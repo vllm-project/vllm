@@ -42,10 +42,12 @@ from vllm.parser.engine.registered_adapters import (
     KimiK2Parser,
     MiMoParser,
     MinimaxM2Parser,
+    MinimaxM3Parser,
     NemotronV3Parser,
     Plamo3Parser,
     Qwen3Parser,
     SeedOssParser,
+    Step3p5Parser,
 )
 
 # ── Data structures ──────────────────────────────────────────────────
@@ -449,6 +451,19 @@ def _build_mimo(scenario: Scenario, validate: bool = True) -> Sample:
     )
 
 
+# ── Step-3.5 (Qwen3 XML, trailing reasoning whitespace stripped) ────
+
+
+def _build_step3p5(scenario: Scenario, validate: bool = True) -> Sample:
+    return _build_qwen3(
+        scenario,
+        name="step3p5",
+        parser_cls=Step3p5Parser,
+        strip_trailing_ws=True,
+        validate=validate,
+    )
+
+
 # ── MiniMax M2 (XML invoke format, starts in REASONING) ──────────────
 
 _MINIMAX_M2_VOCAB: dict[str, int] = {
@@ -522,6 +537,66 @@ def _build_minimax_m2(scenario: Scenario, validate: bool = True) -> Sample:
     )
     if validate:
         _validate_sample(sample, MinimaxM2Parser)
+    return sample
+
+
+# ── MiniMax M3 (namespaced XML elements, no reasoning) ───────────────
+
+_MINIMAX_M3_NS = "]<]minimax[>["
+
+
+def _minimax_m3_value(value: Any) -> str:
+    """Render a value the way the M3 chat template's ``to_xml`` does."""
+    ns = _MINIMAX_M3_NS
+    if isinstance(value, dict):
+        return "".join(
+            f"{ns}<{key}>{_minimax_m3_value(item)}{ns}</{key}>"
+            for key, item in value.items()
+        )
+    if isinstance(value, list):
+        return "".join(
+            f"{ns}<item>{_minimax_m3_value(item)}{ns}</item>" for item in value
+        )
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
+def _minimax_m3_segments(scenario: Scenario) -> list[tuple[str, bool]]:
+    ns = _MINIMAX_M3_NS
+    segs: list[tuple[str, bool]] = []
+    if scenario.content:
+        # The tool parser receives reasoning-stripped content.
+        segs.append((scenario.content, False))
+    if scenario.tool_calls:
+        invokes = "".join(
+            f'{ns}<invoke name="{tc.name}">'
+            f"{_minimax_m3_value(tc.arguments)}{ns}</invoke>\n"
+            for tc in scenario.tool_calls
+        )
+        segs.append((f"{ns}<tool_call>\n{invokes}{ns}</tool_call>", False))
+    return segs
+
+
+def _minimax_m3_expected_content(scenario: Scenario) -> str | None:
+    if scenario.tool_calls and not (scenario.content or "").strip():
+        return None
+    return scenario.content
+
+
+def _build_minimax_m3(scenario: Scenario, validate: bool = True) -> Sample:
+    sample = _make_sample(
+        sample_id=f"minimax_m3-{scenario.id}",
+        description=scenario.description,
+        vocab={},
+        segments=_minimax_m3_segments(scenario),
+        expected_reasoning=None,
+        expected_content=_minimax_m3_expected_content(scenario),
+        expected_tool_calls=_expected_tc(scenario),
+        tools=_expected_tools(scenario),
+    )
+    if validate:
+        _validate_sample(sample, MinimaxM3Parser)
     return sample
 
 
@@ -1261,6 +1336,7 @@ _BUILDERS: dict[str, Any] = {
     "gemma4": _build_gemma4,
     "granite": _build_granite,
     "minimax_m2": _build_minimax_m2,
+    "minimax_m3": _build_minimax_m3,
     "nemotron_v3": _build_nemotron_v3,
     "granite_thinking_parser": _build_granite_thinking,
     "seed_oss": _build_seed_oss,
@@ -1268,6 +1344,7 @@ _BUILDERS: dict[str, Any] = {
     "kimi_k2": _build_kimi_k2,
     "qwen3": _build_qwen3,
     "mimo": _build_mimo,
+    "step3p5": _build_step3p5,
     "inkling": _build_inkling,
     "plamo3": _build_plamo3,
 }

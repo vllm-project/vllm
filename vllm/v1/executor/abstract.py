@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import inspect
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable
@@ -36,6 +37,18 @@ _R = TypeVar("_R")
 SLEEP_TAGS = frozenset(("weights", "kv_cache"))
 
 FailureCallback = Callable[[], None]
+
+
+def _check_worker_profile_kwargs(worker_cls: str, kwargs: dict[str, int]) -> None:
+    """Raise if the worker's ``profile`` cannot accept the given overrides."""
+    params = inspect.signature(resolve_obj_by_qualname(worker_cls).profile).parameters
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        return
+    if unsupported := [name for name in kwargs if name not in params]:
+        raise ValueError(
+            f"Worker class {worker_cls} does not support per-session profiling "
+            f"overrides: {', '.join(unsupported)}"
+        )
 
 
 class Executor(ABC):
@@ -269,8 +282,30 @@ class Executor(ABC):
         output: list[DraftTokenIds] = self.collective_rpc("take_draft_token_ids")
         return output[0]
 
-    def profile(self, is_start: bool = True, profile_prefix: str | None = None):
-        self.collective_rpc("profile", args=(is_start, profile_prefix))
+    def profile(
+        self,
+        is_start: bool = True,
+        profile_prefix: str | None = None,
+        *,
+        delay_iterations: int | None = None,
+        max_iterations: int | None = None,
+    ):
+        kwargs: dict[str, int] = {}
+        if delay_iterations is not None:
+            kwargs["delay_iterations"] = delay_iterations
+        if max_iterations is not None:
+            kwargs["max_iterations"] = max_iterations
+        if kwargs:
+            # Reject before dispatch: a failing collective_rpc may leave
+            # unread worker replies queued.
+            _check_worker_profile_kwargs(
+                self.vllm_config.parallel_config.worker_cls, kwargs
+            )
+        self.collective_rpc(
+            "profile",
+            args=(is_start, profile_prefix),
+            kwargs=kwargs or None,
+        )
 
     def save_sharded_state(
         self,

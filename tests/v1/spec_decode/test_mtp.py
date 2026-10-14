@@ -43,7 +43,7 @@ def test_glm_mtp_defers_lm_head(default_vllm_config):
         index_kpool=4,
     )
     vllm_config = mock.MagicMock()
-    vllm_config.speculative_config.draft_model_config.hf_config = config
+    vllm_config.speculative_config.draft_model_config.hf_text_config = config
     vllm_config.scheduler_config.max_num_batched_tokens = 4
 
     with (
