@@ -109,7 +109,7 @@ def test_row_sharding_gate_rejects_unsupported_configurations(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The gate is the whole safety envelope; nothing else guards the exchange."""
-    monkeypatch.setattr(indexer.current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(indexer.current_platform, "is_cuda_alike", lambda: True)
 
     def supported(**kwargs):
         mode = kwargs.pop("cudagraph_mode", CUDAGraphMode.PIECEWISE)
@@ -185,7 +185,7 @@ def test_profiling_run_reserves_exchange_transient(
                 ),
             )
             m.setattr(sparse_indexer.envs, "VLLM_SPARSE_INDEXER_MAX_LOGITS_MB", 1)
-            m.setattr(indexer.current_platform, "is_cuda", lambda: True)
+            m.setattr(indexer.current_platform, "is_cuda_alike", lambda: True)
             sparse_indexer.sparse_attn_indexer(
                 hidden_states=torch.empty(4, 4),
                 k_cache_prefix="k",
