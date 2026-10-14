@@ -58,6 +58,7 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) Basic Models (Other)"
   device: h200_35gb
   key: basic-models-tests-other
+  automatic_shard: true
   timeout_in_minutes: 38
   source_file_dependencies:
   - vllm/
@@ -212,7 +213,7 @@ steps:
   - tests/models/qwen4_exp/
   commands:
     - pytest -v -s models/qwen4_exp/test_hc_ops.py models/qwen4_exp/test_qsa_prepare.py models/qwen4_exp/test_qsa_reference.py
-    - pytest -v -s models/qwen4_exp/test_ple.py -k test_fused_conv_correctness
+    - pytest -v -s models/qwen4_exp/test_ple.py
   mirror:
     amd:
       label: ":amd: (MI355 DPX) Qwen4 Exp"
@@ -272,6 +273,7 @@ steps:
   depends_on:
   - image-build-amd
   source_file_dependencies:
+  - docker/Dockerfile.rocm_base
   - vllm/models/deepseek_v41/amd/
   - tests/models/test_dsv41_mono_numerics.py
   - tests/models/test_dsv41_mono_layers.py
