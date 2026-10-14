@@ -3,6 +3,7 @@
 """Bounded request dimensions on the existing parser invocation counter."""
 
 from functools import partial
+from unittest.mock import MagicMock
 
 import pytest
 from prometheus_client import CollectorRegistry, Counter, generate_latest
@@ -70,6 +71,39 @@ def test_internal_trace_metadata_uses_only_allowlisted_attributes():
         SpanAttributes.TOOL_CALLING_TOOL_CHOICE: "other",
         SpanAttributes.TOOL_CALLING_API_SURFACE: "chat_completions",
     }
+
+
+@pytest.mark.parametrize(
+    "count, failed, completed, status",
+    [
+        (2, False, True, "success"),
+        (0, False, True, "no_tool_calls"),
+        (2, True, False, "parse_failure"),
+        (0, False, False, "interrupted"),
+        (2, False, False, "interrupted"),
+    ],
+)
+def test_response_trace_finishes_once_without_metric_registration(
+    monkeypatch, count, failed, completed, status
+):
+    monkeypatch.setattr(metrics, "_tool_call_responses", None)
+    monkeypatch.setattr(metrics, "_tool_calls_emitted", None)
+    request = ChatCompletionRequest.model_construct()
+    span = MagicMock()
+    request._tool_calling_spans = [span]
+    metrics.finish_tool_calling_trace(
+        request, tool_calls_count=count, parse_failed=failed, completed=completed
+    )
+    metrics.finish_tool_calling_trace(request)
+    span.set_attributes.assert_called_once_with(
+        {
+            SpanAttributes.TOOL_CALLING_RESPONSE_HAS_TOOL_CALLS: count > 0,
+            SpanAttributes.TOOL_CALLING_TOOL_CALLS_COUNT: count,
+            SpanAttributes.TOOL_CALLING_PARSER_STATUS: status,
+        }
+    )
+    span.end.assert_called_once_with()
+    assert request._tool_calling_spans is None
 
 
 @pytest.fixture
