@@ -40,10 +40,9 @@ log probabilities.
 
 At startup, the server renders the chat template with thinking off. If the
 prompt opens a thought, or the template drops thoughts from the history but does
-not close one in the prompt, the endpoint returns 501. Thinking-only
-checkpoints, such as `Qwen/Qwen3-4B-Thinking-2507` and
-`deepseek-ai/DeepSeek-R1-0528-Qwen3-8B`, get 501 this way. The 501 body names
-the reason the endpoint is disabled.
+not close one in the prompt, the endpoint returns 501 and names the reason.
+Thinking-only checkpoints, such as `Qwen/Qwen3-4B-Thinking-2507` and
+`deepseek-ai/DeepSeek-R1-0528-Qwen3-8B`, get 501 this way.
 
 The check reads only the template. A template that turns thinking off for a
 model that still thinks passes it, and its reads are noise:

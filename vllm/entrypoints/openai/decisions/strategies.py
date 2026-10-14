@@ -85,8 +85,7 @@ class QuestionRead:
 
 class ReadPromptRequest(OpenAIBaseModel):
     """Chat options for one read, ending at the generation prompt so the label
-    is the reply's first token. Thinking is off; otherwise the label would
-    follow a thought rather than start the reply."""
+    is the reply's first token. Thinking is always off."""
 
     chat_template_kwargs: dict[str, Any] | None = None
     cache_salt: str | None = None
