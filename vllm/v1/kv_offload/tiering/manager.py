@@ -228,8 +228,8 @@ class TieringOffloadingManager(OffloadingManager):
 
         """
         # Guards this manager and every tier it composes, the primary tier
-        # included; the primary's own lock is not used underneath it. A real
-        # lock because the control-plane thread enters the manager too.
+        # included. A real lock because the control-plane thread enters the
+        # manager too; the primary tier has none of its own.
         self._lock = threading.Lock()
         self.primary_tier: CPUPrimaryTierOffloadingManager = primary_tier
         self.secondary_tiers = secondary_tiers or []

@@ -393,8 +393,8 @@ def test_lock_excludes_other_threads(manager_and_tier):
 def test_lock_defaults_to_no_op():
     """Managers entered from one thread only pay nothing for the lock.
 
-    The base default must be a no-op context manager, while the CPU manager,
-    which runs under the plain offloading connector, keeps a real one.
+    The base default, inherited by the CPU manager, must be a no-op context
+    manager that may be entered re-entrantly.
     """
     base_lock = OffloadingManager.lock.fget(MagicMock())
     assert isinstance(base_lock, nullcontext)
@@ -402,5 +402,5 @@ def test_lock_defaults_to_no_op():
         pass
 
     cpu = CPUOffloadingManager(num_chunks=4)
-    with cpu.lock:
-        assert not cpu.lock.acquire(blocking=False)
+    with cpu.lock, cpu.lock:
+        pass
