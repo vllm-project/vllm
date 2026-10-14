@@ -102,9 +102,7 @@ def test_model_rpc_uses_execute_model_timeout(monkeypatch, method, result, stall
         with pytest.raises(TimeoutError, match=f"{method} timed out"):
             getattr(executor, method)()
     else:
-assert getattr(executor, method)() is result
-
-
+        assert getattr(executor, method)() is result
 
 
 @pytest.mark.parametrize("non_block", [False, True])
