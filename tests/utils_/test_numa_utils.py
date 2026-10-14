@@ -43,6 +43,7 @@ def _disable_pct_by_default(monkeypatch):
 def _make_config(**parallel_kwargs):
     parallel_defaults: dict[str, Any] = dict(
         numa_bind=False,
+        _numa_bind_auto=False,
         numa_bind_nodes=None,
         numa_bind_cpus=None,
         assigned_physical_gpu_ids=None,
@@ -225,12 +226,18 @@ def test_pct_binding_returns_none_when_node_cpulist_missing(monkeypatch):
     assert numa_utils._maybe_get_pct_cpu_binding([0]) is None
 
 
-def test_get_numactl_args_uses_pct_when_user_did_not_specify_cpus(monkeypatch):
+@pytest.mark.parametrize("automatic", [False, True])
+def test_get_numactl_args_uses_pct_when_user_did_not_specify_cpus(
+    monkeypatch, automatic
+):
     _patch_pct_gates(monkeypatch, model_match=True, highest_perf=46)
-    vllm_config = _make_config(numa_bind=True, numa_bind_nodes=[0, 1])
+    vllm_config = _make_config(
+        numa_bind=True, _numa_bind_auto=automatic, numa_bind_nodes=[0, 1]
+    )
+    memory_policy = "preferred" if automatic else "membind"
     assert (
         numa_utils._get_numactl_worker_args(vllm_config.parallel_config, local_rank=1)
-        == "--physcpubind=0,1,16,17,64,65,80,81 --membind=1"
+        == f"--physcpubind=0,1,16,17,64,65,80,81 --{memory_policy}=1"
     )
 
 
@@ -260,7 +267,10 @@ def test_get_numactl_args_engine_core_baseline_spans_shard_numa_nodes():
     )
 
 
-def test_get_numactl_args_engine_core_pct_spans_shard_numa_nodes(monkeypatch):
+@pytest.mark.parametrize("automatic", [False, True])
+def test_get_numactl_args_engine_core_pct_spans_shard_numa_nodes(
+    monkeypatch, automatic
+):
     """PCT: EngineCore for a multi-NUMA shard binds to the union of priority
     cores across all shard nodes, so worker `--physcpubind` is always a
     subset of EngineCore's `cpus_allowed`."""
@@ -272,15 +282,17 @@ def test_get_numactl_args_engine_core_pct_spans_shard_numa_nodes(monkeypatch):
     )
     vllm_config = _make_config(
         numa_bind=True,
+        _numa_bind_auto=automatic,
         numa_bind_nodes=[0, 0, 1, 1],
         tensor_parallel_size=4,
     )
+    memory_policy = "preferred-many" if automatic else "membind"
     assert numa_utils._get_numactl_enginecore_args(
         vllm_config.parallel_config, local_rank=0
     ) == (
         "--physcpubind="
         "0,1,16,17,64,65,80,81,128,129,144,145,192,193,208,209"
-        " --membind=0,1"
+        f" --{memory_policy}=0,1"
     )
 
 
@@ -634,25 +646,50 @@ def _patch_auto_numa(
     monkeypatch.setattr(numa_utils.Path, "read_text", read_text)
 
 
-def test_configure_subprocess_auto_binds_and_records_result(monkeypatch):
+@pytest.mark.parametrize("nodes", [[0], [0, 1]])
+def test_configure_subprocess_auto_binds_and_records_result(monkeypatch, nodes):
     """Default mode resolves once in the launcher and stores the result, so
     spawned children bind with it instead of re-checking eligibility."""
-    _patch_auto_numa(monkeypatch, "spawn", lambda: [0])
+    _patch_auto_numa(monkeypatch, "spawn", lambda: nodes, visible_gpus=len(nodes))
     monkeypatch.setattr(numa_utils.subprocess, "run", _fake_numactl_run([]))
 
-    vllm_config = _make_config(numa_bind=None)
+    vllm_config = _make_config(numa_bind=None, tensor_parallel_size=len(nodes))
+    node_list = ",".join(map(str, nodes))
+    preference = "preferred" if len(nodes) == 1 else "preferred-many"
     with numa_utils.configure_subprocess(
         vllm_config, local_rank=0, process_kind="EngineCore"
     ):
-        assert os.environ[numa_utils._NUMACTL_ARGS_ENV] == "--cpunodebind=0 --membind=0"
+        assert os.environ[numa_utils._NUMACTL_ARGS_ENV] == (
+            f"--cpunodebind={node_list} --{preference}={node_list}"
+        )
         child_config = deepcopy(vllm_config)
     assert vllm_config.parallel_config.numa_bind is True
-    assert child_config.parallel_config.numa_bind_nodes == [0]
+    assert child_config.parallel_config._numa_bind_auto is True
+    assert child_config.parallel_config.numa_bind_nodes == nodes
 
     monkeypatch.setattr(numa_utils, "get_auto_numa_nodes", _raise_probe_error)
     monkeypatch.setattr(numa_utils, "_is_auto_numa_available", lambda **kwargs: False)
-    with numa_utils.configure_subprocess(child_config, local_rank=0):
-        assert os.environ[numa_utils._NUMACTL_ARGS_ENV] == "--cpunodebind=0 --membind=0"
+    with numa_utils.configure_subprocess(child_config, local_rank=len(nodes) - 1):
+        assert os.environ[numa_utils._NUMACTL_ARGS_ENV] == (
+            f"--cpunodebind={nodes[-1]} --preferred={nodes[-1]}"
+        )
+
+
+def test_parallel_config_auto_policy_survives_copy_without_changing_hash():
+    """Copying the launch decision must not change the DP configuration hash."""
+    from vllm.config.utils import replace
+
+    parallel_config = ParallelConfig()
+    original_hash = parallel_config.compute_hash()
+    parallel_config.numa_bind = True
+    parallel_config.numa_bind_nodes = [0]
+    parallel_config._numa_bind_auto = True
+    for copied in (
+        replace(parallel_config),
+        deepcopy(parallel_config),
+    ):
+        assert copied._numa_bind_auto is True
+        assert copied.compute_hash() == original_hash
 
 
 def test_auto_numa_redetects_when_visible_devices_change(monkeypatch):
@@ -680,7 +717,7 @@ def test_auto_numa_redetects_when_visible_devices_change(monkeypatch):
             vllm_config, local_rank=0, process_kind="EngineCore"
         ):
             numactl_args = os.environ[numa_utils._NUMACTL_ARGS_ENV]
-            assert numactl_args == f"--cpunodebind={node} --membind={node}"
+            assert numactl_args == f"--cpunodebind={node} --preferred={node}"
         assert vllm_config.parallel_config.numa_bind_nodes == [node, node]
     assert detections == ["0,1", "2,3"]
 
@@ -742,10 +779,11 @@ def test_configure_subprocess_respects_existing_mempolicy(
         return
 
     expected_bind = policy is not None and (policy == 0 or explicit)
+    memory_arg = "--membind=0" if explicit else "--preferred=0"
     with numa_utils.configure_subprocess(vllm_config, local_rank=0):
         numactl_args = os.environ.get(numa_utils._NUMACTL_ARGS_ENV)
         assert numactl_args == (
-            "--cpunodebind=0 --membind=0" if expected_bind else None
+            f"--cpunodebind=0 {memory_arg}" if expected_bind else None
         )
     assert vllm_config.parallel_config.numa_bind is expected_bind
 
@@ -838,11 +876,13 @@ def test_auto_numa_multi_node_topology_is_local(monkeypatch):
         vllm_config, local_rank=0, process_kind="EngineCore"
     ):
         assert os.environ[numa_utils._NUMACTL_ARGS_ENV] == (
-            "--cpunodebind=2,3 --membind=2,3"
+            "--cpunodebind=2,3 --preferred-many=2,3"
         )
         child_config = deepcopy(vllm_config)
     with numa_utils.configure_subprocess(child_config, local_rank=1):
-        assert os.environ[numa_utils._NUMACTL_ARGS_ENV] == "--cpunodebind=3 --membind=3"
+        assert (
+            os.environ[numa_utils._NUMACTL_ARGS_ENV] == "--cpunodebind=3 --preferred=3"
+        )
 
 
 @pytest.mark.parametrize("node_cpus", [None, "", "invalid"])
@@ -855,28 +895,42 @@ def test_auto_numa_skips_nodes_without_usable_cpus(monkeypatch, node_cpus):
 
 
 @pytest.mark.parametrize(
-    "rejected_args, expected_args",
-    [("--membind=", "--cpunodebind=0"), ("--cpunodebind=", None)],
+    "nodes, rejected_args, expected_args",
+    [
+        ([0], "--preferred=", "--cpunodebind=0"),
+        ([0], "--cpunodebind=", None),
+        ([0, 1], "--preferred-many=", "--cpunodebind=0,1"),
+        ([0, 1], "--cpunodebind=", None),
+    ],
 )
 def test_auto_numa_records_effective_policy(
-    monkeypatch, caplog, rejected_args, expected_args
+    monkeypatch, caplog, nodes, rejected_args, expected_args
 ):
     caplog.set_level("INFO", logger=numa_utils.logger.name)
-    _patch_auto_numa(monkeypatch, "spawn", lambda: [0])
-    monkeypatch.setattr(
-        numa_utils.subprocess, "run", _fake_numactl_run([rejected_args])
-    )
-    vllm_config = _make_config(numa_bind=None)
-    with numa_utils.configure_subprocess(vllm_config, local_rank=0):
+    _patch_auto_numa(monkeypatch, "spawn", lambda: nodes, visible_gpus=len(nodes))
+    probes = []
+    fake_run = _fake_numactl_run([rejected_args])
+
+    def run(cmd, *args, **kwargs):
+        probes.extend(cmd)
+        return fake_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(numa_utils.subprocess, "run", run)
+    vllm_config = _make_config(numa_bind=None, tensor_parallel_size=len(nodes))
+    with numa_utils.configure_subprocess(
+        vllm_config, local_rank=0, process_kind="EngineCore"
+    ):
         assert os.environ.get(numa_utils._NUMACTL_ARGS_ENV) == expected_args
         assert vllm_config.parallel_config.numa_bind is (expected_args is not None)
     launch_logs = [r.getMessage() for r in caplog.records if "Launching" in r.message]
     if expected_args is None:
         assert launch_logs == []
         assert vllm_config.parallel_config.numa_bind_nodes is None
+        assert vllm_config.parallel_config._numa_bind_auto is False
     else:
         assert len(launch_logs) == 1
         assert launch_logs[0].endswith(f"numactl {expected_args}")
+    assert not any(arg.startswith("--membind=") for arg in probes)
 
 
 def test_auto_numa_does_not_swallow_launch_errors(monkeypatch):
