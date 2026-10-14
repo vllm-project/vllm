@@ -450,8 +450,9 @@ def test_flashinfer_cutedsl_fp4_moe(
 
 @pytest.mark.parametrize("localized", [False, True])
 @pytest.mark.parametrize("overlap", [False, True])
+@pytest.mark.parametrize("max_capture_size", [0, 256])
 def test_localization_arguments_initialized_after_loading(
-    monkeypatch, localized, overlap
+    monkeypatch, localized, overlap, max_capture_size
 ):
     import vllm.model_executor.layers.fused_moe.experts.flashinfer_cutedsl_moe as mod
 
@@ -468,6 +469,7 @@ def test_localization_arguments_initialized_after_loading(
         in_dtype=torch.bfloat16,
         moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
         routing_method=RoutingMethodType.TopK,
+        max_capture_size=max_capture_size,
     )
     experts = FlashInferCuteDSLExperts(
         config,
@@ -525,6 +527,7 @@ def test_localization_arguments_initialized_after_loading(
         apply_router_weight_on_input=False,
     )
     kwargs = backend.call_args.kwargs
+    assert kwargs["autotune_use_cuda_graph"] is (max_capture_size > 0)
     if localized:
         assert kwargs["localized_weights"][0]["w1_weight"] is shard["w13_weight"]
         assert kwargs["localized_streams"] is resources.split_streams

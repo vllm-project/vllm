@@ -134,7 +134,6 @@ class FlashInferCuteDSLExperts(mk.FusedMoEExpertsModular):
             "localized_allow_nonlocalized": (
                 not envs.VLLM_MOE_LOCALIZE_FREE_FULL_WEIGHTS
             ),
-            "autotune_use_cuda_graph": self.autotune_use_cuda_graph,
             # Optionally overlap output zeroing on the auxiliary stream.
             **(
                 {"localized_memset_stream": res.aux_stream}
@@ -289,6 +288,7 @@ class FlashInferCuteDSLExperts(mk.FusedMoEExpertsModular):
             local_expert_offset=self.local_expert_offset,
             output_dtype=output.dtype,
             moe_output=output,
+            autotune_use_cuda_graph=self.autotune_use_cuda_graph,
             # normalize_cute_dsl_moe_activation_type rejects ActivationType.Situ,
             # so SiTU is expressed as the SILU base type plus the betas below.
             activation_type=activation_to_flashinfer_int(
