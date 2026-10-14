@@ -104,11 +104,13 @@ impl MmProcessorShmCache {
         self.inner.lock().is_cached(hash)
     }
 
-    /// Pre-touch one hash of the current request (writer_flag bump if cached).
+    /// Pre-touch one hash of the current request (eviction protection if
+    /// cached).
     ///
-    /// Mirrors the `_merge_mm_kwargs` pre-touch: combined with the writer_flag
-    /// accounting, a probed-hit item cannot be evicted before this request's
-    /// `address_item_for_cached`/`put_or_inline` calls.
+    /// Mirrors the `_merge_mm_kwargs` pre-touch: a probed-hit item is kept in
+    /// the `_touched` set so it cannot be evicted before this request's
+    /// `address_item_for_cached`/`put_or_inline` calls; the protection is
+    /// released by `get_cached` or `release_touches`.
     pub fn touch(&self, hash: &str) {
         if self.n_readers() == 0 {
             return;
@@ -116,20 +118,41 @@ impl MmProcessorShmCache {
         self.inner.lock().touch(hash);
     }
 
-    /// Hit path: bump writer_flag and build the address item; `None` if the
-    /// hash is (no longer) cached.
+    /// Stop protecting touched items that were not looked up.
+    ///
+    /// Called after each request's merge completes (success or error),
+    /// mirroring Python's `finally: release_sender_touches()`.
+    pub fn release_touches(&self) {
+        self.inner.lock().release_touches();
+    }
+
+    /// Number of items currently protected by `touch`, for tests.
+    #[cfg(feature = "test-util")]
+    pub fn touched_len(&self) -> usize {
+        self.inner.lock().touched_len()
+    }
+
+    /// Hit path: bump writer_flag and build the signed address item; `None`
+    /// if the hash is (no longer) cached.
     pub fn address_item_for_cached(&self, hash: &str) -> Option<MmKwargsItem> {
         if self.n_readers() == 0 {
             return None;
         }
-        let (address, monotonic_id) = self.inner.lock().get_cached(hash)?;
-        Some(address_as_item(address, monotonic_id))
+        let mut inner = self.inner.lock();
+        let (address, monotonic_id) = inner.get_cached(hash)?;
+        let signature = inner.get_signature(hash)?;
+        Some(address_as_item(address, monotonic_id, signature))
     }
 
-    /// Miss path: put the item into shm and return the address item, or
-    /// return the input item unchanged for inline sending on oversize /
+    /// Miss path: put the item into shm and return the signed address item,
+    /// or return the input item unchanged for inline sending on oversize /
     /// buffer-full / duplicate-key.
-    pub fn put_or_inline(&self, hash: &str, item: MmKwargsItem) -> MmKwargsItem {
+    ///
+    /// `hash` is the internal cache key; `sign_id` is the feature-facing id
+    /// the handle is signed over (the string sent as the feature's
+    /// `mm_hash`), which differs from `hash` for budget-sensitive image
+    /// processors.
+    pub fn put_or_inline(&self, hash: &str, sign_id: &str, item: MmKwargsItem) -> MmKwargsItem {
         if self.n_readers() == 0 {
             return item;
         }
@@ -145,8 +168,12 @@ impl MmProcessorShmCache {
             }
         };
 
-        match self.inner.lock().put(hash, &serialized.frames, &serialized.metadata) {
-            Ok((address, monotonic_id)) => address_as_item(address, monotonic_id),
+        let mut inner = self.inner.lock();
+        match inner.put(hash, sign_id, &serialized.frames, &serialized.metadata) {
+            Ok((address, monotonic_id)) => {
+                let signature = inner.get_signature(hash).expect("put just inserted the key");
+                address_as_item(address, monotonic_id, signature)
+            }
             // The duplicate-key case (concurrent insert) is benign, so we only
             // warn on the oversize case. Subsequent UUID-only requests for an
             // oversize item will fail with a cache miss.
@@ -191,17 +218,32 @@ impl MmProcessorShmCache {
 
 /// Build the tiny "address item" sent to the engine in place of the real
 /// data, matching `ShmObjectStoreSenderCache.address_as_item`.
-fn address_as_item(address: usize, monotonic_id: u32) -> MmKwargsItem {
-    fn elem(value: i64) -> MmFieldElem {
+///
+/// The signature is the HMAC-SHA256 handle signature as a list of 32 ints
+/// (0-255), which workers verify in get/touch before reading shared memory.
+fn address_as_item(address: usize, monotonic_id: u32, signature: [u8; 32]) -> MmKwargsItem {
+    fn elem(value: MmKwargValue) -> MmFieldElem {
         MmFieldElem {
-            data: Some(MmKwargValue::Int(value)),
+            data: Some(value),
             field: MmField::Batched(MmBatchedField { keep_on_cpu: false }),
         }
     }
 
     BTreeMap::from([
-        ("address".to_string(), elem(address as i64)),
-        ("monotonic_id".to_string(), elem(monotonic_id as i64)),
+        (
+            "address".to_string(),
+            elem(MmKwargValue::Int(address as i64)),
+        ),
+        (
+            "monotonic_id".to_string(),
+            elem(MmKwargValue::Int(monotonic_id as i64)),
+        ),
+        (
+            "signature".to_string(),
+            elem(MmKwargValue::List(
+                signature.iter().map(|&byte| MmKwargValue::Int(i64::from(byte))).collect(),
+            )),
+        ),
     ])
 }
 
@@ -238,7 +280,16 @@ mod tests {
         )])
     }
 
+    /// Assert the item's handle fields and snapshot its shape; the address,
+    /// id, and (random, per-segment) signature are redacted to placeholders
+    /// before snapshotting and checked separately.
     fn expect_address_item(item: &MmKwargsItem, address: i64, monotonic_id: i64) {
+        let mut redacted = item.clone();
+        for key in ["address", "monotonic_id"] {
+            redacted.get_mut(key).expect("address item field").data = Some(MmKwargValue::Int(0));
+        }
+        redacted.get_mut("signature").expect("address item must carry a signature").data =
+            Some(MmKwargValue::List(Vec::new()));
         expect![[r#"
             {
                 "address": MmFieldElem {
@@ -265,8 +316,20 @@ mod tests {
                         },
                     ),
                 },
+                "signature": MmFieldElem {
+                    data: Some(
+                        List(
+                            [],
+                        ),
+                    ),
+                    field: Batched(
+                        MmBatchedField {
+                            keep_on_cpu: false,
+                        },
+                    ),
+                },
             }"#]]
-        .assert_eq(&format!("{item:#?}"));
+        .assert_eq(&format!("{redacted:#?}"));
         let Some(MmKwargValue::Int(actual_address)) = item["address"].data.as_ref() else {
             panic!("address must be an int");
         };
@@ -275,6 +338,31 @@ mod tests {
         };
         assert_eq!(*actual_address, address);
         assert_eq!(*actual_id, monotonic_id);
+
+        let Some(MmKwargValue::List(signature)) = item["signature"].data.as_ref() else {
+            panic!("signature must be a list");
+        };
+        assert_eq!(signature.len(), 32, "HMAC-SHA256 signature is 32 bytes");
+        for value in signature {
+            let MmKwargValue::Int(byte) = value else {
+                panic!("signature bytes must be ints");
+            };
+            assert!((0..=255).contains(byte), "signature bytes are 0-255");
+        }
+    }
+
+    /// The 32 signature bytes of an address item.
+    fn signature_of(item: &MmKwargsItem) -> Vec<u8> {
+        let Some(MmKwargValue::List(signature)) = item["signature"].data.as_ref() else {
+            panic!("signature must be a list");
+        };
+        signature
+            .iter()
+            .map(|value| match value {
+                MmKwargValue::Int(byte) => u8::try_from(*byte).expect("signature byte"),
+                _ => panic!("signature bytes must be ints"),
+            })
+            .collect()
     }
 
     #[test]
@@ -284,10 +372,11 @@ mod tests {
 
         assert!(!cache.is_cached("hash-a"));
         cache.touch("hash-a"); // no-op
+        cache.release_touches(); // no-op
         assert_eq!(cache.address_item_for_cached("hash-a"), None);
 
         // The item comes back unchanged for inline sending.
-        let returned = cache.put_or_inline("hash-a", item.clone());
+        let returned = cache.put_or_inline("hash-a", "hash-a", item.clone());
         assert_eq!(returned, item);
         assert!(!cache.is_cached("hash-a"));
         assert_eq!(cache.cached_len(), 0);
@@ -298,15 +387,36 @@ mod tests {
         let cache = create_cache(1 << 20, 1 << 16);
         cache.set_n_readers(2);
 
-        let address_item = cache.put_or_inline("hash-a", item_with_tensor(8));
+        let address_item = cache.put_or_inline("hash-a", "hash-a", item_with_tensor(8));
         expect_address_item(&address_item, 0, 0);
         assert!(cache.is_cached("hash-a"));
         assert_eq!(cache.cached_len(), 1);
 
-        // Hit path bumps the writer flag and re-uses the address.
+        // Hit path bumps the writer flag and re-uses the address and signature.
         let hit_item = cache.address_item_for_cached("hash-a").unwrap();
         expect_address_item(&hit_item, 0, 0);
+        assert_eq!(signature_of(&hit_item), signature_of(&address_item));
         assert_eq!(cache.address_item_for_cached("hash-b"), None);
+    }
+
+    #[test]
+    fn address_items_are_signed_over_the_feature_facing_id() {
+        let cache = create_cache(1 << 20, 1 << 16);
+        cache.set_n_readers(1);
+
+        // A budget-wrapped internal key whose feature-facing mm_hash is the
+        // raw content hash.
+        let item = cache.put_or_inline("hash-a#budget=Some(1)", "hash-a", item_with_tensor(8));
+        let signature = signature_of(&item);
+
+        let inner = cache.inner.lock();
+        assert_eq!(signature.as_slice(), inner.make_signature("hash-a", 0, 0));
+        // Not over the internal key, and not over another handle.
+        assert_ne!(
+            signature.as_slice(),
+            inner.make_signature("hash-a#budget=Some(1)", 0, 0)
+        );
+        assert_ne!(signature.as_slice(), inner.make_signature("hash-a", 0, 1));
     }
 
     #[test]
@@ -315,8 +425,8 @@ mod tests {
         cache.set_n_readers(1);
 
         let original = item_with_tensor(8);
-        cache.put_or_inline("hash-a", original.clone());
-        let returned = cache.put_or_inline("hash-a", original.clone());
+        cache.put_or_inline("hash-a", "hash-a", original.clone());
+        let returned = cache.put_or_inline("hash-a", "hash-a", original.clone());
         assert_eq!(returned, original);
     }
 
@@ -326,7 +436,7 @@ mod tests {
         cache.set_n_readers(1);
 
         let original = item_with_tensor(1024); // 4 KiB tensor > 256 byte cap
-        let returned = cache.put_or_inline("hash-a", original.clone());
+        let returned = cache.put_or_inline("hash-a", "hash-a", original.clone());
         assert_eq!(returned, original);
         assert!(!cache.is_cached("hash-a"));
     }
@@ -337,12 +447,12 @@ mod tests {
         let cache = create_cache(160, 1 << 16);
         cache.set_n_readers(1);
 
-        let first = cache.put_or_inline("hash-a", item_with_tensor(8));
+        let first = cache.put_or_inline("hash-a", "hash-a", item_with_tensor(8));
         assert!(first.contains_key("address"));
 
         // Unread first chunk cannot be evicted, so the second item is inline.
         let original = item_with_tensor(8);
-        let returned = cache.put_or_inline("hash-b", original.clone());
+        let returned = cache.put_or_inline("hash-b", "hash-b", original.clone());
         assert_eq!(returned, original);
         assert!(!cache.is_cached("hash-b"));
     }
@@ -352,13 +462,15 @@ mod tests {
         let cache = create_cache(1 << 20, 1 << 16);
         cache.set_n_readers(1);
 
-        cache.put_or_inline("hash-a", item_with_tensor(8));
+        cache.put_or_inline("hash-a", "hash-a", item_with_tensor(8));
         cache.clear();
         assert!(!cache.is_cached("hash-a"));
         assert_eq!(cache.cached_len(), 0);
 
-        // After clearing, the next allocation restarts at address/id zero.
-        let address_item = cache.put_or_inline("hash-a", item_with_tensor(8));
-        expect_address_item(&address_item, 0, 0);
+        // After clearing, the next allocation restarts at address zero while
+        // IDs keep increasing, so pre-clear handles fail the engine's ID check
+        // once their chunk is reused.
+        let address_item = cache.put_or_inline("hash-a", "hash-a", item_with_tensor(8));
+        expect_address_item(&address_item, 0, 1);
     }
 }

@@ -54,6 +54,22 @@ fn int_field(item: &MmKwargsItem, key: &str) -> i64 {
     }
 }
 
+/// The 32-byte handle signature of an address item, hex-encoded for the
+/// Python validation script.
+fn signature_hex(item: &MmKwargsItem) -> String {
+    match item["signature"].data.as_ref() {
+        Some(MmKwargValue::List(bytes)) => bytes
+            .iter()
+            .map(|value| match value {
+                MmKwargValue::Int(byte) => u8::try_from(*byte).expect("signature byte"),
+                other => panic!("expected int signature byte, got {other:?}"),
+            })
+            .map(|byte| format!("{byte:02x}"))
+            .collect(),
+        other => panic!("expected list field \"signature\", got {other:?}"),
+    }
+}
+
 #[test]
 fn python_decodes_rust_written_shm_item() {
     // Skip gracefully when the uv-run Python toolchain is unavailable.
@@ -76,9 +92,10 @@ fn python_decodes_rust_written_shm_item() {
     .unwrap();
     cache.set_n_readers(1);
 
-    let address_item = cache.put_or_inline("hash-interop", interop_item());
+    let address_item = cache.put_or_inline("hash-interop", "hash-interop", interop_item());
     let address = int_field(&address_item, "address");
     let monotonic_id = int_field(&address_item, "monotonic_id");
+    let signature = signature_hex(&address_item);
 
     let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/tests/mm_shm_compat.py");
     let output = Command::new(&script)
@@ -86,6 +103,8 @@ fn python_decodes_rust_written_shm_item() {
         .arg(address.to_string())
         .arg(monotonic_id.to_string())
         .arg(data_buffer_size.to_string())
+        .arg("hash-interop")
+        .arg(signature)
         .output()
         .unwrap_or_else(|error| panic!("failed to execute {script:?}: {error}"));
     assert!(

@@ -149,7 +149,7 @@ impl ManagedEngineArgs {
             handshake_port,
             data_parallel_size: self.data_parallel_size,
             python_args,
-            envs: Vec::new(),
+            envs: ManagedEngineConfig::rust_frontend_envs(),
         }
     }
 

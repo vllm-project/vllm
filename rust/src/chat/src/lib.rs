@@ -130,6 +130,7 @@ impl ChatRequestProcessor {
         &self,
         request: &ChatRequest,
         rendered: RenderedPrompt,
+        use_mm_cache: bool,
     ) -> Result<(Prompt, Option<MmFeatures>)> {
         let media_is_empty = match &rendered.media_order {
             Some(media_order) => media_order.is_empty(),
@@ -143,6 +144,7 @@ impl ChatRequestProcessor {
                     self.backend.multimodal_model_info(),
                     model_dtype,
                     self.max_model_len,
+                    use_mm_cache,
                 )
                 .await
             }
@@ -167,7 +169,9 @@ impl ChatRequestProcessor {
         let features = match media {
             multimodal::MultimodalInput::Raw(parts) => {
                 let model_dtype = self.model_dtype.ok_or(Error::UnsupportedMultimodalRenderer)?;
-                info.prepare_multimodal(parts, token_ids, model_dtype, self.max_model_len)
+                // This path always submits to the engine, so the shm cache
+                // stays enabled.
+                info.prepare_multimodal(parts, token_ids, model_dtype, self.max_model_len, true)
                     .await?
             }
             multimodal::MultimodalInput::Preprocessed(features) => {
@@ -177,7 +181,11 @@ impl ChatRequestProcessor {
         Ok(Some(features))
     }
 
-    async fn prepare_text_request(&self, request: ChatRequest) -> Result<TextRequest> {
+    async fn prepare_text_request(
+        &self,
+        request: ChatRequest,
+        use_mm_cache: bool,
+    ) -> Result<TextRequest> {
         // Stamp before rendering so render and tokenize count toward TTFT/e2e.
         let arrival_time = vllm_llm::current_unix_timestamp_secs();
         let renderer = self.backend.chat_renderer();
@@ -187,7 +195,8 @@ impl ChatRequestProcessor {
         .await
         .map_err(|e| Error::ChatTemplate(format!("render task join error: {e}")))??;
         let chat_template_kwargs = std::mem::take(&mut rendered.effective_template_kwargs);
-        let (prompt, mm_features) = self.finalize_rendered_prompt(&request, rendered).await?;
+        let (prompt, mm_features) =
+            self.finalize_rendered_prompt(&request, rendered, use_mm_cache).await?;
         Ok(TextRequest {
             request_id: request.request_id,
             prompt,
@@ -212,9 +221,14 @@ impl ChatRequestProcessor {
     }
 
     /// Prepare one chat request for tokenization without constructing an output processor.
+    ///
+    /// Tokenization never submits to the engine, so the SHM multimodal
+    /// processor cache is bypassed: no worker would read the shm chunks, and
+    /// cached puts would leak writer references (Python uses a separate
+    /// processor-only cache for tokenize).
     pub async fn prepare_for_tokenization(&self, request: ChatRequest) -> Result<TextRequest> {
         request.validate()?;
-        self.prepare_text_request(request).await
+        self.prepare_text_request(request, false).await
     }
 
     /// Prepare one chat request without submitting it to an engine.
@@ -238,7 +252,7 @@ impl ChatRequestProcessor {
                 tool_strict_level: self.tool_strict_level,
             },
         )?;
-        let mut text_request = self.prepare_text_request(request).await?;
+        let mut text_request = self.prepare_text_request(request, true).await?;
 
         // Initialize the output processor from the final prompt token IDs and apply
         // the output grammar to the request, if any.
@@ -392,10 +406,21 @@ impl ChatLlm {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
     use thiserror_ext::AsReport;
+    use vllm_engine_core_client::protocol::dtype::ModelDtype;
+    use vllm_text::Prompt;
 
     use super::{ParserSelection, validate_parser_overrides};
+    use crate::backend::{ChatBackend, NewChatOutputProcessorOptions};
+    use crate::multimodal::MultimodalModelInfo;
+    use crate::output::DynChatOutputProcessor;
     use crate::parser::reasoning::names;
+    use crate::renderer::{ChatRenderer, DynChatRenderer, RenderedPrompt};
+    use crate::request::{ChatMessage, ChatRequest};
+    use crate::{ChatContentPart, ChatRequestProcessor, Error, Result};
 
     #[test]
     fn validate_parser_overrides_accepts_registered_names() {
@@ -443,5 +468,92 @@ mod tests {
         .unwrap_err();
 
         expect_test::expect!["reasoning parser `definitely_missing_reasoning_parser` is not registered (choose from: cohere_cmd, deepseek_r1, deepseek_v3, deepseek_v4, deepseek_v41, gemma4, glm45, glm47, hf, hy_v3, hy_v4, inkling, kimi, kimi_k2, kimi_k3, mimo, minimax_m2, minimax_m3, nemotron_v3, qwen3, seed_oss, step3, step3p5)"].assert_eq(&error.to_report_string());
+    }
+
+    /// Renderer producing one `<|image_pad|>` placeholder for the request's
+    /// single image part.
+    struct PadRenderer;
+
+    impl ChatRenderer for PadRenderer {
+        fn render(&self, _request: &ChatRequest) -> Result<RenderedPrompt> {
+            Ok(RenderedPrompt {
+                prompt: Prompt::Text("a<|image_pad|>b".to_string()),
+                media_order: None,
+                effective_template_kwargs: HashMap::new(),
+            })
+        }
+    }
+
+    struct MmTestBackend {
+        info: MultimodalModelInfo,
+    }
+
+    impl ChatBackend for MmTestBackend {
+        fn chat_renderer(&self) -> DynChatRenderer {
+            Arc::new(PadRenderer)
+        }
+
+        fn multimodal_model_info(&self) -> Option<&MultimodalModelInfo> {
+            Some(&self.info)
+        }
+
+        fn new_chat_output_processor(
+            &self,
+            _request: &mut ChatRequest,
+            _options: NewChatOutputProcessorOptions<'_>,
+        ) -> Result<DynChatOutputProcessor> {
+            Err(Error::ChatTemplate(
+                "test backend has no output processor".to_string(),
+            ))
+        }
+    }
+
+    /// `/tokenize` never submits to the engine, so it must bypass the SHM
+    /// processor cache completely: no put (nothing would ever read the shm
+    /// chunks) and inline feature data, while the prompt still expands.
+    #[tokio::test]
+    async fn prepare_for_tokenization_bypasses_mm_processor_cache() {
+        use crate::multimodal::cache::tests::{TEST_PNG_BASE64, is_address_item, test_shm_cache};
+        use crate::multimodal::tests::qwen3_vl_info;
+
+        let cache = test_shm_cache();
+        let info = qwen3_vl_info().with_mm_processor_cache(Some(Arc::clone(&cache)));
+        let processor =
+            ChatRequestProcessor::new(Arc::new(MmTestBackend { info }), ModelDtype::Float32, 4096);
+        let request = ChatRequest {
+            messages: vec![ChatMessage::user(vec![
+                ChatContentPart::text("describe"),
+                ChatContentPart::ImageUrl {
+                    image_url: format!("data:image/png;base64,{TEST_PNG_BASE64}"),
+                    detail: None,
+                    uuid: None,
+                },
+            ])],
+            ..ChatRequest::for_test()
+        };
+
+        let text_request = processor
+            .prepare_for_tokenization(request)
+            .await
+            .expect("tokenize preparation should succeed");
+        let Prompt::TokenIds(token_ids) = &text_request.prompt else {
+            panic!("multimodal prompts are tokenized in chat");
+        };
+        assert_eq!(token_ids[0], u32::from(b'a'));
+        assert!(
+            token_ids.len() > 3,
+            "the image placeholder should be expanded"
+        );
+        let features = text_request.mm_features.as_ref().expect("mm features");
+        assert_eq!(features.len(), 1);
+        assert!(
+            !is_address_item(features[0].data.as_ref().expect("feature data")),
+            "tokenize must send inline feature data"
+        );
+        assert_eq!(
+            cache.cached_len(),
+            0,
+            "tokenize must not put into the shm cache"
+        );
     }
 }

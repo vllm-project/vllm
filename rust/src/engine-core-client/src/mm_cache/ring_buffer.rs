@@ -16,6 +16,11 @@ const ID_NBYTES: usize = 4;
 const SIZE_NBYTES: usize = 4;
 /// 4 bytes for id, 4 bytes for buffer size.
 pub(crate) const MD_SIZE: usize = ID_NBYTES + SIZE_NBYTES;
+/// Size of the handle-signing secret stored at the start of the segment.
+pub(crate) const AUTH_SECRET_BYTES: usize = 32;
+/// Physical offset of the ring buffer chunks inside the segment; logical
+/// addresses are unchanged, so every chunk lives at `DATA_OFFSET + logical`.
+pub(crate) const DATA_OFFSET: usize = AUTH_SECRET_BYTES;
 /// Exclusive monotonic id bound, so `2**31 - 1` is the max value.
 const ID_MAX: u32 = 1 << 31;
 
@@ -46,6 +51,9 @@ pub(crate) struct NotEnoughSpace;
 /// - Multiple readers: Multiple processes/threads can read (access_buf)
 /// - Reader synchronization handled by is_free_fn callback
 /// - Writer handles garbage collection (free_buf) based on reader feedback
+///
+/// Shared Memory Layout:
+/// `[32-byte handle-signing secret][ring buffer chunks...]`
 ///
 /// Memory Layout per Buffer Chunk:
 /// `[4-byte monotonic_id][4-byte chunk_size][actual_data...]`
@@ -102,7 +110,7 @@ impl SingleWriterShmRingBuffer {
             bail_mm_shm_cache_create!(name = name.to_string(), "shm_open failed: {error}");
         }
         // On failure after `shm_open`, unlink the segment we just created.
-        let result = Self::map(fd, data_buffer_size);
+        let result = Self::map(fd, data_buffer_size + DATA_OFFSET);
         // SAFETY: closing a live fd; mmap keeps the mapping valid afterwards.
         unsafe { libc::close(fd) };
         let ptr = match result {
@@ -114,8 +122,7 @@ impl SingleWriterShmRingBuffer {
             }
         };
 
-        tracing::debug!(name, data_buffer_size, "created new shared memory buffer");
-        Ok(Self {
+        let mut buffer = Self {
             name: name.to_string(),
             data_buffer_size,
             ptr,
@@ -124,7 +131,10 @@ impl SingleWriterShmRingBuffer {
             monotonic_id_start: 0,
             data_buffer_start: 0,
             data_buffer_end: 0,
-        })
+        };
+        buffer.init_auth_secret();
+        tracing::debug!(name, data_buffer_size, "created new shared memory buffer");
+        Ok(buffer)
     }
 
     fn map(fd: libc::c_int, size: usize) -> std::result::Result<NonNull<u8>, std::io::Error> {
@@ -149,11 +159,29 @@ impl SingleWriterShmRingBuffer {
         Ok(NonNull::new(ptr.cast::<u8>()).expect("mmap never returns null"))
     }
 
+    /// Write the random handle-signing secret at the start of the segment.
+    fn init_auth_secret(&mut self) {
+        let secret: [u8; AUTH_SECRET_BYTES] = rand::random();
+        self.write_bytes(0, &secret);
+    }
+
+    /// Return the current handle-signing secret.
+    pub(crate) fn auth_secret(&self) -> [u8; AUTH_SECRET_BYTES] {
+        let mut secret = [0u8; AUTH_SECRET_BYTES];
+        // SAFETY: the secret region is within the mapped segment.
+        unsafe {
+            std::ptr::copy_nonoverlapping(self.ptr.as_ptr(), secret.as_mut_ptr(), AUTH_SECRET_BYTES)
+        };
+        secret
+    }
+
     /// Clear the ring buffer.
     pub(crate) fn clear(&mut self) {
         self.metadata.clear();
-        self.monotonic_id_end = 0;
-        self.monotonic_id_start = 0;
+        // Keep IDs increasing so handles issued before the clear (e.g. for
+        // requests still draining) fail the ID check once their chunk is
+        // reused, instead of resolving to a different object.
+        self.monotonic_id_start = self.monotonic_id_end;
         self.data_buffer_start = 0;
         self.data_buffer_end = 0;
     }
@@ -231,7 +259,7 @@ impl SingleWriterShmRingBuffer {
     pub(crate) fn write_payload(&mut self, address: usize, payload_offset: usize, data: &[u8]) {
         let offset = self.chunk_offset(address) + MD_SIZE + payload_offset;
         assert!(
-            offset + data.len() <= self.data_buffer_size,
+            offset + data.len() <= self.segment_size(),
             "payload write out of bounds"
         );
         self.write_bytes(offset, data);
@@ -304,11 +332,16 @@ impl SingleWriterShmRingBuffer {
     }
 
     fn chunk_offset(&self, address: usize) -> usize {
-        address % self.data_buffer_size
+        DATA_OFFSET + address % self.data_buffer_size
+    }
+
+    /// Total mapped size: the 32-byte secret region plus the data buffer.
+    fn segment_size(&self) -> usize {
+        DATA_OFFSET + self.data_buffer_size
     }
 
     fn write_bytes(&mut self, offset: usize, data: &[u8]) {
-        debug_assert!(offset + data.len() <= self.data_buffer_size);
+        debug_assert!(offset + data.len() <= self.segment_size());
         // SAFETY: `offset + data.len()` is within the mapped segment and the
         // writer has exclusive access to these bytes (chunk ownership).
         unsafe {
@@ -328,10 +361,10 @@ impl SingleWriterShmRingBuffer {
 
 impl Drop for SingleWriterShmRingBuffer {
     fn drop(&mut self) {
-        // SAFETY: `ptr` is a live mapping of `data_buffer_size` bytes created
-        // in `create`; this runs exactly once.
+        // SAFETY: `ptr` is a live mapping of `data_buffer_size + DATA_OFFSET`
+        // bytes created in `create`; this runs exactly once.
         unsafe {
-            libc::munmap(self.ptr.as_ptr().cast(), self.data_buffer_size);
+            libc::munmap(self.ptr.as_ptr().cast(), self.segment_size());
         }
         if let Ok(c_name) = CString::new(format!("/{}", self.name)) {
             // SAFETY: `c_name` is a valid NUL-terminated string.
@@ -471,12 +504,33 @@ mod tests {
     }
 
     #[test]
-    fn clear_resets_all_state() {
+    fn clear_keeps_ids_increasing() {
         let mut buffer = create_buffer(100);
         buffer.allocate_buf(20).unwrap();
         buffer.clear();
 
+        // Addresses restart at zero, but IDs keep increasing so handles
+        // issued before the clear fail the ID check once their chunk is
+        // reused, instead of resolving to a different object.
         let (address, id) = buffer.allocate_buf(20).unwrap();
-        assert_eq!((address, id), (0, 0));
+        assert_eq!((address, id), (0, 1));
+    }
+
+    #[test]
+    fn segment_starts_with_a_random_auth_secret() {
+        let buffer = create_buffer(100);
+        let secret = buffer.auth_secret();
+        assert_ne!(secret, [0u8; AUTH_SECRET_BYTES]);
+        assert_ne!(secret, create_buffer(100).auth_secret());
+    }
+
+    #[test]
+    fn chunk_writes_never_touch_the_secret_region() {
+        let mut buffer = create_buffer(100);
+        let secret = buffer.auth_secret();
+
+        let (address, _) = buffer.allocate_buf(20).unwrap();
+        buffer.write_payload(address, 0, &[0xFF; 20]);
+        assert_eq!(buffer.auth_secret(), secret);
     }
 }

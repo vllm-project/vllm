@@ -18,9 +18,11 @@ use vllm_engine_core_client::protocol::multimodal::{
     SliceSpec,
 };
 
-use super::cache::{CacheLookup, merge_slots, put_or_inline_and_track};
+use super::cache::{CacheLookup, MmProcessorCache, merge_slots, put_or_inline_and_track};
 use super::timing::MM_STAGE_TARGET;
-use super::{MultimodalModelInfo, PreparedItem, PreparedMedia, VisionModalitySupport, tensor};
+use super::{
+    ItemSource, MultimodalModelInfo, PreparedItem, PreparedMedia, VisionModalitySupport, tensor,
+};
 use crate::error::{Error, Result, bail_multimodal, multimodal};
 
 /// Forward-kwargs name of the primary video encoder input.
@@ -40,6 +42,9 @@ impl MultimodalModelInfo {
     /// With the SHM processor cache enabled, cached clips skip preprocessing
     /// entirely: their prompt replacements come from the cache shadow and
     /// their feature data is the shm address item.
+    ///
+    /// A clip carrying a client UUID is keyed by that UUID instead of its
+    /// content hash, and its `mm_hash` is the UUID.
     #[tracing::instrument(
         name = "mm_stage",
         target = MM_STAGE_TARGET,
@@ -48,42 +53,57 @@ impl MultimodalModelInfo {
     )]
     pub(super) async fn prepare_videos(
         &self,
-        clips: Vec<Arc<VideoClip>>,
-        uuids: Vec<Option<String>>,
+        sources: Vec<ItemSource<Arc<VideoClip>>>,
+        cache: Option<&MmProcessorCache>,
         model_dtype: ModelDtype,
     ) -> Result<PreparedMedia> {
         let support = self.video.as_ref().ok_or_else(|| Error::UnsupportedModality {
             modality: Modality::Video.to_string(),
         })?;
 
-        let mut slots = Vec::with_capacity(clips.len());
+        let mut slots = Vec::with_capacity(sources.len());
         let mut miss_clips = Vec::new();
         let mut miss_uuids = Vec::new();
-        for (clip, uuid) in izip!(&clips, uuids) {
-            let lookup = match &self.mm_processor_cache {
-                Some(cache) => cache.lookup(&clip.hash, &clip.hash, uuid),
+        let mut miss_keys = Vec::new();
+        for source in sources {
+            let (clip, uuid) = match source {
+                ItemSource::Cached(item, replacement) => {
+                    slots.push(Some((item, replacement)));
+                    continue;
+                }
+                ItemSource::Fetch(clip, uuid) => (clip, uuid),
+            };
+            let mm_hash = match (cache, &uuid) {
+                (Some(_), Some(uuid)) => uuid.clone(),
+                _ => clip.hash.clone(),
+            };
+            let lookup = match cache {
+                Some(cache) => cache.lookup(&mm_hash, &mm_hash, uuid),
                 None => CacheLookup::Miss(uuid),
             };
             match lookup {
                 CacheLookup::Hit(item, replacement) => slots.push(Some((item, replacement))),
                 CacheLookup::Miss(uuid) => {
                     slots.push(None);
-                    miss_clips.push(Arc::clone(clip));
+                    miss_keys.push(mm_hash);
+                    miss_clips.push(clip);
                     miss_uuids.push(uuid);
                 }
             }
         }
 
         let mut misses = Vec::with_capacity(miss_clips.len());
-        for (clip, uuid) in izip!(miss_clips, miss_uuids) {
+        for (clip, uuid, key) in izip!(miss_clips, miss_uuids, miss_keys) {
             let (replacement, mut item) =
                 self.preprocess_video_item(support, clip, uuid, model_dtype).await?;
             item.data = put_or_inline_and_track(
-                self.mm_processor_cache.as_ref(),
-                &item.hash,
+                cache,
+                &key,
+                &key,
                 &replacement,
                 std::mem::take(&mut item.data),
             );
+            item.hash = key;
             misses.push((item, replacement));
         }
         let (replacements, items) = merge_slots(slots, misses);

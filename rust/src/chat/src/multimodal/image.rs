@@ -12,9 +12,11 @@ use llm_multimodal::{
 };
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
 
-use super::cache::{self, CacheLookup, merge_slots, put_or_inline_and_track};
+use super::cache::{self, CacheLookup, MmProcessorCache, merge_slots, put_or_inline_and_track};
 use super::timing::MM_STAGE_TARGET;
-use super::{MultimodalModelInfo, PreparedItem, PreparedMedia, VisionModalitySupport, item};
+use super::{
+    ItemSource, MultimodalModelInfo, PreparedItem, PreparedMedia, VisionModalitySupport, item,
+};
 use crate::error::{Error, Result, bail_multimodal, multimodal};
 
 /// Forward-kwargs name of the primary image encoder input.
@@ -28,6 +30,10 @@ impl MultimodalModelInfo {
     /// entirely: their prompt replacements come from the cache shadow and
     /// their feature data is the shm address item. Cache misses are
     /// preprocessed as one batch.
+    ///
+    /// A frame carrying a client UUID is keyed by that UUID (budget-wrapped
+    /// for budget-sensitive processors) instead of its content hash, and its
+    /// `mm_hash` is the UUID.
     #[tracing::instrument(
         name = "mm_stage",
         target = MM_STAGE_TARGET,
@@ -36,8 +42,8 @@ impl MultimodalModelInfo {
     )]
     pub(super) async fn prepare_images(
         &self,
-        frames: Vec<Arc<ImageFrame>>,
-        uuids: Vec<Option<String>>,
+        sources: Vec<ItemSource<Arc<ImageFrame>>>,
+        cache: Option<&MmProcessorCache>,
         model_dtype: ModelDtype,
         preprocessing_context: VisionPreprocessingContext,
     ) -> Result<PreparedMedia> {
@@ -45,14 +51,28 @@ impl MultimodalModelInfo {
             modality: Modality::Image.to_string(),
         })?;
 
-        let mut slots = Vec::with_capacity(frames.len());
+        let mut slots = Vec::with_capacity(sources.len());
         let mut miss_frames = Vec::new();
         let mut miss_uuids = Vec::new();
         let mut miss_keys = Vec::new();
-        for (frame, uuid) in frames.into_iter().zip(uuids) {
-            let key = cache::image_cache_key(support, &frame.hash, &preprocessing_context);
-            let lookup = match &self.mm_processor_cache {
-                Some(cache) => cache.lookup(key.as_ref(), &frame.hash, uuid),
+        let mut miss_hashes = Vec::new();
+        for source in sources {
+            let (frame, uuid) = match source {
+                ItemSource::Cached(item, replacement) => {
+                    slots.push(Some((item, replacement)));
+                    continue;
+                }
+                ItemSource::Fetch(frame, uuid) => (frame, uuid),
+            };
+            // A client UUID keys the item when the cache is enabled;
+            // otherwise the item is content-addressed.
+            let mm_hash = match (cache, &uuid) {
+                (Some(_), Some(uuid)) => uuid.clone(),
+                _ => frame.hash.clone(),
+            };
+            let key = cache::mm_item_key(Some(support), &mm_hash, &preprocessing_context);
+            let lookup = match cache {
+                Some(cache) => cache.lookup(key.as_ref(), &mm_hash, uuid),
                 None => CacheLookup::Miss(uuid),
             };
             match lookup {
@@ -60,6 +80,7 @@ impl MultimodalModelInfo {
                 CacheLookup::Miss(uuid) => {
                     slots.push(None);
                     miss_keys.push(key.into_owned());
+                    miss_hashes.push(mm_hash);
                     miss_frames.push(frame);
                     miss_uuids.push(uuid);
                 }
@@ -77,13 +98,21 @@ impl MultimodalModelInfo {
                     preprocessing_context,
                 )
                 .await?;
-            for (item, replacement, key) in izip!(&mut items, &replacements, &miss_keys) {
+            for (item, replacement, key, hash) in
+                izip!(&mut items, &replacements, &miss_keys, &miss_hashes)
+            {
+                // The handle is signed over the feature-facing mm_hash, not
+                // the (possibly budget-wrapped) internal key.
                 item.data = put_or_inline_and_track(
-                    self.mm_processor_cache.as_ref(),
+                    cache,
                     key,
+                    hash,
                     replacement,
                     std::mem::take(&mut item.data),
                 );
+                // UUID-keyed items report the UUID as `mm_hash` (Python
+                // parity: `hashes.append(uuid_item)`).
+                item.hash = hash.clone();
             }
             misses = izip!(items, replacements).collect();
         }
