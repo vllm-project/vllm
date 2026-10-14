@@ -2084,7 +2084,3 @@ class OffloadingConnectorScheduler:
 
     def shutdown(self) -> None:
         self.manager.shutdown()
-        self._pending_events.clear()
-        self._jobs.clear()
-        self._req_status.clear()
-        self._block_id_to_pending_jobs.clear()
