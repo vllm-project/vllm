@@ -63,7 +63,6 @@ def server(trace_service):
         "--tool-call-parser",
         "hermes",
         "--exclude-tools-when-tool-choice-none",
-        "--trust-request-chat-template",
         "--chat-template",
         TOOLS_TEMPLATE,
     ]
@@ -122,42 +121,6 @@ async def test_render_chat_completion_span(client, trace_service):
     assert response.status_code == 200
 
     span = _wait_for_span(trace_service, "render_chat_completion")
-    _assert_span_linked_to_trace(span, TRACEPARENT)
-
-
-@pytest.mark.asyncio
-async def test_render_completion_span(client, trace_service):
-    """A span is exported for the completion render endpoint."""
-    response = await client.post(
-        "/v1/completions/render",
-        headers={"traceparent": TRACEPARENT},
-        json={
-            "model": MODEL_NAME,
-            "prompt": "Once upon a time",
-        },
-    )
-
-    assert response.status_code == 200
-
-    span = _wait_for_span(trace_service, "render_completion")
-    _assert_span_linked_to_trace(span, TRACEPARENT)
-
-
-@pytest.mark.asyncio
-async def test_tokenize_span(client, trace_service):
-    """A span is exported for the tokenize endpoint."""
-    response = await client.post(
-        "/tokenize",
-        headers={"traceparent": TRACEPARENT},
-        json={
-            "model": MODEL_NAME,
-            "prompt": "Hello world",
-        },
-    )
-
-    assert response.status_code == 200
-
-    span = _wait_for_span(trace_service, "tokenize")
     _assert_span_linked_to_trace(span, TRACEPARENT)
 
 

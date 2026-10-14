@@ -182,8 +182,7 @@ async def render_completion(request: CompletionRequest, raw_request: Request):
     if handler is None:
         raise NotImplementedError("The model does not support Completions Render API")
 
-    async with request_span(raw_request, "render_completion"):
-        result = await handler.render_completion_request(request, raw_request)
+    result = await handler.render_completion_request(request, raw_request)
 
     if isinstance(result, ErrorResponse):
         return JSONResponse(content=result.model_dump(), status_code=result.error.code)
