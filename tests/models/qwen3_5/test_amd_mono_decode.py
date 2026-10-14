@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The Qwen mono decodes' host side, no GPU:
+"""The Qwen mono decodes' host side (Qwen3.8, Qwen3.8-Flash-Next), no GPU:
 deployments they cannot run are refused with every reason at once, and only
 pure decode steps (with MTP, verify steps) of at most ``MAX_TOKENS`` rows take
 the kernels, never a piecewise cudagraph step."""
@@ -19,9 +19,10 @@ import vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn as gdn_attn  # 
 import vllm.platforms.rocm as rocm  # noqa: E402
 from vllm.models.qwen3_5.amd import mono_base as B  # noqa: E402
 from vllm.models.qwen3_5.amd import mono_decode as qwen38  # noqa: E402
+from vllm.models.qwen4_exp.amd import mono_decode as flash_next  # noqa: E402
 
 PROBE = "model.layers.0.linear_attn"
-MODELS = {"qwen38": qwen38.MonoDecode}
+MODELS = {"qwen38": qwen38.MonoDecode, "flash_next": flash_next.MonoDecode}
 
 
 @pytest.fixture(params=list(MODELS))

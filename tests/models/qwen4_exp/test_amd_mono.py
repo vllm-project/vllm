@@ -26,7 +26,11 @@ from tests.models.qwen3_5.test_amd_mono import (
     COS_MIN,
     STOCK_COS_MIN,
     _all_reduce_fp32,
+    _check_route,
     _cos,
+    _gdn_core_ref,
+    _moe_emulation,
+    _moe_reference,
     _mxfp4_dequant,
     _mxfp4_linear,
     _mxfp4_linear_stock,
@@ -35,6 +39,7 @@ from tests.models.qwen3_5.test_amd_mono import (
     _pairs,
     _randn,
     _rel_l2,
+    _route_and_shared,
     _u8,
 )
 from tests.utils import (
@@ -159,66 +164,14 @@ def _gdn_reference(w, n: int, qkvz=None, ba=None):
     in_proj_qkvz, AITER's conv update and fused gated delta rule,
     RMSNormGated) on the first ``n`` rows; the rest are the cudagraph pad.
     ``qkvz`` / ``ba``: in_proj's outputs to start from."""
-    from aiter.ops.triton.causal_conv1d_update_single_token import (
-        fused_reshape_causal_conv1d_update_single_token,
-    )
-    from aiter.ops.triton.gated_delta_net.fused_rearrange_sigmoid_gdr import (
-        fused_rearrange_sigmoid_gated_delta_rule,
-    )
-
-    from vllm.config import VllmConfig, set_current_vllm_config
-    from vllm.model_executor.layers.layernorm import RMSNormGated
-    from vllm.models.qwen4_exp.amd.mono.layout import HD, Layout
+    from vllm.models.qwen4_exp.amd.mono.layout import Layout
 
     lay = Layout(TP)
-    s = w["state"].size(0)
-    with set_current_vllm_config(VllmConfig()):
-        norm = RMSNormGated(
-            HD, eps=1e-6, norm_before_gate=True, activation="sigmoid", device="cuda"
-        )
-    norm.weight.data = w["norm_w"].clone()
     x, inj, _ = _mix_ref(w["state"], w)
     if qkvz is None:
         qkvz = F.linear(_mxfp4_qdq(x).to(bf), w["w_qkvz_ref"])
         ba = F.linear(x, w["w_ba"])
-    conv_state, rstate = w["conv_state"].clone(), w["rstate"].clone()
-    z = torch.empty(s, lay.NV, HD, dtype=bf, device="cuda")
-    core = torch.empty(s, lay.NV, HD, dtype=bf, device="cuda")
-    mixed, b, a = fused_reshape_causal_conv1d_update_single_token(
-        qkvz.contiguous(),
-        n,
-        lay.NK,
-        lay.NV,
-        HD,
-        HD,
-        ba.contiguous(),
-        z,
-        core,
-        conv_state,
-        w["conv_w"].view(lay.CONV, 4),
-        None,
-        "silu",
-        conv_state_indices=w["st_idx"][:n],
-        validate_data=True,
-        qkvz_layout="flat",
-    )
-    fused_rearrange_sigmoid_gated_delta_rule(
-        A_log=w["a_log"],
-        a=a,
-        b=b,
-        dt_bias=w["dt_bias"],
-        qkv=mixed,
-        key_dim=lay.KEY,
-        value_dim=lay.VAL,
-        head_k_dim=HD,
-        head_v_dim=HD,
-        initial_state=rstate,
-        inplace_final_state=True,
-        cu_seqlens=torch.arange(n + 1, dtype=torch.int32, device="cuda"),
-        ssm_state_indices=w["st_idx"][:n],
-        use_qk_l2norm_in_kernel=True,
-        core_attn_out=core.reshape(-1),
-    )
+    conv_state, rstate, core = _gdn_core_ref(w, n, qkvz, ba, lay.NK, lay.NV, "sigmoid")
     return {
         "x": x,
         "inj": inj,
@@ -226,7 +179,7 @@ def _gdn_reference(w, n: int, qkvz=None, ba=None):
         "ba": ba,
         "conv_state": conv_state,
         "rstate": rstate,
-        "core": norm.forward_native(core, z).reshape(s, lay.CORE),
+        "core": core,
     }
 
 
@@ -366,63 +319,6 @@ def _moe_weights(rank: int, device):
     }
 
 
-def _route(x, mw, ids=None):
-    """The bf16 router's softmax top-10 (or the experts ``ids``) renormalized,
-    the fused shared expert as pick 10 (expert 512, weight sigmoid of the bf16
-    gate logit)."""
-    from vllm.models.qwen4_exp.amd.mono.layout import TOPK, E
-
-    probs = torch.softmax(F.linear(x, mw["w_gate"]).float(), dim=-1)
-    if ids is None:
-        ids = torch.topk(probs, TOPK, dim=-1, sorted=True)[1]
-    wts = probs.gather(-1, ids)
-    wts = wts / wts.sum(-1, keepdim=True)
-    sg = torch.sigmoid(F.linear(x, mw["w_sg"]).float())
-    wts = torch.cat([wts, sg], dim=-1)
-    ids = torch.cat([ids, torch.full_like(ids[:, :1], E)], dim=-1)
-    return wts, ids
-
-
-def _check_route(scratch, region, x, mw):
-    """The kernel's ROUTE: each token's picks a top-10 of the bf16 logits up
-    to ties, their weights the renormalized softmax -> the picks."""
-    from vllm.models.qwen4_exp.amd.mono.layout import TOPK
-
-    s = x.shape[0]
-    off = region[0]
-    words = scratch[off : off + s * 2 * TOPK * 8].view(torch.int32)
-    words = words.view(s, 2 * TOPK, 2)[:, :, 0]
-    ids, wts = words[:, :TOPK].long(), words[:, TOPK:].contiguous().view(torch.float32)
-    logits = F.linear(x, mw["w_gate"]).float()
-    tenth = torch.topk(logits, TOPK, dim=-1)[0][:, -1:]
-    slack = 2 * 2.0**-7 * tenth.abs()
-    assert (logits.gather(-1, ids) >= tenth - slack).all(), "picks not a top-10"
-    assert all(len(set(r.tolist())) == TOPK for r in ids), "repeated pick"
-    want = _route(x, mw, ids)[0][:, :TOPK]
-    torch.testing.assert_close(wts, want, rtol=1e-2, atol=1e-3)
-    return ids
-
-
-def _moe_emulation(x, mw, ids):
-    """The stock decode kernel's numerics on the unpadded experts (x and
-    silu(g) u through dynamic MXFP4, fp32 accumulation, the route weight after
-    w2) in plain torch, then the all-reduce."""
-    from vllm.models.qwen4_exp.amd.mono.layout import Layout
-
-    ri = Layout(TP).RI
-    raw = mw["raw"]
-    wts, ids = _route(x, mw, ids)
-    xq = _mxfp4_qdq(x)
-    routed = torch.zeros(x.shape, dtype=torch.float32, device=x.device)
-    for t in range(x.shape[0]):
-        for k in range(ids.shape[1]):
-            e = ids[t, k].item()
-            gu = _mxfp4_dequant(raw["w13"][e], raw["w13s"][e]) @ xq[t]
-            h = _mxfp4_qdq(F.silu(gu[:ri]) * gu[ri:])
-            routed[t] += wts[t, k] * (_mxfp4_dequant(raw["w2"][e], raw["w2s"][e]) @ h)
-    return _all_reduce_fp32(routed.to(bf))
-
-
 def _moe_exact(x, mw, ids):
     """The routed experts in fp32 on the dequantized weights, x and the
     intermediate unquantized, then the all-reduce."""
@@ -430,7 +326,7 @@ def _moe_exact(x, mw, ids):
 
     ri = Layout(TP).RI
     raw = mw["raw"]
-    wts, ids = _route(x, mw, ids)
+    wts, ids, _ = _route_and_shared(x, mw, ids)
     routed = torch.zeros(x.shape, dtype=torch.float32, device=x.device)
     for t in range(x.shape[0]):
         for k in range(ids.shape[1]):
@@ -439,32 +335,6 @@ def _moe_exact(x, mw, ids):
             h = F.silu(gu[:ri]) * gu[ri:]
             routed[t] += wts[t, k] * (_mxfp4_dequant(raw["w2"][e], raw["w2s"][e]) @ h)
     return _all_reduce_fp32(routed.to(bf))
-
-
-def _moe_reference(x, mw, ids):
-    """The routed experts through aiter's ``fused_moe`` on the padded weights
-    vLLM holds, then the all-reduce."""
-    from aiter import ActivationType, QuantType
-    from aiter.fused_moe import fused_moe
-
-    wts, ids = _route(x, mw, ids)
-    routed = fused_moe(
-        x,
-        mw["w13"],
-        mw["w2"],
-        wts.float(),
-        ids.to(torch.int32),
-        None,
-        ActivationType.Silu,
-        QuantType.per_1x32,
-        False,
-        mw["w13s"],
-        mw["w2s"],
-        None,
-        None,
-        dtype=bf,
-    )
-    return _all_reduce_fp32(routed)
 
 
 @ray.remote(num_gpus=1, max_calls=1)

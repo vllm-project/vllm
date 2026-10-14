@@ -35,21 +35,14 @@ import flydsl.expr as fx
 import torch
 from aiter.ops.flydsl.kernels import buffer_ops as bo
 from flydsl.expr import const_expr, gpu, range_constexpr
-from flydsl.expr.typing import Int32, Int64, T
+from flydsl.expr.typing import Int32, Int64
 
 from vllm.models.kimi_k3.amd.mono.common.ops import (
     bf16_pair,
     bf16_round,
-    bf_hi,
-    bf_lo,
-    butterfly,
-    hw_rsq,
-    ld_i32,
     row_sum,
     rsrc,
     traced,
-    uniform,
-    wave_sum,
 )
 from vllm.models.kimi_k3.amd.mono.common.plan import (
     BLOCKS,
@@ -61,25 +54,22 @@ from vllm.models.kimi_k3.amd.mono.common.plan import (
 )
 from vllm.models.kimi_k3.amd.mono.common.sync import Mailbox, sreg
 from vllm.models.kimi_k3.amd.mono.stages import gemv
-from vllm.models.qwen3_5.amd.mono.gdn import (
-    LN2,
-    SOFTPLUS_THRESHOLD,
-    hw_exp,
-    hw_log2,
-    ld_bf,
-    ld_f32,
-    silu,
+from vllm.models.qwen3_5.amd.mono import gdn as G
+from vllm.models.qwen3_5.amd.mono.gdn import NVCH, VCH, gdn_tasks
+from vllm.models.qwen3_5.amd.mono.moe import (
+    fp4_gemv,
+    fp4_gemv_loads,
+    quant_x,
+    sigmoid,
+    step_tag,
 )
-from vllm.models.qwen3_5.amd.mono.layer import quant_x, sigmoid, step_tag
-from vllm.models.qwen4_exp.amd.mono import fp4, hc
+from vllm.models.qwen4_exp.amd.mono import hc
 from vllm.models.qwen4_exp.amd.mono import layout as L
 from vllm.models.qwen4_exp.amd.mono.layout import need
 from vllm.models.qwen4_exp.amd.mono.sources import digest
 
 H, HH, HC, ROWS, HD = L.HIDDEN, L.HH, L.HC, L.ROWS, L.HD
 D0 = BLOCKS - hc.DOWN_TASKS  # 88: the down CTAs, to the last
-VCH = 16  # state rows a GDN task
-NVCH = HD // VCH  # 8
 SL = L.CONV_W - 1  # conv state entries (no spec decode)
 BA_PARTS = 2
 BA_K = H // BA_PARTS
@@ -176,14 +166,14 @@ def gdn_offset(key: K1Build) -> int:
 # ---------------------------------------------------------------- in_proj
 def qkvz_loads(c, rg):
     a = c["args"]
-    return fp4.fp4_gemv_loads(c["lane"], c["wave"], a["w_qkvz"], a["w_qkvzs"], rg, H)
+    return fp4_gemv_loads(c["lane"], c["wave"], a["w_qkvz"], a["w_qkvzs"], rg, H)
 
 
 @traced
 def stage_qkvz(c, rg, ops):
     """in_proj_qkvz rows 16 rg .. on the MXFP4-exact x rows -> bf16 PROJ."""
     s, tid, lane, wave, red = c["S"], c["tid"], c["lane"], c["wave"], c["red"]
-    acc = fp4.fp4_gemv(lane, wave, c["xl"], XROW, H, s, rg, ops)
+    acc = fp4_gemv(lane, wave, c["xl"], XROW, H, s, rg, ops)
     fx.ptr_store(acc, red + (wave * 64 + lane) * 4)
     gpu.barrier()
     if tid < ROWS * s:
@@ -194,249 +184,10 @@ def stage_qkvz(c, rg, ops):
     gpu.barrier()
 
 
-def ba_loads(c, i):
-    """in_proj_ba task i's weights (rows 16 (i / 2) .., K half i % 2)."""
-    g, q = i // BA_PARTS, i % BA_PARTS
-    return gemv.loads(
-        c["lane"], c["wave"], c["args"]["w_ba"], g * ROWS, BA_K, ldk=H, k0=q * BA_K
-    )
-
-
-@traced
-def stage_ba(c, i, ops):
-    """in_proj_ba task i on the unquantized x rows -> fp32 BAPART."""
-    s, tid, lane, wave, red = c["S"], c["tid"], c["lane"], c["wave"], c["red"]
-    xl = c["xl"] + (i % BA_PARTS) * BA_K // 2
-    acc = gemv.mfmas(lane, wave, xl, XROW, BA_K, s, ops)
-    fx.ptr_store(acc, red + (wave * 64 + lane) * 4)
-    gpu.barrier()
-    if tid < ROWS * s:
-        r = tid % ROWS
-        t = tid // ROWS
-        c["put"](c["bapart"], (i * s + t) * ROWS + r, row_sum(red, r, t))
-    gpu.barrier()
-
-
 # ---------------------------------------------------------------- gdn
-def gdn_stage(c, t, h, ch):
-    """The task's inputs that need no hand-off, issued before its first poll:
-    the slot, the owned channels' conv window and weights, the state rows and
-    the head's constants."""
-    tid = c["tid"]
-    a = c["args"]
-    lay = c["lay"]
-    k = {}
-    k["slot"] = uniform(ld_i32(a["st_idx"], t))
-    kh = h // (lay.NV // lay.NK)
-    k["owner"] = (h % (lay.NV // lay.NK)) == 0
-    # conv: thread < 48 owns channel i of part (q, k, v)
-    ct = fx.min(tid, 3 * VCH - 1)
-    part = ct // VCH
-    i = ct % VCH
-    qk_chan = part * lay.KEY + kh * HD + ch * VCH + i
-    v_chan = 2 * lay.KEY + h * HD + ch * VCH + i
-    chan = (part < 2).select(qk_chan, v_chan)
-    k["part"], k["i"], k["chan"] = part, i, chan
-    cs = a["conv_st"] + fx.Int64(fx.max(k["slot"], 0)) * fx.Int64(a["cs_seq"]) * 2
-    co = chan * a["cs_dim"]
-    k["cs"], k["co"] = cs, co
-    k["win"] = [ld_bf(cs, co + j * a["cs_tok"]) for j in range(SL)]
-    cw = fx.Vector(
-        bo.buffer_load(rsrc(a["conv_w"]), chan * 2, vec_width=2, dtype=T.i32)
-    )
-    k["cw"] = [bf_lo(cw[0]), bf_hi(cw[0]), bf_lo(cw[1]), bf_hi(cw[1])]
-    # recurrence: thread -> state row ch 16 + tid / 32, K columns (tid % 32) 4 ..
-    vr = ch * VCH + tid // 32
-    k["head_off"] = (h * HD + vr) * HD + (tid % 32) * 4
-    k["sbase"] = (
-        a["rstate"] + fx.Int64(fx.max(k["slot"], 0)) * fx.Int64(a["rs_seq"]) * 4
-    )
-    k["st"] = fx.Vector(
-        bo.buffer_load(rsrc(k["sbase"]), k["head_off"], vec_width=4, dtype=T.f32)
-    )
-    k["a_log"] = ld_f32(a["a_log"], h)
-    k["dtb"] = ld_bf(a["dt_bias"], h)
-    return k
-
-
-@traced
-def gdn_conv(c, k, t, h, ch):
-    """The owned channels' conv update: the window shifted (in place), the
-    width-4 conv (each product rounded to bf16, fp32 sum), SiLU -> bf16; q / k
-    out through QK (the key head's owner tasks), v to LDS."""
-    tid = c["tid"]
-    a = c["args"]
-    lay = c["lay"]
-    part, owner = k["part"], k["owner"]
-    if tid < 3 * VCH:
-        x = f32_of(c["poll"]([(c["proj"], t * lay.QKVZ + k["chan"], 1)])[0][0])
-        owned = (part == 2) | owner
-        if (k["slot"] > 0) & owned:
-            rs = rsrc(k["cs"])
-            for j in range_constexpr(SL):
-                nv = k["win"][j + 1] if j < SL - 1 else x
-                bo.buffer_store(
-                    fx.Float32(nv).to(fx.BFloat16), rs, k["co"] + j * a["cs_tok"]
-                )
-        w, win = k["cw"], k["win"]
-        acc = bf16_round(w[0] * win[0]) + bf16_round(w[1] * win[1])
-        acc = acc + bf16_round(w[2] * win[2])
-        acc = acc + bf16_round(w[3] * x)
-        o = bf16_round(silu(acc))
-        if (part < 2) & owner:
-            kh = h // (lay.NV // lay.NK)
-            at = ((t * lay.NK + kh) * 2 + part) * HD + ch * VCH + k["i"]
-            c["put"](c["qk"], at, o)
-        if part == 2:
-            fx.ptr_store(o, c["vloc"] + k["i"])
-    gpu.barrier()
-
-
-@traced
-def gdn_gates(c, k, t, h):
-    """The key head's q and k (QK) l2-normed (q scaled by HD^-1/2); the head's
-    decay exp(-exp(A_log) softplus(a + dt_bias)) and beta = sigmoid(b), b and a
-    the sums of in_proj_ba's K halves (bf16)."""
-    s, tid, lane, wave = c["S"], c["tid"], c["lane"], c["wave"]
-    lay = c["lay"]
-    kh = h // (lay.NV // lay.NK)
-    if tid < 2 * HD:
-        v = c["poll"]([(c["qk"], (t * lay.NK + kh) * 2 * HD + tid, 1)])[0][0]
-        fx.ptr_store(f32_of(v), c["qkl"] + tid)
-    if tid == 2 * HD:
-        rows = (h, lay.NV + h)  # b, a
-        parts = c["poll"](
-            [
-                (
-                    c["bapart"],
-                    (((ro // ROWS) * BA_PARTS + q) * s + t) * ROWS + ro % ROWS,
-                    1,
-                )
-                for ro in rows
-                for q in range(BA_PARTS)
-            ]
-        )
-        ba = []
-        for e in range_constexpr(2):
-            v = f32_of(parts[e * BA_PARTS][0])
-            for q in range_constexpr(1, BA_PARTS):
-                v = v + f32_of(parts[e * BA_PARTS + q][0])
-            ba.append(bf16_round(v))
-        x = ba[1] + k["dtb"]
-        sp = hw_log2(fx.Float32(1.0) + hw_exp(x)) * fx.Float32(LN2)
-        sp = (x <= fx.Float32(SOFTPLUS_THRESHOLD)).select(sp, x)
-        g = -hw_exp(k["a_log"]) * sp
-        fx.ptr_store(hw_exp(g), c["scal"] + 0)
-        fx.ptr_store(sigmoid(ba[0]), c["scal"] + 1)
-    gpu.barrier()
-    if wave < 2:
-        x0 = fx.ptr_load(c["qkl"] + (wave * HD + lane))
-        x1 = fx.ptr_load(c["qkl"] + (wave * HD + 64 + lane))
-        sc = hw_rsq(wave_sum(x0 * x0 + x1 * x1) + fx.Float32(1e-6))
-        y0, y1 = x0 * sc, x1 * sc
-        qs = fx.Float32(HD**-0.5)
-        y0 = (wave == 0).select(y0 * qs, y0)
-        y1 = (wave == 0).select(y1 * qs, y1)
-        fx.ptr_store(y0, c["qkl"] + (wave * HD + lane))
-        fx.ptr_store(y1, c["qkl"] + (wave * HD + 64 + lane))
-    gpu.barrier()
-
-
-@traced
-def gdn_recur(c, k, t, h, ch):
-    """State rows 16 ch .. of head h, one token: decay, the delta rule, the new
-    state (in place), o = bf16(h q) -> LDS ``ol``, the chunk's sum of squares
-    -> ONRM."""
-    tid, lane = c["tid"], c["lane"]
-    lay = c["lay"]
-    v = tid // 32
-    k0 = (tid % 32) * 4
-    live = k["slot"] > 0
-    decay = fx.ptr_load(c["scal"] + 0)
-    beta = fx.ptr_load(c["scal"] + 1)
-    qv = [fx.ptr_load(c["qkl"] + (k0 + e)) for e in range(4)]
-    kv = [fx.ptr_load(c["qkl"] + (HD + k0 + e)) for e in range(4)]
-    stv = [live.select(k["st"][e], fx.Float32(0.0)) * decay for e in range(4)]
-    p = stv[0] * kv[0] + stv[1] * kv[1] + stv[2] * kv[2] + stv[3] * kv[3]
-    p = butterfly(p, (16, 8, 4, 2, 1))
-    vn = (fx.ptr_load(c["vloc"] + v) - p) * beta
-    stv = [stv[e] + vn * kv[e] for e in range(4)]
-    o = stv[0] * qv[0] + stv[1] * qv[1] + stv[2] * qv[2] + stv[3] * qv[3]
-    o = bf16_round(butterfly(o, (16, 8, 4, 2, 1)))
-    o = live.select(o, fx.Float32(0.0))
-    if live:
-        bo.buffer_store(
-            fx.Vector.from_elements(stv, fx.Float32),
-            rsrc(k["sbase"]),
-            k["head_off"],
-        )
-    if lane % 32 == 0:
-        fx.ptr_store(o, c["ol"] + v)
-    gpu.barrier()
-    if tid == 0:
-        ss = fx.Float32(0.0)
-        for e in range_constexpr(VCH):
-            x = fx.ptr_load(c["ol"] + e)
-            ss = ss + x * x
-        c["put"](c["onrm"], (t * lay.NV + h) * NVCH + ch, ss)
-    gpu.barrier()
-
-
-@traced
-def gdn_norm(c, k, t, h, ch):
-    """Rows 16 ch ..: RMSNormGated over the head's 128 (every chunk's partial):
-    bf16(o rstd w sigmoid(z)) -> ``core`` (the checkpoint's output_gate_type)."""
-    tid = c["tid"]
-    a = c["args"]
-    lay = c["lay"]
-    if tid < VCH:
-        vr = ch * VCH + tid
-        got = c["poll"](
-            [(c["onrm"], (t * lay.NV + h) * NVCH + q, 1) for q in range(NVCH)]
-            + [(c["proj"], t * lay.QKVZ + lay.CONV + h * HD + vr, 1)]
-        )
-        ss = f32_of(got[0][0])
-        for q in range_constexpr(1, NVCH):
-            ss = ss + f32_of(got[q][0])
-        r = hw_rsq(ss * fx.Float32(1.0 / HD) + fx.Float32(c["norm_eps"]))
-        y = fx.ptr_load(c["ol"] + tid) * r * ld_bf(a["norm_w"], vr)
-        y = y * sigmoid(f32_of(got[NVCH][0]))
-        y = (k["slot"] > 0).select(y, fx.Float32(0.0))
-        bo.buffer_store(y.to(fx.BFloat16), rsrc(a["core"]), t * lay.CORE + h * HD + vr)
-    gpu.barrier()
-
-
-def gdn_round(c, r):
-    """Round r's task of this CTA (``bid - goff`` cyclically + ``BLOCKS r``,
-    clamped into range), its (token, head, chunk) and the round's LDS."""
-    lay = c["lay"]
-    gt = gdn_tasks_of(lay)
-    n = c["S"] * gt
-    task = (c["bid"] + (BLOCKS - c["goff"])) % BLOCKS + BLOCKS * r
-    tc = fx.min(task, n - 1)
-    cr = dict(c)
-    for name, m in (("qkl", 2 * HD), ("vloc", VCH), ("ol", VCH), ("scal", 4)):
-        cr[name] = c[name] + r * m
-    return cr, task < n, tc // gt, (tc // NVCH) % lay.NV, tc % NVCH
-
-
-@traced
-def gdn_tasks(c, rounds):
-    """This CTA's GDN tasks phase by phase: a task waits only on earlier phases
-    of other CTAs' tasks, and every CTA finishes a phase's work before it
-    waits in the next."""
-    tasks = [gdn_round(c, r) for r in range(rounds)]
-    ks = [gdn_stage(cr, t, h, ch) for cr, _, t, h, ch in tasks]
-    phases = (
-        lambda cr, k, t, h, ch: gdn_conv(cr, k, t, h, ch),
-        lambda cr, k, t, h, ch: gdn_gates(cr, k, t, h),
-        lambda cr, k, t, h, ch: gdn_recur(cr, k, t, h, ch),
-        lambda cr, k, t, h, ch: gdn_norm(cr, k, t, h, ch),
-    )
-    for phase in phases:
-        for (cr, live, t, h, ch), k in zip(tasks, ks):
-            if live:
-                phase(cr, k, t, h, ch)
+def _ba_of(c, t, h):
+    """Head h's b and a of token t: the sums of in_proj_ba's K halves (bf16)."""
+    return G.ba_sums(c, t, h, BA_PARTS)
 
 
 # ---------------------------------------------------------------- kernel
@@ -533,6 +284,9 @@ def build(key: K1Build):
         c = {
             "S": s,
             "lay": lay,
+            "gdn": lay.gdn,
+            "ba_of": _ba_of,
+            "z_gate": sigmoid,
             "goff": gdn_offset(key),
             "tid": tid,
             "bid": bid,
@@ -613,11 +367,11 @@ def build(key: K1Build):
             is_ba = (bid >= BA0) & (bid < BA0 + nba)
             if is_ba:
                 dops = hc.down_loads(c, bid - D0)
-                bops = ba_loads(c, bid - BA0)
+                bops = G.ba_loads(c, bid - BA0, BA_PARTS, BA_K)
                 hc.load_rrms(c)
                 hc.stage_down(c, bid - D0, dops)
                 hc.bin_to_lds(c, XROW)
-                stage_ba(c, bid - BA0, bops)
+                G.stage_ba(c, bid - BA0, bops, BA_PARTS, BA_K)
             if bid >= BA0 + nba:
                 dops = hc.down_loads(c, bid - D0)
                 hc.load_rrms(c)

@@ -44,7 +44,7 @@ from vllm.models.kimi_k3.amd.mono.common.ops import (
 from vllm.models.kimi_k3.amd.mono.common.plan import THREADS
 from vllm.models.kimi_k3.amd.mono.common.ranks import sum_partials
 from vllm.models.kimi_k3.amd.mono.stages import gemv
-from vllm.models.qwen3_5.amd.mono.layer import sigmoid
+from vllm.models.qwen3_5.amd.mono.moe import ksplit_rows, sigmoid
 from vllm.models.qwen4_exp.amd.mono import layout as L
 
 H, HH, HC, ROWS = L.HIDDEN, L.HH, L.HC, L.ROWS
@@ -248,45 +248,33 @@ def stage_down(c, d, ops):
     them in part order, rounds to bf16 (the GEMM's output), and puts the
     low-rank rows through ``hc_silu`` to LORA or the injection rows to
     ``hc["inj_out"](t, r, (v0, v1))`` (rows r, r + 1 < 4)."""
-    s, tid, lane, wave, red = c["S"], c["tid"], c["lane"], c["wave"], c["red"]
-    h = c["hc"]
+    s, lane, wave, red = c["S"], c["lane"], c["wave"], c["red"]
     g, q = d // DPARTS, d % DPARTS
     xn_to_lds(c, q * DK, DK, DROW)
     acc = gemv.mfmas(lane, wave, c["xl"], DROW, DK, s, ops)
     fx.ptr_store(acc, red + (wave * 64 + lane) * 4)
     gpu.barrier()
-    at = lambda qq, t, r: ((g * DPARTS + qq) * s + t) * ROWS + r  # noqa: E731
-    if q > 0:  # noqa: SIM102 (traced: `and` does not combine traced values)
-        if tid < ROWS * s:
-            r = tid % ROWS
-            t = tid // ROWS
-            c["put"](h["dpart"], at(q, t, r), row_sum(red, r, t))
-    if q == 0:  # noqa: SIM102
-        if tid < (ROWS // 2) * s:
-            r = 2 * (tid % (ROWS // 2))
-            t = tid // (ROWS // 2)
-            got = c["poll"](
-                [
-                    (h["dpart"], at(qq, t, r + e), 1)
-                    for e in range(2)
-                    for qq in range(1, DPARTS)
-                ]
-            )
-            vs = []
-            for e in range_constexpr(2):
-                v = row_sum(red, r + e, t)
-                for qq in range_constexpr(DPARTS - 1):
-                    v = v + f32_of(got[e * (DPARTS - 1) + qq][0])
-                vs.append(bf16_round(v))
-            if g < INJ_GROUP:
-                c["put_bf"](
-                    h["lora"],
-                    t * L.LORA + g * ROWS + r,
-                    [hc_silu(vs[0]), hc_silu(vs[1])],
-                )
-            if (g == INJ_GROUP) & (r < L.INJ):
-                h["inj_out"](t, r, vs)
-    gpu.barrier()
+    ksplit_rows(
+        c,
+        c["hc"]["dpart"],
+        lambda qq, t, r: ((g * DPARTS + qq) * s + t) * ROWS + r,
+        q,
+        DPARTS,
+        lambda t, r, vs: _down_out(c, g, t, r, vs),
+    )
+
+
+@traced
+def _down_out(c, g, t, r, vs):
+    """Down group g's rows r, r + 1 of token t: low-rank -> LORA through
+    ``hc_silu``, injection -> ``hc["inj_out"]``."""
+    h = c["hc"]
+    if g < INJ_GROUP:
+        c["put_bf"](
+            h["lora"], t * L.LORA + g * ROWS + r, [hc_silu(vs[0]), hc_silu(vs[1])]
+        )
+    if (g == INJ_GROUP) & (r < L.INJ):
+        h["inj_out"](t, r, vs)
 
 
 # ---------------------------------------------------------------- up

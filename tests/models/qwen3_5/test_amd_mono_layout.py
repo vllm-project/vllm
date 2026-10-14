@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The Qwen mono kernels' weight addresses against aiter's own shuffles, at
-Qwen3.8's TP8 shapes: every fp4 byte and e8m0 scale of a routed expert and
+Qwen3.8's TP8 shapes and Qwen3.8-Flash-Next's TP2 ones (the intermediate
+padded from RI to RIP): every fp4 byte and e8m0 scale of a routed expert and
 of an online-MXFP4 linear, as the backends leave them after loading, is where
 ``layout`` says. Host only."""
 
@@ -17,12 +18,15 @@ import aiter.ops.shuffle as shuffle  # noqa: E402
 import aiter.utility.fp4_utils as fp4_utils  # noqa: E402
 
 from vllm.models.qwen3_5.amd.mono import layout as L  # noqa: E402
+from vllm.models.qwen4_exp.amd.mono import layout as FL  # noqa: E402
 
 NE = 2  # experts: enough to catch a wrong expert stride
-MOES = {"qwen38": L.MOE}
+FN = FL.Layout(2)
+MOES = {"qwen38": L.MOE, "flash_next": FN.moe}
 # the online-MXFP4 linears (rows, K): in_proj_qkvz and out_proj / o_proj
 LINEARS = {
     "qwen38": ((L.QKVZ, L.HIDDEN), (L.HIDDEN, L.CORE)),
+    "flash_next": ((FN.QKVZ, FL.HIDDEN), (FL.HIDDEN, FN.CORE)),
 }
 
 
@@ -52,6 +56,18 @@ def _check_weight(w: torch.Tensor, base_of, k: int) -> None:
 def _rand(*shape, seed):
     g = torch.Generator().manual_seed(seed)
     return torch.randint(0, 256, shape, dtype=torch.uint8, generator=g)
+
+
+def test_flash_next_shapes():
+    assert (FN.NK, FN.NV, FN.QKVZ, FN.BA, FN.CONV, FN.CORE) == (
+        8,
+        24,
+        8192,
+        48,
+        5120,
+        3072,
+    )
+    assert (FN.RI, FN.RIP) == (320, 384)
 
 
 @pytest.mark.parametrize("model", MOES)
