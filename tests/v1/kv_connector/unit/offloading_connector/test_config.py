@@ -1328,7 +1328,13 @@ def test_blocks_per_chunk_must_be_positive():
 
 @pytest.mark.parametrize(
     "tp,dp,dp_local,nnodes,expected_local,expected_chunks",
-    [(4, 2, 2, 1, 4, 4), (4, 2, 1, 2, 4, 4), (8, 2, 1, 4, 4, 4), (1, 4, 2, 2, 1, 16)],
+    [
+        (4, 2, 2, 1, 4, 4),
+        (4, 2, 1, 2, 4, 4),
+        (8, 2, 1, 4, 4, 4),
+        (1, 4, 2, 2, 1, 16),
+        (2, 1, 1, 2, 1, 16),
+    ],
 )
 def test_native_cpu_capacity_is_per_node_per_dp_replica(
     tp, dp, dp_local, nnodes, expected_local, expected_chunks

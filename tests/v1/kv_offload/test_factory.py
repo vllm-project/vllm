@@ -172,27 +172,35 @@ def test_cpu_spec_zero_worker_bytes_produces_empty_cache():
     assert spec.num_chunks == 0
 
 
-def test_cpu_spec_uses_local_world_size_for_node_local_region():
+@pytest.mark.parametrize(
+    "world_size,local_world_size,global_chunks,local_chunks",
+    [(8, 4, 4, 8), (2, 1, 16, 32)],
+)
+def test_cpu_spec_uses_local_world_size_for_node_local_region(
+    world_size, local_world_size, global_chunks, local_chunks
+):
     worker_kv_bytes_per_block = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
     cpu_bytes_to_use = worker_kv_bytes_per_block * 32
 
     global_sized = _create_spec(
         cpu_bytes_to_use=cpu_bytes_to_use,
         worker_kv_bytes_per_block=worker_kv_bytes_per_block,
-        world_size=8,
+        world_size=world_size,
     )
     local_sized = _create_spec(
         cpu_bytes_to_use=cpu_bytes_to_use,
         worker_kv_bytes_per_block=worker_kv_bytes_per_block,
-        world_size=8,
-        local_world_size=4,
+        world_size=world_size,
+        local_world_size=local_world_size,
     )
 
     assert isinstance(global_sized, CPUOffloadingSpec)
     assert isinstance(local_sized, CPUOffloadingSpec)
-    assert global_sized.num_chunks == 4
-    assert local_sized.num_chunks == 8
-    assert local_sized.kv_bytes_per_chunk == worker_kv_bytes_per_block * 4
+    assert global_sized.num_chunks == global_chunks
+    assert local_sized.num_chunks == local_chunks
+    assert (
+        local_sized.kv_bytes_per_chunk == worker_kv_bytes_per_block * local_world_size
+    )
     assert local_sized.cpu_page_size_per_worker == worker_kv_bytes_per_block
 
 
@@ -506,6 +514,10 @@ def test_cpu_spec_create_worker_skips_mmap_for_empty_cache(monkeypatch):
         (False, 5, 5, 8, None, 5),
         (False, 5, 5, 8, 4, 1),
         (False, 7, 7, 8, 4, 3),
+        (False, 0, 0, 2, 1, 0),
+        (False, 1, 0, 2, 1, 0),
+        (True, 0, 0, 2, 1, 0),
+        (True, 1, 0, 2, 1, 0),
     ],
 )
 def test_cpu_spec_create_worker_rank_assignment(
@@ -544,6 +556,10 @@ def test_cpu_spec_create_worker_rank_assignment(
     spec.create_worker(MagicMock())
 
     assert region_calls[0]["rank"] == expected_rank
+    local_size = world_size if local_world_size is None else local_world_size
+    assert region_calls[0]["populate_shard"] == (
+        (rank % local_size, local_size) if replicated_layout else None
+    )
 
 
 def test_offloading_spec_has_replicated_layout_default():
