@@ -73,9 +73,15 @@ _CONTROL_PLANE_LOCK_TIMEOUT_S = 1.0
 # Warn after this much continuous failure to acquire the lock. Above the 5 s
 # warning drain_jobs() emits, so a slow reset_cache() does not warn twice.
 _CONTROL_PLANE_STALL_WARN_S = 30.0
-# Give up after this many consecutive failed rounds. on_schedule_end() still
-# serves the tiers, so the fallback is per-step servicing rather than none.
-_CONTROL_PLANE_MAX_CONSECUTIVE_ERRORS = 100
+# Give up after rounds have failed continuously for this long. Counted in time,
+# not rounds: at the default 1 ms interval a round budget is spent in a blink,
+# so a transient fault (a peer reconnecting) would turn the thread off for
+# good. on_schedule_end() still serves the tiers, so the fallback is per-step
+# servicing rather than none.
+_CONTROL_PLANE_GIVE_UP_AFTER_S = 30.0
+# Minimum spacing between logged tracebacks for a run of failing rounds, which
+# would otherwise log one per interval.
+_CONTROL_PLANE_ERROR_LOG_INTERVAL_S = 1.0
 # How long shutdown() waits for the thread to finish its round.
 _CONTROL_PLANE_JOIN_TIMEOUT_S = 5.0
 
@@ -336,7 +342,9 @@ class TieringOffloadingManager(OffloadingManager):
 
     def _control_plane_loop(self) -> None:
         stalled_since: float | None = None
-        errors = 0
+        # Start of the current run of failed rounds, and when one last logged.
+        failing_since: float | None = None
+        last_error_log = 0.0
         while not self._control_plane_stop.is_set():
             if not self._lock.acquire(timeout=_CONTROL_PLANE_LOCK_TIMEOUT_S):
                 now = time.monotonic()
@@ -354,20 +362,27 @@ class TieringOffloadingManager(OffloadingManager):
             stalled_since = None
             try:
                 self.poll_tiers()
-                errors = 0
+                failing_since = None
             except Exception:
                 # Never let a round kill the thread silently: on_schedule_end()
                 # still serves these tiers, so persistent failure degrades to
                 # per-step servicing instead of stopping the control plane.
-                errors += 1
-                logger.exception("KV offload control-plane round failed")
+                now = time.monotonic()
+                if failing_since is None:
+                    failing_since = now
+                if now - last_error_log >= _CONTROL_PLANE_ERROR_LOG_INTERVAL_S:
+                    last_error_log = now
+                    logger.exception("KV offload control-plane round failed")
             finally:
                 self._lock.release()
-            if errors >= _CONTROL_PLANE_MAX_CONSECUTIVE_ERRORS:
+            if (
+                failing_since is not None
+                and time.monotonic() - failing_since >= _CONTROL_PLANE_GIVE_UP_AFTER_S
+            ):
                 logger.error(
-                    "KV offload control-plane thread stopping after %d "
+                    "KV offload control-plane thread stopping after %.0fs of "
                     "consecutive failures; falling back to per-step servicing.",
-                    errors,
+                    _CONTROL_PLANE_GIVE_UP_AFTER_S,
                 )
                 return
             # Yield unconditionally, and only after release(). Python locks are

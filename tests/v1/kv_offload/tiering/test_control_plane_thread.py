@@ -407,6 +407,48 @@ def test_shutdown_raises_when_the_caller_holds_the_lock(manager_and_tier, monkey
     assert tier.shutdown_saw_live_thread is None
 
 
+def test_failure_burst_does_not_stop_the_thread(manager_and_tier):
+    """The give-up budget is time, not rounds.
+
+    At a 1 ms interval, a few hundred failing rounds take well under a second;
+    a fault that short must not turn the control plane off for good.
+    """
+    manager, tier = manager_and_tier
+    assert tier.served.wait(_SETTLE_S)
+    tier.served.clear()
+    failures_left = 300
+
+    def flaky(parent):
+        nonlocal failures_left
+        if failures_left > 0:
+            failures_left -= 1
+            raise RuntimeError("transient")
+
+    tier.on_serve = flaky
+
+    assert tier.served.wait(_SETTLE_S * 10), "thread did not recover"
+    assert failures_left == 0
+    assert _live_control_threads()
+
+
+def test_sustained_failure_stops_the_thread(monkeypatch):
+    monkeypatch.setattr(tiering_manager, "_CONTROL_PLANE_GIVE_UP_AFTER_S", 0.2)
+    manager, tier = _make_manager()
+    try:
+        assert tier.served.wait(_SETTLE_S)
+
+        def always_fails(parent):
+            raise RuntimeError("persistent")
+
+        tier.on_serve = always_fails
+        deadline = time.monotonic() + 5
+        while _live_control_threads() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert not _live_control_threads()
+    finally:
+        manager.shutdown()
+
+
 def test_lock_releases_on_error(manager_and_tier):
     """Leaving a with-block on an exception must not leak the lock."""
     manager, _ = manager_and_tier
