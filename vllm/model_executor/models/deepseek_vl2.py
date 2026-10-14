@@ -4,6 +4,7 @@
 # adapted from https://github.com/deepseek-ai/DeepSeek-VL2/blob/faf18023f24b962b32d9f0a2d89e402a8d383a78/deepseek_vl2/models/modeling_deepseek_vl_v2.py
 """Inference-only Deepseek-VL2 model compatible with HuggingFace weights."""
 
+import functools
 import math
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Annotated, Any, Literal, TypeAlias
@@ -599,6 +600,7 @@ class DeepseekVLV2ForCausalLM(
 
     # -- SupportsEncoderCudaGraph protocol methods --
 
+    @functools.cached_property
     def _proj_hw(self) -> tuple[int, int]:
         """Return (h, w) of the projector output per tile."""
         h = w = math.ceil(
@@ -622,7 +624,7 @@ class DeepseekVLV2ForCausalLM(
     def get_encoder_cudagraph_budget_range(
         self, vllm_config: "VllmConfig"
     ) -> tuple[int, int]:
-        h, w = self._proj_hw()
+        h, w = self._proj_hw
         # Smallest valid image: 1 global + 1×1 local tile → 2 tiles total.
         min_budget = h * (w + 1) * 2 + 1
         max_budget = min(
@@ -634,7 +636,7 @@ class DeepseekVLV2ForCausalLM(
     def get_encoder_cudagraph_item_specs(self, mm_kwargs: dict[str, Any]):
         from vllm.v1.worker.encoder_cudagraph_defs import EncoderItemSpec
 
-        h, w = self._proj_hw()
+        h, w = self._proj_hw
         specs = []
         for row in mm_kwargs["images_spatial_crop"].tolist():
             tw, th = int(row[0]), int(row[1])
@@ -690,7 +692,7 @@ class DeepseekVLV2ForCausalLM(
     ):
         from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphCaptureInputs
 
-        h, w = self._proj_hw()
+        h, w = self._proj_hw
         # Each tile contributes at least h*w output tokens (before newlines).
         # Using h*w (not h*(w+1)) guarantees we never under-allocate.
         max_tiles = (token_budget + h * w - 1) // (h * w)
