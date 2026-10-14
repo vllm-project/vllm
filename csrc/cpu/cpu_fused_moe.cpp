@@ -4,6 +4,8 @@
 #include "cpu/micro_gemm/cpu_micro_gemm_vec.hpp"
 #include "cpu/cpu_arch_macros.h"
 
+#include <limits>
+
 #ifdef CPU_CAPABILITY_AMXBF16
   #include "cpu/micro_gemm/cpu_micro_gemm_amx.hpp"
   #define AMX_DISPATCH(...)                                                    \
@@ -80,7 +82,9 @@ void fused_moe_impl(scalar_t* __restrict__ output, scalar_t* __restrict__ input,
                     w_t* __restrict__ w13, w_t* __restrict__ w2,
                     w_t* __restrict__ w13_bias, w_t* __restrict__ w2_bias,
                     float* __restrict__ topk_weights,
-                    int32_t* __restrict__ topk_id, FusedMOEAct act_type,
+                    const int32_t* __restrict__ topk_id,
+                    const int32_t* __restrict__ expert_map,
+                    const int32_t global_num_experts, FusedMOEAct act_type,
                     const int32_t token_num, const int32_t expert_num,
                     const int32_t topk_num, const int32_t input_size_13,
                     const int32_t output_size_13, const int32_t input_size_2,
@@ -172,9 +176,14 @@ void fused_moe_impl(scalar_t* __restrict__ output, scalar_t* __restrict__ input,
   const int64_t w13_gemm_output_buffer_offset = common_buffer_offset;
   common_buffer_offset += w13_gemm_output_buffer_size;
 
-  const int64_t w2_gemm_output_buffer_size =
-      cpu_utils::round_up<64>(static_cast<int64_t>(token_num) * topk_num *
-                              output_size_2 * sizeof(float));
+  const int64_t num_routes = static_cast<int64_t>(token_num) * topk_num;
+  if (expert_map != nullptr) {
+    TORCH_CHECK_LT(num_routes, std::numeric_limits<int32_t>::max());
+  }
+  const int32_t invalid_output_idx =
+      expert_map == nullptr ? 0 : static_cast<int32_t>(num_routes);
+  const int64_t w2_gemm_output_buffer_size = cpu_utils::round_up<64>(
+      (num_routes + (expert_map != nullptr)) * output_size_2 * sizeof(float));
   const int64_t w2_gemm_output_buffer_offset = common_buffer_offset;
   common_buffer_offset += w2_gemm_output_buffer_size;
 
@@ -215,13 +224,34 @@ void fused_moe_impl(scalar_t* __restrict__ output, scalar_t* __restrict__ input,
   int32_t* __restrict__ expand_token_id_index_buffer =
       reinterpret_cast<int32_t*>(common_buffer_start +
                                  expand_token_id_index_buffer_offset);
+  float* __restrict__ w2_gemm_output_buffer = reinterpret_cast<float*>(
+      common_buffer_start + w2_gemm_output_buffer_offset);
 
   // prepare token-expert mappings
   {
     std::memset(token_num_per_group_buffer, 0, expert_num * sizeof(int32_t));
-    for (int32_t i = 0; i < token_num * topk_num; ++i) {
-      int32_t curr_expert_id = topk_id[i];
-      ++token_num_per_group_buffer[curr_expert_id];
+    if (expert_map == nullptr) {
+      for (int32_t i = 0; i < token_num * topk_num; ++i) {
+        ++token_num_per_group_buffer[topk_id[i]];
+      }
+    } else {
+      std::memset(w2_gemm_output_buffer +
+                      static_cast<int64_t>(invalid_output_idx) * output_size_2,
+                  0, output_size_2 * sizeof(float));
+      for (int32_t i = 0; i < token_num * topk_num; ++i) {
+        const int32_t global_expert_id = topk_id[i];
+        TORCH_CHECK(
+            global_expert_id >= 0 && global_expert_id < global_num_experts,
+            "Expert ID ", global_expert_id, " is outside [0, ",
+            global_num_experts, ")");
+        const int32_t local_expert_id = expert_map[global_expert_id];
+        TORCH_CHECK(local_expert_id >= -1 && local_expert_id < expert_num,
+                    "Mapped expert ID ", local_expert_id, " is outside [-1, ",
+                    expert_num, ")");
+        if (local_expert_id >= 0) {
+          ++token_num_per_group_buffer[local_expert_id];
+        }
+      }
     }
 
     int32_t token_num_sum = 0;
@@ -233,12 +263,18 @@ void fused_moe_impl(scalar_t* __restrict__ output, scalar_t* __restrict__ input,
     }
 
     for (int32_t i = 0; i < token_num; ++i) {
-      int32_t* curr_topk_id = topk_id + i * topk_num;
+      const int32_t* curr_topk_id = topk_id + i * topk_num;
       int32_t* curr_index_buffer = expand_token_id_index_buffer + i * topk_num;
       for (int32_t j = 0; j < topk_num; ++j) {
-        int32_t curr_expert_id = curr_topk_id[j];
-        int32_t curr_index = token_index_buffer[curr_expert_id];
-        ++token_index_buffer[curr_expert_id];
+        const int32_t local_expert_id = expert_map == nullptr
+                                            ? curr_topk_id[j]
+                                            : expert_map[curr_topk_id[j]];
+        if (local_expert_id < 0) {
+          curr_index_buffer[j] = invalid_output_idx;
+          continue;
+        }
+        int32_t curr_index = token_index_buffer[local_expert_id];
+        ++token_index_buffer[local_expert_id];
         expand_token_id_buffer[curr_index] = i;
         curr_index_buffer[j] = curr_index;
       }
@@ -552,9 +588,6 @@ void fused_moe_impl(scalar_t* __restrict__ output, scalar_t* __restrict__ input,
           thread_buffer_start + thread_id * ws_thread_buffer_offset;
       float* __restrict__ ws_output_buffer =
           reinterpret_cast<float*>(thread_buffer + ws_output_buffer_offset);
-      float* __restrict__ w2_gemm_output_buffer = reinterpret_cast<float*>(
-          common_buffer_start + w2_gemm_output_buffer_offset);
-
       for (;;) {
         int32_t task_id = counter_ptr->acquire_counter();
         if (task_id >= task_num) {
@@ -691,7 +724,8 @@ void cpu_fused_moe(
     const std::optional<torch::Tensor>& w2_bias,  // [expert_num, output_size_2]
     const torch::Tensor& topk_weights,            // [token_num, k], float32
     const torch::Tensor& topk_id,                 // [token_num, k], int32
-    const bool skip_weighted, const std::string& act, const std::string& isa) {
+    const bool skip_weighted, const std::string& act, const std::string& isa,
+    const std::optional<torch::Tensor>& expert_map) {
   const int32_t token_num = input.size(0);
   const int32_t input_size_13 = input.size(1);
   const int64_t input_stride = input.stride(0);
@@ -701,10 +735,19 @@ void cpu_fused_moe(
   const int32_t input_size_2 = w2.size(2);
   const int32_t output_size_2 = w2.size(1);
   const int32_t topk_num = topk_id.size(1);
+  int32_t global_num_experts = expert_num;
   const FusedMOEAct act_type = cpu_fused_moe_utils::get_act_type(act);
   cpu_utils::ISA isa_type = cpu_utils::get_isa(isa);
   TORCH_CHECK(!skip_weighted || topk_num == 1,
               "skip_weighted is only supported for topk=1 on CPU");
+  if (expert_map.has_value()) {
+    TORCH_CHECK(expert_map->device().is_cpu());
+    TORCH_CHECK(expert_map->is_contiguous());
+    TORCH_CHECK_EQ(expert_map->dim(), 1);
+    TORCH_CHECK_EQ(expert_map->scalar_type(), at::kInt);
+    TORCH_CHECK_LE(expert_map->numel(), std::numeric_limits<int32_t>::max());
+    global_num_experts = static_cast<int32_t>(expert_map->numel());
+  }
 
   VLLM_DISPATCH_FLOATING_TYPES(w13.scalar_type(), "cpu_fused_moe", [&]() {
     CPU_ISA_DISPATCH_IMPL(isa_type, [&]() {
@@ -713,9 +756,11 @@ void cpu_fused_moe(
           w13.data_ptr<scalar_t>(), w2.data_ptr<scalar_t>(),
           w13_bias.has_value() ? w13_bias->data_ptr<scalar_t>() : nullptr,
           w2_bias.has_value() ? w2_bias->data_ptr<scalar_t>() : nullptr,
-          topk_weights.data_ptr<float>(), topk_id.data_ptr<int32_t>(), act_type,
-          token_num, expert_num, topk_num, input_size_13, output_size_13,
-          input_size_2, output_size_2, skip_weighted);
+          topk_weights.data_ptr<float>(), topk_id.data_ptr<int32_t>(),
+          expert_map.has_value() ? expert_map->data_ptr<int32_t>() : nullptr,
+          global_num_experts, act_type, token_num, expert_num, topk_num,
+          input_size_13, output_size_13, input_size_2, output_size_2,
+          skip_weighted);
     });
   });
 }
