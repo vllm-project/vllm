@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """GPU-resident Qwen4Exp position-learning enhancement layers."""
 
-import functools
 from collections.abc import Sequence
 from dataclasses import replace
 
@@ -89,7 +88,6 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
         quant_config = vllm_config.quant_config
         self.model_config: ModelConfig = model_config
         self.cache_config: CacheConfig = cache_config
-        self._vllm_config = vllm_config
         self.layer_idx = layer_idx
         self.ple_dense_layer_id = (
             int(ple_dense_layer_id)
@@ -206,22 +204,19 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
         spec = super().get_kv_cache_spec(vllm_config)
-        if not self._exports_checkpoints or not isinstance(spec, MambaSpec):
+        # The scheduler takes internal checkpoints only when every Mamba layer
+        # can export them.
+        if (
+            self.get_prefill_checkpoint_alignment() is None
+            or get_mamba_prefill_checkpoint_alignment(vllm_config) is None
+            or not isinstance(spec, MambaSpec)
+        ):
             return spec
         grid = get_mamba_prefill_checkpoint_grid(vllm_config)
         # Offsets are multiples of the grid, so the window holds only inputs.
         assert grid >= self.conv_state_len
         return replace(
             spec, num_prefill_checkpoint_blocks=1, prefill_checkpoint_alignment=grid
-        )
-
-    @functools.cached_property
-    def _exports_checkpoints(self) -> bool:
-        # Known only once every layer is built: the scheduler takes internal
-        # checkpoints only when every Mamba layer can export them.
-        return (
-            self.get_prefill_checkpoint_alignment() is not None
-            and get_mamba_prefill_checkpoint_alignment(self._vllm_config) is not None
         )
 
     def _short_conv_dilated_dispatch(

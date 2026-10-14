@@ -615,6 +615,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         self.chunk_gated_delta_rule = ChunkGatedDeltaRule()
         self.gdn_prefill_backend = self.chunk_gated_delta_rule.gdn_prefill_backend
         self._prefill_kernels_warmed_up = False
+        self.vllm_config = vllm_config
         # FlashInfer's prefill emits mid-prefill states, so an align-mode
         # checkpoint needs no split prefill.
         self._checkpoint_alignment: int | None = None
@@ -623,7 +624,6 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             and self.gdn_prefill_backend == "flashinfer"
         ):
             self._checkpoint_alignment = FLASHINFER_GDN_CHECKPOINT_ALIGNMENT
-            self._vllm_config = vllm_config
             self._max_num_batched_tokens = (
                 vllm_config.scheduler_config.max_num_batched_tokens
             )
@@ -686,7 +686,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # splitting the prefill instead.
         return (
             self._checkpoint_alignment is not None
-            and get_mamba_prefill_checkpoint_alignment(self._vllm_config) is not None
+            and get_mamba_prefill_checkpoint_alignment(self.vllm_config) is not None
         )
 
     @functools.cached_property
@@ -697,7 +697,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             (
                 cdiv(
                     self._max_num_batched_tokens,
-                    get_mamba_prefill_checkpoint_grid(self._vllm_config),
+                    get_mamba_prefill_checkpoint_grid(self.vllm_config),
                 ),
                 self.num_v_heads // self.tp_size,
                 self.head_v_dim,
