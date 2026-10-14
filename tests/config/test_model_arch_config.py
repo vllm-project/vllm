@@ -104,6 +104,38 @@ def test_qwen35_joint_head_selects_clef_flash(tmp_path, has_joint_head, architec
         assert not hasattr(config, "joint_head_config")
 
 
+@pytest.mark.parametrize("has_decision_config", [False, True])
+@pytest.mark.parametrize(
+    "architecture", ["Qwen3_5Model", "Qwen3_5ForConditionalGeneration"]
+)
+def test_qwen35_decision_config_selects_d3(tmp_path, has_decision_config, architecture):
+    """Only a bare Qwen3.5 backbone with a decision_config.json selects d3."""
+    from transformers import Qwen3_5Config
+
+    decision_config = {
+        "format_version": 1,
+        "codes": ["A", "B"],
+        "token_ids": [32, 33],
+        "attention_mode": "noncausal_full_attention",
+    }
+    if has_decision_config:
+        (tmp_path / "decision_config.json").write_text(json.dumps(decision_config))
+    config = Qwen3_5Config(architectures=[architecture])
+    config.name_or_path = str(tmp_path)
+    model_config = SimpleNamespace(
+        hf_config=config,
+        hf_text_config=config.text_config,
+        _supports_multimodal_for_mm_prefix=lambda: True,
+    )
+    converted = ModelConfig.get_model_arch_config(model_config)
+    if has_decision_config and architecture == "Qwen3_5Model":
+        assert converted.architectures == ["D3ForSequenceClassification"]
+        assert config.decision_config == decision_config
+    else:
+        assert converted.architectures == [architecture]
+        assert not hasattr(config, "decision_config")
+
+
 def _assert_model_arch_config(
     model_config, expected: dict, check_head_size: bool = True
 ):
