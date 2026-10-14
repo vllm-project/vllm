@@ -143,57 +143,49 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         layer.register_parameter("w13_weight_shape", w13_weight_shape)
         set_weight_attrs(w13_weight_shape, extra_weight_attrs)
 
-        w13_weight_chan_scale = torch.nn.Parameter(
-            torch.ones(
-                num_experts,
-                self.moe.w13_num_shards * intermediate_size_per_partition,
-                dtype=torch.float32,
-            ),
-            requires_grad=False,
-        )
-        layer.register_parameter("w13_weight_chan_scale", w13_weight_chan_scale)
-
-        w2_weight_chan_scale = torch.nn.Parameter(
-            torch.ones(num_experts, hidden_size, dtype=torch.float32),
-            requires_grad=False,
-        )
-        layer.register_parameter("w2_weight_chan_scale", w2_weight_chan_scale)
-
         # don't use input scales
         layer.w13_input_scale = None
         layer.w2_input_scale = None
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
+        for name in ("w13", "w2"):
+            setattr(layer, f"{name}_weight", getattr(layer, f"{name}_weight_packed"))
+            delattr(layer, f"{name}_weight_packed")
+
         (
-            w13_weight_packed,
-            w2_weight_packed,
+            w13_weight,
+            w2_weight,
             w13_weight_scale,
             w2_weight_scale,
             w13_weight_chan_scale,
             w2_weight_chan_scale,
-            b_strides1,
-            b_strides2,
+            self.b_strides1,
+            self.b_strides2,
         ) = convert_to_w4a8_moe_kernel_format(
-            w13_weight_packed=layer.w13_weight_packed,
-            w2_weight_packed=layer.w2_weight_packed,
+            backend=self.w4a8_backend,
+            layer=layer,
+            group_size=self.group_size,
+            w13_weight=layer.w13_weight,
+            w2_weight=layer.w2_weight,
             w13_weight_scale=layer.w13_weight_scale,
             w2_weight_scale=layer.w2_weight_scale,
         )
 
-        replace_parameter(layer, "w13_weight_packed", w13_weight_packed)
-        replace_parameter(layer, "w2_weight_packed", w2_weight_packed)
-        replace_parameter(layer, "w13_weight_scale", w13_weight_scale)
-        replace_parameter(layer, "w2_weight_scale", w2_weight_scale)
-        replace_parameter(layer, "w13_weight_chan_scale", w13_weight_chan_scale)
-        replace_parameter(layer, "w2_weight_chan_scale", w2_weight_chan_scale)
-
-        self.b_strides1 = b_strides1
-        self.b_strides2 = b_strides2
+        for name, tensor in (
+            ("w13_weight", w13_weight),
+            ("w2_weight", w2_weight),
+            ("w13_weight_scale", w13_weight_scale),
+            ("w2_weight_scale", w2_weight_scale),
+            ("w13_weight_chan_scale", w13_weight_chan_scale),
+            ("w2_weight_chan_scale", w2_weight_chan_scale),
+        ):
+            replace_parameter(layer, name, tensor)
 
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         if self.moe_quant_config is not None:
             assert self.experts_cls is not None
             self.moe_kernel = make_w4a8_moe_kernel(
+                backend=self.w4a8_backend,
                 moe_quant_config=self.moe_quant_config,
                 moe_config=self.moe,
                 experts_cls=self.experts_cls,
@@ -205,10 +197,12 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
 
     def get_fused_moe_quant_config(self, layer: torch.nn.Module) -> FusedMoEQuantConfig:
         return make_w4a8_moe_quant_config(
+            backend=self.w4a8_backend,
             w1_scale=layer.w13_weight_scale,
             w2_scale=layer.w2_weight_scale,
             g1_alphas=layer.w13_weight_chan_scale,
             g2_alphas=layer.w2_weight_chan_scale,
+            layer=layer,
         )
 
     def apply(
@@ -224,8 +218,8 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         assert self.moe_kernel is not None
         return self.moe_kernel.apply(
             hidden_states=x,
-            w1=layer.w13_weight_packed,
-            w2=layer.w2_weight_packed,
+            w1=layer.w13_weight,
+            w2=layer.w2_weight,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             activation=layer.activation,

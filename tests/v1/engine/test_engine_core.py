@@ -4,6 +4,7 @@
 import copy
 import time
 import uuid
+from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
 from unittest.mock import MagicMock, PropertyMock, patch
 
@@ -393,6 +394,38 @@ def test_engine_core_concurrent_batches():
             )
         expected_num_tokens[req_id] += 1
         req_id = (req_id + 1) % 2
+
+
+@pytest.mark.parametrize("encoder_only", [True, False])
+def test_async_step_skips_sampling_for_mm_encoder_only(encoder_only):
+    """Encoder outputs are complete; only language-model steps need sampling."""
+    core = MagicMock()
+    core.batch_queue = deque()
+    core.batch_queue_size = 2
+    core.is_mm_encoder_only = encoder_only
+    core.is_pooling_model = False
+    core.scheduler.has_requests.side_effect = [True, False, False]
+    scheduled = core.scheduler.schedule.return_value
+    scheduled.total_num_scheduled_tokens = 16
+    scheduled.pending_structured_output_tokens = False
+
+    output = MagicMock()
+    executed: Future[ModelRunnerOutput | None] = Future()
+    executed.set_result(output if encoder_only else None)
+    sampled: Future[ModelRunnerOutput | None] = Future()
+    sampled.set_result(None if encoder_only else output)
+    core.model_executor.execute_model.return_value = executed
+    core.model_executor.sample_tokens.return_value = sampled
+
+    EngineCore.step_with_batch_queue(core)
+    if core.batch_queue:
+        EngineCore.step_with_batch_queue(core)
+
+    core.scheduler.update_from_output.assert_called_once_with(scheduled, output)
+    if encoder_only:
+        core.model_executor.sample_tokens.assert_not_called()
+    else:
+        core.model_executor.sample_tokens.assert_called_once()
 
 
 @multi_gpu_test(num_gpus=2)

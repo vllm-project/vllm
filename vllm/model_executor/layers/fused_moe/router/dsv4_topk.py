@@ -31,7 +31,7 @@ def can_use_dsv4_topk(
         and correction_bias.is_contiguous()
         and topk == _TOPK
         and renormalize
-        and indices_dtype in (torch.int32, torch.uint32, torch.int64)
+        and indices_dtype in (torch.int32, torch.int64)
     )
 
 

@@ -35,13 +35,11 @@ if current_platform.is_cuda_alike() or current_platform.is_xpu():
         RMSNormReshapeFusionPass,
     )
     from .fusion.qk_norm_rope_fusion import QKNormRoPEFusionPass
-    from .fusion.sequence_parallelism import SequenceParallelismPass
     from .utility.split_coalescing import SplitCoalescingPass
 
 if current_platform.is_cuda_alike():
     from .fusion.act_quant_fusion import ActivationQuantFusionPass
     from .fusion.attn_quant_fusion import AttnQuantFusionPass
-    from .fusion.collective_fusion import AsyncTPPass
     from .fusion.mla_attn_quant_fusion import MLAAttnQuantFusionPass
     from .fusion.mla_rope_kvcache_cat_fusion import MLARoPEKVCacheCatFusionPass
     from .fusion.qk_norm_rope_kvcache_fusion import QkNormRopeKvCacheFusionPass
@@ -155,11 +153,6 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
         with set_current_vllm_config(config, check_compile=False):
             if self.pass_config.eliminate_noops:
                 self.passes += [NoOpEliminationPass(config)]
-
-            if self.pass_config.enable_sp:
-                self.passes += [SequenceParallelismPass(config)]
-                if self.pass_config.fuse_gemm_comms:
-                    self.passes += [AsyncTPPass(config)]
 
             if enable_transformers_norm_canonicalization:
                 self.passes += [AddRMSNormFusionPass(config)]
