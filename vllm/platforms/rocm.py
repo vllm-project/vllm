@@ -535,7 +535,7 @@ def _rocm_attn_falls_back_to_triton(vllm_config: "VllmConfig | None") -> bool:
     if getattr(vllm_config, "speculative_config", None) is not None:
         return True
     model_config = getattr(vllm_config, "model_config", None)
-    return model_config is not None and model_config.is_hybrid
+    return bool(getattr(model_config, "is_hybrid", False))
 
 
 def _uses_turboquant(vllm_config: "VllmConfig | None") -> bool:
