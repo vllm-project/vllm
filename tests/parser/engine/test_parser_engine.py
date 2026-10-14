@@ -1711,7 +1711,7 @@ class TestSafeArgPrefix:
         ],
     )
     def test_safe_arg_prefix(self, json_str, expected):
-        assert ParserEngine._safe_arg_prefix(json_str) == expected
+        assert ParserEngine._safe_arg_prefix(json_str)[0] == expected
 
 
 # ── Coercion instability regression tests ────────────────────────
