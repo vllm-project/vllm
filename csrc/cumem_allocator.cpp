@@ -155,7 +155,10 @@ void create_and_map(unsigned long long device, ssize_t size, CUdeviceptr d_mem,
 #else
   // Exportable as a dmabuf through the allocation handle, which unlike an
   // address-range export does not keep the memory alive once it is released.
-  prop.requestedHandleType = hipMemHandleTypePosixFileDescriptor;
+  static bool posix_fd_unsupported = false;
+  prop.requestedHandleType = posix_fd_unsupported
+                                 ? hipMemHandleTypeNone
+                                 : hipMemHandleTypePosixFileDescriptor;
 #endif
 
 #ifndef USE_ROCM
@@ -181,7 +184,21 @@ void create_and_map(unsigned long long device, ssize_t size, CUdeviceptr d_mem,
   }
 #else
   for (auto i = 0; i < num_chunks; ++i) {
-    CUDA_CHECK(cuMemCreate(p_memHandle[i], chunk_sizes[i], &prop, 0));
+    CUresult ret = cuMemCreate(p_memHandle[i], chunk_sizes[i], &prop, 0);
+    if (ret && ret != hipErrorOutOfMemory &&
+        prop.requestedHandleType != hipMemHandleTypeNone) {
+      // Exportable allocations are unsupported here: use plain ones, which
+      // RDMA registration exports through the address range instead.
+      std::cerr << "cumem_allocator: POSIX fd handle type rejected ("
+                << hipGetErrorString(ret)
+                << "); sleep mode cannot free memory registered for RDMA"
+                << std::endl;
+      (void)hipGetLastError();
+      posix_fd_unsupported = true;
+      prop.requestedHandleType = hipMemHandleTypeNone;
+      ret = cuMemCreate(p_memHandle[i], chunk_sizes[i], &prop, 0);
+    }
+    CUDA_CHECK(ret);
     if (error_code != 0) {
       // Clean up previously created handles
       for (auto j = 0; j < i; ++j) {

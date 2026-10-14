@@ -10,6 +10,7 @@ wiring.
 """
 
 import importlib
+import threading
 from dataclasses import asdict
 from types import SimpleNamespace
 
@@ -719,6 +720,8 @@ def test_write_producer_queues_grouped_attention_blocks():
 
 def test_session_build_rejects_per_layer_region_count_mismatch():
     worker = _FakeWorker(
+        _handshake_lock=threading.Lock(),
+        _kv_released=False,
         built_write_session={},
         layer_name_to_local_kv_cache_metadata={"kda.0": ["conv", "ssm"]},
         layer_name_to_remote_kv_cache_metadata={"prefill": {"kda.0": ["conv"]}},

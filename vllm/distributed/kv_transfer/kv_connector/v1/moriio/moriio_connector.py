@@ -1886,11 +1886,19 @@ class MoRIIOConnectorWorker:
         self.built_write_session: defaultdict[str, list] = defaultdict(list)
         # Sleep mode: the tensors behind each layer's registered regions, so
         # they can be registered again after the KV cache is remapped, and the
-        # handshake listeners of peers that fetched our region metadata.
+        # handshake listeners of peers that fetched our region metadata, by
+        # address: every TP/DP worker of a peer engine has its own listener.
         self._region_tensors: dict[str, list[torch.Tensor]] = {}
         self._kv_released = False
-        self._peer_listeners: dict[EngineId, tuple[str, int]] = {}
+        self._peer_listeners: dict[tuple[str, int], EngineId] = {}
         self._peer_lock = threading.Lock()
+        # Recent (epoch, engine_id) drops of peer metadata, so a handshake that
+        # straddles a drop does not store the stale metadata it received.
+        self._remote_epoch = 0
+        self._dropped_peers: list[tuple[int, EngineId]] = []
+        # Held from session lookup until the transfers are posted, so a drain
+        # never misses a transfer that is about to be posted.
+        self._transfer_post_lock = threading.RLock()
         backend = get_attn_backend(
             self.model_config.get_head_size(),
             self.model_config.dtype,
@@ -1971,6 +1979,17 @@ class MoRIIOConnectorWorker:
         self._writer.schedule_write(task)
 
     def _get_built_session(self, remote_engine_id):
+        with self._handshake_lock:
+            return self._get_built_session_locked(remote_engine_id)
+
+    def _get_built_session_locked(self, remote_engine_id):
+        if self._kv_released:
+            raise MoRIIOError("the local KV cache is unregistered (sleeping)")
+        if remote_engine_id not in self.layer_name_to_remote_kv_cache_metadata:
+            raise MoRIIOError(
+                f"no region metadata for peer {remote_engine_id}; it was "
+                "invalidated (the peer is sleeping) and must handshake again"
+            )
         if remote_engine_id not in self.built_write_session:
             remote_layer_map = self.layer_name_to_remote_kv_cache_metadata[
                 remote_engine_id
@@ -2010,18 +2029,41 @@ class MoRIIOConnectorWorker:
             remote_engine_id
         ]
 
-    def _record_peer_listener(self, info: dict[str, Any]) -> None:
+    def _serve_kv_metadata(self, peer: dict[str, Any] | None) -> bytes | None:
+        """Region metadata for a handshake, or None while the KV cache is
+        unregistered. Records the peer's listener so it is invalidated before
+        the regions are deregistered."""
         with self._peer_lock:
-            self._peer_listeners[info["engine_id"]] = (info["host"], int(info["port"]))
+            if self._kv_released:
+                return None
+            if peer is not None:
+                listener = (peer["host"], int(peer["port"]))
+                self._peer_listeners[listener] = peer["engine_id"]
+            return msgpack.dumps(self.layer_name_to_local_kv_cache_metadata)
+
+    @staticmethod
+    def _is_peer_key(key: str, engine_id: EngineId) -> bool:
+        return key == engine_id or key.startswith(f"{engine_id}_dp")
+
+    def _dropped_since(self, epoch: int, key: str) -> bool:
+        """Whether the peer behind ``key`` was dropped after ``epoch``. Call with
+        _handshake_lock held."""
+        return any(
+            e > epoch and self._is_peer_key(key, engine_id)
+            for e, engine_id in self._dropped_peers
+        )
 
     def _drop_remote_engine(self, engine_id: EngineId) -> None:
-        """Forget a peer's region metadata and sessions; it is about to
-        deregister them. The next transfer to it handshakes again."""
-
-        def is_peer(key: str) -> bool:
-            return key == engine_id or key.startswith(f"{engine_id}_dp")
-
+        """Forget a peer's region metadata and sessions, then wait for the
+        transfers already posted to it: the peer deregisters its regions once
+        this returns. The next transfer to it handshakes again."""
         with self._handshake_lock:
+            self._remote_epoch += 1
+            self._dropped_peers = [
+                *self._dropped_peers[-63:],
+                (self._remote_epoch, engine_id),
+            ]
+            dropped = 0
             for cache in (
                 self.layer_name_to_remote_kv_cache_metadata,
                 self.remote_moriio_metadata,
@@ -2029,45 +2071,99 @@ class MoRIIOConnectorWorker:
                 self._handshake_futures,
                 self.built_write_session,
             ):
-                for key in [k for k in cache if is_peer(k)]:
+                for key in [k for k in cache if self._is_peer_key(k, engine_id)]:
                     del cache[key]
+                    dropped += 1
             self._eager_handshaked_engines = {
-                k for k in self._eager_handshaked_engines if not is_peer(k)
+                k
+                for k in self._eager_handshaked_engines
+                if not self._is_peer_key(k, engine_id)
             }
-        logger.info("MoRIIO dropped region metadata of peer %s", engine_id)
+        self._drain_transfers()
+        if dropped:
+            logger.info("MoRIIO dropped region metadata of peer %s", engine_id)
+        else:
+            logger.warning(
+                "MoRIIO peer %s invalidated its KV cache, but no metadata is "
+                "stored under that engine ID",
+                engine_id,
+            )
 
-    def _invalidate_peers(self) -> None:
-        """Make every peer that fetched our region metadata drop it before we
-        deregister: a transfer against a deregistered region fails with a
-        remote access error and leaves the peer's queue pair unusable."""
-        with self._peer_lock:
-            peers = dict(self._peer_listeners)
-        timeout_ms = int(self.moriio_config.transfer_timeout * 1000)
-        for engine_id, (host, port) in peers.items():
-            path = make_zmq_path("tcp", host, port)
-            try:
-                with zmq_ctx(zmq.DEALER, path) as sock:
-                    sock.setsockopt(zmq.RCVTIMEO, timeout_ms)
+    def _drain_transfers(self) -> None:
+        # Let transfers that already looked up a session finish posting.
+        with self._transfer_post_lock:
+            pass
+        pending = self.moriio_wrapper.drain_transfers(
+            self.moriio_config.transfer_timeout
+        )
+        if pending:
+            logger.warning(
+                "MoRIIO gave up on %d transfer(s) still pending after %.0fs",
+                pending,
+                self.moriio_config.transfer_timeout,
+            )
+
+    def _invalidate_peers(self, peers: dict[tuple[str, int], EngineId]) -> None:
+        """Make every peer that fetched our region metadata drop it and finish
+        its transfers to us before we deregister: a transfer against a
+        deregistered region fails with a remote access error and leaves the
+        peer's queue pair unusable."""
+        socks: dict[zmq.Socket, tuple[str, EngineId]] = {}
+        poller = zmq.Poller()
+        try:
+            for (host, port), engine_id in peers.items():
+                path = make_zmq_path("tcp", host, port)
+                try:
+                    sock = make_zmq_socket(
+                        ctx=self.zmq_context,
+                        path=path,
+                        socket_type=zmq.DEALER,
+                        bind=False,
+                        linger=0,
+                    )
+                    socks[sock] = (path, engine_id)
                     sock.send_multipart(
                         (MoRIIOConstants.INVALIDATE_MSG, self.engine_id.encode())
                     )
+                except zmq.ZMQError as e:
+                    logger.warning("MoRIIO cannot invalidate %s: %s", path, e)
+                    continue
+                poller.register(sock, zmq.POLLIN)
+            # Each peer drains its own transfers for up to transfer_timeout
+            # before it acknowledges.
+            deadline = time.monotonic() + 2 * self.moriio_config.transfer_timeout
+            pending = set(socks)
+            while pending and (remaining := deadline - time.monotonic()) > 0:
+                for sock, _ in poller.poll(int(remaining * 1000) + 1):
                     sock.recv_multipart()
-            except zmq.ZMQError as e:
+                    pending.discard(sock)
+            for sock in pending:
+                path, engine_id = socks[sock]
                 logger.warning(
-                    "MoRIIO peer %s at %s did not acknowledge invalidation (%s); "
-                    "a transfer it issues against the unregistered KV cache will fail",
+                    "MoRIIO peer %s at %s did not acknowledge invalidation; a "
+                    "transfer it issues against the unregistered KV cache fails",
                     engine_id,
                     path,
-                    e,
                 )
+        finally:
+            for sock in socks:
+                sock.close()
 
     def unregister_kv_caches(self) -> None:
-        if self._kv_released or not self._region_tensors:
-            return
+        with self._handshake_lock, self._peer_lock:
+            if self._kv_released or not self._region_tensors:
+                return
+            # From here on handshakes get no metadata and no new sessions are
+            # built, so the peers recorded so far are all that can still
+            # transfer to us.
+            self._kv_released = True
+            self.built_write_session.clear()
+            peers = self._peer_listeners
+            self._peer_listeners = {}
         engine = self.moriio_wrapper.moriio_engine
         assert engine is not None, "MoRIIO engine must be set first"
-        self.moriio_wrapper.waiting_for_transfer_complete()
-        self._invalidate_peers()
+        self._invalidate_peers(peers)
+        self._drain_transfers()
         released: set[bytes] = set()
         for metas in self.layer_name_to_local_kv_cache_metadata.values():
             for meta in metas:
@@ -2076,27 +2172,27 @@ class MoRIIOConnectorWorker:
                     engine.deregister_memory(
                         self.moriio_wrapper.get_unpack_memory_metadata(meta)
                     )
-        self.built_write_session.clear()
-        self._kv_released = True
         logger.info("MoRIIO deregistered %d KV cache region(s)", len(released))
 
     def restore_kv_caches(self) -> None:
-        if not self._kv_released:
-            return
+        with self._peer_lock:
+            if not self._kv_released:
+                return
         # Same regions, same order; regions shared between layers are
-        # registered once. The listener serves this dict, so updating it in
-        # place publishes the new metadata to the next handshake.
+        # registered once.
         registered: dict[tuple[int, int], bytes] = {}
+        metadata: dict[str, list[bytes]] = {}
         for layer_name, tensors in self._region_tensors.items():
-            metas = self.layer_name_to_local_kv_cache_metadata[layer_name]
-            metas.clear()
+            metadata[layer_name] = []
             for tensor in tensors:
                 key = (tensor.data_ptr(), tensor.nbytes)
                 if key not in registered:
                     registered[key] = self.moriio_wrapper.register_local_tensor(tensor)
-                metas.append(registered[key])
-        self.built_write_session.clear()
-        self._kv_released = False
+                metadata[layer_name].append(registered[key])
+        with self._handshake_lock, self._peer_lock:
+            self.layer_name_to_local_kv_cache_metadata.update(metadata)
+            self.built_write_session.clear()
+            self._kv_released = False
         logger.info("MoRIIO registered %d KV cache region(s) again", len(registered))
 
     def _start_heartbeat(self) -> MoRIIOHeartbeat:
@@ -2150,8 +2246,7 @@ class MoRIIOConnectorWorker:
         base_port: int,
         tp_rank: int,
         dp_rank: int,
-        layer_name_to_local_kv_cache_metadata: dict,
-        on_peer: Callable[[dict[str, Any]], None],
+        serve_kv_metadata: Callable[[dict[str, Any] | None], bytes | None],
         on_invalidate: Callable[[EngineId], None],
     ):
         """Background thread for getting new MoRIIO handshakes."""
@@ -2173,7 +2268,10 @@ class MoRIIOConnectorWorker:
             while True:
                 identity, msg, *extra = sock.recv_multipart()
                 if msg == MoRIIOConstants.INVALIDATE_MSG:
-                    on_invalidate(extra[0].decode())
+                    try:
+                        on_invalidate(extra[0].decode())
+                    except Exception:
+                        logger.exception("MoRIIO failed to handle invalidation")
                     sock.send_multipart((identity, b"", MoRIIOConstants.INVALIDATE_ACK))
                     continue
                 if (
@@ -2183,14 +2281,22 @@ class MoRIIOConnectorWorker:
                     logger.error("Connection listener got unexpected message")
                     raise HandshakeError("handshake failed, unexpected msg type")
                 elif msg == MoRIIOConstants.GET_META_MSG:
-                    if extra:
-                        on_peer(msgpack.loads(extra[0]))
+                    try:
+                        peer = msgpack.loads(extra[0]) if extra else None
+                        buf = serve_kv_metadata(peer)
+                    except Exception:
+                        logger.exception("MoRIIO failed to serve a handshake")
+                        buf = None
+                    if buf is None:
+                        sock.send_multipart(
+                            (identity, b"", MoRIIOConstants.KV_UNAVAILABLE)
+                        )
+                        continue
                     sock.send_multipart(
                         (identity, b"", encoded_data)
                     )  # send local mori io engine meta data
                     logger.debug("MoRIIO handshake listener sent metadata")
                     # now we send tensor meta data for each block
-                    buf = msgpack.dumps(layer_name_to_local_kv_cache_metadata)
                     sock.send_multipart((identity, b"", buf))
                 elif msg == MoRIIOConstants.POP_DONE_RECV:
                     _, req_id = sock.recv_multipart()
@@ -2217,6 +2323,7 @@ class MoRIIOConnectorWorker:
         TP-aware.
         """
         start_time = time.perf_counter()
+        epoch = self._remote_epoch
 
         # NOTE(rob): we need each rank to have a unique port. This is
         # a hack to keep us moving. We will switch when moving to etcd
@@ -2249,6 +2356,11 @@ class MoRIIOConnectorWorker:
             received_frame = sock.recv_multipart()
             if len(received_frame) != 2 or received_frame[0] != b"":
                 raise HandshakeError(f"Unexpected frame! {received_frame = }")
+            if received_frame[1] == MoRIIOConstants.KV_UNAVAILABLE:
+                raise HandshakeError(
+                    f"peer {expected_engine_id} has unregistered its KV cache "
+                    "(it is sleeping)"
+                )
 
             metadata_bytes = received_frame[1]
             decoder = msgspec.msgpack.Decoder(MoRIIOAgentMetadata)
@@ -2291,10 +2403,16 @@ class MoRIIOConnectorWorker:
             if len(received_frame) != 2 or received_frame[0] != b"":
                 raise HandshakeError(f"unexpected frame! {received_frame = }")
             buf = received_frame[1]
-            self.layer_name_to_remote_kv_cache_metadata[expected_engine_id] = (
-                msgpack.loads(buf)
-            )
-            self.remote_moriio_metadata[expected_engine_id] = metadata
+            with self._handshake_lock:
+                if self._dropped_since(epoch, expected_engine_id):
+                    raise HandshakeError(
+                        f"peer {expected_engine_id} invalidated its KV cache "
+                        "during the handshake"
+                    )
+                self.layer_name_to_remote_kv_cache_metadata[expected_engine_id] = (
+                    msgpack.loads(buf)
+                )
+                self.remote_moriio_metadata[expected_engine_id] = metadata
             setup_agent_time = time.perf_counter()
             logger.debug(
                 "MoRIIO handshake: add agent took: %s",
@@ -2357,13 +2475,19 @@ class MoRIIOConnectorWorker:
             )
             fut_list.append(future)
 
-            def done_callback(f: Future[set[str]], eid=dp_engine_id):
+            def done_callback(
+                f: Future[set[str]], eid=dp_engine_id, epoch=self._remote_epoch
+            ):
                 with self._handshake_lock:
-                    self._handshake_futures.pop(eid, None)
+                    if self._handshake_futures.get(eid) is f:
+                        self._handshake_futures.pop(eid)
                     try:
-                        self._remote_agents[eid] = f.result()
+                        agents = f.result()
                     except Exception:
                         logger.exception("Handshake with %s failed", eid)
+                    else:
+                        if not self._dropped_since(epoch, eid):
+                            self._remote_agents[eid] = agents
 
             future.add_done_callback(done_callback)
             self._handshake_futures[dp_engine_id] = future
@@ -2784,8 +2908,7 @@ class MoRIIOConnectorWorker:
                 self.side_channel_port,
                 self.tp_rank,
                 self.dp_rank,
-                self.layer_name_to_local_kv_cache_metadata,
-                self._record_peer_listener,
+                self._serve_kv_metadata,
                 self._drop_remote_engine,
             ),
             daemon=True,
@@ -3229,6 +3352,7 @@ class MoRIIOConnectorWorker:
             # layer metadata is half-handshaked and would KeyError at read time.
             futures: list[tuple[str, Future[set[str]]]] = []
             with self._handshake_lock:
+                epoch = self._remote_epoch
                 for eid, cur_dp_rank, cur_tp_rank in targets:
                     if (
                         eid in self._remote_agents
@@ -3259,7 +3383,8 @@ class MoRIIOConnectorWorker:
 
             with self._handshake_lock:
                 for eid, agents in results.items():
-                    self._remote_agents[eid] = agents
+                    if not self._dropped_since(epoch, eid):
+                        self._remote_agents[eid] = agents
 
             logger.info(
                 "Eager MoRIIO handshake: engine=%s dp_size=%d new_ranks=%d "
@@ -3282,7 +3407,9 @@ class MoRIIOConnectorWorker:
                     "TP collective hang"
                 )
 
-            self._eager_handshaked_engines.add(remote_engine_id)
+            with self._handshake_lock:
+                if not self._dropped_since(epoch, remote_engine_id):
+                    self._eager_handshaked_engines.add(remote_engine_id)
 
     def start_load_kv(self, metadata: MoRIIOConnectorMetadata):
         """Start loading by triggering non-blocking moriio_xfer.
@@ -3770,7 +3897,11 @@ class MoRIIOConnectorWorker:
         except Exception:
             return False
 
-    def _read_blocks(
+    def _read_blocks(self, *args, **kwargs):
+        with self._transfer_post_lock:
+            return self._read_blocks_locked(*args, **kwargs)
+
+    def _read_blocks_locked(
         self,
         local_block_ids: BlockIds,
         remote_block_ids: BlockIds,

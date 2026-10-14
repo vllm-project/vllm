@@ -405,6 +405,9 @@ class MoRIIOConstants:
     # deregistered; the peer drops it and handshakes again on next use.
     INVALIDATE_MSG = b"invalidate_msg"
     INVALIDATE_ACK = b"invalidate_ack"
+    # Handshake reply in place of the metadata while the KV cache is
+    # unregistered.
+    KV_UNAVAILABLE = b"kv_unavailable"
     OVER = b"OVER"
     COMPLETION_PREFIX = "cmpl"
     TRANSFER_PREFIX = "tx"
