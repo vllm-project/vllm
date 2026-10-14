@@ -8,16 +8,23 @@ used for classification and routing.
 
 ### Text-only Models
 
-| Architecture | Models | Example HF Models | 
-| ------------ | ------ | ----------------- |
+| Architecture                         | ReadStrategy                   | Task             | Head              | Example HF Models       | 
+|--------------------------------------|--------------------------------|------------------|-------------------|-------------------------|
+| `ClefFlashForJointSchema`            | `ClefFlashStrategy`            | `token_classify` | `JointSchemaHead` | `Cloudflare/clef-flash` |
+| `Qwen3ForCausalLM`                   | `NextTokenStrategy`            | `generate`       | N/A               |                         |
+| `Qwen3_5ForConditionalGeneration`    | `NextTokenStrategy`            | `generate`       | N/A               |                         |
+| `Qwen3_5MoeForConditionalGeneration` | `NextTokenStrategy`            | `generate`       | N/A               |                         |
+| `DiffusionGemmaForBlockDiffusion`    | `DiffusionGemmaCanvasStrategy` | `generate`       | N/A               |                         |
 
 ### Multimodal Models
 
 !!! note
     For more information about multimodal models inputs, see [this page](./supported_models.md#list-of-multimodal-language-models).
 
-| Architecture | Models | Inputs | Example HF Models |
-| ------------ | ------ | ----------------- | ----- |
+| Architecture                     | Inputs | ReadStrategy          | Task             | Head              | Example HF Models      | 
+|----------------------------------|--------|-----------------------|------------------|-------------------|------------------------|
+| `ClefOmniForJointSchema`         |        | `JointSchemaStrategy` | `token_classify` | `JointSchemaHead` | `Cloudflare/clef-omni` |
+| `Lfm2VlForConditionalGeneration` |        | `LiquidStrategy`      | `generate`       | N/A               | `LiquidAI/d1-3B`       |
 
 ## Online Serving
 
