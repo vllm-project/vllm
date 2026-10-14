@@ -228,7 +228,8 @@ def set_dummy_context(
     max_model_len: int,
     input_block_tables: Sequence[torch.Tensor] | None = None,
 ) -> None:
-    """Give each dummy request context_len of context, used when profiling step cost."""
+    """Give each dummy request context_len of context, for profiling step cost
+    and for DCP FULL cudagraph capture."""
     if input_block_tables is None:
         input_block_tables = block_tables.input_block_tables
     if not input_block_tables:
