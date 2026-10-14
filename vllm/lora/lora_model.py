@@ -134,6 +134,7 @@ class LoRAModel:
         modules_to_save_names = peft_helper.modules_to_save or []
         full_parameters: dict[str, dict[str, torch.Tensor]] = {}
         loras: dict[str, LoRALayerWeights] = {}
+        fused_moe_modules: set[str] = set()
         for tensor_name, tensor in tensors.items():
             if is_base_embedding_weights(tensor_name):
                 continue
@@ -155,6 +156,9 @@ class LoRAModel:
                 loras[module_name] = LoRALayerWeights.from_config(
                     module_name, peft_helper, peft_module_name
                 )
+                parts = peft_module_name.split(".")
+                if parts[-1] == "experts" or parts[-2:] == ["experts", "base_layer"]:
+                    fused_moe_modules.add(module_name)
 
             if is_lora_a:
                 if (
@@ -174,6 +178,25 @@ class LoRAModel:
 
                 if pin_memory:
                     loras[module_name].lora_b = loras[module_name].lora_b.pin_memory()
+
+        for module_name, lora in loras.items():
+            # Fused MoE factors flatten the rank and expert axes.
+            if module_name in fused_moe_modules:
+                continue
+            lora_a, lora_b = lora.lora_a, lora.lora_b
+            if lora_a is None or lora_b is None:
+                missing = "A" if lora_a is None else "B"
+                raise ValueError(
+                    f"LoRA module {module_name!r} is missing lora_{missing}."
+                )
+            if lora_a.ndim != 2 or lora_b.ndim != 2:
+                continue
+            if lora_a.shape[0] != lora.rank or lora_b.shape[1] != lora.rank:
+                raise ValueError(
+                    f"LoRA module {module_name!r} expects rank {lora.rank} from its "
+                    f"PEFT configuration, but received A shape {tuple(lora_a.shape)} "
+                    f"and B shape {tuple(lora_b.shape)}."
+                )
 
         modules_to_save = {}
         for module_name, parameters in full_parameters.items():
