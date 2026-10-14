@@ -13,6 +13,7 @@ import pybase64 as base64
 
 from vllm.distributed.kv_transfer.kv_checksum.checksum import (
     KVChecksumBlocks,
+    KVChecksumCarrier,
     KVChecksumGroup,
     KVChecksumRecord,
     KVChecksumScheduled,
@@ -118,6 +119,7 @@ class _Unverified(Exception):
 class _Pending:
     """A request whose checksums are being collected from the workers."""
 
+    carrier: KVChecksumCarrier
     blocks: KVChecksumBlocks
     expected: KVChecksumPayload | None = None
     """The producer's checksums; only for a load."""
@@ -236,12 +238,13 @@ class KVChecksumScheduler:
     def add_send(self, request: "Request", blocks: "KVCacheBlocks") -> None:
         """Checksum a request's KV in the step that finishes its prefill, for
         a consumer to verify after loading it."""
-        if self._connector.kv_checksum_carrier(request, receiving=False) is None:
+        carrier = self._connector.kv_checksum_carrier(request, receiving=False)
+        if carrier is None:
             return
         num_tokens = request.num_computed_tokens
         checksum_blocks = self._blocks(blocks, 0, num_tokens)
         # A new prefill (after a preemption) replaces an earlier one.
-        self._sends[request.request_id] = _Pending(checksum_blocks)
+        self._sends[request.request_id] = _Pending(carrier, checksum_blocks)
         self._scheduled.reqs_to_send[request.request_id] = checksum_blocks
 
     def add_recv(
@@ -256,14 +259,18 @@ class KVChecksumScheduler:
         ``request.num_computed_tokens`` must already include the loaded
         tokens.
         """
-        if self._connector.kv_checksum_carrier(request, receiving=True) is None:
+        carrier = self._connector.kv_checksum_carrier(request, receiving=True)
+        if carrier is None:
             return
         checksum_blocks = self._blocks(
             blocks, num_local_computed_tokens, request.num_computed_tokens
         )
-        pending = _Pending(checksum_blocks)
+        pending = _Pending(carrier, checksum_blocks)
         params = request.kv_transfer_params or {}
-        if (encoded := params.get(KV_TRANSFER_PARAMS_KEY)) is not None:
+        if (
+            carrier == KVChecksumCarrier.KV_TRANSFER_PARAMS
+            and (encoded := params.get(KV_TRANSFER_PARAMS_KEY)) is not None
+        ):
             try:
                 data = base64.b64decode(encoded)
             except (ValueError, TypeError):
@@ -304,6 +311,11 @@ class KVChecksumScheduler:
                     pending = self._sends.get(req_id) or self._recvs.get(req_id)
                     if pending is not None:
                         pending.reports[worker] = (groups, record)
+                # Every worker of the consumer may receive the same checksums.
+                for req_id, data in record.received.items():
+                    pending = self._recvs.get(req_id)
+                    if pending is not None and pending.expected is None:
+                        pending.set_expected(req_id, data)
 
         failed: set[str] = set()
         for req_id in kv_connector_output.finished_recving or ():
@@ -319,7 +331,8 @@ class KVChecksumScheduler:
     def request_finished(
         self, request: "Request", kv_transfer_params: dict[str, Any] | None
     ) -> dict[str, Any] | None:
-        """Add the request's checksums to the kv_transfer_params it returns.
+        """Send the request's checksums through its carrier: added to the
+        kv_transfer_params it returns, or handed to the connector.
 
         Called for every finished request, after the connector's
         ``request_finished``; drops the request's state.
@@ -328,15 +341,17 @@ class KVChecksumScheduler:
         pending = self._sends.pop(request.request_id, None)
         if (
             pending is None
-            or kv_transfer_params is None
             # Aborted or failed: its KV is not sent.
             or request.get_finished_reason() not in _SENT_FINISH_REASONS
             or (payload := self._payload(request.request_id, pending)) is None
         ):
             return kv_transfer_params
-        kv_transfer_params[KV_TRANSFER_PARAMS_KEY] = base64.b64encode(
-            payload.to_bytes()
-        ).decode()
+        if pending.carrier == KVChecksumCarrier.CONNECTOR:
+            self._connector.send_kv_checksums(request, payload.to_bytes())
+        elif kv_transfer_params is not None:
+            kv_transfer_params[KV_TRANSFER_PARAMS_KEY] = base64.b64encode(
+                payload.to_bytes()
+            ).decode()
         return kv_transfer_params
 
     def _blocks(
