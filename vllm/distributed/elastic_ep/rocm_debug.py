@@ -290,11 +290,14 @@ def _ipc_export_mode() -> str:
         hip.hipFree(ptr)
         return f"env={env} export failed {_err(rc)}"
     words = struct.unpack("<16I", bytes(handle))
+    # ctypes types value as int | None, and the allocation succeeded above, so
+    # read it once into an int rather than guarding it twice below.
+    addr = ptr.value or 0
     hip.hipFree(ptr)
     hip.hipGetLastError()
     dmabuf = (
-        words[0] == (ptr.value & 0xFFFFFFFF)
-        and words[1] == (ptr.value >> 32)
+        words[0] == (addr & 0xFFFFFFFF)
+        and words[1] == (addr >> 32)
         and words[2] == os.getpid()
     )
     return f"env={env} effective={'dmabuf' if dmabuf else 'legacy'}"
