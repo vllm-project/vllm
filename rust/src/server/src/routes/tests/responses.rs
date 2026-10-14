@@ -78,8 +78,18 @@ async fn responses_empty_model_uses_served_model() {
 async fn responses_sampling_metadata_matches_engine_defaults_and_overrides() {
     for (overrides, temperature, top_p) in [
         (json!({}), 0.6, 0.95),
-        (json!({"temperature": 0.2, "top_p": 0.8}), 0.2, 0.8),
+        (
+            json!({
+                "temperature": 0.2, "top_p": 0.8, "max_output_tokens": 7,
+                "presence_penalty": 0.5, "frequency_penalty": -0.5
+            }),
+            0.2,
+            0.8,
+        ),
     ] {
+        // The engine resolves `max_tokens` against the context, so echo what
+        // it received rather than a constant.
+        let engine_values = Arc::new(std::sync::Mutex::new(None));
         let backend = FakeChatBackend {
             sampling_hints: vllm_text::SamplingHints {
                 default_temperature: Some(0.6),
@@ -89,18 +99,34 @@ async fn responses_sampling_metadata_matches_engine_defaults_and_overrides() {
             ..FakeChatBackend::new()
         };
         let (app, engine_task) =
-            test_app_with_backend_and_engine_request_check(Arc::new(backend), move |request| {
-                let params = request.sampling_params.as_ref().unwrap();
-                assert_eq!(params.temperature, temperature);
-                assert_eq!(params.top_p, top_p);
+            test_app_with_backend_and_engine_request_check(Arc::new(backend), {
+                let engine_values = Arc::clone(&engine_values);
+                move |request| {
+                    let params = request.sampling_params.as_ref().unwrap();
+                    assert_eq!(params.temperature, temperature);
+                    assert_eq!(params.top_p, top_p);
+                    *engine_values.lock().unwrap() = Some((
+                        params.max_tokens,
+                        params.presence_penalty,
+                        params.frequency_penalty,
+                    ));
+                }
             })
             .await;
         let mut request = json!({"input": "hello"});
         request.as_object_mut().unwrap().extend(overrides.as_object().unwrap().clone());
         let response = responses_stream_terminal(&app, request).await;
         engine_task.await.expect("mock engine task");
+        let (max_tokens, presence_penalty, frequency_penalty) =
+            engine_values.lock().unwrap().expect("engine request");
+        if let Some(requested) = overrides.get("max_output_tokens") {
+            assert_eq!(json!(max_tokens), *requested);
+        }
         assert!((response["temperature"].as_f64().unwrap() - f64::from(temperature)).abs() < 1e-6);
         assert!((response["top_p"].as_f64().unwrap() - f64::from(top_p)).abs() < 1e-6);
+        assert_eq!(response["max_output_tokens"], json!(max_tokens));
+        assert_eq!(response["presence_penalty"], json!(presence_penalty));
+        assert_eq!(response["frequency_penalty"], json!(frequency_penalty));
     }
 }
 

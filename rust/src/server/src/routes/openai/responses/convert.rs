@@ -21,8 +21,8 @@ use vllm_chat::{
     ChatOptions, ChatRequest, ChatTool, ChatToolChoice, Error as ChatError, GenerationPromptMode,
     ResolvedToolContext,
 };
-use vllm_text::SamplingParams;
 use vllm_text::output::TextDecodeOptions;
+use vllm_text::{EffectiveSampling, SamplingParams};
 
 use super::types::{
     AssistantRole, IncompleteDetails, InputTokensDetails, OutputTokensDetails,
@@ -39,9 +39,7 @@ use crate::routes::openai::utils::resolve_generation_prompt_truncation;
 use crate::routes::openai::utils::structured_outputs::{
     JsonSchemaFormat, ResponseFormat, convert_from_response_format,
 };
-use crate::routes::openai::utils::types::{
-    FunctionChoice, ReasoningEffort, ToolChoiceValue, ToolReference,
-};
+use crate::routes::openai::utils::types::{FunctionChoice, ToolChoiceValue, ToolReference};
 use crate::utils::{
     ResolvedRequestContext, convert_logit_bias, merge_ec_transfer_params, merge_kv_transfer_params,
     resolve_session_id,
@@ -57,19 +55,14 @@ pub(crate) struct ResponseMeta {
     pub tools: Vec<ResponsesTool>,
     pub tool_choice: ResponseToolChoice,
     pub parallel_tool_calls: bool,
-    pub max_output_tokens: Option<u32>,
     pub max_tool_calls: Option<u32>,
     pub previous_response_id: Option<String>,
     pub reasoning: Option<ResponsesReasoning>,
     pub service_tier: ServiceTier,
-    pub temperature: f32,
-    pub top_p: f32,
     pub top_logprobs: Option<i32>,
     pub text: Option<ResponseTextConfig>,
     pub truncation: ResponseTruncation,
     pub user: Option<String>,
-    pub presence_penalty: Option<f32>,
-    pub frequency_penalty: Option<f32>,
     pub include_reasoning: bool,
 }
 
@@ -180,19 +173,6 @@ pub(crate) fn prepare_responses_request(
 
     let reasoning_effort = reasoning.as_ref().and_then(|reasoning| reasoning.effort);
 
-    // When reasoning is requested, activate thinking for models whose chat
-    // templates require explicit opt-in; mirrors `build_chat_params` in the
-    // Python frontend.
-    let mut template_kwargs = chat_template_kwargs.unwrap_or_default();
-    if let Some(effort) = reasoning_effort
-        && !template_kwargs.contains_key("enable_thinking")
-    {
-        template_kwargs.insert(
-            "enable_thinking".to_string(),
-            Value::Bool(!matches!(effort, ReasoningEffort::None)),
-        );
-    }
-
     // Map the flat Responses `text.format` shape onto the nested
     // chat-completions `response_format` shape before conversion.
     let response_format =
@@ -276,7 +256,7 @@ pub(crate) fn prepare_responses_request(
             chat_template: None,
             reasoning_effort: reasoning_effort.map(|effort| effort.as_str().into()),
             response_format: response_format_value,
-            template_kwargs,
+            template_kwargs: chat_template_kwargs.unwrap_or_default(),
         },
         tool_context,
         decode_options: TextDecodeOptions {
@@ -305,19 +285,14 @@ pub(crate) fn prepare_responses_request(
         tools,
         tool_choice: tool_choice_echo,
         parallel_tool_calls: parallel_tool_calls.unwrap_or(true),
-        max_output_tokens,
         max_tool_calls,
         previous_response_id,
         reasoning,
         service_tier: service_tier.unwrap_or_default(),
-        temperature: temperature.unwrap_or(1.0),
-        top_p: top_p.unwrap_or(1.0),
         top_logprobs,
         text,
         truncation,
         user,
-        presence_penalty,
-        frequency_penalty,
         include_reasoning,
     };
 
@@ -330,8 +305,9 @@ pub(crate) fn prepare_responses_request(
 
 /// Map Responses API truncation onto the shared chat prompt policy.
 ///
-/// `auto` retains the newest prompt tokens that fit after output-token
-/// reservation, matching the Python Responses frontend.
+/// `auto` keeps the newest `max_model_len - 1` prompt tokens, as
+/// `truncate_prompt_tokens=-1` does in the Python Responses frontend; the
+/// output-token limit is then clamped to the remaining context.
 fn response_prompt_truncation(
     truncation: ResponseTruncation,
 ) -> Result<Option<vllm_text::PromptTruncation>, ApiError> {
@@ -760,6 +736,7 @@ pub(crate) fn build_usage(usage: &vllm_chat::ChatTokenUsage) -> ResponseUsage {
 /// terminal streaming event.
 pub(crate) fn build_response(
     meta: &ResponseMeta,
+    sampling: EffectiveSampling,
     request_id: &str,
     created_at: u64,
     output: Vec<ResponseOutputItem>,
@@ -783,7 +760,7 @@ pub(crate) fn build_response(
         background: false,
         incomplete_details,
         instructions: meta.instructions.clone(),
-        max_output_tokens: meta.max_output_tokens,
+        max_output_tokens: sampling.max_tokens,
         max_tool_calls: meta.max_tool_calls,
         metadata: meta.metadata.clone(),
         model: meta.model.clone(),
@@ -793,17 +770,17 @@ pub(crate) fn build_response(
         prompt: None,
         reasoning: meta.reasoning.clone(),
         service_tier: meta.service_tier,
-        temperature: meta.temperature,
+        temperature: sampling.temperature,
         text: meta.text.clone(),
         tool_choice: meta.tool_choice.clone(),
         tools: meta.tools.clone(),
-        top_p: meta.top_p,
+        top_p: sampling.top_p,
         top_logprobs: meta.top_logprobs,
         truncation: meta.truncation,
         usage,
         user: meta.user.clone(),
-        presence_penalty: meta.presence_penalty,
-        frequency_penalty: meta.frequency_penalty,
+        presence_penalty: sampling.presence_penalty,
+        frequency_penalty: sampling.frequency_penalty,
         kv_transfer_params,
         ec_transfer_params,
     }
@@ -892,7 +869,13 @@ mod tests {
     #[test]
     fn auto_truncation_uses_the_shared_input_budget_policy() {
         assert!(response_prompt_truncation(ResponseTruncation::Disabled).unwrap().is_none());
-        assert!(response_prompt_truncation(ResponseTruncation::Auto).unwrap().is_some());
+        assert_eq!(
+            response_prompt_truncation(ResponseTruncation::Auto).unwrap(),
+            Some(vllm_text::PromptTruncation {
+                limit: vllm_text::PromptTruncationLimit::InputBudget,
+                side: vllm_text::TruncationSide::Left,
+            })
+        );
     }
 
     #[test]

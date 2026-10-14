@@ -630,8 +630,7 @@ pub struct ResponsesResponse {
     pub incomplete_details: Option<IncompleteDetails>,
     #[serde(default)]
     pub instructions: Option<String>,
-    #[serde(default)]
-    pub max_output_tokens: Option<u32>,
+    pub max_output_tokens: u32,
     #[serde(default)]
     pub max_tool_calls: Option<u32>,
     #[serde(default)]
@@ -661,10 +660,8 @@ pub struct ResponsesResponse {
     pub usage: Option<ResponseUsage>,
     #[serde(default)]
     pub user: Option<String>,
-    #[serde(default)]
-    pub presence_penalty: Option<f32>,
-    #[serde(default)]
-    pub frequency_penalty: Option<f32>,
+    pub presence_penalty: f32,
+    pub frequency_penalty: f32,
     #[serde(default)]
     pub kv_transfer_params: Option<Value>,
     #[serde(default)]
@@ -791,7 +788,7 @@ mod tests {
             background: false,
             incomplete_details: None,
             instructions: Some("be terse".to_string()),
-            max_output_tokens: None,
+            max_output_tokens: 16,
             max_tool_calls: None,
             metadata: None,
             model: "test-model".to_string(),
@@ -834,8 +831,8 @@ mod tests {
                 total_tokens: 5,
             }),
             user: None,
-            presence_penalty: None,
-            frequency_penalty: None,
+            presence_penalty: 0.0,
+            frequency_penalty: 0.0,
             kv_transfer_params: None,
             ec_transfer_params: None,
         };
@@ -848,6 +845,7 @@ mod tests {
               "status": "completed",
               "background": false,
               "instructions": "be terse",
+              "max_output_tokens": 16,
               "model": "test-model",
               "output": [
                 {
@@ -886,7 +884,9 @@ mod tests {
                   "tool_output_tokens_per_turn": []
                 },
                 "total_tokens": 5
-              }
+              },
+              "presence_penalty": 0.0,
+              "frequency_penalty": 0.0
             }"#]]
         .assert_eq(&serde_json::to_string_pretty(&response).unwrap());
     }
