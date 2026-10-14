@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from http import HTTPStatus
+from typing import TYPE_CHECKING, Literal
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
@@ -13,9 +14,13 @@ from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.utils.api_utils import request_span, validate_json_request
 from vllm.logger import init_logger
+from vllm.tracing import SpanAttributes
 
 from ..token_in_token_out.protocol import GenerateRequest
 from .serving import ServingRender
+
+if TYPE_CHECKING:
+    from opentelemetry.trace import Span
 
 logger = init_logger(__name__)
 
@@ -44,6 +49,32 @@ def _tool_render_counter(
     return _tool_call_render_requests
 
 
+def _annotate_tool_render_span(
+    request: ChatCompletionRequest | AnthropicMessagesRequest,
+    span: "Span | None",
+    api_surface: Literal["chat_completions", "messages"],
+) -> None:
+    if span is None or not span.is_recording():
+        return
+    choice = request.tool_choice
+    choice_type = (
+        choice if isinstance(choice, str) else getattr(choice, "type", "unset")
+    )
+    choice_label = {"any": "required", "tool": "named", "function": "named"}.get(
+        choice_type, choice_type
+    )
+    if choice_label not in ("unset", "auto", "none", "required", "named"):
+        choice_label = "other"
+    span.set_attributes(
+        {
+            SpanAttributes.TOOL_CALLING_PRESENT: True,
+            SpanAttributes.TOOL_CALLING_TOOL_COUNT: len(request.tools or ()),
+            SpanAttributes.TOOL_CALLING_TOOL_CHOICE: choice_label,
+            SpanAttributes.TOOL_CALLING_API_SURFACE: api_surface,
+        }
+    )
+
+
 def render(request: Request) -> ServingRender | None:
     return getattr(request.app.state, "serving_render", None)
 
@@ -68,18 +99,24 @@ async def render_chat_completion(request: ChatCompletionRequest, raw_request: Re
 
     counter = _tool_render_counter(request)
     status = "error"
-    try:
-        async with request_span(raw_request, "render_chat_completion"):
-            result = await handler.render_chat_request(request, raw_request)
-        if not isinstance(result, ErrorResponse):
-            status = "rendered"
-    finally:
+    async with request_span(raw_request, "render_chat_completion") as span:
         if counter is not None:
-            counter.labels(
-                model_name=handler.model_config.model,
-                api_surface="chat_completions",
-                status=status,
-            ).inc()
+            _annotate_tool_render_span(request, span, "chat_completions")
+        try:
+            result = await handler.render_chat_request(request, raw_request)
+            if not isinstance(result, ErrorResponse):
+                status = "rendered"
+        finally:
+            if counter is not None:
+                counter.labels(
+                    model_name=handler.model_config.model,
+                    api_surface="chat_completions",
+                    status=status,
+                ).inc()
+                if span is not None and span.is_recording():
+                    span.set_attribute(
+                        SpanAttributes.TOOL_CALLING_RENDER_STATUS, status
+                    )
 
     if isinstance(result, ErrorResponse):
         return JSONResponse(content=result.model_dump(), status_code=result.error.code)
@@ -105,17 +142,24 @@ async def render_messages(request: AnthropicMessagesRequest, raw_request: Reques
 
     counter = _tool_render_counter(request)
     status = "error"
-    try:
-        result = await handler.render_messages_request(request, raw_request)
-        if not isinstance(result, ErrorResponse):
-            status = "rendered"
-    finally:
+    async with request_span(raw_request, "render_messages") as span:
         if counter is not None:
-            counter.labels(
-                model_name=handler.model_config.model,
-                api_surface="messages",
-                status=status,
-            ).inc()
+            _annotate_tool_render_span(request, span, "messages")
+        try:
+            result = await handler.render_messages_request(request, raw_request)
+            if not isinstance(result, ErrorResponse):
+                status = "rendered"
+        finally:
+            if counter is not None:
+                counter.labels(
+                    model_name=handler.model_config.model,
+                    api_surface="messages",
+                    status=status,
+                ).inc()
+                if span is not None and span.is_recording():
+                    span.set_attribute(
+                        SpanAttributes.TOOL_CALLING_RENDER_STATUS, status
+                    )
 
     if isinstance(result, ErrorResponse):
         return JSONResponse(content=result.model_dump(), status_code=result.error.code)
