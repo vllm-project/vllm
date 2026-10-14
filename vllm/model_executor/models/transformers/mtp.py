@@ -93,11 +93,10 @@ class MTPMixin(CausalMixin):
 
         hidden_states = self.model.forward_layer(
             spec_step_idx % len(self.model.layers),
-            inputs_embeds,
             hidden_states,
             positions[None, ...],
-            attention_mask=None,
-            past_key_values=None,
+            mtp_cache=None,
+            inputs_embeds=inputs_embeds,
             **kwargs,
         )
 
