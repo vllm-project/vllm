@@ -13,6 +13,7 @@ from unittest.mock import patch
 import torch
 import torch.nn as nn
 from torch._dynamo.symbolic_convert import InliningInstructionTranslator
+from transformers import PreTrainedConfig
 
 import vllm.envs as envs
 from vllm.compilation.counter import compilation_counter
@@ -384,55 +385,37 @@ def _support_torch_compile(
         # we may not have vllm_config so we may need to patch it
         sig = inspect.signature(old_init)
         # Check that any positional arguments match the old_init method signature
-        # Skip 'self', handle *args, and stop before keyword-only parameters
-        params = list(sig.parameters.values())[1:]  # Skip 'self'
-        arg_idx = 0
-        for param in params:
-            if arg_idx >= len(args):
-                break
-            # Keyword-only params cannot receive positional arguments
-            if param.kind == inspect.Parameter.KEYWORD_ONLY:
-                break
-            annotation = param.annotation
-            if annotation is inspect._empty:
-                if param.kind == inspect.Parameter.VAR_POSITIONAL:
-                    break  # *args with no annotation consumes rest
-                arg_idx += 1
-                continue
+        annotations: list[Any] = []
+        for param in list(sig.parameters.values())[1:]:  # skip `self`
             if param.kind == inspect.Parameter.VAR_POSITIONAL:
-                # *args: check all remaining args against this annotation
-                for arg in args[arg_idx:]:
-                    try:
-                        is_match = isinstance(arg, annotation)
-                    except TypeError:
-                        continue
-                    if not is_match:
-                        init = f"'{type(self).__name__}.__init__'"
-                        arg_type = f"'{type(arg).__name__}'"
-                        raise TypeError(
-                            f"{init} received a positional argument of type "
-                            f"{arg_type}, but no parameter of that type was "
-                            f"found in the method signature. Please either "
-                            f"annotate {init} or pass it as a keyword argument."
-                        )
+                annotations += [param.annotation] * (len(args) - len(annotations))
                 break
-            # Regular positional parameter
-            arg = args[arg_idx]
+            if param.kind not in (
+                inspect.Parameter.POSITIONAL_ONLY,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            ):
+                break
+            annotations.append(param.annotation)
+        for arg, annotation in zip(args, annotations):
+            if annotation is inspect._empty:
+                continue
             try:
+                # vLLM may pass its own or a re-imported remote-code config class
+                # in place of the annotated one, so configs are not checked.
+                if issubclass(annotation, PreTrainedConfig):
+                    continue
                 is_match = isinstance(arg, annotation)
             except TypeError:
-                arg_idx += 1
+                # Only plain classes are checked, e.g. not `Callable[[T], U]`
                 continue
             if not is_match:
                 init = f"'{type(self).__name__}.__init__'"
                 arg_type = f"'{type(arg).__name__}'"
                 raise TypeError(
                     f"{init} received a positional argument of type {arg_type}, "
-                    "but no parameter of that type was found in the method "
-                    "signature. Please either annotate {init} or pass it as a "
-                    "keyword argument."
+                    "but no parameter of that type was found in the method signature. "
+                    f"Please either annotate {init} or pass it as a keyword argument."
                 )
-            arg_idx += 1
         if "vllm_config" in sig.parameters:
             kwargs["vllm_config"] = vllm_config
         if "prefix" in sig.parameters:
