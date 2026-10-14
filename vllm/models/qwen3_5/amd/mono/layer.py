@@ -35,10 +35,13 @@ in, but runs x and silu(g) u through MXFP4, 1 x 32 blocks, RCEIL scales). Their
 weights are ``AITER_MXFP4_MXFP4``'s shuffled ones (``layout``). Peer regions are
 double-buffered by the step epoch's parity.
 
-Two schedule choices follow the width: at one row the union U is the token's
-picks in top-k order (no union pass); with the fused shared expert and at
-least 4 rows, its gate | up tasks run before the route (they don't depend
-on it).
+Three schedule choices follow the width. At one row the union U is the
+token's picks in top-k order (no union pass). At 2 and 3 rows every pick
+gets its own slot (``up``), also with no union pass. An expert that two
+tokens pick then gets two slots, and each token's contributions are still
+summed in top-k order, so the outputs are those of the union in expert
+order. With the fused shared expert at 2 rows and at least 4 rows, its
+gate | up tasks run before the route (they don't depend on it).
 
 Two variants follow the stock flags:
 
@@ -144,9 +147,15 @@ class K2Build:
         return self.tokens == 1
 
     @property
+    def up(self) -> bool:
+        """2 or 3 rows: a union slot for each pick (no union pass)."""
+        return 2 <= self.tokens <= 3
+
+    @property
     def ps(self) -> bool:
-        """The fused shared expert's ug tasks run before the route."""
-        return self.fse and self.tokens >= PS_MIN
+        """The fused shared expert's ug tasks run before the route, at the
+        widths where the K2 stage benchmark found that faster."""
+        return self.fse and (self.tokens >= PS_MIN or self.tokens == 2)
 
 
 ABI = KernelAbi(
@@ -613,6 +622,7 @@ def build(key: K2Build):
             },
             "xbuf": scratch + fx.Int64(lay["xrow"][0]),
             "u1": key.u1,
+            "up": key.up,
             "og": key.og,
             "args": {
                 "core": core,
@@ -646,14 +656,19 @@ def build(key: K2Build):
         is_r = (bid >= r0) & (bid < r0 + r_tasks)
         is_g = (bid >= G0) & (bid < G0 + G_TASKS)
         nj = OTASKS // BLOCKS
-        # ---- o_proj (both tasks' weights in flight first; a router CTA's
-        # router weights behind them, they land before x does), then the
+        # ---- o_proj (both tasks' weights in flight first), then the
         # post-attention add + norm, router, shared gate | up
         if is_r:
             oops = [moe.o_loads(c, bid + BLOCKS * j, OK) for j in range(nj)]
             ri = bid - r0
-            rops = router_loads(c, ri // R_PARTS, ri % R_PARTS)
             moe.run_oproj(c, oops, OK)
+            # A router CTA loads its router weights only now. run_oproj loads
+            # the core rows, and a wave's wait for a load also waits for every
+            # load that it issued before, so router weights issued before
+            # run_oproj would delay this CTA's o_proj, and every norm task
+            # waits for the o_proj of every CTA. The weights still land
+            # before x does.
+            rops = router_loads(c, ri // R_PARTS, ri % R_PARTS)
             stage_router(c, ri // R_PARTS, ri % R_PARTS, rops)
         if ~is_r:
             moe.run_oproj(
@@ -674,8 +689,17 @@ def build(key: K2Build):
         if const_expr(not key.fse):
             load_h(c)
         moe.load_inter(c)
-        dops2 = moe.stage_down(c, bid, nu, dops, bid + BLOCKS)
-        moe.stage_down(c, bid + BLOCKS, nu, dops2)
+        # Up to 3 rows one batch of a wave covers the union in each row
+        # group. Then the down rounds run without a prefetch, and the second
+        # row group's tiles go out here, behind the INTER polls, so the polls
+        # do not wait for them.
+        one_batch = s * TOPK + int(key.fse) <= WAVES * moe.DB
+        if const_expr(one_batch):
+            dops2 = moe.down_loads(c, bid + BLOCKS, nu, fx.min(c["wave"], nu - 1))
+            moe.stage_down(c, bid, nu, dops, prefetch=False, drain=True)
+        else:
+            dops2 = moe.stage_down(c, bid, nu, dops, bid + BLOCKS)
+        moe.stage_down(c, bid + BLOCKS, nu, dops2, prefetch=not one_batch)
         if bid < NRED:
             stage_final(c, bid)
 
