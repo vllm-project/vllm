@@ -1,14 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Prometheus metrics for the parsers."""
+"""Tool-calling metrics and bounded request summaries."""
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from enum import Enum
 from itertools import product
 from typing import Literal, cast
 
 from prometheus_client import REGISTRY, Counter
+
+from vllm.tracing.utils import SpanAttributes, extract_trace_headers
 
 _model_name: str | None = None
 
@@ -126,6 +129,22 @@ def _request_api_surface(request: object) -> Literal["chat_completions", "messag
         if getattr(request, "_api_surface", None) == "messages"
         else "chat_completions"
     )
+
+
+def tool_calling_trace_headers(
+    request: object, headers: Mapping[str, str] | None
+) -> dict[str, str]:
+    """Add a sanitized request summary to the engine's internal trace carrier."""
+    return {
+        **extract_trace_headers(headers or {}),
+        SpanAttributes.TOOL_CALLING_TOOL_COUNT: str(
+            len(getattr(request, "tools", None) or ())
+        ),
+        SpanAttributes.TOOL_CALLING_TOOL_CHOICE: _tool_choice_label(
+            getattr(request, "tool_choice", None)
+        ),
+        SpanAttributes.TOOL_CALLING_API_SURFACE: _request_api_surface(request),
+    }
 
 
 def record_tool_call_response(
