@@ -200,7 +200,10 @@ async def run_vllm_snapshot_child(control: ControlArgs, args: Any) -> None:
         build_and_serve,
         build_async_engine_client,
     )
-    from vllm.entrypoints.launchers.launcher import setup_server
+    from vllm.entrypoints.launchers.launcher import (
+        remove_unix_socket_file,
+        setup_server,
+    )
 
     args.enable_sleep_mode = True
 
@@ -238,6 +241,8 @@ async def run_vllm_snapshot_child(control: ControlArgs, args: Any) -> None:
             await shutdown_task
         finally:
             sock.close()
+            if args.uds:
+                remove_unix_socket_file(args.uds)
 
 
 def main(argv: list[str] | None = None) -> None:
