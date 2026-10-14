@@ -96,6 +96,7 @@ PTASKS = NPROJ // ROWS  # 290
 QKVZ_TASKS = L.QKVZ // ROWS  # 288
 COLS = 128  # columns a front task
 NRED = HIDDEN // COLS  # 64
+Z0 = L.CONV  # PROJ entry of z
 B0 = L.QKVZ  # PROJ entry of b
 A0 = L.QKVZ + NV  # PROJ entry of a
 VCH = 16  # state rows a GDN task
@@ -114,6 +115,11 @@ LN2 = math.log(2.0)
 assert BLOCKS < PTASKS <= 2 * BLOCKS and NRED <= 2 * BLOCKS - PTASKS
 assert BLOCKS % (HPK * NVCH) == 0, "a key head's GDN tasks must share a round"
 assert BA_TASKS <= 2 * BLOCKS - QKVZ_TASKS
+# The MXFP6 in_proj (q6) puts the q, k and v tasks, those before z, on the
+# CTAs between the front ones and the ones with two tasks.
+assert Z0 % ROWS == 0 and Z0 // ROWS == 2 * BLOCKS - QKVZ_TASKS - NRED
+# It also moves the GDN tasks of the owner heads 0 and 8 to CTAs 64 .. 95.
+assert NV == 16 and HPK == 8 and NVCH == 8 and NRED == 64
 
 REGIONS = ("msq", "proj", "qk", "onrm", "bapart")
 
@@ -128,8 +134,19 @@ class K1Build:
     norm_eps: float = 1e-6  # the gated norm
     qq: bool = False  # in_proj_qkvz MXFP4 (ASM FP4 GEMM layout)
     # (``qq``) in_proj_qkvz in MXFP6 E2M3, in the layout of moe.fp6_pack,
-    # multiplied with the bf16 x rows (W6A16). quant_x does not run.
+    # multiplied with the bf16 x rows (W6A16). quant_x does not run. The
+    # in_proj tasks are placed by what waits for them (``qp``).
     q6: bool = False
+
+    @property
+    def qp(self) -> bool:
+        """The q, k and v tasks run on CTAs with one in_proj task and no
+        front. The CTAs with two in_proj tasks run z tasks and issue their
+        second task's weights after the x polls. When the GDN tasks fill
+        one round of BLOCKS, the owner tasks of the key heads run on CTAs
+        64 .. 95. The outputs are those of the build without it, bit for
+        bit."""
+        return self.q6
 
 
 ABI = KernelAbi(
@@ -579,6 +596,17 @@ def gdn_round(c, r):
     nv = c["gdn"].nv
     n = c["S"] * nv * NVCH
     task = (c["bid"] + (BLOCKS - c["goff"])) % BLOCKS + BLOCKS * r
+    if c.get("qp", False) and n == BLOCKS and c["goff"] == 0:
+        # ``qp``: a block of NVCH consecutive tasks is one head's chunks, so
+        # block t NV + h is token t's head h. The owner heads 0 and 8 of
+        # tokens 0 and 1 are blocks 0, 8, 16 and 24. Blocks 0, 16 and 24
+        # swap places with blocks 9, 10 and 11, so that all owner tasks
+        # run on CTAs 64 .. 95, whose in_proj tasks are v rows. The front
+        # CTAs and the CTAs with two in_proj tasks then run no owner task.
+        q = task // NVCH
+        for qa, qb in ((0, 9), (16, 10), (24, 11)):
+            q = (q == qa).select(fx.Int32(qb), (q == qb).select(fx.Int32(qa), q))
+        task = q * NVCH + task % NVCH
     tc = fx.min(task, n - 1)
     cr = dict(c)
     for name, m in (("qkl", 2 * HD), ("vloc", VCH), ("ol", VCH), ("scal", 4)):
@@ -639,7 +667,10 @@ def build(key: K1Build):
         rs: fx.Array[fx.Float32, 16, 16]
 
     keyed = key_tuple(key, digest())
-    name = f"qwen38_mono_k1_s{s}_f{int(key.first)}_q{int(key.qq)}{int(key.q6)}"
+    name = (
+        f"qwen38_mono_k1_s{s}_f{int(key.first)}_q{int(key.qq)}{int(key.q6)}"
+        f"_p{int(key.qp)}"
+    )
 
     @flyc.kernel(name=name, known_block_size=[THREADS, 1, 1])
     def k1(
@@ -677,6 +708,7 @@ def build(key: K1Build):
         c = {
             "qq": key.qq,
             "q6": key.q6,
+            "qp": key.qp,
             "gdn": L.GDN,
             "ba_of": _ba_of,
             "z_gate": silu,
@@ -734,6 +766,45 @@ def build(key: K1Build):
             if bid >= 2 * BLOCKS - PTASKS:
                 rg2 = 2 * BLOCKS - 1 - bid
                 stage_proj(c, rg2, proj_loads(c, rg2))
+        elif const_expr(key.qp):
+            # ``qp``: the front CTAs 0 .. 63 keep z tasks 255 .. 192 and load
+            # their weights after the front, as without qp. CTAs 64 .. 223
+            # run tasks 159 .. 0, so the q, k and v rows, which the conv of
+            # every GDN task polls, come from CTAs with one in_proj task.
+            # CTAs 224 .. 255 run z tasks 191 .. 160 and then 287 .. 256.
+            # Only the gated norm at the end reads z. Each group of CTAs
+            # issues all its loads in its own branch, in this order. A load
+            # issued before the branch whose value only the branch uses is
+            # moved into the branch by the compiler, behind the loads that
+            # are already there. x is not quantized (q6).
+            nb = 2 * BLOCKS - QKVZ_TASKS
+            if bid < NRED:
+                rga = BLOCKS - 1 - bid
+                opsa = qkvz_fp4_loads(c, rga)
+                if bid < BA_TASKS:
+                    bops = ba_loads(c, bid, BA_PARTS, BA_K)
+                    local_x(c)
+                    stage_ba(c, bid, bops, BA_PARTS, BA_K)
+                    stage_proj(c, rga, opsa, fp4=True)
+                if bid >= BA_TASKS:
+                    local_x(c)
+                    stage_proj(c, rga, opsa, fp4=True)
+            if (bid >= NRED) & (bid < nb):
+                rgb = nb - 1 - bid
+                opsb = qkvz_fp4_loads(c, rgb)
+                local_x(c)
+                stage_proj(c, rgb, opsb, fp4=True)
+            if bid >= nb:
+                # The x polls go out behind the first task's weights only.
+                # The second task's weights go out after them, and the first
+                # task's MFMAs run while they are on their way.
+                rgc = Z0 // ROWS + BLOCKS - 1 - bid
+                rgc2 = 2 * BLOCKS - 1 - bid
+                opsc = qkvz_fp4_loads(c, rgc)
+                local_x(c)
+                opsc2 = qkvz_fp4_loads(c, rgc2)
+                stage_proj(c, rgc, opsc, fp4=True)
+                stage_proj(c, rgc2, opsc2, fp4=True)
         else:
 
             def quant():
