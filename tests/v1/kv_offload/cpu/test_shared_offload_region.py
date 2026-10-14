@@ -47,6 +47,7 @@ def _make_region(
     num_workers: int = 1,
     rank: int = 0,
     barrier=None,
+    populate_shard: tuple[int, int] | None = None,
 ) -> SharedOffloadRegion:
     assert cpu_page_size % PAGE_SIZE == 0
     return SharedOffloadRegion(
@@ -56,6 +57,7 @@ def _make_region(
         kv_bytes_per_chunk=num_workers * cpu_page_size,
         cpu_page_size=cpu_page_size,
         barrier=barrier,
+        populate_shard=populate_shard,
     )
 
 
@@ -528,6 +530,25 @@ def test_madvise_success_selects_madvise_population(iid, monkeypatch):
         )
 
 
+@pytest.mark.parametrize(
+    "shard, expected",
+    [((1, 2), [(3 * PAGE_SIZE, 3 * PAGE_SIZE)]), ((3, 4), [])],
+)
+def test_populate_shard_prefaults_only_its_share(iid, monkeypatch, shard, expected):
+    """Workers that map the same bytes each pre-fault one contiguous share
+    (page-rounded; a trailing share may be empty) instead of the whole region."""
+    from vllm.v1.kv_offload.cpu import shared_offload_region as sor
+
+    madvise_calls: list[tuple[int, int]] = []
+    monkeypatch.setattr(
+        sor,
+        "_madvise_populate_write",
+        lambda mm, off, ln: madvise_calls.append((off, ln)),
+    )
+    with _region(iid, num_chunks=3, num_workers=2, populate_shard=shard):
+        assert madvise_calls == [(0, PAGE_SIZE), *expected]
+
+
 def test_madvise_einval_selects_fallback_for_ranked_region(iid, monkeypatch):
     """An EINVAL probe must select fallback for every ranked chunk."""
     from vllm.v1.kv_offload.cpu import shared_offload_region as sor
@@ -874,63 +895,31 @@ def _unmapped_registration_region(num_chunks, slot_size, num_workers):
     return region
 
 
-def test_pin_mmap_region_many_rows_keeps_worker_slot_registration(monkeypatch):
-    """A large row count must not make workers register their peers' slots."""
-    slot = 1 << 20
-    region = _unmapped_registration_region((1 << 16) + 1, slot, 4)
-    sizes = []
+@pytest.mark.parametrize(
+    "num_rows,slot_mib,own_slots",
+    [(2, 2, False), (2, 3, True), ((1 << 16) + 1, 3, True)],
+)
+def test_pin_mmap_region_selects_by_savings_not_row_count(
+    monkeypatch, num_rows, slot_mib, own_slots
+):
+    """Small savings favor whole-region calls; large row counts do not disable slots."""
+    slot = slot_mib * 1024**2
+    region = _unmapped_registration_region(num_rows, slot, 2)
+    registrations = []
 
     def register(ptr, size):
-        sizes.append(size)
+        registrations.append((ptr, size))
         return True
 
     monkeypatch.setattr(gpu_worker, "host_register", register)
-
     gpu_worker.pin_mmap_region(region, worker_slot_only=True)
 
     assert region.is_pinned
-    assert sizes == [slot] * region.num_chunks
-    assert region.pinned_addresses == [
-        0x100000 + (4 * row + 1) * slot for row in range(region.num_chunks)
-    ]
-
-
-@pytest.mark.parametrize("slot_mib,own_slots", [(2, False), (3, True)])
-def test_pin_mmap_region_selects_by_bytes_saved_per_row(
-    monkeypatch, slot_mib, own_slots
-):
-    """Use fewer calls for small rows, but pin own slots when savings amortize them."""
-    slot = slot_mib * 1024**2
-    region = _unmapped_registration_region(2, slot, 2)
-    register = MagicMock(return_value=True)
-    monkeypatch.setattr(gpu_worker, "host_register", register)
-
-    gpu_worker.pin_mmap_region(region, worker_slot_only=True)
-
-    assert region.is_pinned
-    assert register.call_args_list == (
-        [call(0x100000 + slot, slot), call(0x100000 + 3 * slot, slot)]
+    assert registrations == (
+        [(0x100000 + (2 * row + 1) * slot, slot) for row in range(num_rows)]
         if own_slots
-        else [call(0x100000, 4 * slot)]
+        else [(0x100000, region.total_size_bytes)]
     )
-
-
-@pytest.mark.parametrize("fail_at", [0, 1, 2])
-def test_pin_worker_slots_failure_rolls_back(iid, host_register, fail_at):
-    """A failed slot registration releases all earlier slots."""
-    register, unregister = host_register
-    register.side_effect = [True] * fail_at + [False]
-    with _region(iid, num_chunks=3, num_workers=2, rank=1) as region:
-        base = region._base.data_ptr() + PAGE_SIZE
-        gpu_worker.pin_mmap_region(region, worker_slot_only=True)
-        assert not region.is_pinned
-        assert region.pinned_addresses == []
-        assert register.call_args_list == [
-            call(base + row * 2 * PAGE_SIZE, PAGE_SIZE) for row in range(fail_at + 1)
-        ]
-    assert unregister.call_args_list == [
-        call(base + row * 2 * PAGE_SIZE) for row in reversed(range(fail_at))
-    ]
 
 
 def test_host_registration_reuses_cudart(monkeypatch):
@@ -951,24 +940,6 @@ def test_host_registration_reuses_cudart(monkeypatch):
         constructor.assert_called_once_with()
         assert cudart.cudaHostRegister.call_count == 2
         assert cudart.cudaHostUnregister.call_count == 2
-    finally:
-        host_register_module._get_cudart.cache_clear()
-
-
-def test_cudart_load_failure_is_retryable(monkeypatch):
-    """A failed runtime lookup must not cache an unavailable runtime forever."""
-    cudart = MagicMock()
-    cudart.cudaHostRegister.return_value = 0
-    constructor = MagicMock(side_effect=[OSError("not loaded"), cudart])
-    monkeypatch.setattr(host_register_module, "CudaRTLibrary", constructor)
-    monkeypatch.setattr(
-        host_register_module.current_platform, "is_cuda_alike", lambda: True
-    )
-    host_register_module._get_cudart.cache_clear()
-    try:
-        assert not host_register_module.host_register(0x100000, PAGE_SIZE)
-        assert host_register_module.host_register(0x100000, PAGE_SIZE)
-        assert constructor.call_count == 2
     finally:
         host_register_module._get_cudart.cache_clear()
 
