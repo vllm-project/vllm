@@ -410,6 +410,15 @@ torch::Tensor gumbel_sample_cpu(const torch::Tensor& logits,
                                 bool apply_temperature, bool is_drafting,
                                 bool use_fp64);
 
+void apply_logit_bias_cpu(
+    torch::Tensor& logits, const torch::Tensor& expanded_idx_mapping,
+    const torch::Tensor& positions, const torch::Tensor& num_allowed_token_ids,
+    const torch::Tensor& allowed_token_ids, const torch::Tensor& num_logit_bias,
+    const torch::Tensor& logit_bias_token_ids, const torch::Tensor& logit_bias,
+    const torch::Tensor& min_lens, const torch::Tensor& num_stop_token_ids,
+    const torch::Tensor& restore_when_all_masked,
+    const torch::Tensor& stop_token_ids, bool check_all_masked_rows);
+
 void init_cpu_memory_env(std::vector<int64_t> node_ids);
 
 namespace cpu_utils {
@@ -1120,6 +1129,16 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor temperature, Tensor seeds, Tensor positions, "
       "bool apply_temperature, bool is_drafting, bool use_fp64) -> Tensor");
   ops.impl("gumbel_sample_cpu", torch::kCPU, &gumbel_sample_cpu);
+
+  ops.def(
+      "apply_logit_bias_cpu(Tensor(a0!) logits, "
+      "Tensor expanded_idx_mapping, Tensor positions, "
+      "Tensor num_allowed_token_ids, Tensor allowed_token_ids, "
+      "Tensor num_logit_bias, Tensor logit_bias_token_ids, "
+      "Tensor logit_bias, Tensor min_lens, Tensor num_stop_token_ids, "
+      "Tensor restore_when_all_masked, Tensor stop_token_ids, "
+      "bool check_all_masked_rows) -> ()",
+      &apply_logit_bias_cpu);
 
   // Speculative decoding kernels
   ops.def(

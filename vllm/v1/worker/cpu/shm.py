@@ -96,6 +96,7 @@ import vllm.v1.worker.gpu.buffer_utils as gpu_buffer_utils
 import vllm.v1.worker.gpu.block_table as gpu_block_table
 import vllm.v1.worker.gpu.input_batch as gpu_input_batch
 import vllm.v1.worker.gpu.sample.gumbel as gpu_gumbel
+import vllm.v1.worker.gpu.sample.logit_bias as gpu_logit_bias
 import vllm.v1.worker.gpu.sample.logprob as gpu_logprob
 import vllm.v1.worker.gpu.sample.prompt_logprob as gpu_prompt_logprob
 import vllm.v1.worker.gpu.sample.sampler as gpu_sampler
@@ -103,6 +104,7 @@ import vllm.v1.worker.cpu.block_table as cpu_block_table
 import vllm.v1.worker.cpu.buffer_utils as cpu_buffer_utils
 import vllm.v1.worker.cpu.gumbel as cpu_gumbel
 import vllm.v1.worker.cpu.input_batch as cpu_input_batch
+import vllm.v1.worker.cpu.logit_bias as cpu_logit_bias
 import vllm.v1.worker.cpu.logprob as cpu_logprob
 
 gpu_buffer_utils.UvaBuffer = cpu_buffer_utils.UvaBuffer
@@ -118,6 +120,7 @@ if not HAS_TRITON:
         cpu_block_table.compute_slot_mappings
     )
     gpu_gumbel.gumbel_sample = cpu_gumbel.gumbel_sample
+    gpu_logit_bias.apply_logit_bias = cpu_logit_bias.apply_logit_bias
     gpu_sampler.gumbel_sample = cpu_gumbel.gumbel_sample
     gpu_logprob.compute_token_logprobs = cpu_logprob.compute_token_logprobs
     gpu_logprob.compute_topk_scores = cpu_logprob.compute_topk_scores
