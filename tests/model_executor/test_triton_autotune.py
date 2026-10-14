@@ -100,8 +100,10 @@ def test_two_ranks_split_the_work_and_share_results(tmp_path, monkeypatch):
         nprocs=2,
         join=True,
     )
-    by_rank = {rank: (tuned, committed) for rank, tuned, committed in
-               (queue.get() for _ in range(2))}
+    by_rank = {
+        rank: (tuned, committed)
+        for rank, tuned, committed in (queue.get() for _ in range(2))
+    }
     assert sorted(by_rank[0][0] + by_rank[1][0]) == [1, 8, 16, 32]
     expected = {b: {"BLOCK_SIZE_M": b} for b in (1, 8, 16, 32)}
     assert by_rank[0][1] == by_rank[1][1] == expected

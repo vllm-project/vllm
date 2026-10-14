@@ -99,6 +99,7 @@ class MambaSSUConfigTable(TunableConfigTable):
 
     def tune(self, item: TuningItem) -> Config | None:
         shape = item.shape
+        assert isinstance(shape, SSUShape)
         case = SSUTuningCase(
             batch=item.bucket,
             nheads=shape.nheads,
@@ -120,9 +121,13 @@ class MambaSSUConfigTable(TunableConfigTable):
         by_file: dict[tuple[int, int, str], dict[int, Config]] = defaultdict(dict)
         for item, config in results.items():
             shape = item.shape
+            assert isinstance(shape, SSUShape)
             key = (shape.headdim, shape.dstate, shape.cache_dtype)
             by_file[key][item.bucket * shape.nheads] = config
         for (headdim, dstate, cache_dtype), configs in by_file.items():
-            merged = {**load_ssm_autotune_configs(headdim, dstate, cache_dtype), **configs}
+            merged = {
+                **load_ssm_autotune_configs(headdim, dstate, cache_dtype),
+                **configs,
+            }
             path = save_ssm_configs(headdim, dstate, cache_dtype, merged)
             logger.info("Saved %d Mamba SSU configs to %s.", len(configs), path)

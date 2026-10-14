@@ -17,14 +17,14 @@ import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.mamba.ops.triton_helpers import fast_exp
-from vllm.platforms import current_platform
-from vllm.triton_utils import HAS_TRITON, tl, triton
-from vllm.utils.platform_utils import get_device_name_as_file_name
-from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.model_executor.warmup.triton_autotune import (
     atomic_write_json,
     get_autotune_cache_dir,
 )
+from vllm.platforms import current_platform
+from vllm.triton_utils import HAS_TRITON, tl, triton
+from vllm.utils.platform_utils import get_device_name_as_file_name
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
 if current_platform.is_xpu():
     from vllm._xpu_ops import xpu_ops
@@ -198,6 +198,7 @@ def try_get_optimal_ssm_config(
         headdim, dstate, batch, nheads, cache_dtype, is_blackwell
     )
 
+
 def get_ssm_autotune_config_file_path(
     headdim: int, dstate: int, cache_dtype: str
 ) -> str:
@@ -206,6 +207,7 @@ def get_ssm_autotune_config_file_path(
         get_autotune_cache_dir("mamba_ssu"),
         get_ssm_config_file_name(headdim, dstate, cache_dtype, get_ssm_device_name()),
     )
+
 
 def load_ssm_autotune_configs(
     headdim: int, dstate: int, cache_dtype: str
@@ -216,6 +218,7 @@ def load_ssm_autotune_configs(
     with open(path) as f:
         raw = json.load(f)
     return {int(k): v for k, v in raw.items() if k.isdigit()}
+
 
 def save_ssm_configs(
     headdim: int, dstate: int, cache_dtype: str, configs: dict[int, dict[str, int]]

@@ -479,6 +479,7 @@ def test_compilation_config():
         and args.compilation_config.backend == "inductor"
     )
 
+
 def test_enable_triton_autotune():
     from vllm.config.kernel import KernelConfig
 
@@ -502,6 +503,7 @@ def test_enable_triton_autotune():
             enable_triton_autotune=True,
             kernel_config=KernelConfig(enable_triton_autotune=True),
         ).create_engine_config()
+
 
 def test_trust_request_mm_kwargs_cli():
     from vllm.entrypoints.launchers.cli_args import FrontendArgs

@@ -66,10 +66,12 @@ def valid_request_batches(max_num_reqs: int) -> list[int]:
     buckets.append(max_num_reqs)
     return sorted(set(buckets))
 
+
 def ssu_scratch_bytes(case: SSUTuningCase) -> int:
     """Peak scratch memory for one case: validation holds two state copies."""
     state_numel = case.batch * case.nheads * case.headdim * case.dstate
     return 2 * state_numel * case.state_dtype.itemsize
+
 
 def validate_ssu_config(
     case: SSUTuningCase,
@@ -82,7 +84,12 @@ def validate_ssu_config(
     """Check a candidate against the default launch config on identical inputs."""
     state, x, dt, A, B, C, D, dt_bias, out = make_ssu_inputs(case)
     ref_state, ref_out = state.clone(), torch.empty_like(out)
-    kwargs = dict(D=D, dt_bias=dt_bias, dt_softplus=True, is_blackwell=case.is_blackwell)
+    kwargs = dict(
+        D=D,
+        dt_bias=dt_bias,
+        dt_softplus=True,
+        is_blackwell=case.is_blackwell,
+    )
     default = _get_default_ssm_launch_config(case.dstate, case.is_blackwell)
     with override_ssm_config(default):
         triton_selective_state_update(ref_state, x, dt, A, B, C, out=ref_out, **kwargs)
@@ -91,6 +98,7 @@ def validate_ssu_config(
     return torch.allclose(out, ref_out, atol=atol, rtol=rtol) and torch.allclose(
         state, ref_state, atol=atol, rtol=rtol
     )
+
 
 def make_active_cases(
     batch_sizes: list[int],
@@ -244,7 +252,10 @@ def tune_ssu_case(
             logger.info(
                 "Mamba SSU tuned effective_batch=%d to BLOCK_SIZE_M=%d "
                 "num_warps=%d (%.2f us).",
-                case.effective_batch, block_size_m, num_warps, elapsed_us,
+                case.effective_batch,
+                block_size_m,
+                num_warps,
+                elapsed_us,
             )
             return {"BLOCK_SIZE_M": block_size_m, "num_warps": num_warps}
     return None
