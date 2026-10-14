@@ -407,7 +407,6 @@ def _get_priority_backends_for_gpt_oss() -> list[Mxfp4MoeBackend]:
         Mxfp4MoeBackend.AITER_TRITON_MXFP4_BF16,
         Mxfp4MoeBackend.AITER_MXFP4_FP8,
         Mxfp4MoeBackend.AITER_MXFP4_MXFP4,
-        Mxfp4MoeBackend.AITER_TRITON_MXFP4_MXFP4,
         Mxfp4MoeBackend.TRITON,
         Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16,
         Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_MXFP8,
@@ -440,10 +439,7 @@ def _get_priority_backends() -> list[Mxfp4MoeBackend]:
     backend-level ``is_supported_config`` check filters by device capability).
     """
     if current_platform.is_rocm():
-        # AITER_TRITON_MXFP4_MXFP4 only supports gfx1250, so other ROCm archs
-        # fall through to AITER_MXFP4_BF16.
         return [
-            Mxfp4MoeBackend.AITER_TRITON_MXFP4_MXFP4,
             Mxfp4MoeBackend.AITER_MXFP4_BF16,
             Mxfp4MoeBackend.EMULATION,
         ]
@@ -804,10 +800,7 @@ def select_deepseek_v4_mxfp4_moe_backend(
         current_platform.is_rocm()
         and config.routing_method == RoutingMethodType.DeepseekV4
     ):
-        # AITER_TRITON_MXFP4_MXFP4 only supports gfx1250, so other ROCm archs
-        # fall through to AITER_MXFP4_BF16.
         priority_backends = [
-            Mxfp4MoeBackend.AITER_TRITON_MXFP4_MXFP4,
             Mxfp4MoeBackend.AITER_MXFP4_BF16,
             Mxfp4MoeBackend.TRITON_UNFUSED,
         ]
