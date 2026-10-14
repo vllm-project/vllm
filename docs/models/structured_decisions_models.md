@@ -1,4 +1,34 @@
-# Structured Decisions
+# Structured Decisions Models
+
+Structured Decisions Models (aka JEV Models) map inputs directly to predefined
+options or categories and return probabilities and confidence scores, commonly
+used for classification and routing.
+
+## Supported Models
+
+### Text-only Models
+
+| Architecture              | ReadStrategy        | Task             | Head              | Example HF Models       |
+|---------------------------|---------------------|------------------|-------------------|-------------------------|
+| `ClefFlashForJointSchema` | `ClefFlashStrategy` | `token_classify` | `JointSchemaHead` | `Cloudflare/clef-flash` |
+| `Qwen3ForCausalLM`        | `NextTokenStrategy` | `generate`       | N/A               | `Qwen/Qwen3-0.6B`, etc. |
+
+### Multimodal Models
+
+!!! note
+    For more information about multimodal models inputs, see [this page](./supported_models.md#list-of-multimodal-language-models).
+
+| Architecture                         | Inputs                              | ReadStrategy                   | Task             | Head              | Example HF Models                        |
+|--------------------------------------|-------------------------------------|--------------------------------|------------------|-------------------|------------------------------------------|
+| `ClefOmniForJointSchema`             | T + I + V                           | `JointSchemaStrategy`          | `token_classify` | `JointSchemaHead` | `Cloudflare/clef-omni`                   |
+| `Lfm2VlForConditionalGeneration`     | T + I<sup>+</sup>                   | `LiquidStrategy`               | `generate`       | N/A               | `LiquidAI/d1-3B`                         |
+| `Qwen3_5ForConditionalGeneration`    | T + I<sup>E+</sup> + V<sup>E+</sup> | `NextTokenStrategy`            | `generate`       | N/A               | `Qwen/Qwen3.5-0.8B`, etc.                |
+| `Qwen3_5MoeForConditionalGeneration` | T + I<sup>E+</sup> + V<sup>E+</sup> | `NextTokenStrategy`            | `generate`       | N/A               | `Qwen/Qwen3.5-35B-A3B`, etc.             |
+| `DiffusionGemmaForBlockDiffusion`    | T + I<sup>+</sup> + V<sup>+</sup>   | `DiffusionGemmaCanvasStrategy` | `generate`       | N/A               | `google/diffusiongemma-26B-A4B-it`, etc. |
+
+## Online Serving
+
+### TypeSafe System One Endpoint
 
 The `/v1/systemone` endpoint answers a set of typed questions about a state and
 returns a probability for every allowed answer.
@@ -8,7 +38,7 @@ supported read strategy return 501. Supported architectures require
 `--logprobs-mode raw_logprobs` or `processed_logprobs`, since `label_mass` needs
 log probabilities.
 
-## How it works
+#### How it works
 
 1. Each question is one read. The user message is the state, followed by the
    question and its options with the type's labels, and an instruction to
@@ -29,7 +59,7 @@ Every read of a request starts with the state, so with
 `--enable-prefix-caching` the state is prefilled once and each further
 question prefills only its own text, then reads one token.
 
-## Question types
+#### Question types
 
 | type | criteria | answer |
 | --- | --- | --- |
@@ -40,7 +70,7 @@ question prefills only its own text, then reads one token.
 A choice has at least one option, a score at least two levels. A question id
 is a non-empty string.
 
-## Example
+#### Example
 
 ```bash
 curl -s http://localhost:8000/v1/systemone \
@@ -116,13 +146,13 @@ its whole vocabulary. A low value means most of the probability went to tokens
 that are not labels. `confidence` is the chosen option's probability over the
 whole vocabulary: its share of the labels times `label_mass`.
 
-## Labels
+#### Labels
 
 Labels follow the type: a `choice` labels its options `A` to `Z` in the order
 the request lists them, a `noul` labels its options `yes` and `no`, and a
 `score` labels its levels `0` to `9`, so a level's label is its score.
 
-## Limits
+#### Limits
 
 | limit | value |
 | --- | --- |
@@ -130,7 +160,98 @@ the request lists them, a `noul` labels its options `yes` and `no`, and a
 | options per `choice` | 26 |
 | levels per `score` | 10 |
 
-## Clef-Flash
+#### Request fields
+
+| field | meaning |
+| --- | --- |
+| `state` | what the questions are about: a string, or JSON that is sent as its JSON text |
+| `questions` | question id to `{type, instructions, criteria}`, asked in this order |
+| `instructions` | optional context placed ahead of the questions |
+| `chat_template_kwargs` | passed to the chat template, for example `{"enable_thinking": false}` |
+| `cache_salt` | optional [prefix-cache salt](../usage/security.md#cache-salting) applied to every question |
+| `images`, `audio`, `videos` | optional media URLs or data URLs, for models that take them ([Clef-Flash](#clef-flash), images/video; [Clef-Omni](#clef-omni); [Liquid d1](#liquid-d1), images only) |
+
+A question with any field other than `type`, `instructions` and `criteria` is
+rejected with a 400.
+
+When [tracing](../../examples/observability/opentelemetry/README.md) is enabled
+with `--otlp-traces-endpoint`, the HTTP `traceparent` and `tracestate` headers are
+forwarded to every question's generation request.
+
+### OpenAI Decisions API
+
+vLLM provides a text-only implementation of OpenAI's
+[`POST /v1/decisions`](https://developers.openai.com/api/docs/guides/decisions)
+API. Start a supported model:
+
+```bash
+vllm serve Qwen/Qwen3-0.6B
+```
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://localhost:8000/v1", api_key="EMPTY")
+decision = client.decisions.create(
+    model="Qwen/Qwen3-0.6B",
+    input="The package arrived with a broken screen.",
+    questions=[
+        {
+            "type": "predicate",
+            "name": "damaged",
+            "instructions": "Does the customer report a damaged item?",
+        },
+        {
+            "type": "choice",
+            "name": "department",
+            "instructions": "Which department should handle this complaint?",
+            "choices": [{"value": "returns"}, {"value": "billing"}],
+        },
+        {
+            "type": "score",
+            "instructions": "How severe is the damage?",
+            "levels": [{"label": "cosmetic"}, {"label": "broken"}],
+        },
+    ],
+)
+print(decision.answers)
+```
+
+Use OpenAI Python SDK 3.26.0 or newer for `client.decisions.create`.
+`input` accepts a string or an array of user messages with string content or
+`input_text` parts. Answers retain question order and echo `name`, including
+`null` for unnamed questions. Choice values preserve strings and booleans.
+Scores are probability-weighted averages of zero-based level indices.
+
+The request contract follows the OpenAI OpenAPI schemas retrieved on
+October 7, 2026. This MVP supports 1–64 questions, 2–26 choices, and 2–10 score
+levels. Upstream permits 200 questions and 255 choices; this backend returns
+a 400 when either model limit is exceeded.
+The optional `safety_identifier` is caller metadata, available in request
+body logging with `--enable-log-requests` and DEBUG logging; it does not
+authenticate callers.
+
+#### Implementation and limits
+
+This MVP uses the same label-reading backend as
+[structured decisions](structured_decisions_models.md). It supports generation
+architectures with a registered read strategy, including Qwen, DiffusionGemma,
+and Liquid d1; unsupported models return 501. Each question reads a model's
+label tokens. Usage reports the actual prompt and output tokens across these
+reads, including prefix-cache counters.
+
+Probabilities are normalized over the supplied options. `confidence` is the
+winning label's probability over the full vocabulary; it is not calibrated
+to OpenAI's models. Thinking is disabled for these reads.
+
+Image inputs, other message roles, tools, streaming, and per-question refusal
+scoring are outside this MVP. Unsupported request fields and input types are
+rejected. The `/v1/systemone` endpoint retains its existing request format and
+is available by default.
+
+## Examples
+
+### Clef-Flash
 
 [Clef-Flash](https://huggingface.co/Cloudflare/clef-flash) uses a Qwen3.5-9B
 backbone and a joint schema head to score all questions in one forward pass.
@@ -154,7 +275,7 @@ examples above. `choice`, `noul` and `score` questions are supported.
 - Each request performs one pooling read. `usage.input_tokens` counts the
   prompt once, `output_tokens` is 0, and `label_mass` is 1.
 
-## Clef-Omni
+### Clef-Omni
 
 [Clef-Omni](https://huggingface.co/Cloudflare/clef-omni) is a decision model:
 a joint schema head on the Qwen3-Omni thinker scores every option of every
@@ -180,7 +301,7 @@ vllm serve Cloudflare/clef-omni
   with it when every video has one. Audio clips cannot be sent together with
   videos that have soundtracks.
 
-## Liquid d1
+### Liquid d1
 
 [`LiquidAI/d1-3B`](https://huggingface.co/LiquidAI/d1-3B) is LFM2.5-VL-3B
 post-trained to answer decisions as the first token of its reply. vLLM serves
@@ -202,21 +323,3 @@ vllm serve LiquidAI/d1-3B
   letters.
 - When each request carries one question over a state that changes from
   request to request, `--no-enable-prefix-caching` lowers latency.
-
-## Request fields
-
-| field | meaning |
-| --- | --- |
-| `state` | what the questions are about: a string, or JSON that is sent as its JSON text |
-| `questions` | question id to `{type, instructions, criteria}`, asked in this order |
-| `instructions` | optional context placed ahead of the questions |
-| `chat_template_kwargs` | passed to the chat template, for example `{"enable_thinking": false}` |
-| `cache_salt` | optional [prefix-cache salt](../../usage/security.md#cache-salting) applied to every question |
-| `images`, `audio`, `videos` | optional media URLs or data URLs, for models that take them ([Clef-Flash](#clef-flash), images/video; [Clef-Omni](#clef-omni); [Liquid d1](#liquid-d1), images only) |
-
-A question with any field other than `type`, `instructions` and `criteria` is
-rejected with a 400.
-
-When [tracing](../../../examples/observability/opentelemetry/README.md) is enabled
-with `--otlp-traces-endpoint`, the HTTP `traceparent` and `tracestate` headers are
-forwarded to every question's generation request.
