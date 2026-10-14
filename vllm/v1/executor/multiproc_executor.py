@@ -205,11 +205,7 @@ class MultiprocExecutor(Executor):
                     )
 
             if self._can_start_workers_concurrently(inherited_fds):
-                # With spawn, Process.start() blocks until the child has
-                # unpickled its arguments, which imports vLLM and torch and
-                # takes several seconds per worker. Start the workers from a
-                # thread pool so those imports overlap instead of running one
-                # after another.
+                # Start workers in parallel to overlap their slow spawn imports.
                 self._start_workers_concurrently(start_worker, unready_workers)
             else:
                 for local_rank in range(self.local_world_size):
