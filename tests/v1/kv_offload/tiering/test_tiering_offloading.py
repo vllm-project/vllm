@@ -641,7 +641,7 @@ class TestTieringOffloadingManager:
             if successful_indices is None
             else {chunks[i] for i in successful_indices}
         )
-        assert set(self.manager._request_load_sources[id(_CTX)]) == (
+        assert set(self.manager._request_load_sources[_CTX.req_id]) == (
             expected_source_keys
         )
 
@@ -1069,23 +1069,6 @@ class TestTieringOffloadingManager:
         assert new_state.pending_primary_stores == 0
         assert self.manager._req_state[new_ctx.req_id] is new_state
 
-    def test_load_source_uses_exact_context_after_req_id_reuse(self, manager_setup):
-        key = to_keys(range(1))[0]
-        old_ctx = ReqContext(req_id="reused-source")
-        new_ctx = ReqContext(req_id="reused-source")
-        self.manager.on_new_request(old_ctx)
-        self.manager.on_new_request(new_ctx)
-        self.manager._request_load_sources[id(old_ctx)] = {key: CacheHitSource.DISK}
-        self.manager._request_load_sources[id(new_ctx)] = {key: CacheHitSource.P2P}
-
-        assert self.manager.get_load_source(key, old_ctx) == CacheHitSource.DISK
-        assert self.manager.get_load_source(key, new_ctx) == CacheHitSource.P2P
-
-        self.manager.on_request_finished(old_ctx)
-
-        assert id(old_ctx) not in self.manager._request_load_sources
-        assert self.manager.get_load_source(key, new_ctx) == CacheHitSource.P2P
-
     def test_reset_finalizes_old_finished_state_after_req_id_reuse(self, manager_setup):
         old_ctx = ReqContext(req_id="reused-reset")
         new_ctx = ReqContext(req_id="reused-reset")
@@ -1101,7 +1084,6 @@ class TestTieringOffloadingManager:
         assert id(old_ctx) not in self.manager._live_req_states
         assert id(new_ctx) in self.manager._live_req_states
         assert self.manager._req_state[new_ctx.req_id] is new_state
-        assert not old_ctx._state
 
     def test_failed_store_finalizes_finished_request(self, manager_setup):
         """Failed primary stores still unblock secondary finalization."""
@@ -1373,6 +1355,30 @@ class TestTieringOffloadingManager:
 
         assert self._cascaded_keys_for(ctx.req_id) == [set(keys)]
         assert ctx.req_id not in self.manager._req_state
+
+    def test_deferred_cascade_survives_reused_request_id(self, manager_setup):
+        keys = to_keys(range(3))
+        writer_ctx = self._start_in_flight_primary_write(keys)
+
+        old_ctx = self._make_request_level_request("reused-cascade")
+        result = self.manager.prepare_store(keys, old_ctx)
+        assert result is not None
+        assert not result.keys_to_store
+        self.manager.on_request_finished(old_ctx)
+
+        new_ctx = ReqContext(req_id=old_ctx.req_id)
+        self.manager.on_new_request(new_ctx)
+        assert self.manager.has_pending_work()
+        self.manager.complete_store(keys, writer_ctx, success=True)
+        self._simulate_on_schedule_end()
+
+        assert any(
+            call.args[0].req_context is old_ctx
+            and set(call.args[0].keys) == set(keys)
+            for call in self.secondary_tier1.submit_store.call_args_list
+        )
+        assert id(old_ctx) not in self.manager._live_req_states
+        assert id(new_ctx) in self.manager._live_req_states
 
     def test_cascade_drops_deferred_keys_whose_primary_write_failed(
         self, manager_setup

@@ -77,11 +77,6 @@ class RequestState:
     pending_cascade_keys: list[OffloadKey] = field(default_factory=list)
 
 
-@dataclass(slots=True)
-class _RequestStateRef:
-    state: RequestState
-
-
 class JobMetadata(NamedTuple):
     transfer_job: TransferJob
     tier_idx: int
@@ -243,7 +238,7 @@ class TieringOffloadingManager(OffloadingManager):
         # Preserve the original tier for this request's cache-hit metrics,
         # even after its KV blocks are promoted into host memory
         # (otherwise a disk or P2P hit would be mislabeled as a host hit).
-        self._request_load_sources: dict[int, dict[OffloadKey, CacheHitSource]] = {}
+        self._request_load_sources: dict[str, dict[OffloadKey, CacheHitSource]] = {}
 
         # Cached ParentManager wrappers for each secondary tier.
         self._tier_parents: dict[SecondaryTierManager, _SecondaryTierFacingParent] = {
@@ -306,7 +301,9 @@ class TieringOffloadingManager(OffloadingManager):
             successful_keys = ()
             failed_keys = transfer_job.keys
 
-        load_sources = self._request_load_sources.get(id(transfer_job.req_context))
+        load_sources = self._request_load_sources.get(
+            transfer_job.req_context.req_id
+        )
         if load_sources is not None:
             source = self.secondary_tiers[job_metadata.tier_idx].cache_hit_source
             for key in failed_keys:
@@ -488,7 +485,7 @@ class TieringOffloadingManager(OffloadingManager):
     def get_load_source(
         self, key: OffloadKey, req_context: ReqContext
     ) -> CacheHitSource:
-        load_sources = self._request_load_sources.get(id(req_context))
+        load_sources = self._request_load_sources.get(req_context.req_id)
         if load_sources is not None and key in load_sources:
             return load_sources[key]
         return self.primary_tier.get_load_source(key, req_context)
@@ -530,7 +527,7 @@ class TieringOffloadingManager(OffloadingManager):
 
         store_spec = primary_write_result.store_spec
         assert isinstance(store_spec, CPULoadStoreSpec)
-        load_sources = self._request_load_sources.setdefault(id(req_context), {})
+        load_sources = self._request_load_sources.setdefault(req_context.req_id, {})
         source = self.secondary_tiers[tier_idx].cache_hit_source
         for promoted_key in primary_write_result.keys_to_store:
             load_sources[promoted_key] = source
@@ -729,7 +726,7 @@ class TieringOffloadingManager(OffloadingManager):
         A parked key always resolves, to HIT or to MISS, so the set drains and
         a request cannot be held from finalization forever.
         """
-        for req_id, state in list(self._req_state.items()):
+        for state in list(self._live_req_states.values()):
             if not state.pending_cascade_keys:
                 continue
             assert state.request_level_tiers
@@ -827,7 +824,6 @@ class TieringOffloadingManager(OffloadingManager):
         Only stores REQUEST_LEVEL tier decisions for use in prepare_store.
         """
         state = RequestState(req_context=req_context)
-        req_context.set_state(_RequestStateRef(state))
         self._live_req_states[id(req_context)] = state
         self._metrics.on_new_request(req_context)
         for tier_idx, tier in enumerate(self.secondary_tiers):
@@ -848,9 +844,7 @@ class TieringOffloadingManager(OffloadingManager):
         return RequestOffloadingContext(policy=policy)
 
     def _get_request_state(self, req_context: ReqContext) -> RequestState:
-        state_ref = req_context.get_state(_RequestStateRef)
-        assert state_ref is not None
-        return state_ref.state
+        return self._live_req_states[id(req_context)]
 
     @override
     def on_request_finished(
@@ -886,12 +880,11 @@ class TieringOffloadingManager(OffloadingManager):
                 continue
             tier.on_request_finished(state.req_context)
         self._metrics.on_request_finished(state.req_context)
-        self._request_load_sources.pop(id(state.req_context), None)
+        self._request_load_sources.pop(state.req_context.req_id, None)
         current_state = self._req_state.get(state.req_context.req_id)
         if current_state is state:
             del self._req_state[state.req_context.req_id]
         self._live_req_states.pop(id(state.req_context), None)
-        state.req_context.pop_state(_RequestStateRef)
 
     @override
     def on_schedule_end(self, context: ScheduleEndContext) -> None:
@@ -931,7 +924,7 @@ class TieringOffloadingManager(OffloadingManager):
         # secondary tiers themselves still have outstanding.
         return (
             bool(self._jobs)
-            or any(state.pending_cascade_keys for state in self._req_state.values())
+            or any(state.pending_cascade_keys for state in self._live_req_states.values())
             or any(tier.has_pending_work() for tier in self.secondary_tiers)
         )
 
@@ -994,7 +987,6 @@ class TieringOffloadingManager(OffloadingManager):
             if current_state is state:
                 del self._req_state[state.req_context.req_id]
             self._live_req_states.pop(id(state.req_context), None)
-            state.req_context.pop_state(_RequestStateRef)
         self._processed_jobs_this_step = False
 
         for tier in self.secondary_tiers:

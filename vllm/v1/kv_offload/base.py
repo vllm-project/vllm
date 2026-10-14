@@ -110,9 +110,6 @@ class ReqContext:
     def get_state(self, cls: type[_T]) -> _T | None:
         return self._state.get(cls)
 
-    def pop_state(self, cls: type[_T]) -> _T | None:
-        return self._state.pop(cls, None)
-
     def set_offload_key_position(self, key: OffloadKey, end_token: int) -> None:
         self._offload_key_positions[key] = end_token
 
