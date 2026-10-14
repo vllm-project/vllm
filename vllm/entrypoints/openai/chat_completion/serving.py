@@ -636,7 +636,7 @@ class OpenAIServingChat(GenerateBaseServing):
                     if finish_reason_sent[i]:
                         continue
 
-                    self._raise_if_error(output.finish_reason, request_id)
+                    self._raise_if_error(output.finish_reason, request_id, res.error)
 
                     if request.logprobs:
                         assert output.logprobs is not None, "Did not output logprobs"
@@ -970,7 +970,7 @@ class OpenAIServingChat(GenerateBaseServing):
         for i, output in enumerate(final_res.outputs):
             # check for error finish reason and raise GenerationError
             # finish_reason='error' indicates a retryable request-level internal error
-            self._raise_if_error(output.finish_reason, request_id)
+            self._raise_if_error(output.finish_reason, request_id, final_res.error)
             if i > 0 and parser is not None:
                 # Parsers are stateful: like streaming, use one per choice.
                 parser = self._make_parser(

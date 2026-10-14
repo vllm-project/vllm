@@ -327,7 +327,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
                 for output in res.outputs:
                     i = output.index + prompt_idx * num_choices
                     finish_reason = output.finish_reason
-                    self._raise_if_error(finish_reason, request_id)
+                    self._raise_if_error(finish_reason, request_id, res.error)
 
                     # Useful when request.return_token_ids is True
                     # Returning prompt token IDs shares the same logic
@@ -529,7 +529,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
             out_logprobs: GenericSequence[dict[int, Logprob] | None] | None
 
             for output in final_res.outputs:
-                self._raise_if_error(output.finish_reason, request_id)
+                self._raise_if_error(output.finish_reason, request_id, final_res.error)
 
                 assert request.max_tokens is not None
                 if request.echo:

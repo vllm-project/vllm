@@ -16,7 +16,7 @@ from starlette.websockets import WebSocketDisconnect
 from vllm import envs
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse, UsageInfo
 from vllm.entrypoints.serve.exception_handling.utils import sanitize_message
-from vllm.exceptions import VLLMValidationError
+from vllm.exceptions import RetryableRequestError, VLLMValidationError
 from vllm.logger import init_logger
 
 from .protocol import (
@@ -235,17 +235,24 @@ class RealtimeConnection:
             # Stream results back to client as they're generated
             async for output in result_gen:
                 if output.outputs and len(output.outputs) > 0:
+                    completion = output.outputs[0]
+                    self.serving._raise_if_error(
+                        completion.finish_reason,
+                        request_id,
+                        output.error,
+                    )
+
                     if not prompt_token_ids_len and output.prompt_token_ids:
                         prompt_token_ids_len = len(output.prompt_token_ids)
 
-                    delta = output.outputs[0].text
+                    delta = completion.text
                     full_text += delta
 
                     # append output to input
-                    input_stream.put_nowait(list(output.outputs[0].token_ids))
+                    input_stream.put_nowait(list(completion.token_ids))
                     await self.send(TranscriptionDelta(delta=delta))
 
-                    completion_tokens_len += len(output.outputs[0].token_ids)
+                    completion_tokens_len += len(completion.token_ids)
 
                 if not self._is_connected:
                     # finish because websocket connection was killed
@@ -260,15 +267,22 @@ class RealtimeConnection:
             # Send final completion event
             await self.send(TranscriptionDone(text=full_text, usage=usage))
 
-            # Clear queue for next utterance
-            while not self.audio_queue.empty():
-                self.audio_queue.get_nowait()
-
+        except RetryableRequestError as e:
+            logger.warning("Retryable generation error: %s", e)
+            with contextlib.suppress(Exception):
+                await self.send_error(
+                    sanitize_message(str(e)),
+                    "service_unavailable",
+                )
         except Exception as e:
             logger.exception("Error in generation: %s", e)
             # The socket may already be closed; nothing more we can do.
             with contextlib.suppress(Exception):
                 await self.send_error(sanitize_message(str(e)), "processing_error")
+        finally:
+            # Clear queue for next utterance
+            while not self.audio_queue.empty():
+                self.audio_queue.get_nowait()
 
     async def send(
         self, event: SessionCreated | TranscriptionDelta | TranscriptionDone

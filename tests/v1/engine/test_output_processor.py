@@ -3,7 +3,8 @@
 
 import math
 import time
-from unittest.mock import MagicMock, Mock
+from copy import copy
+from unittest.mock import AsyncMock, MagicMock, Mock
 
 import numpy as np
 import prometheus_client
@@ -24,6 +25,7 @@ from vllm.lora.request import LoRARequest
 from vllm.outputs import (
     CompletionOutput,
     PoolingRequestOutput,
+    RequestError,
     RequestOutput,
     SamplingMask,
     WeightVersionSpan,
@@ -38,6 +40,7 @@ from vllm.v1.engine import (
     EngineCoreRequest,
     FinishReason,
 )
+from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.output_processor import (
     OutputProcessor,
     RequestOutputCollector,
@@ -1733,6 +1736,204 @@ def test_request_output_add_merges_delta_sampling_masks():
 
     assert merged.outputs[0].token_ids == [10, 20]
     assert merged.outputs[0].sampling_mask.token_ids == [[10, 11], [20]]
+
+
+@pytest.mark.skip_global_cleanup
+def test_request_output_add_preserves_request_error():
+    def output(*, finished: bool, error: RequestError | None = None):
+        return RequestOutput(
+            request_id="request",
+            prompt=None,
+            prompt_token_ids=[1],
+            prompt_logprobs=None,
+            outputs=[
+                CompletionOutput(
+                    index=0,
+                    text="",
+                    token_ids=[],
+                    cumulative_logprob=None,
+                    logprobs=None,
+                    finish_reason="error" if error is not None else None,
+                )
+            ],
+            finished=finished,
+            error=error,
+        )
+
+    error = RequestError(
+        code="multimodal_cache_miss",
+        message="Multi-modal processor cache miss.",
+        retryable=True,
+    )
+    merged = output(finished=False)
+    merged.add(output(finished=True, error=error), aggregate=True)
+
+    assert merged.finished
+    assert merged.error == error
+    assert merged.outputs[0].finish_reason == "error"
+
+
+def _generation_request(
+    request_id: str = "request-int",
+    *,
+    n: int = 1,
+) -> EngineCoreRequest:
+    return EngineCoreRequest(
+        request_id=request_id,
+        external_req_id="request",
+        prompt_token_ids=[1, 2],
+        mm_features=None,
+        arrival_time=0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+        sampling_params=SamplingParams(
+            n=n,
+            detokenize=False,
+            output_kind=RequestOutputKind.FINAL_ONLY,
+        ),
+        pooling_params=None,
+    )
+
+
+@pytest.mark.skip_global_cleanup
+def test_generation_cache_miss_is_a_retryable_request_error():
+    output_processor = OutputProcessor(tokenizer=None, log_stats=False)
+    request = _generation_request()
+    output_processor.add_request(request, prompt=None)
+
+    processed = output_processor.process_outputs(
+        [
+            EngineCoreOutput(
+                request_id=request.request_id,
+                new_token_ids=[],
+                finish_reason=FinishReason.ERROR,
+                mm_cache_miss_hashes=["missing-hash"],
+            )
+        ]
+    )
+
+    assert len(processed.request_outputs) == 1
+    output = processed.request_outputs[0]
+    assert isinstance(output, RequestOutput)
+    assert output.finished
+    assert output.outputs[0].finish_reason == "error"
+    assert output.error == RequestError(
+        code="multimodal_cache_miss",
+        message="Multi-modal processor cache miss.",
+        retryable=True,
+    )
+
+
+@pytest.mark.skip_global_cleanup
+def test_generic_generation_error_is_not_marked_retryable():
+    output_processor = OutputProcessor(tokenizer=None, log_stats=False)
+    request = _generation_request()
+    output_processor.add_request(request, prompt=None)
+
+    processed = output_processor.process_outputs(
+        [
+            EngineCoreOutput(
+                request_id=request.request_id,
+                new_token_ids=[],
+                finish_reason=FinishReason.ERROR,
+            )
+        ]
+    )
+
+    output = processed.request_outputs[0]
+    assert isinstance(output, RequestOutput)
+    assert output.outputs[0].finish_reason == "error"
+    assert output.error is None
+
+
+@pytest.mark.skip_global_cleanup
+def test_sync_generation_cache_miss_aborts_parent_siblings():
+    output_processor = OutputProcessor(tokenizer=None, log_stats=False)
+    request = _generation_request("parent-int", n=2)
+    parent = ParentRequest(request)
+    children = []
+    for index in range(2):
+        child_id, child_params = parent.get_child_info(index)
+        child = copy(request)
+        child.request_id = child_id
+        child.sampling_params = child_params
+        children.append(child)
+        output_processor.add_request(child, None, parent, index)
+
+    processed = output_processor.process_outputs(
+        [
+            EngineCoreOutput(
+                request_id=children[0].request_id,
+                new_token_ids=[],
+                finish_reason=FinishReason.ERROR,
+                mm_cache_miss_hashes=["missing-hash"],
+            ),
+            EngineCoreOutput(
+                request_id=children[1].request_id,
+                new_token_ids=[3],
+                finish_reason=FinishReason.STOP,
+            ),
+        ]
+    )
+
+    assert processed.reqs_to_abort == [children[1].request_id]
+    assert len(processed.request_outputs) == 1
+    output = processed.request_outputs[0]
+    assert isinstance(output, RequestOutput)
+    assert output.error is not None and output.error.retryable
+    assert not output_processor.has_unfinished_requests()
+    assert not parent.child_requests
+
+
+@pytest.mark.asyncio
+@pytest.mark.skip_global_cleanup
+async def test_async_generate_propagates_cache_miss_and_aborts_siblings():
+    error = RequestError(
+        code="multimodal_cache_miss",
+        message="Multi-modal processor cache miss.",
+        retryable=True,
+    )
+    failed = RequestOutput(
+        request_id="request",
+        prompt=None,
+        prompt_token_ids=[1, 2],
+        prompt_logprobs=None,
+        outputs=[
+            CompletionOutput(
+                index=0,
+                text="",
+                token_ids=[],
+                cumulative_logprob=None,
+                logprobs=None,
+                finish_reason="error",
+            )
+        ],
+        finished=True,
+        error=error,
+    )
+    collector = RequestOutputCollector(
+        RequestOutputKind.FINAL_ONLY, request_id="parent-int"
+    )
+    collector.put(failed)
+    llm = MagicMock(spec=AsyncLLM)
+    llm.log_requests = False
+    llm.add_request = AsyncMock(return_value=collector)
+    llm.abort = AsyncMock()
+    llm.generate = AsyncLLM.generate.__get__(llm, AsyncLLM)
+
+    outputs = [
+        output
+        async for output in llm.generate(
+            prompt={"prompt_token_ids": [1, 2]},
+            sampling_params=SamplingParams(max_tokens=1),
+            request_id="request",
+        )
+    ]
+
+    assert outputs == [failed]
+    llm.add_request.assert_awaited_once()
+    llm.abort.assert_awaited_once_with("parent-int", internal=True)
 
 
 @pytest.mark.skip_global_cleanup

@@ -256,7 +256,7 @@ class OpenAIServingChatBatch(OpenAIServingChat):
             )
 
             for output in final_res.outputs:
-                self._raise_if_error(output.finish_reason, request_id)
+                self._raise_if_error(output.finish_reason, request_id, final_res.error)
 
                 if request.logprobs:
                     assert output.logprobs is not None, "Did not output logprobs"

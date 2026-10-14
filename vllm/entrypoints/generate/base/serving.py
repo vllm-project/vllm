@@ -25,11 +25,12 @@ from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.engine.serving import BaseServing
 from vllm.entrypoints.serve.engine.typing import AnyRequest
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
-from vllm.exceptions import GenerationError
+from vllm.exceptions import GenerationError, RetryableRequestError
 from vllm.inputs import EngineInput
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob, PromptLogprobs
 from vllm.lora.request import LoRARequest
+from vllm.outputs import RequestError
 from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.detokenizer_utils import convert_ids_list_to_tokens
 from vllm.v1.metrics.stats import RequestStateStats
@@ -197,13 +198,22 @@ class GenerateBaseServing(BaseServing, BeamSearchOnlineMixin):
         )
         return json_str
 
-    def _raise_if_error(self, finish_reason: str | None, request_id: str) -> None:
+    def _raise_if_error(
+        self,
+        finish_reason: str | None,
+        request_id: str,
+        error: RequestError | None = None,
+    ) -> None:
         """Raise GenerationError if finish_reason indicates an error."""
-        if finish_reason == "error":
+        if error is not None or finish_reason == "error":
             logger.error(
                 "Request %s failed with an internal error during generation",
                 request_id,
             )
+            if error is not None:
+                if error.retryable:
+                    raise RetryableRequestError(error.message)
+                raise GenerationError(error.message)
             raise GenerationError("Internal server error")
 
     def _convert_generation_error_to_streaming_response(
@@ -212,7 +222,11 @@ class GenerateBaseServing(BaseServing, BeamSearchOnlineMixin):
         """Convert GenerationError to streaming error response."""
         return self.create_streaming_error_response(
             str(e),
-            err_type="InternalServerError",
+            err_type=(
+                "ServiceUnavailableError"
+                if isinstance(e, RetryableRequestError)
+                else "InternalServerError"
+            ),
             status_code=e.status_code,
         )
 

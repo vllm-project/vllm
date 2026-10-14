@@ -370,6 +370,32 @@ class RequestState:
             finished,
             kv_transfer_params,
             ec_transfer_params,
+            error=error,
+        )
+
+    def make_request_error_output(
+        self, error: RequestError
+    ) -> RequestOutput | PoolingRequestOutput:
+        """Create a terminal request-level error without model output."""
+        external_req_id = (
+            self.external_req_id
+            if self.parent_req is None
+            else self.parent_req.external_req_id
+        )
+        if self.detokenizer is None:
+            return self._new_request_output(
+                external_req_id,
+                [self._new_pooling_output(EMPTY_CPU_TENSOR)],
+                finished=True,
+                error=error,
+            )
+
+        output = self._new_completion_output([], FinishReason.ERROR, None)
+        return self._new_request_output(
+            external_req_id,
+            [output],
+            finished=True,
+            error=error,
         )
 
     def _new_request_output(
@@ -423,6 +449,7 @@ class RequestState:
             num_cached_tokens=self.num_cached_tokens,
             num_cache_creation_tokens=self.num_cache_creation_tokens,
             metrics=self.stats,
+            error=error,
         )
 
     def _new_completion_output(
@@ -745,18 +772,38 @@ class OutputProcessor:
             if engine_core_output.spec_decode_metrics is not None:
                 req_state.spec_decode_metrics = engine_core_output.spec_decode_metrics
 
-            request_error = None
             if (
-                req_state.detokenizer is None
-                and engine_core_output.mm_cache_miss_hashes
+                engine_core_output.mm_cache_miss_hashes
                 and finish_reason == FinishReason.ERROR
             ):
-                request_error = RequestError(
-                    code="multimodal_cache_miss",
-                    message="Multi-modal processor cache miss.",
-                    retryable=True,
+                parent_req = req_state.parent_req
+                error_output = req_state.make_request_error_output(
+                    RequestError(
+                        code="multimodal_cache_miss",
+                        message="Multi-modal processor cache miss.",
+                        retryable=True,
+                    )
                 )
-                pooling_output = EMPTY_CPU_TENSOR
+                if req_state.queue is not None:
+                    req_state.queue.put(error_output)
+                else:
+                    request_outputs.append(error_output)
+
+                if parent_req is not None:
+                    parent_req.child_requests.discard(req_id)
+                self._finish_request(req_state)
+                if req_state.queue is None and parent_req is not None:
+                    reqs_to_abort.extend(
+                        self.abort_requests([parent_req.request_id], internal=True)
+                    )
+                    parent_req.child_requests.clear()
+
+                self._update_stats_from_finished(
+                    req_state, finish_reason, iteration_stats
+                )
+                if self.tracing_enabled:
+                    self.do_tracing(engine_core_output, req_state, iteration_stats)
+                continue
 
             if pooling_output is None:
                 assert req_state.detokenizer is not None
@@ -792,7 +839,6 @@ class OutputProcessor:
                 stop_reason,
                 kv_transfer_params,
                 ec_transfer_params,
-                error=request_error,
             ):
                 if req_state.streaming_input:
                     request_output.finished = False

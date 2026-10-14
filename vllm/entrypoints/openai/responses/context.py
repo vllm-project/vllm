@@ -36,7 +36,7 @@ from vllm.entrypoints.openai.responses.utils import (
 from vllm.entrypoints.serve.utils.tool_calls_utils import (
     maybe_filter_parallel_tool_calls,
 )
-from vllm.outputs import RequestOutput
+from vllm.outputs import RequestError, RequestOutput
 from vllm.parser.abstract_parser import Parser
 from vllm.renderers.chat_utils import (
     ChatTemplateContentFormatOption,
@@ -107,6 +107,7 @@ class TurnMetrics:
 class ConversationContext(ABC):
     response_parser: Parser | None = None
     request_metrics: "RequestStateStats | None" = None
+    error: RequestError | None = None
     # Built-in tools can trigger additional model generations. In that case,
     # the stored engine timestamps cover only one turn, while token usage is
     # accumulated across all turns.
@@ -215,6 +216,7 @@ class SimpleContext(ConversationContext):
         self.last_output = output
         if not isinstance(output, RequestOutput):
             raise ValueError("SimpleContext only supports RequestOutput.")
+        self.error = output.error
         self.num_prompt_tokens = len(output.prompt_token_ids or [])
         self.num_cached_tokens = output.num_cached_tokens or 0
         if output.num_cache_creation_tokens is not None:
@@ -323,6 +325,7 @@ class ParsableContext(ConversationContext):
         self.response_messages: list[ResponseInputOutputItem] = response_messages
         self.num_init_messages = len(response_messages)
         self.finish_reason: str | None = None
+        self.error = None
         self.enable_auto_tools = enable_auto_tools
 
         self.response_parser = response_parser or (
@@ -346,6 +349,7 @@ class ParsableContext(ConversationContext):
         self.ec_transfer_params: dict[str, Any] | None = None
 
     def append_output(self, output: RequestOutput) -> None:
+        self.error = output.error
         self.num_prompt_tokens = len(output.prompt_token_ids or [])
         self.num_cached_tokens = output.num_cached_tokens or 0
         self.num_cache_creation_tokens += output.num_cache_creation_tokens or 0
@@ -644,6 +648,7 @@ class HarmonyContext(ConversationContext):
         self.request = request
         self.response_parser: HarmonyParser = response_parser
         self.finish_reason: str | None = None
+        self.error = None
         self.available_tools = available_tools
         self.function_tool_names = function_tool_names
         self._tool_sessions: dict[str, ClientSession | Tool] = {}
@@ -675,6 +680,7 @@ class HarmonyContext(ConversationContext):
         self.ec_transfer_params: dict[str, Any] | None = None
 
     def append_output(self, output: RequestOutput) -> None:
+        self.error = output.error
         if self.first_tok_of_message:
             self.finish_reason = None
             self._update_prefill_token_usage(output)

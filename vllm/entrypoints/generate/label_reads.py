@@ -6,7 +6,7 @@ from collections.abc import AsyncGenerator, Mapping, Sequence
 from dataclasses import dataclass
 
 from vllm.engine.protocol import EngineClient
-from vllm.exceptions import GenerationError
+from vllm.exceptions import GenerationError, RetryableRequestError
 from vllm.inputs import EngineInput
 from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
@@ -58,6 +58,11 @@ async def next_token_label_reads(
         if not result.outputs:
             raise GenerationError(f"No output generated for item {i}")
         output = result.outputs[0]
+        if result.error is not None:
+            error_cls = (
+                RetryableRequestError if result.error.retryable else GenerationError
+            )
+            raise error_cls(result.error.message)
         if output.finish_reason == "error":
             raise GenerationError(f"Generation error for item {i}")
         if not output.logprobs:

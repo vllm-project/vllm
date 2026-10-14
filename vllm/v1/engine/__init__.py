@@ -53,8 +53,8 @@ class FinishReason(enum.IntEnum):
     stop - a stop string was emitted
     length - max_tokens was consumed, or max_model_len was reached
     abort - aborted by client
-    error - retryable request-level internal error (e.g., KV load failure).
-            Invariant: always converted to 500 Internal Server Error.
+    error - request-level internal error (e.g., KV load failure). The serving
+            layer may map explicitly retryable errors to 503 Service Unavailable.
     repetition - repetitive token pattern detected (hallucination)
 
     """

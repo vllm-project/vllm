@@ -15,9 +15,13 @@ from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.scale_out.render.serving import ServingRender
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
-from vllm.exceptions import GenerationError, VLLMValidationError
+from vllm.exceptions import (
+    GenerationError,
+    RetryableRequestError,
+    VLLMValidationError,
+)
 from vllm.logprobs import Logprob
-from vllm.outputs import CompletionOutput, RequestOutput
+from vllm.outputs import CompletionOutput, RequestError, RequestOutput
 from vllm.renderers.deepseek_v4 import DeepseekV4Renderer
 from vllm.renderers.hf import HfRenderer
 from vllm.renderers.online_renderer import OnlineRenderer
@@ -488,8 +492,23 @@ async def test_completion_suffix_rejects_token_prompt(prompt):
 
 
 @pytest.mark.asyncio
-async def test_completion_error_non_stream():
-    """Test finish_reason='error' returns 500 InternalServerError (non-streaming)."""
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize(
+    ("error", "expected_error"),
+    [
+        (None, GenerationError),
+        (
+            RequestError(
+                code="multimodal_cache_miss",
+                message="Multi-modal processor cache miss.",
+                retryable=True,
+            ),
+            RetryableRequestError,
+        ),
+    ],
+)
+async def test_completion_error_non_stream(error, expected_error):
+    """Generic failures stay 500 while retryable request errors surface 503."""
     mock_engine = MagicMock(spec=AsyncLLM)
     mock_engine.errored = False
     mock_engine.model_config = MockModelConfig()
@@ -518,6 +537,7 @@ async def test_completion_error_non_stream():
         lora_request=None,
         encoder_prompt=None,
         encoder_prompt_token_ids=None,
+        error=error,
     )
 
     async def mock_generate(*args, **kwargs):
@@ -532,8 +552,9 @@ async def test_completion_error_non_stream():
         stream=False,
     )
 
-    with pytest.raises(GenerationError):
+    with pytest.raises(expected_error) as exc_info:
         await serving_completion.create_completion(request)
+    assert type(exc_info.value) is expected_error
 
 
 @pytest.mark.asyncio

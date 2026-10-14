@@ -121,6 +121,7 @@ class BeamSearchOnlineMixin(ABC):
                         finished=True,
                         prompt_token_ids=prompt_token_ids,
                         prompt_logprobs=None,
+                        error=result.error,
                     )
                     return
 

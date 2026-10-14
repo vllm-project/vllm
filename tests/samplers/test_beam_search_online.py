@@ -8,7 +8,13 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
-from vllm import CompletionOutput, PromptType, RequestOutput, SamplingParams
+from vllm import (
+    CompletionOutput,
+    PromptType,
+    RequestError,
+    RequestOutput,
+    SamplingParams,
+)
 from vllm import logger as vllm_logger
 from vllm.config import VllmConfig
 from vllm.entrypoints.generate.beam_search.offline import BeamSearchOfflineMixin
@@ -148,6 +154,56 @@ async def test_beam_search_handles_extra_logprob_candidates() -> None:
     assert outputs[0].outputs[0].finish_reason == "stop"
     assert outputs[0].outputs[0].token_ids == []
     assert outputs[0].outputs[0].cumulative_logprob == pytest.approx(-0.1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.skip_global_cleanup
+async def test_beam_search_preserves_retryable_request_error(monkeypatch) -> None:
+    error = RequestError(
+        code="multimodal_cache_miss",
+        message="Multi-modal processor cache miss.",
+        retryable=True,
+    )
+
+    async def generate(prompt, *args, **kwargs):
+        yield RequestOutput(
+            request_id=kwargs.get("request_id", "test-request"),
+            prompt=prompt.get("prompt"),
+            prompt_token_ids=prompt["prompt_token_ids"],
+            prompt_logprobs=None,
+            outputs=[
+                CompletionOutput(
+                    index=0,
+                    text="",
+                    token_ids=[],
+                    cumulative_logprob=None,
+                    logprobs=None,
+                    finish_reason="error",
+                )
+            ],
+            finished=True,
+            error=error,
+        )
+
+    serving = _AsyncServing()
+    monkeypatch.setattr(serving.engine_client, "generate", generate)
+    prompt: TokensInput = {
+        "type": "token",
+        "prompt": "prompt",
+        "prompt_token_ids": [1],
+    }
+
+    result = await anext(
+        serving.beam_search(
+            prompt,
+            "request",
+            BeamSearchParams(beam_width=1, max_tokens=1, watermarking=False),
+        )
+    )
+
+    assert result.finished
+    assert result.outputs[0].finish_reason == "error"
+    assert result.error == error
 
 
 @pytest.mark.asyncio

@@ -11,6 +11,7 @@ from typing import Any, Final, cast
 
 from fastapi import Request
 from openai.types.responses import (
+    ResponseErrorEvent,
     ResponseOutputItem,
     ResponseOutputItemDoneEvent,
     ResponseOutputMessage,
@@ -18,7 +19,6 @@ from openai.types.responses import (
     ResponseStatus,
 )
 from openai.types.responses.response_output_text import Logprob, LogprobTopLogprob
-from pydantic import TypeAdapter
 
 from vllm import envs
 from vllm.config.utils import replace
@@ -74,7 +74,11 @@ from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.entrypoints.serve.utils.tool_calls_utils import (
     maybe_filter_parallel_tool_calls,
 )
-from vllm.exceptions import GenerationError, VLLMValidationError
+from vllm.exceptions import (
+    GenerationError,
+    RetryableRequestError,
+    VLLMValidationError,
+)
 from vllm.inputs import EngineInput
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob as SampleLogprob
@@ -192,7 +196,12 @@ class OpenAIServingResponses(GenerateBaseServing):
         # FIXME: If enable_store=True, this may cause a memory leak since we
         # never remove events from the store.
         self.event_store: dict[
-            str, tuple[deque[StreamingResponsesResponse], asyncio.Event]
+            str,
+            tuple[
+                deque[StreamingResponsesResponse],
+                asyncio.Event,
+                asyncio.Event,
+            ],
         ] = {}
 
         self.background_tasks: dict[str, asyncio.Task] = {}
@@ -803,16 +812,20 @@ class OpenAIServingResponses(GenerateBaseServing):
                 input_messages = context.messages[: context.num_init_messages]
                 output_messages = context.messages[context.num_init_messages :]
             num_tool_output_tokens = context.num_tool_output_tokens
+            self._raise_if_error(
+                context.finish_reason, request.request_id, context.error
+            )
             if len(output) > 0:
                 if context.finish_reason == "length":
                     status = "incomplete"
                 elif context.finish_reason == "abort":
                     status = "cancelled"
-                else:
-                    self._raise_if_error(context.finish_reason, request.request_id)
             else:
                 status = "incomplete"
         elif isinstance(context, ParsableContext):
+            self._raise_if_error(
+                context.finish_reason, request.request_id, context.error
+            )
             output = context.make_response_output_items()
 
             if request.enable_response_messages:
@@ -835,7 +848,9 @@ class OpenAIServingResponses(GenerateBaseServing):
             final_output = final_res.outputs[0]
 
             # finish_reason='error' indicates retryable internal error
-            self._raise_if_error(final_output.finish_reason, request.request_id)
+            self._raise_if_error(
+                final_output.finish_reason, request.request_id, final_res.error
+            )
 
             # Check if generation was stopped due to max_tokens
             if final_output.finish_reason == "length":
@@ -1075,13 +1090,24 @@ class OpenAIServingResponses(GenerateBaseServing):
     ):
         event_deque: deque[StreamingResponsesResponse] = deque()
         new_event_signal = asyncio.Event()
-        self.event_store[request.request_id] = (event_deque, new_event_signal)
+        finished_signal = asyncio.Event()
+        self.event_store[request.request_id] = (
+            event_deque,
+            new_event_signal,
+            finished_signal,
+        )
         generator = self.responses_stream_generator(request, *args, **kwargs)
         try:
             async for event in generator:
                 event_deque.append(event)
+                if event.type == "error":
+                    await self._mark_background_response_failed(request.request_id)
                 new_event_signal.set()  # Signal new event available
+        except Exception:
+            await self._mark_background_response_failed(request.request_id)
+            raise
         finally:
+            finished_signal.set()
             new_event_signal.set()
 
     async def _run_background_request(
@@ -1090,16 +1116,33 @@ class OpenAIServingResponses(GenerateBaseServing):
         *args,
         **kwargs,
     ):
-        response = await self.responses_full_generator(request, *args, **kwargs)
+        try:
+            response = await self.responses_full_generator(request, *args, **kwargs)
+        except GenerationError as exc:
+            logger.warning(
+                "Background response generation failed for request %s: %s",
+                request.request_id,
+                exc,
+            )
+            await self._mark_background_response_failed(request.request_id)
+            return
+        except Exception:
+            logger.exception(
+                "Background response generation failed for request %s",
+                request.request_id,
+            )
+            await self._mark_background_response_failed(request.request_id)
+            return
 
         if isinstance(response, ErrorResponse):
-            # If the request has failed, update the status to "failed".
-            response_id = request.request_id
-            async with self.response_store_lock:
-                stored_response = self.response_store.get(response_id)
-                assert stored_response is not None
-                if stored_response.status not in ("completed", "cancelled"):
-                    stored_response.status = "failed"
+            await self._mark_background_response_failed(request.request_id)
+
+    async def _mark_background_response_failed(self, response_id: str) -> None:
+        async with self.response_store_lock:
+            stored_response = self.response_store.get(response_id)
+            assert stored_response is not None
+            if stored_response.status not in ("completed", "cancelled"):
+                stored_response.status = "failed"
 
     async def responses_background_stream_generator(
         self,
@@ -1113,7 +1156,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                 value=response_id,
             )
 
-        event_deque, new_event_signal = self.event_store[response_id]
+        event_deque, new_event_signal, finished_signal = self.event_store[response_id]
         start_index = 0 if starting_after is None else starting_after + 1
         current_index = start_index
 
@@ -1124,10 +1167,12 @@ class OpenAIServingResponses(GenerateBaseServing):
             while current_index < len(event_deque):
                 event = event_deque[current_index]
                 yield event
-                if getattr(event, "type", "unknown") == "response.completed":
+                if event.type in ("error", "response.completed"):
                     return
                 current_index += 1
 
+            if finished_signal.is_set():
+                return
             await new_event_signal.wait()
 
     async def retrieve_responses(
@@ -1228,7 +1273,9 @@ class OpenAIServingResponses(GenerateBaseServing):
                 continue
 
             output = ctx.last_output.outputs[0]
-            self._raise_if_error(output.finish_reason, request.request_id)
+            self._raise_if_error(
+                output.finish_reason, request.request_id, ctx.last_output.error
+            )
             delta_text = output.text
             delta_token_ids = as_list(output.token_ids)
 
@@ -1287,7 +1334,7 @@ class OpenAIServingResponses(GenerateBaseServing):
             assert isinstance(ctx, HarmonyContext)
 
             # finish_reason='error' indicates a retryable error
-            self._raise_if_error(ctx.finish_reason, request.request_id)
+            self._raise_if_error(ctx.finish_reason, request.request_id, ctx.error)
 
             for segment in ctx.last_append_segments:
                 if segment.delta:
@@ -1393,9 +1440,18 @@ class OpenAIServingResponses(GenerateBaseServing):
                 ):
                     yield event_data
             except GenerationError as e:
-                error_json = self._convert_generation_error_to_streaming_response(e)
                 yield _increment_sequence_number_and_return(
-                    TypeAdapter(StreamingResponsesResponse).validate_json(error_json)
+                    ResponseErrorEvent(
+                        code=(
+                            "ServiceUnavailableError"
+                            if isinstance(e, RetryableRequestError)
+                            else "InternalServerError"
+                        ),
+                        message=str(e),
+                        param=None,
+                        sequence_number=-1,
+                        type="error",
+                    )
                 )
                 return
 

@@ -250,7 +250,9 @@ class SpeechToTextBaseServing(GenerateBaseServing):
             )
             raise
 
-        token_ids = list(final_output.outputs[0].token_ids)
+        output = final_output.outputs[0]
+        self._raise_if_error(output.finish_reason, request_id, final_output.error)
+        token_ids = list(output.token_ids)
         lang = self.model_cls.parse_language_detection_output(
             token_ids,
             self.tokenizer,
@@ -611,21 +613,23 @@ class SpeechToTextBaseServing(GenerateBaseServing):
             assert len(chunk_start_offsets) == len(list_result_generator)
             result_generator = merge_async_iterators(*list_result_generator)
             async for idx, op in result_generator:
+                output = op.outputs[0]
+                self._raise_if_error(output.finish_reason, request_id, op.error)
                 start_time = chunk_start_offsets[idx]
                 if request.response_format == "verbose_json":
-                    assert op.outputs[0].logprobs
+                    assert output.logprobs
                     segments: list[SpeechToTextSegment] = self._get_verbose_segments(
-                        tokens=tuple(op.outputs[0].token_ids),
+                        tokens=tuple(output.token_ids),
                         segment_class=segment_class,
                         request=request,
                         start_time=start_time,
-                        log_probs=op.outputs[0].logprobs,
+                        log_probs=output.logprobs,
                     )
 
                     chunk_segment_parts[idx].extend(segments)
                     chunk_text_parts[idx].extend([seg.text for seg in segments])
                 else:
-                    raw_text = op.outputs[0].text
+                    raw_text = output.text
                     chunk_text_parts[idx].append(
                         self.model_cls.post_process_output(raw_text)
                     )
@@ -758,6 +762,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                     # Just one output (n=1) supported.
                     assert len(res.outputs) == 1
                     output = res.outputs[0]
+                    self._raise_if_error(output.finish_reason, request_id, res.error)
 
                     output_text = post_processor.process_delta(
                         output.text, output.finish_reason is not None

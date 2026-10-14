@@ -769,6 +769,10 @@ class AsyncLLM(EngineClient):
                 # Note: both OutputProcessor and EngineCore handle their
                 # own request cleanup based on finished.
                 assert isinstance(out, RequestOutput)
+                if out.error is not None and out.error.code == "multimodal_cache_miss":
+                    # Parallel sampling can leave sibling requests running after
+                    # one child reports a request-scoped cache miss.
+                    await self.abort(q.request_id, internal=True)
                 finished = out.finished
                 if out is not STREAM_FINISHED:
                     yield out
