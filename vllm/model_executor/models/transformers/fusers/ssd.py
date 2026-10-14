@@ -9,6 +9,9 @@ from torch import fx, nn
 
 from vllm.model_executor.models.transformers.fusers.attention import interface_call
 from vllm.model_executor.models.transformers.fusers.base import BaseFuser
+from vllm.model_executor.models.transformers.linear_attention import (
+    shard_mamba2_mixer,
+)
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -19,7 +22,9 @@ SSD_INTERFACE = "ALL_SSD_FUNCTIONS"
 
 @dataclass
 class SSDFuser(BaseFuser):
-    """A Mamba2 mixer that dispatches its conv + scan through the SSD interface."""
+    """A Mamba2 mixer that dispatches its causal conv and scan through the
+    Transformers linear attention interfaces. Its layers are sharded for tensor
+    parallelism (see `shard_mamba2_mixer`)."""
 
     redefines_forward: ClassVar[bool] = False
 
@@ -44,11 +49,7 @@ class SSDFuser(BaseFuser):
     def fuse(
         self, module: nn.Module, prefix: str, vllm_config: "VllmConfig"
     ) -> nn.Module:
-        if vllm_config.parallel_config.tensor_parallel_size > 1:
-            raise NotImplementedError(
-                f"{self.source_cls} ({prefix}) does not support tensor parallelism "
-                "in the Transformers modeling backend yet."
-            )
+        shard_mamba2_mixer(module, prefix, vllm_config)
         return module
 
     def layer_index(self, module: nn.Module) -> int | None:

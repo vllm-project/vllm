@@ -22,9 +22,12 @@ import torch.nn.functional as F
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
 try:
-    from transformers.integrations.linear_attention import ALL_SSD_FUNCTIONS
+    from transformers.integrations.linear_attention import (
+        ALL_CAUSAL_CONV1D_FUNCTIONS,
+        ALL_SSD_FUNCTIONS,
+    )
 except ImportError:
-    ALL_SSD_FUNCTIONS = None
+    ALL_CAUSAL_CONV1D_FUNCTIONS = ALL_SSD_FUNCTIONS = None
 
 from vllm.model_executor.models.interfaces import IsAttentionFree, IsHybrid
 from vllm.model_executor.models.transformers.base import VLLM_ATTN_ATTR
@@ -132,21 +135,35 @@ def vllm_mla_attention_forward(
     return attn_output, None
 
 
+def vllm_causal_conv1d_forward(
+    # Transformers args
+    module: "torch.nn.Module",
+    hidden_states: "torch.Tensor",
+    **kwargs,
+):
+    ssd: Mamba2SSM = getattr(module, VLLM_SSD_ATTR)
+    # [batch=1, num_tokens, dim] -> [num_tokens, dim] and back
+    return ssd.forward_conv(hidden_states[0])[None]
+
+
 def vllm_ssd_forward(
     # Transformers args
     module: "torch.nn.Module",
-    hidden_states_B_C: "torch.Tensor",
+    hidden_states: "torch.Tensor",
+    B: "torch.Tensor",
+    C: "torch.Tensor",
     dt: "torch.Tensor",
     **kwargs,
 ):
     ssd: Mamba2SSM = getattr(module, VLLM_SSD_ATTR)
     # [batch=1, num_tokens, dim] -> [num_tokens, dim] and back
-    return ssd.forward_ssd(hidden_states_B_C[0], dt[0])[None]
+    return ssd.forward_scan(hidden_states[0], B[0], C[0], dt[0])[None]
 
 
 ALL_ATTENTION_FUNCTIONS.register("vllm", vllm_attention_forward)
 ALL_ATTENTION_FUNCTIONS.register("vllm_mla", vllm_mla_attention_forward)
-if ALL_SSD_FUNCTIONS is not None:
+if ALL_CAUSAL_CONV1D_FUNCTIONS is not None and ALL_SSD_FUNCTIONS is not None:
+    ALL_CAUSAL_CONV1D_FUNCTIONS.register("vllm", vllm_causal_conv1d_forward)
     ALL_SSD_FUNCTIONS.register("vllm", vllm_ssd_forward)
 
 
