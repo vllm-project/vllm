@@ -605,6 +605,8 @@ openai==3.2.0
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
     #   gpt-oss
+openai-harmony==0.0.8
+    # via gpt-oss
 opencv-python-headless==5.0.0.93
     # via
     #   -c requirements/common.txt
@@ -786,6 +788,7 @@ pydantic==2.13.4
     #   model-hosting-container-standards
     #   mteb
     #   openai
+    #   openai-harmony
     #   oss-harmony
     #   pydantic-extra-types
     #   pydantic-settings
@@ -945,13 +948,13 @@ rpds-py==2026.6.3
     # via
     #   jsonschema
     #   referencing
-runai-model-streamer==0.16.1
+runai-model-streamer==0.17.0
     # via -r requirements/test/xpu.in
-runai-model-streamer-azure==0.16.1
+runai-model-streamer-azure==0.17.0
     # via runai-model-streamer
-runai-model-streamer-gcs==0.16.1
+runai-model-streamer-gcs==0.17.0
     # via runai-model-streamer
-runai-model-streamer-s3==0.16.1
+runai-model-streamer-s3==0.17.0
     # via runai-model-streamer
 s3transfer==0.19.2
     # via boto3

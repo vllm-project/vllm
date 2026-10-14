@@ -94,7 +94,9 @@ metadata placeholders and participate in the existing weight-loader barriers.
 Non-shared tensors in those shards are broadcast as CPU bytes and loaded on each
 rank. The CPU staging limit is restored after this phase.
 
-This experimental path requires Run:ai Model Streamer 0.17.0 and the
+The `vllm[runai]` extra and Docker image require Run:ai Model Streamer 0.17.0
+or newer; its Linux wheels require glibc 2.30 or newer. This experimental path
+additionally requires the
 [non-distributed rank-discovery fix](https://github.com/dsx-ai-factory/model-streamer/pull/252).
 It was validated through startup with TP1/DP8/EP8 on eight co-located H200 GPUs.
 Request correctness, broader topologies and a generic configuration API remain
