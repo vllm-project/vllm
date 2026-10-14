@@ -1534,9 +1534,11 @@ class TestServerFlows:
         assert _srv_abort_started(session, "req-1") is None
         assert tid not in session._server._inflight
 
-    def test_abort_fetch_force_cancels_after_timeout(self):
-        """If wait-mode never drains, the deadline forces immediate
-        cancel and an ack is still sent."""
+    def test_abort_fetch_never_force_cancels_after_timeout(self):
+        """Past the drain deadline a transfer that is still running is not
+        force-released and no ack is sent: releasing the handle or removing
+        the peer does not stop a NIXL WRITE, so the ack would let the peer
+        reuse blocks that are still being written."""
         session, conn, transport = _make_session()
         _activate(session, conn)
         tid = 42
@@ -1560,21 +1562,28 @@ class TestServerFlows:
         )
         session.poll()
         assert _srv_abort_started(session, "req-1") is not None
+        peers = dict(transport._remote_peers)
         # Backdate past the drain deadline.
         session._server._pending_aborts[("req-1", 0)] = (
             time.monotonic() - _CANCEL_DRAIN_TIMEOUT_S - 1.0
         )
-        # Even if the transport still claims it can't cancel, the
-        # session must force-pop and ack.
         transport._cancel_calls.clear()
 
-        session.poll()
+        for _ in range(3):
+            session.poll()
+        assert not any(m[TYPE_KEY] == AbortAckMsg.TYPE for m in conn._sent)
+        assert tid in session._server._inflight
+        assert all(mode == "wait" for _, mode in transport._cancel_calls)
+        assert transport._remote_peers == peers
 
-        ack = next(m for m in conn._sent if m[TYPE_KEY] == AbortAckMsg.TYPE)
-        assert ack[AbortAckMsg.KV_REQUEST_ID] == "req-1"
+        # Once NIXL reports the transfer terminal, the ack follows.
+        transport._cancel_still_inflight.discard(tid)
+        transport._poll_done.append(tid)
+        session.poll()
+        acks = [m for m in conn._sent if m[TYPE_KEY] == AbortAckMsg.TYPE]
+        assert len(acks) == 1
         assert _srv_abort_started(session, "req-1") is None
         assert tid not in session._server._inflight
-        assert ([tid], "immediate") in transport._cancel_calls
 
     def test_abort_fetch_idempotent_while_draining(self):
         """Receiving AbortFetchMsg twice for the same kv_request_id
@@ -1918,6 +1927,64 @@ class TestServerFlows:
         assert session.poll().stores == [StoreResult(job_id=1, success=False)]
         assert 1 not in session._server._store_jobs
         assert sum(m[TYPE_KEY] == AbortAckMsg.TYPE for m in conn._sent) == 1
+        assert session.poll().stores == []
+        assert sum(m[TYPE_KEY] == AbortAckMsg.TYPE for m in conn._sent) == 1
+
+    def test_abort_keeps_pins_only_of_jobs_being_written(self, monkeypatch):
+        """An abort fails the round's jobs at once, except those an inflight
+        transfer still reads; their pins and the ack wait for the transfer."""
+        monkeypatch.setattr(server_mod, "_CANCEL_RETRY_INTERVAL_S", 0.0)
+        session, conn, transport = _make_session()
+        _activate(session, conn)
+        tid = self._submit_unconfirmed_transfer(session, conn, transport)
+        # Job 2 supplies a block nobody demanded: no transfer reads it.
+        session.add_stored_blocks("req-1", [b"k2"], [1], job_id=2)
+        conn.enqueue(
+            {
+                TYPE_KEY: AbortFetchMsg.TYPE,
+                AbortFetchMsg.KV_REQUEST_ID: "req-1",
+                AbortFetchMsg.ROUND_SEQ: 0,
+            }
+        )
+        assert session.poll().stores == [StoreResult(job_id=2, success=False)]
+        for _ in range(3):
+            assert session.poll().stores == []
+        assert 1 in session._server._store_jobs
+        assert tid in session._server._inflight
+        assert not any(m[TYPE_KEY] == AbortAckMsg.TYPE for m in conn._sent)
+
+        transport._cancel_still_inflight.clear()
+        assert session.poll().stores == [StoreResult(job_id=1, success=False)]
+        assert sum(m[TYPE_KEY] == AbortAckMsg.TYPE for m in conn._sent) == 1
+        assert not any(m[TYPE_KEY] == TransferDoneMsg.TYPE for m in conn._sent)
+        assert session.poll().stores == []
+
+    @pytest.mark.parametrize("success", [True, False])
+    def test_abort_acks_after_late_terminal_without_transfer_done(
+        self, success, monkeypatch
+    ):
+        """A transfer that finishes on its own after the abort releases its
+        pin and lets the parked abort ack; the aborted round sends no
+        TransferDoneMsg."""
+        monkeypatch.setattr(server_mod, "_CANCEL_RETRY_INTERVAL_S", 0.0)
+        session, conn, transport = _make_session()
+        _activate(session, conn)
+        tid = self._submit_unconfirmed_transfer(session, conn, transport)
+        conn.enqueue(
+            {
+                TYPE_KEY: AbortFetchMsg.TYPE,
+                AbortFetchMsg.KV_REQUEST_ID: "req-1",
+                AbortFetchMsg.ROUND_SEQ: 0,
+            }
+        )
+        assert session.poll().stores == []
+        assert 1 in session._server._store_jobs
+
+        completed = transport._poll_done if success else transport._poll_failed
+        completed.append(tid)
+        assert session.poll().stores == [StoreResult(job_id=1, success=False)]
+        assert sum(m[TYPE_KEY] == AbortAckMsg.TYPE for m in conn._sent) == 1
+        assert not any(m[TYPE_KEY] == TransferDoneMsg.TYPE for m in conn._sent)
         assert session.poll().stores == []
         assert sum(m[TYPE_KEY] == AbortAckMsg.TYPE for m in conn._sent) == 1
 

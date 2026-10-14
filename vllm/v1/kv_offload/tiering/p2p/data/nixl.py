@@ -27,6 +27,16 @@ logger = init_logger(__name__)
 _EMPTY_POLL_RESULT: PollResult = PollResult(done=(), failed=())
 
 
+def _is_remote_disconnect(exc: Exception) -> bool:
+    """True if a NIXL state check failed because the peer disconnected.
+
+    NIXL raises ``nixlRemoteDisconnectError`` (NIXL_ERR_REMOTE_DISCONNECT)
+    from ``check_xfer_state`` once the target endpoint is gone, e.g. after
+    the peer process died, instead of reporting an ``"ERR"`` state.
+    """
+    return type(exc).__name__ == "nixlRemoteDisconnectError"
+
+
 class _Inflight(NamedTuple):
     """A submitted-but-not-yet-drained transfer.
 
@@ -216,7 +226,9 @@ class NixlTransport(DataTransport):
                     transfer_id,
                     exc,
                 )
-                continue
+                if not _is_remote_disconnect(exc):
+                    continue
+                state = "ERR"
             if state == "DONE":
                 if done_ids is None:
                     done_ids = []
@@ -254,7 +266,8 @@ class NixlTransport(DataTransport):
         the request without cancelling RMA, and the bytes keep landing. So
         PROC/PEND transfers, and those whose state check or
         ``release_xfer_handle`` raises, stay in ``self._inflight`` for a
-        later ``poll()`` to observe.
+        later ``poll()`` to observe. A state check that fails because the
+        peer disconnected counts as terminal.
         """
         if mode == "immediate":
             handles = [
@@ -280,7 +293,13 @@ class NixlTransport(DataTransport):
                     tid,
                     exc,
                 )
-                still_inflight.append(tid)
+                if not _is_remote_disconnect(exc):
+                    still_inflight.append(tid)
+                    continue
+                # The handle may no longer be releasable; it is terminal
+                # either way, so drop it instead of retrying forever.
+                self._release_handles([entry.handle])
+                del self._inflight[tid]
                 continue
             if state in ("PROC", "PEND"):
                 still_inflight.append(tid)

@@ -13,6 +13,15 @@ import pytest
 from vllm.v1.kv_offload.tiering.p2p.data.base import PollResult
 from vllm.v1.kv_offload.tiering.p2p.data.nixl import NixlTransport
 
+
+class nixlRemoteDisconnectError(Exception):  # noqa: N801
+    """Stand-in for NIXL's binding exception of the same name."""
+
+
+def _remote_disconnect() -> Exception:
+    return nixlRemoteDisconnectError("NIXL_ERR_REMOTE_DISCONNECT")
+
+
 # ---------------------------------------------------------------------------
 # DataTransport base class tests
 # ---------------------------------------------------------------------------
@@ -272,6 +281,45 @@ class TestNixlTransportWithMockedAgent:
         assert transport.cancel([tid], mode="wait") == [tid]
         assert tid in transport._inflight
         transport._agent.release_xfer_handle.assert_not_called()
+
+    def test_cancel_wait_remote_disconnect_is_terminal(self):
+        """A dead peer can no longer be written to: wait-mode cancel drops
+        the transfer even if its handle can no longer be released."""
+        transport = self._make_transport()
+        transport.add_remote_peer("peer:1", b"meta", 0x1000, 8, 1024)
+
+        tid = transport.write_blocks("peer:1", [0], [1])
+        transport._agent.check_xfer_state.side_effect = _remote_disconnect()
+        transport._agent.release_xfer_handle.side_effect = RuntimeError("gone")
+
+        assert transport.cancel([tid], mode="wait") == []
+        assert tid not in transport._inflight
+        assert transport.poll() == PollResult(done=(), failed=())
+
+    def test_poll_reports_remote_disconnect_as_failed(self):
+        """check_xfer_state raises instead of returning ERR once the peer
+        disconnected; poll must surface that as a failure, not keep the
+        transfer inflight forever."""
+        transport = self._make_transport()
+        transport.add_remote_peer("peer:1", b"meta", 0x1000, 8, 1024)
+
+        tid = transport.write_blocks("peer:1", [0], [1])
+        transport._agent.check_xfer_state.side_effect = _remote_disconnect()
+
+        result = transport.poll()
+        assert result.done == ()
+        assert tid in result.failed
+        assert tid not in transport._inflight
+
+    def test_poll_keeps_transfer_on_other_state_check_errors(self):
+        transport = self._make_transport()
+        transport.add_remote_peer("peer:1", b"meta", 0x1000, 8, 1024)
+
+        tid = transport.write_blocks("peer:1", [0], [1])
+        transport._agent.check_xfer_state.side_effect = RuntimeError("NOT_FOUND")
+
+        assert transport.poll() == PollResult(done=(), failed=())
+        assert tid in transport._inflight
 
     def test_cancel_wait_release_raises(self):
         """wait-mode cancel keeps the entry and returns the tid on raise."""
