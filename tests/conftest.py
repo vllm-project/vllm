@@ -1406,14 +1406,15 @@ def vllm_runner():
 
 
 @pytest.fixture()
-def temporary_enable_log_propagate():
+def temporary_enable_log_propagate(monkeypatch):
     import logging
 
-    logger = logging.getLogger("vllm")
-    previous_propagate = logger.propagate
-    logger.propagate = True
-    yield
-    logger.propagate = previous_propagate
+    from vllm.logger import DEFAULT_LOGGING_CONFIG
+
+    # The first LLM init in a process reapplies DEFAULT_LOGGING_CONFIG, which
+    # would otherwise turn propagation back off mid-test.
+    monkeypatch.setitem(DEFAULT_LOGGING_CONFIG["loggers"]["vllm"], "propagate", True)
+    monkeypatch.setattr(logging.getLogger("vllm"), "propagate", True)
 
 
 @pytest.fixture()
