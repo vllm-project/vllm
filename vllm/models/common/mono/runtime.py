@@ -5,7 +5,7 @@ behind the hooks a model calls (``attach``, then ``kernel_for_layer`` per layer)
 """
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
 
 import torch
 
@@ -29,6 +29,11 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+KernelT = TypeVar("KernelT", bound=LayerKernel)
+"""The kernel type one spec's ``build`` returns. ``LayerKernel`` is only the
+lower bound, so a model annotates its runtime with its own kernel class
+(``MonoRuntime[MyLayerKernel]``) and reads what that class adds."""
+
 
 class MonoWarmup(VllmJitKernel["MonoWarmup.CompileKey"]):
     """A spec's layer-kernel builds as vLLM JIT warm-up keys."""
@@ -51,7 +56,7 @@ class MonoWarmup(VllmJitKernel["MonoWarmup.CompileKey"]):
         self._compiled_cache[compile_key] = True
 
 
-class MonoRuntime:
+class MonoRuntime(Generic[KernelT]):
     """A model's MonoKernels on this rank: built once after load."""
 
     def __init__(self, spec: MonoSpec[Any], model, vllm_config: "VllmConfig"):
@@ -65,7 +70,7 @@ class MonoRuntime:
             raise MonoUnsupported(f"{refused}: another TP rank refused")
         self.vllm_config = vllm_config
         self.widths = spec.widths(vllm_config)
-        self.kernels: dict[tuple[int, int], LayerKernel] = {}
+        self.kernels: dict[tuple[int, int], KernelT] = {}
         self.state: Any = None
         self.width: int | None = None
         self.why: str | None = None
@@ -79,8 +84,8 @@ class MonoRuntime:
         self.state = spec.launch_state(model, vllm_config)
         for i in indices:
             for w in self.widths:
-                self.kernels[i, w] = spec.build(
-                    vllm_config, self.state, model.layers[i], w
+                self.kernels[i, w] = cast(
+                    KernelT, spec.build(vllm_config, self.state, model.layers[i], w)
                 )
         self.cache_layers = sorted(
             {n for k in self.kernels.values() for n in k.cache_layers}
@@ -163,7 +168,9 @@ class MonoRuntime:
         return self.why
 
 
-def attach(model, vllm_config: "VllmConfig", specs_path: str) -> MonoRuntime | None:
+def attach(
+    model, vllm_config: "VllmConfig", specs_path: str
+) -> MonoRuntime[Any] | None:
     """Picks the variant, builds the launch state and this rank's layer
     kernels. Collective over the TP group.
 
@@ -174,7 +181,8 @@ def attach(model, vllm_config: "VllmConfig", specs_path: str) -> MonoRuntime | N
 
     Returns:
         This rank's ``MonoRuntime``, or None with the switch off or when no layer
-        takes a kernel.
+        takes a kernel. Annotate it with the kernel class the spec's ``build``
+        returns, which is what ``kernel_for_layer`` then hands back.
 
     Raises:
         MonoUnsupported: Every variant refused the config, or this rank (or
@@ -186,14 +194,16 @@ def attach(model, vllm_config: "VllmConfig", specs_path: str) -> MonoRuntime | N
     spec, refusals = _select_spec(_load_specs(specs_path), vllm_config)
     if spec is None:
         raise MonoUnsupported("MonoKernel refused: " + _refusal_message(refusals))
-    mono = MonoRuntime(spec, model, vllm_config)
+    mono: MonoRuntime[Any] = MonoRuntime(spec, model, vllm_config)
     if not mono.kernels:
         logger.info("MonoKernel %s: no layer takes a kernel", spec.name)
         return None
     return mono
 
 
-def kernel_for_layer(mono: MonoRuntime | None, i: int, positions) -> LayerKernel | None:
+def kernel_for_layer(
+    mono: MonoRuntime[KernelT] | None, i: int, positions
+) -> KernelT | None:
     """Layer ``i``'s kernel when this step runs on the kernels, else None.
 
     The first call under a forward context decides for every layer. The model

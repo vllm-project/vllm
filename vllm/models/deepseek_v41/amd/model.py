@@ -277,12 +277,9 @@ class DeepseekV4DecoderLayer(nn.Module):
         residual: torch.Tensor | None = None,
         engram_hashes: torch.Tensor | None = None,
         engram_mask: torch.Tensor | None = None,
-        mono: MonoRuntime | None = None,
+        mono: MonoRuntime[DSV41LayerKernel] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        kernel = typing.cast(
-            DSV41LayerKernel | None,
-            kernel_for_layer(mono, self.attn.layer_id, positions),
-        )
+        kernel = kernel_for_layer(mono, self.attn.layer_id, positions)
         if kernel is not None and not kernel.ffn_only:
             out = kernel.launch(
                 x,
@@ -483,7 +480,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         self.hc_dim = self.hc_mult * config.hidden_size
         self.rms_norm_eps = config.rms_norm_eps
         self.vllm_config = vllm_config
-        self.mono: MonoRuntime | None = None
+        self.mono: MonoRuntime[DSV41LayerKernel] | None = None
         configure(vllm_config, SPECS_PATH)
 
         # Three aux streams: one per non-default input GEMM in
