@@ -371,53 +371,6 @@ pub(super) struct PreparedItem {
     uuid: Option<String>,
 }
 
-/// Expand placeholders in `prompt_token_ids` and assemble the engine-bound
-/// features in prompt order, mirroring the Python frontend's
-/// `argsort_mm_positions`.
-fn expand_and_assemble_features(
-    prepared: Vec<PreparedMedia>,
-    prompt_token_ids: &mut Vec<u32>,
-    media_parts_len: usize,
-) -> Result<MmFeatures> {
-    let mut ranges = expand_prompt_token_ids(prompt_token_ids, &prepared)?;
-
-    let mut features = Vec::with_capacity(media_parts_len);
-    for media in prepared {
-        let media_ranges = ranges.remove(&media.modality).unwrap_or_default();
-        if media_ranges.len() != media.items.len() {
-            bail_multimodal!(
-                "number of expanded `{}` placeholders {} does not match number of media items {}",
-                media.modality,
-                media_ranges.len(),
-                media.items.len()
-            );
-        }
-        for (item, range) in izip!(media.items, media_ranges) {
-            features.push(MmFeatureSpec {
-                data: Some(item.data),
-                modality: match media.modality {
-                    Modality::Image | Modality::ImageEmbeds => MmModality::Image,
-                    Modality::Video => MmModality::Video,
-                    Modality::Audio => MmModality::Audio,
-                },
-                identifier: item.uuid.unwrap_or_else(|| item.hash.clone()),
-                mm_position: range,
-                mm_hash: Some(item.hash),
-            });
-        }
-    }
-    features.sort_by_key(|feature| feature.mm_position.offset);
-
-    if features.len() != media_parts_len {
-        bail_multimodal!(
-            "number of built multimodal features {} does not match number of media parts {}",
-            features.len(),
-            media_parts_len
-        );
-    }
-    Ok(features)
-}
-
 impl MultimodalModelInfo {
     /// Load and resolve multimodal support from model files.
     ///
@@ -988,7 +941,45 @@ impl MultimodalModelInfo {
             prepared.push(self.prepare_audios(sources, self.mm_cache_for(Modality::Audio)).await?);
         }
 
-        expand_and_assemble_features(prepared, prompt_token_ids, media_parts_len)
+        let mut ranges = expand_prompt_token_ids(prompt_token_ids, &prepared)?;
+
+        let mut features = Vec::with_capacity(media_parts_len);
+        for media in prepared {
+            let media_ranges = ranges.remove(&media.modality).unwrap_or_default();
+            if media_ranges.len() != media.items.len() {
+                bail_multimodal!(
+                    "number of expanded `{}` placeholders {} does not match number of media items {}",
+                    media.modality,
+                    media_ranges.len(),
+                    media.items.len()
+                );
+            }
+            for (item, range) in izip!(media.items, media_ranges) {
+                features.push(MmFeatureSpec {
+                    data: Some(item.data),
+                    modality: match media.modality {
+                        Modality::Image | Modality::ImageEmbeds => MmModality::Image,
+                        Modality::Video => MmModality::Video,
+                        Modality::Audio => MmModality::Audio,
+                    },
+                    identifier: item.uuid.unwrap_or_else(|| item.hash.clone()),
+                    mm_position: range,
+                    mm_hash: Some(item.hash),
+                });
+            }
+        }
+        // Mirror the Python frontend (`argsort_mm_positions`): features are
+        // ordered by their placeholder position in the prompt.
+        features.sort_by_key(|feature| feature.mm_position.offset);
+
+        if features.len() != media_parts_len {
+            bail_multimodal!(
+                "number of built multimodal features {} does not match number of media parts {}",
+                features.len(),
+                media_parts_len
+            );
+        }
+        Ok(features)
     }
 
     /// Pre-touch every cache key of the request before any per-item get/put,
