@@ -326,21 +326,37 @@ if has_flashinfer_trtllm_fused_moe() and current_platform.has_device_capability(
 
 if has_aiter():
     from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
-        AiterExperts,
+        AiterFp8BlockExperts,
+        AiterFp8ChannelExperts,
+        AiterFp8TensorExperts,
+        AiterMxfp4Experts,
+        AiterUnquantizedExperts,
     )
 
-    register_experts(
-        AiterExperts,
-        standard_format,
-        # AiterExperts also supports the fully-unquantized (None, None)
-        # scheme (see SUPPORTED_W_A in rocm_aiter_moe.py), not just fp8,
-        # plus the gfx950-only mxfp4 W4A16/W4A4 schemes.
-        common_float_types + mxfp4_types,
-        blocked_quantization_support=True,
-        needs_aiter=True,
-    )
+    # Registration dtypes gate which quant configs the modular-kernel test
+    # harness will ever pair with a given class (see Config.is_valid()):
+    # they must match what each subclass's _supports_quant_scheme() actually
+    # declares, or the harness will generate a case the class rejects.
+    for aiter_experts_cls, aiter_supported_dtypes in (
+        (AiterUnquantizedExperts, common_float_types),
+        (AiterFp8BlockExperts, fp8_types),
+        (AiterFp8TensorExperts, fp8_types),
+        (AiterFp8ChannelExperts, fp8_types),
+        (AiterMxfp4Experts, mxfp4_types),
+    ):
+        register_experts(
+            aiter_experts_cls,
+            standard_format,
+            aiter_supported_dtypes,
+            blocked_quantization_support=True,
+            needs_aiter=True,
+        )
 else:
-    AiterExperts = None
+    AiterUnquantizedExperts = None
+    AiterFp8BlockExperts = None
+    AiterFp8TensorExperts = None
+    AiterFp8ChannelExperts = None
+    AiterMxfp4Experts = None
 
 if has_deep_gemm() and is_deep_gemm_supported():
     register_experts(

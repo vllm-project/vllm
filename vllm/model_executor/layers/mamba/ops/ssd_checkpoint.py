@@ -69,6 +69,8 @@ def store_prefill_checkpoint(
     chunk_states: torch.Tensor,
     ssm_state: torch.Tensor,
     query_start_loc: torch.Tensor,
+    *,
+    state_len: int,
 ) -> None:
     """Write each prefill row's mid-prefill checkpoint into its paged block.
 
@@ -78,14 +80,15 @@ def store_prefill_checkpoint(
         checkpoint: Per-row offsets and destination blocks.
         chunk_idx: Per-row index into ``chunk_states`` of the checkpoint.
         x: Pre-conv activations, ``(dim, num_prefill_tokens)``.
-        conv_state: Paged conv state, ``(num_blocks, dim, state_len)``.
+        conv_state: Paged conv state, ``(num_blocks, dim, state_len + num_spec)``.
         chunk_states: SSD states at every chunk end.
         ssm_state: Paged SSM state.
         query_start_loc: Prefill query start locations.
+        state_len: ``conv_kernel_size - 1``, not the spec-widened conv width.
+            Readers take the first ``state_len`` slots as the newest inputs.
 
     """
     dim = x.size(0)
-    state_len = conv_state.size(-1)
     ssm_row_size = chunk_states[0].numel()
     block_size = 1024
     grid = (

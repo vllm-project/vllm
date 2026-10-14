@@ -185,6 +185,9 @@ class Config:
         vllm_config.model_config = SimpleNamespace(
             enforce_eager=True,
             is_moe=True,
+            enable_sleep_mode=False,
+            sleep_mode_backend="cumem",
+            sleep_mode_offload_cudagraph=False,
         )
         vllm_config.parallel_config.data_parallel_size = self.world_size
         vllm_config.parallel_config.enable_expert_parallel = True
@@ -807,6 +810,9 @@ def _maybe_convert_weights_for_experts(
     rank_weights: WeightTensors,
 ) -> WeightTensors:
     """Convert weights to expert-specific format (e.g., TrtLLM BlockMajorK)."""
+    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+        AiterExperts,
+    )
     from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
         Fp8MoeBackend,
         convert_to_fp8_moe_kernel_format,
@@ -815,7 +821,7 @@ def _maybe_convert_weights_for_experts(
     fe_type = config.fused_experts_type
     fe_name = getattr(fe_type, "__name__", "")
 
-    if fe_name == "AiterExperts" and config.weight_dtype == "mxfp4":
+    if issubclass(fe_type, AiterExperts) and config.weight_dtype == "mxfp4":
         from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
             convert_gpt_oss_weight_to_mxfp4_moe_kernel_format,
         )
@@ -851,7 +857,7 @@ def _maybe_convert_weights_for_experts(
     # intermediate sizes that are not a multiple of 256, but only for the fp8 per-tensor
     # and per-token schemes. Those keep JIT-compiling until
     # https://github.com/ROCm/aiter/issues/5766 is fixed.
-    if fe_name == "AiterExperts" and (
+    if issubclass(fe_type, AiterExperts) and (
         config.quant_dtype is None or config.quant_block_shape is not None
     ):
         return _shuffle_weights_for_aiter(rank_weights)
