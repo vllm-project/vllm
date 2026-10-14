@@ -2,15 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import functools
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, ClassVar, Final
+from typing import TYPE_CHECKING, ClassVar, Final, cast
 
 import torch
 
 from vllm import envs
-from vllm._aiter_ops import rocm_aiter_ops
+from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
 from vllm.distributed import get_dcp_group
@@ -22,7 +23,10 @@ from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonMetadata,
     MLACommonMetadataBuilder,
     QueryLenSupport,
+    accumulate_mla_context_chunk,
+    init_mla_context_partial,
 )
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import cdiv, largest_power_of_2_divisor
@@ -32,18 +36,49 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MultipleOf,
 )
+from vllm.v1.attention.backends.mla.triton_mla import _compute_num_kv_splits
 from vllm.v1.attention.backends.utils import (
     get_dcp_local_seq_lens,
 )
 from vllm.v1.attention.ops.rocm_aiter_mla_merge import (
     merge_mla_segments_triton,
 )
+from vllm.v1.attention.ops.rocm_aiter_mla_prefill import (
+    context_row_indices,
+    expand_context,
+    gather_compressed_context,
+)
+from vllm.v1.attention.ops.triton_decode_attention import decode_attention_fwd
 from vllm.v1.kv_cache_interface import AttentionSpec, is_quantized_kv_cache
+from vllm.v1.worker.workspace import (
+    current_workspace_manager,
+    is_workspace_manager_initialized,
+)
 
 if TYPE_CHECKING:
     from vllm.platforms.interface import DeviceCapability
 
 logger = init_logger(__name__)
+
+
+def _supports_fused_dcp_prefill_config(
+    kv_cache_dtype: str | None,
+    query_dtype: torch.dtype,
+    kv_lora_rank: int,
+    qk_nope_head_dim: int,
+    qk_rope_head_dim: int,
+    v_head_dim: int,
+) -> bool:
+    """Whether the configuration supports fused DCP context expansion."""
+    return (
+        kv_cache_dtype in ("fp8", "fp8_e4m3")
+        and query_dtype == torch.bfloat16
+        and kv_lora_rank == 512
+        and qk_nope_head_dim == 128
+        and qk_rope_head_dim == 64
+        and v_head_dim == 128
+        and is_aiter_found_and_supported()
+    )
 
 
 def _segmented_mla_page_size(block_size: int) -> int:
@@ -241,6 +276,75 @@ def _segmented_dcp_verify_supported(dcp_world_size: int, cp_interleave: int) -> 
     )
 
 
+def _segmented_mla_fits_lds(num_heads: int, block_size: int, fp8_kv: bool) -> bool:
+    """Whether AITER segmented MLA compiles for this DCP verify shape.
+
+    On gfx942 it needs 128 KiB of LDS, over the 64 KiB available, for bf16 KV
+    at TILE-128 and for fp8 KV past 64 heads, where its query block widens to
+    128 heads. ``num_heads`` is the DCP-gathered count.
+    """
+    from vllm.platforms.rocm import on_gfx942
+
+    if not on_gfx942():
+        return True
+    if fp8_kv:
+        return num_heads <= 64
+    return _segmented_mla_page_size(block_size) < 128
+
+
+def _triton_dcp_verify_supported(dcp_world_size: int, cp_interleave: int) -> bool:
+    """Whether gfx942 can fall back to generic split-KV causal target verify.
+
+    The batch shape is causal qlen>1 over a DCP shard. Eagle MTP and DSpark
+    target verify are that same shape, so this is not limited to one
+    speculative method. gfx942 has no cprr kernel, so this serves the shapes
+    segmented MLA cannot (see _segmented_mla_fits_lds). qlen==1 and non-causal
+    stay on the plain ASM decode.
+    """
+    from vllm.platforms.rocm import on_gfx942
+
+    return on_gfx942() and dcp_world_size > 1 and cp_interleave == 1
+
+
+# Heads per stage-1 program in the grouped MLA decode kernel (its BLOCK_H).
+_DECODE_HEADS_PER_PROGRAM: Final = 16
+# Tuned on MI325X with microbenchmarks
+_BATCH_OCCUPANCY_MULTIPLIER: Final = 4
+
+
+def _triton_dcp_verify_num_kv_splits(
+    max_seq_len: int, num_rows: int, num_heads: int, sm_count: int
+) -> int:
+    # Split only until the stage-1 grid fills the GPU. Past that, splits add
+    # scratch and combine work, and large batches overflow the kernel's int32
+    # attn_logits offsets.
+    programs_per_split = max(1, num_rows) * cdiv(num_heads, _DECODE_HEADS_PER_PROGRAM)
+    occupancy_splits = triton.next_power_of_2(
+        cdiv(_BATCH_OCCUPANCY_MULTIPLIER * sm_count, programs_per_split)
+    )
+    return min(_compute_num_kv_splits(max_seq_len, sm_count), occupancy_splits)
+
+
+def _reserve_triton_dcp_verify_workspace(
+    max_rows: int,
+    num_heads: int,
+    max_seq_len: int,
+    kv_lora_rank: int,
+    sm_count: int,
+) -> None:
+    """Reserve split-KV scratch before warmup locks the workspace manager."""
+    if not is_workspace_manager_initialized():
+        return
+    # Fewer rows may take more splits, so size for the largest product.
+    max_row_splits = max(
+        rows * _triton_dcp_verify_num_kv_splits(max_seq_len, rows, num_heads, sm_count)
+        for rows in range(1, max_rows + 1)
+    )
+    current_workspace_manager().get_simultaneous(
+        ((max_row_splits, num_heads, kv_lora_rank + 1), torch.float32),
+    )
+
+
 # DCP decode routing
 #
 # With decode context parallelism each rank holds a round-robin shard of the KV
@@ -253,9 +357,12 @@ def _segmented_dcp_verify_supported(dcp_world_size: int, cp_interleave: int) -> 
 #   round-robin ASM decode rebuilds global positions from g_kv_indptr, cp_rank
 #   and cp_world_size and applies the causal window in-kernel. Kernels exist only
 #   at _NATIVE_CPRR_HEADS; other gathered head counts are padded up.
+# * triton: causal qlen > 1 on gfx942 for shapes segmented MLA cannot fit in
+#   LDS (_segmented_mla_fits_lds). Generic split-KV decode over the same
+#   per-row local window segmented uses.
 # * segmented: causal qlen > 1 when cprr is not selected or qlen is below
-#   _MIN_CPRR_QLEN. Each verify token becomes a single-query row whose KV length
-#   encodes its causal window.
+#   _MIN_CPRR_QLEN. Each verify token becomes a single-query row whose KV
+#   length encodes its causal window.
 #
 # The plain kernel must never serve a causal qlen > 1 block: it applies
 # causality on local indices, which is wrong over a round-robin shard.
@@ -267,6 +374,12 @@ class _DCPDecodeRoute(Enum):
     PLAIN = "plain"
     SEGMENTED = "segmented"
     CPRR = "cprr"
+    TRITON = "triton"
+
+
+def _is_row_view_dcp_route(route: _DCPDecodeRoute) -> bool:
+    """Routes that attend one causal window per verify token."""
+    return route in (_DCPDecodeRoute.SEGMENTED, _DCPDecodeRoute.TRITON)
 
 
 def _asm_dcp_verify_heads(decode_num_heads: int) -> int:
@@ -280,7 +393,9 @@ def _asm_dcp_verify_heads(decode_num_heads: int) -> int:
 
 
 def _select_dcp_decode_route(
+    *,
     supports_segmented: bool,
+    supports_triton: bool,
     causal: bool,
     max_qo_len: int,
     asm_selected: bool,
@@ -290,11 +405,13 @@ def _select_dcp_decode_route(
         return _DCPDecodeRoute.PLAIN
     if asm_selected and max_qo_len >= _MIN_CPRR_QLEN:
         return _DCPDecodeRoute.CPRR
+    if supports_triton:
+        return _DCPDecodeRoute.TRITON
     if supports_segmented:
         return _DCPDecodeRoute.SEGMENTED
     raise RuntimeError(
         "ROCM_AITER_MLA DCP multi-token verify requires either segmented "
-        "MLA or the round-robin asm decode."
+        "MLA, the round-robin asm decode, or the gfx942 Triton verify path."
     )
 
 
@@ -444,11 +561,10 @@ class AiterMLABackend(MLACommonBackend):
 
 @dataclass
 class AiterMLADCPVerifyMetadata:
-    """One paged-KV row per verify token, for segmented DCP verification.
+    """One paged-KV row per verify token for causal DCP verification.
 
-    These are produced together or not at all, so they travel as one value: its
-    presence on the decode metadata *is* the routing decision the builder made,
-    and the impl does not re-derive it.
+    Segmented MLA and the gfx942 Triton path both consume this view. Which
+    kernel runs is ``AiterMLADecodeMetadata.dcp_route``.
     """
 
     # Local KV length of each verify row, already causally bounded.
@@ -486,7 +602,8 @@ class AiterMLADecodeMetadata(MLACommonDecodeMetadata):
     min_kv_seq_len: int = 1
     # Exactly one DCP decode route is selected by the metadata builder.
     dcp_route: _DCPDecodeRoute = _DCPDecodeRoute.PLAIN
-    # Set exactly when this batch routes to segmented DCP verification.
+    # Set when this batch takes a per-row DCP verify kernel (segmented MLA or
+    # gfx942 Triton). ``dcp_route`` selects which kernel.
     dcp_verify: AiterMLADCPVerifyMetadata | None = None
     # cprr only: global per-request page indptr and this rank's position.
     g_kv_indptr: torch.Tensor | None = None
@@ -507,6 +624,7 @@ class AiterMLADecodeMetadata(MLACommonDecodeMetadata):
 
 @dataclass
 class AiterMLAMetadata(MLACommonMetadata[AiterMLADecodeMetadata]):
+    dcp_context_row_indices: list[torch.Tensor] | None = None
     work_meta_data: torch.Tensor | None = None
     work_indptr: torch.Tensor | None = None
     work_info_set: torch.Tensor | None = None
@@ -563,8 +681,6 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         # query_start_loc flat for dummy requests. Only synthesize dummy rows
         # when every padded request maps to the same qlen and the q buffer has
         # exactly that many rows.
-        if num_decode_tokens <= int(qo_len.sum().item()):
-            return 0
         if num_decode_tokens % num_reqs != 0:
             return 0
 
@@ -572,19 +688,34 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         if uniform_qo_len <= 1:
             return 0
 
-        positive_qo_len = qo_len[qo_len > 0]
-        if positive_qo_len.numel() == qo_len.numel():
+        # qo_len is derived from query_start_loc_cpu, so it is already
+        # host-side and tiny (one entry per request). Reading it out once and
+        # deciding on Python ints avoids eight separate tensor dispatches --
+        # sum/item, boolean-mask index, all, eq, nonzero, item, any -- on the
+        # metadata-build path, which runs between decode steps while the GPUs
+        # are idle.
+        lens = qo_len.tolist()
+        if num_decode_tokens <= sum(lens):
             return 0
-        if positive_qo_len.numel() > 0:
+
+        first_zero = -1
+        num_positive = 0
+        for i, qlen in enumerate(lens):
+            if qlen > 0:
+                num_positive += 1
+                # A positive entry after a zero breaks the contiguous live
+                # prefix that the padded layout requires.
+                if first_zero >= 0:
+                    return 0
+            elif first_zero < 0:
+                first_zero = i
+
+        if num_positive == num_reqs:
+            return 0
+        if num_positive > 0:
             if max_qo_len != uniform_qo_len:
                 return 0
-            if not torch.all(positive_qo_len == uniform_qo_len):
-                return 0
-
-        zero_positions = torch.nonzero(qo_len == 0, as_tuple=False).flatten()
-        if zero_positions.numel() > 0:
-            first_zero = int(zero_positions[0].item())
-            if torch.any(qo_len[first_zero:] > 0):
+            if any(qlen != uniform_qo_len for qlen in lens if qlen > 0):
                 return 0
 
         return uniform_qo_len
@@ -598,6 +729,10 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
     ):
         parallel_config = vllm_config.parallel_config
         supports_segmented_dcp_verify = _segmented_dcp_verify_supported(
+            parallel_config.decode_context_parallel_size,
+            parallel_config.cp_kv_cache_interleave_size,
+        )
+        supports_triton_dcp_verify = _triton_dcp_verify_supported(
             parallel_config.decode_context_parallel_size,
             parallel_config.cp_kv_cache_interleave_size,
         )
@@ -617,7 +752,9 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             device,
             AiterMLAMetadata,
             supports_dcp_with_varlen=(
-                supports_segmented_dcp_verify or asm_dcp_verify_config
+                supports_segmented_dcp_verify
+                or asm_dcp_verify_config
+                or supports_triton_dcp_verify
             ),
         )
         self._asm_dcp_verify = False
@@ -642,7 +779,17 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                         else "This AITER build also lacks segmented MLA decode."
                     )
                 )
-        self._supports_segmented_dcp_verify = supports_segmented_dcp_verify
+        self._supports_segmented_dcp_verify = (
+            supports_segmented_dcp_verify
+            and _segmented_mla_fits_lds(
+                self.num_heads * self.dcp_world_size,
+                kv_cache_spec.block_size,
+                is_quantized_kv_cache(vllm_config.cache_config.cache_dtype),
+            )
+        )
+        self._use_triton_dcp_verify = (
+            supports_triton_dcp_verify and not self._supports_segmented_dcp_verify
+        )
         self._mla_max_split_per_batch = 0
         if self._asm_dcp_verify:
             # Cap on KV splits per batch; at low batch the KV axis is the only
@@ -650,6 +797,19 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             self._mla_max_split_per_batch = torch.cuda.get_device_properties(
                 device
             ).multi_processor_count
+
+        # Use the group's original format: decode normalizes E5M2 to "fp8".
+        kv_cache_dtype = getattr(kv_cache_spec, "cache_dtype_str", None)
+        if kv_cache_dtype is None:
+            kv_cache_dtype = vllm_config.cache_config.cache_dtype
+        self._supports_fused_dcp_prefill = _supports_fused_dcp_prefill_config(
+            kv_cache_dtype,
+            self.q_data_type,
+            self.mla_dims.kv_lora_rank,
+            self.mla_dims.qk_nope_head_dim,
+            self.mla_dims.qk_rope_head_dim,
+            self.mla_dims.v_head_dim,
+        )
 
         self.compilation_config = vllm_config.compilation_config
         self.decode_attn_out_dtype = vllm_config.model_config.dtype
@@ -668,7 +828,21 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         # (e.g. 16 with Eagle3), we expand block-level indices into per-token
         # flat indices since the aiter kernel always uses page_size=1 internally.
         self.kernel_block_size = kv_cache_spec.block_size
-        self._segmented_page_size = _segmented_mla_page_size(self.kernel_block_size)
+        # Generic Triton indexes physical KV blocks; segmented MLA indexes
+        # TILE subpages of them.
+        self._dcp_verify_page_size = (
+            kv_cache_spec.block_size
+            if self._use_triton_dcp_verify
+            else _segmented_mla_page_size(kv_cache_spec.block_size)
+        )
+        # A DCP rank's shard of the longest sequence bounds every verify row.
+        dcp_local_max_seq_len = (
+            cdiv(
+                vllm_config.model_config.max_model_len,
+                self.dcp_world_size * parallel_config.cp_kv_cache_interleave_size,
+            )
+            * parallel_config.cp_kv_cache_interleave_size
+        )
 
         # In the flat view (.view(-1,1,1,H)), each token is its own page,
         # so max_num_pages_per_req = max_model_len regardless of
@@ -831,21 +1005,16 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                 max_num_reqs, dtype=torch.int32, device=device
             )
 
-            if self._supports_segmented_dcp_verify and self._mtp_decode_qlen > 1:
+            if (
+                self._supports_segmented_dcp_verify or self._use_triton_dcp_verify
+            ) and self._mtp_decode_qlen > 1:
                 # Allocate even when CPRR is the preferred route: a later
                 # replay can fall below _MIN_CPRR_QLEN and needs these
-                # addresses. A DCP rank's shard of the longest sequence
-                # bounds every verify row, and full graphs need that bound
-                # to be constant.
-                num_dcp_partitions = (
-                    self.dcp_world_size * self.cp_kv_cache_interleave_size
-                )
-                graph_max_kv_seq_len = (
-                    cdiv(vllm_config.model_config.max_model_len, num_dcp_partitions)
-                    * self.cp_kv_cache_interleave_size
-                )
+                # addresses. Full graphs need the row bound to be constant.
                 max_verify_rows = max_num_reqs * self._mtp_decode_qlen
-                max_local_pages = cdiv(graph_max_kv_seq_len, self._segmented_page_size)
+                max_local_pages = cdiv(
+                    dcp_local_max_seq_len, self._dcp_verify_page_size
+                )
                 self._dcp_verify_buffers = AiterMLADCPVerifyMetadata(
                     row_lens=torch.zeros(
                         max_verify_rows, dtype=torch.int32, device=device
@@ -858,9 +1027,20 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                     qo_indptr=torch.arange(
                         max_verify_rows + 1, dtype=torch.int32, device=device
                     ),
-                    page_size=self._segmented_page_size,
-                    max_kv_seq_len=graph_max_kv_seq_len,
+                    page_size=self._dcp_verify_page_size,
+                    max_kv_seq_len=dcp_local_max_seq_len,
                 )
+        # gfx942 DCP verify launches the generic split-KV kernel, which draws
+        # its partials from the shared workspace. Reserve it before warmup
+        # locks the pool.
+        if self._use_triton_dcp_verify and self._mtp_decode_qlen > 1:
+            _reserve_triton_dcp_verify_workspace(
+                max_num_reqs * self._mtp_decode_qlen,
+                self._decode_num_heads,
+                dcp_local_max_seq_len,
+                self.mla_dims.kv_lora_rank,
+                current_platform.num_compute_units(),
+            )
 
     def _init_fp8_prefill_ps_buffers(
         self,
@@ -1138,7 +1318,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         block_table: torch.Tensor,
         dcp_tot_seq_lens: torch.Tensor,
     ) -> AiterMLADCPVerifyMetadata:
-        """Build one paged-KV row per verify token for segmented DCP verification.
+        """Build one paged-KV row per verify token for DCP verification.
 
         Every row is a single query (``qo_indptr`` is an arange), so the whole
         causal structure is carried by ``dcp_local_verify_row_lens`` and the
@@ -1162,7 +1342,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             if buffers is not None
             else max(1, int(row_lens.max().item()))
         )
-        page_size = self._segmented_page_size
+        page_size = self._dcp_verify_page_size
         max_local_pages = cdiv(max_kv_seq_len, page_size)
         if buffers is not None:
             row_block_table = buffers.block_table[:num_rows]
@@ -1180,7 +1360,9 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                 dtype=torch.int32,
                 device=block_table.device,
             )
-        self._fill_dcp_verify_page_table(row_block_table, block_table, num_reqs, qlen)
+        self._fill_dcp_verify_page_table(
+            row_block_table, block_table, num_reqs, qlen, page_size
+        )
         return AiterMLADCPVerifyMetadata(
             row_lens=row_lens,
             block_table=row_block_table,
@@ -1195,8 +1377,13 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         block_table: torch.Tensor,
         num_reqs: int,
         qlen: int,
+        page_size: int,
     ) -> None:
-        """Expand each request's blocks into the subpages one verify row reads.
+        """Fill one page list per request and broadcast it across qlen rows.
+
+        ``page_size`` is the unit the kernel indexes. Segmented MLA uses TILE
+        subpages; generic Triton uses the physical KV block. When those are
+        equal, pages_per_block is 1 and this copies block IDs as-is.
 
         Every row of a request shares the request's shard, so the page list is
         built once per request and repeated; only ``row_lens`` distinguishes the
@@ -1204,9 +1391,12 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         request's block table is always wider than the pages a row can reach.
         """
         kernel_block_size = self.kernel_block_size
-        page_size = self._segmented_page_size
         assert kernel_block_size is not None
-        assert page_size is not None
+        assert page_size > 0
+        assert kernel_block_size % page_size == 0, (
+            f"DCP verify page_size {page_size} must divide kernel_block_size "
+            f"{kernel_block_size}"
+        )
         pages_per_block = kernel_block_size // page_size
         max_local_pages = row_block_table.shape[1]
         max_local_blocks = cdiv(max_local_pages, pages_per_block)
@@ -1214,15 +1404,18 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             f"DCP verify needs {max_local_blocks} blocks per request but the "
             f"block table only has {block_table.shape[1]}"
         )
-        subpage_offsets = torch.arange(
-            pages_per_block,
-            dtype=block_table.dtype,
-            device=block_table.device,
-        )
-        per_req_page_table = (
-            block_table[:num_reqs, :max_local_blocks, None] * pages_per_block
-            + subpage_offsets
-        ).flatten(1)[:, :max_local_pages]
+        if pages_per_block == 1:
+            per_req_page_table = block_table[:num_reqs, :max_local_pages]
+        else:
+            subpage_offsets = torch.arange(
+                pages_per_block,
+                dtype=block_table.dtype,
+                device=block_table.device,
+            )
+            per_req_page_table = (
+                block_table[:num_reqs, :max_local_blocks, None] * pages_per_block
+                + subpage_offsets
+            ).flatten(1)[:, :max_local_pages]
         # Broadcast the request's page list across its rows instead of
         # materializing a repeat_interleave copy.
         row_block_table.unflatten(0, (num_reqs, qlen)).copy_(
@@ -1318,18 +1511,19 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         dcp_route = _DCPDecodeRoute.PLAIN
         if self.dcp_world_size > 1:
             dcp_route = _select_dcp_decode_route(
-                self._supports_segmented_dcp_verify,
-                causal,
-                int(max_qo_len),
-                self._asm_dcp_verify,
+                supports_segmented=self._supports_segmented_dcp_verify,
+                supports_triton=self._use_triton_dcp_verify,
+                causal=causal,
+                max_qo_len=int(max_qo_len),
+                asm_selected=self._asm_dcp_verify,
             )
 
-        # Segmented DCP verify carries its own per-row subpage table, so the
+        # Row-view DCP verify carries its own per-row page table, so the
         # flat per-token view is dead work for it. Leave the buffer alone and
         # hand the metadata None, so a future reader cannot pick up whatever
         # the previous batch left behind.
         paged_kv_indices = None
-        if dcp_route is not _DCPDecodeRoute.SEGMENTED:
+        if not _is_row_view_dcp_route(dcp_route):
             if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
                 self.paged_kv_indices.fill_(-1)
 
@@ -1406,13 +1600,12 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         has_persistent_metadata = False
         # Only the asm decode consumes the schedule, so gate on the routing
         # rather than on num_heads >= 16, which denies it to a padded rank
-        # running the same asm kernels. The predicates are disjoint -- decode
-        # is qlen==1, verify is qlen>1 -- and cover both Gluon entries plus the
-        # segmented DCP verify.
+        # running the same asm kernels. Gluon and the row-view DCP routes
+        # (segmented and gfx942 Triton) cover the non-ASM decode/verify paths.
         use_persistent_metadata = (
             not use_gluon_decode
             and not use_gluon_verify
-            and dcp_route is not _DCPDecodeRoute.SEGMENTED
+            and not _is_row_view_dcp_route(dcp_route)
             # A padded rank has no bf16 persistent kernel past qlen 4 where the
             # gfx950 fold is absent; the non-persistent entry covers it. fp8
             # keeps the schedule -- its fold rejects non-persistent outright.
@@ -1511,7 +1704,8 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                 min_kv_seq_len = int(per_req_len.min().item())
 
         dcp_verify = None
-        if dcp_route is _DCPDecodeRoute.SEGMENTED:
+        if _is_row_view_dcp_route(dcp_route):
+            assert causal
             assert dcp_tot_seq_lens_device is not None
             dcp_verify = self._build_dcp_verify_row_view(
                 int(max_qo_len),
@@ -1564,6 +1758,17 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         attn_metadata = super().build(
             common_prefix_len, common_attn_metadata, fast_build
         )
+        prefill = attn_metadata.prefill
+        if (
+            prefill is not None
+            and prefill.chunked_context is not None
+            and self.dcp_world_size > 1
+            and self._supports_fused_dcp_prefill
+        ):
+            attn_metadata.dcp_context_row_indices = [
+                context_row_indices(chunk, prefill.block_table.device)
+                for chunk in prefill.chunked_context.chunks
+            ]
         if (
             attn_metadata.decode is not None
             and attn_metadata.decode.has_persistent_metadata
@@ -1934,6 +2139,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         )
         AiterMLAHelper.check_num_heads_validity(num_heads)
         AiterMLAHelper.check_num_heads_validity(self._decode_num_heads)
+        self._sm_count = current_platform.num_compute_units()
 
         unsupported_features = [alibi_slopes, sliding_window, logits_soft_cap]
         if any(unsupported_features):
@@ -1961,6 +2167,101 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
 
             self._mla_prefill_ps_asm_fwd = mla_prefill_ps_asm_fwd
             self._mla_reduce_v1 = mla_reduce_v1
+
+    def _context_parallel_compute_prefill_context(
+        self,
+        q: torch.Tensor,
+        kv_c_and_k_pe_cache: torch.Tensor,
+        attn_metadata: MLACommonMetadata,
+        k_scale: torch.Tensor,
+        dcp_world_size: int,
+        fused_mla_kv_concat_fn: Callable[
+            [torch.Tensor, torch.Tensor, bool], tuple[torch.Tensor, torch.Tensor]
+        ]
+        | None = None,
+    ):
+        attn_metadata = cast(AiterMLAMetadata, attn_metadata)
+        assert attn_metadata.prefill is not None
+        prefill = attn_metadata.prefill
+        weight = getattr(self.kv_b_proj, "weight", None)
+        eligible = (
+            _supports_fused_dcp_prefill_config(
+                self.kv_cache_dtype,
+                prefill.q_data_type,
+                self.kv_lora_rank,
+                self.qk_nope_head_dim,
+                self.qk_rope_head_dim,
+                self.v_head_dim,
+            )
+            and q.dtype == torch.bfloat16
+            and weight is not None
+            and weight.dtype == torch.bfloat16
+            and weight.shape == (self.num_heads * 256, 512)
+            and weight.is_contiguous()
+            and getattr(self.kv_b_proj, "bias", None) is None
+            and getattr(self.kv_b_proj, "weight_scale", None) is None
+            and kv_c_and_k_pe_cache.is_contiguous()
+            and attn_metadata.dcp_context_row_indices is not None
+        )
+        if not eligible:
+            return super()._context_parallel_compute_prefill_context(
+                q,
+                kv_c_and_k_pe_cache,
+                attn_metadata,
+                k_scale,
+                dcp_world_size,
+                fused_mla_kv_concat_fn,
+            )
+        from vllm.platforms import current_platform
+
+        assert weight is not None
+        assert attn_metadata.dcp_context_row_indices is not None
+        chunked = prefill.chunked_context
+        assert chunked is not None and chunked.dcp_manager is not None
+        assert prefill.prefill_backend is not None
+        assert len(chunked.chunks) == len(attn_metadata.dcp_context_row_indices)
+        output = output_lse = None
+        for chunk, row_indices in zip(
+            chunked.chunks, attn_metadata.dcp_context_row_indices
+        ):
+            gathered = gather_compressed_context(
+                kv_c_and_k_pe_cache,
+                chunked.workspace,
+                prefill.block_table[chunk.request_slice],
+                chunk,
+                chunked.dcp_manager.kv_gather,
+                current_platform.fp8_dtype(),
+            )
+            k, v = expand_context(
+                gathered,
+                k_scale,
+                row_indices,
+                chunk.cu_seq_lens,
+                weight,
+                self.num_heads,
+                self.qk_nope_head_dim,
+                self.qk_rope_head_dim,
+                self.v_head_dim,
+            )
+            attn_output, attn_lse = prefill.prefill_backend.run_prefill_context_chunk(
+                chunk=chunk,
+                q=q[chunk.token_slice],
+                k=k,
+                v=v,
+            )
+            if output is None:
+                if len(chunked.chunks) == 1 and not chunked.empty_token_slices:
+                    return attn_output, attn_lse
+                output, output_lse = init_mla_context_partial(
+                    chunked,
+                    attn_output,
+                    attn_lse,
+                    num_tokens=q.shape[0],
+                )
+            accumulate_mla_context_chunk(
+                chunk, attn_output, attn_lse, output, output_lse
+            )
+        return output, output_lse
 
     def _flash_attn_varlen_diff_headdims(
         self, q, k, v, return_softmax_lse=False, softmax_scale=None, **kwargs
@@ -2228,6 +2529,64 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             out_dtype,
         )
 
+    def _forward_triton_dcp_verify(
+        self,
+        q_mla: torch.Tensor,
+        verify: AiterMLADCPVerifyMetadata,
+        kv_c_and_k_pe_cache: torch.Tensor,
+        layer: AttentionLayer,
+        out_dtype: torch.dtype,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """gfx942 causal verify using the LDS-safe generic split-KV kernel.
+
+        Each verify token is its own row whose causal window is its
+        ``row_lens`` entry. A zero-length row (an empty DCP shard or graph
+        padding) comes back as a NaN output with an LSE of -inf; the DCP
+        combine gives it zero weight and never reads the output.
+        """
+        num_rows, num_heads = q_mla.shape[:2]
+        # Stage 2 stores every output and LSE element, empty rows included.
+        output = torch.empty(
+            num_rows, num_heads, self.kv_lora_rank, dtype=out_dtype, device=q_mla.device
+        )
+        # Matches merge_mla_segments_triton and the fp32 LSE the DCP combine
+        # kernel is warmed up for.
+        lse = torch.empty(num_rows, num_heads, dtype=torch.float32, device=q_mla.device)
+        if envs.VLLM_BATCH_INVARIANT:
+            num_kv_splits = 1
+        else:
+            num_kv_splits = _triton_dcp_verify_num_kv_splits(
+                verify.max_kv_seq_len, num_rows, num_heads, self._sm_count
+            )
+        logits_shape = (num_rows, num_heads, num_kv_splits, self.kv_lora_rank + 1)
+        if is_workspace_manager_initialized():
+            (attn_logits,) = current_workspace_manager().get_simultaneous(
+                (logits_shape, torch.float32),
+            )
+        else:
+            attn_logits = torch.empty(
+                logits_shape, dtype=torch.float32, device=q_mla.device
+            )
+
+        paged_kv = kv_c_and_k_pe_cache.unsqueeze(2)
+        decode_attention_fwd(
+            q_mla,
+            paged_kv,
+            paged_kv[..., : self.kv_lora_rank],
+            output,
+            lse,
+            verify.block_table,
+            verify.row_lens,
+            attn_logits,
+            num_kv_splits,
+            self.scale,
+            paged_kv.size(1),
+            k_scale=layer._k_scale,
+            v_scale=layer._k_scale,
+            is_mla=True,
+        )
+        return output, lse
+
     def forward_mqa(
         self,
         q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
@@ -2338,6 +2697,23 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             return o, None
 
         dcp_route = decode.dcp_route
+        if dcp_route is _DCPDecodeRoute.TRITON:
+            verify = decode.dcp_verify
+            assert verify is not None
+            q_mla = torch.cat(q, dim=-1) if isinstance(q, tuple) else q
+            if (
+                is_quantized_kv_cache(self.kv_cache_dtype)
+                and q_mla.dtype != torch.bfloat16
+            ):
+                q_mla = q_mla.to(torch.bfloat16) * layer._q_scale
+            return self._forward_triton_dcp_verify(
+                q_mla,
+                verify,
+                kv_c_and_k_pe_cache,
+                layer,
+                decode.attn_out_dtype,
+            )
+
         if dcp_route is _DCPDecodeRoute.SEGMENTED:
             verify = decode.dcp_verify
             assert verify is not None
