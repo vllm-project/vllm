@@ -189,7 +189,6 @@ class TestCudagraphDispatcher:
         assert key == BatchDescriptor(num_tokens=15)
 
         # 4. invalid_modes={FULL} should have a fall back mode
-        #    (e.g., cascade attention)
         desc_full_exact = BatchDescriptor(num_tokens=8, uniform=False)
         rt_mode, key = dispatcher.dispatch(
             num_tokens=8,

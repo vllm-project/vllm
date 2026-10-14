@@ -257,7 +257,7 @@ async fn recv_engine_message(dealer: &mut DealerSocket) -> Vec<bytes::Bytes> {
     dealer.recv().await.unwrap().into_vec()
 }
 
-async fn recv_start_dp_wave(sub: &mut SubSocket) -> (u32, u32) {
+async fn recv_start_dp_wave(sub: &mut SubSocket) -> (u32, Option<u32>) {
     let frames = sub.recv().await.unwrap().into_vec();
     assert_eq!(frames.len(), 2);
     assert_eq!(
@@ -607,12 +607,27 @@ async fn coordinator_wave_control_tracks_pause_running_and_rebroadcasts() {
         let handshake_address = handshake_address.clone();
         async move {
             let mut engine = setup_mock_engine_sockets(handshake_address, &[0x00, 0x00]).await;
+            let coordinator_address = engine
+                .init
+                .addresses
+                .coordinator_input
+                .clone()
+                .expect("coordinator input address should be present");
             let mut coordinator =
                 engine.coordinator.take().expect("coordinator sockets should be present");
             let data_socket = engine.data_sockets.first_mut().expect("data socket");
 
             let (wave, exclude_engine) = recv_start_dp_wave(&mut coordinator.input_sub).await;
-            assert_eq!((wave, exclude_engine), (0, 0));
+            assert_eq!((wave, exclude_engine), (0, Some(0)));
+
+            let mut late_subscriber = SubSocket::new();
+            late_subscriber.connect(&coordinator_address).await.unwrap();
+            late_subscriber.subscribe("").await.unwrap();
+
+            let replay = recv_start_dp_wave(&mut late_subscriber).await;
+            assert_eq!(replay, (0, None));
+            let replay = recv_start_dp_wave(&mut coordinator.input_sub).await;
+            assert_eq!(replay, (0, None));
 
             let add = recv_engine_message(&mut data_socket.dealer).await;
             assert_eq!(add[0].as_ref(), &[0x00]);
@@ -656,7 +671,7 @@ async fn coordinator_wave_control_tracks_pause_running_and_rebroadcasts() {
             .await;
 
             let (wave, exclude_engine) = recv_start_dp_wave(&mut coordinator.input_sub).await;
-            assert_eq!((wave, exclude_engine), (1, 0));
+            assert_eq!((wave, exclude_engine), (1, Some(0)));
 
             let add = recv_engine_message(&mut data_socket.dealer).await;
             assert_eq!(add[0].as_ref(), &[0x00]);
@@ -693,7 +708,9 @@ async fn coordinator_wave_control_tracks_pause_running_and_rebroadcasts() {
             let data_socket = engine.data_sockets.first_mut().expect("data socket");
 
             let (wave, exclude_engine) = recv_start_dp_wave(&mut coordinator.input_sub).await;
-            assert_eq!((wave, exclude_engine), (0, 0));
+            assert_eq!((wave, exclude_engine), (0, Some(0)));
+            let replay = recv_start_dp_wave(&mut coordinator.input_sub).await;
+            assert_eq!(replay, (0, None));
 
             let add = recv_engine_message(&mut data_socket.dealer).await;
             assert_eq!(add[0].as_ref(), &[0x00]);
@@ -727,7 +744,7 @@ async fn coordinator_wave_control_tracks_pause_running_and_rebroadcasts() {
             .await;
 
             let (wave, exclude_engine) = recv_start_dp_wave(&mut coordinator.input_sub).await;
-            assert_eq!((wave, exclude_engine), (1, 0));
+            assert_eq!((wave, exclude_engine), (1, Some(0)));
 
             assert!(
                 timeout(
@@ -812,7 +829,7 @@ async fn coordinator_rebroadcasts_engine_start_wave_control() {
                 engine.coordinator.take().expect("coordinator sockets should be present");
 
             let (wave, exclude_engine) = recv_start_dp_wave(&mut coordinator.input_sub).await;
-            assert_eq!((wave, exclude_engine), (4, 1));
+            assert_eq!((wave, exclude_engine), (4, Some(1)));
 
             let _ = shutdown0_rx.await;
         }
@@ -838,7 +855,7 @@ async fn coordinator_rebroadcasts_engine_start_wave_control() {
             .await;
 
             let (wave, exclude_engine) = recv_start_dp_wave(&mut coordinator.input_sub).await;
-            assert_eq!((wave, exclude_engine), (4, 1));
+            assert_eq!((wave, exclude_engine), (4, Some(1)));
 
             let _ = shutdown1_rx.await;
         }
@@ -880,7 +897,7 @@ async fn coordinator_accepts_stats_only_outputs() {
         let data_socket = engine.data_sockets.first_mut().expect("data socket");
 
         let (wave, exclude_engine) = recv_start_dp_wave(&mut coordinator.input_sub).await;
-        assert_eq!((wave, exclude_engine), (0, 0));
+        assert_eq!((wave, exclude_engine), (0, Some(0)));
 
         send_outputs(
             &mut coordinator.output_push,
