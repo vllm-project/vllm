@@ -3,6 +3,11 @@ description: Optimize a model end to end on one engine and GPU, optionally shrin
 title: "Optimize model: "
 labels: ["optimization"]
 body:
+  - type: markdown
+    attributes:
+      value: |
+        ## Essential
+        What the planner must know to start.
   - type: input
     attributes:
       label: Model
@@ -10,10 +15,6 @@ body:
       placeholder: meta-llama/Llama-3.1-8B
     validations:
       required: true
-  - type: input
-    attributes:
-      label: Model revision
-      description: The model's Hugging Face commit, branch or tag. Leave empty for main.
   - type: dropdown
     attributes:
       label: Engine
@@ -30,40 +31,59 @@ body:
       description: The GPU to optimize for.
       options:
         - B200
+        - B300
         - H100
     validations:
       required: true
+  - type: input
+    attributes:
+      label: Cost budget (USD)
+      description: The most this request may spend on model calls, in dollars. The optimization stops when it is used up.
+      placeholder: "100"
+    validations:
+      required: true
+  - type: markdown
+    attributes:
+      value: |
+        ## Advanced
+        Every field here is filled in with the recommended value. Leave them as they are unless you have a reason.
+  - type: input
+    attributes:
+      label: Model revision
+      description: The model's Hugging Face commit, branch or tag.
+      value: main
   - type: textarea
     attributes:
       label: Metrics
-      description: What to optimize, one per line. Leave empty for the defaults (output tokens per second).
-      placeholder: |
+      description: >-
+        What to measure, one per line. Throughput (output tokens per second) is what a change is judged on; time to
+        first token, inter-token latency and request latency are reported beside it.
+      value: |
         throughput
   - type: input
     attributes:
       label: Prompts
-      description: How many prompts each measurement sends. Leave empty for the default.
-      placeholder: "64"
+      description: How many requests each measurement sends to the served engine.
+      value: "64"
   - type: input
     attributes:
       label: Input tokens per prompt
-      description: Leave empty for the default.
-      placeholder: "1024"
+      value: "1024"
   - type: input
     attributes:
       label: Output tokens per prompt
-      description: Leave empty for the default.
-      placeholder: "128"
+      value: "128"
+  - type: input
+    attributes:
+      label: Concurrency
+      description: How many requests are in flight at once while the engine is served and measured.
+      value: "32"
   - type: textarea
     attributes:
       label: Engine arguments
       description: The engine settings to optimize under, one name=value per line. Leave empty for the engine's defaults.
       placeholder: |
         max_num_seqs=128
-  - type: input
-    attributes:
-      label: Minimum speedup
-      description: The end-to-end speedup a result must reach, such as 1.05. Leave empty for the default.
   - type: textarea
     attributes:
       label: Hints
@@ -114,6 +134,26 @@ body:
       placeholder: |
         fp8
         nvfp4
+  - type: input
+    attributes:
+      label: Planner model
+      description: The model that reads the request and writes the plan.
+      value: claude-opus-5-5
+  - type: input
+    attributes:
+      label: Planner budget (USD)
+      description: The most the planner may spend, in dollars.
+      value: "5"
+  - type: input
+    attributes:
+      label: Task agent model
+      description: The model the lead and the engineers use to write and test the new code.
+      value: claude-opus-5-5
+  - type: input
+    attributes:
+      label: Task agent budget (USD)
+      description: The most all task agents may spend together, in dollars.
+      value: "50"
   - type: checkboxes
     attributes:
       label: Start
