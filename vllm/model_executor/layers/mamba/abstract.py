@@ -23,6 +23,8 @@ class MambaBase(AttentionLayerBase):
     # Contains the KV cache (mamba state) for the layer
     # in the shape specified by `self.get_state_shape`.
     kv_cache: tuple[torch.Tensor, ...]
+    # ReplaySSM rings are auxiliary backend state, not canonical Mamba pages.
+    replayssm_cache: tuple[torch.Tensor, ...] = ()
     supports_dcp: bool = False
 
     def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
@@ -62,6 +64,12 @@ class MambaBase(AttentionLayerBase):
     def get_state_dtype(self) -> tuple[torch.dtype, ...]:
         pass
 
+    def get_replayssm_state_shape(self) -> tuple[tuple[int, ...], ...]:
+        return ()
+
+    def get_replayssm_state_dtype(self) -> tuple[torch.dtype, ...]:
+        return ()
+
     def get_prefill_checkpoint_alignment(self) -> int | None:
         """Token alignment of the checkpoint offsets this layer can export from
         inside a prefill, if any; in align mode, the platform makes Mamba blocks
@@ -76,6 +84,8 @@ class MambaBase(AttentionLayerBase):
         return MambaSpec(
             shapes=tuple(self.get_state_shape()),
             dtypes=self.get_state_dtype(),
+            replayssm_shapes=self.get_replayssm_state_shape(),
+            replayssm_dtypes=self.get_replayssm_state_dtype(),
             block_size=mamba_block_size,
             page_size_padded=page_size_padded,
             mamba_type=self.mamba_type,

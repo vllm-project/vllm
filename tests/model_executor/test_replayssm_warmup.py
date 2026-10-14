@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -39,8 +40,9 @@ def _autotune_runner(
 ) -> SimpleNamespace:
     return SimpleNamespace(
         vllm_config=SimpleNamespace(
-            cache_config=SimpleNamespace(use_replayssm=use_replayssm),
-            mamba_config=SimpleNamespace(backend=backend),
+            use_flashinfer_replayssm=(
+                use_replayssm and backend == MambaBackendEnum.FLASHINFER
+            ),
             use_v2_model_runner=use_v2_model_runner,
         ),
         uniform_decode_query_len=query_len,
@@ -117,26 +119,30 @@ def test_replayssm_autotune_kwargs_skipped(runner_kwargs, flashinfer_supported):
     assert result is None
 
 
-def test_replayssm_autotune_slots_restore_state_and_trackers():
-    mixer = MambaMixer2.__new__(MambaMixer2)
-    torch.nn.Module.__init__(mixer)
-    mixer.use_replayssm = True
-    mixer.replayssm_buffer_len = 16
-    mixer.kv_cache = (
-        torch.full((4, 2), 3.0),
-        torch.full((4, 2), 3.0),
-        *(torch.full((4, 2, 17), 3.0) for _ in range(3)),
-    )
-    mixer._replayssm_ring_start = torch.full((4,), 3, dtype=torch.int32)
-    mixer._replayssm_prev_num_accepted = torch.full((4,), 3, dtype=torch.int32)
-    mixer._replayssm_prev_query_len = torch.full((4,), 3, dtype=torch.int32)
-    tracked = (
-        *mixer.kv_cache,
-        mixer._replayssm_ring_start,
-        mixer._replayssm_prev_num_accepted,
-        mixer._replayssm_prev_query_len,
-    )
-
+@pytest.mark.parametrize(
+    ("use_v2", "fail_warmup"),
+    [(False, False), (True, False), (False, True)],
+    ids=["v1-success", "v2-success", "v1-failure"],
+)
+def test_replayssm_autotune_slots_restore_state_and_trackers(use_v2, fail_warmup):
+    raw = tuple(torch.full((5, 2, 17), 3.0) for _ in range(3))
+    mixers = []
+    states: list[torch.Tensor] = []
+    trackers: list[torch.Tensor] = []
+    for width in (3, 11):
+        mixer = MambaMixer2.__new__(MambaMixer2)
+        torch.nn.Module.__init__(mixer)
+        mixer.use_replayssm = True
+        mixer.replayssm_buffer_len = 16
+        mixer.kv_cache = tuple(torch.full((5, 2), 3.0) for _ in range(2))
+        mixer.replayssm_cache = tuple(tensor[:, :, :width] for tensor in raw)
+        mixer._replayssm_ring_start = torch.full((5,), 3, dtype=torch.int32)
+        mixer._replayssm_prev_num_accepted = torch.full((5,), 3, dtype=torch.int32)
+        states.extend((*mixer.kv_cache, *mixer.replayssm_cache))
+        trackers.extend(
+            (mixer._replayssm_ring_start, mixer._replayssm_prev_num_accepted)
+        )
+        mixers.append(mixer)
     block_ids = np.arange(10, 14, dtype=np.int32).reshape(4, 1)
     original_block_ids = block_ids.copy()
     block_table = SimpleNamespace(block_table=SimpleNamespace(np=block_ids))
@@ -144,22 +150,38 @@ def test_replayssm_autotune_slots_restore_state_and_trackers():
         block_tables=[block_table], commit_block_table=Mock()
     )
     runner = SimpleNamespace(
-        vllm_config=SimpleNamespace(use_v2_model_runner=False),
+        vllm_config=SimpleNamespace(use_v2_model_runner=use_v2),
         input_batch=SimpleNamespace(block_table=multi_group_block_table),
-        get_model=lambda: SimpleNamespace(modules=lambda: (mixer,)),
+        block_tables=SimpleNamespace(get_dummy_block_tables=Mock()),
+        get_model=lambda: SimpleNamespace(modules=lambda: mixers),
     )
 
-    with warmup._temporary_replayssm_autotune_state(runner, 2):
-        assert block_ids[:2, 0].tolist() == [1, 2]
-        for tensor in tracked:
+    error = (
+        pytest.raises(RuntimeError, match="warmup failed")
+        if fail_warmup
+        else nullcontext()
+    )
+    with error, warmup._temporary_replayssm_autotune_state(runner, 2):
+        if not use_v2:
+            assert block_ids[:2, 0].tolist() == [1, 2]
+        for tensor in (*states, *trackers):
             tensor[1:3].fill_(9)
+        if fail_warmup:
+            raise RuntimeError("warmup failed")
 
     assert np.array_equal(block_ids, original_block_ids)
-    assert multi_group_block_table.commit_block_table.call_args_list == [
-        ((2,), {}),
-        ((2,), {}),
-    ]
-    for tensor in tracked:
+    if use_v2:
+        runner.block_tables.get_dummy_block_tables.assert_called_once_with(2)
+    else:
+        assert multi_group_block_table.commit_block_table.call_args_list == [
+            ((2,), {}),
+            ((2,), {}),
+        ]
+    for tensor in states:
         assert torch.count_nonzero(tensor[1:3]) == 0
         assert torch.all(tensor[0] == 3)
-        assert torch.all(tensor[3] == 3)
+        assert torch.all(tensor[3:] == 3)
+    for tensor in trackers:
+        assert torch.count_nonzero(tensor) == 0
+    for tensor in raw:
+        assert torch.all(tensor[1:3, :, 11:] == 3)

@@ -1,45 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
 from vllm.v1.core.kv_cache_planning import check_enough_kv_cache_memory
 from vllm.v1.kv_cache_interface import FullAttentionSpec
+from vllm.v1.kv_cache_layout import KVCacheLayout
 
 
 def test_kv_cache_oom_no_memory():
-    from unittest.mock import MagicMock
-
-    config = MagicMock()
-    config.model_config.max_model_len = 2048
-
-    spec = {
-        "layer_0": FullAttentionSpec(
-            block_size=16,
-            num_kv_heads=8,
-            head_size=128,
-            dtype=torch.float16,
-        )
-    }
-
-    with pytest.raises(ValueError):
-        check_enough_kv_cache_memory(config, spec, 0)
-
-
-def test_kv_cache_oom_insufficient_memory(monkeypatch):
-    from unittest.mock import MagicMock
-
-    config = MagicMock()
-    config.model_config.max_model_len = 2048
-    config.cache_config.block_size = 16
-    config.parallel_config.tensor_parallel_size = 1
-    config.parallel_config.pipeline_parallel_size = 1
-    config.parallel_config.decode_context_parallel_size = 1
-
-    monkeypatch.setattr(
-        "vllm.v1.core.kv_cache_planning.max_memory_usage_bytes",
-        lambda c, s: 100 * 1024**3,  # 100 GiB
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(max_model_len=2048),
+        cache_config=SimpleNamespace(
+            get_resolved_kv_cache_layout=lambda: KVCacheLayout.BLHNC,
+        ),
+        scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
+        attention_config=SimpleNamespace(hisparse_config=None),
     )
 
     spec = {
@@ -51,5 +30,63 @@ def test_kv_cache_oom_insufficient_memory(monkeypatch):
         )
     }
 
+    with pytest.raises(ValueError, match="No available memory for the cache blocks"):
+        check_enough_kv_cache_memory(config, spec, 0)
+
+
+def test_kv_cache_oom_insufficient_memory():
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(max_model_len=2048),
+        cache_config=SimpleNamespace(
+            get_resolved_kv_cache_layout=lambda: KVCacheLayout.BLHNC,
+        ),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
+        attention_config=SimpleNamespace(hisparse_config=None),
+    )
+
+    spec = {
+        "layer_0": FullAttentionSpec(
+            block_size=16,
+            num_kv_heads=8,
+            head_size=128,
+            dtype=torch.float16,
+        )
+    }
+
+    with pytest.raises(
+        ValueError, match="To serve at least one request with the model's max seq len"
+    ):
+        check_enough_kv_cache_memory(config, spec, 64 * spec["layer_0"].page_size_bytes)
+    assert config.model_config.max_model_len == 2048
+
+
+def test_kv_cache_oom_insufficient_memory_estimate(monkeypatch):
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(max_model_len=2048),
+        cache_config=SimpleNamespace(
+            get_resolved_kv_cache_layout=lambda: KVCacheLayout.BLHNC,
+        ),
+        parallel_config=SimpleNamespace(
+            tensor_parallel_size=1,
+            pipeline_parallel_size=1,
+            decode_context_parallel_size=1,
+        ),
+        scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
+        attention_config=SimpleNamespace(hisparse_config=None),
+    )
+    monkeypatch.setattr(
+        "vllm.v1.core.kv_cache_planning._max_memory_usage_bytes_from_groups",
+        lambda c, s: 100 * 1024**3,
+    )
+    spec = {
+        "layer_0": FullAttentionSpec(
+            block_size=16,
+            num_kv_heads=8,
+            head_size=128,
+            dtype=torch.float16,
+        )
+    }
+
     with pytest.raises(ValueError):
-        check_enough_kv_cache_memory(config, spec, 1024**3)  # 1 GiB
+        check_enough_kv_cache_memory(config, spec, 1024**3)
