@@ -450,9 +450,11 @@ class ServingTokens(GenerateBaseServing):
                 index=output.index,
                 logprobs=logprobs,
                 finish_reason=output.finish_reason if output.finish_reason else "stop",
+                stop_reason=output.stop_reason,
                 token_ids=as_list(output.token_ids),
                 routed_experts=routed_experts_b64,
                 sampling_mask=sampling_mask,
+                weight_versions=output.weight_versions,
             )
             if text_mode:
                 text_choices.append(
@@ -622,9 +624,11 @@ class ServingTokens(GenerateBaseServing):
                         index=i,
                         logprobs=logprobs,
                         finish_reason=finish_reason,
+                        stop_reason=output.stop_reason,
                         token_ids=as_list(delta_token_ids),
                         routed_experts=routed_experts_b64,
                         sampling_mask=sampling_mask,
+                        weight_versions=output.weight_versions,
                     )
                     chunk: GenerateTokensStreamResponse | GenerateTextStreamResponse
                     if text_mode:
