@@ -144,7 +144,7 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
             "<|vision_start|><|video_pad|><|vision_end|>"
             "Describe this video in one sentence."
         ),
-        needs_video_metadata=False,
+        needs_video_metadata=True,
         marks=[pytest.mark.core_model],
     ),
     "kimi_vl": VitCudagraphTestConfig(
@@ -172,6 +172,24 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
                 dummy_hf_overrides,
                 model_arch="KimiVLForConditionalGeneration",
             ),
+        },
+        marks=[pytest.mark.core_model],
+    ),
+    "minimax_m3": VitCudagraphTestConfig(
+        model="MiniMaxAI/MiniMax-M3",
+        modalities=["image"],
+        image_prompt=("]~b]user\n]<]image[>[What is in this image?[e~[\n]~b]ai\n"),
+        compilation_config_overrides={
+            "encoder_cudagraph_token_budgets": [512],
+        },
+        vllm_runner_kwargs={
+            "trust_remote_code": True,
+            "load_format": "dummy",
+            "hf_overrides": partial(
+                dummy_hf_overrides,
+                model_arch="MiniMaxM3SparseForConditionalGeneration",
+            ),
+            "mm_processor_kwargs": {"max_long_side_pixel": 336},
         },
         marks=[pytest.mark.core_model],
     ),
@@ -236,7 +254,11 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
         },
         vllm_runner_kwargs={
             "load_format": "dummy",
-            "attention_backend": "FLASHMLA_SPARSE_DSV41",
+            "attention_backend": (
+                "ROCM_FLASHMLA_SPARSE_DSV4"
+                if current_platform.is_rocm()
+                else "FLASHMLA_SPARSE_DSV41"
+            ),
             "hf_overrides": partial(
                 dummy_hf_overrides,
                 model_arch="DeepseekV41ForCausalLM",

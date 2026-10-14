@@ -177,7 +177,7 @@ def test_rust_build_cache_excludes_git_metadata() -> None:
         assert "source=.git,target=.git" not in cached_run
         assert "source=.git,target=.git" in exact_version_stage
         assert 'SETUPTOOLS_SCM_PRETEND_METADATA="{dirty=false}"' in exact_version_stage
-        assert "bash build_rust.sh" in exact_version_stage
+        assert "bash tools/build_rust.sh" in exact_version_stage
 
 
 def test_rocm_ci_base_bake_embeds_content_hash_label() -> None:
