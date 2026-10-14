@@ -13,6 +13,10 @@ from vllm.config import VllmConfig
 from vllm.distributed import divide
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fusion.quant_activation import (
+    QuantizedActivation,
+    get_input_quant_key,
+)
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     RowParallelLinear,
@@ -37,8 +41,9 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn,
     causal_conv1d_update,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.model_executor.model_loader.weight_utils import sharded_weight_loader
-from vllm.model_executor.utils import set_weight_attrs
+from vllm.model_executor.utils import is_weights_pre_processed, set_weight_attrs
 from vllm.models.kimi_k3.amd.kda_metadata import KimiK3ROCmKDABackend
 from vllm.models.kimi_k3.amd.ops.kda_checkpoint import (
     KimiK3ROCmKDAPrefillCheckpointExporter,
@@ -49,8 +54,6 @@ from vllm.models.kimi_k3.amd.ops.kda_chunk import (
 )
 from vllm.models.kimi_k3.amd.ops.kda_decode import (
     is_fused_kda_decode_supported,
-    make_decode_conv1d_weight_loader,
-    make_decode_norm_weight_loader,
 )
 from vllm.models.kimi_k3.amd.ops.kda_prefill import chunk_kda_prefill
 from vllm.models.kimi_k3.amd.ops.third_party.kda import (
@@ -199,19 +202,11 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         self.register_buffer(
             "decode_conv1d_weight", decode_conv1d_weight, persistent=False
         )
-        if decode_conv1d_weight is None:
-            conv1d_weight_loader = _make_fused_conv1d_weight_loader(
-                [self.projection_size] * 3,
-                self.tp_size,
-                self.tp_rank,
-            )
-        else:
-            conv1d_weight_loader = make_decode_conv1d_weight_loader(
-                [self.projection_size] * 3,
-                self.tp_size,
-                self.tp_rank,
-                decode_conv1d_weight,
-            )
+        conv1d_weight_loader = _make_fused_conv1d_weight_loader(
+            [self.projection_size] * 3,
+            self.tp_size,
+            self.tp_rank,
+        )
         set_weight_attrs(self.conv1d.weight, {"weight_loader": conv1d_weight_loader})
 
         self.A_log = nn.Parameter(
@@ -270,12 +265,6 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 dtype=torch.float32,
                 device=self.o_norm.weight.device,
             )
-            if hasattr(self.o_norm.weight, "weight_loader"):
-                delattr(self.o_norm.weight, "weight_loader")
-            set_weight_attrs(
-                self.o_norm.weight,
-                {"weight_loader": make_decode_norm_weight_loader(decode_norm_weight)},
-            )
         self.register_buffer("decode_norm_weight", decode_norm_weight, persistent=False)
         self.o_proj = RowParallelLinear(
             self.projection_size,
@@ -290,6 +279,19 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
 
+    @torch.no_grad()
+    def process_weights_after_loading(self, act_dtype: torch.dtype) -> None:
+        if is_weights_pre_processed():
+            return
+        if self.decode_conv1d_weight is not None:
+            self.decode_conv1d_weight.copy_(
+                self.conv1d.weight.view(
+                    3, self.local_projection_size, self.conv_size
+                ).transpose(1, 2)
+            )
+        if self.decode_norm_weight is not None:
+            self.decode_norm_weight.copy_(self.o_norm.weight)
+
     def rearrange_mixed_qkv(
         self, mixed_qkv: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -300,13 +302,16 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         qkv = qkv.permute(1, 0, 2, 3).contiguous().unsqueeze(1)
         return qkv.unbind(0)
 
+    def get_input_quant_key(self) -> QuantKey | None:
+        return get_input_quant_key(self.in_proj_qkvgfab)
+
     def forward(
         self,
-        hidden_states: torch.Tensor,
+        hidden_states: torch.Tensor | QuantizedActivation,
         positions: torch.Tensor,
     ) -> torch.Tensor:
-        num_tokens = hidden_states.size(0)
         projected_qkvgfab = self.in_proj_qkvgfab(hidden_states)[0]
+        num_tokens = projected_qkvgfab.shape[0]
 
         split_sizes = [
             3 * self.local_projection_size,
@@ -326,8 +331,8 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
 
         core_attn_out = torch.empty(
             (1, num_tokens, self.local_num_heads, self.head_dim),
-            dtype=hidden_states.dtype,
-            device=hidden_states.device,
+            dtype=projected_qkvgfab.dtype,
+            device=projected_qkvgfab.device,
         )
 
         self._forward(

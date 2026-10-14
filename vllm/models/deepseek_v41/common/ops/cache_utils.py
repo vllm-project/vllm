@@ -1089,7 +1089,8 @@ class CombineTopkSwaIndicesKernel(
             token_idx_in_query = token_idx - query_start
             pos = start_pos + token_idx_in_query
             if COMPRESS_RATIO > 0:
-                topk_len = tl.minimum((pos + 1) // COMPRESS_RATIO, TOP_K)
+                # Warmup batches can put pos below zero; keep the length >= 0.
+                topk_len = tl.maximum(tl.minimum((pos + 1) // COMPRESS_RATIO, TOP_K), 0)
             else:
                 # SWA-only layers pass TOP_K=0; skip the division entirely
                 # (integer div by constexpr 0 is UB and yields garbage, which
@@ -1100,7 +1101,7 @@ class CombineTopkSwaIndicesKernel(
             # start (SWA bounded replay), so the window cannot start before
             # the gathered buffer does.
             swa_start = tl.maximum(swa_start, gather_start)
-            swa_len = pos - swa_start + 1
+            swa_len = tl.maximum(pos - swa_start + 1, 0)
 
             offset = tl.arange(0, PADDED_TOP_K)
             mask = offset < topk_len
@@ -1108,9 +1109,12 @@ class CombineTopkSwaIndicesKernel(
                 topk_indices_ptr + token_idx * topk_indices_stride + offset,
                 mask=mask,
             )
+            # A failed (-1) or out-of-pool candidate stays -1 instead of landing
+            # in the previous request's rows or this request's SWA rows.
+            valid = (topk_indices >= 0) & (topk_indices < N)
             tl.store(
                 combined_indices_ptr + token_idx * combined_indices_stride + offset,
-                topk_indices + M * batch_idx,
+                tl.where(valid, topk_indices + M * batch_idx, -1),
                 mask=mask,
             )
             # Index into gathered buffer: N + (position - gather_start)
