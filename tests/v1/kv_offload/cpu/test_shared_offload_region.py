@@ -45,6 +45,7 @@ def _make_region(
     num_workers: int = 1,
     rank: int = 0,
     barrier=None,
+    populate_shard: tuple[int, int] | None = None,
 ) -> SharedOffloadRegion:
     assert cpu_page_size % PAGE_SIZE == 0
     return SharedOffloadRegion(
@@ -54,6 +55,7 @@ def _make_region(
         kv_bytes_per_chunk=num_workers * cpu_page_size,
         cpu_page_size=cpu_page_size,
         barrier=barrier,
+        populate_shard=populate_shard,
     )
 
 
@@ -524,6 +526,25 @@ def test_madvise_success_selects_madvise_population(iid, monkeypatch):
         assert fallback_calls == [], (
             "native-path constructor must not invoke the fallback helper"
         )
+
+
+@pytest.mark.parametrize(
+    "shard, expected",
+    [((1, 2), [(3 * PAGE_SIZE, 3 * PAGE_SIZE)]), ((3, 4), [])],
+)
+def test_populate_shard_prefaults_only_its_share(iid, monkeypatch, shard, expected):
+    """Workers that map the same bytes each pre-fault one contiguous share
+    (page-rounded; a trailing share may be empty) instead of the whole region."""
+    from vllm.v1.kv_offload.cpu import shared_offload_region as sor
+
+    madvise_calls: list[tuple[int, int]] = []
+    monkeypatch.setattr(
+        sor,
+        "_madvise_populate_write",
+        lambda mm, off, ln: madvise_calls.append((off, ln)),
+    )
+    with _region(iid, num_chunks=3, num_workers=2, populate_shard=shard):
+        assert madvise_calls == [(0, PAGE_SIZE), *expected]
 
 
 def test_madvise_einval_selects_fallback_for_ranked_region(iid, monkeypatch):
@@ -1037,6 +1058,22 @@ def test_ftruncate_failure_cleans_up_creator(monkeypatch):
 # ---------------------------------------------------------------------------
 # Unlink-after-barrier — leak immunity to hard kills
 # ---------------------------------------------------------------------------
+
+
+def test_cleanup_keeps_region_mapped_while_buffers_are_exported(iid):
+    """A native user's buffer export must block unmapping -- unmapping under it
+    would let the NIC write into reused address space. The pathname still goes."""
+    region = _make_region(iid)
+    export = ctypes.c_char.from_buffer(region.mmap_obj)
+    try:
+        region.cleanup()
+        assert region.mmap_obj is not None and not region.mmap_obj.closed
+        assert not os.path.exists(region.mmap_path), "pathname must still go"
+        assert region.mmap_obj[0:1] == b"\x00", "mapping must stay readable"
+    finally:
+        del export
+        region.mmap_obj.close()
+        _cleanup_file(region.mmap_path)
 
 
 def test_backing_file_unlinked_after_barrier(iid):
