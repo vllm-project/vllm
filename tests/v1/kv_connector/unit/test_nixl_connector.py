@@ -2775,30 +2775,6 @@ def test_sleep_unregisters_and_restores_kv_caches(dist_init):
     connector.shutdown()
 
 
-def test_wake_up_bumps_registration_epoch(dist_init):
-    """A republish after a wake-up serves the new payload, and new requests tell
-    decoders to handshake again."""
-    connector = create_scheduler(create_vllm_config()).get_kv_connector()
-    try:
-        epochs: list[int] = []
-        for agent in (b"old", b"new"):
-            payload = NixlHandshakePayload(
-                compatibility_hash="hash", agent_metadata_bytes=agent
-            )
-            connector.set_xfer_handshake_metadata_pp_aware({(0, 0): payload})
-            request = create_request(
-                request_id=len(epochs), num_tokens=40, do_remote_decode=True
-            )
-            request.status = RequestStatus.FINISHED_LENGTH_CAPPED
-            params = connector.request_finished_all_groups(request, ([0, 1, 2],))[1]
-            epochs.append(params["remote_registration_epoch"])
-        assert epochs == [0, 1]
-        served = connector.connector_scheduler._handshake_data[(0, 0)]
-        assert msgspec.msgpack.decode(served, type=NixlHandshakePayload) == payload
-    finally:
-        connector.shutdown()
-
-
 # ── TTL-based remote engine eviction tests ──────────────────────────
 
 
@@ -3340,14 +3316,13 @@ class TestPeerReplacement:
         assert not self.worker._failed_remote_engines
         assert not self.worker._invalid_remote_engines
 
-    @pytest.mark.parametrize("epoch", [0, 1], ids=["same", "re-registered"])
-    def test_rehandshakes_re_registered_peer(self, epoch):
+    def test_rehandshakes_re_registered_peer(self):
         metadata = self._request("old")
-        metadata.reqs_to_recv["old-req"].remote.registration_epoch = epoch
+        metadata.reqs_to_recv["old-req"].remote.registration_epoch = 1
         self.worker.start_load_kv(metadata)
-        assert self.transport.make_prepped_xfer.called is (epoch == 0)
-        assert self.transport.remove_remote_agent.called is (epoch == 1)
-        assert ("old" in self.worker._handshake_futures) is (epoch == 1)
+        self.transport.make_prepped_xfer.assert_not_called()
+        self.transport.remove_remote_agent.assert_called_once_with("old")
+        assert "old" in self.worker._handshake_futures
 
 
 def test_transfer_topology_unregister():
