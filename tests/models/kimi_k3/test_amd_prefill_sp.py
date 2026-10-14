@@ -20,10 +20,13 @@ from tests.utils import (
     multi_gpu_test,
 )
 from vllm.distributed import get_tp_group
-from vllm.model_executor.layers.fused_moe.runner import moe_runner
+from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import ReplicatedLinear
-from vllm.models.kimi_k3.amd import latent_moe_runner, sp
+from vllm.model_executor.layers.linear import ColumnParallelLinear, ReplicatedLinear
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kFp8DynamicTokenSym,
+)
+from vllm.models.kimi_k3.amd import sp
 from vllm.models.kimi_k3.amd.latent_moe_runner import ROCmLatentMoERunner
 from vllm.models.kimi_k3.amd.linear import KimiRoutedOutputTransform
 from vllm.platforms import current_platform
@@ -42,20 +45,39 @@ EPS = 1e-5
 DTYPE = torch.bfloat16
 
 
-def _build_transform(device: torch.device) -> KimiRoutedOutputTransform:
+def _build_transform(
+    device: torch.device, tp_world: int, rank: int, row_sharded: bool
+) -> tuple[KimiRoutedOutputTransform, torch.Tensor]:
+    """Returns the transform and the full up-projection weight."""
     norm = RMSNorm(LATENT_SIZE, eps=EPS).to(device=device, dtype=DTYPE)
-    up_proj = ReplicatedLinear(
-        LATENT_SIZE,
-        HIDDEN_SIZE,
-        bias=False,
-        params_dtype=DTYPE,
-        prefix="routed_expert_up_proj",
-    ).to(device=device)
-
     torch.manual_seed(0)
     norm.weight.data.copy_(1 + 0.1 * torch.randn_like(norm.weight))
-    up_proj.weight.data.copy_(torch.randn_like(up_proj.weight) / LATENT_SIZE**0.5)
-    return KimiRoutedOutputTransform(norm, up_proj)
+    weight = torch.randn(HIDDEN_SIZE, LATENT_SIZE, device=device, dtype=DTYPE)
+    weight /= LATENT_SIZE**0.5
+
+    up_proj: ColumnParallelLinear | ReplicatedLinear
+    if row_sharded:
+        # The layout KimiMoE uses under TP: each rank stores its output rows.
+        up_proj = ColumnParallelLinear(
+            LATENT_SIZE,
+            HIDDEN_SIZE,
+            bias=False,
+            gather_output=True,
+            params_dtype=DTYPE,
+            prefix="routed_expert_up_proj",
+        ).to(device=device)
+        rows = HIDDEN_SIZE // tp_world
+        up_proj.weight.data.copy_(weight[rank * rows : (rank + 1) * rows])
+    else:
+        up_proj = ReplicatedLinear(
+            LATENT_SIZE,
+            HIDDEN_SIZE,
+            bias=False,
+            params_dtype=DTYPE,
+            prefix="routed_expert_up_proj",
+        ).to(device=device)
+        up_proj.weight.data.copy_(weight)
+    return KimiRoutedOutputTransform(norm, up_proj, row_sharded=row_sharded), weight
 
 
 def _tail_runner(
@@ -64,6 +86,7 @@ def _tail_runner(
     runner = object.__new__(ROCmLatentMoERunner)
     attrs = {
         "routed_output_transform": transform,
+        "_up_proj_preshard": transform.row_sharded,
         "_up_proj_shard_size": HIDDEN_SIZE // tp_world,
         "_logged_sharded_tail": False,
         "moe_config": SimpleNamespace(
@@ -85,8 +108,16 @@ def _all_reduced(tensor: torch.Tensor, group) -> torch.Tensor:
 
 
 def _check_sharded_tail(device: torch.device, tp_world: int, rank: int) -> None:
-    """The sharded tail returns this rank's rows of the replicated tail."""
-    transform = _build_transform(device)
+    """For both up-projection layouts, the column-parallel tail matches the
+    replicated result, and its token-sharded variant returns this rank's rows."""
+    for row_sharded in (True, False):
+        _check_tail_layout(device, tp_world, rank, row_sharded)
+
+
+def _check_tail_layout(
+    device: torch.device, tp_world: int, rank: int, row_sharded: bool
+) -> None:
+    transform, weight = _build_transform(device, tp_world, rank, row_sharded)
     runner = _tail_runner(transform, tp_world)
     group = get_tp_group().device_group
 
@@ -102,17 +133,15 @@ def _check_sharded_tail(device: torch.device, tp_world: int, rank: int) -> None:
                 transform.norm.weight,
                 EPS,
             ),
-            transform.up_proj.weight,
+            weight,
         )
         expected.add_(_all_reduced(shared, group))
         rows = num_tokens // tp_world
 
-        sp.ACTIVE = True
-        try:
-            actual = runner._shard_up_proj_tail(routed, shared, None)
-        finally:
-            sp.ACTIVE = False
+        full = runner._shard_up_proj_tail(routed.clone(), shared.clone(), None)
+        actual = runner._shard_up_proj_tail(routed, shared, None, token_sharded=True)
 
+        torch.testing.assert_close(full, expected, atol=8e-2, rtol=3e-2)
         assert actual.shape == (rows, HIDDEN_SIZE)
         torch.testing.assert_close(
             actual, expected[rank * rows : (rank + 1) * rows], atol=8e-2, rtol=3e-2
@@ -158,6 +187,25 @@ def _check_padded_gather_scatter(
         torch.testing.assert_close(
             scattered, expected[rank * rows : (rank + 1) * rows], atol=1e-5, rtol=1e-5
         )
+
+        data = full.to(current_platform.fp8_dtype())
+        scale = torch.rand(padded, 1, device=device, generator=gen)
+        mine = slice(rank * rows, (rank + 1) * rows)
+        quantized = QuantizedActivation(
+            data[mine], scale[mine], DTYPE, torch.Size((rows, 64)), kFp8DynamicTokenSym
+        )
+        for keep, expected_rows in ((num_tokens, num_tokens), (None, padded)):
+            got = sp.gather_activation(quantized, keep)
+            assert isinstance(got, QuantizedActivation)
+            assert got.orig_shape == (expected_rows, 64)
+            assert got.orig_dtype == DTYPE and got.quant_key == kFp8DynamicTokenSym
+            torch.testing.assert_close(
+                got.data.view(torch.uint8),
+                data[:expected_rows].view(torch.uint8),
+                atol=0,
+                rtol=0,
+            )
+            torch.testing.assert_close(got.scale, scale[:expected_rows], atol=0, rtol=0)
 
 
 _CHECKS = {
@@ -235,17 +283,18 @@ def test_pre_routed_keeps_an_instance_override() -> None:
 
 
 @pytest.mark.parametrize(
-    "min_tokens,tp_size,num_tokens,has_residual,has_aux,last_rank,expected",
+    "min_tokens,tp_size,num_tokens,has_residual,has_aux,last_rank,dp_size,expected",
     [
-        (1024, 8, 16384, False, False, True, True),
-        (1024, 8, 1024, False, False, True, True),
-        (0, 8, 16384, False, False, True, False),
-        (1024, 1, 16384, False, False, True, False),
-        (1024, 8, 1016, False, False, True, False),
-        (1024, 8, 16381, False, False, True, True),
-        (1024, 8, 16384, True, False, True, False),
-        (1024, 8, 16384, False, True, True, False),
-        (1024, 8, 16384, False, False, False, False),
+        (1024, 8, 16384, False, False, True, 1, True),
+        (1024, 8, 1024, False, False, True, 1, True),
+        (0, 8, 16384, False, False, True, 1, False),
+        (1024, 1, 16384, False, False, True, 1, False),
+        (1024, 8, 1016, False, False, True, 1, False),
+        (1024, 8, 16381, False, False, True, 1, True),
+        (1024, 8, 16384, True, False, True, 1, False),
+        (1024, 8, 16384, False, True, True, 1, False),
+        (1024, 8, 16384, False, False, False, 1, False),
+        (1024, 8, 16384, False, False, True, 2, False),
     ],
 )
 def test_should_shard(
@@ -256,6 +305,7 @@ def test_should_shard(
     has_residual: bool,
     has_aux: bool,
     last_rank: bool,
+    dp_size: int,
     expected: bool,
 ) -> None:
     monkeypatch.setenv("VLLM_KIMI_K3_AMD_PREFILL_SP_MIN_TOKENS", str(min_tokens))
@@ -263,23 +313,5 @@ def test_should_shard(
     monkeypatch.setattr(
         sp, "get_pp_group", lambda: SimpleNamespace(is_last_rank=last_rank)
     )
+    monkeypatch.setattr(sp, "get_dp_group", lambda: SimpleNamespace(world_size=dp_size))
     assert sp.should_shard(num_tokens, has_residual, has_aux) is expected
-
-
-def test_unshardable_tail_narrows_to_own_rows(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Without the sharded tail the runner still returns only this rank's rows."""
-    full = torch.arange(8 * 3, dtype=torch.float32).view(8, 3)
-    monkeypatch.setattr(moe_runner.MoERunner, "forward", lambda *a, **k: full)
-    monkeypatch.setattr(
-        latent_moe_runner, "get_tensor_model_parallel_world_size", lambda: 4
-    )
-    monkeypatch.setattr(latent_moe_runner, "get_tensor_model_parallel_rank", lambda: 2)
-    runner = object.__new__(ROCmLatentMoERunner)
-    object.__setattr__(runner, "_tail_shardable", False)
-
-    monkeypatch.setattr(sp, "ACTIVE", True)
-    out = runner.forward(torch.empty(8, 3), torch.empty(8, 2))
-    torch.testing.assert_close(out, full[4:6])
-
-    monkeypatch.setattr(sp, "ACTIVE", False)
-    assert runner.forward(torch.empty(8, 3), torch.empty(8, 2)) is full

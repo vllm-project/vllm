@@ -11,8 +11,10 @@ from vllm.distributed import (
     tensor_model_parallel_reduce_scatter,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.router.zero_expert_router import (
+    ZeroExpertRouter,
+)
 from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
-from vllm.models.kimi_k3.amd import sp
 
 logger = init_logger(__name__)
 
@@ -63,6 +65,16 @@ class ROCmLatentMoERunner(MoERunner):
             )
         self._logged_sharded_tail = False
 
+    @property
+    def token_shardable(self) -> bool:
+        """Whether ``forward`` supports ``token_sharded=True``."""
+        return (
+            self._tail_shardable
+            and not self._fused_output_is_reduced
+            and not self.moe_config.skip_final_all_reduce
+            and not isinstance(self.router, ZeroExpertRouter)
+        )
+
     def sp_route_shard(
         self, hidden_shard: torch.Tensor, router_logits: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -80,6 +92,7 @@ class ROCmLatentMoERunner(MoERunner):
         fused_output: torch.Tensor,
         shared_output: torch.Tensor,
         trunc_size: int | None,
+        token_sharded: bool = False,
     ) -> torch.Tensor:
         """Tier 2: column-parallel up-projection folded into the final reduce."""
         if not self._logged_sharded_tail:
@@ -92,9 +105,6 @@ class ROCmLatentMoERunner(MoERunner):
 
         transform = self.routed_output_transform
         assert transform is not None
-
-        if sp.ACTIVE:
-            return self._sp_tail(fused_output, shared_output, trunc_size)
 
         latent = tensor_model_parallel_all_reduce(fused_output)
         if transform.norm is not None:
@@ -110,32 +120,17 @@ class ROCmLatentMoERunner(MoERunner):
         )
         hidden_shard = shared_output.narrow(-1, shard_start, shard_size)
 
-        # Not addmm_: hipBLASLt's C-accumulating bf16 GEMM faults at some row
-        # counts for this shape (e.g. 23393-23405 rows at 896x3584).
-        hidden_shard += latent @ up_proj_shard.t()
+        # hidden_shard += latent @ up_proj_shard.T, accumulated in the GEMM's
+        # beta-add epilogue so folding in the shared partial costs no kernel.
+        hidden_shard.addmm_(latent, up_proj_shard.t())
 
+        if token_sharded:
+            # Token-sharded residual stream: keep only this rank's tokens.
+            out = tensor_model_parallel_reduce_scatter(shared_output, dim=0)
+            return out[..., :trunc_size] if trunc_size is not None else out
         return self._maybe_reduce_final_output(
             shared_output, trunc_size, output_is_reduced=False
         )
-
-    def _sp_tail(
-        self,
-        fused_output: torch.Tensor,
-        shared_output: torch.Tensor,
-        trunc_size: int | None,
-    ) -> torch.Tensor:
-        """Token-sharded tail: reduce-scatter the latent (half the bytes of an
-        all-reduce) and up-project this rank's tokens with the full weight."""
-        transform = self.routed_output_transform
-        assert transform is not None
-        latent = tensor_model_parallel_reduce_scatter(fused_output.contiguous(), dim=0)
-        if transform.norm is not None:
-            latent = transform.norm(latent)
-        out = tensor_model_parallel_reduce_scatter(shared_output, dim=0)
-        # Not addmm_: hipBLASLt's C-accumulating bf16 GEMM faults at some row
-        # counts for this shape (e.g. 2914-2925 rows at 7168x3584).
-        out += latent.to(out.dtype) @ transform.up_proj.weight.t()
-        return out[..., :trunc_size] if trunc_size is not None else out
 
     def forward(
         self,
@@ -143,18 +138,22 @@ class ROCmLatentMoERunner(MoERunner):
         router_logits: torch.Tensor,
         input_ids: torch.Tensor | None = None,
         shared_experts_input: torch.Tensor | None = None,
+        token_sharded: bool = False,
     ) -> torch.Tensor:
+        """``token_sharded`` reduce-scatters the output over tokens instead of
+        all-reducing it; it requires ``token_shardable``."""
+        assert not token_sharded or self.token_shardable
         if self._tail_shardable and not self._fused_output_is_reduced:
             return self._fused_forward(
-                hidden_states, router_logits, input_ids, shared_experts_input
+                hidden_states,
+                router_logits,
+                input_ids,
+                shared_experts_input,
+                token_sharded,
             )
-        out = super().forward(
+        return super().forward(
             hidden_states, router_logits, input_ids, shared_experts_input
         )
-        if sp.ACTIVE:
-            shard = out.size(0) // get_tensor_model_parallel_world_size()
-            out = out.narrow(0, get_tensor_model_parallel_rank() * shard, shard)
-        return out
 
     def _fused_forward(
         self,
@@ -162,6 +161,7 @@ class ROCmLatentMoERunner(MoERunner):
         router_logits: torch.Tensor,
         input_ids: torch.Tensor | None,
         shared_experts_input: torch.Tensor | None,
+        token_sharded: bool,
     ) -> torch.Tensor:
         # When the caller pre-applies the routed input transform outside the
         # runner (e.g. to overlap it on a separate stream), it passes the
@@ -196,7 +196,7 @@ class ROCmLatentMoERunner(MoERunner):
             fused_output = fused_output[..., :og_hidden_dim_pre_xform]
 
         result = self._shard_up_proj_tail(
-            fused_output, shared_output, og_hidden_dim_post_xform
+            fused_output, shared_output, og_hidden_dim_post_xform, token_sharded
         )
 
         return self._maybe_add_zero_expert_output(result)
