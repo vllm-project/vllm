@@ -806,12 +806,50 @@ def test_truncate_mamba_request_noop_for_single_token_prompt():
 # --------------------------------------------------------------------------
 # get_num_new_matched_tokens  (hybrid N-1 accounting)
 # --------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "params,expected",
+    [
+        (None, (0, False)),
+        ({}, (0, False)),
+        ({"do_remote_prefill": False}, (0, False)),
+        ({"do_remote_prefill": True}, (31, False)),
+    ],
+)
+def test_read_matches_only_requests_with_pending_remote_prefill(params, expected):
+    scheduler = _FakeScheduler(is_producer=False, mode=MoRIIOMode.READ)
+    request = SimpleNamespace(num_prompt_tokens=32, kv_transfer_params=params)
+
+    assert scheduler.get_num_new_matched_tokens(request, 0) == expected
+
+
+def test_read_rematch_after_alloc_keeps_queued_transfer():
+    """Clearing the flag blocks another external hit, not the queued READ."""
+    sched = _make_read_scheduler()
+    request = _make_read_request([[10, 11], [91]])
+    request.num_prompt_tokens = 32
+    assert sched.get_num_new_matched_tokens(request, 0) == (31, False)
+
+    sched.update_state_after_alloc(
+        request, _FakeBlocks(all_groups=([100, 101], [200])), num_external_tokens=31
+    )
+
+    assert sched._reqs_need_recv["req"][1] == [[100, 101], [200]]
+    assert request.kv_transfer_params["do_remote_prefill"] is False
+
+    meta = sched.build_connector_meta(SchedulerOutput.make_empty())
+    queued = meta.reqs_to_recv["req"]
+    assert queued.transfer_id == "tx"
+    assert queued.local_block_ids == [[100, 101], [200]]
+    assert queued.remote_block_ids == [[10, 11], [91]]
+    assert sched.get_num_new_matched_tokens(request, 0) == (0, False)
+
+
 def test_get_num_new_matched_tokens_read_recomputes_last_token():
     sched = _FakeScheduler(is_producer=False, mode=MoRIIOMode.READ, _has_mamba=True)
     req = SimpleNamespace(
         num_prompt_tokens=10,
         prompt_token_ids=list(range(10)),
-        kv_transfer_params=None,
+        kv_transfer_params={"do_remote_prefill": True},
     )
     n, is_async = sched.get_num_new_matched_tokens(req, num_computed_tokens=0)
     # READ always recomputes the final token locally: N-1 - computed.
