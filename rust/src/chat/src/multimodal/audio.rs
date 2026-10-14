@@ -10,6 +10,7 @@ use llm_multimodal::{AudioClip, Modality, PreprocessedEncoderInputs, PromptRepla
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
 
 use super::cache::{CacheLookup, merge_slots, put_or_inline_and_track};
+use super::timing::MM_STAGE_TARGET;
 use super::{AudioModalitySupport, MultimodalModelInfo, PreparedItem, PreparedMedia, item};
 use crate::error::{Error, Result, bail_multimodal, multimodal};
 
@@ -23,6 +24,12 @@ impl MultimodalModelInfo {
     /// entirely: their prompt replacements come from the cache shadow and
     /// their feature data is the shm address item. Cache misses are
     /// preprocessed as one batch.
+    #[tracing::instrument(
+        name = "mm_stage",
+        target = MM_STAGE_TARGET,
+        skip_all,
+        fields(stage = "preprocess_audio")
+    )]
     pub(super) async fn prepare_audios(
         &self,
         clips: Vec<Arc<AudioClip>>,
@@ -37,7 +44,7 @@ impl MultimodalModelInfo {
         let mut miss_uuids = Vec::new();
         for (clip, uuid) in clips.into_iter().zip(uuids) {
             let lookup = match &self.mm_processor_cache {
-                Some(cache) => cache.lookup(&clip.hash, uuid),
+                Some(cache) => cache.lookup(&clip.hash, &clip.hash, uuid),
                 None => CacheLookup::Miss(uuid),
             };
             match lookup {
@@ -289,6 +296,102 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn audio_pipeline_attributes_stage_timings_to_request() {
+        use tracing::Instrument as _;
+        use tracing::instrument::WithSubscriber as _;
+        use tracing_subscriber::layer::SubscriberExt as _;
+
+        use crate::{mm_request_span, mm_timing_layer};
+
+        // Other tests exercise the same instrumented callsites under
+        // NoSubscriber, which caches `Interest::never` globally; rebuild the
+        // callsite cache so this test's thread-local subscriber sees them.
+        tracing::callsite::rebuild_interest_cache();
+
+        let info = qwen3_asr_info();
+        let (layer, timings) = mm_timing_layer();
+        let parts = vec![MediaContentPart::AudioData {
+            data: wav_i16_mono(16_000, &[0; 1_600]),
+            mime_type: Some("audio/wav".to_string()),
+            uuid: Some("audio-1".to_string()),
+        }];
+        async {
+            info.prepare_multimodal(parts, &mut vec![AUDIO_PAD_ID], ModelDtype::Float32, None)
+                .instrument(mm_request_span("request-1"))
+                .await
+                .unwrap();
+        }
+        .with_subscriber(tracing_subscriber::registry().with(layer))
+        .await;
+
+        let records = timings.stat();
+        assert_eq!(records.len(), 1);
+        let mut stages = records["request-1"].keys().collect::<Vec<_>>();
+        stages.sort();
+        expect_test::expect![[r#"
+            [
+                "media_fetch_secs",
+                "preprocess_audio_secs",
+                "preprocessor_total_secs",
+                "prompt_expansion_secs",
+            ]
+        "#]]
+        .assert_debug_eq(&stages);
+    }
+
+    #[tokio::test]
+    async fn cache_hit_skips_audio_preprocessing() {
+        use super::super::cache::tests::{address_of, is_address_item, test_shm_cache};
+
+        let info = qwen3_asr_info().with_mm_processor_cache(Some(test_shm_cache()));
+        let media_part = || MediaContentPart::AudioData {
+            data: wav_i16_mono(16_000, &[0; 1_600]),
+            mime_type: Some("audio/wav".to_string()),
+            uuid: Some("audio-1".to_string()),
+        };
+
+        let mut tokens_first = vec![1, AUDIO_PAD_ID, 2];
+        let first = info
+            .prepare_multimodal(
+                vec![media_part()],
+                &mut tokens_first,
+                ModelDtype::Float32,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.len(), 1);
+        let data_first = first[0].data.as_ref().expect("feature data");
+        assert!(
+            is_address_item(data_first),
+            "first prepare should put the item into shm and send the address item"
+        );
+
+        let mut tokens_second = vec![1, AUDIO_PAD_ID, 2];
+        let second = info
+            .prepare_multimodal(
+                vec![media_part()],
+                &mut tokens_second,
+                ModelDtype::Float32,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(second.len(), 1);
+        let data_second = second[0].data.as_ref().expect("feature data");
+        // A cache hit reuses the same shm slot; a re-put of the same hash
+        // would hit the duplicate-key inline fallback instead.
+        assert!(is_address_item(data_second));
+        assert_eq!(address_of(data_second), address_of(data_first));
+
+        // The shadowed prompt replacement reproduces the expansion exactly.
+        assert_eq!(tokens_second, tokens_first);
+        assert_eq!(first[0].mm_hash, second[0].mm_hash);
+        assert_eq!(first[0].mm_position.offset, second[0].mm_position.offset);
+        assert_eq!(first[0].mm_position.length, second[0].mm_position.length);
+    }
+
+    #[tokio::test]
     async fn tracker_processor_and_lowering_preserve_audio_contract() {
         let info = qwen3_asr_info();
         let wav = wav_i16_mono(16_000, &[0; 1_600]);
@@ -329,48 +432,6 @@ mod tests {
             Some(MmKwargValue::Tensor(tensor))
                 if tensor.dtype.as_str() == "int64" && tensor.shape.is_empty()
         ));
-    }
-
-    #[tokio::test]
-    async fn cache_hit_skips_audio_preprocessing() {
-        use super::super::cache::tests::{address_of, is_address_item, test_shm_cache};
-
-        let info = qwen3_asr_info().with_mm_processor_cache(Some(test_shm_cache()));
-        let media_part = || MediaContentPart::AudioData {
-            data: wav_i16_mono(16_000, &[0; 1_600]),
-            mime_type: Some("audio/wav".to_string()),
-            uuid: Some("audio-1".to_string()),
-        };
-
-        let mut tokens_first = vec![1, AUDIO_PAD_ID, 2];
-        let first = info
-            .prepare_multimodal(vec![media_part()], &mut tokens_first, ModelDtype::Float32)
-            .await
-            .unwrap();
-        assert_eq!(first.len(), 1);
-        let data_first = first[0].data.as_ref().expect("feature data");
-        assert!(
-            is_address_item(data_first),
-            "first prepare should put the item into shm and send the address item"
-        );
-
-        let mut tokens_second = vec![1, AUDIO_PAD_ID, 2];
-        let second = info
-            .prepare_multimodal(vec![media_part()], &mut tokens_second, ModelDtype::Float32)
-            .await
-            .unwrap();
-        assert_eq!(second.len(), 1);
-        let data_second = second[0].data.as_ref().expect("feature data");
-        // A cache hit reuses the same shm slot; a re-put of the same hash
-        // would hit the duplicate-key inline fallback instead.
-        assert!(is_address_item(data_second));
-        assert_eq!(address_of(data_second), address_of(data_first));
-
-        // The shadowed prompt replacement reproduces the expansion exactly.
-        assert_eq!(tokens_second, tokens_first);
-        assert_eq!(first[0].mm_hash, second[0].mm_hash);
-        assert_eq!(first[0].mm_position.offset, second[0].mm_position.offset);
-        assert_eq!(first[0].mm_position.length, second[0].mm_position.length);
     }
 
     #[tokio::test]

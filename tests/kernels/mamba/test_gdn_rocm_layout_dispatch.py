@@ -6,9 +6,9 @@ The AITER fused reshape+conv kernel learned Qwen3.5's flat ``[q|k|v|z]``
 packing in https://github.com/ROCm/aiter/pull/3251, so flat-layout models take
 the decode fast path too instead of falling back to the generic path.
 
-These tests run host-side on CPU: ``_forward_core_rocm`` is bound to a stub
-layer whose ``_forward_core_decode_aiter``/``_forward_core`` record which
-branch ran, so no GPU or AITER install is needed.
+The dispatch tests run host-side with recording stubs. The prefill numerical
+tests exercise the production ChunkGatedDeltaRule wrapper on ROCm against a
+token-wise Torch reference, including ragged state and output-buffer layouts.
 """
 
 from __future__ import annotations
@@ -122,3 +122,130 @@ def test_non_pure_decode_batches_use_the_generic_path(
 ) -> None:
     layer = _make_layer(gqa_interleaved_layout)
     assert _run(layer, _make_metadata(**meta_kwargs)) == "generic"
+
+
+def _prefill_reference(q, k, v, g, beta, initial_state, lengths):
+    """Independent token-wise recurrence in the layer's [value, key] layout."""
+    q, k, v, g, beta, initial_state = (
+        x.cpu().float() for x in (q, k, v, g, beta, initial_state)
+    )
+    q = q.repeat_interleave(v.shape[2] // q.shape[2], dim=2)
+    k = k.repeat_interleave(v.shape[2] // k.shape[2], dim=2)
+    q = q * q.shape[-1] ** -0.5
+    output = torch.empty_like(v)
+    final_state = torch.empty_like(initial_state)
+    previous_threads = torch.get_num_threads()
+    torch.set_num_threads(1)
+    try:
+        start = 0
+        for sequence, length in enumerate(lengths):
+            state = initial_state[sequence].clone()
+            for token in range(start, start + length):
+                state = state * g[0, token].exp()[:, None, None]
+                key = k[0, token]
+                prediction = (state * key[:, None, :]).sum(dim=-1)
+                delta = (v[0, token] - prediction) * beta[0, token, :, None]
+                state = state + delta[:, :, None] * key[:, None, :]
+                output[0, token] = (state * q[0, token, :, None, :]).sum(dim=-1)
+            final_state[sequence] = state
+            start += length
+    finally:
+        torch.set_num_threads(previous_threads)
+    return output, final_state
+
+
+@pytest.mark.parametrize(
+    "state_dtype,correlated",
+    [(torch.bfloat16, False), (torch.float32, False), (torch.float32, True)],
+    ids=["ragged-bf16-state", "ragged-fp32-state", "correlated-keys"],
+)
+@torch.inference_mode()
+def test_rocm_prefill_numerics_and_output_layout(state_dtype, correlated):
+    from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
+    from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
+        ChunkGatedDeltaRule,
+    )
+    from vllm.third_party.flash_linear_attention.ops.index import (
+        prepare_chunk_indices,
+        prepare_chunk_offsets,
+    )
+
+    if not torch.cuda.is_available():
+        pytest.skip("ROCm prefill numerics require a GPU")
+    # Only the config is needed for production backend selection; no weights.
+    config = VllmConfig(
+        model_config=ModelConfig(
+            model="Qwen/Qwen3.5-0.8B",
+            revision="2fc06364715b967f1860aea9cf38778875588b17",
+            max_model_len=1024,
+        )
+    )
+    with set_current_vllm_config(config):
+        prefill = ChunkGatedDeltaRule()
+    assert prefill.gdn_prefill_backend == "triton"
+    assert prefill._forward_method == prefill.forward_native
+
+    torch.manual_seed(1234)
+    lengths = [64] if correlated else [1, 63, 64, 65, 129]
+    tokens, key_heads, value_heads, dim = sum(lengths), 4, 8, 128
+    q = torch.randn(1, tokens, key_heads, dim, device="cuda")
+    q = torch.nn.functional.normalize(q, dim=-1).to(torch.bfloat16)
+    k = torch.randn_like(q)
+    k = torch.nn.functional.normalize(k.float(), dim=-1).to(q.dtype)
+    v = torch.randn(1, tokens, value_heads, dim, device="cuda", dtype=q.dtype)
+    g = -torch.rand(1, tokens, value_heads, device="cuda") * 0.1
+    beta = torch.rand_like(g)
+    state = (torch.randn(len(lengths), value_heads, dim, dim, device="cuda") * 0.05).to(
+        state_dtype
+    )
+    if correlated:
+        q.zero_()
+        k.zero_()
+        q[..., 0] = 1
+        k[..., 0] = 1
+        g.zero_()
+        beta.fill_(0.9)
+        state.zero_()
+    expected, expected_state = _prefill_reference(q, k, v, g, beta, state, lengths)
+    initial_state_copy = state.clone()
+    cu_seqlens = torch.tensor(
+        [0, *torch.tensor(lengths).cumsum(0).tolist()],
+        device="cuda",
+        dtype=torch.int32,
+    )
+    kwargs = dict(
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        beta=beta,
+        initial_state=state,
+        output_final_state=True,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=prepare_chunk_indices(cu_seqlens, 64),
+        chunk_offsets=prepare_chunk_offsets(cu_seqlens, 64),
+        use_qk_l2norm_in_kernel=False,
+    )
+    storage = torch.full(
+        (tokens + 3, value_heads, dim), float("nan"), device="cuda", dtype=q.dtype
+    )
+    output, final_state = prefill(**kwargs, core_attn_out=storage[:tokens])
+    assert output.data_ptr() == storage.data_ptr()
+    assert output.shape == v.shape
+    assert final_state.shape == state.shape
+    assert torch.isnan(storage[tokens:]).all()
+    torch.testing.assert_close(state, initial_state_copy, atol=0, rtol=0)
+
+    # Preserve the upstream prefill suite's numerical budgets. The reference
+    # here is a token-wise recurrence, independent of the chunk implementation.
+    output_error = (output.cpu().float() - expected).abs()
+    state_error = (final_state.cpu().float() - expected_state).abs()
+    assert torch.isfinite(output).all() and torch.isfinite(final_state).all()
+    assert output_error.max() < (1e-1 if correlated else 2e-3)
+    assert output_error.mean() < (2e-3 if correlated else 6e-5)
+    assert state_error.max() < (2e-1 if correlated else 2e-2)
+    assert state_error.mean() < 6e-4
+
+    no_buffer_output, no_buffer_state = prefill(**kwargs)
+    torch.testing.assert_close(no_buffer_output, output, atol=0, rtol=0)
+    torch.testing.assert_close(no_buffer_state, final_state, atol=0, rtol=0)

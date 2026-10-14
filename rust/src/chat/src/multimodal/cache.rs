@@ -8,15 +8,40 @@
 //! this wrapper additionally shadows each cached hash's `PromptReplacement`
 //! (Python's `_p0_cache`) so cache hits skip re-preprocessing entirely.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use llm_multimodal::PromptReplacement;
+use llm_multimodal::{PromptReplacement, VisionPreprocessingContext};
 use parking_lot::Mutex;
 use vllm_engine_core_client::mm_cache::MmProcessorShmCache;
 use vllm_engine_core_client::protocol::multimodal::MmKwargsItem;
 
-use super::PreparedItem;
+use super::{PreparedItem, VisionModalitySupport};
+
+/// Vision processors whose preprocessing output depends on the per-request
+/// `VisionPreprocessingContext` (today: only Nemotron-H Omni's
+/// `token_budget`-driven dynamic resolution). Their cache entries must key on
+/// the budget in addition to the content hash.
+///
+/// TODO: drop this name list once `llm-multimodal` exposes a capability flag
+/// on `VisionPreProcessor` for request-context sensitivity.
+const BUDGET_SENSITIVE_PROCESSORS: &[&str] = &["nemotron_h_omni"];
+
+/// Cache key for one image item: the content hash, plus the per-request token
+/// budget for budget-sensitive processors so requests with different budgets
+/// never share processed tensors or prompt replacements.
+pub(super) fn image_cache_key<'a>(
+    support: &VisionModalitySupport,
+    hash: &'a str,
+    context: &VisionPreprocessingContext,
+) -> Cow<'a, str> {
+    if BUDGET_SENSITIVE_PROCESSORS.contains(&support.processor.model_name()) {
+        Cow::Owned(format!("{hash}#budget={:?}", context.token_budget))
+    } else {
+        Cow::Borrowed(hash)
+    }
+}
 
 /// The P0 (frontend) side of the SHM multimodal processor cache.
 ///
@@ -64,18 +89,22 @@ impl MmProcessorCache {
         self.shm.touch(hash);
     }
 
-    /// Look up one fetched media item by hash.
+    /// Look up one fetched media item by cache key.
     ///
     /// On a hit, bumps writer_flag and returns the address item plus the
     /// shadowed prompt replacement. On a miss — including a shadowed entry
     /// whose shm data vanished under a concurrent eviction — returns the UUID
     /// back for the preprocessing path.
-    pub(super) fn lookup(&self, hash: &str, uuid: Option<String>) -> CacheLookup {
-        let replacement = self.shadow.lock().get(hash).cloned();
+    ///
+    /// `key` is the cache key (see [`image_cache_key`]); `hash` is the raw
+    /// content hash recorded on the returned [`PreparedItem`] so the engine
+    /// still sees the content-addressed `mm_hash`.
+    pub(super) fn lookup(&self, key: &str, hash: &str, uuid: Option<String>) -> CacheLookup {
+        let replacement = self.shadow.lock().get(key).cloned();
         let Some(replacement) = replacement else {
             return CacheLookup::Miss(uuid);
         };
-        match self.shm.address_item_for_cached(hash) {
+        match self.shm.address_item_for_cached(key) {
             Some(data) => CacheLookup::Hit(
                 PreparedItem {
                     data,
@@ -230,7 +259,10 @@ pub(super) mod tests {
         let sent = cache.put_or_inline_and_track("hash-a", &test_replacement(), item.clone());
         assert_eq!(sent, item, "before set_n_readers the item goes inline");
         assert!(
-            matches!(cache.lookup("hash-a", None), CacheLookup::Miss(None)),
+            matches!(
+                cache.lookup("hash-a", "hash-a", None),
+                CacheLookup::Miss(None)
+            ),
             "before set_n_readers nothing is cached"
         );
     }
@@ -246,7 +278,8 @@ pub(super) mod tests {
             "a fresh put yields the address item"
         );
 
-        let CacheLookup::Hit(hit, replacement) = cache.lookup("hash-b", Some("uuid-1".into()))
+        let CacheLookup::Hit(hit, replacement) =
+            cache.lookup("hash-b", "hash-b", Some("uuid-1".into()))
         else {
             panic!("hash-b should be cached");
         };
@@ -261,7 +294,7 @@ pub(super) mod tests {
         let cache = MmProcessorCache::new(test_shm_cache());
 
         assert!(matches!(
-            cache.lookup("hash-c", Some("uuid-2".into())),
+            cache.lookup("hash-c", "hash-c", Some("uuid-2".into())),
             CacheLookup::Miss(Some(uuid)) if uuid == "uuid-2"
         ));
     }
@@ -311,7 +344,12 @@ pub(super) mod tests {
 
         let mut tokens_first = vec![1, QWEN3_IMAGE_PAD_ID, 2];
         let first = info
-            .prepare_multimodal(vec![media_part()], &mut tokens_first, ModelDtype::Float32)
+            .prepare_multimodal(
+                vec![media_part()],
+                &mut tokens_first,
+                ModelDtype::Float32,
+                None,
+            )
             .await
             .expect("first image prepare should succeed");
         assert_eq!(first.len(), 1);
@@ -323,7 +361,12 @@ pub(super) mod tests {
 
         let mut tokens_second = vec![1, QWEN3_IMAGE_PAD_ID, 2];
         let second = info
-            .prepare_multimodal(vec![media_part()], &mut tokens_second, ModelDtype::Float32)
+            .prepare_multimodal(
+                vec![media_part()],
+                &mut tokens_second,
+                ModelDtype::Float32,
+                None,
+            )
             .await
             .expect("second image prepare should succeed");
         assert_eq!(second.len(), 1);

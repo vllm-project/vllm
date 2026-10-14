@@ -28,7 +28,7 @@ from collections.abc import Iterable
 
 import torch
 from torch import nn
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
@@ -102,7 +102,7 @@ class SolarMLP(nn.Module):
 class SolarAttention(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
@@ -185,7 +185,7 @@ class SolarAttention(nn.Module):
 class SolarDecoderLayer(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",

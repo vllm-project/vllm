@@ -1012,6 +1012,50 @@ def test_concat_and_cache_ds_mla(
         torch.testing.assert_close(kv_rope, ref_rope, atol=0.001, rtol=0.1)
 
 
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("block_size", [64, 256])
+@torch.inference_mode()
+def test_concat_and_cache_ds_mla_nope(device: str, block_size: int) -> None:
+    """NoPE matches zero RoPE, clears valid tails, and preserves unused slots."""
+    dtype = torch.bfloat16
+    if current_platform.is_rocm():
+        pytest.skip("concat_and_cache_mla doesn't support fp8_ds_mla on ROCm")
+    num_tokens, num_blocks = 3, 2
+    set_random_seed(0)
+    torch.set_default_device(device)
+    torch.accelerator.set_device_index(device)
+
+    slot_mapping = torch.tensor(
+        [block_size - 1, block_size, -1], dtype=torch.long, device=device
+    )
+    kv_c = torch.randn(num_tokens, 512, dtype=dtype, device=device)
+    k_pe = torch.empty(num_tokens, 0, dtype=dtype, device=device)
+    zero_k_pe = torch.zeros(num_tokens, 64, dtype=dtype, device=device)
+    scale = torch.tensor(1.0, dtype=torch.float32, device=device)
+    kv_cache = torch.full(
+        (num_blocks, block_size, 656), 0xFF, dtype=torch.uint8, device=device
+    )
+    ref_cache = kv_cache.clone()
+
+    opcheck(
+        torch.ops._C_cache_ops.concat_and_cache_mla,
+        (kv_c, k_pe, kv_cache, slot_mapping, "fp8_ds_mla", scale),
+        test_utils=DEFAULT_OPCHECK_TEST_UTILS,
+    )
+    kv_cache.fill_(0xFF)
+    ops.concat_and_cache_mla(kv_c, k_pe, kv_cache, slot_mapping, "fp8_ds_mla", scale)
+    ops.concat_and_cache_mla(
+        kv_c, zero_k_pe, ref_cache, slot_mapping, "fp8_ds_mla", scale
+    )
+
+    torch.testing.assert_close(kv_cache, ref_cache, atol=0, rtol=0)
+    rows = kv_cache.view(num_blocks * block_size, 656)
+    assert (rows[slot_mapping[:2], 528:] == 0).all()
+    untouched = torch.ones(num_blocks * block_size, dtype=torch.bool, device=device)
+    untouched[slot_mapping[:2]] = False
+    assert (rows[untouched] == 0xFF).all()
+
+
 # Bytes per token for the nvfp4_ds_mla cache layout (see flashmla_sparse.py).
 NVFP4_DS_MLA_ENTRY_SIZE = 352
 
