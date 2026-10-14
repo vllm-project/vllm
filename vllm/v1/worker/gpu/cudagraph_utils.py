@@ -1046,7 +1046,10 @@ def _teardown_profiling_state(runner: "GPUModelRunner") -> None:
     if (model := getattr(runner, "model", None)) is not None:
         layers = itertools.chain(layers, model.modules())
     clear_layer_kv_caches(layers)
-    release_hisparse_profiling_cache(runner.compilation_config.static_forward_context)
+    release_hisparse_profiling_cache(
+        runner.compilation_config.static_forward_context,
+        preserve_host_pool=True,
+    )
     runner.cache_config.num_gpu_blocks = None
     runner.maybe_remove_all_loras(runner.lora_config)
     gc.collect()

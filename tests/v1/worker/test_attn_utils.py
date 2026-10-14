@@ -433,7 +433,7 @@ def test_profiling_cleanup_releases_tp_shared_region_once(monkeypatch):
     assert released == [([runtime], [], region)]
 
 
-@pytest.mark.parametrize("failure_phase", ["allocation", "binding", "buffers"])
+@pytest.mark.parametrize("failure_phase", ["allocation", "binding", "buffers", "reuse"])
 def test_init_hisparse_rolls_back_shared_region(monkeypatch, failure_phase):
     """A failure after mmap allocation must not leak the shared registration."""
     region = _FakeSharedHostRegion()
@@ -444,7 +444,18 @@ def test_init_hisparse_rolls_back_shared_region(monkeypatch, failure_phase):
         scheduler_config=SimpleNamespace(max_num_seqs=1),
     )
 
+    forward_context = {}
+    if failure_phase == "reuse":
+        pool = attn_utils_module.HiSparseHostPool(vllm_config, SimpleNamespace())
+        forward_context["layer"] = SimpleNamespace(
+            hisparse_cache=SimpleNamespace(
+                runtime=SimpleNamespace(host_pool_owner=pool)
+            )
+        )
+
     def allocate(*args):
+        if failure_phase == "reuse":
+            assert args[-1] is pool
         args[-1].shared_region = region
         if failure_phase == "allocation":
             raise RuntimeError("initialization failed")
@@ -469,7 +480,7 @@ def test_init_hisparse_rolls_back_shared_region(monkeypatch, failure_phase):
             torch.device("cpu"),
             [],
             vllm_config,
-            {},
+            forward_context,
             SimpleNamespace(),
         )
     assert region.cleanup_calls == 1

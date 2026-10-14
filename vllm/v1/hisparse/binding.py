@@ -126,7 +126,19 @@ def init_hisparse_kv_cache(
     block_tables: "BlockTables",
 ) -> dict[str, torch.Tensor]:
     """Allocate and bind HiSparse caches within the caller's allocation context."""
-    host_pool = HiSparseHostPool(vllm_config, kv_cache_config)
+    host_pool = next(
+        (
+            cache.runtime.host_pool_owner
+            for layer in forward_context.values()
+            if (cache := getattr(layer, "hisparse_cache", None)) is not None
+            and getattr(cache.runtime, "host_pool_owner", None) is not None
+        ),
+        None,
+    )
+    if host_pool is None:
+        host_pool = HiSparseHostPool(vllm_config, kv_cache_config)
+    else:
+        host_pool.rebind_config(kv_cache_config)
     try:
         kv_caches = allocate_hisparse_kv_caches(
             kv_cache_config,
@@ -162,7 +174,9 @@ def _get_hisparse_cache(
     return hisparse_cache
 
 
-def release_hisparse_profiling_cache(forward_context: dict[str, Any]) -> None:
+def release_hisparse_profiling_cache(
+    forward_context: dict[str, Any], *, preserve_host_pool: bool = False
+) -> None:
     cache_handles = [
         cache
         for layer in forward_context.values()
@@ -193,7 +207,15 @@ def release_hisparse_profiling_cache(forward_context: dict[str, Any]) -> None:
             }.values()
         )
     )
-    release_pinned_state(list(runtimes.values()), registered_pools, shared_region)
+    if preserve_host_pool:
+        release_pinned_state(
+            list(runtimes.values()),
+            registered_pools,
+            shared_region,
+            preserve_host_pool=True,
+        )
+    else:
+        release_pinned_state(list(runtimes.values()), registered_pools, shared_region)
 
 
 def bind_hisparse_kv_caches(
@@ -296,6 +318,7 @@ def bind_hisparse_kv_caches(
             )
             cache_handle.draft_layer = forward_context[layer_name].is_draft_layer
             cache_handle.runtime.shared_host_region = host_pool.shared_region
+            cache_handle.runtime.host_pool_owner = host_pool
             cache_handle.runtime.bind_source_cache(
                 source_cache,
                 registered_host_pool=host_pool.registered,
