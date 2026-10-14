@@ -16,26 +16,86 @@ wheels)
   rm -rf dist && echo "FROM $(pin "$SRC-wheels")" | docker buildx build -q -o dist -
   [[ $(basename dist/vllm-*.whl | grep -oE 'rocm[0-9]+' | tail -1) == "$V" ]]   # setup.py's rocm_version_to_variant
   bash .buildkite/scripts/upload-rocm-wheels.sh "$S" dist
-  buildkite-agent annotate --style info --context "rocm-$S" \
-    "ROCm $V: \`pip install vllm --extra-index-url https://wheels.vllm.ai/rocm/$C/$V\`" ;;
+  WHL_URL="https://wheels.vllm.ai/rocm/$C/$V"
+  buildkite-agent annotate --style success --context "rocm-$S-wheels" << EOF
+## :package: ROCm \`$V\` wheels published
+
+| | |
+|---|---|
+| **Variant** | \`$V\` |
+| **Commit** | \`$C\` |
+| **Branch** | \`${BUILDKITE_BRANCH:-?}\` |
+
+### Install (this commit)
+\`\`\`bash
+pip install vllm --extra-index-url $WHL_URL
+\`\`\`
+
+### Install (latest nightly)
+\`\`\`bash
+pip install vllm --extra-index-url https://wheels.vllm.ai/rocm/nightly/$V
+\`\`\`
+
+### Download wheels directly
+\`\`\`bash
+aws s3 ls s3://vllm-wheels/rocm/$C/$V/
+aws s3 cp --recursive --include "*.whl" s3://vllm-wheels/rocm/$C/$V/ .
+\`\`\`
+EOF
+  ;;
 images)
   RT=$(pin "$SRC-base")
   aws ecr-public get-login-password --region us-east-1 | docker login -u AWS --password-stdin "${ECR%%/*}"
   docker buildx imagetools create -t "$ECR:$C-$V" "$IMG"
   docker buildx imagetools create -t "$ECR:$C-$V-base" "$RT"
   buildkite-agent meta-data set "rocm-$S-variant" "$V"   # root index, publish-release-images.sh
-  [[ ${NIGHTLY:-0} == 1 ]] || exit 0
+  ECR_REF="$ECR:$C-$V"
+  HUB_TAGS=""
+  [[ ${NIGHTLY:-0} == 1 ]] || {
+    buildkite-agent annotate --style success --context "rocm-$S-images" << EOF
+## :docker: ROCm \`$V\` images published to ECR
+
+| | |
+|---|---|
+| **Variant** | \`$V\` |
+| **Commit** | \`$C\` |
+| **ECR image** | \`$ECR_REF\` |
+| **ECR base** | \`$ECR:$C-$V-base\` |
+
+\`\`\`bash
+docker pull $ECR_REF
+\`\`\`
+EOF
+    exit 0
+  }
   export DOCKERHUB_USERNAME=${DOCKERHUB_USERNAME:-vllmbot}           # cleanup-nightly-builds.sh needs it
   sfx=("-$V"); if [[ $S == rocm ]]; then sfx+=(""); fi                # the default stack owns the plain tags
   for s in "${sfx[@]}"; do
     docker buildx imagetools create -t "$HUB:nightly$s" -t "$HUB:nightly$s-$C" "$IMG"
     docker buildx imagetools create -t "$HUB:base-nightly$s" -t "$HUB:base-nightly$s-$C" "$RT"
+    HUB_TAGS="$HUB_TAGS \`$HUB:nightly$s\` \`$HUB:nightly$s-$C\`"
   done
   clean=.buildkite/scripts/cleanup-nightly-builds.sh
   bash "$clean" "nightly-$V-" "$HUB"; bash "$clean" "base-nightly-$V-" "$HUB"
   if [[ $S == rocm ]]; then
     bash "$clean" "nightly-" "$HUB" "nightly-rocm"
     bash "$clean" "base-nightly-" "$HUB" "base-nightly-rocm"
-  fi ;;
+  fi
+  buildkite-agent annotate --style success --context "rocm-$S-images" << EOF
+## :docker: ROCm \`$V\` nightly images published
+
+| | |
+|---|---|
+| **Variant** | \`$V\` |
+| **Commit** | \`$C\` |
+| **ECR image** | \`$ECR_REF\` |
+| **ECR base** | \`$ECR:$C-$V-base\` |
+| **Docker Hub** |$HUB_TAGS |
+
+\`\`\`bash
+docker pull $HUB:nightly-$V
+\`\`\`
+EOF
+  ;;
 *) exit 2 ;;
 esac

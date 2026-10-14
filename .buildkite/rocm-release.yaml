@@ -33,7 +33,7 @@ steps:
   - label: ":rocm: ${ROCM_STACK} GPU smoke (MI300)"
     key: rel-gpu
     depends_on: rel-build
-    agents: {queue: amd_mi300_1}
+    agents: {queue: amd_mi250_1}
     command: vllm bench throughput --model facebook/opt-125m --input-len 32 --output-len 32 --num-prompts 8
     timeout_in_minutes: 30
     plugins:
