@@ -232,6 +232,9 @@ class FakeMooncakeWrapper:
     def batch_register_memory(self, buffer_addresses, capacities) -> int:
         return 0
 
+    def batch_unregister_memory(self, buffer_addresses) -> int:
+        return 0
+
 
 def test_align_transfer_regions_uses_layer_name_occurrences():
     """Repeated layer names should align by occurrence order."""
@@ -2574,3 +2577,29 @@ async def test_kv_producer_heterogeneous_tp(monkeypatch, d_tp_size):
 
         prefill_worker.sender_loop = origin_sender_loop
         prefill_worker.shutdown()
+
+
+def test_sleep_unregisters_and_restores_kv_caches():
+    spec = FullAttentionSpec(
+        block_size=maybe_update_block_size(16),
+        num_kv_heads=4,
+        head_size=64,
+        dtype=torch.float16,
+    )
+    layer_names = ["model.layers.0.self_attn", "model.layers.1.self_attn"]
+    with mooncake_register_worker(_make_test_kv_cache_config()) as (worker, reg):
+        for layer_name in layer_names:
+            worker._layer_specs[layer_name] = spec
+        raw = torch.zeros(2 * 2 * spec.page_size_bytes, dtype=torch.int8)
+        views = dense_kv_cache_views(raw, spec, 2, 2, KVCacheLayout.LBHNC)
+        worker.register_kv_caches(dict(zip(layer_names, views)))
+        reg.reset_mock()
+        with patch.object(
+            worker.engine, "batch_unregister_memory", return_value=0
+        ) as unreg:
+            worker.unregister_kv_caches()
+            worker.unregister_kv_caches()
+        unreg.assert_called_once_with([raw.data_ptr()])
+        worker.restore_kv_caches()
+        worker.restore_kv_caches()
+        reg.assert_called_once_with([raw.data_ptr()], [raw.nbytes])

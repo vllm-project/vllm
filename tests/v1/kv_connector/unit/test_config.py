@@ -101,6 +101,7 @@ def test_kv_connector(
 def _build_config(
     *,
     kv_connector: str | None,
+    kv_connector_extra_config: dict | None = None,
     enable_sleep_mode: bool = False,
     enable_cumem_allocator: bool = False,
 ) -> VllmConfig:
@@ -109,7 +110,11 @@ def _build_config(
     from types import SimpleNamespace
 
     kv_transfer_config = (
-        KVTransferConfig(kv_connector=kv_connector, kv_role="kv_both")
+        KVTransferConfig(
+            kv_connector=kv_connector,
+            kv_role="kv_both",
+            kv_connector_extra_config=kv_connector_extra_config or {},
+        )
         if kv_connector is not None
         else None
     )
@@ -141,7 +146,7 @@ def test_kv_connector_allows_expandable_segments_with_sleep_mode(monkeypatch):
     """Sleep mode routes KV allocations through CuMemAllocator's pool, which
     auto-disables expandable_segments (see #40812)."""
     monkeypatch.setenv("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
-    _build_config(kv_connector="NixlConnector", enable_sleep_mode=True)
+    _build_config(kv_connector="MooncakeConnector", enable_sleep_mode=True)
 
 
 def test_kv_connector_allows_expandable_segments_with_cumem_allocator(
@@ -150,6 +155,27 @@ def test_kv_connector_allows_expandable_segments_with_cumem_allocator(
     """Manual CuMem allocation must also bypass expandable_segments."""
     monkeypatch.setenv("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
     _build_config(kv_connector="NixlConnector", enable_cumem_allocator=True)
+
+
+@pytest.mark.parametrize(
+    ("kv_connector", "extra_config", "env"),
+    [
+        ("NixlConnector", {}, None),
+        ("MooncakeConnector", {"mooncake_protocol": "tcp"}, None),
+        ("MooncakeConnector", {}, "MC_USE_TENT"),
+    ],
+)
+def test_sleep_mode_refuses_unsupported_kv_connector(
+    monkeypatch, kv_connector, extra_config, env
+):
+    if env:
+        monkeypatch.setenv(env, "1")
+    with pytest.raises(ValueError, match=f"^{kv_connector} does not support sleep"):
+        _build_config(
+            kv_connector=kv_connector,
+            kv_connector_extra_config=extra_config,
+            enable_sleep_mode=True,
+        )
 
 
 def test_kv_connector_allows_other_alloc_conf(monkeypatch):
