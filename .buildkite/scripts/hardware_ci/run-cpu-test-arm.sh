@@ -55,6 +55,9 @@ kernel_tests() {
     pytest -x -v -s tests/v1/worker/test_cpu_input_batch.py
     pytest -x -v -s tests/v1/worker/test_cpu_logprob.py
     pytest -x -v -s tests/v1/worker/test_cpu_logit_bias.py
+    pytest -x -v -s tests/v1/worker/test_cpu_logits_processors.py
+    pytest -x -v -s tests/v1/worker/test_cpu_sampler.py
+    pytest -x -v -s tests/v1/worker/test_cpu_structured_outputs.py
     pytest -x -v -s tests/v1/worker/test_cpu_block_table.py
     pytest -x -v -s tests/v1/worker/test_kv_block_zeroer.py
     pytest -x -v -s tests/v1/worker/test_mamba_hybrid_model_state.py \

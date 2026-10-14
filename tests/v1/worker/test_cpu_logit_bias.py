@@ -8,7 +8,7 @@ import vllm._C  # noqa: F401
 
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
-from vllm.v1.worker.gpu.sample.logit_bias import LogitBiasState
+from vllm.v1.worker.cpu.logits_processors import CPULogitBiasState
 from vllm.v1.worker.gpu.sample.logits_processor import (
     LogitsContext,
     LogitsProcRequestState,
@@ -28,7 +28,7 @@ MIN_TOKENS = 10
 POS = 5
 
 
-def _make_state(params: list[SamplingParams]) -> LogitBiasState:
+def _make_state(params: list[SamplingParams]) -> CPULogitBiasState:
     req_states = RequestState(
         max_num_reqs=4,
         max_model_len=64,
@@ -38,7 +38,9 @@ def _make_state(params: list[SamplingParams]) -> LogitBiasState:
         device=torch.device("cpu"),
     )
     req_states.prompt_len.np[:] = PROMPT_LEN
-    state = LogitBiasState(None, LogitsProcRequestState.from_request_state(req_states))
+    state = CPULogitBiasState(
+        None, LogitsProcRequestState.from_request_state(req_states)
+    )
     for req_idx, sampling_params in enumerate(params):
         state.add_request(req_idx, sampling_params)
     state.apply_staged_writes()
