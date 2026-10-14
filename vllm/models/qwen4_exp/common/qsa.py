@@ -574,16 +574,21 @@ build_qsa_metadata = (
 
 @dataclass
 class QSAIndexerMetadata(AttentionMetadata):
-    """Common per-forward metadata for one QSA indexer cache."""
+    """Per-forward metadata for one raw or compressed QSA indexer cache."""
 
     block_table: torch.Tensor
     slot_mapping: torch.Tensor
     seq_lens: torch.Tensor
     query_start_loc: torch.Tensor
     token_to_req: torch.Tensor
-    logical_positions: torch.Tensor
-    visible_blocks: torch.Tensor
-    k_work_metadata: torch.Tensor
+    # Positions in the original uncompressed sequence, padded with -1.
+    logical_positions: torch.Tensor  # [num_tokens]
+    # Complete compression groups visible to each query.
+    visible_blocks: torch.Tensor  # [num_tokens]
+    # K compression work items: (request index, local task index), -1 for padding.
+    # Task 0 per request also saves the raw-K suffix, even without a complete group.
+    # Empty for raw or uncompressed caches.
+    k_work_metadata: torch.Tensor  # [num_k_work, 2]
     num_actual_tokens: int
     num_decodes: int
     num_decode_tokens: int
@@ -592,6 +597,7 @@ class QSAIndexerMetadata(AttentionMetadata):
     max_query_len: int
     decode_query_len: int
     max_seq_len: int
+    # Key rows per physical cache block.
     storage_block_size: int
     compress_ratio: int
 
