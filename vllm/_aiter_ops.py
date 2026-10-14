@@ -554,19 +554,19 @@ def _rocm_aiter_topk_sigmoid_impl(
     topk_sigmoid(topk_weights, topk_indices, gating_output)
 
 
-def _rocm_aiter_router_gemm_impl(
+def _rocm_aiter_bf16_gemm_impl(
     x: torch.Tensor,
     weight: torch.Tensor,
     out_dtype: torch.dtype,
 ) -> torch.Tensor:
-    # AITER only has bf16-output tuned configs for router shapes: run bf16, cast.
+    # AITER's bf16 tuned configs output bf16: run bf16, cast to out_dtype.
     from aiter.tuned_gemm import tgemm
 
     out = tgemm.mm(x, weight, None)
     return out if out.dtype == out_dtype else out.to(out_dtype)
 
 
-def _rocm_aiter_router_gemm_fake(
+def _rocm_aiter_bf16_gemm_fake(
     x: torch.Tensor,
     weight: torch.Tensor,
     out_dtype: torch.dtype,
@@ -2897,10 +2897,10 @@ class rocm_aiter_ops:
             )
 
             direct_register_custom_op(
-                op_name="rocm_aiter_router_gemm",
-                op_func=_rocm_aiter_router_gemm_impl,
+                op_name="rocm_aiter_bf16_gemm",
+                op_func=_rocm_aiter_bf16_gemm_impl,
                 mutates_args=[],
-                fake_impl=_rocm_aiter_router_gemm_fake,
+                fake_impl=_rocm_aiter_bf16_gemm_fake,
                 dispatch_key=current_platform.dispatch_key,
             )
 
@@ -3283,6 +3283,14 @@ class rocm_aiter_ops:
         return torch.ops.vllm.rocm_aiter_triton_gemm_a8w8_blockscale(
             A, B, As, Bs, output_dtype
         )
+
+    @staticmethod
+    def bf16_gemm(
+        x: torch.Tensor,
+        weight: torch.Tensor,
+        out_dtype: torch.dtype,
+    ) -> torch.Tensor:
+        return torch.ops.vllm.rocm_aiter_bf16_gemm(x, weight, out_dtype)
 
     @staticmethod
     def gemm_a8w8_blockscale(

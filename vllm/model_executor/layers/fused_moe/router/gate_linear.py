@@ -368,7 +368,7 @@ class GateLinear(ReplicatedLinear):
         # first to keep it reachable there.
         if x.dtype == torch.bfloat16:
             if self.allow_aiter_router_gemm:
-                output = torch.ops.vllm.rocm_aiter_router_gemm(
+                output = rocm_aiter_ops.bf16_gemm(
                     x,
                     self.weight,
                     self.out_dtype if self.out_dtype is not None else self.weight.dtype,
