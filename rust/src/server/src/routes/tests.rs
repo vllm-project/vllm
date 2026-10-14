@@ -5989,7 +5989,7 @@ async fn reset_mm_cache_route_clears_shm_processor_cache() {
     )]
     .into_iter()
     .collect();
-    let stored = cache.put_or_inline("mm-hash-0", "mm-hash-0", item);
+    let stored = cache.put_or_inline("mm-hash-0", item);
     assert!(
         stored.contains_key("address"),
         "item should be stored in shm"

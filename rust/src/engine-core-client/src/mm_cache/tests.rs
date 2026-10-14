@@ -13,8 +13,8 @@ use crate::protocol::multimodal::{
 };
 use crate::protocol::tensor::WireTensor;
 
-/// Build an item with an inline small tensor (8 bytes < 256 threshold), an
-/// aux-frame large tensor (512 bytes), and a plain int field.
+/// Build an item with two inline tensors (raw-view ext, no aux frames) and a
+/// plain int field.
 fn interop_item() -> MmKwargsItem {
     let batched = || MmField::Batched(MmBatchedField { keep_on_cpu: false });
     BTreeMap::from([
@@ -92,7 +92,7 @@ fn python_decodes_rust_written_shm_item() {
     .unwrap();
     cache.set_n_readers(1);
 
-    let address_item = cache.put_or_inline("hash-interop", "hash-interop", interop_item());
+    let address_item = cache.put_or_inline("hash-interop", interop_item());
     let address = int_field(&address_item, "address");
     let monotonic_id = int_field(&address_item, "monotonic_id");
     let signature = signature_hex(&address_item);

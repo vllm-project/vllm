@@ -12,7 +12,7 @@ use llm_multimodal::{
 };
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
 
-use super::cache::{self, CacheLookup, MmProcessorCache, merge_slots, put_or_inline_and_track};
+use super::cache::{CacheLookup, MmProcessorCache, merge_slots, put_or_inline_and_track};
 use super::timing::MM_STAGE_TARGET;
 use super::{
     ItemSource, MultimodalModelInfo, PreparedItem, PreparedMedia, VisionModalitySupport, item,
@@ -29,11 +29,11 @@ impl MultimodalModelInfo {
     /// With the SHM processor cache enabled, cached frames skip preprocessing
     /// entirely: their prompt replacements come from the cache shadow and
     /// their feature data is the shm address item. Cache misses are
-    /// preprocessed as one batch.
+    /// preprocessed as one batch. Budget-sensitive processors bypass the
+    /// cache (`cache` is `None` for them), so they always preprocess inline.
     ///
-    /// A frame carrying a client UUID is keyed by that UUID (budget-wrapped
-    /// for budget-sensitive processors) instead of its content hash, and its
-    /// `mm_hash` is the UUID.
+    /// A frame carrying a client UUID is keyed by that UUID instead of its
+    /// content hash, and its `mm_hash` is the UUID.
     #[tracing::instrument(
         name = "mm_stage",
         target = MM_STAGE_TARGET,
@@ -54,7 +54,6 @@ impl MultimodalModelInfo {
         let mut slots = Vec::with_capacity(sources.len());
         let mut miss_frames = Vec::new();
         let mut miss_uuids = Vec::new();
-        let mut miss_keys = Vec::new();
         let mut miss_hashes = Vec::new();
         for source in sources {
             let (frame, uuid) = match source {
@@ -70,16 +69,14 @@ impl MultimodalModelInfo {
                 (Some(_), Some(uuid)) => uuid.clone(),
                 _ => frame.hash.clone(),
             };
-            let key = cache::mm_item_key(Some(support), &mm_hash, &preprocessing_context);
             let lookup = match cache {
-                Some(cache) => cache.lookup(key.as_ref(), &mm_hash, uuid),
+                Some(cache) => cache.lookup(&mm_hash, uuid),
                 None => CacheLookup::Miss(uuid),
             };
             match lookup {
                 CacheLookup::Hit(item, replacement) => slots.push(Some((item, replacement))),
                 CacheLookup::Miss(uuid) => {
                     slots.push(None);
-                    miss_keys.push(key.into_owned());
                     miss_hashes.push(mm_hash);
                     miss_frames.push(frame);
                     miss_uuids.push(uuid);
@@ -98,14 +95,9 @@ impl MultimodalModelInfo {
                     preprocessing_context,
                 )
                 .await?;
-            for (item, replacement, key, hash) in
-                izip!(&mut items, &replacements, &miss_keys, &miss_hashes)
-            {
-                // The handle is signed over the feature-facing mm_hash, not
-                // the (possibly budget-wrapped) internal key.
+            for (item, replacement, hash) in izip!(&mut items, &replacements, &miss_hashes) {
                 item.data = put_or_inline_and_track(
                     cache,
-                    key,
                     hash,
                     replacement,
                     std::mem::take(&mut item.data),

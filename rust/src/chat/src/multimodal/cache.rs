@@ -8,11 +8,10 @@
 //! this wrapper additionally shadows each cached hash's `PromptReplacement`
 //! (Python's `_p0_cache`) so cache hits skip re-preprocessing entirely.
 
-use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use llm_multimodal::{PromptReplacement, VisionPreprocessingContext};
+use llm_multimodal::PromptReplacement;
 use parking_lot::Mutex;
 use vllm_engine_core_client::mm_cache::MmProcessorShmCache;
 use vllm_engine_core_client::protocol::multimodal::MmKwargsItem;
@@ -21,30 +20,18 @@ use super::{PreparedItem, VisionModalitySupport};
 
 /// Vision processors whose preprocessing output depends on the per-request
 /// `VisionPreprocessingContext` (today: only Nemotron-H Omni's
-/// `token_budget`-driven dynamic resolution). Their cache entries must key on
-/// the budget in addition to the content hash.
+/// `token_budget`-driven dynamic resolution). Their per-request budget varies,
+/// so cache hits would be rare anyway: such processors bypass the processor
+/// cache entirely and always preprocess inline.
 ///
 /// TODO: drop this name list once `llm-multimodal` exposes a capability flag
 /// on `VisionPreProcessor` for request-context sensitivity.
-const BUDGET_SENSITIVE_PROCESSORS: &[&str] = &["nemotron_h_omni"];
+pub(super) const BUDGET_SENSITIVE_PROCESSORS: &[&str] = &["nemotron_h_omni"];
 
-/// Cache key for one media item: the item's base identifier (a client UUID
-/// when supplied, otherwise the content hash), plus the per-request token
-/// budget for budget-sensitive image processors so requests with different
-/// budgets never share processed tensors or prompt replacements.
-pub(super) fn mm_item_key<'a>(
-    support: Option<&VisionModalitySupport>,
-    id: &'a str,
-    context: &VisionPreprocessingContext,
-) -> Cow<'a, str> {
-    let budget_sensitive = support.is_some_and(|support| {
-        BUDGET_SENSITIVE_PROCESSORS.contains(&support.processor.model_name())
-    });
-    if budget_sensitive {
-        Cow::Owned(format!("{id}#budget={:?}", context.token_budget))
-    } else {
-        Cow::Borrowed(id)
-    }
+/// Whether a vision processor's output depends on the per-request
+/// preprocessing context, in which case its items bypass the SHM cache.
+pub(super) fn is_budget_sensitive(support: &VisionModalitySupport) -> bool {
+    BUDGET_SENSITIVE_PROCESSORS.contains(&support.processor.model_name())
 }
 
 /// The P0 (frontend) side of the SHM multimodal processor cache.
@@ -109,15 +96,14 @@ impl MmProcessorCache {
 
     /// Look up one fetched media item by cache key.
     ///
+    /// The cache key is the feature-facing `mm_hash` itself: the client UUID
+    /// when supplied, otherwise the content hash.
+    ///
     /// On a hit, bumps writer_flag and returns the address item plus the
     /// shadowed prompt replacement. On a miss — including a shadowed entry
     /// whose shm data vanished under a concurrent eviction — returns the UUID
     /// back for the preprocessing path.
-    ///
-    /// `key` is the cache key (see [`mm_item_key`]); `hash` is the raw
-    /// content hash recorded on the returned [`PreparedItem`] so the engine
-    /// still sees the content-addressed `mm_hash`.
-    pub(super) fn lookup(&self, key: &str, hash: &str, uuid: Option<String>) -> CacheLookup {
+    pub(super) fn lookup(&self, key: &str, uuid: Option<String>) -> CacheLookup {
         let replacement = self.shadow.lock().get(key).cloned();
         let Some(replacement) = replacement else {
             return CacheLookup::Miss(uuid);
@@ -126,7 +112,7 @@ impl MmProcessorCache {
             Some(data) => CacheLookup::Hit(
                 PreparedItem {
                     data,
-                    hash: hash.to_owned(),
+                    hash: key.to_owned(),
                     uuid,
                 },
                 replacement,
@@ -166,10 +152,8 @@ impl MmProcessorCache {
     /// Put a freshly preprocessed item into shm and shadow its prompt
     /// replacement.
     ///
-    /// `key` is the internal cache key (see [`mm_item_key`]); `sign_id` is the
-    /// feature-facing id the issued handle is signed over — the string sent as
-    /// the feature's `mm_hash` — which differs from `key` for budget-sensitive
-    /// image processors.
+    /// `key` is the cache key, equal to the feature-facing `mm_hash` the
+    /// issued handle is signed over.
     ///
     /// Oversize, buffer-full, or duplicate-key puts return the item unchanged
     /// for inline sending and shadow nothing (Python's `get_and_update_item`
@@ -177,11 +161,10 @@ impl MmProcessorCache {
     pub(super) fn put_or_inline_and_track(
         &self,
         key: &str,
-        sign_id: &str,
         replacement: &PromptReplacement,
         data: MmKwargsItem,
     ) -> MmKwargsItem {
-        let data = self.shm.put_or_inline(key, sign_id, data);
+        let data = self.shm.put_or_inline(key, data);
         if !self.shm.is_cached(key) {
             return data;
         }
@@ -213,12 +196,11 @@ impl Drop for TouchesGuard<'_> {
 pub(super) fn put_or_inline_and_track(
     cache: Option<&MmProcessorCache>,
     key: &str,
-    sign_id: &str,
     replacement: &PromptReplacement,
     data: MmKwargsItem,
 ) -> MmKwargsItem {
     match cache {
-        Some(cache) => cache.put_or_inline_and_track(key, sign_id, replacement, data),
+        Some(cache) => cache.put_or_inline_and_track(key, replacement, data),
         None => data,
     }
 }
@@ -336,14 +318,10 @@ pub(crate) mod tests {
 
         cache.touch("hash-a");
         let item = test_item(7);
-        let sent =
-            cache.put_or_inline_and_track("hash-a", "hash-a", &test_replacement(), item.clone());
+        let sent = cache.put_or_inline_and_track("hash-a", &test_replacement(), item.clone());
         assert_eq!(sent, item, "before set_n_readers the item goes inline");
         assert!(
-            matches!(
-                cache.lookup("hash-a", "hash-a", None),
-                CacheLookup::Miss(None)
-            ),
+            matches!(cache.lookup("hash-a", None), CacheLookup::Miss(None)),
             "before set_n_readers nothing is cached"
         );
     }
@@ -353,14 +331,13 @@ pub(crate) mod tests {
         let cache = MmProcessorCache::new(test_shm_cache());
 
         let item = test_item(11);
-        let sent = cache.put_or_inline_and_track("hash-b", "hash-b", &test_replacement(), item);
+        let sent = cache.put_or_inline_and_track("hash-b", &test_replacement(), item);
         assert!(
             is_address_item(&sent),
             "a fresh put yields the address item"
         );
 
-        let CacheLookup::Hit(hit, replacement) =
-            cache.lookup("hash-b", "hash-b", Some("uuid-1".into()))
+        let CacheLookup::Hit(hit, replacement) = cache.lookup("hash-b", Some("uuid-1".into()))
         else {
             panic!("hash-b should be cached");
         };
@@ -375,7 +352,7 @@ pub(crate) mod tests {
         let cache = MmProcessorCache::new(test_shm_cache());
 
         assert!(matches!(
-            cache.lookup("hash-c", "hash-c", Some("uuid-2".into())),
+            cache.lookup("hash-c", Some("uuid-2".into())),
             CacheLookup::Miss(Some(uuid)) if uuid == "uuid-2"
         ));
     }
@@ -386,14 +363,13 @@ pub(crate) mod tests {
     fn address_items_carry_a_signed_handle() {
         let cache = MmProcessorCache::new(test_shm_cache());
 
-        let sent =
-            cache.put_or_inline_and_track("hash-s", "hash-s", &test_replacement(), test_item(3));
+        let sent = cache.put_or_inline_and_track("hash-s", &test_replacement(), test_item(3));
         assert!(is_address_item(&sent));
         let signature = signature_of(&sent);
         assert_eq!(signature.len(), 32, "HMAC-SHA256 signature is 32 bytes");
         assert!(signature.iter().all(|byte| (0..=255).contains(byte)));
 
-        let CacheLookup::Hit(hit, _) = cache.lookup("hash-s", "hash-s", None) else {
+        let CacheLookup::Hit(hit, _) = cache.lookup("hash-s", None) else {
             panic!("hash-s should be cached");
         };
         assert!(is_address_item(&hit.data));
@@ -407,8 +383,7 @@ pub(crate) mod tests {
     fn touches_protect_until_guard_drop_or_lookup() {
         let shm = test_shm_cache();
         let cache = MmProcessorCache::new(Arc::clone(&shm));
-        let sent =
-            cache.put_or_inline_and_track("hash-t", "hash-t", &test_replacement(), test_item(5));
+        let sent = cache.put_or_inline_and_track("hash-t", &test_replacement(), test_item(5));
         assert!(is_address_item(&sent));
 
         let guard = cache.touches_guard();
@@ -419,10 +394,7 @@ pub(crate) mod tests {
 
         cache.touch("hash-t");
         assert_eq!(shm.touched_len(), 1);
-        assert!(matches!(
-            cache.lookup("hash-t", "hash-t", None),
-            CacheLookup::Hit(..)
-        ));
+        assert!(matches!(cache.lookup("hash-t", None), CacheLookup::Hit(..)));
         assert_eq!(shm.touched_len(), 0);
     }
 
@@ -700,100 +672,97 @@ pub(crate) mod tests {
         assert!(error.is_request_validation_error());
     }
 
-    /// For budget-sensitive processors the per-request token budget is mixed
-    /// into UUID keys exactly as it is for content-hash keys: the same UUID
-    /// under a different budget must be a cache miss.
+    /// Budget-sensitive image processors bypass the cache entirely: repeated
+    /// prepares of the same image — even with a client UUID and under
+    /// different token budgets — always preprocess inline, and no shm entry
+    /// is ever created.
     #[tokio::test]
-    async fn uuid_keys_mix_in_the_token_budget_for_sensitive_processors() {
+    async fn budget_sensitive_image_processors_bypass_the_cache() {
+        use llm_multimodal::MediaContentPart;
+        use vllm_engine_core_client::protocol::dtype::ModelDtype;
+
+        use super::super::tests::{NEMOTRON_IMAGE_ID, nemotron_h_omni_info};
+
+        let shm = test_shm_cache();
+        let info = nemotron_h_omni_info().with_mm_processor_cache(Some(Arc::clone(&shm)));
+        let media_part = || MediaContentPart::ImageData {
+            data: test_png_bytes(),
+            mime_type: Some("image/png".to_string()),
+            uuid: Some("nem-uuid".to_string()),
+            detail: None,
+        };
+        let prompt = || {
+            let mut prompt = vec![11; 100];
+            prompt.push(NEMOTRON_IMAGE_ID);
+            prompt
+        };
+
+        for max_model_len in [Some(512), Some(600)] {
+            let mut tokens = prompt();
+            let features = info
+                .prepare_multimodal(
+                    vec![media_part()],
+                    &mut tokens,
+                    ModelDtype::Float32,
+                    max_model_len,
+                    true,
+                )
+                .await
+                .expect("budget-sensitive image prepare should succeed");
+            assert_eq!(features.len(), 1);
+            let data = features[0].data.as_ref().expect("feature data");
+            assert!(
+                !is_address_item(data),
+                "budget-sensitive image processors always send the item inline"
+            );
+        }
+        assert_eq!(shm.cached_len(), 0, "no shm entry is ever created");
+        assert_eq!(shm.touched_len(), 0, "nothing is pre-touched");
+    }
+
+    /// A UUID-only cache reference needs the cache, which budget-sensitive
+    /// image processors bypass: the request fails with a clear 400-class
+    /// error rather than a cache miss.
+    #[tokio::test]
+    async fn budget_sensitive_images_reject_uuid_cache_references() {
         use llm_multimodal::MediaContentPart;
         use vllm_engine_core_client::protocol::dtype::ModelDtype;
 
         use super::super::tests::{NEMOTRON_IMAGE_ID, nemotron_h_omni_info};
 
         let info = nemotron_h_omni_info().with_mm_processor_cache(Some(test_shm_cache()));
-        let prompt = || {
-            let mut prompt = vec![11; 100];
-            prompt.push(NEMOTRON_IMAGE_ID);
-            prompt
-        };
-        let reference_part = || MediaContentPart::ImageUrl {
-            url: String::new(),
-            detail: None,
-            uuid: Some("nem-uuid".to_string()),
-        };
-
-        let mut tokens_first = prompt();
-        let first = info
-            .prepare_multimodal(
-                vec![MediaContentPart::ImageData {
-                    data: test_png_bytes(),
-                    mime_type: Some("image/png".to_string()),
-                    uuid: Some("nem-uuid".to_string()),
-                    detail: None,
-                }],
-                &mut tokens_first,
-                ModelDtype::Float32,
-                Some(512),
-                true,
-            )
-            .await
-            .expect("first nemotron prepare should succeed");
-        assert_eq!(first[0].mm_hash.as_deref(), Some("nem-uuid"));
-        assert!(is_address_item(first[0].data.as_ref().unwrap()));
-
-        // Same UUID, same budget: a pure cache reference hits.
-        let mut tokens_second = prompt();
-        let second = info
-            .prepare_multimodal(
-                vec![reference_part()],
-                &mut tokens_second,
-                ModelDtype::Float32,
-                Some(512),
-                true,
-            )
-            .await
-            .expect("same UUID and budget should hit the cache");
-        assert_eq!(
-            address_of(second[0].data.as_ref().unwrap()),
-            address_of(first[0].data.as_ref().unwrap())
-        );
-        assert_eq!(tokens_second, tokens_first);
-
-        // Same UUID, different budget (512 -> 600): a cache miss, and with no
-        // content provided this is the Python-style reference error.
         let error = info
             .prepare_multimodal(
-                vec![reference_part()],
-                &mut prompt(),
+                vec![MediaContentPart::ImageUrl {
+                    url: String::new(),
+                    detail: None,
+                    uuid: Some("nem-uuid".to_string()),
+                }],
+                &mut vec![11, NEMOTRON_IMAGE_ID],
                 ModelDtype::Float32,
-                Some(600),
+                Some(512),
                 true,
             )
             .await
-            .expect_err("a different token budget must miss the UUID cache entry");
+            .expect_err("budget-sensitive models reject UUID cache references");
         assert!(matches!(&error, crate::Error::MmUuidReference { message }
-                if message == "Cache miss for image at index 0 but data is not provided."));
+                if message.contains("cache references are not supported for this model")));
+        assert!(error.is_request_validation_error());
     }
 
     #[test]
-    fn mm_item_key_wraps_budget_only_for_sensitive_image_processors() {
+    fn mm_cache_for_bypasses_only_budget_sensitive_image_processors() {
+        use llm_multimodal::Modality;
+
         use super::super::tests::{nemotron_h_omni_info, qwen3_vl_info};
 
-        let context = VisionPreprocessingContext {
-            token_budget: Some(1234),
-        };
-        let qwen = qwen3_vl_info();
-        let nemotron = nemotron_h_omni_info();
-        assert_eq!(mm_item_key(qwen.image.as_ref(), "id-1", &context), "id-1");
-        assert_eq!(mm_item_key(None, "id-1", &context), "id-1");
-        assert_eq!(
-            mm_item_key(nemotron.image.as_ref(), "id-1", &context),
-            "id-1#budget=Some(1234)"
-        );
-        let no_budget = VisionPreprocessingContext { token_budget: None };
-        assert_eq!(
-            mm_item_key(nemotron.image.as_ref(), "id-1", &no_budget),
-            "id-1#budget=None"
-        );
+        let qwen = qwen3_vl_info().with_mm_processor_cache(Some(test_shm_cache()));
+        assert!(qwen.mm_cache_for(Modality::Image).is_some());
+        assert!(qwen.mm_cache_for(Modality::Video).is_some());
+
+        let nemotron = nemotron_h_omni_info().with_mm_processor_cache(Some(test_shm_cache()));
+        assert!(nemotron.mm_cache_for(Modality::Image).is_none());
+
+        assert!(qwen3_vl_info().mm_cache_for(Modality::Image).is_none());
     }
 }

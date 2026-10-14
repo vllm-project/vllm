@@ -126,18 +126,6 @@ pub enum MmKwargValue {
     List(Vec<MmKwargValue>),
 }
 
-/// Extract large tensor buffers from every field of this item in serialized
-/// (map iteration) field order.
-pub(crate) fn extract_mm_kwargs_item_aux_frames(
-    item: &mut MmKwargsItem,
-    aux_frames: &mut Vec<Bytes>,
-    threshold: usize,
-) {
-    for elem in item.values_mut() {
-        elem.extract_aux_frames(aux_frames, threshold);
-    }
-}
-
 impl MmFeatureSpec {
     /// Extract large tensor buffers from this feature in serialized field order.
     pub(crate) fn extract_aux_frames(&mut self, aux_frames: &mut Vec<Bytes>, threshold: usize) {

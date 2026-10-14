@@ -148,16 +148,13 @@ impl MmProcessorShmCache {
     /// or return the input item unchanged for inline sending on oversize /
     /// buffer-full / duplicate-key.
     ///
-    /// `hash` is the internal cache key; `sign_id` is the feature-facing id
-    /// the handle is signed over (the string sent as the feature's
-    /// `mm_hash`), which differs from `hash` for budget-sensitive image
-    /// processors.
-    pub fn put_or_inline(&self, hash: &str, sign_id: &str, item: MmKwargsItem) -> MmKwargsItem {
+    /// `hash` is the cache key the issued handle is signed over.
+    pub fn put_or_inline(&self, hash: &str, item: MmKwargsItem) -> MmKwargsItem {
         if self.n_readers() == 0 {
             return item;
         }
-        let serialized = match serialize_mm_item(&item) {
-            Ok(serialized) => serialized,
+        let payload = match serialize_mm_item(&item) {
+            Ok(payload) => payload,
             Err(error) => {
                 warn!(
                     hash,
@@ -169,7 +166,7 @@ impl MmProcessorShmCache {
         };
 
         let mut inner = self.inner.lock();
-        match inner.put(hash, sign_id, &serialized.frames, &serialized.metadata) {
+        match inner.put(hash, &payload) {
             Ok((address, monotonic_id)) => {
                 let signature = inner.get_signature(hash).expect("put just inserted the key");
                 address_as_item(address, monotonic_id, signature)
@@ -376,7 +373,7 @@ mod tests {
         assert_eq!(cache.address_item_for_cached("hash-a"), None);
 
         // The item comes back unchanged for inline sending.
-        let returned = cache.put_or_inline("hash-a", "hash-a", item.clone());
+        let returned = cache.put_or_inline("hash-a", item.clone());
         assert_eq!(returned, item);
         assert!(!cache.is_cached("hash-a"));
         assert_eq!(cache.cached_len(), 0);
@@ -387,7 +384,7 @@ mod tests {
         let cache = create_cache(1 << 20, 1 << 16);
         cache.set_n_readers(2);
 
-        let address_item = cache.put_or_inline("hash-a", "hash-a", item_with_tensor(8));
+        let address_item = cache.put_or_inline("hash-a", item_with_tensor(8));
         expect_address_item(&address_item, 0, 0);
         assert!(cache.is_cached("hash-a"));
         assert_eq!(cache.cached_len(), 1);
@@ -400,22 +397,17 @@ mod tests {
     }
 
     #[test]
-    fn address_items_are_signed_over_the_feature_facing_id() {
+    fn address_items_are_signed_over_the_key() {
         let cache = create_cache(1 << 20, 1 << 16);
         cache.set_n_readers(1);
 
-        // A budget-wrapped internal key whose feature-facing mm_hash is the
-        // raw content hash.
-        let item = cache.put_or_inline("hash-a#budget=Some(1)", "hash-a", item_with_tensor(8));
+        let item = cache.put_or_inline("hash-a", item_with_tensor(8));
         let signature = signature_of(&item);
 
         let inner = cache.inner.lock();
         assert_eq!(signature.as_slice(), inner.make_signature("hash-a", 0, 0));
-        // Not over the internal key, and not over another handle.
-        assert_ne!(
-            signature.as_slice(),
-            inner.make_signature("hash-a#budget=Some(1)", 0, 0)
-        );
+        // Not over another key, and not over another handle.
+        assert_ne!(signature.as_slice(), inner.make_signature("hash-b", 0, 0));
         assert_ne!(signature.as_slice(), inner.make_signature("hash-a", 0, 1));
     }
 
@@ -425,8 +417,8 @@ mod tests {
         cache.set_n_readers(1);
 
         let original = item_with_tensor(8);
-        cache.put_or_inline("hash-a", "hash-a", original.clone());
-        let returned = cache.put_or_inline("hash-a", "hash-a", original.clone());
+        cache.put_or_inline("hash-a", original.clone());
+        let returned = cache.put_or_inline("hash-a", original.clone());
         assert_eq!(returned, original);
     }
 
@@ -436,7 +428,7 @@ mod tests {
         cache.set_n_readers(1);
 
         let original = item_with_tensor(1024); // 4 KiB tensor > 256 byte cap
-        let returned = cache.put_or_inline("hash-a", "hash-a", original.clone());
+        let returned = cache.put_or_inline("hash-a", original.clone());
         assert_eq!(returned, original);
         assert!(!cache.is_cached("hash-a"));
     }
@@ -447,12 +439,12 @@ mod tests {
         let cache = create_cache(160, 1 << 16);
         cache.set_n_readers(1);
 
-        let first = cache.put_or_inline("hash-a", "hash-a", item_with_tensor(8));
+        let first = cache.put_or_inline("hash-a", item_with_tensor(8));
         assert!(first.contains_key("address"));
 
         // Unread first chunk cannot be evicted, so the second item is inline.
         let original = item_with_tensor(8);
-        let returned = cache.put_or_inline("hash-b", "hash-b", original.clone());
+        let returned = cache.put_or_inline("hash-b", original.clone());
         assert_eq!(returned, original);
         assert!(!cache.is_cached("hash-b"));
     }
@@ -462,7 +454,7 @@ mod tests {
         let cache = create_cache(1 << 20, 1 << 16);
         cache.set_n_readers(1);
 
-        cache.put_or_inline("hash-a", "hash-a", item_with_tensor(8));
+        cache.put_or_inline("hash-a", item_with_tensor(8));
         cache.clear();
         assert!(!cache.is_cached("hash-a"));
         assert_eq!(cache.cached_len(), 0);
@@ -470,7 +462,7 @@ mod tests {
         // After clearing, the next allocation restarts at address zero while
         // IDs keep increasing, so pre-clear handles fail the engine's ID check
         // once their chunk is reused.
-        let address_item = cache.put_or_inline("hash-a", "hash-a", item_with_tensor(8));
+        let address_item = cache.put_or_inline("hash-a", item_with_tensor(8));
         expect_address_item(&address_item, 0, 1);
     }
 }

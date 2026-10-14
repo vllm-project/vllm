@@ -11,7 +11,6 @@
 //! Raw media stays above `vllm-text`; this module lowers it into token IDs and
 //! opaque tensor payloads before the request is handed to text generation.
 
-use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::Path;
@@ -605,6 +604,25 @@ impl MultimodalModelInfo {
         self
     }
 
+    /// The SHM processor cache for one modality, or `None` when the cache is
+    /// disabled or the modality bypasses it.
+    ///
+    /// Budget-sensitive image processors (see
+    /// [`cache::BUDGET_SENSITIVE_PROCESSORS`]) bypass the cache entirely:
+    /// their output depends on the per-request token budget, so cache hits
+    /// would be rare. Their items are always fetched and preprocessed inline.
+    /// Video and audio preprocessors take no request context and always use
+    /// the cache when enabled.
+    fn mm_cache_for(&self, modality: Modality) -> Option<&MmProcessorCache> {
+        let cache = self.mm_processor_cache.as_ref()?;
+        if modality == Modality::Image
+            && self.image.as_ref().is_some_and(cache::is_budget_sensitive)
+        {
+            return None;
+        }
+        Some(cache)
+    }
+
     /// Return the template-visible placeholder token for one modality, when
     /// this model supports it.
     ///
@@ -910,14 +928,23 @@ impl MultimodalModelInfo {
         let media_parts_len = media_parts.len();
         self.validate_mm_limits(&media_parts)?;
         let vision_context = self.vision_preprocessing_context(prompt_token_ids, max_model_len);
-        let cache = if use_mm_cache {
-            self.mm_processor_cache.as_ref()
-        } else {
-            None
+        // Per-modality view of the SHM processor cache: `use_mm_cache=false`
+        // bypasses it entirely, and budget-sensitive image processors never
+        // use it (see [`Self::mm_cache_for`]).
+        let cache_for = |modality: Modality| {
+            if use_mm_cache {
+                self.mm_cache_for(modality)
+            } else {
+                None
+            }
         };
         // Release this request's touch protections when the merge completes,
         // on success OR error (Python: `finally: release_sender_touches()`).
-        let _touches_guard = cache.map(MmProcessorCache::touches_guard);
+        let _touches_guard = if use_mm_cache {
+            self.mm_processor_cache.as_ref().map(MmProcessorCache::touches_guard)
+        } else {
+            None
+        };
 
         // Resolve client-supplied UUIDs against the cache before any fetch,
         // mirroring Python's `mm_uuids` handling: the UUID (not the content
@@ -940,15 +967,9 @@ impl MultimodalModelInfo {
             part_modalities.push(Some(modality));
             let uuid = uuid.map(str::to_owned);
 
-            match (cache, uuid.as_deref()) {
+            match (cache_for(modality), uuid.as_deref()) {
                 (Some(cache), Some(uuid)) => {
-                    let key = match modality {
-                        Modality::Image => {
-                            cache::mm_item_key(self.image.as_ref(), uuid, &vision_context)
-                        }
-                        _ => Cow::Borrowed(uuid),
-                    };
-                    if let Some(hit) = cache.lookup_uuid(key.as_ref(), uuid) {
+                    if let Some(hit) = cache.lookup_uuid(uuid, uuid) {
                         uuid_hits.push(Some(hit));
                         continue;
                     }
@@ -960,7 +981,17 @@ impl MultimodalModelInfo {
                     uuid_hits.push(None);
                     fetch_parts.push(part);
                 }
-                (_, Some(_)) if !has_content => {
+                (None, Some(_)) if !has_content => {
+                    if modality == Modality::Image
+                        && self.image.as_ref().is_some_and(cache::is_budget_sensitive)
+                    {
+                        bail_mm_uuid_reference!(
+                            "{modality} part at index {index} carries a UUID but no content, \
+                             and cache references are not supported for this model: its image \
+                             preprocessing depends on the per-request token budget and bypasses \
+                             the SHM multimodal processor cache"
+                        );
+                    }
                     bail_mm_uuid_reference!(
                         "{modality} part at index {index} carries a UUID but no content, \
                          which requires the SHM multimodal processor cache \
@@ -983,17 +1014,19 @@ impl MultimodalModelInfo {
         // `put_or_inline` calls (or until `_touches_guard` releases the
         // touches at the end of the request). Keys must match the prepare
         // step exactly: the UUID for UUID-keyed items, otherwise the content
-        // hash, plus the per-request budget for budget-sensitive image
-        // processors.
-        if let Some(cache) = cache {
+        // hash. Budget-sensitive image processors bypass the cache, so their
+        // items are never touched.
+        if let Some(cache) = cache_for(Modality::Image) {
             for (frame, uuid) in fetched.images.iter().zip(&fetched.image_uuids) {
-                let id = uuid.as_deref().unwrap_or(&frame.hash);
-                let key = cache::mm_item_key(self.image.as_ref(), id, &vision_context);
-                cache.touch(key.as_ref());
+                cache.touch(uuid.as_deref().unwrap_or(&frame.hash));
             }
+        }
+        if let Some(cache) = cache_for(Modality::Video) {
             for (clip, uuid) in fetched.videos.iter().zip(&fetched.video_uuids) {
                 cache.touch(uuid.as_deref().unwrap_or(&clip.hash));
             }
+        }
+        if let Some(cache) = cache_for(Modality::Audio) {
             for (clip, uuid) in fetched.audios.iter().zip(&fetched.audio_uuids) {
                 cache.touch(uuid.as_deref().unwrap_or(&clip.hash));
             }
@@ -1043,14 +1076,23 @@ impl MultimodalModelInfo {
         let mut prepared = Vec::new();
         if !image_sources.is_empty() {
             prepared.push(
-                self.prepare_images(image_sources, cache, model_dtype, vision_context).await?,
+                self.prepare_images(
+                    image_sources,
+                    cache_for(Modality::Image),
+                    model_dtype,
+                    vision_context,
+                )
+                .await?,
             );
         }
         if !video_sources.is_empty() {
-            prepared.push(self.prepare_videos(video_sources, cache, model_dtype).await?);
+            prepared.push(
+                self.prepare_videos(video_sources, cache_for(Modality::Video), model_dtype)
+                    .await?,
+            );
         }
         if !audio_sources.is_empty() {
-            prepared.push(self.prepare_audios(audio_sources, cache).await?);
+            prepared.push(self.prepare_audios(audio_sources, cache_for(Modality::Audio)).await?);
         }
 
         let mut ranges = expand_prompt_token_ids(prompt_token_ids, &prepared)?;

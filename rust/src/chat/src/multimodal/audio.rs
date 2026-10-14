@@ -61,7 +61,7 @@ impl MultimodalModelInfo {
                 _ => clip.hash.clone(),
             };
             let lookup = match cache {
-                Some(cache) => cache.lookup(&mm_hash, &mm_hash, uuid),
+                Some(cache) => cache.lookup(&mm_hash, uuid),
                 None => CacheLookup::Miss(uuid),
             };
             match lookup {
@@ -82,7 +82,6 @@ impl MultimodalModelInfo {
             for (item, replacement, key) in izip!(&mut items, &replacements, &miss_keys) {
                 item.data = put_or_inline_and_track(
                     cache,
-                    key,
                     key,
                     replacement,
                     std::mem::take(&mut item.data),
