@@ -16,7 +16,9 @@ if TYPE_CHECKING:
         OffloadingConnectorStats,
     )
 
+from vllm.v1.kv_hints import KvHintsEnvelope
 from vllm.v1.kv_offload.config import OffloadingConfig
+from vllm.v1.metrics.cache_hit_source import CacheHitSource
 
 # `OffloadKey` identifies an offloaded block. It combines a block hash with
 # its KV cache group index, encoded as raw bytes to avoid tuple GC overhead.
@@ -89,10 +91,11 @@ TierFilter.ALL = TierFilter(matchers=(TierMatcher(),))
 class ReqContext:
     req_id: str
     kv_transfer_params: dict[str, Any] | None = None
+    kv_hints: KvHintsEnvelope | None = None
     load_tier_filter: TierFilter = TierFilter.ALL
     # Per-request scratch space keyed by value type, so a tier can parse
-    # kv_transfer_params once (in on_new_request) and read the result back
-    # on later calls for the same request.
+    # kv_transfer_params and kv_hints once (in on_new_request) and read the
+    # result back on later calls for the same request.
     _state: dict[type, Any] = field(default_factory=dict, repr=False, init=False)
     # End-token position for each key in this request. The scheduler records
     # these positions so managers can recover prefix order even when store
@@ -245,6 +248,18 @@ class OffloadingManager(ABC):
 
         """
         pass
+
+    def get_load_source(
+        self, key: OffloadKey, req_context: ReqContext
+    ) -> CacheHitSource:
+        """Return the cache tier that supplied a successful lookup.
+
+        This is queried only after ``lookup`` resolves to ``HIT``. Composing
+        managers can override it to retain the origin across asynchronous
+        promotion into a primary tier. The default keeps out-of-tree managers
+        compatible while making unknown provenance explicit.
+        """
+        return CacheHitSource.EXTERNAL_UNSPECIFIED
 
     @abstractmethod
     def prepare_load(

@@ -47,7 +47,13 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_worker import (
     NixlPushConnectorWorker,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import TPMapping
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.stats import (
+    NixlKVConnectorStats,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
+    ReadSpec,
+    TPMapping,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import (
     get_base_request_id,
 )
@@ -341,6 +347,7 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         )
 
         w._sending_transfers = defaultdict[ReqId, list[TransferHandle]](list)
+        w._send_failures = set()
         w._sending_transfers_lock = threading.Lock()
         w._push_finished_blocks = {}
         w._pending_d_registrations = {}
@@ -360,6 +367,8 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         w._recv_failures = set()
         w._recving_transfers = defaultdict(list)
         w._is_hma_required = False
+        w.xfer_stats = NixlKVConnectorStats()
+        w._has_packed_cache = False
         w._reqs_to_process = set()
         w._reqs_to_send = {}
         w.consumer_notification_counts_by_req = defaultdict(int)
@@ -370,6 +379,8 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         w.pp_size = 1
         w.engine_id = "test-decode-engine"
         w._remote_agents = {}
+        w._failed_remote_engines = set()
+        w._invalid_remote_engines = set()
         w._handshake_lock = threading.RLock()
         w._physical_blocks_per_logical_kv_block = 1
         w._uses_region_group_mapping = False
@@ -387,6 +398,7 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         w._group_spec_types = (FullAttentionSpec,)
         w._engine_ttl = 0.0
         w._engine_last_active = {}
+        w._engine_by_address = {}
 
         # Track _do_start_push_kv invocations.
         calls: list[tuple[str, Any, dict[str, Any]]] = []
@@ -730,6 +742,10 @@ def test_do_start_push_kv_drops_request_on_handshake_failure():
     assert xfer_calls == []
     assert len(failures) == 1
     assert failures[0]["failure_type"] == "push_handshake_failed"
+    # The handshake metric is counted once by _ensure_handshake's own
+    # callback (stubbed out here); the push side must not double-record it.
+    assert w.xfer_stats.data["num_failed_handshakes"] == []
+    assert w.xfer_stats.data["num_failed_transfers"] == []
 
 
 def test_writer_loop_drains_deferred_push_inbox():
@@ -844,6 +860,61 @@ def test_cleanup_remote_engine_pops_under_handshake_lock():
     w.nixl_wrapper.remove_remote_agent.assert_called_once_with("agent-D-old")
 
 
+def _recv_metadata(remote_engine_id: str, req_id: str = "req") -> NixlConnectorMetadata:
+    """Build metadata with a single ``reqs_to_recv`` entry pointing at
+    ``remote_engine_id`` (the prefill remote D receives a push from)."""
+    params = {
+        "remote_block_ids": ([0],),
+        "remote_engine_id": remote_engine_id,
+        "remote_request_id": "p-req",
+        "remote_host": "localhost",
+        "remote_port": 1234,
+        "tp_size": 1,
+    }
+    meta = NixlConnectorMetadata()
+    meta.add_new_req_to_recv(req_id, ([0],), params)
+    return meta
+
+
+def test_start_load_kv_refreshes_engine_last_active_on_d_side():
+    """D receiving a push refreshes ``_engine_last_active`` for the prefill
+    remote, but only once that engine is connected (handshaked into
+    ``_remote_agents`` via heartbeats), mirroring the P-side refresh which runs
+    after ``_ensure_handshake``. Without it the prefill engine is reaped
+    mid-stream once it passes its TTL."""
+    w = _StubWriterWorker.fresh()
+    w._send_heartbeats = lambda metadata: None
+    w._logical_to_kernel_block_ids = lambda x, ratio: x
+    # Connected prefill engine (already handshaked in).
+    w._remote_agents["prefill-engine"] = {(0, 0): "agent-p"}
+
+    stale = time.perf_counter() - 5.0
+    w._engine_last_active["prefill-engine"] = stale
+
+    w.start_load_kv(_recv_metadata("prefill-engine"))
+
+    assert w._engine_last_active["prefill-engine"] > stale
+    assert "req" in w._recving_metadata
+
+
+def test_start_load_kv_skips_liveness_for_unconnected_engine():
+    """If the prefill engine was never handshaked into ``_remote_agents`` (e.g.
+    its heartbeat handshake never succeeded), the D-side refresh must NOT record
+    an ``_engine_last_active`` entry -- otherwise a later eviction pass hits the
+    ``_remote_agents`` invariant in ``_cleanup_remote_engine`` and crashes on
+    the D node."""
+    w = _eviction_worker(engine_ttl=30.0)
+    w._send_heartbeats = lambda metadata: None
+
+    w.start_load_kv(_recv_metadata("prefill-engine"))
+
+    # Unconnected -> no orphaned liveness entry, so eviction has nothing to trip on.
+    assert "prefill-engine" not in w._engine_last_active
+    assert "prefill-engine" not in w._remote_agents
+
+    w._evict_stale_engines()  # nothing to reap, must not raise
+
+
 class TestPushWriterNotifs:
     def test_get_new_notifs_processes_forwarded_completion_notif(self):
         """Non-PUSH_REG notifs forwarded by the writer thread are drained
@@ -933,9 +1004,10 @@ class TestPushWriterNotifs:
         assert request_id not in w._sending_transfers
 
     @pytest.mark.parametrize(("pp_size", "is_hma"), [(1, False), (2, True)])
-    def test_completed_push_send_waits_for_consumer_notif(self, pp_size, is_hma):
-        """P-side sends are completed by consumer notifs / lease expiry,
-        not by local WRITE-handle completion."""
+    def test_completed_push_send_releases_blocks_without_consumer_notif(
+        self, pp_size, is_hma
+    ):
+        """All WRITEs completing lets P reclaim its blocks without a D ACK."""
         w = self._pollable_worker()
         w.pp_size = pp_size
         w._is_hma_required = is_hma
@@ -943,20 +1015,14 @@ class TestPushWriterNotifs:
         w.nixl_wrapper.check_xfer_state.side_effect = ["DONE", "PROC", "DONE"]
 
         results = w.get_transfer_results()
+
         assert request_id not in results.finished_sending
+        assert request_id in w._reqs_to_send
         assert w._sending_transfers[request_id] == [102]
-        assert request_id in w._reqs_to_send
+        assert w._evict_finished_inbox.empty()
 
         results = w.get_transfer_results()
-
-        assert request_id not in results.finished_sending
-        assert request_id in w._reqs_to_send
-        assert request_id not in w._sending_transfers
-
-        # The consumer notif is what completes the send.
-        w._pending_completion_notifs.put(f"{request_id}:1".encode())
-        results = w.get_transfer_results()
-        assert request_id in results.finished_sending
+        assert results.finished_sending == {request_id}
         assert request_id not in w._reqs_to_send
         assert request_id not in w._reqs_to_process
         assert w._evict_finished_inbox.get_nowait() == request_id
@@ -964,6 +1030,91 @@ class TestPushWriterNotifs:
         assert w._evict_finished_inbox.empty()
         assert w.nixl_wrapper.release_xfer_handle.call_count == 2
         w.xfer_stats.record_kv_expired_req.assert_not_called()
+
+    @pytest.mark.parametrize("sibling_state", ["ERR", "DONE"])
+    def test_push_failure_survives_until_lease_expiry(self, sibling_state):
+        """A later sibling completion must not turn a failed send into success."""
+        w = self._pollable_worker()
+        request_id = self._make_sending_req(w)
+        w.nixl_wrapper.check_xfer_state.side_effect = ["ERR", "PROC", sibling_state]
+
+        assert w.get_transfer_results().finished_sending == set()
+        assert w._sending_transfers[request_id] == [102]
+        assert w.get_transfer_results().finished_sending == set()
+        assert request_id not in w._sending_transfers
+        assert request_id in w._reqs_to_send
+        assert w._evict_finished_inbox.empty()
+
+        w.expected_consumer_notifications_by_req = {}
+        w._reqs_to_send[request_id] = time.perf_counter() - 1
+        assert w.get_transfer_results().finished_sending == {request_id}
+        assert request_id not in w._send_failures
+        assert w._evict_finished_inbox.get_nowait() == request_id
+
+    @pytest.mark.parametrize("release_fails", [False, True])
+    def test_push_submission_failure_is_remembered_after_sibling_success(
+        self, release_fails
+    ):
+        """A submission error remains a failure even if later polls succeed."""
+        w = self._pollable_worker()
+        request_id = self._make_sending_req(w)
+        w.transfer_topo.block_size_ratio.return_value = 1
+        w._apply_prefix_caching = MagicMock(return_value=([[1]], [[1]]))
+        w._compute_desc_ids = MagicMock(return_value=[0])
+        w.dst_num_blocks = {w.engine_id: 8}
+        w.dst_region_num_blocks[w.engine_id] = [8]
+        w.dst_region_group_ids[w.engine_id] = [0]
+        w.dst_uses_region_group_mapping[w.engine_id] = False
+        w.nixl_wrapper.make_prepped_xfer.return_value = 101
+        w.nixl_wrapper.transfer.side_effect = RuntimeError("submit")
+        if release_fails:
+            w.nixl_wrapper.release_xfer_handle.side_effect = [
+                RuntimeError("release"),
+                None,
+                None,
+            ]
+
+        handle = w._xfer_blocks(
+            read_spec=ReadSpec(0, [[1]], [[1]]),
+            dst_engine_id=w.engine_id,
+            request_id=request_id,
+            remote_request_id="decode-request",
+            local_xfer_side_handle=1,
+            remote_xfer_side_handle=2,
+        )
+        assert handle == (101 if release_fails else None)
+        w._sending_transfers[request_id] = [102]
+        if handle is not None:
+            w._sending_transfers[request_id].append(handle)
+        w.nixl_wrapper.check_xfer_state.return_value = "DONE"
+
+        assert w.get_transfer_results().finished_sending == set()
+        assert request_id in w._reqs_to_send
+        assert request_id not in w._sending_transfers
+        assert w._evict_finished_inbox.empty()
+
+    @pytest.mark.parametrize("first_state", ["ERR", "DONE"])
+    def test_push_completion_after_expiry_is_not_reported_twice(self, first_state):
+        """A WRITE finishing after lease expiry must not complete the request again."""
+        w = self._pollable_worker()
+        request_id = self._make_sending_req(w)
+        w.nixl_wrapper.check_xfer_state.side_effect = [
+            first_state,
+            "PROC",
+            "PROC",
+            "DONE",
+        ]
+        assert w.get_transfer_results().finished_sending == set()
+
+        w.expected_consumer_notifications_by_req = {}
+        w._reqs_to_send[request_id] = time.perf_counter() - 1
+        assert w.get_transfer_results().finished_sending == {request_id}
+        assert w._evict_finished_inbox.get_nowait() == request_id
+
+        assert w.get_transfer_results().finished_sending == set()
+        assert request_id not in w._sending_transfers
+        assert request_id not in w._send_failures
+        assert w._evict_finished_inbox.empty()
 
 
 # ----------------------------------------------------------------- #
@@ -1107,7 +1258,7 @@ class TestPushWriterNegative:
         w = _StubWriterWorker.fresh()
         for bogus_rid in (123, None, 4.5, b"bytes-not-str"):
             payload = _registration_data("placeholder")
-            payload["request_id"] = bogus_rid  # type: ignore[assignment]
+            payload["request_id"] = bogus_rid
             notif = PUSH_REG_NOTIF_PREFIX + msgspec.msgpack.encode(payload)
             w._handle_push_reg_notif(notif)
         assert w._pending_d_registrations == {}
@@ -1208,6 +1359,7 @@ class TestPushWriterNegative:
         assert notified == set()
         # Did not register anywhere.
         assert "never-heard-of-you" not in w._recving_transfers
+        assert w.xfer_stats.data["num_notifications_after_expiry"] == [1]
 
     def test_start_load_kv_with_empty_metadata_is_noop(self):
         """Empty metadata must not wake the writer or enqueue anything."""
@@ -1695,6 +1847,40 @@ def test_layer_metadata_round_trip():
     assert msgspec.msgpack.Decoder(NixlAgentMetadata).decode(encoded) == metadata
 
 
+@pytest.mark.parametrize(
+    "layouts, error",
+    [
+        ({"L0": (-1, 64)}, "escapes its block"),
+        ({"L0": (0, 0)}, "escapes its block"),
+        ({"L0": (200, 64)}, "escapes its block"),
+        ({"L1": (0, 64)}, "has no layout"),
+        ({"L0": (0, 32)}, "page sizes must match"),
+    ],
+)
+def test_packed_layer_alignment_rejects_invalid_page_layout(layouts, error):
+    worker = _layer_routing_worker([["L0"]], {"L0": 0})
+    worker.block_len_per_layer = [64]
+    metadata = _agent_metadata([["L0", "L1"]], [0x10000], [256])
+    metadata.packed_member_layouts = layouts
+    with pytest.raises(AssertionError, match=error):
+        worker._align_remote_regions_by_layer(metadata)
+
+
+def test_layer_alignment_preserves_nonpacked_regions_alongside_packed_layers():
+    worker = _layer_routing_worker([["a"], ["b"]], {"a": 0, "b": 1})
+    worker.block_len_per_layer = [64, 128]
+    metadata = _agent_metadata(
+        [["a", "other"], ["b"]], [0x1000, 0x2000], [192, 128], [256, 128]
+    )
+    metadata.packed_member_layouts = {"a": (64, 64), "other": (128, 64)}
+
+    worker._align_remote_regions_by_layer(metadata)
+
+    assert metadata.kv_caches_base_addr == [0x1040, 0x2000]
+    assert metadata.block_lens == [64, 128]
+    assert metadata.block_strides == [256, 128]
+
+
 def test_layer_identity_gate_preserves_the_non_hma_path():
     assert _layer_routing_worker([["a"]], {"a": 0})._transfer_layer_region_indices == (
         0,
@@ -1702,6 +1888,7 @@ def test_layer_identity_gate_preserves_the_non_hma_path():
 
     # A base worker (pull) never routes by layer name.
     pull = object.__new__(NixlBaseConnectorWorker)
+    pull.pp_size = 2
     pull._transfer_layer_names = ()
     pull._transfer_layer_region_indices = ()
     pull._transfer_layer_group_ids = ()

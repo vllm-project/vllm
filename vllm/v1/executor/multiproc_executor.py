@@ -42,7 +42,7 @@ from vllm.distributed.parallel_state import (
     model_parallel_is_initialized,
 )
 from vllm.envs import enable_envs_cache
-from vllm.logger import init_logger
+from vllm.logger import configure_logging, init_logger
 from vllm.platforms import current_platform
 from vllm.tracing import instrument, maybe_init_worker_tracer
 from vllm.utils import numa_utils
@@ -166,6 +166,7 @@ class MultiprocExecutor(Executor):
                 self.local_world_size,
                 max_chunk_bytes=max_chunk_bytes,
                 connect_ip=mq_connect_ip,
+                enable_shm_tensor_arena=(self.parallel_config.enable_shm_tensor_arena),
             )
             scheduler_output_handle = self.rpc_broadcast_mq.export_handle()
         # Create workers
@@ -364,12 +365,18 @@ class MultiprocExecutor(Executor):
         )
 
     def execute_dummy_batch(self) -> None:
-        self.collective_rpc("execute_dummy_batch", unique_reply_rank=self.output_rank)
+        self.collective_rpc(
+            "execute_dummy_batch",
+            unique_reply_rank=self.output_rank,
+            timeout=envs.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS,
+        )
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         # OPTIMIZATION: Get output only from a single worker (output_rank)
         return self.collective_rpc(
-            "take_draft_token_ids", unique_reply_rank=self.output_rank
+            "take_draft_token_ids",
+            unique_reply_rank=self.output_rank,
+            timeout=envs.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS,
         )
 
     def collective_rpc(  # type: ignore[override]
@@ -853,6 +860,9 @@ class WorkerProc:
     def worker_main(*args, **kwargs):
         """Worker initialization and execution loops.
         This runs a background process"""
+        if logging_config := getattr(kwargs["vllm_config"], "logging_config", None):
+            configure_logging(logging_config)
+
         # Signal handler used for graceful termination.
         # SystemExit exception is only raised once to allow this and worker
         # processes to terminate without error
