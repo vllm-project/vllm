@@ -296,12 +296,12 @@ class DataTransport(ABC):
                     return []. Matches the legacy fire-and-forget
                     behavior — the caller does not wait for the
                     underlying transfer to drain.
-                "wait": attempt to release each handle. If the release
-                    cannot complete because the transfer is still
-                    PROC/PEND, the entry stays in the inflight set and
-                    its id is included in the returned list. The
-                    caller is expected to keep calling poll() until
-                    every returned id surfaces in done/failed.
+                "wait": release only transfers that have stopped. A
+                    transfer still PROC/PEND (or whose release fails)
+                    stays in the inflight set and its id is included in
+                    the returned list. The caller is expected to keep
+                    calling poll() until every returned id surfaces in
+                    done/failed.
 
         Returns:
             For mode="wait", the subset of *transfer_ids* still
