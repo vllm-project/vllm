@@ -6,6 +6,7 @@ import multiprocessing
 import queue
 import threading
 import time
+import weakref
 from collections import deque
 from types import SimpleNamespace
 from typing import Any
@@ -226,6 +227,62 @@ def monitor_threads(monkeypatch):
     for thread in threads:
         thread.join(5)
         assert not thread.is_alive(), "executor monitor leaked after cleanup"
+
+
+def _run_remote_monitor_collection(conn, handle):
+    reader = MessageQueue.create_from_handle(handle, -1)
+    reader.remote_socket.setsockopt(zmq.RCVTIMEO, 30000)
+    reader_ref = weakref.ref(reader)
+    failed = threading.Event()
+    executor = _make_executor([], [reader], failed)
+    executor.start_worker_monitor()
+    monitor = next(
+        thread
+        for thread in threading.enumerate()
+        if thread.name == "MultiprocWorkerMonitor"
+    )
+    reader.wait_until_ready()
+    del reader
+    conn.send("ready")
+    monitor.join(10)
+    conn.send(
+        {
+            "monitor_stopped": not monitor.is_alive(),
+            "failed": failed.is_set(),
+            "reader_collected": reader_ref() is None,
+        }
+    )
+    conn.close()
+
+
+def test_remote_monitor_releases_last_queue_reference_without_deadlock():
+    """Queue collection must not wait on a monitor socket owned by itself."""
+    ctx = multiprocessing.get_context("spawn")
+    writer = MessageQueue(1, 0, connect_ip="127.0.0.1")
+    writer.remote_socket.setsockopt(zmq.RCVTIMEO, 30000)
+    conn, child_conn = ctx.Pipe()
+    child = ctx.Process(
+        target=_run_remote_monitor_collection,
+        args=(child_conn, writer.export_handle()),
+    )
+    child.start()
+    child_conn.close()
+    try:
+        writer.wait_until_ready()
+        assert conn.poll(30) and conn.recv() == "ready"
+        writer.remote_socket.close(linger=0)
+        assert conn.poll(15), "remote disconnect did not complete monitor teardown"
+        assert conn.recv() == {
+            "monitor_stopped": True,
+            "failed": True,
+            "reader_collected": True,
+        }
+        child.join(5)
+        assert child.exitcode == 0
+    finally:
+        conn.close()
+        _stop_process(child)
+        writer.remote_socket.context.destroy(linger=0)
 
 
 @pytest.mark.parametrize("loss", ["fatal_rpc", "socket", "normal_shutdown"])

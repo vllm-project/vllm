@@ -178,6 +178,7 @@ class MultiprocExecutor(Executor):
                 self.local_world_size,
                 max_chunk_bytes=max_chunk_bytes,
                 connect_ip=mq_connect_ip,
+                enable_shm_tensor_arena=(self.parallel_config.enable_shm_tensor_arena),
             )
             scheduler_output_handle = self.rpc_broadcast_mq.export_handle()
         # Create workers
@@ -309,9 +310,12 @@ class MultiprocExecutor(Executor):
 
     def start_worker_monitor(self, inline=False) -> None:
         sentinels = {h.proc.sentinel: h.proc for h in self.workers}
-        # The monitor thread owns these sockets, not the response data sockets.
+        # Keep queue contexts alive until the monitor thread closes its sockets.
         remote_monitors = {
-            mq.remote_socket.get_monitor_socket(events=zmq.EVENT_DISCONNECTED): rank
+            mq.remote_socket.get_monitor_socket(events=zmq.EVENT_DISCONNECTED): (
+                rank,
+                mq,
+            )
             for rank, mq in enumerate(self.response_mqs)
             if mq.remote_socket is not None
         }
@@ -334,7 +338,9 @@ class MultiprocExecutor(Executor):
                         died[0].exitcode,
                     )
                 else:
-                    rank = next(r for m, r in remote_monitors.items() if m in ready)
+                    rank = next(
+                        r for m, (r, _) in remote_monitors.items() if m in ready
+                    )
                     logger.error(
                         "Remote worker rank %d disconnected, shutting down executor.",
                         rank,
@@ -391,7 +397,11 @@ class MultiprocExecutor(Executor):
         )
 
     def execute_dummy_batch(self) -> None:
-        self.collective_rpc("execute_dummy_batch", unique_reply_rank=self.output_rank)
+        self.collective_rpc(
+            "execute_dummy_batch",
+            unique_reply_rank=self.output_rank,
+            timeout=envs.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS,
+        )
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         # OPTIMIZATION: Get output only from a single worker (output_rank)
