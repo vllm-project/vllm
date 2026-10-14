@@ -166,6 +166,9 @@ class Request:
         # Drop the stale output instead, for same-step preempt + resume
         # (reset_prefix_cache).
         self.drop_stale_output = False
+        # A dropped stale output carried this request's completed prompt
+        # logprobs; the resumed prefill must recompute them (#61490).
+        self.prompt_logprobs_dropped = False
 
         # Tokens of steps whose output is not yet processed (async scheduling
         # and PP run ahead of the GPU); `num_computed_tokens` counts them
