@@ -219,7 +219,7 @@ class CPUUnquantizedExperts(_CPUPaddedIntermediateMixin, mk.FusedMoEExpertsModul
         )
         if not supported:
             return supported, reason
-        if is_zentorch_moe_config_supported(moe_config):
+        if is_zentorch_moe_config_supported(moe_config) and not moe_config.use_ep:
             return True, None
         cpu_cls = cast(type[CPUUnquantizedExperts], cls)
         return cpu_cls._supports_grouped_gemm(moe_config)
@@ -268,7 +268,9 @@ class CPUUnquantizedExperts(_CPUPaddedIntermediateMixin, mk.FusedMoEExpertsModul
         return True
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        self._use_zentorch = is_zentorch_moe_supported(layer)
+        self._use_zentorch = (
+            is_zentorch_moe_supported(layer) and not self.moe_config.use_ep
+        )
         if self._use_zentorch:
             return
         self._pad_moe_intermediate(layer)
@@ -342,6 +344,7 @@ class CPUUnquantizedExperts(_CPUPaddedIntermediateMixin, mk.FusedMoEExpertsModul
             activation.value,
             self.isa,
             apply_router_weight_on_input,
+            expert_map,
         )
 
 
