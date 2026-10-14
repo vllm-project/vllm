@@ -23,6 +23,7 @@ from vllm.compilation.counter import compilation_counter
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.worker.gpu import cudagraph_utils as cgu
 from vllm.v1.worker.gpu import model_runner as mrv2
+from vllm.v1.worker.gpu.eplb_utils import EPLBController
 
 GLOBAL_POOL = "global-pool"
 THROWAWAY_POOL = "throwaway-pool"
@@ -224,6 +225,9 @@ def test_profile_cudagraph_memory_restores_compilation_counters(monkeypatch):
 
 def test_model_runner_delegates_to_cudagraph_utils(monkeypatch):
     runner = mrv2.GPUModelRunner.__new__(mrv2.GPUModelRunner)
+    runner.eplb = EPLBController(
+        SimpleNamespace(enable_eplb=False), torch.device("cpu")
+    )
     monkeypatch.setattr(mrv2, "_profile_cudagraph_memory", lambda r: 42)
     assert runner.profile_cudagraph_memory() == 42
 
