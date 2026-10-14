@@ -334,6 +334,18 @@ def _triton_dcp_verify_supported(dcp_world_size: int, cp_interleave: int) -> boo
     return on_gfx942() and dcp_world_size > 1 and cp_interleave == 1
 
 
+def _asm_rows_dcp_verify_supported(dcp_world_size: int, cp_interleave: int) -> bool:
+    """Whether gfx942 can serve causal DCP verify on the single-token asm decode.
+
+    gfx942 has no cprr kernel, so each verify token runs as its own qlen-1 row
+    over the per-row local window. Whether a shape takes the route additionally
+    depends on _asm_rows_dcp_verify_heads.
+    """
+    from vllm.platforms.rocm import on_gfx942
+
+    return on_gfx942() and dcp_world_size > 1 and cp_interleave == 1
+
+
 # Heads per stage-1 program in the grouped MLA decode kernel (its BLOCK_H).
 _DECODE_HEADS_PER_PROGRAM: Final = 16
 # Tuned on MI325X with microbenchmarks
@@ -837,6 +849,10 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             parallel_config.decode_context_parallel_size,
             parallel_config.cp_kv_cache_interleave_size,
         )
+        supports_asm_rows_dcp_verify = _asm_rows_dcp_verify_supported(
+            parallel_config.decode_context_parallel_size,
+            parallel_config.cp_kv_cache_interleave_size,
+        )
         verify_route = envs.VLLM_ROCM_AITER_MLA_DCP_VERIFY.lower()
         asm_dcp_verify_config = (
             _asm_dcp_verify_configured(
@@ -856,6 +872,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                 supports_segmented_dcp_verify
                 or asm_dcp_verify_config
                 or supports_triton_dcp_verify
+                or supports_asm_rows_dcp_verify
             ),
         )
         self._asm_dcp_verify = False
@@ -889,7 +906,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             )
         )
         self._asm_rows_dcp_verify_heads = 0
-        if supports_triton_dcp_verify:
+        if supports_asm_rows_dcp_verify:
             self._asm_rows_dcp_verify_heads = _asm_rows_dcp_verify_heads(
                 self.num_heads * self.dcp_world_size,
                 is_quantized_kv_cache(vllm_config.cache_config.cache_dtype),
