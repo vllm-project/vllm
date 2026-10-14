@@ -41,11 +41,12 @@ def add_cli_args(parser: FlexibleArgumentParser) -> None:
         "--case",
         action="append",
         default=[],
-        help="NAME=REQS, where REQS is a comma list of [N*]Q[@K][c][:D] (query "
-        "length Q, KV length K including the query (default Q), D draft tokens, "
-        "N requests). A prefill's prefix is a prefix-cache hit unless c marks a "
-        "chunked prefill. E.g. decode=32*1@8192, verify=16*4@4096:3, "
-        "prefill=8192, hit=2048@10240, mix=8192,32*1@8192. Repeatable.",
+        help="`NAME=REQS`, where REQS is a comma list of `[N*]Q[@K][c][:D]` "
+        "(query length Q, KV length K including the query (default Q), D draft "
+        "tokens, N requests). A prefill's prefix is a prefix-cache hit unless c "
+        "marks a chunked prefill. E.g. `decode=32*1@8192`, "
+        "`verify=16*4@4096:3`, `prefill=8192`, `hit=2048@10240`, "
+        "`mix=8192,32*1@8192`. Repeatable.",
     )
     parser.add_argument("--shapes", help="JSON or YAML file with cases.")
     parser.add_argument(
