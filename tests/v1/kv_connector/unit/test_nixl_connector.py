@@ -2192,6 +2192,7 @@ def recv_worker():
     worker._engine_by_address = {}
     worker._failed_remote_engines = set()
     worker._invalid_remote_engines = set()
+    worker._remote_registration_epochs = {}
     worker._replicated_pcp_done_sending = set()
     worker._invalid_block_ids = queue.Queue()
     worker._pending_recv_notifs = {}
