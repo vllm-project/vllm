@@ -22,6 +22,9 @@ pub struct NewChatOutputProcessorOptions<'a> {
     pub tool_call_parser: &'a ParserSelection,
     pub reasoning_parser: &'a ParserSelection,
     pub tool_strict_level: ToolStrictLevel,
+    /// Constrain the output of requests without a tool or structured-output
+    /// constraint (`--always-constrain-output`).
+    pub always_constrain_output: bool,
 }
 
 /// Minimal prompt-processing backend needed by `vllm-chat`.

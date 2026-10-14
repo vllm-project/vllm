@@ -33,6 +33,7 @@ pub struct RenderConfig {
     pub tool_call_parser: ParserSelection,
     pub reasoning_parser: ParserSelection,
     pub tool_strict_level: ToolStrictLevel,
+    pub always_constrain_output: bool,
     pub renderer: RendererSelection,
     pub chat_template: Option<String>,
     pub default_chat_template_kwargs: HashMap<String, Value>,
@@ -94,7 +95,8 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
             config.tool_call_parser.clone(),
             config.reasoning_parser.clone(),
         )
-        .with_tool_strict_level(config.tool_strict_level);
+        .with_tool_strict_level(config.tool_strict_level)
+        .with_always_constrain_output(config.always_constrain_output);
     Ok(Arc::new(RenderState {
         model: config.model.clone(),
         served_model_names,
@@ -158,6 +160,7 @@ mod tests {
         let error = serve_render(
             RenderConfig {
                 tool_strict_level: ToolStrictLevel::Auto,
+                always_constrain_output: false,
                 model: "test-model".to_string(),
                 revision: None,
                 hf_overrides: Default::default(),

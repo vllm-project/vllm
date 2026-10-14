@@ -289,6 +289,12 @@ class FrontendArgs(BaseFrontendArgs):
     on this port. Requires `VLLM_USE_RUST_FRONTEND=1 vllm serve`; HTTP remains on
     `--port`. Binds on `--host`, or 127.0.0.1 with `--uds`. Cannot be combined
     with the Python gRPC server's `--grpc` flag."""
+    always_constrain_output: bool = False
+    """Constrain the output of every request whose model has a reasoning or
+    tool parser, even without tools or a structured-output constraint: the
+    reasoning, the answer, and tool-call envelopes follow the model's output
+    grammar from the first generated token where the parser supports it.
+    Requires `VLLM_USE_RUST_FRONTEND=1 vllm serve`."""
     data_parallel_supervisor_port: int = 9256
     """HTTP port for aggregated health endpoints in multi-port external LB
     mode."""
@@ -467,6 +473,13 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
     return parser
 
 
+def require_rust_frontend_serve(args: argparse.Namespace, flag: str) -> None:
+    """Reject a Rust-frontend-only `flag` outside the launch that runs the
+    Rust frontend."""
+    if not envs.VLLM_USE_RUST_FRONTEND or getattr(args, "subparser", None) != "serve":
+        raise ValueError(f"{flag} requires VLLM_USE_RUST_FRONTEND=1 vllm serve")
+
+
 def validate_grpc_port_arg(args: argparse.Namespace) -> None:
     """Validate the Rust frontend's optional gRPC listener."""
     if getattr(args, "grpc_port", None) is None:
@@ -478,8 +491,7 @@ def validate_grpc_port_arg(args: argparse.Namespace) -> None:
             "--port for the Python gRPC server, or VLLM_USE_RUST_FRONTEND=1 "
             "with --grpc-port for the Rust frontend."
         )
-    if not envs.VLLM_USE_RUST_FRONTEND or getattr(args, "subparser", None) != "serve":
-        raise ValueError("--grpc-port requires VLLM_USE_RUST_FRONTEND=1 vllm serve")
+    require_rust_frontend_serve(args, "--grpc-port")
     if args.headless or (
         args.api_server_count is not None and args.api_server_count <= 0
     ):
@@ -518,6 +530,8 @@ def validate_parsed_serve_args(args: argparse.Namespace):
         )
 
     validate_grpc_port_arg(args)
+    if getattr(args, "always_constrain_output", False):
+        require_rust_frontend_serve(args, "--always-constrain-output")
 
     # Enable auto tool needs a tool call parser to be valid
     if args.enable_auto_tool_choice and not args.tool_call_parser:
