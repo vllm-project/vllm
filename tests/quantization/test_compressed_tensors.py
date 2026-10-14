@@ -5,6 +5,7 @@
 Run `pytest tests/quantization/test_compressed_tensors.py`.
 """
 
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -1020,3 +1021,57 @@ def test_compressed_tensors_mxfp4(vllm_runner):
         llm.apply_model(check_model)
         output = llm.generate_greedy("Hello my name is", max_tokens=4)
         assert output
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="requires a CUDA device (dist_init)"
+)
+def test_compressed_tensors_w8a16_fp8_block_scale_is_weight_scale_inv(
+    default_vllm_config, dist_init
+):
+    """The block strategy registers its scale as "weight_scale_inv".
+
+    Block-FP8 checkpoints store the block scale under that name (the plain FP8
+    path registers it that way too, see quantization/fp8.py), so registering
+    "weight_scale" while loading leaves the loader with nothing to match: it
+    falls back to the module itself, and the layer's weight_loader dies with
+    "AttributeError: ... object has no attribute 'data'".
+    """
+    from vllm.model_executor.layers.linear import MergedColumnParallelLinear
+
+    default_vllm_config.model_config = SimpleNamespace(dtype=torch.bfloat16)
+
+    # This is the scheme vLLM picks for block-FP8 weights wherever the FP8 W8A8
+    # kernel is unavailable (see CompressedTensorsConfig.get_scheme). Such
+    # checkpoints carry input_quant, but it is unused here, so
+    # is_static_input_scheme is False.
+    scheme = CompressedTensorsW8A16Fp8(
+        weight_quant=QuantizationArgs(
+            num_bits=8,
+            type=QuantizationType.FLOAT,
+            strategy=QuantizationStrategy.BLOCK,
+            block_structure=[128, 128],
+            symmetric=True,
+            dynamic=False,
+        ),
+        is_static_input_scheme=False,
+    )
+    layer = MergedColumnParallelLinear(256, [128, 128], bias=False)
+    scheme.create_weights(
+        layer=layer,
+        input_size_per_partition=256,
+        output_partition_sizes=[128, 128],
+        input_size=256,
+        output_size=256,
+        params_dtype=torch.bfloat16,
+        weight_loader=layer.weight_loader,
+    )
+
+    weight = torch.zeros(256, 256, dtype=torch.float8_e4m3fn)
+    scale = torch.rand(2, 2) + 1.0
+    loaded = list(layer.load_weights([("weight", weight), ("weight_scale_inv", scale)]))
+    assert loaded == ["weight", "weight_scale_inv"]
+    torch.testing.assert_close(layer.weight_scale_inv.data, scale)
+
+    # ... and the parameter carries the name the block kernel expects later on.
+    assert not hasattr(layer, "weight_scale")
