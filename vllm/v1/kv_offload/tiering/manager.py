@@ -924,7 +924,9 @@ class TieringOffloadingManager(OffloadingManager):
         # secondary tiers themselves still have outstanding.
         return (
             bool(self._jobs)
-            or any(state.pending_cascade_keys for state in self._live_req_states.values())
+            or any(
+                state.pending_cascade_keys for state in self._live_req_states.values()
+            )
             or any(tier.has_pending_work() for tier in self.secondary_tiers)
         )
 
