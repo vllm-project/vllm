@@ -22,7 +22,8 @@ unsharded model (all layers of the group, all KV heads):
    where ``H = MAX_KV_HEADS_PER_LAYER``, a fixed bound on any layer's KV
    heads, so that ``m`` does not depend on the model or how it is split.
    Layers are numbered by the layer number in their names and heads
-   globally across TP.
+   globally across TP; several caches of one layer (e.g. an attention's KV
+   and its indexer's) number their heads consecutively, in layer name order.
 
 Odd factors make any change to a single piece change ``c``, and distinct
 factors make misplaced data (swapped tokens, blocks, heads or layers) change
@@ -35,6 +36,10 @@ by their global layer and head, whatever its shard or memory layout. The
 parts from all TP ranks and PP stages therefore sum to ``c``, and a producer
 and a consumer can compare one value per (group, block position) regardless
 of their TP sizes, PP sizes or KV cache layouts.
+
+Replicated KV (MLA, or GQA with more TP ranks than KV heads) is tracked per
+replica: a partial checksum is keyed by ``(replicas, replica_index)`` of the
+layers it covers, so each consumer replica can be checked on its own.
 """
 
 import enum
@@ -54,6 +59,9 @@ logger = init_logger(__name__)
 MAX_KV_HEADS_PER_LAYER = 1 << 16
 """``H`` in the slice factor; groups with more KV heads per layer are not
 checksummed."""
+
+ReplicaKey = tuple[int, int]
+"""``(replicas, replica_index)`` of the layers a partial checksum covers."""
 
 
 class KVChecksumCarrier(enum.Enum):
@@ -98,11 +106,13 @@ class KVChecksumGroup:
 
     Attributes:
         start: Position of the first row.
-        values: ``(num_positions,)`` uint64 partial checksums.
+        replica_keys: The replica key of each column.
+        values: ``(num_positions, len(replica_keys))`` uint64 partial checksums.
 
     """
 
     start: int
+    replica_keys: list[ReplicaKey]
     values: np.ndarray
 
 

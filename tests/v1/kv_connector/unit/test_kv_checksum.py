@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Worker-side KV checksums match their definition (per-slice checksums
 weighted by layer and head), computed independently here, whatever the TP or
-PP sharding, memory layout or kernel block size of the KV cache."""
+PP sharding, replication, memory layout or kernel block size of the KV
+cache."""
 
 import copy
 
@@ -17,6 +18,7 @@ from vllm.distributed.kv_transfer.kv_checksum.checksum import (
     KVChecksumRecord,
     KVChecksumScheduled,
 )
+from vllm.distributed.kv_transfer.kv_checksum.scheduler import _sum_replicas
 from vllm.distributed.kv_transfer.kv_checksum.worker import (
     KVChecksumOutput,
     KVChecksumWorker,
@@ -28,6 +30,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     MambaSpec,
     MLAAttentionSpec,
+    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 
@@ -156,6 +159,12 @@ def _send(worker: KVChecksumWorker, blocks=BLOCKS):
     return _send_record(worker, blocks).checksums["req"]
 
 
+def _recv(worker: KVChecksumWorker, blocks=BLOCKS):
+    worker.bind(KVChecksumScheduled(reqs_to_recv={"req": blocks}))
+    [record] = worker.post_forward({"req"}, set(), set()).finalize()
+    return record.checksums["req"]
+
+
 @pytest.mark.parametrize("token_major", [False, True])
 def test_checksum_matches_definition(token_major):
     logical = _logical_kv(heads=2)
@@ -164,8 +173,8 @@ def test_checksum_matches_definition(token_major):
         {_name(0): _cache(logical, token_major=token_major)},
     )
     [group] = _send(worker).values()
-    assert group.start == 0
-    np.testing.assert_array_equal(group.values, _reference({0: logical}))
+    assert group.start == 0 and group.replica_keys == [(1, 0)]
+    np.testing.assert_array_equal(group.values[:, 0], _reference({0: logical}))
 
 
 @pytest.mark.parametrize("token_major", [False, True])
@@ -184,7 +193,7 @@ def test_tp_shards_sum_to_unsharded_checksum(token_major):
             uniform_kv_heads=4,
         )
         [group] = _send(worker).values()
-        total += group.values
+        total += group.values[:, 0]
     np.testing.assert_array_equal(total, _reference({0: logical}))
 
 
@@ -197,7 +206,7 @@ def test_pp_stages_sum_to_whole_model_checksum():
         worker = _worker(
             _config(_group(_spec(2), _name(number))), {_name(number): _cache(kv)}
         )
-        total += _send(worker)[0].values
+        total += _send(worker)[0].values[:, 0]
     np.testing.assert_array_equal(total, _reference(layers))
 
 
@@ -218,6 +227,78 @@ def test_group_fingerprints_sum_over_pp_stages():
     assert fingerprint((0, 1)) != fingerprint((0, 2))
 
 
+def test_gqa_replicas_are_checked_per_replica():
+    """With more TP ranks than KV heads, consecutive ranks replicate a head.
+    A producer sums only replica 0 (other replicas report the request with no
+    checksums); a consumer reports each replica so every copy can be checked
+    against the same unsharded value."""
+    logical = _logical_kv(heads=2)
+    expected = _reference({0: logical})
+    workers = [
+        _worker(
+            _config(_group(_spec(1))),
+            {_name(0): _cache(logical[:, rank // 2 : rank // 2 + 1])},
+            tp_rank=rank,
+            tp_size=4,
+            uniform_kv_heads=2,
+        )
+        for rank in range(4)
+    ]
+
+    sent = [_send(worker) for worker in workers]
+    assert sent[1] == sent[3] == {}
+    assert sent[0][0].replica_keys == sent[2][0].replica_keys == [(2, 0)]
+    np.testing.assert_array_equal(
+        sent[0][0].values[:, 0] + sent[2][0].values[:, 0], expected
+    )
+
+    received = [_recv(worker)[0] for worker in workers]
+    assert [c.replica_keys for c in received] == [
+        [(2, 0)],
+        [(2, 1)],
+        [(2, 0)],
+        [(2, 1)],
+    ]
+    for replica in range(2):
+        np.testing.assert_array_equal(
+            received[replica].values[:, 0] + received[replica + 2].values[:, 0],
+            expected,
+        )
+
+
+@pytest.mark.parametrize("declared", [True, False])
+def test_mla_replicas_are_checked_per_replica(declared):
+    """A cache with one TP shard (MLA) is replicated on every rank, as its
+    spec declares (max_tp_shards=1) or its type implies, whatever the model's
+    KV head count (above 1 in Kimi-K3's config)."""
+    spec = MLAAttentionSpec(
+        block_size=BLOCK_SIZE,
+        num_kv_heads=1,
+        head_size=2 * HEAD_SIZE,
+        head_size_v=0,
+        dtype=torch.bfloat16,
+        max_tp_shards=1 if declared else None,
+    )
+    logical = _logical_kv(heads=1)
+    workers = [
+        _worker(
+            _config(_group(spec)),
+            {_name(0): _cache(logical)},
+            tp_rank=r,
+            tp_size=2,
+            uniform_kv_heads=8,
+        )
+        for r in range(2)
+    ]
+    assert _send(workers[1]) == {}
+    [group] = _send(workers[0]).values()
+    assert group.replica_keys == [(2, 0)]
+    for rank, worker in enumerate(workers):
+        [received] = _recv(worker).values()
+        assert received.replica_keys == [(2, rank)]
+        np.testing.assert_array_equal(received.values[:, 0], _reference({0: logical}))
+
+
 def test_misplaced_tokens_and_layers_change_the_checksum():
     """The same bytes in the wrong place (two tokens or two layers swapped)
     give a different checksum."""
@@ -226,7 +307,7 @@ def test_misplaced_tokens_and_layers_change_the_checksum():
 
     def checksum(layer0, layer1):
         caches = {_name(0): _cache(layer0), _name(1): _cache(layer1)}
-        return _send(_worker(_config(group), caches))[0].values
+        return _send(_worker(_config(group), caches))[0].values[:, 0]
 
     baseline = checksum(first, second)
     swapped_tokens = first.clone()
@@ -256,7 +337,9 @@ def test_kernel_block_split_matches_definition():
     worker = _worker(
         _config(_group(_spec(2))), {_name(0): _cache(logical, kernel_split=2)}
     )
-    np.testing.assert_array_equal(_send(worker)[0].values, _reference({0: logical}))
+    np.testing.assert_array_equal(
+        _send(worker)[0].values[:, 0], _reference({0: logical})
+    )
 
 
 def test_checksums_add_up_across_block_sizes():
@@ -276,10 +359,10 @@ def test_checksums_add_up_across_block_sizes():
     num_tokens = 4 * BLOCK_SIZE + 8
     small_values = _send(
         small_worker, KVChecksumBlocks(num_tokens, {0: (0, [0, 1, 2, 3, 4])})
-    )[0].values
+    )[0].values[:, 0]
     large_values = _send(
         large_worker, KVChecksumBlocks(num_tokens, {0: (0, [0, 1, 2])})
-    )[0].values
+    )[0].values[:, 0]
     np.testing.assert_array_equal(
         np.add.reduceat(small_values, [0, 2, 4]), large_values
     )
@@ -297,20 +380,20 @@ def _check_requests_and_groups_of_one_step(device: str) -> None:
         ),
         "b": KVChecksumBlocks(num_tokens=21, groups={0: (1, [2])}),
     }
-    worker.bind(KVChecksumScheduled(reqs_to_send=reqs))
-    [record] = worker.post_forward(None, set(), set()).finalize()
+    worker.bind(KVChecksumScheduled(reqs_to_recv=reqs))
+    [record] = worker.post_forward(set(reqs), set(), set()).finalize()
     for req_id, blocks in reqs.items():
         for group_id, (start, block_ids) in blocks.groups.items():
             kv = first if group_id == 0 else second
             group_blocks = KVChecksumBlocks(blocks.num_tokens, {0: (start, block_ids)})
             np.testing.assert_array_equal(
-                record.checksums[req_id][group_id].values,
+                record.checksums[req_id][group_id].values[:, 0],
                 _reference({group_id: kv}, group_blocks),
             )
 
 
 def test_requests_and_groups_of_one_step_are_checksummed_together():
-    """Blocks of several requests and groups checksummed in one step, starting
+    """Loads of several requests and groups finishing in one step, starting
     past the first block and ending in partial blocks, match the definition."""
     _check_requests_and_groups_of_one_step("cpu")
 
@@ -325,15 +408,84 @@ def test_kv_sharing_layers_counted_once():
         {_name(0): shared, _name(1): _cache(second), _name(2): shared},
     )
     np.testing.assert_array_equal(
-        _send(worker)[0].values, _reference({0: first, 1: second})
+        _send(worker)[0].values[:, 0], _reference({0: first, 1: second})
     )
+
+
+def test_caches_of_one_layer_take_consecutive_slices():
+    """Distinct caches with one layer number (e.g. an attention's KV and its
+    indexer's) are all covered: the second, in layer name order, takes the
+    heads after the first's."""
+    kv, index = _logical_kv(heads=2, seed=1), _logical_kv(heads=2, seed=2)
+    index_name = "model.layers.0.self_attn.indexer.k_cache"
+    worker = _worker(
+        _config(_group(_spec(2), index_name, _name(0))),
+        {_name(0): _cache(kv), index_name: _cache(index)},
+    )
+    np.testing.assert_array_equal(
+        _send(worker)[0].values[:, 0], _reference({0: torch.cat([kv, index], 1)})
+    )
+
+
+@pytest.mark.parametrize("declared", [True, False])
+@pytest.mark.parametrize("tp_size", [2, 4])
+def test_replicated_indexer_cache_sums_across_tp(tp_size, declared):
+    """As in MiniMax-M3: per layer, attention KV of 2 heads (sharded at TP2,
+    replicated at TP4) and an indexer cache of one head held whole by every
+    rank, as its spec declares (max_tp_shards=1) or its MLA spec type
+    implies. Producer shards sum to the definition with each head counted
+    once, and every consumer replica check equals it."""
+    kv, index = _logical_kv(heads=2, seed=1), _logical_kv(heads=1, seed=2)
+    index_name = "model.layers.0.self_attn.indexer.k_cache"
+    index_spec = MLAAttentionSpec(
+        block_size=BLOCK_SIZE,
+        num_kv_heads=1,
+        head_size=HEAD_SIZE,
+        dtype=torch.bfloat16,
+        max_tp_shards=1 if declared else None,
+    )
+    group = KVCacheGroupSpec(
+        [_name(0), index_name],
+        UniformTypeKVCacheSpecs(
+            block_size=BLOCK_SIZE,
+            kv_cache_specs={_name(0): _spec(1), index_name: index_spec},
+        ),
+    )
+    head_replicas = tp_size // 2
+    workers = [
+        _worker(
+            _config(group),
+            {
+                _name(0): _cache(kv[:, rank // head_replicas :][:, :1]),
+                index_name: _cache(index),
+            },
+            tp_rank=rank,
+            tp_size=tp_size,
+        )
+        for rank in range(tp_size)
+    ]
+    expected = _reference({0: torch.cat([kv, index], 1)})
+    with np.errstate(over="ignore"):
+        sent = sum(
+            group.values.sum(axis=1, dtype=np.uint64)
+            for worker in workers
+            for group in _send(worker).values()
+        )
+    np.testing.assert_array_equal(sent, expected)
+    received = [_recv(worker)[0] for worker in workers]
+    checks = _sum_replicas(received, len(expected))
+    assert len(checks) == tp_size
+    for check in checks:
+        np.testing.assert_array_equal(check, expected)
 
 
 def test_gathers_are_chunked_without_changing_results(monkeypatch):
     monkeypatch.setattr(checksum_worker, "_MAX_GATHER_BYTES", 1)
     logical = _logical_kv(heads=2)
     worker = _worker(_config(_group(_spec(2))), {_name(0): _cache(logical)})
-    np.testing.assert_array_equal(_send(worker)[0].values, _reference({0: logical}))
+    np.testing.assert_array_equal(
+        _send(worker)[0].values[:, 0], _reference({0: logical})
+    )
 
 
 _LOGICAL = _logical_kv(heads=2)
@@ -369,24 +521,6 @@ def _misaligned_cache() -> torch.Tensor:
             {_name(0): _cache(_LOGICAL[:, :1])},
             {"tp_size": 2, "uniform_kv_heads": None},
         ),
-        (
-            _group(_spec(1)),
-            {_name(0): _cache(_LOGICAL[:, :1])},
-            {"tp_size": 4, "uniform_kv_heads": 2},
-        ),
-        (
-            _group(
-                MLAAttentionSpec(
-                    block_size=BLOCK_SIZE,
-                    num_kv_heads=1,
-                    head_size=2 * HEAD_SIZE,
-                    head_size_v=0,
-                    dtype=torch.bfloat16,
-                )
-            ),
-            {_name(0): _cache(_LOGICAL[:, :1])},
-            {"tp_size": 2},
-        ),
         (_group(_spec(2)), {_name(0): _bf16_cache(NUM_BLOCKS + 1)}, {}),
         (_group(_spec(2)), {_name(0): _misaligned_cache()}, {}),
         (
@@ -395,13 +529,10 @@ def _misaligned_cache() -> torch.Tensor:
             {},
         ),
         (_group(_spec(2), "attn"), {"attn": _cache(_LOGICAL)}, {}),
-        # E.g. an attention's KV and its indexer's.
+        # Under PP these could be on different stages, numbered apart.
         (
-            _group(_spec(2), _name(0), "model.layers.0.self_attn.indexer.k_cache"),
-            {
-                _name(0): _cache(_LOGICAL),
-                "model.layers.0.self_attn.indexer.k_cache": _cache(_LOGICAL),
-            },
+            _group(_spec(2), _name(0), "mtp.layers.0.attn"),
+            {_name(0): _cache(_LOGICAL), "mtp.layers.0.attn": _cache(_LOGICAL)},
             {},
         ),
     ],
@@ -410,13 +541,11 @@ def _misaligned_cache() -> torch.Tensor:
         "packed-head-slots",
         "host-resident",
         "unknown-replication",
-        "replicated-gqa-heads",
-        "replicated-mla",
         "block-count",
         "misaligned",
         "kernel-blocks-do-not-tile",
         "no-layer-number",
-        "caches-sharing-a-layer-number",
+        "layer-number-of-two-modules",
     ],
 )
 def test_unsupported_groups_are_skipped(group, caches, worker_kwargs):
@@ -432,7 +561,7 @@ def test_unsupported_groups_are_skipped(group, caches, worker_kwargs):
     checksums = record.checksums["req"]
     assert set(checksums) == {1}
     # Rank 0 holds the model's first heads, so its part covers only those.
-    np.testing.assert_array_equal(checksums[1].values, _reference({9: _LOGICAL}))
+    np.testing.assert_array_equal(checksums[1].values[:, 0], _reference({9: _LOGICAL}))
 
 
 def test_recv_checksummed_only_when_its_load_finishes():
@@ -447,9 +576,6 @@ def test_recv_checksummed_only_when_its_load_finishes():
     worker.bind(None)
     [record] = worker.post_forward({"a", "b", "c"}, {"b"}, {"c"}).finalize()
     assert set(record.checksums) == {"a"}
-    np.testing.assert_array_equal(
-        record.checksums["a"][0].values, _reference({0: _LOGICAL})
-    )
 
     worker.bind(None)
     assert worker.post_forward({"b", "c"}, set(), set()) is None
@@ -470,7 +596,7 @@ def test_deferred_sends_include_kv_written_before_finalize():
     worker.finalize_sends()
     [record] = output.finalize()
     np.testing.assert_array_equal(
-        record.checksums["req"][0].values, _reference({0: drafted})
+        record.checksums["req"][0].values[:, 0], _reference({0: drafted})
     )
 
 
@@ -502,5 +628,5 @@ def test_outputs_serialize_and_aggregate_across_workers():
     assert isinstance(checksums, KVChecksumOutput)
     records = checksums.finalize()
     assert sorted(r.tp_rank for r in records) == [0, 1]
-    total = sum(r.checksums["req"][0].values for r in records)
+    total = sum(r.checksums["req"][0].values[:, 0] for r in records)
     np.testing.assert_array_equal(total, _reference({0: logical}))

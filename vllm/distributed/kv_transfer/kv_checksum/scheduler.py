@@ -16,6 +16,7 @@ from vllm.distributed.kv_transfer.kv_checksum.checksum import (
     KVChecksumGroup,
     KVChecksumRecord,
     KVChecksumScheduled,
+    ReplicaKey,
     kv_checksum_enabled,
     num_valid_tokens,
 )
@@ -378,7 +379,7 @@ class KVChecksumScheduler:
                     continue
                 values = np.zeros(len(block_ids), dtype=np.uint64)
                 for group in pending.group_checksums(group_id):
-                    values += group.values
+                    values += group.values.sum(axis=1, dtype=np.uint64)
                 groups[group_id] = (
                     pending.fingerprint(group_id),
                     self._groups[group_id].kv_cache_spec.block_size,
@@ -485,9 +486,6 @@ class KVChecksumScheduler:
                 f"{block_size} on the consumer",
             )
         start, block_ids = pending.blocks.groups[group_id]
-        values = np.zeros(len(block_ids), dtype=np.uint64)
-        for group in pending.group_checksums(group_id):
-            values += group.values
         positions = [
             pos
             for pos in range(
@@ -501,7 +499,10 @@ class KVChecksumScheduler:
         if not positions:
             raise _Unverified("a group has no block in common", f"group {group_id}")
         index = np.array(positions)
-        bad = values[index - start] != sent_values[index - sent_start]
+        sent_values = sent_values[index - sent_start]
+        bad = np.zeros(len(positions), dtype=bool)
+        for values in _sum_replicas(pending.group_checksums(group_id), len(block_ids)):
+            bad |= values[index - start] != sent_values
         return index[bad].tolist()
 
 
@@ -519,3 +520,34 @@ def _non_null_run(
     if any(nulls[offset:]):
         return None
     return first + offset, block_ids[offset:]
+
+
+def _sum_replicas(
+    groups: list[KVChecksumGroup], num_positions: int
+) -> list[np.ndarray]:
+    """The consumer's checksums of a group, one per check. Check ``k`` sums
+    copy ``k % R`` of each layer replicated on ``R`` ranks, so every check
+    covers each layer once and every copy is checked.
+
+    Raises:
+        _Unverified: If a check misses a copy.
+
+    """
+    totals: dict[ReplicaKey, np.ndarray] = {}
+    for group in groups:
+        for column, key in enumerate(group.replica_keys):
+            total = totals.setdefault(key, np.zeros(num_positions, dtype=np.uint64))
+            total += group.values[:, column]
+    replica_counts = {replicas for replicas, _ in totals}
+    checks = []
+    for k in range(max(replica_counts, default=1)):
+        check = np.zeros(num_positions, dtype=np.uint64)
+        for replicas in replica_counts:
+            if (total := totals.get((replicas, k % replicas))) is None:
+                raise _Unverified(
+                    "a replica was not checksummed",
+                    f"replica {k % replicas} of {replicas}",
+                )
+            check += total
+        checks.append(check)
+    return checks

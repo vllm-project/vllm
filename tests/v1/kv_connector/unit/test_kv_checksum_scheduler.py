@@ -180,11 +180,12 @@ class _Engine:
             )
             for layer in LAYERS
         }
-        heads_per_rank = HEADS // tp_size
+        replicas = max(1, tp_size // HEADS)
+        heads_per_rank = max(1, HEADS // tp_size)
         self.workers = []
         for pp_rank, layers in enumerate(stages):
             for tp_rank in range(tp_size):
-                first = tp_rank * heads_per_rank
+                first = tp_rank // replicas * heads_per_rank
                 caches = {
                     layer: self.kv[layer][:, first : first + heads_per_rank].view(
                         torch.bfloat16
@@ -378,14 +379,16 @@ def test_no_checksums_sent_unless_every_worker_reported():
 
 @pytest.mark.parametrize(
     "producer_tp_pp,consumer_tp_pp",
-    [((1, 1), (1, 1)), ((2, 1), (1, 1)), ((1, 1), (2, 1))]
-    + [((1, 2), (1, 1)), ((1, 1), (2, 2))],
+    [((1, 1), (1, 1)), ((2, 1), (1, 1)), ((1, 1), (2, 1)), ((1, 1), (4, 1))]
+    + [((1, 2), (1, 1)), ((1, 1), (2, 2)), ((4, 1), (1, 1))],
     ids=lambda tp_pp: f"tp{tp_pp[0]}pp{tp_pp[1]}",
 )
 @CONNECTORS
 def test_correct_load_is_verified(connector, producer_tp_pp, consumer_tp_pp):
-    """Checksums and group fingerprints sum over TP shards and PP stages, so
-    any TP and PP pairing verifies."""
+    """Checksums and group fingerprints sum over TP shards and PP stages, a
+    producer with replicated heads (TP 4, 2 heads) sends each head once, and
+    a consumer with replicated heads checks every replica, so any TP and PP
+    pairing verifies."""
     (p_tp, p_pp), (c_tp, c_pp) = producer_tp_pp, consumer_tp_pp
     producer = _Engine("kv_producer", connector, tp_size=p_tp, pp_size=p_pp)
     consumer = _Engine(

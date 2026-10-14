@@ -27,6 +27,7 @@ from vllm.distributed.kv_transfer.kv_checksum.checksum import (
     KVChecksumGroup,
     KVChecksumRecord,
     KVChecksumScheduled,
+    ReplicaKey,
     kv_checksum_enabled,
 )
 from vllm.distributed.parallel_state import (
@@ -65,15 +66,19 @@ class _LayerView:
     ``offset_weights`` to them.
     """
 
-    def __init__(self, pieces: torch.Tensor, first_slice: int) -> None:
+    def __init__(
+        self, pieces: torch.Tensor, first_slice: int, replica_key: ReplicaKey
+    ) -> None:
         """Set up the weighted sums of this rank's slices.
 
         Args:
             pieces: The layer's cache viewed as 8-byte pieces.
             first_slice: ``layer * H + head`` of this rank's first head.
+            replica_key: The replicas and replica index of this rank's heads.
 
         """
         self.pieces = pieces
+        self.replica_key = replica_key
         _, kernel_blocks, heads, tokens, num_pieces = pieces.shape
         tokens_per_block = kernel_blocks * tokens
         device = pieces.device
@@ -170,16 +175,20 @@ def _tp_replicas(
     return tp_size // uniform_kv_heads
 
 
-def _layer_number(layer_name: str) -> int:
-    """The model-wide layer number in a layer name, the same on every rank."""
+def _layer_module(layer_name: str) -> tuple[int, str]:
+    """The model-wide layer number in a layer name, the same on every rank,
+    and the name of its layer module (up to the number)."""
     from vllm.model_executor.models.utils import extract_layer_index
 
     try:
-        return extract_layer_index(layer_name)
+        number = extract_layer_index(layer_name)
     except AssertionError as e:
         raise _UnsupportedGroupError(
             f"layer {layer_name} has no single layer number"
         ) from e
+    parts = layer_name.split(".")
+    end = next(i for i, part in enumerate(parts) if part.isdigit()) + 1
+    return number, ".".join(parts[:end])
 
 
 def _attention_pieces(
@@ -188,8 +197,8 @@ def _attention_pieces(
     num_blocks: int,
     tp_size: int,
     uniform_kv_heads: int | None,
-) -> tuple[torch.Tensor, int]:
-    """An attention layer's 8-byte piece view and heads per rank."""
+) -> tuple[torch.Tensor, int, int]:
+    """An attention layer's 8-byte piece view, TP replicas and heads per rank."""
     if not isinstance(spec, AttentionSpec) or not spec.has_layer_views:
         raise _UnsupportedGroupError(
             f"{type(spec).__name__} has no per-token KV blocks"
@@ -206,9 +215,7 @@ def _attention_pieces(
             f"the kernel blocks of its cache of shape {tuple(cache.shape)} do not "
             f"tile its {spec.block_size}-token blocks"
         )
-    if _tp_replicas(spec, tp_size, uniform_kv_heads) > 1:
-        raise _UnsupportedGroupError("its KV heads are replicated across TP")
-    return pieces, spec.num_kv_heads
+    return pieces, _tp_replicas(spec, tp_size, uniform_kv_heads), spec.num_kv_heads
 
 
 def _as_pieces(cache: torch.Tensor, num_blocks: int) -> torch.Tensor:
@@ -230,12 +237,15 @@ def _as_pieces(cache: torch.Tensor, num_blocks: int) -> torch.Tensor:
 @dataclass
 class _LayerCache:
     """One distinct KV cache of a group, under the lowest layer number using
-    it. Rank ``r`` holds the ``heads`` slices from ``r * heads`` in the layer.
+    it. Rank ``r`` holds shard ``r // replicas``:
+    the ``heads`` slices from ``first_head + shard * heads`` in the layer.
     """
 
     number: int
     pieces: torch.Tensor
+    replicas: int
     heads: int
+    first_head: int = 0
 
 
 def _build_layer_views(
@@ -255,37 +265,61 @@ def _build_layer_views(
     if group.host_resident:
         raise _UnsupportedGroupError("its KV is host-resident")
     # KV-sharing layers alias their target's cache: count each cache once,
-    # under the lowest layer number that uses it.
-    layers: dict[tuple[int, tuple[int, ...]], _LayerCache] = {}
+    # under the lowest (layer number, name) that uses it.
+    owners: dict[tuple[int, tuple[int, ...]], tuple[int, str]] = {}
+    entries: dict[tuple[int, tuple[int, ...]], list[_LayerCache]] = {}
     for layer_name in group.layer_names:
         spec = _layer_spec(group.kv_cache_spec, layer_name)
         cache = kv_caches.get(layer_name)
         if cache is None:
             raise _UnsupportedGroupError(f"layer {layer_name} has no KV cache")
-        number = _layer_number(layer_name)
+        number, _ = _layer_module(layer_name)
         identity = (cache.data_ptr(), cache.stride())
-        if identity in layers:
-            layers[identity].number = min(layers[identity].number, number)
+        if identity in owners:
+            owners[identity] = min(owners[identity], (number, layer_name))
             continue
-        pieces, heads = _attention_pieces(
+        owners[identity] = (number, layer_name)
+        pieces, replicas, heads = _attention_pieces(
             spec, cache, num_blocks, tp_size, uniform_kv_heads
         )
-        layers[identity] = _LayerCache(number, pieces, heads)
+        entries[identity] = [_LayerCache(number, pieces, replicas, heads)]
 
-    numbers = [layer.number for layer in layers.values()]
-    if len(set(numbers)) != len(numbers):
-        raise _UnsupportedGroupError("two of its KV caches share a layer number")
-    if any(layer.heads * tp_size > MAX_KV_HEADS_PER_LAYER for layer in layers.values()):
+    # The caches of one layer module (e.g. an attention's KV and its indexer's,
+    # always on one PP stage) take consecutive slices, in layer name order.
+    layers: list[_LayerCache] = []
+    modules: dict[int, str] = {}
+    next_head: dict[int, int] = defaultdict(int)
+    for identity, (number, name) in sorted(owners.items(), key=lambda item: item[1]):
+        module = _layer_module(name)[1]
+        if modules.setdefault(number, module) != module:
+            raise _UnsupportedGroupError(
+                f"layers {modules[number]} and {module} share a layer number"
+            )
+        for layer in entries[identity]:
+            layer.number = number
+            layer.first_head += next_head[number]
+        next_head[number] = max(
+            layer.first_head + layer.heads * (tp_size // layer.replicas)
+            for layer in entries[identity]
+        )
+        layers.extend(entries[identity])
+    if any(heads > MAX_KV_HEADS_PER_LAYER for heads in next_head.values()):
         raise _UnsupportedGroupError(
             f"a layer has more than {MAX_KV_HEADS_PER_LAYER} KV heads"
         )
-    return [
-        _LayerView(
-            layer.pieces,
-            first_slice=layer.number * MAX_KV_HEADS_PER_LAYER + tp_rank * layer.heads,
+    views = []
+    for layer in layers:
+        shard, replica = divmod(tp_rank, layer.replicas)
+        views.append(
+            _LayerView(
+                layer.pieces,
+                first_slice=layer.number * MAX_KV_HEADS_PER_LAYER
+                + layer.first_head
+                + shard * layer.heads,
+                replica_key=(layer.replicas, replica),
+            )
         )
-        for layer in layers.values()
-    ]
+    return views
 
 
 @dataclass
@@ -331,9 +365,11 @@ class KVChecksumOutput:
         self._skipped_groups = skipped_groups
         self._fingerprints = fingerprints or {}
         self._req_ids: list[str] = []
-        # group id -> (segments, [rows] int64 values). The device values stay
-        # referenced until the copy is done.
-        self._groups: dict[int, tuple[list[tuple[str, int, int]], torch.Tensor]] = {}
+        # group id -> (segments, replica keys, [rows, len(replica keys)] int64
+        # values). The device values stay referenced until the copy is done.
+        self._groups: dict[
+            int, tuple[list[tuple[str, int, int]], list[ReplicaKey], torch.Tensor]
+        ] = {}
         self._host: dict[int, torch.Tensor] = {}
         self._copy_event: torch.cuda.Event | None = None
         self._records: list[KVChecksumRecord] = []
@@ -345,9 +381,13 @@ class KVChecksumOutput:
         self._req_ids.extend(req_ids)
 
     def add_group(
-        self, group_id: int, segments: list[tuple[str, int, int]], values: torch.Tensor
+        self,
+        group_id: int,
+        segments: list[tuple[str, int, int]],
+        replica_keys: list[ReplicaKey],
+        values: torch.Tensor,
     ) -> None:
-        self._groups[group_id] = (segments, values)
+        self._groups[group_id] = (segments, replica_keys, values)
 
     def start_cpu_copy(self, copy_stream: torch.cuda.Stream | None) -> None:
         """Queue the copy to host memory after the work queued so far.
@@ -360,14 +400,15 @@ class KVChecksumOutput:
         if not self._groups:
             return
         if copy_stream is None:
-            self._host = {g: v.cpu() for g, (_, v) in self._groups.items()}
+            self._host = {g: v.cpu() for g, (_, _, v) in self._groups.items()}
             return
         main_stream = current_stream()
         copy_stream.wait_stream(main_stream)
         torch.cuda.set_stream(copy_stream)
         try:
             self._host = {
-                g: v.to("cpu", non_blocking=True) for g, (_, v) in self._groups.items()
+                g: v.to("cpu", non_blocking=True)
+                for g, (_, _, v) in self._groups.items()
             }
         finally:
             torch.cuda.set_stream(main_stream)
@@ -386,12 +427,12 @@ class KVChecksumOutput:
         checksums: dict[str, dict[int, KVChecksumGroup]] = {
             req_id: {} for req_id in self._req_ids
         }
-        for group_id, (segments, _) in self._groups.items():
+        for group_id, (segments, replica_keys, _) in self._groups.items():
             values = self._host[group_id].numpy().view(np.uint64)
             row = 0
             for req_id, start, num_rows in segments:
                 checksums[req_id][group_id] = KVChecksumGroup(
-                    start, values[row : row + num_rows]
+                    start, replica_keys, values[row : row + num_rows]
                 )
                 row += num_rows
         self._records.append(
@@ -515,7 +556,7 @@ class KVChecksumWorker:
         output = KVChecksumOutput(
             self.pp_rank, self.tp_rank, self._skipped_groups, self._fingerprints
         )
-        self._compute(loaded, output)
+        self._compute(loaded, output, replica_zero_only=False)
         if defer_sends and self._reqs_to_send:
             self._deferred_output = output
             return output
@@ -529,14 +570,21 @@ class KVChecksumWorker:
             self._compute_sends(output)
 
     def _compute_sends(self, output: KVChecksumOutput) -> None:
-        self._compute(self._reqs_to_send, output)
+        self._compute(self._reqs_to_send, output, replica_zero_only=True)
         self._reqs_to_send = {}
         output.start_cpu_copy(self._copy_stream)
 
     def _compute(
-        self, reqs: dict[str, KVChecksumBlocks], output: KVChecksumOutput
+        self,
+        reqs: dict[str, KVChecksumBlocks],
+        output: KVChecksumOutput,
+        replica_zero_only: bool,
     ) -> None:
-        """Checksum the blocks of ``reqs`` into ``output``."""
+        """Checksum the blocks of ``reqs`` into ``output``.
+
+        A producer only needs the first replica of each layer: any replica of
+        it describes the same KV, and consumers check each of theirs against it.
+        """
         output.add_requests(reqs)
         batches: dict[int, _GroupBatch] = defaultdict(_GroupBatch)
         for req_id, blocks in reqs.items():
@@ -547,32 +595,52 @@ class KVChecksumWorker:
                 batch.segments.append((req_id, start, len(block_ids)))
                 batch.block_ids.extend(block_ids)
                 batch.num_tokens.append(blocks.num_tokens)
-        if not batches:
+
+        device = None
+        groups = []
+        for group_id, batch in batches.items():
+            layers = [
+                layer
+                for layer in self._layer_views[group_id]
+                if not replica_zero_only or layer.replica_key[1] == 0
+            ]
+            if layers:
+                device = layers[0].pieces.device
+                groups.append((group_id, batch, layers))
+        if device is None:
             return
-        groups = list(batches.items())
-        device = self._layer_views[groups[0][0]][0].pieces.device
 
         # One copy for every group.
         columns = []
         width = 0
-        for _, batch in groups:
+        for _, batch, _ in groups:
             columns.append(width)
             width += len(batch.block_ids)
         host = np.zeros((3, width), dtype=np.int64)
-        for (group_id, batch), column in zip(groups, columns):
+        for (group_id, batch, _), column in zip(groups, columns):
             rows = batch.rows(self._block_sizes[group_id])
             host[:, column : column + rows.shape[1]] = rows
         device_rows = _to_device(host, device)
 
-        for (group_id, batch), column in zip(groups, columns):
+        for (group_id, batch, layers), column in zip(groups, columns):
             num_rows = len(batch.block_ids)
             block_ids, first_tokens, valid_tokens = device_rows[
                 :, column : column + num_rows
             ]
-            values = torch.zeros(num_rows, dtype=torch.int64, device=device)
-            for layer in self._layer_views[group_id]:
-                layer.accumulate(block_ids, first_tokens, valid_tokens, values)
-            output.add_group(group_id, batch.segments, values)
+            replica_keys = list(dict.fromkeys(layer.replica_key for layer in layers))
+            values = torch.zeros(
+                (num_rows, len(replica_keys)),
+                dtype=torch.int64,
+                device=device,
+            )
+            for layer in layers:
+                layer.accumulate(
+                    block_ids,
+                    first_tokens,
+                    valid_tokens,
+                    values[:, replica_keys.index(layer.replica_key)],
+                )
+            output.add_group(group_id, batch.segments, replica_keys, values)
 
 
 def _to_device(values: np.ndarray, device: torch.device) -> torch.Tensor:
