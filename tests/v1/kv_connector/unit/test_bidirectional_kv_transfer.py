@@ -1035,6 +1035,24 @@ def test_d_node_request_finished_exports_blocks_expiry_time():
     assert kv["remote_blocks_expiry_time"] > time.perf_counter()
 
 
+def test_p_node_request_finished_exports_blocks_expiry_time():
+    """P exports its lease expiry so D can decline reads after P reaps it,
+    with or without bidirectional transfer."""
+    vllm_config = create_vllm_config()
+    scheduler = create_scheduler(vllm_config)
+    BS = vllm_config.cache_config.block_size
+    req = create_request(
+        request_id=601, block_size=BS, num_tokens=int(BS * 2.5), do_remote_decode=True
+    )
+    scheduler.add_request(req)
+    lease_start = time.perf_counter()
+    so = scheduler.schedule()
+    eco = scheduler.update_from_output(so, create_model_runner_output(reqs=[req]))
+    kv = eco[0].outputs[0].kv_transfer_params
+    assert kv["do_remote_prefill"] is True
+    assert kv["remote_blocks_expiry_time"] >= lease_start + 30
+
+
 def test_handshake_listener_appends_perf_counter_frame():
     """The handshake reply carries a 2nd frame with the listener's live
     perf_counter."""

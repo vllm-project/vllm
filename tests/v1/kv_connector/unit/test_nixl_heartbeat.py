@@ -3,13 +3,25 @@
 """Unit tests for the scheduler-driven heartbeat / lease-renewal system."""
 
 import time
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+    HeartbeatInfo,
+    NixlConnectorMetadata,
+    RemoteMeta,
+    ReqMeta,
+)
 from vllm.v1.outputs import KVConnectorOutput
 
-from .utils import create_request, make_nixl_scheduler
+from .utils import (
+    create_request,
+    create_vllm_config,
+    make_kv_cache_config,
+    make_nixl_scheduler,
+    maybe_update_block_size,
+)
 
 _ENGINE_A = "my-engine-id"
 
@@ -251,3 +263,161 @@ def test_reaper_reclaims_shorter_lease_behind_later_deadline(monkeypatch):
     assert done == {"Y"}
     assert list(w._reqs_to_send) == ["X"]
     assert w._reqs_to_process == {"X"}
+
+
+# ===================================================================
+# Worker: pull reads check the producer lease, crediting heartbeats
+# ===================================================================
+
+_REMOTE = "remote_engine"
+_LEASE = 30.0
+
+
+@pytest.fixture
+def pull_worker(dist_init, monkeypatch):
+    """Non-bidirectional D worker paired with P, on a fake clock that reads 0
+    when P stamps a 30 s lease."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl import base_worker
+
+    from .test_nixl_connector import FakeNixlConnectorWorker, FakeNixlWrapper
+
+    monkeypatch.setattr(base_worker, "NixlWrapper", FakeNixlWrapper)
+    block_size = maybe_update_block_size(32)
+    vllm_config = create_vllm_config(block_size=block_size)
+    worker = FakeNixlConnectorWorker(
+        vllm_config,
+        vllm_config.kv_transfer_config.engine_id,
+        hand_shake_latency=0,
+        kv_cache_config=make_kv_cache_config(block_size=block_size, num_blocks=2),
+    )
+    assert worker.REMOTE_ENGINE_ID == _REMOTE
+    worker._remote_agents[_REMOTE], _ = worker._nixl_handshake(
+        "localhost", 1234, 1, _REMOTE
+    )
+    worker._engine_clock_offset[_REMOTE] = 0.0
+    clock = {"t": 0.0}
+    monkeypatch.setattr(base_worker.time, "perf_counter", lambda: clock["t"])
+    yield worker, clock
+    worker.shutdown()
+
+
+def _heartbeat_at(worker, clock, t: float) -> None:
+    clock["t"] = t
+    meta = NixlConnectorMetadata()
+    meta.heartbeat_by_engine = {
+        _REMOTE: HeartbeatInfo(
+            req_ids={"prefill-req"}, host="localhost", port=1234, tp_size=1
+        )
+    }
+    worker.start_load_kv(meta)
+
+
+def _read_at(worker, clock, t: float) -> None:
+    clock["t"] = t
+    meta = NixlConnectorMetadata()
+    meta.add_new_req_to_recv(
+        request_id="req",
+        local_block_ids=([0, 1],),
+        kv_transfer_params={
+            "remote_block_ids": ([0, 1],),
+            "remote_engine_id": _REMOTE,
+            "remote_request_id": "prefill-req",
+            "remote_host": "localhost",
+            "remote_port": 1234,
+            "remote_blocks_expiry_time": _LEASE,
+        },
+        awaiting_kvs=True,
+    )
+    worker.start_load_kv(meta)
+
+
+_EVERY_5S = [5.0 * i for i in range(1, 9)]
+
+
+@pytest.mark.parametrize(
+    ("heartbeat_times", "send_fails", "read_time", "expect_expired"),
+    [
+        # Queued past the exported expiry, kept alive by a heartbeat every 5 s.
+        pytest.param(_EVERY_5S, False, 45.0, False, id="renewed"),
+        # Heartbeats that failed to send extended nothing.
+        pytest.param(_EVERY_5S, True, 45.0, True, id="send_failed"),
+        # A 30 s heartbeat gap exceeds P's 20 s extension: the lease lapsed.
+        pytest.param([5.0, 10.0, 40.0], False, 41.0, True, id="heartbeat_gap"),
+        pytest.param([], False, 31.0, True, id="no_heartbeat"),
+        # Heartbeats that start this close to the expiry are not credited, so
+        # the read is declined past expiry - 5 s.
+        pytest.param([20.0, 25.0], False, 26.0, True, id="late_first_heartbeat"),
+    ],
+)
+def test_pull_read_checks_producer_lease(
+    pull_worker, heartbeat_times, send_fails, read_time, expect_expired
+):
+    """D must not read P blocks whose lease P may have reaped and reused."""
+    worker, clock = pull_worker
+    with patch.object(
+        worker.nixl_wrapper,
+        "send_notif",
+        side_effect=RuntimeError("unreachable") if send_fails else None,
+    ):
+        for t in heartbeat_times:
+            _heartbeat_at(worker, clock, t)
+    _read_at(worker, clock, read_time)
+
+    result = worker.get_transfer_results()
+    assert result.finished_recving == {"req"}
+    assert result.failed_recving == ({"req"} if expect_expired else set())
+    assert worker.xfer_stats.data["num_kv_expired_reqs"] == (
+        [1] if expect_expired else []
+    )
+    assert worker.xfer_stats.data["num_failed_transfers"] == []
+
+
+@pytest.mark.parametrize("read_time", [15.0, 50.0], ids=["loaded", "expired"])
+def test_finished_load_drops_heartbeat_record(pull_worker, read_time):
+    """Heartbeat state does not outlive the request's load on this worker."""
+    worker, clock = pull_worker
+    _heartbeat_at(worker, clock, 5.0)
+    _read_at(worker, clock, read_time)
+    assert worker.get_transfer_results().finished_recving == {"req"}
+    assert not worker._heartbeat_sends
+
+
+def test_pull_read_completing_after_lease_expiry_fails(pull_worker):
+    """A read issued in time but finishing after the lease lapsed may hold
+    another request's KV, so its blocks are reported invalid."""
+    worker, clock = pull_worker
+    worker.nixl_wrapper._cycles_before_xfer_done = 1
+    _read_at(worker, clock, 10.0)
+    assert not worker.get_transfer_results().finished_recving
+
+    clock["t"] = _LEASE
+    result = worker.get_transfer_results()
+    assert result.finished_recving == result.failed_recving == {"req"}
+    assert worker.get_block_ids_with_load_errors() == {0, 1}
+    assert worker.xfer_stats.data["num_kv_expired_reqs"] == [1]
+
+
+@pytest.mark.parametrize("lease", [1, 4])
+def test_heartbeat_credit_never_outlives_producer_lease(pull_worker, lease):
+    """P extends by lease * 2 // 3 whole seconds; D's credited deadline must
+    still pass no later than P reaps the blocks."""
+    worker, clock = pull_worker
+    producer = _worker_stub()
+    producer._lease_extension = lease * 2 // 3
+    producer._reqs_to_send = {"prefill-req": float(lease)}
+    meta = ReqMeta(
+        local_block_ids=([0],),
+        local_physical_block_ids=([0],),
+        tp_size=1,
+        remote=RemoteMeta(
+            ([0],), "localhost", 1234, _REMOTE, "prefill-req", float(lease)
+        ),
+    )
+    for step in range(1, 80 * lease):
+        t = step / 20
+        if t <= 2 * lease and step % 2 == 0:
+            _heartbeat_at(worker, clock, t)
+            producer._handle_heartbeat("prefill-req")
+        clock["t"] = t
+        if t >= producer._reqs_to_send["prefill-req"]:
+            assert worker._is_lease_expired(meta), t

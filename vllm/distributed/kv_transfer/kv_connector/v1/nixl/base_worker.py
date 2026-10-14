@@ -655,6 +655,11 @@ class NixlBaseConnectorWorker:
         self._invalid_engine_backoff: dict[EngineId, tuple[float, float]] = {}
         # Map of engine_id -> clock offset.
         self._engine_clock_offset: dict[EngineId, float] = {}
+        # Pull mode: (engine_id, remote request id) -> (first, last, max gap) of
+        # the perf_counter times heartbeats were sent to every agent of the engine.
+        self._heartbeat_sends: dict[
+            tuple[EngineId, ReqId], tuple[float, float, float]
+        ] = {}
 
         # Metadata.
         self.engine_id: EngineId = engine_id
@@ -2859,6 +2864,7 @@ class NixlBaseConnectorWorker:
         assert self.transfer_topo is not None
         done_sending = self._get_new_notifs()
         done_recving, newly_failed = self._pop_done_transfers(self._recving_transfers)
+        self._fail_expired_recvs(done_recving, newly_failed)
         if newly_failed:
             self._recv_failures.update(newly_failed)
 
@@ -2905,6 +2911,10 @@ class NixlBaseConnectorWorker:
             # clean up metadata for completed requests
             meta = self._recving_metadata.pop(req_id, None)
             assert meta is not None, f"{req_id} not found in recving_metadata list"
+            if meta.remote is not None:
+                self._heartbeat_sends.pop(
+                    (meta.remote.engine_id, meta.remote.request_id), None
+                )
 
             # Skip KV sync and post-processing for failed requests
             if req_id in failed_recv_reqs:
@@ -2990,6 +3000,9 @@ class NixlBaseConnectorWorker:
             finished_recving=done_recving,
             failed_recving=failed_recv_reqs,
         )
+
+    def _fail_expired_recvs(self, done_recving: set[str], failed: set[str]) -> None:
+        """Move finished receives whose remote KV lease expired into ``failed``."""
 
     def get_finished(self) -> tuple[set[str], set[str]]:
         """Compatibility wrapper for the legacy completion API."""
@@ -3178,6 +3191,13 @@ class NixlBaseConnectorWorker:
 
     def _send_heartbeats(self, metadata: NixlConnectorMetadata) -> None:
         """Send heartbeats to remote engines, extending the lease on KV blocks."""
+        if metadata.heartbeat_by_engine:
+            self._heartbeat_sends = {
+                key: times
+                for key, times in self._heartbeat_sends.items()
+                if (hb := metadata.heartbeat_by_engine.get(key[0])) is not None
+                and key[1] in hb.req_ids
+            }
         for engine_id, hb_info in metadata.heartbeat_by_engine.items():
             # Proactive handshake (this request may still be in waiting queue) so
             # the **next** heartbeat for this remote can go through.
@@ -3200,15 +3220,24 @@ class NixlBaseConnectorWorker:
             self._engine_last_active[engine_id] = time.perf_counter()
             # Build the heartbeat message: "HB:req1,req2,..."
             hb_msg = ("HB:" + ",".join(hb_info.req_ids)).encode()
+            all_sent = True
             for agent_name in self._remote_agents[engine_id].values():
                 try:
                     self.nixl_wrapper.send_notif(agent_name, notif_msg=hb_msg)
                 except Exception:
+                    all_sent = False
                     logger.debug(
                         "Failed to send heartbeat to engine %s",
                         engine_id,
                         exc_info=True,
                     )
+            if not all_sent or self._TRANSFER_MODE != "pull":
+                continue
+            now = time.perf_counter()
+            for req_id in hb_info.req_ids:
+                key = (engine_id, req_id)
+                first, last, max_gap = self._heartbeat_sends.get(key, (now, now, 0.0))
+                self._heartbeat_sends[key] = (first, now, max(max_gap, now - last))
 
     def get_mapped_blocks(
         self, block_ids: np.ndarray, block_size_ratio: int
@@ -3715,6 +3744,11 @@ class NixlBaseConnectorWorker:
 
         # Drop the cached clock offset; it is re-measured on the next handshake.
         self._engine_clock_offset.pop(engine_id, None)
+        self._heartbeat_sends = {
+            key: times
+            for key, times in self._heartbeat_sends.items()
+            if key[0] != engine_id
+        }
         # A just-completed handshake may not have recorded activity yet, so
         # tolerate a missing entry.
         last_active = self._engine_last_active.pop(engine_id, None)

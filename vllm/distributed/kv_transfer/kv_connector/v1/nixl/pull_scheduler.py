@@ -264,9 +264,7 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             self._reqs_need_send[request.request_id] = (
                 time.perf_counter() + request_kv_blocks_ttl
             )
-            if is_d_node:
-                # D blocks expiry time exported for the turn-2 readback.
-                blocks_expiry_time = self._reqs_need_send[request.request_id]
+            blocks_expiry_time = self._reqs_need_send[request.request_id]
             # NOTE HMA will "mark" empty/null blocks in groups with 0s (eg SWA ones),
             # trimming down after allocating for the whole sequence length. Empty
             # blocks are always at the start of the list.

@@ -28,8 +28,8 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-# Slack (seconds) subtracted from D's exported block-expiry deadline on the turn-2
-# readback, absorbing clock-offset error and read latency.
+# Upper bound (seconds) on the slack subtracted from a remote block-expiry
+# deadline, absorbing clock-offset error and read latency.
 _KV_BLOCKS_EXPIRY_SAFETY_MARGIN = 5.0
 
 
@@ -122,16 +122,49 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         # requests sit in the D scheduler WAITING queue.
         self._send_heartbeats(metadata)
 
-    def _is_turn2_read_expired(self, meta: ReqMeta) -> bool:
-        """Whether D's cached blocks for this turn-2 readback have (nearly) expired."""
+    def _is_lease_expired(self, meta: ReqMeta) -> bool:
+        """Whether the remote lease on this request's blocks has (nearly) expired.
+
+        The exported expiry is extended by the heartbeats this worker sent,
+        each credited with a lower bound on the extension the remote grants.
+        """
         assert meta.remote is not None
-        blocks_expiry_time = meta.remote.blocks_expiry_time
-        # Deadline may be absent (router may not forward it) -> read as usual.
-        if blocks_expiry_time is None or not meta.local_physical_block_ids:
+        remote = meta.remote
+        # Expiry may be absent (old remote, or router did not forward it).
+        if remote.blocks_expiry_time is None or not meta.local_physical_block_ids:
             return False
-        clock_offset = self._engine_clock_offset[meta.remote.engine_id]
-        deadline = blocks_expiry_time - clock_offset
-        return time.perf_counter() + _KV_BLOCKS_EXPIRY_SAFETY_MARGIN >= deadline
+        clock_offset = self._engine_clock_offset.get(remote.engine_id)
+        if clock_offset is None:
+            return False
+        expiry = remote.blocks_expiry_time - clock_offset
+        deadline = expiry - _KV_BLOCKS_EXPIRY_SAFETY_MARGIN
+        if sends := self._heartbeat_sends.get((remote.engine_id, remote.request_id)):
+            first, last, max_gap = sends
+            # The remote extends by kv_lease_duration * 2 // 3 per heartbeat and
+            # stamped the expiry before our first one, so this is a lower bound.
+            extension = (2 * (expiry - first) - 2) / 3
+            margin = min(_KV_BLOCKS_EXPIRY_SAFETY_MARGIN, extension / 4)
+            if (
+                extension > 0
+                and first + margin < expiry
+                and max_gap + margin < extension
+            ):
+                deadline = max(expiry, last + extension) - margin
+        return time.perf_counter() >= deadline
+
+    def _fail_expired_recvs(self, done_recving: set[str], failed: set[str]) -> None:
+        for req_id in done_recving - failed:
+            meta = self._recving_metadata.get(req_id)
+            if meta is None or not self._is_lease_expired(meta):
+                continue
+            logger.warning(
+                "Failing read for %s: remote KV lease expired during transfer.",
+                req_id,
+            )
+            self.xfer_stats.record_kv_expired_req()
+            self._handle_failed_transfer(
+                req_id, None, failed, record_failed_transfer=False
+            )
 
     def _read_blocks_for_req(self, req_id: str, meta: ReqMeta):
         assert meta.remote is not None and self.transfer_topo is not None
@@ -149,7 +182,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         # thread (this one), so we don't race on this structure.
         self._engine_last_active[engine_id] = time.perf_counter()
 
-        if self._bidirectional_kv_xfer_enabled and self._is_turn2_read_expired(meta):
+        if self._is_lease_expired(meta):
             logger.warning(
                 "Declining expired remote read for %s from engine %s.",
                 req_id,
