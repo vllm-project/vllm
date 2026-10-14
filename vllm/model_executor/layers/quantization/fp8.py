@@ -9,14 +9,11 @@ import vllm.envs as envs
 from vllm.config import get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.kernels.linear import (
+    fp8_scaled_mm_is_batch_invariant,
     init_fp8_linear_kernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm import (
-    CutlassFP8ScaledMMLinearKernel,
     MarlinFP8ScaledMMLinearKernel,
-)
-from vllm.model_executor.kernels.linear.scaled_mm.humming import (
-    HummingFP8ScaledMMLinearKernel,
 )
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
@@ -438,10 +435,7 @@ class Fp8LinearMethod(LinearMethodBase):
                     bias,
                 )
             else:
-                if isinstance(
-                    self.fp8_linear,
-                    (CutlassFP8ScaledMMLinearKernel, HummingFP8ScaledMMLinearKernel),
-                ):
+                if fp8_scaled_mm_is_batch_invariant(self.fp8_linear):
                     return self.fp8_linear.apply_weights(layer, x, bias)
 
                 # per-tensor/channel: dequant to BF16 and run GEMM
