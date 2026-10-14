@@ -115,6 +115,42 @@ def pack_fp6(model, rows: int = 1024) -> None:
             count,
             nbytes / 1e9,
         )
+    pack_rm(model)
+
+
+@torch.no_grad()
+def pack_rm(model) -> None:
+    """Makes ``mono_rm``, the router weight of K2's rm (rm_pack in layer.py),
+    for every layer whose out_proj or o_proj weight is bf16. It is made from
+    the values that K2 multiplies: the MXFP6 values when the linear has an
+    MXFP6 copy (mono_fp6), else the bf16 weight. pack_fp6 calls it at its
+    end, so a later call of load_weights makes it again from the weights
+    loaded by then, and the last call from all of them."""
+    from vllm.distributed import get_tensor_model_parallel_rank
+    from vllm.models.qwen3_5.amd.mono.layer import rm_pack
+    from vllm.models.qwen3_5.amd.mxfp6 import round_e2m3
+
+    rank = get_tensor_model_parallel_rank()
+    count = 0
+    for layer in model.layers:
+        o = B.o_proj(layer)
+        w = getattr(o, "weight", None)
+        gate = getattr(layer.mlp, "gate", None)
+        if w is None or w.dtype != torch.bfloat16 or w.dim() != 2 or gate is None:
+            continue
+        # round_e2m3 gives the MXFP6 values of fp6_pack. It leaves values
+        # that VLLM_QWEN38_FAKE_MXFP6_PROJ already rounded unchanged.
+        vals = (
+            round_e2m3(w.data) if getattr(o, "mono_fp6", None) is not None else w.data
+        )
+        layer.mlp.mono_rm = rm_pack(
+            gate.weight, layer.post_attention_layernorm.weight, vals, rank
+        )
+        count += 1
+    if rank == 0:
+        logger.info(
+            "Qwen3.8 mono decode: made the rm router weights of %d layers", count
+        )
 
 
 class MonoDecode(B.QwenMonoDecode):
@@ -500,6 +536,11 @@ class MonoDecode(B.QwenMonoDecode):
         s = core.size(0)
         out = torch.empty_like(residual)
         res_out = torch.empty_like(residual)
+        # rm needs the layer's mono_rm (pack_rm), which is made from bf16 or
+        # MXFP6 o_proj values, so the fp4 o_proj runs without it. From 6 rows
+        # the router tasks after the norm are faster (K2 stage benchmark).
+        w_rm = getattr(mlp, "mono_rm", None)
+        rm = s < 6 and w_rm is not None and not oq
         k2.layer_post(
             k2.K2Build(
                 tokens=s,
@@ -508,6 +549,7 @@ class MonoDecode(B.QwenMonoDecode):
                 oq=oq,
                 o6=fp6 is not None,
                 og=gate is not None,
+                rm=rm,
             ),
             core=core,
             gate=gate,
@@ -530,6 +572,7 @@ class MonoDecode(B.QwenMonoDecode):
             rank=self.rank,
             epoch=self.epoch,
             layer=k2.TAG_SLOTS // 2 + layer.layer_idx,
+            w_rm=w_rm if rm else None,
         )
         return out, res_out
 

@@ -58,6 +58,18 @@ Two variants follow the stock flags:
 
 With ``VLLM_QWEN38_MONO_FP6``, ``o6``: o_proj is the MXFP6 E2M3 copy that
 ``moe.fp6_pack`` makes at load time, multiplied with the bf16 core rows.
+
+Below 6 rows with a bf16 or MXFP6 o_proj, ``rm``: the router's logits come
+through o_proj. ``rm_pack`` multiplies the router rows by the norm's (1 + w)
+and by this rank's o_proj rows, and appends the router columns of this
+rank's slice of the residual. CTAs 64 .. 159 multiply that matrix with the
+core rows and the residual slice after o_proj and put the fp32 partials to
+every rank. CTAs 64 .. 79 add the 24 partials of each logit in rank and
+chunk order. The sum is the router GEMV of the norm's input before the
+rstd. The route orders and weighs bf16(rstd times logit), as the router's
+bf16 logits, with the rstd that ``wait_x`` leaves in LDS. The route needs
+no x rows, but every CTA still loads and quantizes its x rows first,
+because the logits come in about when x is quantized.
 """
 
 from dataclasses import dataclass
@@ -124,9 +136,18 @@ G0 = R0 + R_TASKS  # 80: shared gate | up CTAs
 RT0 = G0 + G_TASKS  # 112: shared gate (SGATE) CTAs, a token each
 PS0 = G0  # the fused shared expert's early ug CTAs (the idle gate | up ones)
 TAG_SLOTS = moe.TAG_SLOTS
+# ``rm``: a router task multiplies 16 rows of w_rm with one of RM_CH
+# chunks of RM_K columns: the two halves of the core rows and this rank's
+# slice of the residual. The tasks run on CTAs R0 .. R0 + RM_TASKS - 1,
+# and CTA R0 + i, i < R_TASKS, sums the logits of RS_PER experts.
+RM_K = 1024
+RM_CH = 3
+RM_TASKS = RM_CH * E // ROWS  # 96
+RS_PER = E // R_TASKS  # 32
 
 assert RT0 + L.MAX_TOKENS <= BLOCKS and OTASKS == 2 * BLOCKS and L.BLOCKS == BLOCKS
 assert (E, TOPK, L.MAX_TOKENS) == (moe.E, moe.TOPK, moe.MAX_TOKENS)
+assert RM_CH * RM_K == OK + HIDDEN // TP and R0 + RM_TASKS <= BLOCKS
 
 _STREAM = fx.Stream(None)
 
@@ -143,6 +164,10 @@ class K2Build:
     # o_proj in MXFP6 E2M3 (fp6_pack's layout and scales), multiplied with
     # the bf16 core rows (W6A16). It takes the place of ``oq``.
     o6: bool = False
+    # The router's logits come through o_proj (rm_pack's w_rm), summed from
+    # every rank's partials without the norm, so every CTA routes as soon
+    # as its rstd is in. Not with ``oq``.
+    rm: bool = False
 
     @property
     def picks(self) -> int:
@@ -189,6 +214,7 @@ ABI = KernelAbi(
         "epoch",
         "layer",
         "gate",
+        "w_rm",
     )
 )
 
@@ -199,6 +225,8 @@ def peer_pairs(s):
         "ar": TP * s * HIDDEN // 2,
         "rlog": TP * s * EPR,
         "final": TP * s * HIDDEN // 2,
+        # (rm) the fp32 partial logits [rank][chunk][token][expert]
+        "rpre": TP * RM_CH * s * E,
     }
 
 
@@ -226,6 +254,8 @@ def scratch_layout(key: K2Build) -> dict:
         "sgate": s,
         "route": s * 2 * TOPK,
         "inter": s * key.picks * RI,
+        # (rm) the summed logits before the rstd [token][expert], fp32
+        "rsum": s * E,
     }
     lay = pair_layout(pairs.items())
     end = max(o + n for o, n in lay.values())
@@ -475,6 +505,93 @@ def stage_router(c, i, q, ops):
     )
 
 
+def rm_pack(w_gate, ln_w, w_o, rank):
+    """``rm``'s weight w_rm of one rank, bf16 [E, RM_CH * RM_K]. Its first OK
+    columns are the router rows times the post-attention norm's (1 + w),
+    times this rank's o_proj rows ``w_o`` (bf16 [HIDDEN, OK], the values
+    that K2 multiplies). Its last RM_K columns are the same scaled router
+    rows on this rank's slice of the residual. Over the 8 ranks, w_rm times
+    [core rows | residual slice] sums to the router rows times
+    (AR sum + residual) (1 + w): the router's logits before the rstd."""
+    wr = w_gate.float() * (1.0 + ln_w.float())
+    cols = wr[:, rank * RM_K : (rank + 1) * RM_K]
+    return torch.cat([wr @ w_o.float(), cols], dim=1).to(torch.bfloat16).contiguous()
+
+
+def rm_loads(c, task):
+    """``rm`` router task ``task``'s w_rm tiles of this wave: rows
+    16 (task % 32) .. 16 (task % 32) + 15 of K chunk task / 32."""
+    q, rg = task // (E // ROWS), task % (E // ROWS)
+    return gemv.loads(
+        c["lane"],
+        c["wave"],
+        c["args"]["w_rm"],
+        rg * ROWS,
+        RM_K,
+        ldk=RM_CH * RM_K,
+        k0=q * RM_K,
+    )
+
+
+@traced
+def stage_rm(c, task, ops):
+    """``rm`` router task ``task``: rows 16 (task % 32) .. of w_rm times K
+    chunk task / 32 of [core rows | this rank's residual slice] -> the fp32
+    partial logits -> every rank's RPRE, in this rank's and chunk's slot.
+    The core rows are still in LDS from run_oproj, so only the residual
+    slice is loaded, into the rows after them, with the same row length."""
+    s, tid, lane, wave, red = c["S"], c["tid"], c["lane"], c["wave"], c["red"]
+    q, rg = task // (E // ROWS), task % (E // ROWS)
+    xrow = OK + gemv.LDS_PAD
+    res_at = s * xrow // 2
+    gemv.rows_to_lds(
+        tid,
+        c["args"]["residual"],
+        RM_K,
+        s,
+        c["xl"] + res_at,
+        xrow,
+        ldk=HIDDEN,
+        k0=c["rank"] * RM_K,
+    )
+    base = (q == RM_CH - 1).select(fx.Int32(res_at), q * (RM_K // 2))
+    acc = gemv.mfmas(lane, wave, c["xl"] + base, xrow, RM_K, s, ops)
+    fx.ptr_store(acc, red + (wave * 64 + lane) * 4)
+    gpu.barrier()
+    if tid < ROWS * s:
+        r = tid % ROWS
+        t = tid // ROWS
+        v = row_sum(red, r, t)
+        at = ((c["rank"] * RM_CH + q) * s + t) * E + rg * ROWS + r
+        for p in range_constexpr(TP):
+            c["put"](c["peer"]["rpre"][p], at, v)
+    gpu.barrier()
+
+
+@traced
+def stage_rsum(c, i):
+    """``rm``, CTA R0 + i: the logits of experts RS_PER i .. RS_PER i +
+    RS_PER - 1 of every token, a thread a logit. Each is the sum of the 8
+    ranks' RM_CH partials (RPRE) in rank and chunk order, the same on every
+    rank, and goes to RSUM, which every CTA's route polls."""
+    s, tid = c["S"], c["tid"]
+    if tid < RS_PER * s:
+        t = tid // RS_PER
+        e = i * RS_PER + tid % RS_PER
+        got = c["poll"](
+            [
+                (c["peer"]["rpre_own"], ((src * RM_CH + q) * s + t) * E + e, 1)
+                for src in range(TP)
+                for q in range(RM_CH)
+            ],
+            batch=TP * RM_CH,
+        )
+        v = f32_of(got[0][0])
+        for k in range_constexpr(1, TP * RM_CH):
+            v = v + f32_of(got[k][0])
+        c["put"](c["rsum"], t * E + e, v)
+
+
 @traced
 def stage_sgu(c, g, ops):
     """Shared gate | up rows 16 g .. (gate 0 .. SI, up SI .. 2 SI) -> bf16 SGU."""
@@ -602,6 +719,7 @@ def build(key: K2Build):
     s = key.tokens
     need(1 <= s <= L.MAX_TOKENS, f"{s} rows, the kernels take 1..{L.MAX_TOKENS}")
     need(not (key.oq and key.o6), "o6 takes the place of oq")
+    need(not (key.rm and key.oq), "rm takes a bf16 or MXFP6 o_proj, not oq")
     lay = scratch_layout(key)
     # every width at the widest's offsets: a step's parity half never overlaps
     # the other half of a step of another width
@@ -641,7 +759,7 @@ def build(key: K2Build):
     keyed = key_tuple(key, digest())
     name = (
         f"qwen38_mono_k2_s{s}_f{int(key.fse)}_o{int(key.oq)}{int(key.o6)}"
-        f"_a{int(key.og)}"
+        f"_a{int(key.og)}_r{int(key.rm)}"
     )
 
     @flyc.kernel(name=name, known_block_size=[THREADS, 1, 1])
@@ -667,6 +785,7 @@ def build(key: K2Build):
         epoch: Int64,
         layer: Int32,
         gate: Int64,
+        w_rm: Int64,
     ):
         _ = keyed
         tid = fx.thread_idx.x
@@ -681,22 +800,37 @@ def build(key: K2Build):
         bases = peer_bases(peers, TP)
         own = load_ptr64(peers, rank)
         peer = {}
-        for region in ("ar", "rlog", "final"):
+        for region in ("ar", "rlog", "final", "rpre"):
             off = play[region][0]
             peer[region] = [
                 shift(preg(b, off, region), fx.Int64(par) * half) for b in bases
             ]
             peer[region + "_own"] = shift(preg(own, off, region), fx.Int64(par) * half)
         rlog = peer["rlog_own"]
+        if const_expr(key.rm):
+            # rm: the route polls RSUM, the fp32 sums of the logits before
+            # the rstd, which stage_rsum puts after the slowest rank's
+            # partials, so there is no last logit to wait on first.
+            def rlog_at(t, lane, i):
+                return (c["rsum"], t * E + lane + 64 * i, 1)
+
+            rlog_last = (0, None)
+        else:
+
+            def rlog_at(t, lane, i):
+                return _rlog_at(rlog, s, t, lane + 64 * i)
+
+            rlog_last = (  # type: ignore[assignment]
+                TP,
+                lambda i: (rlog, ((i * s + s - 1) * EPR + EPR - 2) // 2, 1),
+            )
         c = {
             "S": s,
             "TP": TP,
             "moe": L.MOE,
-            "rlog_at": lambda t, lane, i: _rlog_at(rlog, s, t, lane + 64 * i),
-            "rlog_last": (
-                TP,
-                lambda i: (rlog, ((i * s + s - 1) * EPR + EPR - 2) // 2, 1),
-            ),
+            "rlog_at": rlog_at,
+            "rlog_last": rlog_last,
+            "rm": key.rm,
             "route_cta": RT0,
             "tid": tid,
             "bid": bid,
@@ -747,6 +881,7 @@ def build(key: K2Build):
                 "w2s": w2s,
                 "out": out,
                 "res_out": res_out,
+                "w_rm": w_rm,
             },
         }
         for region in (
@@ -758,6 +893,7 @@ def build(key: K2Build):
             "sgate",
             "route",
             "inter",
+            "rsum",
         ):
             c[region] = sreg(scratch, lay[region][0], region)
         r0, r_tasks = R0, R_TASKS
@@ -766,22 +902,35 @@ def build(key: K2Build):
         nj = OTASKS // BLOCKS
         # ---- o_proj (both tasks' weights in flight first), then the
         # post-attention add + norm, router, shared gate | up
-        if is_r:
-            oops = [moe.o_loads(c, bid + BLOCKS * j, OK) for j in range(nj)]
-            ri = bid - r0
-            moe.run_oproj(c, oops, OK)
-            # A router CTA loads its router weights only now. run_oproj loads
-            # the core rows, and a wave's wait for a load also waits for every
-            # load that it issued before, so router weights issued before
-            # run_oproj would delay this CTA's o_proj, and every norm task
-            # waits for the o_proj of every CTA. The weights still land
-            # before x does.
-            rops = router_loads(c, ri // R_PARTS, ri % R_PARTS)
-            stage_router(c, ri // R_PARTS, ri % R_PARTS, rops)
-        if ~is_r:
+        if const_expr(key.rm):
+            # rm: every CTA runs its o_proj tasks first. CTAs R0 .. R0 + 95
+            # then run one rm router task each, with its weights issued only
+            # after run_oproj, for the reason given below for the router
+            # weights. CTAs R0 .. R0 + 15 then sum every rank's partials.
             moe.run_oproj(
                 c, [moe.o_loads(c, bid + BLOCKS * j, OK) for j in range(nj)], OK
             )
+            if (bid >= R0) & (bid < R0 + RM_TASKS):
+                stage_rm(c, bid - R0, rm_loads(c, bid - R0))
+                if bid < R0 + R_TASKS:
+                    stage_rsum(c, bid - R0)
+        else:
+            if is_r:
+                oops = [moe.o_loads(c, bid + BLOCKS * j, OK) for j in range(nj)]
+                ri = bid - r0
+                moe.run_oproj(c, oops, OK)
+                # A router CTA loads its router weights only now. run_oproj
+                # loads the core rows, and a wave's wait for a load also waits
+                # for every load that it issued before, so router weights
+                # issued before run_oproj would delay this CTA's o_proj, and
+                # every norm task waits for the o_proj of every CTA. The
+                # weights still land before x does.
+                rops = router_loads(c, ri // R_PARTS, ri % R_PARTS)
+                stage_router(c, ri // R_PARTS, ri % R_PARTS, rops)
+            if ~is_r:
+                moe.run_oproj(
+                    c, [moe.o_loads(c, bid + BLOCKS * j, OK) for j in range(nj)], OK
+                )
         if bid < NRED:
             stage_norm(c, bid)
         if const_expr(not key.fse):  # noqa: SIM102 (traced: `and` does not combine traced values)
@@ -834,6 +983,7 @@ def build(key: K2Build):
         epoch: Int64,
         layer: Int32,
         gate: Int64,
+        w_rm: Int64,
         stream: fx.Stream = _STREAM,
     ):
         _ = keyed
@@ -859,6 +1009,7 @@ def build(key: K2Build):
             epoch,
             layer,
             gate,
+            w_rm,
         ).launch(grid=(BLOCKS,), block=(THREADS,), stream=stream)
 
     ABI.check(k2, launch)
@@ -890,6 +1041,7 @@ def layer_post(
     w_sgu=None,
     w_sd=None,
     gate=None,
+    w_rm=None,
 ):
     """Host launcher; every weight as vLLM holds it after loading, the experts'
     shuffled (``layout``). ``w_os``: an fp4 o_proj's scales (``key.oq``);
@@ -897,7 +1049,8 @@ def layer_post(
     the attention output gate (``key.og``), core's shape. With ``key.o6``,
     ``w_o`` and ``w_os`` are fp6_pack's MXFP6 weight and scales.
     ``peers``: the int64 table of every rank's peer buffer (at least
-    ``peer_bytes(S)`` each)."""
+    ``peer_bytes(S)`` each). ``w_rm``: rm_pack's router weight, with
+    ``key.rm`` only."""
     s = key.tokens
     bf = torch.bfloat16
     fp4 = (torch.uint8, torch.float4_e2m1fn_x2)
@@ -937,6 +1090,11 @@ def layer_post(
     else:
         need(w_o.shape == (HIDDEN, OK) and w_o.dtype == bf, "o_proj: bf16 [8192, 2048]")
     need(w_gate.shape == (E, HIDDEN) and w_sg.numel() == HIDDEN, "router shape")
+    need(
+        (w_rm is not None) == key.rm
+        and (w_rm is None or (w_rm.shape == (E, RM_CH * RM_K) and w_rm.dtype == bf)),
+        "w_rm: rm_pack's bf16 [512, 3072], with rm only",
+    )
     if not key.fse:
         need(
             w_sgu is not None
@@ -962,7 +1120,7 @@ def layer_post(
         "w2 scales: e8m0, one a 32-block",
     )
     used = [w_o, w_os, w_gate, w_sg, w_sgu, w_sd, w13, w13s, w2, w2s]
-    used += [gate]
+    used += [gate, w_rm]
     tensors = [core, residual, out, res_out, ln_w] + [w for w in used if w is not None]
     need(all(t.is_contiguous() for t in tensors), "a non-contiguous input")
     dense = [core, residual, out, res_out, ln_w, w_gate, w_sg]
@@ -998,6 +1156,7 @@ def layer_post(
                 "epoch": epoch.data_ptr(),
                 "layer": layer,
                 "gate": ptr(gate),
+                "w_rm": ptr(w_rm),
             }
         ),
         stream=torch.cuda.current_stream(),

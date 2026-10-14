@@ -15,7 +15,9 @@ the model sets them, ``up`` (a union slot for each pick) and ``o6`` (o_proj
 in MXFP6, ``fp6_pack``'s layout). Where the
 router logits are is the model's: ``rlog_at(t, lane, i)`` is token t's logit
 of expert lane + 64 i as a poll spec, ``rlog_last`` (n, spec of i) the n
-logits that land last, and CTA ``route_cta`` also puts ROUTE (for the tests).
+logits that land last (n may be 0), and CTA ``route_cta`` also puts ROUTE
+(for the tests). With ``rm`` the logits are fp32 sums before the norm's
+rstd, which the route takes from LDS ``rs``.
 """
 
 import math
@@ -657,14 +659,24 @@ def route_token(c, t):
     lane + 64 i; a NaN logit, a warmup's garbage row, ranks last) -> the top-10
     (``_route_mp``). Returns (rank, expert, weight), lanes < ``TOPK``."""
     lane = c["lane"]
+    rm = c.get("rm", False)
     per = E // 64
     specs = [c["rlog_at"](t, lane, i) for i in range(per)]
     got = c["poll"](specs, batch=len(specs))
     odd = (lane % 2) == 1
+    if const_expr(rm):
+        rstd = fx.ptr_load(c["rs"] + t)
     lgs = []
     for i in range_constexpr(per):
         w = got[i][0]
-        lg = odd.select(bf_hi(w), bf_lo(w))
+        if const_expr(rm):
+            # rm: the fp32 logit before the rstd, times the token's rstd and
+            # rounded to bf16, is the router's bf16 logit up to rounding. So
+            # the picks, their ties and their weights follow bf16 values, as
+            # with the router's logits.
+            lg = bf16_round(f32_of(w) * rstd)
+        else:
+            lg = odd.select(bf_hi(w), bf_lo(w))
         lgs.append((lg == lg).select(lg, fx.Float32(-(2.0**127))))
     return _route_mp(c, lgs)
 
@@ -681,9 +693,10 @@ def local_route(c):
     logits that land last first, so the full polls don't spin."""
     lane, wave, rt, kt, s = c["lane"], c["wave"], c["rt"], c["KT"], c["S"]
     n, last = c["rlog_last"]
-    if c["tid"] < n:
-        c["poll"]([last(c["tid"])])
-    gpu.barrier()
+    if const_expr(n > 0):
+        if c["tid"] < n:
+            c["poll"]([last(c["tid"])])
+        gpu.barrier()
     if wave < s:
         rank, e, w = route_token(c, wave)
         if lane < TOPK:
