@@ -4,9 +4,8 @@
 ``GatedDeltaNet._forward_core``.
 
 On a pure non-spec batch that mixes prefills with 1-token decodes, the layer
-peels the decodes (the contiguous decode-first front slice) off to
-``fused_sigmoid_gating_delta_rule_update`` -- the same recurrent update kernel
-the spec-decode path uses -- and runs only the prefill tail through
+peels the decodes (the contiguous decode-first front slice) off to a recurrent
+update kernel and runs only the prefill tail through
 ``chunk_gated_delta_rule``. This must produce the same core-attention output and
 the same ssm-state pool update as running *everything* through
 ``chunk_gated_delta_rule`` (the previous behavior).
@@ -22,9 +21,9 @@ Both paths are exercised through the REAL ``_forward_core``:
   non-spec tokens in both paths, so it cancels out and only the recurrent split
   is compared).
 
-The Triton/FLA chunk backend is forced so the prefill-only ``chunk_indices``
-must stay consistent with the rebased ``cu_seqlens`` (a stringent, backend
-portable check of the split wiring).
+The prefill backend's chunk metadata must stay consistent with the rebased
+``cu_seqlens``. Both Triton and FlashInfer decode are compared with the unified
+prefill reference.
 """
 
 from __future__ import annotations
@@ -38,12 +37,9 @@ import torch
 
 from vllm.platforms import current_platform
 
-if not (
-    current_platform.is_cuda() and current_platform.is_device_capability_family(100)
-):
+if not (current_platform.is_cuda() and current_platform.has_device_capability(80)):
     pytest.skip(
-        reason="GDN _forward_core split test uses the CuteDSL prefill backend "
-        "(requires CUDA SM10x).",
+        reason="GDN decode split test requires CUDA SM80+.",
         allow_module_level=True,
     )
 
@@ -56,6 +52,7 @@ from vllm.config import set_current_vllm_config  # noqa: E402
 from vllm.model_executor.layers.mamba.gdn import qwen_gdn_linear_attn  # noqa: E402
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (  # noqa: E402
     ChunkGatedDeltaRule,
+    GDNDecode,
     QwenGatedDeltaNetAttention,
 )
 from vllm.model_executor.layers.mamba.mamba_utils import (  # noqa: E402
@@ -86,19 +83,22 @@ BLOCK_SIZE = 16
 PREFIX = "model.layers.0.linear_attn"
 
 
-def _make_vllm_config():
+def _make_vllm_config(decode_backend):
     # A small, ungated GDN model whose config is cached locally; only the config
     # (scheduler/cache/compilation/hf) is used here, never the weights. Inject
-    # linear_key_head_dim=128 and request the CuteDSL prefill backend -- the
-    # supported GDN chunk kernel on Blackwell (the Triton/FLA chunk kernel is
-    # unsupported on SM10x). CuteDSL consumes chunk_indices/chunk_offsets, so
-    # this also exercises the prefill-only chunk-metadata wiring.
+    # linear_key_head_dim=128. CuteDSL is needed on SM10x; other GPUs use FLA.
     cfg = create_vllm_config(
         model_name="Qwen/Qwen3.5-0.8B",
         block_size=BLOCK_SIZE,
         hf_config_override={"linear_key_head_dim": K},
     )
-    cfg.additional_config = {"gdn_prefill_backend": "cutedsl"}
+    cfg.additional_config = {
+        "gdn_prefill_backend": "cutedsl"
+        if current_platform.is_device_capability_family(100)
+        else "triton"
+    }
+    cfg.kernel_config.gdn_decode_backend = decode_backend
+    cfg.model_config.dtype = torch.bfloat16
     return cfg
 
 
@@ -123,6 +123,7 @@ def _build_layer(
     layer.kv_cache = (conv_state, ssm_state)
     with set_current_vllm_config(vllm_config):
         layer.chunk_gated_delta_rule = ChunkGatedDeltaRule()
+        layer.gdn_decode = GDNDecode(H, HV, K, V, ssm_state.dtype)
     for name in (
         "rearrange_mixed_qkv",
         "_forward_core",
@@ -150,7 +151,14 @@ def _run_forward_core(layer, meta, mixed_qkv, b, a, num_tokens):
     return core_attn_out
 
 
-@pytest.mark.parametrize("state_dtype", [torch.bfloat16, torch.float32])
+@pytest.mark.parametrize(
+    "decode_backend,state_dtype",
+    [
+        ("triton", torch.bfloat16),
+        ("triton", torch.float32),
+        ("flashinfer", torch.float32),
+    ],
+)
 @pytest.mark.parametrize("num_decodes,prefill_lens", [(3, [512, 300]), (4, [64, 5])])
 @pytest.mark.parametrize("fresh_prefill", [False, True])
 def test_forward_core_split_matches_unified(
@@ -158,10 +166,16 @@ def test_forward_core_split_matches_unified(
     num_decodes: int,
     prefill_lens: list[int],
     fresh_prefill: bool,
+    decode_backend: str,
 ) -> None:
+    if decode_backend == "flashinfer":
+        pytest.importorskip("flashinfer.gdn_decode")
     torch.manual_seed(0)
     device = torch.device("cuda")
-    vllm_config = _make_vllm_config()
+    vllm_config = _make_vllm_config(decode_backend)
+    vllm_config.cache_config.mamba_ssm_cache_dtype = (
+        "float32" if state_dtype == torch.float32 else "bfloat16"
+    )
 
     # Decode-first batch: D 1-token decodes (with context), then the prefills.
     decode_seq_lens = [64] * num_decodes
@@ -193,7 +207,10 @@ def test_forward_core_split_matches_unified(
     assert meta_split.num_decodes == num_decodes
     assert meta_split.num_prefills == len(prefill_lens)
     assert meta_split.num_decode_tokens == num_decodes
-    assert builder.gdn_prefill_backend == "cutedsl"
+    assert (
+        builder.gdn_prefill_backend
+        == vllm_config.additional_config["gdn_prefill_backend"]
+    )
 
     num_tokens = sum(query_lens)
 
