@@ -36,6 +36,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
     CompressedTensorsW4A4Fp4,
     CompressedTensorsW4A4Mxfp4,
     CompressedTensorsW4A8Fp8,
+    CompressedTensorsW6A8Mxfp6,
     CompressedTensorsW8A8Fp8,
     CompressedTensorsW8A8Int8,
     CompressedTensorsW8A8Mxfp8,
@@ -54,10 +55,12 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     QuantKey,
     ScaleDesc,
+    kMxfp8Dynamic,
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
+from vllm.utils.import_utils import has_humming
 from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
 
 # AITER only supports per-channel-per-channel INT8 gemm
@@ -992,6 +995,22 @@ def test_quant_key_str_supports_scalar_type_dtypes():
     assert str(quant_key) == (
         "QuantKey(uint2b2,scale(f16,static,GroupShape(row=1, col=128)),symmetric)"
     )
+
+
+@pytest.mark.skipif(not has_humming(), reason="MXFP6 requires humming")
+def test_compressed_tensors_mxfp6(vllm_runner):
+    model_path = "nm-testing/Qwen3-0.6B-MXFP6A8"
+    with vllm_runner(model_path, enforce_eager=True) as llm:
+
+        def check_model(model):
+            layer = model.model.layers[0]
+            for proj in (layer.self_attn.qkv_proj, layer.mlp.down_proj):
+                assert isinstance(proj.scheme, CompressedTensorsW6A8Mxfp6)
+                assert proj.scheme.kernel.config.activation_quant_key == kMxfp8Dynamic
+
+        llm.apply_model(check_model)
+        output = llm.generate_greedy("Hello my name is", max_tokens=4)
+        assert output
 
 
 @pytest.mark.skipif(

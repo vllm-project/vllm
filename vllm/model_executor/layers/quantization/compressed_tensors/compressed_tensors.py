@@ -44,6 +44,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsW4A4Mxfp4,
     CompressedTensorsW4A8Fp8,
     CompressedTensorsW4A8Int,
+    CompressedTensorsW6A8Mxfp6,
     CompressedTensorsW8A8Fp8,
     CompressedTensorsW8A8Int8,
     CompressedTensorsW8A8Mxfp8,
@@ -63,6 +64,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     should_ignore_layer,
 )
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
+from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp8Dynamic
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -450,6 +452,17 @@ class CompressedTensorsConfig(QuantizationConfig):
         )
 
     @staticmethod
+    def _is_mxfp6(quant_args: QuantizationArgs) -> bool:
+        return (
+            quant_args is not None
+            and quant_args.strategy == QuantizationStrategy.GROUP.value
+            and quant_args.symmetric
+            and quant_args.group_size == 32
+            and quant_args.type == QuantizationType.FLOAT
+            and quant_args.num_bits == 6
+        )
+
+    @staticmethod
     def _is_mxfp8(quant_args: QuantizationArgs) -> bool:
         if quant_args is None:
             return False
@@ -766,6 +779,16 @@ class CompressedTensorsConfig(QuantizationConfig):
 
         if self._is_mxfp4(weight_quant):
             return CompressedTensorsW4A4Mxfp4()
+
+        if self._is_mxfp6(weight_quant):
+            if input_quant is None:
+                return CompressedTensorsW6A8Mxfp6(activation_quant_key=None)
+            if self._is_mxfp8(input_quant) and input_quant.dynamic:
+                return CompressedTensorsW6A8Mxfp6(activation_quant_key=kMxfp8Dynamic)
+            raise ValueError(
+                "MXFP6 weights require 16-bit or dynamic MXFP8 activations, "
+                f"got {input_quant}"
+            )
 
         if self._is_mxfp8(weight_quant):
             return CompressedTensorsW8A8Mxfp8()
