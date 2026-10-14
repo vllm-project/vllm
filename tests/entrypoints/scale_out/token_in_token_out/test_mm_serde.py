@@ -168,6 +168,20 @@ def test_render_extracts_metadata_fields_separately():
     assert torch.equal(full_data["pixel_values"].data, pixel_values.data)
 
 
+def test_extract_without_kwargs_keeps_layout():
+    """Layout-only callers get hashes and placeholders, no serialized tensors."""
+    engine_input, _pixel_values, _image_grid_thw = _image_engine_input()
+
+    full = extract_mm_features(engine_input)
+    layout = extract_mm_features(engine_input, include_mm_kwargs=False)
+
+    assert full is not None and layout is not None
+    assert layout.kwargs_data is None
+    assert layout.mm_metadata is None
+    assert layout.mm_hashes == full.mm_hashes
+    assert layout.mm_placeholders == full.mm_placeholders
+
+
 def test_extract_includes_declared_placeholder_metadata_fields():
     """EC placeholder metadata is kept even when keep_on_cpu is unset."""
     engine_input, _pixel_values, image_grid_thw = _image_engine_input(
