@@ -17,7 +17,7 @@ use vllm_engine_core_client::protocol::multimodal::{
     SliceSpec,
 };
 
-use super::cache::{CacheSlot, MmProcessorCache};
+use super::cache::CacheSlot;
 use super::timing::MM_STAGE_TARGET;
 use super::{MultimodalModelInfo, PreparedItem, PreparedMedia, VisionModalitySupport, tensor};
 use crate::error::{Error, Result, bail_multimodal, multimodal};
@@ -48,20 +48,24 @@ impl MultimodalModelInfo {
     pub(super) async fn prepare_videos(
         &self,
         sources: Vec<CacheSlot<Arc<VideoClip>>>,
-        cache: Option<&MmProcessorCache>,
         model_dtype: ModelDtype,
     ) -> Result<PreparedMedia> {
         let support = self.video.as_ref().ok_or_else(|| Error::UnsupportedModality {
             modality: Modality::Video.to_string(),
         })?;
 
-        let (replacements, items) = super::cache::prepare_cached(cache, sources, async |misses| {
-            let mut computed = Vec::with_capacity(misses.len());
-            for (clip, uuid) in misses {
-                computed.push(self.preprocess_video_item(support, clip, uuid, model_dtype).await?);
-            }
-            Ok(computed.into_iter().unzip())
-        })
+        let (replacements, items) = super::cache::prepare_cached(
+            self.mm_cache_for(Modality::Video),
+            sources,
+            async |misses| {
+                let mut computed = Vec::with_capacity(misses.len());
+                for (clip, uuid) in misses {
+                    computed
+                        .push(self.preprocess_video_item(support, clip, uuid, model_dtype).await?);
+                }
+                Ok(computed.into_iter().unzip())
+            },
+        )
         .await?;
 
         Ok(PreparedMedia {

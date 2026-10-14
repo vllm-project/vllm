@@ -11,7 +11,7 @@ use llm_multimodal::{
 };
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
 
-use super::cache::{CacheSlot, MmProcessorCache};
+use super::cache::CacheSlot;
 use super::timing::MM_STAGE_TARGET;
 use super::{MultimodalModelInfo, PreparedItem, PreparedMedia, VisionModalitySupport, item};
 use crate::error::{Error, Result, bail_multimodal, multimodal};
@@ -26,7 +26,7 @@ impl MultimodalModelInfo {
     /// Cache control flow lives in [`cache::prepare_cached`]: `Ready` slots
     /// (UUID references and content-hash hits) skip preprocessing entirely;
     /// misses are preprocessed here as one batch. Budget-sensitive processors
-    /// bypass the cache (`cache` is `None` for them), so they always
+    /// bypass the cache (see [`Self::mm_cache_for`]), so they always
     /// preprocess inline.
     #[tracing::instrument(
         name = "mm_stage",
@@ -37,7 +37,6 @@ impl MultimodalModelInfo {
     pub(super) async fn prepare_images(
         &self,
         sources: Vec<CacheSlot<Arc<ImageFrame>>>,
-        cache: Option<&MmProcessorCache>,
         model_dtype: ModelDtype,
         preprocessing_context: VisionPreprocessingContext,
     ) -> Result<PreparedMedia> {
@@ -45,10 +44,14 @@ impl MultimodalModelInfo {
             modality: Modality::Image.to_string(),
         })?;
 
-        let (replacements, items) = super::cache::prepare_cached(cache, sources, async |misses| {
-            self.preprocess_image_batch(support, misses, model_dtype, preprocessing_context)
-                .await
-        })
+        let (replacements, items) = super::cache::prepare_cached(
+            self.mm_cache_for(Modality::Image),
+            sources,
+            async |misses| {
+                self.preprocess_image_batch(support, misses, model_dtype, preprocessing_context)
+                    .await
+            },
+        )
         .await?;
 
         Ok(PreparedMedia {

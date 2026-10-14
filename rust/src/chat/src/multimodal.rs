@@ -919,26 +919,15 @@ impl MultimodalModelInfo {
         let mut prepared = Vec::new();
         if let Some(slots) = partition.slots.remove(&Modality::Image) {
             let sources = cache::attach_fetched(slots, fetched.images);
-            prepared.push(
-                self.prepare_images(
-                    sources,
-                    self.mm_cache_for(Modality::Image),
-                    model_dtype,
-                    vision_context,
-                )
-                .await?,
-            );
+            prepared.push(self.prepare_images(sources, model_dtype, vision_context).await?);
         }
         if let Some(slots) = partition.slots.remove(&Modality::Video) {
             let sources = cache::attach_fetched(slots, fetched.videos);
-            prepared.push(
-                self.prepare_videos(sources, self.mm_cache_for(Modality::Video), model_dtype)
-                    .await?,
-            );
+            prepared.push(self.prepare_videos(sources, model_dtype).await?);
         }
         if let Some(slots) = partition.slots.remove(&Modality::Audio) {
             let sources = cache::attach_fetched(slots, fetched.audios);
-            prepared.push(self.prepare_audios(sources, self.mm_cache_for(Modality::Audio)).await?);
+            prepared.push(self.prepare_audios(sources).await?);
         }
 
         let mut ranges = expand_prompt_token_ids(prompt_token_ids, &prepared)?;

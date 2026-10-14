@@ -8,7 +8,7 @@ use std::sync::Arc;
 use llm_multimodal::{AudioClip, Modality, PreprocessedEncoderInputs, PromptReplacement};
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
 
-use super::cache::{CacheSlot, MmProcessorCache};
+use super::cache::CacheSlot;
 use super::timing::MM_STAGE_TARGET;
 use super::{AudioModalitySupport, MultimodalModelInfo, PreparedItem, PreparedMedia, item};
 use crate::error::{Error, Result, bail_multimodal, multimodal};
@@ -31,15 +31,16 @@ impl MultimodalModelInfo {
     pub(super) async fn prepare_audios(
         &self,
         sources: Vec<CacheSlot<Arc<AudioClip>>>,
-        cache: Option<&MmProcessorCache>,
     ) -> Result<PreparedMedia> {
         let support = self.audio.as_ref().ok_or_else(|| Error::UnsupportedModality {
             modality: Modality::Audio.to_string(),
         })?;
 
-        let (replacements, items) = super::cache::prepare_cached(cache, sources, async |misses| {
-            self.preprocess_audio_batch(support, misses).await
-        })
+        let (replacements, items) = super::cache::prepare_cached(
+            self.mm_cache_for(Modality::Audio),
+            sources,
+            async |misses| self.preprocess_audio_batch(support, misses).await,
+        )
         .await?;
 
         Ok(PreparedMedia {
@@ -428,7 +429,7 @@ mod tests {
             .zip(fetched.audio_uuids)
             .map(|(clip, uuid)| CacheSlot::Pending(clip, uuid))
             .collect();
-        let prepared = info.prepare_audios(sources, None).await.unwrap();
+        let prepared = info.prepare_audios(sources).await.unwrap();
 
         assert_eq!(prepared.replacements.len(), 1);
         assert!(
@@ -477,7 +478,7 @@ mod tests {
             .zip(fetched.audio_uuids)
             .map(|(clip, uuid)| CacheSlot::Pending(clip, uuid))
             .collect();
-        let prepared = info.prepare_audios(sources, None).await.unwrap();
+        let prepared = info.prepare_audios(sources).await.unwrap();
 
         assert_eq!(prepared.replacements.len(), 1);
         assert_eq!(
