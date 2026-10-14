@@ -184,6 +184,11 @@ def union_dict_and_str(val: str) -> str | dict[str, str] | None:
     return optional_type(json.loads)(val)
 
 
+def parse_reasoning_parser(val: str) -> str:
+    """Map `none` (any case) to the unset default, as `vllm-rs serve` does."""
+    return "" if val.lower() == "none" else val
+
+
 def is_type(type_hint: TypeHint, type: TypeHintT) -> TypeIs[TypeHintT]:
     """Check if the type hint is a specific type."""
     return type_hint is type or get_origin(type_hint) is type
@@ -1114,6 +1119,10 @@ class EngineArgs:
 
         # Structured outputs arguments
         structured_outputs_kwargs = get_kwargs(StructuredOutputsConfig)
+        structured_outputs_kwargs["reasoning_parser"]["type"] = parse_reasoning_parser
+        structured_outputs_kwargs["reasoning_parser"]["help"] += (
+            "\n\n`none` disables reasoning parsing, the same as leaving it unset."
+        )
         structured_outputs_group = parser.add_argument_group(
             title="StructuredOutputsConfig",
             description=StructuredOutputsConfig.__doc__,
