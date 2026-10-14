@@ -23,6 +23,8 @@ def registry(monkeypatch):
     monkeypatch.setattr(metrics, "Counter", partial(Counter, registry=registry))
     monkeypatch.setattr(metrics, "_model_name", None)
     monkeypatch.setattr(metrics, "_tool_call_parser_invocations", None)
+    monkeypatch.setattr(metrics, "_tool_call_responses", None)
+    monkeypatch.setattr(metrics, "_tool_calls_emitted", None)
     metrics.init_parser_metrics(model_name="test-model")
     return registry
 
@@ -124,3 +126,39 @@ def test_parser_failures_are_distinct_from_no_tool_calls(registry, is_streaming)
     assert record(is_tool_called=False, outcome="no_tool_call") == 2
     assert record() == 1
     assert b"private-argument" not in generate_latest(registry)
+
+
+@pytest.mark.parametrize(
+    "count, failed, status",
+    [(3, False, "success"), (0, False, "no_tool_calls"), (0, True, "parse_failure")],
+)
+def test_response_counts_use_bounded_labels_and_survive_reinitialization(
+    registry, count, failed, status
+):
+    request = ChatCompletionRequest.model_construct(
+        tool_choice={"type": "function", "function": {"name": "private-function"}}
+    )
+    metrics.record_tool_call_response(
+        request, tool_calls_count=count, parse_failed=failed
+    )
+    metrics.init_parser_metrics(model_name="test-model")
+    assert (
+        registry.get_sample_value(
+            "vllm:tool_call_responses_total",
+            {
+                "model_name": "test-model",
+                "status": status,
+                "tool_choice": "named",
+                "api_surface": "chat_completions",
+            },
+        )
+        == 1
+    )
+    assert (
+        registry.get_sample_value(
+            "vllm:tool_calls_emitted_total",
+            {"model_name": "test-model", "api_surface": "chat_completions"},
+        )
+        == count
+    )
+    assert b"private-function" not in generate_latest(registry)
