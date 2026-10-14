@@ -1,13 +1,8 @@
-name: Optimize a model
-description: Optimize a model end to end on one engine and GPU, optionally shrinking it first.
+name: "Geometric: Optimize a model"
+description: Make a model faster on your chosen engine and GPU.
 title: "Optimize model: "
 labels: ["optimization"]
 body:
-  - type: markdown
-    attributes:
-      value: |
-        ## Essential
-        What the planner must know to start.
   - type: input
     attributes:
       label: Model
@@ -28,132 +23,179 @@ body:
   - type: dropdown
     attributes:
       label: Hardware
-      description: The GPU to optimize for.
+      description: Choose your hardware family, then fill in the matching GPU question below. Apple Metal needs no GPU selection.
+      options:
+        - NVIDIA
+        - AMD
+        - Apple Metal
+    validations:
+      required: true
+  - type: dropdown
+    attributes:
+      label: NVIDIA GPU
+      description: Choose a GPU if you selected NVIDIA. Otherwise, leave this blank.
       options:
         - B200
         - B300
         - H100
-    validations:
-      required: true
-  - type: input
+        - RTX 5040
+  - type: dropdown
     attributes:
-      label: Cost budget (USD)
-      description: The most this request may spend on model calls, in dollars. The optimization stops when it is used up.
-      placeholder: "100"
-    validations:
-      required: true
+      label: AMD GPU
+      description: Choose a GPU if you selected AMD. Otherwise, leave this blank.
+      options:
+        - R9700
+        - mi355x
   - type: markdown
     attributes:
-      value: |
-        ## Advanced
-        Every field here is filled in with the recommended value. Leave them as they are unless you have a reason.
+      value: "## Advanced\nOptional settings for the agents and the optimization."
+  - type: input
+    attributes:
+      label: Planner Model
+      description: The model that reads your request and proposes a plan. Leave blank to use the default.
+      placeholder: anthropic/claude-opus-5.5
+  - type: input
+    attributes:
+      label: Lead Coding Agent Model
+      description: The model that coordinates the coding agents. Leave blank to use the default.
+      placeholder: z-ai/glm-5.3
+  - type: textarea
+    attributes:
+      label: Coding Agent Models
+      description: The models that write and test code, one per line. Leave blank to use the defaults.
+      placeholder: anthropic/claude-opus-5.5
   - type: input
     attributes:
       label: Model revision
       description: The model's Hugging Face commit, branch or tag.
       value: main
-  - type: textarea
-    attributes:
-      label: Metrics
-      description: >-
-        What to measure, one per line. Throughput (output tokens per second) is what a change is judged on; time to
-        first token, inter-token latency and request latency are reported beside it.
-      value: |
-        throughput
   - type: input
     attributes:
-      label: Prompts
-      description: How many requests each measurement sends to the served engine.
-      value: "64"
-  - type: input
-    attributes:
-      label: Input tokens per prompt
-      value: "1024"
-  - type: input
-    attributes:
-      label: Output tokens per prompt
-      value: "128"
-  - type: input
-    attributes:
-      label: Concurrency
-      description: How many requests are in flight at once while the engine is served and measured.
-      value: "32"
-  - type: textarea
-    attributes:
-      label: Engine arguments
-      description: The engine settings to optimize under, one name=value per line. Leave empty for the engine's defaults.
-      placeholder: |
-        max_num_seqs=128
+      label: Budget
+      description: The total spending limit in USD for this optimization. Leave blank to use the default.
+      placeholder: "5"
   - type: textarea
     attributes:
       label: Hints
       description: Anything the planner should know, such as where to look or what to leave alone.
-  - type: dropdown
-    attributes:
-      label: Tune only
-      description: Only tune the engine's settings, skipping profiling and kernel work. Cannot be combined with shrinking.
-      options:
-        - "No"
-        - "Yes"
-      default: 0
-    validations:
-      required: true
-  - type: dropdown
-    attributes:
-      label: Shrink the model first
-      description: Quantize and prune the model before optimizing it. The next four questions apply only if this is Yes.
-      options:
-        - "No"
-        - "Yes"
-      default: 0
-    validations:
-      required: true
+      placeholder: |
+        We serve Qwen3-8B on an H100 with vLLM. Most requests have 8,192 input tokens
+        and generate about 256 tokens, with a concurrency of 16. Time to first
+        token gets noticeably worse at this load. Start by checking the prefill
+        attention kernels, and keep the model weights at BF16.
   - type: input
     attributes:
       label: Target size
-      description: The size to shrink the model to. Required if shrinking.
+      description: How small the model should be, such as 40GB. Required when Quantize or Prune is Yes.
       placeholder: 40GB
   - type: dropdown
     attributes:
       label: Quantize
-      description: Whether shrinking quantizes the model. Leave unset for the default, Yes.
+      description: Use lower-precision weights to reduce the model’s size.
       options:
-        - "Yes"
         - "No"
+        - "Yes"
+      default: 0
+    validations:
+      required: true
   - type: dropdown
     attributes:
       label: Prune
-      description: Whether shrinking prunes the model. Leave unset for the default, Yes.
+      description: Remove/Zero-out weights or parts of the model to reduce its size.
       options:
-        - "Yes"
         - "No"
-  - type: textarea
+        - "Yes"
+      default: 0
+    validations:
+      required: true
+  - type: dropdown
     attributes:
       label: Quantization formats
-      description: Formats to quantize to, one per line. Leave empty to let the planner choose.
+      description: Select the formats to consider. Different layers can use different formats. Choose auto on its own. Leave blank to let us choose for your hardware.
+      multiple: true
+      options:
+        - auto (we’ll figure out the best formats to use)
+        - nvfp4
+        - mxfp4
+        - mxfp6
+        - mxfp8
+        - fp8
+        - bf16
+        - int8
+        - int4
+        - int3
+        - int2
+        - rocmfp4_fast
+        - rocmfp3
+        - rocmfp2
+        - rocmfp3_adaptive
+        - rocmfp2_adaptive
+        - q2_k
+        - q3_k
+        - q4_k
+        - q5_k
+        - q6_k
+        - q8_0
+        - iq1_s
+        - iq1_m
+        - iq2_xxs
+        - iq2_xs
+        - iq2_s
+        - iq3_xxs
+        - iq3_s
+        - iq4_xs
+        - gqh3_gptq
+        - gqh2_h_gptq
+        - gqh4_gptq
+        - gqh_t_gptq
+        - ggml_mxfp4
+        - ggml_nvfp4
+  - type: input
+    attributes:
+      label: Quantization budget (GPU-hours)
+      description: How much GPU time to spend on quantization. Leave blank to use the default.
+      placeholder: "2"
+  - type: markdown
+    attributes:
+      value: "### Benchmarking\nChoose what to measure and the workload to test with."
+  - type: dropdown
+    attributes:
+      label: Metrics
+      description: >-
+        Select the metrics to track. Output throughput is used to judge improvements.
+        With GuideLLM, TPOT includes the wait for the first token; ITL measures the gaps after it.
+      multiple: true
+      options:
+        - Output throughput (tokens/s)
+        - Time to first token (TTFT)
+        - Time per output token (TPOT)
+        - Inter-token latency (ITL)
+        - End-to-end request latency
+      default: 0
+  - type: input
+    attributes:
+      label: Total Number of Requests
+      description: The number of requests used to measure the metrics.
+      value: "1024"
+  - type: input
+    attributes:
+      label: Input tokens per prompt
+      value: "8192"
+  - type: input
+    attributes:
+      label: Output tokens per prompt
+      value: "1024"
+  - type: input
+    attributes:
+      label: Concurrency
+      description: How many requests to run at the same time.
+      value: "32"
+  - type: textarea
+    attributes:
+      label: Engine arguments
+      description: Engine settings to use during optimization, one name=value per line. Leave blank to use the defaults.
       placeholder: |
-        fp8
-        nvfp4
-  - type: input
-    attributes:
-      label: Planner model
-      description: The model that reads the request and writes the plan.
-      value: claude-opus-5-5
-  - type: input
-    attributes:
-      label: Planner budget (USD)
-      description: The most the planner may spend, in dollars.
-      value: "5"
-  - type: input
-    attributes:
-      label: Task agent model
-      description: The model the lead and the engineers use to write and test the new code.
-      value: claude-opus-5-5
-  - type: input
-    attributes:
-      label: Task agent budget (USD)
-      description: The most all task agents may spend together, in dollars.
-      value: "50"
+        max_num_seqs=128
   - type: checkboxes
     attributes:
       label: Start

@@ -1,13 +1,8 @@
-name: Optimize a kernel
-description: Make one kernel faster on one GPU and prove it still computes the same thing.
+name: "Geometric: Optimize a kernel"
+description: Get a new kernel optimized for your hardware and is formally verified.
 title: "Optimize kernel: "
 labels: ["optimization"]
 body:
-  - type: markdown
-    attributes:
-      value: |
-        ## Essential
-        What the planner must know to start.
   - type: input
     attributes:
       label: Kernel
@@ -18,53 +13,62 @@ body:
   - type: dropdown
     attributes:
       label: Hardware
-      description: The GPU to optimize for.
+      description: Choose your hardware family, then fill in the matching GPU question below. Apple Metal needs no GPU selection.
+      options:
+        - NVIDIA
+        - AMD
+        - Apple Metal
+    validations:
+      required: true
+  - type: dropdown
+    attributes:
+      label: NVIDIA GPU
+      description: Choose a GPU if you selected NVIDIA. Otherwise, leave this blank.
       options:
         - B200
         - B300
         - H100
-    validations:
-      required: true
-  - type: input
+        - RTX 5040
+  - type: dropdown
     attributes:
-      label: Cost budget (USD)
-      description: The most this request may spend on model calls, in dollars. The optimization stops when it is used up.
-      placeholder: "100"
-    validations:
-      required: true
+      label: AMD GPU
+      description: Choose a GPU if you selected AMD. Otherwise, leave this blank.
+      options:
+        - R9700
+        - mi355x
   - type: markdown
     attributes:
-      value: |
-        ## Advanced
-        Every field here is filled in with the recommended value. Leave them as they are unless you have a reason.
+      value: "## Advanced\nOptional settings for the agents and the optimization."
+  - type: input
+    attributes:
+      label: Planner Model
+      description: The model that reads your request and proposes a plan. Leave blank to use the default.
+      placeholder: anthropic/claude-opus-5.5
+  - type: input
+    attributes:
+      label: Lead Coding Agent Model
+      description: The model that coordinates the coding agents. Leave blank to use the default.
+      placeholder: z-ai/glm-5.3
+  - type: textarea
+    attributes:
+      label: Coding Agent Models
+      description: The models that write and test code, one per line. Leave blank to use the defaults.
+      placeholder: anthropic/claude-opus-5.5
+  - type: input
+    attributes:
+      label: Budget
+      description: The total spending limit in USD for this optimization. Leave blank to use the default.
+      placeholder: "5"
+  - type: markdown
+    attributes:
+      value: "### Benchmarking\nChoose what to measure and the workload to test with."
   - type: textarea
     attributes:
       label: Shapes
-      description: Input shapes to optimize for, one per line. Leave empty to let the planner choose.
+      description: Input shapes to optimize for, one per line. Leave blank to let the planner choose.
       placeholder: |
-        4x256
-        64x4096
-        128x8192
-  - type: input
-    attributes:
-      label: Planner model
-      description: The model that reads the request and writes the plan.
-      value: claude-opus-5-5
-  - type: input
-    attributes:
-      label: Planner budget (USD)
-      description: The most the planner may spend, in dollars.
-      value: "5"
-  - type: input
-    attributes:
-      label: Task agent model
-      description: The model the lead and the engineers use to write and test the new code.
-      value: claude-opus-5-5
-  - type: input
-    attributes:
-      label: Task agent budget (USD)
-      description: The most all task agents may spend together, in dollars.
-      value: "50"
+        1x8x4096
+        8x8x4096
   - type: checkboxes
     attributes:
       label: Start

@@ -1,13 +1,8 @@
 name: Optimize an endpoint
-description: Mine a live endpoint's traffic, tune for each pattern, and simulate the full workload.
+description: "Geometric: Make an endpoint faster using its real traffic patterns."
 title: "Optimize endpoint: "
 labels: ["optimization"]
 body:
-  - type: markdown
-    attributes:
-      value: |
-        ## Essential
-        What the planner must know to start.
   - type: input
     attributes:
       label: Traffic
@@ -25,7 +20,7 @@ body:
   - type: input
     attributes:
       label: Nodes
-      description: How many nodes the endpoint runs on, as a whole number.
+      description: How many nodes run the endpoint.
       placeholder: "8"
     validations:
       required: true
@@ -39,36 +34,56 @@ body:
   - type: dropdown
     attributes:
       label: Hardware
-      description: The GPU the endpoint runs on.
+      description: Choose your hardware family, then fill in the matching GPU question below. Apple Metal needs no GPU selection.
+      options:
+        - NVIDIA
+        - AMD
+        - Apple Metal
+    validations:
+      required: true
+  - type: dropdown
+    attributes:
+      label: NVIDIA GPU
+      description: Choose a GPU if you selected NVIDIA. Otherwise, leave this blank.
       options:
         - B200
         - B300
         - H100
-    validations:
-      required: true
-  - type: input
-    attributes:
-      label: Cost budget (USD)
-      description: The most this request may spend on model calls, in dollars. The optimization stops when it is used up.
-      placeholder: "100"
-    validations:
-      required: true
-  - type: markdown
-    attributes:
-      value: |
-        ## Advanced
-        Every field here is filled in with the recommended value. Leave them as they are unless you have a reason.
-  - type: textarea
-    attributes:
-      label: Metrics
-      description: What to optimize, one per line. Leave empty for the defaults.
-      placeholder: |
-        throughput
-        p99 latency
+        - RTX 5040
   - type: dropdown
     attributes:
-      label: Shrink the model first
-      description: Quantize and prune the model before optimizing it. The next four questions apply only if this is Yes.
+      label: AMD GPU
+      description: Choose a GPU if you selected AMD. Otherwise, leave this blank.
+      options:
+        - R9700
+        - mi355x
+  - type: markdown
+    attributes:
+      value: "## Advanced\nOptional settings for the agents and the optimization."
+  - type: input
+    attributes:
+      label: Planner Model
+      description: The model that reads your request and proposes a plan. Leave blank to use the default.
+      placeholder: anthropic/claude-opus-5.5
+  - type: input
+    attributes:
+      label: Lead Coding Agent Model
+      description: The model that coordinates the coding agents. Leave blank to use the default.
+      placeholder: z-ai/glm-5.3
+  - type: textarea
+    attributes:
+      label: Coding Agent Models
+      description: The models that write and test code, one per line. Leave blank to use the defaults.
+      placeholder: anthropic/claude-opus-5.5
+  - type: input
+    attributes:
+      label: Budget
+      description: The total spending limit in USD for this optimization. Leave blank to use the default.
+      placeholder: "5"
+  - type: dropdown
+    attributes:
+      label: Tune only
+      description: Only adjust engine settings. Skip profiling and code changes. Choose No to quantize or prune.
       options:
         - "No"
         - "Yes"
@@ -78,49 +93,91 @@ body:
   - type: input
     attributes:
       label: Target size
-      description: The size to shrink the model to. Required if shrinking.
+      description: How small the model should be, such as 40GB. Required when Quantize or Prune is Yes.
       placeholder: 40GB
   - type: dropdown
     attributes:
       label: Quantize
-      description: Whether shrinking quantizes the model. Leave unset for the default, Yes.
+      description: Use lower-precision weights to reduce the model’s size.
       options:
-        - "Yes"
         - "No"
+        - "Yes"
+      default: 0
+    validations:
+      required: true
   - type: dropdown
     attributes:
       label: Prune
-      description: Whether shrinking prunes the model. Leave unset for the default, Yes.
+      description: Remove weights or parts of the model to reduce its size.
       options:
-        - "Yes"
         - "No"
-  - type: textarea
+        - "Yes"
+      default: 0
+    validations:
+      required: true
+  - type: dropdown
     attributes:
       label: Quantization formats
-      description: Formats to quantize to, one per line. Leave empty to let the planner choose.
-      placeholder: |
-        fp8
-        nvfp4
+      description: Select the formats to consider. Different layers can use different formats. Choose auto on its own. Leave blank to let us choose for your hardware.
+      multiple: true
+      options:
+        - auto (we’ll figure out the best formats to use)
+        - nvfp4
+        - mxfp4
+        - mxfp6
+        - mxfp8
+        - fp8
+        - bf16
+        - int8
+        - int4
+        - int3
+        - int2
+        - rocmfp4_fast
+        - rocmfp3
+        - rocmfp2
+        - rocmfp3_adaptive
+        - rocmfp2_adaptive
+        - q2_k
+        - q3_k
+        - q4_k
+        - q5_k
+        - q6_k
+        - q8_0
+        - iq1_s
+        - iq1_m
+        - iq2_xxs
+        - iq2_xs
+        - iq2_s
+        - iq3_xxs
+        - iq3_s
+        - iq4_xs
+        - gqh3_gptq
+        - gqh2_h_gptq
+        - gqh4_gptq
+        - gqh_t_gptq
+        - ggml_mxfp4
+        - ggml_nvfp4
   - type: input
     attributes:
-      label: Planner model
-      description: The model that reads the request and writes the plan.
-      value: claude-opus-5-5
-  - type: input
+      label: Quantization budget (GPU-hours)
+      description: How much GPU time to spend on quantization. One GPU for two hours is 2 GPU-hours. Leave blank to use the default.
+      placeholder: "2"
+  - type: markdown
     attributes:
-      label: Planner budget (USD)
-      description: The most the planner may spend, in dollars.
-      value: "5"
-  - type: input
+      value: "### Benchmarking\nChoose what to measure and the workload to test with."
+  - type: dropdown
     attributes:
-      label: Task agent model
-      description: The model the lead and the engineers use to write and test the new code.
-      value: claude-opus-5-5
-  - type: input
-    attributes:
-      label: Task agent budget (USD)
-      description: The most all task agents may spend together, in dollars.
-      value: "50"
+      label: Metrics
+      description: >-
+        Select the metrics to track. Output throughput is used to judge improvements.
+        With GuideLLM, TPOT includes the wait for the first token; ITL measures the gaps after it.
+      multiple: true
+      options:
+        - Output throughput (tokens/s)
+        - Time to first token (TTFT)
+        - Time per output token (TPOT)
+        - Inter-token latency (ITL)
+        - End-to-end request latency
   - type: checkboxes
     attributes:
       label: Start
