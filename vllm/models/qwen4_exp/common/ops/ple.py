@@ -558,21 +558,21 @@ def ple_conv(
     """
     BLOCK_C = 512
     kernel_spec_query_len = spec_query_len if mode == "spec" else 1
-    num_tokens, num_channels = inputs.shape
-    kernel_size = conv_weights.shape[1]
-    state_len = (kernel_size - 1) * dilation
+    T, C = inputs.shape
+    K = conv_weights.shape[1]
+    state_len = (K - 1) * dilation
     state_width = state_len + kernel_spec_query_len - 1
     if token_indices is not None:
-        num_tokens = token_indices.numel()
-    if conv_state.shape[1] != num_channels or conv_state.shape[2] < state_width:
+        T = token_indices.numel()
+    if conv_state.shape[1] != C or conv_state.shape[2] < state_width:
         raise ValueError(
             "conv_state must have shape [slots, channels, window], with "
-            f"channels={num_channels} and window >= {state_width}"
+            f"channels={C} and window >= {state_width}"
         )
     state_bs, state_cs, state_ws = conv_state.stride()
 
     if mode == "decode":
-        num_reqs = num_tokens
+        num_reqs = T
         binary_search_iters = 1
         has_initial_states_arg = has_initial_states is not None
     elif mode == "spec":
@@ -601,7 +601,7 @@ def ple_conv(
 
     # Constexpr flags eliminate accesses to optional None arguments. Without a
     # token map, state_indices is an unused but device-resident placeholder.
-    _ple_conv_kernel[(num_tokens, triton.cdiv(num_channels, BLOCK_C))](
+    _ple_conv_kernel[(T, triton.cdiv(C, BLOCK_C))](
         inputs,
         conv_state,
         conv_weights,
@@ -619,11 +619,11 @@ def ple_conv(
         state_bs,
         state_ws,
         state_cs,
-        C=num_channels,
+        C=C,
         BLOCK_C=BLOCK_C,
         STATE_LEN=state_len,
         DILATION=dilation,
-        KERNEL_SIZE=kernel_size,
+        KERNEL_SIZE=K,
         SPEC_QUERY_LEN=kernel_spec_query_len,
         MODE=mode,
         HAS_INIT=has_initial_states_arg,
@@ -634,7 +634,7 @@ def ple_conv(
     )
     # conv state update is fused with the kernel above for decode
     if mode != "decode":
-        _ple_conv_writeback_kernel[(num_reqs, triton.cdiv(num_channels, BLOCK_C))](
+        _ple_conv_writeback_kernel[(num_reqs, triton.cdiv(C, BLOCK_C))](
             inputs,
             conv_state,
             state_indices,
@@ -647,7 +647,7 @@ def ple_conv(
             state_bs,
             state_ws,
             state_cs,
-            C=num_channels,
+            C=C,
             BLOCK_C=BLOCK_C,
             STATE_LEN=state_len,
             SPEC_QUERY_LEN=kernel_spec_query_len,
