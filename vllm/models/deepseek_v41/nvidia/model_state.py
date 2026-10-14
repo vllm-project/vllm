@@ -546,6 +546,7 @@ class DeepseekV41ModelState(DefaultModelState):
                 dp_metadata=dp_metadata,
                 cudagraph_runtime_mode=cg_mode,
                 batch_descriptor=BatchDescriptor(num_tokens=num_padded),
+                num_tokens=num_padded,
                 slot_mapping=build_slot_mappings_by_layer(
                     kept_slot_mappings, kv_cache_config
                 ),
