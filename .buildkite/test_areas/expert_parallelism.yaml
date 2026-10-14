@@ -92,9 +92,30 @@ steps:
       commands:
       - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
       - AMD_LOG_LEVEL=1 python3 distributed/rocm_ipc_churn_repro.py --timeout 240 || true
-      # The failure happens inside RCCL's lazy communicator init, so this run
-      # asks RCCL which transport it picks per pair and which buffer it exports.
-      - NCCL_DEBUG=INFO NCCL_DEBUG_SUBSYS=INIT,P2P,GRAPH,ALLOC AMD_LOG_LEVEL=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=NCCL_DEBUG,NCCL_DEBUG_SUBSYS,AMD_LOG_LEVEL pytest -v -s distributed/test_elastic_ep.py -k enforce_eager_none || true
+      # ROCr refuses the export in Runtime::IPCCreate, which picks between two
+      # unrelated implementations: hsaKmtShareMemory when HSA_ENABLE_IPC_MODE_LEGACY
+      # is 1, hsaKmtExportDMABufHandle otherwise. Our images pin the legacy side in
+      # docker/Dockerfile.rocm, so the dmabuf side has never run here. Since the
+      # same failure appears on ROCm 7.2.3 and on 10.0.0 and only the kernel module
+      # differs from a host where it passes, a second kernel path is worth a pass.
+      # HSA_ is not in DEFAULT_ENV_VAR_PREFIXES, so without naming it below the Ray
+      # actors would keep the image value and the flag would do nothing.
+      - HSA_ENABLE_IPC_MODE_LEGACY=0 AMD_LOG_LEVEL=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=HSA_ENABLE_IPC_MODE_LEGACY,AMD_LOG_LEVEL pytest -v -s distributed/test_elastic_ep.py -k enforce_eager_none || true
+      # The legacy path turns whatever the kernel said into INVALID_ARGUMENT, so
+      # the only remaining place the real reason can surface is the kernel ring
+      # buffer. Worth one line even if the container is not allowed to read it.
+      - echo "--- dmesg after the dmabuf pass" && (dmesg --ctime | tail -n 80 || echo "dmesg not permitted in this container")
+      # One of the six INVALID_ARGUMENT returns in IPCCreate is the fragment branch,
+      # for buffers suballocated out of a 2 MB block. This removes that branch.
+      - HSA_DISABLE_FRAGMENT_ALLOCATOR=1 AMD_LOG_LEVEL=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=HSA_DISABLE_FRAGMENT_ALLOCATOR,AMD_LOG_LEVEL pytest -v -s distributed/test_elastic_ep.py -k enforce_eager_none || true
+      - echo "--- dmesg after the fragment pass" && (dmesg --ctime | tail -n 80 || echo "dmesg not permitted in this container")
+      # The legacy path replaces the kernel's reason with INVALID_ARGUMENT, so the
+      # last place that reason still exists is the thunk. HSAKMT_DEBUG_LEVEL only
+      # says anything at 7, where it names every call, and hsaKmtShareMemory is the
+      # one that matters. That costs about seven lines per export, so the run goes
+      # to a file and only the band around the last share and the tail come back.
+      # HSAKMT_ is not a copied prefix either, so it has to be named for Ray.
+      - HSAKMT_DEBUG_LEVEL=7 AMD_LOG_LEVEL=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=HSAKMT_DEBUG_LEVEL,AMD_LOG_LEVEL pytest -v -s distributed/test_elastic_ep.py -k enforce_eager_none > /tmp/kmt.log 2>&1 || true; echo "--- kmt log has $(wc -l < /tmp/kmt.log) lines, $(grep -c hsaKmtShareMemory /tmp/kmt.log) of them share calls"; L=$(grep -n hsaKmtShareMemory /tmp/kmt.log | tail -n 1 | cut -d":" -f1); test -n "$L" && echo "--- band around the last share call, line $L" && awk -v l="$L" 'NR>=l-25 && NR<=l+60' /tmp/kmt.log; echo "--- tail"; tail -n 150 /tmp/kmt.log
       # The previous run tried NCCL_P2P_DISABLE and NCCL_P2P_LEVEL and both hit
       # the same hsa_status 4097. Measured locally, NCCL_P2P_DISABLE=1 already
       # drops RCCL to zero hipIpcGetMemHandle calls, so that 4097 came from our

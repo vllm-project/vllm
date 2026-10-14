@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import ctypes
 import os
+import struct
 import subprocess
 import sys
 import traceback
@@ -180,7 +181,7 @@ def _pointer_facts(ptr: ctypes.c_void_p) -> str:
 _CHILD_EXPORT = r"""
 import ctypes, sys
 
-size, device, flags = int(sys.argv[1]), int(sys.argv[2]), int(sys.argv[3])
+size, device, flags, limit = (int(a) for a in sys.argv[1:5])
 hip = ctypes.CDLL("libamdhip64.so")
 hip.hipGetErrorString.restype = ctypes.c_char_p
 
@@ -193,20 +194,31 @@ rc = hip.hipSetDevice(device)
 if rc != 0:
     print(f"setDevice failed {err(rc)}")
     raise SystemExit(0)
-ptr = ctypes.c_void_p()
-rc = hip.hipExtMallocWithFlags(
-    ctypes.byref(ptr), ctypes.c_size_t(size), ctypes.c_uint(flags)
-)
-if rc != 0:
-    print(f"malloc failed {err(rc)}")
-    raise SystemExit(0)
-handle = ctypes.create_string_buffer(64)
-rc = hip.hipIpcGetMemHandle(handle, ptr)
-print("ok" if rc == 0 else f"ipc failed {err(rc)}")
+ptrs = []
+held = 0
+stopped = f"no ceiling below {limit}"
+while held < limit:
+    ptr = ctypes.c_void_p()
+    rc = hip.hipExtMallocWithFlags(
+        ctypes.byref(ptr), ctypes.c_size_t(size), ctypes.c_uint(flags)
+    )
+    if rc != 0:
+        stopped = f"malloc stopped first: {err(rc)}"
+        break
+    ptrs.append(ptr)
+    handle = ctypes.create_string_buffer(64)
+    rc = hip.hipIpcGetMemHandle(handle, ptr)
+    if rc != 0:
+        stopped = f"export failed: {err(rc)}"
+        break
+    held += 1
+for p in ptrs:
+    hip.hipFree(p)
+print(f"{held} held, {stopped}")
 """
 
 
-def _ipc_probe_fresh_process(size: int) -> str:
+def _ipc_probe_fresh_process(size: int, limit: int) -> str:
     """Whether the breakage belongs to this process or to the card.
 
     By the time an export fails here, this process has been through engine
@@ -214,6 +226,11 @@ def _ipc_probe_fresh_process(size: int) -> str:
     that has done none of that, on the same device, settles the question in one
     line: exporting fine means the state is ours to find, failing the same way
     means the card is in a state no process can use.
+
+    The child walks the same ceiling the parent does rather than doing a single
+    export, so the two numbers are directly comparable. Last run the parent was
+    down to 0 while the child still managed its one export, which answered the
+    question but left open how much the child really had.
 
     It deliberately does not import torch, so it starts in a fraction of a
     second and costs only a HIP context on the target device. It inherits our
@@ -228,6 +245,7 @@ def _ipc_probe_fresh_process(size: int) -> str:
                 str(size),
                 str(_hip_device()),
                 str(_MALLOC_FLAGS["uncached"]),
+                str(limit),
             ],
             capture_output=True,
             text=True,
@@ -239,6 +257,47 @@ def _ipc_probe_fresh_process(size: int) -> str:
     if out.returncode != 0:
         return f"child exited {out.returncode}: {said} {out.stderr.strip()[-300:]}"
     return said
+
+
+def _ipc_export_mode() -> str:
+    """Which of ROCr's two export implementations is actually running.
+
+    Runtime::IPCCreate branches on ipc_dmabuf_supported_, which is simply
+    !HSA_ENABLE_IPC_MODE_LEGACY. One side goes through hsaKmtShareMemory, the
+    other through hsaKmtExportDMABufHandle, so these are different kernel
+    calls, not two spellings of one. The vLLM ROCm images pin the legacy side:
+
+        docker/Dockerfile.rocm:862  ENV HSA_ENABLE_IPC_MODE_LEGACY=1
+
+    Reading the variable back would only tell us what the image set. Decoding
+    the handle tells us which branch ran, because the dmabuf side writes the
+    pointer into words 0 and 1 and the exporting pid into word 2, while the
+    legacy side writes the thunk's own handle there.
+    """
+    hip = _lib()
+    env = os.environ.get("HSA_ENABLE_IPC_MODE_LEGACY", "unset")
+    ptr = ctypes.c_void_p()
+    rc = hip.hipExtMallocWithFlags(
+        ctypes.byref(ptr), ctypes.c_size_t(6 << 20), ctypes.c_uint(0x3)
+    )
+    if rc != 0:
+        hip.hipGetLastError()
+        return f"env={env} malloc failed {_err(rc)}"
+    handle = (ctypes.c_ubyte * _HANDLE_BYTES)()
+    rc = hip.hipIpcGetMemHandle(handle, ptr)
+    if rc != 0:
+        hip.hipGetLastError()
+        hip.hipFree(ptr)
+        return f"env={env} export failed {_err(rc)}"
+    words = struct.unpack("<16I", bytes(handle))
+    hip.hipFree(ptr)
+    hip.hipGetLastError()
+    dmabuf = (
+        words[0] == (ptr.value & 0xFFFFFFFF)
+        and words[1] == (ptr.value >> 32)
+        and words[2] == os.getpid()
+    )
+    return f"env={env} effective={'dmabuf' if dmabuf else 'legacy'}"
 
 
 def _ipc_probe(size: int) -> dict[str, str]:
@@ -562,7 +621,9 @@ def dump(tag: str, groups: dict | None = None, heavy: bool = False) -> None:
             # context on a neighbour card, so neither runs near the collective.
             info["ipc_probe_burst_64x6MiB"] = _ipc_probe_burst(6 << 20, 64)
             info["ipc_probe_foreign_device"] = _ipc_probe_foreign_device(6 << 20)
-            info["ipc_probe_fresh_process"] = _ipc_probe_fresh_process(6 << 20)
+            # Same size and same limit as the parent's own ceiling below, so
+            # the two lines can be read side by side.
+            info["ipc_probe_fresh_process"] = _ipc_probe_fresh_process(6 << 20, 1536)
             info["ipc_export_ceiling_2MiB"] = _ipc_export_ceiling(2 << 20, 4096)
             # 6 MiB is the size RCCL exports most of, and it holds about a
             # thousand of them per rank, so walk past that.
@@ -584,6 +645,7 @@ def dump_static() -> None:
             torch.cuda.nccl.version(),
             env,
         )
+        logger.warning("[EEP-DEBUG] static ipc_export_mode=%s", _ipc_export_mode())
         logger.warning("[EEP-DEBUG] static kfd_topology=%s", _kfd_topology())
     except Exception as e:
         logger.warning("[EEP-DEBUG] static dump failed: %r", e)
@@ -615,6 +677,19 @@ def warm_each(groups: dict, tag: str) -> None:
                     name,
                     _ipc_mesh_probe(group, 2 << 20, 0x3),
                     _ipc_mesh_probe(group, 6 << 20, 0x0),
+                )
+                # The nearest ceiling measurement before this point is the one
+                # in prepare, which is far enough back that it cannot say
+                # whether the headroom was already gone when RCCL started or
+                # whether RCCL's own 32 channels consumed the last of it. This
+                # measures right at the door. The limit stays small on purpose:
+                # walking to 1536 here would hold 9 GiB and would itself be a
+                # suspect if the collective then failed.
+                logger.warning(
+                    "[EEP-DEBUG] %s warm %s headroom 6MiB/uncached %s",
+                    tag,
+                    name,
+                    _ipc_export_ceiling(6 << 20, 256),
                 )
                 if os.getenv("VLLM_EEP_DEBUG_SET_DEVICE") == "1":
                     torch.accelerator.set_device_index(group.device.index)
