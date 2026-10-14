@@ -20,6 +20,7 @@ Batch invariance is crucial for several use cases:
 Batch invariance is supported on the following platforms:
 
 - NVIDIA GPUs with compute capability 8.0 or higher.
+- AMD Instinct GPUs (gfx90a, gfx942, gfx950).
 - Intel XPUs with Triton support.
 
 ### Attention Backend Selection for XPU
