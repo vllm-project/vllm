@@ -2,11 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Model side of the GLM-5.3-Flash MonoKernel spec.
 
-A KDA layer is one launch for the whole decoder layer. A sparse-attention layer
-runs vLLM's attention half unchanged (the attention mHC pre and the attention,
-with o_proj's TP all-reduce off) and then one launch for the rest: the attention
-TP reduce, the FFN mHC seam, the RMSNorm, the router and the MoE with its TP
-reduce. Both take and return what ``Glm5NextDecoderLayer`` does."""
+Every kernel layer is one launch for the whole decoder layer: the attention-side
+mHC, the attention (KDA, or sparse MLA with its kpool indexer and cache writes),
+o_proj with its TP reduce, the FFN mHC seam, the RMSNorm, the router and the MoE
+with its TP reduce. It takes and returns what ``Glm5NextDecoderLayer`` does."""
 
 from __future__ import annotations
 
@@ -18,6 +17,7 @@ import torch
 from vllm.models.common.mono.spec import MonoContext, MonoStep
 from vllm.models.glm5next.amd.mono import spec as flash_spec
 from vllm.models.glm5next.amd.mono.weights import (
+    dsa_weights,
     experts_backend_reason,
     kda_weights,
     layer_weights,
@@ -26,7 +26,10 @@ from vllm.models.glm5next.amd.ops.mono.config import (
     GLOBAL_INTER,
     HC_MULT,
     HIDDEN,
+    INDEX_DIM,
     KDA_DIM,
+    KPOOL,
+    KV_LORA,
     FlashShard,
 )
 
@@ -34,6 +37,8 @@ if TYPE_CHECKING:
     from torch import nn
 
 POLL_LIMIT = 20_000_000
+# kpool pools a sparse-attention task scores
+POOLS_PER_TASK = 256
 
 
 def _kernel_layers(model: nn.Module) -> list[int]:
@@ -55,31 +60,85 @@ def refuse_model(model: nn.Module) -> list[str]:
             reasons.append(f"layer {idx}: needs the attention's o_proj")
         if flash_spec.is_kda(layer) and getattr(layer.self_attn, "num_spec", 0):
             reasons.append(f"layer {idx}: KDA with speculative decoding")
+        if (
+            flash_spec.is_dsa(layer)
+            and getattr(layer.self_attn, "indexer", None) is None
+        ):
+            reasons.append(f"layer {idx}: sparse attention without its indexer")
     return reasons
 
 
 def pack(model: nn.Module, ctx: MonoContext) -> dict[int, Any]:
+    """Per kernel layer (FFN weights, the attention weights, launch kind)."""
     inter = GLOBAL_INTER // ctx.tp_size
     packed, reasons = {}, []
     for idx in _kernel_layers(model):
         layer = model.layers[idx]
         try:
-            kda = kda_weights(layer, ctx.tp_size) if flash_spec.is_kda(layer) else None
-            packed[idx] = (layer_weights(layer, inter), kda)
+            if flash_spec.is_kda(layer):
+                attn, kind = kda_weights(layer, ctx.tp_size), "kda"
+            else:
+                attn, kind = dsa_weights(layer, ctx.tp_size), "dsa"
+            packed[idx] = (layer_weights(layer, inter), attn, kind)
         except ValueError as error:
             reasons.append(f"layer {idx}: {error}")
     if reasons:
         raise ValueError(
             "VLLM_ROCM_MONO_DECODE cannot run GLM-5.3-Flash: " + "; ".join(reasons)
         )
-    kda = [_kda_name(model.layers[i]) for i in sorted(packed) if packed[i][1]]
+    kda = [_kda_name(model.layers[i]) for i in sorted(packed) if packed[i][2] == "kda"]
     ctx.state["kda_names"] = kda
+    ctx.state["dsa_names"] = {
+        i: _dsa_names(model.layers[i]) for i in sorted(packed) if packed[i][2] == "dsa"
+    }
+    formats = {packed[i][1].fp8 for i in packed if packed[i][2] == "dsa"}
+    if len(formats) > 1:
+        raise ValueError(
+            "VLLM_ROCM_MONO_DECODE cannot run GLM-5.3-Flash: sparse-attention "
+            f"projections differ between layers {sorted(formats)}"
+        )
+    ctx.state["dsa_fp8"] = formats.pop() if formats else (True, True, True)
     return packed
+
+
+def _bind_dsa(caches: Mapping[str, torch.Tensor]) -> tuple[dict, list[str]]:
+    """Each sparse-attention layer's MLA latent cache [blocks, tokens, 512], index
+    cache [blocks, 16 n pools, 132] (16-pool tiles) and kpool tail ring
+    [blocks, 2, 4, 128]; the kernel addresses every block with a 64-bit base."""
+    from vllm.models.glm5next.amd.ops.mono.ffn.op import FlashDsaCaches
+
+    reasons, out = [], {}
+    for key, kv in caches.items():
+        idx, name = key.split(".")
+        if name != "mla":
+            continue
+        ic, tail = caches[f"{idx}.icache"], caches[f"{idx}.tail"]
+        if kv.dim() == 4 and kv.shape[1] == 1:
+            kv = kv.squeeze(1)
+        if kv.dim() != 3 or kv.shape[2] != KV_LORA or kv.stride()[1:] != (KV_LORA, 1):
+            reasons.append(f"layer {idx}: MLA cache {tuple(kv.shape)} {kv.stride()}")
+        if (
+            ic.dim() != 3
+            or ic.shape[2] != INDEX_DIM + 4
+            or ic.stride()[1:] != (INDEX_DIM + 4, 1)
+            or ic.stride(0) != ic.shape[1] * (INDEX_DIM + 4)
+            or ic.shape[1] % 16
+        ):
+            reasons.append(f"layer {idx}: index cache {tuple(ic.shape)} {ic.stride()}")
+        if (
+            tail.dim() != 4
+            or tuple(tail.shape[1:]) != (2, KPOOL, INDEX_DIM)
+            or tail.stride()[2:] != (INDEX_DIM, 1)
+        ):
+            reasons.append(f"layer {idx}: kpool tail {tuple(tail.shape)}")
+        out[int(idx)] = FlashDsaCaches(kv, ic, tail)
+    return out, reasons
 
 
 def bind(ctx: MonoContext, caches: Mapping[str, torch.Tensor]) -> list[str]:
     """Each KDA layer's conv state ([slots, 3P, 3] dim first, else [slots, 3, 3P])
-    and recurrent state [slots, H, 128, 128], kept for the launches."""
+    and recurrent state [slots, H, 128, 128], and each sparse-attention layer's
+    caches, kept for the launches."""
     from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
     from vllm.models.glm5next.amd.ops.mono.ffn.op import FlashKdaState
 
@@ -101,8 +160,11 @@ def bind(ctx: MonoContext, caches: Mapping[str, torch.Tensor]) -> list[str]:
         if conv.shape[0] != rec.shape[0]:
             reasons.append(f"layer {idx}: {conv.shape[0]} conv, {rec.shape[0]} slots")
         states[int(idx)] = FlashKdaState(conv, rec)
+    dsa, dsa_reasons = _bind_dsa(caches)
+    reasons += dsa_reasons
     if not reasons:
         ctx.state["kda_states"] = states
+        ctx.state["dsa_caches"] = dsa
     return reasons
 
 
@@ -117,28 +179,58 @@ def eligible(ctx: MonoContext, step: MonoStep) -> str | None:
         indices = getattr(meta, "non_spec_state_indices_tensor", None)
         if indices is None or indices.shape[0] < step.tokens:
             return "no KDA state index a row"
+    for _, icache, _ in ctx.state.get("dsa_names", {}).values():
+        # one index-cache group for every sparse-attention layer
+        if step.attn_metadata[icache].decode is None:
+            return "no indexer decode metadata"
+        break
     return None
 
 
 def metadata_names(layers: Mapping[int, nn.Module]) -> list[str]:
-    """The kernel layers' KDA attention entries of the forward context; every
-    decode step carries their metadata."""
+    """The kernel layers' attention entries of the forward context (KDA layers;
+    MLA, index cache and kpool tail of sparse-attention ones); every decode step
+    carries their metadata."""
     from vllm.config import get_current_vllm_config
 
     ctx = get_current_vllm_config().compilation_config.static_forward_context
-    attns = {id(layer.self_attn) for layer in layers.values()}
-    return sorted(name for name, module in ctx.items() if id(module) in attns)
+    mods = set()
+    for layer in layers.values():
+        attn = layer.self_attn
+        if flash_spec.is_kda(layer):
+            mods.add(id(attn))
+        else:
+            idx = attn.indexer
+            mods |= {id(attn.mla_attn.mla_attn), id(idx.k_cache), id(idx.tail_cache)}
+    return sorted(name for name, module in ctx.items() if id(module) in mods)
 
 
 def _kda_name(layer: nn.Module) -> str:
     return layer.self_attn.prefix
 
 
+def _dsa_names(layer: nn.Module) -> tuple[str, str, str]:
+    """(MLA layer, index cache, kpool tail) forward-context names."""
+    attn = layer.self_attn
+    idx = attn.indexer
+    return attn.mla_attn.mla_attn.layer_name, idx.k_cache.prefix, idx.tail_cache.prefix
+
+
+def max_pools(ctx: MonoContext) -> int:
+    """Pools a sparse-attention launch scores at most (kpool): the model length's,
+    whole score tasks."""
+    n = -(-ctx.vllm_config.model_config.max_model_len // KPOOL)
+    return -(-n // POOLS_PER_TASK) * POOLS_PER_TASK
+
+
 class _Width:
     """Per-width state of one launch kind: the runtime, padding inputs and, for
-    KDA, padded copies of the step's state indices."""
+    KDA, padded copies of the step's state indices; for sparse attention, the
+    step's row table."""
 
     def __init__(self, runtime, width: int, device: torch.device) -> None:
+        from vllm.models.glm5next.amd.ops.mono.ffn.layout import ROW_BT, ROW_WORDS
+
         self.rt = runtime
         self.pad = (
             torch.zeros(width, HIDDEN, dtype=torch.bfloat16, device=device),
@@ -150,6 +242,10 @@ class _Width:
         self.idx_pool: list[torch.Tensor] = []
         self.step: MonoStep | None = None
         self.idx_of: dict[int, torch.Tensor] = {}
+        # decode rows are one token a request: row i reads block-table row i
+        self.rows = torch.full((width, ROW_WORDS), -1, dtype=torch.int32, device=device)
+        self.rows[:, ROW_BT] = torch.arange(width, dtype=torch.int32, device=device)
+        self.rows_step: MonoStep | None = None
 
     def state_idx(self, step: MonoStep, src: torch.Tensor) -> torch.Tensor:
         """KDA layers of one cache group share ``src``; vLLM pads graph rows with
@@ -173,13 +269,36 @@ class _Width:
             self.idx_of[key] = buf
         return self.idx_of[key]
 
+    def dsa_rows(self, step: MonoStep, names: tuple[str, str, str]) -> torch.Tensor:
+        """The step's (position, MLA slot, index-cache pool slot, tail slot) rows;
+        every sparse-attention layer shares them (one cache group each)."""
+        from vllm.models.glm5next.amd.ops.mono.ffn.layout import (
+            ROW_POOL_SLOT,
+            ROW_POS,
+            ROW_SLOT,
+            ROW_TAIL_SLOT,
+        )
 
-def _runtime(ctx: MonoContext, width: int, launches: int, kda: bool):
+        if self.rows_step is step:
+            return self.rows
+        mla, icache, tail = names
+        n, r = step.tokens, self.rows
+        r[:n, ROW_POS].copy_(step.positions[:n])
+        r[:n, ROW_SLOT].copy_(step.attn_metadata[mla].slot_mapping[:n])
+        r[:n, ROW_POOL_SLOT].copy_(step.attn_metadata[icache].slot_mapping[:n])
+        r[:n, ROW_TAIL_SLOT].copy_(step.attn_metadata[tail].slot_mapping[:n])
+        if n < self.width:
+            r[n:, ROW_POS : ROW_TAIL_SLOT + 1].fill_(-1)
+        self.rows_step = step
+        return r
+
+
+def _runtime(ctx: MonoContext, width: int, launches: int, kind: str):
     from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
     from vllm.models.glm5next.amd.ops.mono.ffn.op import FlashFfnRuntime
 
     widths = ctx.state.setdefault("widths", {})
-    if (width, kda) not in widths:
+    if (width, kind) not in widths:
         first = next(iter(widths.values()), None)
         rt = FlashFfnRuntime(
             width,
@@ -191,13 +310,16 @@ def _runtime(ctx: MonoContext, width: int, launches: int, kda: bool):
             POLL_LIMIT,
             poll_early_out=False,
             flag_addr=None if first is None else first.rt.flag_addr,
-            kda=kda,
+            kda=kind == "kda",
             conv_dim_first=is_conv_state_dim_first(),
+            dsa=kind == "dsa",
+            max_pools=max_pools(ctx) if kind == "dsa" else 0,
+            dsa_fp8=ctx.state.get("dsa_fp8", (True, True, True)),
         )
-        widths[(width, kda)] = _Width(rt, width, ctx.device)
+        widths[(width, kind)] = _Width(rt, width, ctx.device)
         if first is None and rt.flags is not None:
             ctx.state["flags"] = rt.flags
-    return widths[(width, kda)]
+    return widths[(width, kind)]
 
 
 def _pad(w: _Width, step: MonoStep, ins):
@@ -209,12 +331,13 @@ def _pad(w: _Width, step: MonoStep, ins):
     return tuple(t.contiguous() for t in ins)
 
 
-class FlashFfnLayer:
-    """One decoder layer's kernel at one width; ``ends`` the runtimes the step's
-    last kernel layer advances."""
+class FlashLayer:
+    """One whole decoder layer's kernel at one width; ``ends`` the runtimes the
+    step's last kernel layer advances."""
 
-    def __init__(self, ctx: MonoContext, layer: nn.Module, op, w: _Width, ends):
-        self.layer, self.op, self.w, self.ends = layer, op, w, ends
+    def __init__(self, ctx: MonoContext, layer: nn.Module, op, w: _Width, ends, idx):
+        self.ctx, self.layer, self.op, self.w, self.ends = ctx, layer, op, w, ends
+        self.idx = idx
 
     def health(self) -> torch.Tensor:
         return self.w.rt.words
@@ -224,67 +347,86 @@ class FlashFfnLayer:
             rt.advance_step()
         return tuple(t[: step.tokens] for t in out)
 
-    def launch(self, step: MonoStep, hidden_states, residual, post, comb):
-        layer = self.layer
-        if post is None:
-            raise RuntimeError("a Flash kernel layer needs the previous mHC state")
-        residual, post, comb, x = layer.hc_fused_post_pre(
-            hidden_states,
-            residual,
-            post,
-            comb,
-            layer.hc_attn_fn,
-            layer.hc_attn_scale,
-            layer.hc_attn_base,
-            norm_weight=layer.input_layernorm.weight.data,
-            norm_eps=layer.input_layernorm.variance_epsilon,
-        )
-        o_proj = layer.self_attn.o_proj
-        o_proj.reduce_results = False
-        try:
-            x = layer.self_attn(hidden_states=x, positions=step.positions)
-        finally:
-            o_proj.reduce_results = True
-        n = step.tokens
-        ins = _pad(self.w, step, (x, residual, post.view(n, HC_MULT, 1), comb))
-        return self.finish(step, self.op.launch(*ins))
-
-
-class FlashKdaLayer(FlashFfnLayer):
-    """One whole KDA decoder layer at one width, on its own cache group's state
-    indices (rows whose index is not positive are skipped)."""
-
-    def __init__(self, ctx, layer, op, w, ends, idx: int) -> None:
-        super().__init__(ctx, layer, op, w, ends)
-        self.ctx, self.idx, self.name = ctx, idx, _kda_name(layer)
-
-    def launch(self, step: MonoStep, hidden_states, residual, post, comb):
+    def inputs(self, step: MonoStep, hidden_states, residual, post, comb):
         if post is None:
             raise RuntimeError("a Flash kernel layer needs the previous mHC state")
         n = step.tokens
-        meta = step.attn_metadata[self.name]
-        idx = self.w.state_idx(step, meta.non_spec_state_indices_tensor)
-        state = self.ctx.state["kda_states"][self.idx]
-        ins = _pad(
+        return _pad(
             self.w, step, (hidden_states, residual, post.view(n, HC_MULT, 1), comb)
         )
+
+
+class FlashKdaLayer(FlashLayer):
+    """One whole KDA decoder layer, on its own cache group's state indices (rows
+    whose index is not positive are skipped)."""
+
+    def launch(self, step: MonoStep, hidden_states, residual, post, comb):
+        ins = self.inputs(step, hidden_states, residual, post, comb)
+        name = _kda_name(self.layer)
+        idx = self.w.state_idx(
+            step, step.attn_metadata[name].non_spec_state_indices_tensor
+        )
+        state = self.ctx.state["kda_states"][self.idx]
         return self.finish(step, self.op.launch(*ins, state, idx))
+
+
+class FlashDsaLayer(FlashLayer):
+    """One whole sparse-attention decoder layer: it writes the step's MLA cache
+    row, kpool tail and completed pool itself."""
+
+    def launch(self, step: MonoStep, hidden_states, residual, post, comb):
+        ins = self.inputs(step, hidden_states, residual, post, comb)
+        names = self.ctx.state["dsa_names"][self.idx]
+        mla, icache, _ = names
+        return self.finish(
+            step,
+            self.op.launch(
+                *ins,
+                caches=self.ctx.state["dsa_caches"][self.idx],
+                rows=self.w.dsa_rows(step, names),
+                block_table=step.attn_metadata[mla].block_table,
+                idx_block_table=step.attn_metadata[icache].decode.block_table,
+            ),
+        )
+
+
+class _Unbuilt:
+    """A width a launch kind cannot run at this TP size (never eligible)."""
+
+    def __init__(self, words: torch.Tensor) -> None:
+        self.words = words
+
+    def health(self) -> torch.Tensor:
+        return self.words
+
+    def launch(self, step: MonoStep, *args):
+        raise RuntimeError(f"no Flash kernel for {step.width} rows at this TP size")
 
 
 def build(ctx: MonoContext, packed: dict, layer: nn.Module, idx: int, width: int):
     from vllm.models.glm5next.amd.ops.mono.ffn.op import FlashFfnOp
 
-    kda = packed[idx][1] is not None
-    order = sorted(i for i in packed if (packed[i][1] is not None) == kda)
-    w = _runtime(ctx, width, len(order), kda)
-    op = FlashFfnOp(w.rt, packed[idx][0], order.index(idx), packed[idx][1])
-    last = idx == max(packed)
+    ffn, attn, kind = packed[idx]
+    cap = flash_spec.TP_MAX_WIDTH.get(ctx.tp_size)
+    if kind == "dsa" and cap is not None and width > cap:
+        some = next(iter(ctx.state.get("widths", {}).values()))
+        return _Unbuilt(some.rt.words)
+    order = sorted(i for i in packed if packed[i][2] == kind)
+    w = _runtime(ctx, width, len(order), kind)
+    op = FlashFfnOp(
+        w.rt,
+        ffn,
+        order.index(idx),
+        attn if kind == "kda" else None,
+        attn if kind == "dsa" else None,
+    )
     ends = []
-    if last:
-        for k in (False, True):
-            if any((packed[i][1] is not None) == k for i in packed):
-                n = sum((packed[i][1] is not None) == k for i in packed)
-                ends.append(_runtime(ctx, width, n, k).rt)
-    if not kda:
-        return FlashFfnLayer(ctx, layer, op, w, ends)
-    return FlashKdaLayer(ctx, layer, op, w, ends, idx)
+    if idx == max(packed):
+        for k in sorted({packed[i][2] for i in packed}):
+            if k == "dsa" and cap is not None and width > cap:
+                continue
+            n = sum(packed[i][2] == k for i in packed)
+            ends.append(_runtime(ctx, width, n, k).rt)
+    if kind == "kda":
+        return FlashKdaLayer(ctx, layer, op, w, ends, idx)
+    return FlashDsaLayer(ctx, layer, op, w, ends, idx)
