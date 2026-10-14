@@ -4,7 +4,6 @@ import asyncio
 import os
 import socket
 import time
-import warnings
 from collections.abc import AsyncGenerator, Iterable, Mapping
 from copy import copy
 from typing import Any
@@ -349,7 +348,7 @@ class AsyncLLM(EngineClient):
                 else self.get_num_unfinished_requests()
             )
             if current_requests + n > max_num_reqs:
-                logger.info(
+                logger.debug(
                     "Request queue full - rejecting request %s "
                     "(current=%d, n=%d, max=%d).",
                     request_id,
@@ -357,20 +356,27 @@ class AsyncLLM(EngineClient):
                     n,
                     max_num_reqs,
                 )
+                self._record_admission_rejection("max_num_queued_reqs")
                 raise QueueOverflowError()
 
         max_queued_tokens = self.scheduler_config.max_num_queued_tokens
         if max_queued_tokens is not None:
             current_tokens = self.get_num_queued_tokens()
             if current_tokens >= max_queued_tokens:
-                logger.info(
+                logger.debug(
                     "Max queued tokens reached - rejecting request %s "
                     "(current_tokens=%d, max=%d).",
                     request_id,
                     current_tokens,
                     max_queued_tokens,
                 )
+                self._record_admission_rejection("max_num_queued_tokens")
                 raise MaxQueuedTokensError()
+
+    def _record_admission_rejection(self, reason: str) -> None:
+        """Increment the frontend admission rejection counter if logging is on."""
+        if self.logger_manager is not None:
+            self.logger_manager.record_admission_rejection(reason)
 
     async def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         if not hasattr(self, "_supported_tasks"):
@@ -856,7 +862,10 @@ class AsyncLLM(EngineClient):
                         outputs_slice = engine_core_outputs[start:end]
                         # 2) Process EngineCoreOutputs.
                         processed_outputs = output_processor.process_outputs(
-                            outputs_slice, outputs.timestamp, iteration_stats
+                            outputs_slice,
+                            outputs.timestamp,
+                            iteration_stats,
+                            weight_version=outputs.weight_version,
                         )
                         # NOTE: RequestOutputs are pushed to their queues.
                         assert not processed_outputs.request_outputs
@@ -944,7 +953,6 @@ class AsyncLLM(EngineClient):
         self,
         *,
         mode: PauseMode = "abort",
-        wait_for_inflight_requests: bool | None = None,
         clear_cache: bool = True,
     ) -> None:
         """Pause generation to allow model weight updates.
@@ -960,20 +968,10 @@ class AsyncLLM(EngineClient):
                 - ``"wait"``: Wait for in-flight requests to complete.
                 - ``"keep"``: Freeze requests in queue; they resume on
                   :meth:`resume_generation`.
-            wait_for_inflight_requests: DEPRECATED: use mode argument.
             clear_cache: Whether to clear KV cache and prefix cache after
                 draining. Set to ``False`` to preserve cache for faster resume.
 
         """
-        if wait_for_inflight_requests:
-            warnings.warn(
-                "The `wait_for_inflight_requests` parameter in "
-                "`AsyncLLM.pause_generation()` is deprecated. "
-                "Please use `mode` argument instead.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-            mode = "wait"
         if clear_cache:
             await self.renderer.clear_mm_cache_async()
         await self.engine_core.pause_scheduler_async(mode=mode, clear_cache=clear_cache)
@@ -1326,6 +1324,10 @@ class AsyncLLM(EngineClient):
         await self.collective_rpc(
             "init_weight_transfer_engine", kwargs={"init_info": request.init_info}
         )
+
+    async def shutdown_weight_transfer_engine(self) -> None:
+        """Release the trainer connection without shutting down inference."""
+        await self.collective_rpc("shutdown_weight_transfer_engine")
 
     async def start_weight_update(self) -> None:
         """Start a new weight update."""
