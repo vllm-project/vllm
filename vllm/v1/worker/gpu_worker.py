@@ -308,6 +308,8 @@ class Worker(WorkerBase):
                     name: buffer.cpu().clone() for name, buffer in draft.named_buffers()
                 }
 
+        if has_kv_transfer_group():
+            get_kv_transfer_group().unregister_kv_caches()
         self.sleep_mode_backend.suspend(level)
         if self.vllm_config.model_config.enable_nccl_comm_suspend:
             suspend_device_comms()
@@ -331,6 +333,8 @@ class Worker(WorkerBase):
 
     def wake_up(self, tags: list[str] | None = None) -> None:
         self.sleep_mode_backend.resume(tags)
+        if has_kv_transfer_group() and (tags is None or "kv_cache" in tags):
+            get_kv_transfer_group().restore_kv_caches()
         if self.vllm_config.model_config.enable_nccl_comm_suspend:
             resume_device_comms()
 
@@ -356,6 +360,8 @@ class Worker(WorkerBase):
         self.synchronize_device()
 
     def discard(self, tags: tuple[str, ...]) -> None:
+        if has_kv_transfer_group() and "kv_cache" in tags:
+            get_kv_transfer_group().unregister_kv_caches()
         self.sleep_mode_backend.discard(tags)
 
     def checkpoint_prepare(self) -> None:
@@ -906,6 +912,13 @@ class Worker(WorkerBase):
 
     @instrument(span_name="Warmup (GPU)")
     def compile_or_warm_up_model(self) -> CompilationTimes:
+        if not self.use_v2_model_runner:
+            return self._compile_or_warm_up_model()
+        # MRV2 warmup forwards record expert load like real ones.
+        with self.model_runner.eplb.suppress():  # type: ignore
+            return self._compile_or_warm_up_model()
+
+    def _compile_or_warm_up_model(self) -> CompilationTimes:
         warmup_sizes: list[int] = []
 
         if (
