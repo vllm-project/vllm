@@ -16,7 +16,9 @@ two persistent launches:
 The kernels read the weights as the stock flags leave them: the shared expert
 bf16 or fused as MXFP4 expert 512 (``VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS``);
 in_proj_qkvz and out_proj / o_proj bf16 or online MXFP4 on the ASM FP4 GEMM
-(``VLLM_ROCM_USE_AITER_FP4_ASM_GEMM``).
+(``VLLM_ROCM_USE_AITER_FP4_ASM_GEMM``). With ``VLLM_QWEN38_MONO_FP6=1`` they
+read MXFP6 copies of the bf16 in_proj_qkvz and out_proj / o_proj instead
+(``pack_fp6``).
 
 With MTP (``mono_base``), a GDN layer of a verify step runs the input norm and
 vLLM's GDN core instead of K1, then K2; the drafter reads the final norm's
@@ -31,18 +33,84 @@ tags carry a device epoch bumped once a step (captured with it), so no buffer
 is zeroed between steps. Each width and kernel has its own scratch.
 """
 
+import os
 from itertools import islice
 
 import torch
 
 from vllm.forward_context import get_forward_context
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_qk_norm_rope import fused_qk_rmsnorm_rope_gate
 from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
 from vllm.models.qwen3_5.amd import mono_base as B
 from vllm.models.qwen3_5.amd.mono import layout as L
 from vllm.platforms import current_platform
 
+logger = init_logger(__name__)
+
 enabled = B.enabled
+
+# VLLM_QWEN38_MONO_FP6=1 gives the kernels MXFP6 E2M3 copies of the GDN
+# in_proj_qkvz and of every out_proj and o_proj, which pack_fp6 makes after
+# loading. K1 then multiplies in_proj_qkvz in MXFP6 (q6) and K2 its out_proj
+# or o_proj (o6), both with the bf16 inputs. The bf16 weights stay for the
+# other paths. With VLLM_QWEN38_FAKE_MXFP6_PROJ=1 they hold the same MXFP6
+# values, so a prefill step and a mono decode step use the same weights.
+FP6 = os.environ.get("VLLM_QWEN38_MONO_FP6", "0") == "1"
+
+
+@torch.no_grad()
+def pack_fp6(model, rows: int = 1024) -> None:
+    """Packs the MXFP6 copies of VLLM_QWEN38_MONO_FP6: for every layer the
+    out_proj or o_proj and, in a GDN layer, in_proj_qkvz, if its weight is
+    bf16. A copy is ``mono_fp6`` = (weight bytes, scale bytes) of the linear,
+    in the layout of moe.fp6_pack.
+
+    The multi-thread loader calls load_weights once for each batch of
+    shards, and each call ends here. So a later call packs into the same
+    buffers again, and the last call packs every weight after all of it has
+    loaded. The packing goes ``rows`` rows at a time, which keeps the
+    temporaries small. A slice of whole 16-row groups is one contiguous byte
+    range of both buffers, at 3/4 and 1/32 bytes a weight."""
+    from vllm.distributed import get_tensor_model_parallel_rank
+    from vllm.models.qwen3_5.amd.mono.moe import fp6_pack
+
+    count, nbytes = 0, 0
+    for layer in model.layers:
+        linears = [B.o_proj(layer)]
+        if layer.layer_type == "linear_attention":
+            linears.append(layer.linear_attn.in_proj_qkvz)
+        for lin in linears:
+            w = getattr(lin, "weight", None)
+            if w is None or w.dtype != torch.bfloat16 or w.dim() != 2:
+                continue
+            n, k = w.shape
+            fp6 = getattr(lin, "mono_fp6", None)
+            if fp6 is None:
+                fp6 = (
+                    torch.empty(n * k * 3 // 4, dtype=torch.uint8, device=w.device),
+                    torch.empty(n * k // 32, dtype=torch.uint8, device=w.device),
+                )
+                lin.mono_fp6 = fp6
+            for r0 in range(0, n, rows):
+                part_w, part_s = fp6_pack(w.data[r0 : r0 + rows])
+                at_w, at_s = r0 * k * 3 // 4, r0 * k // 32
+                fp6[0][at_w : at_w + part_w.numel()].copy_(part_w)
+                fp6[1][at_s : at_s + part_s.numel()].copy_(part_s)
+            count += 1
+            nbytes += fp6[0].numel() + fp6[1].numel()
+    if count == 0:
+        raise RuntimeError(
+            "VLLM_QWEN38_MONO_FP6=1 found no bf16 in_proj_qkvz, out_proj or o_proj "
+            "to pack. Serve them in bf16, for example with online MXFP4 "
+            "targets that name only the shared expert."
+        )
+    if get_tensor_model_parallel_rank() == 0:
+        logger.info(
+            "Qwen3.8 mono decode: packed MXFP6 copies of %d projections, %.2f GB a GPU",
+            count,
+            nbytes / 1e9,
+        )
 
 
 class MonoDecode(B.QwenMonoDecode):
@@ -169,6 +237,34 @@ class MonoDecode(B.QwenMonoDecode):
             why = B.dense_error(i, dense)
             if why is not None:
                 return why
+        return self._fp6_missing() if FP6 else None
+
+    def _fp6_missing(self) -> str | None:
+        """With VLLM_QWEN38_MONO_FP6=1 every layer must have the MXFP6 copy
+        of its out_proj or o_proj and every GDN layer that of in_proj_qkvz.
+        Without that check a layer whose weight was not bf16 would quietly
+        run in its old format."""
+        n_o = n_q = 0
+        for layer in self.model.layers:
+            if getattr(B.o_proj(layer), "mono_fp6", None) is None:
+                return (
+                    f"VLLM_QWEN38_MONO_FP6 layer {layer.layer_idx}: no MXFP6 out_proj "
+                    "or o_proj"
+                )
+            n_o += 1
+            if layer.layer_type == "linear_attention":
+                if getattr(layer.linear_attn.in_proj_qkvz, "mono_fp6", None) is None:
+                    return (
+                        f"VLLM_QWEN38_MONO_FP6 layer {layer.layer_idx}: no MXFP6 "
+                        "in_proj_qkvz"
+                    )
+                n_q += 1
+        logger.info_once(
+            "Qwen3.8 mono decode: MXFP6 in_proj_qkvz in %d layers, MXFP6 out_proj or "
+            "o_proj in %d layers",
+            n_q,
+            n_o,
+        )
         return None
 
     def eligible(self, input_ids, intermediate_tensors, inputs_embeds) -> bool:
@@ -210,7 +306,15 @@ class MonoDecode(B.QwenMonoDecode):
         if not is_conv_state_dim_first():
             conv_state = conv_state.transpose(-1, -2)
         s = h.size(0)
-        qq = B.asm_mxfp4(a.in_proj_qkvz)
+        # The MXFP6 copy (pack_fp6) runs on the qq path of the MXFP4
+        # in_proj, with its own weight loads and GEMV (q6).
+        fp6 = getattr(a.in_proj_qkvz, "mono_fp6", None)
+        qq = fp6 is not None or B.asm_mxfp4(a.in_proj_qkvz)
+        if fp6 is not None:
+            w_qkvz, w_qkvzs = fp6
+        else:
+            w_qkvz = a.in_proj_qkvz.weight
+            w_qkvzs = a.in_proj_qkvz.weight_scale if qq else None
         gdn.gdn_pre(
             gdn.K1Build(
                 tokens=s,
@@ -218,13 +322,14 @@ class MonoDecode(B.QwenMonoDecode):
                 eps=layer.input_layernorm.variance_epsilon,
                 norm_eps=a.norm.eps,
                 qq=qq,
+                q6=fp6 is not None,
             ),
             hidden=h,
             residual=residual,
             res_out=res_out,
             ln_w=layer.input_layernorm.weight,
-            w_qkvz=a.in_proj_qkvz.weight,
-            w_qkvzs=a.in_proj_qkvz.weight_scale if qq else None,
+            w_qkvz=w_qkvz,
+            w_qkvzs=w_qkvzs,
             w_ba=a.in_proj_ba.weight,
             conv_w=a.conv1d.weight,
             conv_state=conv_state,
@@ -245,7 +350,13 @@ class MonoDecode(B.QwenMonoDecode):
         mlp = layer.mlp
         ex = B.routed_experts(mlp)
         o = B.o_proj(layer)
-        oq = B.asm_mxfp4(o)
+        fp6 = getattr(o, "mono_fp6", None)
+        oq = fp6 is None and B.asm_mxfp4(o)
+        if fp6 is not None:
+            w_o, w_os = fp6
+        else:
+            w_o = o.weight
+            w_os = o.weight_scale if oq else None
         fused = mlp.is_fused_shared_expert_enabled
         s = core.size(0)
         out = torch.empty_like(residual)
@@ -256,13 +367,14 @@ class MonoDecode(B.QwenMonoDecode):
                 eps=layer.post_attention_layernorm.variance_epsilon,
                 fse=fused,
                 oq=oq,
+                o6=fp6 is not None,
                 og=gate is not None,
             ),
             core=core,
             gate=gate,
             residual=residual,
-            w_o=o.weight,
-            w_os=o.weight_scale if oq else None,
+            w_o=w_o,
+            w_os=w_os,
             ln_w=layer.post_attention_layernorm.weight,
             w_gate=mlp.gate.weight,
             w_sg=mlp.shared_expert_gate.weight,

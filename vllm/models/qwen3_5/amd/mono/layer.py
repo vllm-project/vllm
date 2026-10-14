@@ -11,7 +11,9 @@ One launch a layer and rank, ``BLOCKS`` x ``THREADS``, S <= 8 decode rows:
     norm     (CTAs 0 .. 63, 128 columns each): the ranks' partials in rank
              order (fp32 -> bf16), + residual (bf16) -> ``res_out``; the AR
              sums (bf16) and the columns' sums of squares (MSQ), from which
-             every consumer builds x: post_attention_layernorm (Gemma, 1 + w)
+             every consumer builds x: post_attention_layernorm (Gemma, 1 + w).
+             The router reads them as tagged pairs (XAR, MSQ), the other
+             consumers from xbuf after MSQ2, which follows the xbuf stores
     router   (CTAs 64 .. 79: 4 x 16 of this rank's 64 experts x K quarters):
              fp32 parts -> bf16 logits -> every rank's RLOG
     sgu      (CTAs 80 .. 111: 32 x 16 rows of the shared gate | up) -> SGU
@@ -53,6 +55,9 @@ Two variants follow the stock flags:
   fp4x2 through ``shuffle_weight(layout=(16, 16))``, its scales through
   ``e8m0_shuffle``; the core rows go through MXFP4 (RCEIL), as
   ``per_1x32_f4_quant_hip`` quantizes the GEMM's input.
+
+With ``VLLM_QWEN38_MONO_FP6``, ``o6``: o_proj is the MXFP6 E2M3 copy that
+``moe.fp6_pack`` makes at load time, multiplied with the bf16 core rows.
 """
 
 from dataclasses import dataclass
@@ -135,6 +140,9 @@ class K2Build:
     # o_proj's input is core x sigmoid(gate) (bf16; the attention output gate
     # as Qwen3NextAttention applies it)
     og: bool = False
+    # o_proj in MXFP6 E2M3 (fp6_pack's layout and scales), multiplied with
+    # the bf16 core rows (W6A16). It takes the place of ``oq``.
+    o6: bool = False
 
     @property
     def picks(self) -> int:
@@ -207,6 +215,12 @@ def scratch_layout(key: K2Build) -> dict:
     s = key.tokens
     pairs = {
         "msq": NRED * s,
+        # the norm tasks' sums of squares again, after their xbuf stores are
+        # drained, for the consumers that read xbuf
+        "msq2": NRED * s,
+        # the bf16 AR sums as tagged pairs, a pair a word of xbuf, for the
+        # router tasks
+        "xar": s * HIDDEN // 2,
         "rpart": R_TASKS * s * ROWS,
         "sgu": s * SI,  # 2 SI bf16 a token, two a pair
         "sgate": s,
@@ -227,24 +241,28 @@ def scratch_bytes(key: K2Build) -> int:
 @traced
 def stage_norm(c, j):
     """Columns 128 j ..: the AR sum (rank order, fp32 -> bf16) + residual (fp32;
-    bf16 -> ``res_out``); the bf16 AR sums -> the x buffer, the columns' sums
-    of squares -> MSQ. The consumers build x from them (``wait_x``)."""
+    bf16 -> ``res_out``); the bf16 AR sums -> XAR and the x buffer, the
+    columns' sums of squares -> MSQ and, after the x buffer stores, MSQ2. The
+    consumers build x from them (``x_tagged_to_lds``, ``wait_x``)."""
     s, tid, lane = c["S"], c["tid"], c["lane"]
     a = c["args"]
     mine = tid < s * 64
     t = fx.min(tid // 64, s - 1)
     cp = tid % 64
     col = j * COLS + 2 * cp
+    # The residual does not depend on the all-reduce, so its load goes out
+    # before the poll of the partials. The poll's first wait for its loads
+    # also waits for this one, so the residual is in when the partials are.
+    rw = fx.Int32(
+        bo.buffer_load(
+            rsrc(a["residual"]), (t * HIDDEN + col) // 2, vec_width=1, dtype=T.i32
+        )
+    )
     lo, hi = sum_partials(
         c["poll"],
         c["peer"]["ar_own"],
         lambda src: ((src * s + t) * HIDDEN + col) // 2,
         TP,
-    )
-    rw = fx.Int32(
-        bo.buffer_load(
-            rsrc(a["residual"]), (t * HIDDEN + col) // 2, vec_width=1, dtype=T.i32
-        )
     )
     z0 = bf16_round(lo) + bf_lo(rw)
     z1 = bf16_round(hi) + bf_hi(rw)
@@ -255,29 +273,37 @@ def stage_norm(c, j):
     )
     if mine:
         bo.buffer_store(zw, rsrc(a["res_out"]), (t * HIDDEN + col) // 2)
-    # the bf16 AR sums, drained before this token's (this wave's) MSQ
-    if mine:
-        aw = bf16_pair(lo, hi).bitcast(fx.Int32)
-        at = (t * HIDDEN + col) // 2
-        bo.buffer_store(aw, rsrc(c["xbuf"]), at, cache_modifier=CM_DEV)
+    # The router tasks read the bf16 AR sums from XAR and the sums of squares
+    # from MSQ. Both are tagged pairs, so these puts go out without a drain.
+    # The other consumers read the sums from xbuf, and MSQ2 follows only
+    # after the xbuf stores of this token (this wave) are drained.
     sq = wave_sum(z0 * z0 + z1 * z1)
-    rocdl.s_waitcnt(vmcnt=0)
+    aw = bf16_pair(lo, hi).bitcast(fx.Int32)
+    at = (t * HIDDEN + col) // 2
+    if mine:
+        c["put_words"](c["xar"], at, [aw])
     if mine & (lane == 0):
         c["put"](c["msq"], j * s + t, sq)
+    if mine:
+        bo.buffer_store(aw, rsrc(c["xbuf"]), at, cache_modifier=CM_DEV)
+    rocdl.s_waitcnt(vmcnt=0)
+    if mine & (lane == 0):
+        c["put"](c["msq2"], j * s + t, sq)
 
 
 @traced
 def load_rstd(c):
     """Every norm task's sums of squares -> each token's rstd -> LDS ``rs``
     (fp32 sum in task order). A wave waits on the last token's first: the
-    full poll then doesn't spin."""
+    full poll then doesn't spin. It polls MSQ2, which a norm task puts after
+    its xbuf stores, so xbuf is complete when the rstd is in."""
     s, tid, lane, red = c["S"], c["tid"], c["lane"], c["red"]
     if tid < 64:
-        c["poll"]([(c["msq"], tid * s + s - 1, 1)])
+        c["poll"]([(c["msq2"], tid * s + s - 1, 1)])
     gpu.barrier()
     if tid < 64 * s:
         t = tid // 64
-        v = c["poll"]([(c["msq"], lane * s + t, 1)])[0][0]
+        v = c["poll"]([(c["msq2"], lane * s + t, 1)])[0][0]
         fx.ptr_store(f32_of(v), red + (t * 64 + lane))
     gpu.barrier()
     if tid < s:
@@ -327,6 +353,81 @@ def x_rows_to_lds(c, klen, k0):
 
 
 @traced
+def x_tagged_to_lds(c, klen, k0):
+    """The router tasks: x columns k0 .. k0 + klen -> LDS as ``x_rows_to_lds``
+    writes them. The norm tasks' AR sums (XAR) and sums of squares (MSQ)
+    come in one poll, so neither the norm tasks' drain nor a second round
+    trip after the poll is on the router's path. The rstd and the x
+    arithmetic are those of ``load_rstd`` and ``x_rows_to_lds``."""
+    s, tid, lane, red, a = c["S"], c["tid"], c["lane"], c["red"], c["args"]
+    xrow = klen + gemv.LDS_PAD
+    words = s * klen // 8
+    n = (words + THREADS - 1) // THREADS
+    es, gs, rvs, wvs = [], [], [], []
+    for i in range_constexpr(n):
+        e = fx.min(tid + THREADS * i, words - 1)
+        t = e // (klen // 8)
+        kk = e % (klen // 8) * 8
+        g = (t * HIDDEN + k0 + kk) // 2
+        es.append(e)
+        gs.append(g)
+        # The residual and the norm weights do not depend on the norm
+        # tasks, so their loads go out before the poll.
+        rvs.append(
+            fx.Vector(bo.buffer_load(rsrc(a["residual"]), g, vec_width=4, dtype=T.i32))
+        )
+        wvs.append(
+            fx.Vector(
+                bo.buffer_load(
+                    rsrc(a["ln_w"]), (k0 + kk) // 2, vec_width=4, dtype=T.i32
+                )
+            )
+        )
+    # Every thread polls one sum of squares, so all threads run the same
+    # poll. A thread past the first 64 s polls a pair that a lower thread
+    # also polls, and only the first 64 s threads store theirs.
+    mt = (tid // 64) % s
+    specs = [(c["msq"], lane * s + mt, 1)]
+    for g in gs:
+        specs += [(c["xar"], g, 2), (c["xar"], g + 2, 2)]
+    got = c["poll"](specs, batch=len(specs))
+    if tid < 64 * s:
+        fx.ptr_store(f32_of(got[0][0]), red + (mt * 64 + lane))
+    gpu.barrier()
+    if tid < s:
+        tot = fx.ptr_load(red + tid * 64)
+        for q in range_constexpr(1, NRED):
+            tot = tot + fx.ptr_load(red + (tid * 64 + q))
+        r = hw_rsq(tot * fx.Float32(1.0 / HIDDEN) + fx.Float32(c["eps"]))
+        fx.ptr_store(r, c["rs"] + tid)
+    gpu.barrier()
+    for i in range_constexpr(n):
+        e = es[i]
+        t = e // (klen // 8)
+        kk = e % (klen // 8) * 8
+        av = [
+            got[1 + 2 * i][0],
+            got[1 + 2 * i][1],
+            got[2 + 2 * i][0],
+            got[2 + 2 * i][1],
+        ]
+        rv, wv = rvs[i], wvs[i]
+        r = fx.ptr_load(c["rs"] + t)
+        ys = []
+        for d in range_constexpr(4):
+            z0 = bf_lo(av[d]) + bf_lo(rv[d])
+            z1 = bf_hi(av[d]) + bf_hi(rv[d])
+            w0 = fx.Float32(1.0) + bf_lo(wv[d])
+            w1 = fx.Float32(1.0) + bf_hi(wv[d])
+            ys.append(bf16_pair(z0 * r * w0, z1 * r * w1).bitcast(fx.Int32))
+        if tid + THREADS * i < words:
+            fx.ptr_store(
+                fx.Vector.from_elements(ys, fx.Int32), c["xl"] + (t * xrow + kk) // 2
+            )
+    gpu.barrier()
+
+
+@traced
 def wait_x(c, klen, k0):
     """Every norm task's sums in -> x columns k0 .. k0 + klen into LDS."""
     load_rstd(c)
@@ -353,7 +454,7 @@ def stage_router(c, i, q, ops):
     q > 0 publish fp32 partials; part 0 adds them in part order, rounds to bf16
     (GateLinear's output) and puts the logits to every rank's RLOG."""
     s, lane, wave, red = c["S"], c["lane"], c["wave"], c["red"]
-    wait_x(c, R_K, q * R_K)
+    x_tagged_to_lds(c, R_K, q * R_K)
     acc = gemv.mfmas(lane, wave, c["xl"], R_K + gemv.LDS_PAD, R_K, s, ops)
     fx.ptr_store(acc, red + (wave * 64 + lane) * 4)
     gpu.barrier()
@@ -500,6 +601,7 @@ def build(key: K2Build):
         return _BUILDS[key]
     s = key.tokens
     need(1 <= s <= L.MAX_TOKENS, f"{s} rows, the kernels take 1..{L.MAX_TOKENS}")
+    need(not (key.oq and key.o6), "o6 takes the place of oq")
     lay = scratch_layout(key)
     # every width at the widest's offsets: a step's parity half never overlaps
     # the other half of a step of another width
@@ -537,7 +639,10 @@ def build(key: K2Build):
         rs: fx.Array[fx.Float32, 16, 16]
 
     keyed = key_tuple(key, digest())
-    name = f"qwen38_mono_k2_s{s}_f{int(key.fse)}_o{int(key.oq)}_a{int(key.og)}"
+    name = (
+        f"qwen38_mono_k2_s{s}_f{int(key.fse)}_o{int(key.oq)}{int(key.o6)}"
+        f"_a{int(key.og)}"
+    )
 
     @flyc.kernel(name=name, known_block_size=[THREADS, 1, 1])
     def k2(
@@ -601,6 +706,7 @@ def build(key: K2Build):
             "eps": key.eps,
             "fse": key.fse,
             "oq": key.oq,
+            "o6": key.o6,
             "KT": kt,
             "put": mb.put,
             "put_bf": mb.put_bf,
@@ -645,6 +751,8 @@ def build(key: K2Build):
         }
         for region in (
             "msq",
+            "msq2",
+            "xar",
             "rpart",
             "sgu",
             "sgate",
@@ -786,7 +894,8 @@ def layer_post(
     """Host launcher; every weight as vLLM holds it after loading, the experts'
     shuffled (``layout``). ``w_os``: an fp4 o_proj's scales (``key.oq``);
     ``w_sgu`` / ``w_sd``: the unfused shared expert (not ``key.fse``); ``gate``:
-    the attention output gate (``key.og``), core's shape.
+    the attention output gate (``key.og``), core's shape. With ``key.o6``,
+    ``w_o`` and ``w_os`` are fp6_pack's MXFP6 weight and scales.
     ``peers``: the int64 table of every rank's peer buffer (at least
     ``peer_bytes(S)`` each)."""
     s = key.tokens
@@ -807,6 +916,17 @@ def layer_post(
         need(
             w_o.shape == (HIDDEN, OK // 2) and w_o.dtype in fp4,
             "o_proj: fp4x2 [8192, 1024]",
+        )
+        need(
+            w_os is not None
+            and w_os.numel() == HIDDEN * OK // 32
+            and w_os.element_size() == 1,
+            "o_proj scales: e8m0, one a 32-block",
+        )
+    elif key.o6:
+        need(
+            w_o.dtype == torch.uint8 and w_o.numel() == HIDDEN * OK * 3 // 4,
+            "o_proj: fp6_pack's MXFP6 weight, 8192 x 2048 x 3/4 bytes",
         )
         need(
             w_os is not None
@@ -860,7 +980,7 @@ def layer_post(
                 "core": core.data_ptr(),
                 "residual": residual.data_ptr(),
                 "w_o": w_o.data_ptr(),
-                "w_os": ptr(w_os) if key.oq else 0,
+                "w_os": ptr(w_os) if key.oq or key.o6 else 0,
                 "ln_w": ln_w.data_ptr(),
                 "w_gate": w_gate.data_ptr(),
                 "w_sg": w_sg.data_ptr(),

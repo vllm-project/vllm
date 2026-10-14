@@ -293,7 +293,19 @@ class Qwen3_5Model(Qwen3NextModel):
                 ckpt_prefix="mlp.shared_expert",
             )
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        loaded = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        # VLLM_QWEN38_FAKE_MXFP6_PROJ=1 rounds the bf16 projections to MXFP6
+        # here, after loading and before the mono kernels or a CUDA graph
+        # read them.
+        from vllm.models.qwen3_5.amd import mxfp6
+
+        if mxfp6.ROUND_PROJ:
+            mxfp6.round_projections(self)
+        # The MXFP6 copies for the mono kernels are packed from the weights
+        # after the rounding, so that they hold the same values.
+        if mono_decode.FP6:
+            mono_decode.pack_fp6(self)
+        return loaded
 
 
 class Qwen3_5ForCausalLMBase(

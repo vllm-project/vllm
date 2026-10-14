@@ -81,6 +81,8 @@ from vllm.models.qwen3_5.amd.mono.moe import (
     f32_of,
     fp4_gemv,
     fp4_gemv_loads,
+    fp6_gemv,
+    fp6_gemv_loads,
     quant_x,
     sigmoid,
     step_tag,
@@ -125,6 +127,9 @@ class K1Build:
     eps: float = 1e-6  # input_layernorm
     norm_eps: float = 1e-6  # the gated norm
     qq: bool = False  # in_proj_qkvz MXFP4 (ASM FP4 GEMM layout)
+    # (``qq``) in_proj_qkvz in MXFP6 E2M3, in the layout of moe.fp6_pack,
+    # multiplied with the bf16 x rows (W6A16). quant_x does not run.
+    q6: bool = False
 
 
 ABI = KernelAbi(
@@ -249,8 +254,13 @@ def proj_loads(c, rg):
 
 
 def qkvz_fp4_loads(c, rg):
-    """An fp4 in_proj_qkvz task's (rg < 288) operands for this wave."""
+    """An fp4 (``q6``: fp6) in_proj_qkvz task's (rg < 288) operands for this
+    wave."""
     a = c["args"]
+    if const_expr(c.get("q6", False)):
+        return fp6_gemv_loads(
+            c["lane"], c["wave"], a["w_qkvz"], a["w_qkvzs"], rg, HIDDEN
+        )
     return fp4_gemv_loads(c["lane"], c["wave"], a["w_qkvz"], a["w_qkvzs"], rg, HIDDEN)
 
 
@@ -355,10 +365,13 @@ def ba_sums(c, t, h, parts):
 @traced
 def stage_proj(c, rg, ops, fp4=False):
     """Rows 16 rg .. of [in_proj_qkvz; in_proj_ba] -> bf16 PROJ (``fp4``: an
-    in_proj_qkvz task on the quantized rows)."""
+    in_proj_qkvz task on the quantized rows, with ``q6`` an MXFP6 one on the
+    bf16 rows)."""
     s, tid, lane, wave, red = c["S"], c["tid"], c["lane"], c["wave"], c["red"]
     xrow = HIDDEN + gemv.LDS_PAD
-    if const_expr(fp4):
+    if const_expr(fp4 and c.get("q6", False)):
+        acc = fp6_gemv(lane, wave, c["xl"], xrow, HIDDEN, s, ops)
+    elif const_expr(fp4):
         acc = fp4_gemv(lane, wave, c["xl"], xrow, HIDDEN, s, rg, ops)
     else:
         acc = gemv.mfmas(lane, wave, c["xl"], xrow, HIDDEN, s, ops)
@@ -626,7 +639,7 @@ def build(key: K1Build):
         rs: fx.Array[fx.Float32, 16, 16]
 
     keyed = key_tuple(key, digest())
-    name = f"qwen38_mono_k1_s{s}_f{int(key.first)}_q{int(key.qq)}"
+    name = f"qwen38_mono_k1_s{s}_f{int(key.first)}_q{int(key.qq)}{int(key.q6)}"
 
     @flyc.kernel(name=name, known_block_size=[THREADS, 1, 1])
     def k1(
@@ -663,6 +676,7 @@ def build(key: K1Build):
         mb = Mailbox(step_tag(epoch, layer) - 1)
         c = {
             "qq": key.qq,
+            "q6": key.q6,
             "gdn": L.GDN,
             "ba_of": _ba_of,
             "z_gate": silu,
@@ -721,6 +735,13 @@ def build(key: K1Build):
                 rg2 = 2 * BLOCKS - 1 - bid
                 stage_proj(c, rg2, proj_loads(c, rg2))
         else:
+
+            def quant():
+                # The MXFP6 in_proj (q6) multiplies the bf16 rows, so x is
+                # not quantized.
+                if const_expr(not key.q6):
+                    quant_x(c, HIDDEN)
+
             # rg < 256 is in_proj_qkvz; the second tasks 256 .. 287 on CTAs
             # 224 .. 255, their weights with the first's; in_proj_ba's parts
             # on CTAs 0 .. 15 (unquantized x: before quant_x)
@@ -730,18 +751,18 @@ def build(key: K1Build):
                 rg2 = 2 * BLOCKS - 1 - bid
                 ops2 = qkvz_fp4_loads(c, rg2)
                 local_x(c)
-                quant_x(c, HIDDEN)
+                quant()
                 stage_proj(c, rg, ops, fp4=True)
                 stage_proj(c, rg2, ops2, fp4=True)
             if bid < BA_TASKS:
                 bops = ba_loads(c, bid, BA_PARTS, BA_K)
                 local_x(c)
                 stage_ba(c, bid, bops, BA_PARTS, BA_K)
-                quant_x(c, HIDDEN)
+                quant()
                 stage_proj(c, rg, ops, fp4=True)
             if (bid >= BA_TASKS) & (bid < 2 * BLOCKS - QKVZ_TASKS):
                 local_x(c)
-                quant_x(c, HIDDEN)
+                quant()
                 stage_proj(c, rg, ops, fp4=True)
         gdn_tasks(c, nr)
 
@@ -839,12 +860,19 @@ def gdn_pre(
         "hidden / res_out shape",
     )
     need(core.shape == (s, L.CORE) and ln_w.shape == (HIDDEN,), "core / ln_w shape")
-    if key.qq:
+    need(key.qq or not key.q6, "q6 is a weight format of the qq path")
+    if key.q6:
+        need(
+            w_qkvz.dtype == torch.uint8 and w_qkvz.numel() == L.QKVZ * HIDDEN * 3 // 4,
+            "in_proj_qkvz: fp6_pack's MXFP6 weight, 4608 x 8192 x 3/4 bytes",
+        )
+    if key.qq and not key.q6:
         need(
             w_qkvz.shape == (L.QKVZ, HIDDEN // 2)
             and w_qkvz.dtype in (torch.uint8, torch.float4_e2m1fn_x2),
             "in_proj_qkvz: fp4x2 [4608, 4096]",
         )
+    if key.qq:
         need(
             w_qkvzs is not None
             and w_qkvzs.numel() == L.QKVZ * HIDDEN // 32

@@ -11,7 +11,8 @@ the thread ids, ``rank``, the mailbox (``put``, ``put_bf``, ``put_words``,
 ``poll``), LDS (``red``, ``xl``, ``il``, ``contrib``, ``rt``), the scratch
 regions ``sgate`` / ``route`` / ``inter``, the peer regions ``ar`` / ``final``,
 ``args`` and the variant flags ``fse`` / ``oq`` / ``og`` / ``u1``, and, where
-the model sets them, ``up`` (a union slot for each pick). Where the
+the model sets them, ``up`` (a union slot for each pick) and ``o6`` (o_proj
+in MXFP6, ``fp6_pack``'s layout). Where the
 router logits are is the model's: ``rlog_at(t, lane, i)`` is token t's logit
 of expert lane + 64 i as a poll spec, ``rlog_last`` (n, spec of i) the n
 logits that land last, and CTA ``route_cta`` also puts ROUTE (for the tests).
@@ -20,6 +21,7 @@ logits that land last, and CTA ``route_cta`` also puts ROUTE (for the tests).
 import math
 
 import flydsl.expr as fx
+import torch
 from aiter.ops.flydsl.kernels import buffer_ops as bo
 from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr import math as fmath
@@ -247,6 +249,147 @@ def fp4_gemv(lane, wave, xl, xrow, k, s, rg, ops):
     return acc
 
 
+# ---------------------------------------------------------------- fp6 GEMV
+# A 16-row group's 128-K step of an MXFP6 weight in fp6_pack's layout: 64
+# lanes of 24 bytes, so 384 dwords.
+FP6_TILE = 384
+
+
+def fp6_gemv_loads(lane, wave, w, ws, rg, k):
+    """An MXFP6 linear's rows 16 rg .. (K ``k``, fp6_pack's weight and scales)
+    for this wave, whose K steps are w n .. w n + n - 1. A lane's 32 E2M3
+    codes of a step are one 16-byte and one 8-byte load. A scale word of a
+    lane holds the e8m0 codes of 4 steps, byte (step % 4) for each step. With
+    fewer than 4 steps a wave (n = 2 for o_proj, K 2048), waves share a word
+    and each loads it."""
+    n = k // L.FP4_STEP // WAVES
+    assert n % 4 == 0 or 4 % n == 0, "fp6_gemv_loads: n divides 4 or 4 divides n"
+    r_w, r_s = rsrc(w), rsrc(ws)
+    ops = []
+    for i in range(n):
+        at = (rg * (k // L.FP4_STEP) + wave * n + i) * FP6_TILE
+        ops.append(
+            fx.Vector(
+                bo.buffer_load(
+                    r_w, at + lane * 4, vec_width=4, dtype=T.i32, cache_modifier=CM_NT
+                )
+            )
+        )
+        ops.append(
+            fx.Vector(
+                bo.buffer_load(
+                    r_w,
+                    at + 256 + lane * 2,
+                    vec_width=2,
+                    dtype=T.i32,
+                    cache_modifier=CM_NT,
+                )
+            )
+        )
+    for j in range(max(1, n // 4)):
+        at = (rg * (k // L.FP4_STEP // 4) + (wave * n) // 4 + j) * 64 + lane
+        ops.append(fx.Int32(bo.buffer_load(r_s, at, vec_width=1, dtype=T.i32)))
+    return ops
+
+
+def fp6_gemv(lane, wave, xl, xrow, k, s, ops):
+    """The ``fp6_gemv_loads`` operands against the bf16 rows at LDS ``xl`` (row
+    stride ``xrow``) -> this wave's fp32 partial MFMA tile. One
+    v_cvt_scalef32_pk32_bf16_fp6 turns a lane's 32 codes of a step, times
+    their scale, into 32 bf16 values exactly. Dwords 4 q .. 4 q + 3 of them
+    hold K 32 (lane / 16) + 8 q .. + 8, the A operand of MFMA q, the order in
+    which fp4_mfmas reads an MXFP4 tile."""
+    n = k // L.FP4_STEP // WAVES
+    t = fx.min(lane % 16, s - 1)
+    acc = fx.Vector.filled(4, 0.0, fx.Float32)
+    for i in range_constexpr(n):
+        # The byte of step w n + i in its scale word is (w n + i) % 4. When 4
+        # divides n that is i % 4, and otherwise it depends on the wave.
+        shift = (i % 4) * 8 if n % 4 == 0 else ((wave * n + i) % 4) * 8
+        code = (ops[2 * n + i // 4] >> shift) & 0xFF
+        lo, hi = ops[2 * i], ops[2 * i + 1]
+        codes = fx.Vector.from_elements(
+            [lo[0], lo[1], lo[2], lo[3], hi[0], hi[1]], fx.Int32
+        )
+        vals = fx.Vector(
+            rocdl.cvt_scalef32_pk32_bf16_fp6(
+                T.vec(32, T.bf16),
+                as_ir_value(codes),
+                as_ir_value(fx.Float32(pow2(code))),
+            )
+        ).bitcast(fx.Int32)
+        xoff = t * xrow + (wave * n + i) * L.FP4_STEP + 32 * (lane // 16)
+        for q in range_constexpr(4):
+            xb = fx.Vector(
+                fx.ptr_load(
+                    xl + (xoff + 8 * q) // 2,
+                    result_type=fx.Vector.make_type(4, fx.Int32),
+                )
+            )
+            a = fx.Vector.from_elements([vals[4 * q + d] for d in range(4)], fx.Int32)
+            acc = mfma_bf16(a.bitcast(fx.BFloat16), xb.bitcast(fx.BFloat16), acc)
+    return acc
+
+
+def fp6_pack(w):
+    """bf16 [N, K] -> (MXFP6 E2M3 weight, its e8m0 scales) as two flat uint8
+    tensors in the layout that fp6_gemv_loads reads. The scale and the
+    rounding are amd-quark's MXFP6 E2M3, as in mxfp6.py: a 32-block's scale
+    is 2 to the power of (the exponent of its amax rounded to 3 mantissa
+    bits) - 2, and the values round to nearest, ties to even, at most 7.5.
+
+    The 16-row group rg and the 128-K step st form a tile of 1536 bytes at
+    byte (rg (K / 128) + st) 1536. Lane l = 16 g + r of the tile holds row
+    16 rg + r at K 128 st + 32 g + i, i = 0 .. 31, as 32 6-bit codes, code i
+    at bits 6 i .. 6 i + 5 of 24 bytes. The first 16 bytes go to byte 16 l of
+    the tile and the last 8 to byte 1024 + 8 l. The scale of the block is
+    byte (st % 4) of scale word (rg (K / 512) + st / 4) 64 + l."""
+    n, k = w.shape
+    L.need(n % 16 == 0 and k % 512 == 0, "fp6_pack: N a multiple of 16 and K of 512")
+    v = w.float().reshape(n, k // 32, 32)
+    amax = v.abs().amax(dim=-1, keepdim=True)
+    exp = (((amax.view(torch.int32) + 0x80000) & 0x7F800000) >> 23) - 129
+    exp = exp.clamp(-126, 127)
+    a = v.abs() / torch.exp2(exp.float())
+    # The 32 E2M3 magnitudes in code order are 0 to 1.875 in steps of 0.125,
+    # 2 to 3.75 in steps of 0.25 and 4 to 7.5 in steps of 0.5. torch.round
+    # rounds ties to even, and a value that rounds up to the next range gets
+    # that range's first code, which has the same value.
+    idx = torch.where(
+        a < 2.0,
+        torch.round(a * 8.0),
+        torch.where(
+            a < 4.0,
+            torch.round(a * 4.0) + 8.0,
+            torch.round(a * 2.0).clamp(max=15.0) + 16.0,
+        ),
+    ).to(torch.int32)
+    codes = (idx | ((v < 0).to(torch.int32) << 5)).reshape(n, k // 4, 4)
+    # 4 codes are 24 bits, 3 bytes in little-endian order.
+    u = (
+        codes[..., 0]
+        | (codes[..., 1] << 6)
+        | (codes[..., 2] << 12)
+        | (codes[..., 3] << 18)
+    )
+    b = torch.stack((u & 0xFF, (u >> 8) & 0xFF, (u >> 16) & 0xFF), dim=-1).to(
+        torch.uint8
+    )
+    # [rg, r, st, g, 24 bytes] -> [rg, st, g, r, 24 bytes], so lane 16 g + r.
+    b = b.reshape(n // 16, 16, k // 128, 4, 24).permute(0, 2, 3, 1, 4)
+    tiles = torch.cat(
+        (
+            b[..., :16].reshape(n // 16, k // 128, 1024),
+            b[..., 16:].reshape(n // 16, k // 128, 512),
+        ),
+        dim=-1,
+    )
+    # [rg, r, st / 4, st % 4, g] -> [rg, st / 4, g, r, st % 4].
+    sc = (exp + 127).to(torch.uint8).reshape(n // 16, 16, k // 512, 4, 4)
+    sc = sc.permute(0, 2, 4, 1, 3)
+    return tiles.reshape(-1).contiguous(), sc.reshape(-1).contiguous()
+
+
 @traced
 def ksplit_rows(c, region, at, q, parts, out):
     """A K-split GEMV task's 16 rows (``red``; part q of ``parts``): parts
@@ -376,10 +519,13 @@ def quant_x_fp4(c, k):
 
 # ---------------------------------------------------------------- o_proj
 def o_loads(c, rg, k):
-    """o_proj rows 16 rg .. (K ``k``): this wave's weights."""
+    """o_proj rows 16 rg .. (K ``k``): this wave's weights (``o6``: the MXFP6
+    copy of fp6_pack, its scales in ``w_os``)."""
     lane, wave, a = c["lane"], c["wave"], c["args"]
     if const_expr(c["oq"]):
         return fp4_gemv_loads(lane, wave, a["w_o"], a["w_os"], rg, k)
+    if const_expr(c.get("o6", False)):
+        return fp6_gemv_loads(lane, wave, a["w_o"], a["w_os"], rg, k)
     return gemv.loads(lane, wave, a["w_o"], rg * ROWS, k)
 
 
@@ -390,6 +536,8 @@ def stage_o(c, rg, ops, k):
     s, tid, lane, wave, red = c["S"], c["tid"], c["lane"], c["wave"], c["red"]
     if const_expr(c["oq"]):
         acc = fp4_gemv(lane, wave, c["xl"], k + gemv.LDS_PAD, k, s, rg, ops)
+    elif const_expr(c.get("o6", False)):
+        acc = fp6_gemv(lane, wave, c["xl"], k + gemv.LDS_PAD, k, s, ops)
     else:
         acc = gemv.mfmas(lane, wave, c["xl"], k + gemv.LDS_PAD, k, s, ops)
     fx.ptr_store(acc, red + (wave * 64 + lane) * 4)
