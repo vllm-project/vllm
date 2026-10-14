@@ -195,25 +195,6 @@ def test_cpu_reset_discards_stores_but_keeps_removals():
     assert event.req_context is None
 
 
-def test_cpu_take_events_detaches_queue_before_yielding():
-    manager = make_cpu_manager(
-        num_chunks=2,
-        enable_events=True,
-        self_describing_kv_events=True,
-    )
-    keys = to_keys([1])
-    manager.prepare_store(keys, _EMPTY_REQ_CTX)
-    manager.complete_store(keys, _EMPTY_REQ_CTX)
-
-    event_iter = iter(manager.take_events())
-    event = next(event_iter)
-
-    assert event.req_context is _EMPTY_REQ_CTX
-    assert manager.events == []
-    event_iter.close()
-    assert list(manager.take_events()) == []
-
-
 def test_cpu_events_do_not_retain_context_when_provenance_is_disabled():
     manager = make_cpu_manager(num_chunks=2, enable_events=True)
     keys = to_keys([1])

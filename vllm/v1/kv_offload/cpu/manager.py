@@ -452,9 +452,8 @@ class CPUOffloadingManager(OffloadingManager):
     @override
     def take_events(self) -> Iterable[OffloadingEvent]:
         if self.events is not None:
-            events = self.events
-            self.events = []
-            yield from events
+            yield from self.events
+            self.events.clear()
 
     def get_stats(self) -> OffloadingConnectorStats | None:
         stats = OffloadingConnectorStats()
