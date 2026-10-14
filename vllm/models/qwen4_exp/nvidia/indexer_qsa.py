@@ -273,6 +273,7 @@ class QSAIndexer(nn.Module):
             return result, None
 
         from .ops.qsa import qsa_compress_groups_with_ratio, qsa_store_cache_rows
+        from .ops.qsa_dcp_selector import expand_localize_qsa_block_indices
         from .ops.qsa_indexer import (
             expand_qsa_block_indices,
             qsa_select_paged_decode,
@@ -470,6 +471,20 @@ class QSAIndexer(nn.Module):
                 compressed_metadata.max_seq_len,
                 selector_shard,
             )
+        impl = cast("Qwen4ExpQSAFlashAttentionImpl", attn.impl)
+        if selector_shard is not None:
+            # The sharded selector expands and keeps this rank's tokens in one
+            # launch: the rows localize_dcp_selection_ would write.
+            expand_localize_qsa_block_indices(
+                block_indices,
+                compressed_metadata.logical_positions[:num_tokens],
+                visible_blocks,
+                self.compress_ratio,
+                self.token_topk,
+                out,
+                impl.dcp_token_shard,
+            )
+            return out, main_outputs
         expand_qsa_block_indices(
             block_indices,
             compressed_metadata.logical_positions[:num_tokens],
@@ -480,7 +495,7 @@ class QSAIndexer(nn.Module):
         )
         # Under DCP, keep this rank's share as local token ids once per
         # selection; skip_topk steps (above) reuse these rows as they are.
-        cast("Qwen4ExpQSAFlashAttentionImpl", attn.impl).localize_dcp_selection_(out)
+        impl.localize_dcp_selection_(out)
         return out, main_outputs
 
 

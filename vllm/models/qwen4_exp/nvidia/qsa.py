@@ -60,7 +60,7 @@ from vllm.v1.kv_cache_interface import (
     get_kv_quant_mode,
 )
 
-from ..common.qsa_cache import QSAForwardMetadata
+from ..common.qsa_cache import QSADCPShard, QSAForwardMetadata
 from . import model
 from .indexer_qsa import QSAIndexer
 
@@ -275,6 +275,11 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
                     "Qwen4Exp QSA DCP requires block_size divisible by "
                     "cp_kv_cache_interleave_size"
                 )
+        # This rank's share of the main KV cache, in tokens; the sharded
+        # selector's fused expand+localize reads it once per selection.
+        self.dcp_token_shard = QSADCPShard(
+            self.dcp_rank, self.dcp_world_size, self.cp_kv_cache_interleave_size
+        )
         if self.kv_cache_dtype not in ("auto", "bfloat16", "fp8", "fp8_e4m3"):
             raise NotImplementedError(
                 "Qwen4Exp QSA requires a BF16 or FP8-e4m3 main KV cache"
@@ -288,7 +293,8 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
         ``topk_indices_buffer`` holds rank-local token ids with their count.
         MTP skip_topk steps and ``compact_topk_indices`` reuse those rows; the
         attention reads them without localizing again. Without DCP the global
-        selection stays unchanged.
+        selection stays unchanged. The sharded selector does not call this:
+        its fused ``expand_localize_qsa_block_indices`` writes the local rows.
         """
         if self.dcp_world_size <= 1:
             return
@@ -414,13 +420,14 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
         """Attend over local selections and merge rank results.
 
         ``topk_buffer`` already holds this rank's local selection: the indexer
-        localizes each new selection once (``localize_dcp_selection_``), and
-        MTP skip_topk steps reuse those rows. The partial output, its LSE and
-        the head-major combine buffer come from the shared workspace. They
-        are reserved for max_num_batched_tokens rows, as FlashAttention DCP
-        reserves its context output, so the workspace does not grow after
-        CUDA graph capture. The gathered query and the combine output stay
-        collective outputs, as in FlashAttention DCP.
+        localizes each new selection once (``localize_dcp_selection_``, or the
+        fused ``expand_localize_qsa_block_indices`` with the sharded
+        selector), and MTP skip_topk steps reuse those rows. The partial
+        output, its LSE and the head-major combine buffer come from the shared
+        workspace. They are reserved for max_num_batched_tokens rows, as
+        FlashAttention DCP reserves its context output, so the workspace does
+        not grow after CUDA graph capture. The gathered query and the combine
+        output stay collective outputs, as in FlashAttention DCP.
         """
         from vllm.distributed.parallel_state import get_dcp_group
         from vllm.v1.worker.workspace import current_workspace_manager

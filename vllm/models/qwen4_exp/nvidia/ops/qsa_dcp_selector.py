@@ -173,7 +173,128 @@ def merge_qsa_dcp_topk(
     select_qsa_dcp_topk(gathered.view(shard.world_size, *packed.shape), block_indices)
 
 
+@triton.jit(do_not_specialize=["dcp_rank"])
+def _expand_localize_qsa_indices_kernel(
+    block_indices_ptr,
+    query_positions_ptr,
+    visible_blocks_ptr,
+    output_ptr,
+    stride_blocks_row,
+    stride_blocks_column,
+    stride_output_row,
+    stride_output_column,
+    dcp_rank,
+    BLOCK_TOPK: tl.constexpr,
+    COMPRESS_RATIO: tl.constexpr,
+    DCP_WORLD: tl.constexpr,
+    DCP_INTERLEAVE: tl.constexpr,
+    BLOCK_W: tl.constexpr,
+) -> None:
+    """``_expand_qsa_indices_kernel`` then ``_qsa_localize_dcp_kernel``, fused.
+
+    One program holds a whole row. It expands the row as the expand kernel
+    does, keeps the tokens this DCP rank owns (``DCP_INTERLEAVE`` is in
+    tokens) and writes them as rank-local indices to the front of the row
+    in their original order, ``-1`` after them, and their count in the
+    trailing column. The two stores cover disjoint columns.
+    """
+    OUTPUT_WIDTH: tl.constexpr = BLOCK_TOPK * COMPRESS_RATIO + COMPRESS_RATIO - 1
+    row = tl.program_id(0)
+    columns = tl.arange(0, BLOCK_W)
+    query_position = tl.load(query_positions_ptr + row)
+    visible_blocks = tl.load(visible_blocks_ptr + row)
+    complete_blocks = tl.minimum(visible_blocks, BLOCK_TOPK)
+    expanded_count = complete_blocks * COMPRESS_RATIO
+    tail_start = ((query_position + 1) // COMPRESS_RATIO) * COMPRESS_RATIO
+    tail_count = (query_position + 1) - tail_start
+
+    is_expanded = columns < expanded_count
+    block_rank = columns // COMPRESS_RATIO
+    offset = columns % COMPRESS_RATIO
+    safe_rank = tl.minimum(block_rank, BLOCK_TOPK - 1)
+    block = tl.load(
+        block_indices_ptr + row * stride_blocks_row + safe_rank * stride_blocks_column,
+        mask=is_expanded,
+        other=-1,
+    )
+    expanded = block * COMPRESS_RATIO + offset
+    tail_offset = columns - expanded_count
+    is_tail = (
+        (columns >= expanded_count)
+        & (tail_offset < tail_count)
+        & (tail_offset < COMPRESS_RATIO - 1)
+    )
+    token = tl.where(is_expanded, expanded, tail_start + tail_offset)
+    valid = (columns < OUTPUT_WIDTH) & (is_expanded | is_tail) & (token >= 0)
+    count = expanded_count + tail_count
+
+    safe_token = tl.maximum(token, 0)
+    owned = (
+        valid
+        & (columns < count)
+        & (safe_token // DCP_INTERLEAVE % DCP_WORLD == dcp_rank)
+    )
+    local_token = (
+        safe_token // (DCP_INTERLEAVE * DCP_WORLD)
+    ) * DCP_INTERLEAVE + safe_token % DCP_INTERLEAVE
+    owned_flags = owned.to(tl.int32)
+    target = tl.cumsum(owned_flags, axis=0) - 1
+    num_owned = tl.sum(owned_flags, axis=0)
+    row_output = output_ptr + row * stride_output_row
+    tl.store(row_output + target * stride_output_column, local_token, mask=owned)
+    tl.store(
+        row_output + columns * stride_output_column,
+        -1,
+        mask=(columns >= num_owned) & (columns < OUTPUT_WIDTH),
+    )
+    tl.store(row_output + OUTPUT_WIDTH * stride_output_column, num_owned)
+
+
+def expand_localize_qsa_block_indices(
+    block_indices: torch.Tensor,
+    query_positions: torch.Tensor,
+    visible_blocks: torch.Tensor,
+    compress_ratio: int,
+    token_topk: int,
+    out: torch.Tensor,
+    token_shard: QSADCPShard,
+) -> None:
+    """``expand_qsa_block_indices`` then ``qsa_localize_dcp_indices``, in one launch.
+
+    ``block_indices`` holds global states (after ``merge_qsa_dcp_topk``) and
+    ``visible_blocks`` the global visible counts. ``token_shard`` is this
+    rank's share of the main KV cache, in tokens. ``out`` receives the
+    selected tokens this rank owns as rank-local indices plus their count,
+    the rows ``Qwen4ExpQSAFlashAttentionImpl.localize_dcp_selection_`` writes.
+    """
+    assert token_topk % compress_ratio == 0
+    output_width = token_topk + compress_ratio - 1
+    assert block_indices.shape == (
+        query_positions.numel(),
+        token_topk // compress_ratio,
+    )
+    assert out.shape == (block_indices.shape[0], output_width + 1)
+    if not out.shape[0]:
+        return
+    _expand_localize_qsa_indices_kernel[(out.shape[0],)](
+        block_indices,
+        query_positions,
+        visible_blocks,
+        out,
+        *block_indices.stride(),
+        *out.stride(),
+        token_shard.rank,
+        BLOCK_TOPK=token_topk // compress_ratio,
+        COMPRESS_RATIO=compress_ratio,
+        DCP_WORLD=token_shard.world_size,
+        DCP_INTERLEAVE=token_shard.interleave,
+        BLOCK_W=triton.next_power_of_2(output_width),
+        num_warps=8,
+    )
+
+
 __all__ = [
+    "expand_localize_qsa_block_indices",
     "merge_qsa_dcp_topk",
     "pack_qsa_dcp_candidates",
     "select_qsa_dcp_topk",
