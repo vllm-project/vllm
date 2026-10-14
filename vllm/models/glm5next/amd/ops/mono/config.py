@@ -30,6 +30,21 @@ CONV_K = 4
 KDA_LOWER_BOUND = -5.0
 L2_EPS = 1e-6
 O_NORM_EPS = 1e-5
+# sparse (DSA) attention: NoPE MLA with a kpool indexer
+MLA_HEADS = 64
+Q_LORA = 1536
+KV_LORA = 512
+NOPE_DIM = 256
+V_DIM = 256
+MLA_SCALE = NOPE_DIM**-0.5
+INDEX_HEADS = 32
+INDEX_DIM = 128
+INDEX_EPS = 1e-6
+KPOOL = 4
+TOPK_TOKENS = 2048
+TOPK_POOLS = TOPK_TOKENS // KPOOL
+# Hadamard-128 normalization, exact in fp32 as vLLM's kernels use it
+FWHT_SCALE = 0.08838834764831845
 TP_SIZES = (2, 4, 8)
 STEP_TOKENS = (1, 2, 4, 8)
 
@@ -63,3 +78,7 @@ class FlashShard:
     def kda_in_rows(self) -> int:
         """Rows of this rank's merged q|k|v|beta|f_a|g_a projection."""
         return 3 * self.kda_proj + self.kda_heads + 2 * KDA_DIM
+
+    @property
+    def mla_heads(self) -> int:
+        return MLA_HEADS // self.tp
