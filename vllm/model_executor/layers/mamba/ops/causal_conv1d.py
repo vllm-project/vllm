@@ -443,7 +443,10 @@ def causal_conv1d_fn(
         for example: cache_indices = [pad_slot_id, 1, 20, pad_slot_id]
         in this case, the kernel will not process entries at
         indices 0 and 3
-    out: same shape as `x`
+    output_qkv: bool
+        Return contiguous [3, tokens, dim // 3] output for three equal channel
+        groups. Only supported by this Triton implementation.
+    out: same shape as `x`, or [3, tokens, dim // 3] when output_qkv is True
     """
     if isinstance(activation, bool) and activation:
         activation = "silu"

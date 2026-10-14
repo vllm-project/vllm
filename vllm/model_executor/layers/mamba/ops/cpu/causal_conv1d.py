@@ -23,6 +23,8 @@ def causal_conv1d_fn_cpu(
     **kwargs,
 ) -> torch.Tensor:
     """CPU implementation for causal_conv1d_fwd."""
+    if kwargs.get("output_qkv", False):
+        raise NotImplementedError("Dense QKV output requires the Triton implementation")
     if isinstance(activation, bool) and activation:
         activation = "silu"
     elif isinstance(activation, bool):
