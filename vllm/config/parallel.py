@@ -309,7 +309,10 @@ class ParallelConfig:
     """The full name of the worker extension class to use. The worker extension
     class is dynamically inherited by the worker class. This is used to inject
     new attributes and methods to the worker class for use in collective_rpc
-    calls."""
+    calls. It may also define `init_worker_extension(self)`, called after
+    device and distributed initialization but before model loading, and
+    `destroy_worker_extension(self)`, called (best-effort) before the worker
+    shuts down."""
     master_addr: str = "127.0.0.1"
     """distributed master address for multi-node distributed 
     inference when distributed_executor_backend is mp."""
@@ -834,6 +837,22 @@ class ParallelConfig:
     @property
     def local_world_size(self) -> int:
         return self.world_size // self.nnodes_within_dp
+
+    def get_local_gpu_index(
+        self, local_rank: int, dp_local_rank: int | None = None
+    ) -> int:
+        """Map a worker's local rank to its host-local logical GPU index."""
+        if (
+            self.distributed_executor_backend not in ("ray", "external_launcher")
+            and self.data_parallel_backend != "ray"
+            and self.nnodes_within_dp == 1
+        ):
+            if dp_local_rank is None:
+                dp_local_rank = self.data_parallel_rank_local
+                if dp_local_rank is None:
+                    dp_local_rank = self.data_parallel_index
+            return local_rank + dp_local_rank * self.world_size
+        return local_rank
 
     @staticmethod
     def has_unfinished_dp(dp_group: ProcessGroup, has_unfinished: bool) -> bool:
