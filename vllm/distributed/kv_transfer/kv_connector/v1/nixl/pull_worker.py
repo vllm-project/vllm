@@ -177,8 +177,16 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
 
         dcp_active = self.dcp_size > 1 or remote_info.remote_dcp_size > 1
         local_block_ids = meta.local_physical_block_ids
+        peer_transfer_plan = self._peer_transfer_plans.get(engine_id)
         remote_region_groups = self.dst_region_group_ids[engine_id]
-        local_region_groups = self.region_group_ids or remote_region_groups
+        local_region_groups = (
+            [view.group_id for view in peer_transfer_plan.local_views]
+            if peer_transfer_plan is not None
+            else (self.region_group_ids or remote_region_groups)
+        )
+        # Transfer-group IDs are endpoint-local; differing layer-aligned group
+        # vectors require mapping block IDs per region, not comparing raw IDs.
+        use_region_mapping = local_region_groups != remote_region_groups
         if not local_block_ids:
             # Region expansion cannot index empty groups. Pass empty specs to
             # _read_blocks so its existing cache-hit notification path runs.
@@ -186,7 +194,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 ReadSpec(remote_rank=rank, local_block_ids=[], remote_block_ids=[])
                 for rank in plan.all_source_ranks
             ]
-        elif local_region_groups != remote_region_groups:
+        elif use_region_mapping:
             if not self.use_mla or self._has_mamba:
                 raise NotImplementedError(
                     "Different NIXL cache-group layouts are only supported for "
@@ -327,23 +335,49 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 # Remote tp_size > local tp_size: we must perform multiple
                 # reads. Get the memory chunk onto which we will write to.
                 split_key = (tp_ratio, remote_block_size)
-                local_xfer_side_handle = self.src_xfer_handles_by_tp_ratio[split_key][i]
-                local_dram_handle = (
-                    self._dram_src_handles_by_tp_ratio[split_key][i]
-                    if self._mixed_mem_types
-                    else None
-                )
+                if peer_transfer_plan is not None:
+                    local_xfer_side_handle = (
+                        peer_transfer_plan.local_xfer_handles_by_block_size[
+                            remote_block_size
+                        ]
+                    )
+                    local_dram_handle = (
+                        peer_transfer_plan.local_dram_xfer_handles_by_block_size.get(
+                            remote_block_size
+                        )
+                    )
+                else:
+                    local_xfer_side_handle = self.src_xfer_handles_by_tp_ratio[
+                        split_key
+                    ][i]
+                    local_dram_handle = (
+                        self._dram_src_handles_by_tp_ratio[split_key][i]
+                        if self._mixed_mem_types
+                        else None
+                    )
             else:
                 # Single read from remote, we write to the whole memory region.
                 # Also handle remote block size different from local block size.
-                local_xfer_side_handle = self.src_xfer_handles_by_block_size[
-                    remote_block_size
-                ]
-                local_dram_handle = (
-                    self._dram_src_handles_by_block_size[remote_block_size]
-                    if self._mixed_mem_types
-                    else None
-                )
+                if peer_transfer_plan is not None:
+                    local_xfer_side_handle = (
+                        peer_transfer_plan.local_xfer_handles_by_block_size[
+                            remote_block_size
+                        ]
+                    )
+                    local_dram_handle = (
+                        peer_transfer_plan.local_dram_xfer_handles_by_block_size.get(
+                            remote_block_size
+                        )
+                    )
+                else:
+                    local_xfer_side_handle = self.src_xfer_handles_by_block_size[
+                        remote_block_size
+                    ]
+                    local_dram_handle = (
+                        self._dram_src_handles_by_block_size[remote_block_size]
+                        if self._mixed_mem_types
+                        else None
+                    )
 
             # Destination handle: remote_engine_id -> remote_rank -> handle.
             remote_xfer_side_handle = self.dst_xfer_side_handles[meta.remote.engine_id][
@@ -363,6 +397,20 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 remote_xfer_side_handle=remote_xfer_side_handle,
                 expected_consumers=plan.local_consumers,
                 awaiting_kvs=meta.awaiting_kvs,
+                local_desc_is_dram=(
+                    peer_transfer_plan.local_desc_is_dram_by_block_size.get(
+                        remote_block_size
+                    )
+                    if peer_transfer_plan is not None
+                    else None
+                ),
+                local_desc_pos=(
+                    peer_transfer_plan.local_desc_pos_by_block_size.get(
+                        remote_block_size
+                    )
+                    if peer_transfer_plan is not None
+                    else None
+                ),
             ):
                 return
 
@@ -401,6 +449,8 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         remote_xfer_side_handle: int,
         expected_consumers: int,
         awaiting_kvs: bool,
+        local_desc_is_dram: np.ndarray | None = None,
+        local_desc_pos: np.ndarray | None = None,
     ) -> bool:
         """Post a READ point-to-point xfer request from a single local worker to
         a single remote worker.
@@ -415,6 +465,17 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         remote_block_ids = read_spec.remote_block_ids
 
         remote_info = self.transfer_topo.get_engine_info(dst_engine_id)
+        peer_transfer_plan = self._peer_transfer_plans.get(dst_engine_id)
+        local_region_groups = (
+            [view.group_id for view in peer_transfer_plan.local_views]
+            if peer_transfer_plan is not None
+            else self.region_group_ids
+        )
+        local_region_num_blocks = (
+            list(peer_transfer_plan.local_region_num_blocks)
+            if peer_transfer_plan is not None
+            else self.dst_region_num_blocks.get(self.engine_id, [])
+        )
         block_size_ratio = self.transfer_topo.block_size_ratio(
             remote_info.remote_block_size
         )
@@ -495,14 +556,25 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             dst_num_blocks=self.dst_num_blocks[dst_engine_id],
             block_size_ratio=None,
             physical_blocks_per_logical=remote_info.remote_physical_blocks_per_logical,
-            region_num_blocks=(self.dst_region_num_blocks.get(dst_engine_id) or None),
+            region_num_blocks=(
+                list(peer_transfer_plan.remote_region_num_blocks)
+                if peer_transfer_plan is not None
+                else (self.dst_region_num_blocks.get(dst_engine_id) or None)
+            ),
             region_group_ids=(
-                list(range(self.num_regions))
+                list(
+                    range(
+                        len(
+                            self.dst_region_num_blocks.get(dst_engine_id, [])
+                            or self.dst_region_group_ids.get(dst_engine_id, [])
+                        )
+                    )
+                )
                 if read_spec.block_ids_by_region
                 else (self.dst_region_group_ids.get(dst_engine_id) or None)
             ),
             uses_region_group_mapping=(
-                self.num_regions > 1
+                len(self.dst_region_num_blocks.get(dst_engine_id, [])) > 1
                 if read_spec.block_ids_by_region
                 else self.dst_uses_region_group_mapping[dst_engine_id]
             ),
@@ -512,16 +584,20 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             dst_num_blocks=self.dst_num_blocks[self.engine_id],
             block_size_ratio=block_size_ratio,
             physical_blocks_per_logical=self._physical_blocks_per_logical_kv_block,
-            region_num_blocks=(self.dst_region_num_blocks.get(self.engine_id) or None),
+            region_num_blocks=local_region_num_blocks or None,
             region_group_ids=(
-                list(range(self.num_regions))
+                list(range(len(local_region_num_blocks)))
                 if read_spec.block_ids_by_region
-                else (self.region_group_ids or None)
+                else (local_region_groups or None)
             ),
             uses_region_group_mapping=(
-                self.num_regions > 1
+                len(local_region_num_blocks) > 1
                 if read_spec.block_ids_by_region
-                else self._uses_region_group_mapping
+                else (
+                    len(set(local_region_groups)) > 1
+                    if peer_transfer_plan is not None
+                    else self._uses_region_group_mapping
+                )
             ),
         )
 
@@ -530,7 +606,12 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         # Prepare transfer with Nixl.
         handle = None
         try:
-            if self._mixed_mem_types:
+            use_mixed_mem_types = (
+                local_desc_is_dram is not None
+                if peer_transfer_plan is not None
+                else self._mixed_mem_types
+            )
+            if use_mixed_mem_types:
                 self._read_blocks_mixed(
                     request_id=request_id,
                     local_block_size_key=remote_info.remote_block_size,
@@ -541,6 +622,8 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                     remote_block_descs_ids=remote_block_descs_ids,
                     notif_agent=self._remote_agents[dst_engine_id][(0, remote_rank)],
                     notif_id=notif_id,
+                    desc_is_dram=local_desc_is_dram,
+                    desc_pos=local_desc_pos,
                 )
                 return True
             handle = self.nixl_wrapper.make_prepped_xfer(
@@ -585,10 +668,14 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         remote_block_descs_ids: np.ndarray,
         notif_agent: str,
         notif_id: bytes,
+        desc_is_dram: np.ndarray | None = None,
+        desc_pos: np.ndarray | None = None,
     ) -> None:
         """Split a READ across the local DRAM and device descriptor lists."""
-        desc_is_dram = self._desc_is_dram_by_block_size[local_block_size_key]
-        desc_pos = self._desc_pos_by_block_size[local_block_size_key]
+        if desc_is_dram is None:
+            desc_is_dram = self._desc_is_dram_by_block_size[local_block_size_key]
+        if desc_pos is None:
+            desc_pos = self._desc_pos_by_block_size[local_block_size_key]
         local_ids = np.asarray(local_block_descs_ids)
         remote_ids = np.asarray(remote_block_descs_ids)
         is_dram = desc_is_dram[local_ids]

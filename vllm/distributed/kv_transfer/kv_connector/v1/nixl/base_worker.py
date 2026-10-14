@@ -14,6 +14,7 @@ import uuid
 from collections import defaultdict
 from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
 import msgspec
@@ -117,6 +118,275 @@ def _share_storage_and_block_stride(caches: list[torch.Tensor]) -> bool:
     block_strides = {cache.stride(0) * cache.element_size() for cache in caches}
     storage_ptrs = {cache.untyped_storage().data_ptr() for cache in caches}
     return len(block_strides) == len(storage_ptrs) == 1
+
+
+def _uses_dense_virtual_transfer_pages(
+    layer_spec: KVCacheSpec,
+    cache: torch.Tensor,
+    physical_page_size: int,
+    num_blocks: int,
+) -> bool:
+    """Return whether a compressed kernel view can be split into NIXL pages."""
+    if not (
+        isinstance(layer_spec, MLAAttentionSpec)
+        and layer_spec.tokens_per_state > 1
+        and cache.ndim == 4
+        and cache.shape[1] == 1
+        and cache.is_contiguous()
+        and physical_page_size > 0
+        and layer_spec.state_content_size_bytes > 0
+    ):
+        return False
+
+    block_stride = cache.stride(0) * cache.element_size()
+    return (
+        block_stride > physical_page_size
+        and block_stride % physical_page_size == 0
+        and physical_page_size % layer_spec.state_content_size_bytes == 0
+        and cache.shape[0] * (block_stride // physical_page_size) == num_blocks
+        and cache.nbytes == num_blocks * physical_page_size
+    )
+
+
+@dataclass(frozen=True)
+class _NixlCacheLayerGeometry:
+    """Derived per-layer geometry shared by NIXL cache registration paths."""
+
+    physical_page_size: int
+    block_stride: int
+    num_blocks: int
+    memory_type: str
+    device_id: int
+    page_contiguous: bool
+    virtual_transfer_pages: bool
+
+
+def _get_nixl_cache_layer_geometry(
+    layer_spec: KVCacheSpec,
+    cache: torch.Tensor,
+    logical_num_blocks: int,
+    physical_blocks_per_logical_kv_block: int,
+    nixl_memory_type: str,
+) -> _NixlCacheLayerGeometry:
+    """Derive the transferable page geometry for one cache layer."""
+    physical_page_size = (
+        layer_spec.page_size_bytes
+        if isinstance(layer_spec, MambaSpec)
+        else layer_spec.page_size_bytes // physical_blocks_per_logical_kv_block
+    )
+    num_blocks = (
+        logical_num_blocks
+        if isinstance(layer_spec, MambaSpec)
+        else logical_num_blocks * physical_blocks_per_logical_kv_block
+    )
+    block_stride = (
+        cache.stride(0) * cache.element_size() if cache.ndim > 1 else physical_page_size
+    )
+    return _NixlCacheLayerGeometry(
+        physical_page_size=physical_page_size,
+        block_stride=block_stride,
+        num_blocks=num_blocks,
+        memory_type="DRAM" if cache.device.type == "cpu" else nixl_memory_type,
+        device_id=max(cache.get_device(), 0),
+        page_contiguous=(
+            isinstance(layer_spec, (MLAAttentionSpec, SlidingWindowMLASpec))
+            and cache.ndim > 1
+            and cache[0].is_contiguous()
+            and cache[0].nbytes == physical_page_size
+        ),
+        virtual_transfer_pages=_uses_dense_virtual_transfer_pages(
+            layer_spec, cache, physical_page_size, num_blocks
+        ),
+    )
+
+
+@dataclass(frozen=True)
+class _NixlPackedCacheView:
+    """Per-layer storage geometry used to decide whether pages can be coalesced."""
+
+    layer_name: str
+    storage_ptr: int
+    storage_nbytes: int
+    data_offset: int
+    page_size: int
+    block_stride: int
+    num_blocks: int
+    group_id: int
+    memory_type: str
+    device_id: int
+    spec_type: str
+    eligible: bool
+
+
+@dataclass(frozen=True)
+class _NixlPackedCacheSpan:
+    """One NIXL region spanning adjacent cache pages in the same block rows."""
+
+    first_layer: str
+    layers: tuple[str, ...]
+    storage_ptr: int
+    offset: int
+    length: int
+    stride: int
+    num_blocks: int
+    group_id: int
+    member_layouts: tuple[tuple[str, int, int], ...]
+
+
+@dataclass(frozen=True)
+class _NixlLayerTransferView:
+    """Original per-layer geometry for mixed-layout pull-peer descriptors."""
+
+    layer_name: str
+    base_addr: int
+    page_size: int
+    block_stride: int
+    num_blocks: int
+    group_id: int
+    memory_type: str
+    device_id: int
+    page_contiguous: bool
+
+
+@dataclass
+class _NixlPeerTransferPlan:
+    """Fallback geometry and descriptors shared by ranks of one peer engine."""
+
+    local_views: tuple[_NixlLayerTransferView, ...]
+    local_region_num_blocks: tuple[int, ...]
+    remote_group_ids: tuple[int, ...]
+    remote_region_num_blocks: tuple[int, ...]
+    remote_region_mem_types: tuple[str, ...]
+    local_xfer_handles_by_block_size: dict[int, int]
+    local_dram_xfer_handles_by_block_size: dict[int, int | None]
+    local_desc_is_dram_by_block_size: dict[int, np.ndarray]
+    local_desc_pos_by_block_size: dict[int, np.ndarray]
+
+
+def _packed_cache_views_overlap(
+    left: _NixlPackedCacheView, right: _NixlPackedCacheView
+) -> bool:
+    """Conservatively detect whether two views touch overlapping storage bytes."""
+    if (
+        left.num_blocks <= 0
+        or right.num_blocks <= 0
+        or left.block_stride <= 0
+        or right.block_stride <= 0
+        or left.page_size <= 0
+        or right.page_size <= 0
+    ):
+        return False
+    if (
+        left.block_stride == right.block_stride
+        and left.num_blocks == right.num_blocks
+        and 0 <= left.data_offset < left.block_stride
+        and 0 <= right.data_offset < right.block_stride
+    ):
+        return (
+            left.data_offset < right.data_offset + right.page_size
+            and right.data_offset < left.data_offset + left.page_size
+        )
+    left_end = (
+        left.data_offset + (left.num_blocks - 1) * left.block_stride + left.page_size
+    )
+    right_end = (
+        right.data_offset
+        + (right.num_blocks - 1) * right.block_stride
+        + right.page_size
+    )
+    return left.data_offset < right_end and right.data_offset < left_end
+
+
+def _flush_nixl_packed_cache_run(
+    run: list[_NixlPackedCacheView],
+    spans_by_layer: dict[str, _NixlPackedCacheSpan],
+) -> None:
+    """Publish a compatible run only if its full span fits every storage row."""
+    if len(run) < 2:
+        run.clear()
+        return
+    first = run[0]
+    span_length = sum(view.page_size for view in run)
+    if (
+        span_length > first.block_stride
+        or first.data_offset % first.block_stride + span_length > first.block_stride
+        or first.data_offset + (first.num_blocks - 1) * first.block_stride + span_length
+        > first.storage_nbytes
+    ):
+        run.clear()
+        return
+    member_layouts = tuple(
+        (view.layer_name, view.data_offset - first.data_offset, view.page_size)
+        for view in run
+    )
+    span = _NixlPackedCacheSpan(
+        first_layer=first.layer_name,
+        layers=tuple(view.layer_name for view in run),
+        storage_ptr=first.storage_ptr,
+        offset=first.data_offset,
+        length=span_length,
+        stride=first.block_stride,
+        num_blocks=first.num_blocks,
+        group_id=first.group_id,
+        member_layouts=member_layouts,
+    )
+    for view in run:
+        spans_by_layer[view.layer_name] = span
+    run.clear()
+
+
+def _build_nixl_packed_cache_spans(
+    views: list[_NixlPackedCacheView],
+) -> dict[str, _NixlPackedCacheSpan]:
+    """Coalesce adjacent compatible pages, excluding ambiguous overlapping views."""
+    by_storage_group: dict[tuple[int, int], list[_NixlPackedCacheView]] = defaultdict(
+        list
+    )
+    for view in views:
+        by_storage_group[(view.storage_ptr, view.group_id)].append(view)
+
+    # An alias in the same transfer group must not be registered twice as part
+    # of a packed span; exclude every member of an overlapping pair.
+    overlapping_layers: set[str] = set()
+    for storage_group_views in by_storage_group.values():
+        for index, left in enumerate(storage_group_views):
+            for right in storage_group_views[index + 1 :]:
+                if _packed_cache_views_overlap(left, right):
+                    overlapping_layers.add(left.layer_name)
+                    overlapping_layers.add(right.layer_name)
+
+    spans_by_layer: dict[str, _NixlPackedCacheSpan] = {}
+    for storage_group_views in by_storage_group.values():
+        ordered_views = sorted(storage_group_views, key=lambda view: view.data_offset)
+        run: list[_NixlPackedCacheView] = []
+
+        previous: _NixlPackedCacheView | None = None
+        for view in ordered_views:
+            compatible = (
+                view.eligible
+                and view.layer_name not in overlapping_layers
+                and previous is not None
+                and previous.eligible
+                and previous.layer_name not in overlapping_layers
+                and view.data_offset == previous.data_offset + previous.page_size
+                and view.block_stride == previous.block_stride
+                and view.num_blocks == previous.num_blocks
+                and view.storage_nbytes == previous.storage_nbytes
+                and view.memory_type == previous.memory_type
+                and view.device_id == previous.device_id
+                and view.spec_type == previous.spec_type
+            )
+            if not view.eligible or view.layer_name in overlapping_layers:
+                _flush_nixl_packed_cache_run(run, spans_by_layer)
+                previous = None
+                continue
+            if run and not compatible:
+                _flush_nixl_packed_cache_run(run, spans_by_layer)
+            run.append(view)
+            previous = view
+        _flush_nixl_packed_cache_run(run, spans_by_layer)
+
+    return spans_by_layer
 
 
 class NixlBaseConnectorWorker:
@@ -377,13 +647,13 @@ class NixlBaseConnectorWorker:
         return region_idx < len(self._region_is_mla) and self._region_is_mla[region_idx]
 
     def _set_region_layers(self, region_layers: list[list[str]]) -> None:
+        self.region_members: list[list[str]] = region_layers
+        if not self._requires_layer_name_routing():
+            return
         layer_names = [layer_name for region in region_layers for layer_name in region]
         assert len(layer_names) == len(set(layer_names)), (
             "A KV cache layer spans multiple NIXL regions"
         )
-        self.region_members: list[list[str]] = region_layers
-        if not self._requires_layer_name_routing():
-            return
         group_by_layer = self.kv_cache_config.transfer_group_index_by_layer
         ungrouped = [name for name in layer_names if name not in group_by_layer]
         assert not ungrouped, f"KV cache layers outside any local group: {ungrouped}"
@@ -426,6 +696,7 @@ class NixlBaseConnectorWorker:
             == len(nixl_agent_meta.block_strides)
             == len(remote_region_layers)
         ), "Remote region metadata lengths disagree"
+
         assert all(
             values is None or len(values) == len(remote_region_layers)
             for values in (
@@ -737,8 +1008,8 @@ class NixlBaseConnectorWorker:
         # EngineId, dict[int, list[int]] -> engine_id, tp_rank, base_addr_for_layer
         self.kv_caches_base_addr = defaultdict[EngineId, dict[int, list[int]]](dict)
 
-        # Number of NIXL regions. Currently one region per cache
-        # (so 1 per layer for MLA, otherwise 2 per layer)
+        # Number of NIXL regions. Normally one per cache, except for registered
+        # packed spans.
         self.num_regions = 0
         self.region_mem_types: list[str] = []
         self.region_group_ids: list[int] = []
@@ -799,6 +1070,8 @@ class NixlBaseConnectorWorker:
         self.dst_region_group_ids: dict[EngineId, list[int]] = {}
         self.dst_uses_region_group_mapping: dict[EngineId, bool] = {}
         self.dst_region_mem_types: dict[EngineId, list[str]] = {}
+        self._nixl_layer_transfer_views: dict[str, _NixlLayerTransferView] = {}
+        self._peer_transfer_plans: dict[EngineId, _NixlPeerTransferPlan] = {}
         self._registered_descs: list[Any] = []
 
         # In progress transfers.
@@ -1393,7 +1666,6 @@ class NixlBaseConnectorWorker:
             backend_name,
             transfer_mode=self._TRANSFER_MODE,
         )
-
         if self._is_csa_linear and self.use_host_buffer:
             raise NotImplementedError(
                 "NIXL host staging does not preserve CSA-linear shared tensors."
@@ -1424,6 +1696,7 @@ class NixlBaseConnectorWorker:
         registration_ranges: dict[tuple[int, str], tuple[int, int, int]] = {}
         region_mem_types: list[str] = []
         seen_base_addresses: list[int] = []
+        packed_span_region_indices: set[int] = set()
         self._ssm_region_indices = []
         self._scratch_region_indices = []
         self._ple_block_len = None
@@ -1443,6 +1716,115 @@ class NixlBaseConnectorWorker:
         region_layers: list[list[str]] = []
         packed_member_layouts: dict[str, tuple[int, int]] = {}
 
+        can_coalesce_packed_spans = (
+            self._TRANSFER_MODE == "pull"
+            and self._has_packed_cache is not False
+            and not (track_region_layers and packed_storage)
+            and self.pp_size == 1
+            and not route_packed_layers
+            and not self._is_csa_linear
+            and not self.use_host_buffer
+            and self.device_type == "cuda"
+            and self.kv_buffer_device == "cuda"
+            and self.nixl_memory_type == "VRAM"
+        )
+        # Span coalescing is pull-only; push retains its existing packed-row routing.
+        packed_span_views: list[_NixlPackedCacheView] = []
+        layer_geometries: dict[str, _NixlCacheLayerGeometry] = {}
+        for layer_name, cache in xfer_buffers.items():
+            layer_spec = self._layer_specs.get(layer_name)
+            group_id = self.kv_cache_config.transfer_group_index_by_layer.get(
+                layer_name
+            )
+            if layer_spec is None or group_id is None:
+                continue
+            group = self.kv_cache_config.transfer_groups[group_id]
+            logical_num_blocks = (
+                self.kv_cache_config.hisparse_host_num_blocks
+                if group.host_resident
+                else self.kv_cache_config.num_blocks
+            )
+            if logical_num_blocks is None:
+                continue
+            geometry = _get_nixl_cache_layer_geometry(
+                layer_spec,
+                cache,
+                logical_num_blocks,
+                self._physical_blocks_per_logical_kv_block,
+                self.nixl_memory_type,
+            )
+            layer_geometries[layer_name] = geometry
+            if not can_coalesce_packed_spans:
+                continue
+
+            physical_page_size = geometry.physical_page_size
+            num_blocks = geometry.num_blocks
+            if group.host_resident:
+                num_blocks = logical_num_blocks
+            elif isinstance(layer_spec, MambaSpec):
+                num_blocks = self._logical_num_blocks
+            block_stride = geometry.block_stride
+            memory_type = geometry.memory_type
+            device_id = geometry.device_id
+            page_contiguous = geometry.page_contiguous
+            virtual_pages = geometry.virtual_transfer_pages
+            storage = cache.untyped_storage()
+            storage_ptr = storage.data_ptr()
+            storage_nbytes = storage.nbytes()
+            data_offset = cache.data_ptr() - storage_ptr
+            storage_is_block_major = (
+                0 <= storage_nbytes - num_blocks * block_stride < block_stride
+            )
+            page_extent_fits = (
+                num_blocks > 0
+                and block_stride > 0
+                and physical_page_size > 0
+                and 0 <= data_offset < block_stride
+                and data_offset % block_stride + physical_page_size <= block_stride
+                and data_offset + (num_blocks - 1) * block_stride + physical_page_size
+                <= storage_nbytes
+            )
+            eligible = (
+                isinstance(layer_spec, (MLAAttentionSpec, SlidingWindowMLASpec))
+                and not group.host_resident
+                and cache.device.type == "cuda"
+                and memory_type == "VRAM"
+                and page_contiguous
+                and not virtual_pages
+                and storage_is_block_major
+                and page_extent_fits
+            )
+            packed_span_views.append(
+                _NixlPackedCacheView(
+                    layer_name=layer_name,
+                    storage_ptr=storage_ptr,
+                    storage_nbytes=storage_nbytes,
+                    data_offset=data_offset,
+                    page_size=physical_page_size,
+                    block_stride=block_stride,
+                    num_blocks=num_blocks,
+                    group_id=group_id,
+                    memory_type=memory_type,
+                    device_id=device_id,
+                    spec_type=type(layer_spec).__name__,
+                    eligible=eligible,
+                )
+            )
+
+        packed_spans_by_layer = _build_nixl_packed_cache_spans(packed_span_views)
+        packed_spans = {id(span): span for span in packed_spans_by_layer.values()}
+        for span in packed_spans.values():
+            for layer_name, offset, page_size in span.member_layouts:
+                packed_member_layouts[layer_name] = (offset, page_size)
+        self._nixl_packed_cache_span_active = bool(packed_spans)
+        self._packed_member_layouts = packed_member_layouts
+        # Pull MLA peers may need per-layer fallback even when this worker did
+        # not coalesce its own regions, so retain their member metadata as well.
+        track_region_metadata = (
+            track_region_layers
+            or self._nixl_packed_cache_span_active
+            or (self._TRANSFER_MODE == "pull" and self.use_mla and not self._has_mamba)
+        )
         # K and V are packed into the content dim, so each attention layer is a
         # single NIXL region whose block transfers as one unit. Mamba layers instead
         # register separate conv/ssm sub-regions (see `_build_mamba_local`).
@@ -1457,6 +1839,7 @@ class NixlBaseConnectorWorker:
                 key=_region_sort_key,
             )
         )
+        layer_transfer_views: dict[str, _NixlLayerTransferView] = {}
         for layer_name in layer_names:
             cache = xfer_buffers[layer_name]
             # NOTE (NickLucche) Hybrid SSM mamba/FA physical page_size may differ when
@@ -1472,26 +1855,14 @@ class NixlBaseConnectorWorker:
                 )
                 continue
             group_index = self.kv_cache_config.transfer_group_index_by_layer[layer_name]
-            # `layer_spec.page_size_bytes` only accounts for logical page_size, that is
-            # the page_size assuming constant `self._logical_num_blocks`.
-            physical_page_size = (
-                layer_spec.page_size_bytes
-                if isinstance(layer_spec, MambaSpec)
-                else layer_spec.page_size_bytes
-                // self._physical_blocks_per_logical_kv_block
-            )
             group = self.kv_cache_config.transfer_groups[group_index]
             if group.host_resident:
                 logical_num_blocks = self.kv_cache_config.hisparse_host_num_blocks
                 assert logical_num_blocks is not None
-            else:
-                logical_num_blocks = self.kv_cache_config.num_blocks
             group_id = group_index
-            num_blocks = (
-                logical_num_blocks
-                if isinstance(layer_spec, MambaSpec)
-                else logical_num_blocks * self._physical_blocks_per_logical_kv_block
-            )
+            geometry = layer_geometries[layer_name]
+            physical_page_size = geometry.physical_page_size
+            num_blocks = geometry.num_blocks
             base_addr = cache.data_ptr()
             is_mla_region = isinstance(
                 layer_spec, (MLAAttentionSpec, SlidingWindowMLASpec)
@@ -1502,12 +1873,9 @@ class NixlBaseConnectorWorker:
             storage = cache.untyped_storage()
             storage_addr = storage.data_ptr()
             is_host_resident = group.host_resident
-            if cache.device.type == "cpu":
-                mem_type = "DRAM"
-                region_device_id = 0
-            else:
-                mem_type = self.nixl_memory_type
-                region_device_id = max(cache.get_device(), 0)
+            mem_type = geometry.memory_type
+            region_device_id = geometry.device_id
+            if cache.device.type != "cpu":
                 self.device_id = region_device_id
             if is_host_resident:
                 registration_base = cache.data_ptr()
@@ -1523,6 +1891,7 @@ class NixlBaseConnectorWorker:
                     region_device_id,
                 )
 
+            nixl_packed_span = packed_spans_by_layer.get(layer_name)
             if isinstance(layer_spec, MambaSpec):
                 physical_ratio = self._physical_blocks_per_logical_kv_block
                 block_len = physical_page_size // physical_ratio
@@ -1536,13 +1905,7 @@ class NixlBaseConnectorWorker:
                     (cache.data_ptr(), block_len, block_stride // physical_ratio)
                 ]
             else:
-                if cache.ndim == 1:
-                    # Flat byte view: HMA tensors shared between layer types carry
-                    # no block dimension, so stride(0) is 1 byte. Blocks abut, so
-                    # the stride is the page size.
-                    block_stride = physical_page_size
-                else:
-                    block_stride = cache.stride(0) * cache.element_size()
+                block_stride = geometry.block_stride
                 # A connector that registers the backing as one memory region
                 # may need its length rounded up to a page boundary. Such a tail
                 # is shorter than one block, so it cannot make the storage
@@ -1552,11 +1915,20 @@ class NixlBaseConnectorWorker:
                 )
                 # A view with a contiguous page can own a strided region even
                 # when sibling layers share the same backing allocation.
-                page_contiguous = (
-                    cache.ndim > 1
-                    and cache[0].is_contiguous()
-                    and cache[0].nbytes == physical_page_size
-                )
+                page_contiguous = geometry.page_contiguous
+                virtual_transfer_pages = geometry.virtual_transfer_pages
+                if self._TRANSFER_MODE == "pull" and is_mla_region:
+                    layer_transfer_views[layer_name] = _NixlLayerTransferView(
+                        layer_name=layer_name,
+                        base_addr=cache.data_ptr(),
+                        page_size=physical_page_size,
+                        block_stride=block_stride,
+                        num_blocks=num_blocks,
+                        group_id=group_id,
+                        memory_type=mem_type,
+                        device_id=region_device_id,
+                        page_contiguous=page_contiguous and not virtual_transfer_pages,
+                    )
                 # Push workers address the pages of packed MLA rows by layer.
                 packed_mla_push = (
                     track_region_layers
@@ -1565,7 +1937,25 @@ class NixlBaseConnectorWorker:
                     and storage_is_block_major
                     and is_mla_region
                 )
-                if packed_mla_push and use_layer_name_routing:
+                # A packed span is one region for all member pages in each row;
+                # register and advertise it once, at the first member layer.
+                if nixl_packed_span is not None:
+                    if layer_name == nixl_packed_span.first_layer:
+                        region_specs = [
+                            (
+                                nixl_packed_span.storage_ptr + nixl_packed_span.offset,
+                                nixl_packed_span.length,
+                                nixl_packed_span.stride,
+                            )
+                        ]
+                    else:
+                        region_specs = []
+                elif virtual_transfer_pages:
+                    # A compressed kernel row can contain multiple NIXL transfer pages.
+                    region_specs = [
+                        (cache.data_ptr(), physical_page_size, physical_page_size)
+                    ]
+                elif packed_mla_push and use_layer_name_routing:
                     # PP>1 prefill stage: register only this layer's page of each row.
                     region_specs = [
                         (cache.data_ptr(), physical_page_size, block_stride)
@@ -1623,8 +2013,18 @@ class NixlBaseConnectorWorker:
             for base_addr, block_len, block_stride in region_specs:
                 # A packed PP producer keeps one region per layer, so aliases at
                 # one address (a layer and its SWA view) stay distinct.
-                if base_addr in seen_base_addresses and not route_packed_layers:
-                    region_index = seen_base_addresses.index(base_addr)
+                region_index = None
+                if nixl_packed_span is None and not route_packed_layers:
+                    region_index = next(
+                        (
+                            index
+                            for index, address in enumerate(seen_base_addresses)
+                            if address == base_addr
+                            and index not in packed_span_region_indices
+                        ),
+                        None,
+                    )
+                if region_index is not None:
                     assert region_mem_types[region_index] == mem_type
                     self._region_is_mla[region_index] |= is_mla_region
                     if is_mla_region:
@@ -1643,9 +2043,15 @@ class NixlBaseConnectorWorker:
                     self.region_num_blocks.append(num_blocks)
                     self._region_is_mla.append(is_mla_region)
                     region_mem_types.append(mem_type)
+                    if nixl_packed_span is not None:
+                        packed_span_region_indices.add(region_index)
 
-                if track_region_layers:
-                    if region_index == len(region_layers):
+                if track_region_metadata:
+                    if nixl_packed_span is not None:
+                        if layer_name == nixl_packed_span.first_layer:
+                            assert region_index == len(region_layers)
+                            region_layers.append(list(nixl_packed_span.layers))
+                    elif region_index == len(region_layers):
                         region_layers.append([layer_name])
                     else:
                         region_layers[region_index].append(layer_name)
@@ -1699,6 +2105,9 @@ class NixlBaseConnectorWorker:
         self._scratch_region_indices.sort()
 
         self.kv_caches_base_addr[self.engine_id][self.tp_rank] = seen_base_addresses
+        # Preserve the pre-coalescing geometry: a mixed-layout peer may need
+        # per-layer descriptors that cannot be reconstructed from packed spans.
+        self._nixl_layer_transfer_views = layer_transfer_views
         self.num_regions = len(seen_base_addresses)
         self.region_mem_types = region_mem_types
         self._uses_region_group_mapping = len(set(self.region_group_ids)) > 1
@@ -1725,7 +2134,6 @@ class NixlBaseConnectorWorker:
         )
         self.num_descs = sum(xfer_region_num_blocks)
 
-        self._mixed_mem_types = len(set(region_mem_types)) > 1
         self._skip_dram_xfer = self._leaves_dram_xfer_to_rank0()
         if self._mixed_mem_types:
             assert self.use_mla and not self._has_mamba, (
@@ -2135,6 +2543,281 @@ class NixlBaseConnectorWorker:
         # NIXL_INIT_AGENT to be used for preparations of local descs.
         return self.nixl_wrapper.prep_xfer_dlist("NIXL_INIT_AGENT", descs), blocks_data
 
+    def _remote_layer_transfer_views(
+        self, nixl_agent_meta: NixlAgentMetadata
+    ) -> dict[str, _NixlLayerTransferView]:
+        """Expand remote region metadata into layer geometry for fallback reads."""
+        num_regions = len(nixl_agent_meta.kv_caches_base_addr)
+        region_members = nixl_agent_meta.region_members
+        if not region_members and nixl_agent_meta.region_names is not None:
+            region_members = [[name] for name in nixl_agent_meta.region_names]
+        if len(region_members) != num_regions:
+            raise RuntimeError(
+                "NIXL per-layer fallback requires remote region member names"
+            )
+        if not all(
+            len(values) == num_regions
+            for values in (
+                nixl_agent_meta.block_lens,
+                nixl_agent_meta.block_strides,
+            )
+        ):
+            raise RuntimeError("Remote NIXL region geometry lengths disagree")
+
+        region_num_blocks = (
+            nixl_agent_meta.region_num_blocks
+            or [nixl_agent_meta.num_blocks] * num_regions
+        )
+        region_group_ids = nixl_agent_meta.region_group_ids
+        if region_group_ids is None:
+            if num_regions != 1:
+                raise RuntimeError(
+                    "NIXL per-layer fallback requires remote region group IDs"
+                )
+            region_group_ids = [0]
+        region_mem_types = (
+            nixl_agent_meta.region_mem_types or [self.nixl_memory_type] * num_regions
+        )
+        if not all(
+            len(values) == num_regions
+            for values in (region_num_blocks, region_group_ids, region_mem_types)
+        ):
+            raise RuntimeError("Remote NIXL region metadata lengths disagree")
+
+        views: dict[str, _NixlLayerTransferView] = {}
+        for region_index, names in enumerate(region_members):
+            if not names:
+                raise RuntimeError("Remote NIXL region has no member layer names")
+            for name in names:
+                layout = nixl_agent_meta.packed_member_layouts.get(name)
+                if layout is None:
+                    if len(names) != 1:
+                        raise RuntimeError(
+                            "NIXL per-layer fallback cannot recover geometry for "
+                            f"pooled region members {names}"
+                        )
+                    offset, page_size = 0, nixl_agent_meta.block_lens[region_index]
+                else:
+                    offset, page_size = layout
+                    if (
+                        offset < 0
+                        or page_size <= 0
+                        or offset + page_size > nixl_agent_meta.block_lens[region_index]
+                    ):
+                        raise RuntimeError(
+                            f"Remote packed layer {name!r} escapes its cache span"
+                        )
+                if name in views:
+                    raise RuntimeError(f"Remote NIXL metadata repeats layer {name!r}")
+                views[name] = _NixlLayerTransferView(
+                    layer_name=name,
+                    base_addr=(
+                        nixl_agent_meta.kv_caches_base_addr[region_index] + offset
+                    ),
+                    page_size=page_size,
+                    block_stride=nixl_agent_meta.block_strides[region_index],
+                    num_blocks=region_num_blocks[region_index],
+                    group_id=region_group_ids[region_index],
+                    memory_type=region_mem_types[region_index],
+                    device_id=nixl_agent_meta.device_id,
+                    page_contiguous=True,
+                )
+        return views
+
+    def _prepare_peer_transfer_plan(
+        self,
+        nixl_agent_meta: NixlAgentMetadata,
+        remote_packed_span_active: bool,
+    ) -> _NixlPeerTransferPlan | None:
+        """Select packed transfer or cache a per-peer per-layer fallback plan.
+
+        Compatible packed peers keep the worker's original handle. For a
+        mismatch, retain each endpoint's layer geometry in canonical layer order
+        and build fallback handles lazily by remote block size.
+        """
+        local_packed_span_active = self._nixl_packed_cache_span_active
+        if not local_packed_span_active and not remote_packed_span_active:
+            return None
+
+        packed_layout_matches = (
+            local_packed_span_active
+            and remote_packed_span_active
+            and self.block_size == nixl_agent_meta.block_size
+            and self._packed_member_layouts == nixl_agent_meta.packed_member_layouts
+            and self.region_members == nixl_agent_meta.region_members
+        )
+        if packed_layout_matches:
+            return None
+        if not self.use_mla or self._has_mamba:
+            raise NotImplementedError(
+                "Per-layer NIXL fallback is only supported for pure MLA caches"
+            )
+
+        local_views = tuple(self._nixl_layer_transfer_views.values())
+        if not local_views:
+            raise RuntimeError("NIXL fallback has no local transfer regions")
+        local_names = tuple(view.layer_name for view in local_views)
+        remote_views_by_name = self._remote_layer_transfer_views(nixl_agent_meta)
+        if set(remote_views_by_name) != set(local_names):
+            raise RuntimeError(
+                "NIXL per-layer fallback requires matching P/D cache layers"
+            )
+        remote_views = tuple(remote_views_by_name[name] for name in local_names)
+        if not all(view.page_contiguous for view in local_views):
+            raise NotImplementedError(
+                "NIXL per-layer fallback requires contiguous cache pages"
+            )
+        if len({view.memory_type for view in remote_views}) != 1:
+            raise NotImplementedError(
+                "NIXL per-layer fallback does not support mixed remote memory types"
+            )
+
+        block_size_ratio, remainder = divmod(
+            self.block_size, nixl_agent_meta.block_size
+        )
+        if remainder:
+            raise NotImplementedError(
+                "NIXL per-layer fallback requires local block size to be a "
+                "multiple of remote block size"
+            )
+        for local_view, remote_view in zip(local_views, remote_views, strict=True):
+            if (
+                local_view.page_size % block_size_ratio
+                or local_view.page_size // block_size_ratio != remote_view.page_size
+            ):
+                raise RuntimeError(
+                    "NIXL per-layer fallback cache page sizes differ for "
+                    f"layer {local_view.layer_name!r}"
+                )
+
+        peer_plan = _NixlPeerTransferPlan(
+            local_views=local_views,
+            local_region_num_blocks=tuple(view.num_blocks for view in local_views),
+            remote_group_ids=tuple(view.group_id for view in remote_views),
+            remote_region_num_blocks=tuple(view.num_blocks for view in remote_views),
+            remote_region_mem_types=tuple(view.memory_type for view in remote_views),
+            local_xfer_handles_by_block_size={},
+            local_dram_xfer_handles_by_block_size={},
+            local_desc_is_dram_by_block_size={},
+            local_desc_pos_by_block_size={},
+        )
+        # Each TP rank of an engine shares this plan; reject inconsistent rank
+        # metadata rather than silently using descriptor IDs from another rank.
+        existing_plan = self._peer_transfer_plans.get(nixl_agent_meta.engine_id)
+        if existing_plan is not None:
+            if (
+                existing_plan.local_views != peer_plan.local_views
+                or existing_plan.remote_group_ids != peer_plan.remote_group_ids
+                or existing_plan.remote_region_num_blocks
+                != peer_plan.remote_region_num_blocks
+                or existing_plan.remote_region_mem_types
+                != peer_plan.remote_region_mem_types
+            ):
+                raise RuntimeError(
+                    "NIXL peer ranks advertised inconsistent per-layer geometry"
+                )
+            peer_plan = existing_plan
+
+        # Descriptor indices are layer-ordered, while transfer-group IDs are
+        # endpoint-local. Normalize regions by layer, preserving each side's IDs.
+        nixl_agent_meta.kv_caches_base_addr = [view.base_addr for view in remote_views]
+        nixl_agent_meta.block_lens = [view.page_size for view in remote_views]
+        nixl_agent_meta.block_strides = [view.block_stride for view in remote_views]
+        nixl_agent_meta.region_num_blocks = [view.num_blocks for view in remote_views]
+        nixl_agent_meta.region_group_ids = [view.group_id for view in remote_views]
+        nixl_agent_meta.region_names = list(local_names)
+        nixl_agent_meta.region_members = [[name] for name in local_names]
+        nixl_agent_meta.region_mem_types = [view.memory_type for view in remote_views]
+        nixl_agent_meta.packed_member_layouts = {}
+        return peer_plan
+
+    def _register_peer_local_xfer_handler(
+        self, peer_plan: _NixlPeerTransferPlan, remote_block_size: int
+    ) -> int:
+        """Register local per-layer descriptors at the peer's block granularity."""
+        handle = peer_plan.local_xfer_handles_by_block_size.get(remote_block_size)
+        if handle is not None:
+            return handle
+
+        block_size_ratio, remainder = divmod(self.block_size, remote_block_size)
+        assert remainder == 0 and block_size_ratio >= 1
+        blocks_data: list[np.ndarray] = []
+        desc_memory_types: list[str] = []
+        for view in peer_plan.local_views:
+            if view.page_size % block_size_ratio:
+                raise RuntimeError(
+                    "NIXL local layer page cannot be split at remote block size"
+                )
+            block_len = view.page_size // block_size_ratio
+            logical_blocks = np.repeat(
+                np.arange(view.num_blocks, dtype=np.uint64), block_size_ratio
+            )
+            split_offsets = np.tile(
+                np.arange(block_size_ratio, dtype=np.uint64), view.num_blocks
+            )
+            addrs = (
+                view.base_addr
+                + logical_blocks * view.block_stride
+                + split_offsets * block_len
+            )
+            region_descs = self._stack_descs(addrs, block_len, view.device_id)
+            blocks_data.append(region_descs)
+            desc_memory_types.extend([view.memory_type] * len(region_descs))
+        descriptor_data = np.concatenate(blocks_data)
+        if len(set(desc_memory_types)) == 1:
+            memory_type = desc_memory_types[0]
+            descs = self.nixl_wrapper.get_xfer_descs(descriptor_data, memory_type)
+            handle = self.nixl_wrapper.prep_xfer_dlist("NIXL_INIT_AGENT", descs)
+            peer_plan.local_dram_xfer_handles_by_block_size[remote_block_size] = None
+        else:
+            desc_is_dram = np.asarray(
+                [memory_type == "DRAM" for memory_type in desc_memory_types],
+                dtype=bool,
+            )
+            descriptor_data[desc_is_dram, 2] = 0
+            dram_indices = np.flatnonzero(desc_is_dram)
+            device_indices = np.flatnonzero(~desc_is_dram)
+            desc_pos = np.empty(len(desc_is_dram), dtype=np.int64)
+            desc_pos[dram_indices] = np.arange(len(dram_indices), dtype=np.int64)
+            desc_pos[device_indices] = np.arange(len(device_indices), dtype=np.int64)
+            device_descs = self.nixl_wrapper.get_xfer_descs(
+                descriptor_data[device_indices], self.nixl_memory_type
+            )
+            handle = self.nixl_wrapper.prep_xfer_dlist("NIXL_INIT_AGENT", device_descs)
+            if self._skip_dram_xfer:
+                dram_handle = None
+            else:
+                dram_descs = self.nixl_wrapper.get_xfer_descs(
+                    descriptor_data[dram_indices], "DRAM"
+                )
+                dram_handle = self.nixl_wrapper.prep_xfer_dlist(
+                    "NIXL_INIT_AGENT", dram_descs
+                )
+            peer_plan.local_dram_xfer_handles_by_block_size[remote_block_size] = (
+                dram_handle
+            )
+            peer_plan.local_desc_is_dram_by_block_size[remote_block_size] = desc_is_dram
+            peer_plan.local_desc_pos_by_block_size[remote_block_size] = desc_pos
+        peer_plan.local_xfer_handles_by_block_size[remote_block_size] = handle
+        return handle
+
+    def _build_peer_fa_remote(self, nixl_agent_meta: NixlAgentMetadata) -> np.ndarray:
+        """Build a peer's per-layer MLA descriptors in its advertised geometry."""
+        region_num_blocks = nixl_agent_meta.region_num_blocks or [
+            nixl_agent_meta.num_blocks
+        ] * len(nixl_agent_meta.kv_caches_base_addr)
+        parts = []
+        for base_addr, block_len, block_stride, num_blocks in zip(
+            nixl_agent_meta.kv_caches_base_addr,
+            nixl_agent_meta.block_lens,
+            nixl_agent_meta.block_strides,
+            region_num_blocks,
+            strict=True,
+        ):
+            addrs = base_addr + np.arange(num_blocks, dtype=np.uint64) * block_stride
+            parts.append(self._stack_descs(addrs, block_len, nixl_agent_meta.device_id))
+        return np.concatenate(parts)
+
     def add_remote_agent(
         self,
         nixl_agent_meta: NixlAgentMetadata,
@@ -2197,6 +2880,31 @@ class NixlBaseConnectorWorker:
 
         assert self.transfer_topo is not None
         transfer_topo = self.transfer_topo
+        remote_packed_span_active = self._TRANSFER_MODE == "pull" and bool(
+            nixl_agent_meta.packed_member_layouts
+        )
+        peer_transfer_plan = (
+            self._prepare_peer_transfer_plan(nixl_agent_meta, remote_packed_span_active)
+            if self._TRANSFER_MODE == "pull"
+            else None
+        )
+        if (
+            remote_packed_span_active
+            and self.pp_size > 1
+            and not self._transfer_layer_region_indices
+        ):
+            raise RuntimeError("NIXL packed-cache spans require PP layer-name routing")
+        if (
+            peer_transfer_plan is None
+            and (
+                getattr(self, "_nixl_packed_cache_span_active", False)
+                or remote_packed_span_active
+            )
+            and self.block_size != nixl_agent_meta.block_size
+        ):
+            raise NotImplementedError(
+                "NIXL packed-cache spans require identical P/D block sizes"
+            )
         # Number of physical regions registered locally (one per layer/tensor).
         num_local_regions = len(self.block_len_per_layer)
         if self._transfer_layer_region_indices:
@@ -2210,7 +2918,7 @@ class NixlBaseConnectorWorker:
                     "prefill TP yet"
                 )
             self._align_remote_regions_by_layer(nixl_agent_meta)
-        elif (
+        elif peer_transfer_plan is None and (
             self.pp_size > 1
             and len(nixl_agent_meta.kv_caches_base_addr) > num_local_regions
         ):
@@ -2254,6 +2962,8 @@ class NixlBaseConnectorWorker:
         transfer_topo.register_remote_engine(engine_id, transfer_info)
         logger.info("Transfer plan: %s", transfer_topo.describe(engine_id))
 
+        block_size_ratio = transfer_topo.block_size_ratio(nixl_agent_meta.block_size)
+
         self.tp_mappings[engine_id] = compute_tp_mapping(
             transfer_topology=transfer_topo,
             remote_tp_size=remote_tp_size,
@@ -2272,8 +2982,6 @@ class NixlBaseConnectorWorker:
         # remote:               | 0| 1| 2| 3| 4| 5| 6| 7| 8| 9|10|11|12|
         # local origin:|          0|          1|          8|         12|
         # local mapped:| 0| 1| 2| 3| 4| 5| 6| 7| 8| 9|10|11|12|13|14|15|
-        block_size_ratio = transfer_topo.block_size_ratio(nixl_agent_meta.block_size)
-
         if engine_id not in self.dst_num_blocks:
             num_remote_regions = len(nixl_agent_meta.kv_caches_base_addr)
             self.dst_num_blocks[engine_id] = nixl_agent_meta.num_blocks
@@ -2300,8 +3008,14 @@ class NixlBaseConnectorWorker:
             nixl_agent_meta.kv_caches_base_addr
         )
         self._validate_remote_agent_handshake(
-            nixl_agent_meta, remote_tp_size, remote_dcp_size
+            nixl_agent_meta,
+            remote_tp_size,
+            remote_dcp_size,
+            remote_packed_span_active=remote_packed_span_active,
+            peer_transfer_plan=peer_transfer_plan,
         )
+        if peer_transfer_plan is not None:
+            self._peer_transfer_plans[engine_id] = peer_transfer_plan
 
         # This is 1 when P and D `--tensor-parallel-size` match. Otherwise,
         # this is the ratio between the two sizes.
@@ -2320,7 +3034,11 @@ class NixlBaseConnectorWorker:
         ### granularity (remote/prefill blocks smaller than local).
         remote_block_size = nixl_agent_meta.block_size
         src_blocks_data = self.src_blocks_data
-        if block_size_ratio > 1:
+        if peer_transfer_plan is not None:
+            self._register_peer_local_xfer_handler(
+                peer_transfer_plan, remote_block_size
+            )
+        elif block_size_ratio > 1:
             if remote_block_size not in self.src_xfer_handles_by_block_size:
                 handle, blocks_data = self.register_local_xfer_handler(
                     remote_block_size
@@ -2331,8 +3049,10 @@ class NixlBaseConnectorWorker:
 
         ### (Optional) Register local agent memory regions. MLA is not split.
         split_key = (tp_ratio, remote_block_size)
-        if self._needs_split_local_xfer_handles(tp_ratio, plan) and (
-            split_key not in self.src_xfer_handles_by_tp_ratio
+        if (
+            peer_transfer_plan is None
+            and self._needs_split_local_xfer_handles(tp_ratio, plan)
+            and split_key not in self.src_xfer_handles_by_tp_ratio
         ):
             # Remote tp_size > local tp_size: read from multiple remote ranks.
             # Logically "split" own regions into per-source chunks. Hybrid
@@ -2376,10 +3096,10 @@ class NixlBaseConnectorWorker:
         # Eg. PTP1 DTP2 => P0 KV:[block0-KV_0 | block0-KV_1..].
 
         # Register all remote blocks, but only the corresponding kv heads.
-        blocks_data = self._build_fa_remote(
-            plan,
-            nixl_agent_meta,
-            block_size_ratio,
+        blocks_data = (
+            self._build_peer_fa_remote(nixl_agent_meta)
+            if peer_transfer_plan is not None
+            else self._build_fa_remote(plan, nixl_agent_meta, block_size_ratio)
         )
         logger.debug(
             "Created %s blocks for dst engine %s with remote rank %s and local rank %s",
@@ -2414,6 +3134,8 @@ class NixlBaseConnectorWorker:
         nixl_agent_meta: NixlAgentMetadata,
         remote_tp_size: int,
         remote_dcp_size: int = 1,
+        remote_packed_span_active: bool = False,
+        peer_transfer_plan: _NixlPeerTransferPlan | None = None,
     ):
         """Validate the remote agent handshake metadata ensuring the
         invariants hold true.
@@ -2551,9 +3273,16 @@ class NixlBaseConnectorWorker:
         # the per-rank KV head ratio rather than the raw tp_ratio, because GQA
         # replication caps per-rank heads at 1 when tp > total_kv_heads
         # (issue #45330). Mamba uses the ssm_sizes counterpart, so skip here.
-        local_regions = self._transfer_layer_region_indices or range(
-            len(self.block_len_per_layer)
-        )
+        if peer_transfer_plan is None:
+            local_regions = self._transfer_layer_region_indices or range(
+                len(self.block_len_per_layer)
+            )
+            local_block_lens = [self.block_len_per_layer[i] for i in local_regions]
+        else:
+            local_regions = range(len(peer_transfer_plan.local_views))
+            local_block_lens = [
+                view.page_size for view in peer_transfer_plan.local_views
+            ]
         if self._has_mamba and self.use_mla:
             # Hybrid MLA+SSM (e.g. KimiLinear's KDA+MLA): regions are
             # kernel-granularity views of the mamba-unified page. The MLA
@@ -2561,7 +3290,7 @@ class NixlBaseConnectorWorker:
             # match up to the kernel block size ratio even under
             # heterogeneous TP (remote kernel blocks may be smaller).
             # SSM geometry is validated via ssm_sizes/conv offsets instead.
-            assert self.block_len_per_layer == [
+            assert local_block_lens == [
                 block_len * block_size_ratio for block_len in nixl_agent_meta.block_lens
             ], (
                 "Hybrid MLA kernel-granularity block lengths must match "
@@ -2570,7 +3299,7 @@ class NixlBaseConnectorWorker:
                 f"remote={nixl_agent_meta.block_lens}."
             )
         elif not self._has_mamba:
-            assert len(local_regions) == len(nixl_agent_meta.block_lens), (
+            assert len(local_block_lens) == len(nixl_agent_meta.block_lens), (
                 "Number of KV layers must match between prefill and decode"
             )
             model_replicated = self.use_mla or self.transfer_topo.is_kv_replicated(
@@ -2580,8 +3309,11 @@ class NixlBaseConnectorWorker:
             local_heads = self.transfer_topo.local_physical_heads
             remote_heads = max(1, total_kv_heads // remote_tp_size)
             for i, region_idx in enumerate(local_regions):
-                local_len = self.block_len_per_layer[region_idx]
-                replicated = model_replicated or self._is_region_replicated(region_idx)
+                local_len = local_block_lens[i]
+                replicated = model_replicated or (
+                    peer_transfer_plan is None
+                    and self._is_region_replicated(region_idx)
+                )
                 remote_len = nixl_agent_meta.block_lens[i]
                 if replicated:
                     assert local_len // block_size_ratio == remote_len, (
@@ -2629,9 +3361,13 @@ class NixlBaseConnectorWorker:
             assert len(nixl_agent_meta.region_group_ids) == num_remote_regions
         if nixl_agent_meta.region_names is not None:
             expected_names = (
-                list(self._transfer_layer_names)
-                if self._transfer_layer_names
-                else self.region_names
+                [view.layer_name for view in peer_transfer_plan.local_views]
+                if peer_transfer_plan is not None
+                else (
+                    list(self._transfer_layer_names)
+                    if self._transfer_layer_names
+                    else self.region_names
+                )
             )
             assert nixl_agent_meta.region_names == expected_names, (
                 "NIXL transfer regions must name the same model caches in the "
@@ -2639,6 +3375,25 @@ class NixlBaseConnectorWorker:
             )
         if nixl_agent_meta.region_mem_types is not None:
             assert len(nixl_agent_meta.region_mem_types) == num_remote_regions
+
+        if peer_transfer_plan is None and (
+            getattr(self, "_nixl_packed_cache_span_active", False)
+            or remote_packed_span_active
+        ):
+            expected_members = (
+                [[name] for name in self._transfer_layer_names]
+                if self._transfer_layer_names
+                else self.region_members
+            )
+            expected_layouts = getattr(self, "_packed_member_layouts", {})
+            if nixl_agent_meta.region_members != expected_members:
+                raise RuntimeError(
+                    "NIXL packed-cache region membership/order differs between P/D"
+                )
+            if nixl_agent_meta.packed_member_layouts != expected_layouts:
+                raise RuntimeError(
+                    "NIXL packed-cache member offsets differ between P/D"
+                )
 
     def sync_recved_kv_to_device(self, req_id: str, meta: ReqMeta):
         """Copy recved kv from host buffer to device."""
@@ -2850,6 +3605,20 @@ class NixlBaseConnectorWorker:
             for block in blocks:
                 pages[block].zero_()
 
+    def _zero_peer_region_blocks(
+        self, peer_plan: _NixlPeerTransferPlan, block_ids: BlockIds
+    ) -> None:
+        """Clear fallback pages using per-layer geometry, not packed region spans."""
+        if not any(block_ids):
+            return
+        assert len(block_ids) == len(peer_plan.local_views)
+        for view, blocks in zip(peer_plan.local_views, block_ids, strict=True):
+            if not blocks or (self._skip_dram_xfer and view.memory_type == "DRAM"):
+                continue
+            cache = self.device_kv_caches[view.layer_name]
+            for block in blocks:
+                cache[block].zero_()
+
     def get_transfer_results(self) -> KVConnectorTransferResults:
         """Get transfers that completed on this specific worker.
 
@@ -2928,7 +3697,11 @@ class NixlBaseConnectorWorker:
             if meta.region_blocks_to_zero is not None:
                 # P/D group positions differ. Use the actual region read plan,
                 # including any local allocation padding the read did not cover.
-                self._zero_region_blocks(meta.region_blocks_to_zero)
+                peer_plan = self._peer_transfer_plans.get(meta.remote.engine_id)
+                if peer_plan is None:
+                    self._zero_region_blocks(meta.region_blocks_to_zero)
+                else:
+                    self._zero_peer_region_blocks(peer_plan, meta.region_blocks_to_zero)
                 continue
 
             # Post processing for heteroblocksize/layout, and for blocks the
@@ -3709,6 +4482,13 @@ class NixlBaseConnectorWorker:
         self.dst_region_group_ids.pop(engine_id, None)
         self.dst_uses_region_group_mapping.pop(engine_id, None)
         self.dst_region_mem_types.pop(engine_id, None)
+        peer_plan = self._peer_transfer_plans.pop(engine_id, None)
+        if peer_plan is not None:
+            for handle in peer_plan.local_xfer_handles_by_block_size.values():
+                self.nixl_wrapper.release_dlist_handle(handle)
+            for dram_handle in peer_plan.local_dram_xfer_handles_by_block_size.values():
+                if dram_handle is not None:
+                    self.nixl_wrapper.release_dlist_handle(dram_handle)
         self.tp_mappings.pop(engine_id, None)
         if self.transfer_topo is not None:
             self.transfer_topo.unregister_remote_engine(engine_id)

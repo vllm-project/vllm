@@ -1946,6 +1946,44 @@ def test_layer_alignment_expands_pooled_regions():
     assert metadata.region_mem_types == ["VRAM", "VRAM", "VRAM"]
 
 
+def test_layer_alignment_expands_packed_span_to_member_pages():
+    worker = _layer_routing_worker([["L0"], ["L1"]], {"L0": 0, "L1": 0})
+    worker.block_len_per_layer = [64, 64]
+    worker.block_stride_per_layer = [256, 256]
+    worker._region_is_mla = [True, True]
+    worker._group_spec_types = (FullAttentionSpec,)
+
+    metadata = _agent_metadata([["L0", "L1"]], [0x10000], [128], [256])
+    metadata.region_num_blocks = [4]
+    metadata.region_group_ids = [0]
+    metadata.region_names = ["L0"]
+    metadata.region_mem_types = ["VRAM"]
+    metadata.packed_member_layouts = {"L0": (0, 64), "L1": (64, 64)}
+
+    worker._align_remote_regions_by_layer(metadata)
+    remote_descs = worker._build_fa_remote(
+        TPMapping(((0,),), (0,), {0: 0}, 0), metadata, block_size_ratio=1
+    )
+
+    assert metadata.kv_caches_base_addr == [0x10000, 0x10040]
+    assert metadata.block_lens == [64, 64]
+    assert metadata.region_members == [["L0"], ["L1"]]
+    assert metadata.packed_member_layouts == {}
+    assert remote_descs.tolist() == [
+        [0x10000 + block * 256, 64, 7] for block in range(4)
+    ] + [[0x10040 + block * 256, 64, 7] for block in range(4)]
+
+
+def test_layer_alignment_rejects_incomplete_packed_member_layouts():
+    worker = _layer_routing_worker([["L0"], ["L1"]], {"L0": 0, "L1": 0})
+    worker.block_len_per_layer = [64, 64]
+    metadata = _agent_metadata([["L0", "L1"]], [0x10000], [128], [256])
+    metadata.packed_member_layouts = {"L0": (0, 64)}
+
+    with pytest.raises(AssertionError, match="Remote packed layer 'L1' has no layout"):
+        worker._align_remote_regions_by_layer(metadata)
+
+
 def test_layer_alignment_filters_and_reorders_a_pp_stage():
     worker = _layer_routing_worker([["l2"], ["l3"]], {"l2": 0, "l3": 1})
     metadata = _agent_metadata(
