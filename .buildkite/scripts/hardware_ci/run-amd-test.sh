@@ -76,41 +76,13 @@ export PYTEST_ADDOPTS="${PYTEST_ADDOPTS:-} \
 # ---------------------------------------------------------------------------
 # Wheel reinstall — python_only_compile.sh path
 # ---------------------------------------------------------------------------
-# python_only_compile.sh re-imports vLLM from /opt/vllm-wheels (baked into
-# the image). If VLLM_CI_USE_ARTIFACTS=1 a fresher wheel can be downloaded
-# from a Buildkite artifact and reinstalled instead.
-_maybe_reinstall_wheel() {
-  VLLM_VERSION_OVERRIDE=$(python3 -c \
-    'import importlib.metadata as m; print(m.version("vllm"))') || return 1
-  export VLLM_TARGET_DEVICE=rocm VLLM_VERSION_OVERRIDE
-
-  [[ ${VLLM_CI_USE_ARTIFACTS:-0} == 1 ]] || return 0
-  command -v buildkite-agent >/dev/null 2>&1 || return 0
-
-  local glob="${VLLM_CI_ARTIFACT_GLOB:-artifacts/vllm-rocm-install/vllm-rocm-install.tar.gz}"
-  local tmpdir; tmpdir=$(mktemp -d -t vllm-rocm-artifact.XXXXXX)
-  local whl=""
-
-  if buildkite-agent artifact download "$glob" "$tmpdir" 2>/dev/null; then
-    # artifact may be a bare .whl or a .tar.gz containing one
-    whl=$(find "$tmpdir" -name 'vllm-*.whl' | head -1)
-    if [[ -z $whl ]]; then
-      tar -xzf "$tmpdir"/*.tar.gz -C "$tmpdir" 2>/dev/null || true
-      whl=$(find "$tmpdir" -name 'vllm-*.whl' | head -1)
-    fi
-    if [[ -n $whl ]]; then
-      echo "--- Reinstalling vLLM from artifact: $(basename "$whl")"
-      pip install --no-deps --force-reinstall "$whl" || { rm -rf "$tmpdir"; return 1; }
-      VLLM_VERSION_OVERRIDE=$(python3 -c \
-        'import importlib.metadata as m; print(m.version("vllm"))') || true
-      export VLLM_VERSION_OVERRIDE
-    fi
-  fi
-  rm -rf "$tmpdir"
-}
-
+# python_only_compile.sh re-imports vLLM from /opt/vllm-wheels/, which is
+# baked into the CI image by build.sh. No artifact download is needed:
+# the image IS the artifact in the pod-based CI model.
 if [[ $commands == *python_only_compile.sh* ]]; then
-  _maybe_reinstall_wheel || exit 1
+  VLLM_VERSION_OVERRIDE=$(python3 -c \
+    'import importlib.metadata as m; print(m.version("vllm"))') || exit 1
+  export VLLM_TARGET_DEVICE=rocm VLLM_VERSION_OVERRIDE
 fi
 
 # ---------------------------------------------------------------------------
