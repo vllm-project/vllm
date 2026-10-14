@@ -31,6 +31,7 @@ from transformers.modeling_rope_utils import dynamic_rope_update
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.conv import Conv2dLayer, Conv3dLayer
+from vllm.model_executor.layers.layernorm import LayerNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     ReplicatedLinear,
@@ -38,7 +39,7 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.models.utils import maybe_prefix
-from vllm.transformers_utils.config import is_rope_parameters_nested
+from vllm.transformers_utils.config import iter_rope_parameters
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -187,6 +188,34 @@ def replace_conv_class(conv: TorchConv) -> VllmConv | TorchConv:
         bias=conv.bias is not None,
         padding_mode=conv.padding_mode,
         params_dtype=conv.weight.dtype,
+    )
+
+
+def replace_layernorm_class(layernorm: nn.LayerNorm) -> nn.Module:
+    """Replace a standard (mean-centered) `nn.LayerNorm` with vLLM's
+    `LayerNorm`.
+
+    Args:
+        layernorm: `nn.LayerNorm` to be replaced.
+
+    Returns:
+        The new `LayerNorm`. If the layernorm is not supported (a subclass with
+        its own behavior, multi-dim `normalized_shape`, or not both
+        elementwise-affine and biased), returns the original module unchanged.
+
+    """
+    if (
+        type(layernorm) is not nn.LayerNorm
+        or len(layernorm.normalized_shape) != 1
+        or not layernorm.elementwise_affine
+        or layernorm.bias is None
+    ):
+        return layernorm
+
+    return LayerNorm(
+        layernorm.normalized_shape[0],
+        eps=layernorm.eps,
+        dtype=layernorm.weight.dtype,
     )
 
 
@@ -357,13 +386,8 @@ def can_enable_torch_compile(vllm_config: "VllmConfig") -> bool:
       decorator and the model becomes compilable again.
     """
     text_config = vllm_config.model_config.hf_config.get_text_config()
-    rope_parameters: dict | None = getattr(text_config, "rope_parameters", None) or {}
-    if rope_parameters:
-        # Nest rope_parameters if not nested already to simplify logic
-        if not is_rope_parameters_nested(rope_parameters):
-            rope_parameters = {"": rope_parameters}
-        if any(rp["rope_type"] == "dynamic" for rp in rope_parameters.values()):
-            return dynamic_rope_update_is_noop(vllm_config)
+    if any(rp["rope_type"] == "dynamic" for rp in iter_rope_parameters(text_config)):
+        return dynamic_rope_update_is_noop(vllm_config)
     return True
 
 

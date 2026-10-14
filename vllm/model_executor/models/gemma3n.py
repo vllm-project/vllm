@@ -350,17 +350,7 @@ class Gemma3nAttention(nn.Module):
         is_sliding = layer_type == "sliding_attention"
         self.sliding_window = config.sliding_window if is_sliding else None
 
-        # Initialize the rotary embedding.
-        if layer_type in config.rope_parameters:
-            # Transformers v5 rope config.
-            rope_parameters = config.rope_parameters[layer_type]
-        else:
-            # Transformers v4 rope config.
-            # Global attention. Use the values in config.json.
-            rope_parameters = config.rope_parameters.copy()
-            # Local attention. Override the values in config.json.
-            if is_sliding:
-                rope_parameters["rope_theta"] = config.rope_local_base_freq
+        rope_parameters = config.rope_parameters[layer_type]
 
         kv_sharing_target_layer_name = None
         if self.is_kv_shared_layer:
