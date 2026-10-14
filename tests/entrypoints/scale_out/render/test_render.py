@@ -11,6 +11,11 @@ import httpx
 import pytest
 import pytest_asyncio
 from fastapi import FastAPI
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from opentelemetry.sdk.trace.sampling import ALWAYS_OFF
+from opentelemetry.trace import SpanKind
 from prometheus_client import REGISTRY
 
 from tests.utils import RemoteLaunchRenderServer
@@ -23,6 +28,26 @@ from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.renderers.online_renderer import OnlineRenderer
 
 MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
+TRACEPARENT = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+
+
+@pytest.fixture(params=["recording", "unsampled", "disabled"])
+def render_spans(request, monkeypatch):
+    exporter = InMemorySpanExporter()
+    provider = (
+        TracerProvider(sampler=ALWAYS_OFF)
+        if request.param == "unsampled"
+        else TracerProvider()
+    )
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    monkeypatch.setattr(
+        "vllm.tracing.otel.trace.get_tracer",
+        lambda *args, **kwargs: provider.get_tracer("test.render"),
+    )
+    if request.param == "disabled":
+        monkeypatch.setattr("vllm.tracing.otel._IS_OTEL_AVAILABLE", False)
+    yield exporter, request.param == "recording"
+    provider.shutdown()
 
 
 @pytest.mark.asyncio
@@ -32,7 +57,7 @@ MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
 @pytest.mark.parametrize(
     "tool_request", [False, True, None], ids=["plain", "named", "null"]
 )
-async def test_render_tool_outcomes(api_surface, outcome, tool_request):
+async def test_render_tool_outcomes(api_surface, outcome, tool_request, render_spans):
     """Count each tool render once without exposing request or error values."""
     app = FastAPI()
     app.include_router(router)
@@ -82,9 +107,13 @@ async def test_render_tool_outcomes(api_surface, outcome, tool_request):
     ) as client:
         if outcome == "raised_error":
             with pytest.raises(RuntimeError, match="private-render-error"):
-                await client.post(route, json=payload)
+                await client.post(
+                    route, json=payload, headers={"traceparent": TRACEPARENT}
+                )
         else:
-            response = await client.post(route, json=payload)
+            response = await client.post(
+                route, json=payload, headers={"traceparent": TRACEPARENT}
+            )
             assert response.status_code == (200 if outcome == "rendered" else 400)
             if outcome == "rendered":
                 assert response.json() == result
@@ -100,6 +129,29 @@ async def test_render_tool_outcomes(api_surface, outcome, tool_request):
             if sample.name == metric:
                 assert set(sample.labels) == {"model_name", "api_surface", "status"}
                 assert "private" not in str(sample.labels)
+    exporter, recording = render_spans
+    spans = exporter.get_finished_spans()
+    if recording:
+        assert len(spans) == 1
+        span = spans[0]
+        assert span.kind == SpanKind.SERVER
+        assert span.context.trace_id == int(TRACEPARENT.split("-")[1], 16)
+        assert span.parent.span_id == int(TRACEPARENT.split("-")[2], 16)
+        assert dict(span.attributes) == (
+            {
+                "tool_calling.present": True,
+                "tool_calling.tool_count": 1,
+                "tool_calling.tool_choice": "named",
+                "tool_calling.api_surface": api_surface,
+                "tool_calling.render_status": labels["status"],
+            }
+            if tool_request
+            else {}
+        )
+        assert not span.events
+        assert not span.status.description
+    else:
+        assert not spans
 
 
 def _build_serving_render() -> ServingRender:

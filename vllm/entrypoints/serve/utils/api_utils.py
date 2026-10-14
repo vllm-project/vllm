@@ -5,7 +5,6 @@ import asyncio
 import dataclasses
 import functools
 import os
-import time
 from argparse import Namespace
 from contextlib import asynccontextmanager
 from http import HTTPStatus
@@ -25,7 +24,8 @@ from vllm.entrypoints.generate.base.protocol import StreamOptions
 from vllm.entrypoints.openai.models.protocol import LoRAModulePath
 from vllm.logger import current_formatter_type, init_logger
 from vllm.platforms import current_platform
-from vllm.tracing import SpanKind, extract_trace_context, instrument_manual
+from vllm.tracing import SpanKind, extract_trace_context
+from vllm.tracing.otel import is_otel_available, trace
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 logger = init_logger(__name__)
@@ -101,18 +101,19 @@ def with_cancellation(handler_func):
 
 @asynccontextmanager
 async def request_span(raw_request: Request, span_name: str):
-    """Create a server span linked to the caller\'s W3C trace context."""
-    start_time_ns = time.time_ns()
-    trace_context = extract_trace_context(raw_request.headers)
-    try:
-        yield
-    finally:
-        instrument_manual(
-            span_name=span_name,
-            start_time=start_time_ns,
-            context=trace_context,
-            kind=SpanKind.SERVER,
-        )
+    """Yield a server span linked to the caller's W3C trace context."""
+    if not is_otel_available():
+        yield None
+        return
+    tracer = trace.get_tracer(__name__)
+    with tracer.start_as_current_span(
+        span_name,
+        context=extract_trace_context(raw_request.headers),
+        kind=SpanKind.SERVER,
+        record_exception=False,
+        set_status_on_exception=False,
+    ) as span:
+        yield span
 
 
 _ERROR_REF = {"$ref": "#/components/schemas/ErrorResponse"}
