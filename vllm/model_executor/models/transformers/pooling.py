@@ -34,6 +34,7 @@ from vllm.model_executor.models.interfaces_base import VllmModelForPooling
 
 from .base import Base
 from .fusers import ClassifierFuser
+from .fusers.classifier import trace_classification_model
 
 if TYPE_CHECKING:
     from transformers.models.auto.auto_factory import _BaseAutoModelClass
@@ -111,7 +112,13 @@ class ClassificationMixin(VllmModelForPooling, Base):
                 f"`{auto_cls.__name__}` instance."
             )
 
-        if fuser := ClassifierFuser.match_model(cls_model, pooled=pooled):
+        graph = trace_classification_model(cls_model)
+        fuser = (
+            None
+            if graph is None
+            else ClassifierFuser.match(graph, cls_model, pooled=pooled)
+        )
+        if fuser:
             logger.debug(fuser.info(auto_cls.__name__))
             for name in dict.fromkeys(n.split(".")[0] for n in fuser.module_names):
                 module = cls_model.get_submodule(name)
@@ -127,10 +134,14 @@ class ClassificationMixin(VllmModelForPooling, Base):
                 setattr(self, name, module)
             return fuser.fuse(cls_model, "", self.vllm_config)
 
-        logger.warning_once(
-            "Could not match the head of %s, only its classifier will be applied.",
-            type(cls_model).__name__,
-        )
+        if graph is None or not ClassifierFuser.classifies_hidden_states(
+            graph, cls_model
+        ):
+            raise ValueError(
+                f"Could not match the head of {type(cls_model).__name__}, and its "
+                "classifier does not read the last hidden state, so applying the "
+                "classifier alone would give wrong results."
+            )
         self.classifier = classifier
         self.init_parameters(self.classifier, dtype=self.model_config.head_dtype)
         if pooled:

@@ -13,6 +13,9 @@ from transformers import (
 )
 
 from vllm.model_executor.models.transformers.fusers import ClassifierFuser
+from vllm.model_executor.models.transformers.fusers.classifier import (
+    trace_classification_model,
+)
 
 
 def build(auto_cls, model_type: str, device: str = "meta", **overrides):
@@ -84,19 +87,22 @@ def test_matching_does_not_change_config():
 
 
 @pytest.mark.parametrize(
-    ("model_type", "reason"),
+    ("model_type", "classifier_only", "reason"),
     [
-        ("distilbert", "applies an inline `nn.ReLU()`, which ends the trace"),
-        ("deberta-v2", "pools inside its `pooler` module"),
-        ("bert", "classifies the base model's `pooler_output`"),
-        ("roberta", "pools inside its `classifier` module"),
+        ("distilbert", False, "applies an inline `nn.ReLU()`, which ends the trace"),
+        ("deberta-v2", False, "pools inside its `pooler` module"),
+        ("bert", False, "classifies the base model's `pooler_output`"),
+        ("roberta", True, "pools inside its `classifier` module"),
+        ("qwen2", True, "scores every token before pooling"),
     ],
-    ids=["distilbert", "deberta-v2", "bert", "roberta"],
+    ids=["distilbert", "deberta-v2", "bert", "roberta", "qwen2"],
 )
-def test_unsupported_heads_are_not_matched(model_type, reason):
-    """Heads vLLM's pooler can't replace fall back to the classifier alone."""
-    model = build(AutoModelForSequenceClassification, model_type)
-    assert ClassifierFuser.match_model(model, pooled=True) is None, reason
+def test_unsupported_heads_are_not_matched(model_type, classifier_only, reason):
+    """Unmatched heads may only fall back to a classifier that reads hidden states."""
+    model = build(AutoModelForSequenceClassification, model_type, num_hidden_layers=1)
+    graph = trace_classification_model(model)
+    assert ClassifierFuser.match(graph, model, pooled=True) is None, reason
+    assert ClassifierFuser.classifies_hidden_states(graph, model) is classifier_only
 
 
 def test_only_classifier_runs_in_head_dtype():

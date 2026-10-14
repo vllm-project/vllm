@@ -111,6 +111,32 @@ def _ancestors(node: fx.Node) -> set[fx.Node]:
     return seen
 
 
+def _hidden_and_classifier(
+    graph: fx.Graph, module: nn.Module
+) -> tuple[fx.Node, fx.Node] | None:
+    """The base model's last hidden state and the classifier call, if traced."""
+    base = find_node(
+        graph,
+        lambda n: n.op == "call_module" and n.target == module.base_model_prefix,
+    )
+    classifier = find_node(
+        graph,
+        lambda n: n.op == "call_module" and n.target in ("classifier", "score"),
+    )
+    if base is None or classifier is None:
+        return None
+    hidden = find_node(
+        graph,
+        lambda n: len(n.args) == 2
+        and n.args[0] is base
+        and (
+            (n.target is operator.getitem and n.args[1] == 0)
+            or (n.target is getattr and n.args[1] == "last_hidden_state")
+        ),
+    )
+    return None if hidden is None else (hidden, classifier)
+
+
 @dataclass
 class ClassifierFuser(BaseFuser):
     """Fuser for the head between the pooled hidden states and the classifier."""
@@ -138,27 +164,10 @@ class ClassifierFuser(BaseFuser):
         than the last hidden state (BERT's `pooler_output`), or a trace that stops
         before the classifier (DistilBERT's inline `nn.ReLU()`) are not matched.
         """
-        base = find_node(
-            graph,
-            lambda n: n.op == "call_module" and n.target == module.base_model_prefix,
-        )
-        classifier = find_node(
-            graph,
-            lambda n: n.op == "call_module" and n.target in ("classifier", "score"),
-        )
-        if base is None or classifier is None:
+        nodes = _hidden_and_classifier(graph, module)
+        if nodes is None:
             return None
-        hidden = find_node(
-            graph,
-            lambda n: len(n.args) == 2
-            and n.args[0] is base
-            and (
-                (n.target is operator.getitem and n.args[1] == 0)
-                or (n.target is getattr and n.args[1] == "last_hidden_state")
-            ),
-        )
-        if hidden is None:
-            return None
+        hidden, classifier = nodes
 
         # Everything downstream of `hidden` that the classifier's output depends on
         region = _descendants(hidden) & (_ancestors(classifier) | {classifier})
@@ -200,6 +209,26 @@ class ClassifierFuser(BaseFuser):
         graph_head.output(env[classifier])
         module_names = [str(n.target) for n in head if n.op == "call_module"]
         return cls(head=graph_head, module_names=module_names)
+
+    @staticmethod
+    def classifies_hidden_states(graph: fx.Graph, module: nn.Module) -> bool:
+        """Whether the classifier reads the last hidden state, ignoring dropout.
+
+        If so, applying the classifier alone to vLLM's pooled hidden states is
+        equivalent to the model's own head (e.g. RoBERTa, or decoders' `score`).
+        """
+        nodes = _hidden_and_classifier(graph, module)
+        if nodes is None:
+            return False
+        hidden, classifier = nodes
+        node = classifier.args[0]
+        while (
+            isinstance(node, fx.Node)
+            and node.op == "call_module"
+            and isinstance(module.get_submodule(str(node.target)), nn.Dropout)
+        ):
+            node = node.args[0]
+        return node is hidden
 
     @classmethod
     def match_model(
