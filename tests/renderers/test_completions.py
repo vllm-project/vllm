@@ -16,6 +16,8 @@ from vllm.inputs import SingletonPrompt
 from vllm.renderers import TokenizeParams
 from vllm.renderers.hf import HfRenderer
 from vllm.renderers.inputs.preprocess import parse_model_prompt, prompt_to_seq
+from vllm.tokenizers import get_tokenizer
+from vllm.tokenizers.parallel_encode import try_parallel_encode
 
 MODEL_NAME = "openai-community/gpt2"
 
@@ -766,3 +768,67 @@ class TestRenderEmbedPrompt:
         assert len(results[0]["prompt_token_ids"]) == len(text_input)
         # Second should be embed prompt
         assert torch.equal(results[1]["prompt_embeds"], tensor_input)
+
+
+LONG_PROMPT_MODEL_NAME = "Qwen/Qwen3-0.6B"
+# 306,000 characters and about 70k tokens, long enough for the renderer to
+# tokenize the prompt in parallel pieces.
+LONG_PROMPT = "The quick brown fox jumps over the lazy dog 12345.\n" * 6000
+
+
+@pytest.fixture(scope="module")
+def long_prompt_tokenizer():
+    return get_tokenizer(LONG_PROMPT_MODEL_NAME, truncation_side="left")
+
+
+@pytest.fixture
+def parallel_results(monkeypatch) -> list:
+    """Record what `try_parallel_encode` returns to the renderer."""
+    results: list = []
+
+    def spy(*args):
+        results.append(token_ids := try_parallel_encode(*args))
+        return token_ids
+
+    monkeypatch.setattr("vllm.renderers.base.try_parallel_encode", spy)
+    return results
+
+
+def _tokenize_long_prompt(tokenizer, params: TokenizeParams):
+    model_config = MockModelConfig(
+        model=LONG_PROMPT_MODEL_NAME, tokenizer=LONG_PROMPT_MODEL_NAME
+    )
+    renderer = HfRenderer(
+        MockVllmConfig(model_config, parallel_config=MockParallelConfig()),
+        tokenizer=tokenizer,
+    )
+    prompts = renderer.render_prompts(_preprocess_prompt(model_config, LONG_PROMPT))
+    return renderer.tokenize_prompts(prompts, params)
+
+
+class TestTokenizeLongPrompt:
+    """A long text prompt is tokenized in parallel pieces. The token IDs must
+    be the same as those of the normal tokenizer call."""
+
+    def test_truncation(self, long_prompt_tokenizer, parallel_results):
+        tokenizer = long_prompt_tokenizer
+        results = _tokenize_long_prompt(
+            tokenizer,
+            TokenizeParams(max_total_tokens=200_000, truncate_prompt_tokens=1000),
+        )
+        assert parallel_results[0] is not None
+        # The tokenizer truncates on the left side.
+        expected = tokenizer(LONG_PROMPT)["input_ids"][-1000:]
+        assert results[0]["prompt_token_ids"] == expected
+
+    def test_too_long(self, long_prompt_tokenizer, parallel_results):
+        tokenizer = long_prompt_tokenizer
+        # The limit lets the text pass the length check in characters, so
+        # the error comes from the length check in tokens.
+        limit = len(LONG_PROMPT) // tokenizer.max_chars_per_token + 1
+        assert limit < len(tokenizer(LONG_PROMPT)["input_ids"])
+        with pytest.raises(
+            VLLMValidationError, match=f"at least {limit + 1} input tokens"
+        ):
+            _tokenize_long_prompt(tokenizer, TokenizeParams(max_total_tokens=limit))
+        assert parallel_results[0] is not None

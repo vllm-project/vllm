@@ -47,6 +47,7 @@ from vllm.multimodal.processing import BaseMultiModalProcessor
 from vllm.multimodal.processing import ProcessorInputs as MMProcessorInputs
 from vllm.multimodal.registry import MultiModalTimingRegistry
 from vllm.tokenizers import TokenizerLike
+from vllm.tokenizers.parallel_encode import try_parallel_encode
 from vllm.utils.async_utils import make_async
 from vllm.utils.counter import AtomicCounter
 from vllm.utils.torch_utils import set_default_torch_num_threads
@@ -635,6 +636,13 @@ class BaseRenderer(ABC, Generic[_T]):
         kwargs = params.get_encode_kwargs()
         if want_offsets:
             kwargs = {**kwargs, "return_offsets_mapping": True}
+        else:
+            # A long prompt is cut into pieces that are tokenized in parallel
+            # when the tokenizer allows it. The token IDs are the same as
+            # those of the normal call below.
+            token_ids = try_parallel_encode(tokenizer, prompt["prompt"], kwargs)
+            if token_ids is not None:
+                return self._build_tokens_prompt(token_ids, prompt)
         encoding = tokenizer(prompt["prompt"], **kwargs)
         return self._build_tokens_prompt(
             encoding["input_ids"],
