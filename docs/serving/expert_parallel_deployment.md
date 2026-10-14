@@ -31,7 +31,7 @@ vLLM provides multiple communication backends for EP. Use `--all2all-backend` to
 | `flashinfer_nvlink_two_sided` | MNNVL systems | FlashInfer's two-sided A2A strategy for multi-node NVLink | Systems with NVLink across nodes |
 
 The `flashinfer_nvlink_one_sided` backend requires FlashInfer 0.7.2
-(or its 0.7.2rc3 prerelease) with the `MoEEpCommunication` API. This
+with the `MoEEpCommunication` API. This
 backend uses `NVLinkOneSidedAlltoAll`; it does not select the CFT transport.
 
 ## Single Node Deployment

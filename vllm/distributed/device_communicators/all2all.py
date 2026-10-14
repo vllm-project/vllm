@@ -773,7 +773,7 @@ class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
     def __init__(self, cpu_group):
         assert has_flashinfer_nvlink_one_sided(), (
             "FlashInfer MoEEpCommunication NVLink one-sided API not found. "
-            "Please install FlashInfer 0.7.2 or a compatible prerelease."
+            "Please install FlashInfer 0.7.2 or later."
         )
         super().__init__(cpu_group)
         self.initialized = False
