@@ -18,6 +18,8 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.router.gate_linear as gate_linear_mod
 from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
+from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
 
 
 def _make_gate(
@@ -32,6 +34,8 @@ def _make_gate(
     output_size: int = 64,
     on_gfx950: bool = False,
     parallel_world_size: int = 1,
+    force_fp32_compute: bool = False,
+    quant_config=None,
 ) -> GateLinear:
     """Build a GateLinear with platform predicates mocked, no GPU needed."""
     for target in (
@@ -63,6 +67,8 @@ def _make_gate(
         bias=bias,
         out_dtype=out_dtype,
         params_dtype=params_dtype,
+        force_fp32_compute=force_fp32_compute,
+        quant_config=quant_config,
     )
 
 
@@ -258,3 +264,189 @@ def test_rocm_bf16x3_is_reachable_for_low_m_shapes(monkeypatch):
     assert source.index("allow_rocm_bf16x3_router_gemm") < source.index(
         "allow_fp32_router_gemm"
     )
+
+
+# ---------------------------------------------------------------------------
+# ROCm AITER tuned GEMM tier (bf16 router weights)
+# ---------------------------------------------------------------------------
+def _make_aiter_gate(monkeypatch, *, tgemm=True, tuned=True, **kwargs):
+    """Build a gate with the AITER tgemm and tuned-shape checks mocked."""
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    tuned_calls = []
+
+    def is_bf16_gemm_tuned(n, k):
+        tuned_calls.append((n, k))
+        return tuned
+
+    monkeypatch.setattr(rocm_aiter_ops, "is_tgemm_enabled", staticmethod(lambda: tgemm))
+    monkeypatch.setattr(
+        rocm_aiter_ops, "is_bf16_gemm_tuned", staticmethod(is_bf16_gemm_tuned)
+    )
+    return _make_gate(monkeypatch, is_rocm=True, **kwargs), tuned_calls
+
+
+class _OnlineQuantMethod:
+    """Quantizes after loading, so the weight is still bf16 at construction."""
+
+    def create_weights(
+        self,
+        layer,
+        input_size_per_partition,
+        output_partition_sizes,
+        input_size,
+        output_size,
+        params_dtype,
+        **extra_weight_attrs,
+    ):
+        weight = torch.empty(
+            sum(output_partition_sizes), input_size_per_partition, dtype=params_dtype
+        )
+        layer.register_parameter(
+            "weight", torch.nn.Parameter(weight, requires_grad=False)
+        )
+
+
+class _OnlineQuantConfig:
+    online_quantization_config = None
+
+    def get_quant_method(self, layer, prefix):
+        return _OnlineQuantMethod()
+
+
+def test_rocm_aiter_router_gemm_enabled_for_tuned_bf16_gate(monkeypatch):
+    gate, tuned_calls = _make_aiter_gate(monkeypatch, input_size=6144, output_size=256)
+    assert gate.allow_aiter_router_gemm
+    assert tuned_calls == [(256, 6144)]
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        pytest.param({"tgemm": False}, id="tgemm-disabled"),
+        pytest.param({"tuned": False}, id="untuned-shape"),
+        pytest.param({"bias": True}, id="bias"),
+        pytest.param({"params_dtype": torch.float32}, id="fp32-weight"),
+        pytest.param({"force_fp32_compute": True}, id="force-fp32-compute"),
+        pytest.param({"quant_config": _OnlineQuantConfig()}, id="quantized"),
+    ],
+)
+def test_rocm_aiter_router_gemm_rejects_ineligible_gates(monkeypatch, kwargs):
+    gate, _ = _make_aiter_gate(monkeypatch, **kwargs)
+    assert not gate.allow_aiter_router_gemm
+
+
+def test_rocm_aiter_router_gemm_disabled_by_batch_invariant(monkeypatch):
+    # The AITER tuned GEMM picks its kernel from the token count.
+    monkeypatch.setattr(gate_linear_mod.envs, "VLLM_BATCH_INVARIANT", True)
+    gate, _ = _make_aiter_gate(monkeypatch, input_size=6144, output_size=256)
+    assert not gate.allow_aiter_router_gemm
+
+
+@pytest.mark.parametrize(("tuned", "expected"), [(True, "aiter"), (False, "torch.mm")])
+def test_rocm_aiter_router_gemm_forward_dispatch(monkeypatch, tuned, expected):
+    """The torch.mm epilogue is eligible on ROCm too, so a tuned gate must take
+    the AITER op instead of it."""
+    gate, _ = _make_aiter_gate(monkeypatch, tuned=tuned)
+    assert gate.allow_cublas_router_gemm
+
+    calls = []
+
+    def fake_aiter(x, weight, out_dtype):
+        calls.append("aiter")
+        return x.new_zeros(x.shape[0], weight.shape[0], dtype=out_dtype)
+
+    def fake_mm(x, weight_t, out_dtype=None):
+        calls.append("torch.mm")
+        return x.new_zeros(x.shape[0], weight_t.shape[1], dtype=out_dtype)
+
+    monkeypatch.setattr(
+        torch.ops.vllm, "rocm_aiter_router_gemm", fake_aiter, raising=False
+    )
+    monkeypatch.setattr(torch, "mm", fake_mm)
+
+    x = torch.zeros(4, gate.input_size, dtype=torch.bfloat16)
+    output, _ = gate(x)
+
+    assert calls == [expected]
+    assert output.shape == (4, gate.output_size)
+    assert output.dtype == torch.float32
+
+
+# ---------------------------------------------------------------------------
+# ROCm AITER tuned GEMM tier on hardware, shape tuned for only one M
+# ---------------------------------------------------------------------------
+ROUTER_N, ROUTER_K = 256, 6144
+
+
+@pytest.fixture
+def aiter_router_shape_tuned_only_at_m1(monkeypatch):
+    """Keep only the M=1 row of AITER's bf16 tuned table for the router shape."""
+    if not current_platform.is_rocm():
+        pytest.skip("requires ROCm")
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+    rocm_aiter_ops.refresh_env_variables()
+    if not rocm_aiter_ops.is_tgemm_enabled():
+        pytest.skip("requires the AITER tuned GEMM on gfx950")
+
+    import aiter.tuned_gemm as tuned_gemm
+
+    # Keys are (gfx, cu_num, M, N, K, bias, dtype, outdtype, scaleAB, bpreshuffle).
+    table = {
+        key: row
+        for key, row in tuned_gemm.get_GEMM_A16W16_config_().items()
+        if key[3:5] != (ROUTER_N, ROUTER_K) or key[2] == 1
+    }
+    if not any(key[2:5] == (1, ROUTER_N, ROUTER_K) for key in table):
+        pytest.skip("AITER has no M=1 tuned row for the router shape")
+
+    monkeypatch.setattr(tuned_gemm, "get_GEMM_A16W16_config_", lambda: table)
+    tuned_gemm.get_GEMM_A16W16_config.cache_clear()
+    rocm_aiter_ops.is_bf16_gemm_tuned.cache_clear()
+    yield
+    monkeypatch.undo()
+    rocm_aiter_ops.refresh_env_variables()
+    tuned_gemm.get_GEMM_A16W16_config.cache_clear()
+    rocm_aiter_ops.is_bf16_gemm_tuned.cache_clear()
+
+
+@pytest.mark.parametrize("num_tokens", [1, 2, 5, 33, 300])
+@torch.inference_mode()
+def test_rocm_aiter_router_gemm_runs_for_untuned_m(
+    aiter_router_shape_tuned_only_at_m1, monkeypatch, num_tokens: int
+) -> None:
+    """One tuned M enables the tier for every M, so an untuned M must fall back
+    inside AITER instead of failing."""
+    gate = _make_gate(
+        monkeypatch,
+        is_rocm=True,
+        on_gfx950=True,
+        input_size=ROUTER_K,
+        output_size=ROUTER_N,
+    ).cuda()
+    assert gate.allow_aiter_router_gemm
+
+    from aiter.tuned_gemm import TunedGemm
+
+    calls = []
+    tgemm_mm = TunedGemm.mm
+
+    def spy(self, inp, *args, **kwargs):
+        calls.append(inp.shape[0])
+        return tgemm_mm(self, inp, *args, **kwargs)
+
+    monkeypatch.setattr(TunedGemm, "mm", spy)
+
+    set_random_seed(num_tokens)
+    gate.weight.normal_(0, 0.02)
+    x = torch.randn(num_tokens, ROUTER_K, dtype=torch.bfloat16, device="cuda")
+    output, _ = gate(x)
+
+    reference = torch.nn.functional.linear(x.float(), gate.weight.float())
+    assert calls == [num_tokens]
+    assert output.shape == (num_tokens, ROUTER_N)
+    assert output.dtype == torch.float32
+    rel_err = (output - reference).abs().max() / reference.abs().max()
+    assert rel_err < 2e-2
