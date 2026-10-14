@@ -38,6 +38,7 @@ _MODEL_TYPES_WITH_INCORRECT_TOKENIZER_CLASS: set[str] = {
     "step3_vl",
     "step3p7",
     "unlimited-ocr",
+    "unlimited_ocr",
 }
 
 _VLLM_TOKENIZERS = {
