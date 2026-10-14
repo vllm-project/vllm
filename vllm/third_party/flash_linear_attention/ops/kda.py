@@ -145,6 +145,9 @@ def fused_recurrent_kda(
     return o, final_state
 
 
+# Gated norm forward ported from fla/modules/fused_norm_gate.py at
+# fla-org/flash-linear-attention@cfab1960f257bd083e3da00cceb66dd64c885692
+# (PR #1062), retaining K3's head-aware, row-strided gate addressing.
 @triton.heuristics(
     {
         "STORE_RESIDUAL_OUT": lambda args: args["residual_out"] is not None,
@@ -223,11 +226,8 @@ def layer_norm_gated_fwd_kernel(
 
     # swish/sigmoid output gate
     o_g = (o_t // H) * g_stride_n + (o_t % H) * D
-    b_g = tl.load(
-        g + o_g[:, None] + o_d[None, :],
-        mask=(o_t[:, None] < T) & m_d[None, :],
-        other=0.0,
-    ).to(tl.float32)
+    p_g = g + o_g[:, None] + o_d[None, :]
+    b_g = tl.load(p_g, mask=m_x, other=0.0).to(tl.float32)
     if ACTIVATION == "swish" or ACTIVATION == "silu":
         b_y = b_y * b_g * tl.sigmoid(b_g)
     elif ACTIVATION == "sigmoid":
