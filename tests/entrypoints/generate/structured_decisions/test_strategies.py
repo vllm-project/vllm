@@ -908,7 +908,7 @@ def decision_server(qwen):
     tokenizer, _ = qwen
 
     class Engine:
-        model_config = SimpleNamespace(is_encoder_decoder=False)
+        model_config = SimpleNamespace(is_encoder_decoder=False, is_hybrid=False)
         renderer = input_processor = None
         errored = False
         failure = None
