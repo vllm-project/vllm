@@ -1307,6 +1307,21 @@ def get_kv_cache_groups(
     return groups
 
 
+def get_kv_cache_groups_from_builder(
+    builder: KVCacheConfigBuilder,
+    vllm_config: VllmConfig,
+    kv_cache_spec: dict[str, KVCacheSpec],
+) -> list[KVCacheGroupSpec]:
+    """Group the layers with the builder and check the result.
+
+    Core checks every grouping, whether it comes from the default grouping, a
+    model's ``SupportsKVCacheGrouping`` or a platform builder.
+    """
+    groups = builder.get_kv_cache_groups(vllm_config, kv_cache_spec)
+    _check_exact_partition(groups, kv_cache_spec)
+    return groups
+
+
 def _check_exact_partition(
     groups: list[KVCacheGroupSpec],
     kv_cache_spec: dict[str, KVCacheSpec],
@@ -1618,8 +1633,8 @@ def get_kv_cache_configs(
     # Get global KV cache groups. This also handles spec unification for
     # hybrid models when disable_hybrid_kv_cache_manager is enabled.
     # After this call, merged_kv_cache_specs may be modified in-place.
-    global_kv_cache_groups = builder.get_kv_cache_groups(
-        vllm_config, merged_kv_cache_specs
+    global_kv_cache_groups = get_kv_cache_groups_from_builder(
+        builder, vllm_config, merged_kv_cache_specs
     )
 
     # If original_max_model_len was -1, automatically
@@ -1762,9 +1777,7 @@ class DefaultKVCacheConfigBuilder(KVCacheConfigBuilder):
             vllm_config.model_config.architectures,
             vllm_config.model_config,
         )
-        groups = model_cls.get_kv_cache_groups(vllm_config, kv_cache_spec)
-        _check_exact_partition(groups, kv_cache_spec)
-        return groups
+        return model_cls.get_kv_cache_groups(vllm_config, kv_cache_spec)
 
     def get_kv_cache_config_from_groups(
         self,

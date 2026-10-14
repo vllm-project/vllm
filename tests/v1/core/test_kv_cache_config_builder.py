@@ -11,7 +11,11 @@ from vllm.v1.core.kv_cache_config_builder import (
     KVCacheConfigBuilder,
     get_kv_cache_config_builder,
 )
-from vllm.v1.core.kv_cache_planning import DefaultKVCacheConfigBuilder
+from vllm.v1.core.kv_cache_planning import (
+    DefaultKVCacheConfigBuilder,
+    get_kv_cache_groups_from_builder,
+)
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec
 
 
 def _make_vllm_config(supports_grouping: bool = False) -> MagicMock:
@@ -122,20 +126,45 @@ class TestModelGroupingPriority:
         with pytest.raises(ValueError, match="HiSparse"):
             DefaultKVCacheConfigBuilder().get_kv_cache_groups(cfg, {})
 
-    def test_model_grouping_must_partition_all_layers(self):
+
+class TestCoreChecksGrouping:
+    """Core checks the grouping whether a model or a platform produced it."""
+
+    _SPEC = FullAttentionSpec(
+        block_size=16, num_kv_heads=1, head_size=128, dtype="float16"
+    )
+
+    def test_model_grouping_is_checked(self):
         cfg = _make_vllm_config(supports_grouping=True)
         cfg.model_config.registry.resolve_model_cls.return_value = (
             _PartialGroupedModel,
             "arch",
         )
-        from vllm.v1.kv_cache_interface import FullAttentionSpec
-
-        spec = FullAttentionSpec(
-            block_size=16, num_kv_heads=1, head_size=128, dtype="float16"
-        )
         with pytest.raises(AssertionError, match="miss layers"):
-            DefaultKVCacheConfigBuilder().get_kv_cache_groups(
-                cfg, {"a": spec, "b": spec}
+            get_kv_cache_groups_from_builder(
+                DefaultKVCacheConfigBuilder(), cfg, {"a": self._SPEC, "b": self._SPEC}
+            )
+
+    @pytest.mark.parametrize(
+        ("groups", "match"),
+        [
+            ([KVCacheGroupSpec(["a"], _SPEC)], "miss layers"),
+            (
+                [KVCacheGroupSpec(["a", "b"], _SPEC), KVCacheGroupSpec(["b"], _SPEC)],
+                "overlaps",
+            ),
+        ],
+    )
+    def test_platform_grouping_is_checked(self, groups, match):
+        class FixedGroupsBuilder(DefaultKVCacheConfigBuilder):
+            def get_kv_cache_groups(self, vllm_config, kv_cache_spec):
+                return groups
+
+        with pytest.raises(AssertionError, match=match):
+            get_kv_cache_groups_from_builder(
+                FixedGroupsBuilder(),
+                _make_vllm_config(),
+                {"a": self._SPEC, "b": self._SPEC},
             )
 
 

@@ -43,6 +43,7 @@ class KVCacheConfigBuilder(ABC):
         """Split the given layers into KV cache groups.
 
         Planning passes all workers' layers; profiling passes one worker's.
+        Core rejects a result that does not put each layer in exactly one group.
 
         The default builder honors a model's
         :class:`~vllm.model_executor.models.interfaces.SupportsKVCacheGrouping`
