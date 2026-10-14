@@ -12,6 +12,7 @@ from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import divide
 from vllm.forward_context import get_forward_context
+from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
@@ -50,6 +51,8 @@ from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.kv_cache_interface import MambaSpec
 from vllm.v1.worker.workspace import current_workspace_manager
+
+logger = init_logger(__name__)
 
 if current_platform.is_rocm():
     from vllm.models.glm5next.amd.ops.third_party.kda import (
@@ -183,6 +186,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             and cache_config.prefix_match_unit in (None, spec.block_size)
         ):
             alignment = SPLIT_KDA_CHECKPOINT_ALIGNMENT
+            logger.info_once("GLM-5.3-Flash KDA prefill checkpoint enabled.")
         return replace(
             spec,
             num_prefill_checkpoint_blocks=int(alignment is not None),

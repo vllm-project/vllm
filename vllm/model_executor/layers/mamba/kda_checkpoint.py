@@ -19,8 +19,11 @@ def kda_prefill_checkpoint_alignment(backend: str) -> int | None:
 class FlashKDAPrefillCheckpointExporter(MambaPrefillCheckpointExporter):
     """Store FlashKDA recurrent and convolution checkpoint states."""
 
+
 # The split export below can snapshot a row at any token of its query.
 SPLIT_KDA_CHECKPOINT_ALIGNMENT = 1
+
+
 @dataclass
 class KDAPrefillCheckpointSplit:
     """Host plan for exporting checkpoints by splitting prefill rows.
