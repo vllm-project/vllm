@@ -24,7 +24,10 @@ def prom():
     try:
         yield (
             SpecDecodingProm(
-                speculative_config=SimpleNamespace(num_speculative_tokens=3),
+                speculative_config=SimpleNamespace(
+                    num_speculative_tokens=3,
+                    enable_adaptive_verification=False,
+                ),
                 labelnames=["model"],
                 per_engine_labelvalues={0: ["m"]},
             ),
