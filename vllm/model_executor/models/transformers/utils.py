@@ -18,17 +18,17 @@
 
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from functools import lru_cache
 from itertools import chain
 from operator import attrgetter
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, TypeVar
+from typing import TYPE_CHECKING, Literal, TypeAlias, TypeVar
 
 import torch
 from torch import nn
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.conv import Conv2dLayer, Conv3dLayer
+from vllm.model_executor.layers.layernorm import LayerNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     ReplicatedLinear,
@@ -36,7 +36,7 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.models.utils import maybe_prefix
-from vllm.transformers_utils.config import is_rope_parameters_nested
+from vllm.transformers_utils.config import iter_rope_parameters
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -70,7 +70,7 @@ def init_on_device_without_buffers(device: torch.device):
                 module._parameters[name].to(device), **kwargs
             )
 
-    tensor_constructors_to_patch = {}
+    tensor_constructors_to_patch: dict[str, Callable] = {}
 
     def patch_tensor_constructor(fn):
         def wrapper(*args, **kwargs):
@@ -147,8 +147,8 @@ def replace_linear_class(
     )
 
 
-TorchConv = nn.Conv2d | nn.Conv3d
-VllmConv = Conv2dLayer | Conv3dLayer
+TorchConv: TypeAlias = nn.Conv2d | nn.Conv3d
+VllmConv: TypeAlias = Conv2dLayer | Conv3dLayer
 
 
 def replace_conv_class(conv: TorchConv) -> VllmConv | TorchConv:
@@ -188,6 +188,34 @@ def replace_conv_class(conv: TorchConv) -> VllmConv | TorchConv:
     )
 
 
+def replace_layernorm_class(layernorm: nn.LayerNorm) -> nn.Module:
+    """Replace a standard (mean-centered) `nn.LayerNorm` with vLLM's
+    `LayerNorm`.
+
+    Args:
+        layernorm: `nn.LayerNorm` to be replaced.
+
+    Returns:
+        The new `LayerNorm`. If the layernorm is not supported (a subclass with
+        its own behavior, multi-dim `normalized_shape`, or not both
+        elementwise-affine and biased), returns the original module unchanged.
+
+    """
+    if (
+        type(layernorm) is not nn.LayerNorm
+        or len(layernorm.normalized_shape) != 1
+        or not layernorm.elementwise_affine
+        or layernorm.bias is None
+    ):
+        return layernorm
+
+    return LayerNorm(
+        layernorm.normalized_shape[0],
+        eps=layernorm.eps,
+        dtype=layernorm.weight.dtype,
+    )
+
+
 def attrsetter(attr: str) -> Callable[[object, object], None]:
     """Set a possibly nested attribute, like the inverse of attrgetter."""
     parent, _, name = attr.rpartition(".")
@@ -212,7 +240,9 @@ class _VocabParallelEmbeddingBase(VocabParallelEmbedding, _UninitializedEmbeddin
     `super().forward(...)` in an `nn.Embedding` subclass reaches vLLM's embedding."""
 
 
-@lru_cache
+_rebased_embedding_classes: dict[type[nn.Embedding], type[VocabParallelEmbedding]] = {}
+
+
 def _rebase_on_vocab_parallel(cls: type[nn.Embedding]) -> type[VocabParallelEmbedding]:
     """Subclass `cls` so that `VocabParallelEmbedding` supersedes its `nn.Embedding`.
 
@@ -224,7 +254,10 @@ def _rebase_on_vocab_parallel(cls: type[nn.Embedding]) -> type[VocabParallelEmbe
         The new class, to assign to `__class__` of an instance of `cls`.
 
     """
-    return type(cls.__name__, (cls, _VocabParallelEmbeddingBase), {})
+    if cls not in _rebased_embedding_classes:
+        rebased_cls = type(cls.__name__, (cls, _VocabParallelEmbeddingBase), {})
+        _rebased_embedding_classes[cls] = rebased_cls
+    return _rebased_embedding_classes[cls]
 
 
 def replace_embedding_class(
@@ -278,10 +311,9 @@ def recursive_replace_linear(
             qual_name = maybe_prefix(prefix, child_name)
             # Replace modules as needed
             if isinstance(child_module, nn.Linear):
-                style = "replicate"
                 new_module = replace_linear_class(
                     child_module,
-                    style,
+                    "replicate",
                     quant_config,
                     prefix=qual_name,
                 )
@@ -334,10 +366,4 @@ def can_enable_torch_compile(vllm_config: "VllmConfig") -> bool:
     """
     text_config = vllm_config.model_config.hf_config.get_text_config()
     # Dynamic rope scaling is not compatible with torch.compile
-    rope_parameters: dict | None = getattr(text_config, "rope_parameters", None) or {}
-    if rope_parameters:
-        # Nest rope_parameters if not nested already to simplify logic
-        if not is_rope_parameters_nested(rope_parameters):
-            rope_parameters = {"": rope_parameters}
-        return all(rp["rope_type"] != "dynamic" for rp in rope_parameters.values())
-    return True
+    return all(rp["rope_type"] != "dynamic" for rp in iter_rope_parameters(text_config))

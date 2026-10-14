@@ -16,7 +16,7 @@ from vllm.distributed.device_communicators.shm_broadcast import (
     Handle,
     MessageQueue,
 )
-from vllm.logger import init_logger
+from vllm.logger import configure_logging, init_logger
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import (
     get_distributed_init_method,
@@ -113,6 +113,9 @@ class RayWorkerProc(WorkerProc):
         is_driver_worker: bool,
         is_driver_node: bool = False,
     ):
+        if logging_config := getattr(vllm_config, "logging_config", None):
+            configure_logging(logging_config)
+
         # Defer WorkerProc.__init__ until GPU IDs are known.
         self._is_driver_node = is_driver_node
         self._parallel_config = vllm_config.parallel_config

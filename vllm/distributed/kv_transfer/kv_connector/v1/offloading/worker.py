@@ -141,8 +141,9 @@ class OffloadingConnectorWorker:
             ),
             None,
         )
-        if packed_layer_name is not None and len(selected_groups) == len(
-            kv_cache_config.kv_cache_groups
+        if (
+            packed_layer_name is not None
+            and kv_cache_config.hisparse_host_num_blocks is None
         ):
             (tensor,) = tensors_per_block[packed_layer_name]
             num_blocks = tensor.shape[0]

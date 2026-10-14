@@ -23,6 +23,10 @@ class RandomSampler:
     seeds: torch.Tensor
     positions: torch.Tensor
     use_fp64: bool = False
+    is_drafting: bool = False
+    logits_cache: torch.Tensor | None = None
+    logits_cache_col: torch.Tensor | None = None
+    logits_cache_source: torch.Tensor | None = None
 
     def __call__(self, logits: torch.Tensor) -> torch.Tensor:
         return gumbel_sample(
@@ -32,7 +36,10 @@ class RandomSampler:
             self.seeds,
             self.positions,
             apply_temperature=False,
-            is_drafting=False,
+            is_drafting=self.is_drafting,
+            logits_cache=self.logits_cache,
+            logits_cache_col=self.logits_cache_col,
+            logits_cache_source=self.logits_cache_source,
             use_fp64=self.use_fp64,
         )
 

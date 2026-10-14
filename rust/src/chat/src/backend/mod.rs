@@ -13,7 +13,7 @@ use crate::multimodal::{MmLimitPerPrompt, MultimodalModelInfo};
 use crate::output::DynChatOutputProcessor;
 use crate::renderer::DynChatRenderer;
 use crate::request::ChatRequest;
-use crate::{ChatTemplateContentFormatOption, ParserSelection, RendererSelection};
+use crate::{ChatTemplateContentFormatOption, ParserSelection, RendererSelection, ToolStrictLevel};
 
 pub mod hf;
 
@@ -21,6 +21,7 @@ pub mod hf;
 pub struct NewChatOutputProcessorOptions<'a> {
     pub tool_call_parser: &'a ParserSelection,
     pub reasoning_parser: &'a ParserSelection,
+    pub tool_strict_level: ToolStrictLevel,
 }
 
 /// Minimal prompt-processing backend needed by `vllm-chat`.
