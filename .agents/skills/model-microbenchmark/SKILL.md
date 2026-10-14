@@ -62,6 +62,8 @@ Read `median_us` (each replay is already the max over ranks).
   `is_current_stream_capturing()`; that's expected, not a bug.
 - KV cache is zero-initialized (`--kv-init zeros`); random KV was within 3%.
 - Uniform DP only: every rank gets the same case; no idle ranks.
+- CUDA only: it hangs on ROCm (untested cause: likely the in-graph timing
+  events).
 - Large prefills/prefix hits need room: raise `--max-num-batched-tokens` /
   `--max-model-len` / `--gpu-memory-utilization` if build fails on KV blocks.
 - Startup cost is JIT/autotune, not the bench: install FlashInfer jit-cache

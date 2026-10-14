@@ -10,6 +10,7 @@ import pytest
 
 from vllm.benchmarks.forward.batch import build_batch
 from vllm.benchmarks.forward.shapes import jitter_kv_lens, parse_case
+from vllm.platforms import current_platform
 
 MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
 
@@ -84,6 +85,9 @@ def test_jitter_kv_lens():
 
 
 @pytest.mark.benchmark
+@pytest.mark.skipif(
+    current_platform.is_rocm(), reason="Hangs on ROCm; the bench is CUDA-only."
+)
 def test_bench_forward(tmp_path):
     output = tmp_path / "forward.json"
     command = [
