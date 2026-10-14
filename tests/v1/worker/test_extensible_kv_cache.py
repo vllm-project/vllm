@@ -8,15 +8,15 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from tests.v1.core.utils import full_layer, new_kv_cache_group
 from vllm.config import ModelConfig, VllmConfig
 from vllm.utils.vmm_driver import vmm_unavailable_reason
 from vllm.v1.core.kv_cache_planning import get_kv_cache_config_from_groups
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    KVCacheGroupSpec,
+    AttentionSpec,
+    KVCacheGroup,
     KVCacheTensor,
     MLAAttentionSpec,
-    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.kv_cache_layout import KVCacheLayout
 from vllm.v1.worker import extensible_kv_cache
@@ -44,7 +44,7 @@ NUM_LAYERS = 3
 
 
 def _make_config(layout: KVCacheLayout, num_blocks: int = NUM_BLOCKS):
-    spec = FullAttentionSpec(
+    spec = AttentionSpec(
         block_size=16, num_kv_heads=2, head_size=64, dtype=torch.float16
     )
     vllm_config = VllmConfig(model_config=ModelConfig(max_model_len=16))
@@ -52,7 +52,7 @@ def _make_config(layout: KVCacheLayout, num_blocks: int = NUM_BLOCKS):
     layers = [f"layer.{i}" for i in range(NUM_LAYERS)]
     config = get_kv_cache_config_from_groups(
         vllm_config,
-        [KVCacheGroupSpec(layers, spec)],
+        [new_kv_cache_group(layers, spec)],
         available_memory=NUM_LAYERS * spec.page_size_bytes * num_blocks,
     )
     assert config.num_blocks == num_blocks
@@ -315,7 +315,7 @@ def test_freeing_the_cache_lifts_the_torch_memory_cap(monkeypatch):
 def _make_mixed_config(num_blocks: int = NUM_BLOCKS):
     """One group whose layers differ in head size, so their block strides differ."""
     specs = {
-        f"layer.{i}": FullAttentionSpec(
+        f"layer.{i}": AttentionSpec(
             block_size=16,
             num_kv_heads=2,
             head_size=64 * (1 + i % 2),
@@ -323,13 +323,11 @@ def _make_mixed_config(num_blocks: int = NUM_BLOCKS):
         )
         for i in range(NUM_LAYERS)
     }
-    uniform = UniformTypeKVCacheSpecs.from_specs(specs)
-    assert uniform is not None
     vllm_config = VllmConfig(model_config=ModelConfig(max_model_len=16))
     vllm_config.cache_config.kv_cache_layout = "LBNHC"
     config = get_kv_cache_config_from_groups(
         vllm_config,
-        [KVCacheGroupSpec(list(specs), uniform)],
+        [KVCacheGroup.from_layers({n: full_layer(s) for n, s in specs.items()})],
         available_memory=sum(s.page_size_bytes for s in specs.values()) * num_blocks,
     )
     assert config.num_blocks == num_blocks
@@ -416,7 +414,7 @@ def test_block_outermost_views_have_mapped_memory_past_their_start(vmm, num_laye
     layers = [f"layer.{i}" for i in range(num_layers)]
     config = get_kv_cache_config_from_groups(
         vllm_config,
-        [KVCacheGroupSpec(layers, spec)],
+        [new_kv_cache_group(layers, spec)],
         available_memory=num_layers * spec.page_size_bytes * NUM_BLOCKS,
     )
     kv_cache = ExtensibleKVCache(config, torch.device("cuda"), layout)

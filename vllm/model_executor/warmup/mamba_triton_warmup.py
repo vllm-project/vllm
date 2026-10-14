@@ -15,15 +15,9 @@ logger = init_logger(__name__)
 
 
 def _has_mamba_style_cache(runner: "GPUModelRunner") -> bool:
-    from vllm.v1.kv_cache_interface import MambaSpec, UniformTypeKVCacheSpecs
+    from vllm.v1.core.kv_cache_utils import is_mamba_group
 
-    for group in runner.kv_cache_config.kv_cache_groups:
-        spec = group.kv_cache_spec
-        if isinstance(spec, UniformTypeKVCacheSpecs):
-            spec = spec.first_spec
-        if isinstance(spec, MambaSpec):
-            return True
-    return False
+    return any(is_mamba_group(g) for g in runner.kv_cache_config.kv_cache_groups)
 
 
 def _warm_batch_memcpy_kernel(device: torch.device) -> None:

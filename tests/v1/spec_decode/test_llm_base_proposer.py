@@ -31,7 +31,9 @@ class _FakeAttentionGroup:
         self.kv_cache_group_id = kv_cache_group_id
         self.kernel_block_size = None
 
-    def create_metadata_builders(self, vllm_config, device, kernel_block_size=None):
+    def create_metadata_builders(
+        self, vllm_config, device, kernel_block_size=None, kv_cache_group=None
+    ):
         self.kernel_block_size = kernel_block_size
 
     def get_metadata_builder(self):
@@ -64,7 +66,9 @@ def _make_proposer(
 
 def _make_kv_cache_config(layer_names: set[str]) -> KVCacheConfig:
     spec = SimpleNamespace(block_size=SCHEDULER_BLOCK_SIZE)
-    group = SimpleNamespace(layer_names=list(layer_names), kv_cache_spec=spec)
+    group = SimpleNamespace(
+        layer_names=list(layer_names), kv_cache_specs=dict.fromkeys(layer_names, spec)
+    )
     return SimpleNamespace(kv_cache_groups=[group])  # type: ignore[return-value]
 
 

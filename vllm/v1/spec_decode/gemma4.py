@@ -22,7 +22,6 @@ from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheSpec,
-    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.spec_decode.llm_base_proposer import SpecDecodeBaseProposer
 from vllm.v1.worker.utils import AttentionGroup
@@ -238,24 +237,9 @@ class Gemma4Proposer(SpecDecodeBaseProposer):
         layer_to_gid: dict[str, int] = {}
         layer_to_spec: dict[str, KVCacheSpec] = {}
         for gid, group in enumerate(kv_cache_config.kv_cache_groups):
-            group_spec = group.kv_cache_spec
             for ln in group.layer_names:
                 layer_to_gid[ln] = gid
-                if isinstance(group_spec, UniformTypeKVCacheSpecs):
-                    if ln in group_spec.kv_cache_specs:
-                        layer_to_spec[ln] = group_spec.kv_cache_specs[ln]
-                    else:
-                        tgt = getattr(
-                            all_attn_layers.get(ln),
-                            "kv_sharing_target_layer_name",
-                            None,
-                        )
-                        if tgt and tgt in group_spec.kv_cache_specs:
-                            layer_to_spec[ln] = group_spec.kv_cache_specs[tgt]
-                        else:
-                            layer_to_spec[ln] = group_spec
-                else:
-                    layer_to_spec[ln] = group_spec
+                layer_to_spec[ln] = group.kv_cache_specs[ln]
 
         attention_groups: dict[tuple[tuple[str, str], KVCacheSpec], AttentionGroup] = {}
         for layer_name in self._draft_attn_layer_names:
@@ -283,6 +267,7 @@ class Gemma4Proposer(SpecDecodeBaseProposer):
                     self.vllm_config,
                     self.device,
                     kernel_block_size=kernel_block_size,
+                    kv_cache_group=kv_cache_config.kv_cache_groups[gid],
                 )
                 attention_groups[group_key] = attn_group
             else:
@@ -294,9 +279,7 @@ class Gemma4Proposer(SpecDecodeBaseProposer):
             self.block_size = self.draft_attn_groups[0].kv_cache_spec.block_size
         else:
             self.kv_cache_gid = 0
-            self.block_size = kv_cache_config.kv_cache_groups[
-                0
-            ].kv_cache_spec.block_size
+            self.block_size = kv_cache_config.kv_cache_groups[0].block_size
         logger.debug("Using block size %d for drafting layers", self.block_size)
 
     def _setup_gemma4_kv_sharing(

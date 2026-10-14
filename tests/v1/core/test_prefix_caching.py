@@ -60,23 +60,42 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.core.single_type_kv_cache_manager import (
+    HiSparseHotManager,
+    HiSparseResidentManager,
+    HiSparseSourceManager,
+)
 from vllm.v1.hisparse.coordinator import get_hisparse_coordinator
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    HiSparseHotSpec,
-    HiSparseResidentSpec,
+    AttentionSpec,
+    HiSparsePageSpec,
     KVCacheConfig,
     KVCacheGroupRole,
-    KVCacheGroupSpec,
+    KVCacheLayerConfig,
     KVCacheSpecKind,
     MambaSpec,
     MLAAttentionSpec,
-    SlidingWindowSpec,
 )
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import RequestStatus
 
+from .utils import mamba_layer, new_kv_cache_group, sliding_window_layer
+
 pytestmark = pytest.mark.cpu_test
+
+
+def _swa_layer(sliding_window: int, **spec_kwargs) -> KVCacheLayerConfig:
+    return sliding_window_layer(AttentionSpec(**spec_kwargs), sliding_window)
+
+
+def _mamba_layer(
+    mamba_cache_mode: str = "none", num_speculative_blocks: int = 0, **spec_kwargs
+) -> KVCacheLayerConfig:
+    return mamba_layer(
+        MambaSpec(**spec_kwargs),
+        mamba_cache_mode=mamba_cache_mode,
+        num_speculative_blocks=num_speculative_blocks,
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -144,7 +163,7 @@ def make_kv_cache_manager(
     ``vllm_config``, a HiSparseConnector builds the HiSparse coordinator."""
     kwargs.setdefault(
         "scheduler_block_size",
-        lcm(*(g.kv_cache_spec.block_size for g in kv_cache_config.kv_cache_groups)),
+        lcm(*(g.block_size for g in kv_cache_config.kv_cache_groups)),
     )
     if "retention_interval" in kwargs:
         kv_cache_config = replace(
@@ -167,9 +186,9 @@ def make_kv_cache_config(block_size: int, num_blocks: int) -> KVCacheConfig:
         num_blocks=num_blocks,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["layer"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
@@ -190,20 +209,20 @@ def make_hisparse_kv_cache_config(
     transfer_device_cache: bool = False,
     num_resident_groups: int = 1,
 ) -> KVCacheConfig:
-    source_spec = FullAttentionSpec(
+    source_spec = AttentionSpec(
         block_size=HISPARSE_BLOCK_SIZE,
         num_kv_heads=1,
         head_size=1,
         dtype=torch.float32,
     )
     groups = [
-        KVCacheGroupSpec(
+        new_kv_cache_group(
             ["source"],
             source_spec,
-            role=KVCacheGroupRole.HISPARSE_SOURCE,
+            HiSparseSourceManager.config(),
             host_resident=True,
         ),
-        KVCacheGroupSpec(
+        new_kv_cache_group(
             ["indexer"],
             source_spec,
             enable_kv_transfer=transfer_device_cache,
@@ -211,30 +230,35 @@ def make_hisparse_kv_cache_config(
         ),
     ]
     groups.append(
-        KVCacheGroupSpec(
+        new_kv_cache_group(
             ["resident"],
-            HiSparseResidentSpec(
+            HiSparsePageSpec(
                 block_size=HISPARSE_BLOCK_SIZE,
                 page_size=HISPARSE_BLOCK_SIZE * 4,
             ),
+            HiSparseResidentManager.config(),
             enable_kv_transfer=transfer_device_cache,
         )
     )
     groups.append(
-        KVCacheGroupSpec(
+        new_kv_cache_group(
             ["hot"],
-            HiSparseHotSpec(
+            HiSparsePageSpec(
                 block_size=HISPARSE_BLOCK_SIZE,
                 page_size=HISPARSE_BLOCK_SIZE * 4,
-                blocks_per_request=2,
             ),
+            HiSparseHotManager.config(blocks_per_request=2),
             enable_kv_transfer=False,
         )
     )
     for group_idx in range(1, num_resident_groups):
         groups.extend(
             replace(
-                group, layer_names=[f"{name}_{group_idx}" for name in group.layer_names]
+                group,
+                kv_cache_specs={
+                    f"{name}_{group_idx}": spec
+                    for name, spec in group.kv_cache_specs.items()
+                },
             )
             for group in groups[2:4]
         )
@@ -1306,9 +1330,9 @@ def test_mamba_boundary_handoffs_do_not_pin_obsolete_blocks():
             num_blocks=16,
             kv_cache_tensors=[],
             kv_cache_groups=[
-                KVCacheGroupSpec(
+                new_kv_cache_group(
                     ["mamba"],
-                    MambaSpec(
+                    _mamba_layer(
                         block_size=16,
                         shapes=((1,),),
                         dtypes=(torch.float32,),
@@ -1702,7 +1726,7 @@ def make_kv_cache_config_hybrid_model(
     second_spec_type: str = "sliding_window",
 ) -> KVCacheConfig:
     if second_spec_type == "sliding_window":
-        second_spec = SlidingWindowSpec(
+        second_spec = _swa_layer(
             block_size=block_size,
             num_kv_heads=1,
             head_size=1,
@@ -1710,7 +1734,7 @@ def make_kv_cache_config_hybrid_model(
             sliding_window=sliding_window_blocks * block_size,
         )
     elif second_spec_type == "mamba":
-        second_spec = MambaSpec(
+        second_spec = _mamba_layer(
             block_size=block_size,
             shapes=((1, 1),),
             dtypes=(torch.float32,),
@@ -1721,20 +1745,20 @@ def make_kv_cache_config_hybrid_model(
         num_blocks=num_blocks,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["layer1"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["layer2"],
                 second_spec,
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["layer3"],
                 second_spec,
             ),
@@ -1746,14 +1770,14 @@ def make_kv_cache_config_three_types(
     block_size: int, num_blocks: int, third_spec_type: str = "mamba"
 ) -> KVCacheConfig:
     if third_spec_type == "mamba":
-        third_spec = MambaSpec(
+        third_spec = _mamba_layer(
             block_size=block_size,
             shapes=((1, 1),),
             dtypes=(torch.float32,),
             mamba_cache_mode="align",
         )
     elif third_spec_type == "sliding_window":
-        third_spec = SlidingWindowSpec(
+        third_spec = _swa_layer(
             block_size=block_size,
             num_kv_heads=1,
             head_size=1,
@@ -1765,18 +1789,18 @@ def make_kv_cache_config_three_types(
         num_blocks=num_blocks,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["layer1"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["layer2"],
-                SlidingWindowSpec(
+                _swa_layer(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
@@ -1784,7 +1808,7 @@ def make_kv_cache_config_three_types(
                     sliding_window=2 * block_size,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["layer3"],
                 third_spec,
             ),
@@ -1806,16 +1830,16 @@ def test_prefix_cache_hit_uses_per_group_dcp_geometry(draft_sharded):
         num_blocks=64,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["target_mla"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["draft_mla"],
                 MLAAttentionSpec(
                     dcp_sharded=draft_sharded,
@@ -1825,9 +1849,9 @@ def test_prefix_cache_hit_uses_per_group_dcp_geometry(draft_sharded):
                     dtype=torch.float32,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["mamba"],
-                MambaSpec(
+                _mamba_layer(
                     block_size=block_size,
                     shapes=(1, 1),
                     dtypes=(torch.float32,),
@@ -2376,6 +2400,23 @@ def _test_partial_request_hit(
     manager.free(req)
 
 
+def _replace_group(
+    config: KVCacheConfig, group_id: int, block_size: int | None = None, **changes
+) -> None:
+    """Rebuild a group with a new block size and manager config fields."""
+    group = config.kv_cache_groups[group_id]
+    block_size = group.block_size if block_size is None else block_size
+    config.kv_cache_groups[group_id] = replace(
+        group,
+        kv_cache_specs={
+            name: replace(spec, block_size=block_size)
+            for name, spec in group.kv_cache_specs.items()
+        },
+        manager_config=group.manager_config.replace_params(**changes),
+        block_size=block_size,
+    )
+
+
 def _make_hybrid_kv_cache_config(
     block_size: int, num_blocks: int, spec_types: list[str]
 ) -> KVCacheConfig:
@@ -2385,34 +2426,34 @@ def _make_hybrid_kv_cache_config(
         block_size: The block size for KV cache.
         num_blocks: The number of blocks in the KV cache.
         spec_types: List of spec type strings. Supported types:
-            - "full": FullAttentionSpec
-            - "sliding_window": SlidingWindowSpec with window=2*block_size
-            - "sliding_window_large": SlidingWindowSpec with window=4*block_size
+            - "full": full attention
+            - "sliding_window": sliding window with window=2*block_size
+            - "sliding_window_large": sliding window with window=4*block_size
             - "mamba": MambaSpec in prefix-caching ("align") mode
 
     """
     spec_map = {
-        "full": lambda: FullAttentionSpec(
+        "full": lambda: AttentionSpec(
             block_size=block_size,
             num_kv_heads=1,
             head_size=1,
             dtype=torch.float32,
         ),
-        "sliding_window": lambda: SlidingWindowSpec(
+        "sliding_window": lambda: _swa_layer(
             block_size=block_size,
             num_kv_heads=1,
             head_size=1,
             dtype=torch.float32,
             sliding_window=2 * block_size,
         ),
-        "sliding_window_large": lambda: SlidingWindowSpec(
+        "sliding_window_large": lambda: _swa_layer(
             block_size=block_size,
             num_kv_heads=1,
             head_size=1,
             dtype=torch.float32,
             sliding_window=4 * block_size,
         ),
-        "mamba": lambda: MambaSpec(
+        "mamba": lambda: _mamba_layer(
             block_size=block_size,
             shapes=((1, 1),),
             dtypes=(torch.float32,),
@@ -2421,7 +2462,7 @@ def _make_hybrid_kv_cache_config(
     }
 
     kv_cache_groups = [
-        KVCacheGroupSpec([f"layer{i}"], spec_map[spec_type]())
+        new_kv_cache_group([f"layer{i}"], spec_map[spec_type]())
         for i, spec_type in enumerate(spec_types)
     ]
 
@@ -4085,18 +4126,18 @@ def test_block_stored_event_group_idx_multiple_groups():
             num_blocks=5,
             kv_cache_tensors=[],
             kv_cache_groups=[
-                KVCacheGroupSpec(
+                new_kv_cache_group(
                     ["layer1"],
-                    FullAttentionSpec(
+                    AttentionSpec(
                         block_size=block_size,
                         num_kv_heads=1,
                         head_size=1,
                         dtype=torch.float32,
                     ),
                 ),
-                KVCacheGroupSpec(
+                new_kv_cache_group(
                     ["layer2"],
-                    SlidingWindowSpec(
+                    _swa_layer(
                         block_size=block_size,
                         num_kv_heads=1,
                         head_size=1,
@@ -4464,11 +4505,10 @@ def test_lookahead_checkpoint_has_available_hash(
 ):
     """Prefill checkpoints must be reusable at the boundary their hash proves."""
     config = _make_hybrid_kv_cache_config(64, 100, ["full", "mamba", "full"])
-    config.kv_cache_groups[0].kv_cache_spec = replace(
-        config.kv_cache_groups[0].kv_cache_spec, block_size=full_block_size
-    )
-    config.kv_cache_groups[1].kv_cache_spec = replace(
-        config.kv_cache_groups[1].kv_cache_spec,
+    _replace_group(config, 0, block_size=full_block_size)
+    _replace_group(
+        config,
+        1,
         block_size=512,
         num_prefill_checkpoint_blocks=checkpoint_blocks,
         prefill_checkpoint_alignment=64 if checkpoint_blocks else None,
@@ -4526,9 +4566,7 @@ def test_eagle_hybrid_mamba_hits_partial_prompt_boundary():
     mamba_block_size = 544
     token_ids = list(range(1249))
     config = _make_hybrid_kv_cache_config(hash_block_size, 200, ["full", "mamba"])
-    config.kv_cache_groups[1].kv_cache_spec = replace(
-        config.kv_cache_groups[1].kv_cache_spec, block_size=mamba_block_size
-    )
+    _replace_group(config, 1, block_size=mamba_block_size)
     manager = make_kv_cache_manager(
         config,
         max_model_len=8192,
@@ -4580,9 +4618,7 @@ def test_mamba_partial_hit_requires_matching_lookahead_tokens(
     mamba_block_size = 544
     prompt_len = 1249
     config = _make_hybrid_kv_cache_config(hash_block_size, 200, ["full", "mamba"])
-    config.kv_cache_groups[1].kv_cache_spec = replace(
-        config.kv_cache_groups[1].kv_cache_spec, block_size=mamba_block_size
-    )
+    _replace_group(config, 1, block_size=mamba_block_size)
     manager = make_kv_cache_manager(
         config,
         max_model_len=8192,
@@ -4630,7 +4666,7 @@ def test_mamba_partial_hit_requires_matching_lookahead_tokens(
 def test_eagle_with_sliding_window():
     """Test Eagle behavior with sliding window."""
     block_size = 16
-    sliding_window_spec = SlidingWindowSpec(
+    sliding_window_spec = _swa_layer(
         block_size=block_size,
         num_kv_heads=1,
         head_size=1,
@@ -4641,7 +4677,7 @@ def test_eagle_with_sliding_window():
         KVCacheConfig(
             num_blocks=10,
             kv_cache_tensors=[],
-            kv_cache_groups=[KVCacheGroupSpec(["layer"], sliding_window_spec)],
+            kv_cache_groups=[new_kv_cache_group(["layer"], sliding_window_spec)],
         ),
         max_model_len=8192,
         enable_caching=True,
@@ -4711,18 +4747,18 @@ def test_eagle_swa_alignment_caches_extra_block():
         num_blocks=100,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["full"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=4 * block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float16,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["swa_mtp"],
-                SlidingWindowSpec(
+                _swa_layer(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
@@ -4781,18 +4817,18 @@ def test_eagle_swa_boundary_caches_post_boundary_block():
         num_blocks=100,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["full"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=4 * block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float16,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["swa_mtp"],
-                SlidingWindowSpec(
+                _swa_layer(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
@@ -4835,7 +4871,7 @@ def test_eagle_swa_boundary_caches_post_boundary_block():
 def test_eagle_grouped_swa_siblings_use_same_cache_mask():
     """Grouped SWA siblings must cache the EAGLE lookahead block together."""
     block_size = 8
-    swa_spec = SlidingWindowSpec(
+    swa_spec = _swa_layer(
         block_size=block_size,
         num_kv_heads=1,
         head_size=1,
@@ -4846,17 +4882,17 @@ def test_eagle_grouped_swa_siblings_use_same_cache_mask():
         num_blocks=100,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["full"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=4 * block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float16,
                 ),
             ),
-            KVCacheGroupSpec(["swa_main"], swa_spec),
-            KVCacheGroupSpec(["swa_mtp"], swa_spec, is_eagle_group=True),
+            new_kv_cache_group(["swa_main"], swa_spec),
+            new_kv_cache_group(["swa_mtp"], swa_spec, is_eagle_group=True),
         ],
     )
     manager = make_kv_cache_manager(
@@ -4896,18 +4932,18 @@ def test_different_block_size():
         num_blocks=100,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["layer1"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=block_size * 2,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float16,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["layer2"],
-                SlidingWindowSpec(
+                _swa_layer(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
@@ -4979,18 +5015,18 @@ def test_hybrid_cache_blocks_swa_tail_window_only():
         num_blocks=100,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["layer1"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=4 * block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float16,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["layer2"],
-                SlidingWindowSpec(
+                _swa_layer(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
@@ -5047,18 +5083,18 @@ def test_hybrid_cache_blocks_clamped_to_lcm():
         num_blocks=100,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["layer1"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=block_size * 2,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float16,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["layer2"],
-                SlidingWindowSpec(
+                _swa_layer(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
@@ -5109,18 +5145,18 @@ def test_hybrid_local_kv_retention_interval_aligns_in_manager():
         num_blocks=100,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["layer1"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=4 * block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float16,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["layer2"],
-                SlidingWindowSpec(
+                _swa_layer(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
@@ -5181,18 +5217,18 @@ def test_hybrid_local_kv_retention_interval_rejects_invalid(interval, expected_m
         num_blocks=100,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["layer1"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=4 * block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float16,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["layer2"],
-                SlidingWindowSpec(
+                _swa_layer(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
@@ -5243,7 +5279,7 @@ def test_hybrid_local_kv_retention_interval_survives_recycling():
         num_blocks=800,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["full"],
                 MLAAttentionSpec(
                     block_size=64 * hash_block_size,
@@ -5253,9 +5289,9 @@ def test_hybrid_local_kv_retention_interval_survives_recycling():
                     tokens_per_state=4,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["swa"],
-                SlidingWindowSpec(
+                _swa_layer(
                     block_size=16 * hash_block_size,
                     num_kv_heads=1,
                     head_size=1,
@@ -5263,9 +5299,9 @@ def test_hybrid_local_kv_retention_interval_survives_recycling():
                     sliding_window=512,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["c128"],
-                SlidingWindowSpec(
+                _swa_layer(
                     block_size=2 * hash_block_size,
                     num_kv_heads=1,
                     head_size=1,
@@ -5273,9 +5309,9 @@ def test_hybrid_local_kv_retention_interval_survives_recycling():
                     sliding_window=128,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["c4"],
-                SlidingWindowSpec(
+                _swa_layer(
                     block_size=hash_block_size,
                     num_kv_heads=1,
                     head_size=1,
@@ -5326,18 +5362,18 @@ def test_hybrid_local_kv_retention_latest_only_reuses_replay_boundary():
         num_blocks=100,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["layer1"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=4 * block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float16,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["layer2"],
-                SlidingWindowSpec(
+                _swa_layer(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
@@ -5405,18 +5441,18 @@ def test_hybrid_local_kv_retention_mtp_reuses_latest_boundary():
         num_blocks=100,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["full"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=4 * block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float16,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["swa_mtp"],
-                SlidingWindowSpec(
+                _swa_layer(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
@@ -5481,18 +5517,18 @@ def test_hybrid_mamba_retention_mtp_resend_of_aligned_prompt():
         num_blocks=100,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["full"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float16,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["mamba_mtp"],
-                MambaSpec(
+                _mamba_layer(
                     block_size=block_size,
                     shapes=((1, 1),),
                     dtypes=(torch.float32,),
@@ -5555,10 +5591,7 @@ def test_hybrid_mamba_retention_lookahead_keeps_last_prompt_boundary():
     """Sparse retention keeps the last boundary covered by lookahead hashes."""
     block_size = 32
     kv_cache_config = _make_hybrid_kv_cache_config(block_size, 100, ["full", "mamba"])
-    kv_cache_config.kv_cache_groups[1].kv_cache_spec = replace(
-        kv_cache_config.kv_cache_groups[1].kv_cache_spec,
-        num_speculative_blocks=1,
-    )
+    _replace_group(kv_cache_config, 1, num_speculative_blocks=1)
     manager = make_kv_cache_manager(
         kv_cache_config=kv_cache_config,
         max_model_len=8192,
@@ -5685,18 +5718,18 @@ def test_can_fit_full_sequence_swa_cap_admits_long_prompt():
         num_blocks=num_blocks,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["layer_full"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["layer_swa"],
-                SlidingWindowSpec(
+                _swa_layer(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
@@ -5738,9 +5771,9 @@ def test_full_sequence_admission_reserves_device_blocks_for_immediate_chunk(
         num_blocks=11,  # Ten usable blocks after the null block.
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["layer"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
@@ -5778,18 +5811,18 @@ def test_can_fit_full_sequence_full_attention_still_gates_oversized():
         num_blocks=num_blocks,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["layer_full"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["layer_swa"],
-                SlidingWindowSpec(
+                _swa_layer(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
@@ -5911,7 +5944,7 @@ def _assert_no_double_allocation(manager: KVCacheManager, req_id: str) -> None:
 
 
 def _two_phase_block_size(manager: KVCacheManager) -> int:
-    return manager.kv_cache_config.kv_cache_groups[0].kv_cache_spec.block_size
+    return manager.kv_cache_config.kv_cache_groups[0].block_size
 
 
 def _cross_group_cache_hit(
@@ -6025,18 +6058,18 @@ def test_swa_free_split_keeps_cached_tail_ahead_of_scratch():
         num_blocks=100,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["layer1"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=4 * block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float16,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["layer2"],
-                SlidingWindowSpec(
+                _swa_layer(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
@@ -6106,9 +6139,9 @@ def _make_pure_swa_manager(block_size, sliding_window, num_blocks=100, **kwargs)
         num_blocks=num_blocks,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["layer"],
-                SlidingWindowSpec(
+                _swa_layer(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
@@ -6235,7 +6268,7 @@ def test_mamba_reachable_block_mask_sparsifies_retention():
     from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 
     block_size = 16
-    spec = MambaSpec(
+    spec = _mamba_layer(
         block_size=block_size,
         shapes=(1, 1),
         dtypes=(torch.float32,),
@@ -6247,7 +6280,8 @@ def test_mamba_reachable_block_mask_sparsifies_retention():
             start_block=0,
             end_block=end_block,
             alignment_tokens=block_size,
-            kv_cache_spec=spec,
+            block_size=spec.spec.block_size,
+            manager_config=spec.manager_config,
             use_eagle=False,
             retention_interval=retention_interval,
             reachable_boundaries=(num_prompt_tokens - 1,),
@@ -6273,7 +6307,7 @@ def test_mamba_reachable_block_mask_pins_shared_prefix():
     from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 
     block_size = 16
-    spec = MambaSpec(
+    spec = _mamba_layer(
         block_size=block_size,
         shapes=(1, 1),
         dtypes=(torch.float32,),
@@ -6288,7 +6322,8 @@ def test_mamba_reachable_block_mask_pins_shared_prefix():
             start_block=0,
             end_block=end_block,
             alignment_tokens=block_size,
-            kv_cache_spec=spec,
+            block_size=spec.spec.block_size,
+            manager_config=spec.manager_config,
             use_eagle=False,
             retention_interval=retention_interval,
             reachable_boundaries=boundaries,
@@ -6404,7 +6439,7 @@ def test_swa_reachable_block_mask_final_partial_segment():
     """Only a final SWA horizon makes its incomplete segment tail reachable."""
     from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
 
-    spec = SlidingWindowSpec(
+    spec = _swa_layer(
         block_size=4,
         num_kv_heads=1,
         head_size=1,
@@ -6421,7 +6456,8 @@ def test_swa_reachable_block_mask_final_partial_segment():
             start_block=start_block,
             end_block=end_block,
             alignment_tokens=36,
-            kv_cache_spec=spec,
+            block_size=spec.spec.block_size,
+            manager_config=spec.manager_config,
             use_eagle=use_eagle,
             final_segment_end_block=final_segment_end_block,
         )
@@ -6443,7 +6479,7 @@ def test_swa_reachable_block_mask_pins_shared_prefix():
     block_size = 16
 
     def retained(retention, boundary, window, end_block=16):
-        spec = SlidingWindowSpec(
+        spec = _swa_layer(
             block_size=block_size,
             num_kv_heads=1,
             head_size=1,
@@ -6457,7 +6493,8 @@ def test_swa_reachable_block_mask_pins_shared_prefix():
             start_block=0,
             end_block=end_block,
             alignment_tokens=block_size,
-            kv_cache_spec=spec,
+            block_size=spec.spec.block_size,
+            manager_config=spec.manager_config,
             use_eagle=False,
             retention_interval=retention,
             reachable_boundaries=boundaries,
@@ -6489,7 +6526,7 @@ def test_swa_reachable_block_mask_with_dcp_scaling():
     sliding_window = 32  # need = cdiv(31, 16) = 2
 
     def get_mask(dcp_world_size):
-        spec = SlidingWindowSpec(
+        spec = _swa_layer(
             block_size=block_size,
             num_kv_heads=1,
             head_size=1,
@@ -6500,7 +6537,8 @@ def test_swa_reachable_block_mask_with_dcp_scaling():
             start_block=0,
             end_block=16,
             alignment_tokens=64,  # alignment constraint
-            kv_cache_spec=spec,
+            block_size=spec.spec.block_size,
+            manager_config=spec.manager_config,
             use_eagle=False,
             retention_interval=64,  # sparse: 1 state per 64-token segment
             reachable_boundaries=(255,),
@@ -6544,7 +6582,7 @@ def test_swa_reachable_block_mask_sub_block_alignment_is_dense(
     must fall back to dense (None) rather than raise."""
     from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
 
-    spec = SlidingWindowSpec(
+    spec = _swa_layer(
         block_size=block_size,
         num_kv_heads=1,
         head_size=1,
@@ -6556,7 +6594,8 @@ def test_swa_reachable_block_mask_sub_block_alignment_is_dense(
         start_block=0,
         end_block=16,
         alignment_tokens=alignment_tokens,
-        kv_cache_spec=spec,
+        block_size=spec.spec.block_size,
+        manager_config=spec.manager_config,
         use_eagle=False,
         retention_interval=alignment_tokens,
         reachable_boundaries=(),
@@ -6567,12 +6606,12 @@ def test_swa_reachable_block_mask_sub_block_alignment_is_dense(
 
 def test_mamba_reachable_block_mask_ignores_dcp():
     """Mamba uses TP, not DCP: each rank holds the full recurrent state, so a
-    state block spans kv_cache_spec.block_size tokens regardless of DCP. The
+    state block spans the group block_size tokens regardless of DCP. The
     mask must not scale by dcp_world_size, so retention granularity is
     identical for any DCP world size."""
     from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 
-    spec = MambaSpec(
+    spec = _mamba_layer(
         block_size=16,
         shapes=(1, 1),
         dtypes=(torch.float32,),
@@ -6584,7 +6623,8 @@ def test_mamba_reachable_block_mask_ignores_dcp():
             start_block=0,
             end_block=16,
             alignment_tokens=64,
-            kv_cache_spec=spec,
+            block_size=spec.spec.block_size,
+            manager_config=spec.manager_config,
             use_eagle=False,
             retention_interval=64,  # sparse: one state per 64-token segment
             reachable_boundaries=(255,),
@@ -6606,7 +6646,7 @@ def test_mamba_reachable_block_mask_large_dcp_stays_sparse():
     never collapse sparse retention into dense caching."""
     from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 
-    spec = MambaSpec(
+    spec = _mamba_layer(
         block_size=8,
         shapes=(1, 1),
         dtypes=(torch.float32,),
@@ -6618,7 +6658,8 @@ def test_mamba_reachable_block_mask_large_dcp_stays_sparse():
             start_block=0,
             end_block=16,
             alignment_tokens=64,
-            kv_cache_spec=spec,
+            block_size=spec.spec.block_size,
+            manager_config=spec.manager_config,
             use_eagle=False,
             retention_interval=64,
             reachable_boundaries=(255,),

@@ -653,9 +653,9 @@ def _create_backend_impl(
         impl.dcp_rank = 0
 
     # Create KV cache spec for MockLayer
-    from vllm.v1.kv_cache_interface import FullAttentionSpec
+    from vllm.v1.kv_cache_interface import AttentionSpec
 
-    kv_cache_spec = FullAttentionSpec(
+    kv_cache_spec = AttentionSpec(
         block_size=backend_cfg["block_size"] or vllm_config.cache_config.block_size,
         num_kv_heads=1,  # MLA uses 1 KV head
         head_size=576,  # MLA head dim

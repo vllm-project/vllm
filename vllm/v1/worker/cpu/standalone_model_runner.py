@@ -36,19 +36,15 @@ from vllm.tasks import SupportedTask
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
-from vllm.v1.kv_cache_interface import (
-    KVCacheConfig,
-    KVCacheSpec,
-    SlidingWindowSpec,
-    UniformTypeKVCacheSpecs,
-)
+from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheLayerConfig
 from vllm.v1.outputs import ECConnectorOutput, ModelRunnerOutput
 from vllm.v1.watermarking import create_watermarker
 from vllm.v1.worker.block_table import get_block_table_width
 from vllm.v1.worker.cpu.attn_utils import (
     FastPrefillHelper,
     build_slot_mappings_by_layer,
-    get_kv_cache_spec,
+    get_kv_cache_layer_configs,
     init_attn_backend,
     init_kv_cache,
 )
@@ -352,8 +348,8 @@ class StandaloneCPUModelRunner(LoRAModelRunnerMixin):
         encoder_runner = getattr(self.model_state, "encoder_runner", None)
         return encoder_runner.get_encoder_timing_stats() if encoder_runner else {}
 
-    def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
-        return get_kv_cache_spec(self.vllm_config)
+    def get_kv_cache_layer_configs(self) -> dict[str, KVCacheLayerConfig]:
+        return get_kv_cache_layer_configs(self.vllm_config)
 
     def initialize_kv_cache(
         self,
@@ -377,24 +373,21 @@ class StandaloneCPUModelRunner(LoRAModelRunnerMixin):
         slot_mapping_enabled = []
         sliding_window_reach = []
         for kv_cache_group in kv_cache_config.kv_cache_groups:
-            spec = kv_cache_group.kv_cache_spec
-            block_sizes.append(spec.block_size)
-            layer_spec = (
-                spec.first_spec if isinstance(spec, UniformTypeKVCacheSpecs) else spec
-            )
-            slot_mapping_enabled.append(layer_spec.uses_slot_mapping)
+            block_sizes.append(kv_cache_group.block_size)
+            slot_mapping_enabled.append(kv_cache_group.uses_slot_mapping)
+            params = kv_cache_group.manager_config.params
             sliding_window_reach.append(
-                layer_spec.num_retained_tokens
-                if isinstance(layer_spec, SlidingWindowSpec)
+                params.num_retained_tokens
+                if isinstance(params, SlidingWindowManager.Params)
                 else 0
             )
-            max_num_blocks = spec.max_num_blocks_per_req(
+            max_num_blocks = kv_cache_group.max_num_blocks_per_req(
                 self.vllm_config, block_table_max_model_len
             )
             max_num_blocks = get_block_table_width(
                 max_num_blocks,
-                spec.block_size,
-                token_alignment=spec.block_table_token_alignment,
+                kv_cache_group.block_size,
+                token_alignment=kv_cache_group.block_table_token_alignment,
             )
             max_num_blocks_per_group.append(max_num_blocks)
 

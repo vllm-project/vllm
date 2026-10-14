@@ -476,13 +476,12 @@ def _metric_counts(llm) -> dict[str, int]:
 
 
 def _stress_mamba_block_size(worker) -> int:
-    from vllm.v1.kv_cache_interface import MambaSpec, iter_layer_specs
+    from vllm.v1.core.kv_cache_utils import is_mamba_group
 
     sizes = {
-        spec.block_size
+        group.block_size
         for group in worker.model_runner.kv_cache_config.kv_cache_groups
-        for spec in iter_layer_specs(group.kv_cache_spec)
-        if isinstance(spec, MambaSpec)
+        if is_mamba_group(group)
     }
     assert len(sizes) == 1, sizes
     return sizes.pop()

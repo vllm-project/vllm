@@ -8,14 +8,14 @@ import numpy as np
 
 from vllm.benchmarks.forward.shapes import BenchCase
 from vllm.sampling_params import SamplingParams
+from vllm.v1.core.kv_cache_utils import resolve_dcp_kv_block_size
 from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
-from vllm.v1.kv_cache_interface import (
-    CircularBufferSpec,
-    KVCacheSpec,
-    MambaSpec,
-    SlidingWindowSpec,
-    UniformTypeKVCacheSpecs,
+from vllm.v1.core.single_type_kv_cache_manager import (
+    CircularBufferManager,
+    MambaManager,
+    SlidingWindowManager,
 )
+from vllm.v1.kv_cache_interface import KVCacheGroup, KVCacheSpec
 
 
 @dataclass
@@ -51,21 +51,20 @@ def kv_block_size(spec: KVCacheSpec, dcp_size: int) -> int:
 
 
 def _num_blocks(
-    spec: KVCacheSpec, computed: int, kv_len: int, dcp_size: int
+    group: KVCacheGroup, computed: int, kv_len: int, dcp_size: int
 ) -> tuple[int, int]:
     """Return (leading null blocks, live blocks) for one request."""
-    block_size = kv_block_size(spec, dcp_size)
-    if isinstance(spec, UniformTypeKVCacheSpecs):
-        spec = spec.first_spec
-    if isinstance(spec, MambaSpec):
-        return 0, 1 + spec.num_speculative_blocks
-    if isinstance(spec, CircularBufferSpec):
+    block_size = resolve_dcp_kv_block_size(group, dcp_size)
+    config = group.manager_config
+    if isinstance(config.params, MambaManager.Params):
+        return 0, 1 + config.params.num_speculative_blocks
+    if issubclass(config.manager_cls, CircularBufferManager):
         return 0, 1
     total = -(-kv_len // block_size)
     skipped = 0
-    if isinstance(spec, SlidingWindowSpec):
+    if isinstance(config.params, SlidingWindowManager.Params):
         # Blocks wholly before the window are freed to the null block.
-        skipped = max(0, computed - spec.sliding_window + 1) // block_size
+        skipped = max(0, computed - config.params.sliding_window + 1) // block_size
     return skipped, total - skipped
 
 
@@ -97,7 +96,7 @@ def build_batch(
     replay_start = num_computed_tokens = P - R.
     """
     replay_window = max(
-        (group.kv_cache_spec.prefix_replay_tokens for group in kv_cache_groups),
+        (group.prefix_replay_tokens for group in kv_cache_groups),
         default=0,
     )
     expected: dict[str, tuple[int, int, bool]] = {}
@@ -113,7 +112,7 @@ def build_batch(
         block_ids = []
         for group, ranges in zip(kv_cache_groups, group_block_ranges):
             skipped, live = _num_blocks(
-                group.kv_cache_spec, computed, req.kv_len + lookahead, dcp_size
+                group, computed, req.kv_len + lookahead, dcp_size
             )
             block_ids.append([0] * skipped + list(range(cursor, cursor + live)))
             ranges.append((cursor, cursor + live))

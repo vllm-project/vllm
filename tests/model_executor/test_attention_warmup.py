@@ -11,7 +11,7 @@ import torch
 from vllm.distributed import parallel_state
 from vllm.model_executor.warmup import attention_warmup, kernel_warmup
 from vllm.model_executor.warmup.attention_warmup import mixed_batch_attention_warmup
-from vllm.v1.kv_cache_interface import FullAttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.utils import AttentionGroup
 
 
@@ -128,7 +128,7 @@ def _workers(
                 AttentionGroup(
                     backend=_Backend(backend_name),
                     layer_names=["layer"],
-                    kv_cache_spec=FullAttentionSpec(
+                    kv_cache_spec=AttentionSpec(
                         block_size=16,
                         num_kv_heads=1,
                         head_size=128,

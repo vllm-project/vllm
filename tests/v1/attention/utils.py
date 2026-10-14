@@ -3,7 +3,10 @@
 """Utility functions for attention-related v1 tests."""
 
 import os
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -19,6 +22,7 @@ from vllm.config import (
     VllmConfig,
 )
 from vllm.config.model import ModelDType
+from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.v1.attention.backend import (
     AttentionImplBase,
     AttentionMetadataBuilder,
@@ -29,10 +33,12 @@ from vllm.v1.attention.backends.mamba_attn import (
     BaseMambaAttentionMetadata,
     BaseMambaAttentionMetadataBuilder,
 )
-from vllm.v1.attention.backends.registry import AttentionBackendEnum
+from vllm.v1.attention.backends.registry import (
+    AttentionBackendEnum,
+    MambaAttentionBackendEnum,
+)
 from vllm.v1.kv_cache_interface import (
-    EncoderOnlyAttentionSpec,
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheLayout,
     KVCacheSpec,
     KVCacheTensor,
@@ -152,32 +158,71 @@ def try_backend_includes_kv_cache_update(
 
 def create_standard_kv_cache_spec(
     vllm_config: VllmConfig,
-    attn_type: AttentionType = AttentionType.DECODER,
-) -> FullAttentionSpec | EncoderOnlyAttentionSpec:
-    """Create an AttentionSpec from VllmConfig.
-
-    Returns an EncoderOnlyAttentionSpec for encoder-only attention (no KV
-    cache), and a FullAttentionSpec otherwise.
-    """
-    if attn_type == AttentionType.ENCODER_ONLY:
-        return EncoderOnlyAttentionSpec(
-            block_size=vllm_config.cache_config.block_size,
-            num_kv_heads=vllm_config.model_config.get_num_kv_heads(
-                vllm_config.parallel_config
-            ),
-            head_size=vllm_config.model_config.get_head_size(),
-            dtype=vllm_config.model_config.dtype,
-        )
-    return FullAttentionSpec(
+) -> AttentionSpec:
+    """Create an AttentionSpec from VllmConfig."""
+    return AttentionSpec(
         block_size=vllm_config.cache_config.block_size,
         num_kv_heads=vllm_config.model_config.get_num_kv_heads(
             vllm_config.parallel_config
         ),
         head_size=vllm_config.model_config.get_head_size(),
         dtype=vllm_config.model_config.dtype,
-        sliding_window=vllm_config.model_config.get_sliding_window(),
         kv_quant_mode=get_kv_quant_mode(vllm_config.cache_config.cache_dtype),
     )
+
+
+@contextmanager
+def registered_attention_layers(
+    vllm_config: VllmConfig,
+    layer_names: list[str],
+    attn_type: str = AttentionType.DECODER,
+    sliding_window: int | None = None,
+) -> Iterator[None]:
+    """Register stand-in ``Attention`` layers for builders that read the
+    attention type or window from their group's layers."""
+    from vllm.model_executor.layers.attention import Attention
+
+    forward_context = vllm_config.compilation_config.static_forward_context
+    for name in layer_names:
+        layer = Attention.__new__(Attention)
+        torch.nn.Module.__init__(layer)
+        layer.attn_type = attn_type
+        layer.impl = SimpleNamespace(sliding_window=sliding_window)
+        forward_context[name] = layer
+    try:
+        yield
+    finally:
+        for name in layer_names:
+            forward_context.pop(name, None)
+
+
+class CheckpointingMambaLayer(MambaBase):
+    """Stand-in Mamba layer whose KV cache reserves prefill checkpoints at
+    a fixed alignment."""
+
+    mamba_type = MambaAttentionBackendEnum.GDN_ATTN
+
+    def __init__(self, checkpoint_alignment: int | None):
+        self.checkpoint_alignment = checkpoint_alignment
+
+    def get_kv_cache_checkpoint_alignment(self, vllm_config: VllmConfig) -> int | None:
+        return self.checkpoint_alignment
+
+    def get_state_shape(self):
+        return ()
+
+    def get_state_dtype(self):
+        return ()
+
+
+def register_mamba_layers(
+    vllm_config: VllmConfig, layer_names: list[str], checkpoint_alignment: int | None
+) -> None:
+    """Register stand-in Mamba layers for builders that read their prefill
+    checkpoint alignment from their group's layers."""
+    forward_context = vllm_config.compilation_config.static_forward_context
+    for name in layer_names:
+        forward_context[name] = CheckpointingMambaLayer(checkpoint_alignment)
 
 
 def create_vllm_config(

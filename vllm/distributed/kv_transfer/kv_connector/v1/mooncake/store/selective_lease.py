@@ -22,7 +22,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.layout import (
 )
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_utils import BlockHash
-from vllm.v1.kv_cache_interface import KVCacheGroupSpec
+from vllm.v1.kv_cache_interface import KVCacheGroup
 
 logger = init_logger(__name__)
 
@@ -59,7 +59,7 @@ class SelectiveLookupLease:
         self,
         store: Any,
         token_dbs: Sequence[ChunkedTokenDatabase],
-        kv_cache_groups: Sequence[KVCacheGroupSpec],
+        kv_cache_groups: Sequence[KVCacheGroup],
         lookup_key_prefixes: Sequence[Sequence[str]],
         record_operation: _RecordOperation,
     ):
@@ -139,7 +139,7 @@ class SelectiveLookupLease:
         keys: list[str] = []
         key_meta: list[tuple[int, bytes]] = []
         for g_idx, db in enumerate(self.token_dbs):
-            if not self.kv_cache_groups[g_idx].kv_cache_spec.prefix_cacheable:
+            if not self.kv_cache_groups[g_idx].prefix_cacheable:
                 continue
             mask = load_masks[g_idx]
             store_block_size = db.store_layout.block_size
