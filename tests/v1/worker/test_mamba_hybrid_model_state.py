@@ -27,6 +27,8 @@ from vllm.v1.worker.cpu.model_state import (
 )
 from vllm.v1.worker.gpu.model_states import mamba_hybrid
 from vllm.v1.worker.gpu.model_states.default import DefaultModelState
+from vllm.v1.worker.gpu.model_states.encoder_decoder import EncoderDecoderModelState
+from vllm.v1.worker.gpu.model_states.encoder_only import EncoderOnlyModelState
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 from vllm.v1.worker.gpu.model_states.recoverssm import RecoverSSMState
 
@@ -466,9 +468,11 @@ def test_cpu_preprocess_state_copies_state_across_align_boundary() -> None:
     [
         (DefaultModelState, CPUDefaultModelState),
         (MambaHybridModelState, CPUMambaHybridModelState),
+        (EncoderOnlyModelState, EncoderOnlyModelState),
+        (EncoderDecoderModelState, EncoderDecoderModelState),
     ],
 )
-def test_cpu_runner_selects_model_state_only_without_triton(
+def test_cpu_runner_selects_model_state(
     monkeypatch, model_state_cls, cpu_model_state_cls
 ) -> None:
     from vllm.v1.worker.cpu import model_runner as cpu_model_runner
@@ -485,10 +489,33 @@ def test_cpu_runner_selects_model_state_only_without_triton(
 
     monkeypatch.setattr(cpu_model_runner, "HAS_TRITON", False)
     assert runner.model_state_cls is cpu_model_state_cls
-    assert runner.model_state_cls.rope_state_cls is CPURopeState
+    if cpu_model_state_cls in (CPUDefaultModelState, CPUMambaHybridModelState):
+        assert runner.model_state_cls.rope_state_cls is CPURopeState
 
     monkeypatch.setattr(cpu_model_runner, "HAS_TRITON", True)
     assert runner.model_state_cls is model_state_cls
+
+
+@pytest.mark.skipif(not current_platform.is_cpu(), reason="Requires CPU")
+def test_cpu_runner_rejects_custom_model_state_without_triton(monkeypatch) -> None:
+    from vllm.v1.worker.cpu import model_runner as cpu_model_runner
+    from vllm.v1.worker.gpu import model_runner as gpu_model_runner
+
+    class CustomModelState(DefaultModelState):
+        pass
+
+    runner = object.__new__(cpu_model_runner.CPUModelRunner)
+    runner.vllm_config = Mock()
+    runner.model = Mock()
+    monkeypatch.setattr(
+        gpu_model_runner,
+        "resolve_model_state_cls",
+        lambda *_: CustomModelState,
+    )
+    monkeypatch.setattr(cpu_model_runner, "HAS_TRITON", False)
+
+    with pytest.raises(ValueError, match="CustomModelState"):
+        _ = runner.model_state_cls
 
 
 def test_recoverssm_commits_accepted_window_after_v2_sampling() -> None:
