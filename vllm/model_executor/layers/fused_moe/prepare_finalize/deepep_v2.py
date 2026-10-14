@@ -115,6 +115,7 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         use_fp8_dispatch: bool = False,
         use_cudagraph: bool = False,
         sp_size: int = 1,
+        num_sms: int = 0,
     ):
         super().__init__()
         self.buffer = buffer
@@ -126,6 +127,8 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         self.use_fp8_dispatch = use_fp8_dispatch
         self.use_cudagraph = use_cudagraph
         self.sp_size = sp_size
+        # 0 lets DeepEP pick get_theoretical_num_sms.
+        self.num_sms = num_sms
 
         # DBO microbatching: one handle slot per micro-batch.
         self.handles: list[deep_ep.EPHandle | None] = [None, None]
@@ -218,6 +221,7 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             topk_weights=rank_topk_weights,
             num_experts=num_experts,
             num_max_tokens_per_rank=num_max_tokens_per_rank,
+            num_sms=self.num_sms,
             do_expand=do_expand,
             do_cpu_sync=do_cpu_sync,
             async_with_compute_stream=False,

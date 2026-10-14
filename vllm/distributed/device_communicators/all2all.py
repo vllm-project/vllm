@@ -1401,9 +1401,11 @@ class DeepEPV2All2AllManager(All2AllManagerBase):
             buffer_kwargs, deep_ep.ElasticBuffer
         )
         if self._num_sms is None:
-            self._num_sms = handle.get_theoretical_num_sms(
-                num_experts=num_experts,
-                num_topk=kwargs["num_topk"],
+            self._num_sms = envs.VLLM_DEEPEP_V2_NUM_SMS or (
+                handle.get_theoretical_num_sms(
+                    num_experts=num_experts,
+                    num_topk=kwargs["num_topk"],
+                )
             )
         return handle
 

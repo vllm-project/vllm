@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Contract tests for DeepEPV2PrepareAndFinalize.finalize_async.
+"""Contract tests for DeepEPV2PrepareAndFinalize and its manager.
 
 Hermetic: fake buffer/event, single process, no GPU collectives — only
 requires deep_ep to be importable.
@@ -12,11 +12,18 @@ requires deep_ep to be importable.
                         the receiver still produces the correct output.
   T3 finalize (sync) -> combine is issued synchronously and the output is
                         copied immediately.
+  T4 VLLM_DEEPEP_V2_NUM_SMS -> reaches the dispatch and the manager's
+                        max_sms_used().
 """
+
+from types import SimpleNamespace
 
 import pytest
 import torch
 
+from vllm.config import VllmConfig
+from vllm.forward_context import set_forward_context
+from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.utils.import_utils import has_deep_ep_v2
 
 requires_deep_ep_v2 = pytest.mark.skipif(
@@ -120,3 +127,85 @@ def test_finalize_sync():
     assert ret is None
     assert pf.buffer.calls[0]["async_with_compute_stream"] is False
     assert torch.equal(dst, out_src)
+
+
+class _FakeDispatchBuffer:
+    def dispatch(self, x, **kwargs):
+        self.kwargs = kwargs
+        handle = SimpleNamespace(
+            num_recv_tokens_per_expert_list=[],
+            psum_num_recv_tokens_per_scaleup_rank=torch.tensor(
+                [3, 3], dtype=torch.int32
+            ),
+        )
+        recv_x = x.new_zeros(8, x.size(1))
+        return recv_x, None, torch.ones(8), handle, _FakeEvent(has_event=False)
+
+
+def _dispatch_via_factory(monkeypatch, env: dict[str, str]):
+    from tests.kernels.moe.utils import make_ep_prepare_finalize_with_fake_buffer
+
+    monkeypatch.delenv("VLLM_DEEPEP_V2_NUM_SMS", raising=False)
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    buffer = _FakeDispatchBuffer()
+    pf = make_ep_prepare_finalize_with_fake_buffer("deepep_v2", buffer, monkeypatch)
+    a1 = torch.randn(3, 256, dtype=torch.bfloat16)
+    topk_ids = torch.tensor([[0, 4], [1, 2], [5, 6]])
+    with set_forward_context(None, VllmConfig()):
+        receiver = pf.prepare_async(
+            a1, torch.rand(3, 2), topk_ids, 8, None, False, FusedMoEQuantConfig.make()
+        )
+    return buffer.kwargs, receiver
+
+
+@requires_deep_ep_v2
+@pytest.mark.parametrize("env, expected", [(None, 0), ("24", 24)])
+def test_deepep_v2_num_sms_knob(env, expected, monkeypatch):
+    kwargs, _ = _dispatch_via_factory(
+        monkeypatch, {} if env is None else {"VLLM_DEEPEP_V2_NUM_SMS": env}
+    )
+    assert kwargs["num_sms"] == expected  # 0: DeepEP's own formula
+
+
+@requires_deep_ep_v2
+@pytest.mark.parametrize("env, expected", [(None, 40), ("24", 24)])
+def test_deepep_v2_manager_num_sms(env, expected, monkeypatch):
+    import deep_ep
+
+    from vllm.distributed.device_communicators.all2all import (
+        DeepEPV2All2AllManager,
+    )
+    from vllm.distributed.device_communicators.base_device_communicator import (
+        Cache,
+    )
+
+    class _Buffer:
+        def __init__(self, **kwargs):
+            pass
+
+        def get_theoretical_num_sms(self, num_experts, num_topk):
+            return 40
+
+    monkeypatch.setattr(deep_ep, "ElasticBuffer", _Buffer)
+    monkeypatch.delenv("VLLM_DEEPEP_V2_NUM_SMS", raising=False)
+    if env is not None:
+        monkeypatch.setenv("VLLM_DEEPEP_V2_NUM_SMS", env)
+    mgr = object.__new__(DeepEPV2All2AllManager)
+    mgr._device_group = None
+    mgr.cpu_group = None
+    mgr.handle_cache = Cache()
+    mgr._num_sms = None
+    mgr._gin_checked = True
+    # Keep the handle alive: the cache holds weak references.
+    handle = mgr.get_handle(
+        dict(
+            num_max_tokens_per_rank=16,
+            hidden=256,
+            num_topk=2,
+            num_experts=8,
+            use_fp8_dispatch=False,
+        )
+    )
+    assert isinstance(handle, _Buffer)
+    assert mgr.max_sms_used() == expected

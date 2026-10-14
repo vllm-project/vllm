@@ -289,6 +289,7 @@ if TYPE_CHECKING:
     VLLM_DEEPEP_V2_ALLOW_HYBRID_MODE: bool = True
     VLLM_DEEPEP_V2_PREFER_OVERLAP: bool = False
     VLLM_DEEPEP_V2_ALLOW_MULTIPLE_REDUCTION: bool = False
+    VLLM_DEEPEP_V2_NUM_SMS: int = 0
     VLLM_NIXL_EP_V2_DOMAIN_SIZE: int = 0
     VLLM_NIXL_EP_V2_NUM_SMS: int = 0
     VLLM_NIXL_EP_V2_EXPAND: bool = False
@@ -2046,6 +2047,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_DEEPEP_V2_ALLOW_MULTIPLE_REDUCTION": lambda: bool(
         int(os.getenv("VLLM_DEEPEP_V2_ALLOW_MULTIPLE_REDUCTION", "0"))
     ),
+    # DeepEP v2: SMs per dispatch/combine; 0 = DeepEP's get_theoretical_num_sms
+    "VLLM_DEEPEP_V2_NUM_SMS": lambda: int(os.getenv("VLLM_DEEPEP_V2_NUM_SMS", "0")),
     # NIXL EP v2: GPUs per NVLink domain. 0 lets nixl_ep_v2 infer the domains
     # (fixed EP size only); with elastic EP, 0 means one domain. Must not be
     # smaller than the physical NVLink domain.
