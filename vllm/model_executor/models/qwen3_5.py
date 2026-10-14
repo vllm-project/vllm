@@ -36,6 +36,7 @@ from transformers import (
     Qwen3_5TextConfig,
 )
 
+import vllm.envs as envs
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import (
@@ -278,6 +279,45 @@ class Qwen3_5Model(Qwen3NextModel):
             self.norm = PPMissingLayer()
 
         self.aux_hidden_state_layers: tuple[int, ...] = ()
+        self.dense_mono = None
+        if envs.VLLM_ROCM_MONO_DECODE:
+            from vllm.models.qwen3_5.amd.dense_mono import install
+
+            self.dense_mono = install(self, vllm_config)
+
+    def maybe_whole_forward(
+        self,
+        input_ids: torch.Tensor | None,
+        positions: torch.Tensor,
+        intermediate_tensors: IntermediateTensors | None,
+        inputs_embeds: torch.Tensor | None,
+    ):
+        """Called from the uncompiled outer forward.
+
+        Eligible widths enter the separately compiled mono graph. None leaves
+        prefill and wider decode on the compiled stock model.
+        """
+        mono = self.dense_mono
+        if mono is None or mono.graph is None:
+            return None
+        return mono.try_whole_forward(
+            input_ids, positions, intermediate_tensors, inputs_embeds
+        )
+
+    def forward(
+        self,
+        input_ids: torch.Tensor | None,
+        positions: torch.Tensor,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
+        return Qwen3NextModel.forward(
+            self,
+            input_ids,
+            positions,
+            intermediate_tensors,
+            inputs_embeds,
+        )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         # FSE must match construction (Qwen3NextSparseMoeBlock): reroute the
@@ -292,7 +332,10 @@ class Qwen3_5Model(Qwen3NextModel):
                 ckpt_prefix="mlp.shared_expert",
             )
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        loaded = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        if self.dense_mono is not None:
+            self.dense_mono.prepare()
+        return loaded
 
 
 class Qwen3_5ForCausalLMBase(
@@ -378,6 +421,11 @@ class Qwen3_5ForCausalLMBase(
         inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
     ):
+        taken = self.model.maybe_whole_forward(
+            input_ids, positions, intermediate_tensors, inputs_embeds
+        )
+        if taken is not None:
+            return taken
         hidden_states = self.model(
             input_ids, positions, intermediate_tensors, inputs_embeds
         )
@@ -588,6 +636,12 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
         """
         if intermediate_tensors is not None:
             inputs_embeds = None
+
+        taken = self.language_model.model.maybe_whole_forward(
+            input_ids, positions, intermediate_tensors, inputs_embeds
+        )
+        if taken is not None:
+            return taken
 
         hidden_states = self.language_model.model(
             input_ids=input_ids,
