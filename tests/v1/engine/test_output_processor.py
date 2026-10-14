@@ -30,6 +30,7 @@ from vllm.outputs import (
 )
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.tokenizers import TokenizerLike
+from vllm.tracing import SpanAttributes
 from vllm.v1.engine import (
     EngineCoreEvent,
     EngineCoreEventType,
@@ -47,8 +48,74 @@ from vllm.v1.engine.output_processor import (
 from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.metrics.loggers import PrometheusStatLogger
 from vllm.v1.metrics.prometheus import unregister_vllm_metrics
-from vllm.v1.metrics.stats import IterationStats, PrefillStats, SchedulerStats
+from vllm.v1.metrics.stats import (
+    IterationStats,
+    PrefillStats,
+    RequestStateStats,
+    SchedulerStats,
+)
 from vllm.v1.outputs import SamplingMaskLists
+
+
+@pytest.mark.parametrize(
+    "api_surface", ["messages", "chat_completions", "completions", None, "arbitrary"]
+)
+def test_inference_span_api_identity_preserves_parent_and_usage(
+    monkeypatch, api_surface
+):
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+        InMemorySpanExporter,
+    )
+
+    from vllm.tracing import otel
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    monkeypatch.setattr(otel.trace, "get_tracer", provider.get_tracer)
+    headers = {"traceparent": "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"}
+    if api_surface is not None:
+        headers[SpanAttributes.API_SURFACE] = api_surface
+    state = Mock(
+        spec=RequestState,
+        external_req_id="request",
+        prompt_token_ids=[1, 2, 3],
+        prompt_embeds=None,
+        stats=RequestStateStats(
+            arrival_time=1.0,
+            queued_ts=1.0,
+            scheduled_ts=1.5,
+            first_token_ts=2.0,
+            last_token_ts=3.0,
+            num_generation_tokens=2,
+        ),
+        top_p=0.9,
+        max_tokens_param=2,
+        temperature=1.0,
+        n=1,
+    )
+    output = EngineCoreOutput(
+        request_id="request", new_token_ids=[4, 5], trace_headers=headers
+    )
+    iteration = IterationStats()
+    iteration.iteration_timestamp = 3.0
+    try:
+        OutputProcessor.__new__(OutputProcessor).do_tracing(output, state, iteration)
+
+        (span,) = exporter.get_finished_spans()
+        assert span.name == "llm_request"
+        assert span.context.trace_id == int("0123456789abcdef0123456789abcdef", 16)
+        assert span.parent.span_id == int("0123456789abcdef", 16)
+        assert span.attributes[SpanAttributes.GEN_AI_USAGE_PROMPT_TOKENS] == 3
+        assert span.attributes[SpanAttributes.GEN_AI_USAGE_COMPLETION_TOKENS] == 2
+        if api_surface in ("messages", "chat_completions", "completions"):
+            assert span.attributes[SpanAttributes.API_SURFACE] == api_surface
+        else:
+            assert SpanAttributes.API_SURFACE not in span.attributes
+    finally:
+        provider.shutdown()
 
 
 @pytest.mark.parametrize("flat_logprobs", [False, True])

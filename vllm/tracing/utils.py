@@ -28,6 +28,7 @@ class SpanAttributes:
     GEN_AI_RESPONSE_MODEL = "gen_ai.response.model"
 
     # Custom attributes added until they are standardized
+    API_SURFACE = "api_surface"
     GEN_AI_REQUEST_ID = "gen_ai.request.id"
     GEN_AI_REQUEST_N = "gen_ai.request.n"
     GEN_AI_USAGE_NUM_SEQUENCES = "gen_ai.usage.num_sequences"

@@ -966,6 +966,12 @@ class OutputProcessor:
             SpanAttributes.GEN_AI_REQUEST_ID: req_state.external_req_id,
         }
 
+        api_surface = (engine_core_output.trace_headers or {}).get(
+            SpanAttributes.API_SURFACE
+        )
+        if api_surface in ("messages", "chat_completions", "completions"):
+            attributes[SpanAttributes.API_SURFACE] = api_surface
+
         # Add optional request parameters
         if req_state.top_p:
             attributes[SpanAttributes.GEN_AI_REQUEST_TOP_P] = req_state.top_p
