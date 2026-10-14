@@ -8,6 +8,7 @@
     - `LLM.encode(..., pooling_task="token_embed")`
 - Online APIs:
     - Pooling API (`/pooling`)
+    - Embedding API (`/v1/embeddings`) for [late chunking](#online-late-chunking)
 
 The difference between the (sequence) embedding task and the token embedding task is that (sequence) embedding outputs one embedding for each sequence, while token embedding outputs an embedding for each token.
 
@@ -113,7 +114,7 @@ print(f"Data: {data!r}")
 
 Late chunking encodes the full input before averaging contextual token representations within each chunk. The chunk means pass through the model's embedding head, including its projection and optional normalization.
 
-This mode is currently available through the offline `LLM.encode` API for plain-text input. With an instance configured for `token_embed`, enable it per request:
+With an instance configured for `token_embed`, enable late chunking per request through the offline `LLM.encode` API for plain-text input:
 
 ```python
 from vllm import PoolingParams
@@ -164,6 +165,65 @@ print(f"Score: {score}")
 ## Online Serving
 
 Please refer to the [Pooling API](README.md#pooling-api) and use `"task":"token_embed"`.
+
+### Online late chunking
+
+Start a token embedding server, for example:
+
+```bash
+vllm serve intfloat/multilingual-e5-small \
+    --runner pooling --pooler-config.task token_embed --max-model-len 512
+```
+
+Set `late_chunking_params.chunk_size` to a positive integer less than `2**63`:
+
+```bash
+curl http://localhost:8000/v1/embeddings \
+    -H 'Content-Type: application/json' \
+    -d '{
+      "model": "intfloat/multilingual-e5-small",
+      "input": "passage: Berlin has many museums. They display art from around the world.",
+      "late_chunking_params": {"chunk_size": 16},
+      "encoding_format": "float"
+    }'
+```
+
+Each response item contains `embedding`, a `[num_chunks, embedding_dimension]` matrix, and `late_chunking`, with these fields:
+
+| Field | Meaning |
+| --- | --- |
+| `strategy` | `"fixed_tokens"` |
+| `chunk_size` | Requested number of model-input tokens per chunk |
+| `input_tokens` | Number of tokens in this document, including special tokens |
+| `chunks` | One entry per vector row, containing `token_range` and `char_range` |
+
+Ranges have the same semantics as the offline API. JSON represents them as two-element arrays; `char_range` is `null` for a special-token-only chunk. Character indices count Unicode code points, so clients using UTF-16 string indices must convert them before slicing.
+
+Use a string or a nonempty list of strings as `input`. A batch shares one chunk size, returns one item per document in input order, and counts input tokens once in `usage`. Values of `chunk_size` larger than the input token count produce one chunk.
+
+This endpoint requires `late_chunking_params` on a `token_embed` server. Missing or null parameters return an error; use `/pooling` with `task="token_embed"` for ordinary token vectors. Only `encoding_format="float"` is supported. Token IDs, chat messages, input truncation, padding, and `dimensions` are unsupported.
+
+The matrix-valued `embedding` and `late_chunking` fields are a vLLM extension, not the standard OpenAI embedding response. Use an HTTP client that handles this format. Ordinary `embed` servers keep their existing response format; they do not enable late chunking and may ignore an unrecognized `late_chunking_params` field. Cohere `/v2/embed`, the batch API, and `/invocations` are not extended with late chunking.
+
+### Retrieve source text from chunk vectors
+
+The [retrieval example](../../../examples/pooling/token_embed/late_chunking_retrieval_online.py) uses the server above to:
+
+1. Encode documents with E5's `passage:` prefix and request contextual chunks.
+2. Build an in-memory index containing vectors, document IDs, chunk indices and source ranges.
+3. Encode a question with the `query:` prefix, using one chunk covering the whole query.
+4. Rank stored vectors by cosine similarity and print the matching source excerpts.
+
+```bash
+python examples/pooling/token_embed/late_chunking_retrieval_online.py \
+    --chunk-size 16 --query "Which city has museums with art collections?"
+```
+
+Add `--index-path late_chunking_index.json` to save the index. The example creates no index file by default.
+
+For E5, one chunk covering the complete query produces its mean-pooled sequence embedding. Other models may require a different query head. Keep the model revision, prefixes, projection and normalization consistent between indexing and querying.
+
+Source ranges refer to the exact submitted text, including the prefix. The example excludes special-token-only chunks from retrieval. Fixed token boundaries may split sentences; late chunking does not guarantee better retrieval on every dataset.
 
 ## More examples
 
