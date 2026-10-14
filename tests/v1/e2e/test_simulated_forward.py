@@ -467,3 +467,28 @@ def test_simulate_forward_multi_rank(
         outputs = vllm_model.generate([prompt] * 4, sampling_params=sampling_params)
     for output in outputs:
         assert output[0][0][-3:] == [501, 502, 503]
+
+
+def test_simulate_forward_prefill_context_parallel(
+    vllm_runner: type[VllmRunner],
+) -> None:
+    """PCP ranks run their shard of each prefill, and the request still
+    samples once its whole prefill is done."""
+    if not current_platform.is_cuda_alike() or current_platform.device_count() < 2:
+        pytest.skip("Needs 2 CUDA devices.")
+    sampling_params = SamplingParams(trace_decode_token_ids=[501, 502, 503])
+    # PCP needs an MLA attention backend.
+    with vllm_runner(
+        "deepseek-ai/DeepSeek-V2-Lite",
+        simulate_forward=True,
+        prefill_context_parallel_size=2,
+        hf_overrides={"num_hidden_layers": 1},
+        trust_remote_code=True,
+        kv_cache_memory_bytes=1024**3,
+        max_model_len=1024,
+    ) as vllm_model:
+        outputs = vllm_model.generate(
+            [list(range(1000, 1300))] * 4, sampling_params=sampling_params
+        )
+    for output in outputs:
+        assert output[0][0][-3:] == [501, 502, 503]

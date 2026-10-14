@@ -258,6 +258,9 @@ class SimulatedModelRunner(GPUModelRunner):
             ),
             num_active_loras=0,
         )
+        if self.pcp_manager is not None:
+            # Samples over the whole batch, not this rank's PCP shard.
+            input_batch = self.pcp_manager.global_batch
 
         descriptor = build_step_descriptor(
             scheduler_output, self._prompt_lens, self._step_index, self._parallel

@@ -197,10 +197,11 @@ with speculative decoding.
 
 ### Parallelism
 
-Tensor, pipeline and data parallelism run as deployed: one simulated worker
-per rank builds its shard of the model, so per-rank KV capacity is vLLM's
-own; `--kv-cache-memory-bytes` is per rank. No collective runs in a step:
-every rank derives the same timing from the same scheduler output.
+Tensor, pipeline, data and context (prefill and decode) parallelism run as
+deployed: one simulated worker per rank builds its shard of the model, so
+per-rank KV capacity is vLLM's own; `--kv-cache-memory-bytes` is per rank.
+No collective runs in a step: every rank derives the same timing from the
+same scheduler output.
 
 * **Pipeline parallelism**: `device_s` is a step's time through the pipeline,
   split evenly over the stages, so consecutive microbatches overlap. Steps

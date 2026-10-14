@@ -124,10 +124,6 @@ class SimulationConfig:
             raise ValueError("Simulated forward does not support weight transfer.")
         if vllm_config.model_config.runner_type != "generate":
             raise ValueError("Simulated forward supports generation runners only.")
-        if parallel.prefill_context_parallel_size > 1:
-            raise ValueError(
-                "Simulated forward does not support prefill context parallelism."
-            )
         if self.clock != "real" and parallel.world_size_across_dp > 1:
             raise ValueError(
                 f"The {self.clock} simulation clock supports one rank, not "
