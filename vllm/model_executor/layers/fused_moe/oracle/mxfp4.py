@@ -7,13 +7,13 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import envs
-from vllm.config import get_current_vllm_config
+from vllm.config import get_current_vllm_config_or_none
 from vllm.config.kernel import (
     FLASHINFER_MOE_EP_CUTEDSL,
     FLASHINFER_MOE_EP_DEEP_GEMM,
     MoEBackend,
 )
-from vllm.config.quantization import QuantizationConfigArgs
+from vllm.config.quantization import QuantizationConfigArgs, quant_key_name
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEConfig,
@@ -470,9 +470,10 @@ def _backend_activation_key(backend: Mxfp4MoeBackend) -> QuantKey | None:
     return None  # BF16 activation
 
 
-def _user_moe_activation_override() -> QuantKey | None:
+def user_moe_activation_override() -> QuantKey | None:
     """User's MoE activation override from quantization_config, or None."""
-    args = get_current_vllm_config().model_config.quantization_config
+    model_config = getattr(get_current_vllm_config_or_none(), "model_config", None)
+    args = getattr(model_config, "quantization_config", None)
     if not isinstance(args, QuantizationConfigArgs) or args.moe is None:
         return None
     return args.moe.activation
@@ -483,7 +484,7 @@ def _resolve_activation_key(
 ) -> QuantKey | None:
     """Combine the model-supplied activation key with the user override.
     Raises on conflict (both set and disagreeing)."""
-    user_override = _user_moe_activation_override()
+    user_override = user_moe_activation_override()
     if user_override is None:
         return model_activation_key
     if model_activation_key is None or model_activation_key == user_override:
@@ -493,6 +494,35 @@ def _resolve_activation_key(
         f"quantization_config.moe.activation={user_override}; remove the "
         f"override or align it with the checkpoint."
     )
+
+
+def _check_humming_moe_activation(config: FusedMoEConfig, key: QuantKey) -> None:
+    if envs.is_set("VLLM_HUMMING_INPUT_QUANT_CONFIG"):
+        raise ValueError(
+            "Set quantization_config.moe.activation or "
+            "VLLM_HUMMING_INPUT_QUANT_CONFIG, not both."
+        )
+    from vllm.model_executor.layers.quantization.utils.humming import (
+        check_and_fallback_input_schema,
+        quant_key_to_input_schema,
+    )
+    from vllm.utils.humming import BaseWeightSchema, dtypes
+
+    try:
+        schema = check_and_fallback_input_schema(
+            BaseWeightSchema.from_config({"quant_method": "mxfp4"}),
+            quant_key_to_input_schema(key),
+            param_dtype=config.in_dtype,
+            allow_fallback=False,
+        )
+        if current_platform.is_device_capability(90) and (
+            schema.input_scale_dtype not in (None, dtypes.float32)
+        ):
+            raise ValueError("SM90 WGMMA needs float32 input scales")
+    except ValueError as e:
+        raise ValueError(
+            f"Humming MoE cannot run activation={quant_key_name(key)}: {e}"
+        ) from e
 
 
 def _make_log_backend(backend: Mxfp4MoeBackend) -> str:
@@ -754,6 +784,7 @@ def select_deepseek_v4_mxfp4_moe_backend(
     # Honor explicit moe_backend (e.g. "marlin", "triton_unfused") before
     # falling back to the auto priority list.
     runner_backend = config.moe_backend
+    user_key = user_moe_activation_override()
     if runner_backend != "auto":
         if runner_backend == "b12x":
             requested_backends = _get_requested_backends(runner_backend, None)
@@ -769,12 +800,22 @@ def select_deepseek_v4_mxfp4_moe_backend(
             ]
         last_error: Exception | None = None
         for requested_backend in requested_backends:
+            key = _backend_activation_key(requested_backend)
+            if requested_backend == Mxfp4MoeBackend.HUMMING and user_key is not None:
+                _check_humming_moe_activation(config, user_key)
+                key = user_key
+            elif user_key is not None and key != user_key:
+                last_error = last_error or ValueError(
+                    f"{requested_backend.value} does not run "
+                    f"activation={quant_key_name(user_key)}"
+                )
+                continue
             try:
                 return _return_or_raise(
                     requested_backend,
                     config,
                     kMxfp4Static,
-                    _backend_activation_key(requested_backend),
+                    key,
                     activation_format,
                 )
             except ValueError as e:
@@ -794,6 +835,15 @@ def select_deepseek_v4_mxfp4_moe_backend(
         ]
     else:
         priority_backends = _get_priority_backends()
+    if user_key is not None:
+        priority_backends = [
+            b for b in priority_backends if _backend_activation_key(b) == user_key
+        ]
+        if not priority_backends:
+            raise ValueError(
+                "No auto-selected MXFP4 MoE backend runs activation="
+                f"{quant_key_name(user_key)}; set --moe-backend."
+            )
 
     # Iterate priority backends: TRTLLM MXFP8, then Triton.
     for backend in priority_backends:
@@ -1480,6 +1530,7 @@ def convert_weight_to_mxfp4_moe_kernel_format(
     _cache_permute_indices: dict[torch.Size, torch.Tensor] | None = None,
     activation: MoEActivation | None = None,
     use_separated_a4w4: bool = False,
+    humming_activation_key: QuantKey | None = None,
 ) -> tuple[
     torch.Tensor,
     torch.Tensor,
@@ -1539,10 +1590,16 @@ def convert_weight_to_mxfp4_moe_kernel_format(
     if mxfp4_backend == Mxfp4MoeBackend.HUMMING:
         from vllm.model_executor.layers.quantization.utils.humming import (
             convert_to_humming_moe_kernel_format,
+            quant_key_to_input_schema,
         )
 
         convert_to_humming_moe_kernel_format(
-            layer, quant_config={"quant_method": "mxfp4"}
+            layer,
+            quant_config={"quant_method": "mxfp4"},
+            input_schema=None
+            if humming_activation_key is None
+            else quant_key_to_input_schema(humming_activation_key),
+            allow_input_schema_fallback=humming_activation_key is None,
         )
         return (
             layer.w13_weight,

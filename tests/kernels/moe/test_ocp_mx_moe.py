@@ -1991,7 +1991,7 @@ def test_select_mxfp4_moe_backend_raises_with_unsupported_reasons(
     monkeypatch.setattr(
         mxfp4_oracle, "backend_to_kernel_cls", lambda backend: [UnsupportedExperts]
     )
-    monkeypatch.setattr(mxfp4_oracle, "_user_moe_activation_override", lambda: None)
+    monkeypatch.setattr(mxfp4_oracle, "user_moe_activation_override", lambda: None)
     monkeypatch.setattr(current_platform, "is_xpu", lambda: False)
     monkeypatch.setattr(current_platform, "is_cpu", lambda: False)
 
