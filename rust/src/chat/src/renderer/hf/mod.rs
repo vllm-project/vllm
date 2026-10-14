@@ -26,7 +26,6 @@ use crate::{
 mod error;
 mod format;
 mod generation;
-mod media;
 mod template;
 mod tojson;
 
@@ -258,12 +257,20 @@ impl HfChatRenderer {
             .messages
             .iter()
             .any(|message| matches!(message, ChatMessage::Developer { .. }));
-        let mut media_order = None;
         if has_developer_messages && !effective_template.supports_developer_role() {
-            media_order = Some(media::consolidated_media_order(
-                &request.messages,
-                &messages,
-            ));
+            // Consolidation moves every non-leading system message to the front,
+            // ahead of earlier media. Media data stays in message order, so the
+            // rendered placeholders would no longer match it.
+            let moves_media = request.messages.iter().skip(1).any(|message| {
+                matches!(
+                    message,
+                    ChatMessage::System { content } | ChatMessage::Developer { content, .. }
+                        if content.has_multimodal()
+                )
+            });
+            if moves_media {
+                return Err(Error::UnsupportedMultimodalSystemFallback);
+            }
             messages = consolidate_system_messages(messages);
         }
 
@@ -320,7 +327,7 @@ impl HfChatRenderer {
 
         Ok(RenderedPrompt {
             prompt: Prompt::Text(prompt),
-            media_order,
+            media_order: None,
             effective_template_kwargs,
         })
     }
@@ -1016,6 +1023,31 @@ mod tests {
                 "system=base policy<image>\n\nadditional policy;user=question;".to_string()
             )
         );
+    }
+
+    #[test]
+    fn developer_fallback_rejects_media_in_moved_messages() {
+        let request = sample_request(vec![
+            ChatMessage::user(vec![
+                ChatContentPart::text("question"),
+                ChatContentPart::image_url("data:image/png;base64,a"),
+            ]),
+            ChatMessage::developer(
+                vec![
+                    ChatContentPart::text("policy"),
+                    ChatContentPart::image_url("data:image/png;base64,b"),
+                ],
+                None,
+            ),
+        ]);
+        let error = render_mm(
+            "{% for message in messages %}{{ message.role }}={{ message.content }};{% endfor %}",
+            &request,
+            ChatTemplateContentFormatOption::String,
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, Error::UnsupportedMultimodalSystemFallback));
     }
 
     #[test]
