@@ -56,7 +56,7 @@ class MonoModel:
         reasons = spec.refuse_model(model)
         if reasons:
             raise ValueError(
-                f"{guards.SWITCH}=1 cannot run the {spec.name} MonoKernel on this "
+                f"{guards.SWITCH} cannot run the {spec.name} MonoKernel on this "
                 "model: " + "; ".join(reasons) + "."
             )
         self.packed = spec.pack(model, self.ctx)
@@ -93,7 +93,7 @@ class MonoModel:
         batch eagerly first)."""
         if capturing():
             raise RuntimeError(
-                f"{guards.SWITCH}=1: the {self.spec.name} MonoKernel was first reached "
+                f"{guards.SWITCH}: the {self.spec.name} MonoKernel was first reached "
                 "inside CUDA graph capture, before an eager decode step."
             )
         for width in self.spec.widths:
@@ -119,7 +119,7 @@ def attach(
 ) -> MonoModel | None:
     """After weight loading: pack weights for this rank's layers. None when the
     switch is off."""
-    if not guards.enabled():
+    if not guards.enabled(vllm_config):
         return None
     return MonoModel(model, vllm_config, guards.load_spec(spec_path))
 

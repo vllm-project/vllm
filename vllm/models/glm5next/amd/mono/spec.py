@@ -97,6 +97,9 @@ def refuse_config(vllm_config: VllmConfig) -> list[str]:
         reasons.append("sequence-parallel MoE")
     if vllm_config.cache_config.cache_dtype not in ("auto", "bfloat16"):
         reasons.append(f"{vllm_config.cache_config.cache_dtype} KV cache (needs bf16)")
+    ssm = getattr(vllm_config.cache_config, "mamba_ssm_cache_dtype", "auto")
+    if ssm not in ("auto", "float32"):
+        reasons.append(f"{ssm} KDA recurrent state (needs float32)")
     if vllm_config.speculative_config is not None:
         reasons.append("speculative decoding (a wider kpool tail ring)")
     return reasons

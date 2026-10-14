@@ -36,7 +36,10 @@ def _flash_config(**over):
         parallel_config=SimpleNamespace(
             tensor_parallel_size=over.pop("tp", 4), use_sequence_parallel_moe=False
         ),
-        cache_config=SimpleNamespace(cache_dtype=over.pop("cache", "auto")),
+        cache_config=SimpleNamespace(
+            cache_dtype=over.pop("cache", "auto"),
+            mamba_ssm_cache_dtype=over.pop("ssm", "auto"),
+        ),
         speculative_config=over.pop("spec", None),
     )
 
@@ -44,7 +47,11 @@ def _flash_config(**over):
 def test_refusals_are_reported_at_once():
     reasons = spec.refuse_config(
         _flash_config(
-            tp=16, cache="fp8", spec=object(), hf={"hidden_size": 2048, "hc_mult": 2}
+            tp=16,
+            cache="fp8",
+            ssm="bfloat16",
+            spec=object(),
+            hf={"hidden_size": 2048, "hc_mult": 2},
         )
     )
     want = (
@@ -52,6 +59,7 @@ def test_refusals_are_reported_at_once():
         "needs hc_mult 4",
         "tensor parallel size",
         "fp8 KV cache",
+        "bfloat16 KDA recurrent state",
         "speculative decoding",
     )
     for w in want:

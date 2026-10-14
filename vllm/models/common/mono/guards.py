@@ -17,11 +17,11 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-SWITCH = "VLLM_ROCM_MONO_DECODE"
+SWITCH = "--monokernel"
 
 
-def enabled() -> bool:
-    return envs.VLLM_ROCM_MONO_DECODE
+def enabled(vllm_config: VllmConfig) -> bool:
+    return vllm_config.kernel_config.monokernel
 
 
 def load_spec(path: str) -> MonoSpec:
@@ -119,7 +119,7 @@ def refuse_config(
 
 def configure(vllm_config: VllmConfig, spec_path: str) -> MonoSpec | None:
     """Config-stage check when the switch is on: raises with every reason."""
-    if not enabled():
+    if not enabled(vllm_config):
         return None
     from vllm.config.compilation import CUDAGraphMode
     from vllm.platforms import current_platform
@@ -135,7 +135,7 @@ def configure(vllm_config: VllmConfig, spec_path: str) -> MonoSpec | None:
     reasons = refuse_config(vllm_config, spec, compute_units)
     if reasons:
         raise ValueError(
-            f"{SWITCH}=1 cannot run the {spec.name} MonoKernel: "
+            f"{SWITCH} cannot run the {spec.name} MonoKernel: "
             + "; ".join(reasons)
             + "."
         )
