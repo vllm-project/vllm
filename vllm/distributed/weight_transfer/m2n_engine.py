@@ -41,10 +41,13 @@ from vllm.distributed.weight_transfer.m2n_common import (
     M2NParamMeta,
     M2NWireParam,
     Placements,
+    check_complete_plan_agreement,
     check_data_plane_agreement,
     check_runtime_ready_agreement,
     check_source_plan_agreement,
+    check_transferable,
     create_m2n_communicator,
+    expected_local_shape,
     import_m2n,
     prepare_m2n_local_runtime,
     publish_destination_placements,
@@ -52,6 +55,7 @@ from vllm.distributed.weight_transfer.m2n_common import (
     source_plan_digest,
     to_mesh,
     to_placements,
+    validate_transfer_plan,
 )
 from vllm.distributed.weight_transfer.m2n_layout import (
     M2NDestination,
@@ -104,13 +108,6 @@ class M2NWeightTransferInitInfo(WeightTransferInitInfo):
     """SHA-256 of the ordered, versioned source parameter plan."""
     params: list[dict[str, Any]]
     """Ordered per-parameter source metadata and layouts."""
-    worker_rank_offset: int | None = None
-    """First global rank assigned to this inference deployment.
-
-    `rank_offset` remains the start of the complete destination mesh. A
-    multi-deployment client sets this field per deployment so deployment-local
-    DP ranks remain globally unique. Single deployments may leave it unset.
-    """
     nccl_unique_id_b64: str | None = field(default=None, repr=False)
     max_cta: int | None = None
 
@@ -134,16 +131,6 @@ class M2NWeightTransferInitInfo(WeightTransferInitInfo):
             raise ValueError(
                 f"`rank_offset` ({self.rank_offset}) must leave at least one "
                 f"trainer rank and one worker in world_size {self.world_size}"
-            )
-        if self.worker_rank_offset is not None and (
-            not isinstance(self.worker_rank_offset, int)
-            or isinstance(self.worker_rank_offset, bool)
-            or not self.rank_offset <= self.worker_rank_offset < self.world_size
-        ):
-            raise ValueError(
-                "`worker_rank_offset` must lie inside the destination rank "
-                f"interval [{self.rank_offset}, {self.world_size}); got "
-                f"{self.worker_rank_offset}"
             )
         num_workers = self.world_size - self.rank_offset
         dst = tuple(self.dst_mesh_dims)
@@ -256,14 +243,15 @@ class M2NWeightTransferEngine(
 
     def init_transfer_engine(self, init_info: M2NWeightTransferInitInfo) -> None:
         """Agree on source and local readiness before constructing NCCL."""
+        if self._handle is not None or self.model_update_group is not None:
+            raise RuntimeError(
+                "nccl_m2n weight transfer is already initialized; call "
+                "shutdown_weight_transfer_engine() before initializing again"
+            )
         rendezvous_info = NCCLWeightTransferInitInfo(
             master_address=init_info.master_address,
             master_port=init_info.master_port,
-            rank_offset=(
-                init_info.rank_offset
-                if init_info.worker_rank_offset is None
-                else init_info.worker_rank_offset
-            ),
+            rank_offset=init_info.rank_offset,
             world_size=init_info.world_size,
         )
         metadata_group = worker_init_metadata_group(
@@ -335,24 +323,40 @@ class M2NWeightTransferEngine(
                 mine,
                 len(self._metas),
             )
-            if agreed != mine:
-                mismatched = next(
-                    meta.name
-                    for meta, ours, theirs in zip(self._metas, mine, agreed)
-                    if ours != theirs
-                )
-                raise RuntimeError(
-                    "inference workers resolved different nccl_m2n destinations "
-                    f"(first mismatch: '{mismatched}'); all workers must run the "
-                    "same model and parallel config"
-                )
+            complete_plan_error: str | None = None
+            try:
+                if agreed != mine:
+                    mismatched = next(
+                        meta.name
+                        for meta, ours, theirs in zip(self._metas, mine, agreed)
+                        if ours != theirs
+                    )
+                    raise RuntimeError(
+                        "inference workers resolved different nccl_m2n "
+                        f"destinations (first mismatch: '{mismatched}'); all "
+                        "workers must run the same model and parallel config"
+                    )
+                assert self._dst_mesh is not None
+                validate_transfer_plan(self._metas, self._dst_mesh, agreed)
+            except Exception as exc:
+                complete_plan_error = f"{type(exc).__name__}: {exc}"
+            assert self._dst_mesh is not None
+            check_complete_plan_agreement(
+                metadata_group,
+                init_info.source_digest,
+                self._dst_mesh,
+                agreed,
+                complete_plan_error,
+            )
         except BaseException:
             if group is not None:
                 try:
-                    group.destroy()
+                    # Transport cleanup only; reload validity belongs to the
+                    # model-update lifecycle, not this backend.
+                    group.abort()
                 except BaseException:
                     logger.exception(
-                        "failed to destroy partially initialized nccl_m2n communicator"
+                        "failed to abort partially initialized nccl_m2n communicator"
                     )
             if handle is not None:
                 try:
@@ -380,6 +384,7 @@ class M2NWeightTransferEngine(
                     f"parameter '{param.name}' has invalid dtype name "
                     f"'{param.dtype_name}'; expected the name of a torch.dtype"
                 )
+            check_transferable(param.name, dtype, param.shape)
             layout = M2NLayout(M2NMesh(param.src_mesh_dims, 0), param.src_placements)
             if layout.mesh.size != num_trainer_ranks:
                 raise ValueError(
@@ -387,7 +392,9 @@ class M2NWeightTransferEngine(
                     f"{layout.mesh.size} ranks, but there are "
                     f"{num_trainer_ranks} trainer ranks"
                 )
-            self._metas.append(M2NParamMeta(param.name, dtype, param.shape, layout))
+            meta = M2NParamMeta(param.name, dtype, param.shape, layout)
+            expected_local_shape(meta)
+            self._metas.append(meta)
 
     def _prepare_destination_plan(self, init_info: M2NWeightTransferInitInfo) -> None:
         """Resolve the merged-#51520 in-place/full-fallback destination plan."""
@@ -420,6 +427,11 @@ class M2NWeightTransferEngine(
             num_workers=self._dst_mesh.size,
             shard_axis_size=shard_axis_size,
             allow_direct=allow_direct,
+        )
+        validate_transfer_plan(
+            self._metas,
+            self._dst_mesh,
+            [destination.placements for destination in self._parameter_destinations],
         )
         # Update requests carry names only, so cache their plan indices. Track
         # whether any fallback entry requires the `load_weights` lifecycle.
@@ -582,6 +594,6 @@ class M2NWeightTransferEngine(
         if handle is not None:
             attempt(handle.destroy, "failed to destroy nccl_m2n handle")
         if group is not None:
-            attempt(group.destroy, "failed to destroy nccl_m2n communicator")
+            attempt(group.abort, "failed to abort nccl_m2n communicator")
         if first_error is not None:
             raise first_error

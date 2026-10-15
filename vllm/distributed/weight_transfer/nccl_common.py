@@ -158,19 +158,6 @@ def stateless_init_metadata_group(
     )
 
 
-def pynccl_from_metadata_group(
-    group: "StatelessProcessGroup",
-    device,
-    *,
-    library_path: str | None = None,
-) -> "PyNcclCommunicator":
-    """Construct the data-plane communicator from an existing metadata group."""
-    from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
-
-    with unpinned_nccl_env():
-        return PyNcclCommunicator(group, device=device, library_path=library_path)
-
-
 def stateless_init_process_group(
     master_address: str,
     master_port: int,
@@ -199,8 +186,6 @@ def uid_init_process_group(
     rank: int,
     world_size: int,
     device,
-    *,
-    library_path: str | None = None,
 ) -> "PyNcclCommunicator":
     """Join the NCCL group from pre-shared ``ncclUniqueId`` bytes.
 
@@ -215,7 +200,6 @@ def uid_init_process_group(
             rank=rank,
             world_size=world_size,
             device=device,
-            library_path=library_path,
         )
 
 
