@@ -105,7 +105,7 @@ class RoutedExpertsCapturer:
         batches are DP-major; gathered shards are DP-major/TP-minor, with
         padding trailing each DP rank's batch. PCP layouts are unsupported.
 
-        Without DP metadata, ``ctx.num_tokens`` gives the local batch size.
+        Without DP metadata, the batch descriptor gives the pre-SP batch size.
         Accept a full local batch or a TP shard. Also defensively accept an
         already-gathered padded batch of
         ``tp_size * ceil(local_tokens / tp_size)`` rows and trim it. If the
@@ -132,9 +132,9 @@ class RoutedExpertsCapturer:
         n = topk_ids.shape[0]
         dp_metadata = ctx.dp_metadata
         if dp_metadata is None:
-            num_local_tokens = ctx.num_tokens
-            if num_local_tokens is None:
+            if ctx.batch_descriptor is None:
                 return topk_ids
+            num_local_tokens = ctx.batch_descriptor.num_tokens
         else:
             num_tokens_dp = dp_metadata.num_tokens_across_dp_cpu
             num_local_tokens = int(num_tokens_dp[self.dp_rank].item())

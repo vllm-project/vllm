@@ -7,10 +7,11 @@ from unittest.mock import Mock, patch
 import pytest
 import torch
 
-from vllm.config import VllmConfig
+from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.config.compilation import CompilationMode
 from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.forward_context import (
+    BatchDescriptor,
     ForwardContext,
     get_forward_context,
     set_forward_context,
@@ -330,7 +331,7 @@ def test_routed_experts_capturer_single_dp_no_metadata():
     """dp_metadata is None: capture writes the full topk_ids rows."""
     capturer = _capturer_with_buffer(dp_rank=0)
     topk = torch.tensor([[1, 2], [3, 4], [5, 6]], dtype=torch.int32)
-    ctx = _forward_context(dp_metadata=None, num_tokens=None)
+    ctx = _forward_context()
     with patch(f"{_REC_MODULE}.get_forward_context", return_value=ctx):
         capturer.capture(layer_id=0, topk_ids=topk)
     assert torch.equal(capturer.device_buffer[:3, 0, :], topk)
@@ -338,7 +339,10 @@ def test_routed_experts_capturer_single_dp_no_metadata():
 
 
 @pytest.mark.parametrize("tp_size, num_tokens", [(2, 6), (2, 3), (2, 1), (4, 2)])
-def test_single_dp_ep_capture_restores_tp_shards(tp_size, num_tokens):
+@pytest.mark.parametrize(
+    "cg_mode", [CUDAGraphMode.NONE, CUDAGraphMode.FULL, CUDAGraphMode.PIECEWISE]
+)
+def test_single_dp_ep_capture_restores_tp_shards(tp_size, num_tokens, cg_mode):
     """Capture all current rows after model-level SP, including buffer reuse."""
     capturer = _capturer_with_buffer(tp_size=tp_size)
     config = SimpleNamespace(
@@ -356,7 +360,12 @@ def test_single_dp_ep_capture_restores_tp_shards(tp_size, num_tokens):
     tp_group = Mock()
     shard_n = (num_tokens + tp_size - 1) // tp_size
     with (
-        set_forward_context(None, config, num_tokens=num_tokens),
+        set_forward_context(
+            None,
+            config,
+            num_tokens=num_tokens,
+            cudagraph_runtime_mode=cg_mode,
+        ),
         patch(f"{_REC_MODULE}.get_tp_group", return_value=tp_group),
     ):
         assert get_forward_context().dp_metadata is None
@@ -381,7 +390,7 @@ def test_single_dp_ep_capture_restores_tp_shards(tp_size, num_tokens):
 def test_single_dp_tp_capture_does_not_regather_full_batch(num_tokens, num_rows):
     capturer = _capturer_with_buffer(tp_size=2)
     topk = torch.arange(num_rows * 2, dtype=torch.int32).reshape(-1, 2)
-    ctx = _forward_context(dp_metadata=None, num_tokens=num_tokens)
+    ctx = _forward_context(batch_descriptor=BatchDescriptor(num_tokens=num_tokens))
     with (
         patch(f"{_REC_MODULE}.get_forward_context", return_value=ctx),
         patch(f"{_REC_MODULE}.get_tp_group") as get_tp_group,
@@ -398,13 +407,42 @@ def test_single_dp_tp_capture_rejects_unexpected_batch_without_writing(
 ):
     capturer = _capturer_with_buffer(tp_size=2)
     topk = torch.ones(num_rows, 2, dtype=torch.int32)
-    ctx = _forward_context(dp_metadata=None, num_tokens=num_tokens)
+    ctx = _forward_context(batch_descriptor=BatchDescriptor(num_tokens=num_tokens))
     with (
         patch(f"{_REC_MODULE}.get_forward_context", return_value=ctx),
         pytest.raises(AssertionError, match="unexpected topk_ids batch dim"),
     ):
         capturer.capture(0, topk)
     assert (capturer.device_buffer == -1).all()
+
+
+@pytest.mark.parametrize("tp_rank", [0, 1])
+def test_capture_uses_pre_sp_size_after_model_shards_padding_mask(tp_rank):
+    """Model-level SP shortens the mask; capture still needs all three rows."""
+    from vllm.models.common.ops import sequence_parallel as sp
+
+    capturer = _capturer_with_buffer(tp_size=2)
+    expected = torch.arange(8, dtype=torch.int32).reshape(4, 2)
+    ctx = _forward_context(
+        is_padding=torch.zeros(3, dtype=torch.bool),
+        batch_descriptor=BatchDescriptor(num_tokens=3),
+    )
+    with (
+        patch.object(sp, "get_tensor_model_parallel_world_size", return_value=2),
+        patch.object(sp, "get_tensor_model_parallel_rank", return_value=tp_rank),
+    ):
+        ctx.is_padding = sp.sp_padding_mask(ctx.is_padding, torch.empty(3, 1))
+    assert len(ctx.is_padding) == 2
+    tp_group = Mock()
+    tp_group.all_gather.return_value = expected
+    with (
+        patch(f"{_REC_MODULE}.get_forward_context", return_value=ctx),
+        patch(f"{_REC_MODULE}.get_tp_group", return_value=tp_group),
+    ):
+        capturer.capture(0, expected[2 * tp_rank : 2 * (tp_rank + 1)])
+    tp_group.all_gather.assert_called_once()
+    torch.testing.assert_close(capturer.device_buffer[:3, 0], expected[:3])
+    assert (capturer.device_buffer[3:, 0] == -1).all()
 
 
 @pytest.mark.parametrize(
@@ -440,7 +478,7 @@ def test_routed_experts_capturer_narrows_snapshot(output_dtype):
     capturer = _capturer_with_buffer(dtype=torch.int32)
     capturer.output_dtype = output_dtype
     topk = torch.tensor([[1, 2], [254, 255]], dtype=torch.int64)
-    ctx = _forward_context(dp_metadata=None, num_tokens=None)
+    ctx = _forward_context()
     with patch(f"{_REC_MODULE}.get_forward_context", return_value=ctx):
         capturer.capture(layer_id=0, topk_ids=topk)
 
@@ -512,7 +550,7 @@ def test_routed_experts_capturer_sp_modular_gathers_tp_shards(single_dp):
             if single_dp
             else SimpleNamespace(num_tokens_across_dp_cpu=num_tokens_dp)
         ),
-        num_tokens=3,
+        batch_descriptor=BatchDescriptor(num_tokens=3),
     )
     local_shard = torch.tensor([[10, 12], [11, 13]], dtype=torch.int32).t()
     gathered = torch.tensor([[10, 11], [12, 13], [14, 15], [-1, -1]], dtype=torch.int32)
@@ -553,7 +591,7 @@ def test_routed_experts_capturer_rejects_incomplete_dp_shard_groups():
 @pytest.mark.parametrize("layer_id", [-1, 4])
 def test_routed_experts_capturer_rejects_layer_before_restoring_rows(layer_id):
     capturer = _capturer_with_buffer(tp_size=2)
-    ctx = _forward_context(dp_metadata=None, num_tokens=3)
+    ctx = _forward_context(batch_descriptor=BatchDescriptor(num_tokens=3))
     with (
         patch(f"{_REC_MODULE}.get_forward_context", return_value=ctx),
         patch(f"{_REC_MODULE}.get_tp_group") as get_tp_group,

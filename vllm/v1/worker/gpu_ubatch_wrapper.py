@@ -277,7 +277,6 @@ class UBatchWrapper:
                     batch_descriptor=batch_descriptor,
                     cudagraph_runtime_mode=cudagraph_runtime_mode,
                     slot_mapping=slot_mapping[i] if has_slot_mapping else None,
-                    num_tokens=ubatch_slice.num_tokens,
                     is_padding=(
                         is_padding[ubatch_slice.token_slice]
                         if is_padding is not None

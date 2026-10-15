@@ -422,7 +422,6 @@ class UBatchRunner:
                     cudagraph_runtime_mode=CUDAGraphMode.NONE,
                     slot_mapping=slot_mappings_by_layer[i],
                     is_padding=is_padding[i],
-                    num_tokens=num_tokens,
                 )
             )
         return forward_contexts
