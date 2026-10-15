@@ -270,6 +270,119 @@ def test_rocm_sparse_triton_route_preserves_padded_sinks(
     assert lse is None
 
 
+@pytest.mark.parametrize("q_form", ["tensor", "tuple"])
+@pytest.mark.parametrize("workload", ["mixed", "decode"])
+@pytest.mark.parametrize(
+    ("head_size", "use_aiter_sparse_mla", "route"),
+    [
+        pytest.param(512, False, "triton", id="nope-triton"),
+        pytest.param(576, False, "asm", id="rope-asm"),
+        pytest.param(512, True, "aiter-sparse-mla", id="nope-aiter-sparse-mla"),
+    ],
+)
+def test_forward_mqa_fp8_kv_query_contract(
+    monkeypatch, q_form, workload, head_size, use_aiter_sparse_mla, route
+):
+    """FP8 KV keeps NoPE Q in model dtype; every other route still quantizes Q.
+
+    The non-unit KV scale must reach whichever attention wrapper is selected.
+    """
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx942", lambda: False)
+    fp8_dtype = current_platform.fp8_dtype()
+    num_tokens, num_heads, kv_lora_rank, k_scale = 2, 16, 512, 2.5
+    calls = []
+
+    def record(name, q, kv_scale):
+        calls.append((name, q.dtype, float(kv_scale)))
+
+    def fake_triton_prefill(**kwargs):
+        record("triton_prefill", kwargs["q"], kwargs["kv_scale"])
+
+    def fake_triton_decode(**kwargs):
+        record("triton_decode", kwargs["q"], kwargs["kv_scale"])
+
+    def fake_asm(q, kv, out, *args, **kwargs):
+        record("asm", q, kwargs["kv_scale"])
+
+    def fake_aiter_sparse_mla(q, kv, out, *args, **kwargs):
+        record("aiter-sparse-mla", q, kwargs["kv_scale"])
+
+    def fake_scaled_fp8_quant(q, scale):
+        calls.append(("scaled_fp8_quant",))
+        return q.to(fp8_dtype), None
+
+    def fake_concat_quant(ql_nope, q_pe, scale):
+        calls.append(("concat_quant",))
+        return torch.cat((ql_nope, q_pe), dim=-1).to(fp8_dtype)
+
+    monkeypatch.setattr(sparse_mod, "rocm_sparse_attn_prefill", fake_triton_prefill)
+    monkeypatch.setattr(sparse_mod, "rocm_sparse_attn_decode_bf16", fake_triton_decode)
+    monkeypatch.setattr(
+        sparse_mod, "rocm_sparse_decode_bf16_num_splits", lambda *args: 4
+    )
+    monkeypatch.setattr(sparse_mod.rocm_aiter_ops, "mla_decode_fwd", fake_asm)
+    monkeypatch.setattr(
+        sparse_mod.rocm_aiter_ops, "triton_sparse_mla_fwd", fake_aiter_sparse_mla
+    )
+    monkeypatch.setattr(sparse_mod.ops, "scaled_fp8_quant", fake_scaled_fp8_quant)
+    monkeypatch.setattr(
+        sparse_mod, "triton_convert_req_index_to_global_index", lambda *a, **k: None
+    )
+
+    impl = object.__new__(sparse_mod.ROCMAiterMLASparseImpl)
+    impl.num_heads = num_heads
+    impl.kv_lora_rank = kv_lora_rank
+    impl.qk_rope_head_dim = head_size - kv_lora_rank
+    impl.kv_cache_dtype = "fp8"
+    impl.scale = head_size**-0.5
+    impl.sinks = None
+    impl.use_aiter_sparse_mla = use_aiter_sparse_mla
+    impl.topk_indices_buffer = torch.zeros(num_tokens, 4, dtype=torch.int32)
+    impl.owns_indexer = True
+    impl.index_epoch = 0
+    impl.q_concat_buffer = torch.empty(
+        num_tokens, num_heads, head_size, dtype=torch.bfloat16
+    )
+
+    num_decodes = num_tokens if workload == "decode" else 1
+    metadata = SimpleNamespace(
+        attn_out_dtype=torch.bfloat16,
+        num_actual_tokens=num_tokens,
+        num_prefills=num_tokens - num_decodes,
+        num_decodes=num_decodes,
+        num_decode_tokens=num_decodes,
+        max_seq_len=4096,
+        topk_tokens=4,
+        block_size=1,
+        req_id_per_token=torch.zeros(num_tokens, dtype=torch.int32),
+        block_table=torch.zeros(1, 4, dtype=torch.int32),
+        work_meta_data=None,
+        qo_indptr=torch.arange(num_tokens + 1, dtype=torch.int32),
+        paged_kv_indices=torch.zeros(4, dtype=torch.int32),
+        paged_kv_indptr=torch.arange(num_tokens + 1, dtype=torch.int32),
+        paged_kv_last_page_len=torch.ones(num_tokens, dtype=torch.int32),
+    )
+    layer = SimpleNamespace(
+        _q_scale=torch.tensor(1.0),
+        _k_scale=torch.tensor(k_scale),
+        _k_scale_float=k_scale,
+        _decode_concat_quant_fp8_op=fake_concat_quant,
+    )
+    q = torch.randn(num_tokens, num_heads, head_size, dtype=torch.bfloat16)
+    if q_form == "tuple":
+        q = (q[..., :kv_lora_rank], q[..., kv_lora_rank:])
+    kv_cache = torch.zeros(4, 1, head_size, dtype=torch.uint8)
+
+    impl.forward_mqa(q, kv_cache, metadata, layer)
+
+    if route == "triton":
+        wrapper = "triton_decode" if workload == "decode" else "triton_prefill"
+        assert calls == [(wrapper, torch.bfloat16, k_scale)]
+    else:
+        quant = "concat_quant" if q_form == "tuple" else "scaled_fp8_quant"
+        assert calls == [(quant,), (route, fp8_dtype, k_scale)]
+
+
 def test_rocm_sparse_attention_accepts_glm_nope_dimensions():
     _validate_sparse_dims(512, 512, 0, "test")
 
@@ -310,12 +423,32 @@ def test_sparse_prefill_query_row_offset_does_not_overflow_int32():
     assert output.item() == 131071 * 128 * 512
 
 
+def _sparse_attn_fp32_reference(q, kv, indices, indptr, scale, attn_sink):
+    q = q.float()
+    out = torch.zeros_like(q)
+    for row in range(q.shape[0]):
+        slots = indices[indptr[row] : indptr[row + 1]]
+        slots = slots[slots >= 0].long()
+        scores = q[row] @ kv[slots].T * scale
+        if attn_sink is not None:
+            scores = torch.cat((scores, attn_sink[:, None]), dim=1)
+        if scores.shape[1] == 0:
+            continue
+        probs = scores.softmax(dim=-1)[:, : slots.numel()]
+        out[row] = probs @ kv[slots]
+    return out
+
+
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm required")
+@pytest.mark.parametrize("kv_scale", [1.5, 0.37])
+@pytest.mark.parametrize("with_sink", [False, True])
 @pytest.mark.parametrize("num_splits", [None, 4])
-def test_sparse_fp8_nope_matches_bf16_reference(num_splits):
+def test_sparse_fp8_nope_matches_fp32_reference(num_splits, with_sink, kv_scale):
     """NoPE FP8 KV must dequantize in Triton, not reach 576-wide AITER asm.
 
     ``num_splits=None`` covers the ragged kernel, otherwise split-K decode.
+    Row 1 is empty, and row 2 is shorter than ``num_splits`` so later splits
+    are empty.
     """
     from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
         _rocm_sparse_attn_decode_ragged_bf16_triton,
@@ -324,40 +457,47 @@ def test_sparse_fp8_nope_matches_bf16_reference(num_splits):
 
     torch.manual_seed(0)
     device = "cuda"
-    num_queries, num_heads, head_dim = 4, 16, 512
-    num_kv, topk = 256, 64
-    kv_scale = 1.5
+    num_heads, head_dim, num_kv = 16, 512, 1024
+    kv_lens = [64, 0, 2, 37, 300]
     q = torch.randn(
-        num_queries, num_heads, head_dim, dtype=torch.bfloat16, device=device
+        len(kv_lens), num_heads, head_dim, dtype=torch.bfloat16, device=device
     )
     kv_source = torch.randn(num_kv, head_dim, dtype=torch.float32, device=device)
     kv_fp8 = (kv_source / kv_scale).to(current_platform.fp8_dtype())
-    kv_bf16 = (kv_fp8.float() * kv_scale).to(torch.bfloat16)
     indices = torch.randint(
-        0, num_kv, (num_queries * topk,), device=device, dtype=torch.int32
+        0, num_kv, (sum(kv_lens),), device=device, dtype=torch.int32
     )
-    indptr = torch.arange(
-        0, num_queries * topk + 1, topk, device=device, dtype=torch.int32
+    indices[kv_lens[0] + 5] = -1
+    indptr = torch.tensor(
+        [0, *torch.tensor(kv_lens).cumsum(0).tolist()],
+        device=device,
+        dtype=torch.int32,
     )
-
-    def run(kv, scale):
-        common = dict(
-            q=q,
-            kv=kv,
-            indices=indices,
-            indptr=indptr,
-            scale=head_dim**-0.5,
-            attn_sink=None,
-            nope_head_dim=head_dim,
-            rope_head_dim=0,
-            kv_scale=scale,
-        )
-        if num_splits is None:
-            return _rocm_sparse_attn_prefill_ragged_triton(**common)
-        return _rocm_sparse_attn_decode_ragged_bf16_triton(
+    attn_sink = (
+        torch.randn(num_heads, dtype=torch.float32, device=device) + 1.0
+        if with_sink
+        else None
+    )
+    common = dict(
+        q=q,
+        kv=kv_fp8,
+        indices=indices,
+        indptr=indptr,
+        scale=head_dim**-0.5,
+        attn_sink=attn_sink,
+        nope_head_dim=head_dim,
+        rope_head_dim=0,
+        kv_scale=kv_scale,
+    )
+    if num_splits is None:
+        out = _rocm_sparse_attn_prefill_ragged_triton(**common)
+    else:
+        out = _rocm_sparse_attn_decode_ragged_bf16_triton(
             **common, num_splits=num_splits
         )
 
-    out_fp8 = run(kv_fp8, kv_scale)
-    out_bf16 = run(kv_bf16, 1.0)
-    torch.testing.assert_close(out_fp8, out_bf16, rtol=5e-3, atol=5e-3)
+    expected = _sparse_attn_fp32_reference(
+        q, kv_fp8.float() * kv_scale, indices, indptr, head_dim**-0.5, attn_sink
+    )
+    assert out[1].count_nonzero() == 0
+    torch.testing.assert_close(out.float(), expected, rtol=2e-2, atol=2e-2)

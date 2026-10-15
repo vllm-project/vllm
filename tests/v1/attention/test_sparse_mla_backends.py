@@ -530,12 +530,16 @@ def test_sparse_backend_decode_correctness(
     monkeypatch,
     block_stride_rows: int | None = None,
 ):
-    if qk_rope_head_dim == 0 and (
-        backend_cls != FlashMLASparseBackend
-        or kv_cache_dtype not in ("auto", "fp8_ds_mla")
-        or torch.cuda.get_device_capability()[0] != 9
+    if (
+        qk_rope_head_dim == 0
+        and not current_platform.is_rocm()
+        and (
+            backend_cls != FlashMLASparseBackend
+            or kv_cache_dtype not in ("auto", "fp8_ds_mla")
+            or torch.cuda.get_device_capability()[0] != 9
+        )
     ):
-        pytest.skip("NoPE sparse MLA is served by FlashMLA on SM90 only")
+        pytest.skip("NoPE sparse MLA is served by FlashMLA on SM90 or ROCm only")
     if (
         batch_name == "large_q_pure_prefill"
         and backend_cls == FlashMLASparseBackend
