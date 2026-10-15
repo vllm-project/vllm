@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """One-launch decode build of the DeepSeek V4.1 SWA metadata on ROCm.
 
-DeepseekV4ROCMAiterSparseSWAMetadataBuilder.build runs once per SWA KV cache
+DeepseekV41ROCMAiterSparseSWAMetadataBuilder.build runs once per SWA KV cache
 group, which is 8 times a step for DeepSeek-V4.1-Flash at TP 4. For a decode
 batch that this file does not take, each build launches 8 small kernels:
 torch.ge for is_valid_token, the zero fill of the unused decode_swa_lens,
@@ -24,7 +24,7 @@ is 3 more builds of 8 launches after every target step.
 
 On gfx942 with --monokernel (``ops.enabled()``), decode
 batches of up to MAX_ROWS rows, causal or the draft block, use it. Other
-batches take the rest of DeepseekV4ROCMAiterSparseSWAMetadataBuilder.build.
+batches take the rest of DeepseekV41ROCMAiterSparseSWAMetadataBuilder.build.
 tests/kernels/test_dsv41_gfx942_decode_meta.py compares it with the vLLM ops
 that it replaces.
 """
@@ -181,7 +181,7 @@ def launch(
 def build(builder, common_prefix_len, cam, fast_build, replay_start, metadata_cls):
     """Return the ROCm SWA metadata of a decode batch, causal or the DSpark
     draft block, built with one launch, or None when the batch needs the rest
-    of DeepseekV4ROCMAiterSparseSWAMetadataBuilder.build."""
+    of DeepseekV41ROCMAiterSparseSWAMetadataBuilder.build."""
     if not enabled():
         return None
     from vllm.v1.attention.backends.mla import sparse_swa
