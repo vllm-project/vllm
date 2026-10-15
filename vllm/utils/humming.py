@@ -123,7 +123,8 @@ def _patch_humming() -> None:
     instance per device instead; ``prepare_layer_config`` creates it eagerly
     during weight processing.
 
-    TODO: remove once humming's ``DeviceInfo`` is trace-safe.
+    TODO: remove after bumping humming to a release with
+    vllm-project/humming#149.
     """
     global _patched
     if _patched:
