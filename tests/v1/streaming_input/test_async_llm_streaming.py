@@ -122,9 +122,9 @@ def test_resumable_requests_rejected_for_non_decoder_models(
 
     with pytest.raises(
         VLLMValidationError,
-        match="Resumable requests are not supported",
+        match="Input streaming not currently supported",
     ):
-        AsyncLLM._validate_resumable_request(llm)
+        AsyncLLM._validate_streaming_input_request(llm, SamplingParams())
 
 
 @pytest.mark.asyncio
@@ -196,12 +196,10 @@ async def test_generate_with_async_generator():
 @pytest.mark.asyncio
 async def test_empty_input_stream_finishes_without_engine_request():
     llm = AsyncLLM.__new__(AsyncLLM)
-    llm._validate_streaming_input_sampling_params = MagicMock()
+    llm._validate_streaming_input_request = MagicMock()
     llm.get_supported_tasks = AsyncMock(return_value=("generate",))
     llm._run_output_handler = MagicMock()
     llm._add_request = AsyncMock()
-    llm.vllm_config = MagicMock(is_mm_encoder_only=False)
-    llm.model_config = MagicMock(is_diffusion=False)
 
     final_req = MagicMock()
     final_req.request_id = "request-int"

@@ -595,8 +595,7 @@ class AsyncLLM(EngineClient):
         session_id: str | None = None,
         kv_hints: KvHintsEnvelope | None = None,
     ) -> RequestOutputCollector:
-        self._validate_resumable_request()
-        self._validate_streaming_input_sampling_params(sampling_params)
+        self._validate_streaming_input_request(sampling_params)
 
         inputs = dict(
             supported_tasks=await self.get_supported_tasks(),
@@ -644,7 +643,7 @@ class AsyncLLM(EngineClient):
                         break
                     sp = input_chunk.sampling_params
                     if sp:
-                        self._validate_streaming_input_sampling_params(sp)
+                        self._validate_streaming_input_request(sp)
                     else:
                         sp = sampling_params
                     # TODO(nick): Avoid re-validating reused sampling parameters
@@ -690,17 +689,14 @@ class AsyncLLM(EngineClient):
         queue._input_stream_task = asyncio.create_task(handle_inputs())
         return queue
 
-    def _validate_resumable_request(self) -> None:
+    def _validate_streaming_input_request(
+        self, params: SamplingParams | PoolingParams
+    ) -> None:
         if self.vllm_config.is_mm_encoder_only or self.model_config.is_diffusion:
             raise VLLMValidationError(
-                "Resumable requests are not supported for encoder-only or "
+                "Input streaming not currently supported for encoder-only or "
                 "diffusion models."
             )
-
-    @staticmethod
-    def _validate_streaming_input_sampling_params(
-        params: SamplingParams | PoolingParams,
-    ):
         if (
             not isinstance(params, SamplingParams)
             or params.n > 1
