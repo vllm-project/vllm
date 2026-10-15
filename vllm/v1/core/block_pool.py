@@ -785,6 +785,8 @@ class BlockPool:
         blocks_to_evict_first = []
         other_pools: dict[BlockPool, list[KVCacheBlock]] = {}
         for block in ordered_blocks:
+            if block.is_null:  # never pooled; its ref_cnt is not maintained
+                continue
             if block.pool is not None and block.pool is not self:
                 other_pools.setdefault(block.pool, []).append(block)
                 continue

@@ -216,6 +216,23 @@ class KVCacheBlock:
         )
 
 
+def null_head_len(blocks: Sequence[KVCacheBlock]) -> int:
+    """Number of leading null blocks, e.g. a sliding-window table's skipped prefix."""
+    if not blocks or not blocks[0].is_null:
+        return 0
+    lo, hi = 1, len(blocks)
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if blocks[mid].is_null:
+            lo = mid + 1
+        else:
+            hi = mid
+    # All null entries are one shared object, so count() checks the run at C speed.
+    if blocks[:lo].count(blocks[0]) == lo:
+        return lo
+    return next(i for i, b in enumerate(blocks) if not b.is_null)
+
+
 class KVCacheBlockCopy(NamedTuple):
     src_block_id: int
     dst_block_id: int

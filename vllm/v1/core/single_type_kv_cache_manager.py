@@ -15,6 +15,7 @@ from vllm.v1.core.kv_cache_utils import (
     BlockHashListWithBlockSize,
     BlockHashWithGroupId,
     KVCacheBlock,
+    null_head_len,
     resolve_block_hashes,
 )
 from vllm.v1.hisparse.block_pool import SharedEventQueueBlockPool
@@ -586,7 +587,8 @@ class SingleTypeKVCacheManager(ABC):
 
         """
         # Free blocks in reverse order so that the tail blocks are freed first.
-        self.block_pool.free_blocks(reversed(self.pop_blocks_for_free(request_id)))
+        blocks = self.pop_blocks_for_free(request_id)
+        self.block_pool.free_blocks(reversed(blocks[null_head_len(blocks) :]))
 
     @classmethod
     @abstractmethod
