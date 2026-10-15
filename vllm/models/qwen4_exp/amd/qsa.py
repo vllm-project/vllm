@@ -161,12 +161,9 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
         value_cache = canonicalize_singleton_dim_strides(value_cache)
         if self.kv_cache_dtype in ("fp8", "fp8_e4m3"):
             # The cache is allocated as uint8; reinterpret the e4m3 bytes in
-            # the platform's native flavor (OCP on gfx950/CDNA4, FNUZ on
-            # gfx942/CDNA3), matching the C++ cache-update op, which follows
-            # the platform flavor the same way.
-            from vllm.platforms.rocm import on_gfx950
-
-            fp8_dtype = torch.float8_e4m3fn if on_gfx950() else torch.float8_e4m3fnuz
+            # the platform's native fp8 flavor, matching the C++ cache-update
+            # op, which follows the platform flavor the same way.
+            fp8_dtype = current_platform.fp8_dtype()
             key_cache = key_cache.view(fp8_dtype)
             value_cache = value_cache.view(fp8_dtype)
         if (

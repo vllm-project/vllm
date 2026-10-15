@@ -16,6 +16,7 @@ from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding.mrope import triton_mrope
+from vllm.platforms import current_platform
 
 from ..common.qsa_cache import (
     QSACompressedKeyCache,
@@ -313,12 +314,10 @@ class QSAIndexer(nn.Module):
         )
         main_kv_cache = attn.kv_cache.transpose(1, 2)
         if attn.kv_cache_dtype in ("fp8", "fp8_e4m3"):
-            # Reinterpret the uint8 cache in the platform's native fp8 flavor
-            # (OCP on gfx950, FNUZ on gfx942), matching the C++ cache-update
-            # op and the attention backend's read-side views.
-            from vllm.platforms.rocm import on_gfx950
-
-            fp8_dtype = torch.float8_e4m3fn if on_gfx950() else torch.float8_e4m3fnuz
+            # Reinterpret the uint8 cache in the platform's native fp8 flavor,
+            # matching the C++ cache-update op and the attention backend's
+            # read-side views.
+            fp8_dtype = current_platform.fp8_dtype()
             main_kv_cache = main_kv_cache.view(fp8_dtype)
         main_outputs = qsa_prepare(
             projected_q,

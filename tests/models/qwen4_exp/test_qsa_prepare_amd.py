@@ -82,9 +82,9 @@ def _make_main_inputs(num_tokens: int, main_fp8: bool = False) -> dict:
     num_blocks = num_tokens // MAIN_PAGE + 2
     if main_fp8:
         # ROCm fp8 KV-cache layout: uint8 storage holding e4m3 codes in
-        # the given flavor (FNUZ is the CDNA3/ROCm convention; OCP is
-        # what the gfx950 typed views reinterpret the cache as).
-        fp8_dtype = torch.float8_e4m3fnuz if main_fp8 == "fnuz" else torch.float8_e4m3fn
+        # the platform's native fp8 flavor, as the production typed views
+        # do (FNUZ on MI300/MI325, OCP elsewhere).
+        fp8_dtype = current_platform.fp8_dtype()
         cache = (
             torch.zeros(
                 num_blocks,
@@ -208,7 +208,7 @@ def _check_main_outputs(main: dict, q_out, gate_out, rope, positions) -> None:
 
 @requires_qsa_kernels
 @pytest.mark.usefixtures("default_vllm_config")
-@pytest.mark.parametrize("main_fp8", [False, "fnuz", "ocp"])
+@pytest.mark.parametrize("main_fp8", [False, True])
 @pytest.mark.parametrize("indexer_dtype", [torch.bfloat16, torch.float8_e4m3fn])
 @pytest.mark.parametrize(
     "mrope,is_2d_positions,cache_rope_positions,state_size,seq_lens,query_lens,history_lens",
