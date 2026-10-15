@@ -1563,8 +1563,8 @@ class KimiLinearForCausalLM(
         self.logits_processor = LogitsProcessor(
             self.config.vocab_size, scale=logit_scale
         )
-        # decode_backend=cute: a specialized decode executor over self.model, built
-        # by the model state once the weights are loaded.
+        # decode_backend=latency_specialized: a specialized decode executor over
+        # self.model, built by the model state once the weights are loaded.
         self.specialized_decode_config = specialized_decode_config(vllm_config)
         self.specialized_decode: SpecializedDecode | None = None
         # The final norm is applied in compute_logits unless the specialized decode
