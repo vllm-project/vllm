@@ -841,7 +841,6 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/v1/spec_decode/
-  - vllm/model_executor/models/mlp_speculator.py
   - tests/v1/spec_decode/test_acceptance_length.py
   commands:
     - export VLLM_ALLOW_INSECURE_SERIALIZATION=1
@@ -857,6 +856,5 @@ steps:
       working_dir: /vllm-workspace/tests
       source_file_dependencies:
       - vllm/v1/spec_decode/
-      - vllm/model_executor/models/mlp_speculator.py
       - tests/v1/spec_decode/test_acceptance_length.py
       - vllm/platforms/rocm.py

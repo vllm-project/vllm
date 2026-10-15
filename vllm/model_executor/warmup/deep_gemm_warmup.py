@@ -366,7 +366,7 @@ def _get_fp8_fp4_mega_moe_m_values(
             dg.get_bf16_mega_gate_config(
                 num_tokens, gate.input_size, gate.output_size, experts.top_k
             )
-            if uses_mega_gate
+            if uses_mega_gate and hasattr(dg, "get_bf16_mega_gate_config")
             else {}
         )
         block_m = dg.get_block_m_for_mega_moe(
