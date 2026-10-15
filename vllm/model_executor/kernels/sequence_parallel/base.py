@@ -108,7 +108,7 @@ class FusedGemmReduceScatterKernel(FusedCommGemmKernel):
             return self.row_parallel_forward(x)
 
 
-class UnfusedAllGatherGemmKernel(LinearCommKernel):
+class UnfusedAllGatherGemm(LinearCommKernel):
     """All-gather the input shard, then the layer's plain ``forward``."""
 
     @classmethod
@@ -119,7 +119,7 @@ class UnfusedAllGatherGemmKernel(LinearCommKernel):
         return self.column_parallel_forward(sp_all_gather(x))
 
 
-class UnfusedGemmReduceScatterKernel(LinearCommKernel):
+class UnfusedGemmReduceScatter(LinearCommKernel):
     """The layer's GEMM, then reduce-scatter."""
 
     @classmethod

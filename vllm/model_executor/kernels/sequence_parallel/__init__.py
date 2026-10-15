@@ -6,8 +6,8 @@ from vllm.model_executor.kernels.sequence_parallel.base import (
     FusedAllGatherGemmKernel,
     FusedGemmReduceScatterKernel,
     LinearCommKernel,
-    UnfusedAllGatherGemmKernel,
-    UnfusedGemmReduceScatterKernel,
+    UnfusedAllGatherGemm,
+    UnfusedGemmReduceScatter,
 )
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -46,13 +46,13 @@ def _init_unquantized_fused_kernel(
     if not isinstance(linear.quant_method, UnquantizedLinearMethod):
         return None
     from vllm.model_executor.kernels.sequence_parallel.unquantized import (
-        UnquantizedAllGatherGemm,
-        UnquantizedGemmReduceScatter,
+        FusedAllGatherGemm,
+        FusedGemmReduceScatter,
     )
 
     if isinstance(linear, RowParallelLinear):
-        return UnquantizedGemmReduceScatter(linear)
-    return UnquantizedAllGatherGemm(linear)
+        return FusedGemmReduceScatter(linear)
+    return FusedAllGatherGemm(linear)
 
 
 def init_fused_comm_kernel(
@@ -72,9 +72,9 @@ def init_unfused_comm_kernel(
 ) -> LinearCommKernel:
     """Return a comm+GEMM kernel built on plain collectives."""
     if isinstance(linear, RowParallelLinear):
-        return UnfusedGemmReduceScatterKernel(linear)
+        return UnfusedGemmReduceScatter(linear)
     if isinstance(linear, ColumnParallelLinear):
-        return UnfusedAllGatherGemmKernel(linear)
+        return UnfusedAllGatherGemm(linear)
     raise TypeError(
         f"init_unfused_comm_kernel: expected ColumnParallelLinear or "
         f"RowParallelLinear, got {type(linear).__name__}."
@@ -85,8 +85,8 @@ __all__ = [
     "LinearCommKernel",
     "FusedAllGatherGemmKernel",
     "FusedGemmReduceScatterKernel",
-    "UnfusedAllGatherGemmKernel",
-    "UnfusedGemmReduceScatterKernel",
+    "UnfusedAllGatherGemm",
+    "UnfusedGemmReduceScatter",
     "init_fused_comm_kernel",
     "init_unfused_comm_kernel",
 ]

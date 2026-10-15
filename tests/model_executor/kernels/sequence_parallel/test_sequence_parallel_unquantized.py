@@ -8,12 +8,12 @@ import torch
 
 from vllm.model_executor.kernels.sequence_parallel.base import (
     FusedGemmReduceScatterKernel,
-    UnfusedAllGatherGemmKernel,
-    UnfusedGemmReduceScatterKernel,
+    UnfusedAllGatherGemm,
+    UnfusedGemmReduceScatter,
 )
 from vllm.model_executor.kernels.sequence_parallel.unquantized import (
-    UnquantizedAllGatherGemm,
-    UnquantizedGemmReduceScatter,
+    FusedAllGatherGemm,
+    FusedGemmReduceScatter,
 )
 from vllm.platforms import current_platform
 
@@ -32,10 +32,10 @@ def _build_unquantized(w: torch.Tensor):
 @pytest.mark.parametrize(
     "kernel_cls,row_parallel",
     [
-        (UnquantizedAllGatherGemm, False),
-        (UnquantizedGemmReduceScatter, True),
-        (UnfusedAllGatherGemmKernel, False),
-        (UnfusedGemmReduceScatterKernel, True),
+        (FusedAllGatherGemm, False),
+        (FusedGemmReduceScatter, True),
+        (UnfusedAllGatherGemm, False),
+        (UnfusedGemmReduceScatter, True),
     ],
     ids=["ag", "rs", "unfused-ag", "unfused-rs"],
 )
