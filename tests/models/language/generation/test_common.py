@@ -77,7 +77,7 @@ AITER_MODEL_LIST = [
         ),
         pytest.param(
             "facebook/opt-350m",  # opt with projected token embeddings
-            marks=[pytest.mark.core_model, pytest.mark.cpu_model],
+            marks=[pytest.mark.core_model],
         ),
         pytest.param(
             "microsoft/phi-2",  # phi
