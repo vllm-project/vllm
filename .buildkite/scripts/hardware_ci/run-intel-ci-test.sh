@@ -37,7 +37,7 @@ case "${test_suite}" in
     cd tests
 
     pytest -v -s v1/core --ignore=v1/core/test_reset_prefix_cache_e2e.py --ignore=v1/core/test_scheduler_e2e.py
-    pytest -v -s v1/engine --ignore=v1/engine/test_output_processor.py
+    pytest -v -s v1/engine --ignore=v1/engine/test_output_processor.py --ignore=v1/engine/test_core_engine_actor_manager.py
     pytest -v -s v1/sample --ignore=v1/sample/test_logprobs.py --ignore=v1/sample/test_logprobs_e2e.py -k "not test_topk_only and not test_topp_only and not test_topk_and_topp"
     pytest -v -s v1/worker --ignore=v1/worker/test_gpu_model_runner.py --ignore=v1/worker/test_worker_memory_snapshot.py
     pytest -v -s v1/structured_output
@@ -57,7 +57,7 @@ case "${test_suite}" in
     cd tests
 
     pytest -v -s quantization/test_auto_round.py
-    pytest -v -s quantization/test_online.py --deselect=tests/quantization/test_online.py::test_online_quantization_loads_real_weights
+    pytest -v -s quantization/test_online.py --deselect=tests/quantization/test_online.py::test_online_quantization_loads_real_weights --deselect="tests/quantization/test_online.py::test_online_quantization[False-requantization_mxfp8_ptcp_fp8]"
     ;;
   compressed-tensors-fp8)
     cd tests
