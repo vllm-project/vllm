@@ -55,6 +55,11 @@ logger = init_logger(__name__)
 # The DSA indexer K cache is always quantized; "auto" means fp8 (V3.2 layout)
 # and mxfp4 is the opt-in Blackwell and gfx950 path.
 DSA_INDEXER_KV_DTYPES = ("fp8", "mxfp4")
+# Served by vllm/models/deepseek_v32/amd, whose indexer writes and scores the
+# ROCm paged MXFP4 cache.
+_ROCM_MXFP4_V32_ARCHS = frozenset(
+    ("DeepseekV32ForCausalLM", "GlmMoeDsaForCausalLM", "DeepseekV32MTPModel")
+)
 
 
 def dsa_indexer_uses_fp4(vllm_config: VllmConfig) -> bool:
@@ -70,16 +75,18 @@ def dsa_indexer_uses_fp4(vllm_config: VllmConfig) -> bool:
         from vllm._aiter_ops import rocm_aiter_ops
         from vllm.platforms.rocm import get_cdna_version
 
-        # Only DeepSeek-V4 and V4.1 are wired to the ROCm MXFP4 cache; other
-        # DSA models would silently keep their FP8 one.
+        # Only DeepSeek-V4, V4.1 and the V3.2-style DSA models (GLM-5.x, MTP
+        # drafts included) are wired to the ROCm MXFP4 cache; other DSA models
+        # would silently keep their FP8 one.
         model_config = vllm_config.model_config
-        if model_config is None or model_config.hf_config.model_type not in (
-            "deepseek_v4",
-            "deepseek_v41",
+        if model_config is None or not (
+            model_config.hf_config.model_type in ("deepseek_v4", "deepseek_v41")
+            or set(model_config.architectures) & _ROCM_MXFP4_V32_ARCHS
         ):
             raise ValueError(
                 "indexer_kv_dtype='mxfp4' on ROCm is only supported for "
-                "DeepSeek-V4 and DeepSeek-V4.1."
+                "DeepSeek-V4, DeepSeek-V4.1 and the DeepSeek-V3.2 / GLM-5 DSA "
+                "models."
             )
         if get_cdna_version() != 4:
             raise ValueError(
