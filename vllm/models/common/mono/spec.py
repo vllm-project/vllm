@@ -58,7 +58,13 @@ class ModelKernel(Protocol):
     """Attention layers whose caches ``MonoSpec.refuse_caches`` checks."""
 
     def run(self, step: Step, input_ids, inputs_embeds, **kwargs) -> Any:
-        """Takes and returns what the model's own forward does."""
+        """Takes and returns what the model's own forward does.
+
+        A launch replaces a *whole* decoder layer: it returns what that layer's
+        forward returns, or declines, and the kernel runs the layer on vLLM's
+        path instead. Covering part of a layer is the model's own problem, and
+        is discouraged: a new kernel should cover a whole layer or fall back.
+        """
         ...
 
     def warmup_keys(self) -> list[Any]:

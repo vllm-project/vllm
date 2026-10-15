@@ -15,7 +15,7 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
 from vllm.models.common.mono.guards import select_mono_spec
 from vllm.models.common.mono.runtime import MonoRuntime
-from vllm.models.common.mono.spec import MonoUnsupported
+from vllm.models.common.mono.spec import MonoUnsupported, Step
 from vllm.models.deepseek_v41.amd import mono_spec as ms
 
 SPECS = ms.MONO_SPECS
@@ -152,6 +152,22 @@ class _Layer(torch.nn.Module):
         for key, value in overrides.items():
             setattr(self, key, value)
         self.weight = torch.nn.Parameter(torch.zeros(HIDDEN))
+        self.taken: list = []
+
+    def forward(self, x, positions, input_ids, *rest, mono_ffn=None):
+        self.taken.append(("layer", self.attn.layer_id, mono_ffn is not None))
+        return _stream()
+
+
+def _stream() -> tuple[torch.Tensor, ...]:
+    """What a decoder layer returns: the stream and its three mixes."""
+    return (
+        torch.zeros(1, HIDDEN),
+        torch.zeros(1, 4, HIDDEN),
+        torch.zeros(1, 4, 1),
+        torch.zeros(1, 4, 4),
+        torch.zeros(1, 4),
+    )
 
 
 class _Model(torch.nn.Module):
@@ -162,6 +178,15 @@ class _Model(torch.nn.Module):
         self.layers = torch.nn.ModuleList(_Layer(i) for i in range(LAYERS))
         self.start_layer = 0
         self.end_layer = LAYERS
+
+    def prologue(self, input_ids, positions, intermediate_tensors, embeds, lookback):
+        return embeds, input_ids, None, None, None, positions.shape[0]
+
+    def after_layer(self, idx, hidden, residual, post_mix, res_mix, tokens, aux):
+        return None
+
+    def epilogue(self, hidden, *rest):
+        return hidden
 
 
 def make_cache(blocks: int = 4, block: int = 32) -> torch.Tensor:
@@ -297,7 +322,7 @@ def _build(monkeypatch, config=None, model=None, **layer_overrides):
 
 
 def _launch(mono, layer_id: int, width: int = 1):
-    return ms.DSV41Dispatch(mono.kernel.kernels, width)(layer_id)
+    return mono.kernel.kernels[layer_id, width]
 
 
 def _indexer():
@@ -509,6 +534,38 @@ def test_ffn_launch_takes_wo_b_unreduced(monkeypatch):
             torch.zeros(1, 4),
         )
     assert out[0] == "ffn"
+
+
+def test_run_takes_every_layer_the_way_its_launch_allows(monkeypatch):
+    """One loop over the backbone, from the model's prologue to its epilogue:
+    a whole-layer launch replaces the layer, a declined one and a layer without
+    a launch fall through to it, and an FFN-only launch rides into it."""
+    config = make_config()
+    model = TestDsv41Spec().make_model(config)
+    model.layers[2].attn.compressor = object()
+    model.layers[4].use_sequence_parallel = True
+    mono, _ = _build(monkeypatch, config=config, model=model)
+    for (layer_id, width), kernel in mono.kernel.kernels.items():
+        if width != 1 or kernel.ffn_only:
+            continue
+        taken = model.layers[layer_id].taken
+        declines = layer_id == 1
+        kernel.launch = lambda *a, _t=taken, _id=layer_id, _d=declines, **kw: (
+            _t.append(("launch", _id)) or (None if _d else _stream())
+        )
+
+    step = Step(width=1, positions=torch.zeros(1, dtype=torch.long))
+    out = mono.kernel.run(step, None, torch.zeros(1, HIDDEN))
+
+    assert out.shape == (1, HIDDEN)
+    assert [layer.taken for layer in model.layers] == [
+        [("launch", 0)],
+        [("launch", 1), ("layer", 1, False)],
+        [("layer", 2, True)],
+        [("launch", 3)],
+        [("layer", 4, False)],
+        [("launch", 5)],
+    ]
 
 
 def test_launch_declines_a_layout_it_cannot_read(monkeypatch):

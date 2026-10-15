@@ -208,26 +208,14 @@ class FfnSeam(DSV41LayerKernel):
         return self.mono.runner.ffn(self.weights, *tensors)
 
 
-class DSV41Dispatch:
-    """One step's launches, as the backbone's layers reach them. Built per step
-    from the step's width, so a layer only ever sees the launch its rows fit."""
-
-    def __init__(self, kernels: dict[tuple[int, int], DSV41LayerKernel], width: int):
-        self.kernels = kernels
-        self.width = width
-
-    def __call__(self, layer_id: int) -> DSV41LayerKernel | None:
-        return self.kernels.get((layer_id, self.width))
-
-
 class DSV41Kernel:
     """DeepSeek-V4.1's decode on this rank: the runner (one a rank, its peer
     memory collective over the TP group), each kernel layer's weight views, and
     a launch per (layer, width).
 
-    ``run`` takes the backbone's own forward, which keeps the engram hashes,
-    the sequence-parallel shard and the final collapse on one code path, and
-    hands it the step's dispatch for its layers to launch from.
+    ``run`` owns the backbone's layer loop, between the model's own prologue
+    and epilogue: those keep the engram hashes, the sequence-parallel shard and
+    the final collapse on one code path.
 
     Built once at load and never moved: the launches and the captured graphs
     hold its addresses.
@@ -243,6 +231,10 @@ class DSV41Kernel:
         self.model = model
         self.runner = DSV41MonoLayer(world, rank, cpu_group, device)
         self.embed_layer = getattr(model, "start_layer", 0)
+        # The replay layers run on their own trimmed batch, outside the loop
+        # ``run`` owns, so no launch is built for them.
+        end = getattr(model, "end_layer", len(model.layers))
+        self.layer_end = getattr(model, "decoder_replay_start", end)
         self.words = torch.zeros(world, dtype=torch.int32, device=device)
         self.weights: dict[int, Any] = {}
         self.swa_keys: list[str] = []
@@ -259,7 +251,7 @@ class DSV41Kernel:
         )
 
     def _kernel_layers(self, model) -> list["DeepseekV4DecoderLayer"]:
-        end = getattr(model, "end_layer", len(model.layers))
+        end = self.layer_end
         layers = []
         for i in range(self.embed_layer, end):
             why = _skip_layer(model.layers[i])
@@ -305,13 +297,74 @@ class DSV41Kernel:
         self._owners[key].compile(key)
 
     def run(self, step: Step, input_ids, inputs_embeds, **kwargs) -> Any:
-        return self.model(
+        model, positions = self.model, step.positions
+        (
+            hidden,
             input_ids,
-            step.positions,
-            None,
-            inputs_embeds,
-            mono=DSV41Dispatch(self.kernels, step.width),
-            **kwargs,
+            pre_mix,
+            engram_hashes,
+            engram_mask,
+            full_num_tokens,
+        ) = model.prologue(
+            input_ids, positions, None, inputs_embeds, kwargs.get("lookback_token_ids")
+        )
+        residual = post_mix = res_mix = None
+        aux_hidden_states: list[torch.Tensor] = []
+        final_aux_recon = None
+        for idx in range(self.embed_layer, self.layer_end):
+            layer = model.layers[idx]
+            launch = self.kernels.get((layer.attn.layer_id, step.width))
+            ffn = launch if launch is not None and launch.ffn_only else None
+            whole = launch if launch is not None and ffn is None else None
+            out = None
+            if whole is not None:
+                out = whole.launch(
+                    hidden,
+                    positions,
+                    residual,
+                    post_mix,
+                    res_mix,
+                    pre_mix,
+                    engram_hashes,
+                    engram_mask,
+                )
+            if out is None:
+                out = layer(
+                    hidden,
+                    positions,
+                    input_ids,
+                    pre_mix,
+                    post_mix,
+                    res_mix,
+                    residual,
+                    engram_hashes,
+                    engram_mask,
+                    mono_ffn=ffn,
+                )
+            hidden, residual, post_mix, res_mix, pre_mix = out
+            aux_recon = model.after_layer(
+                idx,
+                hidden,
+                residual,
+                post_mix,
+                res_mix,
+                full_num_tokens,
+                aux_hidden_states,
+            )
+            if aux_recon is not None:
+                final_aux_recon = aux_recon
+        return model.epilogue(
+            hidden,
+            positions,
+            input_ids,
+            pre_mix,
+            post_mix,
+            res_mix,
+            residual,
+            aux_hidden_states,
+            final_aux_recon,
+            self.layer_end > self.embed_layer,
+            full_num_tokens,
         )
 
 
