@@ -476,8 +476,8 @@ class HiSparseHotSpec(KVCacheSpec):
 
 
 @dataclass(frozen=True, kw_only=True)
-class HiSparseResidentSpec(KVCacheSpec):
-    """Evictable GPU-resident pages for host-backed HiSparse KV."""
+class HiSparseDeviceSpec(KVCacheSpec):
+    """Evictable device pages for host-backed HiSparse KV."""
 
     page_size: int
 

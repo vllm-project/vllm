@@ -13,9 +13,9 @@ from vllm.v1.core.kv_cache_utils import (
     KVCacheBlockCopy,
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
+    HiSparseDeviceManager,
     HiSparseHostManager,
     HiSparseHotManager,
-    HiSparseResidentManager,
     SingleTypeKVCacheManager,
 )
 from vllm.v1.hisparse.types import (
@@ -26,7 +26,7 @@ from vllm.v1.hisparse.types import (
     HiSparseTransferCommand,
 )
 from vllm.v1.kv_cache_interface import (
-    HiSparseResidentSpec,
+    HiSparseDeviceSpec,
     KVCacheConfig,
 )
 from vllm.v1.request import Request
@@ -50,7 +50,7 @@ class _PendingPublication:
 class _HiSparseRequestState:
     """Residency bookkeeping for one request.
 
-    A resident page moves through three states: not yet durable (only the GPU
+    A device page moves through three states: not yet durable (only the GPU
     copy exists), durable (``durable_pages``: its host copy is complete) and
     released (``released_pages``: durable, and its allocation reference was
     released so the pool may evict it). ``pinned_durable_pages`` tracks durable pages
@@ -79,7 +79,7 @@ class _PendingTransfer:
     page: tuple[str, int]
     request_state: _HiSparseRequestState
     host_block: KVCacheBlock
-    resident_blocks: tuple[KVCacheBlock, ...]
+    device_blocks: tuple[KVCacheBlock, ...]
     is_restore: bool = False
     expected_worker_completions: int = 0
     worker_completions: int = 0
@@ -89,7 +89,7 @@ class _PendingTransfer:
 class HiSparseCoordinator:
     """Own HiSparse host allocation, publication, page transfers, and GPU residency.
 
-    GPU-resident pages are a write-back cache of the host tier. Once a page's
+    device pages are a write-back cache of the host tier. Once a page's
     host copy is durable and its request can read from host (it has, or has
     asked for, a hot buffer), the page's allocation reference is released with
     ``BlockPool.unpin_blocks``: the block keeps being read, but the pool counts
@@ -111,24 +111,24 @@ class HiSparseCoordinator:
         self.num_reprefillable_tokens = num_reprefillable_tokens
         groups = kv_cache_config.kv_cache_groups
 
-        resident_managers: list[HiSparseResidentManager] = []
+        device_managers: list[HiSparseDeviceManager] = []
         hot_managers: list[HiSparseHotManager] = []
-        resident_group_ids: list[int] = []
+        device_group_ids: list[int] = []
         for group_id, (group, manager) in enumerate(zip(groups, managers)):
-            if isinstance(group.kv_cache_spec, HiSparseResidentSpec):
-                if not isinstance(manager, HiSparseResidentManager):
+            if isinstance(group.kv_cache_spec, HiSparseDeviceSpec):
+                if not isinstance(manager, HiSparseDeviceManager):
                     raise TypeError(
-                        "HiSparse resident specs require resident cache managers."
+                        "HiSparse device specs require device cache managers."
                     )
-                resident_managers.append(manager)
-                resident_group_ids.append(group_id)
+                device_managers.append(manager)
+                device_group_ids.append(group_id)
                 assert not group.host_resident
             if isinstance(manager, HiSparseHotManager):
                 hot_managers.append(manager)
                 assert not group.host_resident
-            if isinstance(manager, (HiSparseHotManager, HiSparseResidentManager)):
+            if isinstance(manager, (HiSparseHotManager, HiSparseDeviceManager)):
                 manager.coordinator = self
-        self.resident_managers = tuple(resident_managers)
+        self.device_managers = tuple(device_managers)
         self.hot_managers = tuple(hot_managers)
         self.host_manager: HiSparseHostManager | None = None
         self.host_group_id: int | None = None
@@ -147,23 +147,23 @@ class HiSparseCoordinator:
         self.has_host_cache = self.host_manager is not None
         self.gpu_pool: BlockPool | None = None
         self.read_from_host_watermark = 0
-        if self.resident_managers:
+        if self.device_managers:
             assert self.host_manager is not None
             assert self.host_group_id is not None
-            if self.host_group_id > min(resident_group_ids):
-                raise ValueError("HiSparse host group must precede resident groups.")
-            resident_block_sizes = {
-                manager.block_size for manager in self.resident_managers
+            if self.host_group_id > min(device_group_ids):
+                raise ValueError("HiSparse host group must precede device groups.")
+            device_block_sizes = {
+                manager.block_size for manager in self.device_managers
             }
-            if len(resident_block_sizes) != 1:
+            if len(device_block_sizes) != 1:
                 raise ValueError(
-                    "HiSparse resident cache groups must use one block size."
+                    "HiSparse device cache groups must use one block size."
                 )
-            resident_block_size = resident_block_sizes.pop()
-            if self.host_manager.block_size != resident_block_size:
-                raise ValueError("HiSparse host and resident block sizes must match.")
-            self.max_transfers_per_step = max_model_len // resident_block_size
-            self.gpu_pool = self.resident_managers[0].block_pool
+            device_block_size = device_block_sizes.pop()
+            if self.host_manager.block_size != device_block_size:
+                raise ValueError("HiSparse host and device block sizes must match.")
+            self.max_transfers_per_step = max_model_len // device_block_size
+            self.gpu_pool = self.device_managers[0].block_pool
             # Requests start reading from host once the shared pool runs this
             # low, so admissions find evictable pages rather than pinned ones.
             hot_cost = sum(manager.blocks_per_request for manager in hot_managers)
@@ -176,16 +176,16 @@ class HiSparseCoordinator:
         self._retained_cow_copies: dict[int, tuple[KVCacheBlock, KVCacheBlock]] = {}
         # request -> prefix length an external load is still filling in.
         self._pending_import_tokens: dict[str, int] = {}
-        # Requests whose resident pages were all non-null when last scanned.
+        # Requests whose device pages were all non-null when last scanned.
         # Pages only become null at admission or import (before the first
         # scan) and when the pool evicts a released page (_unmap_evicted_page).
-        self._resident_requests: set[str] = set()
+        self._on_device_requests: set[str] = set()
         self.transfers_to_send: list[HiSparsePageTransfer] = []
         self.pending_transfers: dict[int, _PendingTransfer] = {}
         self.request_states: dict[str, _HiSparseRequestState] = {}
         self.next_transfer_id = 0
         # Published host block hash -> GPU copies of that page, readable until
-        # the pool evicts them. Lets a host prefix hit come back GPU-resident.
+        # the pool evicts them. Lets a host prefix hit come back on device.
         self.gpu_copies: dict[BlockHashWithGroupId, tuple[KVCacheBlock, ...]] = {}
         self._gpu_copy_by_block: dict[int, BlockHashWithGroupId] = {}
         # Released GPU block id -> (request, page) pairs still reading it.
@@ -200,8 +200,8 @@ class HiSparseCoordinator:
 
     def record_host_prefix_hit(self, request_id: str, num_host_pages: int) -> None:
         """Account for a prefix hit on host pages the request now references."""
-        self._resident_requests.discard(request_id)
-        if not self.resident_managers or self.host_manager is None:
+        self._on_device_requests.discard(request_id)
+        if not self.device_managers or self.host_manager is None:
             return
         host_blocks = self.host_manager.req_to_blocks.get(request_id, ())
         num_host_pages = min(num_host_pages, len(host_blocks))
@@ -277,8 +277,8 @@ class HiSparseCoordinator:
             blocks = self.gpu_copies.get(host_block.block_hash)
             if blocks is None:
                 continue
-            for manager, block in zip(self.resident_managers, blocks):
-                if manager.revive_resident_page(request_id, page_idx, block):
+            for manager, block in zip(self.device_managers, blocks):
+                if manager.revive_device_page(request_id, page_idx, block):
                     manager.block_pool.touch([block])
                     state.pinned_durable_pages.add(page_idx)
                     if page_idx < state.synced_pages:
@@ -286,7 +286,7 @@ class HiSparseCoordinator:
 
     def _record_gpu_copies(self, request_id: str, num_computed_tokens: int) -> None:
         """Index the GPU copies of just-published host pages for later hits."""
-        if not self.resident_managers:
+        if not self.device_managers:
             return
         assert self.host_manager is not None
         host_blocks = self.host_manager.req_to_blocks.get(request_id)
@@ -310,8 +310,8 @@ class HiSparseCoordinator:
         if host_block.is_null or host_block.block_hash is None:
             return
         blocks: list[KVCacheBlock] = []
-        for manager in self.resident_managers:
-            block = manager.get_resident_page(request_id, page_idx)
+        for manager in self.device_managers:
+            block = manager.get_device_page(request_id, page_idx)
             if block is None:
                 return
             blocks.append(block)
@@ -332,31 +332,31 @@ class HiSparseCoordinator:
     # ------------------------------------------------------------------
 
     def _can_read_from_host(self, request_id: str) -> bool:
-        """Whether resident pages may be dropped under the request."""
+        """Whether device pages may be dropped under the request."""
         return bool(self.hot_managers) and all(
             manager.has_hot_buffer(request_id) for manager in self.hot_managers
         )
 
     def _fills_admission_window(self, request_id: str) -> bool:
-        """Whether the request holds the resident pages admission reserved.
+        """Whether the request holds the device pages admission reserved.
 
-        Admission caps a request's resident pages at the in-flight window,
+        Admission caps a request's device pages at the in-flight window,
         assuming older pages move to host; keeping them pinned past it lets a
         chunked prefill outgrow the pool it was admitted into.
         """
         return any(
             len(manager.req_to_blocks.get(request_id, ()))
             >= manager.max_admission_blocks_per_request
-            for manager in self.resident_managers
+            for manager in self.device_managers
         )
 
-    def _resident_page_blocks(
+    def _device_page_blocks(
         self, request_id: str, page_idx: int
     ) -> list[KVCacheBlock] | None:
         blocks: list[KVCacheBlock] = []
-        for manager in self.resident_managers:
+        for manager in self.device_managers:
             num_pages = len(manager.req_to_blocks.get(request_id, ()))
-            block = manager.get_resident_page(request_id, page_idx)
+            block = manager.get_device_page(request_id, page_idx)
             if page_idx >= num_pages - ACTIVE_TAIL_PAGES or block is None:
                 return None
             blocks.append(block)
@@ -367,10 +367,10 @@ class HiSparseCoordinator:
     ) -> bool:
         if page_idx in state.in_flight_transfers or page_idx not in state.durable_pages:
             return False
-        blocks = self._resident_page_blocks(request_id, page_idx)
+        blocks = self._device_page_blocks(request_id, page_idx)
         if blocks is None:
             return False
-        for manager, block in zip(self.resident_managers, blocks):
+        for manager, block in zip(self.device_managers, blocks):
             self._gpu_copy_readers.setdefault(block.block_id, set()).add(
                 (request_id, page_idx)
             )
@@ -401,12 +401,12 @@ class HiSparseCoordinator:
             self._unmap_evicted_page(request_id, page_idx)
 
     def _unmap_evicted_page(self, request_id: str, page_idx: int) -> None:
-        self._resident_requests.discard(request_id)
+        self._on_device_requests.discard(request_id)
         state = self.request_states.get(request_id)
         if state is None:
             return
-        for manager in self.resident_managers:
-            block = manager.drop_resident_page(request_id, page_idx)
+        for manager in self.device_managers:
+            block = manager.drop_device_page(request_id, page_idx)
             if block is None:
                 continue
             readers = self._gpu_copy_readers.get(block.block_id)
@@ -423,11 +423,11 @@ class HiSparseCoordinator:
 
         A request that can read from host releases every durable sealed page to
         the pool. One that cannot keeps its pages pinned until the shared pool
-        runs low, or until it holds the resident pages admission reserved for
+        runs low, or until it holds the device pages admission reserved for
         it, then asks for a hot buffer. Pages remain pinned until that buffer is
         allocated on a subsequent scheduling pass.
         """
-        if not self.resident_managers:
+        if not self.device_managers:
             return
         state = self._get_request_state(request_id)
         if state.pages_to_revive:
@@ -461,7 +461,7 @@ class HiSparseCoordinator:
         last ``num_reprefillable_tokens`` are not final yet and are not written
         back.
         """
-        if not self.resident_managers:
+        if not self.device_managers:
             return
         for request_id, num_tokens in requests:
             self.plan_write_backs(
@@ -471,7 +471,7 @@ class HiSparseCoordinator:
 
     def plan_write_backs(self, request_id: str, num_computed_tokens: int) -> None:
         """Eagerly write back every sealed page that has no host copy yet."""
-        if not self.resident_managers:
+        if not self.device_managers:
             return
         assert self.host_manager is not None
         host_block_size = self.host_manager.block_size
@@ -490,8 +490,8 @@ class HiSparseCoordinator:
             if page_idx in state.durable_pages:
                 continue
             if not all(
-                manager.get_resident_page(request_id, page_idx) is not None
-                for manager in self.resident_managers
+                manager.get_device_page(request_id, page_idx) is not None
+                for manager in self.device_managers
             ):
                 continue
             if self._plan_page_transfer(request_id, page_idx, runs_after_forward=True):
@@ -549,15 +549,15 @@ class HiSparseCoordinator:
 
     def record_pending_host_import(self, request_id: str, num_tokens: int) -> None:
         """Note a prefix an external load is populating in host pages."""
-        self._resident_requests.discard(request_id)
+        self._on_device_requests.discard(request_id)
         self._pending_import_tokens[request_id] = num_tokens
 
     def finish_host_import(self, request_id: str, *, failed: bool) -> None:
         """Publish externally populated host pages after connector completion."""
         num_computed_tokens = self._pending_import_tokens.pop(request_id, None)
-        if num_computed_tokens is None or failed or not self.resident_managers:
+        if num_computed_tokens is None or failed or not self.device_managers:
             return
-        block_size = self.resident_managers[0].block_size
+        block_size = self.device_managers[0].block_size
         num_pages = num_computed_tokens // block_size
         state = self._get_request_state(request_id)
         state.durable_pages = set(range(num_pages))
@@ -591,21 +591,21 @@ class HiSparseCoordinator:
             return False
 
         blocks: list[KVCacheBlock] = []
-        for manager in self.resident_managers:
-            block = manager.get_resident_page(request_id, page_idx)
+        for manager in self.device_managers:
+            block = manager.get_device_page(request_id, page_idx)
             if block is None:
                 return False
             blocks.append(block)
 
         self.host_manager.block_pool.touch([host_block])
-        for manager, block in zip(self.resident_managers, blocks):
+        for manager, block in zip(self.device_managers, blocks):
             manager.block_pool.touch([block])
         transfer_id = self.next_transfer_id
         self.next_transfer_id += 1
         plan = HiSparsePageTransfer(
             transfer_id=transfer_id,
             host_block_id=host_block.block_id,
-            resident_block_ids=tuple(block.block_id for block in blocks),
+            device_block_ids=tuple(block.block_id for block in blocks),
             runs_after_forward=runs_after_forward,
             is_restore=is_restore,
         )
@@ -614,7 +614,7 @@ class HiSparseCoordinator:
             page=(request_id, page_idx),
             request_state=state,
             host_block=host_block,
-            resident_blocks=tuple(blocks),
+            device_blocks=tuple(blocks),
             is_restore=is_restore,
         )
         state.in_flight_transfers[page_idx] = transfer_id
@@ -629,16 +629,16 @@ class HiSparseCoordinator:
         self,
         requests: Iterable[tuple[str, int, int]],
     ) -> tuple[HiSparseRowMirror, ...]:
-        """Map scheduled rows to scheduler-owned resident and host blocks."""
-        if not self.resident_managers or self.host_manager is None:
+        """Map scheduled rows to scheduler-owned device and host blocks."""
+        if not self.device_managers or self.host_manager is None:
             return ()
-        block_size = self.resident_managers[0].block_size
+        block_size = self.device_managers[0].block_size
         mirrors: list[HiSparseRowMirror] = []
         for request_id, num_computed_tokens, num_scheduled_tokens in requests:
             host_blocks = self.host_manager.req_to_blocks.get(request_id)
             if host_blocks is None or any(
                 request_id not in manager.req_to_blocks
-                for manager in self.resident_managers
+                for manager in self.device_managers
             ):
                 continue
             token_position = num_computed_tokens
@@ -652,12 +652,12 @@ class HiSparseCoordinator:
                 # window only ever moves forward, so dropping them here would
                 # leave their host rows permanently stale.
                 source_starts = []
-                for manager in self.resident_managers:
-                    block = manager.get_resident_page(request_id, page_idx)
+                for manager in self.device_managers:
+                    block = manager.get_device_page(request_id, page_idx)
                     if block is None:
                         break
                     source_starts.append(block.block_id * block_size + row_offset)
-                if len(source_starts) != len(self.resident_managers):
+                if len(source_starts) != len(self.device_managers):
                     token_position += num_rows
                     continue
                 if page_idx >= len(host_blocks):
@@ -679,44 +679,44 @@ class HiSparseCoordinator:
                 token_position += num_rows
         return tuple(mirrors)
 
-    def all_context_pages_resident(
+    def all_context_pages_on_device(
         self,
         requests: Iterable[tuple[str, int, int]],
     ) -> bool:
-        """Return whether every scheduled request can read only resident KV."""
-        if not self.resident_managers:
+        """Return whether every scheduled request can read only device KV."""
+        if not self.device_managers:
             return False
-        first = self.resident_managers[0]
+        first = self.device_managers[0]
         for request_id, num_computed_tokens, num_scheduled_tokens in requests:
             num_pages = cdiv(
                 num_computed_tokens + num_scheduled_tokens, first.block_size
             )
             if len(first.req_to_blocks.get(request_id, ())) < num_pages:
                 return False
-            if request_id in self._resident_requests:
+            if request_id in self._on_device_requests:
                 continue
             if any(
                 block.is_null
-                for manager in self.resident_managers
+                for manager in self.device_managers
                 for block in manager.get_residency_row(request_id)
             ):
                 return False
-            self._resident_requests.add(request_id)
+            self._on_device_requests.add(request_id)
         return True
 
     def take_residency_updates(
         self, request_ids: Iterable[str]
     ) -> dict[str, HiSparseResidencyUpdate]:
-        """Resident block ids the worker lacks for the scheduled requests:
+        """Device block ids the worker lacks for the scheduled requests:
         stale pages plus pages appended since the last update.
 
         Requests that are not scheduled keep their changes until they are:
         only a scheduled request's residency is read.
         """
         updates: dict[str, HiSparseResidencyUpdate] = {}
-        if not self.resident_managers:
+        if not self.device_managers:
             return updates
-        first = self.resident_managers[0]
+        first = self.device_managers[0]
         for request_id in request_ids:
             state = self._get_request_state(request_id)
             num_pages = len(first.req_to_blocks.get(request_id, ()))
@@ -725,12 +725,12 @@ class HiSparseCoordinator:
                 continue
             stale_pages = sorted(state.stale_pages)
             block_ids: list[list[int]] = []
-            for manager in self.resident_managers:
+            for manager in self.device_managers:
                 null_block_id = manager.block_pool.null_block.block_id
                 group_block_ids = [
                     null_block_id if block is None else block.block_id
                     for block in (
-                        manager.get_resident_page(request_id, page_idx)
+                        manager.get_device_page(request_id, page_idx)
                         for page_idx in stale_pages
                     )
                 ]
@@ -749,7 +749,7 @@ class HiSparseCoordinator:
 
     def build_transfer_command(self) -> HiSparseTransferCommand | None:
         """Package residency decisions for the worker connector."""
-        if not self.resident_managers:
+        if not self.device_managers:
             return None
         command = HiSparseTransferCommand(page_transfers=self.transfers_to_send)
         self.transfers_to_send = []
@@ -799,7 +799,7 @@ class HiSparseCoordinator:
                 or pending.worker_completions < pending.expected_worker_completions
             ):
                 continue
-            for manager, block in zip(self.resident_managers, pending.resident_blocks):
+            for manager, block in zip(self.device_managers, pending.device_blocks):
                 manager.block_pool.free_blocks([block])
             pending.enqueue_applied = True
 
@@ -863,7 +863,7 @@ class HiSparseCoordinator:
 
     def free(self, request_id: str) -> None:
         """Detach the request; its durable pages stay readable GPU copies."""
-        self._resident_requests.discard(request_id)
+        self._on_device_requests.discard(request_id)
         self._pending_import_tokens.pop(request_id, None)
         state = self.request_states.pop(request_id, None)
         if state is None:
@@ -888,7 +888,7 @@ class HiSparseCoordinator:
             # Preemption can cancel a scheduled forward after its write-backs were
             # planned, so its copies do not prove that the KV was computed.
             state.pending_publication = None
-        for manager in self.resident_managers:
+        for manager in self.device_managers:
             blocks = manager.get_residency_row(request_id)
             # Tail first, so a prefix loses its tail pages before its head.
             for page_idx in reversed(range(len(blocks))):
@@ -906,7 +906,7 @@ class HiSparseCoordinator:
                     manager.block_pool.unpin_blocks([block], self._on_block_evicted)
                 else:
                     continue
-                manager.drop_resident_page(request_id, page_idx)
+                manager.drop_device_page(request_id, page_idx)
 
 
 def get_hisparse_coordinator(

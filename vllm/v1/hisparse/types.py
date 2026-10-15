@@ -14,14 +14,14 @@ class HiSparsePageTransfer:
 
     transfer_id: int
     host_block_id: int
-    resident_block_ids: tuple[int, ...]
+    device_block_ids: tuple[int, ...]
     runs_after_forward: bool
     is_restore: bool = False
 
 
 @dataclass(frozen=True)
 class HiSparseRowMirror:
-    """Mirror one contiguous resident-row span into the host cache."""
+    """Mirror one contiguous device-row span into the host cache."""
 
     source_starts: tuple[int, ...]
     destination_start: int
@@ -30,7 +30,7 @@ class HiSparseRowMirror:
 
 @dataclass(frozen=True)
 class HiSparseResidencyUpdate:
-    """GPU block ids of some of a request's resident pages, per resident group.
+    """GPU block ids of some of a request's device pages, per device group.
     A null block id means the page is read from the host."""
 
     pages: list[int]

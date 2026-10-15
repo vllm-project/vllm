@@ -201,7 +201,7 @@ def test_hisparse_write_back_and_prefix_restore(
             assert worker._row_mirrors
             for layer_index in layer_indices:
                 cache = worker.cache_handles[layer_index]
-                source_index = cache.runtime.resident_group_index
+                source_index = cache.runtime.device_group_index
                 for mirror in worker._row_mirrors:
                     source_row = mirror.source_starts[source_index]
                     destination_row = mirror.destination_start
@@ -210,7 +210,7 @@ def test_hisparse_write_back_and_prefix_restore(
                         source_row, worker.kernel_block_size
                     )
                     with gpu_sync_allowed():
-                        gpu_rows = worker.resident_caches[layer_index][
+                        gpu_rows = worker.device_caches[layer_index][
                             source_block, source_offset : source_offset + num_rows
                         ].cpu()
                     host_rows = worker.host_caches[layer_index][

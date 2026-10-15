@@ -59,7 +59,7 @@ class HiSparseConnectorMetadata(KVConnectorMetadata):
     host_cow_copies: tuple[KVCacheBlockCopy, ...]
     source_block_ids: tuple[int, ...]
     row_mirrors: dict[str, tuple[HiSparseRowMirror, ...]]
-    all_context_pages_resident: bool
+    all_context_pages_on_device: bool
     residency_updates: dict[str, HiSparseResidencyUpdate]
 
 
@@ -193,7 +193,7 @@ class HiSparseConnectorScheduler:
             host_cow_copies,
             tuple(source_block_ids),
             row_mirrors,
-            self.coordinator.all_context_pages_resident(scheduled_requests),
+            self.coordinator.all_context_pages_on_device(scheduled_requests),
             self.coordinator.take_residency_updates(
                 scheduler_output.num_scheduled_tokens
             ),

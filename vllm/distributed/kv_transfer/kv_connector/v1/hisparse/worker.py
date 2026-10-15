@@ -232,8 +232,8 @@ class HiSparseConnectorWorker:
         )
         is_host_writer = _is_hisparse_host_writer(shared_host_region)
 
-        resident = cache_handles[0].view
-        assert resident is not None
+        device_view = cache_handles[0].view
+        assert device_view is not None
         host_num_blocks = self.kv_cache_config.hisparse_host_num_blocks
         assert host_num_blocks is not None
         try:
@@ -271,9 +271,9 @@ class HiSparseConnectorWorker:
     ) -> None:
         if self._initialized:
             raise RuntimeError("HiSparse connector worker is already initialized.")
-        resident = cache_handles[0].view
-        assert resident is not None
-        self.kernel_block_size = resident.block_size
+        device_view = cache_handles[0].view
+        assert device_view is not None
+        self.kernel_block_size = device_view.block_size
         self.host_num_blocks = host_num_blocks
         self.pinned_host_pools = pinned_host_pools
         self.shared_host_region = shared_host_region
@@ -381,21 +381,21 @@ class HiSparseConnectorWorker:
 
     def _init_dma(self) -> None:
         host_caches = tuple(cache.runtime.host_cache for cache in self.cache_handles)
-        resident_caches = []
+        device_caches = []
         for cache in self.cache_handles:
             assert cache.view is not None and cache.slot_mapping is not None
-            resident_caches.append(cache.view.cache)
+            device_caches.append(cache.view.cache)
         self.host_caches = host_caches
-        self.resident_caches = tuple(resident_caches)
+        self.device_caches = tuple(device_caches)
 
-        for resident_cache, host_cache in zip(resident_caches, host_caches):
-            row_bytes = resident_cache.shape[-1] * resident_cache.element_size()
+        for device_cache, host_cache in zip(device_caches, host_caches):
+            row_bytes = device_cache.shape[-1] * device_cache.element_size()
             if (
-                resident_cache.ndim != 3
-                or resident_cache.shape[1] != self.kernel_block_size
-                or resident_cache.stride(1) * resident_cache.element_size() != row_bytes
+                device_cache.ndim != 3
+                or device_cache.shape[1] != self.kernel_block_size
+                or device_cache.stride(1) * device_cache.element_size() != row_bytes
             ):
-                raise RuntimeError("HiSparse DMA requires contiguous resident rows.")
+                raise RuntimeError("HiSparse DMA requires contiguous device rows.")
             if (
                 host_cache.ndim != 2
                 or not host_cache.is_contiguous()
@@ -428,7 +428,7 @@ class HiSparseConnectorWorker:
         self._set_row_mirrors(mirrors)
         self._clear_forward_mirror_state()
         for handle in self.cache_handles:
-            handle.all_context_pages_resident = metadata.all_context_pages_resident
+            handle.all_context_pages_on_device = metadata.all_context_pages_on_device
         self._copy_host_blocks(metadata.host_cow_copies, previous_host_write_event)
         transfers = (
             metadata.command.page_transfers if metadata.command is not None else []
@@ -480,7 +480,7 @@ class HiSparseConnectorWorker:
     def _stage_row_mirror_mapping(self, num_tokens: int) -> None:
         """Snapshot the rows this forward will write, off the compute stream.
 
-        The resident slot mapping is a persistent view bound at registration
+        The device slot mapping is a persistent view bound at registration
         time, so the rows are already staged by the time the forward launches.
         """
         state = self._slot_mapping_staging
@@ -489,7 +489,7 @@ class HiSparseConnectorWorker:
         handle = self.cache_handles[0]
         slots = handle.slot_mapping
         assert slots is not None
-        source_index = handle.runtime.resident_group_index
+        source_index = handle.runtime.device_group_index
         start = state.num_tokens
         end = start + num_tokens
         if end > state.slots.shape[0]:
@@ -669,11 +669,11 @@ class HiSparseConnectorWorker:
         row_counts = self._row_mirror_counts
         for descriptor_offset, layer_index in enumerate(layer_indices):
             cache = self.cache_handles[layer_index]
-            source_index = cache.runtime.resident_group_index
+            source_index = cache.runtime.device_group_index
             if source_index >= self._row_mirror_source_starts.shape[1]:
                 raise RuntimeError("HiSparse row DMA source index is out of range.")
             source_rows = self._row_mirror_source_starts[:, source_index]
-            source = self.resident_caches[layer_index]
+            source = self.device_caches[layer_index]
             destination = self.host_caches[layer_index]
             row_bytes = source.shape[-1] * source.element_size()
             if (
@@ -727,8 +727,8 @@ class HiSparseConnectorWorker:
         next_layer = layer_index + 1
         if (
             next_layer < len(self.cache_handles)
-            and self.cache_handles[next_layer].runtime.resident_group_index
-            == handle.runtime.resident_group_index
+            and self.cache_handles[next_layer].runtime.device_group_index
+            == handle.runtime.device_group_index
         ):
             return
         ready_event = self._layer_ready_events[layer_index]
@@ -766,12 +766,12 @@ class HiSparseConnectorWorker:
         if not transfers:
             return
         for layer_index, cache in enumerate(self.cache_handles):
-            source_index = cache.runtime.resident_group_index
+            source_index = cache.runtime.device_group_index
             source = self.host_caches[layer_index]
-            destination = self.resident_caches[layer_index]
+            destination = self.device_caches[layer_index]
             for transfer in transfers:
                 host_start = transfer.host_block_id * self.kernel_block_size
-                resident_block = transfer.resident_block_ids[source_index]
+                device_block = transfer.device_block_ids[source_index]
                 # Each import pays one H2D page copy and enqueue per layer/rank
                 # instead of tail prefill on D. Restore the prompt rows before
                 # decode appends to this page; unused rows do not extend the
@@ -779,7 +779,7 @@ class HiSparseConnectorWorker:
                 # cudaHostRegister pins this pool outside PyTorch's allocator,
                 # so the sync checker cannot recognize it via is_pinned().
                 with gpu_sync_allowed():
-                    destination[resident_block].copy_(
+                    destination[device_block].copy_(
                         source[host_start : host_start + self.kernel_block_size],
                         non_blocking=True,
                     )
@@ -803,20 +803,20 @@ class HiSparseConnectorWorker:
             count=len(transfers),
         )
         source_blocks_by_transfer = np.asarray(
-            [transfer.resident_block_ids for transfer in transfers], dtype=np.int64
+            [transfer.device_block_ids for transfer in transfers], dtype=np.int64
         )
         if source_blocks_by_transfer.ndim != 2:
             raise RuntimeError(
                 "HiSparse write-back DMA source mappings must be rectangular."
             )
         for layer_index, cache in enumerate(self.cache_handles):
-            source_index = cache.runtime.resident_group_index
+            source_index = cache.runtime.device_group_index
             if source_index >= source_blocks_by_transfer.shape[1]:
                 raise RuntimeError(
                     "HiSparse write-back DMA source index is out of range."
                 )
             source_blocks = source_blocks_by_transfer[:, source_index]
-            source = self.resident_caches[layer_index]
+            source = self.device_caches[layer_index]
             destination = self.host_caches[layer_index]
             if np.any(source_blocks < 0) or np.any(source_blocks >= source.shape[0]):
                 raise RuntimeError("HiSparse write-back DMA source is out of range.")
@@ -933,7 +933,7 @@ class HiSparseConnectorWorker:
 
         Runs before this step's work, so after the previous step's drafter.
         Post-forward transfers are ordered behind the draft mirror, so a page is
-        never reported durable, and its resident block never released, before
+        never reported durable, and its device block never released, before
         its draft-layer rows reach the host. Both land in the previous step's
         host write event, which this step waits on before its forward and its
         host copies, since the pool may already have evicted the

@@ -154,7 +154,7 @@ def test_hisparse_appends_reference_slots_within_a_mirror_phase(monkeypatch):
         MagicMock(), MagicMock(), torch.empty(4, dtype=torch.int64)
     )
     worker._slot_mapping_staging = state
-    handle = SimpleNamespace(runtime=SimpleNamespace(resident_group_index=1))
+    handle = SimpleNamespace(runtime=SimpleNamespace(device_group_index=1))
     worker.cache_layer_names = ["layer"]
     worker.cache_handles = [handle]
     worker._layer_mirror_callbacks = (MagicMock(),)
@@ -542,10 +542,10 @@ def test_hisparse_pre_forward_transfer_builds_page_descriptors():
     worker.kernel_block_size = 2
     source = torch.empty((3, 2, 4), dtype=torch.uint8)
     destination = torch.empty((6, 4), dtype=torch.uint8)
-    worker.resident_caches = (source,)
+    worker.device_caches = (source,)
     worker.host_caches = (destination,)
     worker.cache_handles = [
-        SimpleNamespace(runtime=SimpleNamespace(resident_group_index=0))
+        SimpleNamespace(runtime=SimpleNamespace(device_group_index=0))
     ]
     worker._dma_free_descriptors = []
     worker._submit_dma_descriptors = MagicMock()
@@ -607,12 +607,12 @@ def test_hisparse_tail_restore_preserves_imported_rows(
         for destination, source in zip(host_caches, worker.host_caches):
             destination.copy_(source)
         worker.host_caches = host_caches
-    worker.resident_caches = tuple(
+    worker.device_caches = tuple(
         torch.full((4, 4, 2), -1.0, device=device) for _ in range(2)
     )
     worker.cache_handles = [
         SimpleNamespace(
-            runtime=SimpleNamespace(resident_group_index=i, eager_host_mirror=True)
+            runtime=SimpleNamespace(device_group_index=i, eager_host_mirror=True)
         )
         for i in range(2)
     ]
@@ -633,7 +633,7 @@ def test_hisparse_tail_restore_preserves_imported_rows(
 
     # Appending into unused capacity must preserve every imported prompt row.
     for cache, host, block in zip(
-        worker.resident_caches, worker.host_caches, transfer.resident_block_ids
+        worker.device_caches, worker.host_caches, transfer.device_block_ids
     ):
         assert torch.equal(cache[block].cpu(), host[8:12])
         cache[block, 2:] = 999
@@ -665,11 +665,11 @@ def test_hisparse_dma_row_mirror_builds_descriptors(monkeypatch):
     worker.kernel_block_size = 2
     source = torch.empty((3, 2, 4), dtype=torch.uint8)
     destination = torch.empty((6, 4), dtype=torch.uint8)
-    worker.resident_caches = (source,)
+    worker.device_caches = (source,)
     worker.host_caches = (destination,)
     worker.cache_handles = [
         SimpleNamespace(
-            runtime=SimpleNamespace(resident_group_index=0), decode_batch=True
+            runtime=SimpleNamespace(device_group_index=0), decode_batch=True
         )
     ]
     worker.hot_backing = SimpleNamespace(device=torch.device("cuda:0"))
@@ -705,17 +705,17 @@ def test_hisparse_dma_row_mirror_builds_descriptors(monkeypatch):
     assert worker._dma_submitted
 
 
-def test_hisparse_row_dma_uses_resident_spans():
+def test_hisparse_row_dma_uses_device_spans():
     worker = _make_hisparse_worker()
     source = torch.empty((2, 2, 4), dtype=torch.uint8)
     destination = torch.empty((12, 4), dtype=torch.uint8)
     worker.is_host_writer = True
     worker.kernel_block_size = 2
-    worker.resident_caches = (source,)
+    worker.device_caches = (source,)
     worker.host_caches = (destination,)
     worker.cache_handles = [
         SimpleNamespace(
-            runtime=SimpleNamespace(resident_group_index=0), decode_batch=True
+            runtime=SimpleNamespace(device_group_index=0), decode_batch=True
         )
     ]
     worker._set_row_mirrors(
@@ -838,7 +838,7 @@ def test_hisparse_prefill_mirrors_source_groups_and_flushes_partial_group():
             runtime=SimpleNamespace(
                 eager_host_mirror=False,
                 is_group_leader=False,
-                resident_group_index=source_index,
+                device_group_index=source_index,
             ),
             decode_batch=False,
             host_mirror_required=layer_index < 5,
@@ -1067,8 +1067,8 @@ def test_hisparse_step_waits_for_previous_host_write(monkeypatch, is_host_writer
             command=None,
             source_block_ids=[],
             row_mirrors={},
-            all_context_pages_resident=True,
-            row_mirrors_from_resident=False,
+            all_context_pages_on_device=True,
+            row_mirrors_from_device=False,
             residency_updates={},
         ),
         None,
@@ -1079,8 +1079,8 @@ def test_hisparse_step_waits_for_previous_host_write(monkeypatch, is_host_writer
             command=None,
             source_block_ids=[],
             row_mirrors={},
-            all_context_pages_resident=True,
-            row_mirrors_from_resident=False,
+            all_context_pages_on_device=True,
+            row_mirrors_from_device=False,
             residency_updates={},
         ),
         None,
@@ -1153,8 +1153,8 @@ def test_hisparse_empty_step_does_not_replay_stale_host_mirror(monkeypatch):
             command=None,
             source_block_ids=[],
             row_mirrors={},
-            all_context_pages_resident=True,
-            row_mirrors_from_resident=False,
+            all_context_pages_on_device=True,
+            row_mirrors_from_device=False,
             residency_updates={},
         ),
         None,

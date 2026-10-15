@@ -125,7 +125,7 @@ class FlashInferMLASparseSM120Impl(SparseMLACommonImpl[FlashInferMLASparseMetada
             physical_kv_cache = index_group.physical_kv_cache(self.index_group_index)
             if (
                 num_decode_tokens == num_actual_toks
-                or index_group.cache(self.index_group_index).all_context_pages_resident
+                or index_group.cache(self.index_group_index).all_context_pages_on_device
             ):
                 topk_indices_physical = cast(
                     torch.Tensor,

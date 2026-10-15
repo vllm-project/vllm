@@ -236,7 +236,7 @@ def test_draft_layer_rows_mirrored_after_drafter(monkeypatch, cg_mode):
     leaves pre-draft rows on the host, and the page is still reported durable.
     """
     block_size, width = 4, 8
-    resident_block, host_block, transfer_id = 2, 1, 7
+    device_block, host_block, transfer_id = 2, 1, 7
     log: list[tuple[str, object]] = []
     _FakeEvent.log = log
 
@@ -258,14 +258,14 @@ def test_draft_layer_rows_mirrored_after_drafter(monkeypatch, cg_mode):
         lambda: SimpleNamespace(cudagraph_runtime_mode=cg_mode),
     )
 
-    slots = torch.arange(block_size) + resident_block * block_size
+    slots = torch.arange(block_size) + device_block * block_size
     request_state_indices = torch.full((1,), -1, dtype=torch.int32)
     handles = []
     for draft_layer in (False, True):
         runtime = SimpleNamespace(
             is_group_leader=True,
             eager_host_mirror=True,
-            resident_group_index=0,
+            device_group_index=0,
             host_cache=torch.zeros(4 * block_size, width),
             request_state_indices=request_state_indices,
             begin_forward=MagicMock(),
@@ -281,7 +281,7 @@ def test_draft_layer_rows_mirrored_after_drafter(monkeypatch, cg_mode):
         handles.append(handle)
     target, draft = handles
     # Rows the draft layer held before this step's drafter ran.
-    draft.view.cache[resident_block] = -1.0
+    draft.view.cache[device_block] = -1.0
 
     worker = HiSparseConnectorWorker(
         SimpleNamespace(
@@ -308,7 +308,7 @@ def test_draft_layer_rows_mirrored_after_drafter(monkeypatch, cg_mode):
                     HiSparsePageTransfer(
                         transfer_id=transfer_id,
                         host_block_id=host_block,
-                        resident_block_ids=(resident_block,),
+                        device_block_ids=(device_block,),
                         runs_after_forward=True,
                     )
                 ]
@@ -318,7 +318,7 @@ def test_draft_layer_rows_mirrored_after_drafter(monkeypatch, cg_mode):
             {
                 "req": (
                     HiSparseRowMirror(
-                        source_starts=(resident_block * block_size,),
+                        source_starts=(device_block * block_size,),
                         destination_start=host_block * block_size,
                         num_rows=block_size,
                     ),
@@ -344,7 +344,7 @@ def test_draft_layer_rows_mirrored_after_drafter(monkeypatch, cg_mode):
         num_tokens=block_size,
         attn_metadata={"target": attn_metadata, "draft": attn_metadata},
     )
-    target.view.cache[resident_block] = 1.0
+    target.view.cache[device_block] = 1.0
     if cg_mode != CUDAGraphMode.FULL:
         target.finish_kv_update()
     connector.finish_forward()
@@ -353,7 +353,7 @@ def test_draft_layer_rows_mirrored_after_drafter(monkeypatch, cg_mode):
     # The drafter writes the draft layer's rows for the same positions.
     if cg_mode != CUDAGraphMode.FULL:
         draft.prepare_group_for_batch(attn_metadata)
-    draft.view.cache[resident_block] = 2.0
+    draft.view.cache[device_block] = 2.0
     if cg_mode != CUDAGraphMode.FULL:
         draft.finish_kv_update()
     # The next step's start mirrors the drafter's rows, then hands the page over.
