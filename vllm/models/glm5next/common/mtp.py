@@ -28,7 +28,6 @@ from vllm.model_executor.models.utils import maybe_prefix
 from vllm.models.glm5next.nvidia.ops.fused_eh_norm import fused_eh_norm
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.v1.kv_cache_interface import get_sparse_topk_buffer_width
 
 from .model import (
     Glm5NextDecoderLayer,
@@ -38,6 +37,7 @@ from .model import (
     _num_fused_shared_experts,
     _try_load_fp8_attn_proj,
     _try_load_fp8_indexer_wk,
+    get_sparse_topk_buffer_width,
     get_spec_layer_idx_from_weight_name,
 )
 

@@ -27,7 +27,6 @@ from vllm.v1.kv_cache_interface import (
     SparseCacheRole,
     UniformTypeKVCacheSpecs,
     compute_layout_strides,
-    get_sparse_topk_buffer_width,
 )
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
@@ -136,9 +135,12 @@ def _lay_out_hisparse_groups(
 
     config = ResolvedHiSparseConfig.from_vllm_config(
         vllm_config,
-        # Size from the actual top-k buffer width (kpool models widen it
-        # past index_topk).
-        get_sparse_topk_buffer_width(vllm_config.model_config.hf_config),
+        max(
+            spec.topk_buffer_width
+            if spec.topk_buffer_width is not None
+            else vllm_config.model_config.hf_config.index_topk
+            for spec in source_specs.values()
+        ),
         gpu_block_size,
     )
     assert config is not None

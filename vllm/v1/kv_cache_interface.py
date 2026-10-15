@@ -24,8 +24,6 @@ from vllm.v1.kv_cache_layout import _DIM_B, _DIM_L, KVCacheLayout
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 if TYPE_CHECKING:
-    from transformers import PretrainedConfig
-
     from vllm.config import VllmConfig
     from vllm.v1.attention.backend import MultipleOf
 
@@ -443,22 +441,6 @@ def create_kv_cache_views(
     return views
 
 
-def get_sparse_topk_buffer_width(hf_config: PretrainedConfig) -> int:
-    """Width of the per-token top-k indices buffer a sparse-MLA model allocates.
-
-    A kpool config (glm5next) reserves the incomplete pool tail and tiles
-    top-k in 128 columns; other sparse-MLA models keep the buffer exactly
-    ``index_topk`` wide. HiSparse sizes its hot region from this width, so
-    the scheduler and the model must agree on it.
-    """
-    topk = hf_config.index_topk
-    assert topk is not None
-    kpool = getattr(hf_config, "index_kpool", None)
-    if kpool is None:
-        return topk
-    return round_up(topk + (kpool - 1 if kpool > 1 else 0), 128)
-
-
 @dataclass(frozen=True, kw_only=True)
 class HiSparseHotSpec(KVCacheSpec):
     """Ephemeral per-request HiSparse hot-cache allocation."""
@@ -704,6 +686,8 @@ def _apply_alignment_padding(spec: MLAAttentionSpec | SlidingWindowMLASpec):
 class MLAAttentionSpec(FullAttentionSpec):
     # TODO(Lucas/Chen): less hacky way to do this
     cache_dtype_str: str | None = None
+    topk_buffer_width: int | None = None
+    """Width of the model's sparse top-k indices buffer, including padding."""
     # DeepseekV4 only fields. Non-DeepseekV4 MLA models leave these at defaults.
     alignment: int | None = None  # Default to None for no padding.
     model_version: str | None = None
@@ -725,6 +709,7 @@ class MLAAttentionSpec(FullAttentionSpec):
             "All attention layers in the same KV cache group must be MLAAttentionSpec."
         )
         cache_dtype_str_set = set(spec.cache_dtype_str for spec in specs)
+        topk_buffer_width_set = {spec.topk_buffer_width for spec in specs}
         tokens_per_state_set = set(spec.tokens_per_state for spec in specs)
         model_version_set = set(spec.model_version for spec in specs)
         cache_role_set = {spec.cache_role for spec in specs}
@@ -732,6 +717,7 @@ class MLAAttentionSpec(FullAttentionSpec):
         block_stride_alignment_set = {spec.block_stride_alignment for spec in specs}
         assert (
             len(cache_dtype_str_set) == 1
+            and len(topk_buffer_width_set) == 1
             and len(tokens_per_state_set) == 1
             and len(model_version_set) == 1
             and len(cache_role_set) == 1
@@ -739,7 +725,8 @@ class MLAAttentionSpec(FullAttentionSpec):
             and len(block_stride_alignment_set) == 1
         ), (
             "All attention layers in the same KV cache group must use the same "
-            "quantization method, tokens per state, model version, cache role, "
+            "quantization method, top-k buffer width, tokens per state, "
+            "model version, cache role, "
             "index-sharing role, and block stride alignment."
         )
         merged_spec = cls(
@@ -754,6 +741,7 @@ class MLAAttentionSpec(FullAttentionSpec):
             num_head_slots=specs[0].num_head_slots,
             state_content_bytes=specs[0].state_content_bytes,
             cache_dtype_str=cache_dtype_str_set.pop(),
+            topk_buffer_width=topk_buffer_width_set.pop(),
             tokens_per_state=tokens_per_state_set.pop(),
             model_version=model_version_set.pop(),
             cache_role=cache_role_set.pop(),
