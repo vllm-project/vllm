@@ -1728,11 +1728,14 @@ def test_online_quantization(
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1" if use_rocm_aiter else "0")
         rocm_aiter_ops.refresh_env_variables()
 
-    if current_platform.is_xpu() and quant_scheme in (
-        "fp8_per_block",
-        "fp8_per_channel",
-    ):
-        pytest.skip(f"Skip test for online {quant_scheme} on XPU platform.")
+    if current_platform.is_xpu():
+        if quant_scheme in ("fp8_per_block", "fp8_per_channel"):
+            pytest.skip(f"Skip test for online {quant_scheme} on XPU platform.")
+        if model_name == MODELOPT_NVFP4_MOE_MODEL_NAME:
+            pytest.skip(
+                "modelopt_fp4 quantization (base format of "
+                f"{MODELOPT_NVFP4_MOE_MODEL_NAME}) is not supported on XPU platform."
+            )
 
     runner_kwargs = dict(extra_runner_kwargs)
     kv_cache_dtype = runner_kwargs.get("kv_cache_dtype", "auto")
