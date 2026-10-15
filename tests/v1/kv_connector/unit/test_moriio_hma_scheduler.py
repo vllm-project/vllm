@@ -510,6 +510,117 @@ def test_hybrid_write_keeps_separate_draft_groups_and_their_block_spans():
     assert params["remote_block_ids"] == expected
 
 
+@pytest.mark.usefixtures("restore_moriio_role")
+@pytest.mark.parametrize(
+    "blocks,delay_free",
+    [(([0, 51, 52, 53], [31, 32, 33]), True), (([], []), False)],
+)
+def test_hybrid_write_request_finished_defers_free_only_with_blocks_to_send(
+    blocks, delay_free
+):
+    config = _dspark_wrapped_attention_config()
+    config.select_transfer_block_ids = lambda blocks: tuple(blocks)
+    sched = moriio_connector.MoRIIOConnectorScheduler(
+        _gate_vllm_config(read_mode=False, dcp_size=2), "engine", config
+    )
+    sched.is_producer = True
+    req = _mk_request(
+        list(range(9)), params={"do_remote_decode": True, "transfer_id": "tx"}
+    )
+    req.request_id = "req"
+    req.status = moriio_connector.RequestStatus.FINISHED_LENGTH_CAPPED
+
+    assert sched.request_finished(req, blocks)[0] is delay_free
+    # The WRITE ACK, not the READ watchdog, releases the deferred blocks.
+    if delay_free:
+        assert sched._deferred_send_deadlines["req"][1] == "tx"
+    else:
+        assert "req" not in sched._deferred_send_deadlines
+
+
+@pytest.mark.usefixtures("restore_moriio_role")
+def test_hybrid_write_build_meta_saves_current_state_on_the_final_chunk():
+    """Chunked prefill must not ship block ids cached at admission: align-mode
+    state slots move between chunks without appending a block."""
+    config = _dspark_wrapped_attention_config()
+    config.select_transfer_block_ids = lambda blocks: tuple(blocks)
+    sched = moriio_connector.MoRIIOConnectorScheduler(
+        _gate_vllm_config(read_mode=False, dcp_size=2), "engine", config
+    )
+    sched.is_producer = True
+    set_role(moriio_common.ROLE.PRODUCER)
+    params = {
+        "do_remote_decode": True,
+        "transfer_id": "tx",
+        "remote_engine_id": "decode",
+        "remote_block_ids": [],
+        "remote_host": "127.0.0.1",
+        "remote_handshake_port": 6000,
+        "remote_notify_port": 6001,
+    }
+    req = _mk_request(list(range(9)), params=params)
+    req.request_id = "req"
+    req.num_computed_tokens = 0
+    sched._reqs_need_save["req"] = (req, [[10, 11, 12], [1]])
+    sched._req_kv_params["req"] = dict(params)
+
+    def _output(cached_req_ids, new_block_ids, num_scheduled):
+        return SimpleNamespace(
+            scheduled_cached_reqs=SimpleNamespace(
+                req_ids=cached_req_ids, new_block_ids=new_block_ids
+            ),
+            num_scheduled_tokens={"req": num_scheduled},
+            new_block_ids_to_zero=None,
+            kv_connector_block_state=KVConnectorBlockState(
+                req_ids={"req"},
+                resolve_block_ids=lambda _: ([0, 51, 52, 53], [31, 32, 33]),
+                boundary_state_offloads={},
+            ),
+        )
+
+    # First chunk: not final, so nothing is saved yet.
+    meta = sched.build_connector_meta(_output([], [], 4))
+    assert not meta.reqs_to_save
+    assert "req" in sched._reqs_need_pending_save
+
+    # Final chunk: stale cached ids plus new ids are ignored in favour of
+    # the scheduler's current table, clamped to the prompt.
+    req.num_computed_tokens = 4
+    meta = sched.build_connector_meta(_output(["req"], [([77], [78])], 5))
+    assert meta.reqs_to_save["req"].local_block_ids == [[51], [31, 32]]
+    assert "req" not in sched._reqs_need_pending_save
+
+
+@pytest.mark.parametrize(
+    "mode,deadlines,expected",
+    [
+        (MoRIIOMode.WRITE, {"req": (0.0, "tx")}, True),
+        (MoRIIOMode.WRITE, {}, False),
+        (MoRIIOMode.READ, {"req": (0.0, "tx")}, False),
+    ],
+)
+def test_has_pending_push_work_tracks_write_deferred_frees(mode, deadlines, expected):
+    connector = _FakeConnector(_FakeScheduler(_deferred_send_deadlines=deadlines))
+    connector.mode = mode
+    assert connector.has_pending_push_work() is expected
+
+
+def test_has_pending_push_work_is_false_on_worker_role():
+    connector = _FakeConnector(None)
+    connector.mode = MoRIIOMode.WRITE
+    assert connector.has_pending_push_work() is False
+
+
+def test_loaded_kv_cache_groups_are_every_transfer_group():
+    # The connector restores the request's own blocks, not a hash-addressed
+    # prefix, so a transfer-enabled Mamba group counts as loaded too.
+    connector = _FakeConnector(None)
+    connector._kv_cache_config = SimpleNamespace(
+        transfer_group_ids=(0, 2), prefix_cacheable_group_ids=(0,)
+    )
+    assert connector.get_loaded_kv_cache_group_ids(SimpleNamespace()) == (0, 2)
+
+
 def test_split_block_groups_rejects_non_hybrid_use():
     sched = _FakeScheduler(_has_mamba=False)
 
