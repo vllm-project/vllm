@@ -50,6 +50,13 @@ The following request metrics include an `api_surface` label:
 - `vllm:request_inference_time_seconds`
 - `vllm:request_prefill_time_seconds`
 - `vllm:request_decode_time_seconds`
+- `vllm:prompt_tokens_total`
+- `vllm:generation_tokens_total`
+- `vllm:prompt_tokens_by_source_total` (with the existing `source` label)
+- `vllm:prompt_tokens_cached_total`
+- `vllm:request_prompt_tokens`
+- `vllm:request_generation_tokens`
+- `vllm:request_prefill_kv_computed_tokens`
 
 Its values are `messages` for `/v1/messages`, `chat_completions` for
 `/v1/chat/completions`, `completions` for `/v1/completions`, and `unknown`
@@ -63,10 +70,24 @@ engine requests: multiple generated choices contribute separately, and errors
 rejected before engine admission are excluded. Each model and engine has four
 sets of series for these metrics, one per API value.
 
+Token counters update as engine outputs arrive, including before a request
+finishes. Prompt tokens are counted at prefill completion, with their existing
+local-compute, local-cache, and external-transfer breakdown. Generation tokens
+count all emitted token IDs, including multiple tokens in one engine output.
+The scheduler's `vllm:prompt_tokens_cached_by_source_total` counter tracks
+cache-tier hits at admission and remains engine-wide, as do scheduler gauges
+and the per-iteration token histogram.
+
 For example, request throughput by API can be queried with:
 
 ```promql
 sum by (api_surface) (rate(vllm:request_success_total[5m]))
+```
+
+For output token throughput by API:
+
+```promql
+sum by (api_surface) (rate(vllm:generation_tokens_total[5m]))
 ```
 
 To query p95 end-to-end latency by API:

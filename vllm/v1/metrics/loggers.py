@@ -755,35 +755,35 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         counter_prompt_tokens = self._counter_cls(
             name="vllm:prompt_tokens",
             documentation="Number of prefill tokens processed.",
-            labelnames=labelnames,
+            labelnames=request_labelnames,
         )
         self.counter_prompt_tokens = create_metric_per_engine(
-            counter_prompt_tokens, per_engine_labelvalues
+            counter_prompt_tokens, per_api_labelvalues
         )
 
         # Labeled prompt token counters by source
         counter_prompt_tokens_by_source = self._counter_cls(
             name="vllm:prompt_tokens_by_source",
             documentation="Number of prompt tokens by source.",
-            labelnames=labelnames + ["source"],
+            labelnames=request_labelnames + ["source"],
         )
-        self.counter_prompt_tokens_by_source: dict[str, dict[int, Counter]] = {}
+        self.counter_prompt_tokens_by_source: dict[
+            str, dict[tuple[int, str], Counter]
+        ] = {}
         for source in PromptTokenStats.ALL_SOURCES:
             self.counter_prompt_tokens_by_source[source] = {
-                idx: counter_prompt_tokens_by_source.labels(
-                    model_name, str(idx), source
-                )
-                for idx in engine_indexes
+                key: counter_prompt_tokens_by_source.labels(*values, source)
+                for key, values in per_api_labelvalues.items()
             }
 
         # Cached prompt tokens counter
         counter_prompt_tokens_cached = self._counter_cls(
             name="vllm:prompt_tokens_cached",
             documentation="Number of cached prompt tokens (local + external).",
-            labelnames=labelnames,
+            labelnames=request_labelnames,
         )
         self.counter_prompt_tokens_cached = create_metric_per_engine(
-            counter_prompt_tokens_cached, per_engine_labelvalues
+            counter_prompt_tokens_cached, per_api_labelvalues
         )
 
         self.counter_prompt_tokens_cached_by_source = self._counter_cls(
@@ -806,10 +806,10 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         counter_generation_tokens = self._counter_cls(
             name="vllm:generation_tokens",
             documentation="Number of generation tokens processed.",
-            labelnames=labelnames,
+            labelnames=request_labelnames,
         )
         self.counter_generation_tokens = create_metric_per_engine(
-            counter_generation_tokens, per_engine_labelvalues
+            counter_generation_tokens, per_api_labelvalues
         )
 
         self.counter_request_success: dict[
@@ -873,20 +873,20 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             name="vllm:request_prompt_tokens",
             documentation="Number of prefill tokens processed.",
             buckets=request_tokens_buckets,
-            labelnames=labelnames,
+            labelnames=request_labelnames,
         )
         self.histogram_num_prompt_tokens_request = create_metric_per_engine(
-            histogram_num_prompt_tokens_request, per_engine_labelvalues
+            histogram_num_prompt_tokens_request, per_api_labelvalues
         )
 
         histogram_num_generation_tokens_request = self._histogram_cls(
             name="vllm:request_generation_tokens",
             documentation="Number of generation tokens processed.",
             buckets=request_tokens_buckets,
-            labelnames=labelnames,
+            labelnames=request_labelnames,
         )
         self.histogram_num_generation_tokens_request = create_metric_per_engine(
-            histogram_num_generation_tokens_request, per_engine_labelvalues
+            histogram_num_generation_tokens_request, per_api_labelvalues
         )
 
         # TODO: This metric might be incorrect in case of using multiple
@@ -1032,10 +1032,10 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 "(excluding cached tokens)."
             ),
             buckets=request_tokens_buckets,
-            labelnames=labelnames,
+            labelnames=request_labelnames,
         )
         self.histogram_prefill_kv_computed_request = create_metric_per_engine(
-            histogram_prefill_kv_computed_request, per_engine_labelvalues
+            histogram_prefill_kv_computed_request, per_api_labelvalues
         )
 
         #
@@ -1267,17 +1267,20 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         self.counter_num_preempted_reqs[engine_idx].inc(
             iteration_stats.num_preempted_reqs
         )
-        self.counter_prompt_tokens[engine_idx].inc(iteration_stats.num_prompt_tokens)
-        # Labeled prompt token counters by source
-        pts = iteration_stats.prompt_token_stats
-        for source in PromptTokenStats.ALL_SOURCES:
-            self.counter_prompt_tokens_by_source[source][engine_idx].inc(
-                pts.get_by_source(source)
-            )
-        self.counter_prompt_tokens_cached[engine_idx].inc(pts.cached_tokens)
-        self.counter_generation_tokens[engine_idx].inc(
-            iteration_stats.num_generation_tokens
-        )
+        prompt_stats_by_api = iteration_stats.prompt_token_stats_by_api_surface
+        for api_surface, pts in prompt_stats_by_api.items():
+            request_key = (engine_idx, normalize_api_surface(api_surface))
+            self.counter_prompt_tokens[request_key].inc(pts.total)
+            for source in PromptTokenStats.ALL_SOURCES:
+                self.counter_prompt_tokens_by_source[source][request_key].inc(
+                    pts.get_by_source(source)
+                )
+            self.counter_prompt_tokens_cached[request_key].inc(pts.cached_tokens)
+        generation_tokens_by_api = iteration_stats.num_generation_tokens_by_api_surface
+        for api_surface, num_tokens in generation_tokens_by_api.items():
+            self.counter_generation_tokens[
+                engine_idx, normalize_api_surface(api_surface)
+            ].inc(num_tokens)
         self.histogram_iteration_tokens[engine_idx].observe(
             iteration_stats.prompt_token_stats.computed
             + iteration_stats.num_generation_tokens
@@ -1328,13 +1331,13 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             prefill_kv_computed = finished_request.num_prompt_tokens - max(
                 finished_request.num_cached_tokens, 0
             )
-            self.histogram_prefill_kv_computed_request[engine_idx].observe(
+            self.histogram_prefill_kv_computed_request[request_key].observe(
                 prefill_kv_computed
             )
-            self.histogram_num_prompt_tokens_request[engine_idx].observe(
+            self.histogram_num_prompt_tokens_request[request_key].observe(
                 finished_request.num_prompt_tokens
             )
-            self.histogram_num_generation_tokens_request[engine_idx].observe(
+            self.histogram_num_generation_tokens_request[request_key].observe(
                 finished_request.num_generation_tokens
             )
             self.histogram_request_time_per_output_token[request_key].observe(

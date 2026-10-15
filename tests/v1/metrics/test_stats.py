@@ -23,8 +23,8 @@ def test_iteration_stats_repr():
     assert repr(iteration_stats).startswith("IterationStats(")
 
 
-def test_iteration_latencies_preserve_api_surface_in_mixed_batch():
-    """TTFT, ITL, and completion statistics must retain each request's API."""
+def test_iteration_stats_preserve_api_surface_in_mixed_batch():
+    """Latencies, tokens, and completion stats retain each request's API."""
     stats = IterationStats()
     stats.iteration_timestamp = 102.0
     api_surfaces = ("messages", "chat_completions", "completions", "unknown")
@@ -32,7 +32,13 @@ def test_iteration_latencies_preserve_api_surface_in_mixed_batch():
         req_stats = RequestStateStats(
             arrival_time=100.0 - index, api_surface=api_surface
         )
-        output = EngineCoreOutput(request_id=api_surface, new_token_ids=[1])
+        prefill_stats = PrefillStats()
+        prefill_stats.set(10 + index, 2, 3)
+        output = EngineCoreOutput(
+            request_id=api_surface,
+            new_token_ids=[1, 2],
+            prefill_stats=prefill_stats,
+        )
         for is_prefilling, timestamp in ((True, 10.0), (False, 11.0 + index)):
             stats.update_from_output(
                 output,
@@ -55,6 +61,18 @@ def test_iteration_latencies_preserve_api_surface_in_mixed_batch():
     assert [request.api_surface for request in stats.finished_requests] == list(
         api_surfaces
     )
+    assert stats.num_generation_tokens_by_api_surface == dict.fromkeys(api_surfaces, 4)
+    assert stats.num_generation_tokens == 16
+    assert stats.num_prompt_tokens == sum(10 + index for index in range(4))
+    assert stats.prompt_token_stats.cached_tokens == 20
+    for index, api_surface in enumerate(api_surfaces):
+        assert stats.prompt_token_stats_by_api_surface[api_surface] == PromptTokenStats(
+            computed=5 + index,
+            local_cache_hit=2,
+            external_kv_transfer=3,
+            cached_tokens=5,
+            total=10 + index,
+        )
 
 
 def test_scheduler_iteration_details_serialization():

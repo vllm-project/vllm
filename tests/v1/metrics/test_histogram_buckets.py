@@ -12,7 +12,7 @@ import pytest
 from vllm.config import ModelConfig, VllmConfig
 from vllm.config.observability import ObservabilityConfig
 from vllm.config.watermarking import WatermarkConfig
-from vllm.v1.engine import FinishReason
+from vllm.v1.engine import EngineCoreOutput, FinishReason
 from vllm.v1.metrics.buckets import (
     BUCKET_FAMILY_KEYS,
     build_1_2_5_buckets,
@@ -20,7 +20,13 @@ from vllm.v1.metrics.buckets import (
 )
 from vllm.v1.metrics.loggers import PrometheusStatLogger
 from vllm.v1.metrics.prometheus import unregister_vllm_metrics
-from vllm.v1.metrics.stats import FinishedRequestStats, IterationStats
+from vllm.v1.metrics.stats import (
+    FinishedRequestStats,
+    IterationStats,
+    LoRARequestStates,
+    PrefillStats,
+    RequestStateStats,
+)
 
 pytestmark = pytest.mark.cpu_test
 
@@ -403,5 +409,98 @@ def test_request_counts_and_latencies_by_api_surface():
             for sample in metric.samples
             if "api_surface" in sample.labels
         } == set(api_surfaces)
+    finally:
+        unregister_vllm_metrics()
+
+
+def test_token_metrics_by_api_surface():
+    """Tokens are attributed during generation, with no cache or decode recount."""
+    config = build_logger_config(ObservabilityConfig())
+    api_surfaces = ("messages", "chat_completions", "completions", "unknown")
+    expected: dict[tuple[int, str], list[int]] = {}
+    registry = prometheus_client.REGISTRY
+    try:
+        logger = PrometheusStatLogger(config, engine_indexes=[0, 1])
+        for engine_idx in (0, 1):
+            prefill, decode = IterationStats(), IterationStats()
+            for index, api_surface in enumerate((*api_surfaces, "unsupported")):
+                value = (engine_idx + 1) * (index + 1)
+                normalized = api_surface if api_surface in api_surfaces else "unknown"
+                expected.setdefault((engine_idx, normalized), []).append(value)
+                req_stats = RequestStateStats(api_surface=api_surface)
+                prefill_stats = PrefillStats()
+                prefill_stats.set(10 * value, 2 * value, 3 * value)
+                for stats, is_prefilling, num_tokens in (
+                    (prefill, True, value),
+                    (decode, False, 2 * value),
+                ):
+                    stats.update_from_output(
+                        EngineCoreOutput(
+                            request_id=api_surface,
+                            new_token_ids=[1] * num_tokens,
+                            prefill_stats=prefill_stats,
+                        ),
+                        engine_core_timestamp=1.0 if is_prefilling else 2.0,
+                        is_prefilling=is_prefilling,
+                        req_stats=req_stats,
+                        lora_states=LoRARequestStates(),
+                        lora_name=None,
+                    )
+                decode.update_from_finished_request(
+                    FinishReason.STOP,
+                    api_surface,
+                    10 * value,
+                    None,
+                    req_stats,
+                    num_cached_tokens=5 * value,
+                )
+
+            logger.record(None, prefill, engine_idx=engine_idx)
+            assert (
+                registry.get_sample_value(
+                    "vllm:generation_tokens_total",
+                    {
+                        "model_name": config.model_config.served_model_name,
+                        "engine": str(engine_idx),
+                        "api_surface": "messages",
+                    },
+                )
+                == engine_idx + 1
+            )
+            logger.record(None, decode, engine_idx=engine_idx)
+
+        for (engine_idx, api_surface), values in expected.items():
+            labels = {
+                "model_name": config.model_config.served_model_name,
+                "engine": str(engine_idx),
+                "api_surface": api_surface,
+            }
+            for metric_name, factor in (
+                ("prompt_tokens", 10),
+                ("generation_tokens", 3),
+                ("prompt_tokens_cached", 5),
+            ):
+                assert registry.get_sample_value(
+                    f"vllm:{metric_name}_total", labels
+                ) == factor * sum(values)
+            for source, factor in (
+                ("local_compute", 5),
+                ("local_cache_hit", 2),
+                ("external_kv_transfer", 3),
+            ):
+                assert registry.get_sample_value(
+                    "vllm:prompt_tokens_by_source_total", {**labels, "source": source}
+                ) == factor * sum(values)
+            for metric_name, factor in (
+                ("request_prompt_tokens", 10),
+                ("request_generation_tokens", 3),
+                ("request_prefill_kv_computed_tokens", 5),
+            ):
+                assert registry.get_sample_value(
+                    f"vllm:{metric_name}_count", labels
+                ) == len(values)
+                assert registry.get_sample_value(
+                    f"vllm:{metric_name}_sum", labels
+                ) == factor * sum(values)
     finally:
         unregister_vllm_metrics()

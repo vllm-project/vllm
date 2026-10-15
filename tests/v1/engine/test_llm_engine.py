@@ -241,10 +241,13 @@ def test_engine_metrics(vllm_runner, example_prompts):
 
         metrics = llm.get_metrics()
 
-        def find_metric(name) -> list[Metric]:
+        def find_metric(name, api_surface: str | None = None) -> list[Metric]:
             found = []
             for metric in metrics:
-                if metric.name == name:
+                if metric.name == name and (
+                    api_surface is None
+                    or metric.labels.get("api_surface") == api_surface
+                ):
                     found.append(metric)
             return found
 
@@ -253,12 +256,14 @@ def test_engine_metrics(vllm_runner, example_prompts):
         assert isinstance(num_requests_running[0], Gauge)
         assert num_requests_running[0].value == 0.0
 
-        generation_tokens = find_metric("vllm:generation_tokens")
+        generation_tokens = find_metric("vllm:generation_tokens", api_surface="unknown")
         assert len(generation_tokens) == 1
         assert isinstance(generation_tokens[0], Counter)
         assert generation_tokens[0].value == total_tokens
 
-        request_generation_tokens = find_metric("vllm:request_generation_tokens")
+        request_generation_tokens = find_metric(
+            "vllm:request_generation_tokens", api_surface="unknown"
+        )
         assert len(request_generation_tokens) == 1
         assert isinstance(request_generation_tokens[0], Histogram)
         assert "+Inf" in request_generation_tokens[0].buckets
