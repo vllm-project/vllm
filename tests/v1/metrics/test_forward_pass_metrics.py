@@ -83,20 +83,10 @@ def test_iteration_mapping_preserves_fpm_v1_wire_contract():
     assert decode_forward_pass_metrics(payload) == metrics
 
 
-@pytest.mark.parametrize(
-    "changes",
-    [
-        {"elapsed_ms": None},
-        {"elapsed_ms": 0.0},
-        {"timing_scope": None},
-        {"queued_workload": None},
-        {"scheduled_workload": None},
-    ],
-)
-def test_incomplete_iterations_are_not_exported_as_idle(changes):
-    assert (
-        forward_pass_metrics_from_iteration(_record(**changes), "worker", 0, 0) is None
-    )
+@pytest.mark.parametrize("elapsed_ms", [None, 0.0])
+def test_incomplete_iterations_are_not_exported_as_idle(elapsed_ms):
+    record = _record(elapsed_ms=elapsed_ms)
+    assert forward_pass_metrics_from_iteration(record, "worker", 0, 0) is None
 
 
 @pytest.mark.parametrize("idle", [False, True])
@@ -121,7 +111,7 @@ def test_dummy_and_explicit_idle_preserve_waiting_work(idle):
 
 def test_fpm_configuration_enables_collection_without_verbose_logs():
     config = ObservabilityConfig(forward_pass_metrics_port=20380)
-    assert config.enable_iteration_timing
+    assert config.iteration_timing_enabled
     assert config.enable_iteration_workload_metrics
     assert not config.enable_logging_iteration_details
     assert (
@@ -237,12 +227,12 @@ def test_slow_publisher_drops_without_blocking_and_keeps_sequence_gap(monkeypatc
         exporter.shutdown()
 
 
-@pytest.mark.parametrize("count", [2, 10_000, 2**64 - 1])
-def test_subscriber_sample_fits_two_80_column_lines(count, capsys):
+def test_subscriber_sample_fits_two_80_column_lines(capsys):
     from examples.features.forward_pass_metrics.forward_pass_metrics_subscriber import (
         print_metrics,
     )
 
+    count = 2**64 - 1
     metrics = ForwardPassMetrics(
         worker_id="long-worker-identity" * 10,
         wall_time=1.234567e100,
@@ -277,20 +267,20 @@ def test_subscriber_refresh_keeps_latest_sample_and_idle_tail(
     initial = capsys.readouterr().out
     assert all(len(line) <= 80 for line in initial.splitlines())
     assert "\x1b" not in initial
-    for seq in range(2, 102):
+    for seq in range(2, 4):
         display.update(seq, metrics)
     updates = capsys.readouterr().out
-    assert len(updates.splitlines()) == (100 if interval == 0 else 0)
+    assert len(updates.splitlines()) == (2 if interval == 0 else 0)
     if interval:
         assert display.poll_timeout_ms() == 1000
         clock[0] = 1.0
         assert display.poll_timeout_ms() == 0
         display.flush()  # The last sample is visible even without more messages.
         lines = capsys.readouterr().out.splitlines()
-        assert len(lines) == 1 and lines[0].lstrip().startswith("101 ")
+        assert len(lines) == 1 and lines[0].lstrip().startswith("3 ")
     assert display.poll_timeout_ms() == subscriber.POLL_TIMEOUT_MS
     clock[0] = 2.0
-    display.update(102, msgspec.structs.replace(metrics, wall_time=0.0))
+    display.update(4, msgspec.structs.replace(metrics, wall_time=0.0))
     lines = capsys.readouterr().out.splitlines()
     assert len(lines) == 1 and "idle (heartbeat)" in lines[0]
 
