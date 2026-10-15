@@ -8,7 +8,7 @@ from itertools import islice
 import torch
 
 from vllm.config import VllmConfig
-from vllm.distributed import get_pp_group
+from vllm.distributed import get_pp_group, get_tensor_model_parallel_rank
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
@@ -79,10 +79,20 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
                 quant_config=quant_config,
                 prefix=f"{prefix}.mlp",
             )
-            moe_cfg = self.mlp.experts.moe_config
-            if not moe_cfg.moe_parallel_config.use_all2all_kernels:
-                moe_cfg.skip_final_all_reduce = True
+            moe_parallel_config = self.mlp.experts.moe_config.moe_parallel_config
+            combine_reduces = moe_parallel_config.use_passthrough_all2all or (
+                moe_parallel_config.use_all2all_kernels
+                and not moe_parallel_config.use_ag_rs_all2all_kernels
+            )
+            if not combine_reduces:
+                self.mlp.experts.moe_config.skip_final_all_reduce = True
+            # The next fused_allreduce_rms_norm sums over TP, so an output that
+            # is already complete on every TP rank must enter it from one rank.
+            self.zero_mlp_output = get_tensor_model_parallel_rank() != 0 and (
+                combine_reduces or self.mlp.is_sequence_parallel
+            )
         else:
+            self.zero_mlp_output = False
             self.mlp = DeepseekV2MLP(
                 hidden_size=config.hidden_size,
                 intermediate_size=config.intermediate_size,
@@ -115,6 +125,8 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
             hidden_states, residual, self.post_attention_layernorm
         )
         hidden_states = self.mlp(hidden_states)
+        if self.zero_mlp_output:
+            hidden_states = torch.zeros_like(hidden_states)
         return hidden_states, residual
 
 
