@@ -313,32 +313,43 @@ def flash_attn_varlen_func(
         "seqused_k must be provided if block_table is provided"
     )
 
-    fa4_fp8_kv_dequant = False
-    if (
-        fa_version == 4
-        and k.dtype == torch.float8_e4m3fn
+    # custom op does not support non-tuple input
+    real_window_size: tuple[int, int]
+    if window_size is None:
+        real_window_size = (-1, -1)
+    else:
+        assert len(window_size) == 2
+        real_window_size = (window_size[0], window_size[1])
+
+    fa4_fp8_kv_dequant = (
+        k.dtype == torch.float8_e4m3fn
         and torch.cuda.get_device_capability()[0] == 9
-    ):
-        if q.shape[-1] == k.shape[-1] == v.shape[-1] == 512:
-            fa4_fp8_kv_dequant = True
-        elif (
-            q.dtype == torch.float8_e4m3fn
-            and q.shape[-1] <= 256
-            and k.shape[-1] == q.shape[-1] == v.shape[-1]
-        ):
-            # Preserve supported FA3 FP8 configurations for smaller heads.
-            if dynamic_causal is not None or block_sparse_tensors is not None:
+        and q.shape[-1] == k.shape[-1] == v.shape[-1] == 512
+    )
+    if fa_version == 4:
+        if fa4_fp8_kv_dequant:
+            if not causal and real_window_size[0] < 0 and real_window_size[1] < 0:
                 raise NotImplementedError(
-                    "SM90 FP8 FA3 fallback does not support dynamic_causal "
-                    "or block_sparse_tensors"
+                    "SM90 FP8 MMA noncausal full attention has known accuracy errors."
                 )
-            fa_version = 3
-        else:
-            raise NotImplementedError(
-                "SM90 FA4 FP8 MMA requires Q/K/V head dimension 512; "
-                f"got q={q.shape[-1]}, k={k.shape[-1]}, v={v.shape[-1]}. "
-                "FA3 fallback supports FP8 Q/K/V with head dimensions up to 256."
-            )
+        elif (
+            k.dtype == torch.float8_e4m3fn
+            and torch.cuda.get_device_capability()[0] == 9
+        ):
+            if (
+                q.dtype == torch.float8_e4m3fn
+                and q.shape[-1] <= 256
+                and k.shape[-1] == q.shape[-1] == v.shape[-1]
+            ):
+                if dynamic_causal is not None or block_sparse_tensors is not None:
+                    raise NotImplementedError(
+                        "FA3 FP8 fallback does not support dynamic causal or block sparsity."
+                    )
+                fa_version = 3
+            else:
+                raise NotImplementedError(
+                    "SM90 FP8 MMA requires d512; FA3 requires equal FP8 heads <=256."
+                )
 
     assert output_scale is None or fa_version == 4, (
         f"Fused FP8 output (output_scale) is only supported by FA4, "
@@ -350,24 +361,6 @@ def flash_attn_varlen_func(
 
     if softmax_scale is None:
         softmax_scale = q.shape[-1] ** (-0.5)
-    # custom op does not support non-tuple input
-    real_window_size: tuple[int, int]
-    if window_size is None:
-        real_window_size = (-1, -1)
-    else:
-        assert len(window_size) == 2
-        real_window_size = (window_size[0], window_size[1])
-    if (
-        fa4_fp8_kv_dequant
-        and not causal
-        and real_window_size[0] < 0
-        and real_window_size[1] < 0
-    ):
-        raise NotImplementedError(
-            "SM90 d512 FP8 MMA noncausal full attention is disabled due to "
-            "known numerical accuracy failures. "
-            "Use an unquantized KV cache or a supported attention backend."
-        )
     q, k, v = [maybe_contiguous(x) for x in (q, k, v)]
 
     dummy_cu_seqlens_k = torch.empty_like(cu_seqlens_q)
