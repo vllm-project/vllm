@@ -130,6 +130,14 @@ impl StructuredOutputsParams {
                     message: "structured_outputs.choice cannot be empty".to_string(),
                 })
             }
+            // NUL is never meaningful in a regex and the regex-to-grammar
+            // conversion does not handle it; Python rejects it for every backend.
+            StructuredOutputConstraint::Regex(regex) if regex.contains('\0') => {
+                Err(Error::InvalidStructuredOutputsParams {
+                    message: "structured_outputs.regex must not contain a NUL character ('\\x00')"
+                        .to_string(),
+                })
+            }
             StructuredOutputConstraint::StructuralTag(tag) if tag.trim().is_empty() => {
                 Err(Error::InvalidStructuredOutputsParams {
                     message: "structured_outputs.structural_tag cannot be an empty string"
@@ -362,6 +370,12 @@ mod tests {
     fn validate_rejects_empty_choice() {
         let error = StructuredOutputsParams::choice(vec![]).validate().unwrap_err();
         assert!(error.to_string().contains("choice cannot be empty"));
+    }
+
+    #[test]
+    fn validate_rejects_nul_in_regex() {
+        let error = StructuredOutputsParams::regex("a\0b").validate().unwrap_err();
+        assert!(error.to_string().contains("must not contain a NUL character"));
     }
 
     #[test]
