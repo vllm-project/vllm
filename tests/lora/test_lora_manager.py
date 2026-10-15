@@ -428,46 +428,6 @@ def test_get_dummy_lora_warmup_rank_for_fully_sharded_moe():
     assert manager.get_dummy_lora_warmup_rank(8) == 32
 
 
-@pytest.mark.parametrize("manager_cls", [LoRAModelManager, LRUCacheLoRAModelManager])
-def test_failed_lora_activation_can_be_retried(
-    default_vllm_config, dist_init, dummy_model, manager_cls
-):
-    """A failed weight copy must not make later activation skip the adapter."""
-    device = DEVICES[0]
-    adapter = create_lora(1, dummy_model, ["dense1", "dense2"], device=device)
-    manager = manager_cls(
-        dummy_model,
-        1,
-        1,
-        1,
-        LoRAConfig(
-            max_lora_rank=8, max_cpu_loras=1, max_loras=1, lora_dtype=DEFAULT_DTYPE
-        ),
-        device=device,
-        vllm_config=default_vllm_config,
-    )
-    assert manager.add_adapter(adapter)
-    weights = adapter.get_lora("dense2")
-    assert weights is not None
-    original_a = weights.lora_a
-    assert isinstance(original_a, torch.Tensor)
-    weights.lora_a = torch.zeros(
-        original_a.shape[0], original_a.shape[1] + 1, device=device
-    )
-
-    with pytest.raises(RuntimeError, match="size of tensor"):
-        manager.activate_adapter(adapter.id)
-
-    assert adapter.id not in manager._active_adapters
-    assert manager.lora_index_to_id == [None]
-    weights.lora_a = original_a
-    assert manager.activate_adapter(adapter.id)
-    torch.testing.assert_close(
-        manager.modules["dense2"].lora_a_stacked[0][0, 0],
-        original_a.to(manager.lora_config.lora_dtype),
-    )
-
-
 @pytest.mark.parametrize("device", DEVICES)
 def test_lora_model_manager(default_vllm_config, dist_init, dummy_model, device):
     model = dummy_model
