@@ -240,6 +240,18 @@ def rank_worker(
                     "AiterMxfp4Experts (W4A16) produced non-finite output."
                 )
             elif is_aiter_fp8:
+                # MXFP4's small output magnitude lets an all-zero output pass
+                # the tolerance below outright; guard against a degenerate
+                # real output doing the same. Excludes topk==1, a separate,
+                # pre-existing apply_router_weight_on_input/reference gap.
+                if config.weight_dtype == "mxfp4" and config.topk != 1:
+                    ref_scale = ref_out.abs().mean()
+                    mk_scale = mk_out.abs().mean()
+                    assert mk_scale > 0.5 * ref_scale, (
+                        f"AITER MXFP4 output magnitude (mean "
+                        f"|mk_out|={mk_scale:.6f}) looks degenerate/zeroed "
+                        f"vs. reference (mean |ref_out|={ref_scale:.6f})."
+                    )
                 check_accuracy(ref_out, mk_out, atol=atol, rtol=rtol, percent=0.9)
             else:
                 torch.testing.assert_close(ref_out, mk_out, atol=atol, rtol=rtol)

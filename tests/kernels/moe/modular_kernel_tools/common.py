@@ -145,11 +145,12 @@ class Config:
 
     @property
     def weight_dtype(self) -> torch.dtype | str | None:
-        """Weight quant dtype, defaulting to quant_dtype when unset (mirrors
-        FusedMoEQuantConfig.make()'s own weight_dtype fallback)."""
+        """Weight quant dtype, defaulting to quant_dtype when unset. Falls
+        back outright if quant_config is a production FusedMoEQuantConfig
+        (e.g. via cli_args.py), which has no weight_dtype field."""
         assert self.quant_config is not None
-        wd = self.quant_config.weight_dtype
-        return wd if wd is not None else self.quant_config.quant_dtype
+        wd = getattr(self.quant_config, "weight_dtype", None)
+        return wd if wd is not None else self.quant_dtype
 
     @property
     def is_per_act_token_quant(self) -> bool:
