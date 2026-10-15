@@ -4,15 +4,10 @@
 
 Drop-in replacement for ``triton_turboquant_decode_attention_soa`` for the
 TQ decode profile HEAD_SIZE=128, MSE_BITS=4 K, VQB=4 V, N_CENTROIDS=16,
-BLOCK_SIZE in {16, 32}.
-
-Per-GQA kernel dispatch:
-  * GQA group ∈ {8, 16} → canonical kernels.tq_decode (Qwen-class)
-  * GQA group == 6      → kernels.tq_decode_gqa6 sibling (MiniMax-M2.5)
+BLOCK_SIZE in {16, 32}, GQA group in {6, 8, 16} (one kernel, kernels.tq_decode).
 
 Auto-selected on gfx950 when FlyDSL is importable; falls back to the SoA Triton
-decode otherwise (wrong arch, missing build tree). The GQA-6 sibling is imported
-best-effort: missing it does not affect Qwen GQA-{8,16} paths.
+decode otherwise (wrong arch, missing build tree).
 
 Architecture:
     1. Q rotation: ``q_rot = (query.float() @ PiT).bfloat16()`` — the same
@@ -44,8 +39,7 @@ logger = init_logger(__name__)
 
 
 _FLYDSL_AVAILABLE: bool | None = None
-_TQ_MOD: Any = None  # kernels.tq_decode module (Qwen GQA-{8,16})
-_TQ_MOD_GQA6: Any = None  # kernels.tq_decode_gqa6 module (MiniMax GQA-6, optional)
+_TQ_MOD: Any = None  # kernels.tq_decode module
 _FLYC: Any = None  # flydsl.compiler
 _FX: Any = None  # flydsl.expr
 _CC: Any = None  # CompilationContext
@@ -53,14 +47,8 @@ _IR: Any = None
 
 
 def is_flydsl_available() -> bool:
-    """Return True iff on gfx950 and FlyDSL imports + kernel module load.
-
-    The GQA-6 sibling kernel (``kernels.tq_decode_gqa6``) is imported
-    best-effort: if it's missing (older FlyDSL checkout that pre-dates
-    MiniMax support) the canonical Qwen path stays fully functional and
-    only GQA-6 dispatches will fail with a clear error at launch time.
-    """
-    global _FLYDSL_AVAILABLE, _TQ_MOD, _TQ_MOD_GQA6
+    """Return True iff on gfx950 and FlyDSL imports + kernel module load."""
+    global _FLYDSL_AVAILABLE, _TQ_MOD
     global _FLYC, _FX, _CC, _IR
     if _FLYDSL_AVAILABLE is not None:
         return _FLYDSL_AVAILABLE
@@ -94,35 +82,12 @@ def is_flydsl_available() -> bool:
             "Falling back to SoA Triton decode.",
             ex,
         )
-        return _FLYDSL_AVAILABLE
-    # Best-effort GQA-6 sibling import (does NOT gate Qwen availability).
-    try:
-        from vllm.v1.attention.ops.flydsl_kernels import (
-            tq_decode_gqa6 as tq_mod_gqa6,
-        )
-
-        _TQ_MOD_GQA6 = tq_mod_gqa6
-        logger.info_once("FlyDSL TQ decode GQA-6 sibling: available (MiniMax-class)")
-    except Exception as ex:  # noqa: BLE001
-        _TQ_MOD_GQA6 = None
-        logger.info_once(
-            "FlyDSL TQ decode GQA-6 sibling: not available (%s); "
-            "GQA-6 models will fall back to SoA Triton decode.",
-            ex,
-        )
     return _FLYDSL_AVAILABLE
 
 
 def is_flydsl_gqa6_available() -> bool:
-    """True iff the optional GQA-6 sibling kernel module loaded.
-
-    Used by the eligibility gate in turboquant_attn.py to decide whether
-    a layer with num_kv_groups==6 can run on FlyDSL or must fall back
-    to the SoA Triton decode.
-    """
-    if _FLYDSL_AVAILABLE is None:
-        is_flydsl_available()
-    return _TQ_MOD_GQA6 is not None
+    """GQA-6 runs on the same kernel; kept for the turboquant_attn.py gate."""
+    return is_flydsl_available()
 
 
 # -- Kernel module cache -------------------------------------------------------
@@ -370,40 +335,17 @@ def _get_kernel(
 
     _build_t0 = _t.perf_counter()
 
-    # Per-GQA dispatch: GQA-6 (MiniMax-M2.5) lives in the sibling module
-    # tq_decode_gqa6 to keep the Qwen kernel's invariants untouched.
-    # GQA-{8,16} (Qwen) keep using the canonical tq_decode kernel.
-    qg = int(query_group_size)
-    if qg == 6:
-        if _TQ_MOD_GQA6 is None:
-            raise RuntimeError(
-                "FlyDSL TQ GQA-6 sibling kernel "
-                "(vllm.v1.attention.ops.flydsl_kernels.tq_decode_gqa6) "
-                "failed to import; check that FlyDSL is installed/importable."
-            )
-        kmod = _TQ_MOD_GQA6
-        kfn = kmod.build_tq_decode_gqa6_module(
-            num_seqs=int(num_seqs_hint),
-            num_kv_heads=num_kv_heads,
-            num_partitions=num_partitions,
-            max_blocks_per_seq=max_blocks_per_seq,
-            softmax_scale=float(scale),
-            query_group_size=qg,
-            kv_block_size=int(kv_block_size),
-            tile_groups_per_partition=int(tile_groups_per_partition),
-        )
-    else:
-        kmod = _TQ_MOD
-        kfn = kmod.build_tq_decode_module(
-            num_seqs=int(num_seqs_hint),
-            num_kv_heads=num_kv_heads,
-            num_partitions=num_partitions,
-            max_blocks_per_seq=max_blocks_per_seq,
-            softmax_scale=float(scale),
-            query_group_size=qg,
-            kv_block_size=int(kv_block_size),
-            tile_groups_per_partition=int(tile_groups_per_partition),
-        )
+    kmod = _TQ_MOD
+    kfn = kmod.build_tq_decode_module(
+        num_seqs=int(num_seqs_hint),
+        num_kv_heads=num_kv_heads,
+        num_partitions=num_partitions,
+        max_blocks_per_seq=max_blocks_per_seq,
+        softmax_scale=float(scale),
+        query_group_size=int(query_group_size),
+        kv_block_size=int(kv_block_size),
+        tile_groups_per_partition=int(tile_groups_per_partition),
+    )
     al = kmod.allocator
     block_threads = kmod.BLOCK_THREADS
 
@@ -550,8 +492,6 @@ def flydsl_turboquant_decode_attention(
       * D == 128
       * block_size in {16, 32}
       * Hq // Hk in {6, 8, 16}
-        - 8/16 → canonical tq_decode kernel (Qwen2.5-72B / Qwen3-32B)
-        - 6    → tq_decode_gqa6 sibling kernel (MiniMax-M2.5)
 
     Sinks are NYI and silently ignored if set. norm_correction is honored
     implicitly via the pre-folded stored K-norm (see footer comment).
@@ -577,13 +517,6 @@ def flydsl_turboquant_decode_attention(
         f"FlyDSL supports kv_block_size 16 or 32, got {block_size}"
     )
     assert QG in (6, 8, 16), f"FlyDSL supports GQA factor 6, 8 or 16, got {QG}"
-    if QG == 6 and _TQ_MOD_GQA6 is None:
-        raise RuntimeError(
-            "FlyDSL launcher: GQA-6 requested (MiniMax-class) but the "
-            "tq_decode_gqa6 sibling module is not available. Update your "
-            "FlyDSL checkout (must include kernels/tq_decode_gqa6.py); "
-            "otherwise the SoA Triton decode is the fallback."
-        )
     assert centroids.numel() == _TQ_MOD.N_CENTROIDS, (
         f"centroids.numel={centroids.numel()} != {_TQ_MOD.N_CENTROIDS}"
     )

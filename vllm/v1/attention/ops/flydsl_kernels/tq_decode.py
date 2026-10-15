@@ -3,8 +3,8 @@
 # TurboQuant decode (FlyDSL) — MI355X / gfx950 / CDNA4
 #
 # Decode-only paged attention over a TurboQuant SoA KV cache.
-# Targets Qwen-class models: HEAD_SIZE=128, GQA group=8, MSE_BITS=4 K, VQB=4 V,
-# N_CENTROIDS=16, BLOCK_SIZE=16, partitioned mode.
+# Targets HEAD_SIZE=128, GQA group 6/8/16, MSE_BITS=4 K, VQB=4 V,
+# N_CENTROIDS=16, BLOCK_SIZE=16/32, partitioned mode.
 #
 # === Design ===
 # * 1 wave (64 lanes) per CTA.
@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl.expr import arith, gpu, range_constexpr, rocdl
+from flydsl.expr import arith, const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
@@ -41,7 +41,7 @@ from vllm.v1.attention.ops.flydsl_kernels.buffer_utils import (
 )
 from vllm.v1.attention.ops.flydsl_kernels.mma_utils import mma
 
-# === Constants (Qwen-class TQ decode profile) ===============================
+# === Constants (TQ decode profile) ==========================================
 HEAD_SIZE = 128
 # default; overridable via build_tq_decode_module(kv_block_size=...)
 KV_BLOCK_SIZE = 16
@@ -96,11 +96,10 @@ def build_tq_decode_module(
     """Build a TQ decode kernel module.
 
     ``query_group_size`` (= num_query_heads // num_kv_heads) selects the
-    GQA factor. Supported values: 8 and 16. For 8 the MFMA's 16-row
-    capacity is half-used; lanes 8..15 compute garbage and are gated out
+    GQA factor. Supported values: 6, 8 and 16. Below 16 the MFMA's 16-row
+    capacity is partly used; lanes QG..15 compute garbage and are gated out
     of all global-memory writes by ``mfma_row < QG``. Q load iterates
-    ``QG // 4`` chunks (= 2 for QG=8, 4 for QG=16) so we never read past
-    the real Q rows in HBM.
+    ``(QG + 3) // 4`` chunks (= 2 for QG=6/8, 4 for QG=16).
 
     ``kv_block_size`` is the number of tokens per vLLM cache block. Must
     be a multiple of TILE_SIZE (=16). Supported values: 16 and 32. With
@@ -122,8 +121,8 @@ def build_tq_decode_module(
     tokens of worst-case context with grid.z=32 instead of 256.
     Behavior at G=1 is bit-identical to the single-partition kernel.
     """
-    assert query_group_size in (8, 16), (
-        f"query_group_size must be 8 or 16; got {query_group_size}"
+    assert query_group_size in (6, 8, 16), (
+        f"query_group_size must be 6, 8 or 16; got {query_group_size}"
     )
     assert kv_block_size in (16, 32), (
         f"kv_block_size must be 16 or 32; got {kv_block_size}"
@@ -136,7 +135,8 @@ def build_tq_decode_module(
     PARTITION_EXTENT_TOKENS = TGPP * KV_COMPUTE_BLOCK
 
     QG = int(query_group_size)
-    QG_LOAD_ITERS = QG // 4  # 2 for QG=8, 4 for QG=16
+    QG_LOAD_ITERS = (QG + 3) // 4  # 2 for QG=6/8, 4 for QG=16
+    _Q_ROWS_PADDED = QG_LOAD_ITERS * 4 != QG  # QG=6 loads 8 rows
 
     _BS = int(kv_block_size)
     _TILES_PER_BLOCK = _BS // TILE_SIZE  # 1 for BS=16, 2 for BS=32
@@ -235,13 +235,20 @@ def build_tq_decode_module(
         # q_buf points to the externally-rotated q_rot tensor. Load 8 bf16
         # per lane per iter (vec_width=4 i32) in QG_LOAD_ITERS iterations.
         for c in range_constexpr(QG_LOAD_ITERS):
-            row_chunk = lane + c * WARP_SIZE  # 0..QG*16-1
-            row = row_chunk >> 4  # 0..QG-1
+            row_chunk = lane + c * WARP_SIZE  # 0..QG_LOAD_ITERS*64-1
+            row = row_chunk >> 4  # 0..QG_LOAD_ITERS*4-1
             col_b = row_chunk & 15  # 0..15
             col_elem = col_b * 8  # 0..120 in bf16
             q_off_elem = (
                 seq * _stride_q_seq + (kv_h * QG + row) * _stride_q_head + col_elem
             )
+            if const_expr(_Q_ROWS_PADDED):
+                # Rows >= QG would address heads past the last (seq, kv_h)'s
+                # Q slice, and the descriptor has no bounds check, so they
+                # load the in-bounds offset col_elem; mfma_row < QG gates
+                # their output. A buffer-load mask does not help: it
+                # substitutes a 2 GiB offset, still inside the descriptor.
+                q_off_elem = (row < QG).select(q_off_elem, col_elem)
             q_v = load_vec(q_buf, q_off_elem // 2, 4)
             q_lds_byte = row * (HEAD_SIZE * 2) + col_elem * 2
             fx.Vector(q_v).store(q_lds_i32, [fx.Index(q_lds_byte // 4)])

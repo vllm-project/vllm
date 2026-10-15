@@ -38,7 +38,6 @@ if not on_gfx950():
 from vllm.v1.attention.ops.flydsl_turboquant_decode import (  # noqa: E402
     flydsl_turboquant_decode_attention,
     is_flydsl_available,
-    is_flydsl_gqa6_available,
 )
 
 if not is_flydsl_available():
@@ -217,14 +216,7 @@ def _reference_attention(q_bf16, k_ref, v_ref, seq_lens, scale):
     [
         (8, 8),  # Qwen2.5-72B class
         (8, 16),  # Qwen3-32B class
-        pytest.param(
-            4,
-            6,  # MiniMax-M2.5 class (GQA-6 sibling kernel)
-            marks=pytest.mark.skipif(
-                not is_flydsl_gqa6_available(),
-                reason="FlyDSL GQA-6 sibling kernel not available",
-            ),
-        ),
+        (4, 6),  # MiniMax-M2.5 class
     ],
 )
 @pytest.mark.parametrize("kv_block_size", [16, 32])
