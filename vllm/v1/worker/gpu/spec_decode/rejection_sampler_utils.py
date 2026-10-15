@@ -551,9 +551,6 @@ def _rejection_kernel(
     seed = tl.load(seed_ptr + req_state_idx)
     temp = tl.load(temp_ptr + req_state_idx).to(tl.float32)
     is_greedy = temp == 0.0
-    if USE_BLOCK_VERIFICATION:
-        # The first position advances each round, unlike uncommitted draft positions.
-        seed = spec_step_seed(seed, tl.load(pos_ptr + start_idx))
 
     accepted_length = tl.zeros((), tl.int64)
     target_lse = 0.0
@@ -573,7 +570,8 @@ def _rejection_kernel(
             verifying &= is_valid_draft
         if verifying:
             pos = tl.load(pos_ptr + logit_idx)
-            u = tl_rand32(seed, pos, includes_zero=False)
+            step_seed = spec_step_seed(seed, i) if USE_BLOCK_VERIFICATION else seed
+            u = tl_rand32(step_seed, pos, includes_zero=False)
             if is_greedy:
                 # Greedy sampling. Accept IFF draft matches target argmax.
                 # NOTE: Target argmax is stored directly so that resampling
