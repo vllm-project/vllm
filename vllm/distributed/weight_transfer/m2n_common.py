@@ -38,8 +38,9 @@ MESH_NDIMS = 2
 DESTINATION_REPLICA_AXIS = 0
 DESTINATION_SHARD_AXIS = 1
 
-# These compile-time nccl_m2n limits are not exposed by its Python API yet.
-# Remove the mirrors once nccl_m2n exposes communication-free plan validation.
+# Conservative capacities accepted by the supported nccl_m2n algorithms. They
+# are not exposed by its Python API yet; remove these mirrors once nccl_m2n
+# provides communication-free plan validation.
 MAX_SOURCE_SHARDS = 16
 MAX_DEST_SHARDS = 64
 
@@ -296,35 +297,64 @@ def check_transferable(name: str, dtype: torch.dtype, shape: Sequence[int]) -> N
         )
 
 
-def _shard_count(mesh: M2NMesh, placements: Placements) -> int:
+def _shard_spec(mesh: M2NMesh, placements: Placements) -> tuple[int, int]:
     return next(
-        (mesh.dims[axis] for axis, code in enumerate(placements) if code != REPLICATE),
-        1,
+        (code, mesh.dims[axis])
+        for axis, code in enumerate(placements)
+        if code != REPLICATE
     )
+
+
+def _max_partition_overlaps(
+    extent: int,
+    partitions: int,
+    other_partitions: int,
+) -> int:
+    """Return the maximum other partitions intersected by any one partition."""
+    if extent == 0:
+        return 0
+    width = extent // partitions
+    other_width = extent // other_partitions
+    max_overlaps = 0
+    for index in range(partitions):
+        start = index * width
+        end = start + width
+        first_other = start // other_width
+        last_other = (end - 1) // other_width
+        max_overlaps = max(max_overlaps, last_other - first_other + 1)
+    return max_overlaps
 
 
 def check_plan_limits(
     src: tuple[M2NMesh, Placements],
     dst: tuple[M2NMesh, Placements],
     name: str,
+    shape: Sequence[int],
 ) -> None:
-    """Reject shard-count violations that can be calculated exactly here.
+    """Reject plans whose per-shard fan-in or fan-out exceeds M2N capacity."""
+    src_dim, src_shards = _shard_spec(*src)
+    dst_dim, dst_shards = _shard_spec(*dst)
+    if any(extent == 0 for extent in shape):
+        max_sources = max_targets = 0
+    elif src_dim != dst_dim:
+        max_sources = src_shards
+        max_targets = dst_shards
+    else:
+        extent = shape[src_dim]
+        max_sources = _max_partition_overlaps(extent, dst_shards, src_shards)
+        max_targets = _max_partition_overlaps(extent, src_shards, dst_shards)
 
-    General sharded-to-sharded overlap remains authoritative in nccl_m2n; the
-    exact single-shard cases below protect whole-plan initialization meanwhile.
-    """
-    src_shards = _shard_count(*src)
-    dst_shards = _shard_count(*dst)
-    if dst_shards == 1 and src_shards > MAX_SOURCE_SHARDS:
+    if max_sources > MAX_SOURCE_SHARDS:
         raise ValueError(
-            f"parameter '{name}' would feed {src_shards} source shards into one "
-            f"replicated destination, over nccl_m2n MAX_SOURCES="
+            f"parameter '{name}' would feed up to {max_sources} source shards "
+            f"into one destination shard, over nccl_m2n MAX_SOURCES="
             f"{MAX_SOURCE_SHARDS}"
         )
-    if src_shards == 1 and dst_shards > MAX_DEST_SHARDS:
+    if max_targets > MAX_DEST_SHARDS:
         raise ValueError(
-            f"parameter '{name}' would fan one source shard out to {dst_shards} "
-            f"destination shards, over nccl_m2n MAX_TARGETS={MAX_DEST_SHARDS}"
+            f"parameter '{name}' would fan one source shard out to up to "
+            f"{max_targets} destination shards, over nccl_m2n "
+            f"MAX_TARGETS={MAX_DEST_SHARDS}"
         )
 
 
@@ -353,7 +383,7 @@ def validate_transfer_plan(
             f"parameter '{meta.name}' destination placements",
         )
         validate_layout(*dst, meta.shape, f"parameter '{meta.name}' destination layout")
-        check_plan_limits(src, dst, meta.name)
+        check_plan_limits(src, dst, meta.name, meta.shape)
 
 
 @dataclass(frozen=True)

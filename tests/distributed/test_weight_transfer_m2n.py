@@ -33,6 +33,7 @@ from vllm.distributed.weight_transfer.m2n_common import (
     M2NWireParam,
     check_complete_plan_agreement,
     check_data_plane_agreement,
+    check_plan_limits,
     check_runtime_ready_agreement,
     check_source_plan_agreement,
     create_m2n_communicator,
@@ -230,6 +231,13 @@ class TestLayout:
 
         with pytest.raises(ValueError, match=match):
             expected_local_shape(meta)
+
+    def test_cross_sharded_fanout_over_capacity_is_rejected(self):
+        src = (M2NMesh((1, 2), 0), (REPLICATE, 0))
+        dst = (M2NMesh((1, 65), 2), (REPLICATE, 1))
+
+        with pytest.raises(ValueError, match=r"parameter 'w'.*MAX_TARGETS=64"):
+            check_plan_limits(src, dst, "w", (2, 65))
 
 
 class TestSourceLayout:
@@ -682,6 +690,14 @@ class TestWireTypes:
 
         self._init_32_to_4_plan(monkeypatch, destination)
 
+    def test_cross_sharded_destination_over_capacity_rejected_at_init(
+        self, monkeypatch
+    ):
+        destination = M2NDestination("w", (REPLICATE, 1), torch.empty(32, 2))
+
+        with pytest.raises(ValueError, match=r"parameter 'w'.*MAX_SOURCES=16"):
+            self._init_32_to_4_plan(monkeypatch, destination)
+
     def test_replicated_destination_over_capacity_rejected_at_init(self, monkeypatch):
         destination = M2NDestination("w", REPLICATED, None)
 
@@ -716,8 +732,8 @@ class TestWireTypes:
 
     def test_later_invalid_parameter_rejects_plan_before_any_reshard(self, monkeypatch):
         destinations = [
-            M2NDestination("valid", REPLICATED, None),
-            M2NDestination("invalid", REPLICATED, None),
+            M2NDestination("valid", (REPLICATE, 0), torch.empty(8, 8)),
+            M2NDestination("invalid", (REPLICATE, 1), torch.empty(32, 2)),
         ]
         monkeypatch.setattr(
             "vllm.distributed.weight_transfer.m2n_engine."

@@ -93,14 +93,14 @@ See [`examples/rl/rlhf_m2n.py`](../../../examples/rl/rlhf_m2n.py) for a runnable
 
 ## Limitations
 
-- Tensor-rank and dtype support are defined and validated by the installed M2N
-  runtime rather than duplicated in vLLM.
+- vLLM validates tensor-rank and dtype support while agreeing on the complete
+  plan; the installed M2N runtime validates them again for each reshard.
 - Each parameter's source mesh must cover the same contiguous trainer-rank interval starting at 0, and be 1-D or 2-D.
 - `Partial` placements are not supported.
 - Models with known model-level checkpoint preprocessing use the full-tensor
   fallback for the affected module.
 - A reshard cannot be issued from inside a CUDA graph capture (weight updates run outside capture, so this only matters for custom callers).
-- Source/target capacity is algorithm- and build-specific. The installed M2N
-  runtime validates the complete plan while preparing each reshard; vLLM does
-  not mirror M2N's internal source or target limits.
+- vLLM checks every parameter's shard overlap against conservative 16-source
+  and 64-target capacities before committing the plan. The installed M2N
+  runtime remains authoritative and validates each reshard again.
 - Each communicator holds a cached staging pool (~256 MiB by default: 4 channels x 64 MiB).
