@@ -36,6 +36,10 @@ from vllm.utils.deep_gemm import is_deep_gemm_supported
 pytestmark = pytest.mark.skipif(
     not current_platform.is_cuda(), reason="DeepGEMM MegaMoE requires CUDA"
 )
+requires_sm100 = pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="MegaMoE input staging only feeds the SM100 kernels",
+)
 
 
 @pytest.fixture(autouse=True)
@@ -683,6 +687,7 @@ def test_deep_gemm_mega_moe_adds_unfused_shared_expert_once(monkeypatch, fused):
     assert ("shared_l1_weights" in launches[-1]) == fused
 
 
+@requires_sm100
 @pytest.mark.parametrize("num_tokens", [7, 63, 64, 65, 127, 128, 135, 434, 16384])
 @pytest.mark.parametrize("hidden_size", [256, 5120])
 def test_prepare_megamoe_inputs_is_bitwise_exact(num_tokens, hidden_size):
@@ -774,6 +779,7 @@ def _shared_sf_tma_layout(sf: torch.Tensor, block_m: int) -> torch.Tensor:
     return out
 
 
+@requires_sm100
 @pytest.mark.parametrize("shared_block_m", [8, 32, 96, 128, 192])
 def test_prepare_megamoe_inputs_stages_shared_scale_tma_layout(shared_block_m):
     from vllm.third_party.deep_gemm.utils import per_token_cast_to_fp8
@@ -848,6 +854,7 @@ def test_prepare_megamoe_inputs_stages_shared_scale_tma_layout(shared_block_m):
     assert torch.all(fused_shared_x_sf[~populated] == -1)
 
 
+@requires_sm100
 @pytest.mark.parametrize("quantize", [True, False])
 @pytest.mark.parametrize("nonfinite_padding", [False, True])
 @pytest.mark.parametrize("num_tokens", [7, 65, 135])
@@ -931,6 +938,7 @@ def test_prepare_megamoe_inputs_masks_padding(nonfinite_padding, num_tokens, qua
     )
 
 
+@requires_sm100
 @pytest.mark.parametrize("shared", [None, "mxfp8", "bf16"])
 @pytest.mark.parametrize("num_tokens", [0, 7, 65, 135])
 def test_prepare_megamoe_nvfp4_inputs_is_bitwise_exact(num_tokens, shared):
