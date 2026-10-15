@@ -20,10 +20,12 @@ logger = init_logger(__name__)
 
 
 def _get_kda_layer(worker: Worker) -> KimiK3DeltaAttention | None:
-    # Kimi model construction already imports kda. Avoid importing it here.
-    kda = sys.modules.get("vllm.models.kimi_k3.nvidia.kda")
-    if kda is None:
+    # Kimi model construction already imports kda. Importing it here would
+    # re-register a CustomOp that ops.fused_norm_gate also claims.
+    module = sys.modules.get("vllm.models.kimi_k3.nvidia.kda")
+    if module is None:
         return None
+    kda_cls = module.KimiK3DeltaAttention
 
     compilation_config = getattr(
         worker.model_runner,
@@ -34,11 +36,7 @@ def _get_kda_layer(worker: Worker) -> KimiK3DeltaAttention | None:
     if not isinstance(static_context, dict):
         return None
     return next(
-        (
-            layer
-            for layer in static_context.values()
-            if isinstance(layer, kda.KimiK3DeltaAttention)
-        ),
+        (layer for layer in static_context.values() if isinstance(layer, kda_cls)),
         None,
     )
 

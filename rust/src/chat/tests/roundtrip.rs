@@ -81,6 +81,10 @@ enum ThinkingBehavior {
         enabled: &'static str,
         disabled: &'static str,
     },
+    /// The chat template disables thinking through a dedicated
+    /// `disable_reasoning` kwarg, and reasons by `default` when the request
+    /// does not specify it.
+    DisableReasoning { default: bool },
 }
 
 impl ThinkingBehavior {
@@ -89,12 +93,13 @@ impl ThinkingBehavior {
             Self::Toggleable { default } => default,
             Self::Always { value } => value,
             Self::ReasoningEffort { default, .. } => default,
+            Self::DisableReasoning { default } => default,
         }
     }
 
     fn fixtures(self) -> Vec<Option<bool>> {
         match self {
-            Self::Toggleable { .. } => vec![
+            Self::Toggleable { .. } | Self::DisableReasoning { .. } => vec![
                 Some(true),  // explicitly enable thinking
                 Some(false), // explicitly disable thinking
                 None,        // use default template behavior
@@ -129,6 +134,12 @@ impl ThinkingBehavior {
                     "reasoning_effort".to_string(),
                     if thinking { enabled } else { disabled }.into(),
                 );
+            }
+            Self::DisableReasoning { .. } => {
+                request
+                    .chat_options
+                    .template_kwargs
+                    .insert("disable_reasoning".to_string(), (!thinking).into());
             }
         }
     }
@@ -407,10 +418,6 @@ impl RoundtripCase {
     }
 
     /// Kimi K3 XTML tool/reasoning channels (native renderer + unified parser).
-    ///
-    /// Needs HF tokenizer files under `HF_HOME` (`tiktoken.model` +
-    /// `tokenizer_config.json`). Weights are not required for this text-level
-    /// roundtrip.
     fn kimi_k3() -> Self {
         Self {
             model_id: "moonshotai/Kimi-K3",
@@ -421,6 +428,53 @@ impl RoundtripCase {
             json_fmt: compact_json_fmt(),
             sort_json_keys: false,
             with_schema: ToolCallMixVariant::WITH_SCHEMA,
+        }
+    }
+
+    /// Muse Spark 1.2 recipient-routed segments with ATEM tool calls (generic
+    /// HF Jinja renderer + unified parser).
+    fn muse_spark() -> Self {
+        Self {
+            model_id: "meta-models/Muse-Spark-1.2-820B-A42B-NVFP4",
+            assistant_stop_suffix: "<|eot|>",
+            tool_call_parser: ParserSelection::Auto,
+            reasoning_parser: ParserSelection::Auto,
+            // The template's true thinking switch is the `disable_reasoning`
+            // kwarg: it drops "self" from the valid recipients and suppresses
+            // the "Reasoning strength" hint. `reasoning_effort`
+            // minimal/low/medium/high only tunes the strength hint while
+            // reasoning stays enabled.
+            thinking_behavior: ThinkingBehavior::DisableReasoning { default: true },
+            json_fmt: compact_json_fmt(),
+            sort_json_keys: false,
+            // The Muse parser builds no tool grammar, so the schema excludes the
+            // calls.
+            with_schema: &[
+                ToolCallMixVariant::NoneSchema,
+                ToolCallMixVariant::AutoSchemaContent,
+            ],
+        }
+    }
+
+    /// Muse Glimmer shares the Muse Spark output format and unified parser,
+    /// with its own chat template.
+    fn muse_glimmer() -> Self {
+        Self {
+            model_id: "meta-models/Muse-Glimmer-30B",
+            assistant_stop_suffix: "<|eot|>",
+            tool_call_parser: ParserSelection::Auto,
+            reasoning_parser: ParserSelection::Auto,
+            // The template has no thinking switch; `reasoning_strength` only
+            // tunes the hint.
+            thinking_behavior: ThinkingBehavior::Always { value: true },
+            json_fmt: compact_json_fmt(),
+            sort_json_keys: false,
+            // The Muse parser builds no tool grammar, so the schema excludes the
+            // calls.
+            with_schema: &[
+                ToolCallMixVariant::NoneSchema,
+                ToolCallMixVariant::AutoSchemaContent,
+            ],
         }
     }
 
@@ -561,6 +615,8 @@ roundtrip_tests! {
     // HY3's final plain-assistant history omits EOS; tool-call history keeps it
     // and exercises both stages of the tokenizer-derived unified parser.
     hy_v3 => [tool_call_mix],
+    muse_spark => [reasoning_and_content, tool_call_mix],
+    muse_glimmer => [reasoning_and_content], // Glimmer drops content on tool-call turns in history
     gpt_oss => [tool_call_mix], // Harmony strips reasoning in history if there's no tool call
     inkling => [reasoning_and_content, tool_call_mix],
 }

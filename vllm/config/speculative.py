@@ -89,6 +89,7 @@ _QWEN3_OMNI_TARGET_ARCHITECTURES = frozenset(
     }
 )
 _QWEN3_OMNI_DSPARK_ARCHITECTURE = "Qwen3OmniDSparkModel"
+_MUSE_SPARK_DSPARK_ARCHITECTURE = "MuseSparkDSparkModel"
 
 
 def _is_qwen3_omni_target(model_config: ModelConfig) -> bool:
@@ -1325,6 +1326,8 @@ class SpeculativeConfig:
                     or "Qwen3DSparkModel" in self.draft_model_config.architectures
                     or _QWEN3_OMNI_DSPARK_ARCHITECTURE
                     in self.draft_model_config.architectures
+                    or _MUSE_SPARK_DSPARK_ARCHITECTURE
+                    in self.draft_model_config.architectures
                     or "Gemma4DSparkModel" in self.draft_model_config.architectures
                     or (
                         "DSparkDraftModel" in self.draft_model_config.architectures
@@ -1407,6 +1410,8 @@ class SpeculativeConfig:
                 elif self.method == "dspark" and (
                     "Qwen3DSparkModel" not in self.draft_model_config.architectures
                     and _QWEN3_OMNI_DSPARK_ARCHITECTURE
+                    not in self.draft_model_config.architectures
+                    and _MUSE_SPARK_DSPARK_ARCHITECTURE
                     not in self.draft_model_config.architectures
                     and "Gemma4DSparkModel" not in self.draft_model_config.architectures
                     and "K3DSparkModel" not in self.draft_model_config.architectures

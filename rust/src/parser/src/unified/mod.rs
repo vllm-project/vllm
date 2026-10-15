@@ -9,6 +9,7 @@ mod hf;
 mod hy;
 mod inkling;
 mod kimi_k3;
+mod muse;
 
 pub use combined::CombinedParser;
 pub use gemma4::Gemma4UnifiedParser;
@@ -16,6 +17,7 @@ pub use hf::{HfTemplateError, HfUnifiedParser, ResponseTemplate};
 pub use hy::{HyV3UnifiedParser, HyV4UnifiedParser};
 pub use inkling::InklingUnifiedParser;
 pub use kimi_k3::KimiK3UnifiedParser;
+pub use muse::MuseUnifiedParser;
 use thiserror::Error;
 use thiserror_ext::Macro;
 use vllm_tokenizer::{DecodedText, DynTokenizer};

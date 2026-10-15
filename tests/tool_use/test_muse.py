@@ -1,25 +1,29 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""Unit tests for the MuseGlimmer ATEM tool parser and reasoning parser.
+"""Unit tests for the Muse ATEM tool parser and reasoning parser.
 
-MuseGlimmer writes every turn as a sequence of channel-scoped messages rather
+Muse writes every turn as a sequence of channel-scoped messages rather
 than JSON, so the two parsers are tested together: the reasoning parser strips
 the reasoning span and forwards the remaining channels as content, and the tool
 parser reads ATEM markup out of those channels.
 
-Four areas, in order:
+Six areas, in order:
 
   1. non-streaming tool-call extraction, including channel scoping (an
      ``<atem:invoke>`` echoed inside reasoning must never become a call);
   2. the reasoning -> tool-parser handoff, which regressed once by returning
      ``content=None`` and starving the tool parser;
-  3. streaming, where markers routinely straddle chunk boundaries, plus
+  3. channel routing: ``to=commentary`` is content, a recipient-less
+     ``<|message|>`` is reasoning, ``to=developer`` is dropped, and a tool
+     header written without the closing ``<|eom|>`` still ends the reasoning;
+  4. streaming, where markers routinely straddle chunk boundaries, plus
      truncation isolation for an unterminated ``to=self`` block;
-  4. tool-name normalization against the tools registered on the request.
+  5. tool-name normalization against the tools registered on the request;
+  6. reasoning token counting.
 
 These drive the parsers directly and need no checkpoint. The tests that require
-a real tokenizer live in ``test_muse_glimmer_parse_delta.py``.
+a real tokenizer live in ``test_muse_parse_delta.py``.
 """
 
 import json
@@ -30,19 +34,19 @@ import pytest
 
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
-from vllm.reasoning.muse_glimmer_reasoning_parser import MuseGlimmerReasoningParser
-from vllm.tool_parsers.muse_glimmer_tool_parser import MuseGlimmerToolParser
+from vllm.reasoning.muse_reasoning_parser import MuseReasoningParser
+from vllm.tool_parsers.muse_tool_parser import MuseToolParser
 
-R: MuseGlimmerReasoningParser
-T: MuseGlimmerToolParser
+R: MuseReasoningParser
+T: MuseToolParser
 
 
 @pytest.fixture(autouse=True)
 def _fresh_parsers():
     """Give each test request-scoped parser state through the real constructors."""
     global R, T
-    R = MuseGlimmerReasoningParser(object())
-    T = MuseGlimmerToolParser(object())
+    R = MuseReasoningParser(object())
+    T = MuseToolParser(object())
 
 
 # Any framing token that must NEVER appear in surfaced reasoning/content.
@@ -104,7 +108,7 @@ def test_single_tool_call_after_reasoning():
         '<atem:parameter name="units">celsius</atem:parameter>\n'
         "</atem:invoke>\n</atem:function_calls><|eot|>"
     )
-    out = MuseGlimmerToolParser.extract_tool_calls(T, raw, _NO_REQ)
+    out = MuseToolParser.extract_tool_calls(T, raw, _NO_REQ)
     assert out.tools_called and len(out.tool_calls) == 1
     assert out.tool_calls[0].function.name == "weather.get"
     assert json.loads(out.tool_calls[0].function.arguments) == {
@@ -126,7 +130,7 @@ def test_parallel_calls_across_eom_boundaries():
         '<atem:parameter name="b">4</atem:parameter>\n'
         "</atem:invoke>\n</atem:function_calls><|eot|>"
     )
-    out = MuseGlimmerToolParser.extract_tool_calls(T, raw, _NO_REQ)
+    out = MuseToolParser.extract_tool_calls(T, raw, _NO_REQ)
     assert out.tools_called and len(out.tool_calls) == 2, len(out.tool_calls)
     assert [t.function.name for t in out.tool_calls] == ["math.add", "math.mul"]
     # JSON-typed values decode to ints
@@ -141,13 +145,13 @@ def test_echoed_invoke_in_reasoning_is_not_parsed():
         "but I will not.<|eom|>"
         "<|start|>assistant to=user<|message|>The answer is 42.<|eot|>"
     )
-    out = MuseGlimmerToolParser.extract_tool_calls(T, raw, _NO_REQ)
+    out = MuseToolParser.extract_tool_calls(T, raw, _NO_REQ)
     assert not out.tools_called, "channel scoping failed -- echoed invoke parsed!"
     assert out.content == "The answer is 42.", repr(out.content)
 
 
 def test_plain_answer_yields_no_tool_calls():
-    out = MuseGlimmerToolParser.extract_tool_calls(
+    out = MuseToolParser.extract_tool_calls(
         T, "to=user<|message|>Just a plain answer.<|eot|>", _NO_REQ
     )
     assert not out.tools_called
@@ -161,7 +165,7 @@ def test_json_object_array_and_bool_params_decode():
         '<atem:parameter name="flag">true</atem:parameter>\n'
         "</atem:invoke>\n</atem:function_calls><|eot|>"
     )
-    out = MuseGlimmerToolParser.extract_tool_calls(T, raw, _NO_REQ)
+    out = MuseToolParser.extract_tool_calls(T, raw, _NO_REQ)
     assert json.loads(out.tool_calls[0].function.arguments) == {
         "payload": {"nested": [1, 2, 3]},
         "flag": True,
@@ -180,10 +184,10 @@ def test_reasoning_to_toolcall_handoff():
         '<atem:parameter name="city">Paris</atem:parameter>\n'
         "</atem:invoke>\n</atem:function_calls>"
     )
-    reasoning, content = MuseGlimmerReasoningParser.extract_reasoning(R, raw, _NO_REQ)
+    reasoning, content = MuseReasoningParser.extract_reasoning(R, raw, _NO_REQ)
     assert reasoning == "Let me call the tool.", repr(reasoning)
     assert content is not None and "<atem:invoke" in content, repr(content)
-    out = MuseGlimmerToolParser.extract_tool_calls(T, content, _NO_REQ)
+    out = MuseToolParser.extract_tool_calls(T, content, _NO_REQ)
     assert out.tools_called and len(out.tool_calls) == 1
     assert out.tool_calls[0].function.name == "weather.get"
 
@@ -193,16 +197,14 @@ def test_reasoning_then_user_answer():
         " to=self<|message|>thinking<|eom|>"
         "<|start|>assistant to=user<|message|>The answer is 42.<|eot|>"
     )
-    reasoning, content = MuseGlimmerReasoningParser.extract_reasoning(R, raw, _NO_REQ)
+    reasoning, content = MuseReasoningParser.extract_reasoning(R, raw, _NO_REQ)
     assert reasoning == "thinking", repr(reasoning)
     assert content == "The answer is 42.", repr(content)
-    assert not MuseGlimmerToolParser.extract_tool_calls(
-        T, content, _NO_REQ
-    ).tools_called
+    assert not MuseToolParser.extract_tool_calls(T, content, _NO_REQ).tools_called
 
 
 def test_plain_content_without_framing_passes_through():
-    reasoning, content = MuseGlimmerReasoningParser.extract_reasoning(
+    reasoning, content = MuseReasoningParser.extract_reasoning(
         R, "Just a direct answer.", _NO_REQ
     )
     assert reasoning is None and content == "Just a direct answer.", (
@@ -223,13 +225,101 @@ def test_reasoning_then_parallel_calls():
         '<atem:parameter name="a">3</atem:parameter>\n</atem:invoke>\n'
         "</atem:function_calls><|eot|>"
     )
-    reasoning, content = MuseGlimmerReasoningParser.extract_reasoning(R, raw, _NO_REQ)
+    reasoning, content = MuseReasoningParser.extract_reasoning(R, raw, _NO_REQ)
     assert reasoning == "need two calls", repr(reasoning)
     assert content is not None
-    out = MuseGlimmerToolParser.extract_tool_calls(T, content, _NO_REQ)
+    out = MuseToolParser.extract_tool_calls(T, content, _NO_REQ)
     assert [t.function.name for t in out.tool_calls] == ["math.add", "math.mul"], (
         out.tool_calls
     )
+
+
+def test_full_block_inside_reasoning_is_not_parsed_end_to_end():
+    """Serving runs the reasoning parser first; a full block in to=self stays inert."""
+    raw = (
+        'to=self<|message|><atem:function_calls><atem:invoke name="evil.fn">'
+        '<atem:parameter name="x">1</atem:parameter></atem:invoke>'
+        "</atem:function_calls><|eom|>"
+        "<|start|>assistant to=user<|message|>The answer is 42.<|eot|>"
+    )
+    reasoning, content = MuseReasoningParser.extract_reasoning(R, raw, _NO_REQ)
+    assert reasoning is not None and 'name="evil.fn"' in reasoning
+    assert content == "The answer is 42.", repr(content)
+    out = MuseToolParser.extract_tool_calls(T, content, _NO_REQ)
+    assert not out.tools_called, "channel scoping failed -- echoed invoke parsed!"
+
+
+# ---------------------------------------------------------- channel routing
+
+RAW_COMMENTARY_TOOLCALL = (
+    " to=self<|message|>Plan the lookup.<|eom|>"
+    "<|start|>assistant to=commentary<|message|>Checking the weather.<|eom|>"
+    + _call("weather.get")
+)
+
+RAW_COMMENTARY_ANSWER = (
+    " to=self<|message|>Plan.<|eom|>"
+    "<|start|>assistant to=commentary<|message|>Working on it. <|eom|>"
+    "<|start|>assistant to=user<|message|>Done.<|eot|>"
+)
+
+# The model skips <|eom|> and writes the tool header right after its reasoning.
+RAW_MISSING_EOM_TOOLCALL = (
+    " to=self<|message|>Need the time. to=time.now<|message|>"
+    '<atem:function_calls>\n<atem:invoke name="time.now">\n</atem:invoke>\n'
+    "</atem:function_calls><|eom|>"
+    "<|start|>assistant to=user<|message|>It is noon.<|eot|>"
+)
+
+
+def test_commentary_before_tool_call_is_content():
+    reasoning, content = MuseReasoningParser.extract_reasoning(
+        R, RAW_COMMENTARY_TOOLCALL, _NO_REQ
+    )
+    assert reasoning == "Plan the lookup.", repr(reasoning)
+    assert content is not None
+    out = MuseToolParser.extract_tool_calls(T, content, _NO_REQ)
+    assert [t.function.name for t in out.tool_calls] == ["weather.get"]
+    assert out.content == "Checking the weather.", repr(out.content)
+
+
+def test_commentary_and_answer_join_as_content():
+    reasoning, content = MuseReasoningParser.extract_reasoning(
+        R, RAW_COMMENTARY_ANSWER, _NO_REQ
+    )
+    assert reasoning == "Plan.", repr(reasoning)
+    assert content == "Working on it. Done.", repr(content)
+
+
+def test_recipient_less_message_is_reasoning():
+    raw = (
+        "<|message|>Thinking.<|eom|><|start|>assistant to=user<|message|>Answer.<|eot|>"
+    )
+    reasoning, content = MuseReasoningParser.extract_reasoning(R, raw, _NO_REQ)
+    assert reasoning == "Thinking.", repr(reasoning)
+    assert content == "Answer.", repr(content)
+
+
+def test_developer_channel_is_dropped():
+    raw = (
+        " to=developer<|message|>internal note<|eom|>"
+        "<|start|>assistant to=user<|message|>Answer.<|eot|>"
+    )
+    reasoning, content = MuseReasoningParser.extract_reasoning(R, raw, _NO_REQ)
+    assert reasoning is None and content == "Answer.", (reasoning, content)
+    out = MuseToolParser.extract_tool_calls(T, raw, _NO_REQ)
+    assert not out.tools_called and out.content == "Answer.", out
+
+
+def test_missing_eom_before_tool_header_keeps_tool_call():
+    reasoning, content = MuseReasoningParser.extract_reasoning(
+        R, RAW_MISSING_EOM_TOOLCALL, _NO_REQ
+    )
+    assert reasoning == "Need the time. ", repr(reasoning)
+    assert content is not None
+    out = MuseToolParser.extract_tool_calls(T, content, _NO_REQ)
+    assert [t.function.name for t in out.tool_calls] == ["time.now"]
+    assert out.content == "It is noon.", repr(out.content)
 
 
 # ----------------------------------------------------------------- streaming
@@ -244,7 +334,7 @@ def _stream(raw: str, chunk: int):
     while i < len(raw):
         cur = raw[: i + chunk]
         delta = cur[len(prev) :]
-        dm = MuseGlimmerReasoningParser.extract_reasoning_streaming(
+        dm = MuseReasoningParser.extract_reasoning_streaming(
             R, prev, cur, delta, [], [], []
         )
         if dm is not None:
@@ -255,7 +345,7 @@ def _stream(raw: str, chunk: int):
             # not client-visible content from the unified parser.
             if content_delta and "<atem:function_calls>" not in content_delta:
                 content.append(content_delta)
-        dt = MuseGlimmerToolParser.extract_tool_calls_streaming(
+        dt = MuseToolParser.extract_tool_calls_streaming(
             T, prev, cur, delta, [], [], [], _fake_req()
         )
         if dt is not None and dt.tool_calls:
@@ -294,7 +384,9 @@ RAW_TRUNCATED = (
 )
 
 
-def _check_toolcall_stream(chunk):
+# 1 is the worst case: markers arrive one char at a time (mid-marker deltas).
+@pytest.mark.parametrize("chunk", [1, 3, 17])
+def test_streaming_toolcall(chunk):
     reasoning, content, tcs = _stream(RAW_TOOLCALL, chunk)
     # (a) no framing token leaks into reasoning or content
     for f in _FRAMING:
@@ -313,19 +405,6 @@ def _check_toolcall_stream(chunk):
     assert content == "", repr(content)
 
 
-def test_streaming_toolcall_chunk3():
-    _check_toolcall_stream(3)
-
-
-def test_streaming_toolcall_charwise():
-    # worst case: markers arrive one char at a time (mid-marker deltas)
-    _check_toolcall_stream(1)
-
-
-def test_streaming_toolcall_bigchunks():
-    _check_toolcall_stream(17)
-
-
 def test_streaming_reasoning_then_content():
     reasoning, content, tcs = _stream(RAW_ANSWER, 3)
     for f in _FRAMING:
@@ -335,13 +414,26 @@ def test_streaming_reasoning_then_content():
     assert tcs == []
 
 
+def test_streaming_commentary_and_answer():
+    reasoning, content, tcs = _stream(RAW_COMMENTARY_ANSWER, 3)
+    for f in _FRAMING:
+        assert f not in reasoning and f not in content, f
+    assert reasoning == "Plan.", repr(reasoning)
+    assert content == "Working on it. Done.", repr(content)
+    assert tcs == []
+
+
+def test_streaming_missing_eom_before_tool_header():
+    reasoning, _, tcs = _stream(RAW_MISSING_EOM_TOOLCALL, 1)
+    assert reasoning == "Need the time. ", repr(reasoning)
+    assert [_fn_of(tc)[0] for tc in tcs] == ["time.now"], tcs
+
+
 def test_truncated_cot_no_toolcall_nonstreaming():
-    out = MuseGlimmerToolParser.extract_tool_calls(T, RAW_TRUNCATED, _fake_req())
+    out = MuseToolParser.extract_tool_calls(T, RAW_TRUNCATED, _fake_req())
     assert not out.tools_called and out.tool_calls == []
     # partial reasoning must still be recovered by the reasoning parser
-    reasoning, _ = MuseGlimmerReasoningParser.extract_reasoning(
-        R, RAW_TRUNCATED, _fake_req()
-    )
+    reasoning, _ = MuseReasoningParser.extract_reasoning(R, RAW_TRUNCATED, _fake_req())
     assert reasoning and "Maybe I should call" in reasoning, repr(reasoning)
 
 
@@ -352,13 +444,13 @@ def test_truncated_cot_no_toolcall_streaming():
 
 # ------------------------------------------------------- name normalization
 #
-# MuseGlimmer emits `get_weather.get_weather` for a bare-registered
+# Muse emits `get_weather.get_weather` for a bare-registered
 # `get_weather`, and `weather.get` verbatim for a namespaced one. The parser
 # normalizes against the tools actually registered on the request.
 
 
 def test_doubled_bare_name_collapses():
-    out = MuseGlimmerToolParser.extract_tool_calls(
+    out = MuseToolParser.extract_tool_calls(
         T, _call("get_weather.get_weather"), _req("get_weather")
     )
     assert out.tools_called and out.tool_calls[0].function.name == "get_weather", (
@@ -367,7 +459,7 @@ def test_doubled_bare_name_collapses():
 
 
 def test_namespaced_name_preserved():
-    out = MuseGlimmerToolParser.extract_tool_calls(
+    out = MuseToolParser.extract_tool_calls(
         T, _call("weather.get"), _req("weather.get")
     )
     assert out.tool_calls[0].function.name == "weather.get"
@@ -375,7 +467,7 @@ def test_namespaced_name_preserved():
 
 def test_unregistered_namespace_is_preserved():
     # Suffix-only matching can silently dispatch a tool from the wrong namespace.
-    out = MuseGlimmerToolParser.extract_tool_calls(
+    out = MuseToolParser.extract_tool_calls(
         T, _call("foo.get_weather"), _req("get_weather")
     )
     assert out.tool_calls[0].function.name == "foo.get_weather"
@@ -383,24 +475,80 @@ def test_unregistered_namespace_is_preserved():
 
 def test_trailing_segment_ambiguous_left_alone():
     # two registered tools share leaf 'get' -> ambiguous -> do NOT rewrite
-    out = MuseGlimmerToolParser.extract_tool_calls(
+    out = MuseToolParser.extract_tool_calls(
         T, _call("x.get"), _req("weather.get", "time.get")
     )
     assert out.tool_calls[0].function.name == "x.get"
 
 
 def test_no_registered_tools_passthrough():
-    out = MuseGlimmerToolParser.extract_tool_calls(
+    out = MuseToolParser.extract_tool_calls(
         T, _call("get_weather.get_weather"), _NO_REQ
     )
     assert out.tool_calls[0].function.name == "get_weather.get_weather"
 
 
 def test_exact_match_kept():
-    out = MuseGlimmerToolParser.extract_tool_calls(
+    out = MuseToolParser.extract_tool_calls(
         T, _call("get_weather"), _req("get_weather")
     )
     assert out.tool_calls[0].function.name == "get_weather"
+
+
+def test_adjust_request_forces_skip_special_tokens_off():
+    req = SimpleNamespace(tools=None, tool_choice=None, skip_special_tokens=True)
+    MuseToolParser.adjust_request(T, cast(ChatCompletionRequest, req))
+    assert req.skip_special_tokens is False
+
+
+# --------------------------------------------------- reasoning token counting
+
+_SPECIALS = ["<|message|>", "<|start|>", "<|eom|>", "<|eot|>"]
+
+
+class _CharTokenizer:
+    """Char-level stub: specials are single ids, other chars are ``ord()``."""
+
+    def __init__(self):
+        self._id_of = {s: 200100 + i for i, s in enumerate(_SPECIALS)}
+        self._str_of = {v: k for k, v in self._id_of.items()}
+
+    def get_vocab(self) -> dict[str, int]:
+        return dict(self._id_of)
+
+    def encode(self, text: str) -> list[int]:
+        ids = []
+        i = 0
+        while i < len(text):
+            for s in _SPECIALS:
+                if text.startswith(s, i):
+                    ids.append(self._id_of[s])
+                    i += len(s)
+                    break
+            else:
+                ids.append(ord(text[i]))
+                i += 1
+        return ids
+
+    def decode(self, ids) -> str:
+        return "".join(self._str_of.get(t, chr(t)) for t in ids)
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        # Every reasoning block counts; commentary, tool and answer bodies don't.
+        (RAW_COMMENTARY_ANSWER + " to=self<|message|>more", len("Plan.more")),
+        (RAW_TOOLCALL, len("I should read the hostname file to answer.")),
+        ("<|message|>bare<|eom|><|start|>assistant to=user<|message|>x", 4),
+        # A body cut off by the token budget counts to the end.
+        (" to=self<|message|>cut off", len("cut off")),
+    ],
+)
+def test_count_reasoning_tokens(raw, expected):
+    tok = _CharTokenizer()
+    parser = MuseReasoningParser(tok)
+    assert parser.count_reasoning_tokens(tok.encode(raw)) == expected
 
 
 def test_named_custom_tool_choice_skips_structured_outputs():

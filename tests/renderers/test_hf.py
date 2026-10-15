@@ -415,6 +415,25 @@ def test_resolve_chat_template_kwargs_with_template_name():
             """,
             "string",
         ),
+        (
+            """
+            {% set ns = namespace(rest=messages) %}
+            {% for message in ns.rest %}
+              {% for item in message['content'] %}{{ item['type'] }}{% endfor %}
+            {% endfor %}
+            """,
+            "openai",
+        ),
+        (
+            """
+            {% set ns = namespace(rest=[]) %}
+            {% set ns.rest = messages %}
+            {% for message in ns.rest %}
+              {% for item in message['content'] %}{{ item['type'] }}{% endfor %}
+            {% endfor %}
+            """,
+            "openai",
+        ),
     ],
 )
 def test_detect_content_format(chat_template, expected_format):

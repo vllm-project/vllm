@@ -148,9 +148,18 @@ _REASONING_PARSERS_TO_REGISTER = {
         "plamo3_engine_reasoning_parser",
         "Plamo3ParserReasoningAdapter",
     ),
+    "muse": (
+        "muse_reasoning_parser",
+        "MuseReasoningParser",
+    ),
+    # Aliases of "muse".
     "muse_glimmer": (
-        "muse_glimmer_reasoning_parser",
-        "MuseGlimmerReasoningParser",
+        "muse_reasoning_parser",
+        "MuseReasoningParser",
+    ),
+    "musespark1x": (
+        "muse_reasoning_parser",
+        "MuseReasoningParser",
     ),
     "qwen3": (
         "qwen3_engine_reasoning_parser",
