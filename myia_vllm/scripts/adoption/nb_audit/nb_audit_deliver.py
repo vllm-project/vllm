@@ -4,7 +4,7 @@
 Each bot told us which channel it can actually read (global dashboard, 2026-09-23, point C3):
   - NanoClaw (ai-01): a RooSync DM per series with the records as attachments, the series
     index.json attached as well;
-  - Hermes (po-2026): attachments never reach its container, so the records travel in the
+  - Hermes (ai-01 since 14/10, po-2026 before): attachments never reach its container, so the records travel in the
     DM body, each as one monolithic base64 block between ---BEGIN-BASE64--- and
     ---END-BASE64---, with its full sha256 and byte length; messages are numbered x/y when
     the body would grow past --max-body.
@@ -41,7 +41,7 @@ from nb_audit_runner import GH_REPO, log, secret_hits, series_checklist  # noqa:
 REPO_ROOT = HERE.parents[2]  # WORKSPACE_PATH of the RSM child: the sender is myia-ai-01:vllm
 OWNERS = {  # owner as written in the series issue title -> (recipient, channel)
     "NanoClaw": ("myia-ai-01:nanoclaw", "attach"),
-    "Hermes": ("myia-po-2026:hermes-agent", "b64body"),
+    "Hermes": ("myia-ai-01:hermes-agent", "b64body"),  # seat rebuilt on ai-01 (user decision 14/10); po-2026 HS since 09/10 left dossiers unread
 }
 C5_LINE = "`<chemin> · proposés N · confirmés C · rejetés R · FULL READ M min`"
 
