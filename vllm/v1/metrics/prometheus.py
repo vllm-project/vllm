@@ -71,7 +71,7 @@ def unregister_vllm_metrics():
 
 def shutdown_prometheus():
     """Shutdown prometheus metrics."""
-    path = _prometheus_multiproc_dir
+    path = os.environ.get("PROMETHEUS_MULTIPROC_DIR")
     if path is None:
         return
     try:
