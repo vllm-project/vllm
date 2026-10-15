@@ -275,12 +275,11 @@ def test_aiter_backend_ignores_prequantized_qkv_for_pure_decode(monkeypatch):
         "is_shuffle_kv_cache_enabled",
         lambda: False,
     )
-    monkeypatch.setattr(
-        torch.ops.aiter,
-        "paged_attention_v1",
-        fake_paged_attention,
-        raising=False,
-    )
+    # aiter registers its ops on torch.ops.aiter at import; patching the
+    # namespace first makes that registration fail and poisons the process.
+    import aiter  # noqa: F401
+
+    monkeypatch.setattr(torch.ops.aiter, "paged_attention_v1", fake_paged_attention)
 
     impl._forward(
         SimpleNamespace(_k_scale=torch.ones(1), _v_scale=torch.ones(1)),
@@ -363,12 +362,7 @@ def test_aiter_backend_gathers_context_for_fp8_attention(
         attention_calls.append(kwargs)
         return torch.zeros_like(query), torch.zeros((1, 4))
 
-    monkeypatch.setattr(
-        rocm_aiter_fa,
-        "cp_mha_gather_cache",
-        fake_gather,
-        raising=False,
-    )
+    monkeypatch.setattr(rocm_aiter_fa, "cp_mha_gather_cache", fake_gather)
     monkeypatch.setattr(
         rocm_aiter_fa.rocm_aiter_ops,
         "flash_attn_varlen_func",
