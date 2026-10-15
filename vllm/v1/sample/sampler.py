@@ -122,7 +122,7 @@ class Sampler(nn.Module):
                 num_logprobs or 0,
             )
 
-        if num_logprobs is None:
+        if logprob_token_ids_tensors is not None or num_logprobs is None:
             logprobs_tensors = logprob_token_ids_tensors
         elif num_logprobs == -1:
             # Return the full unsorted and unranked logprobs.
@@ -137,11 +137,6 @@ class Sampler(nn.Module):
                 token_ids=sampled,
                 candidates=sampling_metadata.logprob_candidate_token_ids,
             )
-
-        # If we have both num_logprobs and logprob_token_ids, prefer
-        # logprob_token_ids as it's more specific
-        if logprob_token_ids_tensors is not None and num_logprobs is not None:
-            logprobs_tensors = logprob_token_ids_tensors
 
         # Use int32 to reduce the tensor size.
         sampled = sampled.to(torch.int32)
