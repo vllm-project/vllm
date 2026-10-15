@@ -48,9 +48,14 @@ _DUAL_STREAM_TOKEN_THRESHOLD = 1024
 
 
 def _capturing_cudagraph() -> bool:
+    # MRV2 captures FULL graphs with runtime mode NONE.
     return (
         is_forward_context_available()
         and get_forward_context().cudagraph_runtime_mode != CUDAGraphMode.NONE
+    ) or (
+        current_platform.is_cuda_alike()
+        and not torch.compiler.is_compiling()
+        and torch.cuda.is_current_stream_capturing()
     )
 
 
