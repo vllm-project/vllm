@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 from http import HTTPStatus
 from logging import Logger
 from string import Template
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from fastapi import Request
 from fastapi.exceptions import RequestValidationError
@@ -27,6 +27,9 @@ from vllm.platforms import current_platform
 from vllm.tracing import SpanKind, extract_trace_context
 from vllm.tracing.otel import is_otel_available, trace
 from vllm.utils.argparse_utils import FlexibleArgumentParser
+
+if TYPE_CHECKING:
+    from opentelemetry.trace import Span
 
 logger = init_logger(__name__)
 
@@ -113,7 +116,16 @@ async def request_span(raw_request: Request, span_name: str):
         record_exception=False,
         set_status_on_exception=False,
     ) as span:
-        yield span
+        try:
+            yield span
+        except Exception:
+            set_span_error(span)
+            raise
+
+
+def set_span_error(span: "Span | None") -> None:
+    if span is not None:
+        span.set_status(trace.StatusCode.ERROR)
 
 
 _ERROR_REF = {"$ref": "#/components/schemas/ErrorResponse"}
