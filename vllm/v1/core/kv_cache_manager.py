@@ -117,7 +117,7 @@ class KVCacheBlocks:
         return [
             [
                 block.block_id
-                for block in group[null_head_len(group) :]
+                for block in trim_null_head(group)
                 if block.block_hash is None and not block.is_null
             ]
             for group in self.blocks
