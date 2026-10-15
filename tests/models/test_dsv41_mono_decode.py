@@ -13,8 +13,8 @@ import torch
 from tests.models.common.mono.kit import MonoConformance, forward
 from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
-from vllm.models.common.mono.guards import configure
-from vllm.models.common.mono.runtime import attach, kernel_for_layer
+from vllm.models.common.mono.guards import select_mono_spec
+from vllm.models.common.mono.runtime import MonoRuntime
 from vllm.models.common.mono.spec import MonoUnsupported
 from vllm.models.deepseek_v41.amd import mono_spec as ms
 
@@ -162,7 +162,6 @@ class _Model(torch.nn.Module):
         self.layers = torch.nn.ModuleList(_Layer(i) for i in range(LAYERS))
         self.start_layer = 0
         self.end_layer = LAYERS
-        self.mono = None
 
 
 def make_cache(blocks: int = 4, block: int = 32) -> torch.Tensor:
@@ -264,11 +263,6 @@ class TestDsv41Spec(MonoConformance):
     def bad_caches(self, config, model):
         return {"swa": torch.zeros(4, dtype=torch.bfloat16)}
 
-    def _run_layers(self, mono, model) -> None:
-        positions = self._positions(mono)
-        for i, layer in enumerate(model.layers):
-            kernel_for_layer(mono, i, positions)
-
 
 def _rocm_platform() -> ModuleType:
     """The real ROCm platform module, whose arch probe needs a GPU to answer."""
@@ -290,7 +284,7 @@ def _gpu(monkeypatch, cdna: int = 4, cus: int = BLOCKS) -> None:
     monkeypatch.setattr(_rocm_platform(), "get_cdna_version", lambda: cdna)
 
 
-def _attach(monkeypatch, config=None, model=None, **layer_overrides):
+def _build(monkeypatch, config=None, model=None, **layer_overrides):
     _gpu(monkeypatch)
     kit = TestDsv41Spec()
     config = config or make_config()
@@ -299,6 +293,10 @@ def _attach(monkeypatch, config=None, model=None, **layer_overrides):
         for key, value in layer_overrides.items():
             setattr(layer.attn, key, value)
     return kit.make_mono(config, model), model
+
+
+def _launch(mono, layer_id: int, width: int = 1):
+    return ms.DSV41Dispatch(mono.kernel.kernels, width)(layer_id)
 
 
 def _indexer():
@@ -337,9 +335,8 @@ def test_layers_take_whole_or_ffn_launch(monkeypatch, overrides, ffn_only):
     index source's compressor and indexer run between them); a layer outside
     them keeps vLLM's attention and runs its FFN half as one launch, from
     wo_b's unreduced output."""
-    mono, model = _attach(monkeypatch, **overrides())
-    kernels = {k.ffn_only for k in mono.kernels.values()}
-    assert kernels == {ffn_only}
+    mono, model = _build(monkeypatch, **overrides())
+    assert {k.ffn_only for k in mono.kernel.kernels.values()} == {ffn_only}
     assert all(layer.attn.wo_b.reduce_results is not ffn_only for layer in model.layers)
 
 
@@ -357,8 +354,8 @@ def test_skipped_layers_keep_vllm_path(monkeypatch, skip):
     for layer in model.layers:
         for key, value in skip.items():
             setattr(layer, key, value)
-    mono, _ = _attach(monkeypatch, config=config, model=model)
-    assert mono is None
+    mono, _ = _build(monkeypatch, config=config, model=model)
+    assert not mono.kernel.kernels
 
 
 def test_moe_routing_outside_the_kernels_keeps_vllm_path(monkeypatch):
@@ -366,13 +363,14 @@ def test_moe_routing_outside_the_kernels_keeps_vllm_path(monkeypatch):
     model = TestDsv41Spec().make_model(config)
     for layer in model.layers:
         layer.ffn.n_routed_experts = 256
-    mono, _ = _attach(monkeypatch, config=config, model=model)
-    assert mono is None
+    mono, _ = _build(monkeypatch, config=config, model=model)
+    assert not mono.kernel.kernels
 
 
 def _step(mono, model, metadata, width=1):
     with forward(mono.vllm_config, CUDAGraphMode.FULL, metadata):
-        return mono.skip_reason(torch.zeros(width, dtype=torch.long))
+        mono.plan(torch.zeros(width, dtype=torch.long))
+    return mono.last_reason
 
 
 @pytest.mark.parametrize(
@@ -387,22 +385,22 @@ def _step(mono, model, metadata, width=1):
     ids=["prefill", "no-decode", "tokens-past-rows", "noncausal-window", "no-swa"],
 )
 def test_other_steps_take_vllm_path(monkeypatch, case, why):
-    mono, model = _attach(monkeypatch)
+    mono, model = _build(monkeypatch)
     assert why in _step(mono, model, _metadata(model, **case))
 
 
 def test_decode_step_takes_the_kernels(monkeypatch):
-    mono, model = _attach(monkeypatch)
+    mono, model = _build(monkeypatch)
     assert _step(mono, model, _metadata(model)) is None
 
 
 def test_profile_run_takes_vllm_path(monkeypatch):
-    mono, model = _attach(monkeypatch)
+    mono, model = _build(monkeypatch)
     assert _step(mono, model, None) == "no attention metadata"
 
 
 def test_rows_past_the_kernels_take_vllm_path(monkeypatch):
-    mono, model = _attach(monkeypatch)
+    mono, model = _build(monkeypatch)
     assert _step(mono, model, _metadata(model), width=ms.MAX_ROWS + 1) == "width"
 
 
@@ -436,7 +434,7 @@ def test_other_isa_refuses(monkeypatch, cdna):
     model = TestDsv41Spec().make_model(config)
     _gpu(monkeypatch, cdna=cdna)
     with pytest.raises(MonoUnsupported, match="CDNA4"):
-        attach(model, config, configure(config, SPECS_PATH))
+        MonoRuntime(model, config, select_mono_spec(config, SPECS_PATH))
 
 
 def test_too_few_compute_units_refuses(monkeypatch):
@@ -444,7 +442,7 @@ def test_too_few_compute_units_refuses(monkeypatch):
     model = TestDsv41Spec().make_model(config)
     _gpu(monkeypatch, cus=BLOCKS // 2)
     with pytest.raises(MonoUnsupported, match="compute units"):
-        attach(model, config, configure(config, SPECS_PATH))
+        MonoRuntime(model, config, select_mono_spec(config, SPECS_PATH))
 
 
 def test_other_moe_backend_refuses(monkeypatch):
@@ -455,21 +453,21 @@ def test_other_moe_backend_refuses(monkeypatch):
         experts.quant_method.mxfp4_backend = Mxfp4MoeBackend.TRITON
     _gpu(monkeypatch)
     with pytest.raises(MonoUnsupported, match="AITER_MXFP4_BF16"):
-        attach(model, config, configure(config, SPECS_PATH))
+        MonoRuntime(model, config, select_mono_spec(config, SPECS_PATH))
 
 
 def test_off_without_the_flag(monkeypatch):
+    _gpu(monkeypatch)
     config = make_config()
     config.kernel_config.monokernel = False
-    mono, _ = _attach(monkeypatch, config=config)
-    assert mono is None
+    assert select_mono_spec(config, SPECS_PATH) is None
 
 
 def test_whole_launch_runs_the_layer(monkeypatch):
-    mono, model = _attach(monkeypatch)
+    mono, model = _build(monkeypatch)
     positions = torch.zeros(1, dtype=torch.long)
     with forward(mono.vllm_config, CUDAGraphMode.FULL, _metadata(model)):
-        kernel = kernel_for_layer(mono, 1, positions)
+        kernel = _launch(mono, 1)
         out = kernel.launch(
             torch.zeros(1, HIDDEN),
             positions,
@@ -488,20 +486,19 @@ def test_whole_launch_runs_the_layer(monkeypatch):
 def test_first_layer_takes_the_embedding(monkeypatch):
     """Layer 0's residual is the embedding broadcast to the four streams, which
     K1 takes as it is (no owed post to fold)."""
-    mono, model = _attach(monkeypatch)
+    mono, model = _build(monkeypatch)
     positions = torch.zeros(1, dtype=torch.long)
     with forward(mono.vllm_config, CUDAGraphMode.FULL, _metadata(model)):
-        kernel = kernel_for_layer(mono, 0, positions)
+        kernel = _launch(mono, 0)
         out = kernel.launch(torch.zeros(1, HIDDEN), positions, None, None, None, None)
     assert out[0] == "whole" and not out[2]["fold"]
     assert out[1][2].shape == (1, 4, HIDDEN)
 
 
 def test_ffn_launch_takes_wo_b_unreduced(monkeypatch):
-    mono, model = _attach(monkeypatch, compressor=object())
-    positions = torch.zeros(1, dtype=torch.long)
+    mono, model = _build(monkeypatch, compressor=object())
     with forward(mono.vllm_config, CUDAGraphMode.FULL, _metadata(model)):
-        kernel = kernel_for_layer(mono, 1, positions)
+        kernel = _launch(mono, 1)
         assert kernel.ffn_only
         out = kernel.launch(
             torch.zeros(1, HIDDEN),
@@ -516,10 +513,10 @@ def test_ffn_launch_takes_wo_b_unreduced(monkeypatch):
 def test_launch_declines_a_layout_it_cannot_read(monkeypatch):
     """A later pipeline stage's first layer gets a stream without the mixes:
     ``skip_step`` cannot see that, so the launch declines it."""
-    mono, model = _attach(monkeypatch)
+    mono, model = _build(monkeypatch)
     positions = torch.zeros(1, dtype=torch.long)
     with forward(mono.vllm_config, CUDAGraphMode.FULL, _metadata(model)):
-        kernel = kernel_for_layer(mono, 1, positions)
+        kernel = _launch(mono, 1)
         out = kernel.launch(
             torch.zeros(1, 4, HIDDEN), positions, None, None, None, None
         )

@@ -4,7 +4,6 @@
 
 import subprocess
 import sys
-from collections import defaultdict
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import replace
@@ -21,9 +20,9 @@ from vllm.models.common.mono.guards import (
     _refuse_config,
     _select_spec,
     _set_capture_sizes,
-    configure,
+    select_mono_spec,
 )
-from vllm.models.common.mono.runtime import attach, kernel_for_layer
+from vllm.models.common.mono.runtime import MonoRuntime
 from vllm.models.common.mono.spec import Feature, MonoUnsupported
 
 KERNEL_BACKENDS = ("aiter", "flydsl")
@@ -44,17 +43,6 @@ def forward(config, mode: CUDAGraphMode, attn_metadata: Any) -> Iterator[None]:
         yield
 
 
-def forward_layer(mono, i: int, layer, positions, *args, **kwargs):
-    """Layer ``i`` on its kernel when this step runs on the kernels, else the
-    vLLM layer unchanged: the layer loop a model writes for itself."""
-    k = kernel_for_layer(mono, i, positions)
-    if k is not None:
-        out = k.launch(positions, *args, **kwargs)
-        if out is not None:
-            return out
-    return layer(positions, *args, **kwargs)
-
-
 def _spy(spec, field: str, calls: list):
     """``spec`` with one callback recording its calls."""
     inner = getattr(spec, field)
@@ -71,7 +59,8 @@ class MonoConformance:
     module and fill in the hooks below."""
 
     specs_path: str
-    """``"package.module:MONO_SPECS"``, as the model passes it to ``configure``."""
+    """``"package.module:MONO_SPECS"``, as the model passes it to
+    ``select_mono_spec``."""
 
     def make_config(self, **overrides) -> Any:
         """A config this spec serves, with ``overrides`` applied on top."""
@@ -106,11 +95,17 @@ class MonoConformance:
     def mono(self, config, model):
         return self.make_mono(config, model)
 
-    def make_mono(self, config, model=None):
+    def make_mono(self, config, model=None, bind: bool = True):
         """This rank's runtime, built the way a model builds it: the variant
-        picked once by ``configure``, then handed to ``attach``."""
+        picked once by ``select_mono_spec``, then the runtime over the loaded model,
+        then the caches the runner binds."""
         model = self.make_model(config) if model is None else model
-        return attach(model, config, configure(config, self.specs_path))
+        spec = select_mono_spec(config, self.specs_path)
+        assert spec is not None
+        mono = MonoRuntime(model, config, spec)
+        if bind:
+            mono.bind_caches()
+        return mono
 
     def spec(self, config):
         spec, refusals = _select_spec(_load_specs(self.specs_path), config)
@@ -131,7 +126,7 @@ class MonoConformance:
     def test_refusal_names_every_variant(self, config):
         config.use_v2_model_runner = False
         with pytest.raises(MonoUnsupported) as excinfo:
-            configure(config, self.specs_path)
+            select_mono_spec(config, self.specs_path)
         for spec in _load_specs(self.specs_path):
             assert spec.name in str(excinfo.value)
 
@@ -161,102 +156,98 @@ class MonoConformance:
         sizes = config.compilation_config.cudagraph_capture_sizes
         assert [s for s in sizes if s <= max(widths)] == sorted(widths)
 
-    def test_decided_once_a_forward(self, config, model, mono):
+    def test_decided_once_a_step(self, config, model, mono):
         asked: list = []
         mono.spec = _spy(mono.spec, "skip_step", asked)
-        with forward(config, CUDAGraphMode.NONE, self.decode_metadata(config, model)):
-            self._run_layers(mono, model)
+        step = self._plan(config, model, mono)
+        assert step is not None and step.width == min(mono.widths)
         assert len(asked) == 1
-        assert len(mono.kernels) > 1
 
     def test_every_rank_decides_alike(self, config, model):
         decisions = []
         for _ in range(2):
             other = self.make_mono(config)
-            with forward(
-                config, CUDAGraphMode.NONE, self.decode_metadata(config, model)
-            ):
-                decisions.append(other.skip_reason(self._positions(other)))
-        assert decisions[0] == decisions[1] is None
+            decisions.append(self._plan(config, model, other))
+        assert decisions[0] is not None and decisions[1] is not None
 
     def test_skipped_step_runs_vllm_layers(self, config, model, mono):
         with forward(config, CUDAGraphMode.NONE, self.skipped_metadata(config, model)):
-            assert mono.skip_reason(self._positions(mono)) is not None
+            assert mono.plan(self._positions(mono)) is None
+        assert mono.last_reason is not None
+
+    def test_pipeline_stage_input_runs_vllm_layers(self, config, model, mono):
+        with forward(config, CUDAGraphMode.NONE, self.decode_metadata(config, model)):
+            assert mono.plan(self._positions(mono), object()) is None
+        assert mono.last_reason == "pipeline stage input"
 
     def test_width_off_the_capture_sizes_runs_vllm_layers(self, config, model, mono):
-        off = max(mono.widths) + 1
+        off = torch.zeros(max(mono.widths) + 1, dtype=torch.long)
         with forward(config, CUDAGraphMode.NONE, self.decode_metadata(config, model)):
-            assert mono.skip_reason(torch.zeros(off, dtype=torch.long)) == "width"
+            assert mono.plan(off) is None
+        assert mono.last_reason == "width"
 
     def test_piecewise_runs_vllm_layers(self, config, model, mono):
         meta = self.decode_metadata(config, model)
         with forward(config, CUDAGraphMode.PIECEWISE, meta):
-            assert mono.skip_reason(self._positions(mono)) == "piecewise"
+            assert mono.plan(self._positions(mono)) is None
+        assert mono.last_reason == "piecewise"
 
-    def test_caches_rechecked_when_they_move(self, config, model, mono):
+    def test_unbound_caches_run_vllm_layers(self, config, model):
+        mono = self.make_mono(config, model, bind=False)
+        assert self._plan(config, model, mono) is None
+        assert mono.last_reason == "caches not bound"
+
+    def test_caches_checked_on_every_bind(self, config, model, mono):
         checks: list = []
         mono.spec = _spy(mono.spec, "refuse_caches", checks)
-        self._decode(config, model, mono)
-        assert len(checks) == 1
-        self._decode(config, model, mono)
+        mono.bind_caches()
         assert len(checks) == 1
         sfc = config.compilation_config.static_forward_context
-        for name in mono.cache_layers:
+        for name in mono.kernel.cache_layers:
             sfc[name].kv_cache = sfc[name].kv_cache.clone()
-        self._decode(config, model, mono)
+        mono.bind_caches()
         assert len(checks) == 2
 
     def test_refuse_caches_reports_every_reason(self, config, model, mono):
         reasons = mono.spec.refuse_caches(
-            mono.vllm_config, mono.launch_state, self.bad_caches(config, model)
+            mono.vllm_config, mono.kernel, self.bad_caches(config, model)
         )
         assert len(reasons) >= 2, reasons
 
-    def test_mismatched_caches_refuse_the_step(self, config, model, mono):
+    def test_mismatched_caches_refuse_the_bind(self, config, model, mono):
         sfc = config.compilation_config.static_forward_context
         bad = self.bad_caches(config, model)
-        for name, cache in zip(mono.cache_layers, bad.values(), strict=False):
+        for name, cache in zip(mono.kernel.cache_layers, bad.values(), strict=False):
             sfc[name].kv_cache = cache
         with pytest.raises(MonoUnsupported):
-            self._decode(config, model, mono)
+            mono.bind_caches()
 
-    def test_attach_does_not_move_weights(self, config):
+    def test_build_does_not_move_weights(self, config):
         model = self.make_model(config)
         before = {n: p.data_ptr() for n, p in model.named_parameters()}
         self.make_mono(config, model)
         after = {n: p.data_ptr() for n, p in model.named_parameters()}
         assert before == after
 
-    def test_build_runs_once_a_layer(self, config, model):
+    def test_build_runs_once_over_every_width(self, config, model):
         calls: list = []
-        spec = _spy(configure(config, self.specs_path), "build", calls)
-        mono = attach(model, config, spec)
-        layers = sorted({i for i, _ in mono.kernels})
-        assert [args[2] for args in calls] == [model.layers[i] for i in layers]
-        assert all(set(args[3]) == set(mono.widths) for args in calls)
-        assert set(mono.kernels) == {(i, w) for i in layers for w in mono.widths}
+        spec = _spy(select_mono_spec(config, self.specs_path), "build", calls)
+        mono = MonoRuntime(model, config, spec)
+        assert [args[1] for args in calls] == [model]
+        assert set(calls[0][2]) == set(mono.widths)
 
-    def test_warmup_registered_for_every_width(self, config):
+    def test_warmup_registered_for_every_key(self, config):
         registry = JitWarmupRegistry(config)
         with registry.activate():
             mono = self.make_mono(config)
-        assert len(registry) >= 1
-        by_width: dict[int, set] = defaultdict(set)
-        for (_, width), kernel in mono.kernels.items():
-            by_width[width] |= set(kernel.warmup_keys())
-        assert set(by_width) == set(mono.widths)
-        assert all(by_width.values())
+        keys = mono.kernel.warmup_keys()
+        assert len(keys) == len(set(keys)) >= 1
+        assert len(registry) == len(keys)
         registry.warmup()
 
     def _positions(self, mono) -> torch.Tensor:
         return torch.zeros(min(mono.widths), dtype=torch.long)
 
-    def _decode(self, config, model, mono) -> None:
+    def _plan(self, config, model, mono):
         with forward(config, CUDAGraphMode.NONE, self.decode_metadata(config, model)):
-            mono.skip_reason(self._positions(mono))
-
-    def _run_layers(self, mono, model) -> None:
-        hidden = torch.zeros(min(mono.widths), model.config.hidden_size)
-        positions = self._positions(mono)
-        for i, layer in enumerate(model.layers):
-            hidden = forward_layer(mono, i, layer, positions, hidden)
+            return mono.plan(self._positions(mono))

@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The reference MonoKernel: a ``LayerKernel`` over the layer it replaces."""
+"""The reference MonoKernel: a ``ModelKernel`` over the layers it replaces."""
 
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
 
@@ -10,7 +10,7 @@ import torch
 
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import get_forward_context
-from vllm.models.common.mono.spec import MonoSpec
+from vllm.models.common.mono.spec import MonoSpec, Step
 
 CACHE_DTYPE = torch.bfloat16
 CACHE_NDIM = 4
@@ -43,32 +43,48 @@ class ReferenceModel(torch.nn.Module):
         self.start_layer = 0
         self.end_layer = layers
 
-
-@dataclass
-class LaunchState:
-    """What ``launch_state`` builds once at attach: views of the model's
-    weights, never a copy."""
-
-    weights: dict[int, torch.Tensor]
+    def forward(
+        self,
+        input_ids: torch.Tensor | None,
+        positions: torch.Tensor,
+        intermediate_tensors=None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        hidden = inputs_embeds
+        for layer in self.layers:
+            hidden = layer(positions, hidden)
+        return hidden
 
 
 class ReferenceKernel:
-    """One layer's launch at one width: the work of the layer it replaces, off
-    the weight view its launch state holds."""
+    """The model's decode in one launch: the work of every layer it replaces,
+    off views of the model's weights, with the dense layers left to vLLM."""
 
-    def __init__(self, vllm_config, state: LaunchState, layer, width: int):
-        self.cache_layers = (layer.attn_name,)
-        self.index = layer.index
-        self.weight = state.weights[layer.index]
-        self.width = width
+    def __init__(self, vllm_config, model: ReferenceModel, widths: tuple[int, ...]):
+        self.model = model
+        self.widths = widths
+        served = [
+            model.layers[i]
+            for i in range(model.start_layer, model.end_layer)
+            if not model.layers[i].dense
+        ]
+        self.weights = {layer.index: layer.weight.data for layer in served}
+        self.cache_layers = tuple(layer.attn_name for layer in served)
         self.launched: list[int] = []
 
-    def launch(self, positions: torch.Tensor, hidden: torch.Tensor):
-        self.launched.append(self.width)
-        return hidden + self.weight
+    def run(self, step: Step, input_ids, inputs_embeds, **kwargs):
+        self.launched.append(step.width)
+        hidden = inputs_embeds
+        for layer in self.model.layers:
+            weight = self.weights.get(layer.index)
+            if weight is None:
+                hidden = layer(step.positions, hidden)
+            else:
+                hidden = hidden + weight
+        return hidden
 
     def warmup_keys(self) -> list[Any]:
-        return [(self.index, self.width)]
+        return [(i, w) for i in self.weights for w in self.widths]
 
     def compile(self, key: Any) -> None:
         pass
@@ -92,20 +108,12 @@ def refuse_model(model) -> list[str]:
     return [] if isinstance(model, ReferenceModel) else ["not a ReferenceModel"]
 
 
-def skip_layer(layer) -> str | None:
-    return "dense layer" if layer.dense else None
-
-
-def skip_step(vllm_config, state: LaunchState, width: int) -> str | None:
+def skip_step(vllm_config, kernel: ReferenceKernel, width: int) -> str | None:
     md = get_forward_context().attn_metadata
     return "prefill" if md.get("prefill") else None
 
 
-def launch_state(model, vllm_config, layers: tuple[int, ...]) -> LaunchState:
-    return LaunchState(weights={i: model.layers[i].weight.data for i in layers})
-
-
-def refuse_caches(vllm_config, state: LaunchState, caches) -> list[str]:
+def refuse_caches(vllm_config, kernel: ReferenceKernel, caches) -> list[str]:
     reasons = []
     for name, cache in caches.items():
         if cache.dtype is not CACHE_DTYPE:
@@ -115,22 +123,18 @@ def refuse_caches(vllm_config, state: LaunchState, caches) -> list[str]:
     return reasons
 
 
-def build(
-    vllm_config, state: LaunchState, layer, widths: tuple[int, ...]
-) -> dict[int, ReferenceKernel]:
-    return {w: ReferenceKernel(vllm_config, state, layer, w) for w in widths}
+def build(vllm_config, model, widths: tuple[int, ...]) -> ReferenceKernel:
+    return ReferenceKernel(vllm_config, model, widths)
 
 
-REFERENCE = MonoSpec[LaunchState](
+REFERENCE = MonoSpec[ReferenceKernel](
     name="reference",
     supports=frozenset(),
     widths=widths,
     refuse_config=refuse_config,
     refuse_model=refuse_model,
     refuse_caches=refuse_caches,
-    skip_layer=skip_layer,
     skip_step=skip_step,
-    launch_state=launch_state,
     build=build,
 )
 

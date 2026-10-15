@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """DeepSeek-V4.1's MonoKernels on ROCm CDNA4 (``--monokernel``, RFC #60904)."""
 
-from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
 
 import torch
@@ -11,7 +10,7 @@ import vllm.envs as envs
 from vllm.config import CUDAGraphMode
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
-from vllm.models.common.mono.spec import Feature, MonoSpec
+from vllm.models.common.mono.spec import Feature, MonoSpec, Step
 from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
@@ -69,39 +68,19 @@ def _select(
     )
 
 
-@dataclass
-class LaunchState:
-    """What this rank's launches hold across every step: the runner (one a
-    rank, its peer memory collective over the TP group), the error words, each
-    kernel layer's weight views, and the metadata keys ``skip_step`` validates
-    for every kernel layer at once.
-
-    Built once at attach and never moved: the kernels and the captured graphs
-    hold its addresses.
-    """
-
-    runner: Any
-    embed_layer: int
-    words: torch.Tensor
-    weights: dict[int, Any] = field(default_factory=dict)
-    swa_keys: list[str] = field(default_factory=list)
-    comp_keys: list[str] = field(default_factory=list)
-    need_swa: bool = False
-
-
 class DSV41LayerKernel:
-    """The ``LayerKernel`` both launches implement: the layer, its width and
-    its weight views, with the launch shape left to the subclass."""
+    """What both launches share: the layer, its width and its weight views,
+    with the launch shape left to the subclass."""
 
     ffn_only = False
 
     def __init__(
-        self, launch_state: LaunchState, layer: "DeepseekV4DecoderLayer", width: int
+        self, mono: "DSV41Kernel", layer: "DeepseekV4DecoderLayer", width: int
     ):
-        self.launch_state = launch_state
+        self.mono = mono
         self.layer = layer
         self.width = width
-        self.weights = launch_state.weights[layer.attn.layer_id]
+        self.weights = mono.weights[layer.attn.layer_id]
         self.cache_layers: tuple[str, ...] = ()
 
     def warmup_keys(self) -> list[Any]:
@@ -118,9 +97,9 @@ class WholeLayer(DSV41LayerKernel):
     """The whole backbone layer as K1 and K2, from the layer's own inputs."""
 
     def __init__(
-        self, launch_state: LaunchState, layer: "DeepseekV4DecoderLayer", width: int
+        self, mono: "DSV41Kernel", layer: "DeepseekV4DecoderLayer", width: int
     ):
-        super().__init__(launch_state, layer, width)
+        super().__init__(mono, layer, width)
         attn = layer.attn
         self.ratio = attn.compress_ratio
         self.index = attn.indexer is not None
@@ -131,7 +110,7 @@ class WholeLayer(DSV41LayerKernel):
         )
         # K1's seam folds the owed post into the residual, except where the
         # residual arrives settled: the embedding, or after the Engram write.
-        settled = attn.layer_id == launch_state.embed_layer or layer.engram is not None
+        settled = attn.layer_id == mono.embed_layer or layer.engram is not None
         self.folds = (True, False) if settled else (True,)
 
     def warmup_keys(self) -> list[Any]:
@@ -139,8 +118,8 @@ class WholeLayer(DSV41LayerKernel):
 
     def compile(self, key: Any) -> None:
         width, ratio, fold, index = key
-        self.launch_state.runner.scratch(width)
-        self.launch_state.runner.kernels(width, ratio, fold=fold, index=index)
+        self.mono.runner.scratch(width)
+        self.mono.runner.kernels(width, ratio, fold=fold, index=index)
 
     def launch(
         self,
@@ -154,7 +133,7 @@ class WholeLayer(DSV41LayerKernel):
         engram_mask: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, ...] | None:
         layer, attn = self.layer, self.layer.attn
-        runner = self.launch_state.runner
+        runner = self.mono.runner
         first = residual is None
         if first and x.dim() != 2:
             return None
@@ -214,8 +193,8 @@ class FfnSeam(DSV41LayerKernel):
         return [(self.width, "ffn")]
 
     def compile(self, key: Any) -> None:
-        self.launch_state.runner.scratch(key[0])
-        self.launch_state.runner.ffn_kernel(key[0])
+        self.mono.runner.scratch(key[0])
+        self.mono.runner.ffn_kernel(key[0])
 
     def launch(
         self,
@@ -228,7 +207,114 @@ class FfnSeam(DSV41LayerKernel):
         tensors = (part, residual, post_mix, res_mix, pre_mix)
         if not all(t.is_contiguous() for t in tensors):
             return None
-        return self.launch_state.runner.ffn(self.weights, *tensors)
+        return self.mono.runner.ffn(self.weights, *tensors)
+
+
+class DSV41Dispatch:
+    """One step's launches, as the backbone's layers reach them. Built per step
+    from the step's width, so a layer only ever sees the launch its rows fit."""
+
+    def __init__(self, kernels: dict[tuple[int, int], DSV41LayerKernel], width: int):
+        self.kernels = kernels
+        self.width = width
+
+    def __call__(self, layer_id: int) -> DSV41LayerKernel | None:
+        return self.kernels.get((layer_id, self.width))
+
+
+class DSV41Kernel:
+    """DeepSeek-V4.1's decode on this rank: the runner (one a rank, its peer
+    memory collective over the TP group), each kernel layer's weight views, and
+    a launch per (layer, width).
+
+    ``run`` takes the backbone's own forward, which keeps the engram hashes,
+    the sequence-parallel shard and the final collapse on one code path, and
+    hands it the step's dispatch for its layers to launch from.
+
+    Built once at load and never moved: the launches and the captured graphs
+    hold its addresses.
+    """
+
+    def __init__(self, vllm_config, model, widths: tuple[int, ...]):
+        from vllm.models.common.mono.guards import tp_group
+        from vllm.models.deepseek_v41.amd.mono.runner import MAX_TOKENS, DSV41MonoLayer
+
+        assert MAX_TOKENS >= MAX_ROWS, MAX_TOKENS
+        rank, world, cpu_group = tp_group()
+        device = next(model.parameters()).device
+        self.model = model
+        self.runner = DSV41MonoLayer(world, rank, cpu_group, device)
+        self.embed_layer = getattr(model, "start_layer", 0)
+        self.words = torch.zeros(world, dtype=torch.int32, device=device)
+        self.weights: dict[int, Any] = {}
+        self.swa_keys: list[str] = []
+        self.comp_keys: list[str] = []
+        self.need_swa = False
+        self.kernels: dict[tuple[int, int], DSV41LayerKernel] = {}
+        self._owners: dict[Any, DSV41LayerKernel] = {}
+
+        tp_size = vllm_config.parallel_config.tensor_parallel_size
+        for layer in self._kernel_layers(model):
+            self._build_layer(layer, tp_size, widths)
+        self.cache_layers = tuple(
+            sorted({n for k in self.kernels.values() for n in k.cache_layers})
+        )
+
+    def _kernel_layers(self, model) -> list["DeepseekV4DecoderLayer"]:
+        end = getattr(model, "end_layer", len(model.layers))
+        layers = []
+        for i in range(self.embed_layer, end):
+            why = _skip_layer(model.layers[i])
+            if why is None:
+                layers.append(model.layers[i])
+            else:
+                logger.info_once(
+                    "DSv4.1 MonoKernel: layer %d on vLLM's path (%s)", i, why
+                )
+        return layers
+
+    def _build_layer(self, layer, tp_size: int, widths: tuple[int, ...]) -> None:
+        why = _ffn_only(layer)
+        layer_id = layer.attn.layer_id
+        self.weights[layer_id] = _weights(layer, why is not None, tp_size)
+        launch: type[DSV41LayerKernel] = WholeLayer
+        if why is not None:
+            logger.info_once(
+                "DSv4.1 MonoKernel: the FFN launch for layers with %s", why
+            )
+            # A decode step hands wo_b's TP partial to the FFN launch; the layer
+            # reduces it on the steps that keep vLLM's path.
+            layer.attn.wo_b.reduce_results = False
+            launch = FfnSeam
+        else:
+            self.need_swa = True
+            for key, keys in (
+                (layer.attn.swa_cache_layer.prefix, self.swa_keys),
+                (layer.attn.compressed_cache_prefix, self.comp_keys),
+            ):
+                if key is not None and key not in keys:
+                    keys.append(key)
+        for width in widths:
+            kernel = launch(self, layer, width)
+            self.kernels[layer_id, width] = kernel
+            for key in kernel.warmup_keys():
+                self._owners.setdefault(key, kernel)
+
+    def warmup_keys(self) -> list[Any]:
+        return list(self._owners)
+
+    def compile(self, key: Any) -> None:
+        self._owners[key].compile(key)
+
+    def run(self, step: Step, input_ids, inputs_embeds, **kwargs) -> Any:
+        return self.model(
+            input_ids,
+            step.positions,
+            None,
+            inputs_embeds,
+            mono=DSV41Dispatch(self.kernels, step.width),
+            **kwargs,
+        )
 
 
 def _compute_units() -> int:
@@ -327,12 +413,14 @@ def _ffn_only(layer) -> str | None:
     return None
 
 
-def _skip_step(vllm_config, launch_state: LaunchState, width: int) -> str | None:
+def _skip_step(vllm_config, mono: DSV41Kernel, width: int) -> str | None:
     """Why this step keeps vLLM's path at every layer, or None when the kernels
     take it. One verdict for every kernel layer, from the batch the whole TP
     group sees alike."""
     fc = get_forward_context()
     md = fc.attn_metadata
+    if not mono.kernels:
+        return "no layer takes a launch"
     if not 1 <= width <= MAX_ROWS:
         return f"{width} rows"
     if fc.cudagraph_runtime_mode not in (CUDAGraphMode.NONE, CUDAGraphMode.FULL):
@@ -340,9 +428,9 @@ def _skip_step(vllm_config, launch_state: LaunchState, width: int) -> str | None
         return f"{fc.cudagraph_runtime_mode} step"
     if not isinstance(md, dict):  # a profile / dummy run, or DBO ubatches
         return "no attention metadata"
-    if any(md.get(k) is None for k in launch_state.comp_keys):
+    if any(md.get(k) is None for k in mono.comp_keys):
         return "layer metadata missing"
-    for key in launch_state.swa_keys:
+    for key in mono.swa_keys:
         swa = cast("DeepseekV4ROCMAiterSparseSWAMetadata | None", md.get(key))
         if swa is None:
             return "layer metadata missing"
@@ -350,7 +438,7 @@ def _skip_step(vllm_config, launch_state: LaunchState, width: int) -> str | None
             return "not a decode-only step"
         if swa.num_decode_tokens > width:
             return "more decode tokens than rows"
-        if not launch_state.need_swa:
+        if not mono.need_swa:
             continue
         if swa.decode_swa_width != SWA_WIDTH:
             return f"SWA width {swa.decode_swa_width}"
@@ -361,32 +449,6 @@ def _skip_step(vllm_config, launch_state: LaunchState, width: int) -> str | None
         ):
             return "SWA decode metadata missing"
     return None
-
-
-def _launch_state(model, vllm_config, layers: tuple[int, ...]) -> LaunchState:
-    """This rank's runner, collective over the TP group, and the metadata keys
-    of the layers that take a whole-layer launch."""
-    from vllm.models.common.mono.guards import tp_group
-    from vllm.models.deepseek_v41.amd.mono.runner import MAX_TOKENS, DSV41MonoLayer
-
-    assert MAX_TOKENS >= MAX_ROWS, MAX_TOKENS
-    rank, world, cpu_group = tp_group()
-    device = next(model.parameters()).device
-    state = LaunchState(
-        runner=DSV41MonoLayer(world, rank, cpu_group, device),
-        embed_layer=getattr(model, "start_layer", 0),
-        words=torch.zeros(world, dtype=torch.int32, device=device),
-    )
-    whole = [model.layers[i] for i in layers if _ffn_only(model.layers[i]) is None]
-    state.need_swa = bool(whole)
-    for layer in whole:
-        for key, keys in (
-            (layer.attn.swa_cache_layer.prefix, state.swa_keys),
-            (layer.attn.compressed_cache_prefix, state.comp_keys),
-        ):
-            if key is not None and key not in keys:
-                keys.append(key)
-    return state
 
 
 def _weights(layer, ffn_only: bool, world: int):
@@ -443,7 +505,7 @@ def _attn_weights(a, world: int):
     return attn
 
 
-def _refuse_caches(vllm_config, launch_state: LaunchState, caches) -> list[str]:
+def _refuse_caches(vllm_config, mono: DSV41Kernel, caches) -> list[str]:
     """Every reason the kernels cannot read these caches: they index each as
     [blocks, block, RECORD] bytes."""
     reasons = []
@@ -460,32 +522,18 @@ def _refuse_caches(vllm_config, launch_state: LaunchState, caches) -> list[str]:
     return reasons
 
 
-def _build(
-    vllm_config, launch_state: LaunchState, layer, widths: tuple[int, ...]
-) -> dict[int, DSV41LayerKernel]:
-    world = vllm_config.parallel_config.tensor_parallel_size
-    why = _ffn_only(layer)
-    launch_state.weights[layer.attn.layer_id] = _weights(layer, why is not None, world)
-    kernel: type[DSV41LayerKernel] = WholeLayer
-    if why is not None:
-        logger.info_once("DSv4.1 MonoKernel: the FFN launch for layers with %s", why)
-        # A decode step hands wo_b's TP partial to the FFN launch; the layer
-        # reduces it on the steps that keep vLLM's path.
-        layer.attn.wo_b.reduce_results = False
-        kernel = FfnSeam
-    return {w: kernel(launch_state, layer, w) for w in widths}
+def _build(vllm_config, model, widths: tuple[int, ...]) -> DSV41Kernel:
+    return DSV41Kernel(vllm_config, model, widths)
 
 
-MONO_SPEC = MonoSpec[LaunchState](
+MONO_SPEC = MonoSpec[DSV41Kernel](
     name="dsv41-cdna4",
     supports=frozenset({Feature.PIPELINE_PARALLEL, Feature.SPECULATIVE_DECODING}),
     widths=_widths,
     refuse_config=_refuse_config,
     refuse_model=_refuse_model,
     refuse_caches=_refuse_caches,
-    skip_layer=_skip_layer,
     skip_step=_skip_step,
-    launch_state=_launch_state,
     build=_build,
 )
 

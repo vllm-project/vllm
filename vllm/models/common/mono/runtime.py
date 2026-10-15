@@ -1,24 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""One ``MonoRuntime`` a rank: the per-step decision and the cache re-checks,
-behind the hooks a model calls (``attach``, then ``kernel_for_layer`` per layer).
+"""One ``MonoRuntime`` a rank: the per-step decision and the cache checks,
+behind the two hooks a model's forward calls (``plan``, then ``run``).
 """
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Generic
 
 import torch
 
 from vllm.config.compilation import CUDAGraphMode
-from vllm.forward_context import get_forward_context
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.model_executor.warmup.jit_warmup import VllmJitKernel
 from vllm.models.common.mono.guards import _refuse_model, tp_agree, tp_group
 from vllm.models.common.mono.spec import (
-    LaunchStateT,
-    LayerKernel,
+    KernelT,
+    ModelKernel,
     MonoSpec,
     MonoUnsupported,
+    Step,
 )
 
 if TYPE_CHECKING:
@@ -26,51 +27,49 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-KernelT = TypeVar("KernelT", bound=LayerKernel)
-"""The kernel type one spec's ``build`` returns. ``LayerKernel`` is only the
-lower bound, so a model annotates its runtime with its own kernel class
-(``MonoRuntime[MyLayerKernel, MyLaunchState]``) and reads what that class
-adds."""
-
 
 class MonoWarmup(VllmJitKernel["MonoWarmup.CompileKey"]):
-    """A spec's layer-kernel builds as vLLM JIT warm-up keys."""
+    """A spec's kernel builds as vLLM JIT warm-up keys."""
 
     @dataclass(frozen=True)
     class CompileKey:
         spec: str
         build: Any
 
-    def __init__(self, spec: str, owners: dict[Any, LayerKernel]):
+    def __init__(self, spec: str, kernel: ModelKernel):
         super().__init__()
         self.spec = spec
-        self.owners = owners
+        self.kernel = kernel
 
     def get_warmup_keys(self) -> list["MonoWarmup.CompileKey"]:
-        return [self.CompileKey(self.spec, b) for b in self.owners]
+        return [self.CompileKey(self.spec, b) for b in self.kernel.warmup_keys()]
 
     def compile(self, compile_key: "MonoWarmup.CompileKey") -> None:
-        self.owners[compile_key.build].compile(compile_key.build)
+        self.kernel.compile(compile_key.build)
         self._compiled_cache[compile_key] = True
 
 
-class MonoRuntime(Generic[KernelT, LaunchStateT]):
-    """A model's MonoKernels on this rank.
+class MonoRuntime(Generic[KernelT]):
+    """A model's MonoKernel on this rank.
 
-    The runtime reads the spec and builds the layer kernels. It also
-    registers them for warmup and handles caching, and drivers the
-    per-step decision whether to run the kernels or the model's layers.
-
-    To build the kernels, it first creates the necessary launch state
-    LaunchStateT. The kernels built by the runtime are of type KernelT
-    and are stored in the `kernels` attribute.
+    The runtime reads the spec and builds the kernel, registers it for warm-up,
+    checks the caches whenever the runner binds them, and decides each step
+    between the kernel and vLLM's own forward. The kernel it builds is of type
+    KernelT and is held in the ``kernel`` attribute.
     """
 
-    launch_state: LaunchStateT
-    """What ``MonoSpec.launch_state`` built, set whenever a layer takes a
-    kernel, which is the only case ``attach`` hands the runtime back."""
+    def __init__(self, model, vllm_config: "VllmConfig", spec: MonoSpec[KernelT]):
+        """Builds this rank's kernel. Collective over the TP group.
 
-    def __init__(self, spec: MonoSpec[LaunchStateT], model, vllm_config: "VllmConfig"):
+        Args:
+            model: The loaded model, in ``process_weights_after_loading``.
+            vllm_config: The engine's config.
+            spec: The variant ``select_mono_spec`` picked.
+
+        Raises:
+            MonoUnsupported: This rank, or another, refused the loaded model.
+
+        """
         self.spec = spec
         reasons = _refuse_model(spec, model)
         agreed = tp_agree(not reasons, tp_group()[2])
@@ -81,154 +80,66 @@ class MonoRuntime(Generic[KernelT, LaunchStateT]):
             raise MonoUnsupported(f"{refused}: another TP rank refused")
         self.vllm_config = vllm_config
         self.widths = spec.widths(vllm_config)
-        self.kernels: dict[tuple[int, int], KernelT] = {}
-        self._why: str | None = None
-        self._fc: Any = None
-        self._checked: tuple | None = None
+        self.last_reason: str | None = None
+        self._bound = False
+        self.kernel: KernelT = spec.build(vllm_config, model, self.widths)
+        if self.kernel.warmup_keys():
+            MonoWarmup(spec.name, self.kernel).register_warmup()
+        logger.info("MonoKernel %s: widths %s", spec.name, list(self.widths))
 
-        indices = self._kernel_layers(model)
-        if not indices:
-            self.cache_layers: list[str] = []
-            return
-        self.launch_state = spec.launch_state(model, vllm_config, tuple(indices))
-        for i in indices:
-            built = spec.build(
-                vllm_config, self.launch_state, model.layers[i], self.widths
-            )
-            missing = set(self.widths) - set(built)
-            if missing:
-                raise MonoUnsupported(
-                    f"MonoKernel {spec.name}: layer {i} has no kernel for widths "
-                    f"{sorted(missing)}"
-                )
-            for w in self.widths:
-                self.kernels[i, w] = cast(KernelT, built[w])
-        self.cache_layers = sorted(
-            {n for k in self.kernels.values() for n in k.cache_layers}
-        )
-        self._register_warmup()
-        logger.info(
-            "MonoKernel %s: %d layers, widths %s",
-            spec.name,
-            len(indices),
-            list(self.widths),
-        )
+    def bind_caches(self) -> None:
+        """Checks the caches the kernel will read, as the runner binds them.
 
-    def _kernel_layers(self, model) -> list[int]:
-        start = getattr(model, "start_layer", 0)
-        end = getattr(model, "end_layer", len(model.layers))
-        out = []
-        for i in range(start, end):
-            why = self.spec.skip_layer(model.layers[i])
-            if why is None:
-                out.append(i)
-            else:
-                logger.info_once(
-                    "MonoKernel %s: layer %d on vLLM's path (%s)",
-                    self.spec.name,
-                    i,
-                    why,
-                )
-        return out
+        Called from ``ModelState.initialize_kv_cache``, which runs once for the
+        throwaway cache memory profiling allocates and again for the real one.
 
-    def _register_warmup(self) -> None:
-        owners: dict[Any, LayerKernel] = {}
-        for k in self.kernels.values():
-            for key in k.warmup_keys():
-                owners.setdefault(key, k)
-        if owners:
-            MonoWarmup(self.spec.name, owners).register_warmup()
+        Raises:
+            MonoUnsupported: The caches are not what this spec serves.
 
-    def _refuse_caches(self) -> None:
-        """Re-checks the caches whenever they moved (keyed on every tensor's
-        data_ptr and numel): memory profiling runs real steps on throwaway
-        caches before the real ones exist."""
+        """
         sfc = self.vllm_config.compilation_config.static_forward_context
-        caches = {n: sfc[n].kv_cache for n in self.cache_layers}
-        key = tuple(
-            (t.data_ptr(), t.numel())
-            for c in caches.values()
-            for t in (c if isinstance(c, (list, tuple)) else (c,))
-        )
-        if key == self._checked:
-            return
-        if torch.cuda.is_available() and torch.cuda.is_current_stream_capturing():
-            raise MonoUnsupported(
-                f"MonoKernel {self.spec.name}: caches moved during CUDA graph capture"
-            )
-        reasons = self.spec.refuse_caches(self.vllm_config, self.launch_state, caches)
+        caches = {n: sfc[n].kv_cache for n in self.kernel.cache_layers}
+        reasons = self.spec.refuse_caches(self.vllm_config, self.kernel, caches)
         if reasons:
             raise MonoUnsupported(
                 f"MonoKernel {self.spec.name} caches: " + "; ".join(reasons)
             )
-        self._checked = key
+        self._bound = True
 
-    def skip_reason(self, positions: torch.Tensor) -> str | None:
-        """Why this forward runs vLLM's layers, None when it runs on the
-        kernels. Decided on the first kernel layer to ask and reused by the
-        rest, so every layer of one forward is answered alike.
+    def plan(self, positions: torch.Tensor, intermediate_tensors=None) -> Step | None:
+        """This step's plan, or None to run the model's own forward instead.
 
-        Raises:
-            MonoUnsupported: The caches the kernels would read moved to
-                something this spec cannot serve.
+        Steps that run the model's forward: a pipeline stage's inputs, a width
+        off the spec's widths, a PIECEWISE step (keyed by token count alone, so
+        it is replayed for mixed batches too), and whatever ``skip_step``
+        refuses. ``last_reason`` holds why.
 
+        Every predicate is the same on every TP rank: a MonoKernel waits
+        in-kernel on its peers, so the ranks must take the same path.
         """
-        fc = get_forward_context()
-        if fc is self._fc:
-            return self._why
-        n = positions.size(-1)
+        width = positions.size(-1)
         why: str | None
-        if fc.cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE:
-            why = "piecewise"
-        elif n not in self.widths:
+        if intermediate_tensors is not None:
+            why = "pipeline stage input"
+        elif width not in self.widths:
             why = "width"
+        elif not is_forward_context_available():
+            why = "no forward context"
+        elif get_forward_context().cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE:
+            why = "piecewise"
+        elif not self._bound:
+            why = "caches not bound"
         else:
-            why = self.spec.skip_step(self.vllm_config, self.launch_state, n)
-            if why is None:
-                self._refuse_caches()
-        self._fc, self._why = fc, why
-        return why
+            why = self.spec.skip_step(self.vllm_config, self.kernel, width)
+        self.last_reason = why
+        if why is not None:
+            logger.info_once(
+                "MonoKernel %s: step on vLLM's path (%s)", self.spec.name, why
+            )
+            return None
+        return Step(width=width, positions=positions)
 
-
-def attach(
-    model, vllm_config: "VllmConfig", spec: MonoSpec[LaunchStateT] | None
-) -> MonoRuntime[Any, LaunchStateT] | None:
-    """Builds the launch state and this rank's layer kernels. Collective over
-    the TP group.
-
-    Args:
-        model: The loaded model, in ``process_weights_after_loading``.
-        vllm_config: The engine's config.
-        spec: The variant ``configure`` picked, None with the switch off.
-
-    Returns:
-        This rank's ``MonoRuntime``, or None with the switch off or when no layer
-        takes a kernel. Annotate it with the kernel class the spec's ``build``
-        returns (which is what ``kernel_for_layer`` then hands back) and the
-        spec's launch state.
-
-    Raises:
-        MonoUnsupported: This rank, or another, refused the loaded model.
-
-    """
-    if spec is None:
-        return None
-    mono: MonoRuntime[Any, LaunchStateT] = MonoRuntime(spec, model, vllm_config)
-    if not mono.kernels:
-        logger.info("MonoKernel %s: no layer takes a kernel", spec.name)
-        return None
-    return mono
-
-
-def kernel_for_layer(
-    mono: MonoRuntime[KernelT, Any] | None, i: int, positions
-) -> KernelT | None:
-    """Layer ``i``'s kernel when this step runs on the kernels, else None.
-
-    The first call under a forward context decides for every layer. The model
-    calls ``launch`` where it suits the layer, and runs the vLLM layer
-    unchanged when this returns None.
-    """
-    if mono is None or mono.skip_reason(positions) is not None:
-        return None
-    return mono.kernels.get((i, positions.size(-1)))
+    def run(self, step: Step, input_ids, inputs_embeds, **kwargs) -> Any:
+        """A planned step on the kernel, returning what the model's own forward
+        would have returned."""
+        return self.kernel.run(step, input_ids, inputs_embeds, **kwargs)

@@ -8,6 +8,8 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar
 
 if TYPE_CHECKING:
+    import torch
+
     from vllm.config import VllmConfig
 
 
@@ -30,31 +32,37 @@ class Feature(str, Enum):
     WEIGHT_UPDATES = "weight_updates"
 
 
-LaunchStateT = TypeVar("LaunchStateT")
-"""Whatever one spec's ``launch_state`` builds. The library never looks inside
-it, so a spec chooses the type and the callbacks that receive it agree."""
-
-
 class MonoUnsupported(Exception):
     """The configuration or the loaded model is outside what a spec serves."""
 
 
-class LayerKernel(Protocol):
-    """One decoder layer's launch, at one width, on this rank."""
+@dataclass(frozen=True)
+class Step:
+    """One decode step the kernel takes, as ``MonoRuntime.plan`` decided it."""
+
+    width: int
+    """The step's rows, one of the widths the spec serves."""
+
+    positions: "torch.Tensor"
+    """The step's positions, as the model's forward was handed them."""
+
+
+class ModelKernel(Protocol):
+    """One model's decode on this rank, for every width the spec serves.
+
+    The kernel owns its own layer loop, so the library has no opinion about
+    layers: a kernel may replace one layer, two, or the whole backbone.
+    """
 
     cache_layers: tuple[str, ...]
     """Attention layers whose caches ``MonoSpec.refuse_caches`` checks."""
 
-    def launch(self, *args, **kwargs) -> Any:
-        """Takes and returns what the vLLM layer it replaces does, or None to
-        decline this call.
-
-        The decline should only trigger on what ``skip_step`` cannot answer,
-        such as the layout of the tensors the layer was handed."""
+    def run(self, step: Step, input_ids, inputs_embeds, **kwargs) -> Any:
+        """Takes and returns what the model's own forward does."""
         ...
 
     def warmup_keys(self) -> list[Any]:
-        """Hashable build keys of this width's launches, compiled before CUDA
+        """Hashable build keys of this kernel's launches, compiled before CUDA
         graph capture by vLLM's JIT warm-up."""
         ...
 
@@ -63,8 +71,14 @@ class LayerKernel(Protocol):
         ...
 
 
+KernelT = TypeVar("KernelT", bound=ModelKernel)
+"""What one spec's ``build`` returns. ``ModelKernel`` is only the lower bound,
+so a model annotates its runtime with its own kernel class
+(``MonoRuntime[MyKernel]``) and reads what that class adds."""
+
+
 @dataclass(frozen=True)
-class MonoSpec(Generic[LaunchStateT]):
+class MonoSpec(Generic[KernelT]):
     """Definition of when a monokernel can run, and how to build it.
 
     Attributes:
@@ -76,22 +90,14 @@ class MonoSpec(Generic[LaunchStateT]):
         refuse_config: Deployment refusals the engine's config answers, before
             the weights are loaded.
         refuse_model: Deployment refusals only the loaded model answers.
-        refuse_caches: Deployment refusals the KV caches the kernels will read
-            answer, re-run whenever those caches move. Takes the launch state,
-            so the caches are checked against what the kernels were built for.
-        skip_layer: Why one layer takes vLLM's path, None when it takes the
-            kernel's. Takes only the layer, so what it reads is what every rank
-            of the same model sees alike.
+        refuse_caches: Deployment refusals the KV caches the kernel will read
+            answer, re-run whenever the runner binds caches.
         skip_step: Why one step takes vLLM's path, None when it takes the
             kernel's. Takes the step's width; anything else it needs it reads
             from the forward context, which every rank sees alike.
-        launch_state: The weights and launch state, built once at attach, off
-            the loaded model (whose parameters carry the device the kernels
-            launch on). The only place a weight copy is ever made.
-        build: One layer's kernels, by width, called once a layer with every
-            width the spec serves. What a layer prepares once (its weight
-            views, anything the layer itself must be told) is prepared here,
-            and the widths share it. Must return a kernel for every width.
+        build: This rank's kernel, built once off the loaded model (whose
+            parameters carry the device it launches on) and every width the
+            spec serves. The only place a weight copy is ever made.
 
     """
 
@@ -100,10 +106,6 @@ class MonoSpec(Generic[LaunchStateT]):
     widths: Callable[["VllmConfig"], tuple[int, ...]]
     refuse_config: Callable[["VllmConfig"], list[str]]
     refuse_model: Callable[[Any], list[str]]
-    refuse_caches: Callable[["VllmConfig", LaunchStateT, Mapping[str, Any]], list[str]]
-    skip_layer: Callable[[Any], str | None]
-    skip_step: Callable[["VllmConfig", LaunchStateT, int], str | None]
-    launch_state: Callable[[Any, "VllmConfig", tuple[int, ...]], LaunchStateT]
-    build: Callable[
-        ["VllmConfig", LaunchStateT, Any, tuple[int, ...]], Mapping[int, LayerKernel]
-    ]
+    refuse_caches: Callable[["VllmConfig", KernelT, Mapping[str, Any]], list[str]]
+    skip_step: Callable[["VllmConfig", KernelT, int], str | None]
+    build: Callable[["VllmConfig", Any, tuple[int, ...]], KernelT]

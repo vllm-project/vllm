@@ -6,10 +6,10 @@ import pytest
 import torch
 
 from tests.models.common.mono import reference
-from tests.models.common.mono.kit import MonoConformance, forward, forward_layer
+from tests.models.common.mono.kit import MonoConformance, forward
 from vllm.config.compilation import CUDAGraphMode
-from vllm.models.common.mono.guards import _select_spec, configure
-from vllm.models.common.mono.runtime import attach
+from vllm.models.common.mono.guards import _select_spec, select_mono_spec
+from vllm.models.common.mono.runtime import MonoRuntime
 from vllm.models.common.mono.spec import MonoUnsupported
 
 SPECS_PATH = "tests.models.common.mono.reference:MONO_SPECS"
@@ -36,11 +36,10 @@ class TestReferenceSpec(MonoConformance):
         }
 
 
-def test_switch_off_means_no_attach():
+def test_switch_off_means_no_spec():
     config = reference.make_config()
     config.kernel_config.monokernel = False
-    assert configure(config, SPECS_PATH) is None
-    assert attach(reference.make_model(config), config, None) is None
+    assert select_mono_spec(config, SPECS_PATH) is None
 
 
 def test_the_first_servable_variant_wins():
@@ -56,36 +55,43 @@ def test_the_first_servable_variant_wins():
     assert refusals == {}
 
 
+def _make_mono(config, model):
+    mono = MonoRuntime(model, config, select_mono_spec(config, SPECS_PATH))
+    mono.bind_caches()
+    return mono
+
+
 def test_skipped_layers_keep_vllm_path():
     config = reference.make_config()
     model = reference.make_model(config)
-    mono = attach(model, config, configure(config, SPECS_PATH))
-    assert {i for i, _ in mono.kernels} == {1, 2, 3}
+    mono = _make_mono(config, model)
+    assert set(mono.kernel.weights) == {1, 2, 3}
 
 
 def test_kernel_layers_follow_the_pipeline_slice():
     config = reference.make_config()
     model = reference.make_model(config)
     model.start_layer, model.end_layer = 2, 4
-    mono = attach(model, config, configure(config, SPECS_PATH))
-    assert {i for i, _ in mono.kernels} == {2, 3}
+    mono = _make_mono(config, model)
+    assert set(mono.kernel.weights) == {2, 3}
 
 
-def test_kernels_run_the_layers_they_replace():
+def test_the_kernel_runs_the_layers_it_replaces():
     config = reference.make_config()
     model = reference.make_model(config)
-    mono = attach(model, config, configure(config, SPECS_PATH))
+    mono = _make_mono(config, model)
     width = min(mono.widths)
     positions = torch.zeros(width, dtype=torch.long)
-    hidden = torch.zeros(width, model.config.hidden_size)
+    embeds = torch.zeros(width, model.config.hidden_size)
     with forward(config, CUDAGraphMode.NONE, {"prefill": False}):
-        for i, layer in enumerate(model.layers):
-            hidden = forward_layer(mono, i, layer, positions, hidden)
-    assert torch.equal(hidden, torch.full_like(hidden, 0 + 1 + 2 + 3))
-    assert [k.launched for k in mono.kernels.values() if k.launched] == [[width]] * 3
+        step = mono.plan(positions)
+        assert step is not None
+        hidden = mono.run(step, None, embeds)
+    assert torch.equal(hidden, model(None, positions, None, embeds))
+    assert mono.kernel.launched == [width]
 
 
 def test_model_refusal_is_raised():
     config = reference.make_config()
     with pytest.raises(MonoUnsupported, match="not a ReferenceModel"):
-        attach(torch.nn.Linear(2, 2), config, configure(config, SPECS_PATH))
+        MonoRuntime(torch.nn.Linear(2, 2), config, select_mono_spec(config, SPECS_PATH))

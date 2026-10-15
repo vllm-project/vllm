@@ -168,11 +168,13 @@ def _set_capture_sizes(spec: MonoSpec[Any], vllm_config: "VllmConfig") -> None:
         cc.cudagraph_capture_sizes = new
 
 
-def configure(vllm_config: "VllmConfig", specs_path: str) -> MonoSpec[Any] | None:
+def select_mono_spec(
+    vllm_config: "VllmConfig", specs_path: str
+) -> MonoSpec[Any] | None:
     """Picks the variant, sets the capture sizes, or raises with every reason.
 
     The variant is picked here, once: the model holds what this returns and
-    hands it to ``attach`` after the weights are loaded. A model that prepares
+    hands it to ``MonoRuntime`` after the weights are loaded. A model that prepares
     anything of its own at load time reads the returned spec to know which
     variant it is preparing for.
 
