@@ -91,8 +91,11 @@ class MockSubscriber:
         if isinstance(replay_endpoints, str):
             replay_endpoints = [replay_endpoints]
 
+        ipv6 = any("[" in ep for ep in pub_endpoints + (replay_endpoints or []))
+
         # Set up subscriber socket - connect to all endpoints
         self.sub = self.ctx.socket(zmq.SUB)
+        self.sub.setsockopt(zmq.IPV6, ipv6)
         self.sub.setsockopt(zmq.SUBSCRIBE, topic.encode("utf-8"))
         for endpoint in pub_endpoints:
             self.sub.connect(endpoint)
@@ -103,6 +106,7 @@ class MockSubscriber:
         if replay_endpoints:
             for replay_endpoint in replay_endpoints:
                 replay = self.ctx.socket(zmq.DEALER)
+                replay.setsockopt(zmq.IPV6, ipv6)
                 replay.connect(replay_endpoint)
                 self.replay_sockets.append(replay)
 
@@ -178,19 +182,15 @@ class MockSubscriber:
 
 @pytest.fixture
 def enable_ray_v2_backend():
-    """Set env vars for the Ray V2 executor backend and shut down Ray
+    """Run the engine in-process for Ray executor tests and shut down Ray
     between tests."""
     import ray
 
     saved = {
-        "VLLM_USE_RAY_V2_EXECUTOR_BACKEND": os.environ.get(
-            "VLLM_USE_RAY_V2_EXECUTOR_BACKEND"
-        ),
         "VLLM_ENABLE_V1_MULTIPROCESSING": os.environ.get(
             "VLLM_ENABLE_V1_MULTIPROCESSING"
         ),
     }
-    os.environ["VLLM_USE_RAY_V2_EXECUTOR_BACKEND"] = "1"
     os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
     if ray.is_initialized():
         ray.shutdown()

@@ -52,7 +52,11 @@ from vllm.models.minimax_m3.common.sparse_attention import (
     _minimax_m3_aiter_sparse_pa_requested,
 )
 from vllm.platforms import current_platform
-from vllm.v1.attention.backend import AttentionBackend, CommonAttentionMetadata
+from vllm.v1.attention.backend import (
+    AttentionBackend,
+    CommonAttentionMetadata,
+    max_decode_query_len,
+)
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.kv_cache_interface import AttentionSpec
 
@@ -63,6 +67,8 @@ MSA_TOPK_BLOCKS = 16
 MSA_SCORE_TYPE = "max"
 MSA_SPARSE_BLOCK_SIZE = 128
 MSA_INDEX_HEAD_DIM = 128
+# Index head counts the score kernels are instantiated for.
+MSA_NUM_INDEX_HEADS = (1, 2)
 # Wave width the top-k is written against: it gives one lane per output slot and
 # reads the score row in wave-wide strips.
 WAVE_SIZE = 64
@@ -97,10 +103,7 @@ def aiter_indexer_max_decode_query_len(vllm_config: VllmConfig) -> int:
     since that is what the builder splits the batch on and therefore what the
     decode kernel will actually be handed.
     """
-    spec = vllm_config.speculative_config
-    if spec is None or spec.num_speculative_tokens is None:
-        return 1
-    return 1 + (2 if spec.parallel_drafting else 1) * spec.num_speculative_tokens
+    return max_decode_query_len(vllm_config)
 
 
 @cache
@@ -180,8 +183,11 @@ def aiter_indexer_unsupported_reason(
             f"needs index_head_dim={MSA_INDEX_HEAD_DIM}, "
             f"got index_head_dim={index_head_dim}"
         )
-    if num_index_heads > MFMA_COLS:
-        return f"num_index_heads={num_index_heads} exceeds the {MFMA_COLS} MFMA columns"
+    if num_index_heads not in MSA_NUM_INDEX_HEADS:
+        return (
+            f"needs num_index_heads in {MSA_NUM_INDEX_HEADS}, "
+            f"got num_index_heads={num_index_heads}"
+        )
     # A decode row's whole query shares one MFMA tile, one column per (token,
     # head) pair, so spec decode trades columns against the head count.
     if num_index_heads * max_decode_query_len > MFMA_COLS:

@@ -36,20 +36,13 @@ from transformers.models.gemma4.configuration_gemma4 import (
 
 from vllm.config import VllmConfig
 from vllm.config.model import get_served_model_name
-from vllm.config.multimodal import (
-    AudioDummyOptions,
-    BaseDummyOptions,
-    VideoDummyOptions,
-)
+from vllm.config.multimodal import MultiModalDummyOptions, VideoDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.models.gemma3n_mm import batch_audio_features
-from vllm.model_executor.models.gemma4 import (
-    _GEMMA4_EXPERT_PARENT_MAPPER,
-    Gemma4ForCausalLM,
-)
+from vllm.model_executor.models.gemma4 import Gemma4ForCausalLM
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.transformers.utils import recursive_replace_linear
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -104,6 +97,28 @@ if TYPE_CHECKING:
     )
 
 logger = init_logger(__name__)
+
+
+def _get_tower_quant_config(
+    tower_config: Any,
+    quant_config: "QuantizationConfig | None",
+) -> "QuantizationConfig | None":
+    # BNB/torchao/compressed-tensors handle arbitrary sizes; other methods
+    # (Marlin, FP8, …) require dimensions divisible by 64.
+    # TODO(mgoin): remove this by fixing kernel padding.
+    if quant_config and quant_config.get_name() in [
+        "bitsandbytes",
+        "torchao",
+        "compressed-tensors",
+    ]:
+        return quant_config
+    # The audio config has no intermediate_size; treat it as always divisible.
+    intermediate_size = getattr(tower_config, "intermediate_size", None)
+    quantizable = tower_config.hidden_size % 64 == 0 and (
+        intermediate_size is None or intermediate_size % 64 == 0
+    )
+    return quant_config if quantizable else None
+
 
 # Video constants — match transformers Gemma4VideoProcessor defaults.
 _SUPPORTED_SOFT_TOKENS = (70, 140, 280, 560, 1120)
@@ -229,12 +244,11 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
             **kwargs,
         )
 
+    def has_audio(self) -> bool:
+        return self.get_hf_config().audio_config is not None
+
     def validate_num_items(self, modality: str, num_items: int) -> None:
-        if (
-            modality == "audio"
-            and num_items > 0
-            and self.get_hf_config().audio_config is None
-        ):
+        if modality == "audio" and num_items > 0 and not self.has_audio():
             model_config = self.ctx.model_config
             model = get_served_model_name(
                 model_config.model, model_config.served_model_name
@@ -250,7 +264,7 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         limits: dict[str, int | None] = {"image": None}
-        if self.get_hf_config().audio_config is not None:
+        if self.has_audio():
             limits["audio"] = None
         limits["video"] = None
         return limits
@@ -268,7 +282,7 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
         if isinstance(val, int) and val in _SUPPORTED_SOFT_TOKENS:
             tokens_per_image = val
         tokens: dict[str, int] = {"image": tokens_per_image}
-        if config.audio_config is not None:
+        if self.has_audio():
             # Audio max tokens from the processor's audio_seq_length.
             processor = self.get_hf_processor()
             tokens["audio"] = processor.audio_seq_length
@@ -276,18 +290,14 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
         num_frames = _VIDEO_MAX_FRAMES
         mm_config = self.ctx.model_config.get_multimodal_config()
         video_opts = mm_config.limit_per_prompt.get("video")
-        if (
-            isinstance(video_opts, VideoDummyOptions)
-            and video_opts.num_frames is not None
-        ):
+        if video_opts is not None and video_opts.num_frames is not None:
             num_frames = min(num_frames, video_opts.num_frames)
         tokens["video"] = num_frames * (_VIDEO_MAX_SOFT_TOKENS + 2 + 6)
         return tokens
 
     def get_data_parser(self) -> MultiModalDataParser:
-        config = self.get_hf_config()
         kwargs: dict[str, Any] = {"video_needs_metadata": True}
-        if getattr(config, "audio_config", None) is not None:
+        if self.has_audio():
             processor = self.get_hf_processor()
             kwargs["target_sr"] = processor.feature_extractor.sampling_rate
         return MultiModalDataParser(**kwargs)
@@ -505,9 +515,8 @@ class Gemma4DummyInputsBuilder(BaseDummyInputsBuilder[Gemma4ProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_options: MultiModalDummyOptions | None = None,
     ) -> MultiModalDataDict:
-        num_images = mm_counts.get("image", 0)
         num_audios = mm_counts.get("audio", 0)
         num_videos = mm_counts.get("video", 0)
         processor = self.info.get_hf_processor()
@@ -520,18 +529,12 @@ class Gemma4DummyInputsBuilder(BaseDummyInputsBuilder[Gemma4ProcessingInfo]):
         img_width = size.get("width", 224)
         img_height = size.get("height", 224)
 
-        image_overrides = mm_options.get("image") if mm_options else None
-        audio_overrides = mm_options.get("audio") if mm_options else None
-        video_overrides = mm_options.get("video") if mm_options else None
-        assert audio_overrides is None or isinstance(audio_overrides, AudioDummyOptions)
-        assert video_overrides is None or isinstance(video_overrides, VideoDummyOptions)
-
         data: dict[str, Any] = {
             "image": self._get_dummy_images(
                 width=img_width,
                 height=img_height,
-                num_images=num_images,
-                overrides=image_overrides,
+                num_images=mm_counts.get("image", 0),
+                overrides=mm_options.get("image") if mm_options else None,
             ),
         }
 
@@ -540,7 +543,7 @@ class Gemma4DummyInputsBuilder(BaseDummyInputsBuilder[Gemma4ProcessingInfo]):
             data["audio"] = self._get_dummy_audios(
                 length=audio_len,
                 num_audios=num_audios,
-                overrides=audio_overrides,
+                overrides=mm_options.get("audio") if mm_options else None,
             )
 
         if num_videos > 0:
@@ -549,7 +552,7 @@ class Gemma4DummyInputsBuilder(BaseDummyInputsBuilder[Gemma4ProcessingInfo]):
                 height=img_height,
                 num_frames=_VIDEO_MAX_FRAMES,
                 num_videos=num_videos,
-                overrides=video_overrides,
+                overrides=mm_options.get("video") if mm_options else None,
             )
 
         return data
@@ -1060,7 +1063,7 @@ class Gemma4ForConditionalGeneration(
     }
 
     # Maps checkpoint prefixes to vLLM module paths.
-    hf_to_vllm_mapper = _GEMMA4_EXPERT_PARENT_MAPPER | WeightsMapper(
+    hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             # vision tower
             "model.vision_tower": "vision_tower",
@@ -1090,25 +1093,9 @@ class Gemma4ForConditionalGeneration(
             lora_config is not None and lora_config.enable_tower_connector_lora
         )
 
-        # Only quantize towers when the quant method supports their
-        # dimensions.  BNB/torchao handle arbitrary sizes; other methods
-        # (Marlin, FP8, …) require dimensions divisible by 64, which
-        # the vision tower (intermediate_size=4304) does not satisfy.
-        # TODO(mgoin): remove this by fixing kernel padding.
-        tower_quant: QuantizationConfig | None
-        if quant_config and quant_config.get_name() in [
-            "bitsandbytes",
-            "torchao",
-            "compressed-tensors",
-        ]:
-            tower_quant = quant_config
-        else:
-            vision_cfg = config.vision_config
-            quantizable = (
-                vision_cfg.hidden_size % 64 == 0
-                and vision_cfg.intermediate_size % 64 == 0
-            )
-            tower_quant = quant_config if quantizable else None
+        # Apply the dimension check independently because the vision and audio
+        # towers do not necessarily have the same hidden and intermediate sizes.
+        vision_tower_quant = _get_tower_quant_config(config.vision_config, quant_config)
 
         # ---- Vision tower (shared by image and video) ----
         with self._mark_tower_model(vllm_config, {"image", "video"}):
@@ -1116,18 +1103,21 @@ class Gemma4ForConditionalGeneration(
             self.embed_vision = Gemma4MultimodalEmbedder(
                 config.vision_config,
                 config.text_config,
-                quant_config=tower_quant,
+                quant_config=vision_tower_quant,
                 prefix=maybe_prefix(prefix, "embed_vision"),
             )
             recursive_replace_linear(
                 self.vision_tower,
-                tower_quant,
+                vision_tower_quant,
                 prefix=maybe_prefix(prefix, "vision_tower"),
             )
 
         # ---- Audio tower (variants with audio_config) ----
         self.embed_audio: Gemma4MultimodalEmbedder | None
         if config.audio_config is not None:
+            audio_tower_quant = _get_tower_quant_config(
+                config.audio_config, quant_config
+            )
             with self._mark_tower_model(vllm_config, "audio"):
                 self.audio_tower = AutoModel.from_config(config=config.audio_config)
                 # AutoModel.from_config does NOT call post_init(),
@@ -1138,12 +1128,12 @@ class Gemma4ForConditionalGeneration(
                 self.embed_audio = Gemma4MultimodalEmbedder(
                     config.audio_config,
                     config.text_config,
-                    quant_config=tower_quant,
+                    quant_config=audio_tower_quant,
                     prefix=maybe_prefix(prefix, "embed_audio"),
                 )
                 recursive_replace_linear(
                     self.audio_tower,
-                    tower_quant,
+                    audio_tower_quant,
                     prefix=maybe_prefix(prefix, "audio_tower"),
                 )
         else:
