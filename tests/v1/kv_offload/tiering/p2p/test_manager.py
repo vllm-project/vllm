@@ -717,6 +717,7 @@ class _FakeSession:
         close_stores: list[int] | None = None,
         close_failed_serves: list[ReqContext] | None = None,
         last_activity_at: float | None = None,
+        close_memory_safe_jobs: frozenset[int] = frozenset(),
     ) -> None:
         self.peer_id = peer_id
         self.alive = alive
@@ -729,6 +730,7 @@ class _FakeSession:
         self._close_req_ids = close_req_ids or []
         self._close_stores = close_stores or []
         self._close_failed_serves = close_failed_serves or []
+        self._close_memory_safe_jobs = close_memory_safe_jobs
         self.requests: list[tuple[int, str]] = []
         self.stores_added: list[tuple[str, list, object, int]] = []
         self.attached: list[object] = []
@@ -776,6 +778,7 @@ class _FakeSession:
             failed_req_ids=self._close_req_ids,
             failed_stores=self._close_stores,
             failed_serves=self._close_failed_serves,
+            memory_safe_jobs=self._close_memory_safe_jobs,
         )
 
 
@@ -805,7 +808,8 @@ class TestGetFinished:
         # Second call returns empty.
         assert list(mgr.get_finished_jobs()) == []
 
-    def test_reaps_dead_sessions(self):
+    @pytest.mark.parametrize("memory_safe", [True, False])
+    def test_reaps_dead_sessions(self, memory_safe):
         """Dead connected sessions are removed and their pending jobs failed."""
 
         class FakeData:
@@ -821,6 +825,7 @@ class TestGetFinished:
             close_jobs=[20],
             close_req_ids=["req-load"],
             close_stores=[10, 11],
+            close_memory_safe_jobs=frozenset({20}) if memory_safe else frozenset(),
         )
         mgr._sessions["dead:1234"] = dead
 
@@ -829,7 +834,7 @@ class TestGetFinished:
         assert len(results) == 5
         assert JobResult(job_id=10, success=False) in results
         assert JobResult(job_id=11, success=False) in results
-        assert JobResult(job_id=20, success=False, memory_safe=False) in results
+        assert JobResult(job_id=20, success=False, memory_safe=memory_safe) in results
         assert "dead:1234" not in mgr._sessions
         assert "req-load" in mgr._failed_req_ids
 

@@ -2928,6 +2928,48 @@ class TestPendingSession:
 
 
 class TestDisconnect:
+    @pytest.mark.parametrize("flushed", [False, True])
+    def test_close_distinguishes_queued_fetch_from_sent_fetch(self, flushed):
+        session, conn, _ = _make_session()
+        session.request_blocks(7, "req-7", [b"k"], [0])
+        if flushed:
+            _activate(session, conn)
+        else:
+            conn.mark_dead()
+
+        result = session.close()
+        assert result.failed_jobs == [7]
+        assert result.memory_safe_jobs == (frozenset() if flushed else {7})
+
+    @pytest.mark.parametrize("finished", [False, True])
+    def test_queued_fetch_timeout_does_not_quarantine_or_flush_after_failure(
+        self, finished
+    ):
+        session, conn, _ = _make_session()
+        session.request_blocks(7, "req-7", [b"k"], [0])
+        if finished:
+            session.finish_request("req-7")
+        else:
+            _client_load(session, "req-7").submitted_at = (
+                time.monotonic() - _LOAD_TIMEOUT_S - 1.0
+            )
+
+        assert session.poll().loads == [
+            LoadResult(job_id=7, kv_request_id="req-7", success=False)
+        ]
+        assert not session.has_pending_work
+        session.request_blocks(8, "req-7", [b"replacement"], [1])
+        _activate(session, conn)
+        assert [
+            msg[FetchMsg.BLOCK_INDEXES]
+            for msg in conn._sent
+            if msg[TYPE_KEY] == FetchMsg.TYPE
+        ] == [[1]]
+        assert not any(msg[TYPE_KEY] == AbortFetchMsg.TYPE for msg in conn._sent)
+        result = session.close()
+        assert result.failed_jobs == [8]
+        assert result.memory_safe_jobs == frozenset()
+
     def test_close_does_not_report_quarantined_load_twice(self):
         session, conn, _ = _make_session()
         _activate(session, conn)
@@ -2977,6 +3019,7 @@ class TestDisconnect:
         session.request_blocks(1, "req-1", [b"k"], [0])
 
         assert not session.alive
+        assert session.close().memory_safe_jobs == frozenset()
 
     def test_close_surfaces_inflight_lookups(self):
         """close() reports kv_request_ids whose symmetric-P2P probe is still

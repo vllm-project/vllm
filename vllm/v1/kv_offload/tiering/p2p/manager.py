@@ -817,7 +817,11 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             close_result = session.close()
             for job_id in close_result.failed_jobs:
                 self._finished_jobs.append(
-                    JobResult(job_id=job_id, success=False, memory_safe=False)
+                    JobResult(
+                        job_id=job_id,
+                        success=False,
+                        memory_safe=job_id in close_result.memory_safe_jobs,
+                    )
                 )
             for job_id in close_result.failed_stores:
                 self._finished_jobs.append(JobResult(job_id=job_id, success=False))
@@ -917,7 +921,11 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             close_result = session.close()
             for job_id in close_result.failed_jobs:
                 self._finished_jobs.append(
-                    JobResult(job_id=job_id, success=False, memory_safe=False)
+                    JobResult(
+                        job_id=job_id,
+                        success=False,
+                        memory_safe=job_id in close_result.memory_safe_jobs,
+                    )
                 )
             for job_id in close_result.failed_stores:
                 self._finished_jobs.append(JobResult(job_id=job_id, success=False))

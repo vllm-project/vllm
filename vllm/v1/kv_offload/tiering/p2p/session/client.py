@@ -45,6 +45,7 @@ class _InboundLoadState:
 
     job_id: int  # opaque ID assigned by the manager to this load request
     submitted_at: float
+    pending_fetch: dict | None  # None once handed to the transport
     aborted_at: float | None = None
     failure_reported: bool = False
 
@@ -99,7 +100,8 @@ class ClientCloseResult(NamedTuple):
     """What the manager must fail when a peer session is torn down.
 
     ``failed_jobs`` contains loads not yet reported as unsafe failures;
-    each requires quarantine, not slot reclamation. ``failed_req_ids`` is every
+    ``memory_safe_jobs`` identifies fetches never handed to the transport.
+    ``failed_req_ids`` is every
     kv_request_id whose lookup() would otherwise defer forever on the dead
     peer — the in-flight loads plus any request holding an unresolved
     symmetric-P2P probe. ``failed_jobs`` is the subset of ``failed_req_ids``
@@ -108,6 +110,7 @@ class ClientCloseResult(NamedTuple):
 
     failed_jobs: list[int]
     failed_req_ids: list[str]
+    memory_safe_jobs: frozenset[int]
 
 
 class ClientRole:
@@ -214,21 +217,21 @@ class ClientRole:
         st = self._get_or_create_request(kv_request_id)
         round_seq = st.round_seq
         st.round_seq += 1
+        fetch = {
+            TYPE_KEY: FetchMsg.TYPE,
+            FetchMsg.KV_REQUEST_ID: kv_request_id,
+            FetchMsg.KEYS: list(keys),
+            FetchMsg.BLOCK_INDEXES: [int(idx) for idx in block_ids],
+            FetchMsg.ROUND_SEQ: round_seq,
+        }
         st.loads[round_seq] = _InboundLoadState(
             job_id=job_id,
             submitted_at=time.monotonic(),
+            pending_fetch=fetch,
         )
         self._active_loads.add(kv_request_id)
         st.peer_lookup_open = False
-        self._send(
-            {
-                TYPE_KEY: FetchMsg.TYPE,
-                FetchMsg.KV_REQUEST_ID: kv_request_id,
-                FetchMsg.KEYS: list(keys),
-                FetchMsg.BLOCK_INDEXES: [int(idx) for idx in block_ids],
-                FetchMsg.ROUND_SEQ: round_seq,
-            }
-        )
+        self._send(fetch)
         # Issuing the fetch closes this lookup round, so drop all probe
         # state. Once the peer serves the fetch both sides unpin, so a
         # stale cached True would let a later lookup() return HIT for a
@@ -242,11 +245,20 @@ class ClientRole:
         st.probes.clear()
         self._lookup_deadlines.pop(kv_request_id, None)
 
+    def mark_fetch_sent(self, msg: dict) -> bool:
+        """Mark a live fetch as possibly sent; reject retired or cancelled messages."""
+        st = self._requests.get(msg[FetchMsg.KV_REQUEST_ID])
+        load = st.loads.get(msg[FetchMsg.ROUND_SEQ]) if st is not None else None
+        if load is None or load.pending_fetch is not msg or load.aborted_at is not None:
+            return False
+        load.pending_fetch = None
+        return True
+
     def finish(self, kv_request_id: str) -> None:
         """Finish a request: abort in-flight loads and release lookup state.
 
         Called from the session's ``finish_request``. Sends an
-        AbortFetchMsg per load not already aborting, and — independently —
+        AbortFetchMsg per sent load not already aborting, and — independently —
         the terminal empty FetchMsg when the peer still holds lookup
         state no fetch has closed (its "request finished" signal: it
         releases lookup state, drains parked supply, and fires
@@ -254,8 +266,9 @@ class ClientRole:
         while an earlier round's load is still in flight, so both can be
         owed at once.
 
-        Then drop all probe/lookup state. Keep aborted loads until their abort
-        acknowledgement confirms that the remote WRITE has stopped.
+        Then drop all probe/lookup state. Never-sent fetches fail on the next
+        poll. Sent loads wait until their abort acknowledgement confirms that
+        the remote WRITE has stopped.
         """
         st = self._requests.get(kv_request_id)
         if st is None:
@@ -263,6 +276,9 @@ class ClientRole:
         if st.loads:
             for round_seq, load in st.loads.items():
                 if load.aborted_at is not None:
+                    continue
+                if load.pending_fetch is not None:
+                    load.aborted_at = time.monotonic()
                     continue
                 self._send(
                     {
@@ -475,16 +491,27 @@ class ClientRole:
     def collect_results(self) -> list[LoadResult]:
         """Walk load timeouts and drain completed loads.
 
-        Loads past ``_LOAD_TIMEOUT_S`` get an AbortFetchMsg sent and
+        Sent loads past ``_LOAD_TIMEOUT_S`` get an AbortFetchMsg sent and
         enter the aborting phase. Aborting loads past
-        ``_ABORT_ACK_TIMEOUT_S`` report an unsafe failure but remain tracked
-        until the peer confirms completion, so their slots stay quarantined.
+        ``_ABORT_ACK_TIMEOUT_S`` report failure but remain tracked until the
+        peer confirms completion. Never-sent fetches retire safely on finish
+        or load timeout without sending an abort.
         """
         now = time.monotonic()
+        unsent_failures: list[tuple[str, int]] = []
         for req_id in self._active_loads:
             st = self._requests[req_id]
             assert st.loads
             for round_seq, load in st.loads.items():
+                if load.pending_fetch is not None and (
+                    load.aborted_at is not None
+                    or now - load.submitted_at >= _LOAD_TIMEOUT_S
+                ):
+                    self._completed_loads.append(
+                        LoadResult(load.job_id, req_id, success=False)
+                    )
+                    unsent_failures.append((req_id, round_seq))
+                    continue
                 if load.aborted_at is None:
                     if now - load.submitted_at >= _LOAD_TIMEOUT_S:
                         load.aborted_at = now
@@ -522,6 +549,10 @@ class ClientRole:
                             req_id,
                             round_seq,
                         )
+        for req_id, round_seq in unsent_failures:
+            st = self._requests[req_id]
+            del st.loads[round_seq]
+            self._on_load_terminal(req_id, st)
         results = self._completed_loads
         self._completed_loads = []
         return results
@@ -544,9 +575,19 @@ class ClientRole:
             for req_id, st in self._requests.items()
             if st.loads or any(hit is None for hit in st.probes.values())
         ]
+        memory_safe_jobs = frozenset(
+            load.job_id
+            for st in self._requests.values()
+            for load in st.loads.values()
+            if load.pending_fetch is not None
+        )
         self._requests.clear()
         self._flush_pending.clear()
         self._active_loads.clear()
         self._completed_loads.clear()
         self._lookup_deadlines.clear()
-        return ClientCloseResult(failed_jobs=failed_jobs, failed_req_ids=failed_req_ids)
+        return ClientCloseResult(
+            failed_jobs=failed_jobs,
+            failed_req_ids=failed_req_ids,
+            memory_safe_jobs=memory_safe_jobs,
+        )

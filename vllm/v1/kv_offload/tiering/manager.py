@@ -162,13 +162,13 @@ class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
             chunk = self._policy.get(key)
             if chunk is not None and not chunk.is_ready:
                 self._policy.remove(key)
-                self._num_write_pending_chunks -= 1
                 self._quarantined_chunk_ids.add(chunk.chunk_id)
 
     def release_quarantined_write(self, chunk_ids: Iterable[int]) -> None:
         """Recycle quarantined slots after the peer confirms completion."""
         for chunk_id in chunk_ids:
             self._quarantined_chunk_ids.remove(chunk_id)
+            self._num_write_pending_chunks -= 1
             self._free_list.append(chunk_id)
 
     @override
@@ -559,6 +559,7 @@ class TieringOffloadingManager(OffloadingManager):
                             int(chunk_id)
                             for chunk_id in quarantined.transfer_job.chunk_ids
                         )
+                        self._metrics.on_quarantined_job_released(quarantined)
                         del self._quarantined_jobs[job_id]
                     continue
                 job_metadata = self._pop_job(job_id)

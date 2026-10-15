@@ -93,6 +93,7 @@ class SessionCloseResult(NamedTuple):
     failed_req_ids: list[str]  # client kv_request_ids (loads + probes)
     failed_stores: list[int]  # server store job_ids
     failed_serves: list[ReqContext]  # server-side lookup ctxs needing release
+    memory_safe_jobs: frozenset[int] = frozenset()  # fetches never sent
 
 
 class P2PSession:
@@ -385,6 +386,7 @@ class P2PSession:
             failed_req_ids=client_result.failed_req_ids,
             failed_stores=failed_stores,
             failed_serves=failed_serves,
+            memory_safe_jobs=client_result.memory_safe_jobs,
         )
 
     # ------------------------------------------------------------------
@@ -646,6 +648,13 @@ class P2PSession:
 
     def _do_send(self, msg: dict) -> None:
         if self._conn is None:
+            return
+        # A raising send may already have exposed the destination IDs.
+        if (
+            msg[TYPE_KEY] == FetchMsg.TYPE
+            and msg[FetchMsg.BLOCK_INDEXES]
+            and not self._client.mark_fetch_sent(msg)
+        ):
             return
         try:
             self._conn.send(msg)
