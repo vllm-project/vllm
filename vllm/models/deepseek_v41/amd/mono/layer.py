@@ -58,6 +58,12 @@ class MonoBuild:
     tp: int
     ratio: int  # the layer's compress ratio (its attention's key sources)
     timeline: bool = False
+    # K1's seam folds the previous layer's output into the residual; off for a
+    # residual that arrives settled (the first layer, after an Engram)
+    fold: bool = True
+    # the layer selects its own top-k (an index source): K1 hands its normed
+    # input and qr out for vLLM's indexer, K2 builds the key table
+    index: bool = False
 
 
 def _moe_key(key: MonoBuild) -> MoeBuild:
@@ -100,6 +106,7 @@ def scratch_layout(s: int, tp: int) -> dict:
     lo = min(o for o, _ in mr.values())
     place({n: (o - lo, n_) for n, (o, n_) in mr.items()})
     place({"normed": (0, s * HIDDEN * 2), "xrdy_moe": (s * HIDDEN * 2 + 256, s * 8)})
+    place({"krdy": (0, s * 8)})
     return out
 
 
@@ -175,7 +182,15 @@ def build_mono_k1(key: MonoBuild):
         seam: SeamLds
         front: FrontLds  # type: ignore[valid-type]
 
-    name = kernel_symbol("dsv41_mono_k1", s=s, tp=tp, r=key.ratio, tl=key.timeline)
+    name = kernel_symbol(
+        "dsv41_mono_k1",
+        s=s,
+        tp=tp,
+        r=key.ratio,
+        tl=key.timeline,
+        f=key.fold,
+        i=key.index,
+    )
     keyed = key_tuple(key, SOURCES)
 
     @flyc.kernel(name=name, known_block_size=[THREADS, 1, 1])
@@ -215,6 +230,8 @@ def build_mono_k1(key: MonoBuild):
         t2r: Int64,
         kt: Int64,
         klen: Int64,
+        normed_out: Int64,
+        qr_out: Int64,
         scratch: Int64,
         epoch: Int64,
         tl: Int64,
@@ -250,9 +267,11 @@ def build_mono_k1(key: MonoBuild):
             "t2r": t2r,
             "kt": kt,
             "klen": klen,
+            "qr_out": qr_out,
         }
         flayout = {n: layout[n] for n in front_scratch(s, Dims(tp))}
         c = mb_front.front_context(fkey, lds.front.peek(), fargs, scratch, tag, flayout)
+        c["index"] = key.index
         amb = Mailbox(tag)
         tid = fx.thread_idx.x
         ca = {
@@ -284,6 +303,7 @@ def build_mono_k1(key: MonoBuild):
                 "pre_out": pre_out,
             },
             "d": StageDims(tp),
+            "fold": key.fold,
         }
         for region in ("lin", "pmix"):
             ca[region] = sreg(scratch, layout[region][0], region)
@@ -295,9 +315,14 @@ def build_mono_k1(key: MonoBuild):
                 seam.stage_slice(ca, task)
             gpu.barrier()
 
+        def store(*v):
+            store_x8(c, *v)
+            if const_expr(key.index):
+                store_normed(normed_out, *v)
+
         def seam_rest():
             for t in range(first_task(bid, NORM0), s, BLOCKS):
-                seam.stage_norm(ca, t, lambda *v: store_x8(c, *v))
+                seam.stage_norm(ca, t, store)
                 publish_x8(c, t)
             for t in range(first_task(bid, GATE0), s, BLOCKS):
                 seam.stage_gate(ca, t)
@@ -344,6 +369,8 @@ def build_mono_k1(key: MonoBuild):
         t2r: Int64,
         kt: Int64,
         klen: Int64,
+        normed_out: Int64,
+        qr_out: Int64,
         scratch: Int64,
         epoch: Int64,
         tl: Int64,
@@ -386,6 +413,8 @@ def build_mono_k1(key: MonoBuild):
             t2r,
             kt,
             klen,
+            normed_out,
+            qr_out,
             scratch,
             epoch,
             tl,
@@ -544,7 +573,9 @@ def build_mono_k2(key: MonoBuild):
         seam: SeamLds  # type: ignore[valid-type]
         moe: MoeLds  # type: ignore[valid-type]
 
-    name = kernel_symbol("dsv41_mono_k2", s=s, tp=tp, r=key.ratio, tl=key.timeline)
+    name = kernel_symbol(
+        "dsv41_mono_k2", s=s, tp=tp, r=key.ratio, tl=key.timeline, i=key.index
+    )
     keyed = key_tuple(key, SOURCES)
 
     @flyc.kernel(name=name, known_block_size=[THREADS, 1, 1])
@@ -558,6 +589,13 @@ def build_mono_k2(key: MonoBuild):
         comp_block: Int32,
         kt: Int64,
         klen: Int64,
+        slot: Int64,
+        swa_idx: Int64,
+        swa_lens: Int64,
+        t2r: Int64,
+        topk: Int64,
+        comp_bt: Int64,
+        bt_stride: Int32,
         pos: Int64,
         sink: Int64,
         qk_scale: Int32,
@@ -642,6 +680,32 @@ def build_mono_k2(key: MonoBuild):
         if const_expr(key.timeline):
             c["tl"], c["tl_points"] = tl, mb_back.BACK_POINTS
         mb_back.epoch_begin(c, epoch, ep)
+        if const_expr(key.index):
+            # the key table, from the top-k vLLM's indexer selected after K1,
+            # on the last CTAs: each split task waits on its token's
+            ckt = {
+                "S": s,
+                "tid": c["tid"],
+                "dev": True,
+                "ratio": key.ratio,
+                "args": {
+                    "slot": slot,
+                    "swa_idx": swa_idx,
+                    "swa_lens": swa_lens,
+                    "pos": pos,
+                    "t2r": t2r,
+                    "topk": topk,
+                    "comp_block": comp_block,
+                    "comp_bt": comp_bt,
+                    "bt_stride": bt_stride,
+                    "kt": kt,
+                    "klen": klen,
+                },
+            }
+            c["krdy"] = sreg(scratch, layout["krdy"][0], "krdy")
+            for t in range(first_task(bid, BLOCKS - s), s, BLOCKS):
+                mb_front.stage_kt(ckt, t)
+                mb_back.publish(c, c["krdy"], t)
         mb_back.run_back(c, bkey, bid)
         gpu.barrier()
 
@@ -685,6 +749,13 @@ def build_mono_k2(key: MonoBuild):
         comp_block: Int32,
         kt: Int64,
         klen: Int64,
+        slot: Int64,
+        swa_idx: Int64,
+        swa_lens: Int64,
+        t2r: Int64,
+        topk: Int64,
+        comp_bt: Int64,
+        bt_stride: Int32,
         pos: Int64,
         sink: Int64,
         qk_scale: Int32,
@@ -736,6 +807,13 @@ def build_mono_k2(key: MonoBuild):
             comp_block,
             kt,
             klen,
+            slot,
+            swa_idx,
+            swa_lens,
+            t2r,
+            topk,
+            comp_bt,
+            bt_stride,
             pos,
             sink,
             qk_scale,

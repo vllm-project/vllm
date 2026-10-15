@@ -53,7 +53,7 @@ harness = false
 required-features = ["test-util"]
 
 [[bench]]
-name = "qwen3_xml"
+name = "qwen3_json"
 harness = false
 required-features = ["test-util"]
 
