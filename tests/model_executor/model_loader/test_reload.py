@@ -100,7 +100,15 @@ def test_attention_sink_model_loading_shards_once(
     [
         ("deepseek_v4", "DeepseekV4Model", "attn", "attn_sink"),
         ("deepseek_v41", "DeepseekV4Model", "attn", "attn_sink"),
-        ("hy_v4", "HYV4Model", "self_attn", "learnable_sink_param"),
+        pytest.param(
+            "hy_v4",
+            "HYV4Model",
+            "self_attn",
+            "learnable_sink_param",
+            marks=pytest.mark.skipif(
+                current_platform.is_xpu(), reason="hy_v4 does not yet support XPU"
+            ),
+        ),
     ],
 )
 def test_attention_sink_deepseek_hy_loading_uses_parameter_loader(
