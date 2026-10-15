@@ -430,10 +430,10 @@ void gather_block_table_cpu(const torch::Tensor& block_table,
 void compute_slot_mapping_cpu(
     const torch::Tensor& block_table, torch::Tensor& slot_mapping,
     const torch::Tensor& idx_mapping, const torch::Tensor& query_start_loc,
-    const torch::Tensor& positions, const int64_t kv_block_size,
-    const int64_t kernel_block_size, const bool mapping_enabled,
-    const bool dcp_sharded, const int64_t cp_size, const int64_t cp_rank,
-    const int64_t cp_interleave, const int64_t pad_slot_id);
+    const torch::Tensor& positions, const int64_t block_size,
+    const bool mapping_enabled, const bool dcp_sharded, const int64_t cp_size,
+    const int64_t cp_rank, const int64_t cp_interleave,
+    const int64_t pad_slot_id);
 void prepare_prefill_inputs_cpu(torch::Tensor& input_ids,
                                 torch::Tensor& next_prefill_tokens,
                                 const torch::Tensor& idx_mapping,
@@ -1069,10 +1069,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def(
       "compute_slot_mapping_cpu("
       "Tensor block_table, Tensor(a1!) slot_mapping, Tensor idx_mapping, "
-      "Tensor query_start_loc, Tensor positions, SymInt kv_block_size, "
-      "SymInt kernel_block_size, bool mapping_enabled, bool dcp_sharded, "
-      "SymInt cp_size, SymInt cp_rank, SymInt cp_interleave, "
-      "SymInt pad_slot_id) -> ()",
+      "Tensor query_start_loc, Tensor positions, SymInt block_size, "
+      "bool mapping_enabled, bool dcp_sharded, SymInt cp_size, "
+      "SymInt cp_rank, SymInt cp_interleave, SymInt pad_slot_id) -> ()",
       &cpu_utils::compute_slot_mapping_cpu);
 
   ops.def(

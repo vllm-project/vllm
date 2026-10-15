@@ -15,7 +15,7 @@ void prepare_prefill_inputs_cpu(torch::Tensor& input_ids,
                                 const torch::Tensor& num_computed_tokens) {
   int32_t* input_ids_ptr = input_ids.data_ptr<int32_t>();
   int32_t* next_prefill_tokens_ptr = next_prefill_tokens.data_ptr<int32_t>();
-  const int32_t* idx_mapping_ptr = idx_mapping.data_ptr<int32_t>();
+  const int64_t* idx_mapping_ptr = idx_mapping.data_ptr<int64_t>();
   const int32_t* query_start_loc_ptr = query_start_loc.data_ptr<int32_t>();
   const int32_t* all_token_ids_ptr = all_token_ids.data_ptr<int32_t>();
   const int32_t* prefill_len_ptr = prefill_len.data_ptr<int32_t>();
@@ -28,7 +28,7 @@ void prepare_prefill_inputs_cpu(torch::Tensor& input_ids,
   const int64_t all_token_ids_stride = all_token_ids.stride(0);
 
   for (int64_t batch_idx = 0; batch_idx < num_reqs; ++batch_idx) {
-    const int32_t req_state_idx = idx_mapping_ptr[batch_idx];
+    const int64_t req_state_idx = idx_mapping_ptr[batch_idx];
     const int32_t request_prefill_len = prefill_len_ptr[req_state_idx];
     const int32_t num_computed = num_computed_tokens_ptr[req_state_idx];
     if (num_computed >= request_prefill_len) {
@@ -63,14 +63,14 @@ torch::Tensor get_prompt_logprobs_token_ids_cpu(
 
   int64_t* token_ids_ptr = token_ids.data_ptr<int64_t>();
   const int32_t* query_start_loc_ptr = query_start_loc.data_ptr<int32_t>();
-  const int32_t* idx_mapping_ptr = idx_mapping.data_ptr<int32_t>();
+  const int64_t* idx_mapping_ptr = idx_mapping.data_ptr<int64_t>();
   const int32_t* num_computed_tokens_ptr =
       num_computed_tokens.data_ptr<int32_t>();
   const int32_t* all_token_ids_ptr = all_token_ids.data_ptr<int32_t>();
   const int64_t all_token_ids_stride = all_token_ids.stride(0);
 
   for (int64_t batch_idx = 0; batch_idx < idx_mapping.size(0); ++batch_idx) {
-    const int32_t req_state_idx = idx_mapping_ptr[batch_idx];
+    const int64_t req_state_idx = idx_mapping_ptr[batch_idx];
     const int32_t query_start = query_start_loc_ptr[batch_idx];
     const int32_t query_end = query_start_loc_ptr[batch_idx + 1];
     const int32_t target_start = num_computed_tokens_ptr[req_state_idx] + 1;
@@ -90,7 +90,7 @@ void prepare_pos_seq_lens_cpu(const torch::Tensor& idx_mapping,
                               const torch::Tensor& query_start_loc,
                               const torch::Tensor& num_computed_tokens,
                               torch::Tensor& pos, torch::Tensor& seq_lens) {
-  const int32_t* idx_mapping_ptr = idx_mapping.data_ptr<int32_t>();
+  const int64_t* idx_mapping_ptr = idx_mapping.data_ptr<int64_t>();
   const int32_t* query_start_loc_ptr = query_start_loc.data_ptr<int32_t>();
   const int32_t* num_computed_tokens_ptr =
       num_computed_tokens.data_ptr<int32_t>();
@@ -101,7 +101,7 @@ void prepare_pos_seq_lens_cpu(const torch::Tensor& idx_mapping,
   std::fill(seq_lens_ptr + num_reqs, seq_lens_ptr + seq_lens.numel(), 0);
 
   for (int64_t req_idx = 0; req_idx < num_reqs; ++req_idx) {
-    const int32_t req_state_idx = idx_mapping_ptr[req_idx];
+    const int64_t req_state_idx = idx_mapping_ptr[req_idx];
     const int32_t num_computed = num_computed_tokens_ptr[req_state_idx];
     const int64_t start = query_start_loc_ptr[req_idx];
     const int64_t end = query_start_loc_ptr[req_idx + 1];
@@ -122,7 +122,7 @@ void prepare_mrope_positions_cpu(torch::Tensor& positions,
   int64_t* positions_ptr = positions.data_ptr<int64_t>();
   const int32_t* prefill_positions_ptr = prefill_positions.data_ptr<int32_t>();
   const int32_t* prefill_delta_ptr = prefill_delta.data_ptr<int32_t>();
-  const int32_t* idx_mapping_ptr = idx_mapping.data_ptr<int32_t>();
+  const int64_t* idx_mapping_ptr = idx_mapping.data_ptr<int64_t>();
   const int32_t* query_start_loc_ptr = query_start_loc.data_ptr<int32_t>();
   const int32_t* prefill_lens_ptr = prefill_lens.data_ptr<int32_t>();
   const int32_t* num_computed_tokens_ptr =
@@ -136,7 +136,7 @@ void prepare_mrope_positions_cpu(torch::Tensor& positions,
   const int64_t prefill_positions_stride1 = prefill_positions.stride(1);
 
   for (int64_t batch_idx = 0; batch_idx < num_reqs; ++batch_idx) {
-    const int32_t req_state_idx = idx_mapping_ptr[batch_idx];
+    const int64_t req_state_idx = idx_mapping_ptr[batch_idx];
     const int32_t query_start = query_start_loc_ptr[batch_idx];
     const int32_t query_end = query_start_loc_ptr[batch_idx + 1];
     const int32_t query_len = query_end - query_start;
@@ -171,7 +171,7 @@ torch::Tensor combine_sampled_and_draft_tokens_cpu(
     const torch::Tensor& prefill_len, const torch::Tensor& draft_tokens,
     const torch::Tensor& cu_num_logits, const int64_t num_logits,
     const int64_t num_new_sampled_tokens) {
-  const int32_t* idx_mapping_ptr = idx_mapping.data_ptr<int32_t>();
+  const int64_t* idx_mapping_ptr = idx_mapping.data_ptr<int64_t>();
   const int64_t* last_sampled_tokens_ptr =
       last_sampled_tokens.data_ptr<int64_t>();
   const int32_t* query_start_loc_ptr = query_start_loc.data_ptr<int32_t>();
@@ -188,7 +188,7 @@ torch::Tensor combine_sampled_and_draft_tokens_cpu(
   const int64_t num_reqs = idx_mapping.size(0);
   const int64_t draft_tokens_stride = draft_tokens.stride(0);
   for (int64_t req_idx = 0; req_idx < num_reqs; ++req_idx) {
-    const int32_t req_state_idx = idx_mapping_ptr[req_idx];
+    const int64_t req_state_idx = idx_mapping_ptr[req_idx];
     const int64_t logits_offset = cu_num_logits_ptr[req_idx];
     const int64_t logits_offset_end = cu_num_logits_ptr[req_idx + 1];
     const int64_t request_num_logits = logits_offset_end - logits_offset;
@@ -232,7 +232,7 @@ void post_update_cpu(const torch::Tensor& idx_mapping,
                      const torch::Tensor& num_rejected,
                      const c10::optional<torch::Tensor>& query_start_loc,
                      torch::Tensor& all_token_ids, torch::Tensor& total_len) {
-  const int32_t* idx_mapping_ptr = idx_mapping.data_ptr<int32_t>();
+  const int64_t* idx_mapping_ptr = idx_mapping.data_ptr<int64_t>();
   int32_t* num_computed_tokens_ptr = num_computed_tokens.data_ptr<int32_t>();
   int64_t* last_sampled_tokens_ptr = last_sampled_tokens.data_ptr<int64_t>();
   int32_t* output_bin_counts_ptr =
@@ -253,7 +253,7 @@ void post_update_cpu(const torch::Tensor& idx_mapping,
   const int64_t all_token_ids_stride = all_token_ids.stride(0);
 
   for (int64_t req_idx = 0; req_idx < num_reqs; ++req_idx) {
-    const int32_t req_state_idx = idx_mapping_ptr[req_idx];
+    const int64_t req_state_idx = idx_mapping_ptr[req_idx];
     if (req_state_idx < 0) {
       continue;
     }

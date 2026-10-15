@@ -52,8 +52,8 @@ def _make_req_states() -> tuple[RequestState, int]:
 def _context(req_idx: int) -> LogitsContext:
     num_rows = len(INPUT_IDS)
     return LogitsContext(
-        expanded_idx_mapping=torch.full((num_rows,), req_idx, dtype=torch.int32),
-        idx_mapping=torch.tensor([req_idx], dtype=torch.int32),
+        expanded_idx_mapping=torch.full((num_rows,), req_idx, dtype=torch.int64),
+        idx_mapping=torch.tensor([req_idx], dtype=torch.int64),
         idx_mapping_np=np.array([req_idx], dtype=np.intp),
         expanded_local_pos=torch.tensor(LOCAL_POS, dtype=torch.int32),
         input_ids=torch.tensor(INPUT_IDS, dtype=torch.int32),
@@ -150,7 +150,7 @@ def test_cpu_penalties_keep_request_rows_independent() -> None:
     state.add_request(second_idx, second_params)
 
     # Reverse request order so row number and persistent request slot differ.
-    row_mapping = torch.tensor([second_idx, first_idx], dtype=torch.int32)
+    row_mapping = torch.tensor([second_idx, first_idx], dtype=torch.int64)
     ctx = LogitsContext(
         expanded_idx_mapping=row_mapping,
         idx_mapping=row_mapping,

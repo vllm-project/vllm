@@ -82,8 +82,8 @@ def _make_req_states(tokens: list[int], prompt_len: int = 1) -> RequestState:
 def _thinking_context(req_idx: int, input_ids: list[int]) -> LogitsContext:
     num_rows = len(input_ids)
     return LogitsContext(
-        expanded_idx_mapping=torch.full((num_rows,), req_idx, dtype=torch.int32),
-        idx_mapping=torch.tensor([req_idx], dtype=torch.int32),
+        expanded_idx_mapping=torch.full((num_rows,), req_idx, dtype=torch.int64),
+        idx_mapping=torch.tensor([req_idx], dtype=torch.int64),
         idx_mapping_np=np.array([req_idx], dtype=np.intp),
         expanded_local_pos=torch.arange(num_rows, dtype=torch.int32),
         input_ids=torch.tensor(input_ids, dtype=torch.int32),
@@ -241,7 +241,7 @@ def test_cpu_greedy_sampling_applies_thinking_budget() -> None:
         SamplingParams(temperature=0.0, thinking_token_budget=3),
     )
 
-    idx_mapping = torch.tensor([req_idx], dtype=torch.int32)
+    idx_mapping = torch.tensor([req_idx], dtype=torch.int64)
     logits = sampler.apply_sampling_params(
         torch.zeros((1, VOCAB_SIZE)),
         idx_mapping,
@@ -266,7 +266,7 @@ def test_cpu_trace_replay_uses_current_decode_step() -> None:
     for step, expected in enumerate([11, 12, 13]):
         req_states.total_len.gpu[req_idx] = 2 + step
         sampled = torch.tensor([99], dtype=torch.int64)
-        state.apply_trace(sampled, torch.tensor([req_idx], dtype=torch.int32))
+        state.apply_trace(sampled, torch.tensor([req_idx], dtype=torch.int64))
         assert sampled.tolist() == [expected]
 
 
@@ -280,7 +280,7 @@ def test_cpu_trace_replay_skips_inactive_and_exhausted_rows() -> None:
     sampled = torch.tensor([20, 21], dtype=torch.int64)
     state.apply_trace(
         sampled,
-        torch.tensor([traced_idx, -1], dtype=torch.int32),
+        torch.tensor([traced_idx, -1], dtype=torch.int64),
     )
     assert sampled.tolist() == [20, 21]
 
@@ -294,7 +294,7 @@ def test_cpu_trace_replay_clears_reused_slot() -> None:
     state.apply_staged_writes()
 
     sampled = torch.tensor([20], dtype=torch.int64)
-    state.apply_trace(sampled, torch.tensor([req_idx], dtype=torch.int32))
+    state.apply_trace(sampled, torch.tensor([req_idx], dtype=torch.int64))
     assert sampled.tolist() == [20]
 
 
@@ -383,7 +383,7 @@ def test_cpu_sampler_runs_custom_logits_processors() -> None:
         custom_logits_processors=[_AddOneProcessor()],
     )
     sampler.add_request(req_idx, SamplingParams(temperature=0.0))
-    idx_mapping = torch.tensor([req_idx], dtype=torch.int32)
+    idx_mapping = torch.tensor([req_idx], dtype=torch.int64)
 
     logits = sampler.apply_sampling_params(
         torch.zeros((1, VOCAB_SIZE)),
@@ -433,7 +433,7 @@ def test_cpu_watermark_sampler_uses_cpu_sampler_pipeline(
 
     sampled, output_logits = sampler._sample_random(
         torch.linspace(-1, 1, VOCAB_SIZE).unsqueeze(0),
-        torch.tensor([req_idx], dtype=torch.int32),
+        torch.tensor([req_idx], dtype=torch.int64),
         np.array([req_idx], dtype=np.intp),
         torch.tensor([1], dtype=torch.int64),
         top_k=None,
@@ -458,7 +458,7 @@ def test_cpu_watermark_sampler_detects_repeated_context() -> None:
         req_states=req_states,
     )
 
-    req_indices = torch.tensor([req_idx], dtype=torch.int32)
+    req_indices = torch.tensor([req_idx], dtype=torch.int64)
     contexts = sampler._get_contexts(req_indices)
 
     assert contexts.tolist() == [[1, 2]]

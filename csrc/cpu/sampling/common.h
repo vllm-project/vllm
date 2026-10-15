@@ -158,7 +158,7 @@ class SamplingMainLoop {
   using scalar_t = typename sampling_impl_t::scalar_type;
 
   void operator()(int64_t* output, const scalar_t* logits,
-                  int64_t logits_stride, const int32_t* expanded_idx_mapping,
+                  int64_t logits_stride, const int64_t* expanded_idx_mapping,
                   const float* temperature, const int64_t* seeds,
                   const int64_t* positions, int64_t num_tokens,
                   int64_t vocab_size, bool apply_temperature, bool is_drafting,
@@ -191,7 +191,7 @@ class SamplingMainLoop {
  private:
   template <typename score_t, bool APPLY_TEMPERATURE>
   void execute(int64_t* output, const scalar_t* logits, int64_t logits_stride,
-               const int32_t* expanded_idx_mapping, const float* temperature,
+               const int64_t* expanded_idx_mapping, const float* temperature,
                const int64_t* seeds, const int64_t* positions,
                int64_t num_tokens, int64_t vocab_size, bool is_drafting) const {
     // Parallelize across logit rows first; num_tokens is not necessarily the

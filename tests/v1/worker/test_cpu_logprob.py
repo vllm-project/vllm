@@ -34,7 +34,7 @@ def test_cpu_output_logprobs(logits_mode: bool) -> None:
         sampled_token_ids=sampled_token_ids,
         cu_num_logits=[0, 1, 2],
         logprob_token_ids_state=object.__new__(LogprobTokenIdsState),
-        expanded_idx_mapping=torch.tensor([0, 1], dtype=torch.int32),
+        expanded_idx_mapping=torch.tensor([0, 1], dtype=torch.int64),
         max_per_req_token_ids=0,
         logits_mode=logits_mode,
     )
@@ -60,7 +60,7 @@ def test_cpu_prompt_logprobs_scores_prompt_targets() -> None:
     prompt_token_ids = gpu_prompt_logprob.get_prompt_logprobs_token_ids(
         num_tokens=2,
         query_start_loc=torch.tensor([0, 2], dtype=torch.int32),
-        idx_mapping=torch.tensor([0], dtype=torch.int32),
+        idx_mapping=torch.tensor([0], dtype=torch.int64),
         num_computed_tokens=torch.tensor([0], dtype=torch.int32),
         all_token_ids=torch.tensor([[7, 1, 2]], dtype=torch.int32),
     )
@@ -133,7 +133,7 @@ def test_cpu_requested_output_logprobs(logits_mode: bool) -> None:
         sampled_token_ids=sampled_token_ids,
         cu_num_logits=[0, 1, 2, 3, 4],
         logprob_token_ids_state=state,
-        expanded_idx_mapping=torch.tensor([2, 0, 3, 1], dtype=torch.int32),
+        expanded_idx_mapping=torch.tensor([2, 0, 3, 1], dtype=torch.int64),
         max_per_req_token_ids=5,
         logits_mode=logits_mode,
     )
@@ -172,7 +172,7 @@ def test_cpu_requested_output_logprobs_without_topk() -> None:
         sampled_token_ids=torch.tensor([2, 1]),
         cu_num_logits=None,
         logprob_token_ids_state=state,
-        expanded_idx_mapping=torch.tensor([1, 0], dtype=torch.int32),
+        expanded_idx_mapping=torch.tensor([1, 0], dtype=torch.int64),
         max_per_req_token_ids=2,
         logits_mode=True,
     )

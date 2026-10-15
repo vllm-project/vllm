@@ -33,7 +33,7 @@ def test_prepare_prefill_inputs_cpu() -> None:
             10, dtype=torch.int32
         )
 
-    idx_mapping = torch.tensor([4, 1, 3], dtype=torch.int32)
+    idx_mapping = torch.tensor([4, 1, 3], dtype=torch.int64)
     query_start_loc = torch.tensor([0, 3, 5, 6], dtype=torch.int32)
     prefill_len = torch.tensor([0, 4, 0, 8, 7, 0], dtype=torch.int32)
     num_computed_tokens = torch.tensor([0, 4, 0, 4, 2, 0], dtype=torch.int32)
@@ -66,7 +66,7 @@ def test_get_prompt_logprobs_token_ids_cpu() -> None:
     token_ids = ops.get_prompt_logprobs_token_ids_cpu(
         num_tokens=6,
         query_start_loc=torch.tensor([0, 3, 5, 6], dtype=torch.int32),
-        idx_mapping=torch.tensor([4, 1, 3], dtype=torch.int32),
+        idx_mapping=torch.tensor([4, 1, 3], dtype=torch.int64),
         num_computed_tokens=torch.tensor([0, 4, 0, 1, 2, 0], dtype=torch.int32),
         all_token_ids=all_token_ids,
     )
@@ -81,7 +81,7 @@ def test_prepare_pos_seq_lens_cpu() -> None:
     seq_lens_storage = torch.full((8,), -1, dtype=torch.int32)
     seq_lens = seq_lens_storage[1:7]
 
-    idx_mapping = torch.tensor([3, 1, 4], dtype=torch.int32)
+    idx_mapping = torch.tensor([3, 1, 4], dtype=torch.int64)
     query_start_loc = torch.tensor([0, 3, 5, 6], dtype=torch.int32)
     num_computed_tokens = torch.tensor([0, 7, 0, 2, 10], dtype=torch.int32)
 
@@ -116,7 +116,7 @@ def test_prepare_mrope_positions_cpu() -> None:
         positions,
         prefill_positions,
         prefill_delta=torch.tensor([0, 10, 0, 20, 30], dtype=torch.int32),
-        idx_mapping=torch.tensor([3, 1, 4], dtype=torch.int32),
+        idx_mapping=torch.tensor([3, 1, 4], dtype=torch.int64),
         query_start_loc=torch.tensor([0, 3, 6, 8], dtype=torch.int32),
         prefill_lens=torch.tensor([0, 5, 0, 6, 4], dtype=torch.int32),
         num_computed_tokens=torch.tensor([0, 5, 0, 2, 3], dtype=torch.int32),
@@ -139,7 +139,7 @@ def test_cpu_rope_state_prepares_positions() -> None:
     state.prefill_delta = SimpleNamespace(gpu=torch.tensor([0, 10], dtype=torch.int32))
 
     state.prepare_positions(
-        idx_mapping=torch.tensor([1], dtype=torch.int32),
+        idx_mapping=torch.tensor([1], dtype=torch.int64),
         query_start_loc=torch.tensor([0, 2], dtype=torch.int32),
         prefill_lens=torch.tensor([0, 1], dtype=torch.int32),
         num_computed_tokens=torch.tensor([0, 0], dtype=torch.int32),
@@ -150,7 +150,7 @@ def test_cpu_rope_state_prepares_positions() -> None:
 
 def test_combine_sampled_and_draft_tokens_cpu_basic() -> None:
     input_ids = torch.tensor([10, 11, 12, -1], dtype=torch.int32)
-    idx_mapping = torch.tensor([3, 1], dtype=torch.int32)
+    idx_mapping = torch.tensor([3, 1], dtype=torch.int64)
     last_sampled_tokens = torch.tensor([[40], [41], [42], [43]])
     query_start_loc = torch.tensor([0, 3, 4], dtype=torch.int32)
     seq_lens = torch.tensor([5, 6], dtype=torch.int32)
@@ -177,7 +177,7 @@ def test_combine_sampled_and_draft_tokens_cpu_basic() -> None:
 def test_combine_sampled_and_draft_tokens_cpu_with_drafts() -> None:
     input_ids_storage = torch.arange(99, 108, dtype=torch.int32)
     input_ids = input_ids_storage[1:8]
-    idx_mapping = torch.tensor([3, 0], dtype=torch.int32)
+    idx_mapping = torch.tensor([3, 0], dtype=torch.int64)
     last_sampled_tokens = torch.tensor([[50], [150], [250], [350]])
     query_start_loc = torch.tensor([0, 3, 7], dtype=torch.int32)
     seq_lens = torch.tensor([10, 6], dtype=torch.int32)
@@ -208,7 +208,7 @@ def test_get_num_sampled_and_rejected_cpu() -> None:
     num_sampled = torch.tensor([1, 2, 2, 1], dtype=torch.int32)
     seq_lens = torch.tensor([4, 6, 22, 7], dtype=torch.int32)
     cu_num_logits = torch.tensor([0, 1, 5, 8, 10], dtype=torch.int32)
-    idx_mapping = torch.tensor([2, 0, 3, 1], dtype=torch.int32)
+    idx_mapping = torch.tensor([2, 0, 3, 1], dtype=torch.int64)
     prefill_len = torch.tensor([10, 7, 4, 20], dtype=torch.int32)
 
     actual_sampled, actual_rejected = get_num_sampled_and_rejected(
@@ -224,7 +224,7 @@ def test_get_num_sampled_and_rejected_cpu() -> None:
 
 
 def test_post_update_cpu() -> None:
-    idx_mapping = torch.tensor([3, -1, 1, 4], dtype=torch.int32)
+    idx_mapping = torch.tensor([3, -1, 1, 4], dtype=torch.int64)
     num_computed_tokens = torch.tensor([10, 20, 30, 40, 50], dtype=torch.int32)
     last_sampled_storage = torch.full((5, 2), -1, dtype=torch.int64)
     last_sampled_tokens = last_sampled_storage[:, 1:]
@@ -271,7 +271,7 @@ def test_post_update_cpu_without_optional_inputs() -> None:
     total_len = torch.tensor([2, 3], dtype=torch.int32)
 
     post_update(
-        idx_mapping=torch.tensor([1], dtype=torch.int32),
+        idx_mapping=torch.tensor([1], dtype=torch.int64),
         num_computed_tokens=num_computed_tokens,
         last_sampled_tokens=last_sampled_tokens,
         output_bin_counts=None,
@@ -293,7 +293,7 @@ def test_post_update_num_computed_tokens_cpu() -> None:
     num_computed_tokens = torch.tensor([10, 20, 30, 40, 50], dtype=torch.int32)
 
     post_update_num_computed_tokens(
-        idx_mapping=torch.tensor([3, 1, 4], dtype=torch.int32),
+        idx_mapping=torch.tensor([3, 1, 4], dtype=torch.int64),
         num_computed_tokens=num_computed_tokens,
         query_start_loc=torch.tensor([0, 3, 5, 6], dtype=torch.int32),
     )
