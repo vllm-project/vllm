@@ -1,6 +1,37 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""NixlTransport: Data-plane transport for RDMA-based KV block transfers via NIXL."""
+"""NixlTransport: Data-plane transport for RDMA-based KV block transfers via NIXL.
+
+Threading: the agent is reached from the scheduler thread and, when the tiering
+manager runs one, from its tier-poll thread. The manager's lock serializes
+them strictly -- one Python thread inside any agent call at a time, with a full
+memory barrier between.
+
+That lock is the only protection, not a belt over NIXL's own. nixl_agent picks
+NIXL_THREAD_SYNC_STRICT only when ``enable_listen`` is set, which this transport
+does not set, so the agent runs with NIXL_THREAD_SYNC_NONE -- under which NIXL's
+internal agent lock compiles down to no-ops, leaving every agent entry point
+unguarded. So the manager lock must cover all of them, and the lifetime of every
+handle passed between calls. The exception is peer registration moved onto a
+worker thread, as NixlConnector's handshake executor does: it runs outside the
+lock and relies, like that connector, on NIXL tolerating it beside transfers.
+
+Serialized use from a second thread is supported (checked against NIXL 1.4.1
+sources): NIXL never creates its UCX worker in UCS_THREAD_MODE_SINGLE, the only
+creator-thread-affine mode. The weakest mode it ever requests is
+UCS_THREAD_MODE_SERIALIZED, documented as "multiple threads can access, but only
+one at a time", and because ``enable_prog_thread`` defaults on here it actually
+requests UCS_THREAD_MODE_MULTI and fails construction if the UCX build cannot
+provide it.
+
+Two caveats. NIXL binds a shared UCX worker per calling thread
+(``tlsSharedWorkerMap``), which is harmless only while there is exactly one
+shared worker -- true here, but it would stop being true if a ``num_workers``
+UCX backend param were ever set. And NIXL 1.4.1 does accept an explicit
+``sync_mode`` (including NIXL_THREAD_SYNC_RW), which would make its own locking
+real; that parameter does not exist before 1.x, so passing it would need a
+version gate, the way ``capture_telemetry`` does.
+"""
 
 from __future__ import annotations
 
@@ -197,10 +228,7 @@ class NixlTransport(DataTransport):
             nixl_name = self._peer_nixl_names.pop(peer_id, None)
             dlist = self._remote_dlists.pop(peer_id, None)
         if self._agent is not None:
-            if dlist is not None:
-                self._agent.release_dlist_handle(dlist)
-            if nixl_name:
-                self._agent.remove_remote_agent(nixl_name)
+            self._release_remote_handles(peer_id, dlist, nixl_name)
 
     def _begin_registration(self, peer_id: str) -> int:
         """Claim the next registration generation for *peer_id*."""
@@ -256,18 +284,40 @@ class NixlTransport(DataTransport):
             peer_id,
         )
         if self._agent is not None:
+            self._release_remote_handles(peer_id, remote_dlist, nixl_name)
+        return False
+
+    def _release_remote_handles(
+        self, peer_id: str, dlist: object | None, nixl_name: str | None
+    ) -> None:
+        """Release a peer's descriptor list and remote agent independently.
+
+        The two teardown operations are independent: NIXL may reject one
+        after a transport failure, and a ``release_dlist_handle`` that
+        raises must not skip ``remove_remote_agent``. Skipping it would
+        leave a stale remote registration behind after the peer is gone
+        (peer removal) or after its registration was superseded.
+        """
+        if dlist is not None:
             try:
-                self._agent.release_dlist_handle(remote_dlist)
-                self._agent.remove_remote_agent(nixl_name)
+                self._agent.release_dlist_handle(dlist)
             except Exception as exc:
                 logger.warning(
-                    "NixlTransport %s: releasing superseded registration "
-                    "for peer=%s failed: %s",
+                    "NixlTransport %s: releasing dlist handle for peer=%s failed: %s",
                     self._agent_name,
                     peer_id,
                     exc,
                 )
-        return False
+        if nixl_name:
+            try:
+                self._agent.remove_remote_agent(nixl_name)
+            except Exception as exc:
+                logger.warning(
+                    "NixlTransport %s: removing remote agent for peer=%s failed: %s",
+                    self._agent_name,
+                    peer_id,
+                    exc,
+                )
 
     # ------------------------------------------------------------------
     # Transfer submission and polling
