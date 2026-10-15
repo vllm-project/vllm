@@ -1275,6 +1275,8 @@ class AnthropicServingMessages(OpenAIServingChat):
             # Closing here also finalizes parser-failure reporting in Chat.
             try:
                 await generator.aclose()
+            except Exception:
+                logger.error("Error closing Messages stream generator.")
             finally:
                 if request is not None and request._tool_calling_spans is not None:
                     finish_tool_calling_trace(

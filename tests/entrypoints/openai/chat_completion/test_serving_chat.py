@@ -1187,11 +1187,12 @@ async def test_stream_tool_response_metrics_deduplicate_filtered_fragments(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("emitted_first", [False, True])
 @pytest.mark.parametrize(
-    "failure", ["parser", "engine", "generation", "cancel", "close"]
+    "failure",
+    ["parser", "engine", "generation", "cancel", "close", "cleanup", "cleanup-cancel"],
 )
 @pytest.mark.parametrize("api_surface", ["chat_completions", "messages"])
 async def test_stream_tool_response_metrics_retain_calls_without_false_outcomes(
-    tool_metrics_stream_serving, failure, emitted_first, api_surface
+    tool_metrics_stream_serving, failure, emitted_first, api_surface, caplog
 ):
     serving, parser, record = tool_metrics_stream_serving
     request = ChatCompletionRequest(
@@ -1201,11 +1202,12 @@ async def test_stream_tool_response_metrics_retain_calls_without_false_outcomes(
     )
     request._api_surface = api_surface
     span = MagicMock()
-    if api_surface != "messages":
+    if api_surface != "messages" or failure.startswith("cleanup"):
         request._tool_calling_spans = []
+    parser_failed = failure == "parser" or failure.startswith("cleanup")
     parser.parse_delta.side_effect = (
         [DeltaMessage(tool_calls=[DeltaToolCall(index=0)])] if emitted_first else []
-    ) + [ValueError("fixture parse error") if failure == "parser" else DeltaMessage()]
+    ) + [ValueError("fixture parse error") if parser_failed else DeltaMessage()]
 
     source_closed = MagicMock()
 
@@ -1227,6 +1229,10 @@ async def test_stream_tool_response_metrics_retain_calls_without_false_outcomes(
             yield output
         finally:
             source_closed()
+            if failure == "cleanup":
+                raise RuntimeError("private cleanup detail")
+            if failure == "cleanup-cancel":
+                raise asyncio.CancelledError()
 
     iterator = source()
     stream = serving.chat_completion_stream_generator(
@@ -1259,15 +1265,15 @@ async def test_stream_tool_response_metrics_retain_calls_without_false_outcomes(
             source_closed.assert_called_once_with()
         await iterator.aclose()
 
-    assert cancelled == (failure == "cancel")
-    if failure in ("cancel", "close"):
+    assert cancelled == (failure in ("cancel", "cleanup-cancel"))
+    if failure in ("cancel", "close", "cleanup-cancel"):
         assert "data: [DONE]\n\n" not in chunks
     else:
         assert chunks[-1] == "data: [DONE]\n\n"
         errors = [json.loads(line.removeprefix("data: ")) for line in chunks[:-1]]
         assert sum("error" in chunk for chunk in errors) == 1
     if api_surface == "messages":
-        if failure == "parser":
+        if parser_failed:
             record.assert_called_once_with(request, parse_failed=True, completed=False)
         else:
             record.assert_not_called()
@@ -1275,17 +1281,20 @@ async def test_stream_tool_response_metrics_retain_calls_without_false_outcomes(
         record.assert_called_once_with(
             request,
             tool_calls_count=int(emitted_first),
-            parse_failed=failure == "parser",
+            parse_failed=parser_failed,
             completed=False,
         )
         if emitted_first or failure not in ("engine", "cancel"):
             _assert_tool_response_span(
                 span,
                 int(emitted_first),
-                "parse_failure" if failure == "parser" else "interrupted",
+                "parse_failure" if parser_failed else "interrupted",
             )
         else:
             span.end.assert_not_called()
+    if failure == "cleanup":
+        assert "Error closing Chat completion result generator." in caplog.text
+        assert "private cleanup detail" not in caplog.text
 
 
 @pytest.mark.asyncio

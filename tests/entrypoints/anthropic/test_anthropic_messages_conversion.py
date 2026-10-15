@@ -1121,10 +1121,12 @@ def _assert_response_span(span, count, status):
         "cancel",
         "close-before",
         "close-after",
+        "close-error",
+        "close-cancel",
     ],
 )
 async def test_message_stream_metrics_count_only_emitted_tool_blocks(
-    tool_response_record, failure
+    tool_response_record, failure, caplog
 ):
     request = _convert(
         _make_request(
@@ -1159,7 +1161,7 @@ async def test_message_stream_metrics_count_only_emitted_tool_blocks(
                     )
                 )
                 yield _make_stream_chunk(delta=DeltaMessage(tool_calls=[_tc(args="}")]))
-            if failure == "conversion":
+            if failure in ("conversion", "close-error", "close-cancel"):
                 yield "data: not-json"
             if failure == "engine":
                 raise RuntimeError("fixture engine error")
@@ -1173,6 +1175,10 @@ async def test_message_stream_metrics_count_only_emitted_tool_blocks(
         finally:
             span.end.assert_not_called()
             closed = True
+            if failure == "close-error":
+                raise RuntimeError("private cleanup detail")
+            if failure == "close-cancel":
+                raise asyncio.CancelledError()
 
     stream = _make_stream_converter().message_stream_converter(
         source(), request=request
@@ -1203,7 +1209,7 @@ async def test_message_stream_metrics_count_only_emitted_tool_blocks(
         0 if failure in ("no-calls", "no-tools", "metadata-only", "close-before") else 1
     )
     assert closed
-    assert cancelled == (failure == "cancel")
+    assert cancelled == (failure in ("cancel", "close-cancel"))
     if failure == "no-tools":
         tool_response_record.assert_not_called()
         span.end.assert_not_called()
@@ -1221,8 +1227,17 @@ async def test_message_stream_metrics_count_only_emitted_tool_blocks(
             else "interrupted",
         )
         assert request._tool_calling_spans is None
-    if failure in ("conversion", "engine", "invalid-frame"):
+    if failure in (
+        "conversion",
+        "engine",
+        "invalid-frame",
+        "close-error",
+        "close-cancel",
+    ):
         assert sum(event == "error" for event, _ in events) == 1
+    if failure == "close-error":
+        assert "Error closing Messages stream generator." in caplog.text
+        assert "private cleanup detail" not in caplog.text
 
 
 class TestMessageStreamConverterToolUseContentBuffering:

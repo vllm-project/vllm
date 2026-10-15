@@ -975,6 +975,8 @@ class OpenAIServingChat(GenerateBaseServing):
                     close = getattr(result_generator, "aclose", None)
                     if close is not None:
                         await close()
+            except Exception:
+                logger.error("Error closing Chat completion result generator.")
             finally:
                 if (
                     request._tool_calling_spans is not None
