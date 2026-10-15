@@ -5,6 +5,7 @@ from vllm.logger import init_logger
 from vllm.triton_utils import HAS_TRITON
 from vllm.v1.watermarking.gpu_sampler import GPUWatermarkSampler
 from vllm.v1.worker.cpu.block_table import CPUBlockTables
+from vllm.v1.worker.cpu.logprob import CPUPromptLogprobsWorker
 from vllm.v1.worker.cpu.model_state import (
     CPUDefaultModelState,
     CPUEncoderOnlyModelState,
@@ -20,6 +21,7 @@ from vllm.v1.worker.gpu.model_states.encoder_decoder import EncoderDecoderModelS
 from vllm.v1.worker.gpu.model_states.encoder_only import EncoderOnlyModelState
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
+from vllm.v1.worker.gpu.sample.prompt_logprob import PromptLogprobsWorker
 from vllm.v1.worker.gpu.sample.sampler import Sampler
 from vllm.v1.worker.gpu.structured_outputs import StructuredOutputsWorker
 from vllm.v1.worker.utils import KVBlockZeroer
@@ -35,6 +37,12 @@ class CPUModelRunner(GPUModelRunner):
     @property
     def sampler_cls(self) -> type[Sampler]:
         return super().sampler_cls if HAS_TRITON else CPUSampler
+
+    @property
+    def prompt_logprobs_worker_cls(self) -> type[PromptLogprobsWorker]:
+        if HAS_TRITON:
+            return super().prompt_logprobs_worker_cls
+        return CPUPromptLogprobsWorker
 
     @property
     def watermark_sampler_cls(self) -> type[GPUWatermarkSampler]:

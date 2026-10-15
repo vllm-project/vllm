@@ -515,7 +515,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         self.vllm_config.watermark_config
                     ),
                 )
-            self.prompt_logprobs_worker = PromptLogprobsWorker(
+            self.prompt_logprobs_worker = self.prompt_logprobs_worker_cls(
                 self.max_num_reqs,
                 self.device,
                 logprobs_mode=self.model_config.logprobs_mode,
@@ -2413,6 +2413,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     @property
     def sampler_cls(self) -> type[Sampler]:
         return Sampler
+
+    @property
+    def prompt_logprobs_worker_cls(self) -> type[PromptLogprobsWorker]:
+        return PromptLogprobsWorker
 
     @property
     def watermark_sampler_cls(self) -> type[GPUWatermarkSampler]:
