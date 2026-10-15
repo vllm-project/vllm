@@ -492,3 +492,42 @@ def test_simulate_forward_prefill_context_parallel(
         )
     for output in outputs:
         assert output[0][0][-3:] == [501, 502, 503]
+
+
+@pytest.mark.skipif(not current_platform.is_cpu(), reason="Tests the CPU platform.")
+def test_simulate_forward_cpu_hybrid_prefix_cache_multi_rank(
+    vllm_runner: type[VllmRunner],
+) -> None:
+    """Workers raise the block size to fit a hybrid model's Mamba pages. The
+    engine core reruns VllmConfig.__post_init__ after its handshake and must
+    keep that size: Mamba prefill checkpoints land on its block boundaries,
+    so a repeated prompt hits up to its last full block."""
+    from vllm.inputs import TokensPrompt
+
+    params = SamplingParams(max_tokens=1, detokenize=False)
+    with vllm_runner(
+        "Qwen/Qwen3.8-2.4T-A95B-FP8",
+        hf_overrides={"num_hidden_layers": 4},
+        simulate_forward=True,
+        # Unset, as the platform resolves it (the runner sets one by default).
+        block_size=None,
+        tensor_parallel_size=2,
+        enable_expert_parallel=True,
+        enable_prefix_caching=True,
+        enable_chunked_prefill=True,
+        # The whole prompt in one chunk, which no block boundary splits.
+        max_num_batched_tokens=16384,
+        kv_cache_memory_bytes=4 * 1024**3,
+        max_model_len=16384,
+    ) as vllm_model:
+        block_size = vllm_model.llm.llm_engine.vllm_config.cache_config.block_size
+        # Ends mid-block: the prefill must be split at the last block boundary.
+        num_tokens = 4 * block_size + block_size // 2
+        prompt = TokensPrompt(
+            prompt_token_ids=[1000 + i % 5000 for i in range(num_tokens)]
+        )
+        hits = [
+            vllm_model.llm.generate(prompt, params)[0].num_cached_tokens
+            for _ in range(2)
+        ]
+    assert hits == [0, 4 * block_size]
