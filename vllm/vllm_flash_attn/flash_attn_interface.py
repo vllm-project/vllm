@@ -358,6 +358,17 @@ def flash_attn_varlen_func(
     else:
         assert len(window_size) == 2
         real_window_size = (window_size[0], window_size[1])
+    if (
+        fa4_fp8_kv_dequant
+        and not causal
+        and real_window_size[0] < 0
+        and real_window_size[1] < 0
+    ):
+        raise NotImplementedError(
+            "SM90 d512 FP8 MMA requires causal or local attention; "
+            "noncausal full attention is not validated. "
+            "Use an unquantized KV cache or a supported attention backend."
+        )
     q, k, v = [maybe_contiguous(x) for x in (q, k, v)]
 
     dummy_cu_seqlens_k = torch.empty_like(cu_seqlens_q)
