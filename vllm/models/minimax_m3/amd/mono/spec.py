@@ -31,6 +31,10 @@ class MiniMaxM3MonoSpec:
             reasons.append("does not support data parallelism")
         if pc.decode_context_parallel_size != 1:
             reasons.append("does not support decode context parallelism")
+        if pc.prefill_context_parallel_size != 1:
+            reasons.append("does not support prefill context parallelism")
+        if pc.use_ubatching:
+            reasons.append("does not support DBO or ubatching")
         if pc.enable_expert_parallel:
             reasons.append("does not support expert parallelism")
         if pc.enable_eplb:
@@ -41,6 +45,8 @@ class MiniMaxM3MonoSpec:
             reasons.append("requires KV cache block size 128")
         if cc.enable_prefix_caching:
             reasons.append("does not yet support prefix caching")
+        if cc.kv_offloading_size is not None:
+            reasons.append("does not support KV cache offloading")
 
         index_dtype = config.attention_config.resolve_indexer_kv_dtype("bf16")
         if index_dtype != "fp8":
@@ -52,6 +58,17 @@ class MiniMaxM3MonoSpec:
             reasons.append("does not support a KV connector")
         if not getattr(config, "use_v2_model_runner", False):
             reasons.append("requires Model Runner V2")
+        if config.speculative_config is not None:
+            reasons.append("does not support speculative decoding")
+        if config.model_config.enable_sleep_mode:
+            reasons.append("does not support sleep mode")
+        if config.weight_transfer_config is not None:
+            reasons.append("does not support weight transfer or updates")
+        offload = config.offload_config
+        if offload.uva.cpu_offload_gb > 0 or offload.prefetch.offload_group_size > 0:
+            reasons.append("does not support model weight offloading")
+        if not config.model_config.enforce_eager:
+            reasons.append("milestone one requires --enforce-eager")
         text_config = config.model_config.hf_text_config
         if getattr(text_config, "use_index_cache", False):
             reasons.append("does not support cross-layer index reuse")
@@ -67,10 +84,6 @@ class MiniMaxM3MonoSpec:
                 reasons.append("requires sparse attention on layers 3 through 59")
 
         return reasons
-
-    def extend_final_graph_widths(self, final_sizes: list[int]) -> list[int]:
-        """Add mono widths after vLLM resolves its default graph-size list."""
-        return sorted(set(final_sizes).union(self.widths))
 
 
 MONO_SPEC = MiniMaxM3MonoSpec()

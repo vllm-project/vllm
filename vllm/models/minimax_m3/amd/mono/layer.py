@@ -9,11 +9,13 @@ without routing production forwards through a fake kernel.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Protocol
 
 import torch
 
 from vllm.config import VllmConfig
+from vllm.distributed import get_tp_group
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -30,10 +32,26 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-CacheIdentity = tuple[
-    tuple[int, int, torch.dtype, tuple[int, ...], int],
-    ...,
-]
+TensorIdentity = tuple[int, int, torch.dtype, tuple[int, ...], int]
+
+
+@dataclass(frozen=True)
+class CacheBinding:
+    main: torch.Tensor
+    key_pages: torch.Tensor
+    value_pages: torch.Tensor
+    k_scale: torch.Tensor
+    v_scale: torch.Tensor
+    index_key: torch.Tensor
+    sparse_table: torch.Tensor
+    sparse_context: torch.Tensor
+
+    def identity(self) -> dict[str, TensorIdentity]:
+        return {name: tensor_identity(value) for name, value in vars(self).items()}
+
+
+class CacheBinder(Protocol):
+    def bind(self, layer_id: int, binding: CacheBinding) -> None: ...
 
 
 def _runtime_refusals(spec: MiniMaxM3MonoSpec) -> list[str]:
@@ -55,7 +73,7 @@ def _runtime_refusals(spec: MiniMaxM3MonoSpec) -> list[str]:
         cus = current_platform.num_compute_units(
             torch.accelerator.current_device_index()
         )
-    except Exception as err:
+    except RuntimeError as err:
         reasons.append(f"cannot determine compute-unit count ({err})")
     else:
         if cus != spec.blocks:
@@ -66,7 +84,9 @@ def _runtime_refusals(spec: MiniMaxM3MonoSpec) -> list[str]:
 class MiniMaxM3MonoLayer:
     """Owns one rank's mono lifecycle and a single decision for each forward."""
 
-    def __init__(self, model: MiniMaxM3Model, config: VllmConfig) -> None:
+    def __init__(
+        self, model: MiniMaxM3Model, config: VllmConfig, binder: CacheBinder
+    ) -> None:
         self.model = model
         self.spec = MONO_SPEC
         reasons = self.spec.refusal_reasons(config) + _runtime_refusals(self.spec)
@@ -74,60 +94,122 @@ class MiniMaxM3MonoLayer:
             detail = "; ".join(reasons)
             raise ValueError(f"--monokernel unsupported: {detail}.")
         self.layers: list[MiniMaxM3DecoderLayer] = []
+        self.binder = binder
         self.active = False
         self.last_decision = StepDecision(False, "not started")
-        self._cache_identities: dict[int, CacheIdentity] = {}
+        self._cache_identities: dict[int, dict[str, TensorIdentity]] = {}
         self.weights: dict[int, MonoLayerWeights] = {}
         self._weights_attached = False
 
     def attach(self) -> None:
-        for layer in self.model.layers:
-            layer_id = getattr(layer, "layer_id", -1)
-            if (
-                self.spec.first_layer <= layer_id <= self.spec.last_layer
-                and getattr(layer, "is_moe_layer", False)
-                and hasattr(layer.self_attn, "indexer")
-            ):
-                layer.mono = self
-                self.layers.append(layer)
+        expected = list(range(self.spec.first_layer, self.spec.last_layer + 1))
+        layers = [
+            layer
+            for layer in self.model.layers
+            if getattr(layer, "layer_id", -1) in expected
+        ]
+        actual = [getattr(layer, "layer_id", -1) for layer in layers]
+        if actual != expected or any(
+            not getattr(layer, "is_moe_layer", False)
+            or not hasattr(layer.self_attn, "indexer")
+            for layer in layers
+        ):
+            raise ValueError("--monokernel requires exactly sparse MoE layers 3-59")
+        self.layers = layers
 
-    def _attach_after_load(self) -> None:
+    def pack_after_load(self) -> None:
         if self._weights_attached:
             return
+        failures: list[str] = []
         for layer in self.layers:
-            self.weights[layer.layer_id] = MonoLayerWeights.from_layer(layer)
+            try:
+                self.weights[layer.layer_id] = MonoLayerWeights.from_layer(layer)
+            except ValueError as err:
+                failures.append(str(err))
+        if failures:
+            raise ValueError("; ".join(failures))
         self._weights_attached = True
 
     @staticmethod
-    def _cache_tensors(layer: MiniMaxM3DecoderLayer) -> tuple[torch.Tensor, ...]:
+    def _cache_binding(layer: MiniMaxM3DecoderLayer) -> CacheBinding:
         attn = layer.self_attn
-        tensors = [attn.kv_cache, attn.indexer.index_cache.kv_cache]
-        for value in (
-            getattr(attn, "_k_scale", None),
-            getattr(attn, "_v_scale", None),
-            getattr(attn, "sparse_bt_buffer", None),
-            getattr(attn, "sparse_ctx_buffer", None),
+        main = attn.kv_cache
+        key_pages, value_pages = attn.get_aiter_sparse_pa_kv_cache()
+        binding = CacheBinding(
+            main=main,
+            key_pages=key_pages,
+            value_pages=value_pages,
+            k_scale=attn._k_scale,
+            v_scale=attn._v_scale,
+            index_key=attn.indexer.index_cache.kv_cache,
+            sparse_table=attn.sparse_bt_buffer,
+            sparse_context=attn.sparse_ctx_buffer,
+        )
+        if (
+            main.numel() == 0
+            or main.device.type != "cuda"
+            or main.dtype not in (torch.uint8, torch.float8_e4m3fn)
+            or main.shape[2] != 128
         ):
-            if isinstance(value, torch.Tensor):
-                tensors.append(value)
-        return tuple(tensors)
+            raise ValueError("invalid main FP8 KV cache binding")
+        if (
+            key_pages.device != main.device
+            or value_pages.device != main.device
+            or key_pages.stride(-1) != 1
+            or value_pages.stride(-1) != 1
+        ):
+            raise ValueError("invalid AITER page-16 K/V views")
+        for name, scale in (("K", binding.k_scale), ("V", binding.v_scale)):
+            if (
+                not isinstance(scale, torch.Tensor)
+                or scale.device != main.device
+                or scale.dtype != torch.float32
+                or scale.numel() != 1
+            ):
+                raise ValueError(f"invalid {name} cache scale binding")
+        if (
+            binding.index_key.device != main.device
+            or binding.index_key.dtype not in (torch.uint8, torch.float8_e4m3fn)
+            or binding.index_key.shape[:2] != main.shape[:1] + main.shape[2:3]
+        ):
+            raise ValueError("invalid index-key cache binding")
+        for scratch in (binding.sparse_table, binding.sparse_context):
+            if (
+                not isinstance(scratch, torch.Tensor)
+                or scratch.device != main.device
+                or scratch.dtype != torch.int32
+                or not scratch.is_contiguous()
+            ):
+                raise ValueError("invalid model-owned sparse scratch binding")
+        return binding
 
     def _bind_caches(self) -> None:
-        changed: list[tuple[int, CacheIdentity]] = []
+        changed: list[tuple[int, CacheBinding, dict[str, TensorIdentity]]] = []
         for layer in self.layers:
-            tensors = self._cache_tensors(layer)
-            if any(t.numel() == 0 for t in tensors[:2]):
-                raise RuntimeError("--monokernel caches are not bound")
-            identity = tuple(tensor_identity(t) for t in tensors)
+            binding = self._cache_binding(layer)
+            identity = binding.identity()
             if self._cache_identities.get(layer.layer_id) != identity:
-                changed.append((layer.layer_id, identity))
+                changed.append((layer.layer_id, binding, identity))
         if not changed:
             return
         if torch.cuda.is_current_stream_capturing():
             raise RuntimeError(
                 "--monokernel cache first-bind/rebind reached inside graph capture"
             )
-        self._cache_identities.update(changed)
+        failure: Exception | None = None
+        try:
+            for layer_id, binding, _ in changed:
+                self.binder.bind(layer_id, binding)
+        except Exception as err:
+            failure = err
+        from vllm.models.deepseek_v41.amd.mono.common.peer_memory import tp_agree
+
+        if not tp_agree(failure is None, get_tp_group().cpu_group):
+            raise RuntimeError(
+                "rank-uniform MonoKernel cache rebind failed"
+            ) from failure
+        for layer_id, _, identity in changed:
+            self._cache_identities[layer_id] = identity
 
     def begin_step(self, rows: int) -> None:
         self.active = False
@@ -148,7 +230,8 @@ class MiniMaxM3MonoLayer:
         )
         if not self.last_decision.use_mono:
             return
-        self._attach_after_load()
+        if not self._weights_attached:
+            raise RuntimeError("--monokernel weights were not packed after load")
         self._bind_caches()
         self.active = True
         logger.info_once(

@@ -28,8 +28,8 @@ def decide_step(
 ) -> StepDecision:
     if rows not in spec.widths:
         return StepDecision(False, f"unsupported graph width {rows}")
-    if graph_mode not in (CUDAGraphMode.NONE, CUDAGraphMode.FULL):
-        return StepDecision(False, f"unsupported CUDA graph mode {graph_mode}")
+    if graph_mode != CUDAGraphMode.NONE:
+        return StepDecision(False, "milestone one supports eager execution only")
     if not isinstance(metadata, MiniMaxM3SparseMetadata):
         return StepDecision(False, "sparse attention metadata missing")
     if metadata.decode is None or metadata.num_decodes == 0:

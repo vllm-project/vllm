@@ -36,10 +36,9 @@ def _metadata(rows: int, *, decode_tokens: int | None = None, prefills: int = 0)
 
 
 @pytest.mark.parametrize("width", MONO_SPEC.widths)
-@pytest.mark.parametrize("mode", [CUDAGraphMode.NONE, CUDAGraphMode.FULL])
-def test_decode_widths_route_uniformly(width: int, mode: CUDAGraphMode):
-    left = decide_step(MONO_SPEC, width, mode, _metadata(width))
-    right = decide_step(MONO_SPEC, width, mode, _metadata(width))
+def test_decode_widths_route_uniformly(width: int):
+    left = decide_step(MONO_SPEC, width, CUDAGraphMode.NONE, _metadata(width))
+    right = decide_step(MONO_SPEC, width, CUDAGraphMode.NONE, _metadata(width))
     assert left == right
     assert left.use_mono
 
@@ -48,6 +47,7 @@ def test_decode_widths_route_uniformly(width: int, mode: CUDAGraphMode):
     ("rows", "mode", "metadata"),
     [
         (MONO_SPEC.max_rows + 1, CUDAGraphMode.NONE, _metadata(1)),
+        (1, CUDAGraphMode.FULL, _metadata(1)),
         (1, CUDAGraphMode.PIECEWISE, _metadata(1)),
         (1, CUDAGraphMode.NONE, None),
         (1, CUDAGraphMode.NONE, _metadata(1, prefills=1)),
@@ -61,13 +61,14 @@ def test_unsupported_steps_fall_back(rows, mode, metadata):
 def test_padding_slots_are_eligible():
     metadata = _metadata(4, decode_tokens=2)
     metadata.slot_mapping[2:] = -1
-    assert decide_step(MONO_SPEC, 4, CUDAGraphMode.FULL, metadata).use_mono
+    assert decide_step(MONO_SPEC, 4, CUDAGraphMode.NONE, metadata).use_mono
 
 
-def test_speculative_verification_falls_back():
+@pytest.mark.parametrize("query_len", [2, 4])
+def test_speculative_verification_falls_back(query_len: int):
     metadata = _metadata(4)
-    metadata.decode.decode_query_len = 4
-    assert not decide_step(MONO_SPEC, 4, CUDAGraphMode.FULL, metadata).use_mono
+    metadata.decode.decode_query_len = query_len
+    assert not decide_step(MONO_SPEC, 4, CUDAGraphMode.NONE, metadata).use_mono
 
 
 def test_cache_identity_detects_replacement():
@@ -83,14 +84,19 @@ def _config(**overrides):
         pipeline_parallel_size=1,
         data_parallel_size=1,
         decode_context_parallel_size=1,
+        prefill_context_parallel_size=1,
         enable_expert_parallel=False,
         enable_eplb=False,
+        use_ubatching=False,
     )
     values.update(overrides)
     return SimpleNamespace(
         parallel_config=SimpleNamespace(**values),
         cache_config=SimpleNamespace(
-            cache_dtype="fp8", block_size=128, enable_prefix_caching=False
+            cache_dtype="fp8",
+            block_size=128,
+            enable_prefix_caching=False,
+            kv_offloading_size=None,
         ),
         attention_config=SimpleNamespace(
             resolve_indexer_kv_dtype=lambda _default: "fp8"
@@ -99,13 +105,21 @@ def _config(**overrides):
         kernel_config=SimpleNamespace(moe_backend="aiter"),
         lora_config=None,
         kv_transfer_config=SimpleNamespace(kv_connector=None),
+        speculative_config=None,
+        weight_transfer_config=None,
+        offload_config=SimpleNamespace(
+            uva=SimpleNamespace(cpu_offload_gb=0),
+            prefetch=SimpleNamespace(offload_group_size=0),
+        ),
         use_v2_model_runner=True,
         model_config=SimpleNamespace(
+            enforce_eager=True,
+            enable_sleep_mode=False,
             hf_text_config=SimpleNamespace(
                 use_index_cache=False,
                 num_hidden_layers=60,
                 sparse_attention_config={"sparse_attention_freq": [0, 0, 0] + [1] * 57},
-            )
+            ),
         ),
     )
 
@@ -118,20 +132,8 @@ def test_static_refusals_report_all_reasons():
     )
     config.cache_config.enable_prefix_caching = True
     reasons = MONO_SPEC.refusal_reasons(config)
-    assert len(reasons) == 4
     assert any("tensor parallel" in reason for reason in reasons)
     assert any("prefix caching" in reason for reason in reasons)
-
-
-def test_graph_widths_extend_instead_of_truncate():
-    assert MONO_SPEC.extend_final_graph_widths([1, 32]) == [
-        1,
-        2,
-        4,
-        8,
-        16,
-        32,
-    ]
 
 
 def test_attach_does_not_change_parameter_tree(monkeypatch):
@@ -149,15 +151,18 @@ def test_attach_does_not_change_parameter_tree(monkeypatch):
     class FakeModel(nn.Module):
         def __init__(self):
             super().__init__()
-            self.layers = nn.ModuleList(FakeSparseLayer(i) for i in range(6))
+            self.layers = nn.ModuleList(FakeSparseLayer(i) for i in range(60))
+
+    class FakeBinder:
+        def bind(self, layer_id, binding):
+            raise AssertionError("bind is not called during attach")
 
     monkeypatch.setattr(mono_layer, "_runtime_refusals", lambda _spec: [])
     model = FakeModel()
     before = {name: value.clone() for name, value in model.state_dict().items()}
-    controller = mono_layer.MiniMaxM3MonoLayer(model, _config())
+    controller = mono_layer.MiniMaxM3MonoLayer(model, _config(), FakeBinder())
     controller.attach()
     after = model.state_dict()
     assert before.keys() == after.keys()
     assert all(torch.equal(before[name], after[name]) for name in before)
-    assert all(model.layers[i].mono is None for i in range(3))
-    assert all(model.layers[i].mono is controller for i in range(3, 6))
+    assert len(controller.layers) == 57
