@@ -109,7 +109,7 @@ async def render_chat_completion(request: ChatCompletionRequest, raw_request: Re
         finally:
             if counter is not None:
                 counter.labels(
-                    model_name=handler.model_config.model,
+                    model_name=handler.model_config.served_model_name,
                     api_surface="chat_completions",
                     status=status,
                 ).inc()
@@ -152,7 +152,7 @@ async def render_messages(request: AnthropicMessagesRequest, raw_request: Reques
         finally:
             if counter is not None:
                 counter.labels(
-                    model_name=handler.model_config.model,
+                    model_name=handler.model_config.served_model_name,
                     api_surface="messages",
                     status=status,
                 ).inc()

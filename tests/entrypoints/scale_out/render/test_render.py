@@ -28,6 +28,7 @@ from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.renderers.online_renderer import OnlineRenderer
 
 MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
+SERVED_MODEL_NAME = "render-test"
 TRACEPARENT = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
 
 
@@ -63,6 +64,7 @@ async def test_render_tool_outcomes(api_surface, outcome, tool_request, render_s
     app.include_router(router)
     serving = _build_serving_render()
     serving.model_config.model = MODEL_NAME
+    serving.model_config.served_model_name = SERVED_MODEL_NAME
     app.state.serving_render = serving
     result = {"token_ids": [7, 8, 9]}
     handler = AsyncMock(return_value=SimpleNamespace(model_dump=lambda: result))
@@ -96,7 +98,7 @@ async def test_render_tool_outcomes(api_surface, outcome, tool_request, render_s
     elif tool_request is None:
         payload.update(tools=None, tool_choice=None)
     labels = {
-        "model_name": MODEL_NAME,
+        "model_name": SERVED_MODEL_NAME,
         "api_surface": api_surface,
         "status": "rendered" if outcome == "rendered" else "error",
     }
@@ -128,6 +130,7 @@ async def test_render_tool_outcomes(api_surface, outcome, tool_request, render_s
         for sample in collector.samples:
             if sample.name == metric:
                 assert set(sample.labels) == {"model_name", "api_surface", "status"}
+                assert sample.labels["model_name"] == SERVED_MODEL_NAME
                 assert "private" not in str(sample.labels)
     exporter, recording = render_spans
     spans = exporter.get_finished_spans()

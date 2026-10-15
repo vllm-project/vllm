@@ -25,6 +25,7 @@ from tests.utils import RemoteLaunchRenderServer
 from vllm.tokenizers import get_tokenizer
 
 MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
+SERVED_MODEL_NAME = "render-test"
 TOOLS_TEMPLATE = "TOOLS={{ (tools or []) | tojson }}|END|{{ messages[0].content }}"
 
 # W3C traceparent header with a fixed trace id and parent span id.
@@ -57,6 +58,8 @@ def trace_service() -> Generator[FakeTraceService, None, None]:
 @pytest.fixture(scope="module")
 def server(trace_service):
     args = [
+        "--served-model-name",
+        SERVED_MODEL_NAME,
         "--otlp-traces-endpoint",
         FAKE_TRACE_SERVER_ADDRESS,
         "--enable-auto-tool-choice",
@@ -131,7 +134,7 @@ async def test_render_endpoint_span(client, trace_service, route, span_name, pay
     response = await client.post(
         route,
         headers={"traceparent": TRACEPARENT},
-        json={"model": MODEL_NAME, **payload},
+        json={"model": SERVED_MODEL_NAME, **payload},
     )
 
     assert response.status_code == 200, response.text
@@ -150,10 +153,10 @@ async def test_derender_endpoint_span(client, trace_service, api, stream):
     generated = {
         "choices": [{"index": 0, "token_ids": token_ids, "finish_reason": "stop"}]
     }
-    payload = {"model": MODEL_NAME, "stream": stream, "prompt_token_ids": [1]}
+    payload = {"model": SERVED_MODEL_NAME, "stream": stream, "prompt_token_ids": [1]}
     if api == "chat/completions":
         payload["chat_request"] = {
-            "model": MODEL_NAME,
+            "model": SERVED_MODEL_NAME,
             "messages": [{"role": "user", "content": "Hello"}],
         }
         span_name = "derender_chat_completion"
@@ -183,6 +186,7 @@ def _render_count(metrics: str, api_surface: str, status: str) -> float:
         for family in text_string_to_metric_families(metrics)
         for sample in family.samples
         if sample.name == "vllm:tool_call_render_requests_total"
+        and sample.labels["model_name"] == SERVED_MODEL_NAME
         and sample.labels["api_surface"] == api_surface
         and sample.labels["status"] == status
     )
@@ -204,7 +208,7 @@ async def test_render_tool_intent_and_telemetry(
         "function": {"name": "private-render-tool", "parameters": schema},
     }
     payload: dict[str, object] = {
-        "model": MODEL_NAME,
+        "model": SERVED_MODEL_NAME,
         "messages": [{"role": "user", "content": "private-render-prompt"}],
         "max_tokens": 1,
         "stream": choice == "auto",
@@ -276,7 +280,7 @@ async def test_render_tool_intent_and_telemetry(
 async def test_invalid_tool_choice_is_not_counted_as_a_render(client, api_surface):
     """Pre-handler validation must not invent a render or field-rejection outcome."""
     payload: dict[str, object] = {
-        "model": MODEL_NAME,
+        "model": SERVED_MODEL_NAME,
         "messages": [{"role": "user", "content": "Hello"}],
         "max_tokens": 1,
     }
