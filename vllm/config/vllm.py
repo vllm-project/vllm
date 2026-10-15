@@ -1426,6 +1426,24 @@ class VllmConfig:
         self.engram_config.verify_parallel_config(self.parallel_config)
         logger.info_once("Resolved Engram configuration: %s", str(self.engram_config))
 
+    def _reject_mismatched_float_kv_cache(self) -> None:
+        """Reject an explicit float16/bfloat16 KV dtype that differs from the model."""
+        cache_dtype = self.cache_config.cache_dtype
+        if self.model_config is None or cache_dtype not in ("float16", "bfloat16"):
+            return
+        model_dtype = str(self.model_config.dtype).removeprefix("torch.")
+        if model_dtype == cache_dtype:
+            return
+        allowed = (
+            f"`auto` or `{model_dtype}`"
+            if model_dtype in ("float16", "bfloat16")
+            else "`auto`"
+        )
+        raise ValueError(
+            f'kv_cache_dtype="{cache_dtype}" is incompatible with '
+            f'dtype="{model_dtype}". Please set `--kv-cache-dtype` to {allowed}.'
+        )
+
     def __post_init__(self):
         """Verify configs are valid & consistent with each other."""
         # To give each torch profile run a unique instance name.
@@ -1456,6 +1474,7 @@ class VllmConfig:
             logger.info_once("Performance mode set to '%s'.", self.performance_mode)
 
         self.try_verify_and_update_config()
+        self._reject_mismatched_float_kv_cache()
         self._resolve_and_verify_engram_config()
 
         self._check_supports_watermarking()
@@ -2158,10 +2177,10 @@ class VllmConfig:
         self._verify_aux_output_compatibility()
 
         # Hybrid KV cache manager (HMA) runtime rules:
-        # - Explicit enable (--no-disable-kv-cache-manager): error if runtime
+        # - Explicit enable (--enable-hybrid-kv-cache-manager): error if runtime
         #   disables it
         # - No preference: auto-disable for unsupported features or connector configs
-        # - Explicit disable (--disable-kv-cache-manager): always respect it
+        # - Explicit disable (--disable-hybrid-kv-cache-manager): always respect it
         need_disable_hybrid_kv_cache_manager = False
         # logger should only print warning message for hybrid models. As we
         # can't know whether the model is hybrid or not now, so we don't log
@@ -2222,7 +2241,7 @@ class VllmConfig:
             raise ValueError(
                 "Hybrid KV cache manager was explicitly enabled but is not "
                 "supported in this configuration. Consider omitting the "
-                "--no-disable-hybrid-kv-cache-manager flag to let vLLM decide"
+                "--enable-hybrid-kv-cache-manager flag to let vLLM decide"
                 " automatically."
             )
 
@@ -3391,7 +3410,7 @@ class VllmConfig:
             if self.cache_config.mamba_cache_mode != "none":
                 raise ValueError(
                     "FlashInfer ReplaySSM speculative decoding does not support "
-                    "prefix caching; use --no-enable-prefix-caching"
+                    "prefix caching; use --disable-prefix-caching"
                 )
             query_len = 1 + self.num_speculative_tokens
             if self.cache_config.replayssm_buffer_len < query_len:
@@ -3410,7 +3429,7 @@ class VllmConfig:
             if self.cache_config.mamba_cache_mode == "align":
                 raise ValueError(
                     "FlashInfer ReplaySSM does not support prefix caching yet; "
-                    "use --no-enable-prefix-caching"
+                    "use --disable-prefix-caching"
                 )
         elif self.mamba_config.backend != MambaBackendEnum.TRITON:
             raise ValueError(
