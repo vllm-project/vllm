@@ -4,6 +4,7 @@
 
 import importlib.util
 import sys
+from importlib.metadata import distribution
 from pathlib import Path
 from types import ModuleType
 from unittest.mock import Mock
@@ -21,6 +22,9 @@ def flash_attn_interface():
     if not path.is_file():
         # CI images move the source tree under src/ to test the installed wheel.
         path = root / "src" / relative_path
+    if not path.is_file():
+        # Native ROCm CI ships only the installed wheel and test workspace.
+        path = Path(distribution("vllm").locate_file(relative_path))
     spec = importlib.util.spec_from_file_location("flash_attn_interface", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
