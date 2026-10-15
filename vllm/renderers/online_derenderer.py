@@ -1040,8 +1040,10 @@ def _correct_decoded_token(
 def _chat_top_logprobs_limit(chat_request: ChatCompletionRequest | None) -> int | None:
     """The cut `/v1/chat/completions` applies (`chat_top_logprobs_limit`, the
     same helper its `_get_top_logprobs` uses). None keeps every candidate, which
-    is also what happens without a `chat_request`."""
-    if chat_request is None:
+    is also what happens without a `chat_request` or with one that does not ask
+    for logprobs: it then says nothing about the cut, so the candidates
+    generate returned are passed through."""
+    if chat_request is None or not chat_request.logprobs:
         return None
     return chat_top_logprobs_limit(
         chat_request.top_logprobs, bool(chat_request.logprob_token_ids)
@@ -1053,7 +1055,8 @@ def _completion_top_logprobs_limit(
 ) -> int | None:
     """The cut `/v1/completions` applies (`completion_top_logprobs_limit`, the
     same helper `_create_completion_logprobs` uses). None keeps every candidate,
-    which is also what happens without a `completion_request`."""
+    which is also what happens without a `completion_request` or with one that
+    does not ask for logprobs (`logprobs` unset)."""
     if completion_request is None:
         return None
     return completion_top_logprobs_limit(

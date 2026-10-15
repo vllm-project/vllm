@@ -158,12 +158,28 @@ def test_completion_derender_matches_coupled_completion(
         assert [len(top) for top in derendered.top_logprobs] == [len(d) for d in dicts]
 
 
-def test_without_the_request_derender_keeps_every_candidate(tokenizer, vocab_ids):
+@pytest.mark.parametrize(
+    "top_limit",
+    [
+        _chat_top_logprobs_limit(None),
+        # A request that does not ask for logprobs says nothing about the cut.
+        _chat_top_logprobs_limit(
+            ChatCompletionRequest(
+                model=MODEL_NAME, messages=[{"role": "user", "content": "hi"}]
+            )
+        ),
+        _completion_top_logprobs_limit(None),
+        _completion_top_logprobs_limit(
+            CompletionRequest(model=MODEL_NAME, prompt="hi")
+        ),
+    ],
+)
+def test_without_a_logprobs_request_derender_keeps_every_candidate(
+    tokenizer, vocab_ids, top_limit
+):
     token_ids, dicts = _positions(tokenizer, vocab_ids, 2, RANKS)
     derendered = _resolve_logprobs(
-        _generate(token_ids, dicts),
-        tokenizer,
-        top_limit=_chat_top_logprobs_limit(None),
+        _generate(token_ids, dicts), tokenizer, top_limit=top_limit
     )
     assert [len(e.top_logprobs) for e in derendered.content] == [len(d) for d in dicts]
 
