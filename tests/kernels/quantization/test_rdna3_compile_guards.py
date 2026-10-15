@@ -340,11 +340,16 @@ class TestCustomOpsGuards:
             if match is None:
                 continue
             preceding = src[: match.start()]
-            last_hasattr = preceding.rfind(f'hasattr(torch.ops._rocm_C, "{op}")')
-            assert last_hasattr != -1, (
+            guards = list(
+                re.finditer(
+                    rf'hasattr\(\s*torch\.ops\._rocm_C,\s*"{op}"\s*\)', preceding
+                )
+            )
+            assert guards, (
                 f'register_fake("_rocm_C::{op}") is not preceded by a '
                 f"hasattr check — would crash on CDNA import"
             )
+            last_hasattr = guards[-1].start()
             gap = preceding[last_hasattr:].count("\n")
             assert gap <= 5, (
                 f"hasattr guard for {op} is {gap} lines before "
