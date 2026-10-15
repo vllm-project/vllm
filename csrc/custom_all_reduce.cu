@@ -166,6 +166,10 @@ std::tuple<fptr_t, torch::stable::Tensor> allocate_shared_buffer_and_handle(
 
   // Allocate buffer
 #if defined(USE_ROCM)
+  // hipIpcGetMemHandle rejects uncached allocations whose size is not a
+  // multiple of 4 KiB (e.g. meta_size() + max_size), so round up.
+  constexpr int64_t kIpcAlignment = 4096;
+  size = (size + kIpcAlignment - 1) / kIpcAlignment * kIpcAlignment;
   // data buffers need to be "uncached" for signal on MI200
   STD_CUDA_CHECK(
       hipExtMallocWithFlags((void**)&buffer, size, hipDeviceMallocUncached));
