@@ -42,23 +42,23 @@ body:
   - type: input
     attributes:
       label: Planner Model
-      description: The model that reads your request and proposes a plan. Leave blank to use the default.
-      placeholder: anthropic/claude-opus-5.5
+      description: The model that reads your request and proposes a plan. Clear it to use the default.
+      value: anthropic/claude-opus-5-5
   - type: input
     attributes:
       label: Lead Coding Agent Model
-      description: The model that coordinates the coding agents. Leave blank to use the default.
-      placeholder: z-ai/glm-5.3
+      description: The model that coordinates the coding agents. Clear it to use the default.
+      value: anthropic/claude-opus-5-5
   - type: textarea
     attributes:
       label: Coding Agent Models
-      description: The models that write and test code, one per line. Leave blank to use the defaults.
-      placeholder: anthropic/claude-opus-5.5
+      description: The models that write and test code, one per line. Clear it to use the defaults.
+      value: anthropic/claude-opus-5-5
   - type: input
     attributes:
       label: Budget
-      description: The total spending limit in USD for this optimization. Leave blank to use the default.
-      placeholder: "5"
+      description: The total spending limit in USD for this optimization. Clear it to use the default.
+      value: "5"
   - type: markdown
     attributes:
       value: "### Benchmarking\nChoose what to measure and the workload to test with."
