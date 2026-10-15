@@ -87,9 +87,7 @@ def test_skips_mark_sp_region_when_sequence_parallel_disabled(
     monkeypatch: pytest.MonkeyPatch,
 ):
     calls = []
-    monkeypatch.setattr(
-        qwen3_model, "mark_sp_region", lambda *a, **k: calls.append(a)
-    )
+    monkeypatch.setattr(qwen3_model, "mark_sp_region", lambda *a, **k: calls.append(a))
     parallel_config = ParallelConfig(
         tensor_parallel_size=2, enable_sequence_parallel=False
     )
