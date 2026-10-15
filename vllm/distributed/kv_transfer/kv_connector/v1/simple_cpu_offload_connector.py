@@ -23,6 +23,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
 )
 from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.simple_kv_offload.manager import (
     BoundaryStoreStats,
@@ -109,6 +110,9 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
                 f"expected one of {VALID_KV_OFFLOAD_BACKENDS}"
             )
         disk_mode = kv_offload_backend == "disk"
+        self._cache_hit_source = (
+            CacheHitSource.DISK if disk_mode else CacheHitSource.HOST
+        )
 
         disk_path = extra_config.get("disk_path", None) or None
         disk_capacity_bytes = int(
