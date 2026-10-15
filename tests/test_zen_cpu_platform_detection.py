@@ -2,9 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import builtins
 import logging
+from types import SimpleNamespace
 from unittest.mock import mock_open, patch
 
 import pytest
+import torch
 
 from vllm.platforms import (
     _is_amd_zen_cpu,
@@ -139,3 +141,18 @@ def test_platform_plugin_failure_is_logged(caplog_vllm):
     assert platform == "vllm.platforms.interface.UnspecifiedPlatform"
     assert "Platform plugin cpu failed during detection" in caplog_vllm.text
     assert "RuntimeError: plugin exploded" in caplog_vllm.text
+
+
+@pytest.mark.parametrize("fp16_supported", [True, False])
+def test_zen_cpu_supported_dtypes_track_fp16_capability(fp16_supported):
+    from vllm.platforms.zen_cpu import ZenCpuPlatform
+
+    # zentorch is absent on most CI hosts, so torch.ops.zentorch has to be
+    # stood up rather than patched in place.
+    zentorch_ops = SimpleNamespace(zentorch_is_fp16_supported=lambda: fp16_supported)
+    with patch.object(torch.ops, "zentorch", zentorch_ops, create=True):
+        dtypes = ZenCpuPlatform().supported_dtypes
+
+    # bf16 stays first so `--dtype auto` resolves to it on every Zen part.
+    assert dtypes[0] is torch.bfloat16
+    assert (torch.float16 in dtypes) is fp16_supported
