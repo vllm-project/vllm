@@ -4,37 +4,19 @@
 import copy
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from functools import lru_cache
-from typing import Any, Literal, NamedTuple
+from types import UnionType
+from typing import Any, Literal, NamedTuple, Union, get_args, get_origin
 
-import jinja2.ext
 import jinja2.nodes
-import jinja2.parser
-import jinja2.sandbox
+from typing_extensions import get_type_hints
 
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
+from vllm.renderers.chat_utils.types import OpenAIChatCompletionMessageParam
 from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
 
-
-class _ChatTemplateParseExtension(jinja2.ext.Extension):
-    """Accept HF ``{% generation %}`` blocks while parsing a chat template."""
-
-    tags = {"generation"}
-
-    def parse(self, parser: jinja2.parser.Parser) -> jinja2.nodes.Node:
-        lineno = next(parser.stream).lineno
-        body = parser.parse_statements(("name:endgeneration",), drop_needle=True)
-        return jinja2.nodes.Scope(body).set_lineno(lineno)
-
-
-# Same sandbox + loop/generation extensions used when a template is rendered.
-_CHAT_TEMPLATE_JINJA_ENV = jinja2.sandbox.ImmutableSandboxedEnvironment(
-    trim_blocks=True,
-    lstrip_blocks=True,
-    extensions=[_ChatTemplateParseExtension, jinja2.ext.loopcontrols],
-)
 _TEXT_PART_TYPES = frozenset(
     {
         "text",
@@ -44,9 +26,73 @@ _TEXT_PART_TYPES = frozenset(
         "thinking",
     }
 )
-# OpenAI chat roles. A template may ignore these on purpose; a typo or a
-# custom role is outside this set and can still be a hard error.
-_STANDARD_CHAT_ROLES = frozenset({"system", "user", "assistant", "tool", "developer"})
+
+
+def _parse_chat_template(chat_template: str) -> jinja2.nodes.Template:
+    """Parse with the Jinja environment Hugging Face renders templates with.
+
+    ``transformers.utils.chat_template_utils._compile_jinja_template`` is
+    private, but it is the only place that environment is built (the
+    ``generation`` tag, loop controls, and the ``tojson`` /
+    ``raise_exception`` / ``strftime_now`` helpers). The renderer already
+    parses through it for content-format detection, and the supported
+    transformers range (``>=5.16.1,<5.20``) keeps the helper.
+    """
+    import transformers.utils.chat_template_utils as hf_chat_utils
+
+    compiled = hf_chat_utils._compile_jinja_template(chat_template)
+    return compiled.environment.parse(chat_template)
+
+
+def _literal_strings(annotation: Any) -> set[str]:
+    """String members of a ``Literal``, including wrapped annotations."""
+    if get_origin(annotation) is Literal:
+        return {value for value in get_args(annotation) if isinstance(value, str)}
+    found: set[str] = set()
+    for arg in get_args(annotation):
+        found |= _literal_strings(arg)
+    return found
+
+
+def _roles_from_message_params(annotation: Any) -> frozenset[str]:
+    """Literal ``role`` values on a chat-message union.
+
+    ``CustomChatCompletionMessageParam.role`` is a free-form string, so
+    those stay out of this set and can still be a hard error. Only the
+    fixed OpenAI roles are collected. Legacy ``function`` is one of them.
+    """
+    roles: set[str] = set()
+    pending: list[Any] = [annotation]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        marker = id(current)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        origin = get_origin(current)
+        if origin is Union or origin is UnionType:
+            pending.extend(get_args(current))
+            continue
+        if not isinstance(current, type):
+            continue
+        try:
+            hints = get_type_hints(current)
+        except Exception:
+            logger.warning(
+                "Could not read message role literals from %s.",
+                getattr(current, "__name__", current),
+                exc_info=True,
+            )
+            continue
+        roles |= _literal_strings(hints.get("role"))
+    return frozenset(roles)
+
+
+# Fixed roles on OpenAI's chat message union, which vLLM's request schema
+# accepts. A template may ignore these on purpose. A typo or a custom role
+# is outside this set and can still be a hard error.
+_STANDARD_CHAT_ROLES = _roles_from_message_params(OpenAIChatCompletionMessageParam)
 
 
 def _is_role_access(node: jinja2.nodes.Node) -> bool:
@@ -187,7 +233,7 @@ def roles_rendered_by_chat_template(chat_template: str) -> frozenset[str] | None
 
     """
     try:
-        parsed = _CHAT_TEMPLATE_JINJA_ENV.parse(chat_template)
+        parsed = _parse_chat_template(chat_template)
     except Exception:
         logger.warning(
             "Could not parse the chat template while checking message roles.",
@@ -525,6 +571,27 @@ def _constraint_allows_role(constraint: _RoleConstraint, role: str) -> bool:
     return role in constraint.roles
 
 
+def _role_output_is_trusted(
+    passes_unlisted: bool,
+    excluded: frozenset[str],
+    content_paths: Sequence[_RoleConstraint],
+    role: str,
+) -> bool:
+    """Whether a dynamically printed role does not need a probe.
+
+    The role header has to be reachable, and so does the message content.
+    A template can print ``message['role']`` for every turn and still emit
+    content only inside named-role branches. That header alone is not
+    enough. When the walker saw no content output, there is no content
+    constraint to apply, so the header path stays trusted.
+    """
+    if not (passes_unlisted and role not in excluded):
+        return False
+    if not content_paths:
+        return True
+    return any(_constraint_allows_role(path, role) for path in content_paths)
+
+
 @lru_cache(maxsize=32)
 def _template_role_emission(
     chat_template: str,
@@ -540,7 +607,7 @@ def _template_role_emission(
 
     """
     try:
-        parsed = _CHAT_TEMPLATE_JINJA_ENV.parse(chat_template)
+        parsed = _parse_chat_template(chat_template)
     except Exception:
         logger.warning(
             "Could not parse the chat template while checking message roles.",
@@ -921,18 +988,19 @@ def assert_chat_template_rendered_messages(
     """Raise if a non-empty message contributed no prompt content.
 
     This is a post-condition on chat-template rendering. Roles the template
-    names are trusted. So is a role printed with ``message['role']`` on a
-    path that is not limited to those names. Any other non-standard role is
+    names are trusted. So is a role printed with ``message['role']`` when
+    that role can also reach an output of message content. A header with
+    no such content path is still probed. Any other non-standard role is
     probed: a unique token is appended to its content and the conversation
     is rendered again. The turn is rejected only when it adds nothing to
     the prompt. A rendered tool call or image keeps the turn, and echoed
     text does not hide a dropped tool call or image.
 
-    Standard roles (``system``, ``user``, ``assistant``, ``tool``,
-    ``developer``) are not rejected. When the template ignores one, a
-    warning is logged and the request continues. That path does not copy
-    the conversation or render it again. Empty and whitespace-only messages
-    are not an error.
+    Standard roles from the OpenAI message schema (``system``, ``user``,
+    ``assistant``, ``tool``, ``developer``, and legacy ``function``) are
+    not rejected. When the template ignores one, a warning is logged and
+    the request continues. That path does not copy the conversation or
+    render it again. Empty and whitespace-only messages are not an error.
 
     Args:
         conversation: Messages passed to the template, after rewrites such
@@ -957,7 +1025,7 @@ def assert_chat_template_rendered_messages(
         for index, message in enumerate(conversation)
         if isinstance((role := message.get("role")), str)
         and role not in handled
-        and not (passes_unlisted and role not in excluded)
+        and not _role_output_is_trusted(passes_unlisted, excluded, content_paths, role)
         and message_has_nonempty_payload(message)
     ]
     if not suspects:

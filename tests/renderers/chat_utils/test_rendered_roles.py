@@ -17,6 +17,7 @@ from vllm.renderers.chat_utils import (
     message_has_nonempty_payload,
     roles_rendered_by_chat_template,
 )
+from vllm.renderers.chat_utils.rendered_roles import _STANDARD_CHAT_ROLES
 
 # Qwen-style dispatch: unknown roles fall through and emit nothing.
 _FILTERING_TEMPLATE = """
@@ -941,6 +942,93 @@ def test_ignored_developer_role_warns_and_is_not_a_400():
     assert calls == 0
     warn.assert_called_once()
     assert "developer" in str(warn.call_args)
+
+
+def test_standard_roles_follow_the_openai_message_schema():
+    """Legacy ``function`` is a schema role, so it is not treated as a typo."""
+    assert (
+        frozenset({"system", "user", "assistant", "tool", "developer", "function"})
+        == _STANDARD_CHAT_ROLES
+    )
+
+
+def test_ignored_function_role_warns_and_is_not_a_400():
+    """A template that skips legacy function messages warns and still returns."""
+    messages = [
+        {"role": "user", "content": "hello"},
+        {"role": "function", "name": "lookup", "content": "result"},
+    ]
+    calls = 0
+
+    def render_text(rendered_messages):
+        nonlocal calls
+        calls += 1
+        return _filtering_render(rendered_messages)
+
+    with patch("vllm.renderers.chat_utils.rendered_roles.logger.warning_once") as warn:
+        assert_chat_template_rendered_messages(
+            messages, _FILTERING_TEMPLATE, render_text
+        )
+    assert calls == 0
+    warn.assert_called_once()
+    assert "function" in str(warn.call_args)
+
+
+def test_loop_controls_and_generation_still_parse():
+    """HF's Jinja env accepts ``{% break %}`` and ``{% generation %}``."""
+    template = """
+    {% for message in messages %}
+    {% if message['role'] == 'user' %}
+    {% generation %}{{ message['content'] }}{% endgeneration %}
+    {% endif %}
+    {% if loop.first %}{% break %}{% endif %}
+    {% endfor %}
+    """
+    assert roles_rendered_by_chat_template(template) == frozenset({"user"})
+
+
+def test_role_header_without_content_path_rejects_typo():
+    """A role header for every turn does not keep a typo whose text is dropped."""
+    template = """
+    {% for message in messages %}
+    <|{{ message['role'] }}|>
+    {% if message['role'] == 'user' %}
+    {% generation %}{{ message['content'] }}{% endgeneration %}
+    {% elif message['role'] == 'assistant' %}
+    {{ message['content'] }}
+    {% endif %}
+    {% endfor %}
+    """
+
+    def render_text(rendered_messages):
+        parts = []
+        for message in rendered_messages:
+            role = message.get("role")
+            parts.append(f"<|{role}|>")
+            content = message.get("content")
+            if role in {"user", "assistant"} and isinstance(content, str):
+                parts.append(content)
+        return "".join(parts)
+
+    with pytest.raises(VLLMValidationError, match="'usr'"):
+        assert_chat_template_rendered_messages(
+            [{"role": "usr", "content": "secret"}],
+            template,
+            render_text,
+        )
+    calls = 0
+
+    def render_named(rendered_messages):
+        nonlocal calls
+        calls += 1
+        return render_text(rendered_messages)
+
+    assert_chat_template_rendered_messages(
+        [{"role": "user", "content": "hello"}],
+        template,
+        render_named,
+    )
+    assert calls == 0
 
 
 @pytest.mark.parametrize("template_path", _USER_ASSISTANT_TEMPLATES)
