@@ -5,7 +5,7 @@ import math
 import queue
 import threading
 import time
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from collections.abc import Collection
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any, cast
@@ -16,7 +16,7 @@ import numpy as np
 import torch
 import zmq
 
-from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.config import CUDAGraphMode, KVTransferConfig, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     BlockIds,
     clip_ssm_state_blocks,
@@ -25,6 +25,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
     KVConnectorRole,
+    KVConnectorTransferResults,
     SupportsHMA,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
@@ -99,6 +100,7 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
     is_full_attention_spec,
 )
+from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import RequestStatus
 
@@ -115,6 +117,9 @@ logger = init_logger(__name__)
 _SQ_FULL_BACKOFF_INITIAL_S = 0.001
 _SQ_FULL_BACKOFF_MAX_S = 0.05
 _MAX_LOCAL_MAMBA_TAIL_BLOCKS = 1
+# A WRITE failure is broadcast to every decode DP rank, so ranks that never
+# see the request would otherwise keep its transfer id forever.
+_MAX_UNMATCHED_WRITE_FAILURES = 4096
 
 
 try:
@@ -222,6 +227,12 @@ def resolve_moriio_transfer_ack(
 
 
 class MoRIIOConnector(KVConnectorBase_V1, SupportsHMA):
+    _cache_hit_source = CacheHitSource.P2P
+
+    @classmethod
+    def supports_sleep_mode(cls, kv_transfer_config: KVTransferConfig) -> bool:
+        return False
+
     @property
     def supports_divergent_local_hybrid_hits(self) -> bool:
         # The READ path always transfers the recurrent-state slot, including
@@ -352,6 +363,12 @@ class MoRIIOConnector(KVConnectorBase_V1, SupportsHMA):
         """Get the finished recving and sending requests."""
         assert self.connector_worker is not None
         return self.connector_worker.get_finished()
+
+    def get_transfer_results(
+        self, finished_req_ids: set[str]
+    ) -> KVConnectorTransferResults:
+        assert self.connector_worker is not None
+        return self.connector_worker.get_transfer_results()
 
     def get_block_ids_with_load_errors(self) -> set[int]:
         """Blocks whose MoRIIO read failed, for the scheduler to recompute."""
@@ -578,12 +595,31 @@ class MoRIIOConnectorScheduler:
             else (0, self.block_size)
             for g in kv_cache_config.transfer_groups
         ]
-        # add 1 to conservatively account for boundary overlap eg window isn't fully
-        # aligned with blocks.
+        # +1 conservatively covers window/block boundary overlap.
         self.blocks_per_sw = [
             cdiv(n_tokens, block_size) + 1 if n_tokens else 0
             for n_tokens, block_size in sw_sizes_tokens
         ]
+        # Per-group block size over transfer_groups (matching blocks_per_sw and
+        # the connector's block payload), used to clamp each full-attention group
+        # to its prompt length on the WRITE save path.
+        self._group_block_sizes = [
+            getattr(g.kv_cache_spec, "block_size", self.block_size)
+            for g in kv_cache_config.transfer_groups
+        ]
+        # The WRITE-mode prompt-block clamp only covers full-attention groups, so
+        # MoRIIO + speculative decoding is not yet safe on sliding-window /
+        # hybrid models. TODO: lift once SWA + spec is validated end-to-end.
+        if (
+            self.mode == MoRIIOMode.WRITE
+            and vllm_config.speculative_config is not None
+            and any(bps != 0 for bps in self.blocks_per_sw)
+        ):
+            raise NotImplementedError(
+                "MoRIIO with speculative decoding is not yet supported for "
+                "sliding-window / hybrid models: the prompt-block clamp is only "
+                "validated for full-attention KV groups."
+            )
         # In WRITE mode and chunked prefill, we perform the write after the last chunk.
         # Hence we need to track once we are in the last chunk. We do this by computing
         # len(block_ids[g]) * block_size[g] for a full attn group g, as hybrid groups
@@ -645,12 +681,10 @@ class MoRIIOConnectorScheduler:
             set_role(ROLE.CONSUMER)
         # Reqs to send and their expiration time
         self._reqs_need_send: dict[ReqId, float] = {}
-        # Deadlines for requests whose block freeing was deferred.
-        # Survives across scheduler steps. If the worker never reports
-        # finished_sending before the deadline, we inject them into
-        # connector_output.finished_sending so the scheduler frees the blocks to avoid
-        # hanging indefinitely waiting for a free notification that never comes.
-        # Value: (deadline, transfer_id) for unmapping after mutation.
+        # Requests whose block freeing is deferred. READ mode uses the deadline
+        # as a missing-ACK watchdog; WRITE mode waits for the worker ACK because
+        # only the worker can mark the transfer terminal before blocks are freed.
+        # Value: (deadline, transfer_id) for unmapping after completion.
         self._deferred_send_deadlines: dict[ReqId, tuple[float, TransferId | None]] = {}
         self._defer_timeout = float(
             self.kv_transfer_config.kv_connector_extra_config.get(
@@ -746,6 +780,9 @@ class MoRIIOConnectorScheduler:
 
         num_prompt_tokens = request.num_prompt_tokens
         num_external_tokens = max(num_prompt_tokens - num_computed_tokens, 0)
+        params = request.kv_transfer_params or {}
+        if not params.get("do_remote_prefill"):
+            return 0, False
         if self.mode == MoRIIOMode.WRITE:
             # MoriiO in write mode, no remote prefill. Hybrid models never get
             # here: register_kv_caches refuses WRITE mode for them, so there is
@@ -1106,7 +1143,14 @@ class MoRIIOConnectorScheduler:
                     _should_notify = self._global_dp_rank == remote_dp_rank
                 else:
                     _should_notify = self._is_kv_master
-                if _should_notify:
+                if _should_notify and num_external_tokens == 0:
+                    # Nothing left to fetch (full local prefix hit), so release
+                    # the producer's blocks instead of sending an empty
+                    # allocation, which it rejects.
+                    self._release_write_prefill_blocks(
+                        request.request_id, request.kv_transfer_params
+                    )
+                elif _should_notify:
                     peer_zmq = get_peer_zmq_from_request_id(
                         request.request_id, is_producer=False
                     )
@@ -1134,12 +1178,6 @@ class MoRIIOConnectorScheduler:
                                 f"remote_notify_port={remote_notify_port!r})"
                             )
 
-                    # num_external_tokens == 0: nothing to push, so don't tell
-                    # the producer to write into these blocks.
-                    block_notify_list = (
-                        blocks.get_block_ids()[0] if num_external_tokens > 0 else []
-                    )
-
                     # Wide-EP multi-pod: a pod binds notify sockets only for
                     # its LOCAL ranks, so the port offset must use the per-pod
                     # local rank (% dp_local), not the global rank. Single-pod
@@ -1166,7 +1204,7 @@ class MoRIIOConnectorScheduler:
                         self.send_notify_block(
                             req_id=request.request_id,
                             transfer_id=request.kv_transfer_params["transfer_id"],
-                            block_notify_list=block_notify_list,
+                            block_notify_list=blocks.get_block_ids()[0],
                             host=_notify_host,
                             port=target_port,
                         )
@@ -1174,6 +1212,45 @@ class MoRIIOConnectorScheduler:
             # Only trigger 1 KV transfer per request.
 
             params["do_remote_prefill"] = False
+
+    def _clamp_to_prompt_blocks(self, req: "Request", block_ids: BlockIds) -> BlockIds:
+        """Drop trailing speculative-lookahead blocks the consumer never
+        allocated, keeping each full-attention group's prompt blocks.
+
+        Args:
+            req: Request being saved.
+            block_ids: Per-KV-cache-group local block ids.
+
+        Returns:
+            ``block_ids`` with every full-attention group truncated to
+            ``ceil(num_prompt_tokens / block_size)`` leading blocks;
+            sliding-window groups are left unchanged.
+
+        """
+        clamped = list(block_ids)
+        changed = False
+        for g, group_blocks in enumerate(block_ids):
+            if self.blocks_per_sw[g] != 0:
+                continue
+            num_prompt_blocks = math.ceil(
+                req.num_prompt_tokens / self._group_block_sizes[g]
+            )
+            if len(group_blocks) > num_prompt_blocks:
+                clamped[g] = group_blocks[:num_prompt_blocks]
+                changed = True
+        return clamped if changed else block_ids
+
+    def _is_final_prefill_chunk(
+        self, req: "Request", scheduler_output: SchedulerOutput
+    ) -> bool:
+        """Whether this step completes the prompt.
+
+        ``build_connector_meta`` runs before ``_update_after_schedule``, so
+        ``num_computed_tokens`` excludes the current chunk; add this step's
+        scheduled tokens. Token progress is lookahead-safe unlike block counts.
+        """
+        num_scheduled = scheduler_output.num_scheduled_tokens.get(req.request_id, 0)
+        return req.num_computed_tokens + num_scheduled >= req.num_prompt_tokens
 
     def build_connector_meta(
         self,
@@ -1188,38 +1265,36 @@ class MoRIIOConnectorScheduler:
             # It places the request metadata into the saving queue.
 
             for i, req_id in enumerate(scheduler_output.scheduled_cached_reqs.req_ids):
+                # Non-disagg requests aren't registered here; skip them
+                # instead of KeyError-ing.
+                if req_id not in self._reqs_need_pending_save:
+                    continue
+                req, existing_blocks = self._reqs_need_pending_save[req_id]
+                # The final chunk may allocate no new blocks (the previous chunk
+                # reserved speculative-lookahead slack), so new_block_ids is None;
+                # still fall through to the final-chunk check below.
                 new_block_ids = scheduler_output.scheduled_cached_reqs.new_block_ids[i]
-
                 if new_block_ids is not None:
-                    # A non-disagg request (no kv_transfer_params, e.g. smoke
-                    # test) is never registered in _reqs_need_pending_save;
-                    # indexing it unconditionally would KeyError and crash the
-                    # EngineCore. Skip it silently.
-                    if req_id not in self._reqs_need_pending_save:
-                        continue
-                    req, existing_blocks = self._reqs_need_pending_save[req_id]
-                    updated_blocks = [
+                    existing_blocks = [
                         existing_blocks[g] + new_block_ids[g]
                         for g in range(len(new_block_ids))
                     ]
-                    self._reqs_need_pending_save[req_id] = (req, updated_blocks)
-                    saved_tokens = (
-                        len(updated_blocks[self._full_attn_group_idx])
-                        * self._full_attn_block_size
-                    )
-                    if saved_tokens >= req.num_prompt_tokens:
-                        # Final chunk: live kv_transfer_params may be cleared,
-                        # so prefer the snapshot from update_state_after_alloc.
-                        kv_params = self._req_kv_params.pop(
-                            req_id, req.kv_transfer_params or {}
-                        )
-                        meta.add_new_req(
-                            request_id=req_id,
-                            local_block_ids=self._reqs_need_pending_save[req_id][1],
-                            kv_transfer_params=kv_params,
-                            write_mode=True,
-                        )
-                        del self._reqs_need_pending_save[req_id]
+                    self._reqs_need_pending_save[req_id] = (req, existing_blocks)
+                if not self._is_final_prefill_chunk(req, scheduler_output):
+                    continue
+                # Live kv_transfer_params may be cleared; prefer the
+                # update_state_after_alloc snapshot.
+                kv_params = self._req_kv_params.pop(
+                    req_id, req.kv_transfer_params or {}
+                )
+                save_block_ids = self._clamp_to_prompt_blocks(req, existing_blocks)
+                meta.add_new_req(
+                    request_id=req_id,
+                    local_block_ids=save_block_ids,
+                    kv_transfer_params=kv_params,
+                    write_mode=True,
+                )
+                del self._reqs_need_pending_save[req_id]
 
         # Loop through scheduled reqs and convert to ReqMeta.
         for req_id, (req, block_ids) in self._reqs_need_recv.items():
@@ -1229,19 +1304,34 @@ class MoRIIOConnectorScheduler:
                 local_block_ids=block_ids,
                 kv_transfer_params=kv_params,
             )
+        if (
+            self.mode == MoRIIOMode.READ
+            and self._has_mamba
+            and scheduler_output.new_block_ids_to_zero
+        ):
+            # Hybrid models zero recycled attention pages that held Mamba state.
+            # Host-submitted READs overwrite these pages and can race zeroing.
+            # Hybrid READ metadata puts the aligned attention pages first.
+            read_dst_block_ids = {
+                b
+                for _, block_ids in self._reqs_need_recv.values()
+                for b in block_ids[0]
+            }
+            scheduler_output.new_block_ids_to_zero = [
+                b
+                for b in scheduler_output.new_block_ids_to_zero
+                if b not in read_dst_block_ids
+            ]
 
         for req_id, (req, block_ids) in self._reqs_need_save.items():
             kv_params = self._req_kv_params.get(req_id, req.kv_transfer_params or {})
-            tokens_covered = (
-                len(block_ids[self._full_attn_group_idx]) * self._full_attn_block_size
-            )
-            if req.num_prompt_tokens > tokens_covered:
-                # not last chunk prefill
+            if not self._is_final_prefill_chunk(req, scheduler_output):
                 self._reqs_need_pending_save[req_id] = (req, block_ids)
                 continue
+            save_block_ids = self._clamp_to_prompt_blocks(req, block_ids)
             meta.add_new_req(
                 request_id=req_id,
-                local_block_ids=block_ids,
+                local_block_ids=save_block_ids,
                 kv_transfer_params=kv_params,
                 write_mode=True,
             )
@@ -1464,8 +1554,9 @@ class MoRIIOConnectorScheduler:
         * An ACK that arrives BEFORE its request finished is parked in
           ``_pending_sent_acks`` and released on a later step once the
           request enters ``_deferred_send_deadlines``.
-        * A deferred send whose ACK never arrives is reaped after
-          ``_defer_timeout`` and surfaced, so leaked blocks are freed.
+        * In READ mode, a deferred send whose ACK never arrives is reaped
+          after ``_defer_timeout``. WRITE-mode timeouts are owned by the worker,
+          which marks the transfer terminal before ACKing the block release.
         * A parked ACK that never matches a deferral before its own
           deadline is a stale duplicate (e.g. a real ACK landing after the
           send was already reaped) and is dropped.
@@ -1498,7 +1589,7 @@ class MoRIIOConnectorScheduler:
         expired = [
             req_id
             for req_id, (deadline, _) in self._deferred_send_deadlines.items()
-            if now >= deadline
+            if self.mode == MoRIIOMode.READ and now >= deadline
         ]
         if expired:
             safe.update(expired)
@@ -1608,6 +1699,7 @@ class MoRIIOConnectorWorker:
         # Completions that arrived before transfer_id_to_request_id was populated.
         # Retried each step until the mapping is established.
         self._unmatched_write_completions: set[str] = set()
+        self._unmatched_write_failures: OrderedDict[TransferId, None] = OrderedDict()
         # Producer-side READ-mode ACK fan-in. When decode TP is larger than
         # prefill TP, multiple decode ranks can read from one prefill rank and
         # notify the same transfer_id. Blocks are reusable only after all ACKs.
@@ -1800,6 +1892,7 @@ class MoRIIOConnectorWorker:
         remote_ip: str,
         multi_pod_hosts: list[str],
         remote_dp_size_local: int,
+        remote_dp_size: int,
     ) -> None:
         """Schedule a block write operation.
 
@@ -1815,6 +1908,7 @@ class MoRIIOConnectorWorker:
             remote_ip: IP address of remote node
             multi_pod_hosts: List of pod IPs for multi-pod Wide-EP
             remote_dp_size_local: Per-pod DP size for multi-pod
+            remote_dp_size: Global DP size of the decode instance
 
         """
         # synchronization to prevent dirty reads between
@@ -1838,6 +1932,7 @@ class MoRIIOConnectorWorker:
             remote_ip=remote_ip,
             multi_pod_hosts=multi_pod_hosts,
             remote_dp_size_local=remote_dp_size_local,
+            remote_dp_size=remote_dp_size,
         )
         self._writer.schedule_write(task)
 
@@ -2358,10 +2453,15 @@ class MoRIIOConnectorWorker:
         caches_data = []
         self.layer_base_addr_index = {}
         base_addr_idx = 0
-
+        # HMA (#53721 Gemma4 SWA, GLM-5.2 DSA, MiniMax): transfers already
+        # size RDMA from per-layer geometry, so allow divergent block_len
+        # (bytes) always, and divergent block_size (tokens/page) only when
+        # the hybrid KV cache manager is enabled. Without HMA, block_size
+        # must stay uniform for the peer page handshake.
         hma_enabled = (
             not self.vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
         )
+
         for layer_name in kv_caches:
             self.layer_base_addr_index[layer_name] = base_addr_idx
             if self._is_mamba_layer(layer_name):
@@ -2376,16 +2476,31 @@ class MoRIIOConnectorWorker:
                     base_addr_idx += 1
                 continue
             geometry = self._get_layer_transfer_geometry(layer_name)
-            if hma_enabled:
-                if geometry.block_len != self.block_len:
+            if geometry.block_size != self.block_size:
+                if not hma_enabled:
                     raise ValueError(
-                        "MoRIIO KV cache block length mismatch for layer "
-                        f"{layer_name}: {geometry.block_len} != {self.block_len}"
+                        "MoRIIO KV cache block size mismatch for layer "
+                        f"{layer_name}: {geometry.block_size} != "
+                        f"{self.block_size}"
                     )
-            elif geometry.block_size != self.block_size:
-                raise ValueError(
-                    "MoRIIO KV cache block size mismatch for layer "
-                    f"{layer_name}: {geometry.block_size} != {self.block_size}"
+                logger.debug(
+                    "MoRIIO HMA per-layer block_size for %s: %d "
+                    "(page/default %d); continuing with per-layer sizes.",
+                    layer_name,
+                    geometry.block_size,
+                    self.block_size,
+                )
+            if geometry.block_len != self.block_len:
+                # Unlike block_size above, divergent block_len is allowed
+                # unconditionally (not gated on hma_enabled) -- it covers
+                # non-hybrid models too, e.g. GLM-5.2 DSA's per-layer
+                # geometry. Don't attribute it to HMA in the log.
+                logger.debug(
+                    "MoRIIO per-layer block_len for %s: %d "
+                    "(page/default %d); continuing with per-layer sizes.",
+                    layer_name,
+                    geometry.block_len,
+                    self.block_len,
                 )
             # num_blocks is advertised as a single scalar to the peer, so must it
             # be uniform
@@ -2415,6 +2530,7 @@ class MoRIIOConnectorWorker:
         # and a run that has three should not look identical in the log.
         distinct_block_lens = sorted(set(self.block_lens.values()))
         if len(distinct_block_lens) > 1:
+            self.block_len = max(distinct_block_lens)
             logger.info(
                 "MoRIIO registered %d attention layers with %d distinct block "
                 "lengths (bytes): %s; transfer sizes and strides are per layer, "
@@ -2608,6 +2724,28 @@ class MoRIIOConnectorWorker:
             self._unmatched_write_completions -= matched_xfer_ids
 
         return done_sending, done_recving
+
+    def get_transfer_results(self) -> KVConnectorTransferResults:
+        done_sending, done_recving = self.get_finished()
+        failed_recving: set[ReqId] = set()
+
+        if self.mode == MoRIIOMode.WRITE and not self.is_producer:
+            pending = self._unmatched_write_failures
+            mapping = self.transfer_id_to_request_id
+            for transfer_id in self.moriio_wrapper.pop_failed_write_req_ids():
+                pending[transfer_id] = None
+            for transfer_id in [t for t in pending if t in mapping]:
+                del pending[transfer_id]
+                failed_recving.add(mapping[transfer_id])
+            while len(pending) > _MAX_UNMATCHED_WRITE_FAILURES:
+                pending.popitem(last=False)
+            done_recving |= failed_recving
+
+        return KVConnectorTransferResults(
+            finished_sending=done_sending,
+            finished_recving=done_recving,
+            failed_recving=failed_recving,
+        )
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         """Block until all in-flight READs of this layer have landed.
@@ -3181,6 +3319,7 @@ class MoRIIOConnectorWorker:
             remote_ip=meta.remote_host,
             multi_pod_hosts=hosts,
             remote_dp_size_local=dp_local,
+            remote_dp_size=int(meta.remote_dp_size),
         )
 
     def merge_contiguous_blocks(

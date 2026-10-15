@@ -643,6 +643,36 @@ def _check_aiter_mla_fp8_support() -> bool:
     return _AITER_MLA_SUPPORTS_FP8
 
 
+def _rocm_aiter_gather_kv_b_proj_impl(
+    kv_cache: torch.Tensor,
+    kv_scale: torch.Tensor,
+    kv_indptr: torch.Tensor,
+    kv_indices: torch.Tensor,
+    cu_seq_lens: torch.Tensor,
+    weight: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+) -> None:
+    from aiter.ops.triton.gather_kv_b_proj import gather_kv_b_proj
+
+    gather_kv_b_proj(
+        kv_cache, kv_scale, kv_indptr, kv_indices, cu_seq_lens, weight, None, k, v
+    )
+
+
+def _rocm_aiter_gather_kv_b_proj_fake(
+    kv_cache: torch.Tensor,
+    kv_scale: torch.Tensor,
+    kv_indptr: torch.Tensor,
+    kv_indices: torch.Tensor,
+    cu_seq_lens: torch.Tensor,
+    weight: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+) -> None:
+    pass
+
+
 def _rocm_aiter_mla_decode_fwd_impl(
     q: torch.Tensor,
     kv_buffer: torch.Tensor,
@@ -1086,7 +1116,10 @@ def _rocm_aiter_fused_allreduce_rmsnorm_impl(
         hidden_dim = input_.shape[-1]
         row_size = hidden_dim * input_.element_size()
         fused_qr_rmsnorm_ok = (
-            qr_comm is not None
+            # aiter.qr_all_reduce_rmsnorm does not implement Gemma's
+            # (1 + weight) scaling.
+            not gemma_norm
+            and qr_comm is not None
             and not getattr(qr_comm, "disabled", True)
             and hasattr(qr_comm, "should_quick_allreduce")
             and qr_comm.should_quick_allreduce(input_)
@@ -1133,7 +1166,16 @@ def _rocm_aiter_fused_allreduce_rmsnorm_impl(
         use_1stage=use_1stage,
         gemma_norm=gemma_norm,
     )
-    assert result is not None
+    if result is None:
+        from vllm.distributed import tensor_model_parallel_all_reduce
+
+        return torch.ops.vllm_aiter.fused_add_rms_norm(
+            tensor_model_parallel_all_reduce(input_),
+            residual,
+            weight,
+            epsilon,
+            gemma_norm,
+        )
     return result[0], result[1]
 
 
@@ -1167,7 +1209,8 @@ def _rocm_aiter_fused_allreduce_rmsnorm_quant_per_group_impl(
         w=weight,
         eps=epsilon,
         group_size=group_size,
-        registered=torch.cuda.is_current_stream_capturing(),
+        registered=torch.cuda.is_current_stream_capturing()
+        and ca.enable_register_for_capturing,
         use_1stage=use_1stage,
     )
     assert result is not None
@@ -1219,7 +1262,8 @@ def _rocm_aiter_fused_allreduce_rmsnorm_quant_per_group_with_bf16_norm_impl(
         w=weight,
         eps=epsilon,
         group_size=group_size,
-        registered=torch.cuda.is_current_stream_capturing(),
+        registered=torch.cuda.is_current_stream_capturing()
+        and ca.enable_register_for_capturing,
         use_1stage=use_1stage,
         emit_bf16=True,
     )
@@ -1997,6 +2041,8 @@ class rocm_aiter_ops:
 
     # Check if the env variable is set
     _AITER_ENABLED = envs.VLLM_ROCM_USE_AITER
+    # Chunk length the AITER FlyDSL K5 prefill kernels are compiled for.
+    GDN_FLYDSL_CHUNK_SIZE = 64
     _CUSTOM_ALL_REDUCE_ENABLED = envs.VLLM_ROCM_USE_AITER_CUSTOM_AR
     _LINEAR_ENABLED = envs.VLLM_ROCM_USE_AITER_LINEAR
     _FMOE_ENABLED = envs.VLLM_ROCM_USE_AITER_MOE
@@ -2467,6 +2513,23 @@ class rocm_aiter_ops:
         except (ImportError, ModuleNotFoundError):
             return False
 
+    @staticmethod
+    def _gdn_flydsl_prefill_kernels_importable() -> bool:
+        try:
+            from aiter.ops.flydsl.linear_attention_prefill_kernels import (  # noqa: F401
+                chunk_gated_delta_rule_fwd_h_flydsl_opt,
+                gdn_prepare_flydsl_supported,
+                gdn_prepare_fwd_flydsl,
+            )
+            from aiter.ops.triton.gated_delta_net import (  # noqa: F401
+                build_gated_delta_rule_prefill_metadata,
+                chunk_gated_delta_rule_opt_vk,
+            )
+
+            return True
+        except (ImportError, ModuleNotFoundError):
+            return False
+
     @classmethod
     @if_aiter_supported
     def are_gdn_triton_kernels_available(cls) -> bool:
@@ -2477,6 +2540,99 @@ class rocm_aiter_ops:
         in older aiter builds.
         """
         return cls._AITER_ENABLED and cls._gdn_triton_kernels_importable()
+
+    @classmethod
+    @functools.cache
+    def is_gdn_flydsl_prefill_available(cls) -> bool:
+        """Whether the AITER FlyDSL GDN prefill path can be used.
+
+        It runs AITER kernels, so VLLM_ROCM_USE_AITER remains the one switch
+        that turns all of them off.
+        """
+        return (
+            cls._AITER_ENABLED
+            and is_aiter_found_and_supported()
+            and cls._gdn_flydsl_prefill_kernels_importable()
+        )
+
+    @classmethod
+    def build_gdn_flydsl_prefill_metadata(
+        cls,
+        seq_lens_cpu: list[int],
+        cu_seqlens: torch.Tensor,
+    ) -> object:
+        """Build the reusable varlen metadata FlyDSL GDN prefill runs against.
+
+        The K5 recurrence is compiled for a fixed 64-token chunk, so the chunk
+        size is a property of the AITER kernel rather than of FLA, and is not
+        the caller's to choose.
+        """
+        from aiter.ops.triton.gated_delta_net import (
+            build_gated_delta_rule_prefill_metadata,
+        )
+
+        return build_gated_delta_rule_prefill_metadata(
+            seq_lens_cpu,
+            cu_seqlens=cu_seqlens,
+            chunk_size=cls.GDN_FLYDSL_CHUNK_SIZE,
+        )
+
+    @classmethod
+    def gdn_flydsl_prefill(
+        cls,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        g: torch.Tensor,
+        beta: torch.Tensor,
+        initial_state: torch.Tensor,
+        output_final_state: bool,
+        cu_seqlens: torch.Tensor | None,
+        aiter_prefill_metadata: object | None,
+        use_qk_l2norm_in_kernel: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Run GDN prefill through AITER's VK path with the FlyDSL kernels.
+
+        Every argument AITER takes is named here rather than forwarded as
+        ``**kwargs``, so a rename or reordering on the AITER side fails at this
+        call instead of silently binding to the wrong parameter.
+        """
+        from aiter.ops.flydsl.linear_attention_prefill_kernels import (
+            gdn_prepare_flydsl_supported,
+        )
+        from aiter.ops.triton.gated_delta_net import chunk_gated_delta_rule_opt_vk
+
+        if cu_seqlens is not None and aiter_prefill_metadata is None:
+            raise RuntimeError(
+                "AITER FlyDSL GDN prefill requires reusable varlen prefill metadata."
+            )
+        if not gdn_prepare_flydsl_supported(k, v):
+            raise RuntimeError(
+                "AITER FlyDSL GDN prepare does not support the runtime input shape, "
+                "dtype, or device."
+            )
+        logger.info_once(
+            "Dispatching AITER FlyDSL GDN prefill (prepare=flydsl, chunk=flydsl)."
+        )
+        return chunk_gated_delta_rule_opt_vk(
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            beta=beta,
+            initial_state=initial_state,
+            output_final_state=output_final_state,
+            cu_seqlens=cu_seqlens,
+            use_chunk_flydsl=True,
+            use_prepare_flydsl=True,
+            state_dtype=initial_state.dtype,
+            prefill_metadata=aiter_prefill_metadata,
+            # The caller stages the state densely and writes it back, so the
+            # kernel gets a plain [N, H, V, K] buffer and never an index into
+            # the pool; there is correspondingly nothing to update in place.
+            inplace_final_state=False,
+            use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+        )
 
     @classmethod
     def is_rdna_gdn_triton_kernels_available(cls) -> bool:
@@ -2742,6 +2898,13 @@ class rocm_aiter_ops:
                 dispatch_key=current_platform.dispatch_key,
             )
 
+            direct_register_custom_op(
+                op_name="rocm_aiter_gather_kv_b_proj",
+                op_func=_rocm_aiter_gather_kv_b_proj_impl,
+                mutates_args=["k", "v"],
+                fake_impl=_rocm_aiter_gather_kv_b_proj_fake,
+                dispatch_key=current_platform.dispatch_key,
+            )
             direct_register_custom_op(
                 op_name="rocm_aiter_mla_decode_fwd",
                 op_func=_rocm_aiter_mla_decode_fwd_impl,
@@ -3011,6 +3174,10 @@ class rocm_aiter_ops:
             group_size,
             transpose_scale,
         )
+
+    @staticmethod
+    def get_fused_mla_dual_rms_norm_group_quant_op() -> OpOverload:
+        return torch.ops.vllm.fused_mla_dual_rms_norm_group_quant.default
 
     @staticmethod
     def rms_norm(
@@ -3350,6 +3517,21 @@ class rocm_aiter_ops:
             extra_kv=extra_kv_buffer,
             extra_indptr=extra_kv_indptr,
             extra_indices=extra_kv_indices,
+        )
+
+    @staticmethod
+    def gather_kv_b_proj(
+        kv_cache: torch.Tensor,
+        kv_scale: torch.Tensor,
+        kv_indptr: torch.Tensor,
+        kv_indices: torch.Tensor,
+        cu_seq_lens: torch.Tensor,
+        weight: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+    ) -> None:
+        torch.ops.vllm.rocm_aiter_gather_kv_b_proj(
+            kv_cache, kv_scale, kv_indptr, kv_indices, cu_seq_lens, weight, k, v
         )
 
     @staticmethod
