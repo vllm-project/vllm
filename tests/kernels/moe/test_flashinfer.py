@@ -15,8 +15,10 @@ from tests.kernels.moe.utils import (
     make_test_weights,
 )
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
+from vllm.model_executor.layers.fused_moe import eep_reconfigure
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.all2all_utils import (
+    flashinfer_one_sided_dispatch_layout,
     maybe_make_prepare_finalize,
 )
 from vllm.model_executor.layers.fused_moe.config import (
@@ -29,6 +31,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutlass_moe import (
     FlashInferExperts,
 )
+from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
 from vllm.model_executor.layers.fused_moe.experts.trtllm_bf16_moe import (
     view_as_block_major_k,
 )
@@ -37,6 +40,7 @@ from vllm.model_executor.layers.fused_moe.experts.trtllm_fp8_moe import (
     TrtLlmFp8ExpertsMonolithic,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
+from vllm.model_executor.layers.fused_moe.oracle import fp8 as fp8_oracle
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     Fp8MoeBackend,
     convert_to_fp8_moe_kernel_format,
@@ -986,3 +990,100 @@ def test_trtllm_mxfp8_minimax2_routing_applies_routed_scale(m: int, workspace_in
         )
 
     torch.testing.assert_close(fused, reference, atol=2e-2, rtol=2e-2)
+
+
+def _one_sided_ep_moe_config(hidden_dim: int) -> FusedMoEConfig:
+    moe_config = make_dummy_moe_config(
+        num_experts=16,
+        experts_per_token=4,
+        hidden_dim=hidden_dim,
+        intermediate_size=512,
+    )
+    parallel_config = moe_config.moe_parallel_config
+    parallel_config.dp_size = 2
+    parallel_config.ep_size = 2
+    parallel_config.use_ep = True
+    parallel_config.all2all_backend = "flashinfer_nvlink_one_sided"
+    return moe_config
+
+
+def _fp8_block_quant_config() -> FusedMoEQuantConfig:
+    return FusedMoEQuantConfig.make(
+        quant_dtype=current_platform.fp8_dtype(), block_shape=[128, 128]
+    )
+
+
+@pytest.mark.parametrize(
+    "experts_cls, defers_input_quant",
+    [(FlashInferExperts, True), (TritonExperts, False)],
+    ids=["flashinfer_cutlass", "triton"],
+)
+def test_fp8_block_one_sided_dispatch_sized_for_expert_inputs(
+    monkeypatch, experts_cls, defers_input_quant
+):
+    """FlashInfer CUTLASS quantizes block-FP8 activations itself, so the
+    one-sided dispatch sends them unquantized and its workspace must be sized
+    for BF16 rows rather than FP8 rows plus scales."""
+    hidden_dim = 2560
+    moe_config = _one_sided_ep_moe_config(hidden_dim)
+    expert_quant_config = _fp8_block_quant_config()
+
+    def check_dispatch_layout(*, quant_config, input_dtype=None, **kwargs):
+        assert quant_config is expert_quant_config
+        layout = flashinfer_one_sided_dispatch_layout(
+            hidden_dim, quant_config, input_dtype=input_dtype
+        )
+        if defers_input_quant:
+            assert input_dtype == moe_config.in_dtype
+            expected = (hidden_dim * moe_config.in_dtype.itemsize, 0)
+        else:
+            assert input_dtype is None
+            expected = (hidden_dim, hidden_dim // 128 * torch.float32.itemsize)
+        assert (layout.x_bytes_per_token, layout.x_sf_bytes_per_token) == expected
+        raise RuntimeError("dispatch layout verified before allocation")
+
+    monkeypatch.setattr(
+        fp8_oracle, "maybe_make_prepare_finalize", check_dispatch_layout
+    )
+    with pytest.raises(
+        RuntimeError, match="dispatch layout verified before allocation"
+    ):
+        fp8_oracle.make_fp8_moe_kernel(
+            moe_quant_config=expert_quant_config,
+            moe_config=moe_config,
+            experts_cls=experts_cls,
+            fp8_backend=Fp8MoeBackend.FLASHINFER_CUTLASS
+            if defers_input_quant
+            else Fp8MoeBackend.TRITON,
+        )
+
+
+@pytest.mark.parametrize("defers_input_quant", [True, False])
+def test_eep_rebuild_sizes_dispatch_for_expert_inputs(monkeypatch, defers_input_quant):
+    """Rebuilding the prepare/finalize for elastic EP keeps sizing the dispatch
+    for the activations the existing experts expect."""
+    moe_config = _one_sided_ep_moe_config(2560)
+    quant_method = SimpleNamespace(
+        supports_internal_mk=True,
+        is_monolithic=False,
+        moe_quant_config=_fp8_block_quant_config(),
+        moe_kernel=SimpleNamespace(
+            is_monolithic=False,
+            fused_experts=SimpleNamespace(
+                expects_unquantized_inputs=defers_input_quant
+            ),
+        ),
+    )
+    module = SimpleNamespace(_quant_method=quant_method, moe_config=moe_config)
+
+    def check_input_dtype(*args, input_dtype=None, **kwargs):
+        assert input_dtype == (moe_config.in_dtype if defers_input_quant else None)
+        raise RuntimeError("dispatch dtype verified before allocation")
+
+    monkeypatch.setattr(
+        eep_reconfigure, "maybe_make_prepare_finalize", check_input_dtype
+    )
+    with pytest.raises(RuntimeError, match="dispatch dtype verified before allocation"):
+        eep_reconfigure.make_eep_staged_quant_method(
+            module, moe_config, all2all_manager=None
+        )
