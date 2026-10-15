@@ -54,6 +54,7 @@ from vllm.v1.kv_offload.base import (
     ReqContext,
     RequestOffloadingContext,
     ScheduleEndContext,
+    StoreTrigger,
     TierFilter,
     TierMatcher,
     make_offload_key,
@@ -1440,7 +1441,9 @@ class OffloadingConnectorScheduler:
                 key = self._make_boundary_key(
                     req, group_idx, boundary, req_status.req_context
                 )
-                store_output = self.manager.prepare_store([key], req_status.req_context)
+                store_output = self.manager.prepare_store(
+                    [key], req_status.req_context, StoreTrigger.ON_COMPUTE
+                )
                 if store_output is None:
                     self._connector_stats.increase_counter(
                         _ConnectorMetricName.ALLOCATION_FAILURE
@@ -1547,7 +1550,9 @@ class OffloadingConnectorScheduler:
             ]
             assert all(block_id != 0 for block_id in block_ids)
 
-            store_output = self.manager.prepare_store(keys, req_status.req_context)
+            store_output = self.manager.prepare_store(
+                keys, req_status.req_context, StoreTrigger.ON_COMPUTE
+            )
             if store_output is None:
                 self._connector_stats.increase_counter(
                     _ConnectorMetricName.ALLOCATION_FAILURE
@@ -1810,7 +1815,7 @@ class OffloadingConnectorScheduler:
                 continue
 
             store_output = self.manager.prepare_store(
-                new_offload_keys, req_status.req_context
+                new_offload_keys, req_status.req_context, StoreTrigger.ON_COMPUTE
             )
             if store_output is None:
                 self._connector_stats.increase_counter(
