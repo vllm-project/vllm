@@ -22,7 +22,7 @@
 
 #include <string>
 
-#include "../cuda_compat.h"
+#include "core/cuda_compat.h"
 
 #if defined(__GFX11__)
   #define __HIP__MXFP4_W4A8_GFX11__
