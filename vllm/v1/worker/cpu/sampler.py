@@ -8,6 +8,7 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
+from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
 from vllm.v1.watermarking.gpu_sampler import GPUWatermarkSampler
 from vllm.v1.watermarking.watermarker import RandomSampler
@@ -17,7 +18,9 @@ from vllm.v1.worker.cpu.logits_processors import (
     CPULogitBiasState,
     CPUPenalties,
 )
+from vllm.v1.worker.cpu.logprob import compute_topk_scores as compute_topk_scores_cpu
 from vllm.v1.worker.gpu.sample.logits_processor import LogitsContext
+from vllm.v1.worker.gpu.sample.logprob import LogprobTokenIdsState
 from vllm.v1.worker.gpu.sample.output import (
     MAX_COMPACT_SUPPORT,
     SamplingMaskTensors,
@@ -319,6 +322,28 @@ class CPUSampler(Sampler):
     bad_words_state_cls = CPUBadWords
     thinking_budget_state_cls = CPUThinkingBudgetState
     trace_replay_state_cls = CPUTraceReplayState
+
+    def _compute_topk_scores(
+        self,
+        logits: torch.Tensor,
+        num_logprobs: int,
+        sampled_token_ids: torch.Tensor,
+        cu_num_logits: list[int] | torch.Tensor | None,
+        logprob_token_ids_state: LogprobTokenIdsState,
+        expanded_idx_mapping: torch.Tensor,
+        max_per_req_token_ids: int,
+        logits_mode: bool,
+    ) -> LogprobsTensors:
+        return compute_topk_scores_cpu(
+            logits,
+            num_logprobs,
+            sampled_token_ids,
+            cu_num_logits,
+            logprob_token_ids_state=logprob_token_ids_state,
+            expanded_idx_mapping=expanded_idx_mapping,
+            max_per_req_token_ids=max_per_req_token_ids,
+            logits_mode=logits_mode,
+        )
 
     @staticmethod
     def _get_num_nans(logits: torch.Tensor) -> torch.Tensor:

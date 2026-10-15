@@ -7,22 +7,7 @@ from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.worker.gpu.sample.logprob import LogprobTokenIdsState
-
-
-def get_prompt_logprobs_token_ids(
-    num_tokens: int,
-    query_start_loc: torch.Tensor,
-    idx_mapping: torch.Tensor,
-    num_computed_tokens: torch.Tensor,
-    all_token_ids: torch.Tensor,
-) -> torch.Tensor:
-    return ops.get_prompt_logprobs_token_ids_cpu(
-        num_tokens,
-        query_start_loc,
-        idx_mapping,
-        num_computed_tokens,
-        all_token_ids,
-    )
+from vllm.v1.worker.gpu.sample.prompt_logprob import PromptLogprobsWorker
 
 
 @torch.compile(
@@ -128,3 +113,40 @@ def compute_topk_scores(
         cu_num_generated_tokens=None if is_tensor else cu_num_logits,
         cu_num_generated_tokens_tensor=cu_num_logits if is_tensor else None,
     )
+
+
+class CPUPromptLogprobsWorker(PromptLogprobsWorker):
+    def _compute_token_logprobs(
+        self, logits: torch.Tensor, token_ids: torch.Tensor
+    ) -> torch.Tensor:
+        return compute_token_logprobs(logits, token_ids)
+
+    def _compute_topk_scores(
+        self,
+        logits: torch.Tensor,
+        num_logprobs: int,
+        sampled_token_ids: torch.Tensor,
+        logits_mode: bool,
+    ) -> LogprobsTensors:
+        return compute_topk_scores(
+            logits,
+            num_logprobs,
+            sampled_token_ids,
+            logits_mode=logits_mode,
+        )
+
+    def get_prompt_logprobs_token_ids(
+        self,
+        num_tokens: int,
+        query_start_loc: torch.Tensor,
+        idx_mapping: torch.Tensor,
+        num_computed_tokens: torch.Tensor,
+        all_token_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        return ops.get_prompt_logprobs_token_ids_cpu(
+            num_tokens,
+            query_start_loc,
+            idx_mapping,
+            num_computed_tokens,
+            all_token_ids,
+        )
