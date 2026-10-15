@@ -340,7 +340,6 @@ class TieringOffloadingManager(OffloadingManager):
         # included. A real lock because the tier-poll thread enters the
         # manager too; the primary tier has none of its own.
         self._lock = threading.Lock()
-        self.primary_tier: CPUPrimaryTierOffloadingManager = primary_tier
         self.secondary_tiers = secondary_tiers or []
 
         # Wrap primary_tier in a locking proxy only when background worker
