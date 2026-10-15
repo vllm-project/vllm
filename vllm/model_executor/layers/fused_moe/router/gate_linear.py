@@ -5,6 +5,7 @@ from torch.nn.parameter import Parameter
 
 import vllm._custom_ops as ops
 import vllm.envs as envs
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.linear import (
@@ -31,7 +32,8 @@ class GateLinear(ReplicatedLinear):
     4. bf16x3 CuteDSL kernel (SM100, bf16 in, fp32 weight)
     5. ROCm bf16x3 router GEMM (gfx950, bf16 in, fp32 weight, fp32 out,
        M>=2048)
-    6. cuBLAS bf16×bf16→fp32 (SM90+ + bf16 weight + fp32 out_dtype)
+    6. bf16×bf16→fp32 GEMM: cuBLAS (SM90+ + bf16 weight + fp32 out_dtype)
+       or AITER tuned GEMM (ROCm gfx950, bf16 weight)
     7. F.linear via ReplicatedLinear (ultimate fallback)
 
     The ``out_dtype`` attribute is mutable and can be set after init
@@ -41,7 +43,7 @@ class GateLinear(ReplicatedLinear):
     A ``quant_config`` that actually quantizes the gate disables every
     specialized tier, leaving plain ``ReplicatedLinear`` behavior.
 
-    ``VLLM_BATCH_INVARIANT`` also disables tiers 1-5: they pick kernels and
+    ``VLLM_BATCH_INVARIANT`` also disables tiers 1-6: they pick kernels and
     split-K from the token count and skip the batch-invariant linear path.
     """
 
@@ -89,6 +91,12 @@ class GateLinear(ReplicatedLinear):
             and (is_hopper or is_blackwell)
             and not bias
             and not batch_invariant
+        )
+        can_use_aiter_tuned_gemm = (
+            not bias
+            and not force_fp32_compute
+            and not batch_invariant
+            and bool(rocm_aiter_ops.is_tgemm_enabled())
         )
 
         # If fp32 compute is required and no specialized kernel is available,
@@ -211,6 +219,14 @@ class GateLinear(ReplicatedLinear):
                 and self.weight.dtype == torch.float32
                 and self.out_dtype == torch.float32
             )
+
+        # AITER tuned GEMM eligibility
+        self.allow_aiter_router_gemm = (
+            self.is_unquantized
+            and can_use_aiter_tuned_gemm
+            and self.weight.dtype == torch.bfloat16
+            and rocm_aiter_ops.is_bf16_gemm_tuned(output_size, input_size)
+        )
 
         self._register_ll_fp32w_warmup()
 
@@ -347,10 +363,21 @@ class GateLinear(ReplicatedLinear):
             output = bf16x3_router_gemm(x, self.weight)
             return self._return(output)
 
-        # Tier 6: cuBLAS bf16→fp32
-        if self.allow_cublas_router_gemm and x.dtype == torch.bfloat16:
-            output = torch.mm(x, self.weight.T, out_dtype=torch.float32)
-            return self._return(output)
+        # Tier 6: bf16→fp32 GEMM, the AITER tuned GEMM on ROCm or cuBLAS elsewhere.
+        # The torch.mm epilogue below is eligible on ROCm too, so AITER is tried
+        # first to keep it reachable there.
+        if x.dtype == torch.bfloat16:
+            if self.allow_aiter_router_gemm:
+                output = rocm_aiter_ops.bf16_gemm(
+                    x,
+                    self.weight,
+                    self.out_dtype if self.out_dtype is not None else self.weight.dtype,
+                )
+                return self._return(output)
+
+            if self.allow_cublas_router_gemm:
+                output = torch.mm(x, self.weight.T, out_dtype=torch.float32)
+                return self._return(output)
 
         # Tier 7: F.linear (ReplicatedLinear)
         if (
