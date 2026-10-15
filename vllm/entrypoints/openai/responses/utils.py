@@ -2,10 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
+import zlib
 from collections.abc import Iterable
 from typing import Any
 
 import partial_json_parser
+import pybase64 as base64
 from openai.types.chat import (
     ChatCompletionAssistantMessageParam,
     ChatCompletionMessageToolCallParam,
@@ -53,6 +55,28 @@ from vllm.tool_parsers.utils import (
 from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
+
+_REASONING_STATE_PREFIX = "vllm-reasoning-v1."
+
+
+def encode_reasoning_state(text: str) -> str:
+    """Opaque ``reasoning.encrypted_content`` blob for ``store=false`` replay.
+
+    Encoded rather than encrypted: vLLM holds no key, the blob only has to
+    survive a client round trip intact.
+    """
+    packed = base64.urlsafe_b64encode(zlib.compress(text.encode("utf-8")))
+    return _REASONING_STATE_PREFIX + packed.decode("ascii")
+
+
+def decode_reasoning_state(blob: str | None) -> str | None:
+    if not blob or not blob.startswith(_REASONING_STATE_PREFIX):
+        return None
+    try:
+        raw = base64.urlsafe_b64decode(blob[len(_REASONING_STATE_PREFIX) :])
+        return zlib.decompress(raw).decode("utf-8")
+    except (ValueError, zlib.error, UnicodeDecodeError):
+        return None
 
 
 def custom_tool_names(tools: list[Tool] | None) -> frozenset[str]:
@@ -106,6 +130,7 @@ def build_response_output_items(
     tool_calls: list[FunctionCall] | None,
     logprobs: list[Logprob] | None = None,
     tools: list[Tool] | None = None,
+    encrypted_reasoning: bool = False,
 ) -> list[ResponseOutputItem]:
     outputs: list[ResponseOutputItem] = []
     tool_call_name_map = build_responses_tool_call_name_map(tools)
@@ -120,6 +145,9 @@ def build_response_output_items(
                 content=[
                     ResponseReasoningTextContent(text=reasoning, type="reasoning_text")
                 ],
+                encrypted_content=(
+                    encode_reasoning_state(reasoning) if encrypted_reasoning else None
+                ),
                 status=None,
             )
         )
@@ -370,13 +398,10 @@ def _construct_message_from_response_item(
         )
     if isinstance(item, ResponseReasoningItem):
         reasoning = ""
-        if item.encrypted_content:
-            raise VLLMValidationError(
-                "Encrypted content is not supported.",
-                parameter="input",
-            )
-        elif item.content and len(item.content) >= 1:
+        if item.content and len(item.content) >= 1:
             reasoning = item.content[0].text
+        elif (restored := decode_reasoning_state(item.encrypted_content)) is not None:
+            reasoning = restored
         elif len(item.summary) >= 1:
             reasoning = item.summary[0].text
             logger.warning(
