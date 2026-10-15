@@ -866,6 +866,7 @@ steps:
     amd:
       label: ":amd: (MI355) Batch Invariance"
       dind: false
+      automatic_shard: true
       device: mi355_1
       timeout_in_minutes: 60
       depends_on:
