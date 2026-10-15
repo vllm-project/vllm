@@ -208,6 +208,7 @@ fn llama_tool_call_header_event(input: &mut JsonToolInput<'_>) -> ModalResult<Ll
     const CONFIG: JsonToolCallConfig = JsonToolCallConfig {
         parser_name: "Llama JSON",
         start_marker: "",
+        framed_start_marker: None,
         end_marker: "",
         marker_whitespace: JsonToolCallWhitespace::Optional,
         delimiter: Some(";"),

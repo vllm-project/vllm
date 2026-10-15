@@ -4,7 +4,7 @@
 from collections.abc import Sequence
 
 from vllm.config import PoolerConfig, VllmConfig
-from vllm.entrypoints.openai.engine.protocol import UsageInfo
+from vllm.entrypoints.serve.engine.protocol import UsageInfo
 from vllm.inputs import PromptType
 from vllm.outputs import PoolingRequestOutput
 from vllm.plugins.io_processors.interface import IOProcessor

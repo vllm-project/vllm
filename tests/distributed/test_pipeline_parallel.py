@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-WARNING: This test runs in both single-node (4 GPUs) and multi-node
- (2 node with 2 GPUs each) modes. If the test only uses 2 GPUs, it is
- important to set the distributed backend to "mp" to avoid Ray scheduling
- all workers in a node other than the head node, which can cause the test
- to fail.
+"""WARNING: This test runs in both single-node (4 GPUs) and multi-node
+(2 node with 2 GPUs each) modes. If the test only uses 2 GPUs, it is
+important to set the distributed backend to "mp" to avoid Ray scheduling
+all workers in a node other than the head node, which can cause the test
+to fail.
 """
 
 import json
@@ -295,16 +294,7 @@ def _compare_tp(
     if max_num_seqs:
         common_args.extend(["--max-num-seqs", f"{max_num_seqs}"])
 
-    if distributed_backend == "ray":
-        # Test Ray Compiled Graph for all the tests
-        pp_env = {
-            "VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL": "1",
-        }
-    elif distributed_backend == "mp":
-        pp_env = None
-    else:
-        pp_env = None
-
+    pp_env = None
     tp_env = None
 
     pp_args = [

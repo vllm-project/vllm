@@ -31,7 +31,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
   rocm_ops.impl("wvSplitK", torch::kCUDA, &wvSplitK);
 
   // W4A16 grouped skinny GEMM: packed int4 weights, per-group scales,
-  // optional zero points for asymmetric quantization
+  // optional zero points [M/8, K/group_size] int32 for asymmetric
+  // quantization
   rocm_ops.def(
       "wvSplitK_int4_g(Tensor in_a, Tensor in_b, Tensor in_scale, "
       "Tensor? in_zero_points, Tensor? in_bias, int CuCount, "
@@ -56,12 +57,12 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
   // W4A16 GPTQ kernels for AMD RDNA3 (gfx1100).
   rocm_ops.def(
       "gptq_gemm_rdna3(Tensor a, Tensor b_q_weight, Tensor b_qzeros, "
-      "Tensor b_scales, Tensor b_g_idx, bool use_v2_format) -> Tensor");
+      "Tensor b_scales, bool use_v2_format) -> Tensor");
   rocm_ops.impl("gptq_gemm_rdna3", torch::kCUDA, &gptq_gemm_rdna3);
 
   rocm_ops.def(
       "gptq_gemm_rdna3_wmma(Tensor a, Tensor b_q_weight, Tensor b_qzeros, "
-      "Tensor b_scales, Tensor b_g_idx, bool use_v2_format) -> Tensor");
+      "Tensor b_scales, bool use_v2_format) -> Tensor");
   rocm_ops.impl("gptq_gemm_rdna3_wmma", torch::kCUDA, &gptq_gemm_rdna3_wmma);
 
   rocm_ops.def(

@@ -114,6 +114,7 @@ def test_eviction_when_cache_is_full():
 
     # 'x' should have been evicted.
     assert "x" not in manager.cached
+    assert "x" not in manager.num_embeds_by_hash
     assert "req1" not in manager.request_cached_ids
     assert "x" in manager.get_freed_mm_hashes()
 
@@ -165,6 +166,38 @@ def test_get_freed_mm_hashes_clears_freed_list():
     freed = manager.get_freed_mm_hashes()
     assert "a" in freed
     assert manager.get_freed_mm_hashes() == []
+
+
+def test_referencing_a_freeable_entry_protects_it_from_eviction():
+    """A waiting request can hold an entry it is not scheduled for yet.
+
+    Entries with no referent are evictable. A request that is deferred (e.g.
+    by an EC connector waiting on another item) still needs the items it
+    already has, and a connector that hands out one transfer per request
+    cannot always produce the same item a second time.
+    """
+    manager = EncoderCacheManager(cache_size=10)
+    owner = MockRequest("owner", ["a"], [5])
+    waiter = MockRequest("waiter", ["a"], [5])
+    newcomer = MockRequest("newcomer", ["b"], [6])
+
+    manager.allocate(owner, 0)
+    manager.free_encoder_input(owner, 0)
+    assert "a" in manager.freeable
+
+    # The waiting request references it; it is no longer reclaimable.
+    assert manager.check_and_update_cache(waiter, 0)
+    assert "a" not in manager.freeable
+
+    # 'b' no longer fits, and 'a' must not be taken away to make room.
+    assert not manager.can_allocate(newcomer, 0, int(1e9), 0)
+    assert "a" in manager.cached
+    assert manager.get_freed_mm_hashes() == []
+
+    # Once the waiter is done with it, the entry is reclaimable again.
+    manager.free_encoder_input(waiter, 0)
+    assert manager.can_allocate(newcomer, 0, int(1e9), 0)
+    assert manager.get_freed_mm_hashes() == ["a"]
 
 
 def test_reallocated_hash_is_not_reported_as_freed():
@@ -241,6 +274,31 @@ def test_encoder_cache_with_is_embed_mask():
     assert savings_ratio == 12.5
 
 
+def test_encoder_cache_tracks_embedding_count_by_identifier():
+    class MockRequestWithMask(MockRequest):
+        def get_num_encoder_embeds(self, input_id: int) -> int:
+            return self.mm_features[input_id].mm_position.get_num_embeds()
+
+    is_embed = torch.tensor([False, True, True, False, True, False])
+    request = MockRequestWithMask("owner", ["img1"], [len(is_embed)])
+    request.mm_features[0] = MultiModalFeatureSpec(
+        data=None,
+        modality="image",
+        identifier="img1",
+        mm_position=PlaceholderRange(offset=0, length=6, is_embed=is_embed),
+    )
+
+    manager = EncoderCacheManager(cache_size=10)
+    manager.allocate(request, 0)
+    assert manager.get_cached_num_encoder_embeds(request, 0) == 3
+
+    manager.free(request)
+    assert manager.get_cached_num_encoder_embeds(request, 0) == 3
+
+    manager.reset()
+    assert manager.get_cached_num_encoder_embeds(request, 0) is None
+
+
 def test_encoder_cache_mask_based_retrieval():
     class MockRequestWithMask(MockRequest):
         def get_num_encoder_embeds(self, input_id: int) -> int:
@@ -304,6 +362,7 @@ def test_reset_clears_all_state():
     manager.reset()
 
     assert len(manager.cached) == 0
+    assert len(manager.num_embeds_by_hash) == 0
     assert len(manager.request_cached_ids) == 0
     assert len(manager.freeable) == 0
     assert len(manager.freed) == 0
