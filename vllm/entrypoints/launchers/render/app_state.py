@@ -90,6 +90,7 @@ async def init_render_app_state(
         tool_parser=args.tool_call_parser,
         tool_strict_level=args.tool_strict_level,
         reasoning_parser=reasoning_parser,
+        parser_cache_size=args.parser_cache_size,
         default_chat_template_kwargs=default_chat_template_kwargs,
         log_error_stack=args.log_error_stack,
     )
