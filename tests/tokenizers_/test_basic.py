@@ -154,6 +154,36 @@ def test_tokenizer_code_revision_default_or_matching(code_revision: str | None):
 
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize(
+    "code_revision",
+    [
+        None,
+        "c8ae8a2e5845fc3ad4e5237e4346e5a9ba1e87d2",
+        "2efddce40dddaccd37bae208c3c7ca66dbedf68a",
+    ],
+)
+def test_tokenizer_config_code_revision(code_revision):
+    """Load real remote config code at its pin, not the data revision."""
+    revision = "c8ae8a2e5845fc3ad4e5237e4346e5a9ba1e87d2"
+
+    with patch(
+        "vllm.tokenizers.registry.CachedHfTokenizer.from_pretrained",
+        return_value=SimpleNamespace(is_fast=True),
+    ) as load_tokenizer:
+        get_tokenizer(
+            "hf-internal-testing/test_dynamic_model",
+            tokenizer_mode="hf",
+            trust_remote_code=True,
+            revision=revision,
+            code_revision=code_revision,
+        )
+
+    config = load_tokenizer.call_args.kwargs["config"]
+    assert (code_revision or revision) in type(config).__module__.split(".")
+    assert config.new_hidden_size == 12
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize(
     "loader", (cached_tokenizer_from_config, tokenizer_args_from_config)
 )
 @pytest.mark.parametrize(

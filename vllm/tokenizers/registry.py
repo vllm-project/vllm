@@ -248,6 +248,7 @@ def get_tokenizer(
             tokenizer_name,
             trust_remote_code=trust_remote_code,
             revision=revision,
+            code_revision=kwargs.get("code_revision"),
             config_format=config_format,
             token=kwargs.get("token"),
         )
