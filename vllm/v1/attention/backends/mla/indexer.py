@@ -357,12 +357,6 @@ class DeepseekV4IndexerBackend(DeepseekV32IndexerBackend):
 
 
 class DeepseekV41IndexerBackend(DeepseekV4IndexerBackend):
-    @classmethod
-    def supports_device_cpu_query_lens_mismatch(cls) -> bool:
-        # The ROCm flattened-query support above is validated for the
-        # DeepSeek-V4 adaptive DSpark path only.
-        return DeepseekV32IndexerBackend.supports_device_cpu_query_lens_mismatch()
-
     @staticmethod
     def get_name() -> str:
         return "DEEPSEEK_V41_INDEXER"
@@ -467,6 +461,9 @@ class DeepseekV32IndexerPrefillChunkMetadata:
     cu_seq_lens: torch.Tensor
     token_to_seq: torch.Tensor
     total_seq_lens: int
+    # Host upper bound on cu_seqlen_ke - cu_seqlen_ks, sizing the compressed
+    # DeepGEMM prefill logits.
+    max_seqlen_k: int
     token_start: int
     token_end: int
     num_reqs: int
@@ -950,7 +947,10 @@ def _rocm_supports_flattened_device_query_lens(vllm_config: VllmConfig) -> bool:
     return (
         current_platform.is_rocm()
         and model_config is not None
-        and "DeepseekV4ForCausalLM" in model_config.architectures
+        and (
+            "DeepseekV4ForCausalLM" in model_config.architectures
+            or "DeepseekV41ForCausalLM" in model_config.architectures
+        )
     )
 
 
@@ -1957,6 +1957,7 @@ def build_prefill_chunk_metadata(
         cu_seq_lens=cu_seq_lens,
         token_to_seq=token_to_seq,
         total_seq_lens=total_seq_lens,
+        max_seqlen_k=int(compressed_seq_lens_cpu[start_idx:end_idx].max()),
         block_table=block_table[start_idx:end_idx],
         token_start=token_start,
         token_end=token_end,
