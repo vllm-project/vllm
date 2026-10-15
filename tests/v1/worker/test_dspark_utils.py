@@ -7,12 +7,49 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from vllm.config import ParallelConfig
+from vllm.config import LoadConfig, ParallelConfig
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 from vllm.v1.worker.gpu import model_runner
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 from vllm.v1.worker.gpu.spec_decode.dspark.utils import _get_dspark_parallel_config
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
+from vllm.v1.worker.gpu.spec_decode.utils import get_pp_safe_draft_load_config
+
+
+@pytest.mark.parametrize("pp_size", [1, 2])
+@pytest.mark.parametrize("distributed", [False, True])
+def test_runai_draft_loading_preserves_target_configuration(
+    monkeypatch, pp_size, distributed
+):
+    from vllm.v1.worker.gpu.spec_decode import utils
+
+    monkeypatch.setattr(
+        utils, "get_pp_group", lambda: SimpleNamespace(world_size=pp_size)
+    )
+    extra = {"distributed": distributed, "concurrency": 4, "memory_limit": 1048576}
+    target = LoadConfig(load_format="runai_streamer", model_loader_extra_config=extra)
+
+    draft = get_pp_safe_draft_load_config(target)
+
+    assert target.model_loader_extra_config == extra
+    assert target.model_loader_extra_config["distributed"] is distributed
+    assert draft.load_format == "runai_streamer"
+    assert draft.model_loader_extra_config == {
+        **extra,
+        "distributed": distributed and pp_size == 1,
+    }
+
+
+@pytest.mark.parametrize("load_format", ["auto", "runai_streamer"])
+def test_pp_draft_preserves_loader_without_distributed_streaming(
+    monkeypatch, load_format
+):
+    from vllm.v1.worker.gpu.spec_decode import utils
+
+    monkeypatch.setattr(utils, "get_pp_group", lambda: SimpleNamespace(world_size=2))
+    target = LoadConfig(load_format=load_format)
+
+    assert get_pp_safe_draft_load_config(target) is target
 
 
 @dataclass

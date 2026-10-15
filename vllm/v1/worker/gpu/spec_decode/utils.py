@@ -34,7 +34,9 @@ def get_drafter_hidden_states(
 
 def get_pp_safe_draft_load_config(load_config: LoadConfig) -> LoadConfig:
     """Avoid collectives that include PP ranks without a draft model."""
-    if get_pp_group().world_size > 1 and load_config.load_format == "fastsafetensors":
+    if get_pp_group().world_size == 1:
+        return load_config
+    if load_config.load_format == "fastsafetensors":
         logger.warning_once(
             "fastsafetensors cannot load a draft model instantiated on only "
             "one pipeline stage; falling back to the standard safetensors "
@@ -42,6 +44,21 @@ def get_pp_safe_draft_load_config(load_config: LoadConfig) -> LoadConfig:
             "fastsafetensors."
         )
         return replace(load_config, load_format="auto")
+    extra_config = load_config.model_loader_extra_config
+    if (
+        load_config.load_format == "runai_streamer"
+        and isinstance(extra_config, dict)
+        and extra_config.get("distributed", False)
+    ):
+        logger.warning_once(
+            "RunAI distributed loading requires ranks without a draft model; "
+            "disabling distributed loading for the draft model. "
+            "The target model still uses its configured loading mode."
+        )
+        return replace(
+            load_config,
+            model_loader_extra_config={**extra_config, "distributed": False},
+        )
     return load_config
 
 
