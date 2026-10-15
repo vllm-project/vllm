@@ -103,6 +103,10 @@ class AttentionConfig:
     candidate pool instead, with fp32 logits, and keeps the masked dense walk
     for steps whose contexts are too short for the pool to pay."""
 
+    indexer_tp_shard_min_rows: int = Field(default=65536, ge=1)
+    """Minimum total prefill rows for the sparse-attention indexer to split
+    them across TP ranks instead of scoring every row on each rank."""
+
     hisparse_config: HiSparseConfig | None = None
     """HiSparse host-resident KV configuration. Setting this enables experimental
     Model Runner V2-only HiSparse sparse-MLA decode hot-buffering. It is inferred
