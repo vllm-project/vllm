@@ -81,3 +81,8 @@ class D3ForSequenceClassification(_D3ForSequenceClassificationBase):
                 allow_patterns_overrides=[READOUT_WEIGHTS],
             )
         ]
+
+    def is_unused_checkpoint_weight(self, name: str) -> bool:
+        # The readout's only tensor, loaded through `secondary_weights`. A
+        # checkpoint without a weight index lists its file with the backbone's.
+        return name == "weight"
