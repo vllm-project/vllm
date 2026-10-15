@@ -167,10 +167,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 FROM vllm-base AS ucx-nixl-build
 
-# Keep UCX_VERSION aligned with the UCX that NIXL itself builds against for this
-# NIXL_VERSION (nixl contrib/Dockerfile.manylinux: ARG UCX_REF), so XPU runs the
-# same UCX commit as the released nixl-cu* wheels rather than an untested pairing.
-ARG UCX_VERSION=v1.21.x
+ARG UCX_VERSION=cherry/add-ze-ipc-support
 ARG NIXL_VERSION=v1.3.2
 
 # Build-time only: compiler, autotools, and verbs dev headers
@@ -188,11 +185,24 @@ RUN apt-get update -y && apt-get install -y --no-install-recommends \
 # patchelf (installed via uv) is used by the NIXL wheel build to rewrite
 # RPATH entries, making the wheel portable across stages.
 RUN --mount=type=cache,target=/root/.cache/uv \
-    git clone --depth 1 --branch "${UCX_VERSION}" https://github.com/openucx/ucx /tmp/ucx_source && \
+    git clone --depth 1 --branch "${UCX_VERSION}" https://github.com/zhangxiaoli73/ucx /tmp/ucx_source && \
     cd /tmp/ucx_source && \
     bash autogen.sh && \
-    ./configure --prefix=/opt/ucx --with-ze=yes --enable-examples --enable-mt && \
-    make CFLAGS="-Wno-error=incompatible-pointer-types" -j"$(nproc)" && make install && \
+    ./contrib/configure-release \
+        --prefix=/opt/ucx \
+        --with-ze \
+        --enable-shared \
+        --disable-static \
+        --disable-doxygen-doc \
+        --enable-optimizations \
+        --enable-cma \
+        --enable-devel-headers \
+        --with-verbs \
+        --with-dm \
+        --with-efa \
+        --without-cuda \
+        --enable-mt && \
+    make -j"$(nproc)" && make install && \
     git clone --depth 1 --branch "${NIXL_VERSION}" https://github.com/ai-dynamo/nixl /tmp/nixl_source && \
     cd /tmp/nixl_source && \
     uv pip install --upgrade meson pybind11 patchelf && \
