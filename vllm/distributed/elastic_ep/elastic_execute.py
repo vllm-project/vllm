@@ -301,6 +301,32 @@ class ElasticEPScalingExecutor:
             self._group_cleanup_future = None
             future.result()
 
+    def _drain_reshuffle_if_requested(self) -> None:
+        """Wait for the previous reshuffle before touching the groups again.
+
+        prepare_reconfiguration waits for the group cleanup but not for the
+        expert copies that commit_scale_up scheduled asynchronously, and the
+        drain that does wait for them runs later, inside the commit. On MI355
+        the scale down request arrives 34 to 36 s into a 39 s copy window, and
+        create_standby_groups then either gets hipIpcGetMemHandle refused with
+        hsa_status 4097 or faults the GPU inside ncclCommInitRank. Draining
+        here means no reconfiguration ever overlaps copies in flight.
+
+        Diagnostic only.
+        """
+        if os.getenv("VLLM_EEP_DEBUG_DRAIN_BEFORE_RECONFIG") != "1":
+            return
+        eplb_state = self.worker.model_runner.eplb_state
+        if eplb_state is None:
+            return
+        started = time.perf_counter()
+        eplb_state.drain_async()
+        torch.accelerator.synchronize()
+        logger.warning(
+            "[EEP-DEBUG] drained in-flight expert resharding in %.3f s",
+            time.perf_counter() - started,
+        )
+
     def shutdown(self) -> None:
         try:
             self._wait_for_group_cleanup()
@@ -314,6 +340,7 @@ class ElasticEPScalingExecutor:
         self, reconfig_request: ReconfigureDistributedRequest, use_all2all: bool
     ) -> None:
         self._wait_for_group_cleanup()
+        self._drain_reshuffle_if_requested()
         self.reconfig_request = reconfig_request
         new_dp_size = reconfig_request.new_data_parallel_size
         old_dp_size = get_dp_group().world_size
@@ -613,6 +640,13 @@ class ElasticEPScalingExecutor:
         rank_mapping: dict[int, int] | None = None,
         async_op: bool = False,
     ) -> None:
+        if async_op and os.getenv("VLLM_EEP_DEBUG_SYNC_RESHUFFLE") == "1":
+            # Diagnostic only: the scheduled copies are the one thing left that
+            # can explain the fault during the traffic right after scale up,
+            # and nothing cheaper isolates them.
+            async_op = False
+            logger.warning("[EEP-DEBUG] expert resharding forced to sync mode")
+
         if get_ep_group().rank == 0:
             logger.info("[Elastic EP] Starting expert resharding...")
 
