@@ -148,7 +148,7 @@ def test_shared_external_prefix_load_failure(
     if error_kind == "request":
         result.kv_connector_output.failed_recving = {owner.request_id}
     scheduler.update_from_output(output, result)
-    assert not scheduler._shared_load_owners
+    assert not scheduler.kv_cache_manager.block_pool._pending_prefix_loads
     assert not scheduler._shared_load_owners
     assert not scheduler._shared_load_followers
     assert all(block.ref_cnt == 0 for block in blocks)
@@ -460,7 +460,7 @@ def test_nixl_failed_shared_load_does_not_reuse_released_lease(abort_owner, poli
         block.ref_cnt == 0 and block.block_hash is None for block in failed_blocks
     )
     assert not manager.block_pool.cached_block_hash_to_block
-    assert not scheduler._shared_load_owners
+    assert not manager.block_pool._pending_prefix_loads
     assert not scheduler._shared_load_owners
     assert not scheduler._shared_load_followers
     if policy == "fail":
@@ -1213,6 +1213,8 @@ def test_p_side_chunked_prefill_mamba(mock_platform):
         block_size=BLOCK_SIZE,
     )
     vllm_config.scheduler_config.disable_hybrid_kv_cache_manager = False
+    # mamba_cache_mode "none" only runs without prefix caching.
+    vllm_config.cache_config.enable_prefix_caching = False
 
     kv_cache_config = make_kv_cache_config(
         block_size=BLOCK_SIZE,
@@ -1436,6 +1438,7 @@ def test_async_load_does_not_double_reserve_mamba_spec_blocks(
         disable_hybrid_kv_cache_manager=False,
     )
     vllm_config.cache_config.mamba_cache_mode = mamba_cache_mode
+    vllm_config.cache_config.enable_prefix_caching = mamba_cache_mode == "align"
     kv_cache_config = make_kv_cache_config(
         block_size,
         mamba_enabled=True,

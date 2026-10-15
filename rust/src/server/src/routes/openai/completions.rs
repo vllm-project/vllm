@@ -33,6 +33,7 @@ use super::utils::logprobs::{
     collected_logprobs_to_openai, decoded_logprobs_to_openai, decoded_prompt_logprobs_to_openai,
     prompt_logprobs_to_maps, text_len,
 };
+use super::utils::metrics::PerRequestMetrics;
 use super::utils::types::{StreamResponseEnvelope, Usage};
 use crate::config::ApiServerOptions;
 use crate::error::{ApiError, bail_server_error, server_error, text_submit_error};
@@ -140,6 +141,7 @@ async fn collect_completion(
     ApiServerOptions {
         enable_log_requests,
         enable_prompt_tokens_details,
+        enable_per_request_metrics,
         ..
     }: ApiServerOptions,
     ResponseOptions {
@@ -197,6 +199,9 @@ async fn collect_completion(
         Some(prompt) => format!("{prompt}{}", collected.text),
     };
     let finish_reason = completion_finish_reason_to_openai(&finish_reason)?.to_string();
+    let metrics = enable_per_request_metrics.then(|| {
+        PerRequestMetrics::from_timestamps(collected.timestamps, collected.usage.output_token_count)
+    });
     let usage = Usage::from_token_usage(collected.usage, enable_prompt_tokens_details);
 
     if enable_log_requests {
@@ -225,6 +230,7 @@ async fn collect_completion(
             prompt_token_ids: return_token_ids.then(|| collected.prompt_token_ids.to_vec()),
         }],
         usage: Some(usage),
+        metrics,
         system_fingerprint: None,
         kv_transfer_params: collected.kv_transfer_params,
         ec_transfer_params: collected.ec_transfer_params,
@@ -241,6 +247,7 @@ async fn completion_chunk_stream(
     ApiServerOptions {
         enable_log_requests,
         enable_prompt_tokens_details,
+        enable_per_request_metrics,
         ..
     }: ApiServerOptions,
     ResponseOptions {
@@ -356,12 +363,19 @@ async fn completion_chunk_stream(
                         yield_chunk!(final_chunk);
 
                         if include_usage {
+                            let metrics = enable_per_request_metrics.then(|| {
+                                PerRequestMetrics::from_timestamps(
+                                    finished.timestamps,
+                                    finished.usage.output_token_count,
+                                )
+                            });
                             y.yield_ok(CompletionSseChunk::Usage(usage_chunk(
                                 &envelope,
                                 Usage::from_token_usage(
                                     finished.usage,
                                     enable_prompt_tokens_details,
                                 ),
+                                metrics,
                             )))
                             .await;
                         }
@@ -411,9 +425,16 @@ async fn completion_chunk_stream(
                     yield_chunk!(final_chunk);
 
                     if include_usage {
+                        let metrics = enable_per_request_metrics.then(|| {
+                            PerRequestMetrics::from_timestamps(
+                                finished.timestamps,
+                                finished.usage.output_token_count,
+                            )
+                        });
                         y.yield_ok(CompletionSseChunk::Usage(usage_chunk(
                             &envelope,
                             Usage::from_token_usage(finished.usage, enable_prompt_tokens_details),
+                            metrics,
                         )))
                         .await;
                     }
@@ -509,9 +530,14 @@ fn prompt_only_logprobs_to_openai(
     ))
 }
 
-fn usage_chunk(envelope: &Arc<StreamResponseEnvelope>, usage: Usage) -> CompletionStreamResponse {
+fn usage_chunk(
+    envelope: &Arc<StreamResponseEnvelope>,
+    usage: Usage,
+    metrics: Option<PerRequestMetrics>,
+) -> CompletionStreamResponse {
     let mut chunk = CompletionStreamResponse::new(envelope);
     chunk.usage = Some(usage);
+    chunk.metrics = metrics.map(Into::into);
     chunk
 }
 
@@ -578,7 +604,7 @@ mod tests {
 
     use super::{
         ApiServerOptions, CompletionSseChunk, CompletionStreamResponse, ResponseOptions,
-        StreamResponseEnvelope, completion_chunk_stream, final_chunk,
+        StreamResponseEnvelope, collect_completion, completion_chunk_stream, final_chunk,
     };
 
     fn decoded_delta(
@@ -637,6 +663,66 @@ mod tests {
     #[test]
     fn final_chunk_rejects_error_finish_reason() {
         assert!(final_chunk(&stream_envelope(), FinishReason::Error).is_err());
+    }
+
+    #[tokio::test]
+    async fn collected_completion_includes_metrics_only_when_enabled() {
+        let make_stream = || {
+            stream::iter(vec![
+                Ok(DecodedTextEvent::Start {
+                    prompt_token_ids: vec![1].into(),
+                    prompt_logprobs: None,
+                }),
+                Ok(decoded_delta(
+                    "hi",
+                    vec![2],
+                    None,
+                    Some(Finished {
+                        usage: vllm_llm::TokenUsage {
+                            prompt_token_count: 1,
+                            output_token_count: 1,
+                            cached_token_count: 0,
+                        },
+                        finish_reason: FinishReason::stop_eos(),
+                        kv_transfer_params: None,
+                        ec_transfer_params: None,
+                        sampling_mask: None,
+                        timestamps: vllm_llm::RequestTimestamps {
+                            queued_ts: 10.0,
+                            scheduled_ts: 10.2,
+                            first_token_ts: 10.5,
+                            last_token_ts: 10.5,
+                        },
+                    }),
+                )),
+            ])
+        };
+
+        for enabled in [false, true] {
+            let response = collect_completion(
+                make_stream(),
+                "cmpl-1".into(),
+                "model".into(),
+                1,
+                ApiServerOptions {
+                    enable_per_request_metrics: enabled,
+                    ..Default::default()
+                },
+                ResponseOptions::default(),
+            )
+            .await
+            .expect("completion response");
+            let json = serde_json::to_value(response).expect("serializable response");
+            if enabled {
+                assert!(
+                    (json["metrics"]["time_to_first_token_ms"].as_f64().unwrap() - 300.0).abs()
+                        < 1e-9
+                );
+                assert_eq!(json["metrics"]["mean_itl_ms"], serde_json::Value::Null);
+            } else {
+                assert_eq!(json["metrics"], serde_json::Value::Null);
+            }
+        }
     }
 
     #[tokio::test]
@@ -702,6 +788,12 @@ mod tests {
                     kv_transfer_params: None,
                     ec_transfer_params: None,
                     sampling_mask: None,
+                    timestamps: vllm_llm::RequestTimestamps {
+                        queued_ts: 10.0,
+                        scheduled_ts: 10.2,
+                        first_token_ts: 10.5,
+                        last_token_ts: 11.0,
+                    },
                 }),
             )),
         ]);
@@ -713,6 +805,7 @@ mod tests {
             1,
             ApiServerOptions {
                 enable_prompt_tokens_details: true,
+                enable_per_request_metrics: true,
                 ..Default::default()
             },
             ResponseOptions {
@@ -779,6 +872,10 @@ mod tests {
 
         match &chunks[3] {
             CompletionSseChunk::Usage(chunk) => {
+                assert!(chunks[..3].iter().all(|chunk| chunk_response(chunk).metrics.is_none()));
+                let metrics = chunk.metrics.as_ref().expect("per-request metrics");
+                assert!((metrics.queue_time_ms.unwrap() - 200.0).abs() < 1e-9);
+                assert!((metrics.tokens_per_second.unwrap() - 2.5).abs() < 1e-9);
                 assert_eq!(
                     chunk
                         .usage
@@ -815,6 +912,7 @@ mod tests {
                     kv_transfer_params: None,
                     ec_transfer_params: None,
                     sampling_mask: None,
+                    timestamps: Default::default(),
                 }),
             )),
         ]);
@@ -879,6 +977,7 @@ mod tests {
                     kv_transfer_params: None,
                     ec_transfer_params: None,
                     sampling_mask: None,
+                    timestamps: Default::default(),
                 }),
             )),
         ]);
@@ -932,6 +1031,7 @@ mod tests {
                     kv_transfer_params: None,
                     ec_transfer_params: None,
                     sampling_mask: None,
+                    timestamps: Default::default(),
                 }),
             )),
         ]);
@@ -988,6 +1088,7 @@ mod tests {
                     kv_transfer_params: None,
                     ec_transfer_params: None,
                     sampling_mask: None,
+                    timestamps: Default::default(),
                 }),
             )),
         ]);
@@ -1061,6 +1162,7 @@ mod tests {
                     kv_transfer_params: None,
                     ec_transfer_params: None,
                     sampling_mask: None,
+                    timestamps: Default::default(),
                 }),
             )),
         ]);
@@ -1136,6 +1238,7 @@ mod tests {
                     kv_transfer_params: None,
                     ec_transfer_params: None,
                     sampling_mask: None,
+                    timestamps: Default::default(),
                 }),
             )),
         ]);

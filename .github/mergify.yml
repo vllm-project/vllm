@@ -494,8 +494,7 @@ pull_request_rules:
       - files~=^tests/v1/e2e/spec_decode/
       - files~=^examples/features/speculative_decoding/
       - files~=^vllm/model_executor/models/.*eagle.*\.py
-      - files=vllm/model_executor/models/mlp_speculator.py
-      - files~=^vllm/transformers_utils/configs/(eagle|medusa|mlp_speculator)\.py
+      - files~=^vllm/transformers_utils/configs/eagle\.py
   actions:
     label:
       add:
