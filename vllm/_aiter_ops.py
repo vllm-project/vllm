@@ -2676,16 +2676,17 @@ class rocm_aiter_ops:
         """Probe whether the fused QK-norm+RoPE+KV-cache op can emit fp8 Q.
 
         Added in https://github.com/ROCm/aiter/pull/5914 (>=0.1.25). Older
-        AITER must keep the separate query quantization.
+        AITER must keep the separate query quantization. AITER's compiled-op
+        wrapper hides the signature, so this checks the package version.
         """
-        import inspect
+        from importlib.metadata import PackageNotFoundError, version
 
-        from aiter.ops.fused_qk_norm_rope_cache_quant import (
-            fused_qk_norm_rope_cache_pts_quant_shuffle,
-        )
+        from packaging.version import Version
 
-        params = inspect.signature(fused_qk_norm_rope_cache_pts_quant_shuffle).parameters
-        return "q_out_fp8" in params
+        try:
+            return Version(version("amd-aiter")) >= Version("0.1.25")
+        except PackageNotFoundError:
+            return False
 
     @staticmethod
     def _probe_dsv4_i384_fhmoe_capability(num_tokens: int) -> bool:

@@ -356,7 +356,7 @@ def _run_qk_norm_rope_kvcache_fusion_test(
     kv_cache_dtype: CacheDType,
     rms_norm_eps: float,
     custom_op: str,
-    has_v_norm: bool,
+    has_v_norm: bool = False,
     monkeypatch: pytest.MonkeyPatch,
     mrope_section: tuple[int, int, int] | None = None,
     mrope_interleaved: bool = False,
