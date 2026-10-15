@@ -1044,3 +1044,42 @@ def test_pop_blocks_for_free_trims_null_head():
     block_pool.free_blocks([null])
     assert null.ref_cnt == null_ref_cnt
     assert block_pool.get_num_free_blocks() == num_free_blocks
+
+
+def test_mamba_checkpoint_waits_for_its_chunk_output():
+    """Scheduling ahead must not publish the next chunk's checkpoint."""
+    spec = MambaSpec(
+        block_size=128,
+        shapes=((1, 1),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+        num_prefill_checkpoint_blocks=1,
+        prefill_checkpoint_alignment=16,
+    )
+    pool = BlockPool(num_gpu_blocks=64, enable_caching=True, hash_block_size=128)
+    manager = MambaManager(
+        spec,
+        block_pool=pool,
+        enable_caching=True,
+        kv_cache_group_id=0,
+        scheduler_block_size=128,
+    )
+    init_none_hash(sha256)
+    request = Request(
+        request_id="r",
+        prompt_token_ids=list(range(818)),
+        sampling_params=SamplingParams(max_tokens=1),
+        pooling_params=None,
+        block_hasher=get_request_block_hasher(128, sha256),
+    )
+    for start, end in [(0, 512), (512, 818)]:
+        manager.new_step_starts()
+        manager.get_num_blocks_to_allocate(
+            "r", end, [], start, start, end, prefill_end=818
+        )
+        manager.allocate_new_blocks("r", end, end)
+        request.num_computed_tokens = end
+    manager.cache_blocks(request, 512, replay_boundaries=[])
+    assert pool.get_cached_block(request.block_hashes[5], [0]) is None
+    manager.cache_blocks(request, 818, replay_boundaries=[])
+    assert pool.get_cached_block(request.block_hashes[5], [0]) is not None
