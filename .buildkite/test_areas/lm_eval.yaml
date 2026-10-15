@@ -322,7 +322,6 @@ steps:
 
 - label: ":nvidia: (B200) [Nightly] LM Eval Spec Decode"
   key: lm-eval-spec-decode-4xb200
-  automatic_shard: true
   timeout_in_minutes: 120
   device: b200-k8s
   num_devices: 4
@@ -936,7 +935,6 @@ steps:
 
 - label: ":nvidia: (B200) [Nightly] LM Eval Humming Default TEMPORARY"
   key: lm-eval-humming-b200-default
-  automatic_shard: true
   optional: true
   timeout_in_minutes: 50
   device: b200-k8s
