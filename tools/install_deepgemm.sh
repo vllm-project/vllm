@@ -6,16 +6,29 @@ set -e
 
 # Default values
 # Keep DEEPGEMM_GIT_REF in sync with cmake/external_projects/deepgemm.cmake
-DEEPGEMM_GIT_REPO="https://github.com/vllm-project/DeepGEMM.git"
-# NOTE: This targets the vLLM fork's dev branch: upstream's 26/09/30 release
-# plus the sm120 and sm90 paged-MQA ports, the SwiGLU alpha/beta and SiTU
-# Mega MoE activations, and NVFP4 Mega MoE.
-DEEPGEMM_GIT_REF="6ce1c5ec6627a6bf11dbcc698b0b1e19c9248432"
+# Inferact fork of the vLLM fork's dev branch: sm120 and sm90 paged-MQA ports,
+# SwiGLU alpha/beta and SiTU Mega MoE activations, the CUDA 12.x layout header
+# fix, plus Muse Spark BF16/NVFP4 MegaMoE with fused post-expert normalization.
+DEEPGEMM_GIT_REPO="https://github.com/Inferact/DeepGEMM.git"
+DEEPGEMM_GIT_REF="1704143a9f75375d31ba644691645fdf316d4866"
+PYTHON_EXECUTABLE="${VIRTUAL_ENV:-.venv}/bin/python"
 WHEEL_DIR=""
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
     case $1 in
+        --repo|--python)
+            if [[ -z "$2" || "$2" =~ ^- ]]; then
+                echo "Error: $1 requires an argument." >&2
+                exit 1
+            fi
+            if [[ "$1" == "--repo" ]]; then
+                DEEPGEMM_GIT_REPO="$2"
+            else
+                PYTHON_EXECUTABLE="$2"
+            fi
+            shift 2
+            ;;
         --ref)
             if [[ -z "$2" || "$2" =~ ^- ]]; then
                 echo "Error: --ref requires an argument." >&2
@@ -43,7 +56,9 @@ while [[ $# -gt 0 ]]; do
         -h|--help)
             echo "Usage: $0 [OPTIONS]"
             echo "Options:"
+            echo "  --repo URL         Git repository (default: $DEEPGEMM_GIT_REPO)"
             echo "  --ref REF          Git reference to checkout (default: $DEEPGEMM_GIT_REF)"
+            echo "  --python PATH      Target Python (default: $PYTHON_EXECUTABLE)"
             echo "  --cuda-version VER CUDA version (auto-detected if not provided)"
             echo "  --wheel-dir PATH   If set, build wheel into PATH but do not install"
             echo "  -h, --help         Show this help message"
@@ -55,6 +70,17 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+# Resolve paths before entering the temporary checkout. Build with the same
+# Python and torch installation that will load the resulting extension.
+PYTHON_EXECUTABLE=$("$PYTHON_EXECUTABLE" -c 'import sys; print(sys.executable)')
+if [ -n "$WHEEL_DIR" ]; then
+    mkdir -p "$WHEEL_DIR"
+    WHEEL_DIR=$(cd "$WHEEL_DIR" && pwd)
+elif ! command -v uv >/dev/null 2>&1; then
+    echo "uv is required to install into the target Python environment." >&2
+    exit 1
+fi
 
 # Auto-detect CUDA version if not provided
 if [ -z "$CUDA_VERSION" ]; then
@@ -88,13 +114,13 @@ INSTALL_DIR=$(mktemp -d)
 trap 'rm -rf "$INSTALL_DIR"' EXIT
 
 # Clone the repository
-git clone --recursive --shallow-submodules "$DEEPGEMM_GIT_REPO" "$INSTALL_DIR/deepgemm"
+git clone --no-checkout "$DEEPGEMM_GIT_REPO" "$INSTALL_DIR/deepgemm"
 pushd "$INSTALL_DIR/deepgemm"
 
 # Checkout the specific reference
-git checkout "$DEEPGEMM_GIT_REF"
+git checkout --detach "$DEEPGEMM_GIT_REF"
 git submodule sync --recursive
-git submodule update --init --recursive
+git submodule update --init --recursive --depth 1
 
 # Clean previous build artifacts
 # (Based on https://github.com/deepseek-ai/DeepGEMM/blob/main/install.sh)
@@ -102,7 +128,7 @@ rm -rf -- build dist *.egg-info 2>/dev/null || true
 
 # Build wheel
 echo "🏗️  Building DeepGEMM wheel..."
-python3 setup.py bdist_wheel
+DG_FORCE_BUILD=1 "$PYTHON_EXECUTABLE" setup.py bdist_wheel
 
 # If --wheel-dir was specified, copy wheels there and exit
 if [ -n "$WHEEL_DIR" ]; then
@@ -113,18 +139,8 @@ if [ -n "$WHEEL_DIR" ]; then
     exit 0
 fi
 
-# Default behaviour: install built wheel
-if command -v uv >/dev/null 2>&1; then
-    echo "Installing DeepGEMM wheel using uv..."
-    if [ -n "$VLLM_DOCKER_BUILD_CONTEXT" ]; then
-        uv pip install --system dist/*.whl
-    else
-        uv pip install dist/*.whl
-    fi
-else
-    echo "Installing DeepGEMM wheel using pip..."
-    python3 -m pip install dist/*.whl
-fi
+# Keep the target environment's torch/CUDA dependencies unchanged.
+uv pip install --python "$PYTHON_EXECUTABLE" --no-deps --reinstall dist/*.whl
 
 popd
 echo "✅ DeepGEMM installation completed successfully"

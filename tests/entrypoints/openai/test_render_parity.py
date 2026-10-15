@@ -466,6 +466,34 @@ class TestReasoningRenderParity:
 
 @pytest.mark.asyncio
 class TestTemplateKwargsRenderParity:
+    async def test_explicit_template_values_override_defaults(
+        self, online_renderer, serving_responses
+    ):
+        """Preserve explicit null and auto values through both API prep paths."""
+        online_renderer.default_chat_template_kwargs = {
+            "reasoning_effort": "medium",
+            "mode": "strict",
+            "enable_thinking": True,
+        }
+        overrides = {
+            "reasoning_effort": None,
+            "mode": "auto",
+            "enable_thinking": False,
+        }
+        chat = await _capture_chat(
+            online_renderer,
+            ChatCompletionRequest(
+                model=_MODEL, messages=_USER, chat_template_kwargs=overrides
+            ),
+        )
+        responses = await _capture_responses(
+            serving_responses,
+            ResponsesRequest(model=_MODEL, input=_USER, chat_template_kwargs=overrides),
+        )
+        for captured in (chat, responses):
+            actual = captured.chat_params.chat_template_kwargs
+            assert {key: actual[key] for key in overrides} == overrides
+
     async def test_passthrough_fields(self, online_renderer, serving_responses):
         """chat_template_kwargs / media_io_kwargs / mm_processor_kwargs parity."""
         await _assert_parity(

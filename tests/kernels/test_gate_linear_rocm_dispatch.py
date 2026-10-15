@@ -109,7 +109,14 @@ def test_rocm_set_out_dtype_respects_bias_guard(monkeypatch):
 
 @pytest.mark.parametrize(
     ("input_size", "output_size"),
-    [(3072, 256), (4096, 8), (4096, 192), (6144, 128), (6144, 256)],
+    [
+        (3072, 256),
+        (4096, 8),
+        (4096, 192),
+        (6144, 128),
+        (6144, 256),
+        (8192, 256),
+    ],
 )
 def test_rocm_gfx950_enables_fp32_router_gemm(
     monkeypatch, input_size: int, output_size: int

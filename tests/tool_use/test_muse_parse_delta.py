@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""parse_delta-level regression tests for the MuseGlimmer parsers.
+"""parse_delta-level regression tests for the Muse parsers.
 
 These drive the UNIFIED parser-engine streaming API the serving layer actually
 uses (``DelegatingParser.parse_delta``), NOT the ``extract_*_streaming`` methods
@@ -11,7 +11,7 @@ request leaked raw harmony framing into ``content``: the phase machine marked
 a prompt with no ``to=self`` wrongly returned True), skipping the reasoning
 phase for the whole generation.
 
-Requires a real MuseGlimmer tokenizer; skipped if the checkpoint is unavailable.
+Requires a real Muse tokenizer; skipped if the checkpoint is unavailable.
 """
 
 import json
@@ -19,10 +19,10 @@ import os
 
 import pytest
 
-CKPT = os.environ.get("MUSE_GLIMMER_CKPT", "")
+CKPT = os.environ.get("MUSE_CKPT", "")
 
 pytestmark = pytest.mark.skipif(
-    not os.path.isdir(CKPT), reason=f"MuseGlimmer checkpoint not found at {CKPT}"
+    not os.path.isdir(CKPT), reason=f"Muse checkpoint not found at {CKPT}"
 )
 
 _FRAMING = [
@@ -56,8 +56,8 @@ def parser_cls():
     from vllm.parser import ParserManager
 
     return ParserManager.get_parser(
-        tool_parser_name="muse_glimmer",
-        reasoning_parser_name="muse_glimmer",
+        tool_parser_name="muse",
+        reasoning_parser_name="muse",
         enable_auto_tools=True,
     )
 

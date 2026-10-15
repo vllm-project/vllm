@@ -16,6 +16,7 @@ ROCM_FP32_ROUTER_GEMM_SUPPORTED_SHAPES = frozenset(
         (4096, 192),
         (6144, 128),
         (6144, 256),
+        (8192, 256),
     }
 )
 
@@ -112,7 +113,7 @@ def _validate_inputs(
         raise ValueError(
             "supported (hidden_size, num_experts) shape pairs are "
             "(3072, 256), (4096, 8), (4096, 192), (6144, 128), "
-            "and (6144, 256)"
+            "(6144, 256), and (8192, 256)"
         )
     if not 0 <= hidden_states.shape[0] <= _MAX_TOKENS:
         raise ValueError(f"num_tokens must be in [0, {_MAX_TOKENS}]")

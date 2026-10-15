@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""ATEM tool-call parser for MuseGlimmer.
+"""ATEM tool-call parser for Muse (Muse Spark and Muse Glimmer).
 
-Faithful port of the MuseGlimmer ``response_schema`` tool-call contract from the
-HuggingFace MuseGlimmer export (``convert_muse_glimmer_weights_to_hf.py``:
-``MUSE_GLIMMER_RESPONSE_SCHEMA``).
+Port of the ``response_schema`` tool-call contract from the HuggingFace Muse
+Glimmer export (``convert_muse_glimmer_weights_to_hf.py``:
+``MUSE_GLIMMER_RESPONSE_SCHEMA``), which Muse Spark shares.
 
-MuseGlimmer emits tool calls in an XML-ish ATEM format inside channel-scoped messages:
+Muse emits tool calls in an XML-ish ATEM format inside channel-scoped messages:
 
     <|start|>assistant to=self<|message|>...reasoning...<|eom|>
     <|start|>assistant to=<tool>.<fn><|message|>
@@ -17,9 +17,11 @@ MuseGlimmer emits tool calls in an XML-ish ATEM format inside channel-scoped mes
         </atem:function_calls><|eom|>            # non-final call
     <|start|>assistant to=user<|message|>...final answer...<|eot|>
 
-Channel scoping is essential: an ``<atem:invoke>`` echoed inside a ``to=self``
-reasoning block or a ``to=user`` final answer must NOT be parsed as a real tool
-call.
+``to=commentary`` messages are user-visible updates between tool calls, and
+like ``to=user`` messages they are content; ``to=developer`` messages are
+dropped. Channel scoping is essential: an ``<atem:invoke>`` echoed inside a
+``to=self`` reasoning block or a ``to=user`` final answer must NOT be parsed as
+a real tool call.
 
 Rather than *subtracting* reasoning/answer spans with regex substitutions (the
 approach the HF ``response_schema`` uses, which is safe only on a complete,
@@ -29,7 +31,7 @@ on a truncated or damaged turn, subtraction can delete a valid tool call
 (an unterminated ``to=self`` block makes the non-greedy strip run to the next
 ``<|eom|>``, which belongs to the tool-call message) whereas selection cannot.
 
-Usage: ``--enable-auto-tool-choice --tool-call-parser muse_glimmer``
+Usage: ``--enable-auto-tool-choice --tool-call-parser muse``
 """
 
 from __future__ import annotations
@@ -70,8 +72,8 @@ logger = init_logger(__name__)
 #   " to=self<|message|>"                           -- first message of a turn
 #                                                      (the prompt already ended
 #                                                      with "<|start|>assistant")
-#   "<|message|>"                                   -- bare recipient (public CoT
-#                                                      / untagged content)
+#   "<|message|>"                                   -- bare recipient (CoT,
+#                                                      treated as reasoning)
 _MSG_HEADER_RE = re.compile(
     r"(?:<\|start\|>\s*assistant)?[^\S\n]*(?:to=(?P<rcpt>[A-Za-z0-9_.\-]+))?<\|message\|>"
 )
@@ -79,7 +81,8 @@ _MSG_END_RE = re.compile(r"<\|eom\|>|<\|eot\|>")
 
 # Recipients whose bodies are NOT tool calls.
 _REASONING_RECIPIENT = "self"
-_USER_RECIPIENT = "user"
+_CONTENT_RECIPIENTS = ("user", "commentary")
+_NON_TOOL_RECIPIENTS = (_REASONING_RECIPIENT, *_CONTENT_RECIPIENTS, "developer")
 
 # Structural markers that must never reach the client. A streamed body is held
 # back by up to len(marker)-1 characters so a marker split across two chunks is
@@ -179,8 +182,8 @@ def _safe_open_body(body: str) -> str:
     return body[: len(body) - partial] if partial else body
 
 
-class MuseGlimmerToolParser(ToolParser):
-    # MuseGlimmer emits ATEM markup around tool-call arguments. The generic
+class MuseToolParser(ToolParser):
+    # Muse emits ATEM markup around tool-call arguments. The generic
     # named/required tool_choice path in vllm/parser/abstract_parser.py assigns
     # the raw model text straight to FunctionCall.arguments, which leaks that
     # framing and yields invalid JSON; the "required" branch then silently
@@ -217,7 +220,7 @@ class MuseGlimmerToolParser(ToolParser):
 
         For required/named ``tool_choice`` the base hook installs a JSON schema
         constraint (ToolParser.adjust_request -> get_json_schema_from_tools).
-        MuseGlimmer emits ATEM XML, so under that constraint it writes JSON *inside*
+        Muse emits ATEM XML, so under that constraint it writes JSON *inside*
         the tool channel -- ``<atem:function_calls>[{"name": ...``  -- with no
         ``<atem:invoke>`` for this parser to find. Skip the base hook so those
         choices decode natively, the same as "auto".
@@ -253,9 +256,7 @@ class MuseGlimmerToolParser(ToolParser):
         bodies = [
             body
             for rcpt, body, _closed in _iter_messages(text)
-            if rcpt is not None
-            and rcpt != _REASONING_RECIPIENT
-            and rcpt != _USER_RECIPIENT
+            if rcpt is not None and rcpt not in _NON_TOOL_RECIPIENTS
         ]
         if bodies:
             return "\n".join(bodies)
@@ -263,7 +264,7 @@ class MuseGlimmerToolParser(ToolParser):
             _FUNCTION_CALLS_OPEN in text or "<atem:invoke" in text
         ):
             logger.warning(
-                "MuseGlimmer: ATEM markup with no channel framing; "
+                "Muse: ATEM markup with no channel framing; "
                 "is skip_special_tokens enabled upstream?"
             )
             return text
@@ -284,10 +285,10 @@ class MuseGlimmerToolParser(ToolParser):
         content_open = False
         reasoning_open = False
         for rcpt, body, closed in _iter_messages(text):
-            if rcpt == _REASONING_RECIPIENT:
+            if rcpt is None or rcpt == _REASONING_RECIPIENT:
                 reasoning_parts.append(body)
                 reasoning_open = not closed
-            elif rcpt is None or rcpt == _USER_RECIPIENT:
+            elif rcpt in _CONTENT_RECIPIENTS:
                 content_parts.append(body)
                 content_open = not closed
         return (
@@ -334,7 +335,7 @@ class MuseGlimmerToolParser(ToolParser):
         if sep and head == tail and head in registered:
             return head
         logger.warning(
-            "MuseGlimmer: emitted tool name %r does not match any registered tool; "
+            "Muse: emitted tool name %r does not match any registered tool; "
             "passing through unchanged.",
             emitted,
         )
@@ -401,7 +402,7 @@ class MuseGlimmerToolParser(ToolParser):
                 # model choosing not to call one, which makes this failure mode
                 # invisible in production.
                 logger.warning(
-                    "MuseGlimmer: tool channel opened but no complete <atem:invoke> "
+                    "Muse: tool channel opened but no complete <atem:invoke> "
                     "parsed (truncated tool call?); returning content only."
                 )
                 return ExtractedToolCallInformation(
@@ -415,7 +416,7 @@ class MuseGlimmerToolParser(ToolParser):
                 content=self._extract_content(model_output),
             )
         except Exception:
-            logger.exception("Error extracting MuseGlimmer ATEM tool calls.")
+            logger.exception("Error extracting Muse ATEM tool calls.")
             return ExtractedToolCallInformation(
                 tools_called=False, tool_calls=[], content=model_output
             )
@@ -444,7 +445,7 @@ class MuseGlimmerToolParser(ToolParser):
         client. Hence content is emitted here, not left to the reasoning parser.
 
         Tool calls are surfaced only when an ``<atem:invoke>`` block becomes
-        complete: the XML is opaque until closed and MuseGlimmer parameters are not
+        complete: the XML is opaque until closed and Muse parameters are not
         incremental JSON, so there is nothing meaningful to stream before then.
         """
         if not previous_text:
@@ -502,5 +503,5 @@ class MuseGlimmerToolParser(ToolParser):
                 message.tool_calls = tool_deltas
             return message
         except Exception:
-            logger.exception("Error extracting MuseGlimmer ATEM streaming tool calls.")
+            logger.exception("Error extracting Muse ATEM streaming tool calls.")
             return None

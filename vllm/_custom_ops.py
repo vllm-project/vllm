@@ -337,6 +337,17 @@ def fused_add_rms_norm(
     torch.ops._C.fused_add_rms_norm(input, residual, weight, epsilon)
 
 
+def muse_spark_mul_tanh_soft_cap(
+    x: torch.Tensor,
+    multiplier: float,
+    soft_cap_temp: float,
+) -> torch.Tensor:
+    """Cast to FP32 and apply ``temp * tanh(x * multiplier / temp)`` in one pass."""
+    out = torch.empty_like(x, dtype=torch.float32)
+    torch.ops._C.muse_spark_mul_tanh_soft_cap(out, x, multiplier, soft_cap_temp)
+    return out
+
+
 def fused_qk_norm_rope(
     qkv: torch.Tensor,
     num_heads_q: int,
@@ -2586,6 +2597,49 @@ def reshape_and_cache_flash(
         kv_cache_dtype,
         k_scale,
         v_scale,
+    )
+
+
+def fused_muse_spark_qknorm_rope_kv_insert(
+    qkv: torch.Tensor,
+    positions: torch.Tensor,
+    num_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+    eps: float,
+    cos_sin_cache: torch.Tensor | None = None,
+    rotary_dim: int = 0,
+    slot_mapping: torch.Tensor | None = None,
+    kv_cache: torch.Tensor | None = None,
+    block_size: int = 0,
+    kv_cache_dtype: str = "auto",
+    k_scale: torch.Tensor | None = None,
+    v_scale: torch.Tensor | None = None,
+    q_fp8_out: torch.Tensor | None = None,
+    q_scale: torch.Tensor | None = None,
+) -> None:
+    """In-place weightless QK RMSNorm + GPT-J RoPE, optionally writing k/v to cache.
+
+    When ``kv_cache`` is given, the caller must skip the attention layer's own KV write.
+    With ``q_fp8_out``, write scaled E4M3 Q there instead of rewriting Q in ``qkv``.
+    """
+    torch.ops._C.fused_muse_spark_qknorm_rope_kv_insert(
+        qkv,
+        positions,
+        num_heads,
+        num_kv_heads,
+        head_dim,
+        eps,
+        cos_sin_cache,
+        rotary_dim,
+        slot_mapping,
+        kv_cache,
+        block_size,
+        kv_cache_dtype,
+        k_scale,
+        v_scale,
+        q_fp8_out,
+        q_scale,
     )
 
 
