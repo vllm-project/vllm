@@ -34,6 +34,17 @@ def test_getattr_without_cache(monkeypatch: pytest.MonkeyPatch):
     assert not hasattr(envs.__getattr__, "cache_info")
 
 
+def test_model_envs_are_registered(monkeypatch: pytest.MonkeyPatch):
+    """Model-local envs must stay visible to env validation, Ray propagation
+    and compile-cache hashing, all of which key off `environment_variables`."""
+    from vllm.models.kimi_k3 import envs as kimi_k3_envs
+
+    assert "VLLM_KIMI_K3_GEMM_AR" in environment_variables
+    monkeypatch.setenv("VLLM_KIMI_K3_GEMM_AR", "0")
+    assert kimi_k3_envs.VLLM_KIMI_K3_GEMM_AR is False
+    assert envs.compile_factors()["VLLM_KIMI_K3_GEMM_AR"] is False
+
+
 def test_nixl_side_channel_host_is_not_compile_factor(
     monkeypatch: pytest.MonkeyPatch,
 ):
