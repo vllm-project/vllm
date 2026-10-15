@@ -103,6 +103,9 @@ class ExpertTokensMetadata:
     expert_num_tokens: torch.Tensor | None
     expert_num_tokens_cpu: torch.Tensor | None
     psum_recv_per_rank: torch.Tensor | None = None
+    # local->global expert-id offset, set when globalization is deferred to the
+    # experts' fused align kernel.
+    rank_expert_offset: int | None = None
 
     @staticmethod
     def make_from_list(
@@ -254,6 +257,15 @@ class FusedMoEPrepareAndFinalize(ABC):
         finalize_async.
         """
         return False
+
+    def supports_dbo(self) -> bool:
+        """Indicates whether or not this class can run under DBO.
+
+        Defaults to supports_async(). A class whose synchronous prepare and
+        finalize do their own DBO compute/comm handoff can return True here
+        while keeping supports_async() False.
+        """
+        return self.supports_async()
 
     def supports_deferred_moe_finalize(self) -> bool:
         """Whether ``finalize`` can be skipped for a deferring consumer.
@@ -569,6 +581,8 @@ class FusedMoEExperts(ABC):
             )
         elif moe_config.has_hash_routing and cls.is_monolithic():
             return False, _make_reason("hash routing")
+        elif moe_config.require_decomposed_backend and cls.is_monolithic():
+            return False, _make_reason("routes adjusted after routing")
         elif not cls._supports_routing_method(
             moe_config.routing_method, weight_key, activation_key
         ):
@@ -1046,6 +1060,18 @@ class FusedMoEKernelModularImpl:
     ):
         self.prepare_finalize = prepare_finalize
         self.fused_experts = fused_experts
+        # Experts that globalize recv_topk_idx themselves let a capable prepare
+        # stage skip its standalone launch.
+        from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
+            HummingIndexedExperts,
+        )
+
+        if (
+            current_platform.is_cuda()
+            and isinstance(fused_experts, HummingIndexedExperts)
+            and hasattr(prepare_finalize, "defer_globalize")
+        ):
+            prepare_finalize.defer_globalize = True
         self.shared_experts: SharedExperts | None = None
         moe_parallel_config = fused_experts.moe_config.moe_parallel_config
         self.moe_parallel_config = moe_parallel_config
@@ -1189,7 +1215,7 @@ class FusedMoEKernelModularImpl:
             # We shouldn't be running an a2a kernel that doesn't
             # support async prepare/finalize
             # TODO(lucas): enable in follow-up
-            assert not dbo_enabled()
+            assert not dbo_enabled() or self.prepare_finalize.supports_dbo()
 
             (
                 a1q,
@@ -1377,7 +1403,7 @@ class FusedMoEKernelModularImpl:
 
         """
         if not self.prepare_finalize.supports_async():
-            assert not dbo_enabled()
+            assert not dbo_enabled() or self.prepare_finalize.supports_dbo()
 
             self.prepare_finalize.finalize(
                 output,
