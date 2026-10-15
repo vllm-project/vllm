@@ -5,6 +5,7 @@ pytest
 tensorizer==2.10.1
 pytest-forked
 pytest-asyncio
+pytest-mock
 pytest-rerunfailures
 pytest-shard
 pytest-timeout
@@ -42,9 +43,6 @@ schemathesis>=4.0.0 # Required for openai schema test
 bitsandbytes==0.50.0
 buildkite-test-collector==0.1.9
 tilelang==0.1.10
-
-genai_perf>=0.0.8
-tritonclient>=2.51.0
 
 # The version of gRPC libraries should be consistent with each other
 grpcio==1.78.0
