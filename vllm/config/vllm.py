@@ -2300,9 +2300,6 @@ class VllmConfig:
         worker is configured to handle.
         """
         if self.speculative_config is not None:
-            scheduled_token_delta = (
-                self.speculative_config.max_num_new_slots_for_drafting
-            )
             max_num_batched_tokens = self.scheduler_config.max_num_batched_tokens
             if self.scheduler_config.max_num_scheduled_tokens is None:
                 self.scheduler_config.max_num_scheduled_tokens = max_num_batched_tokens
@@ -2326,12 +2323,34 @@ class VllmConfig:
                     " num_speculative_tokens.",
                 )
 
-            if max_num_batched_tokens <= scheduled_token_delta:
+            # num_lookahead_tokens is at least every method's per-request draft
+            # slots, and covers the DFlash/DSpark draft pass's query rows.
+            if max_num_batched_tokens <= self.num_lookahead_tokens:
                 raise ValueError(
                     "VllmConfig does not have enough slots to schedule a token and"
                     " support the speculative decoding settings."
-                    f" Got {max_num_batched_tokens=} and {scheduled_token_delta=}."
+                    f" Got {max_num_batched_tokens=} and"
+                    f" num_lookahead_tokens={self.num_lookahead_tokens}."
                 )
+            spec = self.speculative_config
+            if spec.use_dflash() or spec.use_dspark():
+                max_num_active_seqs = (
+                    self.scheduler_config.max_num_active_seqs
+                    or self.scheduler_config.max_num_seqs
+                )
+                max_draft_seqs = max_num_batched_tokens // self.num_lookahead_tokens
+                if max_draft_seqs < max_num_active_seqs:
+                    logger.warning_once(
+                        "The %s draft pass needs %d query tokens per request within "
+                        "max_num_batched_tokens=%d. Overriding max_num_active_seqs "
+                        "from %d to %d.",
+                        spec.method,
+                        self.num_lookahead_tokens,
+                        max_num_batched_tokens,
+                        max_num_active_seqs,
+                        max_draft_seqs,
+                    )
+                    self.scheduler_config.max_num_active_seqs = max_draft_seqs
 
     def _set_cudagraph_sizes(self):
         """VLLM defines the default candidate list of batch sizes for CUDA graph

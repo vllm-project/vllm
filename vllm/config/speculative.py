@@ -1853,19 +1853,21 @@ class SpeculativeConfig:
         ==================== ============= ======== ================
         EAGLE3               eagle3        No       0
         P-EAGLE              eagle3        Yes      K - 1
-        DFlash               dflash        Yes      K
-        DSpark               dspark        Yes      K - 1
+        DFlash               dflash        Yes      0
+        DSpark               dspark        Yes      0
         MTP                  mtp           No       0
         N-gram               ngram         No       0
         Draft model          draft_model   No       1
         PARD                 draft_model   Yes      K
         ==================== ============= ======== ================
+
+        DFlash and DSpark draft in a separate query pass rather than adding
+        rows to the target batch.
         """
         num_draft_tokens = self.num_speculative_tokens
 
-        if self.use_dflash():
-            # DFlash uses one bonus query followed by K mask queries.
-            return num_draft_tokens
+        if self.use_dflash() or self.use_dspark():
+            return 0
 
         if self.parallel_drafting:
             if self.uses_draft_model():
