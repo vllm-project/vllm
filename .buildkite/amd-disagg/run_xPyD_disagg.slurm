@@ -62,7 +62,7 @@ CONTAINER_SCRIPTS="${CONTAINER_SCRIPTS:-/vllm-workspace/.buildkite/amd-disagg}"
 CLUSTER_ENV_IN="${CLUSTER_ENV_IN:-${CONTAINER_SCRIPTS}/cluster.sh}"
 
 # Overlay the staged vLLM fixes onto the image's copies: deepseek_v32/amd/model.py
-# carries the GLM-5.2 wide-EP fix.
+# carries the GLM-5.2 MoE all-reduce fix for TP and wide-EP.
 # VLLM_DIST_PACKAGES must match the image. If it doesn't, the mounts land on
 # paths nothing imports and the run silently uses the image's copies.
 VLLM_DIST_PACKAGES="${VLLM_DIST_PACKAGES:-/usr/local/lib/python3.12/dist-packages}"
