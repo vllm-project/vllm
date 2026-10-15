@@ -1197,10 +1197,10 @@ class SamplingParams(
         if not model_config.is_diffusion:
             return
 
-        # Nemotron supports ordinary per-request temperatures; other
-        # diffusion models retain their engine-level schedule.
-        per_request_temperature = (
-            "NemotronLabsDiffusionModel" in model_config.architectures
+        # Some diffusion models (e.g. Nemotron) accept per-request
+        # temperatures; others keep their engine-level schedule.
+        per_request_temperature = getattr(
+            model_config.hf_config, "diffusion_per_request_temperature", False
         )
         if (
             (self.temperature != 1.0 and not per_request_temperature)
