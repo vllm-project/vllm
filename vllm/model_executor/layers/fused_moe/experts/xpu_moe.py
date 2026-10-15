@@ -53,7 +53,7 @@ def prepare_fp8_moe_layer_for_xpu(
     )
 
 
-class XPUExperts(mk.FusedMoEExpertsModular):
+class XPUExpertsBase(mk.FusedMoEExpertsModular):
     def __init__(
         self,
         moe_config: FusedMoEConfig,
@@ -184,16 +184,29 @@ class XPUExperts(mk.FusedMoEExpertsModular):
             # expert not owned by this rank so they are skipped.
             sentinel = global_num_experts - 1 if self.moe_config.ep_rank == 0 else 0
             topk_ids = torch.where(topk_ids < 0, sentinel, topk_ids)
-        if isinstance(self, _XPUExpertsWithLoRA) and self._lora_context is not None:
-            if apply_router_weight_on_input or a1q_scale is not None:
-                raise NotImplementedError(
-                    "XPU MoE LoRA requires unquantized inputs "
-                    "and output routing weights"
-                )
-            self._apply_with_lora(
-                output, hidden_states, topk_weights, topk_ids, workspace13, workspace2
-            )
-            return
+        self._apply(
+            output,
+            hidden_states,
+            topk_weights,
+            topk_ids,
+            a1q_scale,
+            workspace13,
+            workspace2,
+            apply_router_weight_on_input,
+        )
+
+    def _apply(
+        self,
+        output: torch.Tensor,
+        hidden_states: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        a1q_scale: torch.Tensor | None,
+        workspace13: torch.Tensor,
+        workspace2: torch.Tensor,
+        apply_router_weight_on_input: bool,
+    ) -> None:
+        assert self.fused_moe_impl is not None
         self.fused_moe_impl.apply(
             output=output,
             hidden_states=hidden_states,
@@ -203,7 +216,39 @@ class XPUExperts(mk.FusedMoEExpertsModular):
         )
 
 
-class _XPUExpertsWithLoRA(LoRAExpertsMixin, XPUExperts):
+class XPUExperts(LoRAExpertsMixin, XPUExpertsBase):
+    def _apply(
+        self,
+        output: torch.Tensor,
+        hidden_states: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        a1q_scale: torch.Tensor | None,
+        workspace13: torch.Tensor,
+        workspace2: torch.Tensor,
+        apply_router_weight_on_input: bool,
+    ) -> None:
+        if self._lora_context is not None:
+            if apply_router_weight_on_input or a1q_scale is not None:
+                raise NotImplementedError(
+                    "XPU MoE LoRA requires unquantized inputs "
+                    "and output routing weights"
+                )
+            self._apply_with_lora(
+                output, hidden_states, topk_weights, topk_ids, workspace13, workspace2
+            )
+            return
+        super()._apply(
+            output,
+            hidden_states,
+            topk_weights,
+            topk_ids,
+            a1q_scale,
+            workspace13,
+            workspace2,
+            apply_router_weight_on_input,
+        )
+
     def workspace_shapes(
         self,
         M: int,
@@ -367,7 +412,7 @@ class _XPUExpertsWithLoRA(LoRAExpertsMixin, XPUExperts):
         output.copy_(combined.sum(dim=1, dtype=torch.float32).add_(output))
 
 
-class XPUExpertsFp8(_XPUExpertsWithLoRA):
+class XPUExpertsFp8(XPUExperts):
     def __init__(
         self,
         moe_config: FusedMoEConfig,
@@ -426,7 +471,7 @@ class XPUExpertsMxFp8(XPUExpertsFp8):
         return (weight_key, activation_key) in SUPPORTED_W_A
 
 
-class XPUExpertsBlockFp8(_XPUExpertsWithLoRA):
+class XPUExpertsBlockFp8(XPUExperts):
     def __init__(
         self,
         moe_config: FusedMoEConfig,
@@ -452,7 +497,7 @@ class XPUExpertsBlockFp8(_XPUExpertsWithLoRA):
         return (weight_key, activation_key) in SUPPORTED_W_A
 
 
-class XPUExpertsWNA16(_XPUExpertsWithLoRA):
+class XPUExpertsWNA16(XPUExperts):
     """W4A16 INT4-symmetric MoE backed by `xpu_fused_moe(is_int4=True)`.
 
     Weight layout when `is_int4=True` (per `xpu_fused_moe` docstring):
@@ -490,7 +535,7 @@ class XPUExpertsWNA16(_XPUExpertsWithLoRA):
         )
 
 
-class XPUExpertsMxFp4(XPUExperts):
+class XPUExpertsMxFp4(XPUExpertsBase):
     def __init__(
         self,
         moe_config: FusedMoEConfig,

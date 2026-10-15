@@ -1600,3 +1600,28 @@ def test_xpu_quantized_moe_lora_reference(
     if graph is not None:
         graph.replay()
         torch.testing.assert_close(output, native, atol=0, rtol=0)
+
+
+@pytest.mark.skipif(not current_platform.is_xpu(), reason="XPU native MoE")
+def test_xpu_moe_lora_support_boundaries():
+    """The LoRA mixin must not enable unsupported native quantization paths."""
+    from vllm.model_executor.layers.fused_moe.experts.xpu_moe import (
+        XPUExpertsBlockFp8,
+        XPUExpertsFp8,
+        XPUExpertsMxFp4,
+        XPUExpertsMxFp8,
+        XPUExpertsWNA16,
+    )
+    from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
+        UnquantizedMoeBackend,
+        backend_to_kernel_cls,
+    )
+
+    for cls in (XPUExpertsFp8, XPUExpertsBlockFp8, XPUExpertsWNA16):
+        assert cls.supports_lora()
+    for cls in (
+        *backend_to_kernel_cls(UnquantizedMoeBackend.XPU),
+        XPUExpertsMxFp4,
+        XPUExpertsMxFp8,
+    ):
+        assert not cls.supports_lora()
