@@ -103,7 +103,6 @@ def _merge_logsumexp_and_gather_kernel(
     topk_ids_ptr,
     topk_ids_stride,
     topk,
-    vocab_size,
     partial_max_ptr,
     partial_sum_ptr,
     NUM_SPLITS: tl.constexpr,
@@ -236,6 +235,7 @@ def compute_token_logprobs(
             TOPK_BLOCK_SIZE=topk_block_size,
         )
     return logprobs
+
 
 def compute_topk_scores(
     logits: torch.Tensor,
