@@ -30,11 +30,12 @@ from vllm.platforms import current_platform
 from .eplb_utils import distributed_run, set_env_vars_and_device
 
 
-def test_set_eplb_state_registers_e8m0_as_uint8_view():
-    """NCCL rejects E8M0, so EPLB must see the scale bytes as uint8 views
+@pytest.mark.parametrize("dtype", [torch.float8_e8m0fnu, torch.float4_e2m1fn_x2])
+def test_set_eplb_state_registers_byte_dtypes_as_uint8_views(dtype):
+    """NCCL lacks these dtypes, so EPLB must see their bytes as uint8 views
     sharing storage with the parameter the kernel reads."""
     weight = torch.zeros(2, 8, dtype=torch.int32)
-    scale = torch.zeros(2, 4, dtype=torch.uint8).view(torch.float8_e8m0fnu)
+    scale = torch.zeros(2, 4, dtype=torch.uint8).view(dtype)
     layer = SimpleNamespace(
         get_expert_weights=lambda: [weight, scale],
         set_eplb_state=lambda **_: None,

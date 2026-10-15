@@ -1067,11 +1067,11 @@ class MixtureOfExperts(Protocol):
         """
         self.expert_weights = []
         for layer_idx, layer in enumerate(self.moe_layers):
-            # Register the expert weights. NCCL has no E8M0 dtype, so
-            # E8M0 scales are moved as same-storage uint8 views.
+            # Register the expert weights. EPLB only moves bytes, so 1-byte
+            # dtypes NCCL lacks (e.g. E8M0, FP4x2) go as uint8 views.
             self.expert_weights.append(
                 [
-                    w.view(torch.uint8) if w.dtype == torch.float8_e8m0fnu else w
+                    w.view(torch.uint8) if w.element_size() == 1 else w
                     for w in layer.get_expert_weights()
                 ]
             )
