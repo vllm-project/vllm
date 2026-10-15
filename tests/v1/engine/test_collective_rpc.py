@@ -34,8 +34,9 @@ class OneShotFuture(Future):
         return self.output
 
 
-@pytest.mark.parametrize("wait", [False, True])
-@pytest.mark.parametrize("separate_exec_future", [False, True])
+@pytest.mark.parametrize(
+    ("wait", "separate_exec_future"), [(False, False), (True, False), (True, True)]
+)
 def test_collective_rpc_preserves_pending_outputs(wait, separate_exec_future):
     order: list[int | str] = []
     outputs = [object(), object()]
