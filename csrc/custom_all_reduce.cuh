@@ -95,7 +95,7 @@ class CustomAllreduce {
  public:
   int rank_;
   int world_size_;
-  // Full NVLink or xGMI connection between GPUs.
+  // Full NVLink, xGMI, or PCIe peer-to-peer (RDNA4) connection between GPUs.
   bool fully_connected_;
   // Use a release/acquire start barrier in the all-reduce kernels, making the
   // producer's writes to registered inputs visible to peers over

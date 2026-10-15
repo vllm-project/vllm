@@ -12,6 +12,7 @@ import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.distributed.device_communicators.all_reduce_utils import (
     CUSTOM_ALL_REDUCE_MAX_SIZES,
+    ROCM_RDNA4_PCIE_CUSTOM_ALL_REDUCE_MAX_SIZES,
     gpu_p2p_access_check,
 )
 from vllm.distributed.parallel_state import in_the_same_node_as
@@ -120,6 +121,8 @@ from vllm.distributed.utils import is_weak_contiguous  # noqa: E402
 class CustomAllreduce:
     _SUPPORTED_WORLD_SIZES = [2, 4, 6, 8, 16]
     batch_invariant = False
+    # If set, messages at least this large use the fallback (below max_size).
+    _dispatch_max_size: int | None = None
     _DEFAULT_ALL_GATHER_MAX_SIZE = 2 * 1024 * 1024
     _DEFAULT_MNNVL_ALL_GATHER_MAX_SIZES = {
         2: 8 * 1024 * 1024,
@@ -274,6 +277,40 @@ class CustomAllreduce:
             physical_device_ids = [t.item() for t in gather_list]
             assert current_platform.is_cuda_alike()
             fully_connected = current_platform.is_fully_connected(physical_device_ids)
+        rdna4 = False
+        if current_platform.is_rocm():
+            from vllm.platforms.rocm import on_rdna4
+
+            rdna4 = on_rdna4()
+        if rdna4:
+            # PCIe peer-to-peer is not cache-coherent: without a release barrier
+            # peers can read a registered input before its producer's writes
+            # leave L2. Over PCIe, one-shot only beats RCCL for small messages.
+            if not fully_connected:
+                logger.warning(
+                    "Custom allreduce is disabled because these RDNA4 GPUs are "
+                    "not all connected by PCIe peer-to-peer. To silence this "
+                    "warning, specify disable_custom_all_reduce=True explicitly."
+                )
+                return
+            if world_size not in ROCM_RDNA4_PCIE_CUSTOM_ALL_REDUCE_MAX_SIZES:
+                logger.info_once(
+                    "Custom allreduce is disabled on RDNA4 for world size %d: "
+                    "no PCIe size limit is defined for it.",
+                    world_size,
+                )
+                return
+            self._release_start = True
+            # A dispatch limit only: max_size also sizes the IPC buffers and the
+            # batch-invariant chunks, which keep their defaults.
+            self._dispatch_max_size = min(
+                ROCM_RDNA4_PCIE_CUSTOM_ALL_REDUCE_MAX_SIZES[world_size], max_size
+            )
+            logger.info_once(
+                "Custom allreduce on RDNA4 over PCIe peer-to-peer: release start "
+                "barrier, messages smaller than %d bytes.",
+                self._dispatch_max_size,
+            )
         if same_node and world_size > 2 and not fully_connected:
             logger.warning(
                 "Custom allreduce is disabled because it's not supported on"
@@ -284,10 +321,10 @@ class CustomAllreduce:
         # test P2P capability, this checks software/cudaruntime support
         # this is expensive to compute at the first time
         # then we cache the result
-        # On AMD GPU, p2p is always enabled between XGMI connected GPUs
+        # On MI300, p2p is always enabled between XGMI connected GPUs
         if (
             same_node
-            and not current_platform.is_rocm()
+            and (not current_platform.is_rocm() or rdna4)
             and not _can_p2p(rank, world_size)
         ):
             logger.warning(
@@ -521,7 +558,8 @@ class CustomAllreduce:
         # for 4 or more non NVLink-capable GPUs, custom allreduce provides
         # little performance improvement over NCCL.
         if self.world_size == 2 or self.fully_connected:
-            return self.batch_invariant or inp_size < self.max_size
+            max_size = self._dispatch_max_size or self.max_size
+            return self.batch_invariant or inp_size < max_size
         return False
 
     def all_reduce(

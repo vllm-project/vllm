@@ -10,6 +10,9 @@ import torch.distributed as dist
 
 from vllm.distributed.communication_op import tensor_model_parallel_all_reduce  # noqa
 from vllm.distributed.device_communicators import custom_all_reduce as car
+from vllm.distributed.device_communicators.all_reduce_utils import (
+    ROCM_RDNA4_PCIE_CUSTOM_ALL_REDUCE_MAX_SIZES,
+)
 from vllm.distributed.parallel_state import get_tp_group, graph_capture
 from vllm.platforms import current_platform
 
@@ -219,6 +222,69 @@ def test_custom_allreduce_size_gate_ignored_under_batch_invariance(
 
     oversized = torch.empty(1024, dtype=torch.float16)
     assert communicator.should_custom_ar(oversized) is batch_invariant
+
+
+@pytest.mark.parametrize("batch_invariant", [False, True])
+def test_custom_allreduce_dispatch_max_size(batch_invariant: bool) -> None:
+    """Messages at or above the dispatch limit fall back, unless batch
+    invariance pins the backend."""
+    communicator = car.CustomAllreduce.__new__(car.CustomAllreduce)
+    communicator.disabled = False
+    communicator.world_size = 4
+    communicator.fully_connected = True
+    communicator.max_size = 8192 * 1024
+    communicator._dispatch_max_size = 1024
+    communicator.batch_invariant = batch_invariant
+    communicator._ptr = 0
+
+    assert communicator.should_custom_ar(torch.empty(256, dtype=torch.float16))
+    at_limit = torch.empty(512, dtype=torch.float16)
+    assert communicator.should_custom_ar(at_limit) is batch_invariant
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm platform logic")
+@pytest.mark.parametrize(
+    ("xgmi_pairs", "no_p2p_pairs", "expected"),
+    [
+        pytest.param(set(), set(), True, id="pcie_p2p_everywhere"),
+        pytest.param(set(), {(0, 2)}, False, id="pair_without_p2p"),
+        pytest.param({(0, 2)}, set(), False, id="pair_not_pcie"),
+    ],
+)
+def test_rocm_pcie_p2p_detection(monkeypatch, xgmi_pairs, no_p2p_pairs, expected):
+    import amdsmi
+
+    from vllm.platforms import rocm
+
+    def link_type(handle, peer_handle):
+        if (handle, peer_handle) in xgmi_pairs:
+            return {"hops": 1, "type": amdsmi.AmdSmiLinkType.AMDSMI_LINK_TYPE_XGMI}
+        return {"hops": 2, "type": amdsmi.AmdSmiLinkType.AMDSMI_LINK_TYPE_PCIE}
+
+    monkeypatch.setattr(rocm, "amdsmi_topo_get_link_type", link_type)
+    monkeypatch.setattr(
+        amdsmi,
+        "amdsmi_is_P2P_accessible",
+        lambda handle, peer_handle: (handle, peer_handle) not in no_p2p_pairs,
+    )
+    assert rocm.RocmPlatform._is_pcie_p2p_connected([0, 1, 2]) is expected
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm platform logic")
+@pytest.mark.parametrize("rdna4", [False, True], ids=["not_rdna4", "rdna4"])
+def test_rocm_is_fully_connected_over_pcie_only_on_rdna4(monkeypatch, rdna4):
+    from vllm.platforms import rocm
+
+    monkeypatch.setattr(rocm, "_ON_RDNA4", rdna4)
+    monkeypatch.setattr(rocm, "amdsmi_get_processor_handles", lambda: [0, 1])
+    monkeypatch.setattr(
+        rocm.RocmPlatform, "_is_pcie_p2p_connected", staticmethod(lambda h: True)
+    )
+    # A PCIe link: not 1-hop xgmi.
+    monkeypatch.setattr(
+        rocm, "amdsmi_topo_get_link_type", lambda h, p: {"hops": 2, "type": 1}
+    )
+    assert rocm.RocmPlatform.is_fully_connected([0, 1]) is rdna4
 
 
 @pytest.mark.parametrize("batch_invariant", [False, True])
@@ -740,6 +806,16 @@ def _producer_in_graph_allreduce(
         if fa is None or fa.disabled:
             # Not used here, e.g. more than two GPUs without full NVLink.
             return
+        if release_start is None and current_platform.is_rocm():
+            from vllm.platforms.rocm import on_rdna4
+
+            if on_rdna4():
+                # Peers read registered inputs over non-coherent PCIe.
+                assert fa._release_start
+                assert (
+                    fa._dispatch_max_size
+                    <= ROCM_RDNA4_PCIE_CUSTOM_ALL_REDUCE_MAX_SIZES[tp_size]
+                )
         try:
             num_bufs = 16
             gen = torch.Generator(device=device).manual_seed(rank)
@@ -812,7 +888,7 @@ def producer_in_graph_allreduce_release_2stage(
     )
 
 
-@pytest.mark.parametrize("tp_size", [2, 4])
+@pytest.mark.parametrize("tp_size", [2, 4, 8])
 @pytest.mark.parametrize(
     "test_target",
     [
