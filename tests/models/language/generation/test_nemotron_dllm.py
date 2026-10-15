@@ -2,8 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Reveal-rule unit tests and GPU model parity/generation checks.
 
-Set NEMOTRON_DLM_MODEL_PATH to a local Nemotron Labs Diffusion 3B or 8B
-checkpoint to run weight-dependent tests. Synthetic reveal rules run eagerly on CPU; GPU
+Weight-dependent tests load nvidia/Nemotron-Labs-Diffusion-3B from the Hub by
+default; set NEMOTRON_DLM_MODEL_PATH to another Hub ID or a local 3B or 8B
+checkpoint directory. Synthetic reveal rules run eagerly on CPU; GPU
 model tests exercise the compiled sampler with the checkpoint's vocabulary.
 """
 
@@ -24,7 +25,10 @@ MAX_MODEL_LEN = 2048
 
 
 def _weights_available() -> bool:
-    return os.path.isfile(os.path.join(MODEL_PATH, "config.json"))
+    # A Hub ID is downloaded on first use; a local path must be a checkpoint.
+    if os.path.isdir(MODEL_PATH) or MODEL_PATH.startswith(("/", ".", "~")):
+        return os.path.isfile(os.path.join(MODEL_PATH, "config.json"))
+    return True
 
 
 requires_weights = pytest.mark.skipif(
@@ -151,11 +155,21 @@ def test_ar_mode_diffusion_detection(architecture, ar_mode, expected):
 
     from vllm.config import ModelConfig
     from vllm.config.model_arch import ModelArchitectureConfig
+    from vllm.transformers_utils.configs import NemotronLabsDiffusionConfig
 
-    # A canvas remains in the checkpoint config even when serving AR. The
-    # scheduler must ignore it only for the Nemotron AR selectors.
+    # The Nemotron config drops its canvas for the AR selectors, so the
+    # generic canvas_length check in ModelConfig.is_diffusion applies.
+    # Other models keep a canvas regardless of an unrelated ar_mode flag.
+    if architecture.startswith("NemotronLabsDiffusion"):
+        hf_config = NemotronLabsDiffusionConfig(
+            block_size=32, architectures=[architecture]
+        )
+        hf_config.ar_mode = ar_mode
+        assert (hf_config.canvas_length is not None) is expected
+    else:
+        hf_config = SimpleNamespace(canvas_length=32, ar_mode=ar_mode)
     config = object.__new__(ModelConfig)
-    config.hf_config = SimpleNamespace(canvas_length=32, ar_mode=ar_mode)
+    config.hf_config = hf_config
     config.model_arch_config = cast(
         ModelArchitectureConfig, SimpleNamespace(architectures=[architecture])
     )
