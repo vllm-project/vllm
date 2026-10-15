@@ -211,7 +211,16 @@ class TritonFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         B: torch.Tensor,
         As: torch.Tensor,
         Bs: torch.Tensor,
-        out_dtype: torch.dtype | None = None,
+    ) -> torch.Tensor:
+        return self.apply_block_scaled_mm_out(A, B, As, Bs, self.config.out_dtype)
+
+    def apply_block_scaled_mm_out(
+        self,
+        A: torch.Tensor,
+        B: torch.Tensor,
+        As: torch.Tensor,
+        Bs: torch.Tensor,
+        out_dtype: torch.dtype,
     ) -> torch.Tensor:
         return torch.ops.vllm.w8a8_triton_block_scaled_mm_func(
             A,
@@ -219,7 +228,7 @@ class TritonFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             As,
             Bs,
             list(self.weight_group_shape),
-            out_dtype or self.config.out_dtype,
+            out_dtype,
         )
 
 
