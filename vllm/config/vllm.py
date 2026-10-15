@@ -2938,12 +2938,7 @@ class VllmConfig:
             unsupported.append("pipeline parallelism with external_launcher")
 
         if speculative_config is not None:
-            if speculative_config.method in (
-                "suffix",
-                "medusa",
-                "mlp_speculator",
-                "custom_class",
-            ):
+            if speculative_config.method in ("suffix", "custom_class"):
                 unsupported.append(f"speculative method '{speculative_config.method}'")
 
             # V2 EagleSpeculator does not support parallel_drafting (for P-Eagle).
