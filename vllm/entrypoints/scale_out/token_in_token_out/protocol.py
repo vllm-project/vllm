@@ -394,7 +394,9 @@ class GenerateLogProbs(BaseModel):
     """
 
     content: list[GenerateLogProbsContent] | None = None
-    sampled: list[float] | None = None
+    sampled: list[float] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     """The sampled token's logprob per generated position (per chunk when
     streaming), set only for ``sampling_params.sampled_logprobs_only`` requests
     and omitted from the response otherwise. Clamped to ``>= -9999.0`` like

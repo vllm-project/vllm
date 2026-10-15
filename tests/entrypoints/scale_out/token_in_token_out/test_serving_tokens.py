@@ -1104,9 +1104,10 @@ async def test_abort_requests_is_served_without_tokens_only(client):
     assert resp.status_code == 404
 
 
-def test_stream_chunks_carry_sampled_only_when_requested():
-    """Without sampled_logprobs_only a chunk must not grow a "sampled": null
-    key that the Rust frontend does not emit."""
+def test_sampled_is_omitted_unless_set():
+    """``logprobs.sampled`` only appears when it is set, so other responses and
+    stream chunks keep the existing schema (the Rust frontend emits no
+    "sampled": null either)."""
     import json
 
     from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
@@ -1114,9 +1115,6 @@ def test_stream_chunks_carry_sampled_only_when_requested():
         GenerateLogProbsContent,
         GenerateTokensStreamChoice,
         GenerateTokensStreamResponse,
-    )
-    from vllm.entrypoints.scale_out.token_in_token_out.serving import (
-        _stream_exclude,
     )
 
     chunk = GenerateTokensStreamResponse(
@@ -1132,12 +1130,11 @@ def test_stream_chunks_carry_sampled_only_when_requested():
             GenerateTokensStreamChoice(index=1, token_ids=[8], logprobs=None),
         ],
     )
-    data = json.loads(chunk.model_dump_json(exclude=_stream_exclude(chunk, False)))
-    assert "sampled" not in data["choices"][0]["logprobs"]
-    assert data["choices"][0]["logprobs"]["content"][0]["token_id"] == 7
-    assert data["choices"][1]["logprobs"] is None
-    assert "prompt_token_ids" not in data
+    for data in (json.loads(chunk.model_dump_json()), chunk.model_dump()):
+        assert "sampled" not in data["choices"][0]["logprobs"]
+        assert data["choices"][0]["logprobs"]["content"][0]["token_id"] == 7
+        assert data["choices"][1]["logprobs"] is None
 
     chunk.choices[0].logprobs = GenerateLogProbs(sampled=[-0.1])
-    data = json.loads(chunk.model_dump_json(exclude=_stream_exclude(chunk, True)))
-    assert data["choices"][0]["logprobs"] == {"content": None, "sampled": [-0.1]}
+    for data in (json.loads(chunk.model_dump_json()), chunk.model_dump()):
+        assert data["choices"][0]["logprobs"] == {"content": None, "sampled": [-0.1]}

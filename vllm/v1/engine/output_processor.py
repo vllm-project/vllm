@@ -853,6 +853,8 @@ class OutputProcessor:
         del output.new_token_ids[num_kept:]
         if output.new_logprobs is not None:
             output.new_logprobs = output.new_logprobs.slice_request(0, num_kept)
+        if output.new_sampled_logprobs is not None:
+            del output.new_sampled_logprobs[num_kept:]
         if output.new_sampling_mask is not None:
             output.new_sampling_mask = output.new_sampling_mask.slice_request(
                 0, num_kept

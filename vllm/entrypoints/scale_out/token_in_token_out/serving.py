@@ -85,23 +85,6 @@ def _clamp_logprob(logprob: float) -> float:
     return -9999.0 if math.isnan(logprob) else max(logprob, -9999.0)
 
 
-def _stream_exclude(
-    chunk: GenerateTokensStreamResponse | GenerateTextStreamResponse,
-    sampled_logprobs_only: bool,
-) -> dict[str, Any]:
-    """Fields to leave out of a token-bearing stream chunk: the ones absent from
-    it, and ``logprobs.sampled`` unless the request set
-    ``sampling_params.sampled_logprobs_only``."""
-    exclude: dict[str, Any] = {
-        name: True
-        for name in ("prompt_token_ids", "mm_placeholders", "metrics")
-        if getattr(chunk, name) is None
-    }
-    if not sampled_logprobs_only:
-        exclude["choices"] = {"__all__": {"logprobs": {"sampled"}}}
-    return exclude
-
-
 def _sampled_logprobs(values: list[float] | None) -> GenerateLogProbs:
     """``GenerateLogProbs`` for a ``sampled_logprobs_only`` request: only
     ``sampled`` is set, clamped like ``content`` (``-inf`` and NaN become
@@ -691,12 +674,13 @@ class ServingTokens(GenerateBaseServing):
                             total_tokens=(num_prompt_tokens + num_generated_tokens[i]),
                         )
 
-                    data = chunk.model_dump_json(
-                        exclude=_stream_exclude(
-                            chunk, sampling_params.sampled_logprobs_only
-                        )
-                    )
-                    yield f"data: {data}\n\n"
+                    # Omit fields that are absent from token-bearing chunks.
+                    exclude = {
+                        name
+                        for name in ("prompt_token_ids", "mm_placeholders", "metrics")
+                        if getattr(chunk, name) is None
+                    }
+                    yield f"data: {chunk.model_dump_json(exclude=exclude)}\n\n"
 
             total_completion_tokens = sum(num_generated_tokens)
             final_usage_info = UsageInfo(
