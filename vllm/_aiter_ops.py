@@ -526,6 +526,46 @@ def _rocm_aiter_topk_softmax_impl(
     )
 
 
+def _rocm_aiter_topk_gating_impl(
+    topk_weights: torch.Tensor,
+    topk_indices: torch.Tensor,
+    token_expert_indices: torch.Tensor,
+    gating_output: torch.Tensor,
+    renormalize: bool,
+    num_shared_experts: int = 0,
+    shared_expert_scoring_func: str = "",
+) -> None:
+    # Callers pick this op only for launches AITER's topk_gating supports (see
+    # dispatch_topk_softmax_func); everything else goes to topk_softmax.
+    from aiter.ops.topk import topk_gating
+
+    # AITER renormalizes the selected softmax mass inside this launch,
+    # preserving vLLM's `renormalize=True` semantics without a second
+    # pointwise kernel, and sigmoids the trailing shared-expert columns.
+    topk_gating(
+        topk_weights,
+        topk_indices,
+        gating_output,
+        correction_bias=None,
+        need_renorm=renormalize,
+        routed_scaling_factor=1.0,
+        score_func="softmax",
+        num_shared_experts=num_shared_experts,
+    )
+
+
+def _rocm_aiter_topk_gating_fake(
+    topk_weights: torch.Tensor,
+    topk_indices: torch.Tensor,
+    token_expert_indices: torch.Tensor,
+    gating_output: torch.Tensor,
+    renormalize: bool,
+    num_shared_experts: int = 0,
+    shared_expert_scoring_func: str = "",
+) -> None:
+    pass
+
+
 def _rocm_aiter_topk_sigmoid_impl(
     topk_weights: torch.Tensor,
     topk_indices: torch.Tensor,
@@ -641,6 +681,36 @@ def _check_aiter_mla_fp8_support() -> bool:
             # TypeError: mla_decode_fwd is not a callable
             _AITER_MLA_SUPPORTS_FP8 = False
     return _AITER_MLA_SUPPORTS_FP8
+
+
+def _rocm_aiter_gather_kv_b_proj_impl(
+    kv_cache: torch.Tensor,
+    kv_scale: torch.Tensor,
+    kv_indptr: torch.Tensor,
+    kv_indices: torch.Tensor,
+    cu_seq_lens: torch.Tensor,
+    weight: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+) -> None:
+    from aiter.ops.triton.gather_kv_b_proj import gather_kv_b_proj
+
+    gather_kv_b_proj(
+        kv_cache, kv_scale, kv_indptr, kv_indices, cu_seq_lens, weight, None, k, v
+    )
+
+
+def _rocm_aiter_gather_kv_b_proj_fake(
+    kv_cache: torch.Tensor,
+    kv_scale: torch.Tensor,
+    kv_indptr: torch.Tensor,
+    kv_indices: torch.Tensor,
+    cu_seq_lens: torch.Tensor,
+    weight: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+) -> None:
+    pass
 
 
 def _rocm_aiter_mla_decode_fwd_impl(
@@ -1086,7 +1156,10 @@ def _rocm_aiter_fused_allreduce_rmsnorm_impl(
         hidden_dim = input_.shape[-1]
         row_size = hidden_dim * input_.element_size()
         fused_qr_rmsnorm_ok = (
-            qr_comm is not None
+            # aiter.qr_all_reduce_rmsnorm does not implement Gemma's
+            # (1 + weight) scaling.
+            not gemma_norm
+            and qr_comm is not None
             and not getattr(qr_comm, "disabled", True)
             and hasattr(qr_comm, "should_quick_allreduce")
             and qr_comm.should_quick_allreduce(input_)
@@ -1133,7 +1206,16 @@ def _rocm_aiter_fused_allreduce_rmsnorm_impl(
         use_1stage=use_1stage,
         gemma_norm=gemma_norm,
     )
-    assert result is not None
+    if result is None:
+        from vllm.distributed import tensor_model_parallel_all_reduce
+
+        return torch.ops.vllm_aiter.fused_add_rms_norm(
+            tensor_model_parallel_all_reduce(input_),
+            residual,
+            weight,
+            epsilon,
+            gemma_norm,
+        )
     return result[0], result[1]
 
 
@@ -1978,7 +2060,7 @@ class rocm_aiter_ops:
     Operations:
         - GEMM operations: gemm_a8w8, gemm_a8w8_blockscale
         - Fused MoE: fused_moe, asm_moe_tkw1
-        - Routing: topk_softmax, biased_grouped_topk, grouped_topk
+        - Routing: topk_softmax, topk_gating, biased_grouped_topk, grouped_topk
         - MLA decode: mla_decode_fwd
         - Quantization: per_tensor_quant, per_token_quant, group_fp8_quant
         - Triton ops: triton_rotary_embed, triton_fp8_bmm, triton_gemm_a8w8_blockscale
@@ -2155,6 +2237,18 @@ class rocm_aiter_ops:
     @if_aiter_supported
     def is_fused_moe_enabled(cls) -> bool:
         return cls._AITER_ENABLED and cls._FMOE_ENABLED
+
+    @classmethod
+    @if_aiter_supported
+    def is_topk_gating_enabled(cls) -> bool:
+        """Use AITER ``topk_gating`` for softmax routing.
+
+        CDNA3 and CDNA4 only (gfx942, gfx950): those are the targets it was
+        measured on. Other AITER targets keep the legacy ``topk_softmax`` launcher.
+        """
+        from vllm.platforms.rocm import get_cdna_version
+
+        return cls.is_fused_moe_enabled() and get_cdna_version() in (3, 4)
 
     @classmethod
     @if_aiter_supported
@@ -2502,11 +2596,10 @@ class rocm_aiter_ops:
     @classmethod
     @functools.cache
     def is_gdn_flydsl_prefill_available(cls) -> bool:
-        """Whether the opt-in AITER FlyDSL GDN prefill path can be used.
+        """Whether the AITER FlyDSL GDN prefill path can be used.
 
-        Selecting the backend is an explicit opt-in in itself, but it still
-        runs AITER kernels, so VLLM_ROCM_USE_AITER remains the one switch that
-        turns all of them off.
+        It runs AITER kernels, so VLLM_ROCM_USE_AITER remains the one switch
+        that turns all of them off.
         """
         return (
             cls._AITER_ENABLED
@@ -2811,6 +2904,14 @@ class rocm_aiter_ops:
             )
 
             direct_register_custom_op(
+                op_name="rocm_aiter_topk_gating",
+                op_func=_rocm_aiter_topk_gating_impl,
+                mutates_args=["topk_weights", "topk_indices"],
+                fake_impl=_rocm_aiter_topk_gating_fake,
+                dispatch_key=current_platform.dispatch_key,
+            )
+
+            direct_register_custom_op(
                 op_name="rocm_aiter_topk_sigmoid",
                 op_func=_rocm_aiter_topk_sigmoid_impl,
                 mutates_args=["topk_weights", "topk_indices"],
@@ -2839,6 +2940,13 @@ class rocm_aiter_ops:
                 dispatch_key=current_platform.dispatch_key,
             )
 
+            direct_register_custom_op(
+                op_name="rocm_aiter_gather_kv_b_proj",
+                op_func=_rocm_aiter_gather_kv_b_proj_impl,
+                mutates_args=["k", "v"],
+                fake_impl=_rocm_aiter_gather_kv_b_proj_fake,
+                dispatch_key=current_platform.dispatch_key,
+            )
             direct_register_custom_op(
                 op_name="rocm_aiter_mla_decode_fwd",
                 op_func=_rocm_aiter_mla_decode_fwd_impl,
@@ -3335,6 +3443,27 @@ class rocm_aiter_ops:
         return topk_weights, topk_indices
 
     @staticmethod
+    def topk_gating(
+        topk_weights: torch.Tensor,
+        topk_indices: torch.Tensor,
+        token_expert_indices: torch.Tensor,
+        gating_output: torch.Tensor,
+        renormalize: bool,
+        num_shared_experts: int = 0,
+        shared_expert_scoring_func: str = "",
+    ) -> tuple[torch.Tensor, ...]:
+        torch.ops.vllm.rocm_aiter_topk_gating(
+            topk_weights,
+            topk_indices,
+            token_expert_indices,
+            gating_output,
+            renormalize,
+            num_shared_experts,
+            shared_expert_scoring_func,
+        )
+        return topk_weights, topk_indices
+
+    @staticmethod
     def topk_sigmoid(
         topk_weights: torch.Tensor,
         topk_indices: torch.Tensor,
@@ -3451,6 +3580,21 @@ class rocm_aiter_ops:
             extra_kv=extra_kv_buffer,
             extra_indptr=extra_kv_indptr,
             extra_indices=extra_kv_indices,
+        )
+
+    @staticmethod
+    def gather_kv_b_proj(
+        kv_cache: torch.Tensor,
+        kv_scale: torch.Tensor,
+        kv_indptr: torch.Tensor,
+        kv_indices: torch.Tensor,
+        cu_seq_lens: torch.Tensor,
+        weight: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+    ) -> None:
+        torch.ops.vllm.rocm_aiter_gather_kv_b_proj(
+            kv_cache, kv_scale, kv_indptr, kv_indices, cu_seq_lens, weight, k, v
         )
 
     @staticmethod

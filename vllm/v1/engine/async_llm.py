@@ -53,7 +53,11 @@ from vllm.v1.engine.admission_control import SharedAdmissionStats
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
 from vllm.v1.engine.input_processor import InputProcessor
-from vllm.v1.engine.output_processor import OutputProcessor, RequestOutputCollector
+from vllm.v1.engine.output_processor import (
+    OutputProcessor,
+    RequestOutputCollector,
+    StreamingInputOutputCollector,
+)
 from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.executor import Executor
 from vllm.v1.fault_tolerance.utils import FaultToleranceRequest, FaultToleranceResult
@@ -348,7 +352,7 @@ class AsyncLLM(EngineClient):
                 else self.get_num_unfinished_requests()
             )
             if current_requests + n > max_num_reqs:
-                logger.info(
+                logger.debug(
                     "Request queue full - rejecting request %s "
                     "(current=%d, n=%d, max=%d).",
                     request_id,
@@ -356,20 +360,27 @@ class AsyncLLM(EngineClient):
                     n,
                     max_num_reqs,
                 )
+                self._record_admission_rejection("max_num_queued_reqs")
                 raise QueueOverflowError()
 
         max_queued_tokens = self.scheduler_config.max_num_queued_tokens
         if max_queued_tokens is not None:
             current_tokens = self.get_num_queued_tokens()
             if current_tokens >= max_queued_tokens:
-                logger.info(
+                logger.debug(
                     "Max queued tokens reached - rejecting request %s "
                     "(current_tokens=%d, max=%d).",
                     request_id,
                     current_tokens,
                     max_queued_tokens,
                 )
+                self._record_admission_rejection("max_num_queued_tokens")
                 raise MaxQueuedTokensError()
+
+    def _record_admission_rejection(self, reason: str) -> None:
+        """Increment the frontend admission rejection counter if logging is on."""
+        if self.logger_manager is not None:
+            self.logger_manager.record_admission_rejection(reason)
 
     async def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         if not hasattr(self, "_supported_tasks"):
@@ -613,7 +624,9 @@ class AsyncLLM(EngineClient):
         self.input_processor.assign_request_id(final_req)
         internal_req_id = final_req.request_id
 
-        queue = RequestOutputCollector(sampling_params.output_kind, internal_req_id)
+        queue = StreamingInputOutputCollector(
+            sampling_params.output_kind, internal_req_id
+        )
 
         async def handle_inputs():
             cancelled = False
@@ -621,6 +634,13 @@ class AsyncLLM(EngineClient):
             any_added = False
             try:
                 async for input_chunk in input_stream:
+                    # Stop once the session has finished (aborted or errored).
+                    # There is no await between this check and the ADD send,
+                    # so any chunk already sent precedes the engine abort.
+                    if any_added and not self.output_processor.has_request(
+                        internal_req_id
+                    ):
+                        break
                     sp = input_chunk.sampling_params
                     if sp:
                         self._validate_streaming_input_sampling_params(sp)
@@ -656,8 +676,10 @@ class AsyncLLM(EngineClient):
                 if not cancelled:
                     if any_added:
                         # Send empty final request to indicate that inputs have
-                        # finished. Don't send if cancelled (session was aborted).
-                        await self._add_request(final_req, None, None, 0, queue)
+                        # finished. Don't send if cancelled or if the session
+                        # already finished (aborted or errored).
+                        if self.output_processor.has_request(internal_req_id):
+                            await self._add_request(final_req, None, None, 0, queue)
                     elif not errored:
                         queue.put(STREAM_FINISHED)
 
