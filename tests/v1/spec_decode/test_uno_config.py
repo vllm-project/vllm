@@ -313,6 +313,24 @@ def test_uno_refuses_flashinfer_before_the_speculator_is_built(
         uno.UnoSpeculator(config, torch.device("cuda"))
 
 
+def test_speculator_factory_builds_uno(uno_config_factory, monkeypatch):
+    """init_speculator routes method='uno' past every other method's branch."""
+    from vllm.v1.worker.gpu.spec_decode import init_speculator, uno
+
+    built = []
+
+    def fake_speculator(config, device):
+        built.append((config, device))
+        return "uno"
+
+    monkeypatch.setattr(uno, "UnoSpeculator", fake_speculator)
+    config = _serving_config(uno_config_factory())
+    device = torch.device("cpu")
+
+    assert init_speculator(config, device, None) == "uno"
+    assert built == [(config, device)]
+
+
 def test_uno_refuses_user_lora_serving(uno_config_factory, monkeypatch):
     """--enable-lora serves only Uno's adapter; user LoRA serving is refused."""
     config = _serving_config(uno_config_factory())
