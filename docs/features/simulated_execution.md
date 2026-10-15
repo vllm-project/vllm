@@ -356,7 +356,7 @@ KV block size, which the CPU attention backend needs to be a multiple of 32:
 pass `--block-size` to match the deployment where it uses a larger one.
 Layers still pick the CPU platform's attention backends and kernels, so a
 model needing one it lacks (sparse MLA, decode context parallelism, NVFP4 or
-MXFP4 weights) fails to build there. The CPU build needs Python 3.11 or newer.
+MXFP4 weights, online FP8 quantization) fails to build there. The CPU build needs Python 3.11 or newer.
 
 ## Limitations
 

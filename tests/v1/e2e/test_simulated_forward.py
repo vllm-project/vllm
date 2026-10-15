@@ -91,6 +91,30 @@ def test_simulate_forward_quantized_checkpoint(
     assert len(outputs[0][0]) == 3 + 4
 
 
+@pytest.mark.skipif(
+    current_platform.is_cpu(), reason="The CPU build has no FP8 quantization kernels."
+)
+def test_simulate_forward_online_quantization(
+    monkeypatch: pytest.MonkeyPatch, vllm_runner: type[VllmRunner]
+) -> None:
+    """Online quantization quantizes the meta weights as they load."""
+    # apply_model() ships a function to the workers.
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    with vllm_runner(
+        "Qwen/Qwen3-0.6B",
+        quantization="fp8",
+        simulate_forward=True,
+        kv_cache_memory_bytes=1024**3,
+        max_model_len=1024,
+    ) as vllm_model:
+        weight_dtypes = vllm_model.apply_model(
+            lambda model: str(model.model.layers[0].self_attn.qkv_proj.weight.dtype)
+        )
+        outputs = vllm_model.generate_greedy([[1000, 1001, 1002]], max_tokens=4)
+    assert weight_dtypes == ["torch.float8_e4m3fn"]
+    assert len(outputs[0][0]) == 3 + 4
+
+
 def _check_model_available(model: str) -> None:
     try:
         model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
