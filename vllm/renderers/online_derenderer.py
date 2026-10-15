@@ -37,6 +37,7 @@ from vllm.entrypoints.serve.engine.protocol import UsageInfo
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.entrypoints.serve.utils.tool_calls_utils import (
     maybe_filter_parallel_tool_calls,
+    resolve_finish_reason,
 )
 from vllm.logger import init_logger
 from vllm.parser import Parser, ParserManager
@@ -205,7 +206,9 @@ class OnlineDerenderer:
                     index=choice.index,
                     message=message,
                     logprobs=resolved_logprobs,
-                    finish_reason=choice.finish_reason,
+                    finish_reason=resolve_finish_reason(
+                        choice.finish_reason, chat_request, bool(message.tool_calls)
+                    ),
                     stop_reason=choice.stop_reason,
                     token_ids=choice.token_ids if return_token_ids else None,
                 )
@@ -664,11 +667,9 @@ class OnlineDerenderer:
 
             finish_reason = choice.finish_reason
             if finish_reason is not None:
-                is_named_tool_choice = (
-                    type(chat_request.tool_choice) is ChatCompletionNamedToolChoiceParam
+                finish_reason = resolve_finish_reason(
+                    finish_reason, chat_request, tools_streamed
                 )
-                if tools_streamed and not is_named_tool_choice:
-                    finish_reason = "tool_calls"
 
             stream_choice = ChatCompletionResponseStreamChoice(
                 index=choice.index,
