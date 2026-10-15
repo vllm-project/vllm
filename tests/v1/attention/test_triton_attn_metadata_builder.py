@@ -17,7 +17,8 @@ from vllm.v1.kv_cache_interface import FullAttentionSpec
 
 
 # 64 segments only while num_seqs * num_kv_heads * 16 < SMs on SM8.6 (82 SMs) or
-# SM12.0 (188 SMs) and the 64-segment scratch holds every query token.
+# SM12.0 (188 SMs) and the 64-segment scratch holds every query token. SM8.6
+# keeps 16 for multi-query batches (verification).
 @pytest.mark.parametrize(
     "builder_cls",
     [TritonAttentionMetadataBuilder, TritonAttentionDiffKVMetadataBuilder],
@@ -31,7 +32,7 @@ from vllm.v1.kv_cache_interface import FullAttentionSpec
         ((12, 0), 8, 2, 1, 16),
         ((8, 6), 2, 2, 1, 64),
         ((8, 6), 2, 3, 1, 16),
-        ((8, 6), 1, 1, 4, 64),
+        ((8, 6), 1, 1, 4, 16),
         ((8, 6), 1, 2, 4, 16),
         ((9, 0), 1, 1, 1, 16),
         ((12, 0), 1, 2, 4, 64),
