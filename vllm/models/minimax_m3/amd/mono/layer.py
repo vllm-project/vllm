@@ -21,6 +21,7 @@ from vllm.platforms import current_platform
 
 from .routing import StepDecision, decide_step, tensor_identity
 from .spec import MONO_SPEC, MiniMaxM3MonoSpec
+from .weights import MonoLayerWeights
 
 if TYPE_CHECKING:
     from vllm.models.minimax_m3.amd.model import (
@@ -78,6 +79,7 @@ class MiniMaxM3MonoLayer:
         self.active = False
         self.last_decision = StepDecision(False, "not started")
         self._cache_identities: dict[int, CacheIdentity] = {}
+        self.weights: dict[int, MonoLayerWeights] = {}
         self._weights_attached = False
 
     def attach(self) -> None:
@@ -95,18 +97,7 @@ class MiniMaxM3MonoLayer:
         if self._weights_attached:
             return
         for layer in self.layers:
-            gate = layer.block_sparse_moe.gate.weight
-            if gate.dtype != torch.float32:
-                raise ValueError(
-                    f"--monokernel layer {layer.layer_id} router must be FP32, "
-                    f"found {gate.dtype}."
-                )
-            for linear in (layer.self_attn.qkv_proj, layer.self_attn.o_proj):
-                if linear.weight.dtype != torch.bfloat16:
-                    raise ValueError(
-                        f"--monokernel {linear.prefix} must be BF16, "
-                        f"found {linear.weight.dtype}."
-                    )
+            self.weights[layer.layer_id] = MonoLayerWeights.from_layer(layer)
         self._weights_attached = True
 
     @staticmethod
