@@ -24,9 +24,9 @@ _E2M1_VALUES = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)
 # Triton's JIT only reads module globals that are ``tl.constexpr`` instances.
 _E2M1_MAX = tl.constexpr(_E2M1_VALUES[-1])
 
-# Midpoints between consecutive E2M1 magnitudes. Summing ``(a > m)`` over these
-# is exactly ``torch.bucketize(a, midpoints, right=False)``: a value sitting on
-# a midpoint rounds *down*, matching AITER.
+# Midpoints between consecutive E2M1 magnitudes. Counting the midpoints below
+# ``a`` rounds to nearest; a value on a midpoint goes to the even code index
+# (ties to even, as AITER does), so ``_M1``, ``_M3``, ``_M5`` compare with ``>=``.
 _M0, _M1, _M2, _M3, _M4, _M5, _M6 = (
     tl.constexpr((lo + hi) / 2) for lo, hi in zip(_E2M1_VALUES, _E2M1_VALUES[1:])
 )
@@ -57,11 +57,11 @@ def _quantize_e2m1(normalized):
     a = tl.abs(normalized)
     index = (
         (a > _M0).to(tl.int32)
-        + (a > _M1).to(tl.int32)
+        + (a >= _M1).to(tl.int32)
         + (a > _M2).to(tl.int32)
-        + (a > _M3).to(tl.int32)
+        + (a >= _M3).to(tl.int32)
         + (a > _M4).to(tl.int32)
-        + (a > _M5).to(tl.int32)
+        + (a >= _M5).to(tl.int32)
         + (a > _M6).to(tl.int32)
     )
     # The sign bit is kept even when the magnitude rounds to zero, so a small
