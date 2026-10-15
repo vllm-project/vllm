@@ -676,6 +676,12 @@ class ExternalElasticEPScaleCoordinator:
                 "--elastic-ep-max-dp-size is "
                 f"{parallel_config.elastic_ep_max_dp_size}."
             )
+        # Validate expert capacity on every rank: rank 0 publishes no epoch
+        # when validation fails, so peers must reject before polling for one.
+        num_redundant_experts = self._calculate_num_redundant_experts(
+            cur_data_parallel_size,
+            new_data_parallel_size,
+        )
         if not parallel_config._coord_store_port:
             raise RuntimeError(
                 "External Elastic EP requires a runtime coordination store port."
@@ -688,14 +694,9 @@ class ExternalElasticEPScaleCoordinator:
         bootstrap: ReconfigureDistributedRequest | None = None
         epoch: str | None = None
         reconfig_store: Any | None = None
-        num_redundant_experts: int | None = None
 
         try:
             if dp_rank == 0:
-                num_redundant_experts = self._calculate_num_redundant_experts(
-                    cur_data_parallel_size,
-                    new_data_parallel_size,
-                )
                 epoch, bootstrap = self._prepare_reconfig_bootstrap(
                     control_store,
                     cur_data_parallel_size,
@@ -723,7 +724,6 @@ class ExternalElasticEPScaleCoordinator:
 
             assert epoch is not None
             assert bootstrap is not None
-            assert num_redundant_experts is not None
             self.active_epoch = epoch
             self.active_reconfig_store = (
                 bootstrap.new_data_parallel_master_ip,

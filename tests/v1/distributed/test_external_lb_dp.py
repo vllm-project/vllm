@@ -92,19 +92,33 @@ def test_external_elastic_ep_calculates_target_expert_redundancy():
     assert coordinator._calculate_num_redundant_experts(2, 3) == 64
 
 
-def test_external_elastic_ep_rejects_insufficient_expert_capacity():
+@pytest.mark.asyncio
+@pytest.mark.parametrize("dp_rank", range(4))
+async def test_validate_expert_capacity_on_every_rank(dp_rank, monkeypatch):
+    """Validate expert capacity on every rank before waiting for an epoch."""
     client = SimpleNamespace(
         vllm_config=SimpleNamespace(
             model_config=SimpleNamespace(get_num_experts=lambda: 128),
             parallel_config=SimpleNamespace(
-                eplb_config=SimpleNamespace(num_redundant_experts=0)
+                data_parallel_rank=dp_rank,
+                elastic_ep_max_dp_size=4,
+                data_parallel_master_ip="127.0.0.1",
+                _coord_store_port=12345,
+                eplb_config=SimpleNamespace(num_redundant_experts=0),
             ),
         )
     )
     coordinator = ExternalElasticEPScaleCoordinator(cast("DPAsyncMPClient", client))
+    store = DictStore({})
+    monkeypatch.setattr(
+        "vllm.distributed.utils.get_cached_tcp_store_client", lambda *args: store
+    )
 
     with pytest.raises(ValueError, match="cannot retain all model experts"):
-        coordinator._calculate_num_redundant_experts(3, 2)
+        await asyncio.wait_for(coordinator.prepare(4, 2), timeout=1)
+
+    assert not store.values
+    assert coordinator.prepared_scale is None
 
 
 @pytest.mark.asyncio
