@@ -8,10 +8,10 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use super::{MmProcessorShmCache, MmShmCacheConfig};
-use crate::protocol::multimodal::{
+use vllm_engine_core_client::protocol::multimodal::{
     MmBatchedField, MmField, MmFieldElem, MmKwargValue, MmKwargsItem,
 };
-use crate::protocol::tensor::WireTensor;
+use vllm_engine_core_client::protocol::tensor::WireTensor;
 
 /// Build an item with two inline tensors (raw-view ext, no aux frames) and a
 /// plain int field.
@@ -97,7 +97,7 @@ fn python_decodes_rust_written_shm_item() {
     let monotonic_id = int_field(&address_item, "monotonic_id");
     let signature = signature_hex(&address_item);
 
-    let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/tests/mm_shm_compat.py");
+    let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/mm_shm_compat.py");
     let output = Command::new(&script)
         .arg(format!("/dev/shm/{}", cache.shm_name()))
         .arg(address.to_string())

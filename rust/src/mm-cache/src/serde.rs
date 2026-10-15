@@ -11,8 +11,8 @@
 //! direction is needed here.
 
 use crate::error::Result;
-use crate::protocol::encode_msgpack;
-use crate::protocol::multimodal::MmKwargsItem;
+use vllm_engine_core_client::protocol::encode_msgpack;
+use vllm_engine_core_client::protocol::multimodal::MmKwargsItem;
 
 /// Format marker prefixing the msgpack body, detected by
 /// `MsgpackSerde.deserialize`. Pickle protocol >= 2 streams always start with
@@ -34,8 +34,10 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
-    use crate::protocol::multimodal::{MmBatchedField, MmField, MmFieldElem, MmKwargValue};
-    use crate::protocol::tensor::WireTensor;
+    use vllm_engine_core_client::protocol::multimodal::{
+        MmBatchedField, MmField, MmFieldElem, MmKwargValue,
+    };
+    use vllm_engine_core_client::protocol::tensor::WireTensor;
 
     fn int_elem(value: i64) -> MmFieldElem {
         MmFieldElem {
@@ -75,7 +77,7 @@ mod tests {
         assert_eq!(payload[0], MM_ITEM_FORMAT_MARKER);
 
         // Both tensors stay inline as raw-view exts regardless of size.
-        let body = crate::protocol::decode_value(&payload[1..]).unwrap();
+        let body = vllm_engine_core_client::protocol::decode_value(&payload[1..]).unwrap();
         let map = body.as_map().expect("item body is a map");
         let field_value = |key: &str| {
             map.iter()

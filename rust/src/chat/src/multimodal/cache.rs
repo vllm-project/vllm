@@ -14,8 +14,8 @@ use std::sync::Arc;
 use itertools::izip;
 use llm_multimodal::{MediaContentPart, Modality, PromptReplacement};
 use parking_lot::Mutex;
-use vllm_engine_core_client::mm_cache::MmProcessorShmCache;
 use vllm_engine_core_client::protocol::multimodal::MmKwargsItem;
+use vllm_mm_cache::MmProcessorShmCache;
 
 use super::{PreparedItem, VisionModalitySupport};
 use crate::error::{Result, bail_mm_uuid_reference};
@@ -440,8 +440,8 @@ fn merge_slots(
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use vllm_engine_core_client::mm_cache::{MmProcessorShmCache, MmShmCacheConfig};
     use vllm_engine_core_client::protocol::multimodal::{MmKwargValue, MmKwargsItem};
+    use vllm_mm_cache::{MmProcessorShmCache, MmShmCacheConfig};
 
     use super::*;
 

@@ -9,6 +9,7 @@ members = [
     "src/llm",
     "src/managed-engine",
     "src/metrics",
+    "src/mm-cache",
     "src/mock-engine",
     "src/parser",
     "src/server",
@@ -149,6 +150,7 @@ vllm-engine-core-client = { path = "src/engine-core-client" }
 vllm-llm = { path = "src/llm" }
 vllm-managed-engine = { path = "src/managed-engine" }
 vllm-metrics = { path = "src/metrics" }
+vllm-mm-cache = { path = "src/mm-cache" }
 vllm-parser = { path = "src/parser" }
 vllm-proto = { path = "proto" }
 vllm-server = { path = "src/server" }

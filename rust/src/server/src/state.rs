@@ -11,9 +11,9 @@ use tokio::time::{Duration, Instant, sleep_until};
 use tracing::warn;
 use vllm_chat::ChatLlm;
 use vllm_engine_core_client::EngineCoreClient;
-use vllm_engine_core_client::mm_cache::MmProcessorShmCache;
 use vllm_engine_core_client::protocol::lora::LoraRequest;
 use vllm_engine_core_client::runtime::BackgroundShutdownRuntime;
+use vllm_mm_cache::MmProcessorShmCache;
 
 use crate::config::{ApiServerOptions, CorsConfig, LoraModulePath};
 use crate::lora::{

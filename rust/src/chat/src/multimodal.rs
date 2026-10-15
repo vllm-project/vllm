@@ -28,9 +28,9 @@ use llm_multimodal::{
 use serde::{Deserialize, Serialize};
 use thiserror_ext::AsReport as _;
 use tracing::{Instrument as _, warn};
-use vllm_engine_core_client::mm_cache::MmProcessorShmCache;
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_engine_core_client::protocol::multimodal::{MmFeatureSpec, MmFeatures, MmKwargsItem};
+use vllm_mm_cache::MmProcessorShmCache;
 use vllm_text::Prompt;
 use vllm_text::tokenizer::{DynTokenizer, Tokenizer};
 

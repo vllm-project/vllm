@@ -51,6 +51,7 @@ vllm-chat.workspace = true
 vllm-engine-core-client.workspace = true
 vllm-llm.workspace = true
 vllm-metrics.workspace = true
+vllm-mm-cache.workspace = true
 vllm-proto.workspace = true
 vllm-text.workspace = true
 
@@ -66,6 +67,7 @@ tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 tower.workspace = true
 vllm-engine-core-client = { workspace = true, features = ["test-util"] }
+vllm-mm-cache = { workspace = true, features = ["test-util"] }
 vllm-tokenizer = { workspace = true, features = ["test-utils"] }
 zeromq.workspace = true
 

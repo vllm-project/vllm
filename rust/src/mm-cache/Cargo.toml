@@ -1,0 +1,27 @@
+[package]
+name = "vllm-mm-cache"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+test-util = []
+
+[dependencies]
+hmac.workspace = true
+memmap2.workspace = true
+parking_lot.workspace = true
+rand.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+thiserror-ext.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+vllm-engine-core-client.workspace = true
+
+[dev-dependencies]
+expect-test.workspace = true
+rmpv.workspace = true
+
+[lints]
+workspace = true

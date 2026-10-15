@@ -102,9 +102,6 @@ pub enum Error {
     #[error("utility call `{method}` returned inconsistent results across engines: {values}")]
     InconsistentUtilityResults { method: String, values: String },
 
-    #[error("failed to create shm multimodal cache {name:?}: {message}")]
-    MmShmCacheCreate { name: String, message: String },
-
     /// A special variant to allow cloning the same error.
     #[error(transparent)]
     Shared(Arc<Self>),

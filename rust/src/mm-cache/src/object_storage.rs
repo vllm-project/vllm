@@ -267,7 +267,7 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::*;
-    use crate::mm_cache::ring_buffer::MD_SIZE;
+    use crate::ring_buffer::MD_SIZE;
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
 

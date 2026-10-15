@@ -26,7 +26,6 @@ use vllm_chat::{
     ChatRequestProcessor, ChatTextBackend, DefaultChatOutputProcessor, DynChatOutputProcessor,
     DynChatRenderer, NewChatOutputProcessorOptions, ParserSelection,
 };
-use vllm_engine_core_client::mm_cache::{MmProcessorShmCache, MmShmCacheConfig};
 use vllm_engine_core_client::mock_engine::default_ready_response;
 use vllm_engine_core_client::protocol::decode_value;
 use vllm_engine_core_client::protocol::handshake::EngineCoreReadyResponse;
@@ -50,6 +49,7 @@ use vllm_engine_core_client::{
 };
 use vllm_llm::Llm;
 use vllm_metrics::METRICS;
+use vllm_mm_cache::{MmProcessorShmCache, MmShmCacheConfig};
 use vllm_text::tokenizer::DynTokenizer;
 use vllm_text::{Prompt, TextBackend, TextRequestProcessor};
 use vllm_tokenizer::test_utils::TestTokenizer;

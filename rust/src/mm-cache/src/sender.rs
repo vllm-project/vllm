@@ -19,7 +19,7 @@ use super::object_storage::{PutFailure, SingleWriterShmObjectStorage};
 use super::ring_buffer::SingleWriterShmRingBuffer;
 use super::serde::serialize_mm_item;
 use crate::Result;
-use crate::protocol::multimodal::{
+use vllm_engine_core_client::protocol::multimodal::{
     MmBatchedField, MmField, MmFieldElem, MmKwargValue, MmKwargsItem,
 };
 
@@ -246,7 +246,7 @@ mod tests {
     use expect_test::expect;
 
     use super::*;
-    use crate::protocol::tensor::WireTensor;
+    use vllm_engine_core_client::protocol::tensor::WireTensor;
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
 

@@ -16,8 +16,9 @@
 //!   `vllm/distributed/device_communicators/shm_object_storage.py`
 //! - `ShmObjectStoreSenderCache` from `vllm/multimodal/cache/shm.py`
 //!
-//! [`MmKwargsItem`]: crate::protocol::multimodal::MmKwargsItem
+//! [`MmKwargsItem`]: vllm_engine_core_client::protocol::multimodal::MmKwargsItem
 
+mod error;
 mod object_storage;
 mod ring_buffer;
 mod sender;
@@ -25,4 +26,5 @@ mod serde;
 #[cfg(test)]
 mod tests;
 
+pub use error::{Error, Result};
 pub use sender::{MmProcessorShmCache, MmShmCacheConfig};

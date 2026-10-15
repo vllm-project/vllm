@@ -5787,6 +5787,7 @@ dependencies = [
  "uuid",
  "vllm-engine-core-client",
  "vllm-llm",
+ "vllm-mm-cache",
  "vllm-parser",
  "vllm-text",
  "vllm-tokenizer",
@@ -5819,6 +5820,7 @@ dependencies = [
  "vllm-chat",
  "vllm-engine-core-client",
  "vllm-managed-engine",
+ "vllm-mm-cache",
  "vllm-server",
  "vllm-text",
  "vllm-tracing",
@@ -5840,12 +5842,9 @@ dependencies = [
  "futures",
  "half",
  "hex",
- "hmac",
  "itertools 0.14.0",
  "libc",
- "memmap2",
  "parking_lot",
- "rand 0.9.5",
  "rmp-serde",
  "rmpv",
  "serde",
@@ -5854,7 +5853,6 @@ dependencies = [
  "serde_repr",
  "serde_tuple",
  "serde_with",
- "sha2",
  "socket2",
  "task-local",
  "tempfile",
@@ -5864,7 +5862,6 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
- "uuid",
  "vllm-metrics",
  "zeromq",
 ]
@@ -5914,6 +5911,24 @@ dependencies = [
  "expect-test",
  "itertools 0.14.0",
  "prometheus-client",
+]
+
+[[package]]
+name = "vllm-mm-cache"
+version = "0.1.0"
+dependencies = [
+ "expect-test",
+ "hmac",
+ "memmap2",
+ "parking_lot",
+ "rand 0.9.5",
+ "rmpv",
+ "sha2",
+ "thiserror 2.0.18",
+ "thiserror-ext",
+ "tracing",
+ "uuid",
+ "vllm-engine-core-client",
 ]
 
 [[package]]
@@ -6029,6 +6044,7 @@ dependencies = [
  "vllm-engine-core-client",
  "vllm-llm",
  "vllm-metrics",
+ "vllm-mm-cache",
  "vllm-proto",
  "vllm-text",
  "vllm-tokenizer",

@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use serde_json::Value;
-use vllm_engine_core_client::mm_cache::MmProcessorShmCache;
+use vllm_mm_cache::MmProcessorShmCache;
 use vllm_text::backend::hf::HfOverrides;
 use vllm_text::{DynTextBackend, GenerationConfigMode, TextBackend};
 

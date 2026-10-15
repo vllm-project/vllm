@@ -18,8 +18,8 @@ use vllm_chat::{
     ChatTemplateContentFormatOption, GenerationConfigMode, ParserSelection, RendererSelection,
     ToolStrictLevel,
 };
-use vllm_engine_core_client::mm_cache::MmProcessorShmCache;
 use vllm_engine_core_client::{CoordinatorMode as EngineCoreCoordinatorMode, TransportMode};
+use vllm_mm_cache::MmProcessorShmCache;
 use vllm_text::backend::hf::HfOverrides;
 
 /// Default keep-alive idle timeout (seconds); also the head-read bound

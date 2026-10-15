@@ -12,8 +12,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use thiserror_ext::AsReport as _;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
-use vllm_engine_core_client::mm_cache::MmProcessorShmCache;
 use vllm_managed_engine::ManagedEngineHandle;
+use vllm_mm_cache::MmProcessorShmCache;
 
 use crate::cli::{BenchCommand, Cli, Command};
 
