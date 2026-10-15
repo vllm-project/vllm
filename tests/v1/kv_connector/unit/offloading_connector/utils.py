@@ -132,6 +132,7 @@ class MockOffloadingSpec(OffloadingSpec):
         self.manager.lookup.return_value = LookupResult.MISS
         self.manager.get_load_source.return_value = CacheHitSource.EXTERNAL_UNSPECIFIED
         self.manager.get_stats.return_value = None
+        self.manager.config_info.return_value = [{}]
         self.manager.on_new_request.return_value = RequestOffloadingContext()
         self.handler = MockOffloadingWorker()
 
