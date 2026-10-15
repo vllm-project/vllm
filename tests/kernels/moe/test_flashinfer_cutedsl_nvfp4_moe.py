@@ -201,6 +201,8 @@ def test_flashinfer_cutedsl_fp4_moe(
     import vllm.distributed.localization as loc
     import vllm.model_executor.layers.fused_moe.experts.flashinfer_cutedsl_moe as mod
 
+    if current_platform.is_device_capability(107) and per_token_activation:
+        pytest.skip("Rubin CuTeDSL MoE does not support per-token activation scales")
     if current_platform.is_device_capability(107) and (
         alpha is not None or beta is not None or limit is not None
     ):
