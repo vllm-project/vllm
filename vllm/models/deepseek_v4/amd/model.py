@@ -775,13 +775,16 @@ class DeepseekV4MoE(nn.Module):
             return self._forward_mega_moe_routed(hidden_states, input_ids)
         # The unfused shared expert overlaps router + MegaMoE in small steps.
         routed, shared = maybe_execute_in_parallel(
-            lambda: self._forward_mega_moe_routed(hidden_states, input_ids),
-            lambda: shared_experts(hidden_states),
-            self.shared_experts_events[0],
-            self.shared_experts_events[1],
-            self.shared_experts_stream
-            if hidden_states.shape[0] <= envs.VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD
-            else None,
+            fn0=lambda: self._forward_mega_moe_routed(hidden_states, input_ids),
+            fn1=lambda: shared_experts(hidden_states),
+            event0=self.shared_experts_events[0],
+            event1=self.shared_experts_events[1],
+            aux_stream=(
+                self.shared_experts_stream
+                if hidden_states.shape[0]
+                <= envs.VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD
+                else None
+            ),
         )
         return routed + shared
 
