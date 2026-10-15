@@ -1680,6 +1680,17 @@ def get_pcp_group() -> GroupCoordinator:
     return _PCP
 
 
+_IN_GRAPH_CAPTURE = False
+
+
+def in_graph_capture() -> bool:
+    """True inside `graph_capture()`, i.e. during the warmup runs before each
+    CUDA graph capture as well as during the capture itself. Kernels that must
+    take the same path in warmup and capture (so JIT compilation and one-time
+    setup happen in warmup) can check this instead of the capturing stream."""
+    return _IN_GRAPH_CAPTURE
+
+
 @contextmanager
 def graph_capture(device: torch.device):
     """`graph_capture` is a context manager which should surround the code that
@@ -1694,13 +1705,18 @@ def graph_capture(device: torch.device):
     in order to explicitly distinguish the kernels to capture
     from other kernels possibly launched on background in the default stream.
     """
+    global _IN_GRAPH_CAPTURE
     context = GraphCaptureContext(torch.cuda.Stream(device=device))
-    with (
-        get_tp_group().graph_capture(context),
-        get_pp_group().graph_capture(context),
-        get_dp_group().graph_capture(context),
-    ):
-        yield context
+    previous, _IN_GRAPH_CAPTURE = _IN_GRAPH_CAPTURE, True
+    try:
+        with (
+            get_tp_group().graph_capture(context),
+            get_pp_group().graph_capture(context),
+            get_dp_group().graph_capture(context),
+        ):
+            yield context
+    finally:
+        _IN_GRAPH_CAPTURE = previous
 
 
 logger = init_logger(__name__)
