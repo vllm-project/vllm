@@ -95,7 +95,9 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         assert isinstance(spec, MambaSpec)
         # Only the fused path exports the checkpoint snapshots
         can_checkpoint = (
-            self.use_prefill_checkpoint and self.use_fused_chunk and self.use_safe_gate
+            self.use_prefill_checkpoint
+            and self.kda_prefill_backend == "fused"
+            and self.use_safe_gate
         )
         if can_checkpoint and vllm_config.cache_config.mamba_cache_mode == "align":
             logger.info_once("Kimi-K3 KDA prefill checkpoint enabled.")
@@ -234,19 +236,19 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             "The ROCm Kimi-K3 KDA prefill backend must be one of "
             f"'auto', 'triton' or 'fused', got {backend!r}."
         )
-        gluon_ok = rocm_aiter_ops.is_enabled() and self.use_safe_gate
-        if backend == "fused" and not gluon_ok and not is_fused_kda_chunk_supported():
+        if backend == "fused" and not is_fused_kda_chunk_supported():
             raise RuntimeError(
                 "The fused KDA chunk kernel requires gfx950 and a build that "
                 "includes it."
             )
-        use_fused_chunk = backend == "fused" or (
-            backend == "auto" and is_fused_kda_chunk_supported()
-        )
-        if backend != "triton" and gluon_ok:
-            self.kda_prefill_backend = "gluon"
-        else:
-            self.kda_prefill_backend = "fused" if use_fused_chunk else "triton"
+        self.kda_prefill_backend = backend
+        if backend == "auto":
+            if self.use_safe_gate and rocm_aiter_ops.is_kda_gluon_prefill_available():
+                self.kda_prefill_backend = "gluon"
+            elif is_fused_kda_chunk_supported():
+                self.kda_prefill_backend = "fused"
+            else:
+                self.kda_prefill_backend = "triton"
         logger.info_once("Kimi-K3 KDA prefill backend: %s", self.kda_prefill_backend)
         # TODO: Remove the extra config arg once tested
         self.use_prefill_checkpoint = (

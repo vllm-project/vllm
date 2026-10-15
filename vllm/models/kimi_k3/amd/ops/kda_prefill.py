@@ -9,6 +9,7 @@ path.
 
 import torch
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.mamba.ops.gather_initial_states import (
     gather_initial_states,
@@ -22,6 +23,11 @@ from vllm.models.kimi_k3.amd.ops.third_party.kda import chunk_kda_with_fused_gat
 from vllm.third_party.flash_linear_attention.ops.utils import FLA_CHUNK_SIZE
 
 logger = init_logger(__name__)
+
+
+# Consumed by kimi_k3_triton_warmup.py during kernel_warmup().
+def get_gluon_chunk_kda_warmup_profiles() -> tuple[tuple[int, int], ...]:
+    return ((1, 64), (4, 64), (16, 64), (1, 4096), (4, 2048))
 
 
 def chunk_kda_prefill(
@@ -123,9 +129,7 @@ def chunk_kda_prefill(
             raise ValueError("state_cache needs state_indices and has_initial_state")
 
     if backend == "gluon":
-        from aiter.ops.triton.attention.chunk_kda import chunk_kda
-
-        return chunk_kda(
+        return rocm_aiter_ops.kda_chunk_prefill(
             q=q,
             k=k,
             v=v,
