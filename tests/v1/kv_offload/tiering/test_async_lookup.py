@@ -11,6 +11,7 @@ from vllm.v1.kv_offload.base import OffloadKey, ReqContext, make_offload_key
 from vllm.v1.kv_offload.tiering.async_lookup import (
     AsyncLookupManager,
     LookupStatus,
+    LookupToken,
 )
 
 
@@ -277,8 +278,9 @@ class TestAsyncLookupManager:
         mgr._results_ready.clear()
         assert mgr.lookup(_key(1), ctx) is True
 
-        # An unknown key must not raise or plant an entry.
-        mgr.mark_miss([mgr.lookup_token(_key(99), ctx.req_id)])
+        # A token whose entry has already been released (its only request
+        # finished) is a no-op, not a lookup on a key nobody is tracking.
+        mgr.mark_miss([LookupToken(key=_key(99), req_id=ctx.req_id, generation=0)])
         assert _key(99) not in mgr._lookup_state
 
         # The block is still "present" per the backing set, so a re-probe would
@@ -302,22 +304,33 @@ class TestAsyncLookupManager:
         assert "reqA" not in mgr._req_keys
         mgr.shutdown()
 
-    def test_mark_miss_ignores_unresolved_generation(self):
-        """A promotion token is unavailable before its lookup resolves."""
+    def test_lookup_token_requires_resolved_verdict(self):
+        """A promotion is only initiated by a resolved verdict, so minting a
+        token for anything else is a contract violation rather than an
+        unclaimed token: an unresolved probe, an unknown key, or a request
+        that does not hold the key must all fail loudly."""
         key = _key(1)
         mgr = InMemoryLookupManager(existing_keys={key})
         ctx = _ctx("reqA")
+        other = _ctx("reqB")
         try:
             assert mgr.lookup(key, ctx) is None
-            token = mgr.lookup_token(key, ctx.req_id)
-            assert token.generation is None
-            mgr.mark_miss([token])
-            assert mgr._lookup_state[key].status is LookupStatus.PENDING
-            assert mgr.lookup(key, ctx) is None
+            with pytest.raises(AssertionError):  # PENDING
+                mgr.lookup_token(key, ctx.req_id)
             mgr.flush()
+            assert mgr._lookup_state[key].status is LookupStatus.IN_FLIGHT
+            with pytest.raises(AssertionError):  # IN_FLIGHT, not yet drained
+                mgr.lookup_token(key, ctx.req_id)
+            with pytest.raises(AssertionError):  # unknown key
+                mgr.lookup_token(_key(99), ctx.req_id)
+            with pytest.raises(AssertionError):  # must hold the key
+                mgr.lookup_token(key, other.req_id)
+
             mgr._results_ready.wait()
             mgr._results_ready.clear()
             assert mgr.lookup(key, ctx) is True
+            token = mgr.lookup_token(key, ctx.req_id)
+            assert token.generation == mgr._lookup_state[key].generation
         finally:
             mgr.shutdown()
 
@@ -337,8 +350,7 @@ class TestAsyncLookupManager:
             mgr.cleanup(ctx_a.req_id)
 
             assert mgr.lookup(key, ctx_b) is None
-            new_token = mgr.lookup_token(key, ctx_b.req_id)
-            assert old_token.generation != new_token.generation
+            assert mgr._lookup_state[key].generation != old_token.generation
             mgr.mark_miss([old_token])
             assert mgr._lookup_state[key].status is LookupStatus.PENDING
 

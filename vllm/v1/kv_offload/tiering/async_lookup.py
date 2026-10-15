@@ -51,11 +51,15 @@ logger = init_logger(__name__)
 
 @dataclass(frozen=True, slots=True)
 class LookupToken:
-    """Lookup key plus the request and generation that observed it."""
+    """Lookup key plus the request and the resolved generation that observed it.
+
+    A token is only minted for a request holding a resolved verdict, so it
+    always names a generation.
+    """
 
     key: OffloadKey
     req_id: str
-    generation: int | None
+    generation: int
 
 
 class LookupStatus(Enum):
@@ -175,17 +179,23 @@ class AsyncLookupManager(ABC):
         return state.status is LookupStatus.HIT
 
     def lookup_token(self, key: OffloadKey, req_id: str) -> LookupToken:
-        """Return the lookup token currently held by ``req_id`` for ``key``."""
+        """Return the resolved lookup generation ``req_id`` observed for ``key``.
+
+        Only a resolved verdict can initiate a promotion, and the framework
+        issues submit_load() before the request's on_request_finished(), so a
+        promotion always finds the generation it captured. A missing or
+        unresolved verdict here is a broken promotion, not an unclaimed one.
+        """
         state = self._lookup_state.get(key)
-        generation = (
-            state.generation
-            if state is not None
-            and state.status
-            in (LookupStatus.HIT, LookupStatus.MISS, LookupStatus.MARKED_MISS)
-            and req_id in state.request_ids
-            else None
+        assert state is not None and req_id in state.request_ids, (
+            f"request {req_id!r} holds no lookup for key {key!r}"
         )
-        return LookupToken(key=key, req_id=req_id, generation=generation)
+        assert state.status in (
+            LookupStatus.HIT,
+            LookupStatus.MISS,
+            LookupStatus.MARKED_MISS,
+        ), f"lookup for key {key!r} is {state.status.name}, not a resolved verdict"
+        return LookupToken(key=key, req_id=req_id, generation=state.generation)
 
     def flush(self) -> None:
         """Post this step's accumulated keys to the worker thread.
@@ -238,10 +248,9 @@ class AsyncLookupManager(ABC):
         """Force the cached verdict for tokens to False after a failed load, so
         the scheduler stops re-issuing the doomed promotion (livelock, #49176).
         A token identifies the resolved lookup generation that initiated the
-        load. Pending, in-flight, and stale generations are ignored."""
+        load; an entry that is gone or has moved on to a newer generation is
+        not its to correct."""
         for token in tokens:
-            if token.generation is None:
-                continue
             state = self._lookup_state.get(token.key)
             if (
                 state is None
