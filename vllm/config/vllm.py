@@ -1164,15 +1164,6 @@ class VllmConfig:
                 "adaptive speculative verification."
             )
         if (
-            self.parallel_config.pipeline_parallel_size > 1
-            and not self.scheduler_config.async_scheduling
-        ):
-            logger.warning_once(
-                "--enable-return-routed-experts with pipeline parallelism but "
-                "without async scheduling makes non-last PP stages wait for "
-                "each step's sampling, which serializes the pipeline."
-            )
-        if (
             self.parallel_config.decode_context_parallel_size > 1
             or self.parallel_config.prefill_context_parallel_size > 1
         ):
