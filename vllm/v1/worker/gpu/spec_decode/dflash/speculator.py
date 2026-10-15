@@ -52,6 +52,9 @@ class DFlashSpeculator(DraftModelSpeculator):
                 else 1
             ),
         )
+        vllm_config.parallel_config.data_parallel_index = (
+            parallel_config.data_parallel_index
+        )
         super().__init__(vllm_config, device)
 
         self.hidden_states = torch.zeros(

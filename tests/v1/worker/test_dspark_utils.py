@@ -39,6 +39,7 @@ class _FakeParallelConfig:
         default_factory=lambda: _FakeEPLBConfig(num_redundant_experts=32)
     )
     enable_elastic_ep: bool = True
+    data_parallel_index: int = 0
 
     def __post_init__(self) -> None:
         if not self.enable_eplb and self.eplb_config.num_redundant_experts:
@@ -89,6 +90,22 @@ def test_dspark_parallel_config_eplb_by_model_type(
         assert draft_config.eplb_config is not target_config.eplb_config
 
 
+def test_dspark_parallel_config_keeps_data_parallel_index():
+    target_config = ParallelConfig(distributed_executor_backend="mp")
+    target_config.data_parallel_index = 3
+    draft_model_config = _FakeModelConfig(
+        hf_config=_FakeHFConfig(model_type="deepseek_v4")
+    )
+
+    draft_config = _get_dspark_parallel_config(
+        target_config,
+        tensor_parallel_size=1,
+        draft_model_config=draft_model_config,
+    )
+
+    assert draft_config.data_parallel_index == 3
+
+
 @pytest.mark.parametrize("pcp_size", [1, 4])
 @pytest.mark.parametrize("dcp_size", [1, 4])
 @pytest.mark.parametrize("use_mla", [False, True])
@@ -102,6 +119,7 @@ def test_draft_context_parallelism_without_changing_target(
         cp_kv_cache_interleave_size=16,
         distributed_executor_backend="mp",
     )
+    target_parallel.data_parallel_index = 3
     target_config = SimpleNamespace(
         parallel_config=target_parallel,
         speculative_config=SimpleNamespace(
@@ -123,6 +141,7 @@ def test_draft_context_parallelism_without_changing_target(
     assert draft_parallel.prefill_context_parallel_size == 1
     assert draft_parallel.decode_context_parallel_size == (dcp_size if use_mla else 1)
     assert draft_parallel.cp_kv_cache_interleave_size == 16
+    assert draft_parallel.data_parallel_index == 3
     assert target_parallel.prefill_context_parallel_size == pcp_size
     assert target_parallel.decode_context_parallel_size == dcp_size
     assert target_parallel.cp_kv_cache_interleave_size == 16
