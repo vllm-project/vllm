@@ -18,7 +18,7 @@ from vllm.models.common.specialized_decode.runtime import SpecializedDecode
 from vllm.models.common.specialized_decode.spec import DecodeUnsupported, Step
 from vllm.models.deepseek_v41.amd import specialized_decode as sd
 
-SPECS = sd.DECODE_SPECS
+SPECS = (sd.DECODE_SPEC,)
 LAYERS = 6
 HIDDEN = 16
 BLOCKS = 256

@@ -80,7 +80,6 @@ class LayerPlan:
     layer: "DeepseekV4DecoderLayer"
     weights: Any
     ffn_only: bool
-    cache_layers: tuple[str, ...] = ()
     ratio: int = 0
     index: bool = False
     swa_key: str | None = None
@@ -114,11 +113,9 @@ class DSV41Kernel:
         # ``run`` owns, so no launch is built for them.
         end = getattr(model, "end_layer", len(model.layers))
         self.layer_end = getattr(model, "decoder_replay_start", end)
-        self.words = torch.zeros(world, dtype=torch.int32, device=device)
         self.widths = widths
         self.swa_keys: list[str] = []
         self.comp_keys: list[str] = []
-        self.need_swa = False
         self.plans: dict[int, LayerPlan] = {}
 
         tp_size = vllm_config.parallel_config.tensor_parallel_size
@@ -130,16 +127,13 @@ class DSV41Kernel:
             self.plans[layer.attn.layer_id] = plan
             if plan.ffn_only:
                 continue
-            self.need_swa = True
             for key, keys in (
                 (plan.swa_key, self.swa_keys),
                 (plan.comp_key, self.comp_keys),
             ):
                 if key is not None and key not in keys:
                     keys.append(key)
-        self.cache_layers = tuple(
-            sorted({n for p in self.plans.values() for n in p.cache_layers})
-        )
+        self.cache_layers = tuple(sorted(set(self.swa_keys) | set(self.comp_keys)))
 
     def _plan_layer(self, layer, tp_size: int) -> LayerPlan | None:
         """This layer's launch, or None when it keeps vLLM's path throughout."""
@@ -170,8 +164,6 @@ class DSV41Kernel:
             layer,
             weights,
             ffn_only=False,
-            cache_layers=(attn.swa_cache_layer.prefix,)
-            + ((comp_key,) if comp_key is not None else ()),
             ratio=attn.compress_ratio,
             index=attn.indexer is not None,
             swa_key=attn.swa_cache_layer.prefix,
@@ -295,13 +287,12 @@ class DSV41Kernel:
         for idx in range(self.embed_layer, self.layer_end):
             layer = model.layers[idx]
             plan = self.plans.get(layer.attn.layer_id)
-            ffn = (
-                partial(self.launch_ffn, plan)
-                if plan is not None and plan.ffn_only
-                else None
-            )
-            out = None
-            if plan is not None and not plan.ffn_only:
+            ffn = out = None
+            if plan is None:
+                pass
+            elif plan.ffn_only:
+                ffn = partial(self.launch_ffn, plan)
+            else:
                 out = self.launch_whole(
                     plan,
                     hidden,
@@ -410,7 +401,7 @@ def _refuse_model(model) -> list[str]:
 
 def _skip_layer(layer) -> str | None:
     """Why this layer keeps vLLM's path for every step, or None when it takes a
-    launch (whole or FFN only: ``_build`` picks which)."""
+    launch (whole or FFN only: ``_plan_layer`` picks which)."""
     ffn = layer.ffn
     if layer.use_sequence_parallel:
         return "sequence-parallel layer"
@@ -453,8 +444,7 @@ def _skip_step(vllm_config, decode: DSV41Kernel, width: int) -> str | None:
     """Why this step keeps vLLM's path at every layer, or None when the kernels
     take it. One verdict for every kernel layer, from the batch the whole TP
     group sees alike."""
-    fc = get_forward_context()
-    md = fc.attn_metadata
+    md = get_forward_context().attn_metadata
     if not decode.plans:
         return "no layer takes a launch"
     if not isinstance(md, dict):  # a profile / dummy run, or DBO ubatches
@@ -469,8 +459,6 @@ def _skip_step(vllm_config, decode: DSV41Kernel, width: int) -> str | None:
             return "not a decode-only step"
         if swa.num_decode_tokens > width:
             return "more decode tokens than rows"
-        if not decode.need_swa:
-            continue
         if swa.decode_swa_width != SWA_WIDTH:
             return f"SWA width {swa.decode_swa_width}"
         if (
@@ -553,10 +541,6 @@ def _refuse_caches(vllm_config, decode: DSV41Kernel, caches) -> list[str]:
     return reasons
 
 
-def _build(vllm_config, model, widths: tuple[int, ...]) -> DSV41Kernel:
-    return DSV41Kernel(vllm_config, model, widths)
-
-
 DECODE_SPEC = DecodeSpec[DSV41Kernel](
     name="dsv41-cdna4",
     supports=frozenset({Feature.PIPELINE_PARALLEL, Feature.SPECULATIVE_DECODING}),
@@ -565,7 +549,5 @@ DECODE_SPEC = DecodeSpec[DSV41Kernel](
     refuse_model=_refuse_model,
     refuse_caches=_refuse_caches,
     skip_step=_skip_step,
-    build=_build,
+    build=DSV41Kernel,
 )
-
-DECODE_SPECS = (DECODE_SPEC,)
