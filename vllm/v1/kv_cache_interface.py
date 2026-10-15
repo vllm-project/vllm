@@ -1492,6 +1492,19 @@ class KVCacheConfig:
     kv_tp_replicas: int = 1
     """Consecutive TP ranks holding identical KV for every layer (1: none)."""
 
+    @property
+    def allocated_bytes(self) -> int:
+        """Device KV backing bytes, excluding host pools and allocator padding."""
+        sizes = {
+            tensor.size for tensor in self.kv_cache_tensors if not tensor.host_resident
+        }
+        if not sizes:
+            return 0
+        assert len(sizes) == 1, (
+            "Device KV cache tensors must share one backing allocation."
+        )
+        return sizes.pop()
+
     @cached_property
     def transfer_group_ids(self) -> tuple[int, ...]:
         """IDs of cache groups that participate in external KV transfer."""

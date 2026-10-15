@@ -11,12 +11,13 @@ block); the allocation is the same either way.
 
 from dataclasses import replace
 from math import lcm
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 import torch
 
-from vllm.config import CacheConfig
+from vllm.config import CacheConfig, ParallelConfig
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.kv_cache_planning import (
     _get_kv_cache_bytes_per_block,
@@ -29,11 +30,15 @@ from vllm.v1.core.kv_cache_utils import (
     generate_scheduler_kv_cache_config,
     resolve_kv_cache_block_sizes,
 )
-from vllm.v1.hisparse.layout import _build_hisparse_kv_cache_tensors
+from vllm.v1.hisparse.layout import (
+    _build_hisparse_kv_cache_tensors,
+    get_hisparse_kv_cache_config,
+)
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     FullAttentionSpec,
     HiSparseHotSpec,
+    KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheLayout,
     KVCacheSpec,
@@ -486,6 +491,38 @@ class TestSlidingWindowBucketCap:
 
 
 class TestDensePacking:
+    def test_empty_cache_has_zero_allocated_bytes(self):
+        config = KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[])
+        assert config.allocated_bytes == 0
+
+    @pytest.mark.parametrize("host_budget", [MEMORY // 8, MEMORY])
+    def test_allocated_bytes_excludes_hisparse_host_pool(self, host_budget):
+        cache = CacheConfig()
+        cache.kv_cache_layout = "BLHNC"
+        vllm_config = SimpleNamespace(
+            cache_config=cache,
+            model_config=SimpleNamespace(max_model_len=64),
+            parallel_config=ParallelConfig(),
+        )
+        spec = _mla(128)
+        groups = [
+            KVCacheGroupSpec(["source"], spec, host_resident=True),
+            KVCacheGroupSpec(["indexer"], spec),
+            KVCacheGroupSpec(["resident"], spec),
+        ]
+        config = get_hisparse_kv_cache_config(
+            vllm_config, groups, MEMORY // 8, host_budget
+        )
+        host_tensors = [t for t in config.kv_cache_tensors if t.host_resident]
+        device_tensors = [t for t in config.kv_cache_tensors if not t.host_resident]
+        assert [t.size for t in host_tensors] == [host_budget]
+        assert [t.size for t in device_tensors] == [MEMORY // 8, MEMORY // 8]
+        assert config.allocated_bytes == MEMORY // 8
+        assert replace(config, hisparse_shared_host_pool=True).allocated_bytes == (
+            MEMORY // 8
+        )
+        assert replace(config, kv_cache_tensors=host_tensors).allocated_bytes == 0
+
     def test_bytes_per_block_is_largest_group(self):
         groups, g1, g2 = _mixed_page_groups()
         assert _get_kv_cache_bytes_per_block(
@@ -532,6 +569,7 @@ class TestDensePacking:
         assert tensor.layers == list(specs)
         assert config.num_blocks == MEMORY // (4 * page)
         assert tensor.size == 4 * page * config.num_blocks
+        assert config.allocated_bytes == tensor.size
         if layout == "LBNHC":
             assert (tensor.layer_stride, tensor.block_stride) == (
                 page * config.num_blocks,
