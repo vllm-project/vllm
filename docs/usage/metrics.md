@@ -50,6 +50,10 @@ handler succeeded; `error` covers returned errors and interrupted/failed
 handlers. Validation errors before the handler runs are not counted.
 Non-tool requests are excluded, and counting does not require tracing.
 
+This provides tool-specific totals that `http_requests_total` does not separate,
+even when traces are unsampled or disabled. It observes only requests received
+by this server; it cannot detect tool fields dropped or changed upstream.
+
 Configure the render server's existing `--otlp-traces-endpoint` option to
 export W3C-linked server spans for rendering, tokenization, detokenization,
 and derendering. Tool-summary attributes are limited to Chat Completions

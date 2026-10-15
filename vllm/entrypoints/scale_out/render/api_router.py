@@ -41,8 +41,8 @@ def _tool_render_counter(
     if _tool_call_render_requests is None:
         _tool_call_render_requests = Counter(
             "vllm:tool_call_render_requests_total",
-            "Validated tool-field requests handled by HTTP render endpoints, "
-            "counted once per request. "
+            "Validated tool-field requests received by HTTP render endpoints, "
+            "counted once per request independently of trace sampling. "
             "Rendered means rendering succeeded, not template equivalence.",
             ["model_name", "api_surface", "status"],
         )
