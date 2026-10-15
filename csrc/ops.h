@@ -579,10 +579,6 @@ void situ_and_mul_quant(
     int64_t group_size = 0,
     std::optional<torch::stable::Tensor> num_valid_tokens = std::nullopt,
     int64_t topk = 1);
-void masked_situ_and_mul(torch::stable::Tensor& out,
-                         torch::stable::Tensor& input,
-                         const torch::stable::Tensor& expert_num_tokens,
-                         double beta = 1.0, double linear_beta = -1.0);
 void masked_moe_activation(torch::stable::Tensor& out,
                            torch::stable::Tensor& input,
                            const torch::stable::Tensor& valid_token_counts,
