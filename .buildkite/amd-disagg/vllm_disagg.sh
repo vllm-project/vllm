@@ -121,6 +121,35 @@ resolve_topology() {
     PROXY_IP="${_PROXY_IP_OVERRIDE:-${PREFILL_MASTER_ADDR}}"
 }
 
+# Rebuild MoRI from MORI_COMMIT when the topology needs a newer one than the
+# image was built with; install_mori.sh no-ops for every other topology.
+#
+# Called from main() rather than from the container's command line so the gate
+# reads WIDE_EP_MODE/xP/yD only after load_config and resolve_topology have
+# applied cluster.sh and the --wide-ep-mode override. Reading the raw docker
+# environment instead would miss those and skip (or trigger) the rebuild for
+# the wrong runs.
+ensure_pinned_mori() {
+    local script="${SCRIPT_DIR}/install_mori.sh"
+    [[ -f "${script}" ]] || return 0
+
+    # Only the roles that actually load MoRI; proxy/bench/accuracy never do.
+    case "${ROLE}" in
+        node|prefill|decode) ;;
+        *) return 0 ;;
+    esac
+
+    # DRY_RUN resolves and prints the plan without side effects, so a build
+    # (tens of minutes, writes to shared NFS) must not happen here either.
+    if [[ "${DRY_RUN:-0}" == "1" ]]; then
+        log "DRY_RUN: skipping pinned MoRI check"
+        return 0
+    fi
+
+    WIDE_EP_MODE="${WIDE_EP_MODE}" xP="${xP}" yD="${yD}" \
+        bash "${script}" || die "install_mori.sh failed (MORI_COMMIT=${MORI_COMMIT:-unset})"
+}
+
 # ============================================================================
 # Non-server roles
 # ============================================================================
@@ -621,6 +650,7 @@ main() {
     parse_args "$@"
     load_config
     resolve_topology
+    ensure_pinned_mori
     case "${ROLE}" in
         node)     run_node ;;
         proxy)    run_proxy ;;
