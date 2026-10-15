@@ -321,8 +321,8 @@ def _build(monkeypatch, config=None, model=None, **layer_overrides):
     return kit.make_decode(config, model), model
 
 
-def _launch(decode, layer_id: int, width: int = 1):
-    return decode.kernel.kernels[layer_id, width]
+def _plan(decode, layer_id: int):
+    return decode.kernel.plans[layer_id]
 
 
 def _indexer():
@@ -362,7 +362,7 @@ def test_layers_take_whole_or_ffn_launch(monkeypatch, overrides, ffn_only):
     them keeps vLLM's attention and runs its FFN half as one launch, from
     wo_b's unreduced output."""
     decode, model = _build(monkeypatch, **overrides())
-    assert {k.ffn_only for k in decode.kernel.kernels.values()} == {ffn_only}
+    assert {p.ffn_only for p in decode.kernel.plans.values()} == {ffn_only}
     assert all(layer.attn.wo_b.reduce_results is not ffn_only for layer in model.layers)
 
 
@@ -381,7 +381,7 @@ def test_skipped_layers_keep_vllm_path(monkeypatch, skip):
         for key, value in skip.items():
             setattr(layer, key, value)
     decode, _ = _build(monkeypatch, config=config, model=model)
-    assert not decode.kernel.kernels
+    assert not decode.kernel.plans
 
 
 def test_moe_routing_outside_the_kernels_keeps_vllm_path(monkeypatch):
@@ -390,7 +390,7 @@ def test_moe_routing_outside_the_kernels_keeps_vllm_path(monkeypatch):
     for layer in model.layers:
         layer.ffn.n_routed_experts = 256
     decode, _ = _build(monkeypatch, config=config, model=model)
-    assert not decode.kernel.kernels
+    assert not decode.kernel.plans
 
 
 def _step(decode, model, metadata, width=1):
@@ -493,8 +493,8 @@ def test_whole_launch_runs_the_layer(monkeypatch):
     decode, model = _build(monkeypatch)
     positions = torch.zeros(1, dtype=torch.long)
     with forward(decode.vllm_config, CUDAGraphMode.FULL, _metadata(model)):
-        kernel = _launch(decode, 1)
-        out = kernel.launch(
+        out = decode.kernel.launch_whole(
+            _plan(decode, 1),
             torch.zeros(1, HIDDEN),
             positions,
             torch.zeros(1, 4, HIDDEN),
@@ -515,8 +515,9 @@ def test_first_layer_takes_the_embedding(monkeypatch):
     decode, model = _build(monkeypatch)
     positions = torch.zeros(1, dtype=torch.long)
     with forward(decode.vllm_config, CUDAGraphMode.FULL, _metadata(model)):
-        kernel = _launch(decode, 0)
-        out = kernel.launch(torch.zeros(1, HIDDEN), positions, None, None, None, None)
+        out = decode.kernel.launch_whole(
+            _plan(decode, 0), torch.zeros(1, HIDDEN), positions, None, None, None, None
+        )
     assert out[0] == "whole" and not out[2]["fold"]
     assert out[1][2].shape == (1, 4, HIDDEN)
 
@@ -524,9 +525,10 @@ def test_first_layer_takes_the_embedding(monkeypatch):
 def test_ffn_launch_takes_wo_b_unreduced(monkeypatch):
     decode, model = _build(monkeypatch, compressor=object())
     with forward(decode.vllm_config, CUDAGraphMode.FULL, _metadata(model)):
-        kernel = _launch(decode, 1)
-        assert kernel.ffn_only
-        out = kernel.launch(
+        plan = _plan(decode, 1)
+        assert plan.ffn_only
+        out = decode.kernel.launch_ffn(
+            plan,
             torch.zeros(1, HIDDEN),
             torch.zeros(1, 4, HIDDEN),
             torch.zeros(1, 4, 1),
@@ -545,14 +547,13 @@ def test_run_takes_every_layer_the_way_its_launch_allows(monkeypatch):
     model.layers[2].attn.compressor = object()
     model.layers[4].use_sequence_parallel = True
     decode, _ = _build(monkeypatch, config=config, model=model)
-    for (layer_id, width), kernel in decode.kernel.kernels.items():
-        if width != 1 or kernel.ffn_only:
-            continue
-        taken = model.layers[layer_id].taken
-        declines = layer_id == 1
-        kernel.launch = lambda *a, _t=taken, _id=layer_id, _d=declines, **kw: (
-            _t.append(("launch", _id)) or (None if _d else _stream())
-        )
+
+    def launch_whole(plan, *args, **kwargs):
+        layer_id = plan.layer.attn.layer_id
+        model.layers[layer_id].taken.append(("launch", layer_id))
+        return None if layer_id == 1 else _stream()
+
+    decode.kernel.launch_whole = launch_whole
 
     step = Step(width=1, positions=torch.zeros(1, dtype=torch.long))
     out = decode.kernel.run(step, None, torch.zeros(1, HIDDEN))
@@ -574,8 +575,13 @@ def test_launch_declines_a_layout_it_cannot_read(monkeypatch):
     decode, model = _build(monkeypatch)
     positions = torch.zeros(1, dtype=torch.long)
     with forward(decode.vllm_config, CUDAGraphMode.FULL, _metadata(model)):
-        kernel = _launch(decode, 1)
-        out = kernel.launch(
-            torch.zeros(1, 4, HIDDEN), positions, None, None, None, None
+        out = decode.kernel.launch_whole(
+            _plan(decode, 1),
+            torch.zeros(1, 4, HIDDEN),
+            positions,
+            None,
+            None,
+            None,
+            None,
         )
     assert out is None

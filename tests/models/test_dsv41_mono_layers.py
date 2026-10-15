@@ -194,15 +194,12 @@ class MonoProbe:
     def mono_layers(self) -> dict:
         model = self.model_runner.model  # type: ignore[attr-defined]
         decode = getattr(model, "specialized_decode", None)
-        kernels = {} if decode is None else decode.kernel.kernels
+        plans = {} if decode is None else decode.kernel.plans
         layers = {
-            i: next(
-                (
-                    ["ffn" if k.ffn_only else "whole", k.weights is not None]
-                    for (j, _), k in kernels.items()
-                    if j == i
-                ),
-                None,
+            i: (
+                ["ffn" if plans[i].ffn_only else "whole", plans[i].weights is not None]
+                if i in plans
+                else None
             )
             for i in self._decoder_layers()
         }

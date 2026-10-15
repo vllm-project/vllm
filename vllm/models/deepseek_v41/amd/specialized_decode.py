@@ -3,6 +3,8 @@
 """DeepSeek-V4.1's specialized decode on ROCm CDNA4 (``--monokernel``,
 RFC #60904)."""
 
+from dataclasses import dataclass
+from functools import partial
 from typing import TYPE_CHECKING, Any, cast
 
 import torch
@@ -67,152 +69,29 @@ def _select(
     )
 
 
-class DSV41LayerKernel:
-    """What both launches share: the layer, its width and its weight views,
-    with the launch shape left to the subclass."""
+@dataclass(frozen=True)
+class LayerPlan:
+    """One decoder layer's launch, settled at load.
 
-    ffn_only = False
+    An ``ffn_only`` layer keeps vLLM's attention and its launch takes wo_b's
+    unreduced output, so its weights are all it has; the rest is what a
+    whole-layer launch reads off the layer.
+    """
 
-    def __init__(
-        self, decode: "DSV41Kernel", layer: "DeepseekV4DecoderLayer", width: int
-    ):
-        self.decode = decode
-        self.layer = layer
-        self.width = width
-        self.weights = decode.weights[layer.attn.layer_id]
-        self.cache_layers: tuple[str, ...] = ()
-
-    def warmup_keys(self) -> list[Any]:
-        raise NotImplementedError
-
-    def compile(self, key: Any) -> None:
-        raise NotImplementedError
-
-    def launch(self, *args, **kwargs) -> Any:
-        raise NotImplementedError
-
-
-class WholeLayer(DSV41LayerKernel):
-    """The whole backbone layer as K1 and K2, from the layer's own inputs."""
-
-    def __init__(
-        self, decode: "DSV41Kernel", layer: "DeepseekV4DecoderLayer", width: int
-    ):
-        super().__init__(decode, layer, width)
-        attn = layer.attn
-        self.ratio = attn.compress_ratio
-        self.index = attn.indexer is not None
-        self.swa_key = attn.swa_cache_layer.prefix
-        self.comp_key = attn.compressed_cache_prefix
-        self.cache_layers = (self.swa_key,) + (
-            (self.comp_key,) if self.comp_key is not None else ()
-        )
-        # K1's seam folds the owed post into the residual, except where the
-        # residual arrives settled: the embedding, or after the Engram write.
-        settled = attn.layer_id == decode.embed_layer or layer.engram is not None
-        self.folds = (True, False) if settled else (True,)
-
-    def warmup_keys(self) -> list[Any]:
-        return [(self.width, self.ratio, f, self.index) for f in self.folds]
-
-    def compile(self, key: Any) -> None:
-        width, ratio, fold, index = key
-        self.decode.runner.scratch(width)
-        self.decode.runner.kernels(width, ratio, fold=fold, index=index)
-
-    def launch(
-        self,
-        x: torch.Tensor,
-        positions: torch.Tensor,
-        residual: torch.Tensor | None,
-        post_mix: torch.Tensor | None,
-        res_mix: torch.Tensor | None,
-        pre_mix: torch.Tensor | None,
-        engram_hashes: torch.Tensor | None = None,
-        engram_mask: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, ...] | None:
-        layer, attn = self.layer, self.layer.attn
-        runner = self.decode.runner
-        first = residual is None
-        if first and x.dim() != 2:
-            return None
-        tensors = (x,) if first else (x, residual, post_mix, res_mix, pre_mix)
-        if not all(t is not None and t.is_contiguous() for t in tensors):
-            return None
-        fold = True
-        if first:
-            residual = x.unsqueeze(1).expand(-1, layer.hc_mult, -1).contiguous()
-            pre_mix = runner.first_pre_mix(x.shape[0])
-            post_mix = res_mix = pre_mix  # unread without the fold
-            fold = False
-        elif layer.engram is not None and engram_hashes is not None:
-            residual = layer.mhc_post(x, residual, post_mix, res_mix)
-            hashes = engram_hashes[:, layer.engram.layer_hash_index]
-            residual = layer.engram(residual, hashes, engram_mask)
-            fold = False
-        md = cast("dict[str, Any]", get_forward_context().attn_metadata)
-        swa = md[self.swa_key]
-        kw: dict[str, Any] = {}
-        if self.index:
-            kw["select"] = lambda normed, qr: _select(layer, positions, normed, qr)
-        if self.ratio:
-            comp = md[cast("str", self.comp_key)]
-            kw.update(
-                topk_indices=attn.topk_indices_buffer,
-                comp_cache=_record_view(
-                    attn._compressed_kv_cache(), comp.block_size // self.ratio
-                ),
-                comp_block_table=comp.block_table,
-            )
-        return runner.forward(
-            self.weights,
-            x,
-            residual,
-            post_mix,
-            res_mix,
-            pre_mix,
-            positions,
-            swa.slot_mapping,
-            _record_view(attn.swa_cache_layer.kv_cache, swa.block_size),
-            swa.decode_swa_indices,
-            swa.decode_swa_lens,
-            swa.token_to_req_indices,
-            fold=fold,
-            **kw,
-        )
-
-
-class FfnSeam(DSV41LayerKernel):
-    """The FFN seam, MoE and both reductions as one launch, from wo_b's
-    unreduced output after vLLM's attention."""
-
-    ffn_only = True
-
-    def warmup_keys(self) -> list[Any]:
-        return [(self.width, "ffn")]
-
-    def compile(self, key: Any) -> None:
-        self.decode.runner.scratch(key[0])
-        self.decode.runner.ffn_kernel(key[0])
-
-    def launch(
-        self,
-        part: torch.Tensor,
-        residual: torch.Tensor,
-        post_mix: torch.Tensor,
-        res_mix: torch.Tensor,
-        pre_mix: torch.Tensor,
-    ) -> tuple[torch.Tensor, ...] | None:
-        tensors = (part, residual, post_mix, res_mix, pre_mix)
-        if not all(t.is_contiguous() for t in tensors):
-            return None
-        return self.decode.runner.ffn(self.weights, *tensors)
+    layer: "DeepseekV4DecoderLayer"
+    weights: Any
+    ffn_only: bool
+    cache_layers: tuple[str, ...] = ()
+    ratio: int = 0
+    index: bool = False
+    swa_key: str | None = None
+    comp_key: str | None = None
+    folds: tuple[bool, ...] = ()
 
 
 class DSV41Kernel:
     """DeepSeek-V4.1's decode on this rank: the runner (one a rank, its peer
-    memory collective over the TP group), each kernel layer's weight views, and
-    a launch per (layer, width).
+    memory collective over the TP group) and a launch plan per kernel layer.
 
     ``run`` owns the backbone's layer loop, between the model's own prologue
     and epilogue: those keep the engram hashes, the sequence-parallel shard and
@@ -237,18 +116,27 @@ class DSV41Kernel:
         end = getattr(model, "end_layer", len(model.layers))
         self.layer_end = getattr(model, "decoder_replay_start", end)
         self.words = torch.zeros(world, dtype=torch.int32, device=device)
-        self.weights: dict[int, Any] = {}
+        self.widths = widths
         self.swa_keys: list[str] = []
         self.comp_keys: list[str] = []
         self.need_swa = False
-        self.kernels: dict[tuple[int, int], DSV41LayerKernel] = {}
-        self._owners: dict[Any, DSV41LayerKernel] = {}
+        self.plans: dict[int, LayerPlan] = {}
 
         tp_size = vllm_config.parallel_config.tensor_parallel_size
         for layer in self._kernel_layers(model):
-            self._build_layer(layer, tp_size, widths)
+            plan = self._plan_layer(layer, tp_size)
+            self.plans[layer.attn.layer_id] = plan
+            if plan.ffn_only:
+                continue
+            self.need_swa = True
+            for key, keys in (
+                (plan.swa_key, self.swa_keys),
+                (plan.comp_key, self.comp_keys),
+            ):
+                if key is not None and key not in keys:
+                    keys.append(key)
         self.cache_layers = tuple(
-            sorted({n for k in self.kernels.values() for n in k.cache_layers})
+            sorted({n for p in self.plans.values() for n in p.cache_layers})
         )
 
     def _kernel_layers(self, model) -> list["DeepseekV4DecoderLayer"]:
@@ -264,11 +152,9 @@ class DSV41Kernel:
                 )
         return layers
 
-    def _build_layer(self, layer, tp_size: int, widths: tuple[int, ...]) -> None:
+    def _plan_layer(self, layer, tp_size: int) -> LayerPlan:
         why = _ffn_only(layer)
-        layer_id = layer.attn.layer_id
-        self.weights[layer_id] = _weights(layer, why is not None, tp_size)
-        launch: type[DSV41LayerKernel] = WholeLayer
+        weights = _weights(layer, why is not None, tp_size)
         if why is not None:
             logger.info_once(
                 "DSv4.1 specialized decode: the FFN launch for layers with %s", why
@@ -276,26 +162,122 @@ class DSV41Kernel:
             # A decode step hands wo_b's TP partial to the FFN launch; the layer
             # reduces it on the steps that keep vLLM's path.
             layer.attn.wo_b.reduce_results = False
-            launch = FfnSeam
-        else:
-            self.need_swa = True
-            for key, keys in (
-                (layer.attn.swa_cache_layer.prefix, self.swa_keys),
-                (layer.attn.compressed_cache_prefix, self.comp_keys),
-            ):
-                if key is not None and key not in keys:
-                    keys.append(key)
-        for width in widths:
-            kernel = launch(self, layer, width)
-            self.kernels[layer_id, width] = kernel
-            for key in kernel.warmup_keys():
-                self._owners.setdefault(key, kernel)
+            return LayerPlan(layer, weights, ffn_only=True)
+        attn = layer.attn
+        comp_key = attn.compressed_cache_prefix
+        # K1's seam folds the owed post into the residual, except where the
+        # residual arrives settled: the embedding, or after the Engram write.
+        settled = attn.layer_id == self.embed_layer or layer.engram is not None
+        return LayerPlan(
+            layer,
+            weights,
+            ffn_only=False,
+            cache_layers=(attn.swa_cache_layer.prefix,)
+            + ((comp_key,) if comp_key is not None else ()),
+            ratio=attn.compress_ratio,
+            index=attn.indexer is not None,
+            swa_key=attn.swa_cache_layer.prefix,
+            comp_key=comp_key,
+            folds=(True, False) if settled else (True,),
+        )
 
     def warmup_keys(self) -> list[Any]:
-        return list(self._owners)
+        keys: dict[Any, None] = {}
+        for plan in self.plans.values():
+            for width in self.widths:
+                if plan.ffn_only:
+                    keys[width, "ffn"] = None
+                else:
+                    for fold in plan.folds:
+                        keys[width, plan.ratio, fold, plan.index] = None
+        return list(keys)
 
     def compile(self, key: Any) -> None:
-        self._owners[key].compile(key)
+        self.runner.scratch(key[0])
+        if key[1] == "ffn":
+            self.runner.ffn_kernel(key[0])
+        else:
+            width, ratio, fold, index = key
+            self.runner.kernels(width, ratio, fold=fold, index=index)
+
+    def launch_whole(
+        self,
+        plan: LayerPlan,
+        x: torch.Tensor,
+        positions: torch.Tensor,
+        residual: torch.Tensor | None,
+        post_mix: torch.Tensor | None,
+        res_mix: torch.Tensor | None,
+        pre_mix: torch.Tensor | None,
+        engram_hashes: torch.Tensor | None = None,
+        engram_mask: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, ...] | None:
+        """The whole backbone layer as K1 and K2, from the layer's own inputs."""
+        layer, runner = plan.layer, self.runner
+        attn = layer.attn
+        first = residual is None
+        if first and x.dim() != 2:
+            return None
+        tensors = (x,) if first else (x, residual, post_mix, res_mix, pre_mix)
+        if not all(t is not None and t.is_contiguous() for t in tensors):
+            return None
+        fold = True
+        if first:
+            residual = x.unsqueeze(1).expand(-1, layer.hc_mult, -1).contiguous()
+            pre_mix = runner.first_pre_mix(x.shape[0])
+            post_mix = res_mix = pre_mix  # unread without the fold
+            fold = False
+        elif layer.engram is not None and engram_hashes is not None:
+            residual = layer.mhc_post(x, residual, post_mix, res_mix)
+            hashes = engram_hashes[:, layer.engram.layer_hash_index]
+            residual = layer.engram(residual, hashes, engram_mask)
+            fold = False
+        md = cast("dict[str, Any]", get_forward_context().attn_metadata)
+        swa = md[cast("str", plan.swa_key)]
+        kw: dict[str, Any] = {}
+        if plan.index:
+            kw["select"] = lambda normed, qr: _select(layer, positions, normed, qr)
+        if plan.ratio:
+            comp = md[cast("str", plan.comp_key)]
+            kw.update(
+                topk_indices=attn.topk_indices_buffer,
+                comp_cache=_record_view(
+                    attn._compressed_kv_cache(), comp.block_size // plan.ratio
+                ),
+                comp_block_table=comp.block_table,
+            )
+        return runner.forward(
+            plan.weights,
+            x,
+            residual,
+            post_mix,
+            res_mix,
+            pre_mix,
+            positions,
+            swa.slot_mapping,
+            _record_view(attn.swa_cache_layer.kv_cache, swa.block_size),
+            swa.decode_swa_indices,
+            swa.decode_swa_lens,
+            swa.token_to_req_indices,
+            fold=fold,
+            **kw,
+        )
+
+    def launch_ffn(
+        self,
+        plan: LayerPlan,
+        part: torch.Tensor,
+        residual: torch.Tensor,
+        post_mix: torch.Tensor,
+        res_mix: torch.Tensor,
+        pre_mix: torch.Tensor,
+    ) -> tuple[torch.Tensor, ...] | None:
+        """The FFN seam, MoE and both reductions as one launch, from wo_b's
+        unreduced output after vLLM's attention."""
+        tensors = (part, residual, post_mix, res_mix, pre_mix)
+        if not all(t.is_contiguous() for t in tensors):
+            return None
+        return self.runner.ffn(plan.weights, *tensors)
 
     def run(self, step: Step, input_ids, inputs_embeds, **kwargs) -> Any:
         model, positions = self.model, step.positions
@@ -314,12 +296,16 @@ class DSV41Kernel:
         final_aux_recon = None
         for idx in range(self.embed_layer, self.layer_end):
             layer = model.layers[idx]
-            launch = self.kernels.get((layer.attn.layer_id, step.width))
-            ffn = launch if launch is not None and launch.ffn_only else None
-            whole = launch if launch is not None and ffn is None else None
+            plan = self.plans.get(layer.attn.layer_id)
+            ffn = (
+                partial(self.launch_ffn, plan)
+                if plan is not None and plan.ffn_only
+                else None
+            )
             out = None
-            if whole is not None:
-                out = whole.launch(
+            if plan is not None and not plan.ffn_only:
+                out = self.launch_whole(
+                    plan,
                     hidden,
                     positions,
                     residual,
@@ -471,7 +457,7 @@ def _skip_step(vllm_config, decode: DSV41Kernel, width: int) -> str | None:
     group sees alike."""
     fc = get_forward_context()
     md = fc.attn_metadata
-    if not decode.kernels:
+    if not decode.plans:
         return "no layer takes a launch"
     if not 1 <= width <= MAX_ROWS:
         return f"{width} rows"

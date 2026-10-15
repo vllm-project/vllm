@@ -283,7 +283,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         residual: torch.Tensor | None = None,
         engram_hashes: torch.Tensor | None = None,
         engram_mask: torch.Tensor | None = None,
-        decode_ffn: typing.Any | None = None,
+        decode_ffn: Callable | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         # Layer 0's attention seam projects the 2-D embedding with the folded
         # hc_attn_fn_broadcast instead of the 4-stream residual with hc_attn_fn.
@@ -389,7 +389,7 @@ class DeepseekV4DecoderLayer(nn.Module):
             # come through here, and a new kernel should cover a whole layer
             # instead of reaching into one.
             if decode_ffn is not None:
-                out = decode_ffn.launch(x, residual, post_mix, res_mix, attn_pre)
+                out = decode_ffn(x, residual, post_mix, res_mix, attn_pre)
                 if out is not None:
                     return out
             x = tensor_model_parallel_all_reduce(x)
