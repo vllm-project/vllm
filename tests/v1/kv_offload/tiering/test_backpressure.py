@@ -21,6 +21,7 @@ from vllm.v1.kv_offload.base import (
     ReqContext,
     RequestOffloadingContext,
     ScheduleEndContext,
+    StoreTrigger,
     make_offload_key,
 )
 from vllm.v1.kv_offload.tiering.backpressure import (
@@ -246,7 +247,7 @@ class TestBackpressure:
 
     def _store_blocks(self, keys, ctx=_CTX):
         self._start_request(ctx)
-        result = self.manager.prepare_store(keys, ctx)
+        result = self.manager.prepare_store(keys, ctx, StoreTrigger.ON_COMPUTE)
         assert result is not None
         self.manager.complete_store(keys, ctx, success=True)
 
@@ -412,7 +413,7 @@ class TestBackpressure:
         keys2 = to_keys(range(10, 12))
         # Force-submit since pressure is on (cascade would skip).
         for k in keys2:
-            self.primary.prepare_store([k], _CTX)
+            self.primary.prepare_store([k], _CTX, StoreTrigger.ON_COMPUTE)
             self.primary.complete_store([k], _CTX)
         job_meta = self.manager.create_store_job(keys2, _CTX)
         job_meta.submit_time = time.monotonic() - mid_latency_s(len(keys2))
@@ -522,7 +523,7 @@ class TestBackpressure:
         # prepare_store with existing + new blocks.
         new = to_keys(range(10, 12))
         all_keys = existing + new
-        result = self.manager.prepare_store(all_keys, ctx)
+        result = self.manager.prepare_store(all_keys, ctx, StoreTrigger.ON_COMPUTE)
         assert result is not None
 
         # Existing blocks would normally cascade to request-level tier,

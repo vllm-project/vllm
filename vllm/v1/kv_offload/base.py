@@ -127,6 +127,23 @@ class LookupResult(Enum):
     RETRY = auto()
 
 
+class StoreTrigger(Enum):
+    """Why the connector asks the manager to store the keys."""
+
+    # The chunks are complete. The eager store.
+    ON_COMPUTE = auto()
+
+
+class StoreMode(Enum):
+    """When the connector offers the chunks of a request to the manager.
+
+    Set with the store_mode key of kv_connector_extra_config.
+    """
+
+    # Offer each chunk when it is computed (StoreTrigger.ON_COMPUTE).
+    EAGER = "eager"
+
+
 class OffloadPolicy(Enum):
     # Offload only newly-computed chunks as they arrive; prefix-hit
     # chunks (already offloaded by a prior request) are skipped.
@@ -375,6 +392,7 @@ class OffloadingManager(ABC):
         self,
         keys: Collection[OffloadKey],
         req_context: ReqContext,
+        trigger: StoreTrigger,
     ) -> PrepareStoreOutput | None:
         """Prepare the given blocks to be offloaded.
         The given blocks will be protected from eviction until
@@ -383,6 +401,7 @@ class OffloadingManager(ABC):
         Args:
             keys: the keys identifying the blocks.
             req_context: per-request context (e.g. kv_transfer_params).
+            trigger: why the connector asks for the store.
 
         Returns:
             A PrepareStoreOutput indicating which blocks need storing,
@@ -398,6 +417,7 @@ class OffloadingManager(ABC):
         keys: Collection[OffloadKey],
         req_context: ReqContext,
         success: bool = True,
+        trigger: StoreTrigger = StoreTrigger.ON_COMPUTE,
     ):
         """Marks blocks which were previously prepared to be stored, as stored.
         Following this call, the blocks become loadable.
@@ -408,6 +428,7 @@ class OffloadingManager(ABC):
             keys: the keys identifying the blocks.
             req_context: per-request context (e.g. kv_transfer_params).
             success: whether the blocks were stored successfully.
+            trigger: the trigger given to the matching prepare_store.
 
         """
         return
@@ -714,6 +735,9 @@ class OffloadingSpec(ABC):
         self.offload_prompt_only: bool = bool(
             self.extra_config.get("offload_prompt_only", True)
         )
+
+        # When the connector offers the chunks to the manager.
+        self.store_mode = StoreMode(self.extra_config.get("store_mode", "eager"))
 
         self.tokens_per_block = tuple(group.tokens_per_block for group in config.groups)
         self.tokens_per_hash = config.cache.tokens_per_hash
