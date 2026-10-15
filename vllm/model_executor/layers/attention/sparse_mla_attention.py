@@ -49,7 +49,10 @@ from vllm.v1.attention.backends.mla.sparse_utils import (
     triton_filter_and_convert_dcp_index,
 )
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
-from vllm.v1.attention.ops.dcp import MLADCPManager
+from vllm.v1.attention.ops.dcp import (
+    DCPValidTokenMask,
+    MLADCPManager,
+)
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.attention.ops.shardq import ShardQMetadata, build_shardq_split
 from vllm.v1.hisparse.runtime import (
@@ -240,6 +243,9 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
         self.cp_kv_cache_interleave_size = parallel_config.cp_kv_cache_interleave_size
         self.dcp_local_block_size = self.cp_kv_cache_interleave_size
         self.dcp_virtual_block_size = self.dcp_local_block_size * self.dcp_world_size
+        self.dcp_valid_token_mask = DCPValidTokenMask.from_config(
+            vllm_config, kv_cache_spec, device
+        )
 
         self.chunked_prefill_workspace_size = (
             self.determine_chunked_prefill_workspace_size(vllm_config)
@@ -473,6 +479,7 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
             prefill_max_seq_len=prefill_max_seq_len,
             prefill=prefill,
             cp_kv_cache_interleave_size=self.cp_kv_cache_interleave_size,
+            dcp_valid_token_mask=self.dcp_valid_token_mask.build(common_attn_metadata),
         )
         if self.use_shardq:
             metadata.shardq = build_shardq_metadata(
