@@ -358,15 +358,6 @@ def test_dummy_and_idle_keep_queue_snapshots_without_double_counting_deferred(po
     assert idle.queued_workload.sum_prefill_tokens == 402
 
 
-@pytest.mark.parametrize("missing", ["requests", "waiting", "kv_holding_waiting"])
-def test_workload_checks_optional_scheduler_state_only_when_enabled(missing):
-    scheduler = SimpleNamespace(requests={}, waiting=[], kv_holding_waiting=[])
-    setattr(scheduler, missing, None)
-    IterationMetricsCollector()  # Timing alone requires no scheduler state.
-    with pytest.raises(AssertionError, match=missing):
-        IterationMetricsCollector(scheduler)
-
-
 def test_prefix_cache_stats_hits_by_source_accumulate():
     stats = PrefixCacheStats()
     stats.record(

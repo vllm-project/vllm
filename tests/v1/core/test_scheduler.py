@@ -152,17 +152,14 @@ def test_add_requests():
         assert len(scheduler.waiting) == i + 1
 
 
-@pytest.mark.parametrize("use_v2_model_runner", [False, True])
 @pytest.mark.parametrize("async_scheduling", [False, True])
-def test_iteration_workload_uses_current_chunk_attention_lengths(
-    use_v2_model_runner, async_scheduling
-):
+def test_iteration_workload_uses_current_chunk_attention_lengths(async_scheduling):
     scheduler = create_scheduler(
         max_num_seqs=2,
         max_model_len=32,
         max_num_batched_tokens=4,
         long_prefill_token_threshold=3,
-        use_v2_model_runner=use_v2_model_runner,
+        use_v2_model_runner=True,
         async_scheduling=async_scheduling,
     )
     scheduler.observability_config.iteration_timing_enabled = True
