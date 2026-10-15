@@ -97,6 +97,9 @@ from vllm.model_executor.kernels.linear.mxfp4.rdna3_hip import (
 from vllm.model_executor.kernels.linear.mxfp4.xpu import (
     XPUMxFp4LinearKernel,
 )
+from vllm.model_executor.kernels.linear.mxfp4.zentorch import (
+    ZentorchMxFp4LinearKernel,
+)
 from vllm.model_executor.kernels.linear.mxfp6 import (
     MxFp6LinearKernel,
     MxFp6LinearLayerConfig,
@@ -171,6 +174,9 @@ from vllm.model_executor.kernels.linear.nvfp4.marlin import (
 )
 from vllm.model_executor.kernels.linear.nvfp4.pytorch import (
     TorchNvFp4LinearKernel,
+)
+from vllm.model_executor.kernels.linear.nvfp4.zentorch import (
+    ZentorchNvFp4LinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm import (
     Fp8BlockScaledMMLinearKernel,
@@ -610,6 +616,9 @@ _POSSIBLE_NVFP4_KERNELS: dict[PlatformEnum, list[type[NvFp4LinearKernel]]] = {
     PlatformEnum.ROCM: [
         EmulationNvFp4LinearKernel,
     ],
+    PlatformEnum.CPU: [
+        ZentorchNvFp4LinearKernel,
+    ],
 }
 
 _POSSIBLE_MXFP6_KERNELS: dict[PlatformEnum, list[type[MxFp6LinearKernel]]] = {
@@ -638,6 +647,9 @@ _POSSIBLE_MXFP4_KERNELS: dict[PlatformEnum, list[type[MxFp4LinearKernel]]] = {
     PlatformEnum.XPU: [
         XPUMxFp4LinearKernel,
         TorchMxFp4LinearKernel,
+    ],
+    PlatformEnum.CPU: [
+        ZentorchMxFp4LinearKernel,
     ],
 }
 

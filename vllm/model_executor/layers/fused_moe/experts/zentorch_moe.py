@@ -24,15 +24,19 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kInt4Static,
     kInt4Static32,
+    kMxfp4Static,
+    kNvfp4Dynamic,
+    kNvfp4Static,
 )
 
 
-class ZentorchExpertsInt4(mk.FusedMoEExpertsMonolithic):
-    """DA8W4 (W4A8) group-quantized monolithic MoE experts."""
+class ZentorchExpertsW4(mk.FusedMoEExpertsMonolithic):
+    """Shared body for zentorch's four-bit monolithic MoE experts.
 
-    # swiglu_oai_mul reads gate/up interleaved, not in the half-split order the
-    # weight loader leaves behind.
-    requires_interleaved_w13 = True
+    DA8W4, MXFP4 and NVFP4 are the same call to the kernel: nibbles left packed
+    at four bits plus one float scale per K-group, which the oracles convert
+    each checkpoint's scales into.
+    """
 
     def __init__(
         self,
@@ -63,7 +67,7 @@ class ZentorchExpertsInt4(mk.FusedMoEExpertsMonolithic):
 
     @staticmethod
     def _supports_current_device() -> bool:
-        return has_zentorch_op(["zentorch_fused_moe", "zentorch_woq_repack_weight"])
+        return has_zentorch_op(["zentorch_fused_moe"])
 
     @staticmethod
     def is_supported_config(
@@ -101,16 +105,6 @@ class ZentorchExpertsInt4(mk.FusedMoEExpertsMonolithic):
         # apply() passes select_experts' global ids straight to the kernel, so
         # every expert has to be resident on the rank.
         return not moe_parallel_config.use_ep
-
-    @staticmethod
-    def _supports_quant_scheme(
-        weight_key: QuantKey | None,
-        activation_key: QuantKey | None,
-    ) -> bool:
-        return (weight_key, activation_key) in [
-            (kInt4Static, None),
-            (kInt4Static32, None),
-        ]
 
     @staticmethod
     def _supports_routing_method(
@@ -153,10 +147,10 @@ class ZentorchExpertsInt4(mk.FusedMoEExpertsMonolithic):
         topk_group: int | None = None,
         routing_replay_out: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        name = type(self).__name__
         if apply_router_weight_on_input:
             raise NotImplementedError(
-                "ZentorchExpertsInt4 does not support "
-                "apply_router_weight_on_input=True."
+                f"{name} does not support apply_router_weight_on_input=True."
             )
 
         if (
@@ -164,7 +158,7 @@ class ZentorchExpertsInt4(mk.FusedMoEExpertsMonolithic):
             and self.custom_routing_function is None
         ):
             raise RuntimeError(
-                "ZentorchExpertsInt4 needs the model's custom_routing_function "
+                f"{name} needs the model's custom_routing_function "
                 "for RoutingMethodType.Custom."
             )
 
@@ -202,4 +196,69 @@ class ZentorchExpertsInt4(mk.FusedMoEExpertsMonolithic):
         return output
 
 
-__all__ = ["ZentorchExpertsInt4"]
+class ZentorchExpertsInt4(ZentorchExpertsW4):
+    """DA8W4 (W4A8) group-quantized monolithic MoE experts."""
+
+    # swiglu_oai_mul reads gate/up interleaved, not in the half-split order the
+    # weight loader leaves behind.
+    requires_interleaved_w13 = True
+
+    @staticmethod
+    def _supports_current_device() -> bool:
+        return has_zentorch_op(["zentorch_fused_moe", "zentorch_woq_repack_weight"])
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        return (weight_key, activation_key) in [
+            (kInt4Static, None),
+            (kInt4Static32, None),
+        ]
+
+
+class ZentorchExpertsMxfp4(ZentorchExpertsW4):
+    """MXFP4 monolithic MoE experts, served through zentorch's W4A8 kernel.
+
+    E2M1 codes are exactly representable as int8 against a halved E8M0 scale,
+    so the weights stay four-bit in memory and are never requantized. w13 is
+    passed through as gpt-oss ships it, gate and up already interleaved, which
+    is what the kernel's swiglu_oai expects.
+    """
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        return (weight_key, activation_key) == (kMxfp4Static, None)
+
+
+class ZentorchExpertsNvfp4(ZentorchExpertsW4):
+    """NVFP4 monolithic MoE experts, served through zentorch's W4A8 kernel.
+
+    Same E2M1 nibbles as MXFP4 over groups of 16, so the kernel is unchanged
+    and the weights stay four-bit. w13 arrives in the canonical split-halves
+    layout and ZenDNN's pack interleaves gate with up for silu_and_mul.
+    """
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        # The kernel quantizes bf16 activations to int8 itself, so a W4A4
+        # checkpoint's activation scales are simply unused.
+        return weight_key == kNvfp4Static and activation_key in (
+            None,
+            kNvfp4Dynamic,
+        )
+
+
+__all__ = [
+    "ZentorchExpertsInt4",
+    "ZentorchExpertsMxfp4",
+    "ZentorchExpertsNvfp4",
+    "ZentorchExpertsW4",
+]

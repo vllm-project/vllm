@@ -144,6 +144,10 @@ MoEBackend = Literal[
     "hpc",
     "emulation",
     "rdna3",
+    # CPU has two MXFP4 MoE backends now, so the name has to be selectable to
+    # pick between them.
+    "cpu",
+    "zen_cpu",
 ]
 
 FLASHINFER_MOE_EP_CUTEDSL = "flashinfer_moe_ep_cutedsl"

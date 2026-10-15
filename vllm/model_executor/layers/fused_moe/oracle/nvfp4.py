@@ -37,6 +37,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
 )
 from vllm.model_executor.utils import move_parameter
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -53,6 +54,7 @@ class NvFp4MoeBackend(Enum):
     HUMMING = "HUMMING"
     EMULATION = "EMULATION"
     FLASHINFER_MOE_EP_CUTEDSL = "FLASHINFER_MOE_EP_CUTEDSL"
+    ZEN_CPU = "ZEN_CPU"
 
 
 FLASHINFER_NVFP4_MOE_BACKENDS = [
@@ -157,6 +159,12 @@ def backend_to_kernel_cls(
         )
 
         return [FlashInferMoeEpExperts]
+    elif backend == NvFp4MoeBackend.ZEN_CPU:
+        from vllm.model_executor.layers.fused_moe.experts.zentorch_moe import (
+            ZentorchExpertsNvfp4,
+        )
+
+        return [ZentorchExpertsNvfp4]
     else:
         raise ValueError(f"Unknown NvFP4 MoE backend: {backend.value}")
 
@@ -174,6 +182,7 @@ def map_nvfp4_backend(runner_backend: MoEBackend) -> NvFp4MoeBackend:
         "marlin": NvFp4MoeBackend.MARLIN,
         "humming": NvFp4MoeBackend.HUMMING,
         "emulation": NvFp4MoeBackend.EMULATION,
+        "zen_cpu": NvFp4MoeBackend.ZEN_CPU,
     }
     if backend := mapping.get(runner_backend):
         return backend
@@ -212,6 +221,10 @@ def select_nvfp4_moe_backend(
         NvFp4MoeBackend.EMULATION,
     ]
     AVAILABLE_BACKENDS = prioritize_humming(AVAILABLE_BACKENDS)
+
+    # The backends above are all GPU kernels; on CPU only Zen serves NVFP4.
+    if current_platform.is_cpu():
+        AVAILABLE_BACKENDS = [NvFp4MoeBackend.ZEN_CPU]
 
     NVFP4_BACKENDS_WITH_CLAMP = {
         NvFp4MoeBackend.B12X,
@@ -509,6 +522,20 @@ def convert_to_nvfp4_moe_kernel_format(
     elif nvfp4_backend == NvFp4MoeBackend.FLASHINFER_MOE_EP_CUTEDSL:
         # The megakernel transforms the checkpoint tensors itself at init.
         pass
+    elif nvfp4_backend == NvFp4MoeBackend.ZEN_CPU:
+        from vllm.model_executor.kernels.linear.zentorch_utils import (
+            w4_group_scale_from_e4m3,
+        )
+
+        # The E2M1 codes go to zentorch as they are, keeping the weights
+        # four-bit; only the two scale levels fold into the per-group floats
+        # its W4A8 kernel takes. That kernel quantizes activations itself.
+        w13 = w13.data.contiguous()
+        w2 = w2.data.contiguous()
+        w13_scale = w4_group_scale_from_e4m3(w13_scale.data, w13_scale_2)
+        w2_scale = w4_group_scale_from_e4m3(w2_scale.data, w2_scale_2)
+        a13_scale = None
+        a2_scale = None
     else:
         raise ValueError(f"Unknown NvFp4 backend for MoE: {nvfp4_backend}")
 
@@ -552,7 +579,7 @@ def make_nvfp4_moe_quant_config(
             gemm1_beta=getattr(layer, "swiglu_beta", None),
             gemm1_clamp_limit=swiglu_limit,
         )
-    elif backend == NvFp4MoeBackend.MARLIN or (
+    elif backend in (NvFp4MoeBackend.MARLIN, NvFp4MoeBackend.ZEN_CPU) or (
         backend == NvFp4MoeBackend.B12X and use_a16
     ):
         return nvfp4_w4a16_moe_quant_config(
