@@ -11,7 +11,6 @@ from collections import Counter, defaultdict
 from collections.abc import Awaitable, Callable, Sequence
 from concurrent.futures import Future
 from dataclasses import dataclass
-from multiprocessing.connection import Connection
 from multiprocessing.queues import Queue
 from threading import Thread
 from typing import Any, TypeAlias, TypeVar
@@ -56,7 +55,8 @@ from vllm.v1.engine.tensor_ipc import TensorIpcSender
 from vllm.v1.engine.utils import (
     CoreEngineActorManager,
     CoreEngineProcManager,
-    get_engine_zmq_addresses,
+    EngineZmqAddresses,
+    get_engine_zmq_bind_addresses,
     launch_core_engines,
 )
 from vllm.v1.executor import Executor
@@ -181,7 +181,13 @@ class EngineCoreClient(ABC):
     def add_request(self, request: EngineCoreRequest) -> None:
         raise NotImplementedError
 
-    def profile(self, is_start: bool = True, profile_prefix: str | None = None) -> None:
+    def profile(
+        self,
+        is_start: bool = True,
+        profile_prefix: str | None = None,
+        delay_iterations: int | None = None,
+        max_iterations: int | None = None,
+    ) -> None:
         raise NotImplementedError
 
     def reset_mm_cache(self) -> None:
@@ -275,7 +281,11 @@ class EngineCoreClient(ABC):
         raise NotImplementedError
 
     async def profile_async(
-        self, is_start: bool = True, profile_prefix: str | None = None
+        self,
+        is_start: bool = True,
+        profile_prefix: str | None = None,
+        delay_iterations: int | None = None,
+        max_iterations: int | None = None,
     ) -> None:
         raise NotImplementedError
 
@@ -392,8 +402,19 @@ class InprocClient(EngineCoreClient):
         if self._finalizer.detach() is not None:
             self.engine_core.shutdown()
 
-    def profile(self, is_start: bool = True, profile_prefix: str | None = None) -> None:
-        self.engine_core.profile(is_start, profile_prefix)
+    def profile(
+        self,
+        is_start: bool = True,
+        profile_prefix: str | None = None,
+        delay_iterations: int | None = None,
+        max_iterations: int | None = None,
+    ) -> None:
+        self.engine_core.profile(
+            is_start,
+            profile_prefix,
+            delay_iterations=delay_iterations,
+            max_iterations=max_iterations,
+        )
 
     def reset_mm_cache(self) -> None:
         self.engine_core.reset_mm_cache()
@@ -517,10 +538,10 @@ class BackgroundResources:
                         with contextlib.suppress(Exception):
                             task.cancel()
 
-            if loop is not None:
+            if loop is not None and not loop.is_closed():
                 if in_loop(loop):
                     close_sockets_and_tasks()
-                elif not loop.is_closed():
+                else:
                     loop.call_soon_threadsafe(close_sockets_and_tasks)
             else:
                 # Loop has been closed, try to clean up directly.
@@ -613,63 +634,50 @@ class MPClient(EngineCoreClient):
                 self.stats_update_address = client_addresses.get("stats_update_address")
                 # Tensor queues passed via client_addresses for multi-API-server case
                 tensor_queue = client_addresses.get("tensor_queue")
+                input_listener = client_addresses.get("input_listener")
+                output_listener = client_addresses.get("output_listener")
                 self.input_socket = self.resources.input_socket = make_zmq_socket(
                     self.ctx,
                     input_address,
                     zmq.ROUTER,
                     bind=True,
                     router_handover=enable_input_socket_handover,
+                    listener=input_listener,
                 )
                 self.resources.output_socket = make_zmq_socket(
-                    self.ctx, output_address, zmq.PULL
+                    self.ctx,
+                    output_address,
+                    zmq.PULL,
+                    listener=output_listener,
                 )
 
-                # Report bound endpoints back so the parent can forward
-                # them to engines (mirrors the DPCoordinator pattern).
-                actual_address_pipe: Connection | None = client_addresses.get(
-                    "actual_address_pipe"
-                )
-                if actual_address_pipe is not None:
-                    try:
-                        actual_input = self.input_socket.getsockopt(
-                            zmq.LAST_ENDPOINT
-                        ).decode()
-                        actual_output = self.resources.output_socket.getsockopt(
-                            zmq.LAST_ENDPOINT
-                        ).decode()
-                        actual_address_pipe.send(
-                            {
-                                "input_address": actual_input,
-                                "output_address": actual_output,
-                            }
-                        )
-                    finally:
-                        actual_address_pipe.close()
                 # Engines are managed externally: this process does not fork
                 # them, so there is no fork race; start the MM warmup now.
                 self._start_mm_warmup()
             else:
                 # Engines are managed by this client.
-                addresses = get_engine_zmq_addresses(vllm_config)
+                bind_addresses = get_engine_zmq_bind_addresses(vllm_config)
                 self.input_socket = self.resources.input_socket = make_zmq_socket(
                     self.ctx,
-                    addresses.inputs[0],
+                    bind_addresses.inputs[0],
                     zmq.ROUTER,
                     bind=True,
                     router_handover=enable_input_socket_handover,
                 )
                 self.resources.output_socket = make_zmq_socket(
-                    self.ctx, addresses.outputs[0], zmq.PULL
+                    self.ctx, bind_addresses.outputs[0], zmq.PULL
                 )
 
-                # Resolve ``tcp://host:0`` placeholders to bound endpoints
-                # before engines DEALER-connect. No-op for IPC.
-                addresses.inputs[0] = self.input_socket.getsockopt(
-                    zmq.LAST_ENDPOINT
-                ).decode()
-                addresses.outputs[0] = self.resources.output_socket.getsockopt(
-                    zmq.LAST_ENDPOINT
-                ).decode()
+                # EngineZmqAddresses contains only endpoints resolved by the
+                # sockets that own the bind operation.
+                addresses = EngineZmqAddresses(
+                    inputs=[self.input_socket.getsockopt(zmq.LAST_ENDPOINT).decode()],
+                    outputs=[
+                        self.resources.output_socket.getsockopt(
+                            zmq.LAST_ENDPOINT
+                        ).decode()
+                    ],
+                )
 
                 with launch_core_engines(
                     vllm_config, executor_class, log_stats, addresses
@@ -1019,8 +1027,20 @@ class SyncMPClient(MPClient):
         if request_ids and not self.resources.engine_dead:
             self._send_input(EngineCoreRequestType.ABORT, request_ids)
 
-    def profile(self, is_start: bool = True, profile_prefix: str | None = None) -> None:
-        self.call_utility("profile", is_start, profile_prefix)
+    def profile(
+        self,
+        is_start: bool = True,
+        profile_prefix: str | None = None,
+        delay_iterations: int | None = None,
+        max_iterations: int | None = None,
+    ) -> None:
+        self.call_utility(
+            "profile",
+            is_start,
+            profile_prefix,
+            delay_iterations,
+            max_iterations,
+        )
 
     def reset_mm_cache(self) -> None:
         self.call_utility("reset_mm_cache")
@@ -1239,6 +1259,23 @@ class AsyncMPClient(MPClient):
     async def call_utility_async(self, method: str, *args) -> Any:
         return await self._call_utility_async(method, *args, engine=self.core_engine)
 
+    async def call_utility_all_async(self, method: str, *args) -> list[Any]:
+        # Like the Rust client's call_utility: one result per managed engine.
+        return await asyncio.gather(
+            *[
+                self._call_utility_async(method, *args, engine=engine)
+                for engine in self.core_engines
+            ]
+        )
+
+    async def call_utility_consensus_async(self, method: str, *args) -> Any:
+        results = await self.call_utility_all_async(method, *args)
+        if any(result != results[0] for result in results):
+            raise RuntimeError(
+                f"Engines returned different {method} results: {results}"
+            )
+        return results[0]
+
     async def _call_utility_async(
         self, method: str, *args, engine: EngineIdentity
     ) -> Any:
@@ -1274,12 +1311,22 @@ class AsyncMPClient(MPClient):
         await self.call_utility_async("resume_scheduler")
 
     async def is_scheduler_paused_async(self) -> bool:
-        return await self.call_utility_async("is_scheduler_paused")
+        return await self.call_utility_consensus_async("is_scheduler_paused")
 
     async def profile_async(
-        self, is_start: bool = True, profile_prefix: str | None = None
+        self,
+        is_start: bool = True,
+        profile_prefix: str | None = None,
+        delay_iterations: int | None = None,
+        max_iterations: int | None = None,
     ) -> None:
-        await self.call_utility_async("profile", is_start, profile_prefix)
+        await self.call_utility_async(
+            "profile",
+            is_start,
+            profile_prefix,
+            delay_iterations,
+            max_iterations,
+        )
 
     async def reset_mm_cache_async(self) -> None:
         await self.call_utility_async("reset_mm_cache")
@@ -1287,8 +1334,10 @@ class AsyncMPClient(MPClient):
     async def reset_prefix_cache_async(
         self, reset_running_requests: bool = False, reset_connector: bool = False
     ) -> bool:
-        return await self.call_utility_async(
-            "reset_prefix_cache", reset_running_requests, reset_connector
+        return all(
+            await self.call_utility_all_async(
+                "reset_prefix_cache", reset_running_requests, reset_connector
+            )
         )
 
     async def reset_encoder_cache_async(self) -> None:
@@ -1301,10 +1350,10 @@ class AsyncMPClient(MPClient):
         await self.call_utility_async("release_kv_cache_memory")
 
     async def wake_up_async(self, tags: list[str] | None = None) -> bool:
-        return await self.call_utility_async("wake_up", tags)
+        return all(await self.call_utility_all_async("wake_up", tags))
 
     async def is_sleeping_async(self) -> bool:
-        return await self.call_utility_async("is_sleeping")
+        return await self.call_utility_consensus_async("is_sleeping")
 
     async def execute_dummy_batch_async(self) -> None:
         await self.call_utility_async("execute_dummy_batch")
@@ -1313,7 +1362,7 @@ class AsyncMPClient(MPClient):
         await self.call_utility_async("set_weight_version", weight_version)
 
     async def get_weight_version_async(self) -> str:
-        return await self.call_utility_async("get_weight_version")
+        return await self.call_utility_consensus_async("get_weight_version")
 
     async def add_lora_async(self, lora_request: LoRARequest) -> bool:
         return await self.call_utility_async("add_lora", lora_request)
@@ -1342,6 +1391,10 @@ class AsyncMPClient(MPClient):
         return await self.call_utility_async(
             "collective_rpc", method, timeout, args, kwargs
         )
+
+    async def compute_weight_checksums_async(self) -> list[dict[str, str]]:
+        per_engine = await self.call_utility_all_async("compute_weight_checksums")
+        return [worker for workers in per_engine for worker in workers]
 
     async def handle_fault(
         self, ft_request: FaultToleranceRequest
@@ -1645,14 +1698,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
 
     async def call_utility_async(self, method: str, *args) -> Any:
         # Only the result from the first engine is returned.
-        return (
-            await asyncio.gather(
-                *[
-                    self._call_utility_async(method, *args, engine=engine)
-                    for engine in self.core_engines
-                ]
-            )
-        )[0]
+        return (await self.call_utility_all_async(method, *args))[0]
 
     @staticmethod
     async def process_engine_outputs(
