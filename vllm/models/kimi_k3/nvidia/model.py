@@ -23,8 +23,10 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
     fused_moe_make_expert_params_mapping,
 )
-from vllm.model_executor.layers.fused_moe.router.base_router import (
-    eplb_map_to_physical_and_record,
+from vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe import (
+    MEGA_MOE_MXFP4,
+    DeepGemmMegaMoEExperts,
+    MegaMoEActivation,
 )
 from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
 from vllm.model_executor.layers.fused_moe.router.grouped_topk_router import (
@@ -95,11 +97,6 @@ from vllm.models.common.ops.sequence_parallel import (
     sp_reduce_scatter,
     sp_shard,
 )
-from vllm.models.deepseek_v4.nvidia.model import (
-    DeepseekV4MegaMoEExperts,
-    DeepseekV4MLP,
-)
-from vllm.models.deepseek_v4.nvidia.ops.prepare_megamoe import prepare_megamoe_inputs
 from vllm.models.kimi_k3.nvidia.kda import KimiK3DeltaAttention
 from vllm.models.kimi_k3.nvidia.latent_moe_runner import (
     LatentMoERunner,
@@ -118,7 +115,6 @@ from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.utils.math_utils import cdiv
 from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
 from vllm.utils.torch_utils import aux_stream, is_meta_module
-from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 from ..common.mm_preprocess import (
     KimiK3DummyInputsBuilder,
@@ -333,190 +329,6 @@ class KimiRoutedOutputTransform(nn.Module):
         return hidden_states
 
 
-class KimiK3MegaMoEExperts(DeepseekV4MegaMoEExperts):
-    """Kimi K3 adapter for the DeepGEMM MegaMoE kernel."""
-
-    _kimi_symm_buffer_cache: dict[tuple[object, ...], object] = {}
-    _synchronized_ep_groups: set[tuple[int, int]] = set()
-
-    def __init__(
-        self,
-        *args,
-        activation: str,
-        activation_beta: float | None,
-        activation_linear_beta: float | None,
-        **kwargs,
-    ):
-        super().__init__(*args, **kwargs)
-        self.activation = activation
-        self.activation_beta = activation_beta
-        self.activation_linear_beta = activation_linear_beta
-        self.register_buffer("_mega_l1_packed", None, persistent=False)
-        self.register_buffer("_mega_l1_scale", None, persistent=False)
-        self.register_buffer("_mega_l2_packed", None, persistent=False)
-        self.register_buffer("_mega_l2_scale", None, persistent=False)
-
-    def synchronize_first_launch(self) -> None:
-        ep_group = get_ep_group()
-        device = torch.accelerator.current_device_index()
-        key = (id(ep_group.cpu_group), device)
-        if key in self._synchronized_ep_groups:
-            return
-        torch.accelerator.synchronize()
-        torch.distributed.barrier(group=ep_group.cpu_group)
-        self._synchronized_ep_groups.add(key)
-
-    def finalize_weights(self, shared_experts: DeepseekV4MLP | None = None) -> None:
-        if self._transformed_l1_weights is not None:
-            return
-
-        # Weight cache IPC engine: the daemon exported the transformed
-        # buffers; reuse them zero-copy and drop the raw packed params.
-        if self._mega_l1_packed is not None:
-            self._transformed_l1_weights = (self._mega_l1_packed, self._mega_l1_scale)
-            self._transformed_l2_weights = (self._mega_l2_packed, self._mega_l2_scale)
-            self._drop_raw_mega_weights()
-            return
-
-        self._check_runtime_supported()
-        backend = self._ensure_backend()
-        self._transformed_l1_weights, self._transformed_l2_weights = (
-            backend.transform_weights(
-                w13_weight=self.w13_weight.data,
-                w13_weight_scale=self.w13_weight_scale.data,
-                w2_weight=self.w2_weight.data,
-                w2_weight_scale=self.w2_weight_scale.data,
-                num_local_experts=self.num_local_experts,
-                hidden_size=self.hidden_size,
-                intermediate_size=self.intermediate_size,
-                activation=self.activation,
-            )
-        )
-        l1_packed, l1_scale = self._transformed_l1_weights
-        l2_packed, l2_scale = self._transformed_l2_weights
-        self.register_buffer("_mega_l1_packed", l1_packed, persistent=False)
-        self.register_buffer("_mega_l1_scale", l1_scale, persistent=False)
-        self.register_buffer("_mega_l2_packed", l2_packed, persistent=False)
-        self.register_buffer("_mega_l2_scale", l2_scale, persistent=False)
-        self._drop_raw_mega_weights()
-
-    def _drop_raw_mega_weights(self) -> None:
-        self.w13_weight = None
-        self.w13_weight_scale = None
-        self.w2_weight = None
-        self.w2_weight_scale = None
-
-    def get_symm_buffer(self):
-        from vllm.utils.deep_gemm import _import_deep_gemm
-
-        deep_gemm = _import_deep_gemm()
-        backend = self._ensure_backend()
-        group = get_ep_group().device_group
-        device = torch.accelerator.current_device_index()
-        key = (
-            id(group),
-            device,
-            self.num_experts,
-            self.max_num_tokens,
-            self.top_k,
-            self.hidden_size,
-            self.intermediate_size,
-            self.activation,
-            backend.mma_type,
-        )
-        symm_buffer = self._kimi_symm_buffer_cache.get(key)
-        if symm_buffer is None:
-            symm_buffer = deep_gemm.get_symm_buffer_for_mega_moe(
-                group,
-                self.num_experts,
-                self.max_num_tokens,
-                self.top_k,
-                self.hidden_size,
-                self.intermediate_size,
-                activation=self.activation,
-                mma_type=backend.mma_type,
-            )
-            self._kimi_symm_buffer_cache[key] = symm_buffer
-        return symm_buffer
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        *,
-        activation_clamp: float | None,
-        fast_math: bool = True,
-    ) -> torch.Tensor:
-        self.synchronize_first_launch()
-        if hidden_states.shape[0] > self.max_num_tokens:
-            raise ValueError(
-                f"Kimi K3 MegaMoE got {hidden_states.shape[0]} tokens, "
-                f"but its symmetric buffer supports {self.max_num_tokens}."
-            )
-        y = torch.empty_like(hidden_states, dtype=torch.bfloat16)
-        num_tokens = hidden_states.shape[0]
-        is_padding = None
-        if envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
-            is_padding = get_forward_context().is_padding
-            if is_padding is not None:
-                is_padding = is_padding[:num_tokens]
-
-        if self.capture_fn is not None:
-            self.capture_fn(topk_ids)
-
-        eplb_state = self.eplb_state
-        if eplb_state.logical_to_physical_map is not None:
-            assert eplb_state.expert_load_view is not None
-            assert eplb_state.logical_replica_count is not None
-            assert eplb_state.should_record_tensor is not None
-            if is_padding is not None:
-                topk_ids = torch.where(is_padding.unsqueeze(1), -1, topk_ids)
-            topk_ids = eplb_map_to_physical_and_record(
-                topk_ids=topk_ids,
-                expert_load_view=eplb_state.expert_load_view,
-                logical_to_physical_map=eplb_state.logical_to_physical_map,
-                logical_replica_count=eplb_state.logical_replica_count,
-                record_enabled=eplb_state.should_record_tensor,
-                num_unpadded_tokens=eplb_state.num_unpadded_tokens_tensors[
-                    dbo_current_ubatch_id()
-                ]
-                if eplb_state.num_unpadded_tokens_tensors is not None
-                else None,
-            )
-
-        backend = self._ensure_backend()
-        symm_buffer = self.get_symm_buffer()
-        prepare_megamoe_inputs(
-            hidden_states,
-            topk_weights,
-            topk_ids,
-            symm_buffer.x[:num_tokens],
-            symm_buffer.x_sf[:num_tokens],
-            symm_buffer.topk_idx[:num_tokens],
-            symm_buffer.topk_weights[:num_tokens],
-            is_padding=is_padding,
-            hidden_quant=backend.hidden_quant,
-        )
-        self.finalize_weights()
-        assert self._transformed_l1_weights is not None
-        assert self._transformed_l2_weights is not None
-        backend.run_mega_moe(
-            y=y,
-            l1_weights=self._transformed_l1_weights,
-            l2_weights=self._transformed_l2_weights,
-            symm_buffer=symm_buffer,
-            activation_clamp=activation_clamp,
-            fast_math=fast_math,
-            # DeepGEMM names the SiTU gate tanh scale `activation_alpha` and the
-            # linear/up tanh scale `activation_beta`; beta=0 leaves up untouched.
-            activation=self.activation,
-            activation_alpha=self.activation_beta or 1.0,
-            activation_beta=self.activation_linear_beta or 0.0,
-        )
-        return y
-
-
 def make_kimi_k3_mega_moe_expert_params_mapping(
     num_experts: int,
 ) -> list[tuple[str, str, int, str]]:
@@ -700,7 +512,7 @@ class KimiMoE(nn.Module):
                     f"EP size {ep_size}."
                 )
             num_local_experts = num_experts // ep_size
-            self.experts = KimiK3MegaMoEExperts(
+            self.experts = DeepGemmMegaMoEExperts(
                 vllm_config,
                 num_experts=num_experts,
                 num_local_experts=num_local_experts,
@@ -708,10 +520,13 @@ class KimiMoE(nn.Module):
                 top_k=num_experts_per_token,
                 hidden_size=self.moe_hidden_size,
                 intermediate_size=self.padded_moe_intermediate_size,
+                activation=MegaMoEActivation(
+                    "situ",
+                    alpha=activation_situ_beta or 1.0,
+                    beta=activation_situ_linear_beta or 0.0,
+                ),
+                weight_format=MEGA_MOE_MXFP4,
                 prefix=f"{prefix}.experts",
-                activation="situ",
-                activation_beta=activation_situ_beta,
-                activation_linear_beta=activation_situ_linear_beta,
             )
         else:
             self.experts = FusedMoEFactory(
@@ -827,11 +642,10 @@ class KimiMoE(nn.Module):
         if self.use_mega_moe:
             assert self.routed_output_transform is not None
             assert topk_ids is not None
+            # The shared expert reads the un-projected hidden states, so it
+            # stays outside the latent-space MegaMoE launch.
             final_hidden_states = self.experts(
-                routed_hidden_states,
-                router_output,
-                topk_ids,
-                activation_clamp=None,
+                routed_hidden_states, router_output, topk_ids
             )
             # The shared output is folded into the up-projection GEMM's beta-add
             # epilogue, so combining the two branches costs no extra kernel.
@@ -1573,11 +1387,6 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
             loaded_params.add(name)
         return loaded_params
 
-    def finalize_mega_moe_weights(self) -> None:
-        for module in self.modules():
-            if isinstance(module, KimiMoE) and module.use_mega_moe:
-                module.experts.finalize_weights()
-
 
 class KimiLinearForCausalLM(
     nn.Module,
@@ -1699,14 +1508,6 @@ class KimiLinearForCausalLM(
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
-
-    def process_weights_after_loading(self) -> None:
-        # A parent AutoWeightsLoader may invoke load_weights repeatedly for
-        # non-contiguous streamed prefixes. Finalize only after the full stream.
-        self.model.finalize_mega_moe_weights()
-        # The fused MultiHeadLatentAttention's process_weights_after_loading
-        # (W_UK_T / W_UV absorption) is driven by the loader's generic post-load
-        # hook for any AttentionLayerBase, so no manual trigger is needed here.
 
 
 def get_spec_layer_idx_from_weight_name(
@@ -2154,6 +1955,3 @@ class KimiK3ForConditionalGeneration(
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
-
-    def process_weights_after_loading(self) -> None:
-        self.language_model.process_weights_after_loading()
