@@ -70,6 +70,10 @@ def gemma3_chat_template(content: str) -> str:
     return f"<bos><start_of_turn>user\n{content}<end_of_turn>\n<start_of_turn>model\n"
 
 
+def deepseek_vl2_chat_template(content: str) -> str:
+    return f"<|User|>: {content}\n\n<|Assistant|>:"
+
+
 def ernie45_vl_chat_template(content: str) -> str:
     return (
         f"<|begin_of_sentence|>User: {content}"
@@ -355,6 +359,15 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
             ),
         },
         skip=True,  # TODO: Re-enable this once OOM issues are resolved on CI.
+    ),
+    "deepseek_vl2": VitCudagraphTestConfig(
+        model="deepseek-ai/deepseek-vl2-tiny",
+        modalities=["image"],
+        image_prompt=deepseek_vl2_chat_template("<image>\nWhat is in this image?"),
+        vllm_runner_kwargs={
+            "hf_overrides": {"architectures": ["DeepseekVLV2ForCausalLM"]},
+        },
+        marks=[pytest.mark.core_model],
     ),
     "gemma4": VitCudagraphTestConfig(
         model="google/gemma-4-E2B-it",
