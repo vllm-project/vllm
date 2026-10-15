@@ -348,6 +348,9 @@ class DelegatingParser(Parser):
     values (no reasoning extraction, no tool calls).
     """
 
+    # set from the rendered prompt; see _check_prompt_reasoning()
+    _reasoning_ended_in_prompt: bool = False
+
     def extract_reasoning(
         self,
         model_output: str,
@@ -769,6 +772,17 @@ class DelegatingParser(Parser):
             return False
         return self._reasoning_parser.is_reasoning_end(input_ids)
 
+    def _check_prompt_reasoning(self, prompt_token_ids: Sequence[int]) -> None:
+        """Record whether the rendered prompt already closes reasoning, as with
+        continue_final_message or a template that switches thinking off.
+        """
+        self._reasoning_ended_in_prompt = self._reasoning_parser is not None and (
+            self.is_reasoning_end(list(prompt_token_ids))
+        )
+
+    def set_prompt_token_ids(self, prompt_token_ids: Sequence[int]) -> None:
+        self._check_prompt_reasoning(prompt_token_ids)
+
     def _is_reasoning_end_streaming(
         self, input_ids: list[int], delta_ids: list[int]
     ) -> bool:
@@ -836,7 +850,13 @@ class DelegatingParser(Parser):
         model_output_token_ids: Sequence[int] = (),
     ) -> tuple[str | None, str | None, list[FunctionCall] | None]:
         self._initialize_history_tool_call_cnt(request)
-        reasoning, content = self.extract_reasoning(model_output, request)
+        reasoning: str | None
+        content: str | None
+        if self._reasoning_ended_in_prompt:
+            # same rule as parse_delta(), the whole output is content
+            reasoning, content = None, model_output
+        else:
+            reasoning, content = self.extract_reasoning(model_output, request)
         tool_calls, content = self._extract_tool_calls(
             content=content,
             request=request,
@@ -858,9 +878,8 @@ class DelegatingParser(Parser):
 
         if not state.prompt_reasoning_checked and prompt_token_ids is not None:
             state.prompt_reasoning_checked = True
-            if self._reasoning_parser is None or self.is_reasoning_end(
-                prompt_token_ids
-            ):
+            self._check_prompt_reasoning(prompt_token_ids)
+            if self._reasoning_parser is None or self._reasoning_ended_in_prompt:
                 state.reasoning_ended = True
             else:
                 # Reasoning is still open at the end of the prompt; let the
@@ -997,7 +1016,7 @@ class DelegatingParser(Parser):
 
     def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
         """Count reasoning tokens through the configured reasoning parser."""
-        if self._reasoning_parser is None:
+        if self._reasoning_parser is None or self._reasoning_ended_in_prompt:
             return 0
         return self._reasoning_parser.count_reasoning_tokens(token_ids)
 
