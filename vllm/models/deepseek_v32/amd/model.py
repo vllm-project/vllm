@@ -68,6 +68,7 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
             topk_indices_buffer=topk_indices_buffer,
         )
 
+        self.zero_mlp_output = False
         if (
             config.n_routed_experts is not None
             and layer_idx >= config.first_k_dense_replace
@@ -81,16 +82,14 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
             )
             moe_cfg = self.mlp.experts.moe_config
             pc = moe_cfg.moe_parallel_config
-            reduced = pc.use_passthrough_all2all or (
-                pc.use_all2all_kernels and not pc.use_ag_rs_all2all_kernels
-            )
-            moe_cfg.skip_final_all_reduce = not reduced
+            reduced = pc.use_all2all_kernels and not pc.use_ag_rs_all2all_kernels
+            if not reduced:
+                moe_cfg.skip_final_all_reduce = True
             # Complete on every TP rank; the next fused norm sums over TP.
             self.zero_mlp_output = get_tensor_model_parallel_rank() > 0 and (
                 reduced or self.mlp.is_sequence_parallel
             )
         else:
-            self.zero_mlp_output = False
             self.mlp = DeepseekV2MLP(
                 hidden_size=config.hidden_size,
                 intermediate_size=config.intermediate_size,
