@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Callable
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock, call
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 import torch
@@ -22,6 +23,7 @@ from vllm.distributed.kv_events import MEDIUM_CPU, BlockRemoved, BlockStored
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     OffloadingConnectorMetadata,
     OffloadingWorkerMetadata,
+    TransferJob,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import (
     build_offloading_config,
@@ -33,8 +35,12 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
     OffloadingConnectorScheduler,
     RequestOffloadState,
+    SchedulerOffloadConfig,
     _create_req_context,
     get_sliding_window_size_in_chunks,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.store_triggers.on_compute import (  # noqa: E501
+    OnComputeStoreHandler,
 )
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -208,6 +214,8 @@ def test_swa_offload_window_covers_unaligned_hit(
 
 def _make_partial_tail_scheduler(
     recurrent_only: bool = False,
+    change_config: Callable[[SchedulerOffloadConfig], SchedulerOffloadConfig]
+    | None = None,
 ) -> OffloadingConnectorScheduler:
     vllm_config = _make_vllm_config(extra_config={"self_describing_kv_events": True})
     vllm_config.cache_config.prefix_match_unit = None if recurrent_only else 4
@@ -219,7 +227,16 @@ def _make_partial_tail_scheduler(
     if recurrent_only:
         kv_cache_config.kv_cache_groups = kv_cache_config.kv_cache_groups[1:]
     spec = MockOffloadingSpec(build_offloading_config(vllm_config, kv_cache_config))
-    return OffloadingConnectorScheduler(spec, vllm_config, kv_cache_config)
+    if change_config is None:
+        return OffloadingConnectorScheduler(spec, vllm_config, kv_cache_config)
+    # Change the config before the scheduler gives it to its handlers.
+    from_spec = SchedulerOffloadConfig.from_spec
+    with patch.object(
+        SchedulerOffloadConfig,
+        "from_spec",
+        lambda *args: change_config(from_spec(*args)),
+    ):
+        return OffloadingConnectorScheduler(spec, vllm_config, kv_cache_config)
 
 
 def _make_partial_tail_request(
@@ -256,6 +273,30 @@ def test_create_req_context_preserves_kv_hints():
     assert _create_req_context(request).kv_hints is kv_hints
 
 
+def _on_compute(scheduler: OffloadingConnectorScheduler) -> OnComputeStoreHandler:
+    handler = scheduler._store_handlers[StoreTrigger.ON_COMPUTE]
+    assert isinstance(handler, OnComputeStoreHandler)
+    return handler
+
+
+def _partial_tail_store_jobs(
+    scheduler: OffloadingConnectorScheduler, scheduler_output: Any
+) -> dict[int, TransferJob]:
+    handler = _on_compute(scheduler)
+    return scheduler._add_store_jobs(
+        handler._build_partial_tail_store_jobs(scheduler_output, scheduler._req_status)
+    )
+
+
+def _store_jobs(
+    scheduler: OffloadingConnectorScheduler, scheduler_output: Any
+) -> dict[int, TransferJob]:
+    handler = _on_compute(scheduler)
+    return scheduler._add_store_jobs(
+        handler._build_store_jobs(scheduler_output, scheduler._req_status)
+    )
+
+
 def _reduce_kv_connector_stats(runner):
     reduced: dict[str, int | float] = {}
     for payload in runner.kv_connector_stats:
@@ -286,7 +327,7 @@ def test_partial_tail_store_uses_attention_and_recurrent_cow_sources():
             boundary_state_offloads={"req": [(1, 99, 28)]},
         )
     )
-    jobs = scheduler._build_partial_tail_store_jobs(output)
+    jobs = _partial_tail_store_jobs(scheduler, output)
 
     assert len(jobs) == 1
     offered_keys = scheduler.manager.prepare_store.call_args.args[0]
@@ -349,7 +390,7 @@ def test_aligned_boundary_store_uses_exact_source_with_partial_tail():
             boundary_state_offloads={"req": [(1, 98, 16), (1, 99, 28)]},
         )
     )
-    jobs = scheduler._build_partial_tail_store_jobs(output)
+    jobs = _partial_tail_store_jobs(scheduler, output)
 
     assert len(jobs) == 2
     src_spec = next(
@@ -362,15 +403,21 @@ def test_aligned_boundary_store_uses_exact_source_with_partial_tail():
 
 
 def test_aligned_boundary_store_maps_sparse_group_id_to_dense_transfer_slot():
-    scheduler = _make_partial_tail_scheduler()
-    indexer_config = scheduler.config.kv_group_configs[1]
-    scheduler.config = scheduler.config._replace(kv_group_configs=(indexer_config,))
+    scheduler = _make_partial_tail_scheduler(
+        change_config=lambda config: config._replace(
+            kv_group_configs=(config.kv_group_configs[1],)
+        )
+    )
     _make_partial_tail_request(scheduler)
     scheduler.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output(keys)
     )
 
-    jobs = scheduler._build_aligned_boundary_store_jobs({"req": [(1, 98, 16)]})
+    jobs = scheduler._add_store_jobs(
+        _on_compute(scheduler)._build_aligned_boundary_store_jobs(
+            {"req": [(1, 98, 16)]}, scheduler._req_status
+        )
+    )
 
     [job] = jobs.values()
     assert job.src_spec.group_sizes == [1]
@@ -429,7 +476,7 @@ def test_normal_store_excludes_align_mode_mamba_sources():
         num_scheduled_tokens={"req": 16},
         finished_req_ids=set(),
     )
-    jobs = scheduler._build_store_jobs(output)
+    jobs = _store_jobs(scheduler, output)
 
     assert len(jobs) == 1
     [job] = jobs.values()
@@ -510,8 +557,9 @@ def test_max_load_tokens_caps_tokens_beyond_gpu_prefix():
 
 
 def test_max_load_tokens_rounds_down_without_partial_tail():
-    scheduler = _make_partial_tail_scheduler()
-    scheduler.config = scheduler.config._replace(supports_partial_tail=False)
+    scheduler = _make_partial_tail_scheduler(
+        change_config=lambda config: config._replace(supports_partial_tail=False)
+    )
     request = _make_partial_tail_request(
         scheduler, kv_transfer_params={"max_load_tokens": 20}
     )
@@ -996,13 +1044,13 @@ def test_store_jobs_wait_for_missing_offload_key(request_runner):
         num_scheduled_tokens={req_id: 0}, finished_req_ids=set()
     )
 
-    jobs = runner.connector_scheduler._build_store_jobs(scheduler_output)
+    jobs = _store_jobs(runner.connector_scheduler, scheduler_output)
     assert len(jobs) == 1
     assert group_state.next_stored_chunk_idx == 1
 
     req.block_hashes.append(missing_hash)
     req_status.update_offload_keys()
-    jobs = runner.connector_scheduler._build_store_jobs(scheduler_output)
+    jobs = _store_jobs(runner.connector_scheduler, scheduler_output)
     assert len(jobs) == 1
     assert group_state.next_stored_chunk_idx == 2
 
@@ -1617,7 +1665,7 @@ def test_on_request_finished_fires_after_final_block_store(
 ):
     """on_request_finished fires after the final prepare_store of the request.
 
-    request_finished() keeps req_status alive so _build_store_jobs can retry a
+    request_finished() keeps req_status alive so the ON_COMPUTE handler can retry a
     block on the next step; the retry must be issued before the manager is told
     the request is over. Every attempt made before the request finishes is
     declined here, so the store that succeeds is the one from the finishing
@@ -2369,6 +2417,9 @@ def test_swa_load_does_not_wait_for_unusable_pending_suffix(
     sched = runner.connector_scheduler
     manager = CPUOffloadingManager(num_chunks=16)
     sched.manager = manager
+    sched._store_handlers[StoreTrigger.ON_COMPUTE] = OnComputeStoreHandler(
+        sched.config, manager, sched._events_tracker
+    )
     runner.new_request(token_ids=list(range(17)))
     state = sched._req_status["0"]
     state.update_offload_keys()
@@ -5100,8 +5151,8 @@ class TestMambaHybridOffloadServing:
                 boundary_state_offloads={"A": [(1, 101, self.MAMBA_BLOCK)]},
             ),
         )
-        scheduler._build_partial_tail_store_jobs(out)
-        scheduler._build_store_jobs(out)
+        _partial_tail_store_jobs(scheduler, out)
+        _store_jobs(scheduler, out)
         complete_all_jobs()
 
         req.num_computed_tokens = self.PROMPT_TOKENS
@@ -5110,7 +5161,7 @@ class TestMambaHybridOffloadServing:
         req_status.update_offload_keys()
         scheduler.request_finished(req)
         out2 = SimpleNamespace(num_scheduled_tokens={}, finished_req_ids={"A"})
-        scheduler._build_store_jobs(out2)
+        _store_jobs(scheduler, out2)
         complete_all_jobs()
 
         make_request("A2")
