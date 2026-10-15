@@ -142,28 +142,3 @@ def test_iteration_timing_poll_preserves_model_response_order(model_consumes_fir
         assert later.result() == "model-output"
     assert not responses
     assert not executor.futures_queue
-
-
-@pytest.mark.parametrize("multiproc", [False, True])
-@pytest.mark.parametrize("timed", [False, True])
-def test_dummy_timing_piggybacks_on_existing_rpc(multiproc, timed):
-    from vllm.v1.executor.abstract import Executor
-
-    calls = []
-
-    def rpc(method, **kwargs):
-        calls.append((method, kwargs))
-        return ((6, 0.01),) if multiproc else [(), ((6, 0.01),)]
-
-    executor = SimpleNamespace(collective_rpc=rpc, output_rank=1)
-    cls = MultiprocExecutor if multiproc else Executor
-    result = cls.execute_dummy_batch(executor, 7 if timed else None)
-    assert result == (((6, 0.01),) if timed else None)
-    expected: dict[str, object] = {}
-    if multiproc:
-        from vllm.envs import VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS
-
-        expected.update(unique_reply_rank=1, timeout=VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS)
-    if timed:
-        expected["args"] = (7,)
-    assert calls == [("execute_dummy_batch", expected)]

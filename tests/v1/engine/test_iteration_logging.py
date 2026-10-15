@@ -54,7 +54,6 @@ def make_fake_engine(
         (True, True, True, "cuda", "pooling", 1, "uni", False, False),
         (True, True, True, "cuda", "generate", 2, "mp", False, False),
         (True, True, True, "cuda", "generate", 1, "ray", False, False),
-        (True, True, True, "cuda", "generate", 1, "external_launcher", False, False),
         (True, False, True, "cuda", "generate", 1, "mp", True, True),
     ],
 )

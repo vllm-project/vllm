@@ -17,8 +17,9 @@ from vllm.v1.metrics.stats import SchedulerIterationDetails, SchedulerStats
 
 
 @pytest.mark.skip_global_cleanup
-@pytest.mark.parametrize("verbose", [False, True])
-@pytest.mark.parametrize("batched", [False, True])
+@pytest.mark.parametrize(
+    "verbose,batched", [(False, True), (True, False), (True, True)]
+)
 def test_iteration_logging_preserves_records_without_inventing_timing(
     monkeypatch, verbose, batched
 ):

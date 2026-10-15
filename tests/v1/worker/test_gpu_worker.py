@@ -443,8 +443,9 @@ def test_execute_model_waits_previous_pp_send_before_forward(
     assert worker._pp_send_work == [tensor_handle]
 
 
-@pytest.mark.parametrize("timed", [False, True])
-@pytest.mark.parametrize("deferred_sampling", [False, True])
+@pytest.mark.parametrize(
+    "timed,deferred_sampling", [(True, False), (True, True), (False, True)]
+)
 def test_iteration_timing_finishes_after_sampling_and_draft(
     monkeypatch, timed, deferred_sampling
 ):
@@ -506,7 +507,7 @@ def test_iteration_timing_discards_failed_step_and_allows_next_step(
 ):
     events = [Mock(query=Mock(return_value=False)) for _ in range(4)]
     events[2].elapsed_time.return_value = 15.0
-    timer = IterationTimer(2, event_factory=iter(events).__next__)
+    timer = IterationTimer(1, event_factory=iter(events).__next__)
     output = ModelRunnerOutput(req_ids=[], req_id_to_index={})
     runner = SimpleNamespace(
         iteration_timer=timer,

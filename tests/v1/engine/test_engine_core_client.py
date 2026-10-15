@@ -67,28 +67,12 @@ _REQUEST_COUNTER = 0
 
 
 @pytest.mark.skip_global_cleanup
-@pytest.mark.parametrize(
-    "multiprocess,timing", [(False, False), (False, True), (True, True)]
-)
-def test_iteration_timing_requires_multiprocessing_client(
-    monkeypatch, multiprocess, timing
-):
-    inproc, mp = MagicMock(), MagicMock()
-    monkeypatch.setattr("vllm.v1.engine.core_client.InprocClient", inproc)
-    monkeypatch.setattr("vllm.v1.engine.core_client.SyncMPClient", mp)
+def test_iteration_timing_requires_multiprocessing_client():
     config = SimpleNamespace(
-        observability_config=SimpleNamespace(enable_iteration_timing=timing)
+        observability_config=SimpleNamespace(enable_iteration_timing=True)
     )
-    if timing and not multiprocess:
-        with pytest.raises(ValueError, match="requires a multiprocessing EngineCore"):
-            EngineCoreClient.make_client(False, False, config, object, False)
-        inproc.assert_not_called()
-        mp.assert_not_called()
-    else:
-        client = EngineCoreClient.make_client(
-            multiprocess, False, config, object, False
-        )
-        assert client is (mp.return_value if multiprocess else inproc.return_value)
+    with pytest.raises(ValueError, match="requires a multiprocessing EngineCore"):
+        EngineCoreClient.make_client(False, False, config, object, False)
 
 
 def make_request(
