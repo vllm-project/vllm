@@ -161,23 +161,33 @@ def test_rdna_unified_attn_backend_opt_out(
     """On RDNA, VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION=0 must opt out of
     ROCM_AITER_UNIFIED_ATTN without changing the default when it is unset."""
     from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.envs import disable_envs_cache
     from vllm.platforms.rocm import _get_backend_priorities
 
-    if unified_attn_env is None:
-        monkeypatch.delenv("VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION", raising=False)
-    else:
-        monkeypatch.setenv("VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION", unified_attn_env)
-    rocm_aiter_ops.refresh_env_variables()
+    try:
+        with monkeypatch.context() as m:
+            if unified_attn_env is None:
+                m.delenv("VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION", raising=False)
+            else:
+                m.setenv("VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION", unified_attn_env)
+            disable_envs_cache()
+            rocm_aiter_ops.refresh_env_variables()
 
-    with (
-        patch("vllm._aiter_ops.is_aiter_found_and_supported", return_value=False),
-        patch("vllm._aiter_ops.rocm_aiter_ops.is_mha_enabled", return_value=False),
-        patch(
-            "vllm._aiter_ops.rocm_aiter_ops.is_rdna_aiter_enabled",
-            return_value=True,
-        ),
-    ):
-        backends = _get_backend_priorities(use_mla=False, use_sparse=False)
+            with (
+                patch(
+                    "vllm._aiter_ops.is_aiter_found_and_supported", return_value=False
+                ),
+                patch(
+                    "vllm._aiter_ops.rocm_aiter_ops.is_mha_enabled", return_value=False
+                ),
+                patch(
+                    "vllm._aiter_ops.rocm_aiter_ops.is_rdna_aiter_enabled",
+                    return_value=True,
+                ),
+            ):
+                backends = _get_backend_priorities(use_mla=False, use_sparse=False)
+    finally:
+        rocm_aiter_ops.refresh_env_variables()
 
     if expect_selected:
         assert backends[0] == AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN
