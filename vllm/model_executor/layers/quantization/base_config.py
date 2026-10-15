@@ -328,11 +328,18 @@ def resolve_quant_method(
     from vllm.model_executor.layers.quantization.online.requantization import (
         requantization_source_scope,
     )
+    from vllm.model_executor.layers.vocab_parallel_embedding import (
+        ParallelLMHead,
+        UnquantizedEmbeddingMethod,
+    )
 
     online_config = quant_config.online_quantization_config
-    # Online quantization currently supports only LinearBase and RoutedExperts.
-    # Embeddings and ParallelLMHead retain their checkpoint quantization method.
-    is_online_supported_layer = isinstance(layer, (LinearBase, RoutedExperts))
+    # Online quantization supports LinearBase, RoutedExperts, and a
+    # ParallelLMHead selected by quantization_config.targets. Embeddings keep
+    # their checkpoint quantization method.
+    is_online_supported_layer = isinstance(
+        layer, (LinearBase, RoutedExperts, ParallelLMHead)
+    )
 
     online_target = None
     target_spec = None
@@ -361,12 +368,23 @@ def resolve_quant_method(
         # No online configuration: retain the checkpoint method.
         return base_quant_method
     if not is_online_supported_layer:
-        # Online quantization only supports linear and routed MoE layers.
         return base_quant_method
 
     checkpoint_is_quantized = base_quant_method is not None and not isinstance(
         base_quant_method, (UnquantizedLinearMethod, UnquantizedFusedMoEMethod)
     )
+
+    if isinstance(layer, ParallelLMHead) and online_target is not None:
+        unquantized = (UnquantizedEmbeddingMethod, UnquantizedLinearMethod)
+        if base_quant_method is not None and not isinstance(
+            base_quant_method, unquantized
+        ):
+            raise ValueError(
+                f"{prefix} is already quantized in the checkpoint "
+                f"({type(base_quant_method).__name__}); remove it from "
+                "quantization_config.targets."
+            )
+        return online_config.get_quant_method(layer, prefix)
 
     if checkpoint_is_quantized:
         if online_target is None:
