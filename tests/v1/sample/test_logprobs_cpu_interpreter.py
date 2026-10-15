@@ -53,4 +53,4 @@ def test_compute_token_logprobs_with_triton_interpreter() -> None:
         env=env,
         timeout=180,
     )
-    assert result.returncode == 0, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    assert result.returncode == 0, (\n        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"\n    )
