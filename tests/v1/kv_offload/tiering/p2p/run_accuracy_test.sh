@@ -42,6 +42,7 @@
 #                               the supported route for mixed prefiller/decoder TP)
 #   ENFORCE_EAGER               default 1
 #   CHECK_TRANSFER              default 1; 0 skips test_p2p_transfer.py
+#   EXPECT_TRANSFER             default 1; 0 asserts no KV moved (safe fallback)
 #   VLLM_SERVE_EXTRA_ARGS       comma-separated extra args for vllm serve
 #   PYTHON_BIN / VLLM_BIN       override interpreter / vllm entrypoint
 #   --decoder-first             toggle decoder-first proxy mode
