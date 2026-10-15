@@ -8,15 +8,17 @@ from typing import Any
 import torch.nn as nn
 
 from vllm.config import ModelConfig
+from vllm.platforms import current_platform
 
 
 def dspark_draft_supports_eplb(draft_model_config: ModelConfig) -> bool:
-    """Return whether a DSpark draft can share EPLB state with the target.
-
-    Only DeepSeek-V4 DSpark drafts reuse the target expert layout. V4.1 drafts
-    use a smaller routed-expert count and cannot share EPLB state.
-    """
-    return getattr(draft_model_config.hf_config, "model_type", None) == "deepseek_v4"
+    """Return whether a DSpark draft should register with EPLB on this platform."""
+    if current_platform.is_rocm():
+        return False
+    return getattr(draft_model_config.hf_config, "model_type", None) in (
+        "deepseek_v4",
+        "deepseek_v41",
+    )
 
 
 def collect_moe_layers(
