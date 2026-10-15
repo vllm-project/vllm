@@ -2,10 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from vllm.v1.core.sched.output import ScheduledEncoderInputStats, SchedulerOutput
-from vllm.v1.engine import EngineCoreOutputs, FinishReason
+from vllm.v1.engine import EngineCoreOutput, EngineCoreOutputs, FinishReason
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.metrics.stats import (
     IterationStats,
+    LoRARequestStates,
     PrefillStats,
     PrefixCacheStats,
     PromptTokenStats,
@@ -20,6 +21,40 @@ from vllm.v1.utils import compute_iteration_details
 def test_iteration_stats_repr():
     iteration_stats = IterationStats()
     assert repr(iteration_stats).startswith("IterationStats(")
+
+
+def test_iteration_latencies_preserve_api_surface_in_mixed_batch():
+    """TTFT, ITL, and completion statistics must retain each request's API."""
+    stats = IterationStats()
+    stats.iteration_timestamp = 102.0
+    api_surfaces = ("messages", "chat_completions", "completions", "unknown")
+    for index, api_surface in enumerate(api_surfaces):
+        req_stats = RequestStateStats(
+            arrival_time=100.0 - index, api_surface=api_surface
+        )
+        output = EngineCoreOutput(request_id=api_surface, new_token_ids=[1])
+        for is_prefilling, timestamp in ((True, 10.0), (False, 11.0 + index)):
+            stats.update_from_output(
+                output,
+                timestamp,
+                is_prefilling,
+                req_stats,
+                LoRARequestStates(),
+                lora_name=None,
+            )
+        stats.update_from_finished_request(
+            FinishReason.STOP, api_surface, 10, None, req_stats
+        )
+
+    assert stats.time_to_first_tokens_iter == [
+        (api_surface, 2.0 + index) for index, api_surface in enumerate(api_surfaces)
+    ]
+    assert stats.inter_token_latencies_iter == [
+        (api_surface, 1.0 + index) for index, api_surface in enumerate(api_surfaces)
+    ]
+    assert [request.api_surface for request in stats.finished_requests] == list(
+        api_surfaces
+    )
 
 
 def test_scheduler_iteration_details_serialization():

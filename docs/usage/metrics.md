@@ -37,6 +37,49 @@ The following metrics are exposed:
 
 --8<-- "gen:metrics-general"
 
+### API attribution
+
+The following request metrics include an `api_surface` label:
+
+- `vllm:request_success_total` (with the existing `finished_reason` label)
+- `vllm:time_to_first_token_seconds`
+- `vllm:inter_token_latency_seconds`
+- `vllm:request_time_per_output_token_seconds`
+- `vllm:e2e_request_latency_seconds`
+- `vllm:request_queue_time_seconds`
+- `vllm:request_inference_time_seconds`
+- `vllm:request_prefill_time_seconds`
+- `vllm:request_decode_time_seconds`
+
+Its values are `messages` for `/v1/messages`, `chat_completions` for
+`/v1/chat/completions`, `completions` for `/v1/completions`, and `unknown`
+for callers without one of these API identities, including offline generation.
+The label applies to streaming and non-streaming generation, including requests
+without tools, and does not require tracing. Inference traces use the same
+`api_surface` attribute for recognized APIs.
+
+Histogram buckets and counting semantics are unchanged. These metrics describe
+engine requests: multiple generated choices contribute separately, and errors
+rejected before engine admission are excluded. Each model and engine has four
+sets of series for these metrics, one per API value.
+
+For example, request throughput by API can be queried with:
+
+```promql
+sum by (api_surface) (rate(vllm:request_success_total[5m]))
+```
+
+To query p95 end-to-end latency by API:
+
+```promql
+histogram_quantile(0.95,
+  sum by (api_surface, le) (rate(vllm:e2e_request_latency_seconds_bucket[5m])))
+```
+
+For totals across APIs, aggregate with `sum without (api_surface)`. Update
+dashboard aggregations and vector joins that previously assumed a single series
+per model, engine, and finish reason.
+
 ## Speculative Decoding Metrics
 
 --8<-- "gen:metrics-spec-decode"
