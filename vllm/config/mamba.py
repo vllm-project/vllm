@@ -18,12 +18,12 @@ class _MambaBackendEnumMeta(EnumMeta):
         except KeyError:
             valid = ", ".join(cls.__members__.keys())
             raise ValueError(
-                f"Unknown Mamba SSU backend: '{name}'. Valid options are: {valid}"
+                f"Unknown Mamba backend: '{name}'. Valid options are: {valid}"
             ) from None
 
 
 class MambaBackendEnum(Enum, metaclass=_MambaBackendEnumMeta):
-    """Enumeration of supported Mamba SSU (selective state update) backends."""
+    """Enumeration of supported Mamba backends."""
 
     TRITON = "triton"
     FLASHINFER = "flashinfer"
@@ -38,7 +38,10 @@ class MambaConfig:
     """Configuration for Mamba SSM backends."""
 
     backend: MambaBackendEnum = MambaBackendEnum.TRITON
-    """Mamba SSU backend to use."""
+    """Default backend for Mamba operations."""
+
+    decode_backend: MambaBackendEnum | None = None
+    """Decode backend for SSU or ReplaySSM. None inherits `backend`."""
 
     enable_stochastic_rounding: bool = False
     """Enable stochastic rounding when writing SSM state to fp16 cache.
@@ -61,13 +64,17 @@ class MambaConfig:
     FlashInfer's fused SSD scan (SM100/SM103 only); prefills that store Mamba
     checkpoints always use "triton"."""
 
-    @field_validator("backend", "prefill_backend", mode="before")
+    @field_validator("backend", "decode_backend", "prefill_backend", mode="before")
     @classmethod
     def validate_backend_before(cls, value: Any) -> Any:
         """Enable parsing of the backend enum fields from strings."""
         if isinstance(value, str):
             return MambaBackendEnum[value.upper()]
         return value
+
+    @property
+    def effective_decode_backend(self) -> MambaBackendEnum:
+        return self.decode_backend if self.decode_backend is not None else self.backend
 
     def validate_ssu_algorithm(self) -> None:
         if self.ssu_algorithm is None:
@@ -79,10 +86,10 @@ class MambaConfig:
                 f"Unknown Mamba SSU algorithm: '{self.ssu_algorithm}'. "
                 f"Valid options are: {valid}"
             )
-        if self.backend != MambaBackendEnum.FLASHINFER:
+        if self.effective_decode_backend != MambaBackendEnum.FLASHINFER:
             raise ValueError(
                 "Mamba SSU algorithm selection is only supported with the "
-                "FlashInfer backend. Please set `--mamba-backend flashinfer`, "
+                "FlashInfer backend. Please set `--mamba-decode-backend flashinfer`, "
                 "or omit `--mamba-ssu-algorithm`."
             )
 
@@ -122,7 +129,7 @@ class MambaConfig:
                     "`--enable-mamba-cache-stochastic-rounding`."
                 )
             elif (
-                self.backend == MambaBackendEnum.TRITON
+                self.effective_decode_backend == MambaBackendEnum.TRITON
                 and not current_platform.is_device_capability_family(100)
             ):
                 raise ValueError(
@@ -130,5 +137,5 @@ class MambaConfig:
                     "compute capability 10.0 (data center Blackwell). The `cvt.rs` "
                     "PTX instruction is not supported on your GPU. Please do not "
                     "specify `--enable-mamba-cache-stochastic-rounding`, "
-                    "or set `--mamba-backend flashinfer`."
+                    "or set `--mamba-decode-backend flashinfer`."
                 )

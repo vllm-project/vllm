@@ -579,7 +579,7 @@ class VllmConfig:
     def use_flashinfer_replayssm(self) -> bool:
         return (
             self.cache_config.use_replayssm
-            and self.mamba_config.backend == MambaBackendEnum.FLASHINFER
+            and self.mamba_config.effective_decode_backend == MambaBackendEnum.FLASHINFER
         )
 
     @property
@@ -3611,6 +3611,8 @@ class VllmConfig:
             self.cache_config.use_kda_recoverssm = False
             return self
 
+        backend = self.mamba_config.effective_decode_backend
+
         kda_architectures = (
             "KimiLinearForCausalLM",
             "KimiK3ForConditionalGeneration",
@@ -3633,7 +3635,7 @@ class VllmConfig:
                 f"{self.model_config.architecture!r}"
             )
         if (
-            self.mamba_config.backend == MambaBackendEnum.FLASHINFER
+            backend == MambaBackendEnum.FLASHINFER
             and self.cache_config.replayssm_buffer_len > 16
         ):
             raise ValueError(
@@ -3650,9 +3652,9 @@ class VllmConfig:
                 raise ValueError(
                     "RecoverSSM currently requires pipeline_parallel_size=1"
                 )
-            if self.mamba_config.backend != MambaBackendEnum.TRITON:
-                raise ValueError("RecoverSSM requires --mamba-backend triton")
-        elif self.mamba_config.backend == MambaBackendEnum.FLASHINFER:
+            if backend != MambaBackendEnum.TRITON:
+                raise ValueError("RecoverSSM requires --mamba-decode-backend triton")
+        elif backend == MambaBackendEnum.FLASHINFER:
             if (
                 self.cache_config.mamba_cache_mode == "align"
                 and self.model_config is not None
@@ -3680,11 +3682,11 @@ class VllmConfig:
         elif use_mamba_replayssm_spec:
             raise ValueError(
                 "Mamba2 ReplaySSM speculative decoding requires "
-                "--mamba-backend flashinfer"
+                "--mamba-decode-backend flashinfer"
             )
-        elif self.mamba_config.backend != MambaBackendEnum.TRITON:
+        elif backend != MambaBackendEnum.TRITON:
             raise ValueError(
-                "--use-replayssm requires --mamba-backend triton or flashinfer"
+                "--use-replayssm requires --mamba-decode-backend triton or flashinfer"
             )
         if (
             self.kv_transfer_config is not None

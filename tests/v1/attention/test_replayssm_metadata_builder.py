@@ -64,6 +64,7 @@ def _create_replayssm_builder(
     mamba_cache_mode: str = "none",
     *,
     mamba_backend: MambaBackendEnum = MambaBackendEnum.TRITON,
+    decode_backend: MambaBackendEnum | None = None,
     num_speculative_tokens: int = 0,
 ) -> MockMambaBuilder:
     vllm_config = create_vllm_config(
@@ -75,6 +76,7 @@ def _create_replayssm_builder(
     vllm_config.cache_config.replayssm_buffer_len = buffer_len
     vllm_config.cache_config.mamba_cache_mode = mamba_cache_mode
     vllm_config.mamba_config.backend = mamba_backend
+    vllm_config.mamba_config.decode_backend = decode_backend
     if num_speculative_tokens > 0:
         vllm_config.scheduler_config.async_scheduling = False
         vllm_config.speculative_config = SpeculativeConfig(
@@ -84,7 +86,7 @@ def _create_replayssm_builder(
     return MockMambaBuilder(
         _make_mamba_spec(
             buffer_len,
-            mamba_backend,
+            vllm_config.mamba_config.effective_decode_backend,
             num_speculative_tokens,
             mamba_cache_mode,
         ),
@@ -148,14 +150,24 @@ def test_spec_decode_single_token_chunk_synthesizes_acceptance_metadata():
     assert meta.num_accepted_tokens.tolist() == [1]
 
 
-def test_flashinfer_replayssm_state_indices_are_stable_for_full_cudagraph():
+@pytest.mark.parametrize(
+    ("shared_backend", "decode_backend"),
+    [
+        (MambaBackendEnum.FLASHINFER, None),
+        (MambaBackendEnum.TRITON, MambaBackendEnum.FLASHINFER),
+    ],
+)
+def test_flashinfer_replayssm_state_indices_are_stable_for_full_cudagraph(
+    shared_backend, decode_backend
+):
     checkpointing_ssu = pytest.importorskip("flashinfer.mamba.checkpointing_ssu")
     if not hasattr(checkpointing_ssu, "allocate_checkpointing_ssu_scratch"):
         pytest.skip("requires FlashInfer ReplaySSM autotuning support")
 
     builder = _create_replayssm_builder(
         16,
-        mamba_backend=MambaBackendEnum.FLASHINFER,
+        mamba_backend=shared_backend,
+        decode_backend=decode_backend,
         num_speculative_tokens=3,
     )
     builder.compilation_config.cudagraph_mode = CUDAGraphMode.FULL

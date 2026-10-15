@@ -473,7 +473,7 @@ def initialize_mamba_ssu_backend(
         return
 
     global _flashinfer_replayssm_kernel, _mamba_ssu_backend
-    backend = mamba_config.backend
+    backend = mamba_config.effective_decode_backend
 
     if backend == MambaBackendEnum.TRITON:
         from vllm.platforms import current_platform

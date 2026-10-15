@@ -47,7 +47,7 @@ from vllm.config import (
 from vllm.config.compilation import CompilationMode, CUDAGraphMode, PassConfig
 from vllm.config.kernel import IrOpPriorityConfig
 from vllm.config.load import LoadConfig
-from vllm.config.mamba import MambaBackendEnum
+from vllm.config.mamba import MambaBackendEnum, MambaConfig
 from vllm.config.profiler import ProfilerConfig
 from vllm.config.speculative import _validate_qwen3_omni_dspark
 from vllm.config.utils import get_field, hash_config
@@ -319,6 +319,78 @@ def test_sampling_replay_config(config, message):
             VllmConfig._verify_sampling_replay_config(config)
 
 
+def test_mamba_ssu_algorithm_uses_decode_override():
+    MambaConfig(decode_backend="flashinfer", ssu_algorithm="vertical")
+
+    with pytest.raises(ValueError, match="--mamba-decode-backend flashinfer"):
+        MambaConfig(
+            backend="flashinfer", decode_backend="triton", ssu_algorithm="vertical"
+        )
+
+    with pytest.raises(ValueError, match="--mamba-decode-backend flashinfer"):
+        MambaConfig(ssu_algorithm="vertical")
+
+
+@pytest.mark.parametrize(
+    ("shared_backend", "decode_backend", "v2", "buffer_len", "error"),
+    [
+        ("flashinfer", "triton", False, 32, None),
+        ("triton", "flashinfer", True, 32, "buffer-len <= 16"),
+        ("flashinfer", "triton", True, 16, "--mamba-decode-backend flashinfer"),
+        ("triton", None, True, 16, "--mamba-decode-backend flashinfer"),
+        ("triton", "cpu", False, 16, "--mamba-decode-backend triton or flashinfer"),
+    ],
+)
+def test_replayssm_validation_uses_decode_backend(
+    shared_backend, decode_backend, v2, buffer_len, error
+):
+    config = SimpleNamespace(
+        cache_config=SimpleNamespace(
+            use_replayssm=True,
+            mamba_cache_mode="none",
+            replayssm_buffer_len=buffer_len,
+        ),
+        num_speculative_tokens=0,
+        model_config=SimpleNamespace(
+            supports_replayssm=True, architecture="NemotronHForCausalLM"
+        ),
+        mamba_config=MambaConfig(backend=shared_backend, decode_backend=decode_backend),
+        kv_transfer_config=None,
+        use_v2_model_runner=v2,
+    )
+
+    if error is None:
+        VllmConfig.validate_mamba_cached_kernel(config)
+    else:
+        with pytest.raises(ValueError, match=error):
+            VllmConfig.validate_mamba_cached_kernel(config)
+
+
+@pytest.mark.parametrize(
+    ("settings", "suggestion"),
+    [
+        (
+            {"backend": "flashinfer", "decode_backend": "triton"},
+            "--mamba-decode-backend flashinfer",
+        ),
+        ({"decode_backend": "flashinfer"}, None),
+        ({}, "--mamba-decode-backend flashinfer"),
+    ],
+)
+def test_mamba_stochastic_rounding_checks_decode_backend(
+    monkeypatch, settings, suggestion
+):
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(
+        current_platform, "is_device_capability_family", lambda _: False
+    )
+    if suggestion is not None:
+        with pytest.raises(ValueError, match=suggestion):
+            MambaConfig(**settings, enable_stochastic_rounding=True)
+    else:
+        MambaConfig(**settings, enable_stochastic_rounding=True)
+
+
 def test_kda_recoverssm_derivation_is_revalidated():
     config = SimpleNamespace(
         cache_config=SimpleNamespace(
@@ -332,7 +404,7 @@ def test_kda_recoverssm_derivation_is_revalidated():
             supports_replayssm=True,
             architecture="KimiLinearForCausalLM",
         ),
-        mamba_config=SimpleNamespace(
+        mamba_config=MambaConfig(
             backend=MambaBackendEnum.TRITON,
             enable_stochastic_rounding=False,
         ),

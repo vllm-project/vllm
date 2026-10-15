@@ -834,6 +834,7 @@ class EngineArgs:
     use_replayssm: bool = CacheConfig.use_replayssm
 
     mamba_backend: MambaBackendEnum = MambaBackendEnum.TRITON
+    mamba_decode_backend: MambaBackendEnum | None = None
     mamba_ssu_algorithm: MambaSSUAlgorithm | None = None
     mamba_prefill_backend: MambaBackendEnum = MambaConfig.prefill_backend
     enable_mamba_cache_stochastic_rounding: bool = (
@@ -1140,6 +1141,9 @@ class EngineArgs:
             description=MambaConfig.__doc__,
         )
         mamba_group.add_argument("--mamba-backend", **mamba_kwargs["backend"])
+        mamba_group.add_argument(
+            "--mamba-decode-backend", **mamba_kwargs["decode_backend"]
+        )
         mamba_group.add_argument(
             "--mamba-ssu-algorithm", **mamba_kwargs["ssu_algorithm"]
         )
@@ -2816,29 +2820,21 @@ class EngineArgs:
             attention_config.flash_attn_version = 2
 
         # Mamba config overrides
-        mamba_config = copy.deepcopy(self.mamba_config)
-        # Convert string to enum if needed (CLI parsing returns a string)
-        if isinstance(self.mamba_backend, str):
-            mamba_config.backend = MambaBackendEnum[self.mamba_backend.upper()]
-        else:
-            mamba_config.backend = self.mamba_backend
+        mamba_config_dict = asdict(self.mamba_config)
+        mamba_config_dict["backend"] = self.mamba_backend
+        if self.mamba_decode_backend is not None:
+            mamba_config_dict["decode_backend"] = self.mamba_decode_backend
         if self.mamba_ssu_algorithm is not None:
-            mamba_config.ssu_algorithm = self.mamba_ssu_algorithm
-        if isinstance(self.mamba_prefill_backend, str):
-            mamba_config.prefill_backend = MambaBackendEnum[
-                self.mamba_prefill_backend.upper()
-            ]
-        else:
-            mamba_config.prefill_backend = self.mamba_prefill_backend
+            mamba_config_dict["ssu_algorithm"] = self.mamba_ssu_algorithm
+        if self.mamba_prefill_backend is not None:
+            mamba_config_dict["prefill_backend"] = self.mamba_prefill_backend
         if self.enable_mamba_cache_stochastic_rounding:
-            mamba_config.enable_stochastic_rounding = (
-                self.enable_mamba_cache_stochastic_rounding
-            )
+            mamba_config_dict["enable_stochastic_rounding"] = True
         if self.mamba_cache_philox_rounds:
-            mamba_config.stochastic_rounding_philox_rounds = (
+            mamba_config_dict["stochastic_rounding_philox_rounds"] = (
                 self.mamba_cache_philox_rounds
             )
-        mamba_config.__post_init__()
+        mamba_config = MambaConfig(**mamba_config_dict)
 
         # Kernel config overrides
         kernel_config = copy.deepcopy(self.kernel_config)
