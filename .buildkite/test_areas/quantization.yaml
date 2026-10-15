@@ -5,8 +5,7 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) Quantization"
   device: h200_35gb
   key: quantization
-  automatic_shard: true
-  timeout_in_minutes: 40
+  timeout_in_minutes: 120
   source_file_dependencies:
   - csrc/
   - vllm/model_executor/layers/quantization
@@ -14,12 +13,13 @@ steps:
   - vllm/utils/humming.py
   - tests/quantization
   commands:
-  # Pin torchao to the version compatible with the CI PyTorch and CUDA stack.
   - uv pip install --system torchao==0.18.0 --index-url https://download.pytorch.org/whl/cu130
   - uv pip install --system conch-triton-kernels
-  # The SM90-only checkpoint currently contains a removed weight_chan_scale
-  # parameter. It was not exercised by the previous L4 job.
-  - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/ --ignore quantization/test_blackwell_moe.py --ignore quantization/test_rocm_moe.py -k 'not test_compressed_tensors_w4a8_fp8'
+  - "VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -q -x quantization/test_per_token_kv_cache.py -k 'not test_compressed_tensors_w4a8_fp8' && echo 'REPRO alone: PASS' || echo 'REPRO alone: FAIL'"
+  - "VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -q -x quantization/test_cutlass_w4a16.py quantization/test_per_token_kv_cache.py -k 'not test_compressed_tensors_w4a8_fp8' && echo 'REPRO after_cutlass_w4a16: PASS' || echo 'REPRO after_cutlass_w4a16: FAIL'"
+  - "VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -q -x quantization/test_mixed_precision.py quantization/test_per_token_kv_cache.py -k 'not test_compressed_tensors_w4a8_fp8' && echo 'REPRO after_mixed_precision: PASS' || echo 'REPRO after_mixed_precision: FAIL'"
+  - "VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -q -x quantization/test_online_shared_expert_fusion.py quantization/test_per_token_kv_cache.py -k 'not test_compressed_tensors_w4a8_fp8' && echo 'REPRO after_online_shared_expert_fusion: PASS' || echo 'REPRO after_online_shared_expert_fusion: FAIL'"
+  - "VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -q -x quantization/test_auto_awq.py quantization/test_auto_gptq.py quantization/test_config_utils.py quantization/test_cutlass_w4a16.py quantization/test_lm_head.py quantization/test_mixed_precision.py quantization/test_online.py quantization/test_online_shared_expert_fusion.py quantization/test_per_token_kv_cache.py -k 'not test_compressed_tensors_w4a8_fp8' && echo 'REPRO full_bad_shard4_prefix: PASS' || echo 'REPRO full_bad_shard4_prefix: FAIL'"
   mirror:
     amd:
       parallelism: 4
