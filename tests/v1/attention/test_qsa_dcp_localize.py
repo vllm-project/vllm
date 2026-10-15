@@ -79,16 +79,20 @@ def test_kernel_matches_the_reference(world, interleave, width):
 # --- MTP selection reuse ----------------------------------------------------
 
 
+def _qsa_module():
+    """The QSA module, imported after the model module (they import each other)."""
+    import_module("vllm.models.qwen4_exp.nvidia.model")
+    return import_module("vllm.models.qwen4_exp.nvidia.qsa")
+
+
 def _localize_in_place(selection, world, rank, interleave):
     """The indexer's call: the impl localizes the layer buffer in place."""
     from types import SimpleNamespace
 
-    from vllm.models.qwen4_exp.nvidia.qsa import Qwen4ExpQSAFlashAttentionImpl
-
     impl = SimpleNamespace(
         dcp_world_size=world, dcp_rank=rank, cp_kv_cache_interleave_size=interleave
     )
-    Qwen4ExpQSAFlashAttentionImpl.localize_dcp_selection_(impl, selection)
+    _qsa_module().Qwen4ExpQSAFlashAttentionImpl.localize_dcp_selection_(impl, selection)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Triton kernel needs a GPU")
@@ -190,7 +194,8 @@ def _select_with_indexer(monkeypatch, *, skip_topk, dcp_world_size):
     from vllm.models.qwen4_exp.nvidia import indexer_qsa
     from vllm.models.qwen4_exp.nvidia.ops import qsa_dcp as qsa_dcp_ops
     from vllm.models.qwen4_exp.nvidia.ops import qsa_indexer as qsa_indexer_ops
-    from vllm.models.qwen4_exp.nvidia.qsa import Qwen4ExpQSAFlashAttentionImpl
+
+    Qwen4ExpQSAFlashAttentionImpl = _qsa_module().Qwen4ExpQSAFlashAttentionImpl
 
     num_tokens, token_topk, compress_ratio = 2, 4, 2
     impl_calls, kernel_calls, select_calls = [], [], []
@@ -636,10 +641,7 @@ def test_qsa_impl_passes_the_mtp_interleave_check(monkeypatch, interleave):
 
     from vllm.v1.worker import cp_utils
 
-    import_module("vllm.models.qwen4_exp.nvidia.model")
-    Qwen4ExpQSAFlashAttentionImpl = import_module(
-        "vllm.models.qwen4_exp.nvidia.qsa"
-    ).Qwen4ExpQSAFlashAttentionImpl
+    Qwen4ExpQSAFlashAttentionImpl = _qsa_module().Qwen4ExpQSAFlashAttentionImpl
 
     impl = SimpleNamespace(
         dcp_world_size=4,
