@@ -103,19 +103,13 @@ logger = init_logger(__name__)
 if current_platform.is_cuda_alike():
     if has_deep_ep():
         from .prepare_finalize.deepep_ht import DeepEPHTPrepareAndFinalize
-        from .prepare_finalize.deepep_ll import (
-            DEEPEP_QUANT_BLOCK_SHAPE,
-            DeepEPLLPrepareAndFinalize,
-        )
+        from .prepare_finalize.deepep_ll import DeepEPLLPrepareAndFinalize
     if has_deep_ep_v2():
         from .prepare_finalize.deepep_v2 import DeepEPV2PrepareAndFinalize
     if has_mori():
         from .prepare_finalize.mori import MoriPrepareAndFinalize
     if has_nixl_ep():
-        from .prepare_finalize.nixl_ep import (
-            NIXL_EP_QUANT_BLOCK_SHAPE,
-            NixlEPPrepareAndFinalize,
-        )
+        from .prepare_finalize.nixl_ep import NixlEPPrepareAndFinalize
     if has_moonep():
         from .prepare_finalize.moonep import (
             MOONEP_DEFAULT_NUM_PREFETCH_SLOTS,
@@ -196,14 +190,15 @@ def maybe_make_prepare_finalize(
         if not allow_new_interface:
             return None
 
+        assert quant_config is not None
+
         # Opt-in XPU batched path: reorganize tokens into E x T x K locally
         # (no all-to-all) so BatchedTritonExperts (moe_mmk TD) can run.
         if current_platform.is_xpu() and moe.moe_backend == "batched_triton":
             return BatchedPrepareAndFinalize(
-                max_num_tokens=moe.max_num_tokens,
-                num_local_experts=moe.num_local_experts,
+                moe,
+                quant_config,
                 num_dispatchers=1,
-                rank=moe.moe_parallel_config.ep_rank,
             )
 
         # For DP/TP case, fall back to naive P/F.
@@ -215,12 +210,17 @@ def maybe_make_prepare_finalize(
             if all2all_manager is None:
                 all2all_manager = get_ep_all2all_manager()
             return make_moe_prepare_and_finalize_naive_dp_ep(
-                is_sequence_parallel=moe.moe_parallel_config.is_sequence_parallel,
+                moe,
+                quant_config,
                 num_dispatchers=all2all_manager.world_size,
                 use_monolithic=use_monolithic,
             )
         else:
-            return make_moe_prepare_and_finalize_no_dp_ep(use_monolithic)
+            return make_moe_prepare_and_finalize_no_dp_ep(
+                use_monolithic, moe, quant_config
+            )
+
+    assert quant_config is not None
 
     if all2all_manager is None:
         all2all_manager = get_ep_all2all_manager()
@@ -233,14 +233,13 @@ def maybe_make_prepare_finalize(
         all_to_all_args: dict[str, Any] = dict()
         handle = all2all_manager.get_handle(all_to_all_args)
         prepare_finalize = DeepEPHTPrepareAndFinalize(
+            moe,
+            quant_config,
             handle,
             num_dispatchers=all2all_manager.world_size,
-            dp_size=all2all_manager.dp_world_size,
-            rank_expert_offset=all2all_manager.rank * moe.num_local_experts,
         )
 
     elif moe.use_deepep_ll_kernels:
-        assert quant_config is not None
         global_to_physical = physical_to_global = local_expert_global_ids = None
         if routing_tables is not None:
             (
@@ -257,18 +256,11 @@ def maybe_make_prepare_finalize(
         )
         handle = all2all_manager.get_handle(all_to_all_args)
 
-        # Note: We may want to use FP8 dispatch just to reduce
-        # data movement.
-        use_fp8_dispatch = (
-            quant_config.quant_dtype == current_platform.fp8_dtype()
-            and quant_config.block_shape == DEEPEP_QUANT_BLOCK_SHAPE
-        )
-
         prepare_finalize = DeepEPLLPrepareAndFinalize(
+            moe,
+            quant_config,
             handle,
-            max_tokens_per_rank=moe.max_num_tokens,
             num_dispatchers=all2all_manager.world_size,
-            use_fp8_dispatch=use_fp8_dispatch,
             global_to_physical=global_to_physical,
             physical_to_global=physical_to_global,
             local_expert_global_ids=local_expert_global_ids,
@@ -276,32 +268,25 @@ def maybe_make_prepare_finalize(
     elif moe.use_deepep_v2_kernels:
         assert moe.dp_size == all2all_manager.dp_world_size
 
-        use_fp8_dispatch = (
-            quant_config is not None
-            and quant_config.quant_dtype == current_platform.fp8_dtype()
-            and quant_config.is_block_quantized
-        )
         all_to_all_args = dict(
             num_max_tokens_per_rank=moe.max_num_tokens,
             hidden=moe.hidden_dim,
             num_topk=moe.experts_per_token,
             num_experts=moe.num_experts,
-            use_fp8_dispatch=use_fp8_dispatch,
+            use_fp8_dispatch=(
+                DeepEPV2PrepareAndFinalize.should_use_fp8_dispatch(quant_config)
+            ),
         )
         handle = all2all_manager.get_handle(all_to_all_args)
         vllm_config = get_current_vllm_config()
         use_cudagraph = not vllm_config.model_config.enforce_eager
 
         prepare_finalize = DeepEPV2PrepareAndFinalize(
+            moe,
+            quant_config,
             buffer=handle,
             num_dispatchers=all2all_manager.world_size,
-            dp_size=all2all_manager.dp_world_size,
-            rank_expert_offset=all2all_manager.rank * moe.num_local_experts,
-            num_experts=moe.num_experts,
-            num_topk=moe.experts_per_token,
-            use_fp8_dispatch=use_fp8_dispatch,
             use_cudagraph=use_cudagraph,
-            sp_size=moe.moe_parallel_config.sp_size,
         )
 
     elif moe.use_moonep_kernels:
@@ -320,22 +305,16 @@ def maybe_make_prepare_finalize(
         # process_weights_after_loading hook) once the layer has loaded and
         # converted its weights.
         prepare_finalize = MoonEPPrepareAndFinalize(
+            moe,
+            quant_config,
             buffer_pool=handle,
-            max_tokens_per_rank=moe.max_num_tokens,
             num_dispatchers=all2all_manager.world_size,
-            num_global_experts=moe.num_experts,
         )
 
     elif moe.use_mori_kernels:
-        assert quant_config is not None
-
         # Note: We may want to use FP8 dispatch just to reduce
         # data movement.
-        use_fp8_dispatch = (
-            quant_config.is_per_act_token
-            or quant_config.is_block_quantized
-            or quant_config.is_per_tensor
-        )
+        use_fp8_dispatch = MoriPrepareAndFinalize.should_use_fp8_dispatch(quant_config)
         if use_fp8_dispatch:
             # For PTPC (per token per channel) or per-tensor quant,
             # scale dim is 1. For 1x128 quant, scale dim is
@@ -366,20 +345,20 @@ def maybe_make_prepare_finalize(
         handle = all2all_manager.get_handle(all_to_all_args)
 
         prepare_finalize = MoriPrepareAndFinalize(
+            moe,
+            quant_config,
             handle,
-            max_tokens_per_rank=moe.max_num_tokens,
             num_dispatchers=all2all_manager.world_size,
-            use_fp8_dispatch=use_fp8_dispatch,
         )
 
     elif moe.use_fi_nvl_two_sided_kernels:
-        assert quant_config is not None
         prepare_finalize = FlashInferNVLinkTwoSidedPrepareAndFinalize(
+            moe,
+            quant_config,
             num_dispatchers=all2all_manager.world_size,
         )
 
     elif moe.use_fi_nvl_one_sided_kernels:
-        assert quant_config is not None
         max_num_tokens = (
             get_current_vllm_config().scheduler_config.max_num_batched_tokens
         )
@@ -387,10 +366,9 @@ def maybe_make_prepare_finalize(
             moe.hidden_dim, quant_config, input_dtype=input_dtype
         )
         prepare_finalize = FlashInferNVLinkOneSidedPrepareAndFinalize(
+            moe,
+            quant_config,
             max_num_tokens=max_num_tokens,
-            top_k=moe.experts_per_token,
-            num_experts=moe.num_experts,
-            hidden_size=moe.hidden_dim,
             num_dispatchers=all2all_manager.world_size,
             x_bytes_per_token=dispatch_layout.x_bytes_per_token,
             x_sf_bytes_per_token=dispatch_layout.x_sf_bytes_per_token,
@@ -398,13 +376,13 @@ def maybe_make_prepare_finalize(
 
     elif moe.use_ag_rs_all2all_kernels and allow_new_interface:
         prepare_finalize = make_moe_prepare_and_finalize_naive_dp_ep(
+            moe,
+            quant_config,
             use_monolithic=use_monolithic,
-            is_sequence_parallel=moe.moe_parallel_config.is_sequence_parallel,
             num_dispatchers=all2all_manager.world_size,
         )
 
     elif moe.use_nixl_ep_kernels:
-        assert quant_config is not None
         global_to_physical = physical_to_global = local_expert_global_ids = None
         if routing_tables is not None:
             (
@@ -419,19 +397,11 @@ def maybe_make_prepare_finalize(
         )
         handle = all2all_manager.get_handle(all_to_all_args)
 
-        # Note: We may want to use FP8 dispatch just to reduce
-        # data movement.
-        use_fp8_dispatch = (
-            quant_config.quant_dtype == current_platform.fp8_dtype()
-            and quant_config.block_shape == NIXL_EP_QUANT_BLOCK_SHAPE
-        )
-
         prepare_finalize = NixlEPPrepareAndFinalize(
+            moe,
+            quant_config,
             handle,
-            max_tokens_per_rank=moe.max_num_tokens,
             num_dispatchers=all2all_manager.max_num_ep_ranks,
-            expert_capacity=(moe.num_local_experts * all2all_manager.max_num_ep_ranks),
-            use_fp8_dispatch=use_fp8_dispatch,
             global_to_physical=global_to_physical,
             physical_to_global=physical_to_global,
             local_expert_global_ids=local_expert_global_ids,

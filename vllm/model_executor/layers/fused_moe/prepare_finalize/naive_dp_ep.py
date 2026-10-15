@@ -4,7 +4,10 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.distributed import get_ep_group
-from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
+    FusedMoEQuantConfig,
+)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceContiguous,
     TopKWeightAndReduceDelegate,
@@ -78,11 +81,12 @@ class MoEPrepareAndFinalizeNaiveDPEPModular(mk.FusedMoEPrepareAndFinalizeModular
 
     def __init__(
         self,
-        is_sequence_parallel: bool = False,
+        moe_config: FusedMoEConfig,
+        quant_config: FusedMoEQuantConfig,
         num_dispatchers: int = 1,
     ) -> None:
-        super().__init__()
-        self.is_sequence_parallel = is_sequence_parallel
+        super().__init__(moe_config, quant_config)
+        self.is_sequence_parallel = moe_config.is_sequence_parallel
         self._num_dispatchers = num_dispatchers
         # Set by FusedMoEWithLoRA.set_mapping() when LoRA is active. When
         # present, prepare() dispatches the per-token LoRA mapping alongside
@@ -254,11 +258,12 @@ class MoEPrepareAndFinalizeNaiveDPEPMonolithic(mk.FusedMoEPrepareAndFinalizeMono
 
     def __init__(
         self,
-        is_sequence_parallel: bool = False,
+        moe_config: FusedMoEConfig,
+        quant_config: FusedMoEQuantConfig,
         num_dispatchers: int = 1,
     ) -> None:
-        super().__init__()
-        self.is_sequence_parallel = is_sequence_parallel
+        super().__init__(moe_config, quant_config)
+        self.is_sequence_parallel = moe_config.is_sequence_parallel
         self._num_dispatchers = num_dispatchers
 
     @property
@@ -318,18 +323,19 @@ class MoEPrepareAndFinalizeNaiveDPEPMonolithic(mk.FusedMoEPrepareAndFinalizeMono
 
 
 def make_moe_prepare_and_finalize_naive_dp_ep(
-    use_monolithic: bool,
-    is_sequence_parallel: bool = False,
+    moe_config: FusedMoEConfig,
+    quant_config: FusedMoEQuantConfig,
+    use_monolithic: bool = False,
     num_dispatchers: int = 1,
 ) -> MoEPrepareAndFinalizeNaiveDPEPModular | MoEPrepareAndFinalizeNaiveDPEPMonolithic:
     return (
         MoEPrepareAndFinalizeNaiveDPEPMonolithic(
-            is_sequence_parallel=is_sequence_parallel,
-            num_dispatchers=num_dispatchers,
+            moe_config, quant_config, num_dispatchers=num_dispatchers
         )
         if use_monolithic
         else MoEPrepareAndFinalizeNaiveDPEPModular(
-            is_sequence_parallel=is_sequence_parallel,
+            moe_config,
+            quant_config,
             num_dispatchers=num_dispatchers,
         )
     )

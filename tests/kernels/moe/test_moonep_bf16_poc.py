@@ -18,10 +18,11 @@ import torch
 import torch.nn.functional as F
 from torch.distributed import ProcessGroup
 
-from tests.kernels.moe.utils import make_test_weights
+from tests.kernels.moe.utils import make_test_moe_config, make_test_weights
 from tests.kernels.utils import torch_experts
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+from vllm.model_executor.layers.fused_moe.config import FUSED_MOE_UNQUANTIZED_CONFIG
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
@@ -29,7 +30,10 @@ from vllm.utils.import_utils import has_moonep
 from vllm.utils.torch_utils import set_random_seed
 
 from ...utils import multi_gpu_test
-from .parallel_utils import ProcessGroupInfo, parallel_launch
+from .parallel_utils import (
+    ProcessGroupInfo,
+    parallel_launch,
+)
 
 if has_moonep():
     from vllm.model_executor.layers.fused_moe.prepare_finalize.moonep import (
@@ -154,11 +158,22 @@ def make_moonep_prepare_finalize(
         ),
         max_tokens_per_rank=max_tokens_per_rank,
     )
+    moe_config = make_test_moe_config(
+        ep_rank=pgi.rank,
+        ep_size=pgi.world_size,
+        device=pgi.device,
+        num_experts=num_experts,
+        num_local_experts=num_experts // pgi.world_size,
+        hidden_size=hidden_size,
+        max_num_tokens=max_tokens_per_rank,
+        experts_per_token=topk,
+        all2all_backend="moonep",
+    )
     return pool, MoonEPPrepareAndFinalize(
+        moe_config,
+        FUSED_MOE_UNQUANTIZED_CONFIG,
         buffer_pool=pool,
-        max_tokens_per_rank=max_tokens_per_rank,
         num_dispatchers=pgi.world_size,
-        num_global_experts=num_experts,
         weight_layout=weight_layout if pass_layout_to_pf else None,
     )
 

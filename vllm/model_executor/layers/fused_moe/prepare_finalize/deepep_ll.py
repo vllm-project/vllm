@@ -8,7 +8,10 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import envs
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
+    FusedMoEQuantConfig,
+)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate,
 )
@@ -16,6 +19,7 @@ from vllm.model_executor.layers.fused_moe.utils import (
     moe_kernel_quantize_input,
     normalize_batched_scales_shape,
 )
+from vllm.platforms import current_platform
 from vllm.v1.worker.ubatching import (
     dbo_current_ubatch_id,
     dbo_enabled,
@@ -80,19 +84,19 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
 
     def __init__(
         self,
+        moe_config: FusedMoEConfig,
+        quant_config: FusedMoEQuantConfig,
         buffer: deep_ep.Buffer,
-        max_tokens_per_rank: int,
         num_dispatchers: int,
-        use_fp8_dispatch: bool = False,
         global_to_physical: torch.Tensor | None = None,
         physical_to_global: torch.Tensor | None = None,
         local_expert_global_ids: torch.Tensor | None = None,
     ):
-        super().__init__()
+        super().__init__(moe_config, quant_config)
 
         self.buffer = buffer
-        self.max_tokens_per_rank = max_tokens_per_rank
-        self.use_fp8_dispatch = use_fp8_dispatch
+        self.max_tokens_per_rank = moe_config.max_num_tokens
+        self.use_fp8_dispatch = self.should_use_fp8_dispatch(quant_config)
         # The dispatch function returns a handle that the combine function
         # requires. We store the handle here so it is available to the
         # combine function.
@@ -114,6 +118,13 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         # activation scales in a packed ue8m0 format during object construction
         # time. This setting is handled by post_init_setup.
         self.use_ue8m0_dispatch = False
+
+    @staticmethod
+    def should_use_fp8_dispatch(quant_config: FusedMoEQuantConfig) -> bool:
+        return (
+            quant_config.quant_dtype == current_platform.fp8_dtype()
+            and quant_config.block_shape == DEEPEP_QUANT_BLOCK_SHAPE
+        )
 
     def post_init_setup(self, fused_experts: mk.FusedMoEExperts):
         if not fused_experts.supports_packed_ue8m0_act_scales():

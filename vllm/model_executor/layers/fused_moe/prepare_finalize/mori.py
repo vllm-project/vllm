@@ -6,7 +6,10 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
+    FusedMoEQuantConfig,
+)
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
@@ -17,17 +20,25 @@ class MoriPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
 
     def __init__(
         self,
+        moe_config: FusedMoEConfig,
+        quant_config: FusedMoEQuantConfig,
         mori_op: mori.ops.EpDispatchCombineOp,
-        max_tokens_per_rank: int,
         num_dispatchers: int,
-        use_fp8_dispatch: bool = False,
     ):
-        super().__init__()
+        super().__init__(moe_config, quant_config)
         self.mori_op = mori_op
         self.num_dispatchers_ = num_dispatchers
-        self.max_tokens_per_rank = max_tokens_per_rank
-        self.use_fp8_dispatch = use_fp8_dispatch
+        self.max_tokens_per_rank = moe_config.max_num_tokens
+        self.use_fp8_dispatch = self.should_use_fp8_dispatch(quant_config)
         self._dispatch_topk_ids: torch.Tensor | None = None
+
+    @staticmethod
+    def should_use_fp8_dispatch(quant_config: FusedMoEQuantConfig) -> bool:
+        return (
+            quant_config.is_per_act_token
+            or quant_config.is_block_quantized
+            or quant_config.is_per_tensor
+        )
 
     @property
     def activation_format(self) -> mk.FusedMoEActivationFormat:
