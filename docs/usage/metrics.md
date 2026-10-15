@@ -44,11 +44,14 @@ All three counters include `model_name`:
 | Counter | Additional labels | Counts |
 | --- | --- | --- |
 | `vllm:tool_call_parser_invocations_total` | `mode`, `outcome`, `request_type` | Parser invocations, not responses: once per choice in non-streaming mode or per delta in streaming mode. Coverage depends on the parser using the recording hook. |
-| `vllm:tool_call_responses_total` | `status`, `tool_choice`, `api_surface` | One outcome per completed tool-bearing Chat Completions or Messages request, or per surfaced tool-parser failure. |
+| `vllm:tool_call_responses_total` | `status`, `tool_choice`, `tool_count`, `api_surface` | One outcome per completed tool-bearing Chat Completions or Messages request, or per surfaced tool-parser failure. |
 | `vllm:tool_calls_emitted_total` | `api_surface` | Individual tool calls returned after filtering and API conversion. Repeated streaming argument fragments are not new calls. |
 
 `tool_choice` is normalized to `unset`, `auto`, `none`, `required`, `named`,
-or `other`; named choices never include the function name.
+or `other`; named choices never include the function name. The response
+counter's `tool_count` buckets are `0`, `1`, `2-5`, `6-10`, and `10+`
+(more than ten tools). These request dimensions are not weighted by streaming
+chunk count or the number of response choices.
 The response counters' `api_surface` is `chat_completions` or `messages`.
 
 The existing parser counter keeps its labels and classifications unchanged:
