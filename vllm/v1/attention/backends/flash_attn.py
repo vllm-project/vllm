@@ -1165,7 +1165,7 @@ class FlashAttentionImpl(AttentionImpl):
             )
 
         # FA4's SM90 d512 FP8-KV path consumes native FP16/BF16 Q. Other FA4
-        # paths (notably SM100) still require Q, K, and V to share an FP8 dtype.
+        # FP8 paths (notably SM100) require Q, K, and V to share an FP8 dtype.
         uses_sm90_fa4_fp8_kv_dequant = (
             self.vllm_flash_attn_version == 4
             and current_platform.is_device_capability_family(90)
