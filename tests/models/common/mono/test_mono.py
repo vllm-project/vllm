@@ -116,11 +116,11 @@ def test_configure_raises_with_every_reason(monkeypatch):
 
 
 def test_capture_sizes_up_to_the_widest_are_the_widths(monkeypatch):
-    """Configure sets them rather than refusing; larger sizes stay."""
+    """Applied to vLLM's final sizes (defaults included); larger sizes stay."""
     monkeypatch.setattr(guards, "load_spec", lambda path: fake_spec())
-    cfg = fake_vllm_config()
-    guards.configure(cfg, "x:SPEC")
-    assert cfg.compilation_config.cudagraph_capture_sizes == [4, *range(8, 17)]
+    default = [1, 2, 4, 8, 16, 24, 32]
+    sizes = guards.capture_sizes("x:SPEC", fake_vllm_config(), default)
+    assert sizes == [4, 8, 16, 24, 32]
 
 
 # ---------------------------------------------------------------- routing

@@ -78,17 +78,18 @@ def refuse_config(spec: MonoSpec, vllm_config: "VllmConfig") -> list[str]:
     return reasons + spec.refuse_config(vllm_config)
 
 
-def set_capture_sizes(spec: MonoSpec, vllm_config: "VllmConfig") -> None:
-    """The capture sizes up to the largest width become exactly the widths, so
-    a replay never pads a request's rows; larger sizes stay as configured (and
-    capture vLLM's path)."""
-    cc = vllm_config.compilation_config
+def capture_sizes(
+    spec_path: str, vllm_config: "VllmConfig", sizes: list[int]
+) -> list[int]:
+    """``sizes`` (vLLM's final capture sizes) with those up to the largest width
+    replaced by exactly the widths, so a replay never pads a request's rows;
+    larger sizes stay (and capture vLLM's path)."""
+    spec = load_spec(spec_path)
     widths = spec.widths(vllm_config)
-    sizes = cc.cudagraph_capture_sizes or []
     new = sorted(set(widths) | {s for s in sizes if s > max(widths)})
     if new != sorted(sizes):
         logger.info("MonoKernel %s: CUDA graph capture sizes %s", spec.name, new)
-        cc.cudagraph_capture_sizes = new
+    return new
 
 
 def configure(vllm_config: "VllmConfig", spec_path: str) -> None:
@@ -96,7 +97,6 @@ def configure(vllm_config: "VllmConfig", spec_path: str) -> None:
     reasons = refuse_config(spec, vllm_config)
     if reasons:
         raise MonoUnsupported(f"MonoKernel {spec.name} refused: " + "; ".join(reasons))
-    set_capture_sizes(spec, vllm_config)
     if vllm_config.compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
         logger.warning(
             "MonoKernel %s under eager mode: for debugging only, serve with FULL "

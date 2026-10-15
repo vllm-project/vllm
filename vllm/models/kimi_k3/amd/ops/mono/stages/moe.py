@@ -130,7 +130,6 @@ W2_STEPS = RI // 128  # 3
 DOWN_TASKS = LAT // ROWS  # 224
 DOWN_BATCH = 5  # a wave's experts whose w2 is in flight together
 MAX_U = 8 * TOPK
-TL_POINTS = 8  # start, early, sdown, ug, down, lnorm, up, reduce
 
 _STREAM = fx.Stream(None)
 

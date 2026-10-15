@@ -6,7 +6,7 @@
 every rank sees alike: the batch's width and the attention metadata, never
 rank-local state. Under a FULL CUDA graph the decision is baked in at capture,
 so it is a function of the captured size: FULL graphs serve uniform decode
-batches and every width is a capture size (``guards.set_capture_sizes``), so
+batches and every width is a capture size (``guards.capture_sizes``), so
 no replay pads a request's rows. PIECEWISE steps run vLLM's layers.
 """
 

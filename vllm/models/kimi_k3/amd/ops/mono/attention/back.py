@@ -56,7 +56,6 @@ OK = PROJ  # K = 1536 a rank
 OKCH = OK // 128  # 12 chunks
 GEMV0 = NA  # the first gemv CTA
 GEMV_N = BLOCKS - NA  # 200
-TL_POINTS = 6  # start, gemv, pushed, reduced, slice/gate, mix
 
 _STREAM = fx.Stream(None)
 

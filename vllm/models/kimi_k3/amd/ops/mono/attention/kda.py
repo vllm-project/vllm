@@ -41,9 +41,6 @@ from flydsl.expr.typing import Int32, Int64, T
 
 from vllm.models.kimi_k3.amd.ops.mono.common.debug import (
     region_ids,
-    stamp,
-    stamp_begin,
-    stamp_flush,
 )
 from vllm.models.kimi_k3.amd.ops.mono.common.ops import (
     CM_DEV,
@@ -97,9 +94,6 @@ NVCH = HD // VCH  # 8
 CONV_W = 4
 LOG2E = 1.0 / math.log(2.0)
 LDS_PAD = 8  # bf16 a padded x row
-# timeline points: start, slice, gate, mix, load_x, gemv0, gemv1, k.stage,
-# k.conv, k.gates, k.recur, k.norm
-TL_POINTS = 15
 
 assert NA + GEMV_CTAS <= BLOCKS and NA == 8 * GSL
 
@@ -120,7 +114,6 @@ class KdaPreBuild:
     out_eps: float = 1e-5  # input_layernorm
     onorm_eps: float = 1e-5
     lower_bound: float = -5.0
-    timeline: bool = False
     write_idx: int = -1  # a block-write layer's block: the updated prefix stored there
     kda0: int = 0  # the first KDA task's CTA
 
@@ -156,7 +149,6 @@ ABI = KernelAbi(
         "epoch",
         "health",
         "alarm",
-        "tl",
     )
 )
 
@@ -550,13 +542,11 @@ def kda_conv(c, k, req, h, ch):
     conv state; q / k out through QK, v to LDS."""
     L, sl, tid = c["L"], c["SL"], c["tid"]
     a = c["args"]
-    stamp(c["on"], c["tls"], tid, 12)
     if tid < 3 * VCH:
         xs = c["poll"](
             [(c["proj"], (req * L + j) * NPROJ + k["chan"], 1) for j in range(L)]
         )
         xv = [f32_of(xs[j][0]) for j in range(L)]
-        stamp(c["on"], c["tls"], tid, 13)
         rs = rsrc(k["cs"])
         if k["slot_c"] > 0:
             for j in range_constexpr(sl):
@@ -564,7 +554,6 @@ def kda_conv(c, k, req, h, ch):
                 bo.buffer_store(
                     fx.Float32(nv).to(fx.BFloat16), rs, k["co"] + j * a["cs_tok"]
                 )
-        stamp(c["on"], c["tls"], tid, 14)
         seq = k["win"] + xv
         for j in range_constexpr(L):
             acc = fx.Float32(0.0)
@@ -714,22 +703,17 @@ def kda_norm(c, req, h, ch):
 
 
 @traced
-def kda_tasks(c, on, tls):
-    s, L, tid, bid = c["S"], c["L"], c["tid"], c["bid"]
+def kda_tasks(c):
+    s, L, bid = c["S"], c["L"], c["bid"]
     for task in range(first_task(bid, c["kda0"]), (s // L) * NH * NVCH, BLOCKS):
         req = task // (NH * NVCH)
         h = (task // NVCH) % NH
         ch = task % NVCH
         k = kda_stage(c, req, h, ch)
-        stamp(on, tls, tid, 7)
         kda_conv(c, k, req, h, ch)
-        stamp(on, tls, tid, 8)
         kda_gates(c, k, req, h)
-        stamp(on, tls, tid, 9)
         kda_recur(c, k, req, h, ch)
-        stamp(on, tls, tid, 10)
         kda_norm(c, req, h, ch)
-        stamp(on, tls, tid, 11)
 
 
 # ---------------------------------------------------------------- kernel
@@ -772,13 +756,9 @@ def build(key: KdaPreBuild):
     @fx.struct
     class Smem:
         red: fx.Array[fx.Float32, WAVES * 64 * 4, 16]
-        tls: fx.Array[fx.Int64, TL_POINTS, 16]
 
     keyed = key_tuple(key, _SOURCES)
-    name = (
-        f"k3_mono_kda_pre_s{s}_l{L}_nb{key.nblocks}_d{int(key.delta)}"
-        f"_t{int(key.timeline)}"
-    )
+    name = f"k3_mono_kda_pre_s{s}_l{L}_nb{key.nblocks}_d{int(key.delta)}"
 
     @flyc.kernel(name=name, known_block_size=[THREADS, 1, 1])
     def kda_pre(
@@ -811,7 +791,6 @@ def build(key: KdaPreBuild):
         epoch: Int64,
         health: Int64,
         alarm: Int64,
-        tl: Int64,
     ):
         _ = keyed
         tid = fx.thread_idx.x
@@ -879,33 +858,23 @@ def build(key: KdaPreBuild):
         }
         for region in REGIONS:
             c[region] = sreg(scratch, lay[region][0], region)
-        on, tls = key.timeline, lds.tls.ptr
-        c["on"], c["tls"] = on, tls
-        stamp_begin(on, tls, tid, TL_POINTS)
         if bid < NA:
             stage_slice(c, bid)
-            stamp(on, tls, tid, 1)
             if bid < s:
                 stage_gate(c, bid)
-            stamp(on, tls, tid, 2)
             stage_mix(c, bid)
-            stamp(on, tls, tid, 3)
         if bid >= NA:
             gi = bid - NA
             rg0 = 2 * gi
             rg1 = 2 * gi + 1
             ops0 = gemv_loads(c, rg0, range(PER_WAVE))
             load_x(c)
-            stamp(on, tls, tid, 4)
             # the second group's first half in flight under the first's MFMAs
             ops1 = gemv_loads(c, rg1, range(4))
             stage_gemv(c, rg0, ops0)
-            stamp(on, tls, tid, 5)
             ops1 = ops1 + gemv_loads(c, rg1, range(4, PER_WAVE))
             stage_gemv(c, rg1, ops1)
-            stamp(on, tls, tid, 6)
-        kda_tasks(c, on, tls)
-        stamp_flush(on, tls, tl, tid, bid, TL_POINTS)
+        kda_tasks(c)
 
     @flyc.jit
     def launch(
@@ -938,7 +907,6 @@ def build(key: KdaPreBuild):
         epoch: Int64,
         health: Int64,
         alarm: Int64,
-        tl: Int64,
         stream: fx.Stream = _STREAM,
     ):
         _ = keyed
@@ -972,7 +940,6 @@ def build(key: KdaPreBuild):
             epoch,
             health,
             alarm,
-            tl,
         ).launch(grid=(BLOCKS,), block=(THREADS,), stream=stream)
 
     ABI.check(kda_pre, launch)
@@ -1009,7 +976,6 @@ def kda_pre(
     epoch,
     health,
     alarm,
-    tl=None,
 ):
     """Host launcher. ``conv_state`` [slots, dim, state_len] or a transposed view
     of [slots, state_len, dim] (strides read); ``rstate`` [slots, 12, 128, 128]
@@ -1047,6 +1013,5 @@ def kda_pre(
         epoch.data_ptr(),
         health.data_ptr(),
         alarm,
-        ptr(tl),
         stream=torch.cuda.current_stream(),
     )

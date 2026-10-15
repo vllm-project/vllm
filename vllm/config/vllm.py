@@ -2498,6 +2498,14 @@ class VllmConfig:
                 # de-duplicate and sort the sizes
                 cudagraph_capture_sizes = sorted(set(cudagraph_capture_sizes))
 
+            mono_spec = self.model_config.mono_spec
+            if self.kernel_config.monokernel and mono_spec is not None:
+                from vllm.models.common.mono.guards import capture_sizes
+
+                cudagraph_capture_sizes = capture_sizes(
+                    mono_spec, self, cudagraph_capture_sizes
+                )
+
             # user-specific compilation_config.max_cudagraph_capture_size get
             # truncated to valid_max_size when they are inconsistent.
             valid_max_size = (
@@ -2627,20 +2635,13 @@ class VllmConfig:
         )
 
     def _configure_monokernel(self) -> None:
-        """With ``--monokernel``, refuses an unsupported config before load and
-        sets the capture sizes the model's MonoKernels need (RFC #60904)."""
+        """With ``--monokernel``, refuses an unsupported config before load
+        (RFC #60904)."""
         from vllm.models.common.mono.guards import configure, enabled
 
-        if not enabled(self):
-            return
         spec = self.model_config.mono_spec
-        if spec is not None:
+        if enabled(self) and spec is not None:
             configure(self, spec)
-        elif self.kernel_config.monokernel:
-            logger.warning(
-                "--monokernel: %s has no MonoKernels; ignored",
-                self.model_config.architecture,
-            )
 
     def try_verify_and_update_config(self):
         if self.model_config is None:

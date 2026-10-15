@@ -39,9 +39,6 @@ from vllm.models.kimi_k3.amd.ops.mono.attention.kda import (
 )
 from vllm.models.kimi_k3.amd.ops.mono.common.debug import (
     region_ids,
-    stamp,
-    stamp_begin,
-    stamp_flush,
 )
 from vllm.models.kimi_k3.amd.ops.mono.common.ops import (
     ld_i32,
@@ -75,10 +72,6 @@ O_ROUNDS = (OTASKS + O_N - 1) // O_N  # 5
 E0 = 160  # router / latent CTAs (their weights in flight under their o_proj)
 H0 = 8  # the shared SiTU's CTAs (after their AttnRes work)
 SD0 = k2b.DOWN_TASKS  # 224: the shared down's CTAs
-# timeline points: 0 start, 1 o_proj done / AR reduced, 2 early done / slice,
-# 3 ug, 4 down/sdown, 5 lnorm, 6 up, 7 reduce, 8 gate, 9 mix (x published),
-# 10 route, 11 route table, 12 latent quant, 13 route starts
-TL_POINTS = 17  # + 14 (unused), 15 INTER loaded, 16 down done
 
 assert E0 + k2b.R_TASKS + k2b.L_TASKS <= BLOCKS and k2b.G_TASKS <= E0 - O0
 
@@ -102,7 +95,6 @@ class K2Build:
     fault_epoch: int = 0
     fault_layer: int = 0
     fault_ticks: int = 0
-    timeline: bool = False
 
 
 ABI = KernelAbi(
@@ -135,7 +127,6 @@ ABI = KernelAbi(
         "layer",
         "health",
         "alarm",
-        "tl",
     )
 )
 
@@ -231,13 +222,9 @@ def build(key: K2Build):
     @fx.struct
     class Smem:
         red: fx.Array[fx.Float32, WAVES * 64 * 4, 16]
-        tls: fx.Array[fx.Int64, TL_POINTS, 16]
 
     keyed = key_tuple(key, _SOURCES)
-    name = (
-        f"k3_mono_k2_s{s}_nb{key.nblocks}_x{int(key.reset)}_r{int(key.reduce)}"
-        f"_t{int(key.timeline)}"
-    )
+    name = f"k3_mono_k2_s{s}_nb{key.nblocks}_x{int(key.reset)}_r{int(key.reduce)}"
     if key.fault_rank >= 0:
         name += (
             f"_f{key.fault_rank}_{key.fault_epoch}_{key.fault_layer}_{key.fault_ticks}"
@@ -273,7 +260,6 @@ def build(key: K2Build):
         layer: Int32,
         health: Int64,
         alarm: Int64,
-        tl: Int64,
     ):
         _ = keyed
         tid = fx.thread_idx.x
@@ -344,8 +330,6 @@ def build(key: K2Build):
             },
             "xbuf": scratch + fx.Int64(lay["xrow"][0]),
             "xflags": NA,
-            "tl_on": key.timeline,
-            "tls": lds.tls.ptr,
             "ln": scratch + fx.Int64(lay["ln"][0]),
             "shp": scratch + fx.Int64(lay["shp"][0]),
             "args": {
@@ -390,8 +374,6 @@ def build(key: K2Build):
             "shrdy",
         ):
             c[region] = sreg(scratch, lay[region][0], region)
-        on, tls = key.timeline, lds.tls.ptr
-        stamp_begin(on, tls, tid, TL_POINTS)
         # ---- o_proj on every CTA past AttnRes's
         eb = bid - E0
         lb = eb - k2b.R_TASKS
@@ -401,45 +383,32 @@ def build(key: K2Build):
         # retire in order), the early weights after: they land before x does
         if is_r:
             stage_oproj(c, bid - O0)
-            stamp(on, tls, tid, 1)
             rops = k2b.early_loads(c, 0, eb // k2b.R_PARTS, eb % k2b.R_PARTS)
             k2b.early_compute(c, 0, eb // k2b.R_PARTS, eb % k2b.R_PARTS, rops)
         if is_l:
             stage_oproj(c, bid - O0)
-            stamp(on, tls, tid, 1)
             lops = k2b.early_loads(c, 1, lb // k2b.L_PARTS, lb % k2b.L_PARTS)
             k2b.early_compute(c, 1, lb // k2b.L_PARTS, lb % k2b.L_PARTS, lops)
         if (bid >= O0) & ~is_r & ~is_l:
             stage_oproj(c, bid - O0)
-            stamp(on, tls, tid, 1)
             gi = bid - O0
             if gi < k2b.G_TASKS:
                 k2b.early_compute(c, 2, gi, 0, k2b.early_loads(c, 2, gi, 0))
         # ---- AttnRes: the reduced o_proj -> x; then route / SiTU
         if bid < NA:
             k2a.stage_reduce(c, bid)
-            stamp(on, tls, tid, 1)
             stage_slice(c, bid)
-            stamp(on, tls, tid, 2)
             if bid < s:
                 stage_gate(c, bid)
-            stamp(on, tls, tid, 8)
             stage_mix(c, bid)
-            stamp(on, tls, tid, 9)
-            stamp(on, tls, tid, 13)
             if bid < s:
                 k2b.stage_route(c, bid)
-            stamp(on, tls, tid, 10)
             if (bid >= H0) & (bid < H0 + s):
                 k2b.stage_h(c, bid - H0)
-        if bid >= NA:
-            stamp(on, tls, tid, 2)
         # ---- the routed experts
         # the latent (ready ~10 us before the route) quantized first
         k2b.load_latq(c)
-        stamp(on, tls, tid, 12)
         nu = k2b.load_route(c)
-        stamp(on, tls, tid, 11)
         total = nu * k2b.UG_GROUPS
         last = total - 1
         # reversed placement: the round's leftover tasks go to the high CTAs,
@@ -452,27 +421,19 @@ def build(key: K2Build):
             k2b.stage_ug(c, task, ops)
             task = nxt
             ops = ops_n
-        stamp(on, tls, tid, 3)
         if bid < k2b.DOWN_TASKS:
             dops = k2b.down_loads(c, bid, nu, fx.min(c["wave"], nu - 1))
             k2b.load_inter(c)
-            stamp(on, tls, tid, 15)
             k2b.stage_down(c, bid, nu, dops)
-            stamp(on, tls, tid, 16)
         k2b.run_sdown_rest(c, bid, w_sd)
         k2b.run_sdown(c, bid, w_sd)
-        stamp(on, tls, tid, 4)
         if (bid >= k2b.LN0) & (bid < k2b.LN0 + k2b.LN_TASKS):
             k2b.stage_lnorm(c, bid - k2b.LN0)
-        stamp(on, tls, tid, 5)
         if bid < k2b.UP_TASKS:
             k2b.stage_up(c, bid)
-        stamp(on, tls, tid, 6)
         if const_expr(key.reduce):  # noqa: SIM102 (traced: `and` does not combine traced values)
             if (bid >= k2b.RED0) & (bid < k2b.RED0 + k2b.RED_TASKS):
                 k2b.stage_reduce(c, bid - k2b.RED0)
-        stamp(on, tls, tid, 7)
-        stamp_flush(on, tls, tl, tid, bid, TL_POINTS)
 
     @flyc.jit
     def launch(
@@ -504,7 +465,6 @@ def build(key: K2Build):
         layer: Int32,
         health: Int64,
         alarm: Int64,
-        tl: Int64,
         stream: fx.Stream = _STREAM,
     ):
         _ = keyed
@@ -537,7 +497,6 @@ def build(key: K2Build):
             layer,
             health,
             alarm,
-            tl,
         ).launch(grid=(BLOCKS,), block=(THREADS,), stream=stream)
 
     ABI.check(k2, launch)
@@ -546,10 +505,6 @@ def build(key: K2Build):
 
 
 TP_ = k2b.TP
-
-
-def ptr(t):
-    return 0 if t is None else t.data_ptr()
 
 
 def k2_launch(
@@ -581,7 +536,6 @@ def k2_launch(
     layer,
     health,
     alarm,
-    tl=None,
 ):
     """Host launcher: ``core`` [S, 1536] (o_proj's input), ``prefix`` updated in
     place, ``out`` the MoE output [S, 7168]; MoE weights as ``moe``."""
@@ -615,6 +569,5 @@ def k2_launch(
         layer,
         health.data_ptr(),
         alarm,
-        ptr(tl),
         stream=torch.cuda.current_stream(),
     )
