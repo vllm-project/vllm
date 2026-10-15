@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.v1.attention.ops.mxfp4_mla import GROUP_SIZE
+from vllm.v1.attention.ops.mxfp4_mla import E8M0_BIAS, GROUP_SIZE
 
 if current_platform.is_rocm():
     from vllm.platforms.rocm import _ON_GFX950
@@ -36,7 +36,6 @@ _GROUP = tl.constexpr(GROUP_SIZE)
 #
 # Applying the normal-number formula to ``e == 0`` yields 0.75 for code 1, which
 # is not an E2M1 value at all.
-_E8M0_BIAS = tl.constexpr(127)
 
 
 # fp32 is 1-8-23, so the exponent field starts at bit 23. Scaling by a power of
@@ -69,7 +68,7 @@ def _apply_e8m0_scale(values, encoded_scales):
     be special-cased: adding to a zero's exponent field manufactures a denormal
     instead of leaving it zero.
     """
-    delta = (encoded_scales.to(tl.int32) - 127) << _F32_MANT_BITS
+    delta = (encoded_scales.to(tl.int32) - E8M0_BIAS) << _F32_MANT_BITS
     bits = values.to(tl.int32, bitcast=True) + delta
     scaled = bits.to(tl.float32, bitcast=True)
     return tl.where(values == 0.0, 0.0, scaled)
@@ -170,6 +169,23 @@ def unpack_mxfp4_tile(
 def load_mxfp4_rows(
     cache_ptr, slots, valid, row_pitch, BLOCK_K: tl.constexpr, LATENT: tl.constexpr
 ):
+    """Gather BLOCK_K packed rows as a bf16 [BLOCK_K, LATENT] tile, using the
+    gfx950 hardware unpack where available."""
+    return _load_mxfp4_rows(
+        cache_ptr, slots, valid, row_pitch, BLOCK_K, LATENT, _HW_UNPACK
+    )
+
+
+@triton.jit
+def _load_mxfp4_rows(
+    cache_ptr,
+    slots,
+    valid,
+    row_pitch,
+    BLOCK_K: tl.constexpr,
+    LATENT: tl.constexpr,
+    HW_UNPACK: tl.constexpr,
+):
     """Gather BLOCK_K packed rows as a bf16 [BLOCK_K, LATENT] tile.
 
     ``cache_ptr`` is the uint8 cache, ``row_pitch`` its row size in bytes.
@@ -192,9 +208,9 @@ def load_mxfp4_rows(
     encoded_scales = tl.load(
         cache_ptr + base + LATENT // 2 + tl.arange(0, LATENT // _GROUP)[None, :],
         mask=valid[:, None],
-        other=127,
+        other=E8M0_BIAS,
     )
-    if _HW_UNPACK:
+    if HW_UNPACK:
         words = tl.load(
             cache_ptr.to(tl.pointer_type(tl.int32))
             + base // 4

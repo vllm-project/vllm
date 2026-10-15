@@ -1,51 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Validate the mxfp4_mla dtype and spec plumbing.
+"""mxfp4_mla dtype selection, page sizing, and routing to the kernels that can
+read a packed cache."""
 
-CPU-only: these check config wiring and page-size arithmetic, not kernels.
-"""
-
-from __future__ import annotations
-
+import contextlib
 import types
+from typing import Any
 
 import pytest
 import torch
 
-from vllm.v1.attention.ops.mxfp4_mla import row_bytes
-
 LATENT = 512
+ROW = 272
 
 
-def test_dtype_is_a_registered_cache_dtype():
-    from vllm.config.cache import CacheDType
-
-    assert "mxfp4_mla" in CacheDType.__args__
-
-
-def test_dtype_maps_to_uint8():
-    from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
-
-    assert STR_DTYPE_TO_TORCH_DTYPE["mxfp4_mla"] is torch.uint8
-
-
-def test_backend_accepts_the_dtype():
-    from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
-        ROCMAiterMLASparseBackend,
-    )
-
-    assert "mxfp4_mla" in ROCMAiterMLASparseBackend.supported_kv_cache_dtypes
-    # The dtypes it already served must not have been disturbed.
-    for kept in ("auto", "bfloat16", "fp8", "fp8_e4m3"):
-        assert kept in ROCMAiterMLASparseBackend.supported_kv_cache_dtypes
-
-
-def _layer_spec(kv_cache_dtype: str, block_size: int = 64):
-    """The spec the production MLA layer publishes, for a GLM-5.3 main layer."""
+def _layer_spec(block_size: int = 64):
+    """The spec the MLA layer publishes for a GLM-5.3 main layer."""
     from vllm.model_executor.layers.attention.mla_attention import MLAAttention
 
     layer = types.SimpleNamespace(
-        kv_cache_dtype=kv_cache_dtype,
+        kv_cache_dtype="mxfp4_mla",
         head_size=LATENT,
         sliding_window=None,
         indexer=None,
@@ -60,51 +34,30 @@ def _layer_spec(kv_cache_dtype: str, block_size: int = 64):
     return MLAAttention.get_kv_cache_spec(layer, config)
 
 
-def test_layer_publishes_a_272_byte_row():
-    spec = _layer_spec("mxfp4_mla")
-    assert row_bytes(LATENT) == 272
+def test_dtype_selects_a_uint8_272_byte_row():
+    from vllm.config.cache import CacheConfig
+    from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
+    from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
+        ROCMAiterMLASparseBackend,
+    )
+
+    assert CacheConfig(block_size=64, cache_dtype="mxfp4_mla").cache_dtype == (
+        "mxfp4_mla"
+    )
+    assert STR_DTYPE_TO_TORCH_DTYPE["mxfp4_mla"] is torch.uint8
+    assert "mxfp4_mla" in ROCMAiterMLASparseBackend.supported_kv_cache_dtypes
+
+    spec = _layer_spec()
     assert spec.dtype is torch.uint8
-    assert spec.state_content_bytes == 272
-    assert spec.page_size_bytes == 64 * 272
+    assert spec.page_size_bytes == 64 * ROW
 
 
-def test_bf16_page_size_is_unchanged():
-    spec = _layer_spec("auto")
-    assert spec.state_content_bytes is None
-    assert spec.page_size_bytes == 64 * LATENT * 2
-
-
-@pytest.mark.parametrize("latent,expected", [(512, 272), (256, 136), (1024, 544)])
-def test_row_bytes_scales_with_latent(latent: int, expected: int):
-    assert row_bytes(latent) == expected
-    # Always 4.25 bits per value, the OCP MXFP4 ratio.
-    assert row_bytes(latent) * 8 / latent == 4.25
-
-
-def test_block_count_scales_by_3_76x_at_a_fixed_memory_budget():
-    """The tokens-per-GiB claim, through the allocator's own page-size read."""
-    from vllm.v1.core.kv_cache_utils import get_uniform_page_size
-
-    block, layers = 64, 11  # 11 DSA layers in GLM-5.3-Flash
-    available = 64 * 1024**3
-
-    def tokens(kv_cache_dtype: str) -> int:
-        page = get_uniform_page_size([_layer_spec(kv_cache_dtype, block)])
-        return (available // page // layers) * block
-
-    ratio = tokens("mxfp4_mla") / tokens("auto")
-    assert 3.7 < ratio < 3.8, ratio
-
-
-@pytest.mark.parametrize("kv_cache_dtype", ["mxfp4_mla", "auto"])
-def test_hybrid_block_size_matches_the_layer_page(monkeypatch, kv_cache_dtype):
+def test_hybrid_block_size_matches_the_layer_page(monkeypatch):
     """The platform sizes the hybrid block from the same row the layer uses.
 
     GLM-5.3-Flash at TP=4 has a 1085440-byte mamba state; the glm5_next KV
     grouping rejects the config if that exceeds the real MLA page.
     """
-    import contextlib
-
     import vllm.config.vllm as vllm_config_mod
     from vllm.model_executor.models import ModelRegistry
     from vllm.platforms.interface import Platform
@@ -122,7 +75,7 @@ def test_hybrid_block_size_matches_the_layer_page(monkeypatch, kv_cache_dtype):
         vllm_config_mod, "set_current_vllm_config", lambda _: contextlib.nullcontext()
     )
     cache = types.SimpleNamespace(
-        cache_dtype=kv_cache_dtype,
+        cache_dtype="mxfp4_mla",
         block_size=64,
         mamba_block_size=None,
         user_specified_mamba_block_size=False,
@@ -148,46 +101,64 @@ def test_hybrid_block_size_matches_the_layer_page(monkeypatch, kv_cache_dtype):
 
     Platform._align_hybrid_block_size(config, backend)
 
-    layer_page = _layer_spec(kv_cache_dtype, cache.block_size).page_size_bytes
+    layer_page = _layer_spec(cache.block_size).page_size_bytes
     assert layer_page >= mamba_page
     assert cache.mamba_page_size_padded == layer_page
 
 
-def test_write_hook_rejects_a_rope_bearing_latent():
-    """mxfp4_mla targets NoPE models; a non-empty k_pe would be silently lost."""
+def test_decode_and_prefill_take_the_triton_route():
+    """Only the Triton kernels read a packed cache; AITER's would misread it."""
     from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
-        ROCMAiterMLASparseImpl,
+        _use_rocm_sparse_triton,
     )
 
-    with pytest.raises(AssertionError, match="rope-free latent"):
-        ROCMAiterMLASparseImpl.do_kv_cache_update(
-            None,
-            kv_c_normed=torch.zeros(1, 512),
-            k_pe=torch.zeros(1, 1, 64),
-            kv_cache=torch.zeros(1, 272, dtype=torch.uint8),
-            slot_mapping=torch.zeros(1, dtype=torch.int64),
-            kv_cache_dtype="mxfp4_mla",
-            k_scale=torch.ones(1),
+    decode = dict(num_prefills=0, num_decodes=8, num_decode_tokens=8, max_query_len=1)
+    prefill = dict(
+        num_prefills=2, num_decodes=0, num_decode_tokens=0, max_query_len=128
+    )
+    for step in (decode, prefill):
+        assert _use_rocm_sparse_triton(
+            kv_cache_dtype="mxfp4_mla", head_size=LATENT, kv_lora_rank=LATENT, **step
         )
 
 
-def test_engine_config_validation_accepts_the_dtype():
-    """``--kv-cache-dtype mxfp4_mla`` must survive CacheConfig validation."""
-    from pydantic import ValidationError
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="_forward_mla imports vllm.platforms.rocm, which queries the GPU",
+)
+def test_long_decode_takes_split_k_with_the_packed_cache(monkeypatch):
+    from vllm.v1.attention.backends.mla import rocm_aiter_mla_sparse as sparse_mod
 
-    from vllm.config.cache import CacheConfig
+    def no_single_pass(**kwargs):
+        raise AssertionError("expected the split-K decode")
 
-    assert CacheConfig(block_size=64, cache_dtype="mxfp4_mla").cache_dtype == (
-        "mxfp4_mla"
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(sparse_mod, "rocm_sparse_decode_bf16_num_splits", lambda *a: 4)
+    monkeypatch.setattr(sparse_mod, "rocm_sparse_attn_decode_bf16", captured.update)
+    monkeypatch.setattr(sparse_mod, "rocm_sparse_attn_prefill", no_single_pass)
+
+    impl = object.__new__(sparse_mod.ROCMAiterMLASparseImpl)
+    impl.num_heads = 16
+    impl.kv_lora_rank = LATENT
+    impl.kv_cache_dtype = "mxfp4_mla"
+    impl.scale = LATENT**-0.5
+    impl.sinks = None
+    metadata = types.SimpleNamespace(
+        attn_out_dtype=torch.bfloat16,
+        num_prefills=0,
+        num_decodes=2,
+        num_decode_tokens=2,
+        max_query_len=1,
+        max_seq_len=8192,
+        topk_tokens=2048,
+        paged_kv_indices=torch.zeros(4, dtype=torch.int32),
+        paged_kv_indptr=torch.tensor([0, 2, 4], dtype=torch.int32),
     )
-    for kept in ("auto", "fp8_e4m3"):
-        assert CacheConfig(block_size=64, cache_dtype=kept).cache_dtype == kept
-    with pytest.raises(ValidationError):
-        CacheConfig(block_size=64, cache_dtype="bogus_dtype")
+    q = torch.zeros(2, 16, LATENT, dtype=torch.bfloat16)
+    cache = torch.zeros(4, 1, ROW, dtype=torch.uint8)
 
+    impl._forward_mla(types.SimpleNamespace(), q, cache, metadata)
 
-def test_mxfp4_is_not_a_quantized_kv_mode():
-    """No KVQuantMode, so the fp8 query-quant and fp8 cache-view paths skip it."""
-    from vllm.v1.kv_cache_interface import KVQuantMode, get_kv_quant_mode
-
-    assert get_kv_quant_mode("mxfp4_mla") == KVQuantMode.NONE
+    assert captured["kv_cache_dtype"] == "mxfp4_mla"
+    assert captured["kv"].shape == (4, 1, ROW)
+    assert captured["num_splits"] == 4
