@@ -1464,6 +1464,33 @@ class TestDerenderChatStreamParsed:
         )
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("request_kwargs", "expected_candidates"),
+        [({"logprobs": True, "top_logprobs": 2}, 2), ({}, 4)],
+    )
+    async def test_top_logprobs_follow_the_chat_cut(
+        self, parsed_derenderer, request_kwargs, expected_candidates
+    ):
+        """The parsed path trims generate's candidate list to the request's
+        `top_logprobs` like the plain path does, and keeps every candidate
+        when the request does not ask for logprobs."""
+        ids = [_FakeParser.CONTENT]
+        logprobs = _generate_logprobs(ids)
+        logprobs["content"][0]["top_logprobs"] = [
+            {"token_id": tid, "logprob": -float(rank)}
+            for rank, tid in enumerate([ids[0], 11, 12, 13])
+        ]
+        chunk, _ = await parsed_derenderer.derender_chat_stream(
+            model=MODEL_NAME,
+            generate_chunk=_make_stream_chunk(ids, logprobs=logprobs),
+            chat_request=_chat_request(**request_kwargs),
+            prompt_token_ids=[1, 2],
+        )
+        content = chunk.choices[0].logprobs.content
+        assert len(content) == 1
+        assert len(content[0].top_logprobs) == expected_candidates
+
+    @pytest.mark.asyncio
     async def test_logprobs_kept_when_parser_swallows_chunk(
         self, parsed_derenderer, tokenizer
     ):
