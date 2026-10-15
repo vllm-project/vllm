@@ -32,6 +32,7 @@ steps:
     amd:
       label: ":amd: (MI355 DPX) V1 Sample"
       dind: false
+      automatic_shard: true
       device: mi355_dpx
       timeout_in_minutes: 70
       depends_on:
