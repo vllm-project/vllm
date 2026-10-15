@@ -149,6 +149,7 @@ def set_default_quant_scales(layer: nn.Module, register_buffer: bool = False) ->
     layer._q_scale_float = 1.0
     layer._k_scale_float = 1.0
     layer._v_scale_float = 1.0
+    layer._q_scale_cpu = torch.tensor(1.0, dtype=torch.float32)
     layer._k_scale_cpu = torch.tensor(1.0, dtype=torch.float32)
     layer._v_scale_cpu = torch.tensor(1.0, dtype=torch.float32)
     layer._prob_scale_float = 1.0
