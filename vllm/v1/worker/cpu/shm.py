@@ -93,12 +93,10 @@ torch_utils.async_tensor_h2d = async_tensor_h2d
 
 # Patch model runner APIs
 import vllm.v1.worker.gpu.buffer_utils as gpu_buffer_utils
-import vllm.v1.worker.gpu.block_table as gpu_block_table
 import vllm.v1.worker.gpu.input_batch as gpu_input_batch
 import vllm.v1.worker.gpu.sample.logprob as gpu_logprob
 import vllm.v1.worker.gpu.sample.prompt_logprob as gpu_prompt_logprob
 import vllm.v1.worker.gpu.sample.sampler as gpu_sampler
-import vllm.v1.worker.cpu.block_table as cpu_block_table
 import vllm.v1.worker.cpu.buffer_utils as cpu_buffer_utils
 import vllm.v1.worker.cpu.input_batch as cpu_input_batch
 import vllm.v1.worker.cpu.logprob as cpu_logprob
@@ -109,12 +107,6 @@ gpu_buffer_utils.UvaBuffer = cpu_buffer_utils.UvaBuffer
 from vllm.triton_utils import HAS_TRITON, tl
 
 if not HAS_TRITON:
-    gpu_block_table.BlockTables.gather_block_tables = (
-        cpu_block_table.gather_block_tables
-    )
-    gpu_block_table.BlockTables.compute_slot_mappings = (
-        cpu_block_table.compute_slot_mappings
-    )
     gpu_logprob.compute_token_logprobs = cpu_logprob.compute_token_logprobs
     gpu_logprob.compute_topk_scores = cpu_logprob.compute_topk_scores
     gpu_prompt_logprob.compute_token_logprobs = cpu_logprob.compute_token_logprobs

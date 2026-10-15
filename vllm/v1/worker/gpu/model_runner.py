@@ -695,7 +695,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             additional_attn_cg_support=additional_attn_cg_support,
         )
 
-        self.block_tables = BlockTables(
+        self.block_tables = self.block_tables_cls(
             block_sizes=block_sizes,
             max_num_reqs=self.max_num_reqs,
             max_num_batched_tokens=self.max_num_tokens,
@@ -2405,6 +2405,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     @property
     def pcp_manager_cls(self) -> type[pcp.PCPManager]:
         return pcp.PCPManager
+
+    @property
+    def block_tables_cls(self) -> type[BlockTables]:
+        return BlockTables
 
     @property
     def sampler_cls(self) -> type[Sampler]:
