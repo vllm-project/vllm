@@ -669,7 +669,7 @@ class DeepseekV41ModelState(DefaultModelState):
                 copy.create_metadata_builders(
                     self.vllm_config,
                     self.device,
-                    group.metadata_builders[0].kernel_block_size,
+                    group.kernel_block_size,
                 )
                 copies.append(copy)
             own_groups.append(copies)

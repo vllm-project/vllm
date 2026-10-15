@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from vllm.entrypoints.chat_utils import _parse_chat_message_content
+from vllm.renderers.chat_utils import _parse_chat_message_content
 
 HEADER = (
     "x-anthropic-billing-header: cc_version=2.1.220.300; "

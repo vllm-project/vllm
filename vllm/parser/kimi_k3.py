@@ -114,6 +114,13 @@ class KimiK3Parser(DelegatingParser):
             delta_message.tool_calls = []
         return delta_message, False
 
+    def _is_reasoning_end_streaming(
+        self, input_ids: list[int], delta_ids: list[int]
+    ) -> bool:
+        if isinstance(self._reasoning_parser, KimiK3ReasoningParser):
+            return self._reasoning_parser.is_streaming_transition_ready(input_ids)
+        return super()._is_reasoning_end_streaming(input_ids, delta_ids)
+
     def parse_delta(
         self,
         delta_text: str,

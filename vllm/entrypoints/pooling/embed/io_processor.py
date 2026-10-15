@@ -12,15 +12,15 @@ from openai.types.chat import (
 from openai.types.chat.chat_completion_content_part_image_param import ImageURL
 
 from vllm import PoolingParams
-from vllm.entrypoints.chat_utils import (
-    ChatCompletionContentPartParam,
-    ChatCompletionMessageParam,
-    CustomChatCompletionMessageParam,
-)
 from vllm.inputs import tokens_input
 from vllm.logger import init_logger
 from vllm.outputs import PoolingOutput, PoolingRequestOutput
 from vllm.renderers import merge_kwargs
+from vllm.renderers.chat_utils import (
+    ChatCompletionContentPartParam,
+    ChatCompletionMessageParam,
+    CustomChatCompletionMessageParam,
+)
 from vllm.renderers.hf import resolve_chat_template
 from vllm.utils.collection_utils import chunk_list
 from vllm.utils.mistral import is_mistral_tokenizer
