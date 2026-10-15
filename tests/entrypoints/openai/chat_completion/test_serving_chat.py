@@ -42,6 +42,7 @@ from vllm.entrypoints.openai.models.serving import (
 )
 from vllm.entrypoints.openai.parser.harmony_utils import get_encoding
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
+from vllm.entrypoints.serve.utils.tool_calls_utils import resolve_finish_reason
 from vllm.exceptions import QueueOverflowError, VLLMValidationError
 from vllm.inputs import TokensPrompt
 from vllm.logprobs import Logprob
@@ -788,6 +789,64 @@ async def test_chat_per_request_metrics_suppressed_for_n_greater_than_one():
         request_metadata=RequestResponseMetadata(request_id="chatcmpl-test-id"),
     )
     assert response.metrics is None
+
+
+@pytest.mark.asyncio
+async def test_chat_full_generator_gives_each_choice_parser_the_prompt():
+    prompts: list[list[int] | None] = []
+
+    class RecordingParser:
+        tool_parser_cls = None
+
+        def __init__(self, *args, **kwargs):
+            self.prompt_token_ids = None
+
+        def set_prompt_token_ids(self, prompt_token_ids):
+            self.prompt_token_ids = list(prompt_token_ids)
+
+        def parse(self, model_output, request, **kwargs):
+            prompts.append(self.prompt_token_ids)
+            return None, model_output, None
+
+        def count_reasoning_tokens(self, token_ids):
+            return 0
+
+    serving = _build_minimal_metrics_serving_chat(enable_per_request_metrics=False)
+    serving.parser_cls = RecordingParser
+    serving.model_config = None
+    serving.chat_template = None
+    serving.chat_template_content_format = "auto"
+    serving.default_chat_template_kwargs = {}
+    request_output = _make_metrics_request_output()
+    request_output.prompt_token_ids = [7, 8]
+    request_output.outputs.append(
+        CompletionOutput(
+            index=1,
+            text="Hi",
+            token_ids=[102],
+            cumulative_logprob=None,
+            logprobs=None,
+            finish_reason="stop",
+        )
+    )
+
+    await serving.chat_completion_full_generator(
+        ChatCompletionRequest(
+            model="test-model",
+            messages=[{"role": "user", "content": "Test prompt"}],
+            max_tokens=10,
+            n=2,
+        ),
+        _single_request_output(request_output),
+        "chatcmpl-test-id",
+        "test-model",
+        conversation=[{"role": "user", "content": "Test"}],
+        tokenizer=MagicMock(),
+        request_metadata=RequestResponseMetadata(request_id="chatcmpl-test-id"),
+        parser=RecordingParser(),
+    )
+
+    assert prompts == [[7, 8], [7, 8]]
 
 
 @pytest.mark.asyncio
@@ -1608,10 +1667,32 @@ async def test_serving_chat_truncation_side_controls_prompt_truncation():
     assert left_token_ids == full_token_ids[-4:]
 
 
+def test_serving_chat_starts_without_tokenizer():
+    """Regression test: building the serving objects must not require a
+    tokenizer, which is absent under `skip_tokenizer_init`."""
+    mock_engine = _build_mock_engine()
+    mock_engine.model_config = MockModelConfig(skip_tokenizer_init=True)
+    mock_engine.renderer = HfRenderer(
+        MockVllmConfig(mock_engine.model_config, parallel_config=MockParallelConfig()),
+        None,
+    )
+
+    serving_chat = _build_serving_chat(mock_engine)
+
+    assert serving_chat.parser_cls is None
+
+
 @pytest.mark.asyncio
 async def test_serving_chat_mistral_token_ids_prompt_is_validated():
     """Regression test: when the Mistral tokenizer path returns token IDs
-    directly, we must still apply input length + max_tokens validation.
+    directly, we must still apply input length validation and clamp the
+    generation budget to the context the prompt leaves over.
+
+    `max_tokens` is an upper bound on generation rather than a reservation off
+    the context window, so a 95-token prompt against `max_model_len=100` is
+    accepted even though the client asked for 10 output tokens. Genuine
+    overflow is covered by
+    test_serving_chat_mistral_token_ids_prompt_too_long_is_rejected.
     """
     mock_engine = MagicMock(spec=AsyncLLM)
     mock_engine.errored = False
@@ -1623,9 +1704,8 @@ async def test_serving_chat_mistral_token_ids_prompt_is_validated():
         MockVllmConfig(mock_engine.model_config, parallel_config=MockParallelConfig()),
         tokenizer=mock_tokenizer,
     )
-    # Force the Mistral chat template renderer to return token IDs.
-    # Choose a prompt length that is < max_model_len, but large enough that
-    # adding max_tokens should exceed the model context window.
+    # Force the Mistral chat template renderer to return token IDs. The prompt
+    # fits the context on its own; only the naive prompt+output sum overflows.
     mock_renderer.render_messages_async = AsyncMock(
         return_value=(
             [],
@@ -1642,8 +1722,12 @@ async def test_serving_chat_mistral_token_ids_prompt_is_validated():
         max_tokens=10,
     )
 
-    with pytest.raises(VLLMValidationError):
-        await serving_chat.create_chat_completion(req)
+    # Must not raise: the prompt alone fits within max_model_len.
+    await serving_chat.create_chat_completion(req)
+
+    # get_max_tokens() clamps the sampling budget to the 5 tokens left over.
+    sampling_params = mock_engine.generate.call_args.args[1]
+    assert 1 <= sampling_params.max_tokens <= 5
 
 
 @pytest.mark.asyncio
@@ -2968,3 +3052,137 @@ def test_chat_kv_transfer_prompt_token_ids_allows_text_only_parts():
         kv_transfer_params={"prompt_token_ids": [10, 20, 30]},
     )
     assert request.kv_transfer_params == {"prompt_token_ids": [10, 20, 30]}
+
+
+_TOOL_FINISH_REASON_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "description": "Get weather",
+            "parameters": {
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+                "required": ["city"],
+            },
+        },
+    }
+]
+_HERMES_TOOL_CALL_TEXT = (
+    '<tool_call>\n{"name": "get_weather", "arguments": {"city": "Tokyo"}}\n</tool_call>'
+)
+
+
+_NAMED_WEATHER_TOOL_CHOICE = {"type": "function", "function": {"name": "get_weather"}}
+
+
+@pytest.mark.parametrize(
+    ("tool_choice", "engine_finish_reason", "tool_calls_made", "expected"),
+    [
+        ("auto", "stop", True, "tool_calls"),
+        ("auto", "length", True, "length"),
+        ("auto", "stop", False, "stop"),
+        ("required", "stop", True, "tool_calls"),
+        ("required", "stop", False, "stop"),
+        ("required", "length", True, "length"),
+        (_NAMED_WEATHER_TOOL_CHOICE, "stop", True, "stop"),
+        (_NAMED_WEATHER_TOOL_CHOICE, "length", True, "length"),
+        ("none", "stop", False, "stop"),
+        (None, None, False, "stop"),
+    ],
+)
+def test_resolve_finish_reason(
+    tool_choice, engine_finish_reason, tool_calls_made, expected
+):
+    """``tool_calls`` needs a real call, a natural stop and no forced tool;
+    ``length`` is never hidden behind a parsed call."""
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "test"}],
+        tools=_TOOL_FINISH_REASON_TOOLS if tool_choice else None,
+        tool_choice=tool_choice,
+    )
+    assert (
+        resolve_finish_reason(engine_finish_reason, request, tool_calls_made)
+        == expected
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tool_choice", "text", "engine_finish_reason", "expected_finish_reason"),
+    [
+        ("auto", _HERMES_TOOL_CALL_TEXT, "stop", "tool_calls"),
+        ("auto", _HERMES_TOOL_CALL_TEXT, "length", "length"),
+        ("required", "Hello, how are you?", "stop", "stop"),
+        (_NAMED_WEATHER_TOOL_CHOICE, _HERMES_TOOL_CALL_TEXT, "stop", "stop"),
+    ],
+)
+async def test_non_streaming_finish_reason_matches_tool_calls(
+    monkeypatch: pytest.MonkeyPatch,
+    tool_choice,
+    text: str,
+    engine_finish_reason: str,
+    expected_finish_reason: str,
+):
+    """Non-streaming ``finish_reason`` must agree with ``message.tool_calls``
+    and never hide a ``length`` truncation (#53255, #58228)."""
+    serving_chat = _build_serving_chat(
+        _build_mock_engine(), tool_parser="hermes", enable_auto_tools=True
+    )
+    # Parse required/named calls from the native <tool_call> format regardless
+    # of VLLM_ENFORCE_STRICT_TOOL_CALLING, so one text serves every case.
+    monkeypatch.setattr(
+        serving_chat.parser_cls.tool_parser_cls, "supports_required_and_named", False
+    )
+
+    tokenizer = get_tokenizer(MODEL_NAME)
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "test"}],
+        tools=_TOOL_FINISH_REASON_TOOLS,
+        tool_choice=tool_choice,
+    )
+    parser = serving_chat.parser_cls(
+        tokenizer,
+        request.tools,
+        chat_template_kwargs=serving_chat._effective_chat_template_kwargs(request),
+        model_config=serving_chat.model_config,
+    )
+    request_output = RequestOutput(
+        request_id="test-req",
+        prompt="test",
+        prompt_token_ids=[1, 2, 3],
+        prompt_logprobs=None,
+        outputs=[
+            CompletionOutput(
+                index=0,
+                text=text,
+                token_ids=tokenizer.encode(text, add_special_tokens=False),
+                cumulative_logprob=0.0,
+                logprobs=None,
+                finish_reason=engine_finish_reason,
+            )
+        ],
+        finished=True,
+    )
+
+    response = await serving_chat.chat_completion_full_generator(
+        request=request,
+        result_generator=_single_request_output(request_output),
+        request_id="test-req",
+        model_name=MODEL_NAME,
+        conversation=[],
+        tokenizer=tokenizer,
+        request_metadata=RequestResponseMetadata(
+            request_id="test-req", model_name=MODEL_NAME
+        ),
+        parser=parser,
+    )
+
+    assert isinstance(response, ChatCompletionResponse)
+    choice = response.choices[0]
+    assert choice.finish_reason == expected_finish_reason
+    assert bool(choice.message.tool_calls) == (text != "Hello, how are you?"), (
+        "finish_reason must reflect whether tool calls were emitted"
+    )

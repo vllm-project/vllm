@@ -409,20 +409,12 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
                 spec_sequence_masks_cpu &= (
                     query_start_loc_cpu.diff() <= self.num_spec + 1
                 )
-            # Native KDA can use its regular decode path when no draft token
-            # was scheduled. RecoverSSM must preserve its extended conv window.
-            if (
-                not self.use_recoverssm
-                and num_decode_draft_tokens_cpu[spec_sequence_masks_cpu].sum().item()
-                == 0
-            ):
+            # A batch whose rows all drafted nothing still has to run the
+            # speculative path: that is the only path that applies each row's
+            # accepted-token offset to the recurrent state.
+            num_spec_decodes = spec_sequence_masks_cpu.sum().item()
+            if num_spec_decodes == 0:
                 spec_sequence_masks_cpu = None
-                num_spec_decodes = 0
-                active_non_spec_mask_cpu = None
-            else:
-                num_spec_decodes = spec_sequence_masks_cpu.sum().item()
-                if num_spec_decodes == 0:
-                    spec_sequence_masks_cpu = None
 
         spec_request_indices = None
         spec_token_start = None
