@@ -134,7 +134,7 @@ class Fp8BlockScaledMMLinearKernel(
             partial_sum_scale = getattr(layer, "partial_sum_scale", 1.0)
             if partial_sum_scale != 1.0:
                 weight_scale = weight_scale * partial_sum_scale
-            output = self.apply_block_scaled_mm(
+            output = self.apply_block_scaled_mm_out(
                 A=q_input,
                 B=weight,
                 As=input_scale,
@@ -163,6 +163,18 @@ class Fp8BlockScaledMMLinearKernel(
         As: torch.Tensor,
         Bs: torch.Tensor,
     ) -> torch.Tensor:
+        raise NotImplementedError
+
+    def apply_block_scaled_mm_out(
+        self,
+        A: torch.Tensor,
+        B: torch.Tensor,
+        As: torch.Tensor,
+        Bs: torch.Tensor,
+        out_dtype: torch.dtype,
+    ) -> torch.Tensor:
+        """apply_block_scaled_mm with an explicit output dtype; implemented by
+        kernels that set ``supports_partial_sum_dtype``."""
         raise NotImplementedError
 
 

@@ -308,9 +308,17 @@ class CutlassFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         B: torch.Tensor,
         As: torch.Tensor,
         Bs: torch.Tensor,
-        out_dtype: torch.dtype | None = None,
     ) -> torch.Tensor:
-        out_dtype = out_dtype or self.config.out_dtype
+        return self.apply_block_scaled_mm_out(A, B, As, Bs, self.config.out_dtype)
+
+    def apply_block_scaled_mm_out(
+        self,
+        A: torch.Tensor,
+        B: torch.Tensor,
+        As: torch.Tensor,
+        Bs: torch.Tensor,
+        out_dtype: torch.dtype,
+    ) -> torch.Tensor:
         return ops.cutlass_scaled_mm(
             A,
             B.T,

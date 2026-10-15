@@ -27,7 +27,9 @@ def test_fp16_partial_linear_matches_reference(bias, m, k, n):
     b = torch.randn(n, device="cuda").bfloat16() if bias else None
     out = _fp16_partial_linear(x.view(1, m, k), w, b, 1.0)
     assert out.dtype == torch.float16 and out.shape == (1, m, n)
-    ref = x.double() @ w.double().T + (b.double() if bias else 0)
+    ref = x.double() @ w.double().T
+    if b is not None:
+        ref = ref + b.double()
     # one FP16 rounding of an FP32-accumulated result
     torch.testing.assert_close(out.view(m, n).double(), ref, rtol=2e-3, atol=2e-3)
 
