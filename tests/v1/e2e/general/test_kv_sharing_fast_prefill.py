@@ -74,6 +74,12 @@ def test_kv_sharing_fast_prefill(
             "ROCm: torch.compile produces incorrect output for gemma-3n's GELU "
             "with tanh approximation. Use enforce_eager=True instead."
         )
+    if not enforce_eager and not use_v2_model_runner and current_platform.is_cuda():
+        pytest.skip(
+            "cublasCreate fails with CUBLAS_STATUS_ALLOC_FAILED during memory "
+            "profiling with torch 2.14: "
+            "https://github.com/pytorch/pytorch/issues/199944"
+        )
 
     sampling_params = SamplingParams(temperature=0.0, max_tokens=100)
     compilation_config = CompilationConfig(
