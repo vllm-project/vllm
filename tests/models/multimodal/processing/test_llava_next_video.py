@@ -14,7 +14,7 @@ from ...utils import build_model_context
 
 
 class _StubModel:
-    """Carries only the two attributes the token helpers read from
+    """Carries only the attributes the token-count method reads from
     `self`, so the real methods can be exercised without constructing
     the full `nn.Module` (vision tower, language model, etc.)."""
 
@@ -22,18 +22,15 @@ class _StubModel:
     pooled_grid_length: int
 
 
-get_num_mm_encoder_tokens = (
-    LlavaNextVideoForConditionalGeneration.get_num_mm_encoder_tokens
-)
-get_num_mm_connector_tokens = (
-    LlavaNextVideoForConditionalGeneration.get_num_mm_connector_tokens
+get_mm_lora_token_counts = (
+    LlavaNextVideoForConditionalGeneration.get_mm_lora_token_counts
 )
 
 
 @pytest.mark.parametrize("model_id", ["llava-hf/LLaVA-NeXT-Video-7B-hf"])
 def test_num_mm_tokens_match_real_config(model_id):
     """The stored grid lengths must match what `__init__` derives from
-    the real HF config, and the two helpers must invert each other's
+    the real HF config, and the LoRA token counts must preserve the
     frame-level scaling exactly."""
     ctx = build_model_context(model_id, limit_mm_per_prompt={"video": 1})
     config = ctx.model_config.hf_config
@@ -49,10 +46,13 @@ def test_num_mm_tokens_match_real_config(model_id):
     for num_frames in (1, 2, 8, 16, 32):
         num_video_tokens = num_frames * pooled_grid_length**2
 
-        encoder_tokens = get_num_mm_encoder_tokens(stub, num_video_tokens)
+        encoder_tokens, connector_tokens = get_mm_lora_token_counts(
+            stub,
+            modality="video",
+            mm_kwargs=None,
+            num_mm_embeds=num_video_tokens,
+        )
         assert encoder_tokens == num_frames * patch_grid_length**2
-
-        connector_tokens = get_num_mm_connector_tokens(stub, encoder_tokens)
         assert connector_tokens == num_video_tokens
 
 
@@ -72,10 +72,13 @@ def test_num_mm_tokens_roundtrip(patch_grid_length, pooled_grid_length, num_fram
 
     num_video_tokens = num_frames * pooled_grid_length**2
 
-    encoder_tokens = get_num_mm_encoder_tokens(stub, num_video_tokens)
+    encoder_tokens, connector_tokens = get_mm_lora_token_counts(
+        stub,
+        modality="video",
+        mm_kwargs=None,
+        num_mm_embeds=num_video_tokens,
+    )
     assert encoder_tokens == num_frames * patch_grid_length**2
-
-    connector_tokens = get_num_mm_connector_tokens(stub, encoder_tokens)
     assert connector_tokens == num_video_tokens
 
 
@@ -84,5 +87,9 @@ def test_num_mm_tokens_zero():
     stub.patch_grid_length = 24
     stub.pooled_grid_length = 12
 
-    assert get_num_mm_encoder_tokens(stub, 0) == 0
-    assert get_num_mm_connector_tokens(stub, 0) == 0
+    assert get_mm_lora_token_counts(
+        stub,
+        modality="video",
+        mm_kwargs=None,
+        num_mm_embeds=0,
+    ) == (0, 0)

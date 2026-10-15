@@ -59,11 +59,14 @@ class EncoderCacheManager:
             reference the cached entry. If the set is empty, the entry exists
             but is not referenced by any request and is eligible for
             reclamation.
+        num_embeds_by_hash: Mapping from mm_hash to the number of encoder
+            embeddings stored for that cache entry.
         freeable: List of tuples (mm_hash, num_encoder_embeds) representing entries
             whose no current running request is needed and that can be freed to
             make space when needed.
         freed: List of mm_hash strings that were actually evicted since the
             last call to get_freed_mm_hashes(). This list is cleared on return.
+
     """
 
     @classmethod
@@ -79,6 +82,8 @@ class EncoderCacheManager:
 
         # mm_hash of mm_data => ids of requests that reference the mm_data
         self.cached: dict[str, set[str]] = {}
+        # mm_hash of mm_data => number of cached encoder embeddings
+        self.num_embeds_by_hash: dict[str, int] = {}
         # request_id => set of input_ids cached for that request
         self.request_cached_ids: dict[str, set[int]] = {}
 
@@ -93,6 +98,7 @@ class EncoderCacheManager:
         Called when model weights are updated to invalidate stale embeddings.
         """
         self.cached.clear()
+        self.num_embeds_by_hash.clear()
         self.request_cached_ids.clear()
         self.freeable.clear()
         self.freed.clear()
@@ -113,6 +119,7 @@ class EncoderCacheManager:
 
         Returns:
             True if the encoder output for this input is already cached
+
         """
         mm_hash = request.mm_features[input_id].identifier
         # Not cached at all
@@ -127,6 +134,13 @@ class EncoderCacheManager:
         self.cached[mm_hash].add(request.request_id)
         self.request_cached_ids.setdefault(request.request_id, set()).add(input_id)
         return True
+
+    def get_cached_num_encoder_embeds(
+        self, request: Request, input_id: int
+    ) -> int | None:
+        """Return the encoder-embedding count stored for a cached input."""
+        mm_hash = request.mm_features[input_id].identifier
+        return self.num_embeds_by_hash.get(mm_hash)
 
     def can_allocate(
         self,
@@ -162,6 +176,7 @@ class EncoderCacheManager:
 
         Note: This method does not allocate physical memory for the encoder
         output but only the state of EncoderCacheManager.
+
         """
         num_embeds = request.get_num_encoder_embeds(input_id)
 
@@ -185,6 +200,7 @@ class EncoderCacheManager:
         while num_embeds > self.num_free_slots:
             mm_hash, num_free_embeds = self.freeable.popitem(last=False)
             del self.cached[mm_hash]
+            del self.num_embeds_by_hash[mm_hash]
             self.freed.append(mm_hash)
             self.num_free_slots += num_free_embeds
         return True
@@ -198,14 +214,20 @@ class EncoderCacheManager:
 
         Note:
             This method assumes can_allocate() returned True for the same input.
-        """
 
+        """
         mm_hash = request.mm_features[input_id].identifier
         request_id = request.request_id
         if mm_hash not in self.cached:
             self.cached[mm_hash] = set()
 
         num_encoder_embeds = request.get_num_encoder_embeds(input_id)
+        cached_num_encoder_embeds = self.num_embeds_by_hash.setdefault(
+            mm_hash, num_encoder_embeds
+        )
+        # _try_schedule_encoder_inputs rejects local-hit and same-step
+        # identifier/count mismatches before allocation.
+        assert cached_num_encoder_embeds == num_encoder_embeds
 
         # NOTE: Encoder cache should always have enough space for encoder inputs
         # that are scheduled since eviction takes place at can_allocate().
@@ -222,7 +244,7 @@ class EncoderCacheManager:
         return self.request_cached_ids.get(request.request_id, set())
 
     def free_encoder_input(self, request: Request, input_id: int) -> None:
-        """Free the request's reference to the encoder input (`mm_data`)
+        """Free the request's reference to the encoder input (`mm_data`).
 
         When the reference set for the corresponding `mm_hash` becomes empty,
         the entry is appended to `freeable` and `num_freeable_slots` is
@@ -255,7 +277,7 @@ class EncoderCacheManager:
             return
         self.cached[mm_hash].discard(req_id)
         if not self.cached[mm_hash]:
-            num_encoder_embeds = request.get_num_encoder_embeds(input_id)
+            num_encoder_embeds = self.num_embeds_by_hash[mm_hash]
             self.freeable[mm_hash] = num_encoder_embeds
             self.num_freeable_slots += num_encoder_embeds
 
@@ -279,6 +301,7 @@ class EncoderCacheManager:
             call to be used by the scheduler to notify workers about which
             encoder outputs can be removed from their caches. The internal
             list is cleared after this call.
+
         """
         # An entry evicted early in the scheduling pass can be allocated again
         # later in the same pass. Keep its worker-side tensor in that case.
@@ -307,8 +330,8 @@ def compute_mm_encoder_budget(
             from the input sequence.
         - Space budget for encoder cache size, measured in number of tokens
             from the input sequence.
-    """
 
+    """
     if not mm_max_toks_per_item:
         logger.warning(
             "All non-text modalities supported by the model have been "
