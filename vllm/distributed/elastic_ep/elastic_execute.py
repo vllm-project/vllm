@@ -297,8 +297,8 @@ class ElasticEPScalingExecutor:
         self._prepare_eplb_communicator(get_standby_eplb_group())
         if new_dp_size > old_dp_size:
             self.transfer_weights(old_dp_size, new_dp_size)
-        # On ROCm this deadlocks while serving; warm_and_capture warms these at commit.
-        if not current_platform.is_rocm():
+        # ROCm and XPU warmups can deadlock with live serving; defer to commit.
+        if not (current_platform.is_rocm() or current_platform.is_xpu()):
             self._warm_target_groups(get_standby_dp_group(), standby_ep_group)
         if new_dp_size > old_dp_size and self._can_reuse_fused_moe_kernel():
             target_world_group = get_standby_world_group()
@@ -601,8 +601,10 @@ class ElasticEPScalingExecutor:
         else:
             mapping = self.receive_expert_mapping()
             self.worker.model_runner.setup_eplb_from_mapping(mapping)
+        if current_platform.is_xpu():
+            self._warm_target_groups(get_dp_group(), get_ep_group())
         if not self._can_reuse_fused_moe_kernel():
-            # warm_and_capture's dummy run warms the deferred dp/ep groups.
+            # ROCm's dummy run warms the deferred dp/ep groups.
             self.warm_and_capture()
         elif current_platform.is_rocm():
             # Reuse path skips warm_and_capture; warm the deferred groups here.
@@ -617,6 +619,8 @@ class ElasticEPScalingExecutor:
             self.switch_and_remove()
         else:
             retired_groups = self.switch_and_prepare()
+            if current_platform.is_xpu():
+                self._warm_target_groups(get_dp_group(), get_ep_group())
             if not self._can_reuse_fused_moe_kernel():
                 self.warm_and_capture()
             elif current_platform.is_rocm():
@@ -678,7 +682,7 @@ class ElasticEPScalingExecutor:
             expert_weights=expert_weights,
         )
         torch.accelerator.synchronize()
-        if not current_platform.is_rocm():
+        if not (current_platform.is_rocm() or current_platform.is_xpu()):
             self._warm_target_groups(get_dp_group(), get_ep_group())
         if self._can_reuse_fused_moe_kernel():
             sync_flashinfer_autotune_cache(self.worker.model_runner, get_world_group())

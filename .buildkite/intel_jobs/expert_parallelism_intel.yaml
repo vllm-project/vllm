@@ -26,3 +26,34 @@ steps:
       'cd tests &&
       pytest -v -s distributed/test_eplb_algo.py &&
       pytest -v -s distributed/test_eplb_utils.py'
+
+- label: XPU MP Elastic EP Scaling (4 GPUs)
+  key: xpu-mp-elastic-ep-scaling
+  timeout_in_minutes: 45
+  num_devices: 4
+  device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 4+
+    mem: 16+
+  no_plugin: true
+  working_dir: "."
+  env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+  - .buildkite/intel_jobs/expert_parallelism_intel.yaml
+  - tests/distributed/test_elastic_ep.py
+  - vllm/config/vllm.py
+  - vllm/distributed/device_communicators/
+  - vllm/distributed/elastic_ep/
+  - vllm/distributed/eplb/
+  - vllm/distributed/stateless_coordinator.py
+  - vllm/platforms/xpu.py
+  - vllm/v1/engine/
+  commands:
+    - >-
+      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+      'cd tests &&
+      pytest -v -s distributed/test_elastic_ep.py::test_elastic_ep_mp_scaling[eager_heavy]'

@@ -6,7 +6,7 @@ import contextlib
 import time
 import uuid
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import timedelta
 
 import numpy as np
@@ -18,6 +18,7 @@ from torch.distributed import (
 )
 
 import vllm.distributed.nixl_utils as nixl_utils
+from vllm.config import get_current_vllm_config_or_none
 from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 from vllm.distributed.device_communicators.pynccl_wrapper import (
     ncclDataTypeEnum,
@@ -160,9 +161,11 @@ class TorchDistGlooStagedEplbCommunicator(EplbCommunicator):
         self,
         cpu_group: ProcessGroup,
         stream: torch.Stream | None = None,
+        stateless: bool = False,
     ) -> None:
         self._cpu_group = cpu_group
         self._stream = stream
+        self._stateless = stateless
         self._ops: list[tuple[str, torch.Tensor, int]] = []
         self._log_initialized()
 
@@ -189,32 +192,43 @@ class TorchDistGlooStagedEplbCommunicator(EplbCommunicator):
             return
 
         p2p_ops: list[P2POp] = []
+        stateless_ops: list[tuple[Callable, torch.Tensor, int]] = []
         recv_staging: list[tuple[torch.Tensor, torch.Tensor]] = []
 
         def build_ops() -> None:
             for op, tensor, peer_rank in self._ops:
                 if op == "send":
                     cpu_tensor = tensor.to(device="cpu", non_blocking=True)
+                    if self._stateless:
+                        stateless_ops.append(
+                            (torch.distributed.isend, cpu_tensor, peer_rank)
+                        )
+                    else:
+                        p2p_ops.append(
+                            P2POp(
+                                torch.distributed.isend,
+                                cpu_tensor,
+                                group=self._cpu_group,
+                                group_peer=peer_rank,
+                            )
+                        )
+                    continue
+                cpu_tensor = torch.empty_like(
+                    tensor, device="cpu", pin_memory=PIN_MEMORY
+                )
+                if self._stateless:
+                    stateless_ops.append(
+                        (torch.distributed.irecv, cpu_tensor, peer_rank)
+                    )
+                else:
                     p2p_ops.append(
                         P2POp(
-                            torch.distributed.isend,
+                            torch.distributed.irecv,
                             cpu_tensor,
                             group=self._cpu_group,
                             group_peer=peer_rank,
                         )
                     )
-                    continue
-                cpu_tensor = torch.empty_like(
-                    tensor, device="cpu", pin_memory=PIN_MEMORY
-                )
-                p2p_ops.append(
-                    P2POp(
-                        torch.distributed.irecv,
-                        cpu_tensor,
-                        group=self._cpu_group,
-                        group_peer=peer_rank,
-                    )
-                )
                 recv_staging.append((tensor, cpu_tensor))
 
         try:
@@ -231,7 +245,19 @@ class TorchDistGlooStagedEplbCommunicator(EplbCommunicator):
             else:
                 torch.accelerator.current_stream().synchronize()
 
-        reqs = batch_isend_irecv(p2p_ops)
+        if self._stateless:
+            reqs = []
+            for operation, tensor, peer_rank in stateless_ops:
+                peer = (
+                    {"group_dst": peer_rank}
+                    if operation is torch.distributed.isend
+                    else {"group_src": peer_rank}
+                )
+                req = operation(tensor, group=self._cpu_group, **peer)
+                assert req is not None
+                reqs.append(req)
+        else:
+            reqs = batch_isend_irecv(p2p_ops)
         for req in reqs:
             req.wait()
 
@@ -714,7 +740,7 @@ def create_eplb_communicator(
             ``"torch_gloo"``, ``"pynccl"``, or ``"nixl"``).
             Falls back to ``"torch_nccl"`` when *None*.
             Stateless (elastic EP) groups support ``"torch_nccl"``,
-            ``"pynccl"``, and ``"nixl"``; ``"torch_nccl"`` is silently
+            ``"torch_xccl"``, ``"pynccl"``, and ``"nixl"``; ``"torch_nccl"`` is silently
             promoted to ``"pynccl"``.  When tensors reside on CPU,
             ``"torch_gloo"`` or
             ``"torch_nccl"`` are used via the CPU process group.
@@ -771,6 +797,17 @@ def create_eplb_communicator(
             ) from exc
 
     is_stateless = isinstance(group_coordinator, StatelessGroupCoordinator)
+    if (
+        is_stateless
+        and backend == "torch_xccl"
+        and current_platform.is_xpu()
+        and (config := get_current_vllm_config_or_none()) is not None
+        and config.parallel_config.data_parallel_backend == "mp"
+        and config.parallel_config.enable_elastic_ep
+    ):
+        return TorchDistGlooStagedEplbCommunicator(
+            cpu_group=group_coordinator.cpu_group, stateless=True
+        )
     if is_stateless and backend != "nixl":
         if backend not in ("torch_nccl", "pynccl"):
             raise ValueError(
