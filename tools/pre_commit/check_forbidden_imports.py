@@ -73,7 +73,6 @@ CHECK_IMPORTS = {
             "benchmarks/fused_kernels/layernorm_rms_benchmarks.py",
             # cloudpickle
             "vllm/v1/executor/multiproc_executor.py",
-            "vllm/v1/executor/ray_executor.py",
             "vllm/entrypoints/llm.py",
             "tests/utils.py",
             # pickle and cloudpickle
