@@ -34,7 +34,7 @@ else()
   # configurable SwiGLU alpha/beta, SiTU for FP8/FP4 Mega MoE, and NVFP4
   # Mega MoE, plus swiglustep for BF16/FP8/NVFP4 Mega MoE.
   # Uses the PyTorch 2.11 stable ABI and CPython 3.10 limited API.
-  set(_DEEPGEMM_UPSTREAM_TAG "e90cfba925f972e268dba5173c74b9a6ebcb2ed4")
+  set(_DEEPGEMM_UPSTREAM_TAG "a7a927731b109fdfec770df7c2a5be5d7e2216b5")
 
   set(_deepgemm_fc_root "${FETCHCONTENT_BASE_DIR}")
   if(NOT _deepgemm_fc_root)
