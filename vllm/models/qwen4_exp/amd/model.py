@@ -74,6 +74,7 @@ from vllm.tokenizers.registry import cached_tokenizer_from_config
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.kv_cache_interface import MambaSpec
 
+from . import mono_decode
 from .hyperconnection import GatedResidual, HyperConnectionConfig
 from .low_latency_gemm import enable_qwen4_exp_low_latency_gemm
 from .ple_layer import Qwen4ExpPLELayer
@@ -632,6 +633,9 @@ class Qwen4ExpForCausalLM(
         )
         self.set_moe_parameters(self.model.layers)
         enable_qwen4_exp_low_latency_gemm(self, self.model_config.dtype)
+        self._mono = None
+        if mono_decode.enabled():
+            self._mono = mono_decode.MonoDecode(self.model, vllm_config)
 
     @staticmethod
     def get_model_state_cls():
@@ -647,6 +651,16 @@ class Qwen4ExpForCausalLM(
         inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
     ) -> torch.Tensor | IntermediateTensors:
+        if self._mono is not None and self._mono.eligible(
+            input_ids, intermediate_tensors
+        ):
+            return self._mono.forward(
+                input_ids,
+                positions,
+                inputs_embeds,
+                kwargs.get("query_start_loc"),
+                kwargs.get("ngram_context"),
+            )
         return self.model(
             input_ids,
             positions,
@@ -970,6 +984,15 @@ class Qwen4ExpForConditionalGeneration(
     ) -> torch.Tensor | IntermediateTensors:
         if intermediate_tensors is not None:
             inputs_embeds = None
+        mono = self.language_model._mono
+        if mono is not None and mono.eligible(input_ids, intermediate_tensors):
+            return mono.forward(
+                input_ids,
+                positions,
+                inputs_embeds,
+                kwargs.get("query_start_loc"),
+                kwargs.get("ngram_context"),
+            )
         if inputs_embeds is not None and get_pp_group().is_first_rank:
             deepstack_input_embeds = self._get_deepstack_input_embeds(
                 inputs_embeds.size(0)
