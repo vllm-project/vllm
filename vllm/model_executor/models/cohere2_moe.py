@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import dataclasses
 from collections.abc import Iterable
 from itertools import islice
 
@@ -8,13 +9,22 @@ import torch
 from torch import nn
 from transformers import CohereConfig
 
+import vllm.envs as envs
+from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import (
+    CacheConfig,
+    CUDAGraphMode,
+    VllmConfig,
+    get_current_vllm_config,
+)
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
 )
+from vllm.forward_context import get_forward_context
+from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
@@ -36,6 +46,12 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
+from vllm.utils.torch_utils import (
+    LayerNameType,
+    _encode_layer_name,
+    _resolve_layer_name,
+    direct_register_custom_op,
+)
 
 from .commandr import LayerNorm
 from .interfaces import EagleModelMixin, SupportsEagle3, SupportsPP, SupportsQuant
@@ -46,6 +62,56 @@ from .utils import (
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
+)
+
+logger = init_logger(__name__)
+
+
+def _dual_stream_layer(layer_name: LayerNameType) -> "Cohere2MoeDecoderLayer":
+    layer = get_forward_context().no_compile_layers[_resolve_layer_name(layer_name)]
+    assert isinstance(layer, Cohere2MoeDecoderLayer)
+    return layer
+
+
+def _cohere2_mlp_fork(
+    hidden_states: torch.Tensor, layer_name: LayerNameType
+) -> torch.Tensor:
+    return _dual_stream_layer(layer_name)._fork_mlp(hidden_states)
+
+
+def _cohere2_mlp_fork_fake(
+    hidden_states: torch.Tensor, layer_name: LayerNameType
+) -> torch.Tensor:
+    return torch.empty_like(hidden_states)
+
+
+def _cohere2_mlp_join(
+    attn_output: torch.Tensor, mlp_output: torch.Tensor, layer_name: LayerNameType
+) -> torch.Tensor:
+    return _dual_stream_layer(layer_name)._join_mlp(attn_output, mlp_output)
+
+
+def _cohere2_mlp_join_fake(
+    attn_output: torch.Tensor, mlp_output: torch.Tensor, layer_name: LayerNameType
+) -> torch.Tensor:
+    return torch.empty_like(attn_output)
+
+
+# The MLP/MoE branch is forked onto a side stream before attention and joined
+# after o_proj. Fork and join are opaque to Dynamo (a traced stream switch
+# would be dropped), while attention stays a regular splitting op, so piecewise
+# CUDA graphs keep working for prefill and mixed batches.
+direct_register_custom_op(
+    op_name="cohere2_mlp_fork",
+    op_func=_cohere2_mlp_fork,
+    fake_impl=_cohere2_mlp_fork_fake,
+    tags=(torch.Tag.needs_fixed_stride_order,),
+)
+direct_register_custom_op(
+    op_name="cohere2_mlp_join",
+    op_func=_cohere2_mlp_join,
+    fake_impl=_cohere2_mlp_join_fake,
+    tags=(torch.Tag.needs_fixed_stride_order,),
 )
 
 
@@ -339,6 +405,21 @@ class Cohere2Moe(nn.Module):
         return final_hidden_states.view(orig_shape)
 
 
+@dataclasses.dataclass
+class _DualStreamState:
+    """Dual-stream state of one decoder layer.
+
+    ``stream`` is the model's single side stream, shared by every layer; the
+    events and ``join_pending`` are per layer, since a layer has at most one
+    fork in flight. DBO would need one state per ubatch."""
+
+    stream: torch.cuda.Stream
+    token_threshold: int
+    fork_event: torch.cuda.Event = dataclasses.field(default_factory=torch.cuda.Event)
+    join_event: torch.cuda.Event = dataclasses.field(default_factory=torch.cuda.Event)
+    join_pending: bool = False
+
+
 class Cohere2MoeDecoderLayer(nn.Module):
     def __init__(
         self,
@@ -346,6 +427,8 @@ class Cohere2MoeDecoderLayer(nn.Module):
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        *,
+        moe_stream: torch.cuda.Stream | None = None,
     ):
         super().__init__()
         self.config = config
@@ -379,6 +462,90 @@ class Cohere2MoeDecoderLayer(nn.Module):
         norm_cls, norm_eps = select_norm_impl(config)
         self.input_layernorm = norm_cls(param_shape=(config.hidden_size,), eps=norm_eps)
 
+        if moe_stream is not None and not self._allows_dual_stream():
+            logger.warning_once(
+                "Cohere2MoE dual stream disabled for MoE layers that reduce "
+                "internally under TP (shared experts, EP all2all or sequence "
+                "parallel)."
+            )
+            moe_stream = None
+        self.dual_stream = (
+            _DualStreamState(
+                stream=moe_stream,
+                token_threshold=envs.VLLM_COHERE2_ATTN_MOE_DUAL_STREAM_TOKEN_THRESHOLD,
+            )
+            if moe_stream is not None
+            else None
+        )
+        self.layer_name = prefix
+        if self.dual_stream is not None:
+            static_forward_context = (
+                get_current_vllm_config().compilation_config.static_forward_context
+            )
+            if prefix in static_forward_context:
+                raise ValueError(f"Duplicate layer name: {prefix}")
+            static_forward_context[prefix] = self
+
+    def _allows_dual_stream(self) -> bool:
+        """With the dual stream the only TP collective in a layer is the
+        all-reduce of attention + MLP after the join. A MoE that reduces
+        internally would let the attention all-reduce run while the MoE stream
+        is still communicating.
+
+        EP all2all kernels stay single-stream at any TP size (including DP + EP
+        at TP1): all2all on the side stream, and next to DBO, is not
+        validated."""
+        if (
+            isinstance(self.mlp, Cohere2Moe)
+            and self.mlp.experts.moe_config.moe_parallel_config.use_all2all_kernels
+        ):
+            return False
+        return (
+            get_tensor_model_parallel_world_size() == 1
+            or not self.mlp_output_is_reduced
+        )
+
+    def _fork_mlp(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        state = self.dual_stream
+        assert state is not None
+        assert not state.join_pending, "Cohere2MoE dual-stream fork was not joined"
+        # A fork must not span a piecewise CUDA graph boundary: the segment
+        # captured before attention would end with an unjoined stream. Prefill
+        # and mixed batches use piecewise graphs, so they run the MLP inline.
+        if (
+            hidden_states.shape[0] > state.token_threshold
+            or get_forward_context().cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE
+            or BreakableCUDAGraphCapture.is_active()
+        ):
+            return self.mlp(hidden_states)
+
+        logger.info_once("Cohere2MoE attention/MoE dual stream is active.")
+        # Inductor may reuse the storage of hidden_states once this op returns
+        # (bypassing the caching allocator), so the MoE stream reads a copy.
+        mlp_input = hidden_states.clone()
+        state.fork_event.record(torch.cuda.current_stream())
+        with torch.cuda.stream(state.stream):
+            state.fork_event.wait()
+            mlp_output = self.mlp(mlp_input)
+            state.join_event.record()
+        mlp_input.record_stream(state.stream)
+        # mlp_output needs no record_stream: its block can only be reused by a
+        # side-stream allocation, and side-stream work always runs after a later
+        # fork_event, recorded on the main stream after every use of mlp_output.
+        # Keep it that way: no side-stream work outside a fork.
+        state.join_pending = True
+        return mlp_output
+
+    def _join_mlp(
+        self, attn_output: torch.Tensor, mlp_output: torch.Tensor
+    ) -> torch.Tensor:
+        state = self.dual_stream
+        assert state is not None
+        if state.join_pending:
+            torch.cuda.current_stream().wait_event(state.join_event)
+            state.join_pending = False
+        return attn_output + mlp_output
+
     def forward(
         self,
         positions: torch.Tensor,
@@ -387,6 +554,25 @@ class Cohere2MoeDecoderLayer(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         residual = hidden_states
         hidden_states, residual = self.input_layernorm(hidden_states, residual)
+
+        if self.dual_stream is not None:
+            layer_name = _encode_layer_name(self.layer_name)
+            hidden_states_mlp = torch.ops.vllm.cohere2_mlp_fork(
+                hidden_states, layer_name
+            )
+            hidden_states_attention = self.self_attn(
+                positions=positions, hidden_states=hidden_states
+            )
+            # Only layers that reduce attention + MLP together keep a
+            # dual_stream (see __init__), so the join can return the sum.
+            parallel_block_output = tensor_model_parallel_all_reduce(
+                torch.ops.vllm.cohere2_mlp_join(
+                    hidden_states_attention, hidden_states_mlp, layer_name
+                )
+            )
+            hidden_states = residual + parallel_block_output
+            return hidden_states, residual
+
         hidden_states_attention = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
@@ -425,10 +611,24 @@ class Cohere2MoeModel(nn.Module, EagleModelMixin):
             config.vocab_size, config.hidden_size
         )
 
+        # Dedicated stream: the global aux_stream() is used by the shared-expert
+        # and LoRA overlaps inside the MoE branch.
+        self._moe_stream: torch.cuda.Stream | None = None
+        if envs.VLLM_COHERE2_ATTN_MOE_DUAL_STREAM and current_platform.is_cuda():
+            self._moe_stream = torch.cuda.Stream()
+            logger.info_once(
+                "Cohere2MoE attention/MoE dual stream enabled (token threshold=%d).",
+                envs.VLLM_COHERE2_ATTN_MOE_DUAL_STREAM_TOKEN_THRESHOLD,
+            )
+
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: Cohere2MoeDecoderLayer(
-                config, cache_config, quant_config, prefix=prefix
+                config,
+                cache_config,
+                quant_config,
+                prefix=prefix,
+                moe_stream=self._moe_stream,
             ),
             prefix=f"{prefix}.layers",
         )
