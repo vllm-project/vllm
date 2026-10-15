@@ -1063,8 +1063,8 @@ def unified_attention(
     # 1. No split-K threshold or scratch buffers, or the scratch has fewer
     #    rows than query tokens, or
     # 2. max_seqlen_q > 1 and either it exceeds MAX_3D_QUERY_LEN, masking is
-    #    non-causal, per-sequence causal, or mm-prefix, or the tuned
-    #    large-head path applies, or
+    #    per-sequence causal or mm-prefix, or the tuned large-head path
+    #    applies, or
     # 3. The number of Q blocks exceeds seq_threshold_3D, or
     # 4. Batch invariance is enabled
     use_3d = not (
@@ -1077,7 +1077,6 @@ def unified_attention(
             max_seqlen_q > 1
             and (
                 max_seqlen_q > MAX_3D_QUERY_LEN
-                or not use_causal
                 or use_per_seq_causal
                 or use_mm_prefix
                 or tuned_large_head
