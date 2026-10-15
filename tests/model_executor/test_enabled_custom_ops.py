@@ -231,28 +231,27 @@ def test_topk_softmax_dispatch_aiter_topk_gating(
 
 
 @pytest.mark.parametrize(
-    "arch, fused_moe_enabled, expected",
+    "cdna, fused_moe_enabled, expected",
     [
-        pytest.param("gfx942", True, True, id="gfx942"),
-        pytest.param("gfx950", True, True, id="gfx950"),
-        pytest.param("gfx90a", True, False, id="gfx90a"),
-        pytest.param("gfx942", False, False, id="gfx942-aiter-moe-off"),
-        pytest.param("gfx950", False, False, id="gfx950-aiter-moe-off"),
+        pytest.param(3, True, True, id="cdna3"),
+        pytest.param(4, True, True, id="cdna4"),
+        pytest.param(2, True, False, id="cdna2"),
+        pytest.param(3, False, False, id="cdna3-aiter-moe-off"),
+        pytest.param(4, False, False, id="cdna4-aiter-moe-off"),
     ],
 )
-def test_topk_gating_enabled_by_arch(
+def test_topk_gating_enabled_by_cdna(
     monkeypatch: pytest.MonkeyPatch,
-    arch: str,
+    cdna: int,
     fused_moe_enabled: bool,
     expected: bool,
 ):
-    """topk_gating is on for gfx942 and gfx950 with AITER MoE enabled, nowhere else."""
+    """topk_gating is on for CDNA3 and CDNA4 with AITER MoE enabled, nowhere else."""
     monkeypatch.setattr("vllm._aiter_ops.is_aiter_found_and_supported", lambda: True)
     monkeypatch.setattr(
         rocm_aiter_ops, "is_fused_moe_enabled", lambda: fused_moe_enabled
     )
-    for name in ("gfx942", "gfx950"):
-        monkeypatch.setattr(f"vllm.platforms.rocm.on_{name}", lambda a=name: a == arch)
+    monkeypatch.setattr("vllm.platforms.rocm.get_cdna_version", lambda: cdna)
     assert bool(rocm_aiter_ops.is_topk_gating_enabled()) is expected
 
 

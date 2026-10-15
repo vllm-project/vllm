@@ -2243,12 +2243,12 @@ class rocm_aiter_ops:
     def is_topk_gating_enabled(cls) -> bool:
         """Use AITER ``topk_gating`` for softmax routing.
 
-        gfx942 and gfx950 only: those are the targets it was measured on. Other
-        AITER targets keep the legacy ``topk_softmax`` launcher.
+        CDNA3 and CDNA4 only (gfx942, gfx950): those are the targets it was
+        measured on. Other AITER targets keep the legacy ``topk_softmax`` launcher.
         """
-        from vllm.platforms.rocm import on_gfx942, on_gfx950
+        from vllm.platforms.rocm import get_cdna_version
 
-        return cls.is_fused_moe_enabled() and (on_gfx942() or on_gfx950())
+        return cls.is_fused_moe_enabled() and get_cdna_version() in (3, 4)
 
     @classmethod
     @if_aiter_supported
