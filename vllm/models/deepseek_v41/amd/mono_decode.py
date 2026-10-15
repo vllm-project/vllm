@@ -39,7 +39,7 @@ from vllm.platforms import current_platform
 if TYPE_CHECKING:
     from vllm.models.deepseek_v41.amd.model import DeepseekV4DecoderLayer
     from vllm.models.deepseek_v41.amd.mono.runner import MonoLayerWeights
-    from vllm.models.deepseek_v41.amd.rocm import DeepseekV4ROCMAiterSparseSWAMetadata
+    from vllm.models.deepseek_v41.amd.rocm import DeepseekV41ROCMAiterSparseSWAMetadata
     from vllm.models.deepseek_v41.sparse_mla import DeepseekV4FlashMLAMetadata
 
 logger = init_logger(__name__)
@@ -301,7 +301,7 @@ class MonoDecodeLayer:
         swa, comp = None, None
         if isinstance(md, dict):
             swa = cast(
-                "DeepseekV4ROCMAiterSparseSWAMetadata | None",
+                "DeepseekV41ROCMAiterSparseSWAMetadata | None",
                 md.get(attn.swa_cache_layer.prefix),
             )
             if attn.compressed_cache_prefix is not None:
