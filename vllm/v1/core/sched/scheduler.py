@@ -2508,8 +2508,7 @@ class Scheduler(SchedulerInterface):
             stopped = check_stop(request, self.max_model_len)
             if stopped:
                 # num_computed_tokens covers all new tokens but the last one.
-                # Keep that true after trimming: resumable requests resume
-                # from it.
+                # Keep that true after trimming: resumable requests resume from it.
                 if not is_stale:
                     request.num_computed_tokens -= len(new_token_ids) - num_new
                 del new_token_ids[num_new:]  # Trim new tokens if needed.
