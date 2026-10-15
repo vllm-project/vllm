@@ -59,6 +59,7 @@ def chunk_fwd_kernel_o(
     BV: tl.constexpr,
     USE_G: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    USE_GRAPH: tl.constexpr,
 ):
     i_v, i_t, i_bh = (
         tl.program_id(0),
@@ -73,6 +74,8 @@ def chunk_fwd_kernel_o(
             tl.load(chunk_indices + i_t * 2).to(tl.int32),
             tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64),
         )
+        if USE_GRAPH and i_n < 0:
+            return
         bos, eos = (
             tl.load(cu_seqlens + i_n).to(tl.int32),
             tl.load(cu_seqlens + i_n + 1).to(tl.int32),
@@ -146,6 +149,7 @@ def chunk_fwd_o(
     chunk_indices: torch.Tensor | None = None,
     chunk_size: int = FLA_CHUNK_SIZE,
     core_attn_out: torch.Tensor | None = None,
+    use_graph: bool = False,
 ) -> torch.Tensor:
     B, T, Hg, K, V = *q.shape, v.shape[-1]
     H = v.shape[-2]
@@ -183,5 +187,6 @@ def chunk_fwd_o(
         K=K,
         V=V,
         BT=BT,
+        USE_GRAPH=use_graph,
     )
     return o
