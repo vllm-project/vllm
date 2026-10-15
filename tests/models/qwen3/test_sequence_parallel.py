@@ -144,21 +144,23 @@ def test_forward_shards_embeds_and_gathers_single_output_when_sp_active(
     model.embed_input_ids = lambda input_ids: embeds
 
     shard_calls, gather_calls = [], []
-    monkeypatch.setattr(
-        qwen3_model,
-        "sp_shard",
-        lambda x: shard_calls.append(x) or x[:2],  # pretend tp_size=2 shards 4 -> 2
-    )
+
+    def fake_sp_shard(x):
+        shard_calls.append(x)
+        return x[:2]  # pretend tp_size=2 shards 4 -> 2
+
+    monkeypatch.setattr(qwen3_model, "sp_shard", fake_sp_shard)
 
     def fake_forward(self, input_ids, positions, intermediate_tensors, inputs_embeds):
         return inputs_embeds * 10
 
     monkeypatch.setattr(qwen3_model.Qwen2Model, "forward", fake_forward)
-    monkeypatch.setattr(
-        qwen3_model,
-        "sp_all_gather",
-        lambda x: gather_calls.append(x) or torch.cat([x, x]),  # un-shard back to 4
-    )
+
+    def fake_sp_all_gather(x):
+        gather_calls.append(x)
+        return torch.cat([x, x])  # un-shard back to 4
+
+    monkeypatch.setattr(qwen3_model, "sp_all_gather", fake_sp_all_gather)
 
     positions = torch.arange(4)
     out = model.forward(input_ids=torch.ones(4, dtype=torch.long), positions=positions)
