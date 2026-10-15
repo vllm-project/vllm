@@ -124,3 +124,42 @@ def test_default_activation_quant_config_defers_to_humming():
     )
     assert not qc.is_block_quantized
     assert qc.per_act_token_quant
+
+
+@pytest.mark.parametrize(
+    "routing,use_ep,expected",
+    [
+        ("DeepseekV4", True, kFp8Dynamic128Sym),
+        ("DeepseekV4", False, None),
+        ("TopK", True, None),
+    ],
+)
+def test_deepseek_v4_hopper_ep_defaults_to_block_fp8(
+    monkeypatch, routing, use_ep, expected
+):
+    """DeepSeek V4 MXFP4 experts on Humming default to block FP8 activations on
+    SM90 only with EP, where the full-size expert GEMMs gain from them."""
+    import dataclasses
+
+    from tests.kernels.moe.utils import make_dummy_moe_config
+    from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
+    from vllm.model_executor.layers.quantization import mxfp4
+    from vllm.platforms import current_platform
+
+    monkeypatch.setattr(
+        mxfp4,
+        "select_deepseek_v4_mxfp4_moe_backend",
+        lambda moe: (Mxfp4MoeBackend.HUMMING, None),
+    )
+    monkeypatch.setattr(
+        current_platform, "is_device_capability_family", lambda cap: cap == 90
+    )
+    moe = make_dummy_moe_config()
+    moe = dataclasses.replace(
+        moe,
+        routing_method=getattr(RoutingMethodType, routing),
+        moe_parallel_config=dataclasses.replace(moe.moe_parallel_config, use_ep=use_ep),
+    )
+
+    assert mxfp4.Mxfp4MoEMethod(moe).activation_key == expected
