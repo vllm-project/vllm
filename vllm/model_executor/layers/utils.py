@@ -168,7 +168,7 @@ def _can_use_flashinfer_cudnn_bf16(
     weight: torch.Tensor,
     bias: torch.Tensor | None,
 ) -> bool:
-    # sm_10x showed no benefit in the same regime (#57318: 0.90-1.13x).
+    # sm_10x showed no benefit in the same regime (measured 0.90-1.13x).
     if not (
         current_platform.is_cuda() and current_platform.is_device_capability_family(120)
     ):
