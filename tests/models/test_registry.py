@@ -127,6 +127,21 @@ def test_registry_is_pp(model_arch, is_pp):
 @pytest.mark.parametrize(
     "model_arch,supported",
     [
+        ("LlamaForCausalLM", True),
+        ("Mamba2ForCausalLM", False),
+        ("Zamba2ForCausalLM", False),
+    ],
+)
+def test_registry_supports_lora(model_arch, supported):
+    model_info = ModelRegistry._try_inspect_model_cls(model_arch)
+    assert model_info is not None
+
+    assert model_info.supports_lora is supported
+
+
+@pytest.mark.parametrize(
+    "model_arch,supported",
+    [
         ("Qwen4ExpForCausalLM", True),
         ("Qwen4ExpForConditionalGeneration", True),
         ("Qwen4ExpMTP", True),
