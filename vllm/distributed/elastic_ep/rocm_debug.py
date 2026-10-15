@@ -670,6 +670,21 @@ def _off() -> bool:
     return os.getenv("VLLM_EEP_DEBUG_OFF") == "1"
 
 
+def _warm_only() -> bool:
+    """Warm each new group with one collective and measure nothing.
+
+    Across both attempts of build 95060, in legacy mode with the normal
+    transport, the scale up completed in all three passes that carried these
+    probes and in none of the four that did not. The probes both warm and
+    measure, so that split has two possible causes and I cannot tell them
+    apart. This leaves only the warm-up: one real collective on each new group
+    right after it is swapped in, before the EPLB reshuffle reaches its own
+    first collective. It also swallows the failure instead of re-raising it, so
+    a pass answers for the product and not for this file.
+    """
+    return os.getenv("VLLM_EEP_DEBUG_WARM_ONLY") == "1"
+
+
 def _drain_probe() -> bool:
     """The 2 MiB ceiling is destructive on the agent, so it is opt in."""
     return os.getenv("VLLM_EEP_DEBUG_DRAIN") == "1"
@@ -772,11 +787,17 @@ def dump_static() -> None:
 def warm_each(groups: dict, tag: str) -> None:
     if _off():
         return
+    warm_only = _warm_only()
     stream = torch.Stream(device=next(iter(groups.values())).device)
     with stream:
         tensor = torch.zeros(1, dtype=torch.int32, device=stream.device)
         for name, group in groups.items():
             try:
+                if warm_only:
+                    torch.distributed.all_reduce(tensor, group=group.device_group)
+                    stream.synchronize()
+                    logger.warning("[EEP-DEBUG] %s warm %s ok, warm only", tag, name)
+                    continue
                 # The stream context does not set HIP's current device, so an
                 # export inside RCCL can land on the wrong one.
                 logger.warning(
@@ -887,5 +908,6 @@ def warm_each(groups: dict, tag: str) -> None:
                     name,
                     traceback.format_exc(),
                 )
-                dump(f"{tag} after {name} failure", groups, heavy=True)
-                raise
+                if not warm_only:
+                    dump(f"{tag} after {name} failure", groups, heavy=True)
+                    raise

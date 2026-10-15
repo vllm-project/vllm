@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import gc
+import os
+import time
 import weakref
 from collections.abc import Iterable, Iterator, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -256,6 +258,43 @@ class ElasticEPScalingExecutor:
         self._group_cleanup_future = self._async_executor.submit(
             self._destroy_retired_groups, groups
         )
+
+    def _early_cleanup_if_requested(
+        self, groups: tuple[GroupCoordinator | None, ...]
+    ) -> tuple[GroupCoordinator | None, ...]:
+        """Retire the old groups now instead of after the new ones are used.
+
+        Both commit paths hand the retired groups to the background thread only
+        after the EPLB reshuffle has run its first collective on the new EP
+        group, so the old communicators are still alive while RCCL sets up the
+        new P2P transport, and the thread that tears them down runs while
+        another thread is computing. On MI355 that first collective is exactly
+        where hipIpcGetMemHandle returns invalid argument, and a pass with
+        every probe off aborted with "Memory access fault by GPU node-2 ...
+        Write access to a read-only page" with _destroy_retired_groups on the
+        stack of one thread and a forward pass on another. An exporter that
+        drops its mappings while a peer still holds them explains both. With
+        this set the teardown finishes first and nothing overlaps.
+
+        Returns the groups still owed a cleanup, so the caller can skip the
+        later hand-off. Diagnostic only.
+        """
+        if os.getenv("VLLM_EEP_DEBUG_EARLY_GROUP_CLEANUP") != "1":
+            return groups
+        live = sum(1 for group in groups if group is not None)
+        started = time.perf_counter()
+        self._start_group_cleanup(groups)
+        self._wait_for_group_cleanup()
+        # Printed through logger and not through rocm_debug on purpose: the
+        # passes that carry this flag also carry VLLM_EEP_DEBUG_OFF, and a pass
+        # that fails the same way as the others has to be distinguishable from
+        # a pass where the variable never reached the Ray actors.
+        logger.warning(
+            "[EEP-DEBUG] retired %d group(s) synchronously in %.3f s",
+            live,
+            time.perf_counter() - started,
+        )
+        return ()
 
     def _wait_for_group_cleanup(self) -> None:
         if (future := self._group_cleanup_future) is not None:
@@ -605,7 +644,7 @@ class ElasticEPScalingExecutor:
     def commit_scale_up(self, is_existing_worker: bool) -> None:
         if is_existing_worker:
             self.broadcast_expert_mapping()
-            retired_groups = self.switch_and_prepare()
+            retired_groups = self._early_cleanup_if_requested(self.switch_and_prepare())
         else:
             mapping = self.receive_expert_mapping()
             self.worker.model_runner.setup_eplb_from_mapping(mapping)
@@ -618,7 +657,7 @@ class ElasticEPScalingExecutor:
         if not self._can_reuse_fused_moe_kernel():
             self.warm_and_capture()
         self._perform_eplb_reshuffle(async_op=True)
-        if is_existing_worker:
+        if is_existing_worker and retired_groups:
             self._start_group_cleanup(retired_groups)
 
     def commit_scale_down(self, new_dp_size: int, removing: bool) -> None:
@@ -626,7 +665,7 @@ class ElasticEPScalingExecutor:
         if removing:
             self.switch_and_remove()
         else:
-            retired_groups = self.switch_and_prepare()
+            retired_groups = self._early_cleanup_if_requested(self.switch_and_prepare())
             if current_platform.is_rocm():
                 groups = {"dp": get_dp_group(), "ep": get_ep_group()}
                 rocm_debug.dump("scale_down before empty_cache", groups)
@@ -635,7 +674,8 @@ class ElasticEPScalingExecutor:
                 rocm_debug.warm_each(groups, "scale_down")
             if not self._can_reuse_fused_moe_kernel():
                 self.warm_and_capture()
-            self._start_group_cleanup(retired_groups)
+            if retired_groups:
+                self._start_group_cleanup(retired_groups)
 
     def perform_scale_down_eplb_reshuffle(self, new_dp_size: int) -> None:
         eplb_state = self.worker.model_runner.eplb_state

@@ -91,75 +91,81 @@ steps:
       - requirements/kv_connectors_rocm.txt
       commands:
       - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
-      # The churn repro that used to run here reported A=PASS B=PASS C=PASS
-      # D=PASS in every build for ten builds running, because it never builds a
-      # second communicator while the first one is alive. It has said what it
-      # had to say and its four minutes are better spent elsewhere. This one
-      # does build the second communicator and measures the export headroom
-      # around it, and it is the only check here that uses all four GPUs.
-      - AMD_LOG_LEVEL=1 python3 distributed/rocm_ipc_headroom_repro.py --rounds 3 || true
-      # The headroom repro only ever exports 6 MiB and it reported a full 256 at
-      # all five of its points on the agent that fails, because 6 MiB is not the
-      # size that bleeds. In the test, a worker reads 117 at 6 MiB, runs one
-      # measurement that exports and frees about 355 buffers, and then reads 0,
-      # and the only pass that keeps its count is the one with the fragment
-      # allocator off. This drives that exact pair with nothing else in the
-      # process. Locally it survives 41216 exports in either mode, so a drop
-      # here is a complete repro for ROCR-Runtime: one file, HIP and torch only.
-      - AMD_LOG_LEVEL=1 python3 distributed/rocm_ipc_drain_repro.py --rounds 40 || true
-      - HSA_DISABLE_FRAGMENT_ALLOCATOR=1 AMD_LOG_LEVEL=1 python3 distributed/rocm_ipc_drain_repro.py --rounds 40 || true
-      # ROCr refuses the export in Runtime::IPCCreate, which picks between two
-      # unrelated implementations: hsaKmtShareMemory when HSA_ENABLE_IPC_MODE_LEGACY
-      # is 1, hsaKmtExportDMABufHandle otherwise. Our images pin the legacy side in
-      # docker/Dockerfile.rocm, so the dmabuf side has never run here. Since the
-      # same failure appears on ROCm 7.2.3 and on 10.0.0 and only the kernel module
-      # differs from a host where it passes, a second kernel path is worth a pass.
-      # HSA_ is not in DEFAULT_ENV_VAR_PREFIXES, so without naming it below the Ray
-      # actors would keep the image value and the flag would do nothing.
-      - HSA_ENABLE_IPC_MODE_LEGACY=0 AMD_LOG_LEVEL=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=HSA_ENABLE_IPC_MODE_LEGACY,AMD_LOG_LEVEL pytest -v -s distributed/test_elastic_ep.py -k enforce_eager_none || true
-      # The two dmesg lines that used to sit here printed "read kernel buffer
-      # failed: Operation not permitted" in every build, so the kernel ring
-      # buffer stays out of reach from this container and there is nothing to
-      # gain by asking again.
-      # One of the six INVALID_ARGUMENT returns in IPCCreate is the fragment branch,
-      # for buffers suballocated out of a 2 MB block. This removes that branch.
-      - HSA_DISABLE_FRAGMENT_ALLOCATOR=1 AMD_LOG_LEVEL=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=HSA_DISABLE_FRAGMENT_ALLOCATOR,AMD_LOG_LEVEL pytest -v -s distributed/test_elastic_ep.py -k enforce_eager_none || true
-      # The pass above still carries the probes, and it is the only run so far
-      # where all of them succeeded and the test then failed on its own, which
-      # makes it the one uncontaminated recording of the real failure. It does
-      # not answer whether the switch alone is enough, because the probes are
-      # still exporting. This one has nothing running but the test.
-      - HSA_DISABLE_FRAGMENT_ALLOCATOR=1 VLLM_EEP_DEBUG_OFF=1 AMD_LOG_LEVEL=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=HSA_DISABLE_FRAGMENT_ALLOCATOR,VLLM_EEP_DEBUG_OFF,AMD_LOG_LEVEL pytest -v -s distributed/test_elastic_ep.py -k enforce_eager_none || true
-      # The thunk trace at HSAKMT_DEBUG_LEVEL=7 that used to run here has already
-      # given what it can. With RAY_DEDUP_LOGS=0 it showed the true order for the
-      # first time: every hsaKmtShareMemory is followed by a 4 MiB device
-      # allocation and a 4 MiB host allocation, both mapped to all four nodes,
-      # and the run made 24054 share calls across 731346 log lines. Level 7 logs
-      # call entry with the address only and never a return value, so the
-      # kernel's own reason is not in there and a second trace would cost seven
-      # minutes to print the same thing.
-      # Measured across two jobs and nine passes: the headroom is full in
-      # prepare and down to about 115 at commit, which is where #56610 moved the
-      # first collective to avoid a deadlock. With the deferral off, that
-      # collective runs in prepare again, where there is room. If this pass
-      # gets further than the others, the headroom is what the failure is about
-      # and the deadlock fix needs somewhere else to put the warm-up. If it
-      # fails the same way, the window is not the explanation.
-      # The first attempt at this answered nothing: the variable did reach the
-      # workers, but the process died inside the probes before the collective,
-      # so the probes are off here and the pass is left to answer only its own
-      # question.
-      - VLLM_EEP_DEBUG_NO_DEFER_WARMUP=1 VLLM_EEP_DEBUG_OFF=1 AMD_LOG_LEVEL=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=VLLM_EEP_DEBUG_NO_DEFER_WARMUP,VLLM_EEP_DEBUG_OFF,AMD_LOG_LEVEL pytest -v -s distributed/test_elastic_ep.py -k enforce_eager_none || true
-      # NCCL_P2P_DISABLE=1 ran once before and failed, but measurement later
-      # showed RCCL makes zero IPC calls under it, so that failure came from the
-      # probes in rocm_debug rather than from the test. VLLM_EEP_DEBUG_OFF=1
-      # silences every probe, so this pass answers the one question the earlier
-      # one could not: does the test itself pass without P2P, slow or not.
-      - NCCL_P2P_DISABLE=1 VLLM_EEP_DEBUG_OFF=1 AMD_LOG_LEVEL=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=NCCL_P2P_DISABLE,VLLM_EEP_DEBUG_OFF,AMD_LOG_LEVEL pytest -v -s distributed/test_elastic_ep.py -k enforce_eager_none || true
-      # The previous run tried NCCL_P2P_DISABLE and NCCL_P2P_LEVEL and both hit
-      # the same hsa_status 4097. Measured locally, NCCL_P2P_DISABLE=1 already
-      # drops RCCL to zero hipIpcGetMemHandle calls, so that 4097 came from our
-      # own probe rather than from RCCL: no transport setting can avoid it and
-      # there is nothing left to learn from those two passes. Spend the time on
-      # a second clean run instead, which is the one the new probes report on.
-      - AMD_LOG_LEVEL=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=AMD_LOG_LEVEL pytest -v -s distributed/test_elastic_ep.py -k enforce_eager_none
+      # Six passes were dropped here after two attempts of build 95060 gave the
+      # same answer twice and left nothing to learn. The headroom repro returned
+      # exit codes [0, 0, 0, 0] at every point, four times. The drain repro
+      # reported no loss after 41216 exports in both fragment modes, four
+      # times, so export capacity is not consumed by exporting. The dmabuf pass
+      # failed identically twice, so the legacy export path is not the problem.
+      # HSA_DISABLE_FRAGMENT_ALLOCATOR=1 with the probes off failed twice, so
+      # the fragment allocator is not involved. VLLM_EEP_DEBUG_NO_DEFER_WARMUP=1
+      # failed at the same line twice, so the window opened by #56610 is not the
+      # explanation. Plain NCCL_P2P_DISABLE=1 is gone too, but for the opposite
+      # reason: it carries the scale up every time and what fails after it is
+      # the second bug, so it comes back below with the flag that is supposed
+      # to fix that one. Those forty minutes now buy repeats of the candidates
+      # that remain.
+      #
+      # The split worth chasing: in legacy mode with the normal transport, the
+      # scale up completed in three of the four passes that carried the probes,
+      # with accuracy 0.672, 0.684 and 0.660, and in none of the four that did
+      # not. That is no longer the clean split it looked like while attempt 2
+      # was still running, but three against one next to zero against four is
+      # still about a 1.4 percent chance of being noise. The probes both warm
+      # and measure, so even a real difference has two possible causes. This
+      # flag leaves only the warm-up, one real collective on each new group
+      # right after it is swapped in, with no measurement and no re-raise.
+      #
+      # One pass, not two. PR #59684 is where these probes were written and its
+      # CI failed with them in, so the warm-up is unlikely to carry the whole
+      # test end to end. What this pass can still establish is whether it
+      # carries the scale up reliably, which is worth one slot and not two.
+      - VLLM_EEP_DEBUG_WARM_ONLY=1 AMD_LOG_LEVEL=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=VLLM_EEP_DEBUG_WARM_ONLY,AMD_LOG_LEVEL pytest -v -s distributed/test_elastic_ep.py -k enforce_eager_none || true
+      # The second candidate. With every probe off, the traceback reaches the
+      # bottom in all four of those passes: the call that refuses is the first
+      # all_reduce on the new EP group, from eplb_state.rearrange inside
+      # _perform_eplb_reshuffle at elastic_execute.py:620. _start_group_cleanup
+      # runs two lines later, so the retired communicators are still alive
+      # while RCCL sets up the new transport. This retires them first. Two
+      # passes for the same reason as above.
+      - VLLM_EEP_DEBUG_EARLY_GROUP_CLEANUP=1 VLLM_EEP_DEBUG_OFF=1 AMD_LOG_LEVEL=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=VLLM_EEP_DEBUG_EARLY_GROUP_CLEANUP,VLLM_EEP_DEBUG_OFF,AMD_LOG_LEVEL pytest -v -s distributed/test_elastic_ep.py -k enforce_eager_none || true
+      - VLLM_EEP_DEBUG_EARLY_GROUP_CLEANUP=1 VLLM_EEP_DEBUG_OFF=1 AMD_LOG_LEVEL=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=VLLM_EEP_DEBUG_EARLY_GROUP_CLEANUP,VLLM_EEP_DEBUG_OFF,AMD_LOG_LEVEL pytest -v -s distributed/test_elastic_ep.py -k enforce_eager_none || true
+      # The two passes below are the only ones here that measure the second bug,
+      # which is ours rather than ROCm's. Every other pass dies on the 4097
+      # refusal before the teardown is ever reached, and NCCL_P2P_DISABLE=1 is
+      # the only setting that has carried the scale up reliably: 38.9 s and
+      # 38.5 s in the two attempts of build 95060. In both of those the scale
+      # up then completed and the model answered nothing at all, accuracy 0.000
+      # against a threshold of 0.58, with "Cannot get amd_mem_obj for ptr" and
+      # "Memory access fault by GPU node-2 ... Write access to a read-only
+      # page" during the evaluation, ncclCommAbort from _destroy_retired_groups
+      # on one thread and stream.synchronize in a forward pass on another. The
+      # same command passed twice in build 94917, so the baseline is 2 of 4 and
+      # already measured; it does not need a control pass here. With the
+      # teardown made synchronous the overlap cannot happen, so accuracy above
+      # the threshold twice is the answer. This is also the one finding here
+      # that is actionable upstream today, without waiting on the kernel.
+      - NCCL_P2P_DISABLE=1 VLLM_EEP_DEBUG_EARLY_GROUP_CLEANUP=1 VLLM_EEP_DEBUG_OFF=1 AMD_LOG_LEVEL=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=NCCL_P2P_DISABLE,VLLM_EEP_DEBUG_EARLY_GROUP_CLEANUP,VLLM_EEP_DEBUG_OFF,AMD_LOG_LEVEL pytest -v -s distributed/test_elastic_ep.py -k enforce_eager_none || true
+      - NCCL_P2P_DISABLE=1 VLLM_EEP_DEBUG_EARLY_GROUP_CLEANUP=1 VLLM_EEP_DEBUG_OFF=1 AMD_LOG_LEVEL=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=NCCL_P2P_DISABLE,VLLM_EEP_DEBUG_EARLY_GROUP_CLEANUP,VLLM_EEP_DEBUG_OFF,AMD_LOG_LEVEL pytest -v -s distributed/test_elastic_ep.py -k enforce_eager_none || true
+      # Both repros below are cheap and neither has run on the agent yet. The
+      # hold mode asks how many exports one process can keep alive at the same
+      # time, which is the only reading that would explain all of the agent
+      # numbers at once, and it names the call that refused so an allocation
+      # limit is never read as an export limit. Locally there is no limit:
+      # 64815 live 64 KiB exports, stopped only by the allocator, and 8192 live
+      # 6 MiB exports with no refusal.
+      - AMD_LOG_LEVEL=1 python3 distributed/rocm_ipc_drain_repro.py --mode hold || true
+      # The race repro drives the one thing nothing here has ever driven: a
+      # buffer exported while a peer process attaches that same buffer, which
+      # is ROCm/rocm-systems#11892. Four processes re-export their own buffers
+      # while the other three attach and detach them, with no barrier between
+      # the two sides. Locally clean through 13056 exports and 38400 attaches
+      # in 16 seconds.
+      - AMD_LOG_LEVEL=1 python3 distributed/rocm_ipc_race_repro.py --rounds 6 --spins 150 || true
+      # The verdict, and the only command without || true. The probes are off
+      # here on purpose. In attempt 1 this command carried them, and warm_each
+      # re-raised after the real work had already succeeded: expert resharding
+      # completed at 08:18:36, the probe refused at 08:18:38, the engine died
+      # at 08:18:40, and the step went red from instrumentation rather than
+      # from the product. Scale up had completed and accuracy was 0.684.
+      - VLLM_EEP_DEBUG_OFF=1 AMD_LOG_LEVEL=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=VLLM_EEP_DEBUG_OFF,AMD_LOG_LEVEL pytest -v -s distributed/test_elastic_ep.py -k enforce_eager_none
