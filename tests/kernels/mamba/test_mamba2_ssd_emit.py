@@ -34,7 +34,7 @@ def _paged(num_slots, shape, dtype, device):
     return carve_paged_states(num_slots, [shape], [dtype], device)[0]
 
 
-@pytest.mark.parametrize("chunk_size", [64])
+@pytest.mark.parametrize("chunk_size", [64, 128, 256])
 @pytest.mark.parametrize("seed", [0, 1])
 def test_emit_matches_single_shot_prefill_at_every_position(chunk_size, seed):
     torch.manual_seed(seed)
@@ -119,7 +119,7 @@ def test_emit_matches_single_shot_prefill_at_every_position(chunk_size, seed):
         assert torch.equal(buf_B[slot, t], B[pos])
 
 
-@pytest.mark.parametrize("chunk_size", [64])
+@pytest.mark.parametrize("chunk_size", [64, 128, 256])
 def test_fold_matches_single_shot_chunk_states(chunk_size):
     """Folding a completed chunk gives the reference boundary state bit for bit.
 
@@ -196,7 +196,7 @@ def test_fold_matches_single_shot_chunk_states(chunk_size):
         assert torch.equal(ssm_state[0], torch.zeros_like(ssm_state[0]))
 
 
-@pytest.mark.parametrize("chunk_size", [64])
+@pytest.mark.parametrize("chunk_size", [64, 128, 256])
 @pytest.mark.parametrize("seed", [0, 1])
 def test_emit_decode_schedule_matches_single_shot_prefill(chunk_size, seed):
     """Prefill through the replayed scan, then decode through emit, batched.
