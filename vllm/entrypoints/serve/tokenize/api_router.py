@@ -17,6 +17,7 @@ from vllm.entrypoints.serve.tokenize.protocol import (
 )
 from vllm.entrypoints.serve.tokenize.serving import ServingTokenization
 from vllm.entrypoints.serve.utils.api_utils import (
+    request_span,
     validate_json_request,
     with_cancellation,
 )
@@ -46,7 +47,8 @@ router = APIRouter()
 async def tokenize(request: TokenizeRequest, raw_request: Request):
     handler = tokenization(raw_request)
 
-    generator = await handler.create_tokenize(request, raw_request)
+    async with request_span(raw_request, "tokenize"):
+        generator = await handler.create_tokenize(request, raw_request)
 
     if isinstance(generator, ErrorResponse):
         return JSONResponse(
@@ -71,7 +73,8 @@ async def tokenize(request: TokenizeRequest, raw_request: Request):
 async def detokenize(request: DetokenizeRequest, raw_request: Request):
     handler = tokenization(raw_request)
 
-    generator = await handler.create_detokenize(request, raw_request)
+    async with request_span(raw_request, "detokenize"):
+        generator = await handler.create_detokenize(request, raw_request)
 
     if isinstance(generator, ErrorResponse):
         return JSONResponse(
