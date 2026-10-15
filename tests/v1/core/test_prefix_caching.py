@@ -1252,7 +1252,7 @@ def test_mamba_boundary_handoffs_do_not_pin_obsolete_blocks():
     assert all(block.ref_cnt == 0 for block in old_blocks[:-1])
 
 
-def test_hisparse_prefix_hit_reclaims_gpu_copies():
+def test_hisparse_prefix_hit_revives_gpu_copies():
     """A host prefix hit must come back GPU-resident while its GPU copies survive."""
     manager = make_hisparse_kv_cache_manager(32, 16, enable_caching=True)
     tokens = list(range(4 * HISPARSE_BLOCK_SIZE))
@@ -1282,17 +1282,17 @@ def test_hisparse_prefix_hit_reclaims_gpu_copies():
     )
 
 
-@pytest.mark.parametrize("free_blocks,reclaimed_pages", [(7, []), (10, [0, 1])])
-def test_hisparse_prefix_hit_under_pressure_reclaims_surviving_copies(
-    free_blocks, reclaimed_pages
+@pytest.mark.parametrize("free_blocks,revived_pages", [(7, []), (10, [0, 1])])
+def test_hisparse_prefix_hit_under_pressure_revives_surviving_copies(
+    free_blocks, revived_pages
 ):
     """A host prefix hit must not starve its own allocation of free blocks.
 
-    Admission counts free GPU copies as free, but reclaiming a copy pins it. When
-    reclaiming ran before the hit's allocation, it took blocks the allocation was
+    Admission counts free GPU copies as free, but reviving a copy pins it. When
+    reviving ran before the hit's allocation, it took blocks the allocation was
     promised and the pool ran dry (``Cannot get N free blocks``). The allocation
     now goes first, evicting a prefix's copies tail first; the copies it leaves
-    are reclaimed.
+    are revived.
     """
     manager = make_hisparse_kv_cache_manager(32, 16, enable_caching=True)
     tokens = list(range(4 * HISPARSE_BLOCK_SIZE))
@@ -1319,7 +1319,7 @@ def test_hisparse_prefix_hit_under_pressure_reclaims_surviving_copies(
 
     resident_ids = _resident_block_ids(manager, "resumed")
     assert resident_ids[:3] == [
-        copy_ids[page] if page in reclaimed_pages else pool.null_block.block_id
+        copy_ids[page] if page in revived_pages else pool.null_block.block_id
         for page in range(3)
     ]
     _, indexer, _, hot = manager.get_block_ids("resumed")
@@ -1525,8 +1525,8 @@ def test_hisparse_reset_prefix_cache_drops_copies():
     assert not coordinator.gpu_copies
 
 
-def test_hisparse_evicted_copy_is_not_reclaimed():
-    """A host prefix hit must not reclaim a GPU copy the pool has handed out."""
+def test_hisparse_evicted_copy_is_not_revived():
+    """A host prefix hit must not revive a GPU copy the pool has handed out."""
     manager = make_hisparse_kv_cache_manager(32, 16, enable_caching=True)
     tokens = list(range(4 * HISPARSE_BLOCK_SIZE))
     original = make_request("original", tokens, HISPARSE_BLOCK_SIZE, sha256)

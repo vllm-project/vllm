@@ -51,19 +51,22 @@ footprint. Host-pool metrics are listed in
 | --- | --- |
 | Host block / host page | A block of the separate CPU pool and the KV page it holds. The host pages are the authoritative copy of a request's sparse-MLA KV. |
 | Resident page | A request's KV page held in a GPU block of its resident group. |
+| Hot cache | The GPU cache group, and its tensor, that holds every request's hot buffer. |
 | Hot buffer / hot row | A request's fixed set of GPU blocks that hold host pages fetched for attention, and one row within it. |
 | Write-back | Copying a resident page to its host page. Happens eagerly, not only under memory pressure. |
 | Page transfer | One tracked write-back or restore of a page, identified by its transfer ID. |
-| Mirror | Copying KV rows to host as decode writes them, rather than a whole page at once. |
-| Durable | A page whose host copy is complete, so its resident block can be released. |
+| Mirror | Copying each step's newly written KV rows to their host pages, rather than waiting to write back whole pages. |
+| Durable | A page whose write-back (or import) has completed, so its resident block can be released. |
 | Publish | Registering durable host pages in the prefix cache so later requests can hit them. |
 | Resolve residency | Mapping attention's top-k positions to physical rows: resident pages directly, hot rows on a hit, and host rows copied into the hot buffer on a miss (`resolve_residency`). |
 | Restore | Copying a host page back into a resident page. |
 | Import | KV arriving from a P/D prefill node. |
-| Pin / release | Holding or dropping a resident page's allocation reference (`BlockPool.unpin_blocks` in core). |
+| Pin / release | Holding or dropping a resident page's allocation reference. Releasing (`BlockPool.unpin_blocks` in core) keeps the block readable until the pool evicts it. |
+| Lease / free | An extra block reference a page transfer or pending publication holds (`BlockPool.touch`) so the block outlives the copy, and dropping it (`BlockPool.free_blocks`). |
 | GPU copy | A durable resident page whose reference was released but whose contents stay readable until the pool evicts its block. |
-| Reclaim | A host-prefix hit taking back a released GPU copy the pool has not yet evicted, re-pinning it instead of reading the page from host. |
+| Revive | A host-prefix hit taking back a released GPU copy the pool has not yet evicted, re-pinning it instead of reading the page from host. |
 | Evict | The pool handing a released block to another allocation, which destroys any GPU copy it held. |
+| Residency update | The scheduler telling the worker which GPU block, if any, each of a request's pages is read from (`take_residency_updates`). The block table stays append-only. |
 
 ## Ownership
 
@@ -71,7 +74,8 @@ footprint. Host-pool metrics are listed in
 | --- | --- | --- |
 | HiSparse host-prefix identity | `HiSparseCoordinator` | maps tokens to logical host blocks |
 | Resident GPU block leases | normal KV cache manager | allocates and frees HMA blocks |
-| Resident block tables | normal KV cache manager | tells attention where resident pages are |
+| Resident block tables | normal KV cache manager | append-only record of a request's resident allocations |
+| Per-page residency | `HiSparseCoordinator` | decides which pages attention reads from GPU and sends residency updates |
 | Residency transitions | `HiSparseCoordinator` | plans write-back-before-release transactions |
 | Logical host block allocation | `HiSparseCoordinator` | owns the separate CPU block pool and its lifecycle |
 | Pinned host-pool lifecycle | `HiSparseWorker` | worker-wide backing and teardown |
@@ -108,7 +112,7 @@ HiSparseConnector                          HiSparseConnector
        │                                          │
        │ connector metadata                       ├─ host bytes
        │ - page transfers                         ├─ copy scheduling
-       │ - block-table replacements               └─ per-layer hot state
+       │ - residency updates                      └─ per-layer hot state
        └───────────────────────────────────────────────►│
        ◄──────── connector worker metadata ─────────────┘
                     enqueued and completed transfer IDs
@@ -116,9 +120,9 @@ HiSparseConnector                          HiSparseConnector
 
 The command travels in `kv_connector_metadata`; transfer updates return in
 `KVConnectorOutput.kv_connector_worker_meta`. The model runner does not
-interpret page transfers. Enqueue acknowledgements let the scheduler release
-resident leases in stream order; completion acknowledgements publish the copied
-host pages.
+interpret page transfers. Enqueue acknowledgements let the scheduler free
+resident leases in stream order; completion acknowledgements make the copied
+pages durable and publish them.
 
 ## Resident device pages
 
@@ -196,29 +200,30 @@ directly in its GPU group.
 
 ## Write-back transaction
 
-A resident block cannot be released until its contents have been handed to the
-worker.
+A resident page cannot be released until its write-back has completed.
 
 ```text
 HiSparseCoordinator                            HiSparseWorker
           │                                     │
-          │ pin resident and host leases        │
+          │ lease resident and host blocks      │
           │── HiSparsePageTransfer ─────────────►│
           │                                     │ enqueue GPU-to-host copy
           │◄── enqueued transfer ID ────────────│
-          │ replace resident table entry        │
-          │ release resident lease to HMA       │
+          │ free resident leases                │
           │                                     │ copy reaches its event
           │◄── completed transfer ID ───────────│
-          │ mark host page durable              │
-          │ release host lease                  │
+          │ mark page durable                   │
+          │ release it if the request can       │
+          │   read from host                    │
+          │ free host lease; publish            │
 ```
 
 “Enqueued” means the copy has entered the worker stream. Stream ordering makes
-it safe to release the resident GPU block for later work, but the host page is
-not yet published. “Completed” means the worker has observed the copy's event;
-only then does the coordinator publish the host page for prefix reuse and
-release its host lease. A host-write event separately protects direct
+it safe to free the resident leases, since later GPU work cannot overtake the
+copy, but the page is not yet durable. “Completed” means the worker has
+observed the copy's event; only then does the coordinator mark the page
+durable, release its resident block once the request can read from host,
+publish the host page for prefix reuse and free its host lease. A host-write event separately protects direct
 CPU readers from writes already queued on the accelerator.
 
 The worker transfer contains only its transfer ID and physical copy

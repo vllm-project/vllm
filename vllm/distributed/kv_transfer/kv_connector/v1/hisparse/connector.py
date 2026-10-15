@@ -209,7 +209,7 @@ class HiSparseConnectorScheduler:
         if metadata is None:
             return
         assert isinstance(metadata, HiSparseConnectorWorkerMetadata)
-        self.coordinator.release_completed_host_cow_copies(
+        self.coordinator.free_completed_host_cow_copies(
             metadata.completed_host_cow_dst_ids
         )
         self.coordinator.update_transfers(

@@ -2540,7 +2540,7 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
         super().pop_blocks_for_free(request_id)
         return blocks
 
-    def reclaim_resident_page(
+    def revive_resident_page(
         self, request_id: str, page_idx: int, block: KVCacheBlock
     ) -> bool:
         """Point a null prefix page at a pinned GPU copy of its contents."""

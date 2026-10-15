@@ -448,8 +448,8 @@ def test_zero_token_step_holds_tp_ranks_after_host_write_wait(
     assert calls == expected
 
 
-def test_scheduled_prefix_hit_publishes_reclaimed_copies():
-    """Copies reclaimed after scheduling reach the worker as a residency update,
+def test_scheduled_prefix_hit_publishes_revived_copies():
+    """Copies revived after scheduling reach the worker as a residency update,
     leaving the block-table row the scheduler output carries untouched."""
     from tests.v1.core.test_prefix_caching import (
         HISPARSE_BLOCK_SIZE,

@@ -65,8 +65,8 @@ class _HiSparseRequestState:
     gpu_copies_recorded_up_to: int = 0
     pinned_durable_pages: set[int] = field(default_factory=set)
     released_pages: set[int] = field(default_factory=set)
-    # Prefix pages whose GPU copies are reclaimed after the admitting allocation.
-    pages_to_reclaim: int = 0
+    # Prefix pages whose GPU copies are revived after the admitting allocation.
+    pages_to_revive: int = 0
     # The worker holds this request's residency for every page below
     # synced_pages, except the stale pages changed since it was sent.
     synced_pages: int = 0
@@ -212,9 +212,9 @@ class HiSparseCoordinator:
         state.num_durable_prefix_pages = max(
             num_host_pages, state.num_durable_prefix_pages
         )
-        # Reclaiming pins copies out of the free pool, so it must wait until the
+        # Reviving pins copies out of the free pool, so it must wait until the
         # allocation admission counted on has run (see update_residency).
-        state.pages_to_reclaim = max(state.pages_to_reclaim, num_host_pages)
+        state.pages_to_revive = max(state.pages_to_revive, num_host_pages)
         state.gpu_copies_recorded_up_to = max(
             state.gpu_copies_recorded_up_to, num_host_pages
         )
@@ -223,7 +223,7 @@ class HiSparseCoordinator:
         """Drain host copy-on-write work, retaining both endpoints.
 
         The worker runs the copies in the step that carries them, so the
-        endpoints are released when that step's output comes back.
+        endpoints are freed when that step's output comes back.
         """
         if self.host_manager is None:
             return ()
@@ -238,8 +238,8 @@ class HiSparseCoordinator:
             for source_block, cow_block in pairs
         )
 
-    def release_completed_host_cow_copies(self, dst_block_ids: Iterable[int]) -> None:
-        """Release the endpoints of host copies the worker reports having run."""
+    def free_completed_host_cow_copies(self, dst_block_ids: Iterable[int]) -> None:
+        """Free the endpoints of host copies the worker reports having run."""
         blocks: list[KVCacheBlock] = []
         for dst_block_id in dst_block_ids:
             pair = self._retained_cow_copies.pop(dst_block_id, None)
@@ -258,7 +258,7 @@ class HiSparseCoordinator:
     # GPU copies of published host pages
     # ------------------------------------------------------------------
 
-    def _reclaim_gpu_copies(
+    def _revive_gpu_copies(
         self,
         request_id: str,
         state: _HiSparseRequestState,
@@ -278,7 +278,7 @@ class HiSparseCoordinator:
             if blocks is None:
                 continue
             for manager, block in zip(self.resident_managers, blocks):
-                if manager.reclaim_resident_page(request_id, page_idx, block):
+                if manager.revive_resident_page(request_id, page_idx, block):
                     manager.block_pool.touch([block])
                     state.pinned_durable_pages.add(page_idx)
                     if page_idx < state.synced_pages:
@@ -328,7 +328,7 @@ class HiSparseCoordinator:
             self._gpu_copy_by_block.pop(block.block_id, None)
 
     # ------------------------------------------------------------------
-    # Residency: pinning, releasing and losing pages
+    # Residency: pinning, releasing and evicting pages
     # ------------------------------------------------------------------
 
     def _can_read_from_host(self, request_id: str) -> bool:
@@ -430,13 +430,13 @@ class HiSparseCoordinator:
         if not self.resident_managers:
             return
         state = self._get_request_state(request_id)
-        if state.pages_to_reclaim:
+        if state.pages_to_revive:
             assert self.host_manager is not None
             host_blocks = self.host_manager.req_to_blocks.get(request_id, ())
-            self._reclaim_gpu_copies(
-                request_id, state, host_blocks[: state.pages_to_reclaim]
+            self._revive_gpu_copies(
+                request_id, state, host_blocks[: state.pages_to_revive]
             )
-            state.pages_to_reclaim = 0
+            state.pages_to_revive = 0
         if not self._can_read_from_host(request_id):
             assert self.gpu_pool is not None
             if (
@@ -791,7 +791,7 @@ class HiSparseCoordinator:
         self._complete_transfers()
 
     def _apply_enqueued_transfers(self) -> None:
-        """Drop the GPU pins once every worker has completed the transfer."""
+        """Free the GPU leases once every worker has completed the transfer."""
         for pending in self.pending_transfers.values():
             if (
                 pending.enqueue_applied
