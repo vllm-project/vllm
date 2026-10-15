@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from functools import cache
+
 import torch
 from torch.nn.parameter import Parameter
 
@@ -404,6 +406,7 @@ class _GateLinearMethod(UnquantizedLinearMethod):
 _FP32_ROUTER_GEMM_MAX_TOKENS = GateLinear.FP32_MAX_TOKENS
 
 
+@cache
 def bf16x3_router_gemm_module():
     """The bf16x3 router GEMM for this device: Triton on SM90, CuteDSL on SM100."""
     if current_platform.is_device_capability((9, 0)):
