@@ -38,6 +38,14 @@ class MTPMixin(CausalMixin):
     proposer replaces with the target's.
     """
 
+    def _patch_config(self):
+        # `vllm_config.model_config` is the target's, which must not be patched
+        assert self.vllm_config.speculative_config is not None
+        self.model_config = self.vllm_config.speculative_config.draft_model_config
+        self.config = self.model_config.hf_config
+        self.text_config = self.config.get_text_config()
+        super()._patch_config()
+
     def _create_model(self) -> "PreTrainedModel":
         self.check_version("5.20.0", "MTP")
         from transformers.modeling_layers import MtpModel

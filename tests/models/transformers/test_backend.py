@@ -859,14 +859,15 @@ def test_mtp_draft_loads_mtp_weights(model_type, tmp_path, tp_init, monkeypatch)
     config.save_pretrained(tmp_path)
 
     target = ModelConfig(str(tmp_path), model_impl="transformers", dtype="bfloat16")
-    draft = SpeculativeConfig(
+    speculative_config = SpeculativeConfig(
         method="mtp",
         num_speculative_tokens=num_mtp_layers,
         target_model_config=target,
         target_parallel_config=ParallelConfig(),
-    ).draft_model_config
+    )
+    draft = speculative_config.draft_model_config
     assert draft.architecture == "TransformersMoEForMTP"
-    vllm_config = VllmConfig(model_config=draft)
+    vllm_config = VllmConfig(model_config=target, speculative_config=speculative_config)
     with set_current_vllm_config(vllm_config):
         model = get_model(vllm_config=vllm_config, model_config=draft)
 
