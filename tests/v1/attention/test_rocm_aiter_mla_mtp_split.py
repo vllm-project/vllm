@@ -156,6 +156,9 @@ def _builder(
             if asm_dcp_verify
             else AiterMLAHelper.get_actual_mla_num_heads(num_heads)
         ),
+        _padded_decode_num_heads=AiterMLAHelper.get_actual_mla_num_heads(
+            decode_num_heads
+        ),
         _mla_work_meta_data=torch.empty(1, dtype=torch.int32),
         _mla_work_info_set=torch.empty(1, dtype=torch.int32),
         _mla_work_indptr=torch.empty(1, dtype=torch.int32),
@@ -517,6 +520,7 @@ def test_non_causal_dcp_block_bypasses_cprr_in_forward(monkeypatch):
         has_persistent_metadata=False,
         attn_out_dtype=torch.bfloat16,
         asm_decode_num_heads=0,
+        padded_num_heads=0,
         mla_num_kv_splits=0,
         cp_world_size=8,
         cp_rank=0,
@@ -582,6 +586,7 @@ def test_single_token_dcp_decode_returns_unpadded_lse(monkeypatch):
         # 0 == the round-robin (cprr) asm route is off, this rank's decode takes
         # the existing path. Mirrors the AiterMLADecodeMetadata default.
         asm_decode_num_heads=0,
+        padded_num_heads=0,
         g_kv_indptr=None,
     )
     attn_metadata = SimpleNamespace(decode=decode, causal=True, work_meta_data=None)
@@ -597,6 +602,145 @@ def test_single_token_dcp_decode_returns_unpadded_lse(monkeypatch):
     assert lse is not None
     assert output.shape[1] == decode_heads
     assert lse.shape == (num_tokens, decode_heads)
+
+
+@pytest.mark.parametrize(
+    "num_heads,non_causal,force,native,expected",
+    [
+        (48, False, False, (64, 128), 64),
+        # auto pads at most 2x; force drops the cap.
+        (48, False, False, (128,), 48),
+        (48, False, True, (128,), 128),
+        # A non-causal block reaches qlen 7 and 8, where 96 folds.
+        (96, True, False, (96, 128), 128),
+        # 16 heads never pad, even where only 32 is native.
+        (16, True, False, (32,), 16),
+    ],
+)
+def test_resolve_padded_mla_num_heads(
+    monkeypatch, num_heads, non_causal, force, native, expected
+):
+    calls = set()
+
+    def query(heads, qlen, q_dtype, kv_dtype, *, v_head_dim, return_lse, causal):
+        calls.add((qlen, return_lse, causal))
+        native_here = heads in native and not (heads == 96 and qlen > 6)
+        return SimpleNamespace(native=native_here, supported=True)
+
+    monkeypatch.setitem(
+        sys.modules, "aiter", SimpleNamespace(get_mla_decode_shape_support=query)
+    )
+    heads = AiterMLAHelper.resolve_padded_mla_num_heads(
+        num_heads,
+        8,
+        dcp=True,
+        non_causal=non_causal,
+        q_dtype=torch.bfloat16,
+        kv_dtype=torch.bfloat16,
+        v_head_dim=512,
+        force=force,
+    )
+    assert heads == expected
+    if not non_causal:
+        # Under DCP a causal block runs plain only at qlen 1, with LSE.
+        assert calls == {(1, True, True)}
+
+
+def test_resolve_padded_mla_num_heads_needs_the_aiter_query(monkeypatch):
+    monkeypatch.setitem(sys.modules, "aiter", SimpleNamespace())
+    with pytest.raises(RuntimeError, match=r"ROCm/aiter#6107"):
+        AiterMLAHelper.resolve_padded_mla_num_heads(
+            48,
+            1,
+            dcp=True,
+            non_causal=False,
+            q_dtype=torch.bfloat16,
+            kv_dtype=torch.bfloat16,
+            v_head_dim=512,
+            force=False,
+        )
+
+
+@pytest.mark.parametrize("qlen,route_heads", [(1, 96), (4, 128)])
+def test_padded_plain_decode_plans_at_the_padded_count(monkeypatch, qlen, route_heads):
+    """Plain plans at the padded count, cprr at its own native count."""
+    get_mla_metadata_v1 = mock.MagicMock()
+    monkeypatch.setitem(
+        sys.modules,
+        "aiter",
+        SimpleNamespace(get_mla_metadata_v1=get_mla_metadata_v1),
+    )
+    monkeypatch.setattr(
+        rocm_aiter_mla, "_expand_page_indices_kernel", _NoOpTritonKernel()
+    )
+    builder = _builder(
+        mtp_decode_qlen=5, dcp_world_size=8, num_heads=10, asm_dcp_verify=True
+    )
+    builder._padded_decode_num_heads = 96
+
+    metadata = _cprr_decode_batch(builder, qlen=qlen)
+
+    assert metadata.has_persistent_metadata
+    assert get_mla_metadata_v1.call_args.args[3] == route_heads
+    if qlen == 1:
+        assert metadata.padded_num_heads == 96
+        assert metadata.asm_decode_num_heads == 0
+    else:
+        assert metadata.padded_num_heads == 0
+        assert metadata.asm_decode_num_heads == 128
+
+
+def test_padded_plain_decode_unpads_output_and_lse(monkeypatch):
+    """A 48-head decode padded to 64 must come back at 48 heads, in order."""
+    num_heads, dcp_world_size = 6, 8
+    decode_heads = num_heads * dcp_world_size
+    num_tokens, head_dim, kv_lora_rank = 3, 576, 512
+    captured = {}
+
+    def fake_aiter_decode(q, kv_buffer, out, *args, **kwargs):
+        # Echo each query head back so the unpad can be checked head by head.
+        captured["q_heads"] = q.shape[1]
+        out.copy_(q[..., :kv_lora_rank])
+        return None, q[..., 0].float()
+
+    monkeypatch.setattr(
+        rocm_aiter_mla, "_get_aiter_mla_decode", lambda: fake_aiter_decode
+    )
+
+    impl = object.__new__(AiterMLAImpl)
+    impl.num_heads = num_heads
+    impl.dcp_world_size = dcp_world_size
+    impl.kv_cache_dtype = "auto"
+    impl.kv_lora_rank = kv_lora_rank
+    impl.qk_rope_head_dim = head_dim - kv_lora_rank
+    impl.scale = head_dim**-0.5
+    decode = SimpleNamespace(
+        varlen_q_rows=None,
+        max_qo_len=1,
+        qo_indptr=torch.arange(num_tokens + 1, dtype=torch.int32),
+        paged_kv_indptr=torch.zeros(num_tokens + 1, dtype=torch.int32),
+        paged_kv_indices=torch.zeros(1, dtype=torch.int32),
+        paged_kv_last_page_len=torch.ones(num_tokens, dtype=torch.int32),
+        use_gluon_decode=False,
+        use_gluon_verify=False,
+        dcp_route=rocm_aiter_mla._DCPDecodeRoute.PLAIN,
+        dcp_verify=None,
+        has_persistent_metadata=True,
+        attn_out_dtype=torch.float32,
+        asm_decode_num_heads=0,
+        padded_num_heads=64,
+        g_kv_indptr=None,
+    )
+    attn_metadata = SimpleNamespace(decode=decode, causal=True, work_meta_data=None)
+    layer = SimpleNamespace(_q_scale=torch.tensor(1.0), _k_scale=torch.tensor(1.0))
+    q = torch.randn(num_tokens, decode_heads, head_dim)
+
+    output, lse = impl.forward_mqa(q, torch.zeros(1, 1, head_dim), attn_metadata, layer)
+
+    assert captured["q_heads"] == 64
+    assert lse is not None
+    torch.testing.assert_close(output, q[..., :kv_lora_rank])
+    torch.testing.assert_close(lse, q[..., 0])
 
 
 def test_verify_partial_attention_merge():
