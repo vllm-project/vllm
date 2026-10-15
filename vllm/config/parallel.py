@@ -23,7 +23,6 @@ if TYPE_CHECKING:
     from ray.runtime_env import RuntimeEnv
     from ray.util.placement_group import PlacementGroup
 
-    from vllm.config.fault_tolerance import FaultToleranceConfig
     from vllm.v1.executor import Executor
 else:
     RuntimeEnv = Any
@@ -464,7 +463,7 @@ class ParallelConfig:
 
     enable_fault_tolerance: bool = False
     """Enable fault tolerance for detailed error recovery,
-    such as scaling down fault DPEngineCore.
+    such as scaling down faulty DPEngineCores.
     """
 
     fault_tolerance_config: FaultToleranceConfig = Field(
@@ -725,7 +724,14 @@ class ParallelConfig:
 
         from vllm.distributed.utils import (
             stateless_init_torch_distributed_process_group,
+            steady_state_entered,
         )
+
+        # Under FT, startup-created groups get no configured timeout: uneven
+        # rank startup would trip it. The sentinel applies it after startup.
+        timeout = self.cpu_distributed_timeout
+        if self.enable_fault_tolerance and not steady_state_entered():
+            timeout = None
 
         max_retries = 5
         last_exc: Exception | None = None
@@ -741,7 +747,7 @@ class ParallelConfig:
                     backend="gloo",
                     return_store=return_store,
                     listen_socket=listen_socket,
-                    timeout=self.cpu_distributed_timeout,
+                    timeout=timeout,
                 )
             except DistNetworkError as e:
                 # We only want to retry when the root cause is EADDRINUSE.
