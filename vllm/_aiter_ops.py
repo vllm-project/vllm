@@ -2513,6 +2513,24 @@ class rocm_aiter_ops:
 
         return "quant_dtype_a" in inspect.signature(fused_moe).parameters
 
+    @classmethod
+    @if_aiter_supported
+    @functools.cache
+    def qk_norm_rope_cache_supports_q_fp8(cls) -> bool:
+        """Probe whether the fused QK-norm+RoPE+KV-cache op can emit fp8 Q.
+
+        Added in https://github.com/ROCm/aiter/pull/5914 (>=0.1.25). Older
+        AITER must keep the separate query quantization.
+        """
+        import inspect
+
+        from aiter.ops.fused_qk_norm_rope_cache_quant import (
+            fused_qk_norm_rope_cache_pts_quant_shuffle,
+        )
+
+        params = inspect.signature(fused_qk_norm_rope_cache_pts_quant_shuffle).parameters
+        return "q_out_fp8" in params
+
     @staticmethod
     def _probe_dsv4_i384_fhmoe_capability(num_tokens: int) -> bool:
         """Probe AITER's CSV-backed DSV4 native-I384 FHMoE contract."""
@@ -3500,6 +3518,12 @@ class rocm_aiter_ops:
             fused_qk_norm_rope_cache_pts_quant_shuffle,
         )
 
+        q_fp8_kwargs = {}
+        if q_out_fp8 is not None:
+            q_fp8_kwargs = {
+                "q_out_fp8": q_out_fp8,
+                "per_tensor_q_scale": per_tensor_q_scale,
+            }
         fused_qk_norm_rope_cache_pts_quant_shuffle(
             qkv,
             q_weight,
@@ -3527,8 +3551,7 @@ class rocm_aiter_ops:
             x,
             rotary_dim,
             v_norm,
-            q_out_fp8,
-            per_tensor_q_scale,
+            **q_fp8_kwargs,
         )
 
     @staticmethod

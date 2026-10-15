@@ -518,10 +518,14 @@ def _run_qk_norm_rope_kvcache_fusion_test(
                 else torch.ops._C.static_scaled_fp8_quant.default
             )
             assert backend.op_count(expected_quant_op, before=True) > 0
-            # RoPE per-tensor Q quant is folded into the fused kernel (q_out_fp8),
-            # so no separate quant op remains. MRoPE and the per-head/group form
-            # keep the separate query quantization.
-            q_quant_folded = mrope_section is None and num_kv_heads != 1
+            # With AITER support, RoPE per-tensor Q quant is folded into the fused
+            # kernel (q_out_fp8). MRoPE and the per-head/group form keep the
+            # separate query quantization.
+            q_quant_folded = (
+                mrope_section is None
+                and num_kv_heads != 1
+                and rocm_aiter_ops.qk_norm_rope_cache_supports_q_fp8()
+            )
             if q_quant_folded:
                 assert backend.op_count(expected_quant_op) == 0
             else:

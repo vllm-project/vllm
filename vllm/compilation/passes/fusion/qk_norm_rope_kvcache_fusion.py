@@ -12,6 +12,7 @@ from torch._higher_order_ops.auto_functionalize import auto_functionalized
 from torch._inductor.pattern_matcher import PatternMatcherPass
 
 import vllm.ir.ops
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.config.utils import Range
 from vllm.logger import init_logger
@@ -61,6 +62,7 @@ def fused_qk_norm_rope_and_unified_kv_cache_update_impl(
     v_norm: bool,
     layer_name: LayerNameType,
     q_out_fp8: torch.Tensor | None = None,
+    q_scale: torch.Tensor | None = None,
 ) -> torch.Tensor:
     layer_name = _resolve_layer_name(layer_name)
     _, attn_layer, kv_cache, layer_slot_mapping = get_attention_context(layer_name)
@@ -80,6 +82,7 @@ def fused_qk_norm_rope_and_unified_kv_cache_update_impl(
             layer_slot_mapping,
             v_norm,
             q_out_fp8,
+            q_scale,
         )
     else:
         # Profiling/dummy run: define q_out/k_out (consumed by attention).
@@ -104,6 +107,7 @@ def fused_qk_norm_rope_and_unified_kv_cache_update_fake(
     v_norm: bool,
     layer_name: LayerNameType,
     q_out_fp8: torch.Tensor | None = None,
+    q_scale: torch.Tensor | None = None,
 ) -> torch.Tensor:
     return torch.empty(0, device=qkv.device, dtype=qkv.dtype)
 
@@ -236,6 +240,11 @@ class QkNormRopeKvCachePattern:
             if layer.query_quant is not None
             else GroupShape.PER_TENSOR
         )
+        # Static per-tensor Q quant is folded into the fused kernel when the
+        # installed AITER supports it; otherwise Q is quantized separately.
+        self.fuse_query_quant = self.query_quant_group_shape.is_per_tensor() and bool(
+            rocm_aiter_ops.qk_norm_rope_cache_supports_q_fp8()
+        )
 
         self.q_size = self.num_heads * self.head_size
         self.k_size = self.num_kv_heads * self.head_size
@@ -339,6 +348,7 @@ class QkNormRopeKvCachePattern:
             v_norm=self.v_norm,
             layer_name=self._get_layer_name(layer_name),
             q_out_fp8=None,
+            q_scale=None,
         )
         return results[0], results[1], results[2], v
 
@@ -442,10 +452,10 @@ class QkNormRopeKvCachePattern:
         _, _, v = qkv.split([self.q_size, self.k_size, self.v_size], dim=-1)
         v = v.view(qkv.shape[0], self.num_kv_heads, self.head_size_v)
 
-        if self.query_quant_group_shape.is_per_tensor():
-            # The fused kernel fp8-quantizes Q directly (static per-tensor scale,
-            # from layer._q_scale_cpu), so we skip the separate scaled_quant. The
-            # bf16 q_out is still written by the kernel but goes unused here.
+        if self.fuse_query_quant:
+            # The fused kernel fp8-quantizes Q with the same q_scale the replaced
+            # quant op consumed, so we skip the separate scaled_quant. The bf16
+            # q_out is still written by the kernel but goes unused here.
             q_out_fp8 = torch.empty(
                 qkv.shape[0],
                 self.num_heads,
@@ -467,6 +477,7 @@ class QkNormRopeKvCachePattern:
                 v_norm=self.v_norm,
                 layer_name=self._get_layer_name(layer_name),
                 q_out_fp8=q_out_fp8,
+                q_scale=q_scale,
             )
             # results = [dummy, q_out, k_out, q_out_fp8]
             q_fp8 = results[3].view(-1, self.q_size)
@@ -474,8 +485,7 @@ class QkNormRopeKvCachePattern:
             # output the pattern exposes (the separate quant op's scale write-back).
             return results[0], q_fp8, results[2], v, q_scale
 
-        # Per-head / group static-quant fallback (out of scope for the fused Q
-        # path): the kernel returns bf16 Q and we re-quantize separately.
+        # Per-head/group form or older AITER: re-quantize the bf16 Q separately.
         results = auto_functionalized(
             self.FUSED_OP,
             q_out=q_out,
@@ -490,6 +500,7 @@ class QkNormRopeKvCachePattern:
             v_norm=self.v_norm,
             layer_name=self._get_layer_name(layer_name),
             q_out_fp8=None,
+            q_scale=None,
         )
         q_fp8_flat = results[1].view(-1, self.q_size)
         q_fp8, q_scale_out = self._quantize_query(q_fp8_flat, q_scale)
