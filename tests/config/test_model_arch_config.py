@@ -55,7 +55,6 @@ BASE_MODELS_TO_TEST = [
 
 # (target_model, draft_model, trust_remote_code)
 SPECULATIVE_MODELS = [
-    ("JackFram/llama-68m", "abhigoyal/vllm-medusa-llama-68m-random", False),
     ("luccafong/deepseek_mtp_main_random", "luccafong/deepseek_mtp_draft_random", True),
     ("eagle618/deepseek-v3-random", "eagle618/eagle-deepseek-v3-random", True),
     ("meta-llama/Meta-Llama-3-8B-Instruct", "yuhuili/EAGLE-LLaMA3-Instruct-8B", True),
@@ -70,9 +69,73 @@ def _load_groundtruth(filename: str) -> dict:
         return json.load(f)
 
 
-def _assert_model_arch_config(
-    model_config, expected: dict, check_head_size: bool = True
-):
+@pytest.mark.parametrize("has_joint_head", [False, True])
+@pytest.mark.parametrize(
+    "architecture", ["Qwen3_5ForConditionalGeneration", "ColQwen3_5"]
+)
+def test_qwen35_joint_head_selects_clef_flash(tmp_path, has_joint_head, architecture):
+    """Only a Qwen3.5 generation checkpoint with a joint head selects Clef."""
+    from transformers import Qwen3_5Config
+
+    head_config = {
+        "hidden_size": 4096,
+        "width": 1024,
+        "routing_layers": 2,
+        "layers": 4,
+        "heads": 16,
+        "feedforward": 4096,
+    }
+    if has_joint_head:
+        (tmp_path / "joint_head_config.json").write_text(json.dumps(head_config))
+    config = Qwen3_5Config(architectures=[architecture])
+    config.name_or_path = str(tmp_path)
+    model_config = SimpleNamespace(
+        hf_config=config,
+        hf_text_config=config.text_config,
+        _supports_multimodal_for_mm_prefix=lambda: True,
+    )
+    converted = ModelConfig.get_model_arch_config(model_config)
+    if has_joint_head and architecture == "Qwen3_5ForConditionalGeneration":
+        assert converted.architectures == ["ClefFlashForJointSchema"]
+        assert config.joint_head_config == head_config
+    else:
+        assert converted.architectures == [architecture]
+        assert not hasattr(config, "joint_head_config")
+
+
+@pytest.mark.parametrize("has_decision_config", [False, True])
+@pytest.mark.parametrize(
+    "architecture", ["Qwen3_5Model", "Qwen3_5ForConditionalGeneration"]
+)
+def test_qwen35_decision_config_selects_d3(tmp_path, has_decision_config, architecture):
+    """Only a bare Qwen3.5 backbone with a decision_config.json selects d3."""
+    from transformers import Qwen3_5Config
+
+    decision_config = {
+        "format_version": 1,
+        "codes": ["A", "B"],
+        "token_ids": [32, 33],
+        "attention_mode": "noncausal_full_attention",
+    }
+    if has_decision_config:
+        (tmp_path / "decision_config.json").write_text(json.dumps(decision_config))
+    config = Qwen3_5Config(architectures=[architecture])
+    config.name_or_path = str(tmp_path)
+    model_config = SimpleNamespace(
+        hf_config=config,
+        hf_text_config=config.text_config,
+        _supports_multimodal_for_mm_prefix=lambda: True,
+    )
+    converted = ModelConfig.get_model_arch_config(model_config)
+    if has_decision_config and architecture == "Qwen3_5Model":
+        assert converted.architectures == ["D3ForSequenceClassification"]
+        assert config.decision_config == decision_config
+    else:
+        assert converted.architectures == [architecture]
+        assert not hasattr(config, "decision_config")
+
+
+def _assert_model_arch_config(model_config, expected: dict):
     """Assert model_arch_config matches expected values."""
     model_arch_config = model_config.model_arch_config
     assert model_arch_config.architectures == expected["architectures"]
@@ -98,14 +161,10 @@ def _assert_model_arch_config(
         config_format="hf",
     )
     assert str(torch_dtype) == expected["dtype"]
-
-    if check_head_size:
-        assert model_arch_config.head_size == expected["head_size"]
+    assert model_arch_config.head_size == expected["head_size"]
 
 
-def _assert_model_config_methods(
-    model_config, expected: dict, check_head_size: bool = True
-):
+def _assert_model_config_methods(model_config, expected: dict):
     """Assert model_config methods return expected values."""
     assert model_config.architectures == expected["architectures"]
     assert model_config.get_vocab_size() == expected["vocab_size"]
@@ -116,9 +175,7 @@ def _assert_model_config_methods(
         model_config.get_total_num_hidden_layers()
         == expected["total_num_hidden_layers"]
     )
-
-    if check_head_size:
-        assert model_config.get_head_size() == expected["head_size"]
+    assert model_config.get_head_size() == expected["head_size"]
 
 
 def test_head_size_falls_back_when_head_dim_is_zero():
@@ -453,14 +510,8 @@ def test_draft_model_arch_config(
     )
     model_config = speculative_config.draft_model_config
 
-    # For medusa models, head_size may cause division by zero before
-    # model_arch_config was introduced, so we conditionally check it
-    check_head_size = isinstance(expected["head_size"], int)
-
-    _assert_model_arch_config(model_config, expected, check_head_size=check_head_size)
-    _assert_model_config_methods(
-        model_config, expected, check_head_size=check_head_size
-    )
+    _assert_model_arch_config(model_config, expected)
+    _assert_model_config_methods(model_config, expected)
 
 
 def test_deepseek_v4_convertor_splits_vision_architecture():
@@ -468,7 +519,8 @@ def test_deepseek_v4_convertor_splits_vision_architecture():
     text-only DeepSeek-V4; the convertor routes it to the VL wrapper class
     by rewriting hf_config.architectures (model-class resolution reads the
     raw attribute)."""
-    from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config
+    from transformers import DeepseekV4Config
+
     from vllm.transformers_utils.model_arch_config_convertor import (
         DeepseekV4ModelArchConfigConvertor,
     )
