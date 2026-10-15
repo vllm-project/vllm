@@ -53,7 +53,6 @@ def test_non_last_pp_rank_uses_global_batch_for_sample_feedback():
         ec_connector_output=None,
         cudagraph_stats=None,
         num_spec_tokens_to_schedule=0,
-        aux_output_connector_metadata=None,
     )
 
     runner.sample_tokens(None)
