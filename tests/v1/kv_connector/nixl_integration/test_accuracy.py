@@ -31,6 +31,7 @@ EXPECTED_VALUES = {
     "Qwen/Qwen3.5-0.8B": 0.33,
     "google/gemma-4-E2B-it": 0.485,
     "deepseek-ai/DeepSeek-V4-Flash": 0.95,
+    "meta-llama/Llama-3.2-1B-Instruct": 0.33,
 }
 
 SIMPLE_PROMPT = (
