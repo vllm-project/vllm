@@ -10,7 +10,7 @@ use tracing::{Level, debug, trace};
 use vllm_engine_core_client::AbortCause;
 use vllm_engine_core_client::protocol::output::StopReason;
 use vllm_engine_core_client::protocol::sampling_mask::SamplingMask;
-use vllm_llm::{FinishReason, GenerateOutput, TokenUsage};
+use vllm_llm::{FinishReason, GenerateOutput, RequestTimestamps, TokenUsage};
 use vllm_tokenizer::{DecodedText, DynTokenizer, IncrementalDecoder};
 
 use super::logprobs::{
@@ -55,6 +55,7 @@ pub struct Finished {
     pub ec_transfer_params: Option<Box<serde_json::Value>>,
     /// Sampling support sets aligned with all generated token positions.
     pub sampling_mask: Option<SamplingMask>,
+    pub timestamps: RequestTimestamps,
 }
 
 /// Sample metadata emitted by one engine output update.
@@ -317,6 +318,7 @@ pub async fn decoded_text_event_stream(
                     kv_transfer_params,
                     ec_transfer_params,
                     sampling_mask,
+                    timestamps: output.timestamps,
                 })),
             })
             .await;
@@ -543,7 +545,19 @@ mod tests {
                 name: "utf8 byte fallback resolves across engine updates",
                 outputs: vec![
                     GenerateOutput::for_test(Some(Arc::clone(&prompt)), vec![0xe4], None),
-                    GenerateOutput::for_test(None, vec![0xbd, 0xa0], Some(FinishReason::Length)),
+                    GenerateOutput {
+                        timestamps: RequestTimestamps {
+                            queued_ts: 8.0,
+                            scheduled_ts: 9.0,
+                            first_token_ts: 10.0,
+                            last_token_ts: 11.5,
+                        },
+                        ..GenerateOutput::for_test(
+                            None,
+                            vec![0xbd, 0xa0],
+                            Some(FinishReason::Length),
+                        )
+                    },
                 ],
                 expected: vec![
                     DecodedTextEvent::Start {
@@ -565,6 +579,12 @@ mod tests {
                             kv_transfer_params: None,
                             ec_transfer_params: None,
                             sampling_mask: None,
+                            timestamps: RequestTimestamps {
+                                queued_ts: 8.0,
+                                scheduled_ts: 9.0,
+                                first_token_ts: 10.0,
+                                last_token_ts: 11.5,
+                            },
                         }),
                     ),
                 ],
@@ -597,6 +617,7 @@ mod tests {
                             kv_transfer_params: None,
                             ec_transfer_params: None,
                             sampling_mask: None,
+                            timestamps: Default::default(),
                         }),
                     ),
                 ],
@@ -634,12 +655,19 @@ mod tests {
     async fn stream_stop_string_sets_task_local_abort_cause_on_raw_stream_drop() {
         let prompt: Arc<[u32]> = Arc::from([]);
         let dropped_cause = Arc::new(Mutex::new(None));
+        let timestamps = RequestTimestamps {
+            queued_ts: 1.0,
+            scheduled_ts: 2.0,
+            first_token_ts: 3.0,
+            last_token_ts: 4.0,
+        };
         let raw_stream = DropRecordingStream {
-            next: Some(Ok(GenerateOutput::for_test(
-                Some(prompt),
-                ascii_tokens("hello"),
-                Some(FinishReason::Length),
-            ))),
+            // The engine output is not terminal. The frontend terminates the
+            // request after decoding the configured stop string.
+            next: Some(Ok(GenerateOutput {
+                timestamps,
+                ..GenerateOutput::for_test(Some(prompt), ascii_tokens("hello"), None)
+            })),
             dropped_cause: Arc::clone(&dropped_cause),
         };
         let tokenizer: DynTokenizer = Arc::new(TestTokenizer::new());
@@ -657,6 +685,7 @@ mod tests {
 
         assert_eq!(output.text, "he");
         assert!(output.finish_reason.is_stop());
+        assert_eq!(output.timestamps, timestamps);
         assert_eq!(
             *dropped_cause.lock().unwrap(),
             Some(AbortCause::StopStringMatched)
