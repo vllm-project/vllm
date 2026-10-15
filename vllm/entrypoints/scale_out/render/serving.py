@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from fastapi import Request
 
 from vllm.entrypoints.anthropic.protocol import AnthropicMessagesRequest
 from vllm.entrypoints.anthropic.serving import AnthropicServingMessages
+from vllm.entrypoints.generate.base.protocol import MMPayload
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.openai.models.serving import (
@@ -33,11 +34,30 @@ from vllm.renderers.inputs.preprocess import (
     extract_prompt_len,
 )
 from vllm.renderers.online_renderer import OnlineRenderer
+from vllm.sampling_params import SamplingParams
 
 logger = init_logger(__name__)
 
 if TYPE_CHECKING:
     from vllm.entrypoints.mcp.tool_server import ToolServer
+
+
+def _hoist_transfer_params(
+    params: SamplingParams,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Move KV/EC transfer params out of `extra_args`.
+
+    Render emits them only as top-level `GenerateRequest` fields. Generate
+    copies them back into `extra_args` for the engine.
+    """
+    if not params.extra_args:
+        return None, None
+    # to_sampling_params aliases request.vllm_xargs, so copy before popping.
+    extra = dict(params.extra_args)
+    kv = extra.pop("kv_transfer_params", None)
+    ec = extra.pop("ec_transfer_params", None)
+    params.extra_args = extra or None
+    return kv, ec
 
 
 class ServingRender(BaseServing):
@@ -126,6 +146,7 @@ class ServingRender(BaseServing):
             truncate_prompt_tokens=request.truncate_prompt_tokens,
         )
         params = request.to_sampling_params(max_tokens, self.default_sampling_params)
+        kv_transfer_params, ec_transfer_params = _hoist_transfer_params(params)
 
         # Resolve here what OpenAIServingChat passes to the engine:
         # `_grammar_from_parser` (set by `adjust_request`) is not serialized.
@@ -149,9 +170,11 @@ class ServingRender(BaseServing):
             request_id=request_id,
             token_ids=token_ids,
             features=self._extract_mm_features(
-                engine_input, include_mm_kwargs=request.return_mm_kwargs
+                engine_input, mm_payload=request.mm_payload
             ),
             sampling_params=params,
+            kv_transfer_params=kv_transfer_params,
+            ec_transfer_params=ec_transfer_params,
             model=request.model,
             reasoning_ended=reasoning_ended,
             reasoning_parser_kwargs=reasoning_parser_kwargs,
@@ -176,7 +199,7 @@ class ServingRender(BaseServing):
         chat_req = AnthropicServingMessages.to_chat_completion_request(
             request, merge_inline_system=self._merge_inline_system
         )
-        chat_req.return_mm_kwargs = request.return_mm_kwargs
+        chat_req.mm_payload = request.mm_payload
         return await self.render_chat_request(chat_req, raw_request)
 
     async def render_completion_request(
@@ -226,6 +249,7 @@ class ServingRender(BaseServing):
             params = request.to_sampling_params(
                 max_tokens, self.default_sampling_params
             )
+            kv_transfer_params, ec_transfer_params = _hoist_transfer_params(params)
 
             request_id = base_id if len(result) == 1 else f"{base_id}-{i}"
 
@@ -234,9 +258,11 @@ class ServingRender(BaseServing):
                     request_id=request_id,
                     token_ids=token_ids,
                     features=self._extract_mm_features(
-                        engine_input, include_mm_kwargs=request.return_mm_kwargs
+                        engine_input, mm_payload=request.mm_payload
                     ),
                     sampling_params=params,
+                    kv_transfer_params=kv_transfer_params,
+                    ec_transfer_params=ec_transfer_params,
                     model=request.model,
                     stream=bool(request.stream),
                     stream_options=(request.stream_options if request.stream else None),
@@ -291,12 +317,13 @@ class ServingRender(BaseServing):
             truncate_prompt_tokens=(-1 if request.truncation != "disabled" else None),
         )
         params = request.to_sampling_params(max_tokens, self.default_sampling_params)
+        kv_transfer_params, ec_transfer_params = _hoist_transfer_params(params)
 
         return GenerateRequest(
             request_id=request.request_id,
             token_ids=list(token_ids),
             features=self._extract_mm_features(
-                engine_input, include_mm_kwargs=request.return_mm_kwargs
+                engine_input, mm_payload=request.mm_payload
             ),
             sampling_params=params,
             model=request.model,
@@ -304,8 +331,8 @@ class ServingRender(BaseServing):
             stream=bool(request.stream),
             cache_salt=request.cache_salt,
             priority=request.priority,
-            kv_transfer_params=request.kv_transfer_params,
-            ec_transfer_params=request.ec_transfer_params,
+            kv_transfer_params=kv_transfer_params,
+            ec_transfer_params=ec_transfer_params,
             token_offsets=engine_input.get("prompt_token_offsets"),
         )
 
@@ -349,10 +376,10 @@ class ServingRender(BaseServing):
         self,
         engine_input: EngineInput,
         *,
-        include_mm_kwargs: bool = True,
+        mm_payload: MMPayload = "tensors",
     ) -> MultiModalFeatures | None:
         return extract_mm_features(
             engine_input,
             metadata_fields_for=self._placeholder_metadata_fields,
-            include_mm_kwargs=include_mm_kwargs,
+            mm_payload=mm_payload,
         )
