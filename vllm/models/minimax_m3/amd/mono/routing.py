@@ -36,14 +36,32 @@ def decide_step(
         return StepDecision(False, "not a decode step")
     if metadata.num_prefills != 0 or metadata.num_prefill_tokens != 0:
         return StepDecision(False, "mixed prefill/decode step")
+    if metadata.decode.decode_query_len != 1:
+        return StepDecision(False, "speculative verification is unsupported")
     if not 0 < metadata.num_decode_tokens <= rows:
         return StepDecision(False, "decode token count exceeds physical rows")
-    if metadata.slot_mapping.numel() < rows:
+    if metadata.num_decodes != metadata.num_decode_tokens:
+        return StepDecision(False, "plain decode requires one token per request")
+    if (
+        metadata.decode.seq_lens.numel() < metadata.num_decodes
+        or metadata.decode.block_table.shape[0] < metadata.num_decodes
+    ):
+        return StepDecision(False, "decode tables do not cover every request")
+    if (
+        metadata.slot_mapping.dtype != torch.int64
+        or metadata.slot_mapping.numel() < rows
+    ):
         return StepDecision(False, "slot mapping does not cover physical rows")
     return StepDecision(True)
 
 
 def tensor_identity(
     tensor: torch.Tensor,
-) -> tuple[int, int, torch.dtype, tuple[int, ...]]:
-    return tensor.data_ptr(), tensor.numel(), tensor.dtype, tensor.stride()
+) -> tuple[int, int, torch.dtype, tuple[int, ...], int]:
+    return (
+        tensor.data_ptr(),
+        tensor.numel(),
+        tensor.dtype,
+        tensor.stride(),
+        tensor.storage_offset(),
+    )

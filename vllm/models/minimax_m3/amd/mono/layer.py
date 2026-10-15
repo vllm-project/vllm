@@ -1,15 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""MiniMax-local MonoKernel lifecycle adapter.
+"""Temporary MiniMax-local MonoKernel lifecycle adapter.
 
-The initial kernel is deliberately a native-call shim. It exercises the final
-attachment, routing, cache-rebind, and graph lifecycle without changing the
-layer boundary or parameter tree.
+This stays detached from the model until the FFN kernel passes its viability
+gate. It mirrors the proposed common runtime's attach and per-step interfaces
+without routing production forwards through a fake kernel.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 import torch
@@ -32,7 +31,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 CacheIdentity = tuple[
-    tuple[int, int, torch.dtype, tuple[int, ...]],
+    tuple[int, int, torch.dtype, tuple[int, ...], int],
     ...,
 ]
 
@@ -74,7 +73,6 @@ class MiniMaxM3MonoLayer:
         if reasons:
             detail = "; ".join(reasons)
             raise ValueError(f"--monokernel unsupported: {detail}.")
-        self.spec.configure_graph_widths(config)
         self.layers: list[MiniMaxM3DecoderLayer] = []
         self.active = False
         self.last_decision = StepDecision(False, "not started")
@@ -154,18 +152,6 @@ class MiniMaxM3MonoLayer:
         self._bind_caches()
         self.active = True
         logger.info_once(
-            "MiniMax-M3 MonoKernel lifecycle active for widths %s (native shim).",
+            "MiniMax-M3 MonoKernel lifecycle active for widths %s.",
             self.spec.widths,
         )
-
-    def forward_layer(
-        self,
-        native: Callable[
-            [torch.Tensor, torch.Tensor, torch.Tensor | None],
-            tuple[torch.Tensor, torch.Tensor],
-        ],
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
-        residual: torch.Tensor | None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        return native(positions, hidden_states, residual)

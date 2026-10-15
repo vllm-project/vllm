@@ -23,14 +23,14 @@ def _metadata(rows: int, *, decode_tokens: int | None = None, prefills: int = 0)
         max_seq_len=1,
         slot_mapping=torch.arange(rows),
         num_actual_tokens=decode_tokens,
-        num_decodes=1,
+        num_decodes=decode_tokens,
         num_decode_tokens=decode_tokens,
         num_prefills=prefills,
         num_prefill_tokens=prefills,
         decode=MiniMaxM3SparseDecodeMetadata(
-            seq_lens=torch.ones(1, dtype=torch.int32),
-            block_table=torch.zeros(1, 1, dtype=torch.int32),
-            decode_query_len=decode_tokens,
+            seq_lens=torch.ones(decode_tokens, dtype=torch.int32),
+            block_table=torch.zeros(decode_tokens, 1, dtype=torch.int32),
+            decode_query_len=1,
         ),
     )
 
@@ -64,6 +64,12 @@ def test_padding_slots_are_eligible():
     assert decide_step(MONO_SPEC, 4, CUDAGraphMode.FULL, metadata).use_mono
 
 
+def test_speculative_verification_falls_back():
+    metadata = _metadata(4)
+    metadata.decode.decode_query_len = 4
+    assert not decide_step(MONO_SPEC, 4, CUDAGraphMode.FULL, metadata).use_mono
+
+
 def test_cache_identity_detects_replacement():
     first = torch.empty(8)
     replacement = torch.empty(8)
@@ -93,6 +99,9 @@ def _config(**overrides):
         lora_config=None,
         kv_transfer_config=SimpleNamespace(kv_connector=None),
         use_v2_model_runner=True,
+        model_config=SimpleNamespace(
+            hf_text_config=SimpleNamespace(use_index_cache=False)
+        ),
     )
 
 
@@ -110,15 +119,11 @@ def test_static_refusals_report_all_reasons():
 
 
 def test_graph_widths_extend_instead_of_truncate():
-    config = _config()
-    MONO_SPEC.configure_graph_widths(config)
-    assert config.compilation_config.cudagraph_capture_sizes == [
+    assert MONO_SPEC.extend_final_graph_widths([1, 32]) == [
         1,
         2,
-        3,
         4,
         8,
-        12,
         16,
         32,
     ]

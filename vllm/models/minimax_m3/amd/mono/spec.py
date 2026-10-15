@@ -14,7 +14,7 @@ class MiniMaxM3MonoSpec:
     tp_size: int = 4
     blocks: int = 256
     max_rows: int = 16
-    widths: tuple[int, ...] = (1, 2, 3, 4, 8, 12, 16)
+    widths: tuple[int, ...] = (1, 2, 4, 8, 16)
     first_layer: int = 3
     last_layer: int = 59
 
@@ -52,16 +52,15 @@ class MiniMaxM3MonoSpec:
             reasons.append("does not support a KV connector")
         if not getattr(config, "use_v2_model_runner", False):
             reasons.append("requires Model Runner V2")
+        text_config = config.model_config.hf_text_config
+        if getattr(text_config, "use_index_cache", False):
+            reasons.append("does not support cross-layer index reuse")
 
         return reasons
 
-    def configure_graph_widths(self, config: VllmConfig) -> None:
-        sizes = config.compilation_config.cudagraph_capture_sizes
-        if sizes is None:
-            return
-        config.compilation_config.cudagraph_capture_sizes = sorted(
-            set(sizes).union(self.widths)
-        )
+    def extend_final_graph_widths(self, final_sizes: list[int]) -> list[int]:
+        """Add mono widths after vLLM resolves its default graph-size list."""
+        return sorted(set(final_sizes).union(self.widths))
 
 
 MONO_SPEC = MiniMaxM3MonoSpec()

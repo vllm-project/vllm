@@ -1333,9 +1333,8 @@ class MiniMaxM3DecoderLayer(nn.Module):
         self.post_attention_layernorm = MiniMAXGemmaRMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
         )
-        self.mono = None
 
-    def _native_forward(
+    def forward(
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
@@ -1358,18 +1357,6 @@ class MiniMaxM3DecoderLayer(nn.Module):
         ffn = self.block_sparse_moe if self.is_moe_layer else self.mlp
         hidden_states = ffn(hidden_states)
         return hidden_states, residual
-
-    def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
-        residual: torch.Tensor | None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        if self.mono is not None and self.mono.active:
-            return self.mono.forward_layer(
-                self._native_forward, positions, hidden_states, residual
-            )
-        return self._native_forward(positions, hidden_states, residual)
 
 
 class MiniMaxM3Model(nn.Module, EagleModelMixin):
@@ -1467,12 +1454,6 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             MiniMaxM3MoE,
             "block_sparse_moe",
         )
-        self.mono = None
-        if vllm_config.kernel_config.monokernel:
-            from vllm.models.minimax_m3.amd.mono import MiniMaxM3MonoLayer
-
-            self.mono = MiniMaxM3MonoLayer(self, vllm_config)
-            self.mono.attach()
 
         if get_pp_group().is_last_rank:
             self.norm = MiniMAXGemmaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -1505,8 +1486,6 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
 
         # EAGLE3 is not yet compatible with pipeline parallel
         aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)
-        if self.mono is not None:
-            self.mono.begin_step(hidden_states.shape[0])
         for idx, layer in enumerate(self.layers[self.start_layer : self.end_layer]):
             hidden_states, residual = layer(positions, hidden_states, residual)
             self._maybe_add_hidden_state(
