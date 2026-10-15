@@ -128,7 +128,7 @@ def test_control_transport_failure_releases_nixl_and_shared_region(monkeypatch):
 @pytest.mark.skipif(NixlWrapper is None, reason="Requires NIXL package")
 @pytest.mark.parametrize("dp_index", [0, 1])
 def test_gate_on_wires_data_transport_and_producer_session(monkeypatch, dp_index):
-    monkeypatch.setenv("VLLM_EC_SIDE_CHANNEL_HOST", "127.0.0.1")
+    monkeypatch.setenv("VLLM_HOST_IP", "127.0.0.1")
     monkeypatch.setattr(sched_mod, "create_ec_shared_region", lambda cfg: _region())
     cfg = create_ec_vllm_config(ec_role="ec_both")
     cfg.parallel_config.data_parallel_index = dp_index
@@ -149,7 +149,7 @@ def test_gate_on_wires_data_transport_and_producer_session(monkeypatch, dp_index
 @pytest.mark.skipif(NixlWrapper is None, reason="Requires NIXL package")
 def test_producers_allocate_distinct_ports_across_dp_and_instances(monkeypatch):
     """Both DP replicas and independent instances can start on one host."""
-    monkeypatch.setenv("VLLM_EC_SIDE_CHANNEL_HOST", "127.0.0.1")
+    monkeypatch.setenv("VLLM_HOST_IP", "127.0.0.1")
     monkeypatch.setattr(sched_mod, "create_ec_shared_region", lambda cfg: _region())
     instance_id = f"ec-test-{uuid.uuid4()}"
     schedulers = []

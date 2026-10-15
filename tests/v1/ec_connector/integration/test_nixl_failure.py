@@ -76,10 +76,7 @@ def servers():
                 "--ec-transfer-config",
                 config("ec_producer"),
             ],
-            env_dict={
-                "CUDA_VISIBLE_DEVICES": devices[0],
-                "VLLM_EC_SIDE_CHANNEL_HOST": "127.0.0.1",
-            },
+            env_dict={"CUDA_VISIBLE_DEVICES": devices[0]},
         ) as encoder,
         RemoteOpenAIServer(
             MODEL,
