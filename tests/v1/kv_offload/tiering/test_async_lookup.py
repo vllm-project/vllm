@@ -349,6 +349,38 @@ class TestAsyncLookupManager:
         finally:
             mgr.shutdown()
 
+    def test_mark_miss_ignores_newer_resolved_probe(self):
+        """A stale correction must not overwrite a newer probe that has already
+        resolved. A resolved verdict is served from cache without re-probing, so
+        flipping it to a miss strands the newer request on a wrong MISS for a
+        key the tier still holds -- the gap a phase-only guard leaves open."""
+        key = _key(1)
+        mgr = InMemoryLookupManager(existing_keys={key})
+        ctx_a = _ctx("reqA")
+        ctx_b = _ctx("reqB")
+        try:
+            assert mgr.lookup(key, ctx_a) is None
+            mgr.flush()
+            mgr._results_ready.wait()
+            mgr._results_ready.clear()
+            assert mgr.lookup(key, ctx_a) is True
+            old_token = mgr.lookup_token(key, ctx_a.req_id)
+            mgr.cleanup(ctx_a.req_id)
+
+            # B re-probes and its own probe already resolved to HIT.
+            assert mgr.lookup(key, ctx_b) is None
+            mgr.flush()
+            mgr._results_ready.wait()
+            mgr._results_ready.clear()
+            assert mgr.lookup(key, ctx_b) is True
+
+            # A's promotion fails only now.
+            mgr.mark_miss([old_token])
+            assert mgr.lookup(key, ctx_b) is True
+            assert mgr._lookup_batch == []  # served from cache, no re-probe
+        finally:
+            mgr.shutdown()
+
     @pytest.mark.parametrize("flushed", [True, False], ids=["in_flight", "pending"])
     def test_mark_miss_skips_newer_unresolved_probe(self, flushed: bool):
         """A failed load reported for an older generation of a key must not
