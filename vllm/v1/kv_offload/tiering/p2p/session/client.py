@@ -94,6 +94,7 @@ class LoadResult(NamedTuple):
     kv_request_id: str
     success: bool
     memory_safe: bool = True
+    failure_reported: bool = False  # A prior result already failed the request.
 
 
 class ClientCloseResult(NamedTuple):
@@ -101,9 +102,9 @@ class ClientCloseResult(NamedTuple):
 
     ``failed_jobs`` contains loads not yet reported as unsafe failures;
     ``memory_safe_jobs`` identifies fetches never handed to the transport.
-    ``failed_req_ids`` is every
-    kv_request_id whose lookup() would otherwise defer forever on the dead
-    peer — the in-flight loads plus any request holding an unresolved
+    ``failed_req_ids`` contains newly failed kv_request_ids whose lookup()
+    would otherwise defer forever on the dead peer — unreported loads plus
+    any request holding an unresolved
     symmetric-P2P probe. ``failed_jobs`` is the subset of ``failed_req_ids``
     that had a load job.
     """
@@ -317,6 +318,7 @@ class ClientRole:
                     job_id=load.job_id,
                     kv_request_id=kv_request_id,
                     success=success and not load.failure_reported,
+                    failure_reported=load.failure_reported,
                 )
             )
             self._on_load_terminal(kv_request_id, st)
@@ -352,6 +354,7 @@ class ClientRole:
                     job_id=load.job_id,
                     kv_request_id=kv_request_id,
                     success=False,
+                    failure_reported=load.failure_reported,
                 )
             )
             self._on_load_terminal(kv_request_id, st)
@@ -573,7 +576,8 @@ class ClientRole:
         failed_req_ids = [
             req_id
             for req_id, st in self._requests.items()
-            if st.loads or any(hit is None for hit in st.probes.values())
+            if any(not load.failure_reported for load in st.loads.values())
+            or any(hit is None for hit in st.probes.values())
         ]
         memory_safe_jobs = frozenset(
             load.job_id

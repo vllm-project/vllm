@@ -1184,26 +1184,25 @@ class TieringOffloadingManager(OffloadingManager):
 
         Called during sleep, weight update, or resume. Each secondary tier
         drains its in-flight transfers via drain_jobs() so no tier I/O is
-        touching primary memory before the primary tier is reset. A stuck
-        tier will block here visibly — preferable to silent corruption
-        from reusing primary slots while a transfer is mid-copy.
+        touching primary memory before the primary tier is reset. A failed
+        transfer whose memory safety is unconfirmed rejects reset, including
+        when the failure is discovered while draining.
 
         Secondary tiers are intentionally not reset: persistent stores
         (FS, network) keep their data across resets. Active request state is
         retained so those requests can continue after the reset; finished
         requests are finalized and removed.
         """
-        if self._quarantined_jobs:
+        self._process_finished_jobs()
+        self._raise_if_quarantined()
+        try:
+            for tier in self.secondary_tiers:
+                tier.drain_jobs()
+        finally:
+            # A failed drain can surface unsafe results that still need quarantine.
             self._process_finished_jobs()
             self._raise_if_quarantined()
-        for tier in self.secondary_tiers:
-            tier.drain_jobs()
-        # All tier I/O has stopped; consume their completion notifications
-        # so manager bookkeeping is consistent before the primary reset.
-        self._process_finished_jobs()
         assert not self._jobs
-
-        self._raise_if_quarantined()
 
         # Deferred promotion submissions reserve primary slots that the
         # reset below invalidates; their submit_load() has not yet been

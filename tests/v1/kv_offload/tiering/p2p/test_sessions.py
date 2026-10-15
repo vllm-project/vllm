@@ -806,7 +806,8 @@ class TestClientFlows:
         ]
         assert session.has_pending_work
 
-    def test_missing_abort_ack_retains_load_until_late_ack(self):
+    @pytest.mark.parametrize("terminal_type", [AbortAckMsg, TransferDoneMsg])
+    def test_missing_abort_ack_retains_load_until_late_ack(self, terminal_type):
         """A timer cannot prove that a remote WRITE stopped targeting load slots."""
         session, conn, _ = _make_session()
         _activate(session, conn)
@@ -823,15 +824,18 @@ class TestClientFlows:
         ]
         assert session.poll().loads == []
         assert session.has_pending_work
-        conn.enqueue(
-            {
-                TYPE_KEY: AbortAckMsg.TYPE,
-                AbortAckMsg.KV_REQUEST_ID: "req-7",
-                AbortAckMsg.ROUND_SEQ: 0,
-            }
-        )
+        terminal = {
+            TYPE_KEY: terminal_type.TYPE,
+            AbortAckMsg.KV_REQUEST_ID: "req-7",
+            AbortAckMsg.ROUND_SEQ: 0,
+        }
+        if terminal_type is TransferDoneMsg:
+            terminal[TransferDoneMsg.SUCCESS] = True
+        conn.enqueue(terminal)
         assert session.poll().loads == [
-            LoadResult(job_id=7, kv_request_id="req-7", success=False)
+            LoadResult(
+                job_id=7, kv_request_id="req-7", success=False, failure_reported=True
+            )
         ]
         assert session.poll().loads == []
 
@@ -2928,6 +2932,22 @@ class TestPendingSession:
 
 
 class TestDisconnect:
+    @pytest.mark.parametrize("already_dead", [False, True])
+    def test_dead_connection_does_not_consume_queued_fetches(self, already_dead):
+        session, conn, _ = _make_session()
+        if already_dead:
+            _activate(session, conn)
+            conn.mark_dead()
+        session.request_blocks(1, "req-1", [b"a"], [0])
+        session.request_blocks(2, "req-2", [b"b"], [1])
+        if not already_dead:
+            conn.fail_send = True
+            _activate(session, conn)
+
+        result = session.close()
+        assert set(result.failed_jobs) == {1, 2}
+        assert result.memory_safe_jobs == ({1, 2} if already_dead else {2})
+
     @pytest.mark.parametrize("flushed", [False, True])
     def test_close_distinguishes_queued_fetch_from_sent_fetch(self, flushed):
         session, conn, _ = _make_session()
@@ -2985,7 +3005,7 @@ class TestDisconnect:
         ]
         result = session.close()
         assert result.failed_jobs == []
-        assert result.failed_req_ids == ["req-7"]
+        assert result.failed_req_ids == []
 
     def test_disconnect_marks_session_dead(self):
         session, conn, _ = _make_session()

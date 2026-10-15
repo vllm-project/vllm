@@ -1589,6 +1589,26 @@ class TestAcceptNewPeers:
 
 
 class TestPollOnce:
+    def test_quarantine_release_does_not_refail_finished_request(self):
+        mgr = _make_manager()
+        mgr._control = _DrainCtrl()
+        peer = "10.0.0.1:8000"
+        sess = _FakeSession(
+            peer_id=peer,
+            loads=[LoadResult(5, "req-5", success=False, memory_safe=False)],
+        )
+        mgr._sessions[peer] = sess
+        mgr._poll_once()
+        assert "req-5" in mgr._failed_req_ids
+        ctx = _req_context(kv_params=_remote_prefiller_kv_params(kv_request_id="req-5"))
+        mgr.on_request_finished(ctx)
+        assert "req-5" not in mgr._failed_req_ids
+
+        sess._loads = [LoadResult(5, "req-5", success=False, failure_reported=True)]
+        mgr._poll_once()
+        assert mgr._finished_jobs[-1] == JobResult(job_id=5, success=False)
+        assert "req-5" not in mgr._failed_req_ids
+
     """_poll_once must drain control, accept new peers, poll every session,
     surface results, and reap dead sessions — in that order."""
 
@@ -1749,6 +1769,38 @@ class _DrainCtrl:
 
 
 class TestDrainJobs:
+    @pytest.mark.parametrize("confirmed", [False, True])
+    def test_drain_rejects_new_unsafe_result_unless_confirmed(
+        self, monkeypatch, confirmed
+    ):
+        mgr = _make_manager()
+        mgr._control = _DrainCtrl()
+        sess = _FakeSession(
+            loads=[LoadResult(5, "req-5", success=False, memory_safe=False)]
+        )
+        sess._client._inbound[6] = object()
+        mgr._sessions["fake:1"] = sess
+        if confirmed:
+            sess._loads.append(
+                LoadResult(5, "req-5", success=False, failure_reported=True)
+            )
+
+        def drain_sleep(_seconds):
+            assert confirmed, "drain waited on an unconfirmed unsafe WRITE"
+            sess._client._inbound.clear()
+
+        monkeypatch.setattr(
+            manager_module,
+            "time",
+            SimpleNamespace(monotonic=time.monotonic, sleep=drain_sleep),
+        )
+        if confirmed:
+            mgr.drain_jobs()
+        else:
+            with pytest.raises(RuntimeError, match="quarantined slots"):
+                mgr.drain_jobs()
+        assert mgr._finished_jobs[0] == JobResult(5, success=False, memory_safe=False)
+
     def test_returns_immediately_when_quiescent(self):
         """No sessions and no inflight: drain_jobs returns without sleeping."""
         mgr = _make_manager()

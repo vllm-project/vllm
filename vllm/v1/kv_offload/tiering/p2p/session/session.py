@@ -84,7 +84,7 @@ class SessionCloseResult(NamedTuple):
 
     `failed_jobs`/`failed_stores` are the in-flight jobs (client loads /
     server stores) the manager must mark failed. `failed_req_ids` is every
-    client-side kv_request_id whose lookup() must fail (in-flight loads plus
+    client-side kv_request_id whose lookup() must fail (newly failed loads plus
     unresolved probes); `failed_serves` is the server-side lookup state the
     dead peer can no longer resolve.
     """
@@ -354,7 +354,7 @@ class P2PSession:
         """Shut down.
 
         failed_jobs: client load job_ids to fail.
-        failed_req_ids: client kv_request_ids to fail — in-flight loads plus
+        failed_req_ids: client kv_request_ids to fail — unreported loads plus
             requests with an unresolved symmetric-P2P probe toward the
             now-dead peer. The manager fails these so the consumer's lookup()
             falls back to local prefill instead of deferring forever on an
@@ -647,7 +647,7 @@ class P2PSession:
         self._do_send(msg)
 
     def _do_send(self, msg: dict) -> None:
-        if self._conn is None:
+        if self._conn is None or not self._conn.alive:
             return
         # A raising send may already have exposed the destination IDs.
         if (

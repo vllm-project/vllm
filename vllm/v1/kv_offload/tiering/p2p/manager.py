@@ -645,7 +645,8 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         are NOT cancelled — the caller (``TieringOffloadingManager.reset_cache``)
         needs the primary memoryview to be quiescent, not aborted. Results
         accumulate in ``_finished_jobs`` and are surfaced by the next
-        ``get_finished_jobs()`` call.
+        ``get_finished_jobs()`` call. An unconfirmed unsafe failure raises
+        instead of waiting indefinitely for a terminal notification.
         """
         start = time.monotonic()
         warned = False
@@ -654,6 +655,14 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             pending = any(s.has_pending_work for s in self._sessions.values())
             if not pending:
                 return
+            latest_safety = {
+                result.job_id: result.memory_safe for result in self._finished_jobs
+            }
+            if not all(latest_safety.values()):
+                raise RuntimeError(
+                    "Cannot drain P2P jobs while remote WRITEs may still target "
+                    "quarantined slots."
+                )
             if not warned and time.monotonic() - start > 5.0:
                 logger.warning(
                     "P2PSecondaryTierManager.drain_jobs: still draining "
@@ -972,7 +981,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                         memory_safe=lr.memory_safe,
                     )
                 )
-                if not lr.success:
+                if not lr.success and not lr.failure_reported:
                     self._failed_req_ids.add(lr.kv_request_id)
             for sr in result.stores:
                 self._finished_jobs.append(

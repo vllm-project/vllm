@@ -372,8 +372,9 @@ class TestTieringOffloadingManager:
         completed.assert_called_once_with(to_keys([1, 2]), _CTX, False)
 
     @pytest.mark.parametrize("terminal_success", [True, False])
+    @pytest.mark.parametrize("during_drain", [False, True])
     def test_unsafe_promotion_reserves_slots_until_confirmation(
-        self, manager_setup, terminal_success
+        self, manager_setup, terminal_success, during_drain
     ):
         """Failed remote loads must not let a late WRITE corrupt reused slots."""
         self._start_request()
@@ -391,10 +392,23 @@ class TestTieringOffloadingManager:
             ),
             0,
         )
-        self.secondary_tier1.completed_jobs.append(
-            JobResult(job_id=job_id, success=False, memory_safe=False)
-        )
-        self.manager._process_finished_jobs()
+        unsafe = JobResult(job_id=job_id, success=False, memory_safe=False)
+        if during_drain:
+
+            def fail_drain():
+                self.secondary_tier1.completed_jobs.append(unsafe)
+                raise RuntimeError("P2P drain encountered an unsafe WRITE")
+
+            with (
+                patch.object(
+                    self.secondary_tier1, "drain_jobs", side_effect=fail_drain
+                ),
+                pytest.raises(RuntimeError, match="quarantined slots"),
+            ):
+                self.manager.reset_cache()
+        else:
+            self.secondary_tier1.completed_jobs.append(unsafe)
+            self.manager._process_finished_jobs()
 
         stats = self.manager.get_stats()
         assert stats is not None
