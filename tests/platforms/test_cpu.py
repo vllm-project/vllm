@@ -222,3 +222,16 @@ def test_cpu_conv_state_layout_selection(
 
     CpuPlatform.check_and_update_config(config)
     assert os.environ.get(layout_env) == expected_layout
+
+
+def test_cpu_block_size_default_survives_config_rerun() -> None:
+    """VllmConfig.__post_init__ reruns after the engine core handshake; it
+    must keep a block size raised since, e.g. for a hybrid model's pages."""
+    cache_config = CacheConfig()
+    config = _cpu_config(cache_config, model_type="qwen3_5", resolved_dtype="float32")
+
+    CpuPlatform.check_and_update_config(config)
+    assert cache_config.block_size == 128
+    cache_config.block_size = 1056
+    CpuPlatform.check_and_update_config(config)
+    assert cache_config.block_size == 1056

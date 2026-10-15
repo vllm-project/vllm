@@ -294,7 +294,12 @@ class CpuPlatform(Platform):
                     cache_config.block_size,
                 )
             cache_config.block_size = 256
-        elif not cache_config.user_specified_block_size:
+        elif (
+            not cache_config.user_specified_block_size
+            # This reruns with VllmConfig.__post_init__ after the engine core
+            # handshake; keep a size already set, e.g. raised for hybrid models.
+            and cache_config.block_size == cache_config.DEFAULT_BLOCK_SIZE
+        ):
             # A simulation takes the minimum, the closest to the GPU default.
             cache_config.block_size = _CPU_ATTN_BLOCK_MULTIPLE if simulated else 128
 
