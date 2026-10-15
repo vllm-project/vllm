@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import ctypes
 import functools
+import inspect
 import os
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
@@ -2501,6 +2502,17 @@ class rocm_aiter_ops:
         )
 
     @staticmethod
+    @functools.cache
+    def is_mrope_q_head_stride_supported() -> bool:
+        """The compile_ops wrapper hides the stub's signature, so read the stub."""
+        try:
+            import aiter.ops.fused_qk_norm_mrope_cache_quant as mod
+
+            return "q_head_stride" in inspect.getsource(mod)
+        except Exception:
+            return False
+
+    @staticmethod
     def _gdn_triton_kernels_importable() -> bool:
         try:
             import aiter.ops.triton.causal_conv1d_update_single_token  # noqa: F401
@@ -3793,6 +3805,10 @@ class rocm_aiter_ops:
         block_size: int,
         x: int,
         rotary_dim: int = 0,
+        use_shuffle_layout: bool = False,
+        gemma_norm: bool = False,
+        q_head_stride: int = 0,
+        k_out: torch.Tensor | None = None,
     ) -> None:
         from aiter.ops.fused_qk_norm_mrope_cache_quant import (
             fused_qk_norm_mrope_3d_cache_pts_quant_shuffle,
@@ -3819,13 +3835,16 @@ class rocm_aiter_ops:
             slot_mapping,
             k_scale,
             v_scale,
+            k_out,
             None,
-            None,
-            False,
-            False,
+            k_out is not None,
+            use_shuffle_layout,
             block_size,
             x,
             rotary_dim,
+            gemma_norm,
+            # Older AITER stubs lack q_head_stride; 0 (dense) is their default.
+            *((q_head_stride,) if q_head_stride else ()),
         )
 
     @staticmethod
@@ -3850,7 +3869,12 @@ class rocm_aiter_ops:
         v_scale: torch.Tensor,
         kv_cache_dtype: str,
         rotary_dim: int = 0,
+        use_shuffle_layout: bool = False,
+        gemma_norm: bool = False,
+        q_head_stride: int = 0,
+        k_out: torch.Tensor | None = None,
     ) -> None:
+        """gemma_norm: (1 + w) norm; q_head_stride: Q head stride (0 = dense); k_out: K."""
         if kv_cache_dtype.startswith("fp8"):
             key_cache = key_cache.view(current_platform.fp8_dtype())
             value_cache = value_cache.view(current_platform.fp8_dtype())
@@ -3877,6 +3901,10 @@ class rocm_aiter_ops:
             block_size=key_cache.shape[1],
             x=16 // key_cache.element_size(),
             rotary_dim=rotary_dim,
+            use_shuffle_layout=use_shuffle_layout,
+            gemma_norm=gemma_norm,
+            q_head_stride=q_head_stride,
+            k_out=k_out,
         )
 
     @staticmethod

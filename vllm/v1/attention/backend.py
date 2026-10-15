@@ -995,8 +995,11 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
         rotary_dim: int,
         kv_cache: torch.Tensor,
         layer_slot_mapping: torch.Tensor,
+        gemma_norm: bool = False,
+        q_head_stride: int = 0,
+        k_out: torch.Tensor | None = None,
     ):
-        """Apply QK-norm and MRoPE, then write K/V to the cache."""
+        """Apply QK-norm and MRoPE, write K/V to the cache; k_out gets the rotated K."""
         raise NotImplementedError
 
     def do_rope_and_kv_cache_update(
