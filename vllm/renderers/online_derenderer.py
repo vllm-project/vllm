@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Sequence
+from functools import cached_property
 from typing import Any
 
 from vllm.config import ModelConfig
-from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
     ToolCall,
@@ -38,10 +38,12 @@ from vllm.entrypoints.serve.engine.protocol import UsageInfo
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.entrypoints.serve.utils.tool_calls_utils import (
     maybe_filter_parallel_tool_calls,
+    resolve_finish_reason,
 )
 from vllm.logger import init_logger
 from vllm.parser import Parser, ParserManager
 from vllm.renderers import BaseRenderer
+from vllm.renderers.chat_utils import ChatTemplateContentFormatOption
 from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.detokenizer_utils import (
     convert_prompt_ids_to_tokens,
@@ -69,7 +71,7 @@ class OnlineDerenderer:
         exclude_tools_when_tool_choice_none: bool = False,
         tool_parser: str | None = None,
         reasoning_parser: str | None = None,
-        tool_strict_level: str = "auto",
+        tool_strict_level: str | None = None,
         default_chat_template_kwargs: dict[str, Any] | None = None,
         log_error_stack: bool = False,
     ) -> None:
@@ -129,6 +131,43 @@ class OnlineDerenderer:
             generate_response, chat_request, prompt_token_ids
         )
 
+    @cached_property
+    def _model_eos_token_ids(self) -> frozenset[int]:
+        """EOS ids the engine stops on: the tokenizer's and generation_config's."""
+        eos_ids: set[int] = set()
+        if (eos_token_id := self.renderer.get_eos_token_id()) is not None:
+            eos_ids.add(eos_token_id)
+        config_eos = self.model_config.try_get_generation_config().get("eos_token_id")
+        if config_eos is not None:
+            eos_ids.update([config_eos] if isinstance(config_eos, int) else config_eos)
+        return frozenset(eos_ids)
+
+    def _text_token_ids(
+        self,
+        token_ids: list[int],
+        finish_reason: str | None,
+        stop_reason: int | str | None,
+        request: ChatCompletionRequest | None,
+    ) -> list[int]:
+        """The ids whose text the engine returns. Like its detokenizer, leave
+        out the token that stopped generation (EOS when `stop_reason` is None,
+        a `stop_token_ids` entry when it is an int) unless
+        `include_stop_str_in_output` is set. The last-id check guards against
+        `finish_reason` defaulting to "stop" when the client sends neither."""
+        if (
+            finish_reason != "stop"
+            or isinstance(stop_reason, str)
+            or not token_ids
+            or (request is not None and request.include_stop_str_in_output)
+        ):
+            return token_ids
+        last = token_ids[-1]
+        if stop_reason is None:
+            stopped = last in self._model_eos_token_ids
+        else:
+            stopped = last == stop_reason
+        return token_ids[:-1] if stopped else token_ids
+
     def _derender_chat(
         self,
         generate_response: GenerateTokensResponse,
@@ -160,6 +199,11 @@ class OnlineDerenderer:
             else {}
         )
 
+        return_token_ids = (
+            chat_request is not None
+            and chat_request.return_token_ids
+            and (not has_parser or chat_request.include_reasoning)
+        )
         for choice in generate_response.choices:
             if not choice.token_ids:
                 raise ValueError(f"choice {choice.index} has empty or null token_ids")
@@ -176,7 +220,12 @@ class OnlineDerenderer:
             # (default True when no request was given).
             decoded_text, _ = self._detokenize_delta(
                 tokenizer,
-                choice.token_ids,
+                self._text_token_ids(
+                    choice.token_ids,
+                    choice.finish_reason,
+                    choice.stop_reason,
+                    chat_request,
+                ),
                 seed_state,
                 skip_special_tokens=skip_special,
                 spaces_between_special_tokens=spaces_between,
@@ -200,7 +249,11 @@ class OnlineDerenderer:
                     index=choice.index,
                     message=message,
                     logprobs=resolved_logprobs,
-                    finish_reason=choice.finish_reason,
+                    finish_reason=resolve_finish_reason(
+                        choice.finish_reason, chat_request, bool(message.tool_calls)
+                    ),
+                    stop_reason=choice.stop_reason,
+                    token_ids=choice.token_ids if return_token_ids else None,
                 )
             )
 
@@ -432,11 +485,14 @@ class OnlineDerenderer:
         stream_choices: list[ChatCompletionResponseStreamChoice] = []
         updated_state = state
 
+        return_token_ids = chat_request is not None and chat_request.return_token_ids
         for choice in generate_chunk.choices:
             delta_tids = choice.token_ids or []
             new_text, updated_state = await self._detokenize_delta_async(
                 tokenizer,
-                delta_tids,
+                self._text_token_ids(
+                    delta_tids, choice.finish_reason, choice.stop_reason, chat_request
+                ),
                 updated_state,
                 skip_special_tokens=skip_special,
                 spaces_between_special_tokens=spaces_between,
@@ -477,6 +533,8 @@ class OnlineDerenderer:
                     delta=delta,
                     logprobs=resolved_logprobs,
                     finish_reason=choice.finish_reason,
+                    stop_reason=choice.stop_reason,
+                    token_ids=choice.token_ids if return_token_ids else None,
                 )
             )
 
@@ -583,6 +641,10 @@ class OnlineDerenderer:
         tools_streamed = state.tools_streamed
         last_tool_call_ids = list(state.last_tool_call_ids)
 
+        return_token_ids = (
+            chat_request.return_token_ids and chat_request.include_reasoning
+        )
+
         # At most one choice: the caller (derender_chat_stream) already
         # rejects >1 before dispatching here. role_sent/tools_streamed/
         # output_token_ids below are updated for that single choice, not
@@ -600,7 +662,12 @@ class OnlineDerenderer:
                 # in this method's docstring.
                 text, detok_state = self._detokenize_delta(
                     tokenizer,
-                    delta_tids,
+                    self._text_token_ids(
+                        delta_tids,
+                        choice.finish_reason,
+                        choice.stop_reason,
+                        chat_request,
+                    ),
                     detok_state,
                     skip_special_tokens=skip_special,
                     spaces_between_special_tokens=spaces_between,
@@ -640,12 +707,6 @@ class OnlineDerenderer:
                     if tc.index < len(last_tool_call_ids):
                         # Pin: reuse the ID already recorded for this index
                         # rather than one a from scratch replay regenerated.
-                        # Real trigger not just defensive with
-                        # tool_choice="required",
-                        # extract_required_tool_call_streaming resets
-                        # function_name_returned to False whenever the
-                        # partial JSON transiently fails to parse which
-                        # re-emits id+name for the same index on replay.
                         tc.id = last_tool_call_ids[tc.index]
                     else:
                         last_tool_call_ids.append(tc.id)
@@ -656,16 +717,16 @@ class OnlineDerenderer:
 
             finish_reason = choice.finish_reason
             if finish_reason is not None:
-                is_named_tool_choice = (
-                    type(chat_request.tool_choice) is ChatCompletionNamedToolChoiceParam
+                finish_reason = resolve_finish_reason(
+                    finish_reason, chat_request, tools_streamed
                 )
-                if tools_streamed and not is_named_tool_choice:
-                    finish_reason = "tool_calls"
 
             stream_choice = ChatCompletionResponseStreamChoice(
                 index=choice.index,
                 delta=delta_message,
                 finish_reason=finish_reason,
+                stop_reason=choice.stop_reason,
+                token_ids=choice.token_ids if return_token_ids else None,
             )
             stream_choices.append(
                 maybe_filter_parallel_tool_calls(stream_choice, chat_request)
@@ -770,6 +831,7 @@ class OnlineDerenderer:
                         index=index,
                         text=decoded_text,
                         finish_reason=choice.finish_reason,
+                        stop_reason=choice.stop_reason,
                         logprobs=completion_logprobs,
                     )
                 )
@@ -871,6 +933,7 @@ class OnlineDerenderer:
                     text=new_text,
                     logprobs=completion_logprobs,
                     finish_reason=choice.finish_reason,
+                    stop_reason=choice.stop_reason,
                 )
             )
 

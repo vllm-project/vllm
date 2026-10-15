@@ -19,6 +19,13 @@ if current_platform.is_rocm():
         ("TritonAttn", "FULL", True),
         ("TritonAttn", "FULL_AND_PIECEWISE", True),
     ]
+elif current_platform.is_xpu():
+    combo_cases_1 = [
+        ("FA2", "FULL", True),
+        ("FA2", "FULL_AND_PIECEWISE", True),
+        ("TritonAttn", "FULL", True),
+        ("TritonAttn", "FULL_AND_PIECEWISE", True),
+    ]
 else:
     combo_cases_1 = [
         ("FA3", "FULL", True),
