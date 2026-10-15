@@ -102,8 +102,8 @@ class Mamba2Model(nn.Module):
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         lora_config = vllm_config.lora_config
-        is_lora_enabled = bool(lora_config)
-        assert not is_lora_enabled
+        if lora_config:
+            raise ValueError("enable_lora=True is not supported for Mamba2.")
 
         self.config = config
 
