@@ -102,10 +102,11 @@ class _OffloadEventMetadata:
 class OffloadingEventsTracker:
     """Tracks offloaded chunks' KV event payloads from store to eviction.
 
-    The scheduler calls :meth:`record_store` from ``_build_store_jobs`` and
-    :meth:`record_lookup` for allocated primary-tier hits while the ``Request`` is
-    available. Unallocated and missing lookups add no state. Entries remain until
-    the final observed residency removal or :meth:`reset`.
+    The store trigger handlers call :meth:`record_store` and the scheduler calls
+    :meth:`record_lookup` for ready primary-tier hits while the ``Request`` is
+    available. Deferred and missing lookups add no state. Under the connector's
+    supported success-only transfer model, entries remain until the final
+    observed residency removal or :meth:`reset`.
     """
 
     def __init__(self, config: OffloadingKVEventsConfig):
