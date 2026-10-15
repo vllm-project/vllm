@@ -107,6 +107,7 @@ For checkpoint revision `5254448`, verify that the checkpoint index places the
 Engram tables in the two filenames below before enabling these settings:
 
 ```bash
+export VLLM_USE_RUST_FRONTEND=0
 export RUNAI_STREAMER_PARTITION_POLICY=spans
 export VLLM_RUNAI_CPU_WEIGHT_FILES=model-00047-of-00048.safetensors,model-00048-of-00048.safetensors
 export VLLM_RUNAI_CPU_MEMORY_LIMIT=107374182400
