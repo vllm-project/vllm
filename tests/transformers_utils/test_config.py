@@ -27,6 +27,21 @@ from vllm.transformers_utils.config import (
 from vllm.transformers_utils.configs.mistral import adapt_config_dict
 
 
+@pytest.mark.parametrize("tie_word_embeddings", [None, False, True])
+def test_midashenglm_preserves_decoder_weight_tying(tie_word_embeddings):
+    from vllm.transformers_utils.configs.midashenglm import MiDashengLMConfig
+
+    text_config = {"vocab_size": 152064}
+    if tie_word_embeddings is not None:
+        text_config["tie_word_embeddings"] = tie_word_embeddings
+
+    config = MiDashengLMConfig(text_config=text_config)
+
+    # Published checkpoints omit the flag and have independent decoder weights.
+    expected = False if tie_word_embeddings is None else tie_word_embeddings
+    assert config.text_config.tie_word_embeddings is expected
+
+
 @pytest.mark.parametrize("layout", ["mixed", "flat"])
 def test_gemma4_dspark_rope_config_preserves_parameters(tmp_path, layout):
     """Remove redundant shared entries while preserving per-layer and flat RoPE."""
