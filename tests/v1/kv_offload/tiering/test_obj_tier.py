@@ -106,6 +106,7 @@ def make_job(
     job_id: int,
     keys: list[OffloadKey],
     chunk_ids: list[int] | None = None,
+    req_context: ReqContext = _CTX,
 ) -> TransferJob:
     if chunk_ids is None:
         chunk_ids = list(range(len(keys)))
@@ -114,7 +115,7 @@ def make_job(
         keys=keys,
         chunk_ids=np.array(chunk_ids, dtype=np.int32),
         is_promotion=False,
-        req_context=_CTX,
+        req_context=req_context,
     )
 
 
@@ -355,7 +356,7 @@ class TestMockObjTierBasic:
 
         # The promotion the HIT triggered fails.
         self.agent.check_xfer_state = lambda h: "ERR"
-        self.tier.submit_load(make_job(2, [key(1)], [0]))
+        self.tier.submit_load(make_job(2, [key(1)], [0], req_context=ctx))
         results = drain(self.tier)
         assert len(results) == 1 and not results[0].success
 
