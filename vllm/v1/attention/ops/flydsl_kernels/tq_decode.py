@@ -25,14 +25,10 @@
 #                                           query → 1 buffer_store of 8 bytes
 #                                           per chunk per lane
 
-from __future__ import annotations
-
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.expr import arith, const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import T
-from flydsl.runtime.device import get_rocm_arch as get_hip_arch
-from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 
 from vllm.v1.attention.ops.flydsl_kernels.buffer_utils import (
     buffer_view,
@@ -73,14 +69,18 @@ QK_K_CHUNKS = HEAD_SIZE // MFMA_K_BF16_QK  # 4
 PV_N_CHUNKS = HEAD_SIZE // MFMA_N  # 8
 
 # LDS regions
-CENTROID_LDS_BYTES = N_CENTROIDS * 4  # 64
 Q_LDS_BYTES = QUERY_GROUP_SIZE * HEAD_SIZE * 2  # 4096
 KV_TILE_LDS_BYTES = TILE_SIZE * HEAD_SIZE * 2  # 4096
 
 LOG2E = 1.4426950408889634
 NEG_INF_VAL = float("-inf")
 
-allocator = None
+
+@fx.struct
+class SharedStorage:
+    cent: fx.Array[fx.Float32, N_CENTROIDS]
+    q: fx.Array[fx.Int32, Q_LDS_BYTES // 4, 16]
+    kv: fx.Array[fx.Int64, KV_TILE_LDS_BYTES // 8, 16]
 
 
 def build_tq_decode_module(
@@ -141,9 +141,6 @@ def build_tq_decode_module(
     _BS = int(kv_block_size)
     _TILES_PER_BLOCK = _BS // TILE_SIZE  # 1 for BS=16, 2 for BS=32
 
-    global allocator
-    arch = get_hip_arch()
-
     if softmax_scale is None:
         softmax_scale = 1.0 / (HEAD_SIZE**0.5)
     _qk_scale = float(softmax_scale)
@@ -165,17 +162,6 @@ def build_tq_decode_module(
     _stride_out_seq = num_kv_heads * num_partitions * QG * HEAD_SIZE
     _stride_es_seq = num_kv_heads * num_partitions * QG
     _stride_ml_seq = _stride_es_seq
-
-    # --- LDS layout ---
-    # Legacy SmemAllocator kept: fx.SharedAllocator is bit-exact but ~18% slower
-    # on QG=8, BS=32 with TGPP > 1 (FlyDSL 0.3.4.1).
-    allocator = SmemAllocator(None, arch=arch, global_sym_name="tq_smem")
-    centroid_off = 0
-    allocator.ptr = CENTROID_LDS_BYTES
-    q_off = allocator.ptr
-    allocator.ptr += Q_LDS_BYTES
-    kv_off = allocator.ptr
-    allocator.ptr += KV_TILE_LDS_BYTES
 
     @flyc.kernel
     def tq_decode_kernel(
@@ -210,11 +196,12 @@ def build_tq_decode_module(
         ml_buf = buffer_view(max_logits_ptr, fx.Float32)
 
         # ---- LDS pointers -----------------------------------------------
-        base = allocator.get_base()
-        cent_lds = SmemPtr(base, centroid_off, T.f32, shape=(N_CENTROIDS,))
-        q_lds_i32 = SmemPtr(base, q_off, T.i32, shape=(Q_LDS_BYTES // 4,)).get()
-        q_lds_i64 = SmemPtr(base, q_off, T.i64, shape=(Q_LDS_BYTES // 8,)).get()
-        kv_lds_i64 = SmemPtr(base, kv_off, T.i64, shape=(KV_TILE_LDS_BYTES // 8,)).get()
+        lds = fx.SharedAllocator().allocate(SharedStorage).peek()
+        cent_lds = lds.cent
+        q_lds_i32 = lds.q.ptr
+        q_lds_i64 = fx.recast_iter(fx.Int64, q_lds_i32)
+        kv_lds_i64 = lds.kv.ptr
+        kv_lds_u8 = fx.recast_iter(fx.Uint8, kv_lds_i64)
 
         # ---- Constants ---------------------------------------------------
         NEG_INF = fx.Float32(NEG_INF_VAL)
@@ -228,7 +215,7 @@ def build_tq_decode_module(
         # ===== STEP A: Load centroids → LDS (cooperative, race-safe) =====
         c_idx_safe = lane & (N_CENTROIDS - 1)
         c_val = fx.Float32(cent_buf[c_idx_safe])
-        cent_lds.store(c_val, [fx.Index(c_idx_safe)])
+        cent_lds[c_idx_safe] = c_val
         gpu.barrier()
 
         # ===== STEP B: Load pre-rotated q_rot → row-major LDS ============
@@ -251,7 +238,7 @@ def build_tq_decode_module(
                 q_off_elem = (row < QG).select(q_off_elem, col_elem)
             q_v = load_vec(q_buf, q_off_elem // 2, 4)
             q_lds_byte = row * (HEAD_SIZE * 2) + col_elem * 2
-            fx.Vector(q_v).store(q_lds_i32, [fx.Index(q_lds_byte // 4)])
+            (q_lds_i32 + q_lds_byte // 4).store(q_v)
         gpu.barrier()
 
         # ===== STEP C: Pre-load Q operands for QK_K_CHUNKS = 4 K-chunks ===
@@ -265,7 +252,7 @@ def build_tq_decode_module(
         q_chunks = []
         for chk in range_constexpr(QK_K_CHUNKS):
             q_idx_i64 = mfma_row * (HEAD_SIZE * 2 // 8) + chk * 8 + mfma_col_grp * 2
-            qv = fx.Vector.load(T.vec(2, T.i64), q_lds_i64, [fx.Index(q_idx_i64)])
+            qv = fx.Vector((q_lds_i64 + q_idx_i64).load(T.vec(2, T.i64)))
             q_chunks.append(qv.bitcast(fx.BFloat16))
 
         # ===== STEP D: Online softmax + PV state =========================
@@ -372,12 +359,10 @@ def build_tq_decode_module(
                     bf16_elems = []
                     for n in range_constexpr(8):
                         nibble = (k_words[w] >> (n * 4)) & 0xF
-                        cent_f32 = fx.Float32(cent_lds.load([fx.Index(nibble)]))
+                        cent_f32 = cent_lds[nibble]
                         bf16_elems.append((cent_f32 * knorm_f32).to(fx.BFloat16))
                     v_bf16 = fx.Vector.from_elements(bf16_elems, dtype=fx.BFloat16)
-                    v_bf16.bitcast(fx.Int64).store(
-                        kv_lds_i64, [fx.Index(chunk_kreg + w * 2)]
-                    )
+                    (kv_lds_i64 + (chunk_kreg + w * 2)).store(v_bf16.bitcast(fx.Int64))
                 gpu.barrier()
 
                 # QK MFMA (CDNA4 wide-K): A=K[token, head_dim], B=Q (= Q^T).
@@ -388,9 +373,7 @@ def build_tq_decode_module(
                     k_idx_i64 = (
                         mfma_row * (HEAD_SIZE * 2 // 8) + chk * 8 + mfma_col_grp * 2
                     )
-                    kv_load = fx.Vector.load(
-                        T.vec(2, T.i64), kv_lds_i64, [fx.Index(k_idx_i64)]
-                    )
+                    kv_load = fx.Vector((kv_lds_i64 + k_idx_i64).load(T.vec(2, T.i64)))
                     k_op = kv_load.bitcast(fx.BFloat16)
                     qk_acc = mma(qk_atom, qk_acc, k_op, q_chunks[chk])
 
@@ -458,9 +441,7 @@ def build_tq_decode_module(
                         bf16_elems.append(elem_f32.to(fx.BFloat16))
                     v_bf16 = fx.Vector.from_elements(bf16_elems, dtype=fx.BFloat16)
                     v_lds_i64_idx = (v_lds_elem_base + w * 8) // 4
-                    v_bf16.bitcast(fx.Int64).store(
-                        kv_lds_i64, [fx.Index(v_lds_i64_idx)]
-                    )
+                    (kv_lds_i64 + v_lds_i64_idx).store(v_bf16.bitcast(fx.Int64))
                 # ds_read_tr16_b64 reads bytes written by other lanes, which
                 # the per-lane waitcnt tracking cannot see. sched_barrier(0)
                 # keeps the scheduler from hoisting those reads above these
@@ -486,18 +467,12 @@ def build_tq_decode_module(
                 # Per-lane address: token_idx = lane // 4 (covers 0..15 across
                 # all four 16-lane MFMA blocks), hd_sub = (lane % 4)*4 selects
                 # the 4-element column window inside the h*16 chunk.
-                # Total LDS byte offset = kv_off + token_idx*HEAD_SIZE*2
-                #                        + (h*16 + hd_sub)*2
+                # KV-tile byte offset = token_idx*HEAD_SIZE*2 + (h*16 + hd_sub)*2
                 token_idx = lane >> 2
                 hd_sub = (lane & 3) * 4
-                lds_u8_ptr = fx.PointerType.get(
-                    fx.Uint8.ir_type, fx.AddressSpace.Shared, 1
-                )
-                v_lane_byte = kv_off + token_idx * (HEAD_SIZE * 2) + hd_sub * 2
+                v_lane_byte = token_idx * (HEAD_SIZE * 2) + hd_sub * 2
                 for h in range_constexpr(PV_N_CHUNKS):
-                    v_ptr = fx.to_llvm_ptr(
-                        fx.inttoptr(lds_u8_ptr, fx.Int64(v_lane_byte + h * 32))
-                    )
+                    v_ptr = fx.to_llvm_ptr(kv_lds_u8 + (v_lane_byte + h * 32))
                     v_op_raw = rocdl.ds_read_tr16_b64(
                         T.vec(4, T.i16),
                         v_ptr,

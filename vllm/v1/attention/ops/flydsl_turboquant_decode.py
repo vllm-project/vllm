@@ -42,14 +42,12 @@ _FLYDSL_AVAILABLE: bool | None = None
 _TQ_MOD: Any = None  # kernels.tq_decode module
 _FLYC: Any = None  # flydsl.compiler
 _FX: Any = None  # flydsl.expr
-_CC: Any = None  # CompilationContext
-_IR: Any = None
 
 
 def is_flydsl_available() -> bool:
     """Return True iff on gfx950 and FlyDSL imports + kernel module load."""
     global _FLYDSL_AVAILABLE, _TQ_MOD
-    global _FLYC, _FX, _CC, _IR
+    global _FLYC, _FX
     if _FLYDSL_AVAILABLE is not None:
         return _FLYDSL_AVAILABLE
     try:
@@ -61,8 +59,6 @@ def is_flydsl_available() -> bool:
             return _FLYDSL_AVAILABLE
         import flydsl.compiler as flyc  # noqa: F401
         import flydsl.expr as fx  # noqa: F401
-        from flydsl._mlir import ir
-        from flydsl.compiler.kernel_function import CompilationContext
 
         # Kernel is vendored in-tree (ships with vLLM); FlyDSL provides only
         # the compiler/runtime framework (imported above).
@@ -70,8 +66,6 @@ def is_flydsl_available() -> bool:
 
         _FLYC = flyc
         _FX = fx
-        _CC = CompilationContext
-        _IR = ir
         _TQ_MOD = tq_mod
         _FLYDSL_AVAILABLE = True
         logger.info_once("FlyDSL TQ decode launcher: available")
@@ -348,13 +342,10 @@ def _get_kernel(
         kv_block_size=int(kv_block_size),
         tile_groups_per_partition=int(tile_groups_per_partition),
     )
-    al = kmod.allocator
     block_threads = kmod.BLOCK_THREADS
 
     flyc = _FLYC
     fx = _FX
-    CompilationContext = _CC
-    ir_mod = _IR
 
     @flyc.jit
     def _launch(
@@ -371,11 +362,6 @@ def _get_kernel(
         gz: fx.Int32,  # type: ignore[name-defined]
         stream: fx.Stream,  # type: ignore[name-defined]
     ):
-        # Re-finalize the LDS allocator for this launch (idempotent per build).
-        al.finalized = False
-        ctx = CompilationContext.get_current()
-        with ir_mod.InsertionPoint(ctx.gpu_module_body):
-            al.finalize()
         kfn(out, es, ml, q, kvc, cents, bt, sl).launch(
             grid=(gx, gy, gz),
             block=(block_threads, 1, 1),

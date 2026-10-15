@@ -262,10 +262,7 @@ def test_flydsl_matches_reference(num_seqs, seq_len, num_kv_heads, qg, kv_block_
 @pytest.mark.parametrize("num_kv_heads,qg", [(8, 8), (8, 16), (4, 6)])
 def test_flydsl_fp16_query(num_kv_heads, qg):
     """fp16 models: output keeps the query dtype and matches the reference."""
-    # A seq_len outside test_flydsl_matches_reference's grid gets a fresh
-    # kernel build: tq_decode's module-global SmemAllocator makes FlyDSL reject
-    # reusing a cached launcher once another shape has been built.
-    seq_len = 2048
+    seq_len = 1024
     centroids, q_bf16, kv_cache, block_table, seq_lens, k_ref, v_ref = _build_cache(
         4, num_kv_heads, seq_len, qg, 16
     )
