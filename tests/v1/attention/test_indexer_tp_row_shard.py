@@ -115,6 +115,26 @@ def test_row_shard_threshold_is_total_not_per_rank() -> None:
         assert indexer.balanced_prefill_row_shard(lens, lens, 4, tp_size) is not None
 
 
+def test_tp2_old_per_rank_window_stays_replicated() -> None:
+    """32K-64K total rows engaged on TP2 under the old per-rank floor
+    (16K rows/rank); the total floor now keeps them replicated — the
+    all_gatherv latency term is largest at small tp."""
+    window = torch.tensor([3 * indexer.MIN_TP_SHARD_TOTAL_ROWS // 4], dtype=torch.int32)
+    assert indexer.balanced_prefill_row_shard(window, window, 4, 2) is None
+
+
+def test_row_shard_threshold_env_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """VLLM_INDEXER_TP_SHARD_MIN_ROWS overrides the built-in floor."""
+    monkeypatch.setattr(indexer.envs, "VLLM_INDEXER_TP_SHARD_MIN_ROWS", 2_000_000)
+    lens = torch.tensor([indexer.MIN_TP_SHARD_TOTAL_ROWS], dtype=torch.int32)
+    assert indexer.balanced_prefill_row_shard(lens, lens, 4, 8) is None
+    monkeypatch.setattr(indexer.envs, "VLLM_INDEXER_TP_SHARD_MIN_ROWS", 1)
+    small = torch.tensor([8], dtype=torch.int32)
+    assert indexer.balanced_prefill_row_shard(small, small, 4, 8) is not None
+
+
 def test_row_sharding_gate_rejects_unsupported_configurations(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
