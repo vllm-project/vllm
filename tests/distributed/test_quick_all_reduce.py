@@ -217,7 +217,10 @@ def test_quick_allreduce_passes_dynamic_quant_level(
     monkeypatch: pytest.MonkeyPatch,
 ):
     quick_reduce = _make_quick_allreduce_for_test(quantization_min_size=2 * KB)
-    quick_reduce._ptr = object()
+    # Fake handle, set through monkeypatch so teardown removes it again before
+    # `QuickAllReduce.__del__` runs; otherwise `close()` would hand this object
+    # to the real `ops.qr_destroy`, which only accepts an int.
+    monkeypatch.setattr(quick_reduce, "_ptr", object(), raising=False)
     inp = torch.empty(KB // 2, dtype=torch.float16)
     called_quant_level = None
 
