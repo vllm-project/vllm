@@ -84,6 +84,7 @@ def test_mamba_prefill_checkpoint_valid(
 
 def _make_hybrid_kv_cache_manager(
     num_prefill_checkpoint_blocks: int = 0,
+    use_eagle: bool = True,
 ) -> KVCacheManager:
     config = KVCacheConfig(
         num_blocks=10000,
@@ -120,7 +121,7 @@ def _make_hybrid_kv_cache_manager(
         scheduler_block_size=MAMBA_BLOCK_SIZE,
         hash_block_size=ATTN_BLOCK_SIZE,
         enable_caching=True,
-        use_eagle=True,
+        use_eagle=use_eagle,
     )
 
 
@@ -132,6 +133,7 @@ def _split(
     partial_hit: bool = False,
     num_prefill_checkpoint_blocks: int = 0,
     max_num_scheduled_tokens: int = 16384,
+    num_prefill_lookahead: int = 0,
 ) -> int:
     """Call the real `Scheduler._mamba_block_aligned_split` on a stub self."""
     if use_eagle_block_drop is None:
@@ -140,6 +142,7 @@ def _split(
         block_size=MAMBA_BLOCK_SIZE,
         cache_config=SimpleNamespace(block_size=MAMBA_BLOCK_SIZE),
         use_eagle_block_drop=use_eagle_block_drop,
+        num_prefill_lookahead=num_prefill_lookahead,
         max_num_scheduled_tokens=max_num_scheduled_tokens,
         scheduler_config=SimpleNamespace(long_prefill_token_threshold=0),
         # `prefix_match_unit` finer than the block size (#46384).
@@ -391,4 +394,114 @@ def test_unaligned_resume_never_runs_past_its_block(
         assert aligned or (partial_hit and end == tail_stop), (
             f"intermediate chunk end {end} is neither block-aligned nor the "
             f"partial-tail stop ({tail_stop})"
+        )
+
+
+def _prefill_with_prefill_lookahead(
+    prompt_len: int,
+    lookahead: int,
+    budget: int,
+    use_eagle_block_drop: bool,
+) -> tuple[list[int], int]:
+    """Chunk a prefill the way `Scheduler.schedule()` does for multi-module MTP.
+
+    Every step runs the real `_mamba_block_aligned_split` and then the real
+    `_reserve_prefill_lookahead` on the step's budget, allocating through a real
+    hybrid `KVCacheManager`. Returns the chunk ends and the number of cached
+    Mamba slots, each checked to hold the state its hash claims.
+    """
+    manager = _make_hybrid_kv_cache_manager(use_eagle=use_eagle_block_drop)
+    mamba_manager = manager.coordinator.single_type_managers[MAMBA_GROUP_ID]
+    (request,) = create_requests(1, num_tokens=prompt_len, block_size=ATTN_BLOCK_SIZE)
+    sched = SimpleNamespace(
+        num_prefill_lookahead=lookahead,
+        need_mamba_block_aligned_split=True,
+        cache_config=SimpleNamespace(block_size=MAMBA_BLOCK_SIZE),
+    )
+    ends: list[int] = []
+    state_at: dict[int, int] = {}
+    # Bounded: with a constant budget a stalled prefill never recovers.
+    for _ in range(2 * cdiv(prompt_len, min(budget, MAMBA_BLOCK_SIZE)) + 2):
+        computed = request.num_computed_tokens
+        if computed >= prompt_len:
+            break
+        num_new = _split(
+            request,
+            min(prompt_len - computed, budget),
+            use_eagle_block_drop=use_eagle_block_drop,
+            max_num_scheduled_tokens=budget,
+            num_prefill_lookahead=lookahead,
+        )
+        num_new = Scheduler._reserve_prefill_lookahead(
+            sched, request, computed, num_new
+        )
+        if num_new == 0:
+            continue
+        assert (
+            manager.allocate_slots(request, num_new, num_lookahead_tokens=NUM_SPEC)
+            is not None
+        )
+        request.num_computed_tokens = computed + num_new
+        ends.append(request.num_computed_tokens)
+        blocks = mamba_manager.req_to_blocks[request.request_id]
+        running = cdiv(request.num_computed_tokens, MAMBA_BLOCK_SIZE) - 1
+        state_at[blocks[running].block_id] = request.num_computed_tokens
+    return ends, _count_cached_boundary_states(manager, request, state_at)
+
+
+@pytest.mark.parametrize("use_eagle_block_drop", [False, True])
+@pytest.mark.parametrize("budget_blocks", [4.0, 1.0, 0.5])
+@pytest.mark.parametrize("num_full_blocks", [1, 2])
+@pytest.mark.parametrize("tail", ["one", "window_edge", "past_window"])
+@pytest.mark.parametrize("lookahead", [2, 3, 5])
+@pytest.mark.parametrize("block_size", [64, 1600])
+def test_mamba_split_respects_multi_module_mtp_prefill_lookahead(
+    monkeypatch: pytest.MonkeyPatch,
+    block_size: int,
+    lookahead: int,
+    tail: str,
+    num_full_blocks: int,
+    budget_blocks: float,
+    use_eagle_block_drop: bool,
+) -> None:
+    """#61762: the Mamba split and the multi-module MTP lookahead must agree.
+
+    `_reserve_prefill_lookahead` shortened a chunk ending within
+    `num_prefill_lookahead` of the prompt end. Applied to a Mamba-aligned end,
+    that left the request just short of the boundary, and the next step (start
+    mid-block, stop at the boundary) was shortened to zero tokens, forever.
+    """
+    monkeypatch.setattr(sys.modules[__name__], "MAMBA_BLOCK_SIZE", block_size)
+    # Tokens past the last full block: inside the window, at its edge, past it.
+    tail_len = {"one": 1, "window_edge": lookahead - 1, "past_window": lookahead}[tail]
+    prompt_len = num_full_blocks * block_size + tail_len
+    budget = int(block_size * budget_blocks)
+
+    ends, _ = _prefill_with_prefill_lookahead(
+        prompt_len, lookahead, budget, use_eagle_block_drop
+    )
+
+    assert ends and ends[-1] == prompt_len, f"prefill stalled at {ends}"
+    if budget >= block_size:
+        assert all(end % block_size == 0 for end in ends[:-1]), ends
+    # A chunk ends inside the lookahead window only when no block boundary
+    # before the window can be reached and the prompt cannot be finished.
+    in_window = [end for end in ends[:-1] if prompt_len - lookahead < end]
+    assert all(end % block_size == 0 for end in in_window), ends
+    if budget >= prompt_len:
+        assert not in_window, ends
+
+
+def test_mamba_split_lookahead_window_is_noop_without_multi_module_mtp() -> None:
+    """EAGLE-family drafters (lookahead 1) and no drafter keep today's split."""
+    (request,) = create_requests(1, num_tokens=3201, block_size=ATTN_BLOCK_SIZE)
+    for lookahead in (0, 1):
+        assert (
+            _split(
+                request,
+                request.num_tokens,
+                use_eagle_block_drop=False,
+                num_prefill_lookahead=lookahead,
+            )
+            == 2 * MAMBA_BLOCK_SIZE
         )
