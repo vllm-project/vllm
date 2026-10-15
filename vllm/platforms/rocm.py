@@ -407,7 +407,8 @@ if (
 
 # RCCL 2.30's RAS thread can abort the process at exit ("terminate called
 # without an active exception") when its shutdown notification fails.
-os.environ.setdefault("NCCL_RAS_ENABLE", "0")
+if torch.version.hip:
+    os.environ.setdefault("NCCL_RAS_ENABLE", "0")
 
 
 @cache
