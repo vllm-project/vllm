@@ -106,7 +106,6 @@ def run_mixed_prefill_decode_warmup(
     prefill_token_ids = list(range(prefill_len))
 
     kv_cache_groups = model_runner.kv_cache_config.kv_cache_groups
-    num_kv_cache_groups = len(kv_cache_groups)
     block_count = _warmup_block_counter(model_runner)
     kv_cache_specs = [g.kv_cache_spec for g in kv_cache_groups]
     decode_prefill_block_counts = [
@@ -166,7 +165,6 @@ def run_mixed_prefill_decode_warmup(
         decode_req_id: decode_prompt_len,
     }
     decode_prefill_output.total_num_scheduled_tokens = decode_prompt_len
-    decode_prefill_output.num_common_prefix_blocks = [0] * num_kv_cache_groups
 
     decode_new_blocks = tuple(_alloc_blocks(n) for n in decode_block_deltas)
     cached_decode_req = CachedRequestData.make_empty()
@@ -198,7 +196,6 @@ def run_mixed_prefill_decode_warmup(
         prefill_req_id: prefill_len,
     }
     mixed_output.total_num_scheduled_tokens = num_tokens
-    mixed_output.num_common_prefix_blocks = [0] * num_kv_cache_groups
 
     cleanup_output = SchedulerOutput.make_empty()
     cleanup_output.finished_req_ids = {decode_req_id, prefill_req_id}
@@ -241,14 +238,14 @@ def warmup_kernels(
         rejection_sampler.enable_adaptive_verification = False
     try:
         _warmup_kernels(model_runner, worker_execute_model, worker_sample_tokens)
-        if model_runner.num_speculative_steps > 0 and not model_runner.is_pooling_model:
-            # Requests without logits processing verify drafts on the model's
-            # logits dtype rather than FP32, which Triton compiles separately.
+        if rejection_sampler is not None:
+            # Greedy batches skip logits processing, so rejection kernels
+            # also see model-dtype logits instead of FP32.
             _warmup_kernels(
                 model_runner,
                 worker_execute_model,
                 worker_sample_tokens,
-                sampling_params=SamplingParams(temperature=0.0),
+                greedy=True,
                 max_num_reqs=1,
             )
     finally:
@@ -262,7 +259,7 @@ def _warmup_kernels(
     model_runner: GPUModelRunner,
     worker_execute_model: Callable[[SchedulerOutput], Any],
     worker_sample_tokens: Callable[[GrammarOutput | None], Any],
-    sampling_params: SamplingParams | None = None,
+    greedy: bool = False,
     max_num_reqs: int | None = None,
 ) -> None:
     if model_runner.vllm_config.is_mm_encoder_only:
@@ -284,7 +281,6 @@ def _warmup_kernels(
     decode_len = prompt_len + num_decode_steps * decode_query_len
 
     kv_cache_groups = model_runner.kv_cache_config.kv_cache_groups
-    num_kv_cache_groups = len(kv_cache_groups)
 
     # Encoder-decoder models: give each warmup request a dummy encoder input so
     # cross-attention warms up over a realistic, non-empty key sequence.
@@ -338,7 +334,11 @@ def _warmup_kernels(
         pooling_params = PoolingParams(task=pooling_task)
         pooling_params.verify(model_runner.model_config)
     else:
-        sampling_params = sampling_params or SamplingParams.for_sampler_warmup()
+        sampling_params = (
+            SamplingParams(temperature=0)
+            if greedy
+            else SamplingParams.for_sampler_warmup()
+        )
         pooling_params = None
 
     # Assign distinct block IDs per request per group. 0 null block, start from 1.
@@ -374,7 +374,6 @@ def _warmup_kernels(
     prefill_output.scheduled_new_reqs = new_reqs
     prefill_output.num_scheduled_tokens = {rid: prompt_len for rid in req_ids}
     prefill_output.total_num_scheduled_tokens = prompt_len * num_reqs
-    prefill_output.num_common_prefix_blocks = [0] * num_kv_cache_groups
 
     # Disable KV connector for warmup run.
     model_runner.kv_connector.set_disabled(True)
@@ -437,7 +436,6 @@ def _warmup_kernels(
             decode_output.total_num_scheduled_tokens = sum(
                 step_num_scheduled_tokens.values()
             )
-            decode_output.num_common_prefix_blocks = [0] * num_kv_cache_groups
 
             worker_execute_model(decode_output)
             worker_sample_tokens(None)
@@ -478,7 +476,5 @@ def _warmup_kernels(
     worker_execute_model(cleanup_output)
     model_runner.kv_connector.set_disabled(False)
     if model_runner.kv_block_zeroer is not None:
-        model_runner.kv_block_zeroer.zero_block_ids(
-            [0], [[0] for _ in range(num_kv_cache_groups)]
-        )
+        model_runner.kv_block_zeroer.zero_block_ids([0], [[0] for _ in kv_cache_groups])
     torch.accelerator.synchronize()

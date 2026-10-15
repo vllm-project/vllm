@@ -272,9 +272,6 @@ class SchedulerOutput:
     # E.g., if a request has [0, 1], it could mean the vision encoder needs
     # to process that the request's 0-th and 1-th images in the current step.
     scheduled_encoder_inputs: dict[str, list[int]]
-    # Number of common prefix blocks for all requests in each KV cache group.
-    # This can be used for cascade attention.
-    num_common_prefix_blocks: list[int]
 
     # Request IDs that are finished in between the previous and the current
     # steps. This is used to notify the workers about the finished requests
@@ -341,6 +338,10 @@ class SchedulerOutput:
     # Number of spec tokens to schedule for the next step.
     num_spec_tokens_to_schedule: int = 0
 
+    # Deprecated: cascade attention has been removed, so this is always empty.
+    # Kept for out-of-tree schedulers and workers.
+    num_common_prefix_blocks: list[int] = field(default_factory=list)
+
     @classmethod
     def make_empty(cls) -> "SchedulerOutput":
         return cls(
@@ -350,7 +351,6 @@ class SchedulerOutput:
             total_num_scheduled_tokens=0,
             scheduled_spec_decode_tokens={},
             scheduled_encoder_inputs={},
-            num_common_prefix_blocks=[],
             finished_req_ids=set(),
             free_encoder_mm_hashes=[],
         )

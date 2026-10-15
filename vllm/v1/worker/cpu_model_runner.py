@@ -32,7 +32,6 @@ class CPUModelRunner(GPUModelRunner):
         # Note: speculative decoding is now supported on CPU with C++ native impls
 
         self.use_cuda_graph = False
-        self.cascade_attn_enabled = False
 
         self._postprocess_tensors()
 
@@ -108,9 +107,6 @@ class CPUModelRunner(GPUModelRunner):
                 logger.info("EAGLE drafter KV cache initialized for CPU backend")
             elif self.speculative_config.uses_draft_model():
                 logger.info("Draft model KV cache initialized for CPU backend")
-
-    def _init_device_properties(self) -> None:
-        pass
 
     def _sync_device(self) -> None:
         pass
