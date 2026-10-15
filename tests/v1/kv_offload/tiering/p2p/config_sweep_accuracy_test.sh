@@ -28,7 +28,8 @@ tp_configs=(
   "P2P_MODE=p2p MODEL_NAMES=${DENSE_MODEL}"
   "P2P_MODE=pd  CANONICAL_LAYOUT=1 PREFILLER_TP_SIZE=1 DECODER_TP_SIZE=2 MODEL_NAMES=${DENSE_MODEL}"
   "P2P_MODE=p2p CANONICAL_LAYOUT=1 PREFILLER_TP_SIZE=2 DECODER_TP_SIZE=1 MODEL_NAMES=${DENSE_MODEL}"
-  # Direct layout with mixed TP must fall back to recompute, never pair.
+  # Direct layout with mixed TP must fall back to recompute until that layout
+  # is byte-portable across TP; flip to a transfer check once it is.
   "P2P_MODE=pd  EXPECT_TRANSFER=0 PREFILLER_TP_SIZE=1 DECODER_TP_SIZE=2 MODEL_NAMES=${DENSE_MODEL}"
   "P2P_MODE=pd  NUM_PREFILL_INSTANCES=2 NUM_DECODE_INSTANCES=2 GPU_MEMORY_UTILIZATION=0.4 MODEL_NAMES=${DENSE_MODEL}"
 )
