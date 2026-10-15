@@ -6,6 +6,7 @@ from fastapi import Request
 
 from vllm.entrypoints.anthropic.protocol import AnthropicMessagesRequest
 from vllm.entrypoints.anthropic.serving import AnthropicServingMessages
+from vllm.entrypoints.generate.base.protocol import MMPayload
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.openai.models.serving import (
@@ -169,7 +170,7 @@ class ServingRender(BaseServing):
             request_id=request_id,
             token_ids=token_ids,
             features=self._extract_mm_features(
-                engine_input, include_mm_kwargs=request.return_mm_kwargs
+                engine_input, mm_payload=request.mm_payload
             ),
             sampling_params=params,
             kv_transfer_params=kv_transfer_params,
@@ -198,7 +199,7 @@ class ServingRender(BaseServing):
         chat_req = AnthropicServingMessages.to_chat_completion_request(
             request, merge_inline_system=self._merge_inline_system
         )
-        chat_req.return_mm_kwargs = request.return_mm_kwargs
+        chat_req.mm_payload = request.mm_payload
         return await self.render_chat_request(chat_req, raw_request)
 
     async def render_completion_request(
@@ -257,7 +258,7 @@ class ServingRender(BaseServing):
                     request_id=request_id,
                     token_ids=token_ids,
                     features=self._extract_mm_features(
-                        engine_input, include_mm_kwargs=request.return_mm_kwargs
+                        engine_input, mm_payload=request.mm_payload
                     ),
                     sampling_params=params,
                     kv_transfer_params=kv_transfer_params,
@@ -322,7 +323,7 @@ class ServingRender(BaseServing):
             request_id=request.request_id,
             token_ids=list(token_ids),
             features=self._extract_mm_features(
-                engine_input, include_mm_kwargs=request.return_mm_kwargs
+                engine_input, mm_payload=request.mm_payload
             ),
             sampling_params=params,
             model=request.model,
@@ -375,10 +376,10 @@ class ServingRender(BaseServing):
         self,
         engine_input: EngineInput,
         *,
-        include_mm_kwargs: bool = True,
+        mm_payload: MMPayload = "tensors",
     ) -> MultiModalFeatures | None:
         return extract_mm_features(
             engine_input,
             metadata_fields_for=self._placeholder_metadata_fields,
-            include_mm_kwargs=include_mm_kwargs,
+            mm_payload=mm_payload,
         )
