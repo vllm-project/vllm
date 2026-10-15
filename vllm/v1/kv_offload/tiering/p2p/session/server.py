@@ -405,11 +405,14 @@ class ServerRole:
             self._finalize_outbound(kv_request_id, round_seq, success=False)
             return
         if result.local_idxs:
+            # _submit_transfer owns the round from here: on a failed
+            # submission it finalizes the round itself, so the finishing
+            # check below must not finalize it a second time.
             self._submit_transfer(kv_request_id, result, req, round_seq)
-        # Prefiller-first mode: finish_request may have run before
-        # fetch arrived. If so, finalize once we know what was
-        # demanded — fully satisfied → success, else early-fail.
-        if req.finishing and req.inflight == 0:
+        elif req.finishing and req.inflight == 0:
+            # Prefiller-first mode: finish_request may have run before
+            # fetch arrived. If so, finalize once we know what was
+            # demanded — fully satisfied → success, else early-fail.
             self._finalize_outbound(kv_request_id, round_seq)
 
     def on_abort_fetch(self, kv_request_id: str, round_seq: int = 0) -> None:
