@@ -7,6 +7,7 @@ from torch.nn.parameter import Parameter
 
 import vllm._custom_ops as ops
 import vllm.envs as envs
+from vllm.config import get_current_vllm_config_or_none
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.linear import (
@@ -30,7 +31,7 @@ class GateLinear(ReplicatedLinear):
        M<=32, model-specific shapes)
     3. cuteDSL ll_fp32w_gemm (SM90+, M<=32, bf16/fp32 in, fp32 out,
        any shape)
-    4. bf16x3 kernel (SM100 CuteDSL or SM90 Triton, bf16 in, fp32 weight)
+    4. bf16x3 CuteDSL kernel (SM90 or SM100, bf16 in, fp32 weight)
     5. ROCm bf16x3 router GEMM (gfx950, bf16 in, fp32 weight, fp32 out,
        M>=2048)
     6. cuBLAS bf16×bf16→fp32 (SM90+ + bf16 weight + fp32 out_dtype)
@@ -138,10 +139,8 @@ class GateLinear(ReplicatedLinear):
             and not bias
             and self.weight.dtype == torch.float32
             and current_platform.is_cuda()
-            and (
-                (is_blackwell and input_size % 8 == 0)
-                or (is_hopper and input_size % 64 == 0)
-            )
+            and (is_hopper or is_blackwell)
+            and input_size % 8 == 0
         )
 
         # Fused bf16 x bf16 -> fp32 GEMM eligibility. torch.mm's out_dtype
@@ -217,6 +216,23 @@ class GateLinear(ReplicatedLinear):
             )
 
         self._register_ll_fp32w_warmup()
+        if self.allow_bf16x3_router_gemm and is_hopper:
+            self._register_sm90_bf16x3_warmup()
+
+    def _register_sm90_bf16x3_warmup(self) -> None:
+        vllm_config = get_current_vllm_config_or_none()
+        if vllm_config is None:
+            return
+
+        from vllm.model_executor.layers.fused_moe.router.bf16x3_router_gemm_sm90 import (  # noqa: E501
+            _SM90_BF16X3_ROUTER_GEMM_KERNEL,
+        )
+
+        _SM90_BF16X3_ROUTER_GEMM_KERNEL.register_warmup(
+            K=self.weight.shape[1],
+            E=self.weight.shape[0],
+            max_tokens=vllm_config.scheduler_config.max_num_batched_tokens,
+        )
 
     def _register_ll_fp32w_warmup(self) -> None:
         # Based on multi-tier GEMM dispatch. See above.
@@ -342,7 +358,7 @@ class GateLinear(ReplicatedLinear):
             output = LL_FP32W_GEMM_KERNEL(x, self.weight)
             return self._return(output)
 
-        # Tier 4: bf16x3 kernel for fp32 router weights
+        # Tier 4: bf16x3 CuteDSL kernel for fp32 router weights
         if self.allow_bf16x3_router_gemm and x.dtype == torch.bfloat16:
             output = bf16x3_router_gemm_module().bf16x3_router_gemm(x, self.weight)
             return self._return(output)
@@ -408,13 +424,13 @@ _FP32_ROUTER_GEMM_MAX_TOKENS = GateLinear.FP32_MAX_TOKENS
 
 @cache
 def bf16x3_router_gemm_module():
-    """The bf16x3 router GEMM for this device: Triton on SM90, CuteDSL on SM100."""
+    """The CuteDSL bf16x3 router GEMM module for this device (SM90 or SM100)."""
     if current_platform.is_device_capability((9, 0)):
         from vllm.model_executor.layers.fused_moe.router import (
-            bf16x3_router_gemm_triton,
+            bf16x3_router_gemm_sm90,
         )
 
-        return bf16x3_router_gemm_triton
+        return bf16x3_router_gemm_sm90
     from vllm.model_executor.layers.fused_moe.router import (
         bf16x3_router_gemm_cutedsl,
     )

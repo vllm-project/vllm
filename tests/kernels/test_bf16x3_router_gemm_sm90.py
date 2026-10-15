@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for the SM90 Triton BF16x3 router GEMM."""
+"""Tests for the SM90 CuteDSL BF16x3 router GEMM."""
 
 import pytest
 import torch
@@ -21,9 +21,10 @@ ROUTER_SHAPES = [
     (4096, 192),  # Hunyuan-V3
     (2816, 256),  # Hunyuan-V4
     (4096, 352),  # Step-5
+    (8192, 64),  # ERNIE-4.5-300B-A47B
 ]
 # M=1 is left out: there cuBLAS's fp32 GEMV is slightly more accurate for K >= 6144.
-NUM_TOKENS = [8, 33, 64, 100, 256, 513, 1024, 2048, 8192]
+NUM_TOKENS = [8, 33, 64, 100, 256, 384, 513, 1024, 1536, 2048, 3072, 8192]
 # Match the observed router weight scale
 ROUTER_WEIGHT_SCALE = 0.053
 
@@ -39,28 +40,49 @@ def _mae(out, ref):
     return (out.double() - ref).abs().mean().item()
 
 
+def _check_against_fp32(x, w, out):
+    ref = torch.nn.functional.linear(x.double(), w.double())
+    # The fp32 path this kernel replaces on SM90.
+    fp32 = torch.nn.functional.linear(x.float(), w)
+    assert out.shape == (x.shape[0], w.shape[0])
+    assert out.dtype == torch.float32
+    assert _mae(out, ref) <= _mae(fp32, ref)
+
+
 @pytest.mark.parametrize(("hidden_size", "num_experts"), ROUTER_SHAPES)
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
 def test_more_accurate_than_fp32_gemm(num_tokens, hidden_size, num_experts):
-    from vllm.model_executor.layers.fused_moe.router.bf16x3_router_gemm_triton import (  # noqa: E501
+    from vllm.model_executor.layers.fused_moe.router.bf16x3_router_gemm_sm90 import (  # noqa: E501
+        bf16x3_router_gemm,
+    )
+
+    x, w = _inputs(num_tokens, hidden_size, num_experts)
+    _check_against_fp32(x, w, bf16x3_router_gemm(x, w))
+
+
+@pytest.mark.parametrize(
+    ("hidden_size", "num_experts"),
+    [
+        (1032, 96),  # partial K-tile and partial expert tile
+        (256, 64),  # fewer K-tiles than the largest split
+    ],
+)
+@pytest.mark.parametrize("num_tokens", [1, 40, 777])
+def test_partial_tiles(num_tokens, hidden_size, num_experts):
+    from vllm.model_executor.layers.fused_moe.router.bf16x3_router_gemm_sm90 import (  # noqa: E501
         bf16x3_router_gemm,
     )
 
     x, w = _inputs(num_tokens, hidden_size, num_experts)
     out = bf16x3_router_gemm(x, w)
     ref = torch.nn.functional.linear(x.double(), w.double())
-    # The fp32 path this kernel replaces on SM90.
-    fp32 = torch.nn.functional.linear(x.float(), w)
-
-    assert out.shape == (num_tokens, num_experts)
-    assert out.dtype == torch.float32
-    assert _mae(out, ref) <= _mae(fp32, ref)
+    torch.testing.assert_close(out.double(), ref, rtol=0, atol=1e-5)
 
 
 def test_weight_split_is_exact():
     """One-hot activations select single weights, so the three bf16 terms of
     each weight must sum back to it bit for bit."""
-    from vllm.model_executor.layers.fused_moe.router.bf16x3_router_gemm_triton import (  # noqa: E501
+    from vllm.model_executor.layers.fused_moe.router.bf16x3_router_gemm_sm90 import (  # noqa: E501
         bf16x3_router_gemm,
     )
 
@@ -78,9 +100,9 @@ def test_weight_split_is_exact():
     assert torch.equal(out, w[:, cols].T)
 
 
-@pytest.mark.parametrize("num_tokens", [48, 512])
+@pytest.mark.parametrize("num_tokens", [48, 512, 4096])
 def test_cuda_graph_replay(num_tokens):
-    from vllm.model_executor.layers.fused_moe.router.bf16x3_router_gemm_triton import (  # noqa: E501
+    from vllm.model_executor.layers.fused_moe.router.bf16x3_router_gemm_sm90 import (  # noqa: E501
         bf16x3_router_gemm,
     )
 
@@ -100,7 +122,7 @@ def test_cuda_graph_replay(num_tokens):
 
 
 def test_strided_activations():
-    from vllm.model_executor.layers.fused_moe.router.bf16x3_router_gemm_triton import (  # noqa: E501
+    from vllm.model_executor.layers.fused_moe.router.bf16x3_router_gemm_sm90 import (  # noqa: E501
         bf16x3_router_gemm,
     )
 
@@ -113,6 +135,26 @@ def test_strided_activations():
         rtol=0,
         atol=0,
     )
+
+
+def test_warmup_covers_runtime_keys():
+    """Warmup compiles from fake tensors every key the runtime can pick."""
+    from vllm.model_executor.layers.fused_moe.router.bf16x3_router_gemm_sm90 import (  # noqa: E501
+        Sm90BF16x3RouterGemmKernel,
+    )
+
+    kernel = Sm90BF16x3RouterGemmKernel()
+    hidden_size, num_experts, max_tokens = 5120, 160, 2048
+    kernel.warmup(K=hidden_size, E=num_experts, max_tokens=max_tokens)
+    warmed = set(kernel._compiled_cache)
+    assert len(warmed) > 1
+
+    for num_tokens in (1, 33, 200, 777, max_tokens):
+        x, w = _inputs(num_tokens, hidden_size, num_experts)
+        out = kernel(x, w)
+        if num_tokens >= 8:
+            _check_against_fp32(x, w, out)
+    assert set(kernel._compiled_cache) == warmed
 
 
 # =================================================================
@@ -140,19 +182,17 @@ def _make_gate_linear(monkeypatch, input_size, output_size):
 
 
 def _record_bf16x3_calls(monkeypatch):
-    from vllm.model_executor.layers.fused_moe.router import (
-        bf16x3_router_gemm_triton,
-    )
+    from vllm.model_executor.layers.fused_moe.router import bf16x3_router_gemm_sm90
 
     calls = []
     for name in ("bf16x3_router_gemm", "_bf16x3_router_gemm"):
-        real = getattr(bf16x3_router_gemm_triton, name)
+        real = getattr(bf16x3_router_gemm_sm90, name)
 
         def record(x, w, real=real):
             calls.append(x.shape[0])
             return real(x, w)
 
-        monkeypatch.setattr(bf16x3_router_gemm_triton, name, record)
+        monkeypatch.setattr(bf16x3_router_gemm_sm90, name, record)
     return calls
 
 
@@ -176,9 +216,7 @@ def test_gate_linear_uses_bf16x3_above_32_tokens(
     out, _ = gate(x)
 
     assert calls == [num_tokens]
-    ref = torch.nn.functional.linear(x.double(), gate.weight.double())
-    fp32 = torch.nn.functional.linear(x.float(), gate.weight)
-    assert _mae(out, ref) <= _mae(fp32, ref)
+    _check_against_fp32(x, gate.weight, out)
 
 
 def test_gate_linear_keeps_fp32_gemv_for_small_batches(monkeypatch):
@@ -189,6 +227,22 @@ def test_gate_linear_keeps_fp32_gemv_for_small_batches(monkeypatch):
     gate(torch.randn(32, 3072, device="cuda").to(torch.bfloat16))
 
     assert calls == []
+
+
+def test_gate_linear_registers_warmup(monkeypatch, default_vllm_config):
+    from vllm.model_executor.layers.fused_moe.router.bf16x3_router_gemm_sm90 import (  # noqa: E501
+        _SM90_BF16X3_ROUTER_GEMM_KERNEL,
+    )
+    from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
+
+    registry = JitWarmupRegistry(default_vllm_config)
+    with registry.activate():
+        _make_gate_linear(monkeypatch, 5120, 160)
+
+    max_tokens = default_vllm_config.scheduler_config.max_num_batched_tokens
+    assert registry._registrations[_SM90_BF16X3_ROUTER_GEMM_KERNEL] == [
+        ((), {"K": 5120, "E": 160, "max_tokens": max_tokens})
+    ]
 
 
 def test_gate_linear_batch_invariant_disables_bf16x3(monkeypatch):
