@@ -1,12 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 import torch
 
+from vllm.config.parallel import EPLBConfig
+from vllm.distributed.eplb import eplb_state as eplb_state_module
 from vllm.distributed.eplb.eplb_state import (
+    EplbState,
     _commit_eplb_maps,
     _commit_eplb_maps_for_layer,
 )
@@ -157,3 +161,38 @@ def test_commit_eplb_maps_for_layer():
 
     # Layer 1 untouched
     assert torch.equal(model_state.physical_to_logical_map[1], original_phy2log[1])
+
+
+@pytest.mark.parametrize("max_rebalances, expected", [(0, 5), (2, 2)])
+def test_eplb_max_rebalances_stops_rearranging(monkeypatch, max_rebalances, expected):
+    """With max_rebalances, rearrangement and load recording stop for good."""
+    monkeypatch.setattr(
+        eplb_state_module,
+        "get_ep_group",
+        lambda: SimpleNamespace(
+            device_group=SimpleNamespace(rank=lambda: 0, size=lambda: 1)
+        ),
+    )
+    eplb_config = EPLBConfig(
+        window_size=2,
+        step_interval=4,
+        max_rebalances=max_rebalances,
+        use_async=False,
+        communicator="torch_gloo",
+    )
+    state = EplbState(SimpleNamespace(eplb_config=eplb_config), torch.device("cpu"))
+    state.expert_load_window_size = 2
+    state.expert_rearrangement_step_interval = 4
+    # add_model() starts the counter at 3/4 of the interval.
+    state.expert_rearrangement_step = 3
+    state.should_record_tensor = torch.ones((), dtype=torch.bool)
+    calls = []
+    monkeypatch.setattr(state, "rearrange", lambda **kwargs: calls.append(kwargs))
+
+    for _ in range(20):
+        state.step()
+
+    # Rearrangement points at steps 1, 5, 9, 13 and 17 without a limit.
+    assert len(calls) == expected
+    assert state.num_rebalances == expected
+    assert bool(state.should_record_tensor) == (max_rebalances == 0)

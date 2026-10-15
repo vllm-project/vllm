@@ -269,6 +269,11 @@ class EplbState:
         Interval for expert rearrangement steps.
         This is a constant and is taken from the config.
         """
+        self.num_rebalances: int = 0
+        """
+        Number of rearrangement points reached so far, compared against
+        `eplb_config.max_rebalances`. Identical on all EP ranks.
+        """
         self.should_record_tensor: torch.Tensor | None = None
         """
         Shared scalar bool tensor for all layers.  Every
@@ -593,6 +598,14 @@ class EplbState:
             self.rearrange(is_profile=True)
             return
 
+        if self._rebalance_limit_reached() and not any(
+            eplb_model_state.rebalanced
+            for eplb_model_state in self.model_states.values()
+        ):
+            # The placement is final: no more counting, recording or
+            # rearranging (every rank stops on the same step).
+            return
+
         if (
             log_stats
             and self.expert_rearrangement_step
@@ -691,8 +704,19 @@ class EplbState:
                 return
             self.expert_rearrangement_step = 0
             self.rearrange()
+            self.num_rebalances += 1
+            if self._rebalance_limit_reached() and ep_group.rank() == 0:
+                logger.info(
+                    "EPLB reached max_rebalances=%d; keeping the current "
+                    "expert placement.",
+                    self.num_rebalances,
+                )
 
         self._update_layer_should_record(log_stats=log_stats)
+
+    def _rebalance_limit_reached(self) -> bool:
+        max_rebalances = self.parallel_config.eplb_config.max_rebalances
+        return 0 < max_rebalances <= self.num_rebalances
 
     def _should_record_current_step(self, log_stats: bool = False) -> bool:
         """Return whether expert-load recording should be enabled this step.
@@ -700,7 +724,10 @@ class EplbState:
         Recording is enabled when we are close to either:
         1) The next rearrangement step, so the sliding window is ready.
         2) The next balancedness logging step, when log_stats is enabled.
+        Never once `eplb_config.max_rebalances` rearrangements have happened.
         """
+        if self._rebalance_limit_reached():
+            return False
         steps_remaining = (
             self.expert_rearrangement_step_interval - self.expert_rearrangement_step
         )
