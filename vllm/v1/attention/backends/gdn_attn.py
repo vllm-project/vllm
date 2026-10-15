@@ -297,13 +297,17 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         # form applies: Triton/FLA kernels, no prefix-cache checkpoints, MRV2
         # on CUDA. The graph of a token count replays for every batch of that
         # count, with or without prefills, so build() then stages every batch.
+        # Mamba "align" mode qualifies when the layer exports no prefill
+        # checkpoint: the scheduler then ends each prefill chunk at a block
+        # boundary, MRV2 moves the state between blocks before the forward,
+        # and the forward reads only the block-aligned state indices.
         self.captures_mixed_batches = (
             is_breakable_cudagraph_enabled()
             and self.compilation_config.cudagraph_mode.has_piecewise_cudagraphs()
             and vllm_config.use_v2_model_runner
             and current_platform.is_cuda()
             and self.gdn_prefill_backend == "triton"
-            and vllm_config.cache_config.mamba_cache_mode == "none"
+            and kv_cache_spec.num_prefill_checkpoint_blocks == 0
             and type(self) is GDNAttentionMetadataBuilder
         )
 
@@ -895,6 +899,8 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         prefill-side metadata: no FLA chunks, causal_conv1d programs and
         ``has_initial_state`` for its non-spec decodes, if any.
         """
+        # The captured forward exports no prefill checkpoint.
+        assert metadata.checkpoint is None
         buffers = self.mixed_batch_buffers
         # build() staged the FLA chunk metadata of a batch with prefills.
         chunk_buffers = {

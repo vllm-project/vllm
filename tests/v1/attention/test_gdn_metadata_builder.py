@@ -150,6 +150,7 @@ GDN_BUILD_TEST_CASES = {
 def _create_gdn_builder(
     num_speculative_tokens: int = 0,
     full_cuda_graph: bool = False,
+    num_speculative_blocks: int = 0,
 ) -> GDNAttentionMetadataBuilder:
     """Create a GDNAttentionMetadataBuilder with minimal config."""
     vllm_config = create_vllm_config(
@@ -168,6 +169,7 @@ def _create_gdn_builder(
         block_size=BLOCK_SIZE,
         shapes=((16, 64),),
         dtypes=(torch.float16,),
+        num_speculative_blocks=num_speculative_blocks,
     )
     return GDNAttentionMetadataBuilder(
         kv_cache_spec=mamba_spec,
@@ -670,13 +672,15 @@ def _assert_rows_then_pad(buffer, rows, pad_value, name) -> None:
     assert torch.all(buffer[len(rows) :] == pad_value), name
 
 
+@pytest.mark.parametrize("mamba_cache_mode", ["none", "align"])
 @pytest.mark.parametrize("update_block_table", [False, True])
-def test_capture_buffers_hold_any_batch(update_block_table: bool):
+def test_capture_buffers_hold_any_batch(update_block_table: bool, mamba_cache_mode):
     """With captures_mixed_batches, build() stages every batch, with or without
     prefills, into the same full-length buffers: the batch's rows, then pads
     that make every static grid of the captured forward a no-op, and no stale
     rows of an earlier batch. update_block_table() restages the state indices
-    into its own group's buffers."""
+    into its own group's buffers. In "align" mode the state indices are the
+    block-aligned ones."""
     from vllm.third_party.flash_linear_attention.ops.index import (
         prepare_chunk_indices,
         prepare_chunk_offsets,
@@ -690,21 +694,37 @@ def test_capture_buffers_hold_any_batch(update_block_table: bool):
         compute_causal_conv1d_metadata,
     )
 
+    align = mamba_cache_mode == "align"
     builder, group_builder, reference_builder = (
-        _create_gdn_builder(num_speculative_tokens=2) for _ in range(3)
+        _create_gdn_builder(num_speculative_tokens=2, num_speculative_blocks=2)
+        for _ in range(3)
     )
     for each_builder in (builder, group_builder, reference_builder):
-        each_builder.vllm_config.cache_config.mamba_cache_mode = "none"
+        each_builder.vllm_config.cache_config.mamba_cache_mode = mamba_cache_mode
     builder.captures_mixed_batches = group_builder.captures_mixed_batches = True
     batches = {**MIXED_BATCHES, **DECODE_BATCHES}
     for name in [*batches, *reversed(batches)]:
         seq_lens, query_lens, draft_tokens = batches[name]
         batch = BatchSpec(seq_lens=seq_lens, query_lens=query_lens)
-        block_table = torch.randint(1, 1000, (batch.batch_size, 3), dtype=torch.int32)
+        # "align" mode reads the state at each row's current block.
+        num_block_cols = 24 if align else 3
+        block_table = torch.randint(
+            1, 1000, (batch.batch_size, num_block_cols), dtype=torch.int32
+        )
         reference = _build(reference_builder, batch, draft_tokens, block_table)
         meta = _build(builder, batch, draft_tokens, block_table)
         staging_builder = builder
         if update_block_table:
+            if align:
+                # MRV2 precomputes these for every Mamba group each step.
+                group_builder.mamba_aligned_state_indices = (
+                    mamba_get_block_table_tensor(
+                        block_table,
+                        torch.tensor(seq_lens),
+                        group_builder.kv_cache_spec,
+                        "align",
+                    )
+                )
             # The first group was built with another block table.
             meta = _build(builder, batch, draft_tokens, block_table + 1000)
             meta = group_builder.update_block_table(meta, block_table, torch.empty(0))
@@ -742,3 +762,45 @@ def test_capture_buffers_hold_any_batch(update_block_table: bool):
         assert torch.equal(meta.batch_ptr[:num_programs], batch_ptr[:num_programs])
         assert torch.all(meta.batch_ptr[num_programs:] == PAD_SLOT_ID)
         assert meta.nums_dict[8]["tot"] == num_programs
+
+
+@pytest.mark.parametrize(
+    "mamba_cache_mode,num_prefill_checkpoint_blocks,expected",
+    [("none", 0, True), ("align", 0, True), ("align", 1, False)],
+)
+def test_captures_mixed_batches_unless_checkpoints_are_exported(
+    mamba_cache_mode: str, num_prefill_checkpoint_blocks: int, expected: bool
+):
+    """The GDN core is captured with prefix caching ("align" mode) too, unless
+    the layer exports prefill checkpoints, which the captured core cannot."""
+    from unittest.mock import PropertyMock, patch
+
+    from vllm.config import VllmConfig
+    from vllm.v1.attention.backends import gdn_attn
+
+    vllm_config = create_vllm_config(
+        model_name="Qwen/Qwen3.5-0.8B", block_size=BLOCK_SIZE
+    )
+    vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL_AND_PIECEWISE
+    vllm_config.cache_config.mamba_cache_mode = mamba_cache_mode
+    mamba_spec = MambaSpec(
+        block_size=BLOCK_SIZE,
+        shapes=((16, 64),),
+        dtypes=(torch.float16,),
+        num_prefill_checkpoint_blocks=num_prefill_checkpoint_blocks,
+    )
+    with (
+        patch.object(gdn_attn, "is_breakable_cudagraph_enabled", return_value=True),
+        patch.object(gdn_attn.current_platform, "is_cuda", return_value=True),
+        patch.object(
+            VllmConfig, "use_v2_model_runner", new_callable=PropertyMock
+        ) as use_v2_model_runner,
+    ):
+        use_v2_model_runner.return_value = True
+        builder = GDNAttentionMetadataBuilder(
+            kv_cache_spec=mamba_spec,
+            layer_names=["layer.0"],
+            vllm_config=vllm_config,
+            device=DEVICE,
+        )
+    assert builder.captures_mixed_batches is expected
