@@ -82,20 +82,6 @@ def qsa_localize_dcp_indices(
     return out
 
 
-def qsa_dcp_empty_owner_rows(packed_indices: torch.Tensor) -> torch.Tensor:
-    """Return rows without local selections."""
-    # Unlike mask_dcp_empty_shards_, QSA emptiness follows selection count.
-    return packed_indices[:, -1] <= 0
-
-
-def qsa_neutralize_empty_owner_lse_(
-    lse: torch.Tensor,
-    empty_rows: torch.Tensor,
-) -> None:
-    """Set rows with no local selection to the merge identity."""
-    lse.masked_fill_(empty_rows.to(device=lse.device)[:, None], float("-inf"))
-
-
 def warmup_qsa_localize_dcp_indices(
     *,
     selection_width: int,

@@ -384,11 +384,7 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
         from vllm.distributed.parallel_state import get_dcp_group
 
         from .ops.qsa import qsa_sparse_paged_attention
-        from .ops.qsa_dcp import (
-            qsa_dcp_empty_owner_rows,
-            qsa_localize_dcp_indices,
-            qsa_neutralize_empty_owner_lse_,
-        )
+        from .ops.qsa_dcp import qsa_localize_dcp_indices
 
         group = get_dcp_group()
 
@@ -401,8 +397,6 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
             self.dcp_rank,
             self.cp_kv_cache_interleave_size,
         )
-        empty_rows = qsa_dcp_empty_owner_rows(local_indices)
-
         query_all_heads = group.all_gather(query.contiguous(), dim=1)
         partial_out, partial_lse = qsa_sparse_paged_attention(
             query_all_heads,
@@ -417,7 +411,8 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
             return_lse=True,
         )
 
-        qsa_neutralize_empty_owner_lse_(partial_lse, empty_rows)
+        # A row with count 0 runs no tile; the reader writes output 0 and LSE
+        # -inf, the identity for the LSE combine.
 
         merged = cast(
             torch.Tensor,

@@ -69,43 +69,6 @@ def test_kernel_matches_the_reference(world, interleave, width):
                 assert bool((local[row, count:width] == PAD).all())
 
 
-# --- empty-owner rows -------------------------------------------------------
-
-
-@pytest.mark.cpu_test
-def test_empty_owner_comes_from_the_count_not_a_scan():
-    """A reused buffer holds stale ids past its count.
-
-    The attention kernel bounds its tile loop by the count, so a row with
-    count 0 contributes nothing even though its columns still hold ids. A scan
-    for `-1` would call that row non-empty and skip the neutralization, and the
-    difference only appears under a captured graph.
-    """
-    from vllm.models.qwen4_exp.nvidia.ops.qsa_dcp import qsa_dcp_empty_owner_rows
-
-    width = 4
-    packed = torch.tensor([[7, 9, 11, 13, 0]], dtype=torch.int32)  # stale ids, count 0
-    empty = qsa_dcp_empty_owner_rows(packed)
-    assert bool(empty[0]) is True, "count 0 means empty owner"
-    scan_says_empty = bool((packed[0, :width] == PAD).all())
-    assert scan_says_empty is False, "a scan would disagree; that is the bug"
-
-
-@pytest.mark.cpu_test
-def test_the_neutral_value_is_negative_infinity():
-    """The identity of the LSE merge."""
-    from vllm.models.qwen4_exp.nvidia.ops.qsa_dcp import (
-        qsa_neutralize_empty_owner_lse_,
-    )
-
-    lse = torch.full((3, 2), 1.5)
-    qsa_neutralize_empty_owner_lse_(lse, torch.tensor([False, True, False]))
-
-    assert torch.isneginf(lse[1]).all()
-    assert torch.equal(lse[0], torch.full_like(lse[0], 1.5)), "row 0 untouched"
-    assert torch.equal(lse[2], torch.full_like(lse[2], 1.5)), "row 2 untouched"
-
-
 # --- contracts that keep the gate from being applied twice -------------------
 
 
@@ -186,11 +149,7 @@ def test_sharded_ranks_reproduce_the_single_rank_result(
     world, interleave, seq_len, cache_dtype, k_scale, v_scale
 ):
     from vllm.models.qwen4_exp.nvidia.ops.qsa import qsa_sparse_paged_attention
-    from vllm.models.qwen4_exp.nvidia.ops.qsa_dcp import (
-        qsa_dcp_empty_owner_rows,
-        qsa_localize_dcp_indices,
-        qsa_neutralize_empty_owner_lse_,
-    )
+    from vllm.models.qwen4_exp.nvidia.ops.qsa_dcp import qsa_localize_dcp_indices
     from vllm.v1.attention.ops.dcp import _lse_weighted_combine
 
     import_module("vllm.models.qwen4_exp.nvidia.model")
@@ -291,7 +250,7 @@ def test_sharded_ranks_reproduce_the_single_rank_result(
         local_sel = qsa_localize_dcp_indices(
             global_sel, torch.empty_like(global_sel), world, rank, interleave
         )
-        empty = qsa_dcp_empty_owner_rows(local_sel)
+        empty = local_sel[:, -1] <= 0
         if rank:
             assert bool(empty[0])
         out, lse = qsa_sparse_paged_attention(
@@ -306,7 +265,8 @@ def test_sharded_ranks_reproduce_the_single_rank_result(
             v_scale=v_scale,
             return_lse=True,
         )
-        qsa_neutralize_empty_owner_lse_(lse, empty)
+        if rank:
+            assert torch.isneginf(lse[0]).all()
         outs.append(out.float())
         lses.append(lse.float())
 
