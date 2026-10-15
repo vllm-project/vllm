@@ -66,6 +66,19 @@ def test_matmul_persistent_matches_fp64_reference(M, K, N, dtype):
 
 
 @skip_unsupported
+@pytest.mark.parametrize(
+    ("M", "K", "N"), [(1, 4096, 64), (1024, 4096, 64), (7, 512, 129)]
+)
+def test_matmul_persistent_strided_bias(M, K, N):
+    x, b = _operands(M, K, N, torch.bfloat16)
+    bias = torch.randn(2 * N, device=DEVICE_TYPE, dtype=torch.bfloat16)[::2]
+    assert bias.stride(0) == 2
+    actual = bi.matmul_persistent(x, b, bias)
+    expected = bi.matmul_persistent(x, b, bias.contiguous())
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+@skip_unsupported
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16, torch.float32])
 @pytest.mark.parametrize(
     ("K", "N"), [(4096, 64), (4096, 1024), (4104, 64), (512, 4096)]
