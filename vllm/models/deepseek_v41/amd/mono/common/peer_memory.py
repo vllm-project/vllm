@@ -9,8 +9,8 @@
 import torch
 from aiter.ops.flydsl.quick_allreduce_int4_ipc import UncachedIpcHeap
 
-from vllm.models.common.mono.guards import tp_agree
-from vllm.models.common.mono.spec import MonoUnsupported
+from vllm.models.common.specialized_decode.guards import tp_agree
+from vllm.models.common.specialized_decode.spec import DecodeUnsupported
 
 
 class _DeviceBytes:
@@ -34,7 +34,7 @@ class PeerBuffer:
     The constructor is collective over ``group`` (the handle exchange, then an
     agreement that every rank mapped every peer): every rank must reach it, so a
     runner reaches it only after ``tp_agree``. A failed mapping on any rank raises
-    ``MonoUnsupported`` on all of them.
+    ``DecodeUnsupported`` on all of them.
     """
 
     def __init__(
@@ -68,7 +68,7 @@ class PeerBuffer:
                 failure = err
             if not tp_agree(failure is None, group):
                 self.close()
-                raise MonoUnsupported(
+                raise DecodeUnsupported(
                     "peer memory handshake failed on "
                     f"{'this' if failure else 'another'}"
                     " TP rank"

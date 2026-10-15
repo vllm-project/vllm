@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""One ``MonoRuntime`` a rank: the per-step decision and the cache checks,
+"""One ``SpecializedDecode`` a rank: the per-step decision and the cache checks,
 behind the two hooks a model's forward calls (``plan``, then ``run``).
 """
 
@@ -13,12 +13,16 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.model_executor.warmup.jit_warmup import VllmJitKernel
-from vllm.models.common.mono.guards import _refuse_model, tp_agree, tp_group
-from vllm.models.common.mono.spec import (
+from vllm.models.common.specialized_decode.guards import (
+    _refuse_model,
+    tp_agree,
+    tp_group,
+)
+from vllm.models.common.specialized_decode.spec import (
+    DecodeSpec,
+    DecodeUnsupported,
     KernelT,
     ModelKernel,
-    MonoSpec,
-    MonoUnsupported,
     Step,
 )
 
@@ -28,7 +32,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-class MonoWarmup(VllmJitKernel["MonoWarmup.CompileKey"]):
+class DecodeWarmup(VllmJitKernel["DecodeWarmup.CompileKey"]):
     """A spec's kernel builds as vLLM JIT warm-up keys."""
 
     @dataclass(frozen=True)
@@ -41,16 +45,16 @@ class MonoWarmup(VllmJitKernel["MonoWarmup.CompileKey"]):
         self.spec = spec
         self.kernel = kernel
 
-    def get_warmup_keys(self) -> list["MonoWarmup.CompileKey"]:
+    def get_warmup_keys(self) -> list["DecodeWarmup.CompileKey"]:
         return [self.CompileKey(self.spec, b) for b in self.kernel.warmup_keys()]
 
-    def compile(self, compile_key: "MonoWarmup.CompileKey") -> None:
+    def compile(self, compile_key: "DecodeWarmup.CompileKey") -> None:
         self.kernel.compile(compile_key.build)
         self._compiled_cache[compile_key] = True
 
 
-class MonoRuntime(Generic[KernelT]):
-    """A model's MonoKernel on this rank.
+class SpecializedDecode(Generic[KernelT]):
+    """A model's specialized decode on this rank.
 
     The runtime reads the spec and builds the kernel, registers it for warm-up,
     checks the caches whenever the runner binds them, and decides each step
@@ -58,34 +62,34 @@ class MonoRuntime(Generic[KernelT]):
     KernelT and is held in the ``kernel`` attribute.
     """
 
-    def __init__(self, model, vllm_config: "VllmConfig", spec: MonoSpec[KernelT]):
+    def __init__(self, model, vllm_config: "VllmConfig", spec: DecodeSpec[KernelT]):
         """Builds this rank's kernel. Collective over the TP group.
 
         Args:
             model: The loaded model, in ``process_weights_after_loading``.
             vllm_config: The engine's config.
-            spec: The variant ``select_mono_spec`` picked.
+            spec: The variant ``select_decode_spec`` picked.
 
         Raises:
-            MonoUnsupported: This rank, or another, refused the loaded model.
+            DecodeUnsupported: This rank, or another, refused the loaded model.
 
         """
         self.spec = spec
         reasons = _refuse_model(spec, model)
         agreed = tp_agree(not reasons, tp_group()[2])
-        refused = f"MonoKernel {spec.name} refused for the loaded model"
+        refused = f"Specialized decode {spec.name} refused for the loaded model"
         if reasons:
-            raise MonoUnsupported(f"{refused}: " + "; ".join(reasons))
+            raise DecodeUnsupported(f"{refused}: " + "; ".join(reasons))
         if not agreed:
-            raise MonoUnsupported(f"{refused}: another TP rank refused")
+            raise DecodeUnsupported(f"{refused}: another TP rank refused")
         self.vllm_config = vllm_config
         self.widths = spec.widths(vllm_config)
         self.last_reason: str | None = None
         self._bound = False
         self.kernel: KernelT = spec.build(vllm_config, model, self.widths)
         if self.kernel.warmup_keys():
-            MonoWarmup(spec.name, self.kernel).register_warmup()
-        logger.info("MonoKernel %s: widths %s", spec.name, list(self.widths))
+            DecodeWarmup(spec.name, self.kernel).register_warmup()
+        logger.info("Specialized decode %s: widths %s", spec.name, list(self.widths))
 
     def bind_caches(self) -> None:
         """Checks the caches the kernel will read, as the runner binds them.
@@ -94,15 +98,15 @@ class MonoRuntime(Generic[KernelT]):
         throwaway cache memory profiling allocates and again for the real one.
 
         Raises:
-            MonoUnsupported: The caches are not what this spec serves.
+            DecodeUnsupported: The caches are not what this spec serves.
 
         """
         sfc = self.vllm_config.compilation_config.static_forward_context
         caches = {n: sfc[n].kv_cache for n in self.kernel.cache_layers}
         reasons = self.spec.refuse_caches(self.vllm_config, self.kernel, caches)
         if reasons:
-            raise MonoUnsupported(
-                f"MonoKernel {self.spec.name} caches: " + "; ".join(reasons)
+            raise DecodeUnsupported(
+                f"Specialized decode {self.spec.name} caches: " + "; ".join(reasons)
             )
         self._bound = True
 
@@ -114,7 +118,7 @@ class MonoRuntime(Generic[KernelT]):
         it is replayed for mixed batches too), and whatever ``skip_step``
         refuses. ``last_reason`` holds why.
 
-        Every predicate is the same on every TP rank: a MonoKernel waits
+        Every predicate is the same on every TP rank: the kernel waits
         in-kernel on its peers, so the ranks must take the same path.
         """
         width = positions.size(-1)
@@ -134,7 +138,7 @@ class MonoRuntime(Generic[KernelT]):
         self.last_reason = why
         if why is not None:
             logger.info_once(
-                "MonoKernel %s: step on vLLM's path (%s)", self.spec.name, why
+                "Specialized decode %s: step on vLLM's path (%s)", self.spec.name, why
             )
             return None
         return Step(width=width, positions=positions)

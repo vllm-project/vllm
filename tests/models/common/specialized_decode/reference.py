@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The reference MonoKernel: a ``ModelKernel`` over the layers it replaces."""
+"""The reference kernel: a ``ModelKernel`` over the layers it replaces."""
 
 from dataclasses import replace
 from types import SimpleNamespace
@@ -10,7 +10,7 @@ import torch
 
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import get_forward_context
-from vllm.models.common.mono.spec import MonoSpec, Step
+from vllm.models.common.specialized_decode.spec import DecodeSpec, Step
 
 CACHE_DTYPE = torch.bfloat16
 CACHE_NDIM = 4
@@ -32,7 +32,7 @@ class ReferenceLayer(torch.nn.Module):
 
 
 class ReferenceModel(torch.nn.Module):
-    """A model shaped like the layer loop a MonoKernel hooks into."""
+    """A model shaped like the layer loop a kernel hooks into."""
 
     def __init__(self, layers: int = 4, hidden: int = 8):
         super().__init__()
@@ -127,7 +127,7 @@ def build(vllm_config, model, widths: tuple[int, ...]) -> ReferenceKernel:
     return ReferenceKernel(vllm_config, model, widths)
 
 
-REFERENCE = MonoSpec[ReferenceKernel](
+REFERENCE = DecodeSpec[ReferenceKernel](
     name="reference",
     supports=frozenset(),
     widths=widths,
@@ -147,7 +147,7 @@ REFERENCE_WIDE = replace(
     ),
 )
 
-MONO_SPECS = (REFERENCE_WIDE, REFERENCE)
+DECODE_SPECS = (REFERENCE_WIDE, REFERENCE)
 
 
 def make_config(**overrides) -> Any:

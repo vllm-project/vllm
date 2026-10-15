@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""DeepSeek-V4.1's MonoSpec against the conformance kit, plus its own choices."""
+"""DeepSeek-V4.1's DecodeSpec against the conformance kit, plus its own choices."""
 
 import importlib
 import sys
@@ -10,15 +10,15 @@ from typing import Any
 import pytest
 import torch
 
-from tests.models.common.mono.kit import MonoConformance, forward
+from tests.models.common.specialized_decode.kit import DecodeConformance, forward
 from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
-from vllm.models.common.mono.guards import select_mono_spec
-from vllm.models.common.mono.runtime import MonoRuntime
-from vllm.models.common.mono.spec import MonoUnsupported, Step
-from vllm.models.deepseek_v41.amd import mono_spec as ms
+from vllm.models.common.specialized_decode.guards import select_decode_spec
+from vllm.models.common.specialized_decode.runtime import SpecializedDecode
+from vllm.models.common.specialized_decode.spec import DecodeUnsupported, Step
+from vllm.models.deepseek_v41.amd import specialized_decode as sd
 
-SPECS = ms.MONO_SPECS
+SPECS = sd.DECODE_SPECS
 LAYERS = 6
 HIDDEN = 16
 BLOCKS = 256
@@ -154,8 +154,8 @@ class _Layer(torch.nn.Module):
         self.weight = torch.nn.Parameter(torch.zeros(HIDDEN))
         self.taken: list = []
 
-    def forward(self, x, positions, input_ids, *rest, mono_ffn=None):
-        self.taken.append(("layer", self.attn.layer_id, mono_ffn is not None))
+    def forward(self, x, positions, input_ids, *rest, decode_ffn=None):
+        self.taken.append(("layer", self.attn.layer_id, decode_ffn is not None))
         return _stream()
 
 
@@ -190,7 +190,7 @@ class _Model(torch.nn.Module):
 
 
 def make_cache(blocks: int = 4, block: int = 32) -> torch.Tensor:
-    return _bytes(blocks, block * ms.RECORD)
+    return _bytes(blocks, block * sd.RECORD)
 
 
 def make_config(**overrides) -> Any:
@@ -219,7 +219,7 @@ def make_config(**overrides) -> Any:
         aux_output_config=SimpleNamespace(enable_return_routed_experts=False),
         compilation_config=SimpleNamespace(
             cudagraph_mode=CUDAGraphMode.FULL,
-            cudagraph_capture_sizes=list(range(1, ms.MAX_ROWS + 1)),
+            cudagraph_capture_sizes=list(range(1, sd.MAX_ROWS + 1)),
             static_forward_context={},
         ),
         lora_config=None,
@@ -238,8 +238,8 @@ def _swa(**overrides) -> Any:
         num_prefills=0,
         num_decodes=1,
         num_decode_tokens=1,
-        decode_swa_width=ms.SWA_WIDTH,
-        decode_swa_indices=torch.zeros(8, 1, ms.SWA_WIDTH, dtype=torch.int32),
+        decode_swa_width=sd.SWA_WIDTH,
+        decode_swa_indices=torch.zeros(8, 1, sd.SWA_WIDTH, dtype=torch.int32),
         decode_swa_lens=torch.zeros(8, dtype=torch.int32),
         token_to_req_indices=torch.zeros(8, dtype=torch.int32),
         slot_mapping=torch.zeros(8, dtype=torch.int64),
@@ -258,9 +258,9 @@ def _metadata(model, **overrides) -> dict:
     return meta
 
 
-class TestDsv41Spec(MonoConformance):
+class TestDsv41Spec(DecodeConformance):
     specs = SPECS
-    specs_module = "vllm.models.deepseek_v41.amd.mono_spec"
+    specs_module = "vllm.models.deepseek_v41.amd.specialized_decode"
 
     @pytest.fixture(autouse=True)
     def _stubs(self, monkeypatch):
@@ -306,7 +306,7 @@ def _rocm_platform() -> ModuleType:
 
 def _gpu(monkeypatch, cdna: int = 4, cus: int = BLOCKS) -> None:
     _stub_modules(monkeypatch)
-    monkeypatch.setattr(ms, "_compute_units", lambda: cus)
+    monkeypatch.setattr(sd, "_compute_units", lambda: cus)
     monkeypatch.setattr(_rocm_platform(), "get_cdna_version", lambda: cdna)
 
 
@@ -318,11 +318,11 @@ def _build(monkeypatch, config=None, model=None, **layer_overrides):
     for layer in model.layers:
         for key, value in layer_overrides.items():
             setattr(layer.attn, key, value)
-    return kit.make_mono(config, model), model
+    return kit.make_decode(config, model), model
 
 
-def _launch(mono, layer_id: int, width: int = 1):
-    return mono.kernel.kernels[layer_id, width]
+def _launch(decode, layer_id: int, width: int = 1):
+    return decode.kernel.kernels[layer_id, width]
 
 
 def _indexer():
@@ -361,8 +361,8 @@ def test_layers_take_whole_or_ffn_launch(monkeypatch, overrides, ffn_only):
     index source's compressor and indexer run between them); a layer outside
     them keeps vLLM's attention and runs its FFN half as one launch, from
     wo_b's unreduced output."""
-    mono, model = _build(monkeypatch, **overrides())
-    assert {k.ffn_only for k in mono.kernel.kernels.values()} == {ffn_only}
+    decode, model = _build(monkeypatch, **overrides())
+    assert {k.ffn_only for k in decode.kernel.kernels.values()} == {ffn_only}
     assert all(layer.attn.wo_b.reduce_results is not ffn_only for layer in model.layers)
 
 
@@ -380,8 +380,8 @@ def test_skipped_layers_keep_vllm_path(monkeypatch, skip):
     for layer in model.layers:
         for key, value in skip.items():
             setattr(layer, key, value)
-    mono, _ = _build(monkeypatch, config=config, model=model)
-    assert not mono.kernel.kernels
+    decode, _ = _build(monkeypatch, config=config, model=model)
+    assert not decode.kernel.kernels
 
 
 def test_moe_routing_outside_the_kernels_keeps_vllm_path(monkeypatch):
@@ -389,14 +389,14 @@ def test_moe_routing_outside_the_kernels_keeps_vllm_path(monkeypatch):
     model = TestDsv41Spec().make_model(config)
     for layer in model.layers:
         layer.ffn.n_routed_experts = 256
-    mono, _ = _build(monkeypatch, config=config, model=model)
-    assert not mono.kernel.kernels
+    decode, _ = _build(monkeypatch, config=config, model=model)
+    assert not decode.kernel.kernels
 
 
-def _step(mono, model, metadata, width=1):
-    with forward(mono.vllm_config, CUDAGraphMode.FULL, metadata):
-        mono.plan(torch.zeros(width, dtype=torch.long))
-    return mono.last_reason
+def _step(decode, model, metadata, width=1):
+    with forward(decode.vllm_config, CUDAGraphMode.FULL, metadata):
+        decode.plan(torch.zeros(width, dtype=torch.long))
+    return decode.last_reason
 
 
 @pytest.mark.parametrize(
@@ -411,47 +411,47 @@ def _step(mono, model, metadata, width=1):
     ids=["prefill", "no-decode", "tokens-past-rows", "noncausal-window", "no-swa"],
 )
 def test_other_steps_take_vllm_path(monkeypatch, case, why):
-    mono, model = _build(monkeypatch)
-    assert why in _step(mono, model, _metadata(model, **case))
+    decode, model = _build(monkeypatch)
+    assert why in _step(decode, model, _metadata(model, **case))
 
 
 def test_decode_step_takes_the_kernels(monkeypatch):
-    mono, model = _build(monkeypatch)
-    assert _step(mono, model, _metadata(model)) is None
+    decode, model = _build(monkeypatch)
+    assert _step(decode, model, _metadata(model)) is None
 
 
 def test_profile_run_takes_vllm_path(monkeypatch):
-    mono, model = _build(monkeypatch)
-    assert _step(mono, model, None) == "no attention metadata"
+    decode, model = _build(monkeypatch)
+    assert _step(decode, model, None) == "no attention metadata"
 
 
 def test_rows_past_the_kernels_take_vllm_path(monkeypatch):
-    mono, model = _build(monkeypatch)
-    assert _step(mono, model, _metadata(model), width=ms.MAX_ROWS + 1) == "width"
+    decode, model = _build(monkeypatch)
+    assert _step(decode, model, _metadata(model), width=sd.MAX_ROWS + 1) == "width"
 
 
 def test_widths_follow_the_capture_sizes(monkeypatch):
     config = make_config()
     config.compilation_config.cudagraph_capture_sizes = [1, 2, 8, 64, 512]
-    assert ms._widths(config) == (1, 2, 8)
+    assert sd._widths(config) == (1, 2, 8)
 
 
 def test_widths_default_to_every_row(monkeypatch):
     config = make_config()
     config.compilation_config.cudagraph_capture_sizes = [512]
-    assert ms._widths(config) == tuple(range(1, ms.MAX_ROWS + 1))
+    assert sd._widths(config) == tuple(range(1, sd.MAX_ROWS + 1))
 
 
 @pytest.mark.parametrize("tp", [1, 3, 8])
 def test_tensor_parallel_outside_the_kernels_refuses(tp):
     config = make_config()
     config.parallel_config.tensor_parallel_size = tp
-    assert any("tensor parallel" in r for r in ms._refuse_config(config))
+    assert any("tensor parallel" in r for r in sd._refuse_config(config))
 
 
 def test_a4w4_moe_refuses(monkeypatch):
     monkeypatch.setattr("vllm.envs.VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4", True)
-    assert any("A8W4" in r for r in ms._refuse_config(make_config()))
+    assert any("A8W4" in r for r in sd._refuse_config(make_config()))
 
 
 @pytest.mark.parametrize("cdna", [3, 5])
@@ -459,16 +459,16 @@ def test_other_isa_refuses(monkeypatch, cdna):
     config = make_config()
     model = TestDsv41Spec().make_model(config)
     _gpu(monkeypatch, cdna=cdna)
-    with pytest.raises(MonoUnsupported, match="CDNA4"):
-        MonoRuntime(model, config, select_mono_spec(config, SPECS))
+    with pytest.raises(DecodeUnsupported, match="CDNA4"):
+        SpecializedDecode(model, config, select_decode_spec(config, SPECS))
 
 
 def test_too_few_compute_units_refuses(monkeypatch):
     config = make_config()
     model = TestDsv41Spec().make_model(config)
     _gpu(monkeypatch, cus=BLOCKS // 2)
-    with pytest.raises(MonoUnsupported, match="compute units"):
-        MonoRuntime(model, config, select_mono_spec(config, SPECS))
+    with pytest.raises(DecodeUnsupported, match="compute units"):
+        SpecializedDecode(model, config, select_decode_spec(config, SPECS))
 
 
 def test_other_moe_backend_refuses(monkeypatch):
@@ -478,22 +478,22 @@ def test_other_moe_backend_refuses(monkeypatch):
         experts = layer.ffn.experts.routed_experts
         experts.quant_method.mxfp4_backend = Mxfp4MoeBackend.TRITON
     _gpu(monkeypatch)
-    with pytest.raises(MonoUnsupported, match="AITER_MXFP4_BF16"):
-        MonoRuntime(model, config, select_mono_spec(config, SPECS))
+    with pytest.raises(DecodeUnsupported, match="AITER_MXFP4_BF16"):
+        SpecializedDecode(model, config, select_decode_spec(config, SPECS))
 
 
 def test_off_without_the_flag(monkeypatch):
     _gpu(monkeypatch)
     config = make_config()
     config.kernel_config.monokernel = False
-    assert select_mono_spec(config, SPECS) is None
+    assert select_decode_spec(config, SPECS) is None
 
 
 def test_whole_launch_runs_the_layer(monkeypatch):
-    mono, model = _build(monkeypatch)
+    decode, model = _build(monkeypatch)
     positions = torch.zeros(1, dtype=torch.long)
-    with forward(mono.vllm_config, CUDAGraphMode.FULL, _metadata(model)):
-        kernel = _launch(mono, 1)
+    with forward(decode.vllm_config, CUDAGraphMode.FULL, _metadata(model)):
+        kernel = _launch(decode, 1)
         out = kernel.launch(
             torch.zeros(1, HIDDEN),
             positions,
@@ -503,28 +503,28 @@ def test_whole_launch_runs_the_layer(monkeypatch):
             torch.zeros(1, 4),
         )
     assert out[0] == "whole"
-    records = [a for a in out[1] if torch.is_tensor(a) and a.shape[-1:] == (ms.RECORD,)]
+    records = [a for a in out[1] if torch.is_tensor(a) and a.shape[-1:] == (sd.RECORD,)]
     assert len(records) == 1
-    assert out[2]["comp_cache"].shape[-1] == ms.RECORD
+    assert out[2]["comp_cache"].shape[-1] == sd.RECORD
     assert out[2]["fold"]
 
 
 def test_first_layer_takes_the_embedding(monkeypatch):
     """Layer 0's residual is the embedding broadcast to the four streams, which
     K1 takes as it is (no owed post to fold)."""
-    mono, model = _build(monkeypatch)
+    decode, model = _build(monkeypatch)
     positions = torch.zeros(1, dtype=torch.long)
-    with forward(mono.vllm_config, CUDAGraphMode.FULL, _metadata(model)):
-        kernel = _launch(mono, 0)
+    with forward(decode.vllm_config, CUDAGraphMode.FULL, _metadata(model)):
+        kernel = _launch(decode, 0)
         out = kernel.launch(torch.zeros(1, HIDDEN), positions, None, None, None, None)
     assert out[0] == "whole" and not out[2]["fold"]
     assert out[1][2].shape == (1, 4, HIDDEN)
 
 
 def test_ffn_launch_takes_wo_b_unreduced(monkeypatch):
-    mono, model = _build(monkeypatch, compressor=object())
-    with forward(mono.vllm_config, CUDAGraphMode.FULL, _metadata(model)):
-        kernel = _launch(mono, 1)
+    decode, model = _build(monkeypatch, compressor=object())
+    with forward(decode.vllm_config, CUDAGraphMode.FULL, _metadata(model)):
+        kernel = _launch(decode, 1)
         assert kernel.ffn_only
         out = kernel.launch(
             torch.zeros(1, HIDDEN),
@@ -544,8 +544,8 @@ def test_run_takes_every_layer_the_way_its_launch_allows(monkeypatch):
     model = TestDsv41Spec().make_model(config)
     model.layers[2].attn.compressor = object()
     model.layers[4].use_sequence_parallel = True
-    mono, _ = _build(monkeypatch, config=config, model=model)
-    for (layer_id, width), kernel in mono.kernel.kernels.items():
+    decode, _ = _build(monkeypatch, config=config, model=model)
+    for (layer_id, width), kernel in decode.kernel.kernels.items():
         if width != 1 or kernel.ffn_only:
             continue
         taken = model.layers[layer_id].taken
@@ -555,7 +555,7 @@ def test_run_takes_every_layer_the_way_its_launch_allows(monkeypatch):
         )
 
     step = Step(width=1, positions=torch.zeros(1, dtype=torch.long))
-    out = mono.kernel.run(step, None, torch.zeros(1, HIDDEN))
+    out = decode.kernel.run(step, None, torch.zeros(1, HIDDEN))
 
     assert out.shape == (1, HIDDEN)
     assert [layer.taken for layer in model.layers] == [
@@ -571,10 +571,10 @@ def test_run_takes_every_layer_the_way_its_launch_allows(monkeypatch):
 def test_launch_declines_a_layout_it_cannot_read(monkeypatch):
     """A later pipeline stage's first layer gets a stream without the mixes:
     ``skip_step`` cannot see that, so the launch declines it."""
-    mono, model = _build(monkeypatch)
+    decode, model = _build(monkeypatch)
     positions = torch.zeros(1, dtype=torch.long)
-    with forward(mono.vllm_config, CUDAGraphMode.FULL, _metadata(model)):
-        kernel = _launch(mono, 1)
+    with forward(decode.vllm_config, CUDAGraphMode.FULL, _metadata(model)):
+        kernel = _launch(decode, 1)
         out = kernel.launch(
             torch.zeros(1, 4, HIDDEN), positions, None, None, None, None
         )

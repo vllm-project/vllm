@@ -193,8 +193,8 @@ class MonoProbe:
 
     def mono_layers(self) -> dict:
         model = self.model_runner.model  # type: ignore[attr-defined]
-        mono = getattr(model.model, "mono", None)
-        kernels = {} if mono is None else mono.kernels
+        decode = getattr(model, "specialized_decode", None)
+        kernels = {} if decode is None else decode.kernel.kernels
         layers = {
             i: next(
                 (
@@ -206,7 +206,7 @@ class MonoProbe:
             )
             for i in self._decoder_layers()
         }
-        runner = None if mono is None else mono.launch_state.runner
+        runner = None if decode is None else decode.kernel.runner
         return {
             "layers": layers,
             "epoch": -1 if runner is None else int(runner.epoch[0]),

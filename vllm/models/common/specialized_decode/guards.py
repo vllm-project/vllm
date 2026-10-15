@@ -10,11 +10,11 @@ import torch.distributed as dist
 
 from vllm.config.compilation import CUDAGraphMode
 from vllm.logger import init_logger
-from vllm.models.common.mono.spec import (
+from vllm.models.common.specialized_decode.spec import (
+    DecodeSpec,
+    DecodeUnsupported,
     Feature,
     KernelT,
-    MonoSpec,
-    MonoUnsupported,
 )
 
 if TYPE_CHECKING:
@@ -44,9 +44,10 @@ def tp_group() -> tuple[int, int, object | None]:
 def tp_agree(ok: bool, group) -> bool:
     """Agrees a verdict every TP rank must take alike.
 
-    A MonoKernel waits in-kernel on every peer rank, so a rank that turned mono
-    off alone, or failed to build what the others launch, leaves the others
-    spinning on the GPU for ever. Every rank must call this at the same point.
+    The kernel waits in-kernel on every peer rank, so a rank that turned
+    specialized decode off alone, or failed to build what the others launch,
+    leaves the others spinning on the GPU for ever. Every rank must call this
+    at the same point.
 
     Args:
         ok: This rank's local verdict.
@@ -64,7 +65,7 @@ def tp_agree(ok: bool, group) -> bool:
 
 
 def _enabled(vllm_config: "VllmConfig") -> bool:
-    """Whether ``--monokernel`` asked for the model's MonoKernels."""
+    """Whether ``--monokernel`` asked for the model's specialized decode."""
     return bool(vllm_config.kernel_config.monokernel)
 
 
@@ -94,7 +95,7 @@ def _features_in_use(vllm_config: "VllmConfig") -> set[Feature]:
     return {f for f, used in on.items() if used}
 
 
-def _refuse_config(spec: MonoSpec[Any], vllm_config: "VllmConfig") -> list[str]:
+def _refuse_config(spec: DecodeSpec[Any], vllm_config: "VllmConfig") -> list[str]:
     """Every reason this config cannot run ``spec``: default-deny on features,
     then the runner and the graph mode, then the spec's own."""
     reasons = [
@@ -109,8 +110,8 @@ def _refuse_config(spec: MonoSpec[Any], vllm_config: "VllmConfig") -> list[str]:
     return reasons + list(spec.refuse_config(vllm_config))
 
 
-def _refuse_model(spec: MonoSpec[Any], model) -> list[str]:
-    """Every reason the loaded model cannot run ``spec``. A MonoKernel replaces
+def _refuse_model(spec: DecodeSpec[Any], model) -> list[str]:
+    """Every reason the loaded model cannot run ``spec``. Specialized decode replaces
     the layer loop, which a traced graph has already inlined, so a model
     carrying ``@support_torch_compile`` is refused."""
     from vllm.compilation.wrapper import TorchCompileWithNoGuardsWrapper
@@ -118,15 +119,15 @@ def _refuse_model(spec: MonoSpec[Any], model) -> list[str]:
     reasons = []
     if isinstance(model, TorchCompileWithNoGuardsWrapper):
         reasons.append(
-            "model is torch.compile'd: MonoKernels replace the layer loop, "
+            "model is torch.compile'd: specialized decode replaces the layer loop, "
             "so the model must not carry @support_torch_compile"
         )
     return reasons + list(spec.refuse_model(model))
 
 
 def _select_spec(
-    specs: Sequence[MonoSpec[Any]], vllm_config: "VllmConfig"
-) -> tuple[MonoSpec[Any] | None, dict[str, list[str]]]:
+    specs: Sequence[DecodeSpec[Any]], vllm_config: "VllmConfig"
+) -> tuple[DecodeSpec[Any] | None, dict[str, list[str]]]:
     """The first variant this config can serve, and every variant's refusals.
 
     Returns:
@@ -150,7 +151,7 @@ def _refusal_message(refusals: dict[str, list[str]]) -> str:
     )
 
 
-def _set_capture_sizes(spec: MonoSpec[Any], vllm_config: "VllmConfig") -> None:
+def _set_capture_sizes(spec: DecodeSpec[Any], vllm_config: "VllmConfig") -> None:
     """The capture sizes up to the largest width become exactly the widths, so
     a replay never pads a request's rows; larger sizes stay as configured (and
     capture vLLM's path)."""
@@ -159,20 +160,22 @@ def _set_capture_sizes(spec: MonoSpec[Any], vllm_config: "VllmConfig") -> None:
     sizes = cc.cudagraph_capture_sizes or []
     new = sorted(set(widths) | {s for s in sizes if s > max(widths)})
     if new != sorted(sizes):
-        logger.info("MonoKernel %s: CUDA graph capture sizes %s", spec.name, new)
+        logger.info(
+            "Specialized decode %s: CUDA graph capture sizes %s", spec.name, new
+        )
         cc.cudagraph_capture_sizes = new
 
 
-def select_mono_spec(
+def select_decode_spec(
     vllm_config: "VllmConfig",
-    specs: MonoSpec[KernelT] | Sequence[MonoSpec[KernelT]],
-) -> MonoSpec[KernelT] | None:
+    specs: DecodeSpec[KernelT] | Sequence[DecodeSpec[KernelT]],
+) -> DecodeSpec[KernelT] | None:
     """Picks the variant, sets the capture sizes, or raises with every reason.
 
     The variant is picked here, once: the model holds what this returns and
-    hands it to ``MonoRuntime`` after the weights are loaded. A model that prepares
-    anything of its own at load time reads the returned spec to know which
-    variant it is preparing for.
+    hands it to ``SpecializedDecode`` after the weights are loaded. A model
+    that prepares anything of its own at load time reads the returned spec to
+    know which variant it is preparing for.
 
     Args:
         vllm_config: The engine's config, before the weights are loaded.
@@ -182,20 +185,22 @@ def select_mono_spec(
         The variant this config runs, or None with ``--monokernel`` off.
 
     Raises:
-        MonoUnsupported: Every variant refused this config.
+        DecodeUnsupported: Every variant refused this config.
 
     """
     if not _enabled(vllm_config):
         return None
-    ordered = (specs,) if isinstance(specs, MonoSpec) else tuple(specs)
+    ordered = (specs,) if isinstance(specs, DecodeSpec) else tuple(specs)
     spec, refusals = _select_spec(ordered, vllm_config)
     if spec is None:
-        raise MonoUnsupported("MonoKernel refused: " + _refusal_message(refusals))
+        raise DecodeUnsupported(
+            "Specialized decode refused: " + _refusal_message(refusals)
+        )
     _set_capture_sizes(spec, vllm_config)
     if vllm_config.compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
         logger.warning(
-            "MonoKernel %s under eager mode: for debugging only, serve with FULL "
-            "CUDA graphs",
+            "Specialized decode %s under eager mode: for debugging only, serve "
+            "with FULL CUDA graphs",
             spec.name,
         )
     return spec

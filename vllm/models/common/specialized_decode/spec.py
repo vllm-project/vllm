@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""What a model declares to run MonoKernels: ``MonoSpec`` and its callbacks."""
+"""What a model declares to run specialized decode: ``DecodeSpec`` and its
+callbacks."""
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -32,13 +33,13 @@ class Feature(str, Enum):
     WEIGHT_UPDATES = "weight_updates"
 
 
-class MonoUnsupported(Exception):
+class DecodeUnsupported(Exception):
     """The configuration or the loaded model is outside what a spec serves."""
 
 
 @dataclass(frozen=True)
 class Step:
-    """One decode step the kernel takes, as ``MonoRuntime.plan`` decided it."""
+    """One decode step the kernel takes, as ``SpecializedDecode.plan`` decided it."""
 
     width: int
     """The step's rows, one of the widths the spec serves."""
@@ -55,7 +56,7 @@ class ModelKernel(Protocol):
     """
 
     cache_layers: tuple[str, ...]
-    """Attention layers whose caches ``MonoSpec.refuse_caches`` checks."""
+    """Attention layers whose caches ``DecodeSpec.refuse_caches`` checks."""
 
     def run(self, step: Step, input_ids, inputs_embeds, **kwargs) -> Any:
         """Takes and returns what the model's own forward does.
@@ -80,12 +81,12 @@ class ModelKernel(Protocol):
 KernelT = TypeVar("KernelT", bound=ModelKernel)
 """What one spec's ``build`` returns. ``ModelKernel`` is only the lower bound,
 so a model annotates its runtime with its own kernel class
-(``MonoRuntime[MyKernel]``) and reads what that class adds."""
+(``SpecializedDecode[MyKernel]``) and reads what that class adds."""
 
 
 @dataclass(frozen=True)
-class MonoSpec(Generic[KernelT]):
-    """Definition of when a monokernel can run, and how to build it.
+class DecodeSpec(Generic[KernelT]):
+    """Definition of when specialized decode can run, and how to build it.
 
     Attributes:
         name: Log and metric name.

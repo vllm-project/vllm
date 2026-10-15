@@ -49,18 +49,18 @@ from vllm.model_executor.models.utils import (
     make_layers,
     maybe_prefix,
 )
-from vllm.models.common.mono import MonoRuntime, select_mono_spec
 from vllm.models.common.ops.sequence_parallel import (
     sp_all_gather,
     sp_padding_mask,
     sp_reduce_scatter,
     sp_shard,
 )
+from vllm.models.common.specialized_decode import SpecializedDecode, select_decode_spec
 from vllm.models.deepseek_v4.amd.model import (
     DeepseekV4MoE as DeepseekV4MoEBase,
 )
-from vllm.models.deepseek_v41.amd.mono_spec import MONO_SPECS, DSV41Kernel
 from vllm.models.deepseek_v41.amd.rocm import DeepseekV41ROCMAiterMLAAttention
+from vllm.models.deepseek_v41.amd.specialized_decode import DECODE_SPECS, DSV41Kernel
 from vllm.models.deepseek_v41.attention import DeepseekV4Attention
 from vllm.models.deepseek_v41.decoder_replay_layers import DecoderReplayLayers
 from vllm.sequence import IntermediateTensors
@@ -283,7 +283,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         residual: torch.Tensor | None = None,
         engram_hashes: torch.Tensor | None = None,
         engram_mask: torch.Tensor | None = None,
-        mono_ffn: typing.Any | None = None,
+        decode_ffn: typing.Any | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         # Layer 0's attention seam projects the 2-D embedding with the folded
         # hc_attn_fn_broadcast instead of the 4-stream residual with hc_attn_fn.
@@ -384,12 +384,12 @@ class DeepseekV4DecoderLayer(nn.Module):
         if self.use_sequence_parallel:
             x = sp_reduce_scatter(x)
         elif not self.attn.wo_b.reduce_results:
-            # A partial-layer MonoKernel: the FFN launch takes wo_b's TP partial
-            # and the rest of the layer. Whole-layer launches never come through
-            # here, and a new kernel should cover a whole layer instead of
-            # reaching into one.
-            if mono_ffn is not None:
-                out = mono_ffn.launch(x, residual, post_mix, res_mix, attn_pre)
+            # A partial-layer specialized decode: the FFN launch takes wo_b's
+            # TP partial and the rest of the layer. Whole-layer launches never
+            # come through here, and a new kernel should cover a whole layer
+            # instead of reaching into one.
+            if decode_ffn is not None:
+                out = decode_ffn.launch(x, residual, post_mix, res_mix, attn_pre)
                 if out is not None:
                     return out
             x = tensor_model_parallel_all_reduce(x)
@@ -1386,8 +1386,8 @@ class DeepseekV41LLMForCausalLM(
         config = vllm_config.model_config.hf_config
         self.config = config
         self.vllm_config = vllm_config
-        self.mono_spec = select_mono_spec(vllm_config, MONO_SPECS)
-        self.mono: MonoRuntime[DSV41Kernel] | None = None
+        self.specialized_decode_spec = select_decode_spec(vllm_config, DECODE_SPECS)
+        self.specialized_decode: SpecializedDecode[DSV41Kernel] | None = None
         expert_dtype = getattr(config, "expert_dtype", "fp4")
         self.hf_to_vllm_mapper = _make_deepseek_v4_weights_mapper(
             expert_dtype, _linear_scale_param_name(vllm_config, expert_dtype)
@@ -1471,10 +1471,10 @@ class DeepseekV41LLMForCausalLM(
         inputs_embeds: torch.Tensor | None = None,
         lookback_token_ids: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
-        if self.mono is not None:
-            step = self.mono.plan(positions, intermediate_tensors)
+        if self.specialized_decode is not None:
+            step = self.specialized_decode.plan(positions, intermediate_tensors)
             if step is not None:
-                return self.mono.run(
+                return self.specialized_decode.run(
                     step,
                     input_ids,
                     inputs_embeds,
@@ -1504,8 +1504,10 @@ class DeepseekV41LLMForCausalLM(
     def process_weights_after_loading(self) -> None:
         self.model.finalize_mega_moe_weights()
         self.model.finalize_mhc_broadcast_weights()
-        if self.mono_spec is not None:
-            self.mono = MonoRuntime(self.model, self.vllm_config, self.mono_spec)
+        if self.specialized_decode_spec is not None:
+            self.specialized_decode = SpecializedDecode(
+                self.model, self.vllm_config, self.specialized_decode_spec
+            )
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return self.model.get_expert_mapping()
