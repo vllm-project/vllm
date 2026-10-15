@@ -14,7 +14,6 @@ from vllm.config.kernel import MEGA_MOE_BACKENDS, NATIVE_MEGA_MOE_BACKENDS
 from vllm.distributed import (
     get_ep_group,
     get_pp_group,
-    get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
 from vllm.distributed.eplb.eplb_state import EplbLayerState
@@ -753,6 +752,7 @@ class DeepseekV4MoE(nn.Module):
             renormalize=config.norm_topk_prob,
             quant_config=quant_config,
             prefix=f"{prefix}.experts",
+            ckpt_names=("w1", "w2", "w3"),
             scoring_func=self.scoring_func,
             routed_scaling_factor=self.routed_scaling_factor,
             e_score_correction_bias=self.gate.e_score_correction_bias,
@@ -944,7 +944,7 @@ class DeepseekV4DecoderLayer(nn.Module):
             vllm_config,
             prefix=f"{prefix}.ffn",
             use_sequence_parallel=self.use_sequence_parallel,
-            num_hash_layers=config.num_hash_layers,
+            num_hash_layers=config.mlp_layer_types.count("hash_moe"),
         )
 
         self.attn_norm = RMSNorm(self.hidden_size, self.rms_norm_eps)
@@ -1207,7 +1207,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             prefix=f"{prefix}.layers",
         )
         self.has_local_hash_moe = self.start_layer < min(
-            self.end_layer, config.num_hash_layers
+            self.end_layer, config.mlp_layer_types.count("hash_moe")
         )
 
         if get_pp_group().is_last_rank:
@@ -1399,14 +1399,6 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
 
-        # TP for attention
-        tp_size = get_tensor_model_parallel_world_size()
-        tp_rank = get_tensor_model_parallel_rank()
-        n_head = self.config.num_attention_heads
-        n_local_head = n_head // tp_size
-        head_rank_start = n_local_head * tp_rank
-        head_rank_end = n_local_head * (tp_rank + 1)
-
         # Pre-compute expert mapping ONCE.
         expert_mapping = self.get_expert_mapping()
 
@@ -1489,14 +1481,6 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                             name = name_mapped
                             break
                     loaded_params.add(name_mapped)
-                    continue
-                elif "attn_sink" in name:
-                    if is_pp_missing_parameter(name, self):
-                        continue
-                    narrow_weight = loaded_weight[head_rank_start:head_rank_end]
-                    n = narrow_weight.shape[0]
-                    params_dict[name][:n].copy_(narrow_weight)
-                    loaded_params.add(name)
                     continue
                 else:
                     if is_pp_missing_parameter(name, self):
