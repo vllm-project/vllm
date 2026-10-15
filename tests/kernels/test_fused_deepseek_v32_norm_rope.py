@@ -776,6 +776,237 @@ def test_fused_norm_rope_supports_large_token_count():
     assert_bf16(q_out[rows], rms_norm(q_c[rows], norm_w), "large-token q norm")
 
 
+def _on_gfx950() -> bool:
+    if not current_platform.is_rocm():
+        return False
+    from vllm.platforms.rocm import on_gfx950
+
+    return on_gfx950()
+
+
+requires_gfx950 = pytest.mark.skipif(
+    not _on_gfx950(), reason="the paged MXFP4 indexer cache is gfx950-only"
+)
+
+
+def mxfp4_quant(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """[..., D] fp32 -> (e2m1 codes [..., D], e8m0 [..., D // 32]) with the
+    2^ceil(log2(amax / 6)) block scale, so nothing saturates."""
+    blocks = x.float().unflatten(-1, (-1, 32))
+    ratio = blocks.abs().amax(-1).clamp_min(6.0 * 2**-126) / 6.0
+    e8m0 = (ratio.view(torch.int32) + 0x7FFFFF) >> 23
+    inv_scale = ((254 - e8m0) << 23).view(torch.float32)
+    codes = quantize_to_e2m1(blocks * inv_scale.unsqueeze(-1)).flatten(-2)
+    return codes, e8m0.to(torch.uint8)
+
+
+def e2m1_pairs(codes: torch.Tensor) -> torch.Tensor:
+    """Pack e2m1 codes two per byte, the even element in the low nibble."""
+    return codes[..., 0::2] | (codes[..., 1::2] << 4)
+
+
+def mxfp4_dequant(packed: torch.Tensor, e8m0: torch.Tensor) -> torch.Tensor:
+    mags = torch.tensor(E2M1_MAGNITUDES, device=packed.device)
+    table = torch.cat([mags, -mags])
+    vals = torch.stack([table[(packed & 0xF).long()], table[(packed >> 4).long()]], -1)
+    scale = torch.exp2(e8m0.float() - 127)
+    return (vals.flatten(-2).unflatten(-1, (-1, 32)) * scale[..., None]).flatten(-2)
+
+
+def unshuffle_mxfp4_page(page: torch.Tensor, entries: int, layout, head_dim: int):
+    """One paged MXFP4 cache page back to token order. Written from the layout's
+    description, not from the writer: in each run of n_per_tile tokens the
+    values are [chunk, token, byte] and the scales [scale % lanes, token,
+    scale // lanes]."""
+    npt, dpt, lanes = layout
+    vals = page[: entries * head_dim // 2].view(entries // npt, -1, npt, dpt)
+    vals = vals.permute(0, 2, 1, 3).reshape(entries, head_dim // 2)
+    scales = page[entries * head_dim // 2 :].view(entries // npt, lanes, npt, -1)
+    scales = scales.permute(0, 2, 3, 1).reshape(entries, head_dim // 32)
+    return vals, scales
+
+
+@requires_gfx950
+@pytest.mark.parametrize("cfg", MODEL_CONFIGS, ids=MODEL_IDS)
+@pytest.mark.parametrize("num_tokens", [1, 17, 300])
+@pytest.mark.parametrize("block_size", [64, 128])
+def test_fused_norm_rope_mxfp4_indexer_cache(
+    num_tokens: int, block_size: int, cfg: ModelConfig
+):
+    """The indexer-K MXFP4 write: exact bytes in the page order aiter's kernel
+    reads, each 32-value block keeping its own scale, nothing outside the
+    pages touched, and the kernel scoring the cache like the reference."""
+    from vllm.v1.attention.ops.rocm_paged_mxfp4_indexer import (
+        _aiter,
+        _kv_view,
+        rocm_paged_mxfp4_cache_layout,
+    )
+
+    torch.manual_seed(3)
+    dev = "cuda"
+    head_dim = cfg.index_head_dim
+    row = head_dim // 2 + head_dim // 32
+    pos = torch.randint(0, 4096, (num_tokens,), device=dev, dtype=torch.int64)
+    q_c = torch.randn(num_tokens, cfg.q_lora, device=dev, dtype=torch.bfloat16)
+    kv_c = torch.randn(num_tokens, cfg.kv_lora, device=dev, dtype=torch.bfloat16)
+    k_pe = torch.randn(num_tokens, cfg.rope_dim, device=dev, dtype=torch.bfloat16)
+    qw = torch.randn(cfg.q_lora, device=dev, dtype=torch.bfloat16)
+    kvw = torch.randn(cfg.kv_lora, device=dev, dtype=torch.bfloat16)
+    ik = torch.randn(num_tokens, head_dim, device=dev, dtype=torch.bfloat16)
+    # Blocks of the head span 1x..64x, so a scale read for the wrong block or
+    # token is off by a power of two the scores show.
+    ikw = torch.randn(head_dim, device=dev) * 4.0 ** torch.arange(
+        head_dim, device=dev
+    ).div(32, rounding_mode="floor")
+    ikb = torch.randn(head_dim, device=dev)
+    cos_sin = make_cos_sin(4096, cfg.rope_dim, dev)
+
+    # A block-major pool: each page sits a padded block stride apart.
+    num_blocks = -(-num_tokens // block_size) + 2
+    stride = block_size * row + 512
+    pool = torch.zeros(num_blocks * stride, device=dev, dtype=torch.uint8)
+    cache = torch.as_strided(pool, (num_blocks, block_size, row), (stride, row, 1))
+    slots = torch.randperm(num_blocks * block_size, device=dev)[:num_tokens]
+    if num_tokens > 1:
+        slots[num_tokens // 2] = -1  # padding row, never written
+    live = [t for t, slot in enumerate(slots.tolist()) if slot >= 0]
+    layout = tuple(rocm_paged_mxfp4_cache_layout(cfg.index_heads, head_dim, block_size))
+    ik_out = torch.empty(num_tokens, head_dim, device=dev, dtype=torch.float32)
+    topk = torch.zeros(num_tokens, 8, device=dev, dtype=torch.int32)
+
+    K.fused_norm_rope(
+        pos,
+        q_c,
+        qw,
+        EPS,
+        kv_c,
+        kvw,
+        EPS,
+        k_pe,
+        cos_sin,
+        ik,
+        ikw,
+        ikb,
+        EPS,
+        cos_sin,
+        topk,
+        slot_mapping=slots,
+        indexer_k_cache=cache,
+        indexer_cache_mxfp4=layout,
+        has_indexer=True,
+        index_rope_interleave=True,
+        index_k_out=ik_out,
+    )
+
+    ref = rope(layer_norm(ik, ikw, ikb), pos, cos_sin, interleave=True)
+    torch.testing.assert_close(ik_out[live], ref[live], rtol=1e-4, atol=1e-3)
+    codes, e8m0 = mxfp4_quant(ik_out)
+    want_vals, want_scales = e2m1_pairs(codes), e8m0
+    written = torch.zeros_like(pool, dtype=torch.bool)
+    for t, slot in enumerate(slots.tolist()):
+        if slot < 0:
+            continue
+        block, entry = divmod(slot, block_size)
+        page = pool[block * stride : block * stride + block_size * row]
+        vals, scales = unshuffle_mxfp4_page(page, block_size, layout, head_dim)
+        assert torch.equal(vals[entry], want_vals[t]), f"token {t} values"
+        assert torch.equal(scales[entry], want_scales[t]), f"token {t} scales"
+        written[block * stride : block * stride + block_size * row] = True
+    assert int(pool[~written].count_nonzero()) == 0, "wrote outside its pages"
+
+    # aiter's kernel reads every written key back: one query row per token,
+    # each over a one-page table, scored against the dequantized reference.
+    slot_live = slots[live]
+    heads = cfg.index_heads
+    q = torch.randint(0, 256, (len(live), heads, head_dim // 2), dtype=torch.uint8)
+    q_e8m0 = torch.randint(124, 130, (len(live), heads, head_dim // 32))
+    q, q_e8m0 = q.to(dev), q_e8m0.to(torch.uint8).to(dev)
+    w = torch.randn(len(live), heads, device=dev)
+    logits = torch.full((len(live), block_size), float("-inf"), device=dev)
+    entries = (slot_live % block_size).int()
+    _aiter().paged_mxfp4_mqa_logits(
+        q.unsqueeze(1),
+        q_e8m0.unsqueeze(1),
+        _kv_view(cache, head_dim),
+        w,
+        entries + 1,
+        (slot_live // block_size).int().unsqueeze(1),
+        block_size,
+        out_logits=logits,
+    )
+    keys = mxfp4_dequant(want_vals[live], want_scales[live])
+    q_ref = mxfp4_dequant(q, q_e8m0)
+    for i, entry in enumerate(entries.tolist()):
+        score = (torch.relu(q_ref[i] @ keys[i]) * w[i]).sum()
+        torch.testing.assert_close(logits[i, entry], score, rtol=1e-4, atol=1e-3)
+
+
+@requires_gfx950
+@pytest.mark.parametrize("cfg", MODEL_CONFIGS, ids=MODEL_IDS)
+@pytest.mark.parametrize("num_tokens", [1, 17, 512])
+def test_fused_q_mxfp4(num_tokens: int, cfg: ModelConfig):
+    """The MXFP4 index query: RoPE'd and quantized per 32 values, its four
+    e8m0 bytes packed as one int32 per head, and weights without a q-scale."""
+    torch.manual_seed(5)
+    dev = "cuda"
+    pos = torch.randint(0, 4096, (num_tokens,), device=dev, dtype=torch.int64)
+    q_pe = torch.randn(
+        num_tokens, cfg.num_heads, cfg.rope_dim, device=dev, dtype=torch.bfloat16
+    )
+    ql_nope = torch.randn(
+        num_tokens, cfg.num_heads, cfg.kv_lora, device=dev, dtype=torch.bfloat16
+    )
+    index_q = torch.randn(
+        num_tokens, cfg.index_heads, cfg.index_head_dim, device=dev
+    ).to(torch.bfloat16)
+    index_w = torch.randn(num_tokens, cfg.index_heads, device=dev)
+    softmax_scale = cfg.index_head_dim**-0.5
+    head_scale = cfg.index_heads**-0.5
+    cos_sin = make_cos_sin(4096, cfg.rope_dim, dev)
+
+    (q_fp4, q_scale), iw_out, _ = K.fused_q(
+        pos,
+        q_pe,
+        cos_sin,
+        index_q,
+        cos_sin,
+        ql_nope,
+        torch.tensor([1.0], device=dev),
+        index_w,
+        softmax_scale,
+        head_scale,
+        has_indexer=True,
+        index_rope_interleave=True,
+        index_q_mxfp4=True,
+    )
+
+    assert q_fp4.shape == (num_tokens, cfg.index_heads, cfg.index_head_dim // 2)
+    assert q_scale.shape == (num_tokens, cfg.index_heads)
+    assert q_scale.dtype == torch.int32
+    scales = q_scale.view(torch.uint8).view(num_tokens, cfg.index_heads, -1)
+    iq_ref = rope(
+        index_q.float(),
+        pos.unsqueeze(-1).expand(num_tokens, cfg.index_heads),
+        cos_sin,
+        interleave=True,
+    )
+    _, e8m0_ref = mxfp4_quant(iq_ref)
+    # The kernel's fp32 RoPE can round to the other side of a power of two or
+    # an e2m1 tie from torch's; compare what the scorer will see.
+    got = mxfp4_dequant(q_fp4, scales)
+    want = mxfp4_dequant(*_pack_ref(iq_ref))
+    assert (scales != e8m0_ref).float().mean() < 1e-3
+    step = torch.exp2(scales.float() - 127).repeat_interleave(32, -1)
+    assert ((got - want).abs() > step + 1e-6).sum() == 0
+    assert ((got - want).abs() > 0).float().mean() < 1e-3
+    torch.testing.assert_close(iw_out, index_w * softmax_scale * head_scale)
+
+
+def _pack_ref(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    codes, e8m0 = mxfp4_quant(x)
+    return e2m1_pairs(codes), e8m0
+
+
 # ── fused_q ──────────────────────────────────────────────────────────────────
 
 
