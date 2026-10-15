@@ -11,6 +11,7 @@ from torch import nn
 
 from vllm.config import (
     CompilationConfig,
+    CompilationMode,
     DeviceConfig,
     LoadConfig,
     VllmConfig,
@@ -122,7 +123,7 @@ def test_lilicorr_matches_exported_head(head_width, slots, dtype):
         set_current_vllm_config(
             VllmConfig(
                 device_config=DeviceConfig("cuda"),
-                compilation_config=CompilationConfig(mode=0),
+                compilation_config=CompilationConfig(mode=CompilationMode.NONE),
             )
         ),
     ):
@@ -183,7 +184,7 @@ def test_runtime_length_keeps_trained_checkpoint_geometry(monkeypatch):
     with set_current_vllm_config(
         VllmConfig(
             device_config=DeviceConfig("cpu"),
-            compilation_config=CompilationConfig(mode=0),
+            compilation_config=CompilationConfig(mode=CompilationMode.NONE),
         )
     ):
         for slots in (1, 3):
@@ -268,7 +269,11 @@ def test_candidates_use_global_partition_and_exclude_padding(monkeypatch, tp_siz
         )
         monkeypatch.setattr(logits_processor, "_topk", lambda x, k: x.topk(k, dim=-1))
         ids, values = logits_processor.LogitsProcessor.get_top_k_tokens(
-            fake, lm_head, torch.empty(2, 1), 2, return_log_probs=True
+            fake,
+            lm_head,
+            torch.empty(2, 1),
+            2,
+            return_log_probs=True,
         )
         expected = torch.cat(valid_shards, -1).log_softmax(-1).topk(2)
         torch.testing.assert_close(ids, expected.indices)
@@ -285,16 +290,47 @@ def test_context_anchor_is_last_committed_normalized_feature():
         anchor_hidden=torch.full((4, 4), 123.0),
         anchor_valid=torch.ones(4, dtype=torch.bool),
     )
-    batch = SimpleNamespace(num_reqs=2, query_start_loc=torch.tensor([0, 2, 6]))
-    LiLiCorrSpeculator.prepare_context_anchor(spec, batch, torch.tensor([0, 2]))
+    LiLiCorrSpeculator.prepare_context_anchor(
+        spec, 2, torch.tensor([0, 2, 6]), torch.tensor([0, 2])
+    )
     torch.testing.assert_close(spec.anchor_hidden[:2], norm(hidden[[1, 3]]))
     assert spec.anchor_valid.tolist() == [True, True, False, False]
     assert not spec.anchor_hidden[2:].any()
     # A smaller reordered batch must not retain an old request's anchor.
-    batch = SimpleNamespace(num_reqs=1, query_start_loc=torch.tensor([0, 3]))
-    LiLiCorrSpeculator.prepare_context_anchor(spec, batch, torch.tensor([1]))
+    LiLiCorrSpeculator.prepare_context_anchor(
+        spec, 1, torch.tensor([0, 3]), torch.tensor([1])
+    )
     torch.testing.assert_close(spec.anchor_hidden[0], norm(hidden[1]))
     assert not spec.anchor_hidden[1:].any()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_captured_context_anchor_rereads_fixed_inputs():
+    """The anchor runs in the draft's FULL graph: each replay must re-read its
+    fixed-address inputs and ignore a padded request's stale rejected count."""
+    dev = torch.device("cuda")
+    query_start_loc = torch.zeros(3, dtype=torch.int32, device=dev)
+    num_rejected = torch.zeros(2, dtype=torch.int32, device=dev)
+    spec = SimpleNamespace(
+        hidden_states=torch.randn(8, 2, device=dev),
+        model=SimpleNamespace(model=SimpleNamespace(hidden_norm=lambda x: 2 * x)),
+        anchor_hidden=torch.zeros(2, 2, device=dev),
+        anchor_valid=torch.zeros(2, dtype=torch.bool, device=dev),
+    )
+    args = (spec, 2, query_start_loc, num_rejected)
+    LiLiCorrSpeculator.prepare_context_anchor(*args)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        LiLiCorrSpeculator.prepare_context_anchor(*args)
+    # One live request padded to two; the second case anchors on a prefill row
+    # past the graph's context rows, stored eagerly before replay.
+    for loc, rejected, row in (([0, 2, 2], [1, 5], 0), ([0, 7, 7], [0, 0], 6)):
+        query_start_loc.copy_(torch.tensor(loc))
+        num_rejected.copy_(torch.tensor(rejected))
+        graph.replay()
+        torch.testing.assert_close(spec.anchor_hidden[0], 2 * spec.hidden_states[row])
+        assert spec.anchor_valid.tolist() == [True, False]
+        assert not spec.anchor_hidden[1].any()
 
 
 @pytest.mark.parametrize("lilicorr", [False, True])
@@ -349,22 +385,35 @@ def test_candidate_generation_routes_scores_and_adaptive_inputs(monkeypatch, lil
         compute_candidates=lambda h: (candidates, log_probs),
         model=SimpleNamespace(lilicorr=score, candidate_selector=score),
     )
-    spec.target_embeddings = lambda ids: ids.float().unsqueeze(-1).expand(*ids.shape, 4)
     if lilicorr:
+        assert isinstance(spec, LiLiCorrSpeculator)
+        monkeypatch.setattr(
+            spec,
+            "target_embeddings",
+            lambda ids: ids.float().unsqueeze(-1).expand(*ids.shape, 4),
+            raising=False,
+        )
         spec.anchor_hidden.copy_(torch.arange(12).view(3, 4))
         spec.anchor_valid[:2] = True
-    spec.candidate_sampler.sample = sample
-    spec._maybe_predict_acceptance = lambda *args: adaptive_inputs.extend(args)
+    monkeypatch.setattr(spec.candidate_sampler, "sample", sample)
+    monkeypatch.setattr(
+        spec, "_maybe_predict_acceptance", lambda *args: adaptive_inputs.extend(args)
+    )
     spec._generate_draft(3, 9, None, None, None)
 
     expected_ids = candidates.view(3, 2, 4)
-    expected_first = spec.target_embeddings(expected_ids) if lilicorr else expected_ids
+    expected_first = (
+        spec.target_embeddings(expected_ids)
+        if isinstance(spec, LiLiCorrSpeculator)
+        else expected_ids
+    )
     torch.testing.assert_close(scoring_inputs[0], expected_first)
     torch.testing.assert_close(scoring_inputs[1], log_probs.view(3, 2, 4))
     torch.testing.assert_close(
         scoring_inputs[2], hidden[spec.sample_indices].view(3, 2, 4)
     )
     if lilicorr:
+        assert isinstance(spec, LiLiCorrSpeculator)
         torch.testing.assert_close(scoring_inputs[3], spec.anchor_hidden)
         torch.testing.assert_close(scoring_inputs[4], spec.anchor_valid)
     else:
@@ -472,7 +521,7 @@ def test_checkpoint_coverage_rejects_incomplete_or_wrong_heads(
 ):
     from vllm.model_executor.models.lilicorr import LiLiCorr, LiLiCorrForCausalLM
 
-    wrapper = LiLiCorrForCausalLM.__new__(LiLiCorrForCausalLM)
+    wrapper = LiLiCorrForCausalLM.__new__(LiLiCorrForCausalLM)  # type: ignore[type-abstract]
     nn.Module.__init__(wrapper)
     wrapper.model = LiLiCorr.__new__(LiLiCorr)
     nn.Module.__init__(wrapper.model)
@@ -480,7 +529,7 @@ def test_checkpoint_coverage_rejects_incomplete_or_wrong_heads(
     with set_current_vllm_config(
         VllmConfig(
             device_config=DeviceConfig("cpu"),
-            compilation_config=CompilationConfig(mode=0),
+            compilation_config=CompilationConfig(mode=CompilationMode.NONE),
         )
     ):
         wrapper.model.lilicorr = LiLiCorrHead(
@@ -615,7 +664,7 @@ def owned_head_model(monkeypatch):
         with set_current_vllm_config(
             VllmConfig(
                 device_config=DeviceConfig("cpu"),
-                compilation_config=CompilationConfig(mode=0),
+                compilation_config=CompilationConfig(mode=CompilationMode.NONE),
             )
         ):
             model = LiLiCorrForCausalLM(vllm_config=vllm_config)
@@ -720,7 +769,7 @@ def test_quantized_head_calls_methods_without_reading_packed_weights(monkeypatch
     with set_current_vllm_config(
         VllmConfig(
             device_config=DeviceConfig("cpu"),
-            compilation_config=CompilationConfig(mode=0),
+            compilation_config=CompilationConfig(mode=CompilationMode.NONE),
         )
     ):
         head = LiLiCorrHead(

@@ -31,6 +31,7 @@ from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     maybe_convert_block_hash,
     resolve_block_hashes,
+    to_event_extra_keys,
 )
 from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
@@ -393,9 +394,7 @@ class OffloadingEventsTracker:
                 lora_id=meta.lora_id,
                 medium=_MEDIUM_TO_EVENT_STR[event.medium],
                 lora_name=meta.lora_name,
-                extra_keys=(
-                    list(meta.extra_keys) if meta.extra_keys is not None else None
-                ),
+                extra_keys=to_event_extra_keys(meta.extra_keys),
                 group_idx=meta.group_idx,
                 kv_cache_spec_kind=meta.kv_cache_spec.kv_cache_spec_kind,
                 kv_cache_spec_sliding_window=(
