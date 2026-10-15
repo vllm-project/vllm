@@ -31,6 +31,7 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     TritonWarmupTensor,
 )
 from vllm.platforms import current_platform
+from vllm.transformers_utils.deepseek_v4_utils import get_compress_ratios
 from vllm.triton_utils import tl, triton
 from vllm.utils.import_utils import has_cutedsl
 from vllm.utils.math_utils import cdiv, next_power_of_2
@@ -1012,7 +1013,7 @@ def _combine_topk_swa_warmup_inputs(vllm_config: Any) -> _WarmupInputRows:
     """
     model_config = getattr(vllm_config, "model_config", None)
     hf_config = getattr(model_config, "hf_config", None)
-    compress_ratios = getattr(hf_config, "compress_ratios", None) or [0]
+    compress_ratios = get_compress_ratios(hf_config) or [0]
     topk = _hf_config_int(vllm_config, "index_topk", 0)
     return zip_inputs(
         *(
