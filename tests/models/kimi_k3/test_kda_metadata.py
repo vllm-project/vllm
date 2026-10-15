@@ -223,7 +223,7 @@ def test_kda_recoverssm_startup_metadata_flow_without_model(monkeypatch):
             max_cudagraph_capture_size=None,
             static_forward_context={},
         ),
-        scheduler_config=SimpleNamespace(max_num_seqs=4),
+        scheduler_config=SimpleNamespace(max_num_seqs=4, max_num_batched_tokens=64),
         additional_config={},
         num_speculative_tokens=2,
         num_hash_lookahead_tokens=0,
