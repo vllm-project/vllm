@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""MLA DCP collective selection and direct symmetric-memory implementations."""
+"""DCP metadata, MLA collective selection and direct symmetric-memory kernels."""
 
 from __future__ import annotations
 
@@ -41,6 +41,51 @@ if TYPE_CHECKING:
     from torch.distributed import ProcessGroup
 
     from vllm.distributed.parallel_state import GroupCoordinator
+    from vllm.v1.attention.backend import CommonAttentionMetadata
+    from vllm.v1.kv_cache_interface import KVCacheSpec
+
+
+@dataclass
+class DCPValidTokenMask:
+    """Persistent source-rank token mask owned by one metadata builder."""
+
+    buffer: torch.Tensor | None = None
+
+    @classmethod
+    def from_config(
+        cls,
+        vllm_config: VllmConfig,
+        kv_cache_spec: KVCacheSpec,
+        device: torch.device,
+    ) -> DCPValidTokenMask:
+        parallel_config = vllm_config.parallel_config
+        if (
+            parallel_config.decode_context_parallel_size <= 1
+            or parallel_config.dcp_comm_backend != "fi_a2a_fused"
+            or not kv_cache_spec.dcp_sharded
+        ):
+            return cls()
+        return cls(
+            torch.empty(
+                get_dcp_workspace_max_num_tokens(vllm_config, include_prefill=True),
+                dtype=torch.bool,
+                device=device,
+            )
+        )
+
+    def build(self, common: CommonAttentionMetadata) -> torch.Tensor | None:
+        mask = self.buffer
+        if mask is None:
+            return None
+        if common.num_actual_tokens > mask.numel():
+            raise ValueError("FI DCP token count exceeds mask capacity")
+        assert common.dcp_local_seq_lens is not None
+        from vllm.v1.attention.ops.metadata import build_dcp_valid_token_mask
+
+        build_dcp_valid_token_mask(
+            common.dcp_local_seq_lens, common.query_start_loc, mask
+        )
+        return mask
 
 
 # LSE/output combine
@@ -1010,8 +1055,18 @@ def dcp_a2a_lse_reduce(
     )
 
 
-def get_dcp_workspace_max_num_tokens(vllm_config: VllmConfig) -> int:
+def get_dcp_workspace_max_num_tokens(
+    vllm_config: VllmConfig, *, include_prefill: bool = False
+) -> int:
     scheduler_config = vllm_config.scheduler_config
+    if include_prefill:
+        # Forced MQA can feed prefill tokens to the O-only MLA combine. The FI
+        # backend never switches collectives at runtime, so reserve the full
+        # scheduler budget as well as graph padding.
+        return max(
+            scheduler_config.max_num_batched_tokens,
+            vllm_config.compilation_config.max_cudagraph_capture_size or 0,
+        )
     # num_speculative_tokens also counts a diffusion canvas.
     tokens_per_seq = max(
         1 + vllm_config.num_speculative_tokens, max_decode_query_len(vllm_config)
@@ -1442,6 +1497,7 @@ class DCPCombine(Protocol):
         *,
         seq_lens: torch.Tensor,
         query_start_loc: torch.Tensor,
+        valid_token_mask: torch.Tensor | None = None,
     ) -> torch.Tensor: ...
 
 
@@ -1467,8 +1523,11 @@ class MLADCPManager:
         self.group = get_dcp_group()
         self.device = torch.device(device)
         self.num_ubatches = max(parallel_config.num_ubatches, 1)
-        self.max_num_tokens = get_dcp_workspace_max_num_tokens(vllm_config)
-        self.use_a2a = parallel_config.dcp_comm_backend == "a2a"
+        self.use_fi_a2a_fused = parallel_config.dcp_comm_backend == "fi_a2a_fused"
+        self.max_num_tokens = get_dcp_workspace_max_num_tokens(
+            vllm_config, include_prefill=self.use_fi_a2a_fused
+        )
+        self.use_a2a = parallel_config.dcp_comm_backend in ("a2a", "fi_a2a_fused")
         self.padded_num_heads = padded_num_heads
 
         self.combine = self._init_combine(
@@ -1504,6 +1563,26 @@ class MLADCPManager:
         is_lse_base_on_e: bool,
         use_pcp: bool,
     ) -> DCPCombine:
+        if self.use_fi_a2a_fused:
+            if use_pcp:
+                raise ValueError("fi_a2a_fused does not support PCP")
+            from vllm.v1.attention.ops.flashinfer_dcp import (
+                get_flashinfer_dcp_workspace,
+            )
+
+            workspace = get_flashinfer_dcp_workspace(
+                self.group,
+                self.device,
+                self.max_num_tokens,
+                num_heads,
+                head_dim,
+                dtype,
+                self.num_ubatches,
+            )
+            logger.info_once("Using FlashInfer NCCL fused DCP A2A + LSE reduction.")
+            return functools.partial(
+                workspace.lse_reduce, is_lse_base_on_e=is_lse_base_on_e
+            )
         direct_workspace = None
         if self.use_a2a:
             direct_workspace = get_direct_dcp_a2a_workspace(

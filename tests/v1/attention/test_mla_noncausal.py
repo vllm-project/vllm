@@ -7,12 +7,19 @@ import pytest
 import torch
 
 from vllm.model_executor.layers.attention.mla_attention import (
+    MLACommonBackend,
     MLACommonMetadata,
     MLACommonMetadataBuilder,
     QueryLenSupport,
 )
+from vllm.model_executor.layers.attention.sparse_mla_attention import (
+    SparseMLACommonMetadata,
+    SparseMLACommonMetadataBuilder,
+)
 from vllm.v1.attention.backend import CommonAttentionMetadata
+from vllm.v1.attention.ops.dcp import DCPValidTokenMask
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
+from vllm.v1.worker.utils import AttentionGroup
 
 
 class _NonCausalMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
@@ -67,6 +74,7 @@ def _builder(marked: bool = True) -> _NonCausalMLAMetadataBuilder:
     builder.query_len_support = QueryLenSupport.SINGLE_ONLY
     builder.non_causal_multi_token_decode = marked
     builder.dcp_world_size = 1
+    builder.dcp_valid_token_mask = DCPValidTokenMask()
     builder.use_pcp = False
     builder.metadata_cls = MLACommonMetadata
     builder.model_config = SimpleNamespace(
@@ -106,6 +114,7 @@ def _dspark_dcp_vllm_config(
         ),
         parallel_config=SimpleNamespace(
             decode_context_parallel_size=2,
+            dcp_comm_backend="ag_rs",
             prefill_context_parallel_size=1,
             cp_kv_cache_interleave_size=1,
         ),
@@ -183,6 +192,136 @@ def test_noncausal_decode_metadata_keeps_live_request_buffers():
         metadata.decode.block_table.data_ptr()
         == common_metadata.block_table_tensor.data_ptr()
     )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
+def test_fi_dcp_builder_refreshes_mask_for_draft_graph_replay():
+    builder = _builder()
+    builder.device = torch.device("cuda")
+    builder.dcp_world_size = 2
+    builder.cp_kv_cache_interleave_size = 1
+    group = AttentionGroup(MLACommonBackend, ["layer.0"], _merged_mla_spec(), 0)
+    group.metadata_builders = [builder]
+    mask = torch.ones(8, dtype=torch.bool, device="cuda")
+    builder.dcp_valid_token_mask = DCPValidTokenMask(mask)
+    mask_ptr = mask.data_ptr()
+
+    for capture, boundaries, local_lens, expected in (
+        (False, [0, 2, 4, 4], [2, 0, 0], [True, True] + [False] * 6),
+        (True, [0, 1, 2, 2], [0, 3, 0], [False, True] + [False] * 6),
+    ):
+        common_metadata = _metadata(boundaries, num_tokens=8)
+        common_metadata.query_start_loc = common_metadata.query_start_loc.cuda()
+        common_metadata.seq_lens = common_metadata.seq_lens.cuda()
+        common_metadata.block_table_tensor = common_metadata.block_table_tensor.cuda()
+        common_metadata.slot_mapping = common_metadata.slot_mapping.cuda()
+        common_metadata.dcp_local_seq_lens = torch.tensor(
+            local_lens, dtype=torch.int32, device="cuda"
+        )
+
+        metadata = (
+            group.build_metadata_for_cudagraph_capture(common_metadata)
+            if capture
+            else group.build_metadata(common_metadata)
+        )
+
+        assert metadata.dcp_valid_token_mask.data_ptr() == mask_ptr
+        torch.testing.assert_close(
+            metadata.dcp_valid_token_mask,
+            torch.tensor(expected, dtype=torch.bool, device="cuda"),
+        )
+
+    group.build_metadata_for_drafting(common_metadata, draft_index=0)
+    torch.accelerator.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        metadata = group.build_metadata_for_drafting(common_metadata, draft_index=0)
+    for boundaries, local_lens, expected in (
+        ([0, 2, 4, 4], [1, 0, 0], [True, True] + [False] * 6),
+        ([0, 3, 6, 6], [0, 0, 0], [False] * 8),
+    ):
+        # Replay must read live GPU metadata, even when CPU boundaries are stale.
+        common_metadata.query_start_loc.copy_(
+            torch.tensor(boundaries, dtype=torch.int32, device="cuda")
+        )
+        common_metadata.dcp_local_seq_lens.copy_(
+            torch.tensor(local_lens, dtype=torch.int32, device="cuda")
+        )
+        graph.replay()
+        assert metadata.dcp_valid_token_mask.data_ptr() == mask_ptr
+        torch.testing.assert_close(
+            metadata.dcp_valid_token_mask,
+            torch.tensor(expected, dtype=torch.bool, device="cuda"),
+        )
+
+
+def test_dcp_builder_leaves_mask_unset_when_disabled():
+    group = AttentionGroup(MLACommonBackend, ["layer.0"], _merged_mla_spec(), 0)
+    group.metadata_builders = [_builder()]
+
+    metadata = group.build_metadata(_metadata([0, 1, 2]))
+
+    assert group.get_metadata_builder().dcp_valid_token_mask.buffer is None
+    assert metadata.dcp_valid_token_mask is None
+
+
+def test_fi_dcp_builder_rejects_mask_capacity_overflow():
+    group = AttentionGroup(MLACommonBackend, ["layer.0"], _merged_mla_spec(), 0)
+    group.metadata_builders = [_builder()]
+    group.get_metadata_builder().dcp_valid_token_mask = DCPValidTokenMask(
+        torch.empty(1, dtype=torch.bool)
+    )
+    with pytest.raises(ValueError, match="token count exceeds mask capacity"):
+        group.build_metadata(_metadata([0, 1, 2]))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
+@pytest.mark.parametrize(
+    "entrypoint",
+    [
+        "build_metadata",
+        "build_metadata_for_cudagraph_capture",
+        "build_metadata_for_drafting",
+    ],
+)
+def test_fi_dcp_builders_preserve_shared_sparse_request_mapping(entrypoint):
+    common = _metadata([0, 1, 2, 2], num_tokens=4, causal=True)
+    common.query_start_loc = common.query_start_loc.cuda()
+    common.seq_lens = common.seq_lens.cuda()
+    common.block_table_tensor = common.block_table_tensor.cuda()
+    common.slot_mapping = common.slot_mapping.cuda()
+    common.dcp_local_seq_lens = torch.tensor([1, 0, 0], device="cuda")
+    shared_ptr = None
+    for _ in range(2):
+        builder = object.__new__(SparseMLACommonMetadataBuilder)
+        builder.metadata_cls = SparseMLACommonMetadata
+        builder.kv_cache_spec = _merged_mla_spec()
+        builder.req_id_per_token_buffer = torch.full(
+            (4,), -1, dtype=torch.int32, device="cuda"
+        )
+        builder.topk_tokens = 2048
+        builder.use_pcp = False
+        builder.reorder_batch_threshold = 1
+        builder.cp_kv_cache_interleave_size = 1
+        group = AttentionGroup(MLACommonBackend, ["layer.0"], builder.kv_cache_spec, 0)
+        group.metadata_builders = [builder]
+        mask = torch.empty(4, dtype=torch.bool, device="cuda")
+        builder.dcp_valid_token_mask = DCPValidTokenMask(mask)
+        kwargs = {"draft_index": 0} if entrypoint.endswith("drafting") else {}
+        metadata = getattr(group, entrypoint)(common, **kwargs)
+
+        if shared_ptr is None:
+            shared_ptr = builder.req_id_per_token_buffer.data_ptr()
+        else:
+            assert torch.all(builder.req_id_per_token_buffer == -1)
+        assert common._token_to_req_indices_cache is not None
+        assert common._token_to_req_indices_cache.data_ptr() == shared_ptr
+        assert metadata.req_id_per_token.data_ptr() == shared_ptr
+        torch.testing.assert_close(
+            metadata.req_id_per_token,
+            torch.tensor([0, 1, 0, 0], dtype=torch.int32, device="cuda"),
+        )
+        assert metadata.dcp_valid_token_mask.data_ptr() == mask.data_ptr()
 
 
 def test_mla_cache_marker_is_promoted_to_group_capability():

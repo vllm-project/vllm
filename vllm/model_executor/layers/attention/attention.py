@@ -360,6 +360,16 @@ class Attention(nn.Module, AttentionLayerBase):
             )
         else:
             self.attn_backend = attn_backend
+        if (
+            vllm_config.parallel_config.dcp_comm_backend == "fi_a2a_fused"
+            and vllm_config.parallel_config.decode_context_parallel_size > 1
+            and not (model_config is not None and model_config.use_mla)
+            and self.attn_backend.get_name() != "FLASHINFER"
+        ):
+            raise ValueError(
+                "fi_a2a_fused requires the FLASHINFER attention backend for "
+                "GQA/MQA; set --attention-backend FLASHINFER"
+            )
         backend_supports_alibi_sqrt = self.attn_backend.supports_alibi_sqrt()
         use_alibi_sqrt = use_alibi_sqrt if use_alibi_sqrt else False
         if use_alibi_sqrt and not backend_supports_alibi_sqrt:

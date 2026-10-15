@@ -51,6 +51,44 @@ In short, for decode context parallel, try to increase `-tp` size until you get 
 
 Decode context parallel is supported in vLLM, for both MLA and GQA models. Some attention backends also support the combination of decode context parallel and MTP (multi-token prediction) to further accelerate the decoding phase.
 
+### FlashInfer fused DCP combine
+
+`--dcp-comm-backend fi_a2a_fused` enables FlashInfer's NCCL-based
+[fused output exchange and LSE reduction with mask/stride support (#6483)](https://github.com/flashinfer-ai/flashinfer/pull/6483)
+for MLA DCP and GQA/MQA decode with `--attention-backend FLASHINFER`.
+Existing defaults and GQA/MQA prefill remain unchanged. GQA/MQA initially
+requires an unquantized KV cache and no attention sinks; existing TP/KV-head
+DCP limits still apply. Speculative queries routed to prefill keep that path.
+
+Requires FlashInfer #6483, SM90+,
+NCCL >= 2.29 with device communicator support, FP16/BF16, 2–64 DCP ranks in one
+NCCL LSA/NVLink domain, and PCP=1.
+PyTorch must expose `NCCL_HAS_DEVCOMM` and
+`NCCLSymmetricMemory::get_window_offset`; the pinned Torch 2.13.0 build lacks them.
+
+The minimum supported FI release will be set once #6483 is released; until then,
+use its source changes in a compatible environment. FI reads O/LSE strided views
+and a token mask prepared by the metadata builder and shared across its layers;
+no O/LSE layout copy is needed.
+
+FI uses the process-wide NCCL symmetric-memory backend, so the following
+collective opt-outs are required:
+
+```bash
+VLLM_ALLREDUCE_USE_SYMM_MEM=0 \
+VLLM_USE_DIRECT_DCP_Q_GATHER=0 \
+VLLM_USE_DIRECT_DCP_KV_GATHER=0 \
+VLLM_USE_DIRECT_DCP_A2A=0 \
+vllm serve deepseek-ai/DeepSeek-V2-Lite \
+    --tensor-parallel-size 2 --decode-context-parallel-size 2 \
+    --dcp-comm-backend fi_a2a_fused --disable-custom-all-reduce \
+    --dtype bfloat16 --max-num-batched-tokens 256 --max-num-seqs 16
+```
+
+Keep CUDA graph warmups enabled: each capture stream needs an eager combine on
+all ranks before capture. Workspace memory scales with the scheduler token
+budget, graph padding, CUDA streams, and DBO slots.
+
 ## Technical Discussions
 
 The main discussions happen in the `#sig-context-parallel` channel of [vLLM Slack](https://slack.vllm.ai/).

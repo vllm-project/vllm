@@ -1567,6 +1567,21 @@ class ModelConfig:
             )
 
         decode_context_parallel_size = parallel_config.decode_context_parallel_size
+        if parallel_config.dcp_comm_backend == "fi_a2a_fused":
+            if self.dtype not in (torch.float16, torch.bfloat16):
+                raise ValueError("fi_a2a_fused requires float16 or bfloat16 output")
+            if set(self.architectures) & {
+                "KimiK3ForConditionalGeneration",
+                "DeepseekV4ForCausalLM",
+                "DeepseekV4ForConditionalGeneration",
+                "DeepseekV41ForCausalLM",
+                "InklingForCausalLM",
+                "InklingForConditionalGeneration",
+            }:
+                raise ValueError(
+                    "fi_a2a_fused does not yet support models with dedicated "
+                    "MLA or model-owned symmetric-memory collectives"
+                )
         if decode_context_parallel_size > 1 and not self.use_mla:
             total_num_kv_heads = self.get_total_num_kv_heads()
             if tensor_parallel_size <= total_num_kv_heads:

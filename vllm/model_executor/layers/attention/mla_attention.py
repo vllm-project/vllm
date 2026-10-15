@@ -293,7 +293,10 @@ from vllm.v1.attention.backends.utils import (
     get_num_attention_heads_from_layers,
     split_decodes_and_prefills,
 )
-from vllm.v1.attention.ops.dcp import MLADCPManager
+from vllm.v1.attention.ops.dcp import (
+    DCPValidTokenMask,
+    MLADCPManager,
+)
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.attention.ops.pcp import (
     finalize_mla_pcp_decode,
@@ -1135,12 +1138,24 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     query_start_loc = attn_metadata.query_start_loc[
                         : attn_metadata.num_decodes + 1
                     ]
-                attn_out = self.dcp_manager.combine(
-                    attn_out,
-                    lse,
-                    seq_lens=seq_lens,
-                    query_start_loc=query_start_loc,
-                )
+                if self.dcp_manager.use_fi_a2a_fused:
+                    assert attn_metadata.dcp_valid_token_mask is not None
+                    attn_out = self.dcp_manager.combine(
+                        attn_out,
+                        lse,
+                        seq_lens=seq_lens,
+                        query_start_loc=query_start_loc,
+                        valid_token_mask=attn_metadata.dcp_valid_token_mask[
+                            : attn_out.shape[0]
+                        ],
+                    )
+                else:
+                    attn_out = self.dcp_manager.combine(
+                        attn_out,
+                        lse,
+                        seq_lens=seq_lens,
+                        query_start_loc=query_start_loc,
+                    )
                 if self.use_pcp:
                     attn_out = finalize_mla_pcp_decode(attn_out, self.num_heads)
 
@@ -1709,6 +1724,9 @@ class MLACommonMetadata(AttentionMetadata, Generic[D]):
 
     prefill: MLACommonPrefillMetadata | None = None
     decode: D | None = None
+
+    # Builder-owned, shared across layers and updated in place before graph replay.
+    dcp_valid_token_mask: torch.Tensor | None = None
 
     def __post_init__(self):
         if self.head_dim is not None and not MLACommonBackend.supports_head_size(
@@ -2416,6 +2434,9 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         self.dcp_local_block_size = parallel_config.cp_kv_cache_interleave_size
         self.dcp_virtual_block_size = self.dcp_local_block_size * self.dcp_world_size
         self.cp_kv_cache_interleave_size = parallel_config.cp_kv_cache_interleave_size
+        self.dcp_valid_token_mask = DCPValidTokenMask.from_config(
+            vllm_config, kv_cache_spec, device
+        )
 
         self.page_size = self.kv_cache_spec.block_size
 
@@ -2668,6 +2689,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             causal=not non_causal_decode,
             prefill=prefill_metadata,
             decode=decode_metadata,
+            dcp_valid_token_mask=self.dcp_valid_token_mask.build(common_attn_metadata),
         )
 
         return attn_metadata  # type: ignore[return-value]

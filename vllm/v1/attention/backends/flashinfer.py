@@ -83,8 +83,10 @@ from vllm.v1.attention.backends.utils import (
     split_decodes_and_prefills,
 )
 from vllm.v1.attention.ops.dcp import (
+    DCPValidTokenMask,
     cp_lse_ag_out_rs,
     dcp_a2a_lse_reduce,
+    get_dcp_workspace_max_num_tokens,
 )
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.kv_cache_interface import (
@@ -742,6 +744,9 @@ class FlashInferMetadata:
 
     cascade_wrapper: MultiLevelCascadeAttentionWrapper | None
 
+    dcp_valid_token_mask: torch.Tensor | None = None
+    """Builder-owned token mask shared across layers and graph replays."""
+
 
 class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
     kv_cache_spec: AttentionSpec
@@ -820,7 +825,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.dcp_a2a = (
             self.use_dcp and vllm_config.parallel_config.dcp_comm_backend == "a2a"
         )
-
+        self.dcp_valid_token_mask = DCPValidTokenMask.from_config(
+            vllm_config, kv_cache_spec, device
+        )
         # Compatible with models with non-uniform per-layer head counts.
         self.num_qo_heads = get_num_attention_heads_from_layers(
             vllm_config, layer_names
@@ -1525,6 +1532,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             prefill=None,
             decode=None,
             cascade_wrapper=None,
+            dcp_valid_token_mask=self.dcp_valid_token_mask.build(common_attn_metadata),
         )
 
         # Guard access to seq_lens_cpu, which may not always be needed
@@ -2036,6 +2044,58 @@ class FlashInferImpl(AttentionImpl):
             self.dcp_combine = partial(dcp_a2a_lse_reduce, is_lse_base_on_e=False)
         else:
             self.dcp_combine = partial(cp_lse_ag_out_rs, is_lse_base_on_e=False)
+
+        self._fi_dcp_workspace = None
+        if (
+            vllm_config is not None
+            and self.dcp_world_size > 1
+            and vllm_config.parallel_config.dcp_comm_backend == "fi_a2a_fused"
+        ):
+            if is_quantized_kv_cache(kv_cache_dtype) or sinks is not None:
+                raise ValueError(
+                    "fi_a2a_fused GQA/MQA decode does not yet support "
+                    "quantized KV caches or attention sinks"
+                )
+            from vllm.v1.attention.ops.flashinfer_dcp import (
+                get_flashinfer_dcp_workspace,
+            )
+
+            self._fi_dcp_workspace = get_flashinfer_dcp_workspace(
+                get_dcp_group(),
+                torch.device("cuda", torch.accelerator.current_device_index()),
+                get_dcp_workspace_max_num_tokens(vllm_config, include_prefill=True),
+                num_heads,
+                head_size,
+                torch.get_default_dtype(),
+                max(vllm_config.parallel_config.num_ubatches, 1),
+            )
+
+    def _combine_dcp(
+        self,
+        partial_output: torch.Tensor,
+        partial_lse: torch.Tensor,
+        seq_lens: torch.Tensor | None = None,
+        query_start_loc: torch.Tensor | None = None,
+        valid_token_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if self._fi_dcp_workspace is not None:
+            if valid_token_mask is None:
+                raise ValueError("FI DCP decode requires a metadata token mask")
+            return self._fi_dcp_workspace.lse_reduce(
+                partial_output,
+                partial_lse,
+                is_lse_base_on_e=False,
+                seq_lens=seq_lens,
+                query_start_loc=query_start_loc,
+                valid_token_mask=valid_token_mask,
+            )
+        return self.dcp_combine(
+            partial_output,
+            partial_lse,
+            get_dcp_group(),
+            seq_lens=seq_lens,
+            query_start_loc=query_start_loc,
+        )
 
     def fused_output_quant_supported(self, quant_key: QuantKey):
         if quant_key == kNvfp4Dynamic and self.is_kvcache_nvfp4:
@@ -2558,10 +2618,14 @@ class FlashInferImpl(AttentionImpl):
                         kv_cache_sf=kv_cache_sf,
                         sinks=self.sinks,
                     )
-                    output[:num_decode_tokens] = self.dcp_combine(
+                    output[:num_decode_tokens] = self._combine_dcp(
                         output_tmp,
                         lse,
-                        get_dcp_group(),
+                        valid_token_mask=(
+                            attn_metadata.dcp_valid_token_mask[:num_decode_tokens]
+                            if attn_metadata.dcp_valid_token_mask is not None
+                            else None
+                        ),
                     )
                 else:
                     decode_wrapper.run(
@@ -2723,12 +2787,16 @@ class FlashInferImpl(AttentionImpl):
                 if use_dcp:
                     assert isinstance(out, torch.Tensor)
                     assert lse is not None
-                    output[:num_decode_tokens] = self.dcp_combine(
+                    output[:num_decode_tokens] = self._combine_dcp(
                         out,
                         lse,
-                        get_dcp_group(),
                         seq_lens=seq_lens_decode,
                         query_start_loc=attn_metadata.decode.dcp_query_start_loc,
+                        valid_token_mask=(
+                            attn_metadata.dcp_valid_token_mask[:num_decode_tokens]
+                            if attn_metadata.dcp_valid_token_mask is not None
+                            else None
+                        ),
                     )
                 elif needs_fp8_out:
                     output[:num_decode_tokens].copy_(out)

@@ -37,7 +37,7 @@ ExpertPlacementStrategy = Literal["linear", "round_robin"]
 DistributedExecutorBackend = Literal["ray", "mp", "uni", "external_launcher"]
 DataParallelBackend = Literal["ray", "mp"]
 EPLBPolicyOption = Literal["default"]
-DCPCommBackend = Literal["ag_rs", "a2a"]
+DCPCommBackend = Literal["ag_rs", "a2a", "fi_a2a_fused"]
 EPLBCommunicatorBackend = Literal[
     "torch_nccl", "torch_gloo", "torch_xccl", "nixl", "pynccl"
 ]
@@ -400,6 +400,11 @@ class ParallelConfig:
     - "a2a": All-to-All exchange of partial outputs + LSE, then
       combine with Triton kernel. Reduces NCCL calls from 3 to 2
       per layer for MLA models.
+    - "fi_a2a_fused": FlashInfer NCCL exchange and LSE reduction for MLA
+      and GQA/MQA decode with the FLASHINFER attention backend. Requires
+      FlashInfer #6483 mask/stride support, DCP > 1, PCP = 1, and explicit
+      opt-out of incompatible symmetric-memory collectives; see the context
+      parallel deployment guide.
 
     `None` selects the model default, which is "ag_rs" unless the model
     overrides it via [`set_dcp_defaults`][vllm.config.ParallelConfig.set_dcp_defaults].
@@ -941,6 +946,31 @@ class ParallelConfig:
         return hash_factors(factors)
 
     def __post_init__(self) -> None:
+        if self.dcp_comm_backend == "fi_a2a_fused":
+            if (
+                not 2 <= self.decode_context_parallel_size <= 64
+                or self.prefill_context_parallel_size != 1
+            ):
+                raise ValueError("fi_a2a_fused requires 2 <= DCP <= 64 and PCP = 1")
+            # Torch's allocation backend is process-wide and cannot be changed
+            # after use. Both TP communicators can allocate CUDA symmetric memory
+            # before MLA construction; require explicit opt-out, never disable them.
+            if not self.disable_custom_all_reduce or envs.VLLM_ALLREDUCE_USE_SYMM_MEM:
+                raise ValueError(
+                    "fi_a2a_fused requires --disable-custom-all-reduce and "
+                    "VLLM_ALLREDUCE_USE_SYMM_MEM=0 before communicator initialization"
+                )
+            if (
+                envs.VLLM_USE_DIRECT_DCP_Q_GATHER is not False
+                or envs.VLLM_USE_DIRECT_DCP_KV_GATHER is not False
+                or envs.VLLM_USE_DIRECT_DCP_A2A is True
+            ):
+                raise ValueError(
+                    "fi_a2a_fused requires VLLM_USE_DIRECT_DCP_Q_GATHER=0 and "
+                    "VLLM_USE_DIRECT_DCP_KV_GATHER=0, and is incompatible with "
+                    "VLLM_USE_DIRECT_DCP_A2A=1"
+                )
+
         # Continue with the rest of the initialization
         self.world_size = (
             self.pipeline_parallel_size

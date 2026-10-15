@@ -8,6 +8,68 @@ from vllm.triton_utils import tl, triton
 
 
 @triton.jit
+def _build_dcp_valid_token_mask_kernel(
+    seq_lens,
+    query_start_loc,
+    out,
+    NUM_REQS: tl.constexpr,
+    CAPACITY: tl.constexpr,
+    SEARCH_STEPS: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    token = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    valid = tl.full((BLOCK,), False, tl.int1)
+    if NUM_REQS > 0:
+        # Upper-bound search skips requests with zero query tokens, including
+        # repeated trailing boundaries used for CUDA graph padding.
+        low = tl.full((BLOCK,), 0, tl.int32)
+        high = tl.full((BLOCK,), NUM_REQS, tl.int32)
+        for _ in range(SEARCH_STEPS):
+            mid = (low + high) // 2
+            end = tl.load(query_start_loc + mid + 1, mid < NUM_REQS, other=0)
+            advance = (mid < NUM_REQS) & (end <= token)
+            low = tl.where(advance, mid + 1, low)
+            high = tl.where(advance, high, mid)
+        local_len = tl.load(seq_lens + low, low < NUM_REQS, other=0)
+        valid = (low < NUM_REQS) & (local_len > 0)
+    tl.store(out + token, valid, token < CAPACITY)
+
+
+def build_dcp_valid_token_mask(
+    seq_lens: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    out: torch.Tensor,
+) -> None:
+    """Refresh a persistent token mask once per metadata build, including padding.
+
+    The persistent buffer is shared by layers using the same attention metadata.
+    Updating it in place before replay preserves captured device pointers.
+    """
+    from vllm.v1.attention.ops.dcp import _validate_dcp_empty_shard_args
+
+    _validate_dcp_empty_shard_args(seq_lens, query_start_loc)
+    if out.ndim != 1 or out.dtype != torch.bool or not out.is_contiguous():
+        raise ValueError("FI DCP token mask must be a contiguous bool vector")
+    if out.device.type != "cuda" or any(
+        value.device != out.device
+        or value.dtype not in (torch.int32, torch.int64)
+        or not value.is_contiguous()
+        for value in (seq_lens, query_start_loc)
+    ):
+        raise ValueError("FI DCP mask metadata must be contiguous CUDA integer vectors")
+    if out.numel():
+        _build_dcp_valid_token_mask_kernel[(triton.cdiv(out.numel(), 256),)](
+            seq_lens,
+            query_start_loc,
+            out,
+            NUM_REQS=seq_lens.numel(),
+            CAPACITY=out.numel(),
+            SEARCH_STEPS=(seq_lens.numel() + 1).bit_length(),
+            BLOCK=256,
+        )
+
+
+@triton.jit
 def _token_request(query_start_loc, token, num_reqs):
     lo = tl.full(token.shape, 0, tl.int32)
     hi = tl.full(token.shape, num_reqs, tl.int32)
