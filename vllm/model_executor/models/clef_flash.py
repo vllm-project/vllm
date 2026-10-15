@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Clef-Flash: the Qwen3.5 backbone with a joint schema decision head."""
+"""Clef and Clef-Flash: Qwen backbones with a joint schema decision head."""
 
 import torch
 

@@ -812,6 +812,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "ClefFlashForJointSchema": _HfExamplesInfo(
         "Cloudflare/clef-flash",
+        extras={"27b": "Cloudflare/clef"},
         max_model_len=4096,
     ),
     "Cohere2VisionForConditionalGeneration": _HfExamplesInfo(

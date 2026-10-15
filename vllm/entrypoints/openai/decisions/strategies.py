@@ -849,7 +849,7 @@ class JointSchemaStrategy(ReadStrategy):
 
 
 class ClefFlashStrategy(JointSchemaStrategy):
-    """Clef-Flash's joint schema prompt with Qwen3.5 image/video processing."""
+    """Clef and Clef-Flash's joint schema prompt with image/video processing."""
 
     modalities = frozenset({"image", "video"})
     MAX_LENGTH = 16384
