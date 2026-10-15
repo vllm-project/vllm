@@ -1618,6 +1618,8 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
 
         # To route aborts to the correct engine.
         self.reqs_in_flight: dict[str, EngineIdentity] = {}
+        # Open streaming-input sessions, whose aborts go to all engines.
+        self.streaming_reqs: set[str] = set()
 
         # Exact per-engine count of this client's unfinished requests.
         self.engine_inflight: Counter[EngineIdentity] = Counter()
@@ -1640,6 +1642,12 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         ) // client_count
 
     def get_core_engine_for_request(self, request: EngineCoreRequest) -> EngineIdentity:
+        if request.resumable:
+            self.streaming_reqs.add(request.request_id)
+        else:
+            # Also removes a session on its final (end-of-stream) request.
+            self.streaming_reqs.discard(request.request_id)
+
         if (engine := self.reqs_in_flight.get(request.request_id)) is not None:
             # This is for streaming-input session affinity.
             return engine
@@ -1759,15 +1767,24 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         if not request_ids or self.resources.engine_dead:
             return
 
-        if len(request_ids) == 1:
+        if (
+            len(request_ids) == 1
+            and (req_id := request_ids[0]) not in self.streaming_reqs
+            and (engine := self.reqs_in_flight.get(req_id))
+        ):
             # Fast-path common case.
-            if engine := self.reqs_in_flight.get(request_ids[0]):
-                await self._abort_requests(request_ids, engine)
+            await self._abort_requests(request_ids, engine)
             return
 
         by_engine = defaultdict[EngineIdentity, list[str]](list)
         for req_id in request_ids:
-            if engine := self.reqs_in_flight.get(req_id):
+            if req_id in self.streaming_reqs:
+                # A chunk in flight when the session finished may have
+                # re-created it on any engine.
+                self.streaming_reqs.discard(req_id)
+                for engine in self.core_engines:
+                    by_engine[engine].append(req_id)
+            elif engine := self.reqs_in_flight.get(req_id):
                 by_engine[engine].append(req_id)
         for engine, req_ids in by_engine.items():
             await self._abort_requests(req_ids, engine)
