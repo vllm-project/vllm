@@ -31,6 +31,7 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
     GateLinear,
 )
+from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     QKVParallelLinear,
@@ -40,10 +41,6 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
-from vllm.model_executor.model_loader.weight_utils import (
-    row_parallel_weight_loader,
-)
-from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import (
@@ -141,35 +138,13 @@ def token_choice_with_bias(
     return topk_weights.to(torch.float32), topk_ids.to(torch.int32)
 
 
-@torch.compile(backend=current_platform.simple_compile_backend)
-def rms_norm_func(hidden_states, weight, variance_epsilon):
-    input_dtype = hidden_states.dtype
-    hidden_states = hidden_states.to(torch.float32)
-    variance = hidden_states.pow(2).mean(-1, keepdim=True)
-    hidden_states = hidden_states * torch.rsqrt(variance + variance_epsilon)
-    hidden_states = weight.to(torch.float32) * hidden_states
-    return hidden_states.to(input_dtype)
-
-
-class RMSNorm(nn.Module):
-    def __init__(self, param_shape=None, eps=1e-6):
-        super().__init__()
-        self.weight = nn.Parameter(torch.ones(param_shape))
-        self.variance_epsilon = eps
-        set_weight_attrs(self.weight, {"weight_loader": row_parallel_weight_loader})
-
-    def forward(self, hidden_states, residuals=None):
-        hidden_states = rms_norm_func(hidden_states, self.weight, self.variance_epsilon)
-        return hidden_states, residuals
-
-
-def select_norm_impl(config: CohereConfig) -> tuple[type[nn.Module], float]:
-    """Returns (norm_class, eps). Uses RMSNorm when config.rms_norm_eps is set,
-    otherwise falls back to LayerNorm with config.layer_norm_eps."""
+def make_norm(config: CohereConfig) -> nn.Module:
+    """RMSNorm when config.rms_norm_eps is set, otherwise Cohere LayerNorm with
+    config.layer_norm_eps."""
     rms_eps = getattr(config, "rms_norm_eps", None)
     if rms_eps is not None:
-        return RMSNorm, rms_eps
-    return LayerNorm, config.layer_norm_eps
+        return RMSNorm(config.hidden_size, eps=rms_eps)
+    return LayerNorm(param_shape=(config.hidden_size,), eps=config.layer_norm_eps)
 
 
 class Cohere2MoeMLP(nn.Module):
@@ -459,8 +434,8 @@ class Cohere2MoeDecoderLayer(nn.Module):
             isinstance(self.mlp, Cohere2Moe) and self.mlp.output_is_reduced
         )
 
-        norm_cls, norm_eps = select_norm_impl(config)
-        self.input_layernorm = norm_cls(param_shape=(config.hidden_size,), eps=norm_eps)
+        self.input_layernorm = make_norm(config)
+        self.uses_rms_norm = isinstance(self.input_layernorm, RMSNorm)
 
         if moe_stream is not None and not self._allows_dual_stream():
             logger.warning_once(
@@ -552,8 +527,14 @@ class Cohere2MoeDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        residual = hidden_states
-        hidden_states, residual = self.input_layernorm(hidden_states, residual)
+        if not self.uses_rms_norm:
+            residual = hidden_states
+            hidden_states, residual = self.input_layernorm(hidden_states, residual)
+        elif residual is None:
+            residual = hidden_states
+            hidden_states = self.input_layernorm(hidden_states)
+        else:
+            hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
         if self.dual_stream is not None:
             layer_name = _encode_layer_name(self.layer_name)
@@ -570,26 +551,26 @@ class Cohere2MoeDecoderLayer(nn.Module):
                     hidden_states_attention, hidden_states_mlp, layer_name
                 )
             )
-            hidden_states = residual + parallel_block_output
-            return hidden_states, residual
-
-        hidden_states_attention = self.self_attn(
-            positions=positions,
-            hidden_states=hidden_states,
-        )
-        hidden_states_mlp = self.mlp(hidden_states)
-
-        if self.mlp_output_is_reduced:
-            parallel_block_output = (
-                tensor_model_parallel_all_reduce(hidden_states_attention)
-                + hidden_states_mlp
-            )
         else:
-            parallel_block_output = tensor_model_parallel_all_reduce(
-                hidden_states_attention + hidden_states_mlp
+            hidden_states_attention = self.self_attn(
+                positions=positions,
+                hidden_states=hidden_states,
             )
-        hidden_states = residual + parallel_block_output
-        return hidden_states, residual
+            hidden_states_mlp = self.mlp(hidden_states)
+            if self.mlp_output_is_reduced:
+                parallel_block_output = (
+                    tensor_model_parallel_all_reduce(hidden_states_attention)
+                    + hidden_states_mlp
+                )
+            else:
+                parallel_block_output = tensor_model_parallel_all_reduce(
+                    hidden_states_attention + hidden_states_mlp
+                )
+
+        if self.uses_rms_norm:
+            # The residual add is fused into the next RMSNorm (or the final norm).
+            return parallel_block_output, residual
+        return residual + parallel_block_output, residual
 
 
 @support_torch_compile
@@ -632,8 +613,8 @@ class Cohere2MoeModel(nn.Module, EagleModelMixin):
             ),
             prefix=f"{prefix}.layers",
         )
-        norm_cls, norm_eps = select_norm_impl(config)
-        self.norm = norm_cls(param_shape=(config.hidden_size,), eps=norm_eps)
+        self.norm = make_norm(config)
+        self.uses_rms_norm = isinstance(self.norm, RMSNorm)
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states", "residual"], config.hidden_size
         )
@@ -659,16 +640,30 @@ class Cohere2MoeModel(nn.Module, EagleModelMixin):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        aux_hidden_states = []
+        aux_hidden_states: list[torch.Tensor] = []
         if self.start_layer in self.aux_hidden_state_layers:
-            aux_hidden_states.append(hidden_states)
+            start_hidden_states = hidden_states
+            if self.uses_rms_norm and residual is None:
+                # The first layer carries hidden_states as the residual, which
+                # later fused RMSNorm calls update in place.
+                start_hidden_states = hidden_states.clone()
+            aux_hidden_states = self._maybe_add_hidden_state(
+                aux_hidden_states,
+                self.start_layer,
+                start_hidden_states,
+                residual if self.uses_rms_norm else None,
+            )
         for layer_idx, layer in enumerate(
             islice(self.layers, self.start_layer, self.end_layer),
             start=self.start_layer,
         ):
             hidden_states, residual = layer(positions, hidden_states, residual)
-            if layer_idx + 1 in self.aux_hidden_state_layers:
-                aux_hidden_states.append(hidden_states)
+            aux_hidden_states = self._maybe_add_hidden_state(
+                aux_hidden_states,
+                layer_idx + 1,
+                hidden_states,
+                residual if self.uses_rms_norm else None,
+            )
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
                 {"hidden_states": hidden_states, "residual": residual}

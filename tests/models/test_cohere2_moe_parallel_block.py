@@ -2,10 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for the Cohere2 MoE parallel block (attention || MLP).
 
-Covers the single TP all-reduce of attention + MLP and the attention / MLP
-dual stream. Decoder layers are built without ``__init__`` around stub
-branches, so the tests need no checkpoint or GPU; the side-stream race test
-needs CUDA and is skipped elsewhere.
+Covers the single TP all-reduce of attention + MLP, the residual flow with the
+fused add + RMSNorm, and the attention / MLP dual stream. Decoder layers are
+built without ``__init__`` around stub branches, so the tests need no
+checkpoint or GPU; the side-stream race test needs CUDA and is skipped
+elsewhere.
 """
 
 import dataclasses
@@ -35,10 +36,25 @@ def _unused_dual_stream(token_threshold: int = 4) -> cohere2_moe._DualStreamStat
 
 
 class _PassthroughNorm(torch.nn.Module):
+    """Cohere LayerNorm interface with an identity normalization."""
+
     def forward(
         self, hidden_states: torch.Tensor, residual: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
         return hidden_states, residual
+
+
+class _FusedAddNorm(torch.nn.Module):
+    """vLLM RMSNorm interface with an identity normalization: like the fused
+    kernel, it adds into ``residual`` in place."""
+
+    def forward(
+        self, hidden_states: torch.Tensor, residual: torch.Tensor | None = None
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        if residual is None:
+            return hidden_states.clone()
+        residual.add_(hidden_states)
+        return residual.clone(), residual
 
 
 class _Branch(torch.nn.Module):
@@ -58,13 +74,15 @@ def _make_decoder(
     mlp: torch.nn.Module,
     mlp_output_is_reduced: bool = False,
     dual_stream: cohere2_moe._DualStreamState | None = None,
+    uses_rms_norm: bool = False,
 ) -> cohere2_moe.Cohere2MoeDecoderLayer:
     layer = cohere2_moe.Cohere2MoeDecoderLayer.__new__(
         cohere2_moe.Cohere2MoeDecoderLayer
     )
     torch.nn.Module.__init__(layer)
     layer.layer_name = "model.layers.0"
-    layer.input_layernorm = _PassthroughNorm()
+    layer.uses_rms_norm = uses_rms_norm
+    layer.input_layernorm = _FusedAddNorm() if uses_rms_norm else _PassthroughNorm()
     layer.self_attn = attention
     layer.mlp = mlp
     layer.mlp_output_is_reduced = mlp_output_is_reduced
@@ -175,6 +193,75 @@ def test_parallel_block_reduces_attention_plus_mlp_once(
         expected_block = 4 * (attention_output + mlp_output)
     torch.testing.assert_close(output, hidden_states + expected_block)
     torch.testing.assert_close(residual, hidden_states)
+
+
+def test_rms_norm_layers_leave_residual_add_to_next_norm(monkeypatch) -> None:
+    """With RMSNorm a layer returns only the reduced block output and the next
+    layer's fused add + RMSNorm folds it into the residual."""
+    hidden_states = torch.ones(2, 4)
+    attention_output = torch.full_like(hidden_states, 2)
+    mlp_output = torch.full_like(hidden_states, 3)
+    layers = [
+        _make_decoder(
+            attention=_Branch(attention_output),
+            mlp=_Branch(mlp_output),
+            uses_rms_norm=True,
+        )
+        for _ in range(2)
+    ]
+    all_reduce_inputs = _record_all_reduce(monkeypatch)
+    block = 4 * (attention_output + mlp_output)
+    positions = torch.arange(hidden_states.shape[0])
+
+    output, residual = layers[0](positions, hidden_states.clone(), None)
+    torch.testing.assert_close(output, block)
+    torch.testing.assert_close(residual, hidden_states)
+
+    output, residual = layers[1](positions, output, residual)
+    torch.testing.assert_close(output, block)
+    torch.testing.assert_close(residual, hidden_states + block)
+    assert len(all_reduce_inputs) == 2
+
+
+def test_aux_hidden_states_include_carried_residual(monkeypatch) -> None:
+    """Eagle3 aux states are full hidden states (block output + residual), and
+    the start-layer capture survives the in-place residual updates."""
+    monkeypatch.setattr(
+        cohere2_moe,
+        "get_pp_group",
+        lambda: SimpleNamespace(is_first_rank=True, is_last_rank=True),
+    )
+    _record_all_reduce(monkeypatch, tp_size=1)
+    hidden_states = torch.ones(2, 4)
+    attention_output = torch.full_like(hidden_states, 2)
+    mlp_output = torch.full_like(hidden_states, 3)
+    model = cohere2_moe.Cohere2MoeModel.__new__(cohere2_moe.Cohere2MoeModel)
+    torch.nn.Module.__init__(model)
+    model.layers = torch.nn.ModuleList(
+        _make_decoder(
+            attention=_Branch(attention_output),
+            mlp=_Branch(mlp_output),
+            uses_rms_norm=True,
+        )
+        for _ in range(2)
+    )
+    model.start_layer, model.end_layer = 0, 2
+    model.norm = _FusedAddNorm()
+    model.uses_rms_norm = True
+    model.aux_hidden_state_layers = (0, 1, 2)
+
+    output, aux_hidden_states = model.forward(
+        input_ids=None,
+        positions=torch.arange(hidden_states.shape[0]),
+        inputs_embeds=hidden_states.clone(),
+    )
+
+    block = attention_output + mlp_output
+    expected = [hidden_states, hidden_states + block, hidden_states + 2 * block]
+    assert len(aux_hidden_states) == len(expected)
+    for actual, want in zip(aux_hidden_states, expected):
+        torch.testing.assert_close(actual, want)
+    torch.testing.assert_close(output, hidden_states + 2 * block)
 
 
 @pytest.mark.parametrize(
