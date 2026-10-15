@@ -586,6 +586,32 @@ class TransferTopology:
         abs_ratio = -tp_ratio
         return [self.tp_rank * abs_ratio + i for i in range(abs_ratio)]
 
+    def is_handshake_target_rank(
+        self, remote_tp_rank: int, remote_tp_size: int, remote_dcp_size: int = 1
+    ) -> bool:
+        """Return whether a remote rank pairs with this rank, without a list."""
+        if (
+            type(remote_tp_rank) is not int
+            or type(remote_tp_size) is not int
+            or type(remote_dcp_size) is not int
+            or remote_tp_size < 1
+            or remote_dcp_size < 1
+            or not 0 <= remote_tp_rank < remote_tp_size
+        ):
+            return False
+
+        if remote_dcp_size > 1:
+            local_dcp_size = self.dcp_size
+            if local_dcp_size <= remote_dcp_size:
+                return remote_tp_rank % local_dcp_size == self.dcp_rank
+            return remote_tp_rank == self.dcp_rank % remote_dcp_size
+
+        tp_ratio = self.tp_ratio(remote_tp_size)
+        if tp_ratio > 0:
+            return remote_tp_rank == self.tp_rank // tp_ratio
+        first_rank = self.tp_rank * -tp_ratio
+        return first_rank <= remote_tp_rank < first_rank - tp_ratio
+
     def dcp_consumer_count(self, remote_tp_size: int, remote_dcp_size: int) -> int:
         """How many local ranks (in aggregate) read from a given remote rank.
 
