@@ -10,7 +10,10 @@ from prometheus_client import CollectorRegistry, Counter, generate_latest
 
 from vllm.entrypoints.anthropic.protocol import AnthropicMessagesRequest
 from vllm.entrypoints.anthropic.serving import AnthropicServingMessages
-from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionNamedToolChoiceParam,
+    ChatCompletionRequest,
+)
 from vllm.parser import metrics
 from vllm.tracing.utils import SpanAttributes, tool_calling_trace_attributes
 
@@ -162,6 +165,83 @@ def test_parser_counter_keeps_existing_label_set_and_series(registry):
     }
 
 
+@pytest.mark.parametrize("api_surface", ["chat_completions", "messages"])
+@pytest.mark.parametrize(
+    "choice, expected",
+    [
+        (None, "unset"),
+        ("auto", "auto"),
+        ("none", "none"),
+        ("required", "required"),
+        (
+            ChatCompletionNamedToolChoiceParam(function={"name": "private-function"}),
+            "named",
+        ),
+        ({"type": "function", "function": {"name": "private-function"}}, "named"),
+        ("private-function", "other"),
+        ({"type": "private-function"}, "other"),
+    ],
+)
+def test_tool_choice_labels_do_not_export_function_names(
+    registry, api_surface, choice, expected
+):
+    # model_construct also exercises unknown values without API validation.
+    request = ChatCompletionRequest.model_construct(tool_choice=choice, tools=None)
+    request._api_surface = api_surface
+    metrics.record_tool_call_response(request)
+    assert (
+        registry.get_sample_value(
+            "vllm:tool_call_responses_total",
+            {
+                "model_name": "test-model",
+                "status": "no_tool_calls",
+                "tool_choice": expected,
+                "tool_count": "0",
+                "api_surface": api_surface,
+            },
+        )
+        == 1
+    )
+    assert b"private-function" not in generate_latest(registry)
+
+
+@pytest.mark.parametrize("api_surface", ["chat_completions", "messages"])
+@pytest.mark.parametrize(
+    "count, expected",
+    [
+        (0, "0"),
+        (1, "1"),
+        (2, "2-5"),
+        (5, "2-5"),
+        (6, "6-10"),
+        (10, "6-10"),
+        (11, "10+"),
+        (100, "10+"),
+    ],
+)
+def test_tool_counts_use_fixed_buckets(registry, api_surface, count, expected):
+    request = ChatCompletionRequest.model_construct(
+        tool_choice="auto",
+        tools=[{"type": "function", "function": {"name": "private-function"}}] * count,
+    )
+    request._api_surface = api_surface
+    metrics.record_tool_call_response(request)
+    assert (
+        registry.get_sample_value(
+            "vllm:tool_call_responses_total",
+            {
+                "model_name": "test-model",
+                "status": "no_tool_calls",
+                "tool_choice": "auto",
+                "tool_count": expected,
+                "api_surface": api_surface,
+            },
+        )
+        == 1
+    )
+    assert b"private-function" not in generate_latest(registry)
+
+
 def test_reinitializing_metrics_preserves_labeled_counts(registry):
     request = ChatCompletionRequest.model_construct(tool_choice="auto", tools=[])
     assert _record_and_read(registry, request, False) == 1
@@ -216,6 +296,7 @@ def test_response_counts_use_bounded_labels_and_survive_reinitialization(
                 "model_name": "test-model",
                 "status": status,
                 "tool_choice": "named",
+                "tool_count": "0",
                 "api_surface": api_surface,
             },
         )
@@ -245,6 +326,7 @@ def test_interrupted_responses_only_count_emitted_calls(registry, count, api_sur
                     "model_name": "test-model",
                     "status": status,
                     "tool_choice": "auto",
+                    "tool_count": "0",
                     "api_surface": api_surface,
                 },
             )
@@ -280,6 +362,7 @@ def test_converted_messages_keep_legacy_parser_attribution(registry, is_streamin
                 "model_name": "test-model",
                 "status": "success",
                 "tool_choice": "named",
+                "tool_count": "1",
                 "api_surface": surface,
             },
         ) == (1 if surface == "messages" else None)

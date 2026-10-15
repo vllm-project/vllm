@@ -62,7 +62,7 @@ def init_parser_metrics(*, model_name: str) -> None:
     _tool_call_responses = _register_counter(
         "vllm:tool_call_responses_total",
         "Tool-calling response outcomes, counted once per request.",
-        ["model_name", "status", "tool_choice", "api_surface"],
+        ["model_name", "status", "tool_choice", "tool_count", "api_surface"],
     )
     _tool_calls_emitted = _register_counter(
         "vllm:tool_calls_emitted_total",
@@ -74,6 +74,7 @@ def init_parser_metrics(*, model_name: str) -> None:
             model_name=_model_name,
             status=status,
             tool_choice="unset",
+            tool_count="0",
             api_surface="chat_completions",
         )
     _tool_calls_emitted.labels(model_name=_model_name, api_surface="chat_completions")
@@ -102,6 +103,16 @@ def _tool_choice_label(tool_choice: object) -> str:
         else getattr(tool_choice, "type", None)
     )
     return "named" if choice_type == "function" else "other"
+
+
+def _tool_count_bucket(count: int) -> str:
+    if count <= 1:
+        return str(count)
+    if count <= 5:
+        return "2-5"
+    if count <= 10:
+        return "6-10"
+    return "10+"
 
 
 def _request_api_surface(request: object) -> Literal["chat_completions", "messages"]:
@@ -154,6 +165,7 @@ def record_tool_call_response(
             model_name=_model_name,
             status=status,
             tool_choice=_tool_choice_label(getattr(request, "tool_choice", None)),
+            tool_count=_tool_count_bucket(len(getattr(request, "tools", None) or ())),
             api_surface=api_surface,
         ).inc()
     _tool_calls_emitted.labels(model_name=_model_name, api_surface=api_surface).inc(
