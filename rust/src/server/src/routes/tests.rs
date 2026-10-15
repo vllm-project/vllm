@@ -758,7 +758,7 @@ async fn scale_out_generate_route_follows_api_server_options() {
         .await
         .expect("call app");
 
-    assert_ne!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -770,10 +770,7 @@ async fn scale_out_generate_route_is_disabled_by_default() {
         Arc::new(FakeChatBackend::new()),
     )
     .await;
-    let mut app = build_router_with_scale_out_endpoints(
-        Arc::new(AppState::new(vec!["model".to_string()], chat)),
-        false,
-    );
+    let mut app = build_router(Arc::new(AppState::new(vec!["model".to_string()], chat)));
 
     let response = app
         .call(
@@ -781,13 +778,22 @@ async fn scale_out_generate_route_is_disabled_by_default() {
                 .method("POST")
                 .uri("/inference/v1/generate")
                 .header("content-type", "application/json")
-                .body(Body::from("{}"))
+                .body(Body::from("not JSON"))
                 .expect("build request"),
         )
         .await
         .expect("call app");
 
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read response");
+    let error: serde_json::Value = serde_json::from_slice(&body).expect("decode error");
+    assert_eq!(error["error"]["type"], "PermissionDeniedError");
+    assert!(
+        error["error"]["message"]
+            .as_str()
+            .expect("error message")
+            .contains("--enable-scale-out")
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -816,7 +822,7 @@ async fn scale_out_generate_route_can_be_enabled() {
         .await
         .expect("call app");
 
-    assert_ne!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
 /// Build a dev-mode router backed by a mock engine using a custom ready
@@ -1369,6 +1375,40 @@ async fn render_chat_returns_generate_request_with_header_request_id() {
 }
 
 #[tokio::test]
+async fn render_chat_omits_unset_sampling_params() {
+    let mut app = test_render_app();
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions/render")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "render-model",
+                        "messages": [{"role": "user", "content": "hello"}],
+                        "max_completion_tokens": 8
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+
+    let sampling_params = json["sampling_params"].as_object().expect("sampling_params object");
+    assert!(
+        sampling_params.values().all(|value| !value.is_null()),
+        "unexpected null in {sampling_params:?}"
+    );
+    assert_eq!(sampling_params["max_tokens"], 8);
+}
+
+#[tokio::test]
 async fn render_chat_uses_processor_owned_parser_selections() {
     let mut app = test_render_app_with_parser_selections(
         ParserSelection::Auto,
@@ -1784,7 +1824,7 @@ async fn api_key_auth_allows_unguarded_route_without_token() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
-async fn cors_default_simple_request_allows_any_origin() {
+async fn cors_default_simple_request_omits_allow_origin() {
     let (mut app, _engine_task) = test_app_with_cors(CorsConfig::default()).await;
     let response = app
         .call(
@@ -1799,18 +1839,39 @@ async fn cors_default_simple_request_allows_any_origin() {
         .expect("call app");
 
     assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(
-        header_value(&response, "access-control-allow-origin"),
-        Some("*")
-    );
-    // Wildcard origins without credentials emit no `Vary` (Starlette parity).
-    assert_eq!(header_value(&response, "vary"), None);
+    assert_eq!(header_value(&response, "access-control-allow-origin"), None);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
-async fn cors_default_preflight_returns_explicit_methods_and_max_age() {
+async fn cors_default_preflight_omits_allow_origin() {
     let (mut app, _engine_task) = test_app_with_cors(CorsConfig::default()).await;
+    let response = app
+        .call(
+            Request::builder()
+                .method("OPTIONS")
+                .uri("/v1/chat/completions")
+                .header("origin", "http://example.com")
+                .header("access-control-request-method", "POST")
+                .header("access-control-request-headers", "content-type")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(header_value(&response, "access-control-allow-origin"), None);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn cors_wildcard_preflight_returns_explicit_methods_and_max_age() {
+    let cors = CorsConfig {
+        allow_origins: vec!["*".to_string()],
+        ..CorsConfig::default()
+    };
+    let (mut app, _engine_task) = test_app_with_cors(cors).await;
     let response = app
         .call(
             Request::builder()
@@ -1917,6 +1978,7 @@ async fn cors_explicit_origin_disallowed_omits_allow_origin() {
 #[serial]
 async fn cors_wildcard_with_credentials_reflects_origin_without_panic() {
     let cors = CorsConfig {
+        allow_origins: vec!["*".to_string()],
         allow_credentials: true,
         ..CorsConfig::default()
     };
@@ -1971,8 +2033,12 @@ async fn cors_unauthorized_response_has_no_cors_headers() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn cors_preflight_bypasses_auth_and_returns_cors_headers() {
+    let cors = CorsConfig {
+        allow_origins: vec!["*".to_string()],
+        ..CorsConfig::default()
+    };
     let (mut app, _engine_task) =
-        test_app_with_cors_and_keys(CorsConfig::default(), vec!["secret".to_string()]).await;
+        test_app_with_cors_and_keys(cors, vec!["secret".to_string()]).await;
     let response = app
         .call(
             Request::builder()
@@ -2978,6 +3044,177 @@ async fn non_stream_chat_rejects_when_image_count_exceeds_limit_mm_per_prompt() 
         json["error"]["message"],
         "At most 1 image(s) may be provided in one prompt."
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn selected_logprobs_invalid_requests_return_client_errors() {
+    let (mut app, engine_task) = test_app_with_engine_handle().await;
+    for chat_route in [true, false] {
+        let base = if chat_route {
+            json!({"messages": [{"role": "user", "content": "hello"}], "logprobs": true})
+        } else {
+            json!({"prompt": "hello", "logprobs": 0})
+        };
+        for invalid in [
+            json!({"logprob_token_ids": [-1]}),
+            json!({"logprob_token_ids": vec![1; 129]}),
+            if chat_route {
+                json!({"logprob_token_ids": [1], "logprobs": false})
+            } else {
+                json!({"logprob_token_ids": [1], "logprobs": null})
+            },
+            json!({"logprob_token_ids": [1], "use_beam_search": true}),
+        ] {
+            let mut body = base.clone();
+            body.as_object_mut().unwrap().extend(invalid.as_object().unwrap().clone());
+            let path = if chat_route {
+                "/v1/chat/completions"
+            } else {
+                "/v1/completions"
+            };
+            let (status, error) = post_json(&mut app, path, body.clone()).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}: {error}");
+        }
+    }
+    let (status, error) = post_json(
+        &mut app,
+        "/v1/completions",
+        json!({"prompt": "hello", "logprobs": 0,
+            "logprob_token_ids": [1], "echo": true, "max_tokens": 0}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+    engine_task.abort_and_join().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn selected_logprobs_reach_engine_and_both_openai_response_modes() {
+    for chat_route in [true, false] {
+        for stream in [true, false] {
+            let ipc = IpcNamespace::new().unwrap();
+            let address = ipc.handshake_endpoint();
+            let engine_task = MockEngineTask::new(spawn_mock_engine_task(
+                address.clone(),
+                b"selected-logprobs".to_vec(),
+                |dealer, push| {
+                    boxed_test_future(async move {
+                        let add = recv_engine_message(dealer).await;
+                        let request: EngineCoreRequest = rmp_serde::from_slice(&add[1]).unwrap();
+                        let params = request.sampling_params.as_ref().unwrap();
+                        assert_eq!(params.logprob_token_ids, Some(vec![65, 104, 66]));
+                        assert_eq!(params.logprobs, None);
+                        send_outputs(
+                            push,
+                            RequestBatchOutputs {
+                                outputs: vec![request_output_with_logprobs(
+                                    &request.request_id,
+                                    vec![104],
+                                    Some(EngineCoreFinishReason::Stop),
+                                    None,
+                                    Some(Logprobs {
+                                        positions: vec![PositionLogprobs {
+                                            entries: vec![
+                                                TokenLogprob {
+                                                    token_id: 104,
+                                                    logprob: -0.5,
+                                                    rank: 1,
+                                                },
+                                                TokenLogprob {
+                                                    token_id: 65,
+                                                    logprob: -4.0,
+                                                    rank: 20,
+                                                },
+                                                TokenLogprob {
+                                                    token_id: 104,
+                                                    logprob: -0.5,
+                                                    rank: 1,
+                                                },
+                                                TokenLogprob {
+                                                    token_id: 66,
+                                                    logprob: -5.0,
+                                                    rank: 30,
+                                                },
+                                            ],
+                                        }],
+                                    }),
+                                    None,
+                                )],
+                                ..Default::default()
+                            }
+                            .into(),
+                        )
+                        .await;
+                    })
+                },
+            ));
+            let client = EngineCoreClient::connect(
+                EngineCoreClientConfig::new_single(address).with_local_input_output_addresses(
+                    Some(ipc.input_endpoint()),
+                    Some(ipc.output_endpoint()),
+                ),
+            )
+            .await
+            .unwrap();
+            let chat =
+                ChatLlm::from_shared_backend(test_llm(client), Arc::new(FakeChatBackend::new()));
+            let mut app = build_router(Arc::new(AppState::new(vec!["test-model".into()], chat)));
+            let mut body = if chat_route {
+                json!({"messages": [{"role": "user", "content": "hello"}], "logprobs": true, "top_logprobs": 1})
+            } else {
+                json!({"prompt": "hello", "logprobs": 0})
+            };
+            body["stream"] = json!(stream);
+            // The sampled token `h` (104) is also requested.
+            body["logprob_token_ids"] = json!([65, 104, 66]);
+            let response = app
+                .call(
+                    Request::builder()
+                        .method("POST")
+                        .uri(if chat_route {
+                            "/v1/chat/completions"
+                        } else {
+                            "/v1/completions"
+                        })
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            engine_task.await.unwrap();
+            let payloads = if stream {
+                sse_json_payloads(std::str::from_utf8(&bytes).unwrap())
+            } else {
+                vec![serde_json::from_slice(&bytes).unwrap()]
+            };
+            let logprobs = payloads
+                .iter()
+                .map(|payload| &payload["choices"][0]["logprobs"])
+                .find(|value| value.is_object())
+                .unwrap();
+            if chat_route {
+                let actual = logprobs["content"][0]["top_logprobs"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|entry| json!([entry["token"], entry["logprob"]]))
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    actual,
+                    [json!(["h", -0.5]), json!(["A", -4.0]), json!(["B", -5.0])]
+                );
+            } else {
+                assert_eq!(
+                    logprobs["top_logprobs"][0],
+                    json!({"h": -0.5, "A": -4.0, "B": -5.0})
+                );
+            }
+        }
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -6676,6 +6913,7 @@ async fn admin_routes_are_hidden_when_dev_mode_is_disabled() {
         ("POST", "/reset_mm_cache"),
         ("POST", "/reset_encoder_cache"),
         ("POST", "/init_weight_transfer_engine"),
+        ("POST", "/shutdown_weight_transfer_engine"),
         ("POST", "/start_weight_update"),
         ("POST", "/start_draft_weight_update"),
         ("POST", "/update_weights"),
@@ -6707,7 +6945,7 @@ async fn weight_transfer_routes_support_the_http_training_lifecycle() {
     let (mut app, engine_task) = test_admin_app_with_engine_script(|dealer, push| {
         boxed_test_future(async move {
             let mut calls = Vec::new();
-            for _ in 0..10 {
+            for _ in 0..11 {
                 let utility = recv_engine_message(dealer).await;
                 assert_eq!(utility[0].as_ref(), &[0x03]);
                 let payload = decode_value(&utility[1]).expect("decode utility");
@@ -6737,6 +6975,7 @@ async fn weight_transfer_routes_support_the_http_training_lifecycle() {
                     "collective_rpc [\"finish_weight_update\",null,[],{}]",
                     "set_weight_version [\"step-2\"]",
                     "get_weight_version []",
+                    "collective_rpc [\"shutdown_weight_transfer_engine\",null,[],{}]",
                 ]
             "#]].assert_debug_eq(&calls);
         })
@@ -6785,6 +7024,7 @@ async fn weight_transfer_routes_support_the_http_training_lifecycle() {
             Some(json!({"new_version": "step-2"})),
         ),
         ("GET", "/weight_info", None),
+        ("POST", "/shutdown_weight_transfer_engine", None),
     ] {
         let mut request = Request::builder().method(method).uri(path);
         let body = match body {
@@ -6806,7 +7046,7 @@ async fn weight_transfer_routes_support_the_http_training_lifecycle() {
     }
     engine_task.await.expect("mock engine task");
     let metrics_after = METRICS.render().unwrap();
-    for operation in ["update", "finish"] {
+    for (operation, count) in [("update", 2.0), ("finish", 2.0), ("shutdown", 1.0)] {
         assert_eq!(
             metric_delta(
                 &metrics_before,
@@ -6814,7 +7054,7 @@ async fn weight_transfer_routes_support_the_http_training_lifecycle() {
                 "vllm:rl_weight_update_operation_duration_seconds_count",
                 Some(&format!("operation=\"{operation}\"")),
             ),
-            2.0
+            count
         );
         assert_eq!(
             metric_value(
@@ -6836,6 +7076,7 @@ async fn weight_transfer_routes_support_the_http_training_lifecycle() {
             "{\"message\":\"Weight update finished\"}",
             "{\"success\":true,\"new_version\":\"step-2\"}",
             "{\"weight_version\":\"step-2\"}",
+            "{\"message\":\"Weight transfer shut down\"}",
         ]
     "#]]
     .assert_debug_eq(&responses);

@@ -137,7 +137,12 @@ def _should_replicate_misaligned_shared_expert(
 
 
 class Qwen3NextSparseMoeBlock(nn.Module):
-    def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        prefix: str = "",
+        reduce_results: bool = True,
+    ):
         super().__init__()
 
         config = vllm_config.model_config.hf_text_config
@@ -239,6 +244,7 @@ class Qwen3NextSparseMoeBlock(nn.Module):
             num_redundant_experts=self.n_redundant_experts,
             is_sequence_parallel=self.is_sequence_parallel,
             n_shared_experts=1 if self.shared_expert is None else None,
+            reduce_results=reduce_results,
             fuse_shared_experts=self.is_fused_shared_expert_enabled,
             shared_expert_prefix=f"{prefix}.shared_expert",
             shared_expert_gate=self.shared_expert_gate
@@ -289,6 +295,7 @@ class Qwen3NextAttention(nn.Module):
         max_num_seqs: int | None = None,
         reduce_results: bool = True,
         prefix: str = "",
+        mrope_positions_factor: int = 4,
     ) -> None:
         super().__init__()
         self.config = config
@@ -340,6 +347,7 @@ class Qwen3NextAttention(nn.Module):
             max_position=config.max_position_embeddings,
             rope_parameters=config.rope_parameters,
             dual_chunk_attention_config=self.dual_chunk_attention_config,
+            mrope_positions_factor=mrope_positions_factor,
         )
 
         # Late-interaction retrieval models (e.g. ColQwen3.5) run BIDIRECTIONAL

@@ -91,6 +91,7 @@ from .qwen3_vl import (
     Qwen3VLForConditionalGeneration,
     Qwen3VLMultiModalProcessor,
     Qwen3VLProcessingInfo,
+    mrope_positions_factor,
 )
 from .utils import (
     AutoWeightsLoader,
@@ -162,6 +163,7 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
                 max_num_seqs=vllm_config.scheduler_config.max_num_seqs,
                 prefix=f"{prefix}.self_attn",
                 reduce_results=not self.use_attn_reduce_scatter_for_moe,
+                mrope_positions_factor=mrope_positions_factor(vllm_config),
             )
         else:
             raise ValueError(f"Invalid layer_type {self.layer_type}")

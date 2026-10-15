@@ -176,7 +176,6 @@ def test_aiter_backend_uses_prequantized_qkv_for_prefill(monkeypatch):
             query_start_loc=torch.tensor([0, 2], dtype=torch.int32),
         ),
         extend_metadata=None,
-        use_cascade=False,
         k_scale=None,
         v_scale=None,
     )
@@ -261,7 +260,6 @@ def test_aiter_backend_ignores_prequantized_qkv_for_pure_decode(monkeypatch):
         decode_metadata=SimpleNamespace(max_query_len=1, uniform_query_len=1),
         prefill_metadata=None,
         extend_metadata=None,
-        use_cascade=False,
         k_scale=None,
         v_scale=None,
         kv_sharing_metadata=None,

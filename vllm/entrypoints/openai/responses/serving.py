@@ -23,9 +23,6 @@ from pydantic import TypeAdapter
 from vllm import envs
 from vllm.config.utils import replace
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.chat_utils import (
-    ChatTemplateContentFormatOption,
-)
 from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
     RequestResponseMetadata,
@@ -86,6 +83,9 @@ from vllm.lora.request import LoRARequest
 from vllm.outputs import CompletionOutput
 from vllm.parser import Parser, ParserManager
 from vllm.renderers import TokenizeParams
+from vllm.renderers.chat_utils import (
+    ChatTemplateContentFormatOption,
+)
 from vllm.renderers.online_renderer import (
     OnlineRenderer,
     ResponsesPreviousMessages,
@@ -113,7 +113,7 @@ class OpenAIServingResponses(GenerateBaseServing):
         reasoning_parser: str = "",
         enable_auto_tools: bool = False,
         tool_parser: str | None = None,
-        tool_strict_level: str = "auto",
+        tool_strict_level: str | None = None,
         tool_server: ToolServer | None = None,
         enable_prompt_tokens_details: bool = False,
         enable_force_include_usage: bool = False,
@@ -881,7 +881,7 @@ class OpenAIServingResponses(GenerateBaseServing):
             output_tokens=num_generated_tokens,
             total_tokens=num_prompt_tokens + num_generated_tokens,
             input_tokens_details=InputTokensDetails(
-                cache_write_tokens=getattr(context, "num_cache_creation_tokens", 0),
+                cache_write_tokens=context.num_cache_creation_tokens,
                 cached_tokens=num_cached_tokens,
                 input_tokens_per_turn=[
                     turn.input_tokens for turn in context.all_turn_metrics

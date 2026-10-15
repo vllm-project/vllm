@@ -11,11 +11,6 @@ from typing import Any, Final, cast
 from fastapi import Request
 
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.chat_utils import (
-    ChatTemplateContentFormatOption,
-    ConversationMessage,
-    make_tool_call_id,
-)
 from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
     FunctionCall,
@@ -61,6 +56,11 @@ from vllm.logprobs import Logprob
 from vllm.outputs import RequestOutput
 from vllm.parser import ParserManager
 from vllm.parser.abstract_parser import Parser
+from vllm.renderers.chat_utils import (
+    ChatTemplateContentFormatOption,
+    ConversationMessage,
+    make_tool_call_id,
+)
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
@@ -132,7 +132,7 @@ class OpenAIServingChat(GenerateBaseServing):
         enable_auto_tools: bool = False,
         exclude_tools_when_tool_choice_none: bool = False,
         tool_parser: str | None = None,
-        tool_strict_level: str = "auto",
+        tool_strict_level: str | None = None,
         enable_prompt_tokens_details: bool = False,
         enable_force_include_usage: bool = False,
         enable_log_outputs: bool = False,
