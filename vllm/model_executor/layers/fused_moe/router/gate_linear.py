@@ -28,7 +28,7 @@ class GateLinear(ReplicatedLinear):
        M<=32, model-specific shapes)
     3. cuteDSL ll_fp32w_gemm (SM90+, M<=32, bf16/fp32 in, fp32 out,
        any shape)
-    4. bf16x3 CuteDSL kernel (SM100, bf16 in, fp32 weight)
+    4. bf16x3 kernel (SM100 CuteDSL or SM90 Triton, bf16 in, fp32 weight)
     5. ROCm bf16x3 router GEMM (gfx950, bf16 in, fp32 weight, fp32 out,
        M>=2048)
     6. cuBLAS bf16×bf16→fp32 (SM90+ + bf16 weight + fp32 out_dtype)
@@ -136,8 +136,10 @@ class GateLinear(ReplicatedLinear):
             and not bias
             and self.weight.dtype == torch.float32
             and current_platform.is_cuda()
-            and is_blackwell
-            and input_size % 8 == 0
+            and (
+                (is_blackwell and input_size % 8 == 0)
+                or (is_hopper and input_size % 64 == 0)
+            )
         )
 
         # Fused bf16 x bf16 -> fp32 GEMM eligibility. torch.mm's out_dtype
@@ -338,13 +340,9 @@ class GateLinear(ReplicatedLinear):
             output = LL_FP32W_GEMM_KERNEL(x, self.weight)
             return self._return(output)
 
-        # Tier 4: bf16x3 CuteDSL kernel for fp32 router weights
+        # Tier 4: bf16x3 kernel for fp32 router weights
         if self.allow_bf16x3_router_gemm and x.dtype == torch.bfloat16:
-            from vllm.model_executor.layers.fused_moe.router.bf16x3_router_gemm_cutedsl import (  # noqa: E501
-                bf16x3_router_gemm,
-            )
-
-            output = bf16x3_router_gemm(x, self.weight)
+            output = bf16x3_router_gemm_module().bf16x3_router_gemm(x, self.weight)
             return self._return(output)
 
         # Tier 6: cuBLAS bf16→fp32
@@ -406,6 +404,21 @@ class _GateLinearMethod(UnquantizedLinearMethod):
 _FP32_ROUTER_GEMM_MAX_TOKENS = GateLinear.FP32_MAX_TOKENS
 
 
+def bf16x3_router_gemm_module():
+    """The bf16x3 router GEMM for this device: Triton on SM90, CuteDSL on SM100."""
+    if current_platform.is_device_capability((9, 0)):
+        from vllm.model_executor.layers.fused_moe.router import (
+            bf16x3_router_gemm_triton,
+        )
+
+        return bf16x3_router_gemm_triton
+    from vllm.model_executor.layers.fused_moe.router import (
+        bf16x3_router_gemm_cutedsl,
+    )
+
+    return bf16x3_router_gemm_cutedsl
+
+
 def rocm_bf16x3_router_gemm_dispatch_impl(
     x: torch.Tensor,
     weight: torch.Tensor,
@@ -460,8 +473,8 @@ def fp32_router_gemm_dispatch_impl(
     allow_bf16x3_router_gemm: bool,
 ) -> torch.Tensor:
     """Dynamically run fp32 specialized gemm if num_tokens <= FP32_MAX_TOKENS,
-    otherwise optionally run the experimental BF16x3 kernel for medium/large
-    SM100 router batches, then fall back to F.linear.
+    otherwise optionally run the BF16x3 kernel for medium/large SM90/SM100
+    router batches, then fall back to F.linear.
     This must be wrapped in a custom op because our torch.compile integration
     does not support runtime dispatching on num_tokens.
     """
@@ -479,11 +492,7 @@ def fp32_router_gemm_dispatch_impl(
         return ops.fp32_router_gemm(x, weight)
 
     if allow_bf16x3_router_gemm and x.dtype == torch.bfloat16:
-        from vllm.model_executor.layers.fused_moe.router.bf16x3_router_gemm_cutedsl import (  # noqa: E501
-            _bf16x3_router_gemm,
-        )
-
-        return _bf16x3_router_gemm(x, weight)
+        return bf16x3_router_gemm_module()._bf16x3_router_gemm(x, weight)
 
     return torch.nn.functional.linear(x.float(), weight)
 
