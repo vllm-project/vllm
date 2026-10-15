@@ -911,7 +911,6 @@ class SamplingParams(
         self._validate_stop_token_ids(model_config)
         self._validate_allowed_token_ids(model_config)
         self._validate_spec_decode(speculative_config)
-        self._validate_diffusion(model_config)
         self._validate_structured_outputs(
             model_config, structured_outputs_config, tokenizer
         )
@@ -1191,30 +1190,6 @@ class SamplingParams(
             raise VLLMValidationError(
                 "The min_p and logit_bias sampling parameters "
                 "are not yet supported with speculative decoding."
-            )
-
-    def _validate_diffusion(self, model_config: ModelConfig) -> None:
-        if not model_config.is_diffusion:
-            return
-
-        # Some diffusion models (e.g. Nemotron) accept per-request
-        # temperatures; others keep their engine-level schedule.
-        per_request_temperature = getattr(
-            model_config.hf_config, "diffusion_per_request_temperature", False
-        )
-        if (
-            (self.temperature != 1.0 and not per_request_temperature)
-            or self.min_p > _SAMPLING_EPS
-            or self.seed is not None
-            or self.min_tokens > 0
-            or self.logit_bias
-            or self.bad_words
-            or self.allowed_token_ids
-        ):
-            raise VLLMValidationError(
-                "The temperature, min_p, seed, min_tokens, logit_bias, "
-                "bad_words, and allowed_token_ids sampling parameters "
-                "are not yet supported with diffusion models."
             )
 
     def _validate_structured_outputs(
