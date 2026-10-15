@@ -2,16 +2,22 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use serde::Serialize;
+use vllm_engine_core_client::protocol::output::RequestSpecDecodeMetrics;
 use vllm_llm::RequestTimestamps;
 
+use crate::routes::request_metrics::{
+    SpeculativeDecodingMetrics, StreamingSpeculativeDecodingMetrics,
+};
+
 /// Per-request response timing fields matching Python's `PerRequestMetrics`.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct PerRequestMetrics {
     pub time_to_first_token_ms: Option<f64>,
     pub generation_time_ms: Option<f64>,
     pub queue_time_ms: Option<f64>,
     pub mean_itl_ms: Option<f64>,
     pub tokens_per_second: Option<f64>,
+    pub speculative_decoding: Option<SpeculativeDecodingMetrics>,
 }
 
 impl PerRequestMetrics {
@@ -32,7 +38,26 @@ impl PerRequestMetrics {
             tokens_per_second: inference
                 .filter(|seconds| *seconds > 0.0)
                 .map(|seconds| num_generation_tokens as f64 / seconds),
+            speculative_decoding: None,
         }
+    }
+
+    pub fn from_request(
+        include_timing: bool,
+        times: RequestTimestamps,
+        num_generation_tokens: usize,
+        spec_decode_metrics: Option<RequestSpecDecodeMetrics>,
+    ) -> Option<Self> {
+        let speculative_decoding = spec_decode_metrics.map(Into::into);
+        (include_timing || speculative_decoding.is_some()).then(|| {
+            let mut metrics = if include_timing {
+                Self::from_timestamps(times, num_generation_tokens)
+            } else {
+                Self::default()
+            };
+            metrics.speculative_decoding = speculative_decoding;
+            metrics
+        })
     }
 }
 
@@ -48,6 +73,7 @@ pub struct StreamPerRequestMetrics {
     pub queue_time_ms: Option<f64>,
     pub mean_itl_ms: Option<f64>,
     pub tokens_per_second: Option<f64>,
+    pub speculative_decoding: Option<StreamingSpeculativeDecodingMetrics>,
 }
 
 impl From<PerRequestMetrics> for StreamPerRequestMetrics {
@@ -58,6 +84,7 @@ impl From<PerRequestMetrics> for StreamPerRequestMetrics {
             queue_time_ms,
             mean_itl_ms,
             tokens_per_second,
+            speculative_decoding,
         } = metrics;
         Self {
             time_to_first_token_ms,
@@ -65,6 +92,7 @@ impl From<PerRequestMetrics> for StreamPerRequestMetrics {
             queue_time_ms,
             mean_itl_ms,
             tokens_per_second,
+            speculative_decoding: speculative_decoding.map(Into::into),
         }
     }
 }
@@ -97,6 +125,7 @@ mod tests {
         assert_eq!(missing.queue_time_ms, None);
         assert_eq!(missing.mean_itl_ms, None);
         assert_eq!(missing.tokens_per_second, None);
+        assert_eq!(missing.speculative_decoding, None);
     }
 
     #[test]
