@@ -1536,6 +1536,91 @@ def test_decode_index_score_cutedsl_correctness(
             side.synchronize()
 
 
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="Sharded index decode score requires Blackwell.",
+)
+@pytest.mark.parametrize(
+    "decode_query_len,max_decode_query_len", [(1, 1), (1, 8), (3, 8), (8, 8)]
+)
+def test_sharded_decode_index_score_matches_reference(
+    decode_query_len, max_decode_query_len
+):
+    pytest.importorskip("cutlass")
+    from vllm.models.minimax_m3.nvidia.ops.index_decode_score_sharded import (
+        MAX_K_TILES,
+        _index_k_max_reduce_kernel,
+        minimax_m3_index_decode_score_sharded_cutedsl,
+    )
+
+    torch.manual_seed(0)
+    world, head_dim = 4, HEAD_DIM
+    seq_lens = torch.tensor([129, 4097, 0], device="cuda", dtype=torch.int32)
+    num_pages = 3 * 33
+    block_table = torch.randperm(num_pages, device="cuda", dtype=torch.int32).view(
+        3, 33
+    )
+    total_q = seq_lens.numel() * decode_query_len
+    q = torch.randn(total_q, world, head_dim, device="cuda").to(torch.float8_e4m3fn)
+    kv = torch.randn(num_pages, BLOCK_SIZE, head_dim, device="cuda").to(q.dtype)
+    # Local destinations isolate score/head routing from the real TP4 transport test.
+    recv = [
+        torch.full(
+            (3, world, 1, total_q, MAX_K_TILES), -1, device="cuda", dtype=torch.int32
+        )
+        for _ in range(world)
+    ]
+    bases = torch.tensor([r.data_ptr() for r in recv], device="cuda", dtype=torch.int64)
+    errors = torch.zeros(1, device="cuda", dtype=torch.int32)
+    actual = torch.full((total_q, world, MAX_K_TILES), -float("inf"), device="cuda")
+    for rank in range(world):
+        minimax_m3_index_decode_score_sharded_cutedsl(
+            q,
+            kv[:, rank::world].contiguous(),
+            block_table,
+            seq_lens,
+            rank,
+            decode_query_len,
+            max_decode_query_len,
+            bases,
+            1,
+            total_q,
+        )
+    for head, r in enumerate(recv):
+        out = actual[:, head : head + 1]
+        _index_k_max_reduce_kernel[(total_q, MAX_K_TILES // 512)](
+            r[1],
+            out,
+            out.stride(0),
+            out.stride(1),
+            seq_lens,
+            decode_query_len,
+            errors,
+            r.stride(1),
+            r.stride(2),
+            r.stride(3),
+            W=world,
+            HPR=1,
+            CHUNK=512,
+            SPIN=1 << 26,
+            num_warps=4,
+        )
+    expected = torch.full_like(actual.transpose(0, 1), -float("inf"))
+    active_q = 2 * decode_query_len
+    expected[:, :active_q] = _reference_decode_index_score(
+        q[:active_q],
+        kv,
+        block_table[:2],
+        seq_lens[:2],
+        decode_query_len,
+        MAX_K_TILES,
+    )
+    torch.testing.assert_close(actual.transpose(0, 1), expected)
+    assert errors.item() == 0
+    for r in recv:
+        assert torch.all(r == -1), "Consumed slots must be reset, other slots untouched"
+
+
 # Sparse attention kernels.
 def _reference_sparse_attn(
     q: torch.Tensor,
@@ -2186,26 +2271,32 @@ def test_aiter_consolidated_qknorm_real_packed_shuffle(skip_index_branch, fp8_in
         assert not index_cache_t128
 
 
-def test_indexer_cache_squeezes_to_contiguous_3d():
-    """The indexer side cache is standardized 4D with H=1: under both layouts
-    the allocator's logical view stays contiguous and squeezes (as
-    `MiniMaxM3IndexerCache.bind_kv_cache` does) to the 3-dim
-    [num_blocks, block_size, head_dim] cache the kernels consume."""
+@pytest.mark.parametrize("tp_shard", [1, 4])
+@pytest.mark.parametrize("index_dtype", ["bf16", "fp8"])
+def test_indexer_cache_squeezes_to_contiguous_3d(tp_shard, index_dtype):
+    from vllm.config import VllmConfig, set_current_vllm_config
+    from vllm.models.minimax_m3.common.indexer import MiniMaxM3IndexerCache
+
     nb = 5
-    ispec = MLAAttentionSpec(
-        block_size=BLOCK_SIZE, num_kv_heads=1, head_size=HEAD_DIM, dtype=DTYPE
-    )
+    config = VllmConfig(cache_config=CacheConfig(block_size=BLOCK_SIZE))
+    with set_current_vllm_config(config):
+        cache = MiniMaxM3IndexerCache(
+            HEAD_DIM, "index_cache", indexer_kv_dtype=index_dtype, tp_shard=tp_shard
+        )
+    ispec = cache.get_kv_cache_spec(config)
     shape_bytes = compute_layer_kv_cache_shape_bytes(ispec, nb)
-    assert shape_bytes == (nb, 1, BLOCK_SIZE, HEAD_DIM * DTYPE.itemsize)
+    content = HEAD_DIM * cache.dtype.itemsize // tp_shard
+    assert shape_bytes == (nb, 1, BLOCK_SIZE, content)
+    assert ispec.page_size_bytes == BLOCK_SIZE * content
     assert _layer_stride_order(KVCacheLayout.LBNHC, 3) == (0, 1, 2)
 
     for layout in (KVCacheLayout.LBNHC, KVCacheLayout.LBHNC):
         iraw = torch.zeros(nb * ispec.page_size_bytes, dtype=torch.int8)
         view = dense_kv_cache_views(iraw, ispec, nb, 1, layout, BLOCK_SIZE)[0]
-        assert tuple(view.shape) == (nb, 1, BLOCK_SIZE, HEAD_DIM)
-        indexer_cache = view.squeeze(1)
-        assert tuple(indexer_cache.shape) == (nb, BLOCK_SIZE, HEAD_DIM)
-        assert indexer_cache.is_contiguous()
+        cache.bind_kv_cache(view)
+        assert tuple(cache.kv_cache.shape) == (nb, BLOCK_SIZE // tp_shard, HEAD_DIM)
+        assert cache.kv_cache.is_contiguous()
+        assert cache.kv_cache.data_ptr() == iraw.data_ptr()
 
 
 def test_hnd_allocation_is_packed_head_major():

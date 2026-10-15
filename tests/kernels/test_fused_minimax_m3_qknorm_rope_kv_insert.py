@@ -482,12 +482,12 @@ def test_sparse_skip_index_branch(num_tokens, block_size, kv_cache_dtype):
     reason="e4m3 conversion requires CUDA SM89+.",
 )
 @pytest.mark.parametrize("num_tokens", [1, 7, 64, 513])
-@pytest.mark.parametrize("block_size", [16, 64])
-def test_sparse_full_fp8_index(num_tokens, block_size):
+@pytest.mark.parametrize("block_size,num_kv_heads", [(16, 4), (64, 4), (128, 1)])
+def test_sparse_full_fp8_index(num_tokens, block_size, num_kv_heads):
     torch.manual_seed(1)
     device, dtype, eps = "cuda", torch.bfloat16, 1e-6
     base, max_pos = 5_000_000.0, 4096
-    num_heads, num_kv_heads, num_idx_heads = 16, 4, 4
+    num_heads, num_idx_heads = 16, 4
 
     q_w = torch.randn(HEAD_DIM, dtype=dtype, device=device) * 0.1
     k_w = torch.randn(HEAD_DIM, dtype=dtype, device=device) * 0.1
@@ -509,8 +509,10 @@ def test_sparse_full_fp8_index(num_tokens, block_size):
         num_blocks * block_size, dtype=torch.int64, device=device
     )[:num_tokens]
     index_slot_mapping = torch.roll(slot_mapping, shifts=1)
+    if block_size == 128 and num_tokens > 1:
+        index_slot_mapping[-1] = -1
 
-    def run(index_dtype):
+    def run(index_dtype, index_cache=None, index_slots=None):
         qkv = qkv0.clone()
         kv_cache = torch.zeros(
             num_blocks,
@@ -520,9 +522,10 @@ def test_sparse_full_fp8_index(num_tokens, block_size):
             dtype=dtype,
             device=device,
         )
-        index_cache = torch.zeros(
-            num_blocks, block_size, HEAD_DIM, dtype=index_dtype, device=device
-        )
+        if index_cache is None:
+            index_cache = torch.zeros(
+                num_blocks, block_size, HEAD_DIM, dtype=index_dtype, device=device
+            )
         q_out = torch.empty(num_tokens, qsz, dtype=dtype, device=device)
         index_q = torch.empty(num_tokens, iqsz, dtype=index_dtype, device=device)
         ops.fused_minimax_m3_qknorm_rope_kv_insert(
@@ -539,7 +542,7 @@ def test_sparse_full_fp8_index(num_tokens, block_size):
             ik_w,
             num_idx_heads,
             slot_mapping,
-            index_slot_mapping,
+            index_slot_mapping if index_slots is None else index_slots,
             kv_cache,
             index_cache,
             block_size,
@@ -565,6 +568,42 @@ def test_sparse_full_fp8_index(num_tokens, block_size):
         iq_fp.view(torch.uint8), iq_bf.to(torch.float8_e4m3fn).view(torch.uint8)
     )
     torch.testing.assert_close(idxc_fp.float(), idxc_bf.float(), rtol=0.13, atol=0.05)
+
+    if block_size == 128:
+        from vllm.config import VllmConfig, set_current_vllm_config
+        from vllm.models.minimax_m3.common.indexer import MiniMaxM3IndexerCache
+        from vllm.models.minimax_m3.nvidia.indexer_msa import shard_slot_mapping
+
+        with set_current_vllm_config(VllmConfig()):
+            cache = MiniMaxM3IndexerCache(
+                HEAD_DIM, prefix="index_cache", indexer_kv_dtype="fp8", tp_shard=4
+            )
+        for rank in range(4):
+            packed = torch.zeros(
+                num_blocks,
+                1,
+                block_size,
+                HEAD_DIM // 4,
+                dtype=torch.float8_e4m3fn,
+                device=device,
+            )
+            cache.bind_kv_cache(packed)
+            assert cache.kv_cache.data_ptr() == packed.data_ptr()
+            index_slots = shard_slot_mapping(
+                index_slot_mapping, rank, 4, torch.empty_like(index_slot_mapping)
+            )
+            qkv_sh, kvc_sh, idxc_sh, qo_sh, iq_sh = run(
+                torch.float8_e4m3fn, cache.kv_cache, index_slots
+            )
+            # Sharding only changes index-K storage; all query heads and the
+            # main KV insert must be identical to the unsharded run.
+            for actual, expected in zip(
+                (qkv_sh, kvc_sh, qo_sh, iq_sh), (qkv_fp, kvc_fp, qo_fp, iq_fp)
+            ):
+                assert torch.equal(actual.view(torch.uint8), expected.view(torch.uint8))
+            assert torch.equal(
+                idxc_sh.view(torch.uint8), idxc_fp[:, rank::4].view(torch.uint8)
+            )
 
 
 # ── Test 5: sparse mode with an NVFP4 main KV cache ──────────────────────────
