@@ -79,17 +79,9 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
                 quant_config=quant_config,
                 prefix=f"{prefix}.mlp",
             )
-            # Force the deferred reduce (fused into the next layer's
-            # fused_allreduce_rms_norm) for DeepSeek V3.2 always, and for
-            # GLM-5.2 only when not using all2all (i.e. under TP). Under
-            # GLM-5.2 EP/WideEP, Mori's combine already reduces, so
-            # forcing this trips "skip_final_all_reduce requires an
-            # un-reduced fused output"; leave it unset there.
-            if (
-                config.model_type != "glm_moe_dsa"
-                or not self.mlp.experts.moe_config.moe_parallel_config.use_all2all_kernels
-            ):
-                self.mlp.experts.moe_config.skip_final_all_reduce = True
+            moe_cfg = self.mlp.experts.moe_config
+            if not moe_cfg.moe_parallel_config.use_all2all_kernels:
+                moe_cfg.skip_final_all_reduce = True
         else:
             self.mlp = DeepseekV2MLP(
                 hidden_size=config.hidden_size,
