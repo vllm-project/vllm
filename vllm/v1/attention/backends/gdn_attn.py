@@ -546,7 +546,10 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                         cu_seqlens=prefill_query_start_loc,
                     )
                 )
-            else:
+            elif self.gdn_prefill_backend != "flashinfer":
+                # FlashInfer's chunk kernel consumes cu_seqlens directly and
+                # never reads chunk_indices/chunk_offsets, so skip the FLA
+                # metadata (CPU compute + H2D copies) entirely.
                 chunk_indices, chunk_offsets = self._build_chunk_metadata(
                     prefill_query_start_loc,
                     prefill_query_start_loc_cpu,

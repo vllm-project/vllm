@@ -1547,8 +1547,6 @@ class VllmConfig:
                 self.quant_config.use_deep_gemm = False
                 logger.warning_once(
                     "Auto-disabled DeepGemm for model_type=%s on Blackwell. "
-                    "DeepGemm E8M0 scale format causes accuracy degradation "
-                    "for this architecture. Falling back to CUTLASS. "
                     "To disable DeepGemm globally, set VLLM_USE_DEEP_GEMM=0.",
                     model_type,
                 )
@@ -2940,12 +2938,7 @@ class VllmConfig:
             unsupported.append("pipeline parallelism with external_launcher")
 
         if speculative_config is not None:
-            if speculative_config.method in (
-                "suffix",
-                "medusa",
-                "mlp_speculator",
-                "custom_class",
-            ):
+            if speculative_config.method in ("suffix", "custom_class"):
                 unsupported.append(f"speculative method '{speculative_config.method}'")
 
             # V2 EagleSpeculator does not support parallel_drafting (for P-Eagle).
