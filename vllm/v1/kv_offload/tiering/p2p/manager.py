@@ -78,7 +78,9 @@ _IDLE_REAP_HEADROOM = 8
 
 # Reconnect backoff after a session ends on a data-plane fault, as for
 # NixlConnector's invalid peers: the first fault reconnects at once; a
-# repeat before the peer has stayed healthy for the max doubles the wait.
+# repeat within the max of the previous wait expiring doubles the wait.
+# Expiry is by time alone: no successful transfer is required, so a peer
+# that is merely idle for the max starts over at an immediate reconnect.
 _RECONNECT_MIN_BACKOFF_S = 1.0
 _RECONNECT_MAX_BACKOFF_S = 60.0
 
@@ -364,6 +366,10 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         self._sessions: dict[str, P2PSession] = {}
         # peer_id → (backoff, retry_at); see _schedule_reconnect_backoff.
         self._reconnect_backoff: dict[str, tuple[float, float]] = {}
+        # peer_id → data-plane faults over this process's lifetime. Unlike
+        # the backoff it never expires, so the peer-down log shows a peer
+        # that keeps faulting under traffic too sparse to escalate.
+        self._data_plane_faults: dict[str, int] = {}
         # kv_request_id → session, set when the bound session has received
         # FetchMsg for that id. submit_store after binding routes directly
         # to the session; before binding, batches are parked in
@@ -855,21 +861,29 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             # dead session's synthetic lookups on the next serve_external_requests.
             self._failed_serve_ctxs.extend(close_result.failed_serves)
             self._data.remove_remote_peer(pid)
-            backoff = (
-                self._schedule_reconnect_backoff(pid)
-                if session.data_plane_fault is not None
-                else 0.0
-            )
+            fault_info = ""
+            if session.data_plane_fault is not None:
+                faults = self._data_plane_faults.get(pid, 0) + 1
+                self._data_plane_faults[pid] = faults
+                fault_info = f"; data-plane fault #{faults}"
+                backoff = self._schedule_reconnect_backoff(pid)
+                if backoff:
+                    fault_info += f"; reconnect backoff {backoff:.0f}s"
             logger.warning(
                 "P2P %s: peer %s down (%s)%s",
                 self._local_id,
                 pid,
                 session.death_reason,
-                f"; reconnect backoff {backoff:.0f}s" if backoff else "",
+                fault_info,
             )
 
     def _schedule_reconnect_backoff(self, peer_id: str) -> float:
-        """Record a data-plane fault for *peer_id*; return its reconnect wait."""
+        """Record a data-plane fault for *peer_id*; return its reconnect wait.
+
+        The wait doubles (1 s up to the max) when the previous fault's wait
+        expired less than the max ago, and is 0 otherwise. Only time is
+        checked, not whether any transfer succeeded in between.
+        """
         now = time.monotonic()
         for pid, (_, retry_at) in list(self._reconnect_backoff.items()):
             if now - retry_at > _RECONNECT_MAX_BACKOFF_S:

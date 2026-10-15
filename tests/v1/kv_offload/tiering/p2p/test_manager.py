@@ -120,6 +120,7 @@ def _make_manager() -> P2PSecondaryTierManager:
     mgr._failed_req_ids = set()
     mgr._sessions = {}
     mgr._reconnect_backoff = {}
+    mgr._data_plane_faults = {}
     mgr._kv_to_session = {}
     mgr._unbound_stores = {}
     mgr._reaped_stores = {}
@@ -2289,13 +2290,40 @@ class TestReconnectBackoff:
         self._reap(mgr, "fault")
         backoff, _ = mgr._reconnect_backoff[self.PEER]
         assert backoff == 1.0
-        # The peer then stays healthy for longer than the max backoff.
+        # The previous wait then expired more than the max ago (no fault
+        # since; no successful transfer is required).
         mgr._reconnect_backoff[self.PEER] = (
             backoff,
             time.monotonic() - _RECONNECT_MAX_BACKOFF_S - 1.0,
         )
         self._reap(mgr, "fault")
         assert mgr._reconnect_backoff[self.PEER][0] == 0.0
+
+    def test_peer_down_log_counts_faults_across_backoff_reset(self, monkeypatch):
+        warnings: list[str] = []
+
+        def record_warning(msg, *args, **_kwargs):
+            warnings.append(msg % args if args else msg)
+
+        monkeypatch.setattr(manager_module.logger, "warning", record_warning)
+        mgr = _make_manager()
+        self._reap(mgr, "fault")
+        self._reap(mgr, "fault")
+        # Let the backoff expire: the count must keep growing regardless.
+        backoff, _ = mgr._reconnect_backoff[self.PEER]
+        mgr._reconnect_backoff[self.PEER] = (
+            backoff,
+            time.monotonic() - _RECONNECT_MAX_BACKOFF_S - 1.0,
+        )
+        self._reap(mgr, "fault")
+        self._reap(mgr, None)
+
+        assert mgr._data_plane_faults[self.PEER] == 3
+        assert warnings[0].endswith("; data-plane fault #1")
+        assert warnings[1].endswith("; data-plane fault #2; reconnect backoff 1s")
+        assert warnings[2].endswith("; data-plane fault #3")
+        # A control-plane death neither counts nor reports a fault.
+        assert "data-plane fault" not in warnings[3]
 
     def test_outbound_connect_is_skipped_during_backoff(self):
         mgr = _make_manager()
