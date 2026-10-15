@@ -14,7 +14,6 @@ from vllm import _custom_ops as ops
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import (
-    get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
 from vllm.logger import init_logger
@@ -33,6 +32,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.model_loader.weight_utils import make_attention_sink
 from vllm.multimodal.inputs import NestedTensors
 from vllm.platforms import current_platform
 from vllm.transformers_utils.config import set_default_rope_theta
@@ -92,7 +92,9 @@ def _dflash_layer_causal(config: Qwen3Config, layer_idx: int) -> bool:
     if override is not None:
         return bool(override)
     layer_types = getattr(config, "layer_types", None)
-    return bool(layer_types) and layer_types[layer_idx] == _SLIDING_ATTENTION
+    if not layer_types:
+        return False
+    return layer_types[layer_idx] == _SLIDING_ATTENTION
 
 
 def dflash_has_any_non_causal(config: Qwen3Config) -> bool:
@@ -105,6 +107,7 @@ def dflash_has_any_non_causal(config: Qwen3Config) -> bool:
 
 def _get_dflash_fc_input_size(vllm_config: VllmConfig) -> int:
     spec_config = vllm_config.speculative_config
+    assert spec_config is not None
     config = spec_config.draft_model_config.hf_config
     aux_layers = get_eagle3_aux_layers_from_config(spec_config)
     num_features_to_use = len(aux_layers) if aux_layers else config.num_hidden_layers
@@ -248,9 +251,7 @@ class DFlashQwen3Attention(nn.Module):
         )
 
         self.attention_sink_bias = (
-            torch.nn.Parameter(torch.empty(self.num_heads), requires_grad=False)
-            if add_swa_attention_sink_bias
-            else None
+            make_attention_sink(self.num_heads) if add_swa_attention_sink_bias else None
         )
 
         self.sliding_window = sliding_window
@@ -267,6 +268,24 @@ class DFlashQwen3Attention(nn.Module):
             sinks=self.attention_sink_bias,
         )
         self.causal = causal
+        if current_platform.is_rocm():
+            from vllm.platforms.rocm import on_gfx1x
+            from vllm.v1.attention.backends.rocm_segmented_attn import (
+                RocmSegmentedAttentionImpl,
+            )
+
+            if on_gfx1x() and isinstance(self.attn.impl, RocmSegmentedAttentionImpl):
+                # Startup segmented tuning needs the draft's actual attention mode.
+                # Causality is normally supplied later through attention metadata.
+                self.attn.segmented_causal = causal
+                speculative_config = get_current_vllm_config().speculative_config
+                if (
+                    speculative_config is not None
+                    and speculative_config.num_speculative_tokens is not None
+                ):
+                    self.attn.segmented_query_limit = (
+                        speculative_config.num_speculative_tokens + 1
+                    )
         self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
         self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
 
@@ -418,7 +437,9 @@ class DFlashQwen3Model(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
-        self.config = vllm_config.speculative_config.draft_model_config.hf_config
+        speculative_config = vllm_config.speculative_config
+        assert speculative_config is not None
+        self.config = speculative_config.draft_model_config.hf_config
         self.vocab_size = self.config.vocab_size
         self.quant_config = get_draft_quant_config(vllm_config)
         _add_global_draft_layer_exclusions(
@@ -617,15 +638,6 @@ class DFlashQwen3Model(nn.Module):
         # --- Grouped RMSNorm K across all layers ([L, num_ctx, nkv, hd]) ---
         # The weight is selected per layer by the outermost (layer) index.
         all_k_normed = torch.empty_like(all_k)
-        if current_platform.is_xpu():
-            for layer_idx in range(all_k.shape[0]):
-                ops.rms_norm(
-                    all_k_normed[layer_idx],
-                    all_k[layer_idx],
-                    self._k_norm_weights[layer_idx],
-                    self._rms_norm_eps,
-                )
-            return all_k_normed
         ops.rms_norm(
             all_k_normed,
             all_k,
@@ -732,26 +744,9 @@ class DFlashQwen3Model(nn.Module):
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
-    def _preprocess(
-        self, weights: Iterable[tuple[str, torch.Tensor]]
-    ) -> Iterable[tuple[str, torch.Tensor]]:
-        tp_size = get_tensor_model_parallel_world_size()
-        tp_rank = get_tensor_model_parallel_rank()
-        for name, loaded_weight in weights:
-            if "attention_sink_bias" in name:
-                # Sink bias is per-head; shard it across TP ranks like the
-                # attention heads themselves.
-                heads_per_rank = loaded_weight.shape[0] // tp_size
-                loaded_weight = loaded_weight.narrow(
-                    0, tp_rank * heads_per_rank, heads_per_rank
-                )
-            yield name, loaded_weight
-
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(
-            self._preprocess(weights), mapper=self.hf_to_vllm_mapper
-        )
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
@@ -759,7 +754,9 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)
-        self.draft_model_config = vllm_config.speculative_config.draft_model_config
+        speculative_config = vllm_config.speculative_config
+        assert speculative_config is not None
+        self.draft_model_config = speculative_config.draft_model_config
         self.config = self.draft_model_config.hf_config
         if getattr(self.config, "draft_vocab_size", None) is None:
             self.config.draft_vocab_size = getattr(self.config, "vocab_size", None)
@@ -801,7 +798,7 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
     ) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
 
-    def forward(
+    def forward(  # type: ignore[override]
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
@@ -896,7 +893,7 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
             model_weights["model.mask_embedding"] = mask_embedding
             self.model.has_separate_mask_embedding = True
 
-        orig_to_new_substr = {}
+        orig_to_new_substr: dict[str, None] = {}
         if not includes_draft_id_mapping:
             orig_to_new_substr["draft_id_to_target_id"] = None
         if not includes_embed_tokens:

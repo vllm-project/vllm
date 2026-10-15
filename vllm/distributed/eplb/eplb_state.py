@@ -183,6 +183,8 @@ class EplbModelState:
     See:
     https://github.com/vllm-project/vllm/pull/22167#pullrequestreview-3086143856
     """
+    last_expert_load: torch.Tensor
+    """Global logical-expert totals from the last reshuffle; equal demand initially."""
     model_name: str
     model: MixtureOfExperts
     expert_buffer: list[torch.Tensor]
@@ -321,39 +323,47 @@ class EplbState:
         """
         if len(self.model_states) > 0:
             model = next(iter(self.model_states.values())).model
-            if (
-                model.num_routed_experts != new_model.num_routed_experts
-                or model.num_redundant_experts != new_model.num_redundant_experts
-                or model.num_physical_experts != new_model.num_physical_experts
-                or model.num_logical_experts != new_model.num_logical_experts
-                or model.num_expert_groups != new_model.num_expert_groups
-            ):
-                raise RuntimeError(
-                    "Model: {} "
-                    "with config {} "
-                    "{} {} {} {} "
-                    "mismatch with new model {} "
-                    "with config {} "
-                    "{} {} {} {}".format(
-                        type(model),
-                        model.num_routed_experts,
-                        model.num_redundant_experts,
-                        model.num_physical_experts,
-                        model.num_logical_experts,
-                        model.num_expert_groups,
-                        type(new_model),
-                        new_model.num_routed_experts,
-                        new_model.num_redundant_experts,
-                        new_model.num_physical_experts,
-                        new_model.num_logical_experts,
-                        new_model.num_expert_groups,
-                    )
+            self.assert_confs_equal(model, new_model)
+
+    @staticmethod
+    def assert_confs_equal(
+        model: MixtureOfExperts, new_model: MixtureOfExperts
+    ) -> None:
+        """Raise if the models have different expert parallel configurations."""
+        if (
+            model.num_routed_experts != new_model.num_routed_experts
+            or model.num_redundant_experts != new_model.num_redundant_experts
+            or model.num_physical_experts != new_model.num_physical_experts
+            or model.num_logical_experts != new_model.num_logical_experts
+            or model.num_expert_groups != new_model.num_expert_groups
+        ):
+            raise RuntimeError(
+                "Model: {} "
+                "with config {} "
+                "{} {} {} {} "
+                "mismatch with new model {} "
+                "with config {} "
+                "{} {} {} {}".format(
+                    type(model),
+                    model.num_routed_experts,
+                    model.num_redundant_experts,
+                    model.num_physical_experts,
+                    model.num_logical_experts,
+                    model.num_expert_groups,
+                    type(new_model),
+                    new_model.num_routed_experts,
+                    new_model.num_redundant_experts,
+                    new_model.num_physical_experts,
+                    new_model.num_logical_experts,
+                    new_model.num_expert_groups,
                 )
+            )
 
     def add_model(
         self,
         model: MixtureOfExperts,
         model_config: ModelConfig,
+        model_name: str | None = None,
     ):
         """Build the initial EPLB state."""
         self.validate_ep_configuration(model)
@@ -499,7 +509,12 @@ class EplbState:
             expert_load_pass=expert_load_pass,
             expert_load_pass_buffer=expert_load_pass_buffer,
             expert_load_window=expert_load_window,
-            model_name=model_config.model,
+            last_expert_load=torch.ones(
+                (model.num_moe_layers, model.num_logical_experts),
+                dtype=torch.int64,
+                device=self.device,
+            ),
+            model_name=model_name or model_config.model,
             model=model,
             expert_buffer=expert_buffer,
             rebalanced=False,
@@ -569,14 +584,14 @@ class EplbState:
 
         """
         ep_group = get_ep_group().device_group
-        if is_profile:
-            self.rearrange(is_profile=True)
-            return
-
         if is_dummy:
             # Do not record load metrics for dummy steps
             for eplb_model_state in self.model_states.values():
                 eplb_model_state.expert_load_pass.zero_()
+
+        if is_profile:
+            self.rearrange(is_profile=True)
+            return
 
         if (
             log_stats
@@ -744,6 +759,7 @@ class EplbState:
         self,
         is_profile: bool = False,
         rank_mapping: dict[int, int] | None = None,
+        use_last_expert_load: bool = False,
     ) -> torch.Tensor | None:
         """Rearrange the experts according to the current load.
 
@@ -753,6 +769,7 @@ class EplbState:
                 no memory movement will be performed. Default is False.
             rank_mapping (dict[int, int] | None): The rank mapping
                 when scaling is done in EEP.
+            use_last_expert_load: Use the last reshuffle's logical-expert totals.
 
         """
         ep_group = get_ep_group().device_group
@@ -775,6 +792,13 @@ class EplbState:
         # Map the physical expert load to global logical experts
         global_expert_load_windows = []
         for eplb_model_state in self.model_states.values():
+            if use_last_expert_load:
+                # Distribute rank 0's saved counts through the existing all-reduce.
+                saved_load = eplb_model_state.last_expert_load
+                global_expert_load_windows.append(
+                    saved_load.clone() if is_main_rank else torch.zeros_like(saved_load)
+                )
+                continue
             expert_load_window = eplb_model_state.expert_load_window
             physical_to_logical = eplb_model_state.physical_to_logical_map
             invalid_idx = eplb_model_state.model.num_logical_experts
@@ -835,6 +859,8 @@ class EplbState:
         for eplb_model_state, global_expert_load_window in zip(
             self.model_states.values(), global_expert_load_windows
         ):
+            if not is_profile:
+                eplb_model_state.last_expert_load = global_expert_load_window
             if not self.is_async or is_profile:
                 # Get new expert mappings for the model. The policy runs on the
                 # host, so the load window and current map have to come back.

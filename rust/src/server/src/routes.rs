@@ -18,21 +18,41 @@ mod server_info;
 mod sleep;
 mod tokenize;
 mod version;
+mod weight_checker;
 mod weight_transfer;
 mod world_size;
 
 use std::sync::Arc;
 
-use axum::Router;
 use axum::extract::DefaultBodyLimit;
+use axum::http::StatusCode;
 use axum::middleware::{from_fn, from_fn_with_state};
 use axum::routing::{get, post};
+use axum::{Json, Router};
 use tower_http::trace::TraceLayer;
 use tracing::{info, warn};
 
 use crate::DEFAULT_REQUEST_BODY_LIMIT_BYTES;
 use crate::middleware;
+use crate::routes::openai::utils::types::{ErrorDetail, ErrorResponse};
 use crate::state::AppState;
+
+const SCALE_OUT_DISABLED_MESSAGE: &str =
+    "Scale-out endpoints are disabled. Restart vllm serve with --enable-scale-out to enable them.";
+
+async fn disabled_scale_out() -> (StatusCode, Json<ErrorResponse>) {
+    (
+        StatusCode::FORBIDDEN,
+        Json(ErrorResponse {
+            error: ErrorDetail {
+                message: SCALE_OUT_DISABLED_MESSAGE.to_string(),
+                error_type: "PermissionDeniedError".to_string(),
+                param: None,
+                code: Some("403".to_string()),
+            },
+        }),
+    )
+}
 
 fn server_dev_mode_enabled() -> bool {
     std::env::var("VLLM_SERVER_DEV_MODE")
@@ -104,7 +124,8 @@ fn build_router_with_options(
     if scale_out_endpoints_enabled {
         router = router.route("/inference/v1/generate", post(inference::generate));
     } else {
-        info!("scale-out endpoints are disabled; pass --enable-scale-out to enable them");
+        info!("{SCALE_OUT_DISABLED_MESSAGE}");
+        router = router.route("/inference/v1/generate", post(disabled_scale_out));
     }
 
     if runtime_lora_updating_enabled {
@@ -125,6 +146,10 @@ fn build_router_with_options(
                 post(weight_transfer::init_weight_transfer_engine),
             )
             .route(
+                "/shutdown_weight_transfer_engine",
+                post(weight_transfer::shutdown_weight_transfer_engine),
+            )
+            .route(
                 "/start_weight_update",
                 post(weight_transfer::start_weight_update),
             )
@@ -142,6 +167,7 @@ fn build_router_with_options(
                 post(weight_transfer::update_weight_version),
             )
             .route("/weight_info", get(weight_transfer::weight_info))
+            .route("/weight_checker", post(weight_checker::weight_checker))
             .route("/abort_requests", post(abort_requests::abort_requests))
             .route("/sleep", post(sleep::sleep))
             .route(

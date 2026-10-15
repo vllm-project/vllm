@@ -183,6 +183,7 @@ fn tools_keep_historical_developer() {
         description: None,
         parameters: Value::Object(Default::default()),
         strict: None,
+        defer_loading: None,
     };
     let request = thinking_request(vec![
         ChatMessage::developer("old instruction", Some(vec![tool])),
