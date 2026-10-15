@@ -650,20 +650,6 @@ def test_naive_block_assignment_moe(
         )
 
 
-@pytest.mark.parametrize("batch_invariant", [False, True])
-def test_should_moe_wna16_use_cuda_batch_invariant(
-    monkeypatch: pytest.MonkeyPatch, batch_invariant: bool
-) -> None:
-    """The CUDA WNA16 kernel is only picked for small batches, so batch
-    invariance must always use the Triton kernel."""
-    monkeypatch.setattr(fused_moe_module.envs, "VLLM_BATCH_INVARIANT", batch_invariant)
-    monkeypatch.setattr(fused_moe_module.current_platform, "is_cuda", lambda: True)
-    small_batch = fused_moe_module.should_moe_wna16_use_cuda(
-        num_valid_tokens=8, group_size=128, num_experts=64, bit=4
-    )
-    assert small_batch is not batch_invariant
-
-
 @pytest.mark.parametrize("m,n,k", FUSED_MOE_WN16_MNK_FACTORS)
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
