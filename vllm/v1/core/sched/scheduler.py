@@ -147,9 +147,15 @@ class Scheduler(SchedulerInterface):
             self.kv_events_config is not None
             and self.kv_events_config.enable_kv_cache_events
         )
-        # Diffusion models may not sample any tokens for a denoising step.
+        # Pooling and diffusion models do not append a sampled token after
+        # prefill, so they should not reserve one context slot while scheduling.
         self.num_sampled_tokens_per_step = (
-            1 if not vllm_config.model_config.is_diffusion else 0
+            0
+            if (
+                vllm_config.model_config.runner_type == "pooling"
+                or vllm_config.model_config.is_diffusion
+            )
+            else 1
         )
 
         # Create KVConnector for the Scheduler. Note that each Worker
@@ -284,10 +290,14 @@ class Scheduler(SchedulerInterface):
         # DSV41 SWA bounded replay: groups that declare a replay window are rebuilt
         # after a prefix hit by recomputing its trailing tokens. One window
         # for all such groups, so the rewind matches every group's allocation.
-        replay_windows = {
-            group.kv_cache_spec.prefix_replay_tokens
-            for group in kv_cache_config.kv_cache_groups
+        self.prefix_replay_group_ids = tuple(
+            group_id
+            for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
             if group.kv_cache_spec.prefix_replay_tokens > 0
+        )
+        replay_windows = {
+            kv_cache_config.kv_cache_groups[group_id].kv_cache_spec.prefix_replay_tokens
+            for group_id in self.prefix_replay_group_ids
         }
         assert len(replay_windows) <= 1, (
             f"Prefix replay windows should agree: {sorted(replay_windows)}"
@@ -334,6 +344,17 @@ class Scheduler(SchedulerInterface):
                 self.cache_config.enable_mamba_shared_prefix_checkpoint
             ),
         )
+        # Mamba managers already account for their speculative state blocks.
+        num_spec_decode_tokens = (
+            1 + self.num_spec_tokens + self.num_lookahead_tokens
+            if self.num_spec_tokens
+            else 0
+        )
+        self._spec_decode_step_blocks = sum(
+            cdiv(num_spec_decode_tokens, manager.block_size)
+            for manager in self.kv_cache_manager.coordinator.single_type_managers
+            if not isinstance(manager.kv_cache_spec, MambaSpec)
+        )
         # Bind after construction so connectors can access the cache manager.
         if self.connector is not None:
             self.connector.bind_kv_cache_manager(self.kv_cache_manager)
@@ -347,6 +368,36 @@ class Scheduler(SchedulerInterface):
         # prefill batch fully drained the waiting queue. Prefill throttling
         # is disabled in this case.
         self.prefill_capacity_bound = False
+        # The DP engine core drives this cadence from a counter shared across
+        # ranks; an engine without one never throttles, so apply the interval
+        # locally, timed from the last prefill-carrying step. Three regimes:
+        #   1. no DP -- local cadence applies;
+        #   2. dense DP rank -- `reconfigure_for_independent_dp_rank` already
+        #      set data_parallel_size=1, so each rank gets its own cadence.
+        #      Intended, but a behaviour change: this used to be a no-op;
+        #   3. MoE DP rank (size > 1) -- the engine core drives it, no-op here.
+        self.local_prefill_interval = (
+            self.scheduler_config.prefill_schedule_interval
+            if self.parallel_config.data_parallel_size == 1
+            else 1
+        )
+        if self.local_prefill_interval > 1:
+            # Neither the hold nor its release is otherwise visible in logs or
+            # stats, which makes a misapplied cadence hard to diagnose.
+            logger.info_once(
+                "Prefill cadence: applying prefill_schedule_interval=%d "
+                "locally (this engine is not DP-coordinated); prefill is held "
+                "until %d executed steps have passed since the last "
+                "prefill-carrying step.",
+                self.local_prefill_interval,
+                self.local_prefill_interval,
+            )
+        # A full interval back, so the first step is never gated.
+        self.last_prefill_step = -self.local_prefill_interval
+        # Steps that actually scheduled tokens. `current_step` counts every
+        # schedule() call including empty ones, so it would expire the hold
+        # early; it keeps its own meaning (next_decode_eligible_step).
+        self.num_executed_steps = 0
         self.scheduler_reserve_full_isl = (
             self.scheduler_config.scheduler_reserve_full_isl
         )
@@ -371,9 +422,8 @@ class Scheduler(SchedulerInterface):
             or group.kv_cache_spec.num_prefill_checkpoint_blocks > 0
             for group in kv_cache_config.kv_cache_groups
         )
-        # A finer prefix_match_unit is configured: a mamba partial tail entry
-        # can only be registered by a step ending exactly at the prompt's last
-        # hash boundary, so the split adds that stop.
+        # Fine-grained hits reuse the prompt's hash-aligned Mamba checkpoint.
+        # Split there only if the backend cannot save it within the final chunk.
         self.mamba_partial_cache_hit = (
             self.need_mamba_block_aligned_split
             and self.hash_block_size < self.block_size
@@ -450,14 +500,19 @@ class Scheduler(SchedulerInterface):
         # The last block-aligned position whose state can be cached. With
         # Eagle, FullAttn prunes the last matching block, so back off one
         # block to avoid a Mamba cache miss.
-        last_cache_position = request.num_tokens - request.num_tokens % block_size
-        if self.use_eagle_block_drop:
-            last_cache_position = max(last_cache_position - block_size, 0)
+        ckpt_block_size = (
+            self.hash_block_size if self.mamba_partial_cache_hit else self.block_size
+        )
+        last_cache_position = get_mamba_prefill_checkpoint_position(
+            request.num_tokens,
+            block_size,
+            self.use_eagle_block_drop,
+        )
 
         end = start + num_new_tokens
         checkpoint_position = get_mamba_prefill_checkpoint_position(
             prefill_end,
-            self.hash_block_size,
+            ckpt_block_size,
             drop_eagle_block=self.use_eagle_block_drop,
         )
         use_internal_checkpoint = (
@@ -490,18 +545,14 @@ class Scheduler(SchedulerInterface):
 
         next_block_boundary = (start // block_size + 1) * block_size
         tail_boundary = (
-            request.num_prompt_tokens // self.hash_block_size * self.hash_block_size
+            get_mamba_prefill_checkpoint_position(
+                request.num_prompt_tokens,
+                self.hash_block_size,
+                self.use_eagle_block_drop,
+            )
             if self.mamba_partial_cache_hit and not use_internal_checkpoint
             else 0
         )
-        if tail_boundary and self.use_eagle_block_drop:
-            # Eagle matches one hash unit past the candidate and drops it, so
-            # nothing proves the prompt's own last hash boundary. Materialize
-            # the state one unit lower, where the hit can actually land. Keyed on
-            # the block-drop bit, not plain use_eagle: this shift exists only to
-            # compensate for the drop, and the Mamba manager's matching gate
-            # reads the same bit (the coordinator is handed use_eagle_block_drop).
-            tail_boundary = max(tail_boundary - self.hash_block_size, 0)
         junction = request.shared_prefix_boundary
         # Block-floored: a sub-block junction's state is not separately cacheable.
         block_floored = start + (junction - start) // block_size * block_size
@@ -522,8 +573,7 @@ class Scheduler(SchedulerInterface):
             else 0,
             # Never run past the last cacheable block boundary mid-chunk.
             last_cache_position,
-            # Fine-grained hits: the prompt's partial-tail entry can only be
-            # registered by a chunk ending exactly at its last hash boundary.
+            # Stop at the prompt checkpoint unless the backend saves it internally.
             tail_boundary
             if last_cache_position < tail_boundary < request.num_prompt_tokens
             else 0,
@@ -603,6 +653,9 @@ class Scheduler(SchedulerInterface):
         scheduled_spec_decode_tokens: dict[str, list[int]] = {}
         # Whether the running batch contains any prefill requests.
         prefill_scheduled = False
+        # Whether a waiting request was admitted with prompt left to compute.
+        # Separate from `prefill_scheduled`, which covers only the running loop.
+        prefill_admitted = False
         # Whether any scheduled request has a synchronous connector KV load.
         has_sync_kv_loads = False
 
@@ -633,6 +686,28 @@ class Scheduler(SchedulerInterface):
             long_prefill_token_threshold = max(
                 long_prefill_token_threshold, input_budget // num_eligible_reqs
             )
+
+        # Local prefill cadence: hold prefill until the interval since the last
+        # prefill-carrying step has elapsed, so decode runs in longer
+        # uninterrupted stretches. Mirrors the DP gate above, including its
+        # capacity escape: once a release step cannot drain the waiting queue,
+        # throttling stops (#44558, test_throttle_capacity_bound_guard_admits).
+        # Without that escape a backed-up engine holds both admissions and
+        # in-flight chunks for interval-1 of every interval steps, capping
+        # prefill at roughly one budget per interval and growing the waiting
+        # queue without bound.
+        if (
+            not defer_prefills
+            and self.local_prefill_interval > 1
+            and not self.prefill_capacity_bound
+            # This call becomes executed step num_executed_steps + 1 if it
+            # schedules anything, and last_prefill_step is stamped on the same
+            # convention below.
+            and (self.num_executed_steps + 1) - self.last_prefill_step
+            < self.local_prefill_interval
+            and any(not r.is_prefill_chunk for r in self.running)
+        ):
+            defer_prefills = True
 
         # First, schedule the RUNNING requests.
         req_index = 0
@@ -877,7 +952,7 @@ class Scheduler(SchedulerInterface):
             assert len(scheduled_loras) <= self.lora_config.max_loras
 
         # Next, schedule the WAITING requests.
-        if not preempted_reqs and self._pause_state == PauseState.UNPAUSED:
+        if not preempted_reqs and self._pause_state != PauseState.PAUSED_ALL:
             step_skipped_waiting: deque[Request] = deque()
             step_skipped_kv_holding: deque[Request] = deque()
 
@@ -890,8 +965,11 @@ class Scheduler(SchedulerInterface):
                     step_skipped_waiting.appendleft(request_to_skip)
 
             while token_budget > 0:
-                # Requests holding KV blocks are always drained first.
-                request_queue = self.kv_holding_waiting or self.waiting
+                # Requests holding KV blocks are always drained first, and are
+                # the only ones admitted under PAUSED_NEW (e.g. async KV loads).
+                request_queue = self.kv_holding_waiting
+                if not request_queue and self._pause_state == PauseState.UNPAUSED:
+                    request_queue = self.waiting
                 if not request_queue or input_budget <= draft_slots:
                     break
                 # Paused streaming sessions (WAITING_FOR_STREAMING_REQ) are not
@@ -967,14 +1045,17 @@ class Scheduler(SchedulerInterface):
                             skip_request(request_queue)
                             continue
 
-                        if self.prefix_replay_tokens:
-                            # SWA bounded replay recomputes the hit's last
+                        if self.prefix_replay_tokens and not (
+                            ext_tokens and self._load_restores_replay_window(request)
+                        ):
+                            # DSV41 SWA bounded replay recomputes the hit's last
                             # window, from the block holding its first
                             # token; the sliding-window groups retire
                             # whole blocks below the window of the hit's
                             # next token. Hits end on a block boundary, or
                             # a hit ending one token short of one would
-                            # retire the block the replay starts in.
+                            # retire the block the replay starts in. A load
+                            # that carries the window replays nothing.
                             ext_tokens -= ext_tokens % self.block_size
                             load_kv_async = load_kv_async and ext_tokens > 0
 
@@ -1020,9 +1101,17 @@ class Scheduler(SchedulerInterface):
                         num_new_local_computed_tokens + num_external_computed_tokens
                     )
                     assert num_computed_tokens <= request.num_tokens
-                    if 0 < num_computed_tokens <= self.prefix_replay_tokens:
-                        # SWA bounded replay: a hit no longer than the replayed
-                        # window would be recomputed in full and save nothing.
+                    # DSV41 SWA bounded replay: a KV load that carries the
+                    # window is taken as is; any other hit no longer than the
+                    # replayed window would be recomputed in full and save
+                    # nothing.
+                    window_loaded = bool(
+                        num_external_computed_tokens
+                    ) and self._load_restores_replay_window(request)
+                    if (
+                        not window_loaded
+                        and 0 < num_computed_tokens <= self.prefix_replay_tokens
+                    ):
                         new_computed_blocks = (
                             self.kv_cache_manager.empty_kv_cache_blocks
                         )
@@ -1085,7 +1174,7 @@ class Scheduler(SchedulerInterface):
                     if did_prefix_cache_lookup:
                         # Fresh admission: local and/or sync external hit.
                         num_replay_tokens = self._mark_prefix_replay(
-                            request, num_computed_tokens
+                            request, num_computed_tokens, window_loaded
                         )
                         num_computed_tokens -= num_replay_tokens
                     # Number of tokens to be scheduled.
@@ -1213,7 +1302,7 @@ class Scheduler(SchedulerInterface):
                     # predictable preemptions.
                     reserved_blocks = (
                         self._inflight_prefill_reserved_blocks()
-                        + self._spec_decode_step_blocks()
+                        + self._spec_decode_step_blocks
                     )
 
                 # Replayed tokens are already counted in the adopted hit; a
@@ -1284,6 +1373,12 @@ class Scheduler(SchedulerInterface):
                     )
 
                 if load_kv_async:
+                    # This path deliberately does not reach `prefill_admitted`
+                    # below, so it does not restart the prefill cadence:
+                    # `num_new_tokens` was set to 0 above, so the step carries
+                    # no prefill compute for this request. The interval is
+                    # timed from steps that actually prefilled; refreshing it
+                    # here would start the cadence from a step that did none.
                     # If loading async, allocate memory and put request
                     # into the WAITING_FOR_REMOTE_KV state.
                     request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
@@ -1339,6 +1434,14 @@ class Scheduler(SchedulerInterface):
                     scheduled_spec_decode_tokens[request_id] = [
                         -1
                     ] * self.num_spec_tokens
+                # Must use the SAME predicate as the deferral gate in the
+                # waiting loop (`num_computed_tokens < num_tokens - 1`).
+                # Stamping on `< num_prompt_tokens` instead let a request with
+                # exactly one token left pass the gate on a held step and still
+                # restart the interval -- which is every full prefix-cache hit,
+                # and every remote-KV resume, since those set
+                # num_computed_tokens = num_tokens - 1.
+                prefill_admitted |= num_computed_tokens < request.num_tokens - 1
                 # Only track requests that will still be prefilling after this chunk.
                 if num_computed_tokens + num_new_tokens < request.num_tokens:
                     self._inflight_prefills.add(request)
@@ -1369,6 +1472,15 @@ class Scheduler(SchedulerInterface):
         # Check if the scheduling constraints are satisfied.
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
         assert total_num_scheduled_tokens <= self.max_num_scheduled_tokens
+        # Count this step before stamping the cadence below, so that
+        # last_prefill_step includes the step that carried the prefill.
+        if total_num_scheduled_tokens > 0:
+            self.num_executed_steps += 1
+
+        # Restart the cadence interval from any step that carried prefill,
+        # whether a new admission or a running chunk.
+        if self.local_prefill_interval > 1 and (prefill_scheduled or prefill_admitted):
+            self.last_prefill_step = self.num_executed_steps
 
         assert token_budget >= 0
         assert input_budget >= 0
@@ -1379,16 +1491,6 @@ class Scheduler(SchedulerInterface):
         assert len(scheduled_new_reqs) + len(scheduled_resumed_reqs) + len(
             scheduled_running_reqs
         ) <= len(self.running)
-
-        # Get the longest common prefix among all requests in the running queue.
-        # This can be potentially used for cascade attention.
-        num_common_prefix_blocks = [0] * len(self.kv_cache_config.kv_cache_groups)
-        with record_function_or_nullcontext("schedule: get_num_common_prefix_blocks"):
-            if self.running:
-                any_request_id = self.running[0].request_id
-                num_common_prefix_blocks = (
-                    self.kv_cache_manager.get_num_common_prefix_blocks(any_request_id)
-                )
 
         # Construct the scheduler output.
         if self.use_v2_model_runner:
@@ -1482,7 +1584,6 @@ class Scheduler(SchedulerInterface):
             scheduled_spec_decode_tokens=scheduled_spec_decode_tokens,
             scheduled_encoder_inputs=scheduled_encoder_inputs,
             scheduled_encoder_input_stats=scheduled_encoder_input_stats,
-            num_common_prefix_blocks=num_common_prefix_blocks,
             preempted_req_ids=self.reset_preempted_req_ids,
             # finished_req_ids is an existing state in the scheduler,
             # instead of being newly scheduled in this step.
@@ -1840,6 +1941,26 @@ class Scheduler(SchedulerInterface):
                 # already calculated encoder inputs and can skip here.
                 continue
 
+            # If no encoder input chunking is allowed, we do not want to
+            # partially schedule a multimodal item. If the scheduled range would
+            # only cover part of the mm input, roll back to before the mm item.
+            if (
+                self.scheduler_config.disable_chunked_mm_input
+                and not self.is_encoder_decoder
+                # `<=`, not `<`: a chunk that starts exactly at the item still
+                # splits it when it cannot cover the whole item.
+                and num_computed_tokens <= start_pos
+                and (num_computed_tokens + num_new_tokens)
+                < (start_pos + num_encoder_tokens)
+            ):
+                # Account for EAGLE shift when rolling back to avoid
+                # encoder cache miss. This ensures the scheduled range
+                # stops before start_pos even with the shift.
+                num_new_tokens = max(
+                    0, start_pos - (num_computed_tokens + shift_computed_tokens)
+                )
+                break
+
             if not self.is_encoder_decoder:
                 # We are not using the encoder cache for encoder-decoder models,
                 # yet.
@@ -1879,22 +2000,6 @@ class Scheduler(SchedulerInterface):
                     # previous step.
                     continue
 
-            # If no encoder input chunking is allowed, we do not want to
-            # partially schedule a multimodal item. If the scheduled range would
-            # only cover part of the mm input, roll back to before the mm item.
-            if (
-                self.scheduler_config.disable_chunked_mm_input
-                and num_computed_tokens < start_pos
-                and (num_computed_tokens + num_new_tokens)
-                < (start_pos + num_encoder_tokens)
-            ):
-                # Account for EAGLE shift when rolling back to avoid
-                # encoder cache miss. This ensures the scheduled range
-                # stops before start_pos even with the shift.
-                num_new_tokens = max(
-                    0, start_pos - (num_computed_tokens + shift_computed_tokens)
-                )
-                break
             if not self.encoder_cache_manager.can_allocate(
                 request, i, encoder_compute_budget, num_embeds_to_schedule
             ):
@@ -2469,7 +2574,6 @@ class Scheduler(SchedulerInterface):
     def _update_request_with_output(
         self, request: Request, new_token_ids: list[int], is_stale: bool = False
     ) -> tuple[list[int], bool]:
-        # is_stale is only used by the AsyncScheduler override.
         # Append generated tokens and check for stop. Note that if
         # a request is still being prefilled, we expect the model runner
         # to return empty token ids for the request.
@@ -2481,6 +2585,10 @@ class Scheduler(SchedulerInterface):
             # This must be called before we make the EngineCoreOutput.
             stopped = check_stop(request, self.max_model_len)
             if stopped:
+                # num_computed_tokens covers all new tokens but the last one.
+                # Keep that true after trimming: resumable requests resume from it.
+                if not is_stale:
+                    request.num_computed_tokens -= len(new_token_ids) - num_new
                 del new_token_ids[num_new:]  # Trim new tokens if needed.
                 break
         return new_token_ids, stopped
@@ -2781,7 +2889,8 @@ class Scheduler(SchedulerInterface):
             return 0
         num_running, num_waiting = self.get_request_counts()
         if self._pause_state == PauseState.PAUSED_NEW:
-            return num_running
+            # Requests holding KV blocks still drain; queued ones stay queued.
+            num_waiting = len(self.kv_holding_waiting)
         num_waiting -= self.num_waiting_for_streaming_input
         return num_waiting + num_running
 
@@ -3035,9 +3144,12 @@ class Scheduler(SchedulerInterface):
     def _request_remaining_blocks(self, request: Request) -> int:
         """Blocks `request` still needs to hold its full sequence and be promoted."""
         full_num_tokens = min(request.num_tokens, self.max_model_len)
-        num_blocks = self.kv_cache_manager.coordinator.get_num_blocks_to_allocate(
+        num_tokens = full_num_tokens
+        if self.num_spec_tokens:
+            num_tokens += 1 + self.num_spec_tokens + self.num_lookahead_tokens
+        return self.kv_cache_manager.coordinator.get_num_blocks_to_allocate(
             request_id=request.request_id,
-            num_tokens=full_num_tokens,
+            num_tokens=num_tokens,
             new_computed_blocks=self.kv_cache_manager.empty_kv_cache_blocks.blocks,
             num_encoder_tokens=0,
             total_computed_tokens=request.num_computed_tokens,
@@ -3045,20 +3157,6 @@ class Scheduler(SchedulerInterface):
             num_tokens_main_model=full_num_tokens,
             apply_admission_cap=True,
             prefill_end=max(request.num_prompt_tokens, request.num_tokens - 1),
-        )
-        return num_blocks + self._spec_decode_step_blocks()
-
-    def _spec_decode_step_blocks(self) -> int:
-        """Number of blocks for the extra KV slots a spec decode step needs.
-
-        When using async kv load, scheduler must reserve enough blocks for
-        full sequence + the spec decode step, otherwise request cannot be
-        able to run after the async_load if we are out of kv blocks.
-        """
-        if not self.num_spec_tokens:
-            return 0
-        return cdiv(
-            1 + self.num_spec_tokens + self.num_lookahead_tokens, self.block_size
         )
 
     def _set_kv_fetch_stage(self, request: Request, stage: str | None) -> None:
@@ -3077,15 +3175,30 @@ class Scheduler(SchedulerInterface):
             self._request_remaining_blocks(req) for req in self._inflight_prefills
         )
 
-    def _mark_prefix_replay(self, request: Request, num_hit_tokens: int) -> int:
+    def _load_restores_replay_window(self, request: Request) -> bool:
+        """Whether the KV connector's load for ``request`` restores every DSV41
+        SWA bounded-replay group, as a P/D transfer of the request's own blocks
+        does; a prefix-cache store holds no window."""
+        assert self.connector is not None
+        return bool(self.prefix_replay_group_ids) and set(
+            self.prefix_replay_group_ids
+        ).issubset(self.connector.get_loaded_kv_cache_group_ids(request))
+
+    def _mark_prefix_replay(
+        self, request: Request, num_hit_tokens: int, window_loaded: bool
+    ) -> int:
         """Record where a prefix hit's replay starts and return the number of
         hit tokens to recompute; the caller rewinds the computed count by it.
 
         The replayed tokens are the hit's last window (see
         ``Request.replay_start``): the worker rebuilds their sliding-window KV
-        and leaves their cached KV alone.
+        and leaves their cached KV alone. A hit whose KV load carries the
+        window replays nothing.
         """
         if not self.prefix_replay_tokens:
+            return 0
+        if window_loaded:
+            request.replay_start = 0
             return 0
         num_replay_tokens = min(self.prefix_replay_tokens, num_hit_tokens)
         request.replay_start = num_hit_tokens - num_replay_tokens
@@ -3100,7 +3213,8 @@ class Scheduler(SchedulerInterface):
         """
         assert self.connector is not None
 
-        if request.request_id in self.failed_recving_kv_req_ids:
+        load_failed = request.request_id in self.failed_recving_kv_req_ids
+        if load_failed:
             # Request had KV load failures; num_computed_tokens was already
             # updated in _update_requests_with_invalid_blocks
             if request.num_computed_tokens:
@@ -3126,11 +3240,15 @@ class Scheduler(SchedulerInterface):
             # This will cache the blocks iff caching is enabled.
             self.kv_cache_manager.cache_blocks(request, request.num_computed_tokens)
 
-        # SWA bounded replay recomputes the tail of the hit, which covers the
-        # last token; otherwise a full prompt hit re-computes that token so the
-        # next one can be sampled.
+        # DSV41 SWA bounded replay recomputes the tail of a hit loaded without
+        # its window, or of a failed load, which may have lost it; the replay
+        # covers the last token. Otherwise a full prompt hit re-computes that
+        # token so the next one can be sampled.
         num_replay_tokens = self._mark_prefix_replay(
-            request, request.num_computed_tokens
+            request,
+            request.num_computed_tokens,
+            window_loaded=not load_failed
+            and self._load_restores_replay_window(request),
         )
         if num_replay_tokens > 0:
             request.num_computed_tokens -= num_replay_tokens
