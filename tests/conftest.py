@@ -133,7 +133,6 @@ def sample_json_schema():
 _TEST_DIR = os.path.dirname(__file__)
 _TEST_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "example.txt")]
 _LONG_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "summary.txt")]
-_SYS_MSG = os.path.join(_TEST_DIR, "system_messages", "sonnet3.5_nov2024.txt")
 
 _M = TypeVar("_M")
 
@@ -309,17 +308,6 @@ def dynamo_reset():
 @pytest.fixture
 def example_prompts() -> list[str]:
     return [prompt for filename in _TEST_PROMPTS for prompt in _read_prompts(filename)]
-
-
-@pytest.fixture
-def example_system_message() -> str:
-    with open(_SYS_MSG) as f:
-        return f.read()
-
-
-@pytest.fixture
-def example_long_prompts() -> list[str]:
-    return [prompt for filename in _LONG_PROMPTS for prompt in _read_prompts(filename)]
 
 
 @pytest.fixture(scope="session")
@@ -1168,7 +1156,7 @@ class VllmRunner:
                 output_logprobs = sample.logprobs
             if include_prompt_token_ids:
                 outputs.append(
-                    (  # type: ignore[arg-type]
+                    (
                         output_ids,
                         output_str,
                         output_logprobs,
@@ -1418,14 +1406,15 @@ def vllm_runner():
 
 
 @pytest.fixture()
-def temporary_enable_log_propagate():
+def temporary_enable_log_propagate(monkeypatch):
     import logging
 
-    logger = logging.getLogger("vllm")
-    previous_propagate = logger.propagate
-    logger.propagate = True
-    yield
-    logger.propagate = previous_propagate
+    from vllm.logger import DEFAULT_LOGGING_CONFIG
+
+    # The first LLM init in a process reapplies DEFAULT_LOGGING_CONFIG, which
+    # would otherwise turn propagation back off mid-test.
+    monkeypatch.setitem(DEFAULT_LOGGING_CONFIG["loggers"]["vllm"], "propagate", True)
+    monkeypatch.setattr(logging.getLogger("vllm"), "propagate", True)
 
 
 @pytest.fixture()
