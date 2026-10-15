@@ -85,13 +85,13 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
             )
             moe_cfg = self.mlp.experts.moe_config
             pc = moe_cfg.moe_parallel_config
-            reduced = pc.use_all2all_kernels and not pc.use_ag_rs_all2all_kernels
-            if not reduced:
+            # Validated on MoRI only. DeepEP, pplx and the other combines
+            # keep the previous always-skip behavior.
+            if pc.use_mori_kernels:
+                # Combine is already all-reduced; the next fused norm sums TP.
+                self.zero_mlp_output = get_tensor_model_parallel_rank() > 0
+            else:
                 moe_cfg.skip_final_all_reduce = True
-            # Complete on every TP rank; the next fused norm sums over TP.
-            self.zero_mlp_output = get_tensor_model_parallel_rank() > 0 and (
-                reduced or self.mlp.is_sequence_parallel
-            )
         else:
             self.mlp = DeepseekV2MLP(
                 hidden_size=config.hidden_size,
