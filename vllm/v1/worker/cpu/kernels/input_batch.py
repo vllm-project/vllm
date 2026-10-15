@@ -2,92 +2,47 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Numba ports of the model runner's input preparation Triton kernels."""
 
+import numba
 import torch
 
 from vllm.v1.worker.cpu.kernels.utils import numba_kernel, ptr_view
 
 
-@numba_kernel
-def prepare_prefill_inputs(
-    grid,
-    input_ids_ptr,
-    next_prefill_tokens_ptr,
-    num_lookahead,
-    idx_mapping_ptr,
-    query_start_loc_ptr,
-    all_token_ids_ptr,
-    prefill_lens_ptr,
-    num_computed_tokens_ptr,
+@numba.njit(cache=True, nogil=True)
+def prepare_inputs(
+    input_ids,
+    positions,
+    seq_lens,
+    next_prefill_tokens,
+    idx_mapping,
+    query_start_loc,
+    all_token_ids,
+    prefill_lens,
+    num_computed_tokens,
+    last_sampled_tokens,
 ):
-    for batch_idx in range(grid[0]):
-        req = idx_mapping_ptr[batch_idx]
-        prefill_len = prefill_lens_ptr[req]
-        num_computed = num_computed_tokens_ptr[req]
-        if num_computed >= prefill_len:
-            continue
-        start = query_start_loc_ptr[batch_idx]
-        end = query_start_loc_ptr[batch_idx + 1]
-        pos = num_computed + end - start
-        input_ids_ptr[start:end] = all_token_ids_ptr[req, num_computed:pos]
-        for i in range(num_lookahead):
-            next_prefill_tokens_ptr[i, req] = (
-                all_token_ids_ptr[req, pos + i] if pos + i < prefill_len else 0
-            )
-
-
-@numba_kernel
-def prepare_pos_seq_lens(
-    grid,
-    pos_ptr,
-    seq_lens_ptr,
-    idx_mapping_ptr,
-    query_start_loc_ptr,
-    num_computed_tokens_ptr,
-    max_num_reqs,
-):
-    num_reqs = grid[0] - 1
-    seq_lens_ptr[num_reqs:max_num_reqs] = 0
+    """Fills the inputs of a batch with one sampled token per request."""
+    num_reqs = idx_mapping.shape[0]
+    seq_lens[num_reqs:] = 0
     for batch_idx in range(num_reqs):
-        num_computed = num_computed_tokens_ptr[idx_mapping_ptr[batch_idx]]
-        start = query_start_loc_ptr[batch_idx]
-        end = query_start_loc_ptr[batch_idx + 1]
-        seq_lens_ptr[batch_idx] = num_computed + end - start
+        req = idx_mapping[batch_idx]
+        prefill_len = prefill_lens[req]
+        num_computed = num_computed_tokens[req]
+        start = query_start_loc[batch_idx]
+        end = query_start_loc[batch_idx + 1]
+        seq_len = num_computed + end - start
+        seq_lens[batch_idx] = seq_len
         for i in range(end - start):
-            pos_ptr[start + i] = num_computed + i
-
-
-@numba_kernel
-def combine_sampled_and_draft_tokens(
-    grid,
-    input_ids_ptr,
-    idx_mapping_ptr,
-    last_sampled_tokens_ptr,
-    query_start_loc_ptr,
-    seq_lens_ptr,
-    prefill_len_ptr,
-    draft_tokens_ptr,
-    cu_num_logits_ptr,
-    logits_indices_ptr,
-    NUM_NEW_SAMPLED_TOKENS=1,
-):
-    for batch_idx in range(grid[0]):
-        req = idx_mapping_ptr[batch_idx]
-        logits_start = cu_num_logits_ptr[batch_idx]
-        num_logits = cu_num_logits_ptr[batch_idx + 1] - logits_start
-        num_draft_tokens = num_logits - NUM_NEW_SAMPLED_TOKENS
-        query_end = query_start_loc_ptr[batch_idx + 1]
-        for i in range(num_logits):
-            logits_indices_ptr[logits_start + i] = query_end - num_logits + i
-
-        seq_len = seq_lens_ptr[batch_idx]
-        prefill_len = prefill_len_ptr[req]
-        if seq_len <= prefill_len:
-            continue
-        # Keep prompt-tail slots intact; only rewrite generated-token slots.
-        if NUM_NEW_SAMPLED_TOKENS > 0 and seq_len - num_logits >= prefill_len:
-            input_ids_ptr[query_end - num_logits] = last_sampled_tokens_ptr.flat[req]
-        for i in range(num_draft_tokens):
-            input_ids_ptr[query_end - num_draft_tokens + i] = draft_tokens_ptr[req, i]
+            positions[start + i] = num_computed + i
+        if num_computed < prefill_len:
+            input_ids[start:end] = all_token_ids[req, num_computed:seq_len]
+            for i in range(next_prefill_tokens.shape[0]):
+                pos = seq_len + i
+                next_prefill_tokens[i, req] = (
+                    all_token_ids[req, pos] if pos < prefill_len else 0
+                )
+        if seq_len > prefill_len:
+            input_ids[end - 1] = last_sampled_tokens[req, 0]
 
 
 @numba_kernel
@@ -155,21 +110,6 @@ def post_update_num_computed_tokens(
         num_computed_tokens_ptr[idx_mapping_ptr[batch_idx]] += (
             query_start_loc_ptr[batch_idx + 1] - query_start_loc_ptr[batch_idx]
         )
-
-
-@numba_kernel
-def expand_idx_mapping(
-    grid,
-    idx_mapping_ptr,
-    expanded_idx_mapping_ptr,
-    expanded_local_pos_ptr,
-    cu_num_logits_ptr,
-):
-    for batch_idx in range(grid[0]):
-        start = cu_num_logits_ptr[batch_idx]
-        for i in range(cu_num_logits_ptr[batch_idx + 1] - start):
-            expanded_idx_mapping_ptr[start + i] = idx_mapping_ptr[batch_idx]
-            expanded_local_pos_ptr[start + i] = i
 
 
 @numba_kernel

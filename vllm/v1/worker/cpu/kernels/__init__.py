@@ -31,24 +31,12 @@ def get_kernel_overrides() -> dict[str, Callable[..., Any]]:
             sample.apply_grammar_bitmask
         ),
         f"{gpu}.metrics.logits._num_nans_kernel": sample.num_nans,
-        f"{gpu}.input_batch._prepare_prefill_inputs_kernel": (
-            input_batch.prepare_prefill_inputs
-        ),
-        f"{gpu}.input_batch._prepare_pos_seq_lens_kernel": (
-            input_batch.prepare_pos_seq_lens
-        ),
-        f"{gpu}.input_batch._combine_sampled_and_draft_tokens_kernel": (
-            input_batch.combine_sampled_and_draft_tokens
-        ),
         f"{gpu}.input_batch._get_num_sampled_and_rejected_kernel": (
             input_batch.get_num_sampled_and_rejected
         ),
         f"{gpu}.input_batch._post_update_kernel": input_batch.post_update,
         f"{gpu}.input_batch._post_update_num_computed_tokens_kernel": (
             input_batch.post_update_num_computed_tokens
-        ),
-        f"{gpu}.input_batch._expand_idx_mapping_kernel": (
-            input_batch.expand_idx_mapping
         ),
         f"{gpu}.buffer_utils._apply_write_kernel": block_table.apply_write,
         f"{gpu}.cp_utils._dcp_local_seq_lens_kernel": block_table.dcp_local_seq_lens,
