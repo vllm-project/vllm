@@ -7,6 +7,7 @@ import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
+from vllm.config import CUDAGraphMode
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadata
 from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
@@ -120,6 +121,26 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
         """Run the ROCm sparse indexer (forward_hip) if this layer has an indexer."""
         if self.indexer_op is not None:
             self.indexer_op.forward_hip(q_c, index_q_fp8, None, index_weights_out)
+
+    def _skip_indexer_scoring(
+        self,
+        attn_metadata: MLACommonMetadata | None,
+        cudagraph_runtime_mode: CUDAGraphMode,
+    ) -> bool:
+        """Whether this batch's top-k goes unread: a pure short prefill that
+        runs entirely on dense MHA. Mirrors the CUDA ``sparse_attn_indexer``
+        check; the indexer K cache is still written by ``fused_norm_rope``.
+        """
+        if attn_metadata is None or not self._dense_mha_metadata_layer_name:
+            return False
+        prefill = attn_metadata.prefill
+        return (
+            prefill is not None
+            and prefill.use_dense_mha
+            and attn_metadata.num_decode_tokens == 0
+            and cudagraph_runtime_mode != CUDAGraphMode.FULL
+            and not torch.cuda.is_current_stream_capturing()
+        )
 
     def _build_q_for_attn(
         self,
@@ -281,7 +302,12 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
             quantize_mqa=self._fp8_kv and not use_mha,
         )
 
-        if self.indexer is not None and not self.skip_topk:
+        if has_indexer and not (
+            use_mha
+            and self._skip_indexer_scoring(
+                attn_metadata, forward_context.cudagraph_runtime_mode
+            )
+        ):
             self._run_indexer(q_c, index_q_fp8, index_weights_out)
 
         if attn_metadata is None:

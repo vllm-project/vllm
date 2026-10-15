@@ -222,6 +222,40 @@ def test_short_prefill_updates_k_cache_before_scoring_decision(
     assert observed["slots"] is slot_mapping
 
 
+@pytest.mark.parametrize(
+    "batch_kind",
+    ["short", "force_mqa", "mla_decode", "capture", "full", "disabled", "dummy"],
+)
+def test_rocm_short_prefill_skips_indexer_scoring(
+    monkeypatch: pytest.MonkeyPatch,
+    batch_kind: str,
+) -> None:
+    from vllm.models.deepseek_v32.amd.rocm import DeepseekV32MLAAttention
+
+    layer = SimpleNamespace(
+        _dense_mha_metadata_layer_name="" if batch_kind == "disabled" else MLA_LAYER
+    )
+    mla_metadata = (
+        None
+        if batch_kind == "dummy"
+        else make_mla_metadata(
+            use_dense_mha=batch_kind != "force_mqa",
+            num_decode_tokens=int(batch_kind == "mla_decode"),
+        )
+    )
+    runtime_mode = CUDAGraphMode.FULL if batch_kind == "full" else CUDAGraphMode.NONE
+    monkeypatch.setattr(
+        torch.cuda,
+        "is_current_stream_capturing",
+        lambda: batch_kind == "capture",
+    )
+
+    skip = DeepseekV32MLAAttention._skip_indexer_scoring(
+        layer, mla_metadata, runtime_mode
+    )
+    assert skip == (batch_kind == "short")
+
+
 def test_skipped_k_cache_insert_accepts_no_k(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

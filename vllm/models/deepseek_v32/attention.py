@@ -228,7 +228,7 @@ class DeepseekV32Attention(MLAAttention):
             not is_mtp_layer
             and not skip_topk
             and not self.use_pcp
-            and current_platform.is_cuda()
+            and current_platform.is_cuda_alike()
             and self.supports_dense_mha_prefill
         )
         self._dense_mha_metadata_layer_name = (
