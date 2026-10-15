@@ -93,6 +93,9 @@ class JobResult:
     successful_keys: Collection[OffloadKey] | None = None
     transfer_time: float | None = None
     transfer_bytes: int | None = None
+    # False means failure is known but the transfer may still access its slots.
+    # A later memory_safe=True result for the same job permits reclamation.
+    memory_safe: bool = True
 
 
 class ParentManager(ABC):

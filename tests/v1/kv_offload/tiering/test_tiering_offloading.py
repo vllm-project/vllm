@@ -370,6 +370,53 @@ class TestTieringOffloadingManager:
             self.manager._process_finished_jobs()
         completed.assert_called_once_with(to_keys([1, 2]), _CTX, False)
 
+    @pytest.mark.parametrize("terminal_success", [True, False])
+    def test_unsafe_promotion_reserves_slots_until_confirmation(
+        self, manager_setup, terminal_success
+    ):
+        """Failed remote loads must not let a late WRITE corrupt reused slots."""
+        self._start_request()
+        keys = to_keys(range(5))
+        prepared = self.primary_tier.prepare_write(keys, _CTX)
+        assert prepared is not None
+        job_id = self.manager._next_job_id()
+        self.manager._register_job(
+            TransferJob(
+                job_id=job_id,
+                keys=keys,
+                chunk_ids=np.asarray(prepared.store_spec.chunk_ids),
+                is_promotion=True,
+                req_context=_CTX,
+            ),
+            0,
+        )
+        self.secondary_tier1.completed_jobs.append(
+            JobResult(job_id=job_id, success=False, memory_safe=False)
+        )
+        self.manager._process_finished_jobs()
+
+        assert all(
+            self.primary_tier.lookup(key, _CTX) is LookupResult.MISS for key in keys
+        )
+        replacement = to_keys([99])
+        assert self.primary_tier.prepare_write(replacement, _CTX) is None
+        with (
+            patch.object(
+                self.secondary_tier1,
+                "drain_jobs",
+                side_effect=AssertionError("reset tried to drain an unconfirmed WRITE"),
+            ),
+            pytest.raises(RuntimeError, match="quarantined slots"),
+        ):
+            self.manager.reset_cache()
+        assert self.primary_tier.prepare_write(replacement, _CTX) is None
+
+        self.secondary_tier1.completed_jobs.append(
+            JobResult(job_id=job_id, success=terminal_success)
+        )
+        self.manager.reset_cache()
+        assert self.primary_tier.prepare_write(replacement, _CTX) is not None
+
     def test_successful_promotion_finalizes_primary_with_success(self, manager_setup):
         from unittest.mock import patch
 

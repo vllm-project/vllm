@@ -690,9 +690,12 @@ class TestClientFlows:
         )
 
         loads = session.poll().loads
-        assert loads == [LoadResult(job_id=9, kv_request_id="req-1", success=False)]
-        assert session._client.has_active_loads is False
-        assert "req-1" not in session._client._requests
+        assert loads == [
+            LoadResult(
+                job_id=9, kv_request_id="req-1", success=False, memory_safe=False
+            )
+        ]
+        assert session._client.has_active_loads is True
         assert session.poll().loads == []
 
     def test_late_transfer_done_after_abort_ack_is_ignored(self):
@@ -771,11 +774,7 @@ class TestClientFlows:
         assert abort[TYPE_KEY] == AbortFetchMsg.TYPE
 
     def test_load_abort_ack_timeout_surfaces_failure(self):
-        """After load timeout sends AbortFetch, if no AbortAck arrives within
-        _ABORT_ACK_TIMEOUT_S the request is surfaced as failed and removed
-        from _requests — the engine cannot wait forever on a peer that won't
-        ack.
-        """
+        """An unanswered abort reports failure without allowing slot reuse."""
         session, conn, _ = _make_session()
         _activate(session, conn)
         session.request_blocks(
@@ -800,8 +799,41 @@ class TestClientFlows:
             time.monotonic() - _ABORT_ACK_TIMEOUT_S - 1.0
         )
         loads = session.poll().loads
-        assert loads == [LoadResult(job_id=7, kv_request_id="req-7", success=False)]
-        assert "req-7" not in session._client._requests
+        assert loads == [
+            LoadResult(
+                job_id=7, kv_request_id="req-7", success=False, memory_safe=False
+            )
+        ]
+        assert session.has_pending_work
+
+    def test_missing_abort_ack_retains_load_until_late_ack(self):
+        """A timer cannot prove that a remote WRITE stopped targeting load slots."""
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+        session.request_blocks(7, "req-7", [b"k"], [0])
+        session.finish_request("req-7")
+        _client_load(session, "req-7").aborted_at = (
+            time.monotonic() - _ABORT_ACK_TIMEOUT_S - 1.0
+        )
+
+        assert session.poll().loads == [
+            LoadResult(
+                job_id=7, kv_request_id="req-7", success=False, memory_safe=False
+            )
+        ]
+        assert session.poll().loads == []
+        assert session.has_pending_work
+        conn.enqueue(
+            {
+                TYPE_KEY: AbortAckMsg.TYPE,
+                AbortAckMsg.KV_REQUEST_ID: "req-7",
+                AbortAckMsg.ROUND_SEQ: 0,
+            }
+        )
+        assert session.poll().loads == [
+            LoadResult(job_id=7, kv_request_id="req-7", success=False)
+        ]
+        assert session.poll().loads == []
 
     def test_load_abort_ack_clears_request(self):
         """After load timeout sends AbortFetch, an arriving AbortAckMsg from
@@ -2896,6 +2928,23 @@ class TestPendingSession:
 
 
 class TestDisconnect:
+    def test_close_does_not_report_quarantined_load_twice(self):
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+        session.request_blocks(7, "req-7", [b"k"], [0])
+        session.finish_request("req-7")
+        _client_load(session, "req-7").aborted_at = (
+            time.monotonic() - _ABORT_ACK_TIMEOUT_S - 1.0
+        )
+        assert session.poll().loads == [
+            LoadResult(
+                job_id=7, kv_request_id="req-7", success=False, memory_safe=False
+            )
+        ]
+        result = session.close()
+        assert result.failed_jobs == []
+        assert result.failed_req_ids == ["req-7"]
+
     def test_disconnect_marks_session_dead(self):
         session, conn, _ = _make_session()
         _activate(session, conn)

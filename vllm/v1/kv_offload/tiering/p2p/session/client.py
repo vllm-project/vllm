@@ -46,6 +46,7 @@ class _InboundLoadState:
     job_id: int  # opaque ID assigned by the manager to this load request
     submitted_at: float
     aborted_at: float | None = None
+    failure_reported: bool = False
 
 
 @dataclass
@@ -91,13 +92,14 @@ class LoadResult(NamedTuple):
     job_id: int
     kv_request_id: str
     success: bool
+    memory_safe: bool = True
 
 
 class ClientCloseResult(NamedTuple):
     """What the manager must fail when a peer session is torn down.
 
-    ``failed_jobs`` is the ``job_id`` of every load still in flight; each
-    becomes a ``JobResult(success=False)``. ``failed_req_ids`` is every
+    ``failed_jobs`` contains loads not yet reported as unsafe failures;
+    each requires quarantine, not slot reclamation. ``failed_req_ids`` is every
     kv_request_id whose lookup() would otherwise defer forever on the dead
     peer — the in-flight loads plus any request holding an unresolved
     symmetric-P2P probe. ``failed_jobs`` is the subset of ``failed_req_ids``
@@ -253,7 +255,7 @@ class ClientRole:
         owed at once.
 
         Then drop all probe/lookup state. Keep aborted loads until their abort
-        acknowledgement or timeout produces a terminal result.
+        acknowledgement confirms that the remote WRITE has stopped.
         """
         st = self._requests.get(kv_request_id)
         if st is None:
@@ -298,7 +300,7 @@ class ClientRole:
                 LoadResult(
                     job_id=load.job_id,
                     kv_request_id=kv_request_id,
-                    success=success,
+                    success=success and not load.failure_reported,
                 )
             )
             self._on_load_terminal(kv_request_id, st)
@@ -475,10 +477,10 @@ class ClientRole:
 
         Loads past ``_LOAD_TIMEOUT_S`` get an AbortFetchMsg sent and
         enter the aborting phase. Aborting loads past
-        ``_ABORT_ACK_TIMEOUT_S`` are surfaced as failed.
+        ``_ABORT_ACK_TIMEOUT_S`` report an unsafe failure but remain tracked
+        until the peer confirms completion, so their slots stay quarantined.
         """
         now = time.monotonic()
-        to_remove: list[tuple[str, int]] = []
         for req_id in self._active_loads:
             st = self._requests[req_id]
             assert st.loads
@@ -500,27 +502,26 @@ class ClientRole:
                             }
                         )
                 else:
-                    if now - load.aborted_at >= _ABORT_ACK_TIMEOUT_S:
-                        to_remove.append((req_id, round_seq))
+                    if (
+                        not load.failure_reported
+                        and now - load.aborted_at >= _ABORT_ACK_TIMEOUT_S
+                    ):
+                        load.failure_reported = True
                         self._completed_loads.append(
                             LoadResult(
                                 job_id=load.job_id,
                                 kv_request_id=req_id,
                                 success=False,
+                                memory_safe=False,
                             )
                         )
                         logger.warning(
                             "P2PSession %s: abort_ack timed out for "
-                            "kv_request_id=%s round=%s",
+                            "kv_request_id=%s round=%s; quarantining destination slots",
                             self._peer_id,
                             req_id,
                             round_seq,
                         )
-        for req_id, round_seq in to_remove:
-            st = self._requests[req_id]
-            st.loads.pop(round_seq)
-            self._on_load_terminal(req_id, st)
-
         results = self._completed_loads
         self._completed_loads = []
         return results
@@ -533,7 +534,10 @@ class ClientRole:
         forever on an answer that can never arrive). See ``ClientCloseResult``.
         """
         failed_jobs = [
-            load.job_id for st in self._requests.values() for load in st.loads.values()
+            load.job_id
+            for st in self._requests.values()
+            for load in st.loads.values()
+            if not load.failure_reported
         ]
         failed_req_ids = [
             req_id

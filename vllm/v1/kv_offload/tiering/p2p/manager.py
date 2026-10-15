@@ -615,7 +615,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             len(block_ids),
             session.ready,
         )
-        session.request_blocks(job_id, kv_request_id, keys, block_ids)
+        session.request_blocks(job_id, kv_request_id, keys, block_ids.tolist())
 
     @override
     def get_finished_jobs(self) -> Iterable[JobResult]:
@@ -816,7 +816,9 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                 del self._kv_to_session[kid]
             close_result = session.close()
             for job_id in close_result.failed_jobs:
-                self._finished_jobs.append(JobResult(job_id=job_id, success=False))
+                self._finished_jobs.append(
+                    JobResult(job_id=job_id, success=False, memory_safe=False)
+                )
             for job_id in close_result.failed_stores:
                 self._finished_jobs.append(JobResult(job_id=job_id, success=False))
             # Fail every client-side request (in-flight loads plus unresolved
@@ -914,7 +916,9 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                 del self._kv_to_session[kid]
             close_result = session.close()
             for job_id in close_result.failed_jobs:
-                self._finished_jobs.append(JobResult(job_id=job_id, success=False))
+                self._finished_jobs.append(
+                    JobResult(job_id=job_id, success=False, memory_safe=False)
+                )
             for job_id in close_result.failed_stores:
                 self._finished_jobs.append(JobResult(job_id=job_id, success=False))
             self._failed_req_ids.update(close_result.failed_req_ids)
@@ -954,7 +958,11 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             result = session.poll()
             for lr in result.loads:
                 self._finished_jobs.append(
-                    JobResult(job_id=lr.job_id, success=lr.success)
+                    JobResult(
+                        job_id=lr.job_id,
+                        success=lr.success,
+                        memory_safe=lr.memory_safe,
+                    )
                 )
                 if not lr.success:
                     self._failed_req_ids.add(lr.kv_request_id)

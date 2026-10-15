@@ -829,7 +829,7 @@ class TestGetFinished:
         assert len(results) == 5
         assert JobResult(job_id=10, success=False) in results
         assert JobResult(job_id=11, success=False) in results
-        assert JobResult(job_id=20, success=False) in results
+        assert JobResult(job_id=20, success=False, memory_safe=False) in results
         assert "dead:1234" not in mgr._sessions
         assert "req-load" in mgr._failed_req_ids
 
@@ -1696,7 +1696,8 @@ class TestPollOnce:
         assert mgr._kv_to_session["req-fast"] is sess
         assert sess.stores_added == []
 
-    def test_failed_load_records_kv_request_id(self):
+    @pytest.mark.parametrize("memory_safe", [True, False])
+    def test_failed_load_records_kv_request_id(self, memory_safe):
         """A LoadResult(success=False) from session.poll() must add its
         kv_request_id to _failed_req_ids so future lookups return MISS."""
         mgr = _make_manager()
@@ -1705,7 +1706,14 @@ class TestPollOnce:
             peer_id=peer,
             alive=True,
             connected=True,
-            loads=[LoadResult(job_id=5, kv_request_id="req-5", success=False)],
+            loads=[
+                LoadResult(
+                    job_id=5,
+                    kv_request_id="req-5",
+                    success=False,
+                    memory_safe=memory_safe,
+                )
+            ],
         )
         mgr._sessions[peer] = sess
 
@@ -1717,7 +1725,9 @@ class TestPollOnce:
 
         mgr._poll_once()
 
-        assert mgr._finished_jobs == [JobResult(job_id=5, success=False)]
+        assert mgr._finished_jobs == [
+            JobResult(job_id=5, success=False, memory_safe=memory_safe)
+        ]
         assert "req-5" in mgr._failed_req_ids
 
 
