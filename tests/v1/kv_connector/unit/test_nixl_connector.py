@@ -68,10 +68,12 @@ from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.output_processor import OutputProcessor
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
+    CircularBufferSpec,
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheLayout,
+    KVQuantMode,
     MLAAttentionSpec,
     compute_layer_kv_cache_shape_bytes,
 )
@@ -1550,6 +1552,95 @@ class TestNixlHandshake:
             with pytest.raises(AssertionError):
                 worker.add_remote_agent(bad_meta, remote_tp_size=2)
 
+    @pytest.mark.parametrize(
+        ("kv_quant_mode", "local_tp", "remote_tp", "num_kv_heads", "rejected"),
+        [
+            (KVQuantMode.NVFP4, 2, 1, 8, True),
+            (KVQuantMode.NVFP4, 1, 2, 8, True),
+            (KVQuantMode.NVFP4, 2, 2, 8, False),
+            # Both sides hold one replicated head per rank: no head split.
+            (KVQuantMode.NVFP4, 16, 8, 8, False),
+            (KVQuantMode.NONE, 2, 1, 8, False),
+        ],
+    )
+    @patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+        FakeNixlWrapper,
+    )
+    def test_handshake_rejects_nvfp4_kv_head_split(
+        self,
+        default_vllm_config,
+        dist_init,
+        kv_quant_mode,
+        local_tp,
+        remote_tp,
+        num_kv_heads,
+        rejected,
+    ):
+        """NVFP4 pages keep all heads' data before all heads' scales, so
+        heterogeneous-TP head splitting would silently corrupt the KV.
+        """
+        block_size = maybe_update_block_size(16)
+        vllm_config = create_vllm_config(block_size=block_size)
+        kv_cache_config = KVCacheConfig(
+            num_blocks=1,
+            kv_cache_tensors=[],
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    ["layer0"],
+                    FullAttentionSpec(
+                        block_size=block_size,
+                        num_kv_heads=max(1, num_kv_heads // local_tp),
+                        head_size=16,
+                        dtype=torch.uint8,
+                        kv_quant_mode=kv_quant_mode,
+                    ),
+                )
+            ],
+        )
+        with patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.get_tensor_model_parallel_world_size",  # noqa: E501
+            return_value=local_tp,
+        ):
+            worker = FakeNixlConnectorWorker(
+                vllm_config,
+                "engine",
+                hand_shake_latency=0,
+                kv_cache_config=kv_cache_config,
+            )
+        worker.transfer_topo.total_num_kv_heads = num_kv_heads
+        worker.transfer_topo.local_physical_heads = max(1, num_kv_heads // local_tp)
+
+        local_len = 4096 * worker.block_size
+        remote_len = (
+            local_len
+            * max(1, num_kv_heads // remote_tp)
+            // worker.transfer_topo.local_physical_heads
+        )
+        worker.block_len_per_layer = [local_len]
+        worker.num_blocks = 1
+        worker.dst_num_blocks[worker.engine_id] = worker.num_blocks
+        meta = NixlAgentMetadata(
+            engine_id=FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
+            agent_metadata=FakeNixlWrapper.AGENT_METADATA,
+            kv_caches_base_addr=[0],
+            device_id=0,
+            num_blocks=1,
+            block_lens=[remote_len],
+            block_strides=[remote_len],
+            kv_cache_layout=worker.kv_cache_layout,
+            block_size=worker.block_size,
+            ssm_sizes=(0, 0),
+            attn_backend_name=worker.backend_name,
+            physical_blocks_per_logical_kv_block=1,
+        )
+
+        if rejected:
+            with pytest.raises(RuntimeError, match="NVFP4"):
+                worker.add_remote_agent(meta, remote_tp_size=remote_tp)
+        else:
+            worker.add_remote_agent(meta, remote_tp_size=remote_tp)
+
 
 # NOTE: resource cleanup in mp backend is a bit finicky, so the order in which
 # we put here is important. First run ray, it will clean up the resources, then
@@ -2523,8 +2614,46 @@ def test_register_kv_caches(
         assert connector.connector_worker.block_size == block_size
 
 
+def _dsv4_mla_spec(record_bytes: int, alignment: int, tokens_per_state: int):
+    return MLAAttentionSpec(
+        block_size=256,
+        num_kv_heads=1,
+        head_size=512,
+        dtype=torch.uint8,
+        cache_dtype_str="fp8_ds_mla",
+        tokens_per_state=tokens_per_state,
+        alignment=alignment,
+        model_version="deepseek_v4",
+        state_content_bytes=record_bytes,
+    )
+
+
+@pytest.mark.parametrize(
+    "groups",
+    [
+        # V4 record: padded pages, so a layer view is not a contiguous page.
+        [(_dsv4_mla_spec(584, 576, 4), 4)],
+        # V4.1 MXFP8 record: unpadded pages in rows that the compressed caches
+        # and a compressor-state ring alias.
+        [
+            (_dsv4_mla_spec(528, 512, 2), 2),
+            (_dsv4_mla_spec(528, 512, 2), 2),
+            (
+                CircularBufferSpec(
+                    block_size=8,
+                    num_kv_heads=1,
+                    head_size=8448,
+                    head_size_v=0,
+                    dtype=torch.uint8,
+                ),
+                2,
+            ),
+        ],
+    ],
+    ids=["v4-padded-pages", "v41-aliased-groups"],
+)
 def test_register_packed_dsv4_mla_cache_as_single_region(
-    default_vllm_config, dist_init
+    default_vllm_config, dist_init, groups
 ):
     from vllm.v1.attention.backends.triton_attn import TritonAttentionBackend
 
@@ -2537,27 +2666,21 @@ def test_register_packed_dsv4_mla_cache_as_single_region(
     ):
         mock_backends.return_value = [TritonAttentionBackend]
         num_blocks = 2
-        num_layers = 4
-        block_size = 256
-        spec = MLAAttentionSpec(
-            block_size=block_size,
-            num_kv_heads=1,
-            head_size=512,
-            dtype=torch.uint8,
-            cache_dtype_str="fp8_ds_mla",
-            tokens_per_state=4,
-            alignment=576,
-            model_version="deepseek_v4",
-            state_content_bytes=584,
-        )
-        layer_names = [f"layer{idx}" for idx in range(num_layers)]
+        specs = [spec for spec, _ in groups]
+        group_layers = [
+            [f"group{group_idx}.layer{idx}" for idx in range(num_layers)]
+            for group_idx, (_, num_layers) in enumerate(groups)
+        ]
         kv_cache_config = KVCacheConfig(
             num_blocks=num_blocks,
             kv_cache_tensors=[],
-            kv_cache_groups=[KVCacheGroupSpec(layer_names, spec)],
+            kv_cache_groups=[
+                KVCacheGroupSpec(layer_names, spec)
+                for layer_names, spec in zip(group_layers, specs)
+            ],
         )
         vllm_config = create_vllm_config(attention_backend="TRITON_ATTN")
-        vllm_config.cache_config.block_size = block_size
+        vllm_config.cache_config.block_size = 256
         vllm_config.cache_config.kv_cache_layout = "BLHNC"
         connector = NixlConnector(vllm_config, KVConnectorRole.WORKER, kv_cache_config)
         connector.connector_worker = FakeNixlConnectorWorker(
@@ -2571,25 +2694,44 @@ def test_register_packed_dsv4_mla_cache_as_single_region(
         connector.connector_worker.nixl_wrapper = wrapper
         wrapper.get_agent_metadata.return_value = b"fake_agent_metadata"
         mock_thread.return_value.is_alive.return_value = False
+        connector.connector_worker.use_mla = True
 
+        # Every group packs its layers' pages into the same block rows.
+        (packed_block_len,) = {
+            len(layer_names) * spec.page_size_bytes
+            for layer_names, spec in zip(group_layers, specs)
+        }
         raw = torch.zeros(
-            spec.page_size_bytes * num_blocks * num_layers,
+            packed_block_len * num_blocks,
             dtype=torch.int8,
             device=current_platform.device_type,
         )
-        views = dense_kv_cache_views(
-            raw, spec, num_blocks, num_layers, KVCacheLayout.BLHNC
-        )
-        connector.register_kv_caches(dict(zip(layer_names, views)))
+        kv_caches: dict[str, torch.Tensor] = {}
+        for layer_names, spec in zip(group_layers, specs):
+            views = dense_kv_cache_views(
+                raw, spec, num_blocks, len(layer_names), KVCacheLayout.BLHNC
+            )
+            kv_caches.update(zip(layer_names, views))
+        connector.register_kv_caches(kv_caches)
 
+        # MLA pages transfer as whole rows; a ring page past the row start keeps
+        # its own region.
+        ring_pages = [
+            (cache.data_ptr(), spec.page_size_bytes)
+            for layer_names, spec in zip(group_layers, specs)
+            if isinstance(spec, CircularBufferSpec)
+            for cache in (kv_caches[name] for name in layer_names)
+            if cache.data_ptr() != raw.data_ptr()
+        ]
         _agent, block_runs = wrapper.prep_xfer_dlist.call_args[0]
-        packed_block_len = num_layers * spec.page_size_bytes
         assert connector.connector_worker.kv_caches_base_addr[
             connector.connector_worker.engine_id
-        ][0] == [raw.data_ptr()]
-        # One packed region -> one run of num_blocks packed rows.
+        ][0] == [raw.data_ptr()] + [addr for addr, _ in ring_pages]
         assert block_runs.tolist() == [
             [raw.data_ptr(), packed_block_len, 0, packed_block_len, num_blocks]
+        ] + [
+            [addr, page_size, 0, packed_block_len, num_blocks]
+            for addr, page_size in ring_pages
         ]
 
 
