@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from typing import Any, ClassVar, cast
 
 import torch
+from transformers import DeepseekV4Config
 
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -18,6 +19,7 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     VllmTritonJitKernel,
 )
 from vllm.platforms import current_platform
+from vllm.transformers_utils.deepseek_v4_utils import get_compress_ratios
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv, next_power_of_2
 from vllm.v1.attention.backend import (
@@ -471,13 +473,13 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
 
         # V4 vision variant: image spans (up to vision_max_n_token tokens) are
         # visible bidirectionally, so prefill index rows widen from
-        # window_size to window_size + max_image_tokens. The V4 config sets
-        # mm_prefix_clamp_sliding_window exactly for these in-kernel-widened
-        # ranges; V4.1 image tokens use the plain causal window, and text-only
-        # models keep max_image_tokens == 0 everywhere.
+        # window_size to window_size + max_image_tokens. V4.1 image tokens use
+        # the plain causal window, and text-only models keep
+        # max_image_tokens == 0 everywhere.
         self.max_image_tokens = (
             getattr(hf_config, "vision_max_n_token", 0)
-            if getattr(hf_config, "mm_prefix_clamp_sliding_window", False)
+            if isinstance(hf_config, DeepseekV4Config)
+            and getattr(hf_config, "vision_n_layers", 0) > 0
             else 0
         )
         self.prefill_index_width = self.window_size + self.max_image_tokens
@@ -485,7 +487,7 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         # Detect which DeepseekV4 layer types this model uses so we only build a
         # FlashMLA tile-scheduler plan for types that will actually be called.
         # Models without compress_ratios (pure SWA) fall back to swaonly.
-        compress_ratios = getattr(hf_config, "compress_ratios", None) or [1]
+        compress_ratios = get_compress_ratios(hf_config) or [1]
         self._layer_types: set[str] = set()
         for ratio in compress_ratios:
             self._layer_types.add(_layer_type_for(int(ratio)))

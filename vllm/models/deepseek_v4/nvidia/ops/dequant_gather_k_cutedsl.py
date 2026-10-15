@@ -18,6 +18,7 @@ from vllm.model_executor.warmup.jit_warmup_cutedsl_helper import (
     CuTeDSLLaunchSpec,
     VllmCuTeDSLJitKernel,
 )
+from vllm.transformers_utils.deepseek_v4_utils import get_compress_ratios
 
 
 class DequantGatherKCacheKernel(
@@ -329,7 +330,7 @@ class DequantGatherKCacheKernel(
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
         block_size = vllm_config.cache_config.block_size
-        compress_ratios = vllm_config.model_config.hf_config.compress_ratios
+        compress_ratios = get_compress_ratios(vllm_config.model_config.hf_config)
         return self._trace_dispatch(self.dispatch)(
             zip_inputs(
                 dict(
