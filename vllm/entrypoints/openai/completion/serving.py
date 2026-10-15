@@ -45,7 +45,6 @@ from vllm.exceptions import (
 from vllm.inputs import EngineInput
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
-from vllm.multimodal.cache import MultiModalCacheMissError
 from vllm.outputs import RequestOutput
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import BeamSearchParams, SamplingParams
@@ -115,7 +114,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
             request, skip_mm_cache=skip_mm_cache
         )
 
-    async def _generate_with_cache_retry(
+    async def _generate_with_retry(
         self,
         request: CompletionRequest,
         engine_input: EngineInput,
@@ -125,34 +124,43 @@ class OpenAIServingCompletion(GenerateBaseServing):
         generate_kwargs: dict,
     ) -> AsyncGenerator[RequestOutput, None]:
         has_yielded_output = False
+        skip_mm_cache = False
         for attempt in range(2):
             if attempt:
                 result = await self.render_completion_request(
-                    request, skip_mm_cache=True
+                    request, skip_mm_cache=skip_mm_cache
                 )
                 if isinstance(result, ErrorResponse):
                     raise VLLMValidationError(result.error.message)
                 engine_input = result[prompt_index]
 
-            try:
-                async for output in self.engine_client.generate(
-                    engine_input,
-                    sampling_params,
-                    request_id,
-                    **generate_kwargs,
-                ):
-                    has_yielded_output = True
-                    yield output
+            retry_error = None
+            async for output in self.engine_client.generate(
+                engine_input,
+                sampling_params,
+                request_id,
+                **generate_kwargs,
+            ):
+                error = output.error
+                if error is not None and error.retryable:
+                    if attempt or has_yielded_output:
+                        raise RetryableRequestError(
+                            error.message,
+                            code=error.code,
+                        )
+                    retry_error = error
+                    break
+                has_yielded_output = True
+                yield output
+
+            if retry_error is None:
                 return
-            except MultiModalCacheMissError as e:
-                if attempt or has_yielded_output:
-                    raise RetryableRequestError(
-                        "Multi-modal processor cache miss."
-                    ) from e
-                logger.warning(
-                    "Retrying completion request %s once after multi-modal cache miss.",
-                    request_id,
-                )
+            skip_mm_cache = retry_error.code == "multimodal_cache_miss"
+            logger.warning(
+                "Retrying completion request %s once after retryable error %s.",
+                request_id,
+                retry_error.code,
+            )
 
     async def create_completion(
         self,
@@ -248,7 +256,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
                     session_id=session_id,
                 )
             else:
-                generator = self._generate_with_cache_retry(
+                generator = self._generate_with_retry(
                     request,
                     engine_input,
                     sampling_params,

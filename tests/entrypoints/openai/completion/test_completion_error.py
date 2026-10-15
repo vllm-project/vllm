@@ -21,8 +21,7 @@ from vllm.exceptions import (
     VLLMValidationError,
 )
 from vllm.logprobs import Logprob
-from vllm.multimodal.cache import MultiModalCacheMissError
-from vllm.outputs import CompletionOutput, RequestOutput
+from vllm.outputs import CompletionOutput, RequestError, RequestOutput
 from vllm.renderers.deepseek_v4 import DeepseekV4Renderer
 from vllm.renderers.hf import HfRenderer
 from vllm.renderers.online_renderer import OnlineRenderer
@@ -43,6 +42,43 @@ _PER_REQUEST_STATS = RequestStateStats(
     last_token_ts=3.0,
     num_generation_tokens=2,
 )
+
+
+def _cache_miss_output(request_id: str = "request-id") -> RequestOutput:
+    return RequestOutput(
+        request_id=request_id,
+        prompt=None,
+        prompt_token_ids=[1, 2, 3],
+        prompt_logprobs=None,
+        outputs=[
+            CompletionOutput(
+                index=0,
+                text="",
+                token_ids=[],
+                cumulative_logprob=None,
+                logprobs=None,
+                finish_reason="error",
+            )
+        ],
+        finished=True,
+        error=RequestError(
+            code="multimodal_cache_miss",
+            message="Multi-modal processor cache miss.",
+            retryable=True,
+        ),
+    )
+
+
+def _retryable_error_output(request_id: str = "request-id") -> RequestOutput:
+    output = _cache_miss_output(request_id)
+    output.error = RequestError(
+        code="temporary_error",
+        message="Temporary request failure.",
+        retryable=True,
+    )
+    return output
+
+
 BASE_MODEL_PATHS = [
     BaseModelPath(name=MODEL_NAME, model_path=MODEL_NAME),
     BaseModelPath(name=MODEL_NAME_SHORT, model_path=MODEL_NAME_SHORT),
@@ -589,17 +625,19 @@ async def test_completion_retries_cache_miss_with_matching_uncached_prompt():
     ]
     serving_completion.render_completion_request = AsyncMock(return_value=retry_prompts)
     expected = MagicMock(spec=RequestOutput)
+    expected.error = None
 
     async def generate(prompt, *args, **kwargs):
         if prompt is initial_prompt:
-            raise MultiModalCacheMissError(["missing-hash"])
+            yield _cache_miss_output()
+            return
         yield expected
 
     mock_engine.generate = MagicMock(side_effect=generate)
 
     outputs = [
         output
-        async for output in serving_completion._generate_with_cache_retry(
+        async for output in serving_completion._generate_with_retry(
             request,
             initial_prompt,
             SamplingParams(max_tokens=1),
@@ -614,6 +652,53 @@ async def test_completion_retries_cache_miss_with_matching_uncached_prompt():
     assert mock_engine.generate.call_args_list[1].args[0] is retry_prompts[1]
     serving_completion.render_completion_request.assert_awaited_once_with(
         request, skip_mm_cache=True
+    )
+
+
+@pytest.mark.asyncio
+async def test_completion_retries_other_error_with_cached_prompt():
+    mock_engine = MagicMock(spec=AsyncLLM)
+    serving_completion = object.__new__(OpenAIServingCompletion)
+    serving_completion.engine_client = mock_engine
+
+    request = CompletionRequest(
+        model=MODEL_NAME,
+        prompt="Test prompt",
+        max_tokens=1,
+    )
+    initial_prompt = {"prompt_token_ids": [1, 2, 3]}
+    retry_prompt = {"prompt_token_ids": [1, 2, 3]}
+    serving_completion.render_completion_request = AsyncMock(
+        return_value=[retry_prompt]
+    )
+    expected = MagicMock(spec=RequestOutput)
+    expected.error = None
+
+    async def generate(prompt, *args, **kwargs):
+        if prompt is initial_prompt:
+            yield _retryable_error_output()
+            return
+        yield expected
+
+    mock_engine.generate = MagicMock(side_effect=generate)
+
+    outputs = [
+        output
+        async for output in serving_completion._generate_with_retry(
+            request,
+            initial_prompt,
+            SamplingParams(max_tokens=1),
+            "request-id-0",
+            0,
+            {},
+        )
+    ]
+
+    assert outputs == [expected]
+    assert mock_engine.generate.call_count == 2
+    assert mock_engine.generate.call_args_list[1].args[0] is retry_prompt
+    serving_completion.render_completion_request.assert_awaited_once_with(
+        request, skip_mm_cache=False
     )
 
 
@@ -634,14 +719,12 @@ async def test_completion_second_cache_miss_is_retryable_error():
     )
 
     async def generate(*args, **kwargs):
-        if False:
-            yield
-        raise MultiModalCacheMissError(["missing-hash"])
+        yield _cache_miss_output()
 
     mock_engine.generate = MagicMock(side_effect=generate)
 
     with pytest.raises(RetryableRequestError) as exc_info:
-        async for _ in serving_completion._generate_with_cache_retry(
+        async for _ in serving_completion._generate_with_retry(
             request,
             {"prompt_token_ids": [1, 2, 3]},
             SamplingParams(max_tokens=1),
@@ -651,7 +734,8 @@ async def test_completion_second_cache_miss_is_retryable_error():
         ):
             pass
 
-    assert isinstance(exc_info.value.__cause__, MultiModalCacheMissError)
+    assert str(exc_info.value) == "Multi-modal processor cache miss."
+    assert exc_info.value.code == "multimodal_cache_miss"
     assert mock_engine.generate.call_count == 2
     serving_completion.render_completion_request.assert_awaited_once_with(
         request, skip_mm_cache=True

@@ -57,7 +57,6 @@ from vllm.exceptions import (
 from vllm.inputs import EngineInput, MultiModalPlaceholders
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
-from vllm.multimodal.cache import MultiModalCacheMissError
 from vllm.outputs import RequestOutput
 from vllm.parser import ParserManager
 from vllm.parser.abstract_parser import Parser
@@ -287,7 +286,7 @@ class OpenAIServingChat(GenerateBaseServing):
             request, skip_mm_cache=skip_mm_cache
         )
 
-    async def _generate_with_cache_retry(
+    async def _generate_with_retry(
         self,
         request: ChatCompletionRequest,
         engine_input: EngineInput,
@@ -300,9 +299,12 @@ class OpenAIServingChat(GenerateBaseServing):
         chat_template_kwargs: dict[str, Any],
     ) -> AsyncGenerator[RequestOutput, None]:
         has_yielded_output = False
+        skip_mm_cache = False
         for attempt in range(2):
             if attempt:
-                result = await self.render_chat_request(request, skip_mm_cache=True)
+                result = await self.render_chat_request(
+                    request, skip_mm_cache=skip_mm_cache
+                )
                 if isinstance(result, ErrorResponse):
                     raise VLLMValidationError(result.error.message)
                 _, engine_inputs = result
@@ -311,28 +313,36 @@ class OpenAIServingChat(GenerateBaseServing):
                     engine_input
                 ).token_ids
 
-            try:
-                async for output in self.engine_client.generate(
-                    engine_input,
-                    sampling_params,
-                    request_id,
-                    **generate_kwargs,
-                    **self._engine_reasoning_kwargs(
-                        request, parser, chat_template_kwargs, prompt_token_ids
-                    ),
-                ):
-                    has_yielded_output = True
-                    yield output
+            retry_error = None
+            async for output in self.engine_client.generate(
+                engine_input,
+                sampling_params,
+                request_id,
+                **generate_kwargs,
+                **self._engine_reasoning_kwargs(
+                    request, parser, chat_template_kwargs, prompt_token_ids
+                ),
+            ):
+                error = output.error
+                if error is not None and error.retryable:
+                    if attempt or has_yielded_output:
+                        raise RetryableRequestError(
+                            error.message,
+                            code=error.code,
+                        )
+                    retry_error = error
+                    break
+                has_yielded_output = True
+                yield output
+
+            if retry_error is None:
                 return
-            except MultiModalCacheMissError as e:
-                if attempt or has_yielded_output:
-                    raise RetryableRequestError(
-                        "Multi-modal processor cache miss."
-                    ) from e
-                logger.warning(
-                    "Retrying chat request %s once after multi-modal cache miss.",
-                    request_id,
-                )
+            skip_mm_cache = retry_error.code == "multimodal_cache_miss"
+            logger.warning(
+                "Retrying chat request %s once after retryable error %s.",
+                request_id,
+                retry_error.code,
+            )
 
     async def create_chat_completion(
         self,
@@ -442,7 +452,7 @@ class OpenAIServingChat(GenerateBaseServing):
                     session_id=session_id,
                 )
             else:
-                generator = self._generate_with_cache_retry(
+                generator = self._generate_with_retry(
                     request,
                     engine_input,
                     sampling_params,

@@ -22,8 +22,7 @@ from vllm.exceptions import (
     RetryableRequestError,
     VLLMValidationError,
 )
-from vllm.multimodal.cache import MultiModalCacheMissError
-from vllm.outputs import CompletionOutput, RequestOutput
+from vllm.outputs import CompletionOutput, RequestError, RequestOutput
 from vllm.renderers.hf import HfRenderer
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import SamplingParams
@@ -36,6 +35,41 @@ BASE_MODEL_PATHS = [
     BaseModelPath(name=MODEL_NAME, model_path=MODEL_NAME),
     BaseModelPath(name=MODEL_NAME_SHORT, model_path=MODEL_NAME_SHORT),
 ]
+
+
+def _cache_miss_output(request_id: str = "request-id") -> RequestOutput:
+    return RequestOutput(
+        request_id=request_id,
+        prompt=None,
+        prompt_token_ids=[1, 2, 3],
+        prompt_logprobs=None,
+        outputs=[
+            CompletionOutput(
+                index=0,
+                text="",
+                token_ids=[],
+                cumulative_logprob=None,
+                logprobs=None,
+                finish_reason="error",
+            )
+        ],
+        finished=True,
+        error=RequestError(
+            code="multimodal_cache_miss",
+            message="Multi-modal processor cache miss.",
+            retryable=True,
+        ),
+    )
+
+
+def _retryable_error_output(request_id: str = "request-id") -> RequestOutput:
+    output = _cache_miss_output(request_id)
+    output.error = RequestError(
+        code="temporary_error",
+        message="Temporary request failure.",
+        retryable=True,
+    )
+    return output
 
 
 @dataclass
@@ -220,17 +254,19 @@ async def test_chat_retries_cache_miss_with_uncached_prompt():
         return_value=([{"role": "user", "content": "Test prompt"}], [retry_prompt])
     )
     expected = MagicMock(spec=RequestOutput)
+    expected.error = None
 
     async def generate(prompt, *args, **kwargs):
         if prompt is initial_prompt:
-            raise MultiModalCacheMissError(["missing-hash"])
+            yield _cache_miss_output()
+            return
         yield expected
 
     mock_engine.generate = MagicMock(side_effect=generate)
 
     outputs = [
         output
-        async for output in serving_chat._generate_with_cache_retry(
+        async for output in serving_chat._generate_with_retry(
             request,
             initial_prompt,
             SamplingParams(max_tokens=1),
@@ -252,6 +288,57 @@ async def test_chat_retries_cache_miss_with_uncached_prompt():
 
 
 @pytest.mark.asyncio
+async def test_chat_retries_other_error_with_cached_prompt():
+    mock_engine = MagicMock(spec=AsyncLLM)
+    serving_chat = object.__new__(OpenAIServingChat)
+    serving_chat.engine_client = mock_engine
+    serving_chat.model_config = MockModelConfig()
+
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "Test prompt"}],
+        max_tokens=1,
+    )
+    initial_prompt = {"prompt_token_ids": [1, 2, 3]}
+    retry_prompt = {"prompt_token_ids": [1, 2, 3]}
+    serving_chat.render_chat_request = AsyncMock(
+        return_value=([{"role": "user", "content": "Test prompt"}], [retry_prompt])
+    )
+    expected = MagicMock(spec=RequestOutput)
+    expected.error = None
+
+    async def generate(prompt, *args, **kwargs):
+        if prompt is initial_prompt:
+            yield _retryable_error_output()
+            return
+        yield expected
+
+    mock_engine.generate = MagicMock(side_effect=generate)
+
+    outputs = [
+        output
+        async for output in serving_chat._generate_with_retry(
+            request,
+            initial_prompt,
+            SamplingParams(max_tokens=1),
+            "request-id",
+            0,
+            [1, 2, 3],
+            {},
+            None,
+            {},
+        )
+    ]
+
+    assert outputs == [expected]
+    assert mock_engine.generate.call_count == 2
+    assert mock_engine.generate.call_args_list[1].args[0] is retry_prompt
+    serving_chat.render_chat_request.assert_awaited_once_with(
+        request, skip_mm_cache=False
+    )
+
+
+@pytest.mark.asyncio
 async def test_chat_does_not_retry_after_output():
     mock_engine = MagicMock(spec=AsyncLLM)
     serving_chat = object.__new__(OpenAIServingChat)
@@ -264,16 +351,17 @@ async def test_chat_does_not_retry_after_output():
         max_tokens=1,
     )
     expected = MagicMock(spec=RequestOutput)
+    expected.error = None
 
     async def generate(*args, **kwargs):
         yield expected
-        raise MultiModalCacheMissError(["missing-hash"])
+        yield _cache_miss_output()
 
     mock_engine.generate = MagicMock(side_effect=generate)
     outputs = []
 
     with pytest.raises(RetryableRequestError) as exc_info:
-        async for output in serving_chat._generate_with_cache_retry(
+        async for output in serving_chat._generate_with_retry(
             request,
             {"prompt_token_ids": [1, 2, 3]},
             SamplingParams(max_tokens=1),
@@ -287,7 +375,8 @@ async def test_chat_does_not_retry_after_output():
             outputs.append(output)
 
     assert outputs == [expected]
-    assert isinstance(exc_info.value.__cause__, MultiModalCacheMissError)
+    assert str(exc_info.value) == "Multi-modal processor cache miss."
+    assert exc_info.value.code == "multimodal_cache_miss"
     serving_chat.render_chat_request.assert_not_awaited()
 
 

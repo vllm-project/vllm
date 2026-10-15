@@ -22,7 +22,6 @@ from vllm import PoolingParams
 from vllm.config.watermarking import WatermarkConfig
 from vllm.logprobs import FlatLogprobs, Logprob, PromptLogprobs, SampleLogprobs
 from vllm.lora.request import LoRARequest
-from vllm.multimodal.cache import MultiModalCacheMissError
 from vllm.outputs import (
     CompletionOutput,
     PoolingRequestOutput,
@@ -1761,7 +1760,39 @@ def _generation_request(
 
 
 @pytest.mark.skip_global_cleanup
-def test_async_generation_cache_miss_aborts_parent_and_signals_retry():
+def test_async_generation_cache_miss_returns_structured_error():
+    output_processor = OutputProcessor(tokenizer=None, log_stats=False)
+    request = _generation_request()
+    collector = RequestOutputCollector(
+        RequestOutputKind.FINAL_ONLY, request_id=request.request_id
+    )
+    output_processor.add_request(request, None, queue=collector)
+
+    processed = output_processor.process_outputs(
+        [
+            EngineCoreOutput(
+                request_id=request.request_id,
+                new_token_ids=[],
+                finish_reason=FinishReason.ERROR,
+                mm_cache_miss_hashes=["missing-hash"],
+            )
+        ]
+    )
+
+    assert processed.request_outputs == []
+    assert processed.reqs_to_abort == []
+    output = collector.get_nowait()
+    assert isinstance(output, RequestOutput)
+    assert output.finished
+    assert output.error is not None
+    assert output.error.code == "multimodal_cache_miss"
+    assert output.error.retryable
+    assert output.outputs[0].finish_reason == "error"
+    assert not output_processor.has_unfinished_requests()
+
+
+@pytest.mark.skip_global_cleanup
+def test_async_generation_cache_miss_aborts_siblings_and_returns_error():
     output_processor = OutputProcessor(tokenizer=None, log_stats=False)
     request = _generation_request("parent-int", n=2)
     parent = ParentRequest(request)
@@ -1794,11 +1825,15 @@ def test_async_generation_cache_miss_aborts_parent_and_signals_retry():
     )
 
     assert processed.request_outputs == []
-    assert set(processed.reqs_to_abort) == {child.request_id for child in children}
+    assert processed.reqs_to_abort == [children[1].request_id]
     assert not output_processor.has_unfinished_requests()
-    with pytest.raises(MultiModalCacheMissError) as exc_info:
-        collector.get_nowait()
-    assert exc_info.value.mm_hashes == ["missing-hash"]
+    output = collector.get_nowait()
+    assert isinstance(output, RequestOutput)
+    assert output.finished
+    assert output.error is not None
+    assert output.error.code == "multimodal_cache_miss"
+    assert output.error.retryable
+    assert any(item.finish_reason == "error" for item in output.outputs)
 
 
 @pytest.mark.skip_global_cleanup
@@ -1883,9 +1918,11 @@ def test_async_pooling_cache_miss_does_not_fail_output_processor():
     )
 
     assert processed.request_outputs == []
-    with pytest.raises(MultiModalCacheMissError) as exc_info:
-        queue.get_nowait()
-    assert exc_info.value.mm_hashes == ["missing-hash"]
+    output = queue.get_nowait()
+    assert isinstance(output, PoolingRequestOutput)
+    assert output.error is not None
+    assert output.error.code == "multimodal_cache_miss"
+    assert output.error.retryable
     assert not output_processor.has_unfinished_requests()
 
 

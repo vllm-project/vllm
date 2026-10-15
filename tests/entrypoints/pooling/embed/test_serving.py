@@ -12,7 +12,19 @@ from vllm.entrypoints.pooling.embed.protocol import (
 )
 from vllm.entrypoints.pooling.embed.serving import ServingEmbedding
 from vllm.exceptions import RetryableRequestError
-from vllm.multimodal.cache import MultiModalCacheMissError
+from vllm.outputs import RequestError
+
+
+def _cache_miss_error() -> RequestError:
+    return RequestError(
+        code="multimodal_cache_miss",
+        message="Multi-modal processor cache miss.",
+        retryable=True,
+    )
+
+
+def _retryable_error(error: RequestError) -> RetryableRequestError:
+    return RetryableRequestError(error.message, code=error.code)
 
 
 def _mock_serving(monkeypatch, collect_side_effect):
@@ -40,9 +52,10 @@ def _mock_serving(monkeypatch, collect_side_effect):
 
 @pytest.mark.asyncio
 async def test_embedding_retries_cache_miss_without_mm_cache(monkeypatch):
-    cache_miss = MultiModalCacheMissError(["missing-hash"])
+    cache_miss = _cache_miss_error()
+    retryable_error = _retryable_error(cache_miss)
     serving, io_processor, ctx, expected, collect_batch = _mock_serving(
-        monkeypatch, [cache_miss, None]
+        monkeypatch, [retryable_error, None]
     )
     request = EmbeddingCompletionRequest(model="test", input="hello")
 
@@ -58,30 +71,73 @@ async def test_embedding_retries_cache_miss_without_mm_cache(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_embedding_second_cache_miss_is_retryable_error(monkeypatch):
-    cache_miss = MultiModalCacheMissError(["missing-hash"])
+    cache_miss = _cache_miss_error()
+    retryable_error = _retryable_error(cache_miss)
     serving, _, _, _, collect_batch = _mock_serving(
-        monkeypatch, [cache_miss, cache_miss]
+        monkeypatch, [retryable_error, retryable_error]
     )
     request = EmbeddingCompletionRequest(model="test", input="hello")
 
     with pytest.raises(RetryableRequestError) as exc_info:
         await serving(request)
 
-    assert isinstance(exc_info.value.__cause__, MultiModalCacheMissError)
+    assert exc_info.value is retryable_error
     assert collect_batch.await_count == 2
 
 
 @pytest.mark.asyncio
-async def test_cohere_embedding_does_not_retry_cache_miss(monkeypatch):
-    cache_miss = MultiModalCacheMissError(["missing-hash"])
-    serving, _, _, _, collect_batch = _mock_serving(monkeypatch, [cache_miss])
+async def test_cohere_embedding_retries_cache_miss(monkeypatch):
+    cache_miss = _cache_miss_error()
+    retryable_error = _retryable_error(cache_miss)
+    serving, _, _, expected, collect_batch = _mock_serving(
+        monkeypatch, [retryable_error, None]
+    )
     request = CohereEmbedRequest(model="test", texts=["hello"])
 
-    with pytest.raises(RetryableRequestError) as exc_info:
-        await serving(request)
+    result = await serving(request)
 
-    assert isinstance(exc_info.value.__cause__, MultiModalCacheMissError)
-    assert collect_batch.await_count == 1
+    assert result is expected
+    assert collect_batch.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_embedding_retries_other_error_with_mm_cache(monkeypatch):
+    retryable_error = RetryableRequestError(
+        "Temporary request failure.", code="temporary_error"
+    )
+    serving, io_processor, ctx, expected, collect_batch = _mock_serving(
+        monkeypatch, [retryable_error, None]
+    )
+    request = EmbeddingCompletionRequest(model="test", input="hello")
+
+    result = await serving(request)
+
+    assert result is expected
+    assert collect_batch.await_count == 2
+    assert serving._preprocessing.await_args_list == [
+        call(io_processor, ctx, skip_mm_cache=False),
+        call(io_processor, ctx, skip_mm_cache=False),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_collect_batch_maps_cache_miss_to_retryable_error_by_default():
+    serving = object.__new__(ServingEmbedding)
+    cache_miss = _cache_miss_error()
+    result = MagicMock()
+    result.error = cache_miss
+
+    async def result_generator():
+        yield 0, result
+
+    ctx = MagicMock()
+    ctx.engine_inputs = [MagicMock()]
+    ctx.result_generator = result_generator()
+
+    with pytest.raises(RetryableRequestError, match=cache_miss.message) as exc_info:
+        await serving._collect_batch(ctx)
+
+    assert exc_info.value.code == cache_miss.code
 
 
 @pytest.mark.asyncio

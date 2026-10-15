@@ -10,7 +10,7 @@ from vllm.utils.serial_utils import EmbedDType, Endianness
 
 from ..base.io_processor import PoolingIOProcessor
 from ..base.serving import PoolingServing
-from ..typing import AnyPoolingRequest, PoolingServeContext
+from ..typing import PoolingServeContext
 from ..utils import (
     BytesEncodingFormat,
     JsonEncodingFormat,
@@ -52,9 +52,6 @@ class ServingEmbedding(PoolingServing):
 
     def init_io_processor(self, *args, **kwargs) -> EmbedIOProcessor:
         return EmbedIOProcessor(*args, **kwargs)
-
-    def _should_retry_mm_cache_miss(self, request: AnyPoolingRequest) -> bool:
-        return not isinstance(request, CohereEmbedRequest)
 
     async def _preprocessing(
         self,

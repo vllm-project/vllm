@@ -32,6 +32,36 @@ def test_request_output_forward_compatible():
     assert output is not None
 
 
+def test_request_output_add_preserves_terminal_error():
+    accumulated = RequestOutput(
+        request_id="request",
+        prompt=None,
+        prompt_token_ids=[],
+        prompt_logprobs=None,
+        outputs=[],
+        finished=False,
+    )
+    error = RequestError(
+        code="multimodal_cache_miss",
+        message="Multi-modal processor cache miss.",
+        retryable=True,
+    )
+    terminal = RequestOutput(
+        request_id="request",
+        prompt=None,
+        prompt_token_ids=[],
+        prompt_logprobs=None,
+        outputs=[],
+        finished=True,
+        error=error,
+    )
+
+    accumulated.add(terminal, aggregate=True)
+
+    assert accumulated.error is error
+    assert accumulated.finished
+
+
 @pytest.mark.parametrize(
     ("output_type", "empty_value"),
     [
