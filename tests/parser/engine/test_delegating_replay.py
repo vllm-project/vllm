@@ -99,6 +99,10 @@ def _discover_pairings() -> list[_PairingInfo]:
             # terminal matching; combined-parser replay coverage lives in
             # test_inkling.py.
             continue
+        if cfg.name == "granite":
+            # Granite has a JSON-array tool body with no TOOL_END terminal;
+            # its replay coverage lives in test_granite.py.
+            continue
 
         parser_cls = type(
             f"_Delegating{engine_cls.__name__}",
@@ -197,7 +201,7 @@ def test_delegating_parse_tool_choice_none(parser_cls, parser_name, sample):
     cfg = parser._tool_parser._parser_engine.parser_engine_config
     terminals = sorted(
         v
-        for v in set(cfg.terminals.values()) | set(cfg.token_id_terminals.values())
+        for v in cfg.terminal_literals | set(cfg.token_id_terminals.values())
         if len(v) > 1
     )
     assert_no_terminal_leakage(

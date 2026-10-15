@@ -35,19 +35,19 @@ import json
 from collections.abc import Sequence
 
 import regex as re
-from openai.types.responses import ToolChoiceFunction
+from openai.types.responses import ToolChoiceCustom, ToolChoiceFunction
 
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionNamedToolChoiceParam,
-    ChatCompletionRequest,
-)
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,
     ExtractedToolCallInformation,
     FunctionCall,
     ToolCall,
+)
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionNamedToolChoiceParam,
+    ChatCompletionRequest,
 )
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.exceptions import VLLMValidationError
@@ -149,7 +149,11 @@ class KimiK3ToolParser(ToolParser):
     ) -> ChatCompletionRequest | ResponsesRequest:
         named = isinstance(
             request.tool_choice,
-            (ChatCompletionNamedToolChoiceParam, ToolChoiceFunction),
+            (
+                ChatCompletionNamedToolChoiceParam,
+                ToolChoiceFunction,
+                ToolChoiceCustom,
+            ),
         )
         structured_outputs = getattr(request, "structured_outputs", None)
         has_structural_tag = (

@@ -295,6 +295,7 @@ fn print_sweep_summary(param_name: &str, points: &[SweepPoint], summary_percenti
 fn build_summary_columns(summary_percentiles: &[f64]) -> Vec<SummaryColumn> {
     let mut columns = vec![
         SummaryColumn::new("Req/s", "request_throughput", 10),
+        SummaryColumn::new("Inputs/s", "input_sequence_throughput", 10),
         SummaryColumn::new("Tok/s", "output_throughput", 10),
         SummaryColumn::new("Total tok/s", "total_token_throughput", 12),
         SummaryColumn::new("SS req/s", SS_REQUEST_THROUGHPUT_KEY, 10),
@@ -452,6 +453,7 @@ mod tests {
             headers,
             vec![
                 "Req/s",
+                "Inputs/s",
                 "Tok/s",
                 "Total tok/s",
                 "SS req/s",
@@ -495,6 +497,7 @@ mod tests {
             headers,
             vec![
                 "Req/s",
+                "Inputs/s",
                 "Tok/s",
                 "Total tok/s",
                 "SS req/s",

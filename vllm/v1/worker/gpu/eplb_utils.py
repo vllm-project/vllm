@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from functools import wraps
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.nn as nn
@@ -12,10 +13,34 @@ from vllm.config import ModelConfig
 from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import (
+    MixtureOfExperts,
     get_mixture_of_experts_model,
 )
+from vllm.models.deepseek_v4.common.eplb_util import dspark_draft_supports_eplb
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 logger = init_logger(__name__)
+
+
+def eplb_draft_model_name(model_config: ModelConfig) -> str:
+    """Return the EPLB step-log display name for a draft model."""
+    return f"{model_config.model} (draft)"
+
+
+def draft_model_supports_eplb(
+    speculative_config: Any | None,
+    draft_moe_model: MixtureOfExperts | None,
+) -> bool:
+    """Return whether a draft MoE model should register with EPLB."""
+    if draft_moe_model is None:
+        return False
+    if speculative_config is None or speculative_config.draft_model_config is None:
+        return False
+    if getattr(speculative_config, "method", None) == "dspark":
+        return dspark_draft_supports_eplb(speculative_config.draft_model_config)
+    return True
 
 
 def step_eplb_after(*, is_dummy: bool = False) -> Callable:
@@ -24,10 +49,12 @@ def step_eplb_after(*, is_dummy: bool = False) -> Callable:
     def decorator(fn: Callable) -> Callable:
         @wraps(fn)
         def wrapper(self: Any, *args, **kwargs) -> Any:
-            result = fn(self, *args, **kwargs)
             if kwargs.get("skip_eplb", False):
-                return result
+                # The router kernel records load before step() is reached.
+                with self.eplb.suppress():
+                    return fn(self, *args, **kwargs)
 
+            result = fn(self, *args, **kwargs)
             is_profile = kwargs.get("is_profile", False) if is_dummy else False
             self.eplb.step(is_dummy=is_dummy, is_profile=is_profile)
             return result
@@ -37,6 +64,27 @@ def step_eplb_after(*, is_dummy: bool = False) -> Callable:
     return decorator
 
 
+@contextmanager
+def preserve_serving_state(model_runner: "GPUModelRunner") -> Iterator[None]:
+    """Keep the elastic EP warmup out of the request pool and the KV cache."""
+    # After the drain only parked streaming sessions still hold a slot, and
+    # those are re-added from NewRequestData on their next chunk.
+    _remove_all_requests(model_runner)
+    model_runner.block_tables.redirect_writes_to_null_block = True
+    try:
+        yield
+    finally:
+        _remove_all_requests(model_runner)
+        model_runner.block_tables.redirect_writes_to_null_block = False
+        if model_runner.kv_block_zeroer is not None:
+            model_runner.kv_block_zeroer.zero_block_ids([0])
+
+
+def _remove_all_requests(model_runner: "GPUModelRunner") -> None:
+    for req_id in list(model_runner.req_states.req_id_to_index):
+        model_runner._remove_request(req_id)
+
+
 class EPLBController:
     def __init__(self, parallel_config: Any, device: torch.device):
         self.parallel_config = parallel_config
@@ -44,6 +92,24 @@ class EPLBController:
         self.state: EplbState | None = None
         self.suppressed = False
         self._has_registered_models = False
+
+    @contextmanager
+    def suppress(self) -> Iterator[None]:
+        """Keep warmup forwards from stepping EPLB or recording expert load."""
+        should_record = (
+            self.state.should_record_tensor if self.state is not None else None
+        )
+        was_suppressed = self.suppressed
+        was_recording = should_record.clone() if should_record is not None else None
+        self.suppressed = True
+        if should_record is not None:
+            should_record.fill_(False)
+        try:
+            yield
+        finally:
+            if should_record is not None and was_recording is not None:
+                should_record.copy_(was_recording)
+            self.suppressed = was_suppressed
 
     def prepare_load(self) -> None:
         self.state = None
@@ -68,30 +134,32 @@ class EPLBController:
 
         draft_model = speculator.model
         draft_moe_model = get_mixture_of_experts_model(draft_model)
-        if draft_moe_model is None:
+        if not draft_model_supports_eplb(speculative_config, draft_moe_model):
             return False
+        assert draft_moe_model is not None
 
         assert not self.parallel_config.enable_elastic_ep, (
             "Elastic EP is not supported with draft model."
         )
         assert speculative_config is not None
-        assert speculative_config.draft_model_config is not None
+        draft_model_config = speculative_config.draft_model_config
+        assert draft_model_config is not None
+        logger.info_once(
+            "EPLB is enabled for MoE part of drafter model %s.",
+            draft_model_config.model,
+        )
         assert self.state is not None
         self.state.add_model(
             draft_moe_model,
-            speculative_config.draft_model_config,
+            draft_model_config,
+            model_name=eplb_draft_model_name(draft_model_config),
         )
         speculator.set_eplb_state(self.state)
         self._has_registered_models = True
         return True
 
-    def maybe_register_model(
-        self,
-        model: nn.Module,
-        model_config: Any,
-        load_dummy_weights: bool,
-    ) -> bool:
-        if not self.parallel_config.enable_eplb or load_dummy_weights:
+    def maybe_register_model(self, model: nn.Module, model_config: ModelConfig) -> bool:
+        if not self.parallel_config.enable_eplb:
             return False
 
         moe_model = get_mixture_of_experts_model(model)
@@ -106,15 +174,17 @@ class EPLBController:
         self._has_registered_models = True
         return True
 
-    def maybe_start_async_loop(self, eplb_models_added: bool) -> None:
+    def maybe_start_async_loop(
+        self, eplb_models_added: bool, load_dummy_weights: bool = False
+    ) -> None:
+        # A scaling-up worker registers to join the communicator handshake, but
+        # its groups are not live yet, so _perform_eplb_reshuffle() starts this.
+        if load_dummy_weights:
+            return
         if eplb_models_added and self.state is not None and self.state.is_async:
             self.state.start_async_loop()
 
-    def step(
-        self,
-        is_dummy: bool = False,
-        is_profile: bool = False,
-    ) -> None:
+    def step(self, is_dummy: bool = False, is_profile: bool = False) -> None:
         if (
             not self.parallel_config.enable_eplb
             or self.suppressed
@@ -123,11 +193,8 @@ class EPLBController:
         ):
             return
 
-        self.state.step(
-            is_dummy,
-            is_profile,
-            log_stats=self.parallel_config.eplb_config.log_balancedness,
-        )
+        log_stats = self.parallel_config.eplb_config.log_balancedness
+        self.state.step(is_dummy, is_profile, log_stats=log_stats)
 
     def prepare_forward(
         self,
@@ -141,20 +208,10 @@ class EPLBController:
 
     def setup_from_mapping(
         self,
-        model: nn.Module,
-        model_config: Any,
+        model_config: ModelConfig,
         expanded_physical_to_logical: torch.Tensor,
-        old_num_physical_experts: int,
     ) -> None:
-        moe_model = get_mixture_of_experts_model(model)
-        assert moe_model is not None
-
-        self.state = EplbState.from_mapping(
-            model=moe_model,
-            model_config=model_config,
-            device=self.device,
-            parallel_config=self.parallel_config,
-            expanded_physical_to_logical=expanded_physical_to_logical,
-            num_valid_physical_experts=old_num_physical_experts,
-        )
-        self._has_registered_models = True
+        # Update in place: a fresh EplbState would build a second communicator
+        # over a group the other ranks have already left.
+        assert self.state is not None
+        self.state.update_mapping(model_config, expanded_physical_to_logical)

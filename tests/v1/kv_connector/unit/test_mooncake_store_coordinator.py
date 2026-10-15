@@ -3,6 +3,7 @@
 
 from math import lcm
 
+import pytest
 import torch
 
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator import (  # noqa: E501
@@ -30,7 +31,13 @@ def _mamba_align(block_size=32):
     )
 
 
-def _make_coord(groups, hash_block_size, use_eagle=False, retention_interval=None):
+def _make_coord(
+    groups,
+    hash_block_size,
+    use_eagle=False,
+    retention_interval=None,
+    enable_partial_hash_hits=False,
+):
     """Construct a coordinator using the natural LCM of group block sizes as
     the scheduler block size — mirrors ``resolve_kv_cache_block_sizes`` for
     the test fixtures."""
@@ -42,6 +49,7 @@ def _make_coord(groups, hash_block_size, use_eagle=False, retention_interval=Non
         hash_block_size=hash_block_size,
         use_eagle=use_eagle,
         retention_interval=retention_interval,
+        enable_partial_hash_hits=enable_partial_hash_hits,
     )
 
 
@@ -219,8 +227,7 @@ def test_coordinator_fine_grained_partial_tail_hit():
         KVCacheGroupSpec(["L0"], _full(32)),
         KVCacheGroupSpec(["L1"], _mamba_align(32)),
     ]
-    coord = _make_coord(groups, hash_block_size=16)
-    assert coord.enable_partial_hash_hits
+    coord = _make_coord(groups, hash_block_size=16, enable_partial_hash_hits=True)
     hs = _hashes(4)  # 4 hash units of 16 = 64 tokens; block 0 = [0,32), etc.
     # Both groups: full block 0 (key = last sub-hash hs[1]) + partial boundary
     # at token 48 (key = hs[2]). No hs[3] -> block 1 is not full.
@@ -416,6 +423,49 @@ def test_store_mask_retention_interval_zero_keeps_only_replay_boundary():
     assert masks[1] == [i == 11 for i in range(16)]
 
 
+def test_store_mask_retention_interval_zero_eagle_keeps_lookup_tail():
+    """With EAGLE the replay boundary sits one scheduler block lower, as in
+    core's ``replay_boundaries``: the lookup matches that block and drops
+    back from it. The retained SWA tail must span the ``need`` contiguous
+    blocks the lookup requires (cdiv(8 - 1, 8) + 1 = 2 here); the non-EAGLE
+    boundary leaves only one of them inside the saved prefix."""
+    coord = _make_coord(
+        _retention_groups(), hash_block_size=8, use_eagle=True, retention_interval=0
+    )
+    # num_prompt=100 -> boundary 64 -> chunks 7, 8 (8 is the EAGLE peek).
+    masks = coord.store_mask(96, num_prompt_tokens=100)
+    assert masks[0] is None
+    assert masks[1] == [i in (7, 8) for i in range(12)]
+    # Aligned num_prompt=96 -> boundaries 32 (resend) and 64 (longer sibling).
+    masks = coord.store_mask(96, num_prompt_tokens=96)
+    assert masks[1] == [i in (3, 4, 7, 8) for i in range(12)]
+
+
+@pytest.mark.parametrize("num_prompt_tokens", [100, 96])
+def test_store_mask_retention_interval_zero_eagle_round_trip(num_prompt_tokens):
+    """Everything store_mask keeps is in the store; the EAGLE lookup of the
+    same prompt must then reach the full block below the one it drops (64 of
+    96). The unaligned prompt hit 0 before the fix; the aligned one already
+    hit."""
+    groups = _retention_groups()
+    coord = _make_coord(groups, hash_block_size=8, use_eagle=True, retention_interval=0)
+    hashes = _hashes(96 // coord.hash_block_size)
+    exists: set[tuple[int, bytes]] = set()
+    store_masks = coord.store_mask(96, num_prompt_tokens=num_prompt_tokens)
+    for gid, (group, mask) in enumerate(zip(groups, store_masks, strict=True)):
+        group_hashes = coord.block_hashes_for_spec(hashes, group.kv_cache_spec)
+        for chunk_id, block_hash in enumerate(group_hashes):
+            if mask is None or mask[chunk_id]:
+                exists.add((gid, bytes(block_hash)))
+
+    _masks, hit = coord.find_longest_cache_hit(
+        hashes,
+        max_length=96,
+        cached_block_pool=ExternalCachedBlockPool(coord.hash_block_size, exists),
+    )
+    assert hit == 64
+
+
 def test_store_mask_retention_interval_keeps_segment_and_replay_tails():
     """Sparse segment tails (interval=64 -> chunks 7,15) plus the replay
     boundary tail (num_prompt=100 -> chunk 11) coexist."""
@@ -449,6 +499,27 @@ def test_store_mask_retention_prefix_stable_as_aligned_length_grows():
     assert shorter is not None
     assert longer is not None
     assert longer[: len(shorter)] == shorter
+
+
+def test_store_mask_excludes_mamba_groups_lookup_unaffected():
+    """Align-mode mamba block tables are not append-only (interior states are
+    nulled/freed; speculative blocks relocate), so the positional normal save
+    must never cover mamba chunks — regardless of retention. Lookups still
+    probe mamba boundaries: their keys come from the pinned snapshot/CoW
+    hand-off path instead."""
+    groups = [
+        KVCacheGroupSpec(["L0"], _full(16)),
+        KVCacheGroupSpec(["L1"], _mamba_align(16)),
+    ]
+    coord = _make_coord(groups, hash_block_size=16)
+    masks = coord.store_mask(64)
+    assert masks[0] is None  # full attn stays dense
+    assert masks[1] == [False] * 4
+
+    coord = _make_coord(groups, hash_block_size=16, retention_interval=32)
+    assert coord.store_mask(64)[1] == [False] * 4
+
+    assert coord.lookup_mask(64)[1] is None
 
 
 # ----- Eagle / MTP interaction with load_mask -----

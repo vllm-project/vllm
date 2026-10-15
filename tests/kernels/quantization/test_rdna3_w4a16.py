@@ -173,7 +173,6 @@ def _run_kernel(
         act_type=dtype,
         group_size=group_size,
         zero_points=has_zp,
-        has_g_idx=False,
     )
     ok, reason = RDNA3W4A16LinearKernel.can_implement(config)
     assert ok, f"can_implement rejected a supported config: {reason}"
@@ -184,7 +183,6 @@ def _run_kernel(
         w_q_param_name="qweight",
         w_s_param_name="scales",
         w_zp_param_name="qzeros" if has_zp else None,
-        w_gidx_param_name=None,
     )
     kernel.process_weights_after_loading(layer)
     return kernel.apply_weights(layer, x_mk, bias=bias)

@@ -32,6 +32,7 @@ logger = init_logger(__name__)
 
 _LOAD_TIMEOUT_S = 30.0
 _ABORT_ACK_TIMEOUT_S = 10.0
+_LOOKUP_TIMEOUT_S = 30.0
 
 
 @dataclass
@@ -59,10 +60,8 @@ class _ClientRequestState:
 
     # -- Lookup phase (symmetric P2P only; untouched for PD) --
     # Probe outcome per OffloadKey: None while in-flight (registered/sent
-    # but unresolved), True/False once a LookupRespMsg lands. There is no
-    # timeout — finish (via finish_request) is guaranteed after
-    # the request's lookup() calls and clears every probe, so an
-    # unanswered probe simply stays None until then.
+    # but unresolved), True/False once a LookupRespMsg lands. Unanswered
+    # probes expire the session so the manager can fall back to local compute.
     probes: dict[OffloadKey, bool | None] = field(default_factory=dict)
     # OffloadKeys registered but not yet flushed onto the wire. Drained and
     # cleared by the next flush_pending_lookups.
@@ -130,12 +129,15 @@ class ClientRole:
         # _serve_pending. Populated by register_lookup, drained by
         # flush_pending_lookups, and discarded on finish/close.
         self._flush_pending: set[str] = set()
-        # kv_request_ids with at least one fetch in flight — the work-list
-        # collect_results walks for timeouts, and the has_active_loads
-        # predicate, instead of scanning every request. Kept in exact sync
-        # with ``st.loads``.
+        # kv_request_ids with at least one fetch in flight or aborting — the
+        # work-list collect_results walks for timeouts, and the
+        # has_active_loads predicate, instead of scanning every request.
+        # Kept in exact sync with ``st.loads``.
         self._active_loads: set[str] = set()
         self._completed_loads: list[LoadResult] = []
+        # Per-request progress deadlines. Only newly resolved probes extend
+        # them; additional keys and repeated scheduler polls do not.
+        self._lookup_deadlines: dict[str, float] = {}
 
     # ------------------------------------------------------------------
     # State helpers
@@ -171,6 +173,14 @@ class ClientRole:
     def has_active_loads(self) -> bool:
         """True if any kv_request_id has a fetch in flight."""
         return bool(self._active_loads)
+
+    def get_expired_lookup(self) -> tuple[str, float] | None:
+        """Return an expired request and seconds without progress, if any."""
+        now = time.monotonic()
+        for req_id, deadline in self._lookup_deadlines.items():
+            if now >= deadline:
+                return req_id, now - deadline + _LOOKUP_TIMEOUT_S
+        return None
 
     # ------------------------------------------------------------------
     # Public API
@@ -228,6 +238,7 @@ class ClientRole:
             )
             assert all(st.probes.get(key) is True for key in keys)
         st.probes.clear()
+        self._lookup_deadlines.pop(kv_request_id, None)
 
     def finish(self, kv_request_id: str) -> None:
         """Finish a request: abort in-flight loads and release lookup state.
@@ -241,7 +252,8 @@ class ClientRole:
         while an earlier round's load is still in flight, so both can be
         owed at once.
 
-        Then drop all probe/lookup state and prune the entry.
+        Then drop all probe/lookup state. Keep aborted loads until their abort
+        acknowledgement or timeout produces a terminal result.
         """
         st = self._requests.get(kv_request_id)
         if st is None:
@@ -257,8 +269,7 @@ class ClientRole:
                         AbortFetchMsg.ROUND_SEQ: round_seq,
                     }
                 )
-            st.loads.clear()
-            self._active_loads.discard(kv_request_id)
+                load.aborted_at = time.monotonic()
         if st.peer_lookup_open:
             st.peer_lookup_open = False
             self._send(
@@ -272,6 +283,7 @@ class ClientRole:
             )
         st.probes.clear()
         st.unsent.clear()
+        self._lookup_deadlines.pop(kv_request_id, None)
         self._flush_pending.discard(kv_request_id)
         self._maybe_prune(kv_request_id)
 
@@ -311,9 +323,8 @@ class ClientRole:
         load = st.loads.pop(round_seq, None) if st is not None else None
         if st is not None and load is not None:
             logger.warning(
-                "P2PSession %s: load request %s (job_id=%d) timed out; "
-                "load job completed with failure. If this recurs, ensure "
-                "PYTHONHASHSEED is set to the same value on all nodes.",
+                "P2PSession %s: load request %s (job_id=%d) "
+                "completed with failure after abort",
                 self._peer_id,
                 kv_request_id,
                 load.job_id,
@@ -378,7 +389,7 @@ class ClientRole:
         )
         return None
 
-    def flush_pending_lookups(self) -> None:
+    def flush_pending_lookups(self, send_ready: bool) -> None:
         """Send a LookupMsg for each kv_request_id with unsent entries.
 
         Called once per scheduler step from the manager's
@@ -388,13 +399,14 @@ class ClientRole:
         keys, all tagged with the current round. register_lookup()
         de-dups in-flight and already-resolved (req_id, key) pairs, so
         each LookupMsg carries only the keys first probed in that step.
-        Send-gating is handled by the injected ``_send`` callback
-        (queues until ConnectAckMsg if needed).
+        Wait for ConnectAckMsg before sending or starting the response deadline.
 
         Only requests that registered new keys since the last flush are
         visited — the ``_flush_pending`` work-list avoids scanning every
         live request each scheduler step.
         """
+        if not send_ready:
+            return
         for req_id in self._flush_pending:
             st = self._requests.get(req_id)
             if st is None or not st.unsent:
@@ -402,6 +414,9 @@ class ClientRole:
             # The peer now holds lookup state for this id; finish owes a
             # terminal empty FetchMsg until a fetch closes it.
             st.peer_lookup_open = True
+            self._lookup_deadlines.setdefault(
+                req_id, time.monotonic() + _LOOKUP_TIMEOUT_S
+            )
             logger.debug(
                 "P2P LOOKUP client %s: SEND LookupMsg kv_request_id=%s keys=%d",
                 self._peer_id,
@@ -444,10 +459,16 @@ class ClientRole:
         st = self._requests.get(kv_request_id)
         if st is None:
             return
+        progressed = False
         for h, hit in zip(keys, hits):
             key = OffloadKey(h)
             if key in st.probes:
+                progressed |= st.probes[key] is None
                 st.probes[key] = hit
+        if all(hit is not None for hit in st.probes.values()):
+            self._lookup_deadlines.pop(kv_request_id, None)
+        elif progressed:
+            self._lookup_deadlines[kv_request_id] = time.monotonic() + _LOOKUP_TIMEOUT_S
 
     def collect_results(self) -> list[LoadResult]:
         """Walk load timeouts and drain completed loads.
@@ -455,9 +476,6 @@ class ClientRole:
         Loads past ``_LOAD_TIMEOUT_S`` get an AbortFetchMsg sent and
         enter the aborting phase. Aborting loads past
         ``_ABORT_ACK_TIMEOUT_S`` are surfaced as failed.
-
-        Lookups have no timeout: an unanswered probe stays None (RETRY)
-        until finish_request clears it — see ``_ClientRequestState.probes``.
         """
         now = time.monotonic()
         to_remove: list[tuple[str, int]] = []
@@ -526,4 +544,5 @@ class ClientRole:
         self._flush_pending.clear()
         self._active_loads.clear()
         self._completed_loads.clear()
+        self._lookup_deadlines.clear()
         return ClientCloseResult(failed_jobs=failed_jobs, failed_req_ids=failed_req_ids)

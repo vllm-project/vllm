@@ -96,7 +96,7 @@ The code used to request completions as a client remains unchanged:
       },
       gpu_memory_utilization=0.5,
   )
-outputs = llm.generate(prompts，sampling_params)
+outputs = llm.generate(prompts, sampling_params)
 
 for output in outputs:
       prompt = output.prompt

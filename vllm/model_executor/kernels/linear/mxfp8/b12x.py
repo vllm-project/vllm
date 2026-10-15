@@ -3,9 +3,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
-from typing import Any
-
 import torch
 
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
@@ -15,10 +12,7 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
 )
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
-from vllm.utils.b12x import (
-    b12x_warmup_token_counts,
-    reuse_packed_weight_storage,
-)
+from vllm.utils.b12x import B12xWarmupUnit, reuse_packed_weight_storage
 from vllm.utils.b12x import (
     get_b12x_mxfp8_linear as _import_b12x_mxfp8,
 )
@@ -27,21 +21,12 @@ from vllm.utils.torch_utils import current_stream
 from .Mxfp8LinearKernel import Mxfp8LinearKernel, Mxfp8LinearLayerConfig
 
 
-def _b12x_mxfp8_expected_m(tokens: int) -> int:
-    return max(1, int(tokens))
-
-
 def _apply_b12x_mxfp8_packed_linear(
     layer: torch.nn.Module,
     x: torch.Tensor,
     bias: torch.Tensor | None,
 ) -> torch.Tensor:
-    packed_weight = getattr(layer, "b12x_mxfp8_packed_weight", None)
-    if packed_weight is None:
-        raise RuntimeError(
-            "b12x MXFP8 packed weights are missing; "
-            "process_weights_after_loading did not run for this layer"
-        )
+    packed_weight = layer.b12x_mxfp8_packed_weight
 
     input_2d = x.reshape(-1, x.shape[-1]).contiguous()
     output_shape = [*x.shape[:-1], int(packed_weight.out_features)]
@@ -52,75 +37,9 @@ def _apply_b12x_mxfp8_packed_linear(
         input_2d,
         packed_weight,
         bias=bias,
-        expected_m=_b12x_mxfp8_expected_m(int(input_2d.shape[0])),
+        expected_m=max(1, int(input_2d.shape[0])),
     )
     return output.view(*output_shape)
-
-
-def warmup_b12x_mxfp8_linear(
-    model: torch.nn.Module,
-    *,
-    max_tokens: int,
-    cudagraph_capture_sizes: Iterable[int] = (),
-    output_dtype: torch.dtype = torch.bfloat16,
-) -> int:
-    if not current_platform.is_cuda():
-        return 0
-    if not current_platform.is_device_capability_family(120):
-        return 0
-    if output_dtype not in (torch.bfloat16, torch.float16):
-        output_dtype = torch.bfloat16
-
-    layer_map: dict[tuple[Any, ...], Any] = {}
-    for layer in model.modules():
-        packed_weight = getattr(layer, "b12x_mxfp8_packed_weight", None)
-        if packed_weight is None:
-            continue
-        device = torch.device(packed_weight.weight.values.device)
-        signature = (
-            device,
-            int(packed_weight.in_features),
-            int(packed_weight.padded_in_features),
-            int(packed_weight.out_features),
-            output_dtype,
-        )
-        layer_map.setdefault(signature, packed_weight)
-    if not layer_map:
-        return 0
-
-    mxfp8 = _import_b12x_mxfp8()
-    if mxfp8 is None:
-        return 0
-
-    token_counts = b12x_warmup_token_counts(
-        max_tokens=max_tokens,
-        cudagraph_capture_sizes=cudagraph_capture_sizes,
-    )
-    warmed = 0
-    last_device: torch.device | None = None
-
-    with torch.inference_mode():
-        for signature, packed_weight in layer_map.items():
-            device = signature[0]
-            last_device = device
-            for tokens in token_counts:
-                source = torch.zeros(
-                    (tokens, int(packed_weight.in_features)),
-                    dtype=output_dtype,
-                    device=device,
-                )
-                mxfp8.mm(
-                    source,
-                    packed_weight,
-                    expected_m=_b12x_mxfp8_expected_m(tokens),
-                    stream=current_stream().cuda_stream,
-                )
-                warmed += 1
-
-        if warmed > 0 and last_device is not None and last_device.type == "cuda":
-            torch.accelerator.synchronize(last_device)
-
-    return warmed
 
 
 class B12xMxfp8LinearKernel(Mxfp8LinearKernel):
@@ -183,6 +102,45 @@ class B12xMxfp8LinearKernel(Mxfp8LinearKernel):
         )
         replace_parameter(layer, "weight", weight.new_empty((0,)))
         replace_parameter(layer, "weight_scale", weight_scale.new_empty((0,)))
+        layer.b12x_warmup_provider = self
+
+    def get_b12x_warmup_unit(
+        self,
+        layer: torch.nn.Module,
+        token_counts: tuple[int, ...],
+        output_dtype: torch.dtype,
+    ) -> B12xWarmupUnit:
+        packed_weight = layer.b12x_mxfp8_packed_weight
+        device = torch.device(packed_weight.weight.values.device)
+
+        def compile() -> None:
+            mxfp8 = _import_b12x_mxfp8()
+            assert mxfp8 is not None
+            for tokens in token_counts:
+                source = torch.zeros(
+                    (tokens, int(packed_weight.in_features)),
+                    dtype=output_dtype,
+                    device=device,
+                )
+                mxfp8.mm(
+                    source,
+                    packed_weight,
+                    expected_m=max(1, int(tokens)),
+                    stream=current_stream().cuda_stream,
+                )
+
+        return B12xWarmupUnit(
+            name="MXFP8",
+            key=(
+                type(self),
+                device,
+                int(packed_weight.in_features),
+                int(packed_weight.padded_in_features),
+                int(packed_weight.out_features),
+                output_dtype,
+            ),
+            compile=compile,
+        )
 
     def apply_weights(
         self,
