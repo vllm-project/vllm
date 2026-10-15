@@ -82,6 +82,7 @@ from vllm.models.deepseek_v4.amd.rocm import DeepseekV4ROCMAiterMLAAttention
 from vllm.platforms import current_platform
 from vllm.platforms.rocm import on_gfx950
 from vllm.sequence import IntermediateTensors
+from vllm.v1.worker.ubatching import dbo_current_ubatch_token_offset
 
 from ..common.mm_preprocess import IMAGE_SENTINEL_BASE_ID
 
@@ -607,7 +608,10 @@ class DeepseekV4MoE(nn.Module):
         self.image_sentinel_lo = (
             IMAGE_SENTINEL_BASE_ID if getattr(config, "vision_n_layers", 0) > 0 else 0
         )
-        is_hash_moe = extract_layer_index(prefix) < config.num_hash_layers
+        num_hash_layers = getattr(config, "num_hash_layers", None)  # Set by V4.1
+        if num_hash_layers is None:
+            num_hash_layers = config.mlp_layer_types.count("hash_moe")
+        is_hash_moe = extract_layer_index(prefix) < num_hash_layers
         self.hash_indices_dtype = torch.int32
         if is_hash_moe:
             # hash MoE doesn't use e_score_correction_bias
@@ -1228,7 +1232,13 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
 
         if self._mtp_hidden_buffer is not None:
             num_tokens = hidden_states.shape[0]
-            self._mtp_hidden_buffer[:num_tokens].copy_(hidden_states.flatten(1))
+            # Each DBO ubatch owns a different slice of the batch. Writing
+            # from row 0 in both threads would let one ubatch clobber the
+            # other's rows in the buffer the MTP drafter reads after the step.
+            offset = dbo_current_ubatch_token_offset()
+            self._mtp_hidden_buffer[offset : offset + num_tokens].copy_(
+                hidden_states.flatten(1)
+            )
 
         hidden_states = self.hc_head_op(
             hidden_states,
@@ -1264,14 +1274,6 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             if name not in params_dict and inv_name in params_dict:
                 return inv_name
             return name
-
-        # TP for attention
-        tp_size = get_tensor_model_parallel_world_size()
-        tp_rank = get_tensor_model_parallel_rank()
-        n_head = self.config.num_attention_heads
-        n_local_head = n_head // tp_size
-        head_rank_start = n_local_head * tp_rank
-        head_rank_end = n_local_head * (tp_rank + 1)
 
         # Pre-compute expert mapping ONCE.
         expert_mapping = self.get_expert_mapping()
@@ -1361,14 +1363,6 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                             name = name_mapped
                             break
                     loaded_params.add(name_mapped)
-                    continue
-                elif "attn_sink" in name:
-                    if is_pp_missing_parameter(name, self):
-                        continue
-                    narrow_weight = loaded_weight[head_rank_start:head_rank_end]
-                    n = narrow_weight.shape[0]
-                    params_dict[name][:n].copy_(narrow_weight)
-                    loaded_params.add(name)
                     continue
                 else:
                     if is_pp_missing_parameter(name, self):

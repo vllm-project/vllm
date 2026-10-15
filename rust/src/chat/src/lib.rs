@@ -79,8 +79,9 @@ pub struct ChatRequestProcessor {
     tool_call_parser: ParserSelection,
     /// Reasoning parser selection used when preparing generation requests.
     reasoning_parser: ParserSelection,
-    /// Server-side floor for tool-call structural tags.
-    tool_strict_level: ToolStrictLevel,
+    /// Server-side floor for tool-call structural tags, or `None` for the
+    /// tool parser's default level.
+    tool_strict_level: Option<ToolStrictLevel>,
 }
 
 impl ChatRequestProcessor {
@@ -93,7 +94,7 @@ impl ChatRequestProcessor {
             max_model_len: Some(max_model_len as usize),
             tool_call_parser: ParserSelection::Auto,
             reasoning_parser: ParserSelection::Auto,
-            tool_strict_level: ToolStrictLevel::Auto,
+            tool_strict_level: None,
         }
     }
 
@@ -105,7 +106,7 @@ impl ChatRequestProcessor {
             max_model_len: None,
             tool_call_parser: ParserSelection::Auto,
             reasoning_parser: ParserSelection::Auto,
-            tool_strict_level: ToolStrictLevel::Auto,
+            tool_strict_level: None,
         }
     }
 
@@ -120,8 +121,9 @@ impl ChatRequestProcessor {
         self
     }
 
-    /// Configure the server-side floor for tool-call structural tags.
-    pub fn with_tool_strict_level(mut self, tool_strict_level: ToolStrictLevel) -> Self {
+    /// Configure the server-side floor for tool-call structural tags, or
+    /// `None` for the tool parser's default level.
+    pub fn with_tool_strict_level(mut self, tool_strict_level: Option<ToolStrictLevel>) -> Self {
         self.tool_strict_level = tool_strict_level;
         self
     }
@@ -295,8 +297,9 @@ impl ChatLlm {
         self
     }
 
-    /// Set the server-side floor for tool-call structural tags.
-    pub fn with_tool_strict_level(mut self, tool_strict_level: ToolStrictLevel) -> Self {
+    /// Set the server-side floor for tool-call structural tags, or `None` for
+    /// the tool parser's default level.
+    pub fn with_tool_strict_level(mut self, tool_strict_level: Option<ToolStrictLevel>) -> Self {
         self.processor.tool_strict_level = tool_strict_level;
         self
     }
