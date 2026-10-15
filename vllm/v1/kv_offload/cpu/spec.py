@@ -17,7 +17,7 @@ from vllm.v1.kv_offload.base import (
     OffloadingWorker,
 )
 from vllm.v1.kv_offload.config import OffloadingConfig
-from vllm.v1.kv_offload.cpu.common import CPUOffloadingMetrics
+from vllm.v1.kv_offload.cpu.common import CPUOffloadingInfo, CPUOffloadingMetrics
 from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
@@ -136,6 +136,12 @@ class CPUOffloadingSpec(OffloadingSpec):
             "cache_policy_module_path"
         )
 
+    @classmethod
+    @override
+    def config_info_keys(cls, extra_config: dict[str, Any]) -> tuple[str, ...]:
+        """Return the label names CPUOffloadingManager.config_info() fills."""
+        return CPUOffloadingInfo.config_info_keys()
+
     @override
     def get_manager(self) -> OffloadingManager:
         if not self._manager:
@@ -180,6 +186,8 @@ class CPUOffloadingSpec(OffloadingSpec):
                 row_bytes = round_up(
                     self.cpu_page_size_per_worker, self.BLOCK_SIZE_ALIGNMENT
                 )
+            world_size = self.config.parallel.world_size
+            worker_index = self.config.parallel.rank
 
             mmap_region = SharedOffloadRegion(
                 engine_id=engine_id,
@@ -189,6 +197,9 @@ class CPUOffloadingSpec(OffloadingSpec):
                 cpu_page_size=self.cpu_page_size_per_worker,
                 barrier=(
                     _all_workers_barrier if self.replicated_layout else lambda: None
+                ),
+                populate_shard=(
+                    (worker_index, world_size) if self.replicated_layout else None
                 ),
             )
         try:

@@ -391,8 +391,8 @@ def test_cpu_spec_create_worker_uses_mmap_on_cuda(monkeypatch):
     kv_caches = MagicMock()
     spec.create_worker(kv_caches)
 
-    # Each rank gets its own region holding only its slots (5 % 4 == 1).
-    assert region_calls[0]["engine_id"] == "test-engine_1"
+    # The logical rank keys its private region, regardless of the CUDA device.
+    assert region_calls[0]["engine_id"] == "test-engine_0"
     assert region_calls[0]["rank"] == 0
     assert region_calls[0]["kv_bytes_per_chunk"] == worker_kv_bytes_per_block
     assert worker_calls[0]["kv_caches"] is kv_caches
@@ -502,6 +502,9 @@ def test_cpu_spec_create_worker_region_assignment(
 
     assert region_calls[0]["engine_id"] == expected_engine_id
     assert region_calls[0]["rank"] == 0
+    assert region_calls[0]["populate_shard"] == (
+        (rank, world_size) if replicated_layout else None
+    )
 
 
 def test_offloading_spec_has_replicated_layout_default():
