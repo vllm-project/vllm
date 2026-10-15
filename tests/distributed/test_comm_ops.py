@@ -794,6 +794,36 @@ def test_multi_process_tensor_parallel(
     multi_process_parallel(monkeypatch, tp_size, 1, test_target)
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+def test_tp_fp16_partial_sums_scale_is_exact_and_saturates():
+    """The 2^-k prescale of FP16 partial sums only moves the exponent, and
+    partial sums beyond the FP16 range saturate instead of becoming inf."""
+    from vllm.model_executor.layers.linear import _fp16_partial_linear
+
+    torch.manual_seed(0)
+    x = torch.randn(64, 512, device="cuda").bfloat16()
+    w = torch.randn(256, 512, device="cuda").bfloat16()
+    plain = _fp16_partial_linear(x, w, None, 1.0)
+    scaled = _fp16_partial_linear(x, w, None, 0.25).float() * 4
+    assert plain.dtype == torch.float16
+    # exact for normal FP16 values; subnormals bound the error by 2^-24 * 4
+    normal = plain.float().abs() >= 2.0**-14 * 4
+    torch.testing.assert_close(scaled[normal], plain.float()[normal], rtol=0, atol=0)
+    assert float((scaled - plain.float()).abs().max()) <= 2.0**-24 * 4
+
+    fp16_max = torch.finfo(torch.float16).max
+    c = (1.5 * fp16_max / float((x.double() @ w.double().T).abs().max())) ** 0.5
+    xb, wb = (x.float() * c).bfloat16(), (w.float() * c).bfloat16()
+    ref = xb.double() @ wb.double().T
+    assert ref.abs().max() > fp16_max
+    saturated = _fp16_partial_linear(xb, wb, None, 1.0)
+    assert torch.isfinite(saturated).all()
+    in_range = _fp16_partial_linear(xb, wb, None, 0.25).double() * 4
+    torch.testing.assert_close(
+        in_range, ref, rtol=2e-3, atol=1e-3 * float(ref.abs().max())
+    )
+
+
 @multi_gpu_test(num_gpus=2)
 def test_tp_fp16_partial_sums_row_parallel(monkeypatch: pytest.MonkeyPatch):
     multi_process_parallel(
