@@ -2,6 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+import sys
+from types import ModuleType
+from unittest.mock import Mock
+
 import pytest
 import torch
 
@@ -32,6 +36,35 @@ QDTYPES = [None, torch.float8_e4m3fn]
 NUM_BLOCKS = [32768, 2048]
 SOFT_CAPS = [None]
 SLIDING_WINDOWS = [None, 256]
+
+
+@pytest.mark.parametrize("causal", [False, True], ids=["noncausal", "causal"])
+def test_sm90_fp8_full_attention_requires_causal_mask(monkeypatch, causal):
+    """Reject the unvalidated global noncausal QK path before kernel dispatch."""
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda: (9, 0))
+    q = torch.empty(1, 8, 512, dtype=torch.bfloat16, device="cpu")
+    kv = torch.empty(1, 64, 1, 512, dtype=torch.float8_e4m3fn, device="cpu")
+    fwd = Mock(return_value=(q, None, None, None))
+    interface = ModuleType("vllm.vllm_flash_attn.cute.interface")
+    monkeypatch.setattr(interface, "_flash_attn_fwd", fwd, raising=False)
+    monkeypatch.setitem(sys.modules, interface.__name__, interface)
+    kwargs = dict(
+        cu_seqlens_q=torch.tensor([0, 1], dtype=torch.int32, device="cpu"),
+        seqused_k=torch.tensor([64], dtype=torch.int32, device="cpu"),
+        block_table=torch.tensor([[0]], dtype=torch.int32, device="cpu"),
+        max_seqlen_q=1,
+        max_seqlen_k=64,
+        causal=causal,
+        fa_version=4,
+    )
+    if not causal:
+        with pytest.raises(NotImplementedError, match="requires causal or local"):
+            flash_attn_varlen_func(q, kv, kv, **kwargs)
+        fwd.assert_not_called()
+    else:
+        assert flash_attn_varlen_func(q, kv, kv, **kwargs) is q
+        fwd.assert_called_once()
+        assert fwd.call_args.kwargs["fp8_kv_dequant"]
 
 
 def ref_paged_attn(
