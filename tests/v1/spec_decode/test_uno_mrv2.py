@@ -1320,7 +1320,7 @@ def test_survivor_kv_budget_clears_the_engine_admission_floor():
     from tests.v1.e2e.spec_decode import uno_kv_budget
     from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
     from vllm.v1.attention.backends.utils import get_supported_kv_cache_layouts
-    from vllm.v1.core.kv_cache_utils import (
+    from vllm.v1.core.kv_cache_planning import (
         _pool_bytes_per_block,
         check_enough_kv_cache_memory,
         get_kv_cache_groups,
