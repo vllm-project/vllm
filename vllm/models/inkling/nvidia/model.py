@@ -556,16 +556,16 @@ class InklingForConditionalGeneration(_TmlForCausalLMBase, SupportsMultiModal):
         return tuple(embeds.split(sizes))
 
     def _process_audio_input(
-        self, audio_input_ids: Any, num_audio_tokens: Any
+        self, input_audio_features: Any, num_audio_tokens: Any
     ) -> tuple[torch.Tensor, ...]:
         assert self.audio is not None
-        if isinstance(audio_input_ids, (list, tuple)):
-            if not audio_input_ids:
+        if isinstance(input_audio_features, (list, tuple)):
+            if not input_audio_features:
                 return ()
-            sizes = [int(d.shape[0]) for d in audio_input_ids]
-            dmel = torch.cat(list(audio_input_ids), dim=0)
+            sizes = [int(d.shape[0]) for d in input_audio_features]
+            dmel = torch.cat(list(input_audio_features), dim=0)
         else:
-            dmel = audio_input_ids
+            dmel = input_audio_features
             sizes = self._sizes_from(num_audio_tokens, dmel.shape[0])
 
         dmel = dmel.to(device=self.audio.device)
@@ -591,14 +591,16 @@ class InklingForConditionalGeneration(_TmlForCausalLMBase, SupportsMultiModal):
         # embed_input_ids handles actual placement.
         pixel_values = kwargs.get("pixel_values")
         num_patches = kwargs.get("num_patches")
-        audio_input_ids = kwargs.get("audio_input_ids")
+        input_audio_features = kwargs.get("input_audio_features")
         num_audio_tokens = kwargs.get("num_audio_tokens")
 
         embeddings: tuple[torch.Tensor, ...] = ()
         if pixel_values is not None and self.visual is not None:
             embeddings += self._process_image_input(pixel_values, num_patches)
-        if audio_input_ids is not None and self.audio is not None:
-            embeddings += self._process_audio_input(audio_input_ids, num_audio_tokens)
+        if input_audio_features is not None and self.audio is not None:
+            embeddings += self._process_audio_input(
+                input_audio_features, num_audio_tokens
+            )
         return embeddings
 
     def embed_input_ids(
