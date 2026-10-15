@@ -123,8 +123,11 @@ class DSV41Kernel:
         self.plans: dict[int, LayerPlan] = {}
 
         tp_size = vllm_config.parallel_config.tensor_parallel_size
-        for layer in self._kernel_layers(model):
+        for idx in range(self.embed_layer, self.layer_end):
+            layer = model.layers[idx]
             plan = self._plan_layer(layer, tp_size)
+            if plan is None:
+                continue
             self.plans[layer.attn.layer_id] = plan
             if plan.ffn_only:
                 continue
@@ -139,20 +142,17 @@ class DSV41Kernel:
             sorted({n for p in self.plans.values() for n in p.cache_layers})
         )
 
-    def _kernel_layers(self, model) -> list["DeepseekV4DecoderLayer"]:
-        end = self.layer_end
-        layers = []
-        for i in range(self.embed_layer, end):
-            why = _skip_layer(model.layers[i])
-            if why is None:
-                layers.append(model.layers[i])
-            else:
-                logger.info_once(
-                    "DSv4.1 specialized decode: layer %d on vLLM's path (%s)", i, why
-                )
-        return layers
-
-    def _plan_layer(self, layer, tp_size: int) -> LayerPlan:
+    def _plan_layer(self, layer, tp_size: int) -> LayerPlan | None:
+        """This layer's launch, or None when it keeps vLLM's path throughout."""
+        attn = layer.attn
+        why = _skip_layer(layer)
+        if why is not None:
+            logger.info_once(
+                "DSv4.1 specialized decode: layer %d on vLLM's path (%s)",
+                attn.layer_id,
+                why,
+            )
+            return None
         why = _ffn_only(layer)
         weights = _weights(layer, why is not None, tp_size)
         if why is not None:
@@ -161,9 +161,8 @@ class DSV41Kernel:
             )
             # A decode step hands wo_b's TP partial to the FFN launch; the layer
             # reduces it on the steps that keep vLLM's path.
-            layer.attn.wo_b.reduce_results = False
+            attn.wo_b.reduce_results = False
             return LayerPlan(layer, weights, ffn_only=True)
-        attn = layer.attn
         comp_key = attn.compressed_cache_prefix
         # K1's seam folds the owed post into the residual, except where the
         # residual arrives settled: the embedding, or after the Engram write.
