@@ -41,6 +41,7 @@ from vllm.distributed.kv_events import BlockStored
 from vllm.distributed.kv_transfer.kv_connector.utils import CircuitBreaker
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorTransferResults,
+    connector_kv_events_enabled,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.transfer_engine_registry import (  # noqa: E501
     SharedMooncakeTransferEngine,
@@ -1713,10 +1714,7 @@ class MooncakeStoreWorker:
         if vllm_config.parallel_config.rank == 0:
             self.lookup_server = LookupKeyServer(self, vllm_config)
 
-        kv_event_config = vllm_config.kv_events_config
-        self.enable_kv_events = False
-        if kv_event_config and kv_event_config.enable_kv_cache_events:
-            self.enable_kv_events = True
+        self.enable_kv_events = connector_kv_events_enabled(vllm_config)
 
         self.kv_send_thread: KVCacheStoreSendingThread | None = None
         # Pool of load-receive threads
