@@ -8,6 +8,7 @@ from functools import cache
 import torch
 import torch.nn.functional as F
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import get_current_vllm_config
 from vllm.distributed import (
     tensor_model_parallel_all_gather,
@@ -51,6 +52,13 @@ def _topk(scores: torch.Tensor, k: int) -> tuple[torch.Tensor, torch.Tensor]:
     impl = _flashinfer_topk()
     if impl is not None and scores.is_cuda:
         return impl(scores, k, sorted=True, deterministic=True)
+    if rocm_aiter_ops.is_vocab_top_k_enabled() and rocm_aiter_ops.supports_vocab_top_k(
+        scores, k
+    ):
+        # Faster than the Triton top-k from ~32 rows up. Its int32 indices are
+        # only used after the caller widens them, and ties are not resolved to
+        # the lowest index.
+        return rocm_aiter_ops.vocab_top_k(scores, k)
     if supports_triton_topk(scores, k):
         # Without flashinfer (e.g. ROCm), the chunked Triton top-k is several
         # times faster than torch.topk over a full vocabulary.
