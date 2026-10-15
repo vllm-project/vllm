@@ -49,10 +49,15 @@ from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.entrypoints.serve.utils.tool_calls_utils import (
     maybe_filter_parallel_tool_calls,
 )
-from vllm.exceptions import GenerationError
+from vllm.exceptions import (
+    GenerationError,
+    RetryableRequestError,
+    VLLMValidationError,
+)
 from vllm.inputs import EngineInput, MultiModalPlaceholders
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
+from vllm.multimodal.cache import MultiModalCacheMissError
 from vllm.outputs import RequestOutput
 from vllm.parser import ParserManager
 from vllm.parser.abstract_parser import Parser
@@ -258,6 +263,8 @@ class OpenAIServingChat(GenerateBaseServing):
     async def render_chat_request(
         self,
         request: ChatCompletionRequest,
+        *,
+        skip_mm_cache: bool = False,
     ) -> tuple[list[ConversationMessage], list[EngineInput]] | ErrorResponse:
         """Validate the model and preprocess a chat completion request.
 
@@ -276,7 +283,56 @@ class OpenAIServingChat(GenerateBaseServing):
 
         self._preflight(request.n or 1)
 
-        return await self.online_renderer.render_chat(request)
+        return await self.online_renderer.render_chat(
+            request, skip_mm_cache=skip_mm_cache
+        )
+
+    async def _generate_with_cache_retry(
+        self,
+        request: ChatCompletionRequest,
+        engine_input: EngineInput,
+        sampling_params: SamplingParams,
+        request_id: str,
+        prompt_index: int,
+        prompt_token_ids: list[int] | None,
+        generate_kwargs: dict[str, Any],
+        parser: Parser | None,
+        chat_template_kwargs: dict[str, Any],
+    ) -> AsyncGenerator[RequestOutput, None]:
+        has_yielded_output = False
+        for attempt in range(2):
+            if attempt:
+                result = await self.render_chat_request(request, skip_mm_cache=True)
+                if isinstance(result, ErrorResponse):
+                    raise VLLMValidationError(result.error.message)
+                _, engine_inputs = result
+                engine_input = engine_inputs[prompt_index]
+                prompt_token_ids = self._extract_prompt_components(
+                    engine_input
+                ).token_ids
+
+            try:
+                async for output in self.engine_client.generate(
+                    engine_input,
+                    sampling_params,
+                    request_id,
+                    **generate_kwargs,
+                    **self._engine_reasoning_kwargs(
+                        request, parser, chat_template_kwargs, prompt_token_ids
+                    ),
+                ):
+                    has_yielded_output = True
+                    yield output
+                return
+            except MultiModalCacheMissError as e:
+                if attempt or has_yielded_output:
+                    raise RetryableRequestError(
+                        "Multi-modal processor cache miss."
+                    ) from e
+                logger.warning(
+                    "Retrying chat request %s once after multi-modal cache miss.",
+                    request_id,
+                )
 
     async def create_chat_completion(
         self,
@@ -386,18 +442,22 @@ class OpenAIServingChat(GenerateBaseServing):
                     session_id=session_id,
                 )
             else:
-                generator = self.engine_client.generate(
+                generator = self._generate_with_cache_retry(
+                    request,
                     engine_input,
                     sampling_params,
                     sub_request_id,
-                    lora_request=lora_request,
-                    trace_headers=trace_headers,
-                    priority=self._get_priority(request, raw_request),
-                    data_parallel_rank=data_parallel_rank,
-                    session_id=session_id,
-                    **self._engine_reasoning_kwargs(
-                        request, parser, chat_template_kwargs, prompt_token_ids
-                    ),
+                    i,
+                    prompt_token_ids,
+                    {
+                        "lora_request": lora_request,
+                        "trace_headers": trace_headers,
+                        "priority": self._get_priority(request, raw_request),
+                        "data_parallel_rank": data_parallel_rank,
+                        "session_id": session_id,
+                    },
+                    parser,
+                    chat_template_kwargs,
                 )
 
             generators.append(generator)

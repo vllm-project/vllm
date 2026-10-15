@@ -11,6 +11,7 @@ import numpy as np
 import torch
 
 from vllm.lora.request import LoRARequest
+from vllm.multimodal.cache import MultiModalCacheMissError
 from vllm.outputs import (
     STREAM_FINISHED,
     CompletionOutput,
@@ -744,6 +745,30 @@ class OutputProcessor:
 
             if engine_core_output.spec_decode_metrics is not None:
                 req_state.spec_decode_metrics = engine_core_output.spec_decode_metrics
+
+            if (
+                req_state.queue is not None
+                and engine_core_output.mm_cache_miss_hashes
+                and finish_reason == FinishReason.ERROR
+            ):
+                req_state.queue.put(
+                    MultiModalCacheMissError(engine_core_output.mm_cache_miss_hashes)
+                )
+                self._update_stats_from_finished(
+                    req_state, finish_reason, iteration_stats
+                )
+                if self.tracing_enabled:
+                    self.do_tracing(engine_core_output, req_state, iteration_stats)
+
+                if req_state.parent_req is None:
+                    self._finish_request(req_state)
+                else:
+                    reqs_to_abort.extend(
+                        self.abort_requests(
+                            [req_state.parent_req.request_id], internal=True
+                        )
+                    )
+                continue
 
             request_error = None
             if (

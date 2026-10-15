@@ -37,10 +37,15 @@ from vllm.entrypoints.serve.engine.protocol import (
 )
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens, should_include_usage
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
-from vllm.exceptions import GenerationError, VLLMValidationError
+from vllm.exceptions import (
+    GenerationError,
+    RetryableRequestError,
+    VLLMValidationError,
+)
 from vllm.inputs import EngineInput
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
+from vllm.multimodal.cache import MultiModalCacheMissError
 from vllm.outputs import RequestOutput
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import BeamSearchParams, SamplingParams
@@ -88,6 +93,8 @@ class OpenAIServingCompletion(GenerateBaseServing):
     async def render_completion_request(
         self,
         request: CompletionRequest,
+        *,
+        skip_mm_cache: bool = False,
     ) -> list[EngineInput] | ErrorResponse:
         """Validate the model and preprocess a completion request.
 
@@ -104,7 +111,48 @@ class OpenAIServingCompletion(GenerateBaseServing):
 
         self._preflight(request.n or 1)
 
-        return await self.online_renderer.render_completion(request)
+        return await self.online_renderer.render_completion(
+            request, skip_mm_cache=skip_mm_cache
+        )
+
+    async def _generate_with_cache_retry(
+        self,
+        request: CompletionRequest,
+        engine_input: EngineInput,
+        sampling_params: SamplingParams,
+        request_id: str,
+        prompt_index: int,
+        generate_kwargs: dict,
+    ) -> AsyncGenerator[RequestOutput, None]:
+        has_yielded_output = False
+        for attempt in range(2):
+            if attempt:
+                result = await self.render_completion_request(
+                    request, skip_mm_cache=True
+                )
+                if isinstance(result, ErrorResponse):
+                    raise VLLMValidationError(result.error.message)
+                engine_input = result[prompt_index]
+
+            try:
+                async for output in self.engine_client.generate(
+                    engine_input,
+                    sampling_params,
+                    request_id,
+                    **generate_kwargs,
+                ):
+                    has_yielded_output = True
+                    yield output
+                return
+            except MultiModalCacheMissError as e:
+                if attempt or has_yielded_output:
+                    raise RetryableRequestError(
+                        "Multi-modal processor cache miss."
+                    ) from e
+                logger.warning(
+                    "Retrying completion request %s once after multi-modal cache miss.",
+                    request_id,
+                )
 
     async def create_completion(
         self,
@@ -200,15 +248,19 @@ class OpenAIServingCompletion(GenerateBaseServing):
                     session_id=session_id,
                 )
             else:
-                generator = self.engine_client.generate(
+                generator = self._generate_with_cache_retry(
+                    request,
                     engine_input,
                     sampling_params,
                     request_id_item,
-                    lora_request=lora_request,
-                    trace_headers=trace_headers,
-                    priority=self._get_priority(request, raw_request),
-                    data_parallel_rank=data_parallel_rank,
-                    session_id=session_id,
+                    i,
+                    {
+                        "lora_request": lora_request,
+                        "trace_headers": trace_headers,
+                        "priority": self._get_priority(request, raw_request),
+                        "data_parallel_rank": data_parallel_rank,
+                        "session_id": session_id,
+                    },
                 )
 
             generators.append(generator)

@@ -35,6 +35,7 @@ from vllm.inputs import EngineInput, PromptType
 from vllm.logger import configure_logging_if_needed, init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
+from vllm.multimodal.cache import MultiModalCacheMissError
 from vllm.outputs import STREAM_FINISHED, PoolingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.profiler.wrapper import TorchProfilerWrapper, create_frontend_profiler
@@ -803,6 +804,13 @@ class AsyncLLM(EngineClient):
                 logger.info("Request %s failed (input error): %s.", request_id, e)
             raise e.cause from e
 
+        except MultiModalCacheMissError:
+            if q is not None:
+                await self.abort(q.request_id, internal=True)
+            if self.log_requests:
+                logger.info("Request %s failed (multi-modal cache miss).", request_id)
+            raise
+
         # Unexpected error in the generate() task (possibly recoverable).
         except Exception as e:
             if q is not None:
@@ -1059,6 +1067,13 @@ class AsyncLLM(EngineClient):
         except (VLLMClientError, GracefulHTTPError):
             if self.log_requests:
                 logger.info("Request %s failed (bad request).", request_id)
+            raise
+
+        except MultiModalCacheMissError:
+            if q is not None:
+                await self.abort(q.request_id, internal=True)
+            if self.log_requests:
+                logger.info("Request %s failed (multi-modal cache miss).", request_id)
             raise
 
         # Unexpected error in the generate() task (possibly recoverable).

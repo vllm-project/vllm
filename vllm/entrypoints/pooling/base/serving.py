@@ -21,6 +21,7 @@ from vllm.entrypoints.serve.engine.typing import AnyRequest
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.exceptions import GenerationError, RetryableRequestError
 from vllm.lora.request import LoRARequest
+from vllm.multimodal.cache import MultiModalCacheMissError
 from vllm.renderers.base import BaseRenderer
 from vllm.renderers.chat_utils import ChatTemplateConfig
 from vllm.utils.async_utils import make_async, merge_async_iterators
@@ -69,24 +70,47 @@ class PoolingBaseServing(ABC, BaseServing):
         request: AnyPoolingRequest,
         raw_request: Request | None = None,
     ) -> Response:
-        io_processor = self.get_io_processor(request)
-        ctx = await self._init_ctx(io_processor, request, raw_request)
-        await self._preprocessing(io_processor, ctx)
-        await self._prepare_generators(ctx)
-        await self._collect_batch(ctx)
-        return await self._postprocessing_async(io_processor, ctx)
+        retry_cache_miss = self._should_retry_mm_cache_miss(request)
+        for attempt in range(2):
+            try:
+                io_processor = self.get_io_processor(request)
+                ctx = await self._init_ctx(io_processor, request, raw_request)
+                await self._preprocessing(
+                    io_processor, ctx, skip_mm_cache=bool(attempt)
+                )
+                await self._prepare_generators(ctx)
+                await self._collect_batch(ctx)
+                return await self._postprocessing_async(io_processor, ctx)
+            except MultiModalCacheMissError as e:
+                if not retry_cache_miss or attempt:
+                    raise RetryableRequestError(
+                        "Multi-modal processor cache miss."
+                    ) from e
+
+        raise AssertionError("unreachable")
+
+    def _should_retry_mm_cache_miss(self, request: AnyPoolingRequest) -> bool:
+        return False
 
     @abstractmethod
     def get_io_processor(self, request: AnyPoolingRequest) -> PoolingIOProcessor:
         raise NotImplementedError
 
     async def _preprocessing(
-        self, io_processor: PoolingIOProcessor, ctx: PoolingServeContext
+        self,
+        io_processor: PoolingIOProcessor,
+        ctx: PoolingServeContext,
+        *,
+        skip_mm_cache: bool = False,
     ):
         requests = io_processor.get_request_factory_online(ctx)
 
         if len(requests) == 0:
             raise ValueError("You must pass at least one prompt")
+
+        if skip_mm_cache:
+            for request in requests:
+                request["skip_mm_cache"] = True
 
         ctx.engine_inputs = await asyncio.gather(
             *[io_processor.render_async(request) for request in requests]
