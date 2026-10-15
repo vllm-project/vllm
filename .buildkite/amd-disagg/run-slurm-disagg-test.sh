@@ -74,8 +74,9 @@ echo "[slurm-submit] staged scripts for compute nodes: ${DISAGG_SCRIPTS_DIR}" >&
 # the scripts; run_xPyD_disagg.slurm bind-mounts them over the image's copies.
 # Staging from the repo (rather than keeping a second copy in this directory)
 # keeps the repo the single source of truth.
-#   deepseek_v32/amd/model.py -- MoRI EP already returns a reduced MoE output, so
-#   skip_final_all_reduce must not be forced (vllm-project/vllm#58589).
+#   deepseek_v32/amd/model.py -- the fused norm after each MoE sums over TP, so
+#   skip_final_all_reduce is forced only when the MoE output is not already
+#   reduced (MoRI EP reduces it); TP and EP both reduce once (vllm-project/vllm#58589).
 #   Overlays replace the image's whole file: keep these copies in sync with the
 #   image's version, or they roll back its later upstream changes.
 VLLM_REPO_ROOT="${VLLM_REPO_ROOT:-$(cd "${SCRIPT_DIR}/../.." && pwd)}"
@@ -84,7 +85,7 @@ if [[ -f "${_dsv32_amd_src}" ]]; then
     mkdir -p "${STAGED_DIR}/overlays"
     cp -L --no-preserve=ownership,timestamps "${_dsv32_amd_src}" \
         "${STAGED_DIR}/overlays/models_deepseek_v32_amd_model.py"
-    echo "[slurm-submit] staged vLLM overlay: deepseek_v32/amd/model.py (no forced skip_final_all_reduce)" >&2
+    echo "[slurm-submit] staged vLLM overlay: deepseek_v32/amd/model.py (MoE output reduced once, #58589)" >&2
 fi
 export IMAGE MODEL_NAME WIDE_EP_MODE xP yD GPUS_PER_NODE RUN_AFTER_HEALTH HEALTH_TIMEOUT_S
 export SHARED_MOUNT LOG_ROOT DRY_RUN MORIIO_READ_MODE
