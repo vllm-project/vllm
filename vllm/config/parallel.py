@@ -1213,18 +1213,21 @@ def resolve_mori_all2all(
     parallel_config: ParallelConfig,
     model_config: "ModelConfig | None",
     moe_backend: str,
+    lsa_spans_hosts: bool = False,
 ) -> None:
     """Resolve whether the "mori" all2all backend runs MoRI EPv2 or EPv1.
 
     An unset `VLLM_MORI_EP_V2` prefers EPv2 and falls back to EPv1 where EPv2
     is unsupported, an explicit true keeps EPv2 regardless, and false selects
-    EPv1. Idempotent, since VllmConfig may be post-initialized more than once.
+    EPv1. `lsa_spans_hosts` says whether a CCO-LSA team can span hosts (e.g.
+    gfx1250's UALink vPOD). Called from the ROCm platform's config hook;
+    idempotent, since VllmConfig may be post-initialized more than once.
     """
     if parallel_config.all2all_backend != "mori":
         return
     if parallel_config.mori_ep_v2 is None:
         parallel_config.mori_ep_v2 = _resolve_mori_ep_v2(
-            parallel_config, model_config, moe_backend
+            parallel_config, model_config, moe_backend, lsa_spans_hosts
         )
     logger.info_once("MoRI all2all: EP%s", "v2" if parallel_config.mori_ep_v2 else "v1")
 
@@ -1233,10 +1236,13 @@ def _resolve_mori_ep_v2(
     parallel_config: ParallelConfig,
     model_config: "ModelConfig | None",
     moe_backend: str,
+    lsa_spans_hosts: bool,
 ) -> bool:
     if envs.VLLM_MORI_EP_V2 is False:
         return False
-    reason = _mori_epv2_unsupported_reason(parallel_config, model_config, moe_backend)
+    reason = _mori_epv2_unsupported_reason(
+        parallel_config, model_config, moe_backend, lsa_spans_hosts
+    )
     if reason is None:
         return True
     if envs.VLLM_MORI_EP_V2:
@@ -1258,6 +1264,7 @@ def _mori_epv2_unsupported_reason(
     parallel_config: ParallelConfig,
     model_config: "ModelConfig | None",
     moe_backend: str,
+    lsa_spans_hosts: bool,
 ) -> str | None:
     ep_size = (
         parallel_config.tensor_parallel_size
@@ -1265,8 +1272,8 @@ def _mori_epv2_unsupported_reason(
         * parallel_config.prefill_context_parallel_size
     )
     # A rough guess before startup; MoriEPv2All2AllManager checks the actual
-    # CCO-LSA team. gfx1250 forms it from the UALink vPOD, which can span hosts.
-    if ep_size > 8 and not _on_gfx1250():
+    # CCO-LSA team.
+    if ep_size > 8 and not lsa_spans_hosts:
         return f"ep_size={ep_size} across hosts (EPv2 is validated within one host)"
     if os.environ.get("MORI_ENABLE_SDMA", "0").lower() in ("1", "true"):
         return "MORI_ENABLE_SDMA=1 (SDMA is EPv1-only)"
@@ -1275,11 +1282,3 @@ def _mori_epv2_unsupported_reason(
     if model_config is not None and model_config.dtype != torch.bfloat16:
         return f"dtype={model_config.dtype} (EPv2 requires bfloat16)"
     return None
-
-
-def _on_gfx1250() -> bool:
-    if not current_platform.is_rocm():
-        return False
-    from vllm.platforms.rocm import on_gfx1250
-
-    return on_gfx1250()

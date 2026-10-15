@@ -254,6 +254,8 @@ def _model_config(**overrides):
     [
         ({}, {}, "aiter", {}, True),
         ({"data_parallel_size": 16}, {}, "aiter", {}, False),
+        # The LSA team may span hosts (gfx1250); the manager checks it.
+        ({"data_parallel_size": 16, "lsa_spans_hosts": True}, {}, "aiter", {}, True),
         ({}, {}, "aiter", {"MORI_ENABLE_SDMA": "1"}, False),
         ({}, {}, "aiter_mega_moe", {}, False),
         ({}, {"dtype": torch.float16}, "aiter", {}, False),
@@ -273,8 +275,12 @@ def test_mori_picks_epv2_where_supported(
     monkeypatch.delenv("MORI_ENABLE_SDMA", raising=False)
     for name, value in env.items():
         monkeypatch.setenv(name, value)
+    parallel = dict(parallel)
+    lsa_spans_hosts = parallel.pop("lsa_spans_hosts", False)
     parallel_config = _parallel_config(**parallel)
-    resolve_mori_all2all(parallel_config, _model_config(**model), moe_backend)
+    resolve_mori_all2all(
+        parallel_config, _model_config(**model), moe_backend, lsa_spans_hosts
+    )
     assert parallel_config.mori_ep_v2 is ep_v2
 
 
