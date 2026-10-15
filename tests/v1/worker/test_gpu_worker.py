@@ -444,8 +444,9 @@ def test_execute_model_waits_previous_pp_send_before_forward(
 
 
 @pytest.mark.parametrize("timed", [False, True])
-def test_iteration_timing_finishes_after_deferred_sampling_and_draft(
-    monkeypatch, timed
+@pytest.mark.parametrize("deferred_sampling", [False, True])
+def test_iteration_timing_finishes_after_sampling_and_draft(
+    monkeypatch, timed, deferred_sampling
 ):
     milestones = []
     events = [Mock(), Mock(query=Mock(return_value=False))]
@@ -457,6 +458,8 @@ def test_iteration_timing_finishes_after_deferred_sampling_and_draft(
 
     def execute_model(*args):
         milestones.append("forward")
+        if not deferred_sampling:
+            return sample_tokens()
 
     def sample_tokens(*args):
         milestones.extend(("sample", "draft"))
@@ -479,8 +482,10 @@ def test_iteration_timing_finishes_after_deferred_sampling_and_draft(
     scheduler_output = SimpleNamespace(
         total_num_scheduled_tokens=4, iteration_metrics_id=3
     )
-    assert gpu_worker.Worker.execute_model(worker, scheduler_output) is None
-    returned = gpu_worker.Worker.sample_tokens(worker, None)
+    returned = gpu_worker.Worker.execute_model(worker, scheduler_output)
+    if deferred_sampling:
+        assert returned is None
+        returned = gpu_worker.Worker.sample_tokens(worker, None)
     assert returned is output and returned.iteration_timing_samples == ()
     if timed:
         assert milestones == ["start", "forward", "sample", "draft", "end"]
@@ -489,6 +494,58 @@ def test_iteration_timing_finishes_after_deferred_sampling_and_draft(
     else:
         assert milestones == ["forward", "sample", "draft"]
         assert gpu_worker.Worker.poll_iteration_timing(worker) == ()
+    for event in events:
+        event.synchronize.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "failed_stage", ["execute_model", "sample_tokens", "_dummy_run"]
+)
+def test_iteration_timing_discards_failed_step_and_allows_next_step(
+    monkeypatch, failed_stage
+):
+    events = [Mock(query=Mock(return_value=False)) for _ in range(4)]
+    events[2].elapsed_time.return_value = 15.0
+    timer = IterationTimer(2, event_factory=iter(events).__next__)
+    output = ModelRunnerOutput(req_ids=[], req_id_to_index={})
+    runner = SimpleNamespace(
+        iteration_timer=timer,
+        execute_model=Mock(return_value=None),
+        sample_tokens=Mock(return_value=output),
+        _dummy_run=Mock(),
+        uniform_decode_query_len=4,
+        is_pooling_model=False,
+    )
+    error = RuntimeError("runner failed")
+    getattr(runner, failed_stage).side_effect = error
+    worker = SimpleNamespace(
+        model_runner=runner,
+        randomize_dummy_inputs=False,
+        _pp_send_work=[],
+        use_v2_model_runner=True,
+        annotate_profile=lambda _: nullcontext(),
+    )
+    monkeypatch.setattr(
+        gpu_worker, "get_pp_group", lambda: SimpleNamespace(is_first_rank=True)
+    )
+    scheduler_output = SimpleNamespace(
+        total_num_scheduled_tokens=4, iteration_metrics_id=3
+    )
+    with pytest.raises(RuntimeError) as raised:
+        if failed_stage == "_dummy_run":
+            gpu_worker.Worker.execute_dummy_batch(worker, 3)
+        else:
+            gpu_worker.Worker.execute_model(worker, scheduler_output)
+            gpu_worker.Worker.sample_tokens(worker, None)
+    assert raised.value is error
+    assert gpu_worker.Worker.poll_iteration_timing(worker) == ()
+
+    getattr(runner, failed_stage).side_effect = None
+    scheduler_output.iteration_metrics_id = 4
+    gpu_worker.Worker.execute_model(worker, scheduler_output)
+    assert gpu_worker.Worker.sample_tokens(worker, None) is output
+    events[3].query.return_value = True
+    assert gpu_worker.Worker.poll_iteration_timing(worker) == ((4, 0.015),)
     for event in events:
         event.synchronize.assert_not_called()
 
