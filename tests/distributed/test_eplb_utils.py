@@ -14,6 +14,7 @@ from vllm.distributed.eplb.eplb_state import (
     EplbState,
     _commit_eplb_maps,
     _commit_eplb_maps_for_layer,
+    rank_load_imbalance,
 )
 
 
@@ -251,3 +252,23 @@ def test_ring_p2p_batches_pair_every_send_with_its_recv(seed, world_size):
             if not is_send and p == rank
         ]
         assert sent == received
+
+
+def test_rank_load_imbalance_is_per_layer():
+    """Skews of different layers must not cancel out: each layer waits for its
+    busiest rank."""
+    # 2 layers x 4 experts on 2 ranks (2 experts each). Contiguous placement:
+    # layer 0 overloads rank 0 and layer 1 overloads rank 1.
+    loads = torch.tensor([[4.0, 4.0, 1.0, 1.0], [1.0, 1.0, 4.0, 4.0]])
+    contiguous = torch.tensor([[0, 1, 2, 3], [0, 1, 2, 3]])
+    balanced = torch.tensor([[0, 2, 1, 3], [0, 2, 1, 3]])
+
+    assert rank_load_imbalance(contiguous, loads, ep_size=2) == pytest.approx(1.6)
+    assert rank_load_imbalance(balanced, loads, ep_size=2) == pytest.approx(1.0)
+
+
+def test_rank_load_imbalance_splits_replica_load():
+    loads = torch.tensor([[6.0, 2.0, 2.0]])
+    # Expert 0 has two replicas, one per rank: 3 + 2 on rank 0, 3 + 2 on rank 1.
+    mapping = torch.tensor([[0, 1, 0, 2]])
+    assert rank_load_imbalance(mapping, loads, ep_size=2) == pytest.approx(1.0)
