@@ -63,6 +63,7 @@ def state(monkeypatch):
     cfg.scheduler_config.max_num_seqs = 16
     cfg.scheduler_config.max_num_batched_tokens = 1024
     cfg.parallel_config.data_parallel_size = 1
+    cfg.aux_output_config.enable_return_routed_experts = False
     cfg.compilation_config.fast_moe_cold_start = False
     cfg.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
     layers = DecoderReplayLayers(WINDOW, MagicMock(), MagicMock(), set(), "swa_first")
@@ -193,6 +194,27 @@ def test_prompt_logprobs_requests_keep_their_rows(state):
     assert replay is not None
     assert replay.rows.tolist() == [0, *range(1, 301), *range(601 - WINDOW, 601)]
     assert build.batch.max_query_len == 300
+
+
+@pytest.mark.parametrize("cg_mode", [CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE])
+def test_aux_output_requests_keep_every_routing_row(state, cg_mode):
+    """R3 needs every prefill row even when final logits only need the window."""
+    state.vllm_config.aux_output_config.enable_return_routed_experts = True
+    for index in range(3):
+        state.add_request(
+            index,
+            SimpleNamespace(
+                replay_start=0,
+                sampling_params=SimpleNamespace(prompt_logprobs=None),
+            ),
+        )
+    batch = _input_batch(QUERY_LENS, SEQ_LENS, PREFILLING)
+    state.decoder_replay_layers.trim_threshold = WINDOW + 1
+    replay, _ = _prepare(state, batch, cg_mode)
+    if cg_mode == CUDAGraphMode.NONE:
+        assert replay is None
+    else:
+        torch.testing.assert_close(replay.rows, torch.arange(401, device=DEVICE))
 
 
 def test_replay_batch_keeps_adaptive_verification_query_bound(state):
