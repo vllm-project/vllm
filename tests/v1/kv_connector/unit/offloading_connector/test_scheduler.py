@@ -16,8 +16,11 @@ from tests.v1.kv_connector.unit.offloading_connector.utils import (
     generate_store_output,
     to_keys,
 )
-from tests.v1.kv_connector.unit.utils import EOS_TOKEN_ID
-from vllm.config import KVEventsConfig
+from tests.v1.kv_connector.unit.utils import (
+    EOS_TOKEN_ID,
+    create_model_runner_output,
+)
+from vllm.config import FaultToleranceConfig, KVEventsConfig
 from vllm.distributed.kv_events import MEDIUM_CPU, BlockRemoved, BlockStored
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     OffloadingConnectorMetadata,
@@ -141,7 +144,11 @@ def test_swa_offload_window_covers_unaligned_hit(
         cache_config=SimpleNamespace(
             enable_prefix_caching=True, prefix_cache_retention_interval=None
         ),
-        parallel_config=SimpleNamespace(world_size=1, decode_context_parallel_size=1),
+        parallel_config=SimpleNamespace(
+            world_size=1,
+            decode_context_parallel_size=1,
+            fault_tolerance_config=FaultToleranceConfig(),
+        ),
     )
     sched = OffloadingConnectorScheduler(
         spec,
@@ -238,6 +245,113 @@ def _make_partial_tail_request(
     request.is_finished.return_value = False
     scheduler.on_new_request(request)
     return request
+
+
+@pytest.mark.parametrize("async_scheduling", [False, True])
+@pytest.mark.parametrize("nan_chunk", [None, 1, 2])
+def test_nan_offload_waits_for_checked_chunks(
+    request_runner, async_scheduling, nan_chunk
+):
+    """Never enqueue an unchecked chunk; retain earlier validated chunks on NaN."""
+    runner = request_runner(
+        block_size=16, num_gpu_blocks=10, async_scheduling=async_scheduling
+    )
+    scheduler = runner.scheduler
+    connector = runner.connector_scheduler
+    scheduler.enable_nan_fault_tolerance = True
+    connector.enable_nan_fault_tolerance = True
+    scheduler.max_num_scheduled_tokens = 32
+    manager = connector.manager = CPUOffloadingManager(num_chunks=4)
+    runner.new_request(token_ids=list(range(64)))
+    first = scheduler.schedule()
+    [request] = scheduler.running
+    state = connector._req_status[request.request_id]
+    keys = state.group_states[0].offload_keys
+    assert first.num_scheduled_tokens == {request.request_id: 32}
+    assert not first.kv_connector_metadata.store_jobs
+    second = scheduler.schedule() if async_scheduling else None
+    if second is not None:
+        assert not second.kv_connector_metadata.store_jobs
+
+    def deliver(output, chunk):
+        result = create_model_runner_output([request], use_eos=True)
+        if chunk == 1:
+            result.sampled_token_ids = [[]]  # Intermediate prefill has no token.
+        result.num_nans_in_logits = {request.request_id: int(nan_chunk == chunk)}
+        scheduler.update_from_output(output, result)
+
+    deliver(first, 1)
+    if nan_chunk == 1:
+        if second is not None:
+            deliver(second, 2)  # Already queued output cannot revive the request.
+        assert not scheduler.schedule().kv_connector_metadata.store_jobs
+        assert all(
+            manager.lookup(k, state.req_context) is LookupResult.MISS for k in keys
+        )
+        return
+
+    # With async scheduling, chunk 2 is still unchecked when chunk 1 is offered.
+    next_step = scheduler.schedule()
+    if second is None:
+        second = next_step
+    stores = next_step.kv_connector_metadata.store_jobs
+    assert stores
+    assert set().union(*(connector._jobs[j].keys for j in stores)) == set(keys[:2])
+    deliver(second, 2)
+    final_stores = scheduler.schedule().kv_connector_metadata.store_jobs
+    assert bool(final_stores) == (nan_chunk is None)
+    stores = stores | final_stores
+    connector.update_connector_output(
+        KVConnectorOutput(
+            kv_connector_worker_meta=OffloadingWorkerMetadata(
+                completed_jobs={job_id: 1 for job_id in stores}
+            )
+        )
+    )
+    assert [manager.lookup(k, state.req_context) for k in keys] == [
+        LookupResult.HIT,
+        LookupResult.HIT,
+        *([LookupResult.HIT if nan_chunk is None else LookupResult.MISS] * 2),
+    ]
+    assert not connector.has_pending_push_work()
+
+
+@pytest.mark.parametrize("boundary", [16, 28])
+@pytest.mark.parametrize(
+    "status,computed,in_flight,allowed",
+    [
+        (RequestStatus.RUNNING, 30, 18, False),
+        (RequestStatus.RUNNING, 30, 0, True),
+        (RequestStatus.FINISHED_ERROR, 30, 0, False),
+        (RequestStatus.FINISHED_ABORTED, 30, 0, False),
+        (RequestStatus.PREEMPTED, 0, 16, False),
+    ],
+)
+def test_nan_offload_checks_checkpoint_boundary(
+    boundary, status, computed, in_flight, allowed
+):
+    """Aligned/partial snapshots must be validated and belong to a live attempt."""
+    scheduler = _make_partial_tail_scheduler()
+    scheduler.enable_nan_fault_tolerance = True
+    request = _make_partial_tail_request(scheduler)
+    request.status = status
+    request.num_computed_tokens = computed
+    request.num_in_flight_tokens = in_flight
+    state = scheduler._req_status[request.request_id]
+    state.group_states[0].block_ids[:] = [11, 12]
+    state.group_states[1].block_ids[:] = [0, 21]
+    scheduler.manager.prepare_store.side_effect = (
+        lambda keys, context: generate_store_output(keys)
+    )
+    output = SchedulerOutput.make_empty()
+    output.kv_connector_block_state = KVConnectorBlockState(
+        req_ids=set(),
+        resolve_block_ids={}.__getitem__,
+        boundary_state_offloads={request.request_id: [(1, 99, boundary)]},
+    )
+    jobs = scheduler._build_partial_tail_store_jobs(output)
+    assert bool(jobs) == allowed
+    assert scheduler.manager.prepare_store.called == allowed
 
 
 def test_create_req_context_preserves_kv_hints():

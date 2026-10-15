@@ -55,10 +55,13 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
 )
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
-from vllm.v1.outputs import KVConnectorOutput
-from vllm.v1.request import Request
+from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
+from vllm.v1.request import Request, RequestStatus
 from vllm.v1.simple_kv_offload.manager import SimpleCPUOffloadScheduler
-from vllm.v1.simple_kv_offload.metadata import SimpleCPUOffloadWorkerMetadata
+from vllm.v1.simple_kv_offload.metadata import (
+    SimpleCPUOffloadMetadata,
+    SimpleCPUOffloadWorkerMetadata,
+)
 
 pytestmark = pytest.mark.skip_global_cleanup
 
@@ -3417,3 +3420,88 @@ def test_eager_store_matches_gpu_cacheable_prefix(
         scheduler.cpu_block_pool.blocks[bid].block_hash
         for bid in load_meta.load_cpu_blocks
     ] == target_hashes + draft_hashes
+
+
+@pytest.mark.parametrize("lazy", [False, True])
+@pytest.mark.parametrize("async_scheduling", [False, True])
+@pytest.mark.parametrize("nan_chunk", [None, 1, 2])
+def test_nan_chunk_never_offloaded(lazy, async_scheduling, nan_chunk):
+    """GPU and CPU retain checked chunks, including after a late store ACK."""
+    from vllm.v1.core.sched.async_scheduler import AsyncScheduler
+    from vllm.v1.core.sched.scheduler import Scheduler
+    from vllm.v1.structured_output import StructuredOutputManager
+
+    config = _make_vllm_config()
+    config.parallel_config.fault_tolerance_config.enable_nan_fault_tolerance = True
+    config.scheduler_config.max_num_batched_tokens = BLOCK_SIZE
+    config.scheduler_config.async_scheduling = async_scheduling
+    config.cache_config.num_gpu_blocks = 8
+    assert config.kv_transfer_config is not None
+    config.kv_transfer_config.kv_connector_extra_config = {
+        "cpu_bytes_to_use": _BYTES_PER_BLOCK * 8,
+        "lazy_offload": lazy,
+    }
+    scheduler_cls = AsyncScheduler if async_scheduling else Scheduler
+    scheduler = scheduler_cls(
+        vllm_config=config,
+        kv_cache_config=_make_kv_cache_config(8),
+        block_size=BLOCK_SIZE,
+        log_stats=False,
+        structured_output_manager=StructuredOutputManager(config),
+    )
+    assert isinstance(scheduler.connector, SimpleCPUOffloadConnector)
+    connector = scheduler.connector.scheduler_manager
+    assert connector is not None
+    request = make_request(num_blocks=2, extra_tokens=0)
+    scheduler.add_request(request)
+    first = scheduler.schedule()
+    second = scheduler.schedule() if async_scheduling else None
+    assert isinstance(first.kv_connector_metadata, SimpleCPUOffloadMetadata)
+    assert first.kv_connector_metadata.store_gpu_blocks == []
+    if second is not None:
+        assert isinstance(second.kv_connector_metadata, SimpleCPUOffloadMetadata)
+        assert second.kv_connector_metadata.store_gpu_blocks == []
+
+    def deliver(output, chunk):
+        scheduler.update_from_output(
+            output,
+            ModelRunnerOutput(
+                req_ids=[request.request_id],
+                req_id_to_index={request.request_id: 0},
+                sampled_token_ids=[[] if chunk == 1 else [1]],
+                logprobs=None,
+                prompt_logprobs_dict={},
+                num_nans_in_logits={request.request_id: int(nan_chunk == chunk)},
+            ),
+        )
+
+    deliver(first, 1)
+    pending_events = []
+    if nan_chunk != 1:
+        step = scheduler.schedule()
+        meta = step.kv_connector_metadata
+        assert isinstance(meta, SimpleCPUOffloadMetadata)
+        if meta.store_event >= 0:
+            pending_events.append(meta.store_event)
+        if second is None:
+            second = step
+    if second is not None:
+        deliver(second, 2)
+    assert request.status == (
+        RequestStatus.FINISHED_LENGTH_CAPPED
+        if nan_chunk is None
+        else RequestStatus.FINISHED_ERROR
+    )
+    # Lazy stores walk the free queue; give the cursor a full pass after free.
+    for _ in range(3):
+        meta = scheduler.schedule().kv_connector_metadata
+        assert isinstance(meta, SimpleCPUOffloadMetadata)
+        if meta.store_event >= 0:
+            pending_events.append(meta.store_event)
+    for event in pending_events:
+        simulate_store_completion(connector, event)
+    expected = 2 if nan_chunk is None else nan_chunk - 1
+    for pool in (scheduler.kv_cache_manager.block_pool, connector.cpu_block_pool):
+        assert [
+            pool.get_cached_block(h, [0]) is not None for h in request.block_hashes
+        ] == [i < expected for i in range(2)]

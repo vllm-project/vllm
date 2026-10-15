@@ -2194,7 +2194,6 @@ class Scheduler(SchedulerInterface):
         request: Request,
         num_nans: int,
         nan_abort_req_ids: set[str],
-        nan_block_ids_to_evict: set[int],
     ) -> bool:
         """Record the NaN count and queue an abort if fault tolerance is enabled."""
         request.num_nans_in_logits = num_nans
@@ -2207,8 +2206,6 @@ class Scheduler(SchedulerInterface):
             num_nans,
         )
         nan_abort_req_ids.add(request.request_id)
-        for group in self.kv_cache_manager.get_block_ids(request.request_id):
-            nan_block_ids_to_evict.update(group)
         return True
 
     def update_from_output(
@@ -2265,7 +2262,6 @@ class Scheduler(SchedulerInterface):
         # Stopped resumable requests to re-enqueue, in output order.
         continuing_reqs: list[Request] = []
         nan_abort_req_ids: set[str] = set()
-        nan_block_ids_to_evict: set[int] = set()
         for req_id, num_tokens_scheduled in num_scheduled_tokens.items():
             assert num_tokens_scheduled > 0
             request = self.requests.get(req_id)
@@ -2354,8 +2350,7 @@ class Scheduler(SchedulerInterface):
             prefill_stats = None
             status_before_stop = request.status
 
-            # NaN abort must happen before check_stop/_free_request so
-            # get_block_ids still returns the request's blocks.
+            # Reject this chunk before publishing its KV or completing the request.
             if (
                 num_nans_in_logits is not None
                 and req_id in num_nans_in_logits
@@ -2363,7 +2358,6 @@ class Scheduler(SchedulerInterface):
                     request,
                     num_nans_in_logits[req_id],
                     nan_abort_req_ids,
-                    nan_block_ids_to_evict,
                 )
             ):
                 continue
@@ -2531,11 +2525,6 @@ class Scheduler(SchedulerInterface):
             # retryable: re-issuing the request re-runs the encode.
             error_req_ids.update(self.ec_connector.take_unavailable_requests())
         error_req_ids.update(nan_abort_req_ids)
-
-        # Evict NaN-corrupted blocks from the prefix cache before freeing,
-        # mirroring the KV-load-failure recovery path.
-        if nan_block_ids_to_evict:
-            self.kv_cache_manager.evict_blocks(nan_block_ids_to_evict)
 
         if error_req_ids:
             error_reqs = self.finish_requests(

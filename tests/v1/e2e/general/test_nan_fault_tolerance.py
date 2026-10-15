@@ -25,7 +25,7 @@ import torch
 from tests.conftest import VllmRunner
 from tests.utils import single_gpu_only
 from vllm import SamplingParams
-from vllm.config import CUDAGraphMode
+from vllm.config import CUDAGraphMode, KVTransferConfig
 from vllm.inputs import TokensPrompt
 from vllm.platforms import current_platform
 
@@ -131,12 +131,16 @@ def _run_abort_cache_recovery(
 
     assert _metric_value(runner, "vllm:corrupted_requests") == corrupted_before + 1
 
-    # The first clean retry must recompute the prompt: the corrupted request's
-    # KV blocks must not have entered, or remained in, the prefix cache.
+    # A first-chunk failure leaves no prefix; a later failure retains the
+    # previously validated prompt blocks.
     recovered = runner.llm.generate(prompt, sampling_params)[0]
     assert recovered.outputs[0].finish_reason == "length"
     assert list(recovered.outputs[0].token_ids) == [FORCED_TOKEN_ID] * MAX_TOKENS
-    assert recovered.num_cached_tokens == 0
+    if expect_partial_output:
+        assert recovered.num_cached_tokens is not None
+        assert recovered.num_cached_tokens > 0
+    else:
+        assert recovered.num_cached_tokens == 0
 
     # A subsequent request must reuse the now-validated prefix.
     cached = runner.llm.generate(prompt, sampling_params)[0]
@@ -148,20 +152,30 @@ def _run_abort_cache_recovery(
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="requires NVIDIA CUDA")
 @pytest.mark.parametrize(
-    ("async_scheduling", "cudagraph_mode"),
+    ("async_scheduling", "cudagraph_mode", "lazy_offload"),
     [
-        (False, CUDAGraphMode.NONE),
-        (True, CUDAGraphMode.NONE),
-        (False, CUDAGraphMode.FULL_AND_PIECEWISE),
-        (True, CUDAGraphMode.FULL_AND_PIECEWISE),
+        (False, CUDAGraphMode.NONE, None),
+        (True, CUDAGraphMode.NONE, None),
+        (False, CUDAGraphMode.FULL_AND_PIECEWISE, None),
+        (True, CUDAGraphMode.FULL_AND_PIECEWISE, None),
+        (True, CUDAGraphMode.FULL_AND_PIECEWISE, False),
+        (True, CUDAGraphMode.FULL_AND_PIECEWISE, True),
     ],
-    ids=["eager-sync", "eager-async", "cudagraph-sync", "cudagraph-async"],
+    ids=[
+        "eager-sync",
+        "eager-async",
+        "cudagraph-sync",
+        "cudagraph-async",
+        "cudagraph-async-cpu-eager",
+        "cudagraph-async-cpu-lazy",
+    ],
 )
 @single_gpu_only
 def test_nan_abort_cache_recovery(
     monkeypatch: pytest.MonkeyPatch,
     async_scheduling: bool,
     cudagraph_mode: CUDAGraphMode,
+    lazy_offload: bool | None,
 ) -> None:
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
@@ -178,6 +192,18 @@ def test_nan_abort_cache_recovery(
         enable_prefix_caching=True,
         enable_nan_fault_tolerance=True,
         async_scheduling=async_scheduling,
+        kv_transfer_config=(
+            KVTransferConfig(
+                kv_connector="SimpleCPUOffloadConnector",
+                kv_role="kv_both",
+                kv_connector_extra_config={
+                    "cpu_bytes_to_use": 1 << 30,
+                    "lazy_offload": lazy_offload,
+                },
+            )
+            if lazy_offload is not None
+            else None
+        ),
         distributed_executor_backend="uni",
         disable_log_stats=False,
         enforce_eager=cudagraph_mode == CUDAGraphMode.NONE,
