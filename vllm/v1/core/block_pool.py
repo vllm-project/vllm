@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Callable, Iterable, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 from vllm.distributed.kv_events import (
@@ -133,6 +134,14 @@ class BlockHashToBlockMap:
         raise AssertionError(f"Invalid KV cache block type {type(blocks)}")
 
 
+@dataclass
+class PendingPrefixLoad:
+    key: BlockHashWithGroupId
+    load_id: str
+    blocks: tuple[KVCacheBlock, ...]
+    failed: bool = False
+
+
 class BlockPool:
     """BlockPool that manages KVCacheBlocks.
     It provides methods to allocate, free and cache the kv cache blocks. The
@@ -194,6 +203,52 @@ class BlockPool:
         # Callbacks for blocks released with ``unpin_blocks`` whose contents
         # are still being read until the pool reuses them.
         self._reuse_watchers: dict[int, Callable[[KVCacheBlock], None]] = {}
+        self._pending_prefix_loads: dict[BlockHashWithGroupId, PendingPrefixLoad] = {}
+
+    def register_pending_prefix_load(
+        self,
+        key: BlockHashWithGroupId,
+        load_id: str,
+        blocks: Sequence[KVCacheBlock],
+    ) -> PendingPrefixLoad | None:
+        """Index and pin an exact prefix until its transfer completes.
+
+        Pending blocks remain outside the readable prefix cache. The caller
+        must release the load after completion, including failure/cancellation.
+        """
+        if key in self._pending_prefix_loads:
+            return None
+        assert self.enable_caching and blocks
+        assert all(not block.is_null and block.ref_cnt > 0 for block in blocks)
+        load = PendingPrefixLoad(key, load_id, tuple(blocks))
+        self.touch(load.blocks)
+        self._pending_prefix_loads[key] = load
+        return load
+
+    def get_pending_prefix_load(
+        self, key: BlockHashWithGroupId
+    ) -> PendingPrefixLoad | None:
+        """Find an unfinished, nonfailed load without exposing a cache hit."""
+        load = self._pending_prefix_loads.get(key)
+        return load if load is not None and not load.failed else None
+
+    def find_pending_prefix_load(
+        self, block_hashes: Sequence[BlockHash], kv_cache_group_id: int
+    ) -> PendingPrefixLoad | None:
+        """Find the longest exact contiguous prefix that is still loading."""
+        for index in range(len(block_hashes) - 1, -1, -1):
+            load = self.get_pending_prefix_load(
+                make_block_hash_with_group_id(block_hashes[index], kv_cache_group_id)
+            )
+            if load is not None and len(load.blocks) == index + 1:
+                return load
+        return None
+
+    def release_pending_prefix_load(self, load: PendingPrefixLoad) -> None:
+        """Remove a completed load and release its transfer-owned references."""
+        assert self._pending_prefix_loads.get(load.key) is load
+        del self._pending_prefix_loads[load.key]
+        self.free_blocks(reversed(load.blocks))
 
     def get_cached_block(
         self, block_hash: BlockHash, kv_cache_group_ids: list[int]

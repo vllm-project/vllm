@@ -83,7 +83,7 @@ def test_shared_external_prefix_lifetime(monkeypatch, cancel):
         follower.request_id
     )
     assert len(blocks) == 2
-    assert all(block.ref_cnt == 2 and block.block_hash is None for block in blocks)
+    assert all(block.ref_cnt == 3 and block.block_hash is None for block in blocks)
     assert scheduler.connector.update_state_after_alloc.call_count == 1
     assert not output.num_scheduled_tokens
     assert not scheduler.reset_connector_cache()
@@ -93,7 +93,7 @@ def test_shared_external_prefix_lifetime(monkeypatch, cancel):
         scheduler.finish_requests(owner.request_id, RequestStatus.FINISHED_ABORTED)
     if cancel in ("follower", "both"):
         scheduler.finish_requests(follower.request_id, RequestStatus.FINISHED_ABORTED)
-    # The owner pins the destination until the transfer reports completion.
+    # Request references and a transfer-owned pin retain the destination.
     assert all(block.ref_cnt >= 1 for block in blocks)
     scheduler.update_from_output(
         output,
@@ -108,7 +108,7 @@ def test_shared_external_prefix_lifetime(monkeypatch, cancel):
         assert manager.get_blocks(request.request_id).blocks[0][:2] == blocks
         assert output.num_scheduled_tokens[request.request_id] == 16
     assert all(block.ref_cnt == len(active) for block in blocks)
-    assert not scheduler._shared_prefix_loads
+    assert not scheduler._shared_load_owners
     assert not scheduler._shared_load_followers
     _abort_scheduled_batch(scheduler, output, active)
 
@@ -148,7 +148,7 @@ def test_shared_external_prefix_load_failure(
     if error_kind == "request":
         result.kv_connector_output.failed_recving = {owner.request_id}
     scheduler.update_from_output(output, result)
-    assert not scheduler._shared_prefix_loads
+    assert not scheduler._shared_load_owners
     assert not scheduler._shared_load_owners
     assert not scheduler._shared_load_followers
     assert all(block.ref_cnt == 0 for block in blocks)
@@ -223,7 +223,7 @@ def test_shared_external_prefix_slicing_requires_opt_in(monkeypatch, matched_tok
         scheduler.add_request(create_request(num_tokens=48, common_prefix_len=48))
     scheduler.schedule()
     assert scheduler.connector.update_state_after_alloc.call_count == 2
-    assert not scheduler._shared_prefix_loads
+    assert not scheduler._shared_load_owners
 
 
 def test_shared_external_prefix_checks_connector_compatibility(monkeypatch):
@@ -312,7 +312,7 @@ def test_nixl_unsupported_config_uses_independent_loads(monkeypatch, unsupported
         manager.get_block_ids(follower.request_id)[0]
     )
     if not remote_config:
-        assert not scheduler._shared_prefix_loads
+        assert not scheduler._shared_load_owners
     assert not scheduler._shared_load_followers
     assert set(nixl_scheduler._heartbeat_req_engine) == {
         owner.request_id,
@@ -460,7 +460,7 @@ def test_nixl_failed_shared_load_does_not_reuse_released_lease(abort_owner, poli
         block.ref_cnt == 0 and block.block_hash is None for block in failed_blocks
     )
     assert not manager.block_pool.cached_block_hash_to_block
-    assert not scheduler._shared_prefix_loads
+    assert not scheduler._shared_load_owners
     assert not scheduler._shared_load_owners
     assert not scheduler._shared_load_followers
     if policy == "fail":
@@ -569,7 +569,7 @@ def test_shared_external_prefix_late_follower_after_owner_abort(monkeypatch):
     scheduler.add_request(follower)
     output = scheduler.schedule()
     assert scheduler.connector.update_state_after_alloc.call_count == 1
-    assert all(block.ref_cnt == 2 for block in blocks)
+    assert all(block.ref_cnt == 3 for block in blocks)
     scheduler.update_from_output(
         output,
         create_model_runner_output(reqs=[], finished_recving={owner.request_id}),
@@ -601,7 +601,7 @@ def test_shared_external_prefix_extends_local_hit(monkeypatch):
     assert manager.get_blocks(follower.request_id).blocks[0] == blocks
     assert blocks[0].block_hash is not None
     assert blocks[1].block_hash is None
-    assert all(block.ref_cnt == 2 for block in blocks)
+    assert all(block.ref_cnt == 3 for block in blocks)
     scheduler.connector.update_state_after_alloc.assert_called_once()
     assert scheduler.connector.update_state_after_alloc.call_args.args[2] == 16
     scheduler.update_from_output(

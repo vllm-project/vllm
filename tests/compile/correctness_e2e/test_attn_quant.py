@@ -77,7 +77,6 @@ def test_rocm_aiter_static_attention_output_correctness(caplog_mp_spawn):
             env1=env,
             env2=env,
             method="generate",
-            force_v1_runner=True,
         )
     matches = [
         int(count) for count in re.findall(r"'attn_quant_fusion': (\d+)", logs.text)

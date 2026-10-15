@@ -1527,7 +1527,7 @@ def test_core_shares_cpu_offload_load_and_blocks(abort_owner, async_scheduling):
         follower.request_id
     )
     blocks = list(manager.get_blocks(owner.request_id).blocks[0])
-    assert all(block.ref_cnt == 2 for block in blocks)
+    assert all(block.ref_cnt == 3 for block in blocks)
     if abort_owner:
         scheduler.finish_requests(owner.request_id, RequestStatus.FINISHED_ABORTED)
 
