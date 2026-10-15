@@ -2195,6 +2195,32 @@ def moe_align_block_size(
     )
 
 
+def fused_globalize_align_block_size(
+    topk_idx: torch.Tensor,
+    psum: torch.Tensor,
+    rank_expert_offset: int,
+    global_num_experts: int,
+    local_num_experts: int,
+    block_size: int,
+    sorted_ids: torch.Tensor,
+    expert_ids: torch.Tensor,
+    num_tokens_post_pad: torch.Tensor,
+    scatter_idx: torch.Tensor | None = None,
+) -> None:
+    torch.ops._moe_C.fused_globalize_align_block_size(
+        topk_idx,
+        psum,
+        rank_expert_offset,
+        global_num_experts,
+        local_num_experts,
+        block_size,
+        sorted_ids,
+        expert_ids,
+        num_tokens_post_pad,
+        scatter_idx,
+    )
+
+
 def batched_moe_align_block_size(
     max_tokens_per_batch: int,
     block_size: int,
@@ -2587,6 +2613,8 @@ def fused_minimax_m3_qknorm_rope_kv_insert(
     skip_index_branch: bool = False,
     q_fp8_out: torch.Tensor | None = None,
     q_fp8_scale: float = 1.0,
+    kv_k_scale: torch.Tensor | None = None,
+    kv_v_scale: torch.Tensor | None = None,
 ) -> None:
     """Fused MiniMax-M3 attention pre-processing (in-place).
 
@@ -2610,7 +2638,14 @@ def fused_minimax_m3_qknorm_rope_kv_insert(
     attention's flat TMA descriptor.
 
     If ``q_fp8_out`` is given, the same normalized q is also written in FP8
-    E4M3 using ``q_fp8_scale`` as its dequantization scale.
+    E4M3 using ``q_fp8_scale`` as its dequantization scale. Without ``q_out``,
+    q is then written only in FP8 and the q slice of ``qkv`` is left as is.
+
+    ``kv_cache_dtype="nvfp4"`` quantizes k/v into the packed HND
+    ``[num_blocks, 2 * num_kv_heads, block_size, 72]`` uint8 cache using the
+    device dequantization scales ``kv_k_scale``/``kv_v_scale``. Slot
+    ``2 * head + side`` (K = 0, V = 1) holds that head's E2M1 data followed by
+    its E4M3 block scales, so every head is one contiguous run of the page.
 
     When ``skip_index_branch`` is true, sparse rows still keep their packed
     ``[index_q | index_k]`` tail, but the kernel only processes the main q/k/v
@@ -2641,6 +2676,8 @@ def fused_minimax_m3_qknorm_rope_kv_insert(
         skip_index_branch,
         q_fp8_out,
         q_fp8_scale,
+        kv_k_scale,
+        kv_v_scale,
     )
 
 
@@ -4450,12 +4487,6 @@ def cpu_gemm_wna16(
         isa_hint,
     )
     out = out.reshape(x_shape[:-1] + (out.size(-1),)) if len(x_shape) > 2 else out
-    return out
-
-
-def cpu_activation_lut_bf16(input: torch.Tensor, activation: str) -> torch.Tensor:
-    out = torch.empty_like(input)
-    torch.ops._C.activation_lut_bf16(out, input, activation)
     return out
 
 

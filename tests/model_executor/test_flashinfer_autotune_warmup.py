@@ -39,13 +39,13 @@ def _make_moe(*, max_deferred_tokens: int = 128, enabled: bool = True):
     return moe
 
 
-def _make_runner(modules, *, max_tokens: int = 8192, linear_backend: str = "auto"):
+def _make_runner(modules, *, max_tokens: int = 8192):
     """Create a runner carrying only the state used by FlashInfer warmup."""
     return SimpleNamespace(
         scheduler_config=SimpleNamespace(max_num_batched_tokens=max_tokens),
         vllm_config=SimpleNamespace(
-            kernel_config=SimpleNamespace(linear_backend=linear_backend),
             attention_config=SimpleNamespace(hisparse_config=None),
+            parallel_config=SimpleNamespace(data_parallel_rank=0),
         ),
         get_model=Mock(
             return_value=SimpleNamespace(modules=Mock(return_value=modules))
@@ -62,21 +62,19 @@ def test_flashinfer_autotune_token_counts_include_deferred_moe_limits():
             _make_moe(max_deferred_tokens=128),
             _make_moe(max_deferred_tokens=64, enabled=False),
             _make_moe(max_deferred_tokens=-1),
-        ],
-        linear_backend="flashinfer_cutedsl",
+        ]
     )
 
     with patch("vllm.model_executor.layers.fused_moe.MoERunner", _FakeMoERunner):
         token_counts = _flashinfer_autotune_token_counts(runner)
 
-    assert token_counts == (8192, 32, 128)
+    assert token_counts == (8192, 128)
 
 
 def test_flashinfer_autotune_token_counts_are_bounded_and_deduplicated():
     runner = _make_runner(
         [_make_moe(max_deferred_tokens=4096)],
         max_tokens=32,
-        linear_backend="flashinfer_cutedsl",
     )
 
     with patch("vllm.model_executor.layers.fused_moe.MoERunner", _FakeMoERunner):
@@ -114,8 +112,8 @@ def test_flashinfer_autotune_uses_token_buckets_for_each_dummy_run(skip_attn):
 
     assert get_buckets.call_args_list == [call(8192), call(128)]
     assert autotune.call_args_list == [
-        call(tuning_buckets=max_buckets),
-        call(tuning_buckets=deferred_buckets),
+        call(tuning_buckets=max_buckets, round_up=True),
+        call(tuning_buckets=deferred_buckets, round_up=True),
     ]
     assert runner._dummy_run.call_args_list == [
         call(
@@ -135,6 +133,33 @@ def test_flashinfer_autotune_uses_token_buckets_for_each_dummy_run(skip_attn):
     ]
 
 
+def test_flashinfer_autotune_buckets_cover_drafter_tokens():
+    """The drafter's M can exceed the pass size; buckets must include it."""
+    runner = _make_runner([])
+    runner.max_num_reqs = 256
+    runner.max_num_tokens = 8192
+    runner.speculator = SimpleNamespace(num_query_per_req=6)
+
+    with (
+        patch(
+            "vllm.model_executor.warmup.kernel_warmup."
+            "_flashinfer_autotune_token_counts",
+            return_value=(8192, 128),
+        ),
+        patch(
+            "vllm.utils.flashinfer.flashinfer_get_hybrid_num_tokens_buckets"
+        ) as get_buckets,
+        patch("vllm.utils.flashinfer.autotune"),
+    ):
+        _run_flashinfer_autotune_dummy_runs(runner)
+
+    assert get_buckets.call_args_list == [call(8192), call(128 * 6)]
+    assert [c.kwargs["num_tokens"] for c in runner._dummy_run.call_args_list] == [
+        8192,
+        128,
+    ]
+
+
 class _AutotuneGroup:
     def __init__(self, run, ranks):
         self.run = run
@@ -146,12 +171,20 @@ class _AutotuneGroup:
     def record(self, operation):
         self.run.collectives[self.ranks][self.run.rank].append(operation)
 
-    def broadcast_object(self, obj, src=0):
-        assert src == 0
-        self.record(("broadcast", src))
-        if self.rank_in_group == src:
-            self.run.broadcasts[self.ranks] = obj
-        return self.run.broadcasts[self.ranks]
+    def all_gather_object(self, out, obj):
+        # Ranks run sequentially: snapshot every rank's file before any saves.
+        self.record(("all_gather",))
+        if isinstance(obj, bool):
+            out[:] = [rank not in self.run.rejected_load_ranks for rank in self.ranks]
+            assert out[self.rank_in_group] == obj
+            return
+        out[:] = self.run.gathered.setdefault(
+            self.ranks,
+            [
+                warmup._autotune_cache_fingerprint(self.run.cache_path(rank))
+                for rank in self.ranks
+            ],
+        )
 
     def barrier(self):
         self.record(("barrier",))
@@ -162,10 +195,18 @@ class _AutotuneTuner:
         self.run = run
         self.cache = {}
         self.loaded = None
+        self._dirty = False
 
     def load_configs(self, path):
+        if self.run.rank in self.run.rejected_load_ranks:
+            return False
         self.loaded = json.loads(Path(path).read_text())
         self.cache.update(self.loaded)
+        return True
+
+    def clear_cache(self):
+        self.cache.clear()
+        self._dirty = False
 
     def save_configs(self, path):
         self.run.saves.append((self.run.rank, Path(path), dict(self.cache)))
@@ -182,20 +223,26 @@ class _AutotuneTuner:
             if group is not None:
                 group.record(("all_reduce", operation, tactic))
         self.cache[operation] = self.run.rank // self.run.tp
+        self._dirty = True
 
 
 class _AutotuneRun:
-    def __init__(self, pp, tp):
+    def __init__(self, pp, tp, cache_dir):
         self.pp, self.tp = pp, tp
+        self.cache_dir = cache_dir
         self.rank = 0
         self.tuning_group = None
         self.collectives: dict[tuple[int, ...], dict[int, list[tuple[Any, ...]]]] = (
             defaultdict(lambda: defaultdict(list))
         )
-        self.broadcasts = {}
+        self.gathered = {}
+        self.rejected_load_ranks: set[int] = set()
         self.tuners = {}
         self.saves = []
         self.profile_groups = defaultdict(list)
+
+    def cache_path(self, rank):
+        return self.cache_dir / f"autotune_configs_dp0_rank{rank}.json"
 
     def world(self):
         return _AutotuneGroup(self, range(self.pp * self.tp))
@@ -235,7 +282,7 @@ def autotune_run(monkeypatch, tmp_path):
     from vllm.distributed import parallel_state
 
     def make_run(*, pp=2, tp=4):
-        run = _AutotuneRun(pp, tp)
+        run = _AutotuneRun(pp, tp, tmp_path)
         autotuner = ModuleType("flashinfer.autotuner")
         monkeypatch.setattr(
             autotuner,
@@ -251,6 +298,10 @@ def autotune_run(monkeypatch, tmp_path):
         monkeypatch.setattr(parallel_state, "get_tp_group", run.tensor_group)
         monkeypatch.setattr(parallel_state, "get_pp_group", run.pipeline_group)
         monkeypatch.setattr(fi_utils, "autotune", lambda **kwargs: nullcontext())
+        monkeypatch.setattr(
+            "torch.distributed.all_gather_object",
+            lambda out, obj, group: group.all_gather_object(out, obj),
+        )
         monkeypatch.setattr(
             warmup,
             "resolve_flashinfer_autotune_file",
@@ -286,19 +337,18 @@ def test_pp_stage_cache_roundtrip_isolated_and_asymmetric_hits_safe(
     legacy = tmp_path / "autotune_configs.json"
     legacy.write_text('{"legacy_world_cache": 99}')
     cold = autotune_run().execute()
-    assert [rank for rank, _, _ in cold.saves] == [0, 4]
-    paths = [path for _, path, _ in cold.saves]
-    assert len(set(paths)) == 2 and legacy not in paths
-    assert json.loads(legacy.read_text()) == {"legacy_world_cache": 99}
-    assert cold.saves[0][2] == {"shared_gemm": 0, "pp0_extra_gemm": 0}
-    assert cold.saves[1][2] == {"shared_gemm": 1}
     cold.assert_collectives_match()
+    assert [rank for rank, _, _ in cold.saves] == list(range(8))
+    assert [path for _, path, _ in cold.saves] == [cold.cache_path(r) for r in range(8)]
+    assert json.loads(legacy.read_text()) == {"legacy_world_cache": 99}
+    stage_caches = [{"shared_gemm": 0, "pp0_extra_gemm": 0}, {"shared_gemm": 1}]
+    assert all(cache == stage_caches[r // 4] for r, _, cache in cold.saves)
     warm = autotune_run().execute()
     warm.assert_collectives_match()
-    assert not warm.profile_groups
+    assert not warm.profile_groups and not warm.saves
     for rank, tuner in warm.tuners.items():
-        assert tuner.loaded == cold.saves[rank // 4][2]
-    paths[1].unlink()
+        assert tuner.loaded == stage_caches[rank // 4]
+    cold.cache_path(5).unlink()
     mixed = autotune_run().execute()
     mixed.assert_collectives_match()
     assert set(mixed.profile_groups) == {4, 5, 6, 7}
@@ -306,10 +356,64 @@ def test_pp_stage_cache_roundtrip_isolated_and_asymmetric_hits_safe(
     assert all(mixed.tuners[rank].loaded is None for rank in range(4, 8))
 
 
-def test_pp1_retains_world_synchronization_and_existing_cache_name(autotune_run):
+def test_pp1_tunes_world_group_and_saves_per_rank(autotune_run):
     run = autotune_run(pp=1, tp=4).execute()
     run.assert_collectives_match()
-    assert [(rank, path.name) for rank, path, _ in run.saves] == [
-        (0, "autotune_configs.json")
+    assert [(rank, path) for rank, path, _ in run.saves] == [
+        (rank, run.cache_path(rank)) for rank in range(4)
     ]
     assert all(groups == [(0, 1, 2, 3)] for groups in run.profile_groups.values())
+
+
+def test_mismatched_rank_caches_are_ignored_by_every_rank(autotune_run):
+    """One rank loading while others tune deadlocks the per-tactic reduce."""
+    cold = autotune_run(pp=1, tp=4).execute()
+    stale = cold.cache_path(2)
+    stale.write_text(json.dumps({**json.loads(stale.read_text()), "old_gemm": 0}))
+    rerun = autotune_run(pp=1, tp=4).execute()
+    rerun.assert_collectives_match()
+    assert all(tuner.loaded is None for tuner in rerun.tuners.values())
+    assert set(rerun.profile_groups) == {0, 1, 2, 3}
+
+
+@pytest.mark.parametrize("pp, tp", [(1, 1), (1, 4), (2, 4)])
+def test_rejected_cache_retunes_every_rank_in_its_tuning_group(autotune_run, pp, tp):
+    """Matching files can still be incompatible with one rank's runtime."""
+    autotune_run(pp=pp, tp=tp).execute()
+    rerun = autotune_run(pp=pp, tp=tp)
+    rerun.rejected_load_ranks = {tp - 1}
+    rerun.execute()
+    rerun.assert_collectives_match()
+    assert set(rerun.profile_groups) == set(range(tp))
+    assert {rank for rank, _, _ in rerun.saves} == set(range(tp))
+
+
+def test_autotune_cache_key_normalizes_kv_init_fields():
+    """mamba_block_size/kv_cache_layout only resolve at engine KV-init time;
+    they must not feed the autotune cache key, or nothing can compute the key
+    before startup (the daemon tunes before any KV init). block_size must
+    stay in the key: the daemon replays the engine's block-size resolution
+    before tuning, and different block sizes may select different ops."""
+    from vllm.config.cache import CacheConfig
+    from vllm.model_executor.warmup.flashinfer_autotune_cache import (
+        _normalize_cache_config_for_hash,
+    )
+
+    fresh = CacheConfig()
+    # Simulate the engine's KV-init write-backs (hybrid model values).
+    mutated = CacheConfig()
+    mutated.mamba_block_size = 512
+    mutated.kv_cache_layout = "LBHNC"
+
+    # Negative control: the write-backs are hashed factors.
+    assert mutated.compute_hash() != fresh.compute_hash()
+    normalized = _normalize_cache_config_for_hash(mutated)
+    assert normalized.compute_hash() == fresh.compute_hash()
+    # Factory state is returned untouched.
+    assert _normalize_cache_config_for_hash(fresh) is fresh
+    # block_size stays significant (the daemon keys on the resolved value).
+    resolved = CacheConfig(block_size=64)
+    assert (
+        _normalize_cache_config_for_hash(resolved).compute_hash()
+        != fresh.compute_hash()
+    )
