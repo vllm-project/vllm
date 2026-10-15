@@ -293,3 +293,53 @@ def test_glm5_next_mtp_override_promotes_index_share():
     assert draft_config.architectures == ["Glm5NextMTPModel"]
     assert draft_config.n_predict == 1
     assert draft_config.index_share_for_mtp_iteration is True
+
+
+def _make_transformers_mtp_speculative_config(
+    is_moe: bool, multimodal: bool = False
+) -> tuple[SpeculativeConfig, MagicMock]:
+    target = MagicMock(
+        model="target", max_model_len=128, quantization=None, hf_overrides={}
+    )
+    target.using_transformers_backend.return_value = True
+    target.is_moe = is_moe
+    if not multimodal:
+        target.hf_text_config = target.hf_config
+    draft = MagicMock(model="draft", hf_config=_make_hf_config(), max_model_len=128)
+
+    with patch(
+        "vllm.config.speculative.ModelConfig", return_value=draft
+    ) as model_config_cls:
+        speculative_config = SpeculativeConfig(
+            method="mtp",
+            num_speculative_tokens=1,
+            target_model_config=target,
+            target_parallel_config=ParallelConfig(),
+        )
+    return speculative_config, model_config_cls
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    ("is_moe", "architecture"),
+    [(False, "TransformersForMTP"), (True, "TransformersMoEForMTP")],
+)
+def test_transformers_backend_mtp_draft(is_moe: bool, architecture: str):
+    """A Transformers backend target gets a Transformers backend MTP draft, built
+    from the target's config without the native MTP draft rewrites."""
+    speculative_config, model_config_cls = _make_transformers_mtp_speculative_config(
+        is_moe
+    )
+    assert speculative_config.method == "mtp"
+
+    hf_overrides = model_config_cls.call_args.kwargs["hf_overrides"]
+    hf_config = hf_overrides(_make_hf_config(model_type="deepseek_v3"))
+    assert hf_config.architectures == [architecture]
+    assert hf_config.model_type == "deepseek_v3"
+    assert hf_config.num_hidden_layers == 64
+
+
+@pytest.mark.cpu_test
+def test_transformers_backend_mtp_rejects_multimodal():
+    with pytest.raises(NotImplementedError, match="multimodal"):
+        _make_transformers_mtp_speculative_config(is_moe=False, multimodal=True)
