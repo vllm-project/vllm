@@ -469,12 +469,12 @@ class FlashAttentionBackend(AttentionBackend):
         use_mm_prefix: bool,
         device_capability: DeviceCapability,
     ) -> str | None:
-        sm90_fp8_kv = (
+        if (
             device_capability == DeviceCapability(9, 0)
             and kv_cache_dtype is not None
             and is_quantized_kv_cache(kv_cache_dtype)
-        )
-        if sm90_fp8_kv and head_size == 512:
+            and head_size == 512
+        ):
             if block_size is not None and block_size % 64 != 0:
                 return "SM90 d512 FP8 KV requires a block size divisible by 64"
             if use_sparse:
@@ -500,12 +500,7 @@ class FlashAttentionBackend(AttentionBackend):
                 supports_fa4_hd256=True,
             )
         ):
-            return (
-                "FP8 KV cache requires a supported FA3 configuration on SM90, "
-                "FA4 with Q/K and V head dimensions both 512 on SM90, "
-                "or supported FA4 on SM100. SM90 FP8 Diff-KV requiring FA4 "
-                "(including sinks) is unsupported"
-            )
+            return "FP8 KV requires FA3 (SM90), equal-d512 FA4 (SM90), or FA4 (SM100)."
         if (
             use_mm_prefix
             and get_flash_attn_version(
