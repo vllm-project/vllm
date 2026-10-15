@@ -175,6 +175,18 @@ class VisualTokenizer(torch.nn.Module):
 
 
 class Ovis2_5ProcessingInfo(BaseProcessingInfo):
+    def __init__(self, ctx) -> None:
+        super().__init__(ctx)
+        # extra_special_tokens adds tokens to the tokenizer lazily, on first
+        # access, but the renderer deep-copies this tokenizer into a thread
+        # pool right after this processor is constructed; the copies never
+        # see mutations made afterwards. Force it now, before that happens,
+        # on the tokenizer we actually use (get_hf_processor()'s cache can
+        # otherwise hand back one bound to a self-loaded tokenizer instead).
+        hf_processor = self.get_hf_processor()
+        hf_processor.tokenizer = self.get_tokenizer()
+        hf_processor.extra_special_tokens  # noqa: B018
+
     def get_hf_config(self):
         return self.ctx.get_hf_config()
 
@@ -390,7 +402,6 @@ class Ovis2_5MultiModalProcessor(BaseMultiModalProcessor[Ovis2_5ProcessingInfo])
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> list[PromptReplacement]:
         hf_processor = self.info.get_hf_processor()
-
         placeholder = {
             "image": hf_processor.get_token_value("image_token"),
             "video": hf_processor.get_token_value("video_token"),

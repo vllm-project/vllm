@@ -101,6 +101,7 @@ def test_flash_attention_geometry_comes_from_the_group():
         num_kv_heads=2,
         head_size=64,
         dtype=torch.bfloat16,
+        dcp_sharded=True,
     )
 
     with (

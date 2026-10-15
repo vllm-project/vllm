@@ -152,6 +152,7 @@ fn request_level_tools_are_lowered_as_synthetic_leading_system_message() {
             "required": ["query"]
         }),
         strict: None,
+        defer_loading: None,
     }];
     let mut request = ChatRequest {
         request_id: "deepseek-v32-tools".to_string(),

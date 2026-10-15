@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.parser.gemma4 import (
     TOOL_CALL_END,
     TOOL_CALL_START,
@@ -115,6 +116,21 @@ def mock_request():
     request.tools = []
     request.tool_choice = "auto"
     return request
+
+
+def test_named_custom_tool_choice_skips_structured_outputs(mock_tokenizer):
+    # Responses custom tools ride the function shim, so a named custom choice
+    # must route like a named function choice, not into guided JSON.
+    tools = [{"type": "custom", "name": "emit_command"}]
+    request = ResponsesRequest(
+        input="hi",
+        tools=tools,
+        tool_choice={"type": "custom", "name": "emit_command"},
+    )
+    Gemma4EngineToolParser(mock_tokenizer, tools=tools).adjust_request(request)
+
+    assert request.skip_special_tokens is False
+    assert request.structured_outputs is None
 
 
 # ---------------------------------------------------------------------------

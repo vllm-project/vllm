@@ -260,6 +260,7 @@ def test_block_stored_per_group_metadata_full_attention() -> None:
     )
     assert ev.block_hashes == [expected_hash_0]
     assert ev.parent_block_hash is None
+    assert req.prompt_token_ids is not None
     assert ev.token_ids == req.prompt_token_ids[0:BLOCK_SIZE]
 
     # Second block's parent_block_hash equals the first block's hash.
@@ -296,7 +297,7 @@ def test_eager_store_lora_metadata() -> None:
         f"expected lora_name='test-lora', got {ev.lora_name!r}"
     )
     assert ev.extra_keys is not None, "expected extra_keys for lora request"
-    assert any("test-lora" in keys for keys in ev.extra_keys), (
+    assert any(keys is not None and "test-lora" in keys for keys in ev.extra_keys), (
         f"expected 'test-lora' in extra_keys, got {ev.extra_keys}"
     )
     assert len(ev.token_ids) == BLOCK_SIZE
@@ -372,6 +373,7 @@ def test_finished_eager_store_emits_all_storage_events() -> None:
     secondary_event_hash = maybe_convert_block_hash(get_block_hash(secondary_hash))
     by_hash = {event.block_hashes[0]: event for event in stored}
     assert set(by_hash) == {*primary_event_hashes, secondary_event_hash}
+    assert req.prompt_token_ids is not None
     assert (
         by_hash[primary_event_hashes[0]].token_ids == req.prompt_token_ids[:BLOCK_SIZE]
     )
@@ -451,6 +453,7 @@ def test_secondary_hash_block_stored_metadata() -> None:
     by_hash = {event.block_hashes[0]: event for event in stored}
     assert set(by_hash) == {primary_event_hash, secondary_event_hash}
     assert by_hash[primary_event_hash].block_size == BLOCK_SIZE
+    assert req.prompt_token_ids is not None
     assert by_hash[primary_event_hash].token_ids == req.prompt_token_ids[:BLOCK_SIZE]
     assert by_hash[secondary_event_hash].block_size == BLOCK_SIZE // 2
     assert (
@@ -752,6 +755,7 @@ def test_mamba_align_skips_positional_event_metadata() -> None:
     stored = [e for e in events if isinstance(e, BlockStored)]
     assert len(stored) == 2
     assert {ev.group_idx for ev in stored} == {0}
+    assert req.prompt_token_ids is not None
     for idx, ev in enumerate(stored):
         assert ev.block_size == vbs
         assert ev.token_ids == req.prompt_token_ids[idx * vbs : (idx + 1) * vbs]
