@@ -568,15 +568,10 @@ def test_replayssm_mixer_selects_mtp_layout(
         num_reqs=2,
         has_initial_states_p=None,
         query_start_loc_p=None,
-        num_computed_tokens_p=None,
         state_indices_tensor_p=None,
         state_indices_tensor_d=torch.tensor([[1], [2]], dtype=torch.int32),
         query_start_loc_d=query_start_loc_d,
         num_accepted_tokens=torch.tensor([4, 2], dtype=torch.int32),
-        block_idx_last_scheduled_token=None,
-        block_idx_first_scheduled_token_p=None,
-        block_idx_last_computed_token=None,
-        block_idx_last_scheduled_token_prev_step=None,
         seq_lens=torch.tensor([104, 102], dtype=torch.int32),
         replayssm_scratch=(torch.empty(0), torch.empty(0), torch.empty(0)),
         replayssm_state_indices_d=torch.tensor([1, 2], dtype=torch.int32),
@@ -642,3 +637,27 @@ def test_replayssm_physical_ring_shape(
         (8, expected_ring_len),
         (2, expected_ring_len, 16),
     )
+
+
+def test_replayssm_ring_shape_extends_groups_for_head_shards():
+    """A single group under TP is replicated to every head shard, as in
+    ``mamba2_state_shape``, so each rank's B_cache holds one group."""
+    base_shapes = MambaStateShapeCalculator.mamba2_state_shape(
+        tp_world_size=2,
+        intermediate_size=256,
+        n_groups=1,
+        num_heads=4,
+        head_dim=64,
+        state_size=128,
+        conv_kernel=4,
+    )
+
+    shapes = MambaStateShapeCalculator.append_replayssm_ring(
+        base_shapes,
+        n_groups=1,
+        tp_world_size=2,
+        logical_window=16,
+        backend=MambaBackendEnum.TRITON,
+    )
+
+    assert shapes[4] == (1, 16, 128)
