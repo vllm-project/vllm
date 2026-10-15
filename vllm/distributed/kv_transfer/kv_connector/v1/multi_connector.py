@@ -125,7 +125,6 @@ class MultiKVConnectorPromMetrics(KVConnectorPromMetrics):
 
     def observe(self, transfer_stats_data: dict[str, Any], engine_idx: int = 0):
         for connector_id, stats_data in transfer_stats_data.items():
-            # A connector can report stats without a Prometheus exporter.
             prom_metrics = self._prom_metrics.get(connector_id)
             if prom_metrics is not None:
                 prom_metrics.observe(stats_data, engine_idx)
