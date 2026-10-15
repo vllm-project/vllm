@@ -46,6 +46,7 @@ from vllm.v1.kv_offload.tiering.base import (
     SecondaryTierManager,
     TieringOffloadingMetrics,
     TransferJob,
+    UnsafeTransferError,
 )
 from vllm.v1.kv_offload.tiering.example.manager import ExampleSecondaryTierManager
 from vllm.v1.kv_offload.tiering.factory import SecondaryTierFactory
@@ -397,7 +398,7 @@ class TestTieringOffloadingManager:
 
             def fail_drain():
                 self.secondary_tier1.completed_jobs.append(unsafe)
-                raise RuntimeError("P2P drain encountered an unsafe WRITE")
+                raise UnsafeTransferError("P2P drain encountered an unsafe WRITE")
 
             with (
                 patch.object(
@@ -447,6 +448,59 @@ class TestTieringOffloadingManager:
         assert values[TieringOffloadingMetrics.ACTIVE_PROMOTION_JOBS][label] == 0
         assert TieringOffloadingMetrics.PROMOTION_JOB_FAILURES not in values
         assert self.primary_tier.prepare_write(replacement, _CTX) is not None
+
+    @pytest.mark.parametrize("drain_error", [UnsafeTransferError, RuntimeError])
+    def test_reset_retries_confirmed_unsafe_drain_but_preserves_other_errors(
+        self, manager_setup, drain_error
+    ):
+        self._start_request()
+        keys = to_keys(range(5))
+        prepared = self.primary_tier.prepare_write(keys, _CTX)
+        assert prepared is not None
+        job_id = self.manager._next_job_id()
+        self.manager._register_job(
+            TransferJob(
+                job_id=job_id,
+                keys=keys,
+                chunk_ids=np.asarray(prepared.store_spec.chunk_ids),
+                is_promotion=True,
+                req_context=_CTX,
+            ),
+            0,
+        )
+
+        def fail_drain():
+            self.secondary_tier1.completed_jobs.extend(
+                [
+                    JobResult(job_id=job_id, success=False, memory_safe=False),
+                    JobResult(job_id=job_id, success=False),
+                ]
+            )
+            raise drain_error("drain stopped")
+
+        with (
+            patch.object(self.secondary_tier1, "drain_jobs") as drain,
+            patch.object(self.secondary_tier2, "drain_jobs") as other_drain,
+            patch.object(
+                self.primary_tier, "reset_cache", wraps=self.primary_tier.reset_cache
+            ) as reset,
+        ):
+
+            def drain_once():
+                if drain.call_count == 1:
+                    fail_drain()
+
+            drain.side_effect = drain_once
+            if drain_error is UnsafeTransferError:
+                self.manager.reset_cache()
+                assert drain.call_count == 2
+                other_drain.assert_called_once()
+                reset.assert_called_once()
+            else:
+                with pytest.raises(RuntimeError, match="drain stopped"):
+                    self.manager.reset_cache()
+                other_drain.assert_not_called()
+                reset.assert_not_called()
 
     def test_successful_promotion_finalizes_primary_with_success(self, manager_setup):
         from unittest.mock import patch

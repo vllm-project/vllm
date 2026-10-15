@@ -31,6 +31,7 @@ from vllm.v1.kv_offload.tiering.base import (
     JobResult,
     SecondaryTierManager,
     TransferJob,
+    UnsafeTransferError,
 )
 from vllm.v1.kv_offload.tiering.p2p.control import ControlTransport, ZmqTransport
 from vllm.v1.kv_offload.tiering.p2p.data import DataTransport, NixlTransport
@@ -659,7 +660,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                 result.job_id: result.memory_safe for result in self._finished_jobs
             }
             if not all(latest_safety.values()):
-                raise RuntimeError(
+                raise UnsafeTransferError(
                     "Cannot drain P2P jobs while remote WRITEs may still target "
                     "quarantined slots."
                 )
@@ -981,7 +982,11 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                         memory_safe=lr.memory_safe,
                     )
                 )
-                if not lr.success and not lr.failure_reported:
+                if (
+                    not lr.success
+                    and not lr.failure_reported
+                    and not lr.request_finished
+                ):
                     self._failed_req_ids.add(lr.kv_request_id)
             for sr in result.stores:
                 self._finished_jobs.append(

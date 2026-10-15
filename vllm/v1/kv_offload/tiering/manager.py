@@ -55,6 +55,7 @@ from vllm.v1.kv_offload.tiering.base import (
     ParentManager,
     SecondaryTierManager,
     TransferJob,
+    UnsafeTransferError,
 )
 from vllm.v1.kv_offload.tiering.metrics import TieringMetricsTracker
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
@@ -1195,13 +1196,19 @@ class TieringOffloadingManager(OffloadingManager):
         """
         self._process_finished_jobs()
         self._raise_if_quarantined()
-        try:
-            for tier in self.secondary_tiers:
-                tier.drain_jobs()
-        finally:
-            # A failed drain can surface unsafe results that still need quarantine.
-            self._process_finished_jobs()
-            self._raise_if_quarantined()
+        for tier in self.secondary_tiers:
+            while True:
+                try:
+                    tier.drain_jobs()
+                except Exception as exc:
+                    self._process_finished_jobs()
+                    self._raise_if_quarantined()
+                    if not isinstance(exc, UnsafeTransferError):
+                        raise
+                else:
+                    break
+        self._process_finished_jobs()
+        self._raise_if_quarantined()
         assert not self._jobs
 
         # Deferred promotion submissions reserve primary slots that the

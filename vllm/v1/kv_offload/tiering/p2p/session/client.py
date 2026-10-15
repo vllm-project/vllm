@@ -48,6 +48,7 @@ class _InboundLoadState:
     pending_fetch: dict | None  # None once handed to the transport
     aborted_at: float | None = None
     failure_reported: bool = False
+    request_finished: bool = False
 
 
 @dataclass
@@ -95,6 +96,7 @@ class LoadResult(NamedTuple):
     success: bool
     memory_safe: bool = True
     failure_reported: bool = False  # A prior result already failed the request.
+    request_finished: bool = False
 
 
 class ClientCloseResult(NamedTuple):
@@ -271,11 +273,18 @@ class ClientRole:
         poll. Sent loads wait until their abort acknowledgement confirms that
         the remote WRITE has stopped.
         """
+        self._completed_loads = [
+            result._replace(request_finished=True)
+            if result.kv_request_id == kv_request_id
+            else result
+            for result in self._completed_loads
+        ]
         st = self._requests.get(kv_request_id)
         if st is None:
             return
         if st.loads:
             for round_seq, load in st.loads.items():
+                load.request_finished = True
                 if load.aborted_at is not None:
                     continue
                 if load.pending_fetch is not None:
@@ -319,6 +328,7 @@ class ClientRole:
                     kv_request_id=kv_request_id,
                     success=success and not load.failure_reported,
                     failure_reported=load.failure_reported,
+                    request_finished=load.request_finished,
                 )
             )
             self._on_load_terminal(kv_request_id, st)
@@ -355,6 +365,7 @@ class ClientRole:
                     kv_request_id=kv_request_id,
                     success=False,
                     failure_reported=load.failure_reported,
+                    request_finished=load.request_finished,
                 )
             )
             self._on_load_terminal(kv_request_id, st)
@@ -511,7 +522,12 @@ class ClientRole:
                     or now - load.submitted_at >= _LOAD_TIMEOUT_S
                 ):
                     self._completed_loads.append(
-                        LoadResult(load.job_id, req_id, success=False)
+                        LoadResult(
+                            load.job_id,
+                            req_id,
+                            success=False,
+                            request_finished=load.request_finished,
+                        )
                     )
                     unsent_failures.append((req_id, round_seq))
                     continue
@@ -543,6 +559,7 @@ class ClientRole:
                                 kv_request_id=req_id,
                                 success=False,
                                 memory_safe=False,
+                                request_finished=load.request_finished,
                             )
                         )
                         logger.warning(
@@ -576,7 +593,10 @@ class ClientRole:
         failed_req_ids = [
             req_id
             for req_id, st in self._requests.items()
-            if any(not load.failure_reported for load in st.loads.values())
+            if any(
+                not load.failure_reported and not load.request_finished
+                for load in st.loads.values()
+            )
             or any(hit is None for hit in st.probes.values())
         ]
         memory_safe_jobs = frozenset(

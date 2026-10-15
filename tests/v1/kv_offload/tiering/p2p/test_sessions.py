@@ -673,7 +673,11 @@ class TestClientFlows:
             }
         )
         loads = session.poll().loads
-        assert loads == [LoadResult(job_id=8, kv_request_id="req-1", success=False)]
+        assert loads == [
+            LoadResult(
+                job_id=8, kv_request_id="req-1", success=False, request_finished=True
+            )
+        ]
         assert session._client.has_active_loads is False
         assert "req-1" not in session._client._requests
         assert session.poll().loads == []
@@ -692,7 +696,11 @@ class TestClientFlows:
         loads = session.poll().loads
         assert loads == [
             LoadResult(
-                job_id=9, kv_request_id="req-1", success=False, memory_safe=False
+                job_id=9,
+                kv_request_id="req-1",
+                success=False,
+                memory_safe=False,
+                request_finished=True,
             )
         ]
         assert session._client.has_active_loads is True
@@ -714,7 +722,9 @@ class TestClientFlows:
             }
         )
         assert session.poll().loads == [
-            LoadResult(job_id=10, kv_request_id="req-1", success=False)
+            LoadResult(
+                job_id=10, kv_request_id="req-1", success=False, request_finished=True
+            )
         ]
 
         conn.enqueue(
@@ -819,7 +829,11 @@ class TestClientFlows:
 
         assert session.poll().loads == [
             LoadResult(
-                job_id=7, kv_request_id="req-7", success=False, memory_safe=False
+                job_id=7,
+                kv_request_id="req-7",
+                success=False,
+                memory_safe=False,
+                request_finished=True,
             )
         ]
         assert session.poll().loads == []
@@ -834,7 +848,11 @@ class TestClientFlows:
         conn.enqueue(terminal)
         assert session.poll().loads == [
             LoadResult(
-                job_id=7, kv_request_id="req-7", success=False, failure_reported=True
+                job_id=7,
+                kv_request_id="req-7",
+                success=False,
+                failure_reported=True,
+                request_finished=True,
             )
         ]
         assert session.poll().loads == []
@@ -2949,17 +2967,33 @@ class TestDisconnect:
         assert result.memory_safe_jobs == ({1, 2} if already_dead else {2})
 
     @pytest.mark.parametrize("flushed", [False, True])
-    def test_close_distinguishes_queued_fetch_from_sent_fetch(self, flushed):
+    @pytest.mark.parametrize("finished", [False, True])
+    def test_close_distinguishes_queued_fetch_from_sent_fetch(self, flushed, finished):
         session, conn, _ = _make_session()
         session.request_blocks(7, "req-7", [b"k"], [0])
         if flushed:
             _activate(session, conn)
         else:
             conn.mark_dead()
+        if finished:
+            session.finish_request("req-7")
 
         result = session.close()
         assert result.failed_jobs == [7]
         assert result.memory_safe_jobs == (frozenset() if flushed else {7})
+        assert result.failed_req_ids == ([] if finished else ["req-7"])
+
+    def test_finish_marks_buffered_failure_before_request_id_reuse(self):
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+        session.request_blocks(7, "req-7", [b"k"], [0])
+        session._client.on_transfer_done("req-7", success=False, round_seq=0)
+        session.finish_request("req-7")
+        session.request_blocks(8, "req-7", [b"replacement"], [1])
+        loads = session.poll().loads
+        assert loads == [LoadResult(7, "req-7", success=False, request_finished=True)]
+        session._client.on_transfer_done("req-7", success=False, round_seq=0)
+        assert session.poll().loads == [LoadResult(8, "req-7", success=False)]
 
     @pytest.mark.parametrize("finished", [False, True])
     def test_queued_fetch_timeout_does_not_quarantine_or_flush_after_failure(
@@ -2975,7 +3009,12 @@ class TestDisconnect:
             )
 
         assert session.poll().loads == [
-            LoadResult(job_id=7, kv_request_id="req-7", success=False)
+            LoadResult(
+                job_id=7,
+                kv_request_id="req-7",
+                success=False,
+                request_finished=finished,
+            )
         ]
         assert not session.has_pending_work
         session.request_blocks(8, "req-7", [b"replacement"], [1])
@@ -3000,7 +3039,11 @@ class TestDisconnect:
         )
         assert session.poll().loads == [
             LoadResult(
-                job_id=7, kv_request_id="req-7", success=False, memory_safe=False
+                job_id=7,
+                kv_request_id="req-7",
+                success=False,
+                memory_safe=False,
+                request_finished=True,
             )
         ]
         result = session.close()

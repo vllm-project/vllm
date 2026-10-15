@@ -28,6 +28,7 @@ from vllm.v1.kv_offload.tiering.base import (
     JobResult,
     TieringOffloadingMetrics,
     TransferJob,
+    UnsafeTransferError,
 )
 from vllm.v1.kv_offload.tiering.manager import TieringOffloadingManager
 from vllm.v1.kv_offload.tiering.p2p import manager as manager_module
@@ -1589,6 +1590,21 @@ class TestAcceptNewPeers:
 
 
 class TestPollOnce:
+    def test_cancelled_queued_fetch_does_not_refail_finished_request(self):
+        mgr = _make_manager()
+        mgr._control = _DrainCtrl()
+        peer = "10.0.0.1:8000"
+        sess = _FakeSession(peer_id=peer)
+        mgr._sessions[peer] = sess
+        ctx = _req_context(kv_params=_remote_prefiller_kv_params(kv_request_id="req-5"))
+        mgr.on_request_finished(ctx)
+        sess._loads = [LoadResult(5, "req-5", success=False, request_finished=True)]
+
+        results = list(mgr.get_finished_jobs())
+        assert results == [JobResult(job_id=5, success=False)]
+        assert "req-5" not in mgr._failed_req_ids
+        assert mgr.lookup(b"key1", ctx) is LookupResult.HIT
+
     def test_quarantine_release_does_not_refail_finished_request(self):
         mgr = _make_manager()
         mgr._control = _DrainCtrl()
@@ -1797,7 +1813,7 @@ class TestDrainJobs:
         if confirmed:
             mgr.drain_jobs()
         else:
-            with pytest.raises(RuntimeError, match="quarantined slots"):
+            with pytest.raises(UnsafeTransferError, match="quarantined slots"):
                 mgr.drain_jobs()
         assert mgr._finished_jobs[0] == JobResult(5, success=False, memory_safe=False)
 

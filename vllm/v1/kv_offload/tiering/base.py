@@ -40,6 +40,10 @@ JobId = int
 TIER_LABEL = "tier"
 
 
+class UnsafeTransferError(RuntimeError):
+    """A drain encountered a transfer that may still access primary memory."""
+
+
 class TieringOffloadingMetrics:
     """Metric names for TieringOffloadingManager."""
 
@@ -387,6 +391,9 @@ class SecondaryTierManager(ABC):
         would corrupt either the primary memoryview or the secondary backing
         store. Queued (not-yet-started) transfers may be cancelled, but their
         failure result must still appear in `get_finished_jobs()`.
+
+        Raise UnsafeTransferError if a failed transfer may still access primary
+        memory. The caller can consume its results and retry after confirmation.
         """
         pass
 
