@@ -28,7 +28,7 @@ def test_gather_block_tables_cpu() -> None:
 
     gathered = gather_block_tables(
         block_tables,
-        idx_mapping=torch.tensor([2, 0], dtype=torch.int32),
+        idx_mapping=torch.tensor([2, 0], dtype=torch.int64),
         num_reqs_padded=3,
     )
 
@@ -56,7 +56,6 @@ def test_compute_slot_mappings_cpu() -> None:
         ],
         slot_mappings=output,
         block_sizes=[8, 8],
-        kernel_block_sizes=[4, 4],
         _slot_mapping_enabled=[True, False],
         dcp_sharded=torch.tensor([True, True]),
         cp_size=1,
@@ -69,7 +68,7 @@ def test_compute_slot_mappings_cpu() -> None:
 
     actual = compute_slot_mappings(
         block_tables,
-        idx_mapping=torch.tensor([1, -1, 0], dtype=torch.int32),
+        idx_mapping=torch.tensor([1, -1, 0], dtype=torch.int64),
         query_start_loc=torch.tensor([0, 2, 4, 6], dtype=torch.int32),
         positions=positions_storage[1:7],
         num_tokens_padded=7,
@@ -77,7 +76,7 @@ def test_compute_slot_mappings_cpu() -> None:
 
     assert actual.data_ptr() == output.data_ptr()
     assert actual.tolist() == [
-        [40, 44, -1, -1, 11, 16, -1],
+        [80, 84, -1, -1, 19, 24, -1],
         [-1, -1, -1, -1, -1, -1, -1],
     ]
     assert output[:, 7:].eq(-1).all()
@@ -97,7 +96,6 @@ def test_compute_slot_mappings_cpu_dcp() -> None:
             ],
             slot_mappings=output,
             block_sizes=[8, 8],
-            kernel_block_sizes=[4, 4],
             _slot_mapping_enabled=[True, True],
             dcp_sharded=torch.tensor([True, False]),
             cp_size=2,
@@ -107,7 +105,7 @@ def test_compute_slot_mappings_cpu_dcp() -> None:
 
         actual = compute_slot_mappings(
             block_tables,
-            idx_mapping=torch.tensor([0], dtype=torch.int32),
+            idx_mapping=torch.tensor([0], dtype=torch.int64),
             query_start_loc=torch.tensor([0, 16], dtype=torch.int32),
             positions=positions,
             num_tokens_padded=16,
@@ -117,6 +115,6 @@ def test_compute_slot_mappings_cpu_dcp() -> None:
         local_mask = positions.div(2, rounding_mode="floor").remainder(2) == cp_rank
         local_positions = positions.div(4, rounding_mode="floor") * 2
         local_positions += positions.remainder(2)
-        expected_sharded[local_mask] = 40 + local_positions[local_mask]
+        expected_sharded[local_mask] = 80 + local_positions[local_mask]
         assert torch.equal(actual[0], expected_sharded)
-        assert torch.equal(actual[1], 80 + positions)
+        assert torch.equal(actual[1], 160 + positions)

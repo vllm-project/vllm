@@ -59,7 +59,7 @@ def _apply(
     if positions is None:
         positions = [POS] * len(idx_mapping)
 
-    idx_mapping_tensor = torch.tensor(idx_mapping, dtype=torch.int32)
+    idx_mapping_tensor = torch.tensor(idx_mapping, dtype=torch.int64)
     num_tokens = len(idx_mapping)
     state.apply(
         logits,

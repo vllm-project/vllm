@@ -200,7 +200,7 @@ torch::Tensor gumbel_sample_cpu(const torch::Tensor& logits,
     using sampling_impl_t = SelectedSamplingImpl<scalar_t>;
     cpu_sampling::SamplingMainLoop<sampling_impl_t> mainloop;
     mainloop(output.data_ptr<int64_t>(), logits.data_ptr<scalar_t>(),
-             logits.stride(0), expanded_idx_mapping.data_ptr<int32_t>(),
+             logits.stride(0), expanded_idx_mapping.data_ptr<int64_t>(),
              temperature.data_ptr<float>(), seeds.data_ptr<int64_t>(),
              positions.data_ptr<int64_t>(), logits.size(0), logits.size(1),
              apply_temperature, is_drafting, use_fp64);
@@ -234,7 +234,7 @@ void apply_logit_bias_cpu(
   const int64_t vocab_size = logits.size(1);
 
   float* logits_ptr = logits.data_ptr<float>();
-  const int32_t* idx_mapping_ptr = expanded_idx_mapping.data_ptr<int32_t>();
+  const int64_t* idx_mapping_ptr = expanded_idx_mapping.data_ptr<int64_t>();
   const int64_t* positions_ptr = positions.data_ptr<int64_t>();
   const int32_t* num_allowed_ptr = num_allowed_token_ids.data_ptr<int32_t>();
   const int32_t* allowed_ptr = allowed_token_ids.data_ptr<int32_t>();
@@ -254,7 +254,7 @@ void apply_logit_bias_cpu(
 
 #pragma omp parallel for schedule(static) if (num_tokens > 1)
   for (int64_t token_idx = 0; token_idx < num_tokens; ++token_idx) {
-    const int32_t req_idx = idx_mapping_ptr[token_idx];
+    const int64_t req_idx = idx_mapping_ptr[token_idx];
     float* row = logits_ptr + token_idx * logits_stride;
 
     const int32_t num_allowed = num_allowed_ptr[req_idx];

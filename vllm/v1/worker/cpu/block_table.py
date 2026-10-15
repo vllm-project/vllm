@@ -58,7 +58,6 @@ def compute_slot_mappings(
             query_start_loc,
             positions,
             self.block_sizes[group_id],
-            self.kernel_block_sizes[group_id],
             self._slot_mapping_enabled[group_id],
             dcp_sharded,
             self.cp_size,

@@ -54,7 +54,7 @@ def _sample_many(
 ) -> torch.Tensor:
     vocab_size = logits_1d.shape[0]
     logits = logits_1d.unsqueeze(0).expand(num_samples, vocab_size)
-    mapping = torch.zeros(num_samples, dtype=torch.int32)
+    mapping = torch.zeros(num_samples, dtype=torch.int64)
     temperature = torch.ones(1)
     seeds = torch.tensor([0xABCD], dtype=torch.int64)
     positions = torch.arange(num_samples, dtype=torch.int64)
@@ -80,7 +80,7 @@ def _sample_histogram(
         size = min(chunk_size, num_samples - start)
         vocab_size = logits_1d.shape[0]
         logits = logits_1d.unsqueeze(0).expand(size, vocab_size)
-        mapping = torch.zeros(size, dtype=torch.int32)
+        mapping = torch.zeros(size, dtype=torch.int64)
         temperature = torch.ones(1)
         seeds = torch.tensor([0xABCD], dtype=torch.int64)
         positions = torch.arange(start, start + size, dtype=torch.int64)
@@ -248,7 +248,7 @@ def test_random_and_mixed_rows_match_reference(
     logits = torch.randn(4, 257, generator=torch.Generator().manual_seed(1234)).to(
         dtype
     )
-    mapping = torch.tensor([3, 0, 2, 1], dtype=torch.int32)
+    mapping = torch.tensor([3, 0, 2, 1], dtype=torch.int64)
     temperature = torch.tensor([0.7, 0.0, 1.3, 1.0])
     seeds = torch.tensor([0xABCD, -1, (1 << 63) - 1, 17], dtype=torch.int64)
     positions = torch.tensor([0, 11, 123456789, 19], dtype=torch.int64)
@@ -282,7 +282,7 @@ def test_greedy_supports_dtypes_strides_and_invalid_mapping(
     logits[0, [0, 17, 44]] = torch.tensor([1.0, 5.0, 3.0], dtype=dtype)
     logits[1, [0, 31, 44]] = torch.tensor([-3.0, -2.0, -1.0], dtype=dtype)
     logits[2, [3, 40]] = 7.0
-    mapping = torch.tensor([2, -1, 0], dtype=torch.int32)
+    mapping = torch.tensor([2, -1, 0], dtype=torch.int64)
     temperature = torch.tensor([0.0, 1.0, 0.0])
     seeds = torch.tensor([11, 22, 33], dtype=torch.int64)
     positions = torch.tensor([100, 101, 102], dtype=torch.int64)
@@ -294,7 +294,7 @@ def test_greedy_supports_dtypes_strides_and_invalid_mapping(
 
 def test_pre_scaled_logits_match_temperature_application() -> None:
     logits = torch.randn(4, 1031, generator=torch.Generator().manual_seed(7))
-    mapping = torch.tensor([2, 0, 3, 1], dtype=torch.int32)
+    mapping = torch.tensor([2, 0, 3, 1], dtype=torch.int64)
     temperature = torch.tensor([0.5, 1.5, 0.8, 2.0])
     seeds = torch.tensor([19, 23, 29, 31], dtype=torch.int64)
     positions = torch.tensor([31, 37, 41, 43], dtype=torch.int64)
@@ -326,7 +326,7 @@ def test_sampling_states_apply_temperature() -> None:
     states.temperature = SimpleNamespace(np=temperatures.numpy(), gpu=temperatures)
 
     logits = torch.arange(1, 69, dtype=torch.float32).reshape(4, 17)
-    expanded_idx_mapping = torch.tensor([2, 0, 3, 1], dtype=torch.int32)
+    expanded_idx_mapping = torch.tensor([2, 0, 3, 1], dtype=torch.int64)
     expected = logits / torch.tensor([2.0, 0.5, 1.0, 1.0]).unsqueeze(1)
 
     states.apply_temperature(logits, expanded_idx_mapping, torch.arange(4).numpy())
@@ -347,7 +347,7 @@ def test_sampling_states_apply_min_p() -> None:
             [4.0, 3.0, 2.0, 1.0],
         ]
     )
-    expanded_idx_mapping = torch.tensor([2, 0, 3, 1], dtype=torch.int32)
+    expanded_idx_mapping = torch.tensor([2, 0, 3, 1], dtype=torch.int64)
     expected = torch.tensor(
         [
             [2.0, -torch.inf, -torch.inf, -torch.inf],
@@ -424,7 +424,7 @@ def test_greedy_temperature_zero_returns_argmax() -> None:
     torch.manual_seed(0)
     num_requests = 128
     logits = torch.randn(num_requests, VOCAB_SIZE)
-    mapping = torch.arange(num_requests, dtype=torch.int32)
+    mapping = torch.arange(num_requests, dtype=torch.int64)
     temperature = torch.zeros(num_requests)
     seeds = torch.arange(num_requests, dtype=torch.int64)
     positions = torch.arange(num_requests, dtype=torch.int64)
