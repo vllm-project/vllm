@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The Clef-Omni pooler against a port of the checkpoint's joint schema head,
+"""The shared Clef pooler against a port of the checkpoint's joint schema head,
 which loops over questions where the pooler batches them."""
 
 import math
@@ -11,10 +11,15 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from vllm.model_executor.models.clef_omni import JointSchemaHead, JointSchemaPooler
+from vllm.model_executor.models.clef_joint_schema import (
+    JointSchemaHead,
+    JointSchemaPooler,
+)
+from vllm.platforms import current_platform
 from vllm.pooling_params import PoolingParams
 from vllm.v1.pool.metadata import PoolingMetadata, PoolingStates
 
+DEVICE_TYPE = current_platform.device_type
 HIDDEN, VOCAB = 64, 500
 TYPES = [0, 1, 1, 2]
 COUNTS = [2, 3, 1, 5]
@@ -52,7 +57,7 @@ def reference_logits(head, hidden, token_ids, embedding, question_spans, spans):
         base
         + head.option_summary_norm(torch.stack(summaries))
         + head.global_projection(global_vector)
-        + head.type_embedding(torch.tensor(TYPES))
+        + head.type_embedding(torch.tensor(TYPES, device=hidden.device))
     ).unsqueeze(0)
     for layer in head.layers:
         fields = layer(fields, memory)
@@ -87,7 +92,8 @@ def pooler():
     with torch.no_grad():
         for p in head.parameters():
             p.add_(torch.randn_like(p) * 0.2)
-    embedding = torch.randn(VOCAB, HIDDEN)
+    head.to(DEVICE_TYPE)
+    embedding = torch.randn(VOCAB, HIDDEN, device=DEVICE_TYPE)
     config = SimpleNamespace(
         scheduler_config=SimpleNamespace(
             enable_chunked_prefill=False, async_scheduling=False
@@ -129,7 +135,7 @@ def test_pooler_matches_reference(pooler):
     pooler, embedding = pooler
     lengths = [120, 90, 100]
     token_ids = [torch.randint(0, VOCAB, (n,)) for n in lengths]
-    hidden = torch.randn(sum(lengths), HIDDEN)
+    hidden = torch.randn(sum(lengths), HIDDEN, device=DEVICE_TYPE)
     first, first_questions, first_spans = schema(lengths[0])
     last, last_questions, last_spans = schema(lengths[2])
     params = [
@@ -151,7 +157,7 @@ def test_pooler_matches_reference(pooler):
     metadata.build_pooling_cursor(
         torch.tensor(lengths).numpy(),
         seq_lens_cpu=torch.tensor(lengths),
-        device=torch.device("cpu"),
+        device=hidden.device,
     )
     probs, empty, logits = pooler(hidden, metadata)
 
