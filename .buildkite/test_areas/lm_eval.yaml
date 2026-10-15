@@ -1344,7 +1344,6 @@ steps:
 
 - label: ":nvidia: (H100) [Nightly] LM Eval KV-Offload Large"
   key: kv-offload-large
-  automatic_shard: true
   # Nightly only: 4-GPU H100 pods wait behind smaller jobs on per-PR runs.
   optional: true
   timeout_in_minutes: 40
