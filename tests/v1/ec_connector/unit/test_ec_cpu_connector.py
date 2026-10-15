@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-E2E test for the ECCPUConnector.
+"""E2E test for the ECCPUConnector.
 
 Verifies:
 - Accuracy: outputs from EC CPU cache match fresh encoder computation.

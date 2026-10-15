@@ -2,10 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Any
 
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 
-class DeepseekV4Config(PretrainedConfig):
+class DeepseekV4Config(PreTrainedConfig):
     model_type = "deepseek_v4"
 
     def __init__(

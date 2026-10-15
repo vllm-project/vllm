@@ -506,6 +506,44 @@ def test_event_metadata_skips_non_full_attention_group(
     assert events[0].block_size == 0
 
 
+@pytest.mark.parametrize("secondary_removal_in_same_batch", [False, True])
+def test_primary_removal_preserves_metadata_for_same_batch_kvcr_store(
+    secondary_removal_in_same_batch,
+):
+    """A removal must not drop the payload a later store in the same batch
+    still needs, and must still drop it once no residency is left."""
+    tracker = _tracker()
+    group_config = _group_config(block_size=64, blocks_per_chunk=2)
+    req = _request(block_hashes=[_hash(i) for i in range(4)], token_count=256)
+    key = _record_chunks(tracker, req, group_config, num_chunks=2)[1]
+    secondary_removal = _removed_event([key], ownership="kvcr")
+
+    batch = [
+        _removed_event([key]),
+        _stored_event([key], ownership="kvcr", removal_expected=True),
+    ]
+    if secondary_removal_in_same_batch:
+        batch.append(secondary_removal)
+    events = list(tracker.take_events(batch))
+    if not secondary_removal_in_same_batch:
+        events += tracker.take_events([secondary_removal])
+    removed, stored, final_removal = events
+
+    hashes = [_wire_hash(_hash(2)), _wire_hash(_hash(3))]
+    assert isinstance(removed, BlockRemoved)
+    assert removed.block_hashes == hashes
+    assert stored.block_size == 64
+    assert stored.token_ids == list(range(129, 257))
+    assert stored.parent_block_hash == _wire_hash(_hash(1))
+    assert stored.block_hashes == hashes
+    assert stored.ownership == "kvcr"
+    assert final_removal.block_hashes == hashes
+
+    # Nothing holds a residency now, so the payload is gone.
+    [after_eviction] = tracker.take_events([_stored_event([key], ownership="kvcr")])
+    assert after_eviction.block_size == 0
+
+
 def test_pending_cpu_removal_consumes_hit_backfill_until_next_hit():
     tracker = _tracker()
     block_hashes = [_hash(0), _hash(1)]
@@ -682,3 +720,92 @@ def test_tiering_accepts_self_describing_kv_events():
     assert spec.kv_events_config.enable_kv_cache_events
     assert spec.kv_events_config.self_describing_kv_events
     assert tracker.self_describing_enabled
+
+
+def _build_tiering_spec(secondary_tiers, *, top_level_backpressure=None):
+    vllm_config = create_vllm_config(
+        block_size=4,
+        max_num_batched_tokens=16,
+        disable_hybrid_kv_cache_manager=False,
+    )
+    extra_config = {
+        "spec_name": "TieringOffloadingSpec",
+        "cpu_bytes_to_use": 1 << 20,
+        "secondary_tiers": secondary_tiers,
+    }
+    if top_level_backpressure is not None:
+        extra_config["backpressure"] = top_level_backpressure
+    vllm_config.kv_transfer_config = KVTransferConfig(
+        kv_connector="OffloadingConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config=extra_config,
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=0,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["layer"],
+                FullAttentionSpec(
+                    block_size=4,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            )
+        ],
+    )
+    return TieringOffloadingSpec(build_offloading_config(vllm_config, kv_cache_config))
+
+
+def test_partial_tier_backpressure_inherits_top_level_defaults():
+    """A partial tier override still inherits missing fields.
+
+    Field-by-field merge means an override that sets only ``high_water_s``
+    keeps ``backpressure_cls`` (and any other field) from the top-level
+    default, so the resolved dict reaching the factory is complete.
+    """
+    spec = _build_tiering_spec(
+        [{"type": "example", "backpressure": {"high_water_s": 0.1}}],
+        top_level_backpressure={
+            "backpressure_cls": "EMABackpressureDetector",
+            "high_water_s": 0.5,
+            "low_water_s": 0.05,
+        },
+    )
+
+    resolved = spec.secondary_tier_configs[0]["backpressure"]
+    # Tier override wins for the field it sets.
+    assert resolved["high_water_s"] == 0.1
+    # Missing fields fall back to the top-level default.
+    assert resolved["backpressure_cls"] == "EMABackpressureDetector"
+    assert resolved["low_water_s"] == 0.05
+
+
+def test_tier_override_wins_over_top_level():
+    """Precedence is tier override > top-level default, field-by-field."""
+    spec = _build_tiering_spec(
+        [
+            {
+                "type": "example",
+                "backpressure": {"high_water_s": 0.1, "low_water_s": 0.02},
+            }
+        ],
+        top_level_backpressure={
+            "backpressure_cls": "EMABackpressureDetector",
+            "high_water_s": 0.5,
+            "low_water_s": 0.05,
+        },
+    )
+
+    resolved = spec.secondary_tier_configs[0]["backpressure"]
+    # Tier override wins for the fields it sets.
+    assert resolved["high_water_s"] == 0.1
+    assert resolved["low_water_s"] == 0.02
+    # Fields only in top-level still fill in.
+    assert resolved["backpressure_cls"] == "EMABackpressureDetector"
+
+
+def test_tier_without_backpressure_stays_unconfigured():
+    spec = _build_tiering_spec([{"type": "example"}])
+    assert "backpressure" not in spec.secondary_tier_configs[0]

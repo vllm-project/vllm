@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-mod array;
+pub(crate) mod array;
 #[cfg(test)]
 mod tests;
 mod wire;
@@ -25,10 +25,13 @@ use crate::protocol::tensor::{WireArrayData, WireNdArray};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TokenLogprob {
     pub token_id: u32,
+    /// Preserves the engine's value, including NaN and infinities.
     pub logprob: f32,
     /// The sampled/selected token uses its actual vocab rank. Remaining entries
     /// use 1-based top-k ranks matching the engine's returned candidate
     /// order.
+    /// A sampled/selected rank of 0 occurs when its logprob is NaN: the engine's
+    /// `(logprobs >= selected_logprob).sum(-1)` counts no matching values.
     pub rank: u32,
 }
 
@@ -53,10 +56,6 @@ impl PositionLogprobs {
                 logprobs.len()
             );
         }
-        if sampled_rank == 0 {
-            bail_ext_value_decode!("token_ranks must be >= 1 for decoded engine-core logprobs");
-        }
-
         let mut entries = Vec::with_capacity(token_ids.len());
         for (index, (&token_id, &logprob)) in token_ids.iter().zip(logprobs.iter()).enumerate() {
             let rank = if index == 0 {

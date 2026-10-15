@@ -274,6 +274,53 @@ class TestNonStreaming:
             ' "multiSelect": false, "answer": null}]',
         }
 
+    @pytest.mark.parametrize(
+        "unclosed_func",
+        ["<function=function_name", "<function=function_name>"],
+    )
+    def test_regression_issue_58227(self, parser, mock_request, unclosed_func):
+        """Regression issue 58227
+        Check cases:
+        * <function=...<tool_call>
+        * <function=abc>...<function=
+        """
+        text = (
+            f"Use <tool_call>\n{unclosed_func}\n"
+            "Wait, let me call the real tool via <tool_call>:\n"
+            "<tool_call>\n"
+            "<function=get_weather>\n"
+            "<parameter=city>Tokyo</parameter>\n"
+            "</function>\n"
+            "</tool_call>"
+        )
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert result.tools_called is True
+        assert result.tool_calls[-1].function.name == "get_weather"
+        assert json.loads(result.tool_calls[-1].function.arguments) == {
+            "city": "Tokyo",
+        }
+
+    def test_tool_call_tag_is_ok_inside_parameter(self, parser, mock_request):
+        """Regression issue 58227
+        Check that <tool_call> tag is ok inside parameter value
+        """
+        text = (
+            "<tool_call>\n"
+            "<function=write_file>\n"
+            "<parameter=content>Document <tool_call> usage</parameter>\n"
+            "</function>\n"
+            "</tool_call>"
+        )
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert result.tools_called is True
+        assert len(result.tool_calls) == 1
+        assert result.tool_calls[0].function.name == "write_file"
+        assert json.loads(result.tool_calls[0].function.arguments) == {
+            "content": "Document <tool_call> usage",
+        }
+
 
 class TestStreaming:
     def test_basic_streaming(self, parser, mock_request):
@@ -634,6 +681,69 @@ class TestStreaming:
 
         assert "Bash" in names
         assert "Read" in names
+
+    @pytest.mark.parametrize(
+        "unclosed_func",
+        ["<function=function_name", "<function=function_name>"],
+    )
+    def test_streaming_regression_issue_58227(
+        self, parser, mock_request, unclosed_func
+    ):
+        """Regression issue 58227
+        Check cases:
+        * <function=...<tool_call>
+        * <function=abc>...<function=
+        """
+        chunks = [
+            "Use <tool_call>\n",
+            f"{unclosed_func}\n",
+            "Wait, let me call the real tool via ",
+            "<tool_call>",
+            ":\n",
+            "<tool_call>\n",
+            "<function=get_weather>\n",
+            "<parameter=city>Tokyo</parameter>\n",
+            "</function>\n",
+            "</tool_call>",
+        ]
+        results = simulate_tool_streaming(parser, mock_request, chunks)
+
+        calls_by_index: dict[int, dict[str, str]] = {}
+        for delta, _ in results:
+            if delta and delta.tool_calls:
+                for tc in delta.tool_calls:
+                    entry = calls_by_index.setdefault(
+                        tc.index, {"name": "", "arguments": ""}
+                    )
+                    if tc.function:
+                        if tc.function.name:
+                            entry["name"] += tc.function.name
+                        if tc.function.arguments:
+                            entry["arguments"] += tc.function.arguments
+
+        last_call = calls_by_index[max(calls_by_index)]
+        assert last_call["name"] == "get_weather"
+        assert json.loads(last_call["arguments"]) == {"city": "Tokyo"}
+
+    def test_streaming_tool_call_tag_is_ok_inside_parameter(self, parser, mock_request):
+        """Regression issue 58227
+        Check that <tool_call> tag is ok inside parameter value
+        """
+        chunks = [
+            "<tool_call>\n",
+            "<function=write_file>\n",
+            "<parameter=content>Document ",
+            "<tool_call>",
+            " usage</parameter>\n",
+            "</function>\n",
+            "</tool_call>",
+        ]
+        results = simulate_tool_streaming(parser, mock_request, chunks)
+
+        assert collect_function_name(results) == "write_file"
+        assert json.loads(collect_tool_arguments(results)) == {
+            "content": "Document <tool_call> usage",
+        }
 
 
 class TestArgConverter:
@@ -1175,3 +1285,27 @@ class TestNestedSchemaCoercion:
         assert questions[0]["question"] == "Pick a color"
         assert questions[0]["multiSelect"] is False
         assert questions[0]["answer"] is None
+
+
+@pytest.mark.parametrize("value", ["\n北京 &amp;\n", "null", "42", "", "a\nb"])
+@pytest.mark.parametrize("chunk_size", [1, 7, 1000])
+def test_mimo_preserves_verbatim_parameter_values(
+    mock_tokenizer, mock_request, value, chunk_size
+):
+    from vllm.parser.mimo import MiMoParser
+
+    text = (
+        f"<tool_call><function=run><parameter=text>{value}</parameter>"
+        "</function></tool_call>"
+    )
+    parser = MiMoParser(mock_tokenizer, chat_template_kwargs={"enable_thinking": False})
+    result = parser.extract_tool_calls(text, mock_request)
+    assert json.loads(result.tool_calls[0].function.arguments) == {"text": value}
+    parser = MiMoParser(mock_tokenizer, chat_template_kwargs={"enable_thinking": False})
+    results = simulate_tool_streaming(
+        parser,
+        mock_request,
+        [text[i : i + chunk_size] for i in range(0, len(text), chunk_size)],
+    )
+    assert collect_function_name(results) == "run"
+    assert json.loads(collect_tool_arguments(results)) == {"text": value}
