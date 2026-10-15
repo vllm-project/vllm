@@ -146,6 +146,7 @@ _CONFIG_REGISTRY: dict[str, type[PreTrainedConfig]] = LazyConfigDict(
     RefinedWebModel="RWConfig",  # For tiiuae/falcon-7b(-instruct)
     midashenglm="MiDashengLMConfig",
     minimax_m3_vl="MiniMaxM3VLConfig",  # Upstream class, hub code uses old schema
+    minimax_m3_mtp="MiniMaxM3MTPConfig",
     moondream3="Moondream3Config",
     moss_transcribe_diarize="MossTranscribeDiarizeConfig",
     eagle="EAGLEConfig",
