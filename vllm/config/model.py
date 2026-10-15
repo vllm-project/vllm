@@ -455,6 +455,7 @@ class ModelConfig:
     video_pruning_method: InitVar[str | None] = None
     mm_tensor_ipc: InitVar[MMTensorIPC] = None
     mm_ipc_gpu_memory_gb: InitVar[float | None] = None
+    mm_cuda_ipc_pool_gb: InitVar[float | None] = None
     mm_device_do_normalize: InitVar[bool | None] = None
     mm_processor_device: InitVar[MMProcessorDevice | None] = None
 
@@ -505,6 +506,7 @@ class ModelConfig:
             "skip_mm_profiling",
             "mm_ipc_gpu_memory_gb",
             "checkpoint_prepare_on_startup",
+            "mm_cuda_ipc_pool_gb",
         }
 
         from vllm.config.utils import get_hash_factors, hash_factors
@@ -599,6 +601,7 @@ class ModelConfig:
         video_pruning_method: str | None,
         mm_tensor_ipc: MMTensorIPC,
         mm_ipc_gpu_memory_gb: float | None,
+        mm_cuda_ipc_pool_gb: float | None,
         mm_device_do_normalize: bool | None,
         mm_processor_device: MMProcessorDevice | None,
     ) -> None:
@@ -876,6 +879,7 @@ class ModelConfig:
                 video_pruning_method=video_pruning_method,
                 mm_tensor_ipc=mm_tensor_ipc,
                 mm_ipc_gpu_memory_gb=mm_ipc_gpu_memory_gb,
+                mm_cuda_ipc_pool_gb=mm_cuda_ipc_pool_gb,
                 mm_device_do_normalize=self._resolve_mm_device_do_normalize(
                     mm_device_do_normalize
                 ),
@@ -1553,6 +1557,15 @@ class ModelConfig:
         self,
         parallel_config: ParallelConfig,
     ) -> None:
+        if (
+            self.multimodal_config is not None
+            and self.multimodal_config.mm_tensor_ipc == "cuda_ipc_pool"
+            and parallel_config._api_process_count > 1
+        ):
+            raise ValueError(
+                "mm_tensor_ipc='cuda_ipc_pool' requires --api-server-count=1."
+            )
+
         if parallel_config.enable_hc_sp and parallel_config.tensor_parallel_size > 1:
             if not current_platform.is_cuda_alike():
                 raise ValueError("--enable-hc-sp currently requires CUDA or ROCm")

@@ -326,6 +326,41 @@ def _nested_tensors_h2d(
     return json_map_leaves(_h2d, tensors)
 
 
+def _cuda_index_for(device: torch.types.Device) -> int:
+    """Resolve a CUDA device index for reconstructing a CUDA-IPC proxy."""
+    if device is not None and str(device) != "cpu":
+        dev = torch.device(device)
+        if dev.type == "cuda" and dev.index is not None:
+            return dev.index
+    return torch.accelerator.current_device_index()
+
+
+def _reconstruct_cuda_ipc_proxies(
+    tensors: Any,
+    device: torch.types.Device,
+) -> Any:
+    """Replace deferred CUDA-IPC proxy leaves with on-device tensors."""
+    from vllm.multimodal import gpu_ipc_memory
+
+    device_index = _cuda_index_for(device)
+
+    def _reconstruct(value: Any) -> Any:
+        if gpu_ipc_memory.is_cuda_ipc_proxy(value):
+            return value.reconstruct(device_index)
+        return value
+
+    return json_map_leaves(_reconstruct, tensors)
+
+
+def _batch_has_cuda_ipc_proxy(batch: Any) -> bool:
+    """Whether any leaf in ``batch`` is a deferred CUDA-IPC proxy."""
+    from vllm.multimodal import gpu_ipc_memory
+
+    return any(
+        gpu_ipc_memory.is_cuda_ipc_proxy(value) for value in json_iter_leaves(batch)
+    )
+
+
 BatchedTensorInputs: TypeAlias = dict[str, NestedTensors]
 """
 A dictionary containing nested tensors which have been batched via
@@ -492,6 +527,18 @@ class BaseMultiModalField(ABC):
             pin_memory = False
 
         batch = [elem.data for elem in elems]
+
+        # Worker side: reconstruct deferred CUDA-IPC proxies on this device.
+        # Each worker opens the cached pool handle and copies its slice onto
+        # its own GPU.
+        if _batch_has_cuda_ipc_proxy(batch):
+            tgt = torch.device(f"cuda:{_cuda_index_for(device)}")
+            batch = [_reconstruct_cuda_ipc_proxies(b, tgt) for b in batch]
+
+            # Some tensors in the same batch can use the host fallback when the
+            # pool is full. Move them to the same device before stack/concat.
+            batch = [_nested_tensors_h2d(b, tgt) for b in batch]
+
         if pin_memory and not _nested_tensors_are_cpu(batch):
             # Data already sits on an accelerator (e.g. a device-side HF
             # processor handed it over by IPC). Pinning is a host-memory

@@ -2952,14 +2952,15 @@ class VllmConfig:
         if ec_config is None or not ec_config.is_encode_only:
             return
 
-        if mm_config.mm_tensor_ipc != "torch_shm":
+        if mm_config.mm_tensor_ipc not in ("torch_shm", "cuda_ipc_pool"):
             # Any other transport serializes host bytes, so the output would be
             # copied back, and that copy costs more than running the transform
             # on device saves.
             logger.info_once(
                 "EPD encoder instance: keeping the multi-modal processor on CPU "
-                "because mm_tensor_ipc=%s cannot carry device tensors. Add "
-                "--mm-tensor-ipc=torch_shm to run it on the accelerator.",
+                "because mm_tensor_ipc=%s cannot carry device tensors. Set "
+                "--mm-tensor-ipc to a device-capable transport (torch_shm or "
+                "cuda_ipc_pool) to run it on the accelerator.",
                 mm_config.mm_tensor_ipc,
             )
             return

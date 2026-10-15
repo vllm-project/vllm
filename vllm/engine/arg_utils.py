@@ -689,6 +689,7 @@ class EngineArgs:
     mm_tensor_ipc: MMTensorIPC = MultiModalConfig.mm_tensor_ipc
     mm_processor_device: MMProcessorDevice = "auto"
     mm_ipc_gpu_memory_gb: float = MultiModalConfig.mm_ipc_gpu_memory_gb
+    mm_cuda_ipc_pool_gb: float = MultiModalConfig.mm_cuda_ipc_pool_gb
     mm_device_do_normalize: bool | None = MultiModalConfig.mm_device_do_normalize
     # LoRA fields
     enable_lora: bool = False
@@ -1588,14 +1589,18 @@ class EngineArgs:
             "encode/prefill/decode deployment -- an EC producer that is not "
             "also a consumer allocates no KV cache, so its accelerator is not "
             "contended by the language model -- and then only when "
-            "`--mm-tensor-ipc=torch_shm` can carry device tensors, since every "
-            "other transport would copy the result back to the host and that "
-            'copy costs more than it saves. "auto" resolves to "cpu" '
+            "`--mm-tensor-ipc` selects a device-capable transport (`torch_shm` "
+            "or `cuda_ipc_pool`). Other transports copy the result back to the "
+            'host, which costs more than it saves. "auto" resolves to "cpu" '
             "everywhere else.",
         )
         multimodal_group.add_argument(
             "--mm-ipc-gpu-memory-gb",
             **multimodal_kwargs["mm_ipc_gpu_memory_gb"],
+        )
+        multimodal_group.add_argument(
+            "--mm-cuda-ipc-pool-gb",
+            **multimodal_kwargs["mm_cuda_ipc_pool_gb"],
         )
         multimodal_group.add_argument(
             "--mm-device-do-normalize",
@@ -2064,6 +2069,7 @@ class EngineArgs:
             video_pruning_method=self.video_pruning_method,
             mm_tensor_ipc=self.mm_tensor_ipc,
             mm_ipc_gpu_memory_gb=self.mm_ipc_gpu_memory_gb,
+            mm_cuda_ipc_pool_gb=self.mm_cuda_ipc_pool_gb,
             mm_device_do_normalize=self.mm_device_do_normalize,
             mm_processor_device=self.mm_processor_device,
             io_processor_plugin=self.io_processor_plugin,

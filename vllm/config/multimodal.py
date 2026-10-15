@@ -289,7 +289,7 @@ class MultiModalDummyOptions(dict[str, BaseDummyOptions]):
 MMEncoderTPMode = Literal["weights", "data"]
 MMCacheType = Literal["shm", "lru"]
 VideoPruningMethod = Literal["evs", "vidcom2"]
-MMTensorIPC = Literal["direct_rpc", "torch_shm"]
+MMTensorIPC = Literal["direct_rpc", "torch_shm", "cuda_ipc_pool"]
 MMHasherAlgorithm = Literal["blake3", "sha256", "sha512"]
 MMProcessorDevice: TypeAlias = str
 """`"auto"`, `"cpu"`, or the platform's own accelerator name
@@ -441,6 +441,15 @@ class MultiModalConfig:
     """IPC (inter-process communication) method for multimodal tensors.
     - "direct_rpc": Use msgspec serialization via RPC
     - "torch_shm": Use torch.multiprocessing shared memory for zero-copy IPC
+    - "cuda_ipc_pool": Keep GPU-preprocessed features on the device and transport
+      them via a persistent CUDA IPC pool; each tensor-parallel worker reads its
+      copy directly from GPU (same-device copy or NVLink/P2P), avoiding a host
+      round trip. Supports `tensor_parallel_size > 1` on a single node with peer
+      access. Only engages for GPU-resident features (e.g.
+      `mm_processor_kwargs={"device": "cuda"}`); CPU features fall back to
+      "direct_rpc". Requires `mm_cuda_ipc_pool_gb` > 0, which both sizes the
+      pool and reserves the headroom for it. Currently requires
+      `--api-server-count=1` because each API-server process owns its own pool.
     Defaults to "direct_rpc". """
     allow_missing_mm_embeddings: bool = False
     """Whether a pre-computed-embedding input may omit the `*_embeds` tensor.
@@ -467,6 +476,16 @@ class MultiModalConfig:
     byte-counting semaphore of this size before allocating on the device.
 
     Set to `0` (default) to disable frontend GPU multimodal memory gating."""
+
+    mm_cuda_ipc_pool_gb: float = Field(default=0, ge=0)
+    """GPU memory (in GiB) reserved for the persistent `cuda_ipc_pool`
+    transport pool in the API-server process. Currently requires
+    `--api-server-count=1`.
+
+    The budget is carved out of the engine's KV-cache memory independently of
+    `mm_ipc_gpu_memory_gb`.
+
+    Set to `0` (default) when `mm_tensor_ipc` is not `"cuda_ipc_pool"`."""
 
     @field_validator("limit_per_prompt", mode="before")
     @classmethod
@@ -521,6 +540,20 @@ class MultiModalConfig:
             raise ValueError(
                 "'mm_shm_cache_max_object_size_mb' should only be set when "
                 "'mm_processor_cache_type' is 'shm'."
+            )
+        # The CUDA-IPC pool lives on the frontend's device; its memory must be
+        # reserved from the engine so it cannot race the workers' KV cache.
+        if self.mm_tensor_ipc == "cuda_ipc_pool":
+            if self.mm_cuda_ipc_pool_gb <= 0:
+                raise ValueError(
+                    "mm_tensor_ipc='cuda_ipc_pool' requires "
+                    "'mm_cuda_ipc_pool_gb' > 0 to size and reserve the "
+                    "on-device transport pool."
+                )
+        elif self.mm_cuda_ipc_pool_gb > 0:
+            raise ValueError(
+                "'mm_cuda_ipc_pool_gb' should only be set when "
+                "'mm_tensor_ipc' is 'cuda_ipc_pool'."
             )
         # Validate FP8 scale path combinations.
         if self.mm_encoder_attn_dtype != "fp8" and (
