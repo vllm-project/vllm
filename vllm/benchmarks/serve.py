@@ -823,22 +823,25 @@ async def benchmark(
     # Reuses connections across requests to reduce TLS handshake overhead.
     # Use ssl_context if provided, otherwise default to True for https URLs
     ssl_setting = ssl_context if ssl_context is not None else ("https://" in api_url)
-    connector = aiohttp.TCPConnector(
-        limit=max_concurrency or 0,
-        limit_per_host=max_concurrency or 0,
-        ttl_dns_cache=300,
-        use_dns_cache=True,
-        keepalive_timeout=60,
-        enable_cleanup_closed=True,
-        force_close=False,
-        ssl=ssl_setting,
-    )
 
-    session = aiohttp.ClientSession(
-        connector=connector,
-        trust_env=True,
-        timeout=aiohttp.ClientTimeout(total=6 * 60 * 60),
-    )
+    def make_session(limit: int) -> aiohttp.ClientSession:
+        connector = aiohttp.TCPConnector(
+            limit=limit,
+            limit_per_host=limit,
+            ttl_dns_cache=300,
+            use_dns_cache=True,
+            keepalive_timeout=60,
+            enable_cleanup_closed=True,
+            force_close=False,
+            ssl=ssl_setting,
+        )
+        return aiohttp.ClientSession(
+            connector=connector,
+            trust_env=True,
+            timeout=aiohttp.ClientTimeout(total=6 * 60 * 60),
+        )
+
+    session = make_session(max_concurrency or 0)
 
     print("Starting initial single prompt test run...")
     test_prompt, test_prompt_len, test_output_len, test_mm_content = (
@@ -997,11 +1000,16 @@ async def benchmark(
             chat_messages=None,
         )
         interval = 1 / probe_request_rate
-        while not probe_stop.is_set():
-            probe_outputs.append(
-                await request_func(request_func_input=probe_input, session=session)
-            )
-            await asyncio.sleep(interval)
+        # The main session's pool is capped at max_concurrency, so probes use
+        # their own connection.
+        async with make_session(1) as probe_session:
+            while not probe_stop.is_set():
+                probe_outputs.append(
+                    await request_func(
+                        request_func_input=probe_input, session=probe_session
+                    )
+                )
+                await asyncio.sleep(interval)
 
     probe_task: asyncio.Task | None = None
     if probe_request_rate > 0:
@@ -1080,14 +1088,16 @@ async def benchmark(
         )
     outputs: list[RequestFuncOutput] = await asyncio.gather(*tasks)
 
-    if probe_task is not None:
-        probe_stop.set()
-        await probe_task
-
     if pbar is not None:
         pbar.close()
 
     benchmark_duration = time.perf_counter() - benchmark_start_time
+
+    # Stop probes after measuring the duration, so the final probe interval
+    # is not counted toward the main workload's throughput.
+    if probe_task is not None:
+        probe_stop.set()
+        await probe_task
 
     spec_decode_metrics_after = await fetch_spec_decode_metrics(base_url, session)
     spec_decode_stats: dict[str, Any] | None = None
