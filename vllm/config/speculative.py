@@ -447,11 +447,18 @@ class SpeculativeConfig:
     speculative input batches can contain sequences of different lengths,
     which may only be supported by certain attention backends. This currently
     only affects the EAGLE method of speculation."""
-    disable_eagle_block_drop: bool = False
+    disable_eagle_block_drop: bool | None = None
     """Disable dropping the trailing prefix-cache block for EAGLE-like
-    speculative methods. This is an experimental option for measuring the
-    acceptance-rate impact of reusing that block. It does not disable the
-    speculative drafter itself."""
+    speculative methods. Reusing that block can only lower acceptance: the
+    draft KV at its last slot may encode a lookahead token that differs from
+    the new request's, but target verification keeps outputs exact. It does
+    not disable the speculative drafter itself.
+
+    If `None`, the drop is kept except for hybrid (attention + Mamba) models in
+    Mamba "align" prefix-caching mode with a single-token drafter lookahead:
+    there the block is sized to hold a Mamba state (often thousands of tokens),
+    so the drop recomputes a whole block on every prefix hit to protect one
+    draft KV slot."""
     use_local_argmax_reduction: bool = False
     """Use vocab-parallel local argmax instead of all-gathering full logits
     for draft token generation. Reduces communication from O(vocab_size) to
@@ -1909,6 +1916,26 @@ class SpeculativeConfig:
     def use_eagle_block_drop(self) -> bool:
         """Whether volatile trailing cache blocks should be discarded."""
         return self.use_eagle() and not self.disable_eagle_block_drop
+
+    def resolve_eagle_block_drop(
+        self, *, hybrid_align_prefix_caching: bool, prefill_lookahead_tokens: int
+    ) -> None:
+        """Resolve an unset `disable_eagle_block_drop` (see its docstring)."""
+        if self.disable_eagle_block_drop is not None:
+            return
+        self.disable_eagle_block_drop = (
+            self.method in ("eagle", "eagle3", "mtp")
+            and hybrid_align_prefix_caching
+            and prefill_lookahead_tokens == 1
+        )
+        if self.disable_eagle_block_drop:
+            logger.info(
+                "Keeping the trailing prefix-cache block for %s on a hybrid "
+                "model: its block holds a Mamba state, so dropping it would "
+                "recompute a whole block per prefix hit. Set "
+                "disable_eagle_block_drop=False to restore the drop.",
+                self.method,
+            )
 
     def use_dflash(self) -> bool:
         return self.method == "dflash"
