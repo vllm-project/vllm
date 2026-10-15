@@ -155,3 +155,109 @@ def test_emit_matches_single_shot_prefill_at_every_position(chunk_size, seed):
         assert torch.equal(out[0].view(torch.int16), ref_out[pos].view(torch.int16)), (
             f"position {pos} (chunk {chunk}, offset {t}) differs"
         )
+
+
+@pytest.mark.parametrize("chunk_size", [64])
+@pytest.mark.parametrize("seed", [0, 1])
+def test_emit_decode_schedule_matches_single_shot_prefill(chunk_size, seed):
+    """Prefill through the replayed scan, then decode through emit, batched.
+
+    Four sequences with prompts at different chunk offsets are prefilled with
+    ``exact_replay_ssd`` (which also zeroes the state of sequences still in
+    their first chunk) and then decoded one token per step with
+    ``exact_replay_emit`` while the batch shrinks as sequences finish. Every
+    produced row must equal the single-shot scan of the whole sequence.
+    """
+    from vllm.model_executor.layers.mamba.exact_replay import (
+        ExactReplayBuffers,
+        exact_replay_emit,
+        exact_replay_ssd,
+    )
+    from vllm.v1.attention.backends.mamba2_attn import build_exact_replay_metadata
+
+    torch.manual_seed(seed)
+    device = torch.device(DEVICE)
+    nheads, head_dim, ngroups, dstate = 8, 64, 1, 64
+    dtype = torch.bfloat16
+    A = -(torch.rand(nheads, device=device) * 15 + 1)
+    dt_target = torch.exp(
+        torch.rand(nheads, device=device)
+        * (torch.log(torch.tensor(0.1)) - torch.log(torch.tensor(1e-3)))
+        + torch.log(torch.tensor(1e-3))
+    )
+    dt_bias = dt_target + torch.log(-torch.expm1(-dt_target))
+    D = torch.ones(nheads, device=device)
+
+    total_lens = [150, 210, 30, 130]
+    prompt_lens = [100, 133, 20, 64]
+    n = len(total_lens)
+    xs = [torch.randn(L, nheads, head_dim, device=device).to(dtype) for L in total_lens]
+    dts = [(0.5 * torch.randn(L, nheads, device=device)).to(dtype) for L in total_lens]
+    Bs = [torch.randn(L, ngroups, dstate, device=device).to(dtype) for L in total_lens]
+    Cs = [torch.randn(L, ngroups, dstate, device=device).to(dtype) for L in total_lens]
+    refs = [
+        _reference(xs[i], dts[i], A, Bs[i], Cs[i], D, dt_bias, chunk_size)[0]
+        for i in range(n)
+    ]
+
+    num_slots = n + 1  # slot 0 is the null block
+    buffers = ExactReplayBuffers(
+        _paged(num_slots, (chunk_size, nheads, head_dim), dtype, device),
+        _paged(num_slots, (chunk_size, nheads), dtype, device),
+        _paged(num_slots, (chunk_size, ngroups, dstate), dtype, device),
+    )
+    ssm_state = torch.full(
+        (num_slots, nheads, head_dim, dstate), float("nan"), device=device
+    )
+    all_slots = torch.arange(1, n + 1, dtype=torch.int32, device=device)
+    outs = [torch.empty_like(x) for x in xs]
+    computed = [0] * n
+
+    def step(active, lens, fn):
+        x = torch.cat(
+            [xs[i][computed[i] : computed[i] + k] for i, k in zip(active, lens)]
+        )
+        dt = torch.cat(
+            [dts[i][computed[i] : computed[i] + k] for i, k in zip(active, lens)]
+        )
+        B = torch.cat(
+            [Bs[i][computed[i] : computed[i] + k] for i, k in zip(active, lens)]
+        )
+        C = torch.cat(
+            [Cs[i][computed[i] : computed[i] + k] for i, k in zip(active, lens)]
+        )
+        slots = all_slots[torch.tensor(active, device=device)]
+        meta = build_exact_replay_metadata(
+            [computed[i] for i in active], lens, chunk_size, device
+        )
+        out = torch.empty_like(x)
+        fn(
+            x,
+            dt,
+            B,
+            C,
+            A=A,
+            D=D,
+            dt_bias=dt_bias,
+            out=out,
+            ssm_state=ssm_state,
+            slots=slots,
+            meta=meta,
+            chunk_size=chunk_size,
+            buffers=buffers,
+        )
+        off = 0
+        for i, k in zip(active, lens):
+            outs[i][computed[i] : computed[i] + k] = out[off : off + k]
+            off += k
+            computed[i] += k
+
+    step(list(range(n)), prompt_lens, exact_replay_ssd)
+    while any(computed[i] < total_lens[i] for i in range(n)):
+        active = [i for i in range(n) if computed[i] < total_lens[i]]
+        step(active, [1] * len(active), exact_replay_emit)
+
+    for i in range(n):
+        assert torch.equal(outs[i].view(torch.int16), refs[i].view(torch.int16)), (
+            f"sequence {i}: emit decode diverged from single-shot prefill"
+        )
