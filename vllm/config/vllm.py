@@ -722,6 +722,8 @@ class VllmConfig:
             return use_v2_model_runner
 
         if not HAS_TRITON:
+            from vllm.platforms import current_platform
+
             if current_platform.is_cpu():
                 return True
             logger.warning_once(

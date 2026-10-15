@@ -1355,6 +1355,15 @@ def test_models_default_to_v2_model_runner(model_config, expected, monkeypatch):
     assert VllmConfig.use_v2_model_runner.fget(config) is expected
 
 
+def test_cpu_without_triton_defaults_to_v2_model_runner(monkeypatch):
+    monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
+    monkeypatch.setattr(vllm_config_module, "HAS_TRITON", False)
+    monkeypatch.setattr(current_platform, "is_cpu", lambda: True)
+    config = SimpleNamespace(attention_config=AttentionConfig())
+
+    assert VllmConfig.use_v2_model_runner.fget(config)
+
+
 def test_v1_model_runner_rejects_v2_only_features():
     config = SimpleNamespace(
         parallel_config=ParallelConfig(
