@@ -387,6 +387,7 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         w.region_group_ids = [0]
         w._transfer_layer_names = ()
         w._transfer_layer_region_indices = ()
+        w._packed_member_layouts = {}
         w._transfer_layer_group_ids = ()
         w.dst_region_num_blocks = {}
         w.dst_region_group_ids = {}
