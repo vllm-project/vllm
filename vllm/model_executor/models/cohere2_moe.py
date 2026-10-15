@@ -13,6 +13,7 @@ from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_reduce,
 )
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
@@ -195,6 +196,7 @@ class Cohere2MoeAttention(nn.Module):
             self.hidden_size,
             bias=False,
             quant_config=quant_config,
+            reduce_results=False,
             prefix=f"{prefix}.o_proj",
         )
         self.rotary_emb = get_rope(
@@ -302,6 +304,9 @@ class Cohere2Moe(nn.Module):
             self.shared_experts = None
             self.shared_expert_combination_strategy = None
 
+        # Routed-only MoE leaves its TP all-reduce to the decoder layer, which
+        # reduces the attention and MoE outputs together.
+        defer_all_reduce = self.tp_size > 1 and self.shared_experts is None
         self.experts = FusedMoEFactory(
             num_experts=config.num_experts,
             top_k=config.num_experts_per_tok,
@@ -314,6 +319,12 @@ class Cohere2Moe(nn.Module):
             prefix=f"{prefix}.experts",
             custom_routing_function=self.custom_routing_function,
             shared_experts=self.shared_experts,
+            reduce_results=not defer_all_reduce,
+        )
+        # The deferral is dropped when the MoE runner must reduce itself
+        # (e.g. EP all2all or sequence parallel).
+        self.output_is_reduced = not (
+            defer_all_reduce and self.experts.moe_config.skip_final_all_reduce
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -355,13 +366,15 @@ class Cohere2MoeDecoderLayer(nn.Module):
                     config, "prefix_dense_intermediate_size", config.intermediate_size
                 ),
                 quant_config=quant_config,
-                reduce_results=True,
                 prefix=f"{prefix}.mlp",
             )
         else:
             self.mlp = Cohere2Moe(
                 config=config, quant_config=quant_config, prefix=f"{prefix}.mlp"
             )
+        self.mlp_output_is_reduced = (
+            isinstance(self.mlp, Cohere2Moe) and self.mlp.output_is_reduced
+        )
 
         norm_cls, norm_eps = select_norm_impl(config)
         self.input_layernorm = norm_cls(param_shape=(config.hidden_size,), eps=norm_eps)
@@ -380,7 +393,16 @@ class Cohere2MoeDecoderLayer(nn.Module):
         )
         hidden_states_mlp = self.mlp(hidden_states)
 
-        hidden_states = residual + hidden_states_attention + hidden_states_mlp
+        if self.mlp_output_is_reduced:
+            parallel_block_output = (
+                tensor_model_parallel_all_reduce(hidden_states_attention)
+                + hidden_states_mlp
+            )
+        else:
+            parallel_block_output = tensor_model_parallel_all_reduce(
+                hidden_states_attention + hidden_states_mlp
+            )
+        hidden_states = residual + parallel_block_output
         return hidden_states, residual
 
 
