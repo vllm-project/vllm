@@ -228,10 +228,7 @@ class NixlTransport(DataTransport):
             nixl_name = self._peer_nixl_names.pop(peer_id, None)
             dlist = self._remote_dlists.pop(peer_id, None)
         if self._agent is not None:
-            if dlist is not None:
-                self._agent.release_dlist_handle(dlist)
-            if nixl_name:
-                self._agent.remove_remote_agent(nixl_name)
+            self._release_remote_handles(peer_id, dlist, nixl_name)
 
     def _begin_registration(self, peer_id: str) -> int:
         """Claim the next registration generation for *peer_id*."""
@@ -287,18 +284,40 @@ class NixlTransport(DataTransport):
             peer_id,
         )
         if self._agent is not None:
+            self._release_remote_handles(peer_id, remote_dlist, nixl_name)
+        return False
+
+    def _release_remote_handles(
+        self, peer_id: str, dlist: object | None, nixl_name: str | None
+    ) -> None:
+        """Release a peer's descriptor list and remote agent independently.
+
+        The two teardown operations are independent: NIXL may reject one
+        after a transport failure, and a ``release_dlist_handle`` that
+        raises must not skip ``remove_remote_agent``. Skipping it would
+        leave a stale remote registration behind after the peer is gone
+        (peer removal) or after its registration was superseded.
+        """
+        if dlist is not None:
             try:
-                self._agent.release_dlist_handle(remote_dlist)
-                self._agent.remove_remote_agent(nixl_name)
+                self._agent.release_dlist_handle(dlist)
             except Exception as exc:
                 logger.warning(
-                    "NixlTransport %s: releasing superseded registration "
-                    "for peer=%s failed: %s",
+                    "NixlTransport %s: releasing dlist handle for peer=%s failed: %s",
                     self._agent_name,
                     peer_id,
                     exc,
                 )
-        return False
+        if nixl_name:
+            try:
+                self._agent.remove_remote_agent(nixl_name)
+            except Exception as exc:
+                logger.warning(
+                    "NixlTransport %s: removing remote agent for peer=%s failed: %s",
+                    self._agent_name,
+                    peer_id,
+                    exc,
+                )
 
     # ------------------------------------------------------------------
     # Transfer submission and polling

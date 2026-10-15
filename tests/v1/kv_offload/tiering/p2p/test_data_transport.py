@@ -11,6 +11,7 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 
+from vllm.v1.kv_offload.tiering.p2p.data import nixl as nixl_module
 from vllm.v1.kv_offload.tiering.p2p.data.base import PollResult
 from vllm.v1.kv_offload.tiering.p2p.data.nixl import NixlTransport
 
@@ -424,6 +425,71 @@ class TestNixlTransportWithMockedAgent:
         assert "peer:1" not in transport._remote_dlists
         transport._agent.release_dlist_handle.assert_called()
         transport._agent.remove_remote_agent.assert_called()
+
+    def test_remove_peer_removes_agent_even_if_release_fails(self):
+        """A dlist release failure must not skip the agent removal.
+
+        Teardown runs two independent NIXL operations. If
+        release_dlist_handle() raises, remove_remote_agent() must still be
+        attempted with the registered agent name; skipping it would leave
+        a stale NIXL registration behind after the peer is gone.
+        """
+        transport = self._make_transport()
+        transport.add_remote_peer("peer:1", b"meta", 0x1000, 8, 1024)
+        transport._agent.release_dlist_handle.side_effect = RuntimeError(
+            "simulated release failure"
+        )
+
+        with patch.object(nixl_module.logger, "warning") as mock_warning:
+            transport.remove_remote_peer("peer:1")
+
+        # The release failure was logged rather than swallowed silently.
+        mock_warning.assert_called_once()
+        # Agent removal was still attempted with the registered name.
+        transport._agent.release_dlist_handle.assert_called_once()
+        transport._agent.remove_remote_agent.assert_called_once_with("nixl-peer-name")
+        assert "peer:1" not in transport._remote_dlists
+
+    def test_superseded_registration_removes_agent_even_if_release_fails(self):
+        """A release failure while discarding must still remove the agent.
+
+        _publish_peer discards handles built under a stale generation when
+        the peer was removed or re-registered mid-registration. Its
+        descriptor-list release and agent removal are independent too: if
+        release_dlist_handle() raises, remove_remote_agent() must still be
+        attempted for the superseded registration, otherwise its remote
+        agent stays registered forever.
+        """
+        transport = self._make_transport()
+        building = threading.Event()
+        release = threading.Event()
+
+        def blocking_prep(*args, **kwargs):
+            building.set()
+            release.wait(timeout=5)
+            return MagicMock(name="remote_dlist")
+
+        transport._agent.prep_xfer_dlist.side_effect = blocking_prep
+
+        future = transport.add_remote_peer_async("peer:1", b"meta", 0x1000, 8, 1024)
+        assert building.wait(timeout=5)
+        # Supersede the registration while its worker still builds handles.
+        transport.remove_remote_peer("peer:1")
+        transport._agent.release_dlist_handle.side_effect = RuntimeError(
+            "simulated release failure"
+        )
+
+        with patch.object(nixl_module.logger, "warning") as mock_warning:
+            release.set()
+            with pytest.raises(RuntimeError, match="superseded"):
+                future.result(timeout=5)
+
+            # The release failure was logged rather than swallowed silently.
+            mock_warning.assert_called_once()
+        # The superseded registration's agent was still removed.
+        transport._agent.release_dlist_handle.assert_called_once()
+        transport._agent.remove_remote_agent.assert_called_once_with("nixl-peer-name")
+        assert "peer:1" not in transport._remote_dlists
 
     def test_close_releases_everything(self):
         """Close releases all handles and clears state."""
