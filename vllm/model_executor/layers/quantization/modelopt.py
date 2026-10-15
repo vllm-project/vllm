@@ -1035,13 +1035,16 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             self.nvfp4_backend == NvFp4MoeBackend.B12X
             and envs.VLLM_B12X_MOE_FP4_FORCE_A16
         )
+        # Only backends that read the checkpoint's activation scales need them.
+        # FLASHINFER_B12X quantizes FC1 input itself and overwrites a2_gscale with
+        # 1.0; FLASHINFER_MOE_EP_CUTEDSL drops the input scales.
         if self.nvfp4_backend in (
             NvFp4MoeBackend.HUMMING,
             NvFp4MoeBackend.MARLIN,
+            NvFp4MoeBackend.FLASHINFER_B12X,
+            NvFp4MoeBackend.FLASHINFER_MOE_EP_CUTEDSL,
         ) or (self.nvfp4_backend == NvFp4MoeBackend.B12X and effective_a16):
             pass
-        elif self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_B12X:
-            names.append("w13_input_scale")
         else:
             names.extend(("w13_input_scale", "w2_input_scale"))
 

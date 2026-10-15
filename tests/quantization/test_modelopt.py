@@ -963,21 +963,22 @@ def test_modelopt_nvfp4_moe_b12x_w4a4_requires_activation_scales(monkeypatch):
         moe._validate_loaded_expert_scales(layer)
 
 
-def test_modelopt_nvfp4_moe_flashinfer_b12x_skips_only_w2_activation_scale():
+@pytest.mark.parametrize(
+    "backend_name", ["FLASHINFER_B12X", "FLASHINFER_MOE_EP_CUTEDSL"]
+)
+def test_modelopt_nvfp4_moe_backends_ignoring_activation_scales(backend_name):
     from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
         NvFp4MoeBackend,
     )
 
-    moe = _make_nvfp4_moe(backend=NvFp4MoeBackend.FLASHINFER_B12X)
+    moe = _make_nvfp4_moe(backend=NvFp4MoeBackend[backend_name])
     layer = _create_nvfp4_moe_layer(moe)
-    _fill_nvfp4_moe_scales(
-        layer,
-        ("w13_weight_scale_2", "w2_weight_scale_2", "w13_input_scale"),
-    )
+    # Weight scales only: accepted, since these backends never read activation scales.
+    _fill_nvfp4_moe_scales(layer, ("w13_weight_scale_2", "w2_weight_scale_2"))
     moe._validate_loaded_expert_scales(layer)
 
-    layer.w13_input_scale.data[2] = float("nan")
-    with pytest.raises(ValueError, match=r"'w13_input_scale'.*\[2\]"):
+    layer.w2_weight_scale_2.data[2] = float("nan")
+    with pytest.raises(ValueError, match=r"'w2_weight_scale_2'.*\[2\]"):
         moe._validate_loaded_expert_scales(layer)
 
 
