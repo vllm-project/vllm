@@ -610,7 +610,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 msg["tool_calls"] = list(tool_calls)
         return self
 
-    _api_surface: Literal["chat_completions", "messages"] = PrivateAttr(
+    _api_surface: Literal["chat_completions", "messages", "unknown"] = PrivateAttr(
         default="chat_completions"
     )
 

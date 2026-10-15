@@ -40,6 +40,8 @@ from vllm.entrypoints.openai.chat_completion.serving import (
     _make_completion_tokens_details,
     _make_prompt_tokens_details,
 )
+from vllm.entrypoints.openai.completion.protocol import CompletionRequest
+from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
 from vllm.entrypoints.openai.models.serving import (
     BaseModelPath,
     OpenAIModelRegistry,
@@ -60,7 +62,6 @@ from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.tokenizers import get_tokenizer
 from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.tokenizers.registry import cached_tokenizer_from_config
-from vllm.tracing import SpanAttributes
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.metrics.stats import RequestStateStats
 
@@ -866,39 +867,6 @@ async def test_streaming_errors_preserve_envelope(raw, failure):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("api_surface", ["messages", "chat_completions", "completions"])
-@pytest.mark.parametrize("tracing_enabled", [True, False])
-@pytest.mark.parametrize("with_parent", [True, False])
-async def test_inference_trace_headers_use_server_api_identity(
-    api_surface, tracing_enabled, with_parent
-):
-    """API attribution must not depend on a parent or trust client metadata."""
-    serving = OpenAIServingChat.__new__(OpenAIServingChat)
-    serving.engine_client = MagicMock()
-    serving.engine_client.is_tracing_enabled = AsyncMock(return_value=tracing_enabled)
-    parent_headers = (
-        {
-            "traceparent": "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01",
-            "tracestate": "vendor=value",
-        }
-        if with_parent
-        else {}
-    )
-    headers = {
-        **parent_headers,
-        "api_surface": "client-controlled",
-        "authorization": "secret",
-    }
-
-    result = await serving._get_trace_headers(headers, api_surface=api_surface)
-
-    expected = dict(parent_headers)
-    if tracing_enabled:
-        expected[SpanAttributes.API_SURFACE] = api_surface
-    assert result == (expected or None)
-
-
-@pytest.mark.asyncio
 async def test_other_generation_trace_headers_keep_existing_behavior():
     serving = OpenAIServingChat.__new__(OpenAIServingChat)
     serving.engine_client = MagicMock()
@@ -919,13 +887,20 @@ def test_chat_api_identity_cannot_be_set_through_request_json():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("messages_api", [True, False])
+@pytest.mark.parametrize(
+    "api_surface", ["messages", "chat_completions", "completions", "unknown"]
+)
 @pytest.mark.parametrize("stream", [True, False])
 @pytest.mark.parametrize("with_http_request", [True, False])
-async def test_chat_generation_passes_original_api_identity_to_engine(
-    messages_api, stream, with_http_request
+async def test_generation_passes_original_api_identity_to_engine(
+    api_surface, stream, with_http_request
 ):
-    serving = _build_minimal_metrics_serving_chat(False)
+    serving = (
+        OpenAIServingCompletion.__new__(OpenAIServingCompletion)
+        if api_surface == "completions"
+        else _build_minimal_metrics_serving_chat(False)
+    )
+    serving.request_logger = None
     serving.has_kv_connector = False
     serving.renderer = MagicMock()
     serving.model_config = SimpleNamespace(max_model_len=128, is_encoder_decoder=False)
@@ -940,29 +915,64 @@ async def test_chat_generation_passes_original_api_identity_to_engine(
     )
     serving.chat_completion_full_generator = AsyncMock()
     serving.chat_completion_stream_generator = MagicMock()
+    serving.render_completion_request = AsyncMock(
+        return_value=[{"type": "token", "prompt_token_ids": [1, 2]}]
+    )
+    serving.request_output_to_completion_response = MagicMock()
+    serving.completion_stream_generator = MagicMock()
     serving.engine_client = MagicMock()
-    serving.engine_client.is_tracing_enabled = AsyncMock(return_value=True)
+    serving.engine_client.generate.side_effect = (
+        lambda *args, **kwargs: _single_request_output(_make_metrics_request_output())
+    )
+    serving.engine_client.is_tracing_enabled = AsyncMock(return_value=False)
     messages = [{"role": "user", "content": "Hello"}]
-    if messages_api:
+    if api_surface == "messages":
         request = AnthropicServingMessages.to_chat_completion_request(
             AnthropicMessagesRequest(
                 model="test-model", messages=messages, max_tokens=8, stream=stream
             )
         )
-    else:
+    elif api_surface == "chat_completions":
         request = ChatCompletionRequest(messages=messages, max_tokens=8, stream=stream)
+    elif api_surface == "completions":
+        request = CompletionRequest(prompt=[1, 2], max_tokens=8, stream=stream)
+    else:
+        pytest.importorskip("cohere")
+        from vllm.entrypoints.cohere.protocol import CohereChatV2Request
+        from vllm.entrypoints.cohere.serving import CohereServingChatV2
+
+        request = CohereServingChatV2._convert_v2_to_chat_completion(
+            CohereChatV2Request(
+                model="test-model", messages=messages, max_tokens=8, stream=stream
+            )
+        )
+    traceparent = "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"
     raw_request = (
-        Request({"type": "http", "headers": [(b"api_surface", b"client-controlled")]})
+        Request(
+            {
+                "type": "http",
+                "headers": [
+                    (b"api_surface", b"client-controlled"),
+                    (b"authorization", b"secret"),
+                    (b"traceparent", traceparent.encode()),
+                ],
+            }
+        )
         if with_http_request
         else None
     )
 
-    await serving.create_chat_completion(request, raw_request)
+    if api_surface == "completions":
+        await serving.create_completion(request, raw_request)
+    else:
+        await serving.create_chat_completion(request, raw_request)
 
-    headers = serving.engine_client.generate.call_args.kwargs["trace_headers"]
-    assert headers == {
-        SpanAttributes.API_SURFACE: "messages" if messages_api else "chat_completions"
-    }
+    kwargs = serving.engine_client.generate.call_args.kwargs
+    assert kwargs["api_surface"] == api_surface
+    assert kwargs["trace_headers"] == (
+        {"traceparent": traceparent} if with_http_request else None
+    )
+    serving.engine_client.is_tracing_enabled.assert_not_awaited()
 
 
 def test_build_per_request_timing_metrics_valid_timestamps():

@@ -372,9 +372,10 @@ class OpenAIServingChat(GenerateBaseServing):
                 lora_request=lora_request,
             )
 
-            trace_headers = await self._get_trace_headers(
-                raw_request.headers if raw_request is not None else {},
-                api_surface=request._api_surface,
+            trace_headers = (
+                None
+                if raw_request is None
+                else await self._get_trace_headers(raw_request.headers)
             )
             session_id = self._get_session_id(request, raw_request)
 
@@ -386,6 +387,7 @@ class OpenAIServingChat(GenerateBaseServing):
                     lora_request=lora_request,
                     trace_headers=trace_headers,
                     session_id=session_id,
+                    api_surface=request._api_surface,
                 )
             else:
                 generator = self.engine_client.generate(
@@ -395,6 +397,7 @@ class OpenAIServingChat(GenerateBaseServing):
                     lora_request=lora_request,
                     trace_headers=trace_headers,
                     priority=self._get_priority(request, raw_request),
+                    api_surface=request._api_surface,
                     data_parallel_rank=data_parallel_rank,
                     session_id=session_id,
                     **self._engine_reasoning_kwargs(
