@@ -462,7 +462,7 @@ def test_mxfp4_experts_quant_no_saturation():
     not is_sm100_supported(),
     reason="mxfp4_experts_quant requires CUDA SM100",
 )
-@pytest.mark.parametrize("num_experts", [20, 40])
+@pytest.mark.parametrize("num_experts", [20, 21, 40])
 @pytest.mark.parametrize("fuse_silu_mul", [False, True])
 def test_mxfp4_experts_quant_ignores_memory_past_offsets(num_experts, fuse_silu_mul):
     """The expert lookup must not read past offsets[num_experts] when
@@ -519,6 +519,79 @@ def test_mxfp4_experts_quant_ignores_memory_past_offsets(num_experts, fuse_silu_
 
     torch.testing.assert_close(results[1][0], results[0][0], atol=0, rtol=0)
     torch.testing.assert_close(results[1][1], results[0][1], atol=0, rtol=0)
+
+
+@pytest.mark.skipif(
+    not is_sm100_supported(),
+    reason="mxfp4_experts_quant requires CUDA SM100",
+)
+@pytest.mark.parametrize("num_experts", [20, 21, 22, 23])
+@pytest.mark.parametrize("fuse_silu_mul", [False, True])
+def test_mxfp4_experts_quant_shared_offsets_path(num_experts, fuse_silu_mul):
+    """Large m_topk (blockRepeat > 1) uses the shared-memory offset kernel,
+    whose vectorized copy only handles num_experts % 4 == 0. Uneven experts,
+    including an empty one, must quantize each row exactly as a single-expert
+    call does (MXFP4 values and E8M0 scales are per row)."""
+    device = "cuda"
+    k = 256
+    props = torch.cuda.get_device_properties(device)
+    # The launch never has more than one thread per SM thread slot
+    # (block * grid <= SMs * max threads per SM), so more work items than that
+    # guarantees blockRepeat > 1.
+    work_per_row = k // 16  # CVT_FP4_ELTS_PER_THREAD
+    max_threads = props.multi_processor_count * props.max_threads_per_multi_processor
+    m_topk = 2 * max_threads // work_per_row
+    assert m_topk * work_per_row > max_threads
+
+    gen = torch.Generator().manual_seed(num_experts)
+    weights = torch.rand(num_experts, generator=gen)
+    weights[num_experts // 2] = 0  # one empty expert
+    counts = (weights / weights.sum() * m_topk).floor().to(torch.int64)
+    counts[0] += m_topk - int(counts.sum())
+    expert_offsets = [0] + torch.cumsum(counts, 0).tolist()
+    blockscale_offsets = [0] + torch.cumsum(
+        torch.tensor([align(int(c), 128) for c in counts]), 0
+    ).tolist()
+
+    width = 2 * k if fuse_silu_mul else k
+    input_tensor = torch.randn(m_topk, width, device=device, dtype=torch.bfloat16)
+    quant = (
+        ops.silu_and_mul_mxfp4_experts_quant
+        if fuse_silu_mul
+        else ops.mxfp4_experts_quant
+    )
+
+    def offsets(values: list[int]) -> torch.Tensor:
+        return torch.tensor(values, device=device, dtype=torch.int32)
+
+    output, output_sf = quant(
+        input_tensor,
+        offsets(expert_offsets),
+        offsets(blockscale_offsets),
+        num_experts,
+        1,
+    )
+    ref, ref_sf = quant(
+        input_tensor,
+        offsets([0, m_topk]),
+        offsets([0, align(m_topk, 128)]),
+        1,
+        1,
+    )
+
+    torch.testing.assert_close(output, ref, atol=0, rtol=0)
+    row_bytes = (k // MXFP4_BLOCK_SIZE + 3) // 4 * 4
+    sf, ref_scales = output_sf.flatten(), untile_cutlass_scale(ref_sf, m_topk, k)
+    for e in range(num_experts):
+        rows = expert_offsets[e + 1] - expert_offsets[e]
+        if rows == 0:
+            continue
+        torch.testing.assert_close(
+            untile_cutlass_scale(sf[blockscale_offsets[e] * row_bytes :], rows, k),
+            ref_scales[expert_offsets[e] : expert_offsets[e + 1]],
+            atol=0,
+            rtol=0,
+        )
 
 
 if __name__ == "__main__":
