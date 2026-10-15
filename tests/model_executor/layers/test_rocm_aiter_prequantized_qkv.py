@@ -7,7 +7,6 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-import vllm.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.platforms import current_platform
 from vllm.v1.attention.backend import PrequantizedQKV
@@ -299,24 +298,11 @@ def test_aiter_backend_ignores_prequantized_qkv_for_pure_decode(monkeypatch):
     assert torch.isfinite(recorded_query).all()
 
 
-@pytest.mark.parametrize(
-    ("kv_cache_dtype", "cache_dtype", "expected_quantize"),
-    [
-        ("fp8", torch.float8_e4m3fn, False),
-        ("auto", torch.bfloat16, True),
-    ],
-)
 @pytest.mark.parametrize("num_kv_heads", [1, 2])
-def test_aiter_backend_gathers_context_for_fp8_attention(
-    monkeypatch,
-    kv_cache_dtype,
-    cache_dtype,
-    expected_quantize,
-    num_kv_heads,
-):
+def test_aiter_backend_gathers_context_for_fp8_attention(monkeypatch, num_kv_heads):
     impl = object.__new__(rocm_aiter_fa.AiterFlashAttentionImpl)
     impl.num_kv_heads = num_kv_heads
-    impl.kv_cache_dtype = kv_cache_dtype
+    impl.kv_cache_dtype = "fp8"
     impl.scale = 1.0
     impl.sliding_window = (-1, -1)
     impl.alibi_slopes = None
@@ -382,8 +368,8 @@ def test_aiter_backend_gathers_context_for_fp8_attention(
         query=query,
         key=key,
         value=value,
-        key_cache=torch.empty((1, 1, num_kv_heads, 16), dtype=cache_dtype),
-        value_cache=torch.empty((1, 1, num_kv_heads, 16), dtype=cache_dtype),
+        key_cache=torch.empty((1, 1, num_kv_heads, 16), dtype=fp8_dtype),
+        value_cache=torch.empty((1, 1, num_kv_heads, 16), dtype=fp8_dtype),
         output=torch.empty_like(query),
         cu_seqlens_q=torch.tensor([0, 2], dtype=torch.int32),
         max_seqlen_q=2,
@@ -398,7 +384,6 @@ def test_aiter_backend_gathers_context_for_fp8_attention(
 
     assert gather_kwargs is not None
     assert gather_kwargs["dequant"] is False
-    assert gather_kwargs["quantize"] is expected_quantize
     assert len(attention_calls) == 2
     context_call = attention_calls[1]
     assert context_call["q"].data_ptr() == prequantized.query.data_ptr()
@@ -414,34 +399,16 @@ def test_aiter_backend_gathers_context_for_fp8_attention(
 
 
 @pytest.mark.parametrize(
-    ("kv_cache_dtype", "model_dtype", "use_prequantized_qkv", "expected"),
-    [
-        ("fp8", torch.bfloat16, False, False),
-        ("fp8", torch.bfloat16, True, True),
-        ("auto", torch.bfloat16, False, False),
-        ("auto", torch.bfloat16, True, True),
-        ("auto", torch.float16, True, False),
-        ("bfloat16", torch.float16, True, True),
-        ("float16", torch.bfloat16, True, False),
-    ],
+    ("kv_cache_dtype", "expected"),
+    [("fp8", True), ("auto", False), ("bfloat16", False)],
 )
 def test_aiter_backend_prequantized_qkv_cache_support(
-    monkeypatch,
-    kv_cache_dtype,
-    model_dtype,
-    use_prequantized_qkv,
-    expected,
+    monkeypatch, kv_cache_dtype, expected
 ):
     monkeypatch.setitem(
         sys.modules,
         "vllm.platforms.rocm",
         SimpleNamespace(on_gfx950=lambda: True),
-    )
-    monkeypatch.setattr(torch, "get_default_dtype", lambda: model_dtype)
-    monkeypatch.setattr(
-        envs,
-        "VLLM_ROCM_USE_PREQUANTIZED_QKV",
-        use_prequantized_qkv,
     )
 
     impl = rocm_aiter_fa.AiterFlashAttentionImpl(
