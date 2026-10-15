@@ -771,13 +771,18 @@ class BlockPool:
         """Return whether a block can be mutated by its sole owner."""
         return not block.is_null and block.ref_cnt == 1 and block.block_hash is None
 
-    def free_blocks(self, ordered_blocks: Iterable[KVCacheBlock]) -> None:
+    def free_blocks(
+        self, ordered_blocks: Iterable[KVCacheBlock], evict_first: bool = False
+    ) -> None:
         """Free a list of blocks. The blocks should be ordered by their
         eviction priority, where the first block will be evicted first.
 
         Args:
             ordered_blocks: A list of blocks to free ordered by their eviction
                 priority.
+            evict_first: Also put freed cached blocks at the front of the free
+                queue, so they are evicted before other cached blocks. For
+                blocks whose contents another tier already holds.
 
         """
         # Identify blocks with hash (LRU cache) and without it (never match APC)
@@ -790,8 +795,9 @@ class BlockPool:
                 continue
             block.ref_cnt -= 1
             if block.ref_cnt == 0 and not block.is_null:
-                if block.block_hash is None or not self.enable_caching:
-                    # LIFO reuse of non-cached blocks for better GPU locality.
+                if block.block_hash is None or not self.enable_caching or evict_first:
+                    # LIFO reuse of non-cached blocks for better GPU locality,
+                    # and of cached ones when asked to evict them first.
                     blocks_to_evict_first.append(block)
                 else:
                     # FIFO reuse of cached blocks for LRU eviction behavior.
@@ -802,7 +808,7 @@ class BlockPool:
         # Blocks to reuse last are appended to the end of the free queue.
         self.free_block_queue.append_n(blocks_to_evict_last)
         for pool, blocks in other_pools.items():
-            pool.free_blocks(blocks)
+            pool.free_blocks(blocks, evict_first=evict_first)
 
     def evict_blocks(self, block_ids: set[int]) -> None:
         """Evict blocks from the prefix cache by their block IDs.
