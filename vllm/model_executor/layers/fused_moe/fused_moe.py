@@ -1285,9 +1285,6 @@ def get_moe_wna16_block_config(
 def should_moe_wna16_use_cuda(
     num_valid_tokens: int, group_size: int, num_experts: int, bit: int
 ):
-    # The CUDA kernel is only picked for small batches, so the kernel (and the
-    # arithmetic) would change with the number of tokens. Batch-invariant mode
-    # always uses the Triton kernel with its fixed config.
     if envs.VLLM_BATCH_INVARIANT:
         return False
     return (
