@@ -883,18 +883,22 @@ D3_PROBS = {
 }
 
 
-@pytest.fixture
-def d3(engine_and_renderer):
-    engine, online_renderer = engine_and_renderer
+def use_d3_config(model_config):
     letters = [chr(c) for c in range(ord("A"), ord("Z") + 1)]
     codes = [*letters, *(a + b for a in letters for b in letters)][:255]
-    engine.model_config.hf_config.decision_config = {
+    model_config.hf_config.decision_config = {
         "format_version": 1,
         "prompt": "d3",
         "codes": codes,
         "token_ids": list(range(255)),
         "temperature": D3_TEMPERATURE,
     }
+
+
+@pytest.fixture
+def d3(engine_and_renderer):
+    engine, online_renderer = engine_and_renderer
+    use_d3_config(engine.model_config)
     tokenizer = online_renderer.renderer.get_tokenizer()
 
     async def encode(prompt, params, request_id, **kwargs):
@@ -967,6 +971,78 @@ async def test_d3_takes_more_options_than_letters(d3):
     assert "\nZ: option 25\nAA: option 26\n" in text
     assert "\nAN: option 39\n\n" in text
     assert len(response.answers["many"]["probabilities"]) == 40
+
+
+async def d3_read(strategy, state, questions=QUESTIONS):
+    sent, gate_full = [], []
+
+    async def encode(prompt, params, request_id, **kwargs):
+        sent.append(prompt["prompt_token_ids"])
+        gate_full.append(strategy._big_decision_gate.locked())
+        yield PoolingRequestOutput(
+            request_id, PoolingOutput(torch.zeros(255)), sent[-1], 0, True
+        )
+
+    strategy.context.engine_client.encode.side_effect = encode
+    read = strategy.read(
+        questions,
+        None,
+        strategy.render_state(state),
+        request_id="r",
+        chat_template_kwargs=None,
+        lora_request=None,
+        priority=0,
+    )
+    reads = await asyncio.wait_for(read, 30)
+    assert len(reads) == len(questions)
+    return sent, gate_full
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model", ["Qwen/Qwen3-0.6B", "Qwen/Qwen3.5-0.8B"])
+async def test_d3_spliced_prompts_match_full_encode(make_context, model):
+    context = make_context(model)
+    use_d3_config(context.engine_client.model_config)
+    strategy = D3Strategy(context)
+    long_state = "\n\n".join(f"Paragraph {i}: charged twice." for i in range(50))
+    for name, state in {**SPLICE_STATES, "long": long_state}.items():
+        sent, _ = await d3_read(strategy, state)
+        text = strategy.render_state(state)
+        full = [strategy._tokens(strategy._prompt(text, q, [])) for q in QUESTIONS]
+        assert sent == full, name
+
+    tokenized = []
+    tokens = strategy._tokens
+    strategy._tokens = lambda text: tokenized.append(text) or tokens(text)
+    await d3_read(strategy, long_state)
+    assert sum("Paragraph 0:" in text for text in tokenized) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "prefix_caching,num_questions,budget_fraction,gated",
+    [
+        # Without the prefix cache every read prefills the whole state.
+        (False, 3, 0.5, True),
+        (True, 3, 0.5, False),
+        (True, 3, 1.5, True),
+        (False, 1, 1.5, False),
+    ],
+)
+async def test_big_d3_decisions_take_the_gate(
+    make_context, prefix_caching, num_questions, budget_fraction, gated
+):
+    context = make_context()
+    use_d3_config(context.engine_client.model_config)
+    vllm_config = context.engine_client.vllm_config
+    vllm_config.cache_config.enable_prefix_caching = prefix_caching
+    budget = vllm_config.scheduler_config.max_num_batched_tokens
+    strategy = D3Strategy(context)
+    strategy._big_decision_gate = asyncio.Semaphore(1)
+    state = "state " * int(budget * budget_fraction)
+    _, gate_full = await d3_read(strategy, state, QUESTIONS[:num_questions])
+    assert gate_full == [gated] * num_questions
+    assert not strategy._big_decision_gate.locked()
 
 
 @pytest.mark.asyncio

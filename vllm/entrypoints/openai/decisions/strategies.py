@@ -65,6 +65,8 @@ _M = TypeVar("_M")
 logger = init_logger(__name__)
 
 _BIG_DECISIONS_IN_ENGINE = 2
+#: Characters before the splice point tokenized again with each question.
+_SPLICE_HEAD_CHARS = 64
 
 
 @dataclass
@@ -145,6 +147,18 @@ class ReadStrategy(ABC):
             else scheduler_config.max_num_batched_tokens
         )
         self._big_decision_gate = asyncio.Semaphore(_BIG_DECISIONS_IN_ENGINE)
+        cache_config = context.engine_client.vllm_config.cache_config
+        self._prefix_caching = cache_config.enable_prefix_caching
+
+    def _turn(
+        self, prompts: list[list[int]]
+    ) -> contextlib.AbstractAsyncContextManager[Any]:
+        """The gate a decision waits at so big decisions take turns."""
+        # With the prefix cache the engine computes the shared start once.
+        shared = len(os.path.commonprefix(prompts)) if self._prefix_caching else 0
+        num_tokens = shared + sum(len(p) - shared for p in prompts)
+        big = len(prompts) > 1 and num_tokens > self._big_decision_tokens
+        return self._big_decision_gate if big else contextlib.nullcontext()
 
     @cached_property
     def _connector(self) -> MediaConnector:
@@ -234,6 +248,16 @@ def cap_pixels(image: Image.Image, max_pixels: int) -> Image.Image:
     scale = math.sqrt(max_pixels / (w * h))
     size = (max(1, int(w * scale)), max(1, int(h * scale)))
     return image.resize(size, Image.Resampling.BICUBIC)
+
+
+def _splice_point(texts: list[str]) -> int | None:
+    """Where the texts split into the start they share and their own ends."""
+    # Split after the last blank line all texts share.
+    cut = os.path.commonprefix(texts).rfind("\n\n") + 2
+    # Whitespace after the cut can join a run longer than the head window.
+    if cut < 2 or any(t[cut : cut + 1].isspace() for t in texts):
+        return None
+    return cut
 
 
 def _messages(content: Any, instructions: str | None) -> list[Any]:
@@ -370,13 +394,10 @@ class NextTokenStrategy(ReadStrategy):
             if not isinstance(text := prompt.get("prompt"), str):
                 return None
             texts.append(text)
-        # Split after the last blank line all prompts share.
-        cut = os.path.commonprefix(texts).rfind("\n\n") + 2
-        # Whitespace after the cut can join a run longer than the head window.
-        if cut < 2 or any(t[cut : cut + 1].isspace() for t in texts):
+        if (cut := _splice_point(texts)) is None:
             return None
         # Tokens of the head must not change when a question follows it.
-        head = texts[0][max(0, cut - 64) : cut]
+        head = texts[0][max(0, cut - _SPLICE_HEAD_CHARS) : cut]
         tokenized = await renderer.tokenize_prompts_async(
             [
                 TextPrompt(prompt=t)
@@ -452,11 +473,9 @@ class NextTokenStrategy(ReadStrategy):
             )
 
         # Decisions over one engine step take turns so short ones need not wait.
-        shared = len(os.path.commonprefix(prompts))
-        num_tokens = shared + sum(len(p) - shared for p in prompts)
+        turn = self._turn(prompts)
         del prompts  # Do not hold the id copies while waiting at the gate.
-        big = len(questions) > 1 and num_tokens > self._big_decision_tokens
-        async with self._big_decision_gate if big else contextlib.nullcontext():
+        async with turn:
             label_reads = await next_token_label_reads(
                 ctx.engine_client,
                 engine_inputs,
@@ -1111,6 +1130,18 @@ class D3Strategy(ReadStrategy):
     def _tokens(self, text: str) -> list[int]:
         return self.tokenizer.encode(text, add_special_tokens=False)
 
+    def _tokens_spliced(self, texts: list[str]) -> list[list[int]]:
+        """Each text's tokens, with the start all texts share tokenized once."""
+        if len(texts) > 1 and (cut := _splice_point(texts)) is not None:
+            # Tokens of the head must not change when a question follows it.
+            head = texts[0][max(0, cut - _SPLICE_HEAD_CHARS) : cut]
+            head_ids = self._tokens(head)
+            windows = [self._tokens(head + t[cut:]) for t in texts]
+            if all(w[: len(head_ids)] == head_ids for w in windows):
+                prefix_ids = self._tokens(texts[0][:cut])
+                return [prefix_ids + w[len(head_ids) :] for w in windows]
+        return [self._tokens(t) for t in texts]
+
     async def _render_media(
         self, prefix: str, media: Mapping[str, Sequence[str]], cache_salt: str | None
     ) -> MultiModalInput:
@@ -1197,12 +1228,12 @@ class D3Strategy(ReadStrategy):
                     "the questions' prompts do not share their media"
                 )
             media_input = await self._render_media(prefix, media or {}, cache_salt)
-            for p in prompts:
-                ids = media_input["prompt_token_ids"] + self._tokens(p[split:])
+            for text_ids in self._tokens_spliced([p[split:] for p in prompts]):
+                ids = media_input["prompt_token_ids"] + text_ids
                 engine_inputs.append({**media_input, "prompt_token_ids": ids})
                 prompt_ids.append(ids)
         else:
-            prompt_ids = [self._tokens(p) for p in prompts]
+            prompt_ids = self._tokens_spliced(prompts)
             engine_inputs = [
                 tokens_input(ids, cache_salt=cache_salt) for ids in prompt_ids
             ]
@@ -1232,9 +1263,10 @@ class D3Strategy(ReadStrategy):
                 )
             return result.outputs.data.tolist()
 
-        logits = await asyncio.gather(
-            *(read_one(n, inputs) for n, inputs in enumerate(engine_inputs))
-        )
+        async with self._turn(prompt_ids):
+            logits = await asyncio.gather(
+                *(read_one(n, inputs) for n, inputs in enumerate(engine_inputs))
+            )
 
         reads = []
         for q, ids, code_logits in zip(questions, prompt_ids, logits):
