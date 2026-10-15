@@ -93,49 +93,51 @@ steps:
       - requirements/kv_connectors_rocm.txt
       commands:
       - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
-      # Everything that measured the first bug is gone from here, because it is
-      # answered: VLLM_EEP_DEBUG_EARLY_GROUP_CLEANUP=1 removed the 4097 refusal
-      # at scale up in eleven passes across three agents from two node families,
-      # against a baseline that refused every time, with a same job control on
-      # each machine. Both IPC repros are gone too. They reproduced the ROCm
-      # refusal on all three agents with the same per rank fingerprint, and
-      # then locally as well with the same parameters, so they have nothing
-      # left to learn from CI and belong in the ROCm report instead.
+      # The first failure is answered and nothing here measures it any more:
+      # VLLM_EEP_DEBUG_EARLY_GROUP_CLEANUP=1 removed the 4097 refusal at scale up
+      # in seventeen passes across four agents from three node families, against
+      # a baseline that refused every time, with a same job control in each job.
+      # Every pass below carries it as the new baseline rather than as a
+      # candidate. Both IPC repros are gone too: they reproduced the ROCm
+      # refusal on all four hosts, including ours at a fifteen times lower rate,
+      # so they belong in the ROCm report and not in CI.
       #
-      # What is left is the second bug, and the one thing build 95099 taught
-      # about it is that it is not deterministic. Byte identical commands in
-      # the same job on the same machine gave four different outcomes, from
-      # accuracy 0.000 to one fully clean pass. So every candidate below runs
-      # three times, and a single green pass is not an answer.
+      # VLLM_EEP_DEBUG_DRAIN_BEFORE_RECONFIG=1 is gone after one round. It
+      # passed one of three, and in most passes it logged 0.000 s, because
+      # drain_async only drains an async EPLB cycle and not the copies a full
+      # rearrange leaves in flight, so it was mostly a no-op.
       #
-      # The pass or fail signal is whether a memory access fault appeared at
-      # all, not the accuracy. Accuracy 0.555 and 0.559 are exactly what 48 and
-      # 46 timed out requests out of 256 produce once the engine dies mid
-      # evaluation, so the score only records when the crash landed.
+      # VLLM_EEP_DEBUG_SYNC_RESHUFFLE=1 stays, and it answered one half of the
+      # second failure. All three of its scale ups came out correct, 0.621,
+      # 0.648 and 0.645, where the same machine gave 0.000 and 0.016 without it,
+      # and it costs about five seconds of downtime rather than the whole copy
+      # window, because the rearrange itself takes 1.96 s when awaited. So the
+      # unawaited window did cause the fault during the traffic right after
+      # scale up, and this is now a fix candidate rather than a cause test.
       #
-      # Candidate one, three passes. prepare_reconfiguration waits for the group
-      # cleanup but not for the expert copies that commit_scale_up scheduled
-      # asynchronously, and the drain that does wait for them runs later, inside
-      # the commit. The scale down request arrives 34 to 36 s into a 39 s copy
-      # window, and create_standby_groups then either gets the 4097 refusal
-      # (command 4 of job 01a13f50) or faults the GPU inside ncclCommInitRank
-      # (command 5 of the same job). This drains first. It is the cheap
-      # candidate, since it only waits when copies are actually in flight.
-      - VLLM_EEP_DEBUG_DRAIN_BEFORE_RECONFIG=1 VLLM_EEP_DEBUG_EARLY_GROUP_CLEANUP=1 VLLM_EEP_DEBUG_OFF=1 AMD_LOG_LEVEL=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=VLLM_EEP_DEBUG_DRAIN_BEFORE_RECONFIG,VLLM_EEP_DEBUG_EARLY_GROUP_CLEANUP,VLLM_EEP_DEBUG_OFF,AMD_LOG_LEVEL pytest -v -s distributed/test_elastic_ep.py -k enforce_eager_none || true
-      - VLLM_EEP_DEBUG_DRAIN_BEFORE_RECONFIG=1 VLLM_EEP_DEBUG_EARLY_GROUP_CLEANUP=1 VLLM_EEP_DEBUG_OFF=1 AMD_LOG_LEVEL=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=VLLM_EEP_DEBUG_DRAIN_BEFORE_RECONFIG,VLLM_EEP_DEBUG_EARLY_GROUP_CLEANUP,VLLM_EEP_DEBUG_OFF,AMD_LOG_LEVEL pytest -v -s distributed/test_elastic_ep.py -k enforce_eager_none || true
-      - VLLM_EEP_DEBUG_DRAIN_BEFORE_RECONFIG=1 VLLM_EEP_DEBUG_EARLY_GROUP_CLEANUP=1 VLLM_EEP_DEBUG_OFF=1 AMD_LOG_LEVEL=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=VLLM_EEP_DEBUG_DRAIN_BEFORE_RECONFIG,VLLM_EEP_DEBUG_EARLY_GROUP_CLEANUP,VLLM_EEP_DEBUG_OFF,AMD_LOG_LEVEL pytest -v -s distributed/test_elastic_ep.py -k enforce_eager_none || true
-      # Candidate two, three passes. The drain above cannot help the fault that
-      # lands during the traffic one second after the copies are scheduled, so
-      # this one removes the window itself: commit_scale_up stops passing
-      # async_op=True and _perform_eplb_reshuffle runs torch.accelerator
-      # .synchronize() before returning. Expensive by construction, since it
-      # adds the whole 39 s copy window to the downtime, so it is a cause test
-      # and not a proposed fix. If these three are clean and the three above
-      # are not, the window is the cause and the fix has to be something that
-      # keeps traffic away from the copies without blocking on them.
+      # What is left is the other half, the one this round is built to measure.
+      # With everything synchronous, one pass of three still died at the next
+      # reconfiguration: both new workers took "Memory access fault ... Reason:
+      # Unknown" inside create_standby_groups, at elastic_execute.py:350. There
+      # was no copy in flight at that point, so the window does not explain it,
+      # and build 95099 showed the same place twice, once as the 4097 refusal
+      # and once as a fault inside ncclCommInitRank.
+      #
+      # Four passes here measure how often that happens, since one in three is
+      # a single observation and nothing more.
       - VLLM_EEP_DEBUG_SYNC_RESHUFFLE=1 VLLM_EEP_DEBUG_EARLY_GROUP_CLEANUP=1 VLLM_EEP_DEBUG_OFF=1 AMD_LOG_LEVEL=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=VLLM_EEP_DEBUG_SYNC_RESHUFFLE,VLLM_EEP_DEBUG_EARLY_GROUP_CLEANUP,VLLM_EEP_DEBUG_OFF,AMD_LOG_LEVEL pytest -v -s distributed/test_elastic_ep.py -k enforce_eager_none || true
       - VLLM_EEP_DEBUG_SYNC_RESHUFFLE=1 VLLM_EEP_DEBUG_EARLY_GROUP_CLEANUP=1 VLLM_EEP_DEBUG_OFF=1 AMD_LOG_LEVEL=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=VLLM_EEP_DEBUG_SYNC_RESHUFFLE,VLLM_EEP_DEBUG_EARLY_GROUP_CLEANUP,VLLM_EEP_DEBUG_OFF,AMD_LOG_LEVEL pytest -v -s distributed/test_elastic_ep.py -k enforce_eager_none || true
       - VLLM_EEP_DEBUG_SYNC_RESHUFFLE=1 VLLM_EEP_DEBUG_EARLY_GROUP_CLEANUP=1 VLLM_EEP_DEBUG_OFF=1 AMD_LOG_LEVEL=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=VLLM_EEP_DEBUG_SYNC_RESHUFFLE,VLLM_EEP_DEBUG_EARLY_GROUP_CLEANUP,VLLM_EEP_DEBUG_OFF,AMD_LOG_LEVEL pytest -v -s distributed/test_elastic_ep.py -k enforce_eager_none || true
+      - VLLM_EEP_DEBUG_SYNC_RESHUFFLE=1 VLLM_EEP_DEBUG_EARLY_GROUP_CLEANUP=1 VLLM_EEP_DEBUG_OFF=1 AMD_LOG_LEVEL=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=VLLM_EEP_DEBUG_SYNC_RESHUFFLE,VLLM_EEP_DEBUG_EARLY_GROUP_CLEANUP,VLLM_EEP_DEBUG_OFF,AMD_LOG_LEVEL pytest -v -s distributed/test_elastic_ep.py -k enforce_eager_none || true
+      # The two passes below ask the one question that splits the remaining
+      # failure in half. NCCL_P2P_DISABLE=1 makes RCCL issue no IPC calls at
+      # all, so if the fault inside create_standby_groups survives it, the
+      # remaining bug is not ROCm's IPC path and is ours; if it disappears, it
+      # is the same ROCm bug wearing a different face. Two passes rather than
+      # one because nothing in this test is deterministic, and the flag costs
+      # throughput, so it can never be the fix either way.
+      - NCCL_P2P_DISABLE=1 VLLM_EEP_DEBUG_SYNC_RESHUFFLE=1 VLLM_EEP_DEBUG_EARLY_GROUP_CLEANUP=1 VLLM_EEP_DEBUG_OFF=1 AMD_LOG_LEVEL=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=NCCL_P2P_DISABLE,VLLM_EEP_DEBUG_SYNC_RESHUFFLE,VLLM_EEP_DEBUG_EARLY_GROUP_CLEANUP,VLLM_EEP_DEBUG_OFF,AMD_LOG_LEVEL pytest -v -s distributed/test_elastic_ep.py -k enforce_eager_none || true
+      - NCCL_P2P_DISABLE=1 VLLM_EEP_DEBUG_SYNC_RESHUFFLE=1 VLLM_EEP_DEBUG_EARLY_GROUP_CLEANUP=1 VLLM_EEP_DEBUG_OFF=1 AMD_LOG_LEVEL=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=NCCL_P2P_DISABLE,VLLM_EEP_DEBUG_SYNC_RESHUFFLE,VLLM_EEP_DEBUG_EARLY_GROUP_CLEANUP,VLLM_EEP_DEBUG_OFF,AMD_LOG_LEVEL pytest -v -s distributed/test_elastic_ep.py -k enforce_eager_none || true
       # The verdict, and the only command without || true. The probes are off
       # here on purpose. In attempt 1 this command carried them, and warm_each
       # re-raised after the real work had already succeeded: expert resharding
