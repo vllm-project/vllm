@@ -3,6 +3,8 @@ accuracy_threshold: 0.90
 num_questions: 1319
 num_fewshot: 5
 max_concurrency: 100
+# 30B+ MoE with EP/PCP: download + kernel autotuning can exceed the 1200s default.
+startup_max_wait_seconds: 2400
 # Leave headroom for FlashInfer CUTLASS autotuning after KV-cache allocation.
 server_args: >-
   --compilation-config '{"cudagraph_mode":"NONE"}'

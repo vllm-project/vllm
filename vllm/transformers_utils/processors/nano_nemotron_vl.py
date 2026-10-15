@@ -20,7 +20,7 @@ import numpy.typing as npt
 import regex as re
 import torch
 from PIL import Image
-from transformers import BatchFeature, PretrainedConfig, TensorType
+from transformers import BatchFeature, PreTrainedConfig, TensorType
 
 from vllm.model_executor.models.parakeet import ParakeetExtractor
 from vllm.multimodal.inputs import AudioItem
@@ -551,7 +551,9 @@ class DynamicResolutionImageTiler:
         )
 
     @staticmethod
-    def stack(images: list[torch.Tensor], patch_size: int) -> torch.Tensor:
+    def stack(
+        images: list[torch.Tensor] | torch.Tensor, patch_size: int
+    ) -> torch.Tensor:
         assert len(images) > 0, "No images to stack"
 
         def rearrange_img(x):
@@ -582,7 +584,7 @@ class BaseNanoNemotronVLProcessor(ABC):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         tokenizer: HfTokenizer,
         *args,
         max_model_len: int,
@@ -621,7 +623,7 @@ class BaseNanoNemotronVLProcessor(ABC):
         self.dtype: torch.dtype = getattr(config, "dtype", torch.float32)
 
     @staticmethod
-    def use_dynamic_resolution(config: PretrainedConfig) -> bool:
+    def use_dynamic_resolution(config: PreTrainedConfig) -> bool:
         return "min_num_patches" in config.vision_config.args
 
     @property
@@ -769,7 +771,7 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         tokenizer: HfTokenizer,
         *,
         max_model_len: int,
