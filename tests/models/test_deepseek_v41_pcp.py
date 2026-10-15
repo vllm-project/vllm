@@ -6,6 +6,7 @@ from unittest.mock import Mock
 import pytest
 import torch
 
+from vllm.config import KVTransferConfig
 from vllm.forward_context import ForwardContext, override_forward_context
 from vllm.models.deepseek_v41 import attention as attention_module
 from vllm.models.deepseek_v41.decoder_replay_layers import (
@@ -195,3 +196,18 @@ def test_pcp_rejects_speculation_other_than_fixed_length_dspark(method, adaptive
     )
     with pytest.raises(NotImplementedError, match="fixed-length DSpark"):
         model_module.DeepseekV4Model(vllm_config=config)
+
+
+def test_pcp_nixl_requires_pull_producer(default_vllm_config):
+    config = default_vllm_config
+    config.parallel_config.prefill_context_parallel_size = 2
+    config.cache_config.enable_prefix_caching = False
+    config.scheduler_config.async_scheduling = False
+    config.kv_transfer_config = KVTransferConfig(
+        kv_connector="NixlConnector", kv_role="kv_producer", kv_buffer_device="cuda"
+    )
+    model_module._validate_pcp_config(config)
+
+    config.kv_transfer_config.kv_role = "kv_consumer"
+    with pytest.raises(NotImplementedError, match="consumers require PCP=1"):
+        model_module._validate_pcp_config(config)
