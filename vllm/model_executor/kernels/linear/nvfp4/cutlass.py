@@ -19,8 +19,9 @@ from .base import NvFp4LinearKernel, NvFp4LinearLayerConfig
 
 
 class CutlassNvFp4LinearKernel(NvFp4LinearKernel):
-    supports_partial_sum_dtype = True
     """NVFP4 GEMM via the vLLM CUTLASS kernel."""
+
+    supports_partial_sum_dtype = True
 
     @classmethod
     def is_supported(
