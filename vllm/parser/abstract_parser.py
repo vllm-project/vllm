@@ -118,8 +118,9 @@ class Parser:
     # Subclasses should override these if they use specific parser classes
     reasoning_parser_cls: type[ReasoningParser] | None = None
     tool_parser_cls: type[ToolParser] | None = None
-    # Server-side floor for tool-call structural tags (--tool-strict-level).
-    tool_strict_level: ToolStrictLevel = ToolStrictLevel.AUTO
+    # Server-side floor for tool-call structural tags (--tool-strict-level), or
+    # None for the tool parser's default level.
+    tool_strict_level: ToolStrictLevel | None = None
     always_adjust_request: bool = False
 
     def __init__(
@@ -519,10 +520,7 @@ class DelegatingParser(Parser):
         is_auto = request.tool_choice == "auto"
         single_call = request.parallel_tool_calls is False
         strict_level = self.tool_strict_level
-        if (
-            strict_level == ToolStrictLevel.AUTO
-            and tool_parser.default_tool_strict_level is not None
-        ):
+        if strict_level is None:
             strict_level = tool_parser.default_tool_strict_level
         if single_call and not (is_auto and structured_outputs is not None):
             # Limiting the call count needs the call envelope in the grammar.
