@@ -53,12 +53,16 @@ def alloc_scratch(device) -> None:
         layer.scratch_bytes(layer.K2Build(tokens=moe.MOE_TILE_TOKENS, nblocks=8)),
         layer.scratch_bytes(
             layer.K2Build(
-                tokens=48,
+                tokens=MAX_TOKENS,
                 nblocks=8,
                 producer_latent_quant=True,
                 stream_x=True,
                 wide=True,
-                tail_panels=True,
+                compact_lds=True,
+                cache_wide_inter=True,
+                stream_attn=True,
+                sparse_routes=True,
+                front_panels=True,
             )
         ),
         overlap.scratch_bytes(
@@ -100,7 +104,7 @@ def peers(device) -> "PeerBuffer":
         from vllm.models.kimi_k3.amd.mono.stages import moe
 
         tp = get_tp_group()
-        nbytes = max(moe.peer_bytes(moe.MOE_TILE_TOKENS), layer.peer_bytes(48))
+        nbytes = max(moe.peer_bytes(moe.MOE_TILE_TOKENS), layer.peer_bytes(MAX_TOKENS))
         buf = PeerBuffer(nbytes, tp.cpu_group, tp.rank_in_group, tp.world_size, device)
         buf.bytes.zero_()
         _State.peers = buf

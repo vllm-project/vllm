@@ -12,9 +12,9 @@ A uniform spec-verify step selects persistent kernels by row count:
   attention up to o_proj's input, then K2.
 
 KDA steps of at most 16 rows overlap K1 and K2 in one launch. Selected larger
-batches through 48 rows use a separate K2 with packed expert tokens and
+batches through 32 rows use a separate K2 with packed expert tokens and
 shape-specific front-stage pipelining. Other larger batches retain the
-production MoE. KDA batches above 29 rows retain the
+production MoE. KDA batches of 30 through 32 rows retain the
 production input projection and fuse the post-projection KDA. K1 needs pure
 uniform verification with at most 8 tokens per request; other attention
 batches take the original path.
@@ -220,7 +220,7 @@ class MonoKda:
 
         core = prefix_sum.new_empty(prefix_sum.size(0), PROJ)
         if (
-            prefix_sum.size(0) >= 30
+            30 <= prefix_sum.size(0) <= MAX_TOKENS
             and not self.serialized_offload
             and self.layer.self_attn.use_local_post
             and self.weights_ok()
@@ -365,7 +365,7 @@ def _prepare_kda(
         (24, 6): (2113536, 0),
         (16, 8): (33562624, 0),
         (24, 8): (35667968, 32),
-    }.get((s, L), (0, s if L == 8 and s in (32, 64) else 0))
+    }.get((s, L), (0, 32 if L == 8 and s == 32 else 0))
     if s <= 16 and L in (2, 4, 6, 8):
         pipeline = 35667968 if L == 6 else 33562624
         state_rows = 16
@@ -462,10 +462,14 @@ def _mono_kda_fused(mono_kda, prefix, blocks, delta, positions, core, next_prefi
     second.update(blk_sm=blocks.stride(0), blk_sr=blocks.stride(1))
     values = overlap.argument_values(first, second, reset=key.k2.reset)
     cache_key = key, values
-    arguments = mono_kda._overlap_arguments.get(cache_key)
-    if arguments is None:
-        arguments = torch.tensor(values, dtype=torch.int64, device=prefix.device)
-        mono_kda._overlap_arguments[cache_key] = arguments
+    cached = mono_kda._overlap_arguments.get(cache_key)
+    if cached is None:
+        host = torch.tensor(values, dtype=torch.int64, pin_memory=True)
+        arguments = host.to(device=prefix.device, non_blocking=True)
+        # Captured copies need the immutable host table on every replay.
+        mono_kda._overlap_arguments[cache_key] = host, arguments
+    else:
+        _, arguments = cached
     state = runner.launch_args()
     args = (
         arguments.data_ptr(),
@@ -563,6 +567,7 @@ def post_projection(attn, projected, core):
         or length is None
         or not 1 <= length <= 8
         or m.spec_state_indices_tensor.size(-1) != length
+        or not 1 <= rows <= MAX_TOKENS
         or rows % length
         or m.num_spec_decodes * length != rows
         or m.num_actual_tokens != rows
@@ -626,10 +631,7 @@ class MonoK2:
 
     def eligible(self, core: torch.Tensor) -> bool:
         return (
-            (
-                1 <= core.size(0) <= 16
-                or core.size(0) in (18, 20, 24, 28, 30, 32, 36, 40, 42, 48)
-            )
+            (1 <= core.size(0) <= 16 or core.size(0) in (18, 20, 24, 28, 30, 32))
             and core.dtype == torch.bfloat16
             and core.is_contiguous()
         )
@@ -638,10 +640,10 @@ class MonoK2:
         from vllm.models.kimi_k3.amd.mono import layer as k2
 
         layer = self.layer
-        tuned = 2 <= rows <= 48
+        tuned = 2 <= rows <= MAX_TOKENS
         wide = rows > 16
         nblocks = layer.prev_valid_blocks + int(reset)
-        stream_attn = wide and (rows > 32 or nblocks >= 8)
+        stream_attn = wide and nblocks >= 8
         front_panels = rows >= 28
         return k2.K2Build(
             tokens=rows,
@@ -658,14 +660,11 @@ class MonoK2:
             stream_oproj=rows == 6,
             wide=wide,
             compact_lds=wide,
-            cache_wide_inter=wide and rows <= 32,
+            cache_wide_inter=wide,
             stream_attn=stream_attn,
             sparse_routes=wide,
             stream_x=front_panels,
             front_panels=front_panels,
-            shared_down_first=rows == 48,
-            shared_h_once=rows == 48,
-            tail_panels=rows == 48,
         )
 
     def arguments(self, core, prefix_sum, block_residual, out):

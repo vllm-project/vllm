@@ -1279,17 +1279,6 @@ def stage_sdown(c, j, ops):
     lo = c["rank"] * UP_TASKS
     for first in range_constexpr(0, c["S"], 16):
         stage_sdown_panel(c, j, ops, first, min(16, c["S"] - first))
-        if const_expr(c.get("tail_panels", False)):  # noqa: SIM102
-            if (j >= lo) & (j < lo + UP_TASKS):
-                publish(
-                    c["put"],
-                    c["shpanels"],
-                    first // 16 * UP_TASKS + j - lo,
-                    fx.Int32(1),
-                    c["tid"] == 0,
-                )
-    if const_expr(c.get("tail_panels", False)):
-        return
     publish(
         c["put"],
         c["shrdy"],
@@ -1339,12 +1328,11 @@ def stage_sdown_panel(c, j, ops, first, count):
 
 
 @traced
-def run_sdown(c, bid, w_sd, h_loaded=False):
+def run_sdown(c, bid, w_sd):
     """This rank's 56 shared-down tasks whose columns the up stage adds to (k ->
     row group (k + 56 rank) % 448), on the CTAs past the down tasks: up waits
     on them."""
-    if const_expr(not h_loaded):
-        load_h(c)
+    load_h(c)
     lo = c["rank"] * UP_TASKS
     if bid >= DOWN_TASKS:
         for k in range(bid - DOWN_TASKS, UP_TASKS, BLOCKS - DOWN_TASKS):
@@ -1353,14 +1341,13 @@ def run_sdown(c, bid, w_sd, h_loaded=False):
 
 
 @traced
-def run_sdown_rest(c, bid, w_sd, h_loaded=False):
+def run_sdown_rest(c, bid, w_sd):
     """The other 392 shared-down tasks (only the final reduce waits on them), on
     the CTAs past lnorm / up's (84 ..), after their down: off the latent-norm ->
     up critical path."""
     r0 = LN0 + LN_TASKS  # 84: past the lnorm / up CTAs
     if bid >= r0:
-        if const_expr(not h_loaded):
-            load_h(c)
+        load_h(c)
         lo = c["rank"] * UP_TASKS
         for k in range(UP_TASKS + bid - r0, SD_TASKS, BLOCKS - r0):
             j = (k + lo) % SD_TASKS
@@ -1416,19 +1403,7 @@ def stage_lnorm(c, j):
                 y, rsrc(c["ln"]), (t * LAT + col) // 2, cache_modifier=CM_DEV
             )
         gpu.barrier()
-        if const_expr(
-            c.get("tail_panels", False)
-            and ((batch + 1) * WAVES % 16 == 0 or batch == (s + WAVES - 1) // WAVES - 1)
-        ):
-            publish(
-                c["put"],
-                c["lnpanels"],
-                batch * WAVES // 16 * LN_TASKS + j,
-                fx.Int32(1),
-                tid == 0,
-            )
-    if const_expr(not c.get("tail_panels", False)):
-        publish(c["put"], c["lnrdy"], j, fx.Int32(1), tid == 0)
+    publish(c["put"], c["lnrdy"], j, fx.Int32(1), tid == 0)
     gpu.barrier()
 
 
@@ -1440,22 +1415,14 @@ def stage_up(c, j):
     a = c["args"]
     row0 = c["rank"] * UP_N + j * ROWS  # the hidden column; w_up is the shard
     ops = gemv.loads(lane, wave, a["w_up"], j * ROWS, LAT)
-    if const_expr(not c.get("tail_panels", False)):
-        if tid < LN_TASKS:
-            c["poll"]([(c["lnrdy"], tid, 1)])
-        if const_expr(not c.get("late_shared_wait", False)):  # noqa: SIM102
-            if tid == 0:
-                c["poll"]([(c["shrdy"], j, 1)])
+    if tid < LN_TASKS:
+        c["poll"]([(c["lnrdy"], tid, 1)])
+    if const_expr(not c.get("late_shared_wait", False)):  # noqa: SIM102
+        if tid == 0:
+            c["poll"]([(c["shrdy"], j, 1)])
     gpu.barrier()
     for first in range_constexpr(0, s, 16):
         count = min(16, s - first)
-        if const_expr(c.get("tail_panels", False)):
-            if tid < LN_TASKS:
-                c["poll"]([(c["lnpanels"], first // 16 * LN_TASKS + tid, 1)])
-            if const_expr(not c.get("late_shared_wait", False)):  # noqa: SIM102
-                if tid == 0:
-                    c["poll"]([(c["shpanels"], first // 16 * UP_TASKS + j, 1)])
-            gpu.barrier()
         lrow = LAT + gemv.LDS_PAD
         gemv.dev_rows_to_lds(
             tid, c["ln"] + fx.Int64(first * LAT * 2), LAT, count, c["xl"], lrow
@@ -1464,10 +1431,7 @@ def stage_up(c, j):
         fx.ptr_store(acc, red + (wave * 64 + lane) * 4)
         if const_expr(c.get("late_shared_wait", False)):  # noqa: SIM102
             if tid == 0:
-                if const_expr(c.get("tail_panels", False)):
-                    c["poll"]([(c["shpanels"], first // 16 * UP_TASKS + j, 1)])
-                else:
-                    c["poll"]([(c["shrdy"], j, 1)])
+                c["poll"]([(c["shrdy"], j, 1)])
         gpu.barrier()
         if tid < (ROWS // 2) * count:
             rp = tid % (ROWS // 2)

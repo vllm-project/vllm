@@ -300,7 +300,7 @@ def build(key):
     L = key.k1.qlen
     ns = key.k1.nblocks + 1
     state_rows = k1._state_rows(key.k1)
-    assert key.k1.state_rows in (16, 32, 64)
+    assert key.k1.state_rows in (16, 32)
     nvch = HD // state_rows
     assert key.k1.pipeline & 24576
     if key.reuse_workers:

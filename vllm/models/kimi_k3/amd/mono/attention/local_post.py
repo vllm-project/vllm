@@ -15,6 +15,7 @@ from vllm.models.kimi_k3.amd.mono.attention import kda
 from vllm.models.kimi_k3.amd.mono.common.ops import butterfly, hw_rsq, rsrc
 from vllm.models.kimi_k3.amd.mono.common.plan import THREADS, key_tuple
 from vllm.models.kimi_k3.amd.mono.common.sync import sreg
+from vllm.models.kimi_k3.amd.mono.common.tiles import MAX_TOKENS
 
 _BUILDS: dict = {}
 _LAUNCHES: dict = {}
@@ -55,6 +56,7 @@ class LocalInputs:
 def build(key):
     if key in _BUILDS:
         return _BUILDS[key]
+    assert 1 <= key.tokens <= MAX_TOKENS
     assert 1 <= key.qlen <= 8 and key.tokens % key.qlen == 0
     L, V = key.qlen, kda.HD
     keyed = key_tuple(key, kda._SOURCES)

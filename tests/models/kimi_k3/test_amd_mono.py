@@ -41,6 +41,62 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+@pytest.mark.parametrize("rows", [24, 32, 33, 36, 40, 42, 48, 64])
+def test_mono_dispatch_falls_back_above_32_rows(monkeypatch, rows):
+    """Large batches must bypass both the mono decoder and K2 dispatch."""
+    from types import SimpleNamespace
+
+    from vllm.models.kimi_k3.amd import linear, mono_decode
+
+    prefix = torch.zeros(rows, 8, dtype=bf)
+    blocks = torch.zeros(rows, 1, 8, dtype=bf)
+    expected = object()
+    calls = []
+
+    def mono(*args):
+        calls.append("mono")
+        return expected
+
+    def native(*args):
+        calls.append("native")
+        return expected
+
+    layer = SimpleNamespace(
+        _mono_kda=object(),
+        _mono_k2=None,
+        _forward_mono_kda=mono,
+        self_attn=object(),
+        self_attention_res_proj=None,
+        self_attention_res_norm=None,
+        prev_valid_blocks=1,
+        input_layernorm=None,
+        is_block_write_layer=False,
+        _run_self_attn=lambda positions, hidden: hidden,
+        _forward_mlp_residual=native,
+    )
+    monkeypatch.setattr(linear, "_apply_attn_res", lambda *args, **kwargs: prefix)
+    result = linear.KimiDecoderLayer.forward_attn_residual(
+        layer, torch.arange(rows), prefix, blocks, None
+    )
+    assert result is expected
+    assert calls == ["mono" if rows <= 32 else "native"]
+    assert mono_decode.MonoK2.eligible(None, prefix) == (rows <= 32)
+
+    metadata = SimpleNamespace(
+        spec_sequence_masks=torch.ones(rows, dtype=torch.bool),
+        num_prefills=0,
+        num_decodes=0,
+        num_spec_decodes=rows,
+        spec_state_indices_tensor=torch.zeros(rows, 1, dtype=torch.int32),
+        uniform_spec_sequence_length=1,
+        num_actual_tokens=rows,
+        num_accepted_tokens=torch.ones(rows, dtype=torch.int32),
+    )
+    assert mono_decode._spec_len(metadata, rows, prefix, None, blocks) == (
+        1 if rows <= 32 else None
+    )
+
+
 def _cos(a: torch.Tensor, b: torch.Tensor) -> float:
     a, b = a.float().reshape(-1), b.float().reshape(-1)
     return F.cosine_similarity(a, b, dim=0).item()
@@ -196,10 +252,8 @@ def _kda_reference(w, nb: int, S: int, write_idx: int, norm=None, inplace=False)
     + [
         (True, 1, False, 16, 8, 0, 0),
         (False, 1, True, 32, 8, 32, 0),
-        (True, 1, False, 64, 8, 64, 0),
         (False, 1, True, 24, 6, 0, 0),
         (False, 1, True, 18, 6, 0, 0),
-        (False, 1, True, 50, 5, 0, 0),
         (False, 1, True, 15, 3, 0, 0),
         (False, 1, True, 6, 6, 0, 7),
         (True, 3, False, 12, 6, 0, 7),
@@ -207,20 +261,17 @@ def _kda_reference(w, nb: int, S: int, write_idx: int, norm=None, inplace=False)
         (True, 1, True, 24, 6, 0, 7),
         (False, 1, False, 16, 8, 0, 7),
         (True, 1, True, 24, 8, 0, 7),
-        (False, 1, False, 64, 8, 64, 7),
         (True, 3, False, 12, 6, 0, 8),
         (False, 1, True, 18, 6, 0, 8),
         (True, 1, True, 24, 6, 0, 8),
         (False, 1, False, 16, 8, 0, 8),
         (True, 1, True, 24, 8, 32, 8),
-        (False, 1, False, 64, 8, 64, 8),
         (True, 3, False, 12, 6, 0, 512),
         (False, 1, True, 18, 6, 0, 512),
         (False, 3, True, 18, 6, 0, 520),
         (False, 1, True, 24, 6, 0, 1024),
         (True, 3, False, 16, 8, 0, 1024),
         (False, 1, True, 24, 8, 0, 1024),
-        (True, 1, False, 64, 8, 64, 1024),
         (False, 1, True, 24, 8, 0, 1536),
         (False, 3, True, 6, 6, 0, 8192),
         (True, 3, False, 12, 6, 0, 8192),
@@ -228,20 +279,17 @@ def _kda_reference(w, nb: int, S: int, write_idx: int, norm=None, inplace=False)
         (True, 1, True, 24, 6, 0, 8192),
         (False, 1, False, 16, 8, 0, 8192),
         (True, 3, True, 24, 8, 0, 8192),
-        (False, 1, False, 64, 8, 64, 8192),
         (False, 3, True, 6, 6, 0, 16384),
         (True, 3, False, 12, 6, 0, 16384),
         (False, 1, True, 18, 6, 0, 16384),
         (True, 1, True, 24, 6, 0, 16384),
         (False, 1, False, 16, 8, 0, 16384),
         (True, 3, True, 24, 8, 0, 16384),
-        (False, 1, False, 64, 8, 64, 16384),
         pytest.param(True, 3, False, 12, 6, 0, 35667968, id="v3-packed-bank-m12"),
         pytest.param(False, 1, True, 18, 6, 0, 33570816, id="v3-packed-m18"),
         pytest.param(True, 3, True, 24, 6, 0, 2113536, id="v3-bank-m24"),
         pytest.param(False, 1, False, 16, 8, 0, 33562624, id="v3-packed64-m16"),
         pytest.param(True, 1, True, 24, 8, 32, 35667968, id="v3-packed-bank-v32"),
-        pytest.param(False, 3, False, 64, 8, 64, 33570816, id="v3-packed-m64"),
         pytest.param(True, 3, False, 12, 6, 16, 102776836, id="v5-token-output-m12"),
         pytest.param(False, 1, True, 16, 8, 16, 100671492, id="v5-token-output-m16"),
         pytest.param(True, 3, False, 12, 6, 16, 236994564, id="v5-mailbox-output-m12"),
@@ -344,7 +392,7 @@ def test_k1_matches_vllm_ops(
 
 
 @pytest.mark.parametrize(
-    "S,qlen", [(6, 6), (12, 6), (18, 6), (24, 6), (16, 8), (24, 8), (64, 8)]
+    "S,qlen", [(6, 6), (12, 6), (18, 6), (24, 6), (16, 8), (24, 8), (32, 8)]
 )
 @pytest.mark.parametrize("serialized_offload", [False, True])
 def test_k1_serving_dispatch_reuses_packed_weights(
@@ -477,8 +525,8 @@ def test_k1_serving_dispatch_reuses_packed_weights(
             "v3_packed_bank",
         )
         for rows, qlen, dim_first in (
-            (48, 6, False),
-            (80 if route == "local_post" else 64, 8, True),
+            (30 if route == "local_post" else 24, 6, False),
+            (32, 8, True),
         )
     ],
 )
@@ -719,7 +767,7 @@ def _moe_args(mw):
     }
 
 
-def _check_k1_k2_serving_replay(rows, length, config, reset):
+def _check_k1_k2_serving_replay(rows, length, config, reset, capture_kind="breakable"):
     """A captured serving call preserves state and the block-write prefix buffer."""
     from types import SimpleNamespace as NS
 
@@ -881,10 +929,17 @@ def _check_k1_k2_serving_replay(rows, length, config, reset):
         expected = control()
         check(expected, call())
         dist.barrier()
-        capture = BreakableCUDAGraphCapture()
-        with capture:
-            downstream = call()
-        assert capture.num_eager_breaks == 1
+        if capture_kind == "cold_table_graph":
+            # Graph-pool addresses can require a new table after eager warmup.
+            mono._overlap_arguments.clear()
+            capture = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(capture, stream=stream):
+                downstream = call()
+        else:
+            capture = BreakableCUDAGraphCapture()
+            with capture:
+                downstream = call()
+            assert capture.num_eager_breaks == 1
         cache_size = len(mono._overlap_arguments)
         for step in range(2):
             initial["prefix"].add_(0.03125)
@@ -899,17 +954,22 @@ def _check_k1_k2_serving_replay(rows, length, config, reset):
 
 @multi_gpu_test(num_gpus=8)
 @pytest.mark.parametrize("reset", [False, True])
-def test_k1_k2_serving_replays_state_and_prefix(monkeypatch, reset):
+@pytest.mark.parametrize("capture_kind", ["breakable", "cold_table_graph"])
+def test_k1_k2_serving_replays_state_and_prefix(monkeypatch, reset, capture_kind):
+    """New graph argument tables must preserve output and state on later replays."""
+
     @ray.remote(num_gpus=1, max_calls=1)
     def worker(monkeypatch, tp_size, pp_size, rank, port):
         monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "1")
         from vllm.config import ParallelConfig, VllmConfig
 
+        monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+        torch.accelerator.set_device_index(rank)
         init_test_distributed_environment(tp_size, pp_size, rank, port)
         config = VllmConfig(
             parallel_config=ParallelConfig(tensor_parallel_size=tp_size)
         )
-        _check_k1_k2_serving_replay(16, 4, config, reset)
+        _check_k1_k2_serving_replay(16, 4, config, reset, capture_kind)
 
     multi_process_parallel(monkeypatch, 8, 1, worker)
 
@@ -1044,6 +1104,7 @@ def _k2_worker(
 
     from vllm.distributed import get_tp_group
     from vllm.models.kimi_k3.amd.mono import layer as k2
+    from vllm.models.kimi_k3.amd.mono import runner
     from vllm.models.kimi_k3.amd.mono.attention.kda import HIDDEN, PROJ
     from vllm.models.kimi_k3.amd.mono.common.peer_memory import PeerBuffer
     from vllm.models.kimi_k3.amd.mono.stages import moe
@@ -1090,12 +1151,14 @@ def _k2_worker(
             wide=sparse_routes,
             compact_lds=sparse_routes,
             sparse_routes=sparse_routes,
-            cache_wide_inter=sparse_routes and S <= 32,
-            stream_attn=sparse_routes and (S > 32 or nb + int(reset) >= 8),
+            cache_wide_inter=sparse_routes,
+            stream_attn=sparse_routes and nb + int(reset) >= 8,
             stream_x=front_panels,
             front_panels=front_panels,
         )
-        scratch = torch.zeros(k2.scratch_bytes(key), dtype=torch.uint8, device=device)
+        runner.alloc_scratch(device)
+        assert k2.scratch_bytes(key) <= runner.scratch_bytes()
+        scratch = runner.scratch()
         prefix = prefix0.clone()
         out = torch.empty(S, HIDDEN, dtype=bf, device=device)
         k2.k2_launch(
@@ -1280,12 +1343,11 @@ def test_k2_and_moe_tp8_match_vllm_ops(
     "S,nblocks,front_panels",
     [
         (24, 4, False),
+        (24, 7, False),
         (32, 7, False),
-        (48, 7, False),
-        pytest.param(18, 7, True, id="front-m18"),
+        pytest.param(28, 7, True, id="front-m28"),
+        pytest.param(30, 7, True, id="front-m30"),
         pytest.param(32, 7, True, id="front-m32"),
-        pytest.param(42, 7, True, id="front-m42"),
-        pytest.param(48, 7, True, id="front-m48"),
     ],
 )
 def test_k2_sparse_routes_preserve_prefix_and_output(
@@ -1304,7 +1366,7 @@ def test_k2_sparse_routes_preserve_prefix_and_output(
             S,
             producer_latent_quant=True,
             bounded_prefetch=True,
-            balanced_oproj=not front_panels,
+            balanced_oproj=S < 30,
             sparse_routes=True,
             nblocks=nblocks,
             front_panels=front_panels,

@@ -54,6 +54,7 @@ from vllm.models.kimi_k3.amd.mono.common.plan import (
 )
 from vllm.models.kimi_k3.amd.mono.common.ranks import peer_bases
 from vllm.models.kimi_k3.amd.mono.common.sync import Mailbox, preg, publish, shift, sreg
+from vllm.models.kimi_k3.amd.mono.common.tiles import MAX_TOKENS
 from vllm.models.kimi_k3.amd.mono.stages import gemv as gemv
 from vllm.models.kimi_k3.amd.mono.stages import moe as k2b
 
@@ -81,8 +82,6 @@ REGIONS = (
         "qlat",
         "qlatsc",
         "xpanels",
-        "lnpanels",
-        "shpanels",
     )
 )
 
@@ -102,9 +101,6 @@ class K2Build:
     timeline: bool = False
     xp: int = 0  # timing experiments (7: route without its selection)
     shared_down_workers: int = 0
-    shared_down_first: bool = False
-    shared_h_once: bool = False
-    tail_panels: bool = False
     parallel_shared_activation: bool = False
     late_shared_wait: bool = False
     latent_quant_workers: int = 0
@@ -203,10 +199,6 @@ def scratch_layout(key: K2Build) -> dict:
     if key.stream_x:
         end = max(o + n for o, n in lay.values())
         lay["xpanels"] = ((end + 15) // 16 * 16, ((s + 15) // 16) * NA * 8)
-    if key.tail_panels:
-        for name, tasks in (("lnpanels", k2b.LN_TASKS), ("shpanels", k2b.UP_TASKS)):
-            end = max(o + n for o, n in lay.values())
-            lay[name] = ((end + 15) // 16 * 16, ((s + 15) // 16) * tasks * 8)
     return lay
 
 
@@ -382,16 +374,10 @@ def run_stages(c, key):
     nu = k2b.load_route(c)
     stamp(on, tls, tid, 11)
     k2b.run_routed(c, nu, BLOCKS, key.down_workers)
-    if const_expr(key.shared_h_once):  # noqa: SIM102
-        if bid >= k2b.LN0 + k2b.LN_TASKS:
-            k2b.load_h(c)
-    if const_expr(key.shared_down_first):
-        k2b.run_sdown(c, bid, w_sd, h_loaded=key.shared_h_once)
-        stamp(on, tls, tid, 14)
     if const_expr(not key.full_shared_pipeline):
-        k2b.run_sdown_rest(c, bid, w_sd, h_loaded=key.shared_h_once)
-    if const_expr(key.shared_down_workers == 0 and not key.shared_down_first):
-        k2b.run_sdown(c, bid, w_sd, h_loaded=key.shared_h_once)
+        k2b.run_sdown_rest(c, bid, w_sd)
+    if const_expr(key.shared_down_workers == 0):
+        k2b.run_sdown(c, bid, w_sd)
     stamp(on, tls, tid, 4)
     if (bid >= k2b.LN0) & (bid < k2b.LN0 + k2b.LN_TASKS):
         k2b.stage_lnorm(c, bid - k2b.LN0)
@@ -412,11 +398,8 @@ def build(key: K2Build):
     if key in _BUILDS:
         return _BUILDS[key]
     s, ns = key.tokens, key.nblocks + 1
-    assert 1 <= s <= (64 if key.wide else k2b.MOE_TILE_TOKENS)
+    assert 1 <= s <= (MAX_TOKENS if key.wide else k2b.MOE_TILE_TOKENS)
     assert key.shared_down_workers in (0, 16, 32, 64)
-    assert not key.shared_down_first or key.shared_down_workers == 0
-    assert not key.shared_h_once or key.shared_down_workers == 0
-    assert not key.tail_panels or key.wide and s > 16
     assert key.latent_quant_workers in (0, 1, 2, 4, 8)
     assert not (key.latent_quant_workers and key.producer_latent_quant)
     assert key.down_workers in (0, 16, 32, 64, 96, 112)
@@ -432,7 +415,6 @@ def build(key: K2Build):
     assert not key.stream_x or key.wide and s > 16
     assert not key.front_panels or key.stream_x
     assert not key.stream_x or s * (ns + 1) + 128 <= WAVES * 64 * 4
-    assert s <= 32 or key.stream_attn and key.compact_lds and not key.cache_wide_inter
     stream_inter = key.down_workers > 0 or key.wide and not key.cache_wide_inter
     route_type = fx.Int8 if key.compact_lds else fx.Int32
     scale_type = fx.Uint8 if key.compact_lds else fx.Int32
@@ -526,9 +508,6 @@ def build(key: K2Build):
         f"k3_mono_k2_s{s}_nb{key.nblocks}_x{int(key.reset)}_r{int(key.reduce)}"
         f"_g{int(key.diag)}_t{int(key.timeline)}"
         f"_sd{key.shared_down_workers}_ha{int(key.parallel_shared_activation)}"
-        f"_sdf{int(key.shared_down_first)}"
-        f"_h1{int(key.shared_h_once)}"
-        f"_tp{int(key.tail_panels)}"
         f"_lw{int(key.late_shared_wait)}"
         f"_lq{key.latent_quant_workers}"
         f"_lqp{int(key.producer_latent_quant)}"
@@ -638,7 +617,6 @@ def build(key: K2Build):
             "balanced_oproj": key.balanced_oproj,
             "route_timeline": key.timeline,
             "late_shared_wait": key.late_shared_wait,
-            "tail_panels": key.tail_panels,
             "producer_quant": key.producer_latent_quant,
             "put": mb.put,
             "put_bf": mb.put_bf,
@@ -725,9 +703,6 @@ def build(key: K2Build):
             c["shared_latsc"] = peer["qlatsc_own"]
         if const_expr(key.stream_x):
             c["xpanels"] = sreg(scratch, lay["xpanels"][0], "xpanels")
-        if const_expr(key.tail_panels):
-            for region in ("lnpanels", "shpanels"):
-                c[region] = sreg(scratch, lay[region][0], region)
         run_stages(c, key)
         on, tls = key.timeline, lds.tls.ptr
         stamp_flush(on, tls, tl, tid, bid, TL_POINTS)

@@ -4,7 +4,7 @@
 
 from dataclasses import replace
 
-MAX_TOKENS = 64
+MAX_TOKENS = 32
 TILE_TOKENS = 8
 
 

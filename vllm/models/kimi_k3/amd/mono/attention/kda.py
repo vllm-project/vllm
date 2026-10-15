@@ -138,8 +138,6 @@ def _state_rows(key: KdaPreBuild) -> int:
         return key.state_rows
     if key.tokens in (18, 24) and key.qlen == 6:
         return 32
-    if (key.tokens, key.qlen) in ((48, 4), (50, 5)):
-        return 64
     return VCH
 
 
@@ -1193,12 +1191,12 @@ def kda_tasks(c, on, tls):
                     parallel.output(c, head * L + token)
     elif const_expr(c.get("pipeline", 0) & 8):
         heads = c["head_total"]
+        producers = BLOCKS - heads
         if bid < heads:
             first = c["head_first"]
             if (bid >= first) & (bid < first + s // L * NH):
                 parallel.head_prepare(c, bid - first)
         else:
-            producers = BLOCKS - heads
             task0 = (
                 bid - heads - c["event_prod_base"] % producers + producers
             ) % producers
@@ -1232,7 +1230,7 @@ def build(key: KdaPreBuild):
     if key in _BUILDS:
         return _BUILDS[key]
     state_rows = _state_rows(key)
-    assert state_rows in (16, 32, 64)
+    assert state_rows in (16, 32)
     nvch = HD // state_rows
     tile_tokens = 16
     tiles = token_tiles(key.tokens, key.qlen, tile_tokens=tile_tokens)

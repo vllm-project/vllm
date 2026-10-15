@@ -701,7 +701,7 @@ class KimiDecoderLayer(nn.Module):
         prefix_delta: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         prefix_sum = hidden_states
-        if self._mono_kda is not None:
+        if self._mono_kda is not None and prefix_sum.size(0) <= mono.MAX_TOKENS:
             return self._forward_mono_kda(
                 positions, prefix_sum, block_residual, prefix_delta
             )
