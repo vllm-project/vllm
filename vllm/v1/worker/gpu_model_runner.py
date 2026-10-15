@@ -4578,7 +4578,9 @@ class GPUModelRunner(
                 )
                 for i in invalid_req_indices:
                     output.sampled_token_ids[i].clear()
-            return meta_mode.MetaAsyncOutput(output, scheduler_output)
+            return meta_mode.MetaAsyncOutput(
+                output, scheduler_output.total_num_scheduled_tokens
+            )
 
         if not self.use_async_scheduling:
             return output

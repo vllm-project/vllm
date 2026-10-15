@@ -828,6 +828,8 @@ class MambaSpecDecodeGPUContext:
 
     # Flag to track if metadata has been populated
     is_initialized: bool = False
+    # Meta-device states (VLLM_META_MODE) have no storage to copy.
+    has_state_storage: bool = True
 
     @classmethod
     def create(
@@ -1004,6 +1006,7 @@ class MambaSpecDecodeGPUContext:
                     )
                 for state_type_idx, copy_func in enumerate(state_copy_funcs):
                     state = kv_caches[state_type_idx]
+                    self.has_state_storage &= not state.is_meta
                     # Base address
                     self.state_base_addrs[idx] = _reinterpret_u64_as_i64(
                         state.data_ptr()
@@ -1110,9 +1113,9 @@ class MambaSpecDecodeGPUContext:
     ) -> torch.Tensor:
         """Compute every Mamba group's aligned physical state IDs in one launch."""
         assert self.is_initialized
-        assert seq_lens.is_cuda
-        assert 0 <= num_reqs <= seq_lens.shape[0]
         assert self.aligned_state_indices is not None
+        assert seq_lens.device == self.aligned_state_indices.device
+        assert 0 <= num_reqs <= seq_lens.shape[0]
         assert num_reqs <= self.aligned_state_indices.shape[1]
         if num_reqs == 0:
             return self.aligned_state_indices[:, :0]
@@ -1170,6 +1173,8 @@ class MambaSpecDecodeGPUContext:
         self.num_accepted_tokens_out[:num_reqs].copy_(
             num_accepted_tokens_gpu[:num_reqs]
         )
+        if not self.has_state_storage:
+            return
 
         total_states = self.num_states
         grid = (num_reqs, total_states, _TEMPORAL_TILES)
@@ -1219,7 +1224,7 @@ class MambaSpecDecodeGPUContext:
                 None means V1 batch order already equals request state order.
 
         """
-        if num_reqs == 0 or not self.is_initialized:
+        if num_reqs == 0 or not self.is_initialized or not self.has_state_storage:
             return
         total_states = self.num_states
         grid = (num_reqs, total_states, _TEMPORAL_TILES)
@@ -1263,7 +1268,7 @@ class MambaSpecDecodeGPUContext:
         (PRECOMPUTED_NEW_COMPUTED).
         ``idx_mapping`` maps batch row -> req-state slot (HAS_IDX_MAPPING).
         """
-        if num_reqs == 0 or not self.is_initialized:
+        if num_reqs == 0 or not self.is_initialized or not self.has_state_storage:
             return
 
         # V2 reads non-contiguous idx_mapping positions, so snapshot the whole
@@ -1372,6 +1377,9 @@ def collect_mamba_copy_meta(
             attention = forward_context[layer_name]
             kv_caches: list[torch.Tensor] = attention.kv_cache
             for state, state_copy_func in zip(kv_caches, state_copy_funcs):
+                if state.is_meta:
+                    # Meta-device states (VLLM_META_MODE) have no storage.
+                    continue
                 copy_spec = state_copy_func(
                     state, block_ids, src_block_idx, accept_token_bias + 1
                 )

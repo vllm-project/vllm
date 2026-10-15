@@ -449,9 +449,6 @@ class Worker(WorkerBase):
             )
             set_random_seed(self.model_config.seed)
             meta_mode.install_launch_hooks()
-            # The meta paths (fake sampled ids, MetaAsyncOutput) live in the
-            # V1 model runner.
-            self.use_v2_model_runner = False
         elif self.device_config.device_type == "cuda":
             # This env var set by Ray causes exceptions with graph building.
             os.environ.pop("NCCL_ASYNC_ERROR_HANDLING", None)

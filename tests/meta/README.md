@@ -1,9 +1,10 @@
 # Meta CI Mode (`VLLM_META_MODE`)
 
-Runs the v1 engine end-to-end on a CPU-only host with `meta`-device weights and
-KV cache. Scope: functional/integration validation of construction and
-execution paths (config, TP/EP, attention/MoE, quantization, sampling,
-scheduling, offload). Numerics are out of scope — meta tensors carry no data.
+Runs the v1 engine end-to-end on a CPU-only host through Model Runner V2
+(MRV2), with `meta`-device weights and KV cache. Scope: functional/integration
+validation of construction and execution paths (config, TP/EP, attention/MoE,
+quantization, sampling, scheduling, offload). Numerics are out of scope — meta
+tensors carry no data.
 
 Mode-wide setup is gated by `envs.VLLM_META_MODE`; tensor-local fallbacks use
 `tensor.is_meta`. When unset, `vllm/meta_mode.py` is not imported and there is
@@ -18,11 +19,10 @@ zero impact. No monkeypatching of vLLM classes — only third-party launch layer
 
 Weights load via `load_format="meta"` (`MetaModelLoader`: model built on the
 meta device, no download, no init; explicit accelerator placements made during
-construction are redirected to meta by the loader);
-`_allocate_kv_cache_tensors` places the KV pool on meta. The worker keeps
-`self.device = cpu` so IO buffers retain real values for scheduling; attention
-is faked and never reads KV, so the Triton slot-mapping kernel is skipped like
-any other launch.
+construction are redirected to meta by the loader); both runners' KV-cache
+allocation paths place the KV pool on meta. The worker keeps `self.device = cpu`
+so IO buffers retain real values for scheduling; attention is faked and never
+reads KV.
 
 ### 1.2 Kernels
 
@@ -39,19 +39,22 @@ indices.
 
 Native, non-op kernels launched as `kernel[grid](...)` (Kimi-K3 KDA/mamba,
 Qwen3-Next `fused_qk_rmsnorm_rope_gate`, DeepSeek-V4/Kimi CuteDSL sparse
-attention) cannot carry a `torch.library` meta kernel and are neutralised at the
+attention) cannot carry a `torch.library` meta kernel and are intercepted at the
 launch layer instead by `install_launch_hooks()`:
 
-- Triton — `JITFunction.run` / `Autotuner.run` → no-op
+- Triton — MRV2 host-only bookkeeping kernels run through the CPU interpreter;
+  model/attention kernels and any launch touching meta tensors are skipped
 - CuteDSL — `cutlass.cute.compile` → no-op launcher
 - `torch.cuda` — `Event`/`Stream`/`current_device`/`get_device_properties`/
   `is_current_stream_capturing`, plus `torch.Event` and
   `torch.accelerator.synchronize`/`current_device_index` → null stubs
 
-Callers pre-allocate outputs (on meta) and write in place, so skipping the
-launch preserves shapes. The DeepGEMM wrapper likewise keeps its kernels
-unbound in meta mode even when the vendored package imports: in-place calls
-become no-ops and value-returning calls use shape-only fallbacks.
+Callers pre-allocate model outputs (on meta) and write in place, so skipping
+model launches preserves shapes. MRV2's request-state, input-preparation, and
+block-table kernels need real host values and therefore execute in the Triton
+interpreter. The DeepGEMM wrapper likewise keeps its kernels unbound in meta
+mode even when the vendored package imports: in-place calls become no-ops and
+value-returning calls use shape-only fallbacks.
 
 > These launch-layer stubs are a harness-side fallback. Ops that read/write in
 > attention should ideally gain a `register_fake` / meta branch at the op
@@ -105,11 +108,11 @@ the real async-output path). Timing only; no data effect.
 
 ---
 
-## 3. Support Matrix and Footprint
+## 3. Support Matrix
 
 | Model | Notes |
 |---|---|
-| `moonshotai/Kimi-K3` | KDA/mamba "align" indices precomputed host-side by the V1 runner |
+| `moonshotai/Kimi-K3` | KDA/mamba "align" indices from MRV2 host block tables |
 | `Qwen/Qwen3.8-2.4T-A95B-FP8` | Hybrid GDN + full-attn MoE; block-wise `[128,128]` FP8 |
 | `deepseek-ai/DeepSeek-V4-Pro` | `fp8_ds_mla` KV + `deepseek_v4_fp8`; CuteDSL/FA4 launch interception |
 | `zai-org/GLM-5` | `GlmMoeDsaForCausalLM` (DSA); FA3 meta shape override |
@@ -121,27 +124,3 @@ smoke cases; external DP=2 follows the standard offline rank launcher.
 Quantization follows the requested production scheme. Covered paths include FP8
 per-tensor, FP8 block-wise, ModelOpt NVFP4, and `deepseek_v4_fp8`; unsupported
 schemes fail through their normal validation or meta-kernel path.
-
-### Per-rank footprint
-
-CPU-only host, TP=8 + EP, `max_model_len=16384`, 8704-token prompt, offload on.
-The table is for one model-rank process; aggregate RSS scales with the number of
-model ranks. RSS is read from `/proc/self/status`, peak from `getrusage(VmHWM)`,
-in MB.
-
-| Stage | Qwen3-30B-A3B | Qwen3.8-2.4T-A95B-FP8 |
-|---|---:|---:|
-| `import torch` | 668 | 668 |
-| `import vllm` (baseline) | 1134 | 1134 |
-| `LLM` build | 1460 (+325) | 1653 (+519) |
-| `generate` (8704 tok) | 1473 (+14) | 1672 (+19) |
-| **Peak RSS** | **1473** | **1672** |
-
-- Footprint is decoupled from parameter count: a 2.4T model builds within
-  ~200 MB of a 30B one (build delta is Python-side config/metadata, not weights).
-- Peak is dominated by the torch+vllm import baseline (~1.1 GB).
-- Inference adds ~14–19 MB; activations are meta and compute leaves are
-  short-circuited.
-- Weights, KV pool, and L2 buffer are 0 real bytes; the only genuine
-  allocations are CPU scheduling tensors (order MB, scaling with
-  `max_num_seqs × max_model_len`).

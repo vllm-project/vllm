@@ -538,7 +538,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.intermediate_tensors = self.model.make_empty_intermediate_tensors(
                 batch_size=self.max_num_tokens,
                 dtype=self.model_config.dtype,
-                device=self.device,
+                # Meta weights produce value-less activations.
+                device=torch.device("meta")
+                if self.load_config.load_format == "meta"
+                else self.device,
             )
 
         get_offloader().post_init()
@@ -1652,6 +1655,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 invalid_drafts,
             )
 
+        if sampler_output is not None and sampler_output.sampled_token_ids.is_meta:
+            from vllm import meta_mode
+
+            sampler_output = meta_mode.materialize_sampler_output(
+                sampler_output, self.device
+            )
+
         if shard_metadata is not None:
             # Gather the sharded sampler outputs from the TP ranks into a single
             # sampler output.
@@ -2277,6 +2287,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         model_runner_output.kv_connector_output = kv_connector_output
         model_runner_output.ec_connector_output = ec_connector_output
 
+        if hidden_states.is_meta:
+            from vllm import meta_mode
+
+            return meta_mode.MetaAsyncOutput(async_output, input_batch.num_tokens)
         return async_output
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:

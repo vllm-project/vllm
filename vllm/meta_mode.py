@@ -22,14 +22,13 @@ custom ops (``vllm::unified_attention_with_output``, ``vllm::mamba_mixer``,
 owner-provided fake kernels when one exists. :func:`register_meta_impls` fills
 the remaining shape-safe gaps, for both compiled leaf ops and opaque
 ``vllm::`` ops, from operator schemas (no return or aliased return). Raw Triton
-kernels that are NOT torch ops (e.g.
-``fused_qk_rmsnorm_rope_gate``) cannot be given a ``torch.library`` meta kernel,
-so in meta mode the Triton launcher is hijacked (:func:`install_launch_hooks`)
-to skip the kernel launch (outputs are host pre-allocated, so shapes are
-preserved).
+kernels that are NOT torch ops (e.g. ``fused_qk_rmsnorm_rope_gate``) cannot be
+given a ``torch.library`` meta kernel, so :func:`install_launch_hooks` skips
+model-side launches but interprets MRV2's value-carrying host bookkeeping.
 """
 
 import contextlib
+import dataclasses
 import functools
 import time
 from collections.abc import Callable
@@ -43,7 +42,7 @@ import vllm.envs as envs
 from vllm.v1.outputs import AsyncModelRunnerOutput, ModelRunnerOutput
 
 if TYPE_CHECKING:
-    from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.v1.worker.gpu.sample.output import SamplerOutput
 
 # Constant token id emitted for every sampled position on meta.
 META_TOKEN_ID = 100
@@ -204,54 +203,121 @@ def fake_token_ids(sampled_token_ids: torch.Tensor) -> list[list[int]]:
     return torch.full(sampled_token_ids.shape, META_TOKEN_ID).tolist()
 
 
+def _materialize(value: Any, device: torch.device, fill_value: int = 0) -> Any:
+    if not isinstance(value, torch.Tensor) or not value.is_meta:
+        return value
+    return torch.full(value.shape, fill_value, dtype=value.dtype, device=device)
+
+
+def materialize_sampler_output(
+    output: "SamplerOutput", device: torch.device
+) -> "SamplerOutput":
+    """Give the value-less outputs of a meta-logits sample host values.
+
+    Model Runner V2 feeds the sampled ids back into its request state and the
+    async D2H output, so they must carry values. Counts derived from the host
+    batch state (``num_sampled``/``num_rejected``) are already real.
+    """
+    logprobs = output.logprobs_tensors
+    if logprobs is not None:
+        logprobs = logprobs._replace(
+            **{k: _materialize(v, device) for k, v in logprobs._asdict().items()}
+        )
+    masks = output.sampling_mask_tensors
+    if masks is not None:
+        masks = masks._replace(
+            **{k: _materialize(v, device) for k, v in masks._asdict().items()}
+        )
+    return dataclasses.replace(
+        output,
+        sampled_token_ids=_materialize(
+            output.sampled_token_ids, device, META_TOKEN_ID
+        ),
+        logprobs_tensors=logprobs,
+        num_nans=_materialize(output.num_nans, device),
+        sampling_mask_tensors=masks,
+    )
+
+
 class MetaAsyncOutput(AsyncModelRunnerOutput):
     """Emulate GPU async output with a token-proportional deadline.
 
-    ``GPUModelRunner.sample_tokens`` returns one in meta mode; the executor
-    unwraps it via the blocking ``get_output()``. The deadline is set at creation
-    (after the forward), so the engine's pre-output scheduling overlaps the
-    simulated latency -- the same overlap the real async-output path gives.
+    The model runners return one in meta mode; the executor unwraps it via the
+    blocking ``get_output()``. The deadline is set at creation (after the
+    forward), so the engine's pre-output scheduling overlaps the simulated
+    latency -- the same overlap the real async-output path gives.
     """
 
-    def __init__(self, output: ModelRunnerOutput, scheduler_output: "SchedulerOutput"):
+    def __init__(
+        self, output: ModelRunnerOutput | AsyncModelRunnerOutput, num_tokens: int
+    ):
         self._output = output
-        self._deadline = time.monotonic() + self._simulated_latency_s(scheduler_output)
-
-    @staticmethod
-    def _simulated_latency_s(scheduler_output: "SchedulerOutput") -> float:
-        num_tokens = scheduler_output.total_num_scheduled_tokens
-        return num_tokens * envs.VLLM_META_TOKEN_LATENCY_MS / 1000.0
+        latency_s = num_tokens * envs.VLLM_META_TOKEN_LATENCY_MS / 1000.0
+        self._deadline = time.monotonic() + latency_s
 
     def get_output(self) -> ModelRunnerOutput:
         remaining = self._deadline - time.monotonic()
         if remaining > 0:
             time.sleep(remaining)
+        if isinstance(self._output, AsyncModelRunnerOutput):
+            return self._output.get_output()
         return self._output
 
 
-def _disable_triton_launch() -> None:
-    """Hijack the Triton launcher so raw ``@triton.jit`` kernels become no-ops.
+def _has_meta_tensor(values: Any) -> bool:
+    if isinstance(values, torch.Tensor):
+        return values.is_meta
+    if isinstance(values, (tuple, list)):
+        return any(_has_meta_tensor(value) for value in values)
+    if isinstance(values, dict):
+        return any(_has_meta_tensor(value) for value in values.values())
+    # TensorWrapper / TensorDescriptor expose the wrapped tensor as ``base``.
+    base = getattr(values, "base", None)
+    return isinstance(base, torch.Tensor) and base.is_meta
+
+
+def _route_triton_launch() -> None:
+    """Route raw ``@triton.jit`` launches by the device of their arguments.
 
     Some fused kernels (e.g. ``fused_qk_rmsnorm_rope_gate`` for Qwen3-Next full
     attention) are launched directly as ``kernel[grid](...)`` rather than through
     a torch custom op, so they cannot be given a ``torch.library`` meta kernel.
     On a CPU/meta box the Triton driver has no active device ("0 active
-    drivers"). These kernels write in place into host pre-allocated (meta)
-    tensors, so skipping the launch preserves output shapes and only avoids the
-    GPU compute -- model-agnostically, one layer below the model.
+    drivers"). Launches touching a meta tensor write in place into pre-allocated
+    outputs, so skipping them preserves shapes and only avoids the GPU compute.
+    Host-only launches from ``vllm.v1.worker`` update Model Runner V2's batch
+    state and run in the Triton interpreter to keep real values. Other host-only
+    launches are model/attention compute and remain shape-only no-ops.
     """
     import triton.runtime.autotuner as _autotuner
     import triton.runtime.jit as _jit
+    from triton.runtime.interpreter import InterpretedFunction
 
-    _jit.JITFunction.run = lambda self, *a, **k: None
-    # Autotuners query the driver before reaching the wrapped JIT function.
-    _autotuner.Autotuner.run = lambda self, *a, **k: None
+    interpreted = functools.cache(InterpretedFunction)
+
+    def run(self, *args, grid, warmup, **kwargs):
+        has_meta_arg = _has_meta_tensor(args) or _has_meta_tensor(kwargs)
+        is_runner_bookkeeping = self.fn.__module__.startswith("vllm.v1.worker.")
+        if warmup or has_meta_arg or not is_runner_bookkeeping:
+            return None
+        return interpreted(self.fn).run(*args, grid=grid, warmup=False, **kwargs)
+
+    def autotuned_run(self, *args, **kwargs):
+        if _has_meta_tensor(args) or _has_meta_tensor(kwargs):
+            return None
+        # Benchmarking needs a device; any config is valid in the interpreter.
+        return self.fn.run(*args, **kwargs, **self.configs[0].all_kwargs())
+
+    _jit.JITFunction.run = run
+    # Device functions called from an interpreted kernel are interpreted too.
+    _jit.JITFunction.__call__ = lambda self, *a, **k: interpreted(self.fn)(*a, **k)
+    _autotuner.Autotuner.run = autotuned_run
 
 
 def _disable_cutedsl_launch() -> None:
     """Hijack the CuteDSL (cutlass.cute) JIT so its kernels become no-ops.
 
-    Same idea as :func:`_disable_triton_launch`, one layer below the model, for
+    Same idea as :func:`_route_triton_launch`, one layer below the model, for
     the CuteDSL kernels used by DeepSeek-V4 / Kimi-K3 (e.g. the sparse-attn
     compressor, latent MoE). ``cute.compile(kernel, *sample_args)`` returns a
     compiled launcher that is later called as ``compiled(*tensors)``; both the
@@ -416,6 +482,6 @@ def _patch_cuda_primitives() -> None:
 @functools.cache
 def install_launch_hooks() -> None:
     """Neutralise third-party GPU launch layers for meta execution. Idempotent."""
-    _disable_triton_launch()
+    _route_triton_launch()
     _disable_cutedsl_launch()
     _patch_cuda_primitives()

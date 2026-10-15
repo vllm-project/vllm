@@ -6,6 +6,7 @@ from functools import partial
 import numpy as np
 import torch
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
 from vllm.utils.platform_utils import is_uva_available
@@ -50,7 +51,9 @@ class NonUvaBuffer:
         )
         self.cpu = torch.zeros(size, dtype=dtype, device="cpu")
         self.np = self.cpu.numpy()
-        self._uva = torch.zeros(size, dtype=dtype, device=current_platform.device_type)
+        # Meta mode runs the model runner on the host.
+        device = "cpu" if envs.VLLM_META_MODE else current_platform.device_type
+        self._uva = torch.zeros(size, dtype=dtype, device=device)
 
     def uva(self, n: int | None = None) -> torch.Tensor:
         if n is None:

@@ -33,6 +33,7 @@ import os
 # CUDA_VISIBLE_DEVICES keeps torch off any GPU, and the in-process EngineCore
 # keeps its scheduler inspectable while model ranks use MultiprocExecutor.
 os.environ.setdefault("VLLM_META_MODE", "1")
+os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "1"
 os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
 os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
 os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
@@ -71,8 +72,8 @@ _MODELS = [
             enable_expert_parallel=True,
             language_model_only=True,  # native multimodal; text LM only
             # KDA "align" mode needs aligned Mamba state indices (normally a
-            # triton/CUDA kernel, no-op on meta); the V1 runner precomputes them
-            # host-side in meta mode, enabling full offload.
+            # triton/CUDA kernel in serving; MRV2 computes equivalent indices
+            # from its value-carrying host block table in meta mode.
             expected_offload=True,
         ),
         id="Kimi-K3",
@@ -241,6 +242,7 @@ def test_meta_model_e2e(llm_kwargs: dict, request: pytest.FixtureRequest) -> Non
         **llm_kwargs,
     )
     request.addfinalizer(llm.llm_engine.engine_core.shutdown)
+    assert llm.llm_engine.vllm_config.use_v2_model_runner
 
     parallel_config = llm.llm_engine.vllm_config.parallel_config
     for name, expected in requested_parallel.items():

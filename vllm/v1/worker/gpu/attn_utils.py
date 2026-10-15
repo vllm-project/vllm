@@ -417,9 +417,15 @@ def init_kv_cache(
                 block_tables,
             )
         else:
+            # Meta weights never read the KV cache, so it holds no memory.
+            kv_cache_device = (
+                torch.device("meta")
+                if vllm_config.load_config.load_format == "meta"
+                else device
+            )
             kv_caches = allocate_kv_cache(
                 kv_cache_config,
-                device,
+                kv_cache_device,
                 vllm_config.cache_config.get_resolved_kv_cache_layout(),
                 kernel_block_sizes,
             )
@@ -575,6 +581,10 @@ def build_attn_metadata(
                 )
             if reuse_key is not None and reuse_key not in cached_metadata:
                 cached_metadata[reuse_key] = metadata
+            if envs.VLLM_META_MODE:
+                metadata = attn_metadata_builder.prepare_for_forward(
+                    metadata, torch.device("meta")
+                )
             for layer_name in attn_group.layer_names:
                 attn_metadata[layer_name] = metadata
         token_to_req_indices = common_attn_metadata._token_to_req_indices_cache
