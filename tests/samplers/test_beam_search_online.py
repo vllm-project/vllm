@@ -19,7 +19,7 @@ from vllm.entrypoints.generate.beam_search.utils import (
 )
 from vllm.inputs import EngineInput, TokensInput
 from vllm.logprobs import Logprob, SampleLogprobs, append_logprobs_for_next_position
-from vllm.sampling_params import BeamSearchParams
+from vllm.sampling_params import BeamSearchParams, StructuredOutputsParams
 from vllm.v1.structured_output.backend_types import StructuredOutputBackend
 
 
@@ -28,6 +28,15 @@ def reset_warning_once():
     vllm_logger._print_warning_once.cache_clear()
     yield
     vllm_logger._print_warning_once.cache_clear()
+
+
+def test_beam_search_params_preserves_positional_arguments():
+    grammar = StructuredOutputsParams(regex="a")
+    params = BeamSearchParams(2, 4, False, 0.0, 1.0, False, grammar, False, True)
+    assert params.structured_outputs is grammar
+    assert params.skip_special_tokens is False
+    assert params.watermarking is True
+    assert params.allowed_token_ids is None
 
 
 class _Tokenizer:

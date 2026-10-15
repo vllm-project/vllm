@@ -69,14 +69,19 @@ def test_iter_request_chunks_preserves_request_boundaries():
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
 @pytest.mark.parametrize("logprobs_mode", get_args(LogprobsMode))
-def test_chunked_scores_match_full_batch(logprobs_mode: str):
+@pytest.mark.parametrize("candidates", [{}, {7: [1, 3], 9: [2, 4]}])
+def test_chunked_scores_match_full_batch(logprobs_mode: str, candidates):
     device = torch.device("cuda")
     cu_num_logits_np = np.array([0, 3, 4, 8, 10], dtype=np.int32)
     num_logits_per_req = np.diff(cu_num_logits_np)
     idx_mapping_np = np.array([7, 2, 9, 1], dtype=np.int32)
     input_batch = _make_input_batch(cu_num_logits_np, idx_mapping_np, device)
     rejection_sampler = _make_rejection_sampler(
-        SimpleNamespace(logprobs_mode=logprobs_mode, return_sampling_mask=False),
+        SimpleNamespace(
+            logprobs_mode=logprobs_mode,
+            return_sampling_mask=False,
+            logprob_candidates=candidates,
+        ),
         num_speculative_steps=3,
     )
 
@@ -118,6 +123,8 @@ def test_chunked_scores_match_full_batch(logprobs_mode: str):
         input_batch.cu_num_logits,
         input_batch.cu_num_logits_np,
         max_num_logprobs=2,
+        expanded_idx_mapping=input_batch.expanded_idx_mapping,
+        idx_mapping_np=input_batch.idx_mapping_np,
     )
 
     assert sampled[:, 0].tolist() == idx_mapping_np.tolist()
@@ -138,6 +145,11 @@ def test_chunked_scores_match_full_batch(logprobs_mode: str):
         == full_logprobs.cu_num_generated_tokens
     )
     assert sampling_mask_tensors is None
+    for row, req_idx in enumerate(input_batch.expanded_idx_mapping.tolist()):
+        if req_idx in candidates:
+            assert set(chunked_logprobs.logprob_token_ids[row, 1:].tolist()) == set(
+                candidates[req_idx]
+            )
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
@@ -163,6 +175,7 @@ def test_replay_on_off_preserves_rejection_sampling_and_rng(monkeypatch):
     draft_sampled = draft_sampled.flatten()
     sampler = SimpleNamespace(
         logprobs_mode="processed_logprobs",
+        logprob_candidates={},
         return_sampling_mask=False,
         sampling_states=SimpleNamespace(
             top_k=SimpleNamespace(np=np.full(num_reqs, vocab_size)),
