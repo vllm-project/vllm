@@ -1151,7 +1151,7 @@ def coerce_to_schema_type(value: str, schema_type: str | list[str]) -> Any:
             continue
 
         if candidate_type == "null":
-            if value.lower() == "null":
+            if value.lower() in ("null", "none"):
                 return None
             continue
         if candidate_type == "string":

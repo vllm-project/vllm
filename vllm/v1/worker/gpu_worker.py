@@ -67,7 +67,10 @@ from vllm.model_executor.model_loader.weight_checksum import (
     compute_tensor_digests,
     zero_weights,
 )
-from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
+from vllm.model_executor.warmup.kernel_warmup import (
+    deep_gemm_kernel_warmup,
+    kernel_warmup,
+)
 from vllm.multimodal.gpu_ipc_memory import reserve_mm_ipc_gpu_memory
 from vllm.platforms import current_platform
 from vllm.profiler.wrapper import (
@@ -109,7 +112,11 @@ from vllm.v1.worker.workspace import init_workspace_manager
 from ...model_executor.model_loader import TensorizerLoader
 from .gpu.cudagraph_utils import has_compiled_submodule
 from .gpu.warmup import warmup_kernels
-from .utils import request_memory
+from .utils import (
+    prepare_kv_cache_side_storage_for_memory_profiling,
+    request_memory,
+    reset_kv_cache_side_storage_and_log,
+)
 
 logger = init_logger(__name__)
 
@@ -155,6 +162,22 @@ if TYPE_CHECKING:
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner as GPUModelRunnerV2
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+
+
+def _warmup_v1_sampler(
+    model_runner: "GPUModelRunner",
+    last_hidden_states: torch.Tensor,
+) -> None:
+    model_runner._dummy_sampler_run(hidden_states=last_hidden_states)
+    if not envs.VLLM_BATCH_INVARIANT:
+        return
+
+    # Triton specializes integer value 1 separately and distinguishes aligned
+    # from unaligned runtime integers. Cover both small-logits classes in
+    # addition to the max-request warmup above.
+    for num_rows in (1, 2):
+        if num_rows < last_hidden_states.shape[0]:
+            model_runner._dummy_sampler_run(hidden_states=last_hidden_states[:num_rows])
 
 
 class AsyncIntermediateTensors(IntermediateTensors):
@@ -547,7 +570,7 @@ class Worker(WorkerBase):
     def _init_workspace_and_model_runner(self) -> None:
         """Set up the workspace manager, build the model runner, report usage."""
         # DSpark target and draft CUDA graphs retain workspace views concurrently.
-        num_ubatches = 2 if self.vllm_config.parallel_config.enable_dbo else 1
+        num_ubatches = max(1, self.vllm_config.parallel_config.num_ubatches)
         init_workspace_manager(
             self.device,
             num_ubatches,
@@ -647,6 +670,11 @@ class Worker(WorkerBase):
         maybe_apply_startup_plan(self)
 
         if kv_cache_memory_bytes := self.cache_config.kv_cache_memory_bytes:
+            deep_gemm_kernel_warmup(self)
+            prepare_kv_cache_side_storage_for_memory_profiling(
+                self.compilation_config.static_forward_context,
+                self.device,
+            )
             # still need a profile run which compiles the model for
             # max_num_batched_tokens
             with set_current_vllm_config(self.vllm_config):
@@ -690,6 +718,10 @@ class Worker(WorkerBase):
             self._scoped_allocator_max_split(max_split_size_mb=20),
             set_current_vllm_config(self.vllm_config),
         ):
+            deep_gemm_kernel_warmup(self)
+            prepare_kv_cache_side_storage_for_memory_profiling(
+                self.compilation_config.static_forward_context, self.device
+            )
             self.model_runner.profile_run(randomize_inputs=self.randomize_dummy_inputs)
 
         # Profile CUDA graph memory if graphs will be captured.
@@ -1055,7 +1087,11 @@ class Worker(WorkerBase):
             if self.model_runner.is_pooling_model:
                 self.model_runner._dummy_pooler_run(hidden_states)
             else:
-                self.model_runner._dummy_sampler_run(hidden_states=last_hidden_states)
+                _warmup_v1_sampler(self.model_runner, last_hidden_states)
+
+        reset_kv_cache_side_storage_and_log(
+            self.compilation_config.static_forward_context, "startup warmup"
+        )
 
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
@@ -1433,6 +1469,7 @@ class Worker(WorkerBase):
         self.model_runner._dummy_run(
             num_tokens,
             uniform_decode=True,
+            disable_kv_cache_writes=True,
             randomize_inputs=self.randomize_dummy_inputs,
         )
 

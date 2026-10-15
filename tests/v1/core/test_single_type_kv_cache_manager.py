@@ -459,6 +459,32 @@ def test_sliding_window_records_new_blocks_for_zeroing():
     assert manager.take_new_block_ids() == []
 
 
+def test_sliding_window_external_hit_allocates_only_attended_window():
+    """Retained blocks below the window are not loaded by a connector, so an
+    external hit must leave them null like a local hit instead of caching
+    unwritten blocks under their prefix hashes."""
+    block_size = 4
+    spec = SlidingWindowSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+        sliding_window=8,
+        extra_retained_tokens=2,
+    )
+    block_pool = BlockPool(
+        num_gpu_blocks=16, enable_caching=True, hash_block_size=block_size
+    )
+    manager = get_sliding_window_manager(spec, block_pool)
+    manager.use_eagle = True
+
+    manager.add_local_computed_blocks("request", [], 0, 24)
+    manager.allocate_external_computed_blocks("request", 0, 24)
+
+    blocks = manager.req_to_blocks["request"]
+    assert [block.is_null for block in blocks] == [True] * 4 + [False] * 2
+
+
 def test_chunked_local_attention_records_new_blocks_for_zeroing():
     block_size = 2
     spec = ChunkedLocalAttentionSpec(

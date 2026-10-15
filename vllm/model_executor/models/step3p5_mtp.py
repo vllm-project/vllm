@@ -174,6 +174,12 @@ class Step3p5MTP(nn.Module):
         self.model = Step3p5AMultiTokenPredictor(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
+        # The target may be MoE while all MTP blocks are dense. Expose the
+        # draft topology so its local TP forwards do not inherit target-model
+        # DP/EP coordination requirements.
+        self.is_dense_mtp = all(
+            not layer.mtp_block.use_moe for layer in self.model.layers.values()
+        )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)

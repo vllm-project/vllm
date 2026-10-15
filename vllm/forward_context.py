@@ -57,6 +57,25 @@ class BatchDescriptor:
     """
 
 
+def make_local_num_tokens_across_dp(
+    parallel_config: ParallelConfig,
+    num_tokens: int,
+) -> torch.Tensor | None:
+    """Build DP metadata for a forward that is local to each DP replica.
+
+    Non-local entries are placeholders and must not be used by a forward that
+    communicates across DP or EP ranks.
+    """
+    if parallel_config.data_parallel_size <= 1:
+        return None
+    return torch.full(
+        (parallel_config.data_parallel_size,),
+        num_tokens,
+        dtype=torch.int32,
+        device="cpu",
+    )
+
+
 def _compute_sp_num_tokens(
     num_tokens_across_dp_cpu: torch.Tensor,
     sequence_parallel_size: int,

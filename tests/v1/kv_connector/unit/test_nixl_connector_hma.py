@@ -1628,6 +1628,27 @@ def test_mamba_n1_d_side_builds_decode_metadata():
 
 
 @pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    ("tokens", "transferred"),
+    [(31, 0), (32, 16), (47, 16), (48, 32)],
+)
+def test_prefill_handoff_resumes_recompute_at_block_boundary(tokens, transferred):
+    """A cache spec's replay suffix backs P/D off to a block boundary."""
+    sched = make_nixl_scheduler(prefix_recompute_tokens=16)
+    producer = create_request(num_tokens=tokens, do_remote_decode=True)
+    original = producer.prompt_token_ids.copy()
+    sched.on_new_request(producer)
+    sched.on_new_request(producer)
+    # With nothing to load the decoder prefills locally; the producer is whole.
+    kept = transferred or tokens
+    assert producer.prompt_token_ids == original[:kept]
+    assert producer.num_prompt_tokens == kept
+    consumer = create_request(num_tokens=tokens, do_remote_prefill=True)
+    expected = (transferred, True) if transferred else (0, False)
+    assert sched.get_num_new_matched_tokens(consumer, 0) == expected
+
+
+@pytest.mark.cpu_test
 def test_mamba_n1_p_side_truncation():
     """P-side truncates to N-1 before the scheduler's prefix-cache lookup.
 

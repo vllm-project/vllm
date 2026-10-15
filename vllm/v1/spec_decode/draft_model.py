@@ -9,7 +9,7 @@ from vllm.config import VllmConfig
 from vllm.config.utils import replace
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
-from vllm.tokenizers.registry import get_tokenizer
+from vllm.tokenizers.registry import cached_tokenizer_from_config
 from vllm.v1.spec_decode.llm_base_proposer import SpecDecodeBaseProposer
 from vllm.v1.spec_decode.vocab_mapping import VocabMapping
 
@@ -38,14 +38,13 @@ class DraftModelProposer(SpecDecodeBaseProposer):
             # Heterogeneous vocabularies: build a VocabMapping to translate
             # token IDs between the two tokenizers and constrain draft logits
             # to the intersection so rejection sampling stays lossless.
-            target_tokenizer = get_tokenizer(
-                spec.target_model_config.tokenizer,
-                trust_remote_code=spec.target_model_config.trust_remote_code,
-            )
-            draft_tokenizer = get_tokenizer(
-                spec.draft_model_config.model,
-                trust_remote_code=spec.draft_model_config.trust_remote_code,
-            )
+            target_tokenizer = cached_tokenizer_from_config(spec.target_model_config)
+            draft_tokenizer = cached_tokenizer_from_config(spec.draft_model_config)
+            if target_tokenizer is None or draft_tokenizer is None:
+                raise ValueError(
+                    "use_heterogeneous_vocab requires tokenizer initialization "
+                    "for both the target and draft models."
+                )
             self.vocab_mapping: VocabMapping | None = VocabMapping(
                 target_tokenizer=target_tokenizer,
                 draft_tokenizer=draft_tokenizer,

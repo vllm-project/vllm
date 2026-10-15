@@ -117,8 +117,10 @@ class RejectionSampler(nn.Module):
                 Metadata for spec decoding.
             draft_probs (Optional[torch.Tensor]):
                 Probability distribution for the draft tokens. Shape is
-                [num_tokens, vocab_size]. Can be None if probabilities are
-                not provided, which is the case for ngram spec decode.
+                [num_tokens, draft_vocab_size], using the same token IDs as
+                the target, with zero probability for missing vocabulary entries.
+                Can be None if probabilities are not provided, which is the
+                case for ngram spec decode.
             logits (torch.Tensor):
                 Target model's logits probability distribution.
                 Shape is [num_tokens + batch_size, vocab_size]. Here,
@@ -439,6 +441,8 @@ def rejection_sample(
     assert draft_probs is None or draft_probs.is_contiguous()
     assert bonus_token_ids.is_contiguous()
     assert target_logits.shape == (num_tokens, vocab_size)
+    if draft_probs is not None:
+        assert draft_probs.shape[0] == num_tokens
 
     # Create output buffer.
     output_token_ids = torch.full(
@@ -508,6 +512,8 @@ def rejection_sample(
         cu_num_draft_tokens,
         draft_token_ids,
         draft_probs,
+        draft_probs.stride(0) if draft_probs is not None else 0,
+        draft_probs.shape[-1] if draft_probs is not None else 0,
         target_probs,
         bonus_token_ids,
         recovered_token_ids,
@@ -714,6 +720,8 @@ def sample_recovered_tokens(
         cu_num_draft_tokens,
         draft_token_ids,
         draft_probs,
+        draft_probs.stride(0) if draft_probs is not None else 0,
+        draft_probs.shape[-1] if draft_probs is not None else 0,
         target_probs,
         inv_q,
         max_spec_len=max_spec_len,
@@ -831,6 +839,8 @@ def rejection_random_sample_kernel(
     cu_num_draft_tokens_ptr,  # [batch_size]
     draft_token_ids_ptr,  # [num_tokens]
     draft_probs_ptr,  # [num_tokens, vocab_size] or None
+    draft_probs_stride,
+    draft_probs_vocab_size,
     target_probs_ptr,  # [num_tokens, vocab_size]
     bonus_token_ids_ptr,  # [batch_size]
     recovered_token_ids_ptr,  # [num_tokens]
@@ -861,7 +871,7 @@ def rejection_random_sample_kernel(
         if not rejected:
             draft_token_id = tl.load(draft_token_ids_ptr + start_idx + pos)
             uniform_prob = tl.load(uniform_probs_ptr + start_idx + pos)
-            if draft_token_id < 0:
+            if draft_token_id < 0 or draft_token_id >= vocab_size:
                 # -1 is used for padded draft token ids that should be rejected.
                 accepted = False
             elif SYNTHETIC_MODE:
@@ -873,8 +883,10 @@ def rejection_random_sample_kernel(
                 else:
                     draft_prob = tl.load(
                         draft_probs_ptr
-                        + (start_idx + pos) * vocab_size
-                        + draft_token_id
+                        + (start_idx + pos) * draft_probs_stride
+                        + draft_token_id,
+                        mask=draft_token_id < draft_probs_vocab_size,
+                        other=0.0,
                     )
                 target_prob = tl.load(
                     target_probs_ptr + (start_idx + pos) * vocab_size + draft_token_id
@@ -915,6 +927,8 @@ def _rejection_random_sample_warmup_inputs(
         cu_num_draft_tokens=int32,
         draft_token_ids=int32,
         draft_probs=None if no_draft_probs else probabilities,
+        draft_probs_stride=vocab_size,
+        draft_probs_vocab_size=vocab_size,
         target_probs=probabilities,
         bonus_token_ids=TritonWarmupTensor(torch.int64),
         recovered_token_ids=int32,
@@ -936,6 +950,8 @@ def _rejection_random_sample(
     cu_num_draft_tokens: torch.Tensor,
     draft_token_ids: torch.Tensor,
     draft_probs: torch.Tensor | None,
+    draft_probs_stride: int,
+    draft_probs_vocab_size: int,
     target_probs: torch.Tensor,
     bonus_token_ids: torch.Tensor,
     recovered_token_ids: torch.Tensor,
@@ -1006,6 +1022,8 @@ def sample_recovered_tokens_kernel(
     cu_num_draft_tokens_ptr,  # [batch_size]
     draft_token_ids_ptr,  # [num_tokens]
     draft_probs_ptr,  # [num_tokens, vocab_size] or None
+    draft_probs_stride,
+    draft_probs_vocab_size,
     target_probs_ptr,  # [num_tokens, vocab_size]
     inv_q_ptr,  # [batch_size, vocab_size]
     vocab_size,
@@ -1049,8 +1067,8 @@ def sample_recovered_tokens_kernel(
             )
         else:
             draft_prob = tl.load(
-                draft_probs_ptr + token_idx * vocab_size + vocab_offset,
-                mask=vocab_mask,
+                draft_probs_ptr + token_idx * draft_probs_stride + vocab_offset,
+                mask=vocab_mask & (vocab_offset < draft_probs_vocab_size),
                 other=0.0,
             )
             target_prob = tl.load(
@@ -1099,6 +1117,8 @@ def _sample_recovered_tokens_warmup_inputs(
         cu_num_draft_tokens=int32,
         draft_token_ids=int32,
         draft_probs=None if no_draft_probs else probabilities,
+        draft_probs_stride=vocab_size,
+        draft_probs_vocab_size=vocab_size,
         target_probs=probabilities,
         inv_q=TritonWarmupTensor(
             torch.float64 if use_fp64_gumbel else torch.float32,
@@ -1117,6 +1137,8 @@ def _sample_recovered_tokens(
     cu_num_draft_tokens: torch.Tensor,
     draft_token_ids: torch.Tensor,
     draft_probs: torch.Tensor | None,
+    draft_probs_stride: int,
+    draft_probs_vocab_size: int,
     target_probs: torch.Tensor,
     inv_q: torch.Tensor,
     *,

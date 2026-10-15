@@ -88,7 +88,10 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
     iter_layer_specs,
 )
-from vllm.v1.worker.utils import select_common_block_size
+from vllm.v1.worker.utils import (
+    KVCacheSideStorageTransfer,
+    select_common_block_size,
+)
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -1683,6 +1686,35 @@ class NixlBaseConnectorWorker:
                     f"kv_cache_layout={self.kv_cache_layout}"
                 )
 
+        # Side storage moves whole rows with its owner group's blocks and is
+        # identical on every TP rank.
+        side_storage: dict[str, torch.Tensor] = {}
+        context = self.vllm_config.compilation_config.static_forward_context
+        for name, layer in context.items():
+            if not isinstance(layer, KVCacheSideStorageTransfer):
+                continue
+            view = side_storage[name] = layer.kv_cache_side_storage_transfer_view()
+            base_addr = view.data_ptr()
+            registration_ranges[(base_addr, self.nixl_memory_type)] = (
+                base_addr,
+                base_addr + view.nbytes,
+                self.device_id,
+            )
+            seen_base_addresses.append(base_addr)
+            self.block_len_per_layer.append(view.stride(0))
+            self.block_stride_per_layer.append(view.stride(0))
+            self.region_group_ids.append(
+                self.kv_cache_config.transfer_group_index_by_layer[
+                    layer.main_layer_name
+                ]
+            )
+            self.region_names.append(name)
+            self.region_num_blocks.append(view.shape[0])
+            self._region_is_mla.append(True)
+            region_mem_types.append(self.nixl_memory_type)
+            if track_region_layers:
+                region_layers.append([name])
+
         logger.debug(
             "Different block lengths collected: %s", set(self.block_len_per_layer)
         )
@@ -1748,7 +1780,7 @@ class NixlBaseConnectorWorker:
             self.nixl_wrapper.register_memory(descs, backends=self.nixl_backends)
             self._registered_descs.append(descs)
 
-        self.device_kv_caches = kv_caches
+        self.device_kv_caches = kv_caches | side_storage
         self.dst_num_blocks[self.engine_id] = self.num_blocks
         self.dst_region_num_blocks[self.engine_id] = xfer_region_num_blocks
         self.dst_region_group_ids[self.engine_id] = self.region_group_ids

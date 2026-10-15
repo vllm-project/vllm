@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, cast
 
 import torch
@@ -460,6 +461,10 @@ class Attention(nn.Module, AttentionLayerBase):
         # by bind_kv_cache
         # this variable will not be accessed if use_direct_call is True
         self.kv_cache = torch.tensor([])
+        self.kv_cache_requires_zeroing = False
+        self.kv_cache_extra_budget_page_size_bytes: int | Callable[[int], int] = 0
+        self.kv_cache_extra_budget_fixed_size_bytes: int | Callable[[int], int] = 0
+        self.kv_cache_prefix_recompute_tokens = 0
 
         # Initialize KV cache quantization attributes
         _init_kv_cache_quant(self, quant_config, prefix)
@@ -495,6 +500,9 @@ class Attention(nn.Module, AttentionLayerBase):
         # definition specify the output tensor shape.
         output_shape: torch.Size | None = None,
         output_dtype: torch.dtype | None = None,
+        # Models that write KV cache through a fused projection can provide the
+        # ordering token instead of issuing a duplicate cache update.
+        kv_cache_dummy_dep: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """The KV cache is stored inside this class and is accessed via
         `self.kv_cache`.
@@ -536,12 +544,13 @@ class Attention(nn.Module, AttentionLayerBase):
             key = key.view(-1, self.num_kv_heads, self.head_size)
         if value is not None:
             value = value.view(-1, self.num_kv_heads, self.head_size_v)
-        kv_cache_dummy_dep = None
         if self.use_direct_call:
-            # Skip this if sharing KV cache with an earlier attention layer.
+            # Skip this if sharing KV cache with an earlier attention layer, or if
+            # the caller already performed the write and passed in its dep token.
             if (
                 not self.attn_backend.forward_includes_kv_cache_update
                 and self.kv_sharing_target_layer_name is None
+                and kv_cache_dummy_dep is None
                 and key is not None
                 and value is not None
             ):
@@ -557,11 +566,13 @@ class Attention(nn.Module, AttentionLayerBase):
                 kv_cache_dummy_dep=kv_cache_dummy_dep,
             )
         else:
-            # Skip this if sharing KV cache with an earlier attention layer.
+            # Skip this if sharing KV cache with an earlier attention layer, or if
+            # the caller already performed the write and passed in its dep token.
             encoded = _encode_layer_name(self.layer_name)
             if (
                 not self.attn_backend.forward_includes_kv_cache_update
                 and self.kv_sharing_target_layer_name is None
+                and kv_cache_dummy_dep is None
                 and key is not None
                 and value is not None
             ):
@@ -602,6 +613,13 @@ class Attention(nn.Module, AttentionLayerBase):
 
     def get_attn_backend(self) -> type[AttentionBackend]:
         return self.attn_backend
+
+    def _with_prefix_recompute_contract(self, spec: KVCacheSpec) -> KVCacheSpec:
+        if not self.kv_cache_prefix_recompute_tokens:
+            return spec
+        return spec.with_side_storage(
+            prefix_cache_recompute_tokens=int(self.kv_cache_prefix_recompute_tokens)
+        )
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
         # Block size may get updated after model loading, refresh it
@@ -656,7 +674,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 block_size,
                 kv_cache_spec,
             )
-            return SlidingWindowSpec(
+            spec = SlidingWindowSpec(
                 block_size=sw_block_size,
                 num_kv_heads=self.num_kv_heads,
                 head_size=self.head_size,
@@ -666,7 +684,18 @@ class Attention(nn.Module, AttentionLayerBase):
                 sliding_window=self.sliding_window,
                 page_size_padded=shared_page,
             )
+            return self._with_prefix_recompute_contract(spec)
         else:
+            requires_zeroing = self.kv_cache_requires_zeroing
+            page_budget_fn = self.kv_cache_extra_budget_page_size_bytes
+            page_budget = (
+                page_budget_fn(block_size)
+                if callable(page_budget_fn)
+                else page_budget_fn
+            )
+            fixed_budget = self.kv_cache_extra_budget_fixed_size_bytes
+            if callable(fixed_budget):
+                fixed_budget = fixed_budget(block_size)
             return FullAttentionSpec(
                 block_size=block_size,
                 num_kv_heads=self.num_kv_heads,
@@ -674,6 +703,13 @@ class Attention(nn.Module, AttentionLayerBase):
                 head_size_v=self.head_size_v,
                 dtype=self.kv_cache_torch_dtype,
                 kv_quant_mode=quant_mode,
+            ).with_side_storage(
+                requires_zeroing=requires_zeroing,
+                extra_budget_page_size_bytes=int(page_budget or 0),
+                extra_budget_fixed_size_bytes=int(fixed_budget or 0),
+                prefix_cache_recompute_tokens=int(
+                    self.kv_cache_prefix_recompute_tokens or 0
+                ),
             )
 
 

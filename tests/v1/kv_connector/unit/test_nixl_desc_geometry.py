@@ -322,7 +322,11 @@ def test_local_descriptors_follow_each_region_pool_capacity():
 
 
 def _register_overlaid_mla_worker(
-    *, push_pp: bool = False, tail_bytes: int = 0, page_covers_view: bool = True
+    *,
+    push_pp: bool = False,
+    tail_bytes: int = 0,
+    page_covers_view: bool = True,
+    static_forward_context=None,
 ):
     """Register two MLA layers overlaid on one allocation.
 
@@ -383,6 +387,9 @@ def _register_overlaid_mla_worker(
     worker._has_mamba = False
     worker._is_csa_linear = False
     worker.vllm_config = MagicMock()
+    worker.vllm_config.compilation_config.static_forward_context = (
+        static_forward_context or {}
+    )
     worker.backend_name = "FLASHMLA"
     worker.num_blocks = num_blocks
     worker.nixl_memory_type = "VRAM"
@@ -494,6 +501,26 @@ def test_overlaid_transfer_groups_share_region_geometry(push_pp):
     assert metadata.region_num_blocks == [num_blocks]
     assert metadata.region_members == ([["layer.0", "layer.1"]] if push_pp else [])
     assert worker._block_ids_by_region(([0], [2]), worker.region_group_ids) == [[0, 2]]
+
+
+@pytest.mark.cpu_test
+def test_side_storage_moves_with_owner_group_blocks():
+    """Side storage registers as a replicated region of its owner's group."""
+    side = torch.zeros((4, 32), dtype=torch.uint8)
+    layer = SimpleNamespace(
+        main_layer_name="layer.1", kv_cache_side_storage_transfer_view=lambda: side
+    )
+    registered = _register_overlaid_mla_worker(
+        static_forward_context={"layer.1.side": layer}
+    )
+    worker = registered.worker
+    region = len(worker.region_names) - 1
+    assert worker.region_names[region] == "layer.1.side"
+    assert worker.region_group_ids[region] == 1
+    assert worker._is_region_replicated(region)
+    assert worker.src_blocks_data[-4:, :2].tolist() == [
+        [side.data_ptr() + 32 * block, 32] for block in range(4)
+    ]
 
 
 def _descriptor_geometry(registered) -> dict:

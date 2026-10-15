@@ -160,6 +160,12 @@ class InputBatch:
             pin_memory=PIN_MEMORY,
         )
         self.num_prompt_tokens = self.num_prompt_tokens_cpu_tensor.numpy()
+        self.is_prefilling = torch.zeros(
+            (max_num_reqs,),
+            device="cpu",
+            dtype=torch.bool,
+            pin_memory=PIN_MEMORY,
+        )
         self.num_computed_tokens_cpu_tensor = torch.zeros(
             (max_num_reqs,),
             device="cpu",
@@ -358,6 +364,16 @@ class InputBatch:
             self.req_output_token_ids[req_index] = request.output_token_ids
             self.spec_token_ids[req_index].clear()
 
+        # A reused row must not retain state from the previous request.  Most
+        # per-request arrays are overwritten below, but these optional maps
+        # are only populated for selected request types.
+        self.req_prompt_embeds.pop(req_index, None)
+        self.logits_processing_needs_token_ids[req_index] = False
+        if self.allowed_token_ids_mask_cpu_tensor is not None:
+            # False means unrestricted; allowed-token requests fill the row
+            # with True below before clearing their allowed IDs.
+            self.allowed_token_ids_mask_cpu_tensor[req_index].fill_(False)
+
         self.req_id_to_index[req_id] = req_index
 
         # Copy the prompt token ids and output token ids.
@@ -538,6 +554,7 @@ class InputBatch:
         self._req_ids[req_index] = None
         self.req_output_token_ids[req_index] = None
         self.spec_token_ids[req_index].clear()
+        self.logits_processing_needs_token_ids[req_index] = False
         self.block_table.clear_row(req_index)
         self.req_prompt_embeds.pop(req_index, None)
 
@@ -616,6 +633,14 @@ class InputBatch:
         self.num_computed_tokens_cpu[i1], self.num_computed_tokens_cpu[i2] = (
             self.num_computed_tokens_cpu[i2],
             self.num_computed_tokens_cpu[i1],
+        )
+        self.is_prefilling[[i1, i2]] = self.is_prefilling[[i2, i1]]
+        (
+            self.logits_processing_needs_token_ids[i1],
+            self.logits_processing_needs_token_ids[i2],
+        ) = (
+            self.logits_processing_needs_token_ids[i2],
+            self.logits_processing_needs_token_ids[i1],
         )
 
         # NOTE: the following is unsafe
@@ -763,6 +788,8 @@ class InputBatch:
                 self.req_prompt_embeds[empty_index] = self.req_prompt_embeds.pop(
                     last_req_index
                 )
+            else:
+                self.req_prompt_embeds.pop(empty_index, None)
             self.num_tokens_no_spec[empty_index] = self.num_tokens_no_spec[
                 last_req_index
             ]
@@ -774,6 +801,15 @@ class InputBatch:
             self.num_computed_tokens_cpu[empty_index] = self.num_computed_tokens_cpu[
                 last_req_index
             ]
+            self.logits_processing_needs_token_ids[empty_index] = (
+                self.logits_processing_needs_token_ids[last_req_index]
+            )
+            self.logits_processing_needs_token_ids[last_req_index] = False
+            if self.allowed_token_ids_mask_cpu_tensor is not None:
+                self.allowed_token_ids_mask_cpu_tensor[empty_index].copy_(
+                    self.allowed_token_ids_mask_cpu_tensor[last_req_index]
+                )
+                self.allowed_token_ids_mask_cpu_tensor[last_req_index].fill_(False)
             self.block_table.move_row(last_req_index, empty_index)
 
             self.request_lora_mapping[empty_index] = self.request_lora_mapping[
@@ -809,13 +845,6 @@ class InputBatch:
             generator = self.generators.pop(last_req_index, None)
             if generator is not None:
                 self.generators[empty_index] = generator
-
-            # TODO convert these to LogitsProcessors
-            if self.allowed_token_ids_mask_cpu_tensor is not None:
-                self.allowed_token_ids_mask_cpu_tensor[empty_index] = (
-                    self.allowed_token_ids_mask_cpu_tensor[last_req_index]
-                )
-                self.allowed_token_ids_mask_cpu_tensor[last_req_index].fill_(False)
 
             bad_words_token_ids = self.bad_words_token_ids.pop(last_req_index, None)
             if bad_words_token_ids is not None:

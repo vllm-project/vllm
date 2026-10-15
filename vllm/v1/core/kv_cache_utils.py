@@ -10,7 +10,7 @@ from collections import defaultdict
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field, replace
 from functools import partial, reduce
-from typing import TYPE_CHECKING, Any, NamedTuple, NewType, TypeAlias, overload
+from typing import TYPE_CHECKING, Any, NamedTuple, NewType, TypeAlias, cast, overload
 
 from vllm import envs
 from vllm.config import VllmConfig
@@ -1067,6 +1067,12 @@ def estimate_max_model_len(
         The estimated maximum model length that can fit in the available memory.
 
     """
+    if _has_extra_kv_budget(kv_cache_spec.values()):
+        groups = get_kv_cache_groups(vllm_config, dict(kv_cache_spec))
+        return _estimate_max_model_len_from_groups(
+            vllm_config, groups, available_memory
+        )
+
     # Save the original max_model_len to restore after estimation
     original_max_model_len = vllm_config.model_config.max_model_len
 
@@ -1131,7 +1137,11 @@ def check_enough_kv_cache_memory(
         )
         _check_enough_kv_cache_memory(
             check_memory,
-            lambda: max_memory_usage_bytes(vllm_config, kv_cache_spec.values()),
+            lambda: (
+                _max_memory_usage_bytes_from_groups(vllm_config, groups)
+                if _has_extra_kv_budget(kv_cache_spec.values())
+                else max_memory_usage_bytes(vllm_config, kv_cache_spec.values())
+            ),
             vllm_config.model_config.max_model_len,
             lambda am: estimate_max_model_len(vllm_config, kv_cache_spec, am),
         )
@@ -1162,6 +1172,9 @@ def create_kv_cache_group_specs(
             kv_cache_spec[layer_name] for layer_name in layer_names_one_group
         ]
         merged_layer_spec = layer_specs[0].merge(layer_specs)
+        merged_layer_spec = merged_layer_spec.with_side_storage_spec(
+            KVCacheSpec.merge_side_storage_specs(layer_specs)
+        )
         kv_cache_groups.append(
             KVCacheGroupSpec(layer_names_one_group, merged_layer_spec)
         )
@@ -1192,6 +1205,58 @@ def is_kv_cache_spec_uniform(kv_cache_spec: dict[str, KVCacheSpec]) -> bool:
     return True
 
 
+def _required_blocks_per_group(
+    vllm_config: VllmConfig, groups: list[KVCacheGroupSpec]
+) -> list[int]:
+    proof_ids: set[int] = set()
+    speculative = getattr(vllm_config, "speculative_config", None)
+    if (
+        speculative is not None
+        and speculative.use_eagle()
+        and vllm_config.cache_config.enable_prefix_caching
+    ):
+        draft_ids = {i for i, group in enumerate(groups) if group.is_eagle_group}
+        if not draft_ids:
+            draft_ids = set(range(len(groups)))
+        specs = [_get_scheduler_kv_cache_spec(group.kv_cache_spec) for group in groups]
+        proof_ids = {
+            i
+            for i, spec in enumerate(specs)
+            if any(spec == specs[j] for j in draft_ids)
+        }
+    scheduler_block_size = (
+        math.lcm(
+            *(
+                resolve_dcp_kv_block_size(
+                    group.kv_cache_spec,
+                    vllm_config.parallel_config.decode_context_parallel_size,
+                )
+                for group in groups
+            )
+        )
+        if proof_ids
+        else None
+    )
+
+    def count(spec: KVCacheSpec, retain_proof: bool) -> int:
+        if isinstance(spec, UniformTypeKVCacheSpecs):
+            return max(
+                count(child, retain_proof) for child in spec.kv_cache_specs.values()
+            )
+        if retain_proof and isinstance(spec, SlidingWindowSpec):
+            return spec.max_admission_blocks_per_request(
+                max_in_flight_tokens=vllm_config.max_in_flight_tokens,
+                max_model_len=vllm_config.model_config.max_model_len,
+                scheduler_block_size=scheduler_block_size,
+                retain_eagle_proof=True,
+            )
+        return cdiv(spec.max_memory_usage_bytes(vllm_config), spec.page_size_bytes)
+
+    return [
+        count(group.kv_cache_spec, i in proof_ids) for i, group in enumerate(groups)
+    ]
+
+
 def get_max_concurrency_for_kv_cache_config(
     vllm_config: VllmConfig, kv_cache_config: KVCacheConfig
 ) -> float:
@@ -1209,11 +1274,8 @@ def get_max_concurrency_for_kv_cache_config(
     """
     num_blocks_per_request = 0
     host_blocks_per_request = 0
-    for group in kv_cache_config.kv_cache_groups:
-        required = cdiv(
-            group.kv_cache_spec.max_memory_usage_bytes(vllm_config),
-            group.kv_cache_spec.page_size_bytes,
-        )
+    groups = kv_cache_config.kv_cache_groups
+    for group, required in zip(groups, _required_blocks_per_group(vllm_config, groups)):
         if group.host_resident:
             host_blocks_per_request += required
         else:
@@ -1236,6 +1298,63 @@ def may_override_num_blocks(vllm_config: VllmConfig, num_blocks: int) -> int:
     return num_blocks
 
 
+def _get_scheduler_kv_cache_spec(spec: KVCacheSpec) -> KVCacheSpec:
+    """Project a worker KV-cache spec to the scheduler-visible spec."""
+    if not isinstance(spec, UniformTypeKVCacheSpecs):
+        return spec
+
+    # Uniform groups share one block table in the scheduler. Use the same
+    # representative and aggregate group-level behavior that
+    # `generate_scheduler_kv_cache_config` exposes at runtime.
+    scheduler_spec = copy.deepcopy(next(iter(spec.kv_cache_specs.values())))
+    side_storage_updates: dict[str, Any] = {}
+    if spec.requires_zeroing and not scheduler_spec.requires_zeroing:
+        side_storage_updates["requires_zeroing"] = True
+    if (
+        spec.prefix_cache_recompute_tokens
+        > scheduler_spec.prefix_cache_recompute_tokens
+    ):
+        side_storage_updates["prefix_cache_recompute_tokens"] = (
+            spec.prefix_cache_recompute_tokens
+        )
+    if side_storage_updates:
+        scheduler_spec = scheduler_spec.with_side_storage(**side_storage_updates)
+    return scheduler_spec
+
+
+def _has_extra_kv_budget(specs: Iterable[KVCacheSpec]) -> bool:
+    return any(
+        spec.extra_budget_page_size_bytes or spec.extra_budget_fixed_size_bytes
+        for spec in specs
+    )
+
+
+def _kv_cache_group_layers_multiplier(group: KVCacheGroupSpec) -> int:
+    """How many times a group's per-layer side-storage budget is counted."""
+    if not group.layer_names:
+        return 0
+    if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs):
+        return 1
+    return len(group.layer_names)
+
+
+def _kv_cache_group_extra_page_budget(group: KVCacheGroupSpec) -> int:
+    return (
+        _kv_cache_group_layers_multiplier(group)
+        * group.kv_cache_spec.extra_budget_page_size_bytes
+    )
+
+
+def _kv_cache_groups_fixed_budget_size(
+    kv_cache_groups: list[KVCacheGroupSpec],
+) -> int:
+    return sum(
+        _kv_cache_group_layers_multiplier(group)
+        * group.kv_cache_spec.extra_budget_fixed_size_bytes
+        for group in kv_cache_groups
+    )
+
+
 def _pool_bytes_per_block(
     vllm_config: VllmConfig, kv_cache_groups: list[KVCacheGroupSpec]
 ) -> int:
@@ -1247,6 +1366,10 @@ def _pool_bytes_per_block(
     return _get_kv_cache_bytes_per_block(
         [group for group in kv_cache_groups if not group.host_resident],
         vllm_config.cache_config.get_resolved_kv_cache_layout(),
+    ) + sum(
+        _kv_cache_group_extra_page_budget(group)
+        for group in kv_cache_groups
+        if not group.host_resident
     )
 
 
@@ -1338,7 +1461,12 @@ def unify_kv_cache_spec_page_size(
             if max_page_size % layer_page_size == 0:
                 ratio = max_page_size // layer_page_size
                 new_block_size = layer_spec.block_size * ratio
-                new_spec = replace(layer_spec, block_size=new_block_size)
+                if layer_spec.extra_budget_page_size_bytes:
+                    new_spec = replace(
+                        cast(AttentionSpec, layer_spec), page_size_padded=max_page_size
+                    )
+                else:
+                    new_spec = replace(layer_spec, block_size=new_block_size)
             elif isinstance(layer_spec, AttentionSpec) and not isinstance(
                 layer_spec, MLAAttentionSpec
             ):
@@ -1427,9 +1555,9 @@ def _get_kv_cache_groups_uniform_page_size(
     # Group all layers by kv_cache_spec.
     # E.g., 2 full attention layers and 3 sliding window attention layers,
     # -> (full.0, full.1), (sw.0, sw.1, sw.2).
-    same_type_layers: dict[KVCacheSpec, list[str]] = defaultdict(list)
+    same_type_layers: dict[tuple[KVCacheSpec, object], list[str]] = defaultdict(list)
     for layer_name, layer_spec in kv_cache_spec.items():
-        same_type_layers[layer_spec].append(layer_name)
+        same_type_layers[(layer_spec, layer_spec.side_storage_spec)].append(layer_name)
 
     # Attempt to further merge same-type layers based on whether their KV
     # cache specs can be merged, to minimize the group count. This benefits
@@ -1438,8 +1566,10 @@ def _get_kv_cache_groups_uniform_page_size(
     # sliding window / attention chunk size).
     layer_buckets: list[list[str]] = []
     spec_buckets: list[list[KVCacheSpec]] = []
-    for layer_spec, layer_names in same_type_layers.items():
+    for (layer_spec, side_storage), layer_names in same_type_layers.items():
         for names, specs in zip(layer_buckets, spec_buckets):
+            if specs[0].side_storage_spec != side_storage:
+                continue
             try:
                 # A raise means that the specs are incompatible.
                 type(specs[0]).merge([*specs, layer_spec])
@@ -1624,7 +1754,10 @@ def get_kv_cache_config_from_groups(
     bytes_per_block = _get_kv_cache_bytes_per_block(kv_cache_groups, layout)
     interleaved_block_stride = bytes_per_block if layout.is_block_outermost else None
 
-    num_blocks = available_memory // bytes_per_block
+    fixed_budget = _kv_cache_groups_fixed_budget_size(kv_cache_groups)
+    num_blocks = max(0, available_memory - fixed_budget) // _pool_bytes_per_block(
+        vllm_config, kv_cache_groups
+    )
     num_blocks = may_override_num_blocks(vllm_config, num_blocks)
     size = bytes_per_block * num_blocks
 
@@ -2291,9 +2424,7 @@ def generate_scheduler_kv_cache_config(
         if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs):
             # All layers in the UniformTypeKVCacheSpecs have the same type,
             # so use an arbitrary one to initialize the scheduler.
-            group.kv_cache_spec = next(
-                iter(group.kv_cache_spec.kv_cache_specs.values())
-            )
+            group.kv_cache_spec = _get_scheduler_kv_cache_spec(group.kv_cache_spec)
     return cfg
 
 
@@ -2345,18 +2476,11 @@ def _max_memory_usage_bytes_from_groups(
         return 0
 
     bytes_per_block = _pool_bytes_per_block(vllm_config, kv_cache_groups)
-    total_blocks = 0
-    for group in kv_cache_groups:
-        spec = group.kv_cache_spec
-        if isinstance(spec, UniformTypeKVCacheSpecs):
-            total_blocks += spec.max_memory_usage_pages(vllm_config)
-        else:
-            total_blocks += cdiv(
-                spec.max_memory_usage_bytes(vllm_config),
-                spec.page_size_bytes,
-            )
+    total_blocks = sum(_required_blocks_per_group(vllm_config, kv_cache_groups))
 
-    return bytes_per_block * total_blocks
+    return bytes_per_block * total_blocks + _kv_cache_groups_fixed_budget_size(
+        kv_cache_groups
+    )
 
 
 def _estimate_max_model_len_from_groups(
@@ -2504,11 +2628,10 @@ def _project_kv_cache_groups_to_worker(
                 },
             )
         projected_groups.append(
-            KVCacheGroupSpec(
-                worker_layer_names,
-                group_spec,
-                is_eagle_group=group.is_eagle_group and bool(worker_layer_names),
-            )
+            # Empty groups still consume scheduler block IDs. Preserve their
+            # global role/replay metadata so PP sizing and the scheduler's
+            # first-worker projection agree about MTP proof retention.
+            replace(group, layer_names=worker_layer_names, kv_cache_spec=group_spec)
         )
     return projected_groups
 
@@ -2556,7 +2679,11 @@ def get_kv_cache_configs(
             if layer_name not in merged_kv_cache_specs:
                 merged_kv_cache_specs[layer_name] = layer_spec
             else:
-                assert merged_kv_cache_specs[layer_name] == layer_spec, (
+                assert (
+                    merged_kv_cache_specs[layer_name] == layer_spec
+                    and merged_kv_cache_specs[layer_name].side_storage_spec
+                    == layer_spec.side_storage_spec
+                ), (
                     "The KV cache specs for the same layer are different "
                     "across workers. This is not supported yet."
                 )
@@ -2606,7 +2733,9 @@ def get_kv_cache_configs(
                 avail_mem // bytes_per_block,
                 override,
             )
-            adjusted_memory.append(override * bytes_per_block)
+            adjusted_memory.append(
+                override * bytes_per_block + _kv_cache_groups_fixed_budget_size(groups)
+            )
         available_memory = adjusted_memory
 
     # Reserve the null block BlockPool permanently holds back, so auto-fit and
@@ -2659,7 +2788,8 @@ def get_kv_cache_configs(
         kv_cache_configs[i] = get_kv_cache_config_from_groups(
             vllm_config,
             groups,
-            min_num_blocks * _pool_bytes_per_block(vllm_config, groups),
+            min_num_blocks * _pool_bytes_per_block(vllm_config, groups)
+            + _kv_cache_groups_fixed_budget_size(groups),
         )
 
     for kv_cache_config in kv_cache_configs:

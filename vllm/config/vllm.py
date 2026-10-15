@@ -97,6 +97,8 @@ DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES = frozenset(
         "Qwen4ExpForCausalLM",
         "Qwen4ExpForConditionalGeneration",
         "Qwen4ExpMTP",
+        "Step5ForCausalLM",
+        "Step5ForConditionalGeneration",
     }
 )
 
@@ -3020,6 +3022,16 @@ class VllmConfig:
 
         if self.parallel_config.enable_batch_sharded_sampling:
             unsupported.append("batch-sharded sampling")
+
+        # Step5 DSA undoes rejected drafts through a journal addressed by the
+        # V2 runner's persistent request indices (Step5ModelState).
+        draft_config = (
+            self.speculative_config.draft_model_config
+            if self.speculative_config is not None
+            else None
+        )
+        if draft_config is not None and draft_config.architecture == "Step5MTP":
+            unsupported.append("Step5 MTP")
 
         return unsupported
 

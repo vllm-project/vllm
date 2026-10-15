@@ -631,6 +631,14 @@ def make_local_attention_virtual_batches(
     ].view(virtual_batches, -1)
     block_table_local = make_block_table(block_table)
 
+    is_prefilling = common_attn_metadata.is_prefilling
+    if is_prefilling is not None:
+        # Each real request is expanded into one virtual request per local
+        # attention block, so preserve its scheduler lifecycle for every
+        # expanded row.
+        local_blocks_t = torch.from_numpy(local_blocks).to(device=is_prefilling.device)
+        is_prefilling = torch.repeat_interleave(is_prefilling, local_blocks_t)
+
     query_start_loc_cpu = torch.from_numpy(cu_seqlens_q_local)
     seq_lens_cpu = torch.from_numpy(seqlens_k_local)
     max_seq_len = int(seq_lens_cpu.max())
@@ -646,6 +654,7 @@ def make_local_attention_virtual_batches(
         block_table_tensor=block_table_local,
         slot_mapping=common_attn_metadata.slot_mapping,
         causal=True,
+        is_prefilling=is_prefilling,
         seq_lens_cpu_upper_bound=seq_lens_cpu,
     ), make_block_table
 
@@ -927,10 +936,20 @@ def reorder_batch_to_split_decodes_and_prefills(
     num_scheduled_tokens_np = np.array(num_scheduled_tokens)
     num_computed_tokens_np = input_batch.num_computed_tokens_cpu[:num_reqs]
     num_prompt_tokens_np = input_batch.num_prompt_tokens[:num_reqs]
+    prefill_state = getattr(input_batch, "is_prefilling", None)
+    if prefill_state is None:
+        # Keep compatibility with alternate input-batch implementations that
+        # have not adopted the explicit scheduler lifecycle state yet. This
+        # fallback cannot represent reset-prefix replay after prompt rebuild.
+        is_prefill_chunk_np = num_computed_tokens_np < num_prompt_tokens_np
+    else:
+        is_prefill_chunk_np = np.asarray(prefill_state[:num_reqs], dtype=bool)
 
     has_context = num_computed_tokens_np > 0
     is_below_threshold = num_scheduled_tokens_np <= decode_threshold
-    done_prefilling = num_computed_tokens_np >= num_prompt_tokens_np
+    # Prompt length is insufficient after reset-prefix replay: the prompt can
+    # already be recomputed while generated output still needs to be replayed.
+    done_prefilling = ~is_prefill_chunk_np
 
     # Mutually exclusive categories (exactly one True per request):
     # 1. No context yet -> prefill

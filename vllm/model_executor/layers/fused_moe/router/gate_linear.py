@@ -41,7 +41,8 @@ class GateLinear(ReplicatedLinear):
 
     # (hidden_size, num_experts) pairs with an instantiated fp32 kernel:
     #   (3072, 256) -> MiniMax-M2/M2.5,  (6144, 128) -> MiniMax-M3
-    FP32_SUPPORTED_SHAPES = {(3072, 256), (6144, 128)}
+    #   (4096, 352) -> Step-5
+    FP32_SUPPORTED_SHAPES = {(3072, 256), (6144, 128), (4096, 352)}
     FP32_MAX_TOKENS = 32
     # Largest batch for which tier 1 beats the cuBLAS epilogue. Subclasses
     # whose router shape stays ahead further up the range may raise it.
@@ -391,13 +392,19 @@ def fp32_router_gemm_dispatch_impl(
     weight: torch.Tensor,
     allow_bf16x3_router_gemm: bool,
 ) -> torch.Tensor:
-    """Dynamically run fp32 specialized gemm if num_tokens <= FP32_MAX_TOKENS,
-    otherwise optionally run the experimental BF16x3 kernel for medium/large
-    SM100 router batches, then fall back to F.linear.
+    """Run the fp32 kernel for small batches, then BF16x3 or F.linear.
     This must be wrapped in a custom op because our torch.compile integration
     does not support runtime dispatching on num_tokens.
     """
-    if x.shape[0] <= _FP32_ROUTER_GEMM_MAX_TOKENS:
+    fp32_max_tokens = _FP32_ROUTER_GEMM_MAX_TOKENS
+    if (
+        allow_bf16x3_router_gemm
+        and x.dtype == torch.bfloat16
+        and weight.shape == (352, 4096)
+    ):
+        # Step-5 on B300: BF16x3 becomes competitive at M=12.
+        fp32_max_tokens = 11
+    if x.shape[0] <= fp32_max_tokens:
         if current_platform.is_rocm():
             from vllm.model_executor.layers.fused_moe.router.rocm_fp32_router_gemm import (  # noqa: E501
                 can_use_rocm_fp32_router_gemm,

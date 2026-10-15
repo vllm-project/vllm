@@ -820,3 +820,20 @@ void ngram_compute_n_gram_ids(
     torch::stable::Tensor& exclusive_req_len_sums,
     torch::stable::Tensor& ne_token_table, torch::stable::Tensor& row_indices,
     torch::stable::Tensor& column_starts, torch::stable::Tensor& n_gram_ids);
+
+#ifndef USE_ROCM
+namespace vllm {
+void fused_qknorm_rope_cache(
+    torch::stable::Tensor& q_out, torch::stable::Tensor& k_out,
+    torch::stable::Tensor& v_out, torch::stable::Tensor& qkv,
+    torch::stable::Tensor& q_weight, torch::stable::Tensor& k_weight,
+    torch::stable::Tensor& cos, torch::stable::Tensor& sin,
+    torch::stable::Tensor& positions, torch::stable::Tensor& slot_mapping,
+    torch::stable::Tensor& k_cache, torch::stable::Tensor& v_cache,
+    int64_t head_dim, int64_t num_q_heads, int64_t num_kv_heads,
+    int64_t rotary_pairs, double epsilon, double norm_weight_bias,
+    const std::string& kv_cache_dtype,
+    std::optional<torch::stable::Tensor> k_scale,
+    std::optional<torch::stable::Tensor> v_scale);
+}  // namespace vllm
+#endif

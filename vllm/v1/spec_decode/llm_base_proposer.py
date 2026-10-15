@@ -21,7 +21,10 @@ if TYPE_CHECKING:
 
 from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.distributed.parallel_state import get_pp_group
-from vllm.forward_context import set_forward_context
+from vllm.forward_context import (
+    make_local_num_tokens_across_dp,
+    set_forward_context,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.model_loader import get_model
@@ -725,8 +728,9 @@ class SpecDecodeBaseProposer:
                 input_ids = None
                 inputs_embeds = self.inputs_embeds[:input_batch_size]
             else:
-                input_ids = self.input_ids[:input_batch_size]
-                inputs_embeds = None
+                input_ids, inputs_embeds = self._prepare_text_model_inputs(
+                    input_batch_size
+                )
 
             # Run the model.
             model_kwargs = {
@@ -972,8 +976,7 @@ class SpecDecodeBaseProposer:
             input_ids = None
             inputs_embeds = self.inputs_embeds[:num_input_tokens]
         else:
-            input_ids = self.input_ids[:num_input_tokens]
-            inputs_embeds = None
+            input_ids, inputs_embeds = self._prepare_text_model_inputs(num_input_tokens)
 
         model_kwargs = {
             "input_ids": input_ids,
@@ -984,6 +987,12 @@ class SpecDecodeBaseProposer:
             model_kwargs["hidden_states"] = self.hidden_states[:num_input_tokens]
 
         return model_kwargs, num_input_tokens
+
+    def _prepare_text_model_inputs(
+        self,
+        num_input_tokens: int,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        return self.input_ids[:num_input_tokens], None
 
     def build_per_group_and_layer_attn_metadata(
         self, common_attn_metadata: CommonAttentionMetadata, draft_index: int = 0
@@ -1062,12 +1071,82 @@ class SpecDecodeBaseProposer:
         # Precompute backup token IDs for discarded requests.
         num_reqs = gpu_input_batch.num_reqs
         for i in range(num_reqs):
+            num_tokens = int(gpu_input_batch.num_tokens_no_spec[i])
+            if num_tokens <= 0:
+                # Load-only rows have no backup token and are discarded.
+                self.backup_next_token_ids.np[i] = 0
+                continue
             self.backup_next_token_ids.np[i] = requests[
                 gpu_input_batch.req_ids[i]
-            ].get_token_id(gpu_input_batch.num_tokens_no_spec[i] - 1)
+            ].get_token_id(num_tokens - 1)
         self.backup_next_token_ids.copy_to_gpu(num_reqs)
         backup_tokens_gpu = self.backup_next_token_ids.gpu
 
+        return self._launch_prepare_next_token_ids_padded(
+            sampled_token_ids,
+            discard_request_mask,
+            backup_tokens_gpu,
+            gpu_input_batch.vocab_size,
+        )
+
+    def warmup_prepare_next_token_ids_padded(
+        self,
+        num_reqs: int,
+        vocab_size: int,
+    ) -> None:
+        """Warm the initial-token and full speculative-output variants."""
+        device = self.input_ids.device
+        discard_request_mask = torch.zeros(num_reqs, dtype=torch.bool, device=device)
+        backup_tokens_gpu = torch.zeros(num_reqs, dtype=torch.int32, device=device)
+
+        max_sampled_tokens = self.num_speculative_tokens + 1
+        sampled_token_widths = []
+        block_size = 1
+        while block_size < max_sampled_tokens:
+            sampled_token_widths.append(block_size)
+            block_size *= 2
+        sampled_token_widths.append(max_sampled_tokens)
+
+        for num_sampled_tokens in sampled_token_widths:
+            sampled_token_ids = torch.zeros(
+                (num_reqs, num_sampled_tokens),
+                dtype=torch.int32,
+                device=device,
+            )
+            self._launch_prepare_next_token_ids_padded(
+                sampled_token_ids,
+                discard_request_mask,
+                backup_tokens_gpu,
+                vocab_size,
+            )
+
+        num_draft_tokens = max(self.num_speculative_tokens, 1)
+        cu_num_draft_tokens = (
+            torch.arange(1, num_reqs + 1, dtype=torch.int32, device=device)
+            * num_draft_tokens
+        )
+        valid_sampled_tokens_count = torch.full(
+            (num_reqs,),
+            num_draft_tokens + 1,
+            dtype=torch.int32,
+            device=device,
+        )
+        query_start_loc = torch.arange(
+            num_reqs + 1, dtype=torch.int32, device=device
+        ) * (num_draft_tokens + 1)
+        self._launch_prepare_inputs_padded(
+            cu_num_draft_tokens,
+            valid_sampled_tokens_count,
+            query_start_loc,
+        )
+
+    @staticmethod
+    def _launch_prepare_next_token_ids_padded(
+        sampled_token_ids: torch.Tensor,
+        discard_request_mask: torch.Tensor,
+        backup_tokens_gpu: torch.Tensor,
+        vocab_size: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         batch_size, num_tokens = sampled_token_ids.shape
         device = sampled_token_ids.device
 
@@ -1087,7 +1166,7 @@ class SpecDecodeBaseProposer:
             backup_tokens_gpu,
             next_token_ids,
             valid_sampled_tokens_count,
-            gpu_input_batch.vocab_size,
+            vocab_size,
             num_tokens,
             batch_size,
             sampled_token_ids.stride(0),
@@ -1109,23 +1188,12 @@ class SpecDecodeBaseProposer:
         used as padding and filtered out later by `token_indices_to_sample`.
         No blocking CPU operations should be introduced in this function.
         """
-        num_reqs = common_attn_metadata.num_reqs
-        device = valid_sampled_tokens_count.device
-
-        token_indices_to_sample = torch.empty(
-            (num_reqs,), dtype=torch.int32, device=device
-        )
-        num_rejected_tokens_gpu = torch.empty(
-            (num_reqs,), dtype=torch.int32, device=device
-        )
-
-        _eagle_prepare_inputs_padded(
-            spec_decode_metadata.cu_num_draft_tokens,
-            valid_sampled_tokens_count,
-            common_attn_metadata.query_start_loc,
-            token_indices_to_sample,
-            num_rejected_tokens_gpu,
-            num_reqs,
+        token_indices_to_sample, num_rejected_tokens_gpu = (
+            self._launch_prepare_inputs_padded(
+                spec_decode_metadata.cu_num_draft_tokens,
+                valid_sampled_tokens_count,
+                common_attn_metadata.query_start_loc,
+            )
         )
 
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
@@ -1145,6 +1213,7 @@ class SpecDecodeBaseProposer:
             block_table_tensor=common_attn_metadata.block_table_tensor,
             slot_mapping=common_attn_metadata.slot_mapping[:total_num_tokens],
             causal=True,
+            is_prefilling=common_attn_metadata.is_prefilling,
             dcp_local_seq_lens=common_attn_metadata.dcp_local_seq_lens,
         )
 
@@ -1152,6 +1221,62 @@ class SpecDecodeBaseProposer:
             spec_common_attn_metadata,
             token_indices_to_sample,
             num_rejected_tokens_gpu,
+        )
+
+    @staticmethod
+    def _launch_prepare_inputs_padded(
+        cu_num_draft_tokens: torch.Tensor,
+        valid_sampled_tokens_count: torch.Tensor,
+        query_start_loc: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        num_reqs = valid_sampled_tokens_count.shape[0]
+        device = valid_sampled_tokens_count.device
+        assert cu_num_draft_tokens.shape == (num_reqs,)
+        assert query_start_loc.shape == (num_reqs + 1,)
+        assert cu_num_draft_tokens.dtype == torch.int32
+        assert valid_sampled_tokens_count.dtype == torch.int32
+        assert query_start_loc.dtype == torch.int32
+
+        token_indices_to_sample = torch.empty(
+            (num_reqs,), dtype=torch.int32, device=device
+        )
+        num_rejected_tokens_gpu = torch.empty(
+            (num_reqs,), dtype=torch.int32, device=device
+        )
+        _eagle_prepare_inputs_padded(
+            cu_num_draft_tokens,
+            valid_sampled_tokens_count,
+            query_start_loc,
+            token_indices_to_sample,
+            num_rejected_tokens_gpu,
+            num_reqs,
+        )
+        return token_indices_to_sample, num_rejected_tokens_gpu
+
+    def warmup_eagle_step_slot_mapping(
+        self,
+        num_reqs: int,
+        block_table_tensor: torch.Tensor,
+    ) -> None:
+        if self.num_speculative_tokens <= 1 or self.constant_draft_positions:
+            return
+        assert self.block_size > 0, "block_size has not been initialized."
+        assert block_table_tensor.dtype == torch.int32
+        assert block_table_tensor.shape[0] == num_reqs
+
+        device = block_table_tensor.device
+        positions = torch.zeros(num_reqs, dtype=torch.int64, device=device)
+        seq_lens = torch.ones(num_reqs, dtype=torch.int32, device=device)
+        out_positions = torch.empty(num_reqs, dtype=torch.int64, device=device)
+        out_slot_mapping = torch.empty(num_reqs, dtype=torch.int64, device=device)
+        eagle_step_update_slot_mapping_and_metadata(
+            positions_1d=positions,
+            block_table_tensor=block_table_tensor,
+            seq_lens=seq_lens,
+            block_size=self.block_size,
+            max_model_len=self.max_model_len,
+            out_clamped_positions=out_positions,
+            out_slot_mapping=out_slot_mapping,
         )
 
     def prepare_inputs(
@@ -1253,6 +1378,7 @@ class SpecDecodeBaseProposer:
             block_table_tensor=common_attn_metadata.block_table_tensor,
             slot_mapping=common_attn_metadata.slot_mapping[token_indices],
             causal=True,
+            is_prefilling=common_attn_metadata.is_prefilling,
             dcp_local_seq_lens=common_attn_metadata.dcp_local_seq_lens,
         )
 
@@ -1368,6 +1494,7 @@ class SpecDecodeBaseProposer:
                 "Gemma4ForConditionalGeneration",
                 "Gemma4UnifiedForConditionalGeneration",
                 "Step3p7ForConditionalGeneration",
+                "Step5ForConditionalGeneration",
             ]:
                 self.model.config.image_token_index = target_model.config.image_token_id
             elif self.get_model_name(target_model) == "PixtralForConditionalGeneration":
@@ -1621,29 +1748,54 @@ class SpecDecodeBaseProposer:
         use_cudagraphs: bool = True,
         is_graph_capturing: bool = False,
         slot_mappings: dict[str, torch.Tensor] | None = None,
+        disable_kv_cache_writes: bool = False,
     ) -> None:
         # FIXME: when using tree-based specdec, adjust number of forward-passes
         # according to the depth of the tree.
-        only_one_forward_pass = is_graph_capturing or self.parallel_drafting
-        for fwd_idx in range(
-            1 if only_one_forward_pass else self.num_speculative_tokens
-        ):
-            if fwd_idx <= 1:
+        use_multi_module_mtp = self.speculative_config.use_multi_module_mtp()
+        if use_multi_module_mtp:
+            num_mtp_layers = getattr(
+                self.draft_model_config.hf_config,
+                "num_nextn_predict_layers",
+                1,
+            )
+            # Each MTP module is independently compiled/captured. Exercise
+            # every distinct module even during CUDA graph capture; runtime
+            # drafting cycles through the same modules for deeper speculation.
+            num_forward_passes = min(self.num_speculative_tokens, num_mtp_layers)
+        else:
+            only_one_forward_pass = is_graph_capturing or self.parallel_drafting
+            num_forward_passes = (
+                1 if only_one_forward_pass else self.num_speculative_tokens
+            )
+        reuse_step_mtp_batch_shape = self.speculative_config.use_step_mtp()
+        for fwd_idx in range(num_forward_passes):
+            if fwd_idx == 0 or (fwd_idx == 1 and not reuse_step_mtp_batch_shape):
                 cudagraph_runtime_mode, num_input_tokens, num_tokens_across_dp = (
                     self._determine_batch_execution_and_padding(
                         num_tokens, use_cudagraphs=use_cudagraphs
                     )
                 )
 
-            # Make sure to use EAGLE's own buffer during cudagraph capture.
+            # Keep the proposer's address-stable buffer, but refresh its
+            # contents from the runner mapping before warmup/capture. This
+            # prevents stale live slots from bypassing dummy KV protection.
+            draft_layer_name = next(iter(self._draft_attn_layer_names), None)
             if (
-                self._draft_attn_layer_names
+                draft_layer_name is not None
                 and slot_mappings is not None
-                and next(iter(self._draft_attn_layer_names)) in slot_mappings
+                and draft_layer_name in slot_mappings
             ):
-                slot_mapping_dict = self._get_slot_mapping(num_input_tokens)
+                slot_mapping_dict = self._get_slot_mapping(
+                    num_input_tokens, slot_mappings[draft_layer_name]
+                )
             else:
                 slot_mapping_dict = slot_mappings or {}
+            if disable_kv_cache_writes:
+                # Step3p5 keeps proposer-owned per-group slot buffers that can
+                # outlive a real request and override the target mapping.
+                for slot_mapping in slot_mapping_dict.values():
+                    slot_mapping.fill_(PADDING_SLOT_ID)
 
             with set_forward_context(
                 None,
@@ -1657,8 +1809,9 @@ class SpecDecodeBaseProposer:
                     input_ids = None
                     inputs_embeds = self.inputs_embeds[:num_input_tokens]
                 else:
-                    input_ids = self.input_ids[:num_input_tokens]
-                    inputs_embeds = None
+                    input_ids, inputs_embeds = self._prepare_text_model_inputs(
+                        num_input_tokens
+                    )
 
                 kwargs = dict(
                     input_ids=input_ids,
@@ -1667,6 +1820,8 @@ class SpecDecodeBaseProposer:
                 )
                 if self.pass_hidden_states_to_model:
                     kwargs["hidden_states"] = self.hidden_states[:num_input_tokens]
+                if use_multi_module_mtp:
+                    kwargs["spec_step_idx"] = fwd_idx
                 self.model(**kwargs)
 
     def _get_eagle3_use_aux_hidden_state_from_config(self) -> bool:
@@ -1768,6 +1923,20 @@ class SpecDecodeBaseProposer:
         self.block_size = self.draft_attn_groups[0].kv_cache_spec.block_size
         logger.debug("Using block size %d for drafting layers", self.block_size)
 
+    def _skip_draft_dp_coordination(self) -> bool:
+        if (
+            self.vllm_config.parallel_config.data_parallel_size <= 1
+            or self.method != "mtp"
+        ):
+            return False
+
+        # Dense MTP blocks only communicate within each replica's TP group.
+        # Their graph dispatch and padding are local decisions, so cross-DP
+        # coordination adds an unnecessary collective cadence. Passing local
+        # DP sizes also prevents set_forward_context() from falling back to an
+        # all-reduce based on the target model's MoE topology.
+        return bool(getattr(getattr(self, "model", None), "is_dense_mtp", False))
+
     def _determine_batch_execution_and_padding(
         self,
         num_tokens: int,
@@ -1783,7 +1952,13 @@ class SpecDecodeBaseProposer:
         # coordinate across ranks
         # TODO(Flechman): support DBO ubatching
         should_ubatch, num_tokens_across_dp = False, None
-        if self.vllm_config.parallel_config.data_parallel_size > 1:
+        skip_dp_coordination = self._skip_draft_dp_coordination()
+        if skip_dp_coordination:
+            num_tokens_across_dp = make_local_num_tokens_across_dp(
+                self.vllm_config.parallel_config,
+                num_tokens_padded,
+            )
+        elif self.vllm_config.parallel_config.data_parallel_size > 1:
             should_ubatch, num_tokens_across_dp, synced_cudagraph_mode = (
                 coordinate_batch_across_dp(
                     num_tokens_unpadded=num_tokens,
