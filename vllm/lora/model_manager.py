@@ -37,6 +37,7 @@ from vllm.lora.utils import (
     process_packed_modules_mapping,
     replace_submodule,
 )
+from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.fused_moe import MoERunner
 from vllm.model_executor.models import (
     SupportsLoRA,
@@ -57,6 +58,11 @@ DEFAULT_LANGUAGE_WRAPPER_KEY = "language_model"
 
 
 class SupportsLoRAModel(nn.Module, SupportsLoRA): ...
+
+
+def _has_mla_attention(model: nn.Module) -> bool:
+    """Detect MLA structurally; config `use_mla` misses some MLA model types."""
+    return any(isinstance(module, MLAAttention) for module in model.modules())
 
 
 class AdapterLRUCache(LRUCache[int, T]):
@@ -161,6 +167,7 @@ class LoRAModelManager:
         self._use_ep = bool(
             vllm_config and vllm_config.parallel_config.enable_expert_parallel
         )
+        self._is_mla = _has_mla_attention(self.model)
         self._init_punica_wrapper(max_num_batched_tokens, vllm_config)
         self._create_lora_modules()
 
@@ -1269,6 +1276,34 @@ class LoRAModelManager:
                     "(--enable-mixed-moe-lora-format) and set "
                     "is_3d_lora_weight=True on the LoRA request."
                 )
+
+    def _validate_mla_lora(self, lora_model: LoRAModel) -> None:
+        """Interim guard for kv_b_proj LoRA weights on MLA models.
+
+        MLA decode uses W_UK/W_UV absorbed from the base kv_b_proj weights and
+        prefill calls the unwrapped layer, so kv_b_proj LoRA weights are never
+        applied. Remove once https://github.com/vllm-project/vllm/issues/48974
+        is fixed.
+        """
+        if not self._is_mla:
+            return
+        kv_b_modules = [
+            name for name in lora_model.loras if name.rsplit(".", 1)[-1] == "kv_b_proj"
+        ]
+        if not kv_b_modules:
+            return
+        msg = (
+            f"LoRA adapter {lora_model.id} targets kv_b_proj, whose LoRA "
+            "weights are not applied on MLA models. See "
+            "https://github.com/vllm-project/vllm/issues/48974."
+        )
+        only_kv_b = len(kv_b_modules) == len(lora_model.loras)
+        if only_kv_b and not lora_model.modules_to_save:
+            raise ValueError(
+                f"{msg} This adapter only targets kv_b_proj, so loading it "
+                "would be a silent no-op."
+            )
+        logger.warning("%s Its kv_b_proj weights are ignored.", msg)
 
     def _validate_modules_to_save(self, lora_model: LoRAModel) -> None:
         if not lora_model.modules_to_save:
