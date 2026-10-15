@@ -44,3 +44,25 @@ def test_torch_cuda_wrapper_allows_dynamo_handler_registration() -> None:
     # if they are the same object (pre-fix alias), raises Handler already registered.
     TorchInGraphFunctionVariable._get_handlers.cache_clear()
     TorchInGraphFunctionVariable._get_handlers()
+
+
+# Child process: patched torch.cuda must not leak to other tests in the session.
+@pytest.mark.forked
+def test_torch_cuda_wrapper_leaves_event_usable_as_a_type() -> None:
+    """Guard against the XPU CUDA shim breaking ``torch.cuda.Event | None``
+    annotations evaluated by unrelated code later in the same process.
+
+    ``_torch_cuda_wrapper`` patches ``torch.cuda`` to redirect to
+    ``torch.xpu`` and never undoes it (by design -- the redirection must
+    stay in effect for the rest of the worker process, not just during
+    ``__init__``). Before the fix, ``torch.cuda.Event`` was replaced by a
+    plain function, which can't be used in ``SomeType | None`` annotations;
+    any later-imported class with a ``torch.cuda.Event | None`` field
+    default (e.g. ``vllm.models.deepseek_v41.common.engram.Engram``) raised
+    ``TypeError: unsupported operand type(s) for |: 'function' and
+    'NoneType'`` merely from being imported in the same test session.
+    """
+    with _torch_cuda_wrapper():
+        pass
+
+    assert torch.cuda.Event | None is not None

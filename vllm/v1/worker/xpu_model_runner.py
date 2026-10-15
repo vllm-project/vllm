@@ -62,9 +62,13 @@ def _torch_cuda_wrapper():
     torch.cuda.set_stream = partial(torch.xpu.set_stream)
 
     # torch.xpu.Event does not accept the ``blocking`` kwarg that
-    # torch.cuda.Event supports, so drop it here.
-    def _xpu_event(*args, blocking=None, **kwargs):
-        return torch.xpu.Event(*args, **kwargs)
+    # torch.cuda.Event supports, so drop it here. This has to be a class
+    # (not a plain function): this patch is never undone, so any later
+    # ``torch.cuda.Event | None`` annotation evaluated elsewhere in the
+    # process needs torch.cuda.Event to still support ``|``.
+    class _xpu_event:
+        def __new__(cls, *args, blocking=None, **kwargs):
+            return torch.xpu.Event(*args, **kwargs)
 
     torch.cuda.Event = _xpu_event
     if supports_xpu_graph():
