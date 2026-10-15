@@ -29,9 +29,14 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.distributed import get_tp_group
 from vllm.logger import init_logger
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
+from vllm.v1.worker.gpu.spec_decode.dspark.local_argmax import (
+    MAX_EXACT_FP32_TOKEN_ID,
+    reduce_local_argmax,
+)
 from vllm.v1.worker.gpu.spec_decode.dspark.utils import load_dspark_model
 
 logger = init_logger(__name__)
@@ -39,6 +44,61 @@ logger = init_logger(__name__)
 
 class DSparkSpeculator(DFlashSpeculator):
     _speculator_name = "DSpark"
+
+    def _validate_local_argmax_reduction(self) -> None:
+        if not self.use_local_argmax_reduction:
+            return
+        if self.speculative_config.draft_sample_method != "greedy":
+            raise ValueError(
+                "DSpark local argmax requires draft_sample_method='greedy'."
+            )
+        draft_topk = getattr(
+            self.draft_model_config.hf_config, "dspark_draft_topk", None
+        )
+        if draft_topk is not None:
+            raise ValueError(
+                "DSpark local argmax cannot be combined with dspark_draft_topk."
+            )
+        if not hasattr(self.model, "compute_local_draft_logits"):
+            raise ValueError(
+                "use_local_argmax_reduction is enabled but draft model "
+                f"{type(self.model).__name__} does not implement "
+                "compute_local_draft_logits()."
+            )
+        if getattr(self.model, "draft_id_to_target_id", None) is not None:
+            raise ValueError(
+                "DSpark local argmax does not support draft-to-target "
+                "vocabulary remapping."
+            )
+
+        lm_head = getattr(self.model, "lm_head", None)
+        tp_group = get_tp_group()
+        if lm_head is None or getattr(lm_head, "tp_size", None) != tp_group.world_size:
+            raise ValueError(
+                "DSpark local argmax requires the LM head TP size to match "
+                "the model TP group."
+            )
+        lm_head_group = getattr(lm_head, "parallel_group", None)
+        if (
+            lm_head_group is not None
+            and lm_head_group.unique_name != tp_group.unique_name
+        ):
+            raise ValueError(
+                "DSpark local argmax requires the LM head communication "
+                "group to match the model TP group."
+            )
+
+        vocab_size = self.model.config.vocab_size
+        if vocab_size - 1 > MAX_EXACT_FP32_TOKEN_ID:
+            raise ValueError(
+                "DSpark vocabulary exceeds the exact FP32 token-ID range: "
+                f"vocab_size={vocab_size}, "
+                f"maximum_token_id={MAX_EXACT_FP32_TOKEN_ID}."
+            )
+        logger.info(
+            "Using local argmax reduction for DSpark token generation "
+            "(communication: O(2*tp_size) vs O(vocab_size))."
+        )
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
@@ -153,7 +213,57 @@ class DSparkSpeculator(DFlashSpeculator):
             use_fp64=self.use_fp64_gumbel,
         )
 
+    def _sample_sequential_local_argmax(
+        self, num_reqs: int, head_hidden: torch.Tensor
+    ) -> None:
+        n_spec = self.num_speculative_steps
+        num_sample = num_reqs * n_spec
+        sample_hidden = head_hidden[self.sample_indices[:num_sample]]
+        local_logits = self.model.compute_local_draft_logits(sample_hidden)
+        local_logits = local_logits.view(num_reqs, n_spec, -1)
+
+        lm_head = self.model.lm_head
+        shard = lm_head.shard_indices
+        vocab_start = shard.org_vocab_start_index
+        vocab_end = shard.org_vocab_end_index
+        tp_group = get_tp_group()
+        confidence_markov_embeds: list[torch.Tensor] = []
+        prev = self.input_buffers.input_ids[self._anchor_idx[:num_reqs]]
+
+        for step in range(n_spec):
+            markov_embed = self.model.markov_embed(prev)
+            if self.use_confidence_head:
+                confidence_markov_embeds.append(markov_embed)
+            full_bias = self.model.markov_bias(markov_embed)
+            local_scores = (
+                local_logits[:, step, : vocab_end - vocab_start]
+                + full_bias[:, vocab_start:vocab_end]
+            )
+            draft_ids = reduce_local_argmax(
+                local_scores,
+                vocab_start=vocab_start,
+                vocab_end=vocab_end,
+                vocab_size=self.model.config.vocab_size,
+                tp_group=tp_group,
+            )
+            sampled = self.model.map_draft_to_target(draft_ids)
+            self.draft_tokens[:num_reqs, step].copy_(sampled)
+            prev = sampled
+
+        if self.use_confidence_head:
+            confidence = self.model.compute_confidence(
+                sample_hidden,
+                torch.stack(confidence_markov_embeds, dim=1).flatten(0, 1),
+            )
+            self.draft_token_confidence_probs[:num_reqs].copy_(
+                confidence.view(num_reqs, n_spec)
+            )
+
     def _sample_sequential(self, num_reqs: int, head_hidden: torch.Tensor) -> None:
+        if self.use_local_argmax_reduction:
+            self._sample_sequential_local_argmax(num_reqs, head_hidden)
+            return
+
         if self._draft_topk is not None:
             self._sample_sequential_topk(num_reqs, head_hidden)
             return
