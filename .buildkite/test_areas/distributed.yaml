@@ -697,7 +697,6 @@ steps:
   - tests/distributed/test_pipeline_parallel.py
   - tests/basic_correctness/models/test_basic_correctness.py
   commands:
-  - export VLLM_USE_RAY_V2_EXECUTOR_BACKEND=1
   - export NCCL_CUMEM_HOST_ENABLE=0
   - pytest -v -s distributed/test_ray_v2_executor.py
   - pytest -v -s distributed/test_ray_v2_executor_e2e.py
@@ -722,7 +721,6 @@ steps:
       - tests/basic_correctness/models/test_basic_correctness.py
       - vllm/platforms/rocm.py
       commands:
-      - export VLLM_USE_RAY_V2_EXECUTOR_BACKEND=1
       - pytest -v -s distributed/test_ray_v2_executor.py
       - pytest -v -s distributed/test_ray_v2_executor_e2e.py
       - pytest -v -s distributed/test_pipeline_parallel.py -k "ray"
