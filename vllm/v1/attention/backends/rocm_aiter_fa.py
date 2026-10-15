@@ -31,6 +31,7 @@ from vllm.v1.attention.backend import (
     AttentionType,
     CommonAttentionMetadata,
     MultipleOf,
+    PrequantizedQKV,
 )
 from vllm.v1.attention.backends.utils import (
     split_decodes_prefills_and_extends,
@@ -40,6 +41,24 @@ from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayout
 
 _PARTITION_SIZE_ROCM = 256
 _CP_TOKENS_PER_ITER_ROCM = 32 * 1024
+
+
+def _slice_prequantized_qkv(
+    prequantized_qkv: PrequantizedQKV,
+    token_slice: slice,
+    sequence_slice: slice,
+) -> PrequantizedQKV:
+    """Select matching token and sequence ranges for one attention phase."""
+    return PrequantizedQKV(
+        query=prequantized_qkv.query[token_slice],
+        key=prequantized_qkv.key[token_slice],
+        value=prequantized_qkv.value[token_slice],
+        query_descale=prequantized_qkv.query_descale[sequence_slice],
+        key_descale=prequantized_qkv.key_descale[sequence_slice],
+        value_descale=prequantized_qkv.value_descale[sequence_slice],
+    )
+
+
 if current_platform.is_rocm():
     from vllm.triton_utils import tl, triton
 
@@ -441,10 +460,13 @@ class AiterFlashAttentionMetadataBuilder(
 
         sliding_window_configs: set[tuple[int, int] | None] = set()
         kv_sharing_shape = None
+        supports_prequantized_qkv = True
+        found_layer = False
         layers = get_layers_from_vllm_config(self.vllm_config, Attention)
         for name, layer in layers.items():
             if name not in layer_names:
                 continue
+            found_layer = True
             assert isinstance(layer.impl, AiterFlashAttentionImpl), (
                 "Aiter Flash Attention Metadata Builder can only be used "
                 "with Aiter Flash Attention Impl."
@@ -452,6 +474,7 @@ class AiterFlashAttentionMetadataBuilder(
             sliding_window_configs.add(layer.impl.sliding_window)
             if layer.kv_sharing_target_layer_name is not None:
                 kv_sharing_shape = (layer.impl.num_kv_heads, layer.impl.head_size)
+            supports_prequantized_qkv &= layer.impl.supports_prequantized_qkv_input
 
         while len(sliding_window_configs) > 0:
             sliding_window_config = sliding_window_configs.pop()
@@ -461,9 +484,26 @@ class AiterFlashAttentionMetadataBuilder(
                 )
                 self.aot_sliding_window = sliding_window_config
 
+        self.direct_fp8_context_gather = (
+            found_layer
+            and supports_prequantized_qkv
+            and is_quantized_kv_cache(self.cache_config.cache_dtype)
+            and not rocm_aiter_ops.is_shuffle_kv_cache_enabled()
+        )
+        if self.direct_fp8_context_gather:
+            logger.info_once(
+                "Using an FP8 context workspace for ROCm AITER chunked prefill "
+                "(KV cache dtype: %s)",
+                kv_cache_spec.dtype,
+            )
+        workspace_dtype = (
+            current_platform.fp8_dtype()
+            if self.direct_fp8_context_gather
+            else self.model_config.dtype
+        )
         self.extend_workspace = torch.empty(
             [2, _CP_TOKENS_PER_ITER_ROCM, self.num_heads_kv, self.headdim],
-            dtype=self.model_config.dtype,
+            dtype=workspace_dtype,
             device=device,
         )
         self.scale = torch.tensor([1.0], dtype=torch.float, device=self.device)
@@ -900,6 +940,17 @@ class AiterFlashAttentionImpl(AttentionImpl):
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
+        from vllm.platforms.rocm import on_gfx950
+
+        self.supports_prequantized_qkv_input = (
+            head_size == 256
+            and on_gfx950()
+            and self.num_queries_per_kv in (1, 2, 4, 8, 16)
+            and self.logits_soft_cap == 0.0
+            and self.sliding_window == (-1, -1)
+            and self.sinks is None
+            and is_quantized_kv_cache(self.kv_cache_dtype)
+        )
 
         if attn_type != AttentionType.DECODER:
             raise NotImplementedError(
@@ -1003,6 +1054,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
         slot_mapping: torch.Tensor,
         k_scale: torch.Tensor,
         v_scale: torch.Tensor,
+        prequantized_qkv: PrequantizedQKV | None = None,
     ):
         if self.sliding_window[0] != -1:
             self.extend_for_sliding_window(
@@ -1018,10 +1070,17 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 v_scale,
             )
             return
+        attention_query = (
+            prequantized_qkv.query if prequantized_qkv is not None else query
+        )
+        attention_key = prequantized_qkv.key if prequantized_qkv is not None else key
+        attention_value = (
+            prequantized_qkv.value if prequantized_qkv is not None else value
+        )
         out, lse = rocm_aiter_ops.flash_attn_varlen_func(
-            q=query,
-            k=key,
-            v=value,
+            q=attention_query,
+            k=attention_key,
+            v=attention_value,
             cu_seqlens_q=cu_seqlens_q,
             cu_seqlens_k=cu_seqlens_q,
             max_seqlen_q=max_seqlen_q,
@@ -1034,6 +1093,15 @@ class AiterFlashAttentionImpl(AttentionImpl):
             alibi_slopes=self.alibi_slopes,
             return_lse=True,
             sink_ptr=self.sinks,
+            q_descale=(
+                prequantized_qkv.query_descale if prequantized_qkv is not None else None
+            ),
+            k_descale=(
+                prequantized_qkv.key_descale if prequantized_qkv is not None else None
+            ),
+            v_descale=(
+                prequantized_qkv.value_descale if prequantized_qkv is not None else None
+            ),
         )
         assert attn_metadata.extend_metadata is not None
         chunk_context_metadata = attn_metadata.extend_metadata.chunk_context_metadata
@@ -1045,6 +1113,11 @@ class AiterFlashAttentionImpl(AttentionImpl):
         token_to_batch = chunk_context_metadata.token_to_batch
         total_token_per_batch = chunk_context_metadata.total_token_per_batch
         key_fetched, value_fetched = workspace[0], workspace[1]
+        fp8_context_gather = (
+            prequantized_qkv is not None
+            and key_fetched.dtype == current_platform.fp8_dtype()
+            and not rocm_aiter_ops.is_shuffle_kv_cache_enabled()
+        )
         chunked_output = None
         chunked_lse = None
         for chunk_idx in range(num_chunks):
@@ -1059,17 +1132,33 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 cu_seqlens_kv=cu_seqlens_kv[chunk_idx],
                 token_to_batch=token_to_batch[chunk_idx],
                 seq_starts=chunk_starts[chunk_idx],
-                dequant=is_quantized_kv_cache(self.kv_cache_dtype),
+                dequant=(
+                    is_quantized_kv_cache(self.kv_cache_dtype)
+                    and not fp8_context_gather
+                ),
                 kv_cache_layout="SHUFFLE"
                 if rocm_aiter_ops.is_shuffle_kv_cache_enabled()
                 else "NHD",
                 total_tokens=total_token_per_batch[chunk_idx],
             )
 
+            chunk_query = query
+            chunk_key = key_fetched
+            chunk_value = value_fetched
+            chunk_q_descale = chunk_k_descale = chunk_v_descale = None
+            if fp8_context_gather:
+                assert prequantized_qkv is not None
+                batch_size = cu_seqlens_q.numel() - 1
+                descale_shape = (batch_size, self.num_kv_heads)
+                chunk_query = prequantized_qkv.query
+                chunk_q_descale = prequantized_qkv.query_descale
+                chunk_k_descale = k_scale.expand(descale_shape)
+                chunk_v_descale = v_scale.expand(descale_shape)
+
             suf_out, suf_lse = rocm_aiter_ops.flash_attn_varlen_func(
-                q=query,
-                k=key_fetched,
-                v=value_fetched,
+                q=chunk_query,
+                k=chunk_key,
+                v=chunk_value,
                 cu_seqlens_q=cu_seqlens_q,
                 cu_seqlens_k=cu_seqlens_kv[chunk_idx],
                 max_seqlen_q=max_seqlen_q,
@@ -1082,6 +1171,9 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 alibi_slopes=self.alibi_slopes,
                 return_lse=True,
                 sink_ptr=self.sinks,
+                q_descale=chunk_q_descale,
+                k_descale=chunk_k_descale,
+                v_descale=chunk_v_descale,
             )
             if chunked_output is None:
                 chunked_output = suf_out
@@ -1120,6 +1212,64 @@ class AiterFlashAttentionImpl(AttentionImpl):
         output_scale: torch.Tensor | None = None,
         output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        return self._forward(
+            layer,
+            query,
+            key,
+            value,
+            kv_cache,
+            attn_metadata,
+            output,
+            output_scale=output_scale,
+            output_block_scale=output_block_scale,
+            prequantized_qkv=None,
+        )
+
+    def forward_with_prequantized_qkv(
+        self,
+        layer: AttentionLayer,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_metadata: AiterFlashAttentionMetadata,
+        output: torch.Tensor,
+        prequantized_qkv: PrequantizedQKV,
+        output_scale: torch.Tensor | None = None,
+        output_block_scale: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if not self.supports_prequantized_qkv_input:
+            raise ValueError(
+                "Prequantized QKV input requires gfx950, head size 256, "
+                "an FP8 KV cache, full causal attention, and no sinks "
+                "or soft cap"
+            )
+        return self._forward(
+            layer,
+            query,
+            key,
+            value,
+            kv_cache,
+            attn_metadata,
+            output,
+            output_scale=output_scale,
+            output_block_scale=output_block_scale,
+            prequantized_qkv=prequantized_qkv,
+        )
+
+    def _forward(
+        self,
+        layer: torch.nn.Module,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_metadata: AiterFlashAttentionMetadata,
+        output: torch.Tensor,
+        output_scale: torch.Tensor | None,
+        output_block_scale: torch.Tensor | None,
+        prequantized_qkv: PrequantizedQKV | None,
+    ) -> torch.Tensor:
         """Forward pass with AiterFlashAttention.
 
         Args:
@@ -1135,6 +1285,9 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 by this backend.
             output_block_scale: Block scale for fused output quantization;
                 not supported by this backend.
+            prequantized_qkv: Optional model-provided FP8 Q/K/V tensors and
+                descales. Only prefill and extend slices are consumed; decode
+                always uses the floating-point query and KV cache.
 
         Returns:
             shape = [num_tokens, num_heads * head_size]
@@ -1175,6 +1328,15 @@ class AiterFlashAttentionImpl(AttentionImpl):
             key = key[:num_actual_tokens]
         if value is not None:
             value = value[:num_actual_tokens]
+        if prequantized_qkv is not None:
+            prequantized_qkv = PrequantizedQKV(
+                query=prequantized_qkv.query[:num_actual_tokens],
+                key=prequantized_qkv.key[:num_actual_tokens],
+                value=prequantized_qkv.value[:num_actual_tokens],
+                query_descale=prequantized_qkv.query_descale,
+                key_descale=prequantized_qkv.key_descale,
+                value_descale=prequantized_qkv.value_descale,
+            )
 
         output_actual_tokens = output[:num_actual_tokens]
 
@@ -1214,9 +1376,25 @@ class AiterFlashAttentionImpl(AttentionImpl):
             assert attn_metadata.prefill_metadata is not None
             assert key is not None and value is not None
 
-            prefill_query = query[num_decode_tokens + num_extend_tokens :]
-            prefill_key = key[num_decode_tokens + num_extend_tokens :]
-            prefill_value = value[num_decode_tokens + num_extend_tokens :]
+            prefill_token_start = num_decode_tokens + num_extend_tokens
+            prefill_query = query[prefill_token_start:]
+            prefill_key = key[prefill_token_start:]
+            prefill_value = value[prefill_token_start:]
+            q_descale = k_descale = v_descale = None
+            if prequantized_qkv is not None:
+                prefill_sequence_start = num_decodes + num_extends
+                prefill_sequence_end = prefill_sequence_start + num_prefills
+                prefill_prequantized_qkv = _slice_prequantized_qkv(
+                    prequantized_qkv,
+                    slice(prefill_token_start, None),
+                    slice(prefill_sequence_start, prefill_sequence_end),
+                )
+                prefill_query = prefill_prequantized_qkv.query
+                prefill_key = prefill_prequantized_qkv.key
+                prefill_value = prefill_prequantized_qkv.value
+                q_descale = prefill_prequantized_qkv.query_descale
+                k_descale = prefill_prequantized_qkv.key_descale
+                v_descale = prefill_prequantized_qkv.value_descale
 
             rocm_aiter_ops.flash_attn_varlen_func(
                 q=prefill_query,
@@ -1234,6 +1412,9 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 alibi_slopes=self.alibi_slopes,
                 out=output_actual_tokens[num_decode_tokens + num_extend_tokens :],
                 sink_ptr=self.sinks,
+                q_descale=q_descale,
+                k_descale=k_descale,
+                v_descale=v_descale,
             )
 
         # calculate for extends
@@ -1252,6 +1433,14 @@ class AiterFlashAttentionImpl(AttentionImpl):
             if rocm_aiter_ops.is_shuffle_kv_cache_enabled():
                 k_scale = attn_metadata.k_scale
                 v_scale = attn_metadata.v_scale
+            extend_prequantized_qkv = None
+            if prequantized_qkv is not None:
+                extend_sequence_slice = slice(num_decodes, num_decodes + num_extends)
+                extend_prequantized_qkv = _slice_prequantized_qkv(
+                    prequantized_qkv,
+                    extend_tokens_slice,
+                    extend_sequence_slice,
+                )
             self.extend_forward(
                 attn_metadata=attn_metadata,
                 query=extend_queries,
@@ -1272,6 +1461,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 ],
                 k_scale=k_scale,
                 v_scale=v_scale,
+                prequantized_qkv=extend_prequantized_qkv,
             )
 
         # calculate for decodes
