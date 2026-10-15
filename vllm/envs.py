@@ -308,6 +308,8 @@ if TYPE_CHECKING:
     VLLM_COMPILE_CACHE_SAVE_FORMAT: Literal["binary", "unpacked"] = "binary"
     VLLM_USE_V2_MODEL_RUNNER: bool | None = None
     VLLM_LOG_MODEL_INSPECTION: bool = False
+    VLLM_LAYERWISE_RELOAD_MEASURED_TOTALS: bool = False
+    VLLM_RELOAD_KEEP_MOE_KERNEL: bool = False
     VLLM_DEBUG_MFU_METRICS: bool = False
     VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY: bool = False
     VLLM_WEIGHT_OFFLOADING_DISABLE_UVA: bool = False
@@ -2138,6 +2140,22 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # with quantization methods and attention backends.
     "VLLM_LOG_MODEL_INSPECTION": lambda: bool(
         int(os.getenv("VLLM_LOG_MODEL_INSPECTION", "0"))
+    ),
+    # Layerwise weight reload: trigger a layer's processing from the element
+    # count its loaders reported during the first load, instead of from the
+    # declared parameter sizes, and process a ready layer only once a load for
+    # another layer arrives. Keeps a reload from dropping the trailing loads
+    # of layers whose loaders report more elements than the layer holds (for
+    # example per-expert NVFP4 MoE scales).
+    "VLLM_LAYERWISE_RELOAD_MEASURED_TOTALS": lambda: bool(
+        int(os.getenv("VLLM_LAYERWISE_RELOAD_MEASURED_TOTALS", "0"))
+    ),
+    # On weight reload, keep the ModelOpt NVFP4 MoE kernel the CUDA graphs
+    # were captured with and refresh the tensors its quant config references
+    # in place, instead of building a new kernel whose derived scales the
+    # captured graphs never see.
+    "VLLM_RELOAD_KEEP_MOE_KERNEL": lambda: bool(
+        int(os.getenv("VLLM_RELOAD_KEEP_MOE_KERNEL", "0"))
     ),
     # Debug logging for --enable-mfu-metrics
     "VLLM_DEBUG_MFU_METRICS": lambda: bool(

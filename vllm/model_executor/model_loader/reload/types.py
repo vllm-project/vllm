@@ -33,9 +33,16 @@ class LayerReloadingInfo:
     # persistence survives `_non_persistent_buffers_set` being mutated during reload
     kernel_non_persistent_buffers: set[str] = field(default_factory=set)
 
+    # number of elements the layer's weight loaders reported during the first
+    # load, recorded by `record_first_load_numel`; kept across resets so it can
+    # serve as the exact `load_numel_total` of later reloads
+    first_load_numel: int | None = None
+
     def reset(self):
         self.__init__(  # type: ignore[misc]
-            restore_metadata=self.restore_metadata, restore_device=self.restore_device
+            restore_metadata=self.restore_metadata,
+            restore_device=self.restore_device,
+            first_load_numel=self.first_load_numel,
         )
 
     def can_load(self) -> bool:

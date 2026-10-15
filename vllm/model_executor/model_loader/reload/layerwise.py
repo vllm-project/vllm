@@ -1,13 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import inspect
-from collections.abc import Callable
-from contextlib import nullcontext
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager, nullcontext
 from functools import wraps
 from weakref import WeakKeyDictionary, WeakSet
 
 import torch
 
+import vllm.envs as envs
 from vllm.config import ModelConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import is_deferred_attention_layer
@@ -34,6 +35,7 @@ logger = init_logger(__name__)
 
 __all__ = [
     "get_layerwise_info",
+    "record_first_load_numel",
     "record_metadata_for_reloading",
     "initialize_layerwise_reload",
     "finalize_layerwise_processing",
@@ -53,6 +55,11 @@ LAYERWISE_INFO: WeakKeyDictionary[torch.nn.Module, LayerReloadingInfo] = (
 # Global set used to track loading for logging purposes only
 LOADING_LAYERS: WeakSet[torch.nn.Module] = WeakSet()
 
+# Layers that have reached their load total but whose processing is deferred
+# until a load for a different layer arrives (VLLM_LAYERWISE_RELOAD_MEASURED_TOTALS),
+# so that a count overshoot cannot drop a layer's trailing loads.
+PENDING_LAYERS: dict[int, tuple[torch.nn.Module, LayerReloadingInfo]] = {}
+
 
 def get_layerwise_info(layer: torch.nn.Module) -> LayerReloadingInfo:
     """Get information related to restoring and layerwise processing. If no previous
@@ -65,6 +72,64 @@ def get_layerwise_info(layer: torch.nn.Module) -> LayerReloadingInfo:
         )
 
     return LAYERWISE_INFO[layer]
+
+
+@contextmanager
+def record_first_load_numel(model: torch.nn.Module) -> Iterator[None]:
+    """Record, per layer, how many elements its weight loaders report during a
+    full load, as the exact `load_numel_total` of later layerwise reloads.
+
+    The declared size of a layer (`get_layer_size`) is only an estimate of what
+    its loaders report: some loaders are called more than once for the same
+    parameter (per-expert MoE scales, qkv partitions) and the per-call cap in
+    `get_numel_loaded` cannot catch that. When the estimate is low, a reload
+    processes the layer before its last loads arrive and silently drops them.
+    Measuring the count on the first load removes the estimate.
+
+    Wrap the first `load_weights` call with this context manager. The counts
+    are stored in each layer's `LayerReloadingInfo.first_load_numel` and used
+    when `VLLM_LAYERWISE_RELOAD_MEASURED_TOTALS` is set.
+    """
+    counts: dict[int, int] = {}
+    wrapped: list[tuple[torch.Tensor, Callable, bool]] = []
+
+    def make_counting_loader(layer: torch.nn.Module, original: Callable) -> Callable:
+        loader_signature = inspect.signature(original)
+
+        @wraps(original, assigned=("__doc__", "__annotations__"))
+        def counting_loader(*args, **kwargs):
+            bound_args = loader_signature.bind(*args, **kwargs)
+            bound_args.apply_defaults()
+            num_loaded, ret = get_numel_loaded(original, bound_args)
+            counts[id(layer)] = counts.get(id(layer), 0) + num_loaded
+            return ret
+
+        return counting_loader
+
+    layers = list(model.modules())
+    for layer in layers:
+        for name, tensor in get_layer_tensors(layer).items():
+            if name in SKIP_LOAD_TENSORS:
+                continue
+            original = _get_weight_loader(tensor)
+            had_attr = "weight_loader" in tensor.__dict__
+            tensor.weight_loader = make_counting_loader(layer, original)
+            wrapped.append((tensor, original, had_attr))
+    try:
+        yield
+    finally:
+        for tensor, original, had_attr in wrapped:
+            if had_attr:
+                tensor.weight_loader = original
+            else:
+                tensor.__dict__.pop("weight_loader", None)
+        num_layers = 0
+        for layer in layers:
+            count = counts.get(id(layer), 0)
+            if count > 0:
+                get_layerwise_info(layer).first_load_numel = count
+                num_layers += 1
+        logger.debug("Recorded first-load element counts for %d layers", num_layers)
 
 
 def record_metadata_for_reloading(model: torch.nn.Module):
@@ -130,8 +195,22 @@ def initialize_online_processing(layer: torch.nn.Module):
 
     # Track loading progress to determine when to process/copy
     info.load_numel = 0
-    info.load_numel_total = get_layer_size(layer)
+    info.load_numel_total = _get_load_numel_total(layer, info)
     _wrap_parameters_weight_loader(layer)
+
+
+def _get_load_numel_total(layer: torch.nn.Module, info: LayerReloadingInfo) -> int:
+    """Number of loaded elements at which the layer is processed: the count
+    measured on the first load when reloading with
+    `VLLM_LAYERWISE_RELOAD_MEASURED_TOTALS`, the declared layer size otherwise.
+    """
+    if (
+        envs.VLLM_LAYERWISE_RELOAD_MEASURED_TOTALS
+        and info.kernel_tensors is not None
+        and info.first_load_numel is not None
+    ):
+        return info.first_load_numel
+    return get_layer_size(layer)
 
 
 def _wrap_parameters_weight_loader(layer: torch.nn.Module) -> None:
@@ -174,7 +253,7 @@ def make_online_process_loader(layer: torch.nn.Module, param_name: str) -> Calla
         # Re-run on each load: layers may register parameters later (e.g., `bias`).
         # Wrap late parameters and refresh `load_numel_total` so processing waits
         # until all parameters are loaded.
-        info.load_numel_total = get_layer_size(layer)
+        info.load_numel_total = _get_load_numel_total(layer, info)
         _wrap_parameters_weight_loader(layer)
 
         # Bind and normalize arguments
@@ -214,6 +293,14 @@ def make_online_process_loader(layer: torch.nn.Module, param_name: str) -> Calla
                 )
 
         # Process and copy when all weights are loaded
+        if envs.VLLM_LAYERWISE_RELOAD_MEASURED_TOTALS:
+            # Defer processing a ready layer until a load for another layer
+            # arrives, so a count overshoot cannot drop this layer's late loads.
+            _process_pending_layers(except_info=info)
+            if info.load_numel >= info.load_numel_total:  # type: ignore[operator]
+                PENDING_LAYERS[id(info)] = (layer, info)
+            return ret
+
         if info.load_numel >= info.load_numel_total:  # type: ignore[operator]
             _layerwise_process(layer, info)
             LOADING_LAYERS.discard(layer)
@@ -238,6 +325,8 @@ def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelCon
     """
     if hasattr(model, "_original_do_torchao_reload"):
         model._do_torchao_reload = model._original_do_torchao_reload
+
+    _process_pending_layers(except_info=None)
 
     deferred_attn: list[tuple[torch.nn.Module, LayerReloadingInfo]] = []
 
@@ -339,6 +428,18 @@ def _reload_attention_scales(layer: torch.nn.Module, info: LayerReloadingInfo) -
             quant_method.process_weights_after_loading(layer)
 
     _copy_and_restore_kernel_tensors(layer, info)
+
+
+def _process_pending_layers(except_info: LayerReloadingInfo | None) -> None:
+    """Process every deferred layer except the one currently receiving loads."""
+    for key in list(PENDING_LAYERS.keys()):
+        layer, info = PENDING_LAYERS[key]
+        if info is except_info:
+            continue
+        del PENDING_LAYERS[key]
+        if info.can_load():
+            _layerwise_process(layer, info)
+            LOADING_LAYERS.discard(layer)
 
 
 def _layerwise_process(layer: torch.nn.Module, info: LayerReloadingInfo):

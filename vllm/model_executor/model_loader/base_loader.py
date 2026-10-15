@@ -11,7 +11,10 @@ import vllm.envs as envs
 from vllm.config import ModelConfig, VllmConfig
 from vllm.config.load import LoadConfig
 from vllm.logger import init_logger
-from vllm.model_executor.model_loader.reload import finalize_layerwise_processing
+from vllm.model_executor.model_loader.reload import (
+    finalize_layerwise_processing,
+    record_first_load_numel,
+)
 from vllm.model_executor.model_loader.utils import (
     initialize_model,
     process_weights_after_loading,
@@ -85,7 +88,11 @@ class BaseModelLoader(ABC):
                 )
 
             logger.debug("Loading weights on %s ...", load_device)
-            self.load_weights(model, model_config)
+            if envs.VLLM_LAYERWISE_RELOAD_MEASURED_TOTALS:
+                with record_first_load_numel(model):
+                    self.load_weights(model, model_config)
+            else:
+                self.load_weights(model, model_config)
 
             # Release transient tensors held by PyTorch's caching allocator
             # before weight post-processing and raw CUDA driver allocations.

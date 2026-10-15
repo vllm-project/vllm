@@ -36,6 +36,31 @@ def test_runai_safetensors_weights_iterator_clones_reused_buffers(
         assert torch.equal(actual_tensors[name], expected_tensor)
 
 
+def test_runai_safetensors_weights_iterator_pinned_staging_fallback(
+    tmp_path, monkeypatch
+):
+    # Without a CUDA device the staging buffer cannot be registered; the
+    # iterator must then yield the same (copied-out) tensors as the plain path.
+    monkeypatch.setenv("RUNAI_STREAMER_MEMORY_LIMIT", "0")
+    weights_file = tmp_path / "model.safetensors"
+    expected_tensors = {
+        "first": torch.tensor([1.0, 2.0]),
+        "second": torch.tensor([3.0, 4.0]),
+    }
+    save_file(expected_tensors, weights_file)
+
+    actual_tensors = dict(
+        runai_safetensors_weights_iterator(
+            [str(weights_file)], False, pinned_staging=True
+        )
+    )
+
+    assert actual_tensors.keys() == expected_tensors.keys()
+    assert actual_tensors["first"].data_ptr() != actual_tensors["second"].data_ptr()
+    for name, expected_tensor in expected_tensors.items():
+        assert torch.equal(actual_tensors[name], expected_tensor)
+
+
 def test_runai_model_loader():
     with tempfile.TemporaryDirectory() as tmpdir:
         huggingface_hub.constants.HF_HUB_OFFLINE = False

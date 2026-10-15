@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from enum import Enum
 from fnmatch import fnmatch
 from typing import TYPE_CHECKING, Any, cast
@@ -836,6 +836,57 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
         )
 
 
+def _refresh_moe_quant_config_inplace(
+    dst: FusedMoEQuantConfig, src: FusedMoEQuantConfig
+) -> None:
+    """Copy every tensor of ``src`` into the tensor ``dst`` holds in its place.
+
+    Used on weight reload so the quant config captured by CUDA graphs keeps
+    its storage. A tensor whose shape, dtype or device changed cannot be
+    refreshed in place; it is rebound with a warning, and captured graphs
+    then read stale values.
+    """
+    copied = shared = rebound = 0
+    for desc_name in ("_a1", "_a2", "_w1", "_w2"):
+        dst_desc = getattr(dst, desc_name)
+        src_desc = getattr(src, desc_name)
+        for desc_field in fields(dst_desc):
+            old = getattr(dst_desc, desc_field.name)
+            new = getattr(src_desc, desc_field.name)
+            if not (isinstance(old, torch.Tensor) and isinstance(new, torch.Tensor)):
+                continue
+            if old is new:
+                shared += 1
+            elif (
+                old.shape == new.shape
+                and old.dtype == new.dtype
+                and old.device == new.device
+                and torch._debug_has_internal_overlap(old) == 0
+            ):
+                old.copy_(new)
+                copied += 1
+            else:
+                logger.warning(
+                    "%s.%s changed on reload (%s/%s -> %s/%s); rebinding it, "
+                    "captured CUDA graphs will read stale values",
+                    desc_name,
+                    desc_field.name,
+                    tuple(old.shape),
+                    old.dtype,
+                    tuple(new.shape),
+                    new.dtype,
+                )
+                setattr(dst_desc, desc_field.name, new)
+                rebound += 1
+    logger.debug(
+        "Refreshed fused-MoE quant config in place: %d tensors copied, "
+        "%d shared, %d rebound",
+        copied,
+        shared,
+        rebound,
+    )
+
+
 class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
     """MoE Method for FP4 Quantization.
 
@@ -1091,17 +1142,36 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
 
     def _build_moe_kernel(self, layer: RoutedExperts) -> None:
         """Build the modular MoE kernel from the (already in-format) weights."""
-        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+        moe_quant_config = self.get_fused_moe_quant_config(layer)
         assert self.experts_cls is not None
-        self.moe_kernel = make_nvfp4_moe_kernel(
-            moe_quant_config=self.moe_quant_config,
+        moe_kernel = make_nvfp4_moe_kernel(
+            moe_quant_config=moe_quant_config,
             moe_config=self.moe,
             experts_cls=self.experts_cls,
             backend=self.nvfp4_backend,
             routing_tables=layer._expert_routing_tables(),
             per_token_activation=self.per_token_activation,
         )
-        self.moe_kernel.fused_experts.process_weights_after_loading(layer)
+        moe_kernel.fused_experts.process_weights_after_loading(layer)
+
+        previous_quant_config = getattr(self, "moe_quant_config", None)
+        if (
+            envs.VLLM_RELOAD_KEEP_MOE_KERNEL
+            and getattr(self, "moe_kernel", None) is not None
+            and previous_quant_config is not None
+        ):
+            # Weight reload. The CUDA graphs captured at startup read the
+            # tensors the existing kernel's quant config references (the
+            # activation gscales are derived here, not layer parameters, so
+            # the layerwise copy into kernel tensors does not cover them).
+            # Keep that kernel and refresh its tensors in place; the layer's
+            # parameters are copied back into their original storage by the
+            # layerwise reload right after this returns.
+            _refresh_moe_quant_config_inplace(previous_quant_config, moe_quant_config)
+            return
+
+        self.moe_quant_config = moe_quant_config
+        self.moe_kernel = moe_kernel
 
     def _restore_padded_moe_dims(self, layer: RoutedExperts) -> None:
         """Recover the padded ``moe_config`` dims from the exported weights."""

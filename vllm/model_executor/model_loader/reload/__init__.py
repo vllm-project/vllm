@@ -17,6 +17,7 @@ Limitations:
 """
 
 __all__ = [
+    "record_first_load_numel",
     "record_metadata_for_reloading",
     "initialize_layerwise_reload",
     "finalize_layerwise_processing",
@@ -29,6 +30,7 @@ from .layerwise import (
     finalize_layerwise_processing,
     finalize_layerwise_reload,
     initialize_layerwise_reload,
+    record_first_load_numel,
     record_metadata_for_reloading,
 )
 from .torchao_decorator import (

@@ -14,6 +14,7 @@ import pytest
 import torch
 from torch.nn.parameter import UninitializedParameter
 
+import vllm.envs as envs
 import vllm.model_executor.model_loader.reload.layerwise as reload_layerwise
 import vllm.model_executor.model_loader.reload.meta as reload_meta
 from vllm.config import ModelConfig
@@ -23,8 +24,10 @@ from vllm.model_executor.layers.linear import QKVParallelLinear
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.model_loader.reload.layerwise import (
     finalize_layerwise_reload,
+    get_layerwise_info,
     initialize_layerwise_reload,
     initialize_online_processing,
+    record_first_load_numel,
     record_metadata_for_reloading,
 )
 from vllm.model_executor.model_loader.reload.meta import (
@@ -1460,3 +1463,97 @@ def test_online_quantize_reload(
         mul_perp = llm.generate_prompt_perplexity(["3 4 = 12"], mask=["3 4 ="])[0]
         add_perp = llm.generate_prompt_perplexity(["3 4 = 7"], mask=["3 4 ="])[0]
         assert add_perp < mul_perp
+
+
+class _DerivingQuantMethod(QuantizeMethodBase):
+    """Derives a tensor from the layer's scale when processing runs, the way
+    quant methods derive kernel scales; stale if processing ran too early."""
+
+    uses_meta_device = True
+
+    def create_weights(self, layer, *weight_args, **extra_weight_attrs):
+        pass
+
+    def apply(self, layer, *args, **kwargs):
+        raise NotImplementedError
+
+    def process_weights_after_loading(self, layer):
+        layer.scale_doubled = layer.scale.detach().clone() * 2
+
+
+class _OverCountingScaleLayer(torch.nn.Module):
+    """A layer whose per-expert scale loader is called twice per expert (one
+    call per projection), so its loaders report more elements than the layer
+    declares, like NVFP4 MoE expert scales."""
+
+    def __init__(self):
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.zeros(2, 2))
+        self.weight.weight_loader = default_weight_loader
+        self.scale = torch.nn.Parameter(torch.zeros(2))
+        self.scale.weight_loader = _OverCountingScaleLayer.scale_loader
+        self.quant_method = _DerivingQuantMethod()
+
+    @staticmethod
+    def scale_loader(param: torch.Tensor, loaded_weight: torch.Tensor, expert_id: int):
+        param.data[expert_id].copy_(loaded_weight)
+
+
+class _OverCountingScaleModel(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.layer = _OverCountingScaleLayer()
+
+    def load_weights(self, weights):
+        for name, loaded_weight, *extra in weights:
+            param = getattr(self.layer, name)
+            param.weight_loader(param, loaded_weight, *extra)
+
+
+def _over_counting_weights(base: float):
+    # The over-counted parameter is streamed last, so the declared-size
+    # trigger fires two loads early and the trailing expert scale is dropped.
+    return [
+        ("weight", torch.full((2, 2), base)),
+        ("scale", torch.tensor(base + 10.0), 0),
+        ("scale", torch.tensor(base + 11.0), 0),
+        ("scale", torch.tensor(base + 20.0), 1),
+        ("scale", torch.tensor(base + 21.0), 1),
+    ]
+
+
+@pytest.mark.parametrize("measured_totals", [False, True])
+def test_layerwise_reload_measured_first_load_totals(monkeypatch, measured_totals):
+    monkeypatch.setattr(envs, "VLLM_LAYERWISE_RELOAD_MEASURED_TOTALS", measured_totals)
+    reload_layerwise.PENDING_LAYERS.clear()
+    model = _OverCountingScaleModel()
+    layer = model.layer
+
+    with record_first_load_numel(model):
+        model.load_weights(_over_counting_weights(1.0))
+    layer.quant_method.process_weights_after_loading(layer)
+    assert torch.equal(layer.scale, torch.tensor([12.0, 22.0]))
+    assert torch.equal(layer.scale_doubled, torch.tensor([24.0, 44.0]))
+    # loaders are restored and the measured count (4 + 4 calls of 1) is kept
+    assert layer.scale.weight_loader is _OverCountingScaleLayer.scale_loader
+    assert layer.weight.weight_loader is default_weight_loader
+    assert get_layerwise_info(layer).first_load_numel == 8
+
+    kernel_scale = layer.scale
+    record_metadata_for_reloading(model)
+    initialize_layerwise_reload(model)
+    expected_total = 8 if measured_totals else 6
+    assert get_layerwise_info(layer).load_numel_total == expected_total
+    model.load_weights(_over_counting_weights(100.0))
+    finalize_layerwise_reload(model, SimpleNamespace(dtype=torch.float32))
+
+    assert layer.scale is kernel_scale
+    assert torch.equal(layer.weight, torch.full((2, 2), 100.0))
+    assert torch.equal(layer.scale, torch.tensor([111.0, 121.0]))
+    if measured_totals:
+        assert torch.equal(layer.scale_doubled, torch.tensor([222.0, 242.0]))
+    else:
+        # the declared total is reached after the second scale load, so the
+        # layer is processed before the second expert's scale arrives
+        assert torch.equal(layer.scale_doubled, torch.tensor([222.0, 0.0]))
+    assert get_layerwise_info(layer).first_load_numel == 8
