@@ -97,37 +97,16 @@ class RoutedExpertsCapturer:
     def _restore_local_topk_ids(
         self, topk_ids: torch.Tensor, ctx: ForwardContext
     ) -> torch.Tensor:
-        """Restore this DP rank's local token rows from supported DP/TP layouts.
+        """Restore this DP rank's token rows, trimming trailing SP padding.
 
-        With DP metadata, accept a full cross-DP batch, a local batch,
-        gathered padded shards described by ``local_sizes``, or a TP shard
-        of ``ceil(local_tokens / tp_size)`` rows, in that order. Cross-DP
-        batches are DP-major; gathered shards are DP-major/TP-minor, with
-        padding trailing each DP rank's batch. PCP layouts are unsupported.
+        Layout priority: cross-DP batch, local batch, gathered DP/TP shards,
+        then a local TP shard. Gathered rows are DP-major/TP-minor; preserve
+        this priority when layout sizes coincide. PCP is unsupported.
 
-        Without DP metadata, the batch descriptor gives the pre-SP batch size.
-        Accept a full local batch or a TP shard. Also defensively accept an
-        already-gathered padded batch of
-        ``tp_size * ceil(local_tokens / tp_size)`` rows and trim it. If the
-        token count is unknown, return the input unchanged; TP shards cannot
-        be identified in that case.
-
-        TP all-gather concatenates shards in rank order, with padding only
-        at the batch's tail. Full batches take precedence when sizes match.
-        For zero or one local token, no gather is needed: TP0 owns the real
-        row, if any, and is the only rank that publishes auxiliary output.
-
-        Args:
-            topk_ids: Routing IDs of shape (rows, num_routed_experts).
-            ctx: Forward context with the local token counts.
-
-        Returns:
-            Routing IDs in this DP rank's original local token order.
-
-        Raises:
-            ValueError: Gathered shard sizes cannot form equal DP groups.
-            AssertionError: The row count matches no supported layout.
-
+        Without DP metadata, use the pre-SP batch descriptor. Unknown counts
+        pass through; known counts must match a full, sharded or padded batch.
+        A full local batch avoids gathering, including zero/one-token batches
+        where only the publishing TP0 rank needs the real rows.
         """
         n = topk_ids.shape[0]
         dp_metadata = ctx.dp_metadata
@@ -138,8 +117,7 @@ class RoutedExpertsCapturer:
         else:
             num_tokens_dp = dp_metadata.num_tokens_across_dp_cpu
             num_local_tokens = int(num_tokens_dp[self.dp_rank].item())
-            total = int(num_tokens_dp.sum().item())
-            if n == total:
+            if n == int(num_tokens_dp.sum().item()):
                 end = int(num_tokens_dp[: self.dp_rank + 1].sum().item())
                 return topk_ids[end - num_local_tokens : end]
 
@@ -147,9 +125,8 @@ class RoutedExpertsCapturer:
             return topk_ids
 
         if dp_metadata is not None:
-            shard_sizes = getattr(dp_metadata, "local_sizes", None)
-            gathered_size = sum(shard_sizes) if shard_sizes is not None else -1
-            if shard_sizes is not None and n == gathered_size:
+            shard_sizes = dp_metadata.local_sizes
+            if shard_sizes is not None and n == sum(shard_sizes):
                 num_dp_ranks = len(num_tokens_dp)
                 if len(shard_sizes) % num_dp_ranks != 0:
                     raise ValueError(
@@ -163,24 +140,16 @@ class RoutedExpertsCapturer:
                 return topk_ids[start : start + num_local_tokens]
 
         shard_n = (num_local_tokens + self.tp_size - 1) // self.tp_size
-        if self.tp_size > 1 and n == shard_n:
+        if n == shard_n:
             return get_tp_group().all_gather(topk_ids.contiguous(), dim=0)[
                 :num_local_tokens
             ]
-        if dp_metadata is None and self.tp_size > 1 and n == shard_n * self.tp_size:
+        if dp_metadata is None and n == shard_n * self.tp_size:
             return topk_ids[:num_local_tokens]
 
-        if dp_metadata is None:
-            raise AssertionError(
-                "RoutedExpertsCapturer: unexpected topk_ids batch "
-                f"dim {n} (expected {num_local_tokens}, {shard_n}, "
-                f"or {shard_n * self.tp_size} for single DP, "
-                f"tp_size={self.tp_size})"
-            )
         raise AssertionError(
-            "RoutedExpertsCapturer: unexpected topk_ids batch "
-            f"dim {n} (expected {total}, {num_local_tokens}, "
-            f"{gathered_size}, or {shard_n} for "
+            f"RoutedExpertsCapturer: unexpected topk_ids batch dim {n} "
+            f"(local_tokens={num_local_tokens}, "
             f"dp_rank={self.dp_rank}, tp_size={self.tp_size})"
         )
 

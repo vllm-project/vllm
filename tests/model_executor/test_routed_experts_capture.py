@@ -12,6 +12,7 @@ from vllm.config.compilation import CompilationMode
 from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.forward_context import (
     BatchDescriptor,
+    DPMetadata,
     ForwardContext,
     get_forward_context,
     set_forward_context,
@@ -495,7 +496,7 @@ def test_routed_experts_capturer_dp_naive_concatenated_all_ranks():
     capturer = _capturer_with_buffer(dp_rank=1)
     num_tokens_dp = torch.tensor([2, 3], dtype=torch.int32)
     ctx = _forward_context(
-        dp_metadata=SimpleNamespace(num_tokens_across_dp_cpu=num_tokens_dp)
+        dp_metadata=DPMetadata(num_tokens_across_dp_cpu=num_tokens_dp)
     )
     # Concatenated order: rank0 rows then rank1 rows.
     topk = torch.tensor(
@@ -512,7 +513,7 @@ def test_routed_experts_capturer_dp_modular_local_tokens():
     capturer = _capturer_with_buffer(dp_rank=1)
     num_tokens_dp = torch.tensor([2, 3], dtype=torch.int32)
     ctx = _forward_context(
-        dp_metadata=SimpleNamespace(num_tokens_across_dp_cpu=num_tokens_dp)
+        dp_metadata=DPMetadata(num_tokens_across_dp_cpu=num_tokens_dp)
     )
     topk = torch.tensor([[10, 11], [12, 13], [14, 15]], dtype=torch.int32)
     with patch(f"{_REC_MODULE}.get_forward_context", return_value=ctx):
@@ -524,7 +525,7 @@ def test_routed_experts_capturer_dp_ep_gathered_shards():
     capturer = _capturer_with_buffer(dp_rank=1, tp_size=2)
     num_tokens_dp = torch.tensor([3, 2], dtype=torch.int32)
     ctx = _forward_context(
-        dp_metadata=SimpleNamespace(
+        dp_metadata=DPMetadata(
             num_tokens_across_dp_cpu=num_tokens_dp,
             local_sizes=[2, 2, 1, 1],
         )
@@ -546,9 +547,7 @@ def test_routed_experts_capturer_sp_modular_gathers_tp_shards(single_dp):
     num_tokens_dp = torch.tensor([2, 3], dtype=torch.int32)
     ctx = _forward_context(
         dp_metadata=(
-            None
-            if single_dp
-            else SimpleNamespace(num_tokens_across_dp_cpu=num_tokens_dp)
+            None if single_dp else DPMetadata(num_tokens_across_dp_cpu=num_tokens_dp)
         ),
         batch_descriptor=BatchDescriptor(num_tokens=3),
     )
@@ -575,7 +574,7 @@ def test_routed_experts_capturer_rejects_incomplete_dp_shard_groups():
     """Invalid gather metadata must not silently select another rank's rows."""
     capturer = _capturer_with_buffer(dp_rank=1, tp_size=2)
     ctx = _forward_context(
-        dp_metadata=SimpleNamespace(
+        dp_metadata=DPMetadata(
             num_tokens_across_dp_cpu=torch.tensor([3, 2]),
             local_sizes=[2, 2, 2],
         )
@@ -618,7 +617,7 @@ def test_routed_experts_capturer_dp_preserves_empty_and_unpadded_spans(
     capturer = _capturer_with_buffer(dp_rank=1, tp_size=2)
     topk = torch.arange(sum(counts) * 2, dtype=torch.int32).reshape(-1, 2)
     ctx = _forward_context(
-        dp_metadata=SimpleNamespace(
+        dp_metadata=DPMetadata(
             num_tokens_across_dp_cpu=torch.tensor(counts), local_sizes=local_sizes
         )
     )
@@ -639,7 +638,7 @@ def test_routed_experts_capturer_dp_unexpected_batch_raises():
     capturer = _capturer_with_buffer(dp_rank=0)
     num_tokens_dp = torch.tensor([2, 3], dtype=torch.int32)
     ctx = _forward_context(
-        dp_metadata=SimpleNamespace(num_tokens_across_dp_cpu=num_tokens_dp)
+        dp_metadata=DPMetadata(num_tokens_across_dp_cpu=num_tokens_dp)
     )
     # total=5, local=2: n=1 matches neither naive (5) nor modular (2).
     topk = torch.tensor([[1, 2]], dtype=torch.int32)
