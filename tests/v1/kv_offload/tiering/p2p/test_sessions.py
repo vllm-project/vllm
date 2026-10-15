@@ -3553,6 +3553,7 @@ class TestPeerFaultEscalation:
         assert not session.alive
         assert conn._sent[-1] == {TYPE_KEY: DisconnectMsg.TYPE}
         assert session.death_reason == "data plane: NIXL_ERR_REMOTE_DISCONNECT"
+        assert session.data_plane_fault == "NIXL_ERR_REMOTE_DISCONNECT"
 
     def test_fault_waits_for_inflight_then_disconnects(self):
         session, conn, transport = _make_session()

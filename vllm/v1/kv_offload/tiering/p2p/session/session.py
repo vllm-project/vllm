@@ -210,6 +210,11 @@ class P2PSession:
         return self._death_reason or "control connection lost"
 
     @property
+    def data_plane_fault(self) -> str | None:
+        """The transport's peer fault, if one was reported (see server role)."""
+        return self._server.peer_fault
+
+    @property
     def last_activity_at(self) -> float:
         """Monotonic timestamp of the last meaningful session activity."""
         return self._last_activity_at
