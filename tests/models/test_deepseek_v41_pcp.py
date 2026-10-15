@@ -6,6 +6,7 @@ from unittest.mock import Mock
 import pytest
 import torch
 
+from vllm.config import KVTransferConfig
 from vllm.models.deepseek_v41.nvidia import model as model_module
 
 
@@ -64,3 +65,84 @@ def test_pcp_gathers_routing_ids_once_after_local_input_preparation(
             routing_ids = routing_ids.repeat(pcp_size)
         torch.testing.assert_close(run_layers.call_args.args[3], routing_ids)
     assert gather.call_count == 2 * int(needs_gather)
+
+
+@pytest.fixture
+def pcp_config():
+    return SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            prefill_context_parallel_size=2,
+            pipeline_parallel_size=1,
+            data_parallel_size=1,
+            decode_context_parallel_size=1,
+            use_ubatching=False,
+        ),
+        speculative_config=None,
+        cache_config=SimpleNamespace(enable_prefix_caching=False),
+        kernel_config=SimpleNamespace(moe_backend="auto"),
+        scheduler_config=SimpleNamespace(async_scheduling=False),
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="NixlConnector", kv_role="kv_producer", kv_buffer_device="cuda"
+        ),
+    )
+
+
+@pytest.mark.parametrize("pcp_size", [2, 4])
+def test_pcp_allows_nixl_producer(pcp_config, pcp_size):
+    pcp_config.parallel_config.prefill_context_parallel_size = pcp_size
+    model_module._validate_pcp_config(pcp_config)
+    pcp_config.kv_transfer_config = None
+    model_module._validate_pcp_config(pcp_config)
+
+
+@pytest.mark.parametrize(
+    "transfer_args",
+    [
+        {"kv_role": "kv_consumer"},
+        {"kv_role": "kv_both"},
+        {"kv_connector": "NixlPushConnector"},
+        {"kv_connector": "MooncakeConnector"},
+        {"kv_connector": "MultiConnector"},
+        {"kv_connector_module_path": "custom.connector"},
+        {"kv_buffer_device": "cpu"},
+        {"kv_connector_extra_config": {"bidirectional_kv_xfer": True}},
+    ],
+)
+def test_pcp_rejects_unsupported_nixl_transfer(pcp_config, transfer_args):
+    pcp_config.kv_transfer_config = KVTransferConfig(
+        **{
+            "kv_connector": "NixlConnector",
+            "kv_role": "kv_producer",
+            "kv_buffer_device": "cuda",
+            **transfer_args,
+        }
+    )
+    with pytest.raises(NotImplementedError, match="GPU NixlConnector"):
+        model_module._validate_pcp_config(pcp_config)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("pipeline_parallel_size", 2),
+        ("data_parallel_size", 2),
+        ("decode_context_parallel_size", 2),
+        ("use_ubatching", True),
+    ],
+)
+def test_pcp_nixl_preserves_topology_limits(pcp_config, field, value):
+    setattr(pcp_config.parallel_config, field, value)
+    with pytest.raises(NotImplementedError, match="PP=DP=DCP=1"):
+        model_module._validate_pcp_config(pcp_config)
+
+
+def test_pcp_nixl_rejects_async_scheduling(pcp_config):
+    pcp_config.scheduler_config.async_scheduling = True
+    with pytest.raises(NotImplementedError, match="synchronous scheduling"):
+        model_module._validate_pcp_config(pcp_config)
+
+
+def test_pcp1_nixl_consumer_keeps_existing_behavior(pcp_config):
+    pcp_config.parallel_config.prefill_context_parallel_size = 1
+    pcp_config.kv_transfer_config.kv_role = "kv_consumer"
+    model_module._validate_pcp_config(pcp_config)
