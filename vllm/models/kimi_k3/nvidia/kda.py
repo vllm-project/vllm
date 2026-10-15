@@ -62,7 +62,7 @@ from vllm.utils.flashinfer import (
     has_flashinfer_recurrent_kda,
 )
 from vllm.v1.attention.backend import AttentionBackend
-from vllm.v1.kv_cache_interface import MambaSpec
+from vllm.v1.kv_cache_interface import MambaSpec, MambaStateSplit
 from vllm.v1.worker.workspace import current_workspace_manager
 
 logger = init_logger(__name__)
@@ -581,6 +581,11 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 spec_query_len=1 + self.num_spec,
             )
         return base_shapes
+
+    def get_state_splits(self) -> tuple[MambaStateSplit, ...] | None:
+        return MambaStateShapeCalculator.kda_state_splits(
+            self.tp_size, self.num_heads, self.head_dim
+        )
 
     def __init__(
         self,

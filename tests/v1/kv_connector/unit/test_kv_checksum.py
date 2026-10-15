@@ -893,6 +893,10 @@ def test_state_splits_cover_state_shapes():
             calc.gated_delta_net_state_shape(tp_size, 4, 8, 16, 32, 4),
             calc.gated_delta_net_state_splits(tp_size, 4, 8, 16, 32),
         )
+        yield (
+            calc.kda_state_shape(tp_size, 8, 16, conv_kernel_size=4),
+            calc.kda_state_splits(tp_size, 8, 16),
+        )
         for n_groups in (1, 4):
             yield (
                 calc.mamba2_state_shape(tp_size, 64, n_groups, 8, 8, 16, 4),
@@ -911,6 +915,9 @@ def test_state_splits_cover_state_shapes():
     assert global_sizes[0] == global_sizes[1] == global_sizes[2]
     [conv, _] = calc.mamba2_state_splits(2, 64, 1, 8, 16)
     assert conv.segments == ((32, 1), (16, 2), (16, 2))
+    [conv, recurrent] = calc.kda_state_splits(2, 8, 16)
+    assert conv.segments == ((64, 1), (64, 1), (64, 1))
+    assert recurrent == MambaStateSplit(0, ((4, 1),))
 
 
 def test_recv_checksummed_only_when_its_load_finishes():

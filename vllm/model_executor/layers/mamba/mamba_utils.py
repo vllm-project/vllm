@@ -386,6 +386,25 @@ class MambaStateShapeCalculator:
         return (conv_state_shape, recurrent_state_shape)
 
     @classmethod
+    def kda_state_splits(
+        cls,
+        tp_world_size: int,
+        num_heads: int,
+        head_dim: int,
+        num_k_heads: int | None = None,
+        head_k_dim: int | None = None,
+    ) -> tuple[MambaStateSplit, ...] | None:
+        """How TP splits ``kda_state_shape``'s states: conv [Q, K, V], and the
+        recurrent state by head. The same layout as gated delta net's."""
+        return cls.gated_delta_net_state_splits(
+            tp_world_size,
+            num_heads if num_k_heads is None else num_k_heads,
+            num_heads,
+            head_dim if head_k_dim is None else head_k_dim,
+            head_dim,
+        )
+
+    @classmethod
     def append_kda_recoverssm_record(
         cls,
         base_shapes: tuple[tuple[int, int], tuple[int, int, int]],
