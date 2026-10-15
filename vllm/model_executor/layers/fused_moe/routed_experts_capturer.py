@@ -229,5 +229,6 @@ def bind_routed_experts_capturer(
                 f"{type(module.router).__name__}."
             )
 
-    if num_bound == 0:
+    # A PP stage may contain only dense layers.
+    if num_bound == 0 and get_pp_group().world_size == 1:
         raise ValueError("No supported MoE router found for routed-experts capture.")
