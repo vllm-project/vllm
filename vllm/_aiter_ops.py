@@ -246,6 +246,26 @@ def _triton_gemm_config_is_tuned(config_name: str, N: int, K: int) -> bool:
     return get_gemm_config(config_name, M_TUNE_PROBE, N, K)[1]
 
 
+def _bf16_gemm_shape_is_tuned(N: int, K: int, out_dtype: torch.dtype) -> bool:
+    # get_GEMM_A16W16_config builds a default on a miss; only tuned rows carry
+    # the tuner's "us" field. Rows are keyed by output dtype, so a shape tuned
+    # for bf16 output does not count as tuned for fp32 output.
+    try:
+        from aiter.tuned_gemm import get_GEMM_A16W16_config
+
+        bf16 = str(torch.bfloat16)
+        otype = str(out_dtype)
+        return any(
+            "us" in get_GEMM_A16W16_config(M, N, K, False, bf16, otype)
+            for M in (1, 2, 4, 8, 16, 32, 64, 128, 256)
+        )
+    except (AttributeError, ImportError, OSError):
+        logger.warning_once(
+            "Could not read aiter bf16 GEMM configs; treating all shapes as untuned."
+        )
+        return False
+
+
 def _ck_gemm_shape_is_tuned(
     N: int, K: int, q_dtype_w: torch.dtype, csv_attr: str
 ) -> bool:
@@ -574,6 +594,27 @@ def _rocm_aiter_topk_sigmoid_impl(
     from aiter import topk_sigmoid
 
     topk_sigmoid(topk_weights, topk_indices, gating_output)
+
+
+def _rocm_aiter_bf16_gemm_impl(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    out_dtype: torch.dtype,
+) -> torch.Tensor:
+    # Pass out_dtype as otype so tgemm looks up the rows tuned for that output
+    # dtype and the kernel writes it directly (e.g. fp32 router logits).
+    from aiter.tuned_gemm import tgemm
+
+    out = tgemm.mm(x, weight, otype=out_dtype)
+    return out if out.dtype == out_dtype else out.to(out_dtype)
+
+
+def _rocm_aiter_bf16_gemm_fake(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    out_dtype: torch.dtype,
+) -> torch.Tensor:
+    return x.new_empty((x.shape[0], weight.shape[0]), dtype=out_dtype)
 
 
 def _rocm_aiter_biased_grouped_topk_impl(
@@ -2919,6 +2960,14 @@ class rocm_aiter_ops:
             )
 
             direct_register_custom_op(
+                op_name="rocm_aiter_bf16_gemm",
+                op_func=_rocm_aiter_bf16_gemm_impl,
+                mutates_args=[],
+                fake_impl=_rocm_aiter_bf16_gemm_fake,
+                dispatch_key=current_platform.dispatch_key,
+            )
+
+            direct_register_custom_op(
                 op_name="rocm_aiter_biased_grouped_topk",
                 op_func=_rocm_aiter_biased_grouped_topk_impl,
                 mutates_args=["topk_weights", "topk_ids"],
@@ -3297,6 +3346,14 @@ class rocm_aiter_ops:
         return torch.ops.vllm.rocm_aiter_triton_gemm_a8w8_blockscale(
             A, B, As, Bs, output_dtype
         )
+
+    @staticmethod
+    def bf16_gemm(
+        x: torch.Tensor,
+        weight: torch.Tensor,
+        out_dtype: torch.dtype,
+    ) -> torch.Tensor:
+        return torch.ops.vllm.rocm_aiter_bf16_gemm(x, weight, out_dtype)
 
     @staticmethod
     def gemm_a8w8_blockscale(
@@ -4086,6 +4143,13 @@ class rocm_aiter_ops:
             )
         except (AssertionError, ImportError):
             return False
+
+    @staticmethod
+    @functools.cache
+    def is_bf16_gemm_tuned(
+        N: int, K: int, out_dtype: torch.dtype = torch.bfloat16
+    ) -> bool:
+        return _bf16_gemm_shape_is_tuned(N, K, out_dtype)
 
     @staticmethod
     @functools.cache
