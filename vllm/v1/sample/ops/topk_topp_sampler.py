@@ -352,6 +352,16 @@ def apply_top_k_top_p(
     if p is None and k is None:
         return logits
 
+    # Batch invariance: the Triton and PyTorch top-k/top-p paths compute the
+    # same mask only up to the sort order of equal keys; since the Triton
+    # path is dispatched for batch >= 8 and the PyTorch path below that,
+    # the cumsum mask boundary can land on different tied tokens at batch
+    # 1 vs batch >= 8, zeroing a razor-edge candidate's probability in one
+    # batch size but not the other. In batch-invariant mode always take the
+    # PyTorch path so the filtering itself is batch-invariant.
+    if envs.VLLM_BATCH_INVARIANT:
+        return apply_top_k_top_p_pytorch(logits, k, p, allow_cpu_sync=False)
+
     if HAS_TRITON:
         return apply_top_k_top_p_triton(logits, k, p)
 
