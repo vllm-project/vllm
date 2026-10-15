@@ -32,7 +32,7 @@ pub struct RenderConfig {
     pub port: u16,
     pub tool_call_parser: ParserSelection,
     pub reasoning_parser: ParserSelection,
-    pub tool_strict_level: ToolStrictLevel,
+    pub tool_strict_level: Option<ToolStrictLevel>,
     pub renderer: RendererSelection,
     pub chat_template: Option<String>,
     pub default_chat_template_kwargs: HashMap<String, Value>,
@@ -157,7 +157,7 @@ mod tests {
         shutdown.cancel();
         let error = serve_render(
             RenderConfig {
-                tool_strict_level: ToolStrictLevel::Auto,
+                tool_strict_level: None,
                 model: "test-model".to_string(),
                 revision: None,
                 hf_overrides: Default::default(),
