@@ -258,6 +258,15 @@ class FusedMoEPrepareAndFinalize(ABC):
         """
         return False
 
+    def supports_dbo(self) -> bool:
+        """Indicates whether or not this class can run under DBO.
+
+        Defaults to supports_async(). A class whose synchronous prepare and
+        finalize do their own DBO compute/comm handoff can return True here
+        while keeping supports_async() False.
+        """
+        return self.supports_async()
+
     def supports_deferred_moe_finalize(self) -> bool:
         """Whether ``finalize`` can be skipped for a deferring consumer.
 
@@ -1219,7 +1228,7 @@ class FusedMoEKernelModularImpl:
             # We shouldn't be running an a2a kernel that doesn't
             # support async prepare/finalize
             # TODO(lucas): enable in follow-up
-            assert not dbo_enabled()
+            assert not dbo_enabled() or self.prepare_finalize.supports_dbo()
 
             (
                 a1q,
@@ -1407,7 +1416,7 @@ class FusedMoEKernelModularImpl:
 
         """
         if not self.prepare_finalize.supports_async():
-            assert not dbo_enabled()
+            assert not dbo_enabled() or self.prepare_finalize.supports_dbo()
 
             self.prepare_finalize.finalize(
                 output,

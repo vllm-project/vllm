@@ -5,7 +5,7 @@ import errno
 import mmap
 import os
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 
 import numpy as np
 import torch
@@ -106,6 +106,7 @@ class SharedOffloadRegion:
         self.num_chunks = num_chunks
         self._row_stride = kv_bytes_per_chunk
         self.total_size_bytes = self.num_chunks * self._row_stride
+        self.cpu_page_size = cpu_page_size
 
         self.mmap_path = f"/dev/shm/vllm_offload_{engine_id}.mmap"
         self._creator = False  # set True only if this worker creates the file
@@ -208,15 +209,9 @@ class SharedOffloadRegion:
 
         if rank is not None:
             # Populate only this worker's pages (one slot per chunk row).
-            worker_offset = rank * cpu_page_size
             _t0 = time.perf_counter()
-            page_size = self.page_size
-            for chunk in range(num_chunks):
-                raw_offset = chunk * self._row_stride + worker_offset
-                aligned_offset = (raw_offset // page_size) * page_size
-                end = raw_offset + cpu_page_size
-                aligned_length = end - aligned_offset
-                populate_write_fn(self.mmap_obj, aligned_offset, aligned_length)
+            for offset, length in self.iter_worker_slot_ranges():
+                populate_write_fn(self.mmap_obj, offset, length)
             logger.debug(
                 "MADV_POPULATE_WRITE loop: %d chunks in %.3f s",
                 num_chunks,
@@ -229,6 +224,16 @@ class SharedOffloadRegion:
             logger.debug(
                 "MADV_POPULATE_WRITE entire region: %.3f s", time.perf_counter() - _t0
             )
+
+    def iter_worker_slot_ranges(self) -> Iterator[tuple[int, int]]:
+        """Yield this worker's slots as page-aligned (offset, length) ranges."""
+        assert self.rank is not None
+        worker_offset = self.rank * self.cpu_page_size
+        for row in range(self.num_chunks):
+            start = row * self._row_stride + worker_offset
+            aligned = start - start % self.page_size
+            end = round_up(start + self.cpu_page_size, self.page_size)
+            yield aligned, end - aligned
 
     @property
     def base_tensor(self) -> torch.Tensor:
