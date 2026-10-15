@@ -164,6 +164,8 @@ class AsyncOutput(AsyncModelRunnerOutput):
                 self.pending_aux_output.enqueue_cpu_copy(
                     num_sampled=self.num_sampled_tokens_np,
                     num_rejected=async_copy_to_np(sampler_output.num_rejected),
+                    logprobs=self.logprobs_tensors,
+                    prompt_logprobs=self.prompt_logprobs_dict,
                 )
             if check_ep_fault:
                 has_fault = get_ep_all2all_manager().query_fault()
