@@ -10,12 +10,14 @@ import os
 import threading
 import time
 import uuid
+from types import SimpleNamespace
 from unittest.mock import MagicMock, call
 
 import pytest
 
 from vllm.utils.system_utils import get_mp_context
 from vllm.v1.kv_offload.cpu import gpu_worker
+from vllm.v1.kv_offload.cpu import host_register as host_register_module
 from vllm.v1.kv_offload.cpu import shared_offload_region as region_module
 from vllm.v1.kv_offload.cpu.shared_offload_region import (
     SharedOffloadRegion,
@@ -827,18 +829,23 @@ def host_register(monkeypatch):
     register = MagicMock(return_value=True)
     unregister = MagicMock()
     monkeypatch.setattr(gpu_worker, "MAX_HOST_REGISTER_CHUNK_BYTES", 7 * PAGE_SIZE)
+    monkeypatch.setattr(gpu_worker, "MIN_HOST_REGISTER_SAVED_BYTES", PAGE_SIZE)
     monkeypatch.setattr(gpu_worker, "host_register", register)
     monkeypatch.setattr(gpu_worker, "host_unregister", unregister)
     monkeypatch.setattr(region_module, "host_unregister", unregister)
     return register, unregister
 
 
-def test_pin_mmap_region_registers_row_aligned_chunks(iid, host_register):
+@pytest.mark.parametrize("worker_slot_only", [False, True])
+def test_pin_mmap_region_registers_row_aligned_chunks(
+    iid, host_register, worker_slot_only
+):
     """Chunks end on row boundaries: 3-page rows under a 7-page cap register
-    as 6 + 6 + 3 pages, where a raw byte cap would give 7 + 7 + 1."""
+    as 6 + 6 + 3 pages, where a raw byte cap would give 7 + 7 + 1. A slot
+    spanning the whole row registers the same way."""
     register, unregister = host_register
     with _region(iid, num_chunks=5, cpu_page_size=3 * PAGE_SIZE) as region:
-        gpu_worker.pin_mmap_region(region)
+        gpu_worker.pin_mmap_region(region, worker_slot_only=worker_slot_only)
         base = region._base.data_ptr()
         assert register.call_args_list == [
             call(base, 6 * PAGE_SIZE),
@@ -852,6 +859,99 @@ def test_pin_mmap_region_registers_row_aligned_chunks(iid, host_register):
         call(base + 6 * PAGE_SIZE),
         call(base),
     ]
+
+
+def test_pin_mmap_region_worker_slot_only_registers_own_slots(
+    iid, host_register, monkeypatch
+):
+    """Rank 1's 1.5-page slot in 4-page rows registers pages [1, 3) of each row."""
+    register, _ = host_register
+    populate = MagicMock()
+    monkeypatch.setattr(region_module, "_get_populate_write_fn", lambda _: populate)
+    region = SharedOffloadRegion(
+        engine_id=iid,
+        num_chunks=3,
+        rank=1,
+        kv_bytes_per_chunk=4 * PAGE_SIZE,
+        cpu_page_size=PAGE_SIZE + PAGE_SIZE // 2,
+    )
+    try:
+        gpu_worker.pin_mmap_region(region, worker_slot_only=True)
+        base = region._base.data_ptr() + PAGE_SIZE
+        assert register.call_args_list == [
+            call(base + row * 4 * PAGE_SIZE, 2 * PAGE_SIZE) for row in range(3)
+        ]
+        assert populate.call_args_list == [
+            call(region.mmap_obj, (1 + row * 4) * PAGE_SIZE, 2 * PAGE_SIZE)
+            for row in range(3)
+        ]
+    finally:
+        region.cleanup()
+        _cleanup_file(region.mmap_path)
+
+
+def _unmapped_registration_region(num_chunks, slot_size, num_workers):
+    """Describe a large region without allocating it; registration is mocked."""
+    region = object.__new__(SharedOffloadRegion)
+    region.rank = 1
+    region.num_chunks = num_chunks
+    region.page_size = PAGE_SIZE
+    region.cpu_page_size = slot_size
+    region._row_stride = num_workers * slot_size
+    region.total_size_bytes = region.num_chunks * region._row_stride
+    region._base = SimpleNamespace(data_ptr=lambda: 0x100000)
+    region.pinned_addresses = []
+    region.is_pinned = False
+    return region
+
+
+@pytest.mark.parametrize(
+    "num_rows,slot_mib,own_slots",
+    [(2, 2, False), (2, 3, True), ((1 << 16) + 1, 3, True)],
+)
+def test_pin_mmap_region_selects_by_savings_not_row_count(
+    monkeypatch, num_rows, slot_mib, own_slots
+):
+    """Small savings favor whole-region calls; large row counts do not disable slots."""
+    slot = slot_mib * 1024**2
+    region = _unmapped_registration_region(num_rows, slot, 2)
+    registrations = []
+
+    def register(ptr, size):
+        registrations.append((ptr, size))
+        return True
+
+    monkeypatch.setattr(gpu_worker, "host_register", register)
+    gpu_worker.pin_mmap_region(region, worker_slot_only=True)
+
+    assert region.is_pinned
+    assert registrations == (
+        [(0x100000 + (2 * row + 1) * slot, slot) for row in range(num_rows)]
+        if own_slots
+        else [(0x100000, region.total_size_bytes)]
+    )
+
+
+def test_host_registration_reuses_cudart(monkeypatch):
+    """Registering and releasing multiple slots constructs one runtime wrapper."""
+    cudart = MagicMock()
+    cudart.cudaHostRegister.return_value = 0
+    cudart.cudaHostUnregister.return_value = 0
+    constructor = MagicMock(return_value=cudart)
+    monkeypatch.setattr(host_register_module, "CudaRTLibrary", constructor)
+    monkeypatch.setattr(
+        host_register_module.current_platform, "is_cuda_alike", lambda: True
+    )
+    host_register_module._get_cudart.cache_clear()
+    try:
+        for ptr in (0x100000, 0x200000):
+            assert host_register_module.host_register(ptr, PAGE_SIZE)
+            host_register_module.host_unregister(ptr)
+        constructor.assert_called_once_with()
+        assert cudart.cudaHostRegister.call_count == 2
+        assert cudart.cudaHostUnregister.call_count == 2
+    finally:
+        host_register_module._get_cudart.cache_clear()
 
 
 @pytest.mark.parametrize("fail_at", [0, 1, 2])
