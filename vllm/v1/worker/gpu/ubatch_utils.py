@@ -303,11 +303,9 @@ def splits_prefix_from_writer(
         if span <= 0:
             continue
         columns = start[:, None] + np.arange(span)[None, :]
-        written = np.take_along_axis(
-            table[idx_mapping_np],
-            np.minimum(columns, table.shape[1] - 1),
-            axis=1,
-        )[columns < stop[:, None]]
+        written = table[
+            idx_mapping_np[:, None], np.minimum(columns, table.shape[1] - 1)
+        ][columns < stop[:, None]]
         for row in reader_rows:
             # Whole blocks only: a reader ends inside a partly filled block,
             # which is private to it and which it fills before reading.

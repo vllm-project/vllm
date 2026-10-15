@@ -1784,7 +1784,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         allow_ubatching = False
         if self.ubatch_runner is not None and not skip_attn_for_dummy_run:
-            allow_ubatching = splits_prefix_from_writer(
+            allow_ubatching = not splits_prefix_from_writer(
                 scheduler_output, batch_req_state, self.req_states, self.block_tables
             )
 
