@@ -2,14 +2,19 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import AsyncIterator, Iterator
+from io import BytesIO
+from pathlib import Path
 from unittest.mock import patch
 
+import numpy as np
 import pytest
+from PIL import Image
 
 import vllm.envs as envs
-from vllm.connections import HTTPConnection
+from vllm.connections import HTTPConnection, MediaRequestDownloadBudget
 from vllm.exceptions import VLLMValidationError
-from vllm.multimodal.media import AudioMediaIO, MediaConnector
+from vllm.multimodal.media import AudioMediaIO, ImageMediaIO, MediaConnector
+from vllm.multimodal.media.base import MediaDecodedBudget
 from vllm.utils.mem_constants import KiB_bytes, MiB_bytes
 
 pytestmark = [pytest.mark.cpu_test, pytest.mark.skip_global_cleanup]
@@ -18,7 +23,7 @@ pytestmark = [pytest.mark.cpu_test, pytest.mark.skip_global_cleanup]
 class _SyncResponse:
     def __init__(self, chunks: list[bytes], content_length: int | None = None):
         self.headers = (
-            {} if content_length is None else {"content-length": str(content_length)}
+            {} if content_length is None else {"Content-Length": str(content_length)}
         )
         self._chunks = chunks
         self.iterated = 0
@@ -79,6 +84,65 @@ def test_audio_base64_rejects_before_decode(monkeypatch: pytest.MonkeyPatch):
     decode.assert_not_called()
 
 
+def test_audio_load_bytes_rejects_oversized(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(envs, "VLLM_MAX_AUDIO_CLIP_FILESIZE_MB", 1)
+
+    with pytest.raises(VLLMValidationError, match="Maximum file size exceeded"):
+        AudioMediaIO().load_bytes(b"\x00" * (MiB_bytes + 1))
+
+
+def test_request_audio_budget_limits_multiple_clips_before_decode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES", 24)
+    budget = MediaDecodedBudget()
+    clip = np.zeros(4, dtype=np.float32)
+
+    def decode(_source, **kwargs):
+        if kwargs["max_decode_bytes"] < clip.nbytes:
+            raise ValueError("VLLM_MAX_AUDIO_DECODE_BYTES")
+        return clip, 16000
+
+    with patch("vllm.multimodal.media.audio.load_audio", side_effect=decode) as load:
+        audio_io = AudioMediaIO(decoded_budget=budget)
+        audio_io.load_bytes(b"first")
+        with pytest.raises(ValueError, match="VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES"):
+            audio_io.load_bytes(b"second")
+
+    assert budget.used == clip.nbytes
+    assert load.call_count == 2
+
+
+def test_request_decoded_budget_is_shared_by_image_and_audio(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES", 24)
+    budget = MediaDecodedBudget()
+    image_bytes = BytesIO()
+    Image.new("RGB", (2, 3)).save(image_bytes, format="PNG")
+    ImageMediaIO(decoded_budget=budget).load_bytes(image_bytes.getvalue())
+
+    with (
+        patch("vllm.multimodal.media.audio.load_audio") as decode,
+        pytest.raises(ValueError, match="VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES"),
+    ):
+        AudioMediaIO(decoded_budget=budget).load_bytes(b"audio")
+
+    decode.assert_not_called()
+
+
+def test_audio_load_file_rejects_oversized(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    monkeypatch.setattr(envs, "VLLM_MAX_AUDIO_CLIP_FILESIZE_MB", 1)
+
+    oversized = tmp_path / "big.wav"
+    oversized.write_bytes(b"\x00" * (MiB_bytes + 1))
+
+    with pytest.raises(VLLMValidationError, match="Maximum file size exceeded"):
+        AudioMediaIO().load_file(oversized)
+
+
 def test_sync_http_reader_rejects_from_content_length_before_body_read():
     response = _SyncResponse([b"A" * 10], content_length=MiB_bytes + 1)
     connection = HTTPConnection()
@@ -118,12 +182,16 @@ async def test_audio_connector_threads_byte_limit_to_http_reader(
     monkeypatch: pytest.MonkeyPatch,
 ):
     monkeypatch.setattr(envs, "VLLM_MAX_AUDIO_CLIP_FILESIZE_MB", 1)
+    budget = MediaRequestDownloadBudget()
 
     class _Connection:
         async def async_get_bytes(self, _url: str, **kwargs):
             assert kwargs["max_bytes"] == MiB_bytes
+            assert kwargs["request_budget"] is budget
             raise VLLMValidationError("Maximum file size exceeded")
 
-    connector = MediaConnector(connection=_Connection())  # type: ignore[arg-type]
+    connector = MediaConnector(  # type: ignore[arg-type]
+        connection=_Connection(), download_budget=budget
+    )
     with pytest.raises(VLLMValidationError, match="Maximum file size exceeded"):
         await connector.fetch_audio_async("https://example.test/audio")

@@ -53,6 +53,7 @@ def get_chat_template(model: str) -> str:
         "mixedbread-ai/mxbai-rerank-base-v2": "mxbai_rerank_v2.jinja",
         "mixedbread-ai/mxbai-rerank-large-v2": "mxbai_rerank_v2.jinja",
         "nvidia/llama-nemotron-rerank-1b-v2": "nemotron-rerank.jinja",
+        "polaria-tech/zerank-2-reranker-vllm": "zerank2.jinja",
     }
 
     # Get the template filename for the specified model
@@ -68,13 +69,13 @@ def get_chat_template(model: str) -> str:
 def get_hf_overrides(model: str) -> dict[str, Any]:
     """Convert Large Language Models (LLMs) to Sequence Classification models.
 
-    note:
+    Note:
         Some reranking models require special configuration overrides to work
         correctly with vLLM's score API.
         Reference: https://github.com/vllm-project/vllm/blob/main/examples/pooling/score/qwen3_reranker_offline.py
         Reference: https://github.com/vllm-project/vllm/blob/main/examples/pooling/score/convert_model_to_seq_cls.py
-    """
 
+    """
     model_name_to_hf_overrides_map = {
         "BAAI/bge-reranker-v2-gemma": {
             "architectures": ["GemmaForSequenceClassification"],
@@ -110,6 +111,7 @@ def get_hf_overrides(model: str) -> dict[str, Any]:
             "method": "from_2_way_softmax",
         },
         "nvidia/llama-nemotron-rerank-1b-v2": {},
+        "polaria-tech/zerank-2-reranker-vllm": {},
     }
 
     hf_overrides = model_name_to_hf_overrides_map.get(model)
@@ -122,7 +124,6 @@ def get_hf_overrides(model: str) -> dict[str, Any]:
 
 def main(args: Namespace):
     """Main execution function for the reranking example."""
-
     # Get the overrides for the specified model
     args.hf_overrides = get_hf_overrides(args.model)
 

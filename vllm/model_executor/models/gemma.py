@@ -311,6 +311,7 @@ class GemmaModel(nn.Module):
                 hidden_states = self.embed_input_ids(input_ids)
             residual = None
         else:
+            assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
         for layer in islice(self.layers, self.start_layer, self.end_layer):
@@ -338,7 +339,7 @@ class GemmaForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsQuant):
             ".up_proj": (".gate_up_proj", 1),
         }
     )
-    packed_modules_mapping = {
+    packed_modules_mapping: dict[str, list[str]] = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
     }

@@ -3,6 +3,7 @@
 
 use super::types::CompletionRequest;
 use crate::error::{ApiError, bail_invalid_request};
+use crate::routes::openai::utils::validate_generation_prompt_truncation;
 
 /// Enforce the minimal compatibility contract for the Rust OpenAI server.
 pub(super) fn validate_request_compat(
@@ -12,8 +13,10 @@ pub(super) fn validate_request_compat(
     // This path is intentionally scoped to the minimum surface needed by
     // `vllm-bench` random workload compatibility, so unsupported legacy
     // completions features fail early here.
-    if !served_model_names.iter().any(|n| n == &request.model) {
-        return Err(ApiError::model_not_found(request.model.clone()));
+    if let Some(model) = request.model.as_ref().filter(|model| !model.is_empty())
+        && !served_model_names.iter().any(|name| name == model)
+    {
+        return Err(ApiError::model_not_found(model.clone()));
     }
 
     if request.stream_options.is_some() && !request.stream {
@@ -39,11 +42,12 @@ pub(super) fn validate_request_compat(
     }
 
     if let Some(logprobs) = request.logprobs
-        && logprobs > i32::MAX as u32
+        && logprobs < 0
+        && logprobs != -1
     {
         bail_invalid_request!(
             param = "logprobs",
-            "`logprobs` must fit within a signed 32-bit integer."
+            "`logprobs` must be a non-negative value or -1."
         );
     }
 
@@ -59,6 +63,22 @@ pub(super) fn validate_request_compat(
             bail_invalid_request!(
                 param = "prompt_logprobs",
                 "`prompt_logprobs` must be a non-negative value or -1."
+            );
+        }
+    }
+
+    if request.logprob_token_ids.as_ref().is_some_and(|ids| !ids.is_empty()) {
+        if request.logprobs.is_none() {
+            bail_invalid_request!(
+                param = "logprob_token_ids",
+                "when using `logprob_token_ids`, `logprobs` must be set."
+            );
+        }
+        if request.echo && request.max_tokens == Some(0) {
+            bail_invalid_request!(
+                param = "logprob_token_ids",
+                "`logprob_token_ids` is not supported when `echo=True` and \
+                 `max_tokens=0` because no output tokens are generated."
             );
         }
     }
@@ -82,12 +102,7 @@ pub(super) fn validate_request_compat(
             "spaces_between_special_tokens is not supported."
         );
     }
-    if request.truncate_prompt_tokens.is_some() {
-        bail_invalid_request!(
-            param = "truncate_prompt_tokens",
-            "truncate_prompt_tokens is not supported."
-        );
-    }
+    validate_generation_prompt_truncation(request.truncate_prompt_tokens, request.echo)?;
 
     Ok(())
 }
@@ -124,6 +139,28 @@ mod tests {
     }
 
     #[test]
+    fn validate_request_compat_accepts_full_vocab_logprobs() {
+        let request = CompletionRequest {
+            logprobs: Some(-1),
+            ..base_request()
+        };
+        assert!(
+            validate_request_compat(&request, &served_names(&["Qwen/Qwen1.5-0.5B-Chat"])).is_ok()
+        );
+    }
+
+    #[test]
+    fn validate_request_compat_rejects_other_negative_logprobs() {
+        let request = CompletionRequest {
+            logprobs: Some(-2),
+            ..base_request()
+        };
+        assert!(
+            validate_request_compat(&request, &served_names(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err()
+        );
+    }
+
+    #[test]
     fn validate_request_compat_accepts_any_served_name() {
         let request = base_request();
         assert!(
@@ -133,6 +170,17 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    #[test]
+    fn validate_request_compat_accepts_default_model_inputs() {
+        for model in [None, Some(String::new())] {
+            let request = CompletionRequest {
+                model,
+                ..base_request()
+            };
+            assert!(validate_request_compat(&request, &served_names(&["served-model"])).is_ok());
+        }
     }
 
     #[test]

@@ -23,8 +23,7 @@ class ThreadSafeHFTokenizerMixin:
 
 
 def maybe_make_thread_pool(tokenizer: _T, copies: int = 1):
-    """
-    If `tokenizer` is a `TokenizersBackend`, modify the tokenizer
+    """If `tokenizer` is a `TokenizersBackend`, modify the tokenizer
     in-place to make the public interface thread-safe by routing calls
     through a deep-copied tokenizer pool.
 
@@ -105,8 +104,7 @@ def maybe_make_thread_pool(tokenizer: _T, copies: int = 1):
 
 
 def get_cached_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
-    """
-    By default, transformers will recompute multiple tokenizer properties
+    """By default, transformers will recompute multiple tokenizer properties
     each time they are called, leading to a significant slowdown.
     This proxy caches these properties for faster access.
     """
@@ -116,16 +114,9 @@ def get_cached_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
     tokenizer_all_special_tokens = tokenizer.all_special_tokens
     tokenizer_vocab = tokenizer.get_vocab()
     tokenizer_len = len(tokenizer)
-    # The underlying tokenizer class could be MistralCommonBackend,
-    # which does not implement is_fast in Transformers
+    # The underlying tokenizer class could be a specific backend,
+    # which does not always implement is_fast in Transformers
     tokenizer_is_fast = getattr(tokenizer, "is_fast", True)
-
-    # MistralCommonBackend is tekken-backed and needs byte-fallback-aware tokenization.
-    mistral_tekkenizer = None
-    if getattr(getattr(tokenizer, "tokenizer", None), "instruct_tokenizer", None):
-        from vllm.tokenizers.mistral import mistral_common_tekkenizer
-
-        mistral_tekkenizer = mistral_common_tekkenizer(tokenizer)
 
     max_token_id = max(tokenizer_vocab.values())
     max_chars_per_token = max(len(tok) for tok in tokenizer_vocab)
@@ -133,10 +124,11 @@ def get_cached_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
     # Some tokenizers (e.g., QwenTokenizer) have special tokens that
     # are added and included in the implementation of the vocab_size
     # property, but not in get_vocab(); if there is an implementation
-    # of vocab size, we should take the greater value.
+    # of vocab size, we should take the greater value. vocab_size is a
+    # count, so the largest id it implies is vocab_size - 1.
     if hasattr(tokenizer, "vocab_size"):
         with contextlib.suppress(NotImplementedError):
-            max_token_id = max(max_token_id, tokenizer.vocab_size)
+            max_token_id = max(max_token_id, tokenizer.vocab_size - 1)
 
     class CachedTokenizer(tokenizer.__class__):  # type: ignore
         @property
@@ -158,27 +150,6 @@ def get_cached_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
         @property
         def is_fast(self) -> bool:
             return tokenizer_is_fast
-
-        def convert_ids_to_tokens(self, ids, skip_special_tokens: bool = False):
-            if mistral_tekkenizer is not None:
-                from vllm.tokenizers.mistral import tekken_convert_ids_to_tokens
-
-                return tekken_convert_ids_to_tokens(mistral_tekkenizer, ids)
-            return super().convert_ids_to_tokens(
-                ids, skip_special_tokens=skip_special_tokens
-            )
-
-        def convert_tokens_to_string(self, tokens: list[str]) -> str:
-            if mistral_tekkenizer is not None:
-                from vllm.tokenizers.mistral import tekken_convert_tokens_to_string
-
-                return tekken_convert_tokens_to_string(mistral_tekkenizer, tokens)
-            try:
-                return super().convert_tokens_to_string(tokens)
-            except NotImplementedError:
-                # The underlying tokenizer class could be MistralCommonBackend,
-                # which does not implement convert_tokens_to_string in Transformers
-                return "".join(tokens)
 
         def get_vocab(self) -> dict[str, int]:
             return tokenizer_vocab

@@ -3,9 +3,7 @@
 """Tests for smolvlm's multimodal preprocessing kwargs."""
 
 import pytest
-from packaging.version import Version
 from transformers import SmolVLMConfig
-from transformers import __version__ as TRANSFORMERS_VERSION
 
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
@@ -13,16 +11,13 @@ from ....conftest import ImageTestAssets
 from ...utils import build_model_context
 
 
-@pytest.mark.skipif(
-    Version(TRANSFORMERS_VERSION) < Version("5.2.0"),
-    reason="See https://github.com/huggingface/transformers/pull/43948",
-)
 @pytest.mark.parametrize("model_id", ["HuggingFaceTB/SmolVLM2-2.2B-Instruct"])
 @pytest.mark.parametrize(
     ("mm_processor_kwargs", "expected_toks_per_img"),
     [
         ({"max_image_size": {"longest_edge": 384}}, 1377),
         ({"max_image_size": {"longest_edge": 768}}, 405),
+        ({"do_image_splitting": False}, 81),
     ],
 )
 @pytest.mark.parametrize("num_imgs", [1, 2])
@@ -69,6 +64,14 @@ def test_processor_override(
 
     # Ensure the placeholders format are correct
     hf_processor = processor.info.get_hf_processor(**hf_processor_mm_kwargs)
+    num_patches = processor.info.get_num_patches(
+        image_width=dummy_image.width,
+        image_height=dummy_image.height,
+        processor=hf_processor,
+        mm_kwargs=hf_processor_mm_kwargs,
+    )
+    assert num_patches == expected_toks_per_img // hf_processor.image_seq_len
+
     hf_processed_inputs = hf_processor(
         text=prompt,
         images=mm_data["image"],

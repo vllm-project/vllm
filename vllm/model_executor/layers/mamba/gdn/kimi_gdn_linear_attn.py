@@ -329,8 +329,7 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
         self,
         hidden_states: torch.Tensor,
         positions: torch.Tensor,
-        output: torch.Tensor,
-    ) -> None:
+    ) -> torch.Tensor:
         num_tokens = hidden_states.size(0)
         projected_qkvgfab = self.in_proj_qkvgfab(hidden_states)[0]
         if self.use_full_rank_gate:
@@ -375,7 +374,7 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
             core_attn_out=core_attn_out,
         )
         core_attn_out = rearrange(core_attn_out, "1 n h d -> n (h d)")
-        output[:] = self.o_proj(core_attn_out)[0]
+        return self.o_proj(core_attn_out)[0]
 
     @eager_break_during_capture
     def _forward(
@@ -416,7 +415,10 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
             )
 
         assert isinstance(attn_metadata_raw, dict)
-        attn_metadata_narrowed = attn_metadata_raw[self.prefix]
+        attn_metadata_narrowed = attn_metadata_raw.get(self.prefix)
+        if attn_metadata_narrowed is None:
+            # Profile/warmup dummy runs skip mamba-family metadata.
+            return
         assert isinstance(attn_metadata_narrowed, GDNAttentionMetadata)
         m = attn_metadata_narrowed
         has_initial_state = m.has_initial_state

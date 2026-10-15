@@ -34,8 +34,12 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
         # make sure quantization config for Linear can target it
         quant_config._add_fused_moe_to_target_scheme_map()
         unfused_names = [
-            layer_name + proj_name
-            for proj_name in [".0.gate_proj", ".0.up_proj", ".0.down_proj"]
+            f"{layer_name}.0.{proj_name}"
+            for proj_name in (
+                layer.ckpt_gate_proj_name,
+                layer.ckpt_up_proj_name,
+                layer.ckpt_down_proj_name,
+            )
         ]
         # TODO: refactor this to use expert_mapping and check all layer numbers
         all_scheme_dicts = [
@@ -58,6 +62,16 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
         weight_quant = scheme_dict.get("weights")
         input_quant = scheme_dict.get("input_activations")
         format = scheme_dict.get("format")
+
+        if quant_config._is_mxfp4_w4a8_fp8(weight_quant, input_quant):
+            from .compressed_tensors_moe_w4a8_mxfp4 import (
+                CompressedTensorsW4A8Mxfp4MoEMethod,
+            )
+
+            return CompressedTensorsW4A8Mxfp4MoEMethod(
+                layer.moe_config,
+                activation_key=quant_config._fp8_dynamic_input_key(input_quant),
+            )
 
         if quant_config._is_mxfp4(weight_quant):
             from .compressed_tensors_moe_w4a4_mxfp4 import (
@@ -88,14 +102,7 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
                     f"and bits: {weight_quant.num_bits}"
                 )
 
-            # Native ROCm HIP kernels (RDNA3, etc.)
             if current_platform.is_rocm():
-                from . import rocm_moe_rdna
-
-                if rocm_moe_rdna.is_supported(weight_quant):
-                    return rocm_moe_rdna.make_method(
-                        weight_quant, input_quant, layer.moe_config
-                    )
                 from vllm.platforms.rocm import on_gfx950
 
                 vllm_config = get_current_vllm_config()
@@ -171,7 +178,7 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
             return CompressedTensorsW8A8Int8MoEMethod(
                 weight_quant, input_quant, layer.moe_config
             )
-        elif quant_config._is_fp8_w4a8_sm90(weight_quant, input_quant):
+        elif quant_config._is_fp8_w4a8(weight_quant, input_quant):
             from .compressed_tensors_moe_w4a8_fp8 import (
                 CompressedTensorsW4A8Fp8MoEMethod,
             )
