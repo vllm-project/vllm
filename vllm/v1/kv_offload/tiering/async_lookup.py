@@ -65,6 +65,7 @@ class LookupPhase(Enum):
 class LookupVerdict(Enum):
     """Cached lookup verdict, including a failed-load correction."""
 
+    UNRESOLVED = auto()
     HIT = auto()
     MISS = auto()
     MARKED_MISS = auto()
@@ -74,8 +75,9 @@ class LookupVerdict(Enum):
 class LookupState:
     generation: int
     phase: LookupPhase = LookupPhase.PENDING
-    # None until a probe resolves, unless mark_miss() records a deferred miss.
-    result: LookupVerdict | None = None
+    # UNRESOLVED until a probe resolves, unless mark_miss() records a deferred
+    # miss.
+    result: LookupVerdict = LookupVerdict.UNRESOLVED
     request_ids: set[str] = field(default_factory=set)  # requests asking for the lookup
 
 
@@ -238,7 +240,7 @@ class AsyncLookupManager(ABC):
                 if state.result is LookupVerdict.MARKED_MISS:
                     pass
                 else:
-                    assert state.result is None, (
+                    assert state.result is LookupVerdict.UNRESOLVED, (
                         "cached key received a second lookup result; the "
                         "enqueue-once invariant is broken and could reopen "
                         "the failed-load livelock"

@@ -379,7 +379,7 @@ class TestAsyncLookupManager:
             new_token = mgr.lookup_token(key, ctx_b.req_id)
             assert old_token.generation != new_token.generation
             mgr.mark_miss([old_token])
-            assert mgr._lookup_state[key].result is None
+            assert mgr._lookup_state[key].result is LookupVerdict.UNRESOLVED
 
             mgr.flush()
             mgr._results_ready.wait()
