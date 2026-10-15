@@ -3,7 +3,7 @@
 
 from contextlib import nullcontext
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 import torch
@@ -388,8 +388,10 @@ class _OrderedHandle:
         self.log.append(f"wait:{self.name}")
 
 
+@pytest.mark.parametrize("timed", [False, True])
 def test_execute_model_waits_previous_pp_send_before_forward(
     monkeypatch: pytest.MonkeyPatch,
+    timed: bool,
 ):
     """Previous device handles are waited before the forward pass; the
     metadata handle is left to the GroupCoordinator's reaper."""
@@ -398,6 +400,10 @@ def test_execute_model_waits_previous_pp_send_before_forward(
     from vllm.sequence import IntermediateTensors
 
     log: list[str] = []
+    start_event = Mock()
+    start_event.record.side_effect = lambda: log.append("timing")
+    event_factory = Mock(return_value=start_event)
+    monkeypatch.setattr(torch.cuda, "Event", event_factory)
     previous_tensor_send = _OrderedHandle(log, "prev-tensor")
     metadata_handle = _OrderedHandle(log, "meta")
     tensor_handle = _OrderedHandle(log, "tensor")
@@ -425,6 +431,7 @@ def test_execute_model_waits_previous_pp_send_before_forward(
             ),
         ),
         use_v2_model_runner=True,
+        observability_config=SimpleNamespace(enable_logging_iteration_details=timed),
         model_runner=SimpleNamespace(execute_model=run_model, is_pooling_model=False),
         annotate_profile=lambda scheduler_output: nullcontext(),
         _pp_send_work=[previous_tensor_send],
@@ -435,7 +442,18 @@ def test_execute_model_waits_previous_pp_send_before_forward(
 
     assert gpu_worker.Worker.execute_model(worker, scheduler_output) is None
 
-    assert log == ["wait:prev-tensor", "forward", "isend"]
+    assert log == [
+        "wait:prev-tensor",
+        *(["timing"] if timed else []),
+        "forward",
+        "isend",
+    ]
+    if timed:
+        event_factory.assert_called_once_with(enable_timing=True)
+        assert worker.model_runner.iteration_start_event is start_event
+    else:
+        event_factory.assert_not_called()
+        assert worker.model_runner.iteration_start_event is None
     assert worker._pp_send_work == [tensor_handle]
 
 

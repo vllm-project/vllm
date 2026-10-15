@@ -122,6 +122,7 @@ class AsyncOutput(AsyncModelRunnerOutput):
         copy_stream: torch.cuda.Stream,
         check_ep_fault: bool,
         pending_aux_output: "PendingAuxOutput | None",
+        iteration_start_event: torch.cuda.Event | None = None,
     ):
         # NOTE(woosuk): We must retain references to the GPU tensors,
         # as the copy operations are performed on a different CUDA stream than
@@ -130,8 +131,11 @@ class AsyncOutput(AsyncModelRunnerOutput):
         self.sampler_output = sampler_output
         self.num_sampled_tokens = num_sampled_tokens
         self.pending_aux_output = pending_aux_output
+        self.iteration_start_event = iteration_start_event
         # Blocking (sleep) event to avoid busy-polling the CUDA driver lock.
-        self.copy_event = torch.cuda.Event(blocking=True)
+        self.copy_event = torch.cuda.Event(
+            blocking=True, enable_timing=iteration_start_event is not None
+        )
         self._has_fault: torch.Tensor | None = None
 
         with stream(copy_stream, main_stream):
@@ -172,6 +176,10 @@ class AsyncOutput(AsyncModelRunnerOutput):
 
     def get_output(self) -> ModelRunnerOutput:
         self.copy_event.synchronize()
+        if self.iteration_start_event is not None:
+            self.model_runner_output.iteration_elapsed_ms = (
+                self.iteration_start_event.elapsed_time(self.copy_event)
+            )
 
         # NOTE(woosuk): The following code is to ensure compatibility with
         # the existing model runner.
@@ -225,11 +233,15 @@ class AsyncPoolingOutput(AsyncModelRunnerOutput):
         finished_mask: list[bool],
         main_stream: torch.cuda.Stream,
         copy_stream: torch.cuda.Stream,
+        iteration_start_event: torch.cuda.Event | None = None,
     ):
         self.model_runner_output = model_runner_output
         self.pooler_output = pooler_output
+        self.iteration_start_event = iteration_start_event
         # Blocking (sleep) event to avoid busy-polling the CUDA driver lock.
-        self.copy_event = torch.cuda.Event(blocking=True)
+        self.copy_event = torch.cuda.Event(
+            blocking=True, enable_timing=iteration_start_event is not None
+        )
 
         with stream(copy_stream, main_stream):
             copy_stream.wait_stream(main_stream)
@@ -258,6 +270,10 @@ class AsyncPoolingOutput(AsyncModelRunnerOutput):
             pooler_output = self.pooler_output_cpu
         self.copy_event.synchronize()
         self.model_runner_output.pooler_output = pooler_output
+        if self.iteration_start_event is not None:
+            self.model_runner_output.iteration_elapsed_ms = (
+                self.iteration_start_event.elapsed_time(self.copy_event)
+            )
         return self.model_runner_output
 
 

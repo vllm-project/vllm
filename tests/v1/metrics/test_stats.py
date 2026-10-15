@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import pytest
+
 from vllm.v1.engine import EngineCoreOutputs, FinishReason
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.metrics.stats import (
@@ -20,14 +22,15 @@ def test_iteration_stats_repr():
     assert repr(iteration_stats).startswith("IterationStats(")
 
 
-def test_scheduler_iteration_details_serialization():
+@pytest.mark.parametrize("elapsed_ms", [None, 6.7])
+def test_scheduler_iteration_details_serialization(elapsed_ms):
     iteration_details = SchedulerIterationDetails(
         iteration_index=1,
         num_ctx_requests=2,
         num_ctx_tokens=3,
         num_generation_requests=4,
         num_generation_tokens=5,
-        elapsed_ms=6.7,
+        elapsed_ms=elapsed_ms,
         num_encoder_inputs=2,
         num_encoder_output_tokens=392,
     )

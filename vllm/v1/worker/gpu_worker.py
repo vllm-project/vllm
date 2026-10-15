@@ -1323,6 +1323,15 @@ class Worker(WorkerBase):
             )
 
         with self.annotate_profile(scheduler_output):
+            self.model_runner.iteration_start_event = None
+            if (
+                forward_pass
+                and self.observability_config.enable_logging_iteration_details
+            ):
+                self.model_runner.iteration_start_event = torch.cuda.Event(
+                    enable_timing=True
+                )
+                self.model_runner.iteration_start_event.record()
             output = self.model_runner.execute_model(
                 scheduler_output, intermediate_tensors
             )

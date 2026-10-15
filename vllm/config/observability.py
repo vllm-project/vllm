@@ -97,10 +97,8 @@ class ObservabilityConfig:
     argument."""
 
     enable_logging_iteration_details: bool = False
-    """Enable detailed logging of iteration details.
-    If set, vllm EngineCore will log iteration details
-    This includes number of context/generation requests and tokens
-    and the elapsed cpu time for the iteration."""
+    """Log scheduled request/token counts and collect GPU timing through
+    model-output readiness where available."""
 
     jit_monitor_mode: Literal["warn", "error"] = "warn"
     """How to handle post-warmup JIT compilation events."""

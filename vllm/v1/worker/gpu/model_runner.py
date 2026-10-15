@@ -205,6 +205,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.speculative_config is not None and self.speculative_config.use_dspark()
         )
         self.observability_config = vllm_config.observability_config
+        self.iteration_start_event: torch.cuda.Event | None = None
         self.jit_warmup_registry = JitWarmupRegistry(vllm_config)
 
         self.device = device
@@ -2191,6 +2192,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             copy_stream=self.output_copy_stream,
             check_ep_fault=self.check_ep_fault,
             pending_aux_output=pending_aux_output,
+            iteration_start_event=self.iteration_start_event,
         )
 
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None
@@ -2323,6 +2325,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             finished_mask=finished_mask,
             main_stream=self.main_stream,
             copy_stream=self.output_copy_stream,
+            iteration_start_event=self.iteration_start_event,
         )
 
         self.postprocess_num_computed_tokens(input_batch)

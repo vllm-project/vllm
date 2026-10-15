@@ -277,13 +277,17 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         vocab_size: int,
         check_ep_fault: bool = False,
         num_nans: torch.Tensor | None = None,
+        iteration_start_event: torch.cuda.Event | None = None,
     ):
         self._model_runner_output = model_runner_output
         self._invalid_req_indices = invalid_req_indices
+        self.iteration_start_event = iteration_start_event
 
         # Event on the copy stream so we can synchronize the non-blocking copy.
         # Blocking (sleep) event to avoid busy-polling the CUDA driver lock.
-        self.async_copy_ready_event = torch.cuda.Event(blocking=True)
+        self.async_copy_ready_event = torch.cuda.Event(
+            blocking=True, enable_timing=iteration_start_event is not None
+        )
 
         # Keep a reference to the device tensor to avoid it being
         # deallocated until we finish copying it to the host.
@@ -342,6 +346,10 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
             )
 
         output = self._model_runner_output
+        if self.iteration_start_event is not None:
+            output.iteration_elapsed_ms = self.iteration_start_event.elapsed_time(
+                self.async_copy_ready_event
+            )
         output.sampled_token_ids = valid_sampled_token_ids
         output.logprobs = logprobs_lists
 
@@ -416,12 +424,16 @@ class AsyncGPUPoolingModelRunnerOutput(AsyncModelRunnerOutput):
         raw_pooler_output: PoolerOutput,
         finished_mask: list[bool],
         async_output_copy_stream: torch.cuda.Stream,
+        iteration_start_event: torch.cuda.Event | None = None,
     ):
         self._model_runner_output = model_runner_output
+        self.iteration_start_event = iteration_start_event
 
         # Event on the copy stream so we can synchronize the non-blocking copy.
         # Blocking (sleep) event to avoid busy-polling the CUDA driver lock.
-        self.async_copy_ready_event = torch.cuda.Event(blocking=True)
+        self.async_copy_ready_event = torch.cuda.Event(
+            blocking=True, enable_timing=iteration_start_event is not None
+        )
 
         # Keep a reference to the device tensors to avoid them being
         # deallocated until we finish copying it to the host.
@@ -442,6 +454,10 @@ class AsyncGPUPoolingModelRunnerOutput(AsyncModelRunnerOutput):
         This function blocks until the copy is finished.
         """
         self.async_copy_ready_event.synchronize()
+        if self.iteration_start_event is not None:
+            self._model_runner_output.iteration_elapsed_ms = (
+                self.iteration_start_event.elapsed_time(self.async_copy_ready_event)
+            )
 
         # Release the device tensors once the copy has completed.
         del self._raw_pooler_output
@@ -484,6 +500,7 @@ class GPUModelRunner(
         self.scheduler_config = vllm_config.scheduler_config
         self.speculative_config = vllm_config.speculative_config
         self.observability_config = vllm_config.observability_config
+        self.iteration_start_event: torch.cuda.Event | None = None
 
         model_config = self.model_config
         cache_config = self.cache_config
@@ -3268,6 +3285,7 @@ class GPUModelRunner(
             raw_pooler_output=raw_pooler_output,
             finished_mask=finished_mask,
             async_output_copy_stream=self._get_or_create_async_output_copy_stream(),
+            iteration_start_event=self.iteration_start_event,
         )
 
     def _prepare_padding_mask(
@@ -4464,6 +4482,12 @@ class GPUModelRunner(
                 self._draft_prob_req_ids = None
                 self._copy_draft_token_ids_to_cpu(scheduler_output, zeros_only=True)
 
+        iteration_end_event = None
+        if self.iteration_start_event is not None and not self.use_async_scheduling:
+            # The blocking result read below also completes this event.
+            iteration_end_event = torch.cuda.Event(enable_timing=True)
+            iteration_end_event.record()
+
         with record_function_or_nullcontext("gpu_model_runner: bookkeep"):
             (
                 num_nans_in_logits,
@@ -4531,6 +4555,11 @@ class GPUModelRunner(
             )
 
         if not self.use_async_scheduling:
+            if iteration_end_event is not None:
+                assert self.iteration_start_event is not None
+                output.iteration_elapsed_ms = self.iteration_start_event.elapsed_time(
+                    iteration_end_event
+                )
             return output
 
         with record_function_or_nullcontext(
@@ -4545,6 +4574,7 @@ class GPUModelRunner(
                 vocab_size=self.input_batch.vocab_size,
                 check_ep_fault=self.check_ep_fault,
                 num_nans=num_nans_device,
+                iteration_start_event=self.iteration_start_event,
             )
         with record_function_or_nullcontext(
             "gpu_model_runner: set_async_sampled_token_ids"

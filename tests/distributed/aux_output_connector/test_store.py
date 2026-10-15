@@ -246,9 +246,13 @@ def test_worker_skips_aux_outputs_for_internal_warmup_step():
     worker.close()
 
 
-def test_next_step_does_not_consume_pending_output(monkeypatch):
+@pytest.mark.parametrize("timed", [False, True])
+def test_next_step_does_not_consume_pending_output(monkeypatch, timed):
     """begin_step must not wait for or consume an unconsumed step output."""
     event = Mock()
+    start_event = Mock() if timed else None
+    if start_event is not None:
+        start_event.elapsed_time.return_value = 7.25
     monkeypatch.setattr(torch.cuda, "Event", lambda **kwargs: event)
     monkeypatch.setattr(async_utils, "stream", lambda *args: nullcontext())
     worker = _make_worker(1)
@@ -274,6 +278,7 @@ def test_next_step_does_not_consume_pending_output(monkeypatch):
         Mock(),
         check_ep_fault=False,
         pending_aux_output=pending,
+        iteration_start_event=start_event,
     )
     event.record.assert_called_once()
     assert worker._pending_outputs == [pending]
@@ -285,12 +290,47 @@ def test_next_step_does_not_consume_pending_output(monkeypatch):
     result = output.get_output()
 
     assert result.sampled_token_ids == [[7]]
+    assert result.iteration_elapsed_ms == (7.25 if timed else None)
+    event.synchronize.assert_called_once()
     np.testing.assert_array_equal(
         result.aux_output_connector_output["request"].rows, rows.numpy()
     )
     process_output.assert_called_once()
     assert worker._pending_outputs == []
     worker.close()
+
+
+def test_queued_outputs_retain_their_own_iteration_timings(monkeypatch):
+    """Resolving another output first must not overwrite a batch's events."""
+    end_events = [Mock(), Mock()]
+    monkeypatch.setattr(torch.cuda, "Event", Mock(side_effect=end_events))
+    monkeypatch.setattr(async_utils, "stream", lambda *args: nullcontext())
+    outputs = []
+    for i, elapsed_ms in enumerate([3.5, 8.25]):
+        start_event = Mock()
+
+        def elapsed_time(end, expected=end_events[i], duration=elapsed_ms):
+            assert end is expected
+            end.synchronize.assert_called_once()
+            return duration
+
+        start_event.elapsed_time.side_effect = elapsed_time
+        outputs.append(
+            async_utils.AsyncOutput(
+                ModelRunnerOutput([str(i)], {str(i): 0}),
+                SamplerOutput(torch.tensor([[i]]), None, None, None, torch.tensor([0])),
+                torch.tensor([1]),
+                Mock(),
+                Mock(),
+                check_ep_fault=False,
+                pending_aux_output=None,
+                iteration_start_event=start_event,
+            )
+        )
+    for i in [1, 0]:
+        result = outputs[i].get_output()
+        assert result.sampled_token_ids == [[i]]
+        assert result.iteration_elapsed_ms == [3.5, 8.25][i]
 
 
 @pytest.mark.parametrize("num_pending", [1, 2])

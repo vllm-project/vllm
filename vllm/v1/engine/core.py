@@ -600,7 +600,7 @@ class EngineCore:
                 num_ctx_tokens=0,
                 num_generation_requests=0,
                 num_generation_tokens=0,
-                elapsed_ms=0.0,
+                elapsed_ms=None,
                 is_dummy=True,
             )
         else:
@@ -612,14 +612,12 @@ class EngineCore:
                 num_ctx_tokens=details.num_ctx_tokens,
                 num_generation_requests=details.num_generation_requests,
                 num_generation_tokens=details.num_generation_tokens,
-                elapsed_ms=0.0,
+                elapsed_ms=None,
                 num_encoder_inputs=details.num_encoder_inputs,
                 num_encoder_output_tokens=details.num_encoder_output_tokens,
             )
 
-        start_time = time.monotonic()
         yield iteration_details
-        iteration_details.elapsed_ms = (time.monotonic() - start_time) * 1000
         self._iteration_index = iteration_index + 1
 
     def _make_iteration_details_stats(
@@ -633,9 +631,12 @@ class EngineCore:
         self,
         outputs: dict[int, EngineCoreOutputs],
         iteration_details: SchedulerIterationDetails | None,
+        model_output: ModelRunnerOutput | None = None,
     ) -> None:
         if iteration_details is None:
             return
+        if model_output is not None:
+            iteration_details.elapsed_ms = model_output.iteration_elapsed_ms
 
         if (eco := next(iter(outputs.values()), None)) is None:
             outputs[0] = eco = EngineCoreOutputs()
@@ -681,7 +682,9 @@ class EngineCore:
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output
         )
-        self._attach_iteration_details(engine_core_outputs, iteration_details)
+        self._attach_iteration_details(
+            engine_core_outputs, iteration_details, model_output
+        )
         self._attach_weight_version(engine_core_outputs)
 
         return engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0
@@ -783,7 +786,9 @@ class EngineCore:
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output
         )
-        self._attach_iteration_details(engine_core_outputs, iteration_details)
+        self._attach_iteration_details(
+            engine_core_outputs, iteration_details, model_output
+        )
         self._attach_weight_version(engine_core_outputs)
 
         # NOTE(nick): We can either handle the deferred tasks here or save

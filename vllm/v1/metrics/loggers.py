@@ -195,11 +195,15 @@ class LoggingStatLogger(StatLoggerBase):
                 f", encoder inputs: {details.num_encoder_inputs}, "
                 f"encoder output embeddings: {details.num_encoder_output_tokens}"
             )
+        elapsed_msg = (
+            f", iteration elapsed time: {details.elapsed_ms:.2f} ms"
+            if details.elapsed_ms is not None
+            else ""
+        )
 
         logger.info(
             "%sIteration(%d): %d context requests, %d context tokens, "
-            "%d generation requests, %d generation tokens, "
-            "iteration elapsed time: %.2f ms%s, "
+            "%d generation requests, %d generation tokens%s%s, "
             "%s KV cache usage: %.1f%%%s",
             self._log_prefix_for_engine(engine_idx),
             details.iteration_index,
@@ -207,7 +211,7 @@ class LoggingStatLogger(StatLoggerBase):
             details.num_ctx_tokens,
             details.num_generation_requests,
             details.num_generation_tokens,
-            details.elapsed_ms,
+            elapsed_msg,
             " (dummy)" if details.is_dummy else "",
             self.kv_cache_device,
             scheduler_stats.kv_cache_usage * 100,
