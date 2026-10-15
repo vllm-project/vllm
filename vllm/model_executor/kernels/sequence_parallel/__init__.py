@@ -43,7 +43,7 @@ def _try_fused_kernels(
 def _init_unquantized_fused_kernel(
     linear: ColumnParallelLinear | RowParallelLinear,
 ) -> LinearCommKernel | None:
-    if not isinstance(linear.quant_method, UnquantizedLinearMethod):
+    if type(linear.quant_method) is not UnquantizedLinearMethod:
         return None
     from vllm.model_executor.kernels.sequence_parallel.unquantized import (
         FusedAllGatherGemm,
