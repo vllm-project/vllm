@@ -29,7 +29,22 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 router = APIRouter()
-_tool_call_render_requests: Counter | None = None
+_tool_call_render_requests = Counter(
+    "vllm:tool_call_render_requests_total",
+    "Validated tool-field requests received by HTTP render endpoints, "
+    "counted once per request independently of trace sampling. "
+    "Rendered means rendering succeeded, not template equivalence.",
+    ["model_name", "api_surface", "status"],
+)
+
+
+def init_render_metrics(model_name: str) -> None:
+    """Expose zero-valued series before the first tool request."""
+    for api_surface in ("chat_completions", "messages"):
+        for status in ("rendered", "error"):
+            _tool_call_render_requests.labels(
+                model_name=model_name, api_surface=api_surface, status=status
+            )
 
 
 def _tool_render_counter(
@@ -41,15 +56,6 @@ def _tool_render_counter(
     ):
         return None
 
-    global _tool_call_render_requests
-    if _tool_call_render_requests is None:
-        _tool_call_render_requests = Counter(
-            "vllm:tool_call_render_requests_total",
-            "Validated tool-field requests received by HTTP render endpoints, "
-            "counted once per request independently of trace sampling. "
-            "Rendered means rendering succeeded, not template equivalence.",
-            ["model_name", "api_surface", "status"],
-        )
     return _tool_call_render_requests
 
 
