@@ -1383,17 +1383,32 @@ def test_amd_decode_index_topk_end_to_end(
     assert torch.count_nonzero(completion_counter).item() == 0
 
 
+def _gfx942() -> bool:
+    if current_platform.is_rocm():
+        from vllm.platforms.rocm import on_gfx942
+
+        return on_gfx942()
+
+    return False
+
+
 @pytest.mark.skipif(
-    not current_platform.is_device_capability_family(100),
-    reason="fp8 e4m3 indexer cache is the SM100 (MSA) path.",
+    not (current_platform.is_device_capability_family(100) or _gfx942()),
+    reason="fp8 e4m3 indexer decode is the SM100 (MSA) or gfx942 (Triton) path.",
 )
 @pytest.mark.parametrize("num_idx_heads", [1, 4])
-def test_decode_index_topk_fp8(num_idx_heads: int):
+@pytest.mark.parametrize(("decode_query_len", "max_decode_query_len"), [(1, 1), (3, 8)])
+def test_decode_index_topk_fp8(
+    num_idx_heads: int, decode_query_len: int, max_decode_query_len: int
+):
     """The standalone Triton path must score FP8 inputs in FP32 so its top-k
-    matches a reference computed from the dequantized FP8 values."""
+    matches a reference computed from the dequantized FP8 values. On gfx942
+    the AMD scorer runs instead; the single-head single-query case covers its
+    degenerate GEMV branch, every wider query tile the tl.dot branch with
+    speculative decode's per-row causal masking."""
     torch.manual_seed(0)
     topk, init_blocks, local_blocks, head_dim = 8, 0, 1, 128
-    decode_query_len = 1
+    fp8_dtype = current_platform.fp8_dtype()
     active_seq_lens = torch.tensor((129, 1025, 4097), device="cuda", dtype=torch.int32)
     q_lens = torch.full_like(active_seq_lens, decode_query_len)
     prefix_lens = active_seq_lens - decode_query_len
@@ -1406,12 +1421,20 @@ def test_decode_index_topk_fp8(num_idx_heads: int):
     )
     idx_q = torch.randn(
         batch * decode_query_len, num_idx_heads, head_dim, device="cuda"
-    ).to(torch.float8_e4m3fn)
+    ).to(fp8_dtype)
     index_kv_cache = torch.randn(num_pages, BLOCK_SIZE, head_dim, device="cuda").to(
-        torch.float8_e4m3fn
+        fp8_dtype
     )
 
-    actual = minimax_m3_index_decode(
+    if current_platform.is_rocm():
+        from vllm.models.minimax_m3.amd.ops.index_topk import (
+            minimax_m3_index_decode as amd_minimax_m3_index_decode,
+        )
+
+        decode = amd_minimax_m3_index_decode
+    else:
+        decode = minimax_m3_index_decode
+    actual = decode(
         idx_q,
         index_kv_cache,
         block_table,
@@ -1422,7 +1445,7 @@ def test_decode_index_topk_fp8(num_idx_heads: int):
         local_blocks=local_blocks,
         num_kv_heads=num_idx_heads,
         decode_query_len=decode_query_len,
-        max_decode_query_len=decode_query_len,
+        max_decode_query_len=max_decode_query_len,
     )
     # Reference from the DEQUANTIZED fp8 values (the kernel computes the fp8 QK
     # in fp32 with no scaling, so it must match an unscaled fp32 matmul of the

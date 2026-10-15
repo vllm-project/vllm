@@ -16,6 +16,7 @@ import pytest
 import torch
 
 import vllm._custom_ops as ops
+from vllm.platforms import current_platform
 
 HEAD_DIM = 128
 ROTARY_DIM = 64
@@ -211,7 +212,7 @@ def test_sparse_full(num_tokens, block_size, kv_cache_dtype):
     q_fp8 = torch.empty(
         num_tokens,
         qsz,
-        dtype=torch.float8_e4m3fn,
+        dtype=current_platform.fp8_dtype(),
         device=device,
     )
     index_q = torch.empty(num_tokens, iqsz, dtype=dtype, device=device)
@@ -477,13 +478,26 @@ def test_sparse_skip_index_branch(num_tokens, block_size, kv_cache_dtype):
 # e4m3 cast of the bf16 run's index_q, and the index-K cache is within fp8 ulp.
 
 
+def _has_native_fp8() -> bool:
+    if not torch.cuda.is_available():
+        return False
+    if current_platform.is_rocm():
+        from vllm.platforms.rocm import on_mi3xx
+
+        return on_mi3xx()
+    return current_platform.has_device_capability(89)
+
+
 @pytest.mark.skipif(
-    not torch.cuda.is_available() or torch.cuda.get_device_capability() < (8, 9),
-    reason="e4m3 conversion requires CUDA SM89+.",
+    not _has_native_fp8(),
+    reason="e4m3 conversion requires CUDA SM89+ or ROCm MI3xx.",
 )
 @pytest.mark.parametrize("num_tokens", [1, 7, 64, 513])
 @pytest.mark.parametrize("block_size", [16, 64])
-def test_sparse_full_fp8_index(num_tokens, block_size):
+@pytest.mark.parametrize("index_k_scale", [0.1, 3000.0])
+def test_sparse_full_fp8_index(num_tokens, block_size, index_k_scale):
+    # The fp8 flavour is the device's own: e4m3fnuz on gfx942, else e4m3fn.
+    fp8_dtype = current_platform.fp8_dtype()
     torch.manual_seed(1)
     device, dtype, eps = "cuda", torch.bfloat16, 1e-6
     base, max_pos = 5_000_000.0, 4096
@@ -492,7 +506,8 @@ def test_sparse_full_fp8_index(num_tokens, block_size):
     q_w = torch.randn(HEAD_DIM, dtype=dtype, device=device) * 0.1
     k_w = torch.randn(HEAD_DIM, dtype=dtype, device=device) * 0.1
     iq_w = torch.randn(HEAD_DIM, dtype=dtype, device=device) * 0.1
-    ik_w = torch.randn(HEAD_DIM, dtype=dtype, device=device) * 0.1
+    # A large index_k norm weight pushes index keys past the e4m3 max.
+    ik_w = torch.randn(HEAD_DIM, dtype=dtype, device=device) * index_k_scale
     cos_sin = make_cos_sin_cache(max_pos, ROTARY_DIM, base, dtype, device)
     positions = torch.randint(
         0, max_pos, (num_tokens,), dtype=torch.int64, device=device
@@ -549,10 +564,10 @@ def test_sparse_full_fp8_index(num_tokens, block_size):
         return qkv, kv_cache, index_cache, q_out, index_q
 
     qkv_bf, kvc_bf, idxc_bf, qo_bf, iq_bf = run(torch.bfloat16)
-    qkv_fp, kvc_fp, idxc_fp, qo_fp, iq_fp = run(torch.float8_e4m3fn)
+    qkv_fp, kvc_fp, idxc_fp, qo_fp, iq_fp = run(fp8_dtype)
 
-    assert iq_fp.dtype == torch.float8_e4m3fn
-    assert idxc_fp.dtype == torch.float8_e4m3fn
+    assert iq_fp.dtype == fp8_dtype
+    assert idxc_fp.dtype == fp8_dtype
 
     # (1) The main branch (q/k/v in qkv, q_out, kv cache) must be bit-identical:
     # the index output dtype must not perturb anything else.
@@ -560,11 +575,78 @@ def test_sparse_full_fp8_index(num_tokens, block_size):
     torch.testing.assert_close(qkv_fp, qkv_bf, rtol=0, atol=0)
     torch.testing.assert_close(kvc_fp, kvc_bf, rtol=0, atol=0)
 
-    # (2) index_q is e4m3(bf16(q)); the index-K cache is within fp8 ulp.
-    assert torch.equal(
-        iq_fp.view(torch.uint8), iq_bf.to(torch.float8_e4m3fn).view(torch.uint8)
+    # (2) index_q is e4m3(bf16(q)); the index-K cache is within fp8 ulp of the
+    # bf16 one, saturated at the writer's bound (448 for e4m3fn, 224 for
+    # e4m3fnuz) rather than NaN.
+    assert torch.equal(iq_fp.view(torch.uint8), iq_bf.to(fp8_dtype).view(torch.uint8))
+    fp8_max = 224.0 if fp8_dtype == torch.float8_e4m3fnuz else 448.0
+    ref = idxc_bf.float()
+    got = idxc_fp.float()
+    saturated = ref.abs() > fp8_max
+    torch.testing.assert_close(
+        got[~saturated],
+        ref[~saturated].clamp(-fp8_max, fp8_max),
+        rtol=0.13,
+        atol=0.05,
     )
-    torch.testing.assert_close(idxc_fp.float(), idxc_bf.float(), rtol=0.13, atol=0.05)
+    # Keys past the bound must land exactly on ±fp8_max: with the ulp tolerance
+    # above, a gfx942 writer emitting 240 against an expected 224 would pass.
+    torch.testing.assert_close(
+        got[saturated], ref[saturated].sign() * fp8_max, rtol=0, atol=0
+    )
+    # The oversized weights must actually saturate, so this cannot pass vacuously.
+    if index_k_scale > 1:
+        assert bool(saturated.any())
+
+
+@pytest.mark.skipif(
+    not _has_native_fp8(),
+    reason="e4m3 conversion requires CUDA SM89+ or ROCm MI3xx.",
+)
+def test_sparse_fp8_index_rejects_foreign_flavour():
+    # The other e4m3 flavour has no convert on this device (gfx942 traps on
+    # OCP), so the host must refuse it rather than launch.
+    foreign = (
+        torch.float8_e4m3fn
+        if current_platform.fp8_dtype() == torch.float8_e4m3fnuz
+        else torch.float8_e4m3fnuz
+    )
+    device, dtype = "cuda", torch.bfloat16
+    num_tokens, block_size, num_heads, num_kv_heads, num_idx_heads = 4, 16, 16, 4, 4
+    qkv = torch.randn(
+        num_tokens,
+        (num_heads + 2 * num_kv_heads + num_idx_heads + 1) * HEAD_DIM,
+        dtype=dtype,
+        device=device,
+    )
+    w = torch.zeros(HEAD_DIM, dtype=dtype, device=device)
+    slots = torch.arange(num_tokens, dtype=torch.int64, device=device)
+    with pytest.raises(RuntimeError, match="e4m3"):
+        ops.fused_minimax_m3_qknorm_rope_kv_insert(
+            qkv,
+            w,
+            w,
+            make_cos_sin_cache(64, ROTARY_DIM, 10000.0, dtype, device),
+            slots,
+            num_heads,
+            num_kv_heads,
+            ROTARY_DIM,
+            1e-6,
+            w,
+            w,
+            num_idx_heads,
+            slots,
+            slots,
+            torch.zeros(
+                2, num_kv_heads, block_size, 2 * HEAD_DIM, dtype=dtype, device=device
+            ),
+            torch.zeros(2, block_size, HEAD_DIM, dtype=foreign, device=device),
+            block_size,
+            torch.empty(num_tokens, num_heads * HEAD_DIM, dtype=dtype, device=device),
+            torch.empty(
+                num_tokens, num_idx_heads * HEAD_DIM, dtype=foreign, device=device
+            ),
+        )
 
 
 # ── Test 5: sparse mode with an NVFP4 main KV cache ──────────────────────────
