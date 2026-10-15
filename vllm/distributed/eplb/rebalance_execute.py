@@ -720,6 +720,7 @@ def rearrange_expert_weights_inplace(
         return
 
     weights_buffer = list(expert_buffer)
+    communicator.prepare_transfer()
 
     # The per-layer transfer plan is built in Python, so both maps have to
     # come back to the host. Once per rearrangement.
