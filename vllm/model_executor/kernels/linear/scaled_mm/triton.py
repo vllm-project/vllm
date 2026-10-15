@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+from collections.abc import Sequence
+
 import torch
 
 from vllm import _custom_ops as ops
@@ -32,6 +34,22 @@ from .ScaledMMLinearKernel import (
 
 class TritonFp8PerTokenScaledMMKernel(FP8ScaledMMLinearKernel):
     """Triton FP8 GEMM with per-token activations and per-channel weights."""
+
+    def __init__(
+        self, c: FP8ScaledMMLinearLayerConfig, layer_param_names: Sequence[str]
+    ) -> None:
+        super().__init__(c, layer_param_names)
+        from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+            get_w8a8_per_token_fp8_configs,
+        )
+        from vllm.utils.platform_utils import get_device_name_as_file_name
+
+        n, k = c.weight_shape
+        self.has_tuned_configs = bool(
+            get_w8a8_per_token_fp8_configs(
+                n, k, get_device_name_as_file_name(), self.fp8_dtype, c.out_dtype
+            )
+        )
 
     @classmethod
     def is_supported(
@@ -67,7 +85,7 @@ class TritonFp8PerTokenScaledMMKernel(FP8ScaledMMLinearKernel):
         output_shape: list,
     ) -> torch.Tensor:
         return torch.ops.vllm.w8a8_triton_per_token_scaled_mm_func(
-            A, B, As, Bs, out_dtype, bias
+            A, B, As, Bs, out_dtype, bias, self.has_tuned_configs
         ).view(*output_shape)
 
 
@@ -234,13 +252,14 @@ def _w8a8_triton_per_token_scaled_mm_func(
     weight_scale: torch.Tensor,
     output_dtype: torch.dtype,
     bias: torch.Tensor | None,
+    has_tuned_configs: bool,
 ) -> torch.Tensor:
     from vllm.model_executor.layers.quantization.utils.fp8_utils import (
         get_w8a8_per_token_fp8_config,
     )
 
     config = None
-    if qx.stride(1) == 1 and weight.stride(0) == 1:
+    if has_tuned_configs and qx.stride(1) == 1 and weight.stride(0) == 1:
         config = get_w8a8_per_token_fp8_config(
             qx.size(0), weight.size(1), qx.size(1), qx.dtype, output_dtype
         )
@@ -286,6 +305,7 @@ def _w8a8_triton_per_token_scaled_mm_fake(
     weight_scale: torch.Tensor,
     output_dtype: torch.dtype,
     bias: torch.Tensor | None,
+    has_tuned_configs: bool,
 ) -> torch.Tensor:
     return torch.empty(
         (qx.size(0), weight.size(1)), dtype=output_dtype, device=qx.device

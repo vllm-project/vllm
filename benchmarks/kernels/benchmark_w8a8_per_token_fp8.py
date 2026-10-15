@@ -274,6 +274,7 @@ def main():
                     sb,
                     out_dtype,
                     None,
+                    True,
                 ),
             }
             errors = {

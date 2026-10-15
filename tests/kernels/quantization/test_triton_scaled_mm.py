@@ -177,7 +177,10 @@ def test_scaled_mm_td_matches_plain(M, N, K, in_dtype, use_scalar_scale_a, use_b
 @pytest.mark.skipif(not current_platform.supports_fp8(), reason="Requires FP8")
 @pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("use_bias", [False, True])
-def test_triton_fp8_per_token_backend_preserves_linear_shape(out_dtype, use_bias):
+@pytest.mark.parametrize("tuned", [False, True])
+def test_triton_fp8_per_token_backend_preserves_linear_shape(
+    per_token_fp8_configs, monkeypatch, out_dtype, use_bias, tuned
+):
     """Select the backend and validate quantization, weight layout and 3D output."""
     from vllm.config import KernelConfig, VllmConfig, set_current_vllm_config
     from vllm.model_executor.kernels.linear import init_fp8_linear_kernel
@@ -190,6 +193,14 @@ def test_triton_fp8_per_token_backend_preserves_linear_shape(out_dtype, use_bias
         kFp8StaticChannelSym,
     )
 
+    if tuned:
+        per_token_fp8_configs[33] = {
+            "BLOCK_SIZE_M": 32,
+            "BLOCK_SIZE_N": 64,
+            "BLOCK_SIZE_K": 64,
+            "num_warps": 4,
+            "num_stages": 1,
+        }
     set_random_seed(0)
     n, k = 256, 128
     with set_current_vllm_config(
@@ -203,6 +214,14 @@ def test_triton_fp8_per_token_backend_preserves_linear_shape(out_dtype, use_bias
             weight_shape=(n, k),
         )
     assert isinstance(kernel, TritonFp8PerTokenScaledMMKernel)
+    if not tuned:
+
+        def unexpected_lookup(*_args):
+            pytest.fail("An untuned layer must skip runtime tuning lookup")
+
+        monkeypatch.setattr(
+            fp8_utils_module, "get_w8a8_per_token_fp8_config", unexpected_lookup
+        )
     layer = torch.nn.Module()
     layer.weight = (
         (0.2 * torch.randn(n, k, device=device)).to(current_platform.fp8_dtype()).t()
@@ -251,7 +270,7 @@ def test_triton_fp8_per_token_dynamic_shapes_and_graph_replay(
 
     def run(a, sa):
         return torch.ops.vllm.w8a8_triton_per_token_scaled_mm_func(
-            a, b, sa, sb, torch.bfloat16, None
+            a, b, sa, sb, torch.bfloat16, None, tuned
         )
 
     compiled = torch.compile(run, fullgraph=True, dynamic=True)
