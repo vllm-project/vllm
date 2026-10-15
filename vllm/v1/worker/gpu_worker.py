@@ -509,6 +509,13 @@ class Worker(WorkerBase):
             # Set random seed.
             set_random_seed(self.model_config.seed)
 
+            # Initialize shared locality resources before weight loading and capture.
+            from vllm.distributed.localization import (
+                maybe_init_localized_resources,
+            )
+
+            self.localized_resources = maybe_init_localized_resources(self.device)
+
             # Now take memory snapshot after NCCL is initialized
             gc.collect()
             torch.accelerator.empty_cache()
