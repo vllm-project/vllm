@@ -25,7 +25,7 @@ from vllm.v1.watermarking.prfs.philox import (
 from vllm.v1.watermarking.prfs.philox import (
     _UINT32_MASK as _UINT32_MASK_VALUE,
 )
-from vllm.v1.worker.gpu.sample.gumbel import gumbel_noised_argmax
+from vllm.v1.worker.gpu.sample.gumbel import gumbel_noised_argmax, spec_step_seed
 
 if HAS_TRITON:
     from triton.language import math as tl_math
@@ -606,7 +606,6 @@ def _philox_gumbel_kernel(
     USE_FP64: tl.constexpr,
     IS_DRAFTING: tl.constexpr,
     PER_TOKEN_COL: tl.constexpr,
-    USE_ROUND_SEED: tl.constexpr,
 ):
     row = tl.program_id(0).to(tl.int64)
     block_index = tl.program_id(1)
@@ -645,9 +644,8 @@ def _philox_gumbel_kernel(
             )
             seed = tl.load(seeds_ptr + req_state_idx, mask=valid_req, other=0)
             pos = tl.load(pos_ptr + row)
-            if USE_ROUND_SEED:
-                round_start = pos.to(tl.int64) - col.to(tl.int64)
-                seed ^= round_start << 32
+            if logits_cache_ptr is not None:
+                seed = spec_step_seed(seed, col)
             logits_row = logits_ptr + row * logits_stride
             logits = tl.load(logits_row + candidate, mask=mask, other=float("-inf")).to(
                 tl.float32
@@ -722,11 +720,7 @@ def philox_gumbel_sample(
     logits_cache: torch.Tensor | None = None,
     logits_cache_col: torch.Tensor | None = None,
     logits_cache_source: torch.Tensor | None = None,
-    use_round_seed: bool = False,
 ) -> torch.Tensor:
-    assert not use_round_seed or (
-        is_drafting and logits_cache is not None and logits_cache_col is not None
-    ), "Round-seeded draft sampling requires the draft step."
     sampling_state = (expanded_idx_mapping, temperatures, seeds, positions)
     if skip_mask is None and any(value is not None for value in sampling_state):
         raise ValueError("sampling state requires skip_mask")
@@ -805,7 +799,6 @@ def philox_gumbel_sample(
         USE_FP64=use_fp64,
         IS_DRAFTING=is_drafting,
         PER_TOKEN_COL=logits_cache_col is not None and logits_cache_col.dim() > 0,
-        USE_ROUND_SEED=use_round_seed,
     )
     max_block_index = local_max.argmax(dim=-1, keepdim=True)
     return local_argmax.gather(dim=-1, index=max_block_index).view(-1)

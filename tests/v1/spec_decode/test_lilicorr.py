@@ -319,7 +319,6 @@ def test_candidate_generation_routes_scores_and_adaptive_inputs(monkeypatch, lil
         self.num_speculative_steps = 2
         self.num_query_per_req = 3
         self.dtype = torch.float32
-        self.speculative_config = SimpleNamespace(rejection_sample_method="block")
 
     monkeypatch.setattr(DFlashSpeculator, "__init__", init_base)
     cls = LiLiCorrSpeculator if lilicorr else DFlash2Speculator
@@ -392,7 +391,6 @@ def test_candidate_generation_routes_scores_and_adaptive_inputs(monkeypatch, lil
     torch.testing.assert_close(sampling_inputs[0], expected_ids)
     assert sampling_inputs[1] is scores
     assert sampling_inputs[4] is spec.sample_idx_mapping
-    assert sampling_inputs[10] is True
     torch.testing.assert_close(adaptive_inputs[0], scores[:, :, 0].flatten(0, 1))
     torch.testing.assert_close(adaptive_inputs[1], spec.sample_idx_mapping)
     torch.testing.assert_close(adaptive_inputs[2], spec.sample_col)
@@ -408,10 +406,7 @@ def test_lilicorr_config_preserves_architecture():
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 @pytest.mark.parametrize("probabilistic", [False, True])
-@pytest.mark.parametrize("use_round_seed", [False, True])
-def test_candidate_walk_preserves_conditional_scores_and_padding(
-    probabilistic, use_round_seed
-):
+def test_candidate_walk_preserves_conditional_scores_and_padding(probabilistic):
     """Check the shared sampler's actual q, stale support, and graph padding."""
     device = torch.device("cuda")
     batch, steps, top_k, vocab = 3, 3, 4, 32
@@ -447,7 +442,6 @@ def test_candidate_walk_preserves_conditional_scores_and_padding(
             tokens,
             cache,
             False,
-            use_round_seed,
         )
 
     run()
@@ -478,8 +472,8 @@ def test_candidate_walk_preserves_conditional_scores_and_padding(
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 @pytest.mark.parametrize("use_fp64", [False, True])
-def test_candidate_walk_revisited_position_matches_round_seed(use_fp64):
-    """The candidate walk must use the same round key as ordinary draft sampling."""
+def test_candidate_walk_revisited_position_matches_step_seed(use_fp64):
+    """The candidate walk must use the same step key as ordinary draft sampling."""
     device = torch.device("cuda")
     batch, steps, top_k = 4096, 2, 2
     sampler = CandidateSampler(batch, steps, top_k, device)
@@ -508,7 +502,6 @@ def test_candidate_walk_revisited_position_matches_round_seed(use_fp64):
             tokens,
             cache,
             use_fp64,
-            use_round_seed=True,
         )
         for step in range(steps):
             expected = gumbel_sample(
@@ -522,7 +515,6 @@ def test_candidate_walk_revisited_position_matches_round_seed(use_fp64):
                 logits_cache=cache,
                 logits_cache_col=torch.tensor(step, device=device),
                 use_fp64=use_fp64,
-                use_round_seed=True,
             )
             torch.testing.assert_close(tokens[:, step], expected)
         if first_round is None:

@@ -107,7 +107,6 @@ class DraftWatermarker:
         logits_cache_col: torch.Tensor | None = None,
         use_fp64: bool = False,
         logits_cache_source: torch.Tensor | None = None,
-        use_round_seed: bool = False,
     ) -> torch.Tensor:
         assert apply_temperature
         assert is_drafting
@@ -135,7 +134,6 @@ class DraftWatermarker:
             logits_cache_source=(
                 logits if logits_cache_source is None else logits_cache_source
             ),
-            use_round_seed=use_round_seed,
         )
         sampled = self.watermarker.sample(
             processed_logits,

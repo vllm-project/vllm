@@ -151,7 +151,6 @@ class DSparkSpeculator(DFlashSpeculator):
             logits_cache=self.draft_logits,
             logits_cache_col=self._step_cols[step],
             use_fp64=self.use_fp64_gumbel,
-            use_round_seed=(self.speculative_config.rejection_sample_method == "block"),
         )
 
     def _sample_sequential(self, num_reqs: int, head_hidden: torch.Tensor) -> None:

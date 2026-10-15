@@ -98,7 +98,6 @@ class GumbelWatermarker(Watermarker):
             logits_cache=random_sampler.logits_cache,
             logits_cache_col=random_sampler.logits_cache_col,
             logits_cache_source=random_sampler.logits_cache_source,
-            use_round_seed=random_sampler.use_round_seed,
         )
         return WatermarkSample(token_ids, logits)
 

@@ -601,7 +601,6 @@ def test_multiround_rejection_sample_is_unbiased(
                     is_drafting=True,
                     logits_cache=logits_cache,
                     logits_cache_col=torch.tensor(step, device=device),
-                    use_round_seed=use_block_verification,
                 )
         sampled, counts = rejection_sample(
             target_logits=target_probs.log().expand(n * (k + 1), -1).contiguous(),

@@ -8,7 +8,7 @@ import torch
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.triton_utils import tl, triton
-from vllm.v1.worker.gpu.sample.gumbel import gumbel_noised_argmax
+from vllm.v1.worker.gpu.sample.gumbel import gumbel_noised_argmax, spec_step_seed
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 
 
@@ -27,7 +27,6 @@ def _selector_walk_kernel(
     BLOCK_K: tl.constexpr,
     SAMPLE_PROBABILISTIC: tl.constexpr,
     USE_FP64: tl.constexpr,
-    USE_ROUND_SEED: tl.constexpr,
 ):
     row = tl.program_id(0)
     offsets = tl.arange(0, BLOCK_K)
@@ -36,10 +35,6 @@ def _selector_walk_kernel(
     valid = req_state >= 0
     temperature = tl.load(temperature_ptr + req_state, mask=valid, other=0.0)
     seed = tl.load(seeds_ptr + req_state, mask=valid, other=0)
-    if USE_ROUND_SEED:
-        # All walk steps share the source position before the first candidate.
-        round_start = tl.load(sample_pos_ptr + row * num_steps).to(tl.int64) - 1
-        seed ^= round_start << 32
     previous = 0
     for step in range(num_steps):
         flat = row * num_steps + step
@@ -63,7 +58,7 @@ def _selector_walk_kernel(
             scores,
             candidates,
             mask & valid,
-            seed,
+            spec_step_seed(seed, step),
             sample_pos,
             temperature if SAMPLE_PROBABILISTIC else 0.0,
             IS_DRAFTING=True,
@@ -140,7 +135,6 @@ class CandidateSampler:
         draft_tokens: torch.Tensor,
         draft_logits: torch.Tensor | None,
         use_fp64: bool,
-        use_round_seed: bool = False,
     ) -> None:
         candidate_ids = candidate_ids.contiguous()
         sample_pos = sample_pos.contiguous()
@@ -160,7 +154,6 @@ class CandidateSampler:
             BLOCK_K=block_k,
             SAMPLE_PROBABILISTIC=draft_logits is not None,
             USE_FP64=use_fp64,
-            USE_ROUND_SEED=use_round_seed,
             num_warps=1,
         )
 
@@ -249,7 +242,6 @@ class DFlash2Speculator(DFlashSpeculator):
             self.draft_tokens,
             self.draft_logits,
             self.use_fp64_gumbel,
-            self.speculative_config.rejection_sample_method == "block",
         )
         if self.enable_adaptive_verification:
             self._maybe_predict_acceptance(

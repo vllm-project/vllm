@@ -447,9 +447,6 @@ class DraftModelSpeculator(BaseSpeculator):
                 logits_cache=draft_logits,
                 logits_cache_col=draft_step,
                 use_fp64=self.use_fp64_gumbel,
-                use_round_seed=(
-                    self.speculative_config.rejection_sample_method == "block"
-                ),
             )
         else:
             sampled = logits.argmax(dim=-1)

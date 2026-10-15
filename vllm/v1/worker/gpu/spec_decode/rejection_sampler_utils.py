@@ -3,7 +3,11 @@
 import torch
 
 from vllm.triton_utils import tl, tldevice, triton
-from vllm.v1.worker.gpu.sample.gumbel import gumbel_block_argmax, tl_rand32
+from vllm.v1.worker.gpu.sample.gumbel import (
+    gumbel_block_argmax,
+    spec_step_seed,
+    tl_rand32,
+)
 from vllm.v1.worker.gpu.sample.watermark import philox_gumbel_block_argmax
 
 
@@ -549,8 +553,7 @@ def _rejection_kernel(
     is_greedy = temp == 0.0
     if USE_BLOCK_VERIFICATION:
         # The first position advances each round, unlike uncommitted draft positions.
-        round_start = tl.load(pos_ptr + start_idx).to(tl.int64)
-        seed ^= round_start << 32
+        seed = spec_step_seed(seed, tl.load(pos_ptr + start_idx))
 
     accepted_length = tl.zeros((), tl.int64)
     target_lse = 0.0

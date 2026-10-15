@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from types import SimpleNamespace
-
 import pytest
 import torch
 from torch import nn
@@ -75,14 +73,12 @@ def test_gathered_markov_bias_matches_dense_at_full_vocab():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-@pytest.mark.parametrize("verification", ["standard", "block"])
 @pytest.mark.parametrize("use_fp64", [False, True])
-def test_dspark_revisited_position_uses_round_seed(verification, use_fp64):
-    """A later round must refresh probabilistic drafts only in block mode."""
+def test_dspark_revisited_position_uses_step_seed(use_fp64):
+    """A cached draft at a revisited position must use its current step."""
     device = torch.device("cuda")
     batch = 4096
     spec = DSparkSpeculator.__new__(DSparkSpeculator)
-    spec.speculative_config = SimpleNamespace(rejection_sample_method=verification)
     spec.acceptance_estimator = None
     spec._d2t_scatter_index = None
     spec.draft_watermarker = None
@@ -110,14 +106,10 @@ def test_dspark_revisited_position_uses_round_seed(verification, use_fp64):
         logits_cache=spec.draft_logits,
         logits_cache_col=spec._step_cols[0],
         use_fp64=use_fp64,
-        use_round_seed=verification == "block",
     )
     torch.testing.assert_close(next_round, expected)
-    if verification == "block":
-        mismatch_rate = (first != next_round).float().mean().item()
-        assert 0.35 < mismatch_rate < 0.5
-    else:
-        torch.testing.assert_close(first, next_round)
+    mismatch_rate = (first != next_round).float().mean().item()
+    assert 0.35 < mismatch_rate < 0.5
 
 
 @pytest.mark.parametrize("cuda_alike_platform", [False, True])
