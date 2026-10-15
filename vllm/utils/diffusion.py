@@ -10,6 +10,13 @@ if TYPE_CHECKING:
     from vllm.sampling_params import SamplingParams
 
 
+def is_one_step_read(params: "SamplingParams | None") -> bool:
+    extra = getattr(params, "extra_args", None) or {}
+    return (
+        bool(extra.get("diffusion_read_only")) and extra.get("diffusion_max_steps") == 1
+    )
+
+
 def validate_diffusion_sampling_params(
     params: "SamplingParams",
     *,

@@ -40,6 +40,25 @@ Per-request canvas widths may be smaller than the served canvas with either
 synchronous or asynchronous scheduling. Omit `diffusion_canvas_length` to use
 the served canvas width.
 
+`single_pass_reads` is disabled by default. On the CPU backend, enable it with
+`--diffusion-config '{"canvas_length": 64, "single_pass_reads": true}'`.
+For requests with `diffusion_read_only` set to `true` and `diffusion_max_steps`
+set to 1, the scheduler can attach the canvas to the step that finishes the
+prompt. This saves one forward pass when eligible. Chunked prompts can still
+require several forward passes.
+
+If the remaining prompt tokens and canvas do not fit the step's token budget,
+or the full prompt plus canvas reaches the maximum model length, the canvas
+runs in a separate step. An eligible read waits until the free KV cache holds
+both. The option cannot be combined with pipeline parallelism, KV connectors,
+or KV offloading.
+
+Fusion can change emitted tokens and probabilities compared with running the
+prompt and canvas separately, even with the same seed. Matching the most likely
+label does not guarantee matching probabilities. Before enabling this option,
+validate the outputs on your workload, including any decisions based on
+probability thresholds.
+
 Question types: `noul` (yes/no), `choice` with `options`, `score` with
 ordered `levels`. Each label must be a single token in the answer template,
 which the server checks with the tokenizer when a request uses the schema.

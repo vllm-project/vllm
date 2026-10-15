@@ -118,6 +118,9 @@ class ModelState(ABC):
             supported_tasks.append("realtime")
         return tuple(supported_tasks)
 
+    def compute_prompt_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        return self.model.compute_logits(hidden_states)
+
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
         return None
 

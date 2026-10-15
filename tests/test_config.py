@@ -25,6 +25,7 @@ from vllm.config import (
     CacheConfig,
     CompilationConfig,
     DeviceConfig,
+    DiffusionConfig,
     EngramConfig,
     HiSparseConfig,
     KernelConfig,
@@ -288,6 +289,58 @@ def test_mamba_cache_mode_all_is_rejected():
     """The removed 'all' mode must fail validation instead of being ignored."""
     with pytest.raises(ValidationError, match="mamba_cache_mode"):
         CacheConfig(mamba_cache_mode="all")
+
+
+@pytest.mark.parametrize(
+    "kwargs, match",
+    [
+        pytest.param(
+            {"device_config": DeviceConfig(device="cuda")}, "CPU backend", id="cuda"
+        ),
+        pytest.param(
+            {"device_config": DeviceConfig(device="xpu")}, "CPU backend", id="xpu"
+        ),
+        pytest.param(
+            {"parallel_config": ParallelConfig(pipeline_parallel_size=2)},
+            "pipeline parallelism",
+            id="pp",
+        ),
+        pytest.param(
+            {
+                "kv_transfer_config": KVTransferConfig(
+                    kv_connector="ExampleConnector", kv_role="kv_both"
+                )
+            },
+            "KV connectors",
+            id="kv-connector",
+        ),
+        pytest.param(
+            {"cache_config": CacheConfig(kv_offloading_size=1)},
+            "KV connectors",
+            id="kv-offloading",
+        ),
+    ],
+)
+def test_single_pass_reads_rejects_incompatible_configs(kwargs, match):
+    kwargs = {"device_config": DeviceConfig(device="cpu"), **kwargs}
+    with pytest.raises(ValueError, match=match):
+        VllmConfig(
+            diffusion_config=DiffusionConfig(canvas_length=8, single_pass_reads=True),
+            **kwargs,
+        )
+
+
+@pytest.mark.parametrize(
+    "device, enabled, offloading_size",
+    [("cpu", True, None), ("auto", False, None), ("auto", False, 1)],
+)
+def test_single_pass_reads_accepts_supported_configs(device, enabled, offloading_size):
+    config = VllmConfig(
+        device_config=DeviceConfig(device=device),
+        diffusion_config=DiffusionConfig(canvas_length=8, single_pass_reads=enabled),
+        cache_config=CacheConfig(kv_offloading_size=offloading_size),
+    )
+    assert config.diffusion_config.single_pass_reads is enabled
 
 
 def test_per_request_spec_decode_metrics_requires_spec_decode():

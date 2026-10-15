@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Canvas-width handling and async read deferral for diffusion requests."""
 
+from vllm.utils.diffusion import is_one_step_read
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
@@ -35,6 +36,35 @@ def _read_in_flight(request: Request, width: int) -> bool:
 
 
 class DiffusionScheduler(Scheduler):
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        diffusion_config = self.vllm_config.diffusion_config
+        self.single_pass_reads = bool(
+            diffusion_config is not None and diffusion_config.single_pass_reads
+        )
+
+    def _final_prefill_spec_tokens(
+        self,
+        request: Request,
+        num_computed_tokens: int,
+        num_new_tokens: int,
+        token_budget: int,
+    ) -> list[int]:
+        if (
+            not self.single_pass_reads
+            or not is_one_step_read(request.sampling_params)
+            or num_computed_tokens >= request.num_prompt_tokens
+            or num_computed_tokens + num_new_tokens != request.num_tokens
+        ):
+            return []
+        width = diffusion_canvas_width(request, self.num_spec_tokens)
+        if (
+            num_new_tokens + width > token_budget
+            or request.num_tokens + width >= self.max_model_len
+        ):
+            return []
+        return [-1] * width
+
     def update_draft_token_ids(self, draft_token_ids: DraftTokenIds) -> None:
         for i, (req_id, token_ids) in enumerate(
             zip(draft_token_ids.req_ids, draft_token_ids.draft_token_ids)
