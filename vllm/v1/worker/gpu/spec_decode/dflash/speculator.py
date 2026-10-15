@@ -544,7 +544,10 @@ class DFlashSpeculator(DraftModelSpeculator):
 
         batch_sync, num_batch_tokens = (
             self._build_uniform_batch_dp_sync(
-                dp_sync_state, num_reqs, self.num_query_per_req
+                dp_sync_state,
+                num_reqs,
+                self.num_query_per_req,
+                max_num_reqs=dp_sync_state.num_reqs_unpadded,
             )
             if dp_sync_state is not None
             else (None, num_query_tokens)

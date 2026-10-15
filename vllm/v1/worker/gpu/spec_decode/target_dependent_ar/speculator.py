@@ -317,7 +317,10 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
 
         decode_batch_sync, num_batch_tokens = (
             self._build_uniform_batch_dp_sync(
-                dp_sync_state, num_reqs, num_query_per_req=1
+                dp_sync_state,
+                num_reqs,
+                num_query_per_req=1,
+                max_num_reqs=dp_sync_state.num_reqs,
             )
             if dp_sync_state is not None
             else (None, num_reqs)
