@@ -164,6 +164,31 @@ steps:
       depends_on:
       - image-build-amd
 
+# The shared KV Connectors steps above exclude vllm/distributed/kv_transfer/ from
+# their triggers, and CUDA skips MoRIIO's mori/aiter-gated tests. Run the whole
+# MoRIIO suite on ROCm whenever the connector or its tests change.
+- label: ":amd: (MI355 DPX) MoRIIO Connector Unit Tests"
+  key: amd-moriio-connector-unit-mi355
+  dind: false
+  device: mi355_dpx
+  num_devices: 1
+  timeout_in_minutes: 30
+  working_dir: /vllm-workspace/tests
+  depends_on:
+  - image-build-amd
+  source_file_dependencies:
+  - vllm/distributed/kv_transfer/kv_connector/v1/moriio/
+  - vllm/distributed/kv_transfer/kv_connector/v1/base.py
+  - vllm/distributed/kv_transfer/kv_connector/v1/ssm_conv_transfer_utils.py
+  - examples/disaggregated/disaggregated_serving/moriio_toy_proxy_server.py
+  - tests/v1/kv_connector/unit/test_moriio_
+  - tests/v1/kv_connector/unit/utils.py
+  - requirements/kv_connectors_rocm.txt
+  commands:
+  - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -v -s -rs v1/kv_connector/unit/test_moriio_*.py
+
 - label: ":nvidia: (H200 MIG 35GB) V1 Metrics + LM Eval"
   device: h200_35gb
   key: v1-metrics-lmeval
