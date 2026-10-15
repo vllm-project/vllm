@@ -34,6 +34,7 @@ from vllm.models.minimax_m3.amd.ops.index_topk import (
     minimax_m3_index_topk,
 )
 from vllm.models.minimax_m3.amd.ops.indexer_context_parallel import (
+    check_context_score_inputs,
     indexer_context_scores,
 )
 from vllm.models.minimax_m3.amd.ops.indexer_cp_exchange import (
@@ -45,7 +46,6 @@ from vllm.models.minimax_m3.common.indexer import (
     MiniMaxM3IndexerMetadata,
     MiniMaxM3IndexerTritonImpl,
 )
-from vllm.platforms import current_platform
 from vllm.triton_utils import triton
 
 
@@ -116,20 +116,17 @@ class IndexerCPDecode:
 
         bf16, f32, i64 = torch.bfloat16, torch.float32, torch.int64
         self._q_local = buf(max_tokens, local_heads, head_dim, dtype=bf16)
-        self._q_gathered = buf(
-            world_size, max_tokens, local_heads, head_dim, dtype=bf16
-        )
         self._q_full = buf(max_tokens, total_heads, head_dim, dtype=bf16)
         self._scores = buf(total_heads, max_tokens, max_local, dtype=f32)
         self._keys = buf(total_heads, max_tokens, topk, dtype=i64)
-        self._keys_gathered = buf(world_size, total_heads, max_tokens, topk, dtype=i64)
+        self._checked = False
 
     def _full_queries(self, local_q: torch.Tensor) -> torch.Tensor:
         """All-gather ``[n, local_heads, D]`` queries to ``[n, total_heads, D]``."""
         n = local_q.shape[0]
         q = _packed(self._q_local, 0, n)
         q.copy_(local_q)
-        gathered = all_gather(q, _packed(self._q_gathered, 1, n), self.group)
+        gathered = all_gather(q, self.group)
         # Replicated ranks carry the same head; keep the first of each group.
         owners = gathered[:: self.replicas]
         full = _packed(self._q_full, 0, n)
@@ -155,6 +152,9 @@ class IndexerCPDecode:
     ) -> torch.Tensor:
         """Write ``[local_heads, n, topk]`` block ids for this rank's heads."""
         n = local_q.shape[0]
+        if not self._checked:
+            check_context_score_inputs(local_q, kv_cache, block_table, seq_lens)
+            self._checked = True
         scores = indexer_context_scores(
             self._full_queries(local_q),
             kv_cache,
@@ -180,7 +180,7 @@ class IndexerCPDecode:
             local_blocks=self.local_blocks,
             out=keys,
         )
-        gathered = all_gather(keys, _packed(self._keys_gathered, 2, n), self.group)
+        gathered = all_gather(keys, self.group)
         own = slice(self.head_offset, self.head_offset + self.local_heads)
         return merge_topk_keys(
             gathered[:, own],
@@ -246,11 +246,7 @@ class MiniMaxM3IndexerTritonCPImpl(MiniMaxM3IndexerTritonImpl):
         max_tokens = max(
             vllm_config.scheduler_config.max_num_seqs * (n_spec + 1), max_cg
         )
-        device = (
-            torch.device("cuda", torch.accelerator.current_device_index())
-            if torch.cuda.is_available()
-            else torch.device("cpu")
-        )
+        device = torch.device("cuda", torch.accelerator.current_device_index())
         self.cp_decode = get_shared_cp_decode(
             total_heads=total_heads,
             rank=get_tp_group().rank_in_group,
@@ -288,10 +284,7 @@ class MiniMaxM3IndexerTritonCPImpl(MiniMaxM3IndexerTritonImpl):
         )
         kv = self.index_cache.kv_cache
 
-        buf = self.topk_indices_buffer
-        buf_htk = (
-            buf if buf is None or current_platform.is_rocm() else buf.transpose(0, 1)
-        )
+        buf_htk = self.topk_indices_buffer
 
         decode_topk: torch.Tensor | None = None
         prefill_topk: torch.Tensor | None = None

@@ -170,21 +170,15 @@ class AttentionConfig:
             # The alias selects only MiniMax's sparse decode kernel. Dense
             # layers still use the platform's normal automatic backend.
             self.backend = None
-        if self.minimax_m3_indexer_cp:
-            # Checked here rather than at indexer selection: an fp8 index
-            # cache is served by the AITER indexer, which never reaches it.
-            if self.indexer_kv_dtype not in ("auto", "bf16"):
-                raise ValueError(
-                    "minimax_m3_indexer_cp requires a bf16 index cache "
-                    "(indexer_kv_dtype 'auto' or 'bf16'), got "
-                    f"{self.indexer_kv_dtype!r}"
-                )
-            if getattr(self, "minimax_m3_fused_decode", False):
-                raise ValueError(
-                    "minimax_m3_indexer_cp cannot be combined with "
-                    "minimax_m3_fused_decode, which computes the indexer top-k "
-                    "inside its kernel"
-                )
+        # Checked here rather than at indexer selection: an fp8 index cache is
+        # served by the AITER indexer, which never reaches it. This also
+        # excludes the fused decode path, which needs fp8.
+        if self.minimax_m3_indexer_cp and self.indexer_kv_dtype not in ("auto", "bf16"):
+            raise ValueError(
+                "minimax_m3_indexer_cp requires a bf16 index cache "
+                "(indexer_kv_dtype 'auto' or 'bf16'), got "
+                f"{self.indexer_kv_dtype!r}"
+            )
 
     def resolve_indexer_kv_dtype(self, default: IndexerKVDType) -> IndexerKVDType:
         """Resolve `indexer_kv_dtype`, substituting `default` for "auto"."""

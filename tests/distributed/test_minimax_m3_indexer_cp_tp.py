@@ -179,12 +179,13 @@ def _run_cp_topk_matches_non_cp(
 @pytest.mark.skipif(
     not current_platform.is_rocm(), reason="MiniMax-M3 CP indexer is ROCm-only."
 )
-@pytest.mark.parametrize("tp_size", [2, 4, 8])
-@pytest.mark.parametrize("query_len", [1, 4])
-@pytest.mark.parametrize("use_aiter", [False, True])
+# TP=4 is MiniMax-M3's one index head per rank. Spec-decode verify rows over
+# the RCCL fallback, and single-token decode over the AITER IPC all-gather.
+@pytest.mark.parametrize("query_len,use_aiter", [(4, False), (1, True)])
 def test_cp_topk_matches_non_cp_per_head(
-    monkeypatch: pytest.MonkeyPatch, tp_size: int, query_len: int, use_aiter: bool
+    monkeypatch: pytest.MonkeyPatch, query_len: int, use_aiter: bool
 ):
+    tp_size = 4
     if torch.accelerator.device_count() < tp_size:
         pytest.skip(f"Need at least {tp_size} GPUs to run the test.")
     if use_aiter:

@@ -109,6 +109,54 @@ def _context_score(
         )
 
 
+def check_context_score_inputs(
+    idx_q: torch.Tensor,
+    index_cache: torch.Tensor,
+    block_table: torch.Tensor,
+    seq_lens: torch.Tensor,
+) -> None:
+    """Validate the layout ``indexer_context_scores`` assumes; call once.
+
+    These hold for every step of a served model, so they are not re-checked
+    on the hot path.
+    """
+    if (
+        idx_q.ndim != 3
+        or idx_q.shape[2] != 128
+        or idx_q.dtype != torch.bfloat16
+        or idx_q.stride(2) != 1
+    ):
+        raise ValueError(
+            "index queries must be BF16 [tokens,heads,128] with contiguous D"
+        )
+    if (
+        index_cache.ndim != 3
+        or index_cache.shape[1:] != (128, 128)
+        or not index_cache.is_contiguous()
+        or index_cache.shape[0] < 1
+    ):
+        raise ValueError("index cache must be contiguous non-empty [pages,128,128]")
+    if index_cache.dtype != torch.bfloat16:
+        # The score loop applies no per-token scale.
+        raise ValueError(
+            f"index cache must be bf16 for CP scoring, got {index_cache.dtype}"
+        )
+    if (
+        block_table.ndim != 2
+        or block_table.stride(1) != 1
+        or block_table.dtype != torch.int32
+        or seq_lens.ndim != 1
+        or seq_lens.dtype != torch.int32
+        or not seq_lens.is_contiguous()
+    ):
+        raise ValueError("block table and lengths must be int32 with unit stride")
+    if any(
+        not x.is_cuda or x.device != idx_q.device
+        for x in (index_cache, block_table, seq_lens)
+    ):
+        raise ValueError("all score inputs must be on the same GPU")
+
+
 def indexer_context_scores(
     idx_q,
     index_cache,
@@ -133,59 +181,13 @@ def indexer_context_scores(
     ``out``, when given, is a ``[heads, >=tokens, >=local]`` buffer written in
     place (stable address for CUDA graph capture).
     """
-    if (
-        world_size < 1
-        or not 0 <= rank < world_size
-        or max_seq_len < 1
-        or max_query_len < 1
-    ):
-        raise ValueError("invalid context partition or query geometry")
-    if (
-        idx_q.ndim != 3
-        or idx_q.shape[2] != 128
-        or idx_q.dtype != torch.bfloat16
-        or idx_q.stride(2) != 1
-    ):
-        raise ValueError(
-            "index queries must be BF16 [tokens,heads,128] with contiguous D"
-        )
     tokens, heads, _ = idx_q.shape
-    if heads < 1 or seq_lens.ndim != 1 or tokens != seq_lens.numel() * max_query_len:
-        raise ValueError("query rows must equal batch * max_query_len")
-    if (
-        index_cache.ndim != 3
-        or index_cache.shape[1:] != (128, 128)
-        or not index_cache.is_contiguous()
-    ):
-        raise ValueError("index cache must be contiguous [pages,128,128]")
-    if index_cache.dtype != torch.bfloat16:
-        # The score loop applies no per-token scale; an fp8 index cache needs
-        # the AITER indexer (#57909).
-        raise ValueError(
-            f"index cache must be bf16 for CP scoring, got {index_cache.dtype}"
-        )
-    num_pages = int(index_cache.shape[0])
-    if num_pages < 1:
-        raise ValueError("index cache has no pages")
     blocks = triton.cdiv(max_seq_len, 128)
-    if (
-        block_table.ndim != 2
-        or block_table.shape[0] != seq_lens.numel()
-        or block_table.shape[1] < blocks
-        or block_table.stride(1) != 1
-    ):
-        raise ValueError("block table does not cover the requested context")
-    if (
-        block_table.dtype != torch.int32
-        or seq_lens.dtype != torch.int32
-        or not seq_lens.is_contiguous()
-    ):
-        raise ValueError("block table and contiguous lengths must be int32")
-    if any(
-        not x.is_cuda or x.device != idx_q.device
-        for x in (idx_q, index_cache, block_table, seq_lens)
-    ):
-        raise ValueError("all score inputs must be on the same GPU")
+    # Layout invariants are checked once by ``check_context_score_inputs``;
+    # only what can change per step is checked here.
+    assert tokens == seq_lens.numel() * max_query_len, "rows != batch * query_len"
+    assert block_table.shape[1] >= blocks, "block table narrower than max_seq_len"
+    num_pages = int(index_cache.shape[0])
     local = triton.cdiv(blocks, world_size)
     out_ok = (
         out is not None

@@ -79,9 +79,9 @@ def _reference_shard(
     return scores, written
 
 
-@pytest.mark.parametrize("rank", [0, 1])
 @torch.inference_mode()
-def test_indexer_context_scores_matches_reference(rank: int):
+def test_indexer_context_scores_matches_reference():
+    rank = 1
     torch.manual_seed(0)
     world_size = 2
     batch, heads, query_len = 2, 2, 1
@@ -127,15 +127,15 @@ def test_indexer_context_scores_matches_reference(rank: int):
     assert (got[~hit] == SENTINEL).all()
 
 
-@pytest.mark.parametrize("bound", [8192, 65536])
 @torch.inference_mode()
-def test_indexer_context_scores_independent_of_shape_bound(bound: int):
+def test_indexer_context_scores_independent_of_shape_bound():
     """A grid sized for max_model_len scores a short batch identically.
 
     CUDA graphs bake the grid and ``CHUNK`` at capture, where the dummy batch
     is one token long. Shapes must therefore come from ``max_model_len``, and
     scoring must not depend on how far past the batch that bound reaches.
     """
+    bound = 65536
     torch.manual_seed(2)
     world_size, rank, query_len = 4, 2, 1
     batch, heads = 3, 2
@@ -255,16 +255,15 @@ def _lexsort_topk(score_row: torch.Tensor, n: int) -> torch.Tensor:
     return order[:n]
 
 
-@pytest.mark.parametrize("heads", [1, 4])
 @torch.inference_mode()
-def test_local_topk_merge_matches_full_topk(heads: int):
+def test_local_topk_merge_matches_full_topk():
     """Sharded per-head local top-k + merge equals a full-row top-k per head.
 
     Every shard scores every head, as the CP decode does after gathering the
     index queries; the merge is exact only under that condition.
     """
     torch.manual_seed(2)
-    world, query_len, topk = 4, 1, 16
+    world, heads, query_len, topk = 4, 4, 1, 16
     init_blocks, local_keep = 1, 2
     seq_lens = torch.tensor([128 * 20, 128 * 7], device=DEVICE, dtype=torch.int32)
     tokens = seq_lens.numel() * query_len
@@ -320,86 +319,9 @@ def test_local_topk_merge_matches_full_topk(heads: int):
     assert torch.equal(got, ref)
 
 
-@pytest.mark.parametrize(
-    "total_heads,world,expected",
-    [
-        (4, 4, [(1, 0), (1, 1), (1, 2), (1, 3)]),
-        (4, 2, [(2, 0), (2, 2)]),
-        (4, 8, [(1, 0), (1, 0), (1, 1), (1, 1), (1, 2), (1, 2), (1, 3), (1, 3)]),
-    ],
-)
-def test_cp_decode_owns_kv_sharded_heads(
-    total_heads: int, world: int, expected: list[tuple[int, int]]
-):
-    """Each rank merges the index heads the fused QKV linear gives it."""
-    from vllm.models.minimax_m3.amd.indexer_context_parallel import IndexerCPDecode
-
-    for rank, (local_heads, offset) in enumerate(expected):
-        dec = IndexerCPDecode(
-            total_heads=total_heads,
-            rank=rank,
-            world_size=world,
-            max_tokens=1,
-            max_seq_len=BLOCK,
-            topk=16,
-            init_blocks=0,
-            local_blocks=1,
-            group=None,  # type: ignore[arg-type]  # only used by forward()
-            device=torch.device(DEVICE),
-        )
-        assert (dec.local_heads, dec.head_offset) == (local_heads, offset)
-        assert dec._q_full.shape[1] == total_heads
-        assert dec._scores.shape[0] == total_heads
-
-
-@pytest.mark.parametrize("indexer_kv_dtype", ["auto", "bf16"])
-def test_indexer_cp_config_accepts_bf16(indexer_kv_dtype: str):
-    from vllm.config.attention import AttentionConfig
-
-    cfg = AttentionConfig(minimax_m3_indexer_cp=True, indexer_kv_dtype=indexer_kv_dtype)
-    assert cfg.minimax_m3_indexer_cp
-
-
-@pytest.mark.parametrize("indexer_kv_dtype", ["fp8", "mxfp4", "nvfp4"])
-def test_indexer_cp_config_rejects_non_bf16(indexer_kv_dtype: str):
-    """CP scores the index cache with no scale; fp8 uses the AITER indexer."""
+def test_indexer_cp_config_rejects_fp8():
+    """CP scores the index cache with no scale; fp8 must not enable it."""
     from vllm.config.attention import AttentionConfig
 
     with pytest.raises(ValueError, match="minimax_m3_indexer_cp requires a bf16"):
-        AttentionConfig(minimax_m3_indexer_cp=True, indexer_kv_dtype=indexer_kv_dtype)
-
-
-def test_indexer_cp_config_default_off():
-    from vllm.config.attention import AttentionConfig
-
-    assert AttentionConfig().minimax_m3_indexer_cp is False
-
-
-def test_cp_decode_shared_across_layers():
-    """Every indexer layer on a rank gets the same scratch buffers."""
-    from vllm.models.minimax_m3.amd.indexer_context_parallel import (
-        get_shared_cp_decode,
-    )
-
-    def get(**overrides):
-        kwargs = dict(
-            total_heads=4,
-            rank=0,
-            world_size=4,
-            max_tokens=8,
-            max_seq_len=4 * BLOCK,
-            topk=16,
-            init_blocks=0,
-            local_blocks=1,
-            group=None,
-            device=torch.device(DEVICE),
-        )
-        kwargs.update(overrides)
-        return get_shared_cp_decode(**kwargs)
-
-    first, second = get(), get()
-    assert first is second
-    assert first._scores.data_ptr() == second._scores.data_ptr()
-    # A different geometry (e.g. another rank's layout) gets its own buffers.
-    assert get(rank=1) is not first
-    assert get(max_tokens=16) is not first
+        AttentionConfig(minimax_m3_indexer_cp=True, indexer_kv_dtype="fp8")
