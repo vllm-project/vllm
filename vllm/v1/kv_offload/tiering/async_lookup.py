@@ -54,18 +54,11 @@ class LookupToken:
     generation: int | None
 
 
-class LookupPhase(Enum):
-    """Lifecycle phase of a lookup probe."""
+class LookupStatus(Enum):
+    """Lifecycle phase and cached verdict of a lookup probe."""
 
     PENDING = auto()  # Accumulated in _lookup_batch, but not yet submitted.
     IN_FLIGHT = auto()  # Submitted to the worker, but not yet resolved.
-    RESOLVED = auto()  # A final verdict has been applied to the state.
-
-
-class LookupVerdict(Enum):
-    """Cached lookup verdict, including a failed-load correction."""
-
-    UNRESOLVED = auto()
     HIT = auto()
     MISS = auto()
     MARKED_MISS = auto()
@@ -74,10 +67,7 @@ class LookupVerdict(Enum):
 @dataclass(slots=True)
 class LookupState:
     generation: int
-    phase: LookupPhase = LookupPhase.PENDING
-    # UNRESOLVED until a probe resolves, unless mark_miss() records a deferred
-    # miss.
-    result: LookupVerdict = LookupVerdict.UNRESOLVED
+    status: LookupStatus = LookupStatus.PENDING
     request_ids: set[str] = field(default_factory=set)  # requests asking for the lookup
 
 
@@ -176,16 +166,19 @@ class AsyncLookupManager(ABC):
             self._lookup_batch.append((key, req_context, state.generation))
         state.request_ids.add(req_id)
         self._req_keys.setdefault(req_id, set()).add(key)
-        if state.phase is not LookupPhase.RESOLVED:
+        if state.status in (LookupStatus.PENDING, LookupStatus.IN_FLIGHT):
             return None
-        return state.result is LookupVerdict.HIT
+        return state.status is LookupStatus.HIT
 
     def lookup_token(self, key: OffloadKey, req_id: str) -> LookupToken:
         """Return the lookup token currently held by ``req_id`` for ``key``."""
         state = self._lookup_state.get(key)
         generation = (
             state.generation
-            if state is not None and req_id in state.request_ids
+            if state is not None
+            and state.status
+            in (LookupStatus.HIT, LookupStatus.MISS, LookupStatus.MARKED_MISS)
+            and req_id in state.request_ids
             else None
         )
         return LookupToken(key=key, req_id=req_id, generation=generation)
@@ -208,8 +201,8 @@ class AsyncLookupManager(ABC):
             state = self._lookup_state.get(key)
             if state is None or state.generation != generation:
                 continue
-            assert state.phase is LookupPhase.PENDING
-            state.phase = LookupPhase.IN_FLIGHT
+            assert state.status is LookupStatus.PENDING
+            state.status = LookupStatus.IN_FLIGHT
             in_flight_batch.append((key, req_context, generation))
         if in_flight_batch:
             self._lookup_queue.put(in_flight_batch)
@@ -231,38 +224,29 @@ class AsyncLookupManager(ABC):
                 if not state.request_ids:
                     del self._lookup_state[key]
                     continue
-                assert state.phase is LookupPhase.IN_FLIGHT
+                assert state.status is LookupStatus.IN_FLIGHT
                 # Each lookup generation is enqueued exactly once. A matching
                 # generation must not receive a second result; stale
                 # generations were discarded above.
-                # mark_miss() may have pre-populated MARKED_MISS while the
-                # probe was still in flight; never let its stale result win.
-                if state.result is LookupVerdict.MARKED_MISS:
-                    pass
-                else:
-                    assert state.result is LookupVerdict.UNRESOLVED, (
-                        "cached key received a second lookup result; the "
-                        "enqueue-once invariant is broken and could reopen "
-                        "the failed-load livelock"
-                    )
-                    state.result = LookupVerdict.HIT if result else LookupVerdict.MISS
-                state.phase = LookupPhase.RESOLVED
+                state.status = LookupStatus.HIT if result else LookupStatus.MISS
 
     def mark_miss(self, tokens: Collection[LookupToken]) -> None:
         """Force the cached verdict for tokens to False after a failed load, so
         the scheduler stops re-issuing the doomed promotion (livelock, #49176).
-        A token identifies the lookup generation that initiated the load. A
-        pending or in-flight generation records the miss for application when
-        its probe result arrives; a stale generation is ignored."""
+        A token identifies the resolved lookup generation that initiated the
+        load. Pending, in-flight, and stale generations are ignored."""
         for token in tokens:
             if token.generation is None:
                 continue
             state = self._lookup_state.get(token.key)
-            if state is None or state.generation != token.generation:
+            if (
+                state is None
+                or state.generation != token.generation
+                or state.status
+                not in (LookupStatus.HIT, LookupStatus.MISS, LookupStatus.MARKED_MISS)
+            ):
                 continue
-            # Keep PENDING/IN_FLIGHT intact so flush()/drain_results() can
-            # consume the queued probe result without a phase assertion.
-            state.result = LookupVerdict.MARKED_MISS
+            state.status = LookupStatus.MARKED_MISS
 
     def cleanup(self, req_id: str) -> None:
         """Release request references, retaining in-flight lookups.
@@ -273,7 +257,7 @@ class AsyncLookupManager(ABC):
         for key in self._req_keys.pop(req_id, ()):
             state = self._lookup_state[key]
             state.request_ids.discard(req_id)
-            if not state.request_ids and state.phase is not LookupPhase.IN_FLIGHT:
+            if not state.request_ids and state.status is not LookupStatus.IN_FLIGHT:
                 del self._lookup_state[key]
 
     def shutdown(self) -> None:

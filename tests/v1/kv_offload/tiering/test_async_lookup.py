@@ -10,8 +10,7 @@ import pytest
 from vllm.v1.kv_offload.base import OffloadKey, ReqContext, make_offload_key
 from vllm.v1.kv_offload.tiering.async_lookup import (
     AsyncLookupManager,
-    LookupPhase,
-    LookupVerdict,
+    LookupStatus,
 )
 
 
@@ -50,13 +49,13 @@ class TestAsyncLookupManager:
     def test_found_key_returns_true(self):
         mgr = InMemoryLookupManager(existing_keys={_key(1)})
         assert mgr.lookup(_key(1), _ctx()) is None
-        assert mgr._lookup_state[_key(1)].phase is LookupPhase.PENDING
+        assert mgr._lookup_state[_key(1)].status is LookupStatus.PENDING
         mgr.flush()
-        assert mgr._lookup_state[_key(1)].phase is LookupPhase.IN_FLIGHT
+        assert mgr._lookup_state[_key(1)].status is LookupStatus.IN_FLIGHT
         mgr._results_ready.wait()
         mgr._results_ready.clear()
         assert mgr.lookup(_key(1), _ctx()) is True
-        assert mgr._lookup_state[_key(1)].phase is LookupPhase.RESOLVED
+        assert mgr._lookup_state[_key(1)].status is LookupStatus.HIT
         mgr.shutdown()
 
     def test_not_found_key_returns_false(self):
@@ -133,10 +132,10 @@ class TestAsyncLookupManager:
             assert mgr.lookup(key, _ctx("req_a")) is None
             mgr.flush()
             assert probe_started.wait(timeout=5)
-            assert mgr._lookup_state[key].phase is LookupPhase.IN_FLIGHT
+            assert mgr._lookup_state[key].status is LookupStatus.IN_FLIGHT
             mgr.cleanup("req_a")
             assert mgr.lookup(key, ctx_b) is None
-            assert mgr._lookup_state[key].phase is LookupPhase.IN_FLIGHT
+            assert mgr._lookup_state[key].status is LookupStatus.IN_FLIGHT
             mgr.flush()
 
             release_probe.set()
@@ -295,7 +294,7 @@ class TestAsyncLookupManager:
         # Entry retained (now False) with reverse index intact, so cleanup()
         # (which direct-indexes _lookup_state per reverse-index key) tears down
         # both structures without raising.
-        assert mgr._lookup_state[_key(1)].result is LookupVerdict.MARKED_MISS
+        assert mgr._lookup_state[_key(1)].status is LookupStatus.MARKED_MISS
         assert _key(1) in mgr._req_keys["reqA"]
         mgr.cleanup("reqA")
         assert _key(1) not in mgr._lookup_state
@@ -303,60 +302,22 @@ class TestAsyncLookupManager:
         assert "reqA" not in mgr._req_keys
         mgr.shutdown()
 
-    def test_mark_miss_applies_to_in_flight_result(self, monkeypatch):
-        """A failed load records a miss while its existence probe is running."""
-        key = _key(1)
-        mgr = InMemoryLookupManager(existing_keys={key})
-        probe_started = threading.Event()
-        release_probe = threading.Event()
-
-        def blocking_lookup(keys, req_context):
-            probe_started.set()
-            assert release_probe.wait(timeout=5)
-            return [True for _ in keys]
-
-        monkeypatch.setattr(mgr, "batch_lookup", blocking_lookup)
-        ctx = _ctx("reqA")
-        try:
-            assert mgr.lookup(key, ctx) is None
-            mgr.flush()
-            assert probe_started.wait(timeout=5)
-            token = mgr.lookup_token(key, ctx.req_id)
-            assert token.generation is not None
-
-            mgr.mark_miss([token])
-            state = mgr._lookup_state[key]
-            assert state.phase is LookupPhase.IN_FLIGHT
-            assert state.result is LookupVerdict.MARKED_MISS
-            assert mgr.lookup(key, ctx) is None
-
-            release_probe.set()
-            batch = mgr._pending_results.get(timeout=5)
-            mgr._pending_results.put(batch)
-            mgr.drain_results()
-            assert mgr.lookup(key, ctx) is False
-            assert state.phase is LookupPhase.RESOLVED
-            assert state.result is LookupVerdict.MARKED_MISS
-        finally:
-            release_probe.set()
-            mgr.shutdown()
-
-    def test_mark_miss_applies_to_pending_result(self):
-        """A pending lookup keeps its phase until its deferred miss is applied."""
+    def test_mark_miss_ignores_unresolved_generation(self):
+        """A promotion token is unavailable before its lookup resolves."""
         key = _key(1)
         mgr = InMemoryLookupManager(existing_keys={key})
         ctx = _ctx("reqA")
         try:
             assert mgr.lookup(key, ctx) is None
             token = mgr.lookup_token(key, ctx.req_id)
+            assert token.generation is None
             mgr.mark_miss([token])
-            assert mgr._lookup_state[key].phase is LookupPhase.PENDING
-            assert mgr._lookup_state[key].result is LookupVerdict.MARKED_MISS
+            assert mgr._lookup_state[key].status is LookupStatus.PENDING
             assert mgr.lookup(key, ctx) is None
             mgr.flush()
             mgr._results_ready.wait()
             mgr._results_ready.clear()
-            assert mgr.lookup(key, ctx) is False
+            assert mgr.lookup(key, ctx) is True
         finally:
             mgr.shutdown()
 
@@ -379,7 +340,7 @@ class TestAsyncLookupManager:
             new_token = mgr.lookup_token(key, ctx_b.req_id)
             assert old_token.generation != new_token.generation
             mgr.mark_miss([old_token])
-            assert mgr._lookup_state[key].result is LookupVerdict.UNRESOLVED
+            assert mgr._lookup_state[key].status is LookupStatus.PENDING
 
             mgr.flush()
             mgr._results_ready.wait()
