@@ -168,7 +168,14 @@ def _can_use_flashinfer_cudnn_bf16(
     weight: torch.Tensor,
     bias: torch.Tensor | None,
 ) -> bool:
-    if not current_platform.is_cuda():
+    # The N<=128 crossover was swept on sm_12x (GB10). sm_10x (B200/B300)
+    # showed no benefit for narrow-N GDN shapes in the same regime (#57318's
+    # sweep measured 0.90-1.13x there), so this path is restricted to sm_12x
+    # until sm_10x is swept separately. family(120) covers the whole 12.x
+    # decade (sm_120, sm_121, ...), same convention as #57318.
+    if not (
+        current_platform.is_cuda() and current_platform.is_device_capability_family(120)
+    ):
         return False
     if weight.shape[0] > _FLASHINFER_BF16_MAX_N:
         return False
