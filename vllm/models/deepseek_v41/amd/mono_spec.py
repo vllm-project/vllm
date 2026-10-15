@@ -19,8 +19,6 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-SPECS_PATH = "vllm.models.deepseek_v41.amd.mono_spec:MONO_SPECS"
-
 RECORD = 584  # an fp8_ds_mla KV record: 576 data bytes, 8 scale bytes
 SWA_WIDTH = 128  # a causal decode token's window slots
 MAX_ROWS = 48  # the kernels' step rows at most: 8 requests x (1 + 5 DSpark drafts)

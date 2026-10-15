@@ -18,7 +18,7 @@ from vllm.models.common.mono.runtime import MonoRuntime
 from vllm.models.common.mono.spec import MonoUnsupported
 from vllm.models.deepseek_v41.amd import mono_spec as ms
 
-SPECS_PATH = ms.SPECS_PATH
+SPECS = ms.MONO_SPECS
 LAYERS = 6
 HIDDEN = 16
 BLOCKS = 256
@@ -234,7 +234,8 @@ def _metadata(model, **overrides) -> dict:
 
 
 class TestDsv41Spec(MonoConformance):
-    specs_path = SPECS_PATH
+    specs = SPECS
+    specs_module = "vllm.models.deepseek_v41.amd.mono_spec"
 
     @pytest.fixture(autouse=True)
     def _stubs(self, monkeypatch):
@@ -434,7 +435,7 @@ def test_other_isa_refuses(monkeypatch, cdna):
     model = TestDsv41Spec().make_model(config)
     _gpu(monkeypatch, cdna=cdna)
     with pytest.raises(MonoUnsupported, match="CDNA4"):
-        MonoRuntime(model, config, select_mono_spec(config, SPECS_PATH))
+        MonoRuntime(model, config, select_mono_spec(config, SPECS))
 
 
 def test_too_few_compute_units_refuses(monkeypatch):
@@ -442,7 +443,7 @@ def test_too_few_compute_units_refuses(monkeypatch):
     model = TestDsv41Spec().make_model(config)
     _gpu(monkeypatch, cus=BLOCKS // 2)
     with pytest.raises(MonoUnsupported, match="compute units"):
-        MonoRuntime(model, config, select_mono_spec(config, SPECS_PATH))
+        MonoRuntime(model, config, select_mono_spec(config, SPECS))
 
 
 def test_other_moe_backend_refuses(monkeypatch):
@@ -453,14 +454,14 @@ def test_other_moe_backend_refuses(monkeypatch):
         experts.quant_method.mxfp4_backend = Mxfp4MoeBackend.TRITON
     _gpu(monkeypatch)
     with pytest.raises(MonoUnsupported, match="AITER_MXFP4_BF16"):
-        MonoRuntime(model, config, select_mono_spec(config, SPECS_PATH))
+        MonoRuntime(model, config, select_mono_spec(config, SPECS))
 
 
 def test_off_without_the_flag(monkeypatch):
     _gpu(monkeypatch)
     config = make_config()
     config.kernel_config.monokernel = False
-    assert select_mono_spec(config, SPECS_PATH) is None
+    assert select_mono_spec(config, SPECS) is None
 
 
 def test_whole_launch_runs_the_layer(monkeypatch):

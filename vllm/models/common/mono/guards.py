@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Refusals: the variant a config can serve, and TP agreement on every stage."""
 
-import importlib
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
@@ -11,7 +10,12 @@ import torch.distributed as dist
 
 from vllm.config.compilation import CUDAGraphMode
 from vllm.logger import init_logger
-from vllm.models.common.mono.spec import Feature, MonoSpec, MonoUnsupported
+from vllm.models.common.mono.spec import (
+    Feature,
+    KernelT,
+    MonoSpec,
+    MonoUnsupported,
+)
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -62,15 +66,6 @@ def tp_agree(ok: bool, group) -> bool:
 def _enabled(vllm_config: "VllmConfig") -> bool:
     """Whether ``--monokernel`` asked for the model's MonoKernels."""
     return bool(vllm_config.kernel_config.monokernel)
-
-
-def _load_specs(path: str) -> tuple[MonoSpec[Any], ...]:
-    """``"package.module:NAME"`` -> the spec variants, importing only that
-    module. ``NAME`` is a ``MonoSpec`` or a tuple of them, in the order they
-    are preferred."""
-    module, name = path.split(":")
-    specs = getattr(importlib.import_module(module), name)
-    return (specs,) if isinstance(specs, MonoSpec) else tuple(specs)
 
 
 def _features_in_use(vllm_config: "VllmConfig") -> set[Feature]:
@@ -169,8 +164,9 @@ def _set_capture_sizes(spec: MonoSpec[Any], vllm_config: "VllmConfig") -> None:
 
 
 def select_mono_spec(
-    vllm_config: "VllmConfig", specs_path: str
-) -> MonoSpec[Any] | None:
+    vllm_config: "VllmConfig",
+    specs: MonoSpec[KernelT] | Sequence[MonoSpec[KernelT]],
+) -> MonoSpec[KernelT] | None:
     """Picks the variant, sets the capture sizes, or raises with every reason.
 
     The variant is picked here, once: the model holds what this returns and
@@ -180,7 +176,7 @@ def select_mono_spec(
 
     Args:
         vllm_config: The engine's config, before the weights are loaded.
-        specs_path: ``"package.module:MONO_SPECS"``.
+        specs: The model's variants, in the order they are preferred.
 
     Returns:
         The variant this config runs, or None with ``--monokernel`` off.
@@ -191,7 +187,8 @@ def select_mono_spec(
     """
     if not _enabled(vllm_config):
         return None
-    spec, refusals = _select_spec(_load_specs(specs_path), vllm_config)
+    ordered = (specs,) if isinstance(specs, MonoSpec) else tuple(specs)
+    spec, refusals = _select_spec(ordered, vllm_config)
     if spec is None:
         raise MonoUnsupported("MonoKernel refused: " + _refusal_message(refusals))
     _set_capture_sizes(spec, vllm_config)

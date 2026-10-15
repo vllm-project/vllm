@@ -12,11 +12,12 @@ from vllm.models.common.mono.guards import _select_spec, select_mono_spec
 from vllm.models.common.mono.runtime import MonoRuntime
 from vllm.models.common.mono.spec import MonoUnsupported
 
-SPECS_PATH = "tests.models.common.mono.reference:MONO_SPECS"
+SPECS = reference.MONO_SPECS
 
 
 class TestReferenceSpec(MonoConformance):
-    specs_path = SPECS_PATH
+    specs = SPECS
+    specs_module = "tests.models.common.mono.reference"
 
     def make_config(self, **overrides):
         return reference.make_config(**overrides)
@@ -39,7 +40,7 @@ class TestReferenceSpec(MonoConformance):
 def test_switch_off_means_no_spec():
     config = reference.make_config()
     config.kernel_config.monokernel = False
-    assert select_mono_spec(config, SPECS_PATH) is None
+    assert select_mono_spec(config, SPECS) is None
 
 
 def test_the_first_servable_variant_wins():
@@ -56,7 +57,7 @@ def test_the_first_servable_variant_wins():
 
 
 def _make_mono(config, model):
-    mono = MonoRuntime(model, config, select_mono_spec(config, SPECS_PATH))
+    mono = MonoRuntime(model, config, select_mono_spec(config, SPECS))
     mono.bind_caches()
     return mono
 
@@ -94,4 +95,4 @@ def test_the_kernel_runs_the_layers_it_replaces():
 def test_model_refusal_is_raised():
     config = reference.make_config()
     with pytest.raises(MonoUnsupported, match="not a ReferenceModel"):
-        MonoRuntime(torch.nn.Linear(2, 2), config, select_mono_spec(config, SPECS_PATH))
+        MonoRuntime(torch.nn.Linear(2, 2), config, select_mono_spec(config, SPECS))

@@ -49,7 +49,7 @@ from vllm.model_executor.models.utils import (
     make_layers,
     maybe_prefix,
 )
-from vllm.models.common.mono import MonoRuntime, MonoSpec, select_mono_spec
+from vllm.models.common.mono import MonoRuntime, select_mono_spec
 from vllm.models.common.ops.sequence_parallel import (
     sp_all_gather,
     sp_padding_mask,
@@ -60,7 +60,7 @@ from vllm.models.deepseek_v4.amd.model import (
     DeepseekV4MoE as DeepseekV4MoEBase,
 )
 from vllm.models.deepseek_v41.amd.mono_spec import (
-    SPECS_PATH,
+    MONO_SPECS,
     DSV41Dispatch,
     DSV41Kernel,
 )
@@ -1302,9 +1302,7 @@ class DeepseekV41LLMForCausalLM(
         config = vllm_config.model_config.hf_config
         self.config = config
         self.vllm_config = vllm_config
-        self.mono_spec: MonoSpec[DSV41Kernel] | None = select_mono_spec(
-            vllm_config, SPECS_PATH
-        )
+        self.mono_spec = select_mono_spec(vllm_config, MONO_SPECS)
         self.mono: MonoRuntime[DSV41Kernel] | None = None
         expert_dtype = getattr(config, "expert_dtype", "fp4")
         self.hf_to_vllm_mapper = _make_deepseek_v4_weights_mapper(

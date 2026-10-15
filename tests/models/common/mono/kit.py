@@ -16,7 +16,6 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import ForwardContext, override_forward_context
 from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
 from vllm.models.common.mono.guards import (
-    _load_specs,
     _refuse_config,
     _select_spec,
     _set_capture_sizes,
@@ -58,9 +57,11 @@ class MonoConformance:
     """What every ``MonoSpec`` must satisfy. Subclass it in the model's test
     module and fill in the hooks below."""
 
-    specs_path: str
-    """``"package.module:MONO_SPECS"``, as the model passes it to
-    ``select_mono_spec``."""
+    specs: tuple[Any, ...]
+    """The model's variants, as it passes them to ``select_mono_spec``."""
+
+    specs_module: str
+    """Where ``specs`` is defined, for the import test to load on its own."""
 
     def make_config(self, **overrides) -> Any:
         """A config this spec serves, with ``overrides`` applied on top."""
@@ -100,7 +101,7 @@ class MonoConformance:
         picked once by ``select_mono_spec``, then the runtime over the loaded model,
         then the caches the runner binds."""
         model = self.make_model(config) if model is None else model
-        spec = select_mono_spec(config, self.specs_path)
+        spec = select_mono_spec(config, self.specs)
         assert spec is not None
         mono = MonoRuntime(model, config, spec)
         if bind:
@@ -108,7 +109,7 @@ class MonoConformance:
         return mono
 
     def spec(self, config):
-        spec, refusals = _select_spec(_load_specs(self.specs_path), config)
+        spec, refusals = _select_spec(self.specs, config)
         assert spec is not None, refusals
         return spec
 
@@ -116,7 +117,7 @@ class MonoConformance:
         config.lora_config = object()
         config.speculative_config = object()
         config.use_v2_model_runner = False
-        for spec in _load_specs(self.specs_path):
+        for spec in self.specs:
             reasons = _refuse_config(spec, config)
             assert sum("Model Runner V2" in r for r in reasons) == 1, reasons
             for feature in (Feature.LORA, Feature.SPECULATIVE_DECODING):
@@ -126,12 +127,12 @@ class MonoConformance:
     def test_refusal_names_every_variant(self, config):
         config.use_v2_model_runner = False
         with pytest.raises(MonoUnsupported) as excinfo:
-            select_mono_spec(config, self.specs_path)
-        for spec in _load_specs(self.specs_path):
+            select_mono_spec(config, self.specs)
+        for spec in self.specs:
             assert spec.name in str(excinfo.value)
 
     def test_spec_module_imports_no_kernel_backend(self):
-        module = self.specs_path.split(":")[0]
+        module = self.specs_module
         source = (
             "import sys; sys.path.insert(0, '.'); import importlib;"
             f"importlib.import_module({module!r});"
@@ -231,7 +232,7 @@ class MonoConformance:
 
     def test_build_runs_once_over_every_width(self, config, model):
         calls: list = []
-        spec = _spy(select_mono_spec(config, self.specs_path), "build", calls)
+        spec = _spy(select_mono_spec(config, self.specs), "build", calls)
         mono = MonoRuntime(model, config, spec)
         assert [args[1] for args in calls] == [model]
         assert set(calls[0][2]) == set(mono.widths)
