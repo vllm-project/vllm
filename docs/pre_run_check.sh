@@ -1,3 +1,4 @@
+#!/usr/bin/env bash
 if [ "$READTHEDOCS_VERSION_TYPE" != "external" ]; then
   echo "Not a PR build (version type=$READTHEDOCS_VERSION_TYPE); skipping pre-run-check gate."
   exit 0
@@ -43,7 +44,7 @@ if [ -z "$DOCS_CHANGED" ]; then
   exit 183
 fi
 echo "Docs-affecting files changed in this PR:"
-echo "$DOCS_CHANGED" | sed 's/^/  /'
+echo "  ${DOCS_CHANGED//$'\n'/$'\n'  }"
 echo "Docs-affecting files changed; continuing pre-run-check."
 echo "Checking pre-commit/pre-run-check status..."
 MAX_WAIT=300
