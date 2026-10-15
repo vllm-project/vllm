@@ -1053,16 +1053,17 @@ def test_eagle_partial_lookup_loads_attention_proof(missing):
 @pytest.mark.parametrize(
     ("attention_missing", "expected_hit", "expected_lookups"),
     [
-        # Chunk h3 is looked up once for the boundaries 24 and 20.
-        (None, 20, ["0h3", "0h3", "0h6", "1h5", "0h5", "1h4"]),
-        # A missing chunk h3 skips the boundaries 24, 20 and 16.
+        # The complete-chunk lookup of h3 also serves the boundaries 24 and 20.
+        (None, 20, ["0h3", "0h6", "1h5", "0h5", "1h4"]),
+        # A missing chunk h3 is looked up once more and skips the boundaries
+        # 24, 20 and 16.
         (b"h3", 0, ["0h3", "0h3", "0h3", "0h2", "1h1", "0h1", "1h0"]),
     ],
 )
 def test_eagle_partial_lookup_probes_popped_chunk_once(
     attention_missing, expected_hit, expected_lookups
 ):
-    """Boundaries past the popped EAGLE chunk share one lookup of that chunk.
+    """Boundaries past the popped EAGLE chunk reuse its complete-chunk lookup.
 
     The Mamba state is stored only at 20 (h4). Before this lookup was shared,
     the same hits took 7 and 9 lookups.
@@ -1086,6 +1087,57 @@ def test_eagle_partial_lookup_probes_popped_chunk_once(
     scheduler.manager.lookup.side_effect = lookup
     assert scheduler._lookup(req_status) == expected_hit
     assert lookups == expected_lookups
+
+
+def test_eagle_partial_lookup_after_recurrent_group_tightens_hit():
+    """A recurrent group can lower the hit after the EAGLE group pops a chunk.
+
+    The 62-token prompt has attention chunks h3, h7 and h11. The EAGLE group
+    hits all three and pops h11. The Mamba group has a complete state only at
+    16 (h3), so the complete hit drops to 16. The EAGLE lookup still confirmed
+    h7, so the partial hit at 36 loads h7 without another lookup of it.
+    """
+    scheduler = _make_partial_tail_scheduler(eagle=True)
+    request = _make_partial_tail_request(scheduler)
+    request.num_prompt_tokens = request.num_tokens = 62
+    request.block_hashes = [BlockHash(f"h{i}".encode()) for i in range(15)]
+    request.all_token_ids = list(range(62))
+    req_status = scheduler._req_status["req"]
+    req_status.num_locally_computed_tokens = 0
+    req_status.update_offload_keys()
+    lookups = []
+
+    def lookup(key, req_context):
+        group_idx = get_offload_group_idx(key)
+        block_hash = get_offload_block_hash(key)
+        lookups.append(f"{group_idx}{block_hash.decode()}")
+        ready = group_idx == 0 or block_hash in (b"h3", b"h8")
+        return LookupResult.HIT if ready else LookupResult.MISS
+
+    scheduler.manager.lookup.side_effect = lookup
+    assert scheduler._lookup(req_status) == 36
+    assert req_status.partial_tail_boundary == 36
+    assert lookups.count("0h7") == 1
+
+    scheduler.update_state_after_alloc(
+        request,
+        KVCacheBlocks(
+            (
+                [KVCacheBlock(31), KVCacheBlock(32), KVCacheBlock(33)],
+                [
+                    KVCacheBlock(0, is_null=True),
+                    KVCacheBlock(0, is_null=True),
+                    KVCacheBlock(41),
+                ],
+            )
+        ),
+        num_external_tokens=36,
+    )
+    [load_job_id] = scheduler._current_batch_load_jobs
+    assert {
+        (get_offload_group_idx(key), get_offload_block_hash(key))
+        for key in scheduler._jobs[load_job_id].keys
+    } == {(0, b"h3"), (0, b"h7"), (0, b"h9"), (1, b"h8")}
 
 
 @pytest.mark.parametrize("cow_on_proof_step", [False, True])
