@@ -68,8 +68,13 @@ if HAS_TRITON:
                 "Triton found 0 active drivers in distributed environment. "
                 "This is expected during initialization."
             )
-        elif not is_distributed_env and len(active_drivers) != 1:
-            # Strict check for non-distributed environments
+        elif (
+            not is_distributed_env
+            and len(active_drivers) != 1
+            and os.environ.get("TRITON_INTERPRET") != "1"
+        ):
+            # Strict check for non-distributed environments. Triton's interpreter
+            # executes JIT kernels on CPU tensors without an active device driver.
             logger.info(
                 "Triton is installed but %d active driver(s) found "
                 "(expected 1). Disabling Triton to prevent runtime errors.",
