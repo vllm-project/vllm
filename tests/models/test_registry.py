@@ -113,9 +113,6 @@ def test_registry_model_property(model_arch, is_mm, score_type):
 @pytest.mark.parametrize(
     "model_arch,is_pp",
     [
-        # TODO(woosuk): Re-enable this once the MLP Speculator is supported
-        # in V1.
-        # ("MLPSpeculatorPreTrainedModel", False),
         ("DeepseekV2ForCausalLM", True),
         ("Qwen2VLForConditionalGeneration", True),
     ],

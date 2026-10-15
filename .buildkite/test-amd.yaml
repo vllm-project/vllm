@@ -2669,7 +2669,6 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/v1/spec_decode/
-  - vllm/model_executor/models/mlp_speculator.py
   - tests/v1/spec_decode/test_acceptance_length.py
   - vllm/platforms/rocm.py
   commands:
@@ -5978,7 +5977,6 @@ steps:
   - vllm/model_executor/models/gemma4_mtp.py
   - vllm/model_executor/models/llama.py
   - vllm/model_executor/models/llama_eagle3.py
-  - vllm/model_executor/models/medusa.py
   - vllm/model_executor/models/registry.py
   - tests/evals/gsm8k/
   - tests/utils.py
