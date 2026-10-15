@@ -95,7 +95,7 @@ class AsyncLookupManager(ABC):
         # and recreates a key.
         self._next_generation = 0
 
-        # Accumulates (key, req_context, generation) tuples during lookup().
+        # Accumulates (key, req_context, generation) triples during lookup().
         # Flushed as one queue item per step by flush().
         self._lookup_batch: list[tuple[OffloadKey, ReqContext, int]] = []
 
@@ -152,11 +152,10 @@ class AsyncLookupManager(ABC):
         context_id = id(req_context)
         state = self._lookup_state.get(key)
         if state is None:
-            generation = self._next_generation
+            state = LookupState(generation=self._next_generation)
             self._next_generation += 1
-            state = LookupState(generation=generation)
             self._lookup_state[key] = state
-            self._lookup_batch.append((key, req_context, generation))
+            self._lookup_batch.append((key, req_context, state.generation))
         state.request_context_ids.add(context_id)
         self._req_keys.setdefault(context_id, set()).add(key)
         return state.result
@@ -256,13 +255,13 @@ class AsyncLookupManager(ABC):
             if pending is None:
                 break
 
-            # Group by request incarnation, not the reusable request ID.
-            batches: dict[int, tuple[ReqContext, list[tuple[OffloadKey, int]]]] = {}
+            # Group by req_id.
+            batches: dict[str, tuple[ReqContext, list[tuple[OffloadKey, int]]]] = {}
             for key, req_context, generation in pending:
-                context_id = id(req_context)
-                if context_id not in batches:
-                    batches[context_id] = (req_context, [])
-                batches[context_id][1].append((key, generation))
+                req_id = req_context.req_id
+                if req_id not in batches:
+                    batches[req_id] = (req_context, [])
+                batches[req_id][1].append((key, generation))
 
             if not batches:
                 continue
