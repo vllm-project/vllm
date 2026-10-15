@@ -239,7 +239,7 @@ class TieringOffloadingManager(OffloadingManager):
         # Preserve the original tier for this request's cache-hit metrics,
         # even after its KV blocks are promoted into host memory
         # (otherwise a disk or P2P hit would be mislabeled as a host hit).
-        self._request_load_sources: dict[str, dict[OffloadKey, CacheHitSource]] = {}
+        self._request_load_sources: dict[int, dict[OffloadKey, CacheHitSource]] = {}
 
         # Cached ParentManager wrappers for each secondary tier.
         self._tier_parents: dict[SecondaryTierManager, _SecondaryTierFacingParent] = {
@@ -302,7 +302,7 @@ class TieringOffloadingManager(OffloadingManager):
             successful_keys = ()
             failed_keys = transfer_job.keys
 
-        load_sources = self._request_load_sources.get(transfer_job.req_context.req_id)
+        load_sources = self._request_load_sources.get(id(transfer_job.req_context))
         if load_sources is not None:
             source = self.secondary_tiers[job_metadata.tier_idx].cache_hit_source
             for key in failed_keys:
@@ -484,7 +484,7 @@ class TieringOffloadingManager(OffloadingManager):
     def get_load_source(
         self, key: OffloadKey, req_context: ReqContext
     ) -> CacheHitSource:
-        load_sources = self._request_load_sources.get(req_context.req_id)
+        load_sources = self._request_load_sources.get(id(req_context))
         if load_sources is not None and key in load_sources:
             return load_sources[key]
         return self.primary_tier.get_load_source(key, req_context)
@@ -526,7 +526,7 @@ class TieringOffloadingManager(OffloadingManager):
 
         store_spec = primary_write_result.store_spec
         assert isinstance(store_spec, CPULoadStoreSpec)
-        load_sources = self._request_load_sources.setdefault(req_context.req_id, {})
+        load_sources = self._request_load_sources.setdefault(id(req_context), {})
         source = self.secondary_tiers[tier_idx].cache_hit_source
         for promoted_key in primary_write_result.keys_to_store:
             load_sources[promoted_key] = source
@@ -876,7 +876,7 @@ class TieringOffloadingManager(OffloadingManager):
                 continue
             tier.on_request_finished(state.req_context)
         self._metrics.on_request_finished(state.req_context)
-        self._request_load_sources.pop(state.req_context.req_id, None)
+        self._request_load_sources.pop(id(state.req_context), None)
         current_state = self._req_state.get(state.req_context.req_id)
         if current_state is state:
             del self._req_state[state.req_context.req_id]

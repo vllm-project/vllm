@@ -641,7 +641,7 @@ class TestTieringOffloadingManager:
             if successful_indices is None
             else {chunks[i] for i in successful_indices}
         )
-        assert set(self.manager._request_load_sources[_CTX.req_id]) == (
+        assert set(self.manager._request_load_sources[id(_CTX)]) == (
             expected_source_keys
         )
 
@@ -1368,17 +1368,22 @@ class TestTieringOffloadingManager:
 
         new_ctx = ReqContext(req_id=old_ctx.req_id)
         self.manager.on_new_request(new_ctx)
+        promoted_key = to_keys([3])[0]
+        self.secondary_tier2.chunks[promoted_key] = True
+        assert self.manager.lookup(promoted_key, new_ctx) is LookupResult.HIT_PENDING
         assert self.manager.has_pending_work()
         self.manager.complete_store(keys, writer_ctx, success=True)
         self._simulate_on_schedule_end()
 
         assert any(
-            call.args[0].req_context is old_ctx
-            and set(call.args[0].keys) == set(keys)
+            call.args[0].req_context is old_ctx and set(call.args[0].keys) == set(keys)
             for call in self.secondary_tier1.submit_store.call_args_list
         )
         assert id(old_ctx) not in self.manager._live_req_states
         assert id(new_ctx) in self.manager._live_req_states
+        assert self.manager.get_load_source(promoted_key, new_ctx) == (
+            self.secondary_tier2.cache_hit_source
+        )
 
     def test_cascade_drops_deferred_keys_whose_primary_write_failed(
         self, manager_setup

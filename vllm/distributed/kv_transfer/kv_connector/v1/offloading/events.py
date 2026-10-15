@@ -4,9 +4,9 @@
 
 The OffloadingManager identifies an offloaded chunk only by its OffloadKey,
 so its raw events carry no token ids, parent hash, or block size.
-:class:`OffloadingEventsTracker` snapshots each chunk's full ``BlockStored``
-payload while the ``Request`` is alive and publishes stores as block-granular
-payloads: a chunk event may carry multiple constituent per-block hashes.
+:class:`OffloadingEventsTracker` retains the originating ``Request`` through
+its request context and builds each ``BlockStored`` payload when the store
+completes. A chunk event may carry multiple constituent per-block hashes.
 Removals carry only the chunk's OffloadKey hash, so consumers must track which
 block hashes were announced by each chunk. Opt-in via
 ``kv_connector_extra_config["self_describing_kv_events"]``; inert unless
@@ -88,7 +88,7 @@ class _OffloadEventMetadata:
     block_size: int
     lora_id: int | None
     lora_name: str | None
-    # Deferred: needs the same incremental curr_mm_idx handling as GPU events.
+    # Per-block extra keys from the originating request, when available.
     extra_keys: tuple[tuple[Any, ...] | None, ...] | None
     group_idx: int
     kv_cache_spec: OffloadingEventGroupSpec
