@@ -58,6 +58,53 @@ from vllm.v1.attention.backend import AttentionCGSupport
 DEVICE_TYPE = current_platform.device_type
 
 
+@pytest.mark.parametrize(
+    "method", ["eagle", "eagle3", "mtp", "dflash", "dspark", "extract_hidden_states"]
+)
+def test_tpsp_rejects_target_hidden_state_speculation(method):
+    config = VllmConfig()
+    config.model_config = SimpleNamespace(enable_tpsp=True)
+    speculative_config = object.__new__(SpeculativeConfig)
+    speculative_config.method = method
+    config.speculative_config = speculative_config
+
+    with pytest.raises(ValueError, match="target hidden states"):
+        config._verify_tpsp_compatibility()
+
+
+def test_tpsp_rejects_pipeline_parallelism():
+    config = VllmConfig()
+    config.model_config = SimpleNamespace(enable_tpsp=True)
+    config.parallel_config.pipeline_parallel_size = 2
+
+    with pytest.raises(ValueError, match="pipeline_parallel_size=1"):
+        config._verify_tpsp_compatibility()
+
+
+def test_tpsp_compatibility_is_checked_during_config_creation(monkeypatch):
+    def set_tpsp_and_pp(config):
+        config.model_config = SimpleNamespace(enable_tpsp=True)
+        config.parallel_config.pipeline_parallel_size = 2
+
+    monkeypatch.setattr(VllmConfig, "try_verify_and_update_config", set_tpsp_and_pp)
+    with pytest.raises(ValueError, match="pipeline_parallel_size=1"):
+        VllmConfig()
+
+
+def test_tpsp_allows_other_speculation_and_disabled_tpsp():
+    config = VllmConfig()
+    config.model_config = SimpleNamespace(enable_tpsp=True)
+    speculative_config = object.__new__(SpeculativeConfig)
+    speculative_config.method = "ngram"
+    config.speculative_config = speculative_config
+    config._verify_tpsp_compatibility()
+
+    config.model_config.enable_tpsp = False
+    config.parallel_config.pipeline_parallel_size = 2
+    speculative_config.method = "eagle3"
+    config._verify_tpsp_compatibility()
+
+
 def test_nested_rope_validation_patch_preserves_flat_rope_parameters(monkeypatch):
     calls = []
 
