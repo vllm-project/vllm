@@ -31,6 +31,7 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     TritonWarmupTensor,
 )
 from vllm.platforms import current_platform
+from vllm.transformers_utils.deepseek_v4_utils import get_compress_ratios
 from vllm.triton_utils import tl, triton
 from vllm.utils.import_utils import has_cutedsl
 from vllm.utils.math_utils import cdiv, next_power_of_2
@@ -1012,7 +1013,7 @@ def _combine_topk_swa_warmup_inputs(vllm_config: Any) -> _WarmupInputRows:
     """
     model_config = getattr(vllm_config, "model_config", None)
     hf_config = getattr(model_config, "hf_config", None)
-    compress_ratios = getattr(hf_config, "compress_ratios", None) or [0]
+    compress_ratios = get_compress_ratios(hf_config) or [0]
     topk = _hf_config_int(vllm_config, "index_topk", 0)
     return zip_inputs(
         *(
@@ -1089,7 +1090,8 @@ class CombineTopkSwaIndicesKernel(
             token_idx_in_query = token_idx - query_start
             pos = start_pos + token_idx_in_query
             if COMPRESS_RATIO > 0:
-                topk_len = tl.minimum((pos + 1) // COMPRESS_RATIO, TOP_K)
+                # Warmup batches can put pos below zero; keep the length >= 0.
+                topk_len = tl.maximum(tl.minimum((pos + 1) // COMPRESS_RATIO, TOP_K), 0)
             else:
                 # SWA-only layers pass TOP_K=0; skip the division entirely
                 # (integer div by constexpr 0 is UB and yields garbage, which
@@ -1100,7 +1102,7 @@ class CombineTopkSwaIndicesKernel(
             # start (SWA bounded replay), so the window cannot start before
             # the gathered buffer does.
             swa_start = tl.maximum(swa_start, gather_start)
-            swa_len = pos - swa_start + 1
+            swa_len = tl.maximum(pos - swa_start + 1, 0)
 
             offset = tl.arange(0, PADDED_TOP_K)
             mask = offset < topk_len
@@ -1108,9 +1110,12 @@ class CombineTopkSwaIndicesKernel(
                 topk_indices_ptr + token_idx * topk_indices_stride + offset,
                 mask=mask,
             )
+            # A failed (-1) or out-of-pool candidate stays -1 instead of landing
+            # in the previous request's rows or this request's SWA rows.
+            valid = (topk_indices >= 0) & (topk_indices < N)
             tl.store(
                 combined_indices_ptr + token_idx * combined_indices_stride + offset,
-                topk_indices + M * batch_idx,
+                tl.where(valid, topk_indices + M * batch_idx, -1),
                 mask=mask,
             )
             # Index into gathered buffer: N + (position - gather_start)

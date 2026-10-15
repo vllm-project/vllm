@@ -127,7 +127,9 @@ def circular_qsa_slot_mapping(
         valid = (requests >= 0) & (requests < block_table.shape[0]) & (positions >= 0)
         safe_requests = requests.clamp(0, block_table.shape[0] - 1)
         physical_blocks = block_table[safe_requests, 0].long()
-        valid &= physical_blocks >= 0
+        # Dummy and padding requests own no ring and sit on the null block,
+        # which must never be written.
+        valid &= physical_blocks > 0
         slots = physical_blocks * compressor_state_size + positions.remainder(
             compressor_state_size
         )
@@ -288,7 +290,8 @@ def _build_qsa_metadata_kernel(
             mask=valid,
             other=-1,
         )
-        valid &= physical_block >= 0
+        # Dummy and padding requests own no ring and sit on the null block.
+        valid &= physical_block > 0
         slot = physical_block * circular_buffer_size + (
             logical_position % circular_buffer_size
         )
