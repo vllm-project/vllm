@@ -39,7 +39,7 @@ HISPARSE_DEVICE_SUFFIX = ".hisparse_device"
 @dataclass(frozen=True)
 class HiSparseLayout:
     host_group: KVCacheGroupSpec
-    gpu_groups: list[KVCacheGroupSpec]
+    device_pool_groups: list[KVCacheGroupSpec]
     host_num_blocks: int
     host_block_stride: int
     shared_host_pool: bool
@@ -254,7 +254,7 @@ def create_hisparse_layout(
 
     return HiSparseLayout(
         host_group=host_group,
-        gpu_groups=[group for group in groups if not group.host_resident],
+        device_pool_groups=[group for group in groups if not group.host_resident],
         host_num_blocks=host_num_blocks,
         host_block_stride=host_block_stride,
         shared_host_pool=shared_host_pool,
@@ -328,16 +328,16 @@ def get_hisparse_kv_cache_config(
     )
 
     hisparse_layout = create_hisparse_layout(vllm_config, kv_cache_groups, host_budget)
-    gpu_groups = hisparse_layout.gpu_groups
+    device_pool_groups = hisparse_layout.device_pool_groups
     layout = vllm_config.cache_config.get_resolved_kv_cache_layout()
-    validate_kv_cache_layout(layout, gpu_groups)
-    bytes_per_block = _get_kv_cache_bytes_per_block(gpu_groups, layout)
+    validate_kv_cache_layout(layout, device_pool_groups)
+    bytes_per_block = _get_kv_cache_bytes_per_block(device_pool_groups, layout)
     num_blocks = may_override_num_blocks(
         vllm_config, available_memory // bytes_per_block
     )
     size = bytes_per_block * num_blocks
     kv_cache_tensors = _build_hisparse_kv_cache_tensors(
-        gpu_groups, num_blocks, size, layout, bytes_per_block
+        device_pool_groups, num_blocks, size, layout, bytes_per_block
     )
 
     host_groups = [hisparse_layout.host_group]
@@ -364,7 +364,7 @@ def get_hisparse_kv_cache_config(
     return KVCacheConfig(
         num_blocks=num_blocks,
         kv_cache_tensors=kv_cache_tensors,
-        kv_cache_groups=[*host_groups, *gpu_groups],
+        kv_cache_groups=[*host_groups, *device_pool_groups],
         hisparse_host_num_blocks=hisparse_layout.host_num_blocks,
         hisparse_host_block_stride=hisparse_layout.host_block_stride,
         hisparse_shared_host_pool=hisparse_layout.shared_host_pool,
