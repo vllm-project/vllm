@@ -531,11 +531,6 @@ class FusedMoEExperts(ABC):
     def is_monolithic() -> bool:
         raise NotImplementedError("Implemented by subclasses.")
 
-    @staticmethod
-    def _supports_hash_routing() -> bool:
-        """Whether a monolithic kernel implements hash routing."""
-        return False
-
     @property
     def expects_unquantized_inputs(self) -> bool:
         """Whether or not the PrepareFinalize should defer input quantization
