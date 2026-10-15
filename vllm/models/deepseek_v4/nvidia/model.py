@@ -944,7 +944,7 @@ class DeepseekV4DecoderLayer(nn.Module):
             vllm_config,
             prefix=f"{prefix}.ffn",
             use_sequence_parallel=self.use_sequence_parallel,
-            num_hash_layers=config.num_hash_layers,
+            num_hash_layers=config.mlp_layer_types.count("hash_moe"),
         )
 
         self.attn_norm = RMSNorm(self.hidden_size, self.rms_norm_eps)
@@ -1207,7 +1207,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             prefix=f"{prefix}.layers",
         )
         self.has_local_hash_moe = self.start_layer < min(
-            self.end_layer, config.num_hash_layers
+            self.end_layer, config.mlp_layer_types.count("hash_moe")
         )
 
         if get_pp_group().is_last_rank:
