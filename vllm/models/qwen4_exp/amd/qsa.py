@@ -58,7 +58,7 @@ from vllm.v1.worker.workspace import (
     is_workspace_manager_initialized,
 )
 
-from ..common.qsa import QSAIndexerMetadata
+from ..common.qsa_indexer import QSAIndexerMetadata
 from . import model
 from .qsa_indexer import QSAIndexer
 

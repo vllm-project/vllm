@@ -5,7 +5,7 @@
 import pytest
 import torch
 
-from vllm.models.qwen4_exp.common.qsa import (
+from vllm.models.qwen4_exp.common.qsa_indexer import (
     canonical_qsa_rope_positions,
     circular_qsa_slot_mapping,
     compressed_qsa_slot_mapping,

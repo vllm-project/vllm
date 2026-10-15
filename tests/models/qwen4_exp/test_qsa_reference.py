@@ -7,8 +7,8 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from vllm.models.qwen4_exp.common import qsa as qsa_common
-from vllm.models.qwen4_exp.common.qsa import QSAIndexerMetadataBuilder
+from vllm.models.qwen4_exp.common import qsa_indexer as qsa_common
+from vllm.models.qwen4_exp.common.qsa_indexer import QSAIndexerMetadataBuilder
 from vllm.models.qwen4_exp.nvidia import (
     model as _qwen4_exp_model,  # noqa: F401
 )
