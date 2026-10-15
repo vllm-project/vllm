@@ -4,7 +4,6 @@
 
 import torch
 
-from vllm.config import get_current_vllm_config_or_none
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import (
@@ -55,18 +54,6 @@ class FlashAttentionDiffKVBackend(FlashAttentionBackend):
         if not is_flash_attn_varlen_func_available():
             return False
         try:
-            vllm_config = get_current_vllm_config_or_none()
-            if (
-                vllm_config is not None
-                and is_quantized_kv_cache(vllm_config.cache_config.cache_dtype)
-                and not flash_attn_supports_kv_cache_dtype(
-                    vllm_config.cache_config.cache_dtype,
-                    head_size=head_size,
-                    head_size_v=head_size_v,
-                    has_sinks=has_sinks,
-                )
-            ):
-                return False
             version = get_flash_attn_version(
                 requires_alibi=False,
                 head_size=head_size,
