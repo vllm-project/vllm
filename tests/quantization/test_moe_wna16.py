@@ -222,7 +222,9 @@ def test_moe_wna16_setup_forwards_selected_backend(monkeypatch):
     method.wna16_backend = WNA16MoEBackend.HUMMING
     method.moe = object()
     quant_config = object()
-    method.get_fused_moe_quant_config = lambda layer: quant_config
+    monkeypatch.setattr(
+        method, "get_fused_moe_quant_config", lambda layer: quant_config
+    )
     layer = SimpleNamespace(_expert_routing_tables=lambda: (None, None, None))
     captured = {}
     kernel = object()
