@@ -106,6 +106,7 @@ def build_response_output_items(
     tool_calls: list[FunctionCall] | None,
     logprobs: list[Logprob] | None = None,
     tools: list[Tool] | None = None,
+    incomplete: bool = False,
 ) -> list[ResponseOutputItem]:
     outputs: list[ResponseOutputItem] = []
     tool_call_name_map = build_responses_tool_call_name_map(tools)
@@ -120,7 +121,9 @@ def build_response_output_items(
                 content=[
                     ResponseReasoningTextContent(text=reasoning, type="reasoning_text")
                 ],
-                status=None,
+                status="incomplete"
+                if incomplete and not (content or tool_calls)
+                else None,
             )
         )
 
@@ -137,7 +140,7 @@ def build_response_output_items(
                     )
                 ],
                 role="assistant",
-                status="completed",
+                status="incomplete" if incomplete and not tool_calls else "completed",
                 type="message",
             )
         )
@@ -166,7 +169,9 @@ def build_response_output_items(
                     id=f"fc_{random_uuid()}",
                     call_id=call_id,
                     type="function_call",
-                    status="completed",
+                    status="incomplete"
+                    if incomplete and idx == len(tool_calls) - 1
+                    else "completed",
                     name=call_name.name,
                     namespace=call_name.namespace,
                     arguments=tool_call.arguments,
