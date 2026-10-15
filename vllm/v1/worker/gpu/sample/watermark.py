@@ -591,6 +591,7 @@ def _philox_gumbel_kernel(
     expanded_idx_mapping_ptr,
     seeds_ptr,
     pos_ptr,
+    round_pos_ptr,
     temp_ptr,
     logits_cache_ptr,
     logits_cache_stride_0,
@@ -644,6 +645,9 @@ def _philox_gumbel_kernel(
             )
             seed = tl.load(seeds_ptr + req_state_idx, mask=valid_req, other=0)
             pos = tl.load(pos_ptr + row)
+            round_pos = (
+                tl.load(round_pos_ptr + row) if round_pos_ptr is not None else None
+            )
             logits_row = logits_ptr + row * logits_stride
             logits = tl.load(logits_row + candidate, mask=mask, other=float("-inf")).to(
                 tl.float32
@@ -655,6 +659,7 @@ def _philox_gumbel_kernel(
                 seed,
                 pos,
                 temp,
+                round_pos,
                 IS_DRAFTING=IS_DRAFTING,
                 USE_FP64=USE_FP64,
                 APPLY_TEMPERATURE=False,
@@ -713,6 +718,7 @@ def philox_gumbel_sample(
     temperatures: torch.Tensor | None = None,
     seeds: torch.Tensor | None = None,
     positions: torch.Tensor | None = None,
+    round_positions: torch.Tensor | None = None,
     use_fp64: bool = False,
     is_drafting: bool = False,
     logits_cache: torch.Tensor | None = None,
@@ -724,6 +730,8 @@ def philox_gumbel_sample(
         raise ValueError("sampling state requires skip_mask")
     if skip_mask is not None and any(value is None for value in sampling_state):
         raise ValueError("skip_mask requires complete sampling state")
+    if round_positions is not None and skip_mask is None:
+        raise ValueError("round positions require skip_mask")
     if logits_cache is not None:
         if logits_cache_col is None or logits_cache_source is None:
             raise ValueError("logits cache requires its column and source logits")
@@ -756,6 +764,8 @@ def philox_gumbel_sample(
         expanded_idx_mapping = expanded_idx_mapping.contiguous()
     if positions is not None:
         positions = positions.contiguous()
+    if round_positions is not None:
+        round_positions = round_positions.contiguous()
     if logits_cache_col is not None:
         logits_cache_col = logits_cache_col.contiguous()
     if logits_cache_source is not None and logits_cache_source.stride(-1) != 1:
@@ -782,6 +792,7 @@ def philox_gumbel_sample(
         expanded_idx_mapping,
         seeds,
         positions,
+        round_positions,
         temperatures,
         logits_cache,
         logits_cache.stride(0) if logits_cache is not None else 0,

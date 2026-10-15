@@ -27,6 +27,7 @@ def _selector_walk_kernel(
     BLOCK_K: tl.constexpr,
     SAMPLE_PROBABILISTIC: tl.constexpr,
     USE_FP64: tl.constexpr,
+    USE_ROUND_SEED: tl.constexpr,
 ):
     row = tl.program_id(0)
     offsets = tl.arange(0, BLOCK_K)
@@ -36,6 +37,9 @@ def _selector_walk_kernel(
     temperature = tl.load(temperature_ptr + req_state, mask=valid, other=0.0)
     seed = tl.load(seeds_ptr + req_state, mask=valid, other=0)
     previous = 0
+    round_pos = (
+        tl.load(sample_pos_ptr + row * num_steps) - 1 if USE_ROUND_SEED else None
+    )
     for step in range(num_steps):
         flat = row * num_steps + step
         score_base = (flat * top_k + previous) * top_k
@@ -61,6 +65,7 @@ def _selector_walk_kernel(
             seed,
             sample_pos,
             temperature if SAMPLE_PROBABILISTIC else 0.0,
+            round_pos,
             IS_DRAFTING=True,
             USE_FP64=USE_FP64,
         )
@@ -135,6 +140,7 @@ class CandidateSampler:
         draft_tokens: torch.Tensor,
         draft_logits: torch.Tensor | None,
         use_fp64: bool,
+        use_round_seed: bool,
     ) -> None:
         candidate_ids = candidate_ids.contiguous()
         sample_pos = sample_pos.contiguous()
@@ -154,6 +160,7 @@ class CandidateSampler:
             BLOCK_K=block_k,
             SAMPLE_PROBABILISTIC=draft_logits is not None,
             USE_FP64=use_fp64,
+            USE_ROUND_SEED=use_round_seed,
             num_warps=1,
         )
 
@@ -242,6 +249,7 @@ class DFlash2Speculator(DFlashSpeculator):
             self.draft_tokens,
             self.draft_logits,
             self.use_fp64_gumbel,
+            self.use_round_seed,
         )
         if self.enable_adaptive_verification:
             self._maybe_predict_acceptance(

@@ -349,6 +349,7 @@ def test_candidate_generation_routes_scores_and_adaptive_inputs(monkeypatch, lil
         self.num_speculative_steps = 2
         self.num_query_per_req = 3
         self.dtype = torch.float32
+        self.use_round_seed = True
 
     monkeypatch.setattr(DFlashSpeculator, "__init__", init_base)
     cls = LiLiCorrSpeculator if lilicorr else DFlash2Speculator
@@ -421,6 +422,7 @@ def test_candidate_generation_routes_scores_and_adaptive_inputs(monkeypatch, lil
     torch.testing.assert_close(sampling_inputs[0], expected_ids)
     assert sampling_inputs[1] is scores
     assert sampling_inputs[4] is spec.sample_idx_mapping
+    assert sampling_inputs[10] is True
     torch.testing.assert_close(adaptive_inputs[0], scores[:, :, 0].flatten(0, 1))
     torch.testing.assert_close(adaptive_inputs[1], spec.sample_idx_mapping)
     torch.testing.assert_close(adaptive_inputs[2], spec.sample_col)
@@ -472,6 +474,7 @@ def test_candidate_walk_preserves_conditional_scores_and_padding(probabilistic):
             tokens,
             cache,
             False,
+            True,
         )
 
     run()
@@ -498,6 +501,53 @@ def test_candidate_walk_preserves_conditional_scores_and_padding(probabilistic):
     assert (tokens[2] == -1).all()
     if cache is not None:
         assert cache[1].isneginf().all()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_probabilistic_candidate_walk_keys_noise_by_round():
+    """Revisiting a source position in a later round must use fresh noise."""
+    device = torch.device("cuda")
+    batch, steps, top_k = 4096, 2, 2
+    sampler = CandidateSampler(batch, steps, top_k, device)
+    candidates = (
+        torch.arange(top_k, device=device).view(1, 1, top_k).expand(batch, steps, top_k)
+    )
+    scores = torch.zeros(batch, steps, top_k, top_k, device=device)
+    mappings = torch.arange(batch, device=device).repeat_interleave(steps)
+    temperatures = torch.ones(batch, device=device)
+    seeds = torch.arange(batch, device=device)
+    logits_cache = torch.empty(batch, steps, top_k, device=device)
+
+    def sample(start: int) -> torch.Tensor:
+        positions = (
+            torch.arange(start, start + steps, device=device)
+            .view(1, steps)
+            .expand(batch, steps)
+            .flatten()
+        )
+        tokens = torch.empty(batch, steps, dtype=torch.long, device=device)
+        sampler.sample(
+            candidates,
+            scores,
+            batch,
+            positions,
+            mappings,
+            temperatures,
+            seeds,
+            tokens,
+            logits_cache,
+            False,
+            True,
+        )
+        return tokens
+
+    first_round = sample(20)
+    repeated_round = sample(20)
+    second_round = sample(21)
+
+    torch.testing.assert_close(first_round, repeated_round)
+    mismatch_rate = (first_round[:, 1] != second_round[:, 0]).float().mean()
+    assert 0.45 < mismatch_rate < 0.55
 
 
 @pytest.mark.parametrize(

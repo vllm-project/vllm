@@ -182,6 +182,36 @@ def _sample(
     )
 
 
+def test_round_position_changes_noise_stream():
+    num_samples = 1024
+    logits = torch.zeros(num_samples, 2, device=DEVICE)
+    idx_mapping = torch.zeros(num_samples, dtype=torch.int32, device=DEVICE)
+    temperature = torch.ones(1, dtype=torch.float32, device=DEVICE)
+    seed = torch.tensor([0xABCD], dtype=torch.int64, device=DEVICE)
+    pos = torch.arange(num_samples, dtype=torch.int64, device=DEVICE)
+    round_pos = torch.zeros_like(pos)
+
+    def sample(key: torch.Tensor) -> torch.Tensor:
+        return gumbel_sample(
+            logits,
+            idx_mapping,
+            temperature,
+            seed,
+            pos,
+            apply_temperature=True,
+            is_drafting=True,
+            round_pos=key,
+        )
+
+    first = sample(round_pos)
+    repeated = sample(round_pos)
+    next_round = sample(round_pos + 1)
+
+    assert torch.equal(first, repeated)
+    difference_rate = (first != next_round).float().mean().item()
+    assert 0.4 < difference_rate < 0.6
+
+
 def _z_score(observed: int, expected: float, num_trials: int) -> float:
     p = expected / num_trials
     return (observed - expected) / math.sqrt(num_trials * p * (1 - p))

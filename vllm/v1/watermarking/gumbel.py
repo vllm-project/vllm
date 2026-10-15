@@ -93,6 +93,7 @@ class GumbelWatermarker(Watermarker):
             temperatures=random_sampler.temperatures,
             seeds=random_sampler.seeds,
             positions=random_sampler.positions,
+            round_positions=random_sampler.round_pos,
             use_fp64=random_sampler.use_fp64,
             is_drafting=random_sampler.is_drafting,
             logits_cache=random_sampler.logits_cache,

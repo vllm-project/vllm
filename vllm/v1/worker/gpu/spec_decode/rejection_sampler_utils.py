@@ -3,7 +3,11 @@
 import torch
 
 from vllm.triton_utils import tl, tldevice, triton
-from vllm.v1.worker.gpu.sample.gumbel import gumbel_block_argmax, tl_rand32
+from vllm.v1.worker.gpu.sample.gumbel import (
+    gumbel_block_argmax,
+    mix_seed_with_pos,
+    tl_rand32,
+)
 from vllm.v1.worker.gpu.sample.watermark import philox_gumbel_block_argmax
 
 
@@ -548,6 +552,8 @@ def _rejection_kernel(
     end_idx = tl.load(cu_num_logits_ptr + req_idx + 1)
     num_draft_tokens = end_idx - start_idx - 1
     seed = tl.load(seed_ptr + req_state_idx)
+    if USE_BLOCK_VERIFICATION:
+        seed = mix_seed_with_pos(seed, tl.load(pos_ptr + start_idx))
     temp = tl.load(temp_ptr + req_state_idx).to(tl.float32)
     is_greedy = temp == 0.0
 
@@ -717,6 +723,7 @@ def _seeded_resample_argmax(
         temp_ptr,
         seed_ptr,
         pos_ptr,
+        None,  # round_pos_ptr
         None,  # logits_cache_ptr
         0,  # logits_cache_stride_0
         0,  # logits_cache_stride_1

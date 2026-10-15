@@ -138,6 +138,7 @@ class DraftModelSpeculator(BaseSpeculator):
         self.use_local_argmax_reduction = (
             self.speculative_config.use_local_argmax_reduction
         )
+        self.use_round_seed = self.speculative_config.rejection_sample_method == "block"
 
         # DP configuration
         self.dp_size = vllm_config.parallel_config.data_parallel_size
@@ -468,6 +469,9 @@ class DraftModelSpeculator(BaseSpeculator):
                 logits_cache=draft_logits,
                 logits_cache_col=draft_step,
                 use_fp64=self.use_fp64_gumbel,
+                round_pos=(
+                    sample_src_positions - draft_step if self.use_round_seed else None
+                ),
             )
         else:
             sampled = logits.argmax(dim=-1)

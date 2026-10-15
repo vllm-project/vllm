@@ -27,6 +27,7 @@ class RandomSampler:
     logits_cache: torch.Tensor | None = None
     logits_cache_col: torch.Tensor | None = None
     logits_cache_source: torch.Tensor | None = None
+    round_pos: torch.Tensor | None = None
 
     def __call__(self, logits: torch.Tensor) -> torch.Tensor:
         return gumbel_sample(
@@ -41,6 +42,7 @@ class RandomSampler:
             logits_cache_col=self.logits_cache_col,
             logits_cache_source=self.logits_cache_source,
             use_fp64=self.use_fp64,
+            round_pos=self.round_pos,
         )
 
 
