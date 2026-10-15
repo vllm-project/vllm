@@ -414,6 +414,39 @@ class TestStreamingScheduler(unittest.TestCase):
             "block_hashes[0] still fingerprints the discarded sampled token"
         )
 
+    def test_update_request_as_session_drops_stale_lookahead_hashes(self):
+        """A lookahead hash also covers the token after its block, so the
+        discarded sampled token invalidates the hash of the block before it."""
+        init_none_hash(sha256)
+        scheduler = create_scheduler()
+        scheduler.use_lookahead_block_hashes = True
+        hash_block_size = scheduler.hash_block_size
+
+        def make_session(token_ids: list[int]) -> Request:
+            return Request(
+                request_id="session",
+                prompt_token_ids=list(token_ids),
+                sampling_params=SamplingParams(max_tokens=16),
+                pooling_params=None,
+                block_hasher=get_request_block_hasher(hash_block_size, sha256, True),
+                resumable=True,
+            )
+
+        prompt = list(range(1, hash_block_size + 1))
+        session = make_session(prompt)
+        session.append_output_token_ids(999)
+        assert len(session.block_hashes) == 1
+        stale_hash = session.block_hashes[0]
+        session.num_computed_tokens = len(prompt)
+
+        update = StreamingUpdate.from_request(
+            DummyRequest(request_id="session", prompt_token_ids=[42])
+        )
+        scheduler._update_request_as_session(session, update)
+
+        assert session.block_hashes == make_session(prompt + [42]).block_hashes
+        assert session.block_hashes[0] != stale_hash
+
     def test_streaming_e2e_lifecycle(self):
         """Comprehensive integration test covering complete streaming request lifecycle
         including scheduler state management and aliasing bug prevention.
