@@ -79,17 +79,15 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
                 quant_config=quant_config,
                 prefix=f"{prefix}.mlp",
             )
-            moe_parallel_config = self.mlp.experts.moe_config.moe_parallel_config
-            combine_reduces = moe_parallel_config.use_passthrough_all2all or (
-                moe_parallel_config.use_all2all_kernels
-                and not moe_parallel_config.use_ag_rs_all2all_kernels
+            moe_cfg = self.mlp.experts.moe_config
+            pc = moe_cfg.moe_parallel_config
+            reduced = pc.use_passthrough_all2all or (
+                pc.use_all2all_kernels and not pc.use_ag_rs_all2all_kernels
             )
-            if not combine_reduces:
-                self.mlp.experts.moe_config.skip_final_all_reduce = True
-            # The next fused_allreduce_rms_norm sums over TP, so an output that
-            # is already complete on every TP rank must enter it from one rank.
-            self.zero_mlp_output = get_tensor_model_parallel_rank() != 0 and (
-                combine_reduces or self.mlp.is_sequence_parallel
+            moe_cfg.skip_final_all_reduce = not reduced
+            # Complete on every TP rank; the next fused norm sums over TP.
+            self.zero_mlp_output = get_tensor_model_parallel_rank() > 0 and (
+                reduced or self.mlp.is_sequence_parallel
             )
         else:
             self.zero_mlp_output = False
