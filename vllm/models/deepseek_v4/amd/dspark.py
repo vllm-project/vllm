@@ -44,6 +44,7 @@ from vllm.model_executor.models.qwen3_dspark import (
     DSparkMarkovHead,
 )
 from vllm.model_executor.models.utils import maybe_prefix
+from vllm.models.deepseek_v4.amd import asm_sparse_mla
 
 from .mega_moe import finalize_mega_moe_weights
 from .model import (
@@ -172,6 +173,13 @@ class DSparkDeepseekV4Model(nn.Module):
             # (q_lora part discarded), then RoPE/quant/insert via the fused op.
             qr_kv, _ = attn.fused_wqa_wkv(main_x)
             kv = qr_kv[..., attn.q_lora_rank :]
+            if asm_sparse_mla.ENABLED:
+                # The aiter insert applies kv_norm itself.
+                if slot_mapping is not None:
+                    asm_sparse_mla.context_kv_insert(
+                        attn, kv, context_positions, slot_mapping
+                    )
+                continue
             kv = attn.kv_norm(kv)
             if slot_mapping is None:
                 continue

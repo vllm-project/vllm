@@ -148,6 +148,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_MHA: bool = True
     VLLM_ROCM_USE_AITER_FP4_ASM_GEMM: bool = False
     VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA: bool = False
+    VLLM_ROCM_USE_AITER_ASM_SPARSE_MLA: bool = False
     VLLM_ROCM_USE_AITER_TRITON_ROPE: bool = False
     VLLM_ROCM_USE_AITER_FP8BMM: bool = False
     VLLM_ROCM_USE_AITER_FP4BMM: bool = False
@@ -1346,6 +1347,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # V4 / V4.1. gfx950 only. By default is disabled.
     "VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA", "False").lower()
+        in ("true", "1")
+    ),
+    # DeepSeek V4 only: keep the sparse MLA KV cache in aiter's two-buffer layout
+    # (512-byte fp8 rows + a bf16 RoPE side pool) and run decode on aiter's ASM
+    # kernels with FP8 Q. Prefill stays on the default path. gfx950 only.
+    # By default is disabled.
+    "VLLM_ROCM_USE_AITER_ASM_SPARSE_MLA": lambda: (
+        os.getenv("VLLM_ROCM_USE_AITER_ASM_SPARSE_MLA", "False").lower()
         in ("true", "1")
     ),
     # Whether to use aiter rope.

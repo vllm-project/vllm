@@ -15,6 +15,7 @@ from vllm.distributed import (
 )
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
+from vllm.models.deepseek_v4.amd import asm_sparse_mla
 from vllm.models.deepseek_v4.attention import DeepseekV4Attention
 from vllm.models.deepseek_v4.common.ops import dequantize_and_gather_k_cache
 from vllm.models.deepseek_v4.sparse_mla import (
@@ -108,6 +109,14 @@ def _aiter_sparse_mla_enabled(has_kv_transfer: bool) -> bool:
     from vllm._aiter_ops import rocm_aiter_ops
 
     if not rocm_aiter_ops.is_triton_sparse_mla_enabled():
+        return False
+    # The Triton kernel reads fp8_ds_mla pages; the ASM path keeps prefill on
+    # the default gather path.
+    if asm_sparse_mla.ENABLED:
+        logger.warning_once(
+            "VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA is ignored with "
+            "VLLM_ROCM_USE_AITER_ASM_SPARSE_MLA."
+        )
         return False
     # The aiter kernel does not scrub NaNs, so like the trust check above it
     # needs a cache only the canonical writer has touched.
@@ -1163,6 +1172,16 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         when the aiter linear path is not active.
         """
         qr, kv = qr_kv.split([self.q_lora_rank, self.head_dim], dim=-1)
+        if asm_sparse_mla.ENABLED:
+            # The 2-buffer insert (aiter fused_qk_norm_rope_group_quant) applies
+            # kv_norm itself, so it takes the pre-norm kv.
+            qr_n, qr_scale, _ = self._split_qkv_and_norm_default(qr_kv, qr, kv)
+            return qr_n, qr_scale, kv
+        return self._split_qkv_and_norm_default(qr_kv, qr, kv)
+
+    def _split_qkv_and_norm_default(
+        self, qr_kv: torch.Tensor, qr: torch.Tensor, kv: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
         if not (
             qr.dim() == 2
             and qr.shape[0] > 0
@@ -1341,6 +1360,11 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         adaptive_splits: bool,
     ) -> int:
         """Returns how many leading rows the decode epilogue inverse-RoPE'd."""
+        if asm_sparse_mla.ENABLED:
+            # aiter v4 nm ASM decode on the 2-buffer pools; inverse RoPE stays
+            # with the caller.
+            asm_sparse_mla.decode(self, output, swa_metadata, attn_metadata, swa_only)
+            return 0
         num_decodes = swa_metadata.num_decodes
         num_decode_tokens = swa_metadata.num_decode_tokens
 
@@ -1501,6 +1525,11 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                     block_size=attn_metadata.block_size // self.compress_ratio,
                     offset=0,
                     use_fnuz=False,
+                    rope_cache=(
+                        asm_sparse_mla.rope_view(self._v4_geom)
+                        if asm_sparse_mla.ENABLED
+                        else None
+                    ),
                 )
 
             swa_block_table = swa_metadata.block_table[num_decodes:]
@@ -1513,6 +1542,11 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                 block_size=swa_metadata.block_size,
                 offset=chunk_N,
                 use_fnuz=current_platform.is_fp8_fnuz(),
+                rope_cache=(
+                    asm_sparse_mla.rope_view(self.swa_cache_layer._v4_geom)
+                    if asm_sparse_mla.ENABLED
+                    else None
+                ),
             )
 
             query_start = (
