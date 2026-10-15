@@ -275,6 +275,8 @@ if TYPE_CHECKING:
     VLLM_ALLREDUCE_USE_SYMM_MEM: bool = True
     VLLM_ALLREDUCE_USE_FLASHINFER: bool = True
     VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC: bool = False
+    VLLM_TP_FP16_PARTIAL_SUMS: bool = False
+    VLLM_TP_FP16_PARTIAL_SUMS_SHIFT: int = 2
     VLLM_TUNED_CONFIG_FOLDER: str | None = None
     VLLM_ENABLE_STARTUP_PLAN: bool = False
     VLLM_GPT_OSS_SYSTEM_TOOL_MCP_LABELS: set[str] = set()
@@ -1952,6 +1954,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Whether to use FlashInfer allreduce
     "VLLM_ALLREDUCE_USE_FLASHINFER": lambda: bool(
         int(os.getenv("VLLM_ALLREDUCE_USE_FLASHINFER", "1"))
+    ),
+    # Tensor-parallel row-parallel layers all-reduce FP16 partial sums instead
+    # of BF16 ones; the output is rounded to BF16 once, after the sum.
+    "VLLM_TP_FP16_PARTIAL_SUMS": lambda: bool(
+        int(os.getenv("VLLM_TP_FP16_PARTIAL_SUMS", "0"))
+    ),
+    # Exact 2^-k prescale of the FP16 partial sums (k in [0, 14]), moving the
+    # FP16 overflow threshold to 65504 * 2^k.
+    "VLLM_TP_FP16_PARTIAL_SUMS_SHIFT": lambda: int(
+        os.getenv("VLLM_TP_FP16_PARTIAL_SUMS_SHIFT", "2")
     ),
     # Whether to use FlashInfer's single-node PCIe CUDA-IPC all-reduce.
     # This backend has a strict single-stream contract and is opt-in while its
