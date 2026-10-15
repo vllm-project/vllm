@@ -3998,10 +3998,11 @@ class rocm_aiter_ops:
     def is_triton_gemm_afp4wfp4_presh_ws_tuned(n: int, k_bytes: int) -> bool:
         if not current_platform.is_rocm():
             return False
-        # Input = weight.shape[1] (bytes); *4 for fp4 and aiter config 2*k
+        # Input = weight.shape[1] (bytes). gemm_afp4wfp4_preshuffle looks its
+        # config up with K = 2 * K_bytes (the logical fp4 K), so match that.
         try:
             return _triton_gemm_config_is_tuned(
-                "GEMM-AFP4WFP4_PRESHUFFLED", n, 4 * k_bytes
+                "GEMM-AFP4WFP4_PRESHUFFLED", n, 2 * k_bytes
             )
         except (AssertionError, ImportError):
             return False
