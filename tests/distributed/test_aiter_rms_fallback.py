@@ -137,10 +137,15 @@ def test_rocm_aiter_fused_rmsnorm_skips_fused_kernels_for_flydsl_payloads(
         vllm_distributed, "tensor_model_parallel_all_reduce", lambda inp: inp + 2
     )
     unfused = []
+
+    def fake_fused_add_rms_norm(*args):
+        unfused.append(args)
+        return "out", "residual_out"
+
     monkeypatch.setattr(
         torch.ops.vllm_aiter,
         "fused_add_rms_norm",
-        lambda *args: unfused.append(args) or ("out", "residual_out"),
+        fake_fused_add_rms_norm,
         raising=False,
     )
 
