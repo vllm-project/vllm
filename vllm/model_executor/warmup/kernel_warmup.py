@@ -465,7 +465,17 @@ def flashinfer_autotune(runner: "GPUModelRunner", *, skip_attn: bool = False) ->
     # MoE kernel entirely, and cause hang due to all-reduce collective
     # during synchronized autotuning.
     if _all_ranks_have_matching_cache(cache_path, tune_group):
-        loaded = tuner.load_configs(str(cache_path))
+        try:
+            loaded = tuner.load_configs(str(cache_path))
+        except Exception as e:
+            # Every rank re-tunes together below, so one unreadable file cannot
+            # leave this rank raising while its peers wait in the gather.
+            logger.warning(
+                "Could not load FlashInfer autotune cache %s: %s. Re-tuning.",
+                cache_path,
+                e,
+            )
+            loaded = False
         if tune_group.world_size > 1:
             loaded_by_rank: list[bool | None] = [None] * tune_group.world_size
             torch.distributed.all_gather_object(
@@ -501,4 +511,15 @@ def flashinfer_autotune(runner: "GPUModelRunner", *, skip_attn: bool = False) ->
     # Skip the rewrite when nothing was tuned this start (every entry came from
     # the file). FlashInfer gates its own autotune(cache=...) save the same way.
     if tuner._dirty:
-        tuner.save_configs(str(cache_path))
+        try:
+            tuner.save_configs(str(cache_path))
+        except (OSError, RuntimeError) as e:
+            # The tuned configs are already in memory, so a failed save only
+            # costs the next start a re-tune. FlashInfer raises RuntimeError
+            # when another writer changed the file since it was loaded.
+            logger.warning(
+                "Could not save FlashInfer autotune cache %s: %s. "
+                "The next start will re-tune.",
+                cache_path,
+                e,
+            )
