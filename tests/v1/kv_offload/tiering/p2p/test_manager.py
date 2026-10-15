@@ -553,6 +553,7 @@ class TestPromotionLatency:
         tiering_manager = TieringOffloadingManager(
             primary_tier=primary_tier,
             secondary_tiers=[p2p_tier],
+            tier_poll_interval_s=0.0,
         )
         job = TransferJob(
             job_id=42,
