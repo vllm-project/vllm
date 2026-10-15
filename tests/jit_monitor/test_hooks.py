@@ -65,9 +65,12 @@ def _fake_tilelang_import_modules():
             key, _ = self.func.parse_args(*args, **kwargs)
             kernel = self._kernel_cache.get(key)
             if kernel is None:
-                kernel = "compiled"
+                kernel = self.compile(*args, **kwargs)
                 self._kernel_cache[key] = kernel
             return kernel
+
+        def compile(self, *args, **kwargs):
+            return "compiled"
 
     fake_kernel = cast(Any, ModuleType("tilelang.jit.kernel"))
     fake_kernel.JITKernel = FakeJITKernel
@@ -149,7 +152,7 @@ def test_activate_logs_info():
 
 def test_activate_rejects_unknown_mode():
     with pytest.raises(ValueError, match="Unsupported JIT monitor mode"):
-        jit_monitor.activate(mode="panic")  # type: ignore[arg-type]
+        jit_monitor.activate(mode="panic")
 
 
 def test_activate_without_triton():

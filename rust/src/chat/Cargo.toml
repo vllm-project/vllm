@@ -46,11 +46,13 @@ clap.workspace = true
 expect-test.workspace = true
 paste.workspace = true
 rmp-serde.workspace = true
+serde_json = { workspace = true, features = ["raw_value"] }
 serial_test.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
 uuid.workspace = true
 vllm-engine-core-client = { workspace = true, features = ["test-util"] }
+vllm-parser = { workspace = true, features = ["test-util"] }
 vllm-tokenizer = { workspace = true, features = ["test-utils"] }
 zeromq.workspace = true
 
