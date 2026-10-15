@@ -37,6 +37,33 @@ class Step5CSAMetadata(AttentionMetadata):
     num_actual_tokens: int
     num_reqs: int
     max_seq_len: int
+    token_req: torch.Tensor | None = None
+    positions: torch.Tensor | None = None
+    completed_regions: torch.Tensor | None = None
+
+
+def _completed_regions(m: CommonAttentionMetadata, region_size: int) -> torch.Tensor:
+    """``(request, region)`` pairs whose last token was cached this step.
+
+    Built on device from exact ``seq_lens``, padded with ``-1`` rows to a
+    host-known upper bound so the host never reads the count.
+    """
+    seq = m.seq_lens[: m.num_reqs]
+    first = torch.div(
+        m.compute_num_computed_tokens()[: m.num_reqs],
+        region_size,
+        rounding_mode="floor",
+    )
+    counts = (torch.div(seq, region_size, rounding_mode="floor") - first).clamp_min(0)
+    ends = torch.cumsum(counts, 0)
+    capacity = m.num_actual_tokens // region_size + m.num_reqs
+    slot = torch.arange(capacity, device=seq.device)
+    req = torch.searchsorted(ends, slot, right=True)
+    live = req < m.num_reqs
+    req = req.clamp_max(m.num_reqs - 1)
+    region = first[req] + slot - (ends - counts)[req]
+    work = torch.stack([torch.where(live, req, -1), torch.where(live, region, -1)], -1)
+    return work.to(torch.int32)
 
 
 class Step5CSAMetadataBuilder(AttentionMetadataBuilder[Step5CSAMetadata]):
@@ -50,6 +77,14 @@ class Step5CSAMetadataBuilder(AttentionMetadataBuilder[Step5CSAMetadata]):
         device: torch.device,
     ) -> None:
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        sparse = vllm_config.model_config.hf_text_config.sparse_config
+        self.region_size = sparse.region_block_size
+        self.per_token = int(kv_cache_spec.tokens_per_state) == 1
+        self.token_req_buffer = torch.empty(
+            vllm_config.scheduler_config.max_num_batched_tokens,
+            dtype=torch.int32,
+            device=device,
+        )
 
     def build(
         self,
@@ -59,7 +94,7 @@ class Step5CSAMetadataBuilder(AttentionMetadataBuilder[Step5CSAMetadata]):
     ) -> Step5CSAMetadata:
         del common_prefix_len, fast_build
         m = common_attn_metadata
-        return Step5CSAMetadata(
+        md = Step5CSAMetadata(
             block_table=m.block_table_tensor,
             slot_mapping=m.slot_mapping[: m.num_actual_tokens],
             query_start_loc=m.query_start_loc,
@@ -69,6 +104,21 @@ class Step5CSAMetadataBuilder(AttentionMetadataBuilder[Step5CSAMetadata]):
             num_reqs=m.num_reqs,
             max_seq_len=m.max_seq_len,
         )
+        if not self.per_token:
+            return md
+        n = m.num_actual_tokens
+        md.token_req = m.token_to_req_indices(self.token_req_buffer)
+        if m.positions is None:
+            positions = (
+                m.compute_num_computed_tokens().index_select(0, md.token_req)
+                + torch.arange(n, device=md.token_req.device)
+                - m.query_start_loc.index_select(0, md.token_req)
+            )
+        else:
+            positions = m.positions[:n]
+        md.positions = positions.to(torch.int32)
+        md.completed_regions = _completed_regions(m, self.region_size)
+        return md
 
 
 class Step5CSABackend(AttentionBackend):

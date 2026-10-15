@@ -6,8 +6,12 @@ import torch
 from torch import nn
 
 from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.distributed import (
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+)
 from vllm.model_executor.layers.attention.attention import unified_kv_cache_update
-from vllm.model_executor.layers.linear import ReplicatedLinear
+from vllm.model_executor.layers.linear import ColumnParallelLinear, ReplicatedLinear
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.models.step3p5 import (
     Step3p5Attention,
@@ -29,7 +33,11 @@ from vllm.utils.torch_utils import _encode_layer_name, kv_cache_dtype_str_to_dty
 
 
 class Step5SparseIndexer(nn.Module):
-    """MQA indexer, replicated on every rank: ``heads_per_group`` heads per KV group."""
+    """MQA indexer with ``heads_per_group`` query heads per KV group.
+
+    Q and W are sharded like the attention KV heads, so each rank computes only
+    its own groups; the shared single-head K and Z stay replicated.
+    """
 
     def __init__(self, config: Step5Config, layer_idx: int, prefix: str) -> None:
         super().__init__()
@@ -43,6 +51,11 @@ class Step5SparseIndexer(nn.Module):
         self.heads_per_group = sparse.indexer_heads_per_group
         self.eps = config.rms_norm_eps
 
+        tp_size = get_tensor_model_parallel_world_size()
+        group_shards = min(tp_size, self.num_groups)
+        group_rank = get_tensor_model_parallel_rank() * group_shards // tp_size
+        self.num_local_groups = self.num_groups // group_shards
+
         def linear(name: str, out: int, dtype: torch.dtype | None = None):
             return ReplicatedLinear(
                 hidden,
@@ -53,11 +66,23 @@ class Step5SparseIndexer(nn.Module):
                 prefix=f"{prefix}.{name}",
             )
 
+        def group_linear(name: str, out: int, dtype: torch.dtype | None = None):
+            return ColumnParallelLinear(
+                hidden,
+                out,
+                bias=False,
+                params_dtype=dtype,
+                quant_config=None,
+                prefix=f"{prefix}.{name}",
+                tp_rank=group_rank,
+                tp_size=group_shards,
+            )
+
         heads = self.num_groups * self.heads_per_group
-        self.sparse_indexer_q = linear("sparse_indexer_q", heads * self.proxy_dim)
+        self.sparse_indexer_q = group_linear("sparse_indexer_q", heads * self.proxy_dim)
         self.sparse_indexer_k = linear("sparse_indexer_k", self.proxy_dim)
         self.sparse_indexer_z = linear("sparse_indexer_z", self.proxy_dim)
-        self.sparse_indexer_w = linear("sparse_indexer_w", heads, torch.float32)
+        self.sparse_indexer_w = group_linear("sparse_indexer_w", heads, torch.float32)
         self.sparse_indexer_q_norm = nn.Module()
         self.sparse_indexer_q_norm.weight = nn.Parameter(
             torch.zeros(self.proxy_dim, dtype=torch.float32), requires_grad=False
@@ -103,7 +128,8 @@ class Step5SparseIndexer(nn.Module):
     def forward(
         self, hidden_states: torch.Tensor, positions: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Returns ``(q [T, G, Hg, P], k [T, P], z [T, P], weights [T, G, Hg])``."""
+        """Returns ``(q [T, G, Hg, P], k [T, P], z [T, P], w [T, G, Hg])`` for
+        this rank's ``G`` local groups."""
         tokens = hidden_states.shape[0]
         q, _ = self.sparse_indexer_q(hidden_states)
         k, _ = self.sparse_indexer_k(hidden_states)
@@ -118,9 +144,9 @@ class Step5SparseIndexer(nn.Module):
             self.eps,
         )
         q, k = self.rotary_emb(positions, q.flatten(1), k.flatten(1))
-        weights = w.view(tokens, self.num_groups, self.heads_per_group)
+        weights = w.view(tokens, self.num_local_groups, self.heads_per_group)
         return (
-            q.view(tokens, self.num_groups, self.heads_per_group, self.proxy_dim),
+            q.view(tokens, self.num_local_groups, self.heads_per_group, self.proxy_dim),
             k.view(tokens, self.proxy_dim),
             z.view(tokens, self.proxy_dim),
             weights * self.heads_per_group**-0.5,
@@ -199,17 +225,6 @@ class Step5Attention(Step3p5Attention):
             out = out * gate.unsqueeze(-1).sigmoid().to(out.dtype)
         output, _ = self.o_proj(out.view(-1, self.q_size))
         return output
-
-    def local_index_groups(
-        self, index_q: torch.Tensor, weights: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """This rank's KV groups of the replicated indexer heads."""
-        if self.num_kv_heads == index_q.shape[1]:
-            return index_q, weights
-        heads_per_kv = self.total_num_heads // self.total_num_kv_heads
-        first = self.rank * self.num_heads // heads_per_kv
-        local = slice(first, first + self.num_kv_heads)
-        return index_q[:, local], weights[:, local]
 
 
 class Step5DecoderLayer(Step3p5DecoderLayer):

@@ -27,44 +27,6 @@ if TYPE_CHECKING:
     from vllm.models.step5.amd.model import Step5Attention
 
 
-def _token_requests_and_positions(
-    md: Step5CSAMetadata,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    n = md.num_actual_tokens
-    device = md.seq_lens.device
-    query_lens = (md.query_start_loc[1:] - md.query_start_loc[:-1])[: md.num_reqs]
-    req = torch.repeat_interleave(
-        torch.arange(md.num_reqs, device=device), query_lens, output_size=n
-    )
-    pos = (
-        (md.seq_lens[: md.num_reqs] - query_lens).index_select(0, req)
-        + torch.arange(n, device=device)
-        - md.query_start_loc.index_select(0, req)
-    )
-    return req.to(torch.int32), pos.to(torch.int32)
-
-
-def _completed_regions(md: Step5CSAMetadata, region_size: int) -> torch.Tensor:
-    """``(request, region)`` pairs whose last token was cached this step.
-
-    Built on device from exact ``seq_lens``, padded with ``-1`` rows to a
-    host-known upper bound so the host never reads the count.
-    """
-    q_lens = (md.query_start_loc[1:] - md.query_start_loc[:-1])[: md.num_reqs]
-    seq = md.seq_lens[: md.num_reqs]
-    first = torch.div(seq - q_lens, region_size, rounding_mode="floor")
-    counts = (torch.div(seq, region_size, rounding_mode="floor") - first).clamp_min(0)
-    ends = torch.cumsum(counts, 0)
-    capacity = md.num_actual_tokens // region_size + md.num_reqs
-    slot = torch.arange(capacity, device=seq.device)
-    req = torch.searchsorted(ends, slot, right=True)
-    live = req < md.num_reqs
-    req = req.clamp_max(md.num_reqs - 1)
-    region = first[req] + slot - (ends - counts)[req]
-    work = torch.stack([torch.where(live, req, -1), torch.where(live, region, -1)], -1)
-    return work.to(torch.int32)
-
-
 def step5_csa_attention(
     hidden_states: torch.Tensor,
     positions: torch.Tensor,
@@ -91,13 +53,15 @@ def step5_csa_attention(
     assert isinstance(index_md, Step5CSAMetadata)
     assert isinstance(summary_md, Step5CSAMetadata)
     assert isinstance(main_md, RocmAttentionMetadata)
+    req, pos = index_md.token_req, index_md.positions
+    work = index_md.completed_regions
+    assert req is not None and pos is not None and work is not None
     n = index_md.num_actual_tokens
     output[n:].zero_()
     if n == 0:
         return
 
     index_q, index_k, index_z, weights = indexer(hidden_states[:n], positions[:n])
-    index_q, weights = layer.local_index_groups(index_q, weights)
 
     index_pages = indexer.index_cache.pages
     ops.concat_and_cache_mla(
@@ -116,11 +80,10 @@ def step5_csa_attention(
         summary_pages,
         index_md.block_table,
         summary_md.block_table,
-        _completed_regions(index_md, region_size),
+        work,
         region_size=region_size,
     )
 
-    req, pos = _token_requests_and_positions(index_md)
     max_regions = index_md.max_seq_len // region_size
     scores = indexer_scores_paged(
         index_q,
