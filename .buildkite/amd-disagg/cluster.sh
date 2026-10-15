@@ -147,6 +147,10 @@ export MORI_SHMEM_HEAP_SIZE="${MORI_SHMEM_HEAP_SIZE:-16G}"
 # Pin to gfx950 to avoid jit compilation failures with other archs on this cluster.
 export MORI_GPU_ARCHS="gfx950"
 
+# Required on this cluster's NIC setup; without the host proxy the EP dispatch
+# path fails to come up.
+export MORI_ENABLE_HOST_PROXY="${MORI_ENABLE_HOST_PROXY:-1}"
+
 # ----------------------------------------------------------------- benchmark
 export BENCHMARK_COMBINATIONS="${BENCHMARK_COMBINATIONS:-1024/128 2048/128}"
 export BENCHMARK_CON="${BENCHMARK_CON:-32 64}"
