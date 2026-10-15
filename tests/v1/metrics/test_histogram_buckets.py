@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Snapshot tests locking the default Prometheus histogram buckets.
+"""Core Prometheus metric registration, recording, and histogram buckets.
 
 The expected lists are deliberately hard-coded literals rather than imports:
 any change to a default bucket boundary must show up as a failing test here.
@@ -12,6 +12,7 @@ import pytest
 from vllm.config import ModelConfig, VllmConfig
 from vllm.config.observability import ObservabilityConfig
 from vllm.config.watermarking import WatermarkConfig
+from vllm.v1.engine import FinishReason
 from vllm.v1.metrics.buckets import (
     BUCKET_FAMILY_KEYS,
     build_1_2_5_buckets,
@@ -19,6 +20,7 @@ from vllm.v1.metrics.buckets import (
 )
 from vllm.v1.metrics.loggers import PrometheusStatLogger
 from vllm.v1.metrics.prometheus import unregister_vllm_metrics
+from vllm.v1.metrics.stats import FinishedRequestStats, IterationStats
 
 pytestmark = pytest.mark.cpu_test
 
@@ -329,5 +331,77 @@ def test_watermark_requests_counter_registration(with_config: bool):
         PrometheusStatLogger(config)
         names = {m.name for m in prometheus_client.REGISTRY.collect()}
         assert ("vllm:watermark_requests" in names) == with_config
+    finally:
+        unregister_vllm_metrics()
+
+
+def test_request_counts_and_latencies_by_api_surface():
+    """Mixed APIs and engines stay separate; unsupported APIs share unknown."""
+    config = build_logger_config(ObservabilityConfig())
+    api_surfaces = ("messages", "chat_completions", "completions", "unknown")
+    latency_factors = {
+        "time_to_first_token_seconds": 1,
+        "inter_token_latency_seconds": 2,
+        "e2e_request_latency_seconds": 3,
+        "request_queue_time_seconds": 4,
+        "request_prefill_time_seconds": 5,
+        "request_inference_time_seconds": 6,
+        "request_decode_time_seconds": 7,
+        "request_time_per_output_token_seconds": 8,
+    }
+    expected: dict[tuple[int, str], list[float]] = {}
+    expected_counts: dict[tuple[int, str, str], int] = {}
+    try:
+        logger = PrometheusStatLogger(config, engine_indexes=[0, 1])
+        for engine_idx in (0, 1):
+            stats = IterationStats()
+            for index, api_surface in enumerate((*api_surfaces, "unsupported")):
+                value = (engine_idx + 1) * (index + 1) / 10
+                reason = list(FinishReason)[index]
+                normalized = api_surface if api_surface in api_surfaces else "unknown"
+                expected.setdefault((engine_idx, normalized), []).append(value)
+                expected_counts[engine_idx, normalized, str(reason)] = 1
+                stats.time_to_first_tokens_iter.append((api_surface, value))
+                stats.inter_token_latencies_iter.append((api_surface, 2 * value))
+                stats.finished_requests.append(
+                    FinishedRequestStats(
+                        finish_reason=reason,
+                        api_surface=api_surface,
+                        e2e_latency=3 * value,
+                        queued_time=4 * value,
+                        prefill_time=5 * value,
+                        inference_time=6 * value,
+                        decode_time=7 * value,
+                        mean_time_per_output_token=8 * value,
+                    )
+                )
+            logger.record(None, stats, engine_idx=engine_idx)
+
+        registry = prometheus_client.REGISTRY
+        for (engine_idx, api_surface), values in expected.items():
+            labels = {
+                "model_name": config.model_config.served_model_name,
+                "engine": str(engine_idx),
+                "api_surface": api_surface,
+            }
+            for metric_name, factor in latency_factors.items():
+                assert registry.get_sample_value(
+                    f"vllm:{metric_name}_count", labels
+                ) == len(values)
+                assert registry.get_sample_value(
+                    f"vllm:{metric_name}_sum", labels
+                ) == pytest.approx(factor * sum(values))
+            for reason in FinishReason:
+                assert registry.get_sample_value(
+                    "vllm:request_success_total",
+                    {**labels, "finished_reason": str(reason)},
+                ) == expected_counts.get((engine_idx, api_surface, str(reason)), 0)
+
+        assert {
+            sample.labels["api_surface"]
+            for metric in registry.collect()
+            for sample in metric.samples
+            if "api_surface" in sample.labels
+        } == set(api_surfaces)
     finally:
         unregister_vllm_metrics()

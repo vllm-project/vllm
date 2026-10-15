@@ -40,6 +40,7 @@ from vllm.v1.metrics.stats import (
     RequestSpecDecodeMetrics,
     RequestStateStats,
     SchedulerStats,
+    normalize_api_surface,
 )
 from vllm.v1.outputs import SamplingMaskLists
 
@@ -686,11 +687,7 @@ class OutputProcessor:
             stream_interval=self.stream_interval,
         )
         if req_state.stats is not None:
-            req_state.stats.api_surface = (
-                api_surface
-                if api_surface in ("messages", "chat_completions", "completions")
-                else "unknown"
-            )
+            req_state.stats.api_surface = normalize_api_surface(api_surface)
         self.request_states[request_id] = req_state
         if parent_req:
             self.parent_requests[parent_req.request_id] = parent_req

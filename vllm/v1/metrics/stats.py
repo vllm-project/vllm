@@ -19,6 +19,14 @@ if TYPE_CHECKING:
     from vllm.v1.engine import EngineCoreEvent, EngineCoreOutput, FinishReason
 
 
+API_SURFACES = ("messages", "chat_completions", "completions", "unknown")
+
+
+def normalize_api_surface(api_surface: str) -> str:
+    """Bound API attribution to the supported metric label values."""
+    return api_surface if api_surface in API_SURFACES else "unknown"
+
+
 @dataclass
 class BaseCacheStats:
     """Stores cache hit statistics."""
@@ -489,8 +497,8 @@ class IterationStats:
         self.finished_requests: list[FinishedRequestStats] = []
         self.max_num_generation_tokens_iter: list[int] = []
         self.n_params_iter: list[int] = []
-        self.time_to_first_tokens_iter: list[float] = []
-        self.inter_token_latencies_iter: list[float] = []
+        self.time_to_first_tokens_iter: list[tuple[str, float]] = []
+        self.inter_token_latencies_iter: list[tuple[str, float]] = []
         self.num_corrupted_reqs: int = 0
         self.num_watermarked_reqs: int = 0
         self.num_watermark_skipped_reqs: int = 0
@@ -526,7 +534,9 @@ class IterationStats:
                 self.prompt_token_stats.update_from_output(output.prefill_stats)
 
             first_token_latency = self._time_since(req_stats.arrival_time)
-            self.time_to_first_tokens_iter.append(first_token_latency)
+            self.time_to_first_tokens_iter.append(
+                (req_stats.api_surface, first_token_latency)
+            )
             req_stats.first_token_latency = first_token_latency
 
         req_stats.num_generation_tokens += num_new_generation_tokens
@@ -556,7 +566,7 @@ class IterationStats:
             req_stats.first_token_ts = engine_core_timestamp
         else:
             itl = engine_core_timestamp - req_stats.last_token_ts
-            self.inter_token_latencies_iter.append(itl)
+            self.inter_token_latencies_iter.append((req_stats.api_surface, itl))
 
         req_stats.last_token_ts = engine_core_timestamp
 
