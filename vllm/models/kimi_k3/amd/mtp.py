@@ -239,7 +239,7 @@ class KimiK3MTP(nn.Module):
                 (".fused_qkv_a_proj", ".q_a_proj", 0),
                 (".fused_qkv_a_proj", ".kv_a_proj_with_mqa", 1),
             ]
-            if getattr(self.config, "mla_use_output_gate", False):
+            if self.config.mla_use_output_gate:
                 stacked_params_mapping.append((".fused_qkv_a_proj", ".g_proj", 2))
 
         expert_params_mapping = (
