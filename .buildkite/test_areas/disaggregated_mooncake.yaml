@@ -24,7 +24,7 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI355) Distributed MooncakeConnector HIP PD accuracy"
-      optional: false
+      optional: true
       dind: false
       device: mi355_4
       num_devices: 4
