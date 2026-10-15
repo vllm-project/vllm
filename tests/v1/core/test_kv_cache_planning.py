@@ -1783,6 +1783,16 @@ def test_unify_hybrid_kv_cache_specs():
         kv_cache_planning.unify_hybrid_kv_cache_specs(kv_cache_spec)
 
 
+def test_unify_hybrid_kv_cache_specs_swa_mla():
+    swa = replace(new_swa_mla_spec(), bounded_replay=True)
+    kv_cache_spec = {"full": new_mla_spec(), "swa": swa}
+    kv_cache_planning.unify_hybrid_kv_cache_specs(kv_cache_spec)
+    promoted = kv_cache_spec["swa"]
+    assert type(promoted) is MLAAttentionSpec
+    assert promoted.sliding_window == swa.sliding_window
+    assert promoted.page_size_bytes == swa.page_size_bytes
+
+
 def test_unify_kv_cache_spec_page_size_mamba():
     """Regression test for https://github.com/vllm-project/vllm/issues/43626.
 
