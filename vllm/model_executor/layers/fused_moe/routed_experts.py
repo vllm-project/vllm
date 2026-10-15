@@ -79,6 +79,9 @@ class RoutedExperts(PluggableLayer):
     - Executing routed experts via quant_method.apply()
     """
 
+    # Hash-routing table, owned by the gate; set by FusedMoEFactory.
+    hash_indices_table: torch.Tensor | None = None
+
     def __init__(
         self,
         layer_name: str,
