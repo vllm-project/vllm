@@ -98,10 +98,7 @@ class FlashAttentionDiffKVImpl(FlashAttentionImpl):
             has_sinks=self.sinks is not None,
         ):
             raise NotImplementedError(
-                "FlashAttention does not support this FP8 Diff-KV configuration: "
-                "SM90 FP8 Diff-KV requires a supported FA3 configuration without "
-                "sinks or dynamic causal. Triton Diff-KV does not support FP8 KV; "
-                "use an unquantized KV cache for unsupported configurations."
+                "Unsupported FP8 Diff-KV configuration; use an unquantized KV cache."
             )
         self.fa4_hd256 = False
 
