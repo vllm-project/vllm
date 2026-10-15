@@ -31,6 +31,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput
 
 if TYPE_CHECKING:
@@ -222,6 +223,17 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         return any(c.requires_kv_delivery for c in self._connectors)
 
     @classmethod
+    def supports_sleep_mode(cls, kv_transfer_config: "KVTransferConfig") -> bool:
+        children = [
+            KVTransferConfig(**{"engine_id": kv_transfer_config.engine_id, **c})
+            for c in kv_transfer_config.kv_connector_extra_config.get("connectors", [])
+        ]
+        return bool(children) and all(
+            KVConnectorFactory.get_connector_class(c).supports_sleep_mode(c)
+            for c in children
+        )
+
+    @classmethod
     def _get_connector_classes_and_configs(
         cls, vllm_config: "VllmConfig"
     ) -> list[tuple[type[KVConnectorBaseType], "VllmConfig"]]:
@@ -250,6 +262,14 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         for c in self._connectors:
             c.register_kv_caches(kv_caches)
+
+    def unregister_kv_caches(self) -> None:
+        for c in self._connectors:
+            c.unregister_kv_caches()
+
+    def restore_kv_caches(self) -> None:
+        for c in self._connectors:
+            c.restore_kv_caches()
 
     def bind_kv_cache_manager(self, kv_cache_manager: "KVCacheManager") -> None:
         for connector in self._connectors:
@@ -450,6 +470,18 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
                 self._requests_to_connector[request.request_id] = i
                 to_return = (toks, load_async)
         return to_return
+
+    def get_external_cache_hit_sources(
+        self,
+        request: "Request",
+        num_external_tokens: int,
+    ) -> dict[CacheHitSource, int]:
+        chosen_connector = self._requests_to_connector.get(request.request_id)
+        if chosen_connector is None:
+            return super().get_external_cache_hit_sources(request, num_external_tokens)
+        return self._connectors[chosen_connector].get_external_cache_hit_sources(
+            request, num_external_tokens
+        )
 
     def update_state_after_alloc(
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int

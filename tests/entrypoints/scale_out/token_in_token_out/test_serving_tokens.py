@@ -14,7 +14,6 @@ from transformers import AutoTokenizer
 import vllm.envs as envs
 from tests.utils import RemoteOpenAIServer
 from vllm.config import ModelConfig
-from vllm.config.utils import getattr_iter
 from vllm.v1.engine.detokenizer import check_stop_strings
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
@@ -183,7 +182,7 @@ async def test_generate_sampling_mask(client):
         assert token_id in support
         # processed_logprobs: exactly the support carries finite probability.
         for top in entry["top_logprobs"]:
-            in_support = int(top["token"].removeprefix("token_id:")) in support
+            in_support = top["token_id"] in support
             assert in_support == (top["logprob"] > -9999.0)
 
 
@@ -402,14 +401,7 @@ async def test_same_response_as_chat_completions(client, tokenizer, messages):
             # Post-EOS generation is undefined and may differ
             eos_tokens = {
                 tokenizer.eos_token_id,
-                *getattr_iter(
-                    tokenizer,
-                    [
-                        "extra_special_tokens_ids",  # Transformers v5
-                        "additional_special_tokens_ids",  # Transformers v4
-                    ],
-                    [],
-                ),
+                *tokenizer.extra_special_tokens_ids,
             }
             # Find first EOS in generated tokens
             eos_pos = None
