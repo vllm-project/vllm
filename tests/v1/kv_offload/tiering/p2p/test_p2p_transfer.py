@@ -6,9 +6,13 @@ gsm8k accuracy alone passes even when the decoder silently recomputes the
 prompt, so this sends fully unique prompts through the proxy and asserts the
 decoders' external prefix cache hit counter grew by most of the prompt blocks.
 
+With EXPECT_TRANSFER=0 it asserts the opposite: no KV moved. That pins the
+safe fallback for deployments the tier must refuse (e.g. mixed TP with the
+direct layout), where pairing would hand the decoder unusable bytes.
+
 Driven by run_accuracy_test.sh via env vars:
     TEST_MODEL, PROXY_URL, DECODE_METRICS_URLS (comma-separated),
-    DECODE_BLOCK_SIZE.
+    DECODE_BLOCK_SIZE, EXPECT_TRANSFER.
 """
 
 import os
@@ -29,6 +33,7 @@ BLOCK_SIZE = int(os.environ.get("DECODE_BLOCK_SIZE", "128"))
 NUM_PROMPTS = int(os.environ.get("NUM_TRANSFER_PROMPTS", "8"))
 # Fraction of each prompt's full blocks that must come from the external tier.
 MIN_HIT_FRACTION = 0.5
+EXPECT_TRANSFER = os.environ.get("EXPECT_TRANSFER", "1") == "1"
 HITS_METRIC = "vllm:external_prefix_cache_hits"
 
 WORDS = [
@@ -96,6 +101,18 @@ def test_decoder_pulls_kv_over_p2p():
         expected_tokens += (prompt_tokens - 1) // BLOCK_SIZE * BLOCK_SIZE
 
     assert expected_tokens > 0, "prompts too short to span a full block"
+
+    if not EXPECT_TRANSFER:
+        # Let any late counter update land before asserting nothing moved.
+        time.sleep(5)
+        delta = _external_hits() - before
+        print(f"external prefix cache hits: +{delta:.0f} tokens (expected 0)")
+        assert delta == 0, (
+            f"decoders loaded {delta:.0f} prompt tokens from the external tier "
+            "in a deployment the p2p tier is expected to refuse"
+        )
+        return
+
     min_hits = MIN_HIT_FRACTION * expected_tokens
 
     # Counters are published from scheduler stats; give the last step a moment.
