@@ -4,6 +4,7 @@
 import numpy as np
 import torch
 
+from vllm import envs
 from vllm.sampling_params import MAX_LOGPROB_TOKEN_IDS, SamplingParams
 from vllm.triton_utils import tl, triton
 from vllm.v1.outputs import LogprobsTensors
@@ -28,34 +29,126 @@ def _topk_log_softmax_kernel(
     req_idx = tl.program_id(0).to(tl.int64)
     row_ptr = logits_ptr + req_idx * logits_stride
 
+    # Online log-sum-exp: each vocabulary element is read exactly once.
     max_val = float("-inf")
+    sum_exp = 0.0
     for i in range(0, vocab_size, BLOCK_SIZE):
         block = i + tl.arange(0, BLOCK_SIZE)
-        logits = tl.load(row_ptr + block, mask=block < vocab_size, other=float("-inf"))
-        max_val = tl.max(tl.maximum(logits, max_val))
-    max_val = max_val.to(tl.float32)  # type: ignore
+        logits = tl.load(
+            row_ptr + block, mask=block < vocab_size, other=float("-inf")
+        ).to(tl.float32)
+        block_max = tl.max(logits)
+        new_max = tl.maximum(max_val, block_max)
+        safe_new_max = tl.where(new_max == float("-inf"), 0.0, new_max)
+        old_scale = tl.where(
+            max_val == float("-inf"), 0.0, tl.exp(max_val - safe_new_max)
+        )
+        block_sum = tl.sum(tl.exp(logits - safe_new_max))
+        sum_exp = sum_exp * old_scale + block_sum
+        max_val = new_max
 
-    se = 0.0
-    for i in range(0, vocab_size, BLOCK_SIZE):
-        block = i + tl.arange(0, BLOCK_SIZE)
-        logits = tl.load(row_ptr + block, mask=block < vocab_size, other=0.0)
-        # NOTE(woosuk): Make sure that logits and all following operations use FP32.
-        logits = logits.to(tl.float32)
-        e = tl.exp(logits - max_val)
-        e = tl.where(block < vocab_size, e, 0.0)
-        se += tl.sum(e)
-    lse = tl.log(se)
+    logsumexp = max_val + tl.log(sum_exp)
 
     for j in range(0, topk, TOPK_BLOCK_SIZE):
         k_offset = j + tl.arange(0, TOPK_BLOCK_SIZE)
         k_mask = k_offset < topk
         topk_ids = tl.load(
-            topk_ids_ptr + req_idx * topk_ids_stride + k_offset, mask=k_mask, other=0
+            topk_ids_ptr + req_idx * topk_ids_stride + k_offset,
+            mask=k_mask,
+            other=0,
         )
-        logits = tl.load(row_ptr + topk_ids, mask=k_mask)
+        logits = tl.load(row_ptr + topk_ids, mask=k_mask, other=0.0)
         logits = logits.to(tl.float32)
-        o = logits - max_val - lse
-        tl.store(output_ptr + req_idx * topk + k_offset, o, mask=k_mask)
+        tl.store(
+            output_ptr + req_idx * topk + k_offset,
+            logits - logsumexp,
+            mask=k_mask,
+        )
+
+
+@triton.jit
+def _partial_logsumexp_kernel(
+    logits_ptr,
+    logits_stride,
+    partial_max_ptr,
+    partial_sum_ptr,
+    vocab_size,
+    NUM_SPLITS: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    req_idx = tl.program_id(0).to(tl.int64)
+    split_idx = tl.program_id(1)
+    offsets = split_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    row_ptr = logits_ptr + req_idx * logits_stride
+    logits = tl.load(
+        row_ptr + offsets, mask=offsets < vocab_size, other=float("-inf")
+    ).to(tl.float32)
+
+    local_max = tl.max(logits)
+    safe_local_max = tl.where(local_max == float("-inf"), 0.0, local_max)
+    local_sum = tl.sum(tl.exp(logits - safe_local_max))
+    # An all -inf chunk contributes zero to the merged exponential sum.
+    local_sum = tl.where(local_max == float("-inf"), 0.0, local_sum)
+
+    output_offset = req_idx * NUM_SPLITS + split_idx
+    tl.store(partial_max_ptr + output_offset, local_max)
+    tl.store(partial_sum_ptr + output_offset, local_sum)
+
+
+@triton.jit
+def _merge_logsumexp_and_gather_kernel(
+    output_ptr,
+    logits_ptr,
+    logits_stride,
+    topk_ids_ptr,
+    topk_ids_stride,
+    topk,
+    vocab_size,
+    partial_max_ptr,
+    partial_sum_ptr,
+    NUM_SPLITS: tl.constexpr,
+    BLOCK_SPLITS: tl.constexpr,
+    TOPK_BLOCK_SIZE: tl.constexpr,
+):
+    req_idx = tl.program_id(0).to(tl.int64)
+    row_ptr = logits_ptr + req_idx * logits_stride
+
+    split_offsets = tl.arange(0, BLOCK_SPLITS)
+    partial_offset = req_idx * NUM_SPLITS + split_offsets
+    partial_max = tl.load(
+        partial_max_ptr + partial_offset,
+        mask=split_offsets < NUM_SPLITS,
+        other=float("-inf"),
+    )
+    partial_sum = tl.load(
+        partial_sum_ptr + partial_offset,
+        mask=split_offsets < NUM_SPLITS,
+        other=0.0,
+    )
+    max_val = tl.max(partial_max)
+    safe_max_val = tl.where(max_val == float("-inf"), 0.0, max_val)
+    scaled_sums = partial_sum * tl.exp(partial_max - safe_max_val)
+    scaled_sums = tl.where(partial_max == float("-inf"), 0.0, scaled_sums)
+    sum_exp = tl.sum(scaled_sums)
+    logsumexp = tl.where(
+        max_val == float("-inf"), float("-inf"), max_val + tl.log(sum_exp)
+    )
+
+    for j in range(0, topk, TOPK_BLOCK_SIZE):
+        k_offset = j + tl.arange(0, TOPK_BLOCK_SIZE)
+        k_mask = k_offset < topk
+        topk_ids = tl.load(
+            topk_ids_ptr + req_idx * topk_ids_stride + k_offset,
+            mask=k_mask,
+            other=0,
+        )
+        logits = tl.load(row_ptr + topk_ids, mask=k_mask, other=0.0)
+        logits = logits.to(tl.float32)
+        tl.store(
+            output_ptr + req_idx * topk + k_offset,
+            logits - logsumexp,
+            mask=k_mask,
+        )
 
 
 @triton.jit
@@ -86,27 +179,64 @@ def compute_token_logprobs(
 ) -> torch.Tensor:
     # NOTE(woosuk): To save GPU memory, we do not materialize the full
     # [batch_size, vocab_size] logprobs tensor. The kernel computes
-    # max + logsumexp per row and only emits logprobs at `token_ids`.
+    # logsumexp per row and only emits logprobs at `token_ids`.
     batch_size, vocab_size = logits.shape
     token_ids = token_ids.to(torch.int64)
     num_logprobs = token_ids.shape[1]
     logprobs = logits.new_empty((batch_size, num_logprobs), dtype=torch.float32)
-    # Cap the kernel's per-iteration width so very large num_logprobs requests
-    # stream the gather in bounded-size chunks, avoiding excessive mem use.
+    # Cap gather width so large num_logprobs requests use bounded-size chunks.
     topk_block_size = min(triton.next_power_of_2(num_logprobs), _MAX_TOPK_BLOCK)
-    _topk_log_softmax_kernel[(batch_size,)](
-        logprobs,
-        logits,
-        logits.stride(0),
-        token_ids,
-        token_ids.stride(0),
-        num_logprobs,
-        vocab_size,
-        BLOCK_SIZE=1024,  # type: ignore
-        TOPK_BLOCK_SIZE=topk_block_size,
-    )
-    return logprobs
 
+    # Splitting the vocabulary creates more independent programs for small
+    # decode batches. Keep the one-program-per-row path for large batches and
+    # batch-invariant execution, where the reduction order must not depend on
+    # how many other rows are scheduled with a request.
+    if (
+        batch_size <= 4
+        and vocab_size > 1024
+        and not envs.VLLM_BATCH_INVARIANT
+    ):
+        num_splits = triton.cdiv(vocab_size, 1024)
+        partial_max = torch.empty(
+            (batch_size, num_splits), device=logits.device, dtype=torch.float32
+        )
+        partial_sum = torch.empty_like(partial_max)
+        _partial_logsumexp_kernel[(batch_size, num_splits)](
+            logits,
+            logits.stride(0),
+            partial_max,
+            partial_sum,
+            vocab_size,
+            NUM_SPLITS=num_splits,
+            BLOCK_SIZE=1024,
+        )
+        _merge_logsumexp_and_gather_kernel[(batch_size,)](
+            logprobs,
+            logits,
+            logits.stride(0),
+            token_ids,
+            token_ids.stride(0),
+            num_logprobs,
+            vocab_size,
+            partial_max,
+            partial_sum,
+            NUM_SPLITS=num_splits,
+            BLOCK_SPLITS=triton.next_power_of_2(num_splits),
+            TOPK_BLOCK_SIZE=topk_block_size,
+        )
+    else:
+        _topk_log_softmax_kernel[(batch_size,)](
+            logprobs,
+            logits,
+            logits.stride(0),
+            token_ids,
+            token_ids.stride(0),
+            num_logprobs,
+            vocab_size,
+            BLOCK_SIZE=1024,
+            TOPK_BLOCK_SIZE=topk_block_size,
+        )
+    return logprobs
 
 def compute_topk_scores(
     logits: torch.Tensor,
