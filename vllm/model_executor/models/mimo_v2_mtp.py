@@ -45,7 +45,12 @@ from .interfaces import (
     SupportsMultiModal,
     _require_is_multimodal,
 )
-from .mimo_v2 import MiMoV2Attention, MiMoV2MLP, _shard_fp8_qkv_proj
+from .mimo_v2 import (
+    PRESLICED_QKV_SHARD_ID,
+    MiMoV2Attention,
+    MiMoV2MLP,
+    _shard_fp8_qkv_proj,
+)
 from .utils import _merge_multimodal_embeddings, maybe_prefix
 
 # MiMo-V2 checkpoints contain multiple MTP layers, but vLLM currently supports
@@ -334,19 +339,13 @@ class MiMoV2MTP(nn.Module):
                         param = params_dict[f"{prefix}.{k}"]
                         if tensor.shape[0] > param.shape[0]:
                             tensor = tensor[: param.shape[0]]
-                        weight_loader = getattr(
-                            param, "weight_loader", default_weight_loader
-                        )
-                        weight_loader(param, tensor)
+                        param.weight_loader(param, tensor, PRESLICED_QKV_SHARD_ID)
                         loaded_params.add(f"{prefix}.{k}")
                 elif name in params_dict:
                     # Non-fp8 fused checkpoint: unchanged behaviour.
                     param = params_dict[name]
                     loaded_weight = loaded_weight.chunk(tp_size, dim=0)[tp_rank]
-                    weight_loader = getattr(
-                        param, "weight_loader", default_weight_loader
-                    )
-                    weight_loader(param, loaded_weight)
+                    param.weight_loader(param, loaded_weight, PRESLICED_QKV_SHARD_ID)
                     loaded_params.add(name)
                 continue
 
