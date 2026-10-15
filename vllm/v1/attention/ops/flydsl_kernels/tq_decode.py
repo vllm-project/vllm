@@ -186,8 +186,6 @@ def build_tq_decode_module(
 
         # ---- Buffer views -----------------------------------------------
         q_buf = buffer_view(query_ptr, fx.Int32, 4)
-        kv_buf4 = buffer_view(kv_cache_ptr, fx.Int32, 4)
-        kv_buf_i16 = buffer_view(kv_cache_ptr, fx.Int16)
         bt_buf = buffer_view(block_tables_ptr, fx.Int32)
         sl_buf = buffer_view(seq_lens_ptr, fx.Int32)
         cent_buf = buffer_view(centroids_ptr, fx.Float32)
@@ -310,43 +308,37 @@ def build_tq_decode_module(
                 bt_off = bt_seq_base + block_in_part
                 bt_off_safe = tile_in_seq.select(bt_off, seq * _stride_bt_seq)
                 phys_block = fx.Int32(bt_buf[bt_off_safe])
-                block_base = phys_block * _stride_cache_block
-                data_region = block_base
-                meta_region = block_base + _meta_region_offset
+                # A buffer descriptor addresses with a 32-bit voffset, so
+                # ``phys_block * c_block`` wraps once the cache view exceeds
+                # 4 GiB. Fold the block base into the descriptor's 64-bit
+                # base pointer and keep only in-block offsets below.
+                blk_off_i64 = fx.Int64(fx.Uint32(phys_block)) * _stride_cache_block
+                blk_buf4 = buffer_view(kv_cache_ptr, fx.Int32, 4, blk_off_i64)
+                blk_buf_i16 = buffer_view(kv_cache_ptr, fx.Int16, 1, blk_off_i64)
 
                 # ``slot`` is the absolute slot index within the cache block
                 # (range 0.._BS-1). For BS=16 it equals tok_in_tile; for BS=32
                 # it equals tile_in_block * 16 + tok_in_tile. Used both for
                 # the K/V data region and SoA metadata region addressing.
                 slot = tok_in_tile + tile_in_block * TILE_SIZE
-                data_bases_byte = (
-                    data_region + slot * _stride_data_slot + kv_h * DATA_BYTES_PER_SLOT
-                )
+                data_bases_byte = slot * _stride_data_slot + kv_h * DATA_BYTES_PER_SLOT
                 k_byte = data_bases_byte + chunk_in_tok * 16
-                k_packed = load_vec(kv_buf4, k_byte // 4, 4)
+                k_packed = load_vec(blk_buf4, k_byte // 4, 4)
 
                 # ---- HOISTED: issue V data + meta HBM loads early ---------
                 # These are async; their s_waitcnt is pushed by the compiler
                 # past the K dequant + QK MFMA + softmax block, hiding most
                 # of the V HBM latency behind compute.
                 v_byte = data_bases_byte + KEY_DATA_BYTES + chunk_in_tok * 16
-                v_packed = load_vec(kv_buf4, v_byte // 4, 4)
-                vscale_u16 = (
-                    meta_region // 2
-                    + kv_h * meta_u16_per_kvh
-                    + SOA_V_SCALE * _BS
-                    + slot
-                )
-                vzero_u16 = (
-                    meta_region // 2 + kv_h * meta_u16_per_kvh + SOA_V_ZERO * _BS + slot
-                )
-                vscale_raw = kv_buf_i16[vscale_u16]
-                vzero_raw = kv_buf_i16[vzero_u16]
+                v_packed = load_vec(blk_buf4, v_byte // 4, 4)
+                _meta_u16 = _meta_region_offset // 2 + kv_h * meta_u16_per_kvh
+                vscale_u16 = _meta_u16 + SOA_V_SCALE * _BS + slot
+                vzero_u16 = _meta_u16 + SOA_V_ZERO * _BS + slot
+                vscale_raw = blk_buf_i16[vscale_u16]
+                vzero_raw = blk_buf_i16[vzero_u16]
 
-                knorm_u16 = (
-                    meta_region // 2 + kv_h * meta_u16_per_kvh + SOA_K_NORM * _BS + slot
-                )
-                knorm_raw = kv_buf_i16[knorm_u16]
+                knorm_u16 = _meta_u16 + SOA_K_NORM * _BS + slot
+                knorm_raw = blk_buf_i16[knorm_u16]
                 knorm_f32 = fx.Int16(knorm_raw).bitcast(fx.Float16).to(fx.Float32)
 
                 # K dequant → LDS [token, head_dim] (natural)

@@ -55,13 +55,23 @@ ATOL = 5e-3
 
 
 def _build_cache(
-    num_seqs, num_kv_heads, seq_len, qg, kv_block_size, seed=0xC0FFEE, device="cuda"
+    num_seqs,
+    num_kv_heads,
+    seq_len,
+    qg,
+    kv_block_size,
+    seed=0xC0FFEE,
+    device="cuda",
+    lead_blocks=0,
 ):
     """Vectorized builder for a SoA-layout 4-bit KV cache + fp32 ground truth.
 
     Returns ``(centroids, q_bf16, kv_cache_4d, block_table, seq_lens,
     K_ref, V_ref)`` where ``K_ref``/``V_ref`` are the dequantized
     full-precision keys/values used by the reference attention.
+
+    ``lead_blocks`` prepends that many unused blocks, which pushes the
+    referenced blocks to a high byte offset without growing the data.
     """
     g = torch.Generator(device=device).manual_seed(seed)
     hk = num_kv_heads
@@ -86,8 +96,9 @@ def _build_cache(
             num_seqs * blocks_per_seq, dtype=torch.int32, device=device
         ).reshape(num_seqs, blocks_per_seq)
         + 1
+        + lead_blocks
     )
-    total_blocks = num_seqs * blocks_per_seq + 8
+    total_blocks = lead_blocks + num_seqs * blocks_per_seq + 8
 
     slot_size_aligned = (KEY_DATA_BYTES + 2) + (KEY_DATA_BYTES + 4)  # 134
     if slot_size_aligned % 2:
@@ -146,7 +157,7 @@ def _build_cache(
         slot_for_tok.unsqueeze(1) * hk * DATA_BYTES_PER_SLOT
         + h_ax.view(1, hk, 1) * DATA_BYTES_PER_SLOT
     )
-    blk_b = blk_for_tok.unsqueeze(1).expand(num_seqs, hk, seq_len)
+    blk_b = blk_for_tok.unsqueeze(1).expand(num_seqs, hk, seq_len).long()
     dst_base = blk_b * bytes_per_block + base_data
     rng_k = torch.arange(KEY_DATA_BYTES, device=device)
     rng_v = torch.arange(KEY_DATA_BYTES, device=device) + KEY_DATA_BYTES
@@ -277,4 +288,34 @@ def test_flydsl_fp16_query(num_kv_heads, qg):
 
     assert out.dtype == torch.float16
     ref = _reference_attention(q_fp16.cpu(), k_ref, v_ref, seq_lens.cpu(), scale)
+    torch.testing.assert_close(out.cpu().float(), ref, atol=ATOL, rtol=0.0)
+
+
+def test_flydsl_kv_cache_over_4gib():
+    """Blocks past 4 GiB: the block base must not wrap the 32-bit voffset."""
+    num_seqs, num_kv_heads, qg, seq_len, kv_block_size = 1, 8, 8, 256, 16
+    slot_size_aligned = (KEY_DATA_BYTES + 2) + (KEY_DATA_BYTES + 4)
+    bytes_per_block = kv_block_size * num_kv_heads * slot_size_aligned
+    # Enough leading blocks that every referenced block starts above 4 GiB.
+    lead_blocks = (1 << 32) // bytes_per_block + 1
+    need = (lead_blocks + num_seqs * (seq_len // kv_block_size) + 8) * bytes_per_block
+    if current_platform.mem_get_info()[0] < need + (1 << 30):
+        pytest.skip("needs >5 GiB free device memory")
+
+    centroids, q_bf16, kv_cache, block_table, seq_lens, k_ref, v_ref = _build_cache(
+        num_seqs,
+        num_kv_heads,
+        seq_len,
+        qg,
+        kv_block_size,
+        lead_blocks=lead_blocks,
+    )
+    assert kv_cache.numel() > (1 << 32)
+    scale = 1.0 / (HEAD_SIZE**0.5)
+
+    out = _run_flydsl(
+        q_bf16, centroids, kv_cache, block_table, seq_lens, seq_len, scale
+    )
+
+    ref = _reference_attention(q_bf16.cpu(), k_ref, v_ref, seq_lens.cpu(), scale)
     torch.testing.assert_close(out.cpu().float(), ref, atol=ATOL, rtol=0.0)
