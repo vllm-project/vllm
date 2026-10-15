@@ -569,14 +569,16 @@ class MoRIIOConnectorScheduler:
             )
         )
         if self._is_hma_required:
-            # MoRIIO handles sliding-window, circular-buffer and mamba/KDA groups
-            # in READ mode. Other hybrid cache specs still fail closed.
-            supported = (
+            # MoRIIO handles sliding-window and mamba/KDA groups in READ mode, and
+            # circular-buffer groups only alongside mamba/KDA. Other hybrid cache
+            # specs still fail closed.
+            supported: tuple[type[KVCacheSpec], ...] = (
                 FullAttentionSpec,
                 SlidingWindowSpec,
-                CircularBufferSpec,
                 MambaSpec,
             )
+            if self._has_mamba:
+                supported += (CircularBufferSpec,)
             unsupported = [
                 type(g.kv_cache_spec).__name__
                 for g in kv_cache_config.transfer_groups

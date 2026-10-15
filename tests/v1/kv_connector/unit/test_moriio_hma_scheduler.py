@@ -586,6 +586,31 @@ def test_scheduler_rejects_hybrid_write():
         )
 
 
+@pytest.mark.usefixtures("restore_moriio_role")
+def test_scheduler_rejects_circular_buffer_without_mamba():
+    full = FullAttentionSpec(
+        block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32
+    )
+    tail = CircularBufferSpec(
+        block_size=8,
+        num_kv_heads=2,
+        head_size=128,
+        head_size_v=0,
+        dtype=torch.bfloat16,
+        dcp_sharded=False,
+    )
+    config = SimpleNamespace(
+        kv_cache_groups=[
+            SimpleNamespace(enable_kv_transfer=True, kv_cache_spec=full),
+            SimpleNamespace(enable_kv_transfer=True, kv_cache_spec=tail),
+        ],
+    )
+    config.transfer_groups = tuple(config.kv_cache_groups)
+
+    with pytest.raises(NotImplementedError, match="CircularBufferSpec"):
+        moriio_connector.MoRIIOConnectorScheduler(_gate_vllm_config(), "engine", config)
+
+
 def test_split_block_groups_rejects_non_hybrid_use():
     sched = _FakeScheduler(_has_mamba=False)
 
