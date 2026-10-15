@@ -16,6 +16,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kMxfp4Static,
 )
+from vllm.triton_utils import triton
 
 __all__ = [
     "AiterW4A16ExpertsMonolithic",
@@ -134,6 +135,8 @@ def aiter_triton_kernel_w4a16_moe_forward(
     e_score_correction_bias: torch.Tensor | None = None,
     routed_scaling_factor: float | None = None,
     score_mode: str | None = None,
+    input_ids: torch.Tensor | None = None,
+    hash_indices_table: torch.Tensor | None = None,
 ):
     assert quant_config is not None and rocm_aiter_ops.is_enabled()
     from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
@@ -154,7 +157,25 @@ def aiter_triton_kernel_w4a16_moe_forward(
         _routing_mod.is_tdm_avail = lambda: False
     aiter_routing = _routing_mod.routing
 
-    if score_mode is not None:
+    scale = routed_scaling_factor if routed_scaling_factor is not None else 1.0
+    if hash_indices_table is not None:
+        assert score_mode == "sqrtsoftplus" and input_ids is not None
+        # Same block_m heuristic as aiter's routing().
+        n_tokens, n_experts = gating_output.shape
+        block_m = max(
+            16, min(triton.next_power_of_2(max(1, n_tokens * topk // n_experts)), 128)
+        )
+        routing_data, gather_idx, scatter_idx = _routing_mod.routing_from_hash(
+            gating_output,
+            hash_indices_table,
+            input_ids,
+            topk,
+            block_m,
+            score_mode=score_mode,
+            renorm=renormalize,
+            routed_scaling_factor=scale,
+        )
+    elif score_mode is not None:
         use_grouped_topk = num_expert_group is not None and num_expert_group > 1
         routing_data, gather_idx, scatter_idx = aiter_routing(
             gating_output,
@@ -162,9 +183,7 @@ def aiter_triton_kernel_w4a16_moe_forward(
             score_mode=score_mode,
             bias=e_score_correction_bias,
             renorm=renormalize,
-            routed_scaling_factor=(
-                routed_scaling_factor if routed_scaling_factor is not None else 1.0
-            ),
+            routed_scaling_factor=scale,
             use_grouped_topk=use_grouped_topk,
             num_expert_group=num_expert_group,
             topk_group=topk_group,
@@ -349,6 +368,10 @@ class AiterW4A16ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
         ]
 
     @staticmethod
+    def _supports_hash_routing() -> bool:
+        return True
+
+    @staticmethod
     def _supports_router_logits_dtype(
         router_logits_dtype: torch.dtype | None,
         routing_method: RoutingMethodType,
@@ -375,6 +398,8 @@ class AiterW4A16ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
         routing_replay_out: torch.Tensor | None = None,
+        input_ids: torch.Tensor | None = None,
+        hash_indices_table: torch.Tensor | None = None,
     ) -> torch.Tensor:
         routing_method = self.moe_config.routing_method
         if routing_method == RoutingMethodType.DeepseekV4:
@@ -411,4 +436,6 @@ class AiterW4A16ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
             e_score_correction_bias=e_score_correction_bias,
             routed_scaling_factor=routed_scaling_factor,
             score_mode=score_mode,
+            input_ids=input_ids,
+            hash_indices_table=hash_indices_table,
         )

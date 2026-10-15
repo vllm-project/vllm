@@ -25,6 +25,7 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
 from vllm.model_executor.layers.sparse_mqa_indexer import SparseMQAIndexer
+from vllm.model_executor.model_loader.weight_utils import make_attention_sink
 from vllm.models.common.ops import fused_q_kv_rmsnorm
 from vllm.models.common.ops.sequence_parallel import sp_reduce_scatter
 from vllm.models.deepseek_v41.common.ops import (
@@ -356,10 +357,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         self.padded_heads = self.get_padded_num_q_heads(self.n_local_heads)
         # Sink padded to the same head count, initialized to -inf (no sink
         # effect). Weight loading fills the first n_local_heads slots.
-        self.attn_sink = nn.Parameter(
-            torch.full((self.padded_heads,), -float("inf"), dtype=torch.float32),
-            requires_grad=False,
-        )
+        self.attn_sink = make_attention_sink(self.padded_heads, torch.float32)
 
         self.fused_wqa_wkv = MergedColumnParallelLinear(
             self.hidden_size,
@@ -648,7 +646,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             if self.backend_cls.get_name() in (
                 "FLASHMLA_SPARSE_DSV41",
                 "FLASHMLA_MEGA_ATTN_DSV41",
-                "ROCM_FLASHMLA_SPARSE_DSV4",
+                "ROCM_FLASHMLA_SPARSE_DSV41",
             ):
                 from vllm.models.deepseek_v41.common.ops.cache_utils import (
                     _COMBINE_TOPK_SWA_INDICES_KERNEL,
