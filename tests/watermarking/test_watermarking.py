@@ -383,7 +383,7 @@ def test_gpu_sampler_filters_top_k_top_p_before_watermarking(
     # reference path; the assertion is about the call order, not the kernel.
     monkeypatch.setattr(
         "vllm.v1.watermarking.gpu_sampler.apply_top_k_top_p",
-        lambda logits, k, p: apply_top_k_top_p_pytorch(
+        lambda logits, k, p, **kwargs: apply_top_k_top_p_pytorch(
             logits, k, p, allow_cpu_sync=True
         ),
     )

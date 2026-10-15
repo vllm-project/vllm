@@ -111,6 +111,11 @@ class SamplingStates:
         top_p = self.top_p.gpu[expanded_idx_mapping] if do_top_p else None
         return top_k, top_p
 
+    def has_topp_only_rows(self, idx_mapping_np: np.ndarray) -> bool:
+        top_k = self.top_k.np[idx_mapping_np]
+        top_p = self.top_p.np[idx_mapping_np]
+        return bool(np.any((top_k >= self.vocab_size) & (top_p < 1.0)))
+
     def apply_top_k_top_p(
         self,
         logits: torch.Tensor,
@@ -120,7 +125,12 @@ class SamplingStates:
         top_k, top_p = self.get_top_k_top_p(expanded_idx_mapping, idx_mapping_np)
         if top_k is None and top_p is None:
             return logits
-        return apply_top_k_top_p(logits, top_k, top_p)
+        has_topp_only_rows = (
+            top_k is None or top_p is None or self.has_topp_only_rows(idx_mapping_np)
+        )
+        return apply_top_k_top_p(
+            logits, top_k, top_p, has_topp_only_rows=has_topp_only_rows
+        )
 
     def any_greedy(self, idx_mapping_np: np.ndarray) -> bool:
         return bool(np.any(self.temperature.np[idx_mapping_np] == 0.0))

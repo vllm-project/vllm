@@ -74,7 +74,14 @@ class GPUWatermarkSampler(Sampler):
                 use_fused_sampler,
             )
 
-        processed_logits = apply_top_k_top_p(processed_logits, top_k, top_p)
+        has_topp_only_rows = (
+            top_k is None
+            or top_p is None
+            or self.sampling_states.has_topp_only_rows(idx_mapping_np)
+        )
+        processed_logits = apply_top_k_top_p(
+            processed_logits, top_k, top_p, has_topp_only_rows=has_topp_only_rows
+        )
         contexts = self._get_contexts(expanded_idx_mapping)
         repeated_contexts = None
         if self.deduplicate_contexts != "none":

@@ -1411,7 +1411,17 @@ class DiffusionSampler:
                 decode_slots_np,
             )
             if top_k is not None or top_p is not None:
-                logits = apply_top_k_top_p(logits.float(), top_k, top_p)
+                has_topp_only_rows = (
+                    top_k is None
+                    or top_p is None
+                    or self.sampling_states.has_topp_only_rows(decode_slots_np)
+                )
+                logits = apply_top_k_top_p(
+                    logits.float(),
+                    top_k,
+                    top_p,
+                    has_topp_only_rows=has_topp_only_rows,
+                )
 
         # Where each decode request's rows start in the flat logits. Tiles
         # below gather and pad a request to the tile's width.

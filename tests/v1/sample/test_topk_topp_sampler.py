@@ -293,7 +293,7 @@ class TestTritonTopkTopp:
 
         self._compare_results(logits, k, p=None)
 
-    @pytest.mark.parametrize("batch_size", [1, 8, 32, 128, 512, 1024])
+    @pytest.mark.parametrize("batch_size", [1, 8, 32, 48, 128, 512, 1024])
     @pytest.mark.parametrize("vocab_size", [1024, 32000, 128256])
     def test_topp_only(self, batch_size: int, vocab_size: int):
         """Test top-p only (k=None)."""
@@ -307,7 +307,7 @@ class TestTritonTopkTopp:
 
         self._compare_results(logits, k=None, p=p)
 
-    @pytest.mark.parametrize("batch_size", [1, 8, 32, 128, 512, 1024])
+    @pytest.mark.parametrize("batch_size", [1, 8, 32, 48, 128, 512, 1024])
     @pytest.mark.parametrize("vocab_size", [1024, 32000, 128256])
     def test_topk_and_topp(self, batch_size: int, vocab_size: int):
         """Test combined top-k and top-p."""
@@ -787,6 +787,38 @@ class TestTritonTopkTopp:
             f"top-p did not trim grammar rows: {kept_topk_only.tolist()} -> "
             f"{kept_topk_topp.tolist()}"
         )
+
+    @pytest.mark.parametrize("batch_size", [8, 48])
+    def test_skip_split_without_topp_only_rows(
+        self, batch_size: int, monkeypatch: pytest.MonkeyPatch
+    ):
+        """has_topp_only_rows=False skips the split pipeline; the result must
+        not change when every top-p row also has a top-k, grammar rows
+        (k >= #finite logits) included."""
+        import vllm.v1.sample.ops.topk_topp_triton as tt
+
+        vocab_size = 32000
+        logits = torch.randn(
+            batch_size, vocab_size, generator=self.generator, dtype=torch.float32
+        )
+        logits[1] = float("-inf")
+        idx = torch.randperm(vocab_size, generator=self.generator)[:30]
+        logits[1, idx] = torch.randn(30, generator=self.generator)
+        k = torch.randint(
+            50, 100, (batch_size,), generator=self.generator, dtype=torch.int32
+        )
+        p = torch.rand(batch_size, generator=self.generator) * 0.9 + 0.1
+        k[::4] = vocab_size
+        p[::4] = 1.0
+
+        expected = tt.apply_top_k_top_p_triton(logits.clone(), k, p)
+        monkeypatch.setattr(
+            tt, "_apply_topp_split", lambda *args: pytest.fail("split launched")
+        )
+        actual = tt.apply_top_k_top_p_triton(
+            logits.clone(), k, p, has_topp_only_rows=False
+        )
+        assert torch.equal(actual, expected)
 
     def test_topp_tie_break_deterministic(self):
         """Boundary-duplicate trimming must be deterministic across calls.

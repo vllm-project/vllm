@@ -109,6 +109,21 @@ def test_custom_processor_add_request_gates_pipeline_flag(admitted: bool):
     assert sampler.needs_logits_processing[3] == admitted
 
 
+def test_has_topp_only_rows():
+    """A row is top-p-only when it has top-p and no effective top-k; top_k
+    of 0 (the default) or above the vocab size disables top-k."""
+    sampler = _make_sampler()
+    sampler.add_request(0, SamplingParams(top_k=10, top_p=0.9))
+    sampler.add_request(1, SamplingParams(top_k=10))
+    sampler.add_request(2, SamplingParams(top_p=0.9))
+    sampler.add_request(3, SamplingParams(top_k=VOCAB_SIZE + 1, top_p=0.9))
+    states = sampler.sampling_states
+
+    assert not states.has_topp_only_rows(np.array([0, 1], dtype=np.int32))
+    assert states.has_topp_only_rows(np.array([0, 2], dtype=np.int32))
+    assert states.has_topp_only_rows(np.array([3], dtype=np.int32))
+
+
 def test_logits_processing_cache_only_checks_active_requests():
     sampler = _make_sampler()
     sampler.add_request(0, SamplingParams(temperature=0.0))

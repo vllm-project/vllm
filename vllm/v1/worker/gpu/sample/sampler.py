@@ -342,7 +342,14 @@ class Sampler:
             else:  # Use XPU sampler
                 sampled, _ = xpu_sample(processed_logits, top_k, top_p)
         else:
-            processed_logits = apply_top_k_top_p(processed_logits, top_k, top_p)
+            has_topp_only_rows = (
+                top_k is None
+                or top_p is None
+                or self.sampling_states.has_topp_only_rows(idx_mapping_np)
+            )
+            processed_logits = apply_top_k_top_p(
+                processed_logits, top_k, top_p, has_topp_only_rows=has_topp_only_rows
+            )
             sampled = gumbel_sample(
                 processed_logits,
                 expanded_idx_mapping,
