@@ -608,13 +608,137 @@ def test_mixed_batch_metadata_is_staged(name: str):
 def test_mixed_batch_buffers_keep_addresses():
     """Different mixes reuse the same buffers, and a smaller batch after a
     larger one leaves no stale rows behind its real rows."""
+    from vllm.v1.attention.backends.gdn_attn import (
+        CAPTURE_PAD_VALUES,
+        MIXED_BATCH_PAD_VALUES,
+    )
+
     builder = _create_gdn_builder(num_speculative_tokens=2)
+    capture_only_fields = CAPTURE_PAD_VALUES.keys() - MIXED_BATCH_PAD_VALUES.keys()
     addresses: dict[str, set[int]] = {}
     for name in [*MIXED_BATCHES, *reversed(MIXED_BATCHES)]:
         meta, reference = _build_mixed(builder, name)
         _assert_staged(builder, meta, reference)
         for field, buffer in builder.mixed_batch_buffers.items():
-            if getattr(meta, field) is not None:
+            if field not in capture_only_fields and getattr(meta, field) is not None:
                 addresses.setdefault(field, set()).add(buffer.data_ptr())
-    assert set(addresses) == set(builder.mixed_batch_buffers)
+    assert set(addresses) == builder.mixed_batch_buffers.keys() - capture_only_fields
     assert all(len(ptrs) == 1 for ptrs in addresses.values())
+
+
+# Batches without prefills, which replay the same captured forward.
+DECODE_BATCHES = {
+    "spec_only": ([50, 30], [3, 3], [2, 2]),
+    "spec_only_with_padding": ([50, 30, 16], [3, 3, 0], [2, 2, -1]),
+    "decode_only": ([40, 30, 20], [1, 1, 1], None),
+}
+
+
+def _expected_capture_rows(
+    reference: GDNAttentionMetadata, num_buffer_tokens: int
+) -> dict[str, torch.Tensor | None]:
+    """Real rows of each capture buffer, from metadata built without them: the
+    decode rows are the non-spec decodes that the forward peels off (none with
+    spec decodes), and the prefill rows follow them in the non-spec tokens."""
+    from vllm.v1.attention.backends.gdn_attn import CAPTURE_PAD_VALUES
+
+    rows = {name: getattr(reference, name, None) for name in CAPTURE_PAD_VALUES}
+    if reference.spec_sequence_masks is None:
+        rows["non_spec_token_indx"] = torch.arange(num_buffer_tokens)
+    non_spec_qsl = reference.non_spec_query_start_loc
+    if non_spec_qsl is None:
+        return rows
+    num_decodes = reference.num_decodes
+    rows["decode_query_start_loc"] = non_spec_qsl[: num_decodes + 1]
+    if reference.num_prefills > 0:
+        rows["non_spec_prefill_query_start_loc"] = (
+            reference.prefill_query_start_loc + reference.num_decode_tokens
+        )
+    else:
+        # Every non-spec row is a decode with prior state.
+        rows["has_initial_state"] = torch.ones(num_decodes, dtype=torch.bool)
+        rows["non_spec_prefill_query_start_loc"] = non_spec_qsl[num_decodes:]
+    return rows
+
+
+def _assert_rows_then_pad(buffer, rows, pad_value, name) -> None:
+    if rows is None:
+        rows = buffer[:0]
+    if pad_value is None:
+        pad_value = rows[-1] if len(rows) else 0
+    assert torch.equal(buffer[: len(rows)], rows.to(buffer.dtype)), name
+    assert torch.all(buffer[len(rows) :] == pad_value), name
+
+
+@pytest.mark.parametrize("update_block_table", [False, True])
+def test_capture_buffers_hold_any_batch(update_block_table: bool):
+    """With captures_mixed_batches, build() stages every batch, with or without
+    prefills, into the same full-length buffers: the batch's rows, then pads
+    that make every static grid of the captured forward a no-op, and no stale
+    rows of an earlier batch. update_block_table() restages the state indices
+    into its own group's buffers."""
+    from vllm.third_party.flash_linear_attention.ops.index import (
+        prepare_chunk_indices,
+        prepare_chunk_offsets,
+    )
+    from vllm.v1.attention.backends.gdn_attn import (
+        CAPTURE_PAD_VALUES,
+        STATE_INDEX_FIELDS,
+    )
+    from vllm.v1.attention.backends.utils import (
+        PAD_SLOT_ID,
+        compute_causal_conv1d_metadata,
+    )
+
+    builder, group_builder, reference_builder = (
+        _create_gdn_builder(num_speculative_tokens=2) for _ in range(3)
+    )
+    for each_builder in (builder, group_builder, reference_builder):
+        each_builder.vllm_config.cache_config.mamba_cache_mode = "none"
+    builder.captures_mixed_batches = group_builder.captures_mixed_batches = True
+    batches = {**MIXED_BATCHES, **DECODE_BATCHES}
+    for name in [*batches, *reversed(batches)]:
+        seq_lens, query_lens, draft_tokens = batches[name]
+        batch = BatchSpec(seq_lens=seq_lens, query_lens=query_lens)
+        block_table = torch.randint(1, 1000, (batch.batch_size, 3), dtype=torch.int32)
+        reference = _build(reference_builder, batch, draft_tokens, block_table)
+        meta = _build(builder, batch, draft_tokens, block_table)
+        staging_builder = builder
+        if update_block_table:
+            # The first group was built with another block table.
+            meta = _build(builder, batch, draft_tokens, block_table + 1000)
+            meta = group_builder.update_block_table(meta, block_table, torch.empty(0))
+            staging_builder = group_builder
+
+        buffers = meta.capture_buffers
+        assert buffers is not None
+        for field, buffer in buffers.items():
+            owner = staging_builder if field in STATE_INDEX_FIELDS else builder
+            assert buffer is not None
+            assert buffer.data_ptr() == owner.mixed_batch_buffers[field].data_ptr()
+            assert buffer.shape == owner.mixed_batch_buffers[field].shape
+        num_buffer_tokens = builder.mixed_batch_buffers["non_spec_token_indx"].shape[0]
+        for field, rows in _expected_capture_rows(reference, num_buffer_tokens).items():
+            _assert_rows_then_pad(buffers[field], rows, CAPTURE_PAD_VALUES[field], name)
+
+        prefill_qsl = reference.prefill_query_start_loc
+        if prefill_qsl is None:
+            # Chunk metadata of no sequence.
+            prefill_qsl = torch.zeros(2, dtype=torch.int32)
+        chunk_indices = prepare_chunk_indices(prefill_qsl, 64)
+        chunk_offsets = prepare_chunk_offsets(prefill_qsl, 64)
+        _assert_rows_then_pad(
+            buffers["chunk_indices"], chunk_indices, torch.tensor([-1, 0]), name
+        )
+        _assert_rows_then_pad(buffers["chunk_offsets"], chunk_offsets, None, name)
+        non_spec_qsl = reference.non_spec_query_start_loc
+        if non_spec_qsl is None:
+            non_spec_qsl = torch.zeros(1, dtype=torch.int32)
+        nums_dict, batch_ptr, _ = compute_causal_conv1d_metadata(
+            non_spec_qsl, device=DEVICE
+        )
+        num_programs = nums_dict[8]["tot"]
+        assert meta.batch_ptr is builder.mixed_batch_buffers["batch_ptr"]
+        assert torch.equal(meta.batch_ptr[:num_programs], batch_ptr[:num_programs])
+        assert torch.all(meta.batch_ptr[num_programs:] == PAD_SLOT_ID)
+        assert meta.nums_dict[8]["tot"] == num_programs
