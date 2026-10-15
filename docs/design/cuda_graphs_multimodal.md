@@ -160,7 +160,6 @@ Models opt-in to encoder CUDA Graphs by implementing the [SupportsEncoderCudaGra
 !!! note
     The `SupportsEncoderCudaGraph` protocol is designed to be model-agnostic. New vision encoder models can opt-in by implementing the protocol methods without modifying the manager.
 
-
 ## Configuration
 
 Four fields in `CompilationConfig` control encoder CUDA Graphs:
