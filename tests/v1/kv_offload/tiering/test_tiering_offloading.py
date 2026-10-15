@@ -425,6 +425,10 @@ class TestTieringOffloadingManager:
         assert values[TieringOffloadingMetrics.PRIMARY_WRITE_USAGE_PERC][label] == 1.0
         assert values[TieringOffloadingMetrics.ACTIVE_PROMOTION_JOBS][label] == 1
         assert values[TieringOffloadingMetrics.PROMOTION_JOB_FAILURES][label] == 1
+        assert (
+            len(values[TieringOffloadingMetrics.PROMOTION_LATENCY][(*label, "failure")])
+            == 1
+        )
         assert all(
             self.primary_tier.lookup(key, _CTX) is LookupResult.MISS for key in keys
         )
@@ -455,6 +459,7 @@ class TestTieringOffloadingManager:
         assert values[TieringOffloadingMetrics.PRIMARY_WRITE_USAGE_PERC][label] == 0.0
         assert values[TieringOffloadingMetrics.ACTIVE_PROMOTION_JOBS][label] == 0
         assert TieringOffloadingMetrics.PROMOTION_JOB_FAILURES not in values
+        assert TieringOffloadingMetrics.PROMOTION_LATENCY not in values
         assert self.primary_tier.prepare_write(replacement, _CTX) is not None
 
     @pytest.mark.parametrize("drain_error", [UnsafeTransferError, RuntimeError])
