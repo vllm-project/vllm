@@ -30,11 +30,13 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     SlidingWindowManager,
 )
 from vllm.v1.kv_cache_interface import (
+    CircularBufferSpec,
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheTensor,
     MLAAttentionSpec,
+    SlidingWindowMLASpec,
 )
 
 from .utils import (
@@ -1592,13 +1594,20 @@ def test_failed_load_rezeroes_unwritten_skipped_blocks():
 @pytest.mark.cpu_test
 @pytest.mark.parametrize(
     "has_mamba,is_hma_required,bounded_replay",
-    [(True, True, False), (False, False, False), (False, True, False), (False, True, True)],
+    [
+        (True, True, False),
+        (False, False, False),
+        (False, True, False),
+        (False, True, True),
+    ],
     ids=["mamba", "fa_only", "swa_only", "swa_bounded_replay"],
 )
 def test_mamba_n1_d_side(has_mamba, is_hma_required, bounded_replay):
     """D-side: every model gets N-1 matched tokens; decode recomputes the last."""
     sched = make_nixl_scheduler(
-        has_mamba=has_mamba, is_hma_required=is_hma_required, bounded_replay=bounded_replay
+        has_mamba=has_mamba,
+        is_hma_required=is_hma_required,
+        bounded_replay=bounded_replay,
     )
     req = create_request(num_tokens=10, do_remote_prefill=True)
 
@@ -2490,3 +2499,62 @@ def test_sync_recved_kv_issues_one_copy_per_request(group_block_ids, expected_id
     worker.sync_recved_kv_to_device("req", meta)
 
     assert calls == [(expected_ids, expected_ids, "h2d")]
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "prompt_len",
+    [2, 3, 31, 32, 33, 63, 64, 65, 127, 128, 129, 255, 256, 257, 4095, 4096, 4097],
+)
+def test_dsv41_nixl_handoff_retains_window_and_compressor_state(prompt_len):
+    """N-1 handoff carries the full SWA tail and the request's open CR2 ring."""
+    from vllm.utils.math_utils import cdiv
+
+    sched = make_nixl_scheduler(is_hma_required=True)
+    specs = [
+        MLAAttentionSpec(
+            block_size=64,
+            num_kv_heads=1,
+            head_size=512,
+            dtype=torch.bfloat16,
+            tokens_per_state=2,
+        ),
+        SlidingWindowMLASpec(
+            block_size=32,
+            num_kv_heads=1,
+            head_size=512,
+            dtype=torch.bfloat16,
+            sliding_window=128,
+        ),
+        CircularBufferSpec(
+            block_size=8,
+            num_kv_heads=1,
+            head_size=1024,
+            head_size_v=0,
+            dtype=torch.float32,
+        ),
+    ]
+    sched.kv_cache_config = KVCacheConfig(
+        num_blocks=256,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec([name], spec)
+            for name, spec in zip(("compressed", "swa", "ring"), specs)
+        ],
+    )
+    sched.blocks_per_sw = [0, 5, 0]
+    sched._ssm_spec_blocks = [None, None, None]
+    producer_req = create_request(num_tokens=prompt_len, do_remote_decode=True)
+    sched.on_new_request(producer_req)
+    resume = prompt_len - 1
+    assert producer_req.num_prompt_tokens == resume
+    consumer_req = create_request(num_tokens=prompt_len, do_remote_prefill=True)
+    assert sched.get_num_new_matched_tokens(consumer_req, 0) == (resume, True)
+
+    compressed = list(range(1, cdiv(resume, 64) + 1))
+    window = list(range(10, 10 + cdiv(resume, 32)))
+    blocks = (compressed, window, [255])
+    transferred = sched.get_exchange_clipped_blocks(blocks)
+    assert transferred == (compressed, window[-5:], [255])
+    # The ring keeps one transferable block regardless of the prompt length.
+    assert specs[-1].max_num_blocks_per_req(sched.vllm_config, prompt_len) == 1
