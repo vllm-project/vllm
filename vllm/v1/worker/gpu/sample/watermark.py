@@ -25,7 +25,7 @@ from vllm.v1.watermarking.prfs.philox import (
 from vllm.v1.watermarking.prfs.philox import (
     _UINT32_MASK as _UINT32_MASK_VALUE,
 )
-from vllm.v1.worker.gpu.sample.gumbel import gumbel_noised_argmax
+from vllm.v1.worker.gpu.sample.gumbel import gumbel_noised_argmax, spec_step_seed
 
 if HAS_TRITON:
     from triton.language import math as tl_math
@@ -644,6 +644,8 @@ def _philox_gumbel_kernel(
             )
             seed = tl.load(seeds_ptr + req_state_idx, mask=valid_req, other=0)
             pos = tl.load(pos_ptr + row)
+            if logits_cache_ptr is not None:
+                seed = spec_step_seed(seed, col)
             logits_row = logits_ptr + row * logits_stride
             logits = tl.load(logits_row + candidate, mask=mask, other=float("-inf")).to(
                 tl.float32
