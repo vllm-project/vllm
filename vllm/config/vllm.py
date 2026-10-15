@@ -1199,6 +1199,21 @@ class VllmConfig:
         ):
             return
 
+        if self.model_config is not None and self.model_config.enable_sleep_mode:
+            # Lazy import to avoid circular dependencies
+            from vllm.distributed.kv_transfer.kv_connector.factory import (
+                KVConnectorFactory,
+            )
+
+            connector_cls = KVConnectorFactory.get_connector_class(
+                self.kv_transfer_config
+            )
+            if not connector_cls.supports_sleep_mode(self.kv_transfer_config):
+                raise ValueError(
+                    f"{self.kv_transfer_config.kv_connector} does not support "
+                    "sleep mode."
+                )
+
         # PyTorch's expandable_segments allocator uses CUDA VMM, which can
         # remap a virtual address range to different physical pages over the
         # engine's lifetime. KV connectors that pin KV cache memory (e.g.
@@ -1532,8 +1547,6 @@ class VllmConfig:
                 self.quant_config.use_deep_gemm = False
                 logger.warning_once(
                     "Auto-disabled DeepGemm for model_type=%s on Blackwell. "
-                    "DeepGemm E8M0 scale format causes accuracy degradation "
-                    "for this architecture. Falling back to CUTLASS. "
                     "To disable DeepGemm globally, set VLLM_USE_DEEP_GEMM=0.",
                     model_type,
                 )
@@ -2103,17 +2116,28 @@ class VllmConfig:
 
         if self.parallel_config.use_ubatching:
             a2a_backend = self.parallel_config.all2all_backend
-            assert a2a_backend in [
-                "deepep_low_latency",
-                "deepep_high_throughput",
-                "nixl_ep",
-            ], (
-                "Microbatching currently only supports the deepep_low_latency, "
-                "deepep_high_throughput, and nixl_ep all2all backends. "
-                f"{a2a_backend} is not supported. To fix use "
-                "--all2all-backend=deepep_low_latency, "
-                "--all2all-backend=deepep_high_throughput, or "
-                "--all2all-backend=nixl_ep and install the matching kernels."
+            if current_platform.is_rocm():
+                supported_backends = [
+                    "deepep_low_latency",
+                    "deepep_high_throughput",
+                    "nixl_ep",
+                    # The naive DP/EP prepare/finalize runs its all-gather /
+                    # reduce-scatter on the comm stream under DBO.
+                    "allgather_reducescatter",
+                ]
+            else:
+                # CUDA and other platforms.
+                supported_backends = [
+                    "deepep_low_latency",
+                    "deepep_high_throughput",
+                    "nixl_ep",
+                ]
+            assert a2a_backend in supported_backends, (
+                "Microbatching currently only supports the "
+                f"{', '.join(supported_backends)} all2all backends on this "
+                f"platform. {a2a_backend} is not supported. To fix use one of "
+                f"{', '.join('--all2all-backend=' + b for b in supported_backends)}"
+                " and install the matching kernels."
             )
 
         if not self.instance_id:
@@ -2925,12 +2949,7 @@ class VllmConfig:
             unsupported.append("pipeline parallelism with external_launcher")
 
         if speculative_config is not None:
-            if speculative_config.method in (
-                "suffix",
-                "medusa",
-                "mlp_speculator",
-                "custom_class",
-            ):
+            if speculative_config.method in ("suffix", "custom_class"):
                 unsupported.append(f"speculative method '{speculative_config.method}'")
 
             # V2 EagleSpeculator does not support parallel_drafting (for P-Eagle).
