@@ -292,6 +292,7 @@ class AnthropicServingMessages(OpenAIServingChat):
                     {"role": "system", "content": "t"},
                     {"role": "user", "content": "t"},
                 ],
+                tools=None,
                 add_generation_prompt=False,
             )
             return False
