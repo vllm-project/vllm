@@ -987,6 +987,85 @@ def test_gpu_periodic_batches_are_bounded_even_when_upload_fails(monkeypatch):
     assert [len(batch[0].events) for batch in batches] == [1, 1, 1]
 
 
+def _write_executable(path: Path, body: str) -> None:
+    path.write_text(f"#!/bin/sh\n{body}")
+    path.chmod(0o755)
+
+
+@pytest.mark.parametrize(
+    "workspace_owner,expect_sampler",
+    [("997 996", True), ("0 0", False)],
+)
+def test_root_shell_runs_gpu_sampler_as_checkout_owner(
+    tmp_path, workspace_owner, expect_sampler
+):
+    bin_dir = tmp_path / "bin"
+    workspace = tmp_path / "workdir"
+    runtime = tmp_path / "runtime"
+    log = tmp_path / "calls.log"
+    bin_dir.mkdir()
+    workspace.mkdir()
+
+    _write_executable(
+        bin_dir / "id",
+        '[ "$1" = "-u" ] && { echo 0; exit 0; }; exec /usr/bin/id "$@"\n',
+    )
+    _write_executable(
+        bin_dir / "stat",
+        f"printf '%s\\n' '{workspace_owner}'\n",
+    )
+    for command in ("chown", "chmod"):
+        _write_executable(bin_dir / command, "exit 0\n")
+    _write_executable(
+        bin_dir / "setpriv",
+        'printf "setpriv %s\\n" "$*" >> "$CI_OTEL_TEST_LOG"\n'
+        'while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do shift; done\n'
+        '[ "$#" -gt 0 ] && shift\n'
+        'exec "$@"\n',
+    )
+    _write_executable(
+        bin_dir / "python3",
+        '[ "$1" = "-c" ] && exit 0\n'
+        '[ "$2" = "new-context" ] && {\n'
+        '  echo "01010101010101010101010101010101 0202020202020202 - 1"\n'
+        "  exit 0\n"
+        "}\n"
+        'case "$1" in *ci_gpu.py) echo gpu >> "$CI_OTEL_TEST_LOG";; esac\n'
+        "exit 0\n",
+    )
+    _write_executable(bin_dir / "nvidia-smi", "exit 0\n")
+    shell = (
+        f'. "{SCRIPTS_DIR / "ci_otel.sh"}"; '
+        f"ci_otel_start 1 {_quoted('true')}; ci_otel_finish 0"
+    )
+
+    result = subprocess.run(
+        ["/bin/sh", "-c", shell],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "PATH": f"{bin_dir}:{os.environ['PATH']}",
+            "CI_INFRA_OTEL_DIR": str(SCRIPTS_DIR),
+            "CI_INFRA_OTEL_RUNTIME_DIR": str(runtime),
+            "CI_INFRA_OTEL_WORKSPACE_DIR": str(workspace),
+            "CI_OTEL_TEST_LOG": str(log),
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    calls = log.read_text() if log.exists() else ""
+    if expect_sampler:
+        expected = "--reuid=997 --regid=996 --clear-groups --no-new-privs --"
+        assert calls.count("setpriv") == 2
+        assert calls.count(expected) == 2
+        assert "gpu" in calls
+    else:
+        assert calls == ""
+        assert "non-root GPU sampler unavailable" in result.stderr
+
+
 @pytest.mark.parametrize("sampling", ["1", "0"])
 def test_gpu_sampler_stops_with_command_and_preserves_failure_status(
     tmp_path, sampling

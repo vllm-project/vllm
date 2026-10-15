@@ -6,14 +6,17 @@ import json
 import keyword as _python_keyword
 import math
 import warnings
+from collections.abc import Sequence
 from dataclasses import dataclass
 from json import JSONDecodeError, JSONDecoder
 from typing import Any, TypeAlias
 
 import partial_json_parser
 from openai.types.responses import (
+    CustomTool,
     FunctionTool,
     NamespaceTool,
+    ToolChoiceCustom,
     ToolChoiceFunction,
 )
 from openai.types.responses.tool import Tool as ResponsesTool
@@ -29,11 +32,38 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionToolsParam,
 )
+from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 
 Tool: TypeAlias = ChatCompletionToolsParam | ResponsesTool
 
 logger = init_logger(__name__)
+
+CUSTOM_TOOL_INPUT_KEY = "input"
+
+
+def custom_tool_parameters() -> dict[str, Any]:
+    """Schema of the single-string function shim a ``custom`` tool is shown as."""
+    return {
+        "type": "object",
+        "properties": {
+            CUSTOM_TOOL_INPUT_KEY: {
+                "type": "string",
+                "description": "The freeform text payload for this tool.",
+            }
+        },
+        "required": [CUSTOM_TOOL_INPUT_KEY],
+        "additionalProperties": False,
+    }
+
+
+def custom_tool_as_function_dict(tool: CustomTool) -> dict[str, Any]:
+    return {
+        "type": "function",
+        "name": tool.name,
+        "description": tool.description,
+        "parameters": custom_tool_parameters(),
+    }
 
 
 def safe_literal_eval(text: str):
@@ -56,8 +86,7 @@ def partial_tag_overlap(text: str, tag: str) -> int:
 
 
 def find_common_prefix(s1: str, s2: str) -> str:
-    """
-    Finds a common prefix that is shared between two strings, if there is one.
+    """Finds a common prefix that is shared between two strings, if there is one.
     Order of arguments is NOT important.
 
     This function is provided as a UTILITY for extracting information from JSON
@@ -79,8 +108,7 @@ def find_common_prefix(s1: str, s2: str) -> str:
 
 
 def find_common_suffix(s1: str, s2: str) -> str:
-    """
-    Finds a common suffix shared between two strings, if there is one. Order of
+    """Finds a common suffix shared between two strings, if there is one. Order of
     arguments is NOT important.
     Stops when the suffix ends OR it hits an alphanumeric character
 
@@ -97,8 +125,7 @@ def find_common_suffix(s1: str, s2: str) -> str:
 
 
 def extract_intermediate_diff(curr: str, old: str) -> str:
-    """
-    Given two strings, extract the difference in the middle between two strings
+    """Given two strings, extract the difference in the middle between two strings
     that are known to have a common prefix and/or suffix.
 
     This function is provided as a UTILITY for extracting information from JSON
@@ -182,43 +209,79 @@ def flat_namespace_tool_name(namespace: str, name: str) -> str:
     return f"{namespace}{_NAMESPACE_TOOL_SEPARATOR}{name}"
 
 
+def get_function_tools(
+    tools: Sequence[Tool],
+) -> list[ChatCompletionToolsParam | FunctionTool]:
+    """Return the function tools the model is shown, in request order.
+
+    This is the single source for both the chat template's tool list and the
+    tools a tool-call grammar constrains, so the two cannot drift apart.
+    Namespace functions are flattened to ``<namespace>__<name>``; custom tools
+    become a single-string function shim. Other Responses tool types are never
+    rendered for the model and are dropped.
+    """
+    function_tools: list[ChatCompletionToolsParam | FunctionTool] = []
+    for tool in tools:
+        if isinstance(tool, NamespaceTool):
+            function_tools.extend(
+                FunctionTool.model_validate(
+                    {
+                        **namespaced_tool.model_dump(by_alias=True),
+                        "name": flat_namespace_tool_name(
+                            tool.name, namespaced_tool.name
+                        ),
+                    }
+                )
+                for namespaced_tool in tool.tools
+                if namespaced_tool.type == "function"
+            )
+        elif isinstance(tool, CustomTool):
+            function_tools.append(
+                FunctionTool.model_validate(custom_tool_as_function_dict(tool))
+            )
+        elif isinstance(tool, (FunctionTool, ChatCompletionToolsParam)):
+            function_tools.append(tool)
+    return function_tools
+
+
+def require_function_tools(
+    tools: Sequence[Tool],
+) -> list[ChatCompletionToolsParam | FunctionTool]:
+    """Return ``get_function_tools(tools)``, rejecting a request that has none.
+
+    Raises:
+        VLLMValidationError: ``tools`` has no tool the model can call, so a
+            tool choice that requires a call can never be satisfied.
+
+    """
+    function_tools = get_function_tools(tools)
+    if not function_tools:
+        raise VLLMValidationError(
+            "tool_choice requires a function call, but tools contains no "
+            "function tool the model can call.",
+            parameter="tool_choice",
+        )
+    return function_tools
+
+
 def iter_response_function_tool_info(
     tool: ResponsesTool,
 ) -> list[tuple[str, dict[str, Any] | None]]:
-    if isinstance(tool, FunctionTool):
-        return [(tool.name, tool.parameters)]
-    if not isinstance(tool, NamespaceTool):
-        return []
-
-    namespace = tool.name
     return [
-        (
-            flat_namespace_tool_name(namespace, namespaced_tool.name),
-            namespaced_tool.parameters,
-        )
-        for namespaced_tool in tool.tools
-        if namespaced_tool.type == "function"
+        (function_tool.name, function_tool.parameters)
+        for function_tool in get_function_tools([tool])
+        if isinstance(function_tool, FunctionTool)
     ]
 
 
 def iter_response_function_tool_dicts(
     tools: list[ResponsesTool],
 ) -> list[dict[str, Any]]:
-    function_tools: list[dict[str, Any]] = []
-    for tool in tools:
-        if isinstance(tool, NamespaceTool):
-            namespace = tool.name
-            for namespaced_tool in tool.tools:
-                if namespaced_tool.type != "function":
-                    continue
-                tool_dict = namespaced_tool.model_dump()
-                tool_dict["name"] = flat_namespace_tool_name(
-                    namespace, namespaced_tool.name
-                )
-                function_tools.append(tool_dict)
-        elif isinstance(tool, FunctionTool):
-            function_tools.append(tool.model_dump())
-    return function_tools
+    return [
+        tool.model_dump()
+        for tool in get_function_tools(tools)
+        if isinstance(tool, FunctionTool)
+    ]
 
 
 def build_responses_tool_call_name_map(
@@ -277,7 +340,7 @@ def find_tool_properties(
     if not tools:
         return {}
     for tool in tools:
-        if isinstance(tool, (FunctionTool, NamespaceTool)):
+        if isinstance(tool, (FunctionTool, NamespaceTool, CustomTool)):
             for name, params in iter_response_function_tool_info(tool):
                 if name == tool_name:
                     return (params or {}).get("properties", {})
@@ -298,7 +361,7 @@ def find_tool_name(
     if not tools:
         return False
     for tool in tools:
-        if isinstance(tool, (FunctionTool, NamespaceTool)):
+        if isinstance(tool, (FunctionTool, NamespaceTool, CustomTool)):
             for name, _ in iter_response_function_tool_info(tool):
                 if name == tool_name:
                     return True
@@ -311,14 +374,18 @@ def find_tool_name(
     return False
 
 
+def _params_or_empty_object(params: dict[str, Any] | None) -> dict[str, Any]:
+    # Empty/missing parameters still constrain arguments to a JSON object.
+    return params if params else {"type": "object", "properties": {}}
+
+
 def _get_tool_schema_from_name_and_params(
     name: str, params: dict[str, Any] | None
 ) -> dict:
-    params = params if params else {"type": "object", "properties": {}}
     return {
         "properties": {
             "name": {"type": "string", "enum": [name]},
-            "parameters": params,
+            "parameters": _params_or_empty_object(params),
         },
         "required": ["name", "parameters"],
     }
@@ -334,15 +401,22 @@ def _get_tool_schema_defs(
 ) -> dict:
     all_defs: dict[str, dict[str, Any]] = {}
     for tool in tools:
-        _, params = _extract_tool_info(tool)
+        name, params = _extract_tool_info(tool)
         if params is None:
             continue
         defs = params.pop("$defs", {})
+        if not isinstance(defs, dict):
+            raise VLLMValidationError(
+                f"`$defs` in the parameters of tool '{name}' must be an "
+                f"object, got {type(defs).__name__}.",
+                parameter="tools",
+            )
         for def_name, def_schema in defs.items():
             if def_name in all_defs and all_defs[def_name] != def_schema:
-                raise ValueError(
+                raise VLLMValidationError(
                     f"Tool definition '{def_name}' has multiple schemas, "
-                    "which is not supported."
+                    "which is not supported.",
+                    parameter="tools",
                 )
             all_defs[def_name] = def_schema
     return all_defs
@@ -350,21 +424,11 @@ def _get_tool_schema_defs(
 
 def _get_json_schema_from_tools(
     tools: list[Tool],
+    parallel_tool_calls: bool | None = None,
 ) -> dict:
-    fn_tool_schemas: list[dict[str, Any]] = []
-    fn_tools: list[Tool] = []
-    for tool in tools:
-        if isinstance(tool, (FunctionTool, NamespaceTool)):
-            fn_tool_schemas.extend(
-                _get_tool_schema_from_name_and_params(name, params)
-                for name, params in iter_response_function_tool_info(tool)
-            )
-            if isinstance(tool, FunctionTool):
-                fn_tools.append(tool)
-        elif _is_function_tool(tool):
-            fn_tool_schemas.append(_get_tool_schema_from_tool(tool))
-            fn_tools.append(tool)
-    json_schema = {
+    fn_tools: list[Tool] = list(require_function_tools(tools))
+    fn_tool_schemas = [_get_tool_schema_from_tool(tool) for tool in fn_tools]
+    json_schema: dict[str, Any] = {
         "type": "array",
         "minItems": 1,
         "items": {
@@ -372,6 +436,10 @@ def _get_json_schema_from_tools(
             "anyOf": fn_tool_schemas,
         },
     }
+    # Only an explicit `false` opts out of parallel tool calls; `None` means the
+    # field was never set and the default (true) applies.
+    if parallel_tool_calls is False:
+        json_schema["maxItems"] = 1
     json_schema_defs = _get_tool_schema_defs(fn_tools)
     if json_schema_defs:
         json_schema["$defs"] = json_schema_defs
@@ -379,28 +447,29 @@ def _get_json_schema_from_tools(
 
 
 def get_json_schema_from_tools(
-    tool_choice: str | ToolChoiceFunction | ChatCompletionNamedToolChoiceParam,
+    tool_choice: (
+        str | ToolChoiceFunction | ToolChoiceCustom | ChatCompletionNamedToolChoiceParam
+    ),
     tools: list[Tool] | None,
+    parallel_tool_calls: bool | None = None,
 ) -> str | dict | None:
     # tool_choice: "none"
     if tool_choice in ("none", None) or tools is None:
         return None
     # tool_choice: Forced Function (Responses)
     if (not isinstance(tool_choice, str)) and isinstance(
-        tool_choice, ToolChoiceFunction
+        tool_choice, (ToolChoiceFunction, ToolChoiceCustom)
     ):
         tool_name = tool_choice.name
         responses_tool_map: dict[str, dict[str, Any] | None] = {}
         for tool in tools:
-            if not isinstance(tool, (FunctionTool, NamespaceTool)):
+            if not isinstance(tool, (FunctionTool, NamespaceTool, CustomTool)):
                 continue
             for name, params in iter_response_function_tool_info(tool):
                 responses_tool_map[name] = params
-                if "__" in name:
-                    responses_tool_map.setdefault(name.rsplit("__", 1)[1], params)
         if tool_name not in responses_tool_map:
             raise ValueError(f"Tool '{tool_name}' has not been passed in `tools`.")
-        return responses_tool_map[tool_name]
+        return _params_or_empty_object(responses_tool_map[tool_name])
     # tool_choice: Forced Function (ChatCompletion)
     if (not isinstance(tool_choice, str)) and isinstance(
         tool_choice, ChatCompletionNamedToolChoiceParam
@@ -413,10 +482,10 @@ def get_json_schema_from_tools(
         }
         if tool_name not in chat_tool_map:
             raise ValueError(f"Tool '{tool_name}' has not been passed in `tools`.")
-        return chat_tool_map[tool_name].function.parameters
+        return _params_or_empty_object(chat_tool_map[tool_name].function.parameters)
     # tool_choice: "required"
     if tool_choice == "required":
-        return _get_json_schema_from_tools(tools)
+        return _get_json_schema_from_tools(tools, parallel_tool_calls)
     # tool_choice: "auto"
     return None
 
@@ -450,6 +519,7 @@ def get_parameter_value(val: ast.expr) -> Any:
 
     Raises:
         UnexpectedAstError: If the AST node is not a supported literal type.
+
     """
     if isinstance(val, ast.Constant):
         if val.value is None or isinstance(val.value, (str, int, float)):
@@ -528,6 +598,7 @@ def _ast_callable_dotted_name(node: ast.expr) -> str:
     Raises:
         UnexpectedAstError: If the chain does not bottom out in an
             ``ast.Name`` (e.g. subscript or call expression as receiver).
+
     """
     parts: list[str] = []
     current: ast.expr = node
@@ -550,6 +621,7 @@ def handle_single_tool(call: ast.Call) -> ToolCall:
     Raises:
         UnexpectedAstError: If the call target is neither a simple name
             nor a chain of attribute accesses bottoming out in a name.
+
     """
     if not isinstance(call.func, (ast.Name, ast.Attribute)):
         logger.warning(
@@ -921,6 +993,7 @@ def make_valid_python(text: str) -> tuple[str, str] | None:
     Raises:
         UnexpectedAstError: If mismatched brackets or parentheses
             are detected.
+
     """
     bracket_stack: list[str] = []
     for index, char in enumerate(text):
@@ -1088,6 +1161,7 @@ def coerce_to_schema_type(value: str, schema_type: str | list[str]) -> Any:
         value: The raw string value from the model output.
         schema_type: One or more JSON Schema type strings
             (e.g. ``"string"`` or ``["string", "null"]``).
+
     """
     if isinstance(schema_type, str):
         schema_type = [schema_type]
@@ -1176,6 +1250,7 @@ def compute_tool_delta(
     Returns:
         A DeltaToolCall with only the new argument characters, or None
         if there is no difference from what was previously sent.
+
     """
     new_call_args = new_call.function.arguments
     if withheld_suffix:

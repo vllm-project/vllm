@@ -10,6 +10,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
     kMxfp4Dynamic,
 )
 from vllm.model_executor.parameter import (
@@ -21,8 +22,7 @@ __all__ = ["CompressedTensorsW4A4Mxfp4"]
 
 
 class CompressedTensorsW4A4Mxfp4(CompressedTensorsScheme):
-    """
-    Compressed tensors scheme for MXFP4.
+    """Compressed tensors scheme for MXFP4.
 
     Supports models quantized with the compressed-tensors mxfp4-pack-quantized
     format.
@@ -33,16 +33,15 @@ class CompressedTensorsW4A4Mxfp4(CompressedTensorsScheme):
     - No global scale (unlike NVFP4)
 
     On SM100+ with FlashInfer and quantized activations: true W4A4.
-    When use_a16=True (weight-only checkpoint, input_activations is null):
-    W4A16 via Marlin even on SM100+.
+    With activation_quant_key=None (weight-only checkpoint, input_activations
+    is null): W4A16 via Marlin even on SM100+.
     Otherwise: W4A16 weight-only via Marlin.
     """
 
-    def __init__(self, use_a16: bool = False):
-        self.use_a16 = use_a16
+    def __init__(self, activation_quant_key: QuantKey | None = kMxfp4Dynamic):
         self.group_size = 32
         self.kernel = init_mxfp4_linear_kernel(
-            activation_quant_key=None if use_a16 else kMxfp4Dynamic,
+            activation_quant_key=activation_quant_key,
         )
 
     @classmethod
