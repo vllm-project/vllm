@@ -526,6 +526,46 @@ def _rocm_aiter_topk_softmax_impl(
     )
 
 
+def _rocm_aiter_topk_gating_impl(
+    topk_weights: torch.Tensor,
+    topk_indices: torch.Tensor,
+    token_expert_indices: torch.Tensor,
+    gating_output: torch.Tensor,
+    renormalize: bool,
+    num_shared_experts: int = 0,
+    shared_expert_scoring_func: str = "",
+) -> None:
+    # Callers pick this op only for launches AITER's topk_gating supports (see
+    # dispatch_topk_softmax_func); everything else goes to topk_softmax.
+    from aiter.ops.topk import topk_gating
+
+    # AITER renormalizes the selected softmax mass inside this launch,
+    # preserving vLLM's `renormalize=True` semantics without a second
+    # pointwise kernel, and sigmoids the trailing shared-expert columns.
+    topk_gating(
+        topk_weights,
+        topk_indices,
+        gating_output,
+        correction_bias=None,
+        need_renorm=renormalize,
+        routed_scaling_factor=1.0,
+        score_func="softmax",
+        num_shared_experts=num_shared_experts,
+    )
+
+
+def _rocm_aiter_topk_gating_fake(
+    topk_weights: torch.Tensor,
+    topk_indices: torch.Tensor,
+    token_expert_indices: torch.Tensor,
+    gating_output: torch.Tensor,
+    renormalize: bool,
+    num_shared_experts: int = 0,
+    shared_expert_scoring_func: str = "",
+) -> None:
+    pass
+
+
 def _rocm_aiter_topk_sigmoid_impl(
     topk_weights: torch.Tensor,
     topk_indices: torch.Tensor,
@@ -641,6 +681,36 @@ def _check_aiter_mla_fp8_support() -> bool:
             # TypeError: mla_decode_fwd is not a callable
             _AITER_MLA_SUPPORTS_FP8 = False
     return _AITER_MLA_SUPPORTS_FP8
+
+
+def _rocm_aiter_gather_kv_b_proj_impl(
+    kv_cache: torch.Tensor,
+    kv_scale: torch.Tensor,
+    kv_indptr: torch.Tensor,
+    kv_indices: torch.Tensor,
+    cu_seq_lens: torch.Tensor,
+    weight: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+) -> None:
+    from aiter.ops.triton.gather_kv_b_proj import gather_kv_b_proj
+
+    gather_kv_b_proj(
+        kv_cache, kv_scale, kv_indptr, kv_indices, cu_seq_lens, weight, None, k, v
+    )
+
+
+def _rocm_aiter_gather_kv_b_proj_fake(
+    kv_cache: torch.Tensor,
+    kv_scale: torch.Tensor,
+    kv_indptr: torch.Tensor,
+    kv_indices: torch.Tensor,
+    cu_seq_lens: torch.Tensor,
+    weight: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+) -> None:
+    pass
 
 
 def _rocm_aiter_mla_decode_fwd_impl(
@@ -938,6 +1008,39 @@ def _rocm_aiter_triton_gemm_a8w8_blockscale_fake(
     n = B.shape[0]
     Y = torch.empty(m, n, dtype=output_dtype, device=A.device)
     return Y
+
+
+def _rocm_aiter_triton_gemm_a8w8_blockscale_preshuffle_impl(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    As: torch.Tensor,
+    Bs: torch.Tensor,
+    output_dtype: torch.dtype = torch.bfloat16,
+) -> torch.Tensor:
+    from aiter.ops.triton.gemm_a8w8_blockscale import gemm_a8w8_blockscale_preshuffle
+
+    n, k = B.shape
+    return gemm_a8w8_blockscale_preshuffle(
+        A,
+        B.reshape(n // 16, k * 16),
+        As,
+        Bs,
+        output_dtype,
+        None,  # y
+        None,  # config
+        False,  # skip_reduce
+        False,  # is_x_scale_transposed (misspelled in aiter)
+    )
+
+
+def _rocm_aiter_triton_gemm_a8w8_blockscale_preshuffle_fake(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    As: torch.Tensor,
+    Bs: torch.Tensor,
+    output_dtype: torch.dtype = torch.bfloat16,
+) -> torch.Tensor:
+    return torch.empty(A.shape[0], B.shape[0], dtype=output_dtype, device=A.device)
 
 
 def _rocm_aiter_gemm_a8w8_blockscale_impl(
@@ -1990,7 +2093,7 @@ class rocm_aiter_ops:
     Operations:
         - GEMM operations: gemm_a8w8, gemm_a8w8_blockscale
         - Fused MoE: fused_moe, asm_moe_tkw1
-        - Routing: topk_softmax, biased_grouped_topk, grouped_topk
+        - Routing: topk_softmax, topk_gating, biased_grouped_topk, grouped_topk
         - MLA decode: mla_decode_fwd
         - Quantization: per_tensor_quant, per_token_quant, group_fp8_quant
         - Triton ops: triton_rotary_embed, triton_fp8_bmm, triton_gemm_a8w8_blockscale
@@ -2167,6 +2270,18 @@ class rocm_aiter_ops:
     @if_aiter_supported
     def is_fused_moe_enabled(cls) -> bool:
         return cls._AITER_ENABLED and cls._FMOE_ENABLED
+
+    @classmethod
+    @if_aiter_supported
+    def is_topk_gating_enabled(cls) -> bool:
+        """Use AITER ``topk_gating`` for softmax routing.
+
+        CDNA3 and CDNA4 only (gfx942, gfx950): those are the targets it was
+        measured on. Other AITER targets keep the legacy ``topk_softmax`` launcher.
+        """
+        from vllm.platforms.rocm import get_cdna_version
+
+        return cls.is_fused_moe_enabled() and get_cdna_version() in (3, 4)
 
     @classmethod
     @if_aiter_supported
@@ -2514,11 +2629,10 @@ class rocm_aiter_ops:
     @classmethod
     @functools.cache
     def is_gdn_flydsl_prefill_available(cls) -> bool:
-        """Whether the opt-in AITER FlyDSL GDN prefill path can be used.
+        """Whether the AITER FlyDSL GDN prefill path can be used.
 
-        Selecting the backend is an explicit opt-in in itself, but it still
-        runs AITER kernels, so VLLM_ROCM_USE_AITER remains the one switch that
-        turns all of them off.
+        It runs AITER kernels, so VLLM_ROCM_USE_AITER remains the one switch
+        that turns all of them off.
         """
         return (
             cls._AITER_ENABLED
@@ -2823,6 +2937,14 @@ class rocm_aiter_ops:
             )
 
             direct_register_custom_op(
+                op_name="rocm_aiter_topk_gating",
+                op_func=_rocm_aiter_topk_gating_impl,
+                mutates_args=["topk_weights", "topk_indices"],
+                fake_impl=_rocm_aiter_topk_gating_fake,
+                dispatch_key=current_platform.dispatch_key,
+            )
+
+            direct_register_custom_op(
                 op_name="rocm_aiter_topk_sigmoid",
                 op_func=_rocm_aiter_topk_sigmoid_impl,
                 mutates_args=["topk_weights", "topk_indices"],
@@ -2851,6 +2973,13 @@ class rocm_aiter_ops:
                 dispatch_key=current_platform.dispatch_key,
             )
 
+            direct_register_custom_op(
+                op_name="rocm_aiter_gather_kv_b_proj",
+                op_func=_rocm_aiter_gather_kv_b_proj_impl,
+                mutates_args=["k", "v"],
+                fake_impl=_rocm_aiter_gather_kv_b_proj_fake,
+                dispatch_key=current_platform.dispatch_key,
+            )
             direct_register_custom_op(
                 op_name="rocm_aiter_mla_decode_fwd",
                 op_func=_rocm_aiter_mla_decode_fwd_impl,
@@ -2886,6 +3015,12 @@ class rocm_aiter_ops:
                 op_name="rocm_aiter_triton_gemm_a8w8_blockscale",
                 op_func=_rocm_aiter_triton_gemm_a8w8_blockscale_impl,
                 fake_impl=_rocm_aiter_triton_gemm_a8w8_blockscale_fake,
+            )
+
+            direct_register_custom_op(
+                op_name="rocm_aiter_triton_gemm_a8w8_blockscale_preshuffle",
+                op_func=_rocm_aiter_triton_gemm_a8w8_blockscale_preshuffle_impl,
+                fake_impl=_rocm_aiter_triton_gemm_a8w8_blockscale_preshuffle_fake,
             )
 
             direct_register_custom_op(
@@ -3203,6 +3338,19 @@ class rocm_aiter_ops:
         )
 
     @staticmethod
+    def triton_gemm_a8w8_blockscale_preshuffle(
+        A: torch.Tensor,
+        B: torch.Tensor,
+        As: torch.Tensor,
+        Bs: torch.Tensor,
+        block_size: list[int],
+        output_dtype: torch.dtype = torch.bfloat16,
+    ) -> torch.Tensor:
+        return torch.ops.vllm.rocm_aiter_triton_gemm_a8w8_blockscale_preshuffle(
+            A, B, As, Bs, output_dtype
+        )
+
+    @staticmethod
     def gemm_a8w8_blockscale(
         A: torch.Tensor,
         B: torch.Tensor,
@@ -3347,6 +3495,27 @@ class rocm_aiter_ops:
         return topk_weights, topk_indices
 
     @staticmethod
+    def topk_gating(
+        topk_weights: torch.Tensor,
+        topk_indices: torch.Tensor,
+        token_expert_indices: torch.Tensor,
+        gating_output: torch.Tensor,
+        renormalize: bool,
+        num_shared_experts: int = 0,
+        shared_expert_scoring_func: str = "",
+    ) -> tuple[torch.Tensor, ...]:
+        torch.ops.vllm.rocm_aiter_topk_gating(
+            topk_weights,
+            topk_indices,
+            token_expert_indices,
+            gating_output,
+            renormalize,
+            num_shared_experts,
+            shared_expert_scoring_func,
+        )
+        return topk_weights, topk_indices
+
+    @staticmethod
     def topk_sigmoid(
         topk_weights: torch.Tensor,
         topk_indices: torch.Tensor,
@@ -3463,6 +3632,21 @@ class rocm_aiter_ops:
             extra_kv=extra_kv_buffer,
             extra_indptr=extra_kv_indptr,
             extra_indices=extra_kv_indices,
+        )
+
+    @staticmethod
+    def gather_kv_b_proj(
+        kv_cache: torch.Tensor,
+        kv_scale: torch.Tensor,
+        kv_indptr: torch.Tensor,
+        kv_indices: torch.Tensor,
+        cu_seq_lens: torch.Tensor,
+        weight: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+    ) -> None:
+        torch.ops.vllm.rocm_aiter_gather_kv_b_proj(
+            kv_cache, kv_scale, kv_indptr, kv_indices, cu_seq_lens, weight, k, v
         )
 
     @staticmethod
@@ -3943,14 +4127,27 @@ class rocm_aiter_ops:
             return False
 
     @staticmethod
+    @if_aiter_supported
+    def is_triton_blockscale_bpreshuffle_gemm_tuned(n: int, k: int) -> bool:
+        from aiter.ops.triton.utils.gemm_config_utils import (
+            get_gemm_config,
+        )
+
+        # Fake M value for now
+        _, is_tuned = get_gemm_config("GEMM-A8W8_BLOCKSCALE_PRESHUFFLED", 1, n, k)
+        return is_tuned
+
+    @staticmethod
     @functools.cache
     def is_triton_gemm_afp4wfp4_presh_ws_tuned(n: int, k_bytes: int) -> bool:
         if not current_platform.is_rocm():
             return False
-        # Input = weight.shape[1] (bytes); *4 for fp4 and aiter config 2*k
+        # k_bytes = weight.shape[1] (two fp4 per byte). AITER names these
+        # config files by the logical K, which is what gemm_afp4wfp4_preshuffle
+        # itself looks up, so probe the same file.
         try:
             return _triton_gemm_config_is_tuned(
-                "GEMM-AFP4WFP4_PRESHUFFLED", n, 4 * k_bytes
+                "GEMM-AFP4WFP4_PRESHUFFLED", n, 2 * k_bytes
             )
         except (AssertionError, ImportError):
             return False
