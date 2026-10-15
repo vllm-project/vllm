@@ -133,6 +133,7 @@ def _build(monkeypatch, gathered_heads, segmented_supported=True):
             v_head_dim=128,
         )
         self.dcp_world_size = DCP
+        self.non_causal_multi_token_decode = False
         self.reorder_batch_threshold = 5
 
     monkeypatch.setattr(
