@@ -15,7 +15,7 @@ from vllm.v1.engine.input_processor import InputProcessor
 @dataclass
 class MockModelConfig:
     is_diffusion: bool = False
-    architectures: list[str] = field(default_factory=list)
+    hf_config: SimpleNamespace = field(default_factory=SimpleNamespace)
     max_logprobs: int = 20
     logits_processors: list | None = None
     return_sampling_mask: bool = False
@@ -48,7 +48,8 @@ def test_nemotron_diffusion_accepts_request_temperature(temperature):
     params = SamplingParams(temperature=temperature)
     params.verify(
         MockModelConfig(
-            is_diffusion=True, architectures=["NemotronLabsDiffusionModel"]
+            is_diffusion=True,
+            hf_config=SimpleNamespace(diffusion_per_request_temperature=True),
         ),
         None,
         None,
@@ -120,8 +121,7 @@ def test_diffusion_canvas_width_is_accepted_with_either_scheduler(
     processor = SimpleNamespace(
         model_config=MockModelConfig(is_diffusion=True),
         vllm_config=SimpleNamespace(
-            scheduler_config=SimpleNamespace(async_scheduling=async_scheduling),
-            diffusion_config=diffusion_config,
+            scheduler_config=SimpleNamespace(async_scheduling=async_scheduling)
         ),
         speculative_config=None,
         structured_outputs_config=None,

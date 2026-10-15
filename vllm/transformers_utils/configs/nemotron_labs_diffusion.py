@@ -57,11 +57,13 @@ class NemotronLabsDiffusionConfig(PreTrainedConfig):
         self.mlp_bias = mlp_bias
         self.sliding_window = sliding_window
 
-        # Masked block-diffusion fields. ``canvas_length`` drives vLLM's
-        # diffusion detection and the per-step spec-decode canvas size.
+        # Masked block-diffusion fields. ``canvas_length`` (a property below)
+        # drives vLLM's diffusion detection and the per-step canvas size.
         self.mask_token_id = mask_token_id
         self.block_size = block_size
-        self.canvas_length = block_size
+        # Nemotron accepts per-request temperatures in diffusion mode, unlike
+        # diffusion models that use an engine-level temperature schedule.
+        self.diffusion_per_request_temperature = True
 
         # Normalize RoPE config: the checkpoint carries the same YaRN dict
         # under both ``rope_parameters`` and (legacy) ``rope_scaling``. Pop
@@ -79,3 +81,24 @@ class NemotronLabsDiffusionConfig(PreTrainedConfig):
             tie_word_embeddings=kwargs.pop("tie_word_embeddings", False),
             **kwargs,
         )
+
+    @property
+    def canvas_length(self) -> int | None:
+        """Canvas width for masked diffusion, or ``None`` for the AR path.
+
+        The same checkpoint can be served autoregressively, either with
+        ``hf_overrides={"ar_mode": True}`` or through the causal-LM
+        architecture. ``ModelConfig.is_diffusion`` keys off this value.
+        """
+        if getattr(self, "ar_mode", False):
+            return None
+        if "NemotronLabsDiffusionForCausalLM" in (
+            getattr(self, "architectures", None) or ()
+        ):
+            return None
+        return self.block_size
+
+    @canvas_length.setter
+    def canvas_length(self, value: int | None) -> None:
+        if value is not None:
+            self.block_size = value
