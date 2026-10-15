@@ -38,7 +38,6 @@ def title(text: str) -> str:
         "openai": "OpenAI",
         "lmcache": "LMCache",
         "multilora": "MultiLoRA",
-        "mlpspeculator": "MLPSpeculator",
         r"fp\d+": lambda x: x.group(0).upper(),  # e.g. fp16, fp32
         r"int\d+": lambda x: x.group(0).upper(),  # e.g. int8, int16
     }
@@ -49,8 +48,7 @@ def title(text: str) -> str:
 
 @dataclass
 class Example:
-    """
-    Example class for generating documentation content from a given path.
+    """Example class for generating documentation content from a given path.
 
     Attributes:
         path (Path): The path to the main directory or file.
@@ -64,6 +62,7 @@ class Example:
 
     Methods:
         generate() -> str: Generates the documentation content.
+
     """
 
     path: Path
@@ -116,8 +115,7 @@ class Example:
         raise ValueError(f"Title not found in {self.main_file}")
 
     def fix_relative_links(self, content: str) -> str:
-        """
-        Fix relative links in markdown content by converting them to gh-file
+        """Fix relative links in markdown content by converting them to gh-file
         format.
 
         Args:
@@ -125,6 +123,7 @@ class Example:
 
         Returns:
             str: Content with relative links converted to gh-file format
+
         """
         # Regex to match markdown links [text](relative_path)
         # This matches links that don't start with http, https, ftp, or #

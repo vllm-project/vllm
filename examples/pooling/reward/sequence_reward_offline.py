@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""
-Example offline usage of sequence reward models.
+"""Example offline usage of sequence reward models.
 
 The key distinction between sequence classification and token classification
 lies in their output granularity: sequence classification produces a single

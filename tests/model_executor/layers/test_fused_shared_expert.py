@@ -2,20 +2,26 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import importlib
+import inspect
+import sys
 from copy import deepcopy
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from typing import Any, cast
 from unittest.mock import patch
 
 import pytest
 import torch
 from torch import nn
+from transformers import Qwen3_5MoeTextConfig
 
 import vllm.config as vllm_config_module
-from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
+from vllm.config.quantization import QuantizationConfigArgs
 from vllm.model_executor.layers.fused_moe import utils as fused_moe_utils
 from vllm.model_executor.layers.fused_moe.layer import determine_expert_counts
+from vllm.model_executor.layers.quantization.experts_int8 import ExpertsInt8Config
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+from vllm.model_executor.layers.quantization.online.base import OnlineQuantizationConfig
 from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
 from vllm.model_executor.layers.quantization.utils.config_utils import (
     get_quark_ocp_mx_group_size,
@@ -29,7 +35,6 @@ from vllm.models.deepseek_v4 import quant_config as deepseek_v4_quant_config
 from vllm.models.minimax_m3.amd import model as minimax_m3_model
 from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.minimax_m3 import MiniMaxM3TextConfig
-from vllm.transformers_utils.configs.qwen3_5_moe import Qwen3_5MoeTextConfig
 
 pytestmark = pytest.mark.skipif(
     current_platform.is_xpu(),
@@ -138,10 +143,17 @@ def get_deepseek_v4_quark_config(exclude: list[str]) -> dict[str, Any]:
     return quantization_config
 
 
+class _StubGlm5NextAttention(nn.Module):
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__()
+        self.o_proj = SimpleNamespace(reduce_results=True)
+
+
 def get_fse_test_model_config(
     model_type: str,
     quantization_config: dict[str, Any],
 ) -> tuple[object, type[nn.Module]]:
+    config: object
     if model_type == "minimax_m3":
         config = MiniMaxM3TextConfig(
             hidden_size=128,
@@ -271,6 +283,33 @@ def get_fse_test_model_config(
             quantization_config=quantization_config,
         )
         return config, Glm4MoeModel
+    if model_type == "glm5_next":
+        from transformers import Glm5NextTextConfig
+
+        from vllm.models.glm5next.common.model import Glm5NextModel
+
+        config = Glm5NextTextConfig(
+            vocab_size=256,
+            hidden_size=128,
+            intermediate_size=32,
+            moe_intermediate_size=32,
+            num_hidden_layers=1,
+            num_attention_heads=1,
+            num_key_value_heads=1,
+            n_routed_experts=2,
+            n_shared_experts=1,
+            num_experts_per_tok=1,
+            layer_types=["linear_attention"],
+            mlp_layer_types=["sparse"],
+            index_topk=1,
+            index_kpool=1,
+            pad_token_id=None,
+            scoring_func="sigmoid",
+            topk_method="noaux_tc",
+            mhc=False,
+            quantization_config=quantization_config,
+        )
+        return config, Glm5NextModel
     raise ValueError(f"Unsupported FSE test model: {model_type}")
 
 
@@ -299,7 +338,7 @@ def test_resolve_layer_fused_shared_expert_skips_compatibility_when_disabled(
     )
 
     assert not fused_moe_utils.resolve_layer_fused_shared_expert(
-        object(), "model.layers.0.mlp"
+        ExpertsInt8Config(), "model.layers.0.mlp"
     )
 
 
@@ -314,7 +353,7 @@ def test_resolve_layer_fused_shared_expert_normalizes_unavailable_aiter(
 
     assert (
         fused_moe_utils.resolve_layer_fused_shared_expert(
-            object(), "model.layers.0.mlp"
+            ExpertsInt8Config(), "model.layers.0.mlp"
         )
         is False
     )
@@ -323,7 +362,7 @@ def test_resolve_layer_fused_shared_expert_normalizes_unavailable_aiter(
 def test_resolve_layer_fused_shared_expert_passes_module_prefixes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    quant_config = object()
+    quant_config = ExpertsInt8Config()
     monkeypatch.setattr(
         fused_moe_utils.rocm_aiter_ops,
         "is_fusion_moe_shared_experts_enabled",
@@ -372,7 +411,7 @@ def test_resolve_layer_fused_shared_expert_rejects_incompatible_quantization(
     )
 
     assert not fused_moe_utils.resolve_layer_fused_shared_expert(
-        object(), "model.layers.0.mlp"
+        ExpertsInt8Config(), "model.layers.0.mlp"
     )
     assert "shared experts are excluded" in caplog.text
 
@@ -382,6 +421,7 @@ def test_deepseek_v4_shared_expert_fse_uses_mtp_quantization_config_prefix(
 ) -> None:
     class DeepseekV4Config:
         expert_dtype = "fp4"
+        online_quantization_config = None
 
         def _is_quark_mxfp4_ocp(self, hf_config: object) -> bool:
             return True
@@ -412,6 +452,343 @@ def test_deepseek_v4_shared_expert_fse_uses_mtp_quantization_config_prefix(
 
     assert compatible
     assert reason is None
+
+
+def test_deepseek_v4_heterogeneous_fhmoe_keeps_native_intermediate_width() -> None:
+    from vllm.models.deepseek_v4.amd.model import _prepare_native_fp8_shared_expert
+
+    hidden_size = 7168
+    intermediate_size = 384
+    w13 = torch.empty((2 * intermediate_size, hidden_size), dtype=torch.float8_e4m3fn)
+    w2 = torch.empty((hidden_size, intermediate_size), dtype=torch.float8_e4m3fn)
+    w13_scale_bytes = (torch.arange(6 * 56).reshape(6, 56).remainder(20) + 0x60).to(
+        torch.uint8
+    )
+    w2_scale_bytes = (torch.arange(56 * 3).reshape(56, 3).remainder(30) + 0x50).to(
+        torch.uint8
+    )
+    w13_scale = w13_scale_bytes.view(torch.float8_e8m0fnu)
+    w2_scale = w2_scale_bytes.view(torch.float8_e8m0fnu)
+
+    prepared = _prepare_native_fp8_shared_expert(
+        w13, w2, w13_scale, w2_scale, intermediate_size
+    )
+
+    assert prepared[0].shape == (1, 768, 7168)
+    assert prepared[1].shape == (1, 7168, 384)
+    assert prepared[2].shape == (768, 224)
+    assert prepared[3].shape == (7168, 16)
+    expected_w13_scale = w13_scale_bytes.repeat_interleave(
+        128, dim=0
+    ).repeat_interleave(4, dim=1)
+    expected_w2_scale = w2_scale_bytes.repeat_interleave(128, dim=0).repeat_interleave(
+        4, dim=1
+    )
+    assert torch.equal(prepared[2].view(torch.uint8), expected_w13_scale)
+    assert torch.equal(prepared[3].view(torch.uint8)[:, :12], expected_w2_scale)
+    assert torch.all(prepared[3].view(torch.uint8)[:, 12:] == 0x7F)
+
+
+@pytest.mark.parametrize(
+    ("num_tokens", "supported_through", "expected"),
+    [
+        (0, 4096, False),
+        (1, 4096, True),
+        (1536, 4096, True),
+        (2048, 4096, True),
+        (2049, 4096, True),
+        (4096, 4096, True),
+        (4097, 4096, False),
+        (1536, 0, False),
+    ],
+)
+def test_deepseek_v4_heterogeneous_fhmoe_token_policy(
+    monkeypatch: pytest.MonkeyPatch,
+    num_tokens: int,
+    supported_through: int,
+    expected: bool,
+) -> None:
+    from vllm.models.deepseek_v4.amd import model as deepseek_v4_model
+
+    checked_tokens: list[int] = []
+
+    def supports(num_tokens: int) -> bool:
+        checked_tokens.append(num_tokens)
+        return num_tokens <= supported_through
+
+    monkeypatch.setattr(
+        deepseek_v4_model.rocm_aiter_ops,
+        "fused_moe_supports_heterogeneous_shared_expert",
+        supports,
+    )
+
+    assert deepseek_v4_model._use_heterogeneous_fhmoe(num_tokens) is expected
+    assert checked_tokens == ([] if num_tokens == 0 else [num_tokens])
+
+
+def _supported_fhmoe_signature(
+    shared_w1=None,
+    shared_w2=None,
+    shared_w1_scale=None,
+    shared_w2_scale=None,
+    shared_expert_id=-1,
+) -> None:
+    pass
+
+
+def _incomplete_fhmoe_signature(
+    shared_w1=None,
+    shared_w2=None,
+    shared_w1_scale=None,
+    shared_w2_scale=None,
+) -> None:
+    pass
+
+
+def _install_fake_aiter_fhmoe(
+    monkeypatch: pytest.MonkeyPatch,
+    supports_dsv4_i384_fhmoe: object,
+    fused_moe: object,
+) -> None:
+    fake_aiter = ModuleType("aiter")
+    fake_aiter.__path__ = []
+    fake_fhmoe = ModuleType("aiter.fhmoe")
+    if supports_dsv4_i384_fhmoe is not None:
+        fake_fhmoe.__dict__["supports_dsv4_i384_fhmoe"] = supports_dsv4_i384_fhmoe
+    fake_fused_moe = ModuleType("aiter.fused_moe")
+    fake_fused_moe.__dict__["fused_moe"] = fused_moe
+    fake_aiter.__dict__["fhmoe"] = fake_fhmoe
+    fake_aiter.__dict__["fused_moe"] = fake_fused_moe
+    monkeypatch.setitem(sys.modules, "aiter", fake_aiter)
+    monkeypatch.setitem(sys.modules, "aiter.fhmoe", fake_fhmoe)
+    monkeypatch.setitem(sys.modules, "aiter.fused_moe", fake_fused_moe)
+
+
+def _supports_fhmoe_through_2047(max_tokens: int) -> bool:
+    return max_tokens <= 2047
+
+
+def _supports_fhmoe_through_2048(max_tokens: int) -> bool:
+    return max_tokens <= 2048
+
+
+def _supports_fhmoe_through_4096(max_tokens: int) -> bool:
+    return max_tokens <= 4096
+
+
+def _raises_fhmoe_config_error(max_tokens: int) -> bool:
+    raise OSError
+
+
+def _returns_truthy_non_bool(max_tokens: int) -> int:
+    return 1
+
+
+@pytest.mark.parametrize(
+    ("num_tokens", "capability", "fused_moe", "expected"),
+    [
+        (0, _supports_fhmoe_through_2048, _supported_fhmoe_signature, False),
+        (True, _supports_fhmoe_through_2048, _supported_fhmoe_signature, False),
+        (2048, None, _supported_fhmoe_signature, False),
+        (2048, True, _supported_fhmoe_signature, False),
+        (2048, _raises_fhmoe_config_error, _supported_fhmoe_signature, False),
+        (2048, _returns_truthy_non_bool, _supported_fhmoe_signature, False),
+        (2048, _supports_fhmoe_through_2047, _supported_fhmoe_signature, False),
+        (2048, _supports_fhmoe_through_2048, _incomplete_fhmoe_signature, False),
+        (2048, _supports_fhmoe_through_2048, _supported_fhmoe_signature, True),
+        (2049, _supports_fhmoe_through_2048, _supported_fhmoe_signature, False),
+        (4096, _supports_fhmoe_through_4096, _supported_fhmoe_signature, True),
+        (4097, _supports_fhmoe_through_4096, _supported_fhmoe_signature, False),
+    ],
+)
+def test_deepseek_v4_heterogeneous_fhmoe_aiter_capability(
+    monkeypatch: pytest.MonkeyPatch,
+    num_tokens: object,
+    capability: object,
+    fused_moe: object,
+    expected: bool,
+) -> None:
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    _install_fake_aiter_fhmoe(monkeypatch, capability, fused_moe)
+
+    assert (
+        rocm_aiter_ops._probe_dsv4_i384_fhmoe_capability(cast(int, num_tokens))
+        is expected
+    )
+
+
+def test_deepseek_v4_heterogeneous_fhmoe_aiter_capability_catches_import_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    fake_aiter = ModuleType("aiter")
+    fake_aiter.__path__ = []
+    monkeypatch.setitem(sys.modules, "aiter", fake_aiter)
+    monkeypatch.setitem(sys.modules, "aiter.fhmoe", None)
+
+    assert not rocm_aiter_ops._probe_dsv4_i384_fhmoe_capability(2048)
+
+
+@pytest.mark.parametrize("error", [TypeError, ValueError])
+def test_deepseek_v4_heterogeneous_fhmoe_aiter_capability_catches_signature_error(
+    monkeypatch: pytest.MonkeyPatch,
+    error: type[Exception],
+) -> None:
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    _install_fake_aiter_fhmoe(
+        monkeypatch, _supports_fhmoe_through_2048, _supported_fhmoe_signature
+    )
+
+    def raise_signature_error(_: object) -> inspect.Signature:
+        raise error
+
+    monkeypatch.setattr(inspect, "signature", raise_signature_error)
+
+    assert not rocm_aiter_ops._probe_dsv4_i384_fhmoe_capability(2048)
+
+
+@pytest.mark.parametrize(
+    ("setting", "value", "expected"),
+    [
+        ("data_parallel_size", 1, True),
+        ("data_parallel_size", 2, False),
+        ("prefill_context_parallel_size", 2, False),
+        ("topk_method", "greedy", False),
+        ("fhmoe_supported", False, False),
+    ],
+)
+def test_deepseek_v4_heterogeneous_fhmoe_compatibility_gates(
+    monkeypatch: pytest.MonkeyPatch,
+    setting: str,
+    value: object,
+    expected: bool,
+) -> None:
+    from vllm.models.deepseek_v4.amd import model as deepseek_v4_model
+
+    hf_config = SimpleNamespace(
+        n_routed_experts=384,
+        num_experts_per_tok=6,
+        n_shared_experts=1,
+        hidden_size=7168,
+        moe_intermediate_size=3072,
+        hidden_act="silu",
+        expert_dtype="fp4",
+        topk_method="noaux_tc",
+    )
+    parallel_config = SimpleNamespace(
+        enable_expert_parallel=False,
+        enable_eplb=False,
+        tensor_parallel_size=8,
+        data_parallel_size=1,
+        prefill_context_parallel_size=1,
+    )
+    if setting == "topk_method":
+        hf_config.topk_method = value
+    elif setting != "fhmoe_supported":
+        setattr(parallel_config, setting, value)
+
+    quant_config = SimpleNamespace(
+        get_name=lambda: "deepseek_v4_fp8",
+        moe_quant_algo="",
+        weight_block_size=[128, 128],
+        is_checkpoint_fp8_serialized=True,
+        is_scale_e8m0=True,
+        ignored_layers=None,
+    )
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(hf_config=hf_config, dtype=torch.bfloat16),
+        quant_config=quant_config,
+        parallel_config=parallel_config,
+        kernel_config=SimpleNamespace(moe_backend="aiter"),
+        offload_config=None,
+    )
+    monkeypatch.setattr(deepseek_v4_model.current_platform, "is_rocm", lambda: True)
+    monkeypatch.setattr(
+        deepseek_v4_model.envs,
+        "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS",
+        True,
+    )
+    monkeypatch.setattr(deepseek_v4_model, "on_gfx950", lambda: True)
+    monkeypatch.setattr(
+        deepseek_v4_model.rocm_aiter_ops,
+        "is_fusion_moe_shared_experts_enabled",
+        lambda: True,
+    )
+    checked_tokens: list[int] = []
+    fhmoe_supported = setting != "fhmoe_supported" or value is True
+
+    def supports(num_tokens: int) -> bool:
+        checked_tokens.append(num_tokens)
+        return fhmoe_supported
+
+    monkeypatch.setattr(
+        deepseek_v4_model.rocm_aiter_ops,
+        "fused_moe_supports_heterogeneous_shared_expert",
+        supports,
+    )
+
+    assert (
+        deepseek_v4_model._heterogeneous_shared_expert_enabled(
+            cast(VllmConfig, vllm_config)
+        )
+        is expected
+    )
+    assert checked_tokens == [1]
+
+
+@pytest.mark.parametrize(
+    ("weights_shape", "ids_shape", "message"),
+    [
+        ((2, 7, 1), (2, 7, 1), "equal two-dimensional shapes"),
+        ((2, 7), (3, 7), "equal two-dimensional shapes"),
+        ((2, 6), (2, 6), "exactly 7 columns"),
+        ((2, 8), (2, 8), "exactly 7 columns"),
+    ],
+)
+def test_deepseek_v4_heterogeneous_fhmoe_rejects_invalid_routes(
+    weights_shape: tuple[int, ...],
+    ids_shape: tuple[int, ...],
+    message: str,
+) -> None:
+    from vllm.models.deepseek_v4.amd.model import _validate_heterogeneous_routes
+
+    with pytest.raises(ValueError, match=message):
+        _validate_heterogeneous_routes(
+            torch.empty(weights_shape),
+            torch.empty(ids_shape, dtype=torch.int64),
+            experts_per_token=6,
+        )
+
+
+def test_deepseek_v4_heterogeneous_fhmoe_accepts_appended_shared_route() -> None:
+    from vllm.models.deepseek_v4.amd.model import _validate_heterogeneous_routes
+
+    _validate_heterogeneous_routes(
+        torch.empty((2, 7)),
+        torch.empty((2, 7), dtype=torch.int64),
+        experts_per_token=6,
+    )
+
+
+def test_aiter_fused_moe_validates_shared_expert_arguments() -> None:
+    from vllm._aiter_ops import (
+        _validate_rocm_aiter_fused_moe_shared_expert_args,
+    )
+
+    validate = _validate_rocm_aiter_fused_moe_shared_expert_args
+    shared_tensor = torch.empty(0)
+
+    assert not validate(None, None, None, None, -1)
+    with pytest.raises(ValueError, match="requires shared weights and scales"):
+        validate(None, None, None, None, 0)
+    with pytest.raises(ValueError, match="both shared weights and scales"):
+        validate(shared_tensor, None, None, None, 0)
+    with pytest.raises(ValueError, match="non-negative shared expert ID"):
+        validate(shared_tensor, shared_tensor, shared_tensor, shared_tensor, -1)
+    assert validate(shared_tensor, shared_tensor, shared_tensor, shared_tensor, 0)
 
 
 def test_is_model_fused_shared_expert_compatible() -> None:
@@ -451,7 +828,7 @@ def test_is_model_fused_shared_expert_compatible() -> None:
 
 @pytest.mark.parametrize(
     "model_type",
-    ["minimax_m3", "deepseek_v4", "qwen3_5", "glm4_moe", "deepseek_v2"],
+    ["minimax_m3", "deepseek_v4", "qwen3_5", "glm4_moe", "deepseek_v2", "glm5_next"],
 )
 @pytest.mark.parametrize(
     ("use_fse", "exclude"),
@@ -469,7 +846,6 @@ def test_models_fse_init(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Model construction resolves FSE consistently with Quark quantization."""
-
     quantization_config: dict[str, Any] = (
         get_deepseek_v4_quark_config(["layers.0.ffn.shared_experts"] if exclude else [])
         if model_type == "deepseek_v4"
@@ -493,6 +869,7 @@ def test_models_fse_init(
         runner_type="generate",
         is_moe=True,
         logits_processors=None,
+        rswa_window=None,
     )
     vllm_config.parallel_config.enable_expert_parallel = False
     if model_type == "deepseek_v4":
@@ -505,6 +882,16 @@ def test_models_fse_init(
         )
     else:
         vllm_config.quant_config = QuarkConfig(quantization_config)
+    if model_type == "glm5_next":
+        from vllm.models.glm5next.common import model as glm5_next_model
+
+        for attention in ("Glm5NextLinearAttention", "Glm5NextMLAAttention"):
+            monkeypatch.setattr(glm5_next_model, attention, _StubGlm5NextAttention)
+        # The gate allows fusion only at TP4/TP8 on gfx950, and this test
+        # runs at TP1; the gate has its own test.
+        monkeypatch.setattr(
+            glm5_next_model, "_fused_shared_experts_tuned", lambda _: True
+        )
 
     import vllm.envs as envs
     from vllm._aiter_ops import rocm_aiter_ops
@@ -557,6 +944,10 @@ def test_models_fse_init(
                 )
                 mtp = DeepSeekV4MTP(vllm_config=vllm_config)
         assert model.is_fused_shared_expert_enabled is (fse_enabled and not exclude)
+        if model_type == "glm5_next":
+            assert (model.layers[0].mlp.shared_experts is None) is (
+                fse_enabled and not exclude
+            )
 
         # The dummy quant config here uses mixed mxfp4/fp8 for experts/shared_expert
         # so should just raise a warning.
@@ -579,6 +970,74 @@ def test_models_fse_init(
 
     importlib.reload(envs)
     rocm_aiter_ops.refresh_env_variables()
+
+
+@pytest.mark.parametrize(
+    ("setting", "value", "reason"),
+    [
+        ("tensor_parallel_size", 4, None),
+        ("tensor_parallel_size", 8, None),
+        ("tensor_parallel_size", 2, "tensor_parallel_size is 2"),
+        ("data_parallel_size", 2, "data_parallel_size is 2"),
+        ("prefill_context_parallel_size", 2, "prefill_context_parallel_size is 2"),
+        ("enable_expert_parallel", True, "expert parallelism is enabled"),
+        ("on_gfx950", False, "the GPU is not gfx950"),
+    ],
+)
+def test_glm5_next_fuses_shared_experts_only_in_tuned_setups(
+    monkeypatch: pytest.MonkeyPatch,
+    setting: str,
+    value: object,
+    reason: str | None,
+) -> None:
+    from vllm.models.glm5next.common import model as glm5_next_model
+
+    parallel_config = SimpleNamespace(
+        tensor_parallel_size=4,
+        data_parallel_size=1,
+        prefill_context_parallel_size=1,
+        enable_expert_parallel=False,
+    )
+    on_gfx950 = value if setting == "on_gfx950" else True
+    if setting != "on_gfx950":
+        setattr(parallel_config, setting, value)
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx950", lambda: on_gfx950)
+
+    with patch.object(glm5_next_model.logger, "warning_once") as warning:
+        tuned = glm5_next_model._fused_shared_experts_tuned(
+            cast(ParallelConfig, parallel_config)
+        )
+
+    assert tuned is (reason is None)
+    if reason is None:
+        warning.assert_not_called()
+    else:
+        warning.assert_called_once()
+        assert warning.call_args.args[1] == reason
+
+
+def test_glm5_next_fused_shared_expert_loads_into_the_shared_slot() -> None:
+    from vllm.models.glm5next.common import model as glm5_next_model
+
+    assert glm5_next_model._num_fused_shared_experts(1, True) == 1
+    assert glm5_next_model._num_fused_shared_experts(1, False) == 0
+    assert glm5_next_model._num_fused_shared_experts(None, True) == 0
+    with pytest.raises(NotImplementedError, match="only 1 shared expert"):
+        glm5_next_model._num_fused_shared_experts(2, True)
+
+    for shared, fused in [
+        (
+            "model.layers.3.mlp.shared_experts.gate_proj.weight_scale_inv",
+            "model.layers.3.mlp.experts.288.gate_proj.weight_scale_inv",
+        ),
+        (
+            "model.layers.45.mtp_block.mlp.shared_experts.down_proj.weight",
+            "model.layers.45.mtp_block.mlp.experts.288.down_proj.weight",
+        ),
+    ]:
+        assert glm5_next_model._fused_shared_expert_name(shared, 288) == fused
+    routed = "model.layers.3.mlp.experts.7.down_proj.weight"
+    assert glm5_next_model._fused_shared_expert_name(routed, 288) == routed
 
 
 @pytest.mark.parametrize(
@@ -608,6 +1067,73 @@ def test_quark_shared_expert_fse_compatibility(
             reason
             == "Quark excludes shared experts at model.layers.0.mlp.shared_expert"
         )
+
+
+@pytest.mark.parametrize("exclude_shared_expert", [False, True])
+def test_online_targets_off_shared_expert_defer_to_checkpoint(
+    exclude_shared_expert: bool,
+) -> None:
+    """Unrelated online targets preserve the checkpoint's FSE decision."""
+    shared_prefix = "model.layers.0.mlp.shared_expert"
+    quant_config = QuarkConfig(
+        {
+            **_QUARK_FSE_CONFIG,
+            "exclude": (
+                [f"{shared_prefix}.down_proj"] if exclude_shared_expert else []
+            ),
+        }
+    )
+    quant_config.online_quantization_config = OnlineQuantizationConfig(
+        QuantizationConfigArgs(targets={"*linear_attn.out_proj": "mxfp4"})
+    )
+
+    compatible, reason = is_shared_expert_quant_fse_compatible(
+        quant_config,
+        "model.layers.0.mlp.experts",
+        shared_prefix,
+    )
+
+    assert compatible is not exclude_shared_expert
+    assert reason == (
+        f"Quark excludes shared experts at {shared_prefix}"
+        if exclude_shared_expert
+        else None
+    )
+
+
+def test_online_targeting_only_one_shared_projection_rejects_fse() -> None:
+    shared_prefix = "model.layers.0.mlp.shared_expert"
+    quant_config = QuarkConfig({**_QUARK_FSE_CONFIG, "exclude": []})
+    quant_config.online_quantization_config = OnlineQuantizationConfig(
+        QuantizationConfigArgs(targets={f"{shared_prefix}.down_proj": "mxfp4"})
+    )
+
+    assert is_shared_expert_quant_fse_compatible(
+        quant_config,
+        "model.layers.0.mlp.experts",
+        shared_prefix,
+    ) == (
+        False,
+        "online quantization targets only part of the shared expert at "
+        f"{shared_prefix}",
+    )
+
+
+def test_online_fp8_shared_expert_rejects_quark_mxfp4_fse() -> None:
+    shared_prefix = "model.layers.0.mlp.shared_expert"
+    quant_config = QuarkConfig({**_QUARK_FSE_CONFIG, "exclude": []})
+    quant_config.online_quantization_config = OnlineQuantizationConfig(
+        QuantizationConfigArgs(targets={f"{shared_prefix}*": "fp8_per_tensor"})
+    )
+
+    assert is_shared_expert_quant_fse_compatible(
+        quant_config,
+        "model.layers.0.mlp.experts",
+        shared_prefix,
+    ) == (
+        False,
+        "online shared-expert quantization keys do not match the routed expert keys",
+    )
 
 
 def test_quark_shared_expert_fse_exclude_is_scoped_to_the_layer() -> None:
@@ -875,20 +1401,20 @@ def test_quark_packed_layer_config_must_match_global_config() -> None:
 
 def test_non_quark_shared_expert_fse_is_incompatible() -> None:
     compatible, reason = is_shared_expert_quant_fse_compatible(
-        object(),
+        ExpertsInt8Config(),
         "model.layers.0.mlp.experts",
         "model.layers.0.mlp.shared_experts",
     )
 
     assert not compatible
     assert reason == (
-        "shared-expert FSE quantization compatibility is not implemented for object"
+        "shared-expert FSE quantization compatibility is not implemented for "
+        "ExpertsInt8Config"
     )
 
 
 def _fp8_config(**kwargs: Any) -> Fp8Config:
     return Fp8Config(
-        is_checkpoint_fp8_serialized=True,
         activation_scheme="dynamic",
         weight_block_size=[128, 128],
         **kwargs,
@@ -909,7 +1435,7 @@ def test_block_fp8_shared_expert_fse_is_compatible() -> None:
 def test_per_tensor_fp8_shared_expert_fse_is_incompatible() -> None:
     """Per-tensor scales are 0-D, so the shared-expert chunker cannot slice them."""
     compatible, reason = is_shared_expert_quant_fse_compatible(
-        Fp8Config(is_checkpoint_fp8_serialized=True, activation_scheme="dynamic"),
+        Fp8Config(activation_scheme="dynamic"),
         "model.layers.0.mlp.experts",
         "model.layers.0.mlp.shared_experts",
     )
