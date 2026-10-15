@@ -310,6 +310,10 @@ class ModelRunnerOutput:
     # ``None`` when ``return_sampling_mask`` is off.
     sampling_masks: SamplingMaskLists | None = None
 
+    # [num_reqs] spec tokens the target verified per request, when the runner
+    # may verify fewer than were scheduled. None means all of them.
+    num_verified_spec_tokens: list[int] | None = None
+
     @staticmethod
     def with_kv_conn_output_only(
         kv_connector_output: KVConnectorOutput | None,

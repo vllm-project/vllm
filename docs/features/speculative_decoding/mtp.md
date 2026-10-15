@@ -74,3 +74,10 @@ vllm serve XiaomiMiMo/MiMo-7B-Base \
   is a good default to start with.
 - If your model does not support MTP, use another method such as EAGLE or draft
   model speculation.
+- `"draft_confidence_threshold": 0.6` with `"draft_confidence_fallback_depth": 3`
+  (Model Runner V2, SM121 GPUs such as DGX Spark) makes `num_speculative_tokens`
+  a maximum depth while one request is decoding: drafting stops once its next
+  draft is not that confident, and only the drafted prefix is verified. With
+  more requests it drafts the fallback depth instead. It waits on the GPU after
+  every draft step, which costs more than it saves on faster GPUs, so it is
+  rejected elsewhere; SM120 (RTX PRO 6000, RTX 5090) is untested.
