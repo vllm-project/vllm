@@ -43,17 +43,20 @@ All three counters include `model_name`:
 
 | Counter | Additional labels | Counts |
 | --- | --- | --- |
-| `vllm:tool_call_parser_invocations_total` | `mode`, `outcome`, `request_type`, `tool_choice`, `tool_count` | Parser invocations, not responses: once per choice in non-streaming mode or per delta in streaming mode. Coverage depends on the parser using the recording hook. |
+| `vllm:tool_call_parser_invocations_total` | `mode`, `outcome`, `request_type` | Parser invocations, not responses: once per choice in non-streaming mode or per delta in streaming mode. Coverage depends on the parser using the recording hook. |
 | `vllm:tool_call_responses_total` | `status`, `tool_choice`, `api_surface` | One outcome per completed tool-bearing Chat Completions or Messages request, or per surfaced tool-parser failure. |
 | `vllm:tool_calls_emitted_total` | `api_surface` | Individual tool calls returned after filtering and API conversion. Repeated streaming argument fragments are not new calls. |
 
 `tool_choice` is normalized to `unset`, `auto`, `none`, `required`, `named`,
-or `other`; named choices never include the function name. The invocation
-counter's `tool_count` buckets are `0`, `1`, `2-5`, `6-10`, and `10+`
-(more than ten tools). Its `mode` is `streaming` or `non_streaming`,
-`outcome` is `tool_call`, `no_tool_call`, or `parse_failure`, and
-`request_type` is `chat_completions`, `messages`, `responses`, or `other`.
+or `other`; named choices never include the function name.
 The response counters' `api_surface` is `chat_completions` or `messages`.
+
+The existing parser counter keeps its labels and classifications unchanged:
+`mode` is `streaming` or `non_streaming`, `outcome` is `tool_call` or
+`no_tool_call`, and `request_type` is `chat_completions`, `responses`, or
+`other`. Internally converted Messages requests remain `chat_completions`,
+and exceptions remain `no_tool_call`. Native API attribution and surfaced
+parse failures are distinguished by the new response counter instead.
 
 Response `status` is `success` when calls are emitted, `no_tool_calls` for
 a completed response without calls, or `parse_failure` for a surfaced parser

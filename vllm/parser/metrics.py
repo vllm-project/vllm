@@ -27,12 +27,10 @@ _tool_calls_emitted: Counter | None = None
 class ToolCallOutcome(Enum):
     TOOL_CALL = "tool_call"
     NO_TOOL_CALL = "no_tool_call"
-    PARSE_FAILURE = "parse_failure"
 
 
 class RequestType(Enum):
     CHAT_COMPLETIONS = "chat_completions"
-    MESSAGES = "messages"
     RESPONSES = "responses"
     OTHER = "other"
 
@@ -55,17 +53,9 @@ def init_parser_metrics(*, model_name: str) -> None:
         (
             "Total number of ToolParser invocations. "
             "Non-streaming increments once per choice; "
-            "streaming increments once per delta. "
-            "Tool choices are normalized and tool counts are bucketed."
+            "streaming increments once per delta."
         ),
-        [
-            "model_name",
-            "mode",
-            "outcome",
-            "request_type",
-            "tool_choice",
-            "tool_count",
-        ],
+        ["model_name", "mode", "outcome", "request_type"],
     )
 
     global _tool_call_responses, _tool_calls_emitted
@@ -98,8 +88,6 @@ def init_parser_metrics(*, model_name: str) -> None:
             mode=mode,
             outcome=outcome.value,
             request_type=request_type.value,
-            tool_choice="unset",
-            tool_count="0",
         )
 
 
@@ -114,16 +102,6 @@ def _tool_choice_label(tool_choice: object) -> str:
         else getattr(tool_choice, "type", None)
     )
     return "named" if choice_type == "function" else "other"
-
-
-def _tool_count_bucket(count: int) -> str:
-    if count <= 1:
-        return str(count)
-    if count <= 5:
-        return "2-5"
-    if count <= 10:
-        return "6-10"
-    return "10+"
 
 
 def _request_api_surface(request: object) -> Literal["chat_completions", "messages"]:
@@ -222,8 +200,8 @@ def record_tool_parser_invocation(
 ) -> None:
     """Increment the tool-call parser invocation counter when registered.
 
-    Surfaced exceptions count as parse failures. Errors caught internally by a
-    parser cannot be distinguished from ordinary no-tool output here.
+    Keep legacy API attribution and no-tool classification for exceptions.
+    Native API surfaces and surfaced failures are reported by the response counter.
     """
     if _tool_call_parser_invocations is None:
         return
@@ -233,15 +211,13 @@ def record_tool_parser_invocation(
 
     match request:
         case ChatCompletionRequest():
-            request_type = RequestType(_request_api_surface(request))
+            request_type = RequestType.CHAT_COMPLETIONS
         case ResponsesRequest():
             request_type = RequestType.RESPONSES
         case _:
             request_type = RequestType.OTHER
 
     match is_tool_called:
-        case Exception():
-            outcome = ToolCallOutcome.PARSE_FAILURE
         case bool():
             outcome = (
                 ToolCallOutcome.TOOL_CALL
@@ -256,6 +232,4 @@ def record_tool_parser_invocation(
         mode="streaming" if is_streaming else "non_streaming",
         outcome=outcome.value,
         request_type=request_type.value,
-        tool_choice=_tool_choice_label(getattr(request, "tool_choice", None)),
-        tool_count=_tool_count_bucket(len(getattr(request, "tools", None) or ())),
     ).inc()
