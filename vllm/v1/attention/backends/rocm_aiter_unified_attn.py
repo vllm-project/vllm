@@ -453,7 +453,7 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
             k_scale=layer._k_scale_cpu,
             v_scale=layer._v_scale_cpu,
             kv_cache_dtype=self.kv_cache_dtype,
-            use_shuffle_layout=False,
+            use_shuffle_layout=self._use_shuffle_kv,
             return_kv=False,
         )
 
