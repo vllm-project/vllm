@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The DeepSeek-V4.1 mono decode path through the real model: a five-layer
-DeepSeek-V4.1-Flash at TP2 and TP4 on CDNA4, served with ``VLLM_ROCM_MONO_DECODE`` on
+DeepSeek-V4.1-Flash at TP2 and TP4 on CDNA4, served with ``--monokernel`` on
 and off on the same random weights: every decoder layer's outputs at every
 decode step must match. Unlike ``test_dsv41_mono_numerics.py``, which
 checks the kernels against vLLM's ops one stage at a time, this runs
@@ -10,12 +10,13 @@ the per-step path choice, the weights taken off the layer, the metadata and
 the indexer's top-k -- so a change to the decoder layer that the kernels do
 not follow fails here.
 
-The five layers hold both kinds the mono path takes:
-- 0: sliding window only -> the FFN launch
-- 1: ratio-2 KV and index source -> the FFN launch
-- 2: ratio-2 consumer -> the whole layer (K1 + K2)
-- 3: ratio-1 KV, index and candidate source -> the FFN launch
-- 4: ratio-1 consumer -> the whole layer
+Every layer takes the whole-layer path (K1 + K2); the five hold each variant:
+- 0: the first layer, sliding window only (K1 takes the embedding settled)
+- 1: ratio-2 KV and index source (vLLM's compressor and indexer between K1
+  and K2)
+- 2: ratio-2 consumer with an Engram (K1 takes the residual settled)
+- 3: ratio-1 KV, index and candidate source
+- 4: ratio-1 index source over 3's candidates and KV
 """
 
 import zlib
@@ -34,13 +35,17 @@ TRUNCATED = {
     # one entry a layer, the three MTP layers' included
     "compress_ratios": [0, 2, 2, 1, 1, 0, 0, 0],
     "kv_source_layer_ids": [1, 3],
-    "index_source_layer_ids": [1, 3],
+    # 4: an indexer of its own over 3's candidates (a REINDEX layer)
+    "index_source_layer_ids": [1, 3, 4],
     "candidate_source_layer_id": 3,
-    "engram_layer_ids": [],
-    "engram_num_embeddings": [],
+    # an Engram on a whole layer (K1 then takes its residual settled), its
+    # tables shrunk: 24 prime-sized ranges from 1000
+    "engram_layer_ids": [2],
+    "engram_num_embeddings": [32768],
+    "engram_vocab_size": 1000,
     "dspark_target_layer_ids": [2, 3, 4],
 }
-WHOLE, FFN = (2, 4), (0, 1, 3)
+WHOLE, FFN = (0, 1, 2, 3, 4), ()
 STEPS = 5  # decode steps after the prefill's token
 
 
@@ -227,7 +232,6 @@ def _decode(vllm_runner, monkeypatch, tp: int, mono: bool, prompts, path: str):
     from vllm import SamplingParams
     from vllm.inputs import TokensPrompt
 
-    monkeypatch.setenv("VLLM_ROCM_MONO_DECODE", "1" if mono else "0")
     monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
     monkeypatch.setenv("VLLM_ROCM_USE_AITER_MOE", "1")
     with vllm_runner(
@@ -237,6 +241,7 @@ def _decode(vllm_runner, monkeypatch, tp: int, mono: bool, prompts, path: str):
         hf_overrides=TRUNCATED,
         worker_extension_cls=f"{__name__}.MonoProbe",
         moe_backend="aiter",
+        monokernel=mono,
         language_model_only=True,
         tokenizer_mode="deepseek_v41",
         attention_config={"indexer_kv_dtype": "mxfp4", "indexer_sparse_logits": True},
@@ -300,15 +305,16 @@ def test_mono_decode_matches_the_model(vllm_runner, monkeypatch, tmp_path, tp):
             same.add((len(prompt), len(prompt) + step))
 
     # each layer's outputs for those tokens, mono against vLLM's path, token by
-    # token. Layer 0 sees the same inputs on both paths at a request's first
-    # decode token: there the bound is test_dsv41_mono_numerics' (about 3x the
-    # kernels' 0.4%); its later tokens attend over KV each path wrote, 3%. Each
-    # later layer takes the previous one's slightly different output, which
-    # random weights amplify (2-4% by layer 4): 8%. A token whose top-6 routing
-    # is a near-tie on vLLM's path (6th / 7th score within 5e-3: a 0.4% input
-    # difference moves scores near 0.8 by about 3e-3) may pick another expert;
-    # once it has, its residual stream differs and the later layers are exempt
-    # for it. The residual stream: 3% (0.3% seen). A layer the kernels no
+    # token. Layer 0 sees the same inputs on both paths, but its FFN input
+    # differs by up to test_dsv41_mono_numerics' 1.2%, which random weights
+    # amplify through the MoE: 3%. Each later layer takes the previous one's
+    # slightly different output, which random weights amplify (2-4% by layer
+    # 4): 8%. A token whose top-6 routing is a near-tie on vLLM's path may pick
+    # another expert: a 0.4% input difference moves scores near 0.8 by about
+    # 3e-3, so 6th / 7th scores within 5e-3 at layer 0 and, past it, where the
+    # input carries the earlier layers' differences (0.4-0.7%), within 1e-2.
+    # Once it has, its residual stream differs and the later layers are exempt
+    # for it. The residual stream: 3% (0.5% seen). A layer the kernels no
     # longer follow is off by far more, on every token.
     for rank in range(tp):
         got, _ = torch.load(f"{tmp_path}/on.rank{rank}")
@@ -317,8 +323,6 @@ def test_mono_decode_matches_the_model(vllm_runner, monkeypatch, tmp_path, tp):
             same & {k[1:] for k in got} & {k[1:] for k in want}
         )
         assert len(keys) >= len(prompts), keys
-        # the bound that sees a 3% error: a request's first decode token
-        assert any(p == n for n, p in keys), keys
         flipped: set = set()
         for i in sorted(WHOLE + FFN):
             for k in keys:
@@ -327,9 +331,10 @@ def test_mono_decode_matches_the_model(vllm_runner, monkeypatch, tmp_path, tp):
                 (x, res), (x_ref, res_ref) = got[(i, *k)], want[(i, *k)]
                 err = _rel(res, res_ref)
                 assert err < 0.03, (rank, i, k, "residual", err)
-                bound = (0.015 if k[1] == k[0] else 0.03) if i == 0 else 0.08
+                bound = 0.03 if i == 0 else 0.08
                 err = _rel(x, x_ref)
                 if err >= bound:
-                    assert gaps[(i, *k)] < 5e-3, (rank, i, k, "x", err)
+                    tie = 5e-3 if i == 0 else 1e-2
+                    assert gaps[(i, *k)] < tie, (rank, i, k, "x", err)
                     flipped.add(k)
         assert len(flipped) <= len(keys) // 4, (rank, sorted(flipped))
