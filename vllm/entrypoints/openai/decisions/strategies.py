@@ -139,26 +139,27 @@ class ReadStrategy(ABC):
 
     def __init__(self, context: ReadContext):
         self.context = context
-        scheduler_config = context.engine_client.vllm_config.scheduler_config
-        # The priority policy orders requests in the engine instead.
-        self._big_decision_tokens = (
-            math.inf
-            if scheduler_config.policy == "priority"
-            else scheduler_config.max_num_batched_tokens
-        )
         self._big_decision_gate = asyncio.Semaphore(_BIG_DECISIONS_IN_ENGINE)
-        cache_config = context.engine_client.vllm_config.cache_config
-        self._prefix_caching = cache_config.enable_prefix_caching
 
     def _turn(
         self, prompts: list[list[int]]
     ) -> contextlib.AbstractAsyncContextManager[Any]:
         """The gate a decision waits at so big decisions take turns."""
+        vllm_config = self.context.engine_client.vllm_config
+        scheduler_config = vllm_config.scheduler_config
+        # The priority policy orders requests in the engine instead.
+        if len(prompts) < 2 or scheduler_config.policy == "priority":
+            return contextlib.nullcontext()
         # With the prefix cache the engine computes the shared start once.
-        shared = len(os.path.commonprefix(prompts)) if self._prefix_caching else 0
+        shared = (
+            len(os.path.commonprefix(prompts))
+            if vllm_config.cache_config.enable_prefix_caching
+            else 0
+        )
         num_tokens = shared + sum(len(p) - shared for p in prompts)
-        big = len(prompts) > 1 and num_tokens > self._big_decision_tokens
-        return self._big_decision_gate if big else contextlib.nullcontext()
+        if num_tokens > scheduler_config.max_num_batched_tokens:
+            return self._big_decision_gate
+        return contextlib.nullcontext()
 
     @cached_property
     def _connector(self) -> MediaConnector:
