@@ -138,11 +138,15 @@ steps:
   - csrc/fused_deepseek_v4_qnorm_rope_kv_insert_kernel.cu
   - vllm/models/deepseek_v4/common/ops/
   - vllm/models/deepseek_v4/nvidia/
+  - vllm/model_executor/layers/fused_moe/deep_gemm_mega_moe.py
+  - vllm/model_executor/layers/fused_moe/prepare_megamoe.py
   - vllm/utils/deep_gemm.py
   - tests/kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py
+  - tests/kernels/moe/test_deep_gemm_mega_moe.py
   - tests/models/test_deepseek_v4_mega_moe.py
   commands:
     - pytest -v -s kernels/test_fused_deepseek_v4_*.py
+    - pytest -v -s kernels/moe/test_deep_gemm_mega_moe.py
     - pytest -v -s models/test_deepseek_v4_mega_moe.py
   mirror:
     amd:
@@ -408,10 +412,14 @@ steps:
       depends_on:
       - image-build-amd
       source_file_dependencies:
+      - vllm/models/deepseek_v41/amd/rocm.py
+      - vllm/models/deepseek_v41/sparse_mla.py
       - vllm/v1/attention/backends/mla/rocm_aiter_mla.py
+      - vllm/v1/attention/ops/rocm_aiter_mla_sparse.py
       - vllm/v1/attention/selector.py
       - vllm/platforms/rocm.py
       - vllm/_aiter_ops.py
+      - tests/kernels/attention/test_rocm_triton_attn_dsv4.py
       - tests/kernels/attention/test_rocm_aiter_mla_decode.py
       - tests/kernels/attention/test_rocm_aiter_mla_decode_metadata.py
       - tests/kernels/attention/test_rocm_aiter_mla_fp8_support.py
@@ -422,6 +430,7 @@ steps:
       - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_decode.py
       - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_fp8_support.py
       - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_op_registration.py
+      - pytest -v -s tests/kernels/attention/test_rocm_triton_attn_dsv4.py::test_dsv41_adaptive_mla_swa_metadata_graph_replay
 
 - label: ":nvidia: (L4) Quantization Kernels Shard %N"
   key: kernels-quantization-test
@@ -510,8 +519,10 @@ steps:
   source_file_dependencies:
   - csrc/mamba/
   - tests/kernels/mamba
+  - vllm/model_executor/layers/mamba/checkpoint.py
   - vllm/model_executor/layers/mamba/gdn
   - vllm/model_executor/layers/mamba/ops
+  - vllm/v1/attention/backends/gdn_attn.py
   commands:
     - pytest -v -s kernels/mamba
   mirror:
