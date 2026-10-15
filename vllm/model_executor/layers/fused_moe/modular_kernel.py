@@ -669,6 +669,15 @@ class FusedMoEExperts(ABC):
         return True
 
     @staticmethod
+    def _supports_hash_routing() -> bool:
+        """Whether a monolithic kernel implements hash routing itself.
+
+        Kernels that return True receive `input_ids` and `hash_indices_table`
+        in `apply()` for layers with a hash-routing table.
+        """
+        return False
+
+    @staticmethod
     def _supports_router_logits_dtype(
         router_logits_dtype: torch.dtype | None,
         routing_method: RoutingMethodType,
@@ -1623,6 +1632,11 @@ class FusedMoEKernelMonolithicImpl:
                     f"kernel {type(self.fused_experts).__name__}."
                 )
             routing_replay_out = routing_sink.buffer[: len(a1q)]
+        hash_kwargs = (
+            {"input_ids": input_ids, "hash_indices_table": hash_indices_table}
+            if hash_indices_table is not None
+            else {}
+        )
         fused_out = self.fused_experts.apply(
             hidden_states=a1q,
             w1=w1,
