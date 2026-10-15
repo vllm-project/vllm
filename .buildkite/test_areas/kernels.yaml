@@ -138,11 +138,15 @@ steps:
   - csrc/fused_deepseek_v4_qnorm_rope_kv_insert_kernel.cu
   - vllm/models/deepseek_v4/common/ops/
   - vllm/models/deepseek_v4/nvidia/
+  - vllm/model_executor/layers/fused_moe/deep_gemm_mega_moe.py
+  - vllm/model_executor/layers/fused_moe/prepare_megamoe.py
   - vllm/utils/deep_gemm.py
   - tests/kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py
+  - tests/kernels/moe/test_deep_gemm_mega_moe.py
   - tests/models/test_deepseek_v4_mega_moe.py
   commands:
     - pytest -v -s kernels/test_fused_deepseek_v4_*.py
+    - pytest -v -s kernels/moe/test_deep_gemm_mega_moe.py
     - pytest -v -s models/test_deepseek_v4_mega_moe.py
   mirror:
     amd:
