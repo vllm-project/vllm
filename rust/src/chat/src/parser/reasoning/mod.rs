@@ -10,9 +10,8 @@ pub use vllm_parser::reasoning::{
     DeepSeekV4ReasoningParser, DeepSeekV41ReasoningParser, Glm45ReasoningParser,
     Glm47ReasoningParser, KimiK2ReasoningParser, KimiReasoningParser, MiMoReasoningParser,
     MiniMaxM2ReasoningParser, MiniMaxM3ReasoningParser, NemotronV3ReasoningParser,
-    PoolsideV1ReasoningParser,
-    Qwen3ReasoningParser, ReasoningDelta, ReasoningError, ReasoningParser, SeedOssReasoningParser,
-    Step3ReasoningParser, Step3p5ReasoningParser,
+    PoolsideV1ReasoningParser, Qwen3ReasoningParser, ReasoningDelta, ReasoningError,
+    ReasoningParser, SeedOssReasoningParser, Step3ReasoningParser, Step3p5ReasoningParser,
 };
 use vllm_tokenizer::DynTokenizer;
 
