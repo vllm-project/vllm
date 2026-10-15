@@ -7,7 +7,7 @@ Run `pytest tests/quantization/test_modelopt.py`.
 
 import os
 from contextlib import nullcontext
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 from typing import Any, NoReturn
 from unittest.mock import MagicMock, Mock, patch
 
@@ -1100,6 +1100,96 @@ def test_modelopt_nvfp4_moe_per_token_fills_only_activation_scales(missing_weigh
     assert torch.all(layer.w13_input_scale == 1.0)
     assert torch.all(layer.w2_input_scale == 1.0)
     if missing_weight is None:
+        converter.assert_called_once()
+        build_kernel.assert_called_once_with(layer)
+    else:
+        converter.assert_not_called()
+        build_kernel.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("missing_global_ids", "expected_error"),
+    [
+        # EP rank 1 of 2 owns global experts 4-7; 0 and 2 belong to rank 0.
+        ({0, 2}, None),
+        # Global expert 5 is local expert 1 on rank 1.
+        ({5}, r"'w13_weight_scale_2'.*\[1\]"),
+    ],
+    ids=["non_local_missing", "local_missing"],
+)
+def test_modelopt_nvfp4_moe_ep_validates_only_local_experts(
+    missing_global_ids, expected_error
+):
+    from vllm.model_executor.layers.fused_moe.expert_map_manager import (
+        determine_expert_map,
+    )
+
+    local_num_experts, expert_map, _ = determine_expert_map(
+        ep_size=2, ep_rank=1, global_num_experts=8
+    )
+    moe = _make_nvfp4_moe()
+    layer = _create_nvfp4_moe_layer(moe, num_experts=local_num_experts)
+
+    loader = SimpleNamespace(
+        quant_config=None,
+        quant_method=moe,
+        _fused_shared_expert_quantizer=None,
+        _map_global_expert_id_to_local_expert_id=lambda e: int(expert_map[e]),
+        _to_scalar=RoutedExperts._to_scalar,
+    )
+    loader._load_per_tensor_weight_scale = MethodType(
+        RoutedExperts._load_per_tensor_weight_scale, loader
+    )
+    loader._load_single_value = MethodType(RoutedExperts._load_single_value, loader)
+    checkpoint_scales = [
+        ("w13_weight_scale_2", "w1"),
+        ("w13_weight_scale_2", "w3"),
+        ("w2_weight_scale_2", "w2"),
+        ("w13_input_scale", "w1"),
+        ("w13_input_scale", "w3"),
+        ("w2_input_scale", "w2"),
+    ]
+    for global_id in range(8):
+        if global_id in missing_global_ids:
+            continue
+        for name, shard_id in checkpoint_scales:
+            loaded = RoutedExperts.weight_loader(
+                loader,
+                getattr(layer, name),
+                torch.tensor(0.01),
+                name,
+                shard_id,
+                global_id,
+                return_success=True,
+            )
+            assert loaded == (expert_map[global_id] != -1)
+
+    expected = (
+        pytest.raises(ValueError, match=expected_error)
+        if expected_error is not None
+        else nullcontext()
+    )
+    with (
+        patch(
+            "vllm.model_executor.layers.quantization.modelopt."
+            "convert_to_nvfp4_moe_kernel_format",
+            side_effect=lambda **kw: (
+                kw["w13"],
+                kw["w13_scale"],
+                kw["w13_scale_2"],
+                kw["a13_scale"],
+                kw["w2"],
+                kw["w2_scale"],
+                kw["w2_scale_2"],
+                kw["a2_scale"],
+            ),
+        ) as converter,
+        patch.object(moe, "_build_moe_kernel") as build_kernel,
+        expected,
+    ):
+        moe.process_weights_after_loading(layer)
+
+    if expected_error is None:
         converter.assert_called_once()
         build_kernel.assert_called_once_with(layer)
     else:
