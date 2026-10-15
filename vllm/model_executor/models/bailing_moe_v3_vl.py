@@ -13,7 +13,7 @@ import torch.nn as nn
 from transformers import AutoProcessor, BatchFeature
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -26,6 +26,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
     MultiModalFieldConfig,
+    MultiModalKwargsItem,
     MultiModalKwargsItems,
 )
 from vllm.multimodal.parse import MultiModalDataItems
@@ -103,7 +104,7 @@ class BailingMoeV3VLDummyInputsBuilder(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
         target_width, target_height = self.info.get_image_size_with_most_features()
         return {
@@ -119,7 +120,7 @@ class BailingMoeV3VLDummyInputsBuilder(
 class BailingMoeV3VLMultiModalProcessor(
     BaseMultiModalProcessor[BailingMoeV3VLProcessingInfo]
 ):
-    def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
         return self.dummy_inputs.get_dummy_text(mm_counts)
 
     def _apply_prompt_updates(
@@ -520,8 +521,12 @@ class BailingMoeV3VLForConditionalGeneration(
             tower_model="visual.",
         )
 
-    def get_num_mm_encoder_tokens(self, num_image_tokens: int) -> int:
-        return num_image_tokens * self.visual.spatial_merge_size**2
-
-    def get_num_mm_connector_tokens(self, num_vision_tokens: int) -> int:
-        return num_vision_tokens // self.visual.spatial_merge_size**2
+    def get_mm_lora_token_counts(
+        self,
+        *,
+        modality: str,
+        mm_kwargs: MultiModalKwargsItem | None,
+        num_mm_embeds: int,
+    ) -> tuple[int, int | None]:
+        del modality, mm_kwargs
+        return num_mm_embeds * self.visual.spatial_merge_size**2, num_mm_embeds

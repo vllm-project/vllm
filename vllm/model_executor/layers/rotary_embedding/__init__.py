@@ -36,6 +36,7 @@ def get_rope(
     rope_parameters: dict[str, Any] | None = None,
     dtype: torch.dtype | None = None,
     dual_chunk_attention_config: dict[str, Any] | None = None,
+    mrope_positions_factor: int = 4,
 ) -> RotaryEmbedding:
     if dtype is None:
         dtype = torch.get_default_dtype()
@@ -78,6 +79,7 @@ def get_rope(
         rope_parameters_args,
         dual_chunk_attention_args,
         dtype,
+        mrope_positions_factor,
     )
     if key in _ROPE_DICT:
         return _ROPE_DICT[key]
@@ -118,6 +120,7 @@ def get_rope(
                 dtype,
                 mrope_section=rope_parameters["mrope_section"],
                 mrope_interleaved=rope_parameters.get("mrope_interleaved", False),
+                positions_factor=mrope_positions_factor,
             )
         elif "use_fope" in rope_parameters and rope_parameters["use_fope"]:
             extra_kwargs = {
@@ -263,6 +266,7 @@ def get_rope(
                 dtype,
                 mrope_section=rope_parameters["mrope_section"],
                 mrope_interleaved=rope_parameters.get("mrope_interleaved", False),
+                positions_factor=mrope_positions_factor,
                 scaling_factor=scaling_factor,
                 **extra_kwargs,
             )

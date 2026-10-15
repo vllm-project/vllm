@@ -5,11 +5,11 @@ import importlib
 import inspect
 import json
 import os
+import threading
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import AbstractContextManager, contextmanager, nullcontext, suppress
 from glob import glob
-from typing import Literal
 from uuid import uuid4
 
 import torch
@@ -18,7 +18,13 @@ from typing_extensions import override
 
 import vllm.version
 from vllm.config import ProfilerConfig
-from vllm.config.profiler import _is_uri_path
+from vllm.config.profiler import (
+    ProfilerKind,
+    TorchProfilerActivity,
+    _is_uri_path,
+    validate_profile_iteration_bounds,
+)
+from vllm.config.utils import replace
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
@@ -29,20 +35,25 @@ _TRITON_PROTON_3_7_VERSION = Version("3.7.0")
 
 class WorkerProfiler(ABC):
     def __init__(self, profiler_config: ProfilerConfig) -> None:
-        self._delay_iters = profiler_config.delay_iterations
+        self._default_delay_iters = profiler_config.delay_iterations
+        self._delay_iters = self._default_delay_iters
         if self._delay_iters > 0:
             logger.info_once(
                 "GPU profiling will start "
                 f"{self._delay_iters} steps after start_profile."
             )
 
-        self._max_iters = profiler_config.max_iterations
+        self._default_max_iters = profiler_config.max_iterations
+        self._max_iters = self._default_max_iters
         if self._max_iters > 0:
             logger.info_once(
                 "GPU profiling will stop "
                 f"after {self._max_iters} worker steps, "
                 "or when stop_profile is received."
             )
+
+        # Serializes start()/stop(), which AsyncLLM may call from different threads.
+        self._lifecycle_lock = threading.Lock()
 
         # Track when the profiler gets triggered by start_profile
         self._active_iteration_count = 0
@@ -55,6 +66,11 @@ class WorkerProfiler(ABC):
     @property
     def is_running(self) -> bool:
         """Whether the underlying profiler is currently collecting data."""
+        return self._running
+
+    @property
+    def should_annotate(self) -> bool:
+        """Whether worker iterations should receive profiler annotations."""
         return self._running
 
     @abstractmethod
@@ -84,17 +100,32 @@ class WorkerProfiler(ABC):
             logger.warning("Failed to stop profiler: %s", e)
         self._running = False  # Always mark as not running, assume stop worked
 
-    def start(self) -> None:
+    def start(
+        self,
+        *,
+        delay_iterations: int | None = None,
+        max_iterations: int | None = None,
+    ) -> None:
         """Attempt to start the profiler, accounting for delayed starts."""
-        if self._active:
-            logger.debug(
-                "start_profile received when profiler is already active. "
-                "Ignoring request."
+        with self._lifecycle_lock:
+            if self._active:
+                logger.debug(
+                    "start_profile received when profiler is already active. "
+                    "Ignoring request."
+                )
+                return
+            validate_profile_iteration_bounds(delay_iterations, max_iterations)
+            self._delay_iters = (
+                self._default_delay_iters
+                if delay_iterations is None
+                else delay_iterations
             )
-            return
-        self._active = True
-        if self._delay_iters == 0:
-            self._call_start()
+            self._max_iters = (
+                self._default_max_iters if max_iterations is None else max_iterations
+            )
+            self._active = True
+            if self._delay_iters == 0:
+                self._call_start()
 
     def step(self) -> None:
         """Update the profiler state at each worker step,
@@ -138,22 +169,25 @@ class WorkerProfiler(ABC):
         Returns:
             True if the step was an active profiling step (data recorded),
             False if the step was a warmup step (data discarded).
+
         """
         return True
 
     def stop(self) -> None:
         """Attempt to stop the profiler, accounting for overlapped calls."""
-        if not self._active:
-            logger.debug(
-                "stop_profile received when profiler is not active. Ignoring request."
-            )
-            return
-        self._active = False
-        self._active_iteration_count = 0
-        self._profiling_for_iters = 0
+        with self._lifecycle_lock:
+            if not self._active:
+                logger.debug(
+                    "stop_profile received when profiler is not active. "
+                    "Ignoring request."
+                )
+                return
+            self._active = False
+            self._active_iteration_count = 0
+            self._profiling_for_iters = 0
 
-        if self._running:
-            self._call_stop()
+            if self._running:
+                self._call_stop()
 
     def shutdown(self) -> None:
         """Ensure profiler is stopped when shutting down."""
@@ -170,12 +204,15 @@ class WorkerProfiler(ABC):
         """Observe graph creation for backends that attribute replay activity."""
         return nullcontext()
 
+    def set_output_name(self, worker_name: str) -> None:
+        """Set the output name for the next profiling session."""
+        return None
+
     def annotate_context_manager(self, name: str):
         """Return a context manager to annotate profiler traces."""
         return nullcontext()
 
 
-TorchProfilerActivity = Literal["CPU", "CUDA", "PrivateUse1", "XPU"]
 TorchProfilerActivityMap = {
     "CPU": torch.profiler.ProfilerActivity.CPU,
     "CUDA": torch.profiler.ProfilerActivity.CUDA,
@@ -190,7 +227,7 @@ class TorchProfilerWrapper(WorkerProfiler):
         profiler_config: ProfilerConfig,
         worker_name: str,
         local_rank: int,
-        activities: list[TorchProfilerActivity],
+        activities: Sequence[TorchProfilerActivity],
         on_trace_ready: Callable[[torch.profiler.profile], None] | None = None,
     ) -> None:
         super().__init__(profiler_config)
@@ -198,6 +235,10 @@ class TorchProfilerWrapper(WorkerProfiler):
         self.local_rank = local_rank
         self.profiler_config = profiler_config
         torch_profiler_trace_dir = profiler_config.torch_profiler_dir
+        self._torch_profiler_trace_dir = torch_profiler_trace_dir
+        self._torch_profiler_use_gzip = profiler_config.torch_profiler_use_gzip
+        self._worker_name = worker_name
+        self._custom_trace_handler = on_trace_ready is not None
         if local_rank in (None, 0):
             logger.info_once(
                 "Torch profiling enabled. Traces will be saved to: %s",
@@ -223,7 +264,12 @@ class TorchProfilerWrapper(WorkerProfiler):
                 use_gzip=profiler_config.torch_profiler_use_gzip,
             )
 
-        self.dump_cpu_time_total = "CPU" in activities and len(activities) == 1
+        self._records_cpu_activity = "CPU" in activities
+        self.dump_device_time_total = (
+            any(activity != "CPU" for activity in activities)
+            and profiler_config.torch_profiler_dump_cuda_time_total
+        )
+        self.dump_cpu_time_total = self._records_cpu_activity and len(activities) == 1
 
         # Create profiler schedule if warmup or wait iterations are configured
         profiler_schedule = None
@@ -243,7 +289,7 @@ class TorchProfilerWrapper(WorkerProfiler):
                     profiler_config.active_iterations,
                 )
 
-        self.profiler = torch.profiler.profile(
+        self._profiler_kwargs = dict(
             activities=[TorchProfilerActivityMap[activity] for activity in activities],
             schedule=profiler_schedule,
             record_shapes=profiler_config.torch_profiler_record_shapes,
@@ -252,6 +298,7 @@ class TorchProfilerWrapper(WorkerProfiler):
             with_flops=profiler_config.torch_profiler_with_flops,
             on_trace_ready=trace_handler,
         )
+        self.profiler: torch.profiler.profile
 
         # Track if we're using a schedule (need to call step())
         self._uses_schedule = profiler_schedule is not None
@@ -259,11 +306,27 @@ class TorchProfilerWrapper(WorkerProfiler):
         # Subtract 1 because profiler.start() already consumes step 0
         # (WAIT or WARMUP), so only wait + warmup - 1 non-active steps
         # remain to be advanced through via profiler.step() calls.
-        self._warmup_steps_remaining = max(
+        self._initial_warmup_steps_remaining = max(
             profiler_config.wait_iterations + profiler_config.warmup_iterations - 1,
             0,
         )
+        self._warmup_steps_remaining = self._initial_warmup_steps_remaining
         self._version_metadata_added = False
+
+    @override
+    def set_output_name(self, worker_name: str) -> None:
+        if self._active:
+            return
+        self._worker_name = worker_name
+        if self._custom_trace_handler:
+            return
+        self._profiler_kwargs["on_trace_ready"] = (
+            torch.profiler.tensorboard_trace_handler(
+                self._torch_profiler_trace_dir,
+                worker_name=worker_name,
+                use_gzip=self._torch_profiler_use_gzip,
+            )
+        )
 
     def _build_profiler_table(
         self,
@@ -282,13 +345,15 @@ class TorchProfilerWrapper(WorkerProfiler):
             row_limit=row_limit,
         )
 
-    def _write_profiler_table(self, rank: int, table: str) -> None:
+    def _write_profiler_table(self, table: str) -> None:
         profiler_dir = self.profiler_config.torch_profiler_dir
 
         # Skip file write for URI paths (gs://, s3://, etc.)
         # as standard file I/O doesn't work with URI schemes
         if not _is_uri_path(profiler_dir):
-            profiler_out_file = f"{profiler_dir}/profiler_out_{rank}.txt"
+            profiler_out_file = os.path.join(
+                profiler_dir, f"{self._worker_name}.profiler_out.txt"
+            )
             with open(profiler_out_file, "w") as f:
                 print(table, file=f)
 
@@ -318,6 +383,9 @@ class TorchProfilerWrapper(WorkerProfiler):
 
     @override
     def _start(self) -> None:
+        self.profiler = torch.profiler.profile(**self._profiler_kwargs)
+        self._warmup_steps_remaining = self._initial_warmup_steps_remaining
+        self._version_metadata_added = False
         self.profiler.start()
         # No-schedule case: Kineto is live immediately. With a schedule this
         # no-ops and _profiler_step stamps it once WAIT ends.
@@ -327,11 +395,10 @@ class TorchProfilerWrapper(WorkerProfiler):
     def _stop(self) -> None:
         self.profiler.stop()
 
-        profiler_config = self.profiler_config
         rank = self.local_rank
-        if profiler_config.torch_profiler_dump_cuda_time_total:
-            table = self._build_profiler_table(sort_key="self_cuda_time_total")
-            self._write_profiler_table(rank, table)
+        if self.dump_device_time_total:
+            table = self._build_profiler_table(sort_key="self_device_time_total")
+            self._write_profiler_table(table)
 
             # only print profiler results on rank 0
             if rank == 0:
@@ -341,7 +408,7 @@ class TorchProfilerWrapper(WorkerProfiler):
             table = self._build_profiler_table(
                 sort_key="self_cpu_time_total", row_limit=50
             )
-            self._write_profiler_table(rank, table)
+            self._write_profiler_table(table)
 
             # only print profiler results on rank 0
             if rank == 0:
@@ -354,6 +421,7 @@ class TorchProfilerWrapper(WorkerProfiler):
         Returns:
             True if the step was an active profiling step (data recorded),
             False if the step was a warmup step (data discarded).
+
         """
         if self._uses_schedule:
             self.profiler.step()
@@ -365,8 +433,15 @@ class TorchProfilerWrapper(WorkerProfiler):
                 return False
         return True
 
+    @property
+    @override
+    def should_annotate(self) -> bool:
+        return self._running and self._records_cpu_activity
+
     @override
     def annotate_context_manager(self, name: str):
+        if not self.should_annotate:
+            return nullcontext()
         return torch.profiler.record_function(name)
 
 
@@ -473,6 +548,7 @@ class ProtonProfilerWrapper(WorkerProfiler):
     def has_cuda_graph_session(self) -> bool:
         return self._graph_session
 
+    @override
     def set_output_name(self, worker_name: str) -> None:
         """Set the next run's output name after startup graph capture."""
         if self._active:
@@ -602,6 +678,105 @@ class CudaProfilerWrapper(WorkerProfiler):
     @override
     def annotate_context_manager(self, name: str):
         return torch.cuda.nvtx.range(name)
+
+
+_DEFAULT_TORCH_PROFILER_ACTIVITIES: dict[str, tuple[TorchProfilerActivity, ...]] = {
+    "cpu": ("CPU",),
+    "cuda": ("CPU", "CUDA"),
+    "xpu": ("CPU", "XPU"),
+}
+_SUPPORTED_TORCH_PROFILER_ACTIVITIES = {
+    device: frozenset(activities)
+    for device, activities in _DEFAULT_TORCH_PROFILER_ACTIVITIES.items()
+}
+_SUPPORTED_PROFILER_KINDS: dict[str, frozenset[ProfilerKind]] = {
+    "cpu": frozenset(("torch",)),
+    "cuda": frozenset(("torch", "cuda", "proton")),
+    "xpu": frozenset(("torch",)),
+}
+
+
+def validate_worker_profiler_config(profiler_config: ProfilerConfig) -> None:
+    """Validate profiler selections against the worker's capabilities."""
+    profiler_type = profiler_config.profiler
+    if profiler_type is None:
+        return
+    device_type = current_platform.device_type
+    if device_type not in _SUPPORTED_PROFILER_KINDS:
+        raise ValueError(f"Unsupported profiler device type: {device_type}")
+    supported_kinds = _SUPPORTED_PROFILER_KINDS[device_type]
+    if profiler_type not in supported_kinds:
+        supported_names = ", ".join(sorted(supported_kinds))
+        raise ValueError(
+            f"Unsupported profiler type for {device_type}: "
+            f"{profiler_type}. Supported profiler types: {supported_names}."
+        )
+    if profiler_type == "torch":
+        default_activities = _DEFAULT_TORCH_PROFILER_ACTIVITIES[device_type]
+        supported_activities = _SUPPORTED_TORCH_PROFILER_ACTIVITIES[device_type]
+        configured = profiler_config.torch_profiler_activities
+        activities = default_activities if configured is None else configured
+        unsupported = set(activities) - supported_activities
+        if unsupported:
+            unsupported_names = ", ".join(sorted(unsupported))
+            supported_names = ", ".join(sorted(supported_activities))
+            raise ValueError(
+                f"Unsupported torch profiler activities for "
+                f"{device_type}: {unsupported_names}. "
+                f"Supported activities: {supported_names}."
+            )
+
+
+def create_worker_profiler(
+    profiler_config: ProfilerConfig,
+    *,
+    worker_name: str,
+    local_rank: int,
+) -> WorkerProfiler:
+    """Create a profiler using a validated config and platform defaults."""
+    profiler_type = profiler_config.profiler
+    if profiler_type == "torch":
+        default_activities = _DEFAULT_TORCH_PROFILER_ACTIVITIES[
+            current_platform.device_type
+        ]
+        configured = profiler_config.torch_profiler_activities
+        logger.debug("Starting torch profiler with trace name: %s", worker_name)
+        return TorchProfilerWrapper(
+            profiler_config,
+            worker_name=worker_name,
+            local_rank=local_rank,
+            activities=default_activities if configured is None else tuple(configured),
+        )
+    if profiler_type == "cuda":
+        logger.debug("Starting CUDA profiler")
+        return CudaProfilerWrapper(profiler_config)
+
+    assert profiler_type == "proton", f"Unknown profiler type: {profiler_type}"
+    logger.debug("Starting Proton profiler with trace name: %s", worker_name)
+    return ProtonProfilerWrapper(profiler_config, worker_name=worker_name)
+
+
+def create_frontend_profiler(
+    profiler_config: ProfilerConfig, *, worker_name: str
+) -> TorchProfilerWrapper:
+    """Create the CPU-only frontend profiler, which runs for the whole session
+    rather than following engine iterations."""
+    logger.info(
+        "Torch profiler enabled. AsyncLLM CPU traces will be collected under %s",
+        profiler_config.torch_profiler_dir,
+    )
+    return TorchProfilerWrapper(
+        replace(
+            profiler_config,
+            delay_iterations=0,
+            max_iterations=0,
+            wait_iterations=0,
+            warmup_iterations=0,
+        ),
+        worker_name=worker_name,
+        local_rank=0,
+        activities=["CPU"],
+    )
 
 
 def create_graph_capture_profiler(

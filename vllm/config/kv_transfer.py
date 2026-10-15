@@ -68,24 +68,9 @@ class KVTransferConfig:
     """The device used by kv connector to buffer the KV cache. Choices are
     'cuda', 'cpu' and 'xpu'."""
 
-    kv_buffer_size: float = 1e9
-    """The buffer size for TorchDistributedConnector. Measured in number of
-    bytes. Recommended value: 1e9 (about 1GB)."""
-
     kv_role: KVRole | None = None
     """Whether this vLLM instance produces, consumes KV cache, or both. Choices
     are 'kv_producer', 'kv_consumer', and 'kv_both'."""
-
-    kv_rank: int | None = None
-    """The rank of this vLLM instance in the KV cache transfer. Typical value:
-    0 for prefill instance, 1 for decode instance.
-    Currently only 1P1D is supported."""
-
-    kv_parallel_size: int = 1
-    """The number of parallel instances for KV cache transfer."""
-
-    kv_ip: str = "127.0.0.1"
-    """The KV connector ip, used to build distributed connection."""
 
     kv_port: int = 14579
     """The KV connector port, used to build distributed connection."""
@@ -106,8 +91,7 @@ class KVTransferConfig:
     'fail': immediately fail the request with an error finish reason (default)"""
 
     def compute_hash(self) -> str:
-        """
-        WARNING: Whenever a new field is added to this config,
+        """WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if
         it affects the computation graph.
 

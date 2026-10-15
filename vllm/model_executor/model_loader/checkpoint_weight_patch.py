@@ -36,6 +36,7 @@ class CheckpointWeightPatch(NamedTuple):
             ``indices`` for a sparse patch.
         indices: Flat indices into the full checkpoint tensor described by
             ``shape``. ``None`` makes ``values`` a dense replacement.
+
     """
 
     name: str
@@ -176,8 +177,8 @@ def load_checkpoint_weight_patches(
 
     Returns:
         Union of the weight names reported by all ``model.load_weights`` calls.
-    """
 
+    """
     if max_chunk_bytes <= 0:
         raise ValueError("max_chunk_bytes must be positive")
 

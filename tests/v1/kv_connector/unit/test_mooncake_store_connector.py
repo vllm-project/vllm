@@ -12,6 +12,7 @@ from vllm.config import set_current_vllm_config
 from vllm.distributed.kv_events import BlockStored
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorRole,
+    KVConnectorTransferResults,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import (
     connector as mooncake_store_connector,
@@ -29,6 +30,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.metrics import (
     MooncakeStoreConnectorStats,
 )
+from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     FullAttentionSpec,
@@ -37,6 +39,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheTensor,
     MambaSpec,
 )
+from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput
 
 from .utils import create_vllm_config
@@ -139,18 +142,74 @@ def test_validation_rejects_mamba_mode_directly():
         )
 
 
-def test_scheduler_requires_align_mode_for_mamba():
-    vllm_config = _make_vllm_config()
-    mamba_spec = MambaSpec(
-        block_size=16,
-        shapes=((1, 1),),
-        dtypes=(torch.float32,),
-        mamba_cache_mode="none",
+def _make_mamba_none_kv_cache_config(
+    attention_block_size: int | None, mamba_block_size: int
+) -> KVCacheConfig:
+    groups = [
+        KVCacheGroupSpec(
+            ["mamba"],
+            MambaSpec(
+                block_size=mamba_block_size,
+                shapes=((1, 1),),
+                dtypes=(torch.float32,),
+                mamba_cache_mode="none",
+            ),
+        )
+    ]
+    if attention_block_size is not None:
+        # Kimi K3 layout without prefix caching: the LCM hash unit exceeds both
+        # group block sizes, so no lookup coordinator can be built.
+        groups.insert(
+            0,
+            KVCacheGroupSpec(
+                ["attention"],
+                FullAttentionSpec(
+                    block_size=attention_block_size,
+                    num_kv_heads=8,
+                    head_size=64,
+                    dtype=torch.float32,
+                ),
+            ),
+        )
+    return KVCacheConfig(num_blocks=4, kv_cache_tensors=[], kv_cache_groups=groups)
+
+
+def _make_role_vllm_config(kv_role: str, enable_lookup: bool, save_decode_cache: bool):
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeStoreConnector",
+        kv_role=kv_role,
+        kv_connector_extra_config={
+            "enable_lookup": enable_lookup,
+            "save_decode_cache": save_decode_cache,
+        },
     )
-    kv_cache_config = KVCacheConfig(
-        num_blocks=4,
-        kv_cache_tensors=[],
-        kv_cache_groups=[KVCacheGroupSpec(["mamba"], mamba_spec)],
+    vllm_config.cache_config.enable_prefix_caching = False
+    return vllm_config
+
+
+_MAMBA_NONE_LAYOUTS = pytest.mark.parametrize(
+    "attention_block_size,mamba_block_size",
+    [(None, 16), (1_048_576, 6_400)],
+    ids=["mamba-only", "hybrid-no-prefix"],
+)
+
+
+@_MAMBA_NONE_LAYOUTS
+@pytest.mark.parametrize(
+    "kv_role,enable_lookup,save_decode_cache",
+    [
+        ("kv_consumer", True, False),
+        ("kv_consumer", False, True),
+        ("kv_producer", False, False),
+        ("kv_both", False, False),
+    ],
+)
+def test_scheduler_requires_align_mode_for_mamba_kv_transfer(
+    kv_role, enable_lookup, save_decode_cache, attention_block_size, mamba_block_size
+):
+    vllm_config = _make_role_vllm_config(kv_role, enable_lookup, save_decode_cache)
+    kv_cache_config = _make_mamba_none_kv_cache_config(
+        attention_block_size, mamba_block_size
     )
 
     with (
@@ -161,6 +220,30 @@ def test_scheduler_requires_align_mode_for_mamba():
         pytest.raises(AssertionError, match="requires mamba_cache_mode='align'"),
     ):
         scheduler.MooncakeStoreScheduler(vllm_config, kv_cache_config)
+
+
+@_MAMBA_NONE_LAYOUTS
+def test_capacity_only_scheduler_allows_mamba_none_mode(
+    attention_block_size, mamba_block_size
+):
+    """Capacity-only consumers transfer no KV, so any Mamba mode is allowed."""
+    vllm_config = _make_role_vllm_config(
+        "kv_consumer", enable_lookup=False, save_decode_cache=False
+    )
+    kv_cache_config = _make_mamba_none_kv_cache_config(
+        attention_block_size, mamba_block_size
+    )
+
+    with patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+        "scheduler.LookupKeyClient"
+    ) as mock_client:
+        store_scheduler = scheduler.MooncakeStoreScheduler(vllm_config, kv_cache_config)
+        assert store_scheduler.get_num_new_matched_tokens(MagicMock(), 0) == (0, False)
+        meta = store_scheduler.build_connector_meta(SchedulerOutput.make_empty())
+
+    mock_client.return_value.lookup.assert_not_called()
+    assert meta.requests == []
 
 
 def _make_block_stored(
@@ -207,6 +290,29 @@ def test_scheduler_role_initializes_store_scheduler_only():
     mock_scheduler.return_value.bind_gpu_block_pool.assert_called_once_with(block_pool)
 
 
+def test_scheduler_reports_mooncake_cache_source():
+    vllm_config = _make_vllm_config()
+    kv_cache_config = _make_kv_cache_config()
+
+    with (
+        set_current_vllm_config(vllm_config),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+            "connector.MooncakeStoreScheduler"
+        ),
+    ):
+        connector = mooncake_store_connector.MooncakeStoreConnector(
+            vllm_config, KVConnectorRole.SCHEDULER, kv_cache_config
+        )
+
+    # Mooncake Store is an external cache service. Its internal memory and
+    # local-storage policy is intentionally hidden behind that stable label.
+    assert connector.get_external_cache_hit_sources(
+        None,  # type: ignore[arg-type]
+        32,
+    ) == {CacheHitSource.EXTERNAL_UNSPECIFIED: 32}
+
+
 def test_worker_methods_delegate_to_store_worker():
     vllm_config = _make_vllm_config()
     kv_cache_config = _make_kv_cache_config()
@@ -243,6 +349,38 @@ def test_worker_methods_delegate_to_store_worker():
     assert result == ({"req-1"}, {"req-2"})
     worker.get_block_ids_with_load_errors.assert_called_once_with()
     assert invalid_block_ids == {3, 4}
+
+
+def test_get_transfer_results_delegates_to_store_worker():
+    vllm_config = _make_vllm_config()
+    kv_cache_config = _make_kv_cache_config()
+    metadata = MooncakeStoreConnectorMetadata(set(), set())
+    finished_req_ids = {"req-1"}
+
+    with (
+        set_current_vllm_config(vllm_config),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+            "connector.MooncakeStoreWorker"
+        ) as mock_worker_cls,
+    ):
+        connector = mooncake_store_connector.MooncakeStoreConnector(
+            vllm_config, KVConnectorRole.WORKER, kv_cache_config
+        )
+
+    worker = mock_worker_cls.return_value
+    transfer_results = KVConnectorTransferResults(
+        finished_sending={"req-1"},
+        finished_recving={"req-2"},
+        failed_recving={"req-3"},
+    )
+    worker.get_transfer_results.return_value = transfer_results
+    connector.bind_connector_metadata(metadata)
+
+    result = connector.get_transfer_results(finished_req_ids)
+
+    worker.get_transfer_results.assert_called_once_with(finished_req_ids, metadata)
+    assert result is transfer_results
 
 
 def test_get_kv_connector_kv_cache_events_returns_none_when_disabled():

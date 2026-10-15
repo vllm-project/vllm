@@ -4,7 +4,7 @@
 
 import pytest
 import torch
-from transformers import Gemma3Config, PretrainedConfig, Qwen2Config
+from transformers import Gemma3Config, PreTrainedConfig, Qwen2Config
 
 from vllm.model_executor.models.adapters import (
     _create_pooling_model_cls,
@@ -266,14 +266,14 @@ def test_resolve_num_labels_defaults_when_undeclared():
     config = _composite_config()
     assert (
         _resolve_num_labels(config, config.get_text_config())
-        == PretrainedConfig().num_labels
+        == PreTrainedConfig().num_labels
     )
 
 
 def test_resolve_num_labels_declared_on_outer_config():
     """Multimodal checkpoints keep id2label/problem_type on the top-level config."""
     config = _composite_config(outer_labels=20)
-    assert config.get_text_config().num_labels == PretrainedConfig().num_labels
+    assert config.get_text_config().num_labels == PreTrainedConfig().num_labels
     assert _resolve_num_labels(config, config.get_text_config()) == 20
 
 
