@@ -7,7 +7,7 @@ import functools
 import mmap
 import os
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from ctypes import c_int, c_long, c_size_t, c_void_p
 
 import numpy as np
@@ -123,10 +123,11 @@ class SharedOffloadRegion:
         self.num_chunks = num_chunks
         self._row_stride = kv_bytes_per_chunk
         self.total_size_bytes = self.num_chunks * self._row_stride
+        self.cpu_page_size = cpu_page_size
 
         self.mmap_path = f"/dev/shm/vllm_offload_{engine_id}.mmap"
         num_segments = min(num_segments, self.total_size_bytes // _MIN_SEGMENT_BYTES)
-        alignment = self.page_size if num_chunks == 1 else self._row_stride
+        alignment = 2 << 20 if num_chunks == 1 else self._row_stride
         segment_bytes = round_up(
             cdiv(self.total_size_bytes, max(1, num_segments)), alignment
         )
@@ -246,20 +247,9 @@ class SharedOffloadRegion:
 
         if rank is not None:
             # Populate only this worker's pages (one slot per chunk row).
-            worker_offset = rank * cpu_page_size
             _t0 = time.perf_counter()
-            page_size = self.page_size
-            first = 0
-            if len(self._segments) > 1:
-                # Start each worker on a different file.
-                first = rank * num_chunks // (self._row_stride // cpu_page_size)
-            for i in range(num_chunks):
-                chunk = (first + i) % num_chunks
-                raw_offset = chunk * self._row_stride + worker_offset
-                aligned_offset = (raw_offset // page_size) * page_size
-                end = raw_offset + cpu_page_size
-                aligned_length = end - aligned_offset
-                populate_write_fn(self.mmap_obj, aligned_offset, aligned_length)
+            for offset, length in self.iter_worker_slot_ranges():
+                populate_write_fn(self.mmap_obj, offset, length)
             logger.debug(
                 "MADV_POPULATE_WRITE loop: %d chunks in %.3f s",
                 num_chunks,
@@ -296,6 +286,23 @@ class SharedOffloadRegion:
         for path, _, _ in self._segments:
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(path)
+
+    def iter_worker_slot_ranges(self) -> Iterator[tuple[int, int]]:
+        """Yield this worker's slots as page-aligned (offset, length) ranges."""
+        assert self.rank is not None
+        worker_offset = self.rank * self.cpu_page_size
+        first = 0
+        if len(self._segments) > 1:
+            # Start each worker on a different file.
+            first = (
+                self.rank * self.num_chunks // (self._row_stride // self.cpu_page_size)
+            )
+        for i in range(self.num_chunks):
+            row = (first + i) % self.num_chunks
+            start = row * self._row_stride + worker_offset
+            aligned = start - start % self.page_size
+            end = round_up(start + self.cpu_page_size, self.page_size)
+            yield aligned, end - aligned
 
     @property
     def base_tensor(self) -> torch.Tensor:
