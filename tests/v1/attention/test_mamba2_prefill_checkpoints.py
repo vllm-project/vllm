@@ -14,6 +14,7 @@ from vllm.v1.attention.backends.mamba2_attn import (
 )
 from vllm.v1.attention.backends.mamba_attn import BaseMambaAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
+from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 from vllm.v1.kv_cache_interface import MambaSpec
 
 compute_chunk_metadata = BaseMambaAttentionMetadataBuilder._compute_chunk_metadata
@@ -87,15 +88,17 @@ def _create_mamba2_builder(
         block_size=MAMBA_BLOCK_SIZE,
         shapes=((16, 64),),
         dtypes=(torch.float16,),
-        mamba_cache_mode=mamba_cache_mode,
-        num_prefill_checkpoint_blocks=num_prefill_checkpoint_blocks,
-        prefill_checkpoint_alignment=prefill_checkpoint_alignment,
     )
     builder = Mamba2AttentionMetadataBuilder(
         kv_cache_spec=spec,
         layer_names=["layer.0"],
         vllm_config=vllm_config,
         device=DEVICE,
+        kv_cache_manager_config=MambaManager.Config(
+            mamba_cache_mode=mamba_cache_mode,
+            num_prefill_checkpoint_blocks=num_prefill_checkpoint_blocks,
+            prefill_checkpoint_alignment=prefill_checkpoint_alignment,
+        ),
     )
     vllm_config.cache_config.hash_block_size = MAMBA_BLOCK_SIZE
     vllm_config.cache_config.cache_hit_alignment_tokens = MAMBA_BLOCK_SIZE

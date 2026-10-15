@@ -135,7 +135,11 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
     def _validate_kv_cache_config(
         vllm_config: VllmConfig, kv_cache_config: KVCacheConfig
     ) -> None:
-        from vllm.v1.kv_cache_interface import CrossAttentionSpec, MambaSpec
+        from vllm.v1.core.kv_cache_utils import is_mamba_align_group
+        from vllm.v1.core.single_type_kv_cache_manager import (
+            CrossAttentionManager,
+            MambaManager,
+        )
 
         unsupported: list[str] = []
         store_group_ids = kv_cache_config.prefix_cacheable_group_ids
@@ -144,13 +148,16 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
                 "MooncakeStore requires at least one prefix-cacheable KV cache group"
             )
         for group_id in store_group_ids:
-            spec = kv_cache_config.kv_cache_groups[group_id].kv_cache_spec
-            if isinstance(spec, CrossAttentionSpec):
-                unsupported.append(f"group {group_id}: CrossAttentionSpec")
-            if isinstance(spec, MambaSpec) and spec.mamba_cache_mode != "align":
+            group = kv_cache_config.kv_cache_groups[group_id]
+            if issubclass(group.manager_cls, CrossAttentionManager):
+                unsupported.append(f"group {group_id}: cross-attention")
+            config = group.manager_config
+            if isinstance(config, MambaManager.Config) and not is_mamba_align_group(
+                group
+            ):
+                mode = config.mamba_cache_mode
                 unsupported.append(
-                    f"group {group_id}: mamba_cache_mode="
-                    f"{spec.mamba_cache_mode!r} != 'align'"
+                    f"group {group_id}: mamba_cache_mode={mode!r} != 'align'"
                 )
         pcp = vllm_config.parallel_config.prefill_context_parallel_size
         if len(store_group_ids) > 1 and pcp > 1:

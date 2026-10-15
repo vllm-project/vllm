@@ -89,9 +89,10 @@ from vllm.models.minimax_m3.common.vision_tower import MiniMaxVLVisionModel
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    KVCacheSpec,
+    AttentionSpec,
+    KVCacheLayerConfig,
     get_kv_quant_mode,
 )
 
@@ -559,9 +560,9 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
     def get_attn_backend(self) -> type[MiniMaxM3SparseBackend]:
         return self.attn_backend
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
+    def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig:
         # Main GQA K/V cache. Block size may change after load, refresh it.
-        return FullAttentionSpec(
+        spec = AttentionSpec(
             block_size=vllm_config.cache_config.block_size,
             num_kv_heads=self.num_kv_heads,
             head_size=self.head_dim,
@@ -569,6 +570,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             dtype=self.kv_cache_torch_dtype,
             kv_quant_mode=get_kv_quant_mode(self.kv_cache_dtype),
         )
+        return FullAttentionManager.layer_config(spec)
 
     def _allocate_query_fp8(self, qkv: torch.Tensor) -> torch.Tensor | None:
         if not getattr(self.impl, "use_cutlass_decode", False):

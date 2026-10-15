@@ -15,18 +15,18 @@ from vllm.v1.attention.backends.linear_attn import (
     LinearAttentionMetadataBuilder,
 )
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
+from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 from vllm.v1.kv_cache_interface import MambaSpec
 
 BLOCK_SIZE = 16
 DEVICE = torch.device("cpu")
 
 
-def _create_mamba_spec(num_speculative_blocks: int = 1) -> MambaSpec:
+def _create_mamba_spec() -> MambaSpec:
     return MambaSpec(
         block_size=BLOCK_SIZE,
         shapes=((16, 64),),
         dtypes=(torch.float16,),
-        num_speculative_blocks=num_speculative_blocks,
     )
 
 
@@ -78,6 +78,7 @@ def test_linear_attention_spec_decode_full_graph_metadata_pads_cache_slots():
         layer_names=["model.layers.0.self_attn"],
         vllm_config=vllm_config,
         device=DEVICE,
+        kv_cache_manager_config=MambaManager.Config(num_speculative_blocks=1),
     )
 
     common = create_common_attn_metadata(
@@ -130,6 +131,7 @@ def test_linear_attention_full_graph_metadata_uses_stable_decode_buffers():
         layer_names=["model.layers.0.self_attn"],
         vllm_config=vllm_config,
         device=DEVICE,
+        kv_cache_manager_config=MambaManager.Config(num_speculative_blocks=1),
     )
 
     common = create_common_attn_metadata(

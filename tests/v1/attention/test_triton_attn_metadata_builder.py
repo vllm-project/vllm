@@ -13,7 +13,7 @@ from vllm.v1.attention.backends.triton_attn import TritonAttentionMetadataBuilde
 from vllm.v1.attention.backends.triton_attn_diffkv import (
     TritonAttentionDiffKVMetadataBuilder,
 )
-from vllm.v1.kv_cache_interface import FullAttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec
 
 
 # 64 segments only while num_seqs * num_kv_heads * 16 < 188 SMs on SM12.0 and
@@ -56,7 +56,7 @@ def test_split_k_segments_follow_sm_occupancy(
             cudagraph_mode=CUDAGraphMode.NONE, static_forward_context={}
         ),
     )
-    spec = FullAttentionSpec(
+    spec = AttentionSpec(
         block_size=16, num_kv_heads=num_kv_heads, head_size=128, dtype=torch.bfloat16
     )
     builder = builder_cls(spec, ["layer.0"], config, "cpu")
@@ -88,7 +88,7 @@ def _draft_builder(builder_cls, rswa_window: int | None):
             cudagraph_mode=CUDAGraphMode.NONE, static_forward_context={}
         ),
     )
-    spec = FullAttentionSpec(
+    spec = AttentionSpec(
         block_size=16, num_kv_heads=1, head_size=128, dtype=torch.bfloat16
     )
     return builder_cls(spec, ["layer.0"], config, "cpu")

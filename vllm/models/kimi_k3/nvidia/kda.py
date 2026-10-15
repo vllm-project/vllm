@@ -62,7 +62,8 @@ from vllm.utils.flashinfer import (
     has_flashinfer_recurrent_kda,
 )
 from vllm.v1.attention.backend import AttentionBackend
-from vllm.v1.kv_cache_interface import MambaSpec
+from vllm.v1.core.single_type_kv_cache_manager import MambaManager
+from vllm.v1.kv_cache_interface import KVCacheLayerConfig
 from vllm.v1.worker.workspace import current_workspace_manager
 
 logger = init_logger(__name__)
@@ -827,14 +828,18 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> MambaSpec:
-        spec = super().get_kv_cache_spec(vllm_config)
-        assert isinstance(spec, MambaSpec)
+    def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig:
+        layer_config = super().get_kv_cache_config(vllm_config)
+        assert layer_config is not None
+        assert isinstance(layer_config.manager_config, MambaManager.Config)
         alignment = kda_prefill_checkpoint_alignment(self.kda_prefill_backend)
         return replace(
-            spec,
-            num_prefill_checkpoint_blocks=int(alignment is not None),
-            prefill_checkpoint_alignment=alignment,
+            layer_config,
+            manager_config=replace(
+                layer_config.manager_config,
+                num_prefill_checkpoint_blocks=int(alignment is not None),
+                prefill_checkpoint_alignment=alignment,
+            ),
         )
 
     def forward(

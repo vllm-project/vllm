@@ -145,9 +145,14 @@ class UMBPNamespace:
             "groups": [
                 {
                     "layers": group.layer_names,
-                    "block_size": group.kv_cache_spec.block_size,
-                    "kind": type(group.kv_cache_spec).__name__,
-                    "dtype": str(getattr(group.kv_cache_spec, "dtype", None)),
+                    "block_size": group.block_size,
+                    "kind": repr(group.manager_config),
+                    "dtype": sorted(
+                        {
+                            str(getattr(spec, "dtype", None))
+                            for spec in group.kv_cache_specs.values()
+                        }
+                    ),
                 }
                 for group in kv_cache_config.kv_cache_groups
             ],
@@ -282,8 +287,8 @@ class KVLayoutPlanner:
                 group_id = group_by_layer.get(layer_name)
                 if group_id is None:
                     continue
-                spec = config.kv_cache_groups[group_id].kv_cache_spec
-                block_bytes = spec.page_size_bytes
+                group = config.kv_cache_groups[group_id]
+                block_bytes = group.kv_cache_specs[layer_name].page_size_bytes
                 regions.append(
                     KVRegion(
                         layer_name=layer_name,
@@ -291,7 +296,7 @@ class KVLayoutPlanner:
                         block_stride=tensor.block_stride,
                         block_bytes=block_bytes,
                         object_offset=offset,
-                        block_size=spec.block_size,
+                        block_size=group.block_size,
                     )
                 )
                 offset += block_bytes

@@ -37,6 +37,7 @@ from vllm.v1.attention.backends.utils import (
     NULL_BLOCK_ID,
     mamba_get_block_table_tensor,
 )
+from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 from vllm.v1.kv_cache_interface import MambaSpec
 from vllm.v1.worker.mamba_utils import validate_mamba_state_copy_funcs
 
@@ -134,6 +135,11 @@ def _make_builder(
             block_size=mamba_block_size,
             shapes=((16, 64),),
             dtypes=(torch.float16,),
+        ),
+        layer_names=["layer.0"],
+        vllm_config=vllm_config,
+        device=device,
+        kv_cache_manager_config=MambaManager.Config(
             mamba_cache_mode=mamba_cache_mode,
             num_speculative_blocks=(0 if use_recoverssm else num_speculative_tokens),
             num_prefill_checkpoint_blocks=num_prefill_checkpoint_blocks,
@@ -141,9 +147,6 @@ def _make_builder(
                 16 if num_prefill_checkpoint_blocks > 0 else None
             ),
         ),
-        layer_names=["layer.0"],
-        vllm_config=vllm_config,
-        device=device,
     )
     if use_recoverssm:
         assert isinstance(builder, KimiK3KDAMetadataBuilder)
@@ -179,6 +182,8 @@ def test_kda_recoverssm_startup_metadata_flow_without_model(monkeypatch):
         shapes=KimiLinearForCausalLM.get_mamba_state_shape_from_config(layout_config),
         dtypes=KimiLinearForCausalLM.get_mamba_state_dtype_from_config(layout_config),
         mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
+    )
+    mamba_config = MambaManager.Config(
         mamba_cache_mode="align",
         num_prefill_checkpoint_blocks=1,
         prefill_checkpoint_alignment=16,
@@ -227,6 +232,7 @@ def test_kda_recoverssm_startup_metadata_flow_without_model(monkeypatch):
         layer_names=["layer.0"],
         vllm_config=builder_config,
         device=DEVICE,
+        kv_cache_manager_config=mamba_config,
     )
     builder_config.cache_config.hash_block_size = BLOCK_SIZE
     builder_config.cache_config.cache_hit_alignment_tokens = BLOCK_SIZE
@@ -242,8 +248,8 @@ def test_kda_recoverssm_startup_metadata_flow_without_model(monkeypatch):
     builder.mamba_aligned_state_indices = mamba_get_block_table_tensor(
         prefill_common.block_table_tensor,
         prefill_common.seq_lens,
-        kv_cache_spec,
-        "align",
+        BLOCK_SIZE,
+        mamba_config,
     )
     prefill_metadata = builder.build(
         0,
@@ -271,8 +277,8 @@ def test_kda_recoverssm_startup_metadata_flow_without_model(monkeypatch):
     builder.mamba_aligned_state_indices = mamba_get_block_table_tensor(
         spec_common.block_table_tensor,
         spec_common.seq_lens,
-        kv_cache_spec,
-        "align",
+        BLOCK_SIZE,
+        mamba_config,
     )
     recoverssm_context = Mock()
     with patch(
@@ -342,8 +348,8 @@ def test_internal_checkpoint_metadata_targets_last_aligned_boundary(
     builder.mamba_aligned_state_indices = mamba_get_block_table_tensor(
         common_attn_metadata.block_table_tensor,
         common_attn_metadata.seq_lens,
-        builder.kv_cache_spec,
-        "align",
+        builder.kv_cache_spec.block_size,
+        builder.mamba_config,
     )
     actual = builder.build(0, common_attn_metadata)
 
@@ -400,8 +406,8 @@ def test_spec_internal_checkpoint_metadata_targets_replay_boundary(
     builder.mamba_aligned_state_indices = mamba_get_block_table_tensor(
         common_attn_metadata.block_table_tensor,
         common_attn_metadata.seq_lens,
-        builder.kv_cache_spec,
-        "align",
+        builder.kv_cache_spec.block_size,
+        builder.mamba_config,
     )
     actual = builder.build(0, common_attn_metadata)
 
@@ -441,8 +447,8 @@ def test_internal_checkpoint_metadata_skips_unaligned_offset():
     builder.mamba_aligned_state_indices = mamba_get_block_table_tensor(
         common_attn_metadata.block_table_tensor,
         common_attn_metadata.seq_lens,
-        builder.kv_cache_spec,
-        "align",
+        builder.kv_cache_spec.block_size,
+        builder.mamba_config,
     )
     actual = builder.build(0, common_attn_metadata)
 
@@ -634,8 +640,8 @@ def test_recoverssm_spec_uses_one_state_slot_and_current_window(
         builder.mamba_aligned_state_indices = mamba_get_block_table_tensor(
             common_attn_metadata.block_table_tensor,
             common_attn_metadata.seq_lens,
-            builder.kv_cache_spec,
-            mamba_cache_mode,
+            builder.kv_cache_spec.block_size,
+            builder.mamba_config,
         )
     context = builder.recoverssm_context
     assert context is not None
@@ -978,24 +984,15 @@ def test_aligned_block_table_matches_shared_gdn():
         device=device,
     ).reshape(seq_lens.numel(), 128)
     block_table = block_table_storage[:, ::2]
-    kv_cache_spec = MambaSpec(
-        block_size=BLOCK_SIZE,
-        shapes=((16, 64),),
-        dtypes=(torch.float16,),
-        num_speculative_blocks=2,
+    mamba_config = MambaManager.Config(
+        mamba_cache_mode="align", num_speculative_blocks=2
     )
 
     expected = mamba_get_block_table_tensor(
-        block_table,
-        seq_lens,
-        kv_cache_spec,
-        "align",
+        block_table, seq_lens, BLOCK_SIZE, mamba_config
     )
     actual = _mamba_get_block_table_tensor(
-        block_table,
-        seq_lens,
-        kv_cache_spec,
-        "align",
+        block_table, seq_lens, BLOCK_SIZE, mamba_config
     )
 
     torch.testing.assert_close(actual, expected)

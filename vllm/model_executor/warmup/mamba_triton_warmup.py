@@ -15,13 +15,10 @@ logger = init_logger(__name__)
 
 
 def _has_mamba_style_cache(runner: "GPUModelRunner") -> bool:
-    from vllm.v1.kv_cache_interface import MambaSpec, UniformTypeKVCacheSpecs
+    from vllm.v1.kv_cache_interface import MambaSpec
 
     for group in runner.kv_cache_config.kv_cache_groups:
-        spec = group.kv_cache_spec
-        if isinstance(spec, UniformTypeKVCacheSpecs):
-            spec = spec.first_spec
-        if isinstance(spec, MambaSpec):
+        if any(isinstance(spec, MambaSpec) for spec in group.kv_cache_specs.values()):
             return True
     return False
 

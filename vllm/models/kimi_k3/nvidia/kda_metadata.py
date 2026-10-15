@@ -36,7 +36,8 @@ from vllm.v1.attention.backends.utils import (
     compute_causal_conv1d_metadata,
     split_decodes_and_prefills,
 )
-from vllm.v1.kv_cache_interface import MambaSpec
+from vllm.v1.core.single_type_kv_cache_manager import MambaManager
+from vllm.v1.kv_cache_interface import MambaSpec, ManagerConfig
 
 if TYPE_CHECKING:
     from vllm.models.kimi_k3.nvidia.ops.recoverssm import (
@@ -101,15 +102,15 @@ def _get_aligned_state_indices_kernel(
 def _mamba_get_block_table_tensor(
     block_table: torch.Tensor,
     seq_lens: torch.Tensor,
-    kv_cache_spec: MambaSpec,
-    mamba_cache_mode: str,
+    block_size: int,
+    mamba_config: MambaManager.Config,
 ) -> torch.Tensor:
-    if mamba_cache_mode == "none":
+    if mamba_config.mamba_cache_mode == "none":
         return block_table
 
     assert block_table.is_cuda and seq_lens.is_cuda
     num_requests = block_table.shape[0]
-    num_state_slots = 1 + kv_cache_spec.num_speculative_blocks
+    num_state_slots = 1 + mamba_config.num_speculative_blocks
     state_indices = torch.empty(
         (num_requests, num_state_slots),
         dtype=block_table.dtype,
@@ -127,7 +128,7 @@ def _mamba_get_block_table_tensor(
         state_indices.stride(0),
         state_indices.stride(1),
         num_requests,
-        CACHE_BLOCK_SIZE=kv_cache_spec.block_size,
+        CACHE_BLOCK_SIZE=block_size,
         NUM_STATE_SLOTS=num_state_slots,
         BLOCK_STATE_SLOTS=triton.next_power_of_2(num_state_slots),
         BLOCK_ROWS=BLOCK_ROWS,
@@ -312,8 +313,16 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
         layer_names: list[str],
         vllm_config: VllmConfig,
         device: torch.device,
+        *,
+        kv_cache_manager_config: ManagerConfig,
     ) -> None:
-        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        super().__init__(
+            kv_cache_spec,
+            layer_names,
+            vllm_config,
+            device,
+            kv_cache_manager_config=kv_cache_manager_config,
+        )
         additional_config = vllm_config.additional_config
         self.use_flashinfer_prefill = (
             isinstance(additional_config, dict)
@@ -383,8 +392,8 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
                 block_table_tensor = _mamba_get_block_table_tensor(
                     m.block_table_tensor,
                     m.seq_lens,
-                    self.kv_cache_spec,
-                    self.vllm_config.cache_config.mamba_cache_mode,
+                    self.kv_cache_spec.block_size,
+                    self.mamba_config,
                 )
         else:
             block_table_tensor = m.block_table_tensor
@@ -668,7 +677,7 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
             assert spec_state_indices_tensor is not None
             assert spec_query_start_loc is not None
             align = None
-            if self.kv_cache_spec.mamba_cache_mode == "align":
+            if self.mamba_config.mamba_cache_mode == "align":
                 align = KDARecoverSSMAlignMetadata(
                     block_table=m.block_table_tensor,
                     num_computed_tokens=m.compute_num_computed_tokens(),

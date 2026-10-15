@@ -365,17 +365,15 @@ def get_current_attn_backends_and_specs(
     pairs: dict[tuple[type[AttentionBackend], AttentionSpec | None], None] = {}
     layer_type = cast(type[Any], AttentionLayerBase)
     for group in kv_cache_config.transfer_groups:
-        specs = getattr(group.kv_cache_spec, "kv_cache_specs", {})
         layers = get_layers_from_vllm_config(vllm_config, layer_type, group.layer_names)
         for name, layer in layers.items():
-            spec = specs.get(name, group.kv_cache_spec)
+            spec = group.kv_cache_specs[name]
             if isinstance(spec, AttentionSpec) and spec.tokens_per_state > 1:
                 layout = vllm_config.cache_config.get_resolved_kv_cache_layout()
                 assert layout.is_block_outermost, "Compressed caches must be packed"
                 continue
-            if not isinstance(spec, AttentionSpec):
-                spec = None
-            pairs[layer.get_attn_backend(), spec] = None
+            attn_spec = spec if isinstance(spec, AttentionSpec) else None
+            pairs[layer.get_attn_backend(), attn_spec] = None
     if not pairs:
         return fallback, [None] * len(fallback)
     return [backend for backend, _ in pairs], [spec for _, spec in pairs]

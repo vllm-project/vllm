@@ -24,6 +24,7 @@ from vllm.v1.attention.backends.gdn_attn import (
     plan_flashinfer_checkpoints,
 )
 from vllm.v1.attention.backends.utils import mamba_get_block_table_tensor
+from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 from vllm.v1.kv_cache_interface import MambaSpec
 
 BLOCK_SIZE = 16
@@ -150,12 +151,14 @@ GDN_BUILD_TEST_CASES = {
 def _create_gdn_builder(
     num_speculative_tokens: int = 0,
     full_cuda_graph: bool = False,
+    mamba_cache_mode: str = "none",
 ) -> GDNAttentionMetadataBuilder:
     """Create a GDNAttentionMetadataBuilder with minimal config."""
     vllm_config = create_vllm_config(
         model_name="Qwen/Qwen3.5-0.8B",
         block_size=BLOCK_SIZE,
     )
+    vllm_config.cache_config.mamba_cache_mode = mamba_cache_mode
     vllm_config.compilation_config.cudagraph_mode = (
         CUDAGraphMode.FULL_AND_PIECEWISE if full_cuda_graph else CUDAGraphMode.NONE
     )
@@ -174,6 +177,7 @@ def _create_gdn_builder(
         layer_names=["layer.0"],
         vllm_config=vllm_config,
         device=DEVICE,
+        kv_cache_manager_config=MambaManager.Config(mamba_cache_mode=mamba_cache_mode),
     )
 
 
@@ -226,17 +230,20 @@ def test_update_block_table_matches_build(
     """update_block_table() on another group's metadata matches build()."""
     batch = BatchSpec(seq_lens=test_case.seq_lens, query_lens=test_case.query_lens)
     src, dst, ref = (
-        _create_gdn_builder(test_case.num_speculative_tokens, full_cuda_graph)
+        _create_gdn_builder(
+            test_case.num_speculative_tokens, full_cuda_graph, mamba_cache_mode
+        )
         for _ in range(3)
     )
-    for builder in (src, dst, ref):
-        builder.vllm_config.cache_config.mamba_cache_mode = mamba_cache_mode
     common = create_common_attn_metadata(batch, BLOCK_SIZE, DEVICE)
     if mamba_cache_mode == "align":
         # MRV2 precomputes these for every Mamba group each step.
         dst.mamba_aligned_state_indices = ref.mamba_aligned_state_indices = (
             mamba_get_block_table_tensor(
-                common.block_table_tensor, common.seq_lens, ref.kv_cache_spec, "align"
+                common.block_table_tensor,
+                common.seq_lens,
+                ref.kv_cache_spec.block_size,
+                ref.mamba_config,
             )
         )
     draft_tokens = test_case.num_decode_draft_tokens
@@ -403,16 +410,18 @@ def _create_checkpoint_builder_and_batch(
         block_size=64,
         shapes=((16, 64),),
         dtypes=(torch.float16,),
-        mamba_cache_mode="align",
-        num_speculative_blocks=num_spec,
-        num_prefill_checkpoint_blocks=1,
-        prefill_checkpoint_alignment=16,
     )
     builder = GDNAttentionMetadataBuilder(
         kv_cache_spec=mamba_spec,
         layer_names=["layer.0"],
         vllm_config=vllm_config,
         device=DEVICE,
+        kv_cache_manager_config=MambaManager.Config(
+            mamba_cache_mode="align",
+            num_speculative_blocks=num_spec,
+            num_prefill_checkpoint_blocks=1,
+            prefill_checkpoint_alignment=16,
+        ),
     )
     vllm_config.cache_config.hash_block_size = prefix_match_unit or 64
     vllm_config.cache_config.cache_hit_alignment_tokens = prefix_match_unit or 64
@@ -471,7 +480,7 @@ def test_update_block_table_regathers_checkpoint(num_spec):
     other_table = common.block_table_tensor + 100
     other = common.replace(block_table_tensor=other_table)
     dst.mamba_aligned_state_indices = mamba_get_block_table_tensor(
-        other_table, other.seq_lens, dst.kv_cache_spec, "align"
+        other_table, other.seq_lens, dst.kv_cache_spec.block_size, dst.mamba_config
     )
 
     source = src.build(0, common, **kwargs)

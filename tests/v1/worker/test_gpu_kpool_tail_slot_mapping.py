@@ -13,9 +13,10 @@ the buffer entirely).
 import pytest
 import torch
 
+from tests.v1.core.utils import new_kv_cache_group, new_kv_cache_spec
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
-from vllm.v1.kv_cache_interface import CircularBufferSpec
+from vllm.v1.core.single_type_kv_cache_manager import CircularBufferManager
 from vllm.v1.worker.block_table import get_block_table_width
 from vllm.v1.worker.gpu.block_table import BlockTables
 
@@ -31,23 +32,15 @@ MAX_NUM_REQS = 4
 POISON_BLOCK_ID = 1 << 20
 
 
-def make_tail_spec():
-    return CircularBufferSpec(
-        block_size=KPOOL,
-        num_kv_heads=2,
-        head_size=128,
-        head_size_v=0,
-        dtype=torch.bfloat16,
-    )
-
-
 def test_kpool_tail_group_never_position_indexes_its_block_table():
     device = torch.device("cuda")
-    spec = make_tail_spec()
+    group = new_kv_cache_group(
+        ["tail"], CircularBufferManager.layer_config(new_kv_cache_spec(KPOOL))
+    )
     tail_width = get_block_table_width(
-        spec.max_num_blocks_per_req(None, MAX_MODEL_LEN),
-        spec.block_size,
-        token_alignment=spec.block_table_token_alignment,
+        group.max_num_blocks_per_req(None, MAX_MODEL_LEN),
+        group.block_size,
+        token_alignment=group.block_table_token_alignment,
     )
     mla_width = get_block_table_width(MAX_MODEL_LEN // MLA_BLOCK_SIZE, MLA_BLOCK_SIZE)
 
@@ -61,12 +54,12 @@ def test_kpool_tail_group_never_position_indexes_its_block_table():
     positions = [0, in_row, next_row, past_table]
 
     block_tables = BlockTables(
-        block_sizes=[MLA_BLOCK_SIZE, spec.block_size],
+        block_sizes=[MLA_BLOCK_SIZE, group.block_size],
         max_num_reqs=MAX_NUM_REQS,
         max_num_batched_tokens=len(positions),
         max_num_blocks_per_group=[mla_width, tail_width],
         device=device,
-        slot_mapping_enabled=[True, spec.uses_slot_mapping],
+        slot_mapping_enabled=[True, group.uses_slot_mapping],
     )
     mla_blocks = list(range(1, mla_width + 1))
     block_tables.append_block_ids(0, (mla_blocks, [7]), overwrite=True)

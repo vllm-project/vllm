@@ -230,7 +230,7 @@ def test_mla_kv_cache_spec_uses_layer_cache_dtype(
         cache_config=SimpleNamespace(block_size=64), model_config=None
     )
 
-    spec = MLAAttention.get_kv_cache_spec(layer, vllm_config)
+    spec = MLAAttention.get_kv_cache_config(layer, vllm_config).spec
 
     assert isinstance(spec, MLAAttentionSpec)
     assert spec.cache_dtype_str == cache_dtype
@@ -827,7 +827,7 @@ class MockMLAAttentionLayer(MLAAttention):
     def get_attn_backend(self):
         raise NotImplementedError
 
-    def get_kv_cache_spec(self, vllm_config):
+    def get_kv_cache_config(self, vllm_config):
         raise NotImplementedError
 
     def forward_impl(
@@ -1977,7 +1977,6 @@ def _run_backend_correctness(
             ),
             head_size=vllm_config.model_config.get_head_size(),
             dtype=vllm_config.model_config.dtype,
-            sliding_window=vllm_config.model_config.get_sliding_window(),
             cache_dtype_str=kv_cache_dtype,
         )
 

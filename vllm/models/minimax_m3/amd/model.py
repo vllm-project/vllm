@@ -128,9 +128,10 @@ from vllm.models.minimax_m3.common.vision_tower import MiniMaxVLVisionModel
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    KVCacheSpec,
+    AttentionSpec,
+    KVCacheLayerConfig,
     get_kv_quant_mode,
     is_quantized_kv_cache,
 )
@@ -818,7 +819,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
     def get_attn_backend(self) -> type[MiniMaxM3SparseBackend]:
         return self.attn_backend
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
+    def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig:
         # Main GQA K/V cache. Block size may change after load, refresh it.
         # AITER sparse PA wants K and V as two separate head groups
         # (H folded into the content dim).
@@ -826,7 +827,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         kv_bytes = (
             self.num_kv_heads * self.head_dim * self.kv_cache_torch_dtype.itemsize
         )
-        return FullAttentionSpec(
+        spec = AttentionSpec(
             block_size=vllm_config.cache_config.block_size,
             num_kv_heads=self.num_kv_heads,
             head_size=self.head_dim,
@@ -836,6 +837,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             num_head_slots=2 if sparse_pa else None,
             state_content_bytes=kv_bytes if sparse_pa else None,
         )
+        return FullAttentionManager.layer_config(spec)
 
     def _ensure_aiter_sparse_pa_kv_cache(self) -> None:
         if self.kv_cache.numel() == 0:

@@ -791,12 +791,12 @@ def test_v41_compressor_metadata_maps_tokens_to_their_ring():
 
     from vllm.models.deepseek_v41.compressor import CompressorMetadataBuilder
     from vllm.v1.attention.backend import CommonAttentionMetadata
-    from vllm.v1.kv_cache_interface import CircularBufferSpec
+    from vllm.v1.kv_cache_interface import AttentionSpec
 
     capacity = 8
     vllm_config = MagicMock()
     vllm_config.scheduler_config.max_num_batched_tokens = 16
-    spec = CircularBufferSpec(
+    spec = AttentionSpec(
         block_size=capacity,
         num_kv_heads=1,
         head_size=1024,

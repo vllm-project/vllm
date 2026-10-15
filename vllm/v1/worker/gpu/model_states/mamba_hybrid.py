@@ -31,6 +31,7 @@ from vllm.v1.worker.mamba_utils import (
     MambaSpecDecodeGPUContext,
     get_mamba_group_ids,
     get_mamba_groups,
+    get_mamba_manager_config,
     preprocess_mamba_align_fused_kernel,
     validate_mamba_state_copy_funcs,
 )
@@ -131,11 +132,9 @@ class MambaHybridModelState(DefaultModelState):
             mamba_groups = get_mamba_groups(kv_cache_config)
             mamba_spec = next(iter(mamba_groups))
             assert all(
-                spec.block_size == mamba_spec.block_size
-                and spec.num_speculative_blocks == mamba_spec.num_speculative_blocks
-                and spec.mamba_cache_mode == mamba_spec.mamba_cache_mode
-                for spec in mamba_groups
+                spec.block_size == mamba_spec.block_size for spec in mamba_groups
             ), "all mamba groups must share cache scheduling parameters"
+            get_mamba_manager_config(kv_cache_config)
             self._mamba_group_ids = get_mamba_group_ids(mamba_groups)
             self._mamba_spec = mamba_spec
         return self._mamba_group_ids, self._mamba_spec

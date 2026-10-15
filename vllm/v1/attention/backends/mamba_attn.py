@@ -22,7 +22,8 @@ from vllm.v1.attention.backends.utils import (
     mamba_get_block_table_tensor,
     split_decodes_and_prefills,
 )
-from vllm.v1.kv_cache_interface import MambaSpec
+from vllm.v1.core.single_type_kv_cache_manager import MambaManager
+from vllm.v1.kv_cache_interface import MambaSpec, ManagerConfig
 
 M = TypeVar("M", bound="BaseMambaAttentionMetadata")
 
@@ -85,6 +86,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
     metadata_cls: type[M]
     reorder_batch_threshold: int = 1
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
+    requires_kv_cache_manager_config = True
 
     # Will be disabled if speculative decoding is used
     supports_update_block_table: bool = True
@@ -96,8 +98,12 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         layer_names: list[str],
         vllm_config: VllmConfig,
         device: torch.device,
+        *,
+        kv_cache_manager_config: ManagerConfig,
     ):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        assert isinstance(kv_cache_manager_config, MambaManager.Config)
+        self.mamba_config = kv_cache_manager_config
 
         # Enable speculative decoding support
         self.speculative_config = vllm_config.speculative_config
@@ -469,8 +475,8 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         state_indices_tensor = mamba_get_block_table_tensor(
             common_attn_metadata.block_table_tensor,
             common_attn_metadata.seq_lens,
-            self.kv_cache_spec,
-            self.vllm_config.cache_config.mamba_cache_mode,
+            self.kv_cache_spec.block_size,
+            self.mamba_config,
         )
 
         if state_indices_tensor.dim() == 1:
@@ -729,8 +735,8 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         state_indices_tensor = mamba_get_block_table_tensor(
             blk_table,
             metadata.seq_lens,
-            self.kv_cache_spec,
-            self.vllm_config.cache_config.mamba_cache_mode,
+            self.kv_cache_spec.block_size,
+            self.mamba_config,
         )
         if state_indices_tensor.dim() == 1:
             state_indices_tensor = state_indices_tensor.unsqueeze(-1)

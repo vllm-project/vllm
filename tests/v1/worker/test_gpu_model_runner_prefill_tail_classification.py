@@ -28,6 +28,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from tests.v1.core.utils import new_kv_cache_group
 from vllm.config import (
     CacheConfig,
     ModelConfig,
@@ -43,9 +44,8 @@ from vllm.sampling_params import SamplingParams
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.v1.core.sched.output import CachedRequestData, NewRequestData, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
     KVCacheTensor,
 )
 from vllm.v1.worker.gpu_input_batch import InputBatch
@@ -90,7 +90,7 @@ def _make_model_runner(vllm_config: VllmConfig) -> GPUModelRunner:
 
 
 def _initialize_kv_cache(runner: GPUModelRunner) -> None:
-    attn_spec = FullAttentionSpec(
+    attn_spec = AttentionSpec(
         block_size=BLOCK_SIZE,
         num_kv_heads=runner.model_config.get_num_kv_heads(runner.parallel_config),
         head_size=runner.model_config.get_head_size(),
@@ -108,7 +108,10 @@ def _initialize_kv_cache(runner: GPUModelRunner) -> None:
             ),
         ],
         kv_cache_groups=[
-            KVCacheGroupSpec(layer_names=["layer.0"], kv_cache_spec=attn_spec)
+            new_kv_cache_group(
+                ["layer.0"],
+                attn_spec,
+            )
         ],
     )
     runner.kv_cache_config = kv_cache_config
@@ -118,7 +121,7 @@ def _initialize_kv_cache(runner: GPUModelRunner) -> None:
         max_num_batched_tokens=runner.max_num_tokens,
         device=runner.device,
         vocab_size=runner.model_config.get_vocab_size(),
-        block_sizes=[kv_cache_config.kv_cache_groups[0].kv_cache_spec.block_size],
+        block_sizes=[kv_cache_config.kv_cache_groups[0].block_size],
         max_num_blocks_per_req=[NUM_BLOCKS],
     )
     runner.initialize_attn_backend(kv_cache_config)

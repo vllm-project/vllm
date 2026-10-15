@@ -3,6 +3,7 @@
 
 import torch
 
+from tests.v1.core.utils import new_kv_cache_group
 from vllm.config import (
     CacheConfig,
     ModelConfig,
@@ -14,11 +15,10 @@ from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
 from vllm.v1.core.sched.scheduler import Scheduler
-from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
 )
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
@@ -63,16 +63,20 @@ def build_scheduler():
         cache_config=cache_config,
         parallel_config=ParallelConfig(),
     )
-    kv_cache_spec = FullAttentionSpec(
+    kv_cache_spec = AttentionSpec(
         block_size=BLOCK_SIZE, num_kv_heads=1, head_size=1, dtype=torch.float32
     )
     kv_cache_config = KVCacheConfig(
         num_blocks=NUM_BLOCKS,
         kv_cache_tensors=[],
-        kv_cache_groups=[KVCacheGroupSpec(["layer"], kv_cache_spec)],
+        kv_cache_groups=[
+            new_kv_cache_group(
+                ["layer"],
+                FullAttentionManager.layer_config(kv_cache_spec),
+            )
+        ],
     )
     cache_config.num_gpu_blocks = NUM_BLOCKS
-    register_all_kvcache_specs(vllm_config)
     return Scheduler(
         vllm_config=vllm_config,
         kv_cache_config=kv_cache_config,

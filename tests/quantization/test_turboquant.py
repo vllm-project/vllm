@@ -284,7 +284,7 @@ class TestTurboQuantKVCacheSpec:
         from vllm.v1.attention.backends.turboquant_attn import (
             TurboQuantAttentionBackend,
         )
-        from vllm.v1.kv_cache_interface import FullAttentionSpec
+        from vllm.v1.kv_cache_interface import AttentionSpec
 
         layer = SimpleNamespace(
             attn_type="decoder",
@@ -300,8 +300,10 @@ class TestTurboQuantKVCacheSpec:
 
         # The layer builds an unpacked spec; the worker's spec-collection
         # loop applies TQ slot packing via the backend's customize_spec hook.
-        spec = Attention.get_kv_cache_spec(layer, vllm_config)
-        assert isinstance(spec, FullAttentionSpec)
+        layer_config = Attention.get_kv_cache_config(layer, vllm_config)
+        assert layer_config is not None
+        spec = layer_config.spec
+        assert isinstance(spec, AttentionSpec)
         assert spec.kv_quant_mode.is_turboquant
         assert spec.state_content_bytes is None
 
@@ -343,9 +345,9 @@ class TestTurboQuantWorkspaceReservation:
 
     @staticmethod
     def _fake_kv_cache_spec():
-        from vllm.v1.kv_cache_interface import FullAttentionSpec
+        from vllm.v1.kv_cache_interface import AttentionSpec
 
-        return FullAttentionSpec(
+        return AttentionSpec(
             block_size=32,
             num_kv_heads=4,
             head_size=128,
