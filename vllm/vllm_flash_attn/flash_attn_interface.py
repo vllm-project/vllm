@@ -326,8 +326,7 @@ def flash_attn_varlen_func(
             and q.shape[-1] <= 256
             and k.shape[-1] == q.shape[-1] == v.shape[-1]
         ):
-            # The FP8-MMA V transpose below is specialized for two 256-column
-            # halves. Preserve the established FA3 FP8-KV path for smaller dims.
+            # Preserve supported FA3 FP8 configurations for smaller heads.
             if dynamic_causal is not None or block_sparse_tensors is not None:
                 raise NotImplementedError(
                     "SM90 FP8 FA3 fallback does not support dynamic_causal "
@@ -365,8 +364,8 @@ def flash_attn_varlen_func(
         and real_window_size[1] < 0
     ):
         raise NotImplementedError(
-            "SM90 d512 FP8 MMA requires causal or local attention; "
-            "noncausal full attention is not validated. "
+            "SM90 d512 FP8 MMA noncausal full attention is disabled due to "
+            "known numerical accuracy failures. "
             "Use an unquantized KV cache or a supported attention backend."
         )
     q, k, v = [maybe_contiguous(x) for x in (q, k, v)]
@@ -492,9 +491,9 @@ def flash_attn_varlen_func(
 
         from vllm.vllm_flash_attn.cute.interface import _flash_attn_fwd
 
-        # SM90 d512 uses native FP16/BF16 Q and paged E4M3 K/V with compensated
-        # FP8 QK/PV MMA and FP32 accumulation. K/V descales are folded in-kernel;
-        # O is written in Q's native dtype without an output copy.
+        # SM90 d512 accepts native FP16/BF16 Q and paged E4M3 K/V.
+        # It uses compensated FP8 MMA with FP32 running accumulation.
+        # K/V descales are folded in-kernel; O is written in Q's native dtype.
         out, softmax_lse, _, _ = _flash_attn_fwd(
             q,
             k,
