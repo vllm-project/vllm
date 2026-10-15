@@ -15,8 +15,9 @@ import functools
 from unittest.mock import MagicMock, patch
 
 import pytest
-from transformers import Glm5NextConfig, PreTrainedConfig
+from transformers import AutoConfig, Glm5NextConfig, PreTrainedConfig
 
+from vllm.config.model import ModelConfig
 from vllm.config.parallel import ParallelConfig
 from vllm.config.speculative import SpeculativeConfig
 
@@ -295,51 +296,27 @@ def test_glm5_next_mtp_override_promotes_index_share():
     assert draft_config.index_share_for_mtp_iteration is True
 
 
-def _make_transformers_mtp_speculative_config(
-    is_moe: bool, multimodal: bool = False
-) -> tuple[SpeculativeConfig, MagicMock]:
-    target = MagicMock(
-        model="target", max_model_len=128, quantization=None, hf_overrides={}
-    )
-    target.using_transformers_backend.return_value = True
-    target.is_moe = is_moe
-    if not multimodal:
-        target.hf_text_config = target.hf_config
-    draft = MagicMock(model="draft", hf_config=_make_hf_config(), max_model_len=128)
-
-    with patch(
-        "vllm.config.speculative.ModelConfig", return_value=draft
-    ) as model_config_cls:
-        speculative_config = SpeculativeConfig(
-            method="mtp",
-            num_speculative_tokens=1,
-            target_model_config=target,
-            target_parallel_config=ParallelConfig(),
-        )
-    return speculative_config, model_config_cls
-
-
 @pytest.mark.cpu_test
 @pytest.mark.parametrize(
-    ("is_moe", "architecture"),
-    [(False, "TransformersForMTP"), (True, "TransformersMoEForMTP")],
+    ("model_impl", "architecture"),
+    [("transformers", "TransformersMoEForMTP"), ("auto", "Glm4MoeMTPModel")],
 )
-def test_transformers_backend_mtp_draft(is_moe: bool, architecture: str):
-    """A Transformers backend target gets a Transformers backend MTP draft, built
-    from the target's config without the native MTP draft rewrites."""
-    speculative_config, model_config_cls = _make_transformers_mtp_speculative_config(
-        is_moe
+def test_mtp_draft_architecture_follows_target_model_impl(
+    tmp_path, model_impl: str, architecture: str
+):
+    """The MTP draft of a Transformers backend target uses the Transformers backend
+    too, while other targets keep their native MTP draft."""
+    config = AutoConfig.for_model("glm4_moe", num_nextn_predict_layers=1)
+    config.architectures = ["Glm4MoeForCausalLM"]
+    config.save_pretrained(tmp_path)
+    target = ModelConfig(str(tmp_path), model_impl=model_impl, skip_tokenizer_init=True)
+
+    speculative_config = SpeculativeConfig(
+        method="mtp",
+        num_speculative_tokens=1,
+        target_model_config=target,
+        target_parallel_config=ParallelConfig(),
     )
+
     assert speculative_config.method == "mtp"
-
-    hf_overrides = model_config_cls.call_args.kwargs["hf_overrides"]
-    hf_config = hf_overrides(_make_hf_config(model_type="deepseek_v3"))
-    assert hf_config.architectures == [architecture]
-    assert hf_config.model_type == "deepseek_v3"
-    assert hf_config.num_hidden_layers == 64
-
-
-@pytest.mark.cpu_test
-def test_transformers_backend_mtp_rejects_multimodal():
-    with pytest.raises(NotImplementedError, match="multimodal"):
-        _make_transformers_mtp_speculative_config(is_moe=False, multimodal=True)
+    assert speculative_config.draft_model_config.architecture == architecture
