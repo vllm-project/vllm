@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""DeepSeek-V4.1's specialized decode on ROCm CDNA4 (``--monokernel``,
-RFC #60904)."""
+"""DeepSeek-V4.1's specialized decode."""
 
 from dataclasses import dataclass
 from functools import partial
@@ -88,17 +87,6 @@ class LayerPlan:
 
 
 class DSV41Kernel:
-    """DeepSeek-V4.1's decode on this rank: the runner (one a rank, its peer
-    memory collective over the TP group) and a launch plan per kernel layer.
-
-    ``run`` owns the backbone's layer loop, between the model's own prologue
-    and epilogue: those keep the engram hashes, the sequence-parallel shard and
-    the final collapse on one code path.
-
-    Built once at load and never moved: the launches and the captured graphs
-    hold its addresses.
-    """
-
     def __init__(self, vllm_config, model, widths: tuple[int, ...]):
         from vllm.models.common.specialized_decode.guards import tp_group
         from vllm.models.deepseek_v41.amd.mono.runner import MAX_TOKENS, DSV41MonoLayer
@@ -136,7 +124,7 @@ class DSV41Kernel:
         self.cache_layers = tuple(sorted(set(self.swa_keys) | set(self.comp_keys)))
 
     def _plan_layer(self, layer, tp_size: int) -> LayerPlan | None:
-        """This layer's launch, or None when it keeps vLLM's path throughout."""
+        """Info needed to run the specialized decode kernel for this layer."""
         attn = layer.attn
         why = _skip_layer(layer)
         if why is not None:
@@ -202,7 +190,7 @@ class DSV41Kernel:
         engram_hashes: torch.Tensor | None = None,
         engram_mask: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, ...] | None:
-        """The whole backbone layer as K1 and K2, from the layer's own inputs."""
+        """Run a decode layer as one logical kernel."""
         layer, runner = plan.layer, self.runner
         attn = layer.attn
         first = residual is None
@@ -289,10 +277,12 @@ class DSV41Kernel:
             plan = self.plans.get(layer.attn.layer_id)
             ffn = out = None
             if plan is None:
+                # TODO: check if we should crash here
                 pass
             elif plan.ffn_only:
                 ffn = partial(self.launch_ffn, plan)
             else:
+                # Run entire layer
                 out = self.launch_whole(
                     plan,
                     hidden,
@@ -305,6 +295,7 @@ class DSV41Kernel:
                     engram_mask,
                 )
             if out is None:
+                # Run standard model implementation, with injected specialized ffn
                 out = layer(
                     hidden,
                     positions,
@@ -344,8 +335,23 @@ class DSV41Kernel:
         )
 
 
-def _compute_units() -> int:
-    return current_platform.num_compute_units(torch.accelerator.current_device_index())
+def _ffn_only(layer) -> str | None:
+    """Why this layer's attention seam and attention stay on vLLM's path, which
+    leaves it the FFN launch, or None when it runs whole."""
+    from vllm.models.deepseek_v41.amd.rocm import DeepseekV41RocmMxfp4Indexer
+
+    attn = layer.attn
+    if attn.compressor is not None and attn.indexer is None:
+        return "a compressor without an indexer"
+    if attn.indexer is not None and not isinstance(
+        attn.indexer, DeepseekV41RocmMxfp4Indexer
+    ):
+        return f"a {type(attn.indexer).__name__}"
+    if attn.compress_ratio not in (0, 1, 2):
+        return f"compress ratio {attn.compress_ratio}"
+    if attn.kv_mxfp8 or attn.kv_cache_dtype != "fp8_ds_mla":
+        return f"a {attn.kv_cache_dtype} KV cache"
+    return None
 
 
 def _widths(vllm_config) -> tuple[int, ...]:
@@ -384,7 +390,7 @@ def _refuse_model(model) -> list[str]:
     reasons = []
     if get_cdna_version() not in CDNA_VERSIONS:
         reasons.append(f"needs CDNA{'/'.join(map(str, CDNA_VERSIONS))}")
-    cus = _compute_units()
+    cus = current_platform.num_compute_units(torch.accelerator.current_device_index())
     if cus < BLOCKS:
         reasons.append(f"needs {BLOCKS} compute units, the GPU has {cus}")
     backends = set()
@@ -418,25 +424,6 @@ def _skip_layer(layer) -> str | None:
         or not ffn.renormalize
     ):
         return "MoE routing outside the kernels' (384 / 6, sqrtsoftplus, x1.5)"
-    return None
-
-
-def _ffn_only(layer) -> str | None:
-    """Why this layer's attention seam and attention stay on vLLM's path, which
-    leaves it the FFN launch, or None when it runs whole."""
-    from vllm.models.deepseek_v41.amd.rocm import DeepseekV41RocmMxfp4Indexer
-
-    attn = layer.attn
-    if attn.compressor is not None and attn.indexer is None:
-        return "a compressor without an indexer"
-    if attn.indexer is not None and not isinstance(
-        attn.indexer, DeepseekV41RocmMxfp4Indexer
-    ):
-        return f"a {type(attn.indexer).__name__}"
-    if attn.compress_ratio not in (0, 1, 2):
-        return f"compress ratio {attn.compress_ratio}"
-    if attn.kv_mxfp8 or attn.kv_cache_dtype != "fp8_ds_mla":
-        return f"a {attn.kv_cache_dtype} KV cache"
     return None
 
 
