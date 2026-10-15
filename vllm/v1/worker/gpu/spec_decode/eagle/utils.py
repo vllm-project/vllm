@@ -121,6 +121,12 @@ def load_eagle_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mod
                     del sh.head
                     sh.head = target_lm_head
 
+    # Only now does the drafter hold the lm_head it drafts with.
+    if speculative_config.draft_token_map is not None:
+        from vllm.model_executor.layers.draft_vocab import load_draft_token_map
+
+        load_draft_token_map(eagle_model, vllm_config)
+
     # MTP shares topk_indices_buffer with the target model. We update
     # every module in the draft that holds a buffer reference so that
     # the per-layer indexer and sparse-attention backends all point to

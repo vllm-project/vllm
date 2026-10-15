@@ -22,6 +22,7 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.model_executor.layers.draft_vocab import DraftVocab
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -256,16 +257,10 @@ class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
             self.config.draft_vocab_size, scale=logit_scale
         )
         self.target_vocab_size = vllm_config.model_config.get_vocab_size()
-        # Only a pruned draft (subset of the target vocab) needs a d2t mapping to
-        # scatter ids up. A draft >= the target vocab (e.g. padded to the target's
-        # physical embedding size) maps identically, so no d2t is needed.
-        if self.config.draft_vocab_size < self.target_vocab_size:
-            self.draft_id_to_target_id = nn.Parameter(
-                torch.zeros(self.config.draft_vocab_size, dtype=torch.long),
-                requires_grad=False,
-            )
-        else:
-            self.draft_id_to_target_id = None
+        # A draft >= the target vocab (e.g. padded to the target's physical
+        # embedding size) maps identically, so it gets no d2t.
+        self.draft_vocab = DraftVocab(self.logits_processor, self.target_vocab_size)
+        self.draft_id_to_target_id = self.draft_vocab.draft_id_to_target_id
 
     def get_draft_kv_cache_layer_names(self) -> list[str]:
         return [layer.self_attn.attn.layer_name for layer in self.model.layers]
@@ -276,10 +271,7 @@ class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
         return self.logits_processor(self.lm_head, hidden_states)
 
     def map_draft_to_target(self, draft_ids: torch.Tensor) -> torch.Tensor:
-        # Map draft-vocab ids to target ids (identity for full-vocab drafts).
-        if self.draft_id_to_target_id is None:
-            return draft_ids
-        return draft_ids + self.draft_id_to_target_id[draft_ids]
+        return self.draft_vocab.map_draft_to_target(draft_ids)
 
     def markov_embed(self, token_ids: torch.Tensor) -> torch.Tensor:
         return self.model.markov_head.embed(token_ids)

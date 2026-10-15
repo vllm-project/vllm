@@ -141,6 +141,7 @@ def test_eagle3_lm_head_receives_quant_config():
         patch("vllm.model_executor.models.llama_eagle3.LlamaModel") as MockModel,
         patch("vllm.model_executor.models.llama_eagle3.ParallelLMHead") as MockLMHead,
         patch("vllm.model_executor.models.llama_eagle3.LogitsProcessor"),
+        patch("vllm.model_executor.models.llama_eagle3.DraftVocab"),
         patch(
             "vllm.model_executor.models.llama_eagle3.get_draft_quant_config",
             return_value=mock_quant_config,
