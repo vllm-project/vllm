@@ -15,6 +15,7 @@ import pytest_asyncio
 from opentelemetry.proto.collector.trace.v1.trace_service_pb2_grpc import (
     add_TraceServiceServicer_to_server,
 )
+from opentelemetry.proto.trace.v1.trace_pb2 import Status
 from prometheus_client.parser import text_string_to_metric_families
 
 from tests.tracing.conftest import (
@@ -108,7 +109,26 @@ def _assert_span_linked_to_trace(span: dict, traceparent: str) -> None:
     assert span["parent_span_id"] == parent_span_id
 
 
+def _assert_span_status(trace_service, span_name, error):
+    spans = [
+        span
+        for request in trace_service.requests
+        for resource in request.resource_spans
+        for scope in resource.scope_spans
+        for span in scope.spans
+        if span.name == span_name
+    ]
+    assert len(spans) == 1
+    span = spans[0]
+    assert span.status.code == (
+        Status.STATUS_CODE_ERROR if error else Status.STATUS_CODE_UNSET
+    )
+    assert not span.status.message
+    assert not span.events
+
+
 @pytest.mark.asyncio
+@pytest.mark.parametrize("error", [False, True])
 @pytest.mark.parametrize(
     "route,span_name,payload",
     [
@@ -128,32 +148,43 @@ def _assert_span_linked_to_trace(span: dict, traceparent: str) -> None:
         ("/detokenize", "detokenize", {"tokens": [1]}),
     ],
 )
-async def test_render_endpoint_span(client, trace_service, route, span_name, payload):
-    """Processing endpoints export linked spans without tool-summary attributes."""
+async def test_render_endpoint_span(
+    client, trace_service, route, span_name, payload, error
+):
+    """Export linked spans with failure status but no request or error content."""
     trace_service.clear()
     response = await client.post(
         route,
         headers={"traceparent": TRACEPARENT},
-        json={"model": SERVED_MODEL_NAME, **payload},
+        json={
+            "model": "private-invalid-model" if error else SERVED_MODEL_NAME,
+            **payload,
+        },
     )
 
-    assert response.status_code == 200, response.text
+    assert response.status_code == (404 if error else 200), response.text
 
     span = _wait_for_span(trace_service, span_name)
     _assert_span_linked_to_trace(span, TRACEPARENT)
     assert not span["attributes"]
+    _assert_span_status(trace_service, span_name, error)
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("api", ["chat/completions", "completions"])
 @pytest.mark.parametrize("stream", [False, True])
-async def test_derender_endpoint_span(client, trace_service, api, stream):
+@pytest.mark.parametrize("error", [False, True])
+async def test_derender_endpoint_span(client, trace_service, api, stream, error):
     """Both derender modes retain caller trace linkage without exposing content."""
     token_ids = get_tokenizer(MODEL_NAME).encode("Hello", add_special_tokens=False)
     generated = {
         "choices": [{"index": 0, "token_ids": token_ids, "finish_reason": "stop"}]
     }
-    payload = {"model": SERVED_MODEL_NAME, "stream": stream, "prompt_token_ids": [1]}
+    payload = {
+        "model": "private-invalid-model" if error else SERVED_MODEL_NAME,
+        "stream": stream,
+        "prompt_token_ids": [1],
+    }
     if api == "chat/completions":
         payload["chat_request"] = {
             "model": SERVED_MODEL_NAME,
@@ -174,10 +205,11 @@ async def test_derender_endpoint_span(client, trace_service, api, stream):
     response = await client.post(
         f"/v1/{api}/derender", json=payload, headers={"traceparent": TRACEPARENT}
     )
-    assert response.status_code == 200, response.text
+    assert response.status_code == (404 if error else 200), response.text
     span = _wait_for_span(trace_service, span_name)
     _assert_span_linked_to_trace(span, TRACEPARENT)
     assert not span["attributes"]
+    _assert_span_status(trace_service, span_name, error)
 
 
 def _render_count(metrics: str, api_surface: str, status: str) -> float:
@@ -267,12 +299,7 @@ async def test_render_tool_intent_and_telemetry(
     ):
         assert value not in metrics
         assert value not in str(span)
-    for request in trace_service.requests:
-        for resource in request.resource_spans:
-            for scope in resource.scope_spans:
-                for exported_span in scope.spans:
-                    assert not exported_span.events
-                    assert not exported_span.status.message
+    _assert_span_status(trace_service, span_name, error=False)
 
 
 @pytest.mark.asyncio

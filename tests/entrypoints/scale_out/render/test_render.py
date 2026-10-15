@@ -15,7 +15,7 @@ from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.sdk.trace.sampling import ALWAYS_OFF
-from opentelemetry.trace import SpanKind
+from opentelemetry.trace import SpanKind, StatusCode
 from prometheus_client import REGISTRY
 
 from tests.utils import RemoteLaunchRenderServer
@@ -152,6 +152,9 @@ async def test_render_tool_outcomes(api_surface, outcome, tool_request, render_s
             else {}
         )
         assert not span.events
+        assert span.status.status_code == (
+            StatusCode.UNSET if outcome == "rendered" else StatusCode.ERROR
+        )
         assert not span.status.description
     else:
         assert not spans

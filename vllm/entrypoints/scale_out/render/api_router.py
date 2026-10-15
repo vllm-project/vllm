@@ -12,7 +12,11 @@ from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionReque
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
-from vllm.entrypoints.serve.utils.api_utils import request_span, validate_json_request
+from vllm.entrypoints.serve.utils.api_utils import (
+    request_span,
+    set_span_error,
+    validate_json_request,
+)
 from vllm.logger import init_logger
 from vllm.tracing import SpanAttributes
 
@@ -104,8 +108,12 @@ async def render_chat_completion(request: ChatCompletionRequest, raw_request: Re
             _annotate_tool_render_span(request, span, "chat_completions")
         try:
             result = await handler.render_chat_request(request, raw_request)
-            if not isinstance(result, ErrorResponse):
-                status = "rendered"
+            if isinstance(result, ErrorResponse):
+                set_span_error(span)
+                return JSONResponse(
+                    content=result.model_dump(), status_code=result.error.code
+                )
+            status = "rendered"
         finally:
             if counter is not None:
                 counter.labels(
@@ -117,9 +125,6 @@ async def render_chat_completion(request: ChatCompletionRequest, raw_request: Re
                     span.set_attribute(
                         SpanAttributes.TOOL_CALLING_RENDER_STATUS, status
                     )
-
-    if isinstance(result, ErrorResponse):
-        return JSONResponse(content=result.model_dump(), status_code=result.error.code)
 
     return JSONResponse(content=result.model_dump())
 
@@ -147,8 +152,12 @@ async def render_messages(request: AnthropicMessagesRequest, raw_request: Reques
             _annotate_tool_render_span(request, span, "messages")
         try:
             result = await handler.render_messages_request(request, raw_request)
-            if not isinstance(result, ErrorResponse):
-                status = "rendered"
+            if isinstance(result, ErrorResponse):
+                set_span_error(span)
+                return JSONResponse(
+                    content=result.model_dump(), status_code=result.error.code
+                )
+            status = "rendered"
         finally:
             if counter is not None:
                 counter.labels(
@@ -160,9 +169,6 @@ async def render_messages(request: AnthropicMessagesRequest, raw_request: Reques
                     span.set_attribute(
                         SpanAttributes.TOOL_CALLING_RENDER_STATUS, status
                     )
-
-    if isinstance(result, ErrorResponse):
-        return JSONResponse(content=result.model_dump(), status_code=result.error.code)
 
     return JSONResponse(content=result.model_dump())
 
@@ -182,11 +188,13 @@ async def render_completion(request: CompletionRequest, raw_request: Request):
     if handler is None:
         raise NotImplementedError("The model does not support Completions Render API")
 
-    async with request_span(raw_request, "render_completion"):
+    async with request_span(raw_request, "render_completion") as span:
         result = await handler.render_completion_request(request, raw_request)
-
-    if isinstance(result, ErrorResponse):
-        return JSONResponse(content=result.model_dump(), status_code=result.error.code)
+        if isinstance(result, ErrorResponse):
+            set_span_error(span)
+            return JSONResponse(
+                content=result.model_dump(), status_code=result.error.code
+            )
 
     return JSONResponse(content=[item.model_dump() for item in result])
 
@@ -207,8 +215,11 @@ async def render_responses(request: ResponsesRequest, raw_request: Request):
     if handler is None:
         raise NotImplementedError("The model does not support Responses Render API")
 
-    async with request_span(raw_request, "render_responses"):
+    async with request_span(raw_request, "render_responses") as span:
         result = await handler.render_responses_request(request)
-    if isinstance(result, ErrorResponse):
-        return JSONResponse(content=result.model_dump(), status_code=result.error.code)
+        if isinstance(result, ErrorResponse):
+            set_span_error(span)
+            return JSONResponse(
+                content=result.model_dump(), status_code=result.error.code
+            )
     return JSONResponse(content=result.model_dump())
