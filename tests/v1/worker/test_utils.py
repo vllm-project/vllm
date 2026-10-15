@@ -242,7 +242,7 @@ def test_hisparse_shared_host_pool_uses_one_replicated_mmap(
     monkeypatch, tp_rank, unlink_owner
 ):
     page = mmap.PAGESIZE
-    tp_group = MagicMock(rank_in_group=tp_rank)
+    tp_group = MagicMock(rank_in_group=tp_rank, world_size=2)
     monkeypatch.setattr(hisparse_runtime_module, "get_tp_group", lambda: tp_group)
 
     class FakeSharedOffloadRegion:
@@ -256,6 +256,7 @@ def test_hisparse_shared_host_pool_uses_one_replicated_mmap(
             self.pinned_addresses = []
             self.view_sizes = []
             self.offset = 0
+            kwargs["barrier"]()
 
         def create_next_canonical_view(self, size):
             self.view_sizes.append(size)
@@ -283,16 +284,13 @@ def test_hisparse_shared_host_pool_uses_one_replicated_mmap(
     pinned: list[torch.Tensor] = []
 
     def pin_tensor(tensor):
+        tp_group.barrier.assert_called_once_with()
         pinned.append(tensor)
 
     monkeypatch.setattr(hisparse_runtime_module, "pin_tensor", pin_tensor)
     config = SimpleNamespace(
         instance_id="instance",
-        parallel_config=_hisparse_parallel_config(
-            tensor_parallel_size=1,
-            world_size=1,
-            distributed_executor_backend="uni",
-        ),
+        parallel_config=_hisparse_parallel_config(),
     )
 
     pools, private_pools, region = hisparse_runtime_module.allocate_hisparse_host_pools(
@@ -313,7 +311,7 @@ def test_hisparse_shared_host_pool_uses_one_replicated_mmap(
         "cpu_page_size": 64,
         "barrier": tp_group.barrier,
         "creator_memory_check": hisparse_runtime_module.check_hisparse_host_memory,
-        "populate_only_on_creator": True,
+        "populate_shard": (tp_rank, 2),
         "unlink_owner": unlink_owner,
     }
     assert region.view_sizes == [24, 40]
@@ -332,7 +330,8 @@ def test_shared_host_pool_tracks_successful_registrations(
 ):
     """Only successful registrations may be unregistered on allocation failure."""
     page = mmap.PAGESIZE
-    monkeypatch.setattr(hisparse_runtime_module, "get_tp_group", MagicMock())
+    tp_group = MagicMock(rank_in_group=0, world_size=2)
+    monkeypatch.setattr(hisparse_runtime_module, "get_tp_group", lambda: tp_group)
     backing = torch.empty(3 * page, dtype=torch.uint8)
     region = MagicMock(base_tensor=backing, pinned_addresses=[], is_pinned=False)
     monkeypatch.setattr(

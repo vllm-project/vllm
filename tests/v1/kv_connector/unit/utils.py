@@ -8,6 +8,7 @@ from itertools import chain, count
 from typing import Any, Literal
 from unittest.mock import Mock
 
+import numpy as np
 import torch
 
 from vllm import SamplingParams
@@ -31,6 +32,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 from vllm.distributed.kv_transfer.kv_connector.v1.example_connector import (  # noqa
     ExampleConnector,
 )
+from vllm.platforms import current_platform
 from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
@@ -57,6 +59,10 @@ def create_mock_connector() -> Mock:
         {CacheHitSource.EXTERNAL_UNSPECIFIED: num_tokens} if num_tokens else {}
     )
     return connector
+
+
+def maybe_update_block_size(block_size: int) -> int:
+    return 64 if current_platform.is_xpu() else block_size
 
 
 def assert_scheduler_empty(scheduler: Scheduler):
@@ -177,6 +183,7 @@ def create_scheduler(
     vllm_config: VllmConfig,
     num_blocks: int = 10000,
     kv_cache_config: KVCacheConfig | None = None,
+    hash_block_size: int | None = None,
 ) -> Scheduler | AsyncScheduler:
     """Initialize Scheduler For Testing."""
     block_size = vllm_config.cache_config.block_size
@@ -207,6 +214,7 @@ def create_scheduler(
         log_stats=True,
         structured_output_manager=StructuredOutputManager(vllm_config),
         block_size=block_size,
+        hash_block_size=hash_block_size,
     )
 
 
@@ -675,3 +683,18 @@ def make_moriio_writer(fake_worker: Any) -> Any:
     writer._defer_timeout = 60.0
     writer.ensure_worker_started = lambda: None
     return writer
+
+
+def expand_strided_descs(strided_descs: np.ndarray) -> np.ndarray:
+    """Expand Nx5 (addr, len, dev, stride, count) rows to one row per block.
+
+    Mirrors how NIXL indexes a strided descriptor list, so desc ids computed
+    by the connector can be resolved to (addr, len, dev) byte ranges.
+    """
+    strided_descs = np.asarray(strided_descs, dtype=np.uint64).reshape(-1, 5)
+    counts = strided_descs[:, 4].astype(np.intp)
+    starts = np.cumsum(strided_descs[:, 4]) - strided_descs[:, 4]
+    out = np.repeat(strided_descs[:, :3], counts, axis=0)
+    offsets = np.arange(len(out), dtype=np.uint64) - np.repeat(starts, counts)
+    out[:, 0] += offsets * np.repeat(strided_descs[:, 3], counts)
+    return out

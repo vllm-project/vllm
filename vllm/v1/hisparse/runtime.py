@@ -379,7 +379,7 @@ def allocate_hisparse_host_pools(
         cpu_page_size=sum(tensor_sizes),
         barrier=tp_group.barrier,
         creator_memory_check=check_hisparse_host_memory,
-        populate_only_on_creator=True,
+        populate_shard=(tp_group.rank_in_group, tp_group.world_size),
         unlink_owner=tp_group.rank_in_group == 0,
     )
     try:
@@ -714,7 +714,7 @@ class HiSparseRuntime:
                 "HiSparse requires its compiled _C_cache_ops CUDA kernels "
                 "(host-resident decode has no Python fallback). Rebuild vLLM "
                 "from source so "
-                "csrc/libtorch_stable/hisparse_kernels.cu is included."
+                "csrc/hisparse_kernels.cu is included."
             )
         self.max_num_reqs = max_num_reqs
         self.row_width = row_width
