@@ -56,11 +56,15 @@ def test_simulated_config_rejections(kwargs, error) -> None:
         ).create_engine_config()
 
 
-def test_simulated_config_keeps_checkpoint_kv_cache_dtype(tmp_path) -> None:
-    """Simulation drops a checkpoint's weight quantization but keeps the KV
-    cache dtype it declares."""
-    from vllm.engine.arg_utils import EngineArgs
+def test_simulate_forward_quantized_checkpoint(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, vllm_runner: type[VllmRunner]
+) -> None:
+    """A quantized checkpoint is simulated as deployed: its layers take the
+    checkpoint's quantization, and its KV cache the dtype it declares."""
     from vllm.transformers_utils.repo_utils import get_hf_file_to_dict
+
+    # apply_model() ships a function to the workers.
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
     config = get_hf_file_to_dict("config.json", "Qwen/Qwen3-0.6B")
     config["quantization_config"] = {
@@ -70,14 +74,21 @@ def test_simulated_config_keeps_checkpoint_kv_cache_dtype(tmp_path) -> None:
     }
     (tmp_path / "config.json").write_text(json.dumps(config))
 
-    vllm_config = EngineArgs(
-        model=str(tmp_path),
-        max_model_len=1024,
+    with vllm_runner(
+        str(tmp_path),
+        tokenizer_name="Qwen/Qwen3-0.6B",
         simulate_forward=True,
-        skip_tokenizer_init=True,
-    ).create_engine_config()
-    assert vllm_config.model_config.quantization is None
-    assert vllm_config.cache_config.cache_dtype == "fp8_e4m3"
+        kv_cache_memory_bytes=1024**3,
+        max_model_len=1024,
+    ) as vllm_model:
+        vllm_config = vllm_model.llm.llm_engine.vllm_config
+        assert vllm_config.cache_config.cache_dtype == "fp8_e4m3"
+        weight_dtypes = vllm_model.apply_model(
+            lambda model: str(model.model.layers[0].self_attn.qkv_proj.weight.dtype)
+        )
+        outputs = vllm_model.generate_greedy([[1000, 1001, 1002]], max_tokens=4)
+    assert weight_dtypes == ["torch.float8_e4m3fn"]
+    assert len(outputs[0][0]) == 3 + 4
 
 
 def _check_model_available(model: str) -> None:

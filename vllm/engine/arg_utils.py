@@ -122,7 +122,7 @@ from vllm.logger import configure_logging_if_needed, init_logger, suppress_loggi
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.plugins import load_general_plugins
 from vllm.ray.lazy_utils import is_in_ray_actor, is_ray_initialized
-from vllm.transformers_utils.config import get_config, maybe_override_with_speculators
+from vllm.transformers_utils.config import maybe_override_with_speculators
 from vllm.transformers_utils.repo_utils import get_model_path
 from vllm.transformers_utils.utils import is_cloud_storage
 from vllm.utils.argparse_utils import (
@@ -132,10 +132,7 @@ from vllm.utils.argparse_utils import (
 )
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.network_utils import get_ip
-from vllm.utils.torch_utils import (
-    get_kv_cache_quant_algo_string,
-    resolve_kv_cache_dtype_string,
-)
+from vllm.utils.torch_utils import resolve_kv_cache_dtype_string
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.sample.logits_processor import LogitsProcessor
 from vllm.version import __version__ as VLLM_VERSION
@@ -1992,26 +1989,6 @@ class EngineArgs:
         if self.disable_cascade_attn is not None:
             warnings.warn(_DISABLE_CASCADE_ATTN_DEPRECATION_MESSAGE, stacklevel=1)
 
-        hf_overrides = self.hf_overrides
-        quantization = self.quantization
-        quantization_config = self.quantization_config
-        if self.simulate_forward:
-            # Simulated forward never loads weights: drop the checkpoint's
-            # weight quantization (its KV cache dtype is resolved from the
-            # checkpoint in create_engine_config()).
-            quantization = None
-            quantization_config = None
-            if callable(hf_overrides):
-                user_overrides = hf_overrides
-
-                def hf_overrides(config):
-                    config = user_overrides(config)
-                    config.quantization_config = None
-                    return config
-
-            else:
-                hf_overrides = {**hf_overrides, "quantization_config": None}
-
         return ModelConfig(
             model=self.model,
             model_weights=self.model_weights,
@@ -2028,12 +2005,12 @@ class EngineArgs:
             revision=self.revision,
             code_revision=self.code_revision,
             hf_token=self.hf_token,
-            hf_overrides=hf_overrides,
+            hf_overrides=self.hf_overrides,
             model_class_overrides=self.model_class_overrides,
             tokenizer_revision=self.tokenizer_revision,
             max_model_len=self.max_model_len,
-            quantization=quantization,
-            quantization_config=quantization_config,
+            quantization=self.quantization,
+            quantization_config=self.quantization_config,
             allow_deprecated_quantization=self.allow_deprecated_quantization,
             enforce_eager=self.enforce_eager,
             return_sampling_mask=self.return_sampling_mask,
@@ -2317,21 +2294,6 @@ class EngineArgs:
         resolved_cache_dtype = resolve_kv_cache_dtype_string(
             self.kv_cache_dtype, model_config
         )
-        if self.simulate_forward and resolved_cache_dtype == "auto":
-            # The checkpoint's quantization config, dropped from the model
-            # config, still sets the KV cache dtype.
-            checkpoint = get_config(
-                model_config.hf_config_path or model_config.model,
-                model_config.trust_remote_code,
-                model_config.revision,
-                model_config.code_revision,
-                model_config.config_format,
-            )
-            quant_cfg = getattr(checkpoint, "quantization_config", None)
-            if isinstance(quant_cfg, dict):
-                resolved_cache_dtype = (
-                    get_kv_cache_quant_algo_string(quant_cfg) or "auto"
-                )
 
         assert self.enable_prefix_caching is not None, (
             "enable_prefix_caching must be set by this point"
