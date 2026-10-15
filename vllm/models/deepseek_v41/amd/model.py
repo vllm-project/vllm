@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import typing
 from collections.abc import Callable, Iterable
+from functools import partial
 from itertools import islice
 
 import regex as re
@@ -64,7 +65,7 @@ from vllm.models.deepseek_v4.amd.model import (
 )
 from vllm.models.deepseek_v41.amd.mhc import (
     MHC_OVERLAP_MAX_TOKENS,
-    mhc_seam_overlap,
+    mhc_pre_delayed_overlap,
     supports_mhc_overlap,
 )
 from vllm.models.deepseek_v41.amd.mono_decode import MonoDecodeLayer
@@ -320,6 +321,11 @@ class DeepseekV4DecoderLayer(nn.Module):
             # Fork only inside FULL graph capture, where the joins become graph
             # edges; HIP event waits at runtime are unreliable here.
             mhc_stream = None
+        mhc_pre = (
+            partial(mhc_pre_delayed_overlap, self.mhc_pre_delayed, stream=mhc_stream)
+            if mhc_stream is not None
+            else self.mhc_pre_delayed
+        )
         # The reference collapses each sublayer's input with the *previous*
         # sublayer's pre-mix: attention uses the pre-mix carried in (identity
         # for the first layer), the FFN uses this layer's attention pre-mix.
@@ -329,7 +335,7 @@ class DeepseekV4DecoderLayer(nn.Module):
                 # copies and the identity pre-mix selects copy 0.
                 assert self.hc_attn_fn_broadcast is not None
                 residual = x.unsqueeze(1).expand(-1, self.hc_mult, -1).contiguous()
-                residual, post_mix, res_mix, x, attn_pre = self.mhc_pre_delayed(
+                residual, post_mix, res_mix, x, attn_pre = mhc_pre(
                     residual,
                     self.hc_attn_fn_broadcast,
                     self.hc_attn_scale,
@@ -343,7 +349,7 @@ class DeepseekV4DecoderLayer(nn.Module):
                 )
             else:
                 residual = x
-                residual, post_mix, res_mix, x, attn_pre = self.mhc_pre_delayed(
+                residual, post_mix, res_mix, x, attn_pre = mhc_pre(
                     residual,
                     self.hc_attn_fn,
                     self.hc_attn_scale,
@@ -380,24 +386,12 @@ class DeepseekV4DecoderLayer(nn.Module):
                     engram_hashes[:, self.engram.layer_hash_index],
                     engram_mask,
                 )
-                residual, post_mix, res_mix, x, attn_pre = self.mhc_pre_delayed(
+                residual, post_mix, res_mix, x, attn_pre = mhc_pre(
                     residual,
                     *pre_args,
                     pre_mix=pre_mix,
                     norm_weight=self.attn_norm.weight if self.fuse_seam_norm else None,
                     norm_eps=self.attn_norm.variance_epsilon,
-                )
-            elif mhc_stream is not None and pre_mix is not None:
-                residual, post_mix, res_mix, x, attn_pre = mhc_seam_overlap(
-                    residual,
-                    *pre_args,
-                    pre_mix=pre_mix,
-                    sublayer_out=x,
-                    post_layer_mix=post_mix,
-                    comb_res_mix=res_mix,
-                    norm_weight=self.attn_norm.weight,
-                    norm_eps=self.attn_norm.variance_epsilon,
-                    stream=mhc_stream,
                 )
             else:
                 (
@@ -406,7 +400,7 @@ class DeepseekV4DecoderLayer(nn.Module):
                     res_mix,
                     x,
                     attn_pre,
-                ) = self.mhc_pre_delayed(
+                ) = mhc_pre(
                     residual,
                     *pre_args,
                     pre_mix=pre_mix,
@@ -423,6 +417,8 @@ class DeepseekV4DecoderLayer(nn.Module):
             x = sp_all_gather(x)[: positions.shape[0]]
 
         x = self.attn(positions, x, None)
+        if mhc_stream is not None:
+            torch.cuda.current_stream().wait_stream(mhc_stream)
         if self.use_sequence_parallel:
             x = sp_reduce_scatter(x)
         elif self.mono is not None and self.mono.ffn_only:
@@ -431,7 +427,7 @@ class DeepseekV4DecoderLayer(nn.Module):
                 return out
             x = tensor_model_parallel_all_reduce(x)
 
-        ffn_args = (
+        residual, post_mix, res_mix, x, ffn_pre = mhc_pre(
             residual,
             self.hc_ffn_fn,
             self.hc_ffn_scale,
@@ -441,31 +437,15 @@ class DeepseekV4DecoderLayer(nn.Module):
             self.hc_eps,
             self.hc_post_alpha,
             self.hc_sinkhorn_iters,
+            pre_mix=attn_pre,
+            sublayer_out=x,
+            post_layer_mix=post_mix,
+            comb_res_mix=res_mix,
+            norm_weight=self.ffn_norm.weight if self.fuse_seam_norm else None,
+            norm_eps=self.ffn_norm.variance_epsilon,
         )
-        if mhc_stream is not None:
-            torch.cuda.current_stream().wait_stream(mhc_stream)
-            residual, post_mix, res_mix, x, ffn_pre = mhc_seam_overlap(
-                *ffn_args,
-                pre_mix=attn_pre,
-                sublayer_out=x,
-                post_layer_mix=post_mix,
-                comb_res_mix=res_mix,
-                norm_weight=self.ffn_norm.weight,
-                norm_eps=self.ffn_norm.variance_epsilon,
-                stream=mhc_stream,
-            )
-        else:
-            residual, post_mix, res_mix, x, ffn_pre = self.mhc_pre_delayed(
-                *ffn_args,
-                pre_mix=attn_pre,
-                sublayer_out=x,
-                post_layer_mix=post_mix,
-                comb_res_mix=res_mix,
-                norm_weight=self.ffn_norm.weight if self.fuse_seam_norm else None,
-                norm_eps=self.ffn_norm.variance_epsilon,
-            )
-            if not self.fuse_seam_norm:
-                x = self.ffn_norm(x)
+        if not self.fuse_seam_norm:
+            x = self.ffn_norm(x)
         x = self.ffn(x, input_ids)
         if mhc_stream is not None:
             torch.cuda.current_stream().wait_stream(mhc_stream)

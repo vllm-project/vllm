@@ -1397,11 +1397,15 @@ def test_mhc_pre_delayed_rocm_aiter_fused_rms_norm(num_tokens, seam):
     reason="AITER fused delayed-seam kernel required (gfx950)",
 )
 @pytest.mark.parametrize("num_tokens", [1, 2, 7, 16, 64, 128])
-def test_deepseek_v41_rocm_mhc_overlap_matches_fused_seam(num_tokens):
+@pytest.mark.parametrize("seam", ["post", "no_post"])
+def test_deepseek_v41_rocm_mhc_overlap_matches_fused_seam(
+    num_tokens, seam, default_vllm_config
+):
     """Moving the gate projection to a side stream keeps the residual and gates
     bit-exact and the layer input within one bf16 ulp, and the layer input is
-    usable before the join; also across graph replays."""
-    from vllm.models.deepseek_v41.amd.mhc import mhc_seam_overlap
+    usable before the join; also across graph replays. A seam without a post
+    block stays serial and still pairs with the caller's join."""
+    from vllm.models.deepseek_v41.amd.mhc import mhc_pre_delayed_overlap
 
     set_random_seed(0)
     hc_mult, hidden_size = 4, 5120
@@ -1417,27 +1421,28 @@ def test_deepseek_v41_rocm_mhc_overlap_matches_fused_seam(num_tokens):
     )
     pre_mix = torch.rand(num_tokens, hc_mult, device=DEVICE) + 0.5
     args = (residual, fn, hc_scale, hc_base, 1e-6, 1e-6, 1e-6, 2.0, 20)
-    kwargs = dict(
-        pre_mix=pre_mix,
-        sublayer_out=sublayer_out,
-        post_layer_mix=post_layer_mix,
-        comb_res_mix=comb_res_mix,
-        norm_weight=norm_weight,
-        norm_eps=1e-6,
-    )
+    kwargs = dict(pre_mix=pre_mix, norm_weight=norm_weight, norm_eps=1e-6)
+    if seam == "post":
+        kwargs.update(
+            sublayer_out=sublayer_out,
+            post_layer_mix=post_layer_mix,
+            comb_res_mix=comb_res_mix,
+        )
+    pre_delayed = MHCPreDelayedOp()
     side = torch.cuda.Stream()
 
     def run():
-        outputs = mhc_seam_overlap(*args, **kwargs, stream=side)
+        outputs = mhc_pre_delayed_overlap(pre_delayed, *args, **kwargs, stream=side)
         consumed_input = outputs[3].clone()
         torch.cuda.current_stream().wait_stream(side)
         return (*outputs, consumed_input)
 
     def check(actual):
-        expected = object.__new__(MHCPreDelayedOp).forward_hip(*args, **kwargs)
+        expected = pre_delayed(*args, **kwargs)
         for i in (0, 1, 2, 4):
             torch.testing.assert_close(actual[i], expected[i], atol=0, rtol=0)
         # The RMSNorm row sum is reduced in another order than AITER's split-K.
+        # Zeros come out of the bit-exact collapse, so no absolute slack.
         for layer_input in (actual[3], actual[5]):
             torch.testing.assert_close(layer_input, expected[3], atol=0, rtol=2**-7)
 
