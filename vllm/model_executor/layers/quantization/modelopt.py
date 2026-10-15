@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
@@ -232,6 +233,24 @@ class ModelOptQuantConfigBase(QuantizationConfig):
 
         # handle exclusion
         if self.is_layer_excluded(prefix):
+            if (
+                os.getenv("STEP5_FP8_TAIL") == "trtllm"
+                and isinstance(layer, RoutedExperts)
+                and any(
+                    fnmatch(prefix, f"*layers.{idx}.moe.experts*")
+                    for idx in (88, 89, 90)
+                )
+            ):
+                from vllm.model_executor.layers.quantization.online.fp8 import (
+                    Fp8PerBlockOnlineMoEMethod,
+                )
+
+                logger.warning(
+                    "EXPERIMENTAL Step5 online block-FP8 tail: %s, activation=%s",
+                    prefix,
+                    layer.moe_config.activation,
+                )
+                return Fp8PerBlockOnlineMoEMethod(moe=layer.moe_config)
             if isinstance(layer, (LinearBase, ParallelLMHead)):
                 return UnquantizedLinearMethod()
             return None

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
 from enum import Enum
 
 import torch
@@ -211,6 +212,8 @@ def select_nvfp4_moe_backend(
         NvFp4MoeBackend.EMULATION,
     ]
     AVAILABLE_BACKENDS = prioritize_humming(AVAILABLE_BACKENDS)
+    if os.getenv("STEP5_TRTLLM_APPROXIMATE_SWIGLU") == "1":
+        AVAILABLE_BACKENDS = [NvFp4MoeBackend.FLASHINFER_TRTLLM]
 
     NVFP4_BACKENDS_WITH_CLAMP = {
         NvFp4MoeBackend.B12X,

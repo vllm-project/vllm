@@ -3,6 +3,7 @@
 """Hopper and B300 sparse attention using FlashInfer and Triton."""
 
 import functools
+import os
 from dataclasses import replace
 from typing import Any, ClassVar, NamedTuple, cast
 
@@ -11,6 +12,7 @@ import torch
 
 from vllm.config import get_current_vllm_config_or_none
 from vllm.config.cache import CacheDType
+from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.v1.attention.backend import AttentionCGSupport, AttentionType, MultipleOf
@@ -30,6 +32,8 @@ from .ops.sparse_prefill_pages import (
     stage_prefill_pages,
 )
 from .ops.summary_update import build_prefill_groups
+
+logger = init_logger(__name__)
 
 # Transient dense BF16 copy of a prefill batch's live pages for one KV group.
 _PREFILL_STAGING_BYTES = 512 << 20
@@ -95,12 +99,6 @@ class Step5SplitKVFlashAttentionImpl(FlashAttentionImpl):
             or self.logits_soft_cap != 0
             or self.sliding_window is None
             or self.sliding_window[0] < 0
-            or self.sliding_window[1] != 0
-            or self.head_size != 192
-            or self.num_heads // self.num_kv_heads > 16
-            or attn_metadata.max_query_len > 4
-            or attn_metadata.num_actual_tokens
-            != attn_metadata.seq_lens.shape[0] * attn_metadata.max_query_len
         ):
             self.forward(layer, query, key, value, kv_cache, attn_metadata, output)
             gated = headwise_sigmoid_gate(output.flatten(1), gate)
@@ -110,6 +108,43 @@ class Step5SplitKVFlashAttentionImpl(FlashAttentionImpl):
         key_cache, value_cache = self._split_kv_cache(kv_cache)
         requests = attn_metadata.seq_lens.shape[0]
         query_len = attn_metadata.max_query_len
+        if (
+            os.getenv("STEP5_FA4_HD192") == "1"
+            and current_platform.is_device_capability_family(100)
+            and self.head_size == 192
+            and query_len > 4
+        ):
+            from .ops.swa_prefill import swa_prefill_fa4
+
+            logger.info_once(
+                "EXPERIMENTAL Step5 SWA prefill: FA4 HD192, KV tile 64, "
+                "separate headwise gate; DSA and uniform decode unchanged."
+            )
+            swa_prefill_fa4(
+                query[:n],
+                key_cache,
+                value_cache,
+                output[:n],
+                attn_metadata.query_start_loc,
+                attn_metadata.seq_lens,
+                attn_metadata.block_table,
+                max_query_len=query_len,
+                scale=self.scale,
+                window_left=self.sliding_window[0],
+            )
+            gated = headwise_sigmoid_gate(output[:n].flatten(1), gate[:n])
+            output[:n].copy_(gated.view_as(output[:n]))
+            return output
+        if (
+            self.sliding_window[1] != 0
+            or self.head_size != 192
+            or self.num_heads // self.num_kv_heads > 16
+            or query_len > 4
+            or n != requests * query_len
+        ):
+            self.forward(layer, query, key, value, kv_cache, attn_metadata, output)
+            gated = headwise_sigmoid_gate(output.flatten(1), gate)
+            return output.copy_(gated.view_as(output))
         # Uniform decode and MTP verify: GQA-packed split-window kernel.
         from .ops.swa_decode import swa_decode_gated, swa_decode_plan
 

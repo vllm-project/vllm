@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+import os
+
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -37,6 +39,14 @@ from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
 
 logger = init_logger(__name__)
+
+
+def _trtllm_activation_to_int(activation: MoEActivation) -> int:
+    if activation == MoEActivation.SWIGLUSTEP:
+        if os.getenv("STEP5_TRTLLM_APPROXIMATE_SWIGLU") != "1":
+            raise ValueError("Step5 TRT-LLM activation approximation requires opt-in")
+        activation = MoEActivation.SILU
+    return activation_to_flashinfer_int(activation)
 
 
 class TrtLlmNvFp4ExpertsBase:
@@ -86,6 +96,18 @@ class TrtLlmNvFp4ExpertsBase:
         clamp = quant_config.gemm1_clamp_limit
         if clamp is None:
             clamp = getattr(moe_config, "swiglu_limit", None)
+        if moe_config.activation == MoEActivation.SWIGLUSTEP:
+            if os.getenv("STEP5_TRTLLM_APPROXIMATE_SWIGLU") != "1":
+                raise ValueError(
+                    "Step5 TRT-LLM activation approximation requires opt-in"
+                )
+            if clamp not in (None, 7.0):
+                raise ValueError("Step5 TRT-LLM approximation requires clamp=7")
+            clamp = 7.0
+            logger.warning_once(
+                "EXPERIMENTAL Step5 TRTLLM approximation enabled: "
+                "clamp gate before SiLU, limit=7; model semantics differ."
+            )
         alpha = quant_config.gemm1_alpha
         if alpha is None:
             alpha = getattr(moe_config, "swiglu_alpha", None)
@@ -229,6 +251,8 @@ class TrtLlmNvFp4ExpertsBase:
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
         """Supports SITU only when the installed FlashInfer exposes it."""
+        if activation == MoEActivation.SWIGLUSTEP:
+            return os.getenv("STEP5_TRTLLM_APPROXIMATE_SWIGLU") == "1"
         if activation == MoEActivation.SITU:
             return has_flashinfer_situ_activation()
         return activation in [
@@ -379,7 +403,7 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
             routed_scaling_factor=None,
             routing_method_type=1,  # not used
             do_finalize=output is not None,
-            activation_type=activation_to_flashinfer_int(activation),
+            activation_type=_trtllm_activation_to_int(activation),
             per_token_scale=per_token_scale,
             output=output,
             tune_max_num_tokens=min(
@@ -577,7 +601,7 @@ class TrtLlmNvFp4ExpertsMonolithic(
             routed_scaling_factor=routed_scaling_factor,
             routing_method_type=self.routing_method_type,
             do_finalize=not defer,
-            activation_type=activation_to_flashinfer_int(activation),
+            activation_type=_trtllm_activation_to_int(activation),
             per_token_scale=per_token_scale,
             tune_max_num_tokens=fi_moe_largest_bucket(self.moe_config),
             routing_replay_out=routing_replay_out,
