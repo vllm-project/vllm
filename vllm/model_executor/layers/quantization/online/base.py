@@ -36,6 +36,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
 from vllm.model_executor.layers.quantization.online.fp8 import (
     Fp8PerBlockOnlineLinearMethod,
     Fp8PerBlockOnlineMoEMethod,
+    Fp8PerChannelWeightOnlyOnlineLinearMethod,
     Fp8PerTensorOnlineLinearMethod,
     Fp8PerTensorOnlineMoEMethod,
     Fp8PtpcOnlineLinearMethod,
@@ -72,6 +73,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp8Dynamic,
     kNvfp4Static,
 )
+from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 
 logger = init_logger(__name__)
 
@@ -93,6 +95,12 @@ _ONLINE_LINEAR_METHODS: dict[QuantKey, type] = {
     kFp8StaticChannelSym: Fp8PtpcOnlineLinearMethod,
     kMxfp8Dynamic: Mxfp8OnlineLinearMethod,
     kMxfp4Static: Mxfp4OnlineLinearMethod,
+}
+
+# The lm_head is quantized weight-only: the logits GEMM keeps full-precision
+# activations.
+_ONLINE_LM_HEAD_METHODS: dict[QuantKey, type] = {
+    kFp8StaticChannelSym: Fp8PerChannelWeightOnlyOnlineLinearMethod,
 }
 
 _ONLINE_MOE_METHODS: dict[QuantKey, type] = {
@@ -359,7 +367,12 @@ class OnlineQuantizationConfig(QuantizationConfig):
         target_pattern = matches[0]
         quant_key_str = self.args.targets[target_pattern]
         shorthand = _ONLINE_SHORTHANDS[quant_key_str]
-        if issubclass(layer_cls, LinearBase):
+        if issubclass(layer_cls, ParallelLMHead):
+            # Only per-output-channel scales: vocab padding rows are never
+            # loaded and must not affect the scale of real rows.
+            quant_spec = shorthand.linear
+            table = _ONLINE_LM_HEAD_METHODS
+        elif issubclass(layer_cls, LinearBase):
             quant_spec = shorthand.linear
             table = _ONLINE_LINEAR_METHODS
         elif issubclass(layer_cls, RoutedExperts):
