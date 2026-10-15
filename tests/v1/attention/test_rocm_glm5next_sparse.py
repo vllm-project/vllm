@@ -455,7 +455,7 @@ def test_sparse_fp8_nope_matches_fp32_reference(num_splits, with_sink, kv_scale)
         _rocm_sparse_attn_prefill_ragged_triton,
     )
 
-    torch.manual_seed(0)
+    set_random_seed(0)
     device = "cuda"
     num_heads, head_dim, num_kv = 16, 512, 1024
     kv_lens = [64, 0, 2, 37, 300]
