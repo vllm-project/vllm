@@ -44,7 +44,9 @@ def _make_connector(
         kv_role="kv_consumer",
         kv_buffer_device="cpu",
     )
-    connector = ActiveKVConnector(SimpleNamespace(kv_transfer_config=kv_config), {})
+    connector = ActiveKVConnector(
+        SimpleNamespace(kv_transfer_config=kv_config), Mock(), {}
+    )
     events.clear()
     return connector
 

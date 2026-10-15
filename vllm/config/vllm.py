@@ -3090,6 +3090,12 @@ class VllmConfig:
         if self.parallel_config.enable_batch_sharded_sampling:
             unsupported.append("batch-sharded sampling")
 
+        if (
+            self.kv_transfer_config is not None
+            and self.kv_transfer_config.enable_kv_checksum
+        ):
+            unsupported.append("KV checksums")
+
         return unsupported
 
     def _validate_adaptive_verification(self) -> None:

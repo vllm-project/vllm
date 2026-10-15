@@ -39,7 +39,7 @@ from vllm.v1.kv_cache_layout import KVCacheLayout
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.worker.utils import allocate_kv_cache
 
-pytestmark = pytest.mark.cpu_test
+pytestmark = [pytest.mark.cpu_test, pytest.mark.usefixtures("cuda_stream_stubs")]
 
 BLOCK_SIZE = 16
 HEAD_SIZE = 8  # (K + V) * bf16 = 32 bytes = 4 pieces per cell
@@ -935,25 +935,6 @@ def test_recv_checksummed_only_when_its_load_finishes():
 
     worker.bind(None)
     assert worker.post_forward({"b", "c"}, set(), set()) is None
-
-
-def test_deferred_sends_include_kv_written_before_finalize():
-    """With a drafter writing KV after the connector step, the sends are
-    checksummed by finalize_sends, so they cover the drafter's writes."""
-    logical = _logical_kv(heads=2)
-    cache = _cache(logical)
-    worker = _worker(_config(_group(_spec(2))), {_name(0): cache})
-    worker.bind(KVChecksumScheduled(reqs_to_send={"req": BLOCKS}))
-    output = worker.post_forward(None, set(), set(), defer_sends=True)
-    assert output is not None
-
-    drafted = _logical_kv(heads=2, seed=7)
-    cache.copy_(_cache(drafted))
-    worker.finalize_sends()
-    [record] = output.finalize()
-    np.testing.assert_array_equal(
-        record.checksums["req"][0].values[:, 0], _reference({0: drafted})
-    )
 
 
 def test_outputs_serialize_and_aggregate_across_workers():

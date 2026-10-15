@@ -39,7 +39,6 @@ from vllm.distributed.aux_output_connector.worker import (
     AuxOutputWorkerConnector,
     get_aux_output_connector,
 )
-from vllm.distributed.kv_transfer.kv_checksum.worker import init_kv_checksum_worker
 from vllm.distributed.parallel_state import get_dcp_group, get_pp_group
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
@@ -807,8 +806,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if is_profiling:
             self.kv_connector = NO_OP_KV_CONNECTOR
         else:
-            self.kv_connector = get_kv_connector(self.vllm_config, kv_caches_dict)
-            init_kv_checksum_worker(
+            self.kv_connector = get_kv_connector(
                 self.vllm_config, self.kv_cache_config, kv_caches_dict
             )
 

@@ -543,18 +543,10 @@ class KVChecksumOutput:
     ) -> None:
         self._groups[group_id] = (segments, replica_keys, values)
 
-    def start_cpu_copy(self, copy_stream: torch.cuda.Stream | None) -> None:
-        """Queue the copy to host memory after the work queued so far.
-
-        Args:
-            copy_stream: Side stream for the copy. None (devices without CUDA
-                streams) copies synchronously, which blocks the host.
-
-        """
+    def start_cpu_copy(self, copy_stream: torch.cuda.Stream) -> None:
+        """Queue the copy to host memory on ``copy_stream``, after the work
+        queued so far."""
         if not self._groups:
-            return
-        if copy_stream is None:
-            self._host = {g: v.cpu() for g, (_, _, v) in self._groups.items()}
             return
         main_stream = current_stream()
         copy_stream.wait_stream(main_stream)
@@ -574,8 +566,6 @@ class KVChecksumOutput:
         """Wait for the copy, if any, and return the records."""
         if not self._req_ids and not self._received:
             return self._records
-        if self._groups and not self._host:
-            self.start_cpu_copy(None)
         if self._copy_event is not None:
             self._copy_event.synchronize()
         checksums: dict[str, dict[int, KVChecksumGroup]] = {
@@ -662,21 +652,13 @@ class KVChecksumWorker:
                 self._layer_views[group_id] = views
                 self._block_sizes[group_id] = group.kv_cache_spec.block_size
 
-        device = next(
-            (views[0].pieces.device for views in self._layer_views.values()), None
-        )
-        self._copy_stream = (
-            torch.cuda.Stream(device)
-            if device is not None and device.type == "cuda"
-            else None
-        )
+        self._copy_stream = torch.cuda.Stream()
         for views in self._layer_views.values():
             for view in views:
                 view.warm_up()
         self._skipped_groups = frozenset(skipped_groups)
         self._reqs_to_send: dict[str, KVChecksumBlocks] = {}
         self._reqs_to_recv: dict[str, KVChecksumBlocks] = {}
-        self._deferred_output: KVChecksumOutput | None = None
 
     def bind(self, scheduled: KVChecksumScheduled | None) -> None:
         """Take the requests the scheduler set for checksumming this step."""
@@ -690,7 +672,6 @@ class KVChecksumWorker:
         failed_recving: set[str],
         finished_req_ids: set[str],
         received: dict[str, bytes] | None = None,
-        defer_sends: bool = False,
     ) -> KVChecksumOutput | None:
         """Checksum this step's sends and finished loads, and start copying the
         results to host.
@@ -701,9 +682,6 @@ class KVChecksumWorker:
             finished_req_ids: Requests that ended, e.g. aborted while loading.
             received: Producer checksums the connector received with finished
                 loads, passed on to the scheduler.
-            defer_sends: Leave the requests to send, and the copy, to
-                ``finalize_sends``, for a drafter that writes this step's KV
-                after this call.
 
         Returns:
             The step's checksums, or None if there is nothing to report.
@@ -723,22 +701,10 @@ class KVChecksumWorker:
         )
         output.add_received(received or {})
         self._compute(loaded, output, replica_zero_only=False)
-        if defer_sends and self._reqs_to_send:
-            self._deferred_output = output
-            return output
-        self._compute_sends(output)
-        return output or None
-
-    def finalize_sends(self) -> None:
-        """Checksum the requests to send that ``post_forward`` deferred."""
-        if (output := self._deferred_output) is not None:
-            self._deferred_output = None
-            self._compute_sends(output)
-
-    def _compute_sends(self, output: KVChecksumOutput) -> None:
         self._compute(self._reqs_to_send, output, replica_zero_only=True)
         self._reqs_to_send = {}
         output.start_cpu_copy(self._copy_stream)
+        return output or None
 
     def _compute(
         self,
@@ -820,20 +786,15 @@ def _to_device(values: np.ndarray, device: torch.device) -> torch.Tensor:
     return host.to(device, non_blocking=True)
 
 
-_KV_CHECKSUM_WORKER: KVChecksumWorker | None = None
-
-
-def init_kv_checksum_worker(
+def create_kv_checksum_worker(
     vllm_config: VllmConfig,
     kv_cache_config: KVCacheConfig,
     kv_caches: dict[str, torch.Tensor],
-) -> None:
-    """Create this worker's KV checksum worker if KV checksums are enabled."""
-    global _KV_CHECKSUM_WORKER
-    _KV_CHECKSUM_WORKER = None
+) -> KVChecksumWorker | None:
+    """This worker's KV checksum worker, or None if KV checksums are off."""
     if not kv_checksum_enabled(vllm_config):
-        return
-    _KV_CHECKSUM_WORKER = KVChecksumWorker(
+        return None
+    return KVChecksumWorker(
         kv_cache_config,
         kv_caches,
         tp_rank=get_tensor_model_parallel_rank(),
@@ -863,7 +824,3 @@ def _uniform_kv_heads(vllm_config: VllmConfig) -> int | None:
     if draft is not None and draft.get_total_num_kv_heads() != total:
         return None
     return total
-
-
-def get_kv_checksum_worker() -> KVChecksumWorker | None:
-    return _KV_CHECKSUM_WORKER
