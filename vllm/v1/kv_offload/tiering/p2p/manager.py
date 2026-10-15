@@ -828,7 +828,9 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             # dead session's synthetic lookups on the next serve_external_requests.
             self._failed_serve_ctxs.extend(close_result.failed_serves)
             self._data.remove_remote_peer(pid)
-            logger.warning("P2P %s: peer %s down", self._local_id, pid)
+            logger.warning(
+                "P2P %s: peer %s down (%s)", self._local_id, pid, session.death_reason
+            )
 
     def _reap_unbound_stores(self) -> None:
         """Time out submit_store batches that no peer has ever fetched.

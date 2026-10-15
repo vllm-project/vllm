@@ -480,6 +480,131 @@ class TestNixlTransportWithMockedAgent:
 
 
 # ---------------------------------------------------------------------------
+# Failure escalation: transfer scope vs peer scope
+# ---------------------------------------------------------------------------
+
+
+class nixlNotFoundError(Exception):  # noqa: N801
+    """Stand-in for NIXL's binding exception of the same name."""
+
+
+class TestNixlPeerFaults:
+    """The transport classifies each failure and reports a peer fault.
+
+    See "Failure model" in data/base.py: a peer-scope NIXL error faults the
+    peer at once; transfer-scope failures fault it only after
+    _MAX_CONSECUTIVE_TRANSFER_FAILURES of them with no success between.
+    """
+
+    def _make_transport(self) -> NixlTransport:
+        transport = TestNixlTransportWithMockedAgent()._make_transport()
+        transport.add_remote_peer("peer:1", b"meta", 0x1000, 8, 1024)
+        transport.add_remote_peer("peer:2", b"meta", 0x2000, 8, 1024)
+        return transport
+
+    def _fail_one(self, transport: NixlTransport, peer_id: str = "peer:1"):
+        tid = transport.write_blocks(peer_id, [0], [1])
+        transport._agent.check_xfer_state.return_value = "ERR"
+        result = transport.poll(peer_id=peer_id)
+        assert tid in result.failed
+        return result
+
+    def test_consecutive_transfer_failures_fault_the_peer(self):
+        transport = self._make_transport()
+        assert self._fail_one(transport).peer_fault is None
+        assert self._fail_one(transport).peer_fault is None
+        fault = self._fail_one(transport).peer_fault
+        assert fault is not None and "3 consecutive" in fault
+        # Reported on every scoped poll, even with nothing inflight, and
+        # never on a sibling's or the unscoped poll.
+        assert transport.poll(peer_id="peer:1").peer_fault == fault
+        assert transport.poll(peer_id="peer:2").peer_fault is None
+        assert transport.poll().peer_fault is None
+
+    def test_success_resets_the_strike_count(self):
+        transport = self._make_transport()
+        self._fail_one(transport)
+        self._fail_one(transport)
+        transport.write_blocks("peer:1", [0], [1])
+        transport._agent.check_xfer_state.return_value = "DONE"
+        transport.poll(peer_id="peer:1")
+        self._fail_one(transport)
+        assert self._fail_one(transport).peer_fault is None
+
+    def test_strikes_are_per_peer(self):
+        transport = self._make_transport()
+        self._fail_one(transport, "peer:1")
+        self._fail_one(transport, "peer:2")
+        self._fail_one(transport, "peer:1")
+        assert self._fail_one(transport, "peer:2").peer_fault is None
+
+    def test_remote_disconnect_faults_at_once(self):
+        transport = self._make_transport()
+        tid = transport.write_blocks("peer:1", [0], [1])
+        transport._agent.check_xfer_state.side_effect = _remote_disconnect()
+        result = transport.poll(peer_id="peer:1")
+        assert tid in result.failed
+        assert result.peer_fault == "NIXL_ERR_REMOTE_DISCONNECT"
+
+    def test_remote_disconnect_in_cancel_faults_the_peer(self):
+        transport = self._make_transport()
+        tid = transport.write_blocks("peer:1", [0], [1])
+        transport._agent.check_xfer_state.side_effect = _remote_disconnect()
+        assert transport.cancel([tid], mode="wait") == []
+        transport._agent.check_xfer_state.side_effect = None
+        fault = transport.poll(peer_id="peer:1").peer_fault
+        assert fault == "NIXL_ERR_REMOTE_DISCONNECT"
+
+    def test_submit_not_found_faults_at_once(self):
+        transport = self._make_transport()
+        transport._agent.make_prepped_xfer.side_effect = nixlNotFoundError(
+            "NIXL_ERR_NOT_FOUND"
+        )
+        assert transport.write_blocks("peer:1", [0], [1]) is None
+        assert transport._inflight == {}
+        fault = transport.poll(peer_id="peer:1").peer_fault
+        assert fault == "NIXL_ERR_NOT_FOUND"
+
+    def test_failed_submissions_fault_the_peer(self):
+        transport = self._make_transport()
+        transport._agent.transfer.side_effect = RuntimeError("post failed")
+        for _ in range(2):
+            assert transport.write_blocks("peer:1", [0], [1]) is None
+            assert transport.poll(peer_id="peer:1").peer_fault is None
+        assert transport.write_blocks("peer:1", [0], [1]) is None
+        assert transport.poll(peer_id="peer:1").peer_fault is not None
+
+    def test_raising_state_check_counts_once_per_transfer(self):
+        """A transfer whose state check keeps raising stays inflight (not
+        provably terminal) and is charged to its peer once, not per poll."""
+        transport = self._make_transport()
+        tid = transport.write_blocks("peer:1", [0], [1])
+        transport._agent.check_xfer_state.side_effect = RuntimeError("flaky")
+        for _ in range(5):
+            result = transport.poll(peer_id="peer:1")
+            assert result.peer_fault is None
+            assert result.failed == ()
+        assert tid in transport._inflight
+        assert transport._peer_strikes == {"peer:1": 1}
+
+    def test_raising_state_checks_on_distinct_transfers_fault(self):
+        transport = self._make_transport()
+        for _ in range(3):
+            transport.write_blocks("peer:1", [0], [1])
+        transport._agent.check_xfer_state.side_effect = RuntimeError("flaky")
+        assert transport.poll(peer_id="peer:1").peer_fault is not None
+
+    def test_remove_remote_peer_clears_the_fault(self):
+        transport = self._make_transport()
+        for _ in range(3):
+            self._fail_one(transport)
+        transport.remove_remote_peer("peer:1")
+        transport.add_remote_peer("peer:1", b"meta", 0x1000, 8, 1024)
+        assert transport.poll(peer_id="peer:1").peer_fault is None
+        assert self._fail_one(transport).peer_fault is None
+
+
+# ---------------------------------------------------------------------------
 # NIXL agent-config selection
 # ---------------------------------------------------------------------------
 

@@ -655,6 +655,7 @@ class _FakeSession:
         self.alive = alive
         self.connected = connected
         self.ready = True
+        self.death_reason = "control connection lost"
         self._loads = loads or []
         self._stores = stores or []
         self._new_fetch_ids = new_fetch_ids or []

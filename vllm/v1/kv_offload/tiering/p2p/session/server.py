@@ -286,6 +286,8 @@ class ServerRole:
         # Parked aborts already warned about for exceeding
         # _CANCEL_DRAIN_TIMEOUT_S.
         self._slow_aborts: set[tuple[str, int]] = set()
+        # PollResult.peer_fault, once reported; no new WRITE after that.
+        self.peer_fault: str | None = None
 
     # ------------------------------------------------------------------
     # State helpers
@@ -766,6 +768,8 @@ class ServerRole:
         # unscoped poll here would consume sibling sessions' completions and
         # report them as "unknown transfer_id", starving those sessions.
         poll_result = self._transport.poll(self._peer_id)
+        if poll_result.peer_fault is not None:
+            self.peer_fault = poll_result.peer_fault
 
         for tid in poll_result.done:
             xfer = self._inflight_pop(tid)
@@ -1167,8 +1171,12 @@ class ServerRole:
             len(result.local_idxs),
             len(result.remote_idxs),
         )
-        transfer_id = self._transport.write_blocks(
-            self._peer_id, result.local_idxs, result.remote_idxs
+        transfer_id = (
+            self._transport.write_blocks(
+                self._peer_id, result.local_idxs, result.remote_idxs
+            )
+            if self.peer_fault is None
+            else None
         )
         if transfer_id is not None:
             logger.debug(
