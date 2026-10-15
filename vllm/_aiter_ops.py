@@ -2903,6 +2903,27 @@ class rocm_aiter_ops:
             and "work_plan" in inspect.signature(pa_decode).parameters
         )
 
+    @staticmethod
+    @functools.cache
+    def _flydsl_pa_decode_max_query_rows() -> int:
+        """Query rows (query tokens x GQA group) one NHD decode call can take.
+
+        ROCm/aiter#5949 first took one query token in one 16-row M-tile; it now
+        takes uniform query lengths whose rows fit two M-tiles (32 rows).
+        """
+        try:
+            from aiter.ops.flydsl.kernels.pa_decode.traits import (  # noqa: F401
+                d256_pipe,
+            )
+        except ImportError:
+            return 0
+        return 32
+
+    @classmethod
+    def flydsl_pa_decode_max_query_len(cls, num_queries_per_kv: int) -> int:
+        """Longest uniform query (1 + speculative tokens) for flydsl_pa_decode."""
+        return max(1, cls._flydsl_pa_decode_max_query_rows() // num_queries_per_kv)
+
     @classmethod
     @if_aiter_supported
     def is_flydsl_pa_decode_enabled(cls) -> bool:
@@ -4724,6 +4745,7 @@ class rocm_aiter_ops:
     def flydsl_pa_decode_plan(
         seq_lens: torch.Tensor,
         num_kv_heads: int,
+        query_length: int = 1,
         plan: Any | None = None,
     ) -> Any:
         """Build or refresh the GPU work plan for flydsl_pa_decode().
@@ -4737,16 +4759,21 @@ class rocm_aiter_ops:
         Args:
             seq_lens: [num_seqs] contiguous int32 context lengths.
             num_kv_heads: KV heads per rank.
+            query_length: Query tokens per sequence (1 + speculative tokens).
             plan: A plan from an earlier call with the same num_seqs.
 
         """
         from aiter.ops.flydsl.kernels.pa_decode_plan import plan_pa_decode
 
         if plan is not None:
-            return plan_pa_decode(seq_lens, num_kv_heads, plan=plan)
+            return plan_pa_decode(
+                seq_lens, num_kv_heads, query_length=query_length, plan=plan
+            )
         # One CTA per CU: AITER's default budget for the head-256 NHD pipe.
         num_cu = torch.cuda.get_device_properties(seq_lens.device).multi_processor_count
-        return plan_pa_decode(seq_lens, num_kv_heads, workgroup_budget=num_cu)
+        return plan_pa_decode(
+            seq_lens, num_kv_heads, workgroup_budget=num_cu, query_length=query_length
+        )
 
     @staticmethod
     def flydsl_pa_decode(
@@ -4760,21 +4787,29 @@ class rocm_aiter_ops:
         k_scale: torch.Tensor,
         v_scale: torch.Tensor,
         work_plan: Any,
+        query_length: int = 1,
     ) -> None:
-        """Single-token FP8 paged-attention decode on NHD K/V views.
+        """FP8 paged-attention decode on NHD K/V views.
+
+        Every sequence has the same number of query tokens, causally masked
+        against its context (single-token decode or a speculative verify step).
 
         Args:
-            output: [num_seqs, num_heads, head_size], written in place.
-            query: [num_seqs, num_heads, head_size], BF16/FP16.
+            output: [num_seqs * query_length, num_heads, head_size], written in
+                place.
+            query: [num_seqs * query_length, num_heads, head_size], BF16/FP16.
             key_cache: [num_blocks, block_size, num_kv_heads, head_size] FP8
                 view.
             value_cache: FP8 view shaped like key_cache.
-            seq_lens: [num_seqs] int32 context lengths.
+            seq_lens: [num_seqs] int32 context lengths, including the query
+                tokens.
             block_table: [num_seqs, max_num_blocks] int32.
             scale: Softmax scale.
             k_scale: Per-tensor K dequantization scale.
             v_scale: Per-tensor V dequantization scale.
             work_plan: Plan from flydsl_pa_decode_plan() for these seq_lens.
+            query_length: Query tokens per sequence; at most
+                flydsl_pa_decode_max_query_len().
 
         """
         from aiter.ops.flydsl.pa_decode import pa_decode
@@ -4789,7 +4824,7 @@ class rocm_aiter_ops:
             seq_lens,
             block_table,
             scale,
-            query_length=1,
+            query_length=query_length,
             compute_type=key_cache.dtype,
             key_scale=k_scale,
             value_scale=v_scale,

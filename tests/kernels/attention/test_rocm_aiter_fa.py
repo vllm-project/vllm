@@ -1236,12 +1236,18 @@ def test_aiter_fa_flydsl_pa_decode_requirements(monkeypatch):
     assert not use_flydsl(head_size=128)
     assert not use_flydsl(num_heads=64, num_kv_heads=2)
     assert not use_flydsl(logits_soft_cap=30.0)
+    assert not use_flydsl(sliding_window=128)
+    assert not use_flydsl(sinks=torch.zeros(16))
 
 
-@pytest.mark.parametrize("num_heads", [(8, 1), (16, 2)])
-def test_aiter_fa_flydsl_pa_decode_matches_reference(monkeypatch, num_heads):
-    """FP8 single-token decode through the FlyDSL kernel matches the reference
-    on the backend's interleaved NHD cache, across page boundaries."""
+@pytest.mark.parametrize(
+    "num_heads,query_len", [((8, 1), 1), ((16, 2), 1), ((8, 1), 2), ((8, 1), 4)]
+)
+def test_aiter_fa_flydsl_pa_decode_matches_reference(monkeypatch, num_heads, query_len):
+    """FP8 decode through the FlyDSL kernel matches the reference on the
+    backend's interleaved NHD cache, across page boundaries. query_len > 1 is a
+    speculative verify step: every sequence has the same number of causally
+    masked query tokens."""
     from tests.v1.attention.utils import (
         BatchSpec,
         create_common_attn_metadata,
@@ -1263,10 +1269,16 @@ def test_aiter_fa_flydsl_pa_decode_matches_reference(monkeypatch, num_heads):
 
     block_size, num_blocks, head_size = 64, 64, 256
     num_q_heads, num_kv_heads = num_heads
+    if query_len > rocm_aiter_ops.flydsl_pa_decode_max_query_len(
+        num_q_heads // num_kv_heads
+    ):
+        pytest.skip("installed AITER takes one query token per FlyDSL decode")
     scale = head_size**-0.5
     k_scale, v_scale = 0.5, 0.25
     cache_dtype = current_platform.fp8_dtype()
-    batch_spec = BatchSpec(seq_lens=[1, 63, 64, 257, 1500], query_lens=[1] * 5)
+    batch_spec = BatchSpec(
+        seq_lens=[query_len, 63, 64, 257, 1500], query_lens=[query_len] * 5
+    )
 
     config = create_vllm_config(
         model_name="Qwen/Qwen3-0.6B",
@@ -1299,6 +1311,9 @@ def test_aiter_fa_flydsl_pa_decode_matches_reference(monkeypatch, num_heads):
             config,
             torch.device("cuda"),
         )
+        # Verify steps count as decodes once speculative decoding raises the
+        # reorder threshold to 1 + num_speculative_tokens.
+        builder.reorder_batch_threshold = query_len
         common = create_common_attn_metadata(
             batch_spec, block_size, torch.device("cuda"), max_block_idx=num_blocks
         )
@@ -1308,6 +1323,7 @@ def test_aiter_fa_flydsl_pa_decode_matches_reference(monkeypatch, num_heads):
             # so a CUDA graph that captured it keeps reading valid buffers.
             plan = metadata.decode_metadata.flydsl_plan
             assert plan is not None
+            assert metadata.decode_metadata.flydsl_query_len == query_len
             metadata = builder.build(0, common)
         assert metadata.decode_metadata.flydsl_plan is plan
         assert metadata.num_decodes == batch_spec.batch_size
