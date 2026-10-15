@@ -8,7 +8,15 @@ import math
 import os
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any, NamedTuple, NewType, TypeAlias, overload
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    NamedTuple,
+    NewType,
+    TypeAlias,
+    TypeVar,
+    overload,
+)
 
 from vllm import envs
 from vllm.config import VllmConfig
@@ -233,7 +241,10 @@ def null_head_len(blocks: Sequence[KVCacheBlock]) -> int:
     return next(i for i, b in enumerate(blocks) if not b.is_null)
 
 
-def trim_null_head(blocks: list[KVCacheBlock]) -> list[KVCacheBlock]:
+_BlockSeq = TypeVar("_BlockSeq", list[KVCacheBlock], Sequence[KVCacheBlock])
+
+
+def trim_null_head(blocks: _BlockSeq) -> _BlockSeq:
     """``blocks`` without its leading null blocks; ``blocks`` itself if none."""
     nhl = null_head_len(blocks)
     return blocks[nhl:] if nhl else blocks
