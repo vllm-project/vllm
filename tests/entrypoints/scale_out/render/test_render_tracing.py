@@ -76,6 +76,24 @@ def server(trace_service):
         max_wait_seconds=120,
         env_dict={"OTEL_BSP_SCHEDULE_DELAY": "100"},
     ) as srv:
+        # Scrape before any render requests, independent of test ordering.
+        metrics = httpx.get(srv.url_for("metrics"))
+        metrics.raise_for_status()
+        counts = {
+            (
+                sample.labels["model_name"],
+                sample.labels["api_surface"],
+                sample.labels["status"],
+            ): sample.value
+            for family in text_string_to_metric_families(metrics.text)
+            for sample in family.samples
+            if sample.name == "vllm:tool_call_render_requests_total"
+        }
+        assert counts == {
+            (SERVED_MODEL_NAME, api_surface, status): 0
+            for api_surface in ("chat_completions", "messages")
+            for status in ("rendered", "error")
+        }
         yield srv
 
 

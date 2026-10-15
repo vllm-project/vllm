@@ -44,8 +44,9 @@ The following metrics are exposed:
 requests with explicitly provided, non-null tool fields once per render
 attempt, including requests with `tool_choice=none`.
 
-Labels are the configured `model_name`, `api_surface` (`chat_completions` or
-`messages`), and `status` (`rendered` or `error`). `rendered` means the render
+Labels are the configured served `model_name`, `api_surface` (`chat_completions`
+or `messages`), and `status` (`rendered` or `error`). All four combinations are
+initialized to zero at startup. `rendered` means the render
 handler succeeded; `error` covers returned errors and interrupted/failed
 handlers. Validation errors before the handler runs are not counted.
 Non-tool requests are excluded, and counting does not require tracing.

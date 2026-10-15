@@ -30,6 +30,7 @@ def init_render_state(
     request_logger: RequestLogger | None,
 ):
     from .derender.serving import ServingDerender
+    from .render.api_router import init_render_metrics
     from .render.serving import ServingRender
 
     state.serving_render = ServingRender(
@@ -38,6 +39,7 @@ def init_render_state(
         request_logger=request_logger,
         tool_server=state.tool_server,
     )
+    init_render_metrics(state.serving_render.model_config.served_model_name)
 
     state.serving_derender = ServingDerender(
         state.openai_serving_models,
