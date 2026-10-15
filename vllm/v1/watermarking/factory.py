@@ -21,11 +21,12 @@ def create_watermarker(config: WatermarkConfig) -> Watermarker:
             config.alpha,
         )
     if config.algorithm == "red_green":
+        delta = 2.0 if config.delta is None else config.delta
         return RedGreenWatermarker(
             config.key,
             config.context_width,
             config.prf,
-            config.delta,
+            delta,
             config.gamma,
         )
     raise ValueError(f"Unknown watermarking algorithm: {config.algorithm}")
