@@ -23,10 +23,11 @@ BADREQUEST_CASES = [
         "is greater than max_lora_rank",
     ),
     ("test_dora", {"use_dora": True}, "does not yet support DoRA"),
+    ("test_pissa", {"init_lora_weights": "pissa"}, "init_lora_weights='pissa'"),
     (
         "test_modules_to_save",
         {"modules_to_save": ["lm_head"]},
-        "only supports modules_to_save being None",
+        "Unsupported modules_to_save",
     ),
 ]
 

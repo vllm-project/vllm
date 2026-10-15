@@ -325,6 +325,77 @@ def test_cuda_communicator_checkpoints_flashinfer_workspaces(
         workspace.checkpoint_restore.assert_called_once_with(group)
 
 
+def _fi_ar_communicator(
+    monkeypatch: pytest.MonkeyPatch, group: object, normal: Mock, quant: Mock
+) -> CudaCommunicator:
+    monkeypatch.setattr(flashinfer_all_reduce, "_fi_ar_workspace", normal)
+    monkeypatch.setattr(flashinfer_all_reduce, "_fi_ar_quant_workspace", quant)
+    monkeypatch.setattr(
+        flashinfer_all_reduce,
+        "_fi_ar_workspace_groups",
+        {id(normal): group, id(quant): group},
+    )
+    monkeypatch.setattr(
+        flashinfer_all_reduce, "TorchDistBackend", lambda group: group, raising=False
+    )
+    communicator = CudaCommunicator.__new__(CudaCommunicator)
+    communicator.cpu_group = group
+    communicator.pynccl_comm = Mock()
+    communicator.all2all_manager = None
+    return communicator
+
+
+def _symm_mem_workspace() -> Mock:
+    workspace = Mock()
+    workspace.checkpoint_prepare.side_effect = NotImplementedError
+    workspace.checkpoint_restore.side_effect = NotImplementedError
+    return workspace
+
+
+@pytest.mark.parametrize("symm_mem", [False, True], ids=["mnnvl", "symm-mem+mnnvl"])
+def test_cuda_communicator_suspend_detaches_flashinfer_workspaces(
+    monkeypatch: pytest.MonkeyPatch,
+    symm_mem: bool,
+) -> None:
+    group = object()
+    workspaces = (_symm_mem_workspace() if symm_mem else Mock(), Mock())
+    communicator = _fi_ar_communicator(monkeypatch, group, *workspaces)
+    communicator.suspend()
+    communicator.resume()
+
+    for workspace in workspaces:
+        workspace.checkpoint_prepare.assert_called_once_with()
+        workspace.checkpoint_restore.assert_called_once_with(group)
+    communicator.pynccl_comm.suspend.assert_called_once_with()
+    communicator.pynccl_comm.resume.assert_called_once_with()
+
+
+def test_cuda_communicator_checkpoint_rejects_symm_mem_workspace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    communicator = _fi_ar_communicator(
+        monkeypatch, object(), _symm_mem_workspace(), Mock()
+    )
+    with pytest.raises(NotImplementedError):
+        communicator.checkpoint_prepare()
+    with pytest.raises(NotImplementedError):
+        communicator.checkpoint_restore()
+
+
+def test_cuda_communicator_resume_retries_failed_restore(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = Mock()
+    workspace.checkpoint_restore.side_effect = [RuntimeError("cuMemCreate"), None]
+    communicator = _fi_ar_communicator(monkeypatch, object(), workspace, Mock())
+    communicator.suspend()
+    with pytest.raises(RuntimeError):
+        communicator.resume()
+    communicator.resume()
+
+    assert workspace.checkpoint_restore.call_count == 2
+
+
 @pytest.mark.parametrize(
     ("backend", "capability", "world_size", "nodes", "expected"),
     [
@@ -376,7 +447,6 @@ def test_flashinfer_standalone_workspace_size(
         "_resolve_fi_ar_backend",
         Mock(return_value=("mnnvl", False)),
     )
-    monkeypatch.setattr(flashinfer_all_reduce, "get_node_count", lambda: 2)
     monkeypatch.setattr(
         flashinfer_all_reduce,
         "_get_tuned_standalone_max_size",
@@ -387,6 +457,63 @@ def test_flashinfer_standalone_workspace_size(
     flashinfer_all_reduce.get_fi_ar_workspace(8, 0, 128, 7168, torch.bfloat16, Mock())
 
     assert create_workspace.call_args.args[3] == expected
+
+
+@pytest.mark.parametrize(
+    ("node_count", "is_blackwell", "expected"),
+    [
+        (1, False, ("trtllm", False)),
+        (1, True, ("trtllm", False)),
+        (2, False, (None, False)),
+        (2, True, ("mnnvl", False)),
+    ],
+)
+def test_flashinfer_auto_backend_uses_group_topology(
+    monkeypatch: pytest.MonkeyPatch,
+    node_count: int,
+    is_blackwell: bool,
+    expected: tuple[str | None, bool],
+) -> None:
+    monkeypatch.setattr(
+        flashinfer_all_reduce.envs, "VLLM_FLASHINFER_ALLREDUCE_BACKEND", "auto"
+    )
+    monkeypatch.setattr(flashinfer_all_reduce, "_node_count", lambda _: node_count)
+    monkeypatch.setattr(
+        flashinfer_all_reduce.current_platform,
+        "has_device_capability",
+        lambda capability: is_blackwell,
+    )
+
+    assert flashinfer_all_reduce._resolve_fi_ar_backend(Mock()) == expected
+
+
+def test_flashinfer_workspace_failure_is_not_retried(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Creation is collective; retrying it per all-reduce desyncs ranks."""
+    create_workspace = Mock(return_value=None)
+    monkeypatch.setattr(flashinfer_all_reduce, "_fi_ar_workspace", None)
+    monkeypatch.setattr(flashinfer_all_reduce, "_fi_ar_quant_workspace", None)
+    monkeypatch.setattr(flashinfer_all_reduce, "_fi_ar_workspace_failed", False)
+    monkeypatch.setattr(
+        flashinfer_all_reduce,
+        "_resolve_fi_ar_backend",
+        Mock(return_value=("mnnvl", True)),
+    )
+    monkeypatch.setattr(
+        flashinfer_all_reduce, "_get_tuned_standalone_max_size", Mock(return_value=None)
+    )
+    monkeypatch.setattr(flashinfer_all_reduce, "_create_workspace", create_workspace)
+    args = (2, 0, 128, 4096, torch.bfloat16, Mock())
+
+    assert flashinfer_all_reduce.get_fi_ar_workspace(*args) is None
+    assert flashinfer_all_reduce.get_fi_ar_workspace(*args) is None
+    # One mnnvl attempt plus one trtllm fallback, never repeated.
+    assert create_workspace.call_count == 2
+
+    flashinfer_all_reduce.destroy_fi_ar_workspace()
+    flashinfer_all_reduce.get_fi_ar_workspace(*args)
+    assert create_workspace.call_count == 4
 
 
 def test_flashinfer_all_reduce_precedes_nccl(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -408,6 +535,21 @@ def test_flashinfer_all_reduce_precedes_nccl(monkeypatch: pytest.MonkeyPatch) ->
 
     assert communicator.all_reduce(torch.empty(1)) is output
     nccl_selector.assert_not_called()
+
+
+def test_aiter_all_gather_precedes_pynccl(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ensure can use aiter all_gather if available even if pynccl is not available."""
+    output = torch.empty(2)
+    aiter_comm = Mock()
+    aiter_comm.should_custom_ag.return_value = True
+    aiter_comm.custom_all_gather.return_value = output
+    communicator = CudaCommunicator.__new__(CudaCommunicator)
+    communicator.world_size = 2
+    communicator.aiter_ar_comm = aiter_comm
+    communicator.pynccl_comm = Mock(disabled=True)
+    monkeypatch.setattr(communicator, "_can_use_aiter_ag_rs", Mock(return_value=True))
+
+    assert communicator.all_gatherv(torch.empty(1)) is output
 
 
 def test_isend_object_posts_size_then_object_and_releases_on_wait(

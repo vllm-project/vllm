@@ -62,6 +62,7 @@ def _make_int4_moe_weights(
     Returns:
         (w13_packed, w2_packed, w13_ref, w2_ref, w13_bias, w2_bias)
         where *_ref are the dequantized float reference weights
+
     """
     # Generate INT4 weights as int8 values in [-8, 7]
     w13_int4 = torch.randint(-8, 8, (E, 2 * N, K), dtype=torch.int8)
