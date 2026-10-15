@@ -11,6 +11,7 @@ from vllm.config import ModelConfig
 from vllm.config.load import LoadConfig
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.weight_utils import (
+    RUNAI_PINNED_STAGING_DEFAULT_BYTES,
     download_safetensors_index_file_from_hf,
     download_weights_from_hf,
     runai_safetensors_weights_iterator,
@@ -28,10 +29,16 @@ class RunaiModelStreamerLoader(BaseModelLoader):
         super().__init__(load_config)
 
         self._is_distributed: bool = False
+        self._pinned_staging: bool = False
         if load_config.model_loader_extra_config:
             extra_config = load_config.model_loader_extra_config
 
-            allowed_keys = {"distributed", "concurrency", "memory_limit"}
+            allowed_keys = {
+                "distributed",
+                "concurrency",
+                "memory_limit",
+                "pinned_staging",
+            }
             if unexpected_keys := set(extra_config) - allowed_keys:
                 raise ValueError(
                     "Unexpected extra config keys for runai_streamer: "
@@ -43,6 +50,14 @@ class RunaiModelStreamerLoader(BaseModelLoader):
                 if not isinstance(distributed, bool):
                     raise ValueError(f"distributed must be a bool, got {distributed!r}")
                 self._is_distributed = distributed
+
+            if "pinned_staging" in extra_config:
+                pinned_staging = extra_config["pinned_staging"]
+                if not isinstance(pinned_staging, bool):
+                    raise ValueError(
+                        f"pinned_staging must be a bool, got {pinned_staging!r}"
+                    )
+                self._pinned_staging = pinned_staging
 
             # Validate every value before mutating os.environ, so a later
             # invalid key cannot leave an earlier one partially applied.
@@ -70,6 +85,15 @@ class RunaiModelStreamerLoader(BaseModelLoader):
                         f"memory_limit must be an integer >= -1, got {memory_limit!r}"
                     )
                 env_updates["RUNAI_STREAMER_MEMORY_LIMIT"] = str(memory_limit)
+            elif (
+                self._pinned_staging
+                and os.getenv("RUNAI_STREAMER_MEMORY_LIMIT") is None
+            ):
+                # Page-locking is paid once per byte of staging buffer, so
+                # bound the streamer's default (40 GB) unless the user chose.
+                env_updates["RUNAI_STREAMER_MEMORY_LIMIT"] = str(
+                    RUNAI_PINNED_STAGING_DEFAULT_BYTES
+                )
             os.environ.update(env_updates)
 
             runai_streamer_s3_endpoint = os.getenv("RUNAI_STREAMER_S3_ENDPOINT")
@@ -127,7 +151,10 @@ class RunaiModelStreamerLoader(BaseModelLoader):
         """Get an iterator for the model weights based on the load format."""
         hf_weights_files = self._prepare_weights(model_or_path, revision)
         return runai_safetensors_weights_iterator(
-            hf_weights_files, self.load_config.use_tqdm_on_load, self._is_distributed
+            hf_weights_files,
+            self.load_config.use_tqdm_on_load,
+            self._is_distributed,
+            pinned_staging=self._pinned_staging,
         )
 
     def download_model(self, model_config: ModelConfig) -> None:

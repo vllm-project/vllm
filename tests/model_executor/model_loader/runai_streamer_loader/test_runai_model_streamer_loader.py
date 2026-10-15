@@ -96,6 +96,7 @@ def _runai_loader(extra):
         ({"distributed": "yes"}, "distributed must be a bool"),
         ({"concurrency": "16"}, "concurrency must be a positive integer"),
         ({"concurrency": -1}, "concurrency must be a positive integer"),
+        ({"pinned_staging": "yes"}, "pinned_staging must be a bool"),
     ],
 )
 def test_runai_rejects_invalid_extra_config(extra, match):
@@ -114,6 +115,29 @@ def test_runai_accepts_valid_extra_config():
         assert loader._is_distributed is True
         assert os.environ["RUNAI_STREAMER_CONCURRENCY"] == "16"
         assert os.environ["RUNAI_STREAMER_MEMORY_LIMIT"] == "1024"
+
+
+def test_runai_pinned_staging_bounds_default_memory_limit():
+    # Page-locking is paid per byte of staging buffer, so the streamer's 40 GB
+    # default is bounded unless the user chose a limit themselves.
+    with patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("RUNAI_STREAMER_MEMORY_LIMIT", None)
+        loader = _runai_loader({"pinned_staging": True})
+        assert loader._pinned_staging is True
+        assert os.environ["RUNAI_STREAMER_MEMORY_LIMIT"] == str(
+            rsl.RUNAI_PINNED_STAGING_DEFAULT_BYTES
+        )
+
+    with patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("RUNAI_STREAMER_MEMORY_LIMIT", None)
+        _runai_loader({"pinned_staging": True, "memory_limit": 1024})
+        assert os.environ["RUNAI_STREAMER_MEMORY_LIMIT"] == "1024"
+
+    with patch.dict(os.environ, {"RUNAI_STREAMER_MEMORY_LIMIT": "2048"}, clear=False):
+        _runai_loader({"pinned_staging": True})
+        assert os.environ["RUNAI_STREAMER_MEMORY_LIMIT"] == "2048"
+
+    assert _runai_loader({"distributed": True})._pinned_staging is False
 
 
 def test_runai_invalid_extra_config_leaves_environ_untouched():

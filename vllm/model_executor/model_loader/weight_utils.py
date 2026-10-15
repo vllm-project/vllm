@@ -1247,18 +1247,121 @@ def multi_thread_safetensors_weights_iterator(
                 yield key, state_dict.pop(key)
 
 
+# Default size of the Run:ai streamer's CPU staging buffer when it is
+# page-locked (``pinned_staging``). Registering the buffer costs roughly
+# 0.2 s/GB once per load; 16 GB keeps that to a few seconds while leaving the
+# streamer enough room to keep every reader busy.
+RUNAI_PINNED_STAGING_DEFAULT_BYTES = 16_000_000_000
+# Threads used to pre-fault the staging buffer before it is page-locked.
+_RUNAI_PINNED_STAGING_TOUCH_THREADS = 16
+
+
+def _pin_runai_streamer_buffer(streamer) -> int | None:
+    """Page-lock the Run:ai streamer's CPU staging buffer.
+
+    The streamer reads every tensor into one reusable host buffer and the
+    host-to-device copies out of it run as pageable copies, i.e. a driver
+    staged memcpy per tensor. Registering the buffer with ``cudaHostRegister``
+    turns those into DMA copies out of pinned memory. The pages are faulted in
+    with ``MADV_POPULATE_WRITE`` from several threads first, so the
+    single-threaded registration does not pay for the page faults itself.
+
+    Returns the registered address, to be passed to ``cudaHostUnregister``
+    once the iterator is exhausted, or ``None`` if the buffer could not be
+    pinned. In that case loading continues unchanged on the pageable path.
+    """
+    try:
+        buf = streamer.file_streamer.file_streamer.requests_iterator.buffer
+    except AttributeError as e:
+        logger.warning(
+            "Run:ai streamer staging buffer not found (%s); "
+            "loading from pageable memory.",
+            e,
+        )
+        return None
+    nbytes = int(buf.nbytes)
+    if nbytes == 0:
+        return None
+    addr = int(buf.ctypes.data)
+    start_time = time.perf_counter()
+    try:
+        import ctypes
+
+        libc = ctypes.CDLL("libc.so.6", use_errno=True)
+        page = 4096
+        madv_hugepage = 14  # MADV_HUGEPAGE
+        madv_populate_write = 23  # MADV_POPULATE_WRITE, Linux >= 5.14
+        begin = addr & ~(page - 1)
+        end = (addr + nbytes + page - 1) & ~(page - 1)
+        libc.madvise(
+            ctypes.c_void_p(begin), ctypes.c_size_t(end - begin), madv_hugepage
+        )
+        step = (end - begin) // _RUNAI_PINNED_STAGING_TOUCH_THREADS
+        step = max((step + page - 1) & ~(page - 1), page)
+
+        def _populate(lo: int, hi: int) -> None:
+            libc.madvise(
+                ctypes.c_void_p(lo), ctypes.c_size_t(hi - lo), madv_populate_write
+            )
+
+        threads = [
+            threading.Thread(target=_populate, args=(lo, min(lo + step, end)))
+            for lo in range(begin, end, step)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        populated_time = time.perf_counter()
+
+        rc = torch.cuda.cudart().cudaHostRegister(addr, nbytes, 0)
+        if int(rc) != 0:
+            logger.warning(
+                "cudaHostRegister on the Run:ai streamer staging buffer returned "
+                "%s; loading from pageable memory.",
+                rc,
+            )
+            return None
+        logger.info(
+            "Page-locked the %.1f GB Run:ai streamer staging buffer "
+            "(populate %.2f s, register %.2f s).",
+            nbytes / 1e9,
+            populated_time - start_time,
+            time.perf_counter() - populated_time,
+        )
+        return addr
+    except Exception as e:
+        logger.warning(
+            "Could not page-lock the Run:ai streamer staging buffer (%s); "
+            "loading from pageable memory.",
+            e,
+        )
+        return None
+
+
 def runai_safetensors_weights_iterator(
     hf_weights_files: list[str],
     use_tqdm_on_load: bool,
     is_distributed: bool = False,
+    pinned_staging: bool = False,
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
-    """Iterate over the weights in the model safetensor files."""
+    """Iterate over the weights in the model safetensor files.
+
+    Args:
+        hf_weights_files: safetensors files to stream.
+        use_tqdm_on_load: show a progress bar.
+        is_distributed: use the streamer's distributed mode.
+        pinned_staging: page-lock the streamer's CPU staging buffer and let
+            the streamer copy each tensor to the current device out of it, so
+            the weight loaders only ever see device tensors. Falls back to the
+            pageable path if the buffer cannot be pinned.
+
+    """
     with SafetensorsStreamer() as streamer:
         is_cuda_alike = current_platform.is_cuda_alike()
+        stream_to_device = is_cuda_alike and (is_distributed or pinned_staging)
         device = (
-            f"cuda:{current_platform.current_device()}"
-            if is_distributed and is_cuda_alike
-            else "cpu"
+            f"cuda:{current_platform.current_device()}" if stream_to_device else "cpu"
         )
 
         streamer.stream_files(
@@ -1266,6 +1369,7 @@ def runai_safetensors_weights_iterator(
             device=device,
             is_distributed=is_distributed,
         )
+        pinned_addr = _pin_runai_streamer_buffer(streamer) if pinned_staging else None
         total_tensors = sum(
             len(tensors_meta)
             for tensors_meta in streamer.files_to_tensors_metadata.values()
@@ -1280,8 +1384,23 @@ def runai_safetensors_weights_iterator(
             mininterval=2,
         )
 
-        for name, tensor in tensor_iter:
-            yield name, tensor.clone()
+        try:
+            for name, tensor in tensor_iter:
+                # The streamer reuses its staging buffers, so a tensor must be
+                # copied out before the next chunk lands in the same memory.
+                # On the pinned path (non-distributed) the streamer has already
+                # moved the tensor to the device, which is that copy.
+                if (
+                    pinned_addr is not None
+                    and not is_distributed
+                    and tensor.device.type != "cpu"
+                ):
+                    yield name, tensor
+                else:
+                    yield name, tensor.clone()
+        finally:
+            if pinned_addr is not None:
+                torch.cuda.cudart().cudaHostUnregister(pinned_addr)
 
 
 def fastsafetensors_weights_iterator(
