@@ -22,6 +22,7 @@ from vllm.model_executor.layers import logits_processor
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.models.lilicorr import LiLiCorrHead
 from vllm.transformers_utils.configs.eagle import EAGLEConfig
+from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.spec_decode.dflash2.speculator import CandidateSampler
 from vllm.v1.worker.gpu.spec_decode.lilicorr.speculator import LiLiCorrSpeculator
 
@@ -498,6 +499,60 @@ def test_candidate_walk_preserves_conditional_scores_and_padding(probabilistic):
     assert (tokens[2] == -1).all()
     if cache is not None:
         assert cache[1].isneginf().all()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize("use_fp64", [False, True])
+def test_candidate_walk_revisited_position_matches_step_seed(use_fp64):
+    """The candidate walk must use the same step key as ordinary draft sampling."""
+    device = torch.device("cuda")
+    batch, steps, top_k = 4096, 2, 2
+    sampler = CandidateSampler(batch, steps, top_k, device)
+    candidates = torch.arange(top_k, device=device).expand(batch, steps, top_k)
+    logits = torch.tensor([0.7, 0.3], device=device).log()
+    scores = logits.expand(batch, steps, top_k, top_k)
+    mapping = torch.arange(batch, device=device)
+    temperature = torch.ones(batch, device=device)
+    seeds = mapping.to(torch.int64)
+    positions = torch.arange(21, 21 + steps, device=device).repeat(batch)
+    tokens = torch.empty(batch, steps, dtype=torch.int64, device=device)
+    cache = torch.empty(batch, steps, top_k, device=device)
+    first_round = None
+    for start in (21, 22):
+        positions.view(batch, steps).copy_(
+            torch.arange(start, start + steps, device=device)
+        )
+        sampler.sample(
+            candidates,
+            scores,
+            batch,
+            positions,
+            mapping.repeat_interleave(steps),
+            temperature,
+            seeds,
+            tokens,
+            cache,
+            use_fp64,
+        )
+        for step in range(steps):
+            expected = gumbel_sample(
+                logits.expand(batch, -1),
+                mapping,
+                temperature,
+                seeds,
+                positions.view(batch, steps)[:, step] - 1,
+                apply_temperature=True,
+                is_drafting=True,
+                logits_cache=cache,
+                logits_cache_col=torch.tensor(step, device=device),
+                use_fp64=use_fp64,
+            )
+            torch.testing.assert_close(tokens[:, step], expected)
+        if first_round is None:
+            first_round = tokens.clone()
+        else:
+            mismatch_rate = (first_round[:, 1] != tokens[:, 0]).float().mean().item()
+            assert 0.35 < mismatch_rate < 0.5
 
 
 @pytest.mark.parametrize(
