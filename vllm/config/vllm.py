@@ -2723,6 +2723,16 @@ class VllmConfig:
         if self.model_config.is_hybrid:
             HybridAttentionMambaModelConfig.verify_and_update_config(self)
 
+        if self.speculative_config is not None:
+            self.speculative_config.resolve_eagle_block_drop(
+                hybrid_align_prefix_caching=(
+                    self.model_config.is_hybrid
+                    and self.cache_config.enable_prefix_caching
+                    and self.cache_config.mamba_cache_mode == "align"
+                ),
+                prefill_lookahead_tokens=self.num_prefill_lookahead_tokens,
+            )
+
         if self.model_config.convert_type == "classify":
             # Maybe convert ForCausalLM into ForSequenceClassification model.
             from vllm.model_executor.models.adapters import SequenceClassificationConfig
