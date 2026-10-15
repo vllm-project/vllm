@@ -173,6 +173,10 @@ def resolve_tokenizer_args(
                 token=kwargs.get("token"),
             )
 
+    if tokenizer_mode == "mistral":
+        # MistralCommonBackend rejects HF-only keyword arguments, even None.
+        kwargs.pop("code_revision", None)
+
     return tokenizer_mode, tokenizer_name, args, kwargs
 
 
@@ -180,10 +184,10 @@ cached_resolve_tokenizer_args = lru_cache(resolve_tokenizer_args)
 
 
 def tokenizer_args_from_config(config: "ModelConfig", **kwargs):
-    kwargs.setdefault(
-        "code_revision",
-        config.code_revision if config.tokenizer == config.model else None,
-    )
+    if config.tokenizer == config.model:
+        code_revision = getattr(config, "code_revision", None)
+        if code_revision is not None:
+            kwargs.setdefault("code_revision", code_revision)
     return cached_resolve_tokenizer_args(
         config.tokenizer,
         runner_type=config.runner_type,
@@ -291,12 +295,10 @@ def cached_tokenizer_from_config(model_config: "ModelConfig", **kwargs):
         return None
 
     _maybe_register_hf_config(getattr(model_config, "hf_config", None))
-    kwargs.setdefault(
-        "code_revision",
-        model_config.code_revision
-        if model_config.tokenizer == model_config.model
-        else None,
-    )
+    if model_config.tokenizer == model_config.model:
+        code_revision = getattr(model_config, "code_revision", None)
+        if code_revision is not None:
+            kwargs.setdefault("code_revision", code_revision)
 
     return cached_get_tokenizer(
         model_config.tokenizer,

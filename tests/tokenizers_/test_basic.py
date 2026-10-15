@@ -229,6 +229,34 @@ def test_config_tokenizer_code_revision(
         _assert_tokenizer_like(tokenizer)
 
 
+@pytest.mark.parametrize(
+    "loader", (cached_tokenizer_from_config, tokenizer_args_from_config)
+)
+@pytest.mark.parametrize("tokenizer_mode", ["mistral", "auto"])
+@pytest.mark.parametrize("code_revision", [None, "never"])
+def test_config_mistral_code_revision(loader, tokenizer_mode, code_revision):
+    """Config loading must not pass HF-only revisions to the Mistral backend."""
+    repo = "mistralai/Mistral-7B-Instruct-v0.3"
+    config = SimpleNamespace(
+        model=repo,
+        tokenizer=repo,
+        runner_type="generate",
+        tokenizer_mode=tokenizer_mode,
+        tokenizer_revision=None,
+        code_revision=code_revision,
+        trust_remote_code=False,
+        skip_tokenizer_init=False,
+    )
+    tokenizer = loader(config)
+    if loader is tokenizer_args_from_config:
+        mode, name, args, kwargs = tokenizer
+        tokenizer = get_tokenizer(name, *args, tokenizer_mode=mode, **kwargs)
+
+    reference = get_tokenizer(repo, tokenizer_mode="mistral")
+    assert isinstance(tokenizer, MistralTokenizer)
+    assert tokenizer.encode("hello world") == reference.encode("hello world")
+
+
 def test_hub_tokenizer_loads_from_local_snapshot():
     """Transformers makes a Hub request per file when given a repo ID."""
     with patch.object(
