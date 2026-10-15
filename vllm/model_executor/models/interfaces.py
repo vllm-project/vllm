@@ -141,6 +141,13 @@ _language_model_by_module: "weakref.WeakKeyDictionary[nn.Module, VllmModel]" = (
 )
 
 
+def _is_language_model(model: object) -> TypeIs[VllmModel]:
+    # Text towers can use config/position_ids signatures and omit loader hooks.
+    return callable(getattr(model, "embed_input_ids", None)) and callable(
+        getattr(model, "forward", None)
+    )
+
+
 @runtime_checkable
 class SupportsMultiModalEmbeddings(Protocol):
     """The interface for models that can merge external multimodal embeddings."""
@@ -284,14 +291,14 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
                     mod = getattr(mod, attr)
 
             candidate: object = mod
-            if candidate is not self_module and isinstance(candidate, VllmModel):
+            if candidate is not self_module and _is_language_model(candidate):
                 _language_model_by_module[self_module] = candidate
                 return candidate
 
         # Fallback
         for mod in self_module.children():
             candidate = mod
-            if isinstance(candidate, VllmModel):
+            if _is_language_model(candidate):
                 _language_model_by_module[self_module] = candidate
                 return candidate
 
