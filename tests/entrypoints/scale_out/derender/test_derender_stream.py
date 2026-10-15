@@ -349,14 +349,28 @@ def test_non_streaming_derender_initializes_parser_prefix(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("include_stop_str_in_output", [False, True])
-async def test_parsed_derender_leaves_out_final_eos_like_engine(
-    tokenizer, include_stop_str_in_output
+@pytest.mark.parametrize(
+    ("stop", "include_stop_str_in_output", "dropped"),
+    [
+        ("eos", False, True),
+        ("stop_token_id", False, True),
+        ("stop_string", False, False),
+        ("eos", True, False),
+    ],
+)
+async def test_parsed_derender_leaves_out_stop_token_like_engine(
+    tokenizer, stop, include_stop_str_in_output, dropped
 ):
-    """A parser keeps special tokens in the decoded text, so the EOS that
-    finished generation must be dropped the way the engine drops it."""
+    """A parser keeps special tokens in the decoded text, so the token that
+    stopped generation must be dropped the way the engine drops it."""
     eos = tokenizer.eos_token_id
     answer_ids = tokenizer.encode("answer", add_special_tokens=False)
+    bang = tokenizer.encode("!", add_special_tokens=False)[-1]
+    last_id, stop_reason = {
+        "eos": (eos, None),
+        "stop_token_id": (bang, bang),
+        "stop_string": (bang, "!"),
+    }[stop]
 
     parser = MagicMock()
     parser.parse.side_effect = lambda text, *args, **kwargs: (None, text, [])
@@ -384,25 +398,27 @@ async def test_parsed_derender_leaves_out_final_eos_like_engine(
         derenderer.parser = MagicMock(return_value=parser)
 
         def batch_content(token_ids: list[int], finish_reason: str) -> str:
+            choice = GenerateTokensChoice(
+                index=0,
+                token_ids=token_ids,
+                finish_reason=finish_reason,
+                stop_reason=stop_reason if finish_reason == "stop" else None,
+            )
             response = GenerateTokensResponse(
-                request_id="test",
-                prompt_token_ids=[11, 12],
-                choices=[
-                    GenerateTokensChoice(
-                        index=0, token_ids=token_ids, finish_reason=finish_reason
-                    )
-                ],
+                request_id="test", prompt_token_ids=[11, 12], choices=[choice]
             )
             return derenderer._derender_chat(response, request)[0].message.content
 
-        # Same decode window and seeding, minus the stop token.
-        expected = batch_content(answer_ids, "length")
-        if include_stop_str_in_output:
-            expected += tokenizer.decode([eos], skip_special_tokens=False)
-        batch = batch_content(answer_ids + [eos], "stop")
+        # Same decode window and seeding; "length" never drops a token.
+        expected = batch_content(
+            answer_ids if dropped else answer_ids + [last_id], "length"
+        )
+        batch = batch_content(answer_ids + [last_id], "stop")
         stream, _ = await derenderer.derender_chat_stream(
             model=MODEL_NAME,
-            generate_chunk=_make_stream_chunk(answer_ids + [eos], finish_reason="stop"),
+            generate_chunk=_make_stream_chunk(
+                answer_ids + [last_id], finish_reason="stop", stop_reason=stop_reason
+            ),
             chat_request=request,
             prompt_token_ids=[11, 12],
         )

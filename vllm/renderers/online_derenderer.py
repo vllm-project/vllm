@@ -145,20 +145,27 @@ class OnlineDerenderer:
         self,
         token_ids: list[int],
         finish_reason: str | None,
+        stop_reason: int | str | None,
         request: ChatCompletionRequest | None,
     ) -> list[int]:
         """The ids whose text the engine returns. Like its detokenizer, leave
-        out a final stop token unless `include_stop_str_in_output` is set."""
+        out the token that stopped generation (EOS when `stop_reason` is None,
+        a `stop_token_ids` entry when it is an int) unless
+        `include_stop_str_in_output` is set. The last-id check guards against
+        `finish_reason` defaulting to "stop" when the client sends neither."""
         if (
             finish_reason != "stop"
+            or isinstance(stop_reason, str)
             or not token_ids
             or (request is not None and request.include_stop_str_in_output)
         ):
             return token_ids
-        stop_ids = set(request.stop_token_ids or []) if request is not None else set()
-        if request is None or not request.ignore_eos:
-            stop_ids |= self._model_eos_token_ids
-        return token_ids[:-1] if token_ids[-1] in stop_ids else token_ids
+        last = token_ids[-1]
+        if stop_reason is None:
+            stopped = last in self._model_eos_token_ids
+        else:
+            stopped = last == stop_reason
+        return token_ids[:-1] if stopped else token_ids
 
     def _derender_chat(
         self,
@@ -213,7 +220,10 @@ class OnlineDerenderer:
             decoded_text, _ = self._detokenize_delta(
                 tokenizer,
                 self._text_token_ids(
-                    choice.token_ids, choice.finish_reason, chat_request
+                    choice.token_ids,
+                    choice.finish_reason,
+                    choice.stop_reason,
+                    chat_request,
                 ),
                 seed_state,
                 skip_special_tokens=skip_special,
@@ -477,7 +487,9 @@ class OnlineDerenderer:
             delta_tids = choice.token_ids or []
             new_text, updated_state = await self._detokenize_delta_async(
                 tokenizer,
-                self._text_token_ids(delta_tids, choice.finish_reason, chat_request),
+                self._text_token_ids(
+                    delta_tids, choice.finish_reason, choice.stop_reason, chat_request
+                ),
                 updated_state,
                 skip_special_tokens=skip_special,
                 spaces_between_special_tokens=spaces_between,
@@ -648,7 +660,10 @@ class OnlineDerenderer:
                 text, detok_state = self._detokenize_delta(
                     tokenizer,
                     self._text_token_ids(
-                        delta_tids, choice.finish_reason, chat_request
+                        delta_tids,
+                        choice.finish_reason,
+                        choice.stop_reason,
+                        chat_request,
                     ),
                     detok_state,
                     skip_special_tokens=skip_special,
