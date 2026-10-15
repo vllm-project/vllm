@@ -209,27 +209,10 @@ def _reference_attention(q_bf16, k_ref, v_ref, seq_lens, scale):
     return out
 
 
-@pytest.mark.parametrize("num_seqs", [1, 4, 16])
-@pytest.mark.parametrize("seq_len", [256, 1024, 4096])
-@pytest.mark.parametrize(
-    "num_kv_heads,qg",
-    [
-        (8, 8),  # Qwen2.5-72B class
-        (8, 16),  # Qwen3-32B class
-        (4, 6),  # MiniMax-M2.5 class
-    ],
-)
-@pytest.mark.parametrize("kv_block_size", [16, 32])
-def test_flydsl_matches_reference(num_seqs, seq_len, num_kv_heads, qg, kv_block_size):
-    """FlyDSL decode must match fp32 attention on dequantized KV."""
-    centroids, q_bf16, kv_cache, block_table, seq_lens, k_ref, v_ref = _build_cache(
-        num_seqs, num_kv_heads, seq_len, qg, kv_block_size
-    )
-    scale = 1.0 / (HEAD_SIZE**0.5)
+def _run_flydsl(query, centroids, kv_cache, block_table, seq_lens, seq_len, scale):
     identity = torch.eye(HEAD_SIZE, dtype=torch.float32, device="cuda")
-
-    out = flydsl_turboquant_decode_attention(
-        query=q_bf16,
+    return flydsl_turboquant_decode_attention(
+        query=query,
         kv_cache=kv_cache,
         block_table=block_table,
         seq_lens=seq_lens,
@@ -248,6 +231,53 @@ def test_flydsl_matches_reference(num_seqs, seq_len, num_kv_heads, qg, kv_block_
         sinks=None,
     )
 
+
+@pytest.mark.parametrize("num_seqs", [1, 4, 16])
+@pytest.mark.parametrize("seq_len", [256, 1024, 4096])
+@pytest.mark.parametrize(
+    "num_kv_heads,qg",
+    [
+        (8, 8),  # Qwen2.5-72B class
+        (8, 16),  # Qwen3-32B class
+        (4, 6),  # MiniMax-M2.5 class
+    ],
+)
+@pytest.mark.parametrize("kv_block_size", [16, 32])
+def test_flydsl_matches_reference(num_seqs, seq_len, num_kv_heads, qg, kv_block_size):
+    """FlyDSL decode must match fp32 attention on dequantized KV."""
+    centroids, q_bf16, kv_cache, block_table, seq_lens, k_ref, v_ref = _build_cache(
+        num_seqs, num_kv_heads, seq_len, qg, kv_block_size
+    )
+    scale = 1.0 / (HEAD_SIZE**0.5)
+
+    out = _run_flydsl(
+        q_bf16, centroids, kv_cache, block_table, seq_lens, seq_len, scale
+    )
+
     ref = _reference_attention(q_bf16.cpu(), k_ref, v_ref, seq_lens.cpu(), scale)
 
+    torch.testing.assert_close(out.cpu().float(), ref, atol=ATOL, rtol=0.0)
+
+
+@pytest.mark.parametrize("num_kv_heads,qg", [(8, 8), (8, 16), (4, 6)])
+def test_flydsl_fp16_query(num_kv_heads, qg):
+    """fp16 models: output keeps the query dtype and matches the reference."""
+    # A seq_len outside test_flydsl_matches_reference's grid gets a fresh
+    # kernel build: tq_decode's module-global SmemAllocator makes FlyDSL reject
+    # reusing a cached launcher once another shape has been built.
+    seq_len = 2048
+    centroids, q_bf16, kv_cache, block_table, seq_lens, k_ref, v_ref = _build_cache(
+        4, num_kv_heads, seq_len, qg, 16
+    )
+    # x16 peaks the softmax: at the default 0.1 scale attention is near-uniform,
+    # so a misread Q still lands within ATOL. x16 is exact in fp16 and bf16.
+    q_fp16 = (q_bf16 * 16).to(torch.float16)
+    scale = 1.0 / (HEAD_SIZE**0.5)
+
+    out = _run_flydsl(
+        q_fp16, centroids, kv_cache, block_table, seq_lens, seq_len, scale
+    )
+
+    assert out.dtype == torch.float16
+    ref = _reference_attention(q_fp16.cpu(), k_ref, v_ref, seq_lens.cpu(), scale)
     torch.testing.assert_close(out.cpu().float(), ref, atol=ATOL, rtol=0.0)

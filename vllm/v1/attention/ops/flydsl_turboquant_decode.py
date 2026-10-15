@@ -234,12 +234,14 @@ class _SegmBufPool:
                 # eager mixed-batch path. By pooling q_rot here (same pattern as
                 # segm_out/output above), the data_ptr is stable from first
                 # allocation onward — same for all captured B's and eager calls.
+                # Always bf16: the kernel reads Q as bf16 whatever the model
+                # dtype (fp16 models included).
                 "q_rot": torch.empty(
                     (B_bucket, Hq, D),
-                    dtype=q_dtype,
+                    dtype=torch.bfloat16,
                     device=device,
                 ),
-                # q_float: fp32 copy of query (bf16→fp32 for mm input).
+                # q_float: fp32 copy of query (query dtype→fp32 for mm input).
                 # Pooled to avoid fresh allocations post-capture.
                 "q_float": torch.empty(
                     (B_bucket, Hq, D),
@@ -661,8 +663,8 @@ def flydsl_turboquant_decode_attention(
     # ---- q rotation: GEMM q @ PiT via stable pooled buffers -------------
     _q_float = pool_bufs["q_float"]  # [B, Hq, D] fp32, stable
     _q_rot_f32 = pool_bufs["q_rot_fp32"]  # [B, Hq, D] fp32, stable mm output
-    _q_rot_out = pool_bufs["q_rot"]  # [B, Hq, D] query.dtype, stable
-    _q_float.copy_(query)  # bf16 → fp32 in-place, no alloc
+    _q_rot_out = pool_bufs["q_rot"]  # [B, Hq, D] bf16, stable
+    _q_float.copy_(query)  # query dtype → fp32 in-place, no alloc
     # mm into stable fp32 buffer via out= to avoid fresh allocations.
     # PiT_f32 is cached on buf_holder (stable ptr since first layer warmup).
     torch.mm(
