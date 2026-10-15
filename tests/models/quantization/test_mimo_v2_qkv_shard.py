@@ -271,7 +271,7 @@ def test_load_weights_pairs_split_fp8_qkv_proj_and_skips_absent_layers(monkeypat
     torch.nn.Module.__init__(model)
     model.layers = torch.nn.ModuleList([layer])
     model.config = SimpleNamespace(num_key_value_heads=ckpt_tp)
-    model.get_expert_mapping = lambda: []
+    monkeypatch.setattr(model, "get_expert_mapping", lambda: [])
 
     present, absent = "layers.0.self_attn.qkv_proj", "layers.7.self_attn.qkv_proj"
     loaded = mimo_v2.MiMoV2Model.load_weights(
