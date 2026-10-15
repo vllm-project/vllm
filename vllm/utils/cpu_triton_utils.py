@@ -12,30 +12,30 @@ import torch
 def _compute_slot_mapping_kernel_impl(
     num_tokens: int,
     max_num_tokens: int,
-    query_start_loc: torch.Tensor,  # [num_reqs + 1], int32
-    positions: torch.Tensor,  # [num_tokens], int64
-    block_table: torch.Tensor,  # [max_num_reqs, max_num_blocks_per_req], int32
-    block_table_stride: int,  # max_num_blocks_per_req
-    block_size: int,
-    slot_mapping: torch.Tensor,  # [max_num_tokens], int64
-    KV_CACHE_BLOCK_SIZE: int | None = None,
-    BLOCKS_PER_KV_BLOCK: int = 1,
-    TOTAL_CP_WORLD_SIZE: int = 1,
-    TOTAL_CP_RANK: int = 0,
-    CP_KV_CACHE_INTERLEAVE_SIZE: int = 1,
-    PAD_ID: int = -1,
-    BLOCK_SIZE: int = 1024,
+    query_start_loc_ptr: torch.Tensor,  # [num_reqs + 1], int32
+    positions_ptr: torch.Tensor,  # [num_tokens], int64
+    block_table_ptr: torch.Tensor,  # [max_num_reqs, max_num_blocks_per_req], int32
+    block_table_stride: int,
+    slot_mapping_ptr: torch.Tensor,  # [max_num_tokens], int64
+    KV_CACHE_BLOCK_SIZE: int,
+    TOTAL_CP_WORLD_SIZE: int,
+    TOTAL_CP_RANK: int,
+    CP_KV_CACHE_INTERLEAVE_SIZE: int,
+    PAD_ID: int,
+    BLOCK_SIZE: int,
 ) -> None:
+    del TOTAL_CP_RANK, CP_KV_CACHE_INTERLEAVE_SIZE, BLOCK_SIZE
     assert TOTAL_CP_WORLD_SIZE == 1, "Context Parallelism is not supported on CPU."
-    if BLOCKS_PER_KV_BLOCK != 1:
-        assert block_size * BLOCKS_PER_KV_BLOCK == KV_CACHE_BLOCK_SIZE
+    assert block_table_stride == block_table_ptr.stride(0)
     torch.ops._C.compute_slot_mapping_kernel_impl(
-        query_start_loc,
-        positions,
-        block_table,
-        slot_mapping,
-        block_size,
+        query_start_loc_ptr,
+        positions_ptr,
+        block_table_ptr,
+        slot_mapping_ptr,
+        KV_CACHE_BLOCK_SIZE,
     )
+    if num_tokens < max_num_tokens:
+        slot_mapping_ptr[num_tokens:max_num_tokens].fill_(PAD_ID)
 
 
 def _ensure_int64(t: torch.Tensor) -> torch.Tensor:
