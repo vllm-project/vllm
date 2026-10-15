@@ -305,7 +305,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Draft tokens propagation - for spec-dec + struct outputs.
         self.draft_tokens_handler = DraftTokensHandler(self.device)
 
-        self.pcp_manager: pcp.PCPManager | None = None
+        # Built before memory profiling; block tables are attached at KV init.
+        self.pcp_manager = pcp.maybe_build_pcp_manager(
+            self.vllm_config,
+            self.device,
+            self.supports_mm_inputs,
+            cls=self.pcp_manager_cls,
+        )
 
         # Pooling models.
         self.is_pooling_model = self.model_config.runner_type == "pooling"
@@ -700,13 +706,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             cp_rank=self.dcp_rank,
             cp_interleave=self.cp_interleave,
         )
-        self.pcp_manager = pcp.maybe_build_pcp_manager(
-            self.vllm_config,
-            self.device,
-            self.supports_mm_inputs,
-            self.block_tables,
-            cls=self.pcp_manager_cls,
-        )
+        if self.pcp_manager is not None:
+            self.pcp_manager.set_block_tables(self.block_tables)
         self.ubatch_runner = maybe_build_ubatch_runner(
             self.vllm_config,
             self.device,
@@ -1848,7 +1849,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 # All-zero input_ids route every token to the same experts.
                 input_batch.input_ids.random_(0, self.vocab_size)
             if self.pcp_manager is not None:
-                input_batch = self.pcp_manager.prepare_inputs_to_capture(input_batch)
+                input_batch = self.pcp_manager.prepare_inputs_for_capture_or_profile(
+                    input_batch
+                )
             if skip_attn_for_dummy_run:
                 assert batch_desc.cg_mode != CUDAGraphMode.FULL, (
                     "Attention metadata must be prepared for dummy runs when using "
