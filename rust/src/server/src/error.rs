@@ -22,6 +22,8 @@ pub enum ApiError {
     ModelNotFound { model: String },
     /// The request body could not be parsed as valid JSON.
     JsonParseError { message: String },
+    /// The requested operation conflicts with current server state.
+    Conflict { message: String },
     /// An unexpected internal failure happened before streaming started.
     ServerError { message: String },
     /// Generation is paused; the request was rejected and can be retried.
@@ -34,6 +36,7 @@ impl ApiError {
         match self {
             Self::InvalidRequest { .. } => StatusCode::BAD_REQUEST,
             Self::ModelNotFound { .. } => StatusCode::NOT_FOUND,
+            Self::Conflict { .. } => StatusCode::CONFLICT,
             Self::ServerError { .. } => StatusCode::INTERNAL_SERVER_ERROR,
             Self::JsonParseError { .. } => StatusCode::BAD_REQUEST,
             Self::EnginePaused => StatusCode::SERVICE_UNAVAILABLE,
@@ -67,6 +70,12 @@ impl ApiError {
                 error_type: "invalid_request_error".to_string(),
                 param: None,
                 code: Some("json_parse_error".to_string()),
+            },
+            Self::Conflict { message } => ErrorDetail {
+                message: message.clone(),
+                error_type: "conflict_error".to_string(),
+                param: None,
+                code: Some("conflict_error".to_string()),
             },
             Self::EnginePaused => ErrorDetail {
                 message: "Generation is paused. Please retry after it resumes.".to_string(),

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Model Recipes"
+  short_description: "Find vLLM deployment recipes and configs for LLMs and Hugging Face models by model and hardware."
+  default_prompt: "Use $model-recipes to find a recipe for my model and hardware, and return its commands and deployment caveats."

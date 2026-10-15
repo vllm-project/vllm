@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 import numpy as np
 
 from vllm.v1.kv_offload.base import (
+    ConfigInfoMapping,
     Locality,
     LookupResult,
     Medium,
@@ -24,6 +25,7 @@ from vllm.v1.kv_offload.base import (
 from vllm.v1.kv_offload.tiering.backpressure import (
     BackpressureDetector,
 )
+from vllm.v1.metrics.cache_hit_source import CacheHitSource
 
 if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
@@ -34,6 +36,8 @@ if TYPE_CHECKING:
 
 # Type alias for job IDs used in async transfer tracking
 JobId = int
+
+TIER_LABEL = "tier"
 
 
 class TieringOffloadingMetrics:
@@ -141,6 +145,17 @@ class SecondaryTierManager(ABC):
     """
 
     medium: ClassVar[Medium | None] = None
+    # Cache tier reported for hits served from this tier. Derived from
+    # ``medium`` unless a subclass sets it; ``None`` medium means unknown.
+    cache_hit_source: ClassVar[CacheHitSource] = CacheHitSource.EXTERNAL_UNSPECIFIED
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        if "cache_hit_source" not in cls.__dict__ and cls.medium is not None:
+            cls.cache_hit_source = {
+                Medium.CPU: CacheHitSource.HOST,
+                Medium.STORAGE: CacheHitSource.DISK,
+            }[cls.medium]
 
     def __init__(
         self,
@@ -358,3 +373,23 @@ class SecondaryTierManager(ABC):
     def get_stats(self) -> "OffloadingConnectorStats | None":
         """Return and reset metric observations collected by this tier."""
         return None
+
+    @classmethod
+    def config_info_keys(cls, tier_config: dict[str, Any]) -> tuple[str, ...]:
+        """Return the info metric label names of this tier.
+
+        TieringOffloadingSpec merges the names of all tiers and adds
+        TIER_LABEL, so a tier must not declare it. See ConfigInfo.
+
+        Args:
+            tier_config: Configuration dict of this tier.
+
+        """
+        return ()
+
+    def config_info(self) -> ConfigInfoMapping:
+        """Return the info metric labels of this tier, for its one series.
+
+        TieringOffloadingManager adds TIER_LABEL. See ConfigInfo.
+        """
+        return {}
