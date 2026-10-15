@@ -1390,7 +1390,6 @@ def launch_core_engines(
             engines_to_handshake,
             parallel_config,
             dp_size > 1 and vllm_config.model_config.is_moe,
-            not (local_engines_only and dp_rank > 0),
             vllm_config.cache_config,
             launch,
         )
@@ -1401,7 +1400,6 @@ def wait_for_engine_startup(
     core_engines: list[CoreEngine],
     parallel_config: ParallelConfig,
     coordinated_dp: bool,
-    send_parallel_config: bool,
     cache_config: CacheConfig,
     launch: CoreEngineLaunch,
 ):
@@ -1514,7 +1512,10 @@ def wait_for_engine_startup(
         if status == "HELLO" and engine.state == CoreEngineState.NEW:
             # Send init message with DP config info.
             parallel_config_payload: dict[str, int | str | list[int]] = {}
-            if coordinated_dp and send_parallel_config:
+            if coordinated_dp and not (
+                parallel_config.local_engines_only
+                and parallel_config.data_parallel_rank > 0
+            ):
                 parallel_config_payload = {
                     k: getattr(parallel_config, k)
                     for k in (
@@ -1525,14 +1526,13 @@ def wait_for_engine_startup(
                         "data_parallel_size",
                     )
                 }
-                if parallel_config.enable_elastic_ep:
-                    if not parallel_config._coord_store_port:
-                        raise RuntimeError(
-                            "Elastic EP startup requires a coordination TCPStore "
-                            "port before engine handshake."
-                        )
-                    parallel_config_payload["_coord_store_port"] = (
-                        parallel_config._coord_store_port
+                if (
+                    parallel_config.enable_elastic_ep
+                    and not parallel_config._coord_store_port
+                ):
+                    raise RuntimeError(
+                        "Elastic EP startup requires a coordination TCPStore "
+                        "port before engine handshake."
                     )
             init_message = msgspec.msgpack.encode(
                 EngineHandshakeMetadata(
