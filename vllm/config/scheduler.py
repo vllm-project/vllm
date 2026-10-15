@@ -205,6 +205,16 @@ class SchedulerConfig:
     once every N engine steps, aligned across DP ranks, to better balance
     per-step forward-pass times."""
 
+    dp_prefill_delayer: bool = False
+    """For data-parallel MoE deployments, hold prefill on every DP rank until
+    the ranks can run it in the same step, and keep the steps after a prefill
+    decode-only. Every step costs one small CPU all-reduce on the DP group.
+    Replaces `prefill_schedule_interval`."""
+
+    dp_prefill_delayer_protected_steps: int = Field(default=10, ge=0)
+    """With `dp_prefill_delayer`, the number of decode-only steps after a step
+    that ran prefill."""
+
     async_scheduling: bool | None = None
     """If set to False, disable async scheduling. Async scheduling helps to
     avoid gaps in GPU utilization, leading to better latency and throughput.
@@ -307,6 +317,12 @@ class SchedulerConfig:
             logger.info_once(
                 "Chunked prefill is enabled with max_num_batched_tokens=%d.",
                 self.max_num_batched_tokens,
+            )
+
+        if self.dp_prefill_delayer and self.prefill_schedule_interval > 1:
+            raise ValueError(
+                "dp_prefill_delayer replaces prefill_schedule_interval; set "
+                "only one of them."
             )
 
         self.verify_max_model_len(max_model_len)
