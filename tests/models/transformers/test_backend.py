@@ -786,42 +786,64 @@ def test_get_mrope_input_positions_omits_unsupported_grid_kwargs():
     assert delta == 0
 
 
-def test_mtp_draft_loads_mtp_weights(tmp_path, tp_init, monkeypatch):
+# The smallest sizes the fused MoE kernels accept
+MTP_HIDDEN_SIZE = 128
+MTP_MOE_KWARGS = dict(
+    vocab_size=128,
+    hidden_size=MTP_HIDDEN_SIZE,
+    intermediate_size=256,
+    moe_intermediate_size=128,
+    n_routed_experts=4,
+    num_experts_per_tok=2,
+)
+# Real layer counts, since the MTP weight patterns hard-code them
+MTP_MODELS = {
+    "glm4_moe": dict(
+        num_hidden_layers=46, num_attention_heads=2, num_key_value_heads=1, head_dim=64
+    ),
+    "deepseek_v3": dict(
+        num_hidden_layers=61,
+        num_attention_heads=16,
+        q_lora_rank=64,
+        kv_lora_rank=512,
+        qk_nope_head_dim=128,
+        qk_rope_head_dim=64,
+        v_head_dim=128,
+        first_k_dense_replace=1,
+        n_group=1,
+        topk_group=1,
+    ),
+}
+
+
+@pytest.mark.parametrize("model_type", MTP_MODELS)
+def test_mtp_draft_loads_mtp_weights(model_type, tmp_path, tp_init, monkeypatch):
     """An MTP draft for a model following the Transformers MTP standard loads each
     MTP layer appended to the target's checkpoint into `MtpModel`'s layout."""
     from safetensors.torch import load_file, save_file
-    from transformers import Glm4MoeConfig, Glm4MoeForCausalLM
+    from transformers import AutoConfig, AutoModelForCausalLM
 
     from vllm.config import ParallelConfig, SpeculativeConfig, set_current_vllm_config
     from vllm.model_executor.model_loader import get_model
 
-    # Real layer count, since GLM-4.5-Air's MTP weight pattern hard-codes it
-    num_hidden_layers = 46
+    kwargs = MTP_MODELS[model_type] | MTP_MOE_KWARGS
+    num_hidden_layers = kwargs.pop("num_hidden_layers")
     num_mtp_layers = 2
-    # GLM has one MTP layer, so register the second like Step-3.7 registers its own
+    hidden_size = MTP_HIDDEN_SIZE
+    config = AutoConfig.for_model(
+        model_type, num_hidden_layers=num_hidden_layers + num_mtp_layers, **kwargs
+    )
+    model_cls = AutoModelForCausalLM._model_mapping[type(config)]
+    config.architectures = [model_cls.__name__]
+    # These have one MTP layer, so register the second like Step-3.7 registers its own
     monkeypatch.setattr(
-        Glm4MoeForCausalLM,
+        model_cls,
         "_keys_to_ignore_on_load_unexpected",
         [rf"model\.layers\.{num_hidden_layers + 1}.*"]
-        + Glm4MoeForCausalLM._keys_to_ignore_on_load_unexpected,
-    )
-    # The smallest sizes the fused MoE kernels accept
-    hidden_size = 128
-    config = Glm4MoeConfig(
-        vocab_size=128,
-        hidden_size=hidden_size,
-        intermediate_size=256,
-        moe_intermediate_size=128,
-        num_attention_heads=2,
-        num_key_value_heads=1,
-        head_dim=64,
-        n_routed_experts=4,
-        num_experts_per_tok=2,
-        num_hidden_layers=num_hidden_layers + num_mtp_layers,
-        architectures=["Glm4MoeForCausalLM"],
+        + model_cls._keys_to_ignore_on_load_unexpected,
     )
     # Save the MTP layers as the last decoder layers, then add their MTP modules
-    Glm4MoeForCausalLM(config).save_pretrained(tmp_path)
+    model_cls(config).save_pretrained(tmp_path)
     weights = load_file(tmp_path / "model.safetensors")
     for i in range(num_hidden_layers, num_hidden_layers + num_mtp_layers):
         for name, shape in {
