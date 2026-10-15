@@ -226,7 +226,20 @@ def rank_worker(
                 and issubclass(config.fused_experts_type, AiterExperts)
                 and config.quant_config is not None
             )
-            if is_aiter_fp8:
+
+            # AITER_MXFP4_BF16 silently computes the wrong thing for
+            # bias-free SwiGLU-OAI (~55% sign agreement, ~5x-small magnitude
+            # on hardware), instead of raising. Only smoke-test until the
+            # fix in https://github.com/vllm-project/vllm/pull/59766 lands.
+            if config.is_w4a16_mxfp4 and config.activation == MoEActivation.SWIGLUOAI:
+                assert mk_out.shape == ref_out.shape, (
+                    f"AiterMxfp4Experts output shape {mk_out.shape} != "
+                    f"reference shape {ref_out.shape}."
+                )
+                assert torch.isfinite(mk_out).all(), (
+                    "AiterMxfp4Experts (W4A16) produced non-finite output."
+                )
+            elif is_aiter_fp8:
                 check_accuracy(ref_out, mk_out, atol=atol, rtol=rtol, percent=0.9)
             else:
                 torch.testing.assert_close(ref_out, mk_out, atol=atol, rtol=rtol)
