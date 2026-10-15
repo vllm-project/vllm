@@ -302,9 +302,7 @@ class TieringOffloadingManager(OffloadingManager):
             successful_keys = ()
             failed_keys = transfer_job.keys
 
-        load_sources = self._request_load_sources.get(
-            transfer_job.req_context.req_id
-        )
+        load_sources = self._request_load_sources.get(transfer_job.req_context.req_id)
         if load_sources is not None:
             source = self.secondary_tiers[job_metadata.tier_idx].cache_hit_source
             for key in failed_keys:
@@ -663,11 +661,11 @@ class TieringOffloadingManager(OffloadingManager):
             return None
 
         if primary_result.keys_to_store:
-            state = self._get_request_state(req_context)
+            state = self._live_req_states[id(req_context)]
             state.pending_primary_stores += 1
 
         # Step 3: For request-level tiers, cascade chunks already in primary
-        request_level_tiers = self._get_request_state(req_context).request_level_tiers
+        request_level_tiers = self._live_req_states[id(req_context)].request_level_tiers
         if request_level_tiers:
             keys_to_store_set = set(primary_result.keys_to_store)
             keys_already_in_primary = tuple(
@@ -699,7 +697,7 @@ class TieringOffloadingManager(OffloadingManager):
         what makes parking HIT_PENDING safe, so it is rejected rather than
         guessed at.
         """
-        state = self._get_request_state(req_context)
+        state = self._live_req_states[id(req_context)]
         ready_keys = []
         for key in keys:
             result = self.primary_tier.lookup(key, req_context)
@@ -779,7 +777,7 @@ class TieringOffloadingManager(OffloadingManager):
 
         # Note: The async transfers are now in flight. Their completion is
         # tracked via get_finished_jobs() / _maybe_process_finished_jobs().
-        state = self._get_request_state(req_context)
+        state = self._live_req_states[id(req_context)]
         assert state.pending_primary_stores > 0
         state.pending_primary_stores -= 1
         self._maybe_finalize_request(state)
@@ -844,9 +842,6 @@ class TieringOffloadingManager(OffloadingManager):
         )
         return RequestOffloadingContext(policy=policy)
 
-    def _get_request_state(self, req_context: ReqContext) -> RequestState:
-        return self._live_req_states[id(req_context)]
-
     @override
     def on_request_finished(
         self,
@@ -855,7 +850,7 @@ class TieringOffloadingManager(OffloadingManager):
         exclude_tier_idx: int | None = None,
     ) -> None:
         self.primary_tier.on_request_finished(req_context)
-        state = self._get_request_state(req_context)
+        state = self._live_req_states[id(req_context)]
         state.is_finished = True
         self._maybe_finalize_request(state, exclude_tier_idx)
 
