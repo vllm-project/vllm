@@ -33,6 +33,7 @@ steps:
     amd:
       label: ":amd: (MI300) Model Executor"
       dind: false
+      automatic_shard: true
       device: mi300_1
       timeout_in_minutes: 75
       depends_on:
