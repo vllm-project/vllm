@@ -20,8 +20,7 @@ def set_scaling_elastic_ep(value):
 
 
 class ScalingMiddleware:
-    """
-    Middleware that checks if the model is currently scaling and
+    """Middleware that checks if the model is currently scaling and
     returns a 503 Service Unavailable response if it is.
 
     This middleware applies to all HTTP requests and prevents
