@@ -6,9 +6,7 @@ import types
 from unittest.mock import MagicMock, patch
 
 import pytest
-from packaging.version import Version
 from transformers import BitsAndBytesConfig
-from transformers import __version__ as TRANSFORMERS_VERSION
 from vllm_bnb_plugin import bitsandbytes_loader as bnb
 
 from vllm.platforms import current_platform
@@ -174,8 +172,7 @@ def test_load_pp_4bit_bnb_model(
     )
 
 
-@pytest.mark.skipif(
-    Version(TRANSFORMERS_VERSION) >= Version("5.0.0"),
+@pytest.mark.skip(
     reason="Need to add support for quantizing MoE experts with bnb in "
     "transformers v5. See https://github.com/bitsandbytes-foundation/"
     "bitsandbytes/issues/1849",
@@ -271,7 +268,7 @@ def test_bitsandbytes_passes_revision_by_name():
             return_value=["/folder/model.safetensors"],
         ),
     ):
-        bnb.BitsAndBytesModelLoader._prepare_weights(fake_self, "org/model", "myrev")  # type: ignore[arg-type]
+        bnb.BitsAndBytesModelLoader._prepare_weights(fake_self, "org/model", "myrev")
 
     mock_idx.assert_called_once()
     assert mock_idx.call_args.kwargs.get("revision") == "myrev"

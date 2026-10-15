@@ -9,14 +9,12 @@ from collections import defaultdict
 from pathlib import PosixPath
 
 import pytest
-from packaging.version import Version
 from transformers import (
     AutoModel,
     AutoModelForCausalLM,
     AutoModelForImageTextToText,
     AutoModelForTextToWaveform,
 )
-from transformers import __version__ as TRANSFORMERS_VERSION
 
 from vllm.platforms import current_platform
 from vllm.utils.func_utils import identity
@@ -151,10 +149,12 @@ VLM_TEST_SETTINGS = {
         img_idx_to_prompt=lambda idx: "<|vision_start|><|image_pad|><|vision_end|>",
         video_idx_to_prompt=lambda idx: "<|vision_start|><|video_pad|><|vision_end|>",
         enforce_eager=False,
+        needs_video_metadata=True,
         max_model_len=4096,
         max_num_seqs=2,
         auto_cls=AutoModelForImageTextToText,
         vllm_output_post_proc=model_utils.qwen2_vllm_to_hf_output,
+        patch_hf_runner=model_utils.qwen3_vl_patch_hf_runner,
         image_size_factors=[(0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
         marks=[pytest.mark.core_model, pytest.mark.cpu_model],
     ),
@@ -317,8 +317,6 @@ VLM_TEST_SETTINGS = {
         img_idx_to_prompt=lambda idx: "",
         auto_cls=AutoModelForImageTextToText,
         vllm_output_post_proc=model_utils.blip2_vllm_to_hf_output,
-        # FIXME: https://github.com/huggingface/transformers/pull/38510
-        marks=[pytest.mark.skip("Model is broken")],
     ),
     "cosmos3": VLMTestInfo(
         models=["nvidia/Cosmos3-Nano"],
@@ -799,7 +797,6 @@ VLM_TEST_SETTINGS = {
         dtype="half",
         num_logprobs=10,
         patch_hf_runner=model_utils.ovis2_5_patch_hf_runner,
-        hf_model_kwargs={"revision": "refs/pr/5"},
     ),
     "paddleocr_vl": VLMTestInfo(
         models=["PaddlePaddle/PaddleOCR-VL"],
@@ -819,12 +816,7 @@ VLM_TEST_SETTINGS = {
         patch_hf_runner=model_utils.paddleocr_vl_patch_hf_runner,
         image_size_factors=[(0.25,)],
         marks=[
-            pytest.mark.skipif(
-                Version(TRANSFORMERS_VERSION) == Version("4.57.3"),
-                reason="This model is broken in Transformers v4.57.3",
-            ),
-            pytest.mark.skipif(
-                Version(TRANSFORMERS_VERSION) >= Version("5.0.0"),
+            pytest.mark.skip(
                 reason="Model's custom code uses ROPE_INIT_FUNCTIONS"
                 "['default'] which was removed in transformers v5",
             ),

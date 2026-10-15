@@ -45,6 +45,7 @@ def solve_lloyd_max(
     Returns:
         centroids: Sorted tensor of 2^bits optimal centroids.
         boundaries: Sorted tensor of 2^bits - 1 decision boundaries.
+
     """
     n_levels = 2**bits
     sigma2 = 1.0 / d

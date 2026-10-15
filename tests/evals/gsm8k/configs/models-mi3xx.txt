@@ -6,5 +6,3 @@ Qwen3-30B-A3B-NVFP4.yaml
 Qwen3-30B-A3B-NVFP4-quark.yaml
 Qwen3.5-35B-A3B-MXFP4-AITER-TP2.yaml
 Qwen3.5-35B-A3B-MXFP4-EMU-TP2.yaml
-Qwen-1.5-MOE-W-MXFP4-A-MXFP6.yaml
-Qwen-1.5-MOE-W-MXFP6-A-MXFP6.yaml
