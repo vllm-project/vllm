@@ -28,6 +28,7 @@ steps:
     amd:
       label: ":amd: (MI300) V1 Spec Decode"
       dind: false
+      automatic_shard: true
       device: mi300_1
       timeout_in_minutes: 50
       depends_on:
@@ -594,7 +595,6 @@ steps:
       - vllm/model_executor/models/gemma4_mtp.py
       - vllm/model_executor/models/llama.py
       - vllm/model_executor/models/llama_eagle3.py
-      - vllm/model_executor/models/medusa.py
       - vllm/model_executor/models/registry.py
       - tests/evals/gsm8k/
       - tests/utils.py
