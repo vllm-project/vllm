@@ -2626,6 +2626,32 @@ class rocm_aiter_ops:
         """
         return cls._AITER_ENABLED and cls._gdn_triton_kernels_importable()
 
+    @staticmethod
+    def _kda_gluon_decode_importable() -> bool:
+        try:
+            from aiter.ops.triton.attention import kda  # noqa: F401
+
+            return True
+        except (ImportError, ModuleNotFoundError):
+            return False
+
+    @classmethod
+    @if_aiter_supported
+    def is_kda_gluon_decode_available(cls) -> bool:
+        """Check if AITER's Gluon KDA decode kernels can run here.
+
+        ``aiter.ops.triton.attention.kda`` (conv + gated delta rule + gated
+        RMSNorm in one launch, plain and speculative decode) ships CDNA4+
+        (gfx950, gfx1250) builds only, and is absent in older aiter releases.
+        """
+        from vllm.platforms.rocm import get_cdna_version
+
+        return (
+            cls._AITER_ENABLED
+            and get_cdna_version() >= 4
+            and cls._kda_gluon_decode_importable()
+        )
+
     @classmethod
     @functools.cache
     def is_gdn_flydsl_prefill_available(cls) -> bool:
@@ -4049,6 +4075,90 @@ class rocm_aiter_ops:
             q_out=query,
             k_out=key,
             output_zeros=False,
+        )
+
+    @staticmethod
+    def kda_fused_recurrent_packed_decode(
+        mixed_qkv: torch.Tensor,
+        g: torch.Tensor,
+        beta: torch.Tensor,
+        A_log: torch.Tensor,
+        dt_bias: torch.Tensor,
+        lower_bound: float | None,
+        initial_state: torch.Tensor,
+        ssm_state_indices: torch.Tensor,
+        conv_state: torch.Tensor,
+        conv_weight: torch.Tensor,
+        out_gate: torch.Tensor,
+        norm_weight: torch.Tensor,
+        norm_eps: float,
+        out: torch.Tensor,
+    ) -> torch.Tensor:
+        from aiter.ops.triton.attention.kda import fused_recurrent_kda_packed_decode
+
+        return fused_recurrent_kda_packed_decode(
+            mixed_qkv=mixed_qkv,
+            g=g,
+            beta=beta,
+            A_log=A_log,
+            dt_bias=dt_bias,
+            lower_bound=lower_bound,
+            initial_state=initial_state,
+            ssm_state_indices=ssm_state_indices,
+            conv_state=conv_state,
+            conv_weight=conv_weight,
+            out_gate=out_gate,
+            norm_weight=norm_weight,
+            norm_eps=norm_eps,
+            out=out,
+        )
+
+    @staticmethod
+    def kda_fused_recurrent_spec_decode(
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        g: torch.Tensor,
+        beta: torch.Tensor,
+        A_log: torch.Tensor,
+        dt_bias: torch.Tensor,
+        lower_bound: float | None,
+        initial_state: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        ssm_state_indices: torch.Tensor,
+        num_accepted_tokens: torch.Tensor,
+        conv_state: torch.Tensor,
+        conv_weight: torch.Tensor,
+        out_gate: torch.Tensor,
+        norm_weight: torch.Tensor,
+        norm_eps: float,
+        out: torch.Tensor,
+    ) -> None:
+        from aiter.ops.triton.attention.kda import fused_recurrent_kda
+
+        fused_recurrent_kda(
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            beta=beta,
+            A_log=A_log,
+            dt_bias=dt_bias,
+            lower_bound=lower_bound,
+            initial_state=initial_state,
+            cu_seqlens=cu_seqlens,
+            ssm_state_indices=ssm_state_indices,
+            num_accepted_tokens=num_accepted_tokens,
+            use_qk_l2norm_in_kernel=True,
+            use_gate_in_kernel=True,
+            use_beta_sigmoid_in_kernel=True,
+            pad_slot_guard=True,
+            conv_state=conv_state,
+            conv_weight=conv_weight,
+            out_gate=out_gate,
+            norm_weight=norm_weight,
+            norm_eps=norm_eps,
+            out=out,
         )
 
     @staticmethod
