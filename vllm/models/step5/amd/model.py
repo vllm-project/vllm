@@ -6,6 +6,7 @@ import torch
 from torch import nn
 
 from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.model_executor.layers.attention.attention import unified_kv_cache_update
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.models.step3p5 import (
@@ -152,6 +153,12 @@ class Step5Attention(Step3p5Attention):
             raise NotImplementedError(
                 f"Step-5 sparse attention reads a BF16 KV cache; got {cache_dtype}"
             )
+        if self.attn.attn_backend.get_name() != "ROCM_AITER_UNIFIED_ATTN":
+            raise NotImplementedError(
+                "Step-5 sparse attention reads the ROCM_AITER_UNIFIED_ATTN "
+                "K/V cache layout; pass --attention-backend "
+                "ROCM_AITER_UNIFIED_ATTN."
+            )
         if not self.use_rope:
             raise NotImplementedError("Step-5 sparse layers require RoPE")
         self.indexer = Step5SparseIndexer(
@@ -173,18 +180,20 @@ class Step5Attention(Step3p5Attention):
         q = self.q_norm(q.view(-1, self.num_heads, self.head_dim)).view(q.shape)
         k = self.k_norm(k.view(-1, self.num_kv_heads, self.head_dim)).view(k.shape)
         q, k = self.rotary_emb(positions, q, k)
-        # Only for the K/V cache write; the dense output is discarded.
-        self.attn(q, k, v)
-
         query = q.view(-1, self.num_heads, self.head_dim)
+        k = k.view(-1, self.num_kv_heads, self.head_dim)
+        v = v.view(-1, self.num_kv_heads, self.head_dim)
         out = torch.empty_like(query)
-        layer_name = _encode_layer_name(self.csa_layer_name)
+        attn_name = _encode_layer_name(self.attn.layer_name)
+        csa_name = _encode_layer_name(self.csa_layer_name)
         if current_platform.opaque_attention_op():
+            kv_dep = torch.ops.vllm.unified_kv_cache_update(k, v, attn_name)
             torch.ops.vllm.step5_csa_attention(
-                hidden_states, positions, query, out, layer_name
+                hidden_states, positions, query, out, csa_name, kv_dep
             )
         else:
-            step5_csa_attention(hidden_states, positions, query, out, layer_name)
+            kv_dep = unified_kv_cache_update(k, v, attn_name)
+            step5_csa_attention(hidden_states, positions, query, out, csa_name, kv_dep)
         if self.use_head_wise_attn_gate:
             gate, _ = self.g_proj(hidden_states)
             out = out * gate.unsqueeze(-1).sigmoid().to(out.dtype)

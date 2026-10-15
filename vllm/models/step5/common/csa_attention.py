@@ -71,7 +71,9 @@ def step5_csa_attention(
     query: torch.Tensor,
     output: torch.Tensor,
     layer_name: LayerNameType,
+    kv_cache_dummy_dep: torch.Tensor | None = None,
 ) -> None:
+    del kv_cache_dummy_dep
     layer: Step5Attention = get_forward_context().no_compile_layers[
         _resolve_layer_name(layer_name)
     ]
@@ -154,6 +156,7 @@ def step5_csa_attention_fake(
     query: torch.Tensor,
     output: torch.Tensor,
     layer_name: LayerNameType,
+    kv_cache_dummy_dep: torch.Tensor | None = None,
 ) -> None:
     return
 
