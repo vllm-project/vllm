@@ -248,10 +248,6 @@ class Step3p5Attention(nn.Module):
         )
 
         self.max_position_embeddings = max_position
-        assert self.partial_rotary_factor == 1 or self.partial_rotary_factor == 0.5
-        self.rotary_dim = (
-            self.head_dim if self.partial_rotary_factor == 1 else self.head_dim // 2
-        )
 
     def forward(
         self,
@@ -394,6 +390,8 @@ class FusedMoEBlock(nn.Module):
 
 
 class Step3p5DecoderLayer(nn.Module):
+    attention_cls: type[Step3p5Attention] = Step3p5Attention
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -425,7 +423,7 @@ class Step3p5DecoderLayer(nn.Module):
                 head_dim = attention_other_setting["head_dim"]
             partial_rotary_factors = getattr(config, "partial_rotary_factors", [])
             assert config.max_position_embeddings is not None
-            self.self_attn = Step3p5Attention(
+            self.self_attn = self.attention_cls(
                 hidden_size=self.hidden_size,
                 num_heads=num_attention_heads
                 if num_attention_heads
@@ -518,6 +516,8 @@ class Step3p5DecoderLayer(nn.Module):
 
 @support_torch_compile
 class Step3p5Model(nn.Module):
+    decoder_layer_cls: type[nn.Module] = Step3p5DecoderLayer
+
     def __init__(self, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
 
@@ -541,7 +541,7 @@ class Step3p5Model(nn.Module):
 
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: Step3p5DecoderLayer(
+            lambda prefix: self.decoder_layer_cls(
                 vllm_config,
                 prefix=prefix,
             ),
@@ -864,6 +864,7 @@ class Step3p5ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_substr={".share_expert.": ".moe.share_expert."}
     )
+    model_cls: type[nn.Module] = Step3p5Model
 
     def __init__(
         self,
@@ -873,7 +874,7 @@ class Step3p5ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
     ):
         super().__init__()
         config = vllm_config.model_config.hf_config
-        self.model = Step3p5Model(
+        self.model = self.model_cls(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
         if get_pp_group().is_last_rank:
