@@ -59,14 +59,6 @@ pub(crate) struct MmProcessorCache {
     shadow: Arc<Mutex<HashMap<String, PromptReplacement>>>,
 }
 
-/// Outcome of a per-item cache lookup.
-pub(super) enum CacheLookup {
-    /// Cache hit: the address item plus the shadowed prompt replacement.
-    Hit(PreparedItem, PromptReplacement),
-    /// Cache miss: preprocess on the miss path.
-    Miss,
-}
-
 impl MmProcessorCache {
     pub(crate) fn new(shm: Arc<MmProcessorShmCache>) -> Self {
         Self {
@@ -102,24 +94,22 @@ impl MmProcessorCache {
     ///
     /// On a hit, bumps writer_flag and returns the address item plus the
     /// shadowed prompt replacement. On a miss — including a shadowed entry
-    /// whose shm data vanished under a concurrent eviction — returns the UUID
-    /// back for the preprocessing path.
-    pub(super) fn lookup(&self, key: &str, uuid: Option<String>) -> CacheLookup {
-        let replacement = self.shadow.lock().get(key).cloned();
-        let Some(replacement) = replacement else {
-            return CacheLookup::Miss;
-        };
-        match self.shm.address_item_for_cached(key) {
-            Some(data) => CacheLookup::Hit(
-                PreparedItem {
-                    data,
-                    hash: key.to_owned(),
-                    uuid,
-                },
-                replacement,
-            ),
-            None => CacheLookup::Miss,
-        }
+    /// whose shm data vanished under a concurrent eviction — returns `None`.
+    pub(super) fn lookup(
+        &self,
+        key: &str,
+        uuid: Option<String>,
+    ) -> Option<(PreparedItem, PromptReplacement)> {
+        let replacement = self.shadow.lock().get(key).cloned()?;
+        let data = self.shm.address_item_for_cached(key)?;
+        Some((
+            PreparedItem {
+                data,
+                hash: key.to_owned(),
+                uuid,
+            },
+            replacement,
+        ))
     }
 
     /// Look up a UUID-keyed item before its media is fetched.
@@ -133,17 +123,8 @@ impl MmProcessorCache {
     /// On a hit the returned [`PreparedItem`] carries the UUID as its `hash`
     /// (Python parity: `hashes.append(uuid_item)`).
     pub(super) fn lookup_uuid(&self, uuid: &str) -> Option<(PreparedItem, PromptReplacement)> {
-        let replacement = self.shadow.lock().get(uuid).cloned()?;
         self.touch(uuid);
-        let data = self.shm.address_item_for_cached(uuid)?;
-        Some((
-            PreparedItem {
-                data,
-                hash: uuid.to_owned(),
-                uuid: Some(uuid.to_owned()),
-            },
-            replacement,
-        ))
+        self.lookup(uuid, Some(uuid.to_owned()))
     }
 
     /// Put a freshly preprocessed item into shm and shadow its prompt
@@ -399,13 +380,9 @@ impl OptionalMmProcessorCache for Option<&MmProcessorCache> {
                 (Some(_), Some(uuid)) => uuid.clone(),
                 _ => media.content_hash().to_owned(),
             };
-            let lookup = match cache {
-                Some(cache) => cache.lookup(&key, uuid.clone()),
-                None => CacheLookup::Miss,
-            };
-            match lookup {
-                CacheLookup::Hit(item, replacement) => slots.push(Some((item, replacement))),
-                CacheLookup::Miss => {
+            match cache.and_then(|cache| cache.lookup(&key, uuid.clone())) {
+                Some(hit) => slots.push(Some(hit)),
+                None => {
                     slots.push(None);
                     pending_keys.push(key);
                     pending.push((media, uuid));
@@ -421,30 +398,18 @@ impl OptionalMmProcessorCache for Option<&MmProcessorCache> {
                 // parity: `hashes.append(uuid_item)`); for content-keyed
                 // items this is a no-op.
                 item.hash = key.clone();
-                item.data = put_or_inline_and_track(
-                    cache,
-                    key,
-                    replacement,
-                    std::mem::take(&mut item.data),
-                );
+                item.data = match cache {
+                    Some(cache) => cache.put_or_inline_and_track(
+                        key,
+                        replacement,
+                        std::mem::take(&mut item.data),
+                    ),
+                    None => std::mem::take(&mut item.data),
+                };
             }
             misses = izip!(items, replacements).collect();
         }
         Ok(merge_slots(slots, misses))
-    }
-}
-
-/// Put a miss item into the SHM cache when enabled, keeping the inline data
-/// otherwise.
-pub(super) fn put_or_inline_and_track(
-    cache: Option<&MmProcessorCache>,
-    key: &str,
-    replacement: &PromptReplacement,
-    data: MmKwargsItem,
-) -> MmKwargsItem {
-    match cache {
-        Some(cache) => cache.put_or_inline_and_track(key, replacement, data),
-        None => data,
     }
 }
 
@@ -454,7 +419,7 @@ pub(super) fn put_or_inline_and_track(
 /// `slots` has one entry per media item: `Some` for hits, `None` for misses.
 /// `misses` carries one prepared item + replacement per `None` slot, in slot
 /// order, so the result stays index-aligned for placeholder expansion.
-pub(super) fn merge_slots(
+fn merge_slots(
     slots: Vec<Option<(PreparedItem, PromptReplacement)>>,
     misses: Vec<(PreparedItem, PromptReplacement)>,
 ) -> (Vec<PromptReplacement>, Vec<PreparedItem>) {
@@ -564,7 +529,7 @@ pub(crate) mod tests {
         let sent = cache.put_or_inline_and_track("hash-a", &test_replacement(), item.clone());
         assert_eq!(sent, item, "before set_n_readers the item goes inline");
         assert!(
-            matches!(cache.lookup("hash-a", None), CacheLookup::Miss),
+            cache.lookup("hash-a", None).is_none(),
             "before set_n_readers nothing is cached"
         );
     }
@@ -580,8 +545,7 @@ pub(crate) mod tests {
             "a fresh put yields the address item"
         );
 
-        let CacheLookup::Hit(hit, replacement) = cache.lookup("hash-b", Some("uuid-1".into()))
-        else {
+        let Some((hit, replacement)) = cache.lookup("hash-b", Some("uuid-1".into())) else {
             panic!("hash-b should be cached");
         };
         assert_eq!(replacement.tokens, test_replacement().tokens);
@@ -594,10 +558,7 @@ pub(crate) mod tests {
     fn lookup_misses_for_unknown_hash_and_returns_uuid() {
         let cache = MmProcessorCache::new(test_shm_cache());
 
-        assert!(matches!(
-            cache.lookup("hash-c", Some("uuid-2".into())),
-            CacheLookup::Miss
-        ));
+        assert!(cache.lookup("hash-c", Some("uuid-2".into())).is_none());
     }
 
     /// Address items carry the 3-field signed handle `(address, monotonic_id,
@@ -612,7 +573,7 @@ pub(crate) mod tests {
         assert_eq!(signature.len(), 32, "HMAC-SHA256 signature is 32 bytes");
         assert!(signature.iter().all(|byte| (0..=255).contains(byte)));
 
-        let CacheLookup::Hit(hit, _) = cache.lookup("hash-s", None) else {
+        let Some((hit, _)) = cache.lookup("hash-s", None) else {
             panic!("hash-s should be cached");
         };
         assert!(is_address_item(&hit.data));
@@ -637,7 +598,7 @@ pub(crate) mod tests {
 
         cache.touch("hash-t");
         assert_eq!(shm.touched_len(), 1);
-        assert!(matches!(cache.lookup("hash-t", None), CacheLookup::Hit(..)));
+        assert!(cache.lookup("hash-t", None).is_some());
         assert_eq!(shm.touched_len(), 0);
     }
 
