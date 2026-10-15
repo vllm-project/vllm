@@ -100,6 +100,9 @@ from vllm.model_executor.kernels.linear.mxfp4.rdna3_hip import (
 from vllm.model_executor.kernels.linear.mxfp4.xpu import (
     XPUMxFp4LinearKernel,
 )
+from vllm.model_executor.kernels.linear.mxfp4.zentorch import (
+    ZentorchMxFp4LinearKernel,
+)
 from vllm.model_executor.kernels.linear.mxfp6 import (
     MxFp6LinearKernel,
     MxFp6LinearLayerConfig,
@@ -669,6 +672,9 @@ _POSSIBLE_MXFP4_KERNELS: dict[PlatformEnum, list[type[MxFp4LinearKernel]]] = {
     PlatformEnum.XPU: [
         XPUMxFp4LinearKernel,
         TorchMxFp4LinearKernel,
+    ],
+    PlatformEnum.CPU: [
+        ZentorchMxFp4LinearKernel,
     ],
 }
 
