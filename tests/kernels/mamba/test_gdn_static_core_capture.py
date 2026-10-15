@@ -7,6 +7,9 @@ metadata builder stages its capture buffers, and replays it for every batch
 padded to that count. One graph, captured once, must equal the eager
 ``_forward_core`` bitwise for batches of every kind: the core output and every
 conv and SSM state block except the null block, which pad rows may write.
+With prefix caching (Mamba "align" mode) the state indices select each row's
+current block, and a prefill chunk ends at a block boundary, so its final state
+is the block's checkpoint.
 """
 
 from __future__ import annotations
@@ -34,6 +37,7 @@ from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
 )
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateShapeCalculator
 from vllm.platforms import current_platform
+from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.gdn_attn import (
     GDNAttentionMetadata,
     GDNAttentionMetadataBuilder,
@@ -53,7 +57,7 @@ PREFIX = "model.layers.0.linear_attn"
 MAX_NUM_SEQS = 16
 MAX_NUM_BATCHED_TOKENS = 128
 NUM_CAPTURED_TOKENS = 64
-NUM_STATE_BLOCKS = 64
+NUM_STATE_BLOCKS = 256
 
 # (seq_lens, query_lens, num_decode_draft_tokens, is_prefilling), decode rows
 # first as the scheduler orders them; None leaves a field unset.
@@ -73,6 +77,17 @@ BATCHES = {
     "all_tokens": ([30, 90], [3, 61], [2, -1], None),
     "zero_length_rows": ([40, 100, 16, 16], [1, 50, 0, 0], None, None),
     "spec_and_zero_length_rows": ([65, 20, 16], [1, 3, 0], [-1, 2, -1], None),
+    # Prefix caching ("align"): a chunk from a cached prefix to a block
+    # boundary, a chunk that starts after a cached prefix, and spec decodes
+    # whose tokens cross a block boundary next to a prefill.
+    "prefill_to_block_boundary": ([64, 48], [32, 16], [-1, -1], None),
+    "prefill_after_cached_prefix": ([80], [32], [-1], None),
+    "spec_across_block_boundary_and_prefill": (
+        [33, 34, 64],
+        [3, 3, 16],
+        [2, 2, -1],
+        None,
+    ),
     # Eager runs causal_conv1d_update on a batch of only non-spec decodes,
     # the captured core causal_conv1d_fn, so only this one may differ.
     "decode_only": ([40, 30, 20], [1, 1, 1], None, None),
@@ -82,7 +97,9 @@ NOT_BITWISE_BATCHES = {"decode_only"}
 NOT_BITWISE_TOLERANCE = 6e-2
 
 
-def _make_builder(device: torch.device) -> GDNAttentionMetadataBuilder:
+def _make_builder(
+    device: torch.device, mamba_cache_mode: str
+) -> GDNAttentionMetadataBuilder:
     vllm_config = create_vllm_config(
         model_name="Qwen/Qwen3.5-0.8B",
         block_size=BLOCK_SIZE,
@@ -94,10 +111,13 @@ def _make_builder(device: torch.device) -> GDNAttentionMetadataBuilder:
     vllm_config.speculative_config = SpeculativeConfig(
         method="ngram", num_speculative_tokens=NUM_SPEC
     )
-    vllm_config.cache_config.mamba_cache_mode = "none"
+    vllm_config.cache_config.mamba_cache_mode = mamba_cache_mode
     builder = GDNAttentionMetadataBuilder(
         kv_cache_spec=MambaSpec(
-            block_size=BLOCK_SIZE, shapes=((16, 64),), dtypes=(torch.float16,)
+            block_size=BLOCK_SIZE,
+            shapes=((16, 64),),
+            dtypes=(torch.float16,),
+            num_speculative_blocks=NUM_SPEC,
         ),
         layer_names=[PREFIX],
         vllm_config=vllm_config,
@@ -114,10 +134,14 @@ def _build(
 ) -> GDNAttentionMetadata:
     seq_lens, query_lens, draft_tokens, is_prefilling = BATCHES[name]
     batch = BatchSpec(seq_lens=seq_lens, query_lens=query_lens)
-    # A distinct state block per row and spec token; block 0 is the null block.
+    # A distinct state block per entry; block 0 is the null block. "align"
+    # mode takes the 1 + NUM_SPEC blocks from each row's current block on.
+    num_block_cols = NUM_SPEC + 1
+    if builder.vllm_config.cache_config.mamba_cache_mode == "align":
+        num_block_cols += cdiv(max(seq_lens), BLOCK_SIZE) - 1
     block_table = 1 + torch.randperm(NUM_STATE_BLOCKS - 1, device=device)[
-        : batch.batch_size * (NUM_SPEC + 1)
-    ].view(batch.batch_size, NUM_SPEC + 1).to(torch.int32)
+        : batch.batch_size * num_block_cols
+    ].view(batch.batch_size, num_block_cols).to(torch.int32)
     common = create_common_attn_metadata(batch, BLOCK_SIZE, device).replace(
         block_table_tensor=block_table
     )
@@ -202,16 +226,17 @@ def _forward_context(meta: GDNAttentionMetadata, mode: CUDAGraphMode):
     not current_platform.is_cuda() or current_platform.is_device_capability_family(100),
     reason="Needs CUDA graphs and the Triton/FLA chunk kernels (not on SM10x).",
 )
+@pytest.mark.parametrize("mamba_cache_mode", ["none", "align"])
 @pytest.mark.parametrize("fused_norm", [False, True])
 @pytest.mark.parametrize("state_dtype", [torch.bfloat16, torch.float32])
 def test_captured_static_core_matches_eager(
-    state_dtype: torch.dtype, fused_norm: bool
+    state_dtype: torch.dtype, fused_norm: bool, mamba_cache_mode: str
 ) -> None:
     from vllm.utils.torch_utils import _current_stream_tls
 
     torch.manual_seed(0)
     device = torch.device("cuda")
-    builder = _make_builder(device)
+    builder = _make_builder(device, mamba_cache_mode)
     conv_shape, ssm_shape = MambaStateShapeCalculator.gated_delta_net_state_shape(
         1, H, HV, K, V, CONV_KERNEL, num_spec=NUM_SPEC
     )
