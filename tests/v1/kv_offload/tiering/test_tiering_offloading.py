@@ -373,9 +373,9 @@ class TestTieringOffloadingManager:
         completed.assert_called_once_with(to_keys([1, 2]), _CTX, False)
 
     @pytest.mark.parametrize("terminal_success", [True, False])
-    @pytest.mark.parametrize("during_drain", [False, True])
+    @pytest.mark.parametrize("completion_path", ["step", "poll_tiers", "drain"])
     def test_unsafe_promotion_reserves_slots_until_confirmation(
-        self, manager_setup, terminal_success, during_drain
+        self, manager_setup, terminal_success, completion_path
     ):
         """Failed remote loads must not let a late WRITE corrupt reused slots."""
         self._start_request()
@@ -394,7 +394,7 @@ class TestTieringOffloadingManager:
             0,
         )
         unsafe = JobResult(job_id=job_id, success=False, memory_safe=False)
-        if during_drain:
+        if completion_path == "drain":
 
             def fail_drain():
                 self.secondary_tier1.completed_jobs.append(unsafe)
@@ -409,7 +409,12 @@ class TestTieringOffloadingManager:
                 self.manager.reset_cache()
         else:
             self.secondary_tier1.completed_jobs.append(unsafe)
-            self.manager._process_finished_jobs()
+            if completion_path == "poll_tiers":
+                self.manager._polled_tiers = [self.secondary_tier1]
+                with self.manager.lock:
+                    self.manager.poll_tiers()
+            else:
+                self.manager._process_finished_jobs()
 
         stats = self.manager.get_stats()
         assert stats is not None
@@ -439,6 +444,9 @@ class TestTieringOffloadingManager:
         self.secondary_tier1.completed_jobs.append(
             JobResult(job_id=job_id, success=terminal_success)
         )
+        if completion_path == "poll_tiers":
+            with self.manager.lock:
+                self.manager.poll_tiers()
         self.manager.reset_cache()
         stats = self.manager.get_stats()
         assert stats is not None
