@@ -109,6 +109,7 @@ steps:
     amd:
       label: ":amd: (MI355) Distributed DP Basic"
       dind: false
+      automatic_shard: true
       device: mi355_2
       timeout_in_minutes: 45
       depends_on:
@@ -331,6 +332,7 @@ steps:
     amd:
       label: ':amd: (MI355) Distributed DP Extended'
       dind: false
+      automatic_shard: true
       device: mi355_4
       timeout_in_minutes: 60
       working_dir: /vllm-workspace/tests
@@ -706,6 +708,7 @@ steps:
     amd:
       label: ':amd: (MI355) RayExecutorV2'
       dind: false
+      automatic_shard: true
       device: mi355_4
       timeout_in_minutes: 75
       working_dir: /vllm-workspace/tests
