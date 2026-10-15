@@ -63,7 +63,7 @@ from vllm.entrypoints.serve.exception_handling.register import (
 )
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.exceptions import VLLMValidationError
-from vllm.inputs import mm_input, tokens_input
+from vllm.inputs import mm_input
 from vllm.logprobs import Logprob
 from vllm.multimodal.media import MediaConnector, MediaWithBytes
 from vllm.outputs import (
@@ -179,7 +179,10 @@ def qwen():
 def test_decisions_state_initializes(qwen):
     tokenizer, _ = qwen
     engine = SimpleNamespace(
-        model_config=model("Qwen3ForCausalLM"), renderer=None, input_processor=None
+        model_config=model("Qwen3ForCausalLM"),
+        vllm_config=VllmConfig(),
+        renderer=None,
+        input_processor=None,
     )
     state = State()
     state.online_renderer = SimpleNamespace(
@@ -1025,11 +1028,13 @@ def test_liquid_caps_images_like_the_checkpoint():
 
 
 @pytest.fixture
-def decision_server(qwen):
+def decision_server(qwen, make_context):
     tokenizer, _ = qwen
+    context = make_context()
 
     class Engine:
-        model_config = SimpleNamespace(is_encoder_decoder=False)
+        model_config = context.engine_client.model_config
+        vllm_config = context.engine_client.vllm_config
         renderer = input_processor = None
         errored = False
         failure = None
@@ -1070,21 +1075,7 @@ def decision_server(qwen):
                 finished=True,
             )
 
-    class Renderer:
-        renderer = SimpleNamespace(get_tokenizer=lambda: tokenizer)
-
-        async def preprocess_chat(self, request, messages, **kwargs):
-            await asyncio.sleep(0)
-            ids = tokenizer.apply_chat_template(
-                messages,
-                add_generation_prompt=True,
-                enable_thinking=False,
-                tokenize=True,
-                return_dict=False,
-            )
-            return [], [tokens_input(ids)]
-
-    engine, renderer = Engine(), Renderer()
+    engine, renderer = Engine(), context.online_renderer
     strategy = NextTokenStrategy(ReadContext(engine, renderer, None, "auto", {}))
     models = OpenAIServingModels(
         engine, [BaseModelPath(name="test-model", model_path="test-model")]
