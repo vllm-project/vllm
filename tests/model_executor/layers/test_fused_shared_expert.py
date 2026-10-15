@@ -12,7 +12,7 @@ from unittest.mock import patch
 import pytest
 import torch
 from torch import nn
-from transformers import Qwen3_5MoeTextConfig
+from transformers import MiniMaxM3VLTextConfig, Qwen3_5MoeTextConfig
 
 import vllm.config as vllm_config_module
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
@@ -34,7 +34,6 @@ from vllm.model_executor.models.utils import PPMissingLayer
 from vllm.models.deepseek_v4 import quant_config as deepseek_v4_quant_config
 from vllm.models.minimax_m3.amd import model as minimax_m3_model
 from vllm.platforms import current_platform
-from vllm.transformers_utils.configs.minimax_m3 import MiniMaxM3TextConfig
 
 pytestmark = pytest.mark.skipif(
     current_platform.is_xpu(),
@@ -155,7 +154,7 @@ def get_fse_test_model_config(
 ) -> tuple[object, type[nn.Module]]:
     config: object
     if model_type == "minimax_m3":
-        config = MiniMaxM3TextConfig(
+        config = MiniMaxM3VLTextConfig(
             hidden_size=128,
             intermediate_size=32,
             dense_intermediate_size=32,
@@ -165,9 +164,11 @@ def get_fse_test_model_config(
             head_dim=128,
             num_local_experts=2,
             num_experts_per_tok=1,
-            moe_layer_freq=[0, 1],
-            sparse_attention_config=None,
+            mlp_layer_types=["dense", "sparse"],
             rotary_dim=64,
+            n_shared_experts=1,
+            scoring_func="sigmoid",
+            use_routing_bias=True,
             quantization_config=quantization_config,
         )
         return config, minimax_m3_model.MiniMaxM3Model
