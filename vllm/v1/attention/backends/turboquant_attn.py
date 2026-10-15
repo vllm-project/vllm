@@ -757,8 +757,6 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         query_start_loc = attn_metadata.query_start_loc
         num_reqs = query_start_loc.shape[0] - 1
 
-        output = torch.zeros(N, Hq, D, device=query.device, dtype=query.dtype)
-
         # Prefer the CPU-resident copies from the metadata if populated —
         # otherwise `.tolist()` on GPU tensors forces a synchronizing copy.
         if attn_metadata.query_start_loc_cpu is not None:
@@ -769,6 +767,40 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             seq_lens_list = attn_metadata.seq_lens_cpu.tolist()
         else:
             seq_lens_list = attn_metadata.seq_lens.tolist()
+
+        # Keep short continuation batches together. Iterating over requests
+        # would launch the same packed attention separately for every sequence.
+        if (
+            self._soa_store
+            and attn_metadata.max_query_len <= 32
+            and all(
+                length > end - start
+                for length, start, end in zip(seq_lens_list, qsl, qsl[1:])
+            )
+        ):
+            return self._dispatch_decode_soa(
+                query=query,
+                kv_cache=kv_cache,
+                block_table=attn_metadata.block_table,
+                seq_lens=attn_metadata.seq_lens,
+                query_start_loc=query_start_loc,
+                max_query_len=attn_metadata.max_query_len,
+                Pi=Pi,
+                centroids=centroids,
+                scale=self.scale,
+                mse_bits=self.tq_config.key_mse_bits,
+                key_packed_size=self.tq_config.key_packed_size,
+                value_quant_bits=self.tq_config.effective_value_quant_bits,
+                value_packed_size=self.tq_config.value_packed_size,
+                max_seq_len=attn_metadata.max_seq_len,
+                key_fp8=self.tq_config.key_fp8,
+                norm_correction=self.tq_config.norm_correction,
+                PiT=PiT,
+                sinks=self.sinks,
+                sliding_window=self.sliding_window,
+            )
+
+        output = torch.zeros(N, Hq, D, device=query.device, dtype=query.dtype)
 
         # Pre-allocate cu_seqlens for single-request flash_attn calls
         # to avoid per-request host→device tensor creation.
@@ -846,11 +878,25 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                         # (APC) request. Continuation stays on the Triton SoA
                         # path even when FlyDSL is the main decode kernel
                         # (FlyDSL is decode-batch only).
+                        # Preserve the query block so the unified kernel can
+                        # share its history and mask causality per query row.
+                        short_query = q_len <= 32
+                        self._cu_2[1:2] = q_len
                         out = self._dispatch_decode_soa(
                             query=q_seq,
                             kv_cache=kv_cache,
-                            block_table=synth_bt,
-                            seq_lens=synth_seq_lens,
+                            block_table=(
+                                attn_metadata.block_table[i : i + 1]
+                                if short_query
+                                else synth_bt
+                            ),
+                            seq_lens=(
+                                attn_metadata.seq_lens[i : i + 1]
+                                if short_query
+                                else synth_seq_lens
+                            ),
+                            query_start_loc=self._cu_2 if short_query else None,
+                            max_query_len=q_len if short_query else 1,
                             Pi=Pi,
                             centroids=centroids,
                             scale=self.scale,

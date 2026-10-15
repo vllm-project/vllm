@@ -1058,3 +1058,18 @@ steps:
   - amd-smi
   - python3 examples/basic/offline_inference/chat.py --attention-backend TRITON_ATTN
   - pytest -v -s tests/kernels/attention/test_attention_selector.py
+
+- label: ":amd: (MI355) TurboQuant Verification"
+  key: rocm-turboquant-verification
+  depends_on:
+  - image-build-amd
+  device: mi355_1
+  dind: false
+  timeout_in_minutes: 30
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/v1/attention/ops/turboquant_soa/
+  - vllm/v1/attention/backends/turboquant_attn.py
+  - tests/kernels/turboquant/test_triton_turboquant_verify.py
+  commands:
+  - pytest --noconftest -v -s kernels/turboquant/test_triton_turboquant_verify.py
