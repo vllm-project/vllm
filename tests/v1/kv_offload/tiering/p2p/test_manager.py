@@ -557,8 +557,8 @@ class TestPromotionLatency:
         )
         job = TransferJob(
             job_id=42,
-            keys=[b"key1"],
-            chunk_ids=np.array([0]),
+            _keys=[b"key1"],
+            _chunk_ids=np.array([0]),
             is_promotion=True,
             req_context=_req_context(_remote_prefiller_kv_params()),
         )
