@@ -39,6 +39,15 @@ class SamplingMask:
 
 
 @dataclass
+class WeightVersionSpan:
+    """Output tokens `[start, end)` were sampled by weights labelled `version`."""
+
+    version: str
+    start: int
+    end: int
+
+
+@dataclass
 class CompletionOutput:
     """The output data of one completion output of a request.
 
@@ -62,6 +71,8 @@ class CompletionOutput:
             ``--per-request-spec-decode-metrics`` is enabled; None otherwise.
             Surfaced in the response as ``metrics.speculative_decoding`` for
             single-sequence (``n == 1``) requests.
+        weight_versions: Contiguous weight version spans over output-token indexes.
+            Set on the final output only.
 
     """
 
@@ -76,6 +87,7 @@ class CompletionOutput:
     lora_request: LoRARequest | None = None
     sampling_mask: SamplingMask | None = None
     spec_decode_metrics: RequestSpecDecodeMetrics | None = None
+    weight_versions: list[WeightVersionSpan] | None = None
     aux_output_keys: list[str] | None = None
 
     def finished(self) -> bool:
@@ -128,9 +140,9 @@ class RequestOutput:
                           decoder input prompt token ids.
         prompt_logprobs: The log probabilities to return per prompt token.
         prompt_token_id_logprobs: Logprobs of prompt_logprob_token_ids, shaped
-            [max(prompt_len - 1 - prompt_logprob_start, 0),
-            len(prompt_logprob_token_ids)]; row i scores them as predictions of
-            prompt token prompt_logprob_start + i + 1.
+            [prompt_len - 1 - prompt_logprob_start, num_ids]; row i holds the
+            logprobs of its own IDs as predictions of prompt token
+            prompt_logprob_start + i + 1, with -inf in padded columns.
         outputs: The output sequences of the request.
         finished: Whether the whole request is finished.
         metrics: Metrics associated with the request.
@@ -213,6 +225,10 @@ class RequestOutput:
                             completion.sampling_mask.token_ids.extend(
                                 next_completion.sampling_mask.token_ids
                             )
+                        if next_completion.spec_decode_metrics is not None:
+                            completion.spec_decode_metrics = (
+                                next_completion.spec_decode_metrics
+                            )
                         completion.cumulative_logprob = (
                             next_completion.cumulative_logprob
                         )
@@ -222,6 +238,8 @@ class RequestOutput:
                             completion.routed_experts = next_completion.routed_experts
                         if next_completion.aux_output_keys is not None:
                             completion.aux_output_keys = next_completion.aux_output_keys
+                        # Like finish_reason, spans come only with the terminal output.
+                        completion.weight_versions = next_completion.weight_versions
                         completion.finish_reason = next_completion.finish_reason
                         completion.stop_reason = next_completion.stop_reason
                     else:
@@ -262,6 +280,20 @@ STREAM_FINISHED = RequestOutput(
 _O = TypeVar("_O", default=PoolingOutput)
 
 
+@dataclass(frozen=True)
+class LateChunk:
+    token_range: tuple[int, int]
+    char_range: tuple[int, int] | None
+
+
+@dataclass(frozen=True)
+class LateChunkingMetadata:
+    chunk_size: int
+    input_tokens: int
+    chunks: list[LateChunk]
+    strategy: str = "fixed_tokens"
+
+
 class PoolingRequestOutput(Generic[_O]):
     """The output data of a pooling request to the LLM.
 
@@ -272,6 +304,7 @@ class PoolingRequestOutput(Generic[_O]):
         num_cached_tokens: The number of tokens with prefix cache hit.
         finished (bool): A flag indicating whether the pooling is completed.
         error: Structured request-level error information, if the request failed.
+        late_chunking: Token and source ranges for fixed-length late chunking.
 
     """
 
@@ -284,8 +317,10 @@ class PoolingRequestOutput(Generic[_O]):
         finished: bool,
         *,
         error: RequestError | None = None,
+        late_chunking: LateChunkingMetadata | None = None,
     ):
         self.request_id = request_id
+        self.late_chunking = late_chunking
         self.prompt_token_ids = prompt_token_ids
         self.num_cached_tokens = num_cached_tokens
         self.finished = finished

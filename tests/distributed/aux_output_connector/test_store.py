@@ -336,13 +336,13 @@ def test_mooncake_preemption_keeps_already_accepted_output(remote_store):
 def test_mooncake_string_stop_delivers_keys_before_engine_abort(remote_store):
     """API-side termination must retain R3 from every accepted step."""
     from tokenizers import Tokenizer, models
-    from transformers import PreTrainedTokenizerFast
+    from transformers import TokenizersBackend
 
     from vllm.sampling_params import SamplingParams
     from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest
     from vllm.v1.engine.output_processor import OutputProcessor
 
-    tokenizer = PreTrainedTokenizerFast(
+    tokenizer = TokenizersBackend(
         tokenizer_object=Tokenizer(
             models.WordLevel({"hello": 0, "!": 1, "[UNK]": 2}, unk_token="[UNK]")
         )
@@ -504,6 +504,10 @@ class _SchedulerRequest:
         default_factory=lambda: SimpleNamespace(routed_experts_prompt_start=0, stop=[])
     )
 
+    @property
+    def num_prompt_tokens(self) -> int:
+        return self.num_tokens - self.num_output_tokens
+
     def is_finished(self) -> bool:
         return self.finished
 
@@ -656,9 +660,6 @@ def test_next_step_does_not_consume_pending_output(monkeypatch):
     event = Mock()
     monkeypatch.setattr(torch.cuda, "Event", lambda **kwargs: event)
     monkeypatch.setattr(async_utils, "stream", lambda *args: nullcontext())
-    monkeypatch.setattr(
-        async_utils, "async_copy_to_np", lambda tensor: tensor.numpy().copy()
-    )
     worker = _make_worker(1)
     worker.begin_step(
         _metadata(0, [_request_metadata("request", 0, 1, 0, [])], {}).metadata
@@ -1867,6 +1868,18 @@ def test_scheduler_starts_worker_output_at_requested_prompt_token():
     )
 
     assert metadata.requests == {request.request_id: 2}
+
+    # A P/D prefiller cuts its prompt short of the last token, which can pass
+    # the requested start; the rows then start at the end of the cut prompt.
+    connector = _make_connector()
+    request = _scheduler_request(
+        "cut", [b"a" * 32], num_tokens=3, num_output_tokens=0, prompt_start=4
+    )
+    metadata = connector.build_connector_meta(
+        _step_output([request.request_id], [0], [3]),
+        {request.request_id: request},
+    )
+    assert metadata.requests == {request.request_id: 3}
 
 
 def test_scheduler_connector_preserves_request_finish_order():

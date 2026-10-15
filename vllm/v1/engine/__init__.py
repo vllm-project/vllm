@@ -235,10 +235,10 @@ class EngineCoreOutput(
     # Per-request spec-decode acceptance; attached only on the final output.
     # Appended last so `array_like` positional serialization stays compatible.
     spec_decode_metrics: RequestSpecDecodeMetrics | None = None
-    aux_output_keys: list[str] | None = None
 
     # [num_scored_rows, num_token_ids]; appended last for array_like compatibility.
     prompt_token_id_logprobs: torch.Tensor | None = None
+    aux_output_keys: list[str] | None = None
 
     @property
     def finished(self) -> bool:
@@ -282,6 +282,9 @@ class EngineCoreOutputs(
     # In DP case, used to signal that a request was received for an
     # "old" wave, so the next wave needs to be started in other engines.
     start_wave: int | None = None
+
+    # Weight version used for this step.
+    weight_version: str | None = None
 
     def __post_init__(self):
         if self.timestamp == 0.0:
