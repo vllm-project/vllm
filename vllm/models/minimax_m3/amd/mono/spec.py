@@ -1,0 +1,67 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Static contract for the MiniMax-M3 ROCm MonoKernel."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from vllm.config import VllmConfig
+
+
+@dataclass(frozen=True)
+class MiniMaxM3MonoSpec:
+    tp_size: int = 4
+    blocks: int = 256
+    max_rows: int = 16
+    widths: tuple[int, ...] = (1, 2, 3, 4, 8, 12, 16)
+    first_layer: int = 3
+    last_layer: int = 59
+
+    def refusal_reasons(self, config: VllmConfig) -> list[str]:
+        pc = config.parallel_config
+        cc = config.cache_config
+        reasons: list[str] = []
+
+        if pc.tensor_parallel_size != self.tp_size:
+            reasons.append(f"requires tensor parallel size {self.tp_size}")
+        if pc.pipeline_parallel_size != 1:
+            reasons.append("does not support pipeline parallelism")
+        if pc.data_parallel_size != 1:
+            reasons.append("does not support data parallelism")
+        if pc.decode_context_parallel_size != 1:
+            reasons.append("does not support decode context parallelism")
+        if pc.enable_expert_parallel:
+            reasons.append("does not support expert parallelism")
+        if pc.enable_eplb:
+            reasons.append("does not support EPLB")
+        if cc.cache_dtype not in ("fp8", "fp8_e4m3"):
+            reasons.append("requires an FP8 KV cache")
+        if cc.block_size != 128:
+            reasons.append("requires KV cache block size 128")
+        if cc.enable_prefix_caching:
+            reasons.append("does not yet support prefix caching")
+
+        index_dtype = config.attention_config.resolve_indexer_kv_dtype("bf16")
+        if index_dtype != "fp8":
+            reasons.append('requires indexer_kv_dtype "fp8"')
+        if getattr(config, "lora_config", None) is not None:
+            reasons.append("does not support LoRA")
+        transfer = getattr(config, "kv_transfer_config", None)
+        if transfer is not None and transfer.kv_connector is not None:
+            reasons.append("does not support a KV connector")
+        if not getattr(config, "use_v2_model_runner", False):
+            reasons.append("requires Model Runner V2")
+
+        return reasons
+
+    def configure_graph_widths(self, config: VllmConfig) -> None:
+        sizes = config.compilation_config.cudagraph_capture_sizes
+        if sizes is None:
+            return
+        config.compilation_config.cudagraph_capture_sizes = sorted(
+            set(sizes).union(self.widths)
+        )
+
+
+MONO_SPEC = MiniMaxM3MonoSpec()
