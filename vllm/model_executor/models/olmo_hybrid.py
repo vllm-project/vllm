@@ -387,6 +387,7 @@ class OlmoHybridForCausalLM(
         "gate_up_proj": ["gate_proj", "up_proj"],
         "in_proj_qkvg": ["q_proj", "k_proj", "v_proj", "g_proj"],
     }
+    hf_to_vllm_mapper = OlmoHybridModel.hf_to_vllm_mapper
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -477,4 +478,4 @@ class OlmoHybridForCausalLM(
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

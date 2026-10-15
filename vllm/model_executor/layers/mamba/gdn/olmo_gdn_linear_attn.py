@@ -515,6 +515,32 @@ def _make_fused_conv1d_weight_loader(dims, tp_size, tp_rank):
     def weight_loader(param, loaded_weight, loaded_shard_id=None):
         if loaded_weight.dim() == 2:
             loaded_weight = loaded_weight.unsqueeze(1)
+        if loaded_shard_id is None:
+            loaded_shard_id = getattr(loaded_weight, "shard_id", None)
+        if loaded_shard_id is None:
+            if loaded_weight.shape == param.shape:
+                param.data.copy_(loaded_weight)
+                return
+            total_dim = sum(dims)
+            if loaded_weight.shape[0] == total_dim:
+                total_shard_size = total_dim // tp_size
+                tp_start = tp_rank * total_shard_size
+                param.data.copy_(loaded_weight[tp_start : tp_start + total_shard_size])
+                return
+            raise ValueError(
+                f"Cannot load conv1d weight without loaded_shard_id; "
+                f"expected one of {list(range(len(dims)))} for section dims {dims}, "
+                f"but got weight with shape {loaded_weight.shape}"
+            )
+        if (
+            not isinstance(loaded_shard_id, int)
+            or loaded_shard_id < 0
+            or loaded_shard_id >= len(dims)
+        ):
+            raise ValueError(
+                f"Invalid loaded_shard_id {loaded_shard_id!r}; "
+                f"expected integer in [0, {len(dims)})"
+            )
         dim = dims[loaded_shard_id]
         shard_size = dim // tp_size
         tp_start = tp_rank * shard_size
