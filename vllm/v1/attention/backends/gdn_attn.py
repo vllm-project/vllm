@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Backend for GatedDeltaNet attention."""
 
+import functools
 import math
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
@@ -10,11 +11,13 @@ from typing import Any, Literal
 import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm.compilation.breakable_cudagraph import is_breakable_cudagraph_enabled
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.mamba.checkpoint import (
     MambaPrefillCheckpointBuilder,
     MambaPrefillCheckpointMetadata,
 )
+from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d
 from vllm.v1.attention.backend import (
@@ -53,6 +56,21 @@ MIXED_BATCH_PAD_VALUES: dict[str, int | bool | None] = {
     "prefill_has_initial_state": False,
     "spec_token_indx": 0,
     "non_spec_token_indx": 0,
+}
+# Pad value of each field that the captured forward reads from a capture
+# buffer (GDNAttentionMetadata.capture_buffers); None repeats the last value,
+# or is 0 when the batch has no such rows. That forward runs the non-spec rows
+# as one token stream with the decodes it peels off first, so the decode and
+# prefill cu_seqlens index that stream (prefill_query_start_loc is rebased to
+# the prefills instead).
+CAPTURE_PAD_VALUES: dict[str, int | bool | None] = {
+    **{
+        name: pad_value
+        for name, pad_value in MIXED_BATCH_PAD_VALUES.items()
+        if name != "prefill_query_start_loc"
+    },
+    "decode_query_start_loc": None,
+    "non_spec_prefill_query_start_loc": None,
 }
 STATE_INDEX_FIELDS = (
     "spec_state_indices_tensor",
@@ -156,6 +174,12 @@ class GDNAttentionMetadata:
     nums_dict: dict | None = None
     batch_ptr: torch.Tensor | None = None
     token_chunk_offset_ptr: torch.Tensor | None = None
+
+    # Persistent buffers with the batch's rows and pads after them, for the
+    # forward captured in a breakable CUDA graph, which reads every buffer at
+    # its full length (fields of CAPTURE_PAD_VALUES, FLA chunk_indices and
+    # chunk_offsets). Set when the builder's captures_mixed_batches is True.
+    capture_buffers: dict[str, torch.Tensor] | None = None
 
 
 class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]):
@@ -269,6 +293,25 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             device=device,
         )
         self.mixed_batch_buffers = self._allocate_mixed_batch_buffers(device)
+        # A breakable CUDA graph also captures the GDN core when its static
+        # form applies: Triton/FLA kernels, no prefix-cache checkpoints, MRV2
+        # on CUDA. The graph of a token count replays for every batch of that
+        # count, with or without prefills, so build() then stages every batch.
+        self.captures_mixed_batches = (
+            is_breakable_cudagraph_enabled()
+            and self.compilation_config.cudagraph_mode.has_piecewise_cudagraphs()
+            and vllm_config.use_v2_model_runner
+            and current_platform.is_cuda()
+            and self.gdn_prefill_backend == "triton"
+            and vllm_config.cache_config.mamba_cache_mode == "none"
+            and type(self) is GDNAttentionMetadataBuilder
+        )
+
+    @functools.cached_property
+    def token_positions(self) -> torch.Tensor:
+        """The non-spec token indices of a batch without spec decodes."""
+        buffer = self.mixed_batch_buffers["non_spec_token_indx"]
+        return torch.arange(buffer.shape[0], device=buffer.device)
 
     def _allocate_mixed_batch_buffers(
         self, device: torch.device
@@ -295,6 +338,8 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             "spec_query_start_loc": ((max_num_reqs + 1,), None),
             "non_spec_query_start_loc": ((max_num_reqs + 1,), None),
             "prefill_query_start_loc": ((max_num_reqs + 1,), None),
+            "decode_query_start_loc": ((max_num_reqs + 1,), None),
+            "non_spec_prefill_query_start_loc": ((max_num_reqs + 1,), None),
             "num_accepted_tokens": ((max_num_reqs,), None),
             "has_initial_state": ((max_num_reqs,), torch.bool),
             "prefill_has_initial_state": ((max_num_reqs,), torch.bool),
@@ -787,7 +832,11 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             batch_ptr=batch_ptr,
             token_chunk_offset_ptr=token_chunk_offset_ptr,
         )
-        if num_prefills > 0:
+        if self.captures_mixed_batches:
+            attn_metadata = self._stage_capture_buffers(
+                attn_metadata, m, non_spec_query_start_loc_cpu
+            )
+        elif num_prefills > 0:
             attn_metadata = self._stage_mixed_batch(attn_metadata)
         return attn_metadata
 
@@ -833,6 +882,106 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 values[-1] if pad_value is None else pad_value,
             )[: values.shape[0]]
         return replace(metadata, **staged)
+
+    def _stage_capture_buffers(
+        self,
+        metadata: GDNAttentionMetadata,
+        common_attn_metadata: CommonAttentionMetadata,
+        non_spec_query_start_loc_cpu: torch.Tensor | None,
+    ) -> GDNAttentionMetadata:
+        """Stage every buffer that the captured forward reads.
+
+        A batch without prefills replays the same graph, so it also gets the
+        prefill-side metadata: no FLA chunks, causal_conv1d programs and
+        ``has_initial_state`` for its non-spec decodes, if any.
+        """
+        buffers = self.mixed_batch_buffers
+        # build() staged the FLA chunk metadata of a batch with prefills.
+        chunk_buffers = {
+            name: buffers[name] for name in ("chunk_indices", "chunk_offsets")
+        }
+        m = replace(metadata, capture_buffers=chunk_buffers)
+        if m.num_prefills == 0:
+            self._stage_h2d(
+                buffers["chunk_indices"],
+                torch.empty((0, 2), dtype=buffers["chunk_indices"].dtype),
+                (-1, 0),
+            )
+            buffers["chunk_offsets"].zero_()
+            if non_spec_query_start_loc_cpu is None:
+                non_spec_query_start_loc_cpu = torch.zeros(1, dtype=torch.int32)
+            nums_dict, batch_ptr, token_chunk_offset_ptr = (
+                compute_causal_conv1d_metadata(
+                    non_spec_query_start_loc_cpu,
+                    device=common_attn_metadata.query_start_loc.device,
+                    program_buffers=(
+                        buffers["batch_ptr"],
+                        buffers["token_chunk_offset_ptr"],
+                    ),
+                )
+            )
+            has_initial_state = None
+            if m.non_spec_query_start_loc is not None:
+                # Without spec decodes, every row is a non-spec row.
+                has_initial_state = (
+                    common_attn_metadata.compute_num_computed_tokens() > 0
+                )
+            m = replace(
+                m,
+                nums_dict=nums_dict,
+                batch_ptr=batch_ptr,
+                token_chunk_offset_ptr=token_chunk_offset_ptr,
+                has_initial_state=has_initial_state,
+            )
+        return self._stage_capture_fields(m, self._capture_values(m))
+
+    def _capture_values(
+        self, metadata: GDNAttentionMetadata
+    ) -> dict[str, torch.Tensor | None]:
+        """The rows of each ``CAPTURE_PAD_VALUES`` field: the batch's own,
+        except that the decode and prefill rows are split at the decodes that
+        the forward peels off the non-spec rows (none with spec decodes)."""
+        m = metadata
+        # The fields that only the captured forward reads start empty.
+        values = {name: getattr(m, name, None) for name in CAPTURE_PAD_VALUES}
+        if m.spec_sequence_masks is None:
+            values["non_spec_token_indx"] = self.token_positions
+        if m.non_spec_query_start_loc is not None:
+            assert m.non_spec_state_indices_tensor is not None
+            assert m.has_initial_state is not None
+            values["decode_query_start_loc"] = m.non_spec_query_start_loc[
+                : m.num_decodes + 1
+            ]
+            values["non_spec_prefill_query_start_loc"] = m.non_spec_query_start_loc[
+                m.num_decodes :
+            ]
+            values["prefill_state_indices"] = m.non_spec_state_indices_tensor[
+                m.num_decodes :
+            ]
+            values["prefill_has_initial_state"] = m.has_initial_state[m.num_decodes :]
+        return values
+
+    def _stage_capture_fields(
+        self,
+        metadata: GDNAttentionMetadata,
+        values: dict[str, torch.Tensor | None],
+    ) -> GDNAttentionMetadata:
+        """Copy ``values`` into their capture buffers with pads after them
+        (a missing part is all pads) and record the buffers in
+        ``capture_buffers``. The metadata fields keep their own tensors."""
+        buffers = self.mixed_batch_buffers
+        capture_buffers = dict(metadata.capture_buffers or {})
+        for name, rows in values.items():
+            buffer = buffers[name]
+            if rows is None:
+                rows = buffer[:0]
+            pad_value: int | bool | torch.Tensor | None = CAPTURE_PAD_VALUES[name]
+            if pad_value is None:
+                pad_value = rows[-1] if len(rows) > 0 else 0
+            capture_buffers[name] = self._stage(
+                buffer, rows, buffer.shape[0], pad_value
+            )
+        return replace(metadata, capture_buffers=capture_buffers)
 
     def _stage_spec_decode(
         self,
@@ -920,7 +1069,12 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             prefill_state_indices=prefill_indices,
             checkpoint=checkpoint,
         )
-        if m.num_prefills > 0:
+        if self.captures_mixed_batches:
+            values = self._capture_values(metadata)
+            metadata = self._stage_capture_fields(
+                metadata, {name: values[name] for name in STATE_INDEX_FIELDS}
+            )
+        elif m.num_prefills > 0:
             metadata = self._stage_mixed_batch(metadata, STATE_INDEX_FIELDS)
         return metadata
 
