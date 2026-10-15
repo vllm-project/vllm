@@ -106,22 +106,75 @@ def _assert_span_linked_to_trace(span: dict, traceparent: str) -> None:
 
 
 @pytest.mark.asyncio
-async def test_render_chat_completion_span(client, trace_service):
-    """A span is exported for the chat render endpoint, linked to the caller's
-    trace context."""
+@pytest.mark.parametrize(
+    "route,span_name,payload",
+    [
+        (
+            "/v1/chat/completions/render",
+            "render_chat_completion",
+            {"messages": [{"role": "user", "content": "Hello"}]},
+        ),
+        (
+            "/v1/messages/render",
+            "render_messages",
+            {"messages": [{"role": "user", "content": "Hello"}], "max_tokens": 1},
+        ),
+        ("/v1/completions/render", "render_completion", {"prompt": "Hello"}),
+        ("/v1/responses/render", "render_responses", {"input": "Hello"}),
+        ("/tokenize", "tokenize", {"prompt": "Hello"}),
+        ("/detokenize", "detokenize", {"tokens": [1]}),
+    ],
+)
+async def test_render_endpoint_span(client, trace_service, route, span_name, payload):
+    """Processing endpoints export linked spans without tool-summary attributes."""
+    trace_service.clear()
     response = await client.post(
-        "/v1/chat/completions/render",
+        route,
         headers={"traceparent": TRACEPARENT},
-        json={
-            "model": MODEL_NAME,
-            "messages": [{"role": "user", "content": "Hello, how are you?"}],
-        },
+        json={"model": MODEL_NAME, **payload},
     )
 
-    assert response.status_code == 200
+    assert response.status_code == 200, response.text
 
-    span = _wait_for_span(trace_service, "render_chat_completion")
+    span = _wait_for_span(trace_service, span_name)
     _assert_span_linked_to_trace(span, TRACEPARENT)
+    assert not span["attributes"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("api", ["chat/completions", "completions"])
+@pytest.mark.parametrize("stream", [False, True])
+async def test_derender_endpoint_span(client, trace_service, api, stream):
+    """Both derender modes retain caller trace linkage without exposing content."""
+    token_ids = get_tokenizer(MODEL_NAME).encode("Hello", add_special_tokens=False)
+    generated = {
+        "choices": [{"index": 0, "token_ids": token_ids, "finish_reason": "stop"}]
+    }
+    payload = {"model": MODEL_NAME, "stream": stream, "prompt_token_ids": [1]}
+    if api == "chat/completions":
+        payload["chat_request"] = {
+            "model": MODEL_NAME,
+            "messages": [{"role": "user", "content": "Hello"}],
+        }
+        span_name = "derender_chat_completion"
+    else:
+        span_name = "derender_completion"
+        if not stream:
+            payload["prompt_token_ids"] = [[1]]
+    if stream:
+        payload["generate_chunk"] = generated
+    elif api == "chat/completions":
+        payload["generate_response"] = generated
+    else:
+        payload["generate_responses"] = [generated]
+    trace_service.clear()
+    response = await client.post(
+        f"/v1/{api}/derender", json=payload, headers={"traceparent": TRACEPARENT}
+    )
+    assert response.status_code == 200, response.text
+    span = _wait_for_span(trace_service, span_name)
+    _assert_span_linked_to_trace(span, TRACEPARENT)
+    assert not span["attributes"]
 
 
 def _render_count(metrics: str, api_surface: str, status: str) -> float:
