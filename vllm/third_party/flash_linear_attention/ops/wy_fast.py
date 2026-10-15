@@ -45,6 +45,7 @@ def recompute_w_u_fwd_kernel(
     BK: tl.constexpr,
     BV: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    USE_GRAPH: tl.constexpr,
 ):
     i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
@@ -53,6 +54,8 @@ def recompute_w_u_fwd_kernel(
             tl.load(chunk_indices + i_t * 2).to(tl.int32),
             tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64),
         )
+        if USE_GRAPH and i_n < 0:
+            return
         bos, eos = (
             tl.load(cu_seqlens + i_n).to(tl.int32),
             tl.load(cu_seqlens + i_n + 1).to(tl.int32),
@@ -105,6 +108,7 @@ def recompute_w_u_fwd(
     A: torch.Tensor,
     cu_seqlens: torch.Tensor | None,
     chunk_indices: torch.Tensor | None = None,
+    use_graph: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, Hg, K, V = *k.shape, v.shape[-1]
     H = v.shape[-2]
@@ -135,5 +139,6 @@ def recompute_w_u_fwd(
         BT=BT,
         BK=BK,
         BV=BV,
+        USE_GRAPH=use_graph,
     )
     return w, u
