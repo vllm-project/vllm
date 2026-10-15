@@ -197,6 +197,10 @@ class _HfExamplesInfo:
 _TEXT_GENERATION_EXAMPLE_MODELS = {
     # [Decoder-only]
     "AfmoeForCausalLM": _HfExamplesInfo("arcee-ai/Trinity-Nano-Preview"),
+    "AliceAIForCausalLM": _HfExamplesInfo(
+        "yandex/AliceAI-Foundation-80B-A3B-Base",
+        trust_remote_code=True,
+    ),
     "ApertusForCausalLM": _HfExamplesInfo("swiss-ai/Apertus-8B-Instruct-2509"),
     "ArceeForCausalLM": _HfExamplesInfo("arcee-ai/AFM-4.5B-Base"),
     "AXK1ForCausalLM": _HfExamplesInfo("skt/A.X-K1", trust_remote_code=True),
@@ -1456,16 +1460,6 @@ _MULTIMODAL_EXAMPLE_MODELS = {
 
 
 _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
-    # [Medusa]
-    "MedusaModel": _HfExamplesInfo(
-        "JackFram/llama-68m", speculative_model="abhigoyal/vllm-medusa-llama-68m-random"
-    ),
-    # Temporarily disabled.
-    # TODO(woosuk): Re-enable this once the MLP Speculator is supported in V1.
-    # "MLPSpeculatorPreTrainedModel": _HfExamplesInfo(
-    #     "JackFram/llama-160m",
-    #     speculative_model="ibm-ai-platform/llama-160m-accelerator"
-    # ),
     # [DFlash]
     "DFlashDraftModel": _HfExamplesInfo(
         "Qwen/Qwen3-4B",
