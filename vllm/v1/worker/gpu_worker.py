@@ -509,6 +509,18 @@ class Worker(WorkerBase):
             # Set random seed.
             set_random_seed(self.model_config.seed)
 
+            # cuBLAS(Lt) asks CUDA for its handle memory directly. When torch's own
+            # cudaMalloc fails, torch frees its unused cache and retries, but a cuBLAS
+            # request never triggers that because torch doesn't see it. Profiling can
+            # grow torch's cache until the GPU is full, and the first cuBLAS call would
+            # then fail even though torch holds idle memory it could have given back.
+            # Create the handles now, before the snapshot, so they count as baseline
+            # like the NCCL buffers. mm uses cuBLAS; linear with a bias uses cuBLASLt.
+            x = torch.ones(16, 16, dtype=self.model_config.dtype, device=self.device)
+            torch.mm(x, x)
+            torch.nn.functional.linear(x, x, x[0])
+            del x
+
             # Now take memory snapshot after NCCL is initialized
             gc.collect()
             torch.accelerator.empty_cache()
