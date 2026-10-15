@@ -34,6 +34,7 @@ class MockModelConfig:
         {"logit_bias": {0: 1.0}},
         {"bad_words": ["foo"]},
         {"allowed_token_ids": [0, 1]},
+        {"_logprob_candidate_token_ids": [0, 1]},
     ],
 )
 def test_diffusion_rejects_unsupported_params(kwargs: dict):

@@ -1214,6 +1214,7 @@ class SamplingParams(
             or self.logit_bias
             or self.bad_words
             or self.allowed_token_ids
+            or self._logprob_candidate_token_ids
         ):
             raise VLLMValidationError(
                 "The temperature, min_p, seed, min_tokens, logit_bias, "
