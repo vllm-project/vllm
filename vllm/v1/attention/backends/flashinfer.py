@@ -930,11 +930,12 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             == FlashInferDecodeKernel.TRTLLM_GEN
             and not self.use_dcp
         )
-        self.use_fa2 = _use_fa2_native_decode()
+        self.use_fa2_native_decode = _use_fa2_native_decode()
         self._init_reorder_batch_threshold(
             1,
             supports_spec_as_decode=(
-                self.flashinfer_trtllm_api_decode_kernel is not None or self.use_fa2
+                self.flashinfer_trtllm_api_decode_kernel is not None
+                or self.use_fa2_native_decode
             ),
             # trtllm-gen decode receives no cp_rank/global-seq-len information,
             # so its end-aligned causal mask is wrong for q_len > 1 over the
@@ -1343,7 +1344,11 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             # NVFP4 KV cache requires the trtllm-gen backend inside
             # the wrapper on SM100; SM8x, SM90 and SM12x read it with fa2.
             backend = (
-                "trtllm-gen" if self.nvfp4_trtllm else "fa2" if self.use_fa2 else "auto"
+                "trtllm-gen"
+                if self.nvfp4_trtllm
+                else "fa2"
+                if self.use_fa2_native_decode
+                else "auto"
             )
             decode_wrapper = BatchDecodeWithPagedKVCacheWrapper(
                 self._get_workspace_buffer(),
@@ -1802,7 +1807,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     and num_decode_tokens <= self._decode_cudagraph_max_bs
                 )
                 num_input_tokens, q_len_per_req = num_decode_tokens, 1
-                if self.use_fa2:
+                if self.use_fa2_native_decode:
                     # fa2 plans uniform spec decodes per request.
                     num_input_tokens = num_decodes
                     q_len_per_req = num_decode_tokens // num_decodes
