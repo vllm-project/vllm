@@ -162,13 +162,14 @@ def test_dspark_context_kv_matches_query_insert(
 )
 @pytest.mark.parametrize("compress_ratio", [1, 2])
 @pytest.mark.parametrize("use_graph", [False, True])
+@pytest.mark.parametrize("fuse_cache", [False, True])
 @pytest.mark.parametrize(
     "lengths",
     [(1, 5, 13), (1, 1, 1), (1, 2, 0), (7, 8, 8), (2, 3, 3)],
     ids=["prefill", "decode", "empty", "wrap_threshold", "packed_boundary"],
 )
 def test_v41_fused_save_compress_and_insert(
-    compress_ratio: int, use_graph: bool, lengths: tuple[int, ...]
+    compress_ratio: int, use_graph: bool, fuse_cache: bool, lengths: tuple[int, ...]
 ):
     """Ring states: a group boundary whose previous token is outside the chunk
     pools the ring row that chunk left behind, even when this chunk overwrites
@@ -180,6 +181,8 @@ def test_v41_fused_save_compress_and_insert(
     a Torch reference with BF16 rounding before RoPE. Replays change both
     inputs and history so stale scratch/cache values cannot satisfy the test.
     """
+    if fuse_cache and not current_platform.is_cuda():
+        pytest.skip("fused cache insertion is CUDA only")
     from vllm.models.deepseek_v41.common.ops.fused_compress_quant_cache import (
         fused_save_compress_norm,
         rope_quant_insert,
@@ -235,10 +238,20 @@ def test_v41_fused_save_compress_and_insert(
             1e-20,
             compress_ratio,
             latent,
+            **(
+                dict(
+                    cos_sin_cache=cos_sin,
+                    kv_cache=cache,
+                    cache_slot_mapping=cache_slots,
+                )
+                if fuse_cache
+                else {}
+            ),
         )
-        rope_quant_insert(
-            latent, positions, cos_sin, cache, cache_slots, compress_ratio
-        )
+        if not fuse_cache:
+            rope_quant_insert(
+                latent, positions, cos_sin, cache, cache_slots, compress_ratio
+            )
 
     state_backing.normal_()
     run()
@@ -895,8 +908,11 @@ def test_v41_compressor_metadata_maps_tokens_to_their_ring():
 @pytest.mark.parametrize(
     "use_aux,use_graph", [(False, False), (True, False), (True, True)]
 )
+@pytest.mark.parametrize("fuse_cache", [False, True])
 @torch.inference_mode()
-def test_v41_attention_joins_cache_writes_before_consumption(use_aux, use_graph):
+def test_v41_attention_joins_cache_writes_before_consumption(
+    use_aux, use_graph, fuse_cache
+):
     """Both reused-event joins must publish this forward's states and cache rows."""
     from vllm.forward_context import ForwardContext, override_forward_context
     from vllm.models.deepseek_v41.attention import (
@@ -966,6 +982,7 @@ def test_v41_attention_joins_cache_writes_before_consumption(use_aux, use_graph)
     auxiliary = [torch.cuda.Stream()] if use_aux else None
     attention = SimpleNamespace(
         compressor=compressor,
+        _fuse_compressor_cache=fuse_cache,
         indexer=prepare_indexer,
         aux_stream_list=auxiliary,
         ln_events=[torch.cuda.Event(), torch.cuda.Event()],
@@ -1007,10 +1024,12 @@ def test_v41_attention_joins_cache_writes_before_consumption(use_aux, use_graph)
         raw.normal_()
         reset()
         attention.aux_stream_list = None
+        attention._fuse_compressor_cache = False
         run()
         expected = tuple(output.clone() for output in observed)
         reset()
         attention.aux_stream_list = auxiliary
+        attention._fuse_compressor_cache = fuse_cache
         if graph is None:
             run()
         else:

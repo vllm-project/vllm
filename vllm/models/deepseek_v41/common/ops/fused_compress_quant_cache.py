@@ -30,6 +30,10 @@ def fused_save_compress_norm(
     rms_norm_eps: float,
     compress_ratio: int,
     latent_out: torch.Tensor,
+    *,
+    cos_sin_cache: torch.Tensor | None = None,
+    kv_cache: torch.Tensor | None = None,
+    cache_slot_mapping: torch.Tensor | None = None,
 ) -> None:
     """Pool each closed group into a normalized BF16 latent; save FP32 states.
 
@@ -58,6 +62,9 @@ def fused_save_compress_norm(
         rms_norm_eps: RMSNorm epsilon.
         compress_ratio: Group size, either 1 or 2.
         latent_out: BF16 [tokens, 512], written only at valid group boundaries.
+        cos_sin_cache: Optional GPT-J RoPE cache for fused cache insertion.
+        kv_cache: Optional 584-byte paged FP8/BF16 main cache.
+        cache_slot_mapping: Main-cache slots, distinct from the state ring slots.
 
     """
     assert compress_ratio in (1, 2)
@@ -88,6 +95,18 @@ def fused_save_compress_norm(
         num_reqs = 0
     num_tokens = slot_mapping.numel()
     assert num_tokens <= min(kv_score.shape[0], positions.numel())
+    fuse_cache = kv_cache is not None
+    if kv_cache is not None:
+        assert current_platform.is_cuda()
+        assert cos_sin_cache is not None and cache_slot_mapping is not None
+        assert kv_cache.dtype == torch.uint8 and kv_cache.shape[-1] == 584
+        assert cache_slot_mapping.is_contiguous()
+        assert cache_slot_mapping.numel() == num_tokens
+        cos_stride = cos_sin_cache.stride(0)
+        cache_stride, cache_block = kv_cache.stride(0), kv_cache.shape[1]
+    else:
+        assert cos_sin_cache is None and cache_slot_mapping is None
+        cos_stride = cache_stride = cache_block = 1
     if num_tokens == 0:
         return
     grid = num_reqs + triton.cdiv(num_tokens, compress_ratio)
@@ -100,6 +119,9 @@ def fused_save_compress_norm(
         token_to_req_indices,
         rms_norm_weight,
         latent_out,
+        cos_sin_cache,
+        kv_cache,
+        cache_slot_mapping,
         num_tokens,
         num_reqs,
         RAW_STRIDE=kv_score.stride(0),
@@ -109,6 +131,10 @@ def fused_save_compress_norm(
         COMPRESS_RATIO=compress_ratio,
         EPS=rms_norm_eps,
         JOIN_ROW_PTRS=_JOIN_ROW_PTRS,
+        FUSE_CACHE=fuse_cache,
+        COS_STRIDE=cos_stride,
+        CACHE_STRIDE=cache_stride,
+        CACHE_BLOCK=cache_block,
         num_warps=4,
         **({"launch_pdl": False} if current_platform.is_cuda() else {}),
     )
@@ -124,6 +150,9 @@ def _fused_save_compress_norm_kernel(
     req_ids,
     norm_weight,
     latent,
+    cos_sin,
+    cache,
+    cache_slots,
     num_tokens,
     num_reqs,
     RAW_STRIDE: tl.constexpr,
@@ -133,6 +162,10 @@ def _fused_save_compress_norm_kernel(
     COMPRESS_RATIO: tl.constexpr,
     EPS: tl.constexpr,
     JOIN_ROW_PTRS: tl.constexpr,
+    FUSE_CACHE: tl.constexpr,
+    COS_STRIDE: tl.constexpr,
+    CACHE_STRIDE: tl.constexpr,
+    CACHE_BLOCK: tl.constexpr,
 ):
     pid = tl.program_id(0)
     d = tl.arange(0, 512)
@@ -176,7 +209,22 @@ def _fused_save_compress_norm_kernel(
                     pooled = (kv_prev * weight_prev + kv_current * weight_current) / (
                         weight_prev + weight_current
                     )
-                _store_latent(pooled, start, norm_weight, latent, EPS)
+                normed = _store_latent(pooled, start, norm_weight, latent, EPS)
+                if FUSE_CACHE:
+                    slot = tl.load(cache_slots + start)
+                    if slot >= 0:
+                        _store_fp8_cache(
+                            normed,
+                            position,
+                            slot,
+                            cos_sin,
+                            cache,
+                            COS_STRIDE,
+                            CACHE_STRIDE,
+                            CACHE_BLOCK,
+                            COMPRESS_RATIO,
+                            False,
+                        )
             num_rows = tl.minimum(end - start, STATE_BLOCK)
             for k in tl.range(0, num_rows):
                 token = end - num_rows + k
@@ -209,7 +257,22 @@ def _fused_save_compress_norm_kernel(
         kv = tl.load(rows + d[None, :])
         score = tl.load(rows + 512 + d[None, :])
         pooled = tl.sum(kv * tl.softmax(score, 0), 0)
-    _store_latent(pooled, t, norm_weight, latent, EPS)
+    normed = _store_latent(pooled, t, norm_weight, latent, EPS)
+    if FUSE_CACHE:
+        slot = tl.load(cache_slots + t)
+        if slot >= 0:
+            _store_fp8_cache(
+                normed,
+                tl.load(positions + t),
+                slot,
+                cos_sin,
+                cache,
+                COS_STRIDE,
+                CACHE_STRIDE,
+                CACHE_BLOCK,
+                COMPRESS_RATIO,
+                False,
+            )
 
 
 @triton.jit
@@ -218,7 +281,10 @@ def _store_latent(pooled, t, norm_weight, latent, EPS: tl.constexpr):
     weight = tl.load(norm_weight + d).to(tl.float32)
     variance = tl.sum(pooled * pooled, 0) / 512
     normed = pooled * tl.rsqrt(variance + EPS) * weight
-    tl.store(latent + t.to(tl.int64) * 512 + d, normed.to(tl.bfloat16))
+    rounded = normed.to(tl.bfloat16)
+    tl.store(latent + t.to(tl.int64) * 512 + d, rounded)
+    # Preserve the store/reload rounding of the separately scheduled tail.
+    return rounded.to(tl.float32)
 
 
 def rope_quant_insert(
@@ -323,6 +389,34 @@ def _rope_quant_insert_kernel(
         return
     d = tl.arange(0, 512)
     normed = tl.load(latent + t.to(tl.int64) * 512 + d).to(tl.float32)
+    _store_fp8_cache(
+        normed,
+        position,
+        slot,
+        cos_sin,
+        cache,
+        COS_STRIDE,
+        CACHE_STRIDE,
+        CACHE_BLOCK,
+        COMPRESS_RATIO,
+        SANITIZE_CACHE_NANS,
+    )
+
+
+@triton.jit
+def _store_fp8_cache(
+    normed,
+    position,
+    slot,
+    cos_sin,
+    cache,
+    COS_STRIDE: tl.constexpr,
+    CACHE_STRIDE: tl.constexpr,
+    CACHE_BLOCK: tl.constexpr,
+    COMPRESS_RATIO: tl.constexpr,
+    SANITIZE_CACHE_NANS: tl.constexpr,
+):
+    d = tl.arange(0, 512)
     page = cache + (slot // CACHE_BLOCK).to(tl.int64) * CACHE_STRIDE
     values = page + (slot % CACHE_BLOCK) * 576
     scales = page + CACHE_BLOCK * 576 + (slot % CACHE_BLOCK) * 8
