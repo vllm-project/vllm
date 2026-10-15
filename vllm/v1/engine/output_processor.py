@@ -667,6 +667,7 @@ class OutputProcessor:
         parent_req: ParentRequest | None = None,
         request_index: int = 0,
         queue: RequestOutputCollector | None = None,
+        api_surface: str = "unknown",
     ) -> None:
         request_id = request.request_id
         req_state = self.request_states.get(request_id)
@@ -684,6 +685,12 @@ class OutputProcessor:
             log_stats=self.log_stats,
             stream_interval=self.stream_interval,
         )
+        if req_state.stats is not None:
+            req_state.stats.api_surface = (
+                api_surface
+                if api_surface in ("messages", "chat_completions", "completions")
+                else "unknown"
+            )
         self.request_states[request_id] = req_state
         if parent_req:
             self.parent_requests[parent_req.request_id] = parent_req
@@ -978,9 +985,7 @@ class OutputProcessor:
             SpanAttributes.GEN_AI_REQUEST_ID: req_state.external_req_id,
         }
 
-        api_surface = (engine_core_output.trace_headers or {}).get(
-            SpanAttributes.API_SURFACE
-        )
+        api_surface = metrics.api_surface
         if api_surface in ("messages", "chat_completions", "completions"):
             attributes[SpanAttributes.API_SURFACE] = api_surface
 

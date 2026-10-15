@@ -2,10 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
 import time
-from collections.abc import Awaitable, Mapping
+from collections.abc import Awaitable
 from dataclasses import dataclass, field
 from http import HTTPStatus
-from typing import ClassVar, Generic, Literal, TypeVar
+from typing import ClassVar, Generic, TypeVar
 
 from fastapi import Request
 from pydantic import ConfigDict
@@ -32,7 +32,6 @@ from vllm.logprobs import Logprob, PromptLogprobs
 from vllm.lora.request import LoRARequest
 from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.detokenizer_utils import convert_ids_list_to_tokens
-from vllm.tracing import SpanAttributes
 from vllm.v1.metrics.stats import RequestStateStats
 
 logger = init_logger(__name__)
@@ -166,22 +165,6 @@ class GenerateBaseServing(BaseServing, BeamSearchOnlineMixin):
         except Exception:
             # Never fail server startup over the fingerprint.
             self.system_fingerprint = None
-
-    async def _get_trace_headers(
-        self,
-        headers: Mapping[str, str],
-        *,
-        api_surface: Literal["chat_completions", "messages", "completions"]
-        | None = None,
-    ) -> Mapping[str, str] | None:
-        """Attach server-side API identity after filtering client trace headers."""
-        trace_headers = await super()._get_trace_headers(headers)
-        if api_surface is not None and await self.engine_client.is_tracing_enabled():
-            trace_headers = {
-                **(trace_headers or {}),
-                SpanAttributes.API_SURFACE: api_surface,
-            }
-        return trace_headers
 
     def _preflight(self, n: int = 1) -> None:
         """Engine checks that must run before a response is started.

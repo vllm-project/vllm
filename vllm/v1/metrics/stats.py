@@ -283,6 +283,8 @@ class RequestStateStats:
     # Track if this request asked for the watermark but could not use it
     is_watermark_skipped: bool = False
 
+    api_surface: str = "unknown"
+
 
 @dataclass
 class FinishedRequestStats:
@@ -302,6 +304,7 @@ class FinishedRequestStats:
     mean_time_per_output_token: float = 0.0
     is_corrupted: bool = False
     num_cached_tokens: int = 0
+    api_surface: str = "unknown"
 
 
 @dataclass
@@ -630,6 +633,7 @@ class IterationStats:
             mean_time_per_output_token=mean_time_per_output_token,
             is_corrupted=req_stats.is_corrupted,
             num_cached_tokens=num_cached_tokens,
+            api_surface=req_stats.api_surface,
         )
         self.finished_requests.append(finished_req)
 

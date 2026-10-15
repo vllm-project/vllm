@@ -78,8 +78,7 @@ def test_inference_span_api_identity_preserves_parent_and_usage(
     provider.add_span_processor(SimpleSpanProcessor(exporter))
     monkeypatch.setattr(otel.trace, "get_tracer", provider.get_tracer)
     headers = {"traceparent": "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"}
-    if api_surface is not None:
-        headers[SpanAttributes.API_SURFACE] = api_surface
+    headers[SpanAttributes.API_SURFACE] = "client-controlled"
     state = Mock(
         spec=RequestState,
         external_req_id="request",
@@ -92,6 +91,7 @@ def test_inference_span_api_identity_preserves_parent_and_usage(
             first_token_ts=2.0,
             last_token_ts=3.0,
             num_generation_tokens=2,
+            api_surface=api_surface or "unknown",
         ),
         top_p=0.9,
         max_tokens_param=2,
