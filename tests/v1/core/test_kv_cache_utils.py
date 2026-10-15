@@ -52,6 +52,7 @@ from vllm.v1.core.kv_cache_utils import (
     hash_block_tokens,
     init_none_hash,
     make_block_hash_with_group_id,
+    null_head_len,
     tensor_data,
     to_event_extra_keys,
 )
@@ -2156,3 +2157,20 @@ def test_wrapped_mamba_group_requires_block_zeroing():
     )
 
     assert config.needs_kv_cache_zeroing
+
+
+def test_null_head_len():
+    null = KVCacheBlock(0, is_null=True)
+    real = [KVCacheBlock(i) for i in range(1, 4)]
+    tables = [
+        [],
+        real,
+        [null] * 5,
+        [null] * 5 + real,
+        [null] * 2 + real[:1] + [null] * 3 + real[1:],  # not one contiguous head
+    ]
+    for table in tables:
+        expected = next((i for i, b in enumerate(table) if not b.is_null), len(table))
+        assert null_head_len(table) == expected
+    blocks = KVCacheBlocks(([null] * 4 + real, [null] + real[:1] + [null]))
+    assert blocks.get_unhashed_block_ids_all_groups() == [[1, 2, 3], [1]]

@@ -8,7 +8,15 @@ import math
 import os
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any, NamedTuple, NewType, TypeAlias, overload
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    NamedTuple,
+    NewType,
+    TypeAlias,
+    TypeVar,
+    overload,
+)
 
 from vllm import envs
 from vllm.config import VllmConfig
@@ -214,6 +222,32 @@ class KVCacheBlock:
             f"prev_free_block={prev_block_id}, "
             f"next_free_block={next_block_id})"
         )
+
+
+def null_head_len(blocks: Sequence[KVCacheBlock]) -> int:
+    """Number of leading null blocks, e.g. a sliding-window table's skipped prefix."""
+    if not blocks or not blocks[0].is_null:
+        return 0
+    lo, hi = 1, len(blocks)
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if blocks[mid].is_null:
+            lo = mid + 1
+        else:
+            hi = mid
+    # All null entries are one shared object, so count() checks the run at C speed.
+    if blocks[:lo].count(blocks[0]) == lo:
+        return lo
+    return next(i for i, b in enumerate(blocks) if not b.is_null)
+
+
+_BlockSeq = TypeVar("_BlockSeq", list[KVCacheBlock], Sequence[KVCacheBlock])
+
+
+def trim_null_head(blocks: _BlockSeq) -> _BlockSeq:
+    """``blocks`` without its leading null blocks; ``blocks`` itself if none."""
+    nhl = null_head_len(blocks)
+    return blocks[nhl:] if nhl else blocks
 
 
 class KVCacheBlockCopy(NamedTuple):
