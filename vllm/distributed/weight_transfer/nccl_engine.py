@@ -5,10 +5,9 @@
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, ClassVar, Self
 
 import torch
-from typing_extensions import Self
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -51,25 +50,6 @@ __all__ = [
     "NCCLWeightTransferEngine",
     "NCCLTrainerWeightTransferEngine",
 ]
-
-
-def _release_communicator(
-    comm: "WeightTransferCommunicator | None",
-) -> None:
-    """Leave the transfer group if this engine's communicator holds one.
-
-    Only the `torch.distributed` transport needs this: its group stays
-    registered process-wide until someone leaves it, and holding it keeps the
-    peer's own teardown waiting. `PyNcclCommunicator` is deliberately left
-    untouched -- it has a `destroy()` of its own that calls `ncclCommAbort`, and
-    calling it here would change CUDA/ROCm teardown, which is out of scope.
-    """
-    from vllm.distributed.weight_transfer.torch_dist_transport import (
-        TorchDistTransport,
-    )
-
-    if isinstance(comm, TorchDistTransport):
-        comm.destroy()
 
 
 @dataclass
@@ -251,8 +231,9 @@ class NCCLWeightTransferEngine(
                     del weight
 
     def shutdown(self) -> None:
-        _release_communicator(self.model_update_group)
-        self.model_update_group = None
+        if self.model_update_group is not None:
+            self.model_update_group.destroy()
+            self.model_update_group = None
 
 
 class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerInitInfo]):
@@ -478,5 +459,6 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
             current_stream().synchronize()
 
     def shutdown(self) -> None:
-        _release_communicator(self.model_update_group)
-        self.model_update_group = None
+        if self.model_update_group is not None:
+            self.model_update_group.destroy()
+            self.model_update_group = None

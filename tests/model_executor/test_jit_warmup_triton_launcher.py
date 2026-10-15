@@ -553,12 +553,10 @@ def test_compute_slot_mapping_uses_named_launcher_inputs(monkeypatch) -> None:
     owner = ComputeSlotMappingKernel()
     compile_key = owner.CompileKey(
         kv_cache_block_size=16,
-        blocks_per_kv_block=1,
         total_cp_world_size=2,
         total_cp_rank=1,
         cp_kv_cache_interleave_size=1,
         block_table_stride=128,
-        block_size=16,
     )
     launches: list[tuple[Any, ...]] = []
 
@@ -574,7 +572,6 @@ def test_compute_slot_mapping_uses_named_launcher_inputs(monkeypatch) -> None:
     assert inputs["block_table_stride"] == 128
     assert kwargs == {
         "KV_CACHE_BLOCK_SIZE": 16,
-        "BLOCKS_PER_KV_BLOCK": 1,
         "TOTAL_CP_WORLD_SIZE": 2,
         "TOTAL_CP_RANK": 1,
         "CP_KV_CACHE_INTERLEAVE_SIZE": 1,
