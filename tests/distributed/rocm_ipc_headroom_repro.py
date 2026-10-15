@@ -18,8 +18,8 @@ This script asks the same question without vLLM, elastic EP, Ray or a model.
 import argparse
 import ctypes
 import os
-import socket
 import sys
+import tempfile
 import traceback
 from datetime import timedelta
 
@@ -32,12 +32,6 @@ SIZE = 6 << 20
 LIMIT = 256
 UNCACHED = 0x3
 HANDLE_BYTES = 64
-
-
-def _free_port() -> int:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
 
 
 def _lib():
@@ -84,13 +78,16 @@ def _log(rank, point, msg):
     print(f"[HEADROOM] rank={rank} {point}: {msg}", flush=True)
 
 
-def _worker(rank: int, port: int, rounds: int) -> None:
+def _worker(rank: int, rendezvous: str, rounds: int) -> None:
     try:
         torch.accelerator.set_device_index(rank)
-        os.environ["MASTER_ADDR"] = "127.0.0.1"
-        os.environ["MASTER_PORT"] = str(port)
+        # A port picked by binding and closing a socket is a race, and losing
+        # it costs the whole run: rank 0 failed to listen with EADDRINUSE and
+        # the other three sat in a 180 second connect timeout. A file needs no
+        # such window.
         dist.init_process_group(
             "cpu:gloo,cuda:nccl",
+            init_method=f"file://{rendezvous}",
             rank=rank,
             world_size=WORLD,
             timeout=timedelta(seconds=180),
@@ -135,18 +132,22 @@ def main() -> int:
         print(f"[HEADROOM] need {WORLD} GPUs, skipping", flush=True)
         return 0
 
-    port = _free_port()
-    ctx = mp.get_context("spawn")
-    procs = [
-        ctx.Process(target=_worker, args=(r, port, args.rounds)) for r in range(WORLD)
-    ]
-    for p in procs:
-        p.start()
-    for p in procs:
-        p.join()
-    bad = [p.exitcode for p in procs if p.exitcode]
-    print(f"[HEADROOM] SUMMARY exit codes {[p.exitcode for p in procs]}", flush=True)
-    return 1 if bad else 0
+    with tempfile.TemporaryDirectory() as tmp:
+        rendezvous = os.path.join(tmp, "rendezvous")
+        ctx = mp.get_context("spawn")
+        procs = [
+            ctx.Process(target=_worker, args=(r, rendezvous, args.rounds))
+            for r in range(WORLD)
+        ]
+        for p in procs:
+            p.start()
+        for p in procs:
+            p.join()
+        bad = [p.exitcode for p in procs if p.exitcode]
+        print(
+            f"[HEADROOM] SUMMARY exit codes {[p.exitcode for p in procs]}", flush=True
+        )
+        return 1 if bad else 0
 
 
 if __name__ == "__main__":

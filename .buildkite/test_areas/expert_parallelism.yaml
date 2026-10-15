@@ -91,13 +91,23 @@ steps:
       - requirements/kv_connectors_rocm.txt
       commands:
       - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
-      - AMD_LOG_LEVEL=1 python3 distributed/rocm_ipc_churn_repro.py --timeout 240 || true
-      # The churn repro passes on the agent that fails the test a minute later,
-      # because it never builds a second communicator while the first one is
-      # alive. This one does exactly that and measures the export headroom
-      # around it, which is the smallest shape of the failure we can hand over
-      # without vLLM, elastic EP, Ray or a model.
+      # The churn repro that used to run here reported A=PASS B=PASS C=PASS
+      # D=PASS in every build for ten builds running, because it never builds a
+      # second communicator while the first one is alive. It has said what it
+      # had to say and its four minutes are better spent elsewhere. This one
+      # does build the second communicator and measures the export headroom
+      # around it, and it is the only check here that uses all four GPUs.
       - AMD_LOG_LEVEL=1 python3 distributed/rocm_ipc_headroom_repro.py --rounds 3 || true
+      # The headroom repro only ever exports 6 MiB and it reported a full 256 at
+      # all five of its points on the agent that fails, because 6 MiB is not the
+      # size that bleeds. In the test, a worker reads 117 at 6 MiB, runs one
+      # measurement that exports and frees about 355 buffers, and then reads 0,
+      # and the only pass that keeps its count is the one with the fragment
+      # allocator off. This drives that exact pair with nothing else in the
+      # process. Locally it survives 41216 exports in either mode, so a drop
+      # here is a complete repro for ROCR-Runtime: one file, HIP and torch only.
+      - AMD_LOG_LEVEL=1 python3 distributed/rocm_ipc_drain_repro.py --rounds 40 || true
+      - HSA_DISABLE_FRAGMENT_ALLOCATOR=1 AMD_LOG_LEVEL=1 python3 distributed/rocm_ipc_drain_repro.py --rounds 40 || true
       # ROCr refuses the export in Runtime::IPCCreate, which picks between two
       # unrelated implementations: hsaKmtShareMemory when HSA_ENABLE_IPC_MODE_LEGACY
       # is 1, hsaKmtExportDMABufHandle otherwise. Our images pin the legacy side in
@@ -107,28 +117,27 @@ steps:
       # HSA_ is not in DEFAULT_ENV_VAR_PREFIXES, so without naming it below the Ray
       # actors would keep the image value and the flag would do nothing.
       - HSA_ENABLE_IPC_MODE_LEGACY=0 AMD_LOG_LEVEL=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=HSA_ENABLE_IPC_MODE_LEGACY,AMD_LOG_LEVEL pytest -v -s distributed/test_elastic_ep.py -k enforce_eager_none || true
-      # The legacy path turns whatever the kernel said into INVALID_ARGUMENT, so
-      # the only remaining place the real reason can surface is the kernel ring
-      # buffer. Worth one line even if the container is not allowed to read it.
-      - echo "--- dmesg after the dmabuf pass" && (dmesg --ctime | tail -n 80 || echo "dmesg not permitted in this container")
+      # The two dmesg lines that used to sit here printed "read kernel buffer
+      # failed: Operation not permitted" in every build, so the kernel ring
+      # buffer stays out of reach from this container and there is nothing to
+      # gain by asking again.
       # One of the six INVALID_ARGUMENT returns in IPCCreate is the fragment branch,
       # for buffers suballocated out of a 2 MB block. This removes that branch.
       - HSA_DISABLE_FRAGMENT_ALLOCATOR=1 AMD_LOG_LEVEL=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=HSA_DISABLE_FRAGMENT_ALLOCATOR,AMD_LOG_LEVEL pytest -v -s distributed/test_elastic_ep.py -k enforce_eager_none || true
-      - echo "--- dmesg after the fragment pass" && (dmesg --ctime | tail -n 80 || echo "dmesg not permitted in this container")
-      # The legacy path replaces the kernel's reason with INVALID_ARGUMENT, so the
-      # last place that reason still exists is the thunk. HSAKMT_DEBUG_LEVEL only
-      # says anything at 7, where it names every call, and hsaKmtShareMemory is the
-      # one that matters. That costs about seven lines per export, so the run goes
-      # to a file and only the band around the last share and the tail come back.
-      # HSAKMT_ is not a copied prefix either, so it has to be named for Ray.
-      # Buildkite substitutes $VAR in a command before bash sees it, so the first
-      # version of this line lost its shell variable and printed nothing. There is
-      # no variable here now, and our own lines are pulled out too, since they go
-      # into the file along with everything else.
-      # Ray collapses identical lines into "[repeated 3188x across cluster]",
-      # which gave us useful totals but destroyed the order, and order is the
-      # whole point of a thunk trace. RAY_DEDUP_LOGS=0 prints every line.
-      - RAY_DEDUP_LOGS=0 HSAKMT_DEBUG_LEVEL=7 AMD_LOG_LEVEL=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=HSAKMT_DEBUG_LEVEL,AMD_LOG_LEVEL,RAY_DEDUP_LOGS pytest -v -s distributed/test_elastic_ep.py -k enforce_eager_none > /tmp/kmt.log 2>&1 || true; echo "--- kmt log has $(wc -l < /tmp/kmt.log) lines, $(grep -c hsaKmtShareMemory /tmp/kmt.log) of them share calls"; echo "--- band around the share calls"; grep -n -B 25 -A 60 hsaKmtShareMemory /tmp/kmt.log | tail -n 170; echo "--- our own lines"; grep -n EEP-DEBUG /tmp/kmt.log | tail -n 40; echo "--- anything that looks like a refusal"; grep -niE "errno|operation not|denied|invalid|failed with" /tmp/kmt.log | tail -n 40; echo "--- tail"; tail -n 120 /tmp/kmt.log
+      # The pass above still carries the probes, and it is the only run so far
+      # where all of them succeeded and the test then failed on its own, which
+      # makes it the one uncontaminated recording of the real failure. It does
+      # not answer whether the switch alone is enough, because the probes are
+      # still exporting. This one has nothing running but the test.
+      - HSA_DISABLE_FRAGMENT_ALLOCATOR=1 VLLM_EEP_DEBUG_OFF=1 AMD_LOG_LEVEL=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=HSA_DISABLE_FRAGMENT_ALLOCATOR,VLLM_EEP_DEBUG_OFF,AMD_LOG_LEVEL pytest -v -s distributed/test_elastic_ep.py -k enforce_eager_none || true
+      # The thunk trace at HSAKMT_DEBUG_LEVEL=7 that used to run here has already
+      # given what it can. With RAY_DEDUP_LOGS=0 it showed the true order for the
+      # first time: every hsaKmtShareMemory is followed by a 4 MiB device
+      # allocation and a 4 MiB host allocation, both mapped to all four nodes,
+      # and the run made 24054 share calls across 731346 log lines. Level 7 logs
+      # call entry with the address only and never a return value, so the
+      # kernel's own reason is not in there and a second trace would cost seven
+      # minutes to print the same thing.
       # Measured across two jobs and nine passes: the headroom is full in
       # prepare and down to about 115 at commit, which is where #56610 moved the
       # first collective to avoid a deadlock. With the deferral off, that
@@ -136,7 +145,11 @@ steps:
       # gets further than the others, the headroom is what the failure is about
       # and the deadlock fix needs somewhere else to put the warm-up. If it
       # fails the same way, the window is not the explanation.
-      - VLLM_EEP_DEBUG_NO_DEFER_WARMUP=1 AMD_LOG_LEVEL=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=VLLM_EEP_DEBUG_NO_DEFER_WARMUP,AMD_LOG_LEVEL pytest -v -s distributed/test_elastic_ep.py -k enforce_eager_none || true
+      # The first attempt at this answered nothing: the variable did reach the
+      # workers, but the process died inside the probes before the collective,
+      # so the probes are off here and the pass is left to answer only its own
+      # question.
+      - VLLM_EEP_DEBUG_NO_DEFER_WARMUP=1 VLLM_EEP_DEBUG_OFF=1 AMD_LOG_LEVEL=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=VLLM_EEP_DEBUG_NO_DEFER_WARMUP,VLLM_EEP_DEBUG_OFF,AMD_LOG_LEVEL pytest -v -s distributed/test_elastic_ep.py -k enforce_eager_none || true
       # NCCL_P2P_DISABLE=1 ran once before and failed, but measurement later
       # showed RCCL makes zero IPC calls under it, so that failure came from the
       # probes in rocm_debug rather than from the test. VLLM_EEP_DEBUG_OFF=1

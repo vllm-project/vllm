@@ -670,6 +670,19 @@ def _off() -> bool:
     return os.getenv("VLLM_EEP_DEBUG_OFF") == "1"
 
 
+def _drain_probe() -> bool:
+    """The 2 MiB ceiling is destructive on the agent, so it is opt in."""
+    return os.getenv("VLLM_EEP_DEBUG_DRAIN") == "1"
+
+
+def _attach_probe() -> bool:
+    """The attach ceiling has produced a real GPU page fault, reported as
+    `Memory access fault by GPU node-N` followed by an abort, so it is opt in
+    until the exporter is proven to outlive every peer that mapped it.
+    """
+    return os.getenv("VLLM_EEP_DEBUG_ATTACH") == "1"
+
+
 def dump(tag: str, groups: dict | None = None, heavy: bool = False) -> None:
     """Heavy adds probes that perturb state, so they stay off at the points
     right before a collective we are trying to observe."""
@@ -712,11 +725,13 @@ def dump(tag: str, groups: dict | None = None, heavy: bool = False) -> None:
         # measurement already runs immediately before a collective that then
         # succeeds, so it is safe to take here too.
         info["ipc_export_ceiling_6MiB_256"] = _ipc_export_ceiling(6 << 20, 256)
-        # Same question as at the door, but here nothing has disturbed the state
-        # first, so this is the pair to trust: a byte limit should put the 2 MiB
-        # count at roughly three times the 6 MiB one, a handle count should put
-        # them side by side.
-        info["ipc_export_ceiling_2MiB_768"] = _ipc_export_ceiling(2 << 20, 768)
+        # This one costs what it measures. Two dumps a second apart read 117
+        # and then 0 on the agent, because the 2 MiB exports in the first one
+        # never give their capacity back, so leaving it on turns every later
+        # reading into a reading of this probe. It stays off unless a pass is
+        # specifically asking how much a batch of 2 MiB exports consumes.
+        if _drain_probe():
+            info["ipc_export_ceiling_2MiB_768"] = _ipc_export_ceiling(2 << 20, 768)
         if heavy:
             # Burst can exhaust export handles and foreign_device creates a
             # context on a neighbour card, so neither runs near the collective.
@@ -808,34 +823,37 @@ def warm_each(groups: dict, tag: str) -> None:
                 # dmabuf pass the whole thing stopped at that probe and this
                 # line never printed at all.
                 #
-                # The second size is there to tell a byte limit from a handle
-                # count. The reproducible 115 at 6 MiB is 690 MiB; if the limit
-                # is bytes then 2 MiB should reach about three times the count,
-                # and if it is handles both numbers should land near each other.
+                # Twice in a row, because on the agent the second reading is
+                # what exposes whether the first one cost anything. The 2 MiB
+                # size answers the same question far more sharply but consumes
+                # the remaining budget outright, so it waits for a pass that
+                # asks for it.
                 logger.warning(
                     "[EEP-DEBUG] %s warm %s headroom rank=%s/%s"
-                    " 6MiB/uncached %s, again %s | 2MiB/uncached %s",
+                    " 6MiB/uncached %s, again %s%s",
                     tag,
                     name,
                     group.rank_in_group,
                     group.world_size,
                     _ipc_export_ceiling(6 << 20, 256),
                     _ipc_export_ceiling(6 << 20, 256),
-                    _ipc_export_ceiling(2 << 20, 768),
+                    f" | 2MiB/uncached {_ipc_export_ceiling(2 << 20, 768)}"
+                    if _drain_probe()
+                    else "",
                 )
                 # The mesh probe attaches one buffer per peer, which answers
-                # whether attaching works at all but not how many fit. The two
-                # implementations fail on opposite sides, dmabuf on attach and
-                # legacy on export, so the import side needs its own count if
-                # the two are to be compared where each of them breaks.
-                logger.warning(
-                    "[EEP-DEBUG] %s warm %s attach rank=%s/%s 2MiB/uncached %s",
-                    tag,
-                    name,
-                    group.rank_in_group,
-                    group.world_size,
-                    _ipc_attach_ceiling(group, 2 << 20, 0x3, 256),
-                )
+                # whether attaching works at all but not how many fit. This one
+                # counts, but it has also faulted the GPU outright, so it only
+                # runs when a pass asks for it.
+                if _attach_probe():
+                    logger.warning(
+                        "[EEP-DEBUG] %s warm %s attach rank=%s/%s 2MiB/uncached %s",
+                        tag,
+                        name,
+                        group.rank_in_group,
+                        group.world_size,
+                        _ipc_attach_ceiling(group, 2 << 20, 0x3, 256),
+                    )
                 if os.getenv("VLLM_EEP_DEBUG_SET_DEVICE") == "1":
                     torch.accelerator.set_device_index(group.device.index)
                 torch.distributed.all_reduce(tensor, group=group.device_group)
