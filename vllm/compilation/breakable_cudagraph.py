@@ -29,7 +29,7 @@ import logging
 import threading
 import weakref
 from collections.abc import Callable
-from typing import Any, ClassVar, TypeVar
+from typing import Any, ClassVar, TypeVar, overload
 
 import torch
 
@@ -64,7 +64,19 @@ def _weak_ref_capture_arg(arg: Any) -> Any:
     return weak_ref_tensor(arg)
 
 
-def eager_break_during_capture(fn: F) -> F:
+@overload
+def eager_break_during_capture(fn: F) -> F: ...
+
+
+@overload
+def eager_break_during_capture(
+    *, capturable: Callable[..., bool]
+) -> Callable[[F], F]: ...
+
+
+def eager_break_during_capture(
+    fn: F | None = None, *, capturable: Callable[..., bool] | None = None
+) -> Any:
     """Decorator that turns a custom-op Python kernel into a "break point"
     for the breakable cudagraph capture.
 
@@ -94,7 +106,15 @@ def eager_break_during_capture(fn: F) -> F:
         @maybe_transfer_kv_layer
         def unified_attention_with_output(...):
             ...
+
+    **Capturable calls.** ``capturable``, if given, is called with the op's
+    arguments inside a capture. When it returns True the op runs inline and
+    is captured into the current segment, so it must then obey the CUDA graph
+    contract: the same launches and tensor addresses for every batch that
+    replays the segment. Use as ``@eager_break_during_capture(capturable=...)``.
     """
+    if fn is None:
+        return functools.partial(eager_break_during_capture, capturable=capturable)
     if not is_breakable_cudagraph_enabled():
         return fn
 
@@ -104,6 +124,8 @@ def eager_break_during_capture(fn: F) -> F:
         if capture is None:
             return fn(*args, **kwargs)
         if not capture._capturing:
+            return fn(*args, **kwargs)
+        if capturable is not None and capturable(*args, **kwargs):
             return fn(*args, **kwargs)
         if is_forward_context_available():
             mode = get_forward_context().cudagraph_runtime_mode
@@ -203,10 +225,20 @@ class BreakableCUDAGraphCapture:
         Replay does not return values; callers should propagate any
         downstream dependencies via static output buffers.
         """
-        self._end_segment()
-        result = fn()
+        result = self.run_uncaptured(fn)
         self.segments.append(fn)
         self._num_eager_breaks += 1
+        return result
+
+    def run_uncaptured(self, fn: Callable[[], Any]) -> Any:
+        """End the current capture segment, run ``fn`` eagerly once without
+        recording it for replay, and start a new segment.
+
+        For warm-ups that cannot run inside a capture, such as the Triton JIT
+        compile and autotune of a kernel the next segment captures.
+        """
+        self._end_segment()
+        result = fn()
         self._begin_segment()
         return result
 
