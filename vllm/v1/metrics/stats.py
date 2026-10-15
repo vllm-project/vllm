@@ -493,6 +493,12 @@ class IterationStats:
         self.compute_nans_in_logits = envs.VLLM_COMPUTE_NANS_IN_LOGITS
         self.num_generation_tokens = 0
         self.prompt_token_stats = PromptTokenStats()
+        self.num_generation_tokens_by_api_surface: defaultdict[str, int] = defaultdict(
+            int
+        )
+        self.prompt_token_stats_by_api_surface: defaultdict[str, PromptTokenStats] = (
+            defaultdict(PromptTokenStats)
+        )
         self.num_preempted_reqs = 0
         self.finished_requests: list[FinishedRequestStats] = []
         self.max_num_generation_tokens_iter: list[int] = []
@@ -529,9 +535,16 @@ class IterationStats:
         num_new_generation_tokens = len(output.new_token_ids)
 
         self.num_generation_tokens += num_new_generation_tokens
+        api_surface = normalize_api_surface(req_stats.api_surface)
+        self.num_generation_tokens_by_api_surface[api_surface] += (
+            num_new_generation_tokens
+        )
         if is_prefilling:
             if output.prefill_stats is not None:
                 self.prompt_token_stats.update_from_output(output.prefill_stats)
+                self.prompt_token_stats_by_api_surface[api_surface].update_from_output(
+                    output.prefill_stats
+                )
 
             first_token_latency = self._time_since(req_stats.arrival_time)
             self.time_to_first_tokens_iter.append(

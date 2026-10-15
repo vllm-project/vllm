@@ -161,6 +161,11 @@ async def test_metrics_counts(
                     found_suffix = False
 
                     for sample in family.samples:
+                        if sample.labels.get("api_surface") not in (
+                            None,
+                            "completions",
+                        ):
+                            continue
                         if sample.name == metric_name_w_suffix:
                             found_suffix = True
 
