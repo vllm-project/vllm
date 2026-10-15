@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+from collections.abc import Iterator
+
 import pytest
 import torch
 import torch.nn.functional as F
@@ -369,8 +371,27 @@ def test_causal_conv1d_varlen(
 def test_causal_conv1d_update_ragged_varlen(
     q_lens_cfg, dim, width, has_bias, silu_activation, itype
 ):
+    mk_inputs = lambda: _create_ragged_varlen_inputs(
+        q_lens_cfg, dim, width, has_bias, silu_activation, itype
+    )
+    inputs, state = mk_inputs()
+    actual = causal_conv1d_update(conv_state=state, **inputs)
+
+    ref_inputs, ref_state = mk_inputs()
+    ref_outs = _create_ragged_varlen_ref_outs(conv_state=ref_state, **ref_inputs)
+
+    for i, ref_out in enumerate(ref_outs):
+        start = int(inputs["query_start_loc"][i])
+        end = int(inputs["query_start_loc"][i + 1])
+        entry = inputs["conv_state_indices"][i : i + 1]
+        assert torch.allclose(actual[start:end], ref_out, rtol=1e-2, atol=5e-2)
+        assert torch.equal(state[entry], ref_state[entry])
+
+
+def _create_ragged_varlen_inputs(
+    q_lens_cfg, dim, width, has_bias, silu_activation, itype
+):
     device = DEVICE
-    rtol, atol = 1e-2, 5e-2
     set_random_seed(0)
 
     batch_size = len(q_lens_cfg)
@@ -402,30 +423,40 @@ def test_causal_conv1d_update_ragged_varlen(
     num_accepted_tokens = torch.randint(
         1, max_query_len + 1, (batch_size,), dtype=torch.int32, device=device
     )
-    conv_state_ref = conv_state.detach().clone()
-
-    out = causal_conv1d_update(
-        x.clone(),
-        conv_state,
-        weight,
-        bias,
+    inputs = dict(
+        x=x,
+        weight=weight,
+        bias=bias,
         activation=activation,
         conv_state_indices=conv_state_indices,
         num_accepted_tokens=num_accepted_tokens,
         query_start_loc=query_start_loc,
         max_query_len=max_query_len,
     )
+    return inputs, conv_state
 
-    for seq_idx in range(batch_size):
+
+def _create_ragged_varlen_ref_outs(
+    x,
+    conv_state,
+    weight,
+    bias,
+    activation,
+    conv_state_indices,
+    num_accepted_tokens,
+    query_start_loc,
+    max_query_len,
+) -> Iterator[torch.Tensor]:
+    for seq_idx in range(len(conv_state_indices)):
         start = int(query_start_loc[seq_idx])
         end = int(query_start_loc[seq_idx + 1])
         entry = conv_state_indices[seq_idx : seq_idx + 1]
         if start == end:
-            assert torch.equal(conv_state[entry], conv_state_ref[entry])
+            yield x[start:end]
             continue
         out_ref = causal_conv1d_update(
-            x[start:end].clone(),
-            conv_state_ref,
+            x[start:end],
+            conv_state,
             weight,
             bias,
             activation=activation,
@@ -434,5 +465,4 @@ def test_causal_conv1d_update_ragged_varlen(
             query_start_loc=query_start_loc.new_tensor([0, end - start]),
             max_query_len=max_query_len,
         )
-        assert torch.equal(conv_state[entry], conv_state_ref[entry])
-        assert torch.allclose(out[start:end], out_ref, rtol=rtol, atol=atol)
+        yield out_ref
