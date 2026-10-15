@@ -105,7 +105,7 @@ The server keeps no state between calls. Everything the next call needs is in `s
 - **Send `prompt_token_ids` on the first chunk, even without a parser.** It seeds detokenization so the first token's leading space matches the coupled endpoint (see [Request format](#request-format)). Later chunks already carry that context in `stream_state`.
 - **Don't forward `[DONE]`.** It marks the end of the generate stream and isn't a chunk.
 
-Streaming derender resolves `logprobs` on the plain detokenization path, including `token_id:N` placeholders, same as the non-streaming endpoints (see [Streaming state and logprobs](#streaming-state-and-logprobs)). The parser path doesn't resolve them yet and drops them.
+`/inference/v1/generate` returns `GenerateLogProbs` with integer `token_id`s (the generate server has no tokenizer), and derender turns those into `ChatCompletionLogProbs` / `CompletionLogProbs`, filling `token` and `bytes` from the tokenizer with the usual U+FFFD byte-fallback correction. Streaming derender does the same per chunk on the plain detokenization path (see [Streaming state and logprobs](#streaming-state-and-logprobs)). The parser path doesn't resolve them yet and drops them.
 
 ## Streaming cost
 
@@ -129,7 +129,7 @@ Streaming derender is stateless on the server side: all mutable state lives in t
 - `logprob_context_token_ids`: the trailing sampled token IDs (at most 4) from previous chunks, used to seed byte-fallback (U+FFFD) correction so multi-byte characters whose tokens split across chunk boundaries still resolve to real strings
 - `logprob_text_offset`: the cumulative emitted text length, so `text_offset` in completion streaming logprobs stays absolute across chunks instead of restarting at 0
 
-When a streamed `GenerateTokensStreamChoice` carries `logprobs`, the `token_id:N` placeholders are resolved per chunk and the resolved logprobs are attached to the corresponding streamed choice. For chat it is as `ChatCompletionLogProbs` and for completions it is converted to the flat `CompletionLogProbs` lists. Chunks without `logprobs` produce choices with `logprobs: null`.
+When a streamed `GenerateTokensStreamChoice` carries `logprobs`, the integer `token_id`s are decoded per chunk and the resolved logprobs are attached to the corresponding streamed choice. For chat it is as `ChatCompletionLogProbs` and for completions it is converted to the flat `CompletionLogProbs` lists. Chunks without `logprobs` produce choices with `logprobs: null`.
 
 ## Example
 
