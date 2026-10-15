@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING, Any, cast
 import torch
 
 import vllm.envs as envs
-from vllm.config import CUDAGraphMode
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.models.common.specialized_decode.spec import DecodeSpec, Feature, Step
@@ -458,11 +457,6 @@ def _skip_step(vllm_config, decode: DSV41Kernel, width: int) -> str | None:
     md = fc.attn_metadata
     if not decode.plans:
         return "no layer takes a launch"
-    if not 1 <= width <= MAX_ROWS:
-        return f"{width} rows"
-    if fc.cudagraph_runtime_mode not in (CUDAGraphMode.NONE, CUDAGraphMode.FULL):
-        # a PIECEWISE (breakable) capture is replayed for mixed batches too
-        return f"{fc.cudagraph_runtime_mode} step"
     if not isinstance(md, dict):  # a profile / dummy run, or DBO ubatches
         return "no attention metadata"
     if any(md.get(k) is None for k in decode.comp_keys):
