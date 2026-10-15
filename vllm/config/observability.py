@@ -220,3 +220,6 @@ class ObservabilityConfig:
                 "collect_detailed_traces requires `--otlp-traces-endpoint` to be set."
             )
         return self
+
+    def is_tracing_enabled(self) -> bool:
+        return self.otlp_traces_endpoint is not None

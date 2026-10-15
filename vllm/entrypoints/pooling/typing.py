@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
-from collections.abc import AsyncGenerator, Callable, Generator, Sequence
+from collections.abc import AsyncGenerator, Callable, Generator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Generic, TypeAlias, TypedDict, TypeVar
 
 from fastapi import Request
+from opentelemetry.trace import Tracer
 from pydantic import ConfigDict
 
 from vllm import PoolingParams, PoolingRequestOutput, PromptType
@@ -116,6 +117,19 @@ class PoolingServeContext(Generic[PoolingRequestT]):
     query_final_res_batch: list[PoolingRequestOutput] | None = None
     late_interaction_query_keys: list[str] | None = None
     late_interaction_doc_keys: list[str] | None = None
+
+    # for observability
+    trace_headers: Mapping[str, str] | None = None
+    entrypoint_tracer: Tracer | None = None
+    request_span_context: Any | None = None
+    entrypoint_span_links: Any | None = None
+    ## timestamp time_ns()
+    arrival_time: int = 0
+    preprocessing_finished: int = 0
+    engine_call_finished: int = 0
+    postprocessing_finished: int = 0
+    ## request attributes
+    request_attributes: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass

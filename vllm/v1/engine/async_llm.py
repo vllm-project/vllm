@@ -1080,7 +1080,7 @@ class AsyncLLM(EngineClient):
         return self.renderer.get_tokenizer()
 
     async def is_tracing_enabled(self) -> bool:
-        return self.observability_config.otlp_traces_endpoint is not None
+        return self.observability_config.is_tracing_enabled()
 
     async def do_log_stats(self) -> None:
         if self.logger_manager:

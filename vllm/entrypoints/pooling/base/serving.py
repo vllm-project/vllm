@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
+import time
 from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator
 from concurrent.futures import Executor
@@ -28,9 +29,10 @@ from vllm.utils.async_utils import make_async, merge_async_iterators
 from ...serve.engine.protocol import ErrorResponse
 from ..typing import AnyPoolingRequest, PoolingServeContext
 from .io_processor import PoolingIOProcessor
+from .observability import PoolingServingObservabilityMixin
 
 
-class PoolingBaseServing(ABC, BaseServing):
+class PoolingBaseServing(BaseServing, PoolingServingObservabilityMixin, ABC):
     request_id_prefix: ClassVar[str]
 
     def __init__(
@@ -64,17 +66,23 @@ class PoolingBaseServing(ABC, BaseServing):
             self._postprocessing, executor=self._executor
         )
 
+        PoolingServingObservabilityMixin.__init__(self)
+
     async def __call__(
         self,
         request: AnyPoolingRequest,
         raw_request: Request | None = None,
     ) -> Response:
+        arrival_time = time.time_ns()
+
         io_processor = self.get_io_processor(request)
         ctx = await self._init_ctx(io_processor, request, raw_request)
-        await self._preprocessing(io_processor, ctx)
-        await self._prepare_generators(ctx)
-        await self._collect_batch(ctx)
-        return await self._postprocessing_async(io_processor, ctx)
+        ctx.arrival_time = arrival_time
+
+        async with self._maybe_tracing(ctx, io_processor, raw_request):
+            await self._preprocessing(io_processor, ctx)
+            await self._engine_call(ctx)
+            return await self._postprocessing_async(io_processor, ctx)
 
     @abstractmethod
     def get_io_processor(self, request: AnyPoolingRequest) -> PoolingIOProcessor:
@@ -92,19 +100,61 @@ class PoolingBaseServing(ABC, BaseServing):
             *[io_processor.render_async(request) for request in requests]
         )
 
+        if self.is_tracing_request:
+            ctx.preprocessing_finished = time.time_ns()
+
+    async def _collect_batch(
+        self,
+        ctx: PoolingServeContext,
+    ):
+        if ctx.engine_inputs is None:
+            raise ValueError("Engine prompts not available")
+
+        if ctx.result_generator is None:
+            raise ValueError("Result generator not available")
+
+        num_inputs = len(ctx.engine_inputs)
+        final_res_batch: list[PoolingRequestOutput | None]
+        final_res_batch = [None] * num_inputs
+
+        async for i, res in ctx.result_generator:
+            if res.error is not None:
+                if res.error.retryable:
+                    raise RetryableRequestError(res.error.message)
+                raise GenerationError(res.error.message)
+            final_res_batch[i] = res
+
+        if None in final_res_batch:
+            raise ValueError("Failed to generate results for all prompts")
+
+        ctx.final_res_batch = [res for res in final_res_batch if res is not None]
+
+    async def _engine_call(self, ctx):
+        await self._prepare_generators(ctx)
+        await self._collect_batch(ctx)
+
+        if self.is_tracing_request:
+            ctx.engine_call_finished = time.time_ns()
+
     @torch.inference_mode()
     def _postprocessing(
         self, io_processor: PoolingIOProcessor, ctx: PoolingServeContext
     ):
+
         io_processor.post_process_online(ctx)
-        return self._build_response(ctx)
+        response = self._build_response(ctx)
+
+        if self.is_tracing_request:
+            ctx.postprocessing_finished = time.time_ns()
+
+        return response
 
     async def _init_ctx(
         self,
         io_processor: PoolingIOProcessor,
         request: AnyPoolingRequest,
         raw_request: Request | None = None,
-    ):
+    ) -> PoolingServeContext:
         validate_request_mm_kwargs(
             mm_processor_kwargs=getattr(request, "mm_processor_kwargs", None),
             media_io_kwargs=getattr(request, "media_io_kwargs", None),
@@ -185,32 +235,6 @@ class PoolingBaseServing(ABC, BaseServing):
             generators.append(generator)
 
         ctx.result_generator = merge_async_iterators(*generators)
-
-    async def _collect_batch(
-        self,
-        ctx: PoolingServeContext,
-    ):
-        if ctx.engine_inputs is None:
-            raise ValueError("Engine prompts not available")
-
-        if ctx.result_generator is None:
-            raise ValueError("Result generator not available")
-
-        num_inputs = len(ctx.engine_inputs)
-        final_res_batch: list[PoolingRequestOutput | None]
-        final_res_batch = [None] * num_inputs
-
-        async for i, res in ctx.result_generator:
-            if res.error is not None:
-                if res.error.retryable:
-                    raise RetryableRequestError(res.error.message)
-                raise GenerationError(res.error.message)
-            final_res_batch[i] = res
-
-        if None in final_res_batch:
-            raise ValueError("Failed to generate results for all prompts")
-
-        ctx.final_res_batch = [res for res in final_res_batch if res is not None]
 
     @abstractmethod
     def _build_response(
