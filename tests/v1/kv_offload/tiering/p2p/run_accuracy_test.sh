@@ -37,6 +37,9 @@
 #   CPU_BYTES                   default 2147483648 (2 GiB), sized so the
 #                               prefiller does not evict KV before decoders
 #                               pull it at NUM_CONCURRENT=100
+#   CANONICAL_LAYOUT            1 adds "canonical_layout": true to the
+#                               offloading config (topology-free host pages,
+#                               the supported route for mixed prefiller/decoder TP)
 #   ENFORCE_EAGER               default 1
 #   CHECK_TRANSFER              default 1; 0 skips test_p2p_transfer.py
 #   VLLM_SERVE_EXTRA_ARGS       comma-separated extra args for vllm serve
@@ -115,6 +118,7 @@ PREFILL_BLOCK_SIZE=${PREFILL_BLOCK_SIZE:-128}
 DECODE_BLOCK_SIZE=${DECODE_BLOCK_SIZE:-128}
 CPU_BYTES=${CPU_BYTES:-2147483648}
 ENFORCE_EAGER=${ENFORCE_EAGER:-1}
+CANONICAL_LAYOUT=${CANONICAL_LAYOUT:-0}
 CHECK_TRANSFER=${CHECK_TRANSFER:-1}
 VLLM_SERVE_EXTRA_ARGS=${VLLM_SERVE_EXTRA_ARGS:-}
 
@@ -243,8 +247,12 @@ gpu_list() {
 # Build the OffloadingConnector kv-transfer-config for a given PD port.
 build_kv_config() {
   local pd_port=$1
-  printf '{"kv_connector":"OffloadingConnector","kv_role":"kv_both","kv_connector_extra_config":{"spec_name":"TieringOffloadingSpec","cpu_bytes_to_use":%s,"secondary_tiers":[{"type":"p2p","host":"%s","port":%s}]}}' \
-    "${CPU_BYTES}" "${P2P_HOST}" "${pd_port}"
+  local canonical=""
+  if [[ "$CANONICAL_LAYOUT" == "1" ]]; then
+    canonical=',"canonical_layout":true'
+  fi
+  printf '{"kv_connector":"OffloadingConnector","kv_role":"kv_both","kv_connector_extra_config":{"spec_name":"TieringOffloadingSpec","cpu_bytes_to_use":%s%s,"secondary_tiers":[{"type":"p2p","host":"%s","port":%s}]}}' \
+    "${CPU_BYTES}" "${canonical}" "${P2P_HOST}" "${pd_port}"
 }
 
 # Append the knobs shared by prefillers and decoders to BASE_CMD.
