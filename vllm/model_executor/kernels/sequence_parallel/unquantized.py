@@ -25,7 +25,7 @@ class UnquantizedAllGatherGemm(FusedAllGatherGemmKernel):
 
     @classmethod
     def is_supported(cls, layer: LinearBase) -> tuple[bool, str | None]:
-        if not isinstance(layer.quant_method, UnquantizedLinearMethod):
+        if type(layer.quant_method) is not UnquantizedLinearMethod:
             return False, "requires UnquantizedLinearMethod"
         return True, None
 
@@ -56,7 +56,7 @@ class UnquantizedGemmReduceScatter(FusedGemmReduceScatterKernel):
 
     @classmethod
     def is_supported(cls, layer: LinearBase) -> tuple[bool, str | None]:
-        if not isinstance(layer.quant_method, UnquantizedLinearMethod):
+        if type(layer.quant_method) is not UnquantizedLinearMethod:
             return False, "requires UnquantizedLinearMethod"
         return True, None
 
