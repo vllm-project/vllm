@@ -204,22 +204,16 @@ class PrepareUniformDecodeKernel(
         )
 
 
-# Below this many total prefill rows, stay replicated. Saved indexer work and
-# all_gatherv traffic both scale with (tp - 1) / tp, so the floor is
-# tp-independent. Override with VLLM_INDEXER_TP_SHARD_MIN_ROWS.
-MIN_TP_SHARD_TOTAL_ROWS = 65_536
-
-
 def balanced_prefill_row_shard(
     seq_lens_cpu: torch.Tensor,
     query_lens_cpu: torch.Tensor,
     compress_ratio: int,
     tp_size: int,
+    min_rows: int,
 ) -> list[int] | None:
     """Return contiguous TP row counts balanced by indexer MQA work."""
     num_rows = int(query_lens_cpu.sum())
-    min_rows = envs.VLLM_INDEXER_TP_SHARD_MIN_ROWS or MIN_TP_SHARD_TOTAL_ROWS
-    if tp_size < 2 or num_rows < min_rows:
+    if tp_size < 2 or num_rows < max(min_rows, tp_size):
         return None
 
     query_lens = query_lens_cpu.to(torch.int64)
@@ -1586,6 +1580,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     prefill_query_lens_cpu,
                     self.compress_ratio,
                     self.tp_size,
+                    self.vllm_config.attention_config.indexer_tp_shard_min_rows,
                 )
             prefill_metadata = DeepseekV32IndexerPrefillMetadata(
                 chunks,
