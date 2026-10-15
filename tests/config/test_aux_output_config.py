@@ -27,7 +27,6 @@ def _config(
     attention_chunk_size: int | None = None,
     enable_prefix_caching: bool = True,
     adaptive_verification: bool = False,
-    async_scheduling: bool = True,
 ):
     return SimpleNamespace(
         model_config=SimpleNamespace(
@@ -46,7 +45,6 @@ def _config(
         cache_config=SimpleNamespace(
             enable_prefix_caching=enable_prefix_caching,
         ),
-        scheduler_config=SimpleNamespace(async_scheduling=async_scheduling),
         speculative_config=(
             SimpleNamespace(enable_adaptive_verification=True)
             if adaptive_verification
@@ -152,11 +150,8 @@ def test_aux_output_config_defers_attention_layout_to_kv_config(kwargs):
     VllmConfig._verify_aux_output_compatibility(_config(**kwargs))
 
 
-@pytest.mark.parametrize("async_scheduling", [True, False])
-def test_aux_output_config_allows_pipeline_parallelism(async_scheduling):
-    VllmConfig._verify_aux_output_compatibility(
-        _config(pp=2, async_scheduling=async_scheduling)
-    )
+def test_aux_output_config_allows_pipeline_parallelism():
+    VllmConfig._verify_aux_output_compatibility(_config(pp=2))
 
 
 def test_aux_output_guards_are_inactive_when_capture_is_disabled():

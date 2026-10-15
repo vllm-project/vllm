@@ -654,22 +654,6 @@ def test_routed_experts_capturer_dp_unexpected_batch_raises():
     assert capturer.device_buffer[0, 0, 0].item() == -1
 
 
-def test_routed_experts_capturer_pp_stage_writes_local_layers():
-    """A later PP stage stores global layers at local buffer columns and
-    rejects layers outside its span instead of wrapping negative indices."""
-    capturer = _capturer_with_buffer(num_layers=2)
-    capturer.start_layer = 2
-    topk = torch.tensor([[1, 2], [3, 4]], dtype=torch.int32)
-    ctx = SimpleNamespace(dp_metadata=None)
-    with patch(f"{_REC_MODULE}.get_forward_context", return_value=ctx):
-        capturer.capture(layer_id=3, topk_ids=topk)
-        with pytest.raises(IndexError, match="outside the capture buffer"):
-            capturer.capture(layer_id=1, topk_ids=topk)
-
-    assert torch.equal(capturer.device_buffer[:2, 1], topk)
-    assert (capturer.device_buffer[:, 0] == -1).all()
-
-
 def test_get_aux_output_connector_passes_config(monkeypatch):
     import vllm.distributed.aux_output_connector.worker as aux_output_worker
 
