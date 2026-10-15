@@ -4,6 +4,10 @@
 
 from __future__ import annotations
 
+import statistics
+import time
+from collections.abc import Sequence
+
 import torch
 
 from vllm import _custom_ops as ops
@@ -19,6 +23,28 @@ from vllm.triton_utils import tl, triton
 NUM_SMS = 12
 THRESHOLD_BYTES = 28 * 1024
 MIN_N = 16
+
+# Init-time calibration of the DMA/Triton crossover (opt-in):
+#   CALIBRATION_NS                - batch sizes timed on both paths
+#   CALIBRATION_ROUNDS            - passes over CALIBRATION_NS, so each batch
+#                                   size is sampled at separate moments
+#   CALIBRATION_REPS              - DMA/Triton pairs timed per batch size and
+#                                   pass; the median Triton/DMA ratio is used
+#   CALIBRATION_MARGIN            - how much faster one path must be at a batch
+#                                   size to override the default choice there
+#   CALIBRATION_MAX_SCRATCH_BYTES - largest GPU scratch destination we allocate;
+#                                   bigger copy sizes keep the defaults
+CALIBRATION_NS = (16, 32, 64, 128, 256)
+CALIBRATION_ROUNDS = 3
+CALIBRATION_REPS = 5
+CALIBRATION_MARGIN = 0.05
+CALIBRATION_MAX_SCRATCH_BYTES = 16 * 1024 * 1024
+
+
+def default_min_n(copy_size_bytes: int) -> int | None:
+    """Smallest batch size from which Triton is used for copies of this size,
+    or None if it never is."""
+    return MIN_N if copy_size_bytes < THRESHOLD_BYTES else None
 
 
 @triton.jit
@@ -53,11 +79,12 @@ def swap_blocks_batch(
     is_src_access_order_any: bool = False,
     *,
     bytes_per_chunk: int,
+    min_n: int = MIN_N,
 ) -> None:
     """Triton implementation of ``swap_blocks_batch`` for small CPU->GPU batches."""
     n = src_addrs.numel()
     # Too few descriptors to amortize Triton's launch cost.
-    if n < MIN_N:
+    if n < min_n:
         ops.swap_blocks_batch(
             src_addrs,
             dst_addrs,
@@ -72,3 +99,97 @@ def swap_blocks_batch(
         n,
         BYTES_PER_CHUNK=bytes_per_chunk,
     )
+
+
+def pick_min_n(
+    ratios: Sequence[float],
+    default: int | None,
+    ns: Sequence[int] = CALIBRATION_NS,
+) -> int | None:
+    """Smallest probed batch size from which Triton is used at every larger
+    probed size, or None if it is not used at the largest one.
+
+    ``ratios`` are Triton time / DMA time per batch size. Where the two paths
+    are within CALIBRATION_MARGIN of each other, the default (Triton from
+    ``default``, never if None) decides, so noise around parity does not move
+    the result."""
+    min_n = None
+    for n, ratio in reversed(list(zip(ns, ratios))):
+        if ratio < 1 - CALIBRATION_MARGIN:
+            use_triton = True
+        elif ratio > 1 + CALIBRATION_MARGIN:
+            use_triton = False
+        else:
+            use_triton = default is not None and n >= default
+        if not use_triton:
+            break
+        min_n = n
+    return min_n
+
+
+def measure_load_paths(
+    copy_size: int,
+    bytes_per_chunk: int,
+    host: torch.Tensor,
+    device: torch.device,
+) -> list[float] | None:
+    """Time DMA and Triton loads of ``copy_size`` bytes at each of
+    CALIBRATION_NS. Returns the median Triton/DMA time ratio per batch size,
+    or None if it can't be done.
+
+    ``host`` is the pinned CPU tensor real loads read from, one CPU chunk per
+    row. With the shared offload region it is a strided view, so the copies
+    read row starts rather than assuming contiguous memory. The destination
+    is a scratch GPU buffer, so no KV block is written."""
+    n_max = CALIBRATION_NS[-1]
+    scratch_bytes = n_max * copy_size
+    # Copies read every other row so neighbours are not contiguous.
+    if (
+        scratch_bytes > CALIBRATION_MAX_SCRATCH_BYTES
+        or host.dim() != 2
+        or host.stride(1) != 1
+        or host.size(1) * host.element_size() < copy_size
+        or host.size(0) < 2 * n_max
+    ):
+        return None
+    try:
+        scratch = torch.empty(scratch_bytes, dtype=torch.int8, device=device)
+    except torch.OutOfMemoryError:
+        return None
+
+    idx = torch.arange(n_max, dtype=torch.int64)
+    row_bytes = host.stride(0) * host.element_size()
+    src = (host.data_ptr() + 2 * row_bytes * idx).pin_memory()
+    dst = (scratch.data_ptr() + copy_size * idx).pin_memory()
+    sizes = torch.full((n_max,), copy_size, dtype=torch.int64).pin_memory()
+
+    def run_ms(fn, n: int) -> float:
+        torch.accelerator.synchronize()
+        t0 = time.perf_counter()
+        fn(src[:n], dst[:n], sizes[:n])
+        torch.accelerator.synchronize()
+        return (time.perf_counter() - t0) * 1e3
+
+    def dma(s, d, z):
+        ops.swap_blocks_batch(s, d, z, is_src_access_order_any=True)
+
+    def tri(s, d, z):
+        # min_n=0 so the wrapper never falls back to DMA while we time it.
+        swap_blocks_batch(s, d, z, bytes_per_chunk=bytes_per_chunk, min_n=0)
+
+    # Real loads run on a dedicated stream (see transfer_async). On the legacy
+    # default stream ops.swap_blocks_batch can't use cuMemcpyBatchAsync and
+    # issues one cudaMemcpyAsync per copy, so time both paths on one as well.
+    ratios: list[list[float]] = [[] for _ in CALIBRATION_NS]
+    with torch.cuda.stream(torch.cuda.Stream(device=device)):
+        for round_idx in range(CALIBRATION_ROUNDS):
+            for i, n in enumerate(CALIBRATION_NS):
+                if round_idx == 0:
+                    # Warm-up, which also compiles the Triton kernel.
+                    run_ms(dma, n)
+                    run_ms(tri, n)
+                for _ in range(CALIBRATION_REPS):
+                    # Back to back, so a slow spell hits both paths alike.
+                    dma_ms = run_ms(dma, n)
+                    ratios[i].append(run_ms(tri, n) / dma_ms)
+    return [statistics.median(r) for r in ratios]
