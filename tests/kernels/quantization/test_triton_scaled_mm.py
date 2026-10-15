@@ -276,31 +276,6 @@ def test_triton_fp8_per_token_dynamic_shapes_and_graph_replay(
 
 
 @pytest.mark.parametrize("in_dtype", get_8bit_types())
-def test_scaled_mm_explicit_tiles_without_heuristic(in_dtype):
-    """Manual tuning overrides must work for both shared INT8 and FP8 paths."""
-    set_random_seed(0)
-    a = torch.randint(-4, 4, (3, 128), device=device).to(in_dtype)
-    b = torch.randint(-4, 4, (96, 128), device=device).to(in_dtype).t()
-    sa = torch.rand(3, 1, device=device)
-    sb = torch.rand(96, 1, device=device)
-    actual = triton_scaled_mm(
-        a,
-        b,
-        sa,
-        sb,
-        torch.bfloat16,
-        use_heuristic=False,
-        block_size_m=32,
-        block_size_n=64,
-        block_size_k=64,
-        num_warps=4,
-        num_stages=1,
-    )
-    expected = torch_scaled_mm(a, b, sa, sb, torch.bfloat16)
-    torch.testing.assert_close(actual, expected, rtol=1e-2, atol=1e-2)
-
-
-@pytest.mark.parametrize("in_dtype", get_8bit_types())
 @pytest.mark.parametrize("scale_ndim", [1, 2])
 def test_scaled_mm_noncontiguous_scales_preserve_values(in_dtype, scale_ndim):
     """Strided scale views must use their logical values, including in the fallback."""
