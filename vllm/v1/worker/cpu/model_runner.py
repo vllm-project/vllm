@@ -4,6 +4,7 @@
 from vllm.logger import init_logger
 from vllm.triton_utils import HAS_TRITON
 from vllm.v1.watermarking.gpu_sampler import GPUWatermarkSampler
+from vllm.v1.worker.cpu.block_table import CPUBlockTables
 from vllm.v1.worker.cpu.model_state import (
     CPUDefaultModelState,
     CPUEncoderOnlyModelState,
@@ -12,6 +13,7 @@ from vllm.v1.worker.cpu.model_state import (
 from vllm.v1.worker.cpu.sampler import CPUSampler, CPUWatermarkSampler
 from vllm.v1.worker.cpu.structured_outputs import CPUStructuredOutputsWorker
 from vllm.v1.worker.cpu.utils import CPUKVBlockZeroer
+from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 from vllm.v1.worker.gpu.model_states.default import DefaultModelState
 from vllm.v1.worker.gpu.model_states.encoder_decoder import EncoderDecoderModelState
@@ -26,6 +28,10 @@ logger = init_logger(__name__)
 
 
 class CPUModelRunner(GPUModelRunner):
+    @property
+    def block_tables_cls(self) -> type[BlockTables]:
+        return super().block_tables_cls if HAS_TRITON else CPUBlockTables
+
     @property
     def sampler_cls(self) -> type[Sampler]:
         return super().sampler_cls if HAS_TRITON else CPUSampler
