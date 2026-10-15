@@ -50,6 +50,12 @@ class MTPMixin(CausalMixin):
 
         # The proposer shares the target's LM head with the draft
         del mtp_model.shared_head
+        # With PP, the last rank has no target embedding to share with the draft
+        if self.pp_group.world_size > 1:
+            mtp_model._keys_to_ignore_on_load_unexpected = [
+                r"layers\..*embed_tokens\.weight" if "embed_tokens" in k else k
+                for k in mtp_model._keys_to_ignore_on_load_unexpected
+            ]
         self.text_config = mtp_model.config
         return mtp_model
 
@@ -64,12 +70,14 @@ class MTPMixin(CausalMixin):
             if k.startswith("layers.*.")
         }
 
+    # The draft runs whole on the last PP rank
     def pipeline_parallel(self):
-        # The draft runs whole on the last PP rank
         pass
 
+    def _pp_indices(self) -> tuple[int, int]:
+        return 0, self.text_config.num_hidden_layers
+
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        # With PP, the last rank has no target embedding to share with the draft
         embed_prefix = None
         if self.pp_group.world_size > 1:
             embed = self.model.get_input_embeddings()
@@ -83,7 +91,10 @@ class MTPMixin(CausalMixin):
             mapped = self.hf_to_vllm_mapper.map_name(name)
             return mapped is not None and mapped.startswith(embed_prefix)
 
-        return super().load_weights(w for w in weights if is_draft_weight(w[0]))
+        loaded = super().load_weights(w for w in weights if is_draft_weight(w[0]))
+        if embed_prefix is not None:
+            self.has_own_embed_tokens = any(n.startswith(embed_prefix) for n in loaded)
+        return loaded
 
     def forward(  # type: ignore[override]
         self,
