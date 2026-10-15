@@ -166,6 +166,22 @@ def get_moriio_remote_tp_rank(
     return local_tp_rank // (local_tp_size // remote_tp_size)
 
 
+def get_moriio_write_target_tp_ranks(
+    producer_tp_rank: int,
+    producer_tp_size: int,
+    consumer_tp_size: int,
+    is_mla: bool,
+) -> tuple[int, ...]:
+    """Expand the existing rank mapping only for MLA WRITE fan-out."""
+    first_target = get_moriio_remote_tp_rank(
+        producer_tp_rank, producer_tp_size, consumer_tp_size
+    )
+    if not is_mla or consumer_tp_size <= producer_tp_size:
+        return (first_target,)
+    fanout = consumer_tp_size // producer_tp_size
+    return tuple(range(first_target, first_target + fanout))
+
+
 def validate_moriio_heterogeneous_tp_kv_heads(
     local_tp_size: int,
     remote_tp_size: int,
@@ -1893,6 +1909,8 @@ class MoRIIOConnectorWorker:
         multi_pod_hosts: list[str],
         remote_dp_size_local: int,
         remote_dp_size: int,
+        target_tp_ranks: tuple[int, ...] = (),
+        remote_tp_size: int = 0,
     ) -> None:
         """Schedule a block write operation.
 
@@ -1933,6 +1951,8 @@ class MoRIIOConnectorWorker:
             multi_pod_hosts=multi_pod_hosts,
             remote_dp_size_local=remote_dp_size_local,
             remote_dp_size=remote_dp_size,
+            target_tp_ranks=target_tp_ranks,
+            remote_tp_size=remote_tp_size,
         )
         self._writer.schedule_write(task)
 
@@ -2193,10 +2213,20 @@ class MoRIIOConnectorWorker:
 
         fut_list = []
 
+        write_target_tp_ranks: tuple[int, ...] = ()
+        if self.mode == MoRIIOMode.WRITE and self.is_producer:
+            targets = get_moriio_write_target_tp_ranks(
+                self.tp_rank,
+                self.world_size,
+                tp_size or self.world_size,
+                self.use_mla,
+            )
+            if len(targets) > 1:
+                write_target_tp_ranks = targets
+
         # In dp(prefill)<->dp(decode) communication, we require an all-to-all handshake.
 
         for cur_dp_rank in range(remote_dp_size):
-            dp_engine_id = self.get_engine_name_with_dp(remote_engine_id, cur_dp_rank)
             _pod_idx = pod_index(cur_dp_rank, remote_dp_size_local)
             if _pod_idx >= len(pod_hosts):
                 _pod_idx = 0
@@ -2205,26 +2235,39 @@ class MoRIIOConnectorWorker:
             # each pod binds sockets only for its local ranks; dp_engine_id
             # keeps the global rank for uniqueness. Single-pod is bit-identical.
             _per_rank_local_dp = fold_local_rank(cur_dp_rank, remote_dp_size_local)
-            future = self._handshake_initiation_executor.submit(
-                self._moriio_handshake,
-                _per_rank_host,
-                port,
-                tp_size,
-                dp_engine_id,
-                _per_rank_local_dp,
+            target_tp_ranks: tuple[int | None, ...] = (
+                tuple(write_target_tp_ranks) if write_target_tp_ranks else (None,)
             )
-            fut_list.append(future)
+            for target_tp_rank in target_tp_ranks:
+                if target_tp_rank is None:
+                    target_engine_id = self.get_engine_name_with_dp(
+                        remote_engine_id, cur_dp_rank
+                    )
+                else:
+                    target_engine_id = self.get_engine_name_with_dp_tp(
+                        remote_engine_id, cur_dp_rank, target_tp_rank
+                    )
+                future = self._handshake_initiation_executor.submit(
+                    self._moriio_handshake,
+                    _per_rank_host,
+                    port,
+                    tp_size,
+                    target_engine_id,
+                    _per_rank_local_dp,
+                    target_tp_rank,
+                )
+                fut_list.append(future)
 
-            def done_callback(f: Future[set[str]], eid=dp_engine_id):
-                with self._handshake_lock:
-                    self._handshake_futures.pop(eid, None)
-                    try:
-                        self._remote_agents[eid] = f.result()
-                    except Exception:
-                        logger.exception("Handshake with %s failed", eid)
+                def done_callback(f: Future[set[str]], eid=target_engine_id):
+                    with self._handshake_lock:
+                        self._handshake_futures.pop(eid, None)
+                        try:
+                            self._remote_agents[eid] = f.result()
+                        except Exception:
+                            logger.exception("Handshake with %s failed", eid)
 
-            future.add_done_callback(done_callback)
-            self._handshake_futures[dp_engine_id] = future
+                future.add_done_callback(done_callback)
+                self._handshake_futures[target_engine_id] = future
 
         # fut = fut_list
         def wait_all_dp():
@@ -2930,8 +2973,20 @@ class MoRIIOConnectorWorker:
 
             meta.remote_engine_id = remote_engine_id
 
+            write_targets = get_moriio_write_target_tp_ranks(
+                self.tp_rank,
+                self.world_size,
+                int(meta.tp_size) or self.world_size,
+                self.use_mla,
+            )
+            is_fanout = len(write_targets) > 1
             dp0_remote_engine_id = self.get_engine_name_with_dp(remote_engine_id, 0)
-            if dp0_remote_engine_id not in self._remote_agents:
+            handshake_ready = (
+                remote_engine_id in self.write_ready_flags
+                if is_fanout
+                else dp0_remote_engine_id in self._remote_agents
+            )
+            if not handshake_ready:
                 # Initiate handshake with remote engine to exchange metadata.
                 with self._handshake_lock:
                     if remote_engine_id not in self._remote_agents:
@@ -3286,6 +3341,13 @@ class MoRIIOConnectorWorker:
         # remote_block_ids can itself be empty so need to be careful when unwrapping.
         local_block_ids = meta.local_block_ids[0]
         remote_block_ids = meta.remote_block_ids[0] if meta.remote_block_ids else []
+        remote_tp_size = int(meta.tp_size) or self.world_size
+        write_targets = get_moriio_write_target_tp_ranks(
+            self.tp_rank,
+            self.world_size,
+            remote_tp_size,
+            self.use_mla,
+        )
         self.schedule_write_blocks(
             request_id=req_id,
             transfer_id=meta.transfer_id,
@@ -3299,6 +3361,8 @@ class MoRIIOConnectorWorker:
             multi_pod_hosts=hosts,
             remote_dp_size_local=dp_local,
             remote_dp_size=int(meta.remote_dp_size),
+            target_tp_ranks=write_targets if len(write_targets) > 1 else (),
+            remote_tp_size=remote_tp_size,
         )
 
     def merge_contiguous_blocks(
