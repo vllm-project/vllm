@@ -41,20 +41,10 @@ class QuickReduceRegime(Enum):
 
 KB = 1024
 MB = 1024 * KB
-# Smallest payload FlyDSL takes. 2 MiB is HIP QuickReduce's own INT4 floor at
-# TP4/TP8 (`_QR_MIN_SIZE`, fp16 kernels), so smaller payloads never reach this
-# communicator. AITER's FlyDSL-vs-HIP benchmarks start at 4 MiB.
-FLYDSL_MIN_SIZE = 2 * MB
-# With all-reduce + RMSNorm fusion on, payloads below this stay on HIP
-# QuickReduce so the fused HIP all-reduce + RMSNorm kernel keeps firing.
-# Not tuned yet: equal to FLYDSL_MIN_SIZE, so routing is unchanged until a
-# sweep shows where the fused HIP kernel wins.
-FLYDSL_FUSED_MIN_SIZE = 2 * MB
 
 
 class QuickAllReduce:
     _flydsl_int4: Any = None
-    _flydsl_min_size: int = FLYDSL_MIN_SIZE
     _SUPPORTED_WORLD_SIZES = [2, 4, 8]
     _SUPPORTED_DTYPES = [torch.float16, torch.bfloat16]
     # The following data is based on kernel tests.
@@ -278,12 +268,6 @@ class QuickAllReduce:
             or not rocm_aiter_ops.is_flydsl_quick_reduce_available()
         ):
             return
-        fusion = (
-            vllm_config is not None
-            and vllm_config.compilation_config.pass_config.fuse_allreduce_rms
-        )
-        if fusion:
-            self._flydsl_min_size = FLYDSL_FUSED_MIN_SIZE
         self._flydsl_int4 = rocm_aiter_ops.create_flydsl_quick_all_reduce_int4(
             group=self.group,
             device=self.device,
@@ -292,23 +276,21 @@ class QuickAllReduce:
         )
         # compile() runs a real all-reduce on every rank. It moves the JIT
         # out of the first prefill and out of CUDA graph capture.
-        warmup = torch.empty(
-            FLYDSL_MIN_SIZE // 2, dtype=torch.bfloat16, device=self.device
-        )
+        warmup = torch.empty(MB, dtype=torch.bfloat16, device=self.device)
         self._flydsl_int4.compile(warmup, torch.empty_like(warmup))
         torch.accelerator.synchronize(self.device)
         logger.info(
-            "Using AITER FlyDSL INT4 QuickReduce for BF16 payloads of at "
-            "least %d MiB; other payloads use the HIP QuickReduce kernels.",
-            self._flydsl_min_size // MB,
+            "Using AITER FlyDSL INT4 QuickReduce for BF16 payloads; other "
+            "payloads use the HIP QuickReduce kernels."
         )
-        if fusion:
+        if (
+            vllm_config is not None
+            and vllm_config.compilation_config.pass_config.fuse_allreduce_rms
+        ):
             logger.warning_once(
-                "All-reduce + RMSNorm fusion is on. FlyDSL QuickReduce has no "
-                "fused RMSNorm kernel, so payloads below %d MiB stay on HIP "
-                "QuickReduce to keep that fusion; larger ones run FlyDSL "
-                "all-reduce plus a separate RMSNorm.",
-                FLYDSL_FUSED_MIN_SIZE // MB,
+                "fuse_allreduce_rms is on, but FlyDSL QuickReduce has no fused "
+                "kernels yet: the payloads it takes run all-reduce plus a "
+                "separate RMSNorm, so the fusion does nothing for them."
             )
 
     @staticmethod
@@ -406,7 +388,6 @@ class QuickAllReduce:
             and inp.dtype == torch.bfloat16
             and inp.is_contiguous()
             and inp.data_ptr() % 16 == 0
-            and inp.numel() * inp.element_size() >= self._flydsl_min_size
             and self._get_qr_quant_level(inp) == QuickReduceRegime.INT4.value
         )
 

@@ -1132,8 +1132,8 @@ def _rocm_aiter_fused_allreduce_rmsnorm_impl(
         device_comm = get_tp_group().device_communicator
         qr_comm = getattr(device_comm, "qr_comm", None)
         if qr_comm is not None and qr_comm.uses_flydsl_int4(input_):
-            # FlyDSL QuickReduce has no fused RMSNorm kernel, and at this size
-            # it plus a separate RMSNorm is faster than the fused kernels.
+            # FlyDSL QuickReduce has no fused RMSNorm kernel yet, so the fusion
+            # is a no-op for these payloads: all-reduce plus a separate RMSNorm.
             return _unfused_allreduce_rmsnorm(
                 input_, residual, weight, epsilon, gemma_norm
             )

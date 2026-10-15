@@ -108,9 +108,8 @@ def _bf16(num_elems: int) -> torch.Tensor:
 @pytest.mark.parametrize(
     "inp, quantization_min_size, expect_flydsl",
     [
-        pytest.param(_bf16(MB), None, True, id="bf16_at_flydsl_min"),
+        pytest.param(_bf16(MB), None, True, id="bf16"),
         pytest.param(torch.empty(MB, dtype=torch.float16), None, False, id="fp16"),
-        pytest.param(_bf16(MB // 2), None, False, id="below_flydsl_min"),
         pytest.param(_bf16(2 * MB)[::2], None, False, id="non_contiguous"),
         # Right size, but the data pointer is 8 bytes past a 16-byte boundary.
         pytest.param(_bf16(MB + 16)[4 : MB + 4], None, False, id="misaligned"),
