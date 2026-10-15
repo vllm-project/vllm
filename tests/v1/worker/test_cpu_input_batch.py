@@ -2,12 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import SimpleNamespace
+from unittest.mock import Mock
 
+import numpy as np
 import pytest
 import torch
 
 from vllm import _custom_ops as ops
+from vllm.config.compilation import CUDAGraphMode
 from vllm.platforms import current_platform
+from vllm.v1.worker.cpu import model_runner as cpu_model_runner
 from vllm.v1.worker.cpu.input_batch import (
     combine_sampled_and_draft_tokens,
     get_num_sampled_and_rejected,
@@ -17,8 +21,78 @@ from vllm.v1.worker.cpu.input_batch import (
     prepare_prefill_inputs,
 )
 from vllm.v1.worker.cpu.model_state import CPURopeState
+from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
+from vllm.v1.worker.gpu.input_batch import InputBuffers
+from vllm.v1.worker.gpu.model_runner import BatchReqState
 
 pytestmark = pytest.mark.skipif(not current_platform.is_cpu(), reason="CPU only")
+
+
+def test_cpu_model_runner_prepares_supported_input_batch(monkeypatch) -> None:
+    monkeypatch.setattr(cpu_model_runner, "HAS_TRITON", False)
+
+    runner = object.__new__(cpu_model_runner.CPUModelRunner)
+    runner.device = torch.device("cpu")
+    runner.max_num_reqs = 4
+    runner.input_buffers = InputBuffers(4, 8, runner.device)
+    fast_prefill_metadata = object()
+    runner.fast_prefill = Mock()
+    runner.fast_prefill.prepare.return_value = fast_prefill_metadata
+    runner.model_config = SimpleNamespace(rswa_window=None)
+
+    num_computed_tokens = torch.tensor([2, 0, 1, 0], dtype=torch.int32)
+    all_token_ids = torch.arange(32, dtype=torch.int32).view(4, 8)
+    next_prefill_tokens = torch.full((1, 4), -1, dtype=torch.int32)
+    runner.req_states = SimpleNamespace(
+        next_prefill_tokens=next_prefill_tokens,
+        all_token_ids=SimpleNamespace(gpu=all_token_ids),
+        prefill_len=SimpleNamespace(gpu=torch.tensor([2, 0, 4, 0], dtype=torch.int32)),
+        num_computed_tokens=SimpleNamespace(gpu=num_computed_tokens),
+        num_computed_tokens_np=num_computed_tokens.numpy(),
+        last_sampled_tokens=torch.tensor([[99], [98], [97], [96]]),
+        draft_tokens=torch.empty((4, 0), dtype=torch.int64),
+    )
+
+    batch_req_state = BatchReqState(
+        req_ids=["prefill", "decode"],
+        num_scheduled_tokens=np.array([2, 1], dtype=np.int32),
+        num_tokens=3,
+        num_draft_tokens_np=None,
+        idx_mapping_np=np.array([2, 0], dtype=np.intp),
+        prefill_len_np=np.array([4, 2], dtype=np.int32),
+        num_computed_prefill_tokens_np=np.array([1, 2], dtype=np.int32),
+        is_prefilling_np=np.array([True, False]),
+        max_seq_len_np=None,
+        has_prefill=True,
+        prefill_runs_as_decode_np=np.array([False, False]),
+        decode_graph_eligible=False,
+    )
+    scheduler_output = SimpleNamespace(has_structured_output_requests=True)
+    batch_desc = BatchExecutionDescriptor(
+        cg_mode=CUDAGraphMode.NONE,
+        num_tokens=3,
+        num_reqs=2,
+    )
+
+    batch = runner.prepare_inputs(
+        scheduler_output,
+        batch_req_state,
+        batch_desc,
+        num_active_loras=0,
+    )
+
+    assert batch.input_ids.tolist() == [17, 18, 99]
+    assert batch.positions.tolist() == [1, 2, 2]
+    assert batch.seq_lens.tolist() == [3, 3]
+    assert batch.logits_indices.tolist() == [1, 2]
+    assert batch.query_start_loc.tolist() == [0, 2, 3]
+    assert batch.cu_num_logits.tolist() == [0, 1, 2]
+    assert batch.idx_mapping.tolist() == [2, 0]
+    assert batch.seq_lens_cpu_upper_bound.tolist() == [3, 3]
+    assert next_prefill_tokens[:, 2].tolist() == [19]
+    assert batch.has_structured_output_reqs
+    assert batch.fast_prefill is fast_prefill_metadata
+    runner.fast_prefill.prepare.assert_called_once()
 
 
 def test_prepare_prefill_inputs_cpu() -> None:

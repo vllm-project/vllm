@@ -112,11 +112,6 @@ gpu_structured_outputs.GRAMMAR_BITMASK_BLOCK_SIZE = 1024
 from vllm.triton_utils import HAS_TRITON, tl
 
 if not HAS_TRITON:
-    gpu_input_batch.prepare_prefill_inputs = cpu_input_batch.prepare_prefill_inputs
-    gpu_input_batch.prepare_pos_seq_lens = cpu_input_batch.prepare_pos_seq_lens
-    gpu_input_batch.combine_sampled_and_draft_tokens = (
-        cpu_input_batch.combine_sampled_and_draft_tokens
-    )
     gpu_input_batch.get_num_sampled_and_rejected = (
         cpu_input_batch.get_num_sampled_and_rejected
     )
