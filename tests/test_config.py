@@ -290,6 +290,28 @@ def test_mamba_cache_mode_all_is_rejected():
         CacheConfig(mamba_cache_mode="all")
 
 
+@pytest.mark.parametrize(
+    ("cache_dtype", "model_dtype", "should_raise"),
+    [
+        ("float16", torch.bfloat16, True),
+        ("bfloat16", torch.float16, True),
+        ("float16", torch.float32, True),
+        ("float16", torch.float16, False),
+        ("auto", torch.bfloat16, False),
+        ("fp8", torch.bfloat16, False),
+    ],
+)
+def test_mismatched_float_kv_cache_is_rejected(cache_dtype, model_dtype, should_raise):
+    config = VllmConfig(cache_config=CacheConfig(cache_dtype=cache_dtype))
+    config.model_config = SimpleNamespace(dtype=model_dtype)
+
+    if should_raise:
+        with pytest.raises(ValueError, match="kv_cache_dtype"):
+            config._reject_mismatched_float_kv_cache()
+    else:
+        config._reject_mismatched_float_kv_cache()
+
+
 def test_per_request_spec_decode_metrics_requires_spec_decode():
     # The flag only makes sense with speculative decoding configured; enabling
     # it without --speculative-config should fail fast rather than silently
@@ -1983,9 +2005,7 @@ def test_draft_inherits_ep_only_for_moe(
     draft_is_moe: bool,
 ):
     """Validate final draft configs without loading weights or mocking validation."""
-    from transformers import LlamaConfig, MixtralConfig
-
-    from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config
+    from transformers import DeepseekV4Config, LlamaConfig, MixtralConfig
 
     common = dict(
         hidden_size=128,
@@ -2002,7 +2022,7 @@ def test_draft_inherits_ep_only_for_moe(
             n_routed_experts=4,
             num_experts_per_tok=2,
             num_nextn_predict_layers=1,
-            compress_ratios=[1, 1],
+            layer_types=["sliding_attention"] * 2,
             head_dim=32,
             **common,
         )
