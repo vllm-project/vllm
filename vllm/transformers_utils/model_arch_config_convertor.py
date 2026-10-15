@@ -496,14 +496,6 @@ class TerratorchModelArchConfigConvertor(ModelArchConfigConvertorBase):
         return 0
 
 
-class MedusaModelArchConfigConvertor(ModelArchConfigConvertorBase):
-    def get_head_size(self) -> int:
-        return 0
-
-    def get_total_num_kv_heads(self) -> int:
-        return 0
-
-
 class Zamba2ModelArchConfigConvertor(ModelArchConfigConvertorBase):
     def get_head_size(self) -> int:
         return getattr(self.hf_text_config, "attention_head_dim", 0)
@@ -849,7 +841,6 @@ MODEL_ARCH_CONFIG_CONVERTORS = {
     "longcat_flash": LongCatFlashModelArchConfigConvertor,
     "longcat_flash_mtp": LongCatFlashMTPModelArchConfigConvertor,
     "mamba": MambaModelArchConfigConvertor,
-    "medusa": MedusaModelArchConfigConvertor,
     "mimo_mtp": MimoMTPModelArchConfigConvertor,
     "mimo_v2": MimoV2ModelArchConfigConvertor,
     "mimo_v2_flash": MimoV2ModelArchConfigConvertor,
