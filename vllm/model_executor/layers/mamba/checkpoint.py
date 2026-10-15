@@ -265,28 +265,32 @@ def store_cache_checkpoints_kernel(
         checkpoint_offsets_ptr + seq_idx * checkpoint_offset_stride
     )
     valid_checkpoint = (state_idx != NULL_STATE_IDX) & (checkpoint_offset > 0)
-    valid_conv = (
-        (cols < WIDTH * STATE_LEN) & valid_checkpoint & (checkpoint_offset >= STATE_LEN)
-    )
-    width_idx = cols // STATE_LEN
-    history_idx = cols % STATE_LEN
-    checkpoint_end = tl.load(query_start_loc_ptr + seq_idx) + checkpoint_offset
-    token_idx = checkpoint_end - STATE_LEN + history_idx
-    if HAS_TOKEN_MAP:
-        token_idx = tl.load(token_indices_ptr + token_idx, mask=valid_conv, other=0)
-    token_idx = token_idx.to(tl.int64)
-    values = tl.load(
-        x_ptr + token_idx * x_stride_0 + width_idx * x_stride_1,
-        mask=valid_conv,
-    )
-    tl.store(
-        conv_state_ptr
-        + state_idx * state_stride_0
-        + width_idx * state_stride_1
-        + history_idx * state_stride_2,
-        values,
-        mask=valid_conv,
-    )
+    # Only the leading programs cover conv columns; the rest skip the window.
+    if tl.program_id(1) * BLOCK_SIZE < WIDTH * STATE_LEN:
+        valid_conv = (
+            (cols < WIDTH * STATE_LEN)
+            & valid_checkpoint
+            & (checkpoint_offset >= STATE_LEN)
+        )
+        width_idx = cols // STATE_LEN
+        history_idx = cols % STATE_LEN
+        checkpoint_end = tl.load(query_start_loc_ptr + seq_idx) + checkpoint_offset
+        token_idx = checkpoint_end - STATE_LEN + history_idx
+        if HAS_TOKEN_MAP:
+            token_idx = tl.load(token_indices_ptr + token_idx, mask=valid_conv, other=0)
+        token_idx = token_idx.to(tl.int64)
+        values = tl.load(
+            x_ptr + token_idx * x_stride_0 + width_idx * x_stride_1,
+            mask=valid_conv,
+        )
+        tl.store(
+            conv_state_ptr
+            + state_idx * state_stride_0
+            + width_idx * state_stride_1
+            + history_idx * state_stride_2,
+            values,
+            mask=valid_conv,
+        )
 
     if HAS_RECURRENT:
         if HAS_RECURRENT_ROWS:
