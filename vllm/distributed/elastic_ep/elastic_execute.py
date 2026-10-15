@@ -279,6 +279,19 @@ class ElasticEPScalingExecutor:
         Returns the groups still owed a cleanup, so the caller can skip the
         later hand-off. Diagnostic only.
         """
+        delay = os.getenv("VLLM_EEP_DEBUG_DELAY_INSTEAD_OF_CLEANUP")
+        if delay is not None:
+            # Diagnostic only, and the one experiment that tells us why the
+            # cleanup above helps. It takes about two seconds and serializes
+            # everything around it, so a plain wait at the same point separates
+            # "the cleanup releases something RCCL needs" from "the delay is
+            # what closes the window". The groups are handed back untouched, so
+            # the normal late cleanup still runs.
+            time.sleep(float(delay))
+            logger.warning(
+                "[EEP-DEBUG] waited %s s instead of retiring the old groups", delay
+            )
+            return groups
         if os.getenv("VLLM_EEP_DEBUG_EARLY_GROUP_CLEANUP") != "1":
             return groups
         live = sum(1 for group in groups if group is not None)
@@ -295,6 +308,60 @@ class ElasticEPScalingExecutor:
             time.perf_counter() - started,
         )
         return ()
+
+    def _dump_group_pressure(self, label: str) -> None:
+        """Record what is alive at the moments where the refusal happens.
+
+        RCCL refuses to create IPC memory inside ncclCommInitRank at scale down
+        and during the first collective on the new group at scale up, and both
+        times there is no teardown in flight, so the only remaining candidate is
+        how much is registered and alive right then. Nothing exposes the IPC
+        registrations themselves, so count the communicators that own them.
+        Diagnostic only.
+        """
+        if os.getenv("VLLM_EEP_DEBUG_GROUP_PRESSURE") != "1":
+            return
+        free_bytes, total_bytes = torch.accelerator.get_memory_info()
+        comms = sum(
+            1 for obj in gc.get_objects() if type(obj).__name__ == "PyNcclCommunicator"
+        )
+        logger.warning(
+            "[EEP-DEBUG] pressure %s: %d pynccl comm(s), reserved %.2f GiB, "
+            "allocated %.2f GiB, free %.2f of %.2f GiB",
+            label,
+            comms,
+            torch.accelerator.memory_reserved() / 2**30,
+            torch.accelerator.memory_allocated() / 2**30,
+            free_bytes / 2**30,
+            total_bytes / 2**30,
+        )
+
+    def _free_before_standby_if_requested(self) -> None:
+        """Hand memory back to the driver before the new communicators appear.
+
+        Both faces of the remaining failure, the 4097 refusal and the memory
+        access fault, land inside create_standby_groups while preparing the
+        scale down, and that is the tightest point in the whole test: locally
+        rank 0 enters it with 3.14 GiB free of 288 and leaves with 1.51 GiB. If
+        the internal IPC allocation is simply running out of room, this makes it
+        measurably less likely, and the pressure dump says by how much.
+        Diagnostic only.
+        """
+        if os.getenv("VLLM_EEP_DEBUG_FREE_BEFORE_STANDBY") != "1":
+            return
+        before, _ = torch.accelerator.get_memory_info()
+        started = time.perf_counter()
+        gc.collect()
+        torch.accelerator.synchronize()
+        torch.accelerator.empty_cache()
+        after, _ = torch.accelerator.get_memory_info()
+        logger.warning(
+            "[EEP-DEBUG] freed %.2f GiB before the standby groups in %.3f s, "
+            "%.2f GiB free now",
+            (after - before) / 2**30,
+            time.perf_counter() - started,
+            after / 2**30,
+        )
 
     def _wait_for_group_cleanup(self) -> None:
         if (future := self._group_cleanup_future) is not None:
@@ -347,6 +414,8 @@ class ElasticEPScalingExecutor:
         parallel_config = self.worker.vllm_config.parallel_config
         world_size = parallel_config.world_size
         new_world_size_across_dp = world_size * new_dp_size
+        self._dump_group_pressure(f"before standby groups for dp={new_dp_size}")
+        self._free_before_standby_if_requested()
         create_standby_groups(
             new_dp_size=new_dp_size,
             new_world_size_across_dp=new_world_size_across_dp,
@@ -355,6 +424,7 @@ class ElasticEPScalingExecutor:
             use_all2all=use_all2all,
             enable_eplb=parallel_config.enable_eplb,
         )
+        self._dump_group_pressure(f"after standby groups for dp={new_dp_size}")
         standby_ep_group = get_standby_ep_group()
         assert standby_ep_group is not None
         if current_platform.is_rocm():
@@ -538,21 +608,22 @@ class ElasticEPScalingExecutor:
     def switch_and_remove(self) -> None:
         # Removing ranks skipped preparation, so wait for prior cleanup here.
         self._wait_for_group_cleanup()
-        # Diagnostic only. The EPLB async worker is a daemon thread with no stop
-        # path that runs collectives on the EPLB group, and the line below
-        # destroys that group. One removed worker segfaulted here with no Python
-        # frames, only __clone, which is what a daemon thread killed inside a
-        # native call looks like. This records whether the thread was alive.
+        # The EPLB worker is a daemon thread that runs collectives on the EPLB
+        # group, and the group is destroyed a few lines below. Every removed
+        # worker was observed with that thread still alive here, and one of
+        # them segfaulted with no Python frames, only __clone, which is what a
+        # daemon thread killed inside a native call looks like.
         eplb_state = self.worker.model_runner.eplb_state
-        async_thread = getattr(eplb_state, "async_worker", None)
-        logger.warning(
-            "[EEP-DEBUG] removing this worker, eplb async thread is %s",
-            "alive"
-            if async_thread is not None and async_thread.is_alive()
-            else "finished"
-            if async_thread is not None
-            else "absent",
-        )
+        if eplb_state is not None:
+            started = time.perf_counter()
+            stopped = eplb_state.stop_async_worker()
+            # Diagnostic only, to tell a pass that ran this from one that did
+            # not. Drop together with the rest of the EEP-DEBUG lines.
+            logger.warning(
+                "[EEP-DEBUG] eplb async worker %s in %.3f s",
+                "stopped" if stopped else "STILL RUNNING",
+                time.perf_counter() - started,
+            )
         self._release_cuda_graphs()
         retired_groups = _replace_active_groups(
             world=None, dp=None, ep=None, eplb=None, node_count=None

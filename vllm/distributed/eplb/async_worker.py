@@ -77,8 +77,12 @@ def transfer_run_periodically(
     stream: torch.Stream,
     is_profile: bool = False,
 ) -> None:
-    while True:
+    while not state.async_stop_requested:
         state.rearrange_event.wait(stream=stream)
+        if state.async_stop_requested:
+            # Return before touching the group: whoever asked for the stop is
+            # about to destroy it.
+            return
 
         eplb_group = get_eplb_group().device_group
         eplb_cpu_group = get_eplb_group().cpu_group
