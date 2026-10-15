@@ -24,6 +24,29 @@ class MockModelConfig:
         return 1024
 
 
+def _admit(
+    params: SamplingParams,
+    hf_config: SimpleNamespace | None = None,
+    async_scheduling: bool = False,
+) -> None:
+    """Run the engine's admission checks for a diffusion model."""
+    processor = SimpleNamespace(
+        model_config=MockModelConfig(
+            is_diffusion=True, hf_config=hf_config or SimpleNamespace()
+        ),
+        vllm_config=SimpleNamespace(
+            scheduler_config=SimpleNamespace(async_scheduling=async_scheduling)
+        ),
+        speculative_config=None,
+        structured_outputs_config=None,
+        diffusion_config=DiffusionConfig(canvas_length=8),
+        tokenizer=None,
+        validate_logits_processors_params=lambda params: None,
+        resolve_watermarking=lambda params: False,
+    )
+    InputProcessor._validate_params(processor, params, ("generate",))
+
+
 @pytest.mark.parametrize(
     "kwargs",
     [
@@ -40,30 +63,23 @@ class MockModelConfig:
 def test_diffusion_rejects_unsupported_params(kwargs: dict):
     params = SamplingParams(**kwargs)
     with pytest.raises(VLLMValidationError, match="not yet supported with diffusion"):
-        params.verify(MockModelConfig(is_diffusion=True), None, None, None)
+        _admit(params)
 
 
-@pytest.mark.parametrize("temperature", [0.0, 0.7, 1.0, 1.5])
-def test_nemotron_diffusion_accepts_request_temperature(temperature):
-    params = SamplingParams(temperature=temperature)
-    params.verify(
-        MockModelConfig(
-            is_diffusion=True,
-            hf_config=SimpleNamespace(diffusion_per_request_temperature=True),
-        ),
-        None,
-        None,
-        None,
-    )
+@pytest.mark.parametrize("temperature", [0.0, 0.7, 1.5])
+def test_diffusion_per_request_temperature_is_a_model_opt_in(temperature):
+    hf_config = SimpleNamespace(diffusion_per_request_temperature=True)
+    _admit(SamplingParams(temperature=temperature), hf_config)
+    with pytest.raises(VLLMValidationError, match="not yet supported with diffusion"):
+        _admit(SamplingParams(temperature=temperature, seed=42), hf_config)
 
 
 def test_diffusion_accepts_default_params():
-    SamplingParams().verify(MockModelConfig(is_diffusion=True), None, None, None)
+    _admit(SamplingParams())
 
 
 def test_diffusion_accepts_top_k_top_p():
-    params = SamplingParams(top_p=0.9, top_k=10)
-    params.verify(MockModelConfig(is_diffusion=True), None, None, None)
+    _admit(SamplingParams(top_p=0.9, top_k=10))
 
 
 def test_non_diffusion_models_unaffected():
@@ -117,21 +133,7 @@ def test_diffusion_extra_args_are_validated_without_a_served_canvas():
 def test_diffusion_canvas_width_is_accepted_with_either_scheduler(
     async_scheduling, extra_args
 ):
-    diffusion_config = DiffusionConfig(canvas_length=8)
-    processor = SimpleNamespace(
-        model_config=MockModelConfig(is_diffusion=True),
-        vllm_config=SimpleNamespace(
-            scheduler_config=SimpleNamespace(async_scheduling=async_scheduling)
-        ),
-        speculative_config=None,
-        structured_outputs_config=None,
-        diffusion_config=diffusion_config,
-        tokenizer=None,
-        validate_logits_processors_params=lambda params: None,
-        resolve_watermarking=lambda params: False,
-    )
-    params = SamplingParams(extra_args=extra_args)
-    InputProcessor._validate_params(processor, params, ("generate",))
+    _admit(SamplingParams(extra_args=extra_args), async_scheduling=async_scheduling)
 
 
 @pytest.mark.parametrize(
