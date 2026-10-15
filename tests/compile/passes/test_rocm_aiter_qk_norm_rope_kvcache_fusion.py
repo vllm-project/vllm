@@ -448,6 +448,10 @@ def _run_qk_norm_rope_kvcache_fusion_test(
                 mrope_section=mrope_section,
                 mrope_interleaved=mrope_interleaved,
             )
+        if use_quark_scalar_query_scale:
+            # Non-unit scale so a quant/dequant scale mismatch between the fused
+            # kernel and attention fails the comparison.
+            model.attn._q_scale.fill_(0.37)
 
         fusion_pass = QkNormRopeKvCacheFusionPass(vllm_config)
         passes = [
@@ -762,16 +766,23 @@ def test_qk_norm_mrope_kvcache_fusion_quark_scalar_query_scale(
     [(32, 2), (16, 1), (8, 1)],
     ids=["tp2", "tp4", "tp8"],
 )
+@pytest.mark.parametrize("q_fp8_fold", [True, False], ids=["fold_q", "separate_q"])
 @pytest.mark.skipif(not IS_AITER_FOUND, reason="Requires AITER")
 def test_qk_norm_rope_kvcache_fusion_quark_scalar_query_scale(
     num_heads: int,
     num_kv_heads: int,
+    q_fp8_fold: bool,
     monkeypatch: pytest.MonkeyPatch,
 ):
     # RoPE (non-MRoPE) fp8 quant_query path. For num_kv_heads != 1 the query
     # scale is per-tensor, so the Q fp8 quant is folded into the fused kernel
-    # (q_out_fp8) and no separate quant op should remain; num_kv_heads == 1 uses
-    # the per-head/group static quant, which stays separate.
+    # (q_out_fp8) when AITER supports it; num_kv_heads == 1 uses the
+    # per-head/group static quant, which stays separate. q_fp8_fold=False
+    # covers the older-AITER fallback that keeps the separate quant.
+    if not q_fp8_fold:
+        monkeypatch.setattr(
+            rocm_aiter_ops, "qk_norm_rope_cache_supports_q_fp8", lambda: False
+        )
     _run_qk_norm_rope_kvcache_fusion_test(
         attn_backend=AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN,
         enable_aiter_triton_rope=False,
