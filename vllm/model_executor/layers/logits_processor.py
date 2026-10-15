@@ -8,11 +8,13 @@ from functools import cache
 import torch
 import torch.nn.functional as F
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import get_current_vllm_config
 from vllm.distributed import (
     tensor_model_parallel_all_gather,
     tensor_model_parallel_gather,
 )
+from vllm.kernels.triton.topk import supports_triton_topk, triton_topk
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
@@ -28,7 +30,7 @@ logger = init_logger(__name__)
 
 @cache
 def _flashinfer_topk() -> Callable[..., tuple[torch.Tensor, torch.Tensor]] | None:
-    """FlashInfer's radix top-k, or None for torch.topk.
+    """FlashInfer's radix top-k, or None to fall back to Triton or torch.
 
     The top-k spans the vocabulary, where the radix kernel is about twice
     torch.topk.
@@ -37,8 +39,8 @@ def _flashinfer_topk() -> Callable[..., tuple[torch.Tensor, torch.Tensor]] | Non
         return None
     if not has_flashinfer():
         logger.info_once(
-            "flashinfer is unavailable; vocab-parallel top-k uses torch.topk, "
-            "at roughly half the speed."
+            "flashinfer is unavailable; vocab-parallel top-k uses a Triton kernel, "
+            "which may be slower."
         )
         return None
     from flashinfer import top_k
@@ -48,9 +50,20 @@ def _flashinfer_topk() -> Callable[..., tuple[torch.Tensor, torch.Tensor]] | Non
 
 def _topk(scores: torch.Tensor, k: int) -> tuple[torch.Tensor, torch.Tensor]:
     impl = _flashinfer_topk()
-    if impl is None or not scores.is_cuda:
-        return torch.topk(scores, k, dim=-1)
-    return impl(scores, k, sorted=True, deterministic=True)
+    if impl is not None and scores.is_cuda:
+        return impl(scores, k, sorted=True, deterministic=True)
+    if rocm_aiter_ops.is_vocab_top_k_enabled() and rocm_aiter_ops.supports_vocab_top_k(
+        scores, k
+    ):
+        # Faster than the Triton top-k from ~32 rows up. Its int32 indices are
+        # only used after the caller widens them, and ties are not resolved to
+        # the lowest index.
+        return rocm_aiter_ops.vocab_top_k(scores, k)
+    if supports_triton_topk(scores, k):
+        # Without flashinfer (e.g. ROCm), the chunked Triton top-k is several
+        # times faster than torch.topk over a full vocabulary.
+        return triton_topk(scores, k)
+    return torch.topk(scores, k, dim=-1)
 
 
 # --8<-- [start:logits_processor]
