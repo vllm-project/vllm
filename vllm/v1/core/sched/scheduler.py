@@ -4,7 +4,7 @@ import itertools
 import time
 from collections import defaultdict, deque
 from collections.abc import Iterable
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import Any
 
 from vllm.compilation.cuda_graph import CUDAGraphStat
@@ -80,6 +80,14 @@ from vllm.v1.structured_output.utils import strip_speculative_padding
 from vllm.v1.utils import record_function_or_nullcontext
 
 logger = init_logger(__name__)
+
+
+@dataclass
+class _FinishedInFlightKV:
+    """Block ids of a finished request, kept until its in-flight outputs arrive."""
+
+    block_ids: tuple[int, ...]
+    num_in_flight_tokens: int
 
 
 class Scheduler(SchedulerInterface):
@@ -446,6 +454,7 @@ class Scheduler(SchedulerInterface):
         # FIFO of (fence_seq, blocks): blocks become safe to free once
         # processed_step_seq >= fence_seq.
         self.deferred_frees: deque[tuple[int, list[KVCacheBlock]]] = deque()
+        self._finished_inflight_kv: dict[str, _FinishedInFlightKV] = {}
 
         self.perf_metrics: ModelMetrics | None = None
         if self.log_stats and vllm_config.observability_config.enable_mfu_metrics:
@@ -2160,6 +2169,9 @@ class Scheduler(SchedulerInterface):
                     num_scheduled_tokens,
                 )
             )
+        # Records created in the loop already exclude this step from
+        # num_in_flight_tokens, so retire existing records first.
+        self._retire_finished_inflight_kv(num_scheduled_tokens)
         # NOTE(woosuk): As len(num_scheduled_tokens) can be up to 1K or more,
         # the below loop can be a performance bottleneck. We should do our best
         # to avoid expensive operations inside the loop.
@@ -2837,11 +2849,37 @@ class Scheduler(SchedulerInterface):
         if self.finished_req_ids_dict is not None:
             self.finished_req_ids_dict[request.client_index].add(request_id)
 
+        # Keep ordered block IDs while outputs are in flight; a load failure may
+        # be reported after this request is gone.
+        if (
+            self.connector is not None
+            and request.num_in_flight_tokens > 0
+            and len(self.kv_cache_config.kv_cache_groups) == 1
+        ):
+            (block_ids,) = self.kv_cache_manager.get_block_ids(request_id)
+            if block_ids:
+                self._finished_inflight_kv[request_id] = _FinishedInFlightKV(
+                    block_ids=tuple(block_ids),
+                    num_in_flight_tokens=request.num_in_flight_tokens,
+                )
+
         delay_free_blocks |= connector_delay_free_blocks
         if not delay_free_blocks:
             self._free_blocks(request)
 
         return kv_xfer_params, ec_xfer_params
+
+    def _retire_finished_inflight_kv(
+        self, num_scheduled_tokens: dict[str, int]
+    ) -> None:
+        """Count each record down by this step's tokens; drop it once all arrive."""
+        if not self._finished_inflight_kv:
+            return
+        for request_id, record in list(self._finished_inflight_kv.items()):
+            record.num_in_flight_tokens -= num_scheduled_tokens.get(request_id, 0)
+            assert record.num_in_flight_tokens >= 0
+            if record.num_in_flight_tokens == 0:
+                del self._finished_inflight_kv[request_id]
 
     def _free_blocks(self, request: Request):
         assert request.is_finished()
@@ -3505,6 +3543,18 @@ class Scheduler(SchedulerInterface):
 
         total_failed_requests += len(sync_failed_req_ids)
         total_failed_tokens += num_failed_tokens
+
+        # Finished requests cannot repair their cached KV under either policy.
+        # Scan every record. A finished request absent from this batch may have
+        # computed its suffix in a later batch using a block that failed here.
+        finished_blocks_to_evict: set[int] = set()
+        for record in self._finished_inflight_kv.values():
+            for idx, block_id in enumerate(record.block_ids):
+                if block_id in invalid_block_ids:
+                    finished_blocks_to_evict.update(record.block_ids[idx:])
+                    break
+        if finished_blocks_to_evict:
+            self.kv_cache_manager.evict_blocks(finished_blocks_to_evict)
 
         if not total_failed_requests:
             return set()
