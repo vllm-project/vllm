@@ -19,9 +19,11 @@ import socket
 import stat
 import struct
 import tempfile
-from dataclasses import dataclass, fields
-from typing import Any, NamedTuple
+import time
+from dataclasses import asdict, dataclass, fields
+from typing import Any, NamedTuple, TypeVar
 
+import regex as re
 import torch
 from torch.multiprocessing.reductions import rebuild_cuda_tensor, reduce_tensor
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
@@ -46,6 +48,10 @@ _LEN_STRUCT = struct.Struct("!Q")
 # Sanity bound for a single message. IPC handles are tiny; only small
 # non-CUDA tensors are ever shipped by value.
 MAX_MSG_SIZE = 1 << 34
+MAX_ARTIFACT_SIZE = 64 << 20
+MAX_JSON_MSG_SIZE = 1 << 26
+
+_DataclassT = TypeVar("_DataclassT")
 
 
 def _current_uid() -> int:
@@ -67,6 +73,15 @@ class UnsupportedQuantForIPCError(Exception):
 
 class UnsupportedPlatformForIPCError(Exception):
     """Raised when the current platform cannot share CUDA IPC handles."""
+
+
+@dataclass(frozen=True)
+class ArtifactCacheKey:
+    """Exact identity of a host-side artifact."""
+
+    kind: str
+    content_hash: str
+    vllm_version: str = vllm.version.__version__
 
 
 def check_ipc_platform_support() -> None:
@@ -358,6 +373,57 @@ class WeightCacheKey:
         ]
 
 
+_HOST_PORT = re.compile(
+    r"\[(?P<v6>[^\]]+)\]:(?P<v6port>\d+)|(?P<host>[^:\[\]]+):(?P<port>\d+)"
+)
+
+
+def parse_host_port(address: str) -> tuple[str, int]:
+    match = _HOST_PORT.fullmatch(address)
+    if match is None:
+        raise ValueError(f"Expected host:port address, got {address!r}")
+    if match["v6"] is not None:
+        host, port = match["v6"], int(match["v6port"])
+    else:
+        host, port = match["host"], int(match["port"])
+    if not 1 <= port <= 65535:
+        raise ValueError(f"Port must be between 1 and 65535, got {port}")
+    return host, port
+
+
+def json_to_dataclass(cls: type[_DataclassT], payload: Any) -> _DataclassT:
+    if not isinstance(payload, dict):
+        raise ValueError(f"Expected a JSON object for {cls.__name__}")
+    names = {field.name for field in fields(cls)}  # type: ignore[arg-type]
+    unknown = set(payload) - names
+    if unknown:
+        raise ValueError(f"Unknown {cls.__name__} fields: {sorted(unknown)}")
+    return cls(**payload)
+
+
+def dataclass_to_json(instance: Any) -> dict[str, Any]:
+    return asdict(instance)
+
+
+def send_json(sock: socket.socket, obj: Any) -> None:
+    payload = json.dumps(obj).encode()
+    if len(payload) > MAX_JSON_MSG_SIZE:
+        raise ValueError("JSON message exceeds configured limit")
+    sock.sendall(_LEN_STRUCT.pack(len(payload)))
+    sock.sendall(payload)
+
+
+def recv_json(
+    sock: socket.socket,
+    max_size: int = MAX_JSON_MSG_SIZE,
+    deadline: float | None = None,
+) -> Any:
+    (length,) = _LEN_STRUCT.unpack(_recv_exact(sock, _LEN_STRUCT.size, deadline))
+    if length > max_size:
+        raise ValueError(f"Message size {length} exceeds limit {max_size}")
+    return json.loads(_recv_exact(sock, length, deadline))
+
+
 @dataclass
 class TensorEntry:
     """A single cached tensor.
@@ -415,9 +481,16 @@ def recv_msg(sock: socket.socket) -> Any:
     return pickle.loads(_recv_exact(sock, length))
 
 
-def _recv_exact(sock: socket.socket, num_bytes: int) -> bytes:
+def _recv_exact(
+    sock: socket.socket, num_bytes: int, deadline: float | None = None
+) -> bytes:
     buf = bytearray()
     while len(buf) < num_bytes:
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("peer did not send its message in time")
+            sock.settimeout(remaining)
         chunk = sock.recv(num_bytes - len(buf))
         if not chunk:
             raise ConnectionError("Socket closed while receiving message")

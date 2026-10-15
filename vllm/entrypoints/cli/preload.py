@@ -26,7 +26,6 @@ import sys
 import threading
 import typing
 from collections.abc import Sequence
-from itertools import product
 from multiprocessing.process import BaseProcess
 
 from fastapi import FastAPI
@@ -38,6 +37,7 @@ from vllm.entrypoints.serve.utils.api_utils import VLLM_SUBCMD_PARSER_EPILOG
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.weight_cache.protocol import (
     check_ipc_platform_support,
+    parse_host_port,
 )
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.network_utils import get_distributed_init_method, get_open_port
@@ -143,6 +143,27 @@ class PreloadSubcommand(CLISubcommand):
             default="0.0.0.0",
             help="Host for the parent /health endpoint (default: 0.0.0.0).",
         )
+        parser.add_argument(
+            "--weight-cache-artifact-listen",
+            type=str,
+            default=None,
+            help="host:base_port for authenticated remote autotune-artifact "
+            "requests; each daemon uses base_port + its global rank.",
+        )
+        parser.add_argument(
+            "--weight-cache-artifact-source",
+            type=str,
+            default=None,
+            help="host:base_port of a source daemon replica; fetch rank-matched "
+            "autotune artifacts before serving.",
+        )
+        parser.add_argument(
+            "--weight-cache-artifact-token",
+            type=str,
+            default=None,
+            help="Shared secret for remote autotune-artifact requests. "
+            "The JSON connection is unencrypted; use a trusted network.",
+        )
 
     @staticmethod
     def cmd(args: argparse.Namespace) -> None:
@@ -179,6 +200,23 @@ class PreloadSubcommand(CLISubcommand):
         tp_size = parallel_config.tensor_parallel_size
         pp_size = parallel_config.pipeline_parallel_size
         dp_size = parallel_config.data_parallel_size
+
+        if (
+            args.weight_cache_artifact_listen or args.weight_cache_artifact_source
+        ) and not args.weight_cache_artifact_token:
+            raise ValueError(
+                "Artifact listener/source requires --weight-cache-artifact-token"
+            )
+        artifact_listen = (
+            parse_host_port(args.weight_cache_artifact_listen)
+            if args.weight_cache_artifact_listen
+            else None
+        )
+        artifact_source = (
+            parse_host_port(args.weight_cache_artifact_source)
+            if args.weight_cache_artifact_source
+            else None
+        )
 
         placements = plan_local_ranks(parallel_config)
         local_world_size = len(placements)
@@ -236,6 +274,14 @@ class PreloadSubcommand(CLISubcommand):
                 )
             )
 
+        world_size = dp_size * pp_size * tp_size
+        for address in (artifact_listen, artifact_source):
+            if (
+                address is not None
+                and address[1] + len(groups) * world_size - 1 > 65535
+            ):
+                raise ValueError("Artifact port range exceeds 65535")
+
         ctx = multiprocessing.get_context("spawn")
         ready_queue: multiprocessing.Queue[tuple[str, int]] = ctx.Queue()
         # Local index == device index; global rank enumerates DP, PP, then TP.
@@ -244,9 +290,8 @@ class PreloadSubcommand(CLISubcommand):
                 format_daemon_role(is_draft),
                 dp_rank * pp_size * tp_size + pp_rank * tp_size + tp_rank,
             )
-            for (is_draft, _, _), (_, dp_rank, pp_rank, tp_rank) in product(
-                groups, placements
-            )
+            for is_draft, _, _ in groups
+            for (_, dp_rank, pp_rank, tp_rank) in placements
         }
         procs = [
             ctx.Process(
@@ -262,17 +307,47 @@ class PreloadSubcommand(CLISubcommand):
                     dp_rank,
                     pp_rank,
                 ),
+                # Artifact endpoints are rank aligned: source and target
+                # daemons exchange the table for the same TP/PP/DP rank.
+                kwargs={
+                    "artifact_source": (
+                        (
+                            artifact_source[0],
+                            artifact_source[1]
+                            + group_index * dp_size * pp_size * tp_size
+                            + dp_rank * pp_size * tp_size
+                            + pp_rank * tp_size
+                            + tp_rank,
+                        )
+                        if artifact_source is not None
+                        else None
+                    ),
+                    "artifact_listen": (
+                        (
+                            artifact_listen[0],
+                            artifact_listen[1]
+                            + group_index * dp_size * pp_size * tp_size
+                            + dp_rank * pp_size * tp_size
+                            + pp_rank * tp_size
+                            + tp_rank,
+                        )
+                        if artifact_listen is not None
+                        else None
+                    ),
+                    "artifact_token": args.weight_cache_artifact_token,
+                },
                 name=(
                     f"vllm-weight-cache-{format_daemon_role(is_draft)}-"
                     f"{(dp_rank * pp_size * tp_size + pp_rank * tp_size + tp_rank)}"
                 ),
             )
-            for (is_draft, config, init_method), (
+            for group_index, (is_draft, config, init_method) in enumerate(groups)
+            for (
                 local_rank,
                 dp_rank,
                 pp_rank,
                 tp_rank,
-            ) in product(groups, placements)
+            ) in placements
         ]
         health_state = _HealthState(procs)
         health_server = None
