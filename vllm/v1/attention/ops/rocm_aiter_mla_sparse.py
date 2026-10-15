@@ -2159,6 +2159,9 @@ def _sparse_attn_prefill_ragged_kernel(
         mask=head_mask[:, None] & dim_mask[None, :],
         other=0.0,
     )
+    # K and V are the same latent row, so the FP8 scale factors out of both
+    # products: once into the QK scale, once into the accumulator.
+    qk_scale = scale * kv_scale if KV_IS_FP8 else scale
 
     neg_large = -3.4028234663852886e38
     m_i = tl.full((BLOCK_H,), neg_large, dtype=tl.float32)
@@ -2187,17 +2190,16 @@ def _sparse_attn_prefill_ragged_kernel(
             other=0.0,
         )
         if KV_IS_FP8:
-            # Direct fp8-to-f32 conversion is unreliable for the FNUZ
-            # encodings used on gfx942. BF16 represents every e4m3/e5m2 value
-            # exactly, so this intermediate conversion is lossless.
-            kv = (kv.to(tl.bfloat16).to(tl.float32) * kv_scale).to(q.dtype)
+            # BF16 represents every e4m3/e5m2 value exactly, and direct
+            # fp8-to-f32 conversion is unreliable for gfx942's FNUZ encodings.
+            kv = kv.to(tl.bfloat16).to(q.dtype)
 
         next_k_pos = k_start + BLOCK_K + k_offsets
         slot = tl.load(
             kv_indices_ptr + kv_start + next_k_pos, mask=next_k_pos < kv_len, other=-1
         )
 
-        scores = tl.dot(q, tl.trans(kv)) * scale
+        scores = tl.dot(q, tl.trans(kv)) * qk_scale
         scores = tl.where(head_mask[:, None] & valid[None, :], scores, neg_large)
 
         m_block = tl.max(scores, axis=1)
@@ -2210,6 +2212,9 @@ def _sparse_attn_prefill_ragged_kernel(
         acc = acc * alpha[:, None] + tl.dot(p.to(kv.dtype), kv)
         m_i = m_new
         l_i = l_new
+
+    if KV_IS_FP8:
+        acc = acc * kv_scale
 
     if HAS_ATTN_SINK:
         sink = tl.load(
