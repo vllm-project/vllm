@@ -73,6 +73,7 @@ logger = init_logger(__name__)
 
 DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES = frozenset(
     {
+        "AliceAIForCausalLM",
         "DeepseekV32MTPModel",
         "DeepseekV32ForCausalLM",
         "DeepseekV4ForCausalLM",
