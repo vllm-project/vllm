@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from huggingface_hub.errors import StrictDataclassClassValidationError
 from torch import nn
 
 from vllm.config import (
@@ -65,7 +66,7 @@ def model_factory(monkeypatch):
         compilation_config=CompilationConfig(mode=0, custom_ops=["none"]),
     )
 
-    def build(**overrides):
+    def build(*, hf_overrides=None, **overrides):
         kwargs = dict(
             vocab_size=32,
             hidden_size=16,
@@ -79,9 +80,7 @@ def model_factory(monkeypatch):
             n_output_layers=2,
             n_recurrent_loops=3,
             max_position_embeddings=32,
-            output_transform="replace",
-            layers_block_type=["sliding_attention", "mlp"] * 3
-            + ["full_attention", "mlp"],
+            layer_types=["sliding_attention", "mlp"] * 3 + ["full_attention", "mlp"],
             sliding_window=3,
             rope_parameters={
                 kind: {
@@ -97,6 +96,7 @@ def model_factory(monkeypatch):
         )
         kwargs.update(overrides)
         cfg = DoryConfig(**kwargs)
+        cfg.update(hf_overrides or {})
         vc.model_config = SimpleNamespace(
             hf_config=cfg, head_dtype=None, dtype=torch.float32
         )
@@ -114,6 +114,11 @@ def model_factory(monkeypatch):
 
     with set_current_vllm_config(vc):
         yield build
+
+
+def test_invalid_loop_override_is_rejected_before_model_creation(model_factory):
+    with pytest.raises(StrictDataclassClassValidationError, match="n_recurrent_loops"):
+        model_factory(hf_overrides={"n_recurrent_loops": 0})
 
 
 @pytest.mark.parametrize("num_loops", [3, 27])

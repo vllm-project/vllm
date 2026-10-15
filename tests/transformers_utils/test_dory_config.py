@@ -23,7 +23,7 @@ def test_dory_loads_without_remote_code_and_preserves_head_size(tmp_path):
     restored = get_config(tmp_path, trust_remote_code=False)
     assert isinstance(restored, DoryConfig)
     assert restored.recurrent_kv_cache_mode == "per_loop"
-    assert restored.layer_types == restored.layers_block_type
+    assert restored.layer_types is not None
     assert restored.layer_types[:8] == ["sliding_attention", "mlp"] * 3 + [
         "full_attention",
         "mlp",
@@ -45,9 +45,24 @@ def test_dory_last_loop_cache_can_be_selected_with_hf_overrides(tmp_path):
         max_model_len=128,
         hf_overrides={"recurrent_kv_cache_mode": "last_loop"},
     ).hf_config
-    config.validate_architecture()
     assert config.recurrent_kv_cache_mode == "last_loop"
     assert DoryConfig.from_dict(config.to_dict()).recurrent_kv_cache_mode == "last_loop"
+
+
+@pytest.mark.parametrize("num_layers", [2, 8])
+def test_dory_rope_theta_defaults_and_explicit_values(num_layers):
+    config = DoryConfig.from_dict({"num_hidden_layers": num_layers})
+    assert all(rope["rope_theta"] == 10000 for rope in config.rope_parameters.values())
+
+    config = DoryConfig.from_dict(
+        {"num_hidden_layers": num_layers, "rope_theta": 500000}
+    )
+    assert all(rope["rope_theta"] == 500000 for rope in config.rope_parameters.values())
+
+    # Explicit checkpoint values take precedence over a top-level default.
+    config.rope_parameters["sliding_attention"]["rope_theta"] = 10000
+    restored = DoryConfig.from_dict(config.to_dict() | {"rope_theta": 1000000})
+    assert restored.rope_parameters == config.rope_parameters
 
 
 @pytest.mark.parametrize(
@@ -57,9 +72,9 @@ def test_dory_last_loop_cache_can_be_selected_with_hf_overrides(tmp_path):
         ({"n_recurrent_loops": 0}, "n_recurrent_loops"),
         ({"n_recurrent_loops": 1.5}, "n_recurrent_loops"),
         ({"recurrent_kv_cache_mode": "loop1"}, "recurrent_kv_cache_mode"),
-        ({"layers_block_type": []}, "num_hidden_layers entries"),
-        ({"layers_block_type": ["mamba"] * 72}, "layers_block_type"),
-        ({"layers_block_type": [None] * 72}, "layers_block_type"),
+        ({"layer_types": []}, "num_hidden_layers entries"),
+        ({"layer_types": ["mamba"] * 72}, "layer_types"),
+        ({"layer_types": [None] * 72}, "layer_types"),
         ({"sliding_window": 0}, "sliding_window"),
         ({"sliding_window": None}, "sliding_window"),
         ({"rope_parameters": {}}, "each attention block type"),
@@ -89,11 +104,7 @@ def test_dory_last_loop_cache_can_be_selected_with_hf_overrides(tmp_path):
         ({"num_key_value_heads": 0}, "Attention dimensions"),
         ({"head_dim": 0}, "Attention dimensions"),
         ({"hidden_act": "relu"}, "SiLU"),
-        ({"output_transform": "adaptive_slerp"}, "replace output transform"),
-        ({"ngpt": False}, "ngpt=True"),
         ({"attention_bias": True}, "bias-free"),
-        ({"initial_state": "zero"}, "input_copy"),
-        ({"output_transform": "gated"}, "output transform"),
     ],
 )
 def test_dory_rejects_incompatible_architecture(overrides, match):

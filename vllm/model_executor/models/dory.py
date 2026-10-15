@@ -96,7 +96,7 @@ class DoryAttention(nn.Module):
             g0 = config.hidden_size**0.5
         self._s_gate_factor = g0**0.5 / std
 
-        layer_type = config.layers_block_type[layer_idx]
+        layer_type = config.layer_types[layer_idx]
         self.rotary_emb = get_rope(
             self.head_dim,
             max_position=config.max_position_embeddings,
@@ -202,7 +202,7 @@ class DoryDecoderLayer(nn.Module):
         self, config, layer_idx, cache_config, quant_config, prefix, num_loops=1
     ):
         super().__init__()
-        self.is_attention = config.layers_block_type[layer_idx] != "mlp"
+        self.is_attention = config.layer_types[layer_idx] != "mlp"
         self._alpha_scale = config.ngpt_alpha_init / config.initializer_range
         if self.is_attention:
             self.mixer = DoryAttention(
@@ -275,7 +275,6 @@ class DoryBackbone(nn.Module):
         h = state
         for layer in self.layers[n_in + n_rec :]:
             h = layer(positions, h)
-        # no final norm (ngpt_enable_final_norm=False)
         return h
 
 
@@ -289,7 +288,8 @@ class DoryForCausalLM(nn.Module):
         super().__init__()
         config = vllm_config.model_config.hf_config
         self.config = config
-        config.validate_architecture()
+        # hf_overrides can change architecture fields after config initialization.
+        config.validate()
         if get_tensor_model_parallel_world_size() != 1:
             raise ValueError("Dory currently supports tensor_parallel_size=1 only")
         if vllm_config.quant_config is not None:

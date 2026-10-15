@@ -273,8 +273,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
             "n_recurrent_layers": 4,
             "n_output_layers": 2,
             "n_recurrent_loops": 2,
-            "layers_block_type": ["sliding_attention", "mlp"] * 3
-            + ["full_attention", "mlp"],
+            "layer_types": ["sliding_attention", "mlp"] * 3 + ["full_attention", "mlp"],
         },
     ),
     "Ernie4_5ForCausalLM": _HfExamplesInfo("baidu/ERNIE-4.5-0.3B-PT"),
