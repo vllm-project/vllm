@@ -1506,6 +1506,8 @@ def get_requirements() -> list[str]:
                 req = req.replace("nvidia-cutlass-dsl[cu13]", "nvidia-cutlass-dsl")
             if "humming-kernels[cu13]" in req and cuda_major == "12":
                 req = req.replace("humming-kernels[cu13]", "humming-kernels[cu12]")
+            if "nvshmem4py-cu13" in req and cuda_major == "12":
+                req = req.replace("nvshmem4py-cu13", "nvshmem4py-cu12")
             modified_requirements.append(req)
         requirements = modified_requirements
     elif _is_hip():

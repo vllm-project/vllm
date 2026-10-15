@@ -224,6 +224,7 @@ RUN --mount=type=cache,target=/opt/uv/cache \
     && if [ "$(echo $CUDA_VERSION | cut -d. -f1)" = "12" ]; then \
         sed -i 's/^nvidia-cutlass-dsl\[cu13\]/nvidia-cutlass-dsl/' requirements/cuda.txt; \
         sed -i 's/^humming-kernels\[cu13\]/humming-kernels[cu12]/' requirements/cuda.txt; \
+        sed -i 's/^nvshmem4py-cu13/nvshmem4py-cu12/' requirements/cuda.txt; \
     fi \
     && if [ "$(uname -m)" = "aarch64" ]; then \
         # The manylinux 2_28 (glibc 2.28) aarch64 builder cannot use
@@ -918,6 +919,7 @@ RUN --mount=type=cache,target=/opt/uv/cache \
     if [ "$(echo $CUDA_VERSION | cut -d. -f1)" = "12" ]; then \
         sed -i 's/^nvidia-cutlass-dsl\[cu13\]/nvidia-cutlass-dsl/' /tmp/requirements-cuda.txt; \
         sed -i 's/^humming-kernels\[cu13\]/humming-kernels[cu12]/' /tmp/requirements-cuda.txt; \
+        sed -i 's/^nvshmem4py-cu13/nvshmem4py-cu12/' /tmp/requirements-cuda.txt; \
     fi && \
     if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ]; then \
         uv pip install --system \
