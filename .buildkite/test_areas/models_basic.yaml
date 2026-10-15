@@ -161,6 +161,8 @@ steps:
 
 - label: ":nvidia: (4xB200) Kimi K3 Prefix Cache"
   key: kimi-k3-prefix-cache-4xb200
+  # Nightly only: 4-GPU B200 pods wait hours behind smaller jobs on per-PR runs.
+  optional: true
   automatic_shard: true
   timeout_in_minutes: 75
   device: b200-k8s
