@@ -12,6 +12,8 @@ import pytest
 import pytest_asyncio
 
 from tests.utils import RemoteLaunchRenderServer
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.entrypoints.scale_out.render.api_router import router
 from vllm.entrypoints.scale_out.render.serving import ServingRender
@@ -21,7 +23,7 @@ from vllm.renderers.online_renderer import OnlineRenderer
 MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
 
 
-def _build_responses_serving_render() -> ServingRender:
+def _build_serving_render() -> ServingRender:
     serving = ServingRender.__new__(ServingRender)
     serving.model_config = SimpleNamespace(
         max_model_len=100,
@@ -43,6 +45,31 @@ def _build_responses_serving_render() -> ServingRender:
     return serving
 
 
+@pytest.mark.asyncio
+@pytest.mark.skip_global_cleanup
+async def test_render_completion_rejects_beam_search():
+    serving = _build_serving_render()
+    serving.online_renderer.render_completion = AsyncMock(
+        return_value=[{"prompt_token_ids": [7, 8, 9]}]
+    )
+    request = CompletionRequest(
+        model=MODEL_NAME,
+        prompt="Test prompt",
+        use_beam_search=True,
+        n=2,
+        length_penalty=0.7,
+    )
+
+    response = await serving.render_completion_request(request)
+
+    assert isinstance(response, ErrorResponse)
+    assert response.error.code == 400
+    assert (
+        response.error.message == "Beam search is not supported by the render endpoint"
+    )
+    serving.online_renderer.render_completion.assert_not_awaited()
+
+
 @pytest.mark.skip_global_cleanup
 def test_responses_render_route_is_registered():
     assert any(route.path == "/v1/responses/render" for route in router.routes)
@@ -60,7 +87,7 @@ def test_responses_render_route_documents_not_implemented():
 @pytest.mark.asyncio
 @pytest.mark.skip_global_cleanup
 async def test_render_responses_returns_generate_request_without_stored_state():
-    serving = _build_responses_serving_render()
+    serving = _build_serving_render()
     serving.online_renderer.render_responses = AsyncMock(
         return_value=MagicMock(
             messages=[{"role": "user", "content": "Test prompt"}],
@@ -89,6 +116,7 @@ async def test_render_responses_returns_generate_request_without_stored_state():
     assert response.priority == 3
     assert response.kv_transfer_params == {"do_remote_prefill": True}
     assert response.ec_transfer_params == {"remote": True}
+    assert response.sampling_params.extra_args is None
     serving.online_renderer.render_responses.assert_awaited_once_with(
         request,
         previous_messages=None,
@@ -100,8 +128,56 @@ async def test_render_responses_returns_generate_request_without_stored_state():
 
 @pytest.mark.asyncio
 @pytest.mark.skip_global_cleanup
+async def test_render_chat_hoists_transfer_params_out_of_extra_args():
+    serving = _build_serving_render()
+    serving.online_renderer.render_chat = AsyncMock(
+        return_value=([], [{"prompt_token_ids": [7, 8, 9]}])
+    )
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "Test prompt"}],
+        kv_transfer_params={"do_remote_prefill": True},
+        ec_transfer_params={"remote": True},
+        vllm_xargs={"foo": 1},
+    )
+
+    response = await serving.render_chat_request(request)
+
+    assert response.kv_transfer_params == {"do_remote_prefill": True}
+    assert response.ec_transfer_params == {"remote": True}
+    assert response.sampling_params.extra_args == {"foo": 1}
+
+
+@pytest.mark.asyncio
+@pytest.mark.skip_global_cleanup
+async def test_render_completion_hoists_transfer_params_for_every_prompt():
+    serving = _build_serving_render()
+    serving.online_renderer.render_completion = AsyncMock(
+        return_value=[
+            {"prompt_token_ids": [7, 8, 9]},
+            {"prompt_token_ids": [4, 5]},
+        ]
+    )
+    request = CompletionRequest(
+        model=MODEL_NAME,
+        prompt=["a", "b"],
+        kv_transfer_params={"do_remote_prefill": True},
+        ec_transfer_params={"remote": True},
+    )
+
+    responses = await serving.render_completion_request(request)
+
+    assert len(responses) == 2
+    for response in responses:
+        assert response.kv_transfer_params == {"do_remote_prefill": True}
+        assert response.ec_transfer_params == {"remote": True}
+        assert response.sampling_params.extra_args is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.skip_global_cleanup
 async def test_render_responses_rejects_previous_response_id():
-    serving = _build_responses_serving_render()
+    serving = _build_serving_render()
     serving.online_renderer.render_responses = AsyncMock()
     request = ResponsesRequest(
         model=MODEL_NAME,
@@ -120,7 +196,7 @@ async def test_render_responses_rejects_previous_response_id():
 @pytest.mark.asyncio
 @pytest.mark.skip_global_cleanup
 async def test_render_responses_rejects_empty_token_ids():
-    serving = _build_responses_serving_render()
+    serving = _build_serving_render()
     serving.online_renderer.render_responses = AsyncMock(
         return_value=MagicMock(
             messages=[],
@@ -141,7 +217,7 @@ async def test_render_responses_rejects_empty_token_ids():
 async def test_render_responses_carries_reasoning_parser_kwargs():
     """/v1/responses gives the engine's reasoning parser the effective template
     kwargs, so the rendered request must carry them to generate."""
-    serving = _build_responses_serving_render()
+    serving = _build_serving_render()
     online = serving.online_renderer
     online.parser = MagicMock(reasoning_parser_cls=object)
     online.chat_template = None
@@ -339,6 +415,74 @@ async def test_completion_render_multiple_prompts(client):
         assert "request_id" in prompt
         assert len(prompt["token_ids"]) > 0
         assert prompt["request_id"].startswith("cmpl-")
+
+
+CHAT_BODY = {
+    "model": MODEL_NAME,
+    "messages": [{"role": "user", "content": "Hello"}],
+}
+
+
+@pytest.mark.asyncio
+async def test_chat_render_honors_body_request_id(client):
+    response = await client.post(
+        "/v1/chat/completions/render", json={**CHAT_BODY, "request_id": "abc"}
+    )
+
+    assert response.status_code == 200
+    assert response.json()["request_id"] == "chatcmpl-abc"
+
+
+@pytest.mark.asyncio
+async def test_chat_render_header_request_id_wins(client):
+    response = await client.post(
+        "/v1/chat/completions/render",
+        json={**CHAT_BODY, "request_id": "abc"},
+        headers={"X-Request-Id": "hdr"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["request_id"] == "chatcmpl-hdr"
+
+
+@pytest.mark.asyncio
+async def test_chat_render_generates_unique_request_ids(client):
+    ids = set()
+    for _ in range(2):
+        response = await client.post("/v1/chat/completions/render", json=CHAT_BODY)
+        assert response.status_code == 200
+        request_id = response.json()["request_id"]
+        assert request_id.startswith("chatcmpl-")
+        ids.add(request_id)
+
+    assert len(ids) == 2
+
+
+@pytest.mark.asyncio
+async def test_completion_render_request_id_single_prompt(client):
+    response = await client.post(
+        "/v1/completions/render",
+        json={"model": MODEL_NAME, "prompt": "Hello world", "request_id": "abc"},
+    )
+
+    assert response.status_code == 200
+    assert [r["request_id"] for r in response.json()] == ["cmpl-abc"]
+
+
+@pytest.mark.asyncio
+async def test_completion_render_request_id_multiple_prompts(client):
+    response = await client.post(
+        "/v1/completions/render",
+        json={
+            "model": MODEL_NAME,
+            "prompt": ["Hello world", "Goodbye world"],
+            "request_id": "abc",
+        },
+        headers={"X-Request-Id": "hdr"},
+    )
+
+    assert response.status_code == 200
+    assert [r["request_id"] for r in response.json()] == ["cmpl-hdr-0", "cmpl-hdr-1"]
 
 
 @pytest.mark.asyncio
