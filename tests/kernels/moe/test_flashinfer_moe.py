@@ -248,3 +248,62 @@ def test_flashinfer_fp4_moe_no_graph(
 
 if __name__ == "__main__":
     test_flashinfer_fp4_moe_no_graph((2, 1024, 1024), 40, 1, torch.half)
+
+
+@pytest.mark.parametrize("n,h", [(928, 128), (1856, 256), (1024, 256), (1856, 2688)])
+@pytest.mark.parametrize("flat_scales", [False, True])
+def test_mxfp8_non_gated_padding_preserves_payload_and_neutral_scales(
+    n, h, flat_scales
+):
+    from types import SimpleNamespace
+
+    from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+        _pad_mxfp8_native_intermediate,
+    )
+
+    # Padding must preserve checkpoint bytes and use UE8M0 127 (scale 1).
+    w13 = torch.randint(0, 120, (1, n, h), dtype=torch.uint8).view(torch.float8_e4m3fn)
+    w2 = torch.randint(0, 120, (1, h, n), dtype=torch.uint8).view(torch.float8_e4m3fn)
+    s13 = torch.randint(110, 135, (1, n, h // 32), dtype=torch.uint8)
+    s2 = torch.randint(110, 135, (1, h, n // 32), dtype=torch.uint8)
+    layer = SimpleNamespace(
+        moe_config=SimpleNamespace(
+            is_act_and_mul=False, intermediate_size_per_partition=n, hidden_dim=h
+        )
+    )
+    a, b, c, d = _pad_mxfp8_native_intermediate(
+        layer,
+        w13,
+        w2,
+        s13.flatten(1) if flat_scales else s13,
+        s2.flatten(1) if flat_scales else s2,
+    )
+    pn, ph = ((n + 127) // 128) * 128, ((h + 255) // 256) * 256
+    assert a.shape == (1, pn, ph) and b.shape == (1, ph, pn)
+    assert layer.moe_config.intermediate_size_per_partition == pn
+    assert layer.moe_config.hidden_dim == ph
+    c, d = c.reshape(1, pn, ph // 32), d.reshape(1, ph, pn // 32)
+    assert torch.equal(a[:, :n, :h].view(torch.uint8), w13.view(torch.uint8))
+    assert torch.equal(b[:, :h, :n].view(torch.uint8), w2.view(torch.uint8))
+    assert torch.equal(c[:, :n, : h // 32], s13)
+    assert torch.equal(d[:, :h, : n // 32], s2)
+    assert not torch.count_nonzero(a[:, n:, :].view(torch.uint8))
+    assert not torch.count_nonzero(a[:, :, h:].view(torch.uint8))
+    assert not torch.count_nonzero(b[:, h:, :].view(torch.uint8))
+    assert not torch.count_nonzero(b[:, :, n:].view(torch.uint8))
+    assert torch.all(c[:, n:, :] == 127) and torch.all(c[:, :, h // 32 :] == 127)
+    assert torch.all(d[:, h:, :] == 127) and torch.all(d[:, :, n // 32 :] == 127)
+
+
+def test_mxfp8_non_gated_padding_preserves_relu2_output():
+    # The runner's padded input and cropped output preserve non-gated RELU2.
+    torch.manual_seed(17)
+    x = torch.randn(3, 128)
+    up = torch.randn(928, 128)
+    down = torch.randn(128, 928)
+    reference = torch.relu(x @ up.T).square() @ down.T
+    xp = torch.nn.functional.pad(x, (0, 128))
+    upp = torch.nn.functional.pad(up, (0, 128, 0, 96))
+    downp = torch.nn.functional.pad(down, (0, 96, 0, 128))
+    padded = (torch.relu(xp @ upp.T).square() @ downp.T)[:, :128]
+    torch.testing.assert_close(reference, padded, rtol=1e-5, atol=0.01)
