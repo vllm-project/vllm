@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import multiprocessing
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
+from functools import partial
 from itertools import chain
 from typing import TYPE_CHECKING, NamedTuple
 
@@ -14,6 +15,7 @@ from vllm.logger import init_logger
 from vllm.parser.engine.adapters import ParserEngineReasoningAdapter
 from vllm.reasoning import ReasoningParserManager
 from vllm.tokenizers import cached_tokenizer_from_config
+from vllm.utils.func_utils import supports_kw
 from vllm.utils.import_utils import LazyLoader
 from vllm.v1.structured_output.backend_guidance import GuidanceBackend
 from vllm.v1.structured_output.backend_types import (
@@ -336,10 +338,23 @@ class StructuredOutputManager:
                 return ConstraintBounds(constraint_start, constraint_start)
 
         # Fallback: the grammar starts after the end token.
+        # Supply the output boundary only when the parser explicitly accepts it.
+        is_reasoning_end_streaming: Callable[..., bool] = (
+            reasoner.is_reasoning_end_streaming
+        )
+        if supports_kw(
+            is_reasoning_end_streaming,
+            "prompt_len",
+            requires_kw_only=True,
+            allow_var_kwargs=False,
+        ):
+            is_reasoning_end_streaming = partial(
+                is_reasoning_end_streaming, prompt_len=request.num_prompt_tokens
+            )
         # TODO: Build a read-only Sequence view over all_token_ids
         # instead of copying the entire all_token_ids into input_ids.
         if spec_tokens_committed:
-            if not spec_tokens or not reasoner.is_reasoning_end_streaming(
+            if not spec_tokens or not is_reasoning_end_streaming(
                 request.all_token_ids, spec_tokens
             ):
                 return ConstraintBounds(num_spec_tokens + 1, num_spec_tokens + 1)
@@ -349,14 +364,14 @@ class StructuredOutputManager:
         else:
             input_ids = request.all_token_ids.copy()
             input_ids.extend(spec_tokens)
-            if not reasoner.is_reasoning_end_streaming(input_ids, spec_tokens):
+            if not is_reasoning_end_streaming(input_ids, spec_tokens):
                 return ConstraintBounds(num_spec_tokens + 1, num_spec_tokens + 1)
             delta_ids = list(spec_tokens)
 
         for i in range(num_spec_tokens - 1, 0, -1):
             input_ids.pop()
             delta_ids.pop()
-            if not reasoner.is_reasoning_end_streaming(input_ids, delta_ids):
+            if not is_reasoning_end_streaming(input_ids, delta_ids):
                 return ConstraintBounds(i + 1, i + 1)
         return ConstraintBounds(1, 1)
 
