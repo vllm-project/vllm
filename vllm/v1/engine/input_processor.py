@@ -6,6 +6,8 @@ from collections.abc import Callable, Mapping
 from functools import partial
 from typing import Any, Literal
 
+import msgspec
+
 import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.exceptions import VLLMValidationError
@@ -34,6 +36,7 @@ from vllm.utils.diffusion import validate_diffusion_sampling_params
 from vllm.utils.jsontree import json_iter_leaves
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.kv_hints import KvHintsEnvelope
+from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 
 logger = init_logger(__name__)
 
@@ -146,6 +149,16 @@ class InputProcessor:
         for `PoolingParams`). The caller applies it to its private copy of the
         params so that a caller-owned params object is never mutated.
         """
+        # EngineCore decodes params with msgspec, which is stricter than the
+        # constructor (e.g. a bool or float in an int field). Do the same round
+        # trip here so such a request fails instead of crashing the EngineCore
+        # input thread. A fresh codec per call: this runs on a thread pool and
+        # the codecs are not thread-safe.
+        try:
+            MsgpackDecoder(type(params)).decode(MsgpackEncoder().encode(params))
+        except msgspec.ValidationError as e:
+            raise VLLMValidationError(f"Invalid {type(params).__name__}: {e}") from e
+
         watermarking: bool | None = None
         if isinstance(params, SamplingParams):
             supported_generation_tasks = [
