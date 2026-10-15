@@ -146,28 +146,35 @@ def test_standard_attention_backend_selection(
 
 
 @pytest.mark.parametrize(
-    "unified_attn_enabled, expect_selected",
+    "unified_attn_env, expect_selected",
     [
-        # VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION unset (default False): the
-        # RDNA unified-attn kernel exceeds RDNA's LDS limit on some shapes, so
-        # it must not be force-selected just because aiter is enabled.
-        (False, False),
-        # Explicit opt-in still works.
-        (True, True),
+        # Unset: RDNA keeps ROCM_AITER_UNIFIED_ATTN as the default with aiter.
+        (None, True),
+        # Explicit opt-out drops only this kernel (see #56021).
+        ("0", False),
+        ("1", True),
     ],
 )
-def test_rdna_unified_attn_backend_respects_flag(unified_attn_enabled, expect_selected):
-    """On RDNA (no CDNA aiter support), ROCM_AITER_UNIFIED_ATTN must only be
-    prioritized when VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION is enabled, not
-    merely because VLLM_ROCM_USE_AITER is set (see #56021)."""
+def test_rdna_unified_attn_backend_opt_out(
+    monkeypatch, unified_attn_env, expect_selected
+):
+    """On RDNA, VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION=0 must opt out of
+    ROCM_AITER_UNIFIED_ATTN without changing the default when it is unset."""
+    from vllm._aiter_ops import rocm_aiter_ops
     from vllm.platforms.rocm import _get_backend_priorities
+
+    if unified_attn_env is None:
+        monkeypatch.delenv("VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION", raising=False)
+    else:
+        monkeypatch.setenv("VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION", unified_attn_env)
+    rocm_aiter_ops.refresh_env_variables()
 
     with (
         patch("vllm._aiter_ops.is_aiter_found_and_supported", return_value=False),
         patch("vllm._aiter_ops.rocm_aiter_ops.is_mha_enabled", return_value=False),
         patch(
-            "vllm._aiter_ops.rocm_aiter_ops.is_rdna_unified_attn_enabled",
-            return_value=unified_attn_enabled,
+            "vllm._aiter_ops.rocm_aiter_ops.is_rdna_aiter_enabled",
+            return_value=True,
         ),
     ):
         backends = _get_backend_priorities(use_mla=False, use_sparse=False)

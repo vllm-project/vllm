@@ -1737,11 +1737,15 @@ class rocm_aiter_ops:
 
     @classmethod
     def is_rdna_unified_attn_enabled(cls) -> bool:
-        """RDNA4 (gfx12) analog of is_triton_unified_attn_enabled(). Unlike the
-        other rdna helpers this also honours VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION,
-        so the kernel can be avoided (it exceeds RDNA's LDS limit on some shapes)
-        without giving up aiter's other Triton paths, e.g. linear GEMM."""
-        return cls.is_rdna_aiter_enabled() and cls._TRITON_UNIFIED_ATTN_ENABLED
+        """RDNA4 (gfx12) analog of is_triton_unified_attn_enabled(). On by
+        default with aiter, but an explicit
+        VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION=0 opts out of this kernel while
+        keeping aiter's other Triton paths, e.g. linear GEMM."""
+        opted_out = (
+            envs.is_set("VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION")
+            and not cls._TRITON_UNIFIED_ATTN_ENABLED
+        )
+        return cls.is_rdna_aiter_enabled() and not opted_out
 
     @classmethod
     @if_aiter_supported
