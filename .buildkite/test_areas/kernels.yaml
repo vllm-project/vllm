@@ -30,9 +30,10 @@ steps:
       - vllm/_aiter_ops.py
       - vllm/platforms/rocm.py
 
-- label: ":nvidia: (H200 MIG 35GB) Core Operation Kernels Shard %N"
+- label: ":nvidia: (H200 MIG 35GB) Core Operation Kernels"
   device: h200_35gb
   key: kernels-core-operation-test
+  automatic_shard: true
   timeout_in_minutes: 120
   source_file_dependencies:
   - csrc/
@@ -40,10 +41,10 @@ steps:
   - tests/kernels/test_concat_mla_q.py
   - tests/kernels/test_fused_qk_norm_rope_gate.py
   commands:
-    - pytest -v -s kernels/core --ignore=kernels/core/test_minimax_reduce_rms.py kernels/test_concat_mla_q.py kernels/test_fused_qk_norm_rope_gate.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
-  parallelism: 3
+    - pytest -v -s kernels/core --ignore=kernels/core/test_minimax_reduce_rms.py kernels/test_concat_mla_q.py kernels/test_fused_qk_norm_rope_gate.py
   mirror:
     amd:
+      parallelism: 3
       label: ":amd: (MI300) Core Operation Kernels Shard %N"
       dind: false
       device: mi300_1
@@ -410,10 +411,14 @@ steps:
       depends_on:
       - image-build-amd
       source_file_dependencies:
+      - vllm/models/deepseek_v41/amd/rocm.py
+      - vllm/models/deepseek_v41/sparse_mla.py
       - vllm/v1/attention/backends/mla/rocm_aiter_mla.py
+      - vllm/v1/attention/ops/rocm_aiter_mla_sparse.py
       - vllm/v1/attention/selector.py
       - vllm/platforms/rocm.py
       - vllm/_aiter_ops.py
+      - tests/kernels/attention/test_rocm_triton_attn_dsv4.py
       - tests/kernels/attention/test_rocm_aiter_mla_decode.py
       - tests/kernels/attention/test_rocm_aiter_mla_decode_metadata.py
       - tests/kernels/attention/test_rocm_aiter_mla_fp8_support.py
@@ -424,6 +429,7 @@ steps:
       - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_decode.py
       - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_fp8_support.py
       - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_op_registration.py
+      - pytest -v -s tests/kernels/attention/test_rocm_triton_attn_dsv4.py::test_dsv41_adaptive_mla_swa_metadata_graph_replay
 
 - label: ":nvidia: (L4) Quantization Kernels Shard %N"
   key: kernels-quantization-test
@@ -512,8 +518,10 @@ steps:
   source_file_dependencies:
   - csrc/mamba/
   - tests/kernels/mamba
+  - vllm/model_executor/layers/mamba/checkpoint.py
   - vllm/model_executor/layers/mamba/gdn
   - vllm/model_executor/layers/mamba/ops
+  - vllm/v1/attention/backends/gdn_attn.py
   commands:
     - pytest -v -s kernels/mamba
   mirror:
