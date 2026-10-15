@@ -153,6 +153,27 @@ def test_region_length_validation_checks_replicated_gqa_heads(
     ) == valid
 
 
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(("local_tp", "remote_tp"), [(1, 2), (2, 1)])
+def test_region_length_validation_preserves_replicated_mla(local_tp, remote_tp):
+    """MLA payloads keep the same size with layer specs and unequal TP."""
+    spec = MLAAttentionSpec(
+        block_size=16, num_kv_heads=1, head_size=64, dtype=torch.uint8
+    )
+    region = TransferRegion("mla", 0, 0, spec.page_size_bytes, spec.page_size_bytes)
+    assert (
+        _validate_asymmetric_region_lengths(
+            local_regions=[region],
+            remote_regions=[region],
+            local_tp_size=local_tp,
+            remote_tp_size=remote_tp,
+            producer_cache_replicated=True,
+            layer_specs={"mla": spec},
+        )
+        is None
+    )
+
+
 def _make_test_kv_cache_config() -> KVCacheConfig:
     block_size = maybe_update_block_size(16)
     return KVCacheConfig(
@@ -1130,6 +1151,11 @@ def patch_worker_dependencies():
         patch(
             "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector.get_tensor_model_parallel_world_size",
             return_value=1,
+        ),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake."
+            "mooncake_connector.torch.accelerator.current_device_index",
+            return_value=0,
         ),
         patch(
             "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector.get_pp_group"

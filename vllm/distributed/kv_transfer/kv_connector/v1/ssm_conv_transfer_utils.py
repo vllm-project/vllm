@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Mamba conv-state sub-projection decomposition for NIXL transfer.
+"""Mamba conv-state sub-projection decomposition for KV transfer.
 
-With DS conv state layout (dim, state_len), sub-projections are
-contiguous in memory.  Each D rank reads its slices via separate
-RDMA transfers — no P-side permutation needed.
+Sub-projections are exposed as per-rank (offset, size) slices so peers
+transfer only the slices they own, with no permutation needed.  With DS
+conv state layout (dim, state_len) each sub-projection is one contiguous
+block; with SD (state_len, dim) it is one slice per conv row.
 
 Supported model types:
   - Mamba1: conv = [x], temporal = (intermediate_size, state_size)
@@ -18,7 +19,10 @@ from dataclasses import dataclass
 
 import torch
 
-from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
+from vllm.model_executor.layers.mamba.mamba_utils import (
+    ConvStateLayoutType,
+    get_conv_state_layout,
+)
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.kv_cache_interface import MambaSpec
 
@@ -42,6 +46,7 @@ class MambaConvSplitInfo:
     local_proj_dims: tuple[int, ...]
     conv_dtype_size: int  # bytes per element (e.g. 2 for float16)
     ssm_sizes: tuple[int, int]  # (conv_state_bytes, ssm_state_bytes)
+    conv_layout: ConvStateLayoutType = "DS"
 
     @property
     def local_conv_dim(self) -> int:
@@ -59,14 +64,37 @@ class MambaConvSplitInfo:
         """(byte_offset, byte_size) of each sub-projection within this
         engine's page.
 
+        DS layout only: sub-projections are contiguous column blocks.
         Used by both P and D for local descriptor registration.
         """
+        assert self.conv_layout == "DS", (
+            "Contiguous sub-projection offsets require the DS conv layout."
+        )
         offsets: list[tuple[int, int]] = []
         offset = 0
         for size in self.proj_bytes:
             offsets.append((offset, size))
             offset += size
         return offsets
+
+    def local_conv_segments(self) -> list[tuple[int, int]]:
+        """(byte_offset, byte_size) of each conv sub-projection slice in
+        one page, for either conv state layout.
+
+        DS: one contiguous block per sub-projection.
+        SD: one slice per (row, sub-projection) pair, because a
+        sub-projection's columns are strided by the row width.
+        """
+        if self.conv_layout == "DS":
+            return self.local_conv_offsets
+        segments: list[tuple[int, int]] = []
+        offset = 0
+        for _ in range(self.conv_rows):
+            for dim in self.local_proj_dims:
+                length = dim * self.conv_dtype_size
+                segments.append((offset, length))
+                offset += length
+        return segments
 
     def remote_conv_offsets(
         self, local_rank_offset: int, tp_ratio: int
@@ -85,6 +113,9 @@ class MambaConvSplitInfo:
                        to get P-sized offsets.
 
         """
+        assert self.conv_layout == "DS", (
+            "Contiguous sub-projection offsets require the DS conv layout."
+        )
         offsets: list[tuple[int, int]] = []
         if tp_ratio >= 1:
             remote_base = 0
@@ -115,13 +146,17 @@ def derive_mamba_conv_split(
 
     Args:
         mamba_spec: MambaSpec whose shapes are:
-            shapes[0] = conv state: (conv_dim_local, conv_rows) in DS layout.
+            shapes[0] = conv state: (conv_dim_local, conv_rows) in DS
+            layout, (conv_rows, conv_dim_local) in SD layout.
             shapes[1] = temporal state (model-specific shape).
         local_tp: this engine's tensor-parallel size.
 
     Returns:
         MambaConvSplitInfo with per-rank sub-projection dims, conv_rows,
         conv_dtype_size, and ssm_sizes (conv_state_bytes, ssm_state_bytes).
+
+    Raises:
+        NotImplementedError: The spec's state cannot be decomposed.
 
     """
     _supported = (
@@ -136,13 +171,16 @@ def derive_mamba_conv_split(
         )
 
     conv_shape = mamba_spec.shapes[0]
-    assert len(conv_shape) == 2, f"Expected 2D conv state shape, got {conv_shape}"
+    if len(conv_shape) != 2:
+        raise NotImplementedError(f"Expected 2D conv state shape, got {conv_shape}")
 
-    # NOTE (ZhanqiuHu): 3-read requires DS layout, which is already asserted
-    # in nixl worker __init__.  Use it directly instead of heuristic detection.
-    assert is_conv_state_dim_first(), "3-read requires DS conv state layout"
-    local_conv_dim = conv_shape[0]  # DS: (conv_dim_local, conv_rows)
-    conv_rows = conv_shape[1]
+    # NIXL and MoRIIO assert the DS layout before deriving; here the conv dim
+    # is read from whichever axis the layout stores it on.
+    conv_layout = get_conv_state_layout()
+    if conv_layout == "DS":
+        local_conv_dim, conv_rows = conv_shape
+    else:
+        conv_rows, local_conv_dim = conv_shape
 
     conv_dtype_size = torch.tensor(
         [],
@@ -160,11 +198,12 @@ def derive_mamba_conv_split(
         # Mamba1 conv state holds only x (no B/C), so it's a single
         # contiguous TP shard with no sub-projection decomposition.
         temporal_shape = mamba_spec.shapes[1]
-        assert temporal_shape[0] == local_conv_dim, (
-            f"Mamba1 temporal state dim ({temporal_shape[0]}) doesn't match "
-            f"conv dim ({local_conv_dim}); both should be "
-            f"intermediate_size/TP."
-        )
+        if temporal_shape[0] != local_conv_dim:
+            raise NotImplementedError(
+                f"Mamba1 temporal state dim ({temporal_shape[0]}) doesn't match "
+                f"conv dim ({local_conv_dim}); both should be "
+                f"intermediate_size/TP."
+            )
         local_proj_dims = (local_conv_dim,)
     elif mamba_spec.mamba_type == MambaAttentionBackendEnum.MAMBA2:
         # NOTE (ZhanqiuHu): intermediate_size (= global x dim) is not stored
@@ -178,11 +217,12 @@ def derive_mamba_conv_split(
         # where groups_ss is the B (= C) dimension.  B and C are always the same
         # size, so we recover groups_ss from the remainder after subtracting x.
         remainder = local_conv_dim * local_tp - intermediate_size
-        assert remainder > 0 and remainder % 2 == 0, (
-            f"Conv dim ({local_conv_dim}*tp={local_tp}) doesn't decompose "
-            f"into intermediate_size={intermediate_size} + 2*groups_ss. "
-            f"remainder={remainder}"
-        )
+        if remainder <= 0 or remainder % 2:
+            raise NotImplementedError(
+                f"Conv dim ({local_conv_dim}*tp={local_tp}) doesn't decompose "
+                f"into intermediate_size={intermediate_size} + 2*groups_ss. "
+                f"remainder={remainder}"
+            )
         groups_ss = remainder // 2
 
         # Divide by TP to get per-rank column counts.
@@ -199,11 +239,12 @@ def derive_mamba_conv_split(
         value_dim_local = num_v_heads_local * head_v_dim
 
         remainder = local_conv_dim - value_dim_local
-        assert remainder > 0 and remainder % 2 == 0, (
-            f"GDN conv dim ({local_conv_dim}) doesn't decompose into "
-            f"2*key_dim_local + value_dim_local={value_dim_local}. "
-            f"remainder={remainder}"
-        )
+        if remainder <= 0 or remainder % 2:
+            raise NotImplementedError(
+                f"GDN conv dim ({local_conv_dim}) doesn't decompose into "
+                f"2*key_dim_local + value_dim_local={value_dim_local}. "
+                f"remainder={remainder}"
+            )
         key_dim_local = remainder // 2
         local_proj_dims = (key_dim_local, key_dim_local, value_dim_local)
     else:
@@ -216,6 +257,7 @@ def derive_mamba_conv_split(
         local_proj_dims=local_proj_dims,
         conv_dtype_size=conv_dtype_size,
         ssm_sizes=(conv_state_bytes, ssm_state_bytes),
+        conv_layout=conv_layout,
     )
 
 
