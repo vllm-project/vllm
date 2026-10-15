@@ -12,15 +12,107 @@ from PIL import Image
 
 from vllm.config.multimodal import MultiModalConfig
 from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
-from vllm.model_executor.models.qwen2_vl import Qwen2VLProcessingInfo
+from vllm.model_executor.models.jina_vl import JinaVLMultiModalProcessor
+from vllm.model_executor.models.qwen2_5_vl import (
+    Qwen2_5_VLMultiModalProcessor,
+    Qwen2_5_VLProcessingInfo,
+)
+from vllm.model_executor.models.qwen2_vl import (
+    Qwen2VLMultiModalProcessor,
+    Qwen2VLProcessingInfo,
+)
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import MultiModalProcessorOnlyCache
 from vllm.multimodal.inputs import batched_tensors_equal
+from vllm.multimodal.processing import ProcessorInputs, TimingContext
 from vllm.multimodal.processing.context import InputProcessingContext
 from vllm.platforms import current_platform
 
 from ....conftest import ImageTestAssets
 from ...utils import build_model_context
+
+
+def test_routing_metadata_fast_path_requires_exact_processor_opt_in() -> None:
+    capability = "_supports_routing_metadata_image_fast_path"
+
+    assert Qwen2VLMultiModalProcessor.__dict__[capability]
+    assert Qwen2_5_VLMultiModalProcessor.__dict__[capability]
+    assert capability not in JinaVLMultiModalProcessor.__dict__
+    assert (
+        Qwen2VLMultiModalProcessor.__dict__["_routing_metadata_processing_info_type"]
+        is Qwen2VLProcessingInfo
+    )
+    assert (
+        Qwen2_5_VLMultiModalProcessor.__dict__["_routing_metadata_processing_info_type"]
+        is Qwen2_5_VLProcessingInfo
+    )
+
+
+@pytest.mark.parametrize(
+    "model_id", ["Qwen/Qwen2-VL-2B-Instruct", "Qwen/Qwen2.5-VL-3B-Instruct"]
+)
+def test_routing_metadata_matches_full_image_processing(model_id: str) -> None:
+    ctx = build_model_context(
+        model_id,
+        limit_mm_per_prompt={"image": 1, "video": 0},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    image = np.zeros((360, 640, 3), dtype=np.uint8)
+    hf_processor = processor.info.get_hf_processor()
+    image_token_id = processor.info.get_tokenizer().get_vocab()[
+        hf_processor.image_token
+    ]
+
+    def make_inputs() -> ProcessorInputs:
+        return ProcessorInputs(
+            prompt=[image_token_id],
+            mm_data_items=processor.info.parse_mm_data({"image": [image]}),
+        )
+
+    full = processor.apply(make_inputs(), TimingContext(enabled=False))
+    routing = processor.apply_routing_metadata(
+        make_inputs(),
+        TimingContext(enabled=False),
+    )
+
+    assert routing["prompt_token_ids"] == full["prompt_token_ids"]
+    assert routing["mm_hashes"] == full["mm_hashes"]
+    assert routing["mm_placeholders"] == full["mm_placeholders"]
+    assert routing["mm_kwargs"] == {}
+
+
+def test_inherited_qwen_processing_info_uses_full_fallback() -> None:
+    class UnverifiedQwen2VLProcessingInfo(Qwen2VLProcessingInfo):
+        pass
+
+    ctx = build_model_context(
+        "Qwen/Qwen2-VL-2B-Instruct",
+        limit_mm_per_prompt={"image": 1, "video": 0},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    processor.info = UnverifiedQwen2VLProcessingInfo(processor.info.ctx)
+    image = np.zeros((128, 128, 3), dtype=np.uint8)
+    hf_processor = processor.info.get_hf_processor()
+    image_token_id = processor.info.get_tokenizer().get_vocab()[
+        hf_processor.image_token
+    ]
+
+    def make_inputs() -> ProcessorInputs:
+        return ProcessorInputs(
+            prompt=[image_token_id],
+            mm_data_items=processor.info.parse_mm_data({"image": [image]}),
+        )
+
+    full = processor.apply(make_inputs(), TimingContext(enabled=False))
+    routing = processor.apply_routing_metadata(
+        make_inputs(),
+        TimingContext(enabled=False),
+    )
+
+    assert routing["prompt_token_ids"] == full["prompt_token_ids"]
+    assert routing["mm_hashes"] == full["mm_hashes"]
+    assert routing["mm_placeholders"] == full["mm_placeholders"]
+    assert routing["mm_kwargs"] != {}
 
 
 @pytest.mark.parametrize(
@@ -288,6 +380,24 @@ def test_jina_vl_processing_order() -> None:
         document["mm_placeholders"]["image"][0].length,
         query["mm_placeholders"]["image"][0].length,
     ]
+
+    pair_inputs = ProcessorInputs(
+        prompt=processor.info.get_tokenizer().encode(
+            placeholder * 2,
+            add_special_tokens=False,
+        ),
+        mm_data_items=processor.info.parse_mm_data(
+            {"image": [query_image, document_image]}
+        ),
+        cache=cache,
+    )
+    full = processor.apply(pair_inputs, TimingContext(enabled=True))
+    routing_timing = TimingContext(enabled=True)
+    routing = processor.apply_routing_metadata(pair_inputs, routing_timing)
+
+    assert "routing_metadata_fallback" in routing_timing.stage_secs
+    for field in ("prompt_token_ids", "mm_hashes", "mm_placeholders"):
+        assert routing[field] == full[field]
 
 
 @pytest.mark.parametrize("model_id", ["Qwen/Qwen2-VL-2B-Instruct"])

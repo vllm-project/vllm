@@ -1182,6 +1182,8 @@ class Qwen2_5_VLDummyInputsBuilder(Qwen2VLDummyInputsBuilder):
 
 
 class Qwen2_5_VLProcessingInfo(Qwen2VLProcessingInfo):
+    _supports_routing_metadata_image_fast_path = True
+
     def get_hf_config(self):
         return self.ctx.get_hf_config(Qwen2_5_VLConfig)
 
@@ -1201,6 +1203,9 @@ class Qwen2_5_VLProcessingInfo(Qwen2VLProcessingInfo):
 
 
 class Qwen2_5_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
+    _supports_routing_metadata_image_fast_path = True
+    _routing_metadata_processing_info_type = Qwen2_5_VLProcessingInfo
+
     def _get_mm_fields_config(
         self,
         hf_inputs: BatchFeature,

@@ -29,14 +29,17 @@ from transformers import BatchFeature
 from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
-from vllm.multimodal.parse import ImageSize, MultiModalDataItems
+from vllm.multimodal.parse import ImageProcessorItems, ImageSize, MultiModalDataItems
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
+    MultiModalProcessingResult,
+    ProcessorInputs,
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
+    TimingContext,
 )
 from vllm.transformers_utils.configs.deepseek_v41 import DeepseekV41Config
 
@@ -118,6 +121,53 @@ def safe_resize(
     return n_llm_h, n_llm_w, best_height, best_width
 
 
+def image_llm_grid_from_size(
+    width: int,
+    height: int,
+    *,
+    patch_size: int,
+    downsample_ratio: int,
+    max_n_token: int,
+    min_pixels: int,
+    max_wh_ratio: float | None,
+) -> tuple[int, int]:
+    """LLM aligner grid for one image, without building ViT patches."""
+    n_llm_h, n_llm_w, _, _ = _resized_image_geometry(
+        width,
+        height,
+        patch_size=patch_size,
+        downsample_ratio=downsample_ratio,
+        max_n_token=max_n_token,
+        min_pixels=min_pixels,
+        max_wh_ratio=max_wh_ratio,
+    )
+    return n_llm_h, n_llm_w
+
+
+def _resized_image_geometry(
+    width: int,
+    height: int,
+    *,
+    patch_size: int,
+    downsample_ratio: int,
+    max_n_token: int,
+    min_pixels: int,
+    max_wh_ratio: float | None,
+) -> tuple[int, int, int, int]:
+    p = patch_size
+    if max_wh_ratio is not None and width > height * max_wh_ratio:
+        width = height * max_wh_ratio
+    if 0 < width * height < min_pixels:
+        ratio = (min_pixels / (width * height)) ** 0.5
+        width = int(width * ratio)
+        height = int(height * ratio)
+    best_width = math.ceil(width / p) * p
+    best_height = math.ceil(height / p) * p
+    return safe_resize(
+        height, width, best_height, best_width, p, downsample_ratio, max_n_token
+    )
+
+
 def load_image(
     image: Image.Image,
     *,
@@ -134,17 +184,13 @@ def load_image(
     """
     p = patch_size
     image = image.convert("RGB")
-    width, height = image.size
-    if max_wh_ratio is not None and width > height * max_wh_ratio:
-        width = height * max_wh_ratio
-    if 0 < width * height < min_pixels:
-        ratio = (min_pixels / (width * height)) ** 0.5
-        width = int(width * ratio)
-        height = int(height * ratio)
-    best_width = math.ceil(width / p) * p
-    best_height = math.ceil(height / p) * p
-    n_llm_h, n_llm_w, best_height, best_width = safe_resize(
-        height, width, best_height, best_width, p, downsample_ratio, max_n_token
+    n_llm_h, n_llm_w, best_height, best_width = _resized_image_geometry(
+        *image.size,
+        patch_size=patch_size,
+        downsample_ratio=downsample_ratio,
+        max_n_token=max_n_token,
+        min_pixels=min_pixels,
+        max_wh_ratio=max_wh_ratio,
     )
     n_vit_h, n_vit_w = best_height // p, best_width // p
     if max_wh_ratio is not None and image.width >= max_wh_ratio * image.height:
@@ -247,8 +293,24 @@ class DeepseekV4VLProcessor:
 
 
 class DeepseekV4VLProcessingInfo(BaseProcessingInfo):
+    _supports_routing_metadata_image_fast_path = True
+
     def get_hf_config(self) -> DeepseekV41Config:
         return self.ctx.get_hf_config(DeepseekV41Config)
+
+    def get_image_llm_grid(
+        self, *, image_width: int, image_height: int
+    ) -> tuple[int, int]:
+        config = self.get_hf_config()
+        return image_llm_grid_from_size(
+            image_width,
+            image_height,
+            patch_size=config.vision_patch_size,
+            downsample_ratio=config.vision_downsample_ratio,
+            max_n_token=config.vision_max_n_token,
+            min_pixels=config.vision_min_pixels,
+            max_wh_ratio=config.vision_max_wh_ratio,
+        )
 
     def get_hf_processor(self, **kwargs: object) -> DeepseekV4VLProcessor:
         if kwargs:
@@ -325,6 +387,70 @@ class DeepseekV4VLDummyInputsBuilder(
 class DeepseekV4VLMultiModalProcessor(
     BaseMultiModalProcessor[DeepseekV4VLProcessingInfo]
 ):
+    _supports_routing_metadata_image_fast_path = True
+    _routing_metadata_processing_info_type = DeepseekV4VLProcessingInfo
+
+    def _apply_routing_metadata(
+        self,
+        inputs: ProcessorInputs,
+        timing_ctx: TimingContext,
+    ) -> MultiModalProcessingResult | None:
+        if not (
+            type(self).__dict__.get(
+                "_supports_routing_metadata_image_fast_path",
+                False,
+            )
+            and type(self.info).__dict__.get(
+                "_supports_routing_metadata_image_fast_path",
+                False,
+            )
+            and type(self.info)
+            is type(self).__dict__.get("_routing_metadata_processing_info_type")
+        ):
+            return None
+        if set(inputs.mm_data_items) != {"image"}:
+            return None
+        image_items = inputs.mm_data_items.get("image")
+        if not isinstance(image_items, ImageProcessorItems):
+            return None
+
+        image_token_id = self.info.get_image_placeholder_token_id()
+        validate_image_sentinel_ids(self.info.get_tokenizer())
+
+        with timing_ctx.record("routing_metadata_item_shapes"):
+            token_counts = []
+            for index in range(len(image_items)):
+                size = image_items.get_image_size(index)
+                n_llm_h, n_llm_w = self.info.get_image_llm_grid(
+                    image_width=size.width,
+                    image_height=size.height,
+                )
+                token_counts.append(num_image_tokens(n_llm_h, n_llm_w))
+
+        def get_image_replacement(item_idx: int) -> PromptUpdateDetails:
+            full = [image_token_id] * token_counts[item_idx]
+            return PromptUpdateDetails.select_token_id(full, image_token_id)
+
+        with timing_ctx.record("routing_metadata_hashes"):
+            mm_hashes = self._get_mm_hashes(inputs)
+
+        prompt_updates = self._bind_and_group_updates(
+            [
+                PromptReplacement(
+                    modality="image",
+                    target=[image_token_id],
+                    replacement=get_image_replacement,
+                )
+            ],
+            inputs.mm_data_items.get_all_counts(),
+        )
+        return MultiModalProcessingResult(
+            prompt_ids=self._postprocess_prompt(inputs.prompt),
+            kwargs=MultiModalKwargsItems({}),
+            hashes=mm_hashes,
+            prompt_updates=prompt_updates,
+        )
+
     def _get_mm_fields_config(
         self,
         hf_inputs: BatchFeature,

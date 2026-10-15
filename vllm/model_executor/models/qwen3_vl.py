@@ -91,14 +91,20 @@ from vllm.multimodal.inputs import (
     PlaceholderRange,
     VideoItem,
 )
-from vllm.multimodal.parse import ImageSize, MultiModalDataItems
+from vllm.multimodal.parse import (
+    ImageProcessorItems,
+    ImageSize,
+    MultiModalDataItems,
+)
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
+    MultiModalProcessingResult,
     ProcessorInputs,
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
+    TimingContext,
 )
 from vllm.multimodal.video_prune.evs import (
     compute_mrope_for_media,
@@ -923,6 +929,8 @@ class Qwen3VLMultiModalDataParser(Qwen2VLMultiModalDataParser):
 
 
 class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
+    _supports_routing_metadata_image_fast_path = True
+
     def get_hf_config(self):
         return self.ctx.get_hf_config(Qwen3VLConfig)
 
@@ -1344,6 +1352,77 @@ def _replace_video_token_placeholders(
 
 
 class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo]):
+    _supports_routing_metadata_image_fast_path = True
+    _routing_metadata_processing_info_type = Qwen3VLProcessingInfo
+
+    def _apply_routing_metadata(
+        self,
+        inputs: ProcessorInputs,
+        timing_ctx: TimingContext,
+    ) -> MultiModalProcessingResult | None:
+        # Images can use the exact model-owned smart-resize/token-count path
+        # without constructing pixel_values. Video timestamp/pruning metadata
+        # remains on the full processor path until it has the same guarantee.
+        if not (
+            type(self).__dict__.get(
+                "_supports_routing_metadata_image_fast_path",
+                False,
+            )
+            and type(self.info).__dict__.get(
+                "_supports_routing_metadata_image_fast_path",
+                False,
+            )
+            and type(self.info)
+            is type(self).__dict__.get("_routing_metadata_processing_info_type")
+        ):
+            return None
+        if set(inputs.mm_data_items) != {"image"}:
+            return None
+        image_items = inputs.mm_data_items.get("image")
+        if not isinstance(image_items, ImageProcessorItems):
+            return None
+
+        hf_kwargs = inputs.hf_processor_mm_kwargs
+        hf_processor = self.info.get_hf_processor(**hf_kwargs)
+        image_processor = self.info.get_image_processor(**hf_kwargs)
+        image_token_id = hf_processor.image_token_id
+
+        with timing_ctx.record("routing_metadata_item_shapes"):
+            token_counts = [
+                self.info.get_num_image_tokens(
+                    image_width=size.width,
+                    image_height=size.height,
+                    image_processor=image_processor,
+                    mm_kwargs=hf_kwargs,
+                )
+                for size in (
+                    image_items.get_image_size(i) for i in range(len(image_items))
+                )
+            ]
+
+        def image_replacement(item_idx: int) -> list[int]:
+            return [image_token_id] * token_counts[item_idx]
+
+        with timing_ctx.record("routing_metadata_hashes"):
+            mm_hashes = self._get_mm_hashes(inputs)
+
+        prompt_updates = self._bind_and_group_updates(
+            [
+                PromptReplacement(
+                    modality="image",
+                    target=[image_token_id],
+                    replacement=image_replacement,
+                )
+            ],
+            inputs.mm_data_items.get_all_counts(),
+        )
+        return MultiModalProcessingResult(
+            prompt_ids=self._postprocess_prompt(inputs.prompt),
+            kwargs=MultiModalKwargsItems({}),
+            hashes=mm_hashes,
+            prompt_updates=prompt_updates,
+        )
+
     def _get_per_video_kwargs(
         self, kwargs: Mapping[str, object], num_videos: int | None = None
     ) -> dict[str, list[Any]]:

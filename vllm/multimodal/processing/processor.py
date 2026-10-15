@@ -1029,6 +1029,65 @@ class MultiModalProcessingResult(NamedTuple):
     prompt_updates: MultiModalPromptUpdates
 
 
+class _RoutingMetadataRequiresFullProcessing(Exception):
+    """Raised when prompt metadata reads generation-ready processor output."""
+
+
+class _RoutingMetadataKwargs(MultiModalKwargsItems):
+    """Sentinel kwargs used to detect tensor-dependent prompt updates.
+
+    Many model processors already derive exact placeholder expansion solely
+    from source item metadata and model configuration. They can use the generic
+    fast path unchanged. Accessing processed kwargs raises a private signal that
+    selects full processing instead.
+    """
+
+    def __init__(self) -> None:
+        super().__init__({})
+
+    @property
+    def data(self):
+        self._requires_full()
+
+    @data.setter
+    def data(self, value):
+        # UserDict initializes and updates this attribute internally. Keep the
+        # storage inaccessible so direct ``out_mm_kwargs.data`` reads fail
+        # closed just like mapping accessors.
+        self._routing_metadata_data = value
+
+    @staticmethod
+    def _requires_full() -> None:
+        raise _RoutingMetadataRequiresFullProcessing
+
+    def __getitem__(self, key):
+        self._requires_full()
+
+    def get(self, key, default=None):
+        self._requires_full()
+
+    def get_data(self):
+        self._requires_full()
+
+    def __iter__(self):
+        self._requires_full()
+
+    def __len__(self):
+        self._requires_full()
+
+    def __contains__(self, key):
+        self._requires_full()
+
+    def keys(self):
+        self._requires_full()
+
+    def items(self):
+        self._requires_full()
+
+    def values(self):
+        self._requires_full()
+
+
 class BaseMultiModalProcessor(ABC, Generic[_I]):
     """Abstract base class to process multi-modal inputs to be used in vLLM.
 
@@ -1398,6 +1457,52 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         return inputs.get_mm_hashes(
             self.info.model_id,
             self.info.ctx.get_mm_config().mm_hasher_algorithm,
+        )
+
+    def _apply_routing_metadata(
+        self,
+        inputs: ProcessorInputs,
+        timing_ctx: TimingContext,
+    ) -> MultiModalProcessingResult | None:
+        """Build exact routing metadata without materializing encoder inputs.
+
+        Existing prompt-update implementations that only inspect source items,
+        model configuration and tokenizer state work without modification.
+        Tensor-dependent implementations touch the sentinel kwargs and select
+        the exact full-processing fallback. Models can override this method to
+        provide cheaper model-owned shape metadata.
+        """
+        if (
+            type(self).apply is not BaseMultiModalProcessor.apply
+            and "_apply_routing_metadata" not in type(self).__dict__
+        ):
+            # A custom apply() may rewrite prompt IDs, hashes, or placeholders
+            # outside the PromptUpdate machinery. It must implement a
+            # model-owned routing method rather than opt into generic behavior.
+            return None
+        if (
+            type(self)._maybe_apply_prompt_updates
+            is not BaseMultiModalProcessor._maybe_apply_prompt_updates
+        ):
+            # A custom finalization hook may intentionally validate already
+            # inserted placeholders instead of applying the declared updates.
+            # The generic routing path calls _apply_prompt_updates directly,
+            # so it cannot preserve that behavior without a model-owned
+            # _apply_routing_metadata implementation.
+            return None
+
+        with timing_ctx.record("routing_metadata_hashes"):
+            mm_hashes = self._get_mm_hashes(inputs)
+        mm_prompt_updates = self._get_mm_prompt_updates(
+            inputs.mm_data_items,
+            inputs.hf_processor_mm_kwargs,
+            _RoutingMetadataKwargs(),
+        )
+        return MultiModalProcessingResult(
+            prompt_ids=self._postprocess_prompt(inputs.prompt),
+            kwargs=MultiModalKwargsItems({}),
+            hashes=mm_hashes,
+            prompt_updates=mm_prompt_updates,
         )
 
     def _get_cache_missing_processor_kwargs(
@@ -1846,9 +1951,75 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             mm_placeholders=mm_placeholder_ranges,
         )
 
+    def apply_routing_metadata(
+        self,
+        inputs: ProcessorInputs,
+        timing_ctx: TimingContext,
+    ) -> MultiModalInput:
+        """Return exact token IDs, hashes and placeholders for routing.
+
+        The fast path deliberately omits generation-ready multimodal kwargs.
+        Processors without an exact metadata implementation transparently use
+        ``apply`` so precise routing never substitutes an estimate.
+        """
+        try:
+            mm_res = self._apply_routing_metadata(inputs, timing_ctx)
+        except _RoutingMetadataRequiresFullProcessing:
+            timing_ctx.mark("routing_metadata_fallback")
+            logger.debug(
+                "Routing metadata for %s requires full multimodal processing",
+                type(self).__name__,
+            )
+            return self.apply(inputs, timing_ctx)
+
+        if mm_res is None:
+            timing_ctx.mark("routing_metadata_fallback")
+            return self.apply(inputs, timing_ctx)
+
+        mm_item_counts = inputs.mm_data_items.get_all_counts()
+        try:
+            self._validate_mm_updates(mm_res.prompt_updates, mm_item_counts)
+
+            with timing_ctx.record("routing_metadata_prompt_updates"):
+                prompt_ids, mm_placeholders = self._apply_prompt_updates(
+                    mm_res.prompt_ids,
+                    mm_res.prompt_updates,
+                )
+        except _RoutingMetadataRequiresFullProcessing:
+            timing_ctx.mark("routing_metadata_fallback")
+            logger.debug(
+                "Routing metadata for %s requires full multimodal processing",
+                type(self).__name__,
+            )
+            return self.apply(inputs, timing_ctx)
+
+        timing_ctx.mark("routing_metadata_fast_path")
+        self._validate_mm_placeholders(mm_placeholders, mm_item_counts)
+        mm_placeholder_ranges = {
+            modality: [item.to_range() for item in placeholders]
+            for modality, placeholders in mm_placeholders.items()
+        }
+
+        return mm_input(
+            prompt_token_ids=prompt_ids,
+            mm_kwargs=MultiModalKwargsItems({}),
+            mm_hashes=mm_res.hashes,
+            mm_placeholders=mm_placeholder_ranges,
+        )
+
 
 class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
     skip_decoder_start_token: bool = False
+
+    def _apply_routing_metadata(
+        self,
+        inputs: ProcessorInputs,
+        timing_ctx: TimingContext,
+    ) -> MultiModalProcessingResult | None:
+        # Encoder-decoder processors reshape the complete engine input in
+        # ``apply``; keep their exact existing path until a metadata result can
+        # represent both encoder and decoder prompts.
+        return None
 
     @abstractmethod
     def create_encoder_prompt(

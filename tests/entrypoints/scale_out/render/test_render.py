@@ -85,7 +85,10 @@ def test_responses_render_route_documents_not_implemented():
 
 @pytest.mark.asyncio
 @pytest.mark.skip_global_cleanup
-async def test_render_responses_returns_generate_request_without_stored_state():
+@pytest.mark.parametrize("return_mm_kwargs", [True, False])
+async def test_render_responses_returns_generate_request_without_stored_state(
+    return_mm_kwargs,
+):
     serving = _build_serving_render()
     serving.online_renderer.render_responses = AsyncMock(
         return_value=MagicMock(
@@ -102,6 +105,7 @@ async def test_render_responses_returns_generate_request_without_stored_state():
         priority=3,
         kv_transfer_params={"do_remote_prefill": True},
         ec_transfer_params={"remote": True},
+        return_mm_kwargs=return_mm_kwargs,
     )
 
     response = await serving.render_responses_request(request)
@@ -121,6 +125,7 @@ async def test_render_responses_returns_generate_request_without_stored_state():
         previous_response_outputs=None,
         tool_server=serving.tool_server,
         skip_mm_cache=True,
+        routing_metadata_only=not return_mm_kwargs,
     )
 
 

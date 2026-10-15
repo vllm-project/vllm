@@ -45,7 +45,15 @@ from vllm.model_executor.models.vision import (
     is_vit_use_data_parallel,
 )
 from vllm.models.common.ops import fused_q_kv_rmsnorm
-from vllm.multimodal.parse import ImageSize, MultiModalDataItems
+from vllm.multimodal.inputs import MultiModalKwargsItems
+from vllm.multimodal.parse import ImageProcessorItems, ImageSize, MultiModalDataItems
+from vllm.multimodal.processing import (
+    MultiModalProcessingResult,
+    ProcessorInputs,
+    PromptReplacement,
+    TimingContext,
+    cached_encode,
+)
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
@@ -629,6 +637,8 @@ class Glm5NextProcessingInfo(Glm4vProcessingInfo):
     inherited Glm4v ``size.longest_edge`` path does not apply.
     """
 
+    _supports_routing_metadata_image_fast_path = True
+
     def get_hf_processor(self, **kwargs: object):
         processor = super().get_hf_processor(**kwargs)
         # Cap video inputs to keep encoder profiling from starving the KV cache.
@@ -824,6 +834,79 @@ class Glm5NextMultiModalProcessor(Glm4vMultiModalProcessor):
     prompt-update machinery — the inherited ``_get_prompt_updates`` builds
     the replacement content and the placeholder scan validates against
     exactly that."""
+
+    _supports_routing_metadata_image_fast_path = True
+    _routing_metadata_processing_info_type = Glm5NextProcessingInfo
+
+    def _apply_routing_metadata(
+        self,
+        inputs: ProcessorInputs,
+        timing_ctx: TimingContext,
+    ) -> MultiModalProcessingResult | None:
+        if not (
+            type(self).__dict__.get(
+                "_supports_routing_metadata_image_fast_path",
+                False,
+            )
+            and type(self.info).__dict__.get(
+                "_supports_routing_metadata_image_fast_path",
+                False,
+            )
+            and type(self.info)
+            is type(self).__dict__.get("_routing_metadata_processing_info_type")
+        ):
+            return None
+        if set(inputs.mm_data_items) != {"image"}:
+            return None
+        image_items = inputs.mm_data_items.get("image")
+        if not isinstance(image_items, ImageProcessorItems):
+            return None
+
+        hf_kwargs = inputs.hf_processor_mm_kwargs
+        hf_processor = self.info.get_hf_processor(**hf_kwargs)
+        tokenizer = self.info.get_tokenizer()
+        image_token_id = hf_processor.image_token_id
+        max_image_pixels = hf_kwargs.get("max_pixels")
+        if max_image_pixels is None:
+            max_image_pixels = self.info._get_image_max_pixels()
+
+        with timing_ctx.record("routing_metadata_item_shapes"):
+            token_counts = [
+                self.info._get_vision_info(
+                    image_width=size.width,
+                    image_height=size.height,
+                    num_frames=1,
+                    max_image_pixels=int(max_image_pixels),
+                )[1]
+                for size in (
+                    image_items.get_image_size(i) for i in range(len(image_items))
+                )
+            ]
+
+        def image_replacement(item_idx: int) -> list[int]:
+            return [image_token_id] * token_counts[item_idx]
+
+        with timing_ctx.record("routing_metadata_hashes"):
+            mm_hashes = self._get_mm_hashes(inputs)
+
+        prompt_updates = self._bind_and_group_updates(
+            [
+                PromptReplacement(
+                    modality="image",
+                    target=cached_encode(
+                        tokenizer, hf_processor.image_token, add_special_tokens=False
+                    ),
+                    replacement=image_replacement,
+                )
+            ],
+            inputs.mm_data_items.get_all_counts(),
+        )
+        return MultiModalProcessingResult(
+            prompt_ids=self._postprocess_prompt(inputs.prompt),
+            kwargs=MultiModalKwargsItems({}),
+            hashes=mm_hashes,
+            prompt_updates=prompt_updates,
+        )
 
     def _hf_processor_applies_updates(
         self,
