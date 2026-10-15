@@ -360,7 +360,7 @@ def _mxfp8_record_reference(
 @pytest.mark.parametrize("compress_ratio", [1, 2])
 def test_v41_rope_insert_mxfp8_record(compress_ratio: int):
     """The 528-byte V4.1 record quantizes the RoPE dims instead of keeping them
-    in bf16, so a page is [block_size x 512 fp8][block_size x 16 UE8M0].
+    in bf16, so a token is [512 fp8][16 UE8M0].
 
     Byte-exact against the reference quantizer, including the rows and page
     padding the kernel must leave alone.
@@ -398,9 +398,8 @@ def test_v41_rope_insert_mxfp8_record(compress_ratio: int):
         values, scales = _mxfp8_record_reference(
             latent[t], cos_sin[pos // compress_ratio * compress_ratio]
         )
-        expected[page, row * 512 : (row + 1) * 512] = values
-        scale_offset = cache_block * 512 + row * 16
-        expected[page, scale_offset : scale_offset + 16] = scales
+        expected[page, row * 528 : row * 528 + 512] = values
+        expected[page, row * 528 + 512 : (row + 1) * 528] = scales
 
     torch.testing.assert_close(cache_backing, expected, rtol=0, atol=0)
 
@@ -510,14 +509,13 @@ def test_v41_mxfp8_cache_round_trip():
         values, scales = _ue8m0_reference(k[t].float(), 32, 448.0)
         page, row = divmod(t, block_size)
         torch.testing.assert_close(
-            cache[page, row * 512 : (row + 1) * 512],
+            cache[page, row * 528 : row * 528 + 512],
             values.view(torch.uint8),
             rtol=0,
             atol=0,
         )
-        scale_offset = block_size * 512 + row * 16
         torch.testing.assert_close(
-            cache[page, scale_offset : scale_offset + 16],
+            cache[page, row * 528 + 512 : (row + 1) * 528],
             (scales.log2() + 127).to(torch.uint8),
             rtol=0,
             atol=0,
@@ -564,7 +562,8 @@ def _decode_nvfp4_row(packed: torch.Tensor, scales: torch.Tensor) -> torch.Tenso
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
 @pytest.mark.parametrize("compress_ratio", [1, 2])
 def test_v41_rope_insert_nvfp4_record(compress_ratio: int):
-    """The 288-byte V4.1 NVFP4 record: 256 B of e2m1 pairs then 32 e4m3 scales.
+    """The 288-byte V4.1 NVFP4 record: 256 B of e2m1 pairs then 32 e4m3 scales
+    per token.
 
     Scales are byte-exact against the reference (``amax / 6`` clamped to the
     e4m3 range); values are checked as round-to-nearest on the e2m1 grid, whose
@@ -604,17 +603,13 @@ def test_v41_rope_insert_nvfp4_record(compress_ratio: int):
         amax = rotated.view(32, 16).abs().amax(-1)
         scale = (amax / 6.0).clamp(2.0**-9, 448.0).to(torch.float8_e4m3fn)
 
-        got_scales = cache_backing[page, cache_block * 256 + row * 32 :][:32]
+        record = cache_backing[page, row * 288 : (row + 1) * 288]
+        got_scales = record[256:]
         torch.testing.assert_close(got_scales, scale.view(torch.uint8), rtol=0, atol=0)
-        decoded = _decode_nvfp4_row(
-            cache_backing[page, row * 256 : (row + 1) * 256], got_scales
-        )
+        decoded = _decode_nvfp4_row(record[:256], got_scales)
         step = scale.float().repeat_interleave(16)
         assert ((decoded - rotated).abs() <= step).all()
-        untouched[page, row * 256 : (row + 1) * 256] = cache_backing[
-            page, row * 256 : (row + 1) * 256
-        ]
-        untouched[page, cache_block * 256 + row * 32 :][:32] = got_scales
+        untouched[page, row * 288 : (row + 1) * 288] = record
     # Rows the kernel must not have touched, page padding included.
     torch.testing.assert_close(cache_backing, untouched, rtol=0, atol=0)
 
@@ -670,10 +665,8 @@ def test_v41_nvfp4_gather_matches_insert(num_reqs, num_tokens, partial):
             offset=offset,
         )
 
-    expected = _decode_nvfp4_row(
-        backing[:, : block_size * 256].reshape(-1, 256),
-        backing[:, block_size * 256 : block_size * 288].reshape(-1, 32),
-    )
+    records = backing[:, : block_size * 288].reshape(-1, 288)
+    expected = _decode_nvfp4_row(records[:, :256], records[:, 256:])
 
     def check(shorter_by):
         assert (storage[:, num_tokens + offset :] == -123).all()
@@ -700,6 +693,72 @@ def test_v41_nvfp4_gather_matches_insert(num_reqs, num_tokens, partial):
         gather_lens.sub_(1)
     graph.replay()
     check(1)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="The V4.1 records are SM100-only",
+)
+@pytest.mark.parametrize("record", ["swa_fp8", "compressed_fp8", "compressed_fp4"])
+def test_v41_cache_writers_match_flashmla_decode(record: str):
+    """FlashMLA and vLLM's gathers read back the token a V4.1 writer put mid
+    page in a padded block, so all agree on the interleaved record layout."""
+    import vllm.v1.attention.ops.flashmla as fm
+    from vllm.models.deepseek_v41.common.ops.cache_utils import (
+        dequantize_and_gather_k_cache,
+        dequantize_and_gather_k_cache_triton,
+    )
+    from vllm.models.deepseek_v41.common.ops.fused_compress_quant_cache import (
+        rope_quant_insert,
+    )
+
+    device, block_size, topk = "cuda", 64, 64
+    slot = block_size + 37
+    bytes_per_token = 288 if record == "compressed_fp4" else 528
+    torch.manual_seed(0)
+    kv = torch.randn(1, 512, dtype=torch.bfloat16, device=device)
+    positions = torch.tensor([slot], device=device)
+    # cos = 1, sin = 0: RoPE is the identity, so the cache should hold `kv`.
+    cos_sin = torch.zeros(slot + 1, 64, device=device)
+    cos_sin[:, :32] = 1
+    # Padded like a packed block: a multiple of the record and of 512 B.
+    cache = torch.zeros(2, block_size + 32, bytes_per_token, dtype=torch.uint8)
+    cache = cache.to(device)[:, :block_size]
+    if record == "swa_fp8":
+        torch.ops._C.fused_deepseek_v4_kv_rope_insert(
+            kv, cache, positions, positions, cos_sin, block_size, None, True
+        )
+    else:
+        rope_quant_insert(kv, positions, cos_sin, cache, positions, 1)
+
+    indices = torch.full((1, 1, topk), -1, dtype=torch.int32, device=device)
+    indices[..., 0] = slot
+    extra = None
+    if record == "compressed_fp4":
+        cache, extra = torch.zeros(2, block_size, 528).to(cache), cache
+    out, _ = fm.flash_mla_with_kvcache(
+        q=torch.randn(1, 1, 64, 512, dtype=torch.bfloat16, device=device),
+        k_cache=cache.unsqueeze(2),
+        block_table=None,
+        cache_seqlens=None,
+        head_dim_v=512,
+        tile_scheduler_metadata=fm.get_mla_metadata()[0],
+        is_fp8_kvcache=True,
+        indices=indices if extra is None else torch.full_like(indices, -1),
+        extra_k_cache=None if extra is None else extra.unsqueeze(2),
+        extra_indices_in_kvcache=None if extra is None else indices,
+    )
+    for gather in (dequantize_and_gather_k_cache, dequantize_and_gather_k_cache_triton):
+        rows = torch.zeros(1, slot + 1, 512, dtype=torch.bfloat16, device=device)
+        block_table = torch.arange(2, dtype=torch.int32, device=device)[None]
+        seq_lens = torch.tensor([slot + 1], dtype=torch.int32, device=device)
+        k_cache = cache if extra is None else extra
+        gather(rows, k_cache, seq_lens, None, block_table, block_size, offset=0)
+        torch.testing.assert_close(
+            out[0, 0], rows[0, slot].expand(64, -1), rtol=0, atol=0
+        )
+    cos = torch.nn.functional.cosine_similarity(rows[0, slot].float(), kv[0].float(), 0)
+    assert cos > (0.98 if extra is not None else 0.999)
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")

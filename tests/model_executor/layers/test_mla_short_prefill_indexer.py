@@ -830,15 +830,19 @@ def test_sparse_mqa_logits_prefill_matches_dense_masked(capture: bool):
     _assert_same_selection(dense, out, ref)
 
 
-def _build_fp4_paged_cache(req_lens: torch.Tensor, page_kv: int, head_dim: int):
+def _build_fp4_paged_cache(
+    req_lens: torch.Tensor, page_kv: int, head_dim: int, page_pad: int = 0
+):
     """MXFP4 paged cache in DeepGEMM's fused layout: per page, all tokens'
-    fp4 data first, then their packed UE8M0 scales."""
+    fp4 data first, then their packed UE8M0 scales; ``page_pad`` bytes pad
+    each page like the other layers' pages in a packed block."""
     device = req_lens.device
     pages_per = (req_lens + page_kv - 1) // page_kv
     num_pages, max_pages = int(pages_per.sum()), int(pages_per.max())
+    head_bytes = head_dim // 2 + 4
     kv_cache = torch.zeros(
-        num_pages, page_kv, 1, head_dim // 2 + 4, dtype=torch.uint8, device=device
-    )
+        num_pages, page_kv * head_bytes + page_pad, dtype=torch.uint8, device=device
+    )[:, : page_kv * head_bytes].view(num_pages, page_kv, 1, head_bytes)
     block_table = torch.zeros(
         len(req_lens), max_pages, dtype=torch.int32, device=device
     )
@@ -864,7 +868,10 @@ def _build_fp4_paged_cache(req_lens: torch.Tensor, page_kv: int, head_dim: int):
 
 @pytest.mark.parametrize("next_n", [1, 2])
 @pytest.mark.parametrize("capture", [False, True])
-def test_sparse_mqa_logits_paged_matches_dense_masked(next_n: int, capture: bool):
+@pytest.mark.parametrize("page_pad", [0, 256])
+def test_sparse_mqa_logits_paged_matches_dense_masked(
+    next_n: int, capture: bool, page_pad: int
+):
     """Paged sparse-MQA decode selects exactly the values ``torch.topk`` picks
     from the dense bf16 masked logits, incl. MTP rows (next_n > 1 flattened to
     one query row each), CUDA graph capture/replay and schedule reuse by a
@@ -886,8 +893,10 @@ def test_sparse_mqa_logits_paged_matches_dense_masked(next_n: int, capture: bool
         .clamp(min=0)
         .to(torch.int32)
     )
-    kv_cache, block_table = _build_fp4_paged_cache(req_lens, page_kv, head_dim)
-    assert kv_cache.stride(0) % 512 == 0  # the paged sparse kernel requires it
+    kv_cache, block_table = _build_fp4_paged_cache(
+        req_lens, page_kv, head_dim, page_pad
+    )
+    assert kv_cache.stride(0) % 512 == page_pad  # padded pages are not 512B
 
     q_fp, q_sf = _quant_fp4(
         torch.randn(rows * num_heads, head_dim, device="cuda", dtype=torch.bfloat16)
