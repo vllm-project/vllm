@@ -784,6 +784,10 @@ class OutputProcessor:
                 # if required.
                 req_state.logprobs_processor.update_from_output(engine_core_output)
 
+            streaming_chunk_boundary = req_state.streaming_input and (
+                finish_reason not in (FinishReason.ABORT, FinishReason.ERROR)
+            )
+
             # 4) Create and handle RequestOutput objects.
             if request_output := req_state.make_request_output(
                 new_token_ids,
@@ -794,7 +798,7 @@ class OutputProcessor:
                 ec_transfer_params,
                 error=request_error,
             ):
-                if req_state.streaming_input:
+                if streaming_chunk_boundary:
                     request_output.finished = False
 
                 if req_state.queue is not None:
@@ -806,7 +810,7 @@ class OutputProcessor:
 
             # Free completed requests.
             if finish_reason is not None:
-                if req_state.streaming_input:
+                if streaming_chunk_boundary:
                     if req_state.input_chunk_queue:
                         update = req_state.input_chunk_queue.popleft()
                         req_state.apply_streaming_update(update)
@@ -814,9 +818,10 @@ class OutputProcessor:
                         req_state.input_chunk_queue = None
                 else:
                     self._finish_request(req_state)
-                    if not engine_core_output.finished:
-                        # If req not finished in EngineCore, but Detokenizer
-                        # detected stop string, abort needed in EngineCore.
+                    if req_state.streaming_input or not engine_core_output.finished:
+                        # EngineCore may still have the request: a stop string
+                        # was detected here, or an in-flight streaming-input
+                        # chunk may re-create the session.
                         reqs_to_abort.append(req_id)
 
                     # Track per-request stats
