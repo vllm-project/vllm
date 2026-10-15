@@ -2,10 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from vllm.v1.core.sched.output import ScheduledEncoderInputStats, SchedulerOutput
-from vllm.v1.engine import EngineCoreOutputs, FinishReason
+from vllm.v1.engine import EngineCoreOutput, EngineCoreOutputs, FinishReason
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.metrics.stats import (
     IterationStats,
+    LoRARequestStates,
     PrefillStats,
     PrefixCacheStats,
     PromptTokenStats,
@@ -381,3 +382,22 @@ def test_prompt_token_stats_full_external_transfer_recompute():
     assert stats.external_kv_transfer == 999
     assert stats.cached_tokens == 999
     assert stats.total == 1000
+
+
+def test_nan_metrics_follow_output_without_legacy_env(monkeypatch):
+    """Engine-argument detection must count NaNs even with the legacy flag off."""
+    monkeypatch.setenv("VLLM_COMPUTE_NANS_IN_LOGITS", "0")
+    stats = IterationStats()
+    request_stats = RequestStateStats(arrival_time=0.0)
+    for num_nans, corrupted in [(0, False), (3, True), (0, True)]:
+        stats.update_from_output(
+            EngineCoreOutput(
+                request_id="request", new_token_ids=[1], num_nans_in_logits=num_nans
+            ),
+            engine_core_timestamp=1.0,
+            is_prefilling=False,
+            req_stats=request_stats,
+            lora_states=LoRARequestStates(),
+            lora_name=None,
+        )
+        assert request_stats.is_corrupted is corrupted
