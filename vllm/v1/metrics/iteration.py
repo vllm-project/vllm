@@ -18,7 +18,11 @@ if TYPE_CHECKING:
     from vllm.v1.outputs import ModelRunnerOutput
 
 ITERATION_TIMING_SCOPE = "model_step_cuda"
+# Retry tail collection when no later model output can carry ready timings.
+# This is a CPU wakeup/RPC cadence, not a GPU sampling or measurement interval.
 ITERATION_TIMING_POLL_INTERVAL = 0.005
+# Best-effort budget for collecting pending timings before executor teardown;
+# it does not bound total engine shutdown or guarantee frontend delivery.
 ITERATION_TIMING_SHUTDOWN_TIMEOUT = 1.0
 
 
@@ -48,10 +52,10 @@ class IterationMetricsCollector:
         self._pending[iteration_id] = _PendingIteration(
             SchedulerIterationDetails(
                 iteration_index=iteration_id,
-                num_ctx_requests=counts.num_ctx_requests,
-                num_ctx_tokens=counts.num_ctx_tokens,
-                num_generation_requests=counts.num_generation_requests,
-                num_generation_tokens=counts.num_generation_tokens,
+                num_ctx_requests=counts.num_prefill_requests,
+                num_ctx_tokens=counts.num_prefill_tokens,
+                num_generation_requests=counts.num_decode_requests,
+                num_generation_tokens=counts.num_decode_tokens,
                 elapsed_ms=None,
                 num_encoder_inputs=counts.num_encoder_inputs,
                 num_encoder_output_tokens=counts.num_encoder_output_tokens,

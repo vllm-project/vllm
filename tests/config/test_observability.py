@@ -3,9 +3,16 @@
 """Tests for ObservabilityConfig validation."""
 
 import pytest
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 
 from vllm.config.observability import ObservabilityConfig
+
+
+def test_iteration_timing_is_not_a_constructor_option():
+    with pytest.raises(ValidationError, match="enable_iteration_timing"):
+        TypeAdapter(ObservabilityConfig).validate_python(
+            {"enable_iteration_timing": True}
+        )
 
 
 def test_custom_histogram_buckets_default_none():

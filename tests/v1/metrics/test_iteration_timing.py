@@ -76,16 +76,16 @@ def test_only_one_worker_per_replica_allocates_timing_events(monkeypatch):
         observability_config=SimpleNamespace(enable_iteration_timing=True),
         max_concurrent_batches=2,
         parallel_config=SimpleNamespace(
-            world_size=4,
+            world_size=8,
             tensor_parallel_size=2,
             prefill_context_parallel_size=2,
         ),
     )
     timers = [
         make_iteration_timer(config, is_iteration_output_rank(config, rank))
-        for rank in range(4)
+        for rank in range(8)
     ]
     assert sum(timer is not None for timer in timers) == 1
-    assert timers[0] is not None
+    assert timers[4] is not None
     assert factory.call_count == 6
     factory.return_value.record.assert_not_called()

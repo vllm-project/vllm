@@ -32,19 +32,16 @@ def make_iteration_details() -> SchedulerIterationDetails:
 def make_fake_engine(
     log_stats: bool = True, enable_iteration_timing: bool = False
 ) -> SimpleNamespace:
+    observability = ObservabilityConfig(enable_logging_iteration_details=True)
+    observability.enable_iteration_timing = enable_iteration_timing
     return SimpleNamespace(
         log_stats=log_stats,
-        vllm_config=SimpleNamespace(
-            observability_config=ObservabilityConfig(
-                enable_logging_iteration_details=True,
-                enable_iteration_timing=enable_iteration_timing,
-            )
-        ),
+        vllm_config=SimpleNamespace(observability_config=observability),
     )
 
 
 @pytest.mark.parametrize(
-    "logging,stats,mp,device,runner,pp,executor,required,expected",
+    "logging,stats,mp,device,runner,pp,executor,previously_enabled,expected",
     [
         (True, True, True, "cuda", "generate", 1, "uni", False, True),
         (False, True, True, "cuda", "generate", 1, "mp", False, False),
@@ -52,13 +49,22 @@ def make_fake_engine(
         (True, True, False, "cuda", "generate", 1, "uni", False, False),
         (True, True, True, "cpu", "generate", 1, "uni", False, False),
         (True, True, True, "cuda", "pooling", 1, "uni", False, False),
-        (True, True, True, "cuda", "generate", 2, "mp", False, False),
+        (True, True, True, "cuda", "generate", 2, "mp", False, True),
         (True, True, True, "cuda", "generate", 1, "ray", False, False),
-        (True, False, True, "cuda", "generate", 1, "mp", True, True),
+        (True, False, True, "cuda", "generate", 1, "mp", True, False),
     ],
 )
 def test_iteration_logging_enables_supported_timing_only(
-    logging, stats, mp, device, runner, pp, executor, required, expected, caplog
+    logging,
+    stats,
+    mp,
+    device,
+    runner,
+    pp,
+    executor,
+    previously_enabled,
+    expected,
+    caplog,
 ):
     config = VllmConfig()
     config.model_config = SimpleNamespace(runner_type=runner)
@@ -66,10 +72,11 @@ def test_iteration_logging_enables_supported_timing_only(
     config.parallel_config.pipeline_parallel_size = pp
     config.parallel_config.distributed_executor_backend = executor
     config.observability_config = ObservabilityConfig(
-        enable_logging_iteration_details=logging, enable_iteration_timing=required
+        enable_logging_iteration_details=logging
     )
+    config.observability_config.enable_iteration_timing = previously_enabled
 
-    config.maybe_enable_iteration_timing_for_logging(stats, mp)
+    config.resolve_iteration_timing(stats, mp)
 
     assert config.observability_config.enable_iteration_timing is expected
     if logging and stats and not expected:

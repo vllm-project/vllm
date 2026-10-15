@@ -23,11 +23,6 @@ from vllm.logger import init_logger
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-    from vllm.sequence import IntermediateTensors
-    from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
-    from vllm.v1.outputs import AsyncModelRunnerOutput, ModelRunnerOutput
-    from vllm.v1.worker.gpu.model_runner import GPUModelRunner as GPUModelRunnerV2
-    from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 logger = init_logger(__name__)
 
@@ -135,73 +130,6 @@ class IterationTimer:
         output = copy(output)
         output.iteration_timing_samples += ready
         return output
-
-
-def execute_model_with_timing(
-    model_runner: GPUModelRunner | GPUModelRunnerV2,
-    scheduler_output: SchedulerOutput,
-    intermediate_tensors: IntermediateTensors | None,
-) -> ModelRunnerOutput | AsyncModelRunnerOutput | IntermediateTensors | None:
-    timer = model_runner.iteration_timer
-    if timer is None:
-        return model_runner.execute_model(scheduler_output, intermediate_tensors)
-    timer.start(
-        scheduler_output.iteration_metrics_id
-        if scheduler_output.total_num_scheduled_tokens > 0
-        else None
-    )
-    try:
-        output = model_runner.execute_model(scheduler_output, intermediate_tensors)
-    except Exception:
-        timer.cancel()
-        raise
-    # A deferred step ends after sampling and speculative drafting.
-    if output is not None:
-        timer.finish()
-    return output
-
-
-def sample_tokens_with_timing(
-    model_runner: GPUModelRunner | GPUModelRunnerV2,
-    grammar_output: GrammarOutput | None,
-) -> ModelRunnerOutput | AsyncModelRunnerOutput:
-    timer = model_runner.iteration_timer
-    if timer is None:
-        return model_runner.sample_tokens(grammar_output)
-    try:
-        output = model_runner.sample_tokens(grammar_output)
-    except Exception:
-        timer.cancel()
-        raise
-    timer.finish()
-    return timer.drain_into(output)
-
-
-def execute_dummy_with_timing(
-    model_runner: GPUModelRunner | GPUModelRunnerV2,
-    iteration_id: int | None,
-    *,
-    randomize_inputs: bool,
-) -> tuple[tuple[int, float], ...] | None:
-    num_tokens = getattr(model_runner, "uniform_decode_query_len", 1)
-    timer = model_runner.iteration_timer
-    if iteration_id is None or timer is None:
-        model_runner._dummy_run(
-            num_tokens, uniform_decode=True, randomize_inputs=randomize_inputs
-        )
-        return None if iteration_id is None else ()
-    # Recycle old ready pairs before queuing the next dummy interval.
-    samples = timer.drain_samples()
-    timer.start(iteration_id)
-    try:
-        model_runner._dummy_run(
-            num_tokens, uniform_decode=True, randomize_inputs=randomize_inputs
-        )
-    except Exception:
-        timer.cancel()
-        raise
-    timer.finish()
-    return samples
 
 
 def make_iteration_timer(

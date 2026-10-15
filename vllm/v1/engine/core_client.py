@@ -100,14 +100,6 @@ class EngineCoreClient(ABC):
         log_stats: bool,
         renderer: BaseRenderer | None = None,
     ) -> "EngineCoreClient":
-        if (
-            not multiprocess_mode
-            and vllm_config.observability_config.enable_iteration_timing
-        ):
-            raise ValueError(
-                "Iteration GPU timing requires a multiprocessing EngineCore client "
-                "to deliver late timing records while the engine is idle."
-            )
         # renderer is passed through to the multiprocess clients, which start
         # the frontend MM warmup (renderer.start_mm_warmup_in_background) once
         # the engine-core processes have been forked, so warmup overlaps

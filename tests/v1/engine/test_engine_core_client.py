@@ -66,15 +66,6 @@ TEST_MODULE = "tests.v1.engine.test_engine_core_client"
 _REQUEST_COUNTER = 0
 
 
-@pytest.mark.skip_global_cleanup
-def test_iteration_timing_requires_multiprocessing_client():
-    config = SimpleNamespace(
-        observability_config=SimpleNamespace(enable_iteration_timing=True)
-    )
-    with pytest.raises(ValueError, match="requires a multiprocessing EngineCore"):
-        EngineCoreClient.make_client(False, False, config, object, False)
-
-
 def make_request(
     params: SamplingParams, prompt_tokens_ids: list[int] | None = None
 ) -> EngineCoreRequest:

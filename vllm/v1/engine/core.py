@@ -133,7 +133,7 @@ class EngineCore:
         load_general_plugins()
 
         self.vllm_config = vllm_config
-        vllm_config.maybe_enable_iteration_timing_for_logging(
+        vllm_config.resolve_iteration_timing(
             log_stats, multiprocess_mode=isinstance(self, EngineCoreProc)
         )
         if not vllm_config.parallel_config.data_parallel_rank_local:
@@ -625,10 +625,10 @@ class EngineCore:
             assert details is not None
             iteration_details = SchedulerIterationDetails(
                 iteration_index=iteration_index,
-                num_ctx_requests=details.num_ctx_requests,
-                num_ctx_tokens=details.num_ctx_tokens,
-                num_generation_requests=details.num_generation_requests,
-                num_generation_tokens=details.num_generation_tokens,
+                num_ctx_requests=details.num_prefill_requests,
+                num_ctx_tokens=details.num_prefill_tokens,
+                num_generation_requests=details.num_decode_requests,
+                num_generation_tokens=details.num_decode_tokens,
                 elapsed_ms=None,
                 num_encoder_inputs=details.num_encoder_inputs,
                 num_encoder_output_tokens=details.num_encoder_output_tokens,

@@ -201,23 +201,6 @@ class IterationDetails:
     num_encoder_inputs: int = 0
     num_encoder_output_tokens: int = 0
 
-    # Temporary aliases for existing EngineCore and worker profiler consumers.
-    @property
-    def num_ctx_requests(self) -> int:
-        return self.num_prefill_requests
-
-    @property
-    def num_ctx_tokens(self) -> int:
-        return self.num_prefill_tokens
-
-    @property
-    def num_generation_requests(self) -> int:
-        return self.num_decode_requests
-
-    @property
-    def num_generation_tokens(self) -> int:
-        return self.num_decode_tokens
-
 
 @dataclass
 class KVConnectorBlockState:

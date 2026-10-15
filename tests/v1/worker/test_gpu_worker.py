@@ -551,14 +551,21 @@ def test_iteration_timing_discards_failed_step_and_allows_next_step(
         event.synchronize.assert_not_called()
 
 
-@pytest.mark.parametrize("timed", [False, True])
-def test_dummy_iteration_recycles_old_timing_and_preserves_randomized_inputs(timed):
+@pytest.mark.parametrize(
+    "has_timer,has_iteration_id", [(True, False), (False, True), (True, True)]
+)
+def test_dummy_iteration_recycles_old_timing_and_preserves_randomized_inputs(
+    has_timer, has_iteration_id
+):
     milestones = []
     events = [Mock(), Mock(query=Mock(return_value=False))]
     events[0].record.side_effect = lambda: milestones.append("start")
     events[0].elapsed_time.return_value = 20.0
     events[1].record.side_effect = lambda: milestones.append("end")
-    timer = IterationTimer(1, event_factory=iter(events).__next__) if timed else None
+    timer = (
+        IterationTimer(1, event_factory=iter(events).__next__) if has_timer else None
+    )
+    timed = has_timer and has_iteration_id
 
     def dummy_run(num_tokens, *, uniform_decode, randomize_inputs):
         assert num_tokens == 4 and uniform_decode and randomize_inputs
@@ -574,18 +581,19 @@ def test_dummy_iteration_recycles_old_timing_and_preserves_randomized_inputs(tim
     )
     for iteration_id in range(3):
         samples = gpu_worker.Worker.execute_dummy_batch(
-            worker, iteration_id if timed else None
+            worker, iteration_id if has_iteration_id else None
         )
         if timed:
             assert samples == (() if iteration_id == 0 else ((iteration_id - 1, 0.02),))
             events[1].query.return_value = True
         else:
-            assert samples is None
+            assert samples == (() if has_iteration_id else None)
     if timed:
         assert milestones == ["start", "forward", "draft", "end"] * 3
         assert gpu_worker.Worker.poll_iteration_timing(worker) == ((2, 0.02),)
     else:
         assert milestones == ["forward", "draft"] * 3
+        events[1].query.assert_not_called()
     for event in events:
         event.synchronize.assert_not_called()
 

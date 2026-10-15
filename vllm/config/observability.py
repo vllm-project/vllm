@@ -101,9 +101,9 @@ class ObservabilityConfig:
     where supported. Unsupported configurations log counts without durations.
     Requires log statistics to be enabled."""
 
-    enable_iteration_timing: bool = False
-    """Internal timing state, enabled by iteration-metrics consumers.
-    Not exposed as a CLI argument; independent of console logging."""
+    enable_iteration_timing: bool = Field(default=False, init=False, repr=False)
+    """Effective timing state resolved before worker initialization.
+    Not a constructor or CLI option; independent of console logging."""
 
     jit_monitor_mode: Literal["warn", "error"] = "warn"
     """How to handle post-warmup JIT compilation events."""

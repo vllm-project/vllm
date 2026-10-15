@@ -5,7 +5,7 @@
 import gc
 import os
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from datetime import timedelta
 from fnmatch import filter as fnmatch_filter
@@ -93,11 +93,9 @@ from vllm.v1.attention.backends.utils import record_kv_cache_layout
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.metrics.iteration_timing import (
-    execute_dummy_with_timing,
-    execute_model_with_timing,
+    IterationTimer,
     is_iteration_output_rank,
     make_iteration_timer,
-    sample_tokens_with_timing,
 )
 from vllm.v1.outputs import (
     AsyncModelRunnerOutput,
@@ -119,6 +117,36 @@ from .gpu.warmup import warmup_kernels
 from .utils import request_memory
 
 logger = init_logger(__name__)
+
+
+@contextmanager
+def _cancel_iteration_timing_on_error(
+    timer: IterationTimer | None,
+) -> Iterator[None]:
+    try:
+        yield
+    except Exception:
+        if timer is not None:
+            timer.cancel()
+        raise
+
+
+@contextmanager
+def _time_dummy_batch(
+    timer: IterationTimer | None, iteration_id: int | None
+) -> Iterator[tuple[tuple[int, float], ...] | None]:
+    if iteration_id is None or timer is None:
+        yield None if iteration_id is None else ()
+        return
+    # Recycle old ready pairs before queuing the next dummy interval.
+    samples = timer.drain_samples()
+    timer.start(iteration_id)
+    try:
+        yield samples
+    except Exception:
+        timer.cancel()
+        raise
+    timer.finish()
 
 
 def _num_workspace_lanes(vllm_config: VllmConfig, use_v2_model_runner: bool) -> int:
@@ -1260,9 +1288,9 @@ class Worker(WorkerBase):
                     "execute_",
                     str(total_scheduled_tokens),
                     "_context_",
-                    str(iteration_details.num_ctx_requests),
+                    str(iteration_details.num_prefill_requests),
                     "(sq",
-                    str(iteration_details.num_ctx_tokens),
+                    str(iteration_details.num_prefill_tokens),
                     "sk",
                     str(ctx_seq_len_sum),
                     "sqsq",
@@ -1270,9 +1298,9 @@ class Worker(WorkerBase):
                     "sqsk",
                     str(ctx_qk_compute),
                     ")_generation_",
-                    str(iteration_details.num_generation_requests),
+                    str(iteration_details.num_decode_requests),
                     "(sq",
-                    str(iteration_details.num_generation_tokens),
+                    str(iteration_details.num_decode_tokens),
                     "sk",
                     str(gen_seq_len_sum),
                     "sqsq",
@@ -1286,14 +1314,14 @@ class Worker(WorkerBase):
             annotation = "".join(
                 [
                     "execute_context_",
-                    str(iteration_details.num_ctx_requests),
+                    str(iteration_details.num_prefill_requests),
                     "(",
-                    str(iteration_details.num_ctx_tokens),
+                    str(iteration_details.num_prefill_tokens),
                     ")",
                     "_generation_",
-                    str(iteration_details.num_generation_requests),
+                    str(iteration_details.num_decode_requests),
                     "(",
-                    str(iteration_details.num_generation_tokens),
+                    str(iteration_details.num_decode_tokens),
                     ")",
                 ]
             )
@@ -1304,7 +1332,13 @@ class Worker(WorkerBase):
     def sample_tokens(
         self, grammar_output: "GrammarOutput | None"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput:
-        return sample_tokens_with_timing(self.model_runner, grammar_output)
+        timer = self.model_runner.iteration_timer
+        with _cancel_iteration_timing_on_error(timer):
+            output = self.model_runner.sample_tokens(grammar_output)
+        if timer is not None:
+            timer.finish()
+            output = timer.drain_into(output)
+        return output
 
     @torch.inference_mode()
     @with_gpu_sync_check
@@ -1334,9 +1368,18 @@ class Worker(WorkerBase):
             )
 
         with self.annotate_profile(scheduler_output):
-            output = execute_model_with_timing(
-                self.model_runner, scheduler_output, intermediate_tensors
-            )
+            timer = self.model_runner.iteration_timer
+            if timer is not None:
+                timer.start(
+                    scheduler_output.iteration_metrics_id if forward_pass else None
+                )
+            with _cancel_iteration_timing_on_error(timer):
+                output = self.model_runner.execute_model(
+                    scheduler_output, intermediate_tensors
+                )
+            # A deferred step ends after sampling and speculative drafting.
+            if timer is not None and output is not None:
+                timer.finish()
             if (
                 self.use_v2_model_runner
                 and self.model_runner.is_pooling_model
@@ -1346,7 +1389,6 @@ class Worker(WorkerBase):
             if isinstance(
                 output, ModelRunnerOutput | AsyncModelRunnerOutput | NoneType
             ):
-                timer = self.model_runner.iteration_timer
                 if timer is not None and isinstance(output, ModelRunnerOutput):
                     output = timer.drain_into(output)
                 return output
@@ -1448,11 +1490,15 @@ class Worker(WorkerBase):
     def execute_dummy_batch(
         self, iteration_metrics_id: int | None = None
     ) -> tuple[tuple[int, float], ...] | None:
-        return execute_dummy_with_timing(
-            self.model_runner,
-            iteration_metrics_id,
-            randomize_inputs=self.randomize_dummy_inputs,
-        )
+        num_tokens = getattr(self.model_runner, "uniform_decode_query_len", 1)
+        randomize_inputs = self.randomize_dummy_inputs
+        with _time_dummy_batch(
+            self.model_runner.iteration_timer, iteration_metrics_id
+        ) as samples:
+            self.model_runner._dummy_run(
+                num_tokens, uniform_decode=True, randomize_inputs=randomize_inputs
+            )
+        return samples
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_runner.add_lora(lora_request)
