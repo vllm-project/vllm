@@ -167,7 +167,7 @@ async def test_fetch_image_local_files(image_url: str):
             await local_connector.fetch_image_async(
                 f"file://{temp_dir}/../{os.path.basename(image_url)}"
             )
-        with pytest.raises(RuntimeError, match="Cannot load local files"):
+        with pytest.raises(ValueError, match="Cannot load local files"):
             await connector.fetch_image_async(
                 f"file://{temp_dir}/../{os.path.basename(image_url)}"
             )
@@ -176,7 +176,7 @@ async def test_fetch_image_local_files(image_url: str):
             local_connector.fetch_image(
                 f"file://{temp_dir}/../{os.path.basename(image_url)}"
             )
-        with pytest.raises(RuntimeError, match="Cannot load local files"):
+        with pytest.raises(ValueError, match="Cannot load local files"):
             connector.fetch_image(f"file://{temp_dir}/../{os.path.basename(image_url)}")
 
 
