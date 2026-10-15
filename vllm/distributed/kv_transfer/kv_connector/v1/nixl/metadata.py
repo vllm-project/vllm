@@ -264,6 +264,9 @@ class ReqMeta:
     # Worker-only, per-region physical pages to zero after a successful pull.
     # None selects group-based completion; empty lists mean no zeroing.
     region_blocks_to_zero: BlockIds | None = None
+    # Worker-only, per-group remote-sized sub-blocks a pull covers from the
+    # start of each local group. None derives it from the block counts.
+    covered_sub_blocks: list[int] | None = None
 
 
 class NixlConnectorMetadata(KVConnectorMetadata):

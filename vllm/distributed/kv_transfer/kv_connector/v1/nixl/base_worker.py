@@ -3296,23 +3296,14 @@ class NixlBaseConnectorWorker:
                         continue
                     # Number of remote-sized sub-blocks the transfer covered;
                     # everything past this was clipped and must be zeroed.
-                    covered_sub_blocks = min(
-                        len(local_group) * block_size_ratio,
-                        len(meta.remote.block_ids[g]),
+                    covered_sub_blocks = (
+                        meta.covered_sub_blocks[g]
+                        if meta.covered_sub_blocks is not None
+                        else min(
+                            len(local_group) * block_size_ratio,
+                            len(meta.remote.block_ids[g]),
+                        )
                     )
-                    if (
-                        (block_size_ratio > 1 or hetero_ppl)
-                        and meta.remote.num_tokens is not None
-                        and self.dcp_size == remote_info.remote_dcp_size == 1
-                    ):
-                        # The read paired the lists by their last token, so
-                        # the local padding past it went unwritten.
-                        local_padding, _ = self._padding_sub_blocks(
-                            g, meta.remote.num_tokens, block_size_ratio
-                        )
-                        covered_sub_blocks = (
-                            len(local_group) * block_size_ratio - local_padding
-                        )
                     block_ids_for_blocksize_post_process[block_size_ratio].append(
                         (g, local_group, covered_sub_blocks)
                     )
@@ -3588,31 +3579,11 @@ class NixlBaseConnectorWorker:
 
         return mapped_2d.flatten().astype(np.int64)
 
-    def _padding_sub_blocks(
-        self,
-        group: int,
-        num_tokens: int,
-        block_size_ratio: int,
-        remote_physical_per_logical: int = 1,
-    ) -> tuple[int, int]:
-        """Remote-block-sized sub-blocks past the last of ``num_tokens`` tokens
-        at the end of the local and the remote block list of transfer group
-        ``group``, as each side allocates whole logical blocks."""
-        local_per_block = self._physical_blocks_per_logical_kv_block * block_size_ratio
-        spec = self.kv_cache_config.transfer_groups[group].kv_cache_spec
-        num_sub_blocks = cdiv(num_tokens, spec.block_size // local_per_block)
-        return (
-            -num_sub_blocks % local_per_block,
-            -num_sub_blocks % remote_physical_per_logical,
-        )
-
     def _map_block_ids_for_block_size_ratio(
         self,
         local_block_ids: BlockIds,
         remote_block_ids: BlockIds,
         block_size_ratio: int,
-        num_tokens: int | None = None,
-        remote_physical_per_logical: int = 1,
     ) -> tuple[BlockIds, BlockIds]:
         """Map attention-group block ids to remote-block granularity.
 
@@ -3626,10 +3597,6 @@ class NixlBaseConnectorWorker:
         [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
         Local (decode) block ids with block_size 16: [1, 2, 3] expand to
         [4, 5, ..., 15], then clip to the first 10 to pair 1:1 with remote.
-
-        Sliding-window clipping and local prefix hits start the two lists at
-        different tokens. Given the request's ``num_tokens``, both lists are
-        cut at its last token instead and paired from there backwards.
         """
         mapped_local: list[list[int]] = []
         mapped_remote: list[list[int]] = []
@@ -3642,16 +3609,7 @@ class NixlBaseConnectorWorker:
             mapped = self.get_mapped_blocks(
                 np.asarray(local_group), block_size_ratio
             ).tolist()
-            if num_tokens is not None:
-                local_padding, remote_padding = self._padding_sub_blocks(
-                    i, num_tokens, block_size_ratio, remote_physical_per_logical
-                )
-                mapped = mapped[: len(mapped) - local_padding]
-                remote_group = remote_group[: len(remote_group) - remote_padding]
-                num_pairs = min(len(mapped), len(remote_group))
-                mapped = mapped[len(mapped) - num_pairs :]
-                remote_group = remote_group[len(remote_group) - num_pairs :]
-            elif len(mapped) > len(remote_group):
+            if len(mapped) > len(remote_group):
                 mapped = mapped[: len(remote_group)]
             mapped_local.append(mapped)
             mapped_remote.append(list(remote_group))

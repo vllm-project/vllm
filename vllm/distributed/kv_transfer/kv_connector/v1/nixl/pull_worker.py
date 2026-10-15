@@ -18,6 +18,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
     ReadSpec,
     _is_attention_spec,
+    _is_ssm_spec,
 )
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
@@ -187,6 +188,14 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         local_block_ids = meta.local_physical_block_ids
         remote_region_groups = self.dst_region_group_ids[engine_id]
         local_region_groups = self.region_group_ids or remote_region_groups
+        num_groups = len(meta.local_block_ids)
+
+        def group_ids(block_ids: BlockIds, rank: int) -> list[list[int]]:
+            return [
+                list(block_ids[g]) if rank in plan.source_ranks_per_group[g] else []
+                for g in range(num_groups)
+            ]
+
         if not local_block_ids:
             # Region expansion cannot index empty groups. Pass empty specs to
             # _read_blocks so its existing cache-hit notification path runs.
@@ -260,19 +269,48 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 list(blocks[sum(len(spec.local_block_ids[r]) for spec in read_specs) :])
                 for r, blocks in enumerate(local_by_region)
             ]
+        elif (
+            not dcp_active
+            and meta.remote.num_tokens is not None
+            and (
+                self.block_size != remote_info.remote_block_size
+                or remote_info.remote_physical_blocks_per_logical
+                != self._physical_blocks_per_logical_kv_block
+            )
+        ):
+            # Each side pads to its own logical block past the last token, so
+            # pair the lists by that token once, for every read.
+            block_size_ratio = self.transfer_topo.block_size_ratio(
+                remote_info.remote_block_size
+            )
+            meta.remote.block_ids = self._logical_to_kernel_block_ids(
+                meta.remote.block_ids,
+                remote_info.remote_physical_blocks_per_logical,
+            )
+            local_ids, remote_ids, meta.covered_sub_blocks = (
+                self._pair_blocks_by_last_token(
+                    meta.local_physical_block_ids,
+                    meta.remote.block_ids,
+                    meta.remote.num_tokens,
+                    block_size_ratio,
+                    remote_info.remote_physical_blocks_per_logical,
+                )
+            )
+            read_specs = [
+                ReadSpec(
+                    remote_rank=rank,
+                    local_block_ids=group_ids(local_ids, rank),
+                    remote_block_ids=group_ids(remote_ids, rank),
+                    paired=True,
+                )
+                for rank in plan.all_source_ranks
+            ]
         else:
             remote_logical_block_ids = meta.remote.block_ids
             meta.remote.block_ids = self._logical_to_kernel_block_ids(
                 remote_logical_block_ids,
                 remote_info.remote_physical_blocks_per_logical,
             )
-            num_groups = len(meta.local_block_ids)
-
-            def group_ids(block_ids: BlockIds, rank: int) -> list[list[int]]:
-                return [
-                    list(block_ids[g]) if rank in plan.source_ranks_per_group[g] else []
-                    for g in range(num_groups)
-                ]
 
             read_specs = []
             for rank in plan.all_source_ranks:
@@ -371,8 +409,6 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 remote_xfer_side_handle=remote_xfer_side_handle,
                 expected_consumers=plan.local_consumers,
                 awaiting_kvs=meta.awaiting_kvs,
-                # DCP slices were already paired by logical position above.
-                num_tokens=None if dcp_active else meta.remote.num_tokens,
             ):
                 return
 
@@ -400,6 +436,52 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                         )
                         self.xfer_stats.record_failed_notification()
 
+    def _pair_blocks_by_last_token(
+        self,
+        local_block_ids: BlockIds,
+        remote_block_ids: BlockIds,
+        num_tokens: int,
+        block_size_ratio: int,
+        remote_physical_per_logical: int,
+    ) -> tuple[BlockIds, BlockIds, list[int]]:
+        """Pair kernel blocks holding the same tokens across P/D block sizes.
+
+        Local blocks are split into remote-sized sub-blocks. Each side
+        allocates whole logical blocks up to the last of ``num_tokens``, while
+        a local prefix hit or sliding-window clipping can start the lists at
+        different tokens. So drop each side's sub-blocks past that last token
+        and pair the lists from their ends. SSM groups pass through unpaired.
+
+        Returns the paired lists and, per group, the local sub-blocks the
+        read covers from the start of the group.
+        """
+        local_per_logical = (
+            self._physical_blocks_per_logical_kv_block * block_size_ratio
+        )
+        paired_local: list[list[int]] = []
+        paired_remote: list[list[int]] = []
+        covered: list[int] = []
+        for g, (local, remote) in enumerate(
+            zip(local_block_ids, remote_block_ids, strict=True)
+        ):
+            if _is_ssm_spec(self._group_spec_types[g]):
+                paired_local.append(list(local))
+                paired_remote.append(list(remote))
+                covered.append(len(local))
+                continue
+            spec = self.kv_cache_config.transfer_groups[g].kv_cache_spec
+            num_sub_blocks = cdiv(num_tokens, spec.block_size // local_per_logical)
+            local = self.get_mapped_blocks(np.asarray(local), block_size_ratio).tolist()
+            local_padding = -num_sub_blocks % local_per_logical
+            remote_padding = -num_sub_blocks % remote_physical_per_logical
+            local = local[: len(local) - local_padding]
+            remote = list(remote)[: len(remote) - remote_padding]
+            num_pairs = min(len(local), len(remote))
+            paired_local.append(local[len(local) - num_pairs :])
+            paired_remote.append(remote[len(remote) - num_pairs :])
+            covered.append(len(local))
+        return paired_local, paired_remote, covered
+
     def _read_blocks(
         self,
         read_spec: ReadSpec,
@@ -411,7 +493,6 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         remote_xfer_side_handle: int,
         expected_consumers: int,
         awaiting_kvs: bool,
-        num_tokens: int | None,
     ) -> bool:
         """Post a READ point-to-point xfer request from a single local worker to
         a single remote worker.
@@ -429,25 +510,14 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         block_size_ratio = self.transfer_topo.block_size_ratio(
             remote_info.remote_block_size
         )
-        # Equal kernel blocks under different logical block sizes leave
-        # different padding at the end of each list: pair them the same way.
-        if block_size_ratio > 1 or (
-            num_tokens is not None
-            and not read_spec.block_ids_by_region
-            and remote_info.remote_physical_blocks_per_logical
-            != self._physical_blocks_per_logical_kv_block
-        ):
+        if block_size_ratio > 1 and not read_spec.paired:
             if read_spec.block_ids_by_region:
                 raise NotImplementedError(
                     "Region-mapped NIXL transfers require matching physical block sizes"
                 )
             local_block_ids, remote_block_ids = (
                 self._map_block_ids_for_block_size_ratio(
-                    local_block_ids,
-                    remote_block_ids,
-                    block_size_ratio,
-                    num_tokens,
-                    remote_info.remote_physical_blocks_per_logical,
+                    local_block_ids, remote_block_ids, block_size_ratio
                 )
             )
         # NOTE(rob): having the staging blocks be on the READER side is
