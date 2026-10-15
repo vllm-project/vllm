@@ -61,7 +61,7 @@ Normally the first serving engine pays for the pass, and on a large MoE model it
 dominates what is left of the startup time once the weights come from the
 daemon.
 
-Unless FlashInfer autotune is disabled (`--no-enable-flashinfer-autotune`),
+Unless FlashInfer autotune is disabled (`--disable-flashinfer-autotune`),
 `vllm preload` pays it at preload time: each daemon runs the autotune pass in
 place — profiling dummy runs against the shard it already holds — after
 loading and before binding its socket, then writes the cache:

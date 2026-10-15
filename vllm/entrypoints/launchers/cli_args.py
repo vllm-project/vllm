@@ -557,7 +557,7 @@ def create_parser_for_docs() -> FlexibleArgumentParser:
 
 
 def propagate_flash_late_interaction(args, engine_args) -> None:
-    """Propagate `--no-enable-flash-late-interaction` into the engine config.
+    """Propagate `--disable-flash-late-interaction` into the engine config.
 
     The frontend flag alone only disables the API-server scoring path;
     mirroring it into `PoolerConfig.enable_flash_late_interaction` lets the

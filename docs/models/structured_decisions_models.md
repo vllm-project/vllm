@@ -355,4 +355,4 @@ vllm serve LiquidAI/d1-3B
 - A `choice` whose option names are all single letters is labeled with those
   letters.
 - When each request carries one question over a state that changes from
-  request to request, `--no-enable-prefix-caching` lowers latency.
+  request to request, `--disable-prefix-caching` lowers latency.

@@ -2531,7 +2531,7 @@ class NixlBaseConnectorWorker:
                 "is not supported for Mamba hybrid models. "
                 f"Local: {self._physical_blocks_per_logical_kv_block}, "
                 f"Remote: {remote_physical_per_logical}. "
-                "Disable prefix caching with --no-enable-prefix-caching."
+                "Disable prefix caching with --disable-prefix-caching."
             )
 
         if block_size_ratio != 1:
