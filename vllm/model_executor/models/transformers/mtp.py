@@ -65,15 +65,25 @@ class MTPMixin(CausalMixin):
         }
 
     def pipeline_parallel(self):
-        if self.pp_group.world_size > 1:
-            raise NotImplementedError(
-                "The Transformers modeling backend does not support pipeline "
-                "parallelism for MTP draft models yet."
-            )
+        # The draft runs whole on the last PP rank
+        pass
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        mtp_weights = (w for w in weights if self.mtp_weights.search(w[0]))
-        return super().load_weights(mtp_weights)
+        # With PP, the last rank has no target embedding to share with the draft
+        embed_prefix = None
+        if self.pp_group.world_size > 1:
+            embed = self.model.get_input_embeddings()
+            embed_prefix = next(n for n, m in self.named_modules() if m is embed) + "."
+
+        def is_draft_weight(name: str) -> bool:
+            if self.mtp_weights.search(name):
+                return True
+            if embed_prefix is None:
+                return False
+            mapped = self.hf_to_vllm_mapper.map_name(name)
+            return mapped is not None and mapped.startswith(embed_prefix)
+
+        return super().load_weights(w for w in weights if is_draft_weight(w[0]))
 
     def forward(  # type: ignore[override]
         self,
