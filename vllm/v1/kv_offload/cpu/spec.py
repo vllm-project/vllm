@@ -4,6 +4,7 @@ from typing import Any
 
 from typing_extensions import override
 
+from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_up
 from vllm.v1.kv_offload.base import (
@@ -21,6 +22,8 @@ from vllm.v1.kv_offload.cpu.common import CPUOffloadingInfo, CPUOffloadingMetric
 from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
+
+logger = init_logger(__name__)
 
 
 def _all_workers_barrier() -> None:
@@ -100,12 +103,34 @@ class CPUOffloadingSpec(OffloadingSpec):
             )
 
         world_size = config.parallel.world_size
+        local_world_size = config.parallel.local_world_size
+        if local_world_size is None:
+            local_world_size = world_size
+        if local_world_size <= 0 or world_size % local_world_size:
+            raise ValueError(
+                "local_world_size must be a positive divisor of world_size"
+            )
+        if not 0 <= config.parallel.rank < world_size:
+            raise ValueError("offloading rank must be in [0, world_size)")
+        if config.parallel.pp_size != 1 or config.parallel.pcp_size != 1:
+            raise ValueError(
+                "Native CPU offloading does not yet support pipeline or prefill "
+                "context parallelism: shared worker byte geometry is not negotiated."
+            )
+        backend = config.parallel.executor_backend
+        if world_size > 1 and backend not in (None, "mp"):
+            raise ValueError(
+                f"Native CPU offloading cannot establish node-local topology for "
+                f"{backend!r}. Use the mp executor with --nnodes. External "
+                "launchers also lack cross-worker offload completion aggregation."
+            )
+        self.local_world_size = local_world_size
         self.num_chunks = 0
         self.kv_bytes_per_chunk = 0
         self.cpu_page_size_per_worker = 0
         self.replicated_layout = config.replicated_layout and self._uses_shared_region()
         if config.worker_kv_bytes_per_block > 0 and world_size > 0:
-            num_copies = 1 if self.replicated_layout else world_size
+            num_copies = 1 if self.replicated_layout else local_world_size
             kv_bytes_per_block = config.worker_kv_bytes_per_block * num_copies
             kv_bytes_per_chunk = kv_bytes_per_block * self.blocks_per_chunk
 
@@ -124,6 +149,17 @@ class CPUOffloadingSpec(OffloadingSpec):
             # |--- W0-C0---|---- W1-C0---| ... |---- Wn-C0---| *** maybe-pad *** |
             # or |--- C0 (single copy) ---| *** maybe-pad *** |
             self.kv_bytes_per_chunk = aligned_kv_bytes_per_chunk
+
+        logger.info(
+            "CPU offload region: world_size=%d local_world_size=%d "
+            "copies=%d row_bytes=%d chunks=%d budget_bytes=%d per node per DP replica",
+            world_size,
+            local_world_size,
+            1 if self.replicated_layout else local_world_size,
+            self.kv_bytes_per_chunk,
+            self.num_chunks,
+            int(cpu_bytes_to_use),
+        )
 
         # scheduler-side
         self._manager: OffloadingManager | None = None
@@ -177,10 +213,8 @@ class CPUOffloadingSpec(OffloadingSpec):
         # mmap'd; fall back to the tensor path (empty tensors) as before.
         if self._uses_shared_region() and self.num_chunks > 0:
             # Use the logical worker rank for each slot, and distribute the
-            # replicated region's pre-faulting work across the worker group.
-            world_size = self.config.parallel.world_size
-            worker_index = self.config.parallel.rank
-
+            # replicated region's pre-faulting work across local workers.
+            worker_index = self.config.parallel.rank % self.local_world_size
             mmap_region = SharedOffloadRegion(
                 engine_id=self.config.engine_id,
                 num_chunks=self.num_chunks,
@@ -189,7 +223,9 @@ class CPUOffloadingSpec(OffloadingSpec):
                 cpu_page_size=self.cpu_page_size_per_worker,
                 barrier=_all_workers_barrier,
                 populate_shard=(
-                    (worker_index, world_size) if self.replicated_layout else None
+                    (worker_index, self.local_world_size)
+                    if self.replicated_layout
+                    else None
                 ),
             )
         try:
