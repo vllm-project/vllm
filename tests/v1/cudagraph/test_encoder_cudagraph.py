@@ -1162,6 +1162,7 @@ class MockDeepseekVL2Model(torch.nn.Module, SupportsEncoderCudaGraph):
         device: torch.device,
         dtype: torch.dtype,
         path: str = "default",
+        axis_keys: tuple[Hashable, ...] | None = None,
     ) -> EncoderCudaGraphCaptureInputs:
         hw = _DSV2_H * _DSV2_H
         max_tiles = (token_budget + hw - 1) // hw
