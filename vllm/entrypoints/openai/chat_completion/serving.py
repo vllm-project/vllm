@@ -550,10 +550,11 @@ class OpenAIServingChat(GenerateBaseServing):
         )
 
         last_res: RequestOutput | None = None
+        tool_calling_spans = request._tool_calling_spans
         try:
             async for res in result_generator:
-                if request._tool_calling_spans is not None:
-                    request._tool_calling_spans.extend(res._tool_calling_spans or ())
+                if tool_calling_spans is not None:
+                    tool_calling_spans.extend(res._tool_calling_spans or ())
                     res._tool_calling_spans = None
                 last_res = res
                 if res.prompt_token_ids is not None:
@@ -1014,11 +1015,12 @@ class OpenAIServingChat(GenerateBaseServing):
     ) -> ErrorResponse | ChatCompletionResponse:
         created_time = int(time.time())
         final_res: RequestOutput | None = None
+        tool_calling_spans = request._tool_calling_spans
 
         try:
             async for res in result_generator:
-                if request._tool_calling_spans is not None:
-                    request._tool_calling_spans.extend(res._tool_calling_spans or ())
+                if tool_calling_spans is not None:
+                    tool_calling_spans.extend(res._tool_calling_spans or ())
                     res._tool_calling_spans = None
                 final_res = res
         except asyncio.CancelledError:
