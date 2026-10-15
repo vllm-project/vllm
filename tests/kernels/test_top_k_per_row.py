@@ -1599,10 +1599,82 @@ def test_cooperative_topk_overflow_cluster_boundary(
 @torch.inference_mode()
 def test_cooperative_topk_16bit_grid_overflow(num_rows: int, top_k: int) -> None:
     seq_len = 32768
-    row = (1.0 + torch.arange(seq_len, dtype=torch.float32) * (0.01 / seq_len))
+    row = 1.0 + torch.arange(seq_len, dtype=torch.float32) * (0.01 / seq_len)
     logits = row.to(torch.bfloat16).float().cuda().repeat(num_rows, 1)
     lengths = torch.full((num_rows,), seq_len, dtype=torch.int32, device="cuda")
     indices = torch.empty((num_rows, top_k), dtype=torch.int32, device="cuda")
+
+    _run_topk_backend("cooperative_topk", logits, lengths, indices, top_k, seq_len)
+    torch.accelerator.synchronize()
+    _assert_cooperative_topk_exact(logits, indices, seq_len, top_k)
+
+
+def _negative_halfway_threshold() -> tuple[float, torch.Tensor]:
+    # Top FP32 key of the coarse bin holding -1.0: an FP16 halfway point that
+    # rounds into the bin while the next keys round into the bin above.
+    def coarse_bin(x: torch.Tensor) -> torch.Tensor:
+        bits = x.half().view(torch.int16).to(torch.int32) & 0xFFFF
+        key = torch.where(bits >= 0x8000, ~bits & 0xFFFF, bits | 0x8000)
+        return key >> 6
+
+    one = torch.tensor([-1.0])
+    base = int(one.view(torch.int32))
+    bits = base - torch.arange(0, 1 << 14, dtype=torch.int32)
+    values = bits.view(torch.float32)
+    in_bin = coarse_bin(values) == coarse_bin(one)
+    top = int(in_bin.nonzero().max())
+    near = values[top + 1 : top + 2048]
+    assert bool((coarse_bin(near) == coarse_bin(one) + 1).all())
+    return float(values[top]), near
+
+
+@pytest.mark.skipif(not _has_device_capability(90), reason="This test requires SM90+")
+@pytest.mark.parametrize("top_k", [512, 1024, 2048])
+@pytest.mark.parametrize(
+    "num_rows,seq_len", [(1, 262144), (6, 131072), (16, 65536), (64, 65536)]
+)
+@torch.inference_mode()
+def test_cooperative_topk_overflow_negative_halfway(
+    num_rows: int, seq_len: int, top_k: int
+) -> None:
+    halfway, near = _negative_halfway_threshold()
+    generator = torch.Generator().manual_seed(seq_len + top_k)
+    num_near, num_needed, num_halfway = 50, 10, 3000
+    num_top = top_k - num_needed - num_near
+    rows = []
+    for _ in range(num_rows):
+        row = torch.full((seq_len,), -100.0)
+        row[:num_top] = 5.0 + torch.rand(num_top, generator=generator)
+        pick = torch.randperm(near.numel(), generator=generator)[:num_near]
+        row[num_top : num_top + num_near] = near[pick]
+        row[num_top + num_near : num_top + num_near + num_halfway] = halfway
+        rows.append(row[torch.randperm(seq_len, generator=generator)])
+    logits = torch.stack(rows).cuda()
+    lengths = torch.full((num_rows,), seq_len, dtype=torch.int32, device="cuda")
+    indices = torch.full((num_rows, top_k), -1, dtype=torch.int32, device="cuda")
+
+    _run_topk_backend("cooperative_topk", logits, lengths, indices, top_k, seq_len)
+    torch.accelerator.synchronize()
+    _assert_cooperative_topk_exact(logits, indices, seq_len, top_k)
+
+
+@pytest.mark.skipif(not _has_device_capability(90), reason="This test requires SM90+")
+@pytest.mark.parametrize("top_k", [512, 1024, 2048])
+@pytest.mark.parametrize("num_ties,num_needed", [(20, 12), (40, 20), (100, 52)])
+@torch.inference_mode()
+def test_cooperative_topk_negative_inf_ties(
+    num_ties: int, num_needed: int, top_k: int
+) -> None:
+    num_rows = 4
+    seq_len = top_k + num_ties - num_needed
+    generator = torch.Generator().manual_seed(num_ties + top_k)
+    logits = torch.full((num_rows, seq_len), float("-inf"))
+    for row in range(num_rows):
+        finite = torch.randperm(seq_len, generator=generator)[: top_k - num_needed]
+        logits[row, finite] = torch.randn(top_k - num_needed, generator=generator)
+    logits = logits.cuda()
+    lengths = torch.full((num_rows,), seq_len, dtype=torch.int32, device="cuda")
+    indices = torch.full((num_rows, top_k), -1, dtype=torch.int32, device="cuda")
 
     _run_topk_backend("cooperative_topk", logits, lengths, indices, top_k, seq_len)
     torch.accelerator.synchronize()

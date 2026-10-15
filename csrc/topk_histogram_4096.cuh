@@ -19,7 +19,6 @@ static_assert(kMaxTies <= kBlockSize,
               "tie_handle requires kMaxTies <= kBlockSize");
 constexpr uint32_t kWarpSize = 32;
 constexpr uint32_t kNumWarps = kBlockSize / kWarpSize;
-constexpr uint32_t kExactCandidateOffset = 16 * 1024;
 
 // Register path
 constexpr uint32_t kHist4096VecsPerThread = 4;
@@ -218,8 +217,7 @@ __device__ void tie_handle_large(const Tie* ties, uint32_t num_ties,
   const auto li = tx % kWarpSize;
   const auto wi = tx / kWarpSize;
 
-  constexpr uint32_t kPerThread =
-      (MaxTies + kBlockSize - 1) / kBlockSize;
+  constexpr uint32_t kPerThread = (MaxTies + kBlockSize - 1) / kBlockSize;
   Tie my_ties[kPerThread];
   uint32_t keys[kPerThread];
   bool active[kPerThread];
@@ -459,8 +457,7 @@ __device__ void histogram_4096_topk(const float* __restrict__ scores,
   // Coarse-bin overflow must be refined before emitting any candidates.
   if constexpr (Recovery == OverflowRecovery::kFp32Rescan) {
     if (need_tie && num_equal > TopK) {
-      exact_topk_rescan_cold<TopK, kBlockSize,
-                              UsePredicatedLoads ? 1 : 4>(
+      exact_topk_rescan_cold<TopK, kBlockSize, UsePredicatedLoads ? 1 : 4>(
           scores, output, length, _smem);
       return;
     }
@@ -528,14 +525,14 @@ __device__ void histogram_4096_topk(const float* __restrict__ scores,
     if (lane_id == 0 && rank < topk_remain) {
       output[num_above + rank] = target.idx;  // place at correct position
     }
-  } else if (num_ties <= kWarpSize * 2 &&
-             Recovery != OverflowRecovery::kDisabled) {
+  } else if (num_ties <= kWarpSize * 2) {
     // Same idea, with each thread handling two tie elements.
     const auto lane_id = tx % kWarpSize;
     const auto warp_id = tx / kWarpSize;
     const auto lane1 = lane_id + kWarpSize;
     const auto warp1 = warp_id + kWarpSize;
-    const auto invalid = Tie{0xFFFFFFFF, -__FLT_MAX__};
+    // Padding must not outrank any real tie, including a -inf one.
+    const auto invalid = Tie{0xFFFFFFFF, -__builtin_huge_valf()};
     const auto tie0 = smem->tie_buffer[lane_id];
     const auto tie1 = lane1 < num_ties ? smem->tie_buffer[lane1] : invalid;
     if (warp_id < num_ties) {

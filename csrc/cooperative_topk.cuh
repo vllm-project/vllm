@@ -23,7 +23,7 @@ namespace hist4096 = topk_histogram_4096;
 
 constexpr uint32_t kHistBits = 10;
 constexpr uint32_t kHistBins = 1 << kHistBits;
-using ExactRadix = hist4096::ExactRadixTraits<true>;
+using ExactRadix = hist4096::ExactRadixTraits;
 constexpr uint32_t kExactHistBins = ExactRadix::kBins;
 constexpr uint32_t kMaxTopK = 2048;
 // Retain this many threshold-bin candidates before exact recovery.
@@ -110,8 +110,7 @@ __device__ __forceinline__ void dsmem_hist_reduce(uint32_t* histogram) {
   constexpr auto kLocal = NumBins / CS;
   const auto off = kLocal * rank;
 #pragma unroll
-  for (uint32_t bin = tx; bin < NumBins;
-       bin += hist4096::kBlockSize) {
+  for (uint32_t bin = tx; bin < NumBins; bin += hist4096::kBlockSize) {
     // Cover histograms wider than one CTA without changing the reduction.
     const auto addr = &histogram[off + bin / CS];
     const auto src = cluster.map_shared_rank(addr, bin % CS);
@@ -362,10 +361,9 @@ __device__ void large_topk(const float* __restrict__ row_input,
   const auto thr = smem->match.bin;
   // A threshold bin beyond tie capacity needs exact recovery; scattering
   // into the bounded buffer would discard possible TopK candidates.
-  if (__builtin_expect(
-          smem->match.equal_count > kCoarseTieCapacity, 0)) {
-    recover_coarse_overflow<TopK, CS, kFused>(
-        row_input, row_output, seq_len, my_start, my_len, smem, s_topk);
+  if (__builtin_expect(smem->match.equal_count > kCoarseTieCapacity, 0)) {
+    recover_coarse_overflow<TopK, CS, kFused>(row_input, row_output, seq_len,
+                                              my_start, my_len, smem, s_topk);
     return;
   }
 
@@ -530,9 +528,9 @@ __device__ void cooperative_topk_body(CooperativeTopKParams<TopK> params) {
   if (sl <= static_cast<int32_t>(hist4096::kHist4096MaxLen)) {
     if (rank == 0) {
       extern __shared__ __align__(128) uint8_t sr[];
-      hist4096::histogram_4096_topk<
-          TopK, 12, hist4096::kHist4096VecsPerThread, false,
-          hist4096::OverflowRecovery::kFp32Rescan>(
+      hist4096::histogram_4096_topk<TopK, 12, hist4096::kHist4096VecsPerThread,
+                                    false,
+                                    hist4096::OverflowRecovery::kFp32Rescan>(
           in, out, sl, sr);  // 4096-bin (12-bit) histogram
     }
     return;

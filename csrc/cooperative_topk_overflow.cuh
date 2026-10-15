@@ -19,12 +19,17 @@ struct OverflowProbeState {
 // Zero and subnormal FP16 bins require the general FP32 radix path.
 __device__ __forceinline__ bool coarse_bin_needs_full_fp32_radix(
     uint32_t coarse_bin) {
-  const uint16_t key =
-      static_cast<uint16_t>(coarse_bin << (16 - kHistBits));
-  const uint16_t bits = (key & 0x8000u)
-                            ? static_cast<uint16_t>(key & 0x7FFFu)
-                            : static_cast<uint16_t>(~key);
+  const uint16_t key = static_cast<uint16_t>(coarse_bin << (16 - kHistBits));
+  const uint16_t bits = (key & 0x8000u) ? static_cast<uint16_t>(key & 0x7FFFu)
+                                        : static_cast<uint16_t>(~key);
   return (bits & 0x7C00u) == 0;
+}
+
+// Coarse bin of an ordered FP32 key (inverse of convert_to_uint32_v2).
+__device__ __forceinline__ uint32_t coarse_bin_of_key(uint32_t ordered) {
+  const uint32_t bits =
+      (ordered & 0x80000000u) ? (ordered & 0x7FFFFFFFu) : ~ordered;
+  return extract_coarse_bin(__uint_as_float(bits));
 }
 
 // Locate the target digit in a 2,048-bin exact-radix histogram.
@@ -39,15 +44,13 @@ __device__ __forceinline__ void find_threshold_exact(
   const uint32_t count0 = histogram[bin0];
   const uint32_t count1 = histogram[bin1];
   const uint32_t local = count0 + count1;
-  const uint32_t warp_inclusive =
-      hist4096::warp_inclusive_sum(lane, local);
+  const uint32_t warp_inclusive = hist4096::warp_inclusive_sum(lane, local);
   if (lane == hist4096::kWarpSize - 1) {
     warp_sum[warp] = warp_inclusive;
   }
   __syncthreads();
   if (warp == 0) {
-    warp_sum[lane] =
-        hist4096::warp_inclusive_sum(lane, warp_sum[lane]);
+    warp_sum[lane] = hist4096::warp_inclusive_sum(lane, warp_sum[lane]);
   }
   __syncthreads();
 
@@ -116,8 +119,7 @@ __device__ void build_coarse_refine_histogram(
   for_each_partition_score<UseResident>(
       scores, length, smem, [&](uint32_t, float score) {
         if (extract_coarse_bin(score) != coarse_bin) return;
-        const uint32_t delta =
-            hist4096::convert_to_uint32_v2(score) - base_key;
+        const uint32_t delta = hist4096::convert_to_uint32_v2(score) - base_key;
         if (round == 0 || (delta & prefix_mask) == prefix) {
           atomicAdd(&histogram[(delta >> shift) & 0x7FFu], 1);
         }
@@ -134,8 +136,7 @@ __device__ void collect_exact_candidates(
       scores, length, smem, [&](uint32_t idx, float score) {
         const uint32_t ordered = hist4096::convert_to_uint32_v2(score);
         if (ordered > pivot) {
-          above_indices[atomicAdd(above_count, 1)] =
-              static_cast<int32_t>(idx);
+          above_indices[atomicAdd(above_count, 1)] = static_cast<int32_t>(idx);
         } else if (ordered == pivot) {
           const uint32_t pos = atomicAdd(equal_count, 1);
           if (pos < equal_limit) {
@@ -153,8 +154,8 @@ struct ClusterCandidateOffsets {
 
 // Place each CTA's above-pivot candidates before all equal-pivot candidates.
 template <uint32_t CS>
-__device__ __forceinline__ ClusterCandidateOffsets candidate_offsets(
-    uint32_t local_above, uint32_t local_equal) {
+__device__ __forceinline__ ClusterCandidateOffsets
+candidate_offsets(uint32_t local_above, uint32_t local_equal) {
   constexpr uint32_t kCountBits = 16;
   constexpr uint32_t kCountMask = (1u << kCountBits) - 1;
   const uint32_t tx = threadIdx.x;
@@ -205,8 +206,7 @@ __device__ __noinline__ OverflowProbeStatus probe_arbitrary_fp32_overflow(
     return OverflowProbeStatus::kFullRescan;
   }
 
-  for (uint32_t bin = tx; bin < kExactHistBins;
-       bin += hist4096::kBlockSize) {
+  for (uint32_t bin = tx; bin < kExactHistBins; bin += hist4096::kBlockSize) {
     exact_histogram[bin] = 0;
   }
   __syncthreads();
@@ -227,11 +227,10 @@ __device__ __noinline__ OverflowProbeStatus probe_arbitrary_fp32_overflow(
   if (tx == 0) {
     const uint32_t first_prefix = smem->match.bin << kDigitBits;
     const uint32_t remaining = needed - smem->match.above_count;
-    smem->match = {
-        .bin = first_prefix,
-        .above_count = remaining,
-        .equal_count =
-            static_cast<uint32_t>(OverflowProbeStatus::kFirstDigitReady)};
+    smem->match = {.bin = first_prefix,
+                   .above_count = remaining,
+                   .equal_count = static_cast<uint32_t>(
+                       OverflowProbeStatus::kFirstDigitReady)};
   }
   __syncthreads();
   return OverflowProbeStatus::kFirstDigitReady;
@@ -239,11 +238,13 @@ __device__ __noinline__ OverflowProbeStatus probe_arbitrary_fp32_overflow(
 
 // Emit candidates saved in the last radix pass if every CTA's staging fits.
 template <uint32_t TopK, uint32_t CS, typename SmemType>
-__device__ bool emit_staged_candidates(
-    const float* __restrict__ row_input, int32_t* __restrict__ row_output,
-    uint32_t my_start, uint32_t pivot, uint32_t remaining,
-    uint32_t staged_above, uint32_t staged_candidates, SmemType* smem,
-    int32_t* scratch) {
+__device__ bool emit_staged_candidates(const float* __restrict__ row_input,
+                                       int32_t* __restrict__ row_output,
+                                       uint32_t my_start, uint32_t pivot,
+                                       uint32_t remaining,
+                                       uint32_t staged_above,
+                                       uint32_t staged_candidates,
+                                       SmemType* smem, int32_t* scratch) {
   const uint32_t tx = threadIdx.x;
   __shared__ uint32_t rank_staging_ok[CS];
   __shared__ uint32_t staging_ok;
@@ -268,11 +269,10 @@ __device__ bool emit_staged_candidates(
     smem->counter_eq = 0;
   }
   __syncthreads();
-  for (uint32_t i = tx; i < staged_candidates;
-       i += hist4096::kBlockSize) {
+  for (uint32_t i = tx; i < staged_candidates; i += hist4096::kBlockSize) {
     const int32_t idx = scratch[kMaxTopK - 1 - i];
-    const uint32_t ordered = hist4096::convert_to_uint32_v2(
-        row_input[my_start + idx]);
+    const uint32_t ordered =
+        hist4096::convert_to_uint32_v2(row_input[my_start + idx]);
     if (ordered > pivot) {
       atomicAdd(&smem->counter_gt, 1);
     } else if (ordered == pivot) {
@@ -281,8 +281,8 @@ __device__ bool emit_staged_candidates(
   }
   __syncthreads();
 
-  const auto offsets = candidate_offsets<CS>(
-      staged_above + smem->counter_gt, smem->counter_eq);
+  const auto offsets =
+      candidate_offsets<CS>(staged_above + smem->counter_gt, smem->counter_eq);
   for (uint32_t i = tx; i < staged_above; i += hist4096::kBlockSize) {
     row_output[offsets.above + i] = scratch[i] + my_start;
   }
@@ -292,19 +292,17 @@ __device__ bool emit_staged_candidates(
     smem->counter_eq = 0;
   }
   __syncthreads();
-  for (uint32_t i = tx; i < staged_candidates;
-       i += hist4096::kBlockSize) {
+  for (uint32_t i = tx; i < staged_candidates; i += hist4096::kBlockSize) {
     const int32_t idx = scratch[kMaxTopK - 1 - i];
-    const uint32_t ordered = hist4096::convert_to_uint32_v2(
-        row_input[my_start + idx]);
+    const uint32_t ordered =
+        hist4096::convert_to_uint32_v2(row_input[my_start + idx]);
     if (ordered > pivot) {
       const uint32_t pos = atomicAdd(&smem->counter_gt, 1);
       row_output[offsets.above + staged_above + pos] = idx + my_start;
     } else if (ordered == pivot) {
       const uint32_t pos = atomicAdd(&smem->counter_eq, 1);
       if (offsets.equal + pos < remaining) {
-        row_output[offsets.total_above + offsets.equal + pos] =
-            idx + my_start;
+        row_output[offsets.total_above + offsets.equal + pos] = idx + my_start;
       }
     }
   }
@@ -317,8 +315,7 @@ __device__ __noinline__ void exact_topk_rescan_cluster(
     const float* __restrict__ row_input, int32_t* __restrict__ row_output,
     uint32_t seq_len, uint32_t my_start, uint32_t my_len, uint32_t coarse_bin,
     uint32_t coarse_above, OverflowProbeState probe, SmemType* smem,
-    int32_t* s_topk)
-{
+    int32_t* s_topk) {
   const uint32_t tx = threadIdx.x;
   const auto range = hist4096::coarse_refine_range<kHistBits>(coarse_bin);
   const bool bounded =
@@ -336,8 +333,7 @@ __device__ __noinline__ void exact_topk_rescan_cluster(
   uint32_t staged_above = 0;
   uint32_t staged_candidates = 0;
   for (uint32_t round = start_round; round < rounds; ++round) {
-    for (uint32_t bin = tx; bin < kExactHistBins;
-         bin += hist4096::kBlockSize) {
+    for (uint32_t bin = tx; bin < kExactHistBins; bin += hist4096::kBlockSize) {
       smem->histogram[bin] = 0;
     }
     __syncthreads();
@@ -352,10 +348,8 @@ __device__ __noinline__ void exact_topk_rescan_cluster(
         const uint32_t interval_lower = range.base_key + prefix;
         const uint32_t interval_upper = interval_lower + 0x7FFu;
         for_each_partition_score<UseResident>(
-            row_input + my_start, my_len, smem,
-            [&](uint32_t idx, float score) {
-              const uint32_t ordered =
-                  hist4096::convert_to_uint32_v2(score);
+            row_input + my_start, my_len, smem, [&](uint32_t idx, float score) {
+              const uint32_t ordered = hist4096::convert_to_uint32_v2(score);
               if (ordered > interval_upper) {
                 const uint32_t pos = atomicAdd(&smem->counter_gt, 1);
                 if (pos < kMaxTopK) {
@@ -370,6 +364,14 @@ __device__ __noinline__ void exact_topk_rescan_cluster(
               }
             });
         __syncthreads();
+        // One slot per key: a negative bin's window can hold neighbouring-bin
+        // keys, which stay staged for exact emission but must not be counted.
+        for (uint32_t key = tx; key < kExactHistBins;
+             key += hist4096::kBlockSize) {
+          if (coarse_bin_of_key(interval_lower + key) != coarse_bin) {
+            smem->histogram[key] = 0;
+          }
+        }
         staged_above = smem->counter_gt;
         staged_candidates = smem->counter_eq;
       } else {
@@ -386,8 +388,8 @@ __device__ __noinline__ void exact_topk_rescan_cluster(
     dsmem_hist_reduce<CS, kExactHistBins>(smem->histogram);
     find_threshold_exact(smem->histogram, smem->warp_sum, remaining,
                          &smem->match);
-    const uint32_t shift = bounded ? (round == 0 ? 11 : 0)
-                                 : ExactRadix::shift(round);
+    const uint32_t shift =
+        bounded ? (round == 0 ? 11 : 0) : ExactRadix::shift(round);
     prefix |= smem->match.bin << shift;
     remaining -= smem->match.above_count;
   }
@@ -395,9 +397,9 @@ __device__ __noinline__ void exact_topk_rescan_cluster(
   const uint32_t pivot = bounded ? range.base_key + prefix : prefix;
 
   if (stage_final_candidates &&
-      emit_staged_candidates<TopK, CS>(
-          row_input, row_output, my_start, pivot, remaining, staged_above,
-          staged_candidates, smem, s_topk)) {
+      emit_staged_candidates<TopK, CS>(row_input, row_output, my_start, pivot,
+                                       remaining, staged_above,
+                                       staged_candidates, smem, s_topk)) {
     return;
   }
 
@@ -409,8 +411,8 @@ __device__ __noinline__ void exact_topk_rescan_cluster(
 
   int32_t* equal_indices = reinterpret_cast<int32_t*>(smem->tie_buffer);
   collect_exact_candidates<UseResident>(
-      row_input + my_start, my_len, pivot, remaining, smem,
-      &smem->counter_gt, &smem->counter_eq, s_topk, equal_indices);
+      row_input + my_start, my_len, pivot, remaining, smem, &smem->counter_gt,
+      &smem->counter_eq, s_topk, equal_indices);
   __syncthreads();
 
   const uint32_t local_above = smem->counter_gt;
@@ -419,10 +421,9 @@ __device__ __noinline__ void exact_topk_rescan_cluster(
   for (uint32_t i = tx; i < local_above; i += hist4096::kBlockSize) {
     row_output[offsets.above + i] = s_topk[i] + my_start;
   }
-  const uint32_t equal_to_write = offsets.equal < remaining
-                                      ? min(local_equal,
-                                            remaining - offsets.equal)
-                                      : 0;
+  const uint32_t equal_to_write =
+      offsets.equal < remaining ? min(local_equal, remaining - offsets.equal)
+                                : 0;
   for (uint32_t i = tx; i < equal_to_write; i += hist4096::kBlockSize) {
     row_output[offsets.total_above + offsets.equal + i] =
         equal_indices[i] + my_start;
@@ -436,12 +437,12 @@ template <uint32_t TopK, uint32_t CS, bool UseResident, typename SmemType>
 __device__ __noinline__ void recover_coarse_overflow(
     const float* __restrict__ row_input, int32_t* __restrict__ row_output,
     uint32_t seq_len, uint32_t my_start, uint32_t my_len, SmemType* smem,
-    int32_t* s_topk)
-{
+    int32_t* s_topk) {
   const uint32_t coarse_bin = smem->match.bin;
   const uint32_t coarse_above = smem->match.above_count;
-  const auto probe_status = probe_arbitrary_fp32_overflow<TopK, CS, UseResident>(
-      row_input, my_start, my_len, coarse_bin, coarse_above, smem, s_topk);
+  const auto probe_status =
+      probe_arbitrary_fp32_overflow<TopK, CS, UseResident>(
+          row_input, my_start, my_len, coarse_bin, coarse_above, smem, s_topk);
   const OverflowProbeState probe = {
       .status = probe_status,
       .prefix = smem->match.bin,
@@ -449,9 +450,8 @@ __device__ __noinline__ void recover_coarse_overflow(
   };
 
   exact_topk_rescan_cluster<TopK, CS, UseResident>(
-      row_input, row_output, seq_len, my_start, my_len, coarse_bin, coarse_above,
-      probe, smem, s_topk);
+      row_input, row_output, seq_len, my_start, my_len, coarse_bin,
+      coarse_above, probe, smem, s_topk);
 }
-
 
 #endif  // COOPERATIVE_TOPK_OVERFLOW_CUH_
