@@ -385,17 +385,27 @@ async def test_late_interaction_releases_requests_and_queries(
                     result.outputs.data.item() == 2 for result in ctx.final_res_batch
                 )
             else:
-                assert response is None
+                assert isinstance(response, Response)
+                assert response.body == b""
                 assert handler_task is not None
                 if scenario in {"double_abort", "double_rpc"}:
                     await cleanup_entered.wait()
                     handler_task.cancel()
                     await asyncio.sleep(0)
                     release.set()
+                await asyncio.wait([handler_task])
                 with pytest.raises(asyncio.CancelledError):
-                    await handler_task
+                    handler_task.result()
 
-    await asyncio.wait_for(run_scenario(), timeout=5)
+    try:
+        await asyncio.wait_for(run_scenario(), timeout=5)
+    finally:
+        # Failed assertions must not leave cleanup waiting during test teardown.
+        release.set()
+        if handler_task is not None:
+            if not handler_task.done():
+                handler_task.cancel()
+            await asyncio.gather(handler_task, return_exceptions=True)
     assert not pending
     assert not runner._query_cache
     assert not runner._query_uses
