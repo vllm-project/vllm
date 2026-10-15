@@ -19,10 +19,10 @@ from vllm.models.common.specialized_decode.guards import (
     tp_group,
 )
 from vllm.models.common.specialized_decode.spec import (
+    DecodeImpl,
     DecodeSpec,
     DecodeUnsupported,
     KernelT,
-    ModelKernel,
     Step,
 )
 
@@ -40,7 +40,7 @@ class DecodeWarmup(VllmJitKernel["DecodeWarmup.CompileKey"]):
         spec: str
         build: Any
 
-    def __init__(self, spec: str, kernel: ModelKernel):
+    def __init__(self, spec: str, kernel: DecodeImpl):
         super().__init__()
         self.spec = spec
         self.kernel = kernel

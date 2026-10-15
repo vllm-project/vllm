@@ -48,11 +48,12 @@ class Step:
     """The step's positions, as the model's forward was handed them."""
 
 
-class ModelKernel(Protocol):
-    """One model's decode on this rank, for every width the spec serves.
+class DecodeImpl(Protocol):
+    """A spec's half of the contract: one model's decode on this rank, for
+    every width the spec serves.
 
-    The kernel owns its own layer loop, so the library has no opinion about
-    layers: a kernel may replace one layer, two, or the whole backbone.
+    The implementation owns its own layer loop, so the library has no opinion
+    about layers: it may replace one layer, two, or the whole backbone.
     """
 
     cache_layers: tuple[str, ...]
@@ -78,8 +79,8 @@ class ModelKernel(Protocol):
         ...
 
 
-KernelT = TypeVar("KernelT", bound=ModelKernel)
-"""What one spec's ``build`` returns. ``ModelKernel`` is only the lower bound,
+KernelT = TypeVar("KernelT", bound=DecodeImpl)
+"""What one spec's ``build`` returns. ``DecodeImpl`` is only the lower bound,
 so a model annotates its runtime with its own kernel class
 (``SpecializedDecode[MyKernel]``) and reads what that class adds."""
 

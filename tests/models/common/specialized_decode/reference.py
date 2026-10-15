@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The reference kernel: a ``ModelKernel`` over the layers it replaces."""
+"""The reference kernel: a ``DecodeImpl`` over the layers it replaces."""
 
 from dataclasses import replace
 from types import SimpleNamespace
