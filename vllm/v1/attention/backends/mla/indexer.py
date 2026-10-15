@@ -204,18 +204,9 @@ class PrepareUniformDecodeKernel(
         )
 
 
-# Below this many TOTAL prefill rows, stay replicated (each rank scores every
-# row). The engagement crossover was calibrated on H200/TP4, where 64K total
-# rows was the first measured win. Per rank, the saved replicated indexer work
-# (~ (1 - 1/tp) * rows) and the all_gatherv index traffic
-# (~ (tp - 1)/tp * rows * topk * 4B) scale identically with tp, so the
-# crossover in TOTAL rows is tp-independent to first order. A per-rank floor
-# would instead grow the total requirement linearly with tp: at TP8 it takes
-# 128K scheduled rows, i.e. --max-num-batched-tokens >= 128K, which 80 GB
-# Hopper nodes cannot fit (the KV-cache budget goes negative during memory
-# profiling). The floor was calibrated on NVSwitch; on slower interconnects
-# (e.g. PCIe) the all_gatherv costs more per row, so VLLM_INDEXER_TP_SHARD_MIN_ROWS
-# can raise, lower, or effectively disable it.
+# Below this many total prefill rows, stay replicated. Saved indexer work and
+# all_gatherv traffic both scale with (tp - 1) / tp, so the floor is
+# tp-independent. Override with VLLM_INDEXER_TP_SHARD_MIN_ROWS.
 MIN_TP_SHARD_TOTAL_ROWS = 65_536
 
 
