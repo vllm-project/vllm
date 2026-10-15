@@ -1,5 +1,5 @@
 name: "Geometric: Optimize an endpoint"
-description: "Geometric: Make an endpoint faster using its real traffic patterns."
+description: "Make an endpoint faster using its real traffic patterns."
 title: "Optimize endpoint: "
 labels: ["optimization"]
 body:
