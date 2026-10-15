@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from transformers import DeepseekV4Config
 
 from vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe import (
     DeepGemmSm100MegaMoEBackend,
@@ -28,7 +29,6 @@ from vllm.models.deepseek_v4.nvidia.ops.prepare_megamoe import prepare_megamoe_i
 from vllm.models.deepseek_v41.common.mm_preprocess import IMAGE_SENTINEL_BASE_ID
 from vllm.models.deepseek_v41.nvidia.model import DeepseekV4MoE as DeepseekV41MoE
 from vllm.platforms import current_platform
-from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config
 from vllm.transformers_utils.configs.deepseek_v41 import DeepseekV41Config
 from vllm.utils.deep_gemm import is_deep_gemm_supported
 from vllm.utils.torch_utils import set_default_torch_dtype
@@ -979,7 +979,7 @@ def v4_dspark_config(dist_init):
         vocab_size=256,
         n_mtp_layers=2,
         enable_confidence_head=False,
-        compress_ratios=[1, 1],
+        layer_types=["sliding_attention"] * 2,
         q_lora_rank=32,
         o_lora_rank=32,
         qk_rope_head_dim=16,
