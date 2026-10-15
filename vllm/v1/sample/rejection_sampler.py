@@ -208,6 +208,7 @@ class RejectionSampler(nn.Module):
                 target_logits if self.is_processed_logprobs_mode else raw_target_logits,
                 bonus_sampler_output.logprobs_tensors.logprobs,
                 output_token_ids,
+                sampling_metadata.logprob_candidate_token_ids,
             )
 
         return SamplerOutput(
@@ -223,6 +224,7 @@ class RejectionSampler(nn.Module):
         target_logits: torch.Tensor,
         bonus_logits: torch.Tensor,
         sampled_token_ids: torch.Tensor,
+        candidates: dict[int, list[int]] | None = None,
     ) -> LogprobsTensors:
         cu_num_sampled_tokens = torch.zeros_like(metadata.cu_num_sampled_tokens)
         cu_num_sampled_tokens[1:] = metadata.cu_num_sampled_tokens[:-1]
@@ -262,6 +264,11 @@ class RejectionSampler(nn.Module):
             accepted_logprobs,
             max_num_logprobs,
             accepted_tokens.to(torch.int64),
+            {
+                req_idx * sampled_token_ids.shape[1] + offset: ids
+                for req_idx, ids in (candidates or {}).items()
+                for offset in range(sampled_token_ids.shape[1])
+            },
         )
 
     @staticmethod

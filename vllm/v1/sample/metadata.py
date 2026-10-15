@@ -47,6 +47,7 @@ class SamplingMetadata:
     # When set, logprobs are computed only for these token IDs using gather
     # req_index -> list of token IDs to get logprobs for
     logprob_token_ids: dict[int, list[int]] | None = None
+    logprob_candidate_token_ids: dict[int, list[int]] | None = None
 
     # Speculative token ids
     spec_token_ids: list[list[int]] | None = None

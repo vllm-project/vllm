@@ -129,6 +129,40 @@ def create_sampling_metadata(
     )
 
 
+def test_mixed_candidate_and_specific_logprobs():
+    logits = torch.arange(16, dtype=torch.float32, device=DEVICE_TYPE).reshape(2, 8)
+    metadata = create_sampling_metadata(all_greedy=True)
+    metadata.max_num_logprobs = 4
+    metadata.logprob_candidate_token_ids = {0: [1, 2]}
+    metadata.logprob_token_ids = {1: [5, 6]}
+    result = Sampler()(logits, metadata).logprobs_tensors
+    assert result is not None
+    assert set(result.logprob_token_ids[0, 1:].tolist()) == {1, 2}
+    assert result.logprob_token_ids[1, 1:3].tolist() == [5, 6]
+    expected = logits.log_softmax(-1).gather(1, result.logprob_token_ids.long())
+    expected[1, 3:] = -torch.inf
+    torch.testing.assert_close(result.logprobs, expected)
+
+
+def test_candidate_logprobs_without_draft_tokens():
+    logits = torch.arange(16, dtype=torch.float32, device=DEVICE_TYPE).reshape(2, 8)
+    metadata = create_sampling_metadata(all_greedy=True)
+    metadata.max_num_logprobs = 4
+    metadata.logprob_candidate_token_ids = {0: [1, 2]}
+    spec_metadata = SpecDecodeMetadata.make_dummy([[], []], device=logits.device)
+    spec_metadata.bonus_logits_indices = torch.arange(2, device=logits.device)
+    result = RejectionSampler(Sampler())(
+        spec_metadata, None, logits, metadata
+    ).logprobs_tensors
+    assert result is not None
+    assert set(result.logprob_token_ids[0, 1:].tolist()) == {1, 2}
+    assert set(result.logprob_token_ids[1, 1:].tolist()) == {4, 5, 6, 7}
+    torch.testing.assert_close(
+        result.logprobs,
+        logits.log_softmax(-1).gather(1, result.logprob_token_ids.long()),
+    )
+
+
 ########################### Tests for Greedy Sampling ###################
 def test_perfect_match(rejection_sampler):
     """Test when output tokens perfectly match speculated tokens."""

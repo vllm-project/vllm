@@ -76,6 +76,7 @@ class Sampler:
         ]
 
         self.logprob_token_ids_state = LogprobTokenIdsState(max_num_reqs, device)
+        self.logprob_candidates: dict[int, list[int]] = {}
         self.thinking_budget_state = ThinkingBudgetState(
             req_states, vllm_config.reasoning_config
         )
@@ -103,8 +104,16 @@ class Sampler:
         self.needs_logits_processing[req_idx] = needs_processing
 
         self.logprob_token_ids_state.add_request(req_idx, sampling_params)
+        self.logprob_candidates.pop(req_idx, None)
+        if sampling_params._logprob_candidate_token_ids is not None:
+            self.logprob_candidates[req_idx] = (
+                sampling_params._logprob_candidate_token_ids
+            )
         if self.trace_replay_state is not None:
             self.trace_replay_state.add_request(req_idx, sampling_params)
+
+    def remove_request(self, req_idx: int) -> None:
+        self.logprob_candidates.pop(req_idx, None)
 
     def apply_staged_writes(self) -> None:
         self.sampling_states.apply_staged_writes()
@@ -179,6 +188,12 @@ class Sampler:
                 num_logprobs,
                 sampled,
                 cu_num_logits,
+                max_rows_per_request=int(np.diff(cu_num_logits_np).max(initial=1)),
+                candidates={
+                    int(idx): self.logprob_candidates[int(idx)]
+                    for idx in idx_mapping_np
+                    if int(idx) in self.logprob_candidates
+                },
                 logprob_token_ids_state=self.logprob_token_ids_state,
                 expanded_idx_mapping=input_batch.expanded_idx_mapping,
                 max_per_req_token_ids=max_per_req_token_ids,

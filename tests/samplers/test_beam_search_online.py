@@ -18,7 +18,7 @@ from vllm.entrypoints.generate.beam_search.utils import (
     BeamSearchSequence,
 )
 from vllm.inputs import EngineInput, TokensInput
-from vllm.logprobs import Logprob, SampleLogprobs
+from vllm.logprobs import Logprob, SampleLogprobs, append_logprobs_for_next_position
 from vllm.sampling_params import BeamSearchParams
 from vllm.v1.structured_output.backend_types import StructuredOutputBackend
 
@@ -152,18 +152,30 @@ async def test_beam_search_handles_extra_logprob_candidates() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("allowed_ids", [[11, 12], [11, *range(100, 227), 12]])
+@pytest.mark.parametrize("allowed_ids", [[11], [11, 12], [11, *range(100, 227), 12]])
 async def test_beam_search_scores_all_allowed_tokens(monkeypatch, allowed_ids) -> None:
     """Select both allowed beams even when one falls outside raw top-k."""
+    calls = []
 
     class ScoringClient(_EngineClient):
         async def generate(self, prompt, params, *args, **kwargs):
+            calls.append(params)
             async for result in super().generate(prompt, params, *args, **kwargs):
                 scores = result.outputs[0].logprobs[0]
-                ids = params.logprob_token_ids or [11]
-                result.outputs[0].logprobs = [
-                    {token: scores[token] for token in [0, *ids] if token in scores}
-                ]
+                ids = params._logprob_candidate_token_ids or [11]
+                assert params.logprobs == 4
+                selected = [token for token in ids if token in scores]
+                token_ids = [0, *(selected * 4)[:4]]
+                logprobs: SampleLogprobs = []
+                append_logprobs_for_next_position(
+                    logprobs,
+                    token_ids,
+                    [scores[token].logprob for token in token_ids],
+                    [None] * len(token_ids),
+                    1,
+                    4,
+                )
+                result.outputs[0].logprobs = logprobs
                 yield result
 
     serving = _AsyncServing()
@@ -175,8 +187,17 @@ async def test_beam_search_scores_all_allowed_tokens(monkeypatch, allowed_ids) -
     outputs = [
         output async for output in serving.beam_search(prompt, "request", params)
     ]
-    assert [choice.token_ids for choice in outputs[0].outputs] == [[11], [12]]
-    assert [choice.cumulative_logprob for choice in outputs[0].outputs] == [-1.0, -2.0]
+    assert len(calls) == 1
+    expected = [token for token in [11, 12] if token in allowed_ids]
+    assert [choice.token_ids for choice in outputs[0].outputs] == [
+        [token] for token in expected
+    ]
+    assert [choice.cumulative_logprob for choice in outputs[0].outputs] == [-1.0, -2.0][
+        : len(expected)
+    ]
+    for choice in outputs[0].outputs:
+        assert choice.logprobs is not None
+        assert all(logprob.rank is None for logprob in choice.logprobs[0].values())
 
 
 @pytest.mark.asyncio
@@ -350,5 +371,54 @@ def test_offline_structured_beam_search_disables_internal_watermarking() -> None
     assert beam_params is not base_params
     assert beam_params.logprobs == base_params.logprobs
     assert beam_params.watermarking is False
-    assert beam_params.allowed_token_ids == [0]
+    assert beam_params._logprob_candidate_token_ids == [0]
     assert base_params.allowed_token_ids is None
+
+
+@pytest.mark.parametrize("terminated", [False, True])
+def test_offline_grammar_dead_end_is_not_completion(terminated):
+    serving = _OfflineServing()
+    serving.model_config = MagicMock()
+    serving.model_config.get_vocab_size.return_value = 32
+    grammar = MagicMock()
+    grammar.is_terminated.return_value = terminated
+    grammar.fill_bitmask.side_effect = lambda mask, index: mask[index].fill_(1)
+    backend = MagicMock()
+    backend.compile_grammar.return_value = grammar
+    instance = BeamSearchInstance({"type": "token", "prompt_token_ids": [1]})
+    exhausted = BeamSearchOfflineMixin._beam_search_step(
+        serving,
+        [instance],
+        SamplingParams(logprobs=2),
+        0,
+        False,
+        1,
+        lambda beam: beam.cum_logprob,
+        backend,
+        ("regex", ".*"),
+        torch.zeros((1, 1), dtype=torch.int32),
+        [2],
+    )
+    assert exhausted
+    assert not instance.beams
+    assert len(instance.completed) == int(terminated)
+
+
+@pytest.mark.parametrize("has_completed", [False, True])
+def test_offline_beam_search_reports_unsatisfiable_constraints(has_completed):
+    class Serving(_OfflineServing):
+        def _beam_search_step(self, instances_batch, *args, **kwargs):
+            for instance in instances_batch:
+                if has_completed:
+                    instance.completed.extend(instance.beams)
+                instance.beams = []
+            return True
+
+    serving = Serving()
+    prompts = [{"type": "token", "prompt_token_ids": [1]}]
+    params = BeamSearchParams(beam_width=1, max_tokens=1, watermarking=False)
+    if has_completed:
+        assert len(serving.beam_search(prompts, params)[0].sequences) == 1
+    else:
+        with pytest.raises(ValueError, match="no valid continuation for input 0"):
+            serving.beam_search(prompts, params)

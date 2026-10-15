@@ -409,6 +409,8 @@ class SamplingParams(
     allowed_token_ids: list[int] | None = None
     """If provided, the engine will construct a logits processor which only
     retains scores for the given token ids."""
+    # Internal beam scoring: restrict selection, not normalization.
+    _logprob_candidate_token_ids: list[int] | None = None
     extra_args: dict[str, Any] | None = None
     """Arbitrary additional args, that can be used by custom sampling
     implementations, plugins, etc. Not used by any in-tree sampling
@@ -910,6 +912,10 @@ class SamplingParams(
         self._validate_trace_replay(model_config, speculative_config)
         self._validate_stop_token_ids(model_config)
         self._validate_allowed_token_ids(model_config)
+        if self._logprob_candidate_token_ids is not None:
+            SamplingParams(
+                allowed_token_ids=self._logprob_candidate_token_ids
+            )._validate_allowed_token_ids(model_config)
         self._validate_spec_decode(speculative_config)
         self._validate_diffusion(model_config)
         self._validate_structured_outputs(
