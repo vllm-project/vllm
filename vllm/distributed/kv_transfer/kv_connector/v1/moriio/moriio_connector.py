@@ -1927,6 +1927,8 @@ class MoRIIOConnectorWorker:
             multi_pod_hosts: List of pod IPs for multi-pod Wide-EP
             remote_dp_size_local: Per-pod DP size for multi-pod
             remote_dp_size: Global DP size of the decode instance
+            target_tp_ranks: Decode TP ranks targeted by an MLA write fan-out
+            remote_tp_size: TP size of the remote decode instance
 
         """
         # synchronization to prevent dirty reads between

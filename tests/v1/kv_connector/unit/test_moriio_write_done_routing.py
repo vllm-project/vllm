@@ -378,9 +378,7 @@ def test_fanout_write_done_notifies_every_target_after_completion():
     info.writes_done = 1
     writer._finalize_if_complete("tA", info)
 
-    assert worker.moriio_wrapper.waited_statuses == [
-        ["write-to-tp2", "write-to-tp3"]
-    ]
+    assert worker.moriio_wrapper.waited_statuses == [["write-to-tp2", "write-to-tp3"]]
     assert worker.moriio_wrapper.sent_notifies == [
         (
             "tA",

@@ -397,9 +397,7 @@ class MoRIIOWriter:
             sessions, remote_moriio_meta = self.worker._get_built_session(
                 task.dst_engine_id
             )
-            plan = self._prepare_transfer_plan(
-                task, request_info, remote_moriio_meta
-            )
+            plan = self._prepare_transfer_plan(task, request_info, remote_moriio_meta)
             transfer_statuses = self._do_layer_write(plan, sessions)
         with self._write_state_lock:
             request_info.transfer_statuses.extend(transfer_statuses)
@@ -420,6 +418,7 @@ class MoRIIOWriter:
             task: The write task
             request_info: Remote allocation information
             remote_moriio_meta: Metadata of the remote MoRIIO agent
+            remote_engine_id: Destination engine ID used to resolve remote offsets
 
         Returns:
             The transfer plan
