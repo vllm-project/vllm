@@ -1,8 +1,8 @@
-group: LM Eval
+group: LM Eval Intel
 depends_on:
   - image-build-xpu
 steps:
-- label: "XPU GPQA Eval (GPT-OSS)"
+- label: ":intel: (BMG) GPQA Eval (GPT-OSS)"
   key: xpu-gpqa-eval-gpt-oss
   timeout_in_minutes: 60
   device: intel_gpu
@@ -23,10 +23,9 @@ steps:
   commands:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-      'uv pip install "gpt-oss[eval]==0.0.5" &&
-      cd tests &&
+      'cd tests &&
       pytest -s -v evals/gpt_oss/test_gpqa_correctness.py --config-list-file=configs/models-xpu.txt'
-- label: LM Eval Large Models(2 GPUs)
+- label: ":intel: (BMG) LM Eval Large Models(2 GPUs)"
   key: lm-eval-large-models-2-gpus
   timeout_in_minutes: 45
   device: intel_gpu

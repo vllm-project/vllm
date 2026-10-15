@@ -53,9 +53,9 @@ steps:
     - VLLM_USE_FLASHINFER_SAMPLER=1 pytest -v -s samplers/test_beam_search.py::test_beam_search_passes_multimodal_data
   mirror:
     amd:
-      label: ":amd: (MI355) Samplers Multimodal Beam Search"
+      label: ":amd: (MI355 DPX) Samplers Multimodal Beam Search"
       dind: false
-      device: mi355_1
+      device: mi355_dpx
       num_devices: 1
       timeout_in_minutes: 45
       working_dir: /vllm-workspace/tests

@@ -531,6 +531,7 @@ class MoeWNA16Method(FusedMoEMethodBase):
             topk_group=layer.topk_group,
             e_score_correction_bias=layer.e_score_correction_bias,
             routed_scaling_factor=layer.routed_scaling_factor,
+            routing_sink=layer.routing_sink,
         )
 
     @staticmethod
@@ -635,10 +636,14 @@ class MoeWNA16Method(FusedMoEMethodBase):
                 tensor = loaded_weight.view(
                     layer.moe_config.tp_size, -1, loaded_weight.size(1)
                 )[tp_rank]
+                # qzeros are packed along the intermediate dim by
+                # bit8_pack_factor, so the w1/w3 boundary is in packed units
+                # (equals shard_size // 2 only for 4-bit).
+                shard_zp_size = shard_size // layer.quant_config.bit8_pack_factor
                 if shard_id == "w1":
-                    param.data[expert_id, : shard_size // 2] = tensor
+                    param.data[expert_id, :shard_zp_size] = tensor
                 else:
-                    param.data[expert_id, shard_size // 2 :] = tensor
+                    param.data[expert_id, shard_zp_size:] = tensor
                 return True if return_success else None
             elif "w2_qzeros" in weight_name:
                 param.data[expert_id] = loaded_weight.view(

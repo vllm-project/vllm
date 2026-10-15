@@ -13,6 +13,8 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+NVFP4_PER_TOKEN_BASE_GLOBAL_SCALE = 1.0 / (448.0 * 6.0)
+
 
 def activation_to_flashinfer_int(activation: MoEActivation) -> int:
     return activation_to_flashinfer_type(activation).value
@@ -48,6 +50,20 @@ def activation_to_flashinfer_type(activation: MoEActivation) -> "ActivationType"
         MoEActivation.RELU2_NO_MUL: ActivationType.Relu2,
     }
     return ACTIVATION_TO_FI_ACTIVATION[activation]
+
+
+def quantize_nvfp4_per_token_input(
+    hidden_states: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Quantize NVFP4 activations with one FP32 decode scale per token."""
+    from flashinfer import SfLayout, nvfp4_quantize
+
+    return nvfp4_quantize(
+        hidden_states,
+        NVFP4_PER_TOKEN_BASE_GLOBAL_SCALE,
+        sfLayout=SfLayout.layout_linear,
+        per_token_activation=True,
+    )
 
 
 def swap_w13_to_w31(x: torch.Tensor) -> torch.Tensor:
@@ -264,7 +280,21 @@ def align_fp4_moe_weights_for_fi(
     return padded_w13, padded_w13_scale, padded_w2, padded_w2_scale, padded_intermediate
 
 
-def align_trtllm_fp4_moe_hidden_dim_for_fi(
+def trtllm_nvfp4_hidden_alignment(
+    per_token_activation: bool, is_act_and_mul: bool
+) -> int:
+    """Hidden-dim alignment for the TRTLLM-Gen NVFP4 MoE cubins.
+
+    The per-token (dynamic activation scale) non-gated variant has far fewer
+    tile configs for 256-aligned K and its heuristic default tactic fails with
+    "No valid config found" (e.g. Nemotron's 2688 -> 2816), so pad to 512.
+    """
+    if per_token_activation and not is_act_and_mul:
+        return 512
+    return 256
+
+
+def align_fp4_moe_hidden_dim_for_fi(
     w13: torch.Tensor,
     w13_scale: torch.Tensor,
     w2: torch.Tensor,
@@ -279,7 +309,7 @@ def align_trtllm_fp4_moe_hidden_dim_for_fi(
         return w13, w13_scale, w2, w2_scale, hidden_size
 
     logger.warning_once(
-        "Padding hidden size from %d to %d for TRTLLM NVFP4 MoE weights. "
+        "Padding hidden size from %d to %d for FlashInfer NVFP4 MoE weights. "
         "This requires activation slicing at runtime and may cause "
         "performance degradation.",
         hidden_size,

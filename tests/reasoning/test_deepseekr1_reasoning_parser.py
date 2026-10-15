@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
 from tests.reasoning.utils import run_reasoning_extraction
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
@@ -15,7 +15,7 @@ REASONING_MODEL_NAME = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
 
 
 @pytest.fixture(scope="module")
-def deepseek_r1_qwen_tokenizer():
+def deepseek_r1_qwen_tokenizer() -> PreTrainedTokenizerBase:
     return AutoTokenizer.from_pretrained(REASONING_MODEL_NAME)
 
 
@@ -279,10 +279,10 @@ def test_reasoning(
 
     # Test extract_content
     if param_dict["content"] is not None:
-        content = parser.extract_content_ids(output_ids)
-        assert content == deepseek_r1_qwen_tokenizer.convert_tokens_to_ids(
+        content_ids = parser.extract_content_ids(output_ids)
+        assert content_ids == deepseek_r1_qwen_tokenizer.convert_tokens_to_ids(
             deepseek_r1_qwen_tokenizer.tokenize(param_dict["content"])
         )
     else:
-        content = parser.extract_content_ids(output)
-        assert content == []
+        content_ids = parser.extract_content_ids(output)
+        assert content_ids == []

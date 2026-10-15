@@ -16,6 +16,7 @@ from transformers import AutoModelForSeq2SeqLM
 from vllm import CompletionOutput, RequestOutput
 from vllm.assets.audio import AudioAsset
 from vllm.entrypoints.llm import LLM
+from vllm.inputs import TokensInput
 from vllm.logprobs import Logprob, SampleLogprobs
 from vllm.platforms import current_platform
 from vllm.sampling_params import BeamSearchParams, StructuredOutputsParams
@@ -107,7 +108,8 @@ def test_beam_search_abort_returns_partial_outputs_and_continues_other_prompts(
     llm.renderer = Mock(get_tokenizer=Mock(return_value=tokenizer))
     monkeypatch.setattr(llm, "_preprocess_cmpl", lambda prompts: prompts)
     monkeypatch.setattr(llm, "_render_and_run_requests", run_requests)
-    prompts = [
+    # Engine inputs, since _preprocess_cmpl is patched to the identity
+    prompts: list[TokensInput] = [
         {"type": "token", "prompt_token_ids": [token]} for token in [prompt_token, 2]
     ]
     params = BeamSearchParams(beam_width=2, max_tokens=3)
