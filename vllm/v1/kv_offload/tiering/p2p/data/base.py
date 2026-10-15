@@ -58,10 +58,12 @@ The transport decides each failure's scope:
 
 - Transfer: write_blocks() returned None or poll() listed the id in
   ``failed``. The caller fails that round; the peer recomputes.
-- Peer: the registration for a peer is unusable (one decisive error, or
-  repeated transfer failures with no success between). poll(peer_id)
-  reports the cause in ``PollResult.peer_fault`` until
-  remove_remote_peer().
+- Peer: the registration for a peer is unusable (one decisive error, such
+  as any failed state check of an inflight transfer, or repeated transfer
+  failures with no success between). poll(peer_id) reports the cause in
+  ``PollResult.peer_fault`` until remove_remote_peer(). A transfer whose
+  state check failed stays inflight unless the failure proves it can no
+  longer write, so the peer's teardown is what bounds it.
 
 The transport never recovers a peer itself. The session turns a peer
 fault into the same connection death as a missed heartbeat, so the

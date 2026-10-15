@@ -11,6 +11,7 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 
+from vllm.v1.kv_offload.tiering.p2p.data import nixl as nixl_module
 from vllm.v1.kv_offload.tiering.p2p.data.base import PollResult
 from vllm.v1.kv_offload.tiering.p2p.data.nixl import NixlTransport
 
@@ -488,6 +489,12 @@ class nixlNotFoundError(Exception):  # noqa: N801
     """Stand-in for NIXL's binding exception of the same name."""
 
 
+class nixlBackendError(Exception):  # noqa: N801
+    """Stand-in for NIXL's binding exception of the same name: what a failed
+    UCX transfer raises from check_xfer_state (the bindings raise for every
+    NIXL error status rather than return "ERR")."""
+
+
 class TestNixlPeerFaults:
     """The transport classifies each failure and reports a peer fault.
 
@@ -503,6 +510,8 @@ class TestNixlPeerFaults:
         return transport
 
     def _fail_one(self, transport: NixlTransport, peer_id: str = "peer:1"):
+        """One transfer reported in state "ERR": the transport contract's
+        transfer-scope failure (NIXL 1.5.0 raises instead; see below)."""
         tid = transport.write_blocks(peer_id, [0], [1])
         transport._agent.check_xfer_state.return_value = "ERR"
         result = transport.poll(peer_id=peer_id)
@@ -574,25 +583,106 @@ class TestNixlPeerFaults:
         assert transport.write_blocks("peer:1", [0], [1]) is None
         assert transport.poll(peer_id="peer:1").peer_fault is not None
 
-    def test_raising_state_check_counts_once_per_transfer(self):
-        """A transfer whose state check keeps raising stays inflight (not
-        provably terminal) and is charged to its peer once, not per poll."""
+    def test_raising_state_check_faults_the_peer_and_keeps_the_transfer(self):
+        """A failed transfer's state check raises. The WRITE may still be
+        landing, so the transfer stays inflight, but its peer is faulted at
+        once: strikes could be reset by other successes forever."""
         transport = self._make_transport()
         tid = transport.write_blocks("peer:1", [0], [1])
-        transport._agent.check_xfer_state.side_effect = RuntimeError("flaky")
-        for _ in range(5):
+        transport._agent.check_xfer_state.side_effect = nixlBackendError(
+            "NIXL_ERR_BACKEND"
+        )
+        for _ in range(3):
             result = transport.poll(peer_id="peer:1")
-            assert result.peer_fault is None
             assert result.failed == ()
+            assert result.peer_fault == (
+                "check_xfer_state raised nixlBackendError: NIXL_ERR_BACKEND"
+            )
         assert tid in transport._inflight
+        assert transport.poll(peer_id="peer:2").peer_fault is None
+
+    def test_raise_faults_despite_a_success_in_the_batch(self):
+        transport = self._make_transport()
+        self._distinct_handles(
+            transport, ["DONE", nixlBackendError("NIXL_ERR_BACKEND"), "DONE"]
+        )
+        result = transport.poll(peer_id="peer:1")
+        assert len(result.done) == 2
+        assert result.peer_fault is not None
+
+    def _distinct_handles(self, transport: NixlTransport, states: list):
+        """Submit one transfer per entry in *states* to peer:1; each one's
+        check_xfer_state returns (or raises) its entry. Returns the tids."""
+        handles = [object() for _ in states]
+        transport._agent.make_prepped_xfer.side_effect = handles
+        tids = [transport.write_blocks("peer:1", [0], [1]) for _ in states]
+        by_handle = dict(zip(map(id, handles), states))
+
+        def check(handle):
+            state = by_handle[id(handle)]
+            if isinstance(state, Exception):
+                raise state
+            return state
+
+        transport._agent.check_xfer_state.side_effect = check
+        return tids
+
+    def test_success_in_the_same_batch_prevents_the_fault(self):
+        """A DONE in the batch that also holds the failure reaching the
+        threshold resets the strikes first, whatever the iteration order."""
+        transport = self._make_transport()
+        self._fail_one(transport)
+        self._fail_one(transport)
+        # The ERR is the oldest transfer, so it is iterated first.
+        tids = self._distinct_handles(transport, ["ERR", "DONE", "DONE", "DONE"])
+        result = transport.poll(peer_id="peer:1")
+        assert result.failed == [tids[0]]
+        assert sorted(result.done) == sorted(tids[1:])
+        assert result.peer_fault is None
         assert transport._peer_strikes == {"peer:1": 1}
 
-    def test_raising_state_checks_on_distinct_transfers_fault(self):
+    def test_batch_of_failures_still_faults_despite_a_success(self):
         transport = self._make_transport()
-        for _ in range(3):
-            transport.write_blocks("peer:1", [0], [1])
-        transport._agent.check_xfer_state.side_effect = RuntimeError("flaky")
+        self._distinct_handles(transport, ["ERR", "ERR", "ERR", "DONE"])
         assert transport.poll(peer_id="peer:1").peer_fault is not None
+
+    def test_not_found_state_check_keeps_the_transfer(self):
+        """#59790 measured a WRITE still landing while its handle raised
+        NOT_FOUND, so NOT_FOUND faults the peer but is not terminal."""
+        transport = self._make_transport()
+        tid = transport.write_blocks("peer:1", [0], [1])
+        transport._agent.check_xfer_state.side_effect = nixlNotFoundError(
+            "NIXL_ERR_NOT_FOUND"
+        )
+        result = transport.poll(peer_id="peer:1")
+        assert result.failed == ()
+        assert result.peer_fault == "NIXL_ERR_NOT_FOUND"
+        assert tid in transport._inflight
+
+    def test_not_found_in_cancel_keeps_the_transfer(self):
+        transport = self._make_transport()
+        tid = transport.write_blocks("peer:1", [0], [1])
+        transport._agent.check_xfer_state.side_effect = nixlNotFoundError(
+            "NIXL_ERR_NOT_FOUND"
+        )
+        assert transport.cancel([tid], mode="wait") == [tid]
+        assert tid in transport._inflight
+        transport._agent.check_xfer_state.side_effect = None
+        assert transport.poll(peer_id="peer:1").peer_fault == "NIXL_ERR_NOT_FOUND"
+
+    def test_raising_state_check_warns_once(self, monkeypatch):
+        warnings: list[str] = []
+        monkeypatch.setattr(
+            nixl_module.logger, "warning", lambda msg, *a, **k: warnings.append(msg)
+        )
+        transport = self._make_transport()
+        transport.write_blocks("peer:1", [0], [1])
+        transport._agent.check_xfer_state.side_effect = nixlBackendError(
+            "NIXL_ERR_BACKEND"
+        )
+        for _ in range(5):
+            transport.poll(peer_id="peer:1")
+        assert sum("check_xfer_state failed" in w for w in warnings) == 1
 
     def test_remove_remote_peer_clears_the_fault(self):
         transport = self._make_transport()
