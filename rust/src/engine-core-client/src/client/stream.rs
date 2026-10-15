@@ -3,6 +3,7 @@
 
 use std::ops::Deref;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use futures::stream::FusedStream;
@@ -30,6 +31,7 @@ enum State {
 pub struct EngineCoreStreamOutput {
     pub engine_index: u32,
     pub timestamp: f64,
+    pub weight_version: Option<Arc<str>>,
     pub output: EngineCoreOutput,
 }
 

@@ -198,7 +198,8 @@ def test_kda_recoverssm_startup_metadata_flow_without_model(monkeypatch):
 
     builder_config = SimpleNamespace(
         model_config=SimpleNamespace(
-            hf_text_config=SimpleNamespace(linear_key_head_dim=32)
+            dtype=torch.bfloat16,
+            hf_text_config=SimpleNamespace(linear_key_head_dim=32),
         ),
         cache_config=SimpleNamespace(
             mamba_cache_mode="align",
@@ -219,7 +220,7 @@ def test_kda_recoverssm_startup_metadata_flow_without_model(monkeypatch):
         scheduler_config=SimpleNamespace(max_num_seqs=4),
         additional_config={},
         num_speculative_tokens=2,
-        use_v2_model_runner=False,
+        use_v2_model_runner=True,
     )
     builder = KimiK3KDAMetadataBuilder(
         kv_cache_spec=kv_cache_spec,
