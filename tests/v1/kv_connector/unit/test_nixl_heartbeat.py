@@ -148,6 +148,73 @@ def test_request_finished_stops_heartbeat():
     assert len(s._heartbeat_req_engine) == 0
 
 
+def _shareable_req(request_id):
+    request = _req(request_id)
+    request.kv_transfer_params.update(
+        remote_block_ids=[[10, 11, 20 + request_id]],
+        remote_block_size=16,
+        remote_num_tokens=48,
+        pcp_size=1,
+        transfer_mode="pull",
+    )
+    return request
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("remote_engine_id", "another-engine"),
+        ("remote_host", "another-host"),
+        ("remote_port", 4321),
+        ("remote_request_id", "prefill-1"),
+        ("remote_block_ids", [[10, 99, 22]]),
+        ("remote_block_ids", [[10]]),
+        ("remote_block_ids", [10]),
+        ("remote_block_ids", [[10, 11], [12, 13]]),
+        ("remote_block_size", None),
+        ("remote_block_size", 32),
+        ("remote_num_tokens", 16),
+        ("remote_num_tokens", None),
+        ("tp_size", 2),
+        ("dcp_size", 2),
+        ("pcp_size", 2),
+        ("pcp_size", None),
+        ("pp_size", 2),
+        ("transfer_mode", "push"),
+        ("do_remote_decode", True),
+    ],
+)
+def test_shared_load_rejects_incompatible_source_or_lease(field, value):
+    """Token equality is insufficient to attest physical KV and lease identity."""
+    s = _sched()
+    owner, follower = _shareable_req(1), _shareable_req(2)
+    assert s.is_shared_prefix_load_compatible(follower, owner, 32)
+    follower.kv_transfer_params[field] = value
+    assert not s.is_shared_prefix_load_compatible(follower, owner, 32)
+
+
+def test_shared_load_releases_each_unused_producer_lease_once():
+    """Followers release independent producer leases without reading KV."""
+    s = _sched()
+    owner, follower1, follower2 = [_shareable_req(i) for i in (1, 2, 3)]
+    for request in (owner, follower1, follower2):
+        s.on_new_request(request)
+    for follower in (follower1, follower2):
+        s.on_shared_prefix_load(follower, owner, 32)
+    meta = s.build_connector_meta(MagicMock())
+    assert set(meta.reqs_to_recv) == {"id-2", "id-3"}
+    assert {entry.remote.request_id for entry in meta.reqs_to_recv.values()} == {
+        "prefill-2",
+        "prefill-3",
+    }
+    assert all(not entry.local_block_ids for entry in meta.reqs_to_recv.values())
+    assert all(not entry.awaiting_kvs for entry in meta.reqs_to_recv.values())
+    assert s._heartbeat_by_engine[_ENGINE_A].req_ids == {"prefill-1"}
+    for follower in (follower1, follower2):
+        s.request_finished(follower, block_ids=())
+    assert not s.build_connector_meta(MagicMock()).reqs_to_recv
+
+
 # ===================================================================
 # Worker: _handle_heartbeat
 # ===================================================================

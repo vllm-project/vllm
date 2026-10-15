@@ -3,6 +3,7 @@
 
 from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator, Iterable, Mapping
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -38,6 +39,18 @@ class StreamingInput:
 
     prompt: EngineInput
     sampling_params: SamplingParams | None = None
+
+
+@dataclass
+class KVTransferAdmissionState:
+    """Shared with child tasks until serving hands cleanup to the engine."""
+
+    admitted: bool = False
+
+
+kv_transfer_admission: ContextVar[KVTransferAdmissionState | None] = ContextVar(
+    "kv_transfer_admission", default=None
+)
 
 
 class EngineClient(ABC):

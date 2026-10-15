@@ -132,6 +132,35 @@ python tests/v1/kv_connector/nixl_integration/toy_proxy_server.py \
     - In bidirectional mode, the decoder caches KV blocks for multi-turn conversations. This TTL controls how long those blocks are held before being released. Unlike the prefiller lease, this TTL is not renewed via heartbeats.
     - Example: `--kv-transfer-config '{"kv_connector_extra_config": {"decoder_kv_blocks_ttl": 600}}'`
 
+## Sharing an In-Flight Prefix Load
+
+The pull connector can let compatible requests wait for one in-flight read of
+their common prefix. Enable it on the decoder with
+`"enable_shared_prefix_loads": true` in `kv_connector_extra_config`, together
+with prefix caching. It is disabled by default.
+
+The initial supported configuration is full attention with one KV cache group,
+TP1, PP1, no context parallelism, no speculative decoding, no host staging,
+and no bidirectional transfer. Each decoder request must carry its own producer
+request and lease. A single producer lease cannot be fanned out to multiple
+decoder requests using this option.
+
+Sharing requires matching local prefix hashes (including cache salt), the same
+producer engine and endpoint, matching block sizes, and identical physical
+producer blocks for the shared prefix. The producer must return
+`remote_block_size` and `pcp_size`; older producers fall back to independent
+reads. Distinct producer requests can meet these conditions through producer prefix caching.
+Identical tokens in different producer blocks do not qualify, so a cold,
+concurrent producer batch may still require independent reads.
+
+The initiating request loads its entire prompt as usual. Followers share only
+complete prefix blocks and compute their own remaining tail locally (up to one
+block for an identical full prompt). Their unused producer leases are released
+through notification-only operations. Cancelling the initiating request keeps
+its read and lease alive until completion. A failed shared read follows
+`kv_load_failure_policy`; recomputation uses local compute, not the followers'
+already released producer leases.
+
 ## Bidirectional KV Transfer (Multi-turn)
 
 In standard disaggregated prefilling, KV cache flows in one direction: Prefill (P) computes the KV cache and Decode (D) reads from P. For multi-turn conversations this is wasteful — D already holds the KV cache corresponding to the generated tokens from prior turns, yet P must recompute it from scratch on every new turn. Bidirectional KV transfer lets P **pull** existing KV blocks from D via RDMA before computing only the new tokens, significantly reducing Time-To-First-Token (TTFT) for long-prefill such as **multi-turn heavy scenarios**.
