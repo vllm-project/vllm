@@ -55,6 +55,16 @@ class MiniMaxM3MonoSpec:
         text_config = config.model_config.hf_text_config
         if getattr(text_config, "use_index_cache", False):
             reasons.append("does not support cross-layer index reuse")
+        if config.kernel_config.moe_backend != "aiter":
+            reasons.append("requires --moe-backend aiter")
+        sparse = getattr(text_config, "sparse_attention_config", None)
+        if text_config.num_hidden_layers != 60 or not sparse:
+            reasons.append("requires the 60-layer MiniMax M3 sparse schema")
+        else:
+            frequencies = sparse.get("sparse_attention_freq", ())
+            sparse_layers = [i for i, enabled in enumerate(frequencies) if enabled]
+            if sparse_layers != list(range(self.first_layer, self.last_layer + 1)):
+                reasons.append("requires sparse attention on layers 3 through 59")
 
         return reasons
 

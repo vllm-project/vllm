@@ -10,6 +10,7 @@ from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
 from vllm.models.minimax_m3.amd.mono.stages import (
     fp32_router_stage,
     gemma_norm_stage,
+    select_index_blocks,
 )
 from vllm.models.minimax_m3.amd.ops import gemma_rmsnorm
 from vllm.platforms import current_platform
@@ -30,6 +31,28 @@ def _metrics(actual: torch.Tensor, expected: torch.Tensor) -> tuple[float, float
     cosine = torch.nn.functional.cosine_similarity(actual_f, expected_f, dim=0)
     relative = (actual_f - expected_f).norm() / expected_f.norm().clamp_min(1e-12)
     return float(cosine), float(relative)
+
+
+def test_index_topk_is_independent_per_head_and_fixed_cardinality():
+    scores = torch.zeros(4, 2, 24, 128)
+    for head in range(4):
+        scores[head, :, head : head + 16] = 10
+    forced = torch.zeros(4, 2, 24, dtype=torch.bool)
+    forced[:, :, 23] = True
+    selected = select_index_blocks(scores, forced)
+    assert selected.shape == (4, 2, 16)
+    for head in range(4):
+        chosen = set(selected[head, 0].tolist())
+        assert len(chosen) == 16
+        assert 23 in chosen
+        assert chosen != set(selected[(head + 1) % 4, 0].tolist())
+
+
+def test_index_topk_uses_max_over_block_tokens():
+    scores = torch.zeros(1, 1, 17, 128)
+    scores[0, 0, 16, 73] = 2
+    selected = select_index_blocks(scores, torch.zeros(1, 1, 17, dtype=torch.bool))
+    assert 16 in selected[0, 0].tolist()
 
 
 @pytest.mark.parametrize("rows", [1, 4, 16])

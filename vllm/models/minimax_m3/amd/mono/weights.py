@@ -8,6 +8,8 @@ from dataclasses import dataclass
 
 import torch
 
+from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
+
 HIDDEN = 6144
 QKV_ROWS = 2560
 O_K = 2048
@@ -50,6 +52,8 @@ class MonoLayerWeights:
     s13: torch.Tensor
     w2: torch.Tensor
     s2: torch.Tensor
+    routed_scale: float
+    shared_weight: float
 
     @classmethod
     def from_layer(cls, layer) -> MonoLayerWeights:
@@ -58,6 +62,7 @@ class MonoLayerWeights:
         moe = layer.block_sparse_moe
         runner = moe.experts
         experts = getattr(runner, "routed_experts", runner)
+        backend = getattr(getattr(experts, "quant_method", None), "mxfp4_backend", None)
 
         _require(
             moe.is_fused_shared_expert_enabled and moe.use_aiter_moe_fse,
@@ -66,6 +71,14 @@ class MonoLayerWeights:
         _require(
             getattr(experts, "top_k", None) == 4,
             f"layer {layer_id} requires top-4 routing",
+        )
+        _require(
+            backend == Mxfp4MoeBackend.AITER_MXFP4_MXFP4,
+            f"layer {layer_id} requires AITER_MXFP4_MXFP4, found {backend}",
+        )
+        _require(
+            float(moe.routed_scaling_factor) == 2.0,
+            f"layer {layer_id} routed scale must be 2.0",
         )
 
         w13 = experts.w13_weight
@@ -90,11 +103,14 @@ class MonoLayerWeights:
         )
         _require(
             s13.dtype == torch.uint8
-            and s13.numel() == EXPERTS * 2 * INTER * HIDDEN // 32,
+            and tuple(s13.shape) == (EXPERTS * 2 * INTER, HIDDEN // 32)
+            and s13.stride(-1) == 1,
             f"layer {layer_id} w13 scales are not shuffled E8M0 group-32",
         )
         _require(
-            s2.dtype == torch.uint8 and s2.numel() == EXPERTS * HIDDEN * INTER // 32,
+            s2.dtype == torch.uint8
+            and tuple(s2.shape) == (EXPERTS * HIDDEN, INTER // 32)
+            and s2.stride(-1) == 1,
             f"layer {layer_id} w2 scales are not shuffled E8M0 group-32",
         )
 
@@ -146,4 +162,6 @@ class MonoLayerWeights:
             s13=s13.data,
             w2=w2.data,
             s2=s2.data,
+            routed_scale=2.0,
+            shared_weight=1.0,
         )

@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
 from vllm.models.minimax_m3.amd.mono.weights import (
     EXPERTS,
     HIDDEN,
@@ -25,6 +26,7 @@ def _layer():
     w2.is_shuffled = True
     experts = SimpleNamespace(
         top_k=4,
+        quant_method=SimpleNamespace(mxfp4_backend=Mxfp4MoeBackend.AITER_MXFP4_MXFP4),
         w13_weight=w13,
         w2_weight=w2,
         w13_weight_scale=_parameter((EXPERTS * 2 * INTER, HIDDEN // 32), torch.uint8),
@@ -36,6 +38,7 @@ def _layer():
         experts=SimpleNamespace(routed_experts=experts),
         gate=SimpleNamespace(weight=_parameter((128, HIDDEN), torch.float32)),
         e_score_correction_bias=_parameter((128,), torch.float32),
+        routed_scaling_factor=2.0,
     )
     attn = SimpleNamespace(
         qkv_proj=SimpleNamespace(weight=_parameter((2560, HIDDEN), torch.bfloat16)),
@@ -73,10 +76,19 @@ def test_weight_views_preserve_checkpoint_formats():
     )
     assert weights.router.dtype == torch.float32
     assert weights.w13.dtype == torch.float4_e2m1fn_x2
+    assert weights.routed_scale == 2.0
+    assert weights.shared_weight == 1.0
 
 
 def test_bf16_router_is_refused():
     layer = _layer()
     layer.block_sparse_moe.gate.weight = _parameter((128, HIDDEN), torch.bfloat16)
     with pytest.raises(ValueError, match="router"):
+        MonoLayerWeights.from_layer(layer)
+
+
+def test_routed_scale_is_independent_of_shared_weight():
+    layer = _layer()
+    layer.block_sparse_moe.routed_scaling_factor = 1.0
+    with pytest.raises(ValueError, match="routed scale"):
         MonoLayerWeights.from_layer(layer)

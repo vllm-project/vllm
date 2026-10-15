@@ -96,11 +96,16 @@ def _config(**overrides):
             resolve_indexer_kv_dtype=lambda _default: "fp8"
         ),
         compilation_config=SimpleNamespace(cudagraph_capture_sizes=[1, 32]),
+        kernel_config=SimpleNamespace(moe_backend="aiter"),
         lora_config=None,
         kv_transfer_config=SimpleNamespace(kv_connector=None),
         use_v2_model_runner=True,
         model_config=SimpleNamespace(
-            hf_text_config=SimpleNamespace(use_index_cache=False)
+            hf_text_config=SimpleNamespace(
+                use_index_cache=False,
+                num_hidden_layers=60,
+                sparse_attention_config={"sparse_attention_freq": [0, 0, 0] + [1] * 57},
+            )
         ),
     )
 
