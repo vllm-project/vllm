@@ -1,13 +1,13 @@
 name: "Geometric: Optimize a kernel"
-description: Get a new kernel optimized for your hardware and is formally verified.
+description: Generate optimized and formally verified kernels specialized to your hardware.
 title: "Optimize kernel: "
 labels: ["optimization"]
 body:
   - type: input
     attributes:
       label: Kernel
-      description: The kernel to optimize, such as a file path or a function name in the repository.
-      placeholder: kernels/attn_fwd.cu
+      description: "The kernel to optimize: a repository path, function name, or fully qualified class name."
+      placeholder: my_package.attention.FusedRoPE
     validations:
       required: true
   - type: dropdown
@@ -67,8 +67,9 @@ body:
       label: Shapes
       description: Input shapes to optimize for, one per line. Leave blank to let the planner choose.
       placeholder: |
-        1x8x4096
-        8x8x4096
+        2x128
+        8x4096
+        256x8192
   - type: checkboxes
     attributes:
       label: Start
