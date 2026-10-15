@@ -630,7 +630,7 @@ class OffloadingConnectorScheduler:
         # Threshold value for stale jobs. All job ids >= _stale_job_threshold are
         # active jobs.
         self._stale_job_threshold: int = 0
-        self._jobs: dict[int, TransferJobStatus] = {}
+        self._job_statuses: dict[int, TransferJobStatus] = {}
 
         # block_id -> pending store job_ids. Used to track jobs that needs
         # flushing in case a block is re-allocated by the KV cache manager.
@@ -1348,7 +1348,7 @@ class OffloadingConnectorScheduler:
         # a load can only be issued when no other jobs are pending.
         assert not req_status.transfer_jobs
         req_status.transfer_jobs.add(load_job_id)
-        self._jobs[load_job_id] = TransferJobStatus(
+        self._job_statuses[load_job_id] = TransferJobStatus(
             req_id=request.request_id,
             pending_count=self.config.num_workers,
             keys=set(keys_to_load),
@@ -1455,7 +1455,7 @@ class OffloadingConnectorScheduler:
                 job_id = self._generate_job_id()
                 req_status.transfer_jobs.add(job_id)
                 self._block_id_to_pending_jobs.setdefault(block_id, set()).add(job_id)
-                self._jobs[job_id] = TransferJobStatus(
+                self._job_statuses[job_id] = TransferJobStatus(
                     req_id=req_id,
                     pending_count=self.config.num_workers,
                     keys={key},
@@ -1580,7 +1580,7 @@ class OffloadingConnectorScheduler:
             req_status.transfer_jobs.add(job_id)
             for block_id in source_blocks:
                 self._block_id_to_pending_jobs.setdefault(block_id, set()).add(job_id)
-            self._jobs[job_id] = TransferJobStatus(
+            self._job_statuses[job_id] = TransferJobStatus(
                 req_id=req_id,
                 pending_count=self.config.num_workers,
                 keys=set(store_output.keys_to_store),
@@ -1888,7 +1888,7 @@ class OffloadingConnectorScheduler:
             # a store can only be issued when no load is pending.
             if req_status.transfer_jobs:
                 any_jid = next(iter(req_status.transfer_jobs))
-                assert self._jobs[any_jid].is_store
+                assert self._job_statuses[any_jid].is_store
             req_status.transfer_jobs.add(job_id)
 
             # Watch sliding window blocks as they may get evicted
@@ -1898,7 +1898,7 @@ class OffloadingConnectorScheduler:
 
             # the non-sliding window blocks will be watched only
             # when the request finishes
-            self._jobs[job_id] = TransferJobStatus(
+            self._job_statuses[job_id] = TransferJobStatus(
                 req_id=req_id,
                 pending_count=self.config.num_workers,
                 keys=set(keys_to_store),
@@ -1955,7 +1955,7 @@ class OffloadingConnectorScheduler:
             if req_status is None or not req_status.transfer_jobs:
                 continue
             any_jid = next(iter(req_status.transfer_jobs))
-            assert self._jobs[any_jid].is_store
+            assert self._job_statuses[any_jid].is_store
             self._current_batch_jobs_to_flush.update(req_status.transfer_jobs)
 
         # Flush jobs that contain re-allocated blocks.
@@ -2013,7 +2013,7 @@ class OffloadingConnectorScheduler:
         release and would hold the manager for good -- which is precisely the
         state an idle engine settles into.
         """
-        if self._jobs:
+        if self._job_statuses:
             return True
         with self._manager_locked():
             return self.manager.has_pending_work()
@@ -2073,7 +2073,7 @@ class OffloadingConnectorScheduler:
                     self._stale_job_threshold,
                 )
                 continue
-            job_status = self._jobs[job_id]
+            job_status = self._job_statuses[job_id]
             job_status.pending_count -= count
             if job_status.pending_count > 0:
                 continue
@@ -2097,7 +2097,7 @@ class OffloadingConnectorScheduler:
                         job_id, job_status.deferred_fence_block_ids
                     )
 
-            del self._jobs[job_id]
+            del self._job_statuses[job_id]
             req_status.transfer_jobs.remove(job_id)
             if req_status.finished_signaled and not req_status.transfer_jobs:
                 del self._req_status[job_status.req_id]
@@ -2162,7 +2162,7 @@ class OffloadingConnectorScheduler:
         # Register deferred fences so future block reuse triggers a flush via
         # _block_id_to_pending_jobs.
         for job_id in req_status.transfer_jobs:
-            job_status = self._jobs[job_id]
+            job_status = self._job_statuses[job_id]
             for bid in job_status.deferred_fence_block_ids or ():
                 self._block_id_to_pending_jobs.setdefault(bid, set()).add(job_id)
 
@@ -2206,7 +2206,7 @@ class OffloadingConnectorScheduler:
 
     def _reset_cache(self) -> None:
         # Flush all in-flight jobs
-        self._current_batch_jobs_to_flush.update(self._jobs.keys())
+        self._current_batch_jobs_to_flush.update(self._job_statuses.keys())
 
         for req_id, status in list(self._req_status.items()):
             if status.req.is_finished():
@@ -2226,7 +2226,7 @@ class OffloadingConnectorScheduler:
 
         # Discard jobs and save job_counter to be able to discard worker responses
         self._stale_job_threshold = self._job_counter
-        self._jobs.clear()
+        self._job_statuses.clear()
         self._block_id_to_pending_jobs.clear()
 
         # The manager pool is empty; pending event payloads and announced
