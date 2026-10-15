@@ -993,3 +993,40 @@ def test_auto_selection_avoids_rocm_attn_triton_fallbacks(
 
     assert backend_path == expected_backend.get_path()
     assert explicit_path == AttentionBackendEnum.ROCM_ATTN.get_path()
+
+
+@pytest.mark.parametrize(
+    "use_spec_decode, is_hybrid, use_kv_connector",
+    [
+        (False, False, False),
+        (True, False, False),
+        (False, True, False),
+        (True, True, False),
+        (True, False, True),
+    ],
+)
+def test_backend_priorities_rank_rocm_attn_below_unified(
+    use_spec_decode, is_hybrid, use_kv_connector
+):
+    from vllm.platforms.rocm import _get_backend_priorities
+
+    with patch("vllm._aiter_ops.is_aiter_found_and_supported", return_value=True):
+        priorities = _get_backend_priorities(
+            use_mla=False,
+            use_sparse=False,
+            use_kv_connector=use_kv_connector,
+            use_spec_decode=use_spec_decode,
+            is_hybrid=is_hybrid,
+        )
+
+    rocm_attn = AttentionBackendEnum.ROCM_ATTN
+    if use_kv_connector:
+        assert rocm_attn not in priorities
+    elif use_spec_decode or is_hybrid:
+        triton_attn = AttentionBackendEnum.TRITON_ATTN
+        assert priorities.index(rocm_attn) == priorities.index(triton_attn) + 1
+    else:
+        assert priorities[0] == rocm_attn
+    assert priorities.index(
+        AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN
+    ) < priorities.index(AttentionBackendEnum.TRITON_ATTN)

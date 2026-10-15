@@ -484,7 +484,19 @@ def _get_backend_priorities(
     use_mla: bool,
     use_sparse: bool,
     use_kv_connector: bool = False,
+    use_spec_decode: bool = False,
+    is_hybrid: bool = False,
 ) -> list[AttentionBackendEnum]:
+    """Backends in priority order for this platform and model.
+
+    ROCM_ATTN's HIP paged-attention kernel only serves single-token decode with
+    a power-of-two block size. Speculative decoding verifies several tokens per
+    request, so every step takes the prefix-prefill kernel instead. Hybrid
+    models enlarge the attention block to the mamba page size (e.g. 832), which
+    disables the HIP kernel. In both cases the unified attention backends,
+    which handle multi-token queries in one kernel, are faster, so ROCM_ATTN
+    stays valid but drops below TRITON_ATTN.
+    """
     from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
 
     if use_sparse:
@@ -505,7 +517,9 @@ def _get_backend_priorities(
     backends = []
     # Keep ROCM_ATTN disabled for KV connectors until connector transfer
     # semantics are validated for its asymmetric native K/V cache views.
-    if not use_kv_connector:
+    use_rocm_attn = not use_kv_connector
+    rocm_attn_first = use_rocm_attn and not (use_spec_decode or is_hybrid)
+    if rocm_attn_first:
         backends.append(AttentionBackendEnum.ROCM_ATTN)
     if rocm_aiter_ops.is_mha_enabled():
         backends.append(AttentionBackendEnum.ROCM_AITER_FA)
@@ -514,28 +528,12 @@ def _get_backend_priorities(
     elif rocm_aiter_ops.is_rdna_aiter_enabled():
         backends.insert(0, AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN)
     backends.append(AttentionBackendEnum.TRITON_ATTN)
+    if use_rocm_attn and not rocm_attn_first:
+        backends.append(AttentionBackendEnum.ROCM_ATTN)
     backends.append(AttentionBackendEnum.TURBOQUANT)
     backends.append(AttentionBackendEnum.ULTRAQUANT)
 
     return backends
-
-
-def _rocm_attn_falls_back_to_triton(vllm_config: "VllmConfig | None") -> bool:
-    """Whether ROCM_ATTN would spend the run in its Triton fallbacks.
-
-    Its HIP paged-attention kernel only serves single-token decode with a
-    power-of-two block size. Speculative decoding verifies several tokens per
-    request, so every step takes the prefix-prefill kernel instead. Hybrid
-    models enlarge the attention block to the mamba page size (e.g. 832), which
-    disables the HIP kernel. In both cases the unified attention backends,
-    which handle multi-token queries in one kernel, are faster.
-    """
-    if vllm_config is None:
-        return False
-    if getattr(vllm_config, "speculative_config", None) is not None:
-        return True
-    model_config = getattr(vllm_config, "model_config", None)
-    return bool(getattr(model_config, "is_hybrid", False))
 
 
 def _uses_turboquant(vllm_config: "VllmConfig | None") -> bool:
@@ -703,17 +701,22 @@ class RocmPlatform(Platform):
         valid_backends_priorities = []
         invalid_reasons = {}
 
+        from vllm.config import get_current_vllm_config_or_none
+
+        vllm_config = get_current_vllm_config_or_none()
+        model_config = getattr(vllm_config, "model_config", None)
+        use_spec_decode = getattr(vllm_config, "speculative_config", None) is not None
+        # Test doubles (e.g. SimpleNamespace model configs) lack is_hybrid.
+        is_hybrid = bool(getattr(model_config, "is_hybrid", False))
         backend_priorities = _get_backend_priorities(
             attn_selector_config.use_mla,
             attn_selector_config.use_sparse,
             attn_selector_config.use_kv_connector,
+            use_spec_decode=use_spec_decode,
+            is_hybrid=is_hybrid,
         )
-        from vllm.config import get_current_vllm_config_or_none
-
-        vllm_config = get_current_vllm_config_or_none()
         is_encoder_decoder = (
-            getattr(getattr(vllm_config, "model_config", None), "attn_type", None)
-            == "encoder_decoder"
+            getattr(model_config, "attn_type", None) == "encoder_decoder"
         )
         # ROCM_ATTN still uses a legacy attention layout (KV is the outer
         # dimension) that is incompatible with the encoder backend layouts. The
@@ -722,16 +725,6 @@ class RocmPlatform(Platform):
         # TODO: Make this explicit in the selector in a future PR.
         if is_encoder_decoder and AttentionBackendEnum.ROCM_ATTN in backend_priorities:
             backend_priorities.remove(AttentionBackendEnum.ROCM_ATTN)
-        if (
-            _rocm_attn_falls_back_to_triton(vllm_config)
-            and AttentionBackendEnum.ROCM_ATTN in backend_priorities
-        ):
-            # Keep ROCM_ATTN valid, but rank the unified backends above it.
-            backend_priorities.remove(AttentionBackendEnum.ROCM_ATTN)
-            backend_priorities.insert(
-                backend_priorities.index(AttentionBackendEnum.TRITON_ATTN) + 1,
-                AttentionBackendEnum.ROCM_ATTN,
-            )
         is_turboquant_run = _uses_turboquant(vllm_config)
         for priority, backend in enumerate(backend_priorities):
             try:
