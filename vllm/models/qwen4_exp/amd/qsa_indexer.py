@@ -20,7 +20,7 @@ from vllm.model_executor.layers.rotary_embedding.mrope import triton_mrope
 from ..common.qsa import (
     QSACompressedKeyCache,
     QSAIndexerMetadata,
-    QSAKeyStateCache,
+    QSARawKeyCache,
     canonical_qsa_rope_positions,
 )
 from .ops.qsa_prepare import qsa_prepare, supports_fused_pre_indexer
@@ -131,7 +131,7 @@ class QSAIndexer(nn.Module):
 
         cache_config = vllm_config.cache_config
         cache_prefix = f"{prefix}." if prefix else ""
-        self.raw_key_cache = QSAKeyStateCache(
+        self.raw_key_cache = QSARawKeyCache(
             head_size=self.index_head_dim,
             dtype=torch.bfloat16,
             cache_rope_positions=vllm_config.model_config.uses_mrope,

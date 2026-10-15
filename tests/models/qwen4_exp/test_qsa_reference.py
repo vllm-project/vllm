@@ -384,8 +384,8 @@ def test_qsa_circular_buffer_survives_one_speculative_step(chunk_start: int) -> 
 
 def _qsa_key_cache(
     block_size: int, compress_ratio: int, **kwargs
-) -> qsa_common.QSAKeyStateCache:
-    return qsa_common.QSAKeyStateCache(
+) -> qsa_common.QSARawKeyCache:
+    return qsa_common.QSARawKeyCache(
         head_size=64,
         dtype=torch.bfloat16,
         cache_config=SimpleNamespace(block_size=block_size),

@@ -730,7 +730,7 @@ class QSAIndexerMetadataBuilder(AttentionMetadataBuilder[QSAIndexerMetadata]):
         )
 
 
-class QSAStateBackend(AttentionBackend):
+class QSAIndexerBackend(AttentionBackend):
     """Key-only dummy backend for out-of-band QSA indexer cache operations."""
 
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.bfloat16]
@@ -744,12 +744,12 @@ class QSAStateBackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "QWEN4_EXP_EXP_QSA_STATE"
+        return "QWEN4_EXP_QSA_INDEXER"
 
     @staticmethod
     def get_impl_cls():
         raise NotImplementedError(
-            "QSA state caches run out-of-band and have no attention impl"
+            "QSA indexer caches run out-of-band and have no attention impl"
         )
 
     @staticmethod
@@ -762,7 +762,7 @@ class QSAStateBackend(AttentionBackend):
         return (KVCacheLayout.BLNHC, KVCacheLayout.BLHNC)
 
 
-class _QSAStateCache(nn.Module, AttentionLayerBase):
+class _QSAIndexerCache(nn.Module, AttentionLayerBase):
     supports_dcp = False
 
     def __init__(
@@ -801,20 +801,20 @@ class _QSAStateCache(nn.Module, AttentionLayerBase):
     def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
         """Adapt the unified [B, H, N, C] view to QSA's [B, N, H, C]."""
         if kv_cache.ndim != 4 or kv_cache.shape[1] != 1:
-            raise ValueError("QSA state cache must be [blocks, 1, states, width]")
+            raise ValueError("QSA indexer cache must be [blocks, 1, states, width]")
         if kv_cache.dtype != self.dtype or kv_cache.shape[3] != self.head_size:
             raise ValueError(
-                f"QSA state cache does not match its spec "
+                f"QSA indexer cache does not match its spec "
                 f"(dtype {kv_cache.dtype} != {self.dtype} or width "
                 f"{kv_cache.shape[3]} != {self.head_size})"
             )
         super().bind_kv_cache(kv_cache.transpose(1, 2))
 
     def get_attn_backend(self) -> type[AttentionBackend]:
-        return QSAStateBackend
+        return QSAIndexerBackend
 
 
-class QSAKeyStateCache(_QSAStateCache):
+class QSARawKeyCache(_QSAIndexerCache):
     """Raw BF16 key, optionally followed by exact int64 MRoPE positions."""
 
     _BF16_PER_INT64 = 4
@@ -866,7 +866,7 @@ class QSAKeyStateCache(_QSAStateCache):
         )
 
 
-class QSACompressedKeyCache(_QSAStateCache):
+class QSACompressedKeyCache(_QSAIndexerCache):
     """Normed, group-first-RoPE key at one row per complete group."""
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
@@ -883,9 +883,9 @@ class QSACompressedKeyCache(_QSAStateCache):
 __all__ = [
     "QSACompressedKeyCache",
     "QSAIndexerMetadata",
-    "QSAKeyStateCache",
+    "QSARawKeyCache",
     "QSAIndexerMetadataBuilder",
-    "QSAStateBackend",
+    "QSAIndexerBackend",
     "canonical_qsa_rope_positions",
     "circular_qsa_slot_mapping",
     "compressed_qsa_slot_mapping",

@@ -18,7 +18,7 @@ from vllm.model_executor.layers.rotary_embedding.mrope import triton_mrope
 from ..common.qsa import (
     QSACompressedKeyCache,
     QSAIndexerMetadata,
-    QSAKeyStateCache,
+    QSARawKeyCache,
     canonical_qsa_rope_positions,
 )
 from .ops.qsa_prepare import qsa_prepare
@@ -162,7 +162,7 @@ class QSAIndexer(nn.Module):
                 "by the Qwen4Exp QSA indexer (only 'bf16' or 'fp8')."
             )
         self.indexer_dtype = indexer_dtype
-        self.raw_key_cache = QSAKeyStateCache(
+        self.raw_key_cache = QSARawKeyCache(
             head_size=self.index_head_dim,
             dtype=torch.bfloat16,
             cache_rope_positions=vllm_config.model_config.uses_mrope,
