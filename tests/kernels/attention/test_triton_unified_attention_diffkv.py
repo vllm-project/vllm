@@ -246,7 +246,7 @@ def test_triton_unified_attn_diffkv_vs_reference(
 )
 @pytest.mark.parametrize(
     "seq_lens,seq_threshold_3D",
-    [([(129, 463)], 0), ([(1, 2011)], 0), ([(1, 2011)], 8)],
+    [([(129, 463)], 0), ([(1, 2011)], 0), ([(1, 2011)], 8), ([(8, 2011)], 8)],
 )
 def test_triton_unified_attn_diffkv_fp8_query(seq_lens, seq_threshold_3D):
     test_triton_unified_attn_diffkv_vs_reference(
@@ -263,8 +263,23 @@ def test_triton_unified_attn_diffkv_fp8_query(seq_lens, seq_threshold_3D):
     )
 
 
+def test_spec_verify_fp8_query_keeps_tile_32() -> None:
+    """Triton needs K >= 32 for FP8 tl.dot: grouped FP8 launches keep tile 32."""
+    _, kwargs, _ = _capture_diffkv_launch(
+        query_lens=[8, 8],
+        max_seqlen_q=8,
+        segm_first_dim=16,
+        dtype=torch.float8_e4m3fn,
+    )
+    assert kwargs["BLOCK_M"] == 32
+    assert kwargs["TILE_SIZE"] == 32
+
+
 def _capture_diffkv_launch(
-    query_lens: list[int], max_seqlen_q: int, segm_first_dim: int
+    query_lens: list[int],
+    max_seqlen_q: int,
+    segm_first_dim: int,
+    dtype: torch.dtype = torch.bfloat16,
 ):
     """Run the launcher with both Triton kernels mocked; return grid/kwargs."""
     num_query_heads, num_kv_heads = 8, 2
@@ -273,14 +288,14 @@ def _capture_diffkv_launch(
     num_tokens = sum(query_lens)
 
     query = torch.zeros(
-        num_tokens, num_query_heads, head_size_qk, dtype=torch.bfloat16, device="cpu"
+        num_tokens, num_query_heads, head_size_qk, dtype=dtype, device="cpu"
     )
     kv_cache = torch.zeros(
         NUM_BLOCKS,
         BLOCK_SIZES[0],
         num_kv_heads,
         head_size_qk + head_size_v,
-        dtype=torch.bfloat16,
+        dtype=dtype,
         device="cpu",
     )
     key_cache = kv_cache[..., :head_size_qk]
