@@ -2,6 +2,8 @@ model_name: "RedHatAI/Qwen3-30B-A3B-FP8-block"
 accuracy_threshold: 0.85
 num_questions: 1319
 num_fewshot: 5
+# 30B MoE + DeepGEMM/DeepEP JIT compile can exceed the 1200s default startup wait.
+startup_max_wait_seconds: 2400
 server_args: "--enforce-eager --max-model-len 8192 --data-parallel-size 2 --enable-expert-parallel --all2all-backend deepep_low_latency --disable-uvicorn-access-log"
 env:
   VLLM_USE_DEEP_GEMM: "1"

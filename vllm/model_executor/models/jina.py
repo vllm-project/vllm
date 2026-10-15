@@ -183,7 +183,9 @@ def _load_adapter(
     return adapter_config, adapter_weights
 
 
-def _build_lora_pairs(adapter_weights: dict) -> dict:
+def _build_lora_pairs(
+    adapter_weights: dict[str, torch.Tensor],
+) -> dict[str, dict[str, torch.Tensor]]:
     """Group raw adapter tensors into {base_key: {"A": tensor, "B": tensor}} pairs.
 
     Transforms adapter keys like:
@@ -191,7 +193,7 @@ def _build_lora_pairs(adapter_weights: dict) -> dict:
     Into base keys like:
         layers.0.self_attn.q_proj.weight
     """
-    lora_pairs = defaultdict(dict)
+    lora_pairs: defaultdict[str, dict[str, torch.Tensor]] = defaultdict(dict)
     for key, tensor in adapter_weights.items():
         clean_key = key
         if clean_key.startswith("base_model.model."):
@@ -232,7 +234,7 @@ def _load_jina_v5_weights(
     model: nn.Module, weights: Iterable[tuple[str, torch.Tensor]]
 ) -> set[str]:
     """Shared loader: merge the selected task LoRA adapter into the base weights."""
-    lora_pairs: dict = {}
+    lora_pairs: dict[str, dict[str, torch.Tensor]] = {}
     scaling = 1.0
 
     result = _load_adapter(model._model_name, model._task, model._revision)

@@ -15,7 +15,7 @@ from einops import rearrange, repeat
 from transformers import BatchFeature
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -35,7 +35,7 @@ from vllm.multimodal.processing import BaseDummyInputsBuilder
 from vllm.multimodal.processing.processor import (
     BaseMultiModalProcessor,
     BaseProcessingInfo,
-    MultiModalProcessingInfo,
+    MultiModalProcessingResult,
     ProcessorInputs,
     PromptReplacement,
     PromptUpdate,
@@ -64,13 +64,12 @@ _IMAGE_TOKEN = "<image>"
 
 
 class DeepseekVL2ImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - bnp: Batch size * number of images * number of patches
-        - p: Number of patches
-        - c: Number of channels (3)
-        - h: Height of each image
-        - w: Width of each image
+    """Dimensions:
+    - bnp: Batch size * number of images * number of patches
+    - p: Number of patches
+    - c: Number of channels (3)
+    - h: Height of each image
+    - w: Width of each image
     """
 
     type: Literal["pixel_values"]
@@ -79,11 +78,10 @@ class DeepseekVL2ImagePixelInputs(TensorSchema):
 
 
 class DeepseekVL2VImageEmbeddingInputs(TensorSchema):
-    """
-    Dimensions:
-        - bn: Batch size * number of images
-        - f: Image feature size
-        - h: Hidden size (must match language model backbone)
+    """Dimensions:
+    - bn: Batch size * number of images
+    - f: Image feature size
+    - h: Hidden size (must match language model backbone)
     """
 
     type: Literal["image_embeds"]
@@ -214,20 +212,16 @@ class DeepseekVL2DummyInputsBuilder(BaseDummyInputsBuilder[DeepseekVL2Processing
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
-        num_images = mm_counts.get("image", 0)
-
         max_image_size = self.info.get_image_size_with_most_features()
-
-        image_overrides = mm_options.get("image")
 
         return {
             "image": self._get_dummy_images(
                 width=max_image_size.width,
                 height=max_image_size.height,
-                num_images=num_images,
-                overrides=image_overrides,
+                num_images=mm_counts.get("image", 0),
+                overrides=mm_options.get("image"),
             )
         }
 
@@ -235,7 +229,7 @@ class DeepseekVL2DummyInputsBuilder(BaseDummyInputsBuilder[DeepseekVL2Processing
 class DeepseekVL2MultiModalProcessor(
     BaseMultiModalProcessor[DeepseekVL2ProcessingInfo]
 ):
-    def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
         return self.dummy_inputs.get_dummy_text(mm_counts)
 
     def _postprocess_hf_mm_data(
@@ -309,7 +303,7 @@ class DeepseekVL2MultiModalProcessor(
         self,
         inputs: ProcessorInputs,
         timing_ctx: TimingContext,
-    ) -> MultiModalProcessingInfo:
+    ) -> MultiModalProcessingResult:
         # The processor logic is different for len(images) <= 2 vs > 2
         # Since the processing cache assumes that the processor output is
         # invariant of how many images are passed per prompt, we only

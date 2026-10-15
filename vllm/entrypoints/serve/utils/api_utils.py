@@ -6,18 +6,20 @@ import dataclasses
 import functools
 import os
 from argparse import Namespace
+from http import HTTPStatus
 from logging import Logger
 from string import Template
 from typing import Any
 
 from fastapi import Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
+from pydantic import BaseModel
 from starlette.background import BackgroundTask, BackgroundTasks
 
 from vllm import envs
 from vllm.engine.arg_utils import EngineArgs
-from vllm.entrypoints.openai.engine.protocol import StreamOptions
+from vllm.entrypoints.generate.base.protocol import StreamOptions
 from vllm.entrypoints.openai.models.protocol import LoRAModulePath
 from vllm.logger import current_formatter_type, init_logger
 from vllm.platforms import current_platform
@@ -34,7 +36,7 @@ VLLM_SUBCMD_PARSER_EPILOG = (
 
 
 async def listen_for_disconnect(request: Request) -> None:
-    """Returns if a disconnect message is received"""
+    """Returns if a disconnect message is received."""
     while True:
         message = await request.receive()
         if message["type"] == "http.disconnect":
@@ -88,9 +90,78 @@ def with_cancellation(handler_func):
 
         if handler_task in done:
             return handler_task.result()
-        return None
+        # The client is gone; an empty response skips response_model validation.
+        return Response()
 
     return wrapper
+
+
+_ERROR_REF = {"$ref": "#/components/schemas/ErrorResponse"}
+
+
+def _sse_event_schema(chunk_ref: dict[str, str]) -> dict[str, Any]:
+    # One SSE event: `data` is a JSON chunk, a JSON error, or "[DONE]". This is
+    # the envelope FastAPI emits for EventSourceResponse routes, but published
+    # under `schema` because OpenAPI 3.1 has no `itemSchema`.
+    return {
+        "type": "object",
+        "required": ["data"],
+        "properties": {
+            "data": {
+                "type": "string",
+                "anyOf": [
+                    {"const": "[DONE]"},
+                    {
+                        "contentMediaType": "application/json",
+                        "contentSchema": chunk_ref,
+                    },
+                    {
+                        "contentMediaType": "application/json",
+                        "contentSchema": _ERROR_REF,
+                    },
+                ],
+            },
+            "event": {"type": "string"},
+            "id": {"type": "string"},
+            "retry": {"type": "integer", "minimum": 0},
+        },
+    }
+
+
+def json_or_sse_responses(
+    unary_model: type[BaseModel],
+    chunk_model: type[BaseModel],
+    error_responses: dict[int, dict[str, Any]],
+) -> dict[str, Any]:
+    """Route kwargs for an endpoint answering with ``unary_model`` as JSON, or
+    with SSE ``data`` events carrying ``chunk_model`` when ``stream=true``.
+
+    FastAPI only registers models reachable from ``response_model`` or an
+    additional response's ``model``. The chunk model rides on the 200 entry,
+    which also overwrites the JSON schema, so ``openapi_extra`` restores it.
+    """
+    unary_ref = {"$ref": f"#/components/schemas/{unary_model.__name__}"}
+    chunk_ref = {"$ref": f"#/components/schemas/{chunk_model.__name__}"}
+    return {
+        "response_model": unary_model,
+        "responses": {
+            HTTPStatus.OK.value: {
+                "model": chunk_model,
+                "description": (
+                    "JSON body when stream=false; SSE events when stream=true."
+                ),
+                "content": {
+                    "text/event-stream": {"schema": _sse_event_schema(chunk_ref)}
+                },
+            },
+            **error_responses,
+        },
+        "openapi_extra": {
+            "responses": {
+                "200": {"content": {"application/json": {"schema": unary_ref}}}
+            }
+        },
+    }
 
 
 def decrement_server_load(request: Request):
@@ -268,7 +339,7 @@ def jsonify_non_default_args(
 
 
 # Fields whose values must never be logged verbatim.
-_SENSITIVE_ARG_FIELDS = frozenset({"api_key", "hf_token"})
+_SENSITIVE_ARG_FIELDS = frozenset({"api_key", "hf_token", "watermark_config"})
 
 
 def redact_sensitive_args(args: dict[str, Any]) -> dict[str, Any]:

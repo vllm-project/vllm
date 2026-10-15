@@ -6,12 +6,15 @@ from collections.abc import Callable
 from fractions import Fraction
 
 import torch
-from compressed_tensors.quantization import ActivationOrdering
+from compressed_tensors.compressors.pack_quantized.helpers import unpack_from_int32
 
+from vllm import envs
 from vllm.distributed.utils import verify_group_size_divides_partition
 from vllm.logger import init_logger
+from vllm.model_executor.determinism.batch_invariant import matmul_batch_invariant
 from vllm.model_executor.kernels.linear import (
     MarlinLinearKernel,
+    MPLinearKernel,
     MPLinearLayerConfig,
     choose_mp_linear_kernel,
 )
@@ -28,8 +31,8 @@ from vllm.model_executor.parameter import (
     GroupQuantScaleParameter,
     PackedColumnParameter,
     PackedvLLMParameter,
-    RowvLLMParameter,
 )
+from vllm.model_executor.utils import replace_parameter
 from vllm.scalar_type import scalar_types
 
 logger = init_logger(__name__)
@@ -44,7 +47,15 @@ WNA16_SUPPORTED_TYPES_MAP = {
     7: scalar_types.uint7b64,
     8: scalar_types.uint8b128,
 }
-WNA16_ZP_SUPPORTED_TYPES_MAP = {4: scalar_types.uint4, 8: scalar_types.uint8}
+WNA16_ZP_SUPPORTED_TYPES_MAP = {
+    2: scalar_types.uint2,
+    3: scalar_types.uint3,
+    4: scalar_types.uint4,
+    5: scalar_types.uint5,
+    6: scalar_types.uint6,
+    7: scalar_types.uint7,
+    8: scalar_types.uint8,
+}
 WNA16_SUPPORTED_BITS = list(WNA16_SUPPORTED_TYPES_MAP.keys())
 
 
@@ -57,7 +68,6 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         num_bits: int,
         group_size: int | None = None,
         symmetric: bool | None = True,
-        actorder: ActivationOrdering | None = None,
         layer_name: str | None = None,
     ):
         self.num_bits = num_bits
@@ -65,8 +75,12 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         self.strategy = strategy
         self.symmetric = symmetric
         self.group_size = -1 if group_size is None else group_size
-        self.has_g_idx = actorder == ActivationOrdering.GROUP
         self.layer_name = layer_name
+        # Marlin picks its tiling and K-split from the number of tokens, so its
+        # results depend on the batch size. In batch-invariant mode keep the
+        # checkpoint layout, unpack the weight and use the batch-invariant matmul.
+        self.use_batch_invariant = envs.VLLM_BATCH_INVARIANT
+        self.kernel: MPLinearKernel | None = None
 
         if self.group_size == -1 and self.strategy != "channel":
             raise ValueError(
@@ -115,8 +129,6 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         layer.output_size_per_partition = output_size_per_partition
         layer.output_partition_sizes = output_partition_sizes
         layer.params_dtype = params_dtype
-        if not hasattr(layer, "has_bias"):
-            layer.has_bias = False
 
         mp_linear_kernel_config = MPLinearLayerConfig(
             full_weight_shape=(input_size, output_size),
@@ -128,14 +140,18 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
             act_type=params_dtype,
             group_size=self.group_size,
             zero_points=not self.symmetric,
-            has_g_idx=self.has_g_idx,
         )
 
-        kernel_type = choose_mp_linear_kernel(mp_linear_kernel_config)
+        if self.use_batch_invariant:
+            kernel_type = None
+            backend_name = "dequantize + batch-invariant matmul"
+        else:
+            kernel_type = choose_mp_linear_kernel(mp_linear_kernel_config)
+            backend_name = kernel_type.__name__
 
-        if kernel_type.__name__ not in self._kernel_backends_being_used:
-            logger.info("Using %s for CompressedTensorsWNA16", kernel_type.__name__)
-            self._kernel_backends_being_used.add(kernel_type.__name__)
+        if backend_name not in self._kernel_backends_being_used:
+            logger.info("Using %s for CompressedTensorsWNA16", backend_name)
+            self._kernel_backends_being_used.add(backend_name)
 
         if kernel_type is MarlinLinearKernel:
             input_dtype = get_marlin_input_dtype(self.layer_name)
@@ -146,7 +162,7 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         group_size = self.group_size if self.group_size != -1 else input_size
         row_parallel = input_size != input_size_per_partition
         partition_scales = not marlin_repeat_scales_on_all_ranks(
-            self.has_g_idx, self.group_size, row_parallel
+            self.group_size, row_parallel
         )
 
         scales_and_zp_size = input_size // group_size
@@ -226,32 +242,49 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         if not self.symmetric:
             layer.register_parameter("weight_zero_point", qzeros)
 
-        # group index (for activation reordering)
-        if self.has_g_idx:
-            weight_g_idx = RowvLLMParameter(
-                data=torch.empty(
-                    input_size_per_partition,
-                    dtype=torch.int32,
-                ),
-                input_dim=0,
-                weight_loader=weight_loader,
+        if kernel_type is not None:
+            self.kernel = kernel_type(
+                mp_linear_kernel_config,
+                w_q_param_name="weight_packed",
+                w_s_param_name="weight_scale",
+                w_zp_param_name="weight_zero_point",
             )
-            layer.register_parameter("weight_g_idx", weight_g_idx)
-
-        self.kernel = kernel_type(
-            mp_linear_kernel_config,
-            w_q_param_name="weight_packed",
-            w_s_param_name="weight_scale",
-            w_zp_param_name="weight_zero_point",
-            w_gidx_param_name="weight_g_idx",
-        )
 
     # Checkpoints are serialized in compressed-tensors format, which is
     # different from the format the kernel may want. Handle repacking here.
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if self.use_batch_invariant:
+            # Keep the checkpoint layout: Marlin's reduction depends on M.
+            for name in ("weight_packed", "weight_scale", "weight_zero_point"):
+                if hasattr(layer, name):
+                    replace_parameter(layer, name, getattr(layer, name).data)
+            return
+        assert self.kernel is not None
         self.kernel.process_weights_after_loading(layer)
 
     def apply_weights(
         self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None
     ) -> torch.Tensor:
+        if self.use_batch_invariant:
+            shape = torch.Size(
+                (layer.output_size_per_partition, layer.input_size_per_partition)
+            )
+            weight = unpack_from_int32(layer.weight_packed, self.num_bits, shape)
+            weight = weight.to(layer.weight_scale.dtype).reshape(
+                shape[0], layer.weight_scale.shape[1], -1
+            )
+            if not self.symmetric:
+                zero_point = unpack_from_int32(
+                    layer.weight_zero_point,
+                    self.num_bits,
+                    layer.weight_scale.shape,
+                    packed_dim=0,
+                )
+                weight = weight - zero_point.unsqueeze(-1)
+            weight = (weight * layer.weight_scale.unsqueeze(-1)).reshape(shape)
+            output = matmul_batch_invariant(x, weight.t().to(x.dtype))
+            if bias is not None:
+                output.add_(bias)
+            return output
+        assert self.kernel is not None
         return self.kernel.apply_weights(layer, x, bias)
