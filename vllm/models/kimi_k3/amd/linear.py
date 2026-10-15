@@ -1142,6 +1142,11 @@ class KimiLinearForCausalLM(
     ) -> tuple[MambaStateCopyFunc, MambaStateCopyFunc]:
         return MambaStateCopyFuncCalculator.kda_state_copy_func()
 
+    def process_weights_after_loading(self) -> None:
+        for module in self.modules():
+            if isinstance(module, KimiK3MultiHeadLatentAttentionWrapper):
+                module.process_weights_after_loading()
+
     def compute_logits(
         self,
         hidden_states: torch.Tensor,

@@ -14,6 +14,7 @@ from vllm.model_executor.layers.fusion.quant_activation import (
     get_input_quant_key,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.mla import MultiHeadLatentAttentionWrapper
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.platforms import current_platform
@@ -32,9 +33,12 @@ class KimiK3MultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
         self._use_eager_qk_rmsnorm_fusion = bool(rocm_aiter_ops.is_enabled())
         self._fused_qk_prep = self._fused_qk_prep_supported()
         self._identity_rope: tuple[torch.Tensor, torch.Tensor] | None = None
+        # The fold reads q_b_proj.weight as plain bf16/fp16 rows, so a quantized
+        # q_b_proj keeps the unfused path.
         self._fold_qb_uk = (
             self._fused_qk_prep
-            and self.q_lora_rank is not None
+            and self.q_b_proj is not None
+            and isinstance(self.q_b_proj.quant_method, UnquantizedLinearMethod)
             and self.rotary_emb is None
             and not self.dcp_q_replicate
             and self.indexer is None
@@ -138,31 +142,9 @@ class KimiK3MultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
             w_qb, W_UK, self.num_heads, self.qk_nope_head_dim, self.qk_rope_head_dim
         )
 
-    def _absorb_q_nope(self, q_nope: torch.Tensor, layer) -> torch.Tensor:
-        """q_nope [B, N, P] -> ql_nope [B, N, L] through W_UK (same dispatch
-        and precedence as MLAAttention.forward_impl)."""
-        attn = self.mla_attn
-        # (B, N, P) -> (N, B, P)
-        q_nope_t = q_nope.transpose(0, 1)
-        if attn.is_aiter_triton_fp4_bmm_enabled:
-            from aiter.ops.triton.batched_gemm_a16wfp4 import batched_gemm_a16wfp4
-
-            ql_nope = batched_gemm_a16wfp4(
-                q_nope_t,
-                attn.W_K,
-                attn.W_K_scale,
-                transpose_bm=True,
-                prequant=True,
-                y_scale=layer._q_scale,
-            )
-        else:
-            assert attn.W_UK_T is not None
-            B, N = q_nope.shape[0], q_nope.shape[1]
-            L = attn.W_UK_T.shape[-1]
-            ql_nope = q_nope_t.new_empty((B, N, L))
-            torch.bmm(q_nope_t, attn.W_UK_T, out=ql_nope.transpose(0, 1))
-        # the W_UK bmm hands back a transposed view; the cache kernel reads dense
-        return ql_nope.contiguous()
+    def process_weights_after_loading(self) -> None:
+        if self._fold_qb_uk:
+            self._build_w_fold()
 
     def _fused_decode(
         self,
@@ -199,7 +181,29 @@ class KimiK3MultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
             q_nope, q_pe = q.split(
                 [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
             )
-            ql_nope = self._absorb_q_nope(q_nope, layer)
+            q_nope_t = q_nope.transpose(0, 1)
+
+            if attn.is_aiter_triton_fp4_bmm_enabled:
+                from aiter.ops.triton.batched_gemm_a16wfp4 import (
+                    batched_gemm_a16wfp4,
+                )
+
+                ql_nope = batched_gemm_a16wfp4(
+                    q_nope_t,
+                    attn.W_K,
+                    attn.W_K_scale,
+                    transpose_bm=True,
+                    prequant=True,
+                    y_scale=layer._q_scale,
+                )
+            else:
+                assert attn.W_UK_T is not None  # guaranteed by _fused_qk_prep_supported
+                B, N = q_nope.shape[0], q_nope.shape[1]
+                L = attn.W_UK_T.shape[-1]
+                ql_nope = q_nope_t.new_empty((B, N, L))
+                torch.bmm(q_nope_t, attn.W_UK_T, out=ql_nope.transpose(0, 1))
+            # Densify the bmm's transposed view, as the unfused path always has.
+            ql_nope = ql_nope.contiguous()
 
         if self._identity_rope is None:
             # cos = 1, sin = 0 makes the kernel's RoPE the identity, which is
@@ -317,9 +321,6 @@ class KimiK3MultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
                 and kv_cache.numel() > 0
                 and attn_metadata.num_actual_tokens == attn_metadata.num_decode_tokens
             )
-
-        if self._fold_qb_uk and self._w_fold is None:
-            self._build_w_fold()
 
         if fuse and self._fold_qb_uk and llama_4_scaling is None:
             q = q_proj_input
