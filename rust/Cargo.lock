@@ -5864,6 +5864,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
+ "uuid",
  "vllm-metrics",
  "zeromq",
 ]

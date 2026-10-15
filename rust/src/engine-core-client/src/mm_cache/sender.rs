@@ -10,7 +10,6 @@
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use parking_lot::Mutex;
 use thiserror_ext::AsReport as _;
@@ -37,13 +36,9 @@ pub struct MmShmCacheConfig {
 }
 
 impl MmShmCacheConfig {
-    /// Unique per-process name, e.g. "vllm-mm-shm-{pid}-{nanos}".
+    /// Unique per-process name, e.g. "vllm-mm-shm-{uuid}".
     pub fn unique_shm_name() -> String {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|duration| duration.as_nanos())
-            .unwrap_or(0);
-        format!("vllm-mm-shm-{}-{nanos}", std::process::id())
+        format!("vllm-mm-shm-{}", uuid::Uuid::new_v4())
     }
 }
 
