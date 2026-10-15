@@ -119,12 +119,6 @@ def input_guard(fn: Callable[..., torch.Tensor]) -> Callable[..., torch.Tensor]:
 
 @functools.cache
 def get_available_device() -> str:
-    if current_platform.is_xpu():
-        return "xpu"
-    if current_platform.is_rocm():
-        return "hip"
-    if current_platform.is_cuda():
-        return "cuda"
     try:
         return triton.runtime.driver.active.get_current_target().backend
     except (RuntimeError, AttributeError):
@@ -171,8 +165,6 @@ is_tma_supported = (
 
 
 def get_all_max_shared_mem():
-    if current_platform.is_xpu():
-        return [-1] * torch.xpu.device_count()
     try:
         return [
             triton.runtime.driver.active.utils.get_device_properties(i)[
