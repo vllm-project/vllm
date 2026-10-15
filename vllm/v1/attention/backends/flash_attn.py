@@ -469,15 +469,12 @@ class FlashAttentionBackend(AttentionBackend):
         use_mm_prefix: bool,
         device_capability: DeviceCapability,
     ) -> str | None:
-        # SM90 FA4 FP8 KV requires equal d512 heads; smaller heads can use FA3
-        # when they do not require FA4 semantics (e.g. dynamic causal or Diff-KV sinks).
         sm90_fp8_kv = (
             device_capability == DeviceCapability(9, 0)
             and kv_cache_dtype is not None
             and is_quantized_kv_cache(kv_cache_dtype)
         )
         if sm90_fp8_kv and head_size == 512:
-            # Framework blocks can be split into the advertised 64-token pages.
             if block_size is not None and block_size % 64 != 0:
                 return "SM90 d512 FP8 KV requires a block size divisible by 64"
             if use_sparse:
