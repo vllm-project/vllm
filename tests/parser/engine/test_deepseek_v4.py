@@ -33,6 +33,7 @@ from vllm.parser.deepseek_v4 import (
     DSML_TOOL_START_VARIANTS,
     DeepSeekV4Parser,
     _dsml_arg_converter,
+    _dsml_arg_value_extender,
     _unwrap_wrapper_args,
     deepseek_v4_config,
 )
@@ -1300,6 +1301,39 @@ class TestDelegatingParserLargeDelta:
         assert eos_text not in output.reasoning
         assert output.content == ""
         assert output.tool_calls == []
+
+
+# ── Open string values stream without re-running the converter (#52846) ──
+
+
+class TestArgValueExtender:
+    def test_stops_at_split_param_close(self):
+        extend = _dsml_arg_value_extender(
+            "<" + _PARAM_OPEN.format(name="k", is_str="true") + "x"
+        )
+        assert [extend(d) for d in ['a"\n', "</｜DSML｜para", "meter>"]] == [
+            'a\\"\\n',
+            "</｜DSML｜para",
+            None,
+        ]
+
+    @pytest.mark.parametrize(
+        "raw_args",
+        [
+            "<" + _PARAM_OPEN.format(name="k", is_str="true") + "x" + _PARAM_CLOSE,
+            "<" + _PARAM_OPEN.format(name="k", is_str="false") + "1",
+            "<"
+            + _PARAM_OPEN.format(name="k", is_str="true")
+            + "x"
+            + _PARAM_CLOSE
+            + "<"
+            + _PARAM_OPEN.format(name="k", is_str="true")
+            + "y",
+        ],
+        ids=["closed_value", "non_string_value", "repeated_key"],
+    )
+    def test_no_extender_unless_open_string_value(self, raw_args):
+        assert _dsml_arg_value_extender(raw_args) is None
 
 
 # ── Malformed DSML markup must not leak into content (#51914) ─────────

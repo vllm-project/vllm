@@ -319,6 +319,19 @@ def test_streaming_non_string_argument_is_withheld_until_close():
     assert json.loads("".join(per_chunk_args)) == {"count": int(body)}
 
 
+def test_streaming_string_argument_with_markup_is_incremental():
+    body = '<div class="a">x > y</div>\n' * 64
+    per_chunk_args = _stream_param_body(
+        {"html": {"type": "string"}},
+        f'{PARAM_START}html" string="true">',
+        body,
+    )
+
+    body_chunks = per_chunk_args[1:-1]
+    assert sum(1 for args in body_chunks if args) > 1
+    assert json.loads("".join(per_chunk_args)) == {"html": body}
+
+
 def _with_strict(
     tools: list[ChatCompletionToolsParam],
 ) -> list[ChatCompletionToolsParam]:
