@@ -113,7 +113,7 @@ class OpenAIServingResponses(GenerateBaseServing):
         reasoning_parser: str = "",
         enable_auto_tools: bool = False,
         tool_parser: str | None = None,
-        tool_strict_level: str = "auto",
+        tool_strict_level: str | None = None,
         tool_server: ToolServer | None = None,
         enable_prompt_tokens_details: bool = False,
         enable_force_include_usage: bool = False,
