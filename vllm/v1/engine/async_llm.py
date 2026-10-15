@@ -4,7 +4,6 @@ import asyncio
 import os
 import socket
 import time
-import warnings
 from collections.abc import AsyncGenerator, Iterable, Mapping
 from copy import copy
 from typing import Any
@@ -44,7 +43,7 @@ from vllm.renderers.inputs.preprocess import extract_prompt_components
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.tasks import SupportedTask
 from vllm.tokenizers import TokenizerLike
-from vllm.tracing import init_tracer
+from vllm.tracing import init_tracer, log_tracing_disabled_warning
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.async_utils import cancel_task_threadsafe
@@ -54,7 +53,11 @@ from vllm.v1.engine.admission_control import SharedAdmissionStats
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
 from vllm.v1.engine.input_processor import InputProcessor
-from vllm.v1.engine.output_processor import OutputProcessor, RequestOutputCollector
+from vllm.v1.engine.output_processor import (
+    OutputProcessor,
+    RequestOutputCollector,
+    StreamingInputOutputCollector,
+)
 from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.executor import Executor
 from vllm.v1.fault_tolerance.utils import FaultToleranceRequest, FaultToleranceResult
@@ -349,7 +352,7 @@ class AsyncLLM(EngineClient):
                 else self.get_num_unfinished_requests()
             )
             if current_requests + n > max_num_reqs:
-                logger.info(
+                logger.debug(
                     "Request queue full - rejecting request %s "
                     "(current=%d, n=%d, max=%d).",
                     request_id,
@@ -357,20 +360,27 @@ class AsyncLLM(EngineClient):
                     n,
                     max_num_reqs,
                 )
+                self._record_admission_rejection("max_num_queued_reqs")
                 raise QueueOverflowError()
 
         max_queued_tokens = self.scheduler_config.max_num_queued_tokens
         if max_queued_tokens is not None:
             current_tokens = self.get_num_queued_tokens()
             if current_tokens >= max_queued_tokens:
-                logger.info(
+                logger.debug(
                     "Max queued tokens reached - rejecting request %s "
                     "(current_tokens=%d, max=%d).",
                     request_id,
                     current_tokens,
                     max_queued_tokens,
                 )
+                self._record_admission_rejection("max_num_queued_tokens")
                 raise MaxQueuedTokensError()
+
+    def _record_admission_rejection(self, reason: str) -> None:
+        """Increment the frontend admission rejection counter if logging is on."""
+        if self.logger_manager is not None:
+            self.logger_manager.record_admission_rejection(reason)
 
     async def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         if not hasattr(self, "_supported_tasks"):
@@ -402,6 +412,10 @@ class AsyncLLM(EngineClient):
         """Add new request to the AsyncLLM."""
         if self.errored:
             raise EngineDeadError()
+
+        if trace_headers and self.observability_config.otlp_traces_endpoint is None:
+            log_tracing_disabled_warning()
+            trace_headers = None
 
         is_pooling = isinstance(params, PoolingParams)
 
@@ -610,7 +624,9 @@ class AsyncLLM(EngineClient):
         self.input_processor.assign_request_id(final_req)
         internal_req_id = final_req.request_id
 
-        queue = RequestOutputCollector(sampling_params.output_kind, internal_req_id)
+        queue = StreamingInputOutputCollector(
+            sampling_params.output_kind, internal_req_id
+        )
 
         async def handle_inputs():
             cancelled = False
@@ -618,6 +634,13 @@ class AsyncLLM(EngineClient):
             any_added = False
             try:
                 async for input_chunk in input_stream:
+                    # Stop once the session has finished (aborted or errored).
+                    # There is no await between this check and the ADD send,
+                    # so any chunk already sent precedes the engine abort.
+                    if any_added and not self.output_processor.has_request(
+                        internal_req_id
+                    ):
+                        break
                     sp = input_chunk.sampling_params
                     if sp:
                         self._validate_streaming_input_sampling_params(sp)
@@ -653,8 +676,10 @@ class AsyncLLM(EngineClient):
                 if not cancelled:
                     if any_added:
                         # Send empty final request to indicate that inputs have
-                        # finished. Don't send if cancelled (session was aborted).
-                        await self._add_request(final_req, None, None, 0, queue)
+                        # finished. Don't send if cancelled or if the session
+                        # already finished (aborted or errored).
+                        if self.output_processor.has_request(internal_req_id):
+                            await self._add_request(final_req, None, None, 0, queue)
                     elif not errored:
                         queue.put(STREAM_FINISHED)
 
@@ -852,7 +877,10 @@ class AsyncLLM(EngineClient):
                         outputs_slice = engine_core_outputs[start:end]
                         # 2) Process EngineCoreOutputs.
                         processed_outputs = output_processor.process_outputs(
-                            outputs_slice, outputs.timestamp, iteration_stats
+                            outputs_slice,
+                            outputs.timestamp,
+                            iteration_stats,
+                            weight_version=outputs.weight_version,
                         )
                         # NOTE: RequestOutputs are pushed to their queues.
                         assert not processed_outputs.request_outputs
@@ -940,7 +968,6 @@ class AsyncLLM(EngineClient):
         self,
         *,
         mode: PauseMode = "abort",
-        wait_for_inflight_requests: bool | None = None,
         clear_cache: bool = True,
     ) -> None:
         """Pause generation to allow model weight updates.
@@ -956,20 +983,10 @@ class AsyncLLM(EngineClient):
                 - ``"wait"``: Wait for in-flight requests to complete.
                 - ``"keep"``: Freeze requests in queue; they resume on
                   :meth:`resume_generation`.
-            wait_for_inflight_requests: DEPRECATED: use mode argument.
             clear_cache: Whether to clear KV cache and prefix cache after
                 draining. Set to ``False`` to preserve cache for faster resume.
 
         """
-        if wait_for_inflight_requests:
-            warnings.warn(
-                "The `wait_for_inflight_requests` parameter in "
-                "`AsyncLLM.pause_generation()` is deprecated. "
-                "Please use `mode` argument instead.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-            mode = "wait"
         if clear_cache:
             await self.renderer.clear_mm_cache_async()
         await self.engine_core.pause_scheduler_async(mode=mode, clear_cache=clear_cache)
@@ -1322,6 +1339,10 @@ class AsyncLLM(EngineClient):
         await self.collective_rpc(
             "init_weight_transfer_engine", kwargs={"init_info": request.init_info}
         )
+
+    async def shutdown_weight_transfer_engine(self) -> None:
+        """Release the trainer connection without shutting down inference."""
+        await self.collective_rpc("shutdown_weight_transfer_engine")
 
     async def start_weight_update(self) -> None:
         """Start a new weight update."""

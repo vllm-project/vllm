@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import cast
+from typing import assert_never, cast
 
 from fastapi.responses import JSONResponse, Response, StreamingResponse
-from typing_extensions import assert_never
 
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
