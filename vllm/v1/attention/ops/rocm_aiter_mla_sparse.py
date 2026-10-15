@@ -1786,7 +1786,15 @@ def rocm_inv_rope_einsum(
         wo_a, n_local_groups, o_lora_rank, o_ref.shape[-1]
     )
 
-    return torch.einsum("tgd,grd->tgr", o_ref, wo_a_weight)
+    from aiter.ops.triton.gemm.batched.batched_gemm_bf16 import batched_gemm_bf16
+
+    z = torch.empty(
+        (o_ref.shape[0], n_local_groups, o_lora_rank),
+        dtype=o_ref.dtype,
+        device=o_ref.device,
+    )
+    batched_gemm_bf16(o_ref.transpose(0, 1), wo_a_weight, YQ=z.transpose(0, 1))
+    return z
 
 
 @triton.jit
