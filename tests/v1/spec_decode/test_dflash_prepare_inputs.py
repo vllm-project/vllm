@@ -202,8 +202,18 @@ def test_prepare_dflash_inputs_pads_the_unused_buffer_tail():
 
     # Slots past the real query tokens must be PAD so a larger replay writes
     # no K/V.
-    assert out.query_slot_mapping.tolist()[last_query_end:] == [PAD_SLOT_ID] * (
-        max_num_tokens - last_query_end
+    num_pad = max_num_tokens - last_query_end
+    assert out.query_slot_mapping.tolist()[last_query_end:] == [PAD_SLOT_ID] * num_pad
+
+    # The same tail of the per-token buffers is zeroed and flagged as
+    # padding, so a replay at a captured size larger than the batch reads
+    # inert rows rather than the previous step's tokens and positions. The
+    # sentinels distinguish "written as 0" from "never written": input_ids
+    # and positions arrive pre-filled with -1, and is_padding all-False.
+    assert out.input_buffers.input_ids.cpu().tolist()[last_query_end:] == [0] * num_pad
+    assert out.input_buffers.positions.cpu().tolist()[last_query_end:] == [0] * num_pad
+    assert (
+        out.input_buffers.is_padding.cpu().tolist()[last_query_end:] == [True] * num_pad
     )
 
 
