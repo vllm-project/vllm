@@ -150,6 +150,20 @@ class Mamba2AttentionBackend(AttentionBackend):
             raise ValueError(f"{prefix} does not support KV connectors")
 
 
+def exact_replay_decode_positions(
+    seq_lens: torch.Tensor, chunk_size: int, out: torch.Tensor | None = None
+) -> torch.Tensor:
+    """Position of each decode row's token inside its partial chunk.
+
+    A decode row has one token, so its computed token count is the sequence
+    length minus one (exact without speculative decoding, which batch-invariant
+    mode rejects). CUDA graph padding rows have sequence length 0 and get
+    position 0 so that they never look like a completed chunk.
+    """
+    pos = torch.remainder(seq_lens - 1, chunk_size, out=out)
+    return pos.masked_fill_(seq_lens <= 0, 0)
+
+
 @dataclass
 class Mamba2AttentionMetadata(BaseMambaAttentionMetadata):
     prep_initial_states: bool = False
@@ -228,6 +242,14 @@ class Mamba2AttentionMetadataBuilder(
         slot_mapping: torch.Tensor,
     ) -> Mamba2AttentionMetadata:
         new_metadata = super().update_block_table(metadata, blk_table, slot_mapping)
+        if metadata.checkpoint_meta is not None:
+            new_metadata = replace(
+                new_metadata,
+                checkpoint_meta=metadata.checkpoint_meta.regather_state_indices(
+                    blk_table
+                ),
+            )
+
         pos = metadata.exact_replay_pos_d
         if pos is None or pos.shape[0] > self.decode_cudagraph_max_bs:
             return new_metadata
@@ -340,20 +362,4 @@ class Mamba2AttentionMetadataBuilder(
             exact_replay_pos_d=exact_replay_pos_d,
             checkpoint_chunk_idx=checkpoint_chunk_idx,
             checkpoint_meta=checkpoint_meta,
-        )
-
-    def update_block_table(
-        self,
-        metadata: Mamba2AttentionMetadata,
-        blk_table: torch.Tensor,
-        slot_mapping: torch.Tensor,
-    ) -> Mamba2AttentionMetadata:
-        new_metadata = super().update_block_table(metadata, blk_table, slot_mapping)
-        if metadata.checkpoint_meta is None:
-            return new_metadata
-        # Checkpoint destinations are block-table entries, so each group
-        # re-gathers its own rather than writing into the source group's.
-        return replace(
-            new_metadata,
-            checkpoint_meta=metadata.checkpoint_meta.regather_state_indices(blk_table),
         )

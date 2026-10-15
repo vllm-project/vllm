@@ -136,6 +136,7 @@ def test_one_token_prompt_joining_a_decode_batch_matches_prefill_logprobs(
     for name, prompt in prompts.items():
         generated = list(finished[name].outputs[0].token_ids)
         decode_logprobs = finished[name].outputs[0].logprobs
+        assert decode_logprobs is not None
         ref = llm.generate(
             [TokensPrompt(prompt_token_ids=prompt + generated)],
             SamplingParams(max_tokens=1, temperature=0.0, prompt_logprobs=0),
@@ -143,7 +144,10 @@ def test_one_token_prompt_joining_a_decode_batch_matches_prefill_logprobs(
         )[0]
         for j, token in enumerate(generated):
             decode_lp = decode_logprobs[j][token].logprob
-            prefill_lp = ref.prompt_logprobs[len(prompt) + j][token].logprob
+            assert ref.prompt_logprobs is not None
+            prefill_logprobs = ref.prompt_logprobs[len(prompt) + j]
+            assert prefill_logprobs is not None
+            prefill_lp = prefill_logprobs[token].logprob
             if decode_lp != prefill_lp:
                 mismatches.append((name, j, decode_lp, prefill_lp))
     assert not mismatches, mismatches[:10]

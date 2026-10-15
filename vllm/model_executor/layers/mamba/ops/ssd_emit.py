@@ -132,9 +132,9 @@ def _workspace_chunk_cumsum_fwd(
     dt_out,
     dA_cumsum,
 ):
-    """dt after bias and softplus, and its per-head prefix sums scaled by A,
-    over each row's partial chunk: buffered positions before ``pos`` plus this
-    step's ``current_dt``, which is also written into the buffer."""
+    """Compute dt after bias and softplus, and its per-head prefix sums scaled
+    by A, over each row's partial chunk: buffered positions before ``pos`` plus
+    this step's ``current_dt``, which is also written into the buffer."""
     _, dt_chunk_size, nheads = dt.shape
     assert dt_chunk_size == chunk_size
     assert A.shape == (nheads,)
