@@ -98,6 +98,7 @@ def _ngram_finalize_kernel(
     scratch_ptr,  # *int64  [B, scratch_stride]
     scratch_stride,
     drafts_ptr,  # *int64  [B, K]  (output)
+    has_match_ptr,  # *bool  [B]  (output)
     L,
     N_BLOCKS,
     K: tl.constexpr,
@@ -146,6 +147,163 @@ def _ngram_finalize_kernel(
     # ordinary (rejectable) drafts, so the fill value only affects efficiency.
     out = tl.where(slot_valid, gathered, last_tok)
     tl.store(drafts_ptr + b * K + k_iota, out, mask=k_in_range)
+    # A partial copy pads with rejectable filler, so it does not count as a
+    # match for callers that would otherwise replace a full model draft.
+    tl.store(has_match_ptr + b, write_ok & (tokens_avail >= K))
+
+
+@triton.jit
+def _one_hot_draft_logits_kernel(
+    draft_logits_ptr,  # [max_num_reqs, K, V]
+    draft_logits_stride_0,
+    draft_logits_stride_1,
+    idx_mapping_ptr,  # [B]
+    has_match_ptr,  # [B]
+    drafts_ptr,  # [B, K]
+    drafts_stride,
+    vocab_size,
+    BLOCK_SIZE: tl.constexpr,
+):
+    b = tl.program_id(0)
+    if not tl.load(has_match_ptr + b):
+        return
+    step = tl.program_id(1)
+    offs = tl.program_id(2) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    req_state_idx = tl.load(idx_mapping_ptr + b).to(tl.int64)
+    token = tl.load(drafts_ptr + b * drafts_stride + step)
+    row = (
+        draft_logits_ptr
+        + req_state_idx * draft_logits_stride_0
+        + step * draft_logits_stride_1
+    )
+    vals = tl.where(offs == token, 0.0, float("-inf"))
+    tl.store(row + offs, vals.to(row.dtype.element_ty), mask=offs < vocab_size)
+
+
+def write_one_hot_draft_logits(
+    draft_logits: torch.Tensor,
+    idx_mapping: torch.Tensor,
+    has_match: torch.Tensor,
+    drafts: torch.Tensor,
+) -> None:
+    """Overwrite the cached draft logits of matched requests with one-hot rows.
+
+    Copied drafts are deterministic, so probabilistic verification must see
+    q = 1 on the copied token.
+    """
+    num_reqs, num_steps = drafts.shape
+    block_size = 1024
+    _one_hot_draft_logits_kernel[
+        (num_reqs, num_steps, triton.cdiv(draft_logits.shape[-1], block_size))
+    ](
+        draft_logits,
+        draft_logits.stride(0),
+        draft_logits.stride(1),
+        idx_mapping,
+        has_match,
+        drafts,
+        drafts.stride(0),
+        draft_logits.shape[-1],
+        BLOCK_SIZE=block_size,
+    )
+
+
+class NgramLookup:
+    """Batched GPU n-gram lookup over the request token history.
+
+    For each request, finds the longest suffix of length in [min_n, max_n]
+    that occurs earlier in its context (rightmost occurrence wins) and gathers
+    the `num_tokens` tokens that followed it.
+    """
+
+    def __init__(
+        self,
+        min_n: int,
+        max_n: int,
+        num_tokens: int,
+        max_num_reqs: int,
+        max_model_len: int,
+        device: torch.device,
+    ):
+        if not HAS_TRITON:
+            raise RuntimeError("GPU n-gram lookup requires Triton.")
+        assert 1 <= min_n <= max_n
+        self.min_n = min_n
+        self.max_n = max_n
+        self.num_tokens = num_tokens
+        self.max_model_len = max_model_len
+
+        L = max_model_len
+        if L >= 1024:
+            self.block_l = 256
+        elif L >= 256:
+            self.block_l = 128
+        elif L >= 64:
+            self.block_l = 64
+        else:
+            self.block_l = max(16, triton.next_power_of_2(max(L, 1)))
+        self.n_blocks = triton.cdiv(L, self.block_l)
+
+        self.scratch = torch.zeros(
+            (max_num_reqs, self.n_blocks), dtype=torch.int64, device=device
+        )
+        # Batch-ordered outputs.
+        self.drafts = torch.zeros(
+            (max_num_reqs, num_tokens), dtype=torch.int64, device=device
+        )
+        self.has_match = torch.zeros(max_num_reqs, dtype=torch.bool, device=device)
+
+    def lookup(
+        self,
+        req_states: RequestState,
+        idx_mapping: torch.Tensor,
+        num_sampled: torch.Tensor,
+        last_sampled: torch.Tensor,
+        num_reqs: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Returns ([num_reqs, num_tokens] drafts, [num_reqs] has_match).
+
+        Requests without a match (or that sampled nothing this step) get their
+        last sampled token in every slot and has_match False; so do the
+        slots past a partial copy, which also leaves has_match False.
+        """
+        token_ids = req_states.all_token_ids.gpu
+        _ngram_scan_kernel[(num_reqs, self.n_blocks)](
+            token_ids,
+            token_ids.stride(0),
+            idx_mapping,
+            req_states.total_len.gpu,
+            num_sampled,
+            self.scratch,
+            self.scratch.stride(0),
+            self.max_model_len,
+            self.min_n,
+            self.max_n,
+            max(1, triton.next_power_of_2(self.max_n)),
+            self.block_l,
+            num_warps=4,
+            num_stages=2,
+        )
+        _ngram_finalize_kernel[(num_reqs,)](
+            token_ids,
+            token_ids.stride(0),
+            idx_mapping,
+            req_states.total_len.gpu,
+            num_sampled,
+            last_sampled.view(-1),
+            self.scratch,
+            self.scratch.stride(0),
+            self.drafts,
+            self.has_match,
+            self.max_model_len,
+            self.n_blocks,
+            self.num_tokens,
+            max(1, triton.next_power_of_2(self.num_tokens)),
+            max(1, triton.next_power_of_2(self.n_blocks)),
+            num_warps=2,
+            num_stages=1,
+        )
+        return self.drafts[:num_reqs], self.has_match[:num_reqs]
 
 
 class NgramGPUSpeculator(BaseSpeculator):
@@ -160,8 +318,6 @@ class NgramGPUSpeculator(BaseSpeculator):
         device: torch.device,
         req_states: RequestState,
     ):
-        if not HAS_TRITON:
-            raise RuntimeError("ngram_gpu speculative decoding requires Triton.")
         spec = vllm_config.speculative_config
         assert spec is not None
         assert spec.prompt_lookup_min is not None, (
@@ -170,40 +326,23 @@ class NgramGPUSpeculator(BaseSpeculator):
         assert spec.prompt_lookup_max is not None, (
             "prompt_lookup_max must be configured for ngram_gpu"
         )
-        assert 1 <= spec.prompt_lookup_min <= spec.prompt_lookup_max
 
         self.vllm_config = vllm_config
         self.device = device
         self.req_states = req_states
         self.speculative_config = spec
         self.num_speculative_steps: int = spec.num_speculative_tokens
-
         self.min_n: int = spec.prompt_lookup_min
         self.max_n: int = spec.prompt_lookup_max
-
         self.max_num_reqs: int = vllm_config.scheduler_config.max_num_seqs
         self.max_model_len: int = vllm_config.model_config.max_model_len
-
-        L = self.max_model_len
-        if L >= 1024:
-            self.block_l = 256
-        elif L >= 256:
-            self.block_l = 128
-        elif L >= 64:
-            self.block_l = 64
-        else:
-            self.block_l = max(16, triton.next_power_of_2(max(L, 1)))
-        self.n_blocks = triton.cdiv(L, self.block_l)
-
-        self.scratch = torch.zeros(
-            (self.max_num_reqs, self.n_blocks), dtype=torch.int64, device=device
-        )
-        # Batch-ordered draft output, scattered into RequestState.draft_tokens
-        # by the model runner (same contract as the model-based speculators).
-        self.drafts = torch.zeros(
-            (self.max_num_reqs, self.num_speculative_steps),
-            dtype=torch.int64,
-            device=device,
+        self.lookup = NgramLookup(
+            self.min_n,
+            self.max_n,
+            self.num_speculative_steps,
+            self.max_num_reqs,
+            self.max_model_len,
+            device,
         )
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
@@ -235,45 +374,12 @@ class NgramGPUSpeculator(BaseSpeculator):
     ) -> torch.Tensor:
         num_reqs = input_batch.num_reqs
         if dummy_run:
-            return self.drafts[:num_reqs]
-
-        req_states = self.req_states
-        token_ids = req_states.all_token_ids.gpu
-        idx_mapping = input_batch.idx_mapping
-
-        _ngram_scan_kernel[(num_reqs, self.n_blocks)](
-            token_ids,
-            token_ids.stride(0),
-            idx_mapping,
-            req_states.total_len.gpu,
+            return self.lookup.drafts[:num_reqs]
+        drafts, _ = self.lookup.lookup(
+            self.req_states,
+            input_batch.idx_mapping,
             num_sampled,
-            self.scratch,
-            self.scratch.stride(0),
-            self.max_model_len,
-            self.min_n,
-            self.max_n,
-            max(1, triton.next_power_of_2(self.max_n)),
-            self.block_l,
-            num_warps=4,
-            num_stages=2,
+            last_sampled,
+            num_reqs,
         )
-
-        _ngram_finalize_kernel[(num_reqs,)](
-            token_ids,
-            token_ids.stride(0),
-            idx_mapping,
-            req_states.total_len.gpu,
-            num_sampled,
-            last_sampled.view(-1),
-            self.scratch,
-            self.scratch.stride(0),
-            self.drafts,
-            self.max_model_len,
-            self.n_blocks,
-            self.num_speculative_steps,
-            max(1, triton.next_power_of_2(self.num_speculative_steps)),
-            max(1, triton.next_power_of_2(self.n_blocks)),
-            num_warps=2,
-            num_stages=1,
-        )
-        return self.drafts[:num_reqs]
+        return drafts
