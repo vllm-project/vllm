@@ -4075,7 +4075,9 @@ class rocm_aiter_ops:
     def is_triton_gemm_afp4wfp4_presh_ws_tuned(n: int, k_bytes: int) -> bool:
         if not current_platform.is_rocm():
             return False
-        # k_bytes = weight.shape[1] (two fp4 per byte)
+        # k_bytes = weight.shape[1] (two fp4 per byte). AITER names these
+        # config files by the logical K, which is what gemm_afp4wfp4_preshuffle
+        # itself looks up, so probe the same file.
         try:
             return _triton_gemm_config_is_tuned(
                 "GEMM-AFP4WFP4_PRESHUFFLED", n, 2 * k_bytes
