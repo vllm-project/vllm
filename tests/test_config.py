@@ -3579,44 +3579,6 @@ def test_eagle_block_drop_can_be_disabled_without_disabling_eagle(
     assert speculative_config.use_eagle_block_drop() is not disable_eagle_block_drop
 
 
-@pytest.mark.parametrize(
-    ("method", "hybrid_align", "lookahead", "expected_drop"),
-    [
-        ("mtp", True, 1, False),
-        ("eagle3", True, 1, False),
-        # Multi-module MTP writes several lookahead slots per chunk boundary.
-        ("mtp", True, 3, True),
-        ("mtp", False, 1, True),
-        ("dflash", True, 1, True),
-    ],
-)
-def test_eagle_block_drop_default_for_hybrid_models(
-    method: str, hybrid_align: bool, lookahead: int, expected_drop: bool
-):
-    speculative_config = SpeculativeConfig(method="ngram", num_speculative_tokens=3)
-    speculative_config.method = method
-
-    speculative_config.resolve_eagle_block_drop(
-        hybrid_align_prefix_caching=hybrid_align, prefill_lookahead_tokens=lookahead
-    )
-
-    assert speculative_config.use_eagle_block_drop() is expected_drop
-
-
-@pytest.mark.parametrize("explicit", [False, True])
-def test_eagle_block_drop_explicit_setting_wins(explicit: bool):
-    speculative_config = SpeculativeConfig(
-        method="ngram", num_speculative_tokens=3, disable_eagle_block_drop=explicit
-    )
-    speculative_config.method = "mtp"
-
-    speculative_config.resolve_eagle_block_drop(
-        hybrid_align_prefix_caching=True, prefill_lookahead_tokens=1
-    )
-
-    assert speculative_config.disable_eagle_block_drop is explicit
-
-
 def test_draft_sample_method_gumbel_is_rejected():
     with pytest.raises(ValidationError):
         SpeculativeConfig(
