@@ -516,7 +516,7 @@ class Step3p5DecoderLayer(nn.Module):
 
 @support_torch_compile
 class Step3p5Model(nn.Module):
-    decoder_layer_cls: type[nn.Module] = Step3p5DecoderLayer
+    decoder_layer_cls: type[Step3p5DecoderLayer] = Step3p5DecoderLayer
 
     def __init__(self, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
@@ -864,7 +864,7 @@ class Step3p5ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_substr={".share_expert.": ".moe.share_expert."}
     )
-    model_cls: type[nn.Module] = Step3p5Model
+    model_cls: type[Step3p5Model] = Step3p5Model
 
     def __init__(
         self,

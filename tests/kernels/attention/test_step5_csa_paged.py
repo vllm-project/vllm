@@ -2,14 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Paged Step-5 CSA kernels vs PyTorch references on scrambled block tables.
 
-Selection is discrete, so rounding and tie-breaks must match exactly, and a
-page-addressing bug reads wrong tokens without changing any shape.
+Each test mixes requests with their own block-table rows, and prefill, chunked
+prefill and decode rows, since a page- or request-addressing bug reads wrong
+tokens without changing any shape.
 """
 
 import pytest
 import torch
 
-from vllm.models.step5.common.ops.csa import select_regions
+from vllm.models.step5.common.ops.csa import round_e4m3, select_regions
 from vllm.models.step5.common.ops.csa_paged import (
     compress_regions_paged,
     indexer_scores_paged,
@@ -27,26 +28,36 @@ PROXY = 256
 
 
 def _e4m3(x: torch.Tensor) -> torch.Tensor:
-    return x.to(torch.bfloat16).to(torch.float8_e4m3fn).float()
+    return round_e4m3(x).float()
 
 
-def _paged(rows: torch.Tensor, rows_per_page: int) -> tuple[torch.Tensor, torch.Tensor]:
-    """Scatter rows into ``[pages, rows_per_page, ...]`` behind a shuffled table."""
-    pages = -(-rows.shape[0] // rows_per_page)
-    table = torch.randperm(pages + 3, device=DEVICE)[:pages].int()
+def _paged(
+    seqs: list[torch.Tensor], rows_per_page: int
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Scatter each request's rows into shared pages behind its own row of a
+    shuffled ``[requests, pages]`` block table."""
+    pages = [-(-x.shape[0] // rows_per_page) for x in seqs]
+    perm = torch.randperm(sum(pages) + 3, device=DEVICE).int()
+    table = torch.zeros(len(seqs), max(pages), dtype=torch.int32, device=DEVICE)
     cache = torch.zeros(
-        (pages + 3, rows_per_page, *rows.shape[1:]), dtype=rows.dtype, device=DEVICE
+        (sum(pages) + 3, rows_per_page, *seqs[0].shape[1:]),
+        dtype=seqs[0].dtype,
+        device=DEVICE,
     )
-    idx = torch.arange(rows.shape[0], device=DEVICE)
-    cache[table[idx // rows_per_page].long(), idx % rows_per_page] = rows
-    return cache, table.view(1, -1)
+    start = 0
+    for r, (x, n) in enumerate(zip(seqs, pages)):
+        table[r, :n] = perm[start : start + n]
+        start += n
+        idx = torch.arange(x.shape[0], device=DEVICE)
+        cache[table[r, idx // rows_per_page].long(), idx % rows_per_page] = x
+    return cache, table
 
 
 def ref_compress(k: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
     regions = k.shape[0] // REGION
     k = k[: regions * REGION].float().view(regions, REGION, -1)
     z = z[: regions * REGION].float().view(regions, REGION, -1)
-    w = torch.exp(z - z.amax(dim=(1, 2), keepdim=True))
+    w = torch.exp(z - z.amax(dim=1, keepdim=True))
     return _e4m3((w * k).sum(1) / w.sum(1))
 
 
@@ -62,12 +73,13 @@ def ref_select(scores: torch.Tensor, positions: torch.Tensor, topk: int):
     return out
 
 
-def ref_attention(q, k, v, regions, positions, scale):
+def ref_attention(q, k, v, regions, req, positions, scale):
     tokens, heads, _ = q.shape
-    groups = k.shape[1]
+    groups = k.shape[2]
     per_group = heads // groups
     out = torch.zeros(q.shape, dtype=torch.float32)
     for t in range(tokens):
+        kr, vr = k[int(req[t])], v[int(req[t])]
         for g in range(groups):
             ids = regions[t, g]
             ids = ids[ids >= 0].long().cpu()
@@ -75,44 +87,55 @@ def ref_attention(q, k, v, regions, positions, scale):
             cols = cols[cols <= int(positions[t])]
             hs = slice(g * per_group, (g + 1) * per_group)
             p = torch.softmax(
-                q[t, hs].float().cpu() @ k[cols, g].float().cpu().T * scale, -1
+                q[t, hs].float().cpu() @ kr[cols, g].float().cpu().T * scale, -1
             )
-            out[t, hs] = p @ v[cols, g].float().cpu()
+            out[t, hs] = p @ vr[cols, g].float().cpu()
     return out
 
 
-@pytest.mark.parametrize("seq_len", [64, 200])
-def test_compress_regions_paged(seq_len: int):
+def test_round_e4m3_saturates():
+    x = torch.tensor([447.0, 500.0, -1e4], device=DEVICE)
+    assert round_e4m3(x).tolist() == [448.0, 448.0, -448.0]
+
+
+def test_compress_regions_paged():
     torch.manual_seed(0)
-    k = torch.randn(seq_len, PROXY, dtype=torch.bfloat16, device=DEVICE)
-    z = torch.randn(seq_len, PROXY, dtype=torch.bfloat16, device=DEVICE) * 4
-    index_cache, index_bt = _paged(torch.cat([k, z], -1), 64)
-    regions = seq_len // REGION
+    lens = [64, 203]
+    ks = [torch.randn(n, PROXY, dtype=torch.bfloat16, device=DEVICE) for n in lens]
+    zs = [torch.randn(n, PROXY, dtype=torch.bfloat16, device=DEVICE) * 4 for n in lens]
+    zs[1][:, :128] += 200
+    index_cache, index_bt = _paged([torch.cat(kz, -1) for kz in zip(ks, zs)], 64)
+    regions = [n // REGION for n in lens]
     summary_cache, summary_bt = _paged(
-        torch.zeros(regions, PROXY, dtype=torch.bfloat16, device=DEVICE), 4
+        [torch.zeros(n, PROXY, dtype=torch.bfloat16, device=DEVICE) for n in regions],
+        4,
     )
-    # Trailing -1 rows are padding and must be skipped.
-    work = torch.full((regions + 3, 2), -1, dtype=torch.int32, device=DEVICE)
-    work[:regions, 0] = 0
-    work[:regions, 1] = torch.arange(regions, device=DEVICE)
+    work = [(req, r) for req, n in enumerate(regions) for r in range(n)]
+    work = torch.tensor(work + [(-1, -1)] * 3, dtype=torch.int32, device=DEVICE)
     compress_regions_paged(
         index_cache, summary_cache, index_bt, summary_bt, work, region_size=REGION
     )
-    r = torch.arange(regions, device=DEVICE)
-    got = summary_cache[summary_bt[0, r // 4].long(), r % 4]
-    torch.testing.assert_close(got.float(), ref_compress(k, z), atol=0, rtol=0)
+    for req, n in enumerate(regions):
+        r = torch.arange(n, device=DEVICE)
+        got = summary_cache[summary_bt[req, r // 4].long(), r % 4].float()
+        # Within one E4M3 step: exp and reduction order may differ by an ulp.
+        torch.testing.assert_close(
+            got, ref_compress(ks[req], zs[req]), rtol=0.125, atol=0
+        )
 
 
 def test_indexer_scores_paged():
     torch.manual_seed(0)
-    seq_len, groups = 200, 4
-    regions = seq_len // REGION
-    summaries = _e4m3(torch.randn(regions, PROXY, device=DEVICE)).to(torch.bfloat16)
+    groups, regions = 4, 25
+    summaries = [
+        _e4m3(torch.randn(regions, PROXY, device=DEVICE)).to(torch.bfloat16)
+        for _ in range(2)
+    ]
     summary_cache, summary_bt = _paged(summaries, 8)
-    q = torch.randn(seq_len, groups, 4, PROXY, dtype=torch.bfloat16, device=DEVICE)
-    w = torch.randn(seq_len, groups, 4, device=DEVICE)
-    pos = torch.arange(seq_len, dtype=torch.int32, device=DEVICE)
-    req = torch.zeros(seq_len, dtype=torch.int32, device=DEVICE)
+    pos = torch.cat([torch.arange(200), torch.arange(150, 154)]).int().to(DEVICE)
+    req = torch.tensor([0] * 200 + [1] * 4, dtype=torch.int32, device=DEVICE)
+    q = torch.randn(len(pos), groups, 4, PROXY, dtype=torch.bfloat16, device=DEVICE)
+    w = torch.randn(len(pos), groups, 4, device=DEVICE)
     got = indexer_scores_paged(
         q,
         w,
@@ -123,12 +146,11 @@ def test_indexer_scores_paged():
         max_regions=regions,
         region_size=REGION,
     )
-    dots = torch.einsum("tghd,rd->tghr", _e4m3(q), summaries.float()).clamp_min(0)
+    history = torch.stack(summaries)[req.long()].float()
+    dots = torch.einsum("tghd,trd->tghr", _e4m3(q), history).clamp_min(0)
     want = (dots * w.unsqueeze(-1)).sum(2)
-    visible = torch.arange(regions, device=DEVICE)[None, None, :] < (
-        pos // REGION
-    ).view(-1, 1, 1)
-    visible = visible.expand_as(got)
+    visible = torch.arange(regions, device=DEVICE) < (pos // REGION)[:, None]
+    visible = visible[:, None, :].expand_as(got)
     torch.testing.assert_close(got[visible], want[visible], atol=1e-3, rtol=1e-4)
     assert torch.isneginf(got[~visible]).all()
 
@@ -147,17 +169,18 @@ def test_select_regions_breaks_ties_by_region_id():
 def test_sparse_attention_paged(topk: int):
     """topk=512 covers the whole history, so it also checks dense equivalence."""
     torch.manual_seed(0)
-    seq_len, heads, groups, dim = 200, 16, 4, 192
-    q = torch.randn(seq_len, heads, dim, dtype=torch.bfloat16, device=DEVICE)
-    k = torch.randn(seq_len, groups, dim, dtype=torch.bfloat16, device=DEVICE)
-    v = torch.randn(seq_len, groups, dim, dtype=torch.bfloat16, device=DEVICE)
-    pos = torch.arange(seq_len, dtype=torch.int32, device=DEVICE)
-    scores = torch.randn(seq_len, groups, seq_len // REGION + 1, device=DEVICE)
+    seq_len, heads, groups, dim = 203, 16, 4, 192
+    shape = (2, seq_len, groups, dim)
+    k = torch.randn(shape, dtype=torch.bfloat16, device=DEVICE)
+    v = torch.randn(shape, dtype=torch.bfloat16, device=DEVICE)
+    pos = torch.cat([torch.arange(seq_len), torch.tensor([202])]).int().to(DEVICE)
+    req = torch.tensor([0] * seq_len + [1], dtype=torch.int32, device=DEVICE)
+    q = torch.randn(len(pos), heads, dim, dtype=torch.bfloat16, device=DEVICE)
+    scores = torch.randn(len(pos), groups, seq_len // REGION + 1, device=DEVICE)
     regions = select_regions(scores, pos, REGION, topk)
 
-    kv_cache, bt = _paged(torch.stack([k, v], 1), 64)
+    kv_cache, bt = _paged([torch.stack([k[r], v[r]], 1) for r in range(2)], 64)
     got = torch.empty_like(q)
-    req = torch.zeros(seq_len, dtype=torch.int32, device=DEVICE)
     sparse_attention_paged(
         q,
         kv_cache[:, :, 0],
@@ -170,5 +193,5 @@ def test_sparse_attention_paged(topk: int):
         region_size=REGION,
         scale=dim**-0.5,
     )
-    want = ref_attention(q, k, v, regions, pos, dim**-0.5)
+    want = ref_attention(q, k, v, regions, req, pos, dim**-0.5)
     torch.testing.assert_close(got.float().cpu(), want, atol=2e-2, rtol=2e-2)

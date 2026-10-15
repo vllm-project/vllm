@@ -55,7 +55,7 @@ class SharedHead(nn.Module):
 
 
 class Step3p5AMultiTokenPredictorLayer(nn.Module):
-    decoder_layer_cls: type[nn.Module] = Step3p5DecoderLayer
+    decoder_layer_cls: type[Step3p5DecoderLayer] = Step3p5DecoderLayer
 
     def __init__(
         self,
@@ -97,7 +97,7 @@ class Step3p5AMultiTokenPredictorLayer(nn.Module):
 
 
 class Step3p5AMultiTokenPredictor(nn.Module):
-    layer_cls: type[nn.Module] = Step3p5AMultiTokenPredictorLayer
+    layer_cls: type[Step3p5AMultiTokenPredictorLayer] = Step3p5AMultiTokenPredictorLayer
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -162,7 +162,7 @@ class Step3p5AMultiTokenPredictor(nn.Module):
 class Step3p5MTP(nn.Module):
     # Each MTP layer's shared_head carries its own LM head weights.
     has_own_lm_head = True
-    predictor_cls: type[nn.Module] = Step3p5AMultiTokenPredictor
+    predictor_cls: type[Step3p5AMultiTokenPredictor] = Step3p5AMultiTokenPredictor
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()

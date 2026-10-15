@@ -24,7 +24,7 @@ from vllm.models.step5.common.csa_cache import (
 )
 from vllm.models.step5.common.ops.csa import indexer_norm
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import _encode_layer_name
+from vllm.utils.torch_utils import _encode_layer_name, kv_cache_dtype_str_to_dtype
 
 
 class Step5SparseIndexer(nn.Module):
@@ -145,8 +145,10 @@ class Step5Attention(Step3p5Attention):
         self.indexer = None
         if not config.is_sparse_layer(self.layer_idx):
             return
-        cache_dtype = vllm_config.cache_config.cache_dtype
-        if cache_dtype not in ("auto", "bfloat16"):
+        cache_dtype = kv_cache_dtype_str_to_dtype(
+            vllm_config.cache_config.cache_dtype, vllm_config.model_config
+        )
+        if cache_dtype != torch.bfloat16:
             raise NotImplementedError(
                 f"Step-5 sparse attention reads a BF16 KV cache; got {cache_dtype}"
             )
@@ -276,7 +278,7 @@ class Step5ForConditionalGeneration(Step3p7ForConditionalGeneration):
     )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
-        text_config = vllm_config.model_config.hf_config.text_config
-        if not getattr(text_config, "architectures", None):
-            text_config.architectures = ["Step5ForCausalLM"]
+        vllm_config.model_config.hf_config.text_config.architectures = [
+            "Step5ForCausalLM"
+        ]
         super().__init__(vllm_config=vllm_config, prefix=prefix)

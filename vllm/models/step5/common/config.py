@@ -50,24 +50,29 @@ class Step5SparseConfig:
         self.apply_to_layer_types = list(apply_to_layer_types or ["full_attention"])
         self._validate()
 
+    _SUPPORTED = {
+        "sparse_indexer_num_k_heads": 1,
+        "sparse_indexer_use_rope": True,
+        "sparse_indexer_q_norm_type": "rmsnorm",
+        "sparse_indexer_k_norm_type": "layernorm",
+        "sparse_indexer_csa_z_norm_type": "none",
+        "sparse_indexer_softmax_variant": "ssmax",
+        "sparse_indexer_ssmax_s_granularity": "q_head",
+        "compression_method": "csa_block_compress",
+        "attention_impl": "sparse_gqa",
+    }
+
     def _validate(self) -> None:
-        if self.sparse_indexer_num_k_heads != 1:
-            raise NotImplementedError("Step-5 sparse indexer expects one key head.")
+        for name, value in self._SUPPORTED.items():
+            if getattr(self, name) != value:
+                raise NotImplementedError(
+                    f"Step-5 sparse_config.{name}={getattr(self, name)!r} is "
+                    f"unsupported; expected {value!r}."
+                )
         if self.sparse_indexer_num_heads % self.num_provider_groups:
             raise ValueError(
                 f"{self.sparse_indexer_num_heads} indexer heads do not divide "
                 f"into {self.num_provider_groups} provider groups."
-            )
-        if (self.sparse_indexer_q_norm_type, self.sparse_indexer_k_norm_type) != (
-            "rmsnorm",
-            "layernorm",
-        ):
-            raise NotImplementedError(
-                "Step-5 sparse indexer supports q=rmsnorm, k=layernorm only."
-            )
-        if self.compression_method != "csa_block_compress":
-            raise NotImplementedError(
-                f"Unsupported compression_method {self.compression_method!r}."
             )
 
     @property

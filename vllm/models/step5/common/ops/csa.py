@@ -12,8 +12,9 @@ _OCP_E4M3 = torch.float8_e4m3fn
 
 
 def round_e4m3(x: torch.Tensor) -> torch.Tensor:
-    """Round to the OCP E4M3 grid and return BF16 (exact: E4M3 fits in BF16)."""
-    return x.to(torch.bfloat16).to(_OCP_E4M3).to(torch.bfloat16)
+    """Round to the OCP E4M3 grid, saturating like Triton's ``float8e4nv`` cast."""
+    x = x.to(torch.bfloat16).clamp(-448, 448)
+    return x.to(_OCP_E4M3).to(torch.bfloat16)
 
 
 def indexer_norm(

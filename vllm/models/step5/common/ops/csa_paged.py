@@ -42,7 +42,7 @@ def _compress_paged_kernel(
     )
     k = tl.load(base).to(tl.float32)
     z = tl.load(base + PROXY_DIM).to(tl.float32)
-    weights = tl.exp(z - tl.max(tl.max(z, axis=1), axis=0))
+    weights = tl.exp(z - tl.max(z, axis=0)[None, :])
     summary = tl.sum(weights * k, axis=0) / tl.sum(weights, axis=0)
     # Same rounding as ``round_e4m3``.
     summary = summary.to(tl.bfloat16).to(tl.float8e4nv).to(tl.bfloat16)
