@@ -208,7 +208,7 @@ def compute_token_logprobs(
             partial_sum,
             vocab_size,
             NUM_SPLITS=num_splits,
-            BLOCK_SIZE=1024,
+            BLOCK_SIZE=1024,  # type: ignore
         )
         _merge_logsumexp_and_gather_kernel[(batch_size,)](
             logprobs,
@@ -217,7 +217,6 @@ def compute_token_logprobs(
             token_ids,
             token_ids.stride(0),
             num_logprobs,
-            vocab_size,
             partial_max,
             partial_sum,
             NUM_SPLITS=num_splits,
@@ -233,7 +232,7 @@ def compute_token_logprobs(
             token_ids.stride(0),
             num_logprobs,
             vocab_size,
-            BLOCK_SIZE=1024,
+            BLOCK_SIZE=1024,  # type: ignore
             TOPK_BLOCK_SIZE=topk_block_size,
         )
     return logprobs
