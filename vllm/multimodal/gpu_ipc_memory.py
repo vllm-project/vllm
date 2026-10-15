@@ -196,6 +196,7 @@ def reserve_mm_ipc_gpu_memory(
     from vllm.multimodal.video_decoders.pynvvideocodec import (
         PYNVVIDEOCODEC_CUDA_CONTEXT_BYTES,
         PYNVVIDEOCODEC_DECODER_GPU_MEMORY_BYTES,
+        get_pynvvideocodec_decoder_gpu_memory_bytes,
         validate_pynvvideocodec_hw_decoders,
     )
 
@@ -220,9 +221,15 @@ def reserve_mm_ipc_gpu_memory(
         if uses_pynvvideocodec
         else 1
     )
+    decoder_bytes = (
+        get_pynvvideocodec_decoder_gpu_memory_bytes(
+            video_kwargs.get("max_width"), video_kwargs.get("max_height")
+        )
+        if uses_pynvvideocodec
+        else PYNVVIDEOCODEC_DECODER_GPU_MEMORY_BYTES
+    )
     per_server_decoder_bytes = (
-        PYNVVIDEOCODEC_DECODER_GPU_MEMORY_BYTES * hw_decoders
-        + PYNVVIDEOCODEC_CUDA_CONTEXT_BYTES
+        decoder_bytes * hw_decoders + PYNVVIDEOCODEC_CUDA_CONTEXT_BYTES
     )
     decoder_reserved_bytes = (
         num_api_servers * per_server_decoder_bytes
