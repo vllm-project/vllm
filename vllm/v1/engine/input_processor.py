@@ -590,6 +590,18 @@ class InputProcessor:
                 f"longer than the maximum model length of {max_prompt_len}. "
                 f"{suggestion}"
             )
+        elif (
+            prompt_type == "decoder"
+            and (max_unchunked_len := self._max_unchunked_prompt_len()) is not None
+            and prompt_len > max_unchunked_len
+        ):
+            raise VLLMValidationError(
+                f"The {prompt_type} prompt (length {prompt_len}) is longer than "
+                f"the {max_unchunked_len} tokens this model can schedule in one "
+                "step. Chunked prefill is disabled for this model, so longer "
+                "prompts can never be scheduled. Increase "
+                "`max_num_batched_tokens` or shorten the prompt."
+            )
         elif prompt_len == max_prompt_len and model_config.runner_type == "generate":
             suggestion = (
                 "Make sure that `max_model_len` is no smaller than the "
@@ -600,6 +612,18 @@ class InputProcessor:
                 f"requested output tokens (at least 1) is longer than the maximum "
                 f"model length of {max_prompt_len}. {suggestion}"
             )
+
+    def _max_unchunked_prompt_len(self) -> int | None:
+        """Prompt limit when prompts cannot be split across steps, else None."""
+        vllm_config = self.vllm_config
+        scheduler_config = vllm_config.scheduler_config
+        # The scheduler does not hold back multimodal encoder-only requests.
+        if scheduler_config.enable_chunked_prefill or vllm_config.is_mm_encoder_only:
+            return None
+        spec_config = vllm_config.speculative_config
+        return scheduler_config.max_unchunked_prompt_len(
+            spec_config.max_num_new_slots_for_drafting if spec_config else 0
+        )
 
     def _validate_model_input(
         self,

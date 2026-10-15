@@ -104,6 +104,9 @@ class EngineCoreReadyResponse:
     supports_draft_weight_updates: bool = False
     # Full-attention block size in tokens after initialization, or unavailable.
     effective_attention_block_size: int | None = None
+    # False when the engine disabled chunked prefill during initialization,
+    # e.g. for non-causal attention or a model without KV cache.
+    enable_chunked_prefill: bool = True
 
 
 class EngineCoreRequest(

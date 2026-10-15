@@ -314,6 +314,18 @@ class SchedulerConfig:
 
         self.verify_max_model_len(max_model_len)
 
+    def max_unchunked_prompt_len(self, num_draft_slots: int = 0) -> int:
+        """Longest prompt that fits in one scheduling step.
+
+        Without chunked prefill, a longer prompt can never be scheduled.
+        """
+        budget = (
+            self.max_num_scheduled_tokens
+            if self.max_num_scheduled_tokens is not None
+            else self.max_num_batched_tokens
+        )
+        return min(budget, self.max_num_batched_tokens - num_draft_slots)
+
     def verify_max_model_len(self, max_model_len: int) -> Self:
         if (
             self.max_num_batched_tokens < max_model_len
