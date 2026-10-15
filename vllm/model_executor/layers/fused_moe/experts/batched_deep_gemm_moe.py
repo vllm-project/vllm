@@ -18,6 +18,9 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate,
 )
 from vllm.model_executor.layers.fused_moe.utils import _resize_cache
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    fused_silu_mul_per_token_group_quant_fp8,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     get_fp8_min_max,
@@ -206,6 +209,23 @@ def persistent_masked_m_silu_mul_quant(
     assert group_size == 128, "H must be divisible by 8"
     assert tokens_per_expert.ndim == 1 and tokens_per_expert.shape[0] == E
     assert not full_tokens or E == 1
+
+    if envs.VLLM_BATCH_INVARIANT and current_platform.is_cuda():
+        if quant_scale_fmt not in (
+            DeepGemmQuantScaleFMT.FLOAT32,
+            DeepGemmQuantScaleFMT.FLOAT32_CEIL_UE8M0,
+            DeepGemmQuantScaleFMT.UE8M0,
+        ):
+            raise RuntimeError(f"unsupported batch-invariant scale: {quant_scale_fmt}")
+        return fused_silu_mul_per_token_group_quant_fp8(
+            y,
+            use_ue8m0=quant_scale_fmt == DeepGemmQuantScaleFMT.UE8M0,
+            round_scale=quant_scale_fmt != DeepGemmQuantScaleFMT.FLOAT32,
+            clamp_limit=clamp_limit,
+            masked_m=tokens_per_expert,
+            output_q=output_q,
+            group_size=group_size,
+        )
 
     tokens_per_expert = tokens_per_expert.to(device=y.device, dtype=torch.int32)
     if full_tokens and not (

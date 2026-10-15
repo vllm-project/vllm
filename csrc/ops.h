@@ -564,6 +564,17 @@ void persistent_masked_m_silu_mul_quant(
     bool use_ue8m0, double clamp_limit = 0.0, bool full_tokens = false,
     bool original_numerics = false);
 
+#ifndef USE_ROCM
+namespace vllm::batch_invariant {
+void fused_silu_mul_per_token_group_quant(
+    const torch::stable::Tensor& input, torch::stable::Tensor& output_q,
+    torch::stable::Tensor& output_s, int64_t group_size, double eps,
+    double min_8bit, double max_8bit, double clamp_limit, bool round_scale,
+    bool scale_ue8m0, bool fuse_silu_and_mul,
+    const std::optional<torch::stable::Tensor>& masked_m);
+}  // namespace vllm::batch_invariant
+#endif
+
 void mul_and_silu(torch::stable::Tensor& out, torch::stable::Tensor& input);
 void gelu_and_mul(torch::stable::Tensor& out, torch::stable::Tensor& input);
 void gelu_tanh_and_mul(torch::stable::Tensor& out,

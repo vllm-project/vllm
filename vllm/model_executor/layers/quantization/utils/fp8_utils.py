@@ -47,7 +47,7 @@ def require_batch_invariant_quant_kernel() -> None:
 
 
 def is_batch_invariant_quant_kernel_enabled() -> bool:
-    return hasattr(torch.ops._C, "persistent_masked_m_silu_mul_quant")
+    return hasattr(torch.ops._C, "fused_silu_mul_per_token_group_quant")
 
 
 def fused_silu_mul_per_token_group_quant_fp8(
@@ -60,65 +60,84 @@ def fused_silu_mul_per_token_group_quant_fp8(
     output_q: torch.Tensor | None = None,
     group_size: int = 128,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Compatibility wrapper over the existing persistent SiLU quantizer."""
+    """Run the batch-invariant fused SiLU*up and per-token FP8 quant kernel."""
     require_batch_invariant_quant_kernel()
     if round_scale is None:
         round_scale = use_ue8m0
     if use_ue8m0 and not round_scale:
         raise ValueError("packed UE8M0 scales require round_scale=True")
-
-    from vllm.model_executor.layers.fused_moe.experts.batched_deep_gemm_moe import (
-        persistent_masked_m_silu_mul_quant,
-    )
-    from vllm.utils.deep_gemm import DeepGemmQuantScaleFMT
-
     if (
         group_size != 128
         or input.ndim != (2 if masked_m is None else 3)
         or input.shape[-1] % (2 * group_size)
         or input.numel() == 0
     ):
-        raise ValueError("invalid batch-invariant activation shape")
+        raise ValueError(
+            f"invalid batch-invariant activation shape: {tuple(input.shape)}"
+        )
     if not input.is_cuda or not input.is_contiguous() or input.dtype != torch.bfloat16:
         raise ValueError(
             "batch-invariant activation input must be contiguous CUDA BF16"
         )
-    if masked_m is not None and (
-        masked_m.shape != (input.shape[0],)
-        or masked_m.dtype != torch.int32
-        or masked_m.device != input.device
+
+    hidden = input.shape[-1] // 2
+    groups = hidden // group_size
+    if output_q is None:
+        output_q = torch.empty(
+            (*input.shape[:-1], hidden), device=input.device, dtype=torch.float8_e4m3fn
+        )
+    elif (
+        output_q.shape != (*input.shape[:-1], hidden)
+        or output_q.dtype != torch.float8_e4m3fn
+        or not output_q.is_contiguous()
+        or output_q.device != input.device
     ):
-        raise ValueError("masked_m must be int32 with one count per expert")
-    if output_q is not None and (
-        not output_q.is_contiguous() or output_q.device != input.device
-    ):
-        raise ValueError("output_q must be contiguous on the input device")
-    scale_format = (
-        DeepGemmQuantScaleFMT.UE8M0
-        if use_ue8m0
-        else DeepGemmQuantScaleFMT.FLOAT32_CEIL_UE8M0
-        if round_scale
-        else DeepGemmQuantScaleFMT.FLOAT32
+        raise ValueError("output_q must be contiguous FP8 on the input device")
+
+    packed_groups = (groups + 3) // 4 if use_ue8m0 else groups
+    if masked_m is None:
+        if input.ndim != 2:
+            raise ValueError("contiguous input must be 2D")
+        tokens = input.shape[0]
+        output_s = torch.empty_strided(
+            (tokens, packed_groups),
+            (1, tokens),
+            device=input.device,
+            dtype=torch.int32 if use_ue8m0 else torch.float32,
+        )
+    else:
+        if input.ndim != 3:
+            raise ValueError("masked input must be 3D")
+        experts, tokens = input.shape[:2]
+        if (
+            masked_m.shape != (experts,)
+            or masked_m.dtype != torch.int32
+            or masked_m.device != input.device
+        ):
+            raise ValueError("masked_m must be int32 with one count per expert")
+        output_s = torch.empty_strided(
+            (experts, tokens, packed_groups),
+            (tokens * packed_groups, 1, tokens),
+            device=input.device,
+            dtype=torch.int32 if use_ue8m0 else torch.float32,
+        )
+        output_s.zero_()
+
+    torch.ops._C.fused_silu_mul_per_token_group_quant(
+        input,
+        output_q,
+        output_s,
+        group_size,
+        1e-10,
+        -448.0,
+        448.0,
+        0.0 if clamp_limit is None else float(clamp_limit),
+        round_scale,
+        use_ue8m0,
+        True,
+        masked_m,
     )
-    full_tokens = masked_m is None
-    counts = (
-        torch.empty((1,), device=input.device, dtype=torch.int32)
-        if full_tokens
-        else masked_m
-    )
-    quantized, scales = persistent_masked_m_silu_mul_quant(
-        input.unsqueeze(0) if full_tokens else input,
-        counts,
-        group_size=group_size,
-        quant_scale_fmt=scale_format,
-        clamp_limit=clamp_limit,
-        full_tokens=full_tokens,
-        original_numerics=True,
-        output_q=output_q.unsqueeze(0)
-        if full_tokens and output_q is not None
-        else output_q,
-    )
-    return (quantized[0], scales[0]) if full_tokens else (quantized, scales)
+    return output_q, output_s
 
 
 # Pre-fill value for scale parameters whose shards load independently. The
