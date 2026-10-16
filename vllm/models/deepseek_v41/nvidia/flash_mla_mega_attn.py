@@ -22,6 +22,7 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
+from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp8Dynamic
@@ -244,7 +245,8 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
         positions: torch.Tensor,
         output: QuantizedActivation,
     ) -> None:
-        attn_metadata = get_forward_context().attn_metadata
+        context = get_forward_context()
+        attn_metadata = context.attn_metadata
         if attn_metadata is None:
             # Warmup dummy run: reserve the prefill workspace, produce zeros.
             self._reserve_prefill_workspace(q)
@@ -265,7 +267,17 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
             "DeepseekSparseSWAMetadata", attn_metadata[self.swa_cache_layer.prefix]
         )
         # The kernel takes int32 RoPE positions.
-        positions_int32 = positions.to(torch.int32)
+        if (
+            torch.cuda.is_current_stream_capturing()
+            and context.cudagraph_runtime_mode != CUDAGraphMode.PIECEWISE
+        ):
+            # Share across layers, but not across independent piecewise graphs.
+            cache = context.additional_kwargs.setdefault("mega_attn_positions", {})
+            if positions not in cache:
+                cache[positions] = positions.to(torch.int32)
+            positions_int32 = cache[positions]
+        else:
+            positions_int32 = positions.to(torch.int32)
         num_decode_tokens = swa_metadata.num_decode_tokens
 
         if swa_metadata.num_prefills > 0:
