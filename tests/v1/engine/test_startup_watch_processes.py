@@ -24,6 +24,7 @@ from vllm.v1.engine.utils import (
     wait_for_engine_startup,
 )
 from vllm.v1.executor import UniProcExecutor, multiproc_executor
+from vllm.v1.request import RequestStatus
 
 pytestmark = pytest.mark.skip_global_cleanup
 
@@ -284,6 +285,33 @@ def test_freeze_gc_after_clean_rocm_engine_core_shutdown(
         EngineCoreProc.run_engine_core(vllm_config=vllm_config)
 
     assert calls == expected_calls
+
+
+@pytest.mark.parametrize("parent_exited", [True, False])
+def test_handle_shutdown_aborts_once_parent_exited(parent_exited: bool):
+    # A dead parent can no longer bound a drain, so in-flight requests abort.
+    finished: list[tuple] = []
+
+    def finish_requests(*args):
+        finished.append(args)
+        return []
+
+    engine = object.__new__(EngineCoreProc)
+    engine.shutdown_state = EngineShutdownState.REQUESTED
+    engine.parent_exited = parent_exited
+    engine.vllm_config = SimpleNamespace(shutdown_timeout=7)
+    engine.scheduler = SimpleNamespace(
+        get_num_unfinished_requests=lambda: 1,
+        finish_requests=finish_requests,
+    )
+    engine._send_abort_outputs = lambda requests: None
+    engine.has_work = lambda: False
+
+    engine._handle_shutdown()
+
+    assert engine.shutdown_state == EngineShutdownState.SHUTTING_DOWN
+    expected = [(None, RequestStatus.FINISHED_ABORTED)] if parent_exited else []
+    assert finished == expected
 
 
 class _FinishedProcess:
