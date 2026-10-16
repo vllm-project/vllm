@@ -120,8 +120,12 @@ class PendingAuxOutput:
         prompt_logprobs: dict[str, LogprobsTensors | None] | None = None,
     ) -> None:
         """Enqueue asynchronous D2H copies; call on the output copy stream."""
-        self.num_sampled = num_sampled[self.batch_indices]
-        self.num_rejected = num_rejected[self.batch_indices]
+        # Do NOT index these arrays here: the D2H copy (non_blocking) is still
+        # in flight on the output copy stream, so reading the CPU buffer now
+        # would observe stale/uninitialized memory. Indexing by batch_indices
+        # happens in _commit_output after copy_event.synchronize().
+        self.num_sampled = num_sampled
+        self.num_rejected = num_rejected
         if self.routed_experts_gpu is not None:
             self.routed_experts = self.routed_experts_gpu.to(
                 "cpu", non_blocking=True
@@ -335,6 +339,10 @@ class AuxOutputWorkerConnector:
         assert num_sampled is not None and num_rejected is not None, (
             "auxiliary output CPU copy was not enqueued"
         )
+        # D2H copies are complete here (process_output runs after
+        # copy_event.synchronize), so per-request values are now authoritative.
+        num_sampled = num_sampled[pending.batch_indices]
+        num_rejected = num_rejected[pending.batch_indices]
         if pending.logprobs_tensors is not None:
             values = pending.logprobs_tensors.tolists()
             for index, request_id in enumerate(pending.request_ids):
