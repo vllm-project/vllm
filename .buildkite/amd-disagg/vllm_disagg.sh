@@ -102,6 +102,18 @@ moriio_read_mode_kv() {
     esac
 }
 
+# NIXL KV config (UCX backend). Peers are found through the NIXL side channel.
+nixl_kv_cfg() {
+    cat <<EOF
+{
+  "kv_connector": "NixlConnector",
+  "kv_role": "${KV_ROLE}",
+  "kv_load_failure_policy": "recompute",
+  "kv_connector_extra_config": {"backends": ["UCX"], "kv_lease_duration": 180}
+}
+EOF
+}
+
 # ----------------------------------------------------------------- topology
 # Resolves MODEL_PATH, MODELS_YAML, the IP array, and the master/proxy addresses.
 # IP_ARRAY[0..xP-1] = prefill nodes, [xP..xP+yD-1] = decode nodes.
@@ -309,6 +321,7 @@ build_tp_cmd() {
 }
 EOF
 )
+    if [[ "${KV_CONNECTOR:-}" == "NixlConnector" ]]; then kv_cfg="$(nixl_kv_cfg)"; fi
     CMD+=(--kv-transfer-config "${kv_cfg}")
     log "role=${ROLE} mode=tp host=${HOST_IP:-0.0.0.0}:${port} kv_role=${KV_ROLE} tp=${TP_SIZE} read_mode=${MORIIO_READ_MODE}"
 }
@@ -359,6 +372,7 @@ build_ep_cmd() {
 }
 EOF
 )
+        if [[ "${KV_CONNECTOR:-}" == "NixlConnector" ]]; then kv_cfg="$(nixl_kv_cfg)"; fi
         CMD+=(--kv-transfer-config "${kv_cfg}")
         log "role=${ROLE} mode=ep MASTER node_rank=${NODE_RANK} dp_size=${DP_GROUP_SIZE} dp_addr=${DP_MASTER_ADDR} kv_role=${KV_ROLE} all2all=${backend} read_mode=${MORIIO_READ_MODE}"
     else
