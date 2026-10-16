@@ -186,8 +186,7 @@ if (CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64" OR ENABLE_X86_ISA)
     endif()
 
     list(APPEND CXX_COMPILE_FLAGS_AVX2
-        "-mavx2"
-        "-mfma")
+        "-mavx2")
 elseif (POWER9_FOUND OR POWER10_FOUND OR POWER11_FOUND)
     message(STATUS "PowerPC detected")
     if (POWER9_FOUND)

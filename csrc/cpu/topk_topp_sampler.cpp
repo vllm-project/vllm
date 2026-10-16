@@ -75,50 +75,10 @@ namespace {
 
 // FP64 accumulator for softmax sum over FP32Vec16 chunks.
 // FP32 accumulation over 128K elements loses ~3 ULP; FP64 avoids this.
-#if defined(__AVX512F__)
+#if defined(__aarch64__)
 struct Fp64Acc16 {
-  __m512d acc0 = _mm512_setzero_pd();
-  __m512d acc1 = _mm512_setzero_pd();
-  inline void add(const vec_op::FP32Vec16& v) {
-    __m256 lo8 = _mm512_castps512_ps256(v.reg);
-    __m256 hi8 = _mm512_extractf32x8_ps(v.reg, 1);
-    acc0 = _mm512_add_pd(acc0, _mm512_cvtps_pd(lo8));
-    acc1 = _mm512_add_pd(acc1, _mm512_cvtps_pd(hi8));
-  }
-  inline double reduce() const {
-    return _mm512_reduce_add_pd(acc0) + _mm512_reduce_add_pd(acc1);
-  }
-};
-#elif defined(__AVX2__)
-struct Fp64Acc16 {
-  __m256d acc0 = _mm256_setzero_pd();
-  __m256d acc1 = _mm256_setzero_pd();
-  __m256d acc2 = _mm256_setzero_pd();
-  __m256d acc3 = _mm256_setzero_pd();
-  inline void add(const vec_op::FP32Vec16& v) {
-    __m128 e_ll = _mm256_extractf128_ps(v.reg_low, 0);
-    __m128 e_lh = _mm256_extractf128_ps(v.reg_low, 1);
-    __m128 e_hl = _mm256_extractf128_ps(v.reg_high, 0);
-    __m128 e_hh = _mm256_extractf128_ps(v.reg_high, 1);
-    acc0 = _mm256_add_pd(acc0, _mm256_cvtps_pd(e_ll));
-    acc1 = _mm256_add_pd(acc1, _mm256_cvtps_pd(e_lh));
-    acc2 = _mm256_add_pd(acc2, _mm256_cvtps_pd(e_hl));
-    acc3 = _mm256_add_pd(acc3, _mm256_cvtps_pd(e_hh));
-  }
-  inline double reduce() const {
-    __m256d sum_a =
-        _mm256_add_pd(_mm256_add_pd(acc0, acc1), _mm256_add_pd(acc2, acc3));
-    __m128d hi128 = _mm256_extractf128_pd(sum_a, 1);
-    __m128d lo128 = _mm256_castpd256_pd128(sum_a);
-    __m128d s2 = _mm_add_pd(lo128, hi128);
-    return _mm_cvtsd_f64(_mm_hadd_pd(s2, s2));
-  }
-};
-#elif defined(__aarch64__)
-struct Fp64Acc16 {
-  float64x2_t acc[8] = {vdupq_n_f64(0.0), vdupq_n_f64(0.0),
-                        vdupq_n_f64(0.0), vdupq_n_f64(0.0),
-                        vdupq_n_f64(0.0), vdupq_n_f64(0.0),
+  float64x2_t acc[8] = {vdupq_n_f64(0.0), vdupq_n_f64(0.0), vdupq_n_f64(0.0),
+                        vdupq_n_f64(0.0), vdupq_n_f64(0.0), vdupq_n_f64(0.0),
                         vdupq_n_f64(0.0), vdupq_n_f64(0.0)};
   inline void add(const vec_op::FP32Vec16& v) {
     for (int i = 0; i < 4; ++i) {
@@ -140,48 +100,7 @@ __attribute__((always_inline)) static inline double sum_gt_to_double(
     const float* buf, int n, float threshold) {
   double s = 0.0;
   int j = 0;
-#if defined(__AVX512F__)
-  __m512d acc0 = _mm512_setzero_pd(), acc1 = _mm512_setzero_pd();
-  const __m512 thr16 = _mm512_set1_ps(threshold);
-  for (; j + 16 <= n; j += 16) {
-    __m512 b16 = _mm512_loadu_ps(buf + j);
-    __mmask16 mask = _mm512_cmp_ps_mask(b16, thr16, _CMP_GT_OQ);
-    __m256 lo8 = _mm512_castps512_ps256(b16);
-    __m256 hi8 = _mm512_extractf32x8_ps(b16, 1);
-    acc0 = _mm512_add_pd(acc0,
-                         _mm512_maskz_cvtps_pd((__mmask8)(mask & 0xFF), lo8));
-    acc1 =
-        _mm512_add_pd(acc1, _mm512_maskz_cvtps_pd((__mmask8)(mask >> 8), hi8));
-  }
-  s = _mm512_reduce_add_pd(acc0) + _mm512_reduce_add_pd(acc1);
-#elif defined(__AVX2__)
-  // and_ps zeros excluded lanes; blendv with -inf would corrupt the sum.
-  const __m256 thr = _mm256_set1_ps(threshold);
-  __m256d acc0 = _mm256_setzero_pd(), acc1 = _mm256_setzero_pd();
-  __m256d acc2 = _mm256_setzero_pd(), acc3 = _mm256_setzero_pd();
-  for (; j + 16 <= n; j += 16) {
-    __m256 b_lo = _mm256_loadu_ps(buf + j);
-    __m256 b_hi = _mm256_loadu_ps(buf + j + 8);
-    __m256 masked_lo =
-        _mm256_and_ps(b_lo, _mm256_cmp_ps(b_lo, thr, _CMP_GT_OQ));
-    __m256 masked_hi =
-        _mm256_and_ps(b_hi, _mm256_cmp_ps(b_hi, thr, _CMP_GT_OQ));
-    acc0 = _mm256_add_pd(acc0,
-                         _mm256_cvtps_pd(_mm256_extractf128_ps(masked_lo, 0)));
-    acc1 = _mm256_add_pd(acc1,
-                         _mm256_cvtps_pd(_mm256_extractf128_ps(masked_lo, 1)));
-    acc2 = _mm256_add_pd(acc2,
-                         _mm256_cvtps_pd(_mm256_extractf128_ps(masked_hi, 0)));
-    acc3 = _mm256_add_pd(acc3,
-                         _mm256_cvtps_pd(_mm256_extractf128_ps(masked_hi, 1)));
-  }
-  __m256d sum_a =
-      _mm256_add_pd(_mm256_add_pd(acc0, acc1), _mm256_add_pd(acc2, acc3));
-  __m128d hi128 = _mm256_extractf128_pd(sum_a, 1);
-  __m128d lo128 = _mm256_castpd256_pd128(sum_a);
-  __m128d s2 = _mm_add_pd(lo128, hi128);
-  s = _mm_cvtsd_f64(_mm_hadd_pd(s2, s2));
-#elif defined(__aarch64__)
+#if defined(__aarch64__)
   Fp64Acc16 acc;
   const float32x4_t thr = vdupq_n_f32(threshold);
   const float32x4_t zero = vdupq_n_f32(0.0f);
@@ -204,25 +123,7 @@ __attribute__((always_inline)) static inline int count_within_tol(
     const float* row, int V, float center, float tol) {
   int n = 0;
   int i = 0;
-#if defined(__AVX512F__)
-  const vec_op::FP32Vec16 c16(center);
-  const vec_op::FP32Vec16 t16(tol);
-  for (; i + 16 <= V; i += 16) {
-    vec_op::FP32Vec16 absdiff = (vec_op::FP32Vec16(row + i) - c16).abs();
-    __mmask16 mask = _mm512_cmp_ps_mask(absdiff.reg, t16.reg, _CMP_LT_OQ);
-    n += __builtin_popcount((unsigned)mask);
-  }
-#elif defined(__AVX2__)
-  const vec_op::FP32Vec16 c16(center);
-  const vec_op::FP32Vec16 t16(tol);
-  for (; i + 16 <= V; i += 16) {
-    vec_op::FP32Vec16 absdiff = (vec_op::FP32Vec16(row + i) - c16).abs();
-    __m256 clo = _mm256_cmp_ps(absdiff.reg_low, t16.reg_low, _CMP_LT_OQ);
-    __m256 chi = _mm256_cmp_ps(absdiff.reg_high, t16.reg_high, _CMP_LT_OQ);
-    n += __builtin_popcount((unsigned)_mm256_movemask_ps(clo));
-    n += __builtin_popcount((unsigned)_mm256_movemask_ps(chi));
-  }
-#elif defined(__aarch64__)
+#if defined(__aarch64__)
   const float32x4_t c = vdupq_n_f32(center);
   const float32x4_t t = vdupq_n_f32(tol);
   for (; i + 16 <= V; i += 16) {
@@ -241,27 +142,7 @@ __attribute__((always_inline)) static inline int count_within_tol(
 __attribute__((always_inline)) static inline void mask_write_below(
     float* row, int V, float threshold, float fill) {
   int i = 0;
-#if defined(__AVX512F__)
-  const vec_op::FP32Vec16 thr16(threshold);
-  const vec_op::FP32Vec16 f16(fill);
-  for (; i + 16 <= V; i += 16) {
-    vec_op::FP32Vec16 v16(row + i);
-    __mmask16 keep = _mm512_cmp_ps_mask(v16.reg, thr16.reg, _CMP_GT_OQ);
-    vec_op::FP32Vec16(_mm512_mask_blend_ps(keep, f16.reg, v16.reg))
-        .save(row + i);
-  }
-#elif defined(__AVX2__)
-  const vec_op::FP32Vec16 thr16(threshold);
-  const vec_op::FP32Vec16 f16(fill);
-  for (; i + 16 <= V; i += 16) {
-    vec_op::FP32Vec16 v16(row + i);
-    __m256 klo = _mm256_cmp_ps(v16.reg_low, thr16.reg_low, _CMP_GT_OQ);
-    __m256 khi = _mm256_cmp_ps(v16.reg_high, thr16.reg_high, _CMP_GT_OQ);
-    vec_op::FP32Vec16(_mm256_blendv_ps(f16.reg_low, v16.reg_low, klo),
-                      _mm256_blendv_ps(f16.reg_high, v16.reg_high, khi))
-        .save(row + i);
-  }
-#elif defined(__aarch64__)
+#if defined(__aarch64__)
   const float32x4_t thr = vdupq_n_f32(threshold);
   const float32x4_t fv = vdupq_n_f32(fill);
   for (; i + 16 <= V; i += 16) {
@@ -285,37 +166,14 @@ __attribute__((always_inline)) static inline void vec_max_min_with_pad_blend(
   int i = 0;
   float max_l = -1e38f, min_l = 1e38f;
   int n_finite = 0;
-#if defined(__AVX512F__) || defined(__AVX2__) || defined(__aarch64__)
+#if defined(__aarch64__)
   {
     const float pos_inf_val = std::numeric_limits<float>::infinity();
     vec_op::FP32Vec16 maxv(row[0]);
     vec_op::FP32Vec16 minv(pos_inf_val);
-    const vec_op::FP32Vec16 sentinel16(pad_sentinel);
-    const vec_op::FP32Vec16 pos_inf16(pos_inf_val);
     for (; i + 16 <= V; i += 16) {
       vec_op::FP32Vec16 v16(row + i);
       maxv = maxv.max(v16);
-  #if defined(__AVX512F__)
-      __mmask16 is_pad =
-          _mm512_cmp_ps_mask(v16.reg, sentinel16.reg, _CMP_LE_OS);
-      vec_op::FP32Vec16 safe(
-          _mm512_mask_blend_ps(is_pad, v16.reg, pos_inf16.reg));
-      __mmask16 fin = _mm512_cmp_ps_mask(v16.reg, sentinel16.reg, _CMP_GT_OQ);
-      n_finite += __builtin_popcount((unsigned)fin);
-  #elif defined(__AVX2__)
-      __m256 lt_lo = _mm256_cmp_ps(v16.reg_low, sentinel16.reg_low, _CMP_LE_OS);
-      __m256 lt_hi =
-          _mm256_cmp_ps(v16.reg_high, sentinel16.reg_high, _CMP_LE_OS);
-      vec_op::FP32Vec16 safe(
-          _mm256_blendv_ps(v16.reg_low, pos_inf16.reg_low, lt_lo),
-          _mm256_blendv_ps(v16.reg_high, pos_inf16.reg_high, lt_hi));
-      __m256 fin_lo =
-          _mm256_cmp_ps(v16.reg_low, sentinel16.reg_low, _CMP_GT_OQ);
-      __m256 fin_hi =
-          _mm256_cmp_ps(v16.reg_high, sentinel16.reg_high, _CMP_GT_OQ);
-      n_finite += __builtin_popcount((unsigned)_mm256_movemask_ps(fin_lo));
-      n_finite += __builtin_popcount((unsigned)_mm256_movemask_ps(fin_hi));
-  #else
       float32x4x4_t safe_raw;
       for (int r = 0; r < 4; ++r) {
         const float32x4_t x = v16.reg.val[r];
@@ -324,7 +182,6 @@ __attribute__((always_inline)) static inline void vec_max_min_with_pad_blend(
         safe_raw.val[r] = vbslq_f32(fin, x, vdupq_n_f32(pos_inf_val));
       }
       vec_op::FP32Vec16 safe(safe_raw);
-  #endif
       minv = minv.min(safe);
     }
     max_l = maxv.reduce_max();
@@ -467,9 +324,8 @@ static void scan_pivot_stats(const float* buf, int n, float pivot, float tol,
   float ma = std::numeric_limits<float>::infinity();
   int na = 0;
   int i = 0;
-#if defined(__AVX512F__) || defined(__AVX2__) || defined(__aarch64__)
-  {
 #if defined(__aarch64__)
+  {
     const float32x4_t vpivot = vdupq_n_f32(pivot);
     const float32x4_t pos_inf =
         vdupq_n_f32(std::numeric_limits<float>::infinity());
@@ -483,32 +339,6 @@ static void scan_pivot_stats(const float* buf, int n, float pivot, float tol,
       }
     }
     ma = vminvq_f32(vmin);
-#else
-    const float pos_inf_val = std::numeric_limits<float>::infinity();
-    const vec_op::FP32Vec16 vpivot16(pivot);
-    const vec_op::FP32Vec16 pos_inf16(pos_inf_val);
-    vec_op::FP32Vec16 vmin16(pos_inf_val);
-    for (; i + 16 <= n; i += 16) {
-      vec_op::FP32Vec16 b16(buf + i);
-  #if defined(__AVX512F__)
-      __mmask16 above = _mm512_cmp_ps_mask(b16.reg, vpivot16.reg, _CMP_GT_OQ);
-      na += __builtin_popcount((unsigned)above);
-      vmin16 = vmin16.min(vec_op::FP32Vec16(
-          _mm512_mask_blend_ps(above, pos_inf16.reg, b16.reg)));
-  #else
-      __m256 above_lo =
-          _mm256_cmp_ps(b16.reg_low, vpivot16.reg_low, _CMP_GT_OQ);
-      __m256 above_hi =
-          _mm256_cmp_ps(b16.reg_high, vpivot16.reg_high, _CMP_GT_OQ);
-      na += __builtin_popcount((unsigned)_mm256_movemask_ps(above_lo));
-      na += __builtin_popcount((unsigned)_mm256_movemask_ps(above_hi));
-      vmin16 = vmin16.min(vec_op::FP32Vec16(
-          _mm256_blendv_ps(pos_inf16.reg_low, b16.reg_low, above_lo),
-          _mm256_blendv_ps(pos_inf16.reg_high, b16.reg_high, above_hi)));
-  #endif
-    }
-    ma = vmin16.reduce_min();
-#endif
   }
 #endif
   for (; i < n; ++i) {
@@ -651,14 +481,14 @@ static void _top_p_row_core(float* __restrict__ row, int V, float p_val,
   sigma = sigma + fabsf(sigma) * -0.25f;
   float outlier_logit = st.avg + st.std_v * sigma;
 
-#if defined(__AVX512F__) || defined(__AVX2__) || defined(__aarch64__)
+#if defined(__aarch64__)
   DEFINE_FAST_EXP
   vec_op::FP32Vec16 base16(st.max_l);
 #endif
   double sum_exp_d = 0.0;
   {
     int i = 0;
-#if defined(__AVX512F__) || defined(__AVX2__) || defined(__aarch64__)
+#if defined(__aarch64__)
     Fp64Acc16 acc;
     for (; i + 16 <= V; i += 16) {
       vec_op::FP32Vec16 v16(row + i);
@@ -679,7 +509,7 @@ static void _top_p_row_core(float* __restrict__ row, int V, float p_val,
   {
     const float inv_sum = 1.0f / sum_exp;
     int i = 0;
-#if defined(__AVX512F__) || defined(__AVX2__) || defined(__aarch64__)
+#if defined(__aarch64__)
     vec_op::FP32Vec16 isum16(inv_sum);
     for (; i + 16 <= V; i += 16) {
       vec_op::FP32Vec16 v16(row + i);
