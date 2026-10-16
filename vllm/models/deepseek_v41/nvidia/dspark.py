@@ -11,6 +11,7 @@ include the future query tokens in the top-k indices for each query token.
 """
 
 from collections.abc import Iterable
+from typing import TYPE_CHECKING
 
 import regex as re
 import torch
@@ -33,6 +34,7 @@ from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
+    UnquantizedEmbeddingMethod,
     VocabParallelEmbedding,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -57,6 +59,11 @@ from .model import (
     maybe_init_gemm_rs,
     prepare_mega_gate_routing_metadata,
 )
+from .specialized_decode import decode_backend, register_draft
+
+if TYPE_CHECKING:
+    from .specialized_decode.runtime.decode import DecodeStep, SpecializedDecode
+    from .specialized_decode.runtime.draft import DraftDecode
 
 logger = init_logger(__name__)
 
@@ -199,6 +206,7 @@ class DSparkDeepseekV4Model(nn.Module):
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         inputs_embeds: torch.Tensor | None = None,
+        decode_step: "DecodeStep | None" = None,
     ) -> torch.Tensor:
         if inputs_embeds is None:
             inputs_embeds = self.embed_input_ids(input_ids)
@@ -222,6 +230,10 @@ class DSparkDeepseekV4Model(nn.Module):
             )
         # Expand to hc_mult copies for hyper-connections ([T, H] -> [T, hc, H]).
         hidden_states = inputs_embeds.unsqueeze(-2).repeat(1, self.hc_mult, 1)
+        if decode_step is not None:
+            hidden_states = decode_step.run(hidden_states, positions, input_ids)
+            assert isinstance(hidden_states, torch.Tensor)
+            return hidden_states
 
         residual = post_mix = res_mix = pre_mix = None
         for layer in self.layers:
@@ -303,6 +315,24 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
             prefix=maybe_prefix(prefix, "lm_head"),
         )
         self.logits_processor = LogitsProcessor(self.config.vocab_size)
+        # decode_backend=latency_specialized: a decode executor over self.model, built
+        # by the target model's state on the target's executor. The speculator
+        # reads the Markov sampling hooks before that, so they test the request.
+        self.specialized_decode_requested = (
+            decode_backend(vllm_config) == "latency_specialized"
+        )
+        self.specialized_decode: DraftDecode | None = None
+        if self.specialized_decode_requested:
+            register_draft(self)
+
+    def build_specialized_decode(self, target: "SpecializedDecode") -> "DraftDecode":
+        """Build this model's decode executor on ``target``, the target
+        model's, and compute logits with the low-batch LM head."""
+        from .specialized_decode.logits.logits import SpecializedDecodeLogitsProcessor
+
+        self.specialized_decode = target.for_draft(self.model)
+        self.logits_processor = SpecializedDecodeLogitsProcessor(self.config.vocab_size)
+        return self.specialized_decode
 
     # --- Hooks used by the speculator -------------------------------------
 
@@ -327,6 +357,35 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
             context_states, context_positions, context_slot_mappings
         )
 
+    def context_kv_shape(self) -> tuple[int, int]:
+        """(num_layers, head_dim) of ``project_context_kv``'s output rows."""
+        layers = self.model.layers
+        return len(layers), layers[0].attn.head_dim
+
+    def project_context_kv(self, main_x: torch.Tensor, out: torch.Tensor) -> None:
+        """The part of ``precompute_and_store_context_kv`` that reads only
+        ``main_x``: layer i's normalized context KV, into ``out[i]``."""
+        for i, layer in enumerate(self.model.layers):
+            attn = layer.attn
+            qr_kv, _ = attn.fused_wqa_wkv(main_x)
+            out[i].copy_(attn.kv_norm(qr_kv[..., attn.q_lora_rank :]))
+
+    def store_projected_context_kv(
+        self,
+        context_kv: torch.Tensor,
+        context_positions: torch.Tensor,
+        context_slot_mappings: list[torch.Tensor | None] | None = None,
+    ) -> None:
+        """The rest: insert ``project_context_kv``'s output at each layer's
+        context slots."""
+        if context_slot_mappings is None:
+            return
+        for layer, kv, slot_mapping in zip(
+            self.model.layers, context_kv, context_slot_mappings
+        ):
+            if slot_mapping is not None:
+                _insert_context_kv(layer.attn, kv, context_positions, slot_mapping)
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -334,7 +393,9 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # Returns the pre-norm collapsed head hidden ([T, hidden_size]).
-        return self.model(input_ids, positions, inputs_embeds)
+        decode = self.specialized_decode
+        step = None if decode is None else decode.plan(positions)
+        return self.model(input_ids, positions, inputs_embeds, decode_step=step)
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """Base logits U_k = lm_head(norm(head_hidden))."""
@@ -344,6 +405,30 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
         # Full-vocab draft: base logits, no d2t scatter.
         return self.compute_logits(hidden_states)
 
+    def compute_draft_logits_local(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """This rank's vocabulary columns of ``compute_draft_logits``, without
+        the tensor-parallel all-gather."""
+        return self.logits_processor(
+            self.lm_head, self.model.norm(hidden_states), skip_gather=True
+        )
+
+    def draft_logits_shard(self) -> tuple[int, int] | None:
+        """``(first column, width)`` of ``compute_draft_logits_local`` within
+        the full draft logits, or None when it is not a plain slice of them
+        (vocabulary padding or added vocabulary in the shard)."""
+        head = self.lm_head
+        shard = head.shard_indices
+        width = shard.num_org_elements
+        if (
+            self.logits_processor.logits_as_input
+            or self.logits_processor.org_vocab_size != self.config.vocab_size
+            or shard.num_elements_padded != width
+            or head.num_embeddings_per_partition != width
+            or shard.org_vocab_start_index != head.tp_rank * width
+        ):
+            return None
+        return shard.org_vocab_start_index, width
+
     def map_draft_to_target(self, draft_ids: torch.Tensor) -> torch.Tensor:
         return draft_ids  # full-vocab: draft ids are target ids
 
@@ -352,6 +437,31 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
 
     def markov_bias(self, markov_embed: torch.Tensor) -> torch.Tensor:
         return self.model.markov_head.bias(markov_embed, self.logits_processor)
+
+    def markov_embed_weight(self) -> torch.Tensor | None:
+        """The table ``markov_embed`` looks up, for fused DSpark sampling with
+        decode_backend=latency_specialized (None without it: the eager loop)."""
+        if not self.specialized_decode_requested:
+            return None
+        return self.model.markov_head.markov_w1.weight
+
+    def markov_bias_weight(self) -> torch.Tensor | None:
+        """The ``[vocab, rank]`` matrix ``markov_bias`` multiplies by, for the
+        vocabulary-sharded DSpark sampler: with decode_backend=latency_specialized, and
+        when ``markov_bias`` is a plain BF16 product with it."""
+        head = self.model.markov_head.markov_w2
+        processor = self.logits_processor
+        if (
+            not self.specialized_decode_requested
+            or not isinstance(head.quant_method, UnquantizedEmbeddingMethod)
+            or head.weight.dtype != torch.bfloat16
+            or processor.scale != 1.0
+            or processor.soft_cap is not None
+            or processor.logits_as_input
+            or processor.head_dtype not in (None, torch.bfloat16)
+        ):
+            return None
+        return head.weight
 
     def compute_confidence(
         self, head_hidden: torch.Tensor, markov_embed: torch.Tensor
