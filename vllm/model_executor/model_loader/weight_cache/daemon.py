@@ -98,6 +98,7 @@ from vllm.distributed import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model_loader
+from vllm.model_executor.model_loader.base_loader import log_model_inspection
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
 from vllm.model_executor.model_loader.weight_cache.protocol import (
     TensorEntry,
@@ -327,7 +328,9 @@ class WeightCacheDaemon:
             check_ipc_quant_support(model)
             loader.load_weights(model, model_config)
             process_weights_after_loading(model, model_config, target_device)
-        return model.eval()
+        model = model.eval()
+        log_model_inspection(model)
+        return model
 
     def serve_forever(self, ready_callback: Callable[[], None] | None = None) -> None:
         """Serve requests until terminated.
