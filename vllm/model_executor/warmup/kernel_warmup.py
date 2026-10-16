@@ -464,7 +464,8 @@ def flashinfer_autotune(runner: "GPUModelRunner", *, skip_attn: bool = False) ->
     # which lead to some EP ranks receiving no tokens and skipping their
     # MoE kernel entirely, and cause hang due to all-reduce collective
     # during synchronized autotuning.
-    if _all_ranks_have_matching_cache(cache_path, tune_group):
+    cache_hit = _all_ranks_have_matching_cache(cache_path, tune_group)
+    if cache_hit:
         loaded = tuner.load_configs(str(cache_path))
         if tune_group.world_size > 1:
             loaded_by_rank: list[bool | None] = [None] * tune_group.world_size
@@ -473,6 +474,7 @@ def flashinfer_autotune(runner: "GPUModelRunner", *, skip_attn: bool = False) ->
             )
             loaded = all(loaded_by_rank)
         if not loaded:
+            cache_hit = False
             tuner.clear_cache()
 
     group = tune_group.cpu_group if tune_group.world_size > 1 else None
@@ -490,7 +492,8 @@ def flashinfer_autotune(runner: "GPUModelRunner", *, skip_attn: bool = False) ->
                 # HiSparse hot-buffer attention is bounded by decode batch
                 # size, not the prefill-sized batch used for the full model.
                 autotune_hisparse_flashinfer_attention(runner)
-            _run_flashinfer_autotune_dummy_runs(runner, skip_attn=skip_attn)
+            if not cache_hit:
+                _run_flashinfer_autotune_dummy_runs(runner, skip_attn=skip_attn)
             replayssm_autotune_warmup(runner)
             _autotune_kimi_k3_kda_qkvg(runner.get_model())
     finally:
