@@ -43,7 +43,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
-from vllm.v1.attention.backend import AttentionType
+from vllm.v1.attention.backend import AttentionBackend, AttentionType
 
 if typing.TYPE_CHECKING:
     from vllm.transformers_utils.configs.step3p5 import Step3p5Config
@@ -245,9 +245,13 @@ class Step3p5Attention(nn.Module):
             prefix=f"{prefix}.attn",
             per_layer_sliding_window=sliding_window,
             attn_type=attn_type,
+            attn_backend=self._attn_backend(),
         )
 
         self.max_position_embeddings = max_position
+
+    def _attn_backend(self) -> type[AttentionBackend] | None:
+        return None
 
     def forward(
         self,

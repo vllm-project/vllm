@@ -10,6 +10,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
+from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.attention import unified_kv_cache_update
 from vllm.model_executor.layers.linear import ColumnParallelLinear, ReplicatedLinear
 from vllm.model_executor.layers.rotary_embedding import get_rope
@@ -30,6 +31,12 @@ from vllm.models.step5.common.csa_cache import (
 from vllm.models.step5.common.ops.csa import indexer_norm
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import _encode_layer_name, kv_cache_dtype_str_to_dtype
+from vllm.v1.attention.backend import AttentionBackend
+from vllm.v1.attention.backends.rocm_aiter_unified_attn import (
+    RocmAiterUnifiedAttentionBackend,
+)
+
+logger = init_logger(__name__)
 
 
 class Step5SparseIndexer(nn.Module):
@@ -179,12 +186,6 @@ class Step5Attention(Step3p5Attention):
             raise NotImplementedError(
                 f"Step-5 sparse attention reads a BF16 KV cache; got {cache_dtype}"
             )
-        if self.attn.attn_backend.get_name() != "ROCM_AITER_UNIFIED_ATTN":
-            raise NotImplementedError(
-                "Step-5 sparse attention reads the ROCM_AITER_UNIFIED_ATTN "
-                "K/V cache layout; pass --attention-backend "
-                "ROCM_AITER_UNIFIED_ATTN."
-            )
         if not self.use_rope:
             raise NotImplementedError("Step-5 sparse layers require RoPE")
         self.indexer = Step5SparseIndexer(
@@ -195,6 +196,14 @@ class Step5Attention(Step3p5Attention):
         if self.csa_layer_name in static_context:
             raise ValueError(f"Duplicate layer name: {self.csa_layer_name}")
         static_context[self.csa_layer_name] = self
+
+    def _attn_backend(self) -> type[AttentionBackend] | None:
+        # The CSA kernels read this backend's paged K/V layout.
+        config = get_current_vllm_config().model_config.hf_config.get_text_config()
+        if not config.is_sparse_layer(self.layer_idx):
+            return None
+        logger.info_once("Step-5 sparse attention layers use ROCM_AITER_UNIFIED_ATTN.")
+        return RocmAiterUnifiedAttentionBackend
 
     def forward(
         self, positions: torch.Tensor, hidden_states: torch.Tensor
