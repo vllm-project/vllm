@@ -4,6 +4,7 @@
 
 import torch
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 from .sparse_indexer import DecodeIndexerMetadata
@@ -41,6 +42,7 @@ def _direct_scores(
     WORKERS: tl.constexpr,
     ROW_GROUPS: tl.constexpr,
     QUERY_LEN: tl.constexpr,
+    USE_BF16_DOT: tl.constexpr,
 ):
     worker = tl.program_id(0)
     row = tl.program_id(1)
@@ -92,7 +94,13 @@ def _direct_scores(
             other=0,
         )
         query = query.to(tl.float8e4nv, bitcast=True)
-        dot = tl.dot(key, query, out_dtype=tl.float32, max_num_imprecise_acc=0)
+        if USE_BF16_DOT:
+            # Preserve the FP8 grid without ROCm native FP8 dot rounding.
+            dot = tl.dot(
+                key.to(tl.bfloat16), query.to(tl.bfloat16), out_dtype=tl.float32
+            )
+        else:
+            dot = tl.dot(key, query, out_dtype=tl.float32, max_num_imprecise_acc=0)
         dot = tl.maximum(dot, 0.0)
         w = tl.load(W + token * W_TOKEN + kv_group * W_GROUP + h, h < HEADS, other=0)
         # FI's FP32 epilogue has four independent FMA chains followed by
@@ -183,6 +191,7 @@ def decode_summary_scores(
         workers,
         row_groups,
         query_len,
+        current_platform.is_rocm(),
         num_warps=4,
         enable_fp_fusion=False,
     )
