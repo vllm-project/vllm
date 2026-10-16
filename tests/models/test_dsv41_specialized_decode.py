@@ -210,6 +210,7 @@ def make_config(**overrides) -> Any:
             enable_expert_parallel=False,
             enable_eplb=False,
             decode_context_parallel_size=1,
+            use_ubatching=False,
             prefill_context_parallel_size=1,
         ),
         offload_config=SimpleNamespace(
@@ -279,12 +280,6 @@ class TestDsv41Spec(DecodeConformance):
                 kv_cache=make_cache()
             )
         return model
-
-    def decode_metadata(self, config, model):
-        return _metadata(model)
-
-    def skipped_metadata(self, config, model):
-        return _metadata(model, num_prefills=1)
 
     def bad_caches(self, config, model):
         return {"swa": torch.zeros(4, dtype=torch.bfloat16)}
