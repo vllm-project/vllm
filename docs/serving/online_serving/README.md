@@ -171,6 +171,38 @@ For further details on derenderer APIs, please refer to [this page](derenderer.m
 - `/scale_elastic_ep` - Trigger scaling operations
 - `/is_scaling_elastic_ep` - Check if scaling is in progress
 
+### External scaling operation status
+
+With external DP load balancing, `POST /scale_elastic_ep` accepts optional
+`operation_id` and `expected_instance_id` fields:
+
+```json
+{
+  "new_data_parallel_size": 4,
+  "drain_timeout": 120,
+  "operation_id": "resize-42",
+  "expected_instance_id": "<instance_id from this rank's status>"
+}
+```
+
+Send the same operation ID and target to every existing rank, using each rank's
+own instance ID. The orchestrator still launches joiners and controls routing.
+`POST /is_scaling_elastic_ep` reports the latest operation's ID, epoch, phase,
+requested and effective DP sizes, topology certainty, and error.
+
+Replaying the latest operation with the same target returns its active or terminal
+status without repeating the resize. A conflicting target or operation, or a stale
+instance precondition, returns HTTP 409. A target already equal to the current DP
+size remains a no-op; status describes the last actual resize. This API retains
+only the latest operation, so controllers must finish reconciling it before
+starting another.
+
+When `topology_known` is false, the effective size is the last known size.
+Further operations are rejected; replaying the failed operation remains available
+for observation. Restart the runtime before issuing another resize. Inference
+admission remains closed after commit failure, while health and status remain
+queryable. These fields do not provide an engine recovery mechanism.
+
 ## Server in development mode
 
 When using the flag VLLM_SERVER_DEV_MODE=1, you enable development endpoints.
