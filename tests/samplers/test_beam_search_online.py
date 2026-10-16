@@ -56,6 +56,7 @@ class _Renderer:
 
 
 class _VllmConfig:
+    use_v2_model_runner = True
     watermark_config = object()
     speculative_config = None
     model_config = SimpleNamespace(is_diffusion=False)
@@ -340,6 +341,9 @@ async def test_explicit_beam_allowlist_uses_exact_scores(offline, exhausted):
     prompt: TokensInput = {"type": "token", "prompt_token_ids": [1]}
     base = SamplingParams(watermarking=False)
     template = [r async for r in _EngineClient().generate(prompt, base)][0]
+    template.outputs[0].logprobs[0] = dict(
+        reversed(list(template.outputs[0].logprobs[0].items()))
+    )
     calls = []
     if exhausted:
         for logprob in template.outputs[0].logprobs[0].values():
@@ -370,6 +374,7 @@ async def test_explicit_beam_allowlist_uses_exact_scores(offline, exhausted):
         )
         ids = [b.tokens[1:] for b in result]
         scores = [b.cum_logprob for b in result]
+        step_scores = [step for b in result for step in b.logprobs]
     else:
         serving = _AsyncServing()
         serving.engine_client = Client()
@@ -378,6 +383,9 @@ async def test_explicit_beam_allowlist_uses_exact_scores(offline, exhausted):
         ]
         ids = [b.token_ids for b in online_result.outputs]
         scores = [b.cumulative_logprob for b in online_result.outputs]
+        step_scores = [
+            step for b in online_result.outputs for step in (b.logprobs or [])
+        ]
     if exhausted:
         assert len(calls) == 1
         assert ids == scores == []
@@ -385,13 +393,16 @@ async def test_explicit_beam_allowlist_uses_exact_scores(offline, exhausted):
     assert len(calls) == 3
     assert ids[0] == [13, 13] and all(set(x) <= {13, 14} for x in ids)
     assert scores == [-6.0, -7.0]
+    assert all(list(step) == [13, 14] for step in step_scores)
+    assert all(score.rank is None for step in step_scores for score in step.values())
 
 
 @pytest.mark.parametrize(
-    "case", ["empty", "grammar", "spec", "diffusion", "size", "id"]
+    "case", ["empty", "grammar", "spec", "diffusion", "v1", "size", "id"]
 )
 def test_beam_allowlist_rejects_unsupported_requests(case):
     config = SimpleNamespace(
+        use_v2_model_runner=case != "v1",
         speculative_config=object() if case == "spec" else None,
         model_config=SimpleNamespace(
             is_diffusion=case == "diffusion",

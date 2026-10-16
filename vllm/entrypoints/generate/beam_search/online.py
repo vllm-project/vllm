@@ -146,7 +146,11 @@ class BeamSearchOnlineMixin(ABC):
                     if allowed is not None:
                         logprobs = {
                             token: score
-                            for token, score in logprobs.items()
+                            for token, score in sorted(
+                                logprobs.items(),
+                                key=lambda item: item[1].logprob,
+                                reverse=True,
+                            )
                             if token in allowed and math.isfinite(score.logprob)
                         }
                         for score in logprobs.values():
