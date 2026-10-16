@@ -27,7 +27,7 @@ class _OOTQGather(dcp.DirectDCPQGather):
 
     def forward_cuda(self, *args: Any, **kwargs: Any) -> None:
         self.calls += 1
-        super().forward_native(*args, **kwargs)
+        super().forward_cuda(*args, **kwargs)
 
     forward_cpu = forward_cuda
 
@@ -37,7 +37,7 @@ class _OOTA2AReduce(dcp.DirectDCPA2AReduce):
 
     def forward_cuda(self, *args: Any, **kwargs: Any) -> None:
         self.calls += 1
-        super().forward_native(*args, **kwargs)
+        super().forward_cuda(*args, **kwargs)
 
     forward_cpu = forward_cuda
 
@@ -47,7 +47,7 @@ class _OOTKVGather(dcp.DirectDCPKVGather):
 
     def forward_cuda(self, *args: Any, **kwargs: Any) -> None:
         self.calls += 1
-        super().forward_native(*args, **kwargs)
+        super().forward_cuda(*args, **kwargs)
 
     forward_cpu = forward_cuda
 
@@ -77,29 +77,59 @@ def test_oot_collective_dispatch_preserves_native_fallback(
         "explicit_on": ["none", f"+{op_cls.__name__}"],
         "explicit_off": ["all", f"-{op_cls.__name__}"],
     }
-    output = torch.zeros(1)
+    group = MagicMock()
+    args: list[Any] = [None] * num_args
+    if op_cls is dcp.DirectDCPQGather:
+        args[0] = torch.full((2, 1, 2), 42.0)
+        output = torch.zeros(2, 2, 2)
+        args[5:9] = [2, 0, 2, 2]
+    elif op_cls is dcp.DirectDCPKVGather:
+        args[0] = torch.full((2, 2), 42.0)
+        output = torch.zeros(4, 2)
+        args[6:9] = [2, 0, 4]
+    else:
+        args[0] = torch.full((2, 2, 2), 42.0)
+        args[1] = torch.zeros(2, 2)
+        output = torch.zeros(2, 1, 2)
+        args[12:] = [2, 0, 2, True]
+    args[output_index] = output
+    cuda_calls: list[None] = []
+    collective_calls: list[None] = []
 
-    def native_kernel(*args: Any) -> None:
+    def cuda_kernel(*args: Any) -> None:
         assert args[output_index] is output, "Collective must use the supplied output"
+        cuda_calls.append(None)
         output.fill_(42)
 
-    monkeypatch.setattr(torch.ops._C, op_cls.name, native_kernel, raising=False)
+    def torch_collective(
+        destination: torch.Tensor, source: torch.Tensor, *, group: Any
+    ) -> None:
+        assert group is op.group, "Native fallback must use the bound process group"
+        collective_calls.append(None)
+        destination.fill_(42)
+
+    monkeypatch.setattr(torch.ops._C, op_cls.name, cuda_kernel, raising=False)
+    monkeypatch.setattr(dist, "all_gather_into_tensor", torch_collective)
+    monkeypatch.setattr(dist, "all_to_all_single", torch_collective)
     config = VllmConfig(
         compilation_config=CompilationConfig(custom_ops=directives[mode])
     )
     with set_current_vllm_config(config):
-        op = op_cls()
+        op = op_cls(group)
     assert isinstance(op, (_OOTQGather, _OOTA2AReduce, _OOTKVGather)), (
         "Collective construction must resolve the registered OOT class"
     )
 
-    args: list[Any] = [None] * num_args
-    args[output_index] = output
     op.forward(*args)
-    assert output.item() == 42, "Native communication must run even with custom ops off"
-    assert op.calls == (mode in {"all", "explicit_on"}), (
-        "Enabled OOT dispatch must run the replacement; disabled dispatch must "
-        "retain the native collective"
+    assert torch.equal(output, torch.full_like(output, 42)), (
+        "Native communication must run even with custom ops off"
+    )
+    cuda_enabled = mode in {"all", "explicit_on"}
+    assert op.calls == len(cuda_calls) == int(cuda_enabled), (
+        "Enabled dispatch must use the OOT CUDA implementation"
+    )
+    assert len(collective_calls) == int(not cuda_enabled), (
+        "Disabled dispatch must use built-in Torch collectives"
     )
 
 
@@ -114,7 +144,7 @@ def _collective_test_op(
     op_cls.register_oot(oot_cls)
     config = VllmConfig(compilation_config=CompilationConfig(custom_ops=[mode]))
     with set_current_vllm_config(config):
-        op = op_cls()
+        op = op_cls(dist.group.WORLD)
     assert isinstance(op, (_OOTQGather, _OOTA2AReduce, _OOTKVGather)), (
         "Every worker must resolve the registered OOT collective"
     )
@@ -727,6 +757,7 @@ def _distributed_direct_q_gather_worker(env: dict[str, str]) -> None:
     device = torch.device(f"cuda:{local_rank}")
     torch.accelerator.set_device_index(local_rank)
     dist.init_process_group(backend="nccl")
+    graph: torch.cuda.CUDAGraph | None = None
     try:
         rank = dist.get_rank()
         world_size = dist.get_world_size()
@@ -736,6 +767,7 @@ def _distributed_direct_q_gather_worker(env: dict[str, str]) -> None:
         dcp.dbo_current_ubatch_id = lambda: active_ubatch[0]
         op = _collective_test_op(dcp.DirectDCPQGather, env["CUSTOM_OPS"])
         kernel = op.forward
+        epoch_increment = int(env["CUSTOM_OPS"] == "all")
         for dtype_idx, dtype_name in enumerate(
             ("bfloat16", "float8_e4m3fn", "float32")
         ):
@@ -833,7 +865,7 @@ def _distributed_direct_q_gather_worker(env: dict[str, str]) -> None:
                 graph.replay()
                 torch.accelerator.synchronize()
                 assert int(workspace.epoch[1].item()) == (
-                    epoch_before_replays + replay + 1
+                    epoch_before_replays + (replay + 1) * epoch_increment
                 )
                 _assert_q_gather_matches_reference(
                     captured_output,
@@ -864,7 +896,10 @@ def _distributed_direct_q_gather_worker(env: dict[str, str]) -> None:
             epoch_before_mixed_replay = int(workspace.epoch[1].item())
             graph.replay()
             torch.accelerator.synchronize()
-            assert int(workspace.epoch[1].item()) == epoch_before_mixed_replay + 1
+            assert (
+                int(workspace.epoch[1].item())
+                == epoch_before_mixed_replay + epoch_increment
+            )
             _assert_q_gather_matches_reference(
                 captured_output, captured_input, world_size, padded_num_heads
             )
@@ -872,6 +907,9 @@ def _distributed_direct_q_gather_worker(env: dict[str, str]) -> None:
             "Distributed query gather must exercise the configured implementation"
         )
     finally:
+        # NCCL shutdown waits for captured graphs to release their communicators.
+        if graph is not None:
+            graph.reset()
         dist.destroy_process_group()
 
 
@@ -904,6 +942,7 @@ def _distributed_direct_kv_gather_worker(env: dict[str, str]) -> None:
     device = torch.device(f"cuda:{local_rank}")
     torch.accelerator.set_device_index(local_rank)
     dist.init_process_group(backend="nccl")
+    graph: torch.cuda.CUDAGraph | None = None
     try:
         rank = dist.get_rank()
         world_size = dist.get_world_size()
@@ -966,6 +1005,8 @@ def _distributed_direct_kv_gather_worker(env: dict[str, str]) -> None:
             "Distributed KV gather must exercise the configured implementation"
         )
     finally:
+        if graph is not None:
+            graph.reset()
         dist.destroy_process_group()
 
 
@@ -998,6 +1039,7 @@ def _distributed_direct_a2a_worker(env: dict[str, str]) -> None:
     device = torch.device(f"cuda:{local_rank}")
     torch.accelerator.set_device_index(local_rank)
     dist.init_process_group(backend="nccl")
+    graph: torch.cuda.CUDAGraph | None = None
     try:
         from vllm.v1.attention.ops.dcp import _lse_weighted_combine
 
@@ -1235,6 +1277,8 @@ def _distributed_direct_a2a_worker(env: dict[str, str]) -> None:
             "Distributed A2A must exercise the configured implementation"
         )
     finally:
+        if graph is not None:
+            graph.reset()
         dist.destroy_process_group()
 
 
@@ -1256,14 +1300,17 @@ def _distributed_direct_a2a_worker(env: dict[str, str]) -> None:
     ],
 )
 @pytest.mark.parametrize("custom_ops", ["all", "none"])
-def test_distributed_direct_a2a_matches_reference(world_size: int, custom_ops: str):
+@pytest.mark.parametrize("is_lse_base_on_e", [False, True])
+def test_distributed_direct_a2a_matches_reference(
+    world_size: int, custom_ops: str, is_lse_base_on_e: bool
+):
     _distributed_run(
         _distributed_direct_a2a_worker,
         world_size=world_size,
         extra_env={
             "TEST_DTYPE": "bfloat16",
             "TEST_LSE_DTYPE": "bfloat16",
-            "LSE_BASE_E": "0",
+            "LSE_BASE_E": str(int(is_lse_base_on_e)),
             "CUSTOM_OPS": custom_ops,
         },
     )

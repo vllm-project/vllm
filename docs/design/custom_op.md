@@ -320,8 +320,9 @@ In addition, you can also register all your `CustomOp` at one place for better m
 `DirectDCPQGather`, `DirectDCPA2AReduce` and `DirectDCPKVGather` in
 `vllm.v1.attention.ops.dcp_custom_ops` support OOT implementations of the
 direct symmetric-memory query gather, output exchange/LSE reduction and KV gather.
-`MLADCPManager` binds their `forward` methods during model construction and
-passes them as kernel arguments to the existing workspace methods. Core owns
+`MLADCPManager` binds each op to its DCP process group and selects its `forward`
+method during model construction. Workspace methods require an explicit kernel
+argument; the manager supplies it through the existing partials. Core owns
 the symmetric buffers, output views, microbatch slots and capacity fallbacks.
 Cached workspaces do not retain plugin implementations.
 
@@ -361,7 +362,7 @@ class PluginDCPQGather(DirectDCPQGather):
 ```
 
 Implement the complete launch with the same argument order and buffer and
-synchronization protocol as the native operation. Query gather publishes into
+synchronization protocol as the dedicated CUDA operation. Query gather publishes into
 the supplied `[T, world_size * H, D]` output view and waits for peer publication.
 The final query buffer is reusable only after the downstream attention combine
 orders all peers after consumption. A2A exchanges the supplied `[T, world_size * H, D]`
@@ -372,8 +373,13 @@ masking. KV gather publishes local rows through its double-buffered workspace
 and copies rank-ordered rows to the supplied output. All ranks must use the
 same plugin/config and collective order.
 
-The inherited `forward_native` calls the existing native collective, so
-`custom_ops=["none"]` still performs communication and synchronization.
+The dedicated kernels live in `forward_cuda`. The inherited `forward_native`
+uses `torch.distributed.all_gather_into_tensor` for Q/KV gather and
+`torch.distributed.all_to_all_single` plus the existing PyTorch LSE combine for
+A2A. It writes the same supplied outputs using the bound process group, without
+touching the dedicated signal/counter/epoch state. Thus `custom_ops=["none"]`
+selects built-in Torch collectives, and enabled CUDA dispatch selects the
+dedicated implementation or its OOT replacement.
 With current OOT registration semantics, explicit plugin opt-in uses the
 original class names:
 `["none", "+DirectDCPQGather", "+DirectDCPA2AReduce", "+DirectDCPKVGather"]`.

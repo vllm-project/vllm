@@ -37,6 +37,13 @@ from vllm.v1.attention.ops.dcp_custom_ops import (
     DirectDCPA2AReduce,
     DirectDCPKVGather,
     DirectDCPQGather,
+    _validate_dcp_empty_shard_args,
+)
+from vllm.v1.attention.ops.dcp_custom_ops import (
+    _lse_weighted_combine as _lse_weighted_combine,
+)
+from vllm.v1.attention.ops.dcp_custom_ops import (
+    mask_dcp_empty_shards_ as mask_dcp_empty_shards_,
 )
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
@@ -49,57 +56,6 @@ if TYPE_CHECKING:
 
 
 # LSE/output combine
-
-
-def _validate_dcp_empty_shard_args(
-    seq_lens: torch.Tensor | None,
-    query_start_loc: torch.Tensor | None,
-) -> bool:
-    """Validate the empty-shard mask inputs.
-
-    Returns True when masking is requested, False when it is disabled. Raises on
-    an inconsistent pair. Performs no device work so it is safe to call from a
-    CUDA-graph-captured region.
-    """
-    if seq_lens is None and query_start_loc is None:
-        return False
-    if seq_lens is None or query_start_loc is None:
-        raise ValueError("seq_lens and query_start_loc must be provided together")
-    if (
-        seq_lens.ndim != 1
-        or query_start_loc.ndim != 1
-        or query_start_loc.shape[0] != seq_lens.shape[0] + 1
-    ):
-        raise ValueError("query_start_loc must contain one boundary per sequence")
-    return True
-
-
-def mask_dcp_empty_shards_(
-    lse: torch.Tensor,
-    seq_lens: torch.Tensor | None,
-    query_start_loc: torch.Tensor | None,
-) -> None:
-    if not _validate_dcp_empty_shard_args(seq_lens, query_start_loc):
-        return
-    assert seq_lens is not None and query_start_loc is not None
-
-    # A DCP rank can receive no local sequences during CUDA graph warmup even
-    # though the padded LSE buffer still has rows. In that case every row is an
-    # empty shard; avoid indexing the empty seq_lens tensor below.
-    if seq_lens.shape[0] == 0:
-        lse.fill_(float("-inf"))
-        return
-
-    row_indices = torch.arange(
-        lse.shape[0], device=lse.device, dtype=query_start_loc.dtype
-    )
-    sequence_indices = torch.searchsorted(
-        query_start_loc[1:], row_indices, right=True
-    ).clamp_max(seq_lens.shape[0] - 1)
-    empty_rows = (row_indices >= query_start_loc[-1]) | (
-        seq_lens[sequence_indices] == 0
-    )
-    lse.masked_fill_(empty_rows[:, None], float("-inf"))
 
 
 # AG + RS/AR implementation
@@ -535,75 +491,6 @@ def cp_lse_ag_out_ar(
 
 
 # Standard A2A implementation
-
-
-def _lse_weighted_combine(
-    outputs: torch.Tensor,
-    lses: torch.Tensor,
-    return_lse: bool = False,
-    is_lse_base_on_e: bool = True,
-) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-    """CPU reference implementation for LSE-weighted combination.
-
-    This is a pure PyTorch implementation used for testing and validation.
-
-    Args:
-        outputs: Partial attention outputs [N, B, H, D]
-                 N = number of KV shards (ranks)
-                 B = batch size (num_tokens)
-                 H = number of heads per rank
-                 D = head dimension
-        lses: Log-sum-exp values [N, B, H]
-        return_lse: If True, also return the global LSE
-        is_lse_base_on_e: If True, LSE is base e; if False, base 2
-
-    Returns:
-        Combined output [B, H, D], and optionally global LSE [B, H]
-
-    """
-    N, B, H, D = outputs.shape
-
-    # Handle NaN and inf in LSEs
-    lses = torch.where(
-        torch.isnan(lses) | torch.isinf(lses),
-        torch.tensor(float("-inf"), device=lses.device, dtype=lses.dtype),
-        lses,
-    )
-
-    # Compute max LSE for numerical stability
-    lse_max, _ = lses.max(dim=0)  # [B, H]
-    lse_max = torch.where(
-        lse_max == float("-inf"),
-        torch.zeros_like(lse_max),
-        lse_max,
-    )
-
-    # Compute weights: softmax over the N dimension
-    if is_lse_base_on_e:
-        weights = torch.exp(lses - lse_max.unsqueeze(0))  # [N, B, H]
-    else:
-        weights = torch.pow(2.0, lses - lse_max.unsqueeze(0))  # [N, B, H]
-
-    # Handle NaN weights
-    weights = torch.where(torch.isnan(weights), torch.zeros_like(weights), weights)
-
-    # Normalize weights
-    weight_sum = weights.sum(dim=0, keepdim=True)  # [1, B, H]
-    weights = weights / weight_sum.clamp(min=1e-10)  # [N, B, H]
-
-    # Weighted combination: sum over N dimension
-    weights = weights.unsqueeze(-1)
-    outputs = torch.where(weights == 0, torch.zeros_like(outputs), outputs)
-    result = (outputs * weights).sum(dim=0)  # [B, H, D]
-
-    if return_lse:
-        if is_lse_base_on_e:
-            global_lse = torch.log(weight_sum.squeeze(0)) + lse_max  # [B, H]
-        else:
-            global_lse = torch.log2(weight_sum.squeeze(0)) + lse_max  # [B, H]
-        return result, global_lse
-
-    return result
 
 
 def _dcp_a2a_lse_pack_dim(output_dtype: torch.dtype) -> int:
@@ -1103,15 +990,14 @@ class DirectDCPA2AWorkspace(DirectCPWorkspace):
         is_lse_base_on_e: bool,
         seq_lens: torch.Tensor | None = None,
         query_start_loc: torch.Tensor | None = None,
-        kernel: Callable[..., None] | None = None,
+        *,
+        kernel: Callable[..., None],
     ) -> torch.Tensor:
         ubatch = dbo_current_ubatch_id()
         num_tokens = partial_output.shape[0]
         output = partial_output.new_empty(
             (num_tokens, self.heads_per_rank, self.head_dim)
         )
-        if kernel is None:
-            kernel = torch.ops._C.direct_dcp_a2a_lse_reduce
         kernel(
             partial_output,
             partial_lse,
@@ -1256,7 +1142,8 @@ class DirectDCPQGatherWorkspace(DirectCPWorkspace):
     def gather(
         self,
         local_query: torch.Tensor,
-        kernel: Callable[..., None] | None = None,
+        *,
+        kernel: Callable[..., None],
     ) -> torch.Tensor:
         ubatch = dbo_current_ubatch_id()
         if not 0 <= ubatch < self.num_ubatches:
@@ -1280,8 +1167,6 @@ class DirectDCPQGatherWorkspace(DirectCPWorkspace):
             ),
         )
         query_multicast_ptr, signal_multicast_ptr = self.multicast_ptrs[ubatch]
-        if kernel is None:
-            kernel = torch.ops._C.direct_dcp_q_gather
         kernel(
             local_query,
             output,
@@ -1399,7 +1284,8 @@ class DirectDCPKVGatherWorkspace(DirectCPWorkspace):
         self,
         gathered_kv: torch.Tensor,
         local_kv: torch.Tensor,
-        kernel: Callable[..., None] | None = None,
+        *,
+        kernel: Callable[..., None],
     ) -> None:
         ubatch = dbo_current_ubatch_id()
         if not 0 <= ubatch < self.num_ubatches:
@@ -1407,8 +1293,6 @@ class DirectDCPKVGatherWorkspace(DirectCPWorkspace):
                 f"DCP kv-gather ubatch {ubatch} exceeds {self.num_ubatches} slots"
             )
         kv_multicast_ptr, signal_multicast_ptr = self.multicast_ptrs[ubatch]
-        if kernel is None:
-            kernel = torch.ops._C.direct_dcp_kv_gather
         kernel(
             local_kv,
             self.received_kv[ubatch],
@@ -1542,7 +1426,7 @@ class MLADCPManager:
                 self._direct_workspace_combine,
                 direct_workspace,
                 is_lse_base_on_e=is_lse_base_on_e,
-                kernel=DirectDCPA2AReduce().forward,
+                kernel=DirectDCPA2AReduce(self.group.device_group).forward,
             )
 
         combine_fn = (
@@ -1566,7 +1450,8 @@ class MLADCPManager:
         is_lse_base_on_e: bool,
         seq_lens: torch.Tensor | None = None,
         query_start_loc: torch.Tensor | None = None,
-        kernel: Callable[..., None] | None = None,
+        *,
+        kernel: Callable[..., None],
     ) -> torch.Tensor:
         # Forced MQA path pass all batch tokens (including prefill) into combine,
         # which may exceed the direct symmetric-memory workspace. Fall back to
@@ -1610,7 +1495,7 @@ class MLADCPManager:
             return functools.partial(
                 self._direct_workspace_query_gather,
                 direct_workspace,
-                kernel=DirectDCPQGather().forward,
+                kernel=DirectDCPQGather(self.group.device_group).forward,
             )
         return self._gather_query
 
@@ -1624,7 +1509,8 @@ class MLADCPManager:
         self,
         direct_workspace: DirectDCPQGatherWorkspace,
         query: torch.Tensor,
-        kernel: Callable[..., None] | None = None,
+        *,
+        kernel: Callable[..., None],
     ) -> torch.Tensor:
         # Forced MQA path can be taken for long sparse MLA prefills, whose batch size
         # may exceed the direct symmetric-memory workspace. Fall back to allgather
@@ -1661,7 +1547,8 @@ class MLADCPManager:
                 "Using direct symmetric-memory DCP chunked-context KV gather for MLA."
             )
             self._kv_gather = functools.partial(
-                direct_workspace.gather, kernel=DirectDCPKVGather().forward
+                direct_workspace.gather,
+                kernel=DirectDCPKVGather(self.group.device_group).forward,
             )
         else:
             self._kv_gather = functools.partial(
