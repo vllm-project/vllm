@@ -27,11 +27,12 @@ physical experts.
 
 import threading
 import time
+from collections import deque
 from collections.abc import Sequence
 from dataclasses import dataclass
 
 import torch
-from torch.distributed import ProcessGroup, ReduceOp, all_reduce
+from torch.distributed import ProcessGroup, all_reduce
 
 from vllm.config import ModelConfig, ParallelConfig
 from vllm.config.utils import compute_hash_cached
@@ -276,6 +277,13 @@ class EplbState:
         a single ``.fill_()`` updates all layers at once.  Allocated on the
         first call to :meth:`_propagate_shared_tensors`.
         """
+        self._should_record_value: bool | None = None
+        """Last value written to ``should_record_tensor``."""
+        self._pending_balancedness: deque[
+            tuple[int, int, torch.Event, list[tuple[str, torch.Tensor]]]
+        ] = deque()
+        """Balancedness stats whose copies to the host are in flight, oldest
+        first."""
         self.is_async: bool = False
         """
         The flag indicates whether the EPLB is running in async mode.
@@ -609,6 +617,8 @@ class EplbState:
             self.rearrange(is_profile=True)
             return
 
+        if log_stats:
+            self._maybe_log_balancedness()
         if (
             log_stats
             and self.expert_rearrangement_step
@@ -619,46 +629,44 @@ class EplbState:
             # expert_load_pass: (num_moe_layers, num_physical_experts)
             expert_load_pass_list = self._sync_load_pass()
             ep_group = get_ep_group().device_group
-            for expert_load_pass, eplb_model_state in zip(
-                expert_load_pass_list, self.model_states.values()
-            ):
-                # num_tokens_per_rank: (num_moe_layers, num_ranks)
-                num_tokens_per_rank = (
-                    expert_load_pass.reshape(
-                        expert_load_pass.shape[0], ep_group.size(), -1
+            if ep_group.rank() == 0:
+                stats: list[tuple[str, torch.Tensor]] = []
+                for expert_load_pass, eplb_model_state in zip(
+                    expert_load_pass_list, self.model_states.values()
+                ):
+                    # num_tokens_per_rank: (num_moe_layers, num_ranks)
+                    num_tokens_per_rank = (
+                        expert_load_pass.reshape(
+                            expert_load_pass.shape[0], ep_group.size(), -1
+                        )
+                        .sum(dim=-1)
+                        .float()
                     )
-                    .sum(dim=-1)
-                    .float()
-                )
-
-                # Compute balancedness ratio:
-                # for each layer:
-                #   (mean load across ranks) / (max load across ranks)
-                avg_tokens_tensor, max_tokens_tensor = _compute_eplb_load_stats(
-                    num_tokens_per_rank
-                )
-
-                # This gpu/cpu sync only happens with expert stat logging enabled.
-                with gpu_sync_allowed():
-                    tokens_tensors: list[float] = torch.stack(
-                        [avg_tokens_tensor, max_tokens_tensor]
-                    ).tolist()
-                avg_tokens, max_tokens = tokens_tensors
-                balancedness = avg_tokens / max_tokens if max_tokens > 0 else 0.0
-
-                if ep_group.rank() == 0:
-                    logger.info(
-                        "EPLB step: %d for model %s: avg_tokens=%.2f, "
-                        "max_tokens=%d, balancedness=%.4f, "
-                        "steps until the next rearrangement: %d",
+                    # Compute balancedness ratio:
+                    # for each layer:
+                    #   (mean load across ranks) / (max load across ranks)
+                    avg_tokens_tensor, max_tokens_tensor = _compute_eplb_load_stats(
+                        num_tokens_per_rank
+                    )
+                    # A blocking read here would wait for the queued forward.
+                    tokens = torch.stack([avg_tokens_tensor, max_tokens_tensor])
+                    stats.append(
+                        (
+                            eplb_model_state.model_name,
+                            tokens.to("cpu", non_blocking=True),
+                        )
+                    )
+                copied = torch.Event()
+                copied.record()
+                self._pending_balancedness.append(
+                    (
                         self.expert_rearrangement_step,
-                        eplb_model_state.model_name,
-                        avg_tokens,
-                        max_tokens,
-                        balancedness,
                         self.expert_rearrangement_step_interval
                         - self.expert_rearrangement_step,
+                        copied,
+                        stats,
                     )
+                )
 
         # Update the expert load sliding window
         if not is_dummy:
@@ -710,6 +718,25 @@ class EplbState:
 
         self._update_layer_should_record(log_stats=log_stats)
 
+    def _maybe_log_balancedness(self) -> None:
+        pending = self._pending_balancedness
+        while pending and pending[0][2].query():
+            step, steps_left, _, stats = pending.popleft()
+            for model_name, tokens in stats:
+                avg_tokens, max_tokens = tokens.tolist()
+                balancedness = avg_tokens / max_tokens if max_tokens > 0 else 0.0
+                logger.info(
+                    "EPLB step: %d for model %s: avg_tokens=%.2f, "
+                    "max_tokens=%d, balancedness=%.4f, "
+                    "steps until the next rearrangement: %d",
+                    step,
+                    model_name,
+                    avg_tokens,
+                    max_tokens,
+                    balancedness,
+                    steps_left,
+                )
+
     def _should_record_current_step(self, log_stats: bool = False) -> bool:
         """Return whether expert-load recording should be enabled this step.
 
@@ -734,10 +761,13 @@ class EplbState:
 
     def _update_layer_should_record(self, log_stats: bool = False) -> None:
         """Update the shared ``should_record_tensor`` for all layers."""
-        if self.should_record_tensor is not None:
-            self.should_record_tensor.fill_(
-                self._should_record_current_step(log_stats=log_stats)
-            )
+        if self.should_record_tensor is None:
+            return
+        should_record = self._should_record_current_step(log_stats=log_stats)
+        # The value only flips at window edges; skip the per-step fill kernel.
+        if should_record != self._should_record_value:
+            self.should_record_tensor.fill_(should_record)
+            self._should_record_value = should_record
 
     def _propagate_shared_tensors(
         self,
@@ -1046,20 +1076,22 @@ class EplbState:
                 )
 
     def _all_ranks_result_ready(self, model_state: EplbModelState) -> bool:
-        # -1 failed, 0 pending, 1 ready: MIN lets a failure on any rank win.
-        status = (
-            -1
-            if self.async_worker_error is not None
-            else int(model_state.pending_result is not None)
+        flags = torch.tensor(
+            (
+                int(self.async_worker_error is not None),
+                int(model_state.pending_result is None),
+            ),
+            dtype=torch.int32,
+            device="cpu",
         )
-        flag = torch.tensor((status,), dtype=torch.int32, device="cpu")
-        all_reduce(flag, op=ReduceOp.MIN, group=get_ep_group().cpu_group)
-        status = int(flag.item())
-        if status < 0:
+        # cpu_all_reduce_ only sums, so count failed and pending ranks.
+        get_ep_group().cpu_all_reduce_(flags)
+        num_failed, num_pending = flags.tolist()
+        if num_failed:
             raise RuntimeError(
                 "Async EPLB worker failed on at least one rank; see the worker logs."
             ) from self.async_worker_error
-        return status == 1
+        return num_pending == 0
 
     def _allreduce_list(self, tensor_list: list[torch.Tensor]) -> list[torch.Tensor]:
         """All-reduce a list of tensors."""
