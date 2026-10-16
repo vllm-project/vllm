@@ -60,7 +60,7 @@ class DiffusionScheduler(Scheduler):
         width = diffusion_canvas_width(request, self.num_spec_tokens)
         if (
             num_new_tokens + width > token_budget
-            or request.num_tokens + width >= self.max_model_len
+            or request.num_tokens + width > self.max_model_len
         ):
             return []
         return [-1] * width
