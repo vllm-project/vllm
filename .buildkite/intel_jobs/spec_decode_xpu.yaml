@@ -17,6 +17,7 @@ steps:
     label: production
     gpu: 1+
     mem: 32+
+  automatic_shard: true
   _raw_old_commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s -m 'not slow_test' v1/spec_decode

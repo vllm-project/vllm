@@ -72,6 +72,7 @@ steps:
     label: production
     gpu: 1+
     mem: 24+
+  automatic_shard: true
   _raw_old_commands:
   - pytest -v -s models/test_terratorch.py models/transformers/test_backend.py models/test_registry.py models/test_deepseek_v4_vl_rocm.py models/test_deepseek_v41_decoder_replay_layers.py models/test_deepseek_v41_replay_batch.py
   source_file_dependencies:
@@ -83,6 +84,8 @@ steps:
   - tests/models/test_deepseek_v4_vl_rocm.py
   - tests/models/test_deepseek_v41_decoder_replay_layers.py
   - tests/models/test_deepseek_v41_replay_batch.py
+  - tests/models/transformers/test_layer_registry_e2e.py
+  - tests/models/test_deepseek_v41_replay_start.py
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
@@ -134,7 +137,7 @@ steps:
   - pytest -v -s models/kimi_k3 --ignore=models/kimi_k3/test_prefix_cache.py kernels/attention/test_kimi_k3_mla_fused_epilogue.py
   source_file_dependencies:
   - vllm/models/kimi_k3/
-  - csrc/libtorch_stable/kimi_k3/
+  - csrc/kimi_k3/
   - tests/models/kimi_k3/
   - tests/kernels/attention/test_kimi_k3_mla_fused_epilogue.py
   commands:
@@ -142,11 +145,10 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
     pytest -v -s models/kimi_k3 --ignore=models/kimi_k3/test_prefix_cache.py kernels/attention/test_kimi_k3_mla_fused_epilogue.py || true'
-- label: ':nvidia: (4xB200) Kimi K3 Prefix Cache Shard %N'
+- label: ':nvidia: (4xB200) Kimi K3 Prefix Cache'
   key: kimi-k3-prefix-cache-4xb200
   device: intel_gpu
   timeout_in_minutes: 75
-  parallelism: 2
   num_devices: 4
   optional: true
   working_dir: .
@@ -159,14 +161,17 @@ steps:
     label: production
     gpu: 4+
     mem: 24+
+  automatic_shard: true
   _raw_old_commands:
   - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
-  - pytest -v -s models/kimi_k3/test_prefix_cache.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  - pytest -v -s models/kimi_k3/test_prefix_cache.py
   source_file_dependencies:
   - vllm/models/kimi_k3/
   - vllm/v1/core/
   - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
   - vllm/distributed/kv_transfer/kv_connector/v1/simple_cpu_offload_connector.py
+  - vllm/distributed/kv_transfer/kv_connector/v1/mooncake/store/
+  - vllm/distributed/mooncake_store.py
   - vllm/v1/simple_kv_offload/
   - vllm/v1/spec_decode/
   - vllm/model_executor/layers/mamba/
@@ -176,7 +181,7 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -v -s models/kimi_k3/test_prefix_cache.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT || true'
+    pytest -v -s models/kimi_k3/test_prefix_cache.py || true'
 - label: ':nvidia: (H200) GLM5Next'
   key: glm5next-unit-tests
   device: intel_gpu
@@ -221,7 +226,6 @@ steps:
   - pytest -v -s models/qwen4_exp/test_hc_ops.py models/qwen4_exp/test_qsa_prepare.py models/qwen4_exp/test_qsa_reference.py
   source_file_dependencies:
   - vllm/models/qwen4_exp/
-  - vllm/transformers_utils/configs/qwen4_exp.py
   - vllm/config/compilation.py
   - vllm/v1/attention/backends/short_conv_attn.py
   - tests/models/qwen4_exp/

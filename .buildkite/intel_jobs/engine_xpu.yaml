@@ -59,6 +59,7 @@ steps:
     label: production
     gpu: 1+
     mem: 16+
+  automatic_shard: true
   _raw_old_commands:
   - pytest -v -s v1/engine/test_preprocess_error_handling.py
   - pytest -v -s v1/engine --ignore v1/engine/test_preprocess_error_handling.py
@@ -139,6 +140,7 @@ steps:
     label: production
     gpu: 1+
     mem: 16+
+  automatic_shard: true
   _raw_old_commands:
   - pytest -v -s v1/e2e/general --ignore v1/e2e/general/test_async_scheduling.py --ignore v1/e2e/general/test_async_scheduling_accuracy.py --ignore v1/e2e/general/test_kv_sharing_fast_prefill.py -k "not test_mamba_prefix_cache_mrv2"
   source_file_dependencies:
@@ -166,7 +168,7 @@ steps:
     mem: 16+
   _raw_old_commands:
   - pytest -v -s v1/e2e/general/test_kv_sharing_fast_prefill.py
-  - pytest -v -s v1/e2e/general/test_mamba_prefix_cache.py::test_mamba_prefix_cache_mrv2 v1/e2e/general/test_mamba_prefix_cache.py::test_mamba_prefix_cache_mrv2_async
+  - pytest -v -s v1/e2e/general/test_mamba_prefix_cache.py::test_mamba_prefix_cache_mrv2 v1/e2e/general/test_mamba_prefix_cache.py::test_mamba_prefix_cache_mrv2_async v1/e2e/general/test_mamba_prefix_cache.py::test_mamba_prefix_cache_mrv2_async_flashinfer
   source_file_dependencies:
   - vllm/v1/
   - tests/v1/e2e/general/
@@ -175,7 +177,7 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
     pytest -v -s v1/e2e/general/test_kv_sharing_fast_prefill.py || true &&
-    pytest -v -s v1/e2e/general/test_mamba_prefix_cache.py::test_mamba_prefix_cache_mrv2 v1/e2e/general/test_mamba_prefix_cache.py::test_mamba_prefix_cache_mrv2_async || true'
+    pytest -v -s v1/e2e/general/test_mamba_prefix_cache.py::test_mamba_prefix_cache_mrv2 v1/e2e/general/test_mamba_prefix_cache.py::test_mamba_prefix_cache_mrv2_async v1/e2e/general/test_mamba_prefix_cache.py::test_mamba_prefix_cache_mrv2_async_flashinfer || true'
 - label: ':nvidia: (H100) ReplaySSM E2E'
   key: replayssm-e2e
   device: intel_gpu
@@ -192,6 +194,7 @@ steps:
     label: production
     gpu: 2+
     mem: 16+
+  automatic_shard: true
   _raw_old_commands:
   - pytest -v -s v1/e2e/test_replayssm_decode.py
   source_file_dependencies:
