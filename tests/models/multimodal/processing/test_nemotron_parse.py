@@ -2,13 +2,21 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for Nemotron-Parse's device-side normalisation path."""
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 import torch
 from PIL import Image
+from transformers import BatchFeature
 
 from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
+from vllm.model_executor.models.nemotron_parse3_5 import (
+    NemotronParseProcessingInfo,
+    RadioMBartPrefixMultiModalProcessor,
+)
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.processing import BaseProcessingInfo
 from vllm.platforms import current_platform
 
 from ...utils import build_model_context
@@ -118,3 +126,51 @@ def test_causal_prefix_preserves_host_normalized_packed_images(
         torch.testing.assert_close(
             actual[name], expected[name].to(actual[name].dtype), rtol=0, atol=0
         )
+
+
+@pytest.mark.parametrize(
+    ("setting", "value"),
+    [
+        ("navit_packing", False),
+        ("navit_coordinate_frame", "canvas"),
+        ("navit_padding_mode", "center"),
+        ("do_normalize", False),
+    ],
+)
+def test_causal_prefix_rejects_incompatible_processor_settings(
+    monkeypatch: pytest.MonkeyPatch, setting: str, value: object
+) -> None:
+    image_processor = SimpleNamespace(
+        navit_packing=True,
+        navit_coordinate_frame="content_normalized",
+        navit_padding_mode="top_left_white",
+        do_normalize=True,
+    )
+    setattr(image_processor, setting, value)
+    monkeypatch.setattr(
+        BaseProcessingInfo,
+        "get_hf_processor",
+        lambda self, **kwargs: SimpleNamespace(image_processor=image_processor),
+    )
+    info = NemotronParseProcessingInfo.__new__(NemotronParseProcessingInfo)
+    monkeypatch.setattr(
+        info,
+        "get_hf_config",
+        lambda: SimpleNamespace(navit_packing=True),
+    )
+
+    with pytest.raises(ValueError, match=f"requires {setting}="):
+        info.get_hf_processor()
+
+
+def test_causal_prefix_fields_config_handles_empty_cached_hf_inputs() -> None:
+    processor = RadioMBartPrefixMultiModalProcessor.__new__(
+        RadioMBartPrefixMultiModalProcessor
+    )
+    processor.info = SimpleNamespace(
+        get_hf_config=lambda: SimpleNamespace(encoder=SimpleNamespace(patch_size=16))
+    )
+
+    fields = processor._get_mm_fields_config(BatchFeature(), {})
+
+    assert fields["pixel_values"].field.slices == []

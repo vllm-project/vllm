@@ -13,8 +13,8 @@ from torch import nn
 from transformers import PreTrainedConfig
 
 from vllm.config.speculative import SpeculativeConfig
-from vllm.model_executor.models.nemotron_parse import MBartDecoderNoPos
-from vllm.model_executor.models.nemotron_parse_mtp import (
+from vllm.model_executor.models.nemotron_parse3_5 import MBartDecoderNoPos
+from vllm.model_executor.models.nemotron_parse3_5_mtp import (
     ParseAuxMTPModel,
     _ParseAuxMTPInner,
 )
@@ -99,6 +99,42 @@ def test_parse_mtp_rejects_wrong_integrated_tensor_shape() -> None:
         draft.load_weights([("decoder.extra_heads.0.weight", torch.zeros(2, 3))])
 
 
+@pytest.mark.parametrize(
+    ("name", "error"),
+    [
+        ("decoder.extra_heads.0.bias", "Duplicate Parse 3.5 MTP tensor"),
+        ("decoder.extra_heads.1.bias", "Unsupported Parse 3.5 MTP tensor"),
+        ("decoder.extra_proj.1.weight", "Unsupported Parse 3.5 MTP tensor"),
+    ],
+)
+def test_parse_mtp_rejects_ambiguous_auxiliary_weights(name: str, error: str) -> None:
+    draft = ParseAuxMTPModel.__new__(ParseAuxMTPModel)
+    nn.Module.__init__(draft)
+    draft.model = _ParseAuxMTPInner(vocab_size=4, hidden_size=3)
+
+    with pytest.raises(RuntimeError, match=error):
+        draft.load_weights(
+            [("decoder.extra_heads.0.bias", torch.zeros(3)), (name, torch.zeros(3))]
+        )
+
+
+def test_parse_mtp_requires_embedding_even_with_complete_auxiliary_weights() -> None:
+    draft = ParseAuxMTPModel.__new__(ParseAuxMTPModel)
+    nn.Module.__init__(draft)
+    draft.model = _ParseAuxMTPInner(vocab_size=4, hidden_size=3)
+    weights = [
+        (f"decoder.{name}.0.{suffix}", torch.zeros_like(parameter))
+        for name, module in (
+            ("extra_heads", draft.model.extra_head),
+            ("extra_proj", draft.model.extra_proj),
+        )
+        for suffix, parameter in module.named_parameters()
+    ]
+
+    with pytest.raises(RuntimeError, match="Missing Parse 3.5 MTP embedding"):
+        draft.load_weights(weights)
+
+
 def test_parse_decoder_exposes_head_without_registering_duplicate_module() -> None:
     decoder = MBartDecoderNoPos.__new__(MBartDecoderNoPos)
     nn.Module.__init__(decoder)
@@ -109,3 +145,24 @@ def test_parse_decoder_exposes_head_without_registering_duplicate_module() -> No
     assert decoder.model is decoder
     assert decoder.lm_head is head
     assert "lm_head" not in dict(decoder.named_modules())
+
+
+def test_parse_mtp_uses_replaced_scaled_embedding_in_auxiliary_prediction() -> None:
+    class ScaledEmbedding(nn.Embedding):
+        def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
+            return super().forward(input_ids) * 2
+
+    model = _ParseAuxMTPInner(vocab_size=4, hidden_size=3)
+    shared_embedding = ScaledEmbedding(4, 3)
+    model.embed_tokens = shared_embedding
+    with torch.no_grad():
+        shared_embedding.weight.fill_(1)
+        model.extra_proj.weight.copy_(3 * torch.eye(3))
+        model.extra_proj.bias.fill_(1)
+        model.extra_head.weight.copy_(5 * torch.eye(3))
+        model.extra_head.bias.fill_(7)
+
+    actual = model(torch.tensor([1]), torch.tensor([[1.0, 2.0, 3.0]]))
+
+    # The trained formula is head(hidden + proj(scaled_embedding(token))).
+    torch.testing.assert_close(actual, torch.tensor([[47.0, 52.0, 57.0]]))
