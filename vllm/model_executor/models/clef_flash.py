@@ -7,11 +7,12 @@ import torch
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
+from vllm.models.qwen3_5 import Qwen3_5ForConditionalGeneration
+from vllm.models.qwen3_5.common.mm_preprocess import Qwen3_5ProcessingInfo
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
 from .clef_joint_schema import JOINT_HEAD_WEIGHTS, JointSchemaHead, JointSchemaPooler
 from .interfaces_base import default_pooling_type
-from .qwen3_5 import Qwen3_5ForConditionalGeneration, Qwen3_5ProcessingInfo
 from .qwen3_vl import Qwen3VLDummyInputsBuilder, Qwen3VLMultiModalProcessor
 
 

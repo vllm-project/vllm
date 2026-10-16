@@ -25,7 +25,8 @@
 """Inference-only Qwen3.5 Series compatible with HuggingFace weights."""
 
 from collections.abc import Iterable
-from typing import ClassVar
+from itertools import islice
+from typing import ClassVar, cast
 
 import torch
 from torch import nn
@@ -36,15 +37,12 @@ from transformers import (
     Qwen3_5TextConfig,
 )
 
-from vllm.compilation.decorators import support_torch_compile
-from vllm.config import VllmConfig
+from vllm.config import MultiModalConfig, VllmConfig
 from vllm.distributed import (
     get_pp_group,
+    tensor_model_parallel_all_gather,
 )
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe.utils import (
-    is_model_fused_shared_expert_compatible,
-)
 from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm as Qwen3_5RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -61,12 +59,8 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import MultiModalFeatureSpec
-from vllm.sequence import IntermediateTensors
-from vllm.tokenizers.registry import cached_tokenizer_from_config
-
-from .interfaces import (
+from vllm.model_executor.models.interfaces import (
+    EagleModelMixin,
     HasInnerState,
     IsHybrid,
     MixtureOfExperts,
@@ -77,23 +71,22 @@ from .interfaces import (
     SupportsPP,
     _require_is_multimodal,
 )
-from .qwen2_moe import Qwen2MoeMLP as Qwen3NextMLP
-from .qwen3_next import (
+from vllm.model_executor.models.qwen2_moe import Qwen2MoeMLP as Qwen3NextMLP
+from vllm.model_executor.models.qwen3_next import (
     Qwen3NextAttention,
     Qwen3NextDecoderLayer,
     Qwen3NextModel,
     Qwen3NextSparseMoeBlock,
     QwenNextMixtureOfExperts,
 )
-from .qwen3_vl import (
+from vllm.model_executor.models.qwen3_vl import (
     Qwen3_VisionTransformer,
     Qwen3VLDummyInputsBuilder,
     Qwen3VLForConditionalGeneration,
     Qwen3VLMultiModalProcessor,
-    Qwen3VLProcessingInfo,
     mrope_positions_factor,
 )
-from .utils import (
+from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     PPMissingLayer,
     WeightsMapper,
@@ -101,25 +94,36 @@ from .utils import (
     extract_layer_index,
     make_empty_intermediate_tensors_factory,
     make_layers,
-    maybe_fuse_shared_experts,
     maybe_prefix,
 )
+from vllm.models.qwen3_5.common.mm_preprocess import (
+    Qwen3_5MoeProcessingInfo,
+    Qwen3_5ProcessingInfo,
+)
+from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.inputs import MultiModalFeatureSpec
+from vllm.sequence import IntermediateTensors
+from vllm.tokenizers.registry import cached_tokenizer_from_config
 
 logger = init_logger(__name__)
 
 
-class Qwen3_5ProcessingInfo(Qwen3VLProcessingInfo):
-    def get_hf_config(self):
-        return self.ctx.get_hf_config(Qwen3_5Config)
+def _all_gather_hidden_and_residual(
+    hidden_states: torch.Tensor,
+    residual: torch.Tensor | None,
+    full_num_tokens: int,
+    hidden_size: int,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    if residual is None:
+        hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
+        hidden_states = hidden_states[:full_num_tokens]
+        return hidden_states, None
 
-
-class Qwen3_5MoeProcessingInfo(Qwen3VLProcessingInfo):
-    def get_hf_config(self):
-        # transformers 5.x renames the top-level Qwen3.5-MoE config class to
-        # Qwen3_5MoeTextConfig for text-only models, while transformers ≤4.x
-        # returns Qwen3_5MoeConfig (the multimodal wrapper).  Accept both so
-        # that vLLM works regardless of which transformers version is installed.
-        return self.ctx.get_hf_config((Qwen3_5MoeConfig, Qwen3_5MoeTextConfig))
+    combined_states = torch.cat([hidden_states, residual], dim=-1)
+    combined_states = tensor_model_parallel_all_gather(combined_states, 0)
+    combined_states = combined_states[:full_num_tokens]
+    hidden_states, residual = combined_states.split([hidden_size, hidden_size], dim=-1)
+    return hidden_states, residual
 
 
 class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
@@ -210,17 +214,7 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
             )
 
 
-@support_torch_compile(
-    dynamic_arg_dims={
-        "input_ids": 0,
-        # positions is of shape (3, seq_len) if mrope is enabled for qwen2-vl,
-        # otherwise (seq_len, ).
-        "positions": -1,
-        "intermediate_tensors": 0,
-        "inputs_embeds": 0,
-    }
-)
-class Qwen3_5Model(Qwen3NextModel):
+class Qwen3_5Model(nn.Module, EagleModelMixin):
     # Qwen3.5 ships the GDN in_proj checkpoints separately (qwen3-next
     # pre-fuses them); fuse them on top of the qwen3-next QKV/gate_up mapping.
     hf_to_vllm_mapper = Qwen3NextModel.hf_to_vllm_mapper | WeightsMapper(
@@ -233,7 +227,7 @@ class Qwen3_5Model(Qwen3NextModel):
     )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super(Qwen3NextModel, self).__init__()
+        super().__init__()
 
         config: Qwen3_5TextConfig | Qwen3_5MoeTextConfig = (
             vllm_config.model_config.hf_text_config
@@ -263,11 +257,6 @@ class Qwen3_5Model(Qwen3NextModel):
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers, get_layer, prefix=f"{prefix}.layers"
         )
-        self.is_fused_shared_expert_enabled = is_model_fused_shared_expert_compatible(
-            self.layers,
-            Qwen3NextSparseMoeBlock,
-            "mlp",
-        )
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states", "residual"], config.hidden_size
         )
@@ -279,18 +268,78 @@ class Qwen3_5Model(Qwen3NextModel):
 
         self.aux_hidden_state_layers: tuple[int, ...] = ()
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        # FSE must match construction (Qwen3NextSparseMoeBlock): reroute the
-        # shared expert into the extra fused slot only when AITER FSE is both
-        # requested and compatible with the quant spec.
-        if "moe" in self.config.model_type:
-            weights = maybe_fuse_shared_experts(
-                weights,
-                enabled=self.is_fused_shared_expert_enabled,
-                n_routed_experts=self.config.num_experts,
-                n_shared_experts=1,
-                ckpt_prefix="mlp.shared_expert",
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.embed_tokens(input_ids)
+
+    def forward(
+        self,
+        input_ids: torch.Tensor | None,
+        positions: torch.Tensor,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
+        if get_pp_group().is_first_rank:
+            if inputs_embeds is not None:
+                hidden_states = inputs_embeds
+            else:
+                hidden_states = self.embed_input_ids(input_ids)
+            residual = None
+        else:
+            assert intermediate_tensors is not None
+            hidden_states = intermediate_tensors["hidden_states"]
+            residual = intermediate_tensors["residual"]
+
+        full_num_tokens = positions.shape[-1]
+        aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)
+        for layer_idx, layer in enumerate(
+            islice(self.layers, self.start_layer, self.end_layer),
+            start=self.start_layer,
+        ):
+            if (
+                hidden_states.shape[0] != full_num_tokens
+                and not layer.use_attn_reduce_scatter_for_moe
+            ):
+                hidden_states, residual = _all_gather_hidden_and_residual(
+                    hidden_states,
+                    residual,
+                    full_num_tokens,
+                    self.config.hidden_size,
+                )
+            hidden_states, residual = layer(
+                positions=positions,
+                hidden_states=hidden_states,
+                residual=residual,
             )
+            if (layer_idx + 1) in self.aux_hidden_state_layers and hidden_states.shape[
+                0
+            ] != full_num_tokens:
+                hidden_states, residual = _all_gather_hidden_and_residual(
+                    hidden_states,
+                    residual,
+                    full_num_tokens,
+                    self.config.hidden_size,
+                )
+            self._maybe_add_hidden_state(
+                aux_hidden_states, layer_idx + 1, hidden_states, residual
+            )
+
+        if not get_pp_group().is_last_rank:
+            return IntermediateTensors(
+                {"hidden_states": hidden_states, "residual": residual}
+            )
+        if hidden_states.shape[0] != full_num_tokens:
+            hidden_states, residual = _all_gather_hidden_and_residual(
+                hidden_states,
+                residual,
+                full_num_tokens,
+                self.config.hidden_size,
+            )
+        hidden_states, _ = self.norm(hidden_states, residual)
+        if aux_hidden_states:
+            return hidden_states, aux_hidden_states
+        return hidden_states
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
@@ -344,19 +393,20 @@ class Qwen3_5ForCausalLMBase(
         )
 
         if get_pp_group().is_last_rank:
-            self.lm_head = ParallelLMHead(
-                config.vocab_size,
-                config.hidden_size,
-                quant_config=self.quant_config,
-                prefix=maybe_prefix(prefix, "lm_head"),
-            )
             if config.tie_word_embeddings:
-                self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
+                self.lm_head = self.model.embed_tokens
+            else:
+                self.lm_head = ParallelLMHead(
+                    config.vocab_size,
+                    config.hidden_size,
+                    quant_config=self.quant_config,
+                    prefix=maybe_prefix(prefix, "lm_head"),
+                )
         else:
             self.lm_head = PPMissingLayer()
 
         self.logits_processor = LogitsProcessor(config.vocab_size)
-        self.make_empty_intermediate_tensors = (
+        self.make_empty_intermediate_tensors = (  # type: ignore[method-assign]
             self.model.make_empty_intermediate_tensors
         )
 
@@ -398,7 +448,7 @@ class Qwen3_5ForCausalLMBase(
     @classmethod
     def get_mamba_state_shape_from_config(
         cls, vllm_config: "VllmConfig"
-    ) -> tuple[tuple[int, int], tuple[int, int]]:
+    ) -> tuple[tuple[int, int], tuple[int, int, int]]:
         parallel_config = vllm_config.parallel_config
         hf_config = vllm_config.model_config.hf_text_config
         tp_size = parallel_config.tensor_parallel_size
@@ -473,11 +523,6 @@ class Qwen3_5MoeForCausalLM(Qwen3_5ForCausalLMBase, QwenNextMixtureOfExperts):
 class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid):
     supports_multimodal_pruning = True
 
-    hf_to_vllm_mapper = (
-        Qwen3VLForConditionalGeneration.hf_to_vllm_mapper
-        | WeightsMapper(orig_to_new_prefix={"mtp.": None})
-    )
-
     packed_modules_mapping = Qwen3VLForConditionalGeneration.packed_modules_mapping | {
         "in_proj_qkvz": ["in_proj_qkv", "in_proj_z"],
         "in_proj_ba": ["in_proj_b", "in_proj_a"],
@@ -488,7 +533,9 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
         nn.Module.__init__(self)
         config: Qwen3_5Config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
-        multimodal_config = vllm_config.model_config.get_multimodal_config()
+        multimodal_config = cast(
+            MultiModalConfig, vllm_config.model_config.multimodal_config
+        )
 
         self.config = config
         self.model_config = vllm_config.model_config
@@ -524,7 +571,7 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
                 vllm_config=vllm_config, prefix=maybe_prefix(prefix, "language_model")
             )
 
-        self.make_empty_intermediate_tensors = (
+        self.make_empty_intermediate_tensors = (  # type: ignore[method-assign]
             self.language_model.make_empty_intermediate_tensors
         )
 
@@ -619,7 +666,7 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
     @classmethod
     def get_mamba_state_shape_from_config(
         cls, vllm_config: "VllmConfig"
-    ) -> tuple[tuple[int, int], tuple[int, int]]:
+    ) -> tuple[tuple[int, int], tuple[int, int, int]]:
         parallel_config = vllm_config.parallel_config
         hf_config = vllm_config.model_config.hf_text_config
         tp_size = parallel_config.tensor_parallel_size
@@ -649,7 +696,7 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
 
 
 class Qwen3_5_MoeMixtureOfExperts(MixtureOfExperts):
-    language_model: Qwen3_5ForCausalLM
+    language_model: Qwen3_5MoeForCausalLM
     num_local_physical_experts: int
 
     def update_physical_experts_metadata(
@@ -711,7 +758,9 @@ class Qwen3_5MoeForConditionalGeneration(
         nn.Module.__init__(self)
         config: Qwen3_5MoeConfig = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
-        multimodal_config = vllm_config.model_config.get_multimodal_config()
+        multimodal_config = cast(
+            MultiModalConfig, vllm_config.model_config.multimodal_config
+        )
 
         self.config = config
         self.model_config = vllm_config.model_config
@@ -747,7 +796,7 @@ class Qwen3_5MoeForConditionalGeneration(
                 vllm_config=vllm_config, prefix=maybe_prefix(prefix, "language_model")
             )
 
-        self.make_empty_intermediate_tensors = (
+        self.make_empty_intermediate_tensors = (  # type: ignore[method-assign]
             self.language_model.make_empty_intermediate_tensors
         )
 
