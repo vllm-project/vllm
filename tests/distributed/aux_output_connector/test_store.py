@@ -33,8 +33,6 @@ from vllm.distributed.aux_output_connector.worker import (
     AuxOutputWorkerConnector,
 )
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
-from vllm.v1.kv_offload.base import make_offload_key
-from vllm.v1.kv_offload.cpu.policies.lru import LRUCachePolicy
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.worker.gpu import async_utils
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
@@ -533,12 +531,10 @@ def _make_store(
     *,
     max_bytes: int = 1 << 20,
     object_nbytes: int = 4,
-    **policy_kwargs,
 ):
     return BlockObjectStore(
         max_bytes=max_bytes,
         object_nbytes=object_nbytes,
-        **policy_kwargs,
     )
 
 
@@ -1869,173 +1865,3 @@ def test_scheduler_connector_reset_derives_emit_start_from_request():
     assert metadata.generation == 1
     assert metadata.requests[request.request_id] == 4
     assert list(metadata.block_hashes[request.request_id]) == [b"a" * 32]
-
-
-@pytest.mark.parametrize("cache_policy", ["lru", "arc"], ids=["lru", "arc"])
-def test_store_cache_policy_respects_references_and_rollback(cache_policy):
-    store = _make_store(max_bytes=8, cache_policy=cache_policy)
-    store.put(
-        [BlockObject("first", b"1111"), BlockObject("second", b"2222")],
-        retain_keys=["first", "second"],
-    )
-
-    with pytest.raises(BlockObjectStoreError, match="cannot retain"):
-        store.put([BlockObject("third", b"3333")])
-    assert store.get_concatenated(["first", "second"]) == b"11112222"
-    with pytest.raises(BlockObjectStoreError, match="does not exist"):
-        store.get_concatenated(["third"])
-
-    store.put([BlockObject("fourth", b"4444")], release_keys=["second"])
-    assert store.get_concatenated(["first", "fourth"]) == b"11114444"
-    with pytest.raises(BlockObjectStoreError, match="does not exist"):
-        store.get_concatenated(["second"])
-    store.put([], release_keys=["first"])
-    store.close()
-
-
-@pytest.mark.parametrize(
-    "cache_policy,evicted",
-    [("lru", "a"), ("arc", "b")],
-    ids=["lru-evicts-oldest", "arc-keeps-reused"],
-)
-def test_store_cache_policy_sees_reuse_not_release(cache_policy, evicted):
-    store = _make_store(max_bytes=8, cache_policy=cache_policy)
-    store.put([BlockObject("a", b"aaaa")], retain_keys=["a"])
-    store.put([], release_keys=["a"])
-    assert store.get_concatenated(["a"]) == b"aaaa"
-    store.put([BlockObject("b", b"bbbb")], retain_keys=["b"])
-    store.put([], release_keys=["b"])
-
-    store.put([BlockObject("c", b"cccc")])
-
-    with pytest.raises(BlockObjectStoreError, match="does not exist"):
-        store.get_concatenated([evicted])
-    survivor = "b" if evicted == "a" else "a"
-    assert store.get_concatenated([survivor, "c"]) == survivor.encode() * 4 + b"cccc"
-    store.close()
-
-
-@pytest.mark.parametrize(
-    "retained,read_keys",
-    [(False, ["head", "tail"]), (True, ["tail"])],
-    ids=["unreferenced-read", "tail-first-release-after-read"],
-)
-def test_store_read_keeps_prefix_head_most_recent(retained, read_keys):
-    store = _make_store(max_bytes=8)
-    keys = ["head", "tail"]
-    store.put(
-        [BlockObject("head", b"hhhh"), BlockObject("tail", b"tttt")],
-        retain_keys=keys if retained else (),
-    )
-    store.get_concatenated(read_keys)
-    if retained:
-        # The read made the tail most recent; release restores KV order.
-        store.put([], release_keys=reversed(keys))
-
-    store.put([BlockObject("new", b"nnnn")])
-
-    assert store.get_concatenated(["head", "new"]) == b"hhhhnnnn"
-    with pytest.raises(BlockObjectStoreError, match="does not exist"):
-        store.get_concatenated(["tail"])
-    store.close()
-
-
-def test_store_released_new_object_competes_for_space():
-    store = _make_store(max_bytes=8)
-    store.put(
-        [BlockObject("a", b"aaaa"), BlockObject("b", b"bbbb")],
-        retain_keys=["a", "b", "x", "y", "z"],
-    )
-
-    # Released as it is stored, x is the only evictable object: it is dropped.
-    store.put([BlockObject("x", b"xxxx")], release_keys=["x"])
-    with pytest.raises(BlockObjectStoreError, match="does not exist"):
-        store.get_concatenated(["x"])
-
-    # Dropping z alone cannot make room for y as well: nothing is admitted.
-    with pytest.raises(BlockObjectStoreError, match="cannot retain"):
-        store.put(
-            [BlockObject("z", b"zzzz"), BlockObject("y", b"yyyy")],
-            release_keys=["z"],
-        )
-    for key in ["y", "z"]:
-        with pytest.raises(BlockObjectStoreError, match="does not exist"):
-            store.get_concatenated([key])
-    assert store.get_concatenated(["a", "b"]) == b"aaaabbbb"
-    store.close()
-
-
-def test_store_arc_evicts_before_admitting_new_objects():
-    # Protected incoming objects must not count toward ARC's T1 size.
-    store = _make_store(max_bytes=8, cache_policy="arc")
-    for key in ["a", "b", "b", "c", "a", "c"]:
-        store.put([BlockObject(key, key.encode() * 4)])
-
-    assert store.get_concatenated(["a", "c"]) == b"aaaacccc"
-    with pytest.raises(BlockObjectStoreError, match="does not exist"):
-        store.get_concatenated(["b"])
-    store.close()
-
-
-def test_store_failed_batch_keeps_recency_of_resident_objects():
-    store = _make_store(max_bytes=8)
-    store.put([BlockObject("a", b"aaaa"), BlockObject("b", b"bbbb")])
-    with pytest.raises(BlockObjectStoreError, match="cannot retain"):
-        store.put([BlockObject(key, key.encode() * 4) for key in "acd"])
-
-    store.put([BlockObject("e", b"eeee")])
-
-    assert store.get_concatenated(["a", "e"]) == b"aaaaeeee"
-    with pytest.raises(BlockObjectStoreError, match="does not exist"):
-        store.get_concatenated(["b"])
-    store.close()
-
-
-def test_store_arc_ignores_evicted_released_object_of_the_batch():
-    # b is stored again, released and evicted in one batch; touching it
-    # afterwards would be an ARC ghost hit (LRU ignores absent touches).
-    store = _make_store(max_bytes=12, cache_policy="arc")
-    store.put([BlockObject("e", b"eeee"), BlockObject("a", b"aaaa")])
-    store.put([BlockObject("a", b"aaaa"), BlockObject("e", b"eeee")])
-    store.put([BlockObject("b", b"bbbb")])
-    store.put(
-        [BlockObject("b", b"bbbb"), BlockObject("c", b"cccc")],
-        retain_keys=["b"],
-        release_keys=["b"],
-    )
-    store.put([BlockObject("b", b"bbbb")])
-
-    assert store.get_concatenated(["a", "e", "b"]) == b"aaaaeeeebbbb"
-    with pytest.raises(BlockObjectStoreError, match="does not exist"):
-        store.get_concatenated(["c"])
-    store.close()
-
-
-class StoreMissRecordingPolicy(LRUCachePolicy):
-    """Record store misses with whether the key was resident at the time."""
-
-    store_misses: list[tuple[bytes, bool]] = []
-
-    def on_store_miss(self, keys, req_context):
-        for key in keys:
-            self.store_misses.append((key, key in self.chunks))
-        super().on_store_miss(keys, req_context)
-
-
-def test_store_loads_out_of_tree_policy_and_reports_store_misses():
-    StoreMissRecordingPolicy.store_misses = []
-    store = _make_store(
-        max_bytes=8,
-        cache_policy=StoreMissRecordingPolicy.__name__,
-        cache_policy_module_path=__name__,
-    )
-    store.put([BlockObject("first", b"1111"), BlockObject("second", b"2222")])
-    store.put([BlockObject("first", b"1111"), BlockObject("third", b"3333")])
-    # "second" was evicted; ARC needs to see its ghost before reinsertion.
-    store.put([BlockObject("second", b"2222")])
-
-    assert StoreMissRecordingPolicy.store_misses == [
-        (make_offload_key(key, 0), False)
-        for key in (b"first", b"second", b"third", b"second")
-    ]
-    store.close()
