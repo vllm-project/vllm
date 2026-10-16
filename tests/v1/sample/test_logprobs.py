@@ -1600,3 +1600,80 @@ def test_token_logprobs_large_batch_int64_row_offset():
     assert torch.allclose(logprobs[last, 0], ref, atol=1e-2), (
         f"logprob {logprobs[last, 0].item()} != ref {ref.item()}"
     )
+
+
+@pytest.mark.parametrize("splits", [1, 2, 3, 8])
+@pytest.mark.parametrize("vocab_size", [1, 7, 1023, 1025, 3001])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, torch.float16])
+def test_tiled_token_logprobs_matches_torch(splits, vocab_size, dtype):
+    from vllm.v1.worker.gpu.sample.logprob import compute_token_logprobs
+
+    if not current_platform.is_cuda():
+        pytest.skip("Tiled token logprobs require CUDA")
+    device = torch.device("cuda")
+    torch.manual_seed(13)
+    logits = torch.randn(3, vocab_size, device=device, dtype=dtype)
+    ids = torch.tensor([0, vocab_size // 2, vocab_size - 1], device=device).expand(
+        3, -1
+    )
+    actual = compute_token_logprobs(logits, ids, splits)
+    expected = torch.log_softmax(logits.double(), dim=-1).gather(-1, ids).float()
+    torch.testing.assert_close(actual, expected, atol=2e-3, rtol=2e-3)
+
+
+@pytest.mark.parametrize("splits", [1, 3, 8])
+@pytest.mark.parametrize("special", [float("-inf"), float("inf"), float("nan")])
+def test_tiled_token_logprobs_isolates_special_rows(splits, special):
+    from vllm.v1.worker.gpu.sample.logprob import compute_token_logprobs
+
+    if not current_platform.is_cuda():
+        pytest.skip("Tiled token logprobs require CUDA")
+    torch.manual_seed(14)
+    logits = torch.randn(3, 3001, device="cuda")
+    logits[1] = special
+    ids = torch.tensor([[0, 1500, 3000]] * 3, device="cuda")
+    actual = compute_token_logprobs(logits, ids, splits)
+    expected = torch.log_softmax(logits.double(), dim=-1).gather(-1, ids).float()
+    torch.testing.assert_close(actual, expected, atol=2e-3, rtol=2e-3, equal_nan=True)
+
+
+def test_tiled_token_logprobs_strides_and_empty():
+    from vllm.v1.worker.gpu.sample.logprob import compute_token_logprobs
+
+    if not current_platform.is_cuda():
+        pytest.skip("Tiled token logprobs require CUDA")
+    logits = torch.randn(4, 6002, device="cuda")[:, ::2]
+    ids = torch.randint(3001, (4, 10), device="cuda", dtype=torch.int32)[:, ::2]
+    actual = compute_token_logprobs(logits, ids, 3)
+    expected = torch.log_softmax(logits.double(), dim=-1).gather(-1, ids.long())
+    torch.testing.assert_close(actual, expected.float(), atol=2e-3, rtol=2e-3)
+    assert compute_token_logprobs(logits[:0], ids[:0]).shape == (0, 5)
+    assert compute_token_logprobs(logits, ids[:, :0]).shape == (4, 0)
+
+
+@pytest.mark.parametrize("num_tokens", [1, 1025, 2100])
+def test_tiled_token_logprobs_large_gather(num_tokens):
+    from vllm.v1.worker.gpu.sample.logprob import compute_token_logprobs
+
+    if not current_platform.is_cuda():
+        pytest.skip("Tiled token logprobs require CUDA")
+    torch.manual_seed(15)
+    logits = torch.randn(2, 3001, device="cuda")
+    ids = torch.randint(3001, (2, num_tokens), device="cuda")
+    actual = compute_token_logprobs(logits, ids, 8)
+    expected = torch.log_softmax(logits.double(), dim=-1).gather(-1, ids).float()
+    torch.testing.assert_close(actual, expected, atol=2e-3, rtol=2e-3)
+
+
+def test_tiled_token_logprobs_split_policy(monkeypatch):
+    import vllm.envs as envs
+    from vllm.v1.worker.gpu.sample import logprob
+
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", False)
+    monkeypatch.setattr(logprob, "num_compute_units", lambda _: 46)
+    device = torch.device("cuda")
+    assert logprob._get_num_vocab_splits(16, 151936, device) == 64
+    assert logprob._get_num_vocab_splits(64, 151936, device) == 32
+    assert logprob._get_num_vocab_splits(128, 151936, device) == 16
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
+    assert logprob._get_num_vocab_splits(16, 151936, device) == 1
