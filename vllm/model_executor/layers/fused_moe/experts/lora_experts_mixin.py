@@ -129,9 +129,7 @@ class LoRAExpertsMixin:
         mul_routed_weight: bool = True,
     ) -> None:
         if not mul_routed_weight:
-            # The router weights were applied to the input. The LoRA op's
-            # mul_routed_weight also selects the W2 row mapping, so keep it
-            # and multiply by one instead.
+            # The op's mul_routed_weight also picks the row mapping; keep it.
             topk_weights = torch.ones_like(topk_weights)
         w2_lora_b_stacked = lora_context.w2_lora_b_stacked
         if lora_context.enable_moe_shared_loras:
