@@ -22,11 +22,22 @@ class _Renderer:
         return _Tokenizer()
 
 
+class _InputProcessor:
+    @staticmethod
+    def resolve_watermarking(params) -> bool:
+        return False
+
+
+class _LLMEngine:
+    input_processor = _InputProcessor()
+
+
 class _FakeOffline(BeamSearchOfflineMixin):
     """Drives ``beam_search`` without a real engine to inspect the per-step
     sampling params."""
 
     renderer = _Renderer()
+    llm_engine = _LLMEngine()
 
     def __init__(self) -> None:
         self.captured_params: list = []
