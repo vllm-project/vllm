@@ -1980,7 +1980,8 @@ def test_store_failed_batch_keeps_recency_of_resident_objects():
 
 def test_store_arc_ignores_evicted_released_object_of_the_batch():
     # b is stored again, released and evicted in one batch; touching it
-    # afterwards would count as an ARC ghost hit.
+    # afterwards would count as an ARC ghost hit. LRU ignores touches of
+    # absent keys, so only an ARC test can catch this.
     store = _make_store(max_bytes=12, cache_policy="arc")
     store.put([BlockObject("e", b"eeee"), BlockObject("a", b"aaaa")])
     store.put([BlockObject("a", b"aaaa"), BlockObject("e", b"eeee")])

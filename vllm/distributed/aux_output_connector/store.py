@@ -147,7 +147,7 @@ class BlockObjectStore:
         self,
         num_incoming: int,
         protected: set[OffloadKey],
-        unallocated: list[OffloadKey],
+        unallocated: set[OffloadKey],
     ) -> None:
         excess = self._num_objects + num_incoming - self.num_slots
         if excess <= 0:
@@ -179,7 +179,7 @@ class BlockObjectStore:
         key: OffloadKey,
         chunk: ChunkStatus,
         protected: set[OffloadKey],
-        unallocated: list[OffloadKey],
+        unallocated: set[OffloadKey],
     ) -> bool:
         if chunk.ref_cnt or key in protected or self._policy.get(key) is not None:
             return False
@@ -223,7 +223,7 @@ class BlockObjectStore:
             self._evict_to_fit(
                 len(new_keys) - len(released_new),
                 unique.keys() - terminal,
-                released_new,
+                set(released_new),
             )
         except BlockObjectStoreError:
             for key in released_new:
