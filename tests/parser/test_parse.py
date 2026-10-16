@@ -158,6 +158,21 @@ def test_parse_plain_text_with_reasoning_parser(tokenizer, reasoning, tool):
     assert len(tool_calls) == 0
 
 
+def test_parse_with_prompt_preserves_legacy_parser_behavior(tokenizer):
+    """Legacy plugins need not implement prompt-aware reasoning detection."""
+    parser = make_parser(tokenizer, reasoning=True)
+    prompt_token_ids = tokenizer.encode(
+        "<|im_start|>assistant\n<think></think>", add_special_tokens=False
+    )
+
+    reasoning, content, _ = parser.parse_with_prompt(
+        PLAIN_TEXT, make_request(), prompt_token_ids=prompt_token_ids
+    )
+
+    assert reasoning == PLAIN_TEXT
+    assert content is None
+
+
 def test_parse_both_parsers(tokenizer):
     parser = make_parser(tokenizer, reasoning=True, tool=True)
     request = make_request(tools=TOOLS)
