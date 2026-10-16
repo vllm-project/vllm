@@ -100,6 +100,36 @@ if not HAS_TRITON:
     )
 
 
+class ConfigPlaceholder:
+    def __init__(self, kwargs=None, num_warps=4, num_stages=2, **extra):
+        if callable(kwargs):
+            self.fn = kwargs
+            self.kwargs = {}
+        else:
+            self.fn = None
+            self.kwargs = kwargs or {}
+        self.num_warps = num_warps
+        self.num_stages = num_stages
+        self.pre_hook = None
+        self.extra = extra
+
+    def all_kwargs(self):
+        return {**self.kwargs, **self.extra}
+
+    def __call__(self, *args, **kwargs):
+        if self.fn is not None:
+            return self.fn(*args, **kwargs)
+        if args and callable(args[0]):
+            return args[0]
+        return self
+
+    def __repr__(self):
+        return (
+            f"Config(kwargs={self.kwargs}, num_warps={self.num_warps}, "
+            f"num_stages={self.num_stages})"
+        )
+
+
 class TritonPlaceholder(types.ModuleType):
     def __init__(self):
         super().__init__("triton")
@@ -107,7 +137,7 @@ class TritonPlaceholder(types.ModuleType):
         self.jit = self._dummy_decorator("jit")
         self.autotune = self._dummy_decorator("autotune")
         self.heuristics = self._dummy_decorator("heuristics")
-        self.Config = self._dummy_decorator("Config")
+        self.Config = ConfigPlaceholder
         self.cdiv = cdiv
         self.language = TritonLanguagePlaceholder()
 
