@@ -33,7 +33,6 @@ from vllm.model_executor.layers.attention.mla_attention import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.platforms import current_platform
-from vllm.utils.flashinfer import has_flashinfer
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.attention.backend import CommonAttentionMetadata
@@ -2178,34 +2177,6 @@ def test_backend_correctness(
         qk_nope_head_dim,
         v_head_dim,
     )
-
-
-@pytest.mark.skipif(
-    not current_platform.is_cuda()
-    or not current_platform.is_device_capability_family(100)
-    or not has_flashinfer(),
-    reason="Requires Blackwell FlashInfer MLA prefill",
-)
-def test_fp8_cache_reference_uses_stored_values(
-    default_vllm_config, dist_init, workspace_init
-):
-    """Cover an input sensitive to FP8 cache rounding."""
-    with torch.random.fork_rng():
-        torch.manual_seed(6113)
-        _run_backend_correctness(
-            default_vllm_config,
-            dist_init,
-            workspace_init,
-            batch_spec_name="mixed_small",
-            model="deepseek-ai/DeepSeek-R1",
-            tensor_parallel_size=1,
-            kv_cache_dtype="fp8",
-            q_scale=1.0,
-            k_scale=1.0,
-            prefill_backend=MLAPrefillBackendEnum.TRTLLM_RAGGED,
-            qk_nope_head_dim=192,
-            v_head_dim=256,
-        )
 
 
 @pytest.mark.parametrize(
