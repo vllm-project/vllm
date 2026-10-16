@@ -60,7 +60,7 @@ from vllm.models.deepseek_v4.amd.model import (
     DeepseekV4MoE as DeepseekV4MoEBase,
 )
 from vllm.models.deepseek_v41.amd.rocm import DeepseekV41ROCMAiterMLAAttention
-from vllm.models.deepseek_v41.amd.specialized_decode import DECODE_SPEC, DSV41Kernel
+from vllm.models.deepseek_v41.amd.specialized_decode import DECODE_SPEC
 from vllm.models.deepseek_v41.attention import DeepseekV4Attention
 from vllm.models.deepseek_v41.decoder_replay_layers import DecoderReplayLayers
 from vllm.sequence import IntermediateTensors
@@ -1387,7 +1387,7 @@ class DeepseekV41LLMForCausalLM(
         self.config = config
         self.vllm_config = vllm_config
         self.specialized_decode_spec = select_decode_spec(vllm_config, DECODE_SPEC)
-        self.specialized_decode: SpecializedDecode[DSV41Kernel] | None = None
+        self.specialized_decode: SpecializedDecode | None = None
         expert_dtype = getattr(config, "expert_dtype", "fp4")
         self.hf_to_vllm_mapper = _make_deepseek_v4_weights_mapper(
             expert_dtype, _linear_scale_param_name(vllm_config, expert_dtype)

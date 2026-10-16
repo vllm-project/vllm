@@ -5,7 +5,7 @@ behind the two hooks a model's forward calls (``plan``, then ``run``).
 """
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Generic
+from typing import TYPE_CHECKING, Any
 
 import torch
 
@@ -22,7 +22,6 @@ from vllm.models.common.specialized_decode.spec import (
     DecodeImpl,
     DecodeSpec,
     DecodeUnsupported,
-    KernelT,
     Step,
 )
 
@@ -53,16 +52,16 @@ class DecodeWarmup(VllmJitKernel["DecodeWarmup.CompileKey"]):
         self._compiled_cache[compile_key] = True
 
 
-class SpecializedDecode(Generic[KernelT]):
+class SpecializedDecode:
     """A model's specialized decode on this rank.
 
     The runtime reads the spec and builds the kernel, registers it for warm-up,
     checks the caches whenever the runner binds them, and decides each step
-    between the kernel and vLLM's own forward. The kernel it builds is of type
-    KernelT and is held in the ``kernel`` attribute.
+    between the kernel and vLLM's own forward. The kernel it builds is held in
+    the ``kernel`` attribute.
     """
 
-    def __init__(self, model, vllm_config: "VllmConfig", spec: DecodeSpec[KernelT]):
+    def __init__(self, model, vllm_config: "VllmConfig", spec: DecodeSpec[Any]):
         """Builds this rank's kernel. Collective over the TP group.
 
         Args:
@@ -86,7 +85,7 @@ class SpecializedDecode(Generic[KernelT]):
         self.widths = spec.widths(vllm_config)
         self.last_reason: str | None = None
         self._bound = False
-        self.kernel: KernelT = spec.build(vllm_config, model, self.widths)
+        self.kernel: DecodeImpl = spec.build(vllm_config, model, self.widths)
         if self.kernel.warmup_keys():
             DecodeWarmup(spec.name, self.kernel).register_warmup()
         logger.info("Specialized decode %s: widths %s", spec.name, list(self.widths))

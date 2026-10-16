@@ -80,9 +80,9 @@ class DecodeImpl(Protocol):
 
 
 KernelT = TypeVar("KernelT", bound=DecodeImpl)
-"""What one spec's ``build`` returns. ``DecodeImpl`` is only the lower bound,
-so a model annotates its runtime with its own kernel class
-(``SpecializedDecode[MyKernel]``) and reads what that class adds."""
+"""What one spec's ``build`` returns, and what its ``refuse_caches`` and
+``skip_step`` are handed: a spec declared ``DecodeSpec[MyKernel]`` ties the
+three together."""
 
 
 @dataclass(frozen=True)
