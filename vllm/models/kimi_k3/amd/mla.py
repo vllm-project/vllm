@@ -50,8 +50,9 @@ class KimiK3MultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
         if attn.hisparse_cache is not None or attn.q_pad_num_heads is not None:
             return False
         # Only the W_UK variants reproduced in _fused_decode are supported.
-        return attn.is_aiter_triton_fp4_bmm_enabled or (
-            not attn.is_aiter_triton_fp8_bmm_enabled and attn.W_UK_T is not None
+        return (
+            attn.is_aiter_triton_fp4_bmm_enabled
+            or not attn.is_aiter_triton_fp8_bmm_enabled
         )
 
     def get_input_quant_key(self) -> QuantKey | None:
