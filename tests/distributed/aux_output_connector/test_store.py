@@ -33,6 +33,7 @@ from vllm.distributed.aux_output_connector.worker import (
     AuxOutputWorkerConnector,
 )
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
+from vllm.v1.kv_offload.base import get_offload_block_hash
 from vllm.v1.kv_offload.cpu.policies.lru import LRUCachePolicy
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.worker.gpu import async_utils
@@ -1857,23 +1858,6 @@ def test_scheduler_connector_reset_derives_emit_start_from_request():
     assert list(metadata.block_hashes[request.request_id]) == [b"a" * 32]
 
 
-class NewestFirstCachePolicy(LRUCachePolicy):
-    """Out-of-tree style policy that evicts the most recently used key first."""
-
-    def evict(self, n, protected):
-        victims = sorted(
-            (key for key in self._evictable if key not in protected),
-            key=self._ranks.__getitem__,
-            reverse=True,
-        )[:n]
-        if len(victims) < n:
-            return None
-        evicted = [(key, self.chunks[key]) for key in victims]
-        for key in victims:
-            self.remove(key)
-        return evicted
-
-
 @pytest.mark.parametrize("cache_policy", ["lru", "arc"], ids=["lru", "arc"])
 def test_store_cache_policy_respects_references_and_rollback(cache_policy):
     store = _make_store(max_bytes=8, cache_policy=cache_policy)
@@ -1894,16 +1878,82 @@ def test_store_cache_policy_respects_references_and_rollback(cache_policy):
     store.close()
 
 
-def test_store_loads_out_of_tree_cache_policy():
+@pytest.mark.parametrize(
+    "cache_policy,evicted",
+    [("lru", "a"), ("arc", "b")],
+    ids=["lru-evicts-oldest", "arc-keeps-reused"],
+)
+def test_store_cache_policy_sees_reuse_not_release(cache_policy, evicted):
+    store = _make_store(max_bytes=8, cache_policy=cache_policy)
+    store.put([BlockObject("a", b"aaaa")], retain_keys=["a"])
+    store.put([], release_keys=["a"])
+    assert store.get_concatenated(["a"]) == b"aaaa"
+    store.put([BlockObject("b", b"bbbb")], retain_keys=["b"])
+    store.put([], release_keys=["b"])
+
+    store.put([BlockObject("c", b"cccc")])
+
+    with pytest.raises(BlockObjectStoreError, match="does not exist"):
+        store.get_concatenated([evicted])
+    survivor = "b" if evicted == "a" else "a"
+    assert store.get_concatenated([survivor, "c"]) == survivor.encode() * 4 + b"cccc"
+    store.close()
+
+
+@pytest.mark.parametrize(
+    "retained",
+    [False, True],
+    ids=["unreferenced-read", "read-then-tail-first-release"],
+)
+def test_store_read_keeps_prefix_head_most_recent(retained):
+    store = _make_store(max_bytes=8)
+    keys = ["head", "tail"]
+    store.put(
+        [BlockObject("head", b"hhhh"), BlockObject("tail", b"tttt")],
+        retain_keys=keys if retained else (),
+    )
+    assert store.get_concatenated(keys) == b"hhhhtttt"
+    if retained:
+        store.put([], release_keys=reversed(keys))
+
+    store.put([BlockObject("new", b"nnnn")])
+
+    assert store.get_concatenated(["head", "new"]) == b"hhhhnnnn"
+    with pytest.raises(BlockObjectStoreError, match="does not exist"):
+        store.get_concatenated(["tail"])
+    store.close()
+
+
+class StoreMissRecordingPolicy(LRUCachePolicy):
+    """Record store misses with whether the key was resident at the time."""
+
+    store_misses: list[tuple[bytes, bool]] = []
+
+    def on_store_miss(self, keys, req_context):
+        for key in keys:
+            self.store_misses.append((key, key in self.chunks))
+        super().on_store_miss(keys, req_context)
+
+
+def test_store_loads_out_of_tree_policy_and_reports_store_misses():
+    StoreMissRecordingPolicy.store_misses = []
     store = _make_store(
         max_bytes=8,
-        cache_policy=NewestFirstCachePolicy.__name__,
+        cache_policy=StoreMissRecordingPolicy.__name__,
         cache_policy_module_path=__name__,
     )
     store.put([BlockObject("first", b"1111"), BlockObject("second", b"2222")])
-    store.put([BlockObject("third", b"3333")])
+    store.put([BlockObject("first", b"1111"), BlockObject("third", b"3333")])
+    # "second" was evicted; ARC needs to see its ghost before reinsertion.
+    store.put([BlockObject("second", b"2222")])
 
-    assert store.get_concatenated(["first", "third"]) == b"11113333"
-    with pytest.raises(BlockObjectStoreError, match="does not exist"):
-        store.get_concatenated(["second"])
+    assert [
+        (get_offload_block_hash(key), resident)
+        for key, resident in StoreMissRecordingPolicy.store_misses
+    ] == [
+        (b"first", False),
+        (b"second", False),
+        (b"third", False),
+        (b"second", False),
+    ]
     store.close()

@@ -10,7 +10,7 @@ import threading
 from collections.abc import Iterable
 from dataclasses import dataclass
 
-from vllm.v1.kv_offload.base import OffloadKey, ReqContext
+from vllm.v1.kv_offload.base import OffloadKey, ReqContext, make_offload_key
 from vllm.v1.kv_offload.cpu.policies.base import ChunkStatus
 from vllm.v1.kv_offload.cpu.policies.factory import CachePolicyFactory
 
@@ -103,8 +103,8 @@ class BackgroundBlockObjectStore:
 class BlockObjectStore:
     """Single-owner bounded store that fails closed after an eviction.
 
-    Victims are chosen by a KV offload `CachePolicy` ("lru" by default), so
-    routed experts follow the same retention rules as offloaded KV blocks.
+    Recency and victims come from a KV offload `CachePolicy` ("lru" by
+    default), driven the way the KV CPU offload manager drives it.
     """
 
     _UNALLOCATED_SLOT = -1
@@ -176,18 +176,24 @@ class BlockObjectStore:
         inserted = []
         for key in unique:
             if self._policy.get(key) is not None:
+                # Storing a resident object reuses it, as in KV offload.
                 self._policy.touch([key], self._req_context)
                 continue
+            # ARC learns from ghost entries before insert() drops them.
+            self._policy.on_store_miss([key], self._req_context)
             chunk = ChunkStatus(self._UNALLOCATED_SLOT)
             chunk.ref_cnt = self._references.get(key, 0)
             self._policy.insert(key, chunk)
             inserted.append(key)
         self._num_objects += len(inserted)
         # Released keys arrive tail first; the policy expects prefix order.
-        released = [
+        # Releasing refreshes recency only: reuse was recorded when read.
+        released = tuple(
             key for key in reversed(terminal_order) if self._policy.get(key) is not None
-        ]
-        self._policy.touch(released, self._req_context)
+        )
+        self._policy.on_request_finished(
+            (released,), set(released), set(), self._req_context
+        )
         try:
             self._evict_to_fit(unique.keys() - set(terminal_order))
         except BlockObjectStoreError:
@@ -265,4 +271,5 @@ class BlockObjectStore:
 
 
 def _offload_key(key: str) -> OffloadKey:
-    return OffloadKey(key.encode())
+    # Routed experts form one cache group.
+    return make_offload_key(key.encode(), 0)
