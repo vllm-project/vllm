@@ -189,6 +189,33 @@ def _make_xqa_ragged_draft_block_mask(
     return _pack_draft_block_bool_mask(bool_mask, num_packed)
 
 
+def _query_token_request_indices(
+    query_start_loc: torch.Tensor, num_tokens: int
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return per-request query lengths and each packed query token's request."""
+    query_lens = query_start_loc[1:] - query_start_loc[:-1]
+    request_indices = torch.repeat_interleave(
+        torch.arange(
+            query_lens.shape[0],
+            dtype=torch.int32,
+            device=query_start_loc.device,
+        ),
+        query_lens,
+        output_size=num_tokens,
+    )
+    return query_lens, request_indices
+
+
+def _make_token_causal_mask(
+    query_start_loc: torch.Tensor,
+    causal: torch.Tensor,
+    num_tokens: int,
+) -> torch.Tensor:
+    """Expand per-request causal flags (bool or int) to one bool per query token."""
+    _, request_indices = _query_token_request_indices(query_start_loc, num_tokens)
+    return causal[request_indices] != 0
+
+
 def _make_variable_window_bounds(
     query_start_loc: torch.Tensor,
     seq_lens: torch.Tensor,
@@ -202,16 +229,11 @@ def _make_variable_window_bounds(
     tokens, so each query's absolute position starts at ``seq_len - q_len``.
     For bidirectional requests a sliding window is symmetric, matching the
     semantics used by DiffusionGemma's FlashAttention reference path.
+    ``causal`` holds one flag per request, as bool or int (DiffusionGemma's
+    persistent buffer is int32).
     """
-    query_lens = query_start_loc[1:] - query_start_loc[:-1]
-    request_indices = torch.repeat_interleave(
-        torch.arange(
-            query_lens.shape[0],
-            dtype=torch.int32,
-            device=query_start_loc.device,
-        ),
-        query_lens,
-        output_size=num_tokens,
+    query_lens, request_indices = _query_token_request_indices(
+        query_start_loc, num_tokens
     )
     token_indices = torch.arange(
         num_tokens,
@@ -225,7 +247,7 @@ def _make_variable_window_bounds(
         - query_start_loc[request_indices]
     )
     token_seq_lens = seq_lens[request_indices]
-    token_causal = causal[request_indices]
+    token_causal = causal[request_indices] != 0
 
     if window_left < 0:
         starts = torch.zeros_like(query_positions)
@@ -715,7 +737,12 @@ class TRTLLMPrefill:
     """The maximum sequence length for KV Cache."""
 
     variable_window_bounds: dict[int, tuple[torch.Tensor, torch.Tensor]] | None = None
-    """Inclusive per-token KV bounds, keyed by the layer's window_left."""
+    """Inclusive per-token KV bounds for mixed-causal batches, keyed by a
+    sliding layer's window_left."""
+
+    token_causal: torch.Tensor | None = None
+    """Per-token bool causal flags for mixed-causal batches. Full-attention
+    layers merge a causal and a bidirectional launch with it."""
 
 
 @dataclass
@@ -1703,8 +1730,13 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         ].contiguous()
                     )
                 variable_window_bounds = None
+                token_causal = None
                 if dynamic_causal:
                     assert isinstance(causal, torch.Tensor)
+                    # Sliding layers use the VariableWindow kernel. Full-attention
+                    # layers instead merge causal and dense launches (see
+                    # FlashInferImpl.forward), which need no VariableWindow cubin
+                    # for their head dim.
                     variable_window_bounds = {
                         window_left: _make_variable_window_bounds(
                             qo_indptr_prefill_gpu,
@@ -1714,7 +1746,13 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                             num_prefill_tokens,
                         )
                         for window_left in self.window_lefts
+                        if window_left >= 0
                     }
+                    token_causal = _make_token_causal_mask(
+                        qo_indptr_prefill_gpu,
+                        causal[prefill_start:],
+                        num_prefill_tokens,
+                    )
                 attn_metadata.prefill = TRTLLMPrefill(
                     block_tables=prefill_block_tables,
                     seq_lens=prefill_seq_lens,
@@ -1723,6 +1761,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     max_q_len=max_q_len_prefill,
                     max_seq_len=max_seq_len,
                     variable_window_bounds=variable_window_bounds,
+                    token_causal=token_causal,
                 )
             else:
                 prefill_wrapper = self._get_prefill_wrapper(causal=attn_metadata.causal)
@@ -2444,17 +2483,30 @@ class FlashInferImpl(AttentionImpl):
                     mock_block_table = block_tables_prefill
 
                 variable_window_bounds = attn_metadata.prefill.variable_window_bounds
+                token_causal = attn_metadata.prefill.token_causal
                 variable_window_starts = None
                 variable_window_ends = None
                 trtllm_window_left = self.window_left
                 trtllm_window_right = -1
-                if variable_window_bounds is not None:
+                if variable_window_bounds is not None and self.window_left >= 0:
                     variable_window_starts, variable_window_ends = (
                         variable_window_bounds[self.window_left]
                     )
                     trtllm_window_left = -1
+                # A mixed-causal batch on a full-attention layer runs the causal
+                # and the dense kernel and keeps each token's own result, so the
+                # layer needs no VariableWindow cubin for its head dim.
+                merge_bidirectional = token_causal is not None and self.window_left < 0
+                if merge_bidirectional and (
+                    isinstance(out, FP4Tensor) or needs_fp8_out
+                ):
+                    raise NotImplementedError(
+                        "FlashInfer mixed causal/bidirectional full attention does "
+                        "not support quantized attention output yet."
+                    )
 
-                trtllm_batch_context_with_kv_cache(
+                run_context = partial(
+                    trtllm_batch_context_with_kv_cache,
                     query=prefill_query,
                     kv_cache=mock_kv_cache,
                     workspace_buffer=workspace_buffer,
@@ -2469,13 +2521,27 @@ class FlashInferImpl(AttentionImpl):
                     cum_seq_lens_kv=attn_metadata.prefill.cum_seq_lens_kv,
                     window_left=trtllm_window_left,
                     window_right=trtllm_window_right,
-                    variable_window_token_starts=variable_window_starts,
-                    variable_window_token_ends=variable_window_ends,
                     sinks=self.sinks,
                     o_sf_scale=self.o_sf_scale,
-                    out=out,
                     kv_cache_sf=prefill_kv_block_scales,
                 )
+                run_context(
+                    variable_window_token_starts=variable_window_starts,
+                    variable_window_token_ends=variable_window_ends,
+                    out=out,
+                )
+                if merge_bidirectional:
+                    assert token_causal is not None and isinstance(out, torch.Tensor)
+                    bidirectional_out = torch.empty_like(out)
+                    run_context(causal=False, out=bidirectional_out)
+                    causal_rows = token_causal.view(-1, *([1] * (out.dim() - 1)))
+                    out[:num_prefill_tokens].copy_(
+                        torch.where(
+                            causal_rows,
+                            out[:num_prefill_tokens],
+                            bidirectional_out[:num_prefill_tokens],
+                        )
+                    )
 
                 if needs_fp8_out:
                     output[

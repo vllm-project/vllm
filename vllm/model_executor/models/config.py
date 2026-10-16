@@ -401,15 +401,18 @@ class DiffusionGemmaModelForBlockDiffusionConfig(VerifyAndUpdateConfig):
         Gemma4Config.verify_and_update_config(vllm_config)
 
         attention_config = vllm_config.attention_config
-        if attention_config.backend is None and not attention_config.use_non_causal:
-            # Only the sm_100 default backend order reads this flag (it puts
-            # FlashInfer first for causal models). Elsewhere Gemma4Config above
-            # keeps FlashInfer out: FA4 on every layer, else TRITON_ATTN.
+        if not attention_config.use_non_causal:
+            # With no explicit backend, the sm_100 default backend order reads
+            # this flag (it puts FlashInfer first for causal models); elsewhere
+            # Gemma4Config above keeps FlashInfer out: FA4 on every layer, else
+            # TRITON_ATTN. With an explicit FlashInfer backend, it limits FULL
+            # CUDA graphs to single-token decode: mixed-causal batches take the
+            # TRTLLM prefill path, whose per-step metadata (query offsets,
+            # variable-window bounds) is not kept in persistent buffers.
             attention_config.use_non_causal = True
             logger.info(
                 "DiffusionGemma mixes causal and bidirectional attention in "
-                "one batch; setting use_non_causal=True so the default backend "
-                "order prefers FlashAttention over FlashInfer."
+                "one batch; setting use_non_causal=True."
             )
 
         # Auto-create DiffusionConfig from HF config if not provided.
