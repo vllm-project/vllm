@@ -7,7 +7,7 @@ from typing import Any
 import torch
 
 import vllm.envs as envs
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, get_current_vllm_config_or_none
 from vllm.config.mamba import MambaBackendEnum
 from vllm.model_executor.layers.mamba.checkpoint import (
     MambaPrefillCheckpointBuilder,
@@ -22,12 +22,13 @@ from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import (
     AttentionBackend,
     CommonAttentionMetadata,
+    max_decode_query_len,
 )
 from vllm.v1.attention.backends.mamba_attn import (
     BaseMambaAttentionMetadata,
     BaseMambaAttentionMetadataBuilder,
 )
-from vllm.v1.kv_cache_interface import MambaSpec
+from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec
 
 
 def compute_varlen_chunk_metadata(
@@ -110,6 +111,17 @@ class Mamba2AttentionBackend(AttentionBackend):
     @classmethod
     def is_ssm(cls) -> bool:
         return True
+
+    @classmethod
+    def supports_device_cpu_query_lens_mismatch(cls) -> bool:
+        # Decode kernels take device offsets; ReplaySSM and batch-invariant
+        # exact replay plan off CPU counts.
+        if envs.VLLM_BATCH_INVARIANT:
+            return False
+        vllm_config = get_current_vllm_config_or_none()
+        if vllm_config is None:
+            return True
+        return not vllm_config.cache_config.use_replayssm
 
     @classmethod
     def supports_batch_invariance(cls) -> bool:
@@ -219,6 +231,14 @@ class Mamba2AttentionMetadataBuilder(
     BaseMambaAttentionMetadataBuilder[Mamba2AttentionMetadata]
 ):
     metadata_cls = Mamba2AttentionMetadata
+
+    @classmethod
+    def get_varlen_cudagraph_max_query_len(
+        cls,
+        vllm_config: VllmConfig,
+        kv_cache_spec: KVCacheSpec,
+    ) -> int | None:
+        return max_decode_query_len(vllm_config)
 
     def __init__(
         self,
