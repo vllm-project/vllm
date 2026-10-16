@@ -60,11 +60,7 @@ from vllm.logprobs import Logprob
 from vllm.outputs import RequestOutput
 from vllm.parser import ParserManager
 from vllm.parser.abstract_parser import Parser
-from vllm.parser.metrics import (
-    finish_tool_calling_trace,
-    record_tool_call_response,
-    tool_calling_trace_headers,
-)
+from vllm.parser.metrics import record_tool_call_response
 from vllm.renderers.chat_utils import (
     ChatTemplateContentFormatOption,
     ConversationMessage,
@@ -73,7 +69,6 @@ from vllm.renderers.chat_utils import (
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
-from vllm.tracing.utils import DEFER_TOOL_CALLING_SPAN
 from vllm.utils.collection_utils import as_list
 from vllm.utils.serial_utils import numpy2base64
 
@@ -299,17 +294,9 @@ class OpenAIServingChat(GenerateBaseServing):
         for the API specification. This API mimics the OpenAI
         Chat Completion API.
         """
-        try:
-            return await self._with_kv_transfer_rejection_cleanup(
-                self._create_chat_completion(request, raw_request), request, raw_request
-            )
-        finally:
-            if (
-                not request.stream
-                and request._api_surface != "messages"
-                and request._tool_calling_spans is not None
-            ):
-                finish_tool_calling_trace(request)
+        return await self._with_kv_transfer_rejection_cleanup(
+            self._create_chat_completion(request, raw_request), request, raw_request
+        )
 
     async def _create_chat_completion(
         self,
@@ -317,14 +304,6 @@ class OpenAIServingChat(GenerateBaseServing):
         raw_request: Request | None = None,
     ) -> AsyncGenerator[str, None] | ChatCompletionResponse | ErrorResponse:
         # Streaming response
-        # Capture received intent before rendering or parser request adjustments.
-        tool_trace_headers = None
-        if request.tools and await self.engine_client.is_tracing_enabled():
-            tool_trace_headers = tool_calling_trace_headers(request, None)
-            # Beam search replaces engine outputs rather than handing spans through.
-            if not request.use_beam_search:
-                tool_trace_headers[DEFER_TOOL_CALLING_SPAN] = "1"
-                request._tool_calling_spans = []
         tokenizer = self.renderer.tokenizer
         assert tokenizer is not None
         chat_template_kwargs = self._effective_chat_template_kwargs(request)
@@ -400,8 +379,6 @@ class OpenAIServingChat(GenerateBaseServing):
                 if raw_request is None
                 else await self._get_trace_headers(raw_request.headers)
             )
-            if tool_trace_headers is not None:
-                trace_headers = {**(trace_headers or {}), **tool_trace_headers}
             session_id = self._get_session_id(request, raw_request)
 
             if isinstance(sampling_params, BeamSearchParams):
@@ -591,12 +568,8 @@ class OpenAIServingChat(GenerateBaseServing):
         )
 
         last_res: RequestOutput | None = None
-        tool_calling_spans = request._tool_calling_spans
         try:
             async for res in result_generator:
-                if tool_calling_spans is not None:
-                    tool_calling_spans.extend(res._tool_calling_spans or ())
-                    res._tool_calling_spans = None
                 last_res = res
                 if res.prompt_token_ids is not None:
                     num_prompt_tokens = len(res.prompt_token_ids)
@@ -748,7 +721,6 @@ class OpenAIServingChat(GenerateBaseServing):
                             )
                         except Exception:
                             parse_failed = True
-                            request._tool_calling_parse_failed = True
                             raise
                         if delta_message is not None and delta_message.tool_calls:
                             tools_streamed[i] = True
@@ -1006,36 +978,16 @@ class OpenAIServingChat(GenerateBaseServing):
             logger.exception("Error in chat completion stream generator.")
             yield self.create_error_response(e)
         finally:
-            try:
-                if request._tool_calling_spans is not None:
-                    close = getattr(result_generator, "aclose", None)
-                    if close is not None:
-                        await close()
-            except Exception:
-                logger.error("Error closing Chat completion result generator.")
-            finally:
-                if (
-                    request._tool_calling_spans is not None
-                    and request._api_surface != "messages"
-                ):
-                    finish_tool_calling_trace(
-                        request,
-                        tool_calls_count=len(emitted_tool_calls or ()),
-                        parse_failed=parse_failed,
-                        completed=stream_completed,
-                    )
-                if emitted_tool_calls is not None:
-                    record_tool_call_response(
-                        request,
-                        tool_calls_count=len(emitted_tool_calls),
-                        parse_failed=parse_failed,
-                        completed=stream_completed,
-                    )
-                elif request.tools and parse_failed:
-                    # Messages counts emitted blocks after its own conversion.
-                    record_tool_call_response(
-                        request, parse_failed=True, completed=False
-                    )
+            if emitted_tool_calls is not None:
+                record_tool_call_response(
+                    request,
+                    tool_calls_count=len(emitted_tool_calls),
+                    parse_failed=parse_failed,
+                    completed=stream_completed,
+                )
+            elif request.tools and parse_failed:
+                # Messages counts emitted blocks after its own conversion.
+                record_tool_call_response(request, parse_failed=True, completed=False)
 
     async def chat_completion_full_generator(
         self,
@@ -1051,13 +1003,9 @@ class OpenAIServingChat(GenerateBaseServing):
     ) -> ErrorResponse | ChatCompletionResponse:
         created_time = int(time.time())
         final_res: RequestOutput | None = None
-        tool_calling_spans = request._tool_calling_spans
 
         try:
             async for res in result_generator:
-                if tool_calling_spans is not None:
-                    tool_calling_spans.extend(res._tool_calling_spans or ())
-                    res._tool_calling_spans = None
                 final_res = res
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
@@ -1112,9 +1060,6 @@ class OpenAIServingChat(GenerateBaseServing):
                         model_output_token_ids=token_ids,
                     )
                 except Exception:
-                    request._tool_calling_parse_failed = True
-                    if request._api_surface != "messages":
-                        finish_tool_calling_trace(request, parse_failed=True)
                     if request.tools:
                         record_tool_call_response(request, parse_failed=True)
                     raise
@@ -1344,15 +1289,9 @@ class OpenAIServingChat(GenerateBaseServing):
                         delta=False,
                     )
 
-        if request._api_surface != "messages" and (
-            request.tools or request._tool_calling_spans is not None
-        ):
+        if request.tools and request._api_surface != "messages":
             tool_calls_count = sum(len(choice.message.tool_calls) for choice in choices)
-            finish_tool_calling_trace(
-                request, tool_calls_count=tool_calls_count, completed=True
-            )
-            if request.tools:
-                record_tool_call_response(request, tool_calls_count=tool_calls_count)
+            record_tool_call_response(request, tool_calls_count=tool_calls_count)
         return response
 
     def _get_top_logprobs(

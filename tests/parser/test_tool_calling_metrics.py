@@ -3,7 +3,6 @@
 """Compatible parser metrics and bounded tool-calling response dimensions."""
 
 from functools import partial
-from unittest.mock import MagicMock
 
 import pytest
 from prometheus_client import CollectorRegistry, Counter, generate_latest
@@ -15,95 +14,8 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
 )
 from vllm.parser import metrics
-from vllm.tracing.utils import SpanAttributes, tool_calling_trace_attributes
 
 pytestmark = pytest.mark.skip_global_cleanup
-
-
-@pytest.mark.parametrize("api_surface", ["chat_completions", "messages"])
-@pytest.mark.parametrize("count", [0, 2])
-def test_request_trace_summary_preserves_context_without_exporting_payloads(
-    api_surface, count
-):
-    request = ChatCompletionRequest.model_construct(
-        tools=[{"name": "private-function", "arguments": "private-data"}] * count,
-        tool_choice={"type": "function", "function": {"name": "private-function"}},
-    )
-    request._api_surface = api_surface
-    headers = {
-        "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
-        "tracestate": "vendor=value",
-        "body": "private-data",
-    }
-    carrier = metrics.tool_calling_trace_headers(request, headers)
-    assert carrier["traceparent"] == headers["traceparent"]
-    assert carrier["tracestate"] == headers["tracestate"]
-    assert "body" not in carrier
-    assert "private" not in repr(carrier)
-    assert headers["body"] == "private-data"  # The original mapping is not modified.
-    assert tool_calling_trace_attributes(carrier) == {
-        SpanAttributes.TOOL_CALLING_PRESENT: count > 0,
-        SpanAttributes.TOOL_CALLING_TOOL_COUNT: count,
-        SpanAttributes.TOOL_CALLING_TOOL_CHOICE: "named",
-        SpanAttributes.TOOL_CALLING_API_SURFACE: api_surface,
-    }
-
-
-@pytest.mark.parametrize("count", [None, "", "private-data", "-1", "1.5", "9" * 19])
-def test_invalid_internal_trace_counts_do_not_export_metadata(count):
-    assert (
-        tool_calling_trace_attributes({SpanAttributes.TOOL_CALLING_TOOL_COUNT: count})
-        == {}
-    )
-
-
-def test_internal_trace_metadata_uses_only_allowlisted_attributes():
-    assert tool_calling_trace_attributes(
-        {
-            SpanAttributes.TOOL_CALLING_TOOL_COUNT: "2",
-            SpanAttributes.TOOL_CALLING_TOOL_CHOICE: "private-function",
-            SpanAttributes.TOOL_CALLING_API_SURFACE: "private-data",
-            "tool_calling.arguments": "private-data",
-        }
-    ) == {
-        SpanAttributes.TOOL_CALLING_PRESENT: True,
-        SpanAttributes.TOOL_CALLING_TOOL_COUNT: 2,
-        SpanAttributes.TOOL_CALLING_TOOL_CHOICE: "other",
-        SpanAttributes.TOOL_CALLING_API_SURFACE: "chat_completions",
-    }
-
-
-@pytest.mark.parametrize(
-    "count, failed, completed, status",
-    [
-        (2, False, True, "success"),
-        (0, False, True, "no_tool_calls"),
-        (2, True, False, "parse_failure"),
-        (0, False, False, "interrupted"),
-        (2, False, False, "interrupted"),
-    ],
-)
-def test_response_trace_finishes_once_without_metric_registration(
-    monkeypatch, count, failed, completed, status
-):
-    monkeypatch.setattr(metrics, "_tool_call_responses", None)
-    monkeypatch.setattr(metrics, "_tool_calls_emitted", None)
-    request = ChatCompletionRequest.model_construct()
-    span = MagicMock()
-    request._tool_calling_spans = [span]
-    metrics.finish_tool_calling_trace(
-        request, tool_calls_count=count, parse_failed=failed, completed=completed
-    )
-    metrics.finish_tool_calling_trace(request)
-    span.set_attributes.assert_called_once_with(
-        {
-            SpanAttributes.TOOL_CALLING_RESPONSE_HAS_TOOL_CALLS: count > 0,
-            SpanAttributes.TOOL_CALLING_TOOL_CALLS_COUNT: count,
-            SpanAttributes.TOOL_CALLING_PARSER_STATUS: status,
-        }
-    )
-    span.end.assert_called_once_with()
-    assert request._tool_calling_spans is None
 
 
 @pytest.fixture
