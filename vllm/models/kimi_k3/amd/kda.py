@@ -8,6 +8,7 @@ from einops import rearrange
 from torch import nn
 
 from vllm import _custom_ops as ops
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import VllmConfig
 from vllm.distributed import divide
@@ -43,7 +44,7 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.model_executor.model_loader.weight_utils import sharded_weight_loader
-from vllm.model_executor.utils import set_weight_attrs
+from vllm.model_executor.utils import is_weights_pre_processed, set_weight_attrs
 from vllm.models.kimi_k3.amd.kda_metadata import KimiK3ROCmKDABackend
 from vllm.models.kimi_k3.amd.ops.kda_checkpoint import (
     KimiK3ROCmKDAPrefillCheckpointExporter,
@@ -54,8 +55,6 @@ from vllm.models.kimi_k3.amd.ops.kda_chunk import (
 )
 from vllm.models.kimi_k3.amd.ops.kda_decode import (
     is_fused_kda_decode_supported,
-    make_decode_conv1d_weight_loader,
-    make_decode_norm_weight_loader,
 )
 from vllm.models.kimi_k3.amd.ops.kda_prefill import chunk_kda_prefill
 from vllm.models.kimi_k3.amd.ops.third_party.kda import (
@@ -184,16 +183,19 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         # into one kernel, which wants a width-major fp32 conv weight staged at
         # load time. Everything else keeps the [channel, width] layout.
         conv_state_dtype, _ = self.get_state_dtype()
-        decode_conv1d_weight = None
-        if is_fused_kda_decode_supported(
+        self.use_aiter_decode = bool(rocm_aiter_ops.is_kda_gluon_decode_available())
+        use_hip_decode = not self.use_aiter_decode and is_fused_kda_decode_supported(
             self.local_num_heads,
             self.head_dim,
             self.conv_size,
             self.num_spec,
             vllm_config.model_config.dtype,
             conv_state_dtype,
-        ):
+        )
+        if use_hip_decode:
             logger.info_once("Fused KDA decode kernel (conv+KDA+norm) is enabled.")
+        decode_conv1d_weight = None
+        if use_hip_decode or self.use_aiter_decode:
             decode_conv1d_weight = torch.empty(
                 3,
                 self.conv_size,
@@ -204,19 +206,11 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         self.register_buffer(
             "decode_conv1d_weight", decode_conv1d_weight, persistent=False
         )
-        if decode_conv1d_weight is None:
-            conv1d_weight_loader = _make_fused_conv1d_weight_loader(
-                [self.projection_size] * 3,
-                self.tp_size,
-                self.tp_rank,
-            )
-        else:
-            conv1d_weight_loader = make_decode_conv1d_weight_loader(
-                [self.projection_size] * 3,
-                self.tp_size,
-                self.tp_rank,
-                decode_conv1d_weight,
-            )
+        conv1d_weight_loader = _make_fused_conv1d_weight_loader(
+            [self.projection_size] * 3,
+            self.tp_size,
+            self.tp_rank,
+        )
         set_weight_attrs(self.conv1d.weight, {"weight_loader": conv1d_weight_loader})
 
         self.A_log = nn.Parameter(
@@ -267,19 +261,13 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
 
         self.o_norm = FusedRMSNormGated(self.head_dim, activation="sigmoid")
         decode_norm_weight = None
-        if decode_conv1d_weight is not None:
+        if use_hip_decode:
             # Upcast once at load time; a BF16 norm weight slows the fused
             # decode kernel's epilogue.
             decode_norm_weight = torch.empty(
                 self.head_dim,
                 dtype=torch.float32,
                 device=self.o_norm.weight.device,
-            )
-            if hasattr(self.o_norm.weight, "weight_loader"):
-                delattr(self.o_norm.weight, "weight_loader")
-            set_weight_attrs(
-                self.o_norm.weight,
-                {"weight_loader": make_decode_norm_weight_loader(decode_norm_weight)},
             )
         self.register_buffer("decode_norm_weight", decode_norm_weight, persistent=False)
         self.o_proj = RowParallelLinear(
@@ -294,6 +282,19 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
+
+    @torch.no_grad()
+    def process_weights_after_loading(self, act_dtype: torch.dtype) -> None:
+        if is_weights_pre_processed():
+            return
+        if self.decode_conv1d_weight is not None:
+            self.decode_conv1d_weight.copy_(
+                self.conv1d.weight.view(
+                    3, self.local_projection_size, self.conv_size
+                ).transpose(1, 2)
+            )
+        if self.decode_norm_weight is not None:
+            self.decode_norm_weight.copy_(self.o_norm.weight)
 
     def rearrange_mixed_qkv(
         self, mixed_qkv: torch.Tensor
@@ -390,6 +391,66 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         # DS layout stores it that way directly; SD layout needs a transpose.
         if not is_conv_state_dim_first():
             conv_state = conv_state.transpose(-1, -2)
+
+        if (
+            self.use_aiter_decode
+            and spec_sequence_masks is None
+            and m.num_prefills == 0
+            and m.num_decodes > 0
+        ):
+            assert non_spec_state_indices_tensor is not None
+            rocm_aiter_ops.kda_fused_recurrent_packed_decode(
+                mixed_qkv=mixed_qkv,
+                g=g1[0],
+                beta=beta[0],
+                A_log=self.A_log,
+                dt_bias=self.dt_bias,
+                lower_bound=self.gate_lower_bound,
+                initial_state=recurrent_state,
+                ssm_state_indices=non_spec_state_indices_tensor[:num_actual_tokens],
+                conv_state=conv_state,
+                conv_weight=self.decode_conv1d_weight,
+                out_gate=g2[:num_actual_tokens],
+                norm_weight=self.o_norm.weight,
+                norm_eps=self.o_norm.eps,
+                out=core_attn_out[0, :num_actual_tokens],
+            )
+            return
+
+        if (
+            self.use_aiter_decode
+            and spec_sequence_masks is not None
+            and m.num_prefills == 0
+        ):
+            # Spec-only batch (gdn_attn never mixes spec and plain decodes).
+            assert spec_state_indices_tensor is not None
+            assert spec_query_start_loc is not None
+            q, k, v = (
+                rearrange(x, "n (h d) -> 1 n h d", d=self.head_dim)
+                for x in mixed_qkv.split(self.local_projection_size, dim=-1)
+            )
+            n_spec = q.shape[1]
+            rocm_aiter_ops.kda_fused_recurrent_spec_decode(
+                q=q,
+                k=k,
+                v=v,
+                g=g1,
+                beta=beta,
+                A_log=self.A_log,
+                dt_bias=self.dt_bias,
+                lower_bound=self.gate_lower_bound,
+                initial_state=recurrent_state,
+                cu_seqlens=spec_query_start_loc[: m.num_spec_decodes + 1],
+                ssm_state_indices=spec_state_indices_tensor,
+                num_accepted_tokens=num_accepted_tokens,
+                conv_state=conv_state,
+                conv_weight=self.decode_conv1d_weight,
+                out_gate=g2[:n_spec].unsqueeze(0),
+                norm_weight=self.o_norm.weight,
+                norm_eps=self.o_norm.eps,
+                out=core_attn_out[:, :n_spec],
+            )
+            return
 
         if (
             self.decode_conv1d_weight is not None
