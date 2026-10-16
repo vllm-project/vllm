@@ -965,29 +965,6 @@ def test_send_and_finished_load_in_one_step():
         )
 
 
-def test_sends_checksummed_before_post_forward():
-    """checksum_sends takes the step's sends, before a drafter runs, leaving
-    the finished loads to post_forward."""
-    worker = _worker(_config(_group(_spec(2))), {_name(0): _cache(_LOGICAL)})
-    worker.bind(
-        KVChecksumScheduled(
-            reqs_to_send={"send": BLOCKS}, reqs_to_recv={"recv": BLOCKS}
-        )
-    )
-    sends = _finish(worker.checksum_sends())
-    loads = _finish(worker.post_forward({"recv"}, set(), set()))
-    assert set(sends.checksums) == {"send"}
-    assert set(loads.checksums) == {"recv"}
-    expected = _reference({0: _LOGICAL})
-    for record, req_id in ((sends, "send"), (loads, "recv")):
-        np.testing.assert_array_equal(
-            record.checksums[req_id][0].values[:, 0], expected
-        )
-
-    worker.bind(None)
-    assert worker.checksum_sends() is None
-
-
 def test_draft_layers_are_not_checksummed():
     """Drafter layers are left out of their group's checksums and
     fingerprint, and a group of drafter layers only is not checksummed (nor

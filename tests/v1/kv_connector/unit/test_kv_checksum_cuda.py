@@ -184,10 +184,9 @@ def test_copy_is_ordered_after_checksums_for_any_reader():
     )
 
 
-def test_sampled_output_carries_send_and_load_checksums():
-    """On the last PP rank, the sends' checksums are copied with the sampled
-    tokens (before a drafter would run) and the finished loads' after it;
-    the output carries both records."""
+def test_sampled_output_carries_kv_checksums():
+    """On the last PP rank, the checksums of the step's sends and finished
+    loads, queued after the sampled tokens' copy, reach the sampled output."""
     logical = _logical_kv(heads=2)
     worker = _worker(_config(_group(_spec(2))), {_name(0): _cache(logical).cuda()})
     main_stream = torch.cuda.Stream()
@@ -200,7 +199,6 @@ def test_sampled_output_carries_send_and_load_checksums():
                 reqs_to_send={"send": BLOCKS}, reqs_to_recv={"recv": BLOCKS}
             )
         )
-        sends = worker.checksum_sends()
         num_sampled = torch.ones(1, dtype=torch.int32, device="cuda")
         async_output = AsyncOutput(
             ModelRunnerOutput(req_ids=["send"], req_id_to_index={"send": 0}),
@@ -216,20 +214,18 @@ def test_sampled_output_carries_send_and_load_checksums():
             copy_stream=copy_stream,
             check_ep_fault=False,
             pending_aux_output=None,
-            pending_kv_checksums=sends,
         )
-        loads = worker.post_forward({"recv"}, set(), set())
-        assert loads is not None
-        async_output.kv_checksums = KVChecksumCopy(loads, main_stream, copy_stream)
+        pending = worker.post_forward({"recv"}, set(), set())
+        assert pending is not None
+        async_output.kv_checksums = KVChecksumCopy(pending, main_stream, copy_stream)
     finally:
         torch.cuda.set_stream(torch.cuda.default_stream())
 
     output = async_output.get_output()
     assert output.sampled_token_ids == [[7]]
-    records = output.kv_connector_output.kv_checksums
-    assert [set(record.checksums) for record in records] == [{"send"}, {"recv"}]
+    [record] = output.kv_connector_output.kv_checksums
     expected = _reference({0: logical})
-    for record, req_id in zip(records, ("send", "recv")):
+    for req_id in ("send", "recv"):
         np.testing.assert_array_equal(
             record.checksums[req_id][0].values[:, 0], expected
         )

@@ -500,10 +500,9 @@ class _GroupBatch:
 class PendingKVChecksums:
     """A worker's KV checksums of one step, until they reach host memory.
 
-    ``checksum_sends`` or ``post_forward`` queues the checksum kernels on the
-    main stream. The model runner then calls ``enqueue_cpu_copy`` on its output
-    copy stream, ordered after them, and ``process_output`` once that copy is
-    done.
+    ``post_forward`` queues the checksum kernels on the main stream. The model
+    runner then calls ``enqueue_cpu_copy`` on its output copy stream, ordered
+    after them, and ``process_output`` once that copy is done.
     """
 
     def __init__(
@@ -578,11 +577,9 @@ class PendingKVChecksums:
 class KVChecksumWorker:
     """Computes the KV checksums the scheduler asks a worker for.
 
-    Requests to send are checksummed in the step that finishes their KV, by
-    ``checksum_sends`` right after the forward, so a drafter running after it
-    does not delay them, or else by ``post_forward``. Requests to receive are
-    checksummed by ``post_forward`` in the step whose transfer results report
-    their load finished, before any later step can write their blocks.
+    Requests to send are checksummed in the step that finishes their KV.
+    Requests to receive are checksummed in the step whose transfer results
+    report their load finished, before any later step can write their blocks.
     """
 
     def __init__(
@@ -646,30 +643,6 @@ class KVChecksumWorker:
         if scheduled is not None:
             self._reqs_to_recv.update(scheduled.reqs_to_recv)
 
-    def checksum_sends(self) -> PendingKVChecksums | None:
-        """Queue the checksums of this step's sends, once its forward wrote
-        their KV.
-
-        Returns:
-            The checksums, still on the device, or None if there are none.
-
-        """
-        if not self._reqs_to_send:
-            return None
-        pending = self._pending({})
-        self._compute(self._reqs_to_send, pending, replica_zero_only=True)
-        self._reqs_to_send = {}
-        return pending
-
-    def _pending(self, received: dict[str, bytes]) -> PendingKVChecksums:
-        return PendingKVChecksums(
-            self.pp_rank,
-            self.tp_rank,
-            self._skipped_groups,
-            self._fingerprints,
-            received,
-        )
-
     def post_forward(
         self,
         finished_recving: set[str] | None,
@@ -677,8 +650,7 @@ class KVChecksumWorker:
         finished_req_ids: set[str],
         received: dict[str, bytes] | None = None,
     ) -> PendingKVChecksums | None:
-        """Queue the checksums of this step's finished loads, and of its sends
-        unless ``checksum_sends`` already did.
+        """Queue the checksums of this step's sends and finished loads.
 
         Args:
             finished_recving: Requests whose load this worker finished.
@@ -701,7 +673,13 @@ class KVChecksumWorker:
             and req_id not in failed_recving
         }
 
-        pending = self._pending(received or {})
+        pending = PendingKVChecksums(
+            self.pp_rank,
+            self.tp_rank,
+            self._skipped_groups,
+            self._fingerprints,
+            received or {},
+        )
         self._compute(loaded, pending, replica_zero_only=False)
         self._compute(self._reqs_to_send, pending, replica_zero_only=True)
         self._reqs_to_send = {}
