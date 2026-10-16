@@ -292,9 +292,13 @@ class DeepseekV41ForCausalLM(
 
     @staticmethod
     def get_model_state_cls():
-        from ..nvidia.model_state import DeepseekV41ModelState
+        from .model_state import DeepseekV41ROCMModelState
 
-        return DeepseekV41ModelState
+        return DeepseekV41ROCMModelState
+
+    @property
+    def specialized_decode(self):
+        return self.language_model.specialized_decode
 
     @property
     def token_lookback_depth(self) -> int:
@@ -342,15 +346,10 @@ class DeepseekV41ForCausalLM(
         # must not run on a partially loaded model).
         mapped = sorted(self.hf_to_vllm_mapper.apply(weights), key=lambda x: x[0])
         loader = AutoWeightsLoader(self)
-        loaded_params = loader.load_weights(mapped)
-        # The child's load_weights already ran its post-load finalization.
-        self._weights_finalized = True
-        return loaded_params
+        return loader.load_weights(mapped)
 
     def process_weights_after_loading(self) -> None:
-        # Model-level post-load hook (called by the loader after any load
-        # format). Under DummyModelLoader the child's load_weights — and
-        # hence its finalize step — is bypassed, so run it here instead.
-        if getattr(self, "_weights_finalized", False):
-            return
+        # Model-level post-load hook, called by the loader once every module's
+        # own post-load processing has run. The child finalizes idempotently
+        # and builds its specialized decode here, so it always runs.
         self.language_model.process_weights_after_loading()

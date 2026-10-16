@@ -98,10 +98,9 @@ class DSV41Kernel:
         self.model = model
         self.runner = DSV41MonoLayer(world, rank, cpu_group, device)
         self.embed_layer = getattr(model, "start_layer", 0)
-        # The replay layers run on their own trimmed batch, outside the loop
-        # ``run`` owns, so no launch is built for them.
-        end = getattr(model, "end_layer", len(model.layers))
-        self.layer_end = getattr(model, "decoder_replay_start", end)
+        # A decode step is never trimmed, so ``run`` owns every layer, the ones
+        # past the replay cut included.
+        self.layer_end = getattr(model, "end_layer", len(model.layers))
         self.widths = widths
         self.swa_keys: list[str] = []
         self.comp_keys: list[str] = []
@@ -321,6 +320,7 @@ class DSV41Kernel:
                 res_mix,
                 full_num_tokens,
                 aux_hidden_states,
+                replay=False,
             )
             if aux_recon is not None:
                 final_aux_recon = aux_recon
@@ -336,6 +336,7 @@ class DSV41Kernel:
             final_aux_recon,
             self.layer_end > self.embed_layer,
             full_num_tokens,
+            replay=False,
         )
 
 
@@ -440,6 +441,9 @@ def _skip_step(vllm_config, decode: DSV41Kernel, width: int) -> str | None:
         return "no layer takes a launch"
     if not isinstance(md, dict):  # a profile / dummy run, or DBO ubatches
         return "no attention metadata"
+    replay = decode.model.decoder_replay_layers
+    if replay is not None and replay.uses_replay_batch():
+        return "replay batch step"
     if any(md.get(k) is None for k in decode.comp_keys):
         return "layer metadata missing"
     for key in decode.swa_keys:

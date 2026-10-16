@@ -136,19 +136,22 @@ class MonoProbe:
         self._captured: dict = {}
         lens = sorted(lens)
 
+        def record(layer, layer_id, pos, out) -> None:
+            md = get_forward_context().attn_metadata
+            if not isinstance(md, dict):
+                return
+            swa = md.get(layer.attn.swa_cache_layer.prefix)
+            if swa is None or swa.num_prefills != 0:
+                return
+            for row, p in enumerate(pos.tolist()):
+                n = max(n for n in lens if n <= p)
+                kept = [t[row].float().cpu() for t in out[:2]]
+                self._captured.setdefault((layer_id, n, p), kept)
+
         def hook(layer_id):
             def keep(module, args, kwargs, out):
-                md = get_forward_context().attn_metadata
-                if not isinstance(md, dict):
-                    return
-                swa = md.get(module.attn.swa_cache_layer.prefix)
-                if swa is None or swa.num_prefills != 0:
-                    return
                 pos = kwargs.get("positions", args[1] if len(args) > 1 else None)
-                for row, p in enumerate(pos.tolist()):
-                    n = max(n for n in lens if n <= p)
-                    kept = [t[row].float().cpu() for t in out[:2]]
-                    self._captured.setdefault((layer_id, n, p), kept)
+                record(module, layer_id, pos, out)
 
             return keep
 
@@ -186,6 +189,22 @@ class MonoProbe:
             layer.register_forward_pre_hook(pos_hook, with_kwargs=True)
             gap = gap_hook(i, layer)
             layer.ffn.register_forward_pre_hook(gap, with_kwargs=True)
+
+        # A whole-layer launch replaces the layer's forward, so no module hook
+        # sees it: wrap the launch itself to keep the same outputs.
+        decode = getattr(self.model_runner.model, "specialized_decode", None)  # type: ignore[attr-defined]
+        if decode is None:
+            return
+        kernel = decode.kernel
+        launch_whole = kernel.launch_whole
+
+        def launch(plan, x, positions, *args, **kwargs):
+            out = launch_whole(plan, x, positions, *args, **kwargs)
+            if out is not None:
+                record(plan.layer, plan.layer.attn.layer_id, positions, out)
+            return out
+
+        kernel.launch_whole = launch
 
     def save_capture(self, path: str) -> None:
         rank = self.rank  # type: ignore[attr-defined]

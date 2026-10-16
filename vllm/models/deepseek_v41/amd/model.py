@@ -818,13 +818,15 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         final_aux_recon: torch.Tensor | None,
         ran_layers: bool,
         full_num_tokens: int,
+        replay: bool = True,
     ) -> torch.Tensor | IntermediateTensors:
         """Everything after the last decoder layer: the replay batch, the final
-        post and collapse, and this rank's return."""
+        post and collapse, and this rank's return.
+        """
         # Replay collapses inside its own batch. The early loop still sets
         # ran_layers, so that flag alone must not post again on the full batch.
         collapsed = False
-        if self.decoder_replay_layers is not None:
+        if replay and self.decoder_replay_layers is not None:
             hidden_states, pre_mix, *late_aux = self.decoder_replay_layers(
                 hidden_states,
                 positions,
@@ -941,15 +943,18 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         res_mix: torch.Tensor | None,
         full_num_tokens: int,
         aux_hidden_states: list[torch.Tensor],
+        replay: bool = True,
     ) -> torch.Tensor | None:
         """This layer's aux hidden state, appended to ``aux_hidden_states``, or
         None when layer ``idx + 1`` does not want one.
 
         The aux id of the first replay layer is the post of the last full-batch
-        layer; that one is captured on the trimmed rows instead.
+        layer; that one is captured on the trimmed rows instead, unless
+        ``replay`` is False and the caller runs every layer on the full batch.
         """
         if idx + 1 not in self.aux_hidden_state_layers or (
-            self.decoder_replay_layers is not None
+            replay
+            and self.decoder_replay_layers is not None
             and idx + 1 == self.decoder_replay_start
         ):
             return None
@@ -1502,8 +1507,6 @@ class DeepseekV41LLMForCausalLM(
         self.model.finalize_mhc_broadcast_weights()
 
     def process_weights_after_loading(self) -> None:
-        # The loader calls this once every module's own post-load processing has
-        # run, which is what the specialized decode reads its weights in.
         self.finalize_weights()
         if self.specialized_decode_spec is not None and self.specialized_decode is None:
             self.specialized_decode = SpecializedDecode(

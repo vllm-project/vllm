@@ -178,14 +178,17 @@ class _Model(torch.nn.Module):
         self.layers = torch.nn.ModuleList(_Layer(i) for i in range(LAYERS))
         self.start_layer = 0
         self.end_layer = LAYERS
+        self.decoder_replay_layers = None
 
     def prologue(self, input_ids, positions, intermediate_tensors, embeds, lookback):
         return embeds, input_ids, None, None, None, positions.shape[0]
 
-    def after_layer(self, idx, hidden, residual, post_mix, res_mix, tokens, aux):
+    def after_layer(
+        self, idx, hidden, residual, post_mix, res_mix, tokens, aux, replay=True
+    ):
         return None
 
-    def epilogue(self, hidden, *rest):
+    def epilogue(self, hidden, *rest, replay=True):
         return hidden
 
 
@@ -301,7 +304,10 @@ def _rocm_platform() -> ModuleType:
 
 def _gpu(monkeypatch, cdna: int = 4, cus: int = BLOCKS) -> None:
     _stub_modules(monkeypatch)
-    monkeypatch.setattr(sd, "_compute_units", lambda: cus)
+    # The compute-unit probe reads the current accelerator, which a CPU run has
+    # none of.
+    monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 0)
+    monkeypatch.setattr(sd.current_platform, "num_compute_units", lambda _: cus)
     monkeypatch.setattr(_rocm_platform(), "get_cdna_version", lambda: cdna)
 
 

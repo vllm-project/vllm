@@ -22,8 +22,10 @@ from vllm.models.common.specialized_decode.dispatch import SpecializedDecode
 from vllm.models.common.specialized_decode.guards import select_decode_spec
 
 KERNEL_BACKENDS = ("aiter", "flydsl")
-"""Backends a spec module must not pull in: it is imported at config time, on
-every platform, before anything has decided the spec can run."""
+"""Backends a spec module must not pull in of its own: it is imported at config
+time, before anything has decided the spec can run. The package holding it is
+the model's own hardware entry point, which already pulls its platform's
+backend, so only what the spec module adds on top of that package counts."""
 
 
 @contextmanager
@@ -88,10 +90,13 @@ class DecodeConformance:
 
     def test_spec_module_imports_no_kernel_backend(self):
         module = self.specs_module
+        package = module.rpartition(".")[0]
         source = (
             "import sys; sys.path.insert(0, '.'); import importlib;"
+            f"importlib.import_module({package!r});"
+            "loaded = set(sys.modules);"
             f"importlib.import_module({module!r});"
-            "print('\\n'.join(sys.modules))"
+            "print('\\n'.join(set(sys.modules) - loaded))"
         )
         loaded = subprocess.run(
             [sys.executable, "-c", source],
