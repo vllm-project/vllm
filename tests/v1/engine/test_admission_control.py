@@ -505,6 +505,25 @@ async def test_parallel_admission_cancellation_cleans_up_all_children():
     assert set(aborted_ids) == {"0_parallel", "1_parallel", "2_parallel"}
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error", [RuntimeError("submission failed"), asyncio.CancelledError()]
+)
+async def test_single_admission_failure_releases_frontend_state(error):
+    """Submission failure cannot leave a locally registered request or span."""
+
+    async def add_request_async(_request):
+        raise error
+
+    llm = _make_request_test_llm(1, add_request_async)
+    request = _make_engine_request("single", 1)
+    with pytest.raises(type(error)) as caught:
+        await llm.add_request(request.request_id, request, request.params)
+
+    assert caught.value is error
+    assert not llm.output_processor.has_unfinished_requests()
+
+
 # ---------------------------------------------------------------------------
 # create_error_response integration
 # ---------------------------------------------------------------------------

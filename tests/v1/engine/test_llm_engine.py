@@ -9,7 +9,9 @@ import pytest
 from vllm import LLM
 from vllm.exceptions import ProfilerAlreadyActiveError
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
+from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.llm_engine import LLMEngine
+from vllm.v1.engine.output_processor import OutputProcessor
 from vllm.v1.metrics.reader import Counter, Gauge, Histogram, Metric, Vector
 
 if TYPE_CHECKING:
@@ -22,7 +24,8 @@ DTYPE = "half"
 
 
 @pytest.mark.skip_global_cleanup
-def test_step_invalidates_mm_processor_cache_misses():
+@pytest.mark.parametrize("tracing_enabled", [False, True])
+def test_step_invalidates_mm_processor_cache_misses(tracing_enabled):
     engine = object.__new__(LLMEngine)
     engine.should_execute_dummy_batch = False
     engine.log_stats = False
@@ -44,13 +47,58 @@ def test_step_invalidates_mm_processor_cache_misses():
 
     processed_outputs = MagicMock(reqs_to_abort=[], request_outputs=[])
     engine.output_processor = MagicMock()
+    engine.output_processor.tracing_enabled = tracing_enabled
     engine.output_processor.process_outputs.return_value = processed_outputs
 
     assert engine.step() == []
+    iteration_stats = engine.output_processor.process_outputs.call_args.kwargs[
+        "iteration_stats"
+    ]
+    assert (iteration_stats is not None) == tracing_enabled
     assert mm_processor_cache.invalidate.call_args_list == [
         call("missing-hash-1"),
         call("missing-hash-2"),
     ]
+
+
+@pytest.mark.parametrize("n", [1, 2])
+def test_submission_failure_releases_frontend_state(n):
+    engine = object.__new__(LLMEngine)
+    engine.input_processor = MagicMock()
+    engine.output_processor = OutputProcessor(None, log_stats=False)
+    engine.engine_core = MagicMock()
+    error = RuntimeError("submission failed")
+    engine.engine_core.add_request.side_effect = error
+    request = EngineCoreRequest(
+        request_id="request",
+        external_req_id="request",
+        prompt_token_ids=[1],
+        mm_features=None,
+        sampling_params=SamplingParams(n=n, detokenize=False),
+        pooling_params=None,
+        arrival_time=0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+    )
+
+    with pytest.raises(RuntimeError) as caught:
+        engine.add_request(request.request_id, request, request.params)
+    assert caught.value is error
+    assert not engine.output_processor.has_unfinished_requests()
+
+
+def test_output_failure_closes_request_spans():
+    engine = object.__new__(LLMEngine)
+    engine.should_execute_dummy_batch = False
+    engine.engine_core = MagicMock()
+    engine.output_processor = MagicMock()
+    error = RuntimeError("engine failed")
+    engine.engine_core.get_output.side_effect = error
+    with pytest.raises(RuntimeError) as caught:
+        engine.step()
+    assert caught.value is error
+    engine.output_processor.shutdown.assert_called_once()
 
 
 def test_duplicate_profile_start_rejected_before_engine_core_dispatch():
