@@ -10,12 +10,14 @@ import pytest
 from vllm.v1.kv_offload.base import LookupResult, ReqContext, make_offload_key
 from vllm.v1.kv_offload.tiering import metrics as tiering_metrics
 from vllm.v1.kv_offload.tiering.base import (
-    DeferredTransferJob,
     JobResult,
     TieringOffloadingMetrics,
-    TransferJob,
 )
-from vllm.v1.kv_offload.tiering.manager import JobMetadata
+from vllm.v1.kv_offload.tiering.manager import (
+    CascadeTransferJob,
+    JobMetadata,
+    PromotionTransferJob,
+)
 from vllm.v1.kv_offload.tiering.metrics import TieringMetricsTracker
 
 _CTX = ReqContext(req_id="test")
@@ -97,6 +99,19 @@ def test_tiering_metrics_tracker_stops_lookup_metrics_after_allocation():
     assert TieringOffloadingMetrics.CHUNK_HITS not in values
 
 
+def _register(tracker: TieringMetricsTracker, job: JobMetadata) -> None:
+    """Register a job the way production does.
+
+    Promotion chunk counts are recorded at allocation (inside
+    _promotion_allocation), which hand-built jobs bypass; simulate that here.
+    """
+    tracker.on_job_registered(job)
+    transfer_job = job.transfer_job
+    claim = transfer_job.get()
+    if transfer_job.is_promotion and claim is not None:
+        tracker.on_primary_chunk_count(job.tier_idx, len(claim[1]), is_promotion=True)
+
+
 def test_tiering_metrics_tracker_records_finished_job_metrics():
     tracker = TieringMetricsTracker(
         tier_types=["example"],
@@ -108,24 +123,24 @@ def test_tiering_metrics_tracker_records_finished_job_metrics():
     )
     jobs = [
         JobMetadata(
-            TransferJob(0, [cascade_key], np.array([0]), False, _CTX),
+            CascadeTransferJob(0, _CTX, [cascade_key], np.array([0])),
             0,
         ),
         JobMetadata(
-            TransferJob(1, [promotion_key], np.array([1]), True, _CTX),
+            PromotionTransferJob(1, _CTX, [promotion_key], np.array([1])),
             0,
         ),
         JobMetadata(
-            TransferJob(2, [failed_cascade_key], np.array([2]), False, _CTX),
+            CascadeTransferJob(2, _CTX, [failed_cascade_key], np.array([2])),
             0,
         ),
         JobMetadata(
-            TransferJob(3, [failed_promotion_key], np.array([3]), True, _CTX),
+            PromotionTransferJob(3, _CTX, [failed_promotion_key], np.array([3])),
             0,
         ),
     ]
     for job in jobs:
-        tracker.on_job_registered(job)
+        _register(tracker, job)
 
     tracker.on_job_finished(
         jobs[0], JobResult(job_id=0, success=True, transfer_time=0.5)
@@ -157,10 +172,10 @@ def test_tiering_metrics_tracker_records_partial_promotion_success_bytes():
     )
     keys = to_keys(range(3))
     job = JobMetadata(
-        TransferJob(0, keys, np.array([0, 1, 2]), True, _CTX),
+        PromotionTransferJob(0, _CTX, keys, np.array([0, 1, 2])),
         0,
     )
-    tracker.on_job_registered(job)
+    _register(tracker, job)
 
     tracker.on_job_finished(
         job,
@@ -189,15 +204,15 @@ def test_tiering_metrics_tracker_reports_active_job_and_primary_usage_gauges():
         primary_chunk_size=16,
     )
     ex_job = JobMetadata(
-        TransferJob(0, to_keys([0, 1]), np.array([0, 1]), False, _CTX),
+        CascadeTransferJob(0, _CTX, to_keys([0, 1]), np.array([0, 1])),
         0,
     )
     p2p_job = JobMetadata(
-        TransferJob(1, to_keys([2, 3, 4]), np.array([2, 3, 4]), True, _CTX),
+        PromotionTransferJob(1, _CTX, to_keys([2, 3, 4]), np.array([2, 3, 4])),
         1,
     )
-    tracker.on_job_registered(ex_job)
-    tracker.on_job_registered(p2p_job)
+    _register(tracker, ex_job)
+    _register(tracker, p2p_job)
 
     stats = tracker.take_stats()
     assert stats is not None
@@ -231,11 +246,11 @@ def test_tiering_metrics_tracker_records_promotion_latency_histogram(monkeypatch
     )
 
     promotion_job = JobMetadata(
-        TransferJob(0, to_keys([0, 1]), np.array([0, 1]), True, _CTX),
+        PromotionTransferJob(0, _CTX, to_keys([0, 1]), np.array([0, 1])),
         1,
     )
     promotion_job.transfer_job.submit_time = clock
-    tracker.on_job_registered(promotion_job)
+    _register(tracker, promotion_job)
     clock += 1.5
     tracker.on_job_finished(
         promotion_job, JobResult(job_id=0, success=True, transfer_time=0.42)
@@ -247,10 +262,10 @@ def test_tiering_metrics_tracker_records_promotion_latency_histogram(monkeypatch
     assert observations == {("2:p2p", "success"): [1.5]}
 
     cascade_job = JobMetadata(
-        TransferJob(1, to_keys([2]), np.array([2]), False, _CTX),
+        CascadeTransferJob(1, _CTX, to_keys([2]), np.array([2])),
         1,
     )
-    tracker.on_job_registered(cascade_job)
+    _register(tracker, cascade_job)
     clock += 0.1
     tracker.on_job_finished(
         cascade_job, JobResult(job_id=1, success=True, transfer_time=0.10)
@@ -262,11 +277,11 @@ def test_tiering_metrics_tracker_records_promotion_latency_histogram(monkeypatch
     assert TieringOffloadingMetrics.PROMOTION_LATENCY not in values
 
     failed_promotion_job = JobMetadata(
-        TransferJob(2, to_keys([3]), np.array([3]), True, _CTX),
+        PromotionTransferJob(2, _CTX, to_keys([3]), np.array([3])),
         0,
     )
     failed_promotion_job.transfer_job.submit_time = clock
-    tracker.on_job_registered(failed_promotion_job)
+    _register(tracker, failed_promotion_job)
     clock += 0.2
     tracker.on_job_finished(
         failed_promotion_job,
@@ -290,10 +305,10 @@ def test_tiering_metrics_tracker_records_promotion_latency_without_transfer_time
     )
 
     promotion_job = JobMetadata(
-        TransferJob(0, to_keys([0]), np.array([0]), True, _CTX),
+        PromotionTransferJob(0, _CTX, to_keys([0]), np.array([0])),
         0,
     )
-    tracker.on_job_registered(promotion_job)
+    _register(tracker, promotion_job)
     tracker.on_job_finished(promotion_job, JobResult(job_id=0, success=True))
     tracker.assert_idle()
 
@@ -318,52 +333,34 @@ def test_tiering_metrics_tracker_records_promotion_allocation_failures():
     assert values[TieringOffloadingMetrics.PROMOTION_ALLOCATION_FAILURES][()] == 1
 
 
-def test_metrics_promotion_chunk_count_at_registration():
+def test_metrics_promotion_chunk_count_at_acquisition():
+    """Promotion chunk count is recorded at acquisition, not registration."""
     keys = to_keys(range(3))
-
-    # --- Eager path ---
-    tracker = TieringMetricsTracker(
-        tier_types=["example"], num_primary_chunks=5, primary_chunk_size=16
-    )
-    eager_job = JobMetadata(TransferJob(0, keys, np.array([0, 1, 2]), True, _CTX), 0)
-    tracker.on_job_registered(eager_job)
-    state = tracker._tier_states[0]
-    assert state.active_promotion_count == 1
-    assert (
-        state.primary_write_chunk_count == 3
-    )  # updated at registration, no extra call
-
-    tracker.on_job_finished(
-        eager_job, JobResult(job_id=0, success=True, transfer_time=0.1)
-    )
-    tracker.assert_idle()
-
-    # --- Deferred path ---
     tracker = TieringMetricsTracker(
         tier_types=["fs"], num_primary_chunks=5, primary_chunk_size=16
     )
-    deferred_job = JobMetadata(
-        DeferredTransferJob(
+    job = JobMetadata(
+        PromotionTransferJob(
             1,
+            _CTX,
             keys,
             None,
-            True,
-            _CTX,
-            primary_alloc_fn=lambda k, ctx: (list(k), list(range(len(list(k))))),
+            alloc_fn=lambda k, ctx: (list(k), np.array([0, 1, 2], dtype=np.int32)),
         ),
         0,
     )
-    tracker.on_job_registered(deferred_job)
+
+    # Registration records only the active-job count.
+    tracker.on_job_registered(job)
     state = tracker._tier_states[0]
     assert state.active_promotion_count == 1
-    assert state.primary_write_chunk_count == 0  # not yet materialized
+    assert state.primary_write_chunk_count == 0
 
-    # Materialization happens in worker thread; then on_promotion_chunk_count fires
-    tracker.on_promotion_chunk_count(0, len(keys))
+    # Acquisition (inside get(), on whichever thread redeems it) records the
+    # chunk count.
+    assert job.transfer_job.get() is not None
+    tracker.on_primary_chunk_count(0, len(keys), is_promotion=True)
     assert state.primary_write_chunk_count == 3
 
-    deferred_job.transfer_job.materialize()
-    tracker.on_job_finished(
-        deferred_job, JobResult(job_id=1, success=True, transfer_time=0.1)
-    )
+    tracker.on_job_finished(job, JobResult(job_id=1, success=True, transfer_time=0.1))
     tracker.assert_idle()

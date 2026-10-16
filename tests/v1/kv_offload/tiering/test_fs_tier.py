@@ -34,12 +34,16 @@ from vllm.v1.kv_offload.config import (
     OffloadingModelConfig,
     OffloadingParallelConfig,
 )
-from vllm.v1.kv_offload.tiering.base import DeferredTransferJob, TransferJob
+from vllm.v1.kv_offload.tiering.base import TransferJob
 from vllm.v1.kv_offload.tiering.factory import SecondaryTierFactory
 from vllm.v1.kv_offload.tiering.fs.manager import (
     FileSystemTierManager,
 )
 from vllm.v1.kv_offload.tiering.fs.thread_pool import DualQueueThreadPool
+from vllm.v1.kv_offload.tiering.manager import (
+    CascadeTransferJob,
+    PromotionTransferJob,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -111,20 +115,21 @@ def make_job(
         chunk_ids = list(range(len(keys)))
     if is_promotion:
         chunk_ids_list = list(chunk_ids)
-        return DeferredTransferJob(
+        return PromotionTransferJob(
             job_id=job_id,
-            _keys=keys,
-            _chunk_ids=None,
-            is_promotion=True,
             req_context=_CTX,
-            primary_alloc_fn=lambda k, ctx: (list(k), chunk_ids_list),
+            keys=keys,
+            chunk_ids=None,
+            alloc_fn=lambda k, ctx: (
+                list(k),
+                np.array(chunk_ids_list, dtype=np.int32),
+            ),
         )
-    return TransferJob(
+    return CascadeTransferJob(
         job_id=job_id,
-        _keys=keys,
-        _chunk_ids=np.array(chunk_ids, dtype=np.int64),
-        is_promotion=False,
         req_context=_CTX,
+        keys=keys,
+        chunk_ids=np.array(chunk_ids, dtype=np.int64),
     )
 
 
@@ -1016,38 +1021,46 @@ def test_fs_tier_cross_tp_round_trip(tmp_path):
 class TestFSPromotion:
     """Test deferred promotion. FS tier defers allocation by default."""
 
-    def test_submit_load_rejects_eager_transfer_job(self, fs_tier):
-        """submit_load must raise AssertionError for an eager TransferJob."""
+    def test_submit_load_rejects_materialized_promotion_job(self, fs_tier):
+        """A materialized promotion job is rejected: the FS tier defers
+        allocation, so load_task asserts the job is unmaterialized and the
+        job reports failure."""
         tier, _ = fs_tier
-        eager_job = TransferJob(
-            job_id=1,
-            _keys=[key(1)],
-            _chunk_ids=np.array([0], dtype=np.int64),
-            is_promotion=True,
+        tier.submit_store(make_job(1, [key(1)], [0]))
+        drain(tier)
+
+        job = PromotionTransferJob(
+            job_id=2,
             req_context=_CTX,
+            keys=[key(1)],
+            chunk_ids=np.array([0], dtype=np.int32),
         )
-        with pytest.raises(AssertionError):
-            tier.submit_load(eager_job)
+        assert job.get() is not None
+        tier.submit_load(job)
+        results = drain(tier)
+
+        assert len(results) == 1
+        assert results[0].job_id == 2
+        assert not results[0].success
 
     def test_promotion_allocation_failure(self, fs_tier):
-        """primary_alloc_fn returning None → deferred_alloc_succeeded=False,
-        job fails."""
+        """alloc_fn returning None → get() redeems to None and the job
+        finishes with zero keys."""
         tier, _ = fs_tier
-        job = DeferredTransferJob(
+        job = PromotionTransferJob(
             job_id=42,
-            _keys=[key(1), key(2)],
-            _chunk_ids=np.array([], dtype=np.int64),
-            is_promotion=True,
             req_context=_CTX,
-            primary_alloc_fn=lambda keys, ctx: None,
+            keys=[key(1), key(2)],
+            chunk_ids=None,
+            alloc_fn=lambda keys, ctx: None,
         )
         tier.submit_load(job)
         results = drain(tier)
 
-        # Assert that the job degenerated to an empty job
-        assert job.deferred_alloc_succeeded is False
-        assert len(job.keys) == 0
-        assert len(job.chunk_ids) == 0
+        # The claim was never acquired; the job finishes with zero keys.
+        assert job.get() is None
+        with pytest.raises(ValueError):
+            _ = job.keys
 
         assert len(results) == 1
         result = results[0]
@@ -1055,14 +1068,14 @@ class TestFSPromotion:
         assert result.success
         assert result.successful_keys is None
 
-    def test_materialize_called_in_worker_thread(self, fs_tier):
-        """materialize() is deferred to a worker thread, not the scheduler thread.
+    def test_get_redeemed_in_worker_thread(self, fs_tier):
+        """get() is redeemed on a worker thread, not the scheduler thread.
 
         Checks:
-        - job.is_materialized() is False immediately after submit_load() returns
-          (the scheduler thread has not yet called materialize()).
-        - job.is_materialized() is True after the worker finishes (drain()).
-        - primary_alloc_fn ran on a thread other than the scheduler thread.
+        - the claim is unacquired immediately after submit_load() returns
+          (the scheduler thread has not redeemed get()).
+        - the claim is acquired after the worker finishes (drain()).
+        - alloc_fn ran on a thread other than the scheduler thread.
         """
         tier, _ = fs_tier
         # Pre-store a file so the load can succeed
@@ -1072,7 +1085,7 @@ class TestFSPromotion:
         main_thread_id = threading.current_thread().ident
         alloc_thread_ids: list[int] = []
         # Gate that keeps the worker blocked inside alloc_fn until we've
-        # finished asserting is_materialized() == False.
+        # finished asserting the claim is still unacquired.
         check_done = threading.Event()
 
         def tracking_alloc_fn(keys, ctx):
@@ -1080,45 +1093,41 @@ class TestFSPromotion:
             assert ident is not None
             alloc_thread_ids.append(ident)
             check_done.wait()  # hold until the scheduler thread has checked
-            return (list(keys), np.array([0], dtype=np.int64))
+            return (list(keys), np.array([0], dtype=np.int32))
 
-        job = DeferredTransferJob(
+        job = PromotionTransferJob(
             job_id=99,
-            _keys=[key(1)],
-            _chunk_ids=np.array([], dtype=np.int64),
-            is_promotion=True,
             req_context=_CTX,
-            primary_alloc_fn=tracking_alloc_fn,
+            keys=[key(1)],
+            chunk_ids=None,
+            alloc_fn=tracking_alloc_fn,
         )
 
-        # Not yet materialized before submit
-        assert not job.is_materialized(), (
-            "job must not be materialized before submit_load()"
-        )
+        # Claim not acquired before submit
+        with pytest.raises(ValueError):
+            _ = job.keys
 
         tier.submit_load(job)
 
-        # Worker is blocked in alloc_fn waiting for check_done; guaranteed not
-        # materialized yet.
-        assert not job.is_materialized(), (
-            "job must not be materialized synchronously on the scheduler thread"
-        )
+        # Worker is blocked in alloc_fn waiting for check_done; the claim is
+        # guaranteed not acquired yet.
+        with pytest.raises(ValueError):
+            _ = job.keys
 
         # Unblock the worker, then wait for it to finish
         check_done.set()
         drain(tier)
 
-        # After the worker finishes, materialize() has been called
-        assert job.is_materialized(), (
-            "job must be materialized after the worker thread completes"
-        )
+        # After the worker finishes, get() has been redeemed
+        assert job.get() is not None
+        assert list(job.keys) == [key(1)]
         assert len(alloc_thread_ids) == 1, "alloc_fn must be called exactly once"
         assert alloc_thread_ids[0] != main_thread_id, (
             "alloc_fn must run on a worker thread, not the scheduler thread"
         )
 
     def test_promotion_primary_key_availability(self, fs_tier):
-        """primary_alloc_fn controls which subset of requested keys are loaded from FS.
+        """alloc_fn controls which subset of requested keys are loaded from FS.
 
         Three sub-cases exercised in sequence, each using its own non-overlapping
         primary chunk slots so that writes from one sub-case do not pollute another:
@@ -1134,15 +1143,14 @@ class TestFSPromotion:
         drain(tier)
 
         # None cached
-        job = DeferredTransferJob(
+        job = PromotionTransferJob(
             job_id=10,
-            _keys=all_keys,
-            _chunk_ids=np.array([], dtype=np.int64),
-            is_promotion=True,
             req_context=_CTX,
-            primary_alloc_fn=lambda req_keys, ctx: (
+            keys=all_keys,
+            chunk_ids=None,
+            alloc_fn=lambda req_keys, ctx: (
                 list(req_keys),
-                np.array([0, 1, 2, 3], dtype=np.int64),
+                np.array([0, 1, 2, 3], dtype=np.int32),
             ),
         )
         tier.submit_load(job)
@@ -1153,15 +1161,14 @@ class TestFSPromotion:
 
         # Half cached
         uncached = all_keys[2:]
-        job = DeferredTransferJob(
+        job = PromotionTransferJob(
             job_id=11,
-            _keys=all_keys,
-            _chunk_ids=np.array([], dtype=np.int64),
-            is_promotion=True,
             req_context=_CTX,
-            primary_alloc_fn=lambda req_keys, ctx: (
+            keys=all_keys,
+            chunk_ids=None,
+            alloc_fn=lambda req_keys, ctx: (
                 list(uncached),
-                np.array([4, 5], dtype=np.int64),
+                np.array([4, 5], dtype=np.int32),
             ),
         )
         tier.submit_load(job)
@@ -1171,13 +1178,12 @@ class TestFSPromotion:
         assert list(job.chunk_ids) == [4, 5]
 
         # All cached
-        job = DeferredTransferJob(
+        job = PromotionTransferJob(
             job_id=12,
-            _keys=all_keys,
-            _chunk_ids=np.array([], dtype=np.int64),
-            is_promotion=True,
             req_context=_CTX,
-            primary_alloc_fn=lambda req_keys, ctx: ([], []),
+            keys=all_keys,
+            chunk_ids=None,
+            alloc_fn=lambda req_keys, ctx: ([], []),
         )
         tier.submit_load(job)
         result = drain(tier)[0]
@@ -1201,15 +1207,14 @@ class TestFSPromotion:
         tier.submit_store(make_job(1, all_keys, [0, 1, 2, 3]))
         drain(tier)
 
-        job = DeferredTransferJob(
+        job = PromotionTransferJob(
             job_id=20,
-            _keys=all_keys,
-            _chunk_ids=np.array([], dtype=np.int64),
-            is_promotion=True,
             req_context=_CTX,
-            primary_alloc_fn=lambda req_keys, ctx: (
+            keys=all_keys,
+            chunk_ids=None,
+            alloc_fn=lambda req_keys, ctx: (
                 list(req_keys),
-                np.array([0, 1, 2, 3], dtype=np.int64),
+                np.array([0, 1, 2, 3], dtype=np.int32),
             ),
         )
         tier.submit_load(job)
@@ -1226,15 +1231,14 @@ class TestFSPromotion:
             if os.path.exists(path):
                 os.remove(path)
 
-        job = DeferredTransferJob(
+        job = PromotionTransferJob(
             job_id=21,
-            _keys=all_keys,
-            _chunk_ids=np.array([], dtype=np.int64),
-            is_promotion=True,
             req_context=_CTX,
-            primary_alloc_fn=lambda req_keys, ctx: (
+            keys=all_keys,
+            chunk_ids=None,
+            alloc_fn=lambda req_keys, ctx: (
                 list(req_keys),
-                np.array([4, 5, 6, 7], dtype=np.int64),
+                np.array([4, 5, 6, 7], dtype=np.int32),
             ),
         )
         tier.submit_load(job)
@@ -1252,15 +1256,14 @@ class TestFSPromotion:
             if os.path.exists(path):
                 os.remove(path)
 
-        job = DeferredTransferJob(
+        job = PromotionTransferJob(
             job_id=22,
-            _keys=all_keys,
-            _chunk_ids=np.array([], dtype=np.int64),
-            is_promotion=True,
             req_context=_CTX,
-            primary_alloc_fn=lambda req_keys, ctx: (
+            keys=all_keys,
+            chunk_ids=None,
+            alloc_fn=lambda req_keys, ctx: (
                 list(req_keys),
-                np.array([0, 1, 2, 3], dtype=np.int64),
+                np.array([0, 1, 2, 3], dtype=np.int32),
             ),
         )
         tier.submit_load(job)

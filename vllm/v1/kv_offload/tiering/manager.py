@@ -363,8 +363,6 @@ class _LockedMetrics:
     thread, where _promotion_allocation records chunk counts and allocation
     failures concurrently with scheduler-thread metrics calls."""
 
-    __slots__ = ("_tracker", "_lock")
-
     def __init__(self, tracker: TieringMetricsTracker) -> None:
         self._tracker = tracker
         self._lock = threading.Lock()
@@ -383,8 +381,6 @@ class _LockedMetrics:
 
 
 class _LockedPrimaryTier:
-    __slots__ = ("_primary_tier", "_lock")
-
     def __init__(self, obj: CPUPrimaryTierOffloadingManager) -> None:
         self._primary_tier = obj
         self._lock = threading.Lock()
@@ -1462,9 +1458,13 @@ class TieringOffloadingManager(OffloadingManager):
 
         # _inflight_promotion_keys are updated as soon as promotions are initiated.
         # Work in _pending_load_submissions are never submitted (cleared below).
-        for _, pending_by_ctx in self._pending_load_submissions.items():
+        for tier_idx, pending_by_ctx in self._pending_load_submissions.items():
             for entry in pending_by_ctx.values():
                 self._inflight_promotion_keys.difference_update(entry.keys)
+                if entry.chunk_ids:
+                    self._metrics.on_primary_chunk_count(
+                        tier_idx, -len(entry.chunk_ids), is_promotion=True
+                    )
 
         # Deferred promotion submissions reserve primary slots that the
         # reset below invalidates; their submit_load() has not yet been

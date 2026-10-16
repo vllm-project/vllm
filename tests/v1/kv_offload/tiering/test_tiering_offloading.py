@@ -61,6 +61,7 @@ from vllm.v1.kv_offload.tiering.factory import SecondaryTierFactory
 from vllm.v1.kv_offload.tiering.fs.manager import FileSystemTierManager
 from vllm.v1.kv_offload.tiering.manager import (
     CPUPrimaryTierOffloadingManager,
+    PromotionTransferJob,
     TieringOffloadingManager,
     _LockedPrimaryTier,
 )
@@ -397,16 +398,18 @@ class TestTieringOffloadingManager:
         self._start_request()
         # Register an in-flight promotion job for tier1 by hand.
         job_id = self.manager._next_job_id()
-        self.manager._register_job(
-            TransferJob(
-                job_id=job_id,
-                _keys=to_keys([1, 2]),
-                _chunk_ids=np.array([0, 1], dtype=np.int64),
-                is_promotion=True,
-                req_context=_CTX,
-            ),
-            0,
+        # Hand-built job: simulate the allocation-side chunk-count recording
+        # that _promotion_allocation performs for real promotions.
+        self.manager._metrics.on_primary_chunk_count(0, 2, is_promotion=True)
+        job = PromotionTransferJob(
+            job_id=job_id,
+            req_context=_CTX,
+            keys=to_keys([1, 2]),
+            chunk_ids=np.array([0, 1], dtype=np.int32),
         )
+        self.manager._register_job(job, 0)
+        # Redeem the claim the way the tier worker does before finishing.
+        assert job.get() is not None
         failed = JobResult(job_id=job_id, success=False)
         with (
             patch.object(
@@ -424,16 +427,16 @@ class TestTieringOffloadingManager:
 
         self._start_request()
         job_id = self.manager._next_job_id()
-        self.manager._register_job(
-            TransferJob(
-                job_id=job_id,
-                _keys=to_keys([1]),
-                _chunk_ids=np.array([0], dtype=np.int64),
-                is_promotion=True,
-                req_context=_CTX,
-            ),
-            0,
+        self.manager._metrics.on_primary_chunk_count(0, 1, is_promotion=True)
+        job = PromotionTransferJob(
+            job_id=job_id,
+            req_context=_CTX,
+            keys=to_keys([1]),
+            chunk_ids=np.array([0], dtype=np.int32),
         )
+        self.manager._register_job(job, 0)
+        # Redeem the claim the way the tier worker does before finishing.
+        assert job.get() is not None
         ok = JobResult(job_id=job_id, success=True)
         with (
             patch.object(self.secondary_tier1, "get_finished_jobs", return_value=[ok]),
@@ -1841,14 +1844,15 @@ class TestTieringOffloadingManagerWithFsTier:
         fs_tier1.shutdown()
 
     def test_promotion_counter_ordering_invariant_deferred(self, fs_manager_setup):
-        """While a deferred promotion job is materializing, both
+        """While a deferred promotion job is redeeming, both
         active_promotion_count >= 1 and primary_write_chunk_count > 0 hold.
 
         active_promotion_count is incremented synchronously on job registration
-        (before the worker runs). primary_write_chunk_count is incremented inside
-        the FS worker when primary_alloc_fn calls on_promotion_chunk_count.
-        A gate on on_promotion_chunk_count freezes the worker at that exact
-        moment so both counters can be asserted simultaneously.
+        (before the worker runs). primary_write_chunk_count is incremented
+        inside the FS worker when _promotion_allocation records the acquired
+        chunk count via on_primary_chunk_count. A gate on that call freezes
+        the worker at that exact moment so both counters can be asserted
+        simultaneously.
         """
         manager, _, fs_tier = fs_manager_setup
         keys = to_keys(range(3))
@@ -1876,17 +1880,17 @@ class TestTieringOffloadingManagerWithFsTier:
         alloc_continue = threading.Event()
         alloc_end = threading.Event()
         alloc_end_continue = threading.Event()
-        original_fn = manager._metrics.on_promotion_chunk_count
+        original_fn = manager._metrics.on_primary_chunk_count
 
-        def _gated(tier_idx, chunk_alloc_count):
+        def _gated(tier_idx, chunk_count, is_promotion):
             alloc_start.set()
             alloc_continue.wait()
-            original_fn(tier_idx, chunk_alloc_count)
+            original_fn(tier_idx, chunk_count, is_promotion)
             alloc_end.set()
             alloc_end_continue.wait()
 
         with patch.object(
-            manager._metrics, "on_promotion_chunk_count", side_effect=_gated
+            manager._metrics, "on_primary_chunk_count", side_effect=_gated
         ):
             manager.on_schedule_end(
                 ScheduleEndContext(new_req_ids=[], preempted_req_ids=[])
@@ -1956,9 +1960,9 @@ class TestPromotionAllocation:
         # Release blocks by completing the store
         manager.primary_tier.complete_store([key], req_ctx, success=True)
 
-    def test_eager_tier_returns_allocation_without_chunk_count_metric(self):
-        """For an eager tier, _promotion_allocation returns (keys, chunk_ids)
-        and does NOT call on_promotion_chunk_count."""
+    def test_eager_tier_allocation_records_chunk_count_metric(self):
+        """For an eager tier, _promotion_allocation records the chunk count at
+        acquisition."""
         num_chunks = 4
         manager, mmap = self._make_manager(
             num_chunks, [self._make_eager_tier(_mock_mmap_region(num_chunks))]
@@ -1975,17 +1979,16 @@ class TestPromotionAllocation:
         keys_out, chunk_ids_out = result
         assert key in keys_out
         assert len(chunk_ids_out) > 0
-        # Eager tier must NOT increment primary_write_chunk_count; This happens
-        # in job registration.
-        assert tier_state.primary_write_chunk_count == 0
+        # Chunk count is recorded at acquisition, inside _promotion_allocation.
+        assert tier_state.primary_write_chunk_count == len(chunk_ids_out)
 
     def test_deferred_tier_returns_allocation_and_fires_chunk_count_metric(
         self, fs_manager_setup
     ):
-        """For a deferred (FS) tier, _promotion_allocation returns (keys, chunk_ids)
-        and calls on_promotion_chunk_count with the allocated chunk count.
+        """For a deferred (FS) tier, _promotion_allocation (the job's alloc_fn)
+        records the chunk count when get() redeems the claim.
 
-        on_promotion_chunk_count is patched so the metric side-effect does not
+        on_primary_chunk_count is patched so the metric side-effect does not
         dirty the manager state that reset_cache() asserts on teardown.
         """
         manager, _, _ = fs_manager_setup
@@ -1994,12 +1997,12 @@ class TestPromotionAllocation:
 
         calls = []
 
-        def capturing_chunk_count(tier_idx, chunk_alloc_count):
-            calls.append((tier_idx, chunk_alloc_count))
+        def capturing_chunk_count(tier_idx, chunk_count, is_promotion):
+            calls.append((tier_idx, chunk_count, is_promotion))
 
         with patch.object(
             manager._metrics,
-            "on_promotion_chunk_count",
+            "on_primary_chunk_count",
             side_effect=capturing_chunk_count,
         ):
             result = manager._promotion_allocation(0, [key], req_ctx)
@@ -2008,9 +2011,10 @@ class TestPromotionAllocation:
         keys_out, chunk_ids_out = result
         assert key in keys_out
         assert len(chunk_ids_out) > 0
-        # Deferred tier MUST call on_promotion_chunk_count once with the right args
+        # _promotion_allocation MUST record the chunk count once, with the
+        # right args
         assert len(calls) == 1
-        assert calls[0] == (0, len(chunk_ids_out))
+        assert calls[0] == (0, len(chunk_ids_out), True)
 
     def test_promotion_fails_for_finalized_request(self):
         from vllm.v1.kv_offload.tiering.manager import CPUPrimaryTierOffloadingManager
