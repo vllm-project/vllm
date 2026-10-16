@@ -1159,6 +1159,40 @@ def test_read_matches_only_requests_with_pending_remote_prefill(params, expected
     assert scheduler.get_num_new_matched_tokens(request, 0) == expected
 
 
+@pytest.mark.parametrize(
+    "has_mamba,expected", [(False, (32, True)), (True, (31, True))]
+)
+def test_write_consumer_matches_full_prompt_unless_hybrid(has_mamba, expected):
+    """Without a mamba group (attention-only, or HMA disabled) prefill pushed
+    KV for all N tokens; with one it pushed h(N-1)."""
+    scheduler = _FakeScheduler(
+        is_producer=False, mode=MoRIIOMode.WRITE, _has_mamba=has_mamba
+    )
+    request = SimpleNamespace(
+        num_prompt_tokens=32, kv_transfer_params={"do_remote_prefill": True}
+    )
+
+    assert scheduler.get_num_new_matched_tokens(request, 0) == expected
+
+
+@pytest.mark.parametrize(
+    "is_producer,has_mamba,expected_prompt_len",
+    [(True, True, 4), (True, False, 5), (False, True, 5)],
+)
+def test_on_new_request_truncates_only_hybrid_producers(
+    is_producer, has_mamba, expected_prompt_len
+):
+    """Attention-only prefill (including models run with HMA disabled)
+    computes all N prompt tokens; only a hybrid producer drops the last."""
+    scheduler = _FakeScheduler(is_producer=is_producer, _has_mamba=has_mamba)
+    request = _mk_request([10, 11, 12, 13, 14], params={"do_remote_decode": True})
+
+    scheduler.on_new_request(request)
+
+    assert request.num_prompt_tokens == expected_prompt_len
+    assert len(request.prompt_token_ids) == expected_prompt_len
+
+
 def test_read_rematch_after_alloc_keeps_queued_transfer():
     """Clearing the flag blocks another external hit, not the queued READ."""
     sched = _make_read_scheduler()
