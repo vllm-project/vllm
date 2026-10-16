@@ -60,11 +60,7 @@ if TYPE_CHECKING:
     VLLM_XLA_CHECK_RECOMPILATION: bool = False
     VLLM_SPARSE_INDEXER_MAX_LOGITS_MB: int = 512
     VLLM_ADAPTIVE_VERIFICATION_PROFILE_CONTEXT_LEN: int = 8192
-    VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE: Literal["auto", "nccl", "shm"] = "auto"
-    VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM: bool = False
-    VLLM_USE_RAY_WRAPPED_PP_COMM: bool = True
     VLLM_XPU_PP_MICROBATCH: bool = True
-    VLLM_USE_RAY_V2_EXECUTOR_BACKEND: bool = False
     VLLM_DISTRIBUTED_USE_SPLIT_GROUP: bool = False
     VLLM_XLA_USE_SPMD: bool = False
     VLLM_WORKER_MULTIPROC_METHOD: Literal["fork", "spawn"] = "fork"
@@ -78,6 +74,7 @@ if TYPE_CHECKING:
     VLLM_MEDIA_CACHE_TTL_HOURS: float = 24
     VLLM_MEDIA_FETCH_MAX_RETRIES: int = 3
     VLLM_MAX_MEDIA_DOWNLOAD_SIZE_MB: int = 256
+    VLLM_MAX_MEDIA_REQUEST_DOWNLOAD_SIZE_MB: int = 256
     VLLM_MEDIA_URL_ALLOW_REDIRECTS: bool = True
     VLLM_MEDIA_LOADING_THREAD_COUNT: int = 8
     VLLM_MAX_AUDIO_CLIP_FILESIZE_MB: int = 25
@@ -86,6 +83,7 @@ if TYPE_CHECKING:
     VLLM_MAX_AUDIO_PREPROCESS_WORKERS: int = max(1, min(os.cpu_count() or 1, 2))
     VLLM_MAX_EMBED_DECODE_BYTES: int = 2_147_483_648
     VLLM_MAX_IMAGE_PIXELS: int = 178_956_970
+    VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES: int = 715_827_880
     VLLM_VIDEO_LOADER_BACKEND: str = "opencv"
     VLLM_MEDIA_CONNECTOR: str = "http"
     VLLM_TARGET_DEVICE: str = "cuda"
@@ -151,11 +149,11 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_FP4_ASM_GEMM: bool = False
     VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA: bool = False
     VLLM_ROCM_USE_AITER_TRITON_ROPE: bool = False
-    VLLM_ROCM_USE_AITER_FP8BMM: bool = True
-    VLLM_ROCM_USE_AITER_FP4BMM: bool = True
+    VLLM_ROCM_USE_AITER_FP8BMM: bool = False
+    VLLM_ROCM_USE_AITER_FP4BMM: bool = False
     VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION: bool = False
     VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: bool = False
-    VLLM_ROCM_MONO_DECODE: bool = False
+    VLLM_ROCM_AITER_MEGA_MOE_FUSE_SHARED_EXPERTS: bool = False
     VLLM_ROCM_USE_AITER_TRITON_GEMM: bool = True
     VLLM_ROCM_USE_SKINNY_GEMM: bool = True
     VLLM_ROCM_FP8_PADDING: bool = True
@@ -172,6 +170,7 @@ if TYPE_CHECKING:
     VLLM_SERVER_DEV_MODE: bool = False
     VLLM_V1_OUTPUT_PROC_CHUNK_SIZE: int = 128
     VLLM_MLA_DISABLE: bool = False
+    VLLM_USE_RAY_V2_EXECUTOR_BACKEND: bool = True
     VLLM_RAY_PER_WORKER_GPUS: float = 1.0
     VLLM_RAY_BUNDLE_INDICES: str = ""
     VLLM_CUDART_SO_PATH: str | None = None
@@ -351,6 +350,7 @@ if TYPE_CHECKING:
     VLLM_GPU_NIC_PCIE_MAPPING: str = ""
     VLLM_NIC_SELECTION_VARS: str = ""
     VLLM_ENABLE_HPC_OPS: bool = False
+    VLLM_REQUEST_BODY_LOG_LEVEL: str = "DEBUG"
 
 
 def get_default_cache_root():
@@ -931,36 +931,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # (CPU backend only) whether to use SGLang INT4 W4A8 kernels for AWQ, and
     # on Zen CPUs whether to serve int4 checkpoints as DA8W4 rather than W4A16.
     "VLLM_CPU_INT4_W4A8": lambda: bool(int(os.getenv("VLLM_CPU_INT4_W4A8", "1"))),
-    # If the env var is set, Ray Compiled Graph uses the specified
-    # channel type to communicate between workers belonging to
-    # different pipeline-parallel stages.
-    # Available options:
-    # - "auto": use the default channel type
-    # - "nccl": use NCCL for communication
-    # - "shm": use shared memory and gRPC for communication
-    "VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE": env_with_choices(
-        "VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE", "auto", ["auto", "nccl", "shm"]
-    ),
-    # If the env var is set, it enables GPU communication overlap
-    # (experimental feature) in Ray's Compiled Graph.
-    "VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM": lambda: bool(
-        int(os.getenv("VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM", "0"))
-    ),
-    # If the env var is set, it uses a Ray Communicator wrapping
-    # vLLM's pipeline parallelism communicator to interact with Ray's
-    # Compiled Graph. Otherwise, it uses Ray's NCCL communicator.
-    "VLLM_USE_RAY_WRAPPED_PP_COMM": lambda: bool(
-        int(os.getenv("VLLM_USE_RAY_WRAPPED_PP_COMM", "1"))
-    ),
     # Using a flag to control microbatch on XPU device, users on XPU device can
     # decide to disable it when they needed.
     "VLLM_XPU_PP_MICROBATCH": lambda: bool(
         int(os.getenv("VLLM_XPU_PP_MICROBATCH", "1"))
-    ),
-    # When True and distributed_executor_backend="ray", use RayExecutorV2
-    # (MQ-based) instead of RayDistributedExecutor (compiled-graph backend).
-    "VLLM_USE_RAY_V2_EXECUTOR_BACKEND": lambda: bool(
-        int(os.getenv("VLLM_USE_RAY_V2_EXECUTOR_BACKEND", "1"))
     ),
     # When True, GroupCoordinator constructs its CPU/device subgroups via
     # ``torch.distributed.split_group(backend=...)``
@@ -1081,6 +1055,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # built-in 2x decompression-bomb threshold (~179M pixels, ~680 MB RGB).
     "VLLM_MAX_IMAGE_PIXELS": lambda: int(
         os.getenv("VLLM_MAX_IMAGE_PIXELS", "178956970")
+    ),
+    # Maximum aggregate decoded bytes across media in one request.
+    # The default allows one image at the per-image pixel limit at 4 bytes
+    # per pixel. Set to 0 to disable.
+    "VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES": lambda: int(
+        os.getenv("VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES", "715827880")
+    ),
+    "VLLM_MAX_MEDIA_REQUEST_DOWNLOAD_SIZE_MB": lambda: int(
+        os.getenv("VLLM_MAX_MEDIA_REQUEST_DOWNLOAD_SIZE_MB", "256")
     ),
     # Backend for Video IO — selects the frame-sampling algorithm.
     # - "opencv": uniform sampling.
@@ -1389,15 +1372,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_USE_AITER_TRITON_ROPE": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_TRITON_ROPE", "False").lower() in ("true", "1")
     ),
-    # Whether to use aiter triton fp8 bmm kernel
-    # By default is enabled.
+    # Whether to use aiter triton fp8 bmm kernel for MLA kv_b_proj.
+    # By default is disabled: it re-quantizes the projection weights online,
+    # regardless of the precision the checkpoint asked for.
     "VLLM_ROCM_USE_AITER_FP8BMM": lambda: (
-        os.getenv("VLLM_ROCM_USE_AITER_FP8BMM", "True").lower() in ("true", "1")
+        os.getenv("VLLM_ROCM_USE_AITER_FP8BMM", "False").lower() in ("true", "1")
     ),
-    # Whether to use aiter triton fp4 bmm kernel
-    # By default is enabled.
+    # Whether to use aiter triton fp4 bmm kernel for MLA kv_b_proj.
+    # By default is disabled, for the same reason as the fp8 variant above.
     "VLLM_ROCM_USE_AITER_FP4BMM": lambda: (
-        os.getenv("VLLM_ROCM_USE_AITER_FP4BMM", "True").lower() in ("true", "1")
+        os.getenv("VLLM_ROCM_USE_AITER_FP4BMM", "False").lower() in ("true", "1")
     ),
     # Use AITER triton unified attention for V1 attention
     "VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION": lambda: (
@@ -1410,11 +1394,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.getenv("VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS", "False").lower()
         in ("true", "1")
     ),
-    # Run the eligible layers of decode steps on the model's mono decode
-    # kernels: persistent launches a layer, the TP all-reduces in-kernel
-    # (DeepSeek-V4.1 on CDNA4). By default is disabled.
-    "VLLM_ROCM_MONO_DECODE": lambda: (
-        os.getenv("VLLM_ROCM_MONO_DECODE", "False").lower() in ("true", "1")
+    # Fuse DeepSeek-V4's shared expert into AITER MegaMoE (requantized to
+    # MXFP4). By default is disabled.
+    "VLLM_ROCM_AITER_MEGA_MOE_FUSE_SHARED_EXPERTS": lambda: (
+        os.getenv("VLLM_ROCM_AITER_MEGA_MOE_FUSE_SHARED_EXPERTS", "False").lower()
+        in ("true", "1")
     ),
     # Whether to use aiter triton kernels for gemm ops.
     # By default is enabled.
@@ -1520,6 +1504,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # which indices are used for the Ray bundle, for every worker.
     # Format: comma-separated list of integers, e.g. "0,1,2,3"
     "VLLM_RAY_BUNDLE_INDICES": lambda: os.getenv("VLLM_RAY_BUNDLE_INDICES", ""),
+    # Deprecated and ignored: RayExecutorV2 is the only Ray executor. Kept so
+    # out-of-tree platforms that still read it keep working; will be removed
+    # in v0.34.
+    "VLLM_USE_RAY_V2_EXECUTOR_BACKEND": lambda: bool(
+        int(os.getenv("VLLM_USE_RAY_V2_EXECUTOR_BACKEND", "1"))
+    ),
     # In some system, find_loaded_library() may not work. So we allow users to
     # specify the path through environment variable VLLM_CUDART_SO_PATH.
     "VLLM_CUDART_SO_PATH": lambda: os.getenv("VLLM_CUDART_SO_PATH", None),
@@ -2383,6 +2373,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_SKIP_VERSION_SUFFIX": lambda: bool(
         int(os.getenv("VLLM_SKIP_VERSION_SUFFIX", "0"))
     ),
+    # Logging level for request JSON body.
+    "VLLM_REQUEST_BODY_LOG_LEVEL": lambda: os.getenv(
+        "VLLM_REQUEST_BODY_LOG_LEVEL", "DEBUG"
+    ).upper(),
 }
 
 
@@ -2520,6 +2514,8 @@ def compile_factors() -> dict[str, object]:
         "VLLM_MAX_AUDIO_PREPROCESS_WORKERS",
         "VLLM_MAX_EMBED_DECODE_BYTES",
         "VLLM_MAX_IMAGE_PIXELS",
+        "VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES",
+        "VLLM_MAX_MEDIA_REQUEST_DOWNLOAD_SIZE_MB",
         "VLLM_VIDEO_LOADER_BACKEND",
         "VLLM_MEDIA_CONNECTOR",
         "VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME",
@@ -2540,6 +2536,7 @@ def compile_factors() -> dict[str, object]:
         "NO_COLOR",
         "VLLM_SKIP_VERSION_SUFFIX",
         "FORCE_COLOR",
+        "VLLM_REQUEST_BODY_LOG_LEVEL",
     }
 
     from vllm.config.utils import normalize_value

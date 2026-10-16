@@ -15,6 +15,7 @@ from torch.distributed import ProcessGroup, ReduceOp, Store
 import vllm.envs as envs
 from vllm.config.fault_tolerance import FaultToleranceConfig
 from vllm.config.utils import config
+from vllm.distributed.utils import cpu_all_reduce_
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_ports_list
@@ -212,6 +213,11 @@ class ParallelConfig:
     --data-parallel-start-rank."""
     is_moe_model: bool | None = None
     """Whether the deployed model is MoE (if known)."""
+    enable_hc_sp: bool = False
+    """Enable sequence parallelism for HyperConnection (HC) computation.
+    Currently supported by Qwen4Exp on CUDA/ROCm with TP>1 and PP=1 (ignored when TP=1).
+    Does not change MoE parallelism. MoE SP may enable HC SP independently of this flag.
+    """
     enable_expert_parallel: bool = False
     """Use expert parallelism instead of tensor parallelism for MoE layers."""
     enable_batch_sharded_sampling: bool | None = None
@@ -335,7 +341,10 @@ class ParallelConfig:
     """The full name of the worker extension class to use. The worker extension
     class is dynamically inherited by the worker class. This is used to inject
     new attributes and methods to the worker class for use in collective_rpc
-    calls."""
+    calls. It may also define `init_worker_extension(self)`, called after
+    device and distributed initialization but before model loading, and
+    `destroy_worker_extension(self)`, called (best-effort) before the worker
+    shuts down."""
     master_addr: str = "127.0.0.1"
     """distributed master address for multi-node distributed 
     inference when distributed_executor_backend is mp."""
@@ -903,6 +912,22 @@ class ParallelConfig:
     def local_world_size(self) -> int:
         return self.world_size // self.nnodes_within_dp
 
+    def get_local_gpu_index(
+        self, local_rank: int, dp_local_rank: int | None = None
+    ) -> int:
+        """Map a worker's local rank to its host-local logical GPU index."""
+        if (
+            self.distributed_executor_backend not in ("ray", "external_launcher")
+            and self.data_parallel_backend != "ray"
+            and self.nnodes_within_dp == 1
+        ):
+            if dp_local_rank is None:
+                dp_local_rank = self.data_parallel_rank_local
+                if dp_local_rank is None:
+                    dp_local_rank = self.data_parallel_index
+            return local_rank + dp_local_rank * self.world_size
+        return local_rank
+
     @staticmethod
     def has_unfinished_dp(dp_group: ProcessGroup, has_unfinished: bool) -> bool:
         tensor = torch.tensor([has_unfinished], dtype=torch.int32, device="cpu")
@@ -936,7 +961,7 @@ class ParallelConfig:
         tensor = torch.tensor(
             [int(has_unfinished), int(pending_pause)], dtype=torch.int32, device="cpu"
         )
-        torch.distributed.all_reduce(tensor, op=ReduceOp.SUM, group=dp_group)
+        cpu_all_reduce_(tensor, dp_group)
         dp_size = dp_group.size()
         pause_count = tensor[1].item()
         has_unfinished_global = tensor[0].item() > 0 or pause_count % dp_size != 0
@@ -1028,11 +1053,11 @@ class ParallelConfig:
                     "Elastic EP is not supported with pipeline parallelism "
                     f"(pipeline_parallel_size={self.pipeline_parallel_size})."
                 )
-            if self.data_parallel_external_lb or self.data_parallel_hybrid_lb:
+            if self.data_parallel_hybrid_lb:
                 raise NotImplementedError(
-                    "Elastic EP is not compatible with data_parallel_external_lb "
-                    "or data_parallel_hybrid_lb. Elastic EP relies on a single API "
-                    "server and core client to coordinate scale up/down."
+                    "Elastic EP is not compatible with data_parallel_hybrid_lb. "
+                    "Elastic EP supports a single API server/core client path "
+                    "or data_parallel_external_lb, but not hybrid load balancing."
                 )
             if self.eplb_config.use_async:
                 from vllm.distributed.nixl_utils import is_nixl_available

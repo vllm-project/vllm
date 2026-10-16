@@ -27,6 +27,9 @@ from vllm.distributed import (
     cleanup_dist_env_and_memory,
     stateless_destroy_torch_distributed_process_group,
 )
+from vllm.distributed.ec_transfer.ec_connector.encoder_output_width import (
+    measure_encoder_output_widths,
+)
 from vllm.envs import enable_envs_cache
 from vllm.logger import configure_logging, init_logger
 from vllm.logging_utils.dump_input import dump_engine_exception
@@ -47,10 +50,10 @@ from vllm.utils.hashing import get_hash_fn_by_name
 from vllm.utils.network_utils import make_zmq_socket
 from vllm.utils.system_utils import decorate_logs, set_process_title
 from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
+from vllm.v1.core.kv_cache_planning import get_kv_cache_configs
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     generate_scheduler_kv_cache_config,
-    get_kv_cache_configs,
     get_request_block_hasher,
     init_none_hash,
     resolve_cache_hit_alignment_tokens,
@@ -147,6 +150,8 @@ class EngineCore:
 
         if envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
             self._eep_scale_up_before_kv_init()
+
+        measure_encoder_output_widths(vllm_config, self.collective_rpc)
 
         # Setup KV Caches and update CacheConfig after profiling.
         kv_cache_config = self._initialize_kv_caches(vllm_config)
@@ -1341,6 +1346,16 @@ class EngineCoreProc(EngineCore):
                 ready_msg["parallel_config_hash"] = (
                     vllm_config.parallel_config.compute_hash()
                 )
+            if vllm_config.parallel_config.enable_elastic_ep:
+                ready_msg["coord_store_port"] = (
+                    vllm_config.parallel_config._coord_store_port
+                )
+                ready_msg["elastic_ep_max_dp_size"] = (
+                    vllm_config.parallel_config.elastic_ep_max_dp_size
+                )
+                ready_msg["num_redundant_experts"] = (
+                    vllm_config.parallel_config.eplb_config.num_redundant_experts
+                )
 
             handshake_socket.send(msgspec.msgpack.encode(ready_msg))
 
@@ -1371,14 +1386,37 @@ class EngineCoreProc(EngineCore):
                 f"minutes"
             )
         init_bytes = handshake_socket.recv()
-        init_message: EngineHandshakeMetadata = msgspec.msgpack.decode(
-            init_bytes, type=EngineHandshakeMetadata
-        )
+        num_redundant_experts: int | None = None
+        if (
+            envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH
+            and parallel_config is not None
+            and parallel_config.data_parallel_external_lb
+        ):
+            from vllm.distributed.elastic_ep.external_elastic_ep import (
+                ExternalElasticEPScaleUpHandshakeMetadata,
+            )
+
+            scale_up_message = msgspec.msgpack.decode(
+                init_bytes, type=ExternalElasticEPScaleUpHandshakeMetadata
+            )
+            init_message = scale_up_message.engine_metadata
+            num_redundant_experts = scale_up_message.num_redundant_experts
+            parallel_config.elastic_ep_max_dp_size = (
+                scale_up_message.elastic_ep_max_dp_size
+            )
+        else:
+            init_message = msgspec.msgpack.decode(
+                init_bytes, type=EngineHandshakeMetadata
+            )
         logger.debug("Received init message: %s", init_message)
 
         if parallel_config is not None:
             for key, value in init_message.parallel_config.items():
                 setattr(parallel_config, key, value)
+            if num_redundant_experts is not None:
+                parallel_config.eplb_config.num_redundant_experts = (
+                    num_redundant_experts
+                )
 
         return init_message.addresses
 
@@ -1821,6 +1859,9 @@ class EngineCoreProc(EngineCore):
                 if self.vllm_config.weight_transfer_config is not None
                 else False
             ),
+            coord_store_port=parallel_config._coord_store_port,
+            coordinator_input_address=self.addresses.coordinator_input,
+            coordinator_output_address=self.addresses.coordinator_output,
         )
 
     def process_input_sockets(
@@ -2337,6 +2378,13 @@ class DPEngineCoreProc(EngineCoreProc):
                 if state.is_complete():
                     if state.worker_type == "removing":
                         raise SystemExit
+                    if (
+                        state.worker_type == "new"
+                        and self.vllm_config.parallel_config.data_parallel_external_lb
+                    ):
+                        # An independently launched rank has no external utility
+                        # caller to join the post-commit resume barrier.
+                        self.resume_scheduler()
                     self.process_input_queue_block = True
                     self.eep_scaling_state = None
                 elif not state.commit_requested and state.is_ready_for_switch():
@@ -2507,12 +2555,10 @@ class DPEngineCoreProc(EngineCoreProc):
             self.output_queue.put_nowait((0, outputs))
         else:
             encoder = MsgpackEncoder()
-            with (
-                zmq.Context() as ctx,
-                make_zmq_socket(
-                    ctx, self.addresses.outputs[0], zmq.PUSH, linger=4000
-                ) as socket,
-            ):
+            ctx = zmq.Context.instance()
+            with make_zmq_socket(
+                ctx, self.addresses.outputs[0], zmq.PUSH, linger=4000
+            ) as socket:
                 socket.send_multipart(encoder.encode(outputs))
 
     def _eep_scale_up_before_kv_init(self):
