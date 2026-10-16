@@ -4,7 +4,7 @@ meta:
   provider: "Qwen"
   description: "27B-parameter dense hybrid-attention model with linear attention on 48 of 64 layers, a vision tower, a built-in MTP draft head, 262K native context window and extensible to 1M context"
   date_added: 2026-08-14
-  date_updated: 2026-10-08
+  date_updated: 2026-10-15
   tasks:
     - multimodal
     - text
@@ -16,6 +16,9 @@ meta:
   # and working tool calls. Everything else stays absent — the honest silent default.
   hardware:
     gb300: verified
+    # Blackwell B200, verified 2026-09-20: the RedHatAI MXFP4 variant (true W4A4, TP1) booted,
+    # served and answered on 1x B200 — the same hardware used for the checkpoint's own eval.
+    b200: verified
     # Consumer Blackwell (sm120), verified 2026-08-15 on vLLM
     # 0.26.1rc1.dev608+g99a10304d. Each entry was booted, served and answered a
     # verifiable prompt, with MTP acceptance read from /metrics rather than
@@ -99,7 +102,7 @@ features:
         # off the TOP-level config (config/speculative.py), but this checkpoint carries it only
         # under `text_config`, so the depth cannot be inferred here — omit it and startup fails.
         description: "Native MTP head, 3 draft tokens."
-        variants: [default, fp8, nvfp4, nvfp4_nvidia, int4]
+        variants: [default, fp8, nvfp4, nvfp4_nvidia, int4, mxfp4]
         args:
           - "--speculative-config"
           - '{"method":"mtp","num_speculative_tokens":3}'
@@ -262,6 +265,16 @@ variants:
     vram_minimum_gb: 24
     supported_hardware: [h100, h200, b200, b300, gb200, gb300, rtx_5090, rtx_5090_2x]
     description: "Red Hat AI compressed-tensors W4A16 INT4 build — 19.5 GB: 1 GPU, runs on Hopper too."
+  mxfp4:
+    model_id: "RedHatAI/Qwen3.8-27B-MXFP4"
+    precision: mxfp4
+    label: "MXFP4 (W4A4)"
+    # 19.83 GB on disk (19,832,841,464 B). Transformer linear weights+activations are FP4
+    # (OCP Microscaling, group-32, E8M0 scales); the vision tower, embeddings and the
+    # linear-attention in_proj_a/b stay BF16.
+    vram_minimum_gb: 24
+    supported_hardware: [h100, h200, b200, b300, gb200, gb300, rtx_5090, rtx_5090_2x]
+    description: "Red Hat AI compressed-tensors MXFP4 build — 19.8 GB: 1 GPU. True W4A4 on Blackwell (SM100+); W4A16 via Marlin on Hopper and elsewhere."
 
   ascend_w8a8:
     model_id: "Eco-Tech/Qwen3.8-27B-w8a8"
@@ -329,7 +342,8 @@ guide: |
   (`full_attention_interval: 4`); the other 48 run linear attention with a constant
   recurrent state. Unlike the 2.4T this is a multimodal model: the architecture is
   `Qwen3_5ForConditionalGeneration` and `config.json` carries a `vision_config`. Text
-  serving is what this recipe covers and what has been verified.
+  serving is what this recipe covers and what has been verified. Quantized builds (NVFP4, FP8,
+  INT4, and Red Hat AI's MXFP4) are offered as variants alongside the base checkpoint.
 
   ## Prerequisites
 
@@ -362,6 +376,18 @@ guide: |
   ```
 
   Add `--speculative-config '{"method":"mtp","num_speculative_tokens":3}'` for MTP.
+
+  ### MXFP4 (W4A4) — Blackwell
+
+  ```bash
+  vllm serve RedHatAI/Qwen3.8-27B-MXFP4 \
+    --tensor-parallel-size 1 \
+    --reasoning-parser qwen3 \
+    --enable-auto-tool-choice --tool-call-parser qwen3_coder
+  ```
+
+  True W4A4 on Blackwell. The in-checkpoint MTP head, long-context YaRN and tool calling all
+  carry over from the base recipe.
 
   ### 2x RTX 5090 (consumer Blackwell, sm120)
 
@@ -562,9 +588,12 @@ guide: |
 
   ## Troubleshooting
 
-  **MXFP4 does not load on Nvidia devices.** The vLLM MXFP4 implementation on Nvidia device is
-  currently missing linear method support so it doesn't run as intended. Use NVFP4 quantization
-  on Nvidia instead.
+  **Two different "MXFP4" paths.** The *native* `Mxfp4Config` path (gpt-oss-style weight-only
+  checkpoints) has no linear-layer method and falls back to `UnquantizedLinearMethod`, so it does
+  not run. This recipe's **RedHatAI MXFP4** variant instead uses the *compressed-tensors*
+  `mxfp4-pack-quantized` format, which maps to `CompressedTensorsW4A4Mxfp4` — a real W4A4 method
+  on Blackwell (SM100+) and W4A16-via-Marlin elsewhere. That path loads and serves correctly on
+  Nvidia; pick the **MXFP4** variant (or NVFP4) when you want the 4-bit build.
 
   ## References
 
@@ -572,6 +601,7 @@ guide: |
   - FP8 checkpoint: https://huggingface.co/Qwen/Qwen3.8-27B-FP8
   - NVFP4 build (NVIDIA): https://huggingface.co/nvidia/Qwen3.8-27B-NVFP4
   - NVFP4 build (Inferact): https://huggingface.co/Inferact/Qwen3.8-27B-NVFP4
+  - MXFP4 build (RedHatAI): https://huggingface.co/RedHatAI/Qwen3.8-27B-MXFP4
   - Ascend INT8 checkpoint (ModelScope): https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-27B-w8a8
   - vLLM documentation: https://docs.vllm.ai/
   - vLLM Ascend tutorial: https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/Qwen3.8-27B.html

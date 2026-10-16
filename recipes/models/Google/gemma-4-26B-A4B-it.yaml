@@ -4,7 +4,7 @@ meta:
   provider: "Google"
   description: "Google's Gemma 4 MoE multimodal model (26B total / 4B active) with 128 fine-grained experts, top-8 routing, thinking mode, and tool-use protocol."
   date_added: 2026-04-02
-  date_updated: 2026-09-12
+  date_updated: 2026-09-27
   tasks:
     - multimodal
     - text
@@ -36,6 +36,8 @@ meta:
     dgx_station_gb300: verified
     rtx_pro_6000: verified
     rtx_5090: verified
+    arc_pro_b60: verified
+    arc_pro_b70: verified
 
 model:
   model_id: "google/gemma-4-26B-A4B-it"
@@ -278,6 +280,23 @@ compatible_strategies:
   - multi_node_tep
   - multi_node_dep
 
+hardware_overrides:
+  xpu:
+    extra_args:
+      - "--enforce-eager"
+      - "--attention-backend"
+      - "flash_attn"
+      - "--trust-remote-code"
+      - "--gpu-memory-utilization"
+      - "0.9"
+      - "--no-enable-prefix-caching"
+      - "--max-num-batched-tokens"
+      - "8192"
+      - "--max-model-len"
+      - "5120"
+      - "--tensor-parallel-size"
+      - "4"
+
 strategy_overrides:
   single_node_tp:
     tp: 1
@@ -333,6 +352,7 @@ guide: |
   docker pull vllm/vllm-openai:gemma4-0505-cu130  # NVIDIA Blackwell (B200/B300, CUDA 13.0)
   docker pull vllm/vllm-openai-rocm:latest   # AMD
   docker pull vllm/vllm-openai-cpu:latest-x86_64 # For Intel Xeon 6
+  docker pull vllm/vllm-openai-xpu:latest # Intel XPU (B60 / B70)
   ```
   TPU images are published separately by [vllm-project/tpu-inference](https://github.com/vllm-project/tpu-inference); see the Trillium / Ironwood tpu-recipes below for the pinned tag.
 
@@ -432,6 +452,35 @@ guide: |
   These settings may still appear in validated hardware-specific overrides. Tune
   them at deployment time based on platform resources, workload shape, and
   latency/throughput goals.
+
+  ### Docker (Intel XPU B60 / B70, TP=4, Full-Featured)
+
+  Validated on 4x Intel Arc Pro B60 / B70 with the official vLLM XPU image.
+
+  ```bash
+  docker run --device /dev/dri \
+    -v /dev/dri/by-path:/dev/dri/by-path --shm-size=16g \
+    --privileged --ipc=host -p 8000:8000 \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    vllm/vllm-openai-xpu:latest \
+    google/gemma-4-26B-A4B-it \
+    --enforce-eager \
+    --attention-backend flash_attn \
+    --host 0.0.0.0 \
+    --port 8000 \
+    --trust-remote-code \
+    --enable-auto-tool-choice \
+    --reasoning-parser gemma4 \
+    --tool-call-parser gemma4 \
+    --chat-template examples/tool_chat_template_gemma4.jinja \
+    --limit-mm-per-prompt.image 4 \
+    --async-scheduling \
+    --gpu-memory-utilization 0.9 \
+    --no-enable-prefix-caching \
+    --max-num-batched-tokens 8192 \
+    --max-model-len 5120 \
+    --tensor-parallel-size 4
+  ```
 
   ## Client Usage
 

@@ -5,7 +5,7 @@ meta:
   provider: "DeepSeek"
   description: "DeepSeek V4.1 Flash vision-language MoE (552B backbone; 8B active per prompt token, 16B per output token) combining sliding-window plus compressed sparse attention with a two-level indexer, engram n-gram memory, hyper-connections, and a DSpark multi-token draft head."
   date_added: 2026-09-09
-  date_updated: 2026-10-03
+  date_updated: 2026-10-13
   tasks:
     - text
     - multimodal
@@ -194,11 +194,6 @@ hardware_overrides:
       # Allow CK a8w4 expert selection instead of pinning Triton W4A16.
       - "--moe-backend"
       - "aiter"
-      # The ROCm sparse SWA path lacks the replay window clamp that vllm#56227
-      # relies on, so on gfx950 every TP=2 and TP=4 point died with
-      # HSA_STATUS_ERROR_MEMORY_FAULT at the first prefix hit carrying a replay
-      # start. Drop this once ROCm clamps too; prefix caching stays on.
-      - "--no-swa-bounded-replay"
     extra_env:
       VLLM_ROCM_USE_AITER: "1"
       VLLM_ROCM_USE_AITER_MOE: "1"
@@ -275,17 +270,18 @@ strategy_overrides:
           # otherwise falls back to 64.
           - "--block-size"
           - "128"
+          # Mono decode kernels (vllm-project/vllm#60397, #61082): two persistent
+          # launches a layer on all 40 backbone layers for decode steps of up to
+          # 48 rows, i.e. up to concurrency 8 with five DSpark drafts. Larger
+          # steps take the regular path, so the gain fades as concurrency rises.
+          # Replaces the VLLM_ROCM_MONO_DECODE environment variable.
+          - "--monokernel"
         extra_env:
           # Aiter's Gluon sparse-MLA kernel, gfx950 only
           # (vllm-project/vllm#53492).
           VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA: "1"
           # INT4 quantization for faster all-reduce
           VLLM_ROCM_QUICK_REDUCE_QUANTIZATION: "INT4"
-          # Mono decode kernels (vllm-project/vllm#60397): two persistent
-          # launches a layer for decode steps of up to 48 rows, i.e. up to
-          # concurrency 8 with five DSpark drafts. Larger steps take the
-          # regular path, so the gain fades as concurrency rises.
-          VLLM_ROCM_MONO_DECODE: "1"
       blackwell:
         extra_args:
           - "--attention-config"
@@ -682,15 +678,20 @@ guide: |
   default `cpu_offload` on through `VLLM_PLE_CPU_OFFLOAD`, so set it explicitly
   rather than inheriting the default.
 
-  ROCm additionally needs `--no-swa-bounded-replay`, which the shared AMD
-  override supplies; see the comment there for why.
+  `--monokernel` selects the mono decode layer from
+  [vllm-project/vllm#60397](https://github.com/vllm-project/vllm/pull/60397),
+  which [vllm-project/vllm#61082](https://github.com/vllm-project/vllm/pull/61082)
+  extended to all 40 backbone layers and moved from the
+  `VLLM_ROCM_MONO_DECODE` environment variable to this flag. Two persistent
+  launches cover a layer for decode steps of up to 48 rows, which with five
+  DSpark drafts is concurrency 8; larger steps fall back to the regular path, so
+  the gain is largest at low concurrency and fades as concurrency rises.
 
-  `VLLM_ROCM_MONO_DECODE=1` selects the mono decode layer from
-  [vllm-project/vllm#60397](https://github.com/vllm-project/vllm/pull/60397).
-  Two persistent launches cover a layer for decode steps of up to 48 rows,
-  which with five DSpark drafts is concurrency 8; larger steps fall back to the
-  regular path, so the gain is largest at low concurrency and fades as
-  concurrency rises.
+  Decoder SWA bounded replay
+  ([vllm-project/vllm#59039](https://github.com/vllm-project/vllm/pull/59039))
+  is on by default on ROCm, so the recipe no longer passes
+  `--no-swa-bounded-replay`. Use a nightly from 2026-10-13 or later; earlier
+  ROCm builds lack the replay window clamp and fault at the first prefix hit.
 
   ## MI300X Tensor Parallel
 
@@ -723,9 +724,6 @@ guide: |
   on through `VLLM_PLE_CPU_OFFLOAD`, so set it explicitly rather than inheriting
   the default.
 
-  ROCm additionally needs `--no-swa-bounded-replay`, which the shared AMD
-  override supplies; see the comment there for why.
-
   ## MI325X Tensor Parallel
 
   On MI325X, **Tensor Parallel** takes the recipe default of **TP4**, with the
@@ -749,9 +747,6 @@ guide: |
   the same gate MI355X needs. Those builds also default `cpu_offload` on through
   `VLLM_PLE_CPU_OFFLOAD`, so set it explicitly rather than inheriting the
   default.
-
-  ROCm additionally needs `--no-swa-bounded-replay`, which the shared AMD
-  override supplies; see the comment there for why.
 
   ## H200 Tensor Parallel
 

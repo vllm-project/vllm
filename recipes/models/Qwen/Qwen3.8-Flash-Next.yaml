@@ -3,7 +3,7 @@ meta:
   slug: "qwen3.8-flash-next"
   provider: "Qwen"
   description: "Qwen4 architecture preview with a 125B-parameter main model, supplemented by an additional 51B N-gram embeddings, with 6B parameters activated per token."
-  date_updated: 2026-09-30
+  date_updated: 2026-10-13
   tasks:
     - multimodal
     - text
@@ -28,9 +28,10 @@ model:
     amd: "vllm/vllm-openai-rocm:nightly"
   nightly_required: true
   install:
+    pip:
+      note: "Nightly wheels are recommended and verified by this recipe; stable vLLM ≥0.30.0 also runs the model."
     docker:
-      note: "Use the vLLM nightly image; PyPI installation is not supported for this recipe."
-    pip: false
+      note: "Use the vLLM nightly image."
   architecture: moe
   parameter_count: "176B"
   active_parameters: "6B"
@@ -41,7 +42,6 @@ model:
     - "--gpu-memory-utilization"
     - "0.90"
     - "--enable-prefix-caching"
-    - "--no-enable-flashinfer-autotune"
   base_env: {}
 
 dependencies: []
@@ -154,6 +154,10 @@ variants:
     vram_minimum_gb: 423
     description: "Official BF16 checkpoint"
 
+# TP+EP is the default deployment; it benchmarks consistently faster than
+# plain TP for this model, which stays offered as an alternative.
+default_strategy: single_node_tep
+
 compatible_strategies:
   - single_node_tp
   - single_node_tep
@@ -206,25 +210,24 @@ guide: |
 
   The checkpoint natively supports 262,144 tokens. Qwen reports that QSA reaches up
   to 10.2x prefill and 6.6x decode attention-kernel speedups at one million tokens.
-  On GB300, TP2 is the minimum validated FP8 deployment and TP4 is the recommended
-  full-tray configuration. On an 8x H200 node, use TEP8 for the official FP8
-  checkpoint; plain TP8 is incompatible with its 128-wide quantization blocks.
+  On GB300, TEP4 is the recommended full-tray configuration. On an 8x H200 node,
+  use TEP8 for the official FP8 checkpoint; plain TP8 is incompatible with its
+  128-wide quantization blocks.
 
   ## Prerequisites
 
   - **Runtime:** use the nightly image, `vllm/vllm-openai:nightly` on NVIDIA or
-    `vllm/vllm-openai-rocm:nightly` on AMD. PyPI installation is not supported
-    for this recipe.
+    `vllm/vllm-openai-rocm:nightly` on AMD, or the nightly PyPI wheels. Stable
+    ≥0.30.0 runs the model, but this recipe is tuned and verified on nightly.
   - **Hardware:** NVIDIA CUDA and AMD ROCm instructions are provided below.
-  - **FP8 memory:** the checkpoint is 172.78 GiB. TP2 is the validated minimum on
-    GB300; TP4 is the recommended full-tray configuration.
+  - **FP8 memory:** the checkpoint is 172.78 GiB; it fits on a single GB300 GPU
+    (288 GB HBM3e).
   - **BF16 memory:** the checkpoint is 335.28 GiB. The validated TP2 configuration
     used about 190 GiB per GB300 GPU.
   - **Host memory for N-gram Embedding offload:** at least 51 GB plus
     runtime headroom.
 
-  The Install block above generates the pull and Docker launch flow for the nightly
-  image.
+  The Install block above generates the nightly-wheel and Docker launch flows.
 
   ## Serving
 
@@ -237,10 +240,10 @@ guide: |
   ```bash
   vllm serve Qwen/Qwen3.8-Flash-Next-FP8 \
     --tensor-parallel-size 4 \
+    --enable-expert-parallel \
     --gpu-memory-utilization 0.90 \
     --max-num-seqs 256 \
     --enable-prefix-caching \
-    --no-enable-flashinfer-autotune \
     --kv-cache-dtype fp8 \
     --attention-config.indexer_kv_dtype fp8 \
     --speculative-config '{"method":"mtp","num_speculative_tokens":3}' \
@@ -249,12 +252,19 @@ guide: |
     --reasoning-parser qwen3
   ```
 
-  TP2 is the minimum FP8 deployment on GB300. TP4 and TEP4 are validated
-  full-tray configurations, including with MTP3. Enable expert parallelism with
-  `--enable-expert-parallel` to improve throughput.
+  TEP4 is the recommended full-tray configuration — we recommend it over plain
+  TP4 because expert parallelism is consistently faster for this model. TP4 and
+  TEP4 are both validated full-tray configurations, including with MTP3.
 
   To serve BF16, use the `Qwen/Qwen3.8-Flash-Next` checkpoint with the same
   arguments.
+
+  ### Single-GPU deployment on GB200/GB300
+
+  The model fits on a single GPU: the FP8 checkpoint on one GB300 (288 GB
+  HBM3e), and the NVFP4 variant on GB200 as well. Single-GPU TP1 suits
+  evaluation and development; multi-GPU TEP remains the recommended deployment
+  for serving throughput.
 
   ### Recommended FP8 configuration on 8x H200
 
@@ -268,7 +278,6 @@ guide: |
     --gpu-memory-utilization 0.85 \
     --max-num-seqs 256 \
     --enable-prefix-caching \
-    --no-enable-flashinfer-autotune \
     --kv-cache-dtype fp8 \
     --attention-config.indexer_kv_dtype fp8 \
     --speculative-config '{"method":"mtp","num_speculative_tokens":3}' \
@@ -279,20 +288,24 @@ guide: |
 
   Plain TP8 is incompatible with the FP8 checkpoint; use TEP8.
 
-  ### Recommended FP8 configuration on 4x H100
+  ### Recommended FP8 configuration on 8x H100
 
   H100's 80GB/GPU is not enough headroom for the 51B N-gram/PLE embedding table
-  under plain TP4 — it relies on PLE CPU offload, which vLLM enables by default. Verified: engine starts, produces correct output, and sustains
-  ~1,430 output tok/s at concurrency 64 (random 1024-in/256-out workload).
+  — it relies on PLE CPU offload, which vLLM enables by default. Use TEP8 with
+  the Triton MoE backend; as on other hardware, expert parallelism is faster
+  than plain TP, and plain TP8 is incompatible with the FP8 checkpoint's
+  128-wide quantization blocks.
 
   ```bash
   vllm serve Qwen/Qwen3.8-Flash-Next-FP8 \
-    --tensor-parallel-size 4 \
+    --tensor-parallel-size 8 \
+    --enable-expert-parallel \
     --moe-backend triton \
     --gpu-memory-utilization 0.85 \
     --max-num-seqs 256 \
     --enable-prefix-caching \
-    --no-enable-flashinfer-autotune \
+    --kv-cache-dtype fp8 \
+    --attention-config.indexer_kv_dtype fp8 \
     --speculative-config '{"method":"mtp","num_speculative_tokens":3}' \
     --enable-auto-tool-choice \
     --tool-call-parser qwen3_coder \
@@ -340,8 +353,8 @@ guide: |
   ```bash
   vllm serve Qwen/Qwen3.8-Flash-Next-FP8 \
     --tensor-parallel-size 4 \
+    --enable-expert-parallel \
     --max-model-len 262144 \
-    --no-enable-flashinfer-autotune \
     --enable-auto-tool-choice \
     --tool-call-parser qwen3_coder \
     --reasoning-parser qwen3
@@ -380,7 +393,6 @@ guide: |
 
   - **FP8 on eight GPUs:** use TEP8; plain TP8 is incompatible with this
     checkpoint. TP4 is also supported if GPU memory capacity allows.
-  - **TP1 compilation OOM on GB300:** use TP2 or TP4.
   - **Mamba-cache capacity error at startup:** keep `--max-num-seqs 256`.
   - **Runtime OOM on large multimodal batches:** keep `--gpu-memory-utilization 0.90`.
   - **Out of memory while loading:** enable N-gram Embedding CPU offload, increase
@@ -398,7 +410,7 @@ guide: |
 
   ## KV cache offloading
 
-  Offloading requires a build containing [vllm-project/vllm#57145](https://github.com/vllm-project/vllm/pull/57145).
+  Offloading is available upstream since vLLM v0.30.0 ([vllm-project/vllm#57145](https://github.com/vllm-project/vllm/pull/57145)).
   Validation used [Qwen/Qwen3.8-Flash-Next-FP8](https://huggingface.co/Qwen/Qwen3.8-Flash-Next-FP8) on 4×H200 (TP4),
   vLLM commit `d1b4028d7e`, the Python frontend, `--enforce-eager`,
   `--max-model-len 16384`, `--max-num-seqs 16` and `--max-num-batched-tokens 8192`.

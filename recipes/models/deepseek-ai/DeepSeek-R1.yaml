@@ -31,7 +31,6 @@ model:
   supports_dcp: true
   base_args:
     - "--trust-remote-code"
-    - "--enable-expert-parallel"
   base_env: {}
 
 features:
@@ -104,12 +103,22 @@ compatible_strategies:
   - pd_cluster
 
 hardware_overrides:
+  nvidia:
+    extra_args:
+      - "--enable-expert-parallel"
+    extra_env: {}
   amd:
     extra_args: []
     extra_env:
       VLLM_ROCM_USE_AITER: "1"
 
 strategy_overrides:
+  single_node_tp:
+    hardware_overrides:
+      mi355x:
+        extra_env:
+          VLLM_ROCM_QUICK_REDUCE_QUANTIZATION: "INT4"
+          VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: "1"
   single_node_dpa_tp:
     extra_env:
       VLLM_ENGINE_READY_TIMEOUT_S: "1800"
@@ -174,6 +183,20 @@ guide: |
     --trust-remote-code \
     --data-parallel-size 8 \
     --enable-expert-parallel
+  ```
+
+  ### 8xMI355X (FP8)
+
+  Tensor Parallel (TP8) — ROCm. Validated on MI355X only; INT4 quick reduce and
+  fused shared experts are not enabled on other AMD GPUs or other strategies:
+  ```bash
+  export VLLM_ROCM_USE_AITER=1
+  export VLLM_ROCM_QUICK_REDUCE_QUANTIZATION=INT4
+  export VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=1
+
+  vllm serve deepseek-ai/DeepSeek-R1 \
+    --trust-remote-code \
+    --tensor-parallel-size 8
   ```
 
   ### 8xMI350X / 8xMI355X (DPA+TP)

@@ -4,7 +4,7 @@ meta:
   provider: "GLM (Z-AI)"
   description: "GLM-5.3 — Frontier Coding with Emergent Cyber Capabilities"
   date_added: 2026-08-28
-  date_updated: 2026-10-03
+  date_updated: 2026-10-15
   tasks:
     - text
   performance_headline: "Latest GLM-5 series MoE — native FP8 by default, 5-token MTP, 1M context"
@@ -127,7 +127,8 @@ variants:
       # Exact-GPU: GPU-resident fit stays ≤ 252 GB HBM. Taxonomy vram_gb is
       # unchanged — host RAM is only this variant's --cpu-offload-gb path.
       dgx_station_gb300:
-        docker_image: "vllm/vllm-openai:v0.29.0-ubuntu2404"
+        # The Rust frontend only registers the glm47 reasoning parser in v0.30.0+.
+        docker_image: "vllm/vllm-openai:v0.30.0-ubuntu2404"
         vram_minimum_gb: 252
         extra_env:
           VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY: "1"
