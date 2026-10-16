@@ -186,8 +186,6 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
         outputs = []
         for instance in instances:
             instance.completed.extend(instance.beams)
-            if params.allowed_token_ids is not None and not instance.completed:
-                raise ValueError("Beam search has no valid continuation")
             sorted_completed = sorted(
                 instance.completed, key=sort_beams_key, reverse=True
             )

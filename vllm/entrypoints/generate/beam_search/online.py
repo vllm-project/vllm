@@ -211,8 +211,6 @@ class BeamSearchOnlineMixin(ABC):
                 break
 
         completed.extend(all_beams)
-        if allowed is not None and not completed:
-            raise ValueError("Beam search has no valid continuation")
         sorted_completed = sorted(completed, key=sort_beams_key, reverse=True)
         best_beams = sorted_completed[:beam_width]
 

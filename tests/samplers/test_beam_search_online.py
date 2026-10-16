@@ -335,11 +335,15 @@ def test_offline_structured_beam_search_disables_internal_watermarking() -> None
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("offline", [False, True])
-async def test_explicit_beam_allowlist_uses_exact_scores(offline):
+@pytest.mark.parametrize("exhausted", [False, True])
+async def test_explicit_beam_allowlist_uses_exact_scores(offline, exhausted):
     prompt: TokensInput = {"type": "token", "prompt_token_ids": [1]}
     base = SamplingParams(watermarking=False)
     template = [r async for r in _EngineClient().generate(prompt, base)][0]
     calls = []
+    if exhausted:
+        for logprob in template.outputs[0].logprobs[0].values():
+            logprob.logprob = float("-inf")
 
     def score(params):
         assert params.logprob_token_ids == [13, 14]
@@ -374,6 +378,10 @@ async def test_explicit_beam_allowlist_uses_exact_scores(offline):
         ]
         ids = [b.token_ids for b in online_result.outputs]
         scores = [b.cumulative_logprob for b in online_result.outputs]
+    if exhausted:
+        assert len(calls) == 1
+        assert ids == scores == []
+        return
     assert len(calls) == 3
     assert ids[0] == [13, 13] and all(set(x) <= {13, 14} for x in ids)
     assert scores == [-6.0, -7.0]
