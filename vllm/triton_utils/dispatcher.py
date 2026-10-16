@@ -79,6 +79,9 @@ class KernelOverride:
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         return self._impl(*args, **kwargs)
 
+    def register_warmup(self, *args: Any, **kwargs: Any) -> None:
+        """Overrides are not Triton kernels, so there is nothing to JIT."""
+
 
 def _resolve_kernel(name: str) -> tuple[Any, str]:
     """Return the (host object, attribute) holding the kernel `name`."""

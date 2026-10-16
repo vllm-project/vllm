@@ -52,11 +52,11 @@ from vllm.v1.sample.sampler import _SAMPLING_EPS
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.utils import (
     PADDING_SLOT_ID,
-    _copy_and_expand_eagle_inputs,
-    _eagle_prepare_inputs_padded,
-    _eagle_prepare_next_token_padded,
-    _eagle_step_slot_mapping_metadata,
     compute_new_slot_mapping,
+    copy_and_expand_eagle_inputs_kernel,
+    eagle_prepare_inputs_padded_kernel,
+    eagle_prepare_next_token_padded_kernel,
+    eagle_step_slot_mapping_metadata_kernel,
     eagle_step_update_slot_mapping_and_metadata,
     extend_all_queries_by_N,
     next_power_of_2,
@@ -141,22 +141,19 @@ class SpecDecodeBaseProposer:
 
         self.max_batch_size = vllm_config.scheduler_config.max_num_seqs
         self.max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
-        _eagle_step_slot_mapping_metadata.register_warmup(
-            max_model_len=self.max_model_len,
-            max_batch_size=self.max_batch_size,
+        eagle_step_slot_mapping_metadata_kernel.register_warmup(
+            max_model_len=self.max_model_len
         )
-        _eagle_prepare_inputs_padded.register_warmup(max_batch_size=self.max_batch_size)
-        _eagle_prepare_next_token_padded.register_warmup(
+        eagle_prepare_inputs_padded_kernel.register_warmup()
+        eagle_prepare_next_token_padded_kernel.register_warmup(
             vocab_size=vllm_config.model_config.get_vocab_size(),
-            num_sampled_tokens_per_req=self.num_speculative_tokens + 1,
-            max_batch_size=self.max_batch_size,
+            max_num_sampled_tokens_per_req=self.num_speculative_tokens + 1,
         )
         if self.needs_extra_input_slots:
-            _copy_and_expand_eagle_inputs.register_warmup(
+            copy_and_expand_eagle_inputs_kernel.register_warmup(
                 parallel_drafting_token_id=self.parallel_drafting_token_id,
                 num_padding_slots_per_request=self.extra_slots_per_request,
                 shift_input_ids=self.pass_hidden_states_to_model,
-                max_num_tokens=self.max_num_tokens,
             )
         self.token_arange_np = np.arange(self.max_num_tokens, dtype=np.int32)
 
@@ -891,7 +888,7 @@ class SpecDecodeBaseProposer:
             if num_rejected_tokens_gpu is not None:
                 query_end_loc = query_end_loc - num_rejected_tokens_gpu
 
-            _copy_and_expand_eagle_inputs(
+            copy_and_expand_eagle_inputs_kernel[(batch_size, num_blocks)](
                 # (Padded) Inputs from the target model
                 target_token_ids_ptr=target_token_ids,
                 target_positions_ptr=target_positions,
@@ -914,8 +911,6 @@ class SpecDecodeBaseProposer:
                 num_padding_slots_per_request=self.extra_slots_per_request,
                 shift_input_ids=self.pass_hidden_states_to_model,
                 BLOCK_SIZE_TOKENS=BLOCK_SIZE_TOKENS,
-                batch_size=batch_size,
-                num_blocks=num_blocks,
             )
             if self.pass_hidden_states_to_model:
                 assert self.parallel_drafting_hidden_state_tensor is not None
@@ -1081,7 +1076,7 @@ class SpecDecodeBaseProposer:
 
         # Find the next power of 2 for block sizes
         BLOCK_SIZE_TOKENS = next_power_of_2(num_tokens)
-        _eagle_prepare_next_token_padded(
+        eagle_prepare_next_token_padded_kernel[(batch_size,)](
             sampled_token_ids,
             discard_request_mask,
             backup_tokens_gpu,
@@ -1119,7 +1114,7 @@ class SpecDecodeBaseProposer:
             (num_reqs,), dtype=torch.int32, device=device
         )
 
-        _eagle_prepare_inputs_padded(
+        eagle_prepare_inputs_padded_kernel[(num_reqs,)](
             spec_decode_metadata.cu_num_draft_tokens,
             valid_sampled_tokens_count,
             common_attn_metadata.query_start_loc,

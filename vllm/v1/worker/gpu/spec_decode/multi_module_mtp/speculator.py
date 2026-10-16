@@ -9,6 +9,13 @@ from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    BF16,
+    F16,
+    F32,
+    I32,
+    I64,
+)
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
@@ -27,6 +34,7 @@ logger = init_logger(__name__)
 class MultiModuleMTPSpeculator(DraftModelSpeculator):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
+        _shift_input_ids_kernel.register_warmup()
 
         self.hidden_states = torch.zeros(
             self.max_num_tokens, self.hidden_size, dtype=self.dtype, device=device
@@ -94,6 +102,7 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
             dtype=self.dtype,
             device=self.device,
         )
+        _shift_input_embeds_kernel.register_warmup(hidden_size=self.hidden_size)
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         # TODO(TheEpicDolphin): Support piecewise cudagraph for multi-module MTP.
@@ -992,12 +1001,12 @@ def cache_inputs(
 
 @triton.jit
 def _shift_input_ids_kernel(
-    input_ids_ptr,
-    idx_mapping_ptr,
-    query_start_loc_ptr,
-    last_token_indices_ptr,
-    draft_tokens_ptr,
-    BLOCK_SIZE: tl.constexpr,
+    input_ids_ptr: I32,
+    idx_mapping_ptr: I64,
+    query_start_loc_ptr: I32,
+    last_token_indices_ptr: I64,
+    draft_tokens_ptr: I64,
+    BLOCK_SIZE: tl.constexpr = 1024,
 ):
     req_idx = tl.program_id(0)
     req_state_idx = tl.load(idx_mapping_ptr + req_idx)
@@ -1024,16 +1033,15 @@ def _shift_input_ids_kernel(
 
 @triton.jit
 def _shift_input_embeds_kernel(
-    input_embeds_ptr,
-    input_embeds_stride0,
-    draft_embeds_ptr,
-    draft_embeds_stride0,
-    idx_mapping_ptr,
-    query_start_loc_ptr,
-    last_token_indices_ptr,
+    # Both embeddings are contiguous [*, hidden_size].
+    input_embeds_ptr: F16 | BF16 | F32,
+    draft_embeds_ptr: F16 | BF16 | F32,
+    idx_mapping_ptr: I64,
+    query_start_loc_ptr: I32,
+    last_token_indices_ptr: I64,
     hidden_size,
-    BLOCK_SIZE_Q: tl.constexpr,
-    BLOCK_SIZE_H: tl.constexpr,
+    BLOCK_SIZE_Q: tl.constexpr = 16,
+    BLOCK_SIZE_H: tl.constexpr = 256,
 ):
     req_idx = tl.program_id(0)
     req_state_idx = tl.load(idx_mapping_ptr + req_idx)
@@ -1057,23 +1065,23 @@ def _shift_input_embeds_kernel(
         mask = query_mask[:, None] & dim_mask[None, :]
         input_embed = tl.load(
             input_embeds_ptr
-            + (query_start + query_block)[:, None] * input_embeds_stride0
+            + (query_start + query_block)[:, None] * hidden_size
             + dim_block[None, :],
             mask=mask,
         )
         tl.store(
             input_embeds_ptr
-            + (query_start + query_block - 1)[:, None] * input_embeds_stride0
+            + (query_start + query_block - 1)[:, None] * hidden_size
             + dim_block[None, :],
             input_embed,
             mask=mask,
         )
     draft_embed = tl.load(
-        draft_embeds_ptr + req_idx * draft_embeds_stride0 + dim_block,
+        draft_embeds_ptr + req_idx * hidden_size + dim_block,
         mask=dim_mask,
     )
     tl.store(
-        input_embeds_ptr + last_token_index * input_embeds_stride0 + dim_block,
+        input_embeds_ptr + last_token_index * hidden_size + dim_block,
         draft_embed,
         mask=dim_mask,
     )
@@ -1094,23 +1102,19 @@ def update_draft_inputs(
         input_buffers.query_start_loc,
         last_token_indices,
         draft_tokens,
-        BLOCK_SIZE=1024,
     )
     if input_embeds is not None:
-        assert draft_embeds is not None
+        assert draft_embeds is not None and draft_embeds.is_contiguous()
         hidden_size = input_embeds.shape[-1]
         hidden_block_size = 256
         _shift_input_embeds_kernel[
             (num_reqs, triton.cdiv(hidden_size, hidden_block_size))
         ](
             input_embeds,
-            input_embeds.stride(0),
             draft_embeds,
-            draft_embeds.stride(0),
             idx_mapping,
             input_buffers.query_start_loc,
             last_token_indices,
             hidden_size,
-            BLOCK_SIZE_Q=16,
             BLOCK_SIZE_H=hidden_block_size,
         )

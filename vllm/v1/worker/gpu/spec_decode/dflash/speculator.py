@@ -10,6 +10,13 @@ from vllm.config import VllmConfig, replace
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.warmup.jit_warmup import WarmupIntRange
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    F32,
+    I32,
+    I64,
+    triton_warmup,
+)
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
@@ -112,6 +119,7 @@ class DFlashSpeculator(DraftModelSpeculator):
 
         self.query_cudagraph_manager: DFlashCudaGraphManager | None = None
         self.draft_kv_cache_group_id: int = -1
+        _prepare_dflash_inputs_kernel.register_warmup(speculator=self)
 
     @property
     def attn_vllm_config(self) -> VllmConfig:
@@ -530,34 +538,42 @@ class DFlashSpeculator(DraftModelSpeculator):
         return self.draft_tokens[:num_reqs]
 
 
-@triton.jit
+@triton_warmup(
+    block_size=lambda speculator: speculator.block_tables.block_sizes,
+    cp_rank=lambda speculator: speculator.block_tables.cp_rank,
+    CP_SIZE=lambda speculator: speculator.dcp_size,
+    CP_INTERLEAVE=lambda speculator: speculator.block_tables.cp_interleave,
+    PAD_SLOT_ID=PAD_SLOT_ID,
+    BLOCK_SIZE=WarmupIntRange(1, 257, advance=lambda value: value * 2),
+)
+@triton.jit(do_not_specialize=["block_table_stride"])
 def _prepare_dflash_inputs_kernel(
     # Outputs
-    out_input_ids_ptr,
-    out_query_positions_ptr,
-    out_query_start_loc_ptr,
-    out_seq_lens_ptr,
-    out_query_slot_mapping_ptr,
-    out_context_positions_ptr,
-    out_context_slot_mapping_ptr,
-    out_sample_indices_ptr,
-    out_sample_pos_ptr,
-    out_sample_idx_mapping_ptr,
-    out_temperature_ptr,
-    out_seeds_ptr,
+    out_input_ids_ptr: I32,
+    out_query_positions_ptr: I64,
+    out_query_start_loc_ptr: I32,
+    out_seq_lens_ptr: I32,
+    out_query_slot_mapping_ptr: I64,
+    out_context_positions_ptr: I64,
+    out_context_slot_mapping_ptr: I64,
+    out_sample_indices_ptr: I64,
+    out_sample_pos_ptr: I64,
+    out_sample_idx_mapping_ptr: I64,
+    out_temperature_ptr: F32,
+    out_seeds_ptr: I64,
     # Inputs from target batch
-    target_positions_ptr,
-    target_query_start_loc_ptr,
-    idx_mapping_ptr,
-    last_sampled_ptr,
-    next_prefill_tokens_ptr,
-    num_sampled_ptr,
-    num_rejected_ptr,
+    target_positions_ptr: I64,
+    target_query_start_loc_ptr: I32,
+    idx_mapping_ptr: I64,
+    last_sampled_ptr: I64,
+    next_prefill_tokens_ptr: I32,
+    num_sampled_ptr: I32,
+    num_rejected_ptr: I32,
     # Sampling params
-    temperature_ptr,
-    seeds_ptr,
+    temperature_ptr: F32,
+    seeds_ptr: I64,
     # Block table for slot mapping lookup.
-    block_table_ptr,
+    block_table_ptr: I32,
     block_table_stride,
     # Scalars
     parallel_drafting_token_id,
