@@ -209,8 +209,7 @@ class LoggingStatLogger(StatLoggerBase):
 
             logger.info(
                 "%sIteration(%d): %d context requests, %d context tokens, "
-                "%d generation requests, %d generation tokens%s%s, "
-                "%s KV cache usage: %.1f%%%s",
+                "%d generation requests, %d generation tokens%s%s%s",
                 self._log_prefix_for_engine(engine_idx),
                 details.iteration_index,
                 details.num_ctx_requests,
@@ -219,8 +218,6 @@ class LoggingStatLogger(StatLoggerBase):
                 details.num_generation_tokens,
                 elapsed_msg,
                 " (dummy)" if details.is_dummy else "",
-                self.kv_cache_device,
-                scheduler_stats.kv_cache_usage * 100,
                 encoder_msg,
             )
 

@@ -30,12 +30,12 @@ def test_ready_events_are_reused_without_waiting_for_pending_or_contended_drains
         assert timer.drain_samples() == ()
     with timer._pending_lock:
         assert timer.drain_samples() == ()
-    assert timer.drain_samples() == ((4, 0.007),)
+    assert timer.drain_samples() == ((4, 7.0),)
 
     # The factory is exhausted; the next interval must reuse the ready pair.
     timer.start(5)
     timer.finish()
-    assert timer.drain_samples() == ((5, 0.007),)
+    assert timer.drain_samples() == ((5, 7.0),)
     for event in events:
         assert event.record.call_count == 2
         event.synchronize.assert_not_called()
@@ -54,7 +54,7 @@ def test_empty_step_is_not_timed_and_shared_output_is_not_mutated():
     timer.finish()
     output = timer.drain_into(EMPTY_MODEL_RUNNER_OUTPUT)
     assert output is not EMPTY_MODEL_RUNNER_OUTPUT
-    assert output.iteration_timing_samples == ((9, 0.001),)
+    assert output.iteration_timing_samples == ((9, 1.0),)
     assert EMPTY_MODEL_RUNNER_OUTPUT.iteration_timing_samples == ()
 
 

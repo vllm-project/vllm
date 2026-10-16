@@ -309,9 +309,8 @@ every 5 seconds with some key metrics:
 `--enable-logging-iteration-details` additionally logs per-iteration request and
 token counts. With log statistics enabled, it automatically includes GPU timing
 for CUDA generation with a `uni` or `mp` executor and an out-of-process
-EngineCore; unsupported configurations log counts only. Timing is disabled by
-default unless an iteration-metrics consumer requests it. There is no separate
-timing CLI flag.
+EngineCore; unsupported configurations log counts only. This logging option is
+disabled by default, and there is no separate timing CLI flag.
 
 The `model_step_cuda` duration covers target-model execution, sampling and
 postprocessing, and drafting for the next iteration on the recorded CUDA stream,

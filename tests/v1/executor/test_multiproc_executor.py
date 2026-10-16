@@ -133,12 +133,12 @@ def test_iteration_timing_poll_preserves_model_response_order(model_consumes_fir
     later = executor.collective_rpc(
         "execute_model", non_block=True, unique_reply_rank=0
     )
-    responses.extend([((7, 0.01),), "model-output"])
+    responses.extend([((7, 10.0),), "model-output"])
     if model_consumes_first:
         assert later.result() == "model-output"
-        assert poll() == ((7, 0.01),)
+        assert poll() == ((7, 10.0),)
     else:
-        assert poll() == ((7, 0.01),)
+        assert poll() == ((7, 10.0),)
         assert later.result() == "model-output"
     assert not responses
     assert not executor.futures_queue

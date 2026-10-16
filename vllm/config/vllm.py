@@ -3156,7 +3156,7 @@ class VllmConfig:
         reason = (
             self._iteration_timing_unsupported_reason()
             if multiprocess_mode
-            else "In-process EngineCore cannot deliver idle timing records"
+            else "In-process EngineCore cannot collect pending GPU timings while idle"
         )
         if reason is None:
             observability.iteration_timing_enabled = True

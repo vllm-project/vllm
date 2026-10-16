@@ -71,7 +71,7 @@ def test_iteration_timing_keeps_original_batch_when_results_arrive_late():
     assert not collector.take_ready()
     assert collector.has_pending_timing()
     output.iteration_details.num_prefill_tokens = 99
-    collector.complete_timing_samples(((index, 0.012),))
+    collector.complete_timing_samples(((index, 12.0),))
     (record,) = collector.take_ready()
     assert record.num_ctx_tokens == 8
     assert record.elapsed_ms == 12
@@ -88,7 +88,7 @@ def test_dummy_tail_timings_survive_more_than_batch_queue_depth():
     collector.complete_iteration(
         output,
         ModelRunnerOutput(
-            [], {}, iteration_timing_samples=tuple((index, 0.01) for index in indices)
+            [], {}, iteration_timing_samples=tuple((index, 10.0) for index in indices)
         ),
     )
     records = collector.take_ready()
@@ -108,12 +108,12 @@ def test_completed_idle_timing_poll_is_consumed_when_inference_resumes(dummy):
 
     def start_poll():
         submitted.append(True)
-        return lambda: ((old_id, 0.01),)
+        return lambda: ((old_id, 10.0),)
 
     collector.poll_timing(SimpleNamespace(start_iteration_timing_poll=start_poll))
     if dummy:
         iteration_id = collector.begin_dummy_iteration()
-        collector.complete_timing_samples(((iteration_id, 0.02),))
+        collector.complete_timing_samples(((iteration_id, 20.0),))
     else:
         output = SchedulerOutput.make_empty()
         output.num_scheduled_tokens = {"request": 1}
@@ -125,7 +125,7 @@ def test_completed_idle_timing_poll_is_consumed_when_inference_resumes(dummy):
         iteration_id = output.iteration_metrics_id
         collector.complete_iteration(
             output,
-            ModelRunnerOutput([], {}, iteration_timing_samples=((iteration_id, 0.02),)),
+            ModelRunnerOutput([], {}, iteration_timing_samples=((iteration_id, 20.0),)),
         )
     records = collector.take_ready()
     assert [record.iteration_index for record in records] == [
@@ -142,7 +142,7 @@ def test_iteration_records_have_one_stable_frontend_owner():
 
     collector = IterationMetricsCollector()
     index = collector.begin_dummy_iteration()
-    collector.complete_timing_samples(((index, 0.01),))
+    collector.complete_timing_samples(((index, 10.0),))
     stats = SchedulerStats(num_running_reqs=7, kv_cache_usage=0.5)
     outputs = {3: EngineCoreOutputs(scheduler_stats=stats)}
     core = SimpleNamespace(iteration_metrics=collector)

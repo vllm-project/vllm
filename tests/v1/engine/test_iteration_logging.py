@@ -53,6 +53,17 @@ def make_fake_engine(
         (True, True, True, "cuda", "generate", 1, "ray", False, False),
         (True, False, True, "cuda", "generate", 1, "mp", True, False),
     ],
+    ids=[
+        "supported-uni",
+        "logging-off",
+        "stats-off",
+        "in-process",
+        "non-cuda",
+        "pooling",
+        "supported-pp2",
+        "ray",
+        "clear-stale-state",
+    ],
 )
 def test_iteration_logging_enables_supported_timing_only(
     logging,

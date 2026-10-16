@@ -33,11 +33,21 @@ def test_iteration_logging_preserves_records_without_inventing_timing(
     )
     info = Mock()
     monkeypatch.setattr("vllm.v1.metrics.loggers.logger.info", info)
-    untimed = SchedulerIterationDetails(7, 1, 16, 0, 0, elapsed_ms=None)
+    untimed = SchedulerIterationDetails(
+        7,
+        1,
+        16,
+        0,
+        0,
+        elapsed_ms=None,
+        num_encoder_inputs=1,
+        num_encoder_output_tokens=32,
+    )
     timed = SchedulerIterationDetails(
         8, 0, 0, 0, 0, elapsed_ms=1.25, is_dummy=True, timing_scope="model_step_cuda"
     )
     stats = SchedulerStats(
+        kv_cache_usage=0.9,
         iteration_details=untimed,
         iteration_records=[untimed, timed] if batched else [],
     )
@@ -53,6 +63,8 @@ def test_iteration_logging_preserves_records_without_inventing_timing(
         "Engine 002: Iteration(7): 1 context requests, 16 context tokens" in messages[0]
     )
     assert "elapsed" not in messages[0]
+    assert "encoder inputs: 1, encoder output embeddings: 32" in messages[0]
+    assert all("KV cache usage" not in message for message in messages)
     if batched:
         assert "Iteration(8)" in messages[1]
         assert "iteration elapsed time: 1.25 ms (dummy)" in messages[1]

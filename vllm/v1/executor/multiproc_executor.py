@@ -477,8 +477,6 @@ class MultiprocExecutor(Executor):
                     return None
                 if not response_mq.can_dequeue():
                     return None
-                self.futures_queue.pop()
-                future._wait_for_response()
             return future.result()
 
         return poll

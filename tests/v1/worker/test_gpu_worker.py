@@ -497,7 +497,7 @@ def test_iteration_timing_finishes_after_sampling_and_draft(
     elif timed:
         assert milestones == ["start", "forward", "sample", "draft", "end"]
         events[1].query.return_value = True
-        assert gpu_worker.Worker.poll_iteration_timing(worker) == ((3, 0.015),)
+        assert gpu_worker.Worker.poll_iteration_timing(worker) == ((3, 15.0),)
     else:
         assert milestones == ["forward", "sample", "draft"]
         assert gpu_worker.Worker.poll_iteration_timing(worker) == ()
@@ -552,7 +552,7 @@ def test_iteration_timing_discards_failed_step_and_allows_next_step(
     gpu_worker.Worker.execute_model(worker, scheduler_output)
     assert gpu_worker.Worker.sample_tokens(worker, None) is output
     events[3].query.return_value = True
-    assert gpu_worker.Worker.poll_iteration_timing(worker) == ((4, 0.015),)
+    assert gpu_worker.Worker.poll_iteration_timing(worker) == ((4, 15.0),)
     for event in events:
         event.synchronize.assert_not_called()
 
@@ -590,13 +590,13 @@ def test_dummy_iteration_recycles_old_timing_and_preserves_randomized_inputs(
             worker, iteration_id if has_iteration_id else None
         )
         if timed:
-            assert samples == (() if iteration_id == 0 else ((iteration_id - 1, 0.02),))
+            assert samples == (() if iteration_id == 0 else ((iteration_id - 1, 20.0),))
             events[1].query.return_value = True
         else:
             assert samples == (() if has_iteration_id else None)
     if timed:
         assert milestones == ["start", "forward", "draft", "end"] * 3
-        assert gpu_worker.Worker.poll_iteration_timing(worker) == ((2, 0.02),)
+        assert gpu_worker.Worker.poll_iteration_timing(worker) == ((2, 20.0),)
     else:
         assert milestones == ["forward", "draft"] * 3
         events[1].query.assert_not_called()

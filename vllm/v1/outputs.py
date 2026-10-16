@@ -310,8 +310,8 @@ class ModelRunnerOutput:
     # ``None`` when ``return_sampling_mask`` is off.
     sampling_masks: SamplingMaskLists | None = None
 
-    # Completed CUDA timings may arrive a few outputs after their originating
-    # scheduler iteration. EngineCore associates them by iteration_id.
+    # Ready (iteration_id, elapsed_ms) samples can lag their scheduler iteration.
+    # EngineCore associates them by iteration_id.
     iteration_timing_samples: tuple[tuple[int, float], ...] = ()
 
     @staticmethod

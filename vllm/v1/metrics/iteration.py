@@ -93,10 +93,10 @@ class IterationMetricsCollector:
         self.complete_timing_samples(model_output.iteration_timing_samples)
 
     def complete_timing_samples(self, samples: tuple[tuple[int, float], ...]) -> None:
-        for iteration_id, seconds in samples:
+        for iteration_id, elapsed_ms in samples:
             pending = self._pending.get(iteration_id)
             if pending is not None:
-                pending.details.elapsed_ms = seconds * 1000
+                pending.details.elapsed_ms = elapsed_ms
                 self._complete_if_ready(iteration_id)
 
     def _complete_if_ready(self, iteration_id: int) -> None:

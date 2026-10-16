@@ -298,7 +298,7 @@ def test_next_step_does_not_consume_pending_output(monkeypatch, timed):
     result = output.get_output()
 
     assert result.sampled_token_ids == [[7]]
-    assert result.iteration_timing_samples == (((7, 0.001),) if timed else ())
+    assert result.iteration_timing_samples == (((7, 1.0),) if timed else ())
     np.testing.assert_array_equal(
         result.aux_output_connector_output["request"].rows, rows.numpy()
     )

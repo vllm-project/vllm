@@ -296,6 +296,8 @@ class Executor(ABC):
 
         Executors with lazy futures must override this to advance their response
         transport without waiting. None means submission should be retried later.
+        The poller returns None while pending, or a possibly empty tuple of
+        (iteration_id, elapsed_ms) samples once the response arrives.
         """
         future: Future[list[tuple[tuple[int, float], ...]]] = self.collective_rpc(
             "poll_iteration_timing", non_block=True

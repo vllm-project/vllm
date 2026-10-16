@@ -91,7 +91,7 @@ class IterationTimer:
         self._active = None
 
     def drain_samples(self) -> tuple[tuple[int, float], ...]:
-        """Return ready (iteration ID, seconds) pairs without synchronization."""
+        """Return ready (iteration_id, elapsed_ms) pairs without synchronization."""
         if not self._drain_lock.acquire(blocking=False):
             return ()
         ready: list[tuple[int, float]] = []
@@ -113,14 +113,17 @@ class IterationTimer:
                     self._pending.popleft()
                 finally:
                     self._pending_lock.release()
-                ready.append((pending.iteration_id, elapsed_ms * 1e-3))
+                ready.append((pending.iteration_id, elapsed_ms))
                 self._event_pool.put((pending.start_event, pending.end_event))
         finally:
             self._drain_lock.release()
         return tuple(ready)
 
     def drain_into(self, output: Any) -> Any:
-        """Attach ready samples without mutating shared empty runner outputs."""
+        """Attach ready samples without mutating shared empty runner outputs.
+
+        Async handles collect their samples later in get_output().
+        """
         if output is None or not hasattr(output, "iteration_timing_samples"):
             return output
         ready = self.drain_samples()
