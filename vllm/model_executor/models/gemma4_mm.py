@@ -1839,7 +1839,15 @@ class Gemma4ForConditionalGeneration(
 
         dtype = dtype or torch.float32
 
-        max_size = max(max_batch_size, max_frames_per_batch)
+        # Each replayed row (an image or a video frame) bills at least
+        # _SUPPORTED_SOFT_TOKENS[0] tokens, so a budget never packs more rows.
+        max_size = max(
+            1,
+            min(
+                max(max_batch_size, max_frames_per_batch),
+                token_budget // _SUPPORTED_SOFT_TOKENS[0],
+            ),
+        )
 
         vision_cfg = self.vision_tower.config
         pool_ratio = getattr(vision_cfg, "pooling_kernel_size", 2) ** 2
