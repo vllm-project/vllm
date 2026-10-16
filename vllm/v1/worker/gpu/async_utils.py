@@ -271,13 +271,7 @@ class AsyncPoolingOutput(AsyncModelRunnerOutput):
 
 
 class KVChecksumCopy:
-    """A step's KV checksums on their way to host memory.
-
-    The checksum kernels run in the KV connector's ``post_forward``, after the
-    sampled tokens were queued for copying, so they get their own copy and
-    event on the same stream: the tokens' copy does not wait for them or for
-    the connector's other work, and outputs without checksums never do.
-    """
+    """A step's KV checksums on their way to host memory."""
 
     def __init__(
         self,
