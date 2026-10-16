@@ -858,7 +858,33 @@ class TestChatCompletionStreamToV2:
         assert "error" in error_end["delta"]
 
     @pytest.mark.asyncio
-    async def test_error_message_end_is_sanitized(self):
+    @pytest.mark.parametrize("started", [False, True])
+    async def test_upstream_error_envelope_preserves_message(self, started):
+        serving = _serving()
+        items = []
+        if started:
+            items.extend([_make_chunk(role="assistant"), _make_chunk(content="Hi")])
+        items.append(
+            _sse(serving.create_streaming_error_response(ValueError("backend failed")))
+        )
+        items.append(_make_done())
+
+        frames = await _drain(serving, items)
+        assert frames[-1] == _DONE_FRAME
+        events = [_parse_event(frame) for frame in frames[:-1]]
+        error_ends = [event for event in events if event["type"] == "message-end"]
+        assert len(error_ends) == 1
+        assert error_ends[0]["delta"] == {
+            "finish_reason": "ERROR",
+            "error": "backend failed",
+        }
+        assert events[-1] == error_ends[0]
+        if started:
+            assert events[-2]["type"] == "content-end"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("started", [False, True])
+    async def test_error_message_end_is_sanitized(self, started):
         # The client-visible ``error`` field on the terminal message-end
         # must be routed through ``sanitize_message`` so tracebacks,
         # host filesystem paths, and Python object memory addresses
@@ -866,7 +892,8 @@ class TestChatCompletionStreamToV2:
         serving = _serving()
 
         async def _raises_mid_stream() -> AsyncGenerator[str, None]:
-            yield _make_chunk(role="assistant")
+            if started:
+                yield _make_chunk(role="assistant")
             raise RuntimeError(
                 "boom <Foo at 0x7fabc0deface> reading /Users/dev/vllm/x.py"
             )

@@ -42,7 +42,7 @@ from cohere.types import (
     UserChatMessageV2,
 )
 from fastapi import Request
-from pydantic import BaseModel
+from pydantic import BaseModel, TypeAdapter
 
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.cohere.cohere_chat_message import (
@@ -136,6 +136,10 @@ def _sse(data: str) -> str:
 # (the Python SDK breaks its read loop on ``_sse.data == "[DONE]"``).
 # Must be emitted after the closing ``message-end`` event.
 _DONE_FRAME = _sse("[DONE]")
+
+_CHAT_COMPLETION_STREAM_ADAPTER: TypeAdapter[
+    ChatCompletionStreamResponse | ErrorResponse
+] = TypeAdapter(ChatCompletionStreamResponse | ErrorResponse)
 
 
 def _emit(event: BaseModel) -> str:
@@ -1457,7 +1461,9 @@ class CohereServingChatV2(OpenAIServingChat):
                     # even if the usage-only chunk was skipped.
                     break
 
-                chunk = ChatCompletionStreamResponse.model_validate_json(data_str)
+                chunk = _CHAT_COMPLETION_STREAM_ADAPTER.validate_json(data_str)
+                if isinstance(chunk, ErrorResponse):
+                    raise RuntimeError(chunk.error.message)
                 state.last_chunk_id = chunk.id
 
                 if not state.started:
@@ -1514,7 +1520,9 @@ class CohereServingChatV2(OpenAIServingChat):
 
         except Exception as exc:
             logger.exception("Error converting chat completion stream to v2")
-            if state.started and not state.ended:
+            if not state.ended:
+                for ev in self._close_open_blocks(state):
+                    yield ev
                 yield _sse(
                     json.dumps(
                         {
