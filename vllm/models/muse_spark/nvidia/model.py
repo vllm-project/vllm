@@ -1321,10 +1321,9 @@ class MuseSpark1xDecoderLayer(nn.Module):
 
         self.self_attn = MuseSpark1xAttention(
             config=config,
-            max_position_embeddings=max(
-                config.max_position_embeddings,
-                vllm_config.model_config.max_model_len,
-            ),
+            # Unscaled RoPE only needs positions < max_model_len; sizing the
+            # cos/sin cache by the 1M-token config costs ~11.5 GiB per GPU.
+            max_position_embeddings=vllm_config.model_config.max_model_len,
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
