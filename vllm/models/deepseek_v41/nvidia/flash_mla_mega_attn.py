@@ -244,6 +244,7 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
             (self.wo_a.weight, self.wo_a.weight_scale),
             (z, z_scale) if quantize else z,
             recipe=self._einsum_recipe,
+            use_128x4_sfd_layout=quantize,
         )
         z = z.flatten(1)
         if not quantize:
