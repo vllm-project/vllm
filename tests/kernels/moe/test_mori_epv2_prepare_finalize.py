@@ -3,17 +3,21 @@
 """MORI EPv2 prepare/finalize and all2all manager, with MORI faked out."""
 
 import sys
+from datetime import timedelta
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
 import torch
+import torch.distributed as dist
+import torch.multiprocessing as mp
 
 import vllm.model_executor.layers.fused_moe.prepare_finalize.mori_epv2 as mori_epv2
 from vllm.config.parallel import resolve_mori_all2all
 from vllm.model_executor.layers.fused_moe.prepare_finalize.mori_epv2 import (
     MoriEPv2PrepareAndFinalize,
 )
+from vllm.utils.network_utils import get_open_port
 
 
 class FakeOp:
@@ -184,6 +188,43 @@ def test_manager_requires_one_lsa_team(monkeypatch, world_size, lsa_size):
         assert order.index("op.close") < order.index("comm.destroy")
     device_comm.close.assert_called_once()
     comm.destroy.assert_called_once()
+
+
+def _unique_id_worker(rank, init_method):
+    from vllm.distributed.device_communicators import all2all
+    from vllm.distributed.device_communicators.base_device_communicator import (
+        All2AllManagerBase,
+    )
+
+    dist.init_process_group(
+        "gloo",
+        init_method=init_method,
+        rank=rank,
+        world_size=4,
+        timeout=timedelta(seconds=60),
+    )
+    # With PP=2 and DP=2 the EP groups are [0, 2] and [1, 3].
+    groups = [dist.new_group([0, 2]), dist.new_group([1, 3])]
+    group = groups[rank % 2]
+    All2AllManagerBase.__init__ = lambda self, g: self.__dict__.update(
+        rank=g.rank(), world_size=g.size(), cpu_group=g
+    )
+    communicator = Mock()
+    communicator.get_unique_id.return_value = f"uid-of-rank-{rank}"
+    communicator.init.return_value.create_dev_comm.return_value = Mock(lsa_size=2)
+    sys.modules["mori.cco"] = SimpleNamespace(
+        Communicator=communicator,
+        CCODevCommRequirements=SimpleNamespace,
+        GDA_CONNECTION_NONE=0,
+    )
+    all2all.MoriEPv2All2AllManager(group)
+    # Every rank joins the communicator with the ID its group's first rank made.
+    assert communicator.init.call_args.args[2] == f"uid-of-rank-{rank % 2}"
+    dist.destroy_process_group()
+
+
+def test_unique_id_comes_from_the_ep_groups_first_rank():
+    mp.spawn(_unique_id_worker, args=(f"tcp://127.0.0.1:{get_open_port()}",), nprocs=4)
 
 
 def test_experts_write_into_combine_staging_only_when_it_fits():

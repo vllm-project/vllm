@@ -1165,7 +1165,7 @@ class MoriEPv2All2AllManager(All2AllManagerBase):
 
         uid = Communicator.get_unique_id() if self.rank == 0 else None
         values = [uid]
-        dist.broadcast_object_list(values, src=0, group=self.cpu_group)
+        dist.broadcast_object_list(values, group_src=0, group=self.cpu_group)
         comm = Communicator.init(
             self.world_size, self.rank, values[0], per_rank_vmm=nbytes
         )
