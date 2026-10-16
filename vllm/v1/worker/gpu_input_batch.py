@@ -269,7 +269,7 @@ class InputBatch:
         # req_id -> list of specific token IDs to compute logprobs for
         # More efficient than num_logprobs=-1 when only a few tokens are needed
         self.logprob_token_ids: dict[str, list[int]] = {}
-        self.logprob_candidate_token_ids: dict[str, list[int]] = {}
+        self.logprob_candidate_token_ids: dict[str, list[int] | bytes] = {}
 
         # Internal representation of per-step batch state changes, used for
         # reordering persistent batch and generating logitsprocs batch state

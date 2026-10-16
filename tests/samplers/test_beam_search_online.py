@@ -352,6 +352,7 @@ def test_offline_structured_beam_search_disables_internal_watermarking() -> None
     grammar.fill_bitmask.side_effect = lambda bitmask, index: bitmask[index].fill_(1)
     backend = MagicMock()
     backend.compile_grammar.return_value = grammar
+    backend.tokenizer.eos_token_id = None
     serving = _OfflineServing()
     serving.model_config = MagicMock()
     serving.model_config.get_vocab_size.return_value = 32
@@ -380,7 +381,7 @@ def test_offline_structured_beam_search_disables_internal_watermarking() -> None
     assert beam_params is not base_params
     assert beam_params.logprobs == base_params.logprobs
     assert beam_params.watermarking is False
-    assert beam_params._logprob_candidate_token_ids == [0]
+    assert beam_params._logprob_candidate_token_ids == b"\x01\x00\x00\x00"
     assert base_params.allowed_token_ids is None
 
 
@@ -394,6 +395,7 @@ def test_offline_grammar_dead_end_is_not_completion(terminated):
     grammar.fill_bitmask.side_effect = lambda mask, index: mask[index].fill_(1)
     backend = MagicMock()
     backend.compile_grammar.return_value = grammar
+    backend.tokenizer.eos_token_id = None
     instance = BeamSearchInstance({"type": "token", "prompt_token_ids": [1]})
     exhausted = BeamSearchOfflineMixin._beam_search_step(
         serving,

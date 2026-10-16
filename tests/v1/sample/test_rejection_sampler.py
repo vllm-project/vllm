@@ -129,11 +129,14 @@ def create_sampling_metadata(
     )
 
 
-def test_mixed_candidate_and_specific_logprobs():
+@pytest.mark.parametrize("packed", [False, True])
+def test_mixed_candidate_and_specific_logprobs(packed):
     logits = torch.arange(16, dtype=torch.float32, device=DEVICE_TYPE).reshape(2, 8)
     metadata = create_sampling_metadata(all_greedy=True)
     metadata.max_num_logprobs = 4
-    metadata.logprob_candidate_token_ids = {0: [1, 2]}
+    metadata.logprob_candidate_token_ids = {
+        0: b"\x06\x00\x00\x00" if packed else [1, 2]
+    }
     metadata.logprob_token_ids = {1: [5, 6]}
     result = Sampler()(logits, metadata).logprobs_tensors
     assert result is not None
@@ -144,11 +147,14 @@ def test_mixed_candidate_and_specific_logprobs():
     torch.testing.assert_close(result.logprobs, expected)
 
 
-def test_candidate_logprobs_without_draft_tokens():
+@pytest.mark.parametrize("packed", [False, True])
+def test_candidate_logprobs_without_draft_tokens(packed):
     logits = torch.arange(16, dtype=torch.float32, device=DEVICE_TYPE).reshape(2, 8)
     metadata = create_sampling_metadata(all_greedy=True)
     metadata.max_num_logprobs = 4
-    metadata.logprob_candidate_token_ids = {0: [1, 2]}
+    metadata.logprob_candidate_token_ids = {
+        0: b"\x06\x00\x00\x00" if packed else [1, 2]
+    }
     spec_metadata = SpecDecodeMetadata.make_dummy([[], []], device=logits.device)
     spec_metadata.bonus_logits_indices = torch.arange(2, device=logits.device)
     result = RejectionSampler(Sampler())(

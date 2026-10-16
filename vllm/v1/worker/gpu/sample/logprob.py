@@ -118,7 +118,7 @@ def compute_topk_scores(
     expanded_idx_mapping: torch.Tensor | None = None,
     max_per_req_token_ids: int = 0,
     logits_mode: bool = False,
-    candidates: dict[int, list[int]] | None = None,
+    candidates: dict[int, list[int] | bytes] | None = None,
     max_rows_per_request: int = 1,
 ) -> LogprobsTensors:
     assert num_logprobs >= 0

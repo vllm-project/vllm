@@ -156,7 +156,7 @@ class Sampler(nn.Module):
         logprobs: torch.Tensor,
         logprob_token_ids: dict[int, list[int]],
         sampled: torch.Tensor,
-        candidates: dict[int, list[int]] | None = None,
+        candidates: dict[int, list[int] | bytes] | None = None,
         num_logprobs: int = 0,
     ) -> LogprobsTensors | None:
         """Gather logprobs for specific token IDs requested per request.
@@ -327,7 +327,7 @@ class Sampler(nn.Module):
         logprobs: torch.Tensor,
         num_logprobs: int,
         token_ids: torch.Tensor,
-        candidates: dict[int, list[int]] | None = None,
+        candidates: dict[int, list[int] | bytes] | None = None,
     ) -> LogprobsTensors:
         """Gather logprobs for topk and sampled/prompt token.
 

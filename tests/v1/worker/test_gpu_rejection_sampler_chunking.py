@@ -69,7 +69,9 @@ def test_iter_request_chunks_preserves_request_boundaries():
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
 @pytest.mark.parametrize("logprobs_mode", get_args(LogprobsMode))
-@pytest.mark.parametrize("candidates", [{}, {7: [1, 3], 9: [2, 4]}])
+@pytest.mark.parametrize(
+    "candidates", [{}, {7: [1, 3], 9: [2, 4]}, {7: b"\x0a\x00\x00\x00", 9: [2, 4]}]
+)
 def test_chunked_scores_match_full_batch(logprobs_mode: str, candidates):
     device = torch.device("cuda")
     cu_num_logits_np = np.array([0, 3, 4, 8, 10], dtype=np.int32)
@@ -147,8 +149,15 @@ def test_chunked_scores_match_full_batch(logprobs_mode: str, candidates):
     assert sampling_mask_tensors is None
     for row, req_idx in enumerate(input_batch.expanded_idx_mapping.tolist()):
         if req_idx in candidates:
+            expected = candidates[req_idx]
+            if isinstance(expected, bytes):
+                expected = [
+                    i
+                    for i in range(17)
+                    if int.from_bytes(expected, "little") & (1 << i)
+                ]
             assert set(chunked_logprobs.logprob_token_ids[row, 1:].tolist()) == set(
-                candidates[req_idx]
+                expected
             )
 
 

@@ -76,7 +76,7 @@ class Sampler:
         ]
 
         self.logprob_token_ids_state = LogprobTokenIdsState(max_num_reqs, device)
-        self.logprob_candidates: dict[int, list[int]] = {}
+        self.logprob_candidates: dict[int, list[int] | bytes] = {}
         self.thinking_budget_state = ThinkingBudgetState(
             req_states, vllm_config.reasoning_config
         )

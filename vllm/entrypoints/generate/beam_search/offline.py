@@ -31,21 +31,11 @@ from .utils import (
 
 logger = init_logger(__name__)
 
-_bitmask_cache: dict[int, tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
 
-
-def _bitmask_to_token_ids(bitmask_row: torch.Tensor, vocab_size: int) -> list[int]:
-    """Convert a packed int32 bitmask row to a list of allowed token IDs."""
-    if vocab_size not in _bitmask_cache:
-        indices = torch.arange(vocab_size)
-        _bitmask_cache[vocab_size] = (
-            indices,
-            indices >> 5,  # i // 32
-            indices & 31,  # i % 32
-        )
-    indices, word_indices, bit_indices = _bitmask_cache[vocab_size]
-    mask = ((bitmask_row[word_indices] >> bit_indices) & 1).bool()
-    return indices[mask].tolist()
+def _token_in_bitmask(token_id: int, bitmask: bytes) -> bool:
+    return 0 <= token_id < len(bitmask) * 8 and bool(
+        bitmask[token_id // 8] & (1 << (token_id % 8))
+    )
 
 
 class BeamSearchOfflineMixin(OfflineInferenceMixin):
@@ -304,11 +294,15 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
             if request_allowed_token_ids is not None
             else None
         )
-        allowed_sets: list[set[int] | None] = [request_allowed_set] * len(all_beams)
+        allowed_sets: list[set[int] | bytes | None] = [request_allowed_set] * len(
+            all_beams
+        )
         if structured_output_backend is not None:
             for i, entry in enumerate(beam_entries):
                 if entry is not None:
-                    allowed_sets[i] = set(entry[1])
+                    allowed_sets[i] = (
+                        entry[1] if isinstance(entry[1], bytes) else set(entry[1])
+                    )
 
         for (start, end), instance in zip(instance_start_and_end, instances_batch):
             instance_output = output[start:end]
@@ -341,8 +335,12 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
                     for token_id, logprob_obj in logprobs.items():
                         if not math.isfinite(logprob_obj.logprob):
                             continue
-                        if allowed is not None and token_id not in allowed:
-                            continue
+                        if allowed is not None:
+                            if isinstance(allowed, bytes):
+                                if not _token_in_bitmask(token_id, allowed):
+                                    continue
+                            elif token_id not in allowed:
+                                continue
                         new_beam = BeamSearchSequence(
                             current_beam.orig_prompt,
                             tokens=current_beam.tokens + [token_id],
@@ -442,7 +440,7 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
         structured_output_key: tuple,
         bitmask: torch.Tensor,
         request_allowed_token_ids: list[int] | None,
-    ) -> list[tuple[SamplingParams, list[int]] | None]:
+    ) -> list[tuple[SamplingParams, list[int] | bytes] | None]:
         """Build per-beam SamplingParams and allowed token IDs from grammar.
 
         Returns None for beams where the grammar has terminated.
@@ -454,7 +452,7 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
             if request_allowed_token_ids is not None
             else None
         )
-        result: list[tuple[SamplingParams, list[int]] | None] = []
+        result: list[tuple[SamplingParams, list[int] | bytes] | None] = []
 
         for beam in beams:
             # Fresh grammar per beam, replaying generated tokens.
@@ -473,15 +471,23 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
                 continue
 
             grammar.fill_bitmask(bitmask, 0)
-            allowed_ids = _bitmask_to_token_ids(bitmask[0], vocab_size)
+            mask = bitmask[0].clone()
+            if vocab_size % 32:
+                mask[-1] &= (1 << (vocab_size % 32)) - 1
+            packed = mask.numpy().astype("<i4", copy=False).tobytes()
             eos_token_id = backend.tokenizer.eos_token_id
-            can_finish = eos_token_id in allowed_ids
+            can_finish = eos_token_id is not None and _token_in_bitmask(
+                eos_token_id, packed
+            )
+            allowed_ids: list[int] | bytes
             if request_allowed_set is not None:
                 allowed_ids = [
                     token_id
-                    for token_id in allowed_ids
-                    if token_id in request_allowed_set
+                    for token_id in request_allowed_set
+                    if _token_in_bitmask(token_id, packed)
                 ]
+            else:
+                allowed_ids = packed if any(packed) else []
 
             if not allowed_ids:
                 # Prove completion without adding a forbidden EOS to the beam.
