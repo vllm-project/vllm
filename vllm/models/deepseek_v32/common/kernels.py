@@ -179,6 +179,7 @@ def _fused_norm_rope_kernel(
     mla_cache_entry_stride,
     MLA_CACHE_BLOCK_SIZE: tl.constexpr,
     MLA_CACHE_FP8: tl.constexpr,
+    SKIP_MLA_SCALE: tl.constexpr,
     mla_cache_scale_ptr,
     # fp8_ds_mla cache views (block-scaled fp8 NoPE + unquantized bf16 RoPE).
     # mla_cache_ptr is the fp8 (1-byte) view, so the block/entry strides above
@@ -389,7 +390,9 @@ def _fused_norm_rope_kernel(
             )
             # kv_c_normed (KV_DIM elements)
             if MLA_CACHE_FP8:
-                scale = tl.load(mla_cache_scale_ptr)
+                scale = 1.0
+                if not SKIP_MLA_SCALE:
+                    scale = tl.load(mla_cache_scale_ptr)
                 kv_c_fp8 = (kv_c.to(tl.float32) / scale).to(fp8_dtype)
                 tl.store(dst + kv_block, kv_c_fp8)
             else:
@@ -397,10 +400,7 @@ def _fused_norm_rope_kernel(
             # k_pe_roped (from registers, interleaved layout)
             if MLA_CACHE_FP8:
                 tl.store(dst + KV_DIM + dim_off * 2, (r1 / scale).to(fp8_dtype))
-                tl.store(
-                    dst + KV_DIM + dim_off * 2 + 1,
-                    (r2 / scale).to(fp8_dtype),
-                )
+                tl.store(dst + KV_DIM + dim_off * 2 + 1, (r2 / scale).to(fp8_dtype))
             else:
                 tl.store(dst + KV_DIM + dim_off * 2, r1)
                 tl.store(dst + KV_DIM + dim_off * 2 + 1, r2)
@@ -543,6 +543,7 @@ def fused_norm_rope(
     kv_c_out: torch.Tensor | None = None,
     k_pe_out: torch.Tensor | None = None,
     index_k_out: torch.Tensor | None = None,
+    skip_scale: bool = False,
 ) -> torch.Tensor:
     assert positions.ndim == 1
     assert q_c.ndim == 2
@@ -719,6 +720,7 @@ def fused_norm_rope(
         mla_entry_stride,
         mla_block_size,
         mla_cache_fp8,
+        mla_cache_fp8 and skip_scale,
         mla_k_scale,
         mla_ds_scale_view,
         mla_ds_rope_view,
