@@ -320,6 +320,7 @@ In addition, you can also register all your `CustomOp` at one place for better m
 `DirectDCPQGather`, `DirectDCPA2AReduce` and `DirectDCPKVGather` in
 `vllm.v1.attention.ops.dcp` support OOT replacements. Workspaces own buffers and
 views; ops own communication, reduction and fallbacks. `workspace` may be `None`.
+`can_use_direct_workspace(group, dtype)` gates allocation; ops still run without it.
 
 Register through `vllm.general_plugins` on every worker before model construction.
 Override `forward_cuda`; handle absent/oversized workspaces or call `super()`:

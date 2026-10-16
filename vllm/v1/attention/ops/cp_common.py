@@ -70,7 +70,9 @@ class DirectCPCollective(CustomOp):
         return True
 
     @classmethod
-    def is_supported(cls, group: GroupCoordinator, dtype: torch.dtype) -> bool:
+    def can_use_direct_workspace(
+        cls, group: GroupCoordinator, dtype: torch.dtype
+    ) -> bool:
         if not (
             symm_mem_available
             and current_platform.is_cuda()

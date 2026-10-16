@@ -1096,7 +1096,7 @@ def get_direct_dcp_a2a_workspace(
     dtype: torch.dtype,
     num_ubatches: int,
 ) -> DirectDCPA2AWorkspace | None:
-    if not DirectDCPA2AReduce.is_supported(group, dtype):
+    if not DirectDCPA2AReduce.can_use_direct_workspace(group, dtype):
         return None
     return DirectDCPA2AWorkspace(
         group.device_group,
@@ -1239,7 +1239,7 @@ def get_direct_dcp_q_gather_workspace(
     num_ubatches: int,
     padded_num_heads: int | None = None,
 ) -> DirectDCPQGatherWorkspace | None:
-    if not DirectDCPQGather.is_supported(group, dtype):
+    if not DirectDCPQGather.can_use_direct_workspace(group, dtype):
         return None
     if not _q_gather_layout_supported(
         group.world_size, heads_per_rank, head_dim, dtype, padded_num_heads
@@ -1335,7 +1335,7 @@ def get_direct_dcp_kv_gather_workspace(
     dtype: torch.dtype,
     num_ubatches: int,
 ) -> DirectDCPKVGatherWorkspace | None:
-    if not DirectDCPKVGather.is_supported(group, dtype):
+    if not DirectDCPKVGather.can_use_direct_workspace(group, dtype):
         return None
     if not _kv_gather_layout_supported(token_dim, dtype):
         return None
