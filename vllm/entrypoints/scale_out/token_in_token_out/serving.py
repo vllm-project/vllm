@@ -179,6 +179,10 @@ class ServingTokens(GenerateBaseServing):
         request: GenerateRequest,
         raw_request: Request | None = None,
     ) -> GenerateResponse | ErrorResponse | AsyncGenerator[str, None]:
+        if self.synthetic_output and request.output_mode != "tokens":
+            return self.create_error_response(
+                "Text output is unsupported on the token API with synthetic acceptance"
+            )
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             logger.error("Error with model %s", error_check_ret)

@@ -82,6 +82,13 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
         temperature = params.temperature
         ignore_eos = params.ignore_eos
         length_penalty = params.length_penalty
+        vllm_config = self.llm_engine.vllm_config
+        spec_config = vllm_config.speculative_config
+        if (
+            spec_config is not None
+            and spec_config.rejection_sample_method == "synthetic"
+        ):
+            raise ValueError("Beam search is unsupported with synthetic acceptance")
         self.llm_engine.input_processor.resolve_watermarking(params)
 
         tokenizer = self.renderer.get_tokenizer()
