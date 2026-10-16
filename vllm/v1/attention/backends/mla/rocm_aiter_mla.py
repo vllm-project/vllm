@@ -134,13 +134,9 @@ def _get_mla_gluon():
 def _fp8_mla_prefill_supported() -> bool:
     """Auto-detect FP8 MLA prefill via mla_prefill_ps_asm_fwd + mla_reduce_v1.
 
-    Requires gfx950 plus an AITER build that exports both kernels.  When
+    Requires gfx950 plus an AITER build that exports both kernels. When
     either is missing we silently fall back to ``flash_attn_varlen_func``.
     """
-    import vllm.envs as envs
-
-    if not envs.VLLM_ROCM_USE_AITER_FP8_MLA_PREFILL:
-        return False
     try:
         from vllm.platforms.rocm import on_gfx950
     except Exception:  # noqa: BLE001
@@ -179,14 +175,10 @@ def _fused_mla_prefill_qkv_supported() -> bool:
 
 @functools.lru_cache(maxsize=1)
 def _fused_mla_prefill_supported() -> bool:
-    """Checks if fused MLA should be used via environment variables.
+    """Whether prefill with context may take one causal launch.
 
-    Requires gfx950.
+    Requires gfx950, the only arch the fused path is measured on.
     """
-    import vllm.envs as envs
-
-    if not envs.VLLM_ROCM_USE_AITER_FUSED_MLA_PREFILL:
-        return False
     try:
         from vllm.platforms.rocm import on_gfx950
     except Exception:  # noqa: BLE001
@@ -738,6 +730,14 @@ class AiterMLAMetadata(MLACommonMetadata[AiterMLADecodeMetadata]):
 
 # Tile size used by the mla_prefill_ps_asm_fwd assembly kernel.
 _FP8_PREFILL_TILE_Q = 256
+_FP8_PREFILL_NUM_HEADS = (16, 32, 48, 64, 96, 128)
+_FP8_PREFILL_MIN_QUERY_LEN = 8192
+_FP8_PREFILL_MANY_HEADS = 64
+_FP8_PREFILL_MANY_HEADS_MIN_QUERY_LEN = 4096
+
+_FUSED_PREFILL_LONG_CONTEXT = 8192
+_FUSED_PREFILL_MAX_HEADS = 32
+_FUSED_PREFILL_SHORT_QUERY = 256
 
 
 class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
@@ -1082,15 +1082,12 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             device=device,
         )
 
-        # The assembly prefill requires FP8 KV, bf16 output, and 16-aligned
-        # heads. It writes bf16 through a raw output pointer, so fp16 must use
-        # the standard prefill path. Head counts that are not a multiple of 16
-        # are replicate-padded up to one in _mla_fp8_prefill_attn, so the gate
-        # is the same head-count predicate the decode path uses.
         self._fp8_prefill_enabled = _fp8_mla_prefill_supported() and (
             kv_cache_dtype_str == "fp8"
             and vllm_config.model_config.dtype == torch.bfloat16
-            and AiterMLAHelper.is_valid_num_heads(self.num_heads)
+            and self.mla_dims.qk_nope_head_dim + self.mla_dims.qk_rope_head_dim == 192
+            and self.mla_dims.v_head_dim == 128
+            and self.num_heads in _FP8_PREFILL_NUM_HEADS
         )
         if self._fp8_prefill_enabled:
             max_prefill_qlen = min(
@@ -1447,6 +1444,24 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         metadata.fp8_prefill_max_q_len = prefill.max_query_len
         metadata.fp8_prefill_num_partial_tiles = num_partial_tiles
 
+    def _use_fp8_prefill(self, query_lens: torch.Tensor) -> bool:
+        """Shape rule for prefills without context."""
+        if self.num_heads >= _FP8_PREFILL_MANY_HEADS:
+            return int(query_lens.min()) >= _FP8_PREFILL_MANY_HEADS_MIN_QUERY_LEN
+        return int(query_lens.min()) >= _FP8_PREFILL_MIN_QUERY_LEN
+
+    def _use_fused_prefill(
+        self, query_lens: torch.Tensor, context_lens: torch.Tensor
+    ) -> bool:
+        """Shape rule for prefills with context."""
+        if self.num_heads > _FUSED_PREFILL_MAX_HEADS:
+            return True
+        if int(context_lens.min()) >= _FUSED_PREFILL_LONG_CONTEXT:
+            return True
+        long_query = query_lens > _FUSED_PREFILL_SHORT_QUERY
+        long_context = context_lens >= _FUSED_PREFILL_LONG_CONTEXT
+        return not bool((long_query & long_context).any())
+
     def _build_fused_prefill_metadata(
         self,
         metadata: AiterMLAMetadata,
@@ -1455,7 +1470,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         """Lay out every prefill's [context ‖ new] rows for one causal launch.
 
         Returns None to keep the two-pass path when the rows do not fit the
-        chunked-prefill workspace.
+        chunked-prefill workspace or _use_fused_prefill returns False.
         """
         num_decodes = metadata.num_decodes
         num_reqs = common_attn_metadata.num_reqs
@@ -1471,6 +1486,8 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
 
         num_kv_tokens = int(seq_lens.sum())
         if num_kv_tokens > self.chunked_prefill_workspace_size:
+            return None
+        if not self._use_fused_prefill(query_lens, context_lens):
             return None
 
         cu_seq_lens = torch.zeros(seq_lens.numel() + 1, dtype=torch.int32)
@@ -2044,6 +2061,8 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             self._fp8_prefill_enabled
             and attn_metadata.prefill is not None
             and attn_metadata.prefill.chunked_context is None
+            and attn_metadata.prefill.query_lens_cpu is not None
+            and self._use_fp8_prefill(attn_metadata.prefill.query_lens_cpu)
         ):
             self._build_fp8_prefill_ps_metadata(attn_metadata, common_attn_metadata)
         if (
@@ -2230,13 +2249,9 @@ class AiterMLAHelper:
         sized with this same function, or the work/reduce maps describe a
         different head count than the kernel is handed.
 
-        This function itself has no upper bound; the ceiling comes from the
-        ``is_valid_num_heads`` gate, which rejects counts above
-        ``_AITER_MAX_PADDED_MLA_HEADS`` (128) unless they are already
-        16-aligned. That bound was established for the asm *decode* padding, so
-        an architecture with, say, 136 heads per rank would be refused the
-        prefill here for a reason that was never measured against this kernel
-        pair. Revisit the constant rather than special-casing prefill.
+        This function itself has no upper bound; the builder gate admits only
+        ``_FP8_PREFILL_NUM_HEADS``, the 16-aligned head counts ``mla_reduce_v1``
+        has a 128-dim case for.
         """
         m = AiterMLAHelper._AITER_MIN_MLA_HEADS
         return -(-num_heads // m) * m
@@ -2447,8 +2462,8 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
 
         # FP8 MLA prefill kernel imports (lazy, only when enabled).
         # Auto-enabled on gfx950 when AITER ships the kernels. Only runs when the
-        # KV cache is FP8. Head counts that are not a multiple of 16 are
-        # replicate-padded up to one (see _mla_fp8_prefill_attn).
+        # KV cache is FP8 and the builder admits the head count
+        # (_FP8_PREFILL_NUM_HEADS).
 
         self._fp8_prefill_enabled = _fp8_mla_prefill_supported() and (
             is_quantized_kv_cache(kv_cache_dtype)
