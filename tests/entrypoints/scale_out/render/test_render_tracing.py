@@ -302,11 +302,11 @@ async def test_render_tool_intent_and_telemetry(
     span = _wait_for_span(trace_service, span_name)
     _assert_span_linked_to_trace(span, TRACEPARENT)
     assert span["attributes"] == {
-        "tool_calling.present": True,
-        "tool_calling.tool_count": 1,
-        "tool_calling.tool_choice": choice,
-        "tool_calling.api_surface": api_surface,
-        "tool_calling.render_status": "rendered",
+        "vllm.tool_calling.present": True,
+        "vllm.tool_calling.tool_count": 1,
+        "vllm.tool_calling.tool_choice": choice,
+        "vllm.tool_calling.api_surface": api_surface,
+        "vllm.tool_calling.render_status": "rendered",
     }
     metrics = (await client.get("/metrics")).text
     assert _render_count(metrics, api_surface, "rendered") - before == 1
