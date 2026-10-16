@@ -131,10 +131,7 @@ def test_oot_collective_dispatch_preserves_native_fallback(
     group = SimpleNamespace(
         world_size=workspace.world_size,
         device_group=workspace.group,
-        all_gather=MagicMock(return_value=torch.full_like(output, 42)),
     )
-    fallback_a2a = MagicMock(return_value=torch.full_like(output, 42))
-    monkeypatch.setattr(dcp, "dcp_a2a_lse_reduce", fallback_a2a)
     if workspace_state == "oversized":
         workspace.max_num_tokens = 1
         workspace.max_gathered_tokens = 3
@@ -178,16 +175,9 @@ def test_oot_collective_dispatch_preserves_native_fallback(
     ), "Direct kernels must stay enabled under Inductor unless explicitly disabled"
     if use_oot:
         assert op.calls == int(cuda_enabled), "Enabled dispatch must use the OOT op"
-    cuda_fallback = cuda_enabled and workspace_state != "available"
-    assert group.all_gather.call_count == int(
-        cuda_fallback and op_cls is dcp.DirectDCPQGather
-    )
-    assert fallback_a2a.call_count == int(
-        cuda_fallback and op_cls is dcp.DirectDCPA2AReduce
-    )
     assert len(collective_calls) == int(
-        not cuda_enabled or (cuda_fallback and op_cls is dcp.DirectDCPKVGather)
-    ), "Native dispatch and KV fallback must use built-in Torch collectives"
+        not cuda_enabled or workspace_state != "available"
+    ), "Native dispatch and all CUDA fallbacks must use built-in Torch collectives"
 
 
 def _collective_test_op(
@@ -207,9 +197,6 @@ def _collective_test_op(
     with set_current_vllm_config(config):
         group = SimpleNamespace(
             world_size=workspace.world_size, device_group=workspace.group
-        )
-        group.all_gather = lambda query, dim: _q_gather_reference(
-            query, group.world_size, None
         )
         kwargs = (
             {"padded_num_heads": workspace.padded_num_heads}
@@ -543,9 +530,7 @@ def test_mla_dcp_manager_selects_fallback_backends(monkeypatch, default_vllm_con
         monkeypatch.setattr(op_cls, "forward_cpu", op_cls.forward_cuda)
     import vllm.v1.attention.ops.dcp as dcp_manager
 
-    group = MagicMock(world_size=2)
-    gathered_query = torch.empty(1, 4, 8)
-    group.all_gather.return_value = gathered_query
+    group = SimpleNamespace(world_size=2, device_group=object())
     monkeypatch.setattr(dcp_manager, "get_dcp_group", lambda: group)
     monkeypatch.setattr(
         dcp_manager, "get_direct_dcp_a2a_workspace", MagicMock(return_value=None)
@@ -556,8 +541,6 @@ def test_mla_dcp_manager_selects_fallback_backends(monkeypatch, default_vllm_con
     monkeypatch.setattr(
         dcp_manager, "get_direct_dcp_kv_gather_workspace", MagicMock(return_value=None)
     )
-    fallback_combine = MagicMock(return_value=torch.empty(1))
-    monkeypatch.setattr(dcp_manager, "dcp_a2a_lse_reduce", fallback_combine)
 
     manager = dcp_manager.MLADCPManager(
         vllm_config=_manager_config(),
@@ -572,36 +555,39 @@ def test_mla_dcp_manager_selects_fallback_backends(monkeypatch, default_vllm_con
         use_pcp=False,
     )
 
-    all_gather = MagicMock()
+    def gather(destination: torch.Tensor, source: torch.Tensor, *, group: Any) -> None:
+        destination.copy_(torch.cat((source, source), dim=0))
+
+    all_gather = MagicMock(side_effect=gather)
     monkeypatch.setattr(torch.distributed, "all_gather_into_tensor", all_gather)
     workspace = torch.empty(96, 8)
     manager.init_kv_gather(workspace, 64)
-    output, local = torch.empty(4, 8), torch.empty(2, 8)
+    output, local = torch.empty(4, 8), torch.ones(2, 8)
     manager.kv_gather(output, local)
     all_gather.assert_called_once_with(output, local, group=group.device_group)
+    assert torch.equal(output, torch.cat((local, local), dim=0))
 
-    query = torch.empty(1, 2, 8)
+    all_gather.reset_mock()
+    query = torch.arange(16, dtype=torch.float32).reshape(1, 2, 8)
     assert manager.query_gather is not None
-    assert manager.query_gather(query) is gathered_query
-    group.all_gather.assert_called_once_with(query, dim=1)
+    assert torch.equal(manager.query_gather(query), torch.cat((query, query), dim=1))
+    all_gather.assert_called_once()
+    assert all_gather.call_args.kwargs["group"] is group.device_group
 
-    partial_output, partial_lse = torch.empty(1), torch.empty(1)
+    all_to_all = MagicMock(side_effect=lambda dst, src, **kwargs: dst.copy_(src))
+    monkeypatch.setattr(torch.distributed, "all_to_all_single", all_to_all)
+    partial_output, partial_lse = torch.full((1, 4, 4), 42.0), torch.zeros(1, 4)
     seq_lens = torch.ones(1, dtype=torch.int32)
     query_start_loc = torch.tensor([0, 1], dtype=torch.int32)
-    manager.combine(
+    combined = manager.combine(
         partial_output,
         partial_lse,
         seq_lens=seq_lens,
         query_start_loc=query_start_loc,
     )
-    fallback_combine.assert_called_once_with(
-        partial_output,
-        partial_lse,
-        seq_lens=seq_lens,
-        query_start_loc=query_start_loc,
-        cp_group=group,
-        is_lse_base_on_e=True,
-    )
+    assert torch.equal(combined, torch.full((1, 2, 4), 42.0))
+    all_to_all.assert_called_once()
+    assert all_to_all.call_args.kwargs["group"] is group.device_group
 
 
 @pytest.mark.parametrize(
@@ -1202,6 +1188,10 @@ def _distributed_direct_a2a_worker(env: dict[str, str]) -> None:
         check_empty_shards(
             query_lens=[1, 3, 2, *([1] * (world_size - 1))],
             iteration=len(cases),
+        )
+        check_empty_shards(
+            query_lens=[max_num_tokens + 1, 3, 2, *([1] * (world_size - 1))],
+            iteration=len(cases) + 1,
         )
         generator = torch.Generator(device=device)
         generator.manual_seed(4321 + rank)

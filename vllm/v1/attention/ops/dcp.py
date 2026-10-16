@@ -1386,10 +1386,7 @@ class DirectDCPQGather(DirectCPCollective):
     def forward_cuda(self, local_query: torch.Tensor) -> torch.Tensor:
         workspace = self.workspace
         if workspace is None or local_query.shape[0] > workspace.max_num_tokens:
-            output = self.group.all_gather(local_query, dim=1)
-            if self.padded_num_heads is not None:
-                output = reserve_query_head_storage(output, self.padded_num_heads)
-            return output
+            return self.forward_native(local_query)
         ubatch = dbo_current_ubatch_id()
         output = workspace.query_output(local_query, ubatch)
         query_multicast_ptr, signal_multicast_ptr = workspace.multicast_ptrs[ubatch]
@@ -1467,18 +1464,13 @@ class DirectDCPA2AReduce(DirectCPCollective):
     ) -> torch.Tensor:
         workspace = self.workspace
         if workspace is None or partial_output.shape[0] > workspace.max_num_tokens:
-            output = dcp_a2a_lse_reduce(
+            return self.forward_native(
                 partial_output,
                 partial_lse,
-                cp_group=self.group,
                 is_lse_base_on_e=is_lse_base_on_e,
                 seq_lens=seq_lens,
                 query_start_loc=query_start_loc,
             )
-            assert isinstance(output, torch.Tensor), (
-                "DCP combine must return its output"
-            )
-            return output
         ubatch = dbo_current_ubatch_id()
         num_tokens = partial_output.shape[0]
         output = partial_output.new_empty(
