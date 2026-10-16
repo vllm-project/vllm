@@ -1273,3 +1273,76 @@ def test_modelopt_block_quant_loads_expert_blocks_with_aligned_tp_slices(
             "w2",
             0,
         )
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
+@pytest.mark.parametrize("late", [False, True])
+def test_modelopt_w4a16_reload_ignores_legacy_input_scale(dist_init, late):
+    """A layerwise reload processes a W4A16 layer once its weights arrive, so a
+    deprecated checkpoint's input_scale may come before or after that; either
+    way it is ignored. An FP8 layer still waits for its input_scale."""
+    from vllm.model_executor.layers.linear import ReplicatedLinear
+    from vllm.model_executor.model_loader.reload import (
+        finalize_layerwise_processing,
+        initialize_layerwise_reload,
+        record_metadata_for_reloading,
+    )
+    from vllm.model_executor.model_loader.reload.layerwise import LAYERWISE_INFO
+    from vllm.model_executor.models.utils import AutoWeightsLoader
+
+    k, n = 128, 64
+
+    class Toy(torch.nn.Module):
+        def __init__(self, quant_config):
+            super().__init__()
+            self.quant_config = quant_config
+            for prefix in ("w4a16", "fp8"):
+                linear = ReplicatedLinear(
+                    k,
+                    n,
+                    bias=False,
+                    params_dtype=torch.bfloat16,
+                    quant_config=quant_config,
+                    prefix=prefix,
+                )
+                self.add_module(prefix, linear)
+
+        def load_weights(self, weights):
+            return AutoWeightsLoader(self).load_weights(weights)
+
+    config = _mixed_precision_config(
+        {"w4a16": {"quant_algo": "W4A16_NVFP4"}, "fp8": {"quant_algo": "FP8"}}
+    )
+    with set_current_vllm_config(VllmConfig()), torch.device("cuda"):
+        model = Toy(config)
+        record_metadata_for_reloading(model)
+        fp8 = current_platform.fp8_dtype()
+        ckpt = {
+            "w4a16.weight": torch.randint(0, 256, (n, k // 2), dtype=torch.uint8),
+            "w4a16.weight_scale": (torch.rand(n, k // 16) + 0.5).to(fp8),
+            "w4a16.weight_scale_2": torch.tensor(0.01),
+            "fp8.weight": torch.randn(n, k).to(fp8),
+            "fp8.weight_scale": torch.tensor(0.02),
+        }
+        legacy = [("w4a16.input_scale", torch.tensor(1.0))]
+        fp8_input_scale = [("fp8.input_scale", torch.tensor(0.05))]
+
+        model.load_weights([*ckpt.items(), *legacy, *fp8_input_scale])
+        for layer in (model.w4a16, model.fp8):
+            layer.quant_method.process_weights_after_loading(layer)
+        cold = {name: t.clone() for name, t in model.state_dict().items()}
+
+        initialize_layerwise_reload(model)
+        first = [*ckpt.items()] if late else [*legacy, *ckpt.items()]
+        model.load_weights(first)
+        assert not LAYERWISE_INFO[model.w4a16].can_load()
+        assert LAYERWISE_INFO[model.fp8].can_load()
+        model.load_weights([*legacy, *fp8_input_scale] if late else fp8_input_scale)
+        assert not LAYERWISE_INFO[model.fp8].can_load()
+        finalize_layerwise_processing(model, None)
+
+    assert not hasattr(model.w4a16, "input_scale")
+    reloaded = model.state_dict()
+    assert reloaded.keys() == cold.keys()
+    for name, tensor in cold.items():
+        assert torch.equal(reloaded[name], tensor), name
