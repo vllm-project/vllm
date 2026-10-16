@@ -188,11 +188,11 @@ steps:
   _raw_old_commands:
   - fused_recurrent_gated_delta_rule
   source_file_dependencies:
-  - tests/kernels/test_fused_recurrent_packed_decode.py
+  - tests/kernels/fla/test_fused_recurrent_packed_decode.py
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-    'pytest tests/kernels/test_fused_recurrent_packed_decode.py::test_fused_recurrent_packed_decode_matches_reference -v || true'
+    'pytest tests/kernels/fla/test_fused_recurrent_packed_decode.py::test_fused_recurrent_packed_decode_matches_reference -v || true'
 - label: layer_norm_fwd_kernel
   key: layer-norm-fwd-kernel
   device: intel_gpu
@@ -210,11 +210,11 @@ steps:
   _raw_old_commands:
   - layer_norm_fwd_kernel
   source_file_dependencies:
-  - tests/kernels/test_fla_layernorm_guard.py
+  - tests/kernels/fla/test_fla_layernorm_guard.py
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-    'pytest tests/kernels/test_fla_layernorm_guard.py::test_layer_norm_fwd_basic -v || true'
+    'pytest tests/kernels/fla/test_fla_layernorm_guard.py::test_layer_norm_fwd_basic -v || true'
 - label: _silu_mul_fp8_quant_deep_gemm
   key: silu-mul-fp8-quant-deep-gemm
   device: intel_gpu
