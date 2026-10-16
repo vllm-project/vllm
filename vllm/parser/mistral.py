@@ -466,12 +466,23 @@ class MistralParser(ParserEngine):
                     }
                 )
 
-        match tool_choice, json_schema is not None:
-            case MistralToolChoiceEnum.none, True:
+        # When a json_schema is set but no tool can be called (either because
+        # tool_choice is "none" or the request has no tools at all), route to
+        # the schema-only grammar. Otherwise `get_lark_from_jinja` renders
+        # `start: body | %json ...` where `body` includes a wildcard
+        # `[TOOL_CALLS] /.+/ [ARGS] {anything}` branch, letting the model emit
+        # arbitrary tool calls the user never defined alongside the schema.
+        has_tools = mistral_tools is not None and len(mistral_tools) > 0
+        match tool_choice, has_tools, json_schema is not None:
+            case _, False, True:
                 lark_grammar = grammar_factory.get_lark_for_json_schema(
                     template=template, json_schema=json_schema
                 )
-            case _, _:
+            case MistralToolChoiceEnum.none, True, True:
+                lark_grammar = grammar_factory.get_lark_for_json_schema(
+                    template=template, json_schema=json_schema
+                )
+            case _, _, _:
                 lark_grammar = grammar_factory.get_lark_from_jinja(
                     template=template,
                     mode=tool_choice,
