@@ -102,7 +102,6 @@ CUtensorMap make_strided_kv(void* ptr, unsigned groups, unsigned stride) {
 
 constexpr int kHeads = 32;
 constexpr int kHeadDim = 128;
-constexpr int kTopK = 2048;
 constexpr int kCandidates = 16384;  // per-row candidate slab
 constexpr int kRetained = 4096;     // per-row recovery slab
 
@@ -118,10 +117,10 @@ void check_tensor(const torch::stable::Tensor& t, int32_t device,
 
 // q [rows,32,128] fp8e4m3, k [keys,128] fp8e4m3, scales [keys] fp32,
 // weights [rows,32] fp32, starts/ends [rows] int32 (visible key range
-// [start,end) of each row), out [rows,2048] int32: absolute key indices
-// (columns of the logits), or with relative=true indices relative to the
-// row's start (key - start, the top_k_per_row_prefill convention); -1 padded
-// when fewer than 2048 keys are visible.
+// [start,end) of each row), out [rows,K] int32 with K (the top-k) 512, 1024 or
+// 2048: absolute key indices (columns of the logits), or with relative=true
+// indices relative to the row's start (key - start, the top_k_per_row_prefill
+// convention); -1 padded when fewer than K keys are visible.
 // 0 < rows <= 16384, 0 < keys <= 1048576 (the last 8-row block may be partial).
 // Workspace (caller-owned, reused across calls), with B = ceil(rows / 8) and
 // S >= 2 slots per CTA of the persistent grid (one CTA per SM):
@@ -169,8 +168,10 @@ void fused_mqa_topk_prefill(
                   "weights must be [rows, 32]");
   STD_TORCH_CHECK(starts.numel() == rows && ends.numel() == rows,
                   "starts/ends must be [rows]");
-  STD_TORCH_CHECK(out.dim() == 2 && out.size(0) == rows && out.size(1) == kTopK,
-                  "out must be [rows, 2048]");
+  STD_TORCH_CHECK(
+      out.dim() == 2 && out.size(0) == rows &&
+          (out.size(1) == 512 || out.size(1) == 1024 || out.size(1) == 2048),
+      "out must be [rows, K] with K in {512, 1024, 2048}");
   STD_TORCH_CHECK(reinterpret_cast<uintptr_t>(out.data_ptr()) % 16 == 0,
                   "out must be 16-byte aligned");
 
@@ -178,7 +179,8 @@ void fused_mqa_topk_prefill(
   const cudaStream_t stream = get_current_cuda_stream(dev);
   const unsigned urows = static_cast<unsigned>(rows),
                  ukeys = static_cast<unsigned>(keys),
-                 ublocks = static_cast<unsigned>(blocks);
+                 ublocks = static_cast<unsigned>(blocks),
+                 topk = static_cast<unsigned>(out.size(1));
   const auto* starts_p = static_cast<const unsigned*>(starts.data_ptr());
   const auto* ends_p = static_cast<const unsigned*>(ends.data_ptr());
   auto* out_p = static_cast<int*>(out.data_ptr());
@@ -198,7 +200,7 @@ void fused_mqa_topk_prefill(
         reinterpret_cast<const void*>(fused_mqa_topk_fp8_resident_kernel),
         cudaFuncAttributeMaxDynamicSharedMemorySize, smem));
     fused_mqa_topk_fp8_resident_kernel<<<ublocks, 384, smem, stream>>>(
-        urows, ukeys, starts_p, ends_p, out_p, relative, tq, ts, tk, tw);
+        urows, ukeys, starts_p, ends_p, out_p, topk, relative, tq, ts, tk, tw);
     check_cuda(cudaGetLastError());
     return;
   }
@@ -225,7 +227,7 @@ void fused_mqa_topk_prefill(
   const unsigned grid = static_cast<unsigned>(
       std::min<int64_t>({int64_t(num_sms), blocks, values.size(0) / 16}));
   fused_persist::LaunchConfig c;
-  check_cuda(fused_persist::launch_config(ukeys, c));
+  check_cuda(fused_persist::launch_config(ukeys, topk, c));
   auto tks = make_strided_kv(k.data_ptr(), c.sample_groups, c.sample_stride);
   const FallbackBuffers fallback{static_cast<float*>(retained.data_ptr()),
                                  static_cast<int*>(retained_indices.data_ptr()),

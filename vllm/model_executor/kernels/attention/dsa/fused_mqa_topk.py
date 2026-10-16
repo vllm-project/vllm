@@ -4,8 +4,9 @@
 
 One kernel (``torch.ops._C.fused_mqa_topk_prefill``) scores every visible key
 of each query row with the DeepSeek sparse-attention indexer and selects the
-row's top-2048 keys, without materializing the ``[rows, keys]`` logits matrix
-that the dense path (``fp8_fp4_mqa_logits`` + ``top_k_per_row_prefill``) needs.
+row's top-k keys (k = 512, 1024 or 2048), without materializing the
+``[rows, keys]`` logits matrix that the dense path (``fp8_fp4_mqa_logits`` +
+``top_k_per_row_prefill``) needs.
 
 Above 4K keys the kernel is persistent (one CTA per SM); each CTA owns two
 8-row candidate slots. The scratch (~296 MiB on a 148-SM GPU) is allocated once
@@ -24,7 +25,7 @@ logger = init_logger(__name__)
 
 FUSED_MQA_TOPK_HEADS = 32
 FUSED_MQA_TOPK_HEAD_DIM = 128
-FUSED_MQA_TOPK_TOPK = 2048
+FUSED_MQA_TOPK_TOPKS = (512, 1024, 2048)
 # Largest query chunk / gathered key range a single call accepts.
 FUSED_MQA_TOPK_MAX_ROWS = 16384
 FUSED_MQA_TOPK_MAX_KEYS = 1 << 20
@@ -117,7 +118,7 @@ def get_fused_mqa_topk_workspace(device: torch.device) -> FusedMQATopKWorkspace:
 def fused_mqa_topk_config_supported(q: torch.Tensor, topk_tokens: int) -> bool:
     """Whether this indexer's query layout and top-k fit the fused kernel."""
     return (
-        topk_tokens == FUSED_MQA_TOPK_TOPK
+        topk_tokens in FUSED_MQA_TOPK_TOPKS
         and q.dtype == torch.float8_e4m3fn
         and q.dim() == 3
         and tuple(q.shape[1:]) == (FUSED_MQA_TOPK_HEADS, FUSED_MQA_TOPK_HEAD_DIM)
@@ -166,11 +167,12 @@ def fused_mqa_topk_prefill(
 
     q: [rows, 32, 128] fp8 e4m3; k: [keys, 128] fp8 e4m3; scales: [keys] fp32;
     weights: [rows, 32] fp32; starts/ends: [rows] int32, the visible key range
-    ``[start, end)`` of each row; output: [rows, 2048] int32.
+    ``[start, end)`` of each row; output: [rows, k] int32 with k (the top-k)
+    512, 1024 or 2048.
 
     Writes the same convention as ``ops.top_k_per_row_prefill``: indices
     relative to the row's ``start`` (i.e. ``key - start``), unordered, ``-1``
-    padded when fewer than 2048 keys are visible. ``rows_start_at_zero=True``
+    padded when fewer than k keys are visible. ``rows_start_at_zero=True``
     promises every ``start`` is 0 (single-request chunk) and skips the
     relative-index conversion.
 
@@ -189,13 +191,14 @@ def fused_mqa_topk_prefill(
         or starts.numel() != rows
         or ends.numel() != rows
         or output.dtype != torch.int32
-        or tuple(output.shape) != (rows, FUSED_MQA_TOPK_TOPK)
+        or output.shape[0] != rows
     ):
         return False
 
     logger.info_once(
         "Using the single-launch fused MQA+top-k prefill kernel "
-        "(FP8, 32 heads, top-k 2048)."
+        "(FP8, 32 heads, top-k %d).",
+        output.shape[1],
     )
     q = q.contiguous()
     k = k.contiguous()

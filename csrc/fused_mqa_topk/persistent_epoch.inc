@@ -75,7 +75,9 @@ if (warp_idx == 8) {
       e.ends[lane] = en;
     }
     const bool all_short =
-        __ballot_sync(0xffffffffu, lane < 8 && en - st > 2048u) == 0;
+        __ballot_sync(0xffffffffu, lane < 8 && en - st > topk) == 0;
+    const bool gated =
+        __ballot_sync(0xffffffffu, lane < 8 && en - st > sample_target) != 0;
     // KV range: rows past the end are clamped to the last valid row (DeepGEMM
     // scheduler).
     const unsigned src = min(row_base + (lane & 7), rows - 1) - row_base;
@@ -97,6 +99,7 @@ if (warp_idx == 8) {
       e.all_short = all_short;
       e.kv_base = kv_base;
       e.splits = (hi - kv_base + 255) / 256;
+      e.samples = gated ? sample_tiles : 0u;
       e.slot = slot;
     }
     __syncwarp();
@@ -145,7 +148,7 @@ if (warp_idx == 8) {
     claim_full[k & 1].wait((k >> 1) & 1);
     const ClaimEntry& e = entries[k & 1];
     const unsigned vblock = e.vblock, all_short = e.all_short,
-                   kv_base = e.kv_base, splits = e.splits;
+                   kv_base = e.kv_base, splits = e.splits, samples = e.samples;
     __syncwarp();
     if (vblock >= kPause) break;
     claim_empty[k & 1].arrive();
@@ -165,7 +168,7 @@ if (warp_idx == 8) {
                                   : 0.0f;
       }
 #pragma unroll 1
-      for (unsigned t = 0; t < sample_tiles; ++t) {
+      for (unsigned t = 0; t < samples; ++t) {
         // Only lane 0's ring state is maintained across blocks (the scan loop
         // runs on lane 0).
         CUTE_TIE_DECL(kv_pipe.advance(), s0, ph);
@@ -197,7 +200,7 @@ if (warp_idx == 8) {
                       1);  // selection scratch overlaps the KV stages
       const unsigned center = sample_stride / 2;
 #pragma unroll 1
-      for (unsigned t = 0; t < (KVS == 3 ? 0u : sample_tiles); ++t) {
+      for (unsigned t = 0; t < (KVS == 3 ? 0u : samples); ++t) {
         CUTE_TIE_DECL(kv_pipe.advance(), s, ph);
         empty_kv[s].wait(ph ^ 1);
         fused_mqa_dg::tma_copy<128, 256, 0, cutlass::float_e4m3_t, true>(
@@ -242,7 +245,7 @@ if (warp_idx == 8) {
     claim_full[k & 1].wait((k >> 1) & 1);
     const ClaimEntry& e = entries[k & 1];
     const unsigned vblock = e.vblock, all_short = e.all_short,
-                   splits = e.splits;
+                   splits = e.splits, samples = e.samples;
     __syncwarp();
     if (vblock >= kPause) break;
     claim_empty[k & 1].arrive();
@@ -254,7 +257,7 @@ if (warp_idx == 8) {
       full_lin->wait(q_phase);  // this block's linear-term rows (warp 11)
       ptx::tcgen05_after_thread_sync();
     }
-    const unsigned total = sample_tiles + splits;
+    const unsigned total = samples + splits;
 #pragma unroll 1
     for (unsigned t = 0; t < total; ++t) {
       CUTE_TIE_DECL(kv_pipe.advance(), s, ph);
@@ -388,8 +391,8 @@ if (warp_idx == 8) {
     if (e.all_short) {
       for (unsigned r = 0; r < 8 && row_base + r < rows; ++r) {
         const unsigned s0 = e.starts[r], vis = e.ends[r] - s0;
-        for (unsigned j = math_tid; j < 2048; j += 256)
-          fallback.output[(uint64_t)(row_base + r) * 2048 + j] =
+        for (unsigned j = math_tid; j < topk; j += 256)
+          fallback.output[(uint64_t)(row_base + r) * topk + j] =
               j < vis ? int((relative ? 0u : s0) + j) : -1;
       }
       __syncwarp();
@@ -406,7 +409,6 @@ if (warp_idx == 8) {
     static_assert(SampleQ * 2112 % 4 == 0);
     for (unsigned j = math_tid; j < SampleQ * 2112 / 4; j += 256)
       reinterpret_cast<uint4*>(stream.hist)[j] = make_uint4(0, 0, 0, 0);
-    if (math_tid < 8) stream.counts[math_tid] = 0;
     float weights[4][32];
     [[maybe_unused]] float
         row_s[4];  // > 16K: pow2 row scale of the linear term
@@ -455,7 +457,7 @@ if (warp_idx == 8) {
     sample_sync();
     // ---- sample tiles ----
 #pragma unroll 1
-    for (unsigned t = 0; t < sample_tiles; ++t) {
+    for (unsigned t = 0; t < e.samples; ++t) {
       CUTE_TIE_DECL(kv_pipe.advance(), kv_stage, kv_phase);
       if constexpr (!kRel) full_kv[kv_stage].wait(kv_phase);
 #pragma unroll
@@ -530,34 +532,17 @@ if (warp_idx == 8) {
             bq = (sum.x + sum.y) * scale_kv;
           const bool valid = in_view && kv_offset >= seq_k_start[i] &&
                              kv_offset < seq_k_end[i] && isfinite(bq);
-          if constexpr (kLin) {
-            if (valid) {
-              const unsigned bin = sample_bin(bq);
-              atomicAdd(stream.hist[query_base + i] + bin + bin / 32, 1u);
-            }
-          } else {
-            stream.scores[query_base + i][kv_lane] = valid ? bq : -CUDART_INF_F;
+          if (valid) {
+            const unsigned bin = sample_bin(bq);
+            atomicAdd(stream.hist[query_base + i] + bin + bin / 32, 1u);
           }
         }
       }
-      if constexpr (!kLin) {
-        sample_sync();
-        accumulate_sample(stream, math_tid);
-        sample_sync();
-      }
     }
-    if constexpr (kLin) {
-      sample_sync();
-      finish_sample_histogram(stream.hist[warp_idx], gate_s + warp_idx,
-                              e.ends[warp_idx] - e.starts[warp_idx],
-                              sample_target, lane);
-    } else {
-      const unsigned rb =
-          *reinterpret_cast<const volatile unsigned*>(&e.vblock) * 8;
-      SampleBuffers sb{gate_s - rb, nullptr, nullptr, nullptr, sample_target};
-      finish_sample(stream, sb, warp_idx, rb + warp_idx,
-                    e.ends[warp_idx] - e.starts[warp_idx], lane);
-    }
+    sample_sync();
+    finish_sample_histogram(stream.hist[warp_idx], gate_s + warp_idx,
+                            e.ends[warp_idx] - e.starts[warp_idx],
+                            sample_target, lane);
     sample_sync();
     const unsigned row_base2 =
         *reinterpret_cast<const volatile unsigned*>(&e.vblock) * 8;
@@ -906,12 +891,12 @@ if (warp_idx == 8) {
       unsigned recover = 0, short_rows = 0;
       row_offset[0] = 0;
       for (unsigned r = 0; r < 8; ++r) {
-        const bool is_short = ce.ends[r] - ce.starts[r] <= 2048u;
+        const bool is_short = ce.ends[r] - ce.starts[r] <= topk;
         short_rows |= unsigned(is_short) << r;
         const int c =
             kSmem ? int(row_count[r]) : __ldcg(counts + row_base3 + r);
         const int real = kSmem ? (c & ((1 << 21) - 1)) : c;
-        recover |= !is_short && (real < 2048 || real > 16384);
+        recover |= !is_short && (real < int(topk) || real > 16384);
         // > 16K rows start 16-byte aligned for select_staged_row's vector
         // loads.
         row_offset[r + 1] =
@@ -950,8 +935,8 @@ if (warp_idx == 8) {
       if (r >= rows) return;
       const unsigned s0 = ce.starts[r - row_base3],
                      visible = ce.ends[r - row_base3] - s0;
-      int* o = fallback.output + (uint64_t)r * 2048;
-      for (unsigned j = t; j < 2048; j += stride)
+      int* o = fallback.output + (uint64_t)r * topk;
+      for (unsigned j = t; j < topk; j += stride)
         o[j] = j < visible ? int((relative ? 0u : s0) + j) : -1;
     };
     if (!recover) {
@@ -960,7 +945,7 @@ if (warp_idx == 8) {
         const unsigned warp = warp_idx;
         if (row_base3 + warp < rows) {
           const unsigned r = row_base3 + warp;
-          int* o = fallback.output + (uint64_t)r * 2048;
+          int* o = fallback.output + (uint64_t)r * topk;
           if (short_rows >> warp & 1u)
             write_short(r, lane, 32);
           else {
@@ -985,7 +970,7 @@ if (warp_idx == 8) {
                                : (unsigned(__ldcg(gv + e2 - kCandCap)) << 8 |
                                   (unsigned(__ldcg(gi + e2 - kCandCap)) >> 16));
                   },
-                  total, o, reinterpret_cast<unsigned*>(scratch),
+                  total, o, topk, reinterpret_cast<unsigned*>(scratch),
                   [&](unsigned e2) {
                     return e2 < kCandCap
                                ? int32_t(idx[e2])
@@ -993,8 +978,8 @@ if (warp_idx == 8) {
                   });
             } else if (!row_select::select_shared_row(
                            hi, lo, idx, kCandCap, unsigned(c & ((1 << 21) - 1)),
-                           o, scratch)) {
-              fast_select::select_resident(hi, lo, kCandCap, 0u, o,
+                           o, topk, scratch)) {
+              fast_select::select_resident(hi, lo, kCandCap, 0u, o, topk,
                                            reinterpret_cast<unsigned*>(scratch),
                                            key_of);
             }
@@ -1017,11 +1002,11 @@ if (warp_idx == 8) {
               write_short(r, lane, 32);
             else {
               const unsigned cnt = __ldcg(counts + r);
-              int* o = fallback.output + (uint64_t)r * 2048;
+              int* o = fallback.output + (uint64_t)r * topk;
               if (!row_select::select_staged_row(codes, cnt, vals + base,
-                                                 indices + base, o, hist))
+                                                 indices + base, o, topk, hist))
                 fast_select::select_row(codes, cnt, vals + base, indices + base,
-                                        o, hist);
+                                        o, topk, hist);
             }
           }
           cutlass::arch::NamedBarrier(256, 5).sync();
@@ -1030,15 +1015,16 @@ if (warp_idx == 8) {
     }
     cutlass::arch::NamedBarrier(256, 5).sync();
     if (relative && !recover) {
-      for (unsigned i = math_tid; i < 8 * 512; i += 256) {
-        const unsigned r = row_base3 + i / 512;
-        if (r >= rows || ce.ends[i / 512] - ce.starts[i / 512] <= 2048u)
+      const unsigned quads = topk / 4;
+      for (unsigned i = math_tid; i < 8 * quads; i += 256) {
+        const unsigned r = row_base3 + i / quads;
+        if (r >= rows || ce.ends[i / quads] - ce.starts[i / quads] <= topk)
           continue;
         const int s = int(starts_g[r]);
         if (s == 0) continue;
         int4* p =
-            reinterpret_cast<int4*>(fallback.output + (uint64_t)r * 2048) +
-            i % 512;
+            reinterpret_cast<int4*>(fallback.output + (uint64_t)r * topk) +
+            i % quads;
         int4 v = *p;
         v.x = v.x < 0 ? -1 : v.x - s;
         v.y = v.y < 0 ? -1 : v.y - s;
@@ -1083,8 +1069,8 @@ if (defer_head != kTerm) {
     fb.retained += row_delta * 4096;
     fb.indices += row_delta * 4096;
     fused_mqa_fallback::rescan_block(
-        fused_mqa_dense::Scheduler(vblock, rows, keys, starts, ends), fb, tq,
-        tk, ts, tw);
+        fused_mqa_dense::Scheduler(vblock, rows, keys, starts, ends), fb, topk,
+        tq, tk, ts, tw);
     __syncthreads();
     if (threadIdx.x == 0) {
       auto& fst =
@@ -1098,14 +1084,15 @@ if (defer_head != kTerm) {
     }
     __syncthreads();
     if (relative) {
-      for (unsigned i = threadIdx.x; i < 8 * 512; i += 384) {
-        const unsigned r = row_base + i / 512;
+      const unsigned quads = topk / 4;
+      for (unsigned i = threadIdx.x; i < 8 * quads; i += 384) {
+        const unsigned r = row_base + i / quads;
         if (r >= rows) continue;
         const int s = int(starts_g[r]);
         if (s == 0) continue;
         int4* p =
-            reinterpret_cast<int4*>(fallback.output + (uint64_t)r * 2048) +
-            i % 512;
+            reinterpret_cast<int4*>(fallback.output + (uint64_t)r * topk) +
+            i % quads;
         int4 v = *p;
         v.x = v.x < 0 ? -1 : v.x - s;
         v.y = v.y < 0 ? -1 : v.y - s;

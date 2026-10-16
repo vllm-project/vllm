@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
-// Exact recovery for blocks whose gated candidate count left [2048, 16384] (or
+// Exact recovery for blocks whose gated candidate count left [K, 16384] (or
 // whose weights are too small to halve exactly): the block is rescanned
 // densely, and every 1024-key segment of scores is merged into a running
-// per-row top set (kept <= FallbackRetain, compacted to 2048).
+// per-row top set (kept <= FallbackRetain, compacted to K).
 #pragma once
 #include <cutlass/arch/barrier.h>
 #include "dense_scan.cuh"
@@ -11,6 +11,7 @@
 #include <math_constants.h>
 #include <cuda_fp16.h>
 constexpr unsigned FallbackSegment = 1024, FallbackRetain = 4096;
+// output: [rows, K] int32 (K = the row top-k).
 struct FallbackBuffers {
   float* retained;
   int* indices;
@@ -50,10 +51,10 @@ __device__ __forceinline__ void fb_sync() {
   cutlass::arch::NamedBarrier(256, 2).sync();
   asm volatile("" ::: "memory");
 }
-__device__ void fb_compact(FallbackShared& s, FallbackBuffers b, unsigned local,
-                           unsigned row, unsigned tid, bool final = false) {
-  constexpr unsigned K = 2048, Full = 0xffffffffu, T = 256,
-                     Items = FallbackRetain / T;
+__device__ void fb_compact(FallbackShared& s, FallbackBuffers b, unsigned K,
+                           unsigned local, unsigned row, unsigned tid,
+                           bool final = false) {
+  constexpr unsigned Full = 0xffffffffu, T = 256, Items = FallbackRetain / T;
   unsigned lane = tid & 31, count = s.kept[local];
   uint64_t base = (uint64_t)row * FallbackRetain;
   float values[Items];
@@ -193,11 +194,11 @@ __device__ void fb_compact(FallbackShared& s, FallbackBuffers b, unsigned local,
   }
   fb_sync();
 }
-__device__ void fb_select(FallbackShared& s, FallbackBuffers b, unsigned local,
-                          unsigned row, unsigned epoch, unsigned first,
-                          unsigned n, unsigned tid, bool final) {
-  constexpr unsigned K = 2048, Full = 0xffffffffu, T = 32,
-                     Items = FallbackSegment / T;
+__device__ void fb_select(FallbackShared& s, FallbackBuffers b, unsigned K,
+                          unsigned local, unsigned row, unsigned epoch,
+                          unsigned first, unsigned n, unsigned tid,
+                          bool final) {
+  constexpr unsigned Full = 0xffffffffu, T = 32, Items = FallbackSegment / T;
   unsigned lane = tid, bank = epoch & 1;
   float values[Items], gate = __uint_as_float(s.gates[local]);
   unsigned count = 0;
@@ -278,7 +279,7 @@ struct RescanPolicy {
   static constexpr uint32_t kSplitsPerSegment = FallbackSegment / 256;
   FallbackShared& stream;
   FallbackBuffers buffers;
-  uint32_t query_base, row_base, epoch = 0;
+  uint32_t topk, query_base, row_base, epoch = 0;
   uint32_t seq_k_start[4], seq_k_end[4];
   float gate[4];
   CUTLASS_DEVICE void begin_block(const Scheduler& s, uint32_t q_block,
@@ -316,17 +317,17 @@ struct RescanPolicy {
     const unsigned tid = threadIdx.x;
     for (unsigned local = 0; local < 8; ++local)
       if (stream.kept[local] > FallbackRetain - FallbackSegment)
-        fb_compact(stream, buffers, local, row_base + local, tid);
+        fb_compact(stream, buffers, topk, local, row_base + local, tid);
     fb_sync();
     const unsigned local = tid / 32;
-    fb_select(stream, buffers, local, row_base + local, epoch,
+    fb_select(stream, buffers, topk, local, row_base + local, epoch,
               kv_base + (split / kSplitsPerSegment) * FallbackSegment,
               (split % kSplitsPerSegment + 1) * 256, tid % 32, false);
     fb_sync();
     if (split + 1 == num_splits)
       for (unsigned l = 0; l < 8; ++l)
-        if (stream.kept[l] > 2048)
-          fb_compact(stream, buffers, l, row_base + l, tid, true);
+        if (stream.kept[l] > topk)
+          fb_compact(stream, buffers, topk, l, row_base + l, tid, true);
     fb_sync();
     ++epoch;
   }
@@ -335,8 +336,8 @@ struct RescanPolicy {
     const unsigned row = s.get_logits_row(q_block, local),
                    count = stream.kept[local];
     if (row < s.num_q_tokens)
-      for (unsigned j = lane; j < 2048; j += 32)
-        buffers.output[(uint64_t)row * 2048 + j] =
+      for (unsigned j = lane; j < topk; j += 32)
+        buffers.output[(uint64_t)row * topk + j] =
             j < count ? buffers.indices[(uint64_t)row * FallbackRetain + j]
                       : -1;
   }
@@ -345,17 +346,15 @@ struct RescanPolicy {
 // Rescans one block exactly; `buffers` rows are addressed by absolute row
 // (callers offset them). Out of line: the rare rescan must not add register
 // pressure to the caller's hot loops.
-__device__ __noinline__ void rescan_block(const Scheduler& block,
-                                          FallbackBuffers buffers,
-                                          const cute::TmaDescriptor& tq,
-                                          const cute::TmaDescriptor& tk,
-                                          const cute::TmaDescriptor& ts,
-                                          const cute::TmaDescriptor& tw) {
+__device__ __noinline__ void rescan_block(
+    const Scheduler& block, FallbackBuffers buffers, unsigned topk,
+    const cute::TmaDescriptor& tq, const cute::TmaDescriptor& tk,
+    const cute::TmaDescriptor& ts, const cute::TmaDescriptor& tw) {
   extern __shared__ __align__(1024) uint8_t smem_buffer[];
   auto& stream = *reinterpret_cast<FallbackShared*>(
       smem_buffer + sizeof(fused_mqa_dense::SharedStorage));
   stream.init(threadIdx.x);
-  RescanPolicy policy{stream, buffers};
+  RescanPolicy policy{stream, buffers, topk};
   fused_mqa_dense::score_block(block, policy, tq, tk, ts, tw);
 }
 

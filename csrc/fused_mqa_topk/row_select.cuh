@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
-// Single-warp top-2048 selection of one row's candidates for the persistent
-// kernel. Both selections bracket the 2048-th largest fp24 code with 512
+// Single-warp top-K selection of one row's candidates for the persistent
+// kernel. Both selections bracket the K-th largest fp24 code with 512
 // sampled codes, place the codes above the bracket directly, and resolve the
 // bracket with histogram levels on register-resident codes; elements are placed
 // by per-lane counts and one warp prefix scan (no per-element ballots).
@@ -93,28 +93,6 @@ __device__ __forceinline__ unsigned find_bin_v(const unsigned* hist,
   above = __shfl_sync(Full, acc_at, winner);
   return __shfl_sync(Full, chosen, winner);
 }
-// Sampled hi16 bracket (16-step bit search over the 512 register samples).
-__device__ __forceinline__ void bit_bracket(
-    const unsigned (&smp)[kSamplesPerLane], unsigned r_hi, unsigned r_lo,
-    unsigned& h_hi, unsigned& h_lo) {
-  h_hi = 0;
-  h_lo = 0;
-#pragma unroll 1
-  for (int bit = 15; bit >= 0; --bit) {
-    const unsigned ch = h_hi | (1u << bit), cl = h_lo | (1u << bit);
-    unsigned nh = 0, nl = 0;
-#pragma unroll
-    for (unsigned u = 0; u < kSamplesPerLane; ++u) {
-      nh += smp[u] >= ch;
-      nl += smp[u] >= cl;
-    }
-    const unsigned both =
-        __reduce_add_sync(Full, nh | nl << 16);  // counts <= 512 fit 16 bits
-    if ((both & 0xffffu) >= r_hi) h_hi = ch;
-    if ((both >> 16) >= r_lo) h_lo = cl;
-  }
-}
-
 // <= 16K keys: one row's shared-memory candidates (hi16 / lo8 code arrays and
 // the uint16 key array idx_row, read with 16-byte loads). Bracket keys are
 // preloaded into registers before the emit. Returns false (out untouched) when
@@ -123,7 +101,7 @@ __device__ bool select_shared_row(const uint16_t* __restrict__ hi_row,
                                   const uint8_t* __restrict__ lo_row,
                                   const uint16_t* __restrict__ idx_row,
                                   unsigned count, unsigned real,
-                                  int32_t* __restrict__ out,
+                                  int32_t* __restrict__ out, unsigned K,
                                   unsigned char* scratch) {
   const unsigned lane = threadIdx.x & 31;
   unsigned h_hi, h_lo;
@@ -139,7 +117,9 @@ __device__ bool select_shared_row(const uint16_t* __restrict__ hi_row,
     const unsigned expect = (K * s_real + real / 2) / real;
     const unsigned r_hi = expect > 40 ? expect - 40 : 1,
                    r_lo = min(expect + 40, s_real);
-    bit_bracket(smp, r_hi, r_lo, h_hi, h_lo);
+    // h8 (768 words) borrows the stage area, written only after the bracket.
+    radix_bracket(smp, r_hi, r_lo, reinterpret_cast<unsigned*>(scratch), h_hi,
+                  h_lo);
     h_lo = max(h_lo, 1u);
   }
   const unsigned units = (count + 7) / 8;
@@ -158,8 +138,9 @@ __device__ bool select_shared_row(const uint16_t* __restrict__ hi_row,
            pm = warp_exclusive_scan(nm, mid);
   if (above >= K || above + mid < K || mid > kMid3Cap) return false;
   uint16_t* stage = reinterpret_cast<uint16_t*>(scratch);
-  uint16_t* midbuf = reinterpret_cast<uint16_t*>(scratch + K * 2);
-  unsigned* hist = reinterpret_cast<unsigned*>(scratch + K * 2 + kMid3Cap * 2);
+  uint16_t* midbuf = reinterpret_cast<uint16_t*>(scratch + kMaxK * 2);
+  unsigned* hist =
+      reinterpret_cast<unsigned*>(scratch + kMaxK * 2 + kMid3Cap * 2);
 #pragma unroll 2
   for (unsigned unit = lane; unit < units; unit += 32) {
     const uint4 h4 = hv[unit], k4 = iv[unit];
@@ -256,7 +237,7 @@ __device__ bool select_shared_row(const uint16_t* __restrict__ hi_row,
 __device__ __noinline__ bool select_staged_row(
     unsigned* __restrict__ codes, unsigned count,
     const uint16_t* __restrict__ values, const int32_t* __restrict__ packed,
-    int32_t* __restrict__ out, unsigned* hist) {
+    int32_t* __restrict__ out, unsigned K, unsigned* hist) {
   const unsigned lane = threadIdx.x & 31;
   if (count <= K) return false;
   const unsigned chunks = (count + 7) / 8;

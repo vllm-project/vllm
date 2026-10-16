@@ -9,8 +9,9 @@
 // torch.ops._C.<op_name> for compatibility with existing code.
 STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
 #ifdef VLLM_ENABLE_FUSED_MQA_TOPK
-  // Single-launch fused FP8 MQA-logits + top-2048 prefill selection (SM100
-  // family). Workspace tensors are caller-owned; counter must be zero.
+  // Single-launch fused FP8 MQA-logits + top-k (512/1024/2048) prefill
+  // selection (SM100 family). Workspace tensors are caller-owned; counter must
+  // be zero.
   ops.def(
       "fused_mqa_topk_prefill(Tensor q, Tensor k, Tensor scales, "
       "Tensor weights, Tensor starts, Tensor ends, Tensor! out, "
