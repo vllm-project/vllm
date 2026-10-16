@@ -138,8 +138,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
 
         self._push_writer_stop = threading.Event()
         self._push_writer_thread: threading.Thread | None = None
-        # NIXL does not guarantee thread safety. Serialize the writer's data
-        # plane operations with endpoint setup on the handshake executor.
+        # NIXL is not thread-safe. Serialize writer calls with handshake setup.
         self._nixl_io_lock = threading.Lock()
 
     # --- Lifecycle ----------------------------------------------------- #
@@ -252,8 +251,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                     )
                 self._reqs_to_send[req_id] = expiration_time
 
-        # _send_heartbeats may start a handshake or call send_notif. Keep both
-        # operations off the model thread so it cannot miss an EP collective.
+        # Heartbeats call NIXL. Run them on the writer, not the model thread.
         if metadata.heartbeat_by_engine:
             self._heartbeat_inbox.put(metadata)
             self._push_writer_wake.set()
@@ -320,7 +318,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                     self._push_finished_blocks.pop(rid, None)
                     self._pending_d_registrations.pop(rid, None)
 
-                # 4. Heartbeats: handshake/send_notif are writer-owned.
+                # 4. Heartbeats.
                 self._drain_heartbeats()
 
                 # 5. NIXL notifs: route PUSH_REG; forward the rest.
@@ -331,17 +329,14 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                         else:
                             self._pending_completion_notifs.put(notif)
 
-                # 6. Poll outgoing WRITE handles. The model thread consumes
-                # only the resulting request IDs.
+                # 6. Poll outgoing WRITE handles.
                 self._poll_sending_transfers()
             except Exception:
                 logger.exception("nixl-push-writer error; continuing")
             finally:
                 self._nixl_io_lock.release()
 
-            # Self-poll only while there is no other wake source: P-side
-            # finished blocks waiting for a D PUSH_REG match, or an outgoing
-            # WRITE awaiting completion.
+            # Self-poll while unmatched blocks or outgoing WRITEs remain.
             with self._sending_transfers_lock:
                 has_inflight_writes = bool(self._sending_transfers)
             if self._push_finished_blocks or has_inflight_writes:
@@ -857,8 +852,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         return set()
 
     def get_transfer_results(self) -> KVConnectorTransferResults:
-        # Wake the writer to progress NIXL. The model thread only consumes
-        # notifications and request IDs published by the writer.
+        # Wake the writer. It owns NIXL progress.
         self._push_writer_wake.set()
 
         results = super().get_transfer_results()
