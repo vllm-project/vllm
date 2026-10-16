@@ -77,10 +77,8 @@ logger = init_logger(__name__)
 
 
 class DeepseekV4MoE(DeepseekV4MoEBase):
-    # AITER's FlyDSL MoE leaves padded intermediate columns unwritten when told
-    # about the padding (576 -> 640 at TP4), so they read as stale memory and
-    # can turn rows NaN. The padding's weights are zero, so computing over it is
-    # exact. Drop once AITER's stage-1 grid fix is in the pinned AITER.
+    # TODO: revert once https://github.com/ROCm/aiter/pull/6598 is in the
+    # pinned AITER; with the padding set, its FlyDSL MoE can output NaN.
     experts_intermediate_pad = 0
 
     def __init__(

@@ -578,8 +578,7 @@ def _validate_aiter_mega_moe_config(vllm_config: VllmConfig) -> None:
 
 
 class DeepseekV4MoE(nn.Module):
-    # The routed experts' intermediate padding as AITER sees it (None: the
-    # padding vLLM added).
+    # None: use the padding vLLM added.
     experts_intermediate_pad: int | None = None
 
     def __init__(
