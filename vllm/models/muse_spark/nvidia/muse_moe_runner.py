@@ -137,6 +137,17 @@ def validate_deployment(moe_config: FusedMoEConfig, *, kernel_routes: bool) -> N
         )
 
 
+def _use_route_major_on_this_gpu() -> bool:
+    """Whether the expert path runs route-major Triton/Marlin GEMMs.
+
+    The FlashInfer TRT-LLM MoE kernels need Blackwell; Hopper and Ampere/Ada
+    run route-major GEMMs with the Triton post-expert finalize instead.
+    """
+    return current_platform.is_cuda() and not current_platform.has_device_capability(
+        100
+    )
+
+
 def _validate_route_major_deployment(moe_config: FusedMoEConfig) -> None:
     validate_deployment(moe_config, kernel_routes=False)
     parallel_config = moe_config.moe_parallel_config
@@ -575,7 +586,7 @@ class MuseSparkModelOptNvFp4FusedMoE(ModelOptNvFp4FusedMoE):
         super().__init__(quant_config, moe_config)
         self.use_route_major = (
             self.nvfp4_backend == NvFp4MoeBackend.MARLIN
-            and current_platform.is_device_capability_family(90)
+            and _use_route_major_on_this_gpu()
         )
         if self.use_route_major:
             _validate_route_major_deployment(moe_config)
@@ -588,8 +599,8 @@ class MuseSparkModelOptNvFp4FusedMoE(ModelOptNvFp4FusedMoE):
             return
         if self.nvfp4_backend != NvFp4MoeBackend.FLASHINFER_TRTLLM:
             raise NotImplementedError(
-                "MuseSpark NVFP4 MoE requires FLASHINFER_TRTLLM or Marlin "
-                f"on Hopper; got {self.nvfp4_backend}."
+                "MuseSpark NVFP4 MoE requires FLASHINFER_TRTLLM, or Marlin "
+                f"before Blackwell; got {self.nvfp4_backend}."
             )
         if self.use_a16 or not self.moe.is_act_and_mul:
             raise NotImplementedError(
@@ -746,7 +757,7 @@ class MuseSparkUnquantizedFusedMoE(UnquantizedFusedMoEMethod):
     muse_post_expert_finalize: MusePostExpertFinalize
 
     def __init__(self, moe: FusedMoEConfig) -> None:
-        self.use_route_major = current_platform.is_device_capability_family(90)
+        self.use_route_major = _use_route_major_on_this_gpu()
         if self.use_route_major:
             _validate_route_major_deployment(moe)
             FusedMoEMethodBase.__init__(self, moe)
