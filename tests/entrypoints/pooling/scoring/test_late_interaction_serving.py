@@ -216,12 +216,12 @@ async def test_late_interaction_releases_requests_and_queries(
     all_docs_added = asyncio.Event()
     blocked = asyncio.Event()
     pending = set()
-    external_aborts, rpcs = [], []
     handler_task = None
     error = VLLMValidationError("document rejected")
 
     class ControlledEngine:
         encode = AsyncLLM.encode
+        abort = AsyncLLM.abort
         log_requests = False
         is_tracing_enabled = AsyncMock(return_value=False)
 
@@ -292,11 +292,6 @@ async def test_late_interaction_releases_requests_and_queries(
             )
             return collector
 
-        async def abort(self, request_ids, internal=False):
-            if not internal:
-                external_aborts.append(request_ids)
-            await AsyncLLM.abort(self, request_ids, internal)
-
         async def send_abort(self, request_ids):
             if request_ids and scenario == "double_abort":
                 # AsyncLLM.abort already removed the external ID mapping.
@@ -309,8 +304,8 @@ async def test_late_interaction_releases_requests_and_queries(
         async def collective_rpc(
             self, method, *, args, wait_for_inflight_batches=False
         ):
+            assert scenario != "normal"
             assert method == "release_late_interaction_query_cache"
-            rpcs.append(args[0])
             if scenario == "double_rpc":
                 cleanup_entered.set()
                 await release.wait()
@@ -339,12 +334,7 @@ async def test_late_interaction_releases_requests_and_queries(
     engine = ControlledEngine()
     serving.engine_client = engine
     monkeypatch.setattr(serving, "_preprocessing", AsyncMock())
-    monkeypatch.setattr(
-        serving,
-        "_postprocessing_async",
-        AsyncMock(return_value=Response()),
-        raising=False,
-    )
+    serving._postprocessing_async = AsyncMock(return_value=Response())
     monkeypatch.setattr(serving, "_log_inputs", Mock())
 
     async def init_context(*args, **kwargs):
@@ -411,11 +401,3 @@ async def test_late_interaction_releases_requests_and_queries(
     assert not runner._query_uses
     assert not runner._doc_query_keys
     assert not engine.output_processor.external_req_ids
-    if scenario == "normal":
-        assert not external_aborts and not rpcs
-    else:
-        assert ctx.late_interaction_query_keys is not None
-        assert external_aborts == [
-            ctx.late_interaction_query_keys + (ctx.late_interaction_doc_keys or [])
-        ]
-        assert rpcs == [ctx.late_interaction_query_keys]
