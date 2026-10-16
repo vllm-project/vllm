@@ -686,6 +686,7 @@ fn tools_convert_string_arguments() {
             },
         }),
         strict: None,
+        defer_loading: None,
     }];
     let text = "<tool_call>\n<function=set_alarm>\n<parameter=hour>\n7\n</parameter>\n<parameter=enabled>\ntrue\n</parameter>\n<parameter=label>\nwake up\n</parameter>\n<parameter=weekday>1</parameter><parameter=weekday>2</parameter>\n</function>\n</tool_call>";
     assert_eq!(
@@ -888,6 +889,7 @@ fn differential_against_transformers() {
                 description: None,
                 parameters: tool["function"]["parameters"].clone(),
                 strict: None,
+                defer_loading: None,
             })
             .collect();
         let expected = match DIVERGENCES.iter().find(|(divergent, _)| *divergent == text) {
