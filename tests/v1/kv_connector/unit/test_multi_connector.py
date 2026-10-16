@@ -629,6 +629,7 @@ class TestMultiConnectorStats:
                 "num_failed_handshakes": [],
                 "num_kv_expired_reqs": [],
                 "num_notifications_after_expiry": [],
+                "num_lease_check_failures": [],
             }
         }
 
@@ -655,6 +656,7 @@ class TestMultiConnectorStats:
                 "num_failed_handshakes": [],
                 "num_kv_expired_reqs": [],
                 "num_notifications_after_expiry": [],
+                "num_lease_check_failures": [],
             },
             "MockConnector": {"mock_field": [1, 2, 3]},
         }
@@ -687,6 +689,7 @@ class TestMultiConnectorStats:
                 "num_failed_handshakes": [],
                 "num_kv_expired_reqs": [],
                 "num_notifications_after_expiry": [],
+                "num_lease_check_failures": [],
             },
         }
 
@@ -709,6 +712,7 @@ class TestMultiConnectorStats:
                 "num_failed_handshakes": [],
                 "num_kv_expired_reqs": [],
                 "num_notifications_after_expiry": [],
+                "num_lease_check_failures": [],
             }
         )
         mock_stats = MockConnectorStats(data={"mock_field": [1, 2, 3]})
@@ -741,6 +745,7 @@ class TestMultiConnectorStats:
                 "num_failed_handshakes": [],
                 "num_kv_expired_reqs": [],
                 "num_notifications_after_expiry": [],
+                "num_lease_check_failures": [],
             }
         )
 
@@ -775,6 +780,7 @@ class TestMultiConnectorStats:
                 "num_failed_handshakes": [],
                 "num_kv_expired_reqs": [],
                 "num_notifications_after_expiry": [],
+                "num_lease_check_failures": [],
             },
             "ExampleConnector": {"some_field": [1, 2, 3]},
         }
@@ -815,6 +821,7 @@ class TestMultiConnectorStats:
                         "num_failed_handshakes": [],
                         "num_kv_expired_reqs": [],
                         "num_notifications_after_expiry": [],
+                        "num_lease_check_failures": [],
                     }
                 )
             }
@@ -833,6 +840,7 @@ class TestMultiConnectorStats:
                         "num_failed_handshakes": [],
                         "num_kv_expired_reqs": [],
                         "num_notifications_after_expiry": [],
+                        "num_lease_check_failures": [],
                     }
                 )
             }
@@ -867,6 +875,7 @@ class TestMultiConnectorStats:
                         "num_failed_handshakes": [],
                         "num_kv_expired_reqs": [],
                         "num_notifications_after_expiry": [],
+                        "num_lease_check_failures": [],
                     }
                 )
             }
@@ -896,6 +905,7 @@ class TestMultiConnectorStats:
                         "num_failed_handshakes": [],
                         "num_kv_expired_reqs": [],
                         "num_notifications_after_expiry": [],
+                        "num_lease_check_failures": [],
                     }
                 )
             }
@@ -925,6 +935,7 @@ class TestMultiConnectorStats:
                         "num_failed_handshakes": [],
                         "num_kv_expired_reqs": [],
                         "num_notifications_after_expiry": [],
+                        "num_lease_check_failures": [],
                     }
                 )
             }
@@ -957,6 +968,7 @@ class TestMultiConnectorStats:
                         "num_failed_handshakes": [],
                         "num_kv_expired_reqs": [],
                         "num_notifications_after_expiry": [],
+                        "num_lease_check_failures": [],
                     }
                 )
             }
