@@ -1534,8 +1534,8 @@ class ModelConfig:
         parallel_config: ParallelConfig,
     ) -> None:
         if parallel_config.enable_hc_sp and parallel_config.tensor_parallel_size > 1:
-            if not current_platform.is_cuda():
-                raise ValueError("--enable-hc-sp currently requires CUDA")
+            if not current_platform.is_cuda_alike():
+                raise ValueError("--enable-hc-sp currently requires CUDA or ROCm")
             if not self.registry.is_hc_sp_supported_model(self.architectures, self):
                 raise ValueError("--enable-hc-sp is not supported for this model")
             if parallel_config.pipeline_parallel_size != 1:
@@ -2037,10 +2037,6 @@ class ModelConfig:
     @property
     def has_inner_state(self):
         return self._model_info.has_inner_state
-
-    @property
-    def supports_mamba_prefix_caching(self) -> bool:
-        return self._model_info.supports_mamba_prefix_caching
 
     @property
     def supports_replayssm(self) -> bool:
