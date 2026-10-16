@@ -243,12 +243,15 @@ def get_quant_config(
         # (e.g. for activation overrides via the MXFP4 oracle).
 
         # For modelopt_mixed, config.json's quantization_config may or may
-        # not contain the per-layer quantized_layers map.  Newer checkpoints
+        # not contain the per-layer weight or KV-cache map. Newer checkpoints
         # embed it directly; older ones keep it only in hf_quant_config.json.
         # If it is missing, fall through to the file-based loading path.
         if (
             model_config.quantization == "modelopt_mixed"
-            and "quantized_layers" not in hf_quant_config
+            and not any(
+                key in hf_quant_config.get("quantization", hf_quant_config)
+                for key in ("quantized_layers", "kv_cache_quantized_layers")
+            )
         ) or (
             # Inkling2's per-tensor precisions are only in hf_quant_config.json.
             model_config.quantization == "inkling2" and "model" not in hf_quant_config
