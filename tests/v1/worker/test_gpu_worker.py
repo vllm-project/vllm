@@ -444,10 +444,11 @@ def test_execute_model_waits_previous_pp_send_before_forward(
 
 
 @pytest.mark.parametrize(
-    "timed,deferred_sampling", [(True, False), (True, True), (False, True)]
+    "timed,deferred_sampling,num_tokens",
+    [(True, False, 4), (True, True, 4), (False, True, 4), (True, False, 0)],
 )
 def test_iteration_timing_finishes_after_sampling_and_draft(
-    monkeypatch, timed, deferred_sampling
+    monkeypatch, timed, deferred_sampling, num_tokens
 ):
     milestones = []
     events = [Mock(), Mock(query=Mock(return_value=False))]
@@ -459,6 +460,8 @@ def test_iteration_timing_finishes_after_sampling_and_draft(
 
     def execute_model(*args):
         milestones.append("forward")
+        if num_tokens == 0:
+            return output
         if not deferred_sampling:
             return sample_tokens()
 
@@ -480,15 +483,18 @@ def test_iteration_timing_finishes_after_sampling_and_draft(
         use_v2_model_runner=True,
         annotate_profile=lambda _: nullcontext(),
     )
-    scheduler_output = SimpleNamespace(
-        total_num_scheduled_tokens=4, iteration_metrics_id=3
-    )
+    scheduler_output = SimpleNamespace(total_num_scheduled_tokens=num_tokens)
+    if num_tokens:
+        scheduler_output.iteration_metrics_id = 3
     returned = gpu_worker.Worker.execute_model(worker, scheduler_output)
     if deferred_sampling:
         assert returned is None
         returned = gpu_worker.Worker.sample_tokens(worker, None)
     assert returned is output and returned.iteration_timing_samples == ()
-    if timed:
+    if num_tokens == 0:
+        assert milestones == ["forward"]
+        assert gpu_worker.Worker.poll_iteration_timing(worker) == ()
+    elif timed:
         assert milestones == ["start", "forward", "sample", "draft", "end"]
         events[1].query.return_value = True
         assert gpu_worker.Worker.poll_iteration_timing(worker) == ((3, 0.015),)

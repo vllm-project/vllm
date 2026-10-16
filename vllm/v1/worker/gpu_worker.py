@@ -119,9 +119,18 @@ logger = init_logger(__name__)
 
 
 @contextmanager
-def _cancel_iteration_timing_on_error(
+def _guard_iteration_timing(
     timer: IterationTimer | None,
+    *,
+    new_iteration: SchedulerOutput | None = None,
 ) -> Iterator[None]:
+    """Start a scheduled step or guard deferred sampling; never finish it."""
+    if timer is not None and new_iteration is not None:
+        timer.start(
+            new_iteration.iteration_metrics_id
+            if new_iteration.total_num_scheduled_tokens > 0
+            else None
+        )
     try:
         yield
     except Exception:
@@ -1331,7 +1340,7 @@ class Worker(WorkerBase):
         self, grammar_output: "GrammarOutput | None"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput:
         timer = self.model_runner.iteration_timer
-        with _cancel_iteration_timing_on_error(timer):
+        with _guard_iteration_timing(timer):
             output = self.model_runner.sample_tokens(grammar_output)
         if timer is not None:
             timer.finish()
@@ -1367,11 +1376,7 @@ class Worker(WorkerBase):
 
         with self.annotate_profile(scheduler_output):
             timer = self.model_runner.iteration_timer
-            if timer is not None:
-                timer.start(
-                    scheduler_output.iteration_metrics_id if forward_pass else None
-                )
-            with _cancel_iteration_timing_on_error(timer):
+            with _guard_iteration_timing(timer, new_iteration=scheduler_output):
                 output = self.model_runner.execute_model(
                     scheduler_output, intermediate_tensors
                 )
