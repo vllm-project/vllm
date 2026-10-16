@@ -545,7 +545,6 @@ steps:
   num_devices: 1
   source_file_dependencies:
   - cmake/external_projects/deepgemm.cmake
-  - tools/install_deepgemm.sh
   - tools/build_deepgemm_C.py
   - tools/setup_deepgemm_pythons.sh
   - tools/check_wheel_deepgemm.py
