@@ -323,6 +323,14 @@ class SpeculativeConfig:
             if layer_ids is not None:
                 # Convert to tuple to make it hashable
                 factors.append(tuple(layer_ids))
+            if self.method == "extract_hidden_states":
+                layout = getattr(
+                    self.draft_model_config.hf_config,
+                    "hidden_states_layout",
+                    "auxiliary",
+                )
+                if layout != "auxiliary":
+                    factors.append(layout)
 
         hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str

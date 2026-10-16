@@ -124,3 +124,9 @@ The file path is returned in `output.kv_transfer_params["hidden_states_path"]`. 
 
 !!! note
     Chunked prefill is not compatible with this feature and must be disabled.
+
+## Experimental response-window capture
+
+See [windowed connector capture](windowed_hidden_states_connector.md) for the
+opt-in write-filtered rollout path, layout metadata, resource budget and
+explicit compatibility restrictions.
