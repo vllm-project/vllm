@@ -107,6 +107,38 @@ def test_nemotron_h_batch_invariant_uses_cuda_fp8_quant(
     assert pass_config.fuse_act_quant is False
 
 
+@pytest.fixture
+def on_sm10x(monkeypatch):
+    """The batch-invariant config checks below assume a supported GPU."""
+    from vllm.platforms import current_platform
+
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(
+        current_platform, "is_device_capability_family", lambda family: family == 100
+    )
+
+
+def test_nemotron_h_batch_invariant_requires_sm10x(monkeypatch):
+    """Off SM10x, batch-invariant Nemotron-H fails at config time with the
+    reason, not later in a kernel check inside the engine core."""
+    from vllm.model_executor.models import config
+    from vllm.platforms import current_platform
+
+    monkeypatch.setattr(config.envs, "VLLM_BATCH_INVARIANT", True)
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(
+        current_platform, "is_device_capability_family", lambda family: False
+    )
+    vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(mamba_ssm_cache_dtype="float32"),
+        model_config=SimpleNamespace(hf_config=SimpleNamespace()),
+        parallel_config=SimpleNamespace(tensor_parallel_size=1),
+    )
+    with pytest.raises(ValueError, match="SM10x"):
+        config.NemotronHForCausalLMConfig.verify_and_update_config(vllm_config)
+
+
+@pytest.mark.usefixtures("on_sm10x")
 @pytest.mark.parametrize("batch_invariant", [False, True])
 def test_nemotron_h_batch_invariant_requires_tp1(monkeypatch, batch_invariant):
     """Only TP=1 matches the training replay, so batch-invariant Nemotron-H
@@ -126,6 +158,7 @@ def test_nemotron_h_batch_invariant_requires_tp1(monkeypatch, batch_invariant):
         config.NemotronHForCausalLMConfig.verify_and_update_config(vllm_config)
 
 
+@pytest.mark.usefixtures("on_sm10x")
 @pytest.mark.parametrize(
     "kv_cache_dtype,error",
     [("auto", False), ("bfloat16", True), ("fp8", False), ("fp8_e5m2", True)],
@@ -166,6 +199,7 @@ _MIXED_FP8_W4A16 = {
 }
 
 
+@pytest.mark.usefixtures("on_sm10x")
 @pytest.mark.parametrize(
     "dtype,kv_cache_dtype,quantization,hf_quant_config,error",
     [

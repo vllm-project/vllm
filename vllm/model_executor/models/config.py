@@ -813,6 +813,17 @@ class NemotronHForCausalLMConfig(VerifyAndUpdateConfig):
         if bf16_activations:
             cls.verify_bf16_activations(vllm_config)
         if envs.VLLM_BATCH_INVARIANT:
+            from vllm.platforms import current_platform
+
+            if not (
+                current_platform.is_cuda()
+                and current_platform.is_device_capability_family(100)
+            ):
+                raise ValueError(
+                    "VLLM_BATCH_INVARIANT=1 with Nemotron-H requires an SM10x GPU "
+                    "(B200, GB200, B300): its batch-invariant W4A16 experts and "
+                    "fixed split-KV FA4 attention run only there"
+                )
             if vllm_config.parallel_config.tensor_parallel_size > 1:
                 raise ValueError(
                     "VLLM_BATCH_INVARIANT=1 with Nemotron-H currently requires "
