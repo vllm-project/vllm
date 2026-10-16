@@ -90,10 +90,12 @@ class SpecializedDecode:
         logger.info("Specialized decode %s: widths %s", spec.name, list(self.widths))
 
     def bind_caches(self) -> None:
-        """Checks the caches the kernel will read, as the runner binds them.
+        """Checks the caches the kernel will read and hands them to it, as the
+        runner binds them.
 
         Called from ``ModelState.initialize_kv_cache``, which runs once for the
         throwaway cache memory profiling allocates and again for the real one.
+        The kernel only ever sees caches this spec has accepted.
 
         Raises:
             DecodeUnsupported: The caches are not what this spec serves.
@@ -106,6 +108,7 @@ class SpecializedDecode:
             raise DecodeUnsupported(
                 f"Specialized decode {self.spec.name} caches: " + "; ".join(reasons)
             )
+        self.kernel.bind_caches(caches)
         self._bound = True
 
     def plan(self, positions: torch.Tensor, intermediate_tensors=None) -> Step | None:

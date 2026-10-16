@@ -69,6 +69,18 @@ class DecodeImpl(Protocol):
         """
         ...
 
+    def bind_caches(self, caches: Mapping[str, Any]) -> None:
+        """Takes the ``cache_layers`` caches the runner has bound, once
+        ``DecodeSpec.refuse_caches`` has passed them.
+
+        For a kernel whose launches close over the cache layout (a compile
+        against its strides, a cached view), this is where that happens. Called
+        again whenever the runner rebinds, so it must replace what the last call
+        built, not add to it: a normal startup binds the throwaway cache memory
+        profiling allocates before the real one.
+        """
+        ...
+
     def warmup_keys(self) -> list[Any]:
         """Hashable build keys of this kernel's launches, compiled before CUDA
         graph capture by vLLM's JIT warm-up."""

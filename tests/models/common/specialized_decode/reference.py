@@ -71,6 +71,7 @@ class ReferenceKernel:
         self.weights = {layer.index: layer.weight.data for layer in served}
         self.cache_layers = tuple(layer.attn_name for layer in served)
         self.launched: list[int] = []
+        self.bound: dict[str, Any] = {}
 
     def run(self, step: Step, input_ids, inputs_embeds, **kwargs):
         self.launched.append(step.width)
@@ -82,6 +83,9 @@ class ReferenceKernel:
             else:
                 hidden = hidden + weight
         return hidden
+
+    def bind_caches(self, caches) -> None:
+        self.bound = dict(caches)
 
     def warmup_keys(self) -> list[Any]:
         return [(i, w) for i in self.weights for w in self.widths]

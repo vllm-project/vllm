@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """DeepSeek-V4.1's specialized decode."""
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import partial
 from typing import TYPE_CHECKING, Any, cast
@@ -158,6 +159,9 @@ class DSV41Kernel:
             comp_key=comp_key,
             folds=(True, False) if settled else (True,),
         )
+
+    def bind_caches(self, caches: Mapping[str, Any]) -> None:
+        """Nothing to take: a launch reads the cache off its attention layer."""
 
     def warmup_keys(self) -> list[Any]:
         keys: dict[Any, None] = {}

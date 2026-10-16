@@ -54,6 +54,19 @@ def _spy(spec, field: str, calls: list):
     return replace(spec, **{field: recorded})
 
 
+def _record(obj, method: str) -> list:
+    """``obj.method``'s calls from here on, as they are made."""
+    calls: list = []
+    inner = getattr(obj, method)
+
+    def recorded(*args, **kwargs):
+        calls.append(args)
+        return inner(*args, **kwargs)
+
+    setattr(obj, method, recorded)
+    return calls
+
+
 class DecodeConformance:
     """What every ``DecodeSpec`` must satisfy. Subclass it in the model's test
     module and fill in the hooks below."""
@@ -194,16 +207,18 @@ class DecodeConformance:
         decode = self.make_decode(config, model, bind=False)
         assert self._plan(config, model, decode) is None
 
-    def test_caches_checked_on_every_bind(self, config, model, decode):
+    def test_caches_checked_and_handed_over_on_every_bind(self, config, model, decode):
         checks: list = []
+        taken = _record(decode.kernel, "bind_caches")
         decode.spec = _spy(decode.spec, "refuse_caches", checks)
         decode.bind_caches()
-        assert len(checks) == 1
+        assert len(checks) == len(taken) == 1
+        assert set(taken[0][0]) == set(decode.kernel.cache_layers)
         sfc = config.compilation_config.static_forward_context
         for name in decode.kernel.cache_layers:
             sfc[name].kv_cache = sfc[name].kv_cache.clone()
         decode.bind_caches()
-        assert len(checks) == 2
+        assert len(checks) == len(taken) == 2
 
     def test_refuse_caches_reports_every_reason(self, config, model, decode):
         reasons = decode.spec.refuse_caches(
@@ -213,11 +228,13 @@ class DecodeConformance:
 
     def test_mismatched_caches_refuse_the_bind(self, config, model, decode):
         sfc = config.compilation_config.static_forward_context
+        taken = _record(decode.kernel, "bind_caches")
         bad = self.bad_caches(config, model)
         for name, cache in zip(decode.kernel.cache_layers, bad.values(), strict=False):
             sfc[name].kv_cache = cache
         with pytest.raises(DecodeUnsupported):
             decode.bind_caches()
+        assert not taken
 
     def test_build_does_not_move_weights(self, config):
         model = self.make_model(config)
