@@ -23,7 +23,10 @@ from vllm.v1.attention.backend import (
     MLAAttentionImpl,
     MultipleOf,
 )
-from vllm.v1.attention.backends.fa_utils import flash_attn_supports_mla
+from vllm.v1.attention.backends.fa_utils import (
+    flash_attn_supports_mla,
+    flash_attn_varlen_func,
+)
 from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
     FlashInferMLASparseImpl,
     FlashInferMLASparseTRTLLMBackend,
@@ -35,7 +38,6 @@ from vllm.v1.attention.backends.mla.sparse_utils import (
 )
 from vllm.v1.attention.ops.metadata import compute_token_to_req_indices
 from vllm.v1.kv_cache_interface import AttentionSpec
-from vllm.vllm_flash_attn.flash_attn_interface import flash_attn_varlen_func
 
 
 class FlashAttnMLASparseBackend(AttentionBackend):
