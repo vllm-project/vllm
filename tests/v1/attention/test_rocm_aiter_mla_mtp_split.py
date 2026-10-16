@@ -63,9 +63,11 @@ class _ExpandPageIndicesKernel:
         stride_0,
         stride_1,
         paged_kv_indptr,
+        num_real_tokens,
         *,
         KERNEL_BLOCK_SIZE,
         BLOCK_SIZE,
+        CLAMP_TAIL=False,
     ):
         # Both block-table strides are passed explicitly: the kernel no longer
         # assumes the column stride is 1. This stand-in indexes the tensor
@@ -145,6 +147,7 @@ def _builder(
             )
         ),
         _mtp_decode_qlen=mtp_decode_qlen,
+        _varlen_decode_qlen=0,
         _uniform_padded_mtp_qo_len=(AiterMLAMetadataBuilder._uniform_padded_mtp_qo_len),
         _use_persistent_metadata=False,
         kernel_block_size=kernel_block_size,
@@ -500,6 +503,7 @@ def test_non_causal_dcp_block_bypasses_cprr_in_forward(monkeypatch):
     impl.qk_rope_head_dim = 64
     impl.scale = 576**-0.5
     decode = SimpleNamespace(
+        varlen_q_rows=None,
         max_qo_len=4,
         qo_indptr=torch.tensor([0, 4], dtype=torch.int32),
         paged_kv_indptr=torch.tensor([0, 1], dtype=torch.int32),
@@ -563,6 +567,7 @@ def test_single_token_dcp_decode_returns_unpadded_lse(monkeypatch):
     impl.qk_rope_head_dim = 64
     impl.scale = head_dim**-0.5
     decode = SimpleNamespace(
+        varlen_q_rows=None,
         max_qo_len=1,
         qo_indptr=torch.arange(num_tokens + 1, dtype=torch.int32),
         paged_kv_indptr=torch.zeros(num_tokens + 1, dtype=torch.int32),
@@ -787,6 +792,7 @@ def test_segmented_dcp_verify_matches_causal_attention(monkeypatch):
             torch.tensor([global_seq_len], dtype=torch.int32, device=device),
         )
         decode = SimpleNamespace(
+            varlen_q_rows=None,
             max_qo_len=qlen,
             paged_kv_indptr=torch.tensor(
                 [0, local_kv.shape[0]], dtype=torch.int32, device=device
@@ -1452,3 +1458,29 @@ def test_a_two_token_bf16_block_is_allowed(monkeypatch):
         monkeypatch, num_heads=12, kv_cache_dtype="auto", qlen=2, mtp_qlen=8
     )
     assert metadata.has_persistent_metadata
+
+
+def _adaptive_config(
+    *, adaptive: bool = True, dcp: int = 1, num_speculative_tokens: int = 7
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        speculative_config=SimpleNamespace(
+            num_speculative_tokens=num_speculative_tokens,
+            enable_adaptive_verification=adaptive,
+            parallel_drafting=False,
+        ),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=dcp),
+        use_v2_model_runner=True,
+    )
+
+
+def test_varlen_cudagraph_bound_follows_adaptive_verification():
+    bound = AiterMLAMetadataBuilder.get_varlen_cudagraph_max_query_len
+    assert bound(_adaptive_config(), SimpleNamespace()) == 8
+    assert bound(_adaptive_config(adaptive=False), SimpleNamespace()) is None
+    # DCP routes plan per-row windows from host lengths.
+    assert bound(_adaptive_config(dcp=2), SimpleNamespace()) is None
+    # Kimi-K3 DSpark draft layers share the target's group; causality is
+    # decided per batch, so the merged non-causal spec keeps the bound.
+    shared_draft_group = SimpleNamespace(non_causal_multi_token_decode=True)
+    assert bound(_adaptive_config(), shared_draft_group) == 8
