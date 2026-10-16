@@ -53,6 +53,7 @@ from vllm.models.common.ops.sequence_parallel import (
 )
 from vllm.sequence import IntermediateTensors
 
+from ..common.hyperconnection import is_hc_sequence_parallel_enabled
 from .hyperconnection import GatedResidual, HyperConnectionConfig
 from .low_latency_gemm import enable_qwen4_exp_low_latency_gemm
 from .model import (
@@ -61,7 +62,6 @@ from .model import (
     Qwen4ExpDecoderLayer,
     Qwen4ExpMixtureOfExperts,
     Qwen4ExpSparseMoeBlock,
-    is_hc_sequence_parallel_enabled,
 )
 
 
