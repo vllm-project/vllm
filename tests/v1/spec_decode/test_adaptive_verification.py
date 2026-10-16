@@ -4,6 +4,7 @@
 from collections import deque
 from contextlib import nullcontext
 from types import SimpleNamespace
+from typing import Any
 
 import numpy as np
 import pytest
@@ -58,10 +59,11 @@ class FakeEvent:
 
 def test_confidence_ring_promotes_only_completed_copies_without_waiting():
     manager = AdaptiveVerificationManager.__new__(AdaptiveVerificationManager)
-    manager._stale_confidences = [
+    stale_confidences: list[Any] = [
         SimpleNamespace(np=np.full((2, 2), value, dtype=np.float32))
         for value in range(4)
     ]
+    manager._stale_confidences = stale_confidences
     manager._copy_events = [
         FakeEvent(True),
         FakeEvent(True),
@@ -107,6 +109,7 @@ def test_non_driver_uses_driver_draft_budget():
     )
 
     assert num_tokens == 3
+    assert manager._batch_budget is not None
     assert manager._batch_budget[2] == 1
 
 
