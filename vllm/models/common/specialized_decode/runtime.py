@@ -83,7 +83,6 @@ class SpecializedDecode:
             raise DecodeUnsupported(f"{refused}: another TP rank refused")
         self.vllm_config = vllm_config
         self.widths = spec.widths(vllm_config)
-        self.last_reason: str | None = None
         self._bound = False
         self.kernel: DecodeImpl = spec.build(vllm_config, model, self.widths)
         if self.kernel.warmup_keys():
@@ -114,8 +113,8 @@ class SpecializedDecode:
 
         Steps that run the model's forward: a pipeline stage's inputs, a width
         off the spec's widths, a PIECEWISE step (keyed by token count alone, so
-        it is replayed for mixed batches too), and whatever ``skip_step``
-        refuses. ``last_reason`` holds why.
+        it is replayed for mixed batches too), caches the runner has not bound,
+        and whatever ``skip_step`` refuses.
 
         Every predicate is the same on every TP rank: the kernel waits
         in-kernel on its peers, so the ranks must take the same path.
@@ -134,7 +133,6 @@ class SpecializedDecode:
             why = "caches not bound"
         else:
             why = self.spec.skip_step(self.vllm_config, self.kernel, width)
-        self.last_reason = why
         if why is not None:
             logger.info_once(
                 "Specialized decode %s: step on vLLM's path (%s)", self.spec.name, why

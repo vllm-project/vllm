@@ -393,10 +393,9 @@ def test_moe_routing_outside_the_kernels_keeps_vllm_path(monkeypatch):
     assert not decode.kernel.plans
 
 
-def _step(decode, model, metadata, width=1):
+def _step(decode, metadata, width=1):
     with forward(decode.vllm_config, CUDAGraphMode.FULL, metadata):
-        decode.plan(torch.zeros(width, dtype=torch.long))
-    return decode.last_reason
+        return sd._skip_step(decode.vllm_config, decode.kernel, width)
 
 
 @pytest.mark.parametrize(
@@ -412,22 +411,17 @@ def _step(decode, model, metadata, width=1):
 )
 def test_other_steps_take_vllm_path(monkeypatch, case, why):
     decode, model = _build(monkeypatch)
-    assert why in _step(decode, model, _metadata(model, **case))
+    assert why in _step(decode, _metadata(model, **case))
 
 
 def test_decode_step_takes_the_kernels(monkeypatch):
     decode, model = _build(monkeypatch)
-    assert _step(decode, model, _metadata(model)) is None
+    assert _step(decode, _metadata(model)) is None
 
 
 def test_profile_run_takes_vllm_path(monkeypatch):
     decode, model = _build(monkeypatch)
-    assert _step(decode, model, None) == "no attention metadata"
-
-
-def test_rows_past_the_kernels_take_vllm_path(monkeypatch):
-    decode, model = _build(monkeypatch)
-    assert _step(decode, model, _metadata(model), width=sd.MAX_ROWS + 1) == "width"
+    assert _step(decode, None) == "no attention metadata"
 
 
 def test_widths_follow_the_capture_sizes(monkeypatch):

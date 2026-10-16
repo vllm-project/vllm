@@ -175,29 +175,24 @@ class DecodeConformance:
     def test_skipped_step_runs_vllm_layers(self, config, model, decode):
         with forward(config, CUDAGraphMode.NONE, self.skipped_metadata(config, model)):
             assert decode.plan(self._positions(decode)) is None
-        assert decode.last_reason is not None
 
     def test_pipeline_stage_input_runs_vllm_layers(self, config, model, decode):
         with forward(config, CUDAGraphMode.NONE, self.decode_metadata(config, model)):
             assert decode.plan(self._positions(decode), object()) is None
-        assert decode.last_reason == "pipeline stage input"
 
     def test_width_off_the_capture_sizes_runs_vllm_layers(self, config, model, decode):
         off = torch.zeros(max(decode.widths) + 1, dtype=torch.long)
         with forward(config, CUDAGraphMode.NONE, self.decode_metadata(config, model)):
             assert decode.plan(off) is None
-        assert decode.last_reason == "width"
 
     def test_piecewise_runs_vllm_layers(self, config, model, decode):
         meta = self.decode_metadata(config, model)
         with forward(config, CUDAGraphMode.PIECEWISE, meta):
             assert decode.plan(self._positions(decode)) is None
-        assert decode.last_reason == "piecewise"
 
     def test_unbound_caches_run_vllm_layers(self, config, model):
         decode = self.make_decode(config, model, bind=False)
         assert self._plan(config, model, decode) is None
-        assert decode.last_reason == "caches not bound"
 
     def test_caches_checked_on_every_bind(self, config, model, decode):
         checks: list = []
