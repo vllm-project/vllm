@@ -360,6 +360,7 @@ def _pack_sampler_output_kernel(
     local_cu_num_logits_ptr,
     max_num_logits_per_req,
     num_src_cols,
+    no_valid_token_mask_ptr,
     BLOCK_SIZE: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
@@ -386,6 +387,9 @@ def _pack_sampler_output_kernel(
         tl.store(
             row_ptr + max_num_logits_per_req + 2, tl.sum(nans.to(tl.int64), axis=0)
         )
+    if no_valid_token_mask_ptr is not None:
+        mask_val = tl.load(no_valid_token_mask_ptr + req_idx)
+        tl.store(row_ptr + max_num_logits_per_req + 2 + (1 if num_nans_ptr is not None else 0), mask_val.to(tl.int64))
 
 
 @triton.jit(do_not_specialize=["max_num_logits_per_req", "gathered_stride"])
@@ -398,6 +402,7 @@ def _unpack_gathered_output_kernel(
     num_rejected_ptr,
     num_nans_ptr,
     max_num_logits_per_req,
+    no_valid_token_mask_ptr,
     BLOCK_SIZE: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
@@ -419,6 +424,10 @@ def _unpack_gathered_output_kernel(
     if num_nans_ptr is not None:
         num_nans = tl.load(row_ptr + max_num_logits_per_req + 2)
         tl.store(num_nans_ptr + req_idx, num_nans.to(tl.int32))
+    if no_valid_token_mask_ptr is not None:
+        nv_col = max_num_logits_per_req + 2 + (1 if num_nans_ptr is not None else 0)
+        mask_val = tl.load(row_ptr + nv_col)
+        tl.store(no_valid_token_mask_ptr + req_idx, mask_val.to(tl.int32))
 
 
 @triton.jit(
@@ -604,9 +613,15 @@ def gather_sampler_output(
     local_batch: InputBatch,
     gather_num_nans: bool = False,
     logprobs_dims: tuple[int, int] | None = None,
+    gather_no_valid_token_mask: bool = False,
 ) -> SamplerOutput:
     max_num_logits_per_req = metadata.max_num_logits_per_req
-    num_packed_cols = max_num_logits_per_req + 2 + (1 if gather_num_nans else 0)
+    num_packed_cols = (
+        max_num_logits_per_req
+        + 2
+        + (1 if gather_num_nans else 0)
+        + (1 if gather_no_valid_token_mask else 0)
+    )
     block_size = triton.next_power_of_2(max_num_logits_per_req)
 
     # Pack the sampler output tensors (excluding logprobs) into a single
@@ -616,6 +631,9 @@ def gather_sampler_output(
         num_packed_cols,
         dtype=torch.int64,
         device=device,
+    )
+    no_valid_token_mask_local = (
+        local_output.no_valid_token_mask if local_output is not None else None
     )
     if local_output is not None:
         assert not gather_num_nans or local_output.num_nans is not None
@@ -633,6 +651,7 @@ def gather_sampler_output(
             local_batch.cu_num_logits if gather_num_nans else None,
             max_num_logits_per_req,
             num_src_cols,
+            no_valid_token_mask_local if gather_no_valid_token_mask else None,
             BLOCK_SIZE=block_size,
         )
 
@@ -657,6 +676,11 @@ def gather_sampler_output(
         if gather_num_nans
         else None
     )
+    no_valid_token_mask = (
+        torch.empty(num_reqs, dtype=torch.int32, device=device)
+        if gather_no_valid_token_mask
+        else None
+    )
     _unpack_gathered_output_kernel[(num_reqs,)](
         gathered,
         gathered.stride(0),
@@ -666,7 +690,11 @@ def gather_sampler_output(
         num_rejected,
         num_nans,
         max_num_logits_per_req,
+        no_valid_token_mask,
         BLOCK_SIZE=block_size,
+    )
+    no_valid_token_mask_bool = (
+        no_valid_token_mask.to(torch.bool) if no_valid_token_mask is not None else None
     )
     return SamplerOutput(
         sampled_token_ids=sampled_token_ids,
@@ -674,4 +702,5 @@ def gather_sampler_output(
         num_nans=num_nans,
         num_sampled=num_sampled,
         num_rejected=num_rejected,
+        no_valid_token_mask=no_valid_token_mask_bool,
     )

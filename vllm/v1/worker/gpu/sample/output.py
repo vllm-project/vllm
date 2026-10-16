@@ -21,6 +21,9 @@ class SamplerOutput:
     num_sampled: torch.Tensor
     num_rejected: torch.Tensor
     sampling_mask_tensors: SamplingMaskTensors | None = None
+    # [num_reqs] bool mask: True if every logit is -inf after all
+    # logit processors (i.e., no legal token can be sampled).
+    no_valid_token_mask: torch.Tensor | None = None
 
 
 @triton.jit
