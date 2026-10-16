@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 //
-// Router GEMM: activation(T) x weight(fp32) -> fp32, M<=32, for the
+// Router GEMM: activation(T) x weight(fp32) -> fp32, M<=48, for the
 // supported (E, H) pairs listed at the bottom of this file.
 // Supports bf16 or fp32 activation; weight is always fp32.
 
@@ -214,8 +214,26 @@ void invokeFp32RouterGemm(float* output, InputT const* mat_a,
   // production-fidelity harness (CUDA-graph replay, per-layer cold weights).
   // Only enabled on the Blackwell family where it was validated; Hopper and
   // other shapes / fp32 activation keep the legacy geometry.
-  if constexpr (std::is_same_v<InputT, __nv_bfloat16> && kNumExperts == 128 &&
-                kHiddenDim == 6144) {
+  if constexpr (std::is_same_v<InputT, __nv_bfloat16> && kNumExperts == 256 &&
+                kHiddenDim == 5120) {
+    if (!isBlackwellFamily()) {
+      launchFp32RouterGemm<InputT, 128, 1, kNumTokens, kNumExperts, kHiddenDim>(
+          output, mat_a, mat_b, stream);
+      return;
+    }
+    if constexpr (kNumTokens > 16 && kNumTokens % 8 == 0) {
+      constexpr int block_size = kNumTokens == 24 ? 160 : 128;
+      launchFp32RouterGemm<InputT, block_size, 2, kNumTokens, kNumExperts,
+                           kHiddenDim, 4>(output, mat_a, mat_b, stream);
+    } else {
+      constexpr int block_size = kNumTokens == 1 ? 64 : 128;
+      constexpr int token_groups = kNumTokens % 2 == 0 ? 2 : 1;
+      launchFp32RouterGemm<InputT, block_size, 1, kNumTokens, kNumExperts,
+                           kHiddenDim, token_groups>(output, mat_a, mat_b,
+                                                     stream);
+    }
+  } else if constexpr (std::is_same_v<InputT, __nv_bfloat16> &&
+                       kNumExperts == 128 && kHiddenDim == 6144) {
     // MiniMax-M3. Legacy 128/1 only fills 128 blocks and pays the same
     // accumulator register cliffs; B300 sweep:
     //   even M in [6, 10] : BS=384, EPB=1, 2 token groups (1.26-1.43x)
@@ -268,8 +286,8 @@ void invokeFp32RouterGemm(float* output, InputT const* mat_a,
 }
 
 // ---------------------------------------------------------------------------
-// Explicit instantiations: M=1..32, for both input types, for the supported
-// (E, H) pairs:  (256, 3072) [MiniMax-M2/M2.5]  and  (128, 6144) [MiniMax-M3].
+// Explicit instantiations for both input types.
+// Supported (E, H) pairs: (256, 3072), (128, 6144), and (256, 5120).
 // ---------------------------------------------------------------------------
 
 #define INSTANTIATE(T, M, E, H)                                    \
@@ -314,6 +332,32 @@ INSTANTIATE_ALL(float, 256, 3072)
 INSTANTIATE_ALL(__nv_bfloat16, 256, 3072)
 INSTANTIATE_ALL(float, 128, 6144)
 INSTANTIATE_ALL(__nv_bfloat16, 128, 6144)
+
+INSTANTIATE_ALL(float, 256, 5120)
+INSTANTIATE_ALL(__nv_bfloat16, 256, 5120)
+
+#define INSTANTIATE_LARGE(T, E, H) \
+  INSTANTIATE(T, 33, E, H)         \
+  INSTANTIATE(T, 34, E, H)         \
+  INSTANTIATE(T, 35, E, H)         \
+  INSTANTIATE(T, 36, E, H)         \
+  INSTANTIATE(T, 37, E, H)         \
+  INSTANTIATE(T, 38, E, H)         \
+  INSTANTIATE(T, 39, E, H)         \
+  INSTANTIATE(T, 40, E, H)         \
+  INSTANTIATE(T, 41, E, H)         \
+  INSTANTIATE(T, 42, E, H)         \
+  INSTANTIATE(T, 43, E, H)         \
+  INSTANTIATE(T, 44, E, H)         \
+  INSTANTIATE(T, 45, E, H)         \
+  INSTANTIATE(T, 46, E, H)         \
+  INSTANTIATE(T, 47, E, H)         \
+  INSTANTIATE(T, 48, E, H)
+
+INSTANTIATE_LARGE(float, 256, 5120)
+INSTANTIATE_LARGE(__nv_bfloat16, 256, 5120)
+
+#undef INSTANTIATE_LARGE
 
 #undef INSTANTIATE_ALL
 #undef INSTANTIATE
