@@ -315,79 +315,53 @@ In addition, you can also register all your `CustomOp` at one place for better m
         CustomOp.register_oot(_decorated_op_cls=op_cls, name=op_name)
     ```
 
-### Direct DCP Collective Kernels
+### Direct DCP Collectives
 
 `DirectDCPQGather`, `DirectDCPA2AReduce` and `DirectDCPKVGather` in
-`vllm.v1.attention.ops.dcp_custom_ops` support OOT implementations of the
-direct symmetric-memory query gather, output exchange/LSE reduction and KV gather.
-`MLADCPManager` binds each op to its DCP process group and selects its `forward`
-method during model construction. Workspace methods require an explicit kernel
-argument; the manager supplies it through the existing partials. Core owns
-the symmetric buffers, output views, microbatch slots and capacity fallbacks.
-Cached workspaces do not retain plugin implementations.
+`vllm.v1.attention.ops.dcp` support OOT implementations of direct query gather,
+output exchange/LSE reduction and chunked-context KV gather. Each `CustomOp`
+holds its core-owned workspace. `MLADCPManager` constructs the ops during model
+initialization; cached workspaces retain buffers and protocol state independently
+of the selected implementation.
 
-For a plugin running on CUDA, override `forward_cuda`. `forward_oot` applies to
-an OOT platform, rather than an OOT package running on an in-tree platform.
-Register the subclass from a `vllm.general_plugins` entry point before model
-construction on every worker:
+On CUDA, override `forward_cuda`. `forward_oot` applies to an OOT platform.
+Register from a `vllm.general_plugins` entry point before model construction on
+every worker:
 
 ```python
 import torch
 
-from my_plugin.kernels import launch_query_gather
-from vllm.v1.attention.ops.dcp_custom_ops import DirectDCPQGather
+from my_plugin.kernels import gather_query
+from vllm.v1.attention.ops.dcp import DirectDCPQGather
 
 
 @DirectDCPQGather.register_oot
 class PluginDCPQGather(DirectDCPQGather):
-    def forward_cuda(
-        self,
-        local_query: torch.Tensor,
-        final_query: torch.Tensor,
-        received_signal: torch.Tensor,
-        completion: torch.Tensor,
-        epoch: torch.Tensor,
-        world_size: int,
-        rank: int,
-        max_num_tokens: int,
-        padded_num_heads: int,
-        query_mc_ptr: int,
-        signal_mc_ptr: int,
-    ) -> None:
-        launch_query_gather(
-            local_query, final_query, received_signal, completion, epoch,
-            world_size, rank, max_num_tokens, padded_num_heads,
-            query_mc_ptr, signal_mc_ptr,
-        )
+    def forward_cuda(self, local_query: torch.Tensor) -> torch.Tensor:
+        return gather_query(local_query, self.workspace)
 ```
 
-Implement the complete launch with the same argument order and buffer and
-synchronization protocol as the dedicated CUDA operation. Query gather publishes into
-the supplied `[T, world_size * H, D]` output view and waits for peer publication.
-The final query buffer is reusable only after the downstream attention combine
-orders all peers after consumption. A2A exchanges the supplied `[T, world_size * H, D]`
-partial outputs and matching LSEs into the double-buffered peer workspaces, then
-writes the combined `[T, H, D]` output. Preserve epoch advancement, parity,
-completion counters, release/acquire ordering, both LSE bases and empty-shard
-masking. KV gather publishes local rows through its double-buffered workspace
-and copies rank-ordered rows to the supplied output. All ranks must use the
-same plugin/config and collective order.
+The CUDA implementations call the existing workspace methods and dedicated
+kernels. Replacements implement the complete collective: Q gather returns
+`[T, world_size * H, D]` with the workspace's reserved head storage; A2A returns
+`[T, H, D]` with both LSE bases and empty-shard masking; KV gather fills the
+supplied rank-ordered output. When reusing the core symmetric buffers, preserve
+publication/wait ordering, completion counters, epoch advancement and parity.
+Q storage is reusable after the downstream DCP combine orders peers after
+attention consumption. Core retains workspace capacity and oversized-input
+fallbacks.
 
-The dedicated kernels live in `forward_cuda`. The inherited `forward_native`
-uses `torch.distributed.all_gather_into_tensor` for Q/KV gather and
+`forward_native` uses `torch.distributed.all_gather_into_tensor` for Q/KV and
 `torch.distributed.all_to_all_single` plus the existing PyTorch LSE combine for
-A2A. It writes the same supplied outputs using the bound process group, without
-touching the dedicated signal/counter/epoch state. Thus `custom_ops=["none"]`
-selects built-in Torch collectives, and enabled CUDA dispatch selects the
-dedicated implementation or its OOT replacement.
-With current OOT registration semantics, explicit plugin opt-in uses the
-original class names:
+A2A. These paths leave dedicated signal/counter/epoch state untouched.
+`custom_ops=["none"]` selects Torch collectives; enabled CUDA dispatch selects
+the dedicated implementation or its OOT replacement. Explicit plugin opt-in
+uses the original class names:
 `["none", "+DirectDCPQGather", "+DirectDCPA2AReduce", "+DirectDCPKVGather"]`.
-Without replacements, the registered names are `direct_dcp_q_gather` and
-`direct_dcp_a2a_lse_reduce` and `direct_dcp_kv_gather`. `all` enables either
-implementation.
+Without replacements, the registered names are `direct_dcp_q_gather`,
+`direct_dcp_a2a_lse_reduce` and `direct_dcp_kv_gather`. `all` enables either.
 
-Warm up plugin kernels before CUDA graph capture and keep launch bindings and
-buffer addresses fixed through replay. The compiled CUDA MLA path retains its
-existing opaque attention-op boundary. `CustomOp` itself does not provide a
-Torch mutation schema or fake implementation for standalone collective tracing.
+All ranks must load the same plugin/config and follow the same collective order.
+Warm kernels before graph capture and keep bindings and buffers stable through
+replay. The compiled MLA path retains its existing opaque attention-op boundary;
+this does not add standalone collective tracing support.

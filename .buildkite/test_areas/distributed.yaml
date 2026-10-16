@@ -592,7 +592,6 @@ steps:
   source_file_dependencies:
     - .buildkite/test_areas/distributed.yaml
     - vllm/v1/attention/ops/dcp.py
-    - vllm/v1/attention/ops/dcp_custom_ops.py
     - vllm/v1/attention/ops/cp_common.py
     - vllm/model_executor/custom_op.py
     - csrc/attention/dcp_utils/
