@@ -105,9 +105,10 @@ class BlockObjectStore:
 
     Recency and victims come from a KV offload `CachePolicy` ("lru" by
     default), called with the KV CPU offload manager's lifecycle hooks: store
-    misses before insertion, eviction before admitting protected objects, and
-    reuse recorded after eviction. Policies are trusted to honor the
-    `CachePolicy` contract.
+    misses before insertion, eviction before admitting protected new objects,
+    and reuse recorded after eviction. New objects released in the same batch
+    are the exception: as before, they are inserted first and compete for
+    space. A policy result that would alias two objects closes the store.
     """
 
     _UNALLOCATED_SLOT = -1
@@ -135,13 +136,19 @@ class BlockObjectStore:
         self._num_objects = 0
         # References may arrive before the object is stored.
         self._references: dict[OffloadKey, int] = {}
+        self._slot_keys: dict[int, OffloadKey] = {}
         self._free_slots: list[int] = []
         self._next_slot = 0
         self._arena: mmap.mmap | None = mmap.mmap(
             -1, self.num_slots * self.object_nbytes
         )
 
-    def _evict_to_fit(self, num_incoming: int, protected: set[OffloadKey]) -> None:
+    def _evict_to_fit(
+        self,
+        num_incoming: int,
+        protected: set[OffloadKey],
+        unallocated: list[OffloadKey],
+    ) -> None:
         excess = self._num_objects + num_incoming - self.num_slots
         if excess <= 0:
             return
@@ -151,16 +158,34 @@ class BlockObjectStore:
                 "auxiliary output store cannot retain the requested batch: "
                 f"limit={self.num_slots} objects"
             )
-        # A slot freed twice or still owned would alias two objects.
-        if len({key for key, _ in victims}) != excess or any(
-            chunk.ref_cnt or key in protected or self._policy.get(key) is not None
+        # A slot freed twice or still owned would alias two objects, and the
+        # policy may already have dropped them, so stop using the store.
+        if not len(victims) == len({key for key, _ in victims}) == excess or not all(
+            self._is_valid_victim(key, chunk, protected, unallocated)
             for key, chunk in victims
         ):
-            raise BlockObjectStoreError("cache policy returned invalid victims")
+            self.close()
+            raise BlockObjectStoreError(
+                "cache policy returned invalid victims; the store is closed"
+            )
         self._num_objects -= len(victims)
         for _, chunk in victims:
             if chunk.chunk_id != self._UNALLOCATED_SLOT:
+                del self._slot_keys[chunk.chunk_id]
                 self._free_slots.append(chunk.chunk_id)
+
+    def _is_valid_victim(
+        self,
+        key: OffloadKey,
+        chunk: ChunkStatus,
+        protected: set[OffloadKey],
+        unallocated: list[OffloadKey],
+    ) -> bool:
+        if chunk.ref_cnt or key in protected or self._policy.get(key) is not None:
+            return False
+        if chunk.chunk_id == self._UNALLOCATED_SLOT:
+            return key in unallocated
+        return self._slot_keys.get(chunk.chunk_id) == key
 
     def _allocate_slot(self) -> int:
         if self._free_slots:
@@ -196,22 +221,18 @@ class BlockObjectStore:
         self._refresh_released(terminal_order)
         try:
             self._evict_to_fit(
-                len(new_keys) - len(released_new), unique.keys() - terminal
+                len(new_keys) - len(released_new),
+                unique.keys() - terminal,
+                released_new,
             )
         except BlockObjectStoreError:
             for key in released_new:
                 if self._policy.get(key) is not None:
                     self._policy.remove(key)
                     self._num_objects -= 1
+            self._record_batch(unique, new_keys, terminal_order, admit=False)
             raise
-        # Record the batch in order: reuse of resident objects, admission of
-        # protected new ones, then release recency on top.
-        for key in unique:
-            if key not in new_keys:
-                self._policy.touch([key], self._req_context)
-            elif key not in terminal:
-                self._insert([key])
-        self._refresh_released(terminal_order)
+        self._record_batch(unique, new_keys, terminal_order, admit=True)
         for key, obj in unique.items():
             stored = self._policy.get(key)
             if stored is None or stored.chunk_id != self._UNALLOCATED_SLOT:
@@ -220,6 +241,27 @@ class BlockObjectStore:
             offset = slot * self.object_nbytes
             arena[offset : offset + self.object_nbytes] = obj.payload
             stored.chunk_id = slot
+            self._slot_keys[slot] = key
+
+    def _record_batch(
+        self,
+        unique: dict[OffloadKey, BlockObject],
+        new_keys: set[OffloadKey],
+        terminal_order: list[OffloadKey],
+        *,
+        admit: bool,
+    ) -> None:
+        """Record reuse of resident objects and admit protected new ones in
+        batch order, then put release recency on top. Release recency was
+        applied before eviction too; this pass re-ranks it above the batch."""
+        terminal = set(terminal_order)
+        for key in unique:
+            if key not in new_keys:
+                if self._policy.get(key) is not None:
+                    self._policy.touch([key], self._req_context)
+            elif admit and key not in terminal:
+                self._insert([key])
+        self._refresh_released(terminal_order)
 
     def _insert(self, keys: list[OffloadKey]) -> None:
         for key in keys:

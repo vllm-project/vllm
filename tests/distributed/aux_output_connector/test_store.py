@@ -1964,6 +1964,40 @@ def test_store_arc_evicts_before_admitting_new_objects():
     store.close()
 
 
+def test_store_failed_batch_keeps_recency_of_resident_objects():
+    store = _make_store(max_bytes=8)
+    store.put([BlockObject("a", b"aaaa"), BlockObject("b", b"bbbb")])
+    with pytest.raises(BlockObjectStoreError, match="cannot retain"):
+        store.put([BlockObject(key, key.encode() * 4) for key in "acd"])
+
+    store.put([BlockObject("e", b"eeee")])
+
+    assert store.get_concatenated(["a", "e"]) == b"aaaaeeee"
+    with pytest.raises(BlockObjectStoreError, match="does not exist"):
+        store.get_concatenated(["b"])
+    store.close()
+
+
+def test_store_arc_ignores_evicted_released_object_of_the_batch():
+    # b is stored again, released and evicted in one batch; touching it
+    # afterwards would count as an ARC ghost hit.
+    store = _make_store(max_bytes=12, cache_policy="arc")
+    store.put([BlockObject("e", b"eeee"), BlockObject("a", b"aaaa")])
+    store.put([BlockObject("a", b"aaaa"), BlockObject("e", b"eeee")])
+    store.put([BlockObject("b", b"bbbb")])
+    store.put(
+        [BlockObject("b", b"bbbb"), BlockObject("c", b"cccc")],
+        retain_keys=["b"],
+        release_keys=["b"],
+    )
+    store.put([BlockObject("b", b"bbbb")])
+
+    assert store.get_concatenated(["a", "e", "b"]) == b"aaaaeeeebbbb"
+    with pytest.raises(BlockObjectStoreError, match="does not exist"):
+        store.get_concatenated(["c"])
+    store.close()
+
+
 class StoreMissRecordingPolicy(LRUCachePolicy):
     """Record store misses with whether the key was resident at the time."""
 
@@ -1995,21 +2029,47 @@ def test_store_loads_out_of_tree_policy_and_reports_store_misses():
 
 
 class DuplicateVictimPolicy(LRUCachePolicy):
-    """Contract-violating policy that reports one victim for every slot."""
+    """Contract-violating policy that reports its first victim twice."""
 
     def evict(self, n, protected):
-        victims = super().evict(1, protected)
-        return None if victims is None else victims * n
+        victims = super().evict(n, protected)
+        return None if victims is None else victims + victims[:1]
 
 
-def test_store_rejects_invalid_policy_victims():
+class StaleVictimPolicy(LRUCachePolicy):
+    """Contract-violating policy that reports its first eviction again."""
+
+    first_victim = None
+
+    def evict(self, n, protected):
+        victims = super().evict(n, protected)
+        if not victims or self.first_victim is None:
+            self.first_victim = victims[0] if victims else None
+            return victims
+        return [self.first_victim, *victims[1:]]
+
+
+@pytest.mark.parametrize(
+    "policy,batches",
+    [
+        (DuplicateVictimPolicy, ["c"]),
+        (DuplicateVictimPolicy, ["cd"]),
+        (StaleVictimPolicy, ["c", "d"]),
+    ],
+    ids=["duplicate-one", "duplicate-two", "stale-slot-owner"],
+)
+def test_store_rejects_invalid_policy_victims(policy, batches):
     store = _make_store(
         max_bytes=8,
-        cache_policy=DuplicateVictimPolicy.__name__,
+        cache_policy=policy.__name__,
         cache_policy_module_path=__name__,
     )
     store.put([BlockObject("a", b"aaaa"), BlockObject("b", b"bbbb")])
+    *valid, invalid = batches
+    for keys in valid:
+        store.put([BlockObject(key, key.encode() * 4) for key in keys])
 
     with pytest.raises(BlockObjectStoreError, match="invalid victims"):
-        store.put([BlockObject("c", b"cccc"), BlockObject("d", b"dddd")])
-    store.close()
+        store.put([BlockObject(key, key.encode() * 4) for key in invalid])
+    with pytest.raises(RuntimeError, match="closed"):
+        store.get_concatenated(["b"])
