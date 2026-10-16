@@ -234,8 +234,13 @@ class CutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
             padded_scale = self._pad_to_alignment(
                 flat_scale, dim=0, alignment=16, value=1.0
             ).view(-1, *weight_scale.shape[1:])
-            # replace_parameter keeps the scale's own weight_loader
             replace_parameter(layer, weight_scale_name, padded_scale.data)
+            set_weight_attrs(
+                getattr(layer, weight_name),
+                {
+                    "weight_loader": self.padded_weight_loader,
+                },
+            )
 
     def apply_scaled_mm(
         self,

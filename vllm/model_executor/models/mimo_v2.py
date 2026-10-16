@@ -216,49 +216,6 @@ class MiMoV2MoE(nn.Module):
         return final_hidden_states.squeeze(0) if is_input_1d else final_hidden_states
 
 
-# Shard id telling `MiMoV2QKVParallelLinear` that a tensor is already this
-# rank's slice of the fused qkv_proj and must be copied as is.
-PRESLICED_QKV_SHARD_ID = "mimo_v2_presliced"
-
-
-class MiMoV2QKVParallelLinear(QKVParallelLinear):
-    """QKVParallelLinear that also accepts a pre-sliced fused tensor.
-
-    The fused qkv_proj checkpoints (fp8 and MTP) are sharded by the model's
-    loader, so the stock loaders, which split a fused tensor by the *total*
-    q/k/v sizes and narrow by tp_rank, would shard them twice. The tensor
-    still goes through the param's loader so a reload sees the write.
-    """
-
-    def weight_loader(
-        self,
-        param: nn.Parameter,
-        loaded_weight: torch.Tensor,
-        loaded_shard_id: str | None = None,
-    ) -> None:
-        if loaded_shard_id == PRESLICED_QKV_SHARD_ID:
-            return self._load_presliced(param, loaded_weight)
-        return super().weight_loader(param, loaded_weight, loaded_shard_id)
-
-    def weight_loader_v2(
-        self,
-        param: nn.Parameter,
-        loaded_weight: torch.Tensor,
-        loaded_shard_id: str | None = None,
-    ) -> None:
-        if loaded_shard_id == PRESLICED_QKV_SHARD_ID:
-            return self._load_presliced(param, loaded_weight)
-        return super().weight_loader_v2(param, loaded_weight, loaded_shard_id)
-
-    @staticmethod
-    def _load_presliced(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
-        assert param.data.shape == loaded_weight.shape, (
-            f"pre-sliced qkv_proj tensor has shape {tuple(loaded_weight.shape)}, "
-            f"expected {tuple(param.data.shape)}"
-        )
-        param.data.copy_(loaded_weight)
-
-
 class MiMoV2Attention(nn.Module):
     def __init__(
         self,
@@ -303,7 +260,7 @@ class MiMoV2Attention(nn.Module):
         self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
 
-        self.qkv_proj = MiMoV2QKVParallelLinear(
+        self.qkv_proj = QKVParallelLinear(
             hidden_size,
             self.head_dim,
             self.total_num_heads,
@@ -958,7 +915,7 @@ class MiMoV2Model(nn.Module, EagleModelMixin):
             param = params_dict[param_name]
             if tensor.shape[0] > param.shape[0]:
                 tensor = tensor[: param.shape[0]]
-            param.weight_loader(param, tensor, PRESLICED_QKV_SHARD_ID)
+            default_weight_loader(param, tensor)
             loaded_params.add(param_name)
         return True
 
