@@ -19,6 +19,9 @@ logger = init_logger(__name__)
 
 _ASM_FP4_SCALE_ROW_MULTIPLE = 32
 _ASM_FP4_SCALE_COL_MULTIPLE = 8
+# Workaround until AITER gemm_a4w4 is correct at M <= 64 for weights with 128
+# rows or fewer. https://github.com/ROCm/aiter/issues/5931
+_ASM_FP4_MIN_SCALE_ROWS = 160
 
 
 def _asm_fp4_scale_swizzle_supported(weight_scale: torch.Tensor) -> bool:
@@ -28,7 +31,9 @@ def _asm_fp4_scale_swizzle_supported(weight_scale: torch.Tensor) -> bool:
         return False
     sm, sn = weight_scale.shape
     return (
-        sm % _ASM_FP4_SCALE_ROW_MULTIPLE == 0 and sn % _ASM_FP4_SCALE_COL_MULTIPLE == 0
+        sm >= _ASM_FP4_MIN_SCALE_ROWS
+        and sm % _ASM_FP4_SCALE_ROW_MULTIPLE == 0
+        and sn % _ASM_FP4_SCALE_COL_MULTIPLE == 0
     )
 
 
@@ -203,9 +208,11 @@ class AiterMxfp4LinearKernel(MxFp4LinearKernel):
             layer.weight_scale.data
         ):
             logger.warning_once(
-                "AITER ASM FP4 GEMM requires weight_scale dims divisible by "
-                "(%d, %d), but this layer has weight_scale shape %s. Falling "
-                "back to the AITER Triton FP4 GEMM for this layer.",
+                "AITER ASM FP4 GEMM requires at least %d weight_scale rows and "
+                "dims divisible by (%d, %d), but this layer has weight_scale "
+                "shape %s. Falling back to the AITER Triton FP4 GEMM for this "
+                "layer.",
+                _ASM_FP4_MIN_SCALE_ROWS,
                 _ASM_FP4_SCALE_ROW_MULTIPLE,
                 _ASM_FP4_SCALE_COL_MULTIPLE,
                 tuple(layer.weight_scale.data.shape),
