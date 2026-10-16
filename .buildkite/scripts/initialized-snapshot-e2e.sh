@@ -34,6 +34,7 @@ readonly DEADLINE_EPOCH="$(( $(date +%s) + RUN_LIMIT_S ))"
 RUN_ID="" CONTAINER_NAME="" CONTAINER_ID=""
 GPU_UUID="" PORT_ONE="" PORT_TWO=""
 LINK_REMAP_BASELINE=""
+CHECK_CLEANUP_STATE=0
 SNAPSHOT_PIDS=()
 die() {
     echo "initialized snapshot E2E: $*" >&2
@@ -113,7 +114,7 @@ cleanup() {
         names="$(container_names 2>/dev/null)" || return 1
         grep -Fxq "$CONTAINER_NAME" <<< "$names" && failed=1
     fi
-    if [[ -n "$PORT_TWO" ]] && ! wait_clean; then
+    if (( CHECK_CLEANUP_STATE )) && ! wait_clean; then
         echo "process, GPU, port, or link-remap residue remained" >&2
         failed=1
     fi
@@ -218,7 +219,8 @@ GPU_PIDS="$(gpu_pids)" || die "failed to inspect the selected GPU"
 RUN_ID="snapshot-e2e-$(date +%s)-$$-$RANDOM"
 CONTAINER_NAME="vllm-$RUN_ID"
 read -r PORT_ONE PORT_TWO < <(python3 -c 'import socket; s=[socket.socket(),socket.socket()]; [x.bind(("127.0.0.1",0)) for x in s]; print(*(x.getsockname()[1] for x in s))')
-LINK_REMAP_BASELINE="$(link_remaps)"
+LINK_REMAP_BASELINE="$(link_remaps)" \
+    || die "cannot inventory /dev/shm; check CI runner permissions"
 
 run "pull exact candidate image" 900 docker pull --platform linux/amd64 \
     "$IMAGE_TAG" >/dev/null
@@ -231,6 +233,8 @@ IFS='|' read -r IMAGE_ID IMAGE_PLATFORM OCI_COMMIT VLLM_COMMIT < <(
     || die "candidate image identity is invalid"
 [[ "$OCI_COMMIT" == "$EXPECTED_COMMIT" && "$VLLM_COMMIT" == "$EXPECTED_COMMIT" ]] \
     || die "candidate image commit labels do not match"
+# A failed preflight has not started any workload whose cleanup we can verify.
+CHECK_CLEANUP_STATE=1
 CONTAINER_ID="$(run "start exact candidate container" 90 docker run --detach \
     --name "$CONTAINER_NAME" --label "ai.vllm.snapshot.e2e.run=$RUN_ID" \
     --gpus "device=$GPU_UUID" --user 0 --privileged --pid=host --ipc=host \

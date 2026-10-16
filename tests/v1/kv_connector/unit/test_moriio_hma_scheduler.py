@@ -7,31 +7,19 @@ These exercise the highest-risk, otherwise-untested scheduler logic without a
 GPU or the ``mori`` runtime: per-group block-id splitting, the READ/WRITE
 ``N-1`` token accounting, P-side prompt truncation, and offset-template cache
 wiring.
-
-Like ``test_moriio_kv_layout.py`` the whole module is skipped unless it is
-running on ROCm with ``mori`` installed (importing the connector pulls in
-``mori``). The authoritative run happens on the MIA recipe image.
 """
 
 import importlib
-import importlib.util
+from dataclasses import asdict
 from types import SimpleNamespace
 
 import pytest
 import torch
 
-from vllm.platforms import current_platform
 from vllm.v1.core.block_pool import BlockPool
+from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 from vllm.v1.kv_cache_interface import FullAttentionSpec, UniformTypeKVCacheSpecs
-
-mori_available = importlib.util.find_spec("mori") is not None
-
-if not (current_platform.is_rocm() and mori_available):
-    pytest.skip(
-        "MoRIIOs are only available on ROCm with mori package installed",
-        allow_module_level=True,
-    )
 
 moriio_connector = importlib.import_module(
     "vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector"
@@ -67,7 +55,6 @@ class _FakeScheduler(moriio_connector.MoRIIOConnectorScheduler):  # type: ignore
         self._mamba_group_ids: list[int] = []
         self._attn_group_ids: list[int] = [0]
         self._num_ssm_scratch_blocks = 0
-        self._ssm_state_slots_are_positional = False
         self._is_hma_required = False
         self.kv_cache_config = SimpleNamespace(
             kv_cache_groups=[None, None],
@@ -130,7 +117,7 @@ def _mamba_spec(num_states: int = 2, *, num_speculative_blocks: int = 0):
         block_size=16,
         shapes=shapes,
         dtypes=(torch.float32,) * num_states,
-        mamba_cache_mode="all",
+        mamba_cache_mode="align",
         num_speculative_blocks=num_speculative_blocks,
     )
 
@@ -146,7 +133,7 @@ def _gate_vllm_config(
     block_size: int = 16,
     num_lookahead_tokens: int = 0,
     num_speculative_tokens: int = 0,
-    mamba_cache_mode: str = "all",
+    mamba_cache_mode: str = "align",
     dcp_size: int = 1,
 ):
     return SimpleNamespace(
@@ -193,7 +180,7 @@ def test_split_block_groups_ignores_transfer_disabled_group():
         block_size=16,
         shapes=((1, 1),),
         dtypes=(torch.float32,),
-        mamba_cache_mode="all",
+        mamba_cache_mode="align",
     )
     config = SimpleNamespace(
         kv_cache_groups=[
@@ -361,7 +348,6 @@ def test_scheduler_accepts_dspark_with_wrapped_full_attention(
         block_size=4,
         num_lookahead_tokens=7,
         num_speculative_tokens=7,
-        mamba_cache_mode="align",
         dcp_size=dcp_size,
     )
     scheduler = moriio_connector.MoRIIOConnectorScheduler(vllm_config, "engine", config)
@@ -398,21 +384,6 @@ def test_scheduler_accepts_dspark_with_wrapped_full_attention(
         )
 
 
-def test_scheduler_rejects_dspark_with_positional_mamba_cache():
-    """Positional mode counts lookahead in the Mamba allocation, so the
-    one-block recurrent-state tail bound no longer holds."""
-    with pytest.raises(moriio_common.MoRIIOError, match="mamba_cache_mode"):
-        moriio_connector.MoRIIOConnectorScheduler(
-            _gate_vllm_config(
-                speculative_config=_spec_config("dspark"),
-                block_size=4,
-                mamba_cache_mode="all",
-            ),
-            "engine",
-            _dspark_wrapped_attention_config(),
-        )
-
-
 def test_scheduler_rejects_hybrid_write():
     config = SimpleNamespace(
         kv_cache_groups=[
@@ -441,20 +412,7 @@ def test_split_block_groups_accepts_empty_abort_payload():
     assert sched.split_block_groups(()) == ([], [])
 
 
-def test_split_block_groups_keeps_positional_slots_in_all_mode():
-    # mamba_cache_mode="all" keeps a state per block position.
-    sched = _FakeScheduler(
-        _has_mamba=True,
-        _attn_group_ids=[0],
-        _mamba_group_ids=[1],
-        _ssm_state_slots_are_positional=True,
-    )
-    attn, mamba = sched.split_block_groups(([1], [40, 41, 42]))
-    assert attn == [1]
-    assert mamba == [[40, 41, 42]]
-
-
-def test_split_block_groups_keeps_only_running_state_outside_all_mode():
+def test_split_block_groups_keeps_only_running_state():
     sched = _FakeScheduler(
         _has_mamba=True,
         _attn_group_ids=[0],
@@ -464,24 +422,21 @@ def test_split_block_groups_keeps_only_running_state_outside_all_mode():
 
 
 @pytest.mark.parametrize(
-    "positional,blocks,expected",
+    "blocks,expected",
     [
-        # Trailing scratch slots go in either cache mode.
-        (True, [40, 41, 42], [40]),
-        # Outside "all" the running state is picked only after they are gone.
-        (False, [40, 41, 42, 43], [41]),
+        # The running state is picked only after the scratch slots are gone.
+        ([40, 41, 42, 43], [41]),
         # Never empty: a list shorter than the scratch count keeps one state.
-        (True, [40], [40]),
-        (False, [], []),
+        ([40], [40]),
+        ([], []),
     ],
 )
-def test_split_block_groups_strips_dspark_scratch_slots(positional, blocks, expected):
+def test_split_block_groups_strips_dspark_scratch_slots(blocks, expected):
     sched = _FakeScheduler(
         _has_mamba=True,
         _attn_group_ids=[0],
         _mamba_group_ids=[1],
         _num_ssm_scratch_blocks=2,
-        _ssm_state_slots_are_positional=positional,
     )
 
     assert sched.split_block_groups(([1], blocks)) == ([1], [expected])
@@ -555,10 +510,11 @@ def _make_read_scheduler():
         _has_mamba=True,
         _attn_group_ids=[0],
         _mamba_group_ids=[1],
-        _ssm_state_slots_are_positional=True,
         request_id_to_transfer_id={},
         transfer_id_to_request_id={},
         _reqs_need_recv={},
+        _reqs_need_save={},
+        _reqs_need_send={},
         _req_kv_params={},
         _max_decode_tail_blocks=1,
     )
@@ -572,24 +528,52 @@ def _make_read_request(remote_block_ids):
             "transfer_id": "tx",
             "remote_engine_id": "prefill",
             "remote_block_ids": remote_block_ids,
+            "remote_host": "127.0.0.1",
+            "remote_handshake_port": 6000,
+            "remote_notify_port": 6001,
         },
     )
 
 
-def test_update_state_drops_decode_recompute_tail_block():
+@pytest.mark.parametrize("external_tokens", [0, 256])
+@pytest.mark.parametrize("has_mamba", [False, True])
+@pytest.mark.parametrize("zero_ids", [None, [], [101], [101, 102, 202, 999]])
+def test_update_state_drops_decode_recompute_tail_block(
+    external_tokens, has_mamba, zero_ids
+):
+    """Only full hybrid READ destinations skip zeroing; local tails still zero."""
     sched = _make_read_scheduler()
-    request = _make_read_request([[10, 11], [90, 91]])
+    sched._has_mamba = has_mamba
+    remote_blocks = [[10, 11], [91]] if has_mamba else [[10, 11]]
+    request = _make_read_request(remote_blocks)
     blocks = _FakeBlocks(
-        all_groups=([100, 101, 102], [200, 201, 202]),
+        all_groups=([100, 101, 102], [200, 201, 202])
+        if has_mamba
+        else ([100, 101, 102],),
     )
 
-    sched.update_state_after_alloc(request, blocks, num_external_tokens=256)
+    sched.update_state_after_alloc(request, blocks, num_external_tokens=external_tokens)
 
-    assert sched._reqs_need_recv["req"][1] == [[100, 101], [200, 201]]
-    assert sched._req_kv_params["req"]["remote_block_ids"] == [
-        [10, 11],
-        [90, 91],
-    ]
+    expected_blocks = [[100, 101] if external_tokens else []]
+    if has_mamba:
+        expected_blocks.append([202])
+    assert sched._reqs_need_recv["req"][1] == expected_blocks
+    assert sched._req_kv_params["req"]["remote_block_ids"] == remote_blocks
+
+    output = SchedulerOutput.make_empty()
+    output.new_block_ids_to_zero = None if zero_ids is None else list(zero_ids)
+    before = asdict(output)
+    meta = sched.build_connector_meta(output)
+    assert meta.reqs_to_recv["req"].local_block_ids == expected_blocks
+    if zero_ids and has_mamba and external_tokens:
+        before["new_block_ids_to_zero"] = zero_ids[1:]
+    assert asdict(output) == before
+
+    # A later local allocation of the same pages must still be zeroed.
+    output.new_block_ids_to_zero = [100, 101, 102]
+    meta = sched.build_connector_meta(output)
+    assert not meta.reqs_to_recv
+    assert output.new_block_ids_to_zero == [100, 101, 102]
 
 
 def test_update_state_pairs_shorter_local_blocks_with_remote_suffix():
@@ -609,7 +593,6 @@ def test_update_state_pairs_trimmed_mamba_state_with_remote_state():
     """The DSpark shape end to end: scratch slots are stripped, the running
     state is then selected, and the attention list loses its lookahead tail."""
     sched = _make_read_scheduler()
-    sched._ssm_state_slots_are_positional = False
     sched._num_ssm_scratch_blocks = 2
     sched._max_decode_tail_blocks = 2
     request = _make_read_request([[10, 11], [90]])
@@ -774,6 +757,117 @@ def test_worker_rejects_incompatible_mamba_specs_before_registration():
         worker.register_kv_caches({"kda.0": object(), "kda.1": object()})
 
 
+def _make_register_worker(caches, geoms, *, disable_hma: bool = True):
+    worker = _FakeWorker(
+        mode=MoRIIOMode.READ,
+        _transfer_layer_names=set(caches),
+        block_size=16,
+        engine_id="e0",
+        dst_num_blocks={},
+        block_lens={},
+        layer_name_to_local_kv_cache_metadata={},
+        kv_caches_base_addr={},
+        kv_layer_mr_offset={},
+        local_kv_cache_size=[],
+        block_window_per_layer=[],
+        moriio_wrapper=SimpleNamespace(
+            register_local_tensor=lambda _t: b"m",
+            get_agent_metadata=lambda: b"a",
+            async_wait_reqid=lambda: None,
+        ),
+        world_size=1,
+        layer_to_spec={},
+        backend_name="TRITON_ATTN",
+        side_channel_port=6301,
+        tp_rank=0,
+        dp_rank=0,
+        is_producer=False,
+        vllm_config=SimpleNamespace(
+            model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="x")),
+            scheduler_config=SimpleNamespace(
+                disable_hybrid_kv_cache_manager=disable_hma
+            ),
+        ),
+    )
+    worker._is_mamba_layer = lambda _n: False
+    worker._is_mla_cache_layer = lambda _n: False
+    worker._get_layer_transfer_geometry = lambda n, remote_num_blocks=None: geoms[n]
+    worker._iter_layer_registration_regions = lambda n: [(caches[n], caches[n].nbytes)]
+    worker._moriio_handshake_listener = (
+        lambda _m, ready_event, *_a, **_k: ready_event.set()
+    )
+    return worker
+
+
+def test_register_kv_caches_allows_hybrid_divergent_block_len():
+    """GLM-5.2 / MiniMax HMA: divergent per-layer block_len is allowed."""
+    Geom = moriio_layout.LayerTransferGeometry
+    caches = {
+        "layer0": torch.zeros(2, 4, 16, 1, 8, dtype=torch.float16),
+        "layer1": torch.zeros(2, 4, 16, 1, 8, dtype=torch.float16),
+    }
+    # Same tokens-per-block (16); different bytes-per-block (2112 vs 9216).
+    geoms = {
+        "layer0": Geom(4, 16, 2112, 132, 2112, None, None, 1, 1, False),
+        "layer1": Geom(4, 16, 9216, 576, 9216, None, None, 1, 1, False),
+    }
+    worker = _make_register_worker(caches, geoms)
+    worker.register_kv_caches(caches)
+
+    assert worker.block_lens == {"layer0": 2112, "layer1": 9216}
+    assert worker.block_len == 9216
+
+
+def test_register_kv_caches_rejects_divergent_block_size():
+    """Without HMA, block_size (tokens/page) must stay uniform."""
+    Geom = moriio_layout.LayerTransferGeometry
+    caches = {
+        "layer0": torch.zeros(2, 4, 16, 1, 8, dtype=torch.float16),
+        "layer1": torch.zeros(2, 4, 16, 1, 8, dtype=torch.float16),
+    }
+    geoms = {
+        "layer0": Geom(4, 16, 2112, 132, 2112, None, None, 1, 1, False),
+        "layer1": Geom(4, 32, 2112, 66, 2112, None, None, 1, 1, False),
+    }
+    worker = _make_register_worker(caches, geoms, disable_hma=True)
+    with pytest.raises(ValueError, match="block size mismatch"):
+        worker.register_kv_caches(caches)
+
+
+def test_register_kv_caches_rejects_divergent_block_size_even_if_block_len_differs():
+    """Without HMA, size+len both differing must still raise."""
+    Geom = moriio_layout.LayerTransferGeometry
+    caches = {
+        "layer0": torch.zeros(2, 4, 16, 1, 8, dtype=torch.float16),
+        "layer1": torch.zeros(2, 4, 16, 1, 8, dtype=torch.float16),
+    }
+    # Previously buggy: size+len both differ → registration continued.
+    geoms = {
+        "layer0": Geom(4, 16, 2112, 132, 2112, None, None, 1, 1, False),
+        "layer1": Geom(4, 32, 9216, 288, 9216, None, None, 1, 1, False),
+    }
+    worker = _make_register_worker(caches, geoms, disable_hma=True)
+    with pytest.raises(ValueError, match="block size mismatch"):
+        worker.register_kv_caches(caches)
+
+
+def test_register_kv_caches_allows_hma_divergent_block_size():
+    """Gemma4 HMA (#53721): SWA vs full-attn may differ in tokens/page."""
+    Geom = moriio_layout.LayerTransferGeometry
+    caches = {
+        "layer0": torch.zeros(2, 4, 16, 1, 8, dtype=torch.float16),
+        "layer1": torch.zeros(2, 4, 16, 1, 8, dtype=torch.float16),
+    }
+    geoms = {
+        "layer0": Geom(4, 16, 2112, 132, 2112, None, None, 1, 1, False),
+        "layer1": Geom(4, 32, 4224, 132, 4224, None, None, 1, 1, False),
+    }
+    worker = _make_register_worker(caches, geoms, disable_hma=False)
+    worker.register_kv_caches(caches)
+    assert worker.block_lens == {"layer0": 2112, "layer1": 4224}
+    assert worker.block_len == 4224
+
+
 # --------------------------------------------------------------------------
 # _truncate_mamba_request_for_prefill
 # --------------------------------------------------------------------------
@@ -823,12 +917,50 @@ def test_truncate_mamba_request_noop_for_single_token_prompt():
 # --------------------------------------------------------------------------
 # get_num_new_matched_tokens  (hybrid N-1 accounting)
 # --------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "params,expected",
+    [
+        (None, (0, False)),
+        ({}, (0, False)),
+        ({"do_remote_prefill": False}, (0, False)),
+        ({"do_remote_prefill": True}, (31, False)),
+    ],
+)
+def test_read_matches_only_requests_with_pending_remote_prefill(params, expected):
+    scheduler = _FakeScheduler(is_producer=False, mode=MoRIIOMode.READ)
+    request = SimpleNamespace(num_prompt_tokens=32, kv_transfer_params=params)
+
+    assert scheduler.get_num_new_matched_tokens(request, 0) == expected
+
+
+def test_read_rematch_after_alloc_keeps_queued_transfer():
+    """Clearing the flag blocks another external hit, not the queued READ."""
+    sched = _make_read_scheduler()
+    request = _make_read_request([[10, 11], [91]])
+    request.num_prompt_tokens = 32
+    assert sched.get_num_new_matched_tokens(request, 0) == (31, False)
+
+    sched.update_state_after_alloc(
+        request, _FakeBlocks(all_groups=([100, 101], [200])), num_external_tokens=31
+    )
+
+    assert sched._reqs_need_recv["req"][1] == [[100, 101], [200]]
+    assert request.kv_transfer_params["do_remote_prefill"] is False
+
+    meta = sched.build_connector_meta(SchedulerOutput.make_empty())
+    queued = meta.reqs_to_recv["req"]
+    assert queued.transfer_id == "tx"
+    assert queued.local_block_ids == [[100, 101], [200]]
+    assert queued.remote_block_ids == [[10, 11], [91]]
+    assert sched.get_num_new_matched_tokens(request, 0) == (0, False)
+
+
 def test_get_num_new_matched_tokens_read_recomputes_last_token():
     sched = _FakeScheduler(is_producer=False, mode=MoRIIOMode.READ, _has_mamba=True)
     req = SimpleNamespace(
         num_prompt_tokens=10,
         prompt_token_ids=list(range(10)),
-        kv_transfer_params=None,
+        kv_transfer_params={"do_remote_prefill": True},
     )
     n, is_async = sched.get_num_new_matched_tokens(req, num_computed_tokens=0)
     # READ always recomputes the final token locally: N-1 - computed.
@@ -841,7 +973,7 @@ def test_get_num_new_matched_tokens_write_plain_keeps_all_tokens():
     req = SimpleNamespace(
         num_prompt_tokens=10,
         prompt_token_ids=list(range(10)),
-        kv_transfer_params=None,
+        kv_transfer_params={"do_remote_prefill": True},
     )
     n, is_async = sched.get_num_new_matched_tokens(req, num_computed_tokens=2)
     # Pure-attention WRITE: no N-1 drop; full length minus already-computed.
@@ -865,7 +997,7 @@ def test_get_num_new_matched_tokens_supports_embeds_only_prompts(
         num_prompt_tokens=10,
         prompt_token_ids=None,
         prompt_embeds=object(),
-        kv_transfer_params=None,
+        kv_transfer_params={"do_remote_prefill": True},
     )
 
     assert sched.get_num_new_matched_tokens(req, num_computed_tokens) == (
