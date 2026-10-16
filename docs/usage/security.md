@@ -404,8 +404,6 @@ An attacker who can reach the gRPC port can:
 3. **Consume GPU and compute resources** by submitting unbounded generation requests
 4. **Stop a managed engine** through `Control.Shutdown`, or cause denial of service by exploiting bugs in the gRPC interface.
 
-FlashInfer SM120 sparse MLA also maintains a separate calibration cache controlled by `FLASHINFER_AUTOTUNE_DIR`. Managed-cache reload does not synchronize its calibration parameters across ranks. Pre-calibrate on idle, compatible hardware and deploy a consistent calibration artifact when reproducible kernel selection is required.
-
 ### Recommendations
 
 - Only enable `--grpc-port` when you have a specific need for gRPC-based inference
@@ -638,8 +636,6 @@ Scope the salt to the isolation boundary you need:
 - **Per-group sharing**: A shared random salt for users who are allowed to benefit from each other's cached prefixes, such as users within the same organization.
 - **No salt**: Omitting `cache_salt` preserves the default behavior where all requests can share cached prefixes. This is appropriate for single-tenant deployments or when prefix privacy is not a concern.
 
-FlashInfer SM120 sparse MLA also maintains a separate calibration cache controlled by `FLASHINFER_AUTOTUNE_DIR`. Managed-cache reload does not synchronize its calibration parameters across ranks. Pre-calibrate on idle, compatible hardware and deploy a consistent calibration artifact when reproducible kernel selection is required.
-
 ### Recommendations
 
 - **Multi-tenant deployments**: Set `cache_salt` on every request, using a secret scoped to the tenant boundary you want to enforce.
@@ -670,8 +666,6 @@ This applies to the multimodal processor cache, the encoder output cache, and th
 For additional cross-tenant isolation, set `cache_salt` on each request (see [Prefix Cache Timing Side-Channel Mitigation](#prefix-cache-timing-side-channel-mitigation-cache-salting) above). The salt is mixed into the prefix cache block hashes, so requests with different salts cannot share cached prefix blocks even if UUIDs collide.
 
 `cache_salt` is opt-in and not passed by default.
-
-FlashInfer SM120 sparse MLA also maintains a separate calibration cache controlled by `FLASHINFER_AUTOTUNE_DIR`. Managed-cache reload does not synchronize its calibration parameters across ranks. Pre-calibrate on idle, compatible hardware and deploy a consistent calibration artifact when reproducible kernel selection is required.
 
 ### Recommendations
 
