@@ -6,6 +6,7 @@ from torch.nn.parameter import Parameter
 
 import vllm.envs as envs
 from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
+from vllm.config import CompilationMode, get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp4Dynamic,
@@ -137,9 +138,9 @@ if is_aiter_found_and_supported():
         x: torch.Tensor,
         weight: torch.Tensor,
         weight_scale: torch.Tensor,
-        x_scales: torch.Tensor = None,
         rocm_use_aiter_fp4_asm_gemm: bool = False,
         out_dtype: torch.dtype | None = torch.bfloat16,
+        x_scales: torch.Tensor | None = None,
     ) -> torch.Tensor:
         return torch.empty(
             (*x.shape[:-1], weight.shape[0]), dtype=out_dtype, device=x.device
@@ -161,6 +162,16 @@ class AiterMxfp4LinearKernel(MxFp4LinearKernel):
         super().__init__(config)
         self.use_asm_gemm = rocm_aiter_ops.is_asm_fp4_gemm_dynamic_quant_enabled()
         self.out_dtype = torch.get_default_dtype()
+        # only emit the quant as its own op when a pass will fold it, so eager
+        # mode and -O0 keep the single gemm_with_dynamic_quant call
+        compilation_config = get_current_vllm_config().compilation_config
+        pass_config = compilation_config.pass_config
+        compiled = compilation_config.mode == CompilationMode.VLLM_COMPILE
+        self.fold_act_quant = compiled and (
+            bool(pass_config.fuse_act_quant)
+            or bool(pass_config.fuse_norm_quant and pass_config.fuse_norm_mxfp4_quant)
+        )
+        self.split_act_quant = False
 
     @classmethod
     def is_supported(
@@ -212,6 +223,13 @@ class AiterMxfp4LinearKernel(MxFp4LinearKernel):
             )
             self.use_asm_gemm = False
 
+        # the MXFP4 quant fusions only cover the Triton afp4wfp4 path
+        self.split_act_quant = (
+            not self.use_asm_gemm
+            and self.fold_act_quant
+            and bool(rocm_aiter_ops.is_mxfp4_quant_fusion_supported())
+        )
+
         if self.use_asm_gemm:
             from aiter.ops.shuffle import shuffle_weight
 
@@ -237,13 +255,27 @@ class AiterMxfp4LinearKernel(MxFp4LinearKernel):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        y = torch.ops.vllm.gemm_with_dynamic_quant(
-            x,
-            layer.weight,
-            layer.weight_scale,
-            self.use_asm_gemm,
-            self.out_dtype,
-        )
+        if self.split_act_quant:
+            # Emit the activation quant as its own op so the aiter fusion
+            # passes can fold it into the producing SiLU-mul / RMSNorm. Left
+            # unfused it is the same dynamic_mxfp4_quant + gemm_afp4wfp4.
+            x_q, x_s = torch.ops.vllm.rocm_aiter_dynamic_mxfp4_quant(x)
+            y = torch.ops.vllm.gemm_with_dynamic_quant(
+                x_q,
+                layer.weight,
+                layer.weight_scale,
+                False,
+                self.out_dtype,
+                x_s,
+            )
+        else:
+            y = torch.ops.vllm.gemm_with_dynamic_quant(
+                x,
+                layer.weight,
+                layer.weight_scale,
+                self.use_asm_gemm,
+                self.out_dtype,
+            )
         if bias is not None:
             y = y + bias
         return y
