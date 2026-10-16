@@ -517,12 +517,13 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
                 f"the checkpoint has no {name or 'default'!r} chat template."
             )
 
-        logger.info_once(
-            "Scoring with the %r chat template declared by the Sentence "
-            "Transformers config. Its suffix is not restored after truncation; "
-            "use max_tokens_per_doc to truncate documents.",
-            name or "default",
-        )
+        if self.chat_template is None:
+            logger.info_once(
+                "Scoring with the %r chat template declared by the Sentence "
+                "Transformers config. Its suffix is not restored after "
+                "truncation; use max_tokens_per_doc to truncate documents.",
+                name or "default",
+            )
         return template, saved_kwargs
 
     #######################################
