@@ -117,6 +117,7 @@ class EngineCoreOutput(
     new_sampling_mask: object | None = None
     spec_decode_metrics: object | None = None
     prompt_token_id_logprobs: object | None = None
+    aux_output_keys: list[str] | None = None
 
 
 class ExtendedEngineCoreOutput(EngineCoreOutput):
@@ -238,6 +239,7 @@ outputs = EngineCoreOutputs(
             request_id="req-1",
             new_token_ids=[7, 8],
             finish_reason=FinishReason.LENGTH,
+            aux_output_keys=["r3:block-0", "r3-tail:end"],
         )
     ],
     finished_requests={"req-1"},

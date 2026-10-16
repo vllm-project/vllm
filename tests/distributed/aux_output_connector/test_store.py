@@ -260,6 +260,22 @@ def test_remote_kv_requires_r3_handoff_manifest(prefix):
     assert metadata.remote_tails == {"decode": "tail"}
 
 
+@pytest.mark.parametrize("start", [4, 8])
+def test_aligned_external_kv_hit_needs_no_aux_handoff(start):
+    connector = _make_connector()
+    request = _SchedulerRequest(
+        "offload",
+        [],
+        num_tokens=start + 1,
+        num_computed_tokens=start,
+        prefill_stats=SimpleNamespace(num_external_cached_tokens=start),
+    )
+    scheduled = SimpleNamespace(num_scheduled_tokens={"offload": 1})
+    metadata = connector.build_connector_meta(scheduled, {"offload": request})
+    assert not metadata.remote_tails
+    assert "offload" in metadata.requests
+
+
 def test_mooncake_pd_missing_tail_fails_closed(remote_store):
     worker = _make_worker(1)
     worker._store.close()

@@ -352,19 +352,24 @@ async fn generate_merges_outputs_by_stream_interval() {
                     (&[6], "v7", None),
                     (&[7], "v7", Some(EngineCoreFinishReason::Length)),
                 ];
+                // Auxiliary-output keys published by each step.
+                let keys: [&[&str]; 6] = [&[], &["k0"], &[], &["k1", "k2"], &[], &["tail"]];
                 for (step, (token_ids, weight_version, finish_reason)) in
                     steps.into_iter().enumerate()
                 {
+                    let mut output = request_output_with_logprobs(
+                        &request.request_id,
+                        token_ids.to_vec(),
+                        finish_reason,
+                        Some(token_logprobs(token_ids)),
+                        None,
+                    );
+                    output.aux_output_keys = (!keys[step].is_empty())
+                        .then(|| keys[step].iter().map(|key| key.to_string()).collect());
                     send_outputs(
                         push,
                         RequestBatchOutputs {
-                            outputs: vec![request_output_with_logprobs(
-                                &request.request_id,
-                                token_ids.to_vec(),
-                                finish_reason,
-                                Some(token_logprobs(token_ids)),
-                                None,
-                            )],
+                            outputs: vec![output],
                             weight_version: Some(weight_version.into()),
                             timestamp: step as f64 + 1.0,
                             ..Default::default()
@@ -431,6 +436,16 @@ async fn generate_merges_outputs_by_stream_interval() {
             None,
             None,
             Some(vec![span("v7", 0, 2), span("v8", 2, 5), span("v7", 5, 7)])
+        ]
+    );
+    let aux_output_keys: Vec<_> =
+        outputs.iter().map(|output| output.aux_output_keys.clone()).collect();
+    assert_eq!(
+        aux_output_keys,
+        [
+            None,
+            None,
+            Some(vec!["k0".into(), "k1".into(), "k2".into(), "tail".into()])
         ]
     );
     let last_token_timestamps: Vec<_> =
@@ -555,6 +570,7 @@ async fn collect_output_rejects_partial_sampling_mask() {
         }),
         spec_decode_metrics: None,
         weight_versions: None,
+        aux_output_keys: None,
         timestamps: Default::default(),
     };
 
