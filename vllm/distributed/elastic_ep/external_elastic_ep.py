@@ -838,7 +838,7 @@ class ExternalElasticEPScaleCoordinator:
                 if prepared.dp_rank == 0:
                     self.client._coord_store = self.reconfig_store_ref
                     self.client._ensure_stats_update_task()
-                    await self.client.first_req_send_socket.send(
+                    await self.client.scale_send_socket.send(
                         msgspec.msgpack.encode(
                             ("SCALE_ELASTIC_EP", bootstrap.new_data_parallel_size)
                         )
