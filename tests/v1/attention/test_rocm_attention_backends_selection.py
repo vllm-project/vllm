@@ -9,6 +9,7 @@ import pytest
 import torch
 
 from vllm.config.attention import AttentionConfig
+from vllm.config.parallel import ParallelConfig
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.selector import AttentionSelectorConfig
@@ -71,6 +72,7 @@ def test_deepseek_v41_rocm_accepts_legacy_backend_alias(backend_name, expect_war
 
     config = SimpleNamespace(
         attention_config=AttentionConfig(backend=backend_name),
+        parallel_config=ParallelConfig(),
     )
 
     with patch.object(dsv41_model.logger, "warning_once") as warning_once:
