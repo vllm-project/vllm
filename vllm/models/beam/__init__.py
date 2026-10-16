@@ -2,7 +2,18 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Beam model entry point."""
 
-from .nvidia.dflash2 import DFlash2BeamForCausalLM
-from .nvidia.model import BeamForCausalLM
+from typing import TYPE_CHECKING
+
+from vllm.platforms import current_platform
+
+if TYPE_CHECKING:
+    from .nvidia.dflash2 import DFlash2BeamForCausalLM
+    from .nvidia.model import BeamForCausalLM
+elif current_platform.is_rocm():
+    from .amd.model import BeamForCausalLM
+    from .nvidia.dflash2 import DFlash2BeamForCausalLM
+else:
+    from .nvidia.dflash2 import DFlash2BeamForCausalLM
+    from .nvidia.model import BeamForCausalLM
 
 __all__ = ["BeamForCausalLM", "DFlash2BeamForCausalLM"]

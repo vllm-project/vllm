@@ -5,6 +5,7 @@
 import torch
 from torch import nn
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 
@@ -185,6 +186,12 @@ def beam_norm_residual_norm(
     normalized = torch.empty_like(hidden) if next_eps is not None else None
     n = x.shape[-1]
     if hidden.numel():
+        launch_kwargs = {
+            "num_warps": 4 if launch_pdl or n <= 1024 else 8,
+            "enable_fp_fusion": False,
+        }
+        if current_platform.is_cuda():
+            launch_kwargs["launch_pdl"] = launch_pdl
         _norm_residual_norm_kernel[(x.shape[0],)](
             x,
             residual,
@@ -205,8 +212,6 @@ def beam_norm_residual_norm(
             scales is not None,
             triton.next_power_of_2(n),
             launch_pdl,
-            num_warps=4 if launch_pdl or n <= 1024 else 8,
-            enable_fp_fusion=False,
-            launch_pdl=launch_pdl,
+            **launch_kwargs,
         )
     return hidden, normalized
