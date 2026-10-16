@@ -20,4 +20,6 @@ pub enum Error {
         token_count: usize,
         row_count: usize,
     },
+    #[error("routed experts for request `{request_id}` are malformed: {reason}")]
+    MalformedRoutedExperts { request_id: String, reason: String },
 }

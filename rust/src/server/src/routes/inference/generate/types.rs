@@ -74,6 +74,9 @@ pub(super) struct GenerateResponseChoice {
     pub finish_reason: Option<String>,
     pub stop_reason: Option<StopReason>,
     pub token_ids: Vec<u32>,
+    /// Base64 `.npy` routed-expert rows `[num_tokens - 1, num_layers, top_k]`,
+    /// set on the terminal response, as Python `numpy2base64` encodes them.
+    pub routed_experts: Option<String>,
     pub sampling_mask: Option<Vec<Vec<u32>>>,
     pub weight_versions: Option<Vec<WeightVersionSpan>>,
 }
@@ -87,6 +90,9 @@ pub(super) struct GenerateResponseStreamChoice {
     pub finish_reason: Option<String>,
     pub stop_reason: Option<StopReason>,
     pub token_ids: Vec<u32>,
+    /// Base64 `.npy` routed-expert rows `[num_tokens - 1, num_layers, top_k]`,
+    /// set on the terminal response, as Python `numpy2base64` encodes them.
+    pub routed_experts: Option<String>,
     pub sampling_mask: Option<Vec<Vec<u32>>>,
     /// Set on the final chunk only; covers the whole output.
     pub weight_versions: Option<Vec<WeightVersionSpan>>,

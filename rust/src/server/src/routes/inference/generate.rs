@@ -21,10 +21,10 @@ use futures::{Stream, StreamExt as _, pin_mut};
 use thiserror_ext::AsReport as _;
 use tracing::{error, info, trace};
 use tracing_futures::Instrument as _;
-use vllm_engine_core_client::protocol::dtype::TensorDtype;
+use vllm_engine_core_client::protocol::dtype::{Endianness, TensorDtype};
 use vllm_engine_core_client::protocol::logprobs::{Logprobs, PositionLogprobs};
 use vllm_engine_core_client::protocol::multimodal::MmFeatureSpec;
-use vllm_engine_core_client::protocol::tensor::WireNdArray;
+use vllm_engine_core_client::protocol::tensor::{ShapeExt as _, WireNdArray};
 use vllm_llm::{
     CollectedGenerateOutput, FinishReason, GenerateOutput, GenerateOutputStreamExt as _, TokenUsage,
 };
@@ -235,6 +235,11 @@ async fn generate_chunk_stream(
                         finish_reason: finish_reason.map(|reason| reason.as_str().to_string()),
                         stop_reason,
                         token_ids,
+                        routed_experts: output
+                            .routed_experts
+                            .as_deref()
+                            .map(npy_base64)
+                            .transpose()?,
                         sampling_mask: output.sampling_mask.map(|mask| mask.rows),
                         weight_versions: output.weight_versions,
                     }],
@@ -339,6 +344,7 @@ fn collect_generate(
             finish_reason: Some(finish_reason),
             stop_reason,
             token_ids: collected.token_ids,
+            routed_experts: collected.routed_experts.as_ref().map(npy_base64).transpose()?,
             sampling_mask: collected.sampling_mask.map(|mask| mask.rows),
             weight_versions: collected.weight_versions,
         }],
@@ -462,18 +468,43 @@ fn position_to_logprob_map(position: &PositionLogprobs) -> HashMap<u32, Generate
         .collect()
 }
 
-/// Encode a float32 matrix as Python `numpy2base64` does.
+/// Encode an ndarray as Python `numpy2base64` (`np.save`, then base64) does.
 fn npy_base64(array: &WireNdArray) -> Result<String, ApiError> {
-    let (TensorDtype::F32, Some(data), [rows, cols]) = (
-        array.dtype.scalar,
-        array.data.as_raw_view(),
-        array.shape.as_slice(),
-    ) else {
-        bail_server_error!("prompt_token_id_logprobs: expected a float32 matrix");
+    let Some(data) = array.data.as_raw_view() else {
+        bail_server_error!("ndarray data was not resolved");
     };
-    let mut header =
-        format!("{{'descr': '<f4', 'fortran_order': False, 'shape': ({rows}, {cols}), }}");
-    header.push_str(&" ".repeat(21 - rows.to_string().len()));
+    let size = array.dtype.scalar.element_size();
+    if array.shape.checked_numel().and_then(|numel| numel.checked_mul(size)) != Some(data.len()) {
+        bail_server_error!("ndarray byte length does not match its shape");
+    }
+    if array.dtype.scalar == TensorDtype::Bf16 {
+        bail_server_error!("bfloat16 has no NumPy `.npy` descriptor");
+    }
+    let byte_order = match array.dtype.endianness {
+        _ if size == 1 => '|',
+        Endianness::Little => '<',
+        Endianness::Big => '>',
+        Endianness::Native if cfg!(target_endian = "little") => '<',
+        Endianness::Native => '>',
+    };
+    // The descriptor code follows the byte-order character of the dtype string.
+    let descr = array.dtype.to_string();
+    let shape = match array.shape.as_slice() {
+        [] => "()".to_string(),
+        [dim] => format!("({dim},)"),
+        dims => {
+            let dims: Vec<_> = dims.iter().map(ToString::to_string).collect();
+            format!("({})", dims.join(", "))
+        }
+    };
+    let mut header = format!(
+        "{{'descr': '{byte_order}{}', 'fortran_order': False, 'shape': {shape}, }}",
+        &descr[1..]
+    );
+    // NumPy reserves room to grow the first axis in place.
+    if let Some(first) = array.shape.first() {
+        header.push_str(&" ".repeat(21 - first.to_string().len()));
+    }
     header.push_str(&" ".repeat(64 - (11 + header.len()) % 64));
     header.push('\n');
 
@@ -639,6 +670,7 @@ mod tests {
                 sampling_mask: None,
                 spec_decode_metrics: None,
                 weight_versions: None,
+                routed_experts: None,
                 timestamps: Default::default(),
             }),
             Ok(GenerateOutput {
@@ -657,6 +689,7 @@ mod tests {
                 sampling_mask: None,
                 spec_decode_metrics: None,
                 weight_versions: None,
+                routed_experts: None,
                 timestamps: Default::default(),
             }),
         ]);
@@ -745,6 +778,7 @@ mod tests {
             sampling_mask: None,
             spec_decode_metrics: None,
             weight_versions: None,
+            routed_experts: None,
             timestamps: Default::default(),
         }
     }
@@ -921,6 +955,7 @@ mod tests {
             }),
             spec_decode_metrics: None,
             weight_versions: None,
+            routed_experts: None,
         };
 
         let response = collect_generate(
@@ -941,6 +976,56 @@ mod tests {
         assert!(response.prompt_token_ids.is_none());
         assert!(response.mm_placeholders.is_none());
         assert_eq!(response.choices[0].sampling_mask, Some(vec![vec![30, 40]]));
+    }
+
+    #[test]
+    fn routed_experts_match_numpy2base64() {
+        // Expected values are numpy2base64 of the same arrays.
+        let cases = [
+            (
+                // np.arange(12, dtype=np.uint8).reshape(2, 3, 2)
+                WireNdArray::from_raw(TensorDtype::U8, vec![2, 3, 2], (0..12).collect()),
+                "k05VTVBZAQB2AHsnZGVzY3InOiAnfHUxJywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDIsIDMsIDIpLCB9ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAoAAQIDBAUGBwgJCgs=",
+            ),
+            (
+                // np.arange(6, dtype="<i4").reshape(3, 1, 2)
+                WireNdArray::from_i32(vec![3, 1, 2], (0..6).collect()).unwrap(),
+                "k05VTVBZAQB2AHsnZGVzY3InOiAnPGk0JywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDMsIDEsIDIpLCB9ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAoAAAAAAQAAAAIAAAADAAAABAAAAAUAAAA=",
+            ),
+            (
+                // np.arange(3, dtype="<u2")
+                WireNdArray::from_raw(TensorDtype::U16, vec![3], vec![0, 0, 1, 0, 2, 0]),
+                "k05VTVBZAQB2AHsnZGVzY3InOiAnPHUyJywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDMsKSwgfSAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAoAAAEAAgA=",
+            ),
+            (
+                // np.zeros((0, 2, 2), dtype=np.uint8)
+                WireNdArray::from_raw(TensorDtype::U8, vec![0, 2, 2], Vec::new()),
+                "k05VTVBZAQB2AHsnZGVzY3InOiAnfHUxJywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDAsIDIsIDIpLCB9ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAo=",
+            ),
+        ];
+        for (array, expected) in cases {
+            assert_eq!(npy_base64(&array).unwrap(), expected, "{array:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn generate_chunk_stream_returns_routed_experts_on_final_chunk() {
+        let rows = WireNdArray::from_raw(TensorDtype::U8, vec![2, 3, 2], (0..12).collect());
+        let mut terminal = stream_output(None, vec![44], Some(FinishReason::Length));
+        terminal.routed_experts = Some(Box::new(rows.clone()));
+
+        let chunks = collect_chunks(
+            vec![stream_output(Some(&[11]), vec![33], None), terminal],
+            false,
+            None,
+        )
+        .await;
+
+        assert_eq!(chunks[0].choices[0].routed_experts, None);
+        assert_eq!(
+            chunks[1].choices[0].routed_experts,
+            Some(npy_base64(&rows).unwrap())
+        );
     }
 
     #[test]
@@ -976,6 +1061,7 @@ mod tests {
             sampling_mask: None,
             spec_decode_metrics: Some(metrics.clone()),
             weight_versions: None,
+            routed_experts: None,
         };
 
         let response = collect_generate(
@@ -1069,6 +1155,7 @@ mod tests {
             sampling_mask: None,
             spec_decode_metrics: None,
             weight_versions: None,
+            routed_experts: None,
         };
 
         let response = collect_generate(
@@ -1105,6 +1192,7 @@ mod tests {
             sampling_mask: None,
             spec_decode_metrics: None,
             weight_versions: None,
+            routed_experts: None,
             prompt_token_ids,
         };
 
@@ -1183,6 +1271,7 @@ mod tests {
             sampling_mask: None,
             spec_decode_metrics: None,
             weight_versions: None,
+            routed_experts: None,
         };
 
         let response = collect_generate(
