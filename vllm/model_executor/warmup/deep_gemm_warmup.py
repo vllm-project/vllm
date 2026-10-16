@@ -14,7 +14,6 @@ from tqdm import tqdm
 import vllm.envs as envs
 from vllm.distributed.parallel_state import (
     get_dp_group,
-    get_ep_group,
     is_global_first_rank,
 )
 from vllm.forward_context import ForwardContext, override_forward_context
@@ -356,7 +355,6 @@ def _get_fp8_fp4_mega_moe_m_values(
     dg = _import_deep_gemm()
     gate, experts = module.gate, module.experts
     uses_mega_gate = _mega_moe_uses_mega_gate(module)
-    num_max_tokens_per_rank = experts.get_symm_buffer().num_max_tokens_per_rank
     if module.use_sequence_parallel:
         max_tokens = cdiv(max_tokens, module.tp_size)
 
@@ -366,17 +364,10 @@ def _get_fp8_fp4_mega_moe_m_values(
             dg.get_bf16_mega_gate_config(
                 num_tokens, gate.input_size, gate.output_size, experts.top_k
             )
-            if uses_mega_gate
+            if uses_mega_gate and hasattr(dg, "get_bf16_mega_gate_config")
             else {}
         )
-        block_m = dg.get_block_m_for_mega_moe(
-            get_ep_group().world_size,
-            experts.num_experts,
-            num_max_tokens_per_rank,
-            num_tokens,
-            experts.top_k,
-            "fp8xfp4",
-        )
+        block_m = experts.get_block_m(num_tokens)
         # Keep the largest M: DeepSeek-V4 only calls bf16_mega_gate above a
         # small token threshold, and a config's largest M is always above it.
         m_values[(tuple(gate_config.items()), block_m)] = num_tokens

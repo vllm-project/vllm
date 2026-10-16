@@ -105,6 +105,7 @@ steps:
 
 - label: ":nvidia: (H100) LM Eval Large Models"
   key: lm-eval-large-models-4xh100
+  automatic_shard: true
   device: h100
   optional: true
   num_devices: 4
@@ -139,6 +140,7 @@ steps:
 
 - label: ":nvidia: (B200) LM Eval Small Models"
   key: lm-eval-small-models-1xb200
+  automatic_shard: true
   timeout_in_minutes: 50
   device: b200-k8s
   optional: true
@@ -236,6 +238,7 @@ steps:
 
 - label: ":nvidia: (B200) LM Eval PCP"
   key: lm-eval-pcp-4xb200
+  automatic_shard: true
   timeout_in_minutes: 360
   device: b200-k8s
   num_devices: 4
@@ -384,6 +387,7 @@ steps:
 
 - label: ":nvidia: (B200) LM Eval Large Models EP"
   key: lm-eval-large-models-ep-2xb200
+  automatic_shard: true
   timeout_in_minutes: 60
   device: b200-k8s
   optional: true
@@ -1341,6 +1345,8 @@ steps:
 
 - label: ":nvidia: (H100) LM Eval KV-Offload Large"
   key: kv-offload-large
+  # Nightly only: 4-GPU H100 pods wait behind smaller jobs on per-PR runs.
+  optional: true
   timeout_in_minutes: 40
   device: h100
   num_devices: 4

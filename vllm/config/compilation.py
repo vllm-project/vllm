@@ -1086,6 +1086,7 @@ class CompilationConfig:
         vllm_config: "VllmConfig",
         prefix: str = "",
         is_encoder: bool = False,
+        use_aot_compile: bool = True,
     ) -> str | Callable:
         """Initialize the backend for the compilation config from a vllm config.
 
@@ -1094,6 +1095,7 @@ class CompilationConfig:
             prefix: Cache directory prefix for this compiled module.
             is_encoder: Whether this module is used in an encoder (as
                 opposed to a text backbone).
+            use_aot_compile: Whether the module permits AOT and direct artifacts.
 
         Returns:
             The backend for the compilation config.
@@ -1125,7 +1127,12 @@ class CompilationConfig:
 
         from vllm.compilation.backends import VllmBackend
 
-        return VllmBackend(vllm_config, prefix=prefix, is_encoder=is_encoder)
+        return VllmBackend(
+            vllm_config,
+            prefix=prefix,
+            is_encoder=is_encoder,
+            use_aot_compile=use_aot_compile,
+        )
 
     def post_init_cudagraph_sizes(self) -> None:
         """To complete the initialization after cudagraph related
