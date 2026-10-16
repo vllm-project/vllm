@@ -1062,6 +1062,37 @@ def _tc(*, args, id=None, name=None):
     )
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("after_content", [False, True])
+@pytest.mark.parametrize(
+    "error_type,code", [("BadRequestError", 400), ("InternalServerError", 500)]
+)
+async def test_stream_preserves_backend_error_and_terminates(
+    after_content, error_type, code
+):
+    message = "thinking_token_budget requires reasoning_config"
+
+    async def sse_input():
+        if after_content:
+            yield _make_stream_chunk(delta=DeltaMessage(role="assistant"))
+            yield _make_stream_chunk(delta=DeltaMessage(content="Partial"))
+        yield "data: " + json.dumps(
+            {"error": {"type": error_type, "message": message, "code": code}}
+        )
+        yield "data: [DONE]"
+
+    converter = _make_stream_converter()
+    events = _parse_sse_events(
+        [event async for event in converter.message_stream_converter(sse_input())]
+    )
+    assert events[-1] == (
+        "error",
+        {"type": "error", "error": {"type": error_type, "message": message}},
+    )
+    assert sum(event == "error" for event, _ in events) == 1
+    assert not any(event in {"message_delta", "message_stop"} for event, _ in events)
+
+
 class TestMessageStreamConverterToolUseContentBuffering:
     """Regression test for tool_use arguments being silently dropped.
 

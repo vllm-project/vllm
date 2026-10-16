@@ -1005,8 +1005,21 @@ class AnthropicServingMessages(OpenAIServingChat):
                         )
                         yield wrap_data_with_event(data, "message_stop")
                     else:
-                        origin_chunk = ChatCompletionStreamResponse.model_validate_json(
-                            data_str
+                        payload = json.loads(data_str)
+                        if "error" in payload:
+                            backend_error = ErrorResponse.model_validate(payload).error
+                            error_response = AnthropicStreamEvent(
+                                type="error",
+                                error=AnthropicError(
+                                    type=backend_error.type,
+                                    message=backend_error.message,
+                                ),
+                            )
+                            data = error_response.model_dump_json(exclude_unset=True)
+                            yield wrap_data_with_event(data, "error")
+                            return
+                        origin_chunk = ChatCompletionStreamResponse.model_validate(
+                            payload
                         )
 
                         if first_item:

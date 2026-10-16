@@ -24,7 +24,12 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from tests.distributed.eplb_utils import distributed_run, set_env_vars_and_device
-from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.config import (
+    KernelConfig,
+    ParallelConfig,
+    VllmConfig,
+    set_current_vllm_config,
+)
 from vllm.config.kernel import FLASHINFER_MOE_EP_CUTEDSL, FLASHINFER_MOE_EP_DEEP_GEMM
 from vllm.distributed.parallel_state import ensure_model_parallel_initialized
 from vllm.model_executor.layers.fused_moe import flashinfer_moe_ep as fi_ep
@@ -32,6 +37,7 @@ from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
+    FusedMoEQuantConfig,
     RoutingMethodType,
 )
 from vllm.model_executor.layers.fused_moe.experts.flashinfer_moe_ep import (
@@ -41,6 +47,7 @@ from vllm.model_executor.layers.fused_moe.flashinfer_moe_ep import (
     FlashInferMoeEp,
     FlashInferMoeEpWeights,
     apply_topk_in_fc1,
+    supports_flashinfer_moe_ep_deferred_finalize,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp4Static
 from vllm.platforms import current_platform
@@ -241,6 +248,7 @@ def _check_expert_views_alias_kernel_memory(
     assert torch.equal(output, _expected_output(geometry, topk_ids, topk_weights))
 
 
+@torch.inference_mode()
 def _init_warmup_forward(
     env: dict[str, str], world_size: int, geometry: Geometry, backend: str
 ) -> None:
@@ -293,6 +301,216 @@ def _init_warmup_forward(
                 )
         finally:
             adapter.destroy()
+
+
+@torch.inference_mode()
+def _data_parallel_boundary_forward(
+    env: dict[str, str],
+    world_size: int,
+    cache_path: str | None = None,
+) -> None:
+    from vllm.distributed import graph_capture
+    from vllm.forward_context import set_forward_context
+    from vllm.model_executor.layers.fused_moe.all2all_utils import (
+        maybe_make_prepare_finalize,
+    )
+    from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
+    from vllm.models.beam.nvidia.layernorm import beam_norm_residual_norm
+    from vllm.models.beam.nvidia.moe_finalize import (
+        beam_moe_finalize_norm_residual_norm,
+    )
+    from vllm.v1.worker.workspace import init_workspace_manager
+
+    set_env_vars_and_device(env)
+    rank = torch.distributed.get_rank()
+    vllm_config = VllmConfig(
+        parallel_config=ParallelConfig(
+            data_parallel_size=world_size,
+            data_parallel_rank=rank,
+            enable_expert_parallel=True,
+        ),
+        kernel_config=KernelConfig(moe_backend=FLASHINFER_MOE_EP_CUTEDSL),
+    )
+    vllm_config.scheduler_config.max_num_seqs = 32
+    geometry = Geometry("dp-top8", 1024, 512, 32, 8)
+    with set_current_vllm_config(vllm_config):
+        ensure_model_parallel_initialized(
+            tensor_model_parallel_size=1, pipeline_model_parallel_size=1
+        )
+        device = torch.device(f"cuda:{rank}")
+        init_workspace_manager(device)
+        moe = _moe_config(
+            vllm_config, geometry, world_size, device, FLASHINFER_MOE_EP_CUTEDSL
+        )
+        moe.defer_moe_finalize(allow_ep=True)
+        assert moe.use_deferred_moe_finalize
+        weights = _local_expert_weights(geometry, rank, moe.num_local_experts, device)
+        if cache_path is not None:
+            import os
+
+            from flashinfer.moe_ep.kernel_src.sm100.cutedsl_megamoe.shim.knob_cache import (  # noqa: E501
+                record_knobs,
+            )
+
+            os.environ["FLASHINFER_MOE_EP_KNOB_CACHE"] = cache_path
+            if rank == 0:
+                for capacity, live, cluster in (
+                    (32, 4, 1),
+                    (32, 32, 4),
+                    (MAX_TOKENS_PER_RANK, 33, 2),
+                ):
+                    record_knobs(
+                        dict(
+                            mma_tiler_mnk=(128 if cluster == 1 else 256, 128, 256),
+                            cluster_shape_mnk=(cluster, 1, 1),
+                            token_back_mode="epi_warps",
+                            load_balance_mode="atomic_counter",
+                            group_hint=512,
+                            flag_batch=4,
+                            epi_flag_batch=(2, 4),
+                        ),
+                        dtype="nvfp4",
+                        world_size=world_size,
+                        hidden=geometry.hidden_size,
+                        intermediate=2 * geometry.intermediate_size,
+                        num_experts=geometry.num_experts,
+                        topk=geometry.top_k,
+                        max_tokens=capacity,
+                        live_tokens=live,
+                        apply_topk_in_fc1=False,
+                        defer_topk_reduce=True,
+                    )
+            torch.distributed.barrier()
+        adapter = FlashInferMoeEp(moe, weights, apply_topk_in_fc1=False)
+        try:
+            adapter.warmup()
+            assert adapter._decode_max_num_tokens == 32
+            if cache_path is not None:
+                assert list(adapter._live_workspaces[32]) == [4, 32]
+                for live, cluster in ((4, 1), (32, 4)):
+                    workspace = adapter._live_workspaces[32][live]
+                    assert workspace.max_tokens_per_rank == 32
+                    assert (
+                        workspace._backend_workspace._frontend.config.cluster_shape_mnk
+                        == (cluster, 1, 1)
+                    )
+            quant_config = FusedMoEQuantConfig.make()
+            experts = FlashInferMoeEpExperts(moe, quant_config)
+            experts._adapter = adapter
+            prepare_finalize = maybe_make_prepare_finalize(
+                moe, quant_config, allow_new_interface=True, use_monolithic=False
+            )
+            assert prepare_finalize.output_is_reduced()
+            kernel = mk.FusedMoEKernel(prepare_finalize, experts)
+            post_weight = torch.linspace(
+                0.5, 1.5, geometry.hidden_size, device=device, dtype=torch.bfloat16
+            )
+            scales = (0.125, 0.9682458365518543)
+            ids, scores = _routing(geometry, rank, device)
+            base_input = _hidden_states(geometry, device)
+            reduced = (_expected_output(geometry, ids, scores) * 2.5).bfloat16()
+            expected = beam_norm_residual_norm(
+                reduced, base_input, post_weight, 1e-6, post_weight, 1e-6, scales
+            )
+
+            def run(x, batch_ids, batch_scores, sizes):
+                with set_forward_context(
+                    None,
+                    vllm_config,
+                    num_tokens=x.shape[0],
+                    num_tokens_across_dp=torch.tensor(sizes, dtype=torch.int32),
+                ):
+                    if cache_path is not None:
+                        selected = adapter._select_workspace(x.shape[0])
+                        expected_bucket = (
+                            4 if max(sizes) <= 4 else (32 if max(sizes) <= 32 else 33)
+                        )
+                        assert selected.live_tokens == expected_bucket
+                    output = kernel.apply(
+                        hidden_states=x,
+                        w1=weights.w13,
+                        w2=weights.w2,
+                        topk_weights=batch_scores,
+                        topk_ids=batch_ids,
+                        activation=MoEActivation.SILU,
+                        global_num_experts=geometry.num_experts,
+                        expert_map=None,
+                        apply_router_weight_on_input=False,
+                    )
+                    assert isinstance(output, UnfinalizedMoEOutput)
+                    return beam_moe_finalize_norm_residual_norm(
+                        output,
+                        x,
+                        post_weight,
+                        1e-6,
+                        post_weight,
+                        1e-6,
+                        scales,
+                        routed_scale=2.5,
+                    )
+
+            graphs = {}
+            for sizes in ((0, 4), (3, 0), (0, 0), (31, 32), (32, 33)):
+                rows = torch.arange(sizes[rank], device=device) % NUM_TOKENS_PER_RANK
+                x, batch_ids, batch_scores = base_input[rows], ids[rows], scores[rows]
+                actual = run(x, batch_ids, batch_scores, sizes)
+                for observed, reference in zip(actual, expected):
+                    torch.testing.assert_close(
+                        observed, reference[rows], rtol=0, atol=0
+                    )
+                if sizes in ((0, 4), (31, 32), (32, 33)):
+                    graph = torch.cuda.CUDAGraph()
+                    with (
+                        graph_capture(device) as capture,
+                        torch.cuda.graph(graph, stream=capture.stream),
+                    ):
+                        captured = run(x, batch_ids, batch_scores, sizes)
+                    graphs[sizes] = graph, (x, batch_ids, batch_scores), captured, rows
+
+            for sizes in ((0, 4), (31, 32), (32, 33), (0, 4)):
+                graph, inputs, captured, rows = graphs[sizes]
+                x = inputs[0]
+                x.zero_()
+                graph.replay()
+                for observed in captured:
+                    torch.testing.assert_close(
+                        observed, torch.zeros_like(x), rtol=0, atol=0
+                    )
+                x.copy_(base_input[rows])
+                graph.replay()
+                for observed, reference in zip(captured, expected):
+                    torch.testing.assert_close(
+                        observed, reference[rows], rtol=0, atol=0
+                    )
+            for graph, *_ in graphs.values():
+                graph.reset()
+        finally:
+            adapter.destroy()
+
+
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="The FlashInfer MoE-EP megakernels require SM100",
+)
+@pytest.mark.parametrize("live_profiles", [False, True])
+def test_data_parallel_boundary_preserves_local_tokens_and_graph_profiles(
+    tmp_path, live_profiles
+):
+    """DP2 keeps unequal/empty batches local across producer workspace changes."""
+    moe_ep = pytest.importorskip("flashinfer.moe_ep")
+    if not supports_flashinfer_moe_ep_deferred_finalize():
+        pytest.skip("FlashInfer does not support unfinalized MegaMoE output")
+    if not hasattr(moe_ep.MoEEpMegaLayer, "create_workspace"):
+        pytest.skip("FlashInfer does not support multiple MegaMoE workspaces")
+    if live_profiles and not hasattr(moe_ep.MoEEpMegaLayer, "live_token_buckets"):
+        pytest.skip("FlashInfer does not support live-token knob profiles")
+    if torch.accelerator.device_count() < 2:
+        pytest.skip("Need at least 2 GPUs")
+    distributed_run(
+        _data_parallel_boundary_forward,
+        2,
+        str(tmp_path / "knobs.json") if live_profiles else None,
+    )
 
 
 @pytest.mark.skipif(
