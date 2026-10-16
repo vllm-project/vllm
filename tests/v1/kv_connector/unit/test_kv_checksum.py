@@ -173,10 +173,10 @@ def _results(
 def _finish(pending: PendingKVChecksums | None) -> KVChecksumRecord:
     """Copy the checksums to host as the model runner does, and wait."""
     assert pending is not None
-    pending.enqueue_cpu_copy()
+    record = pending.enqueue_async_cpu_copy()
     if torch.accelerator.is_available():
         torch.accelerator.synchronize()
-    return pending.process_output()
+    return record
 
 
 def _send_record(worker: KVChecksumWorker, blocks=BLOCKS) -> KVChecksumRecord:

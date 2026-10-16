@@ -246,8 +246,7 @@ class _Engine:
                 output.finished_req_ids,
             )
             if pending is not None:
-                pending.enqueue_cpu_copy()
-                checksums.append(pending.process_output())
+                checksums.append(pending.enqueue_async_cpu_copy())
         requests = [self.scheduler.requests[i] for i in output.num_scheduled_tokens]
         model_runner_output = create_model_runner_output(requests)
         # Like the model runner, sample nothing for a prefill not yet done.

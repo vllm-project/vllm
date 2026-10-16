@@ -279,22 +279,22 @@ class KVChecksumCopy:
         main_stream: torch.cuda.Stream,
         copy_stream: torch.cuda.Stream,
     ):
+        # Holds the device values until the copy is done.
         self.pending = pending
         # Blocking (sleep) event to avoid busy-polling the CUDA driver lock.
         self.copy_event = torch.cuda.Event(blocking=True)
         with stream(copy_stream, main_stream):
             copy_stream.wait_stream(main_stream)
-            pending.enqueue_cpu_copy()
+            self.record = pending.enqueue_async_cpu_copy()
             self.copy_event.record(copy_stream)
 
     def add_to(self, output: ModelRunnerOutput) -> None:
         """Wait for the copy and add the checksums to ``output``, which must
         not be the shared empty output."""
-        self.copy_event.synchronize()
-        record = self.pending.process_output()
         if output.kv_connector_output is None:
             output.kv_connector_output = KVConnectorOutput()
-        output.kv_connector_output.kv_checksums = [record]
+        self.copy_event.synchronize()
+        output.kv_connector_output.kv_checksums = [self.record]
 
 
 class AsyncKVChecksumOutput(AsyncModelRunnerOutput):

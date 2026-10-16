@@ -507,8 +507,8 @@ class PendingKVChecksums:
     """A worker's KV checksums of one step, until they reach host memory.
 
     ``post_forward`` queues the checksum kernels on the main stream. The model
-    runner then calls ``enqueue_cpu_copy`` on its output copy stream, ordered
-    after them, and ``process_output`` once that copy is done.
+    runner then calls ``enqueue_async_cpu_copy`` on its output copy stream, ordered
+    after them, and reads the record it returns once that copy is done.
     """
 
     def __init__(
@@ -530,7 +530,6 @@ class PendingKVChecksums:
         self._groups: list[
             tuple[int, list[tuple[str, int, int]], list[ReplicaKey], torch.Tensor]
         ] = []
-        self._host: list[torch.Tensor] | None = None
 
     def __bool__(self) -> bool:
         return bool(self._req_ids or self._received)
@@ -547,24 +546,15 @@ class PendingKVChecksums:
     ) -> None:
         self._groups.append((group_id, segments, replica_keys, values))
 
-    def enqueue_cpu_copy(self) -> None:
+    def enqueue_async_cpu_copy(self) -> KVChecksumRecord:
         """Enqueue the asynchronous D2H copy; call on the output copy stream,
         after it waits for the main stream."""
-        assert self._host is None
-        self._host = [
-            values.to("cpu", non_blocking=True) for *_, values in self._groups
-        ]
-
-    def process_output(self) -> KVChecksumRecord:
-        """The step's record; call once the copy is done."""
-        assert self._host is not None or not self._groups
         checksums: dict[str, dict[int, KVChecksumGroup]] = {
             req_id: {} for req_id in self._req_ids
         }
-        for (group_id, segments, replica_keys, _), host in zip(
-            self._groups, self._host or ()
-        ):
-            values = host.numpy().view(np.uint64)
+        for group_id, segments, replica_keys, device_values in self._groups:
+            values = device_values.to("cpu", non_blocking=True).numpy()
+            values = values.view(np.uint64)
             row = 0
             for req_id, start, num_rows in segments:
                 checksums[req_id][group_id] = KVChecksumGroup(
