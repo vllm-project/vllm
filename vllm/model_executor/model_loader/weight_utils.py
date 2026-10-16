@@ -1253,6 +1253,7 @@ def runai_safetensors_weights_iterator(
     is_distributed: bool = False,
     cpu_weights_group: Any = None,
     is_shared_cpu_weight: Callable[[str], bool] | None = None,
+    process_group: Any = ...,
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model safetensor files."""
     cpu_filenames = set(
@@ -1270,7 +1271,10 @@ def runai_safetensors_weights_iterator(
             )
             if gpu_files:
                 yield from runai_safetensors_weights_iterator(
-                    gpu_files, use_tqdm_on_load, is_distributed=True
+                    gpu_files,
+                    use_tqdm_on_load,
+                    is_distributed=True,
+                    process_group=process_group,
                 )
             original_limit = os.environ.get("RUNAI_STREAMER_MEMORY_LIMIT")
             os.environ["RUNAI_STREAMER_MEMORY_LIMIT"] = os.environ[
@@ -1279,14 +1283,20 @@ def runai_safetensors_weights_iterator(
             try:
                 if cpu_weights_group is None:
                     yield from runai_safetensors_weights_iterator(
-                        cpu_files, use_tqdm_on_load, is_distributed=False
+                        cpu_files,
+                        use_tqdm_on_load,
+                        is_distributed=False,
+                        process_group=process_group,
                     )
                 else:
                     group = cpu_weights_group
                     weights = (
                         iter(
                             runai_safetensors_weights_iterator(
-                                cpu_files, use_tqdm_on_load, is_distributed=False
+                                cpu_files,
+                                use_tqdm_on_load,
+                                is_distributed=False,
+                                process_group=None,
                             )
                         )
                         if group.rank_in_group == 0
@@ -1369,11 +1379,18 @@ def runai_safetensors_weights_iterator(
             if is_distributed and is_cuda_alike
             else "cpu"
         )
+        if process_group is ...:
+            process_group = (
+                torch.distributed.group.WORLD
+                if torch.distributed.is_initialized()
+                else None
+            )
 
         streamer.stream_files(
             hf_weights_files,
             device=device,
             is_distributed=is_distributed,
+            process_group=process_group,
             **(
                 {"owned": False}
                 if os.environ.get("VLLM_RUNAI_BORROWED_WEIGHTS") == "1"

@@ -4,6 +4,7 @@
 import glob
 import os
 import tempfile
+from types import SimpleNamespace
 
 import huggingface_hub.constants
 import pytest
@@ -19,9 +20,11 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 
 
-@pytest.mark.parametrize("distributed", [False, True])
+@pytest.mark.parametrize(
+    "distributed,shared_cpu", [(False, False), (True, False), (True, True)]
+)
 def test_explicit_cpu_shards_load_every_weight_before_buffer_reuse(
-    monkeypatch, distributed
+    monkeypatch, distributed, shared_cpu
 ):
     files = ["s3://weights/regular.safetensors", "s3://weights/engram.safetensors"]
     source = {
@@ -29,6 +32,8 @@ def test_explicit_cpu_shards_load_every_weight_before_buffer_reuse(
         files[1]: ("layers.1.engram.embed.weight", torch.tensor([7.0])),
     }
     requests = []
+    reader_groups = []
+    world_group = object()
 
     class Streamer:
         def __enter__(self):
@@ -37,8 +42,9 @@ def test_explicit_cpu_shards_load_every_weight_before_buffer_reuse(
         def __exit__(self, *_):
             pass
 
-        def stream_files(self, paths, *, device, is_distributed):
+        def stream_files(self, paths, *, device, is_distributed, process_group):
             self.paths = paths
+            reader_groups.append(process_group)
             requests.append(
                 (
                     paths,
@@ -61,8 +67,19 @@ def test_explicit_cpu_shards_load_every_weight_before_buffer_reuse(
     monkeypatch.setattr(weight_utils, "SafetensorsStreamer", Streamer)
     monkeypatch.setattr(weight_utils.current_platform, "is_cuda_alike", lambda: True)
     monkeypatch.setattr(weight_utils.current_platform, "current_device", lambda: 0)
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
+    monkeypatch.setattr(torch.distributed, "group", SimpleNamespace(WORLD=world_group))
+    cpu_group = SimpleNamespace(
+        rank_in_group=0, world_size=8, broadcast_object=lambda value: value
+    )
     loaded = {}
-    for name, tensor in runai_safetensors_weights_iterator(files, False, distributed):
+    for name, tensor in runai_safetensors_weights_iterator(
+        files,
+        False,
+        distributed,
+        cpu_weights_group=cpu_group if shared_cpu else None,
+        is_shared_cpu_weight=lambda _: True,
+    ):
         param = torch.nn.Parameter(torch.zeros(1), requires_grad=False)
         default_weight_loader(param, tensor)
         loaded[name] = param
@@ -79,6 +96,11 @@ def test_explicit_cpu_shards_load_every_weight_before_buffer_reuse(
         else [(files, "cpu", False, "4294967296")]
     )
     assert os.environ["RUNAI_STREAMER_MEMORY_LIMIT"] == "4294967296"
+    assert reader_groups == (
+        [world_group, None if shared_cpu else world_group]
+        if distributed
+        else [world_group]
+    )
 
 
 def test_runai_safetensors_weights_iterator_clones_reused_buffers(
