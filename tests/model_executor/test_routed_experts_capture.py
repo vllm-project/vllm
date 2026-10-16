@@ -481,41 +481,6 @@ def test_get_aux_output_connector_passes_config(monkeypatch):
     assert result is connector
 
 
-@pytest.mark.parametrize("pp_size", [1, 2])
-def test_aux_output_dense_stage_requires_pipeline_parallelism(monkeypatch, pp_size):
-    """A dense PP stage contributes zeros and preserves preceding stages' R3."""
-    from vllm.distributed.aux_output_connector import worker
-
-    capturer = _capturer_with_buffer()
-    capturer.device_buffer.zero_()
-    monkeypatch.setattr(worker, "RoutedExpertsCapturer", lambda **_: capturer)
-    monkeypatch.setattr(
-        worker, "get_tp_group", lambda: SimpleNamespace(is_first_rank=True)
-    )
-    monkeypatch.setattr(
-        worker, "get_pp_group", lambda: SimpleNamespace(is_last_rank=False)
-    )
-    config = SimpleNamespace(
-        scheduler_config=SimpleNamespace(max_num_batched_tokens=8),
-        parallel_config=SimpleNamespace(pipeline_parallel_size=pp_size),
-        max_concurrent_batches=2,
-    )
-    kwargs = dict(vllm_config=config, model=torch.nn.Linear(2, 2), kv_cache_config=None)
-    if pp_size == 1:
-        with pytest.raises(ValueError, match="No supported MoE router"):
-            worker.AuxOutputWorkerConnector(**kwargs)
-        return
-
-    connector = worker.AuxOutputWorkerConnector(**kwargs)
-    batch = SimpleNamespace(req_ids=["request"], query_start_loc_np=[0, 2])
-    local = connector.merge_pp_routed_experts(batch, None)
-    assert torch.count_nonzero(local) == 0
-    previous = torch.full_like(local, 3)
-    torch.testing.assert_close(
-        connector.merge_pp_routed_experts(batch, previous), previous
-    )
-
-
 def test_aux_output_worker_connector_binds_capture_on_non_output_rank(monkeypatch):
     import vllm.distributed.aux_output_connector.worker as aux_output_worker
 
@@ -535,7 +500,6 @@ def test_aux_output_worker_connector_binds_capture_on_non_output_rank(monkeypatc
         kv_transfer_config=None,
         max_concurrent_batches=2,
         scheduler_config=SimpleNamespace(max_num_batched_tokens=32),
-        parallel_config=SimpleNamespace(pipeline_parallel_size=1),
     )
     model = Mock()
     connector = aux_output_worker.AuxOutputWorkerConnector(
@@ -548,7 +512,7 @@ def test_aux_output_worker_connector_binds_capture_on_non_output_rank(monkeypatc
         max_num_batched_tokens=32,
         vllm_config=config,
     )
-    bind.assert_called_once_with(model, capturer, allow_empty=False)
+    bind.assert_called_once_with(model, capturer)
     connector.begin_step(Mock())
     assert connector.prepare_output(Mock()) is None
     capturer.snapshot_routing_data.assert_not_called()
@@ -562,9 +526,6 @@ def test_aux_output_worker_connector_default_capacity(monkeypatch):
     background_store_constructor = Mock(side_effect=lambda store, **_: store)
     capturer = SimpleNamespace(shape_per_token=(2,), output_dtype_name="int32")
     monkeypatch.setattr(aux_output_worker, "get_tp_group", lambda: tp_group)
-    monkeypatch.setattr(
-        aux_output_worker, "get_pp_group", lambda: SimpleNamespace(is_last_rank=True)
-    )
     monkeypatch.setattr(
         aux_output_worker, "RoutedExpertsCapturer", Mock(return_value=capturer)
     )
@@ -585,7 +546,6 @@ def test_aux_output_worker_connector_default_capacity(monkeypatch):
         kv_transfer_config=None,
         cache_config=SimpleNamespace(enable_prefix_caching=True),
         scheduler_config=SimpleNamespace(max_num_seqs=8, max_num_batched_tokens=32),
-        parallel_config=SimpleNamespace(pipeline_parallel_size=1),
         max_concurrent_batches=2,
     )
     kwargs = dict(

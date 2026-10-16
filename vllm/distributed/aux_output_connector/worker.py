@@ -94,11 +94,7 @@ class AuxOutputWorkerConnector:
         capturer = RoutedExpertsCapturer(
             max_num_batched_tokens=max_num_batched_tokens, vllm_config=vllm_config
         )
-        bind_routed_experts_capturer(
-            model,
-            capturer,
-            allow_empty=vllm_config.parallel_config.pipeline_parallel_size > 1,
-        )
+        bind_routed_experts_capturer(model, capturer)
         self._capturer = capturer
         self._store: BackgroundBlockObjectStore | None = None
         self._buffer: RoutedExpertsBuffer | None = None
