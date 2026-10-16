@@ -283,6 +283,125 @@ __global__ void __launch_bounds__(1024) finishTwoshot(Params p) {
        0});
 }
 
+__device__ Vec finalizeGatherRow(Params const& p, int token, int packedIdx) {
+  int64_t inputOffset = int64_t(token) * p.topK * p.ar.tokenDim + packedIdx * 8;
+  auto weights = static_cast<float const*>(p.expertWeights);
+  Vec expert;
+  expert.packed = ar::utils::loadPacked<float4>(p.experts + inputOffset);
+  float weight = weights[int64_t(token) * p.topK];
+  float sum[8];
+#pragma unroll
+  for (int i = 0; i < 8; ++i)
+    sum[i] = __fmul_rn(ar::utils::toFloat<T>(expert.elements[i]), weight);
+  for (int k = 1; k < p.topK; ++k) {
+    expert.packed = ar::utils::loadPacked<float4>(p.experts + inputOffset +
+                                                  int64_t(k) * p.ar.tokenDim);
+    weight = weights[int64_t(token) * p.topK + k];
+#pragma unroll
+    for (int i = 0; i < 8; ++i)
+      sum[i] =
+          __fmaf_rn(ar::utils::toFloat<T>(expert.elements[i]), weight, sum[i]);
+  }
+  Vec value;
+#pragma unroll
+  for (int i = 0; i < 8; ++i) {
+    T reduced = ar::utils::fromFloat<T>(sum[i]);
+    value.elements[i] = ar::utils::fromFloat<T>(
+        __fmul_rn(ar::utils::toFloat<T>(reduced), p.routedScale));
+  }
+  if (p.postNorm) {
+    float rstd = invRms<false, 0>(value, p.ar.tokenDim, p.ar.epsilon);
+    Vec weight;
+    if (p.ar.gammaPtr)
+      weight.packed =
+          ar::utils::loadPacked<float4>(p.ar.gammaPtr + packedIdx * 8);
+#pragma unroll
+    for (int i = 0; i < 8; ++i) {
+      float x = __fmul_rn(ar::utils::toFloat<T>(value.elements[i]), rstd);
+      if (p.ar.gammaPtr)
+        x = __fmul_rn(x, ar::utils::toFloat<T>(weight.elements[i]));
+      value.elements[i] = ar::utils::fromFloat<T>(x);
+    }
+  }
+  ar::utils::sanitizeLamportPayload<float4, T>(value);
+  return value;
+}
+
+__device__ Vec waitGatherRow(T const* buffer, int64_t offset) {
+  auto loaded = ar::utils::loadPackedVolatile<float4>(buffer + offset);
+  while (ar::utils::isLamportDirty(loaded))
+    loaded = ar::utils::loadPackedVolatile<float4>(buffer + offset);
+  return Vec{.packed = loaded.packed};
+}
+
+template <int World>
+__global__ void __launch_bounds__(1024) finalizeGatherOneshot(Params p) {
+  int localTokens = flashinfer::ceil_div(p.ar.numTokens, World);
+  int localToken = blockIdx.x;
+  int token = p.ar.rank * localTokens + localToken;
+  int packedIdx = threadIdx.x;
+  cudaGridDependencySynchronize();
+  ar::utils::LamportFlags<float4> flag(p.ar.bufferFlags, 1);
+  auto broadcast = static_cast<T*>(flag.getCurLamportBuf(p.ar.mcastPtr));
+  auto local = static_cast<T*>(flag.getCurLamportBuf(p.ar.localBufferPtr));
+  Vec ownValue{};
+  if (token < p.ar.numTokens)
+    ownValue = finalizeGatherRow(p, localToken, packedIdx);
+  // Empty ranks publish padding so no peer can outrun their readers.
+  *reinterpret_cast<float4*>(broadcast + int64_t(token) * p.ar.tokenDim +
+                             packedIdx * 8) = ownValue.packed;
+  flag.ctaArrive();
+  flag.clearDirtyLamportBuf(p.ar.localBufferPtr, -1);
+  p.postNorm = false;
+#pragma unroll
+  for (int rank = 0; rank < World; ++rank) {
+    token = rank * localTokens + localToken;
+    int offset = token * p.ar.tokenDim + packedIdx * 8;
+    Vec value = rank == p.ar.rank ? ownValue : waitGatherRow(local, offset);
+    if (token < p.ar.numTokens) {
+      epilogue<false>(p, value, packedIdx, offset);
+    }
+  }
+  cudaTriggerProgrammaticLaunchCompletion();
+  flag.waitAndUpdate({static_cast<uint32_t>(int64_t(localTokens) * World *
+                                            p.ar.tokenDim * sizeof(T)),
+                      0, 0, 0});
+}
+
+__global__ void __launch_bounds__(1024) finalizeGatherPublish(Params p) {
+  int localTokens = flashinfer::ceil_div(p.ar.numTokens, p.ar.nRanks);
+  int localToken = blockIdx.x;
+  int token = p.ar.rank * localTokens + localToken;
+  int packedIdx = threadIdx.x;
+  cudaGridDependencySynchronize();
+  ar::utils::LamportFlags<float4> flag(p.ar.bufferFlags, 1);
+  auto broadcast = static_cast<T*>(flag.getCurLamportBuf(p.ar.mcastPtr));
+  Vec value{};
+  if (token < p.ar.numTokens)
+    value = finalizeGatherRow(p, localToken, packedIdx);
+  *reinterpret_cast<float4*>(broadcast + int64_t(token) * p.ar.tokenDim +
+                             packedIdx * 8) = value.packed;
+  cudaTriggerProgrammaticLaunchCompletion();
+  flag.clearDirtyLamportBuf(p.ar.localBufferPtr, -1);
+}
+
+__global__ void __launch_bounds__(1024) finishGatherTwoshot(Params p) {
+  int packedIdx = threadIdx.x;
+  int offset = blockIdx.x * p.ar.tokenDim + packedIdx * 8;
+  cudaTriggerProgrammaticLaunchCompletion();
+  ar::utils::LamportFlags<float4> flag(p.ar.bufferFlags, 1);
+  auto local = static_cast<T*>(flag.getCurLamportBuf(p.ar.localBufferPtr));
+  flag.ctaArrive();
+  Vec value = waitGatherRow(local, offset);
+  p.postNorm = false;
+  if (blockIdx.x < p.ar.numTokens) epilogue<false>(p, value, packedIdx, offset);
+  // The producer must finish clearing the previous generation before reuse.
+  cudaGridDependencySynchronize();
+  flag.waitAndUpdate(
+      {static_cast<uint32_t>(int64_t(gridDim.x) * p.ar.tokenDim * sizeof(T)), 0,
+       0, 0});
+}
+
 void checkCuda(cudaError_t status) {
   TVM_FFI_ICHECK_EQ(status, cudaSuccess) << cudaGetErrorString(status);
 }
@@ -410,5 +529,97 @@ void launch(TensorView input, TensorView residual,
     }
   }
 }
+
+void launchGather(TensorView experts, TensorView expertWeights,
+                  TensorView residual,
+                  tvm::ffi::Optional<TensorView> postWeight,
+                  tvm::ffi::Optional<TensorView> nextWeight, TensorView hidden,
+                  tvm::ffi::Optional<TensorView> normalized, int64_t pointers,
+                  TensorView flags, int64_t multicast, int64_t local,
+                  int64_t world, int64_t rank, double postEps, double nextEps,
+                  double xScale, double rScale, bool postNorm, bool nextNorm,
+                  bool scaled, bool oneShot, double routedScale) {
+  ffi::CUDADeviceGuard guard(residual.device().device_id);
+  TVM_FFI_ICHECK_EQ(encode_dlpack_dtype(experts.dtype()), bfloat16_code);
+  TVM_FFI_ICHECK_EQ(encode_dlpack_dtype(expertWeights.dtype()), float32_code);
+  TVM_FFI_ICHECK_EQ(encode_dlpack_dtype(residual.dtype()), bfloat16_code);
+  TVM_FFI_ICHECK_EQ(encode_dlpack_dtype(hidden.dtype()), bfloat16_code);
+  TVM_FFI_ICHECK(world == 2 || world == 4 || world == 8);
+  TVM_FFI_ICHECK(rank >= 0 && rank < world);
+  int64_t tokens = residual.size(0);
+  int64_t dim = residual.size(1);
+  int64_t localTokens = flashinfer::ceil_div(tokens, world);
+  TVM_FFI_ICHECK(dim >= 1024 && dim <= 8192 && dim % 1024 == 0);
+  TVM_FFI_ICHECK(experts.size(0) >= localTokens);
+  TVM_FFI_ICHECK(expertWeights.size(0) >= localTokens);
+  TVM_FFI_ICHECK_EQ(experts.size(2), dim);
+  TVM_FFI_ICHECK_EQ(expertWeights.size(1), experts.size(1));
+  TVM_FFI_ICHECK(experts.size(1) >= 1 && experts.size(1) <= 32);
+  TVM_FFI_ICHECK_EQ(hidden.size(0), tokens);
+  TVM_FFI_ICHECK_EQ(hidden.size(1), dim);
+  TVM_FFI_ICHECK(!nextNorm || normalized.has_value());
+  TVM_FFI_ICHECK(localTokens * world * dim <= INT32_MAX);
+  if (!tokens) return;
+
+  Params p{};
+  p.ar.outputPtr = normalized.has_value()
+                       ? static_cast<T*>(normalized.value().data_ptr())
+                       : nullptr;
+  p.ar.prenormedPtr = static_cast<T*>(hidden.data_ptr());
+  p.ar.residualInPtr = static_cast<T const*>(residual.data_ptr());
+  p.ar.gammaPtr = postWeight.has_value()
+                      ? static_cast<T const*>(postWeight.value().data_ptr())
+                      : nullptr;
+  p.nextWeight = nextWeight.has_value()
+                     ? static_cast<T const*>(nextWeight.value().data_ptr())
+                     : nullptr;
+  p.ar.inputPtrs = reinterpret_cast<T**>(pointers);
+  p.ar.mcastPtr = reinterpret_cast<T*>(multicast);
+  p.ar.localBufferPtr = reinterpret_cast<T*>(local);
+  p.ar.bufferFlags = static_cast<uint32_t*>(flags.data_ptr());
+  p.ar.nRanks = world;
+  p.ar.rank = rank;
+  p.ar.numTokens = tokens;
+  p.ar.tokenDim = dim;
+  p.ar.epsilon = postEps;
+  p.nextEps = nextEps;
+  p.xScale = xScale;
+  p.rScale = rScale;
+  p.postNorm = postNorm;
+  p.nextNorm = nextNorm;
+  p.scaled = scaled;
+  p.experts = static_cast<T const*>(experts.data_ptr());
+  p.expertWeights = expertWeights.data_ptr();
+  p.topK = experts.size(1);
+  p.routedScale = routedScale;
+
+  cudaLaunchAttribute attr{};
+  attr.id = cudaLaunchAttributeProgrammaticStreamSerialization;
+  attr.val.programmaticStreamSerializationAllowed = 1;
+  cudaLaunchConfig_t config{};
+  config.gridDim = dim3(localTokens);
+  config.blockDim = dim3(dim / 8);
+  config.stream = get_stream(residual.device());
+  config.attrs = &attr;
+  config.numAttrs = 1;
+  if (oneShot) {
+    switch (world) {
+      case 2:
+        checkCuda(cudaLaunchKernelEx(&config, &finalizeGatherOneshot<2>, p));
+        break;
+      case 4:
+        checkCuda(cudaLaunchKernelEx(&config, &finalizeGatherOneshot<4>, p));
+        break;
+      case 8:
+        checkCuda(cudaLaunchKernelEx(&config, &finalizeGatherOneshot<8>, p));
+        break;
+    }
+  } else {
+    checkCuda(cudaLaunchKernelEx(&config, &finalizeGatherPublish, p));
+    config.gridDim = dim3(localTokens * world);
+    checkCuda(cudaLaunchKernelEx(&config, &finishGatherTwoshot, p));
+  }
+}
 }  // namespace beam
 TVM_FFI_DLL_EXPORT_TYPED_FUNC(beam_allreduce, beam::launch);
+TVM_FFI_DLL_EXPORT_TYPED_FUNC(beam_moe_gather, beam::launchGather);

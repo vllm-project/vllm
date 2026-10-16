@@ -82,11 +82,13 @@ def _boundary_math(
     NEXT_EPS: tl.constexpr,
     X_SCALE,
     R_SCALE,
+    POST_NORM: tl.constexpr,
     NEXT_NORM: tl.constexpr,
 ):
-    x = x * tl.rsqrt(tl.sum(x * x, 0) / N + POST_EPS)
-    w = tl.load(POST_W + col, col < N, other=0).to(tl.float32)
-    x = (x * w).to(dtype).to(tl.float32)
+    if POST_NORM:
+        x = x * tl.rsqrt(tl.sum(x * x, 0) / N + POST_EPS)
+        w = tl.load(POST_W + col, col < N, other=0).to(tl.float32)
+        x = (x * w).to(dtype).to(tl.float32)
     x = (x * X_SCALE).to(dtype).to(tl.float32)
     r = (r * R_SCALE).to(dtype).to(tl.float32)
     h = (x + r).to(dtype)
@@ -115,6 +117,7 @@ def _norm_residual_norm_kernel(
     NEXT_EPS: tl.constexpr,
     X_SCALE,
     R_SCALE,
+    POST_NORM: tl.constexpr,
     NEXT_NORM: tl.constexpr,
     BLOCK: tl.constexpr,
     PDL: tl.constexpr,
@@ -138,6 +141,7 @@ def _norm_residual_norm_kernel(
         NEXT_EPS,
         X_SCALE,
         R_SCALE,
+        POST_NORM,
         NEXT_NORM,
     )
     tl.store(H + row * N + col, h, col < N)
@@ -148,8 +152,8 @@ def _norm_residual_norm_kernel(
 def beam_norm_residual_norm(
     x: torch.Tensor,
     residual: torch.Tensor,
-    post_weight: torch.Tensor,
-    post_eps: float,
+    post_weight: torch.Tensor | None,
+    post_eps: float | None,
     next_weight: torch.Tensor | None,
     next_eps: float | None,
     scales: tuple[float, float],
@@ -159,10 +163,12 @@ def beam_norm_residual_norm(
     """Fuse post-norm, scaled residual add and next pre-norm, keeping each cast.
 
     Returns the new residual and, when ``next_weight`` is given, its
-    normalization for the next sublayer.
+    normalization for the next sublayer. ``post_weight`` is omitted when the
+    caller already applied the post-norm (the fused MoE finalize).
     """
     assert x.ndim == residual.ndim == 2 and x.shape == residual.shape
     assert x.stride(-1) == residual.stride(-1) == 1
+    assert (post_weight is None) == (post_eps is None)
     assert (next_weight is None) == (next_eps is None)
     hidden = torch.empty(x.shape, device=x.device, dtype=x.dtype)
     normalized = torch.empty_like(hidden) if next_weight is not None else None
@@ -178,9 +184,10 @@ def beam_norm_residual_norm(
             n,
             x.stride(0),
             residual.stride(0),
-            post_eps,
+            post_eps or 0.0,
             next_eps or 0.0,
             *scales,
+            post_weight is not None,
             next_weight is not None,
             triton.next_power_of_2(n),
             launch_pdl,

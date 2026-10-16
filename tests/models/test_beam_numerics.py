@@ -8,13 +8,20 @@ import torch
 
 def _torch_rms_norm(x, weight, eps):
     y = x.float()
-    y = y * torch.rsqrt(y.square().mean(-1, keepdim=True) + eps) * weight.float()
+    y = y * torch.rsqrt(y.square().mean(-1, keepdim=True) + eps)
+    if weight is not None:
+        y = y * weight.float()
     return y.to(x.dtype)
 
 
 def _torch_boundary(x, residual, post_weight, post_eps, next_weight, next_eps, scales):
-    x = _torch_rms_norm(x, post_weight, post_eps) * scales[0]
-    hidden = x + residual.to(x.dtype) * scales[1]
+    if post_eps is not None:
+        x = _torch_rms_norm(x, post_weight, post_eps)
+    residual = residual.to(x.dtype)
+    if scales is not None:
+        x = x * scales[0]
+        residual = residual * scales[1]
+    hidden = x + residual
     normalized = (
         _torch_rms_norm(hidden, next_weight, next_eps) if next_eps is not None else None
     )
@@ -39,6 +46,170 @@ def _assert_boundary_close(actual, expected, *, relative_tolerance=1e-4):
             assert error <= reference.float().norm() * (
                 relative_tolerance if bf16 else 2e-6
             )
+
+
+def _torch_megamoe_finalize(experts, weights, routed_scale, post_weight, post_eps):
+    # BF16 x FP32 fits in FP64; round once per fused multiply-add to FP32.
+    value = (experts[:, 0].double() * weights[:, 0, None].double()).float()
+    for k in range(1, experts.shape[1]):
+        value = (
+            experts[:, k].double() * weights[:, k, None].double() + value.double()
+        ).float()
+    value = (value.bfloat16().float() * routed_scale).bfloat16()
+    if post_eps is not None:
+        value = _torch_rms_norm(value, post_weight, post_eps)
+    return value
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize(
+    "rows,hidden,top_k",
+    [(0, 5120, 8), (33, 5120, 8), (7, 256, 1), (3, 8192, 32)],
+)
+@pytest.mark.parametrize("norm", ["none", "unweighted", "weighted"])
+@torch.inference_mode()
+def test_megamoe_finalize_preserves_rounding_and_ignores_capacity(
+    rows, hidden, top_k, norm
+):
+    """Padded experts stay unread and the live result keeps both BF16 casts."""
+    pytest.importorskip("flashinfer")
+    from vllm.models.beam.nvidia.moe_finalize import beam_moe_finalize
+
+    torch.manual_seed(42)
+    experts = torch.randn(rows + 3, top_k, hidden, device="cuda", dtype=torch.bfloat16)
+    experts[:rows:2].mul_(1e-3)
+    experts[rows:] = float("nan")
+    weights = torch.rand(rows + 3, top_k, device="cuda", dtype=torch.float32)
+    weights[rows:] = float("nan")
+    post_weight = (
+        torch.randn(hidden, device="cuda", dtype=torch.bfloat16)
+        if norm == "weighted"
+        else None
+    )
+    post_eps = None if norm == "none" else 1e-6
+    storage = torch.full((rows + 3, hidden), 37, device="cuda", dtype=experts.dtype)
+    output = storage[:rows]
+    actual = beam_moe_finalize(experts, weights, output, 0.137, post_weight, post_eps)
+    expected = _torch_megamoe_finalize(
+        experts[:rows], weights[:rows], 0.137, post_weight, post_eps
+    )
+    assert actual is output
+    if post_eps is None:
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    else:
+        _assert_boundary_close((actual,), (expected,))
+    torch.testing.assert_close(storage[rows:], torch.full_like(storage[rows:], 37))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize(
+    "rows,hidden,top_k",
+    [(0, 5120, 8), (33, 5120, 8), (3, 8192, 32)],
+)
+@pytest.mark.parametrize("next_norm,routed_scale", [(False, 1.0), (True, 0.137)])
+@torch.inference_mode()
+def test_megamoe_local_boundary_preserves_rounding_and_ignores_capacity(
+    rows, hidden, top_k, next_norm, routed_scale
+):
+    """DP finalization keeps every BF16 boundary and ignores workspace padding."""
+    pytest.importorskip("flashinfer")
+    from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
+    from vllm.models.beam.nvidia.moe_finalize import (
+        beam_moe_finalize_norm_residual_norm,
+    )
+
+    torch.manual_seed(42)
+    capacity = rows + 3
+    experts = torch.randn(capacity, top_k, hidden, device="cuda", dtype=torch.bfloat16)
+    experts[:rows:2].mul_(1e-3)
+    experts[rows:] = float("nan")
+    weights = torch.rand(capacity, top_k, device="cuda")
+    weights[rows:] = float("nan")
+    mapping = torch.arange(capacity * top_k, device="cuda", dtype=torch.int32).view(
+        capacity, top_k
+    )
+    output = UnfinalizedMoEOutput(experts.view(-1, hidden), weights, mapping)
+    residual = torch.randn(rows, hidden, device="cuda", dtype=experts.dtype)
+    original_residual = residual.clone()
+
+    scales = (0.173, 0.937)
+    post_weight = torch.randn(hidden, device="cuda", dtype=experts.dtype)
+    post_eps = 1e-6
+    next_weight = torch.randn_like(post_weight) if next_norm else None
+    next_eps = 1e-6 if next_norm else None
+    actual = beam_moe_finalize_norm_residual_norm(
+        output,
+        residual,
+        post_weight,
+        post_eps,
+        next_weight,
+        next_eps,
+        scales,
+        routed_scale,
+    )
+    finalized = _torch_megamoe_finalize(
+        experts[:rows], weights[:rows], routed_scale, None, None
+    )
+    expected = _torch_boundary(
+        finalized, residual, post_weight, post_eps, next_weight, next_eps, scales
+    )
+    _assert_boundary_close(actual, expected)
+    torch.testing.assert_close(residual, original_residual, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("strategy", ["fused", "unfused"])
+@torch.inference_mode()
+def test_megamoe_local_boundary_graph_replays_with_live_inputs(strategy):
+    """Captured DP finalization reads current routing, residual, and norm weights."""
+    pytest.importorskip("flashinfer")
+    from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
+    from vllm.models.beam.nvidia.moe_finalize import (
+        beam_moe_finalize_norm_residual_norm,
+    )
+
+    torch.manual_seed(42)
+    experts = torch.randn(19, 8, 5120, device="cuda", dtype=torch.bfloat16)
+    weights = torch.rand(19, 8, device="cuda")
+    mapping = torch.arange(19 * 8, device="cuda", dtype=torch.int32).view(19, 8)
+    output = UnfinalizedMoEOutput(experts.view(-1, 5120), weights, mapping)
+    residual = torch.randn(17, 5120, device="cuda", dtype=experts.dtype)
+    post_weight = torch.randn(5120, device="cuda", dtype=experts.dtype)
+    next_weight = torch.randn_like(post_weight)
+    scales = (0.173, 0.937)
+
+    def run():
+        return beam_moe_finalize_norm_residual_norm(
+            output,
+            residual,
+            post_weight,
+            1e-6,
+            next_weight,
+            1e-6,
+            scales,
+            0.137,
+            strategy=strategy,
+        )
+
+    run()
+    torch.accelerator.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        actual = run()
+    for _ in range(2):
+        experts.add_(0.125)
+        weights.copy_(weights.roll(1, dims=1))
+        residual.sub_(0.25)
+        post_weight.neg_()
+        next_weight.mul_(0.5)
+        graph.replay()
+        finalized = _torch_megamoe_finalize(
+            experts[:17], weights[:17], 0.137, None, None
+        )
+        expected = _torch_boundary(
+            finalized, residual, post_weight, 1e-6, next_weight, 1e-6, scales
+        )
+        _assert_boundary_close(actual, expected)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -719,6 +890,175 @@ def test_moe_finalize_allreduce_preserves_local_rounding_and_replay(
     spawn(
         _beam_finalize_worker,
         args=(world_size, get_open_port(), expert_parallel, hidden_size),
+        nprocs=world_size,
+    )
+
+
+def _beam_moe_gather_worker(rank, world_size, port, hidden_size):
+    from datetime import timedelta
+
+    import torch.distributed as dist
+
+    from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
+    from vllm.models.beam.nvidia.allreduce import (
+        BeamAllReduceWorkspace,
+        beam_allreduce_norm_residual_norm,
+    )
+    from vllm.models.beam.nvidia.moe_finalize import (
+        beam_moe_finalize_gather_norm_residual_norm,
+    )
+
+    torch.accelerator.set_device_index(rank)
+    dist.init_process_group(
+        "nccl",
+        init_method=f"tcp://127.0.0.1:{port}",
+        rank=rank,
+        world_size=world_size,
+        timeout=timedelta(seconds=120),
+    )
+    group = dist.new_group(backend="gloo")
+    workspace = BeamAllReduceWorkspace(group, hidden_size, 513)
+
+    def make_case(tokens, seed, *, next_norm):
+        local_rows = (tokens + world_size - 1) // world_size
+        valid_rows = max(0, min(local_rows, tokens - rank * local_rows))
+        torch.manual_seed(seed)
+        residual = torch.randn(tokens, hidden_size, device="cuda", dtype=torch.bfloat16)
+        affine = torch.randn(hidden_size, device="cuda", dtype=torch.bfloat16)
+        torch.manual_seed(seed + rank + 1)
+        experts = torch.randn(
+            local_rows + 3, 8, hidden_size, device="cuda", dtype=torch.bfloat16
+        )
+        weights = torch.rand(local_rows + 3, 8, device="cuda")
+        permutation = torch.arange(
+            (local_rows + 3) * 8, device="cuda", dtype=torch.int32
+        ).view(local_rows + 3, 8)
+        experts[:valid_rows:2].mul_(1e-3)
+        experts[:valid_rows, :, ::97] = -0.0
+        experts[:valid_rows, :, 1::97] = -1e-40
+        # Both capacity padding and SP padding must stay outside live outputs.
+        experts[valid_rows:] = float("nan")
+        weights[valid_rows:] = float("nan")
+        return (
+            UnfinalizedMoEOutput(experts.flatten(0, 1), weights, permutation),
+            residual,
+            affine,
+            1e-6,
+            affine if next_norm else None,
+            1e-6 if next_norm else None,
+            (0.125, 0.9682458365518543),
+            workspace,
+            0.137,
+        )
+
+    def check(actual, args):
+        output, residual, pw, peps, nw, neps, scales, _, scale = args
+        tokens = residual.shape[0]
+        local_rows = (tokens + world_size - 1) // world_size
+        valid_rows = max(0, min(local_rows, tokens - rank * local_rows))
+        weights = output.expert_weights[:valid_rows]
+        experts = output.gemm2_permuted.view(-1, 8, hidden_size)[:valid_rows]
+        local = torch.zeros(
+            local_rows, hidden_size, dtype=residual.dtype, device=residual.device
+        )
+        local[:valid_rows] = _torch_megamoe_finalize(experts, weights, scale, pw, peps)
+        gathered = torch.empty(
+            world_size * local_rows,
+            hidden_size,
+            dtype=local.dtype,
+            device=local.device,
+        )
+        if tokens:
+            dist.all_gather_into_tensor(gathered, local)
+        expected = _torch_boundary(
+            gathered[:tokens], residual, None, None, nw, neps, scales
+        )
+        _assert_boundary_close(actual, expected, relative_tolerance=1e-3)
+
+    batches = (0, 1, world_size + 1, 513)
+    for iteration, tokens in enumerate(batches):
+        args = make_case(tokens, 200 + iteration, next_norm=iteration % 2 == 0)
+        for strategy in ("unfused", "oneshot", "twoshot", None):
+            check(
+                beam_moe_finalize_gather_norm_residual_norm(*args, strategy=strategy),
+                args,
+            )
+
+    # Independent captured graphs share the Lamport generation state. Replaying
+    # one then two stages must work after eager collectives and changed inputs.
+    graphs = []
+    for strategy, tokens in (
+        ("oneshot", world_size - 1),
+        ("oneshot", 17),
+        ("twoshot", world_size - 1),
+        ("twoshot", 129),
+    ):
+        args = make_case(tokens, 300 + tokens, next_norm=True)
+        beam_moe_finalize_gather_norm_residual_norm(*args, strategy=strategy)
+        torch.accelerator.synchronize()
+        dist.barrier()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            actual = beam_moe_finalize_gather_norm_residual_norm(
+                *args, strategy=strategy
+            )
+        graphs.append((graph, actual, args))
+    # Without a reference collective between replays, empty ranks may lag more
+    # than a Lamport generation. Padded rows must still acknowledge each rank.
+    for graph, actual, args in graphs:
+        if rank == world_size - 1:
+            torch.cuda._sleep(2_000_000)
+        for _ in range(16):
+            graph.replay()
+        check(actual, args)
+    for iteration in range(2):
+        for graph, actual, args in graphs[:: 1 if iteration % 2 else -1]:
+            output = args[0]
+            output.gemm2_permuted.mul_(0.75)
+            output.expert_weights.copy_(output.expert_weights.roll(1, dims=1))
+            args[1].mul_(0.5)
+            args[2].neg_()
+            graph.replay()
+            check(actual, args)
+            # Attention AR and MoE gather reuse this workspace in production.
+            residual, weight = args[1], args[2]
+            x = residual * (rank + 1)
+            scales = args[6]
+            ar_args = (x, residual, weight, 1e-6, weight, 1e-6, scales, workspace)
+            actual_ar = beam_allreduce_norm_residual_norm(*ar_args)
+            reduced = x.float()
+            dist.all_reduce(reduced)
+            _assert_boundary_close(
+                actual_ar,
+                _torch_boundary(
+                    reduced.bfloat16(), residual, weight, 1e-6, weight, 1e-6, scales
+                ),
+                relative_tolerance=1e-3,
+            )
+    torch.accelerator.synchronize()
+    for graph, _, _ in graphs:
+        graph.reset()
+    dist.barrier()
+    dist.destroy_process_group()
+
+
+@pytest.mark.parametrize("world_size,hidden_size", [(2, 8192), (4, 5120)])
+def test_megamoe_gather_restores_tokens_and_alternates_graph_strategies(
+    world_size, hidden_size
+):
+    """Keep SP rank order, BF16 casts, and generation state across all strategies."""
+    from torch.multiprocessing import spawn
+
+    from vllm.utils.network_utils import get_open_port
+
+    if torch.accelerator.device_count() < world_size:
+        pytest.skip(f"Requires {world_size} GPUs")
+    mnnvl = pytest.importorskip("flashinfer.comm.mnnvl")
+    if not mnnvl.is_multicast_supported(0):
+        pytest.skip("NVLink multicast required")
+    spawn(
+        _beam_moe_gather_worker,
+        args=(world_size, get_open_port(), hidden_size),
         nprocs=world_size,
     )
 
