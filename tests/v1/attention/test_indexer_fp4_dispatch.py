@@ -21,7 +21,7 @@ def test_rocm_fp4_decode_uses_temporary_logits_and_precomputed_schedule(
     """Decode logits follow batch rows, independent of the caller's capacity."""
     import torch
 
-    from vllm.model_executor.layers import sparse_attn_indexer as sparse
+    from vllm.models.deepseek_v4.amd.ops import sparse_attn_indexer as sparse
 
     scorer = Mock(side_effect=lambda *args, out, **kwargs: out)
     decode_module = ModuleType("aiter.ops.flydsl.kernels.mqa_logits.pa_mqa_logits_fp4")
@@ -217,7 +217,7 @@ def test_rocm_fp4_builder_selects_bounded_graph_stable_schedule(
 def test_rocm_fp4_prefill_forwards_planned_width_and_schedule(monkeypatch, total_ctas):
     import torch
 
-    from vllm.model_executor.layers import sparse_attn_indexer as sparse
+    from vllm.models.deepseek_v4.amd.ops import sparse_attn_indexer as sparse
 
     scorer = Mock(return_value=torch.zeros((3, 192), dtype=torch.float32))
     decode_module = ModuleType("aiter.ops.flydsl.kernels.mqa_logits.pa_mqa_logits_fp4")
@@ -297,7 +297,7 @@ def test_rocm_fp4_prefill_forwards_planned_width_and_schedule(monkeypatch, total
 def test_rocm_fp4_prefill_skips_scoring_when_topk_covers_context(monkeypatch):
     import torch
 
-    from vllm.model_executor.layers import sparse_attn_indexer as sparse
+    from vllm.models.deepseek_v4.amd.ops import sparse_attn_indexer as sparse
 
     scorer = Mock()
     decode_module = ModuleType("aiter.ops.flydsl.kernels.mqa_logits.pa_mqa_logits_fp4")
