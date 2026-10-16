@@ -412,6 +412,34 @@ def test_gemma4_layer_count_comes_from_num_hidden_layers():
     assert arch.per_layer_overrides is None
 
 
+@pytest.mark.parametrize(
+    ("sliding_window", "has_layer_types", "expected"),
+    [
+        (16, True, {(1, 8)}),
+        (None, True, {(4, 8), (1, 8)}),
+        (16, False, {(4, 8), (1, 8)}),
+    ],
+)
+def test_gemma4_dcp_validates_only_sharded_layers(
+    sliding_window, has_layer_types, expected
+):
+    """Sliding layers keep replicated KV under DCP, so their wider KV heads must
+    not cap DCP. Every layer is checked when the window is disabled or no
+    layer_types say which layers slide."""
+    text_config = _gemma4_text_config(
+        num_global_key_value_heads=1, attention_k_eq_v=True
+    )
+    model_config = SimpleNamespace(
+        model_arch_config=Gemma4ModelArchConfigConvertor(
+            text_config, text_config
+        ).convert(),
+        hf_text_config=text_config if has_layer_types else SimpleNamespace(),
+        get_sliding_window=lambda: sliding_window,
+    )
+
+    assert ModelConfig._get_dcp_sharded_layer_heads(model_config) == expected
+
+
 def test_gemma4_uniform_head_dims_are_homogeneous():
     text_config = _gemma4_text_config(global_head_dim=16)
 

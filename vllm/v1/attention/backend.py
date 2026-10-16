@@ -874,6 +874,14 @@ class AttentionImplBase(ABC, Generic[T]):
         )
         return self
 
+    def disable_dcp(self) -> None:
+        """Attend over KV that is replicated, not sharded, across CP ranks."""
+        for impl in {self, *self.get_impl_variants()}:
+            impl.dcp_world_size, impl.dcp_rank = 1, 0
+            impl.pcp_world_size, impl.pcp_rank = 1, 0
+            impl.total_cp_world_size, impl.total_cp_rank = 1, 0
+            impl.need_to_return_lse_for_decode = False
+
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         pass
 
