@@ -168,22 +168,6 @@ if TYPE_CHECKING:
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 
-def _warmup_v1_sampler(
-    model_runner: "GPUModelRunner",
-    last_hidden_states: torch.Tensor,
-) -> None:
-    model_runner._dummy_sampler_run(hidden_states=last_hidden_states)
-    if not envs.VLLM_BATCH_INVARIANT:
-        return
-
-    # Triton specializes integer value 1 separately and distinguishes aligned
-    # from unaligned runtime integers. Cover both small-logits classes in
-    # addition to the max-request warmup above.
-    for num_rows in (1, 2):
-        if num_rows < last_hidden_states.shape[0]:
-            model_runner._dummy_sampler_run(hidden_states=last_hidden_states[:num_rows])
-
-
 class AsyncIntermediateTensors(IntermediateTensors):
     """IntermediateTensors with lazy comm synchronization"""
 
@@ -1098,7 +1082,7 @@ class Worker(WorkerBase):
             if self.model_runner.is_pooling_model:
                 self.model_runner._dummy_pooler_run(hidden_states)
             else:
-                _warmup_v1_sampler(self.model_runner, last_hidden_states)
+                self.model_runner._dummy_sampler_run(hidden_states=last_hidden_states)
 
         reset_kv_cache_side_storage_and_log(
             self.compilation_config.static_forward_context, "startup warmup"
@@ -1480,7 +1464,6 @@ class Worker(WorkerBase):
         self.model_runner._dummy_run(
             num_tokens,
             uniform_decode=True,
-            disable_kv_cache_writes=True,
             randomize_inputs=self.randomize_dummy_inputs,
         )
 

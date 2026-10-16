@@ -76,23 +76,6 @@ class AttentionBackend(ABC):
         return [MultipleOf(1)]
 
     @staticmethod
-    def get_attention_warmup_num_tokens() -> int | None:
-        """Return an eager dummy-prefill size needed to warm this backend."""
-        return None
-
-    @staticmethod
-    def get_attention_warmup_decode_query_len() -> int | None:
-        """Return a uniform decode query length needed to warm this backend.
-
-        Backends that need a decode-only eager warmup should return the
-        minimum query length they require.  The runner may raise this to its
-        configured speculative-decode query length so the warmup exercises the
-        actual runtime shape.  ``None`` means no dedicated decode warmup is
-        required.
-        """
-        return None
-
-    @staticmethod
     @abstractmethod
     def get_name() -> str:
         raise NotImplementedError
@@ -455,9 +438,8 @@ class CommonAttentionMetadata:
 
     is_prefilling: torch.Tensor | None = None
     """(batch_size,) bool tensor: True if request is still in prefill phase
-    according to the scheduler lifecycle state. Used by some backends to
-    distinguish actual decodes from short extends, including reset-prefix
-    replay where prompt length alone is insufficient."""
+    (num_computed_tokens < num_prompt_tokens). Used by some backends to
+    distinguish actual decodes from short extends."""
 
     seq_lens_cpu_upper_bound: torch.Tensor | None = None
     """(batch_size,) CPU upper bound on seq_lens. Precise for prefill rows

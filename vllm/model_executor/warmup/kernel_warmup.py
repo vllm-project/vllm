@@ -14,7 +14,6 @@ from typing import TYPE_CHECKING
 import torch
 
 import vllm.envs as envs
-from vllm.config import CUDAGraphMode
 from vllm.logger import init_logger
 from vllm.model_executor.warmup.attention_warmup import (
     mixed_batch_attention_warmup,
@@ -103,86 +102,6 @@ def _warmup_ll_bf16_router_gemm(model: torch.nn.Module) -> None:
     )
 
 
-def _warmup_attention_backends(model_runner: "GPUModelRunner") -> None:
-    """Run metadata-backed eager prefill/decode warmups for attention backends."""
-    prefill_num_tokens = max(
-        (
-            group.backend.get_attention_warmup_num_tokens() or 0
-            for groups in model_runner.attn_groups
-            for group in groups
-        ),
-        default=0,
-    )
-    prefill_num_tokens = min(prefill_num_tokens, model_runner.max_num_tokens)
-    if prefill_num_tokens > 0:
-        logger.info_once(
-            "Warming up attention backends with an eager %d-token mixed prefill.",
-            prefill_num_tokens,
-        )
-        model_runner._dummy_run(
-            num_tokens=prefill_num_tokens,
-            cudagraph_runtime_mode=CUDAGraphMode.NONE,
-            force_attention=True,
-            # ``_dummy_run`` normally spreads ``num_tokens`` across as many
-            # requests as possible.  With the usual max_num_seqs (>> 16), a
-            # 16-token warmup would therefore be sixteen one-token decodes and
-            # would never compile a sparse-prefill implementation.  Construct
-            # a mixed batch so at least one request has a genuine prefill span
-            # while still exercising the decode path.
-            create_mixed_batch=True,
-            skip_eplb=True,
-        )
-
-    decode_query_len = max(
-        (
-            group.backend.get_attention_warmup_decode_query_len() or 0
-            for groups in model_runner.attn_groups
-            for group in groups
-        ),
-        default=0,
-    )
-    if decode_query_len <= 0:
-        return
-
-    decode_query_len = max(
-        decode_query_len,
-        int(getattr(model_runner, "uniform_decode_query_len", 1)),
-    )
-    max_num_reqs = getattr(model_runner, "max_num_reqs", None)
-    if max_num_reqs is None:
-        scheduler_config = getattr(model_runner, "scheduler_config", None)
-        max_num_reqs = getattr(scheduler_config, "max_num_seqs", None) or 1
-    max_num_reqs = max(1, int(max_num_reqs))
-    num_decode_reqs = min(max_num_reqs, 2)
-    num_decode_reqs = min(
-        num_decode_reqs,
-        int(model_runner.max_num_tokens) // decode_query_len,
-    )
-    if num_decode_reqs <= 0:
-        logger.warning_once(
-            "Skipping attention backend decode warmup: "
-            "max_num_tokens=%d is smaller than decode query length=%d.",
-            model_runner.max_num_tokens,
-            decode_query_len,
-        )
-        return
-
-    decode_num_tokens = num_decode_reqs * decode_query_len
-    logger.info_once(
-        "Warming up attention backends with an eager %d-request "
-        "uniform decode (query_len=%d).",
-        num_decode_reqs,
-        decode_query_len,
-    )
-    model_runner._dummy_run(
-        num_tokens=decode_num_tokens,
-        cudagraph_runtime_mode=CUDAGraphMode.NONE,
-        force_attention=True,
-        uniform_decode=True,
-        skip_eplb=True,
-    )
-
-
 def deep_gemm_kernel_warmup(worker: "Worker") -> None:
     """Materialize DeepGEMM workspaces before profiling the memory budget."""
     if getattr(worker, "_deep_gemm_warmup_done", False):
@@ -267,7 +186,6 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
         zeroer = getattr(worker.model_runner, "_kv_block_zeroer", None)
         if zeroer is not None:
             zeroer.warmup(worker.model_runner.kv_cache_config.num_blocks)
-        _warmup_attention_backends(worker.model_runner)
 
     enable_jit_warmup = worker.vllm_config.kernel_config.enable_jit_warmup
     if enable_jit_warmup:

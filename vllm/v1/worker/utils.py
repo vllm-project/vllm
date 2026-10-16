@@ -79,17 +79,6 @@ class KVCacheSideStorageTransfer(Protocol):
 
 
 @runtime_checkable
-class KVCacheSideStorageRequestLifecycle(Protocol):
-    """Optional request-lifetime state associated with physical KV blocks."""
-
-    main_layer_name: str
-
-    def release_kv_cache_side_storage(
-        self, block_ids: torch.Tensor | list[int]
-    ) -> None: ...
-
-
-@runtime_checkable
 class KVCacheSideStorageMemoryProfiler(Protocol):
     """Optional fixed-memory profiling contract for KV side storage.
 
@@ -1336,26 +1325,6 @@ def get_uniform_decode_token_count(
     ):
         return max_query_len
     return None
-
-
-def release_kv_cache_side_storage_blocks(
-    static_forward_context: dict[str, Any],
-    kv_cache_groups: Sequence[KVCacheGroupSpec],
-    block_ids_by_group: Sequence[Sequence[int]],
-) -> None:
-    """Release request state without invalidating reusable prefix-cache payloads."""
-    layer_name_to_group_id = _layer_name_to_group_id(kv_cache_groups)
-    for layer_name, layer in _iter_unique_layers(
-        static_forward_context, KVCacheSideStorageRequestLifecycle
-    ):
-        group_id = layer_name_to_group_id.get(layer.main_layer_name)
-        if group_id is None or group_id >= len(block_ids_by_group):
-            raise ValueError(
-                "KV side-storage request release is missing its owner group: "
-                f"layer={layer_name!r}, owner={layer.main_layer_name!r}."
-            )
-        if block_ids_by_group[group_id]:
-            layer.release_kv_cache_side_storage(list(block_ids_by_group[group_id]))
 
 
 def copy_kv_cache_side_storage_blocks(

@@ -937,20 +937,10 @@ def reorder_batch_to_split_decodes_and_prefills(
     num_scheduled_tokens_np = np.array(num_scheduled_tokens)
     num_computed_tokens_np = input_batch.num_computed_tokens_cpu[:num_reqs]
     num_prompt_tokens_np = input_batch.num_prompt_tokens[:num_reqs]
-    prefill_state = getattr(input_batch, "is_prefilling", None)
-    if prefill_state is None:
-        # Keep compatibility with alternate input-batch implementations that
-        # have not adopted the explicit scheduler lifecycle state yet. This
-        # fallback cannot represent reset-prefix replay after prompt rebuild.
-        is_prefill_chunk_np = num_computed_tokens_np < num_prompt_tokens_np
-    else:
-        is_prefill_chunk_np = np.asarray(prefill_state[:num_reqs], dtype=bool)
 
     has_context = num_computed_tokens_np > 0
     is_below_threshold = num_scheduled_tokens_np <= decode_threshold
-    # Prompt length is insufficient after reset-prefix replay: the prompt can
-    # already be recomputed while generated output still needs to be replayed.
-    done_prefilling = ~is_prefill_chunk_np
+    done_prefilling = num_computed_tokens_np >= num_prompt_tokens_np
 
     # Mutually exclusive categories (exactly one True per request):
     # 1. No context yet -> prefill

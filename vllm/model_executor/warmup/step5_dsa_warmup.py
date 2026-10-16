@@ -14,7 +14,7 @@ from vllm.logger import init_logger
 from vllm.v1.worker.gpu.warmup import run_mixed_prefill_decode_warmup
 
 if TYPE_CHECKING:
-    from vllm.v1.worker.gpu.model_runner import GPUModelRunner as V2GPUModelRunner
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
     from vllm.v1.worker.gpu_worker import Worker
 
 logger = init_logger(__name__)
@@ -48,22 +48,16 @@ def step5_dsa_warmup(worker: "Worker") -> None:
         )
         return
     logger.info("Warming up Step5 DSA scored prefill with %d tokens.", num_tokens)
-    if worker.use_v2_model_runner and runner.max_num_reqs >= 2:
+    if runner.max_num_reqs >= 2:
         run_mixed_prefill_decode_warmup(
-            cast("V2GPUModelRunner", runner),
+            cast("GPUModelRunner", runner),
             worker.execute_model,
             worker.sample_tokens,
             num_tokens,
             req_id_prefix="_step5_dsa_warmup",
         )
     else:
-        runner._dummy_run(
-            num_tokens=num_tokens,
-            skip_eplb=True,
-            is_profile=True,
-            force_attention=True,
-            create_mixed_batch=True,
-        )
+        runner._dummy_run(num_tokens=num_tokens, skip_eplb=True, is_profile=True)
     impl.adapter.warmup_prefill_scoring(
         impl.max_num_regions,
         impl.sparse_topk,

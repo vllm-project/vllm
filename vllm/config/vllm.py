@@ -3069,15 +3069,11 @@ class VllmConfig:
         if self.parallel_config.enable_batch_sharded_sampling:
             unsupported.append("batch-sharded sampling")
 
-        # Step5 DSA undoes rejected drafts through a journal addressed by the
-        # V2 runner's persistent request indices (Step5ModelState).
-        draft_config = (
-            self.speculative_config.draft_model_config
-            if self.speculative_config is not None
-            else None
-        )
-        if draft_config is not None and draft_config.architecture == "Step5MTP":
-            unsupported.append("Step5 MTP")
+        if self.model_config is not None and self.model_config.architecture in (
+            "Step5ForCausalLM",
+            "Step5ForConditionalGeneration",
+        ):
+            unsupported.append("Step5")
 
         return unsupported
 

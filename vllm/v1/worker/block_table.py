@@ -181,15 +181,6 @@ class BlockTable:
     def commit_block_table(self, num_reqs: int) -> None:
         self.block_table.copy_to_gpu(num_reqs)
 
-    def clear_device_rows(self, num_reqs: int) -> None:
-        """Point temporary device-only rows at the reserved null block.
-
-        Runtime dummy forwards must not expose live request block IDs to
-        attention side-state kernels. Keep the CPU rows unchanged so the next
-        real forward can restore them through :meth:`commit_block_table`.
-        """
-        self.block_table.gpu[:num_reqs].zero_()
-
     def clear(self) -> None:
         self.block_table.gpu.fill_(0)
         self.block_table.cpu.fill_(0)
@@ -301,10 +292,6 @@ class MultiGroupBlockTable:
     def commit_block_table(self, num_reqs: int) -> None:
         for block_table in self.block_tables:
             block_table.commit_block_table(num_reqs)
-
-    def clear_device_rows(self, num_reqs: int) -> None:
-        for block_table in self.block_tables:
-            block_table.clear_device_rows(num_reqs)
 
     def clear(self) -> None:
         for block_table in self.block_tables:

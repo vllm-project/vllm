@@ -899,14 +899,6 @@ class Step5DSAAttentionBackend(Step5SplitKVFlashAttentionBackend):
         return capability in (DeviceCapability(9, 0), DeviceCapability(10, 3))
 
     @staticmethod
-    def get_attention_warmup_num_tokens() -> int:
-        return 16
-
-    @staticmethod
-    def get_attention_warmup_decode_query_len() -> int:
-        return 1
-
-    @staticmethod
     def get_name() -> str:
         return "STEP5_DSA"
 
