@@ -288,11 +288,41 @@ class ElasticEPScalingExecutor:
 
         barker = threading.Thread(target=bark, name="eep-watchdog", daemon=True)
         barker.start()
+        started = time.perf_counter()
         try:
             yield
         finally:
             done.set()
             barker.join(timeout=5)
+            logger.warning(
+                "[EEP-DEBUG] %s finished in %.3f s",
+                label,
+                time.perf_counter() - started,
+            )
+
+    @contextmanager
+    def _timed(self, label: str) -> Iterator[None]:
+        """Record how long one step of a reconfiguration took.
+
+        commit_scale_up was measured running past 120 s on the CI machine,
+        against a few seconds locally, and a rank crashes somewhere inside that
+        window. The watchdog says the phase is slow but not which step is slow,
+        and the stacks it dumps are a single instant rather than a breakdown.
+
+        Diagnostic only.
+        """
+        if not os.getenv("VLLM_EEP_DEBUG_WATCHDOG"):
+            yield
+            return
+        started = time.perf_counter()
+        try:
+            yield
+        finally:
+            logger.warning(
+                "[EEP-DEBUG] step %s took %.3f s",
+                label,
+                time.perf_counter() - started,
+            )
 
     def _retire_groups(self, groups: tuple[GroupCoordinator | None, ...]) -> None:
         """Destroy the groups the reconfiguration replaced.
@@ -388,14 +418,15 @@ class ElasticEPScalingExecutor:
         world_size = parallel_config.world_size
         new_world_size_across_dp = world_size * new_dp_size
         self._dump_group_pressure(f"before standby groups for dp={new_dp_size}")
-        create_standby_groups(
-            new_dp_size=new_dp_size,
-            new_world_size_across_dp=new_world_size_across_dp,
-            master_ip=reconfig_request.new_data_parallel_master_ip,
-            coord_store_port=reconfig_request.coord_store_port,
-            use_all2all=use_all2all,
-            enable_eplb=parallel_config.enable_eplb,
-        )
+        with self._timed("prepare create_standby_groups"):
+            create_standby_groups(
+                new_dp_size=new_dp_size,
+                new_world_size_across_dp=new_world_size_across_dp,
+                master_ip=reconfig_request.new_data_parallel_master_ip,
+                coord_store_port=reconfig_request.coord_store_port,
+                use_all2all=use_all2all,
+                enable_eplb=parallel_config.enable_eplb,
+            )
         self._dump_group_pressure(f"after standby groups for dp={new_dp_size}")
         standby_ep_group = get_standby_ep_group()
         assert standby_ep_group is not None
@@ -407,12 +438,16 @@ class ElasticEPScalingExecutor:
                 heavy=True,
             )
         all2all_manager = get_ep_all2all_manager(standby_ep_group)
-        all2all_manager.stage_ep_size()
+        with self._timed("prepare stage_ep_size"):
+            all2all_manager.stage_ep_size()
         if not self._can_reuse_fused_moe_kernel():
-            self.stage_standby_moe_quant_methods(all2all_manager)
-        self._prepare_eplb_communicator(get_standby_eplb_group())
+            with self._timed("prepare stage_quant_methods"):
+                self.stage_standby_moe_quant_methods(all2all_manager)
+        with self._timed("prepare eplb_communicator"):
+            self._prepare_eplb_communicator(get_standby_eplb_group())
         if new_dp_size > old_dp_size:
-            self.transfer_weights(old_dp_size, new_dp_size)
+            with self._timed("prepare transfer_weights"):
+                self.transfer_weights(old_dp_size, new_dp_size)
         # On ROCm this deadlocks while serving; warm_and_capture warms these at commit.
         if not current_platform.is_rocm():
             self._warm_target_groups(get_standby_dp_group(), standby_ep_group)
@@ -732,37 +767,46 @@ class ElasticEPScalingExecutor:
 
     def commit_scale_up(self, is_existing_worker: bool) -> None:
         with self._watchdog("commit_scale_up"):
-            if is_existing_worker:
-                self.broadcast_expert_mapping()
-                self._retire_groups(self.switch_and_prepare())
-            else:
-                mapping = self.receive_expert_mapping()
-                self.worker.model_runner.setup_eplb_from_mapping(mapping)
+            with self._timed("scale_up switch"):
+                if is_existing_worker:
+                    self.broadcast_expert_mapping()
+                    self._retire_groups(self.switch_and_prepare())
+                else:
+                    mapping = self.receive_expert_mapping()
+                    self.worker.model_runner.setup_eplb_from_mapping(mapping)
             if current_platform.is_rocm():
-                groups = {"dp": get_dp_group(), "ep": get_ep_group()}
-                rocm_debug.dump("scale_up before empty_cache", groups)
-                torch.accelerator.empty_cache()
-                rocm_debug.dump("scale_up after empty_cache", groups)
-                rocm_debug.warm_each(groups, "scale_up")
+                with self._timed("scale_up empty_cache"):
+                    groups = {"dp": get_dp_group(), "ep": get_ep_group()}
+                    rocm_debug.dump("scale_up before empty_cache", groups)
+                    torch.accelerator.empty_cache()
+                    rocm_debug.dump("scale_up after empty_cache", groups)
+                    rocm_debug.warm_each(groups, "scale_up")
             if not self._can_reuse_fused_moe_kernel():
-                self.warm_and_capture()
-            self._perform_eplb_reshuffle(async_op=True)
+                with self._timed("scale_up warm_and_capture"):
+                    self.warm_and_capture()
+            with self._timed("scale_up reshuffle"):
+                self._perform_eplb_reshuffle(async_op=True)
 
     def commit_scale_down(self, new_dp_size: int, removing: bool) -> None:
         with self._watchdog("commit_scale_down"):
-            self.perform_scale_down_eplb_reshuffle(new_dp_size)
+            with self._timed("scale_down reshuffle"):
+                self.perform_scale_down_eplb_reshuffle(new_dp_size)
             if removing:
-                self.switch_and_remove()
+                with self._timed("scale_down switch_and_remove"):
+                    self.switch_and_remove()
             else:
-                self._retire_groups(self.switch_and_prepare())
+                with self._timed("scale_down switch"):
+                    self._retire_groups(self.switch_and_prepare())
                 if current_platform.is_rocm():
-                    groups = {"dp": get_dp_group(), "ep": get_ep_group()}
-                    rocm_debug.dump("scale_down before empty_cache", groups)
-                    torch.accelerator.empty_cache()
-                    rocm_debug.dump("scale_down after empty_cache", groups)
-                    rocm_debug.warm_each(groups, "scale_down")
+                    with self._timed("scale_down empty_cache"):
+                        groups = {"dp": get_dp_group(), "ep": get_ep_group()}
+                        rocm_debug.dump("scale_down before empty_cache", groups)
+                        torch.accelerator.empty_cache()
+                        rocm_debug.dump("scale_down after empty_cache", groups)
+                        rocm_debug.warm_each(groups, "scale_down")
                 if not self._can_reuse_fused_moe_kernel():
-                    self.warm_and_capture()
+                    with self._timed("scale_down warm_and_capture"):
+                        self.warm_and_capture()
 
     def perform_scale_down_eplb_reshuffle(self, new_dp_size: int) -> None:
         eplb_state = self.worker.model_runner.eplb_state

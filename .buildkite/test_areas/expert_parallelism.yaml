@@ -122,10 +122,24 @@ steps:
       # missing. A hung rank cannot report anything else, which is exactly why
       # the two hours above produced nothing.
       #
+      # RAY_DEDUP_LOGS=0 is not cosmetic. Build 95373 fired the watchdog three
+      # times inside commit_scale_up and every stack frame was lost: the four
+      # ranks print identical frames, Ray collapsed them into "repeated 4x
+      # across cluster", and the log kept the thread headers with nothing
+      # underneath them.
+      #
+      # The same build also measured the phases, and the gap is the lead worth
+      # chasing: commit_scale_up takes 9 s locally and over 120 s here, with a
+      # rank crashing inside that window. Each phase now reports its own
+      # duration and each step inside it reports its own, so the next log says
+      # where those two minutes go instead of only that they went.
+      #
       # --timeout bounds a hang so one stuck case cannot eat the step budget,
       # and the whole file runs twice, because a group that passes sometimes is
-      # not a group that passes.
-      - VLLM_EEP_DEBUG_WATCHDOG=60 VLLM_EEP_DEBUG_GROUP_PRESSURE=1 VLLM_EEP_DEBUG_SYNC_RESHUFFLE=1 VLLM_EEP_DEBUG_OFF=1 AMD_LOG_LEVEL=1 PYTHONFAULTHANDLER=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=VLLM_EEP_DEBUG_WATCHDOG,VLLM_EEP_DEBUG_GROUP_PRESSURE,VLLM_EEP_DEBUG_SYNC_RESHUFFLE,VLLM_EEP_DEBUG_OFF,AMD_LOG_LEVEL,PYTHONFAULTHANDLER pytest -v -s --timeout=780 --timeout-method=thread distributed/test_elastic_ep.py || true
-      - VLLM_EEP_DEBUG_WATCHDOG=60 VLLM_EEP_DEBUG_GROUP_PRESSURE=1 VLLM_EEP_DEBUG_SYNC_RESHUFFLE=1 VLLM_EEP_DEBUG_OFF=1 AMD_LOG_LEVEL=1 PYTHONFAULTHANDLER=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=VLLM_EEP_DEBUG_WATCHDOG,VLLM_EEP_DEBUG_GROUP_PRESSURE,VLLM_EEP_DEBUG_SYNC_RESHUFFLE,VLLM_EEP_DEBUG_OFF,AMD_LOG_LEVEL,PYTHONFAULTHANDLER pytest -v -s --timeout=780 --timeout-method=thread distributed/test_elastic_ep.py || true
+      # not a group that passes. Build 95373 ran it twice and every one of the
+      # four real cases passed at least once, so nothing here is dead, it is
+      # unstable: three green out of eight runs.
+      - RAY_DEDUP_LOGS=0 VLLM_EEP_DEBUG_WATCHDOG=60 VLLM_EEP_DEBUG_GROUP_PRESSURE=1 VLLM_EEP_DEBUG_SYNC_RESHUFFLE=1 VLLM_EEP_DEBUG_OFF=1 AMD_LOG_LEVEL=1 PYTHONFAULTHANDLER=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=RAY_DEDUP_LOGS,VLLM_EEP_DEBUG_WATCHDOG,VLLM_EEP_DEBUG_GROUP_PRESSURE,VLLM_EEP_DEBUG_SYNC_RESHUFFLE,VLLM_EEP_DEBUG_OFF,AMD_LOG_LEVEL,PYTHONFAULTHANDLER pytest -v -s --timeout=780 --timeout-method=thread distributed/test_elastic_ep.py || true
+      - RAY_DEDUP_LOGS=0 VLLM_EEP_DEBUG_WATCHDOG=60 VLLM_EEP_DEBUG_GROUP_PRESSURE=1 VLLM_EEP_DEBUG_SYNC_RESHUFFLE=1 VLLM_EEP_DEBUG_OFF=1 AMD_LOG_LEVEL=1 PYTHONFAULTHANDLER=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=RAY_DEDUP_LOGS,VLLM_EEP_DEBUG_WATCHDOG,VLLM_EEP_DEBUG_GROUP_PRESSURE,VLLM_EEP_DEBUG_SYNC_RESHUFFLE,VLLM_EEP_DEBUG_OFF,AMD_LOG_LEVEL,PYTHONFAULTHANDLER pytest -v -s --timeout=780 --timeout-method=thread distributed/test_elastic_ep.py || true
       # Every command ends in || true, so the step stays green and the log is the
       # deliverable rather than the result.

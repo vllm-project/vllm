@@ -1032,9 +1032,17 @@ class EplbState:
         interfere.
 
         No-op when no async cycle is in progress (rebalanced=False).
+
+        The wait is bounded. Draining takes well under a second when the async
+        worker is healthy, but a rank that stops producing results leaves the
+        others reducing a flag that can never reach the group size, and a
+        reconfiguration was seen spinning here for two hours without printing
+        anything at all. Failing with the state of this rank is strictly more
+        useful than waiting forever.
         """
         if not self.is_async:
             return
+        timeout = float(os.getenv("VLLM_EEP_DRAIN_TIMEOUT_S") or 300.0)
         for model_key, ms in self.model_states.items():
             needs_drain = ms.rebalanced
             if needs_drain:
@@ -1042,12 +1050,9 @@ class EplbState:
                     "Draining async EPLB worker for model %s",
                     model_key,
                 )
-            # Diagnostic only. This loop has no deadline, and a scale down was
-            # seen spinning in it for two hours without a single line of
-            # output. If one rank stops producing results while the others
-            # keep theirs, the reduce never reaches the group size and nobody
-            # ever leaves, so the state of each rank is the only way to tell
-            # which one dropped out.
+            # The periodic report is diagnostic only. The rank that dropped out
+            # is the one whose pending_result stays false while the others have
+            # theirs, and nothing else in the log names it.
             started = time.perf_counter()
             report_every = float(os.getenv("VLLM_EEP_DEBUG_WATCHDOG") or 0)
             next_report = report_every
@@ -1062,9 +1067,12 @@ class EplbState:
                 else:
                     time.sleep(0.001)
                 elapsed = time.perf_counter() - started
+                worker = self.async_worker
+                worker_state = (
+                    "alive" if worker is not None and worker.is_alive() else "gone"
+                )
                 if report_every > 0 and elapsed > next_report:
                     next_report += report_every
-                    worker = self.async_worker
                     logger.warning(
                         "[EEP-DEBUG] still draining %s after %.0f s: "
                         "pending_result=%s, stop_requested=%s, worker=%s",
@@ -1072,7 +1080,18 @@ class EplbState:
                         elapsed,
                         ms.pending_result is not None,
                         self.async_stop_requested,
-                        "alive" if worker is not None and worker.is_alive() else "gone",
+                        worker_state,
+                    )
+                if timeout > 0 and elapsed > timeout:
+                    raise RuntimeError(
+                        f"Draining the async EPLB worker for model {model_key} "
+                        f"did not finish within {timeout:.0f} s "
+                        f"(pending_result={ms.pending_result is not None}, "
+                        f"stop_requested={self.async_stop_requested}, "
+                        f"async worker {worker_state}). Every EP rank has to "
+                        f"produce a result for each layer before any of them "
+                        f"can leave this loop, so one rank that stopped "
+                        f"producing holds up all of them."
                     )
             if needs_drain:
                 logger.info(
