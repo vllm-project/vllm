@@ -29,6 +29,7 @@ from functools import lru_cache, partial
 from itertools import islice
 from typing import Any, Literal
 
+import einops
 import numpy as np
 import torch
 import torch.nn as nn
@@ -120,6 +121,7 @@ from vllm.utils.cache import LRUCache
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.torch_utils import PIN_MEMORY
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphReplayBuffers
 
 from ...utils.gpu_sync_debug import gpu_sync_allowed
@@ -441,6 +443,11 @@ class Qwen3_VisionMLP(nn.Module):
         return mlp_output
 
 
+# Vision blocks process images with more patches than this in token chunks
+# (see Qwen3_VisionBlock._forward_chunked).
+_VIT_CHUNK_TOKENS = 8192
+
+
 @support_torch_compile(
     dynamic_arg_dims={
         "x": 0,
@@ -493,6 +500,22 @@ class Qwen3_VisionBlock(nn.Module):
         max_seqlen: torch.Tensor,  # Only used for Flash Attention
         sequence_lengths: torch.Tensor,  # Only used for FlashInfer CuDNN backend
     ) -> torch.Tensor:
+        mm_attn = self.attn.attn
+        # FlashInfer offsets V by the interleaved QKV stride, and the FP8 path
+        # quantizes Q/K/V itself; the chunked path passes separate Q/K/V buffers.
+        if (
+            not torch.compiler.is_compiling()
+            and x.shape[0] > _VIT_CHUNK_TOKENS
+            and not mm_attn.fp8_enabled
+            and (
+                mm_attn.is_flash_attn_backend
+                or mm_attn.attn_backend == AttentionBackendEnum.TORCH_SDPA
+            )
+        ):
+            return self._forward_chunked(
+                x, cu_seqlens, rotary_pos_emb_cos, rotary_pos_emb_sin, max_seqlen
+            )
+
         x = x + self.attn(
             self.norm1(x),
             cu_seqlens=cu_seqlens,
@@ -504,6 +527,99 @@ class Qwen3_VisionBlock(nn.Module):
 
         x = x + self.mlp(self.norm2(x))
         return x
+
+    def _forward_chunked(
+        self,
+        x: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        rotary_pos_emb_cos: torch.Tensor | None,
+        rotary_pos_emb_sin: torch.Tensor | None,
+        max_seqlen: torch.Tensor,
+    ) -> torch.Tensor:
+        """Same math as `forward`, with the per-token work done in chunks.
+
+        Only Q/K/V and the attention output are materialized for the whole
+        sequence, which bounds the activation peak of a max-size image (and
+        hence the memory reserved for it at profiling) to about 5x the
+        hidden states instead of about 12x.
+        """
+        attn = self.attn
+        seq_len, batch_size, _ = x.shape
+        num_heads = attn.num_attention_heads_per_partition
+        head_dim = attn.hidden_size_per_attention_head
+        chunks = [
+            (start, min(start + _VIT_CHUNK_TOKENS, seq_len))
+            for start in range(0, seq_len, _VIT_CHUNK_TOKENS)
+        ]
+
+        q, k, v = torch.empty(
+            (3, batch_size, seq_len, num_heads, head_dim),
+            dtype=x.dtype,
+            device=x.device,
+        ).unbind(0)
+        for start, end in chunks:
+            cos = sin = None
+            if rotary_pos_emb_cos is not None and rotary_pos_emb_sin is not None:
+                cos = rotary_pos_emb_cos[start:end]
+                sin = rotary_pos_emb_sin[start:end]
+            self._write_qkv_chunk(
+                x[start:end],
+                cos,
+                sin,
+                q[:, start:end],
+                k[:, start:end],
+                v[:, start:end],
+            )
+
+        context = attn.attn(
+            query=q,
+            key=k,
+            value=v,
+            cu_seqlens=cu_seqlens,
+            max_seqlen=max_seqlen,
+        )
+        del q, k, v
+        context = einops.rearrange(context, "b s h d -> s b (h d)", b=batch_size)
+
+        out = torch.empty_like(x)
+        for start, end in chunks:
+            proj, _ = attn.proj(context[start:end])
+            torch.add(x[start:end], proj, out=out[start:end])
+        del context
+
+        for start, end in chunks:
+            out_chunk = out[start:end]
+            out_chunk.add_(self.mlp(self.norm2(out_chunk)))
+        return out
+
+    def _write_qkv_chunk(
+        self,
+        x: torch.Tensor,
+        cos: torch.Tensor | None,
+        sin: torch.Tensor | None,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+    ) -> None:
+        attn = self.attn
+        qkv, _ = attn.qkv(self.norm1(x))
+        qkv = einops.rearrange(
+            qkv,
+            "s b (three head head_dim) -> b s three head head_dim",
+            three=3,
+            head=attn.num_attention_heads_per_partition,
+        )
+        v.copy_(qkv[:, :, 2])
+        if cos is None or sin is None:
+            q.copy_(qkv[:, :, 0])
+            k.copy_(qkv[:, :, 1])
+            return
+        qk = einops.rearrange(
+            qkv[:, :, :2], "b s two head head_dim -> (two b) s head head_dim"
+        ).contiguous()
+        qk = attn.apply_rotary_emb(qk, cos, sin).view(2, *q.shape)
+        q.copy_(qk[0])
+        k.copy_(qk[1])
 
 
 class Qwen3_VisionPatchMerger(nn.Module):
@@ -877,9 +993,12 @@ class Qwen3_VisionTransformer(nn.Module):
             else:
                 grid_thw_list = grid_thw.tolist()
             encoder_metadata = self.prepare_encoder_metadata(grid_thw_list)
-
-        pos_embeds = encoder_metadata["pos_embeds"]
+            # Owned here, so free it before the blocks run.
+            pos_embeds = encoder_metadata.pop("pos_embeds")
+        else:
+            pos_embeds = encoder_metadata["pos_embeds"]
         hidden_states = hidden_states + pos_embeds
+        del pos_embeds
         hidden_states = hidden_states.unsqueeze(1)
 
         deepstack_feature_lists = []
