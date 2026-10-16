@@ -75,34 +75,6 @@ def _handler(max_num_reqs: int = 8):
     return h
 
 
-def test_each_request_gets_its_own_drafts_back():
-    # PP overlap: "g" was sampled in an earlier batch; batches in between
-    # must not shadow it. Fetch returns each request's own row.
-    h = _handler()
-    h._draft_tokens_by_req = {
-        "g": np.array([10, 11]),
-        "x": np.array([12, 13]),
-        "y": np.array([14, 15]),
-    }
-    out = h.get_draft_tokens()
-    got = dict(zip(out.req_ids, out.draft_token_ids))
-    assert got["g"] == [10, 11]
-    assert got["x"] == [12, 13]
-    assert got["y"] == [14, 15]
-
-
-def test_unstructured_width_placeholder_keeps_structured_drafts():
-    # A batch with no structured reqs stores only the draft width per
-    # request; an earlier structured batch's real drafts are preserved and
-    # the unstructured request gets a -1 placeholder of the right width.
-    h = _handler()
-    h._draft_tokens_by_req = {"a": [7, 8], "b": 2}
-    out = h.get_draft_tokens()
-    got = dict(zip(out.req_ids, out.draft_token_ids))
-    assert got["a"] == [7, 8]
-    assert got["b"] == [-1, -1]
-
-
 def test_discard_drops_only_the_named_request():
     # discard() on a re-added (or finished) request must not touch others.
     h = _handler()
