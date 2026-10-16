@@ -175,7 +175,8 @@ class _AutotuneGroup:
         # Ranks run sequentially: snapshot every rank's file before any saves.
         self.record(("all_gather",))
         if isinstance(obj, bool):
-            out[:] = [rank not in self.run.rejected_load_ranks for rank in self.ranks]
+            failed = self.run.rejected_load_ranks | set(self.run.load_errors)
+            out[:] = [rank not in failed for rank in self.ranks]
             assert out[self.rank_in_group] == obj
             return
         out[:] = self.run.gathered.setdefault(
@@ -200,6 +201,8 @@ class _AutotuneTuner:
     def load_configs(self, path):
         if self.run.rank in self.run.rejected_load_ranks:
             return False
+        if self.run.rank in self.run.load_errors:
+            raise self.run.load_errors[self.run.rank]
         self.loaded = json.loads(Path(path).read_text())
         self.cache.update(self.loaded)
         return True
@@ -209,6 +212,8 @@ class _AutotuneTuner:
         self._dirty = False
 
     def save_configs(self, path):
+        if self.run.rank in self.run.save_errors:
+            raise self.run.save_errors[self.run.rank]
         self.run.saves.append((self.run.rank, Path(path), dict(self.cache)))
         Path(path).write_text(json.dumps(self.cache))
 
@@ -237,6 +242,8 @@ class _AutotuneRun:
         )
         self.gathered = {}
         self.rejected_load_ranks: set[int] = set()
+        self.load_errors: dict[int, Exception] = {}
+        self.save_errors: dict[int, Exception] = {}
         self.tuners = {}
         self.saves = []
         self.profile_groups = defaultdict(list)
@@ -417,3 +424,27 @@ def test_autotune_cache_key_normalizes_kv_init_fields():
         _normalize_cache_config_for_hash(resolved).compute_hash()
         != fresh.compute_hash()
     )
+
+
+@pytest.mark.parametrize("pp, tp", [(1, 1), (1, 4), (2, 4)])
+def test_cache_load_error_retunes_every_rank_in_its_tuning_group(autotune_run, pp, tp):
+    """A rank that raises while loading would leave its peers in the gather."""
+    autotune_run(pp=pp, tp=tp).execute()
+    rerun = autotune_run(pp=pp, tp=tp)
+    rerun.load_errors = {tp - 1: TypeError("unexpected entry")}
+    rerun.execute()
+    rerun.assert_collectives_match()
+    assert set(rerun.profile_groups) == set(range(tp))
+    assert {rank for rank, _, _ in rerun.saves} == set(range(tp))
+
+
+@pytest.mark.parametrize(
+    "error", [OSError(28, "No space left on device"), RuntimeError("file changed")]
+)
+def test_cache_save_error_does_not_fail_startup(autotune_run, error):
+    run = autotune_run(pp=1, tp=4)
+    run.save_errors = {2: error}
+    run.execute()
+    run.assert_collectives_match()
+    assert {rank for rank, _, _ in run.saves} == {0, 1, 3}
+    assert not run.cache_path(2).exists()
