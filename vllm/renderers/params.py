@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 
@@ -505,29 +504,45 @@ class TokenizeParams:
 
         return slice(0, max_length)
 
+    @staticmethod
     def _truncation_indices(
-        self, tokenizer: TokenizerLike | None, special_tokens_mask: Sequence[int]
+        truncation: slice, token_ids: list[int], text_ids: list[int]
     ) -> list[int] | None:
-        """The token indices to keep so that truncation spares special tokens.
+        """The indices of `token_ids` to keep so that `truncation` spares the
+        special tokens.
 
-        `special_tokens_mask` flags the tokens that the tokenizer added around
-        the text, such as `[CLS]` and `[SEP]`. These are all kept and only the
-        text between them is truncated, as the tokenizer's own truncation does.
+        `text_ids` is the same text tokenized without special tokens, so the
+        tokens around it in `token_ids`, such as `[CLS]` and `[SEP]`, are the
+        ones the tokenizer added. These are all kept and only the text between
+        them is truncated, as the tokenizer's own truncation does.
 
-        `None` means `_truncation_slice` applies as it is: there is nothing to
-        truncate, no special tokens to keep, or no room for them.
+        `None` means `truncation` applies as it is: there are no special tokens
+        to keep, no telling which ones they are, or no room for them.
         """
-        length = len(special_tokens_mask)
-        truncation = self._truncation_slice(tokenizer, length)
-        if truncation is None or 0 not in special_tokens_mask:
+        length = len(token_ids)
+        num_added = length - len(text_ids)
+        if num_added <= 0:
+            return None
+
+        # The text tokens sit between the added ones. If they are not found
+        # there, the tokenizer split the text differently without the special
+        # tokens, and there is no telling which tokens it added.
+        num_prefix = next(
+            (
+                i
+                for i in range(num_added + 1)
+                if token_ids[i : i + len(text_ids)] == text_ids
+            ),
+            None,
+        )
+        if num_prefix is None:
             return None
 
         # Shrink the kept span so that the special tokens at either end fit.
-        num_prefix = special_tokens_mask.index(0)
-        num_suffix = special_tokens_mask[::-1].index(0)
+        num_suffix = num_added - num_prefix
         start, stop, _ = truncation.indices(length)
         text_start, text_stop = start + num_prefix, stop - num_suffix
-        if num_prefix + num_suffix == 0 or text_start > text_stop:
+        if text_start > text_stop:
             return None
 
         return [

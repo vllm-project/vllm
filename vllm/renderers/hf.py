@@ -1013,10 +1013,6 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         # Only fast tokenizers expose offset_mapping.
         return self.tokenizer is not None and self.tokenizer.is_fast
 
-    def _can_produce_special_tokens_mask(self) -> bool:
-        # The kimi_audio tokenizer runs on this renderer too, but is not an HF one.
-        return isinstance(self.tokenizer, HfTokenizer)
-
     def render_messages(
         self,
         messages: list[ChatCompletionMessageParam],
