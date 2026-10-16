@@ -157,10 +157,17 @@ class QKNormRoPEKVCacheTestModel(torch.nn.Module):
         )
 
         if self.kv_cache_dtype != self.dtype:
-            self.attn._k_scale = torch.tensor(1.0, dtype=torch.float32, device=device)
-            self.attn._v_scale = torch.tensor(1.0, dtype=torch.float32, device=device)
-            self.attn._k_scale_float = 1.0
-            self.attn._v_scale_float = 1.0
+            # Non-unit scales so the fused and unfused writers must agree on them.
+            self.attn._k_scale = torch.tensor(0.5, dtype=torch.float32, device=device)
+            self.attn._v_scale = torch.tensor(0.25, dtype=torch.float32, device=device)
+            self.attn._k_scale_cpu = torch.tensor(
+                0.5, dtype=torch.float32, device="cpu"
+            )
+            self.attn._v_scale_cpu = torch.tensor(
+                0.25, dtype=torch.float32, device="cpu"
+            )
+            self.attn._k_scale_float = 0.5
+            self.attn._v_scale_float = 0.25
         else:
             self.attn._k_scale = self.attn._k_scale.to(device)
             self.attn._v_scale = self.attn._v_scale.to(device)
@@ -527,16 +534,6 @@ def _run_qk_norm_rope_kvcache_fusion_test(
         else:
             torch.testing.assert_close(q_unfused, q_fused, atol=ATOL, rtol=RTOL)
 
-        if not expect_fusion or (not is_fp8_cache and mrope_section is None):
-            # The AITER PTS kernel populates k_out only for non-FP8 caches.
-            # With FP8, the kernel writes quantized K directly to the cache
-            # and may leave k_out uninitialised.  In production this is fine
-            # because downstream attention reads K from the cache.
-            torch.testing.assert_close(k_unfused, k_fused, atol=ATOL, rtol=RTOL)
-
-        # Should be bit exact since no processing had been done on v for both paths
-        torch.testing.assert_close(v_unfused, v_fused, atol=0.0, rtol=0.0)
-
         # Fused and unfused arithmetic can straddle an FP8 rounding boundary.
         # Allow one E4M3 quantization step while still comparing every block.
         if is_fp8_cache:
@@ -544,6 +541,18 @@ def _run_qk_norm_rope_kvcache_fusion_test(
         else:
             cache_atol, cache_rtol = ATOL, RTOL
 
+        # The fused k_out is the dequantized cache write, so it carries the same
+        # rounding; FA and ROCM_ATTN prefill consume it directly. Unified reads K
+        # from the cache and asks the kernel not to write k_out at all.
+        if attn_backend != AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN:
+            torch.testing.assert_close(
+                k_unfused, k_fused, atol=cache_atol, rtol=cache_rtol
+            )
+
+        # Should be bit exact since no processing had been done on v for both paths
+        torch.testing.assert_close(v_unfused, v_fused, atol=0.0, rtol=0.0)
+
+        # Whole cache, so the interleaved V write (ROCM_ATTN kv_cache[1]) is checked.
         torch.testing.assert_close(
             kv_cache_unfused.float(),
             kv_cache_fused.float(),
@@ -570,20 +579,52 @@ _FUSION_CONFIGS = [
     _FUSION_CONFIGS,
 )
 @pytest.mark.parametrize(
-    "attn_backend",
+    "attn_backend, use_shuffle_kv_layout, kv_layout",
     [
-        AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN,
-        AttentionBackendEnum.ROCM_AITER_FA,
+        # ROCM_ATTN always writes the shuffled, interleaved-V layout and needs each
+        # K/V side contiguous per block, so head-major only.
+        pytest.param(
+            AttentionBackendEnum.ROCM_ATTN,
+            "0",
+            KVCacheLayout.LBHNC,
+            id="rocm_attn",
+        ),
+        # Unified never reads the shuffle env; its strided views take any layout.
+        pytest.param(
+            AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN,
+            "0",
+            KVCacheLayout.LBHNC,
+            id="unified-head_major",
+        ),
+        pytest.param(
+            AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN,
+            "0",
+            KVCacheLayout.LBNHC,
+            id="unified-token_major",
+        ),
+        # FA takes any layout unshuffled; its shuffle writer needs each K/V side
+        # contiguous per block, so head-major only.
+        pytest.param(
+            AttentionBackendEnum.ROCM_AITER_FA,
+            "0",
+            KVCacheLayout.LBHNC,
+            id="fa-head_major",
+        ),
+        pytest.param(
+            AttentionBackendEnum.ROCM_AITER_FA,
+            "0",
+            KVCacheLayout.LBNHC,
+            id="fa-token_major",
+        ),
+        pytest.param(
+            AttentionBackendEnum.ROCM_AITER_FA,
+            "1",
+            KVCacheLayout.LBHNC,
+            id="fa-shuffle",
+        ),
     ],
 )
 @pytest.mark.parametrize("num_tokens", [5, 2048])
-@pytest.mark.parametrize(
-    "kv_layout",
-    [
-        pytest.param(KVCacheLayout.LBHNC, id="head_major"),
-        pytest.param(KVCacheLayout.LBNHC, id="token_major"),
-    ],
-)
 @pytest.mark.parametrize("enable_aiter_triton_rope", [True, False])
 @pytest.mark.parametrize("block_size", [16, 32, 64])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
@@ -615,6 +656,7 @@ def test_qk_norm_rope_kvcache_fusion(
     kv_cache_dtype: CacheDType,
     rms_norm_eps: float,
     custom_op: str,
+    use_shuffle_kv_layout: str,
     monkeypatch: pytest.MonkeyPatch,
 ):
     _run_qk_norm_rope_kvcache_fusion_test(
@@ -627,7 +669,7 @@ def test_qk_norm_rope_kvcache_fusion(
         rotary_dim=rotary_dim,
         block_size=block_size,
         is_neox=is_neox,
-        use_shuffle_kv_layout="0",
+        use_shuffle_kv_layout=use_shuffle_kv_layout,
         kv_layout=kv_layout,
         dtype=dtype,
         kv_cache_dtype=kv_cache_dtype,
