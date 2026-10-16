@@ -135,6 +135,22 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         self._push_writer_stop = threading.Event()
         self._push_writer_thread: threading.Thread | None = None
 
+    def _validate_remote_parallel_config(
+        self, agent_metadata: NixlAgentMetadata
+    ) -> None:
+        super()._validate_remote_parallel_config(agent_metadata)
+        local = (self.block_size, self._physical_blocks_per_logical_kv_block)
+        remote = (
+            agent_metadata.block_size,
+            agent_metadata.physical_blocks_per_logical_kv_block,
+        )
+        if local != remote:
+            raise NotImplementedError(
+                "NixlPushConnector requires identical P/D block sizes. Kernel "
+                "block size and kernel blocks per logical block: local "
+                f"{local}, remote engine {agent_metadata.engine_id} {remote}."
+            )
+
     # --- Lifecycle ----------------------------------------------------- #
 
     def register_kv_caches(self, kv_caches: dict[str, "torch.Tensor"]):
