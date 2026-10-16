@@ -26,7 +26,6 @@ from .utils import (
     BeamSearchInstance,
     BeamSearchOutput,
     BeamSearchSequence,
-    configure_beam_logprobs,
     create_sort_beams_key_function,
 )
 
@@ -118,8 +117,8 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
             detokenize=False,
             skip_clone=True,  # Internal beam search, safe to skip clone
         )
-        configure_beam_logprobs(
-            base_sampling_params, params, self.llm_engine.input_processor.vllm_config
+        params.configure_logprobs(
+            base_sampling_params, self.llm_engine.input_processor.vllm_config
         )
         if params.structured_outputs is not None:
             (

@@ -19,7 +19,6 @@ from vllm.utils.async_utils import collect_from_async_generator
 
 from .utils import (
     BeamSearchSequence,
-    configure_beam_logprobs,
     create_sort_beams_key_function,
 )
 
@@ -71,8 +70,8 @@ class BeamSearchOnlineMixin(ABC):
             watermarking=False,
             detokenize=False,
         )
-        configure_beam_logprobs(
-            sampling_params, params, self.engine_client.input_processor.vllm_config
+        params.configure_logprobs(
+            sampling_params, self.engine_client.input_processor.vllm_config
         )
         allowed = set(params.allowed_token_ids) if params.allowed_token_ids else None
         all_beams = [

@@ -23,7 +23,6 @@ from vllm.entrypoints.generate.beam_search.online import BeamSearchOnlineMixin
 from vllm.entrypoints.generate.beam_search.utils import (
     BeamSearchInstance,
     BeamSearchSequence,
-    configure_beam_logprobs,
 )
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import EngineInput, TokensInput
@@ -398,5 +397,5 @@ def test_beam_allowlist_rejects_unsupported_requests(case):
         params.structured_outputs = StructuredOutputsParams(regex="a")
     sampling = SamplingParams(logprobs=4)
     with pytest.raises((ValueError, VLLMValidationError)):
-        configure_beam_logprobs(sampling, params, config)
+        params.configure_logprobs(sampling, config)
         sampling._validate_logprobs(config.model_config)

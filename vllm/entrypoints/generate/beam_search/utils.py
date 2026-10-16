@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
 
 from vllm.inputs import (
     DecoderOnlyEngineInput,
@@ -14,10 +13,6 @@ from vllm.inputs import (
 )
 from vllm.logprobs import Logprob
 from vllm.lora.request import LoRARequest
-from vllm.sampling_params import BeamSearchParams, SamplingParams
-
-if TYPE_CHECKING:
-    from vllm.config import VllmConfig
 
 
 @dataclass
@@ -166,22 +161,3 @@ def create_sort_beams_key_function(eos_token_id: int, length_penalty: float):
         )
 
     return sort_beams_key
-
-
-def configure_beam_logprobs(
-    sampling_params: SamplingParams, params: BeamSearchParams, config: "VllmConfig"
-) -> None:
-    ids = params.allowed_token_ids
-    if ids is None:
-        return
-    if not ids:
-        raise ValueError("Beam search allowed_token_ids must not be empty")
-    if params.structured_outputs is not None:
-        raise ValueError("Beam allowlists with structured outputs are not supported")
-    if config.speculative_config is not None:
-        raise ValueError("Beam allowlists with speculative decoding are not supported")
-    if config.model_config.is_diffusion:
-        raise ValueError("Beam allowlists with diffusion models are not supported")
-    # Score the original distribution without applying a sampling mask.
-    sampling_params.logprobs = None
-    sampling_params.logprob_token_ids = ids
