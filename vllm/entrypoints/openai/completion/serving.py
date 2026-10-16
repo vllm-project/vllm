@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import itertools
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
@@ -19,6 +20,7 @@ from vllm.entrypoints.generate.base.serving import (
     build_per_request_timing_metrics,
     build_spec_decoding_metrics,
     clamp_prompt_logprobs,
+    completion_top_logprobs_limit,
     format_token_id_placeholder,
 )
 from vllm.entrypoints.openai.completion.protocol import (
@@ -721,8 +723,12 @@ class OpenAIServingCompletion(GenerateBaseServing):
                             tokenizer,
                             return_as_token_id=should_return_as_token_id,
                         ): max(top_lp[1].logprob, -9999.0)
-                        for i, top_lp in enumerate(step_top_logprobs.items())
-                        if logprob_token_ids or num_output_top_logprobs >= i
+                        for top_lp in itertools.islice(
+                            step_top_logprobs.items(),
+                            completion_top_logprobs_limit(
+                                num_output_top_logprobs, bool(logprob_token_ids)
+                            ),
+                        )
                     }
                 )
 
