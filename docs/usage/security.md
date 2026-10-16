@@ -425,9 +425,7 @@ Most cache paths default to subdirectories under a single root. Changing `VLLM_C
 | --- | --- | --- |
 | `VLLM_CACHE_ROOT` | `~/.cache/vllm` | Base directory for vLLM-owned caches. Respects `XDG_CACHE_HOME` if set. |
 | *(torch.compile)* | `$VLLM_CACHE_ROOT/torch_compile_cache/` | Compilation cache for AOT-compiled models, Inductor graphs, and Triton kernels. Controlled by `VLLM_DISABLE_COMPILE_CACHE` (set to `1` to disable). |
-| `VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR` | Managed: FlashInfer's default below; legacy: `$VLLM_CACHE_ROOT/flashinfer_autotune_cache/<flashinfer-version>/<arch>/<cache-hash>/` | Overrides cache placement for both FlashInfer autotune cache APIs. |
-| `FLASHINFER_AUTOTUNE_CACHE_DIR` | `~/.cache/flashinfer/autotune` | FlashInfer-owned managed-cache root, used when the vLLM override is unset. `FLASHINFER_WORKSPACE_BASE` relocates its default; `VLLM_CACHE_ROOT` does not. |
-| `FLASHINFER_AUTOTUNE_DIR` | `autotune/` under FlashInfer's workspace | FlashInfer-owned SM120 sparse-MLA calibration cache, separate from the autotuner cache and unaffected by the vLLM override. |
+| `VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR` | Managed: `~/.cache/flashinfer/autotune/`; legacy: `$VLLM_CACHE_ROOT/flashinfer_autotune_cache/<flashinfer-version>/<arch>/<cache-hash>/` | Overrides cache placement for both FlashInfer autotune cache APIs. |
 | `VLLM_ASSETS_CACHE` | `$VLLM_CACHE_ROOT/assets/` | Downloaded assets (e.g., tokenizer files). |
 | `VLLM_XLA_CACHE_PATH` | `$VLLM_CACHE_ROOT/xla_cache/` | XLA/TPU compilation cache. |
 | `VLLM_MEDIA_CACHE` | *(disabled)* | Optional cache for downloaded media (images, video, audio). Not enabled unless explicitly set. |
