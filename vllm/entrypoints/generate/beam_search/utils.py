@@ -137,7 +137,7 @@ class BeamSearchInstance:
 def get_beam_search_score(
     tokens: list[int],
     cumulative_logprob: float,
-    eos_token_id: int,
+    eos_token_ids: set[int],
     length_penalty: float = 1.0,
 ) -> float:
     """Calculate the beam search score with length penalty.
@@ -147,17 +147,17 @@ def get_beam_search_score(
     https://github.com/huggingface/transformers/blob/ccb92be23def445f2afdea94c31286f84b89eb5b/src/transformers/generation/beam_search.py#L938
     """
     seq_len = len(tokens)
-    if tokens[-1] == eos_token_id:
+    if tokens[-1] in eos_token_ids:
         seq_len -= 1
 
     # An aborted beam may contain only an EOS prompt token.
     return cumulative_logprob / (max(seq_len, 1) ** length_penalty)
 
 
-def create_sort_beams_key_function(eos_token_id: int, length_penalty: float):
+def create_sort_beams_key_function(eos_token_ids: set[int], length_penalty: float):
     def sort_beams_key(x: BeamSearchSequence) -> float:
         return get_beam_search_score(
-            x.tokens, x.cum_logprob, eos_token_id, length_penalty
+            x.tokens, x.cum_logprob, eos_token_ids, length_penalty
         )
 
     return sort_beams_key
