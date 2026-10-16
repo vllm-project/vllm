@@ -239,7 +239,7 @@ def test_hisparse_shares_host_pool_only_for_local_tp(monkeypatch):
 @pytest.mark.skip_global_cleanup
 def test_hisparse_shared_host_pool_uses_one_replicated_mmap(monkeypatch):
     page = mmap.PAGESIZE
-    tp_group = MagicMock()
+    tp_group = MagicMock(rank_in_group=1, world_size=2)
     monkeypatch.setattr(hisparse_runtime_module, "get_tp_group", lambda: tp_group)
 
     class FakeSharedOffloadRegion:
@@ -253,6 +253,7 @@ def test_hisparse_shared_host_pool_uses_one_replicated_mmap(monkeypatch):
             self.pinned_addresses = []
             self.view_sizes = []
             self.offset = 0
+            kwargs["barrier"]()
 
         def create_next_canonical_view(self, size):
             self.view_sizes.append(size)
@@ -280,16 +281,13 @@ def test_hisparse_shared_host_pool_uses_one_replicated_mmap(monkeypatch):
     pinned: list[torch.Tensor] = []
 
     def pin_tensor(tensor):
+        tp_group.barrier.assert_called_once_with()
         pinned.append(tensor)
 
     monkeypatch.setattr(hisparse_runtime_module, "pin_tensor", pin_tensor)
     config = SimpleNamespace(
         instance_id="instance",
-        parallel_config=_hisparse_parallel_config(
-            tensor_parallel_size=1,
-            world_size=1,
-            distributed_executor_backend="uni",
-        ),
+        parallel_config=_hisparse_parallel_config(),
     )
 
     pools, private_pools, region = hisparse_runtime_module.allocate_hisparse_host_pools(
@@ -310,7 +308,7 @@ def test_hisparse_shared_host_pool_uses_one_replicated_mmap(monkeypatch):
         "cpu_page_size": 64,
         "barrier": tp_group.barrier,
         "creator_memory_check": hisparse_runtime_module.check_hisparse_host_memory,
-        "populate_only_on_creator": True,
+        "populate_shard": (1, 2),
     }
     assert region.view_sizes == [24, 40]
     assert [pool.shape for pool in pools] == [(24,), (40,)]
@@ -328,7 +326,8 @@ def test_shared_host_pool_tracks_successful_registrations(
 ):
     """Only successful registrations may be unregistered on allocation failure."""
     page = mmap.PAGESIZE
-    monkeypatch.setattr(hisparse_runtime_module, "get_tp_group", MagicMock())
+    tp_group = MagicMock(rank_in_group=0, world_size=2)
+    monkeypatch.setattr(hisparse_runtime_module, "get_tp_group", lambda: tp_group)
     backing = torch.empty(3 * page, dtype=torch.uint8)
     region = MagicMock(base_tensor=backing, pinned_addresses=[], is_pinned=False)
     monkeypatch.setattr(
@@ -1258,6 +1257,8 @@ def test_hisparse_worker_shutdown_releases_pinned_state(monkeypatch):
     worker.cache_handles = []
     worker.pinned_host_pools = []
     worker.shared_host_region = object()
+    worker.vllm_config = SimpleNamespace(instance_id="shutdown")
+    pool = hisparse_runtime_module.get_hisparse_host_pool(worker.vllm_config, None)
     released = False
 
     def release_pinned_state(runtimes, pinned_host_pools, shared_host_region):
@@ -1274,6 +1275,9 @@ def test_hisparse_worker_shutdown_releases_pinned_state(monkeypatch):
     worker.shutdown()
 
     assert released
+    new_pool = hisparse_runtime_module.get_hisparse_host_pool(worker.vllm_config, None)
+    assert new_pool is not pool
+    hisparse_runtime_module.drop_hisparse_host_pool(worker.vllm_config)
 
 
 class _TestReplaySSMMixer(MambaMixer2):
