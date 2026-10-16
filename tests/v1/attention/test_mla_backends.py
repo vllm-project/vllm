@@ -10,6 +10,7 @@ Known Issues:
 
 import sys
 from types import MethodType, SimpleNamespace
+from typing import Literal
 
 import pytest
 import torch
@@ -1633,6 +1634,7 @@ def _run_backend_correctness(
     v_head_dim: int,
     chunked_prefill_workspace_size: int | None = None,
     adaptive_verification: bool = False,
+    trtllm_ragged_backend: Literal["trtllm", "cute-dsl"] = "trtllm",
 ):
     """Test that all backends produce similar outputs to a reference implementation
     using torch.nn.functional.scaled_dot_product_attention.
@@ -1712,6 +1714,7 @@ def _run_backend_correctness(
             hf_config_override["num_attention_heads"]
         )
     vllm_config.cache_config.cache_dtype = kv_cache_dtype
+    vllm_config.attention_config.trtllm_ragged_backend = trtllm_ragged_backend
 
     # For spec decode tests, add a speculative_config to set the reorder_batch_threshold
     if is_spec_decode_test:
@@ -2163,6 +2166,7 @@ def test_backend_correctness(
     _prefill_backend_dimension_params(),
 )
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
+@pytest.mark.parametrize("trtllm_ragged_backend", ["trtllm", "cute-dsl"])
 def test_chunked_context_backend_correctness(
     default_vllm_config,
     dist_init,
@@ -2171,8 +2175,14 @@ def test_chunked_context_backend_correctness(
     qk_nope_head_dim: int,
     v_head_dim: int,
     kv_cache_dtype: str,
+    trtllm_ragged_backend: Literal["trtllm", "cute-dsl"],
 ):
     """Split, packed, and context-free requests match the SDPA reference."""
+    if (
+        trtllm_ragged_backend == "cute-dsl"
+        and prefill_backend != MLAPrefillBackendEnum.TRTLLM_RAGGED
+    ):
+        pytest.skip("CuTe DSL is only selectable for TRTLLM_RAGGED prefill")
     _run_backend_correctness(
         default_vllm_config,
         dist_init,
@@ -2187,6 +2197,7 @@ def test_chunked_context_backend_correctness(
         qk_nope_head_dim=qk_nope_head_dim,
         v_head_dim=v_head_dim,
         chunked_prefill_workspace_size=1024,
+        trtllm_ragged_backend=trtllm_ragged_backend,
     )
 
 

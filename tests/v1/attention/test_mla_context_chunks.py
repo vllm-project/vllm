@@ -33,7 +33,6 @@ def build_chunked_context(
     block_size: int = BLOCK_SIZE,
     dcp_world_size: int = 1,
     dcp_local_block_size: int = 1,
-    align_indptr: bool = False,
 ):
     query_start_loc = torch.zeros(len(query_lens) + 1, dtype=torch.int32)
     query_start_loc[1:] = torch.tensor(query_lens, dtype=torch.int32).cumsum(0)
@@ -49,7 +48,6 @@ def build_chunked_context(
         dcp_world_size=dcp_world_size,
         dcp_local_block_size=dcp_local_block_size,
         dcp_virtual_block_size=dcp_local_block_size * dcp_world_size,
-        align_indptr=align_indptr,
     )
 
 
@@ -106,10 +104,7 @@ def test_sparse_context_lengths_do_not_force_gpu_sync(monkeypatch):
         ([1], 1024),
     ],
 )
-@pytest.mark.parametrize("align_indptr", [False, True])
-def test_chunks_gather_every_context_row_exactly_once(
-    context_lens, workspace_size, align_indptr
-):
+def test_chunks_gather_every_context_row_exactly_once(context_lens, workspace_size):
     """Chunks tile the batch's context without gaps, overlap, or overflow.
 
     This is the invariant the whole schedule rests on: attention over a chunk
@@ -117,24 +112,14 @@ def test_chunks_gather_every_context_row_exactly_once(
     silently corrupts the context partial.
     """
     query_lens = [4] * len(context_lens)
-    metadata = build_chunked_context(
-        context_lens, query_lens, workspace_size, align_indptr=align_indptr
-    )
+    metadata = build_chunked_context(context_lens, query_lens, workspace_size)
     assert metadata is not None
     assert metadata.context_lens.tolist() == context_lens
 
     gathered: dict[int, list[tuple[int, int]]] = {}
     previous_request_start = -1
-    boundary_offset = 0
     for chunk in metadata.chunks:
         assert chunk.all_rows_active
-        if align_indptr:
-            assert chunk.query_start_loc.data_ptr() % 16 == 0
-            assert chunk.cu_seq_lens.data_ptr() % 16 == 0
-        else:
-            assert chunk.query_start_loc.storage_offset() == boundary_offset
-            assert chunk.cu_seq_lens.storage_offset() == boundary_offset
-        boundary_offset += chunk.num_requests + 1
         assert chunk.num_context_tokens <= workspace_size
         assert chunk.num_context_tokens == int(chunk.cu_seq_lens[-1])
         assert chunk.token_to_seq.shape[0] == chunk.num_context_tokens
@@ -252,8 +237,7 @@ def test_no_context_needs_no_chunks():
     assert build_chunked_context([0, 0], [4, 4], 1024) is None
 
 
-@pytest.mark.parametrize("align_indptr", [False, True])
-def test_dcp_chunks_fit_the_per_rank_row_budget(align_indptr):
+def test_dcp_chunks_fit_the_per_rank_row_budget():
     """Under DCP each rank gathers its own shard, so the budget is 1/world.
 
     The local starts and lengths must tile the rank's padded context the same
@@ -269,25 +253,14 @@ def test_dcp_chunks_fit_the_per_rank_row_budget(align_indptr):
         block_size=128,
         dcp_world_size=dcp_world_size,
         dcp_local_block_size=interleave,
-        align_indptr=align_indptr,
     )
     assert metadata is not None
     assert metadata.context_lens.tolist() == context_lens
     virtual_block_size = interleave * dcp_world_size
 
     local_cursor: dict[int, int] = {}
-    boundary_offset = 0
     for chunk in metadata.chunks:
         assert chunk.num_local_context_tokens <= workspace_size // dcp_world_size
-        if align_indptr:
-            assert chunk.query_start_loc.data_ptr() % 16 == 0
-            assert chunk.cu_seq_lens.data_ptr() % 16 == 0
-            assert chunk.padded_local_cu_seq_lens.data_ptr() % 16 == 0
-        else:
-            assert chunk.query_start_loc.storage_offset() == boundary_offset
-            assert chunk.cu_seq_lens.storage_offset() == boundary_offset
-            assert chunk.padded_local_cu_seq_lens.storage_offset() == boundary_offset
-        boundary_offset += chunk.num_requests + 1
         assert chunk.local_starts == chunk.starts.tolist()
         assert chunk.padded_local_cu_seq_lens.tolist() == [0] + list(
             torch.tensor(chunk.padded_local_seq_lens).cumsum(0)
