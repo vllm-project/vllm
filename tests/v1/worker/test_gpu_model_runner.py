@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 import torch
 
+import vllm.model_executor.model_loader.reload.inplace as reload_inplace_module
 import vllm.v1.worker.gpu_model_runner as gpu_model_runner_module
 from vllm.config import (
     AttentionConfig,
@@ -28,6 +29,7 @@ from vllm.distributed.parallel_state import (
 from vllm.lora.layers import LoRAMappingType
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
 from vllm.platforms import current_platform
@@ -41,8 +43,14 @@ from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerBackend
 from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
     ROCMAiterMLASparseBackend,
 )
-from vllm.v1.attention.backends.registry import AttentionBackendEnum
-from vllm.v1.core.kv_cache_utils import estimate_max_model_len, get_kv_cache_configs
+from vllm.v1.attention.backends.registry import (
+    AttentionBackendEnum,
+    MambaAttentionBackendEnum,
+)
+from vllm.v1.core.kv_cache_planning import (
+    estimate_max_model_len,
+    get_kv_cache_configs,
+)
 from vllm.v1.core.sched.output import CachedRequestData, NewRequestData, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -63,6 +71,7 @@ from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.lora import set_active_mm_loras
 from vllm.v1.worker.gpu_input_batch import InputBatch
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+from vllm.v1.worker.gpu_worker import Worker
 from vllm.v1.worker.utils import select_common_block_size
 
 BLOCK_SIZE = 16
@@ -231,7 +240,6 @@ def _schedule_new_request(*req_ids: str) -> SchedulerOutput:
         total_num_scheduled_tokens=total_num_scheduled_tokens,
         scheduled_spec_decode_tokens={},
         scheduled_encoder_inputs={},
-        num_common_prefix_blocks=[],
         finished_req_ids=set(),
         free_encoder_mm_hashes=[],
     )
@@ -259,7 +267,6 @@ def _schedule_cached_requests(
         total_num_scheduled_tokens=sum(num_scheduled_tokens.values()),
         scheduled_spec_decode_tokens={},
         scheduled_encoder_inputs={},
-        num_common_prefix_blocks=[],
         finished_req_ids=set(),
         free_encoder_mm_hashes=[],
     )
@@ -509,6 +516,53 @@ def test_alignment_rejected_by_a_sibling_backend_raises(monkeypatch, cpu):
         platform.update_block_size_for_backend(vllm_config)
 
 
+class _CheckpointingMambaLayer(MambaBase):
+    mamba_type = MambaAttentionBackendEnum.GDN_ATTN
+
+    def __init__(self, prefill_checkpoint_alignment: int | None):
+        self._prefill_checkpoint_alignment = prefill_checkpoint_alignment
+
+    def get_prefill_checkpoint_alignment(self) -> int | None:
+        return self._prefill_checkpoint_alignment
+
+    def get_state_shape(self):
+        return ()
+
+    def get_state_dtype(self):
+        return ()
+
+
+def _align_qwen3_5_blocks(*prefill_checkpoint_alignments: int | None):
+    from tests.v1.attention.utils import create_vllm_config
+
+    vllm_config = create_vllm_config(model_name="Qwen/Qwen3.5-0.8B")
+    cache_config = vllm_config.cache_config
+    cache_config.mamba_cache_mode = "align"
+    forward_context = vllm_config.compilation_config.static_forward_context
+    for i, alignment in enumerate(prefill_checkpoint_alignments):
+        forward_context[f"mamba.{i}"] = _CheckpointingMambaLayer(alignment)
+    Platform._align_hybrid_block_size(vllm_config, _mock_backend([MultipleOf(16)]))
+    return cache_config
+
+
+@pytest.mark.parametrize(
+    ("prefill_checkpoint_alignments", "block_size"),
+    [((64,), 576), ((None,), 544), ((64, None), 544)],
+)
+def test_blocks_land_on_the_mamba_checkpoint_grid(
+    prefill_checkpoint_alignments, block_size
+):
+    """A layer that checkpoints every 64 tokens needs 64-aligned blocks.
+
+    Unaligned, Qwen3.5-0.8B's block (544) puts every other checkpoint off the
+    grid. A Mamba layer that cannot checkpoint (like Qwen4Exp's PLE short conv)
+    stops the scheduler from taking any, so the block stays.
+    """
+    cache_config = _align_qwen3_5_blocks(*prefill_checkpoint_alignments)
+
+    assert cache_config.block_size == block_size
+
+
 def test_xpu_gdn_rounding_rejected_by_a_sibling_backend_raises(monkeypatch):
     # XPU's GDN rounding runs after super()'s check, so it must check again.
     try:
@@ -717,7 +771,6 @@ def test_update_states_request_finished(model_runner, dist_init):
         total_num_scheduled_tokens=0,
         scheduled_spec_decode_tokens={},
         scheduled_encoder_inputs={},
-        num_common_prefix_blocks=[],
         finished_req_ids={req_id},
         free_encoder_mm_hashes=[],
     )
@@ -747,7 +800,6 @@ def test_update_states_request_resumed(model_runner, dist_init):
         total_num_scheduled_tokens=0,
         scheduled_spec_decode_tokens={},
         scheduled_encoder_inputs={},
-        num_common_prefix_blocks=[],
         finished_req_ids=set(),
         free_encoder_mm_hashes=[],
     )
@@ -774,7 +826,6 @@ def test_update_states_request_resumed(model_runner, dist_init):
         total_num_scheduled_tokens=1,
         scheduled_spec_decode_tokens={},
         scheduled_encoder_inputs={},
-        num_common_prefix_blocks=[],
         finished_req_ids=set(),
         free_encoder_mm_hashes=[],
     )
@@ -866,7 +917,6 @@ def test_update_states_no_changes(model_runner, dist_init):
         total_num_scheduled_tokens=1,
         scheduled_spec_decode_tokens={},
         scheduled_encoder_inputs={},
-        num_common_prefix_blocks=[],
         finished_req_ids=set(),
         free_encoder_mm_hashes=[],
     )
@@ -901,7 +951,6 @@ def test_update_states_request_unscheduled(model_runner, dist_init):
         total_num_scheduled_tokens=1,
         scheduled_spec_decode_tokens={},
         scheduled_encoder_inputs={},
-        num_common_prefix_blocks=[],
         finished_req_ids=set(),
         free_encoder_mm_hashes=[],
     )
@@ -1045,13 +1094,22 @@ def test_update_states_pp_async_multi_request_keeps_rank_state_consistent(
         )
 
 
+def _update_config(model_runner: GPUModelRunner, overrides: dict) -> None:
+    # Apply overrides via the worker without constructing a full worker.
+    worker = object.__new__(Worker)
+    worker.vllm_config = model_runner.vllm_config
+    worker.model_runner = model_runner
+    worker.update_config(overrides)
+
+
 def test_update_config(model_runner):
     # Simple update
-    model_runner.update_config({"load_config": {"load_format": "dummy"}})
+    _update_config(model_runner, {"load_config": {"load_format": "dummy"}})
     assert model_runner.load_config.load_format == "dummy"
+    assert model_runner.vllm_config.load_config is model_runner.load_config
     # Raise error on non-existing config
     with pytest.raises(ValueError, match="do_not_exist_config"):
-        model_runner.update_config({"do_not_exist_config": "dummy"})
+        _update_config(model_runner, {"do_not_exist_config": "dummy"})
 
 
 def test_load_model_weights_inplace(dist_init, model_runner, model_runner_2):
@@ -1059,12 +1117,14 @@ def test_load_model_weights_inplace(dist_init, model_runner, model_runner_2):
     # model_runner_2 loads dummy weights first then load real weights inplace
     model_runner.load_model()
     original_load_format = model_runner_2.load_config.load_format
-    model_runner_2.update_config({"load_config": {"load_format": "dummy"}})
+    _update_config(model_runner_2, {"load_config": {"load_format": "dummy"}})
     model_runner_2.load_model()  # Initial model loading with dummy weights
     assert str(model_runner.get_model().state_dict()) != str(
         model_runner_2.get_model().state_dict()
     )
-    model_runner_2.update_config({"load_config": {"load_format": original_load_format}})
+    _update_config(
+        model_runner_2, {"load_config": {"load_format": original_load_format}}
+    )
     model_runner_2.reload_weights()  # Load real weights inplace
     assert str(model_runner.get_model().state_dict()) == str(
         model_runner_2.get_model().state_dict()
@@ -1083,26 +1143,34 @@ def test_reload_weights_path_replaces_object_storage_source(monkeypatch):
     # silently re-streams the original checkpoint.
     loader = Mock()
     loader.get_all_weights.return_value = iter(())
-    monkeypatch.setattr(gpu_model_runner_module, "get_model_loader", lambda _: loader)
-    monkeypatch.setattr(gpu_model_runner_module, "initialize_layerwise_reload", Mock())
-    monkeypatch.setattr(gpu_model_runner_module, "finalize_layerwise_reload", Mock())
+    monkeypatch.setattr(reload_inplace_module, "get_model_loader", lambda _: loader)
+    monkeypatch.setattr(reload_inplace_module, "initialize_layerwise_reload", Mock())
+    monkeypatch.setattr(reload_inplace_module, "finalize_layerwise_reload", Mock())
 
-    runner = Mock(lora_config=None)
-    runner.model_config = SimpleNamespace(
-        model="/tmp/pulled-config-files",
-        model_weights="s3://bucket/original",
-        revision="abc123",
-        quantization=None,
+    vllm_config = SimpleNamespace(
+        lora_config=None,
+        load_config=SimpleNamespace(load_format="runai_streamer"),
+        model_config=SimpleNamespace(
+            model="/tmp/pulled-config-files",
+            model_weights="s3://bucket/original",
+            revision="abc123",
+            quantization=None,
+        ),
     )
-    runner.get_model.return_value.named_parameters.return_value = []
-    runner.get_model.return_value.load_weights.return_value = None
+    model = Mock()
+    model.named_parameters.return_value = []
+    model.load_weights.return_value = None
 
-    GPUModelRunner.reload_weights(runner, weights_path="org/new-model")
-
-    loader.get_all_weights.assert_called_once_with(
-        runner.model_config, runner.get_model.return_value
+    reload_inplace_module.reload_weights(
+        vllm_config,
+        model,
+        weights_iterator=None,
+        weights_path="org/new-model",
+        is_checkpoint_format=True,
     )
-    cfg = runner.model_config
+
+    loader.get_all_weights.assert_called_once_with(vllm_config.model_config, model)
+    cfg = vllm_config.model_config
     assert (cfg.model, cfg.model_weights, cfg.revision) == ("org/new-model", "", None)
 
 
