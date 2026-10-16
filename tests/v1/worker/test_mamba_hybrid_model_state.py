@@ -479,26 +479,26 @@ def test_cpu_runner_selects_model_state(
     from vllm.v1.worker.cpu import model_runner as cpu_model_runner
     from vllm.v1.worker.gpu import model_runner as gpu_model_runner
 
-    runner = object.__new__(cpu_model_runner.CPUModelRunner)
-    runner.vllm_config = Mock()
-    runner.model = Mock()
+    triton_runner = object.__new__(cpu_model_runner.CPUModelRunner)
+    no_triton_runner = object.__new__(cpu_model_runner.NoTritonCPUModelRunner)
+    for runner in (triton_runner, no_triton_runner):
+        runner.vllm_config = Mock()
+        runner.model = Mock()
     monkeypatch.setattr(
         gpu_model_runner,
         "resolve_model_state_cls",
         lambda *_: model_state_cls,
     )
 
-    monkeypatch.setattr(cpu_model_runner, "HAS_TRITON", False)
-    assert runner.model_state_cls is cpu_model_state_cls
+    assert no_triton_runner.model_state_cls is cpu_model_state_cls
     if cpu_model_state_cls in (
         CPUDefaultModelState,
         CPUEncoderOnlyModelState,
         CPUMambaHybridModelState,
     ):
-        assert runner.model_state_cls.rope_state_cls is CPURopeState
+        assert no_triton_runner.model_state_cls.rope_state_cls is CPURopeState
 
-    monkeypatch.setattr(cpu_model_runner, "HAS_TRITON", True)
-    assert runner.model_state_cls is model_state_cls
+    assert triton_runner.model_state_cls is model_state_cls
 
 
 @pytest.mark.skipif(not current_platform.is_cpu(), reason="Requires CPU")
@@ -509,7 +509,7 @@ def test_cpu_runner_rejects_custom_model_state_without_triton(monkeypatch) -> No
     class CustomModelState(DefaultModelState):
         pass
 
-    runner = object.__new__(cpu_model_runner.CPUModelRunner)
+    runner = object.__new__(cpu_model_runner.NoTritonCPUModelRunner)
     runner.vllm_config = Mock()
     runner.model = Mock()
     monkeypatch.setattr(
@@ -517,8 +517,6 @@ def test_cpu_runner_rejects_custom_model_state_without_triton(monkeypatch) -> No
         "resolve_model_state_cls",
         lambda *_: CustomModelState,
     )
-    monkeypatch.setattr(cpu_model_runner, "HAS_TRITON", False)
-
     with pytest.raises(ValueError, match="CustomModelState"):
         _ = runner.model_state_cls
 

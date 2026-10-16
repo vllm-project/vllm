@@ -15,6 +15,7 @@ from vllm import envs
 from vllm.config import CompilationMode, VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
+from vllm.triton_utils import HAS_TRITON
 from vllm.utils.cpu_resource_utils import (
     get_allowed_cpu_list,
     get_memory_node_info,
@@ -169,8 +170,14 @@ class CPUWorker(Worker):
             from vllm.v1.worker.cpu.model_runner import (
                 CPUModelRunner as CPUModelRunnerV2,
             )
+            from vllm.v1.worker.cpu.model_runner import (
+                NoTritonCPUModelRunner as NoTritonCPUModelRunnerV2,
+            )
 
-            self.model_runner: CPUModelRunner = CPUModelRunnerV2(  # type: ignore
+            model_runner_cls = (
+                CPUModelRunnerV2 if HAS_TRITON else NoTritonCPUModelRunnerV2
+            )
+            self.model_runner: CPUModelRunner = model_runner_cls(  # type: ignore
                 self.vllm_config, self.device
             )
         else:

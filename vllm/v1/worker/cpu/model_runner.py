@@ -6,7 +6,6 @@ import torch
 
 import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.triton_utils import HAS_TRITON
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.watermarking.gpu_sampler import GPUWatermarkSampler
 from vllm.v1.worker.cpu.block_table import CPUBlockTables
@@ -44,6 +43,15 @@ logger = init_logger(__name__)
 
 
 class CPUModelRunner(GPUModelRunner):
+    # TBD: Whether need to move this to Worker?
+    def warming_up_model(self) -> None:
+        logger.info("Warming up model for the compilation...")
+        # Only generate graph for the generic shape
+        self.profile_run()
+        logger.info("Warming up done.")
+
+
+class NoTritonCPUModelRunner(CPUModelRunner):
     def prepare_inputs(
         self,
         scheduler_output: SchedulerOutput,
@@ -51,14 +59,6 @@ class CPUModelRunner(GPUModelRunner):
         batch_desc: BatchExecutionDescriptor,
         num_active_loras: int,
     ) -> InputBatch:
-        if HAS_TRITON:
-            return super().prepare_inputs(
-                scheduler_output,
-                batch_req_state,
-                batch_desc,
-                num_active_loras,
-            )
-
         num_tokens = batch_req_state.num_tokens
         req_ids = batch_req_state.req_ids
         num_reqs = len(req_ids)
@@ -182,15 +182,6 @@ class CPUModelRunner(GPUModelRunner):
         num_rejected: torch.Tensor,
         query_start_loc: torch.Tensor | None = None,
     ) -> None:
-        if HAS_TRITON:
-            return super().postprocess_sampled(
-                idx_mapping,
-                sampled_tokens,
-                num_sampled,
-                num_rejected,
-                query_start_loc,
-            )
-
         output_bin_counts = None
         if self.is_last_pp_rank:
             assert self.sampler is not None
@@ -214,9 +205,6 @@ class CPUModelRunner(GPUModelRunner):
         )
 
     def postprocess_num_computed_tokens(self, input_batch: InputBatch) -> None:
-        if HAS_TRITON:
-            return super().postprocess_num_computed_tokens(input_batch)
-
         post_update_num_computed_tokens(
             input_batch.idx_mapping,
             self.req_states.num_computed_tokens.gpu,
@@ -225,53 +213,40 @@ class CPUModelRunner(GPUModelRunner):
 
     @property
     def block_tables_cls(self) -> type[BlockTables]:
-        return super().block_tables_cls if HAS_TRITON else CPUBlockTables
+        return CPUBlockTables
 
     @property
     def sampler_cls(self) -> type[Sampler]:
-        return super().sampler_cls if HAS_TRITON else CPUSampler
+        return CPUSampler
 
     @property
     def prompt_logprobs_worker_cls(self) -> type[PromptLogprobsWorker]:
-        if HAS_TRITON:
-            return super().prompt_logprobs_worker_cls
         return CPUPromptLogprobsWorker
 
     @property
     def watermark_sampler_cls(self) -> type[GPUWatermarkSampler]:
-        return super().watermark_sampler_cls if HAS_TRITON else CPUWatermarkSampler
+        return CPUWatermarkSampler
 
     @property
     def model_state_cls(self) -> type[ModelState]:
         model_state_cls = super().model_state_cls
-        if not HAS_TRITON:
-            if model_state_cls is DefaultModelState:
-                return CPUDefaultModelState
-            if model_state_cls is MambaHybridModelState:
-                return CPUMambaHybridModelState
-            if model_state_cls is EncoderOnlyModelState:
-                return CPUEncoderOnlyModelState
-            if model_state_cls is EncoderDecoderModelState:
-                return model_state_cls
-            raise ValueError(
-                "CPU Model Runner V2 without Triton does not support model state "
-                f"{model_state_cls.__name__}."
-            )
-        return model_state_cls
+        if model_state_cls is DefaultModelState:
+            return CPUDefaultModelState
+        if model_state_cls is MambaHybridModelState:
+            return CPUMambaHybridModelState
+        if model_state_cls is EncoderOnlyModelState:
+            return CPUEncoderOnlyModelState
+        if model_state_cls is EncoderDecoderModelState:
+            return model_state_cls
+        raise ValueError(
+            "CPU Model Runner V2 without Triton does not support model state "
+            f"{model_state_cls.__name__}."
+        )
 
     @property
     def structured_outputs_worker_cls(self) -> type[StructuredOutputsWorker]:
-        if HAS_TRITON:
-            return super().structured_outputs_worker_cls
         return CPUStructuredOutputsWorker
 
     @property
     def kv_block_zeroer_cls(self) -> type[KVBlockZeroer]:
-        return super().kv_block_zeroer_cls if HAS_TRITON else CPUKVBlockZeroer
-
-    # TBD: Whether need to move this to Worker?
-    def warming_up_model(self) -> None:
-        logger.info("Warming up model for the compilation...")
-        # Only generate graph for the generic shape
-        self.profile_run()
-        logger.info("Warming up done.")
+        return CPUKVBlockZeroer

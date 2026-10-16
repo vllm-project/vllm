@@ -26,10 +26,8 @@ from vllm.v1.worker.gpu.model_runner import BatchReqState
 pytestmark = pytest.mark.skipif(not current_platform.is_cpu(), reason="CPU only")
 
 
-def test_cpu_model_runner_prepares_supported_input_batch(monkeypatch) -> None:
-    monkeypatch.setattr(cpu_model_runner, "HAS_TRITON", False)
-
-    runner = object.__new__(cpu_model_runner.CPUModelRunner)
+def test_cpu_model_runner_prepares_supported_input_batch() -> None:
+    runner = object.__new__(cpu_model_runner.NoTritonCPUModelRunner)
     runner.device = torch.device("cpu")
     runner.max_num_reqs = 4
     runner.input_buffers = InputBuffers(4, 8, runner.device)
@@ -276,9 +274,7 @@ def test_combine_sampled_and_draft_tokens_cpu_with_drafts() -> None:
     assert input_ids_storage[[0, 8]].tolist() == [99, 107]
 
 
-def test_cpu_model_runner_postprocesses_sampled_tokens(monkeypatch) -> None:
-    monkeypatch.setattr(cpu_model_runner, "HAS_TRITON", False)
-
+def test_cpu_model_runner_postprocesses_sampled_tokens() -> None:
     idx_mapping = torch.tensor([3, -1, 1, 4], dtype=torch.int64)
     num_computed_tokens = torch.tensor([10, 20, 30, 40, 50], dtype=torch.int32)
     last_sampled_storage = torch.full((5, 2), -1, dtype=torch.int64)
@@ -295,7 +291,7 @@ def test_cpu_model_runner_postprocesses_sampled_tokens(monkeypatch) -> None:
     all_token_ids = all_token_ids_storage[:, 1:9]
     total_len = torch.tensor([1, 3, 1, 2, 4], dtype=torch.int32)
 
-    runner = object.__new__(cpu_model_runner.CPUModelRunner)
+    runner = object.__new__(cpu_model_runner.NoTritonCPUModelRunner)
     runner.is_last_pp_rank = True
     runner.sampler = SimpleNamespace(
         penalties_state=SimpleNamespace(output_bin_counts=output_bin_counts)
@@ -356,11 +352,9 @@ def test_post_update_cpu_without_optional_inputs() -> None:
     assert all_token_ids[1].tolist() == [-1, -1, -1, 4, -1, -1]
 
 
-def test_cpu_model_runner_postprocesses_num_computed_tokens(monkeypatch) -> None:
-    monkeypatch.setattr(cpu_model_runner, "HAS_TRITON", False)
-
+def test_cpu_model_runner_postprocesses_num_computed_tokens() -> None:
     num_computed_tokens = torch.tensor([10, 20, 30, 40, 50], dtype=torch.int32)
-    runner = object.__new__(cpu_model_runner.CPUModelRunner)
+    runner = object.__new__(cpu_model_runner.NoTritonCPUModelRunner)
     runner.req_states = SimpleNamespace(
         num_computed_tokens=SimpleNamespace(gpu=num_computed_tokens)
     )
