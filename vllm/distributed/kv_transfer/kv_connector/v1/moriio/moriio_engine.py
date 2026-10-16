@@ -258,20 +258,22 @@ class MoRIIOWriter:
         # No remote allocation arrived, so the decode DP rank that owns the
         # request is unknown. Tell every rank; the others drop it.
         for decode_dp_rank in range(max(task.remote_dp_size, 1)):
-            remote_ip, remote_port = self._resolve_notify_endpoint(task, decode_dp_rank)
-            try:
-                self.worker.moriio_wrapper.send_notify(
-                    task.transfer_id,
-                    remote_ip,
-                    remote_port,
-                    message_type="write_failed",
-                )
-            except Exception:
-                logger.exception(
-                    "Failed to notify decode DP rank %d that transfer %s timed out",
-                    decode_dp_rank,
-                    task.transfer_id,
-                )
+            for remote_ip, remote_port in self._resolve_notify_endpoints(
+                task, decode_dp_rank
+            ):
+                try:
+                    self.worker.moriio_wrapper.send_notify(
+                        task.transfer_id,
+                        remote_ip,
+                        remote_port,
+                        message_type="write_failed",
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed to notify decode DP rank %d that transfer %s timed out",
+                        decode_dp_rank,
+                        task.transfer_id,
+                    )
 
     def _clear_transfer_state(self, transfer_id: TransferId) -> None:
         with self._write_state_lock:
@@ -338,12 +340,18 @@ class MoRIIOWriter:
         request_info = self._get_remote_alloc_info(task.transfer_id)
         with self._write_state_lock:
             request_info.completion_request_id = task.request_id
-            # Resolve the final notify endpoint under the lock so finalize only
-            # reads it.
-            (
-                request_info.completion_remote_ip,
-                request_info.completion_notify_port,
-            ) = self._resolve_notify_endpoint(task, request_info.decode_dp_rank)
+            notify_targets = self._resolve_notify_endpoints(
+                task, request_info.decode_dp_rank
+            )
+            if task.target_tp_ranks:
+                request_info.completion_notify_targets.update(notify_targets)
+            else:
+                # Resolve the final notify endpoint under the lock so finalize
+                # only reads it.
+                (
+                    request_info.completion_remote_ip,
+                    request_info.completion_notify_port,
+                ) = notify_targets[0]
             if task.transfer_id in self._sealed_writes:
                 request_info.writes_expected = self._sealed_writes[task.transfer_id]
 
@@ -362,21 +370,35 @@ class MoRIIOWriter:
         # This event is used to synchronize the kv transfer and computation tasks.
         task.event.synchronize()
 
-        # Update engine ID with DP rank
-        task.dst_engine_id = self.worker.get_engine_name_with_dp(
-            task.dst_engine_id, request_info.decode_dp_rank
-        )
-
-        # Get or create sessions
-        sessions, remote_moriio_meta = self.worker._get_built_session(
-            task.dst_engine_id
-        )
-
-        # Prepare transfer plan
-        plan = self._prepare_transfer_plan(task, request_info, remote_moriio_meta)
-
-        # Execute transfer
-        transfer_statuses = self._do_layer_write(plan, sessions)
+        transfer_statuses: list[Any] = []
+        if task.target_tp_ranks:
+            plan = None
+            for target_tp_rank in task.target_tp_ranks:
+                target_engine_id = self.worker.get_engine_name_with_dp_tp(
+                    task.dst_engine_id,
+                    request_info.decode_dp_rank,
+                    target_tp_rank,
+                )
+                sessions, remote_moriio_meta = self.worker._get_built_session(
+                    target_engine_id
+                )
+                if plan is None:
+                    plan = self._prepare_transfer_plan(
+                        task,
+                        request_info,
+                        remote_moriio_meta,
+                        remote_engine_id=target_engine_id,
+                    )
+                transfer_statuses.extend(self._do_layer_write(plan, sessions))
+        else:
+            task.dst_engine_id = self.worker.get_engine_name_with_dp(
+                task.dst_engine_id, request_info.decode_dp_rank
+            )
+            sessions, remote_moriio_meta = self.worker._get_built_session(
+                task.dst_engine_id
+            )
+            plan = self._prepare_transfer_plan(task, request_info, remote_moriio_meta)
+            transfer_statuses = self._do_layer_write(plan, sessions)
         with self._write_state_lock:
             request_info.transfer_statuses.extend(transfer_statuses)
 
@@ -388,6 +410,7 @@ class MoRIIOWriter:
         task: WriteTask,
         request_info: RemoteAllocInfo,
         remote_moriio_meta: MoRIIOAgentMetadata,
+        remote_engine_id: str | None = None,
     ) -> LayerTransferPlan:
         """Prepare the transfer plan for a layer.
 
@@ -395,12 +418,15 @@ class MoRIIOWriter:
             task: The write task
             request_info: Remote allocation information
             remote_moriio_meta: Metadata of the remote MoRIIO agent
+            remote_engine_id: Destination engine ID used to resolve remote offsets
 
         Returns:
             The transfer plan
 
         """
         layer_cache = self.worker.kv_caches[task.layer_name]
+        if remote_engine_id is None:
+            remote_engine_id = task.dst_engine_id
         key = (task.layer_name, *_get_write_geometry_key(layer_cache))
         offsets = request_info.transfer_offsets.get(key)
         if offsets is None:
@@ -409,7 +435,7 @@ class MoRIIOWriter:
                 task.local_block_ids,
                 request_info.block_ids,
                 remote_moriio_meta,
-                remote_engine_id=task.dst_engine_id,
+                remote_engine_id=remote_engine_id,
             )
             request_info.transfer_offsets[key] = offsets
 
@@ -479,9 +505,13 @@ class MoRIIOWriter:
             if request_info.completion_notified:
                 return
             request_id = request_info.completion_request_id
-            remote_port = request_info.completion_notify_port
-            remote_ip = request_info.completion_remote_ip
-            if request_id is None or remote_port is None or remote_ip is None:
+            notify_targets = sorted(request_info.completion_notify_targets)
+            if not notify_targets:
+                remote_port = request_info.completion_notify_port
+                remote_ip = request_info.completion_remote_ip
+                if remote_port is not None and remote_ip is not None:
+                    notify_targets = [(remote_ip, remote_port)]
+            if request_id is None or not notify_targets:
                 return
             transfer_statuses = list(request_info.transfer_statuses)
             request_info.transfer_statuses.clear()
@@ -495,9 +525,10 @@ class MoRIIOWriter:
         # Consider including the first gen token from prefill in the notification
 
         # Send completion notification
-        self.worker.moriio_wrapper.send_notify(
-            transfer_id, remote_ip, remote_port, message_type="write_done"
-        )
+        for remote_ip, remote_port in notify_targets:
+            self.worker.moriio_wrapper.send_notify(
+                transfer_id, remote_ip, remote_port, message_type="write_done"
+            )
         # mark request as done, then we can free the blocks
         with self.worker.moriio_wrapper.lock:
             self.worker.moriio_wrapper.done_req_ids.append(
@@ -509,14 +540,18 @@ class MoRIIOWriter:
             self.worker.moriio_wrapper._mark_transfer_terminal_locked(transfer_id)
         self._clear_transfer_state(transfer_id)
         logger.debug(
-            "Completed transfer for (request, transfer) %s, %s, notified port %d",
+            "Completed transfer for (request, transfer) %s, %s, notified %s",
             request_id,
             transfer_id,
-            remote_port,
+            notify_targets,
         )
 
     def _resolve_notify_endpoint(
-        self, task: WriteTask, decode_dp_rank: int
+        self,
+        task: WriteTask,
+        decode_dp_rank: int,
+        tp_rank: int | None = None,
+        tp_size: int = 1,
     ) -> tuple[str, int]:
         # Wide-EP multi-pod: task.remote_ip addresses only the first pod, so
         # resolve the per-rank host from multi_pod_hosts (falls back to
@@ -530,10 +565,27 @@ class MoRIIOWriter:
             remote_pod = pod_index(decode_dp_rank, dp_local)
             if 0 <= remote_pod < len(task.multi_pod_hosts):
                 remote_ip = task.multi_pod_hosts[remote_pod]
+        if tp_rank is None:
+            tp_rank = self.worker.tp_rank
         remote_port = task.remote_notify_port + get_port_offset(
-            fold_local_rank(decode_dp_rank, dp_local), self.worker.tp_rank
+            fold_local_rank(decode_dp_rank, dp_local), tp_rank, tp_size
         )
         return remote_ip, remote_port
+
+    def _resolve_notify_endpoints(
+        self, task: WriteTask, decode_dp_rank: int
+    ) -> list[tuple[str, int]]:
+        if not task.target_tp_ranks:
+            return [self._resolve_notify_endpoint(task, decode_dp_rank)]
+        return [
+            self._resolve_notify_endpoint(
+                task,
+                decode_dp_rank,
+                target_tp_rank,
+                task.remote_tp_size,
+            )
+            for target_tp_rank in task.target_tp_ranks
+        ]
 
 
 class MoRIIOWrapper:
