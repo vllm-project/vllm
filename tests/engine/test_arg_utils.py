@@ -1086,9 +1086,7 @@ class TestDpDeviceIdSharding:
         assert by_rank == {0: [0], 1: [1]}
 
         for rank in (0, 1):
-            set_cpu_visible_memory_nodes_env_var_for_dp_rank(
-                vllm_config, by_rank[rank]
-            )
+            set_cpu_visible_memory_nodes_env_var_for_dp_rank(vllm_config, by_rank[rank])
             assert os.environ[current_platform.device_control_env_var] == str(rank)
             assert vllm_config.parallel_config.assigned_physical_gpu_ids == [rank]
 
