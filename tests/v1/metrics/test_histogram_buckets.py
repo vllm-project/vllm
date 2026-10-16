@@ -341,9 +341,12 @@ def test_watermark_requests_counter_registration(with_config: bool):
         unregister_vllm_metrics()
 
 
-def test_request_counts_and_latencies_by_api_surface():
-    """Mixed APIs and engines stay separate; unsupported APIs share unknown."""
-    config = build_logger_config(ObservabilityConfig())
+@pytest.mark.parametrize("enabled", [False, True])
+def test_request_counts_and_latencies_by_api_surface(enabled):
+    """Mixed APIs aggregate by default and stay separate only when opted in."""
+    config = build_logger_config(
+        ObservabilityConfig(enable_api_surface_metrics=enabled)
+    )
     api_surfaces = ("messages", "chat_completions", "completions", "unknown")
     latency_factors = {
         "time_to_first_token_seconds": 1,
@@ -355,8 +358,8 @@ def test_request_counts_and_latencies_by_api_surface():
         "request_decode_time_seconds": 7,
         "request_time_per_output_token_seconds": 8,
     }
-    expected: dict[tuple[int, str], list[float]] = {}
-    expected_counts: dict[tuple[int, str, str], int] = {}
+    expected: dict[tuple[int, str | None], list[float]] = {}
+    expected_counts: dict[tuple[int, str | None, str], int] = {}
     try:
         logger = PrometheusStatLogger(config, engine_indexes=[0, 1])
         for engine_idx in (0, 1):
@@ -365,8 +368,9 @@ def test_request_counts_and_latencies_by_api_surface():
                 value = (engine_idx + 1) * (index + 1) / 10
                 reason = list(FinishReason)[index]
                 normalized = api_surface if api_surface in api_surfaces else "unknown"
-                expected.setdefault((engine_idx, normalized), []).append(value)
-                expected_counts[engine_idx, normalized, str(reason)] = 1
+                label = normalized if enabled else None
+                expected.setdefault((engine_idx, label), []).append(value)
+                expected_counts[engine_idx, label, str(reason)] = 1
                 stats.time_to_first_tokens_iter.append((api_surface, value))
                 stats.inter_token_latencies_iter.append((api_surface, 2 * value))
                 stats.finished_requests.append(
@@ -388,8 +392,9 @@ def test_request_counts_and_latencies_by_api_surface():
             labels = {
                 "model_name": config.model_config.served_model_name,
                 "engine": str(engine_idx),
-                "api_surface": api_surface,
             }
+            if api_surface is not None:
+                labels["api_surface"] = api_surface
             for metric_name, factor in latency_factors.items():
                 assert registry.get_sample_value(
                     f"vllm:{metric_name}_count", labels
@@ -408,16 +413,34 @@ def test_request_counts_and_latencies_by_api_surface():
             for metric in registry.collect()
             for sample in metric.samples
             if "api_surface" in sample.labels
-        } == set(api_surfaces)
+        } == (set(api_surfaces) if enabled else set())
+        for metric in registry.collect():
+            if metric.name in {"vllm:request_success"} | {
+                f"vllm:{name}" for name in latency_factors
+            }:
+                for sample in metric.samples:
+                    assert set(sample.labels) == (
+                        {"model_name", "engine"}
+                        | ({"api_surface"} if enabled else set())
+                        | (
+                            {"finished_reason"}
+                            if metric.name == "vllm:request_success"
+                            else set()
+                        )
+                        | ({"le"} if sample.name.endswith("_bucket") else set())
+                    )
     finally:
         unregister_vllm_metrics()
 
 
-def test_token_metrics_by_api_surface():
+@pytest.mark.parametrize("enabled", [False, True])
+def test_token_metrics_by_api_surface(enabled):
     """Tokens are attributed during generation, with no cache or decode recount."""
-    config = build_logger_config(ObservabilityConfig())
+    config = build_logger_config(
+        ObservabilityConfig(enable_api_surface_metrics=enabled)
+    )
     api_surfaces = ("messages", "chat_completions", "completions", "unknown")
-    expected: dict[tuple[int, str], list[int]] = {}
+    expected: dict[tuple[int, str | None], list[int]] = {}
     registry = prometheus_client.REGISTRY
     try:
         logger = PrometheusStatLogger(config, engine_indexes=[0, 1])
@@ -426,7 +449,8 @@ def test_token_metrics_by_api_surface():
             for index, api_surface in enumerate((*api_surfaces, "unsupported")):
                 value = (engine_idx + 1) * (index + 1)
                 normalized = api_surface if api_surface in api_surfaces else "unknown"
-                expected.setdefault((engine_idx, normalized), []).append(value)
+                label = normalized if enabled else None
+                expected.setdefault((engine_idx, label), []).append(value)
                 req_stats = RequestStateStats(api_surface=api_surface)
                 prefill_stats = PrefillStats()
                 prefill_stats.set(10 * value, 2 * value, 3 * value)
@@ -456,25 +480,25 @@ def test_token_metrics_by_api_surface():
                 )
 
             logger.record(None, prefill, engine_idx=engine_idx)
-            assert (
-                registry.get_sample_value(
-                    "vllm:generation_tokens_total",
-                    {
-                        "model_name": config.model_config.served_model_name,
-                        "engine": str(engine_idx),
-                        "api_surface": "messages",
-                    },
-                )
-                == engine_idx + 1
-            )
+            labels = {
+                "model_name": config.model_config.served_model_name,
+                "engine": str(engine_idx),
+            }
+            if enabled:
+                labels["api_surface"] = "messages"
+            assert registry.get_sample_value(
+                "vllm:generation_tokens_total",
+                labels,
+            ) == sum(expected[engine_idx, "messages" if enabled else None])
             logger.record(None, decode, engine_idx=engine_idx)
 
         for (engine_idx, api_surface), values in expected.items():
             labels = {
                 "model_name": config.model_config.served_model_name,
                 "engine": str(engine_idx),
-                "api_surface": api_surface,
             }
+            if api_surface is not None:
+                labels["api_surface"] = api_surface
             for metric_name, factor in (
                 ("prompt_tokens", 10),
                 ("generation_tokens", 3),
@@ -502,5 +526,11 @@ def test_token_metrics_by_api_surface():
                 assert registry.get_sample_value(
                     f"vllm:{metric_name}_sum", labels
                 ) == factor * sum(values)
+        if not enabled:
+            assert all(
+                "api_surface" not in sample.labels
+                for metric in registry.collect()
+                for sample in metric.samples
+            )
     finally:
         unregister_vllm_metrics()

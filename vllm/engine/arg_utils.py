@@ -734,6 +734,7 @@ class EngineArgs:
         ObservabilityConfig.show_hidden_metrics_for_version
     )
     otlp_traces_endpoint: str | None = ObservabilityConfig.otlp_traces_endpoint
+    enable_api_surface_metrics: bool = ObservabilityConfig.enable_api_surface_metrics
     collect_detailed_traces: list[DetailedTraceModules] | None = (
         ObservabilityConfig.collect_detailed_traces
     )
@@ -1681,6 +1682,10 @@ class EngineArgs:
             "--otlp-traces-endpoint", **observability_kwargs["otlp_traces_endpoint"]
         )
         observability_group.add_argument(
+            "--enable-api-surface-metrics",
+            **observability_kwargs["enable_api_surface_metrics"],
+        )
+        observability_group.add_argument(
             "--collect-detailed-traces",
             **observability_kwargs["collect_detailed_traces"],
         )
@@ -2212,6 +2217,7 @@ class EngineArgs:
         return ObservabilityConfig(
             show_hidden_metrics_for_version=self.show_hidden_metrics_for_version,
             otlp_traces_endpoint=self.otlp_traces_endpoint,
+            enable_api_surface_metrics=self.enable_api_surface_metrics,
             collect_detailed_traces=self.collect_detailed_traces,
             per_request_spec_decode_metrics=self.per_request_spec_decode_metrics,
             kv_cache_metrics=self.kv_cache_metrics,

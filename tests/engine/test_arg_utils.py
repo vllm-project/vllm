@@ -346,6 +346,18 @@ def test_jit_monitor_verbose_arg():
     assert EngineArgs(model="test", jit_monitor_verbose=True).jit_monitor_verbose
 
 
+@pytest.mark.parametrize(
+    "cli_args, expected",
+    [([], False), (["--enable-api-surface-metrics"], True)],
+)
+def test_api_surface_metrics_cli_opt_in(cli_args, expected):
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = parser.parse_args(cli_args)
+    config = EngineArgs.from_cli_args(args).create_observability_config()
+
+    assert config.enable_api_surface_metrics is expected
+
+
 @pytest.mark.parametrize("mode", ["warn", "error"])
 def test_jit_monitor_mode_arg(mode):
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())

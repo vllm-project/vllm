@@ -55,11 +55,12 @@ def default_server_args():
     ],
 )
 def server(model_key, default_server_args, request):
+    server_args = list(default_server_args)
     if request.param:
-        default_server_args.append(request.param)
+        server_args.append(request.param)
 
     model_name = MODELS[model_key]
-    with RemoteOpenAIServer(model_name, default_server_args) as remote_server:
+    with RemoteOpenAIServer(model_name, server_args) as remote_server:
         yield remote_server
 
 
@@ -223,19 +224,34 @@ async def test_metrics_counts(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "server, enable_api_surface_metrics",
+    [("", False), ("--enable-api-surface-metrics", True)],
+    indirect=["server"],
+    scope="module",
+)
 @pytest.mark.parametrize("api_surface", ["messages", "chat_completions", "completions"])
 @pytest.mark.parametrize("stream", [False, True])
 async def test_metrics_counts_by_api_surface(
-    server, client, model_key, api_surface, stream
+    server, client, model_key, api_surface, stream, enable_api_surface_metrics
 ):
-    """Native JSON/SSE requests update only their originating API's engine metrics."""
+    """Native JSON/SSE requests aggregate by default and split metrics on opt-in."""
     if model_key == "multimodal":
         pytest.skip("Covered by the text model")
 
     response = requests.get(server.url_for("metrics"))
     response.raise_for_status()
+    if not enable_api_surface_metrics:
+        assert all(
+            "api_surface" not in sample.labels
+            for family in text_string_to_metric_families(response.text)
+            for sample in family.samples
+        )
     surfaces = ("messages", "chat_completions", "completions", "unknown")
-    before = {surface: _metric_totals(response.text, surface) for surface in surfaces}
+    before = _metric_totals(response.text)
+    before_by_api = {
+        surface: _metric_totals(response.text, surface) for surface in surfaces
+    }
     kwargs = {"model": MODELS[model_key], "max_tokens": 4, "stream": stream}
     messages = [{"role": "user", "content": _PROMPT}]
     if api_surface == "messages":
@@ -260,11 +276,22 @@ async def test_metrics_counts_by_api_surface(
 
     response = requests.get(server.url_for("metrics"))
     response.raise_for_status()
-    after = {surface: _metric_totals(response.text, surface) for surface in surfaces}
-    delta = {
-        name: value - before[api_surface].get(name, 0)
-        for name, value in after[api_surface].items()
+    after = _metric_totals(response.text)
+    after_by_api = {
+        surface: _metric_totals(response.text, surface) for surface in surfaces
     }
+    if enable_api_surface_metrics:
+        for surface in surfaces:
+            if surface != api_surface:
+                assert after_by_api[surface] == before_by_api[surface], surface
+        before, after = before_by_api[api_surface], after_by_api[api_surface]
+    else:
+        assert all(
+            "api_surface" not in sample.labels
+            for family in text_string_to_metric_families(response.text)
+            for sample in family.samples
+        )
+    delta = {name: value - before.get(name, 0) for name, value in after.items()}
     assert delta["vllm:request_success_total"] == 1
     for metric in (
         "time_to_first_token_seconds",
@@ -290,9 +317,6 @@ async def test_metrics_counts_by_api_surface(
     assert delta["vllm:request_prefill_kv_computed_tokens_sum"] == (
         prompt_tokens - delta["vllm:prompt_tokens_cached_total"]
     )
-    for surface in surfaces:
-        if surface != api_surface:
-            assert after[surface] == before[surface], surface
 
 
 EXPECTED_METRICS_V1 = [
