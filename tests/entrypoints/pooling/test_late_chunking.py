@@ -30,6 +30,7 @@ from vllm.entrypoints.pooling.typing import (
 )
 from vllm.exceptions import GenerationError, VLLMValidationError
 from vllm.outputs import (
+    EmbeddingRequestOutput,
     LateChunk,
     PoolingOutput,
     PoolingRequestOutput,
@@ -198,6 +199,8 @@ def test_late_chunk_ranges_reject_missing_or_invalid_offsets(offsets):
 
 def _mock_chunk_llm(processor, outputs):
     llm = mock.Mock(spec=PoolingOfflineMixin)
+    llm.pooling_task = "token_embed"
+    llm.embed = PoolingOfflineMixin.embed.__get__(llm)
     llm.encode = PoolingOfflineMixin.encode.__get__(llm)
     llm._run_tiling_engine = PoolingOfflineMixin._run_tiling_engine.__get__(llm)
     llm.pooling_io_processors = {"token_embed": processor}
@@ -253,9 +256,7 @@ def test_late_chunk_mapping_preserves_order_mixed_requests_and_errors(
             _chunk_output(0),
         ]
     ]
-    outputs = llm.encode(
-        ["a b"] * 4, pooling_task="token_embed", pooling_params=params, use_tqdm=False
-    )
+    outputs = llm.embed(["a b"] * 4, pooling_params=params, use_tqdm=False)
     assert outputs[0].late_chunking.chunks == [
         LateChunk((0, 2), (0, 1)),
         LateChunk((2, 4), (2, 3)),
@@ -327,7 +328,9 @@ def test_plain_token_embed_skips_chunk_metadata(late_chunk_processor):
 def _online_chunk_context(texts, chunk_size=2):
     request = TokenEmbeddingRequest(
         input=texts,
-        late_chunking_params={"chunk_size": chunk_size},
+        late_chunking_params=(
+            {"chunk_size": chunk_size} if chunk_size is not None else None
+        ),
     )
     return PoolingServeContext(
         request=request,
@@ -338,6 +341,50 @@ def _online_chunk_context(texts, chunk_size=2):
         priorities=0,
         prompt_extras=None,
     )
+
+
+@pytest.mark.parametrize("task", ["embed", "token_embed"])
+def test_embed_preserves_output_types(task):
+    llm = mock.Mock(spec=PoolingOfflineMixin)
+    llm.pooling_task = task
+    output = _chunk_output(0)
+    if task == "embed":
+        output.outputs.data = output.outputs.data[0]
+    llm.encode.return_value = [output]
+
+    result = PoolingOfflineMixin.embed(llm, "text")[0]
+    assert llm.encode.call_args.kwargs["pooling_task"] == task
+    if task == "token_embed":
+        assert result is output
+    else:
+        assert isinstance(result, EmbeddingRequestOutput)
+        assert result.outputs.embedding == output.outputs.data.tolist()
+
+
+@pytest.mark.parametrize(
+    "runner, task, supported_tasks, error",
+    [
+        ("pooling", "classify", ("classify",), "--convert embed"),
+        (
+            "pooling",
+            "classify",
+            ("classify", "embed"),
+            r'PoolerConfig\(task="embed"\)',
+        ),
+        ("generate", None, ("generate",), "--runner pooling"),
+    ],
+)
+def test_embed_preserves_task_validation(runner, task, supported_tasks, error):
+    llm = mock.Mock(spec=PoolingOfflineMixin)
+    llm.runner_type = runner
+    llm.pooling_task = task
+    llm.supported_tasks = supported_tasks
+    llm.encode = PoolingOfflineMixin.encode.__get__(llm)
+    llm._verify_pooling_task = PoolingOfflineMixin._verify_pooling_task.__get__(llm)
+
+    with pytest.raises(ValueError, match=error):
+        PoolingOfflineMixin.embed(llm, "text", use_tqdm=False)
+    llm._run_tiling_engine.assert_not_called()
 
 
 @pytest.mark.parametrize("response_cls", [JSONResponse, ORJSONResponse])

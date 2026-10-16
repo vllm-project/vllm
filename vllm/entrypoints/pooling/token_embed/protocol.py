@@ -32,30 +32,25 @@ class TokenEmbeddingRequest(
     EmbedRequestMixin,
     FixedMaxLenTokenizeParamsMixin,
 ):
-    """Full-document late chunking on a token embedding server."""
+    """Token embeddings with optional full-document late chunking."""
 
-    input: str | list[str]
-    late_chunking_params: LateChunkingConfig
+    late_chunking_params: LateChunkingConfig | None = None
     encoding_format: Literal["float"] = "float"
     dimensions: None = None
 
     @model_validator(mode="before")
     @classmethod
-    def check_late_chunking(cls, data):
-        data = reject_removed_pooling_parameters(data)
-        if isinstance(data, dict) and data.get("late_chunking_params") is None:
-            raise ValueError(
-                "late_chunking_params is required here; use /pooling with "
-                "task='token_embed' for token embeddings."
-            )
-        return data
+    def check_removed_parameters(cls, data):
+        return reject_removed_pooling_parameters(data)
 
     def to_pooling_params(self):
         return PoolingParams(
             task="token_embed",
             use_activation=self.use_activation,
-            late_chunking_params=LateChunkingParams(
-                chunk_size=self.late_chunking_params.chunk_size
+            late_chunking_params=(
+                LateChunkingParams(chunk_size=self.late_chunking_params.chunk_size)
+                if self.late_chunking_params is not None
+                else None
             ),
         )
 
@@ -64,11 +59,11 @@ class TokenEmbeddingResponseData(OpenAIBaseModel):
     index: int
     object: str = "embedding"
     embedding: list[list[float]]
-    late_chunking: LateChunkingMetadata
+    late_chunking: LateChunkingMetadata | None = None
 
 
 class TokenEmbeddingResponse(OpenAIBaseModel):
-    """vLLM extension returning one matrix of chunk vectors per document."""
+    """vLLM extension returning one matrix of token or chunk vectors per input."""
 
     id: str = Field(default_factory=lambda: f"embd-{random_uuid()}")
     object: str = "list"

@@ -134,12 +134,9 @@ def test_embedding_route_validates_the_configured_task(task):
 
         assert client.post("/v2/embed", json={"texts": ["text"]}).status_code == 404
         bad_requests: list[dict[str, object]] = [
-            {},
-            {"late_chunking_params": None},
             {"late_chunking_params": {}},
             {"late_chunking_params": {"chunk_size": 2, "metadata": {}}},
             {"encoding_format": "base64"},
-            {"input": [1, 2]},
             {"dimensions": 128},
         ]
         bad_requests.extend(
@@ -153,6 +150,17 @@ def test_embedding_route_validates_the_configured_task(task):
             response = client.post("/v1/embeddings", json=body)
             assert response.status_code == 400, response.text
         assert not received
+
+        for body in (
+            {"input": "text"},
+            {"input": ["text", "another text"], "late_chunking_params": None},
+            {"input": [1, 2]},
+        ):
+            response = client.post("/v1/embeddings", json=body)
+            assert response.json() == {"task": "token_embed"}
+            params = received[-1].to_pooling_params()
+            assert params.task == "token_embed"
+            assert params.late_chunking_params is None
 
         for chunk_size in (1, 1024, 2**63 - 1):
             response = client.post(

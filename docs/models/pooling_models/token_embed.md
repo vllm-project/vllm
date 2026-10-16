@@ -5,10 +5,11 @@
 - Model Usage: Token classification models
 - Pooling Tasks: `token_embed`
 - Offline APIs:
+    - `LLM.embed(...)` with the `token_embed` pooling task
     - `LLM.encode(..., pooling_task="token_embed")`
 - Online APIs:
     - Pooling API (`/pooling`)
-    - Embedding API (`/v1/embeddings`) for [late chunking](#online-late-chunking)
+    - Embedding API (`/v1/embeddings`), with optional [late chunking](#online-late-chunking)
 
 The difference between the (sequence) embedding task and the token embedding task is that (sequence) embedding outputs one embedding for each sequence, while token embedding outputs an embedding for each token.
 
@@ -94,35 +95,34 @@ The following [pooling parameters][vllm.PoolingParams] are supported.
 --8<-- "vllm/pooling_params.py:token-embed-pooling-params"
 ```
 
-### `LLM.encode`
+### `LLM.embed`
 
-The [encode][vllm.entrypoints.pooling.offline.PoolingOfflineMixin.encode] method is available to all pooling models in vLLM.
-
-Set `pooling_task="token_embed"` when using `LLM.encode` for token embedding Models:
+The [embed][vllm.entrypoints.pooling.offline.PoolingOfflineMixin.embed] method uses the model's configured pooling task. For `token_embed`, it returns a `PoolingRequestOutput` per input, with a token-vector matrix in `outputs.data`. Ordinary `embed` models keep returning `EmbeddingRequestOutput` with one vector in `outputs.embedding`.
 
 ```python
 from vllm import LLM
 
 llm = LLM(model="answerdotai/answerai-colbert-small-v1", runner="pooling")
-(output,) = llm.encode("Hello, my name is", pooling_task="token_embed")
+(output,) = llm.embed("Hello, my name is")
 
 data = output.outputs.data
 print(f"Data: {data!r}")
 ```
 
+The lower-level [encode][vllm.entrypoints.pooling.offline.PoolingOfflineMixin.encode] API remains available with `pooling_task="token_embed"` and returns the same token embedding output.
+
 ### Fixed-length late chunking
 
 Late chunking encodes the full input before averaging contextual token representations within each chunk. The chunk means pass through the model's embedding head, including its projection and optional normalization.
 
-With an instance configured for `token_embed`, enable late chunking per request through the offline `LLM.encode` API for plain-text input:
+With an instance configured for `token_embed`, enable late chunking per request through `LLM.embed` for plain-text input:
 
 ```python
 from vllm import PoolingParams
 from vllm.pooling_params import LateChunkingParams
 
-outputs = llm.encode(
+outputs = llm.embed(
     [document],
-    pooling_task="token_embed",
     pooling_params=PoolingParams(
         late_chunking_params=LateChunkingParams(chunk_size=256)
     ),
@@ -164,7 +164,7 @@ print(f"Score: {score}")
 
 ## Online Serving
 
-Please refer to the [Pooling API](README.md#pooling-api) and use `"task":"token_embed"`.
+On a server configured for `token_embed`, `/v1/embeddings` returns token vectors by default and chunk vectors when `late_chunking_params` is provided. The [Pooling API](README.md#pooling-api) also remains available for token vectors with `"task":"token_embed"`.
 
 ### Online late chunking
 
@@ -201,7 +201,7 @@ Ranges have the same semantics as the offline API. JSON represents them as two-e
 
 Use a string or a nonempty list of strings as `input`. A batch shares one chunk size, returns one item per document in input order, and counts input tokens once in `usage`. Values of `chunk_size` larger than the input token count produce one chunk.
 
-This endpoint requires `late_chunking_params` on a `token_embed` server. Missing or null parameters return an error; use `/pooling` with `task="token_embed"` for ordinary token vectors. Only `encoding_format="float"` is supported. Token IDs, chat messages, input truncation, padding, and `dimensions` are unsupported.
+Omit `late_chunking_params` or set it to `null` to return ordinary token vectors through the same endpoint. Each item then contains a token-vector matrix in `embedding` and omits `late_chunking`. This mode also accepts token IDs. With late chunking enabled, input must be plain text and must not request truncation or padding, because source ranges refer to the complete submitted text. Only `encoding_format="float"` is supported; chat messages and `dimensions` are unsupported by this endpoint.
 
 The matrix-valued `embedding` and `late_chunking` fields are a vLLM extension, not the standard OpenAI embedding response. Use an HTTP client that handles this format. Ordinary `embed` servers keep their existing response format; they do not enable late chunking and may ignore an unrecognized `late_chunking_params` field. Cohere `/v2/embed`, the batch API, and `/invocations` are not extended with late chunking.
 

@@ -6,12 +6,15 @@ from fastapi.responses import JSONResponse
 from ..base.serving import PoolingServing
 from ..factories import init_pooling_io_processors
 from ..typing import PoolingServeContext
-from ..utils import get_json_response_cls, get_pooling_usage
+from ..utils import (
+    get_json_response_cls,
+    get_pooling_usage,
+)
 from .protocol import TokenEmbeddingResponse, TokenEmbeddingResponseData
 
 
 class ServingTokenEmbedding(PoolingServing):
-    """Serve late chunking through /v1/embeddings on token embedding models."""
+    """Serve token embeddings and late chunking through /v1/embeddings."""
 
     request_id_prefix = "embd"
 
@@ -27,19 +30,20 @@ class ServingTokenEmbedding(PoolingServing):
     def _build_response(self, ctx: PoolingServeContext) -> JSONResponse:
         items = []
         for index, output in enumerate(ctx.final_res_batch):
-            assert output.late_chunking is not None
-            items.append(
-                TokenEmbeddingResponseData(
-                    index=index,
-                    embedding=output.outputs.data.tolist(),
-                    late_chunking=output.late_chunking,
-                )
+            item = TokenEmbeddingResponseData(
+                index=index,
+                embedding=output.outputs.data.tolist(),
+                late_chunking=output.late_chunking,
+            ).model_dump(
+                exclude={"late_chunking"} if output.late_chunking is None else None
             )
+            items.append(item)
         response = TokenEmbeddingResponse(
             id=ctx.request_id,
             created=ctx.created_time,
             model=ctx.model_name,
-            data=items,
+            data=[],
             usage=get_pooling_usage(ctx.final_res_batch),
-        )
-        return self.json_response_cls(content=response.model_dump())
+        ).model_dump()
+        response["data"] = items
+        return self.json_response_cls(content=response)

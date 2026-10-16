@@ -114,6 +114,28 @@ async def test_pooling_not_supported(
     assert response.json()["error"]["message"].startswith(err_msg)
 
 
+@pytest.mark.parametrize("inputs", [input_text, input_tokens, [input_text, "Short."]])
+def test_embeddings_without_chunking_match_pooling(server, inputs):
+    body = {"model": MODEL_NAME, "input": inputs, "use_activation": False}
+    expected = requests.post(
+        server.url_for("pooling"), json={**body, "task": "token_embed"}
+    )
+    expected.raise_for_status()
+    response = requests.post(server.url_for("v1/embeddings"), json=body)
+    response.raise_for_status()
+    result = response.json()
+    TokenEmbeddingResponse.model_validate(result)
+    reference = expected.json()
+    assert result["usage"] == reference["usage"]
+    assert len(result["data"]) == len(reference["data"])
+    for index, (actual, raw) in enumerate(zip(result["data"], reference["data"])):
+        assert actual["index"] == index
+        assert "late_chunking" not in actual
+        torch.testing.assert_close(
+            torch.tensor(actual["embedding"]), torch.tensor(raw["data"])
+        )
+
+
 @pytest.mark.parametrize("chunk_size, normalize", LATE_CHUNK_CASES)
 def test_late_chunking_vectors_and_source_ranges(server, chunk_size, normalize):
     texts = LATE_CHUNK_TEXTS
@@ -223,10 +245,7 @@ async def test_late_chunking_concurrent_requests_do_not_share_ranges(server):
             }
             if size:
                 body["late_chunking_params"] = {"chunk_size": size}
-            response = await client.post(
-                "/v1/embeddings" if size else "/pooling",
-                json=body,
-            )
+            response = await client.post("/v1/embeddings", json=body)
             response.raise_for_status()
             return response.json()["data"][0]
 
