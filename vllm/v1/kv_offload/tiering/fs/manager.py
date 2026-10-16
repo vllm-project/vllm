@@ -39,7 +39,10 @@ from vllm.v1.kv_offload.base import (
     ReqContext,
 )
 from vllm.v1.kv_offload.file_mapper import FileMapper
-from vllm.v1.kv_offload.tiering.async_lookup import AsyncLookupManager
+from vllm.v1.kv_offload.tiering.async_lookup import (
+    AsyncLookupManager,
+    LookupToken,
+)
 from vllm.v1.kv_offload.tiering.backpressure import BackpressureDetector
 from vllm.v1.kv_offload.tiering.base import (
     JobId,
@@ -154,7 +157,7 @@ class FileSystemTierManager(SecondaryTierManager):
         self._store_job_keys: dict[JobId, list[OffloadKey]] = {}
         # Keys of in-flight load (promotion) jobs, so a failed load can mark
         # its own cached lookup verdicts False (see get_finished_jobs).
-        self._load_job_keys: dict[JobId, list[OffloadKey]] = {}
+        self._load_job_keys: dict[JobId, list[LookupToken]] = {}
         # Block count per in-flight job, used to report transfer_bytes.
         self._job_block_counts: dict[JobId, int] = {}
         # Per load job: how many blocks loaded before a failure (partial keep).
@@ -241,7 +244,10 @@ class FileSystemTierManager(SecondaryTierManager):
         # Track this load's keys so a failed promotion can mark only its failed
         # keys as a miss (see get_finished_jobs).
         keys = list(job_metadata.keys)
-        self._load_job_keys[job_id] = keys
+        self._load_job_keys[job_id] = [
+            self._lookup_manager.lookup_token(key, job_metadata.req_context.req_id)
+            for key in keys
+        ]
         self._job_block_counts[job_id] = len(keys)
         paths = [self.file_mapper.get_file_name(key) for key in keys]
         offsets = [int(cid) * self._block_size for cid in job_metadata.chunk_ids]
@@ -308,7 +314,11 @@ class FileSystemTierManager(SecondaryTierManager):
                     JobResult(
                         job_id=job_id,
                         success=False,
-                        successful_keys=tuple(successful) if successful else None,
+                        successful_keys=(
+                            tuple(token.key for token in successful)
+                            if successful
+                            else None
+                        ),
                         transfer_time=transfer_time,
                         transfer_bytes=transfer_bytes,
                     )

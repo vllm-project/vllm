@@ -106,6 +106,7 @@ def make_job(
     keys: list[OffloadKey],
     chunk_ids: list[int] | None = None,
     is_promotion: bool = False,
+    req_context: ReqContext = _CTX,
 ) -> TransferJob:
     if chunk_ids is None:
         chunk_ids = list(range(len(keys)))
@@ -114,7 +115,7 @@ def make_job(
         keys=keys,
         chunk_ids=np.array(chunk_ids, dtype=np.int64),
         is_promotion=is_promotion,
-        req_context=_CTX,
+        req_context=req_context,
     )
 
 
@@ -309,6 +310,8 @@ def test_factory_forwards_locality_to_fs_tier(tmp_path):
 def test_failed_load_missing_file(fs_tier):
     """Test that loading a block whose file does not exist results in a failed job."""
     tier, _ = fs_tier
+    # A promotion's request always holds a resolved verdict for its keys.
+    lookup_and_wait(tier, [key(99)])
     job = make_job(1, [key(99)], [0], is_promotion=True)
     tier.submit_load(job)
     results = drain(tier)
@@ -339,6 +342,7 @@ def test_multi_block_job_partial_failure(fs_tier):
     assert all(r.success for r in drain(tier))
 
     # Load all three — key(99) was never stored
+    lookup_and_wait(tier, [key(10), key(11), key(99)])
     tier.submit_load(
         make_job(2, [key(10), key(11), key(99)], [0, 1, 2], is_promotion=True)
     )
@@ -396,6 +400,7 @@ def test_store_load_data_integrity(fs_tier, monkeypatch, use_c_ext, batch_size):
 
     # Load into a range disjoint by index from the store ids, to also
     # exercise loading a chunk into a different id than it was stored from.
+    lookup_and_wait(tier, keys)
     tier.submit_load(make_job(2, keys, load_chunk_ids, is_promotion=True))
     load_results = drain(tier)
     assert len(load_results) == 1
@@ -435,6 +440,7 @@ def test_store_load_roundtrip_without_o_direct(tmp_path, monkeypatch):
         assert all(r.success for r in drain(tier))
 
         tensor[:2] = 0.0
+        lookup_and_wait(tier, keys)
         tier.submit_load(make_job(2, keys, [2, 3], is_promotion=True))
         assert all(r.success for r in drain(tier))
 
@@ -545,6 +551,7 @@ def test_out_of_bounds_block_id_smoke(fs_tier, monkeypatch, use_c_ext):
     assert len(store_results) == 1
     assert not store_results[0].success
 
+    lookup_and_wait(tier, [key(1)])
     tier.submit_load(make_job(2, [key(1)], [out_of_bounds_bid], is_promotion=True))
     load_results = drain(tier)
     assert len(load_results) == 1
@@ -579,7 +586,7 @@ def test_failed_load_corrects_verdict_and_removes_corrupt_file(
     assert lookup_and_wait(tier, [key(1)], ctx=ctx) == [LookupResult.HIT]
 
     # A successful promotion must NOT touch the verdict or the file.
-    tier.submit_load(make_job(2, [key(1)], [0], is_promotion=True))
+    tier.submit_load(make_job(2, [key(1)], [0], is_promotion=True, req_context=ctx))
     results = drain(tier)
     assert len(results) == 1 and results[0].success
     assert tier.lookup(key(1), ctx) == LookupResult.HIT
@@ -588,7 +595,7 @@ def test_failed_load_corrects_verdict_and_removes_corrupt_file(
     # Truncate below block_size so the next promotion short-reads.
     with open(path, "wb") as f:
         f.write(b"x" * 10)
-    tier.submit_load(make_job(3, [key(1)], [0], is_promotion=True))
+    tier.submit_load(make_job(3, [key(1)], [0], is_promotion=True, req_context=ctx))
     results = drain(tier)  # get_finished_jobs() marks the verdict False here
     assert len(results) == 1 and not results[0].success
 
@@ -604,6 +611,46 @@ def test_failed_load_corrects_verdict_and_removes_corrupt_file(
     assert lookup_and_wait(tier, [key(1)], ctx=fresh) == [LookupResult.MISS]
 
 
+def test_failed_load_does_not_mark_newer_probe(
+    fs_tier,
+):
+    """An old failed promotion cannot change a newer request's probe."""
+    tier, tensor = fs_tier
+    k = key(1)
+    tier.submit_store(make_job(1, [k], [0]))
+    assert all(r.success for r in drain(tier))
+
+    ctx_a = ReqContext(req_id="aborted-load")
+    ctx_b = ReqContext(req_id="replacement-probe")
+    assert lookup_and_wait(tier, [k], ctx=ctx_a) == [LookupResult.HIT]
+
+    # Capture A's lookup generation on the load job, then let A disappear
+    # before B starts a fresh probe for the same key.
+    tier.submit_load(
+        make_job(
+            2,
+            [k],
+            [tensor.shape[0]],
+            is_promotion=True,
+            req_context=ctx_a,
+        )
+    )
+    tier.on_request_finished(ctx_a)
+    assert tier.lookup(k, ctx_b) is LookupResult.RETRY
+
+    results = drain(tier)
+    assert len(results) == 1 and not results[0].success
+
+    # The failed load's generation is stale. B's probe still sees the stored
+    # block and must resolve to HIT.
+    tier.on_schedule_end(ScheduleEndContext(new_req_ids=[], preempted_req_ids=()))
+    deadline = time.monotonic() + 1.0
+    while tier._lookup_manager._pending_results.empty():
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+    assert tier.lookup(k, ctx_b) is LookupResult.HIT
+
+
 def test_failed_load_after_abort_does_not_break_newer_probe(fs_tier):
     """A promotion for request A fails after A was aborted and request B
     re-probed the same key. The failure must not flip B's in-flight probe:
@@ -617,7 +664,7 @@ def test_failed_load_after_abort_does_not_break_newer_probe(fs_tier):
     assert lookup_and_wait(tier, [k], ctx=ctx_a) == [LookupResult.HIT]
 
     os.remove(tier.file_mapper.get_file_name(k))
-    tier.submit_load(make_job(2, [k], [1], is_promotion=True))
+    tier.submit_load(make_job(2, [k], [1], is_promotion=True, req_context=ctx_a))
     tier.on_request_finished(ctx_a)
 
     assert tier.lookup(k, ctx_b) == LookupResult.RETRY
@@ -658,7 +705,7 @@ def test_batched_partial_load_failure_keeps_loaded_blocks(
     # Corrupt only the last block, then load the whole batch as one job.
     with open(bad_path, "wb") as f:
         f.write(b"x" * 10)
-    tier.submit_load(make_job(2, keys, [0, 1, 2], is_promotion=True))
+    tier.submit_load(make_job(2, keys, [0, 1, 2], is_promotion=True, req_context=ctx))
     results = drain(tier)
     # (a) the job fails but reports the two blocks that loaded before the bad one.
     assert len(results) == 1 and not results[0].success
@@ -708,7 +755,7 @@ def test_batched_load_first_block_fails_marks_whole_batch(
 
     with open(tier.file_mapper.get_file_name(key(1)), "wb") as f:
         f.write(b"x" * 10)
-    tier.submit_load(make_job(2, keys, [0, 1, 2], is_promotion=True))
+    tier.submit_load(make_job(2, keys, [0, 1, 2], is_promotion=True, req_context=ctx))
     results = drain(tier)
     assert len(results) == 1 and not results[0].success
     # Nothing loaded before the failure -> no partial success reported.
@@ -745,6 +792,7 @@ def test_transient_load_failure_leaves_file(fs_tier, monkeypatch, use_c_ext):
     os.symlink(loop, path)
     os.symlink(path, loop)
 
+    lookup_and_wait(tier, [key(1)])
     tier.submit_load(make_job(2, [key(1)], [0], is_promotion=True))
     results = drain(tier)
     assert len(results) == 1 and not results[0].success
@@ -815,6 +863,7 @@ def test_load_job_emits_no_event(fs_tier_with_events):
     assert results[0].success
     list(tier.take_events())
 
+    lookup_and_wait(tier, [key(1)])
     tier.submit_load(make_job(2, [key(1)], [1], is_promotion=True))
     results = drain(tier)
     assert len(results) == 1
