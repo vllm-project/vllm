@@ -471,56 +471,79 @@ class EncoderCudaGraphManager:
         per_item_out_tokens = [spec.output_tokens for spec in item_specs]
         max_path_budgets = {path: max(self.path_token_budgets[path]) for path in paths}
 
-        sorted_indices = sorted(range(num_items), key=lambda i: per_item_out_tokens[i])
-        batches: list[tuple[list[int], dict[str, int | None]]] = []
-        current_batch: list[int] = []
-        current_tokens = dict.fromkeys(paths, 0)
-
-        def append_current_batch() -> None:
-            if not current_batch:
-                return
-            path_budgets = {
-                path: self._path_fitting_budget(path, current_tokens[path])
-                for path in paths
-            }
-            batches.append((list(current_batch), path_budgets))
-
-        def should_defer_item(item_tokens: dict[str, int]) -> bool:
-            """Whether closing the batch strictly reduces summed budgets."""
-            for path in paths:
-                item = item_tokens[path]
-                if item == 0:
-                    continue
-                cur = current_tokens[path]
-                b_cur = self._path_fitting_budget(path, cur)
-                b_alone = self._path_fitting_budget(path, item)
-                b_merged = self._path_fitting_budget(path, cur + item)
-                # Only called when the item fits; lookups land on a budget.
-                assert (
-                    b_cur is not None and b_alone is not None and b_merged is not None
-                )
-                # Only defer items that alone outweigh the whole current
-                # batch; splitting smaller ones fragments flood packing.
-                if b_cur + b_alone < b_merged and b_alone >= b_cur:
-                    return True
-            return False
-
-        for orig_idx in sorted_indices:
-            item_tokens = {path: per_item_path_tokens[path][orig_idx] for path in paths}
-            fits = len(current_batch) < self.max_batch_size and all(
-                current_tokens[path] + item_tokens[path] <= max_path_budgets[path]
+        total_path_tokens = {path: sum(per_item_path_tokens[path]) for path in paths}
+        all_fit_individually = all(
+            all(
+                per_item_path_tokens[path][i] <= max_path_budgets[path]
                 for path in paths
             )
-            if current_batch and (not fits or should_defer_item(item_tokens)):
-                append_current_batch()
-                current_batch = []
-                current_tokens = dict.fromkeys(paths, 0)
+            for i in range(num_items)
+        )
+        if (
+            num_items > 1
+            and all_fit_individually
+            and any(total_path_tokens[path] > max_path_budgets[path] for path in paths)
+        ):
+            batches: list[tuple[list[int], dict[str, int | None]]] = [
+                (list(range(num_items)), {path: None for path in paths})
+            ]
+        else:
+            sorted_indices = sorted(
+                range(num_items), key=lambda i: per_item_out_tokens[i]
+            )
+            batches = []
+            current_batch: list[int] = []
+            current_tokens = dict.fromkeys(paths, 0)
 
-            current_batch.append(orig_idx)
-            for path in paths:
-                current_tokens[path] += item_tokens[path]
+            def append_current_batch() -> None:
+                if not current_batch:
+                    return
+                path_budgets = {
+                    path: self._path_fitting_budget(path, current_tokens[path])
+                    for path in paths
+                }
+                batches.append((list(current_batch), path_budgets))
 
-        append_current_batch()
+            def should_defer_item(item_tokens: dict[str, int]) -> bool:
+                """Whether closing the batch strictly reduces summed budgets."""
+                for path in paths:
+                    item = item_tokens[path]
+                    if item == 0:
+                        continue
+                    cur = current_tokens[path]
+                    b_cur = self._path_fitting_budget(path, cur)
+                    b_alone = self._path_fitting_budget(path, item)
+                    b_merged = self._path_fitting_budget(path, cur + item)
+                    # Only called when the item fits; lookups land on a budget.
+                    assert (
+                        b_cur is not None
+                        and b_alone is not None
+                        and b_merged is not None
+                    )
+                    # Only defer items that alone outweigh the whole current
+                    # batch; splitting smaller ones fragments flood packing.
+                    if b_cur + b_alone < b_merged and b_alone >= b_cur:
+                        return True
+                return False
+
+            for orig_idx in sorted_indices:
+                item_tokens = {
+                    path: per_item_path_tokens[path][orig_idx] for path in paths
+                }
+                fits = len(current_batch) < self.max_batch_size and all(
+                    current_tokens[path] + item_tokens[path] <= max_path_budgets[path]
+                    for path in paths
+                )
+                if current_batch and (not fits or should_defer_item(item_tokens)):
+                    append_current_batch()
+                    current_batch = []
+                    current_tokens = dict.fromkeys(paths, 0)
+
+                current_batch.append(orig_idx)
+                for path in paths:
+                    current_tokens[path] += item_tokens[path]
+
+            append_current_batch()
 
         outputs_by_orig_idx: dict[int, torch.Tensor] = {}
         for batch_indices, path_budgets in batches:

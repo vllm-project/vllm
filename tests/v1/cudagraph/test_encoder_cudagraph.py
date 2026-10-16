@@ -360,6 +360,12 @@ class TestExecuteLocalPacking:
         assert runs == [([0], "default", 256)]
         assert mgr.graph_misses == 1
 
+    def test_oversized_batch_falls_back_to_single_eager(self):
+        mgr = _make_manager_with_budgets([256, 4096])
+        runs = _run_packing(mgr, [self._spec(3000), self._spec(3000)])
+        assert runs == []
+        assert mgr.graph_misses == 2
+
     def test_multi_path_deferral_skips_zero_token_paths(self):
         mgr = _make_manager_with_budgets([256, 4096, 8192])
         mgr.path_token_budgets = {
