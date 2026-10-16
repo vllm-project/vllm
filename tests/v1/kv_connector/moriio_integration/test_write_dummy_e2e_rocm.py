@@ -8,6 +8,9 @@ shapes, so the connector registers and transfers exactly the production cache
 layout, but the layer stack is cut to a few layers that still contain every
 cache-group kind and the MoE is cut to a handful of experts. Dummy weights are
 seeded, so the prefill, decode and reference servers hold identical weights.
+Cases marked ``HMA_off`` run every server with
+``--disable-hybrid-kv-cache-manager``, so all layers, sliding-window ones
+included, share a single cache group.
 
 Prefill runs on one GPU, decode on another, and MoRI moves the KV over xGMI.
 Either way decode computes the last prompt token itself. For hybrid models
@@ -63,9 +66,6 @@ _ROOT = Path(__file__).resolve().parents[4]
 _PROXY = (
     _ROOT / "examples/disaggregated/disaggregated_serving/moriio_toy_proxy_server.py"
 )
-# The toy proxy binds its service-discovery socket to this fixed port, so cases
-# on one host must run one at a time.
-_PROXY_PING_PORT = 36367
 
 # Max allowed difference between centered first-token log-probabilities of the
 # P/D and direct outputs, over the direct serve's top-k tokens. The split is
@@ -149,6 +149,29 @@ def _qwen3_dense_overrides(cfg) -> dict[str, Any]:
     return {"num_hidden_layers": 4}
 
 
+def _deepseek_v3_overrides(cfg) -> dict[str, Any]:
+    # MLA attention-only: layer 0 dense, layer 1 MoE, no MTP layer.
+    return {
+        "num_hidden_layers": 2,
+        "first_k_dense_replace": 1,
+        "n_routed_experts": 8,
+        "num_experts_per_tok": 2,
+        "n_group": 1,
+        "topk_group": 1,
+        "num_nextn_predict_layers": 0,
+    }
+
+
+def _gemma3_overrides(cfg) -> dict[str, Any]:
+    # Five sliding-window layers then one global layer, as in the real
+    # 5:1 pattern. Without the hybrid KV cache manager vLLM gives the sliding
+    # layers full-attention cache specs, so all six share one group.
+    return {
+        "num_hidden_layers": 6,
+        "layer_types": ["sliding_attention"] * 5 + ["full_attention"],
+    }
+
+
 @dataclass(frozen=True)
 class ArchCase:
     model: str
@@ -186,6 +209,23 @@ ARCHS: dict[str, ArchCase] = {
         env={"VLLM_ROCM_USE_AITER": "0"},
         hybrid=False,
     ),
+    "deepseek_v3": ArchCase(
+        model="deepseek-ai/DeepSeek-V3",
+        overrides=_deepseek_v3_overrides,
+        corrupt_overrides={"rms_norm_eps": 1.0},
+        env={"VLLM_ROCM_USE_AITER": "1"},
+        hybrid=False,
+    ),
+    # Text-only Gemma 3. The multimodal Gemma3ForConditionalGeneration takes
+    # the inputs_embeds path on KV consumers (enable_mm_embeds is forced on
+    # there) and computes differently from a direct serve without any transfer.
+    "gemma3": ArchCase(
+        model="google/gemma-3-1b-it",
+        overrides=_gemma3_overrides,
+        corrupt_overrides={"rms_norm_eps": 1.0},
+        env={"VLLM_ROCM_USE_AITER": "0"},
+        hybrid=False,
+    ),
 }
 
 
@@ -215,12 +255,19 @@ class Case:
     attention_backend: str
     prefill_graph: str
     decode_graph: str
+    # Run every server of the case without the hybrid KV cache manager.
+    hma_off: bool = False
+
+    @property
+    def extra_args(self) -> tuple[str, ...]:
+        return ("--disable-hybrid-kv-cache-manager",) if self.hma_off else ()
 
     @property
     def id(self) -> str:
         return (
             f"{self.arch}-{self.attention_backend}-"
             f"P_{self.prefill_graph}-D_{self.decode_graph}"
+            + ("-HMA_off" if self.hma_off else "")
         )
 
 
@@ -243,6 +290,10 @@ CASES = [
     # Attention-only: prefill transfers the whole prompt.
     Case("qwen3_dense", "TRITON_ATTN", _DEFAULT, _DEFAULT),
     Case("qwen3_dense", "ROCM_AITER_UNIFIED_ATTN", _DEFAULT, _DEFAULT),
+    # Without the hybrid KV cache manager: one cache group per model.
+    Case("qwen3_dense", "TRITON_ATTN", _DEFAULT, _DEFAULT, hma_off=True),
+    Case("deepseek_v3", "ROCM_AITER_MLA", _DEFAULT, _DEFAULT, hma_off=True),
+    Case("gemma3", "TRITON_ATTN", _DEFAULT, _DEFAULT, hma_off=True),
 ]
 
 
@@ -300,11 +351,13 @@ def _server(
     selector: str,
     *,
     port: int | None = None,
+    extra_args: tuple[str, ...] = (),
     kv_transfer_config: dict[str, Any] | None = None,
 ) -> RemoteOpenAIServer:
     port = port or get_open_port()
     args = [
         *arch.args,
+        *extra_args,
         "--port",
         str(port),
         "--load-format",
@@ -349,7 +402,7 @@ def _server(
     )
 
 
-def _moriio_config(role: str, http_port: int) -> dict[str, Any]:
+def _moriio_config(role: str, http_port: int, ping_port: int) -> dict[str, Any]:
     return {
         "kv_connector": "MoRIIOConnector",
         "kv_role": role,
@@ -358,7 +411,7 @@ def _moriio_config(role: str, http_port: int) -> dict[str, Any]:
             "read_mode": False,
             "host_ip": "127.0.0.1",
             "proxy_ip": "127.0.0.1",
-            "proxy_ping_port": str(_PROXY_PING_PORT),
+            "proxy_ping_port": str(ping_port),
             "http_port": str(http_port),
             "handshake_port": str(get_open_port()),
             "notify_port": str(get_open_port()),
@@ -367,10 +420,19 @@ def _moriio_config(role: str, http_port: int) -> dict[str, Any]:
 
 
 @contextlib.contextmanager
-def _proxy() -> Iterator[str]:
+def _proxy(ping_port: int) -> Iterator[str]:
+    # Free ports for both sockets, so cases from parallel shards on one host
+    # do not collide.
     port = get_open_port()
     process = subprocess.Popen(
-        [sys.executable, str(_PROXY), "--port", str(port)],
+        [
+            sys.executable,
+            str(_PROXY),
+            "--port",
+            str(port),
+            "--service-discovery-port",
+            str(ping_port),
+        ],
         start_new_session=True,
     )
     try:
@@ -404,8 +466,8 @@ def _pd_pair(
 ) -> Iterator[tuple[str, RemoteOpenAIServer]]:
     selector, devices = _visible_devices()
     assert len(devices) >= 2, "needs one GPU for prefill and one for decode"
-    prefill_port, decode_port = get_open_port(), get_open_port()
-    with _proxy() as proxy_url, contextlib.ExitStack() as stack:
+    prefill_port, decode_port, ping_port = (get_open_port() for _ in range(3))
+    with _proxy(ping_port) as proxy_url, contextlib.ExitStack() as stack:
         servers: list[RemoteOpenAIServer] = []
         stack.callback(RemoteOpenAIServer.shutdown_many, servers)
         with ThreadPoolExecutor(2) as pool:
@@ -419,7 +481,10 @@ def _pd_pair(
                     devices[0],
                     selector,
                     port=prefill_port,
-                    kv_transfer_config=_moriio_config("kv_producer", prefill_port),
+                    extra_args=case.extra_args,
+                    kv_transfer_config=_moriio_config(
+                        "kv_producer", prefill_port, ping_port
+                    ),
                 ),
                 pool.submit(
                     _server,
@@ -430,7 +495,10 @@ def _pd_pair(
                     devices[1],
                     selector,
                     port=decode_port,
-                    kv_transfer_config=_moriio_config("kv_consumer", decode_port),
+                    extra_args=case.extra_args,
+                    kv_transfer_config=_moriio_config(
+                        "kv_consumer", decode_port, ping_port
+                    ),
                 ),
             ]
             for future in futures:
@@ -571,6 +639,7 @@ def _reference(arch: ArchCase, overrides: dict[str, Any], case: Case) -> Referen
         case.prefill_graph,
         devices[0],
         selector,
+        extra_args=case.extra_args,
     ) as server:
         url = server.url_root
         lengths = _prompt_lengths(arch, server)
@@ -641,7 +710,9 @@ def test_corrupted_prefill_state_is_detected(arch_name: str):
     """Negative control: KV computed with different values must fail."""
     arch = ARCHS[arch_name]
     default = next(c for c in CASES if c.arch == arch_name)
-    case = Case(arch_name, default.attention_backend, _DEFAULT, _DEFAULT)
+    case = Case(
+        arch_name, default.attention_backend, _DEFAULT, _DEFAULT, default.hma_off
+    )
     overrides = _arch_overrides(arch)
     ref = _reference(arch, overrides, case)
     corrupted = _merge(overrides, arch.corrupt_overrides)

@@ -192,12 +192,16 @@ steps:
 # Single-node MoRIIO WRITE P/D on dummy weights: prefill and decode on separate
 # GPUs over xGMI, compared exactly against a direct serve. Cases share the toy
 # proxy's fixed discovery port, so they run serially on one 2-GPU agent.
-- label: ":amd: (MI355) MoRIIO WRITE P/D Dummy-Weight E2E"
+- label: ":amd: (MI355) MoRIIO WRITE P/D Dummy-Weight E2E Shard %N"
   key: amd-moriio-write-dummy-e2e-mi355
   dind: false
   device: mi355_2
   num_devices: 2
-  timeout_in_minutes: 120
+  # ~3.5 min per case; pytest-shard hashes test ids, so with 20 cases the
+  # largest of 6 shards holds 5 (~17 min). Every case picks its own ports and
+  # compile-cache dir, so shards sharing a host do not collide.
+  parallelism: 6
+  timeout_in_minutes: 45
   working_dir: /vllm-workspace/tests
   depends_on:
   - image-build-amd
@@ -212,7 +216,7 @@ steps:
   commands:
   - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s -rs v1/kv_connector/moriio_integration/test_write_dummy_e2e_rocm.py
+  - pytest -v -s -rs v1/kv_connector/moriio_integration/test_write_dummy_e2e_rocm.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
 - label: ":nvidia: (H200 MIG 35GB) V1 Metrics + LM Eval"
   device: h200_35gb
