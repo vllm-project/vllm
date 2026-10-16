@@ -109,7 +109,6 @@ class SamplingStates:
         vocab_size: int,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None, bool]:
         """Returns (top_k, top_p, has_topp_only_rows)."""
-
         top_k_np = self.top_k.np[idx_mapping_np]
         top_p_np = self.top_p.np[idx_mapping_np]
         do_top_k = np.any(top_k_np != self.vocab_size)
