@@ -190,13 +190,6 @@ class KimiK3Kernel:
             self.caches[layer.layer_idx] = tensors
             self.attention[layer.layer_idx].prepare_layout(tensors)
 
-    def warmup_keys(self) -> list[Any]:
-        """None: every compile finishes in ``build_providers`` and ``bind_caches``."""
-        return []
-
-    def compile(self, key: Any) -> None:
-        raise AssertionError("Kimi K3 registers no warm-up keys")
-
     def embed_input_ids(self, ids):
         rows = ids.shape[0] if ids.ndim == 1 and ids.is_contiguous() else 0
         if not 1 <= rows <= PREPARED_MAX:

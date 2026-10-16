@@ -5,7 +5,14 @@
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Generic,
+    Protocol,
+    TypeVar,
+    runtime_checkable,
+)
 
 if TYPE_CHECKING:
     import torch
@@ -64,6 +71,17 @@ class DecodeImpl(Protocol):
     def bind_caches(self, caches: Mapping[str, Any]) -> None:
         """Bind the KV caches the kernel will read."""
         ...
+
+
+@runtime_checkable
+class DecodeWarmable(Protocol):
+    """A kernel whose launches compile from keys, registered for vLLM's JIT
+    warm-up.
+
+    SpecializedDecodes created inside process_weights_after_loading can implement
+    this for automatic warm-up of their kernels, so that the first decode step does not
+    pay the compilation cost.
+    """
 
     def warmup_keys(self) -> list[Any]:
         """Build keys of this kernel's launches."""

@@ -1,10 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""What Kimi K3 declares to run its specialized decode on SM100/103.
-
-Imported at config time, on every platform, before anything has decided the
-kernel can run: nothing here may pull in CuTe DSL.
-"""
+"""Kimi K3's specialized decode."""
 
 from typing import TYPE_CHECKING
 

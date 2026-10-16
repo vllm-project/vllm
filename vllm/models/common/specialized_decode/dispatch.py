@@ -21,9 +21,9 @@ from vllm.models.common.specialized_decode.guards import (
     tp_group,
 )
 from vllm.models.common.specialized_decode.spec import (
-    DecodeImpl,
     DecodeSpec,
     DecodeUnsupported,
+    DecodeWarmable,
     KernelT,
     Step,
 )
@@ -42,7 +42,7 @@ class DecodeWarmup(VllmJitKernel["DecodeWarmup.CompileKey"]):
         spec: str
         build: Any
 
-    def __init__(self, spec: str, kernel: DecodeImpl):
+    def __init__(self, spec: str, kernel: DecodeWarmable):
         super().__init__()
         self.spec = spec
         self.kernel = kernel
@@ -58,8 +58,9 @@ class DecodeWarmup(VllmJitKernel["DecodeWarmup.CompileKey"]):
 class SpecializedDecode(Generic[KernelT]):
     """A model's specialized decode on this rank.
 
-    It reads the spec and builds the kernel, registers it for warm-up,
-    checks the caches whenever the runner binds them, and decides each step
+    It reads the spec and builds the kernel, registers it for warm-up if it
+    compiles from keys, checks the caches whenever the runner binds them, and
+    decides each step
     between the kernel and vLLM's own forward. The kernel it builds is held in
     the ``kernel`` attribute.
     """
@@ -85,8 +86,9 @@ class SpecializedDecode(Generic[KernelT]):
         self.widths = spec.widths(vllm_config)
         self._bound = False
         self.kernel: KernelT = spec.build(vllm_config, model, self.widths)
-        if self.kernel.warmup_keys():
-            DecodeWarmup(spec.name, self.kernel).register_warmup()
+        kernel = self.kernel
+        if isinstance(kernel, DecodeWarmable) and kernel.warmup_keys():
+            DecodeWarmup(spec.name, kernel).register_warmup()
         logger.info("Specialized decode %s: widths %s", spec.name, list(self.widths))
 
     def bind_caches(self) -> None:
