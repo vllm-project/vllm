@@ -330,7 +330,7 @@ class KVChecksumScheduler:
 
     def request_finished(
         self, request: "Request", kv_transfer_params: dict[str, Any] | None
-    ) -> dict[str, Any] | None:
+    ) -> None:
         """Send the request's checksums through its carrier: added to the
         kv_transfer_params it returns, or handed to the connector.
 
@@ -345,14 +345,13 @@ class KVChecksumScheduler:
             or request.get_finished_reason() not in _SENT_FINISH_REASONS
             or (payload := self._payload(request.request_id, pending)) is None
         ):
-            return kv_transfer_params
+            return
         if pending.carrier == KVChecksumCarrier.CONNECTOR:
             self._connector.send_kv_checksums(request, payload.to_bytes())
-        elif kv_transfer_params is not None:
-            kv_transfer_params[KV_TRANSFER_PARAMS_KEY] = base64.b64encode(
-                payload.to_bytes()
-            ).decode()
-        return kv_transfer_params
+            return
+        if kv_transfer_params is not None:
+            encoded = base64.b64encode(payload.to_bytes()).decode()
+            kv_transfer_params[KV_TRANSFER_PARAMS_KEY] = encoded
 
     def _blocks(
         self, blocks: "KVCacheBlocks", start_token: int, end_token: int

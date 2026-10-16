@@ -2845,8 +2845,6 @@ class Scheduler(SchedulerInterface):
         self._inflight_prefills.discard(request)
         self._set_kv_fetch_stage(request, None)
         connector_delay_free_blocks, kv_xfer_params = self._connector_finished(request)
-        if self.kv_checksum is not None:
-            kv_xfer_params = self.kv_checksum.request_finished(request, kv_xfer_params)
 
         # EC Connector: mirror the KV hook. The contract requires firing
         # before the encoder cache is freed so the connector can inspect
@@ -3181,6 +3179,10 @@ class Scheduler(SchedulerInterface):
             delay_free, kv_xfer_params = self.connector.request_finished_all_groups(
                 request, block_ids
             )
+
+        if self.kv_checksum is not None:
+            self.kv_checksum.request_finished(request, kv_xfer_params)
+
         return delay_free or partial_tail_delay, kv_xfer_params
 
     def _request_remaining_blocks(self, request: Request) -> int:
