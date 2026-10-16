@@ -1720,15 +1720,7 @@ class Scheduler(SchedulerInterface):
             request = self.requests[req_id]
             request.num_computed_tokens += num_scheduled_token
             request.num_in_flight_tokens += num_scheduled_token
-            if (
-                self.kv_checksum is not None
-                and request.num_computed_tokens - num_scheduled_token
-                < request.num_prompt_tokens
-                <= request.num_computed_tokens
-            ):
-                # This step finishes the prompt's KV.'
-                blocks = self.kv_cache_manager.get_blocks(req_id)
-                self.kv_checksum.add_send(request, blocks)
+            self._add_kv_checksum_to_send(request, num_scheduled_token)
             if self.defer_block_free:
                 # Record the in-flight step, to fence deferred block freeing.
                 request.last_sched_seq = self.sched_step_seq
@@ -1752,6 +1744,19 @@ class Scheduler(SchedulerInterface):
         # the scheduler output.
         self.finished_req_ids = set()
         self.reset_preempted_req_ids = set()
+
+    def _add_kv_checksum_to_send(
+        self, request: Request, num_scheduled_tokens: int
+    ) -> None:
+        """Checksum the request's KV if this step finishes its prompt."""
+        if (
+            self.kv_checksum is not None
+            and request.num_computed_tokens - num_scheduled_tokens
+            < request.num_prompt_tokens
+            <= request.num_computed_tokens
+        ):
+            blocks = self.kv_cache_manager.get_blocks(request.request_id)
+            self.kv_checksum.add_send(request, blocks)
 
     def _update_request_as_session(
         self, session: Request, update: StreamingUpdate
@@ -2185,9 +2190,9 @@ class Scheduler(SchedulerInterface):
                 skip_req_ids=failed_kv_load_req_ids | self.failed_recving_kv_req_ids,
             )
             if failed_checksum_req_ids:
-                failed_kv_load_req_ids.update(
-                    self._handle_failed_recving(failed_checksum_req_ids)
-                )
+                failed_req_ids = self._handle_failed_recving(failed_checksum_req_ids)
+                failed_kv_load_req_ids.update(failed_req_ids)
+
         # NOTE(woosuk): As len(num_scheduled_tokens) can be up to 1K or more,
         # the below loop can be a performance bottleneck. We should do our best
         # to avoid expensive operations inside the loop.
