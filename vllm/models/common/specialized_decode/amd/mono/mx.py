@@ -14,7 +14,7 @@ from aiter.ops.flydsl.kernels import buffer_ops as bo
 from flydsl.expr import rocdl
 from flydsl.expr.typing import T
 
-from vllm.models.deepseek_v41.amd.mono.common.ops import CM_NT
+from vllm.models.common.specialized_decode.amd.mono.ops import CM_NT
 
 FP8_MAX = 448.0
 # the f8f6f4 MFMA's operand formats (cbsz / blgp)

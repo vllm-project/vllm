@@ -12,18 +12,18 @@ from aiter.ops.flydsl.kernels import buffer_ops as bo
 from flydsl.expr import const_expr, range_constexpr
 from flydsl.expr.typing import T
 
-from vllm.models.deepseek_v41.amd.mono.common.mx import (
+from vllm.models.common.specialized_decode.amd.mono.mx import (
     UNIT_SCALE,
     mfma_scaled,
 )
-from vllm.models.deepseek_v41.amd.mono.common.ops import (
+from vllm.models.common.specialized_decode.amd.mono.ops import (
     CM_NT,
     fresh,
     rsrc,
     traced,
 )
-from vllm.models.deepseek_v41.amd.mono.common.plan import WAVES
-from vllm.models.deepseek_v41.amd.mono.common.sync import POLL_MAX
+from vllm.models.common.specialized_decode.amd.mono.plan import WAVES
+from vllm.models.common.specialized_decode.amd.mono.sync import POLL_MAX
 
 ROWS = 16  # GEMV rows a task
 TILE = 16  # an MFMA's N: the tokens a GEMV pass takes (``token_tiles``)

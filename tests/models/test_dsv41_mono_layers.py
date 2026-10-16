@@ -1,23 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The DeepSeek-V4.1 mono decode path through the real model: a five-layer
-DeepSeek-V4.1-Flash at TP2 and TP4 on CDNA4, served with ``--monokernel`` on
-and off on the same random weights: every decoder layer's outputs at every
-decode step must match. Unlike ``test_dsv41_mono_numerics.py``, which
-checks the kernels against vLLM's ops one stage at a time, this runs
-``DeepseekV4DecoderLayer.forward`` as the engine does -- the model's hooks,
-the per-step path choice, the weights taken off the layer, the metadata and
-the indexer's top-k -- so a change to the decoder layer that the kernels do
-not follow fails here.
-
-Every layer takes the whole-layer path (K1 + K2); the five hold each variant:
-- 0: the first layer, sliding window only (K1 takes the embedding settled)
-- 1: ratio-2 KV and index source (vLLM's compressor and indexer between K1
-  and K2)
-- 2: ratio-2 consumer with an Engram (K1 takes the residual settled)
-- 3: ratio-1 KV, index and candidate source
-- 4: ratio-1 index source over 3's candidates and KV
-"""
+"""DeepSeek-V4.1 mono decode against vLLM's path, through the real model."""
 
 import zlib
 
@@ -153,19 +136,22 @@ class MonoProbe:
         self._captured: dict = {}
         lens = sorted(lens)
 
+        def record(layer, layer_id, pos, out) -> None:
+            md = get_forward_context().attn_metadata
+            if not isinstance(md, dict):
+                return
+            swa = md.get(layer.attn.swa_cache_layer.prefix)
+            if swa is None or swa.num_prefills != 0:
+                return
+            for row, p in enumerate(pos.tolist()):
+                n = max(n for n in lens if n <= p)
+                kept = [t[row].float().cpu() for t in out[:2]]
+                self._captured.setdefault((layer_id, n, p), kept)
+
         def hook(layer_id):
             def keep(module, args, kwargs, out):
-                md = get_forward_context().attn_metadata
-                if not isinstance(md, dict):
-                    return
-                swa = md.get(module.attn.swa_cache_layer.prefix)
-                if swa is None or swa.num_prefills != 0:
-                    return
                 pos = kwargs.get("positions", args[1] if len(args) > 1 else None)
-                for row, p in enumerate(pos.tolist()):
-                    n = max(n for n in lens if n <= p)
-                    kept = [t[row].float().cpu() for t in out[:2]]
-                    self._captured.setdefault((layer_id, n, p), kept)
+                record(module, layer_id, pos, out)
 
             return keep
 
@@ -204,20 +190,39 @@ class MonoProbe:
             gap = gap_hook(i, layer)
             layer.ffn.register_forward_pre_hook(gap, with_kwargs=True)
 
+        # A whole-layer launch replaces the layer's forward, so no module hook
+        # sees it: wrap the launch itself to keep the same outputs.
+        decode = getattr(self.model_runner.model, "specialized_decode", None)  # type: ignore[attr-defined]
+        if decode is None:
+            return
+        kernel = decode.kernel
+        launch_whole = kernel.launch_whole
+
+        def launch(plan, x, positions, *args, **kwargs):
+            out = launch_whole(plan, x, positions, *args, **kwargs)
+            if out is not None:
+                record(plan.layer, plan.layer.attn.layer_id, positions, out)
+            return out
+
+        kernel.launch_whole = launch
+
     def save_capture(self, path: str) -> None:
         rank = self.rank  # type: ignore[attr-defined]
         torch.save((self._captured, self._gaps), f"{path}.rank{rank}")
 
     def mono_layers(self) -> dict:
-        from vllm.models.deepseek_v41.amd import mono_decode
-
+        model = self.model_runner.model  # type: ignore[attr-defined]
+        decode = getattr(model, "specialized_decode", None)
+        plans = {} if decode is None else decode.kernel.plans
         layers = {
-            i: None
-            if m.mono is None
-            else ["ffn" if m.mono.ffn_only else "whole", m.mono._weights is not None]
-            for i, m in self._decoder_layers().items()
+            i: (
+                ["ffn" if plans[i].ffn_only else "whole", plans[i].weights is not None]
+                if i in plans
+                else None
+            )
+            for i in self._decoder_layers()
         }
-        runner = mono_decode._runner
+        runner = None if decode is None else decode.kernel.runner
         return {
             "layers": layers,
             "epoch": -1 if runner is None else int(runner.epoch[0]),
@@ -241,7 +246,7 @@ def _decode(vllm_runner, monkeypatch, tp: int, mono: bool, prompts, path: str):
         hf_overrides=TRUNCATED,
         worker_extension_cls=f"{__name__}.MonoProbe",
         moe_backend="aiter",
-        monokernel=mono,
+        specialized_decode=mono,
         language_model_only=True,
         tokenizer_mode="deepseek_v41",
         attention_config={"indexer_kv_dtype": "mxfp4", "indexer_sparse_logits": True},

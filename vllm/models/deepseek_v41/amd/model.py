@@ -55,11 +55,12 @@ from vllm.models.common.ops.sequence_parallel import (
     sp_reduce_scatter,
     sp_shard,
 )
+from vllm.models.common.specialized_decode import SpecializedDecode, select_decode_spec
 from vllm.models.deepseek_v4.amd.model import (
     DeepseekV4MoE as DeepseekV4MoEBase,
 )
-from vllm.models.deepseek_v41.amd.mono_decode import MonoDecodeLayer
 from vllm.models.deepseek_v41.amd.rocm import DeepseekV41ROCMAiterMLAAttention
+from vllm.models.deepseek_v41.amd.specialized_decode import DECODE_SPEC, DSV41Kernel
 from vllm.models.deepseek_v41.attention import DeepseekV4Attention
 from vllm.models.deepseek_v41.decoder_replay_layers import DecoderReplayLayers
 from vllm.sequence import IntermediateTensors
@@ -269,12 +270,6 @@ class DeepseekV4DecoderLayer(nn.Module):
         # attn_norm / ffn_norm into its collapse, so the separate norms are
         # skipped for the seams it takes.
         self.fuse_seam_norm = HAS_AITER_MHC_FUSED_POST_PRE_DELAYED_RMS_NORM
-        # Decode steps of an eligible layer may run as the mono decode layer.
-        self.mono = MonoDecodeLayer.create(self, vllm_config)
-        if self.mono is not None and self.mono.ffn_only:
-            # A decode step hands wo_b's TP partial to the FFN launch; forward
-            # reduces it on the others.
-            self.attn.wo_b.reduce_results = False
 
     @staticmethod
     def _hc_collapse(x: torch.Tensor, pre_mix: torch.Tensor) -> torch.Tensor:
@@ -292,21 +287,8 @@ class DeepseekV4DecoderLayer(nn.Module):
         residual: torch.Tensor | None = None,
         engram_hashes: torch.Tensor | None = None,
         engram_mask: torch.Tensor | None = None,
+        decode_ffn: Callable | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        if self.mono is not None:
-            out = self.mono(
-                self,
-                x,
-                positions,
-                residual,
-                post_mix,
-                res_mix,
-                pre_mix,
-                engram_hashes,
-                engram_mask,
-            )
-            if out is not None:
-                return out
         # Layer 0's attention seam projects the 2-D embedding with the folded
         # hc_attn_fn_broadcast instead of the 4-stream residual with hc_attn_fn.
         # The fused kernel only takes the latter, so that seam keeps the
@@ -405,10 +387,11 @@ class DeepseekV4DecoderLayer(nn.Module):
         x = self.attn(positions, x, None)
         if self.use_sequence_parallel:
             x = sp_reduce_scatter(x)
-        elif self.mono is not None and self.mono.ffn_only:
-            out = self.mono.ffn(self, x, residual, post_mix, res_mix, attn_pre)
-            if out is not None:
-                return out
+        elif not self.attn.wo_b.reduce_results:
+            if decode_ffn is not None:
+                out = decode_ffn(x, residual, post_mix, res_mix, attn_pre)
+                if out is not None:
+                    return out
             x = tensor_model_parallel_all_reduce(x)
 
         residual, post_mix, res_mix, x, ffn_pre = self.mhc_pre_delayed(
@@ -492,6 +475,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         self.hc_mult = config.hc_mult
         self.hc_dim = self.hc_mult * config.hidden_size
         self.rms_norm_eps = config.rms_norm_eps
+        self.vllm_config = vllm_config
 
         # Three aux streams: one per non-default input GEMM in
         # DeepseekV4Attention._run_parallel_input_projections
@@ -664,6 +648,79 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         inputs_embeds: torch.Tensor | None = None,
         lookback_token_ids: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
+        (
+            hidden_states,
+            input_ids,
+            pre_mix,
+            engram_hashes,
+            engram_mask,
+            full_num_tokens,
+        ) = self.prologue(
+            input_ids,
+            positions,
+            intermediate_tensors,
+            inputs_embeds,
+            lookback_token_ids,
+        )
+        (
+            hidden_states,
+            residual,
+            post_mix,
+            res_mix,
+            pre_mix,
+            aux_hidden_states,
+            final_aux_recon,
+            ran_layers,
+        ) = self._run_layers(
+            range(self.start_layer, self.decoder_replay_start),
+            hidden_states,
+            positions,
+            input_ids,
+            pre_mix,
+            None,
+            None,
+            None,
+            engram_hashes,
+            engram_mask,
+            full_num_tokens,
+        )
+        return self.epilogue(
+            hidden_states,
+            positions,
+            input_ids,
+            pre_mix,
+            post_mix,
+            res_mix,
+            residual,
+            aux_hidden_states,
+            final_aux_recon,
+            ran_layers,
+            full_num_tokens,
+        )
+
+    def prologue(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        intermediate_tensors: IntermediateTensors | None,
+        inputs_embeds: torch.Tensor | None,
+        lookback_token_ids: torch.Tensor | None,
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor | None,
+        torch.Tensor | None,
+        torch.Tensor | None,
+        int,
+    ]:
+        """Everything the decoder layers need, before the first of them runs.
+
+        Returns:
+            The stream the first layer takes, the (possibly sharded) input ids,
+            the carried pre-mix, the Engram hashes and mask, and the batch's
+            token count before any sequence-parallel shard.
+
+        """
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -739,37 +796,41 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             hidden_states = sp_shard(hidden_states)
             input_ids = sp_shard(input_ids)
 
-        residual, post_mix, res_mix = None, None, None
         pre_mix: torch.Tensor | None = None
         if not get_pp_group().is_first_rank:
             assert intermediate_tensors is not None
             pre_mix = intermediate_tensors["pre_mix"]
-        (
+        return (
             hidden_states,
-            residual,
-            post_mix,
-            res_mix,
-            pre_mix,
-            aux_hidden_states,
-            final_aux_recon,
-            ran_layers,
-        ) = self._run_layers(
-            range(self.start_layer, self.decoder_replay_start),
-            hidden_states,
-            positions,
             input_ids,
             pre_mix,
-            post_mix,
-            res_mix,
-            residual,
             engram_hashes,
             engram_mask,
             full_num_tokens,
         )
+
+    def epilogue(
+        self,
+        hidden_states: torch.Tensor,
+        positions: torch.Tensor,
+        input_ids: torch.Tensor | None,
+        pre_mix: torch.Tensor | None,
+        post_mix: torch.Tensor | None,
+        res_mix: torch.Tensor | None,
+        residual: torch.Tensor | None,
+        aux_hidden_states: list[torch.Tensor],
+        final_aux_recon: torch.Tensor | None,
+        ran_layers: bool,
+        full_num_tokens: int,
+        replay: bool = True,
+    ) -> torch.Tensor | IntermediateTensors:
+        """Everything after the last decoder layer: the replay batch, the final
+        post and collapse, and this rank's return.
+        """
         # Replay collapses inside its own batch. The early loop still sets
         # ran_layers, so that flag alone must not post again on the full batch.
         collapsed = False
-        if self.decoder_replay_layers is not None:
+        if replay and self.decoder_replay_layers is not None:
             hidden_states, pre_mix, *late_aux = self.decoder_replay_layers(
                 hidden_states,
                 positions,
@@ -855,17 +916,16 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 engram_hashes,
                 engram_mask,
             )
-            # The aux id of the first replay layer is the post of the last
-            # full-batch layer. Capture it on the trimmed rows instead.
-            if idx + 1 in self.aux_hidden_state_layers and not (
-                self.decoder_replay_layers is not None
-                and idx + 1 == self.decoder_replay_start
-            ):
-                aux_recon = self.mhc_post(hidden_states, residual, post_mix, res_mix)
-                aux_hidden_state = aux_recon.mean(dim=1)
-                if self.use_sequence_parallel:
-                    aux_hidden_state = sp_all_gather(aux_hidden_state)[:full_num_tokens]
-                aux_hidden_states.append(aux_hidden_state)
+            aux_recon = self.after_layer(
+                idx,
+                hidden_states,
+                residual,
+                post_mix,
+                res_mix,
+                full_num_tokens,
+                aux_hidden_states,
+            )
+            if aux_recon is not None:
                 final_aux_recon = aux_recon
         return (
             hidden_states,
@@ -877,6 +937,37 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             final_aux_recon,
             ran_layers,
         )
+
+    def after_layer(
+        self,
+        idx: int,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor | None,
+        post_mix: torch.Tensor | None,
+        res_mix: torch.Tensor | None,
+        full_num_tokens: int,
+        aux_hidden_states: list[torch.Tensor],
+        replay: bool = True,
+    ) -> torch.Tensor | None:
+        """This layer's aux hidden state, appended to ``aux_hidden_states``, or
+        None when layer ``idx + 1`` does not want one.
+
+        The aux id of the first replay layer is the post of the last full-batch
+        layer; that one is captured on the trimmed rows instead, unless
+        ``replay`` is False and the caller runs every layer on the full batch.
+        """
+        if idx + 1 not in self.aux_hidden_state_layers or (
+            replay
+            and self.decoder_replay_layers is not None
+            and idx + 1 == self.decoder_replay_start
+        ):
+            return None
+        aux_recon = self.mhc_post(hidden_states, residual, post_mix, res_mix)
+        aux_hidden_state = aux_recon.mean(dim=1)
+        if self.use_sequence_parallel:
+            aux_hidden_state = sp_all_gather(aux_hidden_state)[:full_num_tokens]
+        aux_hidden_states.append(aux_hidden_state)
+        return aux_recon
 
     def _run_replay_layers(
         self,
@@ -1299,6 +1390,9 @@ class DeepseekV41LLMForCausalLM(
 
         config = vllm_config.model_config.hf_config
         self.config = config
+        self.vllm_config = vllm_config
+        self.specialized_decode_spec = select_decode_spec(vllm_config, DECODE_SPEC)
+        self.specialized_decode: SpecializedDecode[DSV41Kernel] | None = None
         expert_dtype = getattr(config, "expert_dtype", "fp4")
         self.hf_to_vllm_mapper = _make_deepseek_v4_weights_mapper(
             expert_dtype, _linear_scale_param_name(vllm_config, expert_dtype)
@@ -1359,9 +1453,9 @@ class DeepseekV41LLMForCausalLM(
 
     @staticmethod
     def get_model_state_cls():
-        from ..nvidia.model_state import DeepseekV41ModelState
+        from .model_state import DeepseekV41ROCMModelState
 
-        return DeepseekV41ModelState
+        return DeepseekV41ROCMModelState
 
     @property
     def token_lookback_depth(self) -> int:
@@ -1382,6 +1476,15 @@ class DeepseekV41LLMForCausalLM(
         inputs_embeds: torch.Tensor | None = None,
         lookback_token_ids: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
+        if self.specialized_decode is not None:
+            step = self.specialized_decode.plan(positions, intermediate_tensors)
+            if step is not None:
+                return self.specialized_decode.run(
+                    step,
+                    input_ids,
+                    inputs_embeds,
+                    lookback_token_ids=lookback_token_ids,
+                )
         hidden_states = self.model(
             input_ids,
             positions,
@@ -1400,12 +1503,19 @@ class DeepseekV41LLMForCausalLM(
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         loaded_params = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
-        self.process_weights_after_loading()
+        self.finalize_weights()
         return loaded_params
 
-    def process_weights_after_loading(self) -> None:
+    def finalize_weights(self) -> None:
         self.model.finalize_mega_moe_weights()
         self.model.finalize_mhc_broadcast_weights()
+
+    def process_weights_after_loading(self) -> None:
+        self.finalize_weights()
+        if self.specialized_decode_spec is not None and self.specialized_decode is None:
+            self.specialized_decode = SpecializedDecode(
+                self.model, self.vllm_config, self.specialized_decode_spec
+            )
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return self.model.get_expert_mapping()

@@ -8,7 +8,7 @@ from the TP size, in one place (a build key's ``tp`` picks it)."""
 
 from dataclasses import dataclass
 
-from vllm.models.deepseek_v41.amd.mono.common.plan import Shard, padded
+from vllm.models.common.specialized_decode.amd.mono.plan import Shard, padded
 
 # the model's full widths
 MOE_INTER = 2304  # a routed expert's intermediate width

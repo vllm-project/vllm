@@ -15,7 +15,7 @@ slots' flags (``polled_tile`` its tiles) before it reads their MID rows. Called
 by the kernel on traced Int32 and by the CPU property test on Python ints.
 """
 
-from vllm.models.deepseek_v41.amd.mono.common.plan import cdiv, imin
+from vllm.models.common.specialized_decode.amd.mono.plan import cdiv, imin
 
 TILE = 16  # picks a pick tile: an MFMA's N
 

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Per-layer attention providers (input projection, KDA/MLA core, o-projection) and
-the helpers ``SpecializedDecode.build_providers`` uses."""
+the helpers ``KimiK3Kernel.build_providers`` uses."""
 
 from typing import Any
 
