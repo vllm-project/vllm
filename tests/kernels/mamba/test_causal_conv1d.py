@@ -368,6 +368,10 @@ def test_causal_conv1d_varlen(
 @pytest.mark.parametrize("width", [4])
 @pytest.mark.parametrize("dim", [64, 2048])
 @pytest.mark.parametrize("q_lens_cfg", [[3, 1, 0, 4, 2], [1, 5, 5, 1], [2, 0, 0, 3]])
+@pytest.mark.skipif(
+    current_platform.is_cpu(),
+    reason="CPU kernel for causal_conv1d_update ignores num_accepted_tokens.",
+)
 def test_causal_conv1d_update_ragged_varlen(
     q_lens_cfg, dim, width, has_bias, silu_activation, itype
 ):
