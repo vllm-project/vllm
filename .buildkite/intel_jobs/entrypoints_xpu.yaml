@@ -30,7 +30,7 @@ steps:
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-    'bash .buildkite/scripts/initialized-snapshot-e2e.sh "$IMAGE_TAG_XPU" "$BUILDKITE_COMMIT" || true'
+    'bash .buildkite/scripts/initialized-snapshot-e2e.sh "$IMAGE_TAG" "$BUILDKITE_COMMIT" || true'
 - label: ':nvidia: (H200 MIG 35GB) Entrypoints Unit'
   key: entrypoints-unit-tests
   device: intel_gpu
@@ -46,21 +46,20 @@ steps:
     label: production
     gpu: 1+
     mem: 16+
+  automatic_shard: true
   _raw_old_commands:
   - pytest -v -s entrypoints/unit_tests
-  - pytest -v -s entrypoints/weight_transfer
   - pytest -v -s entrypoints/launchers
   source_file_dependencies:
   - vllm/entrypoints
+  - vllm/utils/flashinfer.py
   - tests/entrypoints/unit_tests
-  - tests/entrypoints/weight_transfer
   - tests/entrypoints/launchers
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
     pytest -v -s entrypoints/unit_tests || true &&
-    pytest -v -s entrypoints/weight_transfer || true &&
     pytest -v -s entrypoints/launchers || true'
 - label: ':nvidia: (H200 MIG 35GB) Entrypoints Integration (LLM)'
   key: entrypoints-integration-llm
@@ -173,6 +172,7 @@ steps:
     label: production
     gpu: 1+
     mem: 16+
+  automatic_shard: true
   _raw_old_commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/openai/chat_completion
@@ -201,6 +201,7 @@ steps:
     label: production
     gpu: 1+
     mem: 24+
+  automatic_shard: true
   _raw_old_commands:
   - pytest -v -s tool_use
   - pytest -v -s entrypoints/tool_parsers
@@ -239,6 +240,7 @@ steps:
     label: production
     gpu: 1+
     mem: 24+
+  automatic_shard: true
   _raw_old_commands:
   - pytest -v -s entrypoints/openai/responses
   source_file_dependencies:
@@ -265,6 +267,7 @@ steps:
     label: production
     gpu: 1+
     mem: 24+
+  automatic_shard: true
   _raw_old_commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/speech_to_text
@@ -294,6 +297,7 @@ steps:
     label: production
     gpu: 1+
     mem: 24+
+  automatic_shard: true
   _raw_old_commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/multimodal
@@ -323,6 +327,7 @@ steps:
     label: production
     gpu: 1+
     mem: 24+
+  automatic_shard: true
   _raw_old_commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/pooling

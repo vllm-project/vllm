@@ -2,11 +2,10 @@ group: Quantization XPU
 depends_on:
   - image-build-xpu
 steps:
-- label: ':nvidia: (H200 MIG 35GB) Quantization Shard %N'
+- label: ':nvidia: (H200 MIG 35GB) Quantization'
   key: quantization-2
   device: intel_gpu
   timeout_in_minutes: 40
-  parallelism: 4
   optional: true
   working_dir: .
   no_plugin: true
@@ -18,6 +17,7 @@ steps:
     label: production
     gpu: 1+
     mem: 16+
+  automatic_shard: true
   _raw_old_commands:
   - uv pip install --system torchao==0.17.0 --index-url https://download.pytorch.org/whl/cu130
   - uv pip install --system conch-triton-kernels
@@ -25,6 +25,8 @@ steps:
   source_file_dependencies:
   - csrc/
   - vllm/model_executor/layers/quantization
+  - vllm/models/deepseek_v41/quant_config.py
+  - vllm/utils/humming.py
   - tests/quantization
   commands:
   - >-
@@ -76,6 +78,7 @@ steps:
     label: production
     gpu: 1+
     mem: 16+
+  automatic_shard: true
   _raw_old_commands:
   - pytest -s -v tests/quantization/test_blackwell_moe.py
   source_file_dependencies:
@@ -107,6 +110,7 @@ steps:
     label: production
     gpu: 1+
     mem: 16+
+  automatic_shard: true
   _raw_old_commands:
   - pytest -v -s models/quantization
   source_file_dependencies:
