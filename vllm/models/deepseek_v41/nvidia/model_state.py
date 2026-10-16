@@ -346,9 +346,7 @@ class DeepseekV41ModelState(DefaultModelState):
                 self._replay_start_np[input_batch.idx_mapping_np[:num_reqs]],
                 0,
             ).astype(np.int32)
-            replay_start = self._replay_start_staging.copy_to_gpu(
-                replay_start_np, out=self._replay_start[:num_reqs]
-            )
+            replay_start = self._upload_replay_start(replay_start_np, num_reqs)
             if window and replay_start_np.any():
                 # The replayed tokens rebuild window KV only: their slots in the
                 # prefix-cacheable groups are padded so the cached KV stays as is.
@@ -366,7 +364,7 @@ class DeepseekV41ModelState(DefaultModelState):
                 )
             assert model_specific_attn_metadata is None
             model_specific_attn_metadata = ReplayAttnMetadata(replay_start)
-        attn_metadata = super().prepare_attn(
+        attn_metadata = self._build_attn_metadata(
             input_batch,
             cudagraph_mode,
             block_tables,
@@ -389,6 +387,16 @@ class DeepseekV41ModelState(DefaultModelState):
                 replay_start,
             )
         return attn_metadata
+
+    def _upload_replay_start(self, values: np.ndarray, num_reqs: int) -> torch.Tensor:
+        """Copy the batch's replay starts to their device buffer."""
+        return self._replay_start_staging.copy_to_gpu(
+            values, out=self._replay_start[:num_reqs]
+        )
+
+    def _build_attn_metadata(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        """The step's attention-metadata build (``DefaultModelState.prepare_attn``)."""
+        return super().prepare_attn(*args, **kwargs)
 
     def _warm_up_replay_kernels(
         self, input_batch: InputBatch, slot_mappings: torch.Tensor
