@@ -14,6 +14,7 @@ import huggingface_hub
 import torch
 import transformers.configuration_utils as hf_configuration_utils
 from huggingface_hub import constants
+from huggingface_hub.utils import HFValidationError, validate_repo_id
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
 from transformers import GenerationConfig, PreTrainedConfig
 from transformers.configuration_utils import ALLOWED_LAYER_TYPES
@@ -126,7 +127,6 @@ _CONFIG_REGISTRY: dict[str, type[PreTrainedConfig]] = LazyConfigDict(
     cosmos3_edge="Cosmos3EdgeConfig",
     deepseek_vl_v2="DeepseekVLV2Config",
     deepseek_v32="DeepseekV3Config",
-    deepseek_v4="DeepseekV4Config",
     dots3_note="Dots3NoteConfig",
     k3_dspark="K3DSparkConfig",
     funaudiochat="FunAudioChatConfig",
@@ -144,8 +144,6 @@ _CONFIG_REGISTRY: dict[str, type[PreTrainedConfig]] = LazyConfigDict(
     kimi_k3="KimiK3Config",
     RefinedWeb="RWConfig",  # For tiiuae/falcon-40b(-instruct)
     RefinedWebModel="RWConfig",  # For tiiuae/falcon-7b(-instruct)
-    mlp_speculator="MLPSpeculatorConfig",
-    medusa="MedusaConfig",
     midashenglm="MiDashengLMConfig",
     minimax_m3_vl="MiniMaxM3Config",
     minimax_m3_mtp="MiniMaxM3MTPConfig",
@@ -168,7 +166,7 @@ _CONFIG_REGISTRY: dict[str, type[PreTrainedConfig]] = LazyConfigDict(
     inkling_model="InklingModelConfig",
 )
 
-_SPECULATIVE_DECODING_CONFIGS: set[str] = {"eagle", "speculators", "medusa"}
+_SPECULATIVE_DECODING_CONFIGS: set[str] = {"eagle", "speculators"}
 
 # Checkpoints whose config.json has no model_type, only remote code in auto_map
 _ARCHITECTURE_TO_MODEL_TYPE: dict[str, str] = {
@@ -217,7 +215,10 @@ def is_rope_parameters_nested(rope_parameters: dict[str, Any]) -> bool:
     # Cannot be nested if rope_parameters is empty
     if not rope_parameters:
         return False
-    return set(rope_parameters.keys()).issubset(ALLOWED_LAYER_TYPES)
+    # DeepSeek-V4 nests by rope type ("main", "compress") instead
+    return set(rope_parameters.keys()).issubset(
+        {*ALLOWED_LAYER_TYPES, "main", "compress"}
+    )
 
 
 @contextmanager
@@ -844,6 +845,19 @@ def maybe_override_with_speculators(
 
     # Override model and tokenizer with the verifier model from config
     verifier_model = speculators_config["verifier"]["name_or_path"]
+    verifier_error = (
+        "Speculators verifier must name a remote model repository. "
+        "Select local verifiers explicitly with --model and --speculative-config."
+    )
+    if not isinstance(verifier_model, str):
+        raise ValueError(verifier_error)
+    try:
+        validate_repo_id(verifier_model)
+    except HFValidationError as exc:
+        raise ValueError(verifier_error) from exc
+    verifier_path = Path(verifier_model)
+    if verifier_path.exists() or verifier_path.is_symlink():
+        raise ValueError(verifier_error)
     model = tokenizer = verifier_model
 
     return model, tokenizer, speculative_config
