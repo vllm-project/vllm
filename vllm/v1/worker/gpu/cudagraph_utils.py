@@ -321,6 +321,9 @@ class CudaGraphManager:
             elif separate_decode_routine and decode_mode and not self.varlen_decode:
                 for decode_query_len in decode_query_lens:
                     rounded_num_tokens = round_up(num_tokens, decode_query_len)
+                    if len(decode_query_lens) == 1:
+                        # Rounding up can step over a full batch; keep it reachable.
+                        rounded_num_tokens = min(rounded_num_tokens, max_decode_tokens)
                     rounded_num_reqs = rounded_num_tokens // decode_query_len
 
                     if (
