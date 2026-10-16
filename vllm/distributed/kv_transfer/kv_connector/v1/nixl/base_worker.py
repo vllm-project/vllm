@@ -2164,6 +2164,13 @@ class NixlBaseConnectorWorker:
             or meta.ple_block_len is not None
             or any(block_len % split for block_len in meta.block_lens)
         ):
+            logger.warning(
+                "Not pairing remote %d-token blocks with local %d-token blocks: "
+                "the remote KV layout cannot be split into %d-token units.",
+                meta.block_size,
+                self.block_size,
+                unit,
+            )
             return
         logger.info_once(
             "Transferring remote %d-token blocks as %d-token kernel blocks to "
