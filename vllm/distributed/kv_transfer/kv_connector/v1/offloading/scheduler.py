@@ -2203,6 +2203,9 @@ class OffloadingConnectorScheduler:
             self._reset_cache()
 
     def _reset_cache(self) -> None:
+        # A rejected manager reset must leave scheduler bookkeeping intact.
+        self.manager.reset_cache()
+
         # Flush all in-flight jobs
         self._current_batch_jobs_to_flush.update(self._jobs.keys())
 
@@ -2211,9 +2214,6 @@ class OffloadingConnectorScheduler:
                 if not status.finished_signaled:
                     self.manager.on_request_finished(status.req_context)
                 del self._req_status[req_id]
-
-        # Reset offloading manager cache
-        self.manager.reset_cache()
 
         # Reset store progress so active requests re-offload from chunk 0.
         for status in self._req_status.values():

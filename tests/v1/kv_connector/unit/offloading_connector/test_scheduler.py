@@ -2884,8 +2884,9 @@ def test_reset_cache(request_runner, async_scheduling: bool):
 
 
 @pytest.mark.parametrize("async_scheduling", [True, False])
+@pytest.mark.parametrize("reset_rejected", [False, True])
 def test_reset_cache_finalizes_finished_request_with_pending_store(
-    request_runner, async_scheduling: bool
+    request_runner, async_scheduling: bool, reset_rejected: bool
 ):
     """reset_cache fires on_request_finished for a finished request whose
     in-flight stores it discards, exactly once.
@@ -2930,6 +2931,30 @@ def test_reset_cache_finalizes_finished_request_with_pending_store(
     cs.request_finished(req_status.req)
     assert finalized == []
     assert req_id in cs._req_status
+
+    if reset_rejected:
+        pending_jobs = set(cs._jobs)
+        stale_threshold = cs._stale_job_threshold
+        runner.manager.reset_cache.side_effect = RuntimeError("quarantined slots")
+        for _ in range(2):
+            with pytest.raises(RuntimeError, match="quarantined slots"):
+                cs.reset_cache()
+            assert cs._req_status[req_id] is req_status
+            assert set(cs._jobs) == pending_jobs
+            assert not cs._current_batch_jobs_to_flush
+            assert cs._stale_job_threshold == stale_threshold
+            assert finalized == []
+
+        cs.update_connector_output(
+            KVConnectorOutput(
+                kv_connector_worker_meta=OffloadingWorkerMetadata(
+                    completed_jobs={jid: cs.config.num_workers for jid in pending_jobs}
+                )
+            )
+        )
+        assert not cs._jobs
+        assert not req_status.transfer_jobs
+        runner.manager.reset_cache.side_effect = None
 
     # reset_cache discards both the in-flight and not-yet-prepared final stores,
     # so it issues the deferred notification before dropping the state.
