@@ -293,24 +293,23 @@ class TestPushScheduler:
         assert "req-d-x" not in sched._push_registration_deadlines
 
     def test_kv_checksums_ship_with_finished_blocks(self):
-        """KV checksums sent after request_finished ride the same metadata as
-        the request's finished blocks; those of a request with no blocks to
-        push (e.g. aborted) are dropped."""
+        """The KV checksums of requests finished since the last step ride the
+        same metadata as their finished blocks."""
         sched = make_nixl_push_scheduler()
         _stub_sw_clipping(sched)
-        pushed = _make_request(request_id="req-p-1", is_d_side=False)
-        aborted = _make_request(request_id="req-p-2", is_d_side=False, finished=False)
-        for request in (pushed, aborted):
-            sched.request_finished(request, ([4, 5, 6],))
-            sched.send_kv_checksums(request.request_id, b"checksums")
+        request = _make_request(request_id="req-p-1", is_d_side=False)
+        sched.request_finished(request, ([4, 5, 6],))
 
         with patch.object(
             sched.__class__.__mro__[1],
             "build_connector_meta",
             return_value=NixlConnectorMetadata(),
         ):
-            meta = sched.build_connector_meta(MagicMock())
+            meta = sched.build_connector_meta(
+                MagicMock(kv_checksums_to_send={"req-p-1": b"checksums"})
+            )
 
+        assert meta.push_finished_blocks.keys() == {"req-p-1"}
         assert meta.push_finished_kv_checksums == {"req-p-1": b"checksums"}
 
     def test_registration_watchdog_expires(self, caplog):

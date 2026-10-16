@@ -1112,25 +1112,21 @@ def test_scheduler_request_finished():
 
 
 def test_scheduler_ships_kv_checksums_with_finished_blocks():
-    """KV checksums sent after request_finished ride the metadata that hands
-    the request's finished blocks to the workers; those of an aborted
-    request are dropped."""
+    """The KV checksums of requests finished since the last step ride the
+    metadata that hands their finished blocks to the workers."""
     vllm_config = create_vllm_config(
         kv_connector="MooncakeConnector", kv_role="kv_producer"
     )
     scheduler = create_scheduler(vllm_config)
     connector = scheduler.get_kv_connector()
-    for request_id, status in (
-        (1, RequestStatus.FINISHED_LENGTH_CAPPED),
-        (2, RequestStatus.FINISHED_ABORTED),
-    ):
-        request = create_request(request_id=request_id, do_remote_decode=True)
-        request.kv_transfer_params["transfer_id"] = request.request_id
-        request.status = status
-        connector.request_finished_all_groups(request, ([10, 11],))
-        connector.send_kv_checksums(request, b"checksums")
+    request = create_request(request_id=1, do_remote_decode=True)
+    request.kv_transfer_params["transfer_id"] = request.request_id
+    request.status = RequestStatus.FINISHED_LENGTH_CAPPED
+    connector.request_finished_all_groups(request, ([10, 11],))
 
-    meta = connector.build_connector_meta(MagicMock())
+    meta = connector.build_connector_meta(
+        MagicMock(kv_checksums_to_send={"id-1": b"checksums"})
+    )
     assert meta.kv_checksums == {"id-1": b"checksums"}
 
 

@@ -233,8 +233,7 @@ class KVConnectorOutput:
     # It captures a static setup info and should almost always remain constant
     # for a given connector after discovery. Default value entails no change.
     expected_finished_count: int = 0
-    # This step's KV checksums, one record per worker, when KV checksums are
-    # enabled.
+    # This step's KV checksums, one record per worker, when enabled.
     kv_checksums: list[KVChecksumRecord] | None = None
 
     def is_empty(self):

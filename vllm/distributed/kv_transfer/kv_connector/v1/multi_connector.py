@@ -36,7 +36,6 @@ from vllm.v1.outputs import KVConnectorOutput
 
 if TYPE_CHECKING:
     from vllm.distributed.kv_events import KVCacheEvent
-    from vllm.distributed.kv_transfer.kv_checksum.checksum import KVChecksumCarrier
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.block_pool import BlockPool
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
@@ -588,34 +587,6 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         self._requests_to_connector.pop(request.request_id, None)
 
         return async_saves > 0, kv_txfer_params
-
-    def kv_checksum_carrier(
-        self, request: "Request", receiving: bool
-    ) -> "KVChecksumCarrier | None":
-        if receiving:
-            # The connector chosen to load the request.
-            index = self._requests_to_connector.get(request.request_id)
-            if index is None:
-                return None
-            return self._connectors[index].kv_checksum_carrier(request, True)
-        if (c := self._kv_checksum_sender(request)) is not None:
-            return c.kv_checksum_carrier(request, False)
-        return None
-
-    def send_kv_checksums(self, request: "Request", checksums: bytes) -> None:
-        if (sender := self._kv_checksum_sender(request)) is not None:
-            sender.send_kv_checksums(request, checksums)
-
-    def _kv_checksum_sender(self, request: "Request") -> KVConnectorBase_V1 | None:
-        """The first sub-connector that carries the request's checksums."""
-        return next(
-            (
-                c
-                for c in self._connectors
-                if c.kv_checksum_carrier(request, False) is not None
-            ),
-            None,
-        )
 
     def request_finished(
         self,

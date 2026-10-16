@@ -309,6 +309,10 @@ class SchedulerOutput:
     # Scheduler-local; always None by the time this reaches a worker.
     kv_connector_block_state: KVConnectorBlockState | None = None
 
+    # KV checksums of producer requests finished since the last step, for
+    # connectors that send them in their own messages. Scheduler-local.
+    kv_checksums_to_send: dict[str, bytes] | None = None
+
     # Dynamic speculative decoding: optimal K chosen by scheduler.
     # Number of spec tokens to schedule for the next step.
     num_spec_tokens_to_schedule: int = 0

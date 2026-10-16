@@ -24,7 +24,6 @@ from huggingface_hub.utils import httpx
 
 from vllm import envs
 from vllm.config import KVTransferConfig, VllmConfig
-from vllm.distributed.kv_transfer.kv_checksum.checksum import KVChecksumCarrier
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     EngineId,
     TransferTopology,
@@ -801,23 +800,6 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_scheduler is not None
         self.connector_scheduler.on_new_request(request)
 
-    def kv_checksum_carrier(
-        self, request: "Request", receiving: bool
-    ) -> KVChecksumCarrier | None:
-        params = request.kv_transfer_params
-        if (
-            not params
-            or not params.get("transfer_id")
-            or bool(params.get("do_remote_decode")) == receiving
-        ):
-            return None
-        # On the MooncakeXferResponse that reports the transfer done.
-        return KVChecksumCarrier.CONNECTOR
-
-    def send_kv_checksums(self, request: "Request", checksums: bytes) -> None:
-        assert self.connector_scheduler is not None
-        self.connector_scheduler.send_kv_checksums(request.request_id, checksums)
-
     def request_finished(
         self,
         request: "Request",
@@ -968,8 +950,6 @@ class MooncakeConnectorScheduler:
         # the scheduler. Used to make metadata passed to Worker.
         self._reqs_need_recv: dict[ReqId, tuple[Request, list[list[int]]]] = {}
         self._reqs_need_send: dict[ReqId, tuple[Request, list[list[int]]]] = {}
-        # KV checksums of finished _reqs_need_send, shipped with them.
-        self._kv_checksums_to_send: dict[ReqId, bytes] = {}
         # Reqs to remove from processed set because they're not to send after
         # remote prefill or aborted.
         self._reqs_not_processed: set[TransferId] = set()
@@ -1169,17 +1149,12 @@ class MooncakeConnectorScheduler:
                     load_remote_cache=False,
                 )
             self._reqs_need_send.clear()
-            meta.kv_checksums = self._kv_checksums_to_send
-            self._kv_checksums_to_send = {}
+            # Sent to D on the MooncakeXferResponse that reports the transfer.
+            meta.kv_checksums = scheduler_output.kv_checksums_to_send or {}
             meta.reqs_not_processed = self._reqs_not_processed
             self._reqs_not_processed = set()
 
         return meta
-
-    def send_kv_checksums(self, request_id: ReqId, checksums: bytes) -> None:
-        """P-side: ship a finished request's KV checksums with its blocks."""
-        if request_id in self._reqs_need_send:
-            self._kv_checksums_to_send[request_id] = checksums
 
     def request_finished(
         self,

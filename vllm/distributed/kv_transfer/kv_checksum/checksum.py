@@ -49,7 +49,6 @@ unsigned; other Mamba layers have one slice per TP shard, which only
 producers and consumers of equal TP sizes compare.
 """
 
-import enum
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -69,22 +68,6 @@ checksummed."""
 
 ReplicaKey = tuple[int, int]
 """``(replicas, replica_index)`` of the layers a partial checksum covers."""
-
-
-class KVChecksumCarrier(enum.Enum):
-    """How a connector carries a request's checksums from its KV producer to
-    its consumer."""
-
-    KV_TRANSFER_PARAMS = enum.auto()
-    """In the kv_transfer_params the producer returns for the request, which
-    reach the consumer with the request."""
-
-    CONNECTOR = enum.auto()
-    """In the connector's own messages. The producer's scheduler hands them to
-    ``KVConnectorBase_V1.send_kv_checksums`` after ``request_finished``; the
-    consumer's worker connector returns them in
-    ``KVConnectorTransferResults.kv_checksums``, by the time it reports the
-    load finished."""
 
 
 @dataclass
@@ -154,7 +137,8 @@ class KVChecksumRecord:
     fingerprints: dict[int, int]
     received: dict[str, bytes] = field(default_factory=dict)
     """Producer checksums this worker's connector received with finished
-    loads (``KVChecksumCarrier.CONNECTOR``), per request."""
+    loads, per request, from connectors that carry them in their own
+    messages."""
 
 
 def num_valid_tokens(position: int, block_size: int, num_tokens: int) -> int:

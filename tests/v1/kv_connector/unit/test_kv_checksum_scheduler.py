@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """KV checksums end to end through a producer's and a consumer's schedulers
-with real checksum workers, for NIXL pull (kv_transfer_params carrier), NIXL
-push and Mooncake (connector carriers): the consumer accepts a correct load whatever
-the TP and PP sizes, and handles a corrupted or unverifiable one per
-kv_checksum_fail_closed and kv_load_failure_policy."""
+with real checksum workers, for NIXL pull (checksums in kv_transfer_params),
+NIXL push and Mooncake (checksums in the connector's messages): the consumer
+accepts a correct load whatever the TP and PP sizes, and handles a corrupted or
+unverifiable one per kv_checksum_fail_closed and kv_load_failure_policy."""
 
 from dataclasses import dataclass
 from typing import Any
@@ -15,7 +15,6 @@ import torch
 
 from vllm.distributed.kv_transfer.kv_checksum.scheduler import (
     KV_TRANSFER_PARAMS_KEY,
-    KVChecksumScheduler,
 )
 from vllm.distributed.kv_transfer.kv_checksum.worker import KVChecksumWorker
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -34,7 +33,6 @@ from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import FinishReason, Request, RequestStatus
 
 from .utils import (
-    MockKVConnector,
     create_model_runner_output,
     create_request,
     create_scheduler,
@@ -341,7 +339,8 @@ def _prefill(producer: _Engine, request: Request) -> _Transfer:
             )
     [engine_output] = producer.finish_step(output)[0].outputs
     assert engine_output.finish_reason == FinishReason.LENGTH
-    # A connector carrier ships the checksums to the workers in the next step.
+    # Connectors that send the checksums themselves get them in the next
+    # step's metadata.
     meta = producer.schedule().kv_connector_metadata
     if producer.connector == "MooncakeConnector":
         # The router sends the request to both sides; the producer returns
@@ -357,8 +356,13 @@ def _prefill(producer: _Engine, request: Request) -> _Transfer:
     else:
         params = engine_output.kv_transfer_params
         assert params is not None
+        assert KV_TRANSFER_PARAMS_KEY in params
         sent = getattr(meta, "push_finished_kv_checksums", {}).get(request.request_id)
-        assert (sent is not None) != (KV_TRANSFER_PARAMS_KEY in params)
+        assert (sent is not None) == (producer.connector == "NixlPushConnector")
+        if sent is not None:
+            # In push mode the proxy sends the consumer's request without the
+            # producer's response, so the checksums reach it with the KV.
+            params = {k: v for k, v in params.items() if k != KV_TRANSFER_PARAMS_KEY}
     return _Transfer(params, sent, block_ids, state_block, split_state)
 
 
@@ -620,22 +624,20 @@ def test_drafter_groups_are_ignored(producer_group):
     assert errors == (set() if producer_group == "draft" else {request.request_id})
 
 
-@pytest.mark.parametrize("fail_closed", [False, True])
-def test_connector_without_carrier_is_refused(fail_closed):
-    """With a connector that cannot carry checksums no load would be checked:
-    fail-closed refuses to start, fail-open disables checksums."""
-    vllm_config = create_vllm_config(kv_role="kv_consumer")
-    vllm_config.kv_transfer_config.enable_kv_checksum = True
-    vllm_config.kv_transfer_config.kv_checksum_fail_closed = fail_closed
-    connector = object.__new__(MockKVConnector)
-    kv_cache_config = _kv_cache_config(HEADS, LAYERS)
-    if fail_closed:
-        with pytest.raises(ValueError, match="does not carry KV checksums"):
-            KVChecksumScheduler.create(vllm_config, kv_cache_config, connector)
+def test_requests_without_pd_params_are_not_checksummed():
+    """Only requests with do_remote_decode (producers) or do_remote_prefill
+    (consumers) in their kv_transfer_params are checksummed."""
+    producer = _Engine("kv_producer")
+    request = create_request(1, NUM_TOKENS)
+    producer.scheduler.add_request(request)
+    for _ in range(NUM_TOKENS):
+        output = producer.schedule()
+        assert output.kv_checksum_scheduled is None
+        if request.num_computed_tokens >= request.num_prompt_tokens:
+            break
+        producer.finish_step(output)
     else:
-        assert (
-            KVChecksumScheduler.create(vllm_config, kv_cache_config, connector) is None
-        )
+        raise AssertionError("the prefill never finished")
 
 
 @CONNECTORS

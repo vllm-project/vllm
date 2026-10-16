@@ -1,7 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Scheduler-side KV checksums: the blocks workers checksum, and verification
-of loads against the producer's checksums."""
+of loads against the producer's checksums.
+
+Requests are checksummed by their P/D role in their kv_transfer_params: a
+producer request (``do_remote_decode``) when its prompt's KV is final, and a
+consumer request (``do_remote_prefill``) once its KV load finishes. A
+producer's checksums are added to the kv_transfer_params it returns, if any,
+for the proxy to forward to the consumer with the request, and are given to
+the connector (``SchedulerOutput.kv_checksums_to_send``) for connectors that
+send them in their own messages. A consumer uses the checksums in its
+request's kv_transfer_params, or those its connector received with the load.
+"""
 
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -13,7 +23,6 @@ import pybase64 as base64
 
 from vllm.distributed.kv_transfer.kv_checksum.checksum import (
     KVChecksumBlocks,
-    KVChecksumCarrier,
     KVChecksumGroup,
     KVChecksumRecord,
     KVChecksumScheduled,
@@ -120,7 +129,6 @@ class _Unverified(Exception):
 class _Pending:
     """A request whose checksums are being collected from the workers."""
 
-    carrier: KVChecksumCarrier
     blocks: KVChecksumBlocks
     expected: KVChecksumPayload | None = None
     """The producer's checksums; only for a load."""
@@ -187,22 +195,12 @@ class _Pending:
 
 
 class KVChecksumScheduler:
-    """Schedules KV checksums and verifies loaded KV against the producer's.
+    """Schedules KV checksums and verifies loaded KV against the producer's."""
 
-    Only requests whose connector carries checksums for them
-    (``KVConnectorBase_V1.kv_checksum_carrier``) are checksummed.
-    """
-
-    def __init__(
-        self,
-        vllm_config: "VllmConfig",
-        kv_cache_config: KVCacheConfig,
-        connector: KVConnectorBase_V1,
-    ):
+    def __init__(self, vllm_config: "VllmConfig", kv_cache_config: KVCacheConfig):
         kv_transfer_config = vllm_config.kv_transfer_config
         assert kv_transfer_config is not None
         parallel_config = vllm_config.parallel_config
-        self._connector = connector
         self._fail_closed = kv_transfer_config.kv_checksum_fail_closed
         self._tp_size = parallel_config.tensor_parallel_size
         self._num_workers = self._tp_size * parallel_config.pipeline_parallel_size
@@ -212,6 +210,9 @@ class KVChecksumScheduler:
         }
         self._sends: dict[str, _Pending] = {}
         self._recvs: dict[str, _Pending] = {}
+        # Consumer requests whose KV load has not started yet.
+        self._remote_prefills: set[str] = set()
+        self._to_send: dict[str, bytes] = {}
         self._scheduled = KVChecksumScheduled()
 
     @classmethod
@@ -223,29 +224,34 @@ class KVChecksumScheduler:
     ) -> "KVChecksumScheduler | None":
         if connector is None or not kv_checksum_enabled(vllm_config):
             return None
+        return cls(vllm_config, kv_cache_config)
+
+    def on_new_request(self, request: "Request") -> None:
+        """Note a consumer request, before its connector starts its load (and
+        may clear ``do_remote_prefill``).
+
+        A request that also has ``do_remote_decode`` is a producer reloading
+        its consumer's KV of an earlier turn (NIXL's bidirectional transfer):
+        not checksummed.
+        """
+        params = request.kv_transfer_params
         if (
-            type(connector).kv_checksum_carrier
-            is KVConnectorBase_V1.kv_checksum_carrier
+            params
+            and params.get("do_remote_prefill")
+            and not params.get("do_remote_decode")
         ):
-            message = f"{type(connector).__name__} does not carry KV checksums"
-            kv_transfer_config = vllm_config.kv_transfer_config
-            assert kv_transfer_config is not None
-            if kv_transfer_config.kv_checksum_fail_closed:
-                raise ValueError(f"{message}, so no load could be verified.")
-            logger.warning("%s; KV checksums are disabled.", message)
-            return None
-        return cls(vllm_config, kv_cache_config, connector)
+            self._remote_prefills.add(request.request_id)
 
     def add_send(self, request: "Request", blocks: "KVCacheBlocks") -> None:
-        """Checksum a request's KV in the step that finishes its prefill, for
-        a consumer to verify after loading it."""
-        carrier = self._connector.kv_checksum_carrier(request, receiving=False)
-        if carrier is None:
+        """Checksum a producer request's KV in the step that finishes its
+        prefill, for its consumer to verify after loading it."""
+        params = request.kv_transfer_params
+        if not params or not params.get("do_remote_decode"):
             return
         num_tokens = request.num_computed_tokens
         checksum_blocks = self._blocks(blocks, 0, num_tokens)
         # A new prefill (after a preemption) replaces an earlier one.
-        self._sends[request.request_id] = _Pending(carrier, checksum_blocks)
+        self._sends[request.request_id] = _Pending(checksum_blocks)
         self._scheduled.reqs_to_send[request.request_id] = checksum_blocks
 
     def add_recv(
@@ -260,18 +266,15 @@ class KVChecksumScheduler:
         ``request.num_computed_tokens`` must already include the loaded
         tokens.
         """
-        carrier = self._connector.kv_checksum_carrier(request, receiving=True)
-        if carrier is None:
+        if request.request_id not in self._remote_prefills:
             return
+        self._remote_prefills.discard(request.request_id)
         checksum_blocks = self._blocks(
             blocks, num_local_computed_tokens, request.num_computed_tokens
         )
-        pending = _Pending(carrier, checksum_blocks)
+        pending = _Pending(checksum_blocks)
         params = request.kv_transfer_params or {}
-        if (
-            carrier == KVChecksumCarrier.KV_TRANSFER_PARAMS
-            and (encoded := params.get(KV_TRANSFER_PARAMS_KEY)) is not None
-        ):
+        if (encoded := params.get(KV_TRANSFER_PARAMS_KEY)) is not None:
             try:
                 data = base64.b64decode(encoded)
             except (ValueError, TypeError):
@@ -331,12 +334,14 @@ class KVChecksumScheduler:
     def request_finished(
         self, request: "Request", kv_transfer_params: dict[str, Any] | None
     ) -> None:
-        """Send the request's checksums through its carrier: added to the
-        kv_transfer_params it returns, or handed to the connector.
+        """Send a producer request's checksums: added to the
+        kv_transfer_params it returns, if any, and given to the connector
+        (see ``take_kv_checksums_to_send``).
 
         Called for every finished request, after the connector's
         ``request_finished``; drops the request's state.
         """
+        self._remote_prefills.discard(request.request_id)
         self._recvs.pop(request.request_id, None)
         pending = self._sends.pop(request.request_id, None)
         if (
@@ -346,12 +351,17 @@ class KVChecksumScheduler:
             or (payload := self._payload(request.request_id, pending)) is None
         ):
             return
-        if pending.carrier == KVChecksumCarrier.CONNECTOR:
-            self._connector.send_kv_checksums(request, payload.to_bytes())
-            return
+        data = payload.to_bytes()
+        self._to_send[request.request_id] = data
         if kv_transfer_params is not None:
-            encoded = base64.b64encode(payload.to_bytes()).decode()
+            encoded = base64.b64encode(data).decode()
             kv_transfer_params[KV_TRANSFER_PARAMS_KEY] = encoded
+
+    def take_kv_checksums_to_send(self) -> dict[str, bytes]:
+        """The checksums of producer requests finished since the last call,
+        for connectors that send them in their own messages."""
+        to_send, self._to_send = self._to_send, {}
+        return to_send
 
     def _blocks(
         self, blocks: "KVCacheBlocks", start_token: int, end_token: int

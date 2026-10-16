@@ -1613,6 +1613,10 @@ class Scheduler(SchedulerInterface):
         # 2. Wrap up all the KV cache load / save ops into an opaque object
         # 3. Clear the internal states of the connector
         if self.connector is not None:
+            if self.kv_checksum is not None:
+                scheduler_output.kv_checksums_to_send = (
+                    self.kv_checksum.take_kv_checksums_to_send()
+                )
             meta = self._build_kv_connector_meta(self.connector, scheduler_output)
             scheduler_output.kv_connector_metadata = meta
 
@@ -1632,6 +1636,7 @@ class Scheduler(SchedulerInterface):
 
         # Connector-only block state must not be dispatched to workers.
         scheduler_output.kv_connector_block_state = None
+        scheduler_output.kv_checksums_to_send = None
 
         # Advance the fence only for non-empty steps (those that actually
         # write KV and have their output processed later in update_from_output).
@@ -1721,10 +1726,9 @@ class Scheduler(SchedulerInterface):
                 < request.num_prompt_tokens
                 <= request.num_computed_tokens
             ):
-                # This step finishes the prompt's KV.
-                self.kv_checksum.add_send(
-                    request, self.kv_cache_manager.get_blocks(req_id)
-                )
+                # This step finishes the prompt's KV.'
+                blocks = self.kv_cache_manager.get_blocks(req_id)
+                self.kv_checksum.add_send(request, blocks)
             if self.defer_block_free:
                 # Record the in-flight step, to fence deferred block freeing.
                 request.last_sched_seq = self.sched_step_seq
@@ -2761,6 +2765,8 @@ class Scheduler(SchedulerInterface):
                 )
             if self.connector is not None:
                 self.connector.on_new_request(request)
+                if self.kv_checksum is not None:
+                    self.kv_checksum.on_new_request(request)
                 kv_transfer_params = request.kv_transfer_params
                 if kv_transfer_params and kv_transfer_params.get("do_remote_prefill"):
                     # Count P/D requests on arrival: connector matching is
