@@ -82,6 +82,7 @@ from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import make_zmq_path
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
     CircularBufferSpec,
     FullAttentionSpec,
     KVCacheLayout,
@@ -510,6 +511,55 @@ class NixlBaseConnectorWorker:
         # One layer per region keeps a second alignment pass a no-op.
         nixl_agent_meta.region_members = [[name] for name in self._transfer_layer_names]
 
+    def _split_remote_packed_rows(self, nixl_agent_meta: NixlAgentMetadata) -> None:
+        """Map the remote's whole-row region onto our per-layer regions.
+
+        E.g. a BLHNC prefiller registers one region whose block is a full row
+        holding every layer's page, while a HiSparse decoder registers one
+        region per layer. Using the advertised `packed_member_layouts`, the
+        remote row is rewritten in place as one virtual region per local layer:
+
+            remote row b:  [ L0 page | L1 page | ... ]   base=B, stride=S
+                             ^off0     ^off1
+
+            remote metadata, before:  [(B, S, S)]               # (base, len, stride)
+            remote metadata, after:   [(B + off0, page0, S),    # L0
+                                       (B + off1, page1, S)]    # L1
+
+        Remote regions outside the row (e.g. a separate indexer) pass through.
+        """
+        layouts = nixl_agent_meta.packed_member_layouts
+        remote_names = nixl_agent_meta.region_names
+        assert remote_names is not None, "Remote advertised no region_names"
+        (row,) = [i for i, name in enumerate(remote_names) if name in layouts]
+        if nixl_agent_meta.region_group_ids is not None and (
+            nixl_agent_meta.region_group_ids[row] == _SHARED_REGION_GROUP_ID
+        ):
+            raise NotImplementedError(
+                "Reading multi-group packed KV rows into per-layer regions is not "
+                "supported; use the same KV cache layout on P and D."
+            )
+        remote_index = {name: i for i, name in enumerate(remote_names)}
+        regions = [
+            (row, *layouts[name])
+            if name in layouts
+            else (remote_index[name], 0, nixl_agent_meta.block_lens[remote_index[name]])
+            for name in self.region_names
+        ]
+        nixl_agent_meta.kv_caches_base_addr = [
+            nixl_agent_meta.kv_caches_base_addr[i] + offset for i, offset, _ in regions
+        ]
+        nixl_agent_meta.block_lens = [page_size for _, _, page_size in regions]
+        nixl_agent_meta.block_strides = [
+            nixl_agent_meta.block_strides[i] for i, _, _ in regions
+        ]
+        for attr in ("region_num_blocks", "region_group_ids", "region_mem_types"):
+            values = getattr(nixl_agent_meta, attr)
+            if values is not None:
+                setattr(nixl_agent_meta, attr, [values[i] for i, _, _ in regions])
+        nixl_agent_meta.region_names = list(self.region_names)
+        nixl_agent_meta.packed_member_layouts = {}
+
     def __init__(
         self,
         vllm_config: "VllmConfig",
@@ -920,6 +970,7 @@ class NixlBaseConnectorWorker:
         self._has_packed_cache = KVCacheLayout[self.kv_cache_layout].is_block_outermost
         # Region layer membership is populated for HMA and packed layouts.
         self.region_members = []
+        self._packed_member_layouts: dict[str, tuple[int, int]] = {}
         # Local layer order, set by ``_set_region_layers`` only when
         # routing by layer name. Empty means region-index routing.
         self._transfer_layer_names = tuple[str, ...]()
@@ -1439,10 +1490,14 @@ class NixlBaseConnectorWorker:
         self._ple_block_len = None
         self._ple_region_index = None
 
-        packed_storage = _share_storage_and_block_stride(list(xfer_buffers.values()))
-        # CSA-linear needs separate logical regions for attention and state
-        # aliases even though every view shares one block-major allocation.
-        packed_storage = packed_storage and not self._is_csa_linear
+        # A shared packed row may transfer whole only if every page in it is
+        # replicated across TP ranks: MLA without SSM state. Head-sharded
+        # attention or SSM state (e.g. Qwen3.8-Flash-Next) must stay split.
+        packed_storage = (
+            _share_storage_and_block_stride(list(xfer_buffers.values()))
+            and self.use_mla
+            and not self._has_mamba
+        )
         if route_packed_layers and any(
             not isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec))
             for spec in self._layer_specs.values()
@@ -1566,22 +1621,23 @@ class NixlBaseConnectorWorker:
                     and cache[0].is_contiguous()
                     and cache[0].nbytes == physical_page_size
                 )
-                # Push workers address the pages of packed MLA rows by layer.
-                packed_mla_push = (
-                    track_region_layers
-                    and self._has_packed_cache
+                # Block-outermost MLA: one block row holds every layer's page.
+                packed_mla = (
+                    self._has_packed_cache
+                    and not self._has_mamba
                     and packed_storage
                     and storage_is_block_major
                     and is_mla_region
                 )
-                if packed_mla_push and use_layer_name_routing:
+                if packed_mla and use_layer_name_routing:
                     # PP>1 prefill stage: register only this layer's page of each row.
                     region_specs = [
                         (cache.data_ptr(), physical_page_size, block_stride)
                     ]
-                elif packed_mla_push:
-                    # PP=1 decode or prefill: register whole rows, and advertise where
-                    # this layer's page sits so a PP>1 prefill can write into it.
+                elif packed_mla and (self.pp_size == 1 or not page_contiguous):
+                    # Register whole rows so a block is a single descriptor. Also,
+                    # advertise where this layer's page sits so a remote with
+                    # LB* can still address it (HiSparse).
                     storage_block_len = block_stride
                     region_specs = [
                         (registration_base, storage_block_len, storage_block_len)
@@ -1716,6 +1772,7 @@ class NixlBaseConnectorWorker:
             self.region_num_blocks = [self.num_blocks] * self.num_regions
 
         self._set_region_layers(region_layers)
+        self._packed_member_layouts = packed_member_layouts
 
         if self.pp_size > 1 and not use_layer_name_routing:
             start_layer, end_layer = self.model_config.get_layers_start_end_indices(
@@ -1811,7 +1868,7 @@ class NixlBaseConnectorWorker:
             dcp_size=self.dcp_size,
             pcp_size=self.pcp_size,
             region_members=self.region_members,
-            packed_member_layouts=packed_member_layouts,
+            packed_member_layouts=self._packed_member_layouts,
         )
         # Wrap metadata in payload with hash for defensive decoding
         assert self.compat_hash is not None
@@ -2264,6 +2321,11 @@ class NixlBaseConnectorWorker:
                     "prefill TP yet"
                 )
             self._align_remote_regions_by_layer(nixl_agent_meta)
+        elif nixl_agent_meta.packed_member_layouts and not self._packed_member_layouts:
+            # With HiSparse, P may be on BL* while D is LB*, as only indexer is on HBM.
+            # TODO (NickLucche) we may consider not allowing this case at all (P BL*)
+            # and just clear this function.
+            self._split_remote_packed_rows(nixl_agent_meta)
         elif (
             self.pp_size > 1
             and len(nixl_agent_meta.kv_caches_base_addr) > num_local_regions
@@ -2293,6 +2355,17 @@ class NixlBaseConnectorWorker:
                 nixl_agent_meta.region_mem_types = nixl_agent_meta.region_mem_types[
                     start:end
                 ]
+
+        if (
+            self._packed_member_layouts
+            and not self._transfer_layer_region_indices
+            and self._packed_member_layouts != nixl_agent_meta.packed_member_layouts
+        ):
+            # Whole rows transfer as one unit, so both sides must pack them alike.
+            raise RuntimeError(
+                "Packed KV block rows differ between P and D. Use the same "
+                "VLLM_KV_CACHE_LAYOUT and block size on both sides."
+            )
 
         ### Register remote engine in TransferTopology (idempotent).
         physical_blocks_per_logical = (
@@ -2531,7 +2604,7 @@ class NixlBaseConnectorWorker:
                 "is not supported for Mamba hybrid models. "
                 f"Local: {self._physical_blocks_per_logical_kv_block}, "
                 f"Remote: {remote_physical_per_logical}. "
-                "Disable prefix caching with --no-enable-prefix-caching."
+                "Disable prefix caching with --disable-prefix-caching."
             )
 
         if block_size_ratio != 1:
@@ -2598,6 +2671,22 @@ class NixlBaseConnectorWorker:
             raise RuntimeError(
                 "Heterogeneous TP head-dimension splitting requires contiguous heads. "
                 "Use a block-contiguous layout (e.g. LBHNC) on the prefill side."
+            )
+        # NVFP4 pages store all heads' data before all heads' scales, so a
+        # head's bytes are not a contiguous slice of the page.
+        if (
+            not self.use_mla
+            and self.transfer_topo.local_physical_heads
+            != max(1, self.transfer_topo.total_num_kv_heads // remote_tp_size)
+            and any(
+                isinstance(spec, AttentionSpec) and spec.kv_quant_mode.is_nvfp4
+                for spec in self._layer_specs.values()
+            )
+        ):
+            raise RuntimeError(
+                "NIXL KV-head re-sharding is not supported for NVFP4 KV cache "
+                f"(local TP {self.transfer_topo.tp_size}, remote TP "
+                f"{remote_tp_size}). Use matching TP sizes on prefill and decode."
             )
 
         # Per-region block_len validation enforcing the P/D invariant.
