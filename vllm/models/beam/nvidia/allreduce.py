@@ -10,7 +10,6 @@ from pathlib import Path
 import torch
 
 from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
-from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
 from vllm.utils.math_utils import cdiv
 
@@ -55,8 +54,7 @@ class BeamAllReduceWorkspace:
     ) -> "BeamAllReduceWorkspace | None":
         # The CUDA epilogue handles one packed load per thread.
         if (
-            not current_platform.is_cuda()
-            or group.size() not in (2, 4, 8)
+            group.size() not in (2, 4, 8)
             or dtype != torch.bfloat16
             or hidden_size % 1024
             or not 1024 <= hidden_size <= 8192

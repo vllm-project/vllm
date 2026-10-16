@@ -21,8 +21,7 @@ def use_low_latency_gemm(weight: torch.Tensor) -> bool:
     from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import is_available
 
     return (
-        current_platform.is_cuda()
-        and weight.dtype == torch.bfloat16
+        weight.dtype == torch.bfloat16
         and weight.device.type == "cuda"
         and current_platform.is_device_capability_family(100)
         and weight.shape in ((1792, 5120), (3584, 5120))

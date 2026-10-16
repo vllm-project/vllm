@@ -22,7 +22,6 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.utils import sequence_parallel_chunk
-from vllm.platforms import current_platform
 from vllm.utils.torch_utils import (
     STR_DTYPE_TO_TORCH_DTYPE,
     direct_register_custom_op,
@@ -208,9 +207,6 @@ class BeamSparseMoeBlock(nn.Module):
         *,
         workspace: "BeamAllReduceWorkspace | None" = None,
     ) -> bool:
-        if not current_platform.is_cuda():
-            return False
-
         from vllm.config.kernel import FLASHINFER_MOE_EP_CUTEDSL
         from vllm.model_executor.layers.fused_moe.experts.flashinfer_moe_ep import (
             FlashInferMoeEpExperts,

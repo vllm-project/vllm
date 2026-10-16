@@ -3,7 +3,6 @@
 
 import torch
 
-from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.triton_utils import tldevice as libdevice
 
@@ -48,15 +47,13 @@ def beam_softcap_logits(logits: torch.Tensor, cap: float) -> torch.Tensor:
     """Softcap in FP32 and round back into the original logits buffer."""
     assert logits.ndim == 2 and logits.stride(1) == 1
     if logits.numel():
-        launch_kwargs = {"enable_fp_fusion": False}
-        if current_platform.is_cuda():
-            launch_kwargs["enable_reflect_ftz"] = False
         _softcap_logits_kernel[(logits.shape[0], triton.cdiv(logits.shape[1], 1024))](
             logits,
             logits.shape[1],
             logits.stride(0),
             cap,
             1024,
-            **launch_kwargs,
+            enable_fp_fusion=False,
+            enable_reflect_ftz=False,
         )
     return logits

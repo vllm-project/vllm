@@ -22,7 +22,6 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.model_loader.weight_utils import sharded_weight_loader
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.beam import BeamConfig
 from vllm.v1.attention.backend import AttentionType
 
@@ -188,8 +187,7 @@ class BeamAttention(nn.Module):
         )
 
         self.fuse_kv_insert = (
-            current_platform.is_cuda()
-            and self.attn.attn_backend.get_name() in ("FLASH_ATTN", "FLASHINFER")
+            self.attn.attn_backend.get_name() in ("FLASH_ATTN", "FLASHINFER")
             and self.attn.impl.dcp_world_size == 1
             and self.attn.kv_sharing_target_layer_name is None
         )
