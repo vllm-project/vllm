@@ -9,7 +9,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from einops import rearrange
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 from transformers.activations import GELUActivation
 from transformers.feature_extraction_utils import BatchFeature
 
@@ -75,7 +75,7 @@ def split_thw(grid_thw: torch.Tensor) -> torch.Tensor:
 
 def get_num_patches(
     grid_thw: torch.Tensor, num_frames: list[int] | torch.Tensor
-) -> list[int]:
+) -> torch.Tensor:
     """Return num_patches per video.
 
     Args:
@@ -84,7 +84,7 @@ def get_num_patches(
         num_frames: List or tensor indicating the number of frames per video
 
     Returns:
-        List of ints representing the number of patches for each video
+        Tensor of the number of patches for each video
 
     Examples:
         >>> # Suppose there are 2 videos with a total of 3 grids
@@ -197,8 +197,8 @@ KeyeVL1_5VideoInputs: TypeAlias = (
 class KeyeVL1_5Projector(nn.Module):
     def __init__(
         self,
-        text_config: PretrainedConfig,
-        vision_config: PretrainedConfig,
+        text_config: PreTrainedConfig,
+        vision_config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
@@ -509,15 +509,15 @@ class KeyeVL1_5ForConditionalGeneration(
 ):
     def _build_projector(
         self,
-        text_config: PretrainedConfig,
-        vision_config: PretrainedConfig,
+        text_config: PreTrainedConfig,
+        vision_config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> nn.Module:
         return KeyeVL1_5Projector(text_config, vision_config, quant_config, prefix)
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        config: PretrainedConfig = vllm_config.model_config.hf_config
+        config: PreTrainedConfig = vllm_config.model_config.hf_config
         self.merge_size = config.vision_config.spatial_merge_size
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 
@@ -538,12 +538,11 @@ class KeyeVL1_5ForConditionalGeneration(
                 image_grid_thw=image_grid_thw,
             )
 
-        if image_embeds is not None:
-            return KeyeVL1_5ImageEmbeddingInputs(
-                type="image_embeds",
-                image_embeds=image_embeds,
-                image_grid_thw=image_grid_thw,
-            )
+        return KeyeVL1_5ImageEmbeddingInputs(
+            type="image_embeds",
+            image_embeds=image_embeds,
+            image_grid_thw=image_grid_thw,
+        )
 
     def _parse_and_validate_video_input(
         self, **kwargs: object
@@ -564,13 +563,12 @@ class KeyeVL1_5ForConditionalGeneration(
                 num_frames=num_frames,
             )
 
-        if video_embeds is not None:
-            return KeyeVL1_5VideoEmbeddingInputs(
-                type="video_embeds",
-                video_embeds=video_embeds,
-                video_grid_thw=video_grid_thw,
-                num_frames=num_frames,
-            )
+        return KeyeVL1_5VideoEmbeddingInputs(
+            type="video_embeds",
+            video_embeds=video_embeds,
+            video_grid_thw=video_grid_thw,
+            num_frames=num_frames,
+        )
 
     def _process_video_input(
         self, video_input: KeyeVL1_5VideoInputs
