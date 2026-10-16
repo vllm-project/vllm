@@ -1487,6 +1487,7 @@ def run_attention_backend(
 
     # Force the prefill backend selection (None means auto-select).
     vllm_config.attention_config.mla_prefill_backend = prefill_backend
+    mla_attention_module.backend_supports_prefill_query_quantization.cache_clear()
 
     # Set the current vllm config so that get_current_vllm_config() works
     # in the backend implementations
