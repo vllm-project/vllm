@@ -483,16 +483,6 @@ class TopKTopPSampler(nn.Module):
         return xpu_sample(logits, k, p, self.logprobs_mode)
 
 
-# Note: this is a workaround for
-# https://github.com/pytorch/pytorch/pull/151218
-@torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
-def compiled_random_sample(logits: torch.Tensor) -> torch.Tensor:
-    probs = logits.softmax(dim=-1, dtype=torch.float32)
-    q = torch.empty_like(probs)
-    q.exponential_()
-    return probs.div(q).argmax(dim=-1).view(-1)
-
-
 def apply_top_k_top_p(
     logits: torch.Tensor, k: torch.Tensor | None, p: torch.Tensor | None
 ) -> torch.Tensor:
