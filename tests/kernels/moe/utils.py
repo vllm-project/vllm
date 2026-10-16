@@ -594,6 +594,7 @@ def check_deferred_moe_finalize(
     run: Callable[[], torch.Tensor | UnfinalizedMoEOutput],
     router_weights: torch.Tensor | None = None,
     chunked: bool = False,
+    allow_ep: bool = False,
 ) -> None:
     """Check a kernel that defers its finalize against the finalize it skips.
 
@@ -608,7 +609,7 @@ def check_deferred_moe_finalize(
     expected_weights = None if router_weights is None else router_weights.clone()
     finalized = run()
     assert isinstance(finalized, torch.Tensor)
-    moe_config.defer_moe_finalize()
+    moe_config.defer_moe_finalize(allow_ep=allow_ep)
     output = run()
     assert moe_config.should_defer_moe_finalize(finalized.shape[0]) != chunked
     if chunked:
@@ -621,11 +622,16 @@ def check_deferred_moe_finalize(
             output.expert_weights, expected_weights, atol=0, rtol=0
         )
     reference = torch.empty_like(finalized)
+    permutation = output.expanded_idx_to_permuted_idx
+    # moe_unpermute skips out-of-range rows, while TRTLLM-Gen marks them -1.
+    permutation = permutation.masked_fill(
+        permutation < 0, output.gemm2_permuted.shape[0]
+    )
     moe_unpermute(
         reference,
         output.gemm2_permuted,
         output.expert_weights.float(),
-        output.expanded_idx_to_permuted_idx,
+        permutation,
         # The kernel reads its valid-row count through this pointer either way.
         expert_first_token_offset=output.gemm2_permuted.new_full(
             (1,), output.gemm2_permuted.shape[0], dtype=torch.int64
