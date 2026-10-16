@@ -27,7 +27,7 @@ logger = init_logger(__name__)
 
 # Consumed by kimi_k3_triton_warmup.py during kernel_warmup().
 def get_gluon_chunk_kda_warmup_profiles() -> tuple[tuple[int, int], ...]:
-    return ((1, 64), (4, 64), (16, 64), (1, 4096), (4, 2048))
+    return ((1, 64), (2, 64), (4, 64), (8, 64), (16, 64), (1, 4096), (2, 2048))
 
 
 def chunk_kda_prefill(

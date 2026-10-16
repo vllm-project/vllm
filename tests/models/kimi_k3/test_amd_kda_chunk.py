@@ -117,12 +117,7 @@ def test_fused_chunk_matches_triton(seqlens: list[int]) -> None:
     [[1], [64], [1024], [4096], [513, 64, 1, 1200], [512] * 6],
 )
 def test_gluon_chunk_matches_triton(seqlens: list[int]) -> None:
-    """AITER's Gluon chunk_kda must match the Triton chunk path too.
-
-    Outputs agree to bfloat16 rounding. The final state is about 10x looser
-    than the fused kernel's (relative L2 ~3e-3 on MI355X, flat in sequence
-    length, so no drift); bound it just above that.
-    """
+    """AITER's Gluon chunk_kda must match the Triton chunk path too."""
     from vllm._aiter_ops import rocm_aiter_ops
 
     if not rocm_aiter_ops.is_kda_gluon_prefill_available():
@@ -133,6 +128,7 @@ def test_gluon_chunk_matches_triton(seqlens: list[int]) -> None:
     o_gluon, state_gluon = _run(inp, use_fused=False, backend="gluon")
 
     torch.testing.assert_close(o_gluon.float(), o_ref.float(), rtol=2e-2, atol=2e-2)
+    torch.testing.assert_close(state_gluon, state_ref, rtol=5e-3, atol=5e-3)
     state_rel = (state_gluon - state_ref).norm() / state_ref.norm()
     assert state_rel < 5e-3, f"final state relative L2 error {state_rel:.2e}"
 
