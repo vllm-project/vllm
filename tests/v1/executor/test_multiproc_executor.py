@@ -8,7 +8,6 @@ from typing import Any
 
 import pytest
 
-from vllm.v1.executor import multiproc_executor
 from vllm.v1.executor.multiproc_executor import MultiprocExecutor, WorkerProc
 from vllm.v1.outputs import DraftTokenIds
 
@@ -102,59 +101,3 @@ def test_model_rpc_uses_execute_model_timeout(monkeypatch, method, result, stall
             getattr(executor, method)()
     else:
         assert getattr(executor, method)() is result
-
-
-class _ReplyQueue:
-    def __init__(self, replies: list) -> None:
-        self.replies = deque(replies)
-
-    def dequeue(self, timeout=None):
-        return self.replies.popleft()
-
-
-def test_collective_rpc_drains_every_rank_on_failure():
-    """A failure on one rank used to raise before the other ranks' replies
-    were read, so the next call returned the previous call's replies."""
-    ok, failure = WorkerProc.ResponseStatus.SUCCESS, WorkerProc.ResponseStatus.FAILURE
-    executor = object.__new__(MultiprocExecutor)
-    executor.rpc_broadcast_mq = SimpleNamespace(enqueue=lambda msg: None)
-    executor.is_failed = False
-    executor.futures_queue = deque()
-    executor.response_mqs = [
-        _ReplyQueue([(failure, "rank 0 failed"), (ok, "second-0")]),
-        _ReplyQueue([(failure, "rank 1 failed"), (ok, "second-1")]),
-    ]
-    with pytest.raises(RuntimeError, match="rank 0 failed"):
-        executor.collective_rpc("first")
-    assert executor.collective_rpc("second") == ["second-0", "second-1"]
-
-
-class _BlockedQueue:
-    """A rank stuck in a collective: it never replies."""
-
-    def __init__(self) -> None:
-        self.timeouts: list = []
-
-    def dequeue(self, timeout=None):
-        self.timeouts.append(timeout)
-        assert timeout is not None, "would block forever"
-        raise TimeoutError
-
-
-def test_collective_rpc_failure_drain_does_not_wait_forever():
-    """Draining after a failure must not hang on a rank that never replies,
-    e.g. one blocked in a collective the failed rank never joined."""
-    failure = WorkerProc.ResponseStatus.FAILURE
-    blocked = _BlockedQueue()
-    executor = object.__new__(MultiprocExecutor)
-    executor.rpc_broadcast_mq = SimpleNamespace(enqueue=lambda msg: None)
-    executor.is_failed = False
-    executor.futures_queue = deque()
-    executor.response_mqs = [_ReplyQueue([(failure, "rank 0 failed")]), blocked]
-    with pytest.raises(RuntimeError, match="rank 0 failed"):
-        executor.collective_rpc("first")
-    assert blocked.timeouts[0] <= multiproc_executor._FAILURE_DRAIN_TIMEOUT_S
-    # The reply queues are out of step, so later calls fail fast.
-    assert executor.is_failed
-    with pytest.raises(RuntimeError, match="Executor failed"):
-        executor.collective_rpc("second")

@@ -74,10 +74,6 @@ from vllm.v1.worker.worker_base import WorkerWrapperBase
 
 logger = init_logger(__name__)
 
-# After one rank reports a failure, how long collective_rpc waits for the other
-# ranks' replies to the same call before giving up on them.
-_FAILURE_DRAIN_TIMEOUT_S = 10.0
-
 
 class FutureWrapper(Future):
     def __init__(
@@ -436,44 +432,20 @@ class MultiprocExecutor(Executor):
 
         def get_response():
             responses = []
-            failure = None
-            call_deadline = deadline
             for mq in response_mqs:
                 dequeue_timeout = (
-                    None
-                    if call_deadline is None
-                    else max(0.0, call_deadline - time.monotonic())
+                    None if deadline is None else max(0.0, deadline - time.monotonic())
                 )
                 try:
                     status, result = mq.dequeue(timeout=dequeue_timeout)
                 except TimeoutError as e:
-                    if failure is not None:
-                        # A rank never replied after another failed (e.g. it
-                        # is blocked in a collective the failed rank never
-                        # joined): the reply queues are out of step for good.
-                        self.is_failed = True
-                        raise RuntimeError(
-                            f"Worker failed with error '{failure}', please check"
-                            " the stack trace above for the root cause. Not every"
-                            " other rank replied, so the executor is marked failed."
-                        ) from e
                     raise TimeoutError(f"RPC call to {method} timed out.") from e
                 if status != WorkerProc.ResponseStatus.SUCCESS:
-                    # Keep draining: the other ranks' replies to this call
-                    # would otherwise be read as the next call's results.
-                    # Bound the wait, since a peer may never reply.
-                    if failure is None:
-                        failure = result
-                        drain_deadline = time.monotonic() + _FAILURE_DRAIN_TIMEOUT_S
-                        if call_deadline is None or drain_deadline < call_deadline:
-                            call_deadline = drain_deadline
-                    continue
+                    raise RuntimeError(
+                        f"Worker failed with error '{result}', please check the"
+                        " stack trace above for the root cause"
+                    )
                 responses.append(result)
-            if failure is not None:
-                raise RuntimeError(
-                    f"Worker failed with error '{failure}', please check the"
-                    " stack trace above for the root cause"
-                )
             return responses[0] if output_rank is not None else responses
 
         future = FutureWrapper(
