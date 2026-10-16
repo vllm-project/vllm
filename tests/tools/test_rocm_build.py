@@ -6,7 +6,7 @@ ship a stale image."""
 
 from pathlib import Path
 
-import re
+import regex as re
 
 ROOT = Path(__file__).parents[2]
 MARKER = "# ==== per-commit stages: nothing below is part of the runtime key ===="
@@ -28,8 +28,9 @@ def context_sources(dockerfile: str) -> set[str]:
 
 def key_paths(name: str, stack: str = "") -> set[str]:
     script = (ROOT / ".buildkite/scripts/rocm/build.sh").read_text()
-    block = re.search(rf"^{name}=\$\(.*?sha256sum", script, re.M | re.S).group(0)
-    paths = set(re.findall(r"\b(?:requirements|tools)/[\w./-]+", block))
+    block_match = re.search(rf"^{name}=\$\(.*?sha256sum", script, re.M | re.S)
+    assert block_match is not None, f"{name}= block not found in build.sh"
+    paths = set(re.findall(r"\b(?:requirements|tools)/[\w./-]+", block_match.group(0)))
     # therock_wheels.py is injected into Ks via a helper variable only for the rocm stack
     if name == "Ks" and stack == "rocm":
         m = re.search(r"_[Tt][Rr][Ww]=.*?tools/[\w./-]+", script, re.S)

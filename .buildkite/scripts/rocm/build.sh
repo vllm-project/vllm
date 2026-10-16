@@ -112,7 +112,7 @@ meta()   { buildkite-agent meta-data "$@"; }
 #   A Kr cache miss triggers a runtime rebuild (minutes).
 
 _trw=$( [[ $STACK == rocm ]] && echo tools/vllm-rocm/therock_wheels.py || true )
-Ks=$(git ls-tree HEAD -- "$SDF" $_trw | sha256sum | cut -c1-16)
+Ks=$(git ls-tree HEAD -- "$SDF" ${_trw:+"$_trw"} | sha256sum | cut -c1-16)
 Kr=$(
   {
     echo "$Ks"
@@ -172,7 +172,7 @@ case $MODE in
   base)
     # Ensure the stack and runtime images exist; record their digests in metadata
     # so subsequent ci / release modes can pull them without re-resolving.
-    STACK_IMAGE=$(ensure stack-$STACK "stack-$STACK-$Ks" -wheels)
+    STACK_IMAGE=$(ensure "stack-${STACK}" "stack-${STACK}-${Ks}" -wheels)
     export STACK_IMAGE
     RUNTIME=$(ensure runtime "runtime-$STACK-$Kr")
     wheels_ref=${STACK_IMAGE%@*}-wheels
