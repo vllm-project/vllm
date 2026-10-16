@@ -56,7 +56,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     weight_amax,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-    cutlass_fp8_supported,
+    dynamic_per_token_fp8_supported,
 )
 from vllm.model_executor.model_loader.reload.layerwise import (
     initialize_online_processing,
@@ -190,7 +190,9 @@ class Fp8PerTensorOnlineLinearMethod(OnlineLinearBase):
     Loads fp16/bf16 weights and quantizes them per-tensor during loading."""
 
     activation_quant_key = (
-        kFp8DynamicTokenSym if cutlass_fp8_supported() else kFp8DynamicTensorSym
+        kFp8DynamicTokenSym
+        if dynamic_per_token_fp8_supported()
+        else kFp8DynamicTensorSym
     )
 
     def __init__(self):

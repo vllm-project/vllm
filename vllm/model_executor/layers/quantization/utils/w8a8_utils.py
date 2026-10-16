@@ -18,6 +18,16 @@ def cutlass_fp8_supported() -> bool:
     return ops.cutlass_scaled_mm_supports_fp8(capability)
 
 
+def dynamic_per_token_fp8_supported() -> bool:
+    """Whether dynamic FP8 activations should use per-token scales.
+
+    Per-token scaling is preferred over per-tensor whenever the platform's
+    w8a8 FP8 linear kernel can consume [M, 1] activation scales: CUTLASS on
+    CUDA, and oneDNN-backed fp8_gemm on XPU.
+    """
+    return current_platform.is_xpu() or cutlass_fp8_supported()
+
+
 def cutlass_block_fp8_supported() -> bool:
     if not current_platform.is_cuda():
         return False

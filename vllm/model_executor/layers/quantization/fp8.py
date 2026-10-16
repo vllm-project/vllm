@@ -66,7 +66,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-    cutlass_fp8_supported,
+    dynamic_per_token_fp8_supported,
     normalize_e4m3fn_to_e4m3fnuz,
 )
 from vllm.model_executor.parameter import (
@@ -271,10 +271,10 @@ class Fp8LinearMethod(LinearMethodBase):
             )
         else:
             self.weight_quant_key = kFp8StaticTensorSym
-            # Use per-token quantization for better perf if dynamic and cutlass
+            # Use per-token quantization for better perf if dynamic and supported
             if self.act_q_static:
                 self.activation_quant_key = kFp8StaticTensorSym
-            elif cutlass_fp8_supported():
+            elif dynamic_per_token_fp8_supported():
                 self.activation_quant_key = kFp8DynamicTokenSym
             else:
                 self.activation_quant_key = kFp8DynamicTensorSym
