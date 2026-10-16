@@ -531,11 +531,6 @@ class FusedMoEExperts(ABC):
     def is_monolithic() -> bool:
         raise NotImplementedError("Implemented by subclasses.")
 
-    @staticmethod
-    def _supports_hash_routing() -> bool:
-        """Whether a monolithic kernel implements hash routing."""
-        return False
-
     @property
     def expects_unquantized_inputs(self) -> bool:
         """Whether or not the PrepareFinalize should defer input quantization
@@ -667,6 +662,15 @@ class FusedMoEExperts(ABC):
         in addition to the experts if certain routers are not supported.
         """
         return True
+
+    @staticmethod
+    def _supports_hash_routing() -> bool:
+        """Whether a monolithic kernel implements hash routing itself.
+
+        Kernels that return True receive `input_ids` and `hash_indices_table`
+        in `apply()` for layers with a hash-routing table.
+        """
+        return False
 
     @staticmethod
     def _supports_router_logits_dtype(
@@ -1623,6 +1627,11 @@ class FusedMoEKernelMonolithicImpl:
                     f"kernel {type(self.fused_experts).__name__}."
                 )
             routing_replay_out = routing_sink.buffer[: len(a1q)]
+        hash_kwargs = (
+            {"input_ids": input_ids, "hash_indices_table": hash_indices_table}
+            if hash_indices_table is not None
+            else {}
+        )
         fused_out = self.fused_experts.apply(
             hidden_states=a1q,
             w1=w1,
