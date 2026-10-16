@@ -65,20 +65,21 @@ def test_moe_sp_rejects_pipeline_parallel() -> None:
         ),
     )
     with (
-        patch("vllm.platforms.current_platform.is_cuda", return_value=True),
+        patch("vllm.platforms.current_platform.is_cuda_alike", return_value=True),
         pytest.raises(ValueError, match="MoE SP requires PP=1"),
     ):
         Qwen4ExpForConditionalGenerationConfig.verify_and_update_config(config)
 
 
+@spawn_new_process_for_each_test
+@pytest.mark.parametrize("backend", ["amd", "nvidia"])
 @pytest.mark.parametrize("use_sp", [False, True])
-def test_qwen4_exp_mtp_returns_sample_and_multi_streams(use_sp: bool) -> None:
+def test_qwen4_exp_mtp_returns_sample_and_multi_streams(
+    backend: str, use_sp: bool
+) -> None:
     """MTP returns complete, contiguous outputs after gathering padded SP shards."""
-    from vllm.models.qwen4_exp.nvidia.mtp import (
-        Qwen4ExpMultiTokenPredictor,
-    )
-
-    model = object.__new__(Qwen4ExpMultiTokenPredictor)
+    mtp_module = f"vllm.models.qwen4_exp.{backend}.mtp"
+    model = object.__new__(import_module(mtp_module).Qwen4ExpMultiTokenPredictor)
     model.use_hc_sequence_parallel = use_sp
     model.use_sequence_parallel = False
     torch.nn.Module.__init__(model)
@@ -93,7 +94,9 @@ def test_qwen4_exp_mtp_returns_sample_and_multi_streams(use_sp: bool) -> None:
     def decoder(**kwargs):
         """Check that the embedding residual shares the hidden state's token slice."""
         hidden = kwargs["hidden_states"]
-        assert kwargs["prev_block_output"].shape == (hidden.shape[0], model.hidden_size)
+        if backend == "nvidia":
+            prev_block_output = kwargs["prev_block_output"]
+            assert prev_block_output.shape == (hidden.shape[0], model.hidden_size)
         return hidden, hidden, torch.zeros(hidden.shape[0], model.hc_count)
 
     model.layers = [decoder]
@@ -115,9 +118,9 @@ def test_qwen4_exp_mtp_returns_sample_and_multi_streams(use_sp: bool) -> None:
         return torch.cat([local, remote, torch.full_like(remote, float("nan"))])
 
     with (
-        patch("vllm.models.qwen4_exp.nvidia.mtp.get_pp_group", return_value=pp_group),
-        patch("vllm.models.qwen4_exp.nvidia.mtp.sp_shard", side_effect=lambda x: x[:2]),
-        patch("vllm.models.qwen4_exp.nvidia.mtp.sp_all_gather", side_effect=gather),
+        patch(f"{mtp_module}.get_pp_group", return_value=pp_group),
+        patch(f"{mtp_module}.sp_shard", side_effect=lambda x: x[:2]),
+        patch(f"{mtp_module}.sp_all_gather", side_effect=gather),
     ):
         sample_hidden, returned_multi_hidden = model.forward(
             input_ids=None,
