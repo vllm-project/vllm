@@ -12,6 +12,8 @@ import pytest
 import pytest_asyncio
 
 from tests.utils import RemoteLaunchRenderServer
+from vllm.entrypoints.anthropic.protocol import AnthropicMessagesRequest
+from vllm.entrypoints.anthropic.serving import DisabledThinkingEffortResolver
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
@@ -43,6 +45,51 @@ def _build_serving_render() -> ServingRender:
     serving.online_renderer.parser = None
     serving._check_model = AsyncMock(return_value=None)
     return serving
+
+
+@pytest.mark.asyncio
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize(
+    "configured_effort, thinking, expected_effort",
+    [
+        ("auto", {"type": "disabled"}, "low"),
+        ("high", {"type": "disabled"}, "high"),
+        ("none", {"type": "disabled"}, "none"),
+        ("high", None, "medium"),
+    ],
+)
+async def test_render_messages_resolves_disabled_thinking(
+    configured_effort, thinking, expected_effort
+):
+    serving = _build_serving_render()
+    serving._merge_inline_system = False
+    serving.online_renderer.model_config = serving.model_config
+    serving._disabled_thinking_effort_resolver = DisabledThinkingEffortResolver(
+        serving.online_renderer, configured_effort
+    )
+
+    async def render_chat(request, **kwargs):
+        if configured_effort == "auto" and request.reasoning_effort == "none":
+            raise ValueError("This renderer does not support reasoning_effort=none")
+        return [], [{"prompt_token_ids": [7, 8, 9]}]
+
+    serving.online_renderer.render_chat = AsyncMock(side_effect=render_chat)
+    request = AnthropicMessagesRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "Hello"}],
+        max_tokens=12,
+        thinking=thinking,
+        output_config={"effort": "medium"},
+    )
+
+    response = await serving.render_messages_request(request)
+
+    assert response.token_ids == [7, 8, 9]
+    rendered_request = serving.online_renderer.render_chat.await_args.args[0]
+    assert rendered_request.reasoning_effort == expected_effort
+    assert serving.online_renderer.render_chat.await_count == (
+        2 if configured_effort == "auto" else 1
+    )
 
 
 @pytest.mark.asyncio

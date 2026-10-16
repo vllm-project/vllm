@@ -18,6 +18,9 @@ from vllm.tasks import SupportedTask
 if TYPE_CHECKING:
     from starlette.datastructures import State
 
+    from vllm.entrypoints.anthropic.protocol import (
+        AnthropicDisabledThinkingEffortOption,
+    )
     from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 else:
     RequestLogger = object
@@ -28,6 +31,8 @@ logger = init_logger(__name__)
 def init_render_state(
     state: "State",
     request_logger: RequestLogger | None,
+    *,
+    disabled_thinking_effort: "AnthropicDisabledThinkingEffortOption" = "auto",
 ):
     from .derender.serving import ServingDerender
     from .render.serving import ServingRender
@@ -37,6 +42,7 @@ def init_render_state(
         state.online_renderer,
         request_logger=request_logger,
         tool_server=state.tool_server,
+        disabled_thinking_effort=disabled_thinking_effort,
     )
 
     state.serving_derender = ServingDerender(
@@ -52,7 +58,11 @@ def init_scale_out_state(
     engine_client: "EngineClient",
     request_logger: RequestLogger | None,
 ):
-    init_render_state(state, request_logger)
+    init_render_state(
+        state,
+        request_logger,
+        disabled_thinking_effort=args.anthropic_disabled_thinking_effort,
+    )
 
     from vllm.entrypoints.scale_out.token_in_token_out.serving import ServingTokens
 
