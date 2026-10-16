@@ -2778,19 +2778,24 @@ def test_sleep_unregisters_and_restores_kv_caches(dist_init):
 def test_registration_generation_bumps_on_changed_payload(
     default_vllm_config, dist_init
 ):
-    """Peers handshake again only when the published registration changed."""
+    """Requests tell decoders to handshake again only when the published
+    registration changed."""
     vllm_config = create_vllm_config()
     scheduler = NixlConnectorScheduler(
         vllm_config, vllm_config.kv_transfer_config.engine_id, make_kv_cache_config(16)
     )
     scheduler._nixl_handshake_listener_t = MagicMock()  # already serving
     generations: list[int] = []
-    for agent in (b"old", b"old", b"new"):  # startup, same keys, changed keys
+    for i, agent in enumerate((b"old", b"old", b"new")):  # startup, same, changed
         payload = NixlHandshakePayload(
             compatibility_hash="h", agent_metadata_bytes=agent
         )
         scheduler.set_xfer_handshake_metadata({(0, 0): payload})
-        generations.append(scheduler._registration_generation)
+        request = create_request(request_id=i, num_tokens=40, do_remote_decode=True)
+        request.status = RequestStatus.FINISHED_LENGTH_CAPPED
+        params = scheduler.request_finished(request, ([0, 1, 2],))[1]
+        assert params is not None
+        generations.append(params["remote_registration_generation"])
     assert generations[0] == generations[1] < generations[2]
 
 
