@@ -1211,6 +1211,29 @@ class DirectDCPQGatherWorkspace(DirectCPWorkspace):
         self.completion = self.received_signal.new_zeros((num_ubatches, 1))
         torch.accelerator.synchronize()
 
+    def query_output(self, local_query: torch.Tensor, ubatch: int) -> torch.Tensor:
+        if not 0 <= ubatch < self.num_ubatches:
+            raise ValueError(
+                f"DCP q-gather ubatch {ubatch} exceeds {self.num_ubatches} slots"
+            )
+        if local_query.ndim == 3 and local_query.shape[1] != self.heads_per_rank:
+            raise ValueError(
+                f"DCP q-gather expected {self.heads_per_rank} local query heads, "
+                f"got {local_query.shape[1]}"
+            )
+
+        num_tokens = local_query.shape[0]
+        output = torch.as_strided(
+            self.final_query[ubatch],
+            size=(num_tokens, self.gathered_num_heads, self.head_dim),
+            stride=(
+                self.gathered_num_heads * self.head_dim,
+                self.head_dim,
+                1,
+            ),
+        )
+        return output
+
 
 @functools.cache
 def get_direct_dcp_q_gather_workspace(
@@ -1349,7 +1372,7 @@ class DirectDCPQGather(CustomOp):
 
     def forward_native(self, local_query: torch.Tensor) -> torch.Tensor:
         workspace = self.workspace
-        output = self._query_output(local_query, dbo_current_ubatch_id())
+        output = workspace.query_output(local_query, dbo_current_ubatch_id())
         gathered = local_query.new_empty((workspace.world_size, *local_query.shape))
         dist.all_gather_into_tensor(
             gathered.flatten(0, 1), local_query.contiguous(), group=workspace.group
@@ -1357,34 +1380,10 @@ class DirectDCPQGather(CustomOp):
         output.copy_(gathered.movedim(0, 1).reshape(output.shape))
         return output
 
-    def _query_output(self, local_query: torch.Tensor, ubatch: int) -> torch.Tensor:
-        workspace = self.workspace
-        if not 0 <= ubatch < workspace.num_ubatches:
-            raise ValueError(
-                f"DCP q-gather ubatch {ubatch} exceeds {workspace.num_ubatches} slots"
-            )
-        if local_query.ndim == 3 and local_query.shape[1] != workspace.heads_per_rank:
-            raise ValueError(
-                f"DCP q-gather expected {workspace.heads_per_rank} local query heads, "
-                f"got {local_query.shape[1]}"
-            )
-
-        num_tokens = local_query.shape[0]
-        output = torch.as_strided(
-            workspace.final_query[ubatch],
-            size=(num_tokens, workspace.gathered_num_heads, workspace.head_dim),
-            stride=(
-                workspace.gathered_num_heads * workspace.head_dim,
-                workspace.head_dim,
-                1,
-            ),
-        )
-        return output
-
     def forward_cuda(self, local_query: torch.Tensor) -> torch.Tensor:
         workspace = self.workspace
         ubatch = dbo_current_ubatch_id()
-        output = self._query_output(local_query, ubatch)
+        output = workspace.query_output(local_query, ubatch)
         query_multicast_ptr, signal_multicast_ptr = workspace.multicast_ptrs[ubatch]
         torch.ops._C.direct_dcp_q_gather(
             local_query,

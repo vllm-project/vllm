@@ -321,8 +321,8 @@ In addition, you can also register all your `CustomOp` at one place for better m
 `vllm.v1.attention.ops.dcp` support OOT implementations of direct query gather,
 output exchange/LSE reduction and chunked-context KV gather. Each `CustomOp`
 holds its core-owned workspace. `MLADCPManager` constructs the ops during model
-initialization; cached workspaces only allocate and hold buffers and layout/protocol
-metadata. The ops own output-view preparation, communication and reduction.
+initialization; cached workspaces own buffers, layout/protocol metadata and buffer
+views. The ops own communication and reduction.
 
 On CUDA, override `forward_cuda`. `forward_oot` applies to an OOT platform.
 Register from a `vllm.general_plugins` entry point before model construction on

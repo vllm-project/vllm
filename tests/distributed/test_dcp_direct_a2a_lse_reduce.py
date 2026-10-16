@@ -93,6 +93,9 @@ def test_oot_collective_dispatch_preserves_native_fallback(
         workspace.final_query = torch.zeros(1, 2, 2, 2)
         workspace.gathered_num_heads = workspace.padded_num_heads = 2
         workspace.multicast_ptrs = [(1, 2)]
+        workspace.query_output = functools.partial(
+            dcp.DirectDCPQGatherWorkspace.query_output, workspace
+        )
         output = workspace.final_query[0]
         args = [torch.full((2, 1, 2), 42.0)]
         kernel_name, output_index = "direct_dcp_q_gather", 1
