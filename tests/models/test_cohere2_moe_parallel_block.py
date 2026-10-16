@@ -305,6 +305,38 @@ def test_dual_stream_off_with_all2all_kernels(monkeypatch, tp_size: int) -> None
 
 
 @pytest.mark.parametrize(
+    ("enabled", "is_cuda", "use_ubatching"),
+    [
+        pytest.param(False, True, False, id="flag-off"),
+        pytest.param(True, False, False, id="non-cuda"),
+        pytest.param(True, True, True, id="microbatching"),
+    ],
+)
+def test_no_dual_stream_when_off_or_unsupported(
+    monkeypatch, enabled: bool, is_cuda: bool, use_ubatching: bool
+) -> None:
+    """Non-CUDA platforms and microbatching (DBO) ignore the flag: each layer
+    holds a single fork/join state, which microbatches would share."""
+    monkeypatch.setenv("VLLM_COHERE2_ATTN_MOE_DUAL_STREAM", str(int(enabled)))
+    monkeypatch.setattr(
+        cohere2_moe, "current_platform", SimpleNamespace(is_cuda=lambda: is_cuda)
+    )
+    vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(use_ubatching=use_ubatching)
+    )
+
+    assert cohere2_moe._make_dual_stream(vllm_config) is None
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="needs CUDA streams")
+def test_dual_stream_created_on_cuda(monkeypatch) -> None:
+    monkeypatch.setenv("VLLM_COHERE2_ATTN_MOE_DUAL_STREAM", "1")
+    vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(use_ubatching=False))
+
+    assert isinstance(cohere2_moe._make_dual_stream(vllm_config), torch.cuda.Stream)
+
+
+@pytest.mark.parametrize(
     ("runtime_mode", "num_tokens", "breakable_capture"),
     [
         (CUDAGraphMode.PIECEWISE, 2, False),

@@ -380,6 +380,32 @@ class Cohere2Moe(nn.Module):
         return final_hidden_states.view(orig_shape)
 
 
+def _make_dual_stream(vllm_config: VllmConfig) -> torch.cuda.Stream | None:
+    """Side stream shared by all decoder layers, or None when the dual stream
+    is off or unsupported."""
+    if not envs.VLLM_COHERE2_ATTN_MOE_DUAL_STREAM:
+        return None
+    if not current_platform.is_cuda():
+        logger.warning_once(
+            "VLLM_COHERE2_ATTN_MOE_DUAL_STREAM is only supported on CUDA; ignoring it."
+        )
+        return None
+    if vllm_config.parallel_config.use_ubatching:
+        # Each layer holds a single fork/join state, so microbatches would race.
+        logger.warning_once(
+            "VLLM_COHERE2_ATTN_MOE_DUAL_STREAM is not supported with "
+            "microbatching (DBO); ignoring it."
+        )
+        return None
+    logger.info_once(
+        "Cohere2MoE attention/MoE dual stream enabled (token threshold=%d).",
+        envs.VLLM_COHERE2_ATTN_MOE_DUAL_STREAM_TOKEN_THRESHOLD,
+    )
+    # Dedicated stream: the global aux_stream() is used by the shared-expert
+    # and LoRA overlaps inside the MoE branch.
+    return torch.cuda.Stream()
+
+
 @dataclasses.dataclass
 class _DualStreamState:
     """Dual-stream state of one decoder layer.
@@ -592,15 +618,7 @@ class Cohere2MoeModel(nn.Module, EagleModelMixin):
             config.vocab_size, config.hidden_size
         )
 
-        # Dedicated stream: the global aux_stream() is used by the shared-expert
-        # and LoRA overlaps inside the MoE branch.
-        self._moe_stream: torch.cuda.Stream | None = None
-        if envs.VLLM_COHERE2_ATTN_MOE_DUAL_STREAM and current_platform.is_cuda():
-            self._moe_stream = torch.cuda.Stream()
-            logger.info_once(
-                "Cohere2MoE attention/MoE dual stream enabled (token threshold=%d).",
-                envs.VLLM_COHERE2_ATTN_MOE_DUAL_STREAM_TOKEN_THRESHOLD,
-            )
+        self._moe_stream = _make_dual_stream(vllm_config)
 
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
