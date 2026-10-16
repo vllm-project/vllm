@@ -359,10 +359,9 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                         if self.config.parallel.per_rank_engine
                         else None
                     ),
-                    unlink_owner=False,
+                    unlink_owner=True,
                 )
                 self._scheduler_mmap = scheduler_mmap
-                scheduler_mmap.unlink()
 
                 # Create primary tier (CPU-based)
                 primary_tier = CPUPrimaryTierOffloadingManager(

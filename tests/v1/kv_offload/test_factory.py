@@ -257,9 +257,9 @@ def test_tiering_spec_create_worker_uses_single_slot_for_replicated_layout(monke
     assert worker_calls[0]["kv_caches"] is kv_caches
     assert worker_calls[0]["mmap_region"] is region
 
-    region.unlink.assert_not_called()
     spec.get_manager()
-    region.unlink.assert_called_once_with()
+    assert region_calls[1]["unlink_owner"] is True
+    region._unlink.assert_not_called()
 
 
 def test_tiering_spec_create_worker_uses_logical_rank_for_sharded_layout(monkeypatch):
@@ -352,8 +352,9 @@ def test_tiering_spec_scheduler_region_uses_startup_barrier(monkeypatch):
     spec.get_manager()
 
     assert region_calls[0]["barrier"] is barrier
+    assert region_calls[0]["unlink_owner"] is True
     barrier.assert_called_once_with()
-    region.unlink.assert_called_once_with()
+    region._unlink.assert_not_called()
 
 
 @pytest.mark.parametrize("world_size", [2, 4, 8])

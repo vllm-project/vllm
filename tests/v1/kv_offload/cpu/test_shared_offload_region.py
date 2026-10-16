@@ -1128,7 +1128,7 @@ def test_backing_file_unlinked_after_barrier(iid):
         # A stale generation must not unlink the path of its replacement.
         replacement = _make_region(iid, unlink_owner=False)
         try:
-            assert not region.unlink()
+            assert not region._unlink()
             assert os.stat(path).st_ino == os.fstat(replacement.fd).st_ino
         finally:
             replacement.cleanup()

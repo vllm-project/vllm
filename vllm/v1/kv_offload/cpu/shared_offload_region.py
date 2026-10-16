@@ -185,7 +185,7 @@ class SharedOffloadRegion:
                     barriers_remaining -= 1
                     barrier()
                 if unlink_owner:
-                    self.unlink()
+                    self._unlink()
                 populate_write_fn = _get_populate_write_fn(self.mmap_obj)
                 index, count = populate_shard
                 share = round_up(cdiv(self.total_size_bytes, count), self.page_size)
@@ -206,7 +206,7 @@ class SharedOffloadRegion:
                 barriers_remaining -= 1
                 barrier()
             if unlink_owner and populate_shard is None:
-                self.unlink()
+                self._unlink()
         except Exception:
             path_unlinked = False
             if created_path:
@@ -269,7 +269,7 @@ class SharedOffloadRegion:
                 time.perf_counter() - _t0,
             )
 
-    def unlink(self) -> bool:
+    def _unlink(self) -> bool:
         """Unlink the pathname only if it still names our mapped file.
 
         Best-effort, for two reasons: Linux cannot unlink by inode, so a
@@ -441,7 +441,7 @@ class SharedOffloadRegion:
 
     def _unlink_for_abort(self) -> None:
         try:
-            self.unlink()
+            self._unlink()
         except Exception:
             logger.warning("Failed to unlink path %s", self.mmap_path, exc_info=True)
 
