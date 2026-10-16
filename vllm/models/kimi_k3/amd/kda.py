@@ -95,7 +95,9 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         assert isinstance(spec, MambaSpec)
         # Only the fused path exports the checkpoint snapshots
         can_checkpoint = (
-            self.use_prefill_checkpoint and self.use_fused_chunk and self.use_safe_gate
+            self.use_prefill_checkpoint
+            and self.kda_prefill_backend == "fused"
+            and self.use_safe_gate
         )
         if can_checkpoint and vllm_config.cache_config.mamba_cache_mode == "align":
             logger.info_once("Kimi-K3 KDA prefill checkpoint enabled.")
@@ -242,13 +244,15 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 "The fused KDA chunk kernel requires gfx950 and a build that "
                 "includes it."
             )
-        self.use_fused_chunk = backend == "fused" or (
-            backend == "auto" and is_fused_kda_chunk_supported()
-        )
-        logger.info_once(
-            "Kimi-K3 KDA prefill backend: %s",
-            "fused" if self.use_fused_chunk else "triton",
-        )
+        self.kda_prefill_backend = backend
+        if backend == "auto":
+            if self.use_safe_gate and rocm_aiter_ops.is_kda_gluon_prefill_available():
+                self.kda_prefill_backend = "gluon"
+            elif is_fused_kda_chunk_supported():
+                self.kda_prefill_backend = "fused"
+            else:
+                self.kda_prefill_backend = "triton"
+        logger.info_once("Kimi-K3 KDA prefill backend: %s", self.kda_prefill_backend)
         # TODO: Remove the extra config arg once tested
         self.use_prefill_checkpoint = (
             additional_config.get("kda_prefill_checkpoint", True)
@@ -694,7 +698,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                     cu_seqlens=prefill_query_start_loc,
                     chunk_indices=m.chunk_indices,
                     chunk_offsets=m.chunk_offsets,
-                    use_fused_chunk=self.use_fused_chunk,
+                    backend=self.kda_prefill_backend,
                     out=core_attn_out[:, nd_tok:num_actual_tokens] if direct else None,
                     checkpoint_state=checkpoint_state,
                     checkpoint_offsets=checkpoint_offsets,

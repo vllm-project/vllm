@@ -2606,6 +2606,27 @@ class rocm_aiter_ops:
 
         return cls.is_linear_enabled() and on_gfx950()
 
+    @staticmethod
+    @functools.cache
+    def _kda_gluon_prefill_importable() -> bool:
+        try:
+            from aiter.ops.triton.attention.chunk_kda import chunk_kda  # noqa: F401
+
+            return True
+        except ImportError:
+            return False
+
+    @classmethod
+    @if_aiter_supported
+    def is_kda_gluon_prefill_available(cls) -> bool:
+        from vllm.platforms.rocm import get_cdna_version
+
+        return (
+            cls._AITER_ENABLED
+            and get_cdna_version() >= 4
+            and cls._kda_gluon_prefill_importable()
+        )
+
     @classmethod
     def get_aiter_allreduce(cls):
         """Return the TP device communicator's AITER custom-allreduce if it has
@@ -5109,6 +5130,50 @@ class rocm_aiter_ops:
             post_mix.view(*outer_shape, hc_mult, 1),
             comb_mix.view(*outer_shape, hc_mult, hc_mult),
             layer_input.view(*outer_shape, hidden_size),
+        )
+
+    @staticmethod
+    def kda_chunk_prefill(
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        g: torch.Tensor,
+        beta: torch.Tensor,
+        A_log: torch.Tensor,
+        dt_bias: torch.Tensor | None,
+        lower_bound: float | None,
+        cu_seqlens: torch.Tensor | None,
+        chunk_indices: torch.Tensor | None,
+        chunk_offsets: torch.Tensor | None,
+        scale: float,
+        out: torch.Tensor | None,
+        initial_state: torch.Tensor | None,
+        output_final_state: bool,
+        state_cache: torch.Tensor | None,
+        state_indices: torch.Tensor | None,
+        has_initial_state: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        from aiter.ops.triton.attention.chunk_kda import chunk_kda
+
+        return chunk_kda(
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            beta=beta,
+            A_log=A_log,
+            dt_bias=dt_bias,
+            lower_bound=lower_bound,
+            cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
+            chunk_offsets=chunk_offsets,
+            scale=scale,
+            out=out,
+            initial_state=initial_state,
+            output_final_state=output_final_state,
+            state_cache=state_cache,
+            state_indices=state_indices,
+            has_initial_state=has_initial_state,
         )
 
 
