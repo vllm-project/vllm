@@ -79,7 +79,7 @@ class RoutedExperts(PluggableLayer):
     - Executing routed experts via quant_method.apply()
     """
 
-    # Hash-routing table, owned by the gate; set by FusedMoEFactory.
+    # Hash-routing table, owned by the gate.
     hash_indices_table: torch.Tensor | None = None
 
     def __init__(
@@ -156,7 +156,8 @@ class RoutedExperts(PluggableLayer):
         # Set by bind_routed_experts_capturer for monolithic kernels.
         self.routing_sink: RoutedExpertsSink | None = None
         self.apply_router_weight_on_input = apply_router_weight_on_input
-        self.hash_indices_table = hash_indices_table
+        # The gate owns this Parameter: keep it out of this module's parameters.
+        object.__setattr__(self, "hash_indices_table", hash_indices_table)
         # End random parameters
         self._loaded_expert_biases: set[str] = set()
         self._fused_shared_expert_quantizer = self._get_fused_shared_expert_quantizer()
