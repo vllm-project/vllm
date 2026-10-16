@@ -315,29 +315,22 @@ def _shard_grammar_output(
     local_req_ids: list[str],
 ) -> GrammarOutput | None:
     owned = set(local_req_ids)
-    mask_stride = grammar_output.grammar_bitmask.shape[0] // len(
-        grammar_output.structured_output_request_ids
-    )
-
-    local_ids: list[str] = []
-    keep_indices: list[int] = []
-    cursor = 0
-    for req_id in grammar_output.structured_output_request_ids:
-        if req_id in owned:
-            local_ids.append(req_id)
-            keep_indices.extend(range(cursor, cursor + mask_stride))
-        cursor += mask_stride
-    if not local_ids:
+    grammar_req_ids = grammar_output.structured_output_request_ids
+    keep = [i for i, req_id in enumerate(grammar_req_ids) if req_id in owned]
+    if not keep:
         return None
+    local_ids = [grammar_req_ids[i] for i in keep]
+    # Each request owns a fixed-width block of rows.
+    bitmask = grammar_output.grammar_bitmask
+    blocks = bitmask.reshape(len(grammar_req_ids), -1, bitmask.shape[-1])
+    local_bitmask = blocks[keep].reshape(-1, bitmask.shape[-1])
     # num_acceptable_drafts is ordered with structured_output_request_ids.
     num_acceptable = grammar_output.num_acceptable_drafts
     if num_acceptable is not None:
-        owned = set(local_ids)
-        ids = grammar_output.structured_output_request_ids
-        num_acceptable = [n for i, n in zip(ids, num_acceptable) if i in owned]
+        num_acceptable = [num_acceptable[i] for i in keep]
     return GrammarOutput(
         structured_output_request_ids=local_ids,
-        grammar_bitmask=grammar_output.grammar_bitmask[keep_indices],
+        grammar_bitmask=local_bitmask,
         num_acceptable_drafts=num_acceptable,
     )
 
