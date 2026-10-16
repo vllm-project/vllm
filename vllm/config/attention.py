@@ -85,7 +85,7 @@ class AttentionConfig:
     use_prefill_query_quantization: bool = False
     """If set, quantize query for attention in prefill."""
 
-    trtllm_ragged_backend: Literal["trtllm", "cute-dsl"] = "trtllm"
+    trtllm_ragged_backend: Literal["trtllm-gen", "cute-dsl"] = "trtllm-gen"
     """Kernel backend for cached-context TRTLLM_RAGGED MLA prefill.
     New-token prefill always uses TRTLLM."""
 

@@ -1634,7 +1634,7 @@ def _run_backend_correctness(
     v_head_dim: int,
     chunked_prefill_workspace_size: int | None = None,
     adaptive_verification: bool = False,
-    trtllm_ragged_backend: Literal["trtllm", "cute-dsl"] = "trtllm",
+    trtllm_ragged_backend: Literal["trtllm-gen", "cute-dsl"] = "trtllm-gen",
 ):
     """Test that all backends produce similar outputs to a reference implementation
     using torch.nn.functional.scaled_dot_product_attention.
@@ -2166,7 +2166,7 @@ def test_backend_correctness(
     _prefill_backend_dimension_params(),
 )
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
-@pytest.mark.parametrize("trtllm_ragged_backend", ["trtllm", "cute-dsl"])
+@pytest.mark.parametrize("trtllm_ragged_backend", ["trtllm-gen", "cute-dsl"])
 def test_chunked_context_backend_correctness(
     default_vllm_config,
     dist_init,
@@ -2175,7 +2175,7 @@ def test_chunked_context_backend_correctness(
     qk_nope_head_dim: int,
     v_head_dim: int,
     kv_cache_dtype: str,
-    trtllm_ragged_backend: Literal["trtllm", "cute-dsl"],
+    trtllm_ragged_backend: Literal["trtllm-gen", "cute-dsl"],
 ):
     """Split, packed, and context-free requests match the SDPA reference."""
     if (

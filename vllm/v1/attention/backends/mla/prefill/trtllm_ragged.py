@@ -79,11 +79,7 @@ class TrtllmRaggedPrefillBackend(MLAPrefillBackend):
             v_head_dim=v_head_dim,
             vllm_config=vllm_config,
         )
-        self._context_backend = (
-            "cute-dsl"
-            if vllm_config.attention_config.trtllm_ragged_backend == "cute-dsl"
-            else "trtllm-gen"
-        )
+        self._context_backend = vllm_config.attention_config.trtllm_ragged_backend
         self._workspace_spec = (
             (envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE,),
             torch.uint8,
