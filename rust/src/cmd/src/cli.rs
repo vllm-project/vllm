@@ -137,9 +137,10 @@ pub struct RenderArgs {
     #[arg(long, default_value_t)]
     reasoning_parser: ParserSelection,
     /// Server-side floor for structural-tag based tool calling: `auto`,
-    /// `function`, or `parameter`.
-    #[arg(long, default_value_t)]
-    tool_strict_level: ToolStrictLevel,
+    /// `function`, or `parameter`. When unset, the tool parser's default
+    /// level applies, else `auto`.
+    #[arg(long)]
+    tool_strict_level: Option<ToolStrictLevel>,
     /// Select the native chat renderer implementation.
     #[arg(long = "tokenizer-mode", default_value_t)]
     renderer: RendererSelection,
@@ -252,10 +253,11 @@ pub struct SharedRuntimeArgs {
     /// top of the per-tool `strict` field: `auto` follows the request's
     /// tool choice and per-tool strictness,
     /// `function` constrains the tool-call envelope for every request with
-    /// tools, `parameter` additionally pins argument schemas.
-    #[arg(long, default_value_t)]
+    /// tools, `parameter` additionally pins argument schemas. When unset, the
+    /// tool parser's default level applies, else `auto`.
+    #[arg(long)]
     #[serde(default)]
-    pub tool_strict_level: ToolStrictLevel,
+    pub tool_strict_level: Option<ToolStrictLevel>,
     /// Select the chat renderer implementation.
     #[arg(long = "tokenizer-mode", default_value_t)]
     #[serde(default, rename = "tokenizer_mode")]
