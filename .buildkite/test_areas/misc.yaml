@@ -709,6 +709,7 @@ steps:
     amd:
       label: ":amd: (MI300) Batch Invariance"
       dind: false
+      automatic_shard: true
       device: mi300_1
       timeout_in_minutes: 60
       depends_on:
