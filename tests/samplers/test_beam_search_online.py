@@ -431,3 +431,43 @@ def test_offline_beam_search_reports_unsatisfiable_constraints(has_completed):
     else:
         with pytest.raises(ValueError, match="no valid continuation for input 0"):
             serving.beam_search(prompts, params)
+
+
+@pytest.mark.parametrize("tokens,completed", [([1, 2], True), ([3, 4], False)])
+def test_offline_grammar_completion_without_allowed_eos(tokens, completed):
+    import xgrammar as xgr
+
+    from vllm.v1.structured_output.backend_xgrammar import XgrammarGrammar
+
+    tokenizer_info = xgr.TokenizerInfo(
+        [str(i) for i in range(10)] + ["<eos>"], stop_token_ids=[10]
+    )
+    ctx = xgr.GrammarCompiler(tokenizer_info).compile_regex("12|345")
+    backend = MagicMock()
+    backend.tokenizer.eos_token_id = 10
+    backend.compile_grammar.side_effect = lambda *args: XgrammarGrammar(
+        11, xgr.GrammarMatcher(ctx), ctx
+    )
+    serving = _OfflineServing()
+    serving.model_config = MagicMock()
+    serving.model_config.get_vocab_size.return_value = 11
+    instance = BeamSearchInstance({"type": "token", "prompt_token_ids": [0]})
+    instance.beams[0].tokens = [0, *tokens]
+    exhausted = BeamSearchOfflineMixin._beam_search_step(
+        serving,
+        [instance],
+        SamplingParams(logprobs=2),
+        10,
+        False,
+        1,
+        lambda beam: beam.cum_logprob,
+        backend,
+        ("regex", "12|345"),
+        xgr.allocate_token_bitmask(1, 11),
+        [1, 2, 3, 4],
+    )
+    assert exhausted
+    assert not instance.beams
+    assert len(instance.completed) == int(completed)
+    if completed:
+        assert instance.completed[0].tokens == [0, *tokens]

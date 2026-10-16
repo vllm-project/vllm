@@ -474,6 +474,8 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
 
             grammar.fill_bitmask(bitmask, 0)
             allowed_ids = _bitmask_to_token_ids(bitmask[0], vocab_size)
+            eos_token_id = backend.tokenizer.eos_token_id
+            can_finish = eos_token_id in allowed_ids
             if request_allowed_set is not None:
                 allowed_ids = [
                     token_id
@@ -482,7 +484,15 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
                 ]
 
             if not allowed_ids:
-                result.append((base_params, []))
+                # Prove completion without adding a forbidden EOS to the beam.
+                if (
+                    can_finish
+                    and grammar.accept_tokens("beam", [eos_token_id])
+                    and grammar.is_terminated()
+                ):
+                    result.append(None)
+                else:
+                    result.append((base_params, []))
                 continue
 
             beam_params = SamplingParams(
