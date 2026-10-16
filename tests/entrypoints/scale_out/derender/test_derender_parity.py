@@ -142,12 +142,28 @@ def _tool_sig(response_choice: dict) -> list[tuple[str, dict]]:
     ]
 
 
+def _tool_id_shapes(response_choice: dict) -> list[str | None]:
+    return [
+        _tool_call_id_shape(tc["id"])
+        for tc in (response_choice["message"].get("tool_calls") or [])
+    ]
+
+
+def _engine_finish_reason(coupled_finish_reason: str) -> str:
+    """Undo the chat level `"tool_calls"` rewrite of `"stop"` so derender
+    gets what the engine reported and has to reapply the rewrite itself."""
+    if coupled_finish_reason == "tool_calls":
+        return "stop"
+    return coupled_finish_reason
+
+
 def _assert_parity(coupled: dict, disagg: dict) -> None:
     """Both paths saw the same tokens, so they must agree unconditionally."""
     c, d = coupled["choices"][0], disagg["choices"][0]
     assert d["message"]["content"] == c["message"]["content"]
     assert d["message"].get("reasoning") == c["message"].get("reasoning")
     assert _tool_sig(d) == _tool_sig(c)
+    assert _tool_id_shapes(d) == _tool_id_shapes(c)
     assert d["finish_reason"] == c["finish_reason"]
     assert d["token_ids"] == c["token_ids"]
     assert disagg["usage"]["prompt_tokens"] == coupled["usage"]["prompt_tokens"]
@@ -166,7 +182,7 @@ async def _run_parity_case(
         client,
         ch["token_ids"],
         coupled["usage"]["prompt_tokens"],
-        ch["finish_reason"],
+        _engine_finish_reason(ch["finish_reason"]),
         chat_request,
     )
     return coupled, disagg
@@ -398,7 +414,7 @@ async def _run_stream_parity_case(
         {"model": MODEL, "messages": messages, "return_token_ids": True, **extra},
         len(prompt_token_ids),
         prompt_token_ids,
-        finish_reason="stop" if finish_reason == "tool_calls" else finish_reason,
+        finish_reason=_engine_finish_reason(finish_reason),
     )
     coupled = assemble_stream(coupled_choices)
     for message in (coupled, disagg):

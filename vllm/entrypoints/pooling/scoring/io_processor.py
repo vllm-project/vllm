@@ -548,7 +548,11 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
                 yield ScoringRenderParams(
                     data_1=data_1[i],
                     data_2=data_2[i],
-                    chat_template=ctx.chat_template,
+                    chat_template=(
+                        self.chat_template
+                        if ctx.chat_template is None
+                        else ctx.chat_template
+                    ),
                     max_tokens_per_query=max_tokens_per_query,
                     max_tokens_per_doc=max_tokens_per_doc,
                     tok_params=tok_params,
