@@ -273,17 +273,6 @@ class CoreEngineProcManager:
         self._addresses = addresses
         self._tensor_queue = tensor_queue
         self._active_processes: dict[int, BaseProcess] = {}
-        if self._mp_elastic_ep:
-            from vllm.distributed.utils import create_tcp_store
-
-            self._coord_store = create_tcp_store(
-                parallel_config.data_parallel_master_ip,
-                0,
-                is_master=True,
-                world_size=-1,
-                wait_for_workers=False,
-            )
-            parallel_config._coord_store_port = self._coord_store.port
         context = get_mp_context()
         common_kwargs = {
             "vllm_config": vllm_config,

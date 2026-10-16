@@ -326,10 +326,10 @@ def test_elastic_ep_scaling(
 
 
 def _run_mp_gsm8k_eval(
-    server: RemoteOpenAIServer, stage: str
+    server: RemoteOpenAIServer, stage: str, dp_size: int
 ) -> dict[str, float | int]:
     result = _run_gsm8k_eval(
-        server, stage, max_concurrency=64, request_timeout_seconds=1800
+        server, stage, max_concurrency=32 * dp_size, request_timeout_seconds=1800
     )
     assert result["num_questions"] == NUM_GSM8K_QUESTIONS
     assert result["invalid_rate"] <= 0.05, f"{stage}: {result}"
@@ -383,7 +383,7 @@ def test_elastic_ep_mp_scaling(enforce_eager: bool, traffic_mode: str) -> None:
     )
     with RemoteOpenAIServer(MP_MODEL_NAME, args, max_wait_seconds=2400) as server:
         _smoke_mp_ranks(server, 2)
-        initial = _run_mp_gsm8k_eval(server, "Initial")
+        initial = _run_mp_gsm8k_eval(server, "Initial", 2)
 
         _scale_with_traffic(
             server,
@@ -395,7 +395,7 @@ def test_elastic_ep_mp_scaling(enforce_eager: bool, traffic_mode: str) -> None:
             scale_timeout=1200,
         )
         _smoke_mp_ranks(server, 4)
-        scaled_target = _run_mp_gsm8k_eval(server, "After scale up")
+        scaled_target = _run_mp_gsm8k_eval(server, "After scale up", 4)
         _assert_scaled_accuracy(initial, scaled_target, "Scale up")
 
         _scale_with_traffic(
@@ -408,7 +408,7 @@ def test_elastic_ep_mp_scaling(enforce_eager: bool, traffic_mode: str) -> None:
             scale_timeout=1200,
         )
         _smoke_mp_ranks(server, 2)
-        scaled_source = _run_mp_gsm8k_eval(server, "After scale down")
+        scaled_source = _run_mp_gsm8k_eval(server, "After scale down", 2)
         _assert_scaled_accuracy(initial, scaled_source, "Scale down")
 
 
@@ -419,15 +419,15 @@ def test_elastic_ep_mp_scaled_vs_cold() -> None:
 
     args = _base_serve_args(enforce_eager=True, dp_backend="mp")
     with RemoteOpenAIServer(MP_MODEL_NAME, args, max_wait_seconds=2400) as server:
-        initial = _run_mp_gsm8k_eval(server, "Initial")
+        initial = _run_mp_gsm8k_eval(server, "Initial", 2)
         _scale_with_traffic(
             server, 2, 4, "none", model=MP_MODEL_NAME, scale_timeout=1200
         )
-        scaled_target = _run_mp_gsm8k_eval(server, "Scaled DP4")
+        scaled_target = _run_mp_gsm8k_eval(server, "Scaled DP4", 4)
         _scale_with_traffic(
             server, 4, 2, "none", model=MP_MODEL_NAME, scale_timeout=1200
         )
-        scaled_source = _run_mp_gsm8k_eval(server, "Scaled DP2")
+        scaled_source = _run_mp_gsm8k_eval(server, "Scaled DP2", 2)
         assert scaled_target["accuracy"] >= initial["accuracy"] - ACCURACY_TOL
         assert scaled_source["accuracy"] >= initial["accuracy"] - ACCURACY_TOL
 
@@ -437,10 +437,10 @@ def test_elastic_ep_mp_scaled_vs_cold() -> None:
     with RemoteOpenAIServer(
         MP_MODEL_NAME, cold_target_args, max_wait_seconds=2400
     ) as server:
-        cold_target = _run_mp_gsm8k_eval(server, "Cold DP4")
+        cold_target = _run_mp_gsm8k_eval(server, "Cold DP4", 4)
 
     with RemoteOpenAIServer(MP_MODEL_NAME, args, max_wait_seconds=2400) as server:
-        cold_source = _run_mp_gsm8k_eval(server, "Cold DP2")
+        cold_source = _run_mp_gsm8k_eval(server, "Cold DP2", 2)
 
     for label, scaled, cold in (
         ("DP4", scaled_target, cold_target),
