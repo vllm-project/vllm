@@ -769,6 +769,10 @@ class DelegatingParser(Parser):
             return False
         return self._reasoning_parser.is_reasoning_end(input_ids)
 
+    def set_prompt_token_ids(self, prompt_token_ids: Sequence[int]) -> None:
+        if self._reasoning_parser is not None:
+            self._reasoning_parser.set_prompt_token_ids(prompt_token_ids)
+
     def _is_reasoning_end_streaming(
         self, input_ids: list[int], delta_ids: list[int]
     ) -> bool:
@@ -858,6 +862,7 @@ class DelegatingParser(Parser):
 
         if not state.prompt_reasoning_checked and prompt_token_ids is not None:
             state.prompt_reasoning_checked = True
+            self.set_prompt_token_ids(prompt_token_ids)
             if self._reasoning_parser is None or self.is_reasoning_end(
                 prompt_token_ids
             ):
