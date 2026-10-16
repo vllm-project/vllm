@@ -22,6 +22,7 @@ from vllm.model_executor.layers.fused_moe import (
     GateLinear,
 )
 from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
+from vllm.model_executor.layers.layernorm import GemmaRMSNorm as Qwen3_5RMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
@@ -31,6 +32,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.models.qwen3_5 import Qwen3_5ForCausalLMBase, Qwen3_5Model, Qwen3_5MoeMTP
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers.registry import cached_tokenizer_from_config
@@ -41,12 +43,6 @@ from .interns2_preview import (
     InternS2PreviewProcessingInfo,
 )
 from .qwen2_moe import Qwen2MoeMLP
-from .qwen3_5 import (
-    Qwen3_5ForCausalLMBase,
-    Qwen3_5Model,
-    Qwen3_5RMSNorm,
-)
-from .qwen3_5_mtp import Qwen3_5MoeMTP
 from .qwen3_next import Qwen3NextAttention
 from .qwen3_vl import (
     Qwen3_VisionTransformer,

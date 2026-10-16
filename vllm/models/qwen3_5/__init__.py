@@ -9,7 +9,9 @@ from vllm.platforms import current_platform
 if TYPE_CHECKING or not current_platform.is_rocm():
     from .nvidia.model import (
         Qwen3_5ForCausalLM,
+        Qwen3_5ForCausalLMBase,
         Qwen3_5ForConditionalGeneration,
+        Qwen3_5Model,
         Qwen3_5MoeForCausalLM,
         Qwen3_5MoeForConditionalGeneration,
     )
@@ -17,7 +19,9 @@ if TYPE_CHECKING or not current_platform.is_rocm():
 else:
     from .amd.model import (  # type: ignore[assignment]
         Qwen3_5ForCausalLM,
+        Qwen3_5ForCausalLMBase,
         Qwen3_5ForConditionalGeneration,
+        Qwen3_5Model,
         Qwen3_5MoeForCausalLM,
         Qwen3_5MoeForConditionalGeneration,
     )
@@ -25,7 +29,9 @@ else:
 
 __all__ = [
     "Qwen3_5ForCausalLM",
+    "Qwen3_5ForCausalLMBase",
     "Qwen3_5ForConditionalGeneration",
+    "Qwen3_5Model",
     "Qwen3_5MoeForCausalLM",
     "Qwen3_5MoeForConditionalGeneration",
     "Qwen3_5MoeMTP",
