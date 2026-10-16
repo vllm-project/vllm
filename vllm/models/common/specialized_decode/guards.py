@@ -79,6 +79,7 @@ def _features_in_use(vllm_config: "VllmConfig") -> set[Feature]:
         Feature.EXPERT_PARALLEL: pc.enable_expert_parallel,
         Feature.EPLB: pc.enable_eplb,
         Feature.DECODE_CONTEXT_PARALLEL: pc.decode_context_parallel_size > 1,
+        Feature.UBATCHING: pc.use_ubatching,
         Feature.PREFILL_CONTEXT_PARALLEL: pc.prefill_context_parallel_size > 1,
         Feature.LORA: vllm_config.lora_config is not None,
         Feature.KV_CONNECTOR: vllm_config.kv_transfer_config is not None,

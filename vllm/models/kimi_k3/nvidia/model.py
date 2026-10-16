@@ -97,6 +97,10 @@ from vllm.models.common.ops.sequence_parallel import (
     sp_reduce_scatter,
     sp_shard,
 )
+from vllm.models.common.specialized_decode import (
+    SpecializedDecode,
+    select_decode_spec,
+)
 from vllm.models.kimi_k3.nvidia.kda import KimiK3DeltaAttention
 from vllm.models.kimi_k3.nvidia.latent_moe_runner import (
     LatentMoERunner,
@@ -121,12 +125,12 @@ from ..common.mm_preprocess import (
     KimiK3MultiModalProcessor,
     KimiK3ProcessingInfo,
 )
-from .specialized_decode.runtime import specialized_decode_config
+from .specialized_decode.spec import DECODE_SPEC
 
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu.model_states.interface import ModelState
 
-    from .specialized_decode.runtime.decode import SpecializedDecode
+    from .specialized_decode.runtime.decode import KimiK3Kernel
 
 logger = init_logger(__name__)
 
@@ -441,6 +445,7 @@ class KimiMoE(nn.Module):
             torch.empty(num_experts, dtype=torch.float32)
         )
 
+        self.shared_experts: KimiMLP | None
         if self.num_shared_experts is not None:
             shared_intermediate_size = moe_intermediate_size * self.num_shared_experts
             self.shared_experts = KimiMLP(
@@ -1427,19 +1432,18 @@ class KimiLinearForCausalLM(
         self.logits_processor = LogitsProcessor(
             self.config.vocab_size, scale=logit_scale
         )
-        # decode_backend=latency_specialized: a specialized decode executor over
-        # self.model, built by the model state once the weights are loaded.
-        self.specialized_decode_config = specialized_decode_config(vllm_config)
-        self.specialized_decode: SpecializedDecode | None = None
+        # --specialized-decode: a specialized decode executor over self.model,
+        # built by the model state once the weights are loaded.
+        self.decode_spec = select_decode_spec(vllm_config, DECODE_SPEC)
+        self.specialized_decode: SpecializedDecode[KimiK3Kernel] | None = None
         # The final norm is applied in compute_logits unless the specialized decode
         # applies it in forward.
         self.needs_norm_in_logits = True
 
     def build_specialized_decode(self) -> None:
-        from .specialized_decode.runtime.decode import SpecializedDecode
-
+        assert self.decode_spec is not None
         self.specialized_decode = SpecializedDecode(
-            self.model, self.specialized_decode_config
+            self.model, self.vllm_config, self.decode_spec
         )
         # From here on forward() returns normalized hidden states on every step: the
         # specialized decode's last AttnRes applies the norm, and forward() applies it
@@ -1454,7 +1458,7 @@ class KimiLinearForCausalLM(
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         if self.specialized_decode is not None:
-            return self.specialized_decode.embed_input_ids(input_ids)
+            return self.specialized_decode.kernel.embed_input_ids(input_ids)
         return self.model.embed_input_ids(input_ids)
 
     def make_empty_intermediate_tensors(
@@ -1477,13 +1481,13 @@ class KimiLinearForCausalLM(
         if decode is not None:
             step = decode.plan(positions, intermediate_tensors)
             if step is not None:
-                return decode.run(step, input_ids, inputs_embeds)
+                return decode.run(step, input_ids, inputs_embeds, **kwargs)
         hidden_states = self.model(
             input_ids, positions, intermediate_tensors, inputs_embeds, **kwargs
         )
         if not self.needs_norm_in_logits:
             assert decode is not None
-            hidden_states = decode.normalize(hidden_states)
+            hidden_states = decode.kernel.normalize(hidden_states)
         return hidden_states
 
     @classmethod

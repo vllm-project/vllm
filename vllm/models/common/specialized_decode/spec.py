@@ -23,6 +23,7 @@ class Feature(str, Enum):
     EXPERT_PARALLEL = "expert_parallel"
     EPLB = "eplb"
     DECODE_CONTEXT_PARALLEL = "decode_context_parallel"
+    UBATCHING = "ubatching"
     PREFILL_CONTEXT_PARALLEL = "prefill_context_parallel"
     LORA = "lora"
     KV_CONNECTOR = "kv_connector"
