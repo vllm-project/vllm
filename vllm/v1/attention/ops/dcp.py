@@ -1419,6 +1419,30 @@ class DirectDCPA2AReduce(DirectCPCollective):
         self.group = group
         self.workspace = workspace
 
+    def forward(
+        self,
+        partial_output: torch.Tensor,
+        partial_lse: torch.Tensor,
+        is_lse_base_on_e: bool,
+        seq_lens: torch.Tensor | None = None,
+        query_start_loc: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        world_size = self.group.world_size
+        if world_size == 1:
+            return partial_output
+        num_heads = partial_output.shape[1]
+        if num_heads % world_size != 0:
+            raise ValueError(
+                f"H={num_heads} must be divisible by DCP world size {world_size}."
+            )
+        return super().forward(
+            partial_output,
+            partial_lse,
+            is_lse_base_on_e=is_lse_base_on_e,
+            seq_lens=seq_lens,
+            query_start_loc=query_start_loc,
+        )
+
     def forward_native(
         self,
         partial_output: torch.Tensor,
@@ -1429,12 +1453,6 @@ class DirectDCPA2AReduce(DirectCPCollective):
     ) -> torch.Tensor:
         num_tokens, num_heads, head_dim = partial_output.shape
         world_size = self.group.world_size
-        if world_size == 1:
-            return partial_output
-        if num_heads % world_size != 0:
-            raise ValueError(
-                f"H={num_heads} must be divisible by DCP world size {world_size}."
-            )
         heads_per_rank = num_heads // world_size
         lse = partial_lse.to(dtype=torch.float32, copy=True)
         mask_dcp_empty_shards_(lse, seq_lens, query_start_loc)

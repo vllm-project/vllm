@@ -180,6 +180,57 @@ def test_oot_collective_dispatch_preserves_native_fallback(
     ), "Native dispatch and all CUDA fallbacks must use built-in Torch collectives"
 
 
+@pytest.mark.parametrize("backend", ["native", "cuda", "oot"])
+@pytest.mark.parametrize("world_size, num_heads", [(1, 3), (2, 3), (2, 4)])
+def test_direct_dcp_a2a_checks_before_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+    backend: str,
+    world_size: int,
+    num_heads: int,
+) -> None:
+    monkeypatch.setattr(custom_op, "op_registry_oot", custom_op.op_registry_oot.copy())
+    op_cls = dcp.DirectDCPA2AReduce
+    if backend == "oot":
+        op_cls.register_oot(_OOTA2AReduce)
+    else:
+        monkeypatch.setattr(op_cls, "forward_cpu", op_cls.forward_cuda)
+    partial_output = torch.ones(2, num_heads, 4)
+    partial_lse = torch.zeros(2, num_heads)
+    dispatched_output = torch.ones(2, num_heads // world_size, 4)
+    dispatch = MagicMock(return_value=dispatched_output)
+    monkeypatch.setattr(
+        op_cls, "forward_native" if backend == "native" else "forward_cuda", dispatch
+    )
+    if backend == "cuda":
+        monkeypatch.setattr(op_cls, "forward_cpu", dispatch)
+    config = VllmConfig(
+        compilation_config=CompilationConfig(
+            custom_ops=[f"-{op_cls.name}"] if backend == "native" else ["all"]
+        )
+    )
+    with set_current_vllm_config(config):
+        op = op_cls(SimpleNamespace(world_size=world_size), workspace=object())
+    seq_lens = torch.ones(1, dtype=torch.int32)
+    query_start_loc = torch.tensor([0, 2], dtype=torch.int32)
+    kwargs = dict(
+        is_lse_base_on_e=False,
+        seq_lens=seq_lens,
+        query_start_loc=query_start_loc,
+    )
+    if world_size == 1:
+        assert op(partial_output, partial_lse, **kwargs) is partial_output, (
+            "Single-rank combine must return its input without backend work"
+        )
+        dispatch.assert_not_called()
+    elif num_heads % world_size != 0:
+        with pytest.raises(ValueError, match="H=3 must be divisible.*2"):
+            op(partial_output, partial_lse, **kwargs)
+        dispatch.assert_not_called()
+    else:
+        assert op(partial_output, partial_lse, **kwargs) is dispatched_output
+        dispatch.assert_called_once_with(partial_output, partial_lse, **kwargs)
+
+
 def _collective_test_op(
     op_cls: type[CustomOp], mode: str, workspace: cp_common.DirectCPWorkspace
 ) -> _OOTQGather | _OOTA2AReduce | _OOTKVGather:
