@@ -29,7 +29,7 @@ pub use glm_xml::{Glm45MoeToolParser, Glm47MoeToolParser};
 pub(crate) use hy::{HyDialect, HyToolMarkers, HyToolParser};
 pub use json::{
     Granite4ToolParser, HermesToolParser, Internlm2ToolParser, Llama3JsonToolParser,
-    MistralToolParser, Phi4MiniJsonToolParser, Qwen3XmlToolParser,
+    MistralToolParser, Phi4MiniJsonToolParser, Qwen3JsonToolParser,
 };
 pub use kimi_k2::KimiK2ToolParser;
 pub use mimo::MiMoToolParser;
@@ -46,7 +46,7 @@ pub use xgrammar_structural_tag::builders::StructuralTagBuilder;
 use xgrammar_structural_tag::format::Format;
 use xgrammar_structural_tag::tool::{AllowedToolsMode, ToolChoiceValue};
 
-use crate::output_grammar::{self, OutputGrammarContext};
+use crate::output_grammar::{self, OutputGrammarContext, ToolStrictLevel};
 use crate::utils;
 
 /// One function-style tool made available to the model.
@@ -197,6 +197,12 @@ pub trait ToolParser: Send {
     /// parsers need `skip_special_tokens = false` while parsing is enabled.
     fn preserve_special_tokens(&self) -> bool {
         false
+    }
+
+    /// Return the tool strict level applied when the operator leaves
+    /// `--tool-strict-level` unset.
+    fn default_tool_strict_level(&self) -> ToolStrictLevel {
+        ToolStrictLevel::Auto
     }
 
     /// Build the language of everything the model may emit after reasoning

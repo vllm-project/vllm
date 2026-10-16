@@ -9,7 +9,7 @@ import pytest
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from tests.kernels.moe.utils import make_dummy_moe_config
+from tests.kernels.moe.utils import make_dummy_moe_config, make_test_quant_config
 from vllm import _custom_ops as ops
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe import (
@@ -26,8 +26,10 @@ from vllm.model_executor.layers.fused_moe.all2all_utils import (
 )
 from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
+    FusedMoEParallelConfig,
     FusedMoEQuantConfig,
     fp8_w8a8_moe_quant_config,
+    mxfp4_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
     CutlassExpertsFp4,
@@ -41,7 +43,10 @@ from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
 )
 from vllm.model_executor.layers.fused_moe.oracle import mxfp4 as mxfp4_oracle
 from vllm.model_executor.layers.fused_moe.oracle import nvfp4 as nvfp4_oracle
-from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
+from vllm.model_executor.layers.fused_moe.utils import (
+    moe_kernel_quantize_input,
+    remap_topk_to_local,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp4Dynamic
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
@@ -181,6 +186,189 @@ def test_cutlass_moe_permutation_maps_padding_to_zero():
     torch.testing.assert_close(restored[1], torch.zeros_like(restored[1]))
     torch.testing.assert_close(restored[2], input_tensor[1])
     torch.testing.assert_close(restored[3], torch.zeros_like(restored[3]))
+
+
+def test_remap_topk_ids_to_local():
+    device = "cuda"
+    expert_map = torch.tensor([-1, 0, -1, 1, -1, 2], dtype=torch.int32, device=device)
+    topk_ids = torch.tensor([[1, 3], [0, 5], [-1, 4]], dtype=torch.int32, device=device)
+    expected = torch.tensor(
+        [[0, 1], [-1, 2], [-1, -1]], dtype=torch.int32, device=device
+    )
+    actual = remap_topk_to_local(topk_ids, expert_map, out_dtype=torch.int32)
+    torch.testing.assert_close(actual, expected)
+
+
+def test_remap_topk_ids_to_local_requires_contiguous_topk_ids():
+    expert_map = torch.tensor([0, 1], dtype=torch.int32)
+    topk_ids = torch.tensor([[0, 1], [1, 0]], dtype=torch.int32).t()
+    assert not topk_ids.is_contiguous()
+    with pytest.raises(AssertionError):
+        remap_topk_to_local(topk_ids, expert_map)
+
+
+def test_cutlass_fp4_moe_supports_expert_parallel_config():
+    ep_config = FusedMoEParallelConfig(
+        tp_size=1,
+        tp_rank=0,
+        pcp_size=1,
+        pcp_rank=0,
+        dp_size=8,
+        dp_rank=0,
+        ep_size=8,
+        ep_rank=0,
+        sp_size=1,
+        use_ep=True,
+        all2all_backend="allgather_reducescatter",
+        enable_eplb=False,
+    )
+    assert CutlassExpertsMxfp4._supports_parallel_config(ep_config)
+    assert CutlassExpertsFp4._supports_parallel_config(ep_config)
+
+
+def _slice_moe_quant_config(
+    quant_config: FusedMoEQuantConfig, start: int, end: int
+) -> FusedMoEQuantConfig:
+    num_experts = quant_config.w1_scale.shape[0]
+    sliced_config = copy.deepcopy(quant_config)
+    for desc_name in ("_a1", "_a2", "_w1", "_w2"):
+        desc = getattr(sliced_config, desc_name)
+        for field_name in ("scale", "alpha_or_gscale", "bias", "zp"):
+            tensor = getattr(desc, field_name)
+            if (
+                isinstance(tensor, torch.Tensor)
+                and tensor.ndim > 0
+                and tensor.shape[0] == num_experts
+            ):
+                setattr(desc, field_name, tensor[start:end])
+    return sliced_config
+
+
+def _swizzle_mxfp4_moe_scales(
+    w1_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    e, w1_n, w1_scale_k = w1_scale.shape
+    w1_k = w1_scale_k * 32
+    w2_m, w2_scale_n = w2_scale.shape[1], w2_scale.shape[2]
+    w2_n = w2_scale_n * 32
+
+    swizzled_w1 = []
+    swizzled_w2 = []
+    for expert in range(e):
+        swizzled_w1.append(
+            swizzle_mxfp4_scales(w1_scale[expert], w1_n, w1_k).reshape(w1_n, w1_scale_k)
+        )
+        swizzled_w2.append(
+            swizzle_mxfp4_scales(w2_scale[expert], w2_m, w2_n).reshape(w2_m, w2_scale_n)
+        )
+    return torch.stack(swizzled_w1), torch.stack(swizzled_w2)
+
+
+def _make_cutlass_fp4_moe_weights(
+    quantization: str,
+    num_experts: int,
+    n: int,
+    k: int,
+    dtype: torch.dtype,
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor, FusedMoEQuantConfig]:
+    if quantization == "nvfp4":
+        return make_test_quant_config(
+            num_experts,
+            n,
+            k,
+            in_dtype=dtype,
+            quant_dtype="nvfp4",
+            block_shape=None,
+            per_act_token_quant=False,
+            make_gate=True,
+        )
+
+    from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
+        mxfp4_quantize,
+    )
+
+    w1, w1_scale = mxfp4_quantize(
+        torch.randn((num_experts, 2 * n, k), device=device, dtype=dtype) / 8
+    )
+    w2, w2_scale = mxfp4_quantize(
+        torch.randn((num_experts, k, n), device=device, dtype=dtype) / 8
+    )
+    w1_scale, w2_scale = _swizzle_mxfp4_moe_scales(w1_scale, w2_scale)
+    return (
+        w1.contiguous(),
+        w2.contiguous(),
+        mxfp4_moe_quant_config(w1_scale=w1_scale, w2_scale=w2_scale),
+    )
+
+
+@pytest.mark.parametrize("quantization", ["nvfp4", "mxfp4"])
+@torch.inference_mode()
+def test_cutlass_fp4_moe_EP(
+    quantization: str,
+    workspace_init,
+):
+    """Sharded CUTLASS FP4/MXFP4 MoE with expert_map must match full weights."""
+    experts_cls = CutlassExpertsFp4 if quantization == "nvfp4" else CutlassExpertsMxfp4
+    if not experts_cls._supports_current_device():
+        pytest.skip(f"CUTLASS {quantization} MoE is not supported on this GPU")
+
+    set_random_seed(7)
+    m, n, k = 8, 128, 128
+    num_experts, num_local_experts, topk = 8, 2, 2
+    dtype = torch.bfloat16
+    device = torch.device("cuda")
+
+    w1, w2, quant_config = _make_cutlass_fp4_moe_weights(
+        quantization, num_experts, n, k, dtype, device
+    )
+    hidden_states = torch.randn((m, k), device=device, dtype=dtype) / 10
+    score = torch.randn((m, num_experts), device=device, dtype=dtype)
+    topk_weights, topk_ids, _ = fused_topk(
+        hidden_states, score, topk, renormalize=False
+    )
+
+    moe_config = make_dummy_moe_config(
+        num_experts=num_experts,
+        num_local_experts=num_experts,
+        experts_per_token=topk,
+        hidden_dim=k,
+        intermediate_size=n,
+        in_dtype=dtype,
+        max_num_tokens=m,
+    )
+    kernel = mk.FusedMoEKernel(
+        maybe_make_prepare_finalize(
+            moe=moe_config,
+            quant_config=quant_config,
+            allow_new_interface=True,
+            use_monolithic=False,
+        ),
+        experts_cls(moe_config=moe_config, quant_config=quant_config),
+    )
+    apply_kwargs = {
+        "hidden_states": hidden_states,
+        "w1": w1,
+        "w2": w2,
+        "topk_weights": topk_weights,
+        "topk_ids": topk_ids,
+        "global_num_experts": num_experts,
+        "activation": MoEActivation.SILU,
+        "expert_map": None,
+        "apply_router_weight_on_input": False,
+    }
+    reference = kernel.apply(**apply_kwargs)
+    sharded = run_with_expert_maps(
+        num_experts,
+        num_local_experts,
+        quant_config,
+        experts_cls,
+        **apply_kwargs,
+    )
+
+    assert reference.abs().max() > 0
+    torch.testing.assert_close(sharded, reference, atol=1e-2, rtol=1e-2)
 
 
 @pytest.mark.parametrize("quantization", ["nvfp4", "mxfp4"])
@@ -486,6 +674,7 @@ def run_with_expert_maps(
     num_experts: int,
     num_local_experts: int,
     quant_config: FusedMoEQuantConfig,
+    experts_cls: type[mk.FusedMoEExperts],
     **cutlass_moe_kwargs,
 ):
     def slice_experts():
@@ -513,9 +702,7 @@ def run_with_expert_maps(
             for k, t in full_tensors.items():
                 cutlass_moe_kwargs[k] = t[s:e]
 
-            new_quant_config = copy.deepcopy(quant_config)
-            new_quant_config._w1.scale = quant_config.w1_scale[s:e]
-            new_quant_config._w2.scale = quant_config.w2_scale[s:e]
+            new_quant_config = _slice_moe_quant_config(quant_config, s, e)
 
             yield cutlass_moe_kwargs, new_quant_config
 
@@ -523,13 +710,14 @@ def run_with_expert_maps(
     for kwargs, new_quant_config in slice_experts():
         w2 = kwargs["w2"]
         a = kwargs["hidden_states"]
+        w1 = kwargs["w1"]
         moe_config = make_dummy_moe_config(
             max_num_tokens=kwargs.get("hidden_states").shape[0],
             experts_per_token=kwargs.get("topk_ids").shape[1],
             num_experts=num_experts,
             num_local_experts=num_local_experts,
             hidden_dim=w2.shape[1],
-            intermediate_size=w2.shape[2],
+            intermediate_size=w1.shape[1] // 2,
             in_dtype=a.dtype,
         )
         kernel = mk.FusedMoEKernel(
@@ -539,7 +727,7 @@ def run_with_expert_maps(
                 allow_new_interface=True,
                 use_monolithic=False,
             ),
-            CutlassExpertsFp8(
+            experts_cls(
                 moe_config=moe_config,
                 quant_config=new_quant_config,
             ),
@@ -624,6 +812,7 @@ def run_8_bit(
         num_experts,
         num_local_experts,
         quant_config,
+        CutlassExpertsFp8,
         **kwargs,
     )
 
