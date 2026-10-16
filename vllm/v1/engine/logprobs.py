@@ -285,7 +285,7 @@ class LogprobsProcessor:
             context = context_token_ids[-num_ctx:]
             full_decoded = self.tokenizer.decode(context + [token_id])
 
-            if full_decoded.endswith("�"):
+            if "�" in full_decoded:
                 continue
 
             # Find the boundary between "clean" context tokens and
@@ -343,11 +343,10 @@ class LogprobsProcessor:
 
         corrected_decoded_token_map = dict()
         for idx, text in enumerate(decoded_tokens_list):
-            if text.endswith("�"):
-                # Replacement char at the end means a potential
-                # unfinished byte sequence from byte-fallback
-                # tokenization. Correct each token independently
-                # using only the sequential context.
+            if "�" in text:
+                # Byte-fallback tokens may begin with a UTF-8 continuation
+                # and include complete characters after it.
+                # Correct each alternative using only sequential context.
                 corrected_decoded_token_map[idx] = self._correct_decoded_token(
                     tokens[idx], context_token_ids
                 )

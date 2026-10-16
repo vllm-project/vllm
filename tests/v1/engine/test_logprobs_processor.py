@@ -11,12 +11,14 @@ row), the trailing positions are populated with sentinel values
 """
 
 import numpy as np
+import pytest
 import torch
 
-from vllm.logprobs import create_sample_logprobs
+from vllm.logprobs import create_prompt_logprobs, create_sample_logprobs
+from vllm.tokenizers import get_tokenizer
 from vllm.v1.engine import EngineCoreOutput
 from vllm.v1.engine.logprobs import LogprobsProcessor
-from vllm.v1.outputs import LogprobsLists
+from vllm.v1.outputs import LogprobsLists, LogprobsTensors
 
 
 def _make_processor(num_logprobs: int) -> LogprobsProcessor:
@@ -87,3 +89,41 @@ def test_prompt_token_id_logprobs_are_popped_once():
     assert scores is not None
     assert scores.tolist() == [[-0.5, -1.5], [-2.5, -3.5]]
     assert processor.pop_prompt_token_id_logprobs() is None
+
+
+@pytest.mark.parametrize("flat_logprobs", [False, True])
+@pytest.mark.parametrize("split_prefix", [False, True])
+def test_utf8_continuation_before_valid_suffix(flat_logprobs, split_prefix):
+    """A token can finish an emoji or Hangul character and contain more text."""
+    tokenizer = get_tokenizer("Qwen/Qwen3-0.6B")
+    token_ids = tokenizer.encode("🍰이 맛있다", add_special_tokens=False)
+    if split_prefix:
+        # Split the emoji's F0 9F prefix across two byte tokens.
+        token_ids[:1] = [tokenizer.get_vocab()[c] for c in ("ð", "Ł")]
+    processor = LogprobsProcessor(
+        tokenizer=tokenizer,
+        logprobs=create_sample_logprobs(flat_logprobs),
+        prompt_logprobs=create_prompt_logprobs(flat_logprobs),
+        cumulative_logprob=0.0,
+        num_logprobs=0,
+        num_prompt_logprobs=0,
+    )
+    for token_id in token_ids:
+        ids = torch.tensor([[token_id]])
+        values = torch.zeros((1, 1))
+        ranks = torch.ones(1, dtype=torch.int64)
+        processor.update_from_output(
+            EngineCoreOutput(
+                request_id="utf8",
+                new_token_ids=[token_id],
+                new_logprobs=LogprobsLists(ids.numpy(), values.numpy(), ranks.numpy()),
+                new_prompt_logprobs_tensors=LogprobsTensors(ids, values, ranks),
+            )
+        )
+
+    expected = tokenizer.decode(token_ids)
+    for logprobs in (processor.logprobs, processor.prompt_logprobs[1:]):
+        decoded = "".join(
+            row[token_id].decoded_token for token_id, row in zip(token_ids, logprobs)
+        )
+        assert decoded == expected
