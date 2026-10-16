@@ -144,6 +144,17 @@ class Sampler:
     def _get_num_nans(logits: torch.Tensor) -> torch.Tensor:
         return get_num_nans(logits)
 
+    def _get_num_sampled_and_rejected(
+        self, input_batch: InputBatch
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return get_num_sampled_and_rejected(
+            input_batch.seq_lens.new_ones(input_batch.num_reqs),
+            input_batch.seq_lens,
+            input_batch.cu_num_logits,
+            input_batch.idx_mapping,
+            self.req_states.prefill_len.gpu,
+        )
+
     def _compute_topk_scores(
         self,
         logits: torch.Tensor,
@@ -225,13 +236,7 @@ class Sampler:
         # 1 sampled token per request, except chunked-prefill requests
         # (seq_len < prefill_len) which aren't done prefilling and produce no
         # output token. num_rejected is always 0 here (one logit per request).
-        num_sampled, num_rejected = get_num_sampled_and_rejected(
-            input_batch.seq_lens.new_ones(input_batch.num_reqs),
-            input_batch.seq_lens,
-            input_batch.cu_num_logits,
-            input_batch.idx_mapping,
-            self.req_states.prefill_len.gpu,
-        )
+        num_sampled, num_rejected = self._get_num_sampled_and_rejected(input_batch)
 
         sampling_mask_tensors = None
         if self.return_sampling_mask:
