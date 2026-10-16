@@ -1,11 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
+import ctypes
 import errno
+import functools
 import mmap
 import os
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from ctypes import c_int, c_long, c_size_t, c_void_p
 
 import numpy as np
 import torch
@@ -21,6 +24,10 @@ logger = init_logger(__name__)
 
 # MADV_POPULATE_WRITE was added in Linux 5.14 (value 23).
 _MADV_POPULATE_WRITE = getattr(mmap, "MADV_POPULATE_WRITE", 23)
+_MAP_FIXED = 0x10
+# Page-cache inserts are serialized per shm file, capping pre-faulting of one
+# file near 10 GiB/s; smaller segments are not worth a file.
+_MIN_SEGMENT_BYTES = 1 << 30
 
 
 def _wait_for_file_size(fd: int, expected_size: int, timeout: float = 30.0) -> None:
@@ -38,6 +45,14 @@ def _wait_for_file_size(fd: int, expected_size: int, timeout: float = 30.0) -> N
                 f"Timed out waiting for mmap file to reach {expected_size} bytes"
             )
         time.sleep(0.005)
+
+
+@functools.cache
+def _libc_mmap() -> Callable[..., int | None]:
+    mmap_fn = ctypes.CDLL(None, use_errno=True).mmap
+    mmap_fn.argtypes = [c_void_p, c_size_t, c_int, c_int, c_int, c_long]
+    mmap_fn.restype = c_void_p
+    return mmap_fn
 
 
 def _madvise_populate_write(mmap_obj: mmap.mmap, offset: int, length: int) -> None:
@@ -71,23 +86,20 @@ def _get_populate_write_fn(
 
 class SharedOffloadRegion:
     """Single mmap-backed memory region shared across all workers for a
-    vLLM instance.
+    vLLM instance.  Workers coordinate via the filesystem: the first worker
+    to open the file with O_EXCL becomes the creator and calls ftruncate;
+    the rest open the existing file and wait until it reaches the expected
+    size.  Each worker then mmap()s the full file.
 
-    Workers coordinate via the filesystem: the first worker to open the file
-    with O_EXCL initializes it with ftruncate; the rest open the existing file
-    and wait until it reaches the expected size. Each worker then mmap()s the
-    full file. The caller selects the successful-path unlink owner;
-    coordinated startup-abort paths explicitly unlink the shared path
-    after all openers have reached the mapping barrier.
-
-    File path: /dev/shm/vllm_offload_{engine_id}.mmap. The caller-selected
-    unlink owner removes the path after the optional barrier; without a
-    barrier, it must be the last expected opener and removes the path as soon
-    as its mapping is ready. Mappings taken before the unlink stay valid.
+    File path: /dev/shm/vllm_offload_{engine_id}.mmap.  When a barrier is
+    given, the path is unlinked once every worker has mapped the file, so
+    the kernel reclaims the memory when the last worker exits, no matter
+    how it exits; mappings taken before the unlink stay valid.
 
     ``populate_shard=(index, count)`` pre-faults only this worker's contiguous
     share, for layouts where every worker maps the same bytes. The barrier
     also waits for all shards to finish pre-faulting before returning.
+    ``num_segments`` splits backing files beneath the contiguous mapping.
     """
 
     BLOCK_SIZE_ALIGNMENT: int = mmap.PAGESIZE
@@ -103,6 +115,7 @@ class SharedOffloadRegion:
         *,
         creator_memory_check: Callable[[int], None] | None = None,
         populate_shard: tuple[int, int] | None = None,
+        num_segments: int = 1,
         unlink_owner: bool,
     ) -> None:
         self.page_size = mmap.PAGESIZE
@@ -111,8 +124,21 @@ class SharedOffloadRegion:
         self.num_chunks = num_chunks
         self._row_stride = kv_bytes_per_chunk
         self.total_size_bytes = self.num_chunks * self._row_stride
+        self.cpu_page_size = cpu_page_size
 
         self.mmap_path = f"/dev/shm/vllm_offload_{engine_id}.mmap"
+        num_segments = min(num_segments, self.total_size_bytes // _MIN_SEGMENT_BYTES)
+        rows = max(1, cdiv(num_chunks, max(1, num_segments)))
+        # (path, offset, length) per file.
+        self._segments = [
+            (
+                f"{self.mmap_path}.{i}" if i else self.mmap_path,
+                row * self._row_stride,
+                min(rows, num_chunks - row) * self._row_stride,
+            )
+            for i, row in enumerate(range(0, max(num_chunks, 1), rows))
+        ]
+        self._mmap_identities: dict[str, tuple[int, int]] = {}
         self._mmap_identity: tuple[int, int] | None = None
         self.rank = rank
         self.fd: int | None = None
@@ -139,46 +165,55 @@ class SharedOffloadRegion:
                 # Joiner path — another worker won O_EXCL. Reopen and wait
                 # for the file to reach expected size.
                 self.fd = os.open(self.mmap_path, os.O_RDWR)
-                _wait_for_file_size(self.fd, self.total_size_bytes)
+                _wait_for_file_size(self.fd, self._segments[0][2])
                 logger.info("Opened existing mmap file %s", self.mmap_path)
             else:
                 # Creator path. We won O_EXCL, so we own the file: any
                 # failure here must clean up so concurrent joiners don't
-                # land on a 0-byte stub and spin in _wait_for_file_size.
+                # land on a 0-byte stub and spin in _wait_for_file_size
+                # for the full 30 s timeout.
                 created_path = True
-                # Record identity before the checks below, which can raise: the
-                # failure path unlinks, and unlink() needs the identity to know
-                # the pathname is still ours. The joiner path has nothing to
-                # unlink, so it is covered by the shared fstat after this block.
-                assert self.fd is not None
                 stat = os.fstat(self.fd)
-                self._mmap_identity = (stat.st_dev, stat.st_ino)
+                self._mmap_identities[self.mmap_path] = (stat.st_dev, stat.st_ino)
+                self._mmap_identity = self._mmap_identities[self.mmap_path]
                 if creator_memory_check is not None:
                     creator_memory_check(self.total_size_bytes)
                 check_shm_free_space(
                     self.total_size_bytes,
                     allocation_name="CPU KV offload shared region in /dev/shm",
                 )
-                os.ftruncate(self.fd, self.total_size_bytes)
+                for path, _, length in self._segments[1:]:
+                    fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
+                    os.ftruncate(fd, length)
+                    stat = os.fstat(fd)
+                    self._mmap_identities[path] = (stat.st_dev, stat.st_ino)
+                    os.close(fd)
+                # Joiners wait for the first file, so size it last.
+                os.ftruncate(self.fd, self._segments[0][2])
                 logger.info(
                     "Created mmap file %s (%.2f GB)",
                     self.mmap_path,
                     self.total_size_bytes / 1e9,
                 )
 
-            assert self.fd is not None
-            stat = os.fstat(self.fd)
-            self._mmap_identity = (stat.st_dev, stat.st_ino)
+            for path, _, _ in self._segments:
+                stat = os.stat(path)
+                self._mmap_identities[path] = (stat.st_dev, stat.st_ino)
+            self._mmap_identity = self._mmap_identities[self.mmap_path]
+
+            single = len(self._segments) == 1
             self.mmap_obj = mmap.mmap(
-                self.fd,
+                self.fd if single else -1,
                 self.total_size_bytes,
-                flags=mmap.MAP_SHARED,
+                flags=mmap.MAP_SHARED if single else mmap.MAP_PRIVATE,
                 prot=mmap.PROT_READ | mmap.PROT_WRITE,
             )
+            if not single:
+                self._map_segments()
+            if barrier is not None:
+                barriers_remaining -= 1
+                barrier()
             if populate_shard is not None:
-                if barrier is not None:
-                    barriers_remaining -= 1
-                    barrier()
                 if unlink_owner:
                     self._unlink()
                 populate_write_fn = _get_populate_write_fn(self.mmap_obj)
@@ -191,10 +226,7 @@ class SharedOffloadRegion:
                 if barrier is not None:
                     barriers_remaining -= 1
                     barrier()
-            elif barrier is not None:
-                barriers_remaining -= 1
-                barrier()
-            if unlink_owner and populate_shard is None:
+            elif unlink_owner:
                 self._unlink()
         except Exception:
             path_unlinked = False
@@ -202,6 +234,8 @@ class SharedOffloadRegion:
                 self._unlink_for_abort()
                 path_unlinked = True
             self._cleanup_local_resources()
+            # Join remaining barriers so peers do not wait until the collective
+            # times out. A barrier failure must not replace the setup error.
             if barrier is not None:
                 for _ in range(barriers_remaining):
                     try:
@@ -221,6 +255,7 @@ class SharedOffloadRegion:
             self._views = []
             self._canonical_offset = 0
             self.is_pinned = False
+            self.pinned_addresses = []
 
             if populate_shard is not None:
                 return
@@ -234,23 +269,15 @@ class SharedOffloadRegion:
         populate_write_fn = _get_populate_write_fn(self.mmap_obj)
 
         if rank is not None:
-            # Populate only this worker's pages (one slot per chunk row).
-            worker_offset = rank * cpu_page_size
             _t0 = time.perf_counter()
-            page_size = self.page_size
-            for chunk in range(self.num_chunks):
-                raw_offset = chunk * self._row_stride + worker_offset
-                aligned_offset = (raw_offset // page_size) * page_size
-                end = raw_offset + cpu_page_size
-                aligned_length = end - aligned_offset
-                populate_write_fn(self.mmap_obj, aligned_offset, aligned_length)
+            for offset, length in self.iter_worker_slot_ranges():
+                populate_write_fn(self.mmap_obj, offset, length)
             logger.debug(
                 "MADV_POPULATE_WRITE loop: %d chunks in %.3f s",
                 self.num_chunks,
                 time.perf_counter() - _t0,
             )
         else:
-            # No rank — populate the entire shared region in one call.
             _t0 = time.perf_counter()
             populate_write_fn(self.mmap_obj, 0, self.total_size_bytes)
             logger.debug(
@@ -258,27 +285,60 @@ class SharedOffloadRegion:
                 time.perf_counter() - _t0,
             )
 
-    def _unlink(self) -> bool:
-        """Unlink the pathname only if it still names our mapped file.
-
-        Best-effort, for two reasons: Linux cannot unlink by inode, so a
-        replacement could be created between the stat and the unlink; and tmpfs
-        reuses inode numbers aggressively, so a replacement can legitimately
-        match a stale generation's (st_dev, st_ino). This narrows the window
-        rather than closing it, which is enough for the realistic failure -- a
-        stale generation tearing down long after its file was replaced.
-        """
-        with contextlib.suppress(FileNotFoundError):
-            stat = os.stat(self.mmap_path)
-            if (stat.st_dev, stat.st_ino) == self._mmap_identity:
-                os.unlink(self.mmap_path)
-                logger.info("Unlinked mmap file %s", self.mmap_path)
-                return True
-            logger.warning(
-                "Kept mmap file %s: it no longer names our region",
-                self.mmap_path,
+    def _map_segments(self) -> None:
+        """Replace the anonymous mapping with the segment files, back to back."""
+        assert self.mmap_obj is not None and self.fd is not None
+        base = ctypes.addressof(ctypes.c_char.from_buffer(self.mmap_obj))
+        for path, offset, length in self._segments:
+            fd = self.fd if offset == 0 else os.open(path, os.O_RDWR)
+            address = _libc_mmap()(
+                base + offset,
+                length,
+                mmap.PROT_READ | mmap.PROT_WRITE,
+                mmap.MAP_SHARED | _MAP_FIXED,
+                fd,
+                0,
             )
-        return False
+            if fd != self.fd:
+                os.close(fd)
+            if address != base + offset:
+                raise OSError(ctypes.get_errno(), f"Failed to map {path}")
+
+    def _unlink(self) -> bool:
+        """Unlink only segment paths that still name this generation."""
+        unlinked = False
+        for path, _, _ in self._segments:
+            identity = self._mmap_identities.get(path)
+            if identity is None:
+                continue
+            with contextlib.suppress(FileNotFoundError):
+                stat = os.stat(path)
+                if (stat.st_dev, stat.st_ino) == identity:
+                    os.unlink(path)
+                    logger.info("Unlinked mmap file %s", path)
+                    unlinked = True
+                else:
+                    logger.warning(
+                        "Kept mmap file %s: it no longer names our region", path
+                    )
+        return unlinked
+
+    def iter_worker_slot_ranges(self) -> Iterator[tuple[int, int]]:
+        """Yield this worker's slots as page-aligned (offset, length) ranges."""
+        assert self.rank is not None
+        worker_offset = self.rank * self.cpu_page_size
+        first = 0
+        if len(self._segments) > 1:
+            # Start each worker on a different file.
+            first = (
+                self.rank * self.num_chunks // (self._row_stride // self.cpu_page_size)
+            )
+        for i in range(self.num_chunks):
+            row = (first + i) % self.num_chunks
+            start = row * self._row_stride + worker_offset
+            aligned = start - start % self.page_size
+            end = round_up(start + self.cpu_page_size, self.page_size)
+            yield aligned, end - aligned
 
     @property
     def base_tensor(self) -> torch.Tensor:
@@ -435,18 +495,10 @@ class SharedOffloadRegion:
             logger.warning("Failed to unlink path %s", self.mmap_path, exc_info=True)
 
     def cleanup(self) -> None:
-        """Release resources owned by this process during normal shutdown.
-
-        Callers must first release every tensor and memoryview derived from this
-        region. They become invalid once this method closes the mmap.
-        """
+        """Release resources owned by this process during normal shutdown."""
         self._cleanup_local_resources()
 
     def abort_startup_cleanup(self) -> None:
-        """Release local resources and remove a region from failed startup.
-
-        Callers must first release every tensor and memoryview derived from this
-        region. They become invalid once this method closes the mmap.
-        """
+        """Release local resources and remove a region from failed startup."""
         self._cleanup_local_resources()
         self._unlink_for_abort()

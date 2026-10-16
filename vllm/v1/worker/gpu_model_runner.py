@@ -1079,8 +1079,9 @@ class GPUModelRunner(
 
         for i in range(num_reqs):
             seq_len_i = seq_lens_cpu[i]
-            pos = token_type_id_requests.get(i, seq_len_i)
-            ids = (torch.arange(seq_len_i) >= pos).int()
+            start, end = token_type_id_requests.get(i, (seq_len_i, seq_len_i))
+            positions = torch.arange(seq_len_i)
+            ids = ((positions >= start) & (positions < end)).int()
             token_type_ids.append(ids)
 
         token_type_ids_cpu = torch.empty(
@@ -2343,7 +2344,7 @@ class GPUModelRunner(
             # TODO(Isotr0py): Refactor mm_prefix_lm implementation
             # for better readability and maintainability.
             _span_pad_modulus = getattr(
-                hf_text_config, "mm_prefix_span_leading_pad_modulus", 0
+                self.model, "mm_prefix_span_leading_pad_modulus", 0
             )
             for req_id in self.input_batch.req_ids:
                 image_doc_ranges = []

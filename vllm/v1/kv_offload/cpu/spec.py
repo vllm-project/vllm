@@ -22,6 +22,10 @@ from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 
+# Split the shared region into this many shm files so workers pre-fault them
+# in parallel (page-cache inserts are serialized per file).
+_REGION_SEGMENTS = 32
+
 
 def _shared_region_barrier() -> None:
     """Synchronize all ranks that may open the shared mmap region."""
@@ -173,10 +177,6 @@ class CPUOffloadingSpec(OffloadingSpec):
         """Return this worker's rank within its local engine topology."""
         worker_world_size = self.config.parallel.world_size
         if self.config.parallel.per_rank_engine:
-            # external_launcher includes all DP engines in world_size, but
-            # each mmap path belongs to one DP engine. Use the topology of
-            # one engine because independent DP setup may reset
-            # data_parallel_size to one before this spec is built.
             worker_world_size = (
                 self.config.parallel.tp_size
                 * self.config.parallel.pp_size
@@ -191,14 +191,10 @@ class CPUOffloadingSpec(OffloadingSpec):
         # num_chunks == 0 would size the region to zero bytes, which cannot be
         # mmap'd; fall back to the tensor path (empty tensors) as before.
         if self._uses_shared_region() and self.num_chunks > 0:
-            # Normalize the device index to the current DP engine.  This is
-            # separate from `rank`: replicated layout intentionally maps every
-            # worker to slot 0, but only worker rank 0 should own unlinking.
             worker_rank = self.worker_rank
-            # Replicated layout puts all ranks on slot 0 (single MLA copy);
-            # otherwise each worker uses its own logical rank-indexed slot.
             rank = 0 if self.replicated_layout else worker_rank
             world_size = self.config.parallel.world_size
+
             mmap_region = SharedOffloadRegion(
                 engine_id=self.config.engine_id,
                 num_chunks=self.num_chunks,
@@ -206,6 +202,7 @@ class CPUOffloadingSpec(OffloadingSpec):
                 kv_bytes_per_chunk=self.kv_bytes_per_chunk,
                 cpu_page_size=self.cpu_page_size_per_worker,
                 barrier=_shared_region_barrier,
+                num_segments=_REGION_SEGMENTS,
                 unlink_owner=worker_rank == 0,
                 populate_shard=(
                     (worker_rank, world_size) if self.replicated_layout else None
