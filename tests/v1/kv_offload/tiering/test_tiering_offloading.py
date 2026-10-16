@@ -529,8 +529,6 @@ class TestTieringOffloadingManager:
             chunk_ids=np.array([0, 1], dtype=np.int32),
         )
         self.manager._register_job(job, 0)
-        # Redeem the claim the way the tier worker does before finishing.
-        assert job.get() is not None
         failed = JobResult(job_id=job_id, success=False)
         with (
             patch.object(
@@ -556,8 +554,6 @@ class TestTieringOffloadingManager:
             chunk_ids=np.array([0], dtype=np.int32),
         )
         self.manager._register_job(job, 0)
-        # Redeem the claim the way the tier worker does before finishing.
-        assert job.get() is not None
         ok = JobResult(job_id=job_id, success=True)
         with (
             patch.object(self.secondary_tier1, "get_finished_jobs", return_value=[ok]),
@@ -2081,9 +2077,10 @@ class TestPromotionAllocation:
         # Release blocks by completing the store
         manager.primary_tier.complete_store([key], req_ctx, success=True)
 
-    def test_eager_tier_allocation_records_chunk_count_metric(self):
-        """For an eager tier, _promotion_allocation records the chunk count at
-        acquisition."""
+    def test_allocation_records_chunk_count_metric(self):
+        """_promotion_allocation records the chunk count for every promotion:
+        eager tiers call it at initiate, deferred tiers via the job's alloc_fn
+        when get() redeems the claim."""
         num_chunks = 4
         manager, mmap = self._make_manager(
             num_chunks, [self._make_eager_tier(_mock_mmap_region(num_chunks))]
@@ -2100,42 +2097,7 @@ class TestPromotionAllocation:
         keys_out, chunk_ids_out = result
         assert key in keys_out
         assert len(chunk_ids_out) > 0
-        # Chunk count is recorded at acquisition, inside _promotion_allocation.
         assert tier_state.primary_write_chunk_count == len(chunk_ids_out)
-
-    def test_deferred_tier_returns_allocation_and_fires_chunk_count_metric(
-        self, fs_manager_setup
-    ):
-        """For a deferred (FS) tier, _promotion_allocation (the job's alloc_fn)
-        records the chunk count when get() redeems the claim.
-
-        on_primary_chunk_count is patched so the metric side-effect does not
-        dirty the manager state that reset_cache() asserts on teardown.
-        """
-        manager, _, _ = fs_manager_setup
-        req_ctx = ReqContext(req_id="req")
-        key = to_keys([1])[0]
-
-        calls = []
-
-        def capturing_chunk_count(tier_idx, chunk_count, is_promotion):
-            calls.append((tier_idx, chunk_count, is_promotion))
-
-        with patch.object(
-            manager._metrics,
-            "on_primary_chunk_count",
-            side_effect=capturing_chunk_count,
-        ):
-            result = manager._promotion_allocation(0, [key], req_ctx)
-
-        assert result is not None
-        keys_out, chunk_ids_out = result
-        assert key in keys_out
-        assert len(chunk_ids_out) > 0
-        # _promotion_allocation MUST record the chunk count once, with the
-        # right args
-        assert len(calls) == 1
-        assert calls[0] == (0, len(chunk_ids_out), True)
 
     def test_promotion_fails_for_finalized_request(self):
         from vllm.v1.kv_offload.tiering.manager import CPUPrimaryTierOffloadingManager

@@ -26,8 +26,8 @@ from vllm.v1.kv_offload.base import (
     OffloadKey,
     ReqContext,
     RequestOffloadingContext,
-    TransferJob,
 )
+from vllm.v1.kv_offload.tiering.base import TransferJob
 from vllm.v1.kv_offload.tiering.manager import CascadeTransferJob
 from vllm.v1.kv_offload.tiering.p2p.session import (
     LoadResult,

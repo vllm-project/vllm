@@ -1023,8 +1023,7 @@ class TestFSPromotion:
 
     def test_submit_load_rejects_materialized_promotion_job(self, fs_tier):
         """A materialized promotion job is rejected: the FS tier defers
-        allocation, so load_task asserts the job is unmaterialized and the
-        job reports failure."""
+        allocation, so submit_load asserts the job is unmaterialized."""
         tier, _ = fs_tier
         tier.submit_store(make_job(1, [key(1)], [0]))
         drain(tier)
@@ -1035,13 +1034,12 @@ class TestFSPromotion:
             keys=[key(1)],
             chunk_ids=np.array([0], dtype=np.int32),
         )
-        assert job.get() is not None
-        tier.submit_load(job)
-        results = drain(tier)
+        assert job.is_materialized()
+        with pytest.raises(AssertionError, match="materialize"):
+            tier.submit_load(job)
 
-        assert len(results) == 1
-        assert results[0].job_id == 2
-        assert not results[0].success
+        # The job was never enqueued, so it reports no result.
+        assert drain(tier) == []
 
     def test_promotion_allocation_failure(self, fs_tier):
         """alloc_fn returning None → get() redeems to None and the job
@@ -1068,15 +1066,7 @@ class TestFSPromotion:
         assert result.success
         assert result.successful_keys is None
 
-    def test_get_redeemed_in_worker_thread(self, fs_tier):
-        """get() is redeemed on a worker thread, not the scheduler thread.
-
-        Checks:
-        - the claim is unacquired immediately after submit_load() returns
-          (the scheduler thread has not redeemed get()).
-        - the claim is acquired after the worker finishes (drain()).
-        - alloc_fn ran on a thread other than the scheduler thread.
-        """
+    def test_alloc_in_worker_thread(self, fs_tier):
         tier, _ = fs_tier
         # Pre-store a file so the load can succeed
         tier.submit_store(make_job(1, [key(1)], [0]))
@@ -1129,10 +1119,9 @@ class TestFSPromotion:
     def test_promotion_primary_key_availability(self, fs_tier):
         """alloc_fn controls which subset of requested keys are loaded from FS.
 
-        Three sub-cases exercised in sequence, each using its own non-overlapping
-        primary chunk slots so that writes from one sub-case do not pollute another:
-          - None cached:  alloc returns all 4 keys → all 4 loaded (slots 0-3).
-          - Half cached:  alloc returns 2 keys     → only those 2 loaded (slots 4-5).
+        Three sub-cases exercised in sequence,
+          - None cached:  alloc returns all 4 keys → all 4 loaded
+          - Half cached:  alloc returns 2 keys     → only those 2 loaded
           - All cached:   alloc returns 0 keys     → no FS reads, job still succeeds.
         """
         tier, _ = fs_tier
@@ -1168,14 +1157,14 @@ class TestFSPromotion:
             chunk_ids=None,
             alloc_fn=lambda req_keys, ctx: (
                 list(uncached),
-                np.array([4, 5], dtype=np.int32),
+                np.array([0, 1], dtype=np.int32),
             ),
         )
         tier.submit_load(job)
         result = drain(tier)[0]
         assert result.success is True
         assert set(job.keys) == set(uncached)
-        assert list(job.chunk_ids) == [4, 5]
+        assert list(job.chunk_ids) == [0, 1]
 
         # All cached
         job = PromotionTransferJob(

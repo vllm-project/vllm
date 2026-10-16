@@ -241,12 +241,12 @@ class FileSystemTierManager(SecondaryTierManager):
 
     @override
     def submit_load(self, job_metadata: TransferJob) -> None:
+        assert not job_metadata.is_materialized(), (
+            "FS tier should materialize job in the transfer thread"
+        )
         job_id = job_metadata.job_id
 
         def load_task() -> None:
-            assert not job_metadata.is_materialized(), (
-                "FS tier should materialize job in the transfer thread"
-            )
             keys_chunks = job_metadata.get()
             if keys_chunks is None:
                 # Job materialization failed; Setup state such that Job reaping
