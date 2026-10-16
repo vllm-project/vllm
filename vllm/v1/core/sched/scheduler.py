@@ -1123,6 +1123,21 @@ class Scheduler(SchedulerInterface):
                         num_computed_tokens = 0
                         load_kv_async = False
 
+                    # A request redoing dropped prompt logprobs must recompute
+                    # the whole prompt: its fresh CPU logprobs tensor has one
+                    # row per prompt position, and only rows this prefill
+                    # covers get written. A retained prefix hit would leave the
+                    # hit rows uninitialized (#61490).
+                    if request.prompt_logprobs_dropped and num_computed_tokens > 0:
+                        new_computed_blocks = (
+                            self.kv_cache_manager.empty_kv_cache_blocks
+                        )
+                        num_new_local_computed_tokens = 0
+                        num_external_computed_tokens = 0
+                        connector_prefix_cache_hits = 0
+                        num_computed_tokens = 0
+                        load_kv_async = False
+
                     # Include encoder inputs needed to replay the prefix tail.
                     ec_computed_tokens = num_computed_tokens
                     if not window_loaded:

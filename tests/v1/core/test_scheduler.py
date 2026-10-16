@@ -2067,6 +2067,50 @@ def test_reset_prefix_cache_redoes_dropped_prompt_logprobs():
     assert request.request_id not in cached.redo_prompt_logprobs_req_ids
 
 
+def test_redo_prompt_logprobs_recomputes_past_a_prefix_hit():
+    """A redo must ignore prefix hits: the resumed prefill fills a fresh CPU
+    logprobs tensor with one row per prompt position, so tokens treated as
+    computed would leave their rows unwritten (#61490)."""
+    scheduler = create_scheduler(
+        enable_prefix_caching=True, async_scheduling=True, use_v2_model_runner=False
+    )
+    request = create_requests(num_requests=1, num_tokens=48, prompt_logprobs=5)[0]
+    scheduler.add_request(request)
+
+    scheduler_output = scheduler.schedule()
+    scheduler.reset_prefix_cache(reset_running_requests=True)
+    scheduler.update_from_output(
+        scheduler_output,
+        ModelRunnerOutput(
+            req_ids=[request.request_id],
+            req_id_to_index={request.request_id: 0},
+            sampled_token_ids=[[]],
+            logprobs=None,
+            prompt_logprobs_dict={request.request_id: Mock()},
+            pooler_output=[],
+        ),
+    )
+    assert request.prompt_logprobs_dropped
+
+    # Force a partial prefix hit on the resume lookup: one block of the prompt
+    # is reported as already computed.
+    hit_tokens = 16
+    real_hit = scheduler._get_local_prefix_cache_hit
+
+    def patched_hit(req):
+        blocks, _num, boundary, diverged = real_hit(req)
+        return blocks, hit_tokens, boundary, diverged
+
+    with patch.object(scheduler, "_get_local_prefix_cache_hit", patched_hit):
+        out = scheduler.schedule()
+
+    cached = out.scheduled_cached_reqs
+    assert request.request_id in cached.redo_prompt_logprobs_req_ids
+    # The whole prompt was scheduled from position 0 (nothing counted as
+    # computed), so every row of the fresh logprobs tensor gets written.
+    assert out.num_scheduled_tokens[request.request_id] == request.num_tokens
+
+
 def test_stale_output_without_prompt_logprobs_sets_no_redo_flag():
     """A dropped stale chunk that carried no prompt logprobs (mid-prefill)
     leaves the runner-side state intact, so no redo directive is sent."""
