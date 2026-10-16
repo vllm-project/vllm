@@ -14,13 +14,19 @@ class AuxOutputConfig:
     enable_return_routed_experts: bool = False
     """Capture and return routed-experts auxiliary outputs."""
 
+    enable_return_logprobs: bool = False
+    """Enable generated-token logprobs replay for opted-in requests."""
+
     max_bytes: int | None = Field(default=None, gt=0)
     """LRU capacity, or ``None`` to derive it from the KV cache capacity."""
 
     @property
     def enabled(self) -> bool:
         """Whether any execution auxiliary output is enabled."""
-        return self.enable_return_routed_experts
+        return (
+            self.enable_return_routed_experts
+            or self.enable_return_logprobs
+        )
 
     def compute_hash(self) -> str:
         """Hash AuxOutput settings that alter the model forward graph."""
