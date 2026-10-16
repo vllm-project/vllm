@@ -101,8 +101,10 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
                 )
             cpu_capacity_per_rank = explicit
 
-        # An explicit count overrides byte-budget sizing so ranks with different
-        # KV cache layouts (e.g. PP stages) can use the same pool size.
+        # When set, num_cpu_blocks overrides automatic pool sizing from byte budgets
+        # (including cpu_bytes_to_use and cpu_bytes_to_use_per_rank), allowing ranks
+        # with different KV layouts (e.g. PP stages) to use the same pool size.
+        # Byte budgets still bound capacity.
         num_cpu_blocks = extra_config.get("num_cpu_blocks")
         if num_cpu_blocks is not None and (
             type(num_cpu_blocks) is not int or num_cpu_blocks <= 0
