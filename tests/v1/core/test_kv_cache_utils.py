@@ -1989,21 +1989,34 @@ def test_request_with_prompt_embeds_and_mm_inputs(hash_fn: Callable[[Any], bytes
     assert block_hashes[1] == expected_hash2
 
 
-def test_unpadded_page_size_includes_per_token_head_scales():
+@pytest.mark.parametrize(
+    "kv_quant_mode,head_size,slot_bytes",
+    [
+        (KVQuantMode.FP8_PER_TOKEN_HEAD, 64, 2 * 80),
+        (KVQuantMode.INT8_PER_TOKEN_HEAD, 128, 2 * 144),
+        (KVQuantMode.INT8_PER_TOKEN_HEAD, 256, 2 * 272),
+        (KVQuantMode.INT4_PER_TOKEN_HEAD, 256, 2 * 132),
+    ],
+)
+def test_unpadded_page_size_includes_per_token_head_scales(
+    kv_quant_mode, head_size, slot_bytes
+):
     # Per-token-head quant carries inline fp32 scales that are carved from the
     # raw KV allocation, so they must be budgeted into the offload width. The
-    # packing is published by the owning backend's customize_spec hook.
+    # packing is published by the owning backend's customize_spec hook, which
+    # pads each INT8/FP8 K/V half to 16 bytes.
     from vllm.v1.attention.backends.triton_attn import TritonAttentionBackend
 
-    dense = new_kv_cache_spec(dtype=torch.uint8)
     spec = TritonAttentionBackend.customize_spec(
         new_kv_cache_spec(
-            dtype=torch.uint8, kv_quant_mode=KVQuantMode.FP8_PER_TOKEN_HEAD
+            head_size=head_size, dtype=torch.uint8, kv_quant_mode=kv_quant_mode
         )
     )
-    scales = 2 * spec.block_size * spec.num_kv_heads * 4
-    assert spec.unpadded_page_size_bytes == dense.unpadded_page_size_bytes + scales
+    num_slots = spec.block_size * spec.num_kv_heads
+    assert spec.unpadded_page_size_bytes == num_slots * slot_bytes
     assert spec.page_size_bytes == spec.unpadded_page_size_bytes
+    if kv_quant_mode != KVQuantMode.INT4_PER_TOKEN_HEAD:
+        assert spec.state_content_size_bytes // 2 % 16 == 0
 
 
 def test_page_size_padded_wins():
