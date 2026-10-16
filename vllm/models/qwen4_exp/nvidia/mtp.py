@@ -402,11 +402,7 @@ class Qwen4ExpMultiTokenPredictor(nn.Module):
 
 
 class Qwen4ExpMTP(
-    nn.Module,
-    SupportsHCSP,
-    SupportsPP,
-    Qwen4ExpMixtureOfExperts,
-    SupportsReplaySSM,
+    nn.Module, SupportsHCSP, SupportsPP, Qwen4ExpMixtureOfExperts, SupportsReplaySSM
 ):
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
