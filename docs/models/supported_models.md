@@ -712,8 +712,8 @@ Some models are supported only via the [Transformers modeling backend](#transfor
 
 !!! note
     For `Step5ForConditionalGeneration`, only ROCm is supported for now, and it
-    requires `--moe-backend triton`, `--attention-backend ROCM_AITER_UNIFIED_ATTN`
-    and a BF16 KV cache. The checkpoint ships three MTP layers, enabled with
+    requires `--moe-backend triton` and a BF16 KV cache. The checkpoint ships
+    three MTP layers, enabled with
     `--speculative-config '{"method":"mtp","num_speculative_tokens":3}'`.
 
 !!! note
