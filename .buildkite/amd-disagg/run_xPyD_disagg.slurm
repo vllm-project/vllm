@@ -251,7 +251,9 @@ export PREFLIGHT PREFLIGHT_MAX_VRAM_PCT PREFLIGHT_GPU_SETTLE_S
 # MoRIIO workers register with the router. NIXL has no discovery, so pass the URLs.
 ROUTER_KV_ARGS="--kv-connector moriio --vllm-discovery-address 0.0.0.0:${PROXY_PING_PORT}"
 if [[ "${KV_CONNECTOR}" == "NixlConnector" ]]; then
-    ROUTER_KV_ARGS="--kv-connector nixl --worker-startup-timeout-secs 1800"
+    nixl_startup_timeout=1800
+    [[ "${WIDE_EP_MODE}" == "1" && "${xP}" -gt 1 ]] && nixl_startup_timeout=7200
+    ROUTER_KV_ARGS="--kv-connector nixl --worker-startup-timeout-secs ${nixl_startup_timeout}"
     if [[ "${WIDE_EP_MODE}" == "1" ]]; then
         ROUTER_KV_ARGS+=" --prefill http://${IPS[0]}:${SERVE_PORT} --decode http://${IPS[$xP]}:${SERVE_PORT}"
     else
