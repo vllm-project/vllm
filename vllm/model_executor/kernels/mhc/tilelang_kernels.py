@@ -62,6 +62,13 @@ def compute_num_split(block_k: int, k: int | None, grid_size: int) -> int:
 # range.
 _FUSED_POST_PRE_N_THR = 128
 _FUSED_POST_PRE_MAX_TOKENS = 32
+# At up to this many tokens the grid is too small to hide the latency of each
+# thread's serial loads, so when the hidden size allows, a twice wider block
+# over twice as many k-slices gives every thread a single pass instead of four
+# (hidden_size 4096, fused post + pre op on GB300 and SM120: 1.11-1.19x at one
+# token, 0.99-1.05x at four, no gain from five on).
+_FUSED_POST_PRE_SINGLE_PASS_MAX_TOKENS = 4
+_FUSED_POST_PRE_SINGLE_PASS = (2, 16, 256)
 
 
 def mhc_fused_post_pre_split_config(
@@ -76,6 +83,13 @@ def mhc_fused_post_pre_split_config(
     """
     if num_tokens > _FUSED_POST_PRE_MAX_TOKENS:
         return None
+    tile_n, n_splits, n_thr = _FUSED_POST_PRE_SINGLE_PASS
+    if (
+        num_tokens <= _FUSED_POST_PRE_SINGLE_PASS_MAX_TOKENS
+        and hidden_size == n_splits * n_thr
+        and (hc_mult * (hc_mult + 2)) % tile_n == 0
+    ):
+        return tile_n, n_splits, n_thr
     n_thr = _FUSED_POST_PRE_N_THR
     if hidden_size % n_thr:
         return None
@@ -1710,9 +1724,16 @@ class MhcFusedTileLangKernel(
         )
 
     def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
-        num_tokens = 1 if compile_key.tile_n == 2 else 16
         hidden_size = compile_key.hidden_size
         hc_mult = compile_key.hc_mult
+        # __call__ derives the config from the token count, so warm with one
+        # that selects this key's config.
+        config = (compile_key.tile_n, compile_key.n_splits, compile_key.n_thr)
+        num_tokens = next(
+            t
+            for t in range(1, _FUSED_POST_PRE_MAX_TOKENS + 1)
+            if mhc_fused_post_pre_split_config(t, hidden_size, hc_mult) == config
+        )
         hc_mult3 = hc_mult * (2 + hc_mult)
         comb_mix = make_tilelang_warmup_tensor(
             torch.float32, num_tokens, hc_mult, hc_mult

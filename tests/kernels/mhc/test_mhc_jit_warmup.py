@@ -117,7 +117,9 @@ def test_mhc_pre_big_fuse_dispatch_matches_legacy_runtime_config(
 @pytest.mark.parametrize(
     ("num_tokens", "hidden_size", "expected_tile_n", "expected_n_splits"),
     [
-        (1, 4096, 2, 8),
+        (1, 4096, 2, 16),
+        (4, 4096, 2, 16),
+        (5, 4096, 2, 8),
         (4, 8192, 2, 8),
         (8, 5120, 2, 8),
         (16, 5120, 6, 8),
@@ -274,6 +276,16 @@ def test_mhc_fused_declines_shapes_it_cannot_tile() -> None:
                 n_splits=8,
                 tile_n=2,
                 n_thr=128,
+            ),
+        ),
+        (
+            MhcFusedTileLangKernel(),
+            MhcFusedTileLangKernel.CompileKey(
+                hidden_size=4096,
+                hc_mult=4,
+                n_splits=16,
+                tile_n=2,
+                n_thr=256,
             ),
         ),
         (
