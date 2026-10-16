@@ -24,7 +24,7 @@ def test_kda_recurrent_state_dtype_follows_ssm_cache_dtype(ssm_dtype, expected):
     cache_config = SimpleNamespace(
         mamba_cache_dtype="auto",
         mamba_ssm_cache_dtype=ssm_dtype,
-        use_kda_recoverssm=False,
+        use_recoverssm=False,
     )
     vllm_config = SimpleNamespace(model_config=model_config, cache_config=cache_config)
     want = (torch.bfloat16, expected)
