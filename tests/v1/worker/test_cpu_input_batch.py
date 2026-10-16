@@ -297,7 +297,9 @@ def test_get_num_sampled_and_rejected_cpu() -> None:
     assert torch.equal(actual_rejected, torch.tensor([0, 0, 1, 1]))
 
 
-def test_post_update_cpu() -> None:
+def test_cpu_model_runner_postprocesses_sampled_tokens(monkeypatch) -> None:
+    monkeypatch.setattr(cpu_model_runner, "HAS_TRITON", False)
+
     idx_mapping = torch.tensor([3, -1, 1, 4], dtype=torch.int64)
     num_computed_tokens = torch.tensor([10, 20, 30, 40, 50], dtype=torch.int32)
     last_sampled_storage = torch.full((5, 2), -1, dtype=torch.int64)
@@ -314,17 +316,25 @@ def test_post_update_cpu() -> None:
     all_token_ids = all_token_ids_storage[:, 1:9]
     total_len = torch.tensor([1, 3, 1, 2, 4], dtype=torch.int32)
 
-    post_update(
+    runner = object.__new__(cpu_model_runner.CPUModelRunner)
+    runner.is_last_pp_rank = True
+    runner.sampler = SimpleNamespace(
+        penalties_state=SimpleNamespace(output_bin_counts=output_bin_counts)
+    )
+    runner.req_states = SimpleNamespace(
+        num_computed_tokens=SimpleNamespace(gpu=num_computed_tokens),
+        last_sampled_tokens=last_sampled_tokens,
+        all_token_ids=SimpleNamespace(gpu=all_token_ids),
+        total_len=SimpleNamespace(gpu=total_len),
+    )
+    runner.model_state = Mock()
+
+    runner.postprocess_sampled(
         idx_mapping,
-        num_computed_tokens,
-        last_sampled_tokens,
-        output_bin_counts,
         sampled_tokens,
         num_sampled,
         num_rejected,
         query_start_loc,
-        all_token_ids,
-        total_len,
     )
 
     assert num_computed_tokens.tolist() == [10, 21, 30, 43, 51]
@@ -336,6 +346,10 @@ def test_post_update_cpu() -> None:
     assert output_bin_counts[3].tolist() == [0, 0, 2, 0, 0, 1, 0, 0]
     assert output_bin_counts[4].tolist() == [0, 0, 0, 1, 0, 0, 1, 0]
     assert torch.all(output_bin_counts[[0, 1, 2]] == 0)
+    callback_args = runner.model_state.postprocess_state.call_args.args
+    assert callback_args[0] is idx_mapping
+    assert callback_args[1] is num_sampled
+    assert callback_args[2] is num_computed_tokens
 
 
 def test_post_update_cpu_without_optional_inputs() -> None:

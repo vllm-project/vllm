@@ -107,7 +107,6 @@ if not HAS_TRITON:
     gpu_input_batch.get_num_sampled_and_rejected = (
         cpu_input_batch.get_num_sampled_and_rejected
     )
-    gpu_input_batch.post_update = cpu_input_batch.post_update
     gpu_input_batch.post_update_num_computed_tokens = (
         cpu_input_batch.post_update_num_computed_tokens
     )

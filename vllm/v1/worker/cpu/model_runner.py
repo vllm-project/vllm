@@ -12,6 +12,7 @@ from vllm.v1.watermarking.gpu_sampler import GPUWatermarkSampler
 from vllm.v1.worker.cpu.block_table import CPUBlockTables
 from vllm.v1.worker.cpu.input_batch import (
     combine_sampled_and_draft_tokens,
+    post_update,
     prepare_pos_seq_lens,
     prepare_prefill_inputs,
 )
@@ -170,6 +171,45 @@ class CPUModelRunner(GPUModelRunner):
             ),
             prompt_lens=prompt_lens,
             fast_prefill=fast_prefill,
+        )
+
+    def postprocess_sampled(
+        self,
+        idx_mapping: torch.Tensor,
+        sampled_tokens: torch.Tensor,
+        num_sampled: torch.Tensor,
+        num_rejected: torch.Tensor,
+        query_start_loc: torch.Tensor | None = None,
+    ) -> None:
+        if HAS_TRITON:
+            return super().postprocess_sampled(
+                idx_mapping,
+                sampled_tokens,
+                num_sampled,
+                num_rejected,
+                query_start_loc,
+            )
+
+        output_bin_counts = None
+        if self.is_last_pp_rank:
+            assert self.sampler is not None
+            output_bin_counts = self.sampler.penalties_state.output_bin_counts
+
+        post_update(
+            idx_mapping,
+            self.req_states.num_computed_tokens.gpu,
+            self.req_states.last_sampled_tokens,
+            output_bin_counts,
+            sampled_tokens,
+            num_sampled,
+            num_rejected,
+            query_start_loc,
+            self.req_states.all_token_ids.gpu,
+            self.req_states.total_len.gpu,
+        )
+
+        self.model_state.postprocess_state(
+            idx_mapping, num_sampled, self.req_states.num_computed_tokens.gpu
         )
 
     @property
