@@ -294,8 +294,8 @@ class KernelConfig:
 
     specialized_decode: bool = False
     """If True, run decode steps on the model's specialized decode: a kernel
-    that runs most or all of a decoder layer in a single launch (DeepSeek-V4.1
-    on MI355X). A deployment that cannot run it is refused at startup."""
+    that runs most or all of a decoder layer in a single launch. A deployment 
+    that cannot run it is refused at startup."""
 
     moe_backend: MoEBackend = "auto"
     """Backend for MoE expert computation kernels. Available options:

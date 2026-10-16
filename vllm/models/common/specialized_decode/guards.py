@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Refusals: the variant a config can serve, and TP agreement on every stage."""
+"""Common validation logic for specialized decode kernels."""
 
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
@@ -42,19 +42,11 @@ def tp_group() -> tuple[int, int, object | None]:
 
 
 def tp_agree(ok: bool, group) -> bool:
-    """Agrees a verdict every TP rank must take alike.
-
-    The kernel waits in-kernel on every peer rank, so a rank that turned
-    specialized decode off alone, or failed to build what the others launch,
-    leaves the others spinning on the GPU for ever. Every rank must call this
-    at the same point.
+    """Agree on a boolean across the TP group.
 
     Args:
         ok: This rank's local verdict.
         group: The TP group's CPU (gloo) process group, or None for one rank.
-
-    Returns:
-        True when every rank of ``group`` passed ``ok`` true.
 
     """
     if group is None:
@@ -65,12 +57,12 @@ def tp_agree(ok: bool, group) -> bool:
 
 
 def _enabled(vllm_config: "VllmConfig") -> bool:
-    """Whether ``--specialized-decode`` asked for the model's specialized decode."""
+    """Whether the engine is configured to run specialized decode."""
     return bool(vllm_config.kernel_config.specialized_decode)
 
 
 def _features_in_use(vllm_config: "VllmConfig") -> set[Feature]:
-    """The deployment's features a spec has to list in ``supports``."""
+    """Features in use by this config."""
     pc = vllm_config.parallel_config
     oc = vllm_config.offload_config
     on = {
@@ -97,8 +89,7 @@ def _features_in_use(vllm_config: "VllmConfig") -> set[Feature]:
 
 
 def _refuse_config(spec: DecodeSpec[Any], vllm_config: "VllmConfig") -> list[str]:
-    """Every reason this config cannot run ``spec``: default-deny on features,
-    then the runner and the graph mode, then the spec's own."""
+    """The reasons the config cannot run the specialized decode kernel, if any."""
     reasons = [
         f"{f.value} is not supported"
         for f in sorted(_features_in_use(vllm_config) - spec.supports)
@@ -112,9 +103,7 @@ def _refuse_config(spec: DecodeSpec[Any], vllm_config: "VllmConfig") -> list[str
 
 
 def _refuse_model(spec: DecodeSpec[Any], model) -> list[str]:
-    """Every reason the loaded model cannot run ``spec``. Specialized decode replaces
-    the layer loop, which a traced graph has already inlined, so a model
-    carrying ``@support_torch_compile`` is refused."""
+    """The reasons the mode cannot run the specialized decode kernel, if any."""
     from vllm.compilation.wrapper import TorchCompileWithNoGuardsWrapper
 
     reasons = []
@@ -129,13 +118,7 @@ def _refuse_model(spec: DecodeSpec[Any], model) -> list[str]:
 def _select_spec(
     specs: Sequence[DecodeSpec[Any]], vllm_config: "VllmConfig"
 ) -> tuple[DecodeSpec[Any] | None, dict[str, list[str]]]:
-    """The first variant this config can serve, and every variant's refusals.
-
-    Returns:
-        (spec, refusals). ``spec`` is None when every variant refused, and
-        ``refusals`` holds each variant's reasons, by spec name.
-
-    """
+    """Get the first compatible spec."""
     refusals: dict[str, list[str]] = {}
     for spec in specs:
         reasons = _refuse_config(spec, vllm_config)
@@ -145,17 +128,8 @@ def _select_spec(
     return None, refusals
 
 
-def _refusal_message(refusals: dict[str, list[str]]) -> str:
-    """Every variant's reasons as one message."""
-    return "; ".join(
-        f"{name}: {', '.join(reasons)}" for name, reasons in refusals.items()
-    )
-
-
 def _set_capture_sizes(spec: DecodeSpec[Any], vllm_config: "VllmConfig") -> None:
-    """The capture sizes up to the largest width become exactly the widths, so
-    a replay never pads a request's rows; larger sizes stay as configured (and
-    capture vLLM's path)."""
+    """Amend the capture sizes with the supported widths to avoid padding."""
     cc = vllm_config.compilation_config
     widths = spec.widths(vllm_config)
     sizes = cc.cudagraph_capture_sizes or []
@@ -171,22 +145,11 @@ def select_decode_spec(
     vllm_config: "VllmConfig",
     specs: DecodeSpec[KernelT] | Sequence[DecodeSpec[KernelT]],
 ) -> DecodeSpec[KernelT] | None:
-    """Picks the variant, sets the capture sizes, or raises with every reason.
-
-    The variant is picked here, once: the model holds what this returns and
-    hands it to ``SpecializedDecode`` after the weights are loaded. A model
-    that prepares anything of its own at load time reads the returned spec to
-    know which variant it is preparing for.
+    """Select the first compatible spec and set the capture sizes, if enabled.
 
     Args:
         vllm_config: The engine's config, before the weights are loaded.
         specs: The model's variants, in the order they are preferred.
-
-    Returns:
-        The variant this config runs, or None with ``--specialized-decode`` off.
-
-    Raises:
-        DecodeUnsupported: Every variant refused this config.
 
     """
     if not _enabled(vllm_config):
@@ -195,7 +158,8 @@ def select_decode_spec(
     spec, refusals = _select_spec(ordered, vllm_config)
     if spec is None:
         raise DecodeUnsupported(
-            "Specialized decode refused: " + _refusal_message(refusals)
+            "Specialized decode refused: "
+            + "; ".join(f"{n}: {', '.join(rs)}" for n, rs in refusals.items())
         )
     _set_capture_sizes(spec, vllm_config)
     if vllm_config.compilation_config.cudagraph_mode == CUDAGraphMode.NONE:

@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""One ``SpecializedDecode`` a rank: the per-step decision and the cache checks,
-behind the two hooks a model's forward calls (``plan``, then ``run``).
+"""Dispatcher for specialized decoder kernels.
+
+Performs validation, jit registration, planning, and dispatching of specialized decode
+kernels for a model based on a given specification.
 """
 
 from dataclasses import dataclass
@@ -63,15 +65,12 @@ class SpecializedDecode(Generic[KernelT]):
     """
 
     def __init__(self, model, vllm_config: "VllmConfig", spec: DecodeSpec[KernelT]):
-        """Builds this rank's kernel. Collective over the TP group.
+        """Builds this rank's kernel.
 
         Args:
             model: The loaded model, in ``process_weights_after_loading``.
             vllm_config: The engine's config.
-            spec: The variant ``select_decode_spec`` picked.
-
-        Raises:
-            DecodeUnsupported: This rank, or another, refused the loaded model.
+            spec: The spec to build and run.
 
         """
         self.spec = spec
@@ -91,16 +90,9 @@ class SpecializedDecode(Generic[KernelT]):
         logger.info("Specialized decode %s: widths %s", spec.name, list(self.widths))
 
     def bind_caches(self) -> None:
-        """Checks the caches the kernel will read and hands them to it, as the
-        runner binds them.
+        """Validate and bind caches to the kernel.
 
-        Called from ``ModelState.initialize_kv_cache``, which runs once for the
-        throwaway cache memory profiling allocates and again for the real one.
-        The kernel only ever sees caches this spec has accepted.
-
-        Raises:
-            DecodeUnsupported: The caches are not what this spec serves.
-
+        The underlying kernel only ever sees caches this spec has accepted.
         """
         sfc = self.vllm_config.compilation_config.static_forward_context
         caches = {n: sfc[n].kv_cache for n in self.kernel.cache_layers}
@@ -115,13 +107,8 @@ class SpecializedDecode(Generic[KernelT]):
     def plan(self, positions: torch.Tensor, intermediate_tensors=None) -> Step | None:
         """This step's plan, or None to run the model's own forward instead.
 
-        Steps that run the model's forward: a pipeline stage's inputs, a width
-        off the spec's widths, a PIECEWISE step (keyed by token count alone, so
-        it is replayed for mixed batches too), caches the runner has not bound,
-        and whatever ``skip_step`` refuses.
-
-        Every predicate is the same on every TP rank: the kernel waits
-        in-kernel on its peers, so the ranks must take the same path.
+        A step can fall back to running the model's own forward when the kernel cannot
+        serve it, as described by the spec.
         """
         width = positions.size(-1)
         why: str | None
@@ -145,6 +132,6 @@ class SpecializedDecode(Generic[KernelT]):
         return Step(width=width, positions=positions)
 
     def run(self, step: Step, input_ids, inputs_embeds, **kwargs) -> Any:
-        """A planned step on the kernel, returning what the model's own forward
-        would have returned."""
+        """Run the specialized kernel, returning what the model's own forward would
+        have returned."""
         return self.kernel.run(step, input_ids, inputs_embeds, **kwargs)

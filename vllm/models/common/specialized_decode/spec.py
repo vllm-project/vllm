@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""What a model declares to run specialized decode: ``DecodeSpec`` and its
-callbacks."""
+"""Interfaces for when and how to run a specialized decode kernel."""
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -15,8 +14,7 @@ if TYPE_CHECKING:
 
 
 class Feature(str, Enum):
-    """What a deployment can turn on. A feature in use that a spec's
-    ``supports`` does not list is refused."""
+    """Features a specialized decode kernel may require."""
 
     PIPELINE_PARALLEL = "pipeline_parallel"
     DATA_PARALLEL = "data_parallel"
@@ -50,8 +48,7 @@ class Step:
 
 
 class DecodeImpl(Protocol):
-    """A spec's half of the contract: one model's decode on this rank, for
-    every width the spec serves.
+    """A specialized decode kernel, substituting a model's forward.
 
     The implementation owns its own layer loop, so the library has no opinion
     about layers: it may replace one layer, two, or the whole backbone.
@@ -61,30 +58,15 @@ class DecodeImpl(Protocol):
     """Attention layers whose caches ``DecodeSpec.refuse_caches`` checks."""
 
     def run(self, step: Step, input_ids, inputs_embeds, **kwargs) -> Any:
-        """Takes and returns what the model's own forward does.
-
-        A launch replaces a *whole* decoder layer: it returns what that layer's
-        forward returns, or declines, and the kernel runs the layer on vLLM's
-        path instead. Covering part of a layer is the model's own problem, and
-        is discouraged: a new kernel should cover a whole layer or fall back.
-        """
+        """Takes and returns what the model's own forward does."""
         ...
 
     def bind_caches(self, caches: Mapping[str, Any]) -> None:
-        """Takes the ``cache_layers`` caches the runner has bound, once
-        ``DecodeSpec.refuse_caches`` has passed them.
-
-        For a kernel whose launches close over the cache layout (a compile
-        against its strides, a cached view), this is where that happens. Called
-        again whenever the runner rebinds, so it must replace what the last call
-        built, not add to it: a normal startup binds the throwaway cache memory
-        profiling allocates before the real one.
-        """
+        """Bind the KV caches the kernel will read."""
         ...
 
     def warmup_keys(self) -> list[Any]:
-        """Hashable build keys of this kernel's launches, compiled before CUDA
-        graph capture by vLLM's JIT warm-up."""
+        """Build keys of this kernel's launches."""
         ...
 
     def compile(self, key: Any) -> None:
@@ -93,14 +75,12 @@ class DecodeImpl(Protocol):
 
 
 KernelT = TypeVar("KernelT", bound=DecodeImpl)
-"""What one spec's ``build`` returns, and what its ``refuse_caches`` and
-``skip_step`` are handed: a spec declared ``DecodeSpec[MyKernel]`` ties the
-three together."""
 
 
 @dataclass(frozen=True)
 class DecodeSpec(Generic[KernelT]):
-    """Definition of when specialized decode can run, and how to build it.
+    """Definition of when specialized decode can run, and how to build its
+    implementation.
 
     Attributes:
         name: Log and metric name.
@@ -108,17 +88,15 @@ class DecodeSpec(Generic[KernelT]):
             that is absent from it refuses the deployment.
         widths: The rows a launch serves, from the engine's config. These
             become the CUDA graph capture sizes.
-        refuse_config: Deployment refusals the engine's config answers, before
-            the weights are loaded.
-        refuse_model: Deployment refusals only the loaded model answers.
-        refuse_caches: Deployment refusals the KV caches the kernel will read
-            answer, re-run whenever the runner binds caches.
-        skip_step: Why one step takes vLLM's path, None when it takes the
-            kernel's. Takes the step's width; anything else it needs it reads
-            from the forward context, which every rank sees alike.
-        build: This rank's kernel, built once off the loaded model (whose
-            parameters carry the device it launches on) and every width the
-            spec serves. The only place a weight copy is ever made.
+        refuse_config: Conditions under which the specialized decode kernel cannot run,
+            based on the config.
+        refuse_model: Conditions under which the specialized decode kernel cannot run,
+            based on the model.
+        refuse_caches: Conditions under which the specialized decode kernel cannot run,
+            based on the cache.
+        skip_step: Whether to run the specialized decode kernel for this forward call,
+            or to fall back to the model's own forward.
+        build: This rank's kernel.
 
     """
 
