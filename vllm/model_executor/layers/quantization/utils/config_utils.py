@@ -172,7 +172,7 @@ def is_shared_expert_quant_fse_compatible(
             # activation quant key as well. Only some online methods define it
             # on the class, so compare the weight key first.
             if shared_quant_spec.weight != routed_weight_key or (
-                routed_activation_key is not None
+                moe_backend != "aiter_mega_moe"
                 and shared_method_cls.activation_quant_key != routed_activation_key
             ):
                 return (
