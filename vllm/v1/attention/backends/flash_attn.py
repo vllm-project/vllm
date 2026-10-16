@@ -1561,11 +1561,9 @@ class FlashAttentionImpl(AttentionImpl):
                 attn_metadata.swa_num_query_rows,
                 *attn_query.shape[1:],
             )
-            padded_query, padded_output = (
-                current_workspace_manager().get_simultaneous(
-                    (padded_shape, attn_query.dtype),
-                    (padded_shape, attn_output.dtype),
-                )
+            padded_query, padded_output = current_workspace_manager().get_simultaneous(
+                (padded_shape, attn_query.dtype),
+                (padded_shape, attn_output.dtype),
             )
             _prepare_swa_tile_alignment_workspace(
                 padded_query,

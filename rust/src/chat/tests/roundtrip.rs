@@ -485,6 +485,7 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Always { value: true },
             json_fmt: compact_json_fmt(),
             sort_json_keys: false,
+            with_schema: ToolCallMixVariant::WITH_SCHEMA,
         }
     }
 

@@ -163,8 +163,7 @@ __global__ void qknorm_rope_cache_kernel(
               reinterpret_cast<uint8_t*>(v_cache_void)[cache_offset + dim] =
                   fp8::scaled_convert<uint8_t, float,
                                       Fp8KVCacheDataType::kFp8E4M3>(
-                      ScalarConverter::convert(value),
-                                                                    *v_scale);
+                      ScalarConverter::convert(value), *v_scale);
             } else {
               v_cache[cache_offset + dim] = value;
             }
@@ -285,8 +284,7 @@ __global__ void qknorm_rope_cache_kernel(
             reinterpret_cast<uint8_t*>(k_cache_void)[cache_offset + dim] =
                 fp8::scaled_convert<uint8_t, float,
                                     Fp8KVCacheDataType::kFp8E4M3>(
-                      ScalarConverter::convert(value),
-                                                                  *k_scale);
+                    ScalarConverter::convert(value), *k_scale);
           } else {
             k_cache[cache_offset + dim] = value;
           }

@@ -2,10 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Any
 
-from transformers.configuration_utils import PretrainedConfig
+from transformers.configuration_utils import PreTrainedConfig
 
 
-class PerceptionEncoderConfig(PretrainedConfig):
+class PerceptionEncoderConfig(PreTrainedConfig):
     """Configuration for the vision tower shared by Step3p7 and Step5."""
 
     model_type = "perception_encoder"
@@ -52,7 +52,7 @@ class PerceptionEncoderConfig(PretrainedConfig):
         self.use_ln_post = use_ln_post
 
 
-class Step5Config(PretrainedConfig):
+class Step5Config(PreTrainedConfig):
     model_type = "step5"
 
     def __init__(
@@ -208,7 +208,7 @@ class Step5Config(PretrainedConfig):
         )
 
 
-class Step5VLConfig(PretrainedConfig):
+class Step5VLConfig(PreTrainedConfig):
     """Configuration for the Step5 vision-language model."""
 
     model_type = "step5_vl"
