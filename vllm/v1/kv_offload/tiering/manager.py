@@ -22,7 +22,7 @@ Key Design Principles:
 import functools
 import threading
 import time
-from collections.abc import Collection, Iterable, Sequence
+from collections.abc import Callable, Collection, Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import NamedTuple, cast
 
@@ -51,7 +51,6 @@ from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.tiering.base import (
     TIER_LABEL,
-    DeferredTransferJob,
     JobId,
     JobResult,
     ParentManager,
@@ -106,6 +105,90 @@ class RequestState:
     is_finished: bool = False
     request_level_tiers: set[int] | None = None
     pending_cascade_keys: list[OffloadKey] = field(default_factory=list)
+
+
+PrimaryAllocFn = Callable[
+    [Collection[OffloadKey], ReqContext], tuple[list[OffloadKey], np.ndarray] | None
+]
+
+
+class PromotionTransferJob(TransferJob):
+    def __init__(
+        self,
+        job_id: JobId,
+        req_context: ReqContext,
+        keys: Collection[OffloadKey],
+        chunk_ids: np.ndarray,
+        alloc_fn: PrimaryAllocFn | None = None,
+    ):
+        super().__init__(job_id, req_context, is_promotion=True)
+        self._requested_keys = keys
+        self._chunk_ids = chunk_ids
+        self._alloc_fn = alloc_fn
+        self._is_alloc_failed = False
+        self._keys_chunks: tuple[Collection[OffloadKey], np.ndarray] | None = None
+
+        # maybe the job is already materialized at construction
+        if len(self._requested_keys) == len(self._chunk_ids):
+            # already materialized
+            self._keys_chunks = (self._requested_keys, self._chunk_ids)
+        else:
+            assert (
+                len(self._requested_keys) != 0
+                and len(self._chunk_ids) == 0
+                and self._alloc_fn is not None
+            ), (
+                "Malformed PromotionTransferJob. Deferred allocation needs "
+                "a alloc_fn, with empty chunk_ids and valid requested_keys "
+            )
+
+    def get(self) -> tuple[Collection[OffloadKey], np.ndarray] | None:
+        if self._keys_chunks is not None or self._is_alloc_failed:
+            return self._keys_chunks
+
+        # Attempt materialization
+        assert self._alloc_fn is not None
+        alloc = self._alloc_fn(self._requested_keys, self.req_context)
+        if alloc is None:
+            self._is_alloc_failed = True
+        else:
+            self._keys_chunks = alloc
+        return self._keys_chunks
+
+    @property
+    def keys(self) -> Collection[OffloadKey]:
+        if self._keys_chunks is None:
+            raise ValueError("Must call get() at least once or get() was unsuccessful")
+        return self._keys_chunks[0]
+
+    @property
+    def chunk_ids(self) -> np.ndarray:
+        if self._keys_chunks is None:
+            raise ValueError("Must call get() at least once or get() was unsuccessful")
+        return self._keys_chunks[1]
+
+
+class CascadeTransferJob(TransferJob):
+    def __init__(
+        self,
+        job_id: JobId,
+        req_context: ReqContext,
+        keys: Collection[OffloadKey],
+        chunk_ids: np.ndarray,
+    ):
+        super().__init__(job_id, req_context, is_promotion=False)
+        self._keys_chunks: tuple[Collection[OffloadKey], np.ndarray] = (keys, chunk_ids)
+
+    def get(self) -> tuple[Collection[OffloadKey], np.ndarray] | None:
+        return self._keys_chunks
+
+    @property
+    def keys(self) -> Collection[OffloadKey]:
+        return self._keys_chunks[0]
+
+    @property
+    def chunk_ids(self) -> np.ndarray:
+        return self._keys_chunks[1]
 
 
 class JobMetadata(NamedTuple):
@@ -272,6 +355,31 @@ class _SecondaryTierFacingParent(ParentManager):
         )
 
 
+class _LockedMetrics:
+    """Serializes TieringMetricsTracker access across scheduler and tier
+    worker threads. Deferred promotion jobs redeem get() on a tier's worker
+    thread, where _promotion_allocation records chunk counts and allocation
+    failures concurrently with scheduler-thread metrics calls."""
+
+    __slots__ = ("_tracker", "_lock")
+
+    def __init__(self, tracker: TieringMetricsTracker) -> None:
+        self._tracker = tracker
+        self._lock = threading.Lock()
+
+    def __getattr__(self, name: str):
+        attr = getattr(self._tracker, name)
+        if callable(attr):
+
+            @functools.wraps(attr)
+            def locked(*args, **kwargs):
+                with self._lock:
+                    return attr(*args, **kwargs)
+
+            return locked
+        return attr
+
+
 class _LockedPrimaryTier:
     __slots__ = ("_primary_tier", "_lock")
 
@@ -342,13 +450,14 @@ class TieringOffloadingManager(OffloadingManager):
         self._lock = threading.Lock()
         self.secondary_tiers = secondary_tiers or []
 
-        # Wrap primary_tier in a locking proxy only when background worker
-        # threads are present (deferred-allocation secondary tiers). Otherwise use
-        # the raw object — no lock overhead for single-threaded configs.
-        if any(
+        has_deferred_tiers = any(
             tier.supports_deferred_promotion_allocation()
             for tier in self.secondary_tiers
-        ):
+        )
+        if has_deferred_tiers:
+            # Wrap primary_tier in a locking proxy only when background worker
+            # threads are present (deferred-allocation secondary tiers). Otherwise use
+            # the raw object — no lock overhead for single-threaded configs.
             self.primary_tier: CPUPrimaryTierOffloadingManager = cast(
                 CPUPrimaryTierOffloadingManager,
                 _LockedPrimaryTier(primary_tier),
@@ -356,19 +465,25 @@ class TieringOffloadingManager(OffloadingManager):
         else:
             self.primary_tier = primary_tier
 
+        primary_view = self.primary_tier.get_kv_memoryview()
+        assert primary_view.strides is not None
+        tracker = TieringMetricsTracker(
+            tier_types=[tier.tier_type for tier in self.secondary_tiers],
+            num_primary_chunks=self.primary_tier._num_chunks,
+            primary_chunk_size=primary_view.strides[0],
+        )
+        self._metrics: TieringMetricsTracker
+        if has_deferred_tiers:
+            self._metrics = cast(TieringMetricsTracker, _LockedMetrics(tracker))
+        else:
+            self._metrics = tracker
+
         self._job_id_counter: int = 0
         # Job tracking: maps job_id to metadata for all in-flight transfers.
         # TransferJob.is_promotion distinguishes direction:
         #   True:  secondary → primary (promotion)
         #   False: primary → secondary (cascade)
         self._jobs: dict[JobId, JobMetadata] = {}
-        primary_view = self.primary_tier.get_kv_memoryview()
-        assert primary_view.strides is not None
-        self._metrics = TieringMetricsTracker(
-            tier_types=[tier.tier_type for tier in self.secondary_tiers],
-            num_primary_chunks=self.primary_tier._num_chunks,
-            primary_chunk_size=primary_view.strides[0],
-        )
 
         # Pending promotion requests accumulated during lookup() calls; flushed
         # as one batched submit_load() per (tier, request) in on_schedule_end().
@@ -554,6 +669,10 @@ class TieringOffloadingManager(OffloadingManager):
     def _register_job(self, transfer_job: TransferJob, tier_idx: int) -> None:
         job_metadata = JobMetadata(transfer_job, tier_idx)
         self._jobs[transfer_job.job_id] = job_metadata
+        if not transfer_job.is_promotion:
+            self._metrics.on_primary_chunk_count(
+                tier_idx, len(transfer_job.chunk_ids), is_promotion=False
+            )
         self._metrics.on_job_registered(job_metadata)
 
     def _pop_job(self, job_id: JobId) -> JobMetadata | None:
@@ -587,15 +706,13 @@ class TieringOffloadingManager(OffloadingManager):
                         del load_sources[key]
 
         # Clear in-flight promotion keys book-keeping.
-        self._inflight_promotion_keys.difference_update(transfer_job._keys)
+        assert isinstance(transfer_job, PromotionTransferJob)
+        self._inflight_promotion_keys.difference_update(transfer_job._requested_keys)
 
-        if (
-            isinstance(transfer_job, DeferredTransferJob)
-            and not transfer_job.deferred_alloc_succeeded
-        ):
+        if transfer_job.get() is None:
             # Promotion failed. lets not doom the request into a retry loop.
             self._promotion_failed_requests.add(transfer_job.req_context.req_id)
-            _maybe_update_load_sources(set(transfer_job._keys))
+            _maybe_update_load_sources(set(transfer_job._requested_keys))
             return
 
         successful_keys = completed_job.successful_keys
@@ -668,7 +785,7 @@ class TieringOffloadingManager(OffloadingManager):
                 transfer_job = job_metadata.transfer_job
                 self._metrics.on_job_finished(job_metadata, completed_job)
 
-                if transfer_job.is_promotion:
+                if isinstance(transfer_job, PromotionTransferJob):
                     # secondary→primary transfer (promotion) completed.
                     # Make chunks available in primary tier.
                     self._complete_promotion(job_metadata, completed_job)
@@ -815,7 +932,7 @@ class TieringOffloadingManager(OffloadingManager):
         tier_idx: int,
         offload_keys: Collection[OffloadKey],
         req_context: ReqContext,
-    ) -> tuple[list[OffloadKey], list[int]] | None:
+    ) -> tuple[list[OffloadKey], np.ndarray] | None:
         """Allocate primary tier slots for promotion"""
         primary_write_result = self.primary_tier.safe_prepare_write(
             offload_keys, req_context
@@ -836,8 +953,9 @@ class TieringOffloadingManager(OffloadingManager):
         store_spec = primary_write_result.store_spec
         assert isinstance(store_spec, CPULoadStoreSpec)
 
-        if self.secondary_tiers[tier_idx].supports_deferred_promotion_allocation():
-            self._metrics.on_promotion_chunk_count(tier_idx, len(store_spec.chunk_ids))
+        self._metrics.on_primary_chunk_count(
+            tier_idx, len(store_spec.chunk_ids), is_promotion=True
+        )
         return primary_write_result.keys_to_store, store_spec.chunk_ids
 
     def _initiate_promotion(
@@ -918,26 +1036,15 @@ class TieringOffloadingManager(OffloadingManager):
             is_deferred_alloc = tier.supports_deferred_promotion_allocation()
             for entry in pending_by_ctx.values():
                 job_id = self._next_job_id()
-                if is_deferred_alloc:
-                    assert len(entry.chunk_ids) == 0
-                    job_metadata: TransferJob = DeferredTransferJob(
-                        job_id=job_id,
-                        _keys=entry.keys,
-                        _chunk_ids=np.array([]),  # deferred alloc
-                        is_promotion=True,
-                        req_context=entry.req_context,
-                        primary_alloc_fn=functools.partial(
-                            self._promotion_allocation, tier_idx
-                        ),
-                    )
-                else:
-                    job_metadata = TransferJob(
-                        job_id=job_id,
-                        _keys=entry.keys,
-                        _chunk_ids=np.array(entry.chunk_ids, dtype=np.int32),
-                        is_promotion=True,
-                        req_context=entry.req_context,
-                    )
+                job_metadata: TransferJob = PromotionTransferJob(
+                    job_id=job_id,
+                    req_context=entry.req_context,
+                    keys=entry.keys,
+                    chunk_ids=np.array(entry.chunk_ids, dtype=np.int32),
+                    alloc_fn=functools.partial(self._promotion_allocation, tier_idx)
+                    if is_deferred_alloc
+                    else None,
+                )
                 self._register_job(job_metadata, tier_idx)
                 tier.submit_load(job_metadata)
 
@@ -1189,12 +1296,11 @@ class TieringOffloadingManager(OffloadingManager):
         primary_chunks_spec = self.primary_tier.prepare_read(keys, req_context)
         assert isinstance(primary_chunks_spec, CPULoadStoreSpec)
         job_id = self._next_job_id()
-        job_metadata = TransferJob(
+        job_metadata = CascadeTransferJob(
             job_id=job_id,
-            _keys=keys,
-            _chunk_ids=primary_chunks_spec.chunk_ids,
-            is_promotion=False,
             req_context=req_context,
+            keys=keys,
+            chunk_ids=primary_chunks_spec.chunk_ids,
         )
         self._register_job(job_metadata, tier_idx)
         return job_metadata

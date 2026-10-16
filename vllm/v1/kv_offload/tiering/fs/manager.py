@@ -42,7 +42,6 @@ from vllm.v1.kv_offload.file_mapper import FileMapper
 from vllm.v1.kv_offload.tiering.async_lookup import AsyncLookupManager
 from vllm.v1.kv_offload.tiering.backpressure import BackpressureDetector
 from vllm.v1.kv_offload.tiering.base import (
-    DeferredTransferJob,
     JobId,
     JobResult,
     RequestOffloadingContext,
@@ -242,18 +241,19 @@ class FileSystemTierManager(SecondaryTierManager):
 
     @override
     def submit_load(self, job_metadata: TransferJob) -> None:
-        assert isinstance(job_metadata, DeferredTransferJob)
-        assert not job_metadata.is_materialized(), (
-            "FS tier should allocate CPU cache lazily"
-        )
         job_id = job_metadata.job_id
 
         def load_task() -> None:
-            # Allocate CPU cache blocks
-            job_metadata.materialize()
-            assert job_metadata.is_materialized()
             # Track this load's keys so a failed promotion can mark only its failed
             # keys as a miss (see get_finished_jobs).
+            keys_chunks = job_metadata.get()
+            if keys_chunks is None:
+                # Job materialization failed; Setup state such that Job reaping
+                # doesn't blow up.
+                self._job_block_counts[job_id] = 0
+                self._load_job_keys[job_id] = []
+                return
+
             self._job_block_counts[job_id] = len(job_metadata.keys)
             self._load_job_keys[job_id] = list(job_metadata.keys)
             # TODO (varun): Path generation is expensive. Consider doing in
@@ -263,14 +263,13 @@ class FileSystemTierManager(SecondaryTierManager):
             assert len(paths) == len(offsets)
 
             try:
-                if paths:
-                    batch_load_block(
-                        paths,
-                        self._primary_kv_view,
-                        offsets,
-                        self._block_size,
-                        self._use_o_direct,
-                    )
+                batch_load_block(
+                    paths,
+                    self._primary_kv_view,
+                    offsets,
+                    self._block_size,
+                    self._use_o_direct,
+                )
             except OSError as exc:
                 # Runs on the pool worker thread. Record how many blocks loaded
                 # before the failure so get_finished_jobs can keep them; this
