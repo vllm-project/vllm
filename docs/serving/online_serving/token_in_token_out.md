@@ -77,7 +77,7 @@ A request can carry media in two ways, and can use both at once:
 - `content_parts`: raw media (`image_url`, `audio_url` or `video_url`, each with an optional `uuid`). `token_ids` holds one placeholder token per item, and the server expands it.
 - `features`: items whose placeholders are already expanded in `token_ids`, at the ranges given in `mm_placeholders`. Pass the processed tensors in `kwargs_data`, or omit them to look the items up in the processor cache by `mm_hashes`.
 
-When both are set, every `content_parts` placeholder must come after the last `features` range. Only the tokens after that range are processed, so the expanded runs before it are left as they are.
+When both are set, every `content_parts` placeholder must come after the last `features` range. Only the tokens after that range are processed, so the expanded runs before it are left as they are. Models that insert media at the start of the prompt (such as PaliGemma, BLIP-2 and Molmo) would place a new item right after that range without an error, so don't combine the two fields for them.
 
 This fits multi-turn rollouts. Each turn resends the previous prompt with its images already expanded, adds the new turn with one placeholder per new image, and sends the earlier images as `features`:
 

@@ -37,7 +37,7 @@ from vllm.entrypoints.serve.engine.protocol import (
 )
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens, should_include_usage
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
-from vllm.exceptions import GenerationError
+from vllm.exceptions import GenerationError, VLLMValidationError
 from vllm.inputs import EngineInput, MultiModalInput, TokensPrompt, mm_input
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
@@ -247,8 +247,10 @@ class ServingTokens(GenerateBaseServing):
         if request.content_parts:
             # Items in features are already expanded; render every token
             # after the last of them, so new placeholders must lie there.
-            ranges = features.mm_placeholders.values() if features else ()
-            start = max((p.offset + p.length for rs in ranges for p in rs), default=0)
+            feature_ranges = features.mm_placeholders.values() if features else ()
+            start = max(
+                (p.offset + p.length for rs in feature_ranges for p in rs), default=0
+            )
             tracker = AsyncMultiModalItemTracker(self.model_config)
             mm_parser = tracker.create_parser()
             for part in request.content_parts:
@@ -269,9 +271,17 @@ class ServingTokens(GenerateBaseServing):
                 prompt["multi_modal_data"] = mm_data
             if mm_uuids:
                 prompt["multi_modal_uuids"] = mm_uuids
-            (engine_input,) = await self.online_renderer.renderer.render_cmpl_async(
-                [prompt]
-            )
+            try:
+                (engine_input,) = await self.online_renderer.renderer.render_cmpl_async(
+                    [prompt]
+                )
+            except VLLMValidationError as e:
+                if not features:
+                    raise
+                raise VLLMValidationError(
+                    "content_parts placeholders must come after the last "
+                    f"features range, which ends at offset {start}"
+                ) from e
         if features:
             # Convert PlaceholderRangeInfo → PlaceholderRange per modality.
             mm_placeholders: dict[str, list[PlaceholderRange]] = {
@@ -288,6 +298,7 @@ class ServingTokens(GenerateBaseServing):
                 return error
 
             token_ids = request.token_ids
+            mm_hashes = {m: list(h) for m, h in features.mm_hashes.items()}
             if request.content_parts:
                 rendered = cast(MultiModalInput, engine_input)
                 token_ids = token_ids[:start] + rendered["prompt_token_ids"]
@@ -296,14 +307,12 @@ class ServingTokens(GenerateBaseServing):
                         replace(p, offset=p.offset + start) for p in ps
                     )
                     mm_kwargs.setdefault(m, []).extend(rendered["mm_kwargs"][m])
-                    features.mm_hashes.setdefault(m, []).extend(
-                        rendered["mm_hashes"][m]
-                    )
+                    mm_hashes.setdefault(m, []).extend(rendered["mm_hashes"][m])
 
             engine_input = mm_input(
                 prompt_token_ids=token_ids,
                 mm_kwargs=MultiModalKwargsItems(mm_kwargs),
-                mm_hashes=features.mm_hashes,
+                mm_hashes=mm_hashes,
                 mm_placeholders=mm_placeholders,
                 cache_salt=request.cache_salt,
             )
