@@ -251,7 +251,7 @@ class CohereServingChatV2(OpenAIServingChat):
         reasoning_parser: str = "",
         enable_auto_tools: bool = False,
         tool_parser: str | None = None,
-        tool_strict_level: str = "auto",
+        tool_strict_level: str | None = None,
         enable_prompt_tokens_details: bool = False,
         enable_force_include_usage: bool = False,
         enable_log_outputs: bool = False,
@@ -601,7 +601,7 @@ class CohereServingChatV2(OpenAIServingChat):
             json_schema=(
                 JsonSchemaResponseFormat(
                     name="cohere_v2_json_schema",
-                    json_schema=rf.json_schema,
+                    schema=rf.json_schema,
                 )
                 if rf.json_schema
                 else None
