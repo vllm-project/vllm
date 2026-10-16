@@ -136,6 +136,7 @@ def _topk_topp_kernel(
         standalone_topp = False
         sum_exp_logits = 0.0
         min_larger_prob = 1.0
+        max_sample = 0.0
 
         max_logit = -float("inf")
         min_logit = float("inf")
@@ -209,7 +210,10 @@ def _topk_topp_kernel(
                 k_pivots_num = tl.zeros((), dtype=tl.uint32)
                 min_larger = float("inf")
                 num_min_larger = tl.zeros((), dtype=tl.uint32)
-                if num_outliers > k:
+                if num_finite_total <= k:
+                    # All finite logits survive top-k; skip the cutoff search.
+                    k_pivot = -float("inf")
+                elif num_outliers > k:
                     max_range = max_logit
                     min_range = outlier_pivot
                     search_range = tl.cast(num_outliers, tl.int32)
@@ -643,6 +647,9 @@ def _topk_topp_kernel(
                 std_logit = tl.sqrt(
                     tl.maximum(sq_avg_logit - avg_logit * avg_logit, 0.0)
                 )
+                # Retain the sampled reference unless a later logit exceeds it,
+                # preserving the existing search rounding on ordinary rows.
+                max_sample = avg_logit + std_logit * 10.0
                 sum_exp_logits = 0.0
 
                 # First pass: compute max and min logits and sum_exp_logits
@@ -652,12 +659,10 @@ def _topk_topp_kernel(
                     logits_blk = tl.load(
                         LOGITS_ROW + offs_n, mask=mask_n, other=-float("inf")
                     )
-                    new_max_logit = tl.maximum(max_logit, tl.max(logits_blk))
-                    rescale = tl.where(
-                        max_logit == -float("inf"),
-                        0.0,
-                        tl.exp(max_logit - new_max_logit),
-                    )
+                    block_max = tl.max(logits_blk)
+                    new_max_sample = tl.maximum(max_sample, block_max)
+                    rescale = tl.exp(max_sample - new_max_sample)
+                    max_logit = tl.maximum(max_logit, block_max)
                     # Exclude -inf from min to keep binary search bounds
                     # finite (avoids NaN pivots).
                     finite_blk = tl.where(
@@ -667,11 +672,11 @@ def _topk_topp_kernel(
 
                     probs_blk = tl.where(
                         logits_blk != -float("inf"),
-                        tl.exp(logits_blk - new_max_logit),
+                        tl.exp(logits_blk - new_max_sample),
                         0.0,
                     )
                     sum_exp_logits = sum_exp_logits * rescale + tl.sum(probs_blk)
-                    max_logit = new_max_logit
+                    max_sample = new_max_sample
 
                 # If no finite logits exist (all -inf), clamp min to
                 # max so the search converges to -inf (no masking).
@@ -683,7 +688,7 @@ def _topk_topp_kernel(
                 sigma = sigma + tl.abs(sigma) * -0.25
                 outlier_pivot = avg_logit + std_logit * sigma
 
-                outlier_prob = tl.exp(outlier_pivot - max_logit) / sum_exp_logits
+                outlier_prob = tl.exp(outlier_pivot - max_sample) / sum_exp_logits
                 sum_outlier_probs = 0.0
                 num_outliers = tl.zeros((), dtype=tl.uint32)
 
@@ -695,7 +700,7 @@ def _topk_topp_kernel(
                     probs_blk = tl.load(
                         LOGITS_ROW + offs_n, mask=mask_n, other=-float("inf")
                     )
-                    probs_blk = tl.exp(probs_blk - max_logit)
+                    probs_blk = tl.exp(probs_blk - max_sample)
                     probs_blk = probs_blk / sum_exp_logits
 
                     outlier_mask = (probs_blk > outlier_prob) & mask_n
@@ -707,8 +712,8 @@ def _topk_topp_kernel(
                     write_pos = tl.where(outlier_mask, cumulative_pos, -1)
                     tl.store(BUFFER_ROW + write_pos, probs_blk, mask=outlier_mask)
 
-                max_range = 1.0 / sum_exp_logits
-                min_range = tl.exp(min_logit - max_logit) / sum_exp_logits
+                max_range = tl.exp(max_logit - max_sample) / sum_exp_logits
+                min_range = tl.exp(min_logit - max_sample) / sum_exp_logits
 
                 p_pivot = 1.0
                 num_iters = 0
@@ -789,7 +794,7 @@ def _topk_topp_kernel(
                         probs_blk = tl.load(
                             LOGITS_ROW + offs_n, mask=mask_n, other=-float("inf")
                         )
-                        probs_blk = tl.exp(probs_blk - max_logit)
+                        probs_blk = tl.exp(probs_blk - max_sample)
                         probs_blk = probs_blk / sum_exp_logits
                         tl.store(BUFFER_ROW + offs_n, probs_blk, mask=mask_n)
 
@@ -847,7 +852,7 @@ def _topk_topp_kernel(
                             p_pivots_sum = p_pivots_sum_0
                             found_pivot = 1
 
-                duplicate_logit = tl.log(min_larger_prob * sum_exp_logits) + max_logit
+                duplicate_logit = tl.log(min_larger_prob * sum_exp_logits) + max_sample
                 num_duplicate_logit = num_min_larger
                 num_keep = num_duplicate_logit - tl.cast(
                     (p_pivots_sum - p) / min_larger_prob, tl.uint32
@@ -855,7 +860,7 @@ def _topk_topp_kernel(
                 num_kept = tl.zeros((), dtype=tl.uint32)
 
                 # Top-p only path
-                final_pivot = tl.log(p_pivot * sum_exp_logits) + max_logit
+                final_pivot = tl.log(p_pivot * sum_exp_logits) + max_sample
 
         # Sixth pass: Apply mask and store final output.
         # If the pivot >= max logit (or is NaN), no token would
@@ -877,7 +882,7 @@ def _topk_topp_kernel(
                     if standalone_topp:
                         # Match the search probabilities without a log/exp round-trip.
                         duplicate_mask = (
-                            tl.exp(logits_blk - max_logit) / sum_exp_logits
+                            tl.exp(logits_blk - max_sample) / sum_exp_logits
                             == min_larger_prob
                         ) & mask_n
                     else:

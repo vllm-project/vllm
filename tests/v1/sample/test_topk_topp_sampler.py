@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import numpy as np
 import pytest
 import torch
 from torch import Generator
@@ -251,8 +252,17 @@ class TestTritonTopkTopp:
         triton_kept = (result_triton != float("-inf")).sum(dim=-1)
 
         if p is None:
-            # Top-k only: expect exact match
-            assert torch.equal(pytorch_kept, triton_kept), (
+            # Top-k only: Triton keeps exactly k (index-ordered tie-break at
+            # the k-th value) while the sort-based reference keeps all ties,
+            # so PyTorch may only keep extra tokens tied with the k-th value.
+            pytorch_mask = result_pytorch != float("-inf")
+            triton_mask = result_triton != float("-inf")
+            kth = torch.where(triton_mask, logits.float(), float("inf"))
+            kth = kth.amin(dim=-1, keepdim=True).expand_as(logits)
+            extra = pytorch_mask & ~triton_mask
+            assert not (triton_mask & ~pytorch_mask).any() and torch.equal(
+                logits.float()[extra], kth[extra]
+            ), (
                 f"Top-k mask mismatch: PyTorch kept {pytorch_kept.tolist()}, "
                 f"Triton kept {triton_kept.tolist()}"
             )
@@ -376,6 +386,25 @@ class TestTritonTopkTopp:
         actual = apply_top_k_top_p_triton(logits.clone(), None, p)
 
         torch.testing.assert_close(actual, logits, rtol=0, atol=0, equal_nan=True)
+
+    def test_topp_dense_quarter_mass(self):
+        """Normalization must not introduce a coarse cutoff on a dense row."""
+        vocab_size = 32768
+        rng = np.random.default_rng(25)
+        values = -rng.exponential(1.0, vocab_size)
+        values[: vocab_size // 4] = 1.5 + rng.exponential(1.0, vocab_size // 4)
+        values = rng.permutation(values).astype(np.float32)
+        probabilities = np.exp(values.astype(np.float64) - values.max())
+        probabilities /= probabilities.sum()
+        cumulative = np.cumsum(np.sort(probabilities)[::-1])
+        cutoff = np.float32(cumulative[vocab_size // 4 - 1])
+        for _ in range(2):
+            cutoff = np.nextafter(cutoff, np.float32(1.0))
+
+        logits = torch.tensor(values).repeat(65, 1)
+        p = torch.full((65,), float(cutoff))
+
+        self._compare_results(logits, k=None, p=p)
 
     @pytest.mark.parametrize("batch_size", [1, 8, 32, 128, 512, 1024])
     @pytest.mark.parametrize("vocab_size", [1024, 32000, 128256])

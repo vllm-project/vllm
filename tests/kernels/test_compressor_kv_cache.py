@@ -360,7 +360,7 @@ def _mxfp8_record_reference(
 @pytest.mark.parametrize("compress_ratio", [1, 2])
 def test_v41_rope_insert_mxfp8_record(compress_ratio: int):
     """The 528-byte V4.1 record quantizes the RoPE dims instead of keeping them
-    in bf16, so a page is [block_size x 512 fp8][block_size x 16 UE8M0].
+    in bf16, so a token is [512 fp8][16 UE8M0].
 
     Byte-exact against the reference quantizer, including the rows and page
     padding the kernel must leave alone.
@@ -398,11 +398,84 @@ def test_v41_rope_insert_mxfp8_record(compress_ratio: int):
         values, scales = _mxfp8_record_reference(
             latent[t], cos_sin[pos // compress_ratio * compress_ratio]
         )
-        expected[page, row * 512 : (row + 1) * 512] = values
-        scale_offset = cache_block * 512 + row * 16
-        expected[page, scale_offset : scale_offset + 16] = scales
+        expected[page, row * 528 : row * 528 + 512] = values
+        expected[page, row * 528 + 512 : (row + 1) * 528] = scales
 
     torch.testing.assert_close(cache_backing, expected, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="needs a CUDA or ROCm device"
+)
+@pytest.mark.parametrize("gather_len", [None, 70, 200])
+@pytest.mark.parametrize("one_pass", [False, True])
+def test_v41_fp8_gather_is_grid_width_invariant(gather_len, one_pass, monkeypatch):
+    """The gather grid only partitions tokens, so its width cannot move the
+    result, and the rows it writes must match a host-side dequantization.
+
+    Covers the fp8_ds_mla record (584 B); the MXFP8 one is covered below.
+    Both dequantization forms are checked against the same host reference on
+    whatever device is present: the wrapper picks the one-pass form on ROCm
+    alone, so otherwise each platform would only ever see one of them.
+    """
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: one_pass)
+    from vllm.models.deepseek_v41.common.ops import quantize_and_insert_k_cache
+    from vllm.models.deepseek_v41.common.ops.cache_utils import (
+        dequantize_and_gather_k_cache_triton,
+    )
+
+    torch.manual_seed(7)
+    device = "cuda"
+    block_size, num_blocks = 64, 6
+    num_tokens = block_size * num_blocks
+
+    k = torch.randn(num_tokens, 512, dtype=torch.bfloat16, device=device)
+    # insert takes [num_blocks, block_bytes]; gather takes the record view.
+    cache = torch.zeros(num_blocks, block_size * 584, dtype=torch.uint8, device=device)
+    slot_mapping = torch.arange(num_tokens, dtype=torch.int64, device=device)
+    quantize_and_insert_k_cache(k, cache, slot_mapping, block_size=block_size)
+    cache_view = cache.view(num_blocks, block_size, 584)
+
+    seq_lens = torch.tensor([num_tokens], dtype=torch.int32, device=device)
+    gls = (
+        None
+        if gather_len is None
+        else torch.tensor([gather_len], dtype=torch.int32, device=device)
+    )
+    block_table = torch.arange(num_blocks, dtype=torch.int32, device=device).view(1, -1)
+
+    def gather(bound):
+        out = torch.zeros(1, num_tokens, 512, dtype=torch.bfloat16, device=device)
+        dequantize_and_gather_k_cache_triton(
+            out,
+            cache_view,
+            seq_lens,
+            gls,
+            block_table,
+            block_size,
+            0,
+            max_gather_len=bound,
+        )
+        return out
+
+    # None keeps the historical 128; the rest make the wrapper pick other widths
+    # for the same work, and the output must not notice.
+    baseline = gather(None)
+    for bound in (8, num_tokens, 1 << 20):
+        torch.testing.assert_close(gather(bound), baseline, rtol=0, atol=0)
+
+    n = num_tokens if gather_len is None else gather_len
+    start = num_tokens - n
+    for i in (0, 1, n // 2, n - 1):
+        values, scales = _ue8m0_reference(k[start + i, :448], 64, 448.0)
+        nope = (values.to(torch.float32).view(7, 64) * scales.view(7, 1)).reshape(448)
+        torch.testing.assert_close(
+            baseline[0, i, :448], nope.to(torch.bfloat16), rtol=4e-3, atol=1e-6
+        )
+        # The RoPE dims are stored verbatim, so they come back exactly.
+        torch.testing.assert_close(
+            baseline[0, i, 448:], k[start + i, 448:], rtol=0, atol=0
+        )
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
@@ -436,14 +509,13 @@ def test_v41_mxfp8_cache_round_trip():
         values, scales = _ue8m0_reference(k[t].float(), 32, 448.0)
         page, row = divmod(t, block_size)
         torch.testing.assert_close(
-            cache[page, row * 512 : (row + 1) * 512],
+            cache[page, row * 528 : row * 528 + 512],
             values.view(torch.uint8),
             rtol=0,
             atol=0,
         )
-        scale_offset = block_size * 512 + row * 16
         torch.testing.assert_close(
-            cache[page, scale_offset : scale_offset + 16],
+            cache[page, row * 528 + 512 : (row + 1) * 528],
             (scales.log2() + 127).to(torch.uint8),
             rtol=0,
             atol=0,
@@ -490,7 +562,8 @@ def _decode_nvfp4_row(packed: torch.Tensor, scales: torch.Tensor) -> torch.Tenso
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
 @pytest.mark.parametrize("compress_ratio", [1, 2])
 def test_v41_rope_insert_nvfp4_record(compress_ratio: int):
-    """The 288-byte V4.1 NVFP4 record: 256 B of e2m1 pairs then 32 e4m3 scales.
+    """The 288-byte V4.1 NVFP4 record: 256 B of e2m1 pairs then 32 e4m3 scales
+    per token.
 
     Scales are byte-exact against the reference (``amax / 6`` clamped to the
     e4m3 range); values are checked as round-to-nearest on the e2m1 grid, whose
@@ -530,17 +603,13 @@ def test_v41_rope_insert_nvfp4_record(compress_ratio: int):
         amax = rotated.view(32, 16).abs().amax(-1)
         scale = (amax / 6.0).clamp(2.0**-9, 448.0).to(torch.float8_e4m3fn)
 
-        got_scales = cache_backing[page, cache_block * 256 + row * 32 :][:32]
+        record = cache_backing[page, row * 288 : (row + 1) * 288]
+        got_scales = record[256:]
         torch.testing.assert_close(got_scales, scale.view(torch.uint8), rtol=0, atol=0)
-        decoded = _decode_nvfp4_row(
-            cache_backing[page, row * 256 : (row + 1) * 256], got_scales
-        )
+        decoded = _decode_nvfp4_row(record[:256], got_scales)
         step = scale.float().repeat_interleave(16)
         assert ((decoded - rotated).abs() <= step).all()
-        untouched[page, row * 256 : (row + 1) * 256] = cache_backing[
-            page, row * 256 : (row + 1) * 256
-        ]
-        untouched[page, cache_block * 256 + row * 32 :][:32] = got_scales
+        untouched[page, row * 288 : (row + 1) * 288] = record
     # Rows the kernel must not have touched, page padding included.
     torch.testing.assert_close(cache_backing, untouched, rtol=0, atol=0)
 
@@ -596,10 +665,8 @@ def test_v41_nvfp4_gather_matches_insert(num_reqs, num_tokens, partial):
             offset=offset,
         )
 
-    expected = _decode_nvfp4_row(
-        backing[:, : block_size * 256].reshape(-1, 256),
-        backing[:, block_size * 256 : block_size * 288].reshape(-1, 32),
-    )
+    records = backing[:, : block_size * 288].reshape(-1, 288)
+    expected = _decode_nvfp4_row(records[:, :256], records[:, 256:])
 
     def check(shorter_by):
         assert (storage[:, num_tokens + offset :] == -123).all()
@@ -626,6 +693,72 @@ def test_v41_nvfp4_gather_matches_insert(num_reqs, num_tokens, partial):
         gather_lens.sub_(1)
     graph.replay()
     check(1)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="The V4.1 records are SM100-only",
+)
+@pytest.mark.parametrize("record", ["swa_fp8", "compressed_fp8", "compressed_fp4"])
+def test_v41_cache_writers_match_flashmla_decode(record: str):
+    """FlashMLA and vLLM's gathers read back the token a V4.1 writer put mid
+    page in a padded block, so all agree on the interleaved record layout."""
+    import vllm.v1.attention.ops.flashmla as fm
+    from vllm.models.deepseek_v41.common.ops.cache_utils import (
+        dequantize_and_gather_k_cache,
+        dequantize_and_gather_k_cache_triton,
+    )
+    from vllm.models.deepseek_v41.common.ops.fused_compress_quant_cache import (
+        rope_quant_insert,
+    )
+
+    device, block_size, topk = "cuda", 64, 64
+    slot = block_size + 37
+    bytes_per_token = 288 if record == "compressed_fp4" else 528
+    torch.manual_seed(0)
+    kv = torch.randn(1, 512, dtype=torch.bfloat16, device=device)
+    positions = torch.tensor([slot], device=device)
+    # cos = 1, sin = 0: RoPE is the identity, so the cache should hold `kv`.
+    cos_sin = torch.zeros(slot + 1, 64, device=device)
+    cos_sin[:, :32] = 1
+    # Padded like a packed block: a multiple of the record and of 512 B.
+    cache = torch.zeros(2, block_size + 32, bytes_per_token, dtype=torch.uint8)
+    cache = cache.to(device)[:, :block_size]
+    if record == "swa_fp8":
+        torch.ops._C.fused_deepseek_v4_kv_rope_insert(
+            kv, cache, positions, positions, cos_sin, block_size, None, True
+        )
+    else:
+        rope_quant_insert(kv, positions, cos_sin, cache, positions, 1)
+
+    indices = torch.full((1, 1, topk), -1, dtype=torch.int32, device=device)
+    indices[..., 0] = slot
+    extra = None
+    if record == "compressed_fp4":
+        cache, extra = torch.zeros(2, block_size, 528).to(cache), cache
+    out, _ = fm.flash_mla_with_kvcache(
+        q=torch.randn(1, 1, 64, 512, dtype=torch.bfloat16, device=device),
+        k_cache=cache.unsqueeze(2),
+        block_table=None,
+        cache_seqlens=None,
+        head_dim_v=512,
+        tile_scheduler_metadata=fm.get_mla_metadata()[0],
+        is_fp8_kvcache=True,
+        indices=indices if extra is None else torch.full_like(indices, -1),
+        extra_k_cache=None if extra is None else extra.unsqueeze(2),
+        extra_indices_in_kvcache=None if extra is None else indices,
+    )
+    for gather in (dequantize_and_gather_k_cache, dequantize_and_gather_k_cache_triton):
+        rows = torch.zeros(1, slot + 1, 512, dtype=torch.bfloat16, device=device)
+        block_table = torch.arange(2, dtype=torch.int32, device=device)[None]
+        seq_lens = torch.tensor([slot + 1], dtype=torch.int32, device=device)
+        k_cache = cache if extra is None else extra
+        gather(rows, k_cache, seq_lens, None, block_table, block_size, offset=0)
+        torch.testing.assert_close(
+            out[0, 0], rows[0, slot].expand(64, -1), rtol=0, atol=0
+        )
+    cos = torch.nn.functional.cosine_similarity(rows[0, slot].float(), kv[0].float(), 0)
+    assert cos > (0.98 if extra is not None else 0.999)
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
@@ -1131,6 +1264,84 @@ def test_get_c128_boundary(starts, query_start_loc, expected):
     assert _get_c128_boundary(metadata) is expected
 
 
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
+@torch.inference_mode()
+def test_c128_skip_is_not_baked_into_cuda_graph(monkeypatch):
+    """A graph captured on a batch with no C128 boundary must still launch the
+    compressor on replay; only eager steps may skip it."""
+    from vllm.config import CUDAGraphMode
+    from vllm.forward_context import ForwardContext, override_forward_context
+    from vllm.models.deepseek_v4 import compressor as compressor_mod
+    from vllm.models.deepseek_v4.compressor import DeepseekCompressor
+    from vllm.models.deepseek_v4.nvidia.ops import sparse_attn_compress_cutedsl
+
+    launches = torch.zeros(1, dtype=torch.int32, device="cuda")
+    monkeypatch.setattr(
+        compressor_mod, "_SAVE_PARTIAL_STATES_KERNEL", lambda **kw: None
+    )
+    monkeypatch.setattr(
+        sparse_attn_compress_cutedsl,
+        "_SPARSE_ATTN_COMPRESSOR_CUTEDSL_KERNEL",
+        lambda **kw: launches.add_(1),
+    )
+
+    compressor = DeepseekCompressor.__new__(DeepseekCompressor)
+    torch.nn.Module.__init__(compressor)
+    compressor.head_dim, compressor.rope_head_dim = 512, 64
+    compressor.compress_ratio, compressor.coff, compressor.overlap = 128, 1, False
+    compressor.use_fp4_cache = False
+    compressor._use_two_stage_fused_compressor = False
+    compressor._quant_block = 64
+    compressor._token_stride = 576
+    compressor._scale_dim = 8
+    compressor.rms_norm_eps = 1e-6
+    compressor.ape = torch.zeros(128, 512, device="cuda")
+    compressor.norm = SimpleNamespace(weight=torch.ones(512, device="cuda"))
+    compressor.state_cache = SimpleNamespace(
+        prefix="state", kv_cache=torch.zeros(2, 8, 1024, device="cuda")
+    )
+    compressor.k_cache_prefix = "main"
+    kv_cache = torch.zeros(1, 64, 584, dtype=torch.uint8, device="cuda")
+    compressor._static_forward_context = {"main": SimpleNamespace(kv_cache=kv_cache)}
+
+    num_tokens = 4
+    slots = torch.arange(num_tokens, device="cuda")
+    metadata = {
+        "state": SimpleNamespace(
+            slot_mapping=slots,
+            block_table=torch.zeros(num_tokens, 1, dtype=torch.int32, device="cuda"),
+            block_size=8,
+            token_to_req_indices=torch.arange(
+                num_tokens, dtype=torch.int32, device="cuda"
+            ),
+            c128_boundary=False,
+        ),
+        "main": SimpleNamespace(slot_mapping=slots),
+    }
+    kv_score = torch.zeros(num_tokens, 1024, device="cuda")
+    positions = torch.arange(num_tokens, device="cuda")
+    rotary = SimpleNamespace(cos_sin_cache=torch.zeros(1, 64, device="cuda"))
+    context = ForwardContext(
+        {}, metadata, {}, cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE
+    )
+
+    def run():
+        with override_forward_context(context):
+            compressor(kv_score, positions, rotary)
+
+    run()
+    torch.accelerator.synchronize()
+    assert launches.item() == 0, "eager step with no boundary should skip"
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        run()
+    launches.zero_()
+    graph.replay()
+    torch.accelerator.synchronize()
+    assert launches.item() == 1, "captured graph must not bake in the skip"
+
+
 # ── Test A: DeepseekV4 Attention path ──────────────────────────────────────────────
 
 
@@ -1348,7 +1559,10 @@ def test_dequantize_and_gather_k_cache(
 
 @pytest.mark.parametrize("num_tokens", [1, 4, 8, 17])
 @pytest.mark.parametrize("block_size", [16, 64])
-def test_indexer_quant_cache_roundtrip(num_tokens: int, block_size: int):
+@pytest.mark.parametrize("scale_fmt", ["ue8m0", "mxfp8"])
+def test_indexer_quant_cache_roundtrip(
+    num_tokens: int, block_size: int, scale_fmt: str
+):
     """K → indexer_k_quant_and_cache → cp_gather_indexer_k_quant_cache
     → manual dequant → compare against original."""
     HEAD_DIM = 128
@@ -1368,7 +1582,9 @@ def test_indexer_quant_cache_roundtrip(num_tokens: int, block_size: int):
     )
     slot_mapping = torch.arange(num_tokens, dtype=torch.int64, device=device)
 
-    ops.indexer_k_quant_and_cache(k, kv_cache, slot_mapping, QUANT_BLOCK_SIZE, "ue8m0")
+    ops.indexer_k_quant_and_cache(
+        k, kv_cache, slot_mapping, QUANT_BLOCK_SIZE, scale_fmt
+    )
 
     # ── Gather ──────────────────────────────────────────────────────────
     max_blocks_per_seq = num_blocks
@@ -1391,7 +1607,12 @@ def test_indexer_quant_cache_roundtrip(num_tokens: int, block_size: int):
 
     # ── Manual dequant ──────────────────────────────────────────────────
     k_fp8 = dst_k.view(torch.float8_e4m3fn).float()  # [num_tokens, 128]
-    scale = dst_scale.view(torch.float32)  # [num_tokens, 1]
+    if scale_fmt == "mxfp8":
+        # One UE8M0 byte per 32 elements, all equal to the token's scale.
+        assert (dst_scale == dst_scale[:, :1]).all()
+        scale = (dst_scale[:, :1].to(torch.int32) << 23).view(torch.float32)
+    else:
+        scale = dst_scale.view(torch.float32)  # [num_tokens, 1]
     k_recovered = k_fp8 * scale  # [num_tokens, 128]
 
     # ── Compare ─────────────────────────────────────────────────────────
@@ -1675,8 +1896,13 @@ def _reference_kv_compress_norm_rope(
         ),
     ],
 )
-def test_fused_kv_insert_indexer(num_tokens: int, kv_block_size: int, use_fp4: bool):
+@pytest.mark.parametrize("mx_scale", [False, True])
+def test_fused_kv_insert_indexer(
+    num_tokens: int, kv_block_size: int, use_fp4: bool, mx_scale: bool
+):
     """Fused K compress+norm+rope+quant+insert for the indexer KV cache."""
+    if use_fp4 and mx_scale:
+        pytest.skip("MX scales only change the FP8 cache")
     HEAD_DIM = 128
     ROPE_DIM = 64
     BLOCK_SIZE = 16
@@ -1759,6 +1985,7 @@ def test_fused_kv_insert_indexer(num_tokens: int, kv_block_size: int, use_fp4: b
         TOKEN_STRIDE=TOKEN_STRIDE,
         SCALE_DIM=SCALE_DIM,
         KV_BLOCK_STRIDE=kv_cache.stride(0),
+        MX_SCALE=mx_scale,
         num_warps=1,
     )
 
@@ -1802,12 +2029,18 @@ def test_fused_kv_insert_indexer(num_tokens: int, kv_block_size: int, use_fp4: b
             ), f"token {i}: FP8 bytes differ"
 
             scale_off = kv_block_size * TOKEN_STRIDE + pos * SCALE_DIM
-            actual_scale = kv_cache[blk, scale_off : scale_off + SCALE_DIM].view(
-                torch.float32
-            )
-            assert torch.equal(actual_scale, scale[i : i + 1]), (
-                f"token {i}: scale {actual_scale.item()} != {scale[i].item()}"
-            )
+            actual_scale = kv_cache[blk, scale_off : scale_off + SCALE_DIM]
+            if mx_scale:
+                # The power-of-two scale's exponent as 4 equal UE8M0 bytes.
+                ue8m0 = (scale[i : i + 1].view(torch.int32) >> 23).to(torch.uint8)
+                assert torch.equal(actual_scale, ue8m0.repeat(SCALE_DIM)), (
+                    f"token {i}: mx scale {actual_scale.tolist()} != {ue8m0.item()}"
+                )
+            else:
+                actual_scale = actual_scale.view(torch.float32)
+                assert torch.equal(actual_scale, scale[i : i + 1]), (
+                    f"token {i}: scale {actual_scale.item()} != {scale[i].item()}"
+                )
 
 
 @pytest.mark.parametrize("compress_ratio", [4, 128])
