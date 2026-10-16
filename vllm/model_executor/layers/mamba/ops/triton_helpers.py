@@ -1,7 +1,31 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import Any
+
 from vllm.triton_utils import tl, triton
+
+_autotuned_configs: dict[tuple, Any] = {}
+
+
+def launch_autotuned(kernel: Any, grid: Any, config_key: tuple, **kwargs) -> None:
+    """Launch a ``@triton.autotune`` kernel with the config it picked for
+    ``config_key``.
+
+    ``Autotuner.run`` rebuilds its cache key from every argument on each
+    launch, several microseconds of host time per launch. ``config_key`` must
+    determine that key: the values of the kernel's autotune ``key`` arguments
+    and the dtype (or absence) of every tensor argument.
+    """
+    cache_key = (kernel, config_key)
+    config = _autotuned_configs.get(cache_key)
+    if config is None:
+        # Autotunes on the first launch for this key.
+        kernel[grid](**kwargs)
+        if kernel.best_config.pre_hook is None:
+            _autotuned_configs[cache_key] = kernel.best_config
+        return
+    kernel.fn[grid](**kwargs, **config.all_kwargs())
 
 
 @triton.jit
