@@ -378,6 +378,8 @@ def stage_route(c, t):
     a = c["args"]
     if wave == 0:
         ept = experts // 64
+        # the score bias is read before the poll: its loads are off the path
+        biases = [ld_f32(a["bias"], lane + 64 * i) for i in range(ept)]
         # each logit's router part sums, added in part order (vLLM's gate: f32 out)
         assert ROUTER_PARTS == 4
         got = c["poll"](
@@ -400,7 +402,7 @@ def stage_route(c, t):
             sc = _score(logits[i])
             # aiter's NaN guards: a NaN score weighs 0 and never wins
             orig.append(fx.Float32(fx.isnan(sc).select(fx.Float32(0.0), sc)))
-            vals.append(fx.max(sc + ld_f32(a["bias"], e), fx.Float32(float("-inf"))))
+            vals.append(fx.max(sc + biases[i], fx.Float32(float("-inf"))))
             idxs.append(fx.Int32(e))
         for p, q in c["rs"].sort_net:
             sw = vals[p] < vals[q]

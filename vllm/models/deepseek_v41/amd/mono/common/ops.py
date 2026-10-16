@@ -186,8 +186,15 @@ def traced(fn):
 LOAD_BATCH = 4  # rounds of a strided loop whose loads go out together
 
 
+def first_loads(tid, n, load, batch=LOAD_BATCH):
+    """The first batch of ``batched_rounds``' loads, for a caller that issues them
+    ahead of the loop (before a poll the loads do not depend on)."""
+    rounds = -(-n // THREADS)
+    return [load(fx.min(tid + THREADS * i, n - 1)) for i in range(min(batch, rounds))]
+
+
 @traced
-def batched_rounds(tid, n, load, use, batch=LOAD_BATCH):
+def batched_rounds(tid, n, load, use, batch=LOAD_BATCH, first=None):
     """A CTA's strided loop over elements v = tid + THREADS i < n (n a Python
     int): ``load(v)`` of ``batch`` rounds issued before any ``use(v, loaded)``.
     A round whose ``use`` stores to global memory keeps the next round's loads
@@ -196,7 +203,10 @@ def batched_rounds(tid, n, load, use, batch=LOAD_BATCH):
     rounds = -(-n // THREADS)
     for b0 in range_constexpr(0, rounds, batch):
         idx = range(b0, min(b0 + batch, rounds))
-        got = [load(fx.min(tid + THREADS * i, n - 1)) for i in idx]
+        if const_expr(b0 == 0 and first is not None):
+            got = first
+        else:
+            got = [load(fx.min(tid + THREADS * i, n - 1)) for i in idx]
         for i, g in zip(idx, got):
             v = tid + THREADS * i
             if v < n:

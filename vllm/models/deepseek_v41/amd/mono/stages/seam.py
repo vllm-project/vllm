@@ -37,6 +37,7 @@ from vllm.models.deepseek_v41.amd.mono.common.ops import (
     bf_hi,
     bf_lo,
     butterfly,
+    first_loads,
     hw_exp2,
     hw_rcp,
     hw_rsq,
@@ -169,10 +170,26 @@ def slice_row(c, c0, e, got):
     fx.ptr_store(v, c["rl"] + (t * KT + o * COLS + e % COLS))
 
 
+def slice_preload(c, task):
+    """``stage_slice``'s inputs that no peer produces (the residual rows, the
+    mixes, hc_fn), issued before the FFN seam's all-reduce poll."""
+    s, tid, a = c["S"], c["tid"], c["args"]
+    c0 = task * COLS
+    rows = first_loads(tid, s * KT, lambda e: slice_loads(c, c0, e))
+    fns = []
+    for i in range((MIX * KT + THREADS - 1) // THREADS):
+        e = fx.min(tid + THREADS * i, MIX * KT - 1)
+        j = e // KT
+        o = (e % KT) // COLS
+        fns.append(ld_f32(a["hc_fn"], j * K_MIX + o * HIDDEN + c0 + e % COLS))
+    return rows, fns
+
+
 @traced
-def stage_slice(c, task):
+def stage_slice(c, task, pre=None):
     """R_new, the layer input and the partial projections of hidden columns
-    32 task .. +32, all four streams, every token."""
+    32 task .. +32, all four streams, every token. ``pre``: ``slice_preload``'s
+    loads, when the caller issued them ahead."""
     s, tid, lane, wave = c["S"], c["tid"], c["lane"], c["wave"]
     rl, fl = c["rl"], c["fl"]
     a = c["args"]
@@ -182,6 +199,7 @@ def stage_slice(c, task):
         s * KT,
         lambda e: slice_loads(c, c0, e),
         lambda e, got: slice_row(c, c0, e, got),
+        first=None if pre is None else pre[0],
     )
     for i in range_constexpr((MIX * KT + THREADS - 1) // THREADS):
         e = tid + THREADS * i
@@ -190,7 +208,10 @@ def stage_slice(c, task):
             o = (e % KT) // COLS
             # the original's two bf16 MFMAs take fn as hi = bf16(fn) and lo =
             # bf16(fn - hi): their sum, exact in fp32, is the weight it applies
-            f = ld_f32(a["hc_fn"], j * K_MIX + o * HIDDEN + c0 + e % COLS)
+            if const_expr(pre is None):
+                f = ld_f32(a["hc_fn"], j * K_MIX + o * HIDDEN + c0 + e % COLS)
+            else:
+                f = pre[1][i]
             hi = bf16_round(f)
             fx.ptr_store(hi + bf16_round(f - hi), fl + e)
     gpu.barrier()
@@ -334,6 +355,11 @@ def stage_norm(c, t, store):
     tt = fx.min(tid, 255)
     mine = tid < 256
     cols = [tt * 8 + 2048 * ch for ch in range(3)]
+    # the norm weight is read before the poll: its loads are off the path
+    wts = [
+        [ld_bf(a["norm_w"], fx.min(cols[ch], HIDDEN - 8) + j) for j in range(8)]
+        for ch in range(3)
+    ]
     xs = []
     for ch in range_constexpr(3):
         base = t * HIDDEN + fx.min(cols[ch], HIDDEN - 8)
@@ -354,9 +380,7 @@ def stage_norm(c, t, store):
     r = hw_rsq(fma(tot, fx.Float32(1.0 / HIDDEN), fx.Float32(EPS)))
     for ch in range_constexpr(3):
         col = fx.min(cols[ch], HIDDEN - 8)
-        ys = [
-            bf16_round((xs[ch][j] * r) * ld_bf(a["norm_w"], col + j)) for j in range(8)
-        ]
+        ys = [bf16_round((xs[ch][j] * r) * wts[ch][j]) for j in range(8)]
         store(t, col, ys, mine & (cols[ch] < HIDDEN))
     gpu.barrier()
 

@@ -527,10 +527,11 @@ def run_ffn(key: MonoBuild, lds, a: dict, amb, bases, own, rank, ep, part=None):
     for i, region in enumerate(COUNTERS):
         cb[region] = sreg(a["epoch"], 4 * (EPOCH_COUNTERS + i * moe.TAGS), region)
     for task in range(first_task(bid, 0), SLICES, BLOCKS):
+        pre = seam.slice_preload(ca, task)
         if const_expr(part is not None):
             seam.stage_push(ca, task, part)
         seam.stage_reduce(ca, task)
-        seam.stage_slice(ca, task)
+        seam.stage_slice(ca, task, pre)
     for t in range(first_task(bid, GATE0), s, BLOCKS):
         seam.stage_gate(ca, t)
     for t in range(first_task(bid, NORM0), s, BLOCKS):
