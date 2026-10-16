@@ -25,6 +25,7 @@ MoE layer. If we have 32 EP ranks, then each GPU will hold 288 / 32 = 9 local
 physical experts.
 """
 
+import os
 import threading
 import time
 from collections.abc import Sequence
@@ -1080,6 +1081,19 @@ class EplbState:
 
     def _allreduce_list(self, tensor_list: list[torch.Tensor]) -> list[torch.Tensor]:
         """All-reduce a list of tensors."""
+        if os.getenv("VLLM_EEP_DEBUG_CPU_RESHUFFLE_REDUCE") == "1":
+            # Diagnostic only. This is the first collective on the EP group
+            # after a scale up, so it is where RCCL sets up the P2P transport
+            # and exports the IPC handles that MI355 refuses. These are expert
+            # load counters, a few kilobytes, so routing them over the CPU
+            # group costs nothing and separates "the first export is what
+            # fails" from "any export on that group fails".
+            cpu_group = get_ep_group().cpu_group
+            for tensor in tensor_list:
+                host = tensor.cpu()
+                all_reduce(host, group=cpu_group)
+                tensor.copy_(host)
+            return tensor_list
         ep_group = get_ep_group().device_group
         if len(tensor_list) == 1:
             all_reduce(tensor_list[0], group=ep_group)

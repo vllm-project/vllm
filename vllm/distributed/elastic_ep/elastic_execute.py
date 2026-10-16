@@ -162,7 +162,6 @@ class ElasticEPScalingExecutor:
             max_workers=1, thread_name_prefix="ElasticEPAsync"
         )
         self._async_future: Future[None] | None = None
-        self._group_cleanup_future: Future[None] | None = None
 
     @property
     def worker(self):
@@ -253,61 +252,29 @@ class ElasticEPScalingExecutor:
             if group is not None:
                 group.destroy()
 
-    def _start_group_cleanup(self, groups: tuple[GroupCoordinator | None, ...]) -> None:
-        assert self._group_cleanup_future is None
-        self._group_cleanup_future = self._async_executor.submit(
-            self._destroy_retired_groups, groups
-        )
+    def _retire_groups(self, groups: tuple[GroupCoordinator | None, ...]) -> None:
+        """Destroy the groups the reconfiguration replaced.
 
-    def _early_cleanup_if_requested(
-        self, groups: tuple[GroupCoordinator | None, ...]
-    ) -> tuple[GroupCoordinator | None, ...]:
-        """Retire the old groups now instead of after the new ones are used.
-
-        Both commit paths hand the retired groups to the background thread only
-        after the EPLB reshuffle has run its first collective on the new EP
-        group, so the old communicators are still alive while RCCL sets up the
-        new P2P transport, and the thread that tears them down runs while
-        another thread is computing. On MI355 that first collective is exactly
-        where hipIpcGetMemHandle returns invalid argument, and a pass with
-        every probe off aborted with "Memory access fault by GPU node-2 ...
-        Write access to a read-only page" with _destroy_retired_groups on the
-        stack of one thread and a forward pass on another. An exporter that
-        drops its mappings while a peer still holds them explains both. With
-        this set the teardown finishes first and nothing overlaps.
-
-        Returns the groups still owed a cleanup, so the caller can skip the
-        later hand-off. Diagnostic only.
+        This has to happen before the first collective on the new groups, and
+        it has to be synchronous. RCCL exports IPC handles when it sets up the
+        P2P transport for a new communicator, and on MI355 the export is
+        refused with hsa_status 4097 whenever the communicators of the previous
+        configuration are still alive: three passes that only waited two
+        seconds here were refused, five that destroyed the groups were not.
+        Handing the teardown to a background thread is not enough either, since
+        it then runs while the new transport is being set up, which faulted the
+        GPU with a write to a read-only page.
         """
-        delay = os.getenv("VLLM_EEP_DEBUG_DELAY_INSTEAD_OF_CLEANUP")
-        if delay is not None:
-            # Diagnostic only, and the one experiment that tells us why the
-            # cleanup above helps. It takes about two seconds and serializes
-            # everything around it, so a plain wait at the same point separates
-            # "the cleanup releases something RCCL needs" from "the delay is
-            # what closes the window". The groups are handed back untouched, so
-            # the normal late cleanup still runs.
-            time.sleep(float(delay))
-            logger.warning(
-                "[EEP-DEBUG] waited %s s instead of retiring the old groups", delay
-            )
-            return groups
-        if os.getenv("VLLM_EEP_DEBUG_EARLY_GROUP_CLEANUP") != "1":
-            return groups
         live = sum(1 for group in groups if group is not None)
+        if not live:
+            return
         started = time.perf_counter()
-        self._start_group_cleanup(groups)
-        self._wait_for_group_cleanup()
-        # Printed through logger and not through rocm_debug on purpose: the
-        # passes that carry this flag also carry VLLM_EEP_DEBUG_OFF, and a pass
-        # that fails the same way as the others has to be distinguishable from
-        # a pass where the variable never reached the Ray actors.
-        logger.warning(
-            "[EEP-DEBUG] retired %d group(s) synchronously in %.3f s",
+        self._destroy_retired_groups(groups)
+        logger.info(
+            "[Elastic EP] Retired %d stale group(s) in %.3f s",
             live,
             time.perf_counter() - started,
         )
-        return ()
 
     def _dump_group_pressure(self, label: str) -> None:
         """Record what is alive at the moments where the refusal happens.
@@ -336,38 +303,6 @@ class ElasticEPScalingExecutor:
             total_bytes / 2**30,
         )
 
-    def _free_before_standby_if_requested(self) -> None:
-        """Hand memory back to the driver before the new communicators appear.
-
-        Both faces of the remaining failure, the 4097 refusal and the memory
-        access fault, land inside create_standby_groups while preparing the
-        scale down, and that is the tightest point in the whole test: locally
-        rank 0 enters it with 3.14 GiB free of 288 and leaves with 1.51 GiB. If
-        the internal IPC allocation is simply running out of room, this makes it
-        measurably less likely, and the pressure dump says by how much.
-        Diagnostic only.
-        """
-        if os.getenv("VLLM_EEP_DEBUG_FREE_BEFORE_STANDBY") != "1":
-            return
-        before, _ = torch.accelerator.get_memory_info()
-        started = time.perf_counter()
-        gc.collect()
-        torch.accelerator.synchronize()
-        torch.accelerator.empty_cache()
-        after, _ = torch.accelerator.get_memory_info()
-        logger.warning(
-            "[EEP-DEBUG] freed %.2f GiB before the standby groups in %.3f s, "
-            "%.2f GiB free now",
-            (after - before) / 2**30,
-            time.perf_counter() - started,
-            after / 2**30,
-        )
-
-    def _wait_for_group_cleanup(self) -> None:
-        if (future := self._group_cleanup_future) is not None:
-            self._group_cleanup_future = None
-            future.result()
-
     def _drain_reshuffle_if_requested(self) -> None:
         """Wait for the previous reshuffle before touching the groups again.
 
@@ -395,10 +330,7 @@ class ElasticEPScalingExecutor:
         )
 
     def shutdown(self) -> None:
-        try:
-            self._wait_for_group_cleanup()
-        finally:
-            self._async_executor.shutdown()
+        self._async_executor.shutdown()
 
     def load_model(self) -> None:
         self.worker.load_model(load_dummy_weights=True)
@@ -406,7 +338,6 @@ class ElasticEPScalingExecutor:
     def prepare_reconfiguration(
         self, reconfig_request: ReconfigureDistributedRequest, use_all2all: bool
     ) -> None:
-        self._wait_for_group_cleanup()
         self._drain_reshuffle_if_requested()
         self.reconfig_request = reconfig_request
         new_dp_size = reconfig_request.new_data_parallel_size
@@ -415,7 +346,6 @@ class ElasticEPScalingExecutor:
         world_size = parallel_config.world_size
         new_world_size_across_dp = world_size * new_dp_size
         self._dump_group_pressure(f"before standby groups for dp={new_dp_size}")
-        self._free_before_standby_if_requested()
         create_standby_groups(
             new_dp_size=new_dp_size,
             new_world_size_across_dp=new_world_size_across_dp,
@@ -606,8 +536,6 @@ class ElasticEPScalingExecutor:
         torch.accelerator.empty_cache()
 
     def switch_and_remove(self) -> None:
-        # Removing ranks skipped preparation, so wait for prior cleanup here.
-        self._wait_for_group_cleanup()
         # The EPLB worker is a daemon thread that runs collectives on the EPLB
         # group, and the group is destroyed a few lines below. Every removed
         # worker was observed with that thread still alive here, and one of
@@ -628,9 +556,8 @@ class ElasticEPScalingExecutor:
         retired_groups = _replace_active_groups(
             world=None, dp=None, ep=None, eplb=None, node_count=None
         )
-        self._start_group_cleanup(retired_groups)
         # Finish collective cleanup before this worker is shut down.
-        self._wait_for_group_cleanup()
+        self._retire_groups(retired_groups)
 
     def switch_and_prepare(self) -> tuple[GroupCoordinator | None, ...]:
         if not self._can_reuse_fused_moe_kernel():
@@ -764,7 +691,7 @@ class ElasticEPScalingExecutor:
     def commit_scale_up(self, is_existing_worker: bool) -> None:
         if is_existing_worker:
             self.broadcast_expert_mapping()
-            retired_groups = self._early_cleanup_if_requested(self.switch_and_prepare())
+            self._retire_groups(self.switch_and_prepare())
         else:
             mapping = self.receive_expert_mapping()
             self.worker.model_runner.setup_eplb_from_mapping(mapping)
@@ -777,15 +704,13 @@ class ElasticEPScalingExecutor:
         if not self._can_reuse_fused_moe_kernel():
             self.warm_and_capture()
         self._perform_eplb_reshuffle(async_op=True)
-        if is_existing_worker and retired_groups:
-            self._start_group_cleanup(retired_groups)
 
     def commit_scale_down(self, new_dp_size: int, removing: bool) -> None:
         self.perform_scale_down_eplb_reshuffle(new_dp_size)
         if removing:
             self.switch_and_remove()
         else:
-            retired_groups = self._early_cleanup_if_requested(self.switch_and_prepare())
+            self._retire_groups(self.switch_and_prepare())
             if current_platform.is_rocm():
                 groups = {"dp": get_dp_group(), "ep": get_ep_group()}
                 rocm_debug.dump("scale_down before empty_cache", groups)
@@ -794,8 +719,6 @@ class ElasticEPScalingExecutor:
                 rocm_debug.warm_each(groups, "scale_down")
             if not self._can_reuse_fused_moe_kernel():
                 self.warm_and_capture()
-            if retired_groups:
-                self._start_group_cleanup(retired_groups)
 
     def perform_scale_down_eplb_reshuffle(self, new_dp_size: int) -> None:
         eplb_state = self.worker.model_runner.eplb_state

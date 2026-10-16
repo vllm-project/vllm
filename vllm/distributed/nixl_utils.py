@@ -38,6 +38,14 @@ def _maybe_set_ucx_rcache_limit() -> None:
 
 
 def _maybe_disable_ucx_mem_events() -> None:
+    # Opt-in on purpose. UCX builds its registration cache on top of these
+    # memory events, so with them off ucp_mem_map finds no rcache and nixl dies
+    # on "Assertion 'rcache != NULL' failed", which is what turned the EPLB
+    # Execution suite red on MI355. Keep it reachable while we measure whether
+    # the hooks really interfere with the HIP IPC buffers RCCL uses.
+    if os.getenv("VLLM_EEP_DEBUG_UCX_MEM_EVENTS_OFF") != "1":
+        return
+
     if not current_platform.is_rocm() or "UCX_MEM_EVENTS" in os.environ:
         return
 

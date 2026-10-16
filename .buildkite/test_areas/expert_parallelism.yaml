@@ -93,81 +93,42 @@ steps:
       - requirements/kv_connectors_rocm.txt
       commands:
       - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
-      # The first failure is answered and nothing here measures it any more:
-      # VLLM_EEP_DEBUG_EARLY_GROUP_CLEANUP=1 removed the 4097 refusal at scale up
-      # in seventeen passes across four agents from three node families, against
-      # a baseline that refused every time, with a same job control in each job.
-      # Every pass below carries it as the new baseline rather than as a
-      # candidate. Both IPC repros are gone too: they reproduced the ROCm
-      # refusal on all four hosts, including ours at a fifteen times lower rate,
-      # so they belong in the ROCm report and not in CI.
+      # Early retirement of the replaced groups is no longer a flag. Build 95233
+      # answered why it works: three passes that only waited two seconds at that
+      # point were refused at scale up with hsa_status 4097, five that destroyed
+      # the groups were not, in the same build on the same machine. The release
+      # is what matters and not the delay, so _retire_groups now does it
+      # unconditionally and synchronously in both commit paths, at a measured
+      # cost of about two seconds per scale event.
       #
-      # VLLM_EEP_DEBUG_DRAIN_BEFORE_RECONFIG=1 is gone after one round. It
-      # passed one of three, and in most passes it logged 0.000 s, because
-      # drain_async only drains an async EPLB cycle and not the copies a full
-      # rearrange leaves in flight, so it was mostly a no-op.
+      # VLLM_EEP_DEBUG_FREE_BEFORE_STANDBY is gone after one round. It freed
+      # 1.21 GiB right before create_standby_groups and left 49 GiB free, and
+      # the 6 MiB internal buffer was refused anyway, so a plain shortage of
+      # memory explains neither moment.
       #
-      # VLLM_EEP_DEBUG_SYNC_RESHUFFLE=1 stays, and it answered one half of the
-      # second failure. All three of its scale ups came out correct, 0.621,
-      # 0.648 and 0.645, where the same machine gave 0.000 and 0.016 without it,
-      # and it costs about five seconds of downtime rather than the whole copy
-      # window, because the rearrange itself takes 1.96 s when awaited. So the
-      # unawaited window did cause the fault during the traffic right after
-      # scale up, and this is now a fix candidate rather than a cause test.
-      #
-      # What is left is the other half, and build 95168 named it. The pass that
-      # died there carried the first failure's exact signature, rocmemory.cpp
-      # :1043 with hsa_status 4097, inside ncclCommInitRank, reached through
-      # create_standby_groups while preparing the scale down. So this is not a
-      # second bug of ours; it is the same ROCm refusal at the second
-      # reconfiguration, where early cleanup does not protect anything.
-      #
-      # That also kills the explanation written above. The refusal needs no
-      # teardown to happen: the standalone reproducer gets it with nothing
-      # being destroyed, and here the cleanup had finished long before. So
-      # early cleanup passes seventeen times for a reason we cannot name, and
-      # this round is built to name it.
-      #
-      # The three passes below wait two seconds at the exact point where early
-      # cleanup would run, and retire the groups late as usual. The cleanup
-      # takes about two seconds and serializes everything around it, so if a
-      # plain wait also passes, the fix is the delay and not the release, and
-      # the same medicine can be dosed at the scale down. If it fails while
-      # cleanup passes, the release is real and worth measuring further.
-      #
-      # VLLM_EEP_DEBUG_GROUP_PRESSURE=1 rides along on every pass. It costs one
-      # log line and reports the live communicator count and the free memory
-      # on both sides of create_standby_groups, at dp=4 and at dp=2, which is
-      # the only number that can separate the two moments.
-      - VLLM_EEP_DEBUG_DELAY_INSTEAD_OF_CLEANUP=2 VLLM_EEP_DEBUG_GROUP_PRESSURE=1 VLLM_EEP_DEBUG_SYNC_RESHUFFLE=1 VLLM_EEP_DEBUG_OFF=1 AMD_LOG_LEVEL=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=VLLM_EEP_DEBUG_DELAY_INSTEAD_OF_CLEANUP,VLLM_EEP_DEBUG_GROUP_PRESSURE,VLLM_EEP_DEBUG_SYNC_RESHUFFLE,VLLM_EEP_DEBUG_OFF,AMD_LOG_LEVEL pytest -v -s distributed/test_elastic_ep.py -k enforce_eager_none || true
-      - VLLM_EEP_DEBUG_DELAY_INSTEAD_OF_CLEANUP=2 VLLM_EEP_DEBUG_GROUP_PRESSURE=1 VLLM_EEP_DEBUG_SYNC_RESHUFFLE=1 VLLM_EEP_DEBUG_OFF=1 AMD_LOG_LEVEL=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=VLLM_EEP_DEBUG_DELAY_INSTEAD_OF_CLEANUP,VLLM_EEP_DEBUG_GROUP_PRESSURE,VLLM_EEP_DEBUG_SYNC_RESHUFFLE,VLLM_EEP_DEBUG_OFF,AMD_LOG_LEVEL pytest -v -s distributed/test_elastic_ep.py -k enforce_eager_none || true
-      - VLLM_EEP_DEBUG_DELAY_INSTEAD_OF_CLEANUP=2 VLLM_EEP_DEBUG_GROUP_PRESSURE=1 VLLM_EEP_DEBUG_SYNC_RESHUFFLE=1 VLLM_EEP_DEBUG_OFF=1 AMD_LOG_LEVEL=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=VLLM_EEP_DEBUG_DELAY_INSTEAD_OF_CLEANUP,VLLM_EEP_DEBUG_GROUP_PRESSURE,VLLM_EEP_DEBUG_SYNC_RESHUFFLE,VLLM_EEP_DEBUG_OFF,AMD_LOG_LEVEL pytest -v -s distributed/test_elastic_ep.py -k enforce_eager_none || true
-      # The two passes below are the control for the three above, the known
-      # good combination carrying the same measurement. They also add two more
-      # samples of how often the scale down refusal hits, which stood at one of
-      # four before this round.
-      - VLLM_EEP_DEBUG_EARLY_GROUP_CLEANUP=1 VLLM_EEP_DEBUG_GROUP_PRESSURE=1 VLLM_EEP_DEBUG_SYNC_RESHUFFLE=1 VLLM_EEP_DEBUG_OFF=1 AMD_LOG_LEVEL=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=VLLM_EEP_DEBUG_EARLY_GROUP_CLEANUP,VLLM_EEP_DEBUG_GROUP_PRESSURE,VLLM_EEP_DEBUG_SYNC_RESHUFFLE,VLLM_EEP_DEBUG_OFF,AMD_LOG_LEVEL pytest -v -s distributed/test_elastic_ep.py -k enforce_eager_none || true
-      - VLLM_EEP_DEBUG_EARLY_GROUP_CLEANUP=1 VLLM_EEP_DEBUG_GROUP_PRESSURE=1 VLLM_EEP_DEBUG_SYNC_RESHUFFLE=1 VLLM_EEP_DEBUG_OFF=1 AMD_LOG_LEVEL=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=VLLM_EEP_DEBUG_EARLY_GROUP_CLEANUP,VLLM_EEP_DEBUG_GROUP_PRESSURE,VLLM_EEP_DEBUG_SYNC_RESHUFFLE,VLLM_EEP_DEBUG_OFF,AMD_LOG_LEVEL pytest -v -s distributed/test_elastic_ep.py -k enforce_eager_none || true
-      # NCCL_P2P_DISABLE is not here any more, because the retry of 95168
-      # answered it. Across both jobs it passed three of four while the same
-      # combination with IPC on passed one of eight, so it lowers the odds and
-      # nothing more: command 6 of the retry died in exactly the same place,
-      # with both new workers taking "Memory access fault by GPU node-3" and
-      # "node-2" inside create_standby_groups.
-      #
-      # That place is now the whole remaining problem. Every scale down failure
-      # in both jobs sits at standby_state.py:97 reached from
-      # elastic_execute.py:350, showing up as the 4097 refusal or as the fault,
-      # and it is also the tightest point in the test. Locally rank 0 enters
-      # that call with 3.14 GiB free of 288 and leaves with 1.51 GiB, while
-      # rank 1 has 47 GiB, and rank 0 is the one that refuses in CI.
-      #
-      # The two passes below hand memory back to the driver right before the
-      # call and report how much that was. If the internal IPC allocation is
-      # simply out of room, this is both the cause and the fix in one place.
-      - VLLM_EEP_DEBUG_FREE_BEFORE_STANDBY=1 VLLM_EEP_DEBUG_EARLY_GROUP_CLEANUP=1 VLLM_EEP_DEBUG_GROUP_PRESSURE=1 VLLM_EEP_DEBUG_SYNC_RESHUFFLE=1 VLLM_EEP_DEBUG_OFF=1 AMD_LOG_LEVEL=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=VLLM_EEP_DEBUG_FREE_BEFORE_STANDBY,VLLM_EEP_DEBUG_EARLY_GROUP_CLEANUP,VLLM_EEP_DEBUG_GROUP_PRESSURE,VLLM_EEP_DEBUG_SYNC_RESHUFFLE,VLLM_EEP_DEBUG_OFF,AMD_LOG_LEVEL pytest -v -s distributed/test_elastic_ep.py -k enforce_eager_none || true
-      - VLLM_EEP_DEBUG_FREE_BEFORE_STANDBY=1 VLLM_EEP_DEBUG_EARLY_GROUP_CLEANUP=1 VLLM_EEP_DEBUG_GROUP_PRESSURE=1 VLLM_EEP_DEBUG_SYNC_RESHUFFLE=1 VLLM_EEP_DEBUG_OFF=1 AMD_LOG_LEVEL=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=VLLM_EEP_DEBUG_FREE_BEFORE_STANDBY,VLLM_EEP_DEBUG_EARLY_GROUP_CLEANUP,VLLM_EEP_DEBUG_GROUP_PRESSURE,VLLM_EEP_DEBUG_SYNC_RESHUFFLE,VLLM_EEP_DEBUG_OFF,AMD_LOG_LEVEL pytest -v -s distributed/test_elastic_ep.py -k enforce_eager_none || true
-      # No verdict command this round. Every command above ends in || true, so
-      # the step stays green and reports data instead of a result. The baseline
-      # has refused at scale up in every single build, including 95168 command
-      # 8, so spending eight minutes to watch it refuse again buys nothing.
+      # The three passes below are the new baseline: real retirement, upstream
+      # UCX settings, nothing else. They measure how often what is left still
+      # fails, and 95233 says it is two different things. All four passes with
+      # retirement cleared the scale up and then split: two died inside
+      # create_standby_groups at the scale down, one lost rank 0 silently during
+      # the scale up reshuffle, one lost a worker in the traffic.
+      - VLLM_EEP_DEBUG_GROUP_PRESSURE=1 VLLM_EEP_DEBUG_SYNC_RESHUFFLE=1 VLLM_EEP_DEBUG_OFF=1 AMD_LOG_LEVEL=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=VLLM_EEP_DEBUG_GROUP_PRESSURE,VLLM_EEP_DEBUG_SYNC_RESHUFFLE,VLLM_EEP_DEBUG_OFF,AMD_LOG_LEVEL pytest -v -s distributed/test_elastic_ep.py -k enforce_eager_none || true
+      - VLLM_EEP_DEBUG_GROUP_PRESSURE=1 VLLM_EEP_DEBUG_SYNC_RESHUFFLE=1 VLLM_EEP_DEBUG_OFF=1 AMD_LOG_LEVEL=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=VLLM_EEP_DEBUG_GROUP_PRESSURE,VLLM_EEP_DEBUG_SYNC_RESHUFFLE,VLLM_EEP_DEBUG_OFF,AMD_LOG_LEVEL pytest -v -s distributed/test_elastic_ep.py -k enforce_eager_none || true
+      - VLLM_EEP_DEBUG_GROUP_PRESSURE=1 VLLM_EEP_DEBUG_SYNC_RESHUFFLE=1 VLLM_EEP_DEBUG_OFF=1 AMD_LOG_LEVEL=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=VLLM_EEP_DEBUG_GROUP_PRESSURE,VLLM_EEP_DEBUG_SYNC_RESHUFFLE,VLLM_EEP_DEBUG_OFF,AMD_LOG_LEVEL pytest -v -s distributed/test_elastic_ep.py -k enforce_eager_none || true
+      # The two passes below route the first collective on the new EP group over
+      # the CPU group. That collective is where the refusal lands at scale up,
+      # and these are expert load counters of a few kilobytes, so the detour
+      # costs nothing. If a pass is still refused somewhere on that group, then
+      # any export fails and not only the first one.
+      - VLLM_EEP_DEBUG_CPU_RESHUFFLE_REDUCE=1 VLLM_EEP_DEBUG_GROUP_PRESSURE=1 VLLM_EEP_DEBUG_SYNC_RESHUFFLE=1 VLLM_EEP_DEBUG_OFF=1 AMD_LOG_LEVEL=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=VLLM_EEP_DEBUG_CPU_RESHUFFLE_REDUCE,VLLM_EEP_DEBUG_GROUP_PRESSURE,VLLM_EEP_DEBUG_SYNC_RESHUFFLE,VLLM_EEP_DEBUG_OFF,AMD_LOG_LEVEL pytest -v -s distributed/test_elastic_ep.py -k enforce_eager_none || true
+      - VLLM_EEP_DEBUG_CPU_RESHUFFLE_REDUCE=1 VLLM_EEP_DEBUG_GROUP_PRESSURE=1 VLLM_EEP_DEBUG_SYNC_RESHUFFLE=1 VLLM_EEP_DEBUG_OFF=1 AMD_LOG_LEVEL=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=VLLM_EEP_DEBUG_CPU_RESHUFFLE_REDUCE,VLLM_EEP_DEBUG_GROUP_PRESSURE,VLLM_EEP_DEBUG_SYNC_RESHUFFLE,VLLM_EEP_DEBUG_OFF,AMD_LOG_LEVEL pytest -v -s distributed/test_elastic_ep.py -k enforce_eager_none || true
+      # The two passes below put UCX_MEM_EVENTS=no back. It came in with the
+      # diagnostics this branch inherited and was unconditional, which is what
+      # turned the upstream EPLB Execution suite red on MI355: with the memory
+      # events off UCX builds no registration cache and nixl asserts on
+      # rcache != NULL. It is opt-in now, so this is the A/B that says whether
+      # our own group ever needed it.
+      - VLLM_EEP_DEBUG_UCX_MEM_EVENTS_OFF=1 VLLM_EEP_DEBUG_GROUP_PRESSURE=1 VLLM_EEP_DEBUG_SYNC_RESHUFFLE=1 VLLM_EEP_DEBUG_OFF=1 AMD_LOG_LEVEL=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=VLLM_EEP_DEBUG_UCX_MEM_EVENTS_OFF,VLLM_EEP_DEBUG_GROUP_PRESSURE,VLLM_EEP_DEBUG_SYNC_RESHUFFLE,VLLM_EEP_DEBUG_OFF,AMD_LOG_LEVEL pytest -v -s distributed/test_elastic_ep.py -k enforce_eager_none || true
+      - VLLM_EEP_DEBUG_UCX_MEM_EVENTS_OFF=1 VLLM_EEP_DEBUG_GROUP_PRESSURE=1 VLLM_EEP_DEBUG_SYNC_RESHUFFLE=1 VLLM_EEP_DEBUG_OFF=1 AMD_LOG_LEVEL=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=VLLM_EEP_DEBUG_UCX_MEM_EVENTS_OFF,VLLM_EEP_DEBUG_GROUP_PRESSURE,VLLM_EEP_DEBUG_SYNC_RESHUFFLE,VLLM_EEP_DEBUG_OFF,AMD_LOG_LEVEL pytest -v -s distributed/test_elastic_ep.py -k enforce_eager_none || true
+      # Every command ends in || true, so the step stays green and the log is the
+      # deliverable rather than the result.
