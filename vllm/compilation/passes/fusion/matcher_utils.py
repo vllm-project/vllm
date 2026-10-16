@@ -394,10 +394,12 @@ class MatcherQuantFP8(MatcherCustomOp):
         self.is_tma_aligned = is_tma_aligned
 
         if match_rocm_aiter:
-            assert not quant_key.scale.group_shape.is_per_tensor(), (
-                "ROCm aiter fusion pass does not support per tensor quantization"
-            )
-            if quant_key.scale.group_shape.is_per_token():
+            if quant_key.scale.group_shape.is_per_tensor():
+                assert quant_key.scale.static, (
+                    "ROCm aiter fusion only supports static per tensor quantization"
+                )
+                self.QUANT_OP = torch.ops.vllm.rocm_aiter_per_tensor_quant.default
+            elif quant_key.scale.group_shape.is_per_token():
                 self.QUANT_OP = rocm_aiter_ops.get_per_token_quant_op()
             else:
                 assert quant_key.scale.group_shape.col == 128, (
@@ -432,6 +434,12 @@ class MatcherQuantFP8(MatcherCustomOp):
         scale: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         quant_key_group_shape = self.quant_key.scale.group_shape
+        if quant_key_group_shape == GroupShape.PER_TENSOR:
+            result = torch.empty_like(input, dtype=self.quant_key.dtype)
+            _, result, scale = auto_functionalized(
+                self.QUANT_OP, out=result, x=input, scale=scale, is_dynamic=False
+            )
+            return result, scale
         if quant_key_group_shape == GroupShape.PER_TOKEN:
             return self.QUANT_OP(  # type: ignore[no-any-return]
                 x=input,

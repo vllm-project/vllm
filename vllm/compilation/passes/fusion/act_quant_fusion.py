@@ -8,6 +8,7 @@ import torch
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
 from torch._ops import OpOverload
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -118,6 +119,38 @@ class SiluMulFp8StaticQuantPattern(ActivationQuantPattern):
                 self.FUSED_OP, result=result, input=input, scale=scale
             )
             return at[1]
+
+        return _replacement
+
+
+class AiterSiluMulFp8StaticQuantPattern(SiluMulFp8StaticQuantPattern):
+    """SiluMul+Fp8StaticQuant where the quant is AITER's per-tensor op, which
+    also returns its (unchanged) scale."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.quant_matcher = MatcherQuantFP8(kFp8StaticTensorSym, match_rocm_aiter=True)
+
+    @property
+    def pattern(self):
+        def _pattern(
+            input: torch.Tensor,
+            scale: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            result_silu_mul = self.silu_and_mul_matcher(input)
+            return self.quant_matcher(result_silu_mul, scale)
+
+        return _pattern
+
+    @property
+    def replacement(self):
+        fused = super().replacement
+
+        def _replacement(
+            input: torch.Tensor,
+            scale: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            return fused(input, scale), scale
 
         return _replacement
 
@@ -287,6 +320,12 @@ class ActivationQuantFusionPass(VllmFusionPatternMatcherPass):
         super().__init__(config, "activation_quant_fusion_pass")
 
         self.register(SiluMulFp8StaticQuantPattern())
+        # QuantFP8 runs AITER's per-tensor quant when AITER FP8 linear is on.
+        if (
+            rocm_aiter_ops.is_linear_fp8_enabled()
+            and config.compilation_config.is_custom_op_enabled("quant_fp8")
+        ):
+            self.register(AiterSiluMulFp8StaticQuantPattern())
 
         if silu_and_mul_nvfp4_quant_supported:
             self.register(SiluMulNvfp4QuantPattern())

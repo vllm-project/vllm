@@ -209,6 +209,10 @@ def test_select_default_backend_by_platform(
 
 
 @patch(
+    "vllm.model_executor.layers.fused_moe.oracle.unquantized.rocm_aiter_ops.is_enabled",
+    return_value=True,
+)
+@patch(
     "vllm.utils.flashinfer.has_flashinfer",
     return_value=False,
 )
@@ -219,7 +223,9 @@ def test_select_default_backend_by_platform(
 @pytest.mark.skipif(
     not current_platform.is_rocm(), reason="ROCm-specific backend selection test"
 )
-def test_select_rocm_aiter_backend(mock_aiter_enabled, mock_has_flashinfer):
+def test_select_rocm_aiter_backend(
+    mock_aiter_enabled, mock_has_flashinfer, mock_aiter_on
+):
     """Test ROCm backend selection when AITER is available."""
     with patch(
         "vllm.model_executor.layers.fused_moe.oracle.unquantized.current_platform"

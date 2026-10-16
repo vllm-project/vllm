@@ -274,8 +274,19 @@ MODELS_AND_DO_FUSION = {
     reason="Only test on cuda and rocm platform",
 )
 def test_fix_functionalization(
-    model_class: torch.nn.Module, do_fusion: bool, dtype: torch.dtype
+    model_class: torch.nn.Module,
+    do_fusion: bool,
+    dtype: torch.dtype,
+    use_aiter: bool,
+    request: pytest.FixtureRequest,
 ):
+    if use_aiter and do_fusion and model_class is TestFusedAddRMSNorm:
+        request.applymarker(
+            pytest.mark.xfail(
+                reason="No AITER pattern fuses fused_add_rms_norm + static FP8 quant",
+                strict=True,
+            )
+        )
     torch.set_default_device("cuda")
     torch.set_default_dtype(dtype)
     torch.manual_seed(0)

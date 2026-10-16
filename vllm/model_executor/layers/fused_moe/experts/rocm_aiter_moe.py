@@ -609,6 +609,11 @@ class AiterFp8BlockExperts(AiterExperts):
         SUPPORTED_W_A = [(kFp8Static128BlockSym, kFp8Dynamic128Sym)]
         return (weight_key, activation_key) in SUPPORTED_W_A
 
+    @staticmethod
+    def _supports_shape(hidden_dim: int) -> bool:
+        # AITER's blockscale MoE dispatch faults or computes garbage otherwise.
+        return hidden_dim % 512 == 0
+
 
 class AiterFp8TensorExperts(AiterExperts):
     """Per-tensor static weight scale, either per-tensor static or

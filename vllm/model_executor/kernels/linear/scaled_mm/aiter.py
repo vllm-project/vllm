@@ -64,6 +64,8 @@ class AiterInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
     def can_implement(cls, c: Int8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
         if not c.input_symmetric:
             return False, "supports symmetric quantization only."
+        if c.is_static_input_scheme or not c.is_channelwise:
+            return False, "supports per-token activation and per-channel weight only."
         return True, None
 
     def apply_weights(
@@ -76,10 +78,8 @@ class AiterInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
             `output = torch.mm((scale_a * a), (scale_b * b)).to(out_dtype)`
         where scale_a * a and scale_b * b are implemented using numpy-style
         broadcasting.
-        Currently only support per-tensor-per-tensor GEMM
-        and per-token-per-channel GEMM through AITER
-        w8a8 scaled gemm. `AiterInt8ScaledMMLinearKernel` also does not support
-        ATIER block scaled GEMM and mix-precision GEMM.
+        Only per-token-per-channel GEMM is supported through AITER w8a8 scaled
+        gemm, which reads the scales as [M] and [N] vectors.
         """
         w_q, w_s, i_s, i_zp, azp_adj = self._get_layer_params(layer)
 
@@ -104,24 +104,8 @@ class AiterInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
         m = x_q.shape[0]  # a
         n = w_q.shape[1]  # b
 
-        per_tensor_scale_a = x_s.numel() == 1
-        per_tensor_scale_b = w_s.numel() == 1
-        per_token_scale_a = x_s.numel() == m
-        per_channel_scale_b = w_s.numel() == n
-
-        # @TODO:
-        # Maybe broadcast the per-tensor-scale into per-channel-scale
-        # if one of the scale is a per-channel-scale.
-        # For now, it only supports:
-        # - per-tensor-per-tensor a8w8 scaled GEMM, and
-        # - per-token-per-channel a8w8 scaled GEMM
-        assert (per_tensor_scale_a and per_tensor_scale_b) or (
-            per_token_scale_a and per_channel_scale_b
-        ), (
-            "Currently only support per-tensor-per-tensor GEMM "
-            " and per-token-per-channel GEMM through AITER"
-            " w8a8 scaled gemm. `AiterInt8ScaledMMLinearKernel` "
-            "does not support AITER block scaled GEMM."
+        assert x_s.numel() == m and w_s.numel() == n, (
+            "AiterInt8ScaledMMLinearKernel only supports per-token-per-channel GEMM."
         )
 
         # gemm_a8w8_CK(a, b, scale_a, scale_b, bias) expects

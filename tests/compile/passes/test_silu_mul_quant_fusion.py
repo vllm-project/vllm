@@ -10,7 +10,7 @@ import vllm.envs as envs
 from tests.compile.backend import TestBackend
 from tests.kernels.quantization.nvfp4_utils import quant_nvfp4_tensor
 from tests.utils import TestFP8Layer
-from vllm._aiter_ops import IS_AITER_FOUND, rocm_aiter_ops
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
 from vllm.compilation.passes.fusion.act_quant_fusion import (
     FUSED_OPS,
@@ -74,6 +74,9 @@ class TestSiluMulFp8QuantModel(torch.nn.Module):
             force_kernel=force_kernel,
             input_dtype=dtype,
         )
+        # Keep silu*mul/scale below 224, where vLLM (224) and AITER (240) clamp.
+        assert self.fp8_linear.input_scale is not None
+        self.fp8_linear.input_scale.data.clamp_(min=0.01)
 
         self.enable_silu_mul_custom_op = self.silu_and_mul.enabled()
         self.enable_quant_fp8_custom_op = self.fp8_linear.is_quant_fp8_enabled()
@@ -84,13 +87,14 @@ class TestSiluMulFp8QuantModel(torch.nn.Module):
         return x2
 
     def ops_in_model_before(self):
+        quant_op = (
+            torch.ops.vllm.rocm_aiter_per_tensor_quant.default
+            if rocm_aiter_ops.is_linear_fp8_enabled()
+            else QUANT_OPS[kFp8StaticTensorSym]
+        )
         return [
             SILU_MUL_OP if self.enable_silu_mul_custom_op else torch.ops.aten.mul,
-            (
-                QUANT_OPS[kFp8StaticTensorSym]
-                if self.enable_quant_fp8_custom_op
-                else torch.ops.aten.reciprocal
-            ),
+            quant_op if self.enable_quant_fp8_custom_op else torch.ops.aten.reciprocal,
         ]
 
     def ops_in_model_after(self):
@@ -283,12 +287,12 @@ def test_fusion_silu_and_mul_quant(
     enable_silu_mul_custom_op: bool,
     enable_quant_fp8_custom_op: bool,
     force_kernel: type[FP8ScaledMMLinearKernel] | None,
-    monkeypatch: pytest.MonkeyPatch,
+    use_aiter: bool,
 ):
     if model_class is TestSiluMulNvfp4QuantModel and not is_nvfp4_supported():
         pytest.skip("NVFP4 is not supported on this GPU.")
-    if model_class is TestSiluMulGroupFp8QuantModel and not IS_AITER_FOUND:
-        pytest.skip("AITER is not supported on this GPU.")
+    if model_class is TestSiluMulGroupFp8QuantModel and not use_aiter:
+        pytest.skip("GroupFP8Quant fusion requires AITER.")
     if (
         isinstance(model_class, partial)
         and model_class.func is TestSiluMulBlockQuantModel
@@ -316,15 +320,13 @@ def test_fusion_silu_and_mul_quant(
         ),
     )
 
-    with set_current_vllm_config(config), monkeypatch.context() as m:
+    with set_current_vllm_config(config):
         fusion_passes = [ActivationQuantFusionPass(config)]
-        if IS_AITER_FOUND and model_class is TestSiluMulGroupFp8QuantModel:
+        if model_class is TestSiluMulGroupFp8QuantModel:
             from vllm.compilation.passes.fusion.rocm_aiter_fusion import (
                 RocmAiterSiluMulFp8GroupQuantFusionPass,
             )
 
-            m.setenv("VLLM_ROCM_USE_AITER", "1")
-            rocm_aiter_ops.refresh_env_variables()
             fusion_passes += [RocmAiterSiluMulFp8GroupQuantFusionPass(config)]
 
         passes = [NoOpEliminationPass(config), *fusion_passes, PostCleanupPass(config)]
