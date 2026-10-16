@@ -18,6 +18,9 @@ from vllm.distributed.kv_transfer.kv_checksum.scheduler import (
     KVChecksumScheduler,
 )
 from vllm.distributed.kv_transfer.kv_checksum.worker import KVChecksumWorker
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorTransferResults,
+)
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
@@ -236,7 +239,11 @@ class _Engine:
         checksums = []
         for worker in self.workers:
             pending = worker.post_forward(
-                finished_recving, set(), output.finished_req_ids, received
+                KVConnectorTransferResults(
+                    finished_recving=finished_recving or set(),
+                    kv_checksums=received or {},
+                ),
+                output.finished_req_ids,
             )
             if pending is not None:
                 pending.enqueue_cpu_copy()

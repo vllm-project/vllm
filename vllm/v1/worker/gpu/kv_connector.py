@@ -182,20 +182,17 @@ class ActiveKVConnector(KVConnector):
         output.kv_connector_worker_meta = (
             self.kv_connector.build_connector_worker_meta()
         )
-        if self.kv_checksum_worker is not None and (
-            pending := self.kv_checksum_worker.post_forward(
-                transfer_results.finished_recving,
-                transfer_results.failed_recving,
-                finished_req_ids,
-                transfer_results.kv_checksums,
+        if self.kv_checksum_worker is not None:
+            pending = self.kv_checksum_worker.post_forward(
+                transfer_results, finished_req_ids
             )
-        ):
-            # Every post_forward's checksums must reach an output.
-            assert self._kv_checksums is None
-            # Copied on their own event, so other outputs do not wait for them.
-            self._kv_checksums = KVChecksumCopy(
-                pending, current_stream(), self._output_copy_stream
-            )
+            if pending:
+                # Every post_forward's checksums must reach an output.
+                assert self._kv_checksums is None
+                # Copied on their own event, so other outputs do not wait for them.
+                self._kv_checksums = KVChecksumCopy(
+                    pending, current_stream(), self._output_copy_stream
+                )
         if not defer_finalize:
             self.kv_connector.clear_connector_metadata()
         return output

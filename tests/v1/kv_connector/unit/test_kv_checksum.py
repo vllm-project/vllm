@@ -6,6 +6,7 @@ PP sharding, replication, memory layout or kernel block size of the KV
 cache."""
 
 import copy
+from collections.abc import Iterable
 
 import numpy as np
 import pytest
@@ -24,6 +25,9 @@ from vllm.distributed.kv_transfer.kv_checksum.worker import (
     PendingKVChecksums,
 )
 from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorTransferResults,
+)
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateShapeCalculator
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -157,6 +161,15 @@ def _reference(
     return sums
 
 
+def _results(
+    *finished_recving: str, failed: Iterable[str] = ()
+) -> KVConnectorTransferResults:
+    """A connector's transfer results with these loads finished."""
+    return KVConnectorTransferResults(
+        finished_recving=set(finished_recving), failed_recving=set(failed)
+    )
+
+
 def _finish(pending: PendingKVChecksums | None) -> KVChecksumRecord:
     """Copy the checksums to host as the model runner does, and wait."""
     assert pending is not None
@@ -168,7 +181,7 @@ def _finish(pending: PendingKVChecksums | None) -> KVChecksumRecord:
 
 def _send_record(worker: KVChecksumWorker, blocks=BLOCKS) -> KVChecksumRecord:
     worker.bind(KVChecksumScheduled(reqs_to_send={"req": blocks}))
-    return _finish(worker.post_forward(None, set(), set()))
+    return _finish(worker.post_forward(_results(), set()))
 
 
 def _send(worker: KVChecksumWorker, blocks=BLOCKS):
@@ -177,7 +190,7 @@ def _send(worker: KVChecksumWorker, blocks=BLOCKS):
 
 def _recv(worker: KVChecksumWorker, blocks=BLOCKS):
     worker.bind(KVChecksumScheduled(reqs_to_recv={"req": blocks}))
-    record = _finish(worker.post_forward({"req"}, set(), set()))
+    record = _finish(worker.post_forward(_results("req"), set()))
     return record.checksums["req"]
 
 
@@ -397,7 +410,7 @@ def _check_requests_and_groups_of_one_step(device: str) -> None:
         "b": KVChecksumBlocks(num_tokens=21, groups={0: (1, [2])}),
     }
     worker.bind(KVChecksumScheduled(reqs_to_recv=reqs))
-    record = _finish(worker.post_forward(set(reqs), set(), set()))
+    record = _finish(worker.post_forward(_results(*reqs), set()))
     for req_id, blocks in reqs.items():
         for group_id, (start, block_ids) in blocks.groups.items():
             kv = first if group_id == 0 else second
@@ -938,14 +951,14 @@ def test_recv_checksummed_only_when_its_load_finishes():
     worker.bind(
         KVChecksumScheduled(reqs_to_recv={"a": BLOCKS, "b": BLOCKS, "c": BLOCKS})
     )
-    assert worker.post_forward(None, set(), set()) is None
+    assert worker.post_forward(_results(), set()) is None
 
     worker.bind(None)
-    record = _finish(worker.post_forward({"a", "b", "c"}, {"b"}, {"c"}))
+    record = _finish(worker.post_forward(_results("a", "b", "c", failed={"b"}), {"c"}))
     assert set(record.checksums) == {"a"}
 
     worker.bind(None)
-    assert worker.post_forward({"b", "c"}, set(), set()) is None
+    assert worker.post_forward(_results("b", "c"), set()) is None
 
 
 def test_send_and_finished_load_in_one_step():
@@ -957,7 +970,7 @@ def test_send_and_finished_load_in_one_step():
             reqs_to_send={"send": BLOCKS}, reqs_to_recv={"recv": BLOCKS}
         )
     )
-    record = _finish(worker.post_forward({"recv"}, set(), set()))
+    record = _finish(worker.post_forward(_results("recv"), set()))
     expected = _reference({0: _LOGICAL})
     for req_id in ("send", "recv"):
         np.testing.assert_array_equal(
@@ -1005,7 +1018,7 @@ def test_outputs_serialize_and_aggregate_across_workers():
         )
         worker.bind(KVChecksumScheduled(reqs_to_send={"req": BLOCKS}))
         kv_output = KVConnectorOutput(
-            kv_checksums=[_finish(worker.post_forward(None, set(), set()))]
+            kv_checksums=[_finish(worker.post_forward(_results(), set()))]
         )
         assert not kv_output.is_empty()
         outputs.append(

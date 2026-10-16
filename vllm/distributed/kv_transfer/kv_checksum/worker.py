@@ -17,6 +17,7 @@ from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
 from math import prod
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
@@ -52,6 +53,11 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowMLASpec,
     UniformTypeKVCacheSpecs,
 )
+
+if TYPE_CHECKING:
+    from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+        KVConnectorTransferResults,
+    )
 
 logger = init_logger(__name__)
 
@@ -645,19 +651,17 @@ class KVChecksumWorker:
 
     def post_forward(
         self,
-        finished_recving: set[str] | None,
-        failed_recving: set[str],
+        transfer_results: "KVConnectorTransferResults",
         finished_req_ids: set[str],
-        received: dict[str, bytes] | None = None,
     ) -> PendingKVChecksums | None:
         """Queue the checksums of this step's sends and finished loads.
 
         Args:
-            finished_recving: Requests whose load this worker finished.
-            failed_recving: Requests whose load failed; nothing to check.
+            transfer_results: The connector's transfer results of this step:
+                the loads it finished (failed ones are not checked) and the
+                producer checksums it received with them, passed on to the
+                scheduler.
             finished_req_ids: Requests that ended, e.g. aborted while loading.
-            received: Producer checksums the connector received with finished
-                loads, passed on to the scheduler.
 
         Returns:
             The step's checksums, still on the device, or None if there is
@@ -668,9 +672,9 @@ class KVChecksumWorker:
             self._reqs_to_recv.pop(req_id, None)
         loaded = {
             req_id: blocks
-            for req_id in finished_recving or ()
+            for req_id in transfer_results.finished_recving
             if (blocks := self._reqs_to_recv.pop(req_id, None)) is not None
-            and req_id not in failed_recving
+            and req_id not in transfer_results.failed_recving
         }
 
         pending = PendingKVChecksums(
@@ -678,7 +682,7 @@ class KVChecksumWorker:
             self.tp_rank,
             self._skipped_groups,
             self._fingerprints,
-            received or {},
+            transfer_results.kv_checksums,
         )
         self._compute(loaded, pending, replica_zero_only=False)
         self._compute(self._reqs_to_send, pending, replica_zero_only=True)

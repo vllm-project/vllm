@@ -1730,8 +1730,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput:
         """Let the EC connector send/recv on a step with no work to run."""
         output = ModelRunnerOutput.with_ec_conn_output(
-            output,
-            self.ec_connector.no_forward(scheduler_output).ec_connector_output,
+            output, self.ec_connector.no_forward(scheduler_output).ec_connector_output
         )
         return self.kv_connector.add_kv_checksums(output)
 

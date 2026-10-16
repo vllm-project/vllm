@@ -40,6 +40,7 @@ from .test_kv_checksum import (
     _mamba_spec,
     _name,
     _reference,
+    _results,
     _send,
     _spec,
     _split_layer,
@@ -164,7 +165,7 @@ def test_copy_is_ordered_after_checksums_for_any_reader():
     try:
         torch.cuda._sleep(200_000_000)
         worker.bind(KVChecksumScheduled(reqs_to_send={"req": BLOCKS}))
-        pending = worker.post_forward(None, set(), set())
+        pending = worker.post_forward(_results(), set())
         assert pending is not None
         async_output = AsyncKVChecksumOutput(
             EMPTY_MODEL_RUNNER_OUTPUT,
@@ -215,7 +216,7 @@ def test_sampled_output_carries_kv_checksums():
             check_ep_fault=False,
             pending_aux_output=None,
         )
-        pending = worker.post_forward({"recv"}, set(), set())
+        pending = worker.post_forward(_results("recv"), set())
         assert pending is not None
         async_output.kv_checksums = KVChecksumCopy(pending, main_stream, copy_stream)
     finally:
