@@ -2223,6 +2223,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.aux_output_connector is not None:
             pending_aux_output = self.aux_output_connector.prepare_output(input_batch)
 
+        # The target model's KV is final, and the drafter's is not checksummed.
+        pending_kv_checksums = self.kv_connector.checksum_sends()
         # Start async output copy here so that it can overlap with speculator proposal.
         async_output = AsyncOutput(
             model_runner_output=model_runner_output,
@@ -2232,6 +2234,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             copy_stream=self.output_copy_stream,
             check_ep_fault=self.check_ep_fault,
             pending_aux_output=pending_aux_output,
+            pending_kv_checksums=pending_kv_checksums,
         )
 
         # Collect KV transfer results now; finalize saves after the drafter runs.

@@ -75,7 +75,9 @@ def _group(spec, *layer_names: str, **kwargs) -> KVCacheGroupSpec:
     return KVCacheGroupSpec(list(layer_names or (_name(0),)), spec, **kwargs)
 
 
-def _worker(config, caches, *, tp_rank=0, tp_size=1, uniform_kv_heads=2):
+def _worker(
+    config, caches, *, tp_rank=0, tp_size=1, uniform_kv_heads=2, draft_layers=()
+):
     return KVChecksumWorker(
         config,
         caches,
@@ -83,6 +85,7 @@ def _worker(config, caches, *, tp_rank=0, tp_size=1, uniform_kv_heads=2):
         tp_size=tp_size,
         pp_rank=0,
         uniform_kv_heads=uniform_kv_heads,
+        draft_layer_names=frozenset(draft_layers),
     )
 
 
@@ -960,6 +963,53 @@ def test_send_and_finished_load_in_one_step():
         np.testing.assert_array_equal(
             record.checksums[req_id][0].values[:, 0], expected
         )
+
+
+def test_sends_checksummed_before_post_forward():
+    """checksum_sends takes the step's sends, before a drafter runs, leaving
+    the finished loads to post_forward."""
+    worker = _worker(_config(_group(_spec(2))), {_name(0): _cache(_LOGICAL)})
+    worker.bind(
+        KVChecksumScheduled(
+            reqs_to_send={"send": BLOCKS}, reqs_to_recv={"recv": BLOCKS}
+        )
+    )
+    sends = _finish(worker.checksum_sends())
+    loads = _finish(worker.post_forward({"recv"}, set(), set()))
+    assert set(sends.checksums) == {"send"}
+    assert set(loads.checksums) == {"recv"}
+    expected = _reference({0: _LOGICAL})
+    for record, req_id in ((sends, "send"), (loads, "recv")):
+        np.testing.assert_array_equal(
+            record.checksums[req_id][0].values[:, 0], expected
+        )
+
+    worker.bind(None)
+    assert worker.checksum_sends() is None
+
+
+def test_draft_layers_are_not_checksummed():
+    """Drafter layers are left out of their group's checksums and
+    fingerprint, and a group of drafter layers only is not checksummed (nor
+    reported as skipped)."""
+    draft = "drafter.layers.1.self_attn.attn"
+    target_only = _worker(_config(_group(_spec(2))), {_name(0): _cache(_LOGICAL)})
+    caches = {_name(0): _cache(_LOGICAL), draft: _cache(_logical_kv(2, seed=9))}
+    worker = _worker(
+        _config(_group(_spec(2), _name(0), draft), _group(_spec(2), draft)),
+        caches,
+        draft_layers={draft},
+    )
+    blocks = KVChecksumBlocks(
+        num_tokens=BLOCKS.num_tokens, groups={0: BLOCKS.groups[0], 1: BLOCKS.groups[0]}
+    )
+    record = _send_record(worker, blocks)
+    assert set(record.checksums["req"]) == {0}
+    np.testing.assert_array_equal(
+        record.checksums["req"][0].values[:, 0], _reference({0: _LOGICAL})
+    )
+    assert record.fingerprints[0] == _send_record(target_only).fingerprints[0]
+    assert not record.skipped_groups
 
 
 def test_outputs_serialize_and_aggregate_across_workers():

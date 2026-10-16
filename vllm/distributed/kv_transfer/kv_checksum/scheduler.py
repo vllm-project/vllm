@@ -404,8 +404,12 @@ class KVChecksumScheduler:
             for group_id, (start, block_ids) in pending.blocks.groups.items():
                 if group_id in skipped:
                     continue
+                checksums = pending.group_checksums(group_id)
+                if not checksums:
+                    # No worker checksums it, e.g. it holds only drafter layers.
+                    continue
                 values = np.zeros(len(block_ids), dtype=np.uint64)
-                for group in pending.group_checksums(group_id):
+                for group in checksums:
                     values += group.values.sum(axis=1, dtype=np.uint64)
                 groups[group_id] = (
                     pending.fingerprint(group_id),
@@ -508,12 +512,14 @@ class KVChecksumScheduler:
             )
             return None
         sent = expected.groups.get(group_id)
-        if skipped or sent is None:
-            if skipped != (sent is None):
+        # No worker checksums a group of only drafter layers, as if skipped.
+        unchecked = skipped or not pending.group_checksums(group_id)
+        if unchecked or sent is None:
+            if unchecked != (sent is None):
                 raise _Unverified(
                     "a group is checksummed by one side only",
                     f"group {group_id} on the "
-                    f"{'producer' if skipped else 'consumer'} only",
+                    f"{'producer' if unchecked else 'consumer'} only",
                 )
             return None
         fingerprint, sent_block_size, sent_start, sent_values = sent

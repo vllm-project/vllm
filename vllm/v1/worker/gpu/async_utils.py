@@ -23,6 +23,7 @@ from vllm.v1.worker.utils import raise_if_nan_logits
 
 if TYPE_CHECKING:
     from vllm.distributed.aux_output_connector.worker import PendingAuxOutput
+    from vllm.distributed.kv_transfer.kv_checksum.checksum import KVChecksumRecord
     from vllm.distributed.kv_transfer.kv_checksum.worker import PendingKVChecksums
     from vllm.v1.worker.gpu.input_batch import InputBatch
 
@@ -125,6 +126,7 @@ class AsyncOutput(AsyncModelRunnerOutput):
         copy_stream: torch.cuda.Stream,
         check_ep_fault: bool,
         pending_aux_output: "PendingAuxOutput | None",
+        pending_kv_checksums: "PendingKVChecksums | None" = None,
     ):
         # NOTE(woosuk): We must retain references to the GPU tensors,
         # as the copy operations are performed on a different CUDA stream than
@@ -133,6 +135,9 @@ class AsyncOutput(AsyncModelRunnerOutput):
         self.sampler_output = sampler_output
         self.num_sampled_tokens = num_sampled_tokens
         self.pending_aux_output = pending_aux_output
+        # The KV checksums of the step's sends, copied with the outputs.
+        self.pending_kv_checksums = pending_kv_checksums
+        # Those of its finished loads, known only after the speculator ran.
         self.kv_checksums: KVChecksumCopy | None = None
         # Blocking (sleep) event to avoid busy-polling the CUDA driver lock.
         self.copy_event = torch.cuda.Event(blocking=True)
@@ -169,6 +174,8 @@ class AsyncOutput(AsyncModelRunnerOutput):
                     num_sampled=self.num_sampled_tokens_np,
                     num_rejected=async_copy_to_np(sampler_output.num_rejected),
                 )
+            if self.pending_kv_checksums is not None:
+                self.pending_kv_checksums.enqueue_cpu_copy()
             if check_ep_fault:
                 has_fault = get_ep_all2all_manager().query_fault()
                 self._has_fault = has_fault.to("cpu", non_blocking=True)
@@ -176,6 +183,10 @@ class AsyncOutput(AsyncModelRunnerOutput):
 
     def get_output(self) -> ModelRunnerOutput:
         self.copy_event.synchronize()
+        if self.pending_kv_checksums is not None:
+            _add_kv_checksums(
+                self.model_runner_output, self.pending_kv_checksums.process_output()
+            )
         if self.kv_checksums is not None:
             self.kv_checksums.add_to(self.model_runner_output)
 
@@ -270,12 +281,23 @@ class AsyncPoolingOutput(AsyncModelRunnerOutput):
         return self.model_runner_output
 
 
+def _add_kv_checksums(output: ModelRunnerOutput, record: "KVChecksumRecord") -> None:
+    """Add a worker's KV checksum record to ``output``, which must not be the
+    shared empty output."""
+    if output.kv_connector_output is None:
+        output.kv_connector_output = KVConnectorOutput()
+    kv_connector_output = output.kv_connector_output
+    if kv_connector_output.kv_checksums is None:
+        kv_connector_output.kv_checksums = []
+    kv_connector_output.kv_checksums.append(record)
+
+
 class KVChecksumCopy:
     """A step's KV checksums on their way to host memory.
 
     The checksum kernels run in the KV connector's ``post_forward``, after the
     step's other outputs were queued for copying (and, with a speculator, after
-    it wrote its KV), so they get their own copy and event on the same stream.
+    it ran), so they get their own copy and event on the same stream.
     """
 
     def __init__(
@@ -296,10 +318,7 @@ class KVChecksumCopy:
         """Wait for the copy and add the checksums to ``output``, which must
         not be the shared empty output."""
         self.copy_event.synchronize()
-        record = self.pending.process_output()
-        if output.kv_connector_output is None:
-            output.kv_connector_output = KVConnectorOutput()
-        output.kv_connector_output.kv_checksums = [record]
+        _add_kv_checksums(output, self.pending.process_output())
 
 
 class AsyncKVChecksumOutput(AsyncModelRunnerOutput):

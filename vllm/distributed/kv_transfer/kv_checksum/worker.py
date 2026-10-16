@@ -5,7 +5,7 @@
 Each worker computes its part of a block's checksum: the slices (layer, KV
 head) it holds, each weighed by its global layer and head (see
 ``checksum.py``). Parts from all TP ranks and PP stages add up to the block's
-checksum.
+checksum. Drafter (speculative decoding) layers are not checksummed.
 
 The results stay on the device until the model runner copies them to host
 memory with the step's other outputs, on its output copy stream (see
@@ -15,13 +15,13 @@ memory with the step's other outputs, on its output copy stream (see
 import hashlib
 from collections import defaultdict
 from collections.abc import Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from math import prod
 
 import numpy as np
 import torch
 
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.distributed.kv_transfer.kv_checksum.checksum import (
     MAX_KV_HEADS_PER_LAYER,
     KVChecksumBlocks,
@@ -38,6 +38,7 @@ from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.triton_utils import HAS_TRITON
 from vllm.utils.torch_utils import PIN_MEMORY, get_dtype_size
 from vllm.v1.core.kv_cache_planning import layer_tp_replicas
@@ -499,9 +500,10 @@ class _GroupBatch:
 class PendingKVChecksums:
     """A worker's KV checksums of one step, until they reach host memory.
 
-    ``post_forward`` queues the checksum kernels on the main stream. The model
-    runner then calls ``enqueue_cpu_copy`` on its output copy stream, ordered
-    after them, and ``process_output`` once that copy is done.
+    ``checksum_sends`` or ``post_forward`` queues the checksum kernels on the
+    main stream. The model runner then calls ``enqueue_cpu_copy`` on its output
+    copy stream, ordered after them, and ``process_output`` once that copy is
+    done.
     """
 
     def __init__(
@@ -576,9 +578,11 @@ class PendingKVChecksums:
 class KVChecksumWorker:
     """Computes the KV checksums the scheduler asks a worker for.
 
-    Requests to send are checksummed in the step that finishes their KV.
-    Requests to receive are checksummed in the step whose transfer results
-    report their load finished, before any later step can write their blocks.
+    Requests to send are checksummed in the step that finishes their KV, by
+    ``checksum_sends`` right after the forward, so a drafter running after it
+    does not delay them, or else by ``post_forward``. Requests to receive are
+    checksummed by ``post_forward`` in the step whose transfer results report
+    their load finished, before any later step can write their blocks.
     """
 
     def __init__(
@@ -589,6 +593,7 @@ class KVChecksumWorker:
         tp_size: int,
         pp_rank: int,
         uniform_kv_heads: int | None,
+        draft_layer_names: frozenset[str] = frozenset(),
     ):
         self.tp_rank = tp_rank
         self.pp_rank = pp_rank
@@ -598,6 +603,14 @@ class KVChecksumWorker:
         self._fingerprints: dict[int, int] = {}
         for group_id in kv_cache_config.transfer_group_ids:
             group = kv_cache_config.kv_cache_groups[group_id]
+            # The drafter's KV is not checksummed: it only affects which draft
+            # tokens are accepted, not the output.
+            group = replace(
+                group,
+                layer_names=[
+                    name for name in group.layer_names if name not in draft_layer_names
+                ],
+            )
             self._fingerprints[group_id] = _group_fingerprint(group, tp_size)
             try:
                 views = _build_layer_views(
@@ -633,6 +646,30 @@ class KVChecksumWorker:
         if scheduled is not None:
             self._reqs_to_recv.update(scheduled.reqs_to_recv)
 
+    def checksum_sends(self) -> PendingKVChecksums | None:
+        """Queue the checksums of this step's sends, once its forward wrote
+        their KV.
+
+        Returns:
+            The checksums, still on the device, or None if there are none.
+
+        """
+        if not self._reqs_to_send:
+            return None
+        pending = self._pending({})
+        self._compute(self._reqs_to_send, pending, replica_zero_only=True)
+        self._reqs_to_send = {}
+        return pending
+
+    def _pending(self, received: dict[str, bytes]) -> PendingKVChecksums:
+        return PendingKVChecksums(
+            self.pp_rank,
+            self.tp_rank,
+            self._skipped_groups,
+            self._fingerprints,
+            received,
+        )
+
     def post_forward(
         self,
         finished_recving: set[str] | None,
@@ -640,7 +677,8 @@ class KVChecksumWorker:
         finished_req_ids: set[str],
         received: dict[str, bytes] | None = None,
     ) -> PendingKVChecksums | None:
-        """Queue the checksums of this step's sends and finished loads.
+        """Queue the checksums of this step's finished loads, and of its sends
+        unless ``checksum_sends`` already did.
 
         Args:
             finished_recving: Requests whose load this worker finished.
@@ -663,13 +701,7 @@ class KVChecksumWorker:
             and req_id not in failed_recving
         }
 
-        pending = PendingKVChecksums(
-            self.pp_rank,
-            self.tp_rank,
-            self._skipped_groups,
-            self._fingerprints,
-            received or {},
-        )
+        pending = self._pending(received or {})
         self._compute(loaded, pending, replica_zero_only=False)
         self._compute(self._reqs_to_send, pending, replica_zero_only=True)
         self._reqs_to_send = {}
@@ -770,7 +802,17 @@ def create_kv_checksum_worker(
         tp_size=get_tensor_model_parallel_world_size(),
         pp_rank=get_pp_group().rank_in_group,
         uniform_kv_heads=_uniform_kv_heads(vllm_config),
+        draft_layer_names=_draft_layer_names(vllm_config),
     )
+
+
+def _draft_layer_names(vllm_config: VllmConfig) -> frozenset[str]:
+    """The drafter's KV cache layers, marked when the drafter was loaded."""
+    layers = get_layers_from_vllm_config(
+        vllm_config,
+        AttentionLayerBase,  # type: ignore[type-abstract]
+    )
+    return frozenset(name for name, layer in layers.items() if layer.is_draft_layer)
 
 
 def _uniform_kv_heads(vllm_config: VllmConfig) -> int | None:
@@ -787,9 +829,5 @@ def _uniform_kv_heads(vllm_config: VllmConfig) -> int | None:
     if global_heads not in (None, total) or any(
         layer.get("total_num_kv_heads", total) != total for layer in overrides
     ):
-        return None
-    speculative_config = vllm_config.speculative_config
-    draft = speculative_config.draft_model_config if speculative_config else None
-    if draft is not None and draft.get_total_num_kv_heads() != total:
         return None
     return total

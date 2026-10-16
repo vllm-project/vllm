@@ -52,6 +52,12 @@ class KVConnector:
     def finalize_step(self) -> None:
         pass
 
+    def checksum_sends(self) -> "PendingKVChecksums | None":
+        """Queue the KV checksums of this step's sends, once the forward wrote
+        their KV, for the model runner to copy to host with the sampled tokens.
+        Otherwise ``post_forward`` queues them."""
+        return None
+
     def take_kv_checksums(self) -> "PendingKVChecksums | None":
         """The KV checksums the last ``post_forward`` queued, for the model
         runner to copy to host with the step's outputs."""
@@ -190,6 +196,11 @@ class ActiveKVConnector(KVConnector):
             return
         self.kv_connector.wait_for_save()
         self.kv_connector.clear_connector_metadata()
+
+    def checksum_sends(self) -> "PendingKVChecksums | None":
+        if self._disabled or self.kv_checksum_worker is None:
+            return None
+        return self.kv_checksum_worker.checksum_sends()
 
     def take_kv_checksums(self) -> "PendingKVChecksums | None":
         pending, self._pending_kv_checksums = self._pending_kv_checksums, None

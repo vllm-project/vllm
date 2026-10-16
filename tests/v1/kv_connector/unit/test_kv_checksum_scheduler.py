@@ -135,7 +135,8 @@ class _Engine:
         block_size: int = BLOCK_SIZE,
     ):
         """``extra_group``: None, or whether the workers can checksum a second
-        group ("covered") or skip it for lack of a cache ("skipped").
+        group ("covered"), skip it for lack of a cache ("skipped"), or leave
+        it out as it holds a drafter layer ("draft").
         ``mamba``: add a Mamba group, as hybrid models have; "split" for one
         whose TP split is known (``_split_mamba_spec``)."""
         vllm_config = create_vllm_config(
@@ -193,7 +194,7 @@ class _Engine:
                     )
                     for layer in layers
                 }
-                if extra_group == "covered":
+                if extra_group in ("covered", "draft"):
                     caches[EXTRA_LAYER] = torch.zeros_like(caches[layers[0]])
                 if mamba_spec is not None:
                     # The model runner's [blocks, 1, 1, state] int8 page view.
@@ -210,6 +211,9 @@ class _Engine:
                         tp_size=tp_size,
                         pp_rank=pp_rank,
                         uniform_kv_heads=HEADS,
+                        draft_layer_names=frozenset(
+                            [EXTRA_LAYER] if extra_group == "draft" else []
+                        ),
                     )
                 )
 
@@ -595,6 +599,19 @@ def test_groups_skipped_on_both_sides_are_ignored(producer_group):
     request = create_request(1, NUM_TOKENS, do_remote_prefill=True)
     errors = _error_ids(_load(producer, consumer, request, transfer))
     assert errors == (set() if producer_group == "skipped" else {request.request_id})
+
+
+@pytest.mark.parametrize("producer_group", ["draft", "covered"])
+def test_drafter_groups_are_ignored(producer_group):
+    """A group of drafter layers only, which no worker checksums, is left out
+    of the verdict, unless the producer checksums it."""
+    producer = _Engine("kv_producer", extra_group=producer_group)
+    consumer = _Engine("kv_consumer", fail_closed=True, extra_group="draft")
+    transfer = _prefill(producer, create_request(1, NUM_TOKENS, do_remote_decode=True))
+
+    request = create_request(1, NUM_TOKENS, do_remote_prefill=True)
+    errors = _error_ids(_load(producer, consumer, request, transfer))
+    assert errors == (set() if producer_group == "draft" else {request.request_id})
 
 
 @pytest.mark.parametrize("fail_closed", [False, True])

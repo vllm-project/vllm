@@ -17,8 +17,13 @@ from vllm.distributed.kv_transfer.kv_checksum.checksum import (
     KVChecksumScheduled,
 )
 from vllm.triton_utils import HAS_TRITON
-from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
-from vllm.v1.worker.gpu.async_utils import AsyncKVChecksumOutput, KVChecksumCopy
+from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
+from vllm.v1.worker.gpu.async_utils import (
+    AsyncKVChecksumOutput,
+    AsyncOutput,
+    KVChecksumCopy,
+)
+from vllm.v1.worker.gpu.sample.output import SamplerOutput
 
 from .test_kv_checksum import (
     BLOCKS,
@@ -177,3 +182,54 @@ def test_copy_is_ordered_after_checksums_for_any_reader():
     np.testing.assert_array_equal(
         record.checksums["req"][0].values[:, 0], _reference({0: logical})
     )
+
+
+def test_sampled_output_carries_send_and_load_checksums():
+    """On the last PP rank, the sends' checksums are copied with the sampled
+    tokens (before a drafter would run) and the finished loads' after it;
+    the output carries both records."""
+    logical = _logical_kv(heads=2)
+    worker = _worker(_config(_group(_spec(2))), {_name(0): _cache(logical).cuda()})
+    main_stream = torch.cuda.Stream()
+    copy_stream = torch.cuda.Stream()
+    torch.cuda.set_stream(main_stream)
+    try:
+        torch.cuda._sleep(200_000_000)
+        worker.bind(
+            KVChecksumScheduled(
+                reqs_to_send={"send": BLOCKS}, reqs_to_recv={"recv": BLOCKS}
+            )
+        )
+        sends = worker.checksum_sends()
+        num_sampled = torch.ones(1, dtype=torch.int32, device="cuda")
+        async_output = AsyncOutput(
+            ModelRunnerOutput(req_ids=["send"], req_id_to_index={"send": 0}),
+            SamplerOutput(
+                sampled_token_ids=torch.full((1, 1), 7, device="cuda"),
+                logprobs_tensors=None,
+                num_nans=None,
+                num_sampled=num_sampled,
+                num_rejected=torch.zeros_like(num_sampled),
+            ),
+            num_sampled,
+            main_stream=main_stream,
+            copy_stream=copy_stream,
+            check_ep_fault=False,
+            pending_aux_output=None,
+            pending_kv_checksums=sends,
+        )
+        loads = worker.post_forward({"recv"}, set(), set())
+        assert loads is not None
+        async_output.kv_checksums = KVChecksumCopy(loads, main_stream, copy_stream)
+    finally:
+        torch.cuda.set_stream(torch.cuda.default_stream())
+
+    output = async_output.get_output()
+    assert output.sampled_token_ids == [[7]]
+    records = output.kv_connector_output.kv_checksums
+    assert [set(record.checksums) for record in records] == [{"send"}, {"recv"}]
+    expected = _reference({0: logical})
+    for record, req_id in zip(records, ("send", "recv")):
+        np.testing.assert_array_equal(
+            record.checksums[req_id][0].values[:, 0], expected
+        )
