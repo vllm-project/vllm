@@ -217,10 +217,9 @@ class AsyncOutput(AsyncModelRunnerOutput):
                 f"Mask: {mask.cpu().tolist()}"
             )
 
-        timer = self.iteration_timer
-        if timer is None:
+        if self.iteration_timer is None:
             return self.model_runner_output
-        return timer.drain_into(self.model_runner_output)
+        return self.iteration_timer.drain_into(self.model_runner_output)
 
 
 class AsyncPoolingOutput(AsyncModelRunnerOutput):
