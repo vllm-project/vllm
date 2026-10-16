@@ -398,6 +398,26 @@ def get_per_layer_parameters(
     return per_layer_params
 
 
+def get_kv_cache_dtype_from_layers(
+    vllm_config: VllmConfig, layer_names: list[str]
+) -> str | None:
+    """Resolve the runtime KV encoding shared by an attention group."""
+    layers = get_layers_from_vllm_config(
+        vllm_config,
+        AttentionLayerBase,  # type: ignore[type-abstract]
+        layer_names,
+    )
+    cache_dtypes = {getattr(layer, "kv_cache_dtype", None) for layer in layers.values()}
+    if not cache_dtypes:
+        return None
+    if len(cache_dtypes) != 1:
+        raise ValueError(
+            "All layers in one attention group must share the same KV cache "
+            f"dtype; got {cache_dtypes} for {layer_names}."
+        )
+    return cache_dtypes.pop()
+
+
 def get_num_attention_heads_from_layers(
     vllm_config: VllmConfig, layer_names: list[str]
 ) -> int | None:

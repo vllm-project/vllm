@@ -280,6 +280,7 @@ class AttentionGroup:
     metadata_builders: list[AttentionMetadataBuilder] = field(
         default_factory=lambda: []
     )
+    kv_cache_dtype: str | None = None
 
     def create_metadata_builders(
         self,
@@ -444,6 +445,15 @@ class AttentionGroup:
     def get_metadata_builder(self, ubatch_id: int = 0) -> AttentionMetadataBuilder:
         assert len(self.metadata_builders) > ubatch_id
         return self.metadata_builders[ubatch_id]
+
+    def get_metadata_reuse_key(
+        self, ubatch_id: int = 0
+    ) -> tuple[KVCacheSpec, type[AttentionMetadataBuilder], str | None]:
+        return (
+            self.kv_cache_spec,
+            type(self.get_metadata_builder(ubatch_id)),
+            self.kv_cache_dtype,
+        )
 
     @property
     def supports_draft_decode_metadata_update(self) -> bool:
