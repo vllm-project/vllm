@@ -282,7 +282,10 @@ def matmul_descriptor_persistent(
 
 
 def matmul_persistent(
-    a: torch.Tensor, b: torch.Tensor, bias: torch.Tensor | None = None
+    a: torch.Tensor,
+    b: torch.Tensor,
+    bias: torch.Tensor | None = None,
+    output_dtype: torch.dtype | None = None,
 ):
     # Check constraints.
     assert a.shape[1] == b.shape[0], "Incompatible dimensions"
@@ -294,8 +297,14 @@ def matmul_persistent(
     M, K = a.shape
     K, N = b.shape
     dtype = a.dtype
+    if output_dtype is None:
+        output_dtype = dtype
+    assert output_dtype in (dtype, torch.float32), (
+        "Persistent matmul only supports the input dtype or FP32 output, got "
+        f"input dtype {dtype} and output dtype {output_dtype}."
+    )
     # Allocates output.
-    c = torch.empty((M, N), device=a.device, dtype=dtype)
+    c = torch.empty((M, N), device=a.device, dtype=output_dtype)
 
     # 1D launch kernel where each block gets its own program.
     def grid(META):
@@ -335,6 +344,11 @@ def matmul_persistent(
             "num_warps": 8,
         },
     }
+    config = configs[dtype]
+    if output_dtype == torch.float32 and dtype == torch.float16:
+        # The regular FP16 N=256 tile can exceed shared-memory limits when
+        # its FP32 accumulator is written as FP32 on current NVIDIA GPUs.
+        config = {**config, "BLOCK_SIZE_N": 128}
     matmul_kernel_persistent[grid](
         a,
         b,
@@ -1268,6 +1282,21 @@ def reduce_scatter_batch_invariant(
         LARGE=recv.numel() > 2**31,
     )
     return out
+
+
+def linear_fp32_batch_invariant(input, weight, bias=None):
+    """Batch-invariant linear with FP32 accumulation and output.
+
+    Inputs and weights retain their original dtype while the persistent
+    reduction writes its FP32 accumulator directly to the output tensor.
+    This is used for numerically sensitive projections such as MoE routers.
+    """
+    return matmul_persistent(
+        input,
+        weight.t(),
+        bias=bias,
+        output_dtype=torch.float32,
+    )
 
 
 _batch_invariant_MODE = False

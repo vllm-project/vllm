@@ -187,7 +187,9 @@ from vllm.v1.worker.utils import (
     KVBlockZeroer,
     clear_layer_kv_caches,
     copy_kv_cache_blocks_inplace,
+    copy_kv_cache_side_storage_blocks,
     get_uniform_decode_token_count,
+    reset_kv_cache_side_storage_and_log,
 )
 from vllm.v1.worker.workspace import lock_workspace, use_workspace_lane
 
@@ -821,6 +823,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             attn_groups_iter=(g for groups in self.attn_groups for g in groups),
             kernel_block_sizes=self.kernel_block_sizes,
             static_forward_context=self.compilation_config.static_forward_context,
+            zero_base_kv_cache=self.kv_cache_config.needs_base_kv_cache_zeroing,
             num_blocks=self.kv_cache_config.num_blocks,
         )
 
@@ -1031,6 +1034,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.reset_encoder_cache()
         gc.collect()
 
+    def post_kv_cache_wake_up(self) -> None:
+        self.block_tables.init_block_table_layout_tensors()
+        reset_kv_cache_side_storage_and_log(
+            self.compilation_config.static_forward_context, "wake-up"
+        )
+
     def reset_mm_cache(self) -> None:
         if self.encoder_cache is not None:
             self.encoder_cache.reset_mm_cache()
@@ -1132,6 +1141,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Lock workspace to prevent resizing during execution. A resize after
             # capture frees the static cuda graph buffer.
             lock_workspace()
+
+        torch.accelerator.synchronize()
+        reset_kv_cache_side_storage_and_log(
+            self.compilation_config.static_forward_context, "graph capture"
+        )
 
         end_time = time.perf_counter()
         elapsed_time = end_time - start_time
@@ -1269,17 +1283,30 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Zero GPU memory for freshly allocated cache blocks to prevent
         # stale NaN/data from corrupting attention or SSM computation.
-        if scheduler_output.new_block_ids_to_zero:
+        if scheduler_output.new_block_ids_to_zero or any(
+            scheduler_output.new_block_ids_to_zero_by_group or ()
+        ):
             assert self.kv_block_zeroer is not None
-            self.kv_block_zeroer.zero_block_ids(scheduler_output.new_block_ids_to_zero)
+            self.kv_block_zeroer.zero_block_ids(
+                scheduler_output.new_block_ids_to_zero or [],
+                scheduler_output.new_block_ids_to_zero_by_group,
+            )
 
         # Apply copy-on-write block copies for partial prefix-cache hits, after
         # zeroing new blocks and before the forward pass reads them.
-        if scheduler_output.kv_cache_block_copies:
+        if scheduler_output.kv_cache_block_copies or any(
+            scheduler_output.kv_cache_block_copies_by_group or ()
+        ):
             copy_kv_cache_blocks_inplace(
                 self.kv_caches,
                 self.kv_cache_config.num_blocks,
-                scheduler_output.kv_cache_block_copies,
+                scheduler_output.kv_cache_block_copies or [],
+            )
+            copy_kv_cache_side_storage_blocks(
+                self.compilation_config.static_forward_context,
+                self.kv_cache_config.kv_cache_groups,
+                scheduler_output.kv_cache_block_copies_by_group or (),
+                self.kv_cache_config.num_blocks,
             )
 
     def gather_batch_req_state(

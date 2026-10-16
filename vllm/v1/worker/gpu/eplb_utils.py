@@ -77,7 +77,9 @@ def preserve_serving_state(model_runner: "GPUModelRunner") -> Iterator[None]:
         _remove_all_requests(model_runner)
         model_runner.block_tables.redirect_writes_to_null_block = False
         if model_runner.kv_block_zeroer is not None:
-            model_runner.kv_block_zeroer.zero_block_ids([0])
+            model_runner.kv_block_zeroer.zero_block_ids(
+                [0], [[0] for _ in model_runner.kv_cache_config.kv_cache_groups]
+            )
 
 
 def _remove_all_requests(model_runner: "GPUModelRunner") -> None:

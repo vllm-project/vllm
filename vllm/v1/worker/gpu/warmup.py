@@ -242,7 +242,11 @@ def warmup_kernels(
             # Greedy batches skip logits processing, so rejection kernels
             # also see model-dtype logits instead of FP32.
             _warmup_kernels(
-                model_runner, worker_execute_model, worker_sample_tokens, greedy=True
+                model_runner,
+                worker_execute_model,
+                worker_sample_tokens,
+                greedy=True,
+                max_num_reqs=1,
             )
     finally:
         model_runner.adaptive_verification = adaptive_verification
@@ -256,6 +260,7 @@ def _warmup_kernels(
     worker_execute_model: Callable[[SchedulerOutput], Any],
     worker_sample_tokens: Callable[[GrammarOutput | None], Any],
     greedy: bool = False,
+    max_num_reqs: int | None = None,
 ) -> None:
     if model_runner.vllm_config.is_mm_encoder_only:
         return
@@ -304,6 +309,7 @@ def _warmup_kernels(
         model_runner.scheduler_config.max_num_seqs,
         model_runner.scheduler_config.max_num_batched_tokens
         // max(prompt_len, decode_query_len),
+        max_num_reqs or model_runner.scheduler_config.max_num_seqs,
     )
     block_tables = getattr(model_runner, "block_tables", None)
     null_blocks = block_tables is not None and (
@@ -470,5 +476,5 @@ def _warmup_kernels(
     worker_execute_model(cleanup_output)
     model_runner.kv_connector.set_disabled(False)
     if model_runner.kv_block_zeroer is not None:
-        model_runner.kv_block_zeroer.zero_block_ids([0])
+        model_runner.kv_block_zeroer.zero_block_ids([0], [[0] for _ in kv_cache_groups])
     torch.accelerator.synchronize()

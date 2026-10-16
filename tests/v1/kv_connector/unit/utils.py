@@ -543,6 +543,7 @@ def make_nixl_scheduler(
     bounded_replay: bool = False,
     heartbeat: bool = False,
     kv_lease_duration: int = 30,
+    prefix_recompute_tokens: int = 0,
 ):
     """Create a NixlConnectorScheduler via __new__ (skipping __init__).
 
@@ -558,6 +559,8 @@ def make_nixl_scheduler(
     sched = object.__new__(NixlConnectorScheduler)
     sched._has_mamba = has_mamba
     sched._bounded_replay = bounded_replay
+    sched._prefix_recompute_tokens = prefix_recompute_tokens
+    sched._prefix_recompute_block_size = 16 if prefix_recompute_tokens else 0
     sched._is_hma_required = is_hma_required
     sched.kv_cache_config = make_kv_cache_config(
         block_size=16,
@@ -626,6 +629,8 @@ def make_nixl_push_scheduler(
     sched.is_bidirectional_kv_xfer_enabled = is_bidirectional_kv_xfer_enabled
     sched._has_mamba = has_mamba
     sched._bounded_replay = False
+    sched._prefix_recompute_tokens = 0
+    sched._prefix_recompute_block_size = 0
     sched.kv_cache_config = make_kv_cache_config(
         block_size=16,
         mamba_enabled=has_mamba,

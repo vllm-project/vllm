@@ -11,7 +11,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
 )
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
-from vllm.v1.core.kv_cache_coordinator import replay_boundaries
+from vllm.v1.core.kv_cache_coordinator import (
+    replay_boundaries,
+    replay_suffix_tokens,
+)
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     KVCacheBlock,
@@ -349,6 +352,7 @@ class MooncakeStoreCoordinator:
                 num_prompt_tokens,
                 self.lcm_block_size,
                 use_eagle=bool(self.eagle_group_ids),
+                recompute_tokens=replay_suffix_tokens(self.kv_cache_groups),
             )
         )
         masks: list[list[bool] | None] = []

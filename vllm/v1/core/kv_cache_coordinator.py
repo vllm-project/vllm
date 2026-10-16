@@ -62,8 +62,25 @@ def _validate_prefix_cache_retention_interval(
         )
 
 
+def replay_suffix_tokens(kv_cache_groups) -> int:
+    """Prompt tokens a resend of the same prompt always recomputes."""
+    return max(
+        1,
+        max(
+            (
+                getattr(group.kv_cache_spec, "prefix_cache_recompute_tokens", 0)
+                for group in kv_cache_groups
+            ),
+            default=0,
+        ),
+    )
+
+
 def replay_boundaries(
-    num_prompt_tokens: int, scheduler_block_size: int, use_eagle: bool
+    num_prompt_tokens: int,
+    scheduler_block_size: int,
+    use_eagle: bool,
+    recompute_tokens: int = 1,
 ) -> tuple[int, ...]:
     """Positions a later request replaying a prompt can resume at.
 
@@ -71,19 +88,23 @@ def replay_boundaries(
     at each position; EAGLE groups also keep the block above, which they
     match and drop back from (see ``reachable_block_mask``).
 
-    Two positions are reachable: a resend of the identical prompt is capped
-    at ``num_tokens - 1`` (its last token is recomputed for logits), a
-    longer sibling matches the final aligned block. They differ only on a
-    block-aligned prompt, where retaining just the higher one collapses the
-    resend's hit to 0. The alignment is the scheduler block size, not the
-    finer hash granularity, which would over-estimate the reach.
+    A resend of the identical prompt is capped by both ``num_tokens - 1``
+    (its last token is recomputed for logits) and ``num_tokens -
+    recompute_tokens`` (a model-declared replay suffix). A longer sibling can
+    match the producer's final aligned block. Retain every resulting boundary,
+    since dropping either one can collapse a hybrid-cache hit to 0. The
+    alignment is the scheduler block size, not the finer hash granularity,
+    which would over-estimate the reach.
     """
+    replay_limit = max(num_prompt_tokens - recompute_tokens, 0)
     if not use_eagle:
-        return (num_prompt_tokens - 1,)
+        return tuple(sorted({max(num_prompt_tokens - 1, 0), replay_limit}))
     block = scheduler_block_size
-    resend = (num_prompt_tokens - 1) // block * block
+    eagle_resend = max((num_prompt_tokens - 1) // block * block - block, 0)
+    recompute_resend = replay_limit // block * block
+    resend = min(eagle_resend, recompute_resend)
     extension = num_prompt_tokens // block * block
-    return tuple(sorted({max(resend - block, 0), max(extension - block, 0)}))
+    return tuple(sorted({resend, max(extension - block, 0)}))
 
 
 class KVCacheCoordinator(ABC):
@@ -114,6 +135,9 @@ class KVCacheCoordinator(ABC):
             for g in kv_cache_config.kv_cache_groups
         )
         self.scheduler_block_size = scheduler_block_size
+        self.replay_suffix_tokens = replay_suffix_tokens(
+            kv_cache_config.kv_cache_groups
+        )
         self.num_reprefillable_tokens = max(0, num_prefill_lookahead - 1)
 
         self.block_pool = BlockPool(
@@ -131,6 +155,18 @@ class KVCacheCoordinator(ABC):
         # Conservatively fall back to flag all groups when no group is flagged.
         if use_eagle and not self.eagle_group_ids:
             self.eagle_group_ids = set(range(len(kv_cache_config.kv_cache_groups)))
+        eagle_specs = [
+            kv_cache_config.kv_cache_groups[i].kv_cache_spec
+            for i in self.eagle_group_ids
+        ]
+        # Hybrid lookup batches equal specs together. If any member performs
+        # the EAGLE proof lookup, every manager in that spec group must retain
+        # the same proof tail.
+        self.eagle_proof_group_ids = {
+            i
+            for i, group in enumerate(kv_cache_config.kv_cache_groups)
+            if any(group.kv_cache_spec == spec for spec in eagle_specs)
+        }
 
         # During chunked prefill with EAGLE, the single next prefill lookahead
         # token past the chunk boundary is combined with the final hidden state
@@ -167,6 +203,7 @@ class KVCacheCoordinator(ABC):
                 pcp_world_size=pcp_world_size,
                 scheduler_block_size=self.scheduler_block_size,
                 needs_kv_cache_zeroing=self.kv_cache_config.needs_kv_cache_zeroing,
+                retain_eagle_proof=(enable_caching and i in self.eagle_proof_group_ids),
             )
             for i, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups)
         )
@@ -365,6 +402,7 @@ class KVCacheCoordinator(ABC):
             request.num_prompt_tokens,
             self.scheduler_block_size,
             use_eagle=bool(self.eagle_group_ids),
+            recompute_tokens=self.replay_suffix_tokens,
         )
         for group_id, manager in enumerate(self.single_type_managers):
             if not manager.enable_caching:
@@ -461,10 +499,18 @@ class KVCacheCoordinator(ABC):
         self,
         block_hashes: list[BlockHash],
         max_cache_hit_length: int,
+        max_returned_cache_hit_length: int | None = None,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int, int]:
         """Returns the per-group hit blocks, the hit length, and the number of
         ``num_uncached_common_prefix_tokens`` (a shared prefix that a
-        sparse-retention group has not cached yet; 0 unless hybrid)."""
+        sparse-retention group has not cached yet; 0 unless hybrid).
+
+        ``max_cache_hit_length`` is the lookup ceiling.  The optional
+        ``max_returned_cache_hit_length`` is a stricter ceiling for the
+        reconciled prefix returned to the scheduler.  EAGLE/MTP groups may
+        inspect one extra cache unit during lookup and then drop it, but the
+        returned hit must never exceed the latter ceiling.
+        """
         pass
 
     def new_step_starts(self) -> None:
@@ -514,6 +560,7 @@ class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):
         self,
         block_hashes: list[BlockHash],
         max_cache_hit_length: int,
+        max_returned_cache_hit_length: int | None = None,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int, int]:
         blocks: tuple[list[KVCacheBlock], ...] = tuple(
             [] for _ in range(self.num_single_type_manager)
@@ -575,18 +622,38 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
         self,
         block_hashes: list[BlockHash],
         max_cache_hit_length: int,
+        max_returned_cache_hit_length: int | None = None,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int, int]:
+        returned_ceiling = min(
+            max_cache_hit_length,
+            max_cache_hit_length
+            if max_returned_cache_hit_length is None
+            else max_returned_cache_hit_length,
+        )
+        drop_eagle_block = 0 in self.eagle_group_ids
+        lookup_ceiling = returned_ceiling
+        if drop_eagle_block:
+            # FullAttentionManager drops one block after lookup.  Give it that
+            # one-unit lookahead without allowing the returned hit to grow.
+            lookup_ceiling = min(
+                max_cache_hit_length,
+                returned_ceiling + self.block_size,
+            )
         hit_blocks, hit_length = self.single_type_managers[0].find_longest_cache_hit(
             block_hashes=block_hashes,
-            max_length=max_cache_hit_length,
+            max_length=lookup_ceiling,
             kv_cache_group_ids=[0],
             block_pool=self.block_pool,
             kv_cache_spec=self.kv_cache_spec,
-            drop_eagle_block=0 in self.eagle_group_ids,
+            drop_eagle_block=drop_eagle_block,
             alignment_tokens=self.block_size,
             dcp_world_size=self.dcp_world_size,
             pcp_world_size=self.pcp_world_size,
         )
+        if hit_length > returned_ceiling:
+            hit_length = returned_ceiling - returned_ceiling % self.block_size
+            for computed in hit_blocks:
+                del computed[cdiv(hit_length, self.block_size) :]
         # Single group: nothing "uncached common" -- no other group to lag it.
         return hit_blocks, hit_length, 0
 
@@ -797,6 +864,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         self,
         block_hashes: list[BlockHash],
         max_cache_hit_length: int,
+        max_returned_cache_hit_length: int | None = None,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int, int]:
         """Find the longest cache hit using an iterative fixed-point algorithm.
 
@@ -808,6 +876,8 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         Args:
             block_hashes: The block hashes of the request.
             max_cache_hit_length: The maximum length of the cache hit.
+            max_returned_cache_hit_length: Optional replay ceiling on the
+                returned prefix length.
 
         Returns:
             A tuple containing:
@@ -818,7 +888,13 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
 
         """
         num_groups = len(self.kv_cache_config.kv_cache_groups)
-        hit_length = max_cache_hit_length
+        returned_ceiling = min(
+            max_cache_hit_length,
+            max_cache_hit_length
+            if max_returned_cache_hit_length is None
+            else max_returned_cache_hit_length,
+        )
+        hit_length = returned_ceiling
         longest_hit_length = 0
         hit_blocks_by_group: list[list[KVCacheBlock] | None] = [None] * num_groups
         hit_length_by_group: list[int] = [0] * num_groups
@@ -873,6 +949,8 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                         curr_hit_length + eagle_margin,
                         len(block_hashes) * self.hash_block_size,
                     )
+                else:
+                    _max_length = min(_max_length, returned_ceiling)
                 hit_blocks, _new_hit_length = manager_cls.find_longest_cache_hit(
                     block_hashes=block_hashes,
                     max_length=_max_length,
@@ -934,6 +1012,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         self,
         block_hashes: list[BlockHash],
         max_cache_hit_length: int,
+        max_returned_cache_hit_length: int | None = None,
     ) -> tuple[tuple[list[KVCacheBlock], ...], tuple[int, ...]]:
         """Like find_longest_cache_hit but evaluates each group independently.
 
@@ -942,26 +1021,36 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
 
         """
         num_groups = len(self.kv_cache_config.kv_cache_groups)
+        returned_ceiling = min(
+            max_cache_hit_length,
+            max_cache_hit_length
+            if max_returned_cache_hit_length is None
+            else max_returned_cache_hit_length,
+        )
         hit_blocks: list[list[KVCacheBlock]] = [[] for _ in range(num_groups)]
         hit_lengths: list[int] = [0] * num_groups
 
         for spec, group_ids, manager_cls, use_eagle in self.attention_groups:
-            manager = self.single_type_managers[group_ids[0]]
-            lookup_length = max_cache_hit_length
+            first_group_id = group_ids[0]
+            group_block_size = self.single_type_managers[first_group_id].block_size
+            group_max_length = returned_ceiling
             if use_eagle and not isinstance(spec, MambaSpec):
-                eagle_margin = eagle_proof_margin(
-                    manager.block_size,
-                    self.hash_block_size,
-                    self.enable_partial_hash_hits
-                    and manager_cls.supports_fine_grained_hash_lookup,
+                eagle_margin = (
+                    self.hash_block_size
+                    if self.enable_partial_hash_hits
+                    and manager_cls.supports_fine_grained_hash_lookup
+                    and group_block_size > self.hash_block_size
+                    else group_block_size
                 )
-                lookup_length = min(
-                    max_cache_hit_length + eagle_margin,
+                group_max_length = min(
                     len(block_hashes) * self.hash_block_size,
+                    returned_ceiling + eagle_margin,
                 )
+
+            manager = self.single_type_managers[group_ids[0]]
             blocks, group_hit = manager_cls.find_longest_cache_hit(
                 block_hashes=block_hashes,
-                max_length=lookup_length,
+                max_length=group_max_length,
                 kv_cache_group_ids=group_ids,
                 block_pool=manager.block_pool,
                 kv_cache_spec=spec,

@@ -2593,6 +2593,62 @@ def reshape_and_cache_flash(
     )
 
 
+def fused_qknorm_rope_cache(
+    qkv: torch.Tensor,
+    q_weight: torch.Tensor,
+    k_weight: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    positions: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    num_q_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+    rotary_dim: int,
+    eps: float,
+    norm_weight_bias: float = 0.0,
+    kv_cache_dtype: str = "auto",
+    k_scale: torch.Tensor | None = None,
+    v_scale: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Fuse per-head RMSNorm, partial NeoX RoPE and KV insertion.
+
+    Norm weights may be FP32 independently of QKV. A zero rotary dimension
+    skips RoPE; norm outputs are rounded to QKV dtype before rotation.
+    """
+    if rotary_dim < 0 or rotary_dim > head_dim or rotary_dim % 8:
+        raise ValueError("rotary_dim must be a multiple of 8 in [0, head_dim]")
+    q = qkv.new_empty((qkv.shape[0], num_q_heads * head_dim))
+    k = qkv.new_empty((qkv.shape[0], num_kv_heads * head_dim))
+    v = torch.empty_like(k)
+    cos, sin = cos_sin_cache.chunk(2, dim=-1)
+    torch.ops._C.fused_qknorm_rope_cache(
+        q,
+        k,
+        v,
+        qkv,
+        q_weight,
+        k_weight,
+        cos,
+        sin,
+        positions,
+        slot_mapping,
+        key_cache,
+        value_cache,
+        head_dim,
+        num_q_heads,
+        num_kv_heads,
+        rotary_dim // 2,
+        eps,
+        norm_weight_bias,
+        kv_cache_dtype,
+        k_scale,
+        v_scale,
+    )
+    return q, k, v
+
+
 def fused_minimax_m3_qknorm_rope_kv_insert(
     qkv: torch.Tensor,
     q_norm_weight: torch.Tensor,

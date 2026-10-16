@@ -502,10 +502,13 @@ class DefaultModelLoader(BaseModelLoader):
             "Loading weights took %.2f seconds",
             self.counter_after_loading_weights - self.counter_before_loading_weights,
         )
-        # We only enable strict check for non-quantized models
-        # that have loaded weights tracking by default.
-        default_enable_weights_track = (
-            model_config.quantization is None and loaded_weights is not None
+        # Quantized models normally disable tracking because some backends
+        # initialize parameters during post-processing instead of loading them
+        # directly from the checkpoint. Models that can account for every such
+        # parameter may opt back into the strict default.
+        default_enable_weights_track = loaded_weights is not None and (
+            model_config.quantization is None
+            or getattr(model, "_enable_weights_track_by_default", False)
         )
         enable_weights_track = (
             self.enable_weights_track

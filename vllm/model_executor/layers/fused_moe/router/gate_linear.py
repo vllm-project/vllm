@@ -48,7 +48,8 @@ class GateLinear(ReplicatedLinear):
 
     # (hidden_size, num_experts) pairs with an instantiated fp32 kernel:
     #   (3072, 256) -> MiniMax-M2/M2.5,  (6144, 128) -> MiniMax-M3
-    FP32_SUPPORTED_SHAPES = {(3072, 256), (6144, 128)}
+    #   (4096, 352) -> Step-5
+    FP32_SUPPORTED_SHAPES = {(3072, 256), (6144, 128), (4096, 352)}
     FP32_MAX_TOKENS = 32
     # Largest batch for which tier 1 beats the cuBLAS epilogue. Subclasses
     # whose router shape stays ahead further up the range may raise it.
@@ -473,7 +474,15 @@ def fp32_router_gemm_dispatch_impl(
         if weight.dtype == torch.bfloat16:
             return torch.mm(x, weight.T, out_dtype=torch.float32)
         return torch.nn.functional.linear(x.float(), weight)
-    if x.shape[0] <= _FP32_ROUTER_GEMM_MAX_TOKENS:
+    fp32_max_tokens = _FP32_ROUTER_GEMM_MAX_TOKENS
+    if (
+        allow_bf16x3_router_gemm
+        and x.dtype == torch.bfloat16
+        and weight.shape == (352, 4096)
+    ):
+        # Step-5 on B300: BF16x3 becomes competitive at M=12.
+        fp32_max_tokens = 11
+    if x.shape[0] <= fp32_max_tokens:
         return ops.fp32_router_gemm(x, weight)
 
     if allow_bf16x3_router_gemm and x.dtype == torch.bfloat16:
