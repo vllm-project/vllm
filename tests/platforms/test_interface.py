@@ -249,3 +249,29 @@ def test_layerwise_hybrid_without_alignment_keeps_legacy_layout(hybrid_config):
     assert pages["attention"].shape[-2] == specs[0].get_num_kernel_states(
         kernel_block_size
     )
+
+
+@pytest.mark.parametrize("layerwise", [None, False, True])
+def test_offloading_layout_preserves_layerwise_hybrid_packing(hybrid_config, layerwise):
+    from vllm.config import KVTransferConfig
+    from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
+        OffloadingConnector,
+    )
+
+    config = hybrid_config
+    config.kv_transfer_config = KVTransferConfig(
+        kv_connector="OffloadingConnector", kv_role="kv_both"
+    )
+    if not layerwise:
+        config.quant_config = None if layerwise is None else Fp8Config()
+    required = OffloadingConnector.get_required_kvcache_layout(config)
+    assert required == (None if layerwise else "LBHNC")
+
+    Platform.update_block_size_for_backend(config)
+
+    if layerwise:
+        assert config.cache_config.block_size == 64
+        assert config.cache_config.mamba_page_size_padded is None
+    else:
+        assert config.cache_config.block_size > 64
+        assert config.cache_config.mamba_page_size_padded is not None
