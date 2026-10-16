@@ -296,7 +296,7 @@ class EngineCoreOutputs(
                 unpack_routed_experts,
             )
 
-            unpack_routed_experts(self)
+            unpack_routed_experts(self, self.routed_experts)
 
 
 class EngineCoreRequestType(enum.Enum):

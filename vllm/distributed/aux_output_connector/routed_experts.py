@@ -39,11 +39,11 @@ def pack_routed_experts(outputs: EngineCoreOutputs) -> None:
         output.routed_experts = None
 
 
-def unpack_routed_experts(outputs: EngineCoreOutputs) -> None:
+def unpack_routed_experts(
+    outputs: EngineCoreOutputs, packed: tuple[np.ndarray, list[int]]
+) -> None:
     """Restore per-request views from a decoded batch payload."""
-    if outputs.routed_experts is None:
-        return
-    rows, lengths = outputs.routed_experts
+    rows, lengths = packed
     if (
         len(lengths) != len(outputs.outputs)
         or any(length < -1 for length in lengths)
@@ -142,7 +142,6 @@ class RoutedExpertsBuffer:
         self, request_id: Hashable, token_start: int, rows: np.ndarray
     ) -> list[tuple[int, np.ndarray]]:
         """Stage rows and return completed blocks without retaining them."""
-        rows = np.asarray(rows)
         assert rows.shape[1:] == self.shape_per_token and rows.dtype == self.dtype, (
             "routed-experts capture profile changed"
         )
@@ -173,12 +172,9 @@ class RoutedExpertsBuffer:
                 f"actual={position}"
             )
             count = min(self.block_size - local_start, len(rows) - offset)
-            if count == 1:
-                self._rows[tail.slot, local_start] = rows[offset]
-            else:
-                self._rows[tail.slot, local_start : local_start + count] = rows[
-                    offset : offset + count
-                ]
+            self._rows[tail.slot, local_start : local_start + count] = rows[
+                offset : offset + count
+            ]
             tail.length += count
             offset += count
             if tail.length == self.block_size:
