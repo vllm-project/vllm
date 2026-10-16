@@ -357,11 +357,10 @@ def terminate_if_errored(server: NoSignalServer, engine: EngineClient):
     for this request.
     """
     engine_errored = engine.errored and not engine.is_running
-    if (
-        envs.VLLM_KEEP_ALIVE_ON_ENGINE_DEATH
-        or server.shutdown_requested
-        or not engine_errored
-    ):
+    keep_alive = (
+        envs.VLLM_KEEP_ALIVE_ON_ENGINE_DEATH or engine.should_keep_api_server_alive
+    )
+    if keep_alive or server.shutdown_requested or not engine_errored:
         return
 
     if server.fatal_engine_error is None:

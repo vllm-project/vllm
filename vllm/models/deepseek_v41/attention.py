@@ -25,6 +25,7 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
 from vllm.model_executor.layers.sparse_mqa_indexer import SparseMQAIndexer
+from vllm.model_executor.model_loader.weight_utils import make_attention_sink
 from vllm.models.common.ops import fused_q_kv_rmsnorm
 from vllm.models.common.ops.sequence_parallel import sp_reduce_scatter
 from vllm.models.deepseek_v41.common.ops import (
@@ -121,10 +122,10 @@ def _fill_short_context_topk_indices(
 
 # Which packed fp8_ds_mla record a V4.1 layer writes. FlashMLA decodes
 # DeepSeek's V4.1 record -- all 512 dims (RoPE included) as fp8 e4m3 with one
-# UE8M0 scale per 32 dims, 512 data bytes + 16 scale bytes per token, pages
-# rounded to the kernel's 512 B TMA stride -- only in its SM100 sparse-decode
-# kernels. Every other arch keeps the V4 record: 448 fp8 NoPE + 64 bf16 RoPE
-# plus 7 UE8M0 scales of 64 dims and a pad byte (584 B, 576 B pages).
+# UE8M0 scale per 32 dims, each token's 512 data bytes followed by its 16 scale
+# bytes -- only in its SM100 sparse-decode kernels. Every other arch keeps the
+# V4 record: 448 fp8 NoPE + 64 bf16 RoPE plus 7 UE8M0 scales of 64 dims and a
+# pad byte (584 B, 576 B pages).
 def _use_v41_mxfp8_kv_record() -> bool:
     return current_platform.is_device_capability_family(100)
 
@@ -356,10 +357,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         self.padded_heads = self.get_padded_num_q_heads(self.n_local_heads)
         # Sink padded to the same head count, initialized to -inf (no sink
         # effect). Weight loading fills the first n_local_heads slots.
-        self.attn_sink = nn.Parameter(
-            torch.full((self.padded_heads,), -float("inf"), dtype=torch.float32),
-            requires_grad=False,
-        )
+        self.attn_sink = make_attention_sink(self.padded_heads, torch.float32)
 
         self.fused_wqa_wkv = MergedColumnParallelLinear(
             self.hidden_size,
@@ -517,8 +515,8 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             288 if self.kv_cache_dtype == "nvfp4_ds_mla" else self.swa_bytes_per_token
         )
         # One alignment for every page in the block: the block stride is their
-        # sum, and 512 satisfies both TMA strides in play (512 for the V4.1
-        # fp8 record, 256 for NVFP4).
+        # sum. V4 needs its 576 B TMA stride; V4.1's is on the SWA block
+        # stride, and 512 is free (its pages are already 512 B multiples).
         self.kv_page_alignment = 512 if self.kv_mxfp8 else 576
         if self.kv_cache_dtype == "nvfp4_ds_mla" and not self.kv_mxfp8:
             raise ValueError(
@@ -547,11 +545,11 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             swa_bounded_replay = False
         if swa_bounded_replay and current_platform.is_rocm():
             logger.warning_once(
-                "SWA bounded replay is off on ROCm (the sparse SWA metadata "
-                "builders forward replay_start, but the window clamp it relies "
-                "on lives in the FlashInfer and FlashMLA prefill kernels, so "
-                "the padded slots fault); the sliding-window cache takes part "
-                "in prefix caching instead."
+                "Prefix-cache SWA replay is off on ROCm (the sparse SWA "
+                "metadata builders forward replay_start, but the window clamp "
+                "it relies on lives in the FlashInfer and FlashMLA prefill "
+                "kernels, so the padded slots fault); the sliding-window cache "
+                "takes part in prefix caching instead."
             )
             swa_bounded_replay = False
         self.swa_cache_layer = DeepseekV4SWACache(
@@ -564,6 +562,13 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             block_size=32,
             packed_bytes_per_token=self.swa_bytes_per_token,
             packed_page_alignment=self.kv_page_alignment,
+            # FlashMLA reads the interleaved V4.1 records as rows of the whole
+            # cache, so the packed block has to hold whole rows of both.
+            packed_block_stride_alignment=(
+                math.lcm(self.swa_bytes_per_token, self.compressed_bytes_per_token)
+                if self.kv_mxfp8
+                else None
+            ),
             bounded_replay=swa_bounded_replay,
         )
 
@@ -648,7 +653,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             if self.backend_cls.get_name() in (
                 "FLASHMLA_SPARSE_DSV41",
                 "FLASHMLA_MEGA_ATTN_DSV41",
-                "ROCM_FLASHMLA_SPARSE_DSV4",
+                "ROCM_FLASHMLA_SPARSE_DSV41",
             ):
                 from vllm.models.deepseek_v41.common.ops.cache_utils import (
                     _COMBINE_TOPK_SWA_INDICES_KERNEL,
@@ -1224,15 +1229,18 @@ class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
             tokens_per_state=self.compress_ratio,
             # The indexer page shares a physical block with the main KV cache
             # (the block stride is the sum of every page in the group), so it
-            # has to carry the same padding: the packed record's TMA stride,
+            # has to carry the same padding: the packed KV pages' alignment,
             # else 512B for FlashInfer sparse (#44577).
             alignment=page_alignment,
-            # DeepGEMM's paged sparse MQA logits address pages by the block
-            # stride, which packs every layer's page in this layout, and need
-            # it 512B-aligned; the main KV record read from the same blocks
-            # needs its own TMA stride, so keep both.
+            # DeepGEMM's paged sparse logits need a 256B-aligned block stride;
+            # V4 records keep their TMA stride (V4.1's is on the SWA spec).
             block_stride_alignment=(
-                math.lcm(512, page_alignment)
+                math.lcm(
+                    256,
+                    1
+                    if uses_fp8_ds_mla_layout and _use_v41_mxfp8_kv_record()
+                    else page_alignment,
+                )
                 if self.sparse_logits and not self.rocm_mxfp4
                 else None
             ),

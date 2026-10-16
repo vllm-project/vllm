@@ -3,7 +3,11 @@
 import torch
 
 from vllm.triton_utils import tl, tldevice, triton
-from vllm.v1.worker.gpu.sample.gumbel import gumbel_block_argmax, tl_rand32
+from vllm.v1.worker.gpu.sample.gumbel import (
+    gumbel_block_argmax,
+    spec_step_seed,
+    tl_rand32,
+)
 from vllm.v1.worker.gpu.sample.watermark import philox_gumbel_block_argmax
 
 
@@ -425,6 +429,9 @@ def _compute_local_residual_mass_kernel(
     PADDED_VOCAB_NUM_BLOCKS: tl.constexpr,
 ):
     logit_idx = tl.program_id(0).to(tl.int64)
+    # Adaptive verification can end before num_speculative_steps.
+    if logit_idx + 1 >= tl.num_programs(0):
+        return
     draft_step_idx = tl.load(expanded_local_pos_ptr + logit_idx)
     if draft_step_idx == 0 or draft_step_idx >= num_speculative_steps:
         # The acceptance threshold, h, looks one position ahead and sums
@@ -566,7 +573,8 @@ def _rejection_kernel(
             verifying &= is_valid_draft
         if verifying:
             pos = tl.load(pos_ptr + logit_idx)
-            u = tl_rand32(seed, pos, includes_zero=False)
+            step_seed = spec_step_seed(seed, i) if USE_BLOCK_VERIFICATION else seed
+            u = tl_rand32(step_seed, pos, includes_zero=False)
             if is_greedy:
                 # Greedy sampling. Accept IFF draft matches target argmax.
                 # NOTE: Target argmax is stored directly so that resampling

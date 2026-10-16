@@ -6,6 +6,7 @@ from collections.abc import AsyncGenerator, Mapping, Sequence
 from dataclasses import dataclass
 
 from vllm.engine.protocol import EngineClient
+from vllm.exceptions import GenerationError
 from vllm.inputs import EngineInput
 from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
@@ -33,7 +34,7 @@ async def next_token_label_reads(
 ) -> list[LabelRead]:
     """Runs one read per input at once, as request ``{request_id}-{i}``. Each
     read's params set ``max_tokens=1`` and the label tokens as
-    ``logprob_token_ids``. Raises ValueError naming the item when a read has
+    ``logprob_token_ids``. Raises GenerationError naming the item when a read has
     no output or lacks a label's logprob."""
     generators: list[AsyncGenerator[RequestOutput, None]] = [
         engine_client.generate(
@@ -53,14 +54,14 @@ async def next_token_label_reads(
     reads = []
     for i, (result, params) in enumerate(zip(results, sampling_params)):
         if result is None:
-            raise ValueError(f"Failed to generate result for item {i}")
+            raise GenerationError(f"Failed to generate result for item {i}")
         if not result.outputs:
-            raise ValueError(f"No output generated for item {i}")
+            raise GenerationError(f"No output generated for item {i}")
         output = result.outputs[0]
         if output.finish_reason == "error":
-            raise ValueError(f"Generation error for item {i}")
+            raise GenerationError(f"Generation error for item {i}")
         if not output.logprobs:
-            raise ValueError(
+            raise GenerationError(
                 f"No logprobs available for item {i}. "
                 "This might indicate an issue with logprobs configuration."
             )
@@ -68,7 +69,7 @@ async def next_token_label_reads(
         label_ids = params.logprob_token_ids or []
         missing = [t for t in label_ids if t not in logprobs]
         if missing:
-            raise ValueError(
+            raise GenerationError(
                 f"Token IDs {missing} not found in logprobs for item {i}. "
                 "This might indicate the tokens are outside the model's vocabulary."
             )

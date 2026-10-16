@@ -18,11 +18,12 @@ from vllm.entrypoints.launchers.launcher import (
 from vllm.v1.engine.exceptions import EngineDeadError
 
 
-def make_engine(*, errored: bool, running: bool, error=None):
+def make_engine(*, errored: bool, running: bool, error=None, keep_alive=False):
     return SimpleNamespace(
         errored=errored,
         is_running=running,
         dead_error=error,
+        should_keep_api_server_alive=keep_alive,
         vllm_config=SimpleNamespace(shutdown_timeout=0),
         shutdown=MagicMock(),
     )
@@ -112,6 +113,22 @@ def test_terminate_if_errored_falls_back_when_dead_error_is_none():
     assert server.should_exit is True
     assert isinstance(server.fatal_engine_error, RuntimeError)
     assert "without a recorded error" in str(server.fatal_engine_error)
+
+
+def test_retired_engine_keeps_api_server_alive():
+    server = make_server()
+    engine = make_engine(
+        errored=True, running=False, error=EngineDeadError(), keep_alive=True
+    )
+
+    with patch(
+        "vllm.entrypoints.launchers.launcher.envs.VLLM_KEEP_ALIVE_ON_ENGINE_DEATH",
+        False,
+    ):
+        terminate_if_errored(server, engine)
+
+    assert server.should_exit is False
+    assert server.fatal_engine_error is None
 
 
 def test_fatal_engine_error_reads_latched_cause():
