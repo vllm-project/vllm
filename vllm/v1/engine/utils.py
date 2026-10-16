@@ -259,7 +259,7 @@ class CoreEngineProcManager:
         self._mp_elastic_ep = (
             parallel_config.enable_elastic_ep
             and parallel_config.data_parallel_backend == "mp"
-            and (current_platform.is_xpu() or current_platform.is_cuda())
+            and current_platform.is_cuda()
         )
         if self._mp_elastic_ep and (
             local_engine_count != parallel_config.data_parallel_size or start_index != 0

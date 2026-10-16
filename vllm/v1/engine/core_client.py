@@ -1954,8 +1954,8 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         assert parallel_config.data_parallel_backend == "ray" or (
             parallel_config.data_parallel_backend == "mp"
             and parallel_config.enable_elastic_ep
-            and (current_platform.is_xpu() or current_platform.is_cuda())
-        ), "Only ray and XPU/CUDA mp DP backends support scaling elastic EP"
+            and current_platform.is_cuda()
+        ), "Only ray and CUDA mp DP backends support scaling elastic EP"
         if new_data_parallel_size > parallel_config.elastic_ep_max_dp_size:
             raise ValueError(
                 f"Cannot scale to data_parallel_size {new_data_parallel_size}; "

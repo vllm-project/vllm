@@ -1732,18 +1732,6 @@ class VllmConfig:
                 "precision for chunked prefill triton kernels."
             )
 
-        if (
-            self.model_config is not None
-            and current_platform.is_xpu()
-            and self.parallel_config.enable_elastic_ep
-            and self.parallel_config.data_parallel_backend == "mp"
-        ):
-            self.model_config.enforce_eager = True
-            logger.warning_once(
-                "XPU MP Elastic EP currently requires eager execution; "
-                "disabling torch.compile and XPU graphs."
-            )
-
         if self.model_config is not None and self.model_config.enforce_eager:
             self.compilation_config.mode = CompilationMode.NONE
             self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE

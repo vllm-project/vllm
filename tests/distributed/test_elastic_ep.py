@@ -247,8 +247,6 @@ def _base_serve_args(
         "/is_scaling_elastic_ep",
     ]
 
-    if current_platform.is_xpu() and dp_backend == "mp":
-        args.extend(["--quantization", "fp8"])
     leader_address = os.environ.get("LEADER_ADDRESS")
     if leader_address and dp_backend == "ray":
         args.extend(["--data-parallel-address", leader_address])
@@ -370,12 +368,8 @@ def _smoke_mp_ranks(server: RemoteOpenAIServer, dp_size: int) -> None:
 )
 @multi_gpu_test(num_gpus=4)
 def test_elastic_ep_mp_scaling(enforce_eager: bool, traffic_mode: str) -> None:
-    if not (current_platform.is_cuda() or current_platform.is_xpu()):
-        pytest.skip("Single-node MP Elastic EP integration requires CUDA or XPU")
-    if current_platform.is_xpu() and not enforce_eager:
-        pytest.skip(
-            "XPU MP Elastic EP uses eager execution until graph hangs are fixed"
-        )
+    if not current_platform.is_cuda():
+        pytest.skip("Single-node MP Elastic EP integration requires CUDA")
 
     args = _base_serve_args(
         enforce_eager=enforce_eager,
@@ -414,8 +408,8 @@ def test_elastic_ep_mp_scaling(enforce_eager: bool, traffic_mode: str) -> None:
 
 @multi_gpu_test(num_gpus=4)
 def test_elastic_ep_mp_scaled_vs_cold() -> None:
-    if not (current_platform.is_cuda() or current_platform.is_xpu()):
-        pytest.skip("Single-node MP Elastic EP integration requires CUDA or XPU")
+    if not current_platform.is_cuda():
+        pytest.skip("Single-node MP Elastic EP integration requires CUDA")
 
     args = _base_serve_args(enforce_eager=True, dp_backend="mp")
     with RemoteOpenAIServer(MP_MODEL_NAME, args, max_wait_seconds=2400) as server:
