@@ -285,7 +285,7 @@ def _gqa_sparse_decode_kernel(
     USE_FP8: tl.constexpr,  # fp8 KV cache: dequantize K/V to q.dtype on load
     KV_SCALE_MODE: tl.constexpr,  # 0: none, 1: scalar, 2: [kv_head, token]
     USE_PDL: tl.constexpr,
-    FP16_DOT: tl.constexpr,
+    USE_FP16_DOT: tl.constexpr,
 ):
     sm_scale_log2e = sm_scale * 1.4426950409
     # split-K over the topk dimension: pid(0) folds (query-token, chunk).
@@ -333,7 +333,7 @@ def _gqa_sparse_decode_kernel(
         mask=hd_mask,
         other=0.0,
     )
-    if FP16_DOT:
+    if USE_FP16_DOT:
         q = tl.clamp(q.to(tl.float32), -65504.0, 65504.0).to(tl.float16)
 
     cur_idx_ptr = idx_base + chunk_start_topk * stride_tk
@@ -362,7 +362,7 @@ def _gqa_sparse_decode_kernel(
             k = k.to(q.dtype)
             if KV_SCALE_MODE == 1:
                 k = (k * tl.load(k_scale_ptr)).to(q.dtype)
-                if FP16_DOT:
+                if USE_FP16_DOT:
                     k = tl.clamp(k, -65504.0, 65504.0).to(q.dtype)
             elif KV_SCALE_MODE == 2:
                 k_scale = tl.load(
@@ -395,7 +395,7 @@ def _gqa_sparse_decode_kernel(
             v = v.to(q.dtype)
             if KV_SCALE_MODE == 1:
                 v = (v * tl.load(v_scale_ptr)).to(q.dtype)
-                if FP16_DOT:
+                if USE_FP16_DOT:
                     v = tl.clamp(v, -65504.0, 65504.0).to(q.dtype)
             elif KV_SCALE_MODE == 2:
                 v_scale = tl.load(
@@ -744,7 +744,7 @@ def minimax_m3_sparse_attn_decode(
         USE_FP8=use_fp8,
         KV_SCALE_MODE=kv_scale_mode,
         USE_PDL=use_pdl,
-        FP16_DOT=fp16_dot,
+        USE_FP16_DOT=fp16_dot,
         **pdl_launch,
     )
     merge_grid = (total_q, num_heads)
