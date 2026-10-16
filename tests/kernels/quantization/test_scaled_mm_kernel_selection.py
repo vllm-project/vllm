@@ -144,6 +144,36 @@ def test_aiter_kernel_implements_is_supported():
     # This validates the method works correctly even on non-ROCm platforms
 
 
+@pytest.mark.parametrize(
+    ("is_static_input_scheme", "is_channelwise", "is_fused_module", "expected"),
+    [
+        # per-tensor activations x per-tensor weights
+        (True, False, False, False),
+        # per-tensor activations x per-channel weights
+        (True, False, True, False),
+        (True, True, False, False),
+        (True, True, True, False),
+        # per-token activations x per-tensor weights
+        (False, False, False, False),
+        # per-token activations x per-channel weights
+        (False, False, True, True),
+        (False, True, False, True),
+        (False, True, True, True),
+    ],
+)
+def test_aiter_int8_kernel_can_implement_scale_layouts(
+    is_static_input_scheme, is_channelwise, is_fused_module, expected
+):
+    config = Int8ScaledMMLinearLayerConfig(
+        is_static_input_scheme=is_static_input_scheme,
+        is_channelwise=is_channelwise,
+        input_symmetric=True,
+        is_fused_module=is_fused_module,
+    )
+    can_impl, _ = AiterInt8ScaledMMLinearKernel.can_implement(config)
+    assert can_impl is expected
+
+
 def test_cpu_kernel_accepts_all_configs():
     """Test that CPUInt8ScaledMMLinearKernel accepts all config combinations."""
     configs = [
