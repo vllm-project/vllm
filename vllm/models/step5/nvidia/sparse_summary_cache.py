@@ -32,7 +32,7 @@ class Step5SparseSummaryCache:
         self.mean = mean
 
     def update_decode(self, key, z, slots, positions, ring: Step5CSATailRing):
-        from .ops.summary_update import update_decode
+        from vllm.models.step5.common.ops.summary_update import update_decode
 
         n = slots.shape[0]
         update_decode(
@@ -49,7 +49,7 @@ class Step5SparseSummaryCache:
     def update_verify(
         self, key, z, slots, query_start_loc, seq_lens, ring: Step5CSATailRing
     ):
-        from .ops.summary_update import update_verify
+        from vllm.models.step5.common.ops.summary_update import update_verify
 
         update_verify(
             key,
@@ -64,7 +64,7 @@ class Step5SparseSummaryCache:
         )
 
     def update_prefill(self, key, z, metadata, positions, ring: Step5CSATailRing):
-        from .ops.summary_update import update_prefill
+        from vllm.models.step5.common.ops.summary_update import update_prefill
 
         n = metadata.shape[0]
         ring_metadata = ring.metadata()

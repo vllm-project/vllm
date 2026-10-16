@@ -11,6 +11,8 @@ import torch
 
 from vllm.config import get_current_vllm_config_or_none
 from vllm.config.cache import CacheDType
+from vllm.models.step5.common.ops.attention_gate import headwise_sigmoid_gate
+from vllm.models.step5.common.ops.summary_update import build_prefill_groups
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.v1.attention.backend import AttentionCGSupport, AttentionType, MultipleOf
@@ -22,14 +24,12 @@ from vllm.v1.attention.backends.flash_attn import (
 from vllm.v1.kv_cache_interface import AttentionSpec, is_quantized_kv_cache
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
-from .ops.attention_gate import headwise_sigmoid_gate
 from .ops.sparse_prefill import make_prefill_chunks
 from .ops.sparse_prefill_pages import (
     kv_page_stride,
     plan_staged_prefill_pages,
     stage_prefill_pages,
 )
-from .ops.summary_update import build_prefill_groups
 
 # Transient dense BF16 copy of a prefill batch's live pages for one KV group.
 _PREFILL_STAGING_BYTES = 512 << 20
@@ -111,7 +111,10 @@ class Step5SplitKVFlashAttentionImpl(FlashAttentionImpl):
         requests = attn_metadata.seq_lens.shape[0]
         query_len = attn_metadata.max_query_len
         # Uniform decode and MTP verify: GQA-packed split-window kernel.
-        from .ops.swa_decode import swa_decode_gated, swa_decode_plan
+        from vllm.models.step5.common.ops.swa_decode import (
+            swa_decode_gated,
+            swa_decode_plan,
+        )
 
         window = self.sliding_window[0] + 1
         pack, splits = swa_decode_plan(
