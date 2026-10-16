@@ -1833,6 +1833,35 @@ def test_aiter_indexer_requires_the_aiter_attend(monkeypatch):
     assert reason is None or "AITER sparse PA attend" not in reason
 
 
+def test_aiter_indexer_rejects_unbuilt_index_heads(monkeypatch):
+    """AITER builds the MSA score kernels for 1 or 2 index heads only.
+
+    MiniMax-M3 has 4, so at attention TP=1 the indexer has to fall back at load
+    time rather than fail at the first forward.
+    """
+    import vllm.models.minimax_m3.amd.indexer_aiter as indexer_aiter_mod
+
+    monkeypatch.setattr(indexer_aiter_mod.current_platform, "is_rocm", lambda: True)
+    monkeypatch.setattr(
+        indexer_aiter_mod, "_minimax_m3_aiter_sparse_pa_requested", lambda: True
+    )
+
+    def unsupported_reason(num_index_heads: int) -> str | None:
+        return indexer_aiter_mod.aiter_indexer_unsupported_reason(
+            topk_blocks=TOPK,
+            sparse_block_size=BLOCK_SIZE,
+            num_index_heads=num_index_heads,
+            index_head_dim=HEAD_DIM,
+            indexer_kv_dtype="fp8",
+            max_model_len=8192,
+        )
+
+    if reason := unsupported_reason(2):
+        pytest.skip(f"AITER MSA indexer unavailable: {reason}")
+    reason = unsupported_reason(4)
+    assert reason is not None and "num_index_heads" in reason
+
+
 def test_aiter_consolidated_qknorm_enabled(monkeypatch):
     from vllm._aiter_ops import rocm_aiter_ops
 
@@ -2610,6 +2639,103 @@ def test_decode_sparse_attention_correctness(
     error = (actual[:active_tokens].float() - expected.float()).abs()
     assert error.mean().item() < 2.5e-4
     assert error.max().item() < 1.7e-2
+
+
+@pytest.mark.parametrize("kv_layout", ["NHD", "HND"], indirect=True)
+@pytest.mark.parametrize("capture_graph", [False, True])
+@pytest.mark.parametrize("num_reqs", [2, 17], ids=["split-k", "single-chunk"])
+@pytest.mark.parametrize(
+    "invalid_block", [-1, 1_000_000], ids=["sentinel", "out-of-range"]
+)
+def test_decode_sparse_attention_ignores_invalid_topk(
+    kv_layout: KVCacheLayout, capture_graph: bool, num_reqs: int, invalid_block: int
+):
+    """Unused top-k entries must not be dereferenced as block-table indices."""
+    torch.manual_seed(0)
+    decode_query_len = 4
+    seq_lens = torch.full(
+        (num_reqs,), decode_query_len, device="cuda", dtype=torch.int32
+    )
+    seq_lens[1] = 4096
+    q = torch.randn(
+        seq_lens.numel() * decode_query_len,
+        NUM_Q_HEADS,
+        HEAD_DIM,
+        device="cuda",
+        dtype=DTYPE,
+    )
+    kv_cache = _allocate_main_kv_via_contract(1, kv_layout)
+
+    # All logical blocks alias the single valid page. With a contiguous multi-row
+    # table, row 1's raw pointer offset -1 resolves to the final element of row
+    # 0. Poison that exact location so an unsafe load deterministically forms an
+    # out-of-range KV-cache pointer.
+    clean_block_table = torch.zeros(num_reqs, 32, device="cuda", dtype=torch.int32)
+    block_table = clean_block_table.clone()
+    block_table[0, -1] = 1_000_000
+    topk_idx = torch.full(
+        (NUM_KV_HEADS, q.shape[0], TOPK),
+        -1,
+        device="cuda",
+        dtype=torch.int32,
+    )
+    topk_idx[..., 0] = 0
+    # Request 1 has invalid entries both before and after its valid block.
+    # Two requests produce empty split-K chunks; 17 put the full top-k in one
+    # chunk, exercising neutral updates before and after a nonempty softmax.
+    request_topk = topk_idx[:, decode_query_len : 2 * decode_query_len]
+    request_topk.fill_(invalid_block)
+    request_topk[..., TOPK // 2] = 0
+
+    # A valid-only run isolates sentinel handling from BF16-vs-FP32 rounding.
+    # Include block 0 exactly once; replacing sentinels with 0 would duplicate
+    # its contribution. The general correctness test covers reference accuracy.
+    valid_topk = torch.zeros(
+        (NUM_KV_HEADS, q.shape[0], 1), device="cuda", dtype=torch.int32
+    )
+    expected = torch.empty_like(q)
+    minimax_m3_sparse_attn_decode(
+        q,
+        kv_cache,
+        valid_topk,
+        clean_block_table,
+        seq_lens,
+        NUM_KV_HEADS,
+        SM_SCALE,
+        expected,
+        decode_query_len,
+    )
+    actual = torch.empty_like(q)
+
+    def run_decode() -> None:
+        minimax_m3_sparse_attn_decode(
+            q,
+            kv_cache,
+            topk_idx,
+            block_table,
+            seq_lens,
+            NUM_KV_HEADS,
+            SM_SCALE,
+            actual,
+            decode_query_len,
+        )
+
+    if capture_graph:
+        # An unfixed kernel faults during capture and leaves the CUDA context
+        # unusable. Run negative-control reproductions in a dedicated process.
+        run_decode()
+        current_platform.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            run_decode()
+        for _ in range(3):
+            graph.replay()
+    else:
+        run_decode()
+    current_platform.synchronize()
+
+    assert torch.isfinite(actual).all()
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
 def test_decode_wrong_layout_breaks_parity():
