@@ -168,7 +168,8 @@ class CPUOffloadingSpec(OffloadingSpec):
             )
         return self._manager
 
-    def _uses_shared_region(self) -> bool:
+    @classmethod
+    def _uses_shared_region(cls) -> bool:
         """Whether the worker CPU buffer is the shared mmap region (vs a private
         per-rank tensor); replicated-layout dedup is gated on this being True."""
         return (

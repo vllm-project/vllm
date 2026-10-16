@@ -509,8 +509,9 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             tiers.append((tier_config, tier_cls))
         return tiers
 
+    @classmethod
     @override
-    def _uses_shared_region(self) -> bool:
+    def _uses_shared_region(cls) -> bool:
         # Tiering always allocates on the shared region (every platform), so the
         # replicated-layout gate must not be narrowed by the CPU spec's
         # CUDA-alike check.

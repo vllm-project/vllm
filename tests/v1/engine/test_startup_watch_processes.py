@@ -125,6 +125,7 @@ def test_engine_core_startup_threads_are_scoped_to_launch(
             local_start_index=0,
             vllm_config=SimpleNamespace(
                 shutdown_timeout=0,
+                kv_transfer_config=None,
                 parallel_config=SimpleNamespace(
                     data_parallel_size=local_engine_count,
                     assigned_physical_gpu_ids=None,

@@ -6,19 +6,25 @@ import errno
 import functools
 import mmap
 import os
+import shutil
 import time
 from collections.abc import Callable, Iterator
 from ctypes import c_int, c_long, c_size_t, c_void_p
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
 
 from vllm.distributed.device_communicators.shm_broadcast import (
+    SHM_PATH,
     check_shm_free_space,
 )
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.v1.kv_offload.cpu.host_register import host_unregister
+
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
 
 logger = init_logger(__name__)
 
@@ -45,6 +51,47 @@ def _wait_for_file_size(fd: int, expected_size: int, timeout: float = 30.0) -> N
                 f"Timed out waiting for mmap file to reach {expected_size} bytes"
             )
         time.sleep(0.005)
+
+
+def check_local_engines_offload_shm(
+    vllm_config: "VllmConfig", local_engine_count: int
+) -> None:
+    """Refuse CPU offload sizes that the engines about to start on this host
+    cannot hold in /dev/shm together.
+
+    Each engine checks free space only for its own region, and ftruncate
+    reserves nothing, so the combined size is compared with /dev/shm's total
+    size where the engines are launched. Specs that keep their CPU buffer out
+    of /dev/shm are skipped.
+    """
+    if local_engine_count < 2 or not os.path.isdir(SHM_PATH):
+        return
+    ktc = vllm_config.kv_transfer_config
+    if ktc is None or ktc.kv_connector != "OffloadingConnector":
+        return
+    extra_config = ktc.kv_connector_extra_config
+    cpu_bytes = int(extra_config.get("cpu_bytes_to_use") or 0)
+    if not cpu_bytes:
+        return
+
+    from vllm.v1.kv_offload.factory import OffloadingSpecFactory
+
+    spec_cls = OffloadingSpecFactory.get_spec_cls(extra_config)
+    uses_shared_region = getattr(spec_cls, "_uses_shared_region", None)
+    if uses_shared_region is None or not uses_shared_region():
+        return
+
+    total = shutil.disk_usage(SHM_PATH).total
+    needed = cpu_bytes * local_engine_count
+    if needed > total:
+        gib = 1 << 30
+        raise ValueError(
+            f"{SHM_PATH} cannot hold the CPU KV offload buffers: "
+            f"{local_engine_count} data-parallel engines on this host each need "
+            f"{cpu_bytes / gib:.1f} GiB ({needed / gib:.1f} GiB in total), but "
+            f"{SHM_PATH} is {total / gib:.1f} GiB. Lower --kv-offloading-size or "
+            f"enlarge {SHM_PATH} (e.g. --shm-size for containers)."
+        )
 
 
 @functools.cache
@@ -116,6 +163,8 @@ class SharedOffloadRegion:
         creator_memory_check: Callable[[int], None] | None = None,
         populate_shard: tuple[int, int] | None = None,
         num_segments: int = 1,
+        shm_allocation_name: str = "CPU KV offload shared region",
+        shm_size_option: str = "--kv-offloading-size",
     ) -> None:
         self.page_size = mmap.PAGESIZE
         assert kv_bytes_per_chunk % self.page_size == 0
@@ -124,6 +173,8 @@ class SharedOffloadRegion:
         self._row_stride = kv_bytes_per_chunk
         self.total_size_bytes = self.num_chunks * self._row_stride
         self.cpu_page_size = cpu_page_size
+        self._shm_allocation_name = shm_allocation_name
+        self._shm_size_option = shm_size_option
 
         self.mmap_path = f"/dev/shm/vllm_offload_{engine_id}.mmap"
         num_segments = min(num_segments, self.total_size_bytes // _MIN_SEGMENT_BYTES)
@@ -166,7 +217,7 @@ class SharedOffloadRegion:
                     creator_memory_check(self.total_size_bytes)
                 check_shm_free_space(
                     self.total_size_bytes,
-                    allocation_name="CPU KV offload shared region in /dev/shm",
+                    allocation_name=f"{shm_allocation_name} in /dev/shm",
                 )
                 for path, _, length in self._segments[1:]:
                     fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
@@ -197,13 +248,14 @@ class SharedOffloadRegion:
                     self._creator = False
                     logger.info("Unlinked mmap file %s", self.mmap_path)
             if populate_shard is not None:
-                populate_write_fn = _get_populate_write_fn(self.mmap_obj)
-                index, count = populate_shard
-                share = round_up(cdiv(self.total_size_bytes, count), self.page_size)
-                start = min(index * share, self.total_size_bytes)
-                if start < self.total_size_bytes:
-                    length = min(share, self.total_size_bytes - start)
-                    populate_write_fn(self.mmap_obj, start, length)
+                with self._shm_exhaustion_as_error():
+                    populate_write_fn = _get_populate_write_fn(self.mmap_obj)
+                    index, count = populate_shard
+                    share = round_up(cdiv(self.total_size_bytes, count), self.page_size)
+                    start = min(index * share, self.total_size_bytes)
+                    if start < self.total_size_bytes:
+                        length = min(share, self.total_size_bytes - start)
+                        populate_write_fn(self.mmap_obj, start, length)
                 if barrier is not None:
                     barriers_remaining -= 1
                     barrier()
@@ -240,25 +292,55 @@ class SharedOffloadRegion:
 
         if populate_shard is not None:
             return
-        populate_write_fn = _get_populate_write_fn(self.mmap_obj)
+        with self._shm_exhaustion_as_error():
+            self._populate()
 
-        if rank is not None:
+    def _populate(self) -> None:
+        mmap_obj = self.mmap_obj
+        assert mmap_obj is not None
+        populate_write_fn = _get_populate_write_fn(mmap_obj)
+
+        if self.rank is not None:
             # Populate only this worker's pages (one slot per chunk row).
             _t0 = time.perf_counter()
             for offset, length in self.iter_worker_slot_ranges():
-                populate_write_fn(self.mmap_obj, offset, length)
+                populate_write_fn(mmap_obj, offset, length)
             logger.debug(
                 "MADV_POPULATE_WRITE loop: %d chunks in %.3f s",
-                num_chunks,
+                self.num_chunks,
                 time.perf_counter() - _t0,
             )
         else:
             # No rank — populate the entire shared region in one call.
             _t0 = time.perf_counter()
-            populate_write_fn(self.mmap_obj, 0, self.total_size_bytes)
+            populate_write_fn(mmap_obj, 0, self.total_size_bytes)
             logger.debug(
                 "MADV_POPULATE_WRITE entire region: %.3f s", time.perf_counter() - _t0
             )
+
+    @contextlib.contextmanager
+    def _shm_exhaustion_as_error(self) -> Iterator[None]:
+        """MADV_POPULATE_WRITE reports a full tmpfs as EFAULT ("Bad address"),
+        which says nothing about /dev/shm."""
+        try:
+            yield
+        except OSError as e:
+            if e.errno != errno.EFAULT:
+                raise
+            gib = 1 << 30
+            where = ""
+            if os.path.isdir(SHM_PATH):
+                usage = shutil.disk_usage(SHM_PATH)
+                where = f"; {SHM_PATH} has {usage.free / gib:.1f} GiB free"
+                where += f" of {usage.total / gib:.1f} GiB"
+            raise RuntimeError(
+                f"Ran out of {SHM_PATH} while pre-faulting the "
+                f"{self._shm_allocation_name} "
+                f"({self.total_size_bytes / gib:.1f} GiB{where}). {SHM_PATH} is "
+                f"shared by every process on this host, including other "
+                f"data-parallel engines. Lower {self._shm_size_option} or "
+                f"enlarge {SHM_PATH}."
+            ) from e
 
     def _map_segments(self) -> None:
         """Replace the anonymous mapping with the segment files, back to back."""
