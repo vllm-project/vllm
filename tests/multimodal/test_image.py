@@ -69,6 +69,19 @@ def test_palette_with_trns_to_rgb():
     assert (r, g, b) == (255, 0, 0)
 
 
+@pytest.mark.parametrize("background_color", [(255, 255, 255), (12, 34, 56)])
+def test_rgb_with_trns_to_rgb(background_color):
+    image = Image.new("RGB", (2, 1), (255, 0, 0))
+    image.putpixel((1, 0), (0, 0, 255))
+    image.info["transparency"] = (255, 0, 0)
+
+    converted = convert_image_mode(image, "RGB", background_color)
+
+    assert converted.mode == "RGB"
+    assert converted.getpixel((0, 0)) == background_color
+    assert converted.getpixel((1, 0)) == (0, 0, 255)
+
+
 def test_l_mode_no_trns_to_rgb():
     """L-mode without transparency should convert directly."""
     img = Image.new("L", (4, 4), 128)
