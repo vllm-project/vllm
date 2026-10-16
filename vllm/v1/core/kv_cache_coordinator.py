@@ -66,9 +66,12 @@ def replay_suffix_tokens(kv_cache_groups) -> int:
     """Prompt tokens a resend of the same prompt always recomputes."""
     return max(
         1,
-        *(
-            getattr(group.kv_cache_spec, "prefix_cache_recompute_tokens", 0)
-            for group in kv_cache_groups
+        max(
+            (
+                getattr(group.kv_cache_spec, "prefix_cache_recompute_tokens", 0)
+                for group in kv_cache_groups
+            ),
+            default=0,
         ),
     )
 

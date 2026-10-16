@@ -192,9 +192,11 @@ class Step5FlashInferSparse:
                 ),
                 kv_fused=packed,
                 weights=torch.zeros((2, paired_heads), device=device),
-                context_lens=lengths,
-                block_table=torch.arange(pages, dtype=torch.int32, device=device)[None],
-                max_context_len=regions,
+                seq_lens=lengths,
+                block_tables=torch.arange(pages, dtype=torch.int32, device=device)[
+                    None
+                ],
+                max_seq_len=regions,
                 schedule_meta=compute_paged_mqa_logits_schedule(lengths),
             )
 
@@ -349,9 +351,9 @@ class Step5FlashInferSparse:
                 q=q[:, :paired_heads].unflatten(0, (-1, 2)),
                 kv_fused=packed,
                 weights=w[:, :paired_heads],
-                context_lens=pair_lengths,
-                block_table=pair_table,
-                max_context_len=regions,
+                seq_lens=pair_lengths,
+                block_tables=pair_table,
+                max_seq_len=regions,
                 schedule_meta=pair_schedule,
             )
         if q.dtype != torch.float8_e4m3fn:
@@ -371,9 +373,9 @@ class Step5FlashInferSparse:
             q=q,
             kv_fused=packed,
             weights=w.contiguous(),
-            context_lens=lengths.int().contiguous(),
-            block_table=block_table,
-            max_context_len=regions,
+            seq_lens=lengths.int().contiguous(),
+            block_tables=block_table,
+            max_seq_len=regions,
             schedule_meta=schedule_meta,
         )
 

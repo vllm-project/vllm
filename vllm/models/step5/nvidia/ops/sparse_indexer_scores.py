@@ -275,9 +275,9 @@ def paged_mqa_logits_sm90(
     q: torch.Tensor,
     kv_fused: torch.Tensor,
     weights: torch.Tensor,
-    context_lens: torch.Tensor,
-    block_table: torch.Tensor,
-    max_context_len: int,
+    block_tables: torch.Tensor,
+    seq_lens: torch.Tensor,
+    max_seq_len: int,
     *,
     schedule_meta: torch.Tensor | None = None,
 ) -> torch.Tensor:
@@ -293,22 +293,22 @@ def paged_mqa_logits_sm90(
     assert kv_fused.shape[2:] == (1, 260)
     assert weights.shape == (batch * next_n, heads)
     output = torch.empty(
-        (batch * next_n, max_context_len), dtype=torch.float32, device=q.device
+        (batch * next_n, max_seq_len), dtype=torch.float32, device=q.device
     )
-    if batch and max_context_len:
-        _paged_scores_sm90[(batch * next_n, triton.cdiv(max_context_len, 32))](
+    if batch and max_seq_len:
+        _paged_scores_sm90[(batch * next_n, triton.cdiv(max_seq_len, 32))](
             q,
             kv_fused,
             weights,
-            context_lens,
-            block_table,
+            seq_lens,
+            block_tables,
             output,
             *q.stride()[:3],
             *weights.stride(),
             kv_fused.stride(0),
-            *block_table.stride(),
-            context_lens.stride(0),
-            max_context_len,
+            *block_tables.stride(),
+            seq_lens.stride(0),
+            max_seq_len,
             next_n,
             heads,
             kv_fused.shape[1],

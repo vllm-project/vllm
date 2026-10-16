@@ -80,7 +80,6 @@ class Step5SplitKVFlashAttentionImpl(FlashAttentionImpl):
         if (
             attn_metadata is None
             or not attn_metadata.num_actual_tokens
-            or attn_metadata.use_cascade
             or self.dcp_world_size != 1
             or self.attn_type != AttentionType.DECODER
             or attn_metadata.causal is not True
@@ -255,9 +254,6 @@ class Step5DSAMetadataBuilder(FlashAttentionMetadataBuilder):
             ),
             positions,
         )
-
-    def use_cascade_attention(self, *args, **kwargs):
-        return False
 
 
 class Step5DSAAttentionImpl(Step5SplitKVFlashAttentionImpl):
