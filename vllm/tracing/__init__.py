@@ -8,6 +8,7 @@ from typing import Any, TypeAlias
 # Import the implementation details
 from .otel import (
     SpanKind,
+    StatusCode,
     extract_trace_context,
     init_otel_tracer,
     init_otel_worker_tracer,
@@ -16,6 +17,7 @@ from .otel import (
     manual_instrument_otel,
     otel_import_error_traceback,
 )
+from .otel import start_span_otel as start_span
 from .utils import (
     SpanAttributes,
     contains_trace_headers,
@@ -31,6 +33,8 @@ __all__ = [
     "is_tracing_available",
     "SpanAttributes",
     "SpanKind",
+    "StatusCode",
+    "start_span",
     "extract_trace_context",
     "extract_trace_headers",
     "log_tracing_disabled_warning",
