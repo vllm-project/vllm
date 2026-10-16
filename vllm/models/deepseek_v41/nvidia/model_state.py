@@ -229,9 +229,9 @@ class DeepseekV41ModelState(DefaultModelState):
             self._keeps_rows_np = np.zeros(self.max_num_reqs, dtype=np.bool_)
             self._dropped_before = UvaBufferPool(self.max_num_reqs + 1, torch.int32)
             # The replay batch's inputs: its rows of the batch, query offsets,
-            # positions, slot mappings (sized with the KV cache groups on first
-            # use) and the position from which each request holds replay-layer
-            # window KV.
+            # positions, MoE padding mask, slot mappings (sized with the KV cache
+            # groups on first use) and the position from which each request holds
+            # replay-layer window KV.
             self._kept_rows = torch.zeros(
                 self.max_num_tokens, dtype=torch.int64, device=device
             )
@@ -240,6 +240,9 @@ class DeepseekV41ModelState(DefaultModelState):
             )
             self._kept_positions = torch.zeros(
                 self.max_num_tokens, dtype=torch.int64, device=device
+            )
+            self._kept_is_padding = torch.ones(
+                self.max_num_tokens, dtype=torch.bool, device=device
             )
             self._kept_slot_mappings: torch.Tensor | None = None
             self._kept_kv_start = torch.zeros(
@@ -546,12 +549,19 @@ class DeepseekV41ModelState(DefaultModelState):
             kv_cache_config,
             model_specific_attn_metadata=ReplayAttnMetadata(replay_start),
         )[first_swa]
+        # Dummy batches and graph-padding rows are padding, as in the outer batch.
+        # Filled in place: replay graphs read the buffer they were captured with.
+        num_real = 0 if is_dummy else num_tokens
+        is_padding = self._kept_is_padding[:num_padded]
+        is_padding[:num_real].fill_(False)
+        is_padding[num_real:].fill_(True)
         layers.replay_batch = ReplayBatch(
             self._kept_rows[:num_tokens],
             create_forward_context(
                 attn_metadata,
                 self.vllm_config,
                 dp_metadata=dp_metadata,
+                is_padding=is_padding,
                 cudagraph_runtime_mode=cg_mode,
                 batch_descriptor=BatchDescriptor(num_tokens=num_padded),
                 slot_mapping=build_slot_mappings_by_layer(

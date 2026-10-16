@@ -6,6 +6,7 @@ from collections.abc import Callable
 import torch
 
 from vllm.distributed.eplb.eplb_state import EplbLayerState
+from vllm.model_executor.layers.fused_moe.eplb_triton import eplb_map_and_record
 from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
     FusedMoERouter,
 )
@@ -29,7 +30,6 @@ if current_platform.is_cuda_alike() or current_platform.is_xpu():
         out_size,
         numel,
         num_active_experts,
-        HAS_NUM_UNPADDED: tl.constexpr,
         BLOCK_SIZE: tl.constexpr,
     ):
         pid = tl.program_id(0)
@@ -37,31 +37,6 @@ if current_platform.is_cuda_alike() or current_platform.is_xpu():
         mask = offs < numel
 
         expert_id = tl.load(topk_ids_ptr + offs, mask=mask, other=0).to(tl.int64)
-        valid_expert = (expert_id >= 0) & (expert_id < num_logical_experts)
-        safe_expert_id = tl.where(valid_expert, expert_id, 0)
-
-        # 1. Convert the logical expert ids to physical expert ids
-        replica_count = tl.load(
-            logical_replica_count_ptr + safe_expert_id,
-            mask=mask & valid_expert,
-            other=1,
-        )
-        # Avoid invalid modulo/div by forcing at least 1.
-        replica_count = tl.maximum(replica_count, 1)
-        # floor(2^32 / phi), classic Knuth multiplicative hash multiplier.
-        KNUTH_MULTIPLIER = 2654435769
-        token_idx = (offs // num_active_experts).to(tl.int64)
-        hashed = (token_idx * KNUTH_MULTIPLIER) & 0xFFFFFFFF
-        replica_idx = hashed % replica_count
-        map_index = safe_expert_id * map_slots + replica_idx
-        physical_id = tl.load(
-            logical_to_physical_ptr + map_index,
-            mask=mask & valid_expert,
-            other=-1,
-        )
-        tl.store(out_ids_ptr + offs, physical_id, mask=mask)
-
-        # 2. Record expert load metrics.
 
         # TODO(bowen): When using `FusedMoEModularKernel`, this
         # can be done in a more unified way, since
@@ -74,23 +49,20 @@ if current_platform.is_cuda_alike() or current_platform.is_xpu():
         # If later refactor moved all the MoE kernel calls
         # to the modular kernel, we can move this logic there
         # to achieve better efficiency.
-
-        record_enabled = tl.load(record_enabled_ptr) != 0
-        # Skip padded tokens when recording.
-        if HAS_NUM_UNPADDED:
-            num_unpadded_tokens = tl.load(num_unpadded_tokens_ptr)
-            is_unpadded = offs < num_unpadded_tokens * num_active_experts
-        else:
-            is_unpadded = True
-        valid = (
-            mask
-            & record_enabled
-            & is_unpadded
-            & (physical_id >= 0)
-            & (physical_id < out_size)
+        physical_id = eplb_map_and_record(
+            expert_id,
+            offs // num_active_experts,
+            mask,
+            logical_to_physical_ptr,
+            logical_replica_count_ptr,
+            num_logical_experts,
+            map_slots,
+            out_ptr,
+            out_size,
+            record_enabled_ptr,
+            num_unpadded_tokens_ptr,
         )
-        safe_physical_id = tl.where(physical_id >= 0, physical_id, 0)
-        tl.atomic_add(out_ptr + safe_physical_id, 1, mask=valid)
+        tl.store(out_ids_ptr + offs, physical_id, mask=mask)
 
     def _eplb_map_and_record_triton(
         topk_ids: torch.Tensor,
@@ -121,7 +93,6 @@ if current_platform.is_cuda_alike() or current_platform.is_xpu():
             expert_load_view.shape[0],
             numel,
             num_active_experts,
-            HAS_NUM_UNPADDED=num_unpadded_tokens is not None,
             BLOCK_SIZE=256,
         )
         return out_flat.reshape(topk_ids.shape)

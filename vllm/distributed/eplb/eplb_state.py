@@ -31,7 +31,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 import torch
-from torch.distributed import ProcessGroup, all_reduce
+from torch.distributed import ProcessGroup, ReduceOp, all_reduce
 
 from vllm.config import ModelConfig, ParallelConfig
 from vllm.config.utils import compute_hash_cached
@@ -288,6 +288,10 @@ class EplbState:
         """
         Background thread handling async transfers.
         """
+        self.async_worker_error: Exception | None = None
+        """
+        Exception that stopped the async worker thread, if any.
+        """
         self.device_index: int | None = None
         """
         Device index for the async EPLB worker thread.
@@ -400,7 +404,12 @@ class EplbState:
             f"num_redundant_experts {model.num_redundant_experts} "
             f"must be less than or equal to {MAX_EXPERT_REDUNDANCY}"
         )
-        max_slots_per_logical_expert = MAX_EXPERT_REDUNDANCY + 1
+        # Only elastic EP changes the physical expert count at runtime.
+        max_slots_per_logical_expert = (
+            MAX_EXPERT_REDUNDANCY + 1
+            if self.parallel_config.enable_elastic_ep
+            else model.num_redundant_experts + 1
+        )
         logical_to_physical_map = torch.full(
             (model.num_logical_experts, max_slots_per_logical_expert),
             -1,
@@ -489,17 +498,24 @@ class EplbState:
             logical_replica_count,
         )
         self._propagate_shared_tensors(model, num_unpadded_tokens_tensors)
-        expert_buffer = [torch.empty_like(w) for w in model.expert_weights[0]]
 
-        assert self.parallel_config.eplb_config.communicator is not None, (
+        backend = self.parallel_config.eplb_config.communicator
+        assert backend is not None, (
             "EPLB communicator backend must be set by ParallelConfig"
+        )
+        expert_buffer = (
+            None
+            if backend == "symm_mem"
+            else [torch.empty_like(w) for w in model.expert_weights[0]]
         )
         communicator = create_eplb_communicator(
             group_coordinator=get_eplb_group(),
-            backend=self.parallel_config.eplb_config.communicator,
+            backend=backend,
             expert_weights=model.expert_weights,
             expert_buffer=expert_buffer,
         )
+        expert_buffer = communicator.owned_expert_buffer or expert_buffer
+        assert expert_buffer is not None
 
         model_state = EplbModelState(
             physical_to_logical_map=physical_to_logical_map,
@@ -1030,25 +1046,20 @@ class EplbState:
                 )
 
     def _all_ranks_result_ready(self, model_state: EplbModelState) -> bool:
-        parallel_state = get_ep_group()
-        has_result = int(model_state.pending_result is not None)
-
-        cpu_group = getattr(parallel_state, "cpu_group", None)
-        if cpu_group is not None and cpu_group.size() > 1:
-            flag = torch.tensor((has_result,), dtype=torch.int32, device="cpu")
-            all_reduce(flag, group=cpu_group)
-            return int(flag.item()) == cpu_group.size()
-
-        device_group = parallel_state.device_group
-        if device_group.size() <= 1:
-            return bool(has_result)
-
-        device = getattr(
-            parallel_state, "device", model_state.physical_to_logical_map.device
+        # -1 failed, 0 pending, 1 ready: MIN lets a failure on any rank win.
+        status = (
+            -1
+            if self.async_worker_error is not None
+            else int(model_state.pending_result is not None)
         )
-        flag = torch.tensor((has_result,), dtype=torch.int32, device=device)
-        all_reduce(flag, group=device_group)
-        return int(flag.item()) == device_group.size()
+        flag = torch.tensor((status,), dtype=torch.int32, device="cpu")
+        all_reduce(flag, op=ReduceOp.MIN, group=get_ep_group().cpu_group)
+        status = int(flag.item())
+        if status < 0:
+            raise RuntimeError(
+                "Async EPLB worker failed on at least one rank; see the worker logs."
+            ) from self.async_worker_error
+        return status == 1
 
     def _allreduce_list(self, tensor_list: list[torch.Tensor]) -> list[torch.Tensor]:
         """All-reduce a list of tensors."""
@@ -1314,24 +1325,22 @@ def compute_logical_maps(
         device=device,
     )
 
-    running_count = torch.zeros_like(logical_replica_count)
-    layer_indices = torch.arange(num_layers, device=device)
-    for phys_idx in range(num_physical):
-        # Logical expert at physical slot phys_idx for each layer
-        logical_expert_ids = physical_to_logical_map_view[:, phys_idx]  # [num_layers]
-
-        # Scale up will set the logical expert ids to -1 for all new physical experts.
-        # Only consider "valid" experts when setting up the logical_to_physical map.
-        valid_expert_mask = logical_expert_ids >= 0
-        if not valid_expert_mask.any():
-            continue
-        valid_layers = layer_indices[valid_expert_mask]
-        valid_experts = logical_expert_ids[valid_expert_mask]
-
-        # Use the current running count as the replica index, then increment it.
-        replica_idx = running_count[valid_layers, valid_experts]
-        logical_to_physical_map_out[valid_layers, valid_experts, replica_idx] = phys_idx
-        running_count[valid_layers, valid_experts] += 1
+    # Stable sorting preserves physical-slot order within each logical expert.
+    logical_ids, physical_slots = torch.sort(
+        physical_to_logical_map_view, dim=1, stable=True
+    )
+    valid_layers, sorted_positions = (logical_ids >= 0).nonzero(as_tuple=True)
+    valid_experts = logical_ids[valid_layers, sorted_positions]
+    expert_offsets = logical_replica_count.cumsum(dim=1) - logical_replica_count
+    num_inactive = (~valid_mask).sum(dim=1)
+    replica_indices = (
+        sorted_positions
+        - num_inactive[valid_layers]
+        - expert_offsets[valid_layers, valid_experts]
+    )
+    logical_to_physical_map_out[valid_layers, valid_experts, replica_indices] = (
+        physical_slots[valid_layers, sorted_positions].to(dtype)
+    )
 
     # If computing maps for a single layer, squeeze out the extra layer dimension
     # before returning
@@ -1344,9 +1353,9 @@ def _pad_out_tensor(src: torch.Tensor, dst: torch.Tensor) -> None:
     src_padding = dst.shape[-1] - src.shape[-1]
     assert src_padding >= 0
     new_src = torch.nn.functional.pad(src, (0, src_padding), value=-1)
-    # The map is committed from the host once per layer per rearrangement.
-    with gpu_sync_allowed():
-        dst.copy_(new_src)
+    if PIN_MEMORY:
+        new_src = new_src.pin_memory()
+    dst.copy_(new_src, non_blocking=True)
 
 
 def _commit_eplb_maps_for_layer(

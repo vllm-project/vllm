@@ -156,7 +156,7 @@ Configure EPLB with the `--eplb-config` argument, which accepts a JSON string. T
 | `num_redundant_experts` | Additional global experts per EP rank beyond equal distribution | `0` |
 | `use_async` | Use non-blocking EPLB for reduced latency overhead | `true` |
 | `policy` | The policy type for expert parallel load balancing | `"default"` |
-| `communicator` | Backend for expert weight transfers: `"torch_nccl"`, `"torch_gloo"`, `"pynccl"`, `"nixl"`,  or `null` (auto) | `null` |
+| `communicator` | Backend for expert weight transfers: `"torch_nccl"`, `"torch_gloo"`, `"pynccl"`, `"nixl"`, `"symm_mem"`, or `null` (auto) | `null` |
 
 For example:
 
@@ -188,6 +188,8 @@ EPLB uses redundant experts that need to fit in GPU memory. This means that EPLB
 
 This overhead equals `NUM_MOE_LAYERS * BYTES_PER_EXPERT * (NUM_TOTAL_EXPERTS + NUM_REDUNDANT_EXPERTS) ÷ NUM_EP_RANKS`.
 For DeepSeekV3, this is approximately `2.4 GB` for one redundant expert per EP rank.
+
+The `symm_mem` communicator requires all EP ranks in one NVLink domain (MNNVL across nodes). It allocates its one-layer receive buffer in symmetric memory instead of regular memory, and senders write into it directly, so it uses no more memory than the other backends.
 
 ### Example Command
 
