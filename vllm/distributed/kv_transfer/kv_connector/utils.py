@@ -102,6 +102,7 @@ class KVOutputAggregator:
         finished_recving = set[str]()
         aggregated_kv_connector_stats = None
         aggregated_kv_connector_worker_meta = None
+        aggregated_kv_checksums = None
         combined_kv_cache_events = None
         invalid_block_ids = set[int]()
         for model_runner_output in outputs:
@@ -152,6 +153,14 @@ class KVOutputAggregator:
                     )
                 )
 
+            # Merge kv_checksums from all workers.
+            if aggregated_kv_checksums is None:
+                aggregated_kv_checksums = kv_output.kv_checksums
+            elif kv_checksums := kv_output.kv_checksums:
+                aggregated_kv_checksums = aggregated_kv_checksums.aggregate(
+                    kv_checksums
+                )
+
             # Combine kv_cache_events from all workers.
             if combined_kv_cache_events is None:
                 # Use the first worker's kv_cache events as start event list.
@@ -184,6 +193,7 @@ class KVOutputAggregator:
             invalid_block_ids=invalid_block_ids,
             failed_recving=failed_recving,
             expected_finished_count=self._expected_finished_count,
+            kv_checksums=aggregated_kv_checksums,
         )
 
         return output

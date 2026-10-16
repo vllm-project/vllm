@@ -18,6 +18,7 @@ from vllm.distributed.ec_transfer.ec_connector.base import (
 from vllm.distributed.ec_transfer.ec_connector.factory import ECConnectorFactory
 from vllm.distributed.ec_transfer.ec_connector.metrics import ECConnectorStats
 from vllm.distributed.kv_events import EventPublisherFactory, KVEventBatch
+from vllm.distributed.kv_transfer.kv_checksum.scheduler import KVChecksumScheduler
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1 import (
     KVConnectorBase_V1,
@@ -192,6 +193,9 @@ class Scheduler(SchedulerInterface):
                 self.defer_block_free = True
 
             self.requires_kv_delivery = self.connector.requires_kv_delivery
+        self.kv_checksum = KVChecksumScheduler.create(
+            self.vllm_config, self.kv_cache_config, self.connector
+        )
 
         self.kv_event_publisher = EventPublisherFactory.create(
             self.kv_events_config,
@@ -1396,6 +1400,12 @@ class Scheduler(SchedulerInterface):
                     # _update_waiting_for_remote_kv will then cache
                     # only the successfully loaded tokens.
                     request.num_computed_tokens = num_computed_tokens
+                    if self.kv_checksum is not None:
+                        self.kv_checksum.add_recv(
+                            request,
+                            self.kv_cache_manager.get_blocks(request_id),
+                            num_new_local_computed_tokens,
+                        )
                     self._inflight_prefills.add(request)
                     self._set_kv_fetch_stage(request, KV_FETCH_IN_PROGRESS)
                     skip_request(request_queue)
@@ -1706,6 +1716,16 @@ class Scheduler(SchedulerInterface):
             request = self.requests[req_id]
             request.num_computed_tokens += num_scheduled_token
             request.num_in_flight_tokens += num_scheduled_token
+            if (
+                self.kv_checksum is not None
+                and request.num_computed_tokens - num_scheduled_token
+                < request.num_prompt_tokens
+                <= request.num_computed_tokens
+            ):
+                # This step finishes the prompt's KV.
+                self.kv_checksum.add_send(
+                    request, self.kv_cache_manager.get_blocks(req_id)
+                )
             if self.defer_block_free:
                 # Record the in-flight step, to fence deferred block freeing.
                 request.last_sched_seq = self.sched_step_seq
@@ -1718,6 +1738,11 @@ class Scheduler(SchedulerInterface):
             # Drop from the in-flight-prefill set once it's no longer prefilling.
             if not request.is_prefill_chunk:
                 self._inflight_prefills.discard(request)
+
+        if self.kv_checksum is not None:
+            scheduler_output.kv_checksum_scheduled = (
+                self.kv_checksum.build_checksum_meta()
+            )
 
         # Clear the finished and preempted request IDs.
         # NOTE: We shouldn't just clear() here because it will also affect
@@ -2150,6 +2175,16 @@ class Scheduler(SchedulerInterface):
                     num_scheduled_tokens,
                 )
             )
+        if self.kv_checksum is not None:
+            # Loads already known to have failed are not verified.
+            failed_checksum_req_ids = self.kv_checksum.update_from_output(
+                kv_connector_output,
+                skip_req_ids=failed_kv_load_req_ids | self.failed_recving_kv_req_ids,
+            )
+            if failed_checksum_req_ids:
+                failed_kv_load_req_ids.update(
+                    self._handle_failed_recving(failed_checksum_req_ids)
+                )
         # NOTE(woosuk): As len(num_scheduled_tokens) can be up to 1K or more,
         # the below loop can be a performance bottleneck. We should do our best
         # to avoid expensive operations inside the loop.
@@ -2805,6 +2840,8 @@ class Scheduler(SchedulerInterface):
         self._inflight_prefills.discard(request)
         self._set_kv_fetch_stage(request, None)
         connector_delay_free_blocks, kv_xfer_params = self._connector_finished(request)
+        if self.kv_checksum is not None:
+            kv_xfer_params = self.kv_checksum.request_finished(request, kv_xfer_params)
 
         # EC Connector: mirror the KV hook. The contract requires firing
         # before the encoder cache is freed so the connector can inspect
