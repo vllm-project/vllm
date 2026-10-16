@@ -9,6 +9,7 @@ import contextlib
 import functools
 import importlib
 import importlib.metadata
+import importlib.resources
 import importlib.util
 import os
 import shutil
@@ -486,7 +487,26 @@ def has_flashinfer_nvfp4_sparse_mla_decode() -> bool:
         from flashinfer.mla import nvfp4_sparse_mla_decode
     except ImportError:
         return False
-    return callable(nvfp4_sparse_mla_decode)
+    if not callable(nvfp4_sparse_mla_decode):
+        return False
+    # The kernel is JIT-compiled from sources shipped inside the package.
+    # Wheels up to flashinfer-python 0.7.2 carry the Python entry point but
+    # not that csrc/ directory, so the first call would fail with
+    # FileNotFoundError instead of compiling.
+    try:
+        source = importlib.resources.files(
+            "flashinfer.experimental.nvfp4_sparse_mla_decode"
+        ).joinpath("csrc", "nvfp4_sparse_mla_decode.cu")
+        has_source = source.is_file()
+    except (ModuleNotFoundError, TypeError):
+        has_source = False
+    if not has_source:
+        logger.warning_once(
+            "FlashInfer exposes nvfp4_sparse_mla_decode but the installed "
+            "package lacks its JIT source; nvfp4_ds_mla decode falls back to "
+            "the FP8-staged path."
+        )
+    return has_source
 
 
 @functools.cache
