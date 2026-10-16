@@ -558,7 +558,7 @@ def test_mla_dcp_manager_selects_direct_backends(monkeypatch, default_vllm_confi
     gathered_kv, local_kv = torch.empty(4, 8), torch.empty(2, 8)
     manager.kv_gather(gathered_kv, local_kv)
     kv_gather.assert_called_once_with(gathered_kv, local_kv)
-    output, lse = torch.empty(1), torch.empty(1)
+    output, lse = torch.empty(1, 4, 4), torch.empty(1, 4)
     seq_lens = torch.ones(1, dtype=torch.int32)
     query_start_loc = torch.tensor([0, 1], dtype=torch.int32)
     manager.combine(
