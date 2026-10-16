@@ -17,8 +17,10 @@ from vllm.entrypoints.pooling.embed.io_processor import (
     JinaRankingTokenEmbedIOProcessor,
     TokenEmbedIOProcessor,
 )
-from vllm.entrypoints.pooling.late_chunking import build_late_chunking_metadata
 from vllm.entrypoints.pooling.offline import PoolingOfflineMixin
+from vllm.entrypoints.pooling.token_embed.late_chunking import (
+    build_late_chunking_metadata,
+)
 from vllm.entrypoints.pooling.token_embed.protocol import TokenEmbeddingRequest
 from vllm.entrypoints.pooling.token_embed.serving import ServingTokenEmbedding
 from vllm.entrypoints.pooling.typing import (

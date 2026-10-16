@@ -27,12 +27,12 @@ from vllm.utils.collection_utils import chunk_list
 from vllm.utils.mistral import is_mistral_tokenizer
 
 from ..base.io_processor import PoolingIOProcessor
-from ..late_chunking import (
+from ..scoring.io_processor import JinaRankingIOProcessorMixin
+from ..token_embed.late_chunking import (
     attach_late_chunking_metadata,
     build_late_chunking_metadata,
     prepare_late_chunking_input,
 )
-from ..scoring.io_processor import JinaRankingIOProcessorMixin
 from ..typing import (
     AnyOfflineInputsContext,
     AnyRenderParam,
