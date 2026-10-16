@@ -122,6 +122,9 @@ class TrtLlmMxfp4ExpertsBase:
         p = current_platform
         return p.is_cuda() and p.is_device_capability_family(100) and has_flashinfer()
 
+    def output_hidden_dim(self, hidden_dim: int) -> int:
+        return self.hidden_dim_unpadded
+
     def _max_supported_tokens(self, top_k: int, global_num_experts: int) -> int:
         """Max tokens per kernel call before the batched-GEMM grid overflows.
 

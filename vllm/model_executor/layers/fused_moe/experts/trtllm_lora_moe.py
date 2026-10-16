@@ -620,6 +620,10 @@ class TrtLlmMxfp4LoRAExperts(_TrtLlmLoRAExpertsBase, TrtLlmMxfp4ExpertsBase):
         # flashinfer manages its own workspace and drops the hidden padding.
         return (0,), (0,), (M, self.hidden_dim_unpadded)
 
+    def output_hidden_dim(self, hidden_dim: int) -> int:
+        # FusedMoEExpertsModular precedes TrtLlmMxfp4ExpertsBase in the MRO.
+        return self.hidden_dim_unpadded
+
     @functools.cached_property
     def _w13_bias_up_gate_index(self) -> torch.Tensor:
         """Columns of the kernel-format FC1 bias in [up | gate] order."""

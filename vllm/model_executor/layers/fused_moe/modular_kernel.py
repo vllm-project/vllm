@@ -843,6 +843,11 @@ class FusedMoEExpertsModular(FusedMoEExperts):
         """Workspace type: The dtype to use for the workspace tensors."""
         return act_dtype
 
+    def output_hidden_dim(self, hidden_dim: int) -> int:
+        """Hidden size of the finalized output. Experts that drop the hidden
+        padding return the unpadded size."""
+        return hidden_dim
+
     @abstractmethod
     def workspace_shapes(
         self,
@@ -1505,7 +1510,12 @@ class FusedMoEKernelModularImpl:
             a fused consumer.
 
         """
-        output = torch.empty_like(hidden_states)
+        output = hidden_states.new_empty(
+            (
+                *hidden_states.shape[:-1],
+                self.fused_experts.output_hidden_dim(hidden_states.size(-1)),
+            )
+        )
 
         local_num_experts = w1.shape[0]
         if global_num_experts == -1:
@@ -1557,15 +1567,6 @@ class FusedMoEKernelModularImpl:
                     "a deferred MoE output."
                 )
             return fused_out
-
-        # Experts that drop the hidden padding return a narrower result. Keep the
-        # local token dims of `output`: with DP, `fused_out` covers the gathered
-        # tokens and finalize combines it into the local slice.
-        if fused_out.size(-1) != output.size(-1):
-            if fused_out.shape[:-1] == output.shape[:-1]:
-                output = fused_out
-            else:
-                output = output.new_empty(*output.shape[:-1], fused_out.size(-1))
 
         return self._finalize(
             output,
