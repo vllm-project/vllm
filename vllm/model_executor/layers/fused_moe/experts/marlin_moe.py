@@ -839,6 +839,7 @@ class MarlinExperts(LoRAExpertsMixin, MarlinExpertsBase):
                 y=moe_out,
                 x=lora_state["cache2"],
                 topk_weights=topk_weights,
+                mul_routed_weight=not apply_router_weight_on_input,
                 sorted_token_ids_lora=lora_state["sorted"],
                 expert_ids_lora=lora_state["eids"],
                 num_tokens_post_padded_lora=lora_state["npad"],
