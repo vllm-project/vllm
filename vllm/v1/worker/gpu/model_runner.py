@@ -523,6 +523,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.max_num_reqs,
                 self.device,
                 logprobs_mode=self.model_config.logprobs_mode,
+                token_logits_rows=self.token_logits_rows,
             )
             self.structured_outputs_worker = StructuredOutputsWorker(
                 max_num_logits=self.max_num_reqs * self.decode_query_len,

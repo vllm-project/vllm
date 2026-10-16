@@ -6,6 +6,8 @@ Punica: Multi-Tenant LoRA Serving.
 https://arxiv.org/abs/2310.18547
 """
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any, final
 
 import torch
@@ -87,6 +89,16 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             # Prepare cuda kernel metadata tensors
             self.token_mapping_meta.prepare_tensors(self.token_lora_indices)
             self.prompt_mapping_meta.prepare_tensors(self.sampler_indices)
+
+    @contextmanager
+    def token_logits_rows(self, start: int, end: int) -> Iterator[None]:
+        with gpu_sync_allowed():
+            self.prompt_mapping_meta.prepare_tensors(self.token_lora_indices[start:end])
+        try:
+            yield
+        finally:
+            with gpu_sync_allowed():
+                self.prompt_mapping_meta.prepare_tensors(self.sampler_indices)
 
     def add_shrink(
         self,
