@@ -27,8 +27,14 @@ if(DEEPGEMM_SRC_DIR)
   set(deepgemm_SOURCE_DIR "${DEEPGEMM_SRC_DIR}")
   message(STATUS "DeepGEMM using local DEEPGEMM_SRC_DIR: ${deepgemm_SOURCE_DIR}")
 else()
-  set(_DEEPGEMM_UPSTREAM_REPO "https://github.com/Inferact/DeepGEMM.git")
-  set(_DEEPGEMM_UPSTREAM_TAG "6122c43fcbc6b1b655bfedf5690969ebae8e8c50")
+  # Keep in sync with tools/install_deepgemm.sh
+  set(_DEEPGEMM_UPSTREAM_REPO "https://github.com/vllm-project/DeepGEMM.git")
+  # Pinned to the fork's dev branch: upstream's 26/09/30 release (2.8.1)
+  # plus the SM120 port, the SM90 paged-MQA kv_block=32/next_n=4 port,
+  # configurable SwiGLU alpha/beta, SiTU for FP8/FP4 Mega MoE, and NVFP4
+  # Mega MoE, plus swiglustep for BF16/FP8/NVFP4 Mega MoE.
+  # Uses the PyTorch 2.11 stable ABI and CPython 3.10 limited API.
+  set(_DEEPGEMM_UPSTREAM_TAG "a7a927731b109fdfec770df7c2a5be5d7e2216b5")
 
   set(_deepgemm_fc_root "${FETCHCONTENT_BASE_DIR}")
   if(NOT _deepgemm_fc_root)
@@ -38,17 +44,21 @@ else()
   set(_deepgemm_bin "${_deepgemm_fc_root}/deepgemm-build")
   set(_deepgemm_sub "${_deepgemm_fc_root}/deepgemm-subbuild")
 
-  # Let FetchContent update cached checkouts when the pinned revision changes.
-  FetchContent_Populate(
-    deepgemm
-    SUBBUILD_DIR "${_deepgemm_sub}"
-    SOURCE_DIR "${_deepgemm_src}"
-    BINARY_DIR "${_deepgemm_bin}"
-    GIT_REPOSITORY "${_DEEPGEMM_UPSTREAM_REPO}"
-    GIT_TAG "${_DEEPGEMM_UPSTREAM_TAG}"
-    GIT_SUBMODULES "third-party/cutlass" "third-party/deep_jit"
-    GIT_PROGRESS TRUE
-  )
+  if(EXISTS "${_deepgemm_src}/deep_gemm/_C.py")
+    set(deepgemm_SOURCE_DIR "${_deepgemm_src}")
+    set(deepgemm_BINARY_DIR "${_deepgemm_bin}")
+  else()
+    FetchContent_Populate(
+      deepgemm
+      SUBBUILD_DIR "${_deepgemm_sub}"
+      SOURCE_DIR "${_deepgemm_src}"
+      BINARY_DIR "${_deepgemm_bin}"
+      GIT_REPOSITORY "${_DEEPGEMM_UPSTREAM_REPO}"
+      GIT_TAG "${_DEEPGEMM_UPSTREAM_TAG}"
+      GIT_SUBMODULES "third-party/cutlass" "third-party/deep_jit"
+      GIT_PROGRESS TRUE
+    )
+  endif()
   message(STATUS "DeepGEMM is available at ${deepgemm_SOURCE_DIR}")
 endif()
 
@@ -81,8 +91,21 @@ cuda_archs_loose_intersection(DEEPGEMM_ARCHS
 if(DEEPGEMM_ARCHS)
   message(STATUS "DeepGEMM CUDA architectures: ${DEEPGEMM_ARCHS}")
 
-  # DeepGEMM now uses PyTorch's stable ABI; one extension covers all supported
-  # Python versions instead of building a separate pybind11 module for each.
+  #
+  # DeepGEMM integration notes
+  # --------------------------
+  # We vendor DeepGEMM into vllm/third_party/deep_gemm/ and bundle:
+  #   - deep_gemm/_C.py (Python shim over torch.ops.deep_gemm)
+  #   - deep_gemm/_C_extension.abi3.so (single limited-API extension)
+  # The build is delegated to tools/build_deepgemm_C.py (setup.py build_ext).
+  #
+  # TODO: AOT-compile DeepGEMM's CUDA kernels instead of runtime JIT to drop
+  # the vendored CUTLASS/CCCL headers and the CUDA-toolkit-at-runtime
+  # requirement.
+  #
+
+  message(STATUS "DeepGEMM extension will be built with: ${Python_EXECUTABLE}")
+
   # add_custom_command does no implicit header scanning; glob explicitly so
   # header-only edits in DeepGEMM/cutlass/deep_jit re-trigger the rebuild.
   file(GLOB_RECURSE _dg_headers
@@ -94,7 +117,7 @@ if(DEEPGEMM_ARCHS)
     "${deepgemm_SOURCE_DIR}/third-party/deep_jit/include/*.h"
     "${deepgemm_SOURCE_DIR}/third-party/deep_jit/include/*.hpp")
 
-  set(_dg_dir "${CMAKE_CURRENT_BINARY_DIR}/deepgemm_C_stable")
+  set(_dg_dir "${CMAKE_CURRENT_BINARY_DIR}/deepgemm_C")
   set(_dg_marker "${_dg_dir}/.built")
   add_custom_command(
     OUTPUT "${_dg_marker}"
@@ -104,20 +127,25 @@ if(DEEPGEMM_ARCHS)
     COMMAND "${CMAKE_COMMAND}" -E touch "${_dg_marker}"
     DEPENDS "${CMAKE_SOURCE_DIR}/tools/build_deepgemm_C.py"
             "${deepgemm_SOURCE_DIR}/csrc/python_api.cpp"
+            "${deepgemm_SOURCE_DIR}/deep_gemm/_C.py"
+            "${deepgemm_SOURCE_DIR}/setup.py"
             ${_dg_headers}
-    COMMENT "Building DeepGEMM stable-ABI extension"
+    COMMENT "Building DeepGEMM _C_extension (abi3)"
     VERBATIM)
   add_custom_target(_deep_gemm_C ALL DEPENDS "${_dg_marker}")
-  install(FILES "${_dg_dir}/_C_extension.abi3.so"
+
+  install(DIRECTORY "${_dg_dir}/"
     DESTINATION vllm/third_party/deep_gemm
-    COMPONENT _deep_gemm_C)
+    COMPONENT _deep_gemm_C
+    FILES_MATCHING
+      PATTERN "_C.py"
+      PATTERN "_C_extension*.so")
 
   #
   # Vendor DeepGEMM Python package files
   #
   install(FILES
     "${deepgemm_SOURCE_DIR}/deep_gemm/__init__.py"
-    "${deepgemm_SOURCE_DIR}/deep_gemm/_C.py"
     "${deepgemm_SOURCE_DIR}/deep_gemm/locality_domain.py"
     DESTINATION vllm/third_party/deep_gemm
     COMPONENT _deep_gemm_C)
@@ -139,11 +167,6 @@ if(DEEPGEMM_ARCHS)
 
   install(DIRECTORY "${deepgemm_SOURCE_DIR}/deep_gemm/mega/"
     DESTINATION vllm/third_party/deep_gemm/mega
-    COMPONENT _deep_gemm_C
-    FILES_MATCHING PATTERN "*.py")
-
-  install(DIRECTORY "${deepgemm_SOURCE_DIR}/deep_gemm/jit_hooks/"
-    DESTINATION vllm/third_party/deep_gemm/jit_hooks
     COMPONENT _deep_gemm_C
     FILES_MATCHING PATTERN "*.py")
 

@@ -342,7 +342,7 @@ class Step5MegaMoEExperts(nn.Module):
             raise ValueError("DeepGEMM MegaMoE requires SM100 GPUs")
         self.dg = _import_deep_gemm()
         if self.dg is None or not hasattr(self.dg, "bf16_mega_moe"):
-            raise RuntimeError("Install the pinned Inferact DeepGEMM build")
+            raise RuntimeError("Install the pinned vLLM DeepGEMM build")
         if self.nvfp4:
             w1, w2 = self._prepare_nvfp4()
         else:
