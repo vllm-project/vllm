@@ -104,6 +104,13 @@ class TransferJob(ABC):
 
         """
 
+    @abstractmethod
+    def is_materialized(self) -> bool:
+        """Return True if the transfer keys are chunk_ids are known at
+        this point in time.
+        """
+        pass
+
     @property
     @abstractmethod
     def keys(self) -> Collection[OffloadKey]:

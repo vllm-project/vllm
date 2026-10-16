@@ -244,8 +244,9 @@ class FileSystemTierManager(SecondaryTierManager):
         job_id = job_metadata.job_id
 
         def load_task() -> None:
-            # Track this load's keys so a failed promotion can mark only its failed
-            # keys as a miss (see get_finished_jobs).
+            assert not job_metadata.is_materialized(), (
+                "FS tier should materialize job in the transfer thread"
+            )
             keys_chunks = job_metadata.get()
             if keys_chunks is None:
                 # Job materialization failed; Setup state such that Job reaping

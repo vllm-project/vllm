@@ -491,6 +491,7 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
 
     @override
     def submit_load(self, job_metadata: TransferJob) -> None:
+        assert job_metadata.get() is not None, "Cannot materialize job"
         blocks = {
             self._key_adapter.encode(key): [self._make_descriptor(int(chunk_id))]
             for key, chunk_id in zip(

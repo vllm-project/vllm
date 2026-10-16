@@ -118,28 +118,24 @@ class PromotionTransferJob(TransferJob):
         job_id: JobId,
         req_context: ReqContext,
         keys: Collection[OffloadKey],
-        chunk_ids: np.ndarray,
+        chunk_ids: np.ndarray | None = None,
         alloc_fn: PrimaryAllocFn | None = None,
     ):
         super().__init__(job_id, req_context, is_promotion=True)
         self._requested_keys = keys
-        self._chunk_ids = chunk_ids
         self._alloc_fn = alloc_fn
         self._is_alloc_failed = False
         self._keys_chunks: tuple[Collection[OffloadKey], np.ndarray] | None = None
 
-        # maybe the job is already materialized at construction
-        if len(self._requested_keys) == len(self._chunk_ids):
-            # already materialized
-            self._keys_chunks = (self._requested_keys, self._chunk_ids)
+        if chunk_ids is not None:
+            assert len(self._requested_keys) == len(chunk_ids), (
+                "Malformed Promotion job. Job materialized by construction"
+                "should have same number of keys and chunk_ids"
+            )
+            self._keys_chunks = (self._requested_keys, chunk_ids)
         else:
-            assert (
-                len(self._requested_keys) != 0
-                and len(self._chunk_ids) == 0
-                and self._alloc_fn is not None
-            ), (
-                "Malformed PromotionTransferJob. Deferred allocation needs "
-                "a alloc_fn, with empty chunk_ids and valid requested_keys "
+            assert self._alloc_fn is not None, (
+                "Malformed PromotionTransferJob. Deferred allocation needs an alloc_fn."
             )
 
     def get(self) -> tuple[Collection[OffloadKey], np.ndarray] | None:
@@ -167,6 +163,9 @@ class PromotionTransferJob(TransferJob):
             raise ValueError("Must call get() at least once or get() was unsuccessful")
         return self._keys_chunks[1]
 
+    def is_materialized(self) -> bool:
+        return self._keys_chunks is not None
+
 
 class CascadeTransferJob(TransferJob):
     def __init__(
@@ -189,6 +188,9 @@ class CascadeTransferJob(TransferJob):
     @property
     def chunk_ids(self) -> np.ndarray:
         return self._keys_chunks[1]
+
+    def is_materialized(self) -> bool:
+        return True
 
 
 class JobMetadata(NamedTuple):
@@ -669,10 +671,6 @@ class TieringOffloadingManager(OffloadingManager):
     def _register_job(self, transfer_job: TransferJob, tier_idx: int) -> None:
         job_metadata = JobMetadata(transfer_job, tier_idx)
         self._jobs[transfer_job.job_id] = job_metadata
-        if not transfer_job.is_promotion:
-            self._metrics.on_primary_chunk_count(
-                tier_idx, len(transfer_job.chunk_ids), is_promotion=False
-            )
         self._metrics.on_job_registered(job_metadata)
 
     def _pop_job(self, job_id: JobId) -> JobMetadata | None:
@@ -709,7 +707,7 @@ class TieringOffloadingManager(OffloadingManager):
         assert isinstance(transfer_job, PromotionTransferJob)
         self._inflight_promotion_keys.difference_update(transfer_job._requested_keys)
 
-        if transfer_job.get() is None:
+        if not transfer_job.is_materialized():
             # Promotion failed. lets not doom the request into a retry loop.
             self._promotion_failed_requests.add(transfer_job.req_context.req_id)
             _maybe_update_load_sources(set(transfer_job._requested_keys))
@@ -785,7 +783,7 @@ class TieringOffloadingManager(OffloadingManager):
                 transfer_job = job_metadata.transfer_job
                 self._metrics.on_job_finished(job_metadata, completed_job)
 
-                if isinstance(transfer_job, PromotionTransferJob):
+                if transfer_job.is_promotion:
                     # secondary→primary transfer (promotion) completed.
                     # Make chunks available in primary tier.
                     self._complete_promotion(job_metadata, completed_job)
@@ -1036,14 +1034,20 @@ class TieringOffloadingManager(OffloadingManager):
             is_deferred_alloc = tier.supports_deferred_promotion_allocation()
             for entry in pending_by_ctx.values():
                 job_id = self._next_job_id()
+                if is_deferred_alloc:
+                    chunk_ids, alloc_fn = (
+                        None,
+                        functools.partial(self._promotion_allocation, tier_idx),
+                    )
+                else:
+                    chunk_ids = np.array(entry.chunk_ids, dtype=np.int32)
+                    alloc_fn = None
                 job_metadata: TransferJob = PromotionTransferJob(
                     job_id=job_id,
                     req_context=entry.req_context,
                     keys=entry.keys,
-                    chunk_ids=np.array(entry.chunk_ids, dtype=np.int32),
-                    alloc_fn=functools.partial(self._promotion_allocation, tier_idx)
-                    if is_deferred_alloc
-                    else None,
+                    chunk_ids=chunk_ids,
+                    alloc_fn=alloc_fn,
                 )
                 self._register_job(job_metadata, tier_idx)
                 tier.submit_load(job_metadata)

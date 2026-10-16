@@ -299,6 +299,7 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         )
 
     def submit_load(self, job_metadata: TransferJob) -> None:
+        assert job_metadata.get() is not None, "Cannot materialize job"
         self._load_job_keys[job_metadata.job_id] = list(job_metadata.keys)
         obj_keys = (self._file_mapper.get_file_name(k) for k in job_metadata.keys)
         self._submit_transfer(
