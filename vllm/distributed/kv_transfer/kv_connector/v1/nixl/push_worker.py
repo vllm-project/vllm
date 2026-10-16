@@ -119,6 +119,10 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         self._reg_send_inbox: queue.Queue[tuple[str, dict[str, Any]]] = queue.Queue()
         self._finished_blocks_inbox: queue.Queue[tuple[str, BlockIds]] = queue.Queue()
         self._pending_completion_notifs: queue.Queue[bytes] = queue.Queue()
+        self._heartbeat_inbox: queue.Queue[NixlConnectorMetadata] = queue.Queue()
+        self._push_result_inbox: queue.Queue[tuple[set[ReqId], set[ReqId]]] = (
+            queue.Queue()
+        )
         # Main thread → writer: req_ids whose lease has expired or whose
         # WRITE has completed. Writer drops them from
         # ``_push_finished_blocks`` so an unmatched entry doesn't keep the
@@ -134,6 +138,9 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
 
         self._push_writer_stop = threading.Event()
         self._push_writer_thread: threading.Thread | None = None
+        # NIXL does not guarantee thread safety. Serialize the writer's data
+        # plane operations with endpoint setup on the handshake executor.
+        self._nixl_io_lock = threading.Lock()
 
     # --- Lifecycle ----------------------------------------------------- #
 
@@ -245,15 +252,33 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                     )
                 self._reqs_to_send[req_id] = expiration_time
 
-        # Heartbeats still leave from the main thread (base worker behaviour).
-        self._send_heartbeats(metadata)
+        # _send_heartbeats may start a handshake or call send_notif. Keep both
+        # operations off the model thread so it cannot miss an EP collective.
+        if metadata.heartbeat_by_engine:
+            self._heartbeat_inbox.put(metadata)
+            self._push_writer_wake.set()
 
     # --- Writer thread ------------------------------------------------- #
+
+    def _drain_heartbeats(self) -> None:
+        while True:
+            try:
+                metadata = self._heartbeat_inbox.get_nowait()
+            except queue.Empty:
+                break
+            super()._send_heartbeats(metadata)
+
+    def _poll_sending_transfers(self) -> None:
+        with self._sending_transfers_lock:
+            done, failed = super()._pop_done_transfers(self._sending_transfers)
+        if done or failed:
+            self._push_result_inbox.put((done, failed))
 
     def _push_writer_loop(self) -> None:
         sleep_s = _PUSH_WRITER_POLL_INTERVAL_MS / 1000.0
 
         while not self._push_writer_stop.is_set():
+            self._nixl_io_lock.acquire()
             try:
                 # 1. D registrations to send.
                 while True:
@@ -295,24 +320,49 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                     self._push_finished_blocks.pop(rid, None)
                     self._pending_d_registrations.pop(rid, None)
 
-                # 4. NIXL notifs: route PUSH_REG; forward the rest.
+                # 4. Heartbeats: handshake/send_notif are writer-owned.
+                self._drain_heartbeats()
+
+                # 5. NIXL notifs: route PUSH_REG; forward the rest.
                 for notifs in self.nixl_wrapper.get_new_notifs().values():
                     for notif in notifs:
                         if notif.startswith(PUSH_REG_NOTIF_PREFIX):
                             self._handle_push_reg_notif(notif)
                         else:
                             self._pending_completion_notifs.put(notif)
+
+                # 6. Poll outgoing WRITE handles. The model thread consumes
+                # only the resulting request IDs.
+                self._poll_sending_transfers()
             except Exception:
                 logger.exception("nixl-push-writer error; continuing")
+            finally:
+                self._nixl_io_lock.release()
 
             # Self-poll only while there is no other wake source: P-side
-            # finished blocks waiting for a D PUSH_REG match. All other
-            # progress is event-driven (see module docstring).
-            if self._push_finished_blocks:
+            # finished blocks waiting for a D PUSH_REG match, or an outgoing
+            # WRITE awaiting completion.
+            with self._sending_transfers_lock:
+                has_inflight_writes = bool(self._sending_transfers)
+            if self._push_finished_blocks or has_inflight_writes:
                 self._push_writer_stop.wait(timeout=sleep_s)
             else:
                 self._push_writer_wake.wait()
                 self._push_writer_wake.clear()
+
+    def _nixl_handshake(self, *args, **kwargs):
+        """Serialize endpoint setup with push data-plane operations."""
+        with self._nixl_io_lock:
+            return super()._nixl_handshake(*args, **kwargs)
+
+    def _pop_done_transfers(
+        self, transfers: dict[str, list[int]]
+    ) -> tuple[set[str], set[str]]:
+        """Complete notification-driven push receives without polling NIXL."""
+        done = {req_id for req_id, handles in transfers.items() if not handles}
+        for req_id in done:
+            del transfers[req_id]
+        return done, set()
 
     def _handle_push_reg_notif(self, notif: bytes) -> None:
         try:
@@ -807,28 +857,31 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         return set()
 
     def get_transfer_results(self) -> KVConnectorTransferResults:
-        # Engine main thread asking for completions: also wake the writer
-        # so it gets a chance to drain NIXL notifs (heartbeats, completion
-        # notifs, late PUSH_REGs) even if it had been parked.
+        # Wake the writer to progress NIXL. The model thread only consumes
+        # notifications and request IDs published by the writer.
         self._push_writer_wake.set()
 
         results = super().get_transfer_results()
         done_sending = results.finished_sending
 
-        # ``_pop_done_transfers`` mutates ``_sending_transfers``; the
-        # writer thread also appends to it, so guard the pop.
-        with self._sending_transfers_lock:
-            done_pushing, failed_pushing = self._pop_done_transfers(
-                self._sending_transfers
-            )
-            # Remember failures until the final sibling WRITE completes.
-            self._send_failures.update(failed_pushing)
-            successful = {
-                req_id
-                for req_id in done_pushing - self._send_failures
-                if req_id in self._reqs_to_send or req_id in self._reqs_to_process
-            }
-            self._send_failures.difference_update(done_pushing | done_sending)
+        done_pushing: set[ReqId] = set()
+        failed_pushing: set[ReqId] = set()
+        while True:
+            try:
+                done, failed = self._push_result_inbox.get_nowait()
+            except queue.Empty:
+                break
+            done_pushing.update(done)
+            failed_pushing.update(failed)
+
+        # Remember failures until the final sibling WRITE completes.
+        self._send_failures.update(failed_pushing)
+        successful = {
+            req_id
+            for req_id in done_pushing - self._send_failures
+            if req_id in self._reqs_to_send or req_id in self._reqs_to_process
+        }
+        self._send_failures.difference_update(done_pushing | done_sending)
         # Expired requests were already reported, even if their WRITEs finish later.
         done_pushing = successful
         for req_id in done_pushing:
