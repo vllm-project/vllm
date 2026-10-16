@@ -119,11 +119,17 @@ class AuxOutputWorkerConnector:
         )
         hashes_per_kv_block = scheduler_block_size // hash_block_size
         block_nbytes = hash_block_size * int(np.prod(shape_per_token)) * dtype.itemsize
-        max_bytes = vllm_config.aux_output_config.max_bytes
+        aux_output_config = vllm_config.aux_output_config
+        max_bytes = aux_output_config.max_bytes
         if max_bytes is None:
             max_bytes = kv_cache_config.num_blocks * hashes_per_kv_block * block_nbytes
         self._store = BackgroundBlockObjectStore(
-            BlockObjectStore(max_bytes=max_bytes, object_nbytes=block_nbytes),
+            BlockObjectStore(
+                max_bytes=max_bytes,
+                object_nbytes=block_nbytes,
+                cache_policy=aux_output_config.eviction_policy,
+                cache_policy_module_path=aux_output_config.cache_policy_module_path,
+            ),
             max_pending_batches=2 * vllm_config.scheduler_config.max_num_seqs,
         )
         self._buffer = RoutedExpertsBuffer(

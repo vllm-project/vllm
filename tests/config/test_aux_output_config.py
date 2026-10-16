@@ -67,6 +67,7 @@ def test_aux_output_config_defaults():
     assert not config.enabled
     assert not config.enable_return_routed_experts
     assert config.max_bytes is None
+    assert config.eviction_policy == "lru"
 
 
 def test_aux_output_capture_changes_compilation_hash():

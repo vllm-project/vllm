@@ -15,7 +15,13 @@ class AuxOutputConfig:
     """Capture and return routed-experts auxiliary outputs."""
 
     max_bytes: int | None = Field(default=None, gt=0)
-    """LRU capacity, or ``None`` to derive it from the KV cache capacity."""
+    """Store capacity, or ``None`` to derive it from the KV cache capacity."""
+
+    eviction_policy: str = "lru"
+    """KV offload cache policy of the store: "lru", "arc" or an out-of-tree name."""
+
+    cache_policy_module_path: str | None = None
+    """Module that defines an out-of-tree ``eviction_policy``."""
 
     @property
     def enabled(self) -> bool:
