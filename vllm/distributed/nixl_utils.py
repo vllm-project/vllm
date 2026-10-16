@@ -37,32 +37,6 @@ def _maybe_set_ucx_rcache_limit() -> None:
     os.environ["UCX_RCACHE_MAX_UNRELEASED"] = "1024"
 
 
-def _maybe_disable_ucx_mem_events() -> None:
-    # Opt-in on purpose. UCX builds its registration cache on top of these
-    # memory events, so with them off ucp_mem_map finds no rcache and nixl dies
-    # on "Assertion 'rcache != NULL' failed", which is what turned the EPLB
-    # Execution suite red on MI355. Keep it reachable while we measure whether
-    # the hooks really interfere with the HIP IPC buffers RCCL uses.
-    if os.getenv("VLLM_EEP_DEBUG_UCX_MEM_EVENTS_OFF") != "1":
-        return
-
-    if not current_platform.is_rocm() or "UCX_MEM_EVENTS" in os.environ:
-        return
-
-    if "nixl_rocm" in sys.modules:
-        logger.warning_once(
-            "NIXL was already imported, we can't set UCX_MEM_EVENTS. "
-            "Please set it to 'no' manually."
-        )
-        return
-
-    logger.info_once(
-        "Setting UCX_MEM_EVENTS to 'no' so UCX ROCm memory hooks do not "
-        "break HIP IPC buffers used by RCCL when using NIXL."
-    )
-    os.environ["UCX_MEM_EVENTS"] = "no"
-
-
 def _get_nixl_package_name() -> str:
     return "nixl_rocm" if current_platform.is_rocm() else "nixl"
 
@@ -82,7 +56,6 @@ def _load_nixl_attr(name: str) -> Any:
     }[name]
 
     _maybe_set_ucx_rcache_limit()
-    _maybe_disable_ucx_mem_events()
     try:
         module = importlib.import_module(_get_nixl_module_name(name))
     except ImportError:
@@ -147,7 +120,6 @@ def alias_nixl_for_ray() -> None:
         raise ImportError(f"Ray's NIXL transport on ROCm requires {package_name}")
 
     _maybe_set_ucx_rcache_limit()
-    _maybe_disable_ucx_mem_events()
     package = importlib.import_module(package_name)
     api = importlib.import_module(f"{package_name}._api")
     sys.modules.setdefault("nixl", package)
