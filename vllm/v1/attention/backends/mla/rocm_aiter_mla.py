@@ -917,10 +917,9 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             if num_gpu_blocks is None
             else num_gpu_blocks * kv_cache_spec.page_size_bytes
         )
-        self._fused_gather_possible = (
+        self._supports_fused_gather = (
             _aiter_gather_kv_b_proj() is not None
             and self._kv_cache_dtype_str != "fp8_ds_mla"
-            and self.dcp_world_size == 1
         )
         # MLAAttention quantizes decode Q to FP8 before calling this backend
         # whenever the KV cache is FP8 and supports_quant_query_input is true.
@@ -1763,18 +1762,12 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
 
         return attn_metadata
 
-    def _build_context_chunk_kv_indices(
-        self, attn_metadata: AiterMLAMetadata
-    ) -> list[torch.Tensor] | None:
+    def _build_context_chunk_kv_indices(self, prefill) -> list[torch.Tensor]:
         """Flatten each context chunk's block table into per-token KV indices.
 
         Built here so the expansion runs once per step instead of once per
         MLA layer.
         """
-        prefill = attn_metadata.prefill
-        if prefill is None or prefill.chunked_context is None:
-            return None
-
         indices = []
         for chunk in prefill.chunked_context.chunks:
             block_table = prefill.block_table[chunk.request_slice]
@@ -1813,11 +1806,16 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         attn_metadata = super().build(
             common_prefix_len, common_attn_metadata, fast_build
         )
-        if self._fused_gather_possible:
-            attn_metadata.context_chunk_kv_indices = (
-                self._build_context_chunk_kv_indices(attn_metadata)
-            )
         prefill = attn_metadata.prefill
+        if (
+            prefill is not None
+            and prefill.chunked_context is not None
+            and self.dcp_world_size == 1
+            and self._supports_fused_gather
+        ):
+            attn_metadata.context_chunk_kv_indices = (
+                self._build_context_chunk_kv_indices(prefill)
+            )
         if (
             prefill is not None
             and prefill.chunked_context is not None
