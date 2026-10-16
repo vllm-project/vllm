@@ -21,10 +21,10 @@ use futures::{Stream, StreamExt as _, pin_mut};
 use thiserror_ext::AsReport as _;
 use tracing::{error, info, trace};
 use tracing_futures::Instrument as _;
-use vllm_engine_core_client::protocol::dtype::{Endianness, TensorDtype};
+use vllm_engine_core_client::protocol::dtype::Endianness;
 use vllm_engine_core_client::protocol::logprobs::{Logprobs, PositionLogprobs};
 use vllm_engine_core_client::protocol::multimodal::MmFeatureSpec;
-use vllm_engine_core_client::protocol::tensor::{ShapeExt as _, WireNdArray};
+use vllm_engine_core_client::protocol::tensor::WireNdArray;
 use vllm_llm::{
     CollectedGenerateOutput, FinishReason, GenerateOutput, GenerateOutputStreamExt as _, TokenUsage,
 };
@@ -473,37 +473,23 @@ fn npy_base64(array: &WireNdArray) -> Result<String, ApiError> {
     let Some(data) = array.data.as_raw_view() else {
         bail_server_error!("ndarray data was not resolved");
     };
-    let size = array.dtype.scalar.element_size();
-    if array.shape.checked_numel().and_then(|numel| numel.checked_mul(size)) != Some(data.len()) {
-        bail_server_error!("ndarray byte length does not match its shape");
-    }
-    if array.dtype.scalar == TensorDtype::Bf16 {
-        bail_server_error!("bfloat16 has no NumPy `.npy` descriptor");
-    }
+    // NumPy writes `|` for single-byte types; vLLM hosts are little-endian.
     let byte_order = match array.dtype.endianness {
-        _ if size == 1 => '|',
-        Endianness::Little => '<',
+        _ if array.dtype.scalar.element_size() == 1 => '|',
         Endianness::Big => '>',
-        Endianness::Native if cfg!(target_endian = "little") => '<',
-        Endianness::Native => '>',
+        Endianness::Little | Endianness::Native => '<',
     };
-    // The descriptor code follows the byte-order character of the dtype string.
-    let descr = array.dtype.to_string();
-    let shape = match array.shape.as_slice() {
-        [] => "()".to_string(),
+    let code = &array.dtype.to_string()[1..];
+    let dims: Vec<_> = array.shape.iter().map(ToString::to_string).collect();
+    let shape = match dims.as_slice() {
         [dim] => format!("({dim},)"),
-        dims => {
-            let dims: Vec<_> = dims.iter().map(ToString::to_string).collect();
-            format!("({})", dims.join(", "))
-        }
+        dims => format!("({})", dims.join(", ")),
     };
-    let mut header = format!(
-        "{{'descr': '{byte_order}{}', 'fortran_order': False, 'shape': {shape}, }}",
-        &descr[1..]
-    );
+    let mut header =
+        format!("{{'descr': '{byte_order}{code}', 'fortran_order': False, 'shape': {shape}, }}");
     // NumPy reserves room to grow the first axis in place.
-    if let Some(first) = array.shape.first() {
-        header.push_str(&" ".repeat(21 - first.to_string().len()));
+    if let Some(first) = dims.first() {
+        header.push_str(&" ".repeat(21 - first.len()));
     }
     header.push_str(&" ".repeat(64 - (11 + header.len()) % 64));
     header.push('\n');
@@ -567,6 +553,7 @@ mod tests {
     use std::sync::Arc;
 
     use futures::{TryStreamExt as _, stream};
+    use vllm_engine_core_client::protocol::dtype::TensorDtype;
     use vllm_engine_core_client::protocol::multimodal::{MmModality, PlaceholderRange};
     use vllm_engine_core_client::protocol::output::{RequestSpecDecodeMetrics, StopReason};
     use vllm_engine_core_client::protocol::sampling_mask::SamplingMask;

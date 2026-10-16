@@ -15,7 +15,7 @@ use vllm_engine_core_client::protocol::output::{
     EngineCoreFinishReason, RequestSpecDecodeMetrics, StopReason,
 };
 use vllm_engine_core_client::protocol::sampling_mask::SamplingMask;
-use vllm_engine_core_client::protocol::tensor::{ShapeExt as _, WireNdArray};
+use vllm_engine_core_client::protocol::tensor::WireNdArray;
 use vllm_engine_core_client::{
     AbortCause, EngineCoreOutputStream, EngineCoreStreamDelivery, EngineCoreStreamOutput,
 };
@@ -435,50 +435,32 @@ impl GenerateOutputStream {
         Ok(output)
     }
 
-    /// Concatenate the routed-expert rows received so far along the token axis.
+    /// Concatenate the routed-expert rows received so far along the token
+    /// axis, like Python's `np.concatenate`.
     fn take_routed_experts(&mut self, request_id: &str) -> Result<Option<Box<WireNdArray>>> {
         let chunks = std::mem::take(&mut self.routed_experts_chunks);
         let Some(first) = chunks.first() else {
             return Ok(None);
         };
-        let malformed = |reason: String| crate::Error::MalformedRoutedExperts {
-            request_id: request_id.to_string(),
-            reason,
-        };
-        let dtype = first.dtype;
-        let row_shape = first.shape.get(1..).unwrap_or_default().to_vec();
-        let row_nbytes = row_shape
-            .checked_numel()
-            .and_then(|numel| numel.checked_mul(dtype.scalar.element_size()))
-            .ok_or_else(|| malformed(format!("row shape {row_shape:?} overflows")))?;
-        let mut num_rows = 0_usize;
+        let row_shape = first.shape.get(1..);
+        let mut num_rows = 0;
         let mut data = Vec::new();
         for chunk in &chunks {
-            let [rows, rest @ ..] = chunk.shape.as_slice() else {
-                return Err(malformed("rows have no token axis".to_string()));
-            };
-            if chunk.dtype != dtype || rest != row_shape.as_slice() {
-                return Err(malformed(format!(
-                    "rows changed from {dtype} {row_shape:?} to {} {rest:?}",
-                    chunk.dtype
-                )));
+            if chunk.dtype != first.dtype || chunk.shape.get(1..) != row_shape {
+                return Err(crate::Error::RoutedExpertsShapeMismatch {
+                    request_id: request_id.to_string(),
+                });
             }
-            let bytes = chunk
-                .data
-                .as_raw_view()
-                .ok_or_else(|| malformed("rows were not resolved".to_string()))?;
-            if rows.checked_mul(row_nbytes) != Some(bytes.len()) {
-                return Err(malformed(format!(
-                    "{} bytes do not match {rows} rows of {row_nbytes} bytes",
-                    bytes.len()
-                )));
-            }
-            num_rows += rows;
-            data.extend_from_slice(bytes);
+            num_rows += chunk.shape[0];
+            data.extend_from_slice(chunk.data.as_raw_view().expect("resolved on decode"));
         }
-        let mut shape = vec![num_rows];
-        shape.extend(row_shape);
-        Ok(Some(Box::new(WireNdArray::from_raw(dtype, shape, data))))
+        let mut shape = first.shape.clone();
+        shape[0] = num_rows;
+        Ok(Some(Box::new(WireNdArray::from_raw(
+            first.dtype,
+            shape,
+            data,
+        ))))
     }
 
     /// Spans over the output so far; `[]` for no tokens, `None` if no label was reported.
