@@ -16,8 +16,8 @@ the Gumbel-max of its block with vLLM's own ``gumbel_noised_argmax``. The
 next step's programs first take the argmax over the previous step's block
 maxima themselves, which gives the previous token, and the last step's
 tokens get one small launch. The noise depends only on the request's seed,
-the position and the token id, and both paths keep the first of equal
-maxima, so the sampled token does not depend on the block size.
+the draft step, the position and the token id, and both paths keep the first
+of equal maxima, so the sampled token does not depend on the block size.
 
 The bias is an fp32 sum of 256 products rounded to bf16, as vLLM's GEMV
 output. The products are added in another order than in vLLM's GEMV, so a
@@ -34,7 +34,7 @@ import torch
 from vllm.logger import init_logger
 from vllm.models.deepseek_v41.amd.ops import enabled
 from vllm.triton_utils import tl, triton
-from vllm.v1.worker.gpu.sample.gumbel import gumbel_noised_argmax
+from vllm.v1.worker.gpu.sample.gumbel import gumbel_noised_argmax, spec_step_seed
 
 logger = init_logger(__name__)
 
@@ -131,7 +131,10 @@ def _markov_step_kernel(
             mask=vmask & valid,
         )
         temp = tl.load(temp_ptr + req, mask=valid, other=0.0).to(tl.float32)
-        seed = tl.load(seeds_ptr + req, mask=valid, other=0)
+        # When gumbel_sample fills the draft logits cache, it mixes the cache
+        # column, which is the draft step, into the request's seed. The
+        # draws here have to be the same as vLLM's.
+        seed = spec_step_seed(tl.load(seeds_ptr + req, mask=valid, other=0), STEP)
         # gumbel_sample keys a draw by the position before the sampled token.
         pos = tl.load(pos_ptr + r * pos_stride + STEP) - 1
         lf = tl.where(vmask, logits.to(tl.float32), float("-inf"))
