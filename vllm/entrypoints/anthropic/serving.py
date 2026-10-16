@@ -54,7 +54,7 @@ from vllm.entrypoints.serve.engine.protocol import ErrorResponse, UsageInfo
 from vllm.entrypoints.serve.exception_handling.utils import sanitize_message
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.logger import init_logger
-from vllm.parser.metrics import finish_tool_calling_trace, record_tool_call_response
+from vllm.parser.metrics import record_tool_call_response
 from vllm.renderers.chat_utils import ChatTemplateContentFormatOption
 from vllm.renderers.hf import HfRenderer, resolve_chat_template
 from vllm.renderers.online_renderer import OnlineRenderer
@@ -815,34 +815,21 @@ class AnthropicServingMessages(OpenAIServingChat):
         )
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug("Convert to OpenAI request %s", chat_req.model_dump_json())
-        streaming = False
-        try:
-            generator = await self.create_chat_completion(chat_req, raw_request)
+        generator = await self.create_chat_completion(chat_req, raw_request)
 
-            if isinstance(generator, ErrorResponse):
-                return generator
+        if isinstance(generator, ErrorResponse):
+            return generator
 
-            elif isinstance(generator, ChatCompletionResponse):
-                response = self.messages_full_converter(generator, request=chat_req)
-                if chat_req.tools or chat_req._tool_calling_spans is not None:
-                    tool_calls_count = sum(
-                        block.type == "tool_use" for block in response.content
-                    )
-                    finish_tool_calling_trace(
-                        chat_req, tool_calls_count=tool_calls_count, completed=True
-                    )
-                    if chat_req.tools:
-                        record_tool_call_response(
-                            chat_req, tool_calls_count=tool_calls_count
-                        )
-                return response
+        elif isinstance(generator, ChatCompletionResponse):
+            response = self.messages_full_converter(generator, request=chat_req)
+            if chat_req.tools:
+                tool_calls_count = sum(
+                    block.type == "tool_use" for block in response.content
+                )
+                record_tool_call_response(chat_req, tool_calls_count=tool_calls_count)
+            return response
 
-            stream = self.message_stream_converter(generator, request=chat_req)
-            streaming = True
-            return stream
-        finally:
-            if not streaming and chat_req._tool_calling_spans is not None:
-                finish_tool_calling_trace(chat_req)
+        return self.message_stream_converter(generator, request=chat_req)
 
     def messages_full_converter(
         self,
@@ -893,10 +880,8 @@ class AnthropicServingMessages(OpenAIServingChat):
                     input=json.loads(tool_call.function.arguments),
                 )
             except (json.JSONDecodeError, ValidationError):
-                if request is not None:
-                    request._tool_calling_parse_failed = True
-                    if request.tools:
-                        record_tool_call_response(request, parse_failed=True)
+                if request is not None and request.tools:
+                    record_tool_call_response(request, parse_failed=True)
                 raise
             content += [anthropic_tool_call]
 
@@ -1278,12 +1263,6 @@ class AnthropicServingMessages(OpenAIServingChat):
             except Exception:
                 logger.error("Error closing Messages stream generator.")
             finally:
-                if request is not None and request._tool_calling_spans is not None:
-                    finish_tool_calling_trace(
-                        request,
-                        tool_calls_count=emitted_tool_calls,
-                        completed=stream_completed and not stream_failed,
-                    )
                 if request is not None and request.tools:
                     record_tool_call_response(
                         request,

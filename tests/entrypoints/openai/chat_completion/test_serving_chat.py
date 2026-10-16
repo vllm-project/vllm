@@ -10,7 +10,6 @@ from unittest.mock import AsyncMock, MagicMock, call
 
 import pytest
 import pytest_asyncio
-from fastapi import Request
 from openai import OpenAI
 
 from tests.entrypoints.openai.utils import (
@@ -60,7 +59,6 @@ from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.tokenizers import get_tokenizer
 from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.tokenizers.registry import cached_tokenizer_from_config
-from vllm.tracing.utils import DEFER_TOOL_CALLING_SPAN, SpanAttributes
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.metrics.stats import RequestStateStats
 
@@ -662,93 +660,6 @@ def _build_minimal_metrics_serving_chat(
     return serving
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("api_surface", ["chat_completions", "messages"])
-@pytest.mark.parametrize(
-    "has_tools, tracing, mutate, beam_search",
-    [
-        (True, True, False, False),
-        (True, False, False, False),
-        (False, True, False, False),
-        (True, True, True, False),
-        (True, True, False, True),
-    ],
-)
-async def test_tool_request_trace_metadata_is_conditional_and_ignores_client_values(
-    has_tools, tracing, mutate, beam_search, api_surface
-):
-    from vllm.tracing.utils import tool_calling_trace_attributes
-
-    serving = MagicMock(spec=OpenAIServingChat)
-    serving._create_chat_completion = OpenAIServingChat._create_chat_completion.__get__(
-        serving
-    )
-    serving._get_trace_headers = OpenAIServingChat._get_trace_headers.__get__(serving)
-    serving.engine_client = MagicMock(spec=AsyncLLM)
-    serving.engine_client.is_tracing_enabled.return_value = tracing
-    serving.renderer = MagicMock()
-    serving.models = MagicMock()
-    serving.model_config = MagicMock(max_model_len=100)
-    serving.default_sampling_params = {}
-    serving.override_max_tokens = None
-    serving.parser_cls = None
-    serving.render_chat_request.return_value = (
-        [],
-        [{"type": "token", "prompt_token_ids": [1]}],
-    )
-    if mutate:
-
-        async def render_chat_request(request):
-            request.tools = []
-            request.tool_choice = "none"
-            return [], [{"type": "token", "prompt_token_ids": [1]}]
-
-        serving.render_chat_request.side_effect = render_chat_request
-    serving._extract_prompt_len.return_value = 1
-    serving._engine_reasoning_kwargs.return_value = {}
-    request = ChatCompletionRequest(
-        messages=[],
-        max_completion_tokens=1,
-        use_beam_search=beam_search,
-        tools=[{"type": "function", "function": {"name": "private-function"}}]
-        if has_tools
-        else None,
-    )
-    request._api_surface = api_surface
-    traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
-    raw_request = Request(
-        {
-            "type": "http",
-            "headers": [
-                (b"traceparent", traceparent.encode()),
-                (SpanAttributes.TOOL_CALLING_TOOL_CHOICE.encode(), b"private-data"),
-                (SpanAttributes.TOOL_CALLING_TOOL_COUNT.encode(), b"999"),
-                (DEFER_TOOL_CALLING_SPAN.encode(), b"1"),
-            ],
-        }
-    )
-    await serving._create_chat_completion(request, raw_request)
-    generate = serving.beam_search if beam_search else serving.engine_client.generate
-    headers = generate.call_args.kwargs["trace_headers"]
-    assert headers["traceparent"] == traceparent
-    assert "private" not in repr(headers)
-    if has_tools and tracing:
-        assert tool_calling_trace_attributes(headers) == {
-            SpanAttributes.TOOL_CALLING_PRESENT: True,
-            SpanAttributes.TOOL_CALLING_TOOL_COUNT: 1,
-            SpanAttributes.TOOL_CALLING_TOOL_CHOICE: "auto",
-            SpanAttributes.TOOL_CALLING_API_SURFACE: api_surface,
-        }
-    else:
-        assert headers == {"traceparent": traceparent}
-    deferred = has_tools and tracing and not beam_search
-    assert (headers.get(DEFER_TOOL_CALLING_SPAN) == "1") == deferred
-    assert (request._tool_calling_spans is not None) == deferred
-    assert "_tool_calling_spans" not in request.model_dump()
-    if not has_tools:
-        serving.engine_client.is_tracing_enabled.assert_not_awaited()
-
-
 def _make_metrics_request_output(
     metrics: RequestStateStats | None = _PER_REQUEST_STATS,
     token_ids: tuple[int, ...] = (100, 101),
@@ -884,17 +795,6 @@ async def test_chat_per_request_metrics_suppressed_for_n_greater_than_one():
     assert response.metrics is None
 
 
-def _assert_tool_response_span(span, count, status):
-    span.set_attributes.assert_called_once_with(
-        {
-            SpanAttributes.TOOL_CALLING_RESPONSE_HAS_TOOL_CALLS: count > 0,
-            SpanAttributes.TOOL_CALLING_TOOL_CALLS_COUNT: count,
-            SpanAttributes.TOOL_CALLING_PARSER_STATUS: status,
-        }
-    )
-    span.end.assert_called_once_with()
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "fields, calls_per_choice, n, expected_count",
@@ -938,10 +838,6 @@ async def test_full_tool_response_metrics_count_returned_calls_once(
     )
     request._api_surface = api_surface
     output = _make_metrics_request_output()
-    spans = [MagicMock(), MagicMock()]
-    if request.tools and api_surface != "messages":
-        request._tool_calling_spans = []
-        output._tool_calling_spans = spans
     output.outputs = [replace(output.outputs[0], index=i) for i in range(n)]
     response = await serving.chat_completion_full_generator(
         request,
@@ -963,14 +859,6 @@ async def test_full_tool_response_metrics_count_returned_calls_once(
             record.assert_not_called()
         else:
             record.assert_called_once_with(request, tool_calls_count=expected_count)
-    for span in spans:
-        if request.tools and api_surface != "messages":
-            _assert_tool_response_span(
-                span, expected_count, "success" if expected_count else "no_tool_calls"
-            )
-            assert request._tool_calling_spans is None
-        else:
-            span.end.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -1002,10 +890,6 @@ async def test_full_tool_response_metrics_report_parse_error_not_emitted_calls(
     )
     request._api_surface = api_surface
     output = _make_metrics_request_output()
-    span = MagicMock()
-    if api_surface != "messages":
-        request._tool_calling_spans = []
-        output._tool_calling_spans = [span]
     output.outputs = [replace(output.outputs[0], index=i) for i in range(2)]
     with pytest.raises(ValueError) as caught:
         await serving.chat_completion_full_generator(
@@ -1019,52 +903,7 @@ async def test_full_tool_response_metrics_report_parse_error_not_emitted_calls(
             parser=parser,
         )
     assert caught.value is error
-    assert request._tool_calling_parse_failed
     record.assert_called_once_with(request, parse_failed=True)
-    if api_surface != "messages":
-        _assert_tool_response_span(span, 0, "parse_failure")
-    else:
-        span.end.assert_not_called()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("failure", ["engine", "cancel"])
-async def test_full_tool_response_trace_closes_on_engine_failure(failure):
-    serving = _build_minimal_metrics_serving_chat(enable_per_request_metrics=False)
-    serving.has_kv_connector = False
-    request = ChatCompletionRequest(
-        messages=[], tools=[{"type": "function", "function": {"name": "f"}}]
-    )
-    request._tool_calling_spans = []
-    span = MagicMock()
-
-    async def source():
-        output = _make_metrics_request_output()
-        output._tool_calling_spans = [span]
-        yield output
-        if failure == "cancel":
-            raise asyncio.CancelledError()
-        raise RuntimeError("fixture engine error")
-
-    serving._create_chat_completion = lambda request, raw_request: (
-        serving.chat_completion_full_generator(
-            request,
-            source(),
-            "test-id",
-            "test-model",
-            [],
-            MagicMock(),
-            RequestResponseMetadata(request_id="test-id"),
-        )
-    )
-    if failure == "cancel":
-        response = await serving.create_chat_completion(request)
-        assert isinstance(response, ErrorResponse)
-    else:
-        with pytest.raises(RuntimeError, match="fixture engine error"):
-            await serving.create_chat_completion(request)
-    _assert_tool_response_span(span, 0, "interrupted")
-    assert request._tool_calling_spans is None
 
 
 @pytest.fixture
@@ -1137,10 +976,6 @@ async def test_stream_tool_response_metrics_deduplicate_filtered_fragments(
             replace(output.outputs[0], index=i, finish_reason=finish) for i in range(n)
         ]
         outputs.append(output)
-    span = MagicMock()
-    if request.tools and api_surface != "messages":
-        request._tool_calling_spans = []
-        outputs[0]._tool_calling_spans = [span]
     chunks = [
         line
         async for line in serving.chat_completion_stream_generator(
@@ -1176,23 +1011,17 @@ async def test_stream_tool_response_metrics_deduplicate_filtered_fragments(
                 parse_failed=False,
                 completed=True,
             )
-    if request.tools and api_surface != "messages":
-        _assert_tool_response_span(
-            span, expected_count, "success" if expected_count else "no_tool_calls"
-        )
-    else:
-        span.end.assert_not_called()
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("emitted_first", [False, True])
 @pytest.mark.parametrize(
     "failure",
-    ["parser", "engine", "generation", "cancel", "close", "cleanup", "cleanup-cancel"],
+    ["parser", "engine", "generation", "cancel", "close"],
 )
 @pytest.mark.parametrize("api_surface", ["chat_completions", "messages"])
 async def test_stream_tool_response_metrics_retain_calls_without_false_outcomes(
-    tool_metrics_stream_serving, failure, emitted_first, api_surface, caplog
+    tool_metrics_stream_serving, failure, emitted_first, api_surface
 ):
     serving, parser, record = tool_metrics_stream_serving
     request = ChatCompletionRequest(
@@ -1201,10 +1030,7 @@ async def test_stream_tool_response_metrics_retain_calls_without_false_outcomes(
         tools=[{"type": "function", "function": {"name": "f"}}],
     )
     request._api_surface = api_surface
-    span = MagicMock()
-    if api_surface != "messages" or failure.startswith("cleanup"):
-        request._tool_calling_spans = []
-    parser_failed = failure == "parser" or failure.startswith("cleanup")
+    parser_failed = failure == "parser"
     parser.parse_delta.side_effect = (
         [DeltaMessage(tool_calls=[DeltaToolCall(index=0)])] if emitted_first else []
     ) + [ValueError("fixture parse error") if parser_failed else DeltaMessage()]
@@ -1213,7 +1039,6 @@ async def test_stream_tool_response_metrics_retain_calls_without_false_outcomes(
 
     async def source():
         output = _reasoning_lifecycle_output()
-        output._tool_calling_spans = [span]
         try:
             if emitted_first:
                 yield output
@@ -1224,15 +1049,9 @@ async def test_stream_tool_response_metrics_retain_calls_without_false_outcomes(
             output = _reasoning_lifecycle_output(
                 finish="error" if failure == "generation" else "stop"
             )
-            if not emitted_first:
-                output._tool_calling_spans = [span]
             yield output
         finally:
             source_closed()
-            if failure == "cleanup":
-                raise RuntimeError("private cleanup detail")
-            if failure == "cleanup-cancel":
-                raise asyncio.CancelledError()
 
     iterator = source()
     stream = serving.chat_completion_stream_generator(
@@ -1261,12 +1080,11 @@ async def test_stream_tool_response_metrics_retain_calls_without_false_outcomes(
         cancelled = True
     finally:
         await stream.aclose()
-        if api_surface != "messages":
-            source_closed.assert_called_once_with()
         await iterator.aclose()
+        source_closed.assert_called_once_with()
 
-    assert cancelled == (failure in ("cancel", "cleanup-cancel"))
-    if failure in ("cancel", "close", "cleanup-cancel"):
+    assert cancelled == (failure == "cancel")
+    if failure in ("cancel", "close"):
         assert "data: [DONE]\n\n" not in chunks
     else:
         assert chunks[-1] == "data: [DONE]\n\n"
@@ -1284,17 +1102,6 @@ async def test_stream_tool_response_metrics_retain_calls_without_false_outcomes(
             parse_failed=parser_failed,
             completed=False,
         )
-        if emitted_first or failure not in ("engine", "cancel"):
-            _assert_tool_response_span(
-                span,
-                int(emitted_first),
-                "parse_failure" if parser_failed else "interrupted",
-            )
-        else:
-            span.end.assert_not_called()
-    if failure == "cleanup":
-        assert "Error closing Chat completion result generator." in caplog.text
-        assert "private cleanup detail" not in caplog.text
 
 
 @pytest.mark.asyncio
@@ -1312,8 +1119,6 @@ async def test_messages_stream_tool_response_metrics_count_parser_failure_once(
         tools=[{"type": "function", "function": {"name": "f"}}],
     )
     request._api_surface = "messages"
-    request._tool_calling_spans = []
-    span = MagicMock()
     parser.parse_delta.side_effect = (
         [
             DeltaMessage(
@@ -1330,7 +1135,6 @@ async def test_messages_stream_tool_response_metrics_count_parser_failure_once(
         else []
     ) + [ValueError("fixture parse error")]
     outputs = [_reasoning_lifecycle_output()] * (2 if emitted_first else 1)
-    outputs[0]._tool_calling_spans = [span]
     chat_stream = serving.chat_completion_stream_generator(
         request,
         _stream_request_outputs(*outputs),
@@ -1349,8 +1153,6 @@ async def test_messages_stream_tool_response_metrics_count_parser_failure_once(
         call(request, parse_failed=True, completed=False),
         call(request, tool_calls_count=int(emitted_first), completed=False),
     ]
-    _assert_tool_response_span(span, int(emitted_first), "parse_failure")
-    assert request._tool_calling_spans is None
 
 
 @pytest.mark.asyncio

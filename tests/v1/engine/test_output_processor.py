@@ -1,12 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import asyncio
 import math
 import time
-from unittest.mock import AsyncMock, MagicMock, Mock
+from unittest.mock import MagicMock, Mock
 
-import msgspec
 import numpy as np
 import prometheus_client
 import pytest
@@ -32,8 +30,6 @@ from vllm.outputs import (
 )
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.tokenizers import TokenizerLike
-from vllm.tracing import SpanAttributes, is_tracing_available
-from vllm.tracing.utils import DEFER_TOOL_CALLING_SPAN
 from vllm.v1.engine import (
     EngineCoreEvent,
     EngineCoreEventType,
@@ -51,212 +47,8 @@ from vllm.v1.engine.output_processor import (
 from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.metrics.loggers import PrometheusStatLogger
 from vllm.v1.metrics.prometheus import unregister_vllm_metrics
-from vllm.v1.metrics.stats import (
-    IterationStats,
-    PrefillStats,
-    RequestStateStats,
-    SchedulerStats,
-)
+from vllm.v1.metrics.stats import IterationStats, PrefillStats, SchedulerStats
 from vllm.v1.outputs import SamplingMaskLists
-
-
-@pytest.fixture
-def span_exporter(monkeypatch):
-    if not is_tracing_available():
-        pytest.skip("OTel tracing dependencies are required")
-    from opentelemetry.sdk.trace import TracerProvider
-    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
-    from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
-        InMemorySpanExporter,
-    )
-
-    exporter = InMemorySpanExporter()
-    provider = TracerProvider()
-    provider.add_span_processor(SimpleSpanProcessor(exporter))
-    monkeypatch.setattr(
-        "vllm.tracing.otel.trace.get_tracer", lambda *args: provider.get_tracer("test")
-    )
-    yield exporter
-    provider.shutdown()
-
-
-@pytest.mark.parametrize("tool_metadata", [False, True])
-@pytest.mark.parametrize("parent_in_headers", [False, True])
-def test_inference_span_adds_sanitized_tool_summary_without_changing_parent(
-    monkeypatch, span_exporter, tool_metadata, parent_in_headers
-):
-    traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
-    headers = {"traceparent": traceparent} if parent_in_headers else {}
-    monkeypatch.setenv("traceparent", traceparent)
-    if tool_metadata:
-        headers.update(
-            {
-                SpanAttributes.TOOL_CALLING_TOOL_COUNT: "2",
-                SpanAttributes.TOOL_CALLING_TOOL_CHOICE: "named",
-                SpanAttributes.TOOL_CALLING_API_SURFACE: "messages",
-                "tool_calling.arguments": "private-data",
-            }
-        )
-    output = EngineCoreOutput(
-        request_id="test-id", new_token_ids=[], trace_headers=headers
-    )
-    output = msgspec.msgpack.decode(
-        msgspec.msgpack.encode(output), type=EngineCoreOutput
-    )
-    state = MagicMock(spec=RequestState)
-    state.stats = RequestStateStats(
-        arrival_time=1,
-        queued_ts=2,
-        scheduled_ts=3,
-        first_token_ts=4,
-        last_token_ts=5,
-        num_generation_tokens=2,
-    )
-    state.prompt_token_ids = [1, 2, 3]
-    state.prompt_embeds = None
-    state.external_req_id = "test-id"
-    state.top_p = state.temperature = state.max_tokens_param = state.n = None
-    OutputProcessor(None, log_stats=True).do_tracing(output, state, IterationStats())
-    spans = span_exporter.get_finished_spans()
-    assert len(spans) == 1 and spans[0].name == "llm_request"
-    assert spans[0].context.trace_id == int("4bf92f3577b34da6a3ce929d0e0e4736", 16)
-    assert spans[0].parent.span_id == int("00f067aa0ba902b7", 16)
-    attributes = dict(spans[0].attributes)
-    assert attributes[SpanAttributes.GEN_AI_USAGE_PROMPT_TOKENS] == 3
-    assert {
-        key: value
-        for key, value in attributes.items()
-        if key.startswith("tool_calling.")
-    } == (
-        {
-            SpanAttributes.TOOL_CALLING_PRESENT: True,
-            SpanAttributes.TOOL_CALLING_TOOL_COUNT: 2,
-            SpanAttributes.TOOL_CALLING_TOOL_CHOICE: "named",
-            SpanAttributes.TOOL_CALLING_API_SURFACE: "messages",
-        }
-        if tool_metadata
-        else {}
-    )
-    assert "private-data" not in repr(attributes)
-
-
-@pytest.mark.parametrize("count", [1, 2])
-@pytest.mark.parametrize("handoff", [False, True])
-def test_deferred_inference_spans_keep_one_owner_until_completion(
-    span_exporter, count, handoff
-):
-    processor = OutputProcessor(None, log_stats=True, tracing_enabled=True)
-    queue = RequestOutputCollector(RequestOutputKind.FINAL_ONLY, "parent")
-    headers = {
-        "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
-        SpanAttributes.TOOL_CALLING_TOOL_COUNT: "1",
-        SpanAttributes.TOOL_CALLING_TOOL_CHOICE: "auto",
-        DEFER_TOOL_CALLING_SPAN: "1",
-    }
-    for i in range(count):
-        request = EngineCoreRequest(
-            request_id=f"child-{i}",
-            external_req_id="parent",
-            prompt_token_ids=[1, 2],
-            mm_features=None,
-            sampling_params=SamplingParams(detokenize=False),
-            pooling_params=None,
-            arrival_time=1,
-            lora_request=None,
-            cache_salt=None,
-            data_parallel_rank=None,
-            trace_headers=headers,
-        )
-        processor.add_request(request, None, queue=queue)
-        state = processor.request_states[request.request_id]
-        processor.do_tracing(
-            EngineCoreOutput(
-                request_id=request.request_id, new_token_ids=[], trace_headers=headers
-            ),
-            state,
-            IterationStats(),
-        )
-    assert not span_exporter.get_finished_spans()
-    spans = queue.take_tool_calling_spans() if handoff else None
-    queue.close()
-    queue.close()  # Cleanup is idempotent and leaves transferred spans alone.
-    if handoff:
-        assert spans is not None
-        assert len(spans) == count
-        assert not span_exporter.get_finished_spans()
-        for span in spans:
-            span.set_attribute("tool_calling.parser_status", "success")
-            span.end()
-    exported = span_exporter.get_finished_spans()
-    assert len(exported) == count
-    assert len({span.context.span_id for span in exported}) == count
-    assert all(span.name == "llm_request" for span in exported)
-    assert all(span.parent.span_id == int("00f067aa0ba902b7", 16) for span in exported)
-    assert all(
-        span.attributes[SpanAttributes.GEN_AI_USAGE_PROMPT_TOKENS] == 2
-        for span in exported
-    )
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("outcome", ["handoff", "error", "cancel"])
-async def test_async_generate_transfers_or_closes_unclaimed_inference_spans(outcome):
-    from vllm.v1.engine.async_llm import AsyncLLM
-    from vllm.v1.engine.exceptions import EngineGenerateError
-
-    queue = RequestOutputCollector(RequestOutputKind.FINAL_ONLY, "test-id")
-    spans = [MagicMock(), MagicMock()]
-    queue._tool_calling_spans = spans
-    engine = AsyncLLM.__new__(AsyncLLM)
-    engine.add_request = AsyncMock(return_value=queue)
-    engine.abort = AsyncMock()
-    engine.log_requests = False
-    if outcome == "handoff":
-        queue.put(RequestOutput("test-id", None, [1], None, [], True))
-        results = [
-            output
-            async for output in engine.generate(
-                {"prompt_token_ids": [1]}, SamplingParams(), "test-id"
-            )
-        ]
-        assert results[0]._tool_calling_spans is spans
-        for span in spans:
-            span.end.assert_not_called()
-            span.end()
-    else:
-        if outcome == "error":
-            queue.put(ValueError("fixture engine error"))
-            error = EngineGenerateError
-        else:
-            queue.get_nowait = MagicMock(side_effect=asyncio.CancelledError)
-            error = asyncio.CancelledError
-        with pytest.raises(error):
-            async for _ in engine.generate(
-                {"prompt_token_ids": [1]}, SamplingParams(), "test-id"
-            ):
-                pytest.fail("A failed engine must not yield output")
-    assert queue.take_tool_calling_spans() is None
-    for span in spans:
-        span.end.assert_called_once()
-
-
-@pytest.mark.asyncio
-async def test_failed_engine_submission_closes_unclaimed_inference_spans():
-    from vllm.v1.engine.async_llm import AsyncLLM
-
-    engine = AsyncLLM.__new__(AsyncLLM)
-    engine.output_processor = MagicMock()
-    engine.engine_core = MagicMock()
-    failure = RuntimeError("fixture submission error")
-    engine.engine_core.add_request_async = AsyncMock(side_effect=failure)
-    queue = RequestOutputCollector(RequestOutputKind.FINAL_ONLY, "test-id")
-    span = MagicMock()
-    queue._tool_calling_spans = [span]
-    request = MagicMock()
-    with pytest.raises(RuntimeError) as caught:
-        await engine._add_request(request, None, None, 0, queue)
-    assert caught.value is failure
-    span.end.assert_called_once()
 
 
 @pytest.mark.parametrize("flat_logprobs", [False, True])

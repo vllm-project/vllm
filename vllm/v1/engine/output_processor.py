@@ -27,10 +27,8 @@ from vllm.tracing import (
     SpanAttributes,
     SpanKind,
     extract_trace_context,
-    extract_trace_headers,
     instrument_manual,
 )
-from vllm.tracing.utils import DEFER_TOOL_CALLING_SPAN, tool_calling_trace_attributes
 from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
 from vllm.v1.engine.detokenizer import IncrementalDetokenizer
@@ -67,7 +65,6 @@ class RequestOutputCollector:
         self.ready = asyncio.Event()
 
         self._input_stream_task: asyncio.Task | None = None
-        self._tool_calling_spans: list[Any] | None = None
 
     def put(self, output: RequestOutput | PoolingRequestOutput | Exception) -> None:
         """Non-blocking put operation."""
@@ -105,28 +102,15 @@ class RequestOutputCollector:
             raise output
         return output
 
-    def take_tool_calling_spans(self) -> list[Any] | None:
-        """Transfer span ownership to the output consumer."""
-        spans, self._tool_calling_spans = self._tool_calling_spans, None
-        return spans
-
     def close(self):
-        try:
-            if self._input_stream_task is not None:
-                self._input_stream_task.cancel()
-            self._input_stream_task = None
-        finally:
-            for span in self.take_tool_calling_spans() or ():
-                span.end()
+        if self._input_stream_task is not None:
+            self._input_stream_task.cancel()
+        self._input_stream_task = None
 
     def __del__(self):
-        try:
-            if (task := self._input_stream_task) is not None:
-                task.get_loop().call_soon_threadsafe(task.cancel)
-                self._input_stream_task = None
-        finally:
-            for span in self.take_tool_calling_spans() or ():
-                span.end()
+        if (task := self._input_stream_task) is not None:
+            task.get_loop().call_soon_threadsafe(task.cancel)
+            self._input_stream_task = None
 
 
 def _is_chunk_boundary(
@@ -250,7 +234,6 @@ class RequestState:
         self.spec_decode_metrics: RequestSpecDecodeMetrics | None = None
 
         self.stats = RequestStateStats(arrival_time=arrival_time) if log_stats else None
-        self._tool_calling_span: Any = None
 
         # Routed experts accumulation (prompt + sample chunks)
         self.routed_experts_chunks: list[np.ndarray] = []
@@ -702,29 +685,6 @@ class OutputProcessor:
             stream_interval=self.stream_interval,
         )
         self.request_states[request_id] = req_state
-        if (
-            self.tracing_enabled
-            and queue is not None
-            and request.trace_headers
-            and request.trace_headers.get(DEFER_TOOL_CALLING_SPAN) == "1"
-        ):
-            attributes = tool_calling_trace_attributes(request.trace_headers)
-            if attributes.get(SpanAttributes.TOOL_CALLING_PRESENT):
-                attributes[SpanAttributes.GEN_AI_REQUEST_ID] = req_state.external_req_id
-                req_state._tool_calling_span = instrument_manual(
-                    span_name="llm_request",
-                    start_time=int(request.arrival_time * 1e9),
-                    attributes=attributes,
-                    context=extract_trace_context(
-                        extract_trace_headers(request.trace_headers)
-                    ),
-                    kind=SpanKind.SERVER,
-                    defer_end=True,
-                )
-                if req_state._tool_calling_span is not None:
-                    if queue._tool_calling_spans is None:
-                        queue._tool_calling_spans = []
-                    queue._tool_calling_spans.append(req_state._tool_calling_span)
         if parent_req:
             self.parent_requests[parent_req.request_id] = parent_req
 
@@ -977,9 +937,7 @@ class OutputProcessor:
 
         metrics = req_state.stats
         arrival_time_ns = int(metrics.arrival_time * 1e9)
-        trace_context = extract_trace_context(
-            extract_trace_headers(engine_core_output.trace_headers or {})
-        )
+        trace_context = extract_trace_context(engine_core_output.trace_headers)
         prompt_length = length_from_prompt_token_ids_or_embeds(
             req_state.prompt_token_ids, req_state.prompt_embeds
         )
@@ -1022,21 +980,13 @@ class OutputProcessor:
         if req_state.n:
             attributes[SpanAttributes.GEN_AI_REQUEST_N] = req_state.n
 
-        attributes.update(
-            tool_calling_trace_attributes(engine_core_output.trace_headers)
+        instrument_manual(
+            span_name="llm_request",
+            start_time=arrival_time_ns,
+            attributes=attributes,
+            context=trace_context,
+            kind=SpanKind.SERVER,
         )
-
-        if (span := getattr(req_state, "_tool_calling_span", None)) is not None:
-            if span.is_recording():
-                span.set_attributes(attributes)
-        else:
-            instrument_manual(
-                span_name="llm_request",
-                start_time=arrival_time_ns,
-                attributes=attributes,
-                context=trace_context,
-                kind=SpanKind.SERVER,
-            )
 
     def _update_stats_from_output(
         self,

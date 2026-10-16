@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Mapping
-from typing import Any
 
 from vllm.logger import init_logger
 from vllm.utils.func_utils import run_once
@@ -11,8 +10,6 @@ logger = init_logger(__name__)
 
 # Standard W3C headers used for context propagation
 TRACE_HEADERS = ["traceparent", "tracestate"]
-# Internal engine metadata; never accepted from incoming HTTP headers.
-DEFER_TOOL_CALLING_SPAN = "_vllm_defer_tool_calling_span"
 
 
 class SpanAttributes:
@@ -31,14 +28,6 @@ class SpanAttributes:
     GEN_AI_RESPONSE_MODEL = "gen_ai.response.model"
 
     # Custom attributes added until they are standardized
-    TOOL_CALLING_PRESENT = "tool_calling.present"
-    TOOL_CALLING_TOOL_COUNT = "tool_calling.tool_count"
-    TOOL_CALLING_TOOL_CHOICE = "tool_calling.tool_choice"
-    TOOL_CALLING_API_SURFACE = "tool_calling.api_surface"
-    TOOL_CALLING_RESPONSE_HAS_TOOL_CALLS = "tool_calling.response_has_tool_calls"
-    TOOL_CALLING_TOOL_CALLS_COUNT = "tool_calling.tool_calls_count"
-    TOOL_CALLING_PARSER_STATUS = "tool_calling.parser_status"
-
     GEN_AI_REQUEST_ID = "gen_ai.request.id"
     GEN_AI_REQUEST_N = "gen_ai.request.n"
     GEN_AI_USAGE_NUM_SEQUENCES = "gen_ai.usage.num_sequences"
@@ -74,32 +63,6 @@ def extract_trace_headers(headers: Mapping[str, str]) -> Mapping[str, str]:
     Useful for logging or passing context to a non-OTel client.
     """
     return {h: headers[h] for h in TRACE_HEADERS if h in headers}
-
-
-def tool_calling_trace_attributes(headers: Mapping[str, str] | None) -> dict[str, Any]:
-    """Read only bounded tool summaries from internal engine trace metadata."""
-    if not headers:
-        return {}
-    count = headers.get(SpanAttributes.TOOL_CALLING_TOOL_COUNT)
-    # Limit conversion to a non-negative, safely representable OTel integer.
-    if not isinstance(count, str) or not count.isdecimal() or len(count) > 18:
-        return {}
-    tool_count = int(count)
-    choice = headers.get(SpanAttributes.TOOL_CALLING_TOOL_CHOICE)
-    return {
-        SpanAttributes.TOOL_CALLING_PRESENT: tool_count > 0,
-        SpanAttributes.TOOL_CALLING_TOOL_COUNT: tool_count,
-        SpanAttributes.TOOL_CALLING_TOOL_CHOICE: (
-            choice
-            if choice in ("unset", "auto", "none", "required", "named", "other")
-            else "other"
-        ),
-        SpanAttributes.TOOL_CALLING_API_SURFACE: (
-            "messages"
-            if headers.get(SpanAttributes.TOOL_CALLING_API_SURFACE) == "messages"
-            else "chat_completions"
-        ),
-    }
 
 
 @run_once
