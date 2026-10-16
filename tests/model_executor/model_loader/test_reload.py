@@ -248,6 +248,29 @@ def test_attention_sink_layerwise_reload(monkeypatch, tp_rank, padding):
         assert torch.equal(model.proj, torch.full((16,), offset))
 
 
+def test_reload_drops_unpaired_pending_load_state(monkeypatch):
+    """A half-pair left by an aborted streamed reload (e.g. an FP8 indexer wk
+    weight whose scale never arrived) must not pair with the other half of the
+    next, unrelated reload; one left at the end of a load is reported."""
+    model = torch.nn.Module()
+    model.inner = torch.nn.Linear(2, 2, bias=False)
+    model.inner._pending_indexer_wk_fp8 = {"layers.0.indexer": {"weight": 1}}
+    record_metadata_for_reloading(model)
+
+    initialize_layerwise_reload(model)
+    assert model.inner._pending_indexer_wk_fp8 == {}
+
+    warnings = Mock()
+    monkeypatch.setattr(reload_layerwise.logger, "warning", warnings)
+    model.inner._pending_indexer_wk_fp8["layers.1.indexer"] = {"scale": 2}
+    weight = model.inner.weight
+    weight.weight_loader(weight, torch.ones(2, 2))
+    finalize_layerwise_reload(model, SimpleNamespace(dtype=torch.float32))
+    assert model.inner._pending_indexer_wk_fp8 == {}
+    warnings.assert_called_once()
+    assert ["layers.1.indexer"] in warnings.call_args.args
+
+
 def _fp8_reload_unsupported() -> bool:
     """Whether the FP8 reload/online-quantize tests should be skipped.
 
@@ -1467,7 +1490,7 @@ requires_cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs 
 
 
 @requires_cuda
-def test_flashinfer_bmm_scales_refresh_in_place():
+def test_flashinfer_bmm_scales_refresh_in_place(monkeypatch):
     """FlashInfer's trtllm-gen decode reads bmm1/bmm2 scales from device
     tensors allocated once and refilled by refresh(), so FULL CUDA graphs see
     q/k/v scales changed by a reload. Values match the host-float path: the
@@ -1484,6 +1507,7 @@ def test_flashinfer_bmm_scales_refresh_in_place():
     impl._bmm_scale_tensors = None
     impl._xqa_bmm1_tensors = None
     impl.float_scales_in_decode = False
+    impl._full_cudagraphs = False
     layer = SimpleNamespace(
         _q_scale_float=1.0,
         _k_scale_float=0.3,
@@ -1517,6 +1541,15 @@ def test_flashinfer_bmm_scales_refresh_in_place():
     # output-quant fusion folds the o-scale into bmm2: host floats (flagged)
     assert impl._trtllm_decode_bmm_scales(torch.ones(1)) == (None, impl.bmm2_scale)
     assert impl.float_scales_in_decode
+
+    # a reload under FULL CUDA graphs after such a decode is reported
+    warnings = Mock()
+    monkeypatch.setattr(fi.logger, "warning_once", warnings)
+    impl.refresh(layer)
+    warnings.assert_not_called()  # not under FULL graphs
+    impl._full_cudagraphs = True
+    impl.refresh(layer)
+    warnings.assert_called_once()
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])

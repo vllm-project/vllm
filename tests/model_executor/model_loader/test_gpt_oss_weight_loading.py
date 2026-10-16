@@ -169,13 +169,25 @@ def test_presliced_expert_goes_through_the_loader() -> None:
     whole = torch.arange(24, dtype=torch.float32).reshape(2, 4, 3)
     _load_presliced_expert(experts.w13_weight, whole, "w13_weight", None)
     assert torch.equal(experts.w13_weight, whole)
-    # one expert (index as is), partial rows (leading slices), and a scalar
+    # one expert (index as is) into a padded param: leading slices only
     part = -torch.ones(2, 3)
-    _load_presliced_expert(experts.w13_weight, part, "w13_weight", 1)
+    _load_presliced_expert(experts.w13_weight, part, "w13_weight", 1, padded=True)
     assert torch.equal(experts.w13_weight[1, :2], part)
     assert torch.equal(experts.w13_weight[1, 2:], whole[1, 2:])
-    assert calls == ["gpt_oss_presliced"] * 2
+    assert calls == ["gpt_oss_presliced", "gpt_oss_presliced_padded"]
 
     scales = _TestExperts("w13_input_scale", (2,))
     _load_presliced_expert(scales.w13_input_scale, torch.tensor(5.0), "s", 1)
     assert scales.w13_input_scale.tolist() == [0.0, 5.0]
+
+
+def test_presliced_expert_rejects_a_short_tensor() -> None:
+    """Unless the param is known to be padded, a tensor that doesn't fill it
+    is an error (the old `param.copy_` raised), not a partial write."""
+    from vllm.model_executor.models.gpt_oss import _load_presliced_expert
+
+    experts = _TestExperts("w13_bias", (2, 4))
+    with pytest.raises(RuntimeError):
+        _load_presliced_expert(experts.w13_bias, torch.ones(2, 3), "w13_bias", None)
+    with pytest.raises(RuntimeError):
+        _load_presliced_expert(experts.w13_bias, torch.ones(3), "w13_bias", 0)

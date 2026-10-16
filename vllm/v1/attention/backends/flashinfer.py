@@ -1930,7 +1930,14 @@ class FlashInferImpl(AttentionImpl):
         self._xqa_bmm1_tensors: dict[bool, torch.Tensor] | None = None
         # Set once a decode path consumed host-side scale floats; FULL CUDA
         # graphs bake those, so a reload that changes the scales is not seen.
+        # refresh() warns when that happens.
         self.float_scales_in_decode = False
+        cudagraph_mode = (
+            vllm_config.compilation_config.cudagraph_mode if vllm_config else None
+        )
+        self._full_cudagraphs = (
+            cudagraph_mode is not None and cudagraph_mode.has_full_cudagraphs()
+        )
 
         # Pre-allocated FP8 output buffer for NVFP4 without fused output quant.
         if self.nvfp4_trtllm and vllm_config is not None:
@@ -1996,6 +2003,16 @@ class FlashInferImpl(AttentionImpl):
         loading, and after a weight reload). Runs outside graph capture. The
         device copies are filled in place, so captured graphs see the new
         values; the o-scale is re-read at the next eager forward."""
+        if self.float_scales_in_decode and self._full_cudagraphs:
+            # A decode already ran, so this is a reload, and decode on this
+            # path (output-quant fusion, DCP, or the FlashInfer decode wrapper)
+            # reads the scales as host floats baked into the FULL graphs.
+            logger.warning_once(
+                "FlashInfer decode on this path reads the q/k/v/o scales as "
+                "host floats, which FULL CUDA graphs captured before this weight "
+                "reload keep: decode uses the old scales until the graphs are "
+                "recaptured, while eager and piecewise forwards use the new ones."
+            )
         bmm1_scale, bmm2_scale = self._compute_bmm_scales(layer)
         self.o_sf_scale = None
         if getattr(layer, "_o_scale_float", None) is not None:

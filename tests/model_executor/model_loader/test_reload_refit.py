@@ -77,6 +77,8 @@ def _diff_ptrs(before: dict, after: dict) -> dict[str, list[str]]:
         out[kind] = sorted(
             [k for k in b if k in a and a[k][0] != b[k][0]]
             + [k for k in a if k not in b]
+            # dropped: a captured graph may still read the old tensor
+            + [k for k in b if k not in a]
         )
     return out
 

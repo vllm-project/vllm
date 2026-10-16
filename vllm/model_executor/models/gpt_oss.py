@@ -94,16 +94,19 @@ def _load_presliced_expert(
     loaded_weight: torch.Tensor,
     name: str,
     expert_id: int | None,
+    padded: bool = False,
 ) -> None:
     """Copy a pre-sliced expert tensor into `param[expert_id]` (the whole stack
     when None) through the param's loader: a direct `param.data` copy writes a
-    meta placeholder during a reload."""
+    meta placeholder during a reload. The shapes must match unless `padded`,
+    where the param may be padded past the tensor and only its leading region
+    is written."""
     weight_loader = typing.cast(Callable[..., object], param.weight_loader)
     weight_loader(
         param,
         loaded_weight,
         weight_name=name,
-        shard_id="gpt_oss_presliced",
+        shard_id="gpt_oss_presliced_padded" if padded else "gpt_oss_presliced",
         expert_id=expert_id,
     )
 
@@ -331,11 +334,14 @@ class GptOssRoutedExperts(RoutedExperts):
         expert_id: int,
         return_success: bool = False,
     ) -> bool | None:
-        if shard_id == "gpt_oss_presliced":
+        if shard_id in ("gpt_oss_presliced", "gpt_oss_presliced_padded"):
             # Already sliced by the model's loader; `expert_id` indexes the
             # local stack as is, and None means the whole stack.
             data = param.data if expert_id is None else param.data[expert_id]
-            self._copy_to_expert(data, loaded_weight)
+            if shard_id == "gpt_oss_presliced_padded":
+                self._copy_to_expert(data, loaded_weight)
+            else:
+                data.copy_(loaded_weight)
             return True if return_success else None
         if shard_id not in ("gpt_oss_w13", "gpt_oss_w2"):
             if return_success:
@@ -960,7 +966,11 @@ class GptOssModel(nn.Module, EagleModelMixin):
                 # direct load here.
                 assert fused_name is not None
                 _load_presliced_expert(
-                    params_dict[fused_name], sliced_weight, fused_name, expert_id
+                    params_dict[fused_name],
+                    sliced_weight,
+                    fused_name,
+                    expert_id,
+                    padded=True,
                 )
                 loaded_params.add(fused_name)
                 continue
@@ -1073,7 +1083,11 @@ class GptOssModel(nn.Module, EagleModelMixin):
                 # direct load here.
                 assert fused_name is not None
                 _load_presliced_expert(
-                    params_dict[fused_name], sliced_weight, fused_name, expert_id
+                    params_dict[fused_name],
+                    sliced_weight,
+                    fused_name,
+                    expert_id,
+                    padded=True,
                 )
                 loaded_params.add(fused_name)
                 continue

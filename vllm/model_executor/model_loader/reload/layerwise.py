@@ -79,6 +79,31 @@ def record_metadata_for_reloading(model: torch.nn.Module):
         info.restore_device = torch.get_default_device()
 
 
+# Dicts a model's load_weights keeps across calls (a streamed reload calls it
+# once per batch) to pair tensors that arrive separately, e.g. an FP8 indexer
+# wk weight and its scale (DeepseekV2, DeepseekV32).
+_PENDING_LOAD_STATE_ATTRS = ("_pending_indexer_wk_fp8",)
+
+
+def _clear_pending_load_state(model: torch.nn.Module, warn: bool) -> None:
+    """Drop half-pairs left by an earlier (possibly aborted) load, so they are
+    not paired with the other half of an unrelated later load."""
+    for name, module in model.named_modules():
+        for attr in _PENDING_LOAD_STATE_ATTRS:
+            pending = module.__dict__.get(attr)
+            if not pending:
+                continue
+            if warn:
+                logger.warning(
+                    "%s.%s still holds unpaired tensors for %s at the end of "
+                    "loading; they were not loaded.",
+                    name or type(module).__name__,
+                    attr,
+                    sorted(pending),
+                )
+            pending.clear()
+
+
 @torch.no_grad()
 def initialize_layerwise_reload(model: torch.nn.Module):
     """Set up layerwise weight loading with deferred processing.
@@ -94,6 +119,8 @@ def initialize_layerwise_reload(model: torch.nn.Module):
     3. Run quantization processing if applicable
     4. Copy processed values back to original tensor storage
     """
+    _clear_pending_load_state(model, warn=False)
+
     # disable torchao reloading to avoid infinite recursion
     model._original_do_torchao_reload = getattr(model, "_do_torchao_reload", False)
     model._do_torchao_reload = False
@@ -238,6 +265,8 @@ def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelCon
     """
     if hasattr(model, "_original_do_torchao_reload"):
         model._do_torchao_reload = model._original_do_torchao_reload
+
+    _clear_pending_load_state(model, warn=True)
 
     deferred_attn: list[tuple[torch.nn.Module, LayerReloadingInfo]] = []
 
