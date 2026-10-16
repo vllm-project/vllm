@@ -21,7 +21,7 @@ from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
 )
 
 if TYPE_CHECKING:
-    from aiter import ActivationType, QuantType
+    from aiter import ActivationType
 
 logger = init_logger(__name__)
 
@@ -2199,38 +2199,6 @@ class rocm_aiter_ops:
             "gelu": ActivationType.Gelu,
             "swiglu": ActivationType.Swiglu,
             "situ": getattr(ActivationType, "Situv2", None),
-        }
-        return mapping.get(name)
-
-    @staticmethod
-    def get_aiter_quant_type(quant_type_str: str) -> "QuantType | None":
-        """Given a quantization type as a string, returns the corresponding aiter QuantType enum.
-        Supported quantization types: "no", "per_tensor", "per_token", "per_1x32", "per_1x128", "per_128x128".
-        Returns None if the mapping fails.
-
-        Args:
-            quant_type_str (str): Quantization type as string.
-
-        Returns:
-            Aiter QuantType enum value, or None if not found.
-
-        """
-        try:
-            from aiter import QuantType
-        except ImportError:
-            return None
-
-        if not isinstance(quant_type_str, str):
-            return None
-
-        name = quant_type_str.strip().lower()
-        mapping = {
-            "no": QuantType.No,
-            "per_tensor": QuantType.per_Tensor,
-            "per_token": QuantType.per_Token,
-            "per_1x32": QuantType.per_1x32,
-            "per_1x128": QuantType.per_1x128,
-            "per_128x128": QuantType.per_128x128,
         }
         return mapping.get(name)
 

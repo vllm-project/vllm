@@ -10,7 +10,6 @@ import torch.nn.functional as F
 import vllm.model_executor.kernels.mhc  # noqa: F401
 import vllm.model_executor.layers.mhc as mhc_layers
 from vllm.model_executor.kernels.mhc.tilelang import (
-    _torch_hc_prenorm_gemm,
     mhc_post_tilelang,
     mhc_pre_delayed_tilelang,
 )
@@ -1000,6 +999,19 @@ def test_mhc_pre_tilelang(num_tokens, hidden_size, hc_mult, fused_norm):
 
     for actual, expected in zip(out, ref, strict=True):
         torch.testing.assert_close(actual, expected, atol=5e-2, rtol=1e-2)
+
+
+def _torch_hc_prenorm_gemm(
+    x: torch.Tensor,
+    fn: torch.Tensor,
+    out: torch.Tensor,
+    sqrsum: torch.Tensor,
+) -> None:
+    assert out.shape[0] == 1
+    assert sqrsum.shape[0] == 1
+    x_float = x.float()
+    out[0].copy_(x_float @ fn.t())
+    sqrsum[0].copy_(x_float.square().sum(dim=-1))
 
 
 @pytest.mark.skipif(
