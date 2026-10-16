@@ -61,6 +61,7 @@ class _OOTKVGather(dcp.DirectDCPKVGather):
         (dcp.DirectDCPKVGather, _OOTKVGather),
     ],
 )
+@pytest.mark.parametrize("workspace_state", ["available", "absent", "oversized"])
 @pytest.mark.parametrize("use_oot", [False, True])
 @pytest.mark.parametrize(
     "mode",
@@ -72,6 +73,7 @@ def test_oot_collective_dispatch_preserves_native_fallback(
     oot_cls: type[CustomOp],
     mode: str,
     use_oot: bool,
+    workspace_state: str,
 ) -> None:
     monkeypatch.setattr(custom_op, "op_registry_oot", custom_op.op_registry_oot.copy())
     if use_oot:
@@ -126,6 +128,16 @@ def test_oot_collective_dispatch_preserves_native_fallback(
         output = torch.zeros(2, 1, 2)
         args = [torch.full((2, 2, 2), 42.0), torch.zeros(2, 2), True]
         kernel_name, output_index = "direct_dcp_a2a_lse_reduce", 11
+    group = SimpleNamespace(
+        world_size=workspace.world_size,
+        device_group=workspace.group,
+        all_gather=MagicMock(return_value=torch.full_like(output, 42)),
+    )
+    fallback_a2a = MagicMock(return_value=torch.full_like(output, 42))
+    monkeypatch.setattr(dcp, "dcp_a2a_lse_reduce", fallback_a2a)
+    if workspace_state == "oversized":
+        workspace.max_num_tokens = 1
+        workspace.max_gathered_tokens = 3
     collective_calls: list[None] = []
 
     def cuda_collective(*inputs: Any) -> None:
@@ -150,7 +162,7 @@ def test_oot_collective_dispatch_preserves_native_fallback(
         )
     )
     with set_current_vllm_config(config):
-        op = op_cls(workspace)
+        op = op_cls(group, None if workspace_state == "absent" else workspace)
     assert type(op) is (oot_cls if use_oot else op_cls), (
         "Collective construction must resolve the registered implementation"
     )
@@ -161,14 +173,21 @@ def test_oot_collective_dispatch_preserves_native_fallback(
         "Communication must run even with custom ops off"
     )
     cuda_enabled = mode != "explicit_off"
-    assert cuda_method.call_count == int(cuda_enabled), (
-        "Direct kernels must stay enabled under Inductor unless explicitly disabled"
-    )
+    assert cuda_method.call_count == int(
+        cuda_enabled and workspace_state == "available"
+    ), "Direct kernels must stay enabled under Inductor unless explicitly disabled"
     if use_oot:
         assert op.calls == int(cuda_enabled), "Enabled dispatch must use the OOT op"
-    assert len(collective_calls) == int(not cuda_enabled), (
-        "Disabled dispatch must use built-in Torch collectives"
+    cuda_fallback = cuda_enabled and workspace_state != "available"
+    assert group.all_gather.call_count == int(
+        cuda_fallback and op_cls is dcp.DirectDCPQGather
     )
+    assert fallback_a2a.call_count == int(
+        cuda_fallback and op_cls is dcp.DirectDCPA2AReduce
+    )
+    assert len(collective_calls) == int(
+        not cuda_enabled or (cuda_fallback and op_cls is dcp.DirectDCPKVGather)
+    ), "Native dispatch and KV fallback must use built-in Torch collectives"
 
 
 def _collective_test_op(
@@ -186,7 +205,18 @@ def _collective_test_op(
         compilation_config=CompilationConfig(mode=3, custom_ops=directives)
     )
     with set_current_vllm_config(config):
-        op = op_cls(workspace)
+        group = SimpleNamespace(
+            world_size=workspace.world_size, device_group=workspace.group
+        )
+        group.all_gather = lambda query, dim: _q_gather_reference(
+            query, group.world_size, None
+        )
+        kwargs = (
+            {"padded_num_heads": workspace.padded_num_heads}
+            if isinstance(workspace, dcp.DirectDCPQGatherWorkspace)
+            else {}
+        )
+        op = op_cls(group, workspace if mode == "default" else None, **kwargs)
     assert isinstance(op, (_OOTQGather, _OOTA2AReduce, _OOTKVGather)), (
         "Every worker must resolve the registered OOT collective"
     )
@@ -502,36 +532,15 @@ def test_mla_dcp_manager_selects_direct_backends(monkeypatch, default_vllm_confi
     a2a_reduce.assert_called_once_with(
         output,
         lse,
-        False,
-        seq_lens,
-        query_start_loc,
-    )
-
-    fallback_combine = MagicMock()
-    monkeypatch.setattr(dcp_manager, "dcp_a2a_lse_reduce", fallback_combine)
-    large_query = torch.empty(17, 2, 8)
-    manager.query_gather(large_query)
-    group.all_gather.assert_called_once_with(large_query, dim=1)
-    query_gather.assert_called_once()
-    large_output, large_lse = torch.empty(17, 4, 4), torch.empty(17, 4)
-    manager.combine(
-        large_output,
-        large_lse,
-        seq_lens=seq_lens,
-        query_start_loc=query_start_loc,
-    )
-    a2a_reduce.assert_called_once()
-    fallback_combine.assert_called_once_with(
-        large_output,
-        large_lse,
-        cp_group=group,
         is_lse_base_on_e=False,
         seq_lens=seq_lens,
         query_start_loc=query_start_loc,
     )
 
 
-def test_mla_dcp_manager_selects_fallback_backends(monkeypatch):
+def test_mla_dcp_manager_selects_fallback_backends(monkeypatch, default_vllm_config):
+    for op_cls in (dcp.DirectDCPQGather, dcp.DirectDCPA2AReduce, dcp.DirectDCPKVGather):
+        monkeypatch.setattr(op_cls, "forward_cpu", op_cls.forward_cuda)
     import vllm.v1.attention.ops.dcp as dcp_manager
 
     group = MagicMock(world_size=2)
@@ -757,7 +766,7 @@ def _distributed_direct_q_gather_worker(env: dict[str, str]) -> None:
             op = _collective_test_op(dcp.DirectDCPQGather, env["CUSTOM_OPS"], workspace)
 
             cases = (
-                ((1, False), (128, True), (17, True), (5, False))
+                ((1, False), (128, True), (129, True), (17, True), (5, False))
                 if dtype == torch.bfloat16
                 else ((17, True),)
             )
@@ -782,10 +791,11 @@ def _distributed_direct_q_gather_worker(env: dict[str, str]) -> None:
                 actual = op(local_query)
                 torch.accelerator.synchronize()
 
-                assert (
-                    actual.data_ptr()
-                    == workspace.final_query[active_ubatch[0]].data_ptr()
-                )
+                if env["CUSTOM_OPS"] == "default" and num_tokens <= max_num_tokens:
+                    assert (
+                        actual.data_ptr()
+                        == workspace.final_query[active_ubatch[0]].data_ptr()
+                    )
                 assert workspace.completion[active_ubatch[0]].numel() == 1
                 _assert_q_gather_matches_reference(
                     actual, local_query, world_size, padded_num_heads
@@ -1186,7 +1196,7 @@ def _distributed_direct_a2a_worker(env: dict[str, str]) -> None:
             assert not torch.isnan(actual.float()).any()
             _assert_close(actual, expected, dtype)
 
-        cases = ((1, False), (17, True), (128, True))
+        cases = ((1, False), (17, True), (128, True), (129, True))
         for iteration, (num_tokens, padded) in enumerate(cases):
             check(num_tokens, iteration, padded)
         check_empty_shards(

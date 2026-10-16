@@ -319,10 +319,10 @@ In addition, you can also register all your `CustomOp` at one place for better m
 
 `DirectDCPQGather`, `DirectDCPA2AReduce` and `DirectDCPKVGather` in
 `vllm.v1.attention.ops.dcp` support OOT replacements. Workspaces own buffers and
-views; ops own communication and reduction.
+views; ops own communication, reduction and fallbacks. `workspace` may be `None`.
 
 Register through `vllm.general_plugins` on every worker before model construction.
-Override `forward_cuda`:
+Override `forward_cuda`; handle absent/oversized workspaces or call `super()`:
 
 ```python
 import torch
@@ -334,7 +334,7 @@ from vllm.v1.attention.ops.dcp import DirectDCPQGather
 @DirectDCPQGather.register_oot
 class PluginDCPQGather(DirectDCPQGather):
     def forward_cuda(self, local_query: torch.Tensor) -> torch.Tensor:
-        return gather_query(local_query, self.workspace)
+        return gather_query(local_query, self.group, self.workspace)
 ```
 
 Eligible direct kernels stay enabled, including with Inductor and `["none"]`.
