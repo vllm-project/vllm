@@ -111,17 +111,26 @@ def test_custom_processor_add_request_gates_pipeline_flag(admitted: bool):
 
 def test_has_topp_only_rows():
     """A row is top-p-only when it has top-p and no effective top-k; top_k
-    of 0 (the default) or above the vocab size disables top-k."""
+    of 0 (the default) or at least the logits width disables top-k."""
     sampler = _make_sampler()
     sampler.add_request(0, SamplingParams(top_k=10, top_p=0.9))
     sampler.add_request(1, SamplingParams(top_k=10))
     sampler.add_request(2, SamplingParams(top_p=0.9))
     sampler.add_request(3, SamplingParams(top_k=VOCAB_SIZE + 1, top_p=0.9))
     states = sampler.sampling_states
+    states.apply_staged_writes()
 
-    assert not states.has_topp_only_rows(np.array([0, 1], dtype=np.int32))
-    assert states.has_topp_only_rows(np.array([0, 2], dtype=np.int32))
-    assert states.has_topp_only_rows(np.array([3], dtype=np.int32))
+    def has_topp_only_rows(idx: list[int], vocab_size: int = VOCAB_SIZE) -> bool:
+        idx_np = np.array(idx, dtype=np.int32)
+        idx_gpu = torch.from_numpy(idx_np).to(DEVICE)
+        return states.get_top_k_top_p(idx_gpu, idx_np, vocab_size)[2]
+
+    assert not has_topp_only_rows([0, 1])
+    assert has_topp_only_rows([0, 2])
+    assert has_topp_only_rows([3])
+    # The kernel compares top_k against the logits width, so a top_k at or
+    # above a narrower logits width counts as no top-k.
+    assert has_topp_only_rows([0], vocab_size=10)
 
 
 def test_logits_processing_cache_only_checks_active_requests():

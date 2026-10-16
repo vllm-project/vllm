@@ -328,6 +328,24 @@ class TestTritonTopkTopp:
 
         self._compare_results(logits, k, p)
 
+    @pytest.mark.parametrize("batch_size", [8, 48, 64])
+    @pytest.mark.parametrize("vocab_size", [151936, 200064, 262144])
+    def test_topk_and_topp_large_vocab(self, batch_size: int, vocab_size: int):
+        """Mixed batches at vocab sizes where the split top-p pipeline uses
+        its largest split counts (up to _SPLIT_MAX_SPLITS)."""
+        logits = torch.randn(
+            batch_size, vocab_size, generator=self.generator, dtype=torch.float32
+        )
+        k = torch.randint(1, 100, (batch_size,), generator=self.generator)
+        p = torch.rand(batch_size, generator=self.generator) * 0.9 + 0.1
+        # Rows cycle through top-k + top-p, top-p only, top-k only, neither.
+        k[1::4] = vocab_size
+        p[2::4] = 1.0
+        k[3::4] = vocab_size
+        p[3::4] = 1.0
+
+        self._compare_results(logits, k, p)
+
     def test_both_disabled(self):
         """Test when both k and p are None (should be no-op)."""
         from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
