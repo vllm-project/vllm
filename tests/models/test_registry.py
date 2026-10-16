@@ -113,9 +113,6 @@ def test_registry_model_property(model_arch, is_mm, score_type):
 @pytest.mark.parametrize(
     "model_arch,is_pp",
     [
-        # TODO(woosuk): Re-enable this once the MLP Speculator is supported
-        # in V1.
-        # ("MLPSpeculatorPreTrainedModel", False),
         ("DeepseekV2ForCausalLM", True),
         ("Qwen2VLForConditionalGeneration", True),
     ],
@@ -125,6 +122,22 @@ def test_registry_is_pp(model_arch, is_pp):
     assert model_info is not None
 
     assert model_info.supports_pp is is_pp
+
+
+@pytest.mark.parametrize(
+    "model_arch,supported",
+    [
+        ("Qwen4ExpForCausalLM", True),
+        ("Qwen4ExpForConditionalGeneration", True),
+        ("Qwen4ExpMTP", True),
+        ("LlamaForCausalLM", False),
+    ],
+)
+def test_registry_supports_hc_sp(model_arch, supported):
+    """HC SP is opt-in for each model implementation, including MTP."""
+    model_info = ModelRegistry._try_inspect_model_cls(model_arch)
+    assert model_info is not None
+    assert model_info.supports_hc_sp is supported
 
 
 @create_new_process_for_each_test()

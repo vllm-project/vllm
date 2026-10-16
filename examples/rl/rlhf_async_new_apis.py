@@ -26,8 +26,8 @@ The example performs the following steps:
 * Pause generation once any request reaches a token threshold.
 * Broadcast the training model's weights to the inference engine
   via the NCCL weight transfer engine, replacing the base weights.
-* Resume generation and collect results, noting which tokens were
-  generated before vs. after the weight swap.
+* Label the new weights, resume generation, and use `weight_versions`
+  to locate the weight swap in each output.
 * Validate correctness by launching a fresh vLLM instance loaded
   directly with the training model and comparing its output to the
   post-swap tokens from the weight-synced engine.
@@ -61,6 +61,7 @@ from vllm.v1.executor import Executor
 MODEL_NAME_V1 = "Qwen/Qwen3-1.7B-Base"
 MODEL_NAME_V2 = "Qwen/Qwen3-1.7B"
 PAUSE_TOKEN_THRESHOLD = 10
+WEIGHT_VERSION_V2 = "v2"
 ATTN_BACKEND = "TRITON_ATTN" if current_platform.is_rocm() else "FLASH_ATTN"
 
 
@@ -77,44 +78,27 @@ class MyLLM(vllm.AsyncLLMEngine):
             log_requests=engine_args.enable_log_requests,
             log_stats=not engine_args.disable_log_stats,
         )
-        self._generation_paused = False
         self._request_pause_flag = False
 
     async def do_generate(
         self, prompt_token_ids: list[int], sampling_params: vllm.SamplingParams
-    ) -> tuple[vllm.RequestOutput, int]:
-        """Generate a single request, setting the request pause flag once the
-        token count reaches the threshold.
-
-        Returns (output, pause_token_index). pause_token_index is the number
-        of tokens generated before the weight change, or -1 if no pause.
-        """
-        pause_token_index = -1
-        prev_token_count = 0
+    ) -> vllm.RequestOutput:
+        """Generate a request and set the pause flag at the token threshold."""
         async for request_output in self.generate(
             {"prompt_token_ids": prompt_token_ids},
             sampling_params,
             request_id=str(uuid.uuid4()),
         ):
             output = request_output
-            cur_token_count = len(output.outputs[0].token_ids)
-            if (
-                cur_token_count >= PAUSE_TOKEN_THRESHOLD
-                and not self._request_pause_flag
-            ):
+            if len(output.outputs[0].token_ids) >= PAUSE_TOKEN_THRESHOLD:
                 self._request_pause_flag = True
-            if self._generation_paused and pause_token_index == -1:
-                pause_token_index = prev_token_count
-            prev_token_count = cur_token_count
-        return output, pause_token_index
+        return output
 
     async def pause_after_n_tokens(self):
         """Wait for any request to set the pause flag, then pause."""
         while not self._request_pause_flag:
             await asyncio.sleep(0)
         await super().pause_generation(mode="keep")
-        await asyncio.sleep(5)
-        self._generation_paused = True
 
 
 @ray.remote(num_gpus=1)
@@ -262,9 +246,18 @@ gen_futures = [
 ray.get(llm.pause_after_n_tokens.remote())
 
 ray.get(train_model.broadcast_weights.remote())
+# Label the new weights before resuming generation.
+ray.get(llm.update_weight_version.remote(WEIGHT_VERSION_V2))
 
 ray.get(llm.resume_generation.remote())
-results = ray.get(gen_futures)
+results = []
+for output in ray.get(gen_futures):
+    completion = output.outputs[0]
+    pause_idx = next(
+        (s.start for s in completion.weight_versions if s.version == WEIGHT_VERSION_V2),
+        len(completion.token_ids),
+    )
+    results.append((output, pause_idx))
 
 for i, (output, pause_idx) in enumerate(results):
     all_token_ids = list(output.outputs[0].token_ids)
@@ -326,7 +319,7 @@ val_results = ray.get(val_futures)
 
 num_pass = 0
 num_total = len(results)
-for i, ((output, pause_idx), (val_output, _)) in enumerate(zip(results, val_results)):
+for i, ((output, pause_idx), val_output) in enumerate(zip(results, val_results)):
     expected = list(output.outputs[0].token_ids)[pause_idx:]
     actual = list(val_output.outputs[0].token_ids)
     match = actual == expected

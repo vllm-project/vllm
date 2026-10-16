@@ -4,6 +4,7 @@
 
 import array
 import contextlib
+import ctypes
 import struct
 import sys
 import threading
@@ -16,6 +17,7 @@ except ImportError:
     from cuda import cudart
 
 _ALIGN = 1 << 21  # 2 MiB — CUDA IPC allocation alignment
+_IPC_HANDLE_SIZE = 64  # sizeof(cudaIpcMemHandle_t)
 
 
 # ---------------------------------------------------------------------------
@@ -28,6 +30,20 @@ def _check(error):
     success = getattr(cudart.cudaError_t, "cudaSuccess", None) or cudart.cudaError_t(0)
     if error != success:
         raise RuntimeError(f"CUDA runtime error: {error}")
+
+
+# cuda-bindings >= 13.4 no longer exposes cudaIpcMemHandle_t.reserved, so
+# copy the raw handle bytes through getPtr() instead. This is safe because the
+# CUDA ABI fixes the handle as an opaque 64-byte struct (char reserved[64]).
+def _ipc_handle_to_bytes(handle) -> bytes:
+    return ctypes.string_at(handle.getPtr(), _IPC_HANDLE_SIZE)
+
+
+def _ipc_handle_from_bytes(raw: bytes):
+    assert len(raw) == _IPC_HANDLE_SIZE, len(raw)
+    handle = cudart.cudaIpcMemHandle_t()
+    ctypes.memmove(handle.getPtr(), raw, _IPC_HANDLE_SIZE)
+    return handle
 
 
 def _cuda_malloc(size: int):
@@ -84,15 +100,16 @@ class IpcBuffer:
 
         all_handles: list[bytes | None] = [None] * world_size
         torch.distributed.all_gather_object(
-            all_handles, bytes(local_handle.reserved), group=process_group
+            all_handles, _ipc_handle_to_bytes(local_handle), group=process_group
         )
 
         for r in range(world_size):
             if r == rank:
                 self.peer_ptrs[r] = self.local_ptr
             else:
-                handle = cudart.cudaIpcMemHandle_t()
-                handle.reserved = all_handles[r]
+                raw = all_handles[r]
+                assert raw is not None
+                handle = _ipc_handle_from_bytes(raw)
                 err, ptr = cudart.cudaIpcOpenMemHandle(
                     handle, cudart.cudaIpcMemLazyEnablePeerAccess
                 )

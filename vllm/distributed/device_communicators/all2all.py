@@ -1012,7 +1012,11 @@ class MoriAll2AllManager(All2AllManagerBase):
         if get_current_vllm_config().kernel_config.moe_backend == "aiter_mega_moe":
             # MegaMoEV2 places its dispatch/combine workspaces on the MoRI
             # symmetric heap, which defaults to 2 GB. MegaMoEV2 requires > 4GB
-            heap_size = os.environ.setdefault("MORI_SHMEM_HEAP_SIZE", "8G")
+            # (> 8GB with a fused shared expert).
+            heap_size = os.environ.setdefault(
+                "MORI_SHMEM_HEAP_SIZE",
+                "16G" if envs.VLLM_ROCM_AITER_MEGA_MOE_FUSE_SHARED_EXPERTS else "8G",
+            )
             logger.info_once("AITER MegaMoE: MORI_SHMEM_HEAP_SIZE=%s", heap_size)
         mori.shmem.shmem_torch_process_group_init("mori")
 
