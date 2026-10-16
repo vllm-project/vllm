@@ -55,6 +55,7 @@ from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.logger import init_logger
 from vllm.renderers.chat_utils import ChatTemplateContentFormatOption
 from vllm.renderers.hf import HfRenderer, resolve_chat_template
+from vllm.renderers.inputs.preprocess import extract_prompt_components
 from vllm.renderers.online_renderer import OnlineRenderer
 
 logger = init_logger(__name__)
@@ -143,6 +144,63 @@ def wrap_data_with_event(data: str, event: str):
     return f"event: {event}\ndata: {data}\n\n"
 
 
+class DisabledThinkingEffortResolver:
+    """Resolve and cache the effort used for Anthropic disabled thinking."""
+
+    def __init__(
+        self,
+        renderer: OnlineRenderer,
+        effort: AnthropicDisabledThinkingEffortOption = "auto",
+    ):
+        self._renderer = renderer
+        self._effort: AnthropicDisabledThinkingEffort | None = (
+            None if effort == "auto" else effort
+        )
+
+    async def resolve(self) -> AnthropicDisabledThinkingEffort:
+        if self._effort is None:
+            self._effort = await self._probe()
+            logger.info(
+                "Anthropic thinking.type=disabled maps to reasoning_effort=%r",
+                self._effort,
+            )
+        return self._effort
+
+    async def _probe(self) -> AnthropicDisabledThinkingEffort:
+        """Use ``low`` if the renderer rejects or ignores ``none``.
+
+        ``none`` is ignored when it renders the same prompt as a thinking
+        effort, e.g. GLM-5.3 treats unknown efforts as ``max``.
+        """
+        none_prompt = await self._render_probe_prompt("none")
+        if none_prompt is None:
+            return "low"
+        for effort in get_args(AnthropicEffort):
+            if await self._render_probe_prompt(effort) == none_prompt:
+                return "low"
+        return "none"
+
+    async def _render_probe_prompt(
+        self, effort: AnthropicDisabledThinkingEffort
+    ) -> tuple[list[int] | None, str | None] | None:
+        request = ChatCompletionRequest(
+            messages=[{"role": "user", "content": "Hi"}],
+            reasoning_effort=effort,
+        )
+        try:
+            result = await self._renderer.render_chat(request)
+        except Exception:
+            logger.debug("Rendering reasoning_effort=%r failed", effort, exc_info=True)
+            return None
+        if isinstance(result, ErrorResponse):
+            return None
+        _, (engine_input,) = result
+        components = extract_prompt_components(
+            self._renderer.model_config, engine_input
+        )
+        return components.token_ids, components.text
+
+
 class AnthropicServingMessages(OpenAIServingChat):
     """Handler for Anthropic Messages API requests."""
 
@@ -188,53 +246,9 @@ class AnthropicServingMessages(OpenAIServingChat):
             default_chat_template_kwargs=default_chat_template_kwargs,
         )
         self._merge_inline_system = self._should_merge_inline_system(online_renderer)
-        # Resolved lazily from the renderer when "auto".
-        self._disabled_thinking_effort: AnthropicDisabledThinkingEffort | None = (
-            None if disabled_thinking_effort == "auto" else disabled_thinking_effort
+        self._disabled_thinking_effort_resolver = DisabledThinkingEffortResolver(
+            online_renderer, disabled_thinking_effort
         )
-
-    async def _get_disabled_thinking_effort(self) -> AnthropicDisabledThinkingEffort:
-        if self._disabled_thinking_effort is None:
-            self._disabled_thinking_effort = (
-                await self._probe_disabled_thinking_effort()
-            )
-            logger.info(
-                "Anthropic thinking.type=disabled maps to reasoning_effort=%r",
-                self._disabled_thinking_effort,
-            )
-        return self._disabled_thinking_effort
-
-    async def _probe_disabled_thinking_effort(self) -> AnthropicDisabledThinkingEffort:
-        """Use ``low`` if the renderer rejects or ignores ``none``.
-
-        ``none`` is ignored when it renders the same prompt as a thinking
-        effort, e.g. GLM-5.3 treats unknown efforts as ``max``.
-        """
-        none_prompt = await self._render_probe_prompt("none")
-        if none_prompt is None:
-            return "low"
-        for effort in get_args(AnthropicEffort):
-            if await self._render_probe_prompt(effort) == none_prompt:
-                return "low"
-        return "none"
-
-    async def _render_probe_prompt(
-        self, effort: AnthropicDisabledThinkingEffort
-    ) -> tuple[list[int] | None, str | None] | None:
-        request = ChatCompletionRequest(
-            messages=[{"role": "user", "content": "Hi"}],
-            reasoning_effort=effort,
-        )
-        try:
-            result = await self.online_renderer.render_chat(request)
-        except Exception:
-            logger.debug("Rendering reasoning_effort=%r failed", effort, exc_info=True)
-            return None
-        if isinstance(result, ErrorResponse):
-            return None
-        _, (engine_input,) = result
-        components = self._extract_prompt_components(engine_input)
-        return components.token_ids, components.text
 
     @classmethod
     def _should_merge_inline_system(cls, online_renderer: OnlineRenderer) -> bool:
@@ -804,7 +818,9 @@ class AnthropicServingMessages(OpenAIServingChat):
             logger.debug("Received messages request %s", request.model_dump_json())
         disabled_thinking_effort: AnthropicDisabledThinkingEffort = "none"
         if request.thinking is not None and request.thinking.type == "disabled":
-            disabled_thinking_effort = await self._get_disabled_thinking_effort()
+            disabled_thinking_effort = (
+                await self._disabled_thinking_effort_resolver.resolve()
+            )
         chat_req = self.to_chat_completion_request(
             request,
             merge_inline_system=self._merge_inline_system,
@@ -1217,7 +1233,9 @@ class AnthropicServingMessages(OpenAIServingChat):
         """Implements Anthropic's messages.count_tokens endpoint."""
         disabled_thinking_effort: AnthropicDisabledThinkingEffort = "none"
         if request.thinking is not None and request.thinking.type == "disabled":
-            disabled_thinking_effort = await self._get_disabled_thinking_effort()
+            disabled_thinking_effort = (
+                await self._disabled_thinking_effort_resolver.resolve()
+            )
         chat_req = self.to_chat_completion_request(
             request,
             merge_inline_system=self._merge_inline_system,
