@@ -2124,18 +2124,6 @@ def test_adjust_request_json_schema_without_tools_uses_json_schema_factory(
     mistral_tool_parser: MistralToolParser,
     tool_choice: str | None,
 ) -> None:
-    """A ``response_format=json_schema`` request without tools must route to
-    the schema-only grammar for every API-reachable ``tool_choice`` value.
-
-    Reachable values when ``tools`` is unset (the request validator rejects
-    ``auto``/``required``) are the explicit JSON ``null`` and the string
-    ``"none"`` (also the default when the field is omitted). Previously
-    ``null`` was normalized to ``MistralToolChoiceEnum.auto`` and fell
-    through to ``get_lark_from_jinja`` with ``tools=None``, producing a
-    grammar whose ``body`` branch admitted wildcard
-    ``[TOOL_CALLS] /.+/ [ARGS] {anything}`` emissions alongside the user's
-    schema.
-    """
     request = _make_request(
         tools=None,
         tool_choice=tool_choice,
@@ -2147,10 +2135,6 @@ def test_adjust_request_json_schema_without_tools_uses_json_schema_factory(
     factory = mistral_tool_parser.model_tokenizer.grammar_factory
 
     sentinel = "SENTINEL_SCHEMA_ONLY_GRAMMAR"
-    # ``get_lark_for_json_schema`` delegates to ``get_lark_from_jinja`` with
-    # ``json_only=True``; stub it with a return value so that transitive call
-    # never happens and ``get_lark_from_jinja`` only fires if the direct
-    # (buggy) path reached it.
     with (
         patch.object(
             factory,
