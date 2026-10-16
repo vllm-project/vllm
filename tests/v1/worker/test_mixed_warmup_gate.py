@@ -76,7 +76,7 @@ def test_kernel_warmup_restores_uncalibrated_adaptive_manager(monkeypatch, fail_
         rejection_sampler=rejection_sampler,
     )
 
-    def run_steps(model_runner, execute, sample):
+    def run_steps(model_runner, execute, sample, greedy=False):
         assert model_runner.adaptive_verification is None
         assert not model_runner.rejection_sampler.enable_adaptive_verification
         if fail_warmup:

@@ -161,12 +161,15 @@ class TestReasoningEndTokenIds:
         )
         engine = _make_engine(cfg)
         assert engine.reasoning_end_token_ids == {201, 202}
+        assert engine.implicit_reasoning_end_token_ids == {202}
         assert engine.find_reasoning_end([5, 201]) == ReasoningEnd(1, False)
         assert engine.find_reasoning_end([5, 202]) == ReasoningEnd(1, True)
 
     def test_transition_staying_in_reasoning_is_ignored(self):
         cfg = _with_reasoning_exits(("THINK_START", ParserState.REASONING, ()))
-        assert _make_engine(cfg).reasoning_end_token_ids == {201}
+        engine = _make_engine(cfg)
+        assert engine.reasoning_end_token_ids == {201}
+        assert engine.implicit_reasoning_end_token_ids == frozenset()
 
     def test_unreported_exit_fails_closed(self):
         cfg = _with_reasoning_exits(
@@ -1683,6 +1686,57 @@ class TestArgDeltaWithConverter:
                 "count": {"type": "integer"},
             }
         ]
+
+
+# ── TestArgValueExtender ──────────────────────────────────────────
+
+
+def _extender_config(structural: frozenset[str] | None = None) -> ParserEngineConfig:
+    """``_kv_converter`` plus an extender for its trailing ``k=v`` record,
+    which is open until whitespace follows it; mirrors
+    ``_glm47_arg_value_extender``."""
+
+    def factory(raw_args: str):
+        if re.search(r"\w+=\S+$", raw_args) is None:
+            return None
+
+        def extend(delta: str) -> str | None:
+            if re.search(r"\s", delta):
+                return None
+            return json.dumps(delta, ensure_ascii=False)[1:-1]
+
+        return extend
+
+    return dataclasses.replace(
+        _converter_config(),
+        arg_value_extender=factory,
+        arg_structural_chars=structural,
+    )
+
+
+class TestArgValueExtender:
+    """Engine contract for ``ParserEngineConfig.arg_value_extender``."""
+
+    def test_live_extender_sees_deltas_without_structural_chars(self):
+        """A delta without structural chars must still reach the live
+        extender: gating it out drops ``el`` from the streamed value and the
+        next accepted delta ``l=`` lands on the gap, so the converted JSON
+        no longer extends what was streamed."""
+        engine = _make_engine(_extender_config(structural=frozenset("= ")))
+        assert _run_streaming_tool(engine, "f", ["a", "=h", "el", "l=", "o "]) == {
+            "a": "hell=o"
+        }
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            {"arg_converter": None},
+            {"stream_arg_deltas": False},
+        ],
+    )
+    def test_extender_requires_streaming_conversion(self, overrides):
+        with pytest.raises(ValueError, match="arg_value_extender"):
+            dataclasses.replace(_extender_config(), **overrides)
 
 
 # ── TestSafeArgPrefix ────────────────────────────────────────────
