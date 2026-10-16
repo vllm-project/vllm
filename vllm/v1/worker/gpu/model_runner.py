@@ -166,6 +166,7 @@ from vllm.v1.worker.gpu.spec_decode.rejection_sampler import (
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 from vllm.v1.worker.gpu.spec_decode.utils import (
     DraftTokensHandler,
+    check_draft_vintage,
     get_drafter_hidden_states,
 )
 from vllm.v1.worker.gpu.states import RequestState
@@ -310,6 +311,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.draft_tokens_handler = DraftTokensHandler(
             max_num_reqs=self.max_num_reqs, device=self.device
         )
+        # Debug canary: "" / "0" off, "1" warn, "2" raise.
+        self.debug_draft_vintage = envs.VLLM_DEBUG_DRAFT_VINTAGE
 
         self.pcp_manager: pcp.PCPManager | None = None
 
@@ -1320,6 +1323,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_draft_tokens_np = np.fromiter(
                 num_drafts_iter, dtype=np.int32, count=num_reqs
             )
+            if self.debug_draft_vintage != "0":
+                # D2H syncs — debug canary only (#54437 vintage invariant).
+                check_draft_vintage(
+                    self.debug_draft_vintage,
+                    draft_tokens,
+                    self.req_states.req_id_to_index,
+                    self.req_states.draft_tokens,
+                )
             if self.adaptive_verification is not None:
                 num_toks = self.adaptive_verification.get_num_tokens(
                     num_tokens_per_req, draft_tokens

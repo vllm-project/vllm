@@ -133,6 +133,49 @@ class DraftTokensHandler:
         return DraftTokenIds(req_ids, draft_token_ids)
 
 
+def check_draft_vintage(
+    level: str,
+    scheduled_spec_tokens: dict[str, "list[int] | tuple[int, ...]"],
+    req_id_to_index: dict[str, int],
+    draft_tokens: torch.Tensor,
+) -> list[str]:
+    """Debug canary: scheduler grammar-advance vintage vs worker proposals.
+
+    The scheduler advances each structured request's grammar over the spec
+    ids it holds for that request; the worker verifies its own proposal rows
+    (`req_states.draft_tokens`) against the resulting bitmask. The two must
+    be the same vintage, or masks built over the wrong tokens are applied
+    silently (the #54437 failure mode). Returns the req_ids that diverge.
+
+    All-(-1) scheduled rows are width placeholders (unstructured requests,
+    or drafts the scheduler fully rejected) and carry no ids to compare.
+    Performs a D2H sync per checked request — only call when
+    VLLM_DEBUG_DRAFT_VINTAGE is enabled. level "2" raises on divergence,
+    any other non-"0" value warns.
+    """
+    stale: list[str] = []
+    for req_id, scheduled in scheduled_spec_tokens.items():
+        width = len(scheduled)
+        while width > 0 and scheduled[width - 1] == -1:
+            width -= 1
+        if width == 0:
+            continue
+        idx = req_id_to_index.get(req_id)
+        if idx is None:
+            continue
+        if draft_tokens[idx, :width].tolist() != list(scheduled[:width]):
+            stale.append(req_id)
+    if stale:
+        msg = (
+            "scheduled spec tokens diverge from worker proposal rows "
+            f"(grammar-advance vintage != verification vintage): {stale}"
+        )
+        if level == "2":
+            raise AssertionError(msg)
+        logger.warning("%s", msg)
+    return stale
+
+
 def get_parallel_drafting_token_id(hf_config) -> int:
     """Resolve the mask token id used for parallel drafting slots.
 
