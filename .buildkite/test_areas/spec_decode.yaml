@@ -5,6 +5,7 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) V1 Spec Decode"
   device: h200_35gb
   key: v1-spec-decode
+  automatic_shard: true
   timeout_in_minutes: 40
   source_file_dependencies:
     - vllm/config/
@@ -27,6 +28,7 @@ steps:
     amd:
       label: ":amd: (MI300) V1 Spec Decode"
       dind: false
+      automatic_shard: true
       device: mi300_1
       timeout_in_minutes: 50
       depends_on:
@@ -593,7 +595,6 @@ steps:
       - vllm/model_executor/models/gemma4_mtp.py
       - vllm/model_executor/models/llama.py
       - vllm/model_executor/models/llama_eagle3.py
-      - vllm/model_executor/models/medusa.py
       - vllm/model_executor/models/registry.py
       - tests/evals/gsm8k/
       - tests/utils.py
