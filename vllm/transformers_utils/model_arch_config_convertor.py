@@ -254,6 +254,11 @@ class ModelArchConfigConvertorBase:
             )
             if producer_name == "modelopt" or is_legacy_modelopt:
                 quant_algo = modelopt_quant_cfg.get("quant_algo")
+                if (
+                    quant_algo is None
+                    and "kv_cache_quantized_layers" in modelopt_quant_cfg
+                ):
+                    quant_cfg["quant_method"] = "modelopt_mixed"
                 if quant_algo is not None:
                     quant_algo_upper = str(quant_algo).upper()
                     if quant_algo_upper in {

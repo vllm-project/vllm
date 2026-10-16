@@ -89,6 +89,7 @@ for _dtype, _typecode in TORCH_DTYPE_TO_ARRAY_TYPECODE.items():
 
 MODELOPT_TO_VLLM_KV_CACHE_DTYPE_MAP = {
     "fp8": "fp8_e4m3",
+    "mixed_precision": "auto",
     "nvfp4": "nvfp4",
 }
 
@@ -472,6 +473,8 @@ def get_kv_cache_quant_algo_string(quant_cfg: dict[str, Any]) -> str | None:
     quant_method = quant_cfg.get("quant_method", "")
     if quant_method.startswith("modelopt"):
         quantization_inner = quant_cfg.get("quantization", quant_cfg)
+        if "kv_cache_quantized_layers" in quantization_inner:
+            return "auto"
         # Check if quant config is specified and use kv cache quant algo
         kv_algo = (
             quantization_inner.get("kv_cache_scheme")

@@ -286,9 +286,9 @@ def get_quant_config(
         # not contain the per-layer quantized_layers map.  Newer checkpoints
         # embed it directly; older ones keep it only in hf_quant_config.json.
         # If it is missing, fall through to the file-based loading path.
-        if (
-            model_config.quantization == "modelopt_mixed"
-            and "quantized_layers" not in hf_quant_config
+        if model_config.quantization == "modelopt_mixed" and not any(
+            key in hf_quant_config.get("quantization", hf_quant_config)
+            for key in ("quantized_layers", "kv_cache_quantized_layers")
         ):
             pass  # fall through to file-based loading below
         else:
