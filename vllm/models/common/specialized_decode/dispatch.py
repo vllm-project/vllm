@@ -55,7 +55,7 @@ class DecodeWarmup(VllmJitKernel["DecodeWarmup.CompileKey"]):
 class SpecializedDecode:
     """A model's specialized decode on this rank.
 
-    The runtime reads the spec and builds the kernel, registers it for warm-up,
+    It reads the spec and builds the kernel, registers it for warm-up,
     checks the caches whenever the runner binds them, and decides each step
     between the kernel and vLLM's own forward. The kernel it builds is held in
     the ``kernel`` attribute.

@@ -13,8 +13,8 @@ import torch
 from tests.models.common.specialized_decode.kit import DecodeConformance, forward
 from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
+from vllm.models.common.specialized_decode.dispatch import SpecializedDecode
 from vllm.models.common.specialized_decode.guards import select_decode_spec
-from vllm.models.common.specialized_decode.runtime import SpecializedDecode
 from vllm.models.common.specialized_decode.spec import DecodeUnsupported, Step
 from vllm.models.deepseek_v41.amd import specialized_decode as sd
 

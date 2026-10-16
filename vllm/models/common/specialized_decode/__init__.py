@@ -3,8 +3,8 @@
 """Specialized decode (RFC #60904, ``--monokernel``): a model's decode step
 in one launch."""
 
+from vllm.models.common.specialized_decode.dispatch import SpecializedDecode
 from vllm.models.common.specialized_decode.guards import select_decode_spec
-from vllm.models.common.specialized_decode.runtime import SpecializedDecode
 from vllm.models.common.specialized_decode.spec import DecodeSpec, Step
 
 __all__ = [

@@ -8,11 +8,11 @@ import torch
 from tests.models.common.specialized_decode import reference
 from tests.models.common.specialized_decode.kit import DecodeConformance, forward
 from vllm.config.compilation import CUDAGraphMode
+from vllm.models.common.specialized_decode.dispatch import SpecializedDecode
 from vllm.models.common.specialized_decode.guards import (
     _select_spec,
     select_decode_spec,
 )
-from vllm.models.common.specialized_decode.runtime import SpecializedDecode
 from vllm.models.common.specialized_decode.spec import DecodeUnsupported
 
 SPECS = reference.DECODE_SPECS

@@ -16,13 +16,13 @@ import torch
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import ForwardContext, override_forward_context
 from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
+from vllm.models.common.specialized_decode.dispatch import SpecializedDecode
 from vllm.models.common.specialized_decode.guards import (
     _refuse_config,
     _select_spec,
     _set_capture_sizes,
     select_decode_spec,
 )
-from vllm.models.common.specialized_decode.runtime import SpecializedDecode
 from vllm.models.common.specialized_decode.spec import DecodeUnsupported, Feature
 
 KERNEL_BACKENDS = ("aiter", "flydsl")
@@ -98,9 +98,9 @@ class DecodeConformance:
         return self.make_decode(config, model)
 
     def make_decode(self, config, model=None, bind: bool = True):
-        """This rank's runtime, built the way a model builds it: the variant
-        picked once by ``select_decode_spec``, then the runtime over the loaded model,
-        then the caches the runner binds."""
+        """This rank's ``SpecializedDecode``, built the way a model builds it:
+        the variant picked once by ``select_decode_spec``, then the dispatch
+        over the loaded model, then the caches the runner binds."""
         model = self.make_model(config) if model is None else model
         spec = select_decode_spec(config, self.specs)
         assert spec is not None
