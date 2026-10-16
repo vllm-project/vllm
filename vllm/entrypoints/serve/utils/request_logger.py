@@ -6,6 +6,9 @@ from collections.abc import Sequence
 
 import torch
 
+from vllm import envs
+from vllm.entrypoints.pooling.typing import AnyPoolingRequest
+from vllm.entrypoints.serve.engine.typing import AnyRequest
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.pooling_params import PoolingParams
@@ -29,7 +32,7 @@ class RequestLogger:
                 "`--enable-log-requests` is set but "
                 "the minimum log level is higher than DEBUG. "
                 "Only limited information will be logged to minimize overhead. "
-                "To view more details, set `VLLM_LOGGING_LEVEL=DEBUG`."
+                "To view more details, set `--log-level DEBUG`."
             )
 
     def log_inputs(
@@ -65,6 +68,24 @@ class RequestLogger:
             request_id,
             params,
             lora_request,
+        )
+
+    def log_request_body(self, request: AnyRequest | AnyPoolingRequest) -> None:
+        try:
+            level = logging.getLevelNamesMapping()[envs.VLLM_REQUEST_BODY_LOG_LEVEL]
+        except KeyError:
+            logger.warning_once(
+                "Invalid logging level for request content: %s. "
+                "Request JSON body will not be logged.",
+                envs.VLLM_REQUEST_BODY_LOG_LEVEL,
+            )
+            return
+
+        logger.log(
+            level,
+            "Request %s JSON body: %s",
+            getattr(request, "request_id", "N/A"),
+            request.model_dump_json(exclude_unset=True)[: self.max_log_len],
         )
 
     def log_outputs(

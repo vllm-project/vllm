@@ -50,7 +50,7 @@ SKINNY_GEMM_PASS_RATES = {
 }
 PRESHUFFLED_SHAPES = [
     (64, 4096, 8192),
-    (32, 8192, 16384),
+    (32, 16384, 16384),
 ]
 
 
@@ -148,7 +148,7 @@ def test_fp4_env_defaults():
     import vllm.envs as envs
 
     assert envs.VLLM_ROCM_USE_AITER_FP4_ASM_GEMM is False
-    assert envs.VLLM_ROCM_USE_AITER_FP4BMM is True
+    assert envs.VLLM_ROCM_USE_AITER_FP4BMM is False
 
 
 @pytest.mark.parametrize(
@@ -421,8 +421,12 @@ def test_aiter_fp4_gemm_preshuffled_tuned_shapes(shape):
     M, K, N = shape
 
     assert M <= 64
-    # The predicate takes K as packed bytes, matching `weight.shape[1]`.
+    # The predicate takes K as packed bytes, matching `weight.shape[1]`, and
+    # must agree with the config the kernel itself resolves.
     assert rocm_aiter_ops.is_triton_gemm_afp4wfp4_presh_ws_tuned(N, K // 2)
+    from aiter.ops.triton.utils.gemm_config_utils import get_gemm_config
+
+    assert get_gemm_config("GEMM-AFP4WFP4_PRESHUFFLED", M, N, K)[1]
 
     A = torch.randn(M, K, dtype=torch.bfloat16)
     B = torch.randn(N, K, dtype=torch.bfloat16)
@@ -462,6 +466,18 @@ def test_aiter_fp4_gemm_preshuffled_tuned_shapes(shape):
     assert torch.isfinite(out).all()
 
     _assert_deterministic(run_preshuffled, n_runs=3)
+
+
+@pytest.mark.skipif(not on_gfx950(), reason="gfx950 ROCm only")
+def test_aiter_fp4_preshuffled_tuned_gate_uses_logical_k():
+    """AITER ships N=16384-K=16384 but not N=16384-K=8192, so a K=8192 layer
+    has no tuned preshuffled config even though twice its K does."""
+    _assert_aiter_supported()
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    rocm_aiter_ops.is_triton_gemm_afp4wfp4_presh_ws_tuned.cache_clear()
+    assert rocm_aiter_ops.is_triton_gemm_afp4wfp4_presh_ws_tuned(16384, 16384 // 2)
+    assert not rocm_aiter_ops.is_triton_gemm_afp4wfp4_presh_ws_tuned(16384, 8192 // 2)
 
 
 @pytest.mark.skipif(not on_gfx950(), reason="gfx950 ROCm only")
@@ -614,11 +630,13 @@ def test_aiter_fp4_gemm_skinny_shapes(M, N, K):
     out = gemm_afp4wfp4(A_fp4, B_fp4, A_scale, B_scale)
 
     assert out.shape == (M, N)
+    assert out.dtype == torch.bfloat16
     assert not torch.any(torch.isnan(out))
 
+    # Accumulate in FP32, then match the GEMM's BF16 output rounding.
     A_dq = quant_dequant_mxfp4(A)
     B_dq = quant_dequant_mxfp4(B)
-    ref = torch.matmul(A_dq.float(), B_dq.t().float())
+    ref = torch.matmul(A_dq.float(), B_dq.t().float()).to(torch.bfloat16).float()
 
     _print_close_stats(
         f"skinny_gemm M={M} N={N} K={K}",

@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from typing import Any, ClassVar, cast
 
 import torch
+from transformers import DeepseekV4Config
 
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -18,6 +19,7 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     VllmTritonJitKernel,
 )
 from vllm.platforms import current_platform
+from vllm.transformers_utils.deepseek_v4_utils import get_compress_ratios
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv, next_power_of_2
 from vllm.v1.attention.backend import (
@@ -26,12 +28,14 @@ from vllm.v1.attention.backend import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
     MultipleOf,
+    max_decode_query_len,
 )
 from vllm.v1.attention.backends.mla.compressor_utils import (
     get_dspark_swa_index_width,
 )
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.attention.ops.flashmla import FlashMLASchedMeta, get_mla_metadata
+from vllm.v1.attention.ops.metadata import compute_token_to_req_indices
 from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MLAAttentionSpec,
@@ -81,6 +85,7 @@ class DeepseekV4SWACache(torch.nn.Module, AttentionLayerBase):
         block_size: int = 64,
         packed_bytes_per_token: int = 584,
         packed_page_alignment: int = 576,
+        packed_block_stride_alignment: int | None = None,
         bounded_replay: bool = False,
     ):
         super().__init__()
@@ -95,6 +100,7 @@ class DeepseekV4SWACache(torch.nn.Module, AttentionLayerBase):
         self.dtype = dtype
         self.packed_bytes_per_token = packed_bytes_per_token
         self.packed_page_alignment = packed_page_alignment
+        self.packed_block_stride_alignment = packed_block_stride_alignment
         compilation_config = get_current_vllm_config().compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
@@ -123,6 +129,7 @@ class DeepseekV4SWACache(torch.nn.Module, AttentionLayerBase):
             bounded_replay=self.bounded_replay,
             block_size=self.block_size,
             num_kv_heads=1,
+            max_tp_shards=1,
             head_size=self.head_dim,
             dtype=self.dtype,
             sliding_window=self.window_size,
@@ -130,8 +137,11 @@ class DeepseekV4SWACache(torch.nn.Module, AttentionLayerBase):
             state_content_bytes=(
                 self.packed_bytes_per_token if uses_fp8_ds_mla_layout else None
             ),
-            # FlashMLA packing stride; 512B for FlashInfer sparse (#44577).
+            # Packed page alignment; 512B for FlashInfer sparse (#44577).
             alignment=self.packed_page_alignment if uses_fp8_ds_mla_layout else 512,
+            block_stride_alignment=(
+                self.packed_block_stride_alignment if uses_fp8_ds_mla_layout else None
+            ),
             model_version="deepseek_v4",
             kv_quant_mode=get_kv_quant_mode(self.cache_config.cache_dtype),
         )
@@ -148,7 +158,7 @@ class DeepseekSparseSWABackend(AttentionBackend):
         return "DEEPSEEK_SPARSE_SWA"
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         return [MultipleOf(32)]
 
     @classmethod
@@ -206,6 +216,9 @@ class DeepseekSparseSWAMetadata:
     # window attention may read (SWA bounded replay);
     # zeros when nothing replays.
     replay_start: torch.Tensor | None = None
+    # PCP cache writes use the gathered slots; queries use rank-local slots.
+    cache_slot_mapping: torch.Tensor | None = None
+    cache_positions: torch.Tensor | None = None
 
     # Number of decode/prefill requests/tokens (batch is reordered: decodes first)
     num_decodes: int = 0
@@ -456,14 +469,10 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         self.num_speculative_tokens = (
             spec_config.num_speculative_tokens if spec_config else 0
         )
-        # Decode can have query_len up to
-        #   1 + (2 if parallel drafting else 1) * num_speculative_tokens.
         # sparse_swa has no MQA-vs-dense-MHA routing, so multi-token queries take
-        # the prefill path and the decode/prefill split stays at that width.
-        spec_mult = (
-            2 if (spec_config is not None and spec_config.parallel_drafting) else 1
-        )
-        self.decode_threshold = 1 + spec_mult * self.num_speculative_tokens
+        # the prefill path and the decode/prefill split stays at the widest
+        # decode.
+        self.decode_threshold = max_decode_query_len(self.vllm_config)
         self.reorder_batch_threshold = None
 
         hf_config = self.vllm_config.model_config.hf_config
@@ -472,13 +481,13 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
 
         # V4 vision variant: image spans (up to vision_max_n_token tokens) are
         # visible bidirectionally, so prefill index rows widen from
-        # window_size to window_size + max_image_tokens. The V4 config sets
-        # mm_prefix_clamp_sliding_window exactly for these in-kernel-widened
-        # ranges; V4.1 image tokens use the plain causal window, and text-only
-        # models keep max_image_tokens == 0 everywhere.
+        # window_size to window_size + max_image_tokens. V4.1 image tokens use
+        # the plain causal window, and text-only models keep
+        # max_image_tokens == 0 everywhere.
         self.max_image_tokens = (
             getattr(hf_config, "vision_max_n_token", 0)
-            if getattr(hf_config, "mm_prefix_clamp_sliding_window", False)
+            if isinstance(hf_config, DeepseekV4Config)
+            and getattr(hf_config, "vision_n_layers", 0) > 0
             else 0
         )
         self.prefill_index_width = self.window_size + self.max_image_tokens
@@ -486,7 +495,7 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         # Detect which DeepseekV4 layer types this model uses so we only build a
         # FlashMLA tile-scheduler plan for types that will actually be called.
         # Models without compress_ratios (pure SWA) fall back to swaonly.
-        compress_ratios = getattr(hf_config, "compress_ratios", None) or [1]
+        compress_ratios = get_compress_ratios(hf_config) or [1]
         self._layer_types: set[str] = set()
         for ratio in compress_ratios:
             self._layer_types.add(_layer_type_for(int(ratio)))
@@ -831,7 +840,8 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         self,
         metadata: DeepseekSparseSWAMetadata,
     ) -> None:
-        if metadata.num_decode_tokens == 0:
+        num_tokens = metadata.num_decode_tokens
+        if num_tokens == 0:
             return
         assert metadata.query_start_loc is not None
         assert metadata.seq_lens is not None
@@ -841,23 +851,55 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         assert metadata.decode_swa_lens is not None
         assert metadata.replay_start is not None
 
-        _COMPUTE_SWA_INDICES_AND_LENS_KERNEL(
-            metadata.decode_swa_indices,
-            metadata.decode_swa_lens,
-            metadata.decode_swa_indices.shape[-1],
-            metadata.decode_swa_indices.shape[-1],
-            metadata.decode_swa_lens,  # unused (HAS_IMAGE=False)
-            metadata.decode_swa_lens,  # unused (HAS_IMAGE=False)
+        # Recompute the validity mask and token->request map from the device
+        # buffers. Their padding differs from the dummy batch the graph was
+        # captured with.
+        torch.ge(metadata.slot_mapping, 0, out=metadata.is_valid_token)
+        compute_token_to_req_indices(
             metadata.query_start_loc,
-            metadata.seq_lens,
             metadata.token_to_req_indices,
-            metadata.is_valid_token,
-            metadata.block_table,
-            self.block_size,
-            metadata.replay_start,
-            num_tokens=metadata.num_decode_tokens,
-            token_offset=0,
+            num_tokens,
+            num_tokens,
         )
+
+        # build() points non-causal (DSpark draft) metadata at its own buffer.
+        noncausal = self.decode_swa_indices_noncausal
+        if (
+            noncausal is not None
+            and metadata.decode_swa_indices.data_ptr() == noncausal.data_ptr()
+        ):
+            _COMPUTE_DSPARK_NONCAUSAL_SWA_INDICES_KERNEL(
+                metadata.decode_swa_indices,
+                metadata.decode_swa_lens,
+                self.window_size,
+                self.noncausal_index_width,
+                metadata.query_start_loc,
+                metadata.seq_lens,
+                metadata.token_to_req_indices,
+                metadata.is_valid_token,
+                metadata.block_table,
+                self.block_size,
+                num_tokens=num_tokens,
+                token_offset=0,
+            )
+        else:
+            _COMPUTE_SWA_INDICES_AND_LENS_KERNEL(
+                metadata.decode_swa_indices,
+                metadata.decode_swa_lens,
+                metadata.decode_swa_indices.shape[-1],
+                metadata.decode_swa_indices.shape[-1],
+                metadata.decode_swa_lens,  # unused (HAS_IMAGE=False)
+                metadata.decode_swa_lens,  # unused (HAS_IMAGE=False)
+                metadata.query_start_loc,
+                metadata.seq_lens,
+                metadata.token_to_req_indices,
+                metadata.is_valid_token,
+                metadata.block_table,
+                self.block_size,
+                metadata.replay_start,
+                num_tokens=metadata.num_decode_tokens,
+                token_offset=0,
+            )
         tile_sched = self.build_tile_scheduler(metadata.num_decode_tokens)
         metadata.tile_sched_swaonly = tile_sched[_LAYER_TYPE_SWAONLY]
         metadata.tile_sched_c4a = tile_sched[_LAYER_TYPE_C4A]

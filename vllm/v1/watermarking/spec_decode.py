@@ -3,14 +3,17 @@
 
 import torch
 
-from vllm.config.watermarking import WatermarkConfig
+from vllm.config.watermarking import WatermarkConfig, WatermarkContextScope
 from vllm.v1.watermarking.factory import create_watermarker
 from vllm.v1.watermarking.gumbel import GumbelWatermarker
 from vllm.v1.watermarking.prfs import PhiloxPRF
 from vllm.v1.watermarking.watermarker import (
+    DraftContextState,
+    RandomSampler,
     SupportsSpeculativeDecoding,
     Watermarker,
 )
+from vllm.v1.worker.gpu.sample.watermark import draft_watermarking_mask
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import rejection_sample
 
 
@@ -20,41 +23,204 @@ class DraftWatermarker:
         watermarker: Watermarker,
         max_num_reqs: int,
         device: torch.device,
+        num_speculative_steps: int,
+        deduplicate_contexts: WatermarkContextScope,
+        deduplicate_contexts_max_history: int | None,
     ) -> None:
         self.watermarker = watermarker
-        self.contexts = torch.zeros(
-            max_num_reqs,
-            watermarker.context_width,
-            dtype=torch.int64,
-            device=device,
+        self.num_speculative_steps = num_speculative_steps
+        self.state = DraftContextState(
+            contexts=torch.zeros(
+                max_num_reqs,
+                watermarker.context_width,
+                dtype=torch.int64,
+                device=device,
+            ),
+            enabled=torch.zeros(max_num_reqs, dtype=torch.bool, device=device),
+            prior_contexts=torch.zeros(
+                max_num_reqs,
+                num_speculative_steps,
+                watermarker.context_width,
+                dtype=torch.int64,
+                device=device,
+            ),
+            prompt_lens=torch.zeros(max_num_reqs, dtype=torch.int32, device=device),
+            deduplicate_contexts=deduplicate_contexts,
+            deduplicate_contexts_max_history=deduplicate_contexts_max_history,
         )
-        self.enabled = torch.zeros(max_num_reqs, dtype=torch.bool, device=device)
 
-    def prepare(self, contexts: torch.Tensor, enabled: torch.Tensor) -> None:
+    def prepare(
+        self,
+        contexts: torch.Tensor,
+        enabled: torch.Tensor,
+        all_token_ids: torch.Tensor,
+        prompt_lens: torch.Tensor,
+        total_lens: torch.Tensor,
+    ) -> None:
         num_reqs = contexts.shape[0]
-        self.contexts[:num_reqs].copy_(contexts)
-        self.enabled[:num_reqs].copy_(enabled)
+        state = self.state
+        state.contexts[:num_reqs].copy_(contexts)
+        state.enabled[:num_reqs].copy_(enabled)
+        state.all_token_ids = all_token_ids
+        state.prompt_lens.copy_(prompt_lens)
+        state.total_lens = total_lens
+
+    def _sampling_state(
+        self,
+        logits: torch.Tensor,
+        idx_mapping: torch.Tensor,
+        request_temperatures: torch.Tensor,
+        draft_step: int | torch.Tensor,
+        contexts: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        num_rows = logits.shape[0]
+        steps = torch.as_tensor(draft_step, device=logits.device, dtype=torch.int64)
+        if steps.ndim == 0:
+            steps = steps.expand(num_rows)
+        state = self.state
+        enabled = state.enabled[:num_rows] & (request_temperatures != 0)
+        if state.deduplicate_contexts == "none":
+            return steps, enabled
+        assert state.all_token_ids is not None
+        assert state.total_lens is not None
+        enabled = draft_watermarking_mask(
+            state.all_token_ids,
+            idx_mapping,
+            state.prompt_lens,
+            state.total_lens,
+            state.prior_contexts,
+            contexts,
+            steps,
+            enabled,
+            state.deduplicate_contexts_max_history,
+            include_prompt=state.deduplicate_contexts == "all",
+        )
+        return steps, enabled
 
     def sample(
         self,
         logits: torch.Tensor,
-        ordinary_sampled: torch.Tensor,
         idx_mapping: torch.Tensor,
         temperature: torch.Tensor,
+        seed: torch.Tensor,
+        pos: torch.Tensor,
+        apply_temperature: bool,
+        is_drafting: bool,
+        logits_cache: torch.Tensor | None = None,
+        logits_cache_col: torch.Tensor | None = None,
+        use_fp64: bool = False,
+        logits_cache_source: torch.Tensor | None = None,
+        num_steps: int = 1,
     ) -> torch.Tensor:
+        if num_steps > 1:
+            return self.sample_block(
+                logits,
+                idx_mapping,
+                temperature,
+                seed,
+                pos,
+                logits_cache=logits_cache,
+                logits_cache_col=logits_cache_col,
+                use_fp64=use_fp64,
+            )
+        assert apply_temperature
+        assert is_drafting
+        assert logits_cache is not None
+        assert logits_cache_col is not None
+        num_rows = logits.shape[0]
         request_temperatures = temperature[idx_mapping]
+        contexts = self.state.contexts[:num_rows]
+        steps, enabled = self._sampling_state(
+            logits, idx_mapping, request_temperatures, logits_cache_col, contexts
+        )
+
         processed_logits = logits / torch.where(
             request_temperatures == 0, 1, request_temperatures
         ).unsqueeze(-1)
-        watermarked = self.watermarker.sample(
+        random_sampler = RandomSampler(
+            expanded_idx_mapping=idx_mapping,
+            temperatures=temperature,
+            seeds=seed,
+            positions=pos,
+            use_fp64=use_fp64,
+            is_drafting=True,
+            logits_cache=logits_cache,
+            logits_cache_col=steps,
+            logits_cache_source=(
+                logits if logits_cache_source is None else logits_cache_source
+            ),
+        )
+        sampled = self.watermarker.sample(
             processed_logits,
-            self.contexts[: logits.shape[0]],
+            contexts,
+            random_sampler=random_sampler,
+            skip_mask=~enabled,
         ).token_ids
-        enabled = self.enabled[: logits.shape[0]] & (request_temperatures != 0)
-        sampled = torch.where(enabled, watermarked, ordinary_sampled)
-        contexts = self.contexts[: logits.shape[0]]
+
         contexts.copy_(torch.cat((contexts[:, 1:], sampled.unsqueeze(-1)), dim=-1))
         return sampled
+
+    def sample_block(
+        self,
+        logits: torch.Tensor,
+        idx_mapping: torch.Tensor,
+        temperature: torch.Tensor,
+        seed: torch.Tensor,
+        pos: torch.Tensor,
+        logits_cache: torch.Tensor | None = None,
+        logits_cache_col: torch.Tensor | None = None,
+        use_fp64: bool = False,
+    ) -> torch.Tensor:
+        """Sample drafts flattened as (request, step), one step at a time.
+        The target verifies each draft with a context that includes the earlier
+        drafts of its request, so steps must be sampled in order even when
+        their logits were computed in parallel.
+        """
+        assert logits_cache_col is not None
+        num_steps = self.num_speculative_steps
+        sampled_block = self.watermarker._try_sample_block(
+            logits,
+            num_steps,
+            RandomSampler(
+                expanded_idx_mapping=idx_mapping,
+                temperatures=temperature,
+                seeds=seed,
+                positions=pos,
+                use_fp64=use_fp64,
+                is_drafting=True,
+                logits_cache=logits_cache,
+                logits_cache_col=logits_cache_col,
+            ),
+            self.state,
+        )
+        if sampled_block is not None:
+            return sampled_block
+        num_reqs = logits.shape[0] // num_steps
+
+        def by_step(tensor: torch.Tensor) -> torch.Tensor:
+            return tensor.view(num_reqs, num_steps, *tensor.shape[1:])
+
+        logits = by_step(logits)
+        idx_mapping = by_step(idx_mapping)
+        pos = by_step(pos)
+        logits_cache_col = by_step(logits_cache_col)
+        sampled = torch.empty(
+            num_reqs, num_steps, dtype=torch.int64, device=logits.device
+        )
+        for step in range(num_steps):
+            sampled[:, step] = self.sample(
+                logits[:, step],
+                idx_mapping[:, step],
+                temperature,
+                seed,
+                pos[:, step],
+                apply_temperature=True,
+                is_drafting=True,
+                logits_cache=logits_cache,
+                logits_cache_col=logits_cache_col[:, step],
+                use_fp64=use_fp64,
+            )
+        return sampled.view(-1)
 
 
 def create_speculative_target_watermarker(watermarker: Watermarker) -> Watermarker:
@@ -68,9 +234,19 @@ def create_speculative_draft_watermarker(
     max_num_reqs: int,
     device: torch.device,
     allow_target_only: bool,
+    num_speculative_steps: int = 1,
+    deduplicate_contexts: WatermarkContextScope = "none",
+    deduplicate_contexts_max_history: int | None = 8192,
 ) -> DraftWatermarker | None:
     if isinstance(watermarker, SupportsSpeculativeDecoding):
-        return DraftWatermarker(watermarker.draft_watermarker, max_num_reqs, device)
+        return DraftWatermarker(
+            watermarker.draft_watermarker,
+            max_num_reqs,
+            device,
+            num_speculative_steps,
+            deduplicate_contexts,
+            deduplicate_contexts_max_history,
+        )
     if allow_target_only:
         return None
     raise ValueError(
@@ -130,9 +306,10 @@ def watermarked_rejection_sample(
     contexts: torch.Tensor,
     watermarking: torch.Tensor,
     watermarker: Watermarker,
+    watermarking_skip_mask: torch.Tensor | None = None,
     use_fp64: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Use the target key for rejection recovery and bonus tokens."""
+    """Use the target key except at contexts selected for ordinary sampling."""
     assert contexts.shape == (target_logits.shape[0], watermarker.context_width)
     return rejection_sample(
         target_logits,
@@ -149,5 +326,6 @@ def watermarked_rejection_sample(
         use_fp64=use_fp64,
         contexts=contexts,
         watermarking=watermarking,
+        watermarking_skip_mask=watermarking_skip_mask,
         watermark_key=_resolve_watermark_key(watermarker),
     )
