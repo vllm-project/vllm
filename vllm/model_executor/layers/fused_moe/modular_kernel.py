@@ -1558,9 +1558,14 @@ class FusedMoEKernelModularImpl:
                 )
             return fused_out
 
-        # Experts that drop the hidden padding return a narrower, final result.
-        if fused_out.dim() == output.dim() and fused_out.shape != output.shape:
-            output = fused_out
+        # Experts that drop the hidden padding return a narrower result. Keep the
+        # local token dims of `output`: with DP, `fused_out` covers the gathered
+        # tokens and finalize combines it into the local slice.
+        if fused_out.size(-1) != output.size(-1):
+            if fused_out.shape[:-1] == output.shape[:-1]:
+                output = fused_out
+            else:
+                output = output.new_empty(*output.shape[:-1], fused_out.size(-1))
 
         return self._finalize(
             output,
