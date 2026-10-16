@@ -1507,7 +1507,7 @@ def test_flashinfer_bmm_scales_refresh_in_place(monkeypatch):
     impl._bmm_scale_tensors = None
     impl._xqa_bmm1_tensors = None
     impl.float_scales_in_decode = False
-    impl._full_cudagraphs = False
+    impl._compilation_config = None
     layer = SimpleNamespace(
         _q_scale_float=1.0,
         _k_scale_float=0.3,
@@ -1542,12 +1542,27 @@ def test_flashinfer_bmm_scales_refresh_in_place(monkeypatch):
     assert impl._trtllm_decode_bmm_scales(torch.ones(1)) == (None, impl.bmm2_scale)
     assert impl.float_scales_in_decode
 
-    # a reload under FULL CUDA graphs after such a decode is reported
+    # a reload under FULL CUDA graphs after such a decode is reported, with
+    # the mode read at reload time (the runner resolves it after model init)
+    from vllm.config.compilation import CUDAGraphMode
+
     warnings = Mock()
     monkeypatch.setattr(fi.logger, "warning_once", warnings)
+    impl._compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode.PIECEWISE)
     impl.refresh(layer)
     warnings.assert_not_called()  # not under FULL graphs
-    impl._full_cudagraphs = True
+    impl._compilation_config.cudagraph_mode = CUDAGraphMode.FULL_AND_PIECEWISE
+    impl.refresh(layer)
+    warnings.assert_called_once()
+
+    # an unquantized KV cache without output-quant fusion has constant scales
+    warnings.reset_mock()
+    impl.kv_cache_dtype = "auto"
+    impl.float_scales_in_decode = True
+    impl.refresh(layer)
+    warnings.assert_not_called()
+    layer._o_scale_float = 0.5  # read by an output-fused forward
+    impl.float_scales_in_decode = True
     impl.refresh(layer)
     warnings.assert_called_once()
 

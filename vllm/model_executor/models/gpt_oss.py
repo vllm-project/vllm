@@ -98,9 +98,10 @@ def _load_presliced_expert(
 ) -> None:
     """Copy a pre-sliced expert tensor into `param[expert_id]` (the whole stack
     when None) through the param's loader: a direct `param.data` copy writes a
-    meta placeholder during a reload. The shapes must match unless `padded`,
-    where the param may be padded past the tensor and only its leading region
-    is written."""
+    meta placeholder during a reload. Copied with `copy_` as the old direct
+    writes were, so a tensor that doesn't broadcast to the param raises; with
+    `padded`, the param may be padded past the tensor and only its leading
+    region is written."""
     weight_loader = typing.cast(Callable[..., object], param.weight_loader)
     weight_loader(
         param,

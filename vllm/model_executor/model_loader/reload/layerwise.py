@@ -80,9 +80,14 @@ def record_metadata_for_reloading(model: torch.nn.Module):
 
 
 # Dicts a model's load_weights keeps across calls (a streamed reload calls it
-# once per batch) to pair tensors that arrive separately, e.g. an FP8 indexer
-# wk weight and its scale (DeepseekV2, DeepseekV32).
-_PENDING_LOAD_STATE_ATTRS = ("_pending_indexer_wk_fp8",)
+# once per batch) to pair tensors that arrive separately: an FP8 indexer wk
+# weight and its scale (DeepseekV2, DeepseekV32), a fused qkv_proj weight and
+# its scale (MiMo-V2, MiMo-V2 MTP). A model adding such state lists it here.
+_PENDING_LOAD_STATE_ATTRS = (
+    "_pending_indexer_wk_fp8",
+    "_pending_fp8_qkv_proj",
+    "_pending_qkv_proj",
+)
 
 
 def _clear_pending_load_state(model: torch.nn.Module, warn: bool) -> None:

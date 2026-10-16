@@ -182,8 +182,8 @@ def test_presliced_expert_goes_through_the_loader() -> None:
 
 
 def test_presliced_expert_rejects_a_short_tensor() -> None:
-    """Unless the param is known to be padded, a tensor that doesn't fill it
-    is an error (the old `param.copy_` raised), not a partial write."""
+    """Unless the param is known to be padded, a tensor that doesn't broadcast
+    to it is an error (as with the old `param.copy_`), not a partial write."""
     from vllm.model_executor.models.gpt_oss import _load_presliced_expert
 
     experts = _TestExperts("w13_bias", (2, 4))

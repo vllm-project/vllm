@@ -1932,11 +1932,9 @@ class FlashInferImpl(AttentionImpl):
         # graphs bake those, so a reload that changes the scales is not seen.
         # refresh() warns when that happens.
         self.float_scales_in_decode = False
-        cudagraph_mode = (
-            vllm_config.compilation_config.cudagraph_mode if vllm_config else None
-        )
-        self._full_cudagraphs = (
-            cudagraph_mode is not None and cudagraph_mode.has_full_cudagraphs()
+        # Read at refresh(): the runner resolves the mode after model init.
+        self._compilation_config = (
+            vllm_config.compilation_config if vllm_config else None
         )
 
         # Pre-allocated FP8 output buffer for NVFP4 without fused output quant.
@@ -2003,7 +2001,7 @@ class FlashInferImpl(AttentionImpl):
         loading, and after a weight reload). Runs outside graph capture. The
         device copies are filled in place, so captured graphs see the new
         values; the o-scale is re-read at the next eager forward."""
-        if self.float_scales_in_decode and self._full_cudagraphs:
+        if self._scales_baked_into_full_graphs(layer):
             # A decode already ran, so this is a reload, and decode on this
             # path (output-quant fusion, DCP, or the FlashInfer decode wrapper)
             # reads the scales as host floats baked into the FULL graphs.
@@ -2035,6 +2033,21 @@ class FlashInferImpl(AttentionImpl):
         self._xqa_bmm1_tensors[False].fill_(
             self.get_xqa_bmm1_scale(layer, torch.bfloat16)
         )
+
+    def _scales_baked_into_full_graphs(self, layer: torch.nn.Module) -> bool:
+        """Whether a decode consumed host-float scales that can change on a
+        reload, under FULL CUDA graphs. They can change with an FP8 KV cache
+        (q/k/v scales) or output-quant fusion (the o-scale, read at a forward);
+        with neither, bmm1/bmm2 are constants."""
+        if not self.float_scales_in_decode:
+            return False
+        if not (
+            is_quantized_kv_cache(self.kv_cache_dtype)
+            or getattr(layer, "_o_scale_float", None) is not None
+        ):
+            return False
+        mode = getattr(self._compilation_config, "cudagraph_mode", None)
+        return mode is not None and mode.has_full_cudagraphs()
 
     def _trtllm_decode_bmm_scales(self, output_scale: torch.Tensor | None):
         """(bmm1_scale_log2, bmm2_scale) for trtllm-gen decode: the device
