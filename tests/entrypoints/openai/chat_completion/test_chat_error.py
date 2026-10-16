@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from vllm.config.multimodal import MultiModalConfig
+from vllm.entrypoints.anthropic.serving import AnthropicServingMessages
 from vllm.entrypoints.openai.chat_completion.protocol import (
     BatchChatCompletionRequest,
     ChatCompletionRequest,
@@ -389,6 +390,19 @@ async def test_chat_error_stream_first_chunk(include_usage: bool):
         f"Expected error message in chunks: {chunks}"
     )
     assert chunks[-1] == "data: [DONE]\n\n"
+
+    async def upstream():
+        for chunk in chunks:
+            yield chunk
+
+    serving = object.__new__(AnthropicServingMessages)
+    events = [event async for event in serving.message_stream_converter(upstream())]
+    error = json.loads(events[-1].split("data:", 1)[1])
+    assert error == {
+        "type": "error",
+        "error": {"type": "api_error", "message": "Internal server error"},
+    }
+    assert not any("event: message_stop" in event for event in events)
 
 
 @pytest.mark.parametrize(
