@@ -323,29 +323,60 @@ def test_mooncake_decode_crosses_blocks_and_clips_terminal_output(remote_store):
 
 
 def test_mooncake_preemption_keeps_already_accepted_output(remote_store):
-    rows = np.arange(60, dtype=np.uint8).reshape(10, *_SHAPE)
-    keys = ["block-0", "block-1"]
-    remote_store.put(
-        [
-            BlockObject(key, rows[i * 4 : i * 4 + 4].tobytes())
-            for i, key in enumerate(keys)
-        ]
-    )
+    """Re-prefill recreates Worker state without replacing already accepted R3."""
+    rows = np.arange(42, dtype=_DTYPE).reshape(7, *_SHAPE)
+    worker = _make_worker(1)
+    worker._store.close()
+    worker._store = BackgroundBlockObjectStore(remote_store, max_pending_batches=2)
+    worker._return_keys = True
     connector = AuxOutputSchedulerConnector(_BLOCK_SIZE)
-    request = _SchedulerRequest("request", [], num_tokens=9)
-    assert (
-        connector.take_output(request, {"request": AuxRequestOutput(0, rows[:0], keys)})
-        is None
+    request = _SchedulerRequest(
+        "request", [b"a" * 32], num_tokens=6, num_output_tokens=0
     )
-    # Preemption terminates the Worker state, not the user request/output.
+    requests = {request.request_id: request}
+    metadata = connector.build_connector_meta(
+        _step_output(["request"], [0], [6]), requests
+    )
+    output = _process_output(
+        worker,
+        metadata,
+        rows[:6],
+        ["request"],
+        np.array([0]),
+        token_starts=(0,),
+        num_tokens=(6,),
+    )
+    request.num_tokens = 7
+    request.num_output_tokens = 1
+    assert connector.take_output(request, output) is None
     connector.request_finished(request)
-    request.num_tokens = 11
-    request.finished = True
-    result = connector.take_output(
-        request, {"request": AuxRequestOutput(8, rows[8:], [])}
+    worker.begin_step(
+        connector.build_connector_meta(_step_output([], [], []), requests)
     )
+    assert "request" not in worker._requests
+
+    request.num_preemptions = 1
+    metadata = connector.build_connector_meta(
+        _step_output(["request"], [0], [7]), requests
+    )
+    replay = rows.copy()
+    replay[:6] = 200
+    output = _process_output(
+        worker,
+        metadata,
+        replay,
+        ["request"],
+        np.array([0]),
+        token_starts=(0,),
+        num_tokens=(7,),
+    )
+    request.num_tokens = 8
+    request.num_output_tokens = 2
+    request.finished = True
+    result = connector.take_output(request, output)
     assert remote_store.get_concatenated(result) == rows.tobytes()
     connector.request_finished(request)
+    worker.close()
     connector.close()
 
 
@@ -414,7 +445,8 @@ def test_mooncake_batches_preserve_order_and_request_release_keeps_objects():
     native = Mock()
 
     def put(keys, values):
-        remote.update(zip(keys, values, strict=True))
+        for key, value in zip(keys, values, strict=True):
+            remote.setdefault(key, value)
         return 0
 
     native.put_batch.side_effect = put
@@ -446,6 +478,12 @@ def test_mooncake_missing_object_does_not_return_partial_output():
     store = MooncakeBlockObjectStore(native, object_nbytes=4, max_batch_bytes=8)
     with pytest.raises(BlockObjectStoreError, match="unavailable: missing"):
         store.get_concatenated(["present", "missing"])
+
+
+def test_mooncake_republishing_a_key_keeps_its_original_bytes(remote_store):
+    remote_store.put([BlockObject("shared", b"first")])
+    remote_store.put([BlockObject("shared", b"other")])
+    assert remote_store.get_concatenated(["shared"]) == b"first"
 
 
 def test_mooncake_failure_propagates_through_background_writer():
