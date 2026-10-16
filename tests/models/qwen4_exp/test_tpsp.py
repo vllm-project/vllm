@@ -14,8 +14,8 @@ from transformers import Qwen4ExpTextConfig
 
 from vllm.platforms import current_platform
 
-if not current_platform.is_cuda():
-    pytest.skip("Qwen4Exp SP requires CUDA", allow_module_level=True)
+if not current_platform.is_cuda_alike():
+    pytest.skip("Qwen4Exp SP requires CUDA or ROCm", allow_module_level=True)
 
 from tests.utils import multi_gpu_test
 from vllm.config import (
@@ -38,13 +38,18 @@ from vllm.models.common.ops.sequence_parallel import (
     sp_padding_mask,
     sp_shard,
 )
-from vllm.models.qwen4_exp.nvidia import model as qwen4_model
-from vllm.models.qwen4_exp.nvidia.model import Qwen4ExpDecoderLayer
 from vllm.utils.network_utils import get_open_port
 from vllm.v1.attention.backends.short_conv_attn import PleShortConvAttentionMetadata
 from vllm.v1.worker.workspace import init_workspace_manager, reset_workspace_manager
 
 from .test_ple import _ConvBatchCase, _make_conv_metadata
+
+if current_platform.is_rocm():
+    from vllm.models.qwen4_exp.amd import model as qwen4_model
+    from vllm.models.qwen4_exp.amd.model import Qwen4ExpDecoderLayer
+else:
+    from vllm.models.qwen4_exp.nvidia import model as qwen4_model
+    from vllm.models.qwen4_exp.nvidia.model import Qwen4ExpDecoderLayer
 
 
 class _TPAttentionProjection(nn.Module):
@@ -168,7 +173,8 @@ def _check_decoder_ple(rank: int) -> None:
                 set_current_vllm_config(config),
                 set_forward_context({layer.ple.prefix: metadata}, config),
             ):
-                layer.ple.start_prefetch(ids, qsl, context)
+                if hasattr(layer.ple, "start_prefetch"):
+                    layer.ple.start_prefetch(ids, qsl, context)
                 output = layer(
                     *inputs,
                     positions,
@@ -177,7 +183,10 @@ def _check_decoder_ple(rank: int) -> None:
                     ngram_context=context,
                 )
                 if config.parallel_config.enable_hc_sp:
-                    output = tuple(sp_all_gather(x)[:num_tokens] for x in output)
+                    # ROCm all-gather requires contiguous inputs.
+                    output = tuple(
+                        sp_all_gather(x.contiguous())[:num_tokens] for x in output
+                    )
                 # A later MoE call may reuse workspace-backed output storage.
                 outputs.append(tuple(x.clone() for x in output))
         torch.testing.assert_close(outputs[1], outputs[0], atol=0.002, rtol=0.02)
@@ -223,11 +232,38 @@ def _check_moe_sp(rank: int, config: VllmConfig) -> None:
             query_start_loc=None,
             ngram_context=None,
         )
-        actual = tuple(sp_all_gather(x)[:num_tokens] for x in output)
+        actual = tuple(sp_all_gather(x.contiguous())[:num_tokens] for x in output)
     torch.testing.assert_close(actual, expected, atol=0.002, rtol=0.02)
 
 
-def _run_sp(rank: int, port: int, moe_sp: bool) -> None:
+def _check_compiled_sp_ops() -> None:
+    """Compiled SP collectives stay correct for token counts unseen at trace time."""
+    from vllm.models.qwen4_exp.amd.ops.sequence_parallel import (
+        sp_reduce_scatter,
+        sp_shard,
+    )
+
+    def collectives(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        gathered = sp_all_gather(sp_shard(x) * 2)[: x.shape[0]]
+        reduced = sp_all_gather(sp_reduce_scatter(x))[: x.shape[0]]
+        return gathered, reduced
+
+    # vLLM drops Dynamo guards, so one trace must serve every token count.
+    compiled = torch.compile(
+        collectives,
+        fullgraph=True,
+        options={"guard_filter_fn": torch.compiler.skip_all_guards_unsafe},
+    )
+    traced = torch.randn(8, 16)
+    torch._dynamo.mark_dynamic(traced, 0)
+    compiled(traced)
+    for num_tokens in (7, 3, 1):
+        torch.manual_seed(num_tokens)
+        x = torch.randn(num_tokens, 16)
+        torch.testing.assert_close(compiled(x), collectives(x), atol=0, rtol=0)
+
+
+def _run_sp(rank: int, port: int, moe_sp: bool, compiled_ops: bool = False) -> None:
     """Initialize rank-local runtime state and run one equivalence check."""
     torch.accelerator.set_device_index(rank)
     torch.set_num_threads(1)
@@ -247,6 +283,8 @@ def _run_sp(rank: int, port: int, moe_sp: bool) -> None:
                 torch.set_default_dtype(torch.bfloat16)
                 if moe_sp:
                     _check_moe_sp(rank, config)
+                elif compiled_ops:
+                    _check_compiled_sp_ops()
                 else:
                     _check_decoder_ple(rank)
     finally:
@@ -265,3 +303,10 @@ def test_moe_sp_equivalence(monkeypatch) -> None:
     """Native MoE SP preserves outputs with unequal DP batches and padding."""
     monkeypatch.setenv("VLLM_MOE_SKIP_PADDING", "1")
     mp.spawn(_run_sp, args=(get_open_port(), True), nprocs=4)
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm-only SP ops")
+@multi_gpu_test(num_gpus=2)
+def test_compiled_sp_ops_handle_untraced_token_counts() -> None:
+    """Padding in compiled SP collectives must not specialize on the traced size."""
+    mp.spawn(_run_sp, args=(get_open_port(), False, True), nprocs=2)
