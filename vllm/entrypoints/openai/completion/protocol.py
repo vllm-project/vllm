@@ -12,9 +12,11 @@ import vllm.envs as envs
 from vllm.config import ModelConfig
 from vllm.entrypoints.generate.base.protocol import (
     AnyResponseFormat,
+    MMPayload,
     PerRequestMetrics,
     StopParam,
     StreamOptions,
+    resolve_return_mm_kwargs_alias,
     structured_outputs_from_response_format,
     validate_cache_salt,
     validate_structural_tag_response_format,
@@ -194,6 +196,28 @@ class CompletionRequest(OpenAIBaseModel):
             "requests, offsets are relative to the templated prompt "
             "string (after applying the chat template). Multimodal "
             "inputs and pre-tokenized inputs always yield null."
+        ),
+    )
+
+    mm_payload: MMPayload = Field(
+        default="tensors",
+        description=(
+            "What the render response's `features` carry for multimodal "
+            "items. 'tensors' serializes the processed tensors into "
+            "`kwargs_data` and `mm_metadata`. 'none' sets both to null for "
+            "callers that need only the token layout and item hashes, such as "
+            "cache-aware routers. Do not send a 'none' response to "
+            "`/inference/v1/generate` which reads a null `kwargs_data` as "
+            "every item being cached. Only supported on the render endpoints. "
+            "Ignored on regular generation endpoints."
+        ),
+    )
+    return_mm_kwargs: bool | None = Field(
+        default=None,
+        deprecated="return_mm_kwargs is deprecated in favor of the mm_payload field",
+        description=(
+            "Deprecated alias: false is the same as `mm_payload='none'`. "
+            "Ignored when `mm_payload` is set."
         ),
     )
 
@@ -392,6 +416,11 @@ class CompletionRequest(OpenAIBaseModel):
 
     @model_validator(mode="before")
     @classmethod
+    def apply_return_mm_kwargs_alias(cls, data: Any) -> Any:
+        return resolve_return_mm_kwargs_alias(data)
+
+    @model_validator(mode="before")
+    @classmethod
     def check_cache_salt_support(cls, data: Any) -> Any:
         if not isinstance(data, dict):
             return data
@@ -478,6 +507,17 @@ class CompletionRequest(OpenAIBaseModel):
             raise VLLMValidationError(
                 "`logprob_token_ids` is not supported with beam search.",
                 parameter="logprob_token_ids",
+            )
+
+        if (
+            data.get("use_beam_search")
+            and data.get("echo")
+            and data.get("logprobs") is not None
+        ):
+            raise VLLMValidationError(
+                "`echo` with `logprobs` is not supported with beam search "
+                "because beam search does not compute prompt logprobs.",
+                parameter="echo",
             )
 
         if (
