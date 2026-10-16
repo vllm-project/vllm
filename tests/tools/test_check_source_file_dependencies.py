@@ -25,7 +25,7 @@ def test_dead_paths(monkeypatch):
               - tests/b/test_x.py  # live: a tracked file
               - vllm/gone.py  # dead
               - tests/gone/  # dead
-              - "!vllm/excluded/"  # dead: the "!" is ignored
+              - "!vllm/excluded/"  # skipped: a dead exclusion excludes nothing
               mirror:
                 amd:
                   source_file_dependencies:
@@ -36,6 +36,5 @@ def test_dead_paths(monkeypatch):
     assert dead_paths(pipeline, ["vllm/a.py", "tests/b/test_x.py"]) == [
         "vllm/gone.py",
         "tests/gone/",
-        "vllm/excluded/",
         "vllm/also_gone.py",
     ]

@@ -6,7 +6,8 @@ A job runs when a change touches one of its `source_file_dependencies`. A path
 that no longer matches a tracked file can never be touched, so after a rename or
 delete the job silently stops triggering on the code it was written to guard.
 This walks the directories the pipeline generator reads and fails on any entry
-that is not a prefix of a tracked file. A leading `!` (an exclusion) is ignored.
+that is not a prefix of a tracked file. Exclusions (a leading `!`) are skipped:
+a dead one excludes nothing, so it cannot stop a job from triggering.
 
 Paths already dead when the check was added are listed in
 `source_file_dependencies_allowlist.txt`, which is only meant to shrink.
@@ -37,8 +38,9 @@ def dead_paths(node: object, tracked: list[str]) -> list[str]:
     for key, value in node.items():
         if key == "source_file_dependencies":
             for path in value:
-                path = path.removeprefix("!")
-                if not any(f.startswith(path) for f in tracked):
+                if not path.startswith("!") and not any(
+                    f.startswith(path) for f in tracked
+                ):
                     dead.append(path)
         else:
             dead += dead_paths(value, tracked)
