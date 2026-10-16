@@ -1392,6 +1392,38 @@ def test_mhc_pre_delayed_rocm_aiter_fused_rms_norm(num_tokens, seam):
     torch.testing.assert_close(actual[2], expected_layer_input, atol=2e-2, rtol=1e-2)
 
 
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm required")
+def test_mhc_post_collapse_rms_norm_warmup_covers_runtime():
+    """Warmup compiles the one variant every runtime token count launches."""
+    from vllm.model_executor.kernels.mhc.triton import (
+        MHC_POST_COLLAPSE_RMS_NORM_KERNEL,
+        mhc_post_collapse_rms_norm_triton,
+    )
+
+    hc_mult, hidden_size = 4, 5120
+    kernel = MHC_POST_COLLAPSE_RMS_NORM_KERNEL.kernel
+    kernel_cache = kernel.device_caches[torch.accelerator.current_device_index()][0]
+    kernel_cache.clear()
+    MHC_POST_COLLAPSE_RMS_NORM_KERNEL.warmup(
+        hidden_size=hidden_size, weight_dtype=torch.bfloat16
+    )
+    assert len(kernel_cache) == 1
+    for num_tokens in (1, 7, 128):
+        residual, _, _, _, norm_weight = _rocm_mhc_inputs(
+            num_tokens=num_tokens, hidden_size=hidden_size, hc_mult=hc_mult
+        )
+        mhc_post_collapse_rms_norm_triton(
+            residual,
+            torch.randn(num_tokens, hidden_size, dtype=torch.bfloat16, device=DEVICE),
+            torch.rand(num_tokens, hc_mult, 1, device=DEVICE),
+            torch.rand(num_tokens, hc_mult, hc_mult, device=DEVICE),
+            torch.rand(num_tokens, hc_mult, device=DEVICE),
+            norm_weight,
+            1e-6,
+        )
+        assert len(kernel_cache) == 1
+
+
 @pytest.mark.skipif(
     not (current_platform.is_rocm() and HAS_AITER_MHC_FUSED_POST_PRE_DELAYED_RMS_NORM),
     reason="AITER fused delayed-seam kernel required (gfx950)",

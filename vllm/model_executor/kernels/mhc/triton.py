@@ -1,10 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from dataclasses import dataclass
+from typing import Any
+
 import torch
 import torch.nn.functional as F
 from torch import Tensor
 
+from vllm.model_executor.warmup.jit_warmup import kernel_launcher
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    LaunchSpec,
+    TritonWarmupTensor,
+    VllmTritonJitKernel,
+)
 from vllm.triton_utils import tl, triton
+from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.torch_utils import direct_register_custom_op
 
 
@@ -201,6 +211,67 @@ def _mhc_post_collapse_rms_norm_kernel(
     tl.store(out_ptr + t * H + cols, ((x1f * rstd) * w).to(tl.bfloat16), mask=mask)
 
 
+class MHCPostCollapseRMSNormKernel(
+    VllmTritonJitKernel["MHCPostCollapseRMSNormKernel.CompileKey"]
+):
+    @dataclass(frozen=True)
+    class CompileKey:
+        hidden_size: int
+        block_h: int
+        weight_dtype: torch.dtype
+
+    kernel = staticmethod(_mhc_post_collapse_rms_norm_kernel)
+
+    def dispatch(  # type: ignore[override]
+        self, *, hidden_size: int, weight_dtype: torch.dtype
+    ) -> CompileKey:
+        return self.CompileKey(
+            hidden_size=hidden_size,
+            block_h=next_power_of_2(hidden_size),
+            weight_dtype=weight_dtype,
+        )
+
+    def get_warmup_keys(
+        self, *, hidden_size: int, weight_dtype: torch.dtype
+    ) -> list[CompileKey]:
+        return self._trace_dispatch(self.dispatch)(
+            hidden_size=hidden_size, weight_dtype=weight_dtype
+        )
+
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+        H = compile_key.hidden_size
+        return dict(
+            residual=TritonWarmupTensor(torch.bfloat16, shape=(1, 4, H)),
+            x=TritonWarmupTensor(torch.bfloat16, shape=(1, H)),
+            post_mix=TritonWarmupTensor(torch.float32, shape=(1, 4, 1)),
+            comb_mix=TritonWarmupTensor(torch.float32, shape=(1, 4, 4)),
+            pre_mix=TritonWarmupTensor(torch.float32, shape=(1, 4)),
+            weight=TritonWarmupTensor(compile_key.weight_dtype, shape=(H,)),
+            residual_out=TritonWarmupTensor(torch.bfloat16, shape=(1, 4, H)),
+            out=TritonWarmupTensor(torch.bfloat16, shape=(1, H)),
+            norm_eps=1e-6,
+        )
+
+    @kernel_launcher
+    def __call__(
+        self,
+        residual: Tensor,
+        x: Tensor,
+        post_mix: Tensor,
+        comb_mix: Tensor,
+        pre_mix: Tensor,
+        weight: Tensor,
+        residual_out: Tensor,
+        out: Tensor,
+        norm_eps: float,
+    ) -> LaunchSpec:
+        H = residual.shape[2]
+        return (residual.shape[0],), dict(H=H, BLOCK_H=next_power_of_2(H), num_warps=16)
+
+
+MHC_POST_COLLAPSE_RMS_NORM_KERNEL = MHCPostCollapseRMSNormKernel()
+
+
 def mhc_post_collapse_rms_norm_triton(
     residual: Tensor,
     sublayer_out: Tensor,
@@ -234,7 +305,7 @@ def mhc_post_collapse_rms_norm_triton(
     residual_out = torch.empty_like(residual)
     out = torch.empty(T, H, dtype=residual.dtype, device=residual.device)
     if T:
-        _mhc_post_collapse_rms_norm_kernel[(T,)](
+        MHC_POST_COLLAPSE_RMS_NORM_KERNEL(
             residual.contiguous(),
             sublayer_out.contiguous(),
             post_layer_mix.contiguous(),
@@ -244,9 +315,6 @@ def mhc_post_collapse_rms_norm_triton(
             residual_out,
             out,
             norm_eps,
-            H=H,
-            BLOCK_H=triton.next_power_of_2(H),
-            num_warps=16,
         )
     return residual_out, out
 

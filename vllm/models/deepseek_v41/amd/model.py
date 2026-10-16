@@ -22,6 +22,7 @@ from vllm.forward_context import (
     is_forward_context_available,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.kernels.mhc.triton import MHC_POST_COLLAPSE_RMS_NORM_KERNEL
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
@@ -265,6 +266,10 @@ class DeepseekV4DecoderLayer(nn.Module):
         )
         self.mhc_pre_delayed = MHCPreDelayedOp()
         self.mhc_post = MHCPostOp()
+        if mhc_stream is not None:
+            MHC_POST_COLLAPSE_RMS_NORM_KERNEL.register_warmup(
+                hidden_size=self.hidden_size, weight_dtype=self.ffn_norm.weight.dtype
+            )
         # Where aiter's fused seam kernel runs (gfx950), it folds the following
         # attn_norm / ffn_norm into its collapse, so the separate norms are
         # skipped for the seams it takes.
