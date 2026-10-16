@@ -5,6 +5,8 @@
 Every expert backend stops after GEMM2 and hands its rows to the finalizer.
 """
 
+import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -45,12 +47,18 @@ from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
 from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
     UnquantizedMoeBackend,
 )
+from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
     UnquantizedFusedMoEMethod,
 )
 from vllm.model_executor.layers.fused_moe.utils import fi_moe_largest_bucket
+from vllm.model_executor.layers.quantization.auto_gptq import (
+    AutoGPTQConfig,
+    AutoGPTQMoEMethod,
+)
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+from vllm.model_executor.layers.quantization.inc import INCConfig
 from vllm.model_executor.layers.quantization.modelopt import (
     ModelOptNvFp4Config,
     ModelOptNvFp4FusedMoE,
@@ -454,7 +462,10 @@ class MusePostExpertFinalize:
 
 
 def _attach_post_expert_finalize(
-    quant_method: "MuseSparkModelOptNvFp4FusedMoE | MuseSparkUnquantizedFusedMoE",
+    quant_method: (
+        "MuseSparkModelOptNvFp4FusedMoE | MuseSparkUnquantizedFusedMoE"
+        " | MuseSparkWNA16FusedMoE"
+    ),
 ) -> None:
     """Hand the layer's finalizer to its experts, which exist only now."""
     assert quant_method.moe_kernel is not None
@@ -782,6 +793,121 @@ class MuseSparkUnquantizedFusedMoE(UnquantizedFusedMoEMethod):
         _attach_post_expert_finalize(self)
 
 
+class MuseSparkWNA16FusedMoE(AutoGPTQMoEMethod):
+    """GPTQ-format W4A16/W8A16 experts (e.g. AutoRound INT4) on Marlin.
+
+    Marlin GEMMs run route-major and hand the unweighted GEMM2 rows to the
+    MuseSpark post-expert finalize, which norms each expert's output before
+    the weighted top-k reduction.
+    """
+
+    muse_post_expert_finalize: MusePostExpertFinalize
+
+    def __init__(self, quant_config: AutoGPTQConfig, moe_config: FusedMoEConfig):
+        super().__init__(quant_config, moe_config)
+        _validate_route_major_deployment(moe_config)
+        if not self.moe.is_act_and_mul:
+            raise NotImplementedError("MuseSpark WNA16 MoE requires SwiGLU.")
+        if not issubclass(self.experts_cls, MarlinExperts):
+            raise NotImplementedError(
+                "MuseSpark WNA16 MoE requires the Marlin experts kernel; got "
+                f"{getattr(self.experts_cls, '__name__', self.experts_cls)}."
+            )
+        logger.info_once(
+            "MuseSpark WNA16: Marlin W%dA16 GEMMs with Triton finalization.",
+            quant_config.weight_bits,
+        )
+
+    def process_weights_after_loading(self, layer: "MuseSparkRoutedExperts") -> None:
+        super().process_weights_after_loading(layer)
+        _attach_post_expert_finalize(self)
+
+
+def _hf_experts_prefix(prefix: str) -> str:
+    """``model.layers.N.feed_forward.experts`` -> the HF checkpoint name."""
+    return re.sub(
+        r"^model\.layers\.(\d+)\.feed_forward\.experts",
+        r"model.language_model.layers.\1.mlp.experts",
+        prefix,
+    )
+
+
+def _inc_experts_bits(quant_config: INCConfig, prefix: str) -> int:
+    """Bits of an INC (AutoRound) expert layer, honouring per-expert overrides.
+
+    AutoRound lists the experts it left unquantized (MuseSpark layers 0 and
+    61) individually in ``extra_config``; every other expert uses the
+    checkpoint-wide bit width.
+    """
+    extra = quant_config.extra_config or {}
+    for candidate in (prefix, _hf_experts_prefix(prefix)):
+        bits = {
+            int(cfg.get("bits", quant_config.weight_bits))
+            for name, cfg in extra.items()
+            if name.startswith(f"{candidate}.")
+        }
+        if len(bits) > 1:
+            raise ValueError(
+                f"{prefix}: experts mix bit widths {sorted(bits)} in extra_config."
+            )
+        if bits:
+            return bits.pop()
+    return quant_config.weight_bits
+
+
+def _wna16_experts_method(
+    quant_config: QuantizationConfig, prefix: str, moe_config: FusedMoEConfig
+) -> FusedMoEMethodBase | None:
+    """The WNA16 method for GPTQ-format experts, or None if unquantized."""
+    if isinstance(quant_config, INCConfig):
+        bits = _inc_experts_bits(quant_config, prefix)
+        if bits >= 16:
+            return None
+        if quant_config.data_type != "int" or "gptq" not in (
+            quant_config.packing_format or ""
+        ):
+            raise NotImplementedError(
+                "MuseSpark INC experts support GPTQ-packed integer weights; got "
+                f"data_type={quant_config.data_type!r}, "
+                f"packing_format={quant_config.packing_format!r}."
+            )
+        group_size, sym = quant_config.group_size, quant_config.sym
+    else:
+        assert isinstance(quant_config, AutoGPTQConfig)
+        if quant_config.dynamic and any(
+            re.match(pattern.removeprefix("-:"), prefix)
+            for pattern in quant_config.dynamic
+            if pattern.startswith("-:")
+        ):
+            return None
+        bits = quant_config.weight_bits
+        group_size, sym = quant_config.group_size, quant_config.is_sym
+        if quant_config.desc_act:
+            raise NotImplementedError("MuseSpark WNA16 MoE does not support act-order.")
+    if (bits, sym) not in ((4, True), (8, True)):
+        raise NotImplementedError(
+            f"MuseSpark WNA16 MoE supports symmetric int4/int8; got bits={bits}, "
+            f"sym={sym}."
+        )
+    return MuseSparkWNA16FusedMoE(
+        AutoGPTQConfig(
+            weight_bits=bits,
+            group_size=group_size,
+            desc_act=False,
+            is_sym=sym,
+            lm_head_quantized=False,
+            dynamic={},
+            full_config={},
+        ),
+        moe_config,
+    )
+
+
+def _is_per_expert_weight(name: str) -> bool:
+    """``<expert id>.<proj>.<param>`` as stored by per-expert checkpoints."""
+    return name.split(".", 1)[0].isdigit()
+
+
 class MuseSparkRoutedExperts(MuseSparkConsolidatedRoutedExperts):
     """Consolidated-tensor experts with the NVFP4 / BF16 quant methods."""
 
@@ -795,8 +921,27 @@ class MuseSparkRoutedExperts(MuseSparkConsolidatedRoutedExperts):
             quant_config.is_layer_excluded(prefix)
         ):
             return MuseSparkModelOptNvFp4FusedMoE(quant_config, moe_config)
-        # MuseSpark NVFP4 keeps layers 0 and 61 in BF16.
+        if isinstance(quant_config, (INCConfig, AutoGPTQConfig)):
+            method = _wna16_experts_method(quant_config, prefix, moe_config)
+            if method is not None:
+                return method
+        # MuseSpark NVFP4 and INT4 keep layers 0 and 61 in BF16.
         return MuseSparkUnquantizedFusedMoE(moe_config)
+
+    def load_weights(
+        self, weights: Iterable[tuple[str, torch.Tensor]]
+    ) -> Iterable[str]:
+        # NVFP4/BF16 checkpoints stack all experts; GPTQ/AutoRound exports
+        # (and their unquantized layers) store one tensor per expert, which
+        # RoutedExperts.load_weights maps through the per-expert mapping.
+        consolidated: list[tuple[str, torch.Tensor]] = []
+        for name, tensor in weights:
+            if _is_per_expert_weight(name):
+                yield from RoutedExperts.load_weights(self, [(name, tensor)])
+            else:
+                consolidated.append((name, tensor))
+        if consolidated:
+            yield from super().load_weights(consolidated)
 
 
 class MuseMoERunner(MoERunner):
@@ -820,7 +965,9 @@ class MuseMoERunner(MoERunner):
             post_expert_norm, self.moe_config, fuse_all_reduce
         )
         quant_method = cast(
-            MuseSparkModelOptNvFp4FusedMoE | MuseSparkUnquantizedFusedMoE,
+            MuseSparkModelOptNvFp4FusedMoE
+            | MuseSparkUnquantizedFusedMoE
+            | MuseSparkWNA16FusedMoE,
             routed_experts.quant_method,
         )
         quant_method.muse_post_expert_finalize = self.post_expert_finalize
