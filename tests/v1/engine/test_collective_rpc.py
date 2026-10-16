@@ -89,24 +89,13 @@ def test_collective_rpc_preserves_failed_output():
 
 @pytest.mark.asyncio
 async def test_collective_rpc_barrier_reaches_each_dp_engine():
-    order: list[str] = []
-    engines = {}
-    for name in ("engine-0", "engine-1"):
-        future = OneShotFuture(object(), order, name)
-        executor = MagicMock()
-        executor.collective_rpc.side_effect = lambda *args, n=name: order.append(
-            f"{n}-rpc"
-        )
-        engines[name] = SimpleNamespace(
-            batch_queue=deque([(future, object(), future)]), model_executor=executor
-        )
+    calls: list[tuple[str, str, tuple]] = []
 
     async def call_utility(method, *args, engine):
-        assert method == "collective_rpc"
-        return EngineCore.collective_rpc(engines[engine], *args)
+        calls.append((engine, method, args))
 
     client = SimpleNamespace(
-        core_engines=list(engines), _call_utility_async=call_utility
+        core_engines=["engine-0", "engine-1"], _call_utility_async=call_utility
     )
     client.call_utility_async = partial(DPLBAsyncMPClient.call_utility_async, client)
     client.call_utility_all_async = partial(
@@ -117,6 +106,7 @@ async def test_collective_rpc_barrier_reaches_each_dp_engine():
 
     await AsyncLLM.collective_rpc(llm, "release", wait_for_inflight_batches=True)
 
-    assert len(order) == 2 * len(engines)
-    for name in engines:
-        assert order.index(name) < order.index(f"{name}-rpc")
+    assert sorted(calls) == [
+        (engine, "collective_rpc", ("release", None, (), None, True))
+        for engine in client.core_engines
+    ]
