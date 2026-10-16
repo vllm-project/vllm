@@ -14,9 +14,11 @@ isolation, plus a handful of end-to-end scenarios that exercise the
 state machine.
 """
 
+import asyncio
 import json
 from collections.abc import AsyncGenerator
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -41,6 +43,7 @@ from vllm.entrypoints.cohere.serving import (
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionStreamResponse,
 )
+from vllm.entrypoints.serve.engine.protocol import ErrorInfo, ErrorResponse
 
 # ----------------------------------------------------------------------
 # Helpers
@@ -619,6 +622,136 @@ class TestBuildMessageEndEvent:
 # ======================================================================
 # End-to-end: _chat_completion_stream_to_v2
 # ======================================================================
+
+
+class TestCreateChatV2:
+    @pytest.fixture
+    def chat_request(self):
+        return CohereChatV2Request(
+            model="m", messages=[{"role": "user", "content": "hi"}], stream=True
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("status_code", [400, 503])
+    async def test_initial_stream_error_returns_error_response(
+        self, monkeypatch, chat_request, status_code
+    ):
+        serving = _serving()
+        error = ErrorResponse(
+            error=ErrorInfo(message="generation failed", type="error", code=status_code)
+        )
+        closed = False
+
+        async def generator():
+            nonlocal closed
+            try:
+                yield _sse(error.model_dump_json())
+                yield _DONE_FRAME
+            finally:
+                closed = True
+
+        monkeypatch.setattr(
+            serving, "create_chat_completion", AsyncMock(return_value=generator())
+        )
+        result = await serving.create_chat_v2(chat_request)
+
+        assert result == error
+        assert closed
+
+    @pytest.mark.asyncio
+    async def test_invalid_first_frame_uses_stream_error_handling(
+        self, monkeypatch, chat_request
+    ):
+        serving = _serving()
+        monkeypatch.setattr(
+            serving,
+            "create_chat_completion",
+            AsyncMock(return_value=_stream_from([_sse("{invalid"), _DONE_FRAME])),
+        )
+
+        result = await serving.create_chat_v2(chat_request)
+
+        assert [frame async for frame in result] == [_DONE_FRAME]
+
+    @pytest.mark.asyncio
+    async def test_stream_preserves_first_chunk(self, monkeypatch, chat_request):
+        serving = _serving()
+        generator = _stream_from(
+            [
+                _make_chunk(role="assistant", content="Hello"),
+                _make_chunk(content=" world", finish_reason="stop"),
+                _DONE_FRAME,
+            ]
+        )
+        monkeypatch.setattr(
+            serving, "create_chat_completion", AsyncMock(return_value=generator)
+        )
+
+        result = await serving.create_chat_v2(chat_request)
+        frames = [frame async for frame in result]
+        events = [_parse_event(frame) for frame in frames[:-1]]
+
+        assert frames[-1] == _DONE_FRAME
+        assert sum(event["type"] == "message-start" for event in events) == 1
+        assert (
+            "".join(
+                event["delta"]["message"]["content"]["text"]
+                for event in events
+                if event["type"] == "content-delta"
+            )
+            == "Hello world"
+        )
+
+    @pytest.mark.asyncio
+    async def test_close_before_iteration_closes_upstream(
+        self, monkeypatch, chat_request
+    ):
+        serving = _serving()
+        closed = False
+
+        async def generator():
+            nonlocal closed
+            try:
+                yield _make_chunk(role="assistant")
+            finally:
+                closed = True
+
+        monkeypatch.setattr(
+            serving, "create_chat_completion", AsyncMock(return_value=generator())
+        )
+        result = await serving.create_chat_v2(chat_request)
+
+        await result.aclose()
+
+        assert closed
+
+    @pytest.mark.asyncio
+    async def test_cancel_before_first_chunk_closes_stream(
+        self, monkeypatch, chat_request
+    ):
+        serving = _serving()
+        started = asyncio.Event()
+        closed = asyncio.Event()
+
+        async def generator():
+            try:
+                started.set()
+                await asyncio.Event().wait()
+                yield _DONE_FRAME
+            finally:
+                closed.set()
+
+        monkeypatch.setattr(
+            serving, "create_chat_completion", AsyncMock(return_value=generator())
+        )
+        task = asyncio.create_task(serving.create_chat_v2(chat_request))
+        try:
+            await asyncio.wait_for(started.wait(), timeout=5)
+        finally:
+            task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert closed.is_set()
 
 
 class TestChatCompletionStreamToV2:

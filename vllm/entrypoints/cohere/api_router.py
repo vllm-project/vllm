@@ -32,11 +32,14 @@ body parameter into a query parameter and reject every request with
 """
 
 import json
+from collections.abc import AsyncGenerator
+from contextlib import aclosing
 from http import HTTPStatus
 
 from fastapi import APIRouter, Depends, FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.types import Receive, Scope, Send
 
 import vllm.envs as envs
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
@@ -70,12 +73,24 @@ if _SDK_AVAILABLE:
         CohereChatV2Response,
         CohereError,
     )
-    from vllm.entrypoints.cohere.serving import CohereServingChatV2
+    from vllm.entrypoints.cohere.serving import CohereServingChatV2, _CohereChatStream
     from vllm.entrypoints.scale_out.render.serving import ServingRender
     from vllm.entrypoints.scale_out.token_in_token_out.protocol import GenerateRequest
 
     router = APIRouter()
     render_router = APIRouter()
+
+    class _CohereStreamingResponse(StreamingResponse):
+        def __init__(
+            self, content: _CohereChatStream | AsyncGenerator[str, None]
+        ) -> None:
+            super().__init__(content=content, media_type="text/event-stream")
+            self._stream = content
+
+        async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+            # Sending response headers can fail before body iteration starts.
+            async with aclosing(self._stream):
+                await super().__call__(scope, receive, send)
 
     def _serving(request: Request) -> CohereServingChatV2 | None:
         return getattr(request.app.state, "cohere_serving_chat_v2", None)
@@ -151,7 +166,7 @@ if _SDK_AVAILABLE:
             case CohereChatV2Response():
                 return JSONResponse(content=result.model_dump(exclude_none=True))
             case _:
-                return StreamingResponse(content=result, media_type="text/event-stream")
+                return _CohereStreamingResponse(result)
 
     @render_router.post(
         "/cohere/v2/chat/render",

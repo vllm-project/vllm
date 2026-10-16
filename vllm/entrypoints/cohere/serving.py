@@ -25,7 +25,7 @@ from __future__ import annotations
 import json
 import logging
 import time
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, AsyncIterator
 from enum import Enum
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
@@ -305,7 +305,7 @@ class CohereServingChatV2(OpenAIServingChat):
         self,
         request: CohereChatV2Request,
         raw_request: Request | None = None,
-    ) -> AsyncGenerator[str, None] | CohereChatV2Response | ErrorResponse:
+    ) -> _CohereChatStream | CohereChatV2Response | ErrorResponse:
         """Implements ``POST /cohere/v2/chat``."""
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(
@@ -321,7 +321,36 @@ class CohereServingChatV2(OpenAIServingChat):
             case ChatCompletionResponse():
                 return self._chat_completion_to_v2(generator, request)
             case _:
-                return self._chat_completion_stream_to_v2(generator, request)
+                # Surface an initial error before committing the HTTP SSE response.
+                try:
+                    first_chunk = await anext(generator, None)
+                    if first_chunk is not None and first_chunk.startswith("data:"):
+                        data_str = first_chunk[len("data:") :].strip()
+                        if data_str and data_str != "[DONE]":
+                            try:
+                                data = json.loads(data_str)
+                            except json.JSONDecodeError:
+                                # Leave malformed frames to the stream converter.
+                                data = None
+                            if isinstance(data, dict) and "error" in data:
+                                await generator.aclose()
+                                return ErrorResponse.model_validate(data)
+                except BaseException:
+                    await generator.aclose()
+                    raise
+
+                async def stream() -> AsyncGenerator[str, None]:
+                    try:
+                        if first_chunk is not None:
+                            yield first_chunk
+                        async for chunk in generator:
+                            yield chunk
+                    finally:
+                        await generator.aclose()
+
+                return _CohereChatStream(
+                    self._chat_completion_stream_to_v2(stream(), request), generator
+                )
 
     def to_chat_completion_request(
         self, request: CohereChatV2Request
@@ -1529,6 +1558,8 @@ class CohereServingChatV2(OpenAIServingChat):
                 state.ended = True
             yield _DONE_FRAME
             return
+        finally:
+            await generator.aclose()
 
         # Normal completion or ``[DONE]``: ensure ``message-end`` is always
         # emitted. Upstream may close the stream without sending the final
@@ -1799,8 +1830,31 @@ class CohereServingChatV2(OpenAIServingChat):
 
 
 # ---------------------------------------------------------------------------
-# Stream state
+# Stream helpers
 # ---------------------------------------------------------------------------
+
+
+class _CohereChatStream(AsyncIterator[str]):
+    def __init__(
+        self,
+        events: AsyncGenerator[str, None],
+        upstream: AsyncGenerator[str, None],
+    ) -> None:
+        self._events = events
+        self._upstream = upstream
+
+    def __aiter__(self) -> _CohereChatStream:
+        return self
+
+    async def __anext__(self) -> str:
+        return await anext(self._events)
+
+    async def aclose(self) -> None:
+        try:
+            await self._events.aclose()
+        finally:
+            # Pre-reading starts upstream even if events are never consumed.
+            await self._upstream.aclose()
 
 
 class _StreamState:

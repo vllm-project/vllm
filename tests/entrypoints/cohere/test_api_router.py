@@ -16,20 +16,23 @@ Covers:
   and that the resulting ``GenerateRequest`` is returned verbatim.
 """
 
+import asyncio
 import json
 from argparse import Namespace
 from collections.abc import AsyncGenerator
 from http import HTTPStatus
 
 import pytest
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.testclient import TestClient
+from starlette.requests import ClientDisconnect
 
 from vllm.entrypoints.cohere import api_router as api_router_mod
 from vllm.entrypoints.cohere.api_router import attach_router
 from vllm.entrypoints.cohere.protocol import (
     AssistantMessageResponse,
+    CohereChatV2Request,
     CohereChatV2Response,
 )
 from vllm.entrypoints.cohere.serving import (
@@ -309,6 +312,54 @@ class TestEnvVarGate:
 
 
 class TestEndpoint:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("error", "expected_exception"),
+        [
+            (OSError("connection closed"), ClientDisconnect),
+            (asyncio.CancelledError(), asyncio.CancelledError),
+        ],
+        ids=["send_error", "cancelled"],
+    )
+    async def test_stream_closed_when_response_start_fails(
+        self, error, expected_exception
+    ):
+        closed = False
+
+        async def generator():
+            nonlocal closed
+            try:
+                yield "prefetched"
+                yield "data: [DONE]\n\n"
+            finally:
+                closed = True
+
+        stream = generator()
+        await anext(stream)
+        app = _build_app(handler=_Handler(stream))
+        scope = {
+            "type": "http",
+            "app": app,
+            "headers": [],
+            "asgi": {"spec_version": "2.4"},
+        }
+
+        async def receive():
+            await asyncio.Event().wait()
+
+        async def send(message):
+            assert message["type"] == "http.response.start"
+            raise error
+
+        request = CohereChatV2Request(**_minimal_request_body(), stream=True)
+        response = await api_router_mod.chat_v2(request, Request(scope, receive))
+        try:
+            with pytest.raises(expected_exception):
+                await response(scope, receive, send)
+            assert closed
+        finally:
+            await stream.aclose()
+
     def test_501_when_handler_missing(self):
         app = _build_app(handler=None)
         with TestClient(app) as client:
