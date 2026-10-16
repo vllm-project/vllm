@@ -657,6 +657,7 @@ def _engram_lookup_kernel(
     SORTED: tl.constexpr if _SORTED_IS_CONSTEXPR else None,  # type: ignore[valid-type]
     PACKED: tl.constexpr,
     OUT_STRIDE: tl.constexpr,
+    PEER_ROWS: tl.constexpr = 0,
 ):
     """Gather FP8 rows as packed values/scales or dequantized BF16.
 
@@ -687,13 +688,24 @@ def _engram_lookup_kernel(
             owned &= (index >= vocab_start) & (index < vocab_end)
             local = index - vocab_start
         local = tl.where(owned, local, 0)
+        if PEER_ROWS:
+            owner = local // PEER_ROWS
+            base = tl.load(weight + owner, mask=owned, other=0)
+            local -= owner * PEER_ROWS
+            row_weight = base.to(tl.pointer_type(tl.float8e4nv))
+            row_scales = (base + PEER_ROWS * DIM).to(tl.pointer_type(tl.uint8))
+        else:
+            row_weight = weight + tl.zeros((BLOCK_R,), dtype=tl.int64)
+            row_scales = scales + tl.zeros((BLOCK_R,), dtype=tl.int64)
         values = tl.load(
-            weight + local[:, None] * DIM + cols[None, :],
+            row_weight[:, None] + local[:, None] * DIM + cols[None, :],
             mask=owned[:, None],
             other=0.0,
         )
         scale = tl.load(
-            scales + local[:, None] * (DIM // QUANT_BLOCK) + scale_cols[None, :],
+            row_scales[:, None]
+            + local[:, None] * (DIM // QUANT_BLOCK)
+            + scale_cols[None, :],
             mask=owned[:, None],
             other=0,
         )
@@ -986,18 +998,32 @@ class ParallelEngramEmbedding(nn.Module):
         self.dim = dim
         self.block_size = block_size
         self.n_hash_cols = len(head_sizes)
+        self.head_sizes = head_sizes
         self.tp_size = get_tensor_model_parallel_world_size()
         num_shards, head_rank = self._get_shard_info()
         self.part_n_hash_cols = triton.cdiv(self.n_hash_cols, num_shards)
-        # TODO: Support row-wise sharding when there are too few hash heads.
-        assert (num_shards - 1) * self.part_n_hash_cols < self.n_hash_cols, (
-            f"Engram sharding leaves ranks without hash heads: "
-            f"{self.n_hash_cols} heads over {num_shards} shards"
-        )
-        self.head_start = head_rank * self.part_n_hash_cols
-        head_end = self.head_start + self.part_n_hash_cols
-        self.vocab_start_idx = sum(head_sizes[: self.head_start])
-        self.vocab_end_idx = sum(head_sizes[:head_end])
+        # GPU tables split rows over the DP group and every rank reads its own
+        # tokens' rows from the owning peer's HBM, so lookups need no collective.
+        self.peer_rows = 0
+        if not cpu_offload and self.dp_size > 1 and self.tp_size == 1:
+            self.peer_rows = triton.cdiv(sum(head_sizes), num_shards)
+            self.part_n_hash_cols = self.n_hash_cols
+            self.head_start = 0
+            self.vocab_start_idx = min(head_rank * self.peer_rows, sum(head_sizes))
+            self.vocab_end_idx = min(
+                self.vocab_start_idx + self.peer_rows, sum(head_sizes)
+            )
+            self.dp_size = 1
+        else:
+            # TODO: Support row-wise sharding of host tables too.
+            assert (num_shards - 1) * self.part_n_hash_cols < self.n_hash_cols, (
+                f"Engram sharding leaves ranks without hash heads: "
+                f"{self.n_hash_cols} heads over {num_shards} shards"
+            )
+            self.head_start = head_rank * self.part_n_hash_cols
+            head_end = self.head_start + self.part_n_hash_cols
+            self.vocab_start_idx = sum(head_sizes[: self.head_start])
+            self.vocab_end_idx = sum(head_sizes[:head_end])
         self.part_num_embeddings = self.vocab_end_idx - self.vocab_start_idx
         self._num_sms = torch.cuda.get_device_properties(
             torch.accelerator.current_device_index()
@@ -1043,6 +1069,29 @@ class ParallelEngramEmbedding(nn.Module):
             self._weight_loader = storage.load_weight
             return storage.weight, storage.weight_scale_inv
         scale_dim = self.dim // self.block_size
+        if self.peer_rows:
+            import torch.distributed._symmetric_memory as symm_mem
+
+            group = get_engram_dp_group()
+            assert group is not None
+            # One buffer per rank: peer_rows FP8 rows, then their scales.
+            values = self.peer_rows * self.dim
+            device = torch.device("cuda", torch.accelerator.current_device_index())
+            buffer = symm_mem.empty(
+                values + self.peer_rows * scale_dim, dtype=torch.uint8, device=device
+            )
+            handle = symm_mem.rendezvous(buffer, group.device_group)
+            self.register_buffer(
+                "peer_ptrs",
+                torch.tensor(handle.buffer_ptrs, dtype=torch.int64, device=device),
+                persistent=False,
+            )
+            self._symm = (buffer, handle)
+            rows = self.part_num_embeddings
+            return (
+                buffer[: rows * self.dim].view(torch.float8_e4m3fn).view(rows, -1),
+                buffer[values : values + rows * scale_dim].view(rows, scale_dim),
+            )
         if not self.cpu_offload:
             return (
                 torch.empty(
@@ -1118,6 +1167,8 @@ class ParallelEngramEmbedding(nn.Module):
         if not rows:
             return
         weight, scales = self._storage()
+        if self.peer_rows:
+            weight = self.peer_ptrs
         ids_stride_t, ids_stride_h = indices.stride()
         sort_min_rows, _ = _engram_lookup_thresholds(indices.device)
         sort = (
@@ -1146,8 +1197,8 @@ class ParallelEngramEmbedding(nn.Module):
             indices,
             dst,
             out,
-            self.vocab_start_idx,
-            self.vocab_end_idx,
+            0 if self.peer_rows else self.vocab_start_idx,
+            sum(self.head_sizes) if self.peer_rows else self.vocab_end_idx,
             rows,
             ids_stride_t,
             ids_stride_h,
@@ -1161,6 +1212,7 @@ class ParallelEngramEmbedding(nn.Module):
             SORTED=sort,
             PACKED=out.dtype == torch.uint8,
             OUT_STRIDE=out.stride(0),
+            PEER_ROWS=self.peer_rows,
         )
 
     def forward(self, indices: torch.Tensor) -> torch.Tensor:

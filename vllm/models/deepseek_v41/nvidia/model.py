@@ -885,8 +885,17 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         # layer's sliding-window KV cache. Only PP ranks owning an engram
         # layer need it.
         self.engram_hash: NgramHashState | None = None
+        engram_config = vllm_config.engram_config
+        # Shared host tables and GPU peer reads look up only this rank's tokens.
         self.engram_dp_shared_memory = bool(
-            vllm_config.engram_config and vllm_config.engram_config.dp_shared_memory
+            engram_config
+            and (
+                engram_config.dp_shared_memory
+                or (
+                    not engram_config.cpu_offload
+                    and vllm_config.parallel_config.tensor_parallel_size == 1
+                )
+            )
         )
         self.engram_swa_prefix: str | None = None
         if self.engram_layout is not None:

@@ -155,6 +155,45 @@ def test_engram_group_creation_honors_model_and_options(
     assert parallel_state.get_etp_group().ranks == etp_ranks
 
 
+@pytest.mark.parametrize("one_nvlink_domain", [False, True])
+def test_gpu_engram_tables_span_dp_only_within_nvlink_domain(
+    monkeypatch, one_nvlink_domain
+):
+    """Peer reads need every member's HBM, so GPU tables leave the node-local
+    group only when all ranks share one NVLink domain, then reuse DP's group."""
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            architecture="DeepseekV41ForCausalLM", is_moe=False
+        ),
+        parallel_config=ParallelConfig(
+            data_parallel_size=4, distributed_executor_backend="mp"
+        ),
+        engram_config=EngramConfig(cpu_offload=False, embedding_across_dp=True),
+    )
+    for name in ("_TP", "_ETP", "_ENGRAM_DP", "_DCP", "_PCP", "_PP", "_DP", "_EP"):
+        monkeypatch.setattr(parallel_state, name, None)
+    monkeypatch.setattr(parallel_state, "_EPLB", None)
+    monkeypatch.setattr(parallel_state, "_WORLD", SimpleNamespace(local_rank=0))
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
+    monkeypatch.setattr(torch.distributed, "get_world_size", lambda: 4)
+    monkeypatch.setattr(torch.distributed, "get_rank", lambda: 0)
+    monkeypatch.setattr(parallel_state, "_engram_dp_shard_size", lambda *args: 2)
+    monkeypatch.setattr(
+        parallel_state, "_in_one_nvlink_domain", lambda: one_nvlink_domain
+    )
+
+    def make_group(group_ranks, *args, **kwargs):
+        ranks = next(ranks for ranks in group_ranks if 0 in ranks)
+        return SimpleNamespace(ranks=ranks, rank_in_group=0, world_size=len(ranks))
+
+    monkeypatch.setattr(parallel_state, "init_model_parallel_group", make_group)
+    with set_current_vllm_config(config):
+        initialize_model_parallel(backend="nccl")
+    group = get_engram_dp_group()
+    assert group.ranks == ([0, 1, 2, 3] if one_nvlink_domain else [0, 1])
+    assert (group is parallel_state._DP) == one_nvlink_domain
+
+
 def _worker(rank: int, tp_size: int, port: int) -> None:
     torch.accelerator.set_device_index(rank)
     update_environment_variables(
@@ -455,13 +494,17 @@ def _check_table(
                 layer.weight_scale_inv.weight_loader(
                     layer.weight_scale_inv, loader_scale
                 )
+            # Shared host tables and GPU peer reads look up only local tokens.
+            local = dp_shared_memory or layer.peer_rows > 0
+            assert (layer.peer_rows > 0) == (not cpu_offload and tp_size == 1)
             if dp_shared_memory:
                 assert layer.dp_size == 1
                 assert layer.head_start == tp_rank * layer.part_n_hash_cols
                 assert layer.weight.is_pinned() and layer.weight_scale_inv.is_pinned()
+            if local:
 
                 def unexpected_collective(*args, **kwargs):
-                    raise AssertionError("shared lookup must not use DP collectives")
+                    raise AssertionError("local lookups must not use DP collectives")
 
                 m.setattr(get_engram_dp_group(), "all_gather", unexpected_collective)
 
@@ -481,12 +524,8 @@ def _check_table(
                 num_tokens=num_tokens,
                 num_tokens_across_dp=torch.tensor(counts, dtype=torch.int32),
             ):
-                gathered = gather_engram_hashes(
-                    ids, dp_shared_memory=layer.dp_shared_memory
-                )
-                expected_tokens = (
-                    num_tokens if dp_shared_memory else max(counts) * dp_size
-                )
+                gathered = gather_engram_hashes(ids, dp_shared_memory=local)
+                expected_tokens = num_tokens if local else max(counts) * dp_size
                 assert gathered.shape[0] == expected_tokens
                 engram.prepare_embeddings(gathered)
                 looked_up = engram.embed(ids)
@@ -525,15 +564,16 @@ def _check_table(
                 and sequence_parallel == (tp_size > 1)
             )
         )
-        if replay:
-            captures = ("full", "breakable")
+        if replay or (layer.peer_rows and n_heads == 7):
+            # Peer reads are FULL-graph safe and have no eager breaks to count.
+            captures = ("full",) if layer.peer_rows else ("full", "breakable")
             for capture in captures:
                 _check_prefetch_replay(
                     engram,
                     head_sizes,
                     weight,
                     scale_inv,
-                    dp_shared_memory,
+                    local,
                     capture,
                 )
         if dp_shared_memory and n_heads == 7 and sequence_parallel == (tp_size > 1):
