@@ -69,24 +69,43 @@ class PoolingBaseServing(ABC, BaseServing):
         request: AnyPoolingRequest,
         raw_request: Request | None = None,
     ) -> Response:
-        io_processor = self.get_io_processor(request)
-        ctx = await self._init_ctx(io_processor, request, raw_request)
-        await self._preprocessing(io_processor, ctx)
-        await self._prepare_generators(ctx)
-        await self._collect_batch(ctx)
-        return await self._postprocessing_async(io_processor, ctx)
+        skip_mm_cache = False
+        for attempt in range(2):
+            try:
+                io_processor = self.get_io_processor(request)
+                ctx = await self._init_ctx(io_processor, request, raw_request)
+                await self._preprocessing(
+                    io_processor, ctx, skip_mm_cache=skip_mm_cache
+                )
+                await self._prepare_generators(ctx)
+                await self._collect_batch(ctx)
+                return await self._postprocessing_async(io_processor, ctx)
+            except RetryableRequestError as e:
+                if attempt:
+                    raise
+                skip_mm_cache = e.code == "multimodal_cache_miss"
+
+        raise AssertionError("unreachable")
 
     @abstractmethod
     def get_io_processor(self, request: AnyPoolingRequest) -> PoolingIOProcessor:
         raise NotImplementedError
 
     async def _preprocessing(
-        self, io_processor: PoolingIOProcessor, ctx: PoolingServeContext
+        self,
+        io_processor: PoolingIOProcessor,
+        ctx: PoolingServeContext,
+        *,
+        skip_mm_cache: bool = False,
     ):
         requests = io_processor.get_request_factory_online(ctx)
 
         if len(requests) == 0:
             raise ValueError("You must pass at least one prompt")
+
+        if skip_mm_cache:
+            for request in requests:
+                request["skip_mm_cache"] = True
 
         ctx.engine_inputs = await asyncio.gather(
             *[io_processor.render_async(request) for request in requests]
@@ -203,7 +222,10 @@ class PoolingBaseServing(ABC, BaseServing):
         async for i, res in ctx.result_generator:
             if res.error is not None:
                 if res.error.retryable:
-                    raise RetryableRequestError(res.error.message)
+                    raise RetryableRequestError(
+                        res.error.message,
+                        code=res.error.code,
+                    )
                 raise GenerationError(res.error.message)
             final_res_batch[i] = res
 

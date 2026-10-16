@@ -139,8 +139,14 @@ class GenerationError(VLLMServerError):
 class RetryableRequestError(GenerationError):
     """A transient request-level failure that is safe for clients to retry."""
 
-    def __init__(self, message: str = "Request failed; please retry"):
+    def __init__(
+        self,
+        message: str = "Request failed; please retry",
+        *,
+        code: str | None = None,
+    ):
         super().__init__(message)
+        self.code = code
         self.status_code = HTTPStatus.SERVICE_UNAVAILABLE
 
 

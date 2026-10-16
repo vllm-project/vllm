@@ -54,9 +54,13 @@ class ServingEmbedding(PoolingServing):
         return EmbedIOProcessor(*args, **kwargs)
 
     async def _preprocessing(
-        self, io_processor: PoolingIOProcessor, ctx: PoolingServeContext
+        self,
+        io_processor: PoolingIOProcessor,
+        ctx: PoolingServeContext,
+        *,
+        skip_mm_cache: bool = False,
     ):
-        await super()._preprocessing(io_processor, ctx)
+        await super()._preprocessing(io_processor, ctx, skip_mm_cache=skip_mm_cache)
         self.io_processor.maybe_pre_process_chunked(ctx)
 
     def _build_response(

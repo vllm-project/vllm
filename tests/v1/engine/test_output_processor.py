@@ -3,6 +3,7 @@
 
 import math
 import time
+from copy import copy
 from unittest.mock import MagicMock, Mock
 
 import numpy as np
@@ -1867,6 +1868,106 @@ def test_request_output_add_merges_delta_sampling_masks():
     assert merged.outputs[0].sampling_mask.token_ids == [[10, 11], [20]]
 
 
+def _generation_request(
+    request_id: str = "request-int",
+    *,
+    n: int = 1,
+) -> EngineCoreRequest:
+    return EngineCoreRequest(
+        request_id=request_id,
+        external_req_id="request",
+        prompt_token_ids=[1, 2],
+        mm_features=None,
+        arrival_time=0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+        sampling_params=SamplingParams(
+            n=n,
+            detokenize=False,
+            output_kind=RequestOutputKind.FINAL_ONLY,
+        ),
+        pooling_params=None,
+    )
+
+
+@pytest.mark.skip_global_cleanup
+def test_async_generation_cache_miss_returns_structured_error():
+    output_processor = OutputProcessor(tokenizer=None, log_stats=False)
+    request = _generation_request()
+    collector = RequestOutputCollector(
+        RequestOutputKind.FINAL_ONLY, request_id=request.request_id
+    )
+    output_processor.add_request(request, None, queue=collector)
+
+    processed = output_processor.process_outputs(
+        [
+            EngineCoreOutput(
+                request_id=request.request_id,
+                new_token_ids=[],
+                finish_reason=FinishReason.ERROR,
+                mm_cache_miss_hashes=["missing-hash"],
+            )
+        ]
+    )
+
+    assert processed.request_outputs == []
+    assert processed.reqs_to_abort == []
+    output = collector.get_nowait()
+    assert isinstance(output, RequestOutput)
+    assert output.finished
+    assert output.error is not None
+    assert output.error.code == "multimodal_cache_miss"
+    assert output.error.retryable
+    assert output.outputs[0].finish_reason == "error"
+    assert not output_processor.has_unfinished_requests()
+
+
+@pytest.mark.skip_global_cleanup
+def test_async_generation_cache_miss_aborts_siblings_and_returns_error():
+    output_processor = OutputProcessor(tokenizer=None, log_stats=False)
+    request = _generation_request("parent-int", n=2)
+    parent = ParentRequest(request)
+    collector = RequestOutputCollector(
+        RequestOutputKind.FINAL_ONLY, request_id=parent.request_id
+    )
+    children = []
+    for index in range(2):
+        child_id, child_params = parent.get_child_info(index)
+        child = copy(request)
+        child.request_id = child_id
+        child.sampling_params = child_params
+        children.append(child)
+        output_processor.add_request(child, None, parent, index, collector)
+
+    processed = output_processor.process_outputs(
+        [
+            EngineCoreOutput(
+                request_id=children[0].request_id,
+                new_token_ids=[],
+                finish_reason=FinishReason.ERROR,
+                mm_cache_miss_hashes=["missing-hash"],
+            ),
+            EngineCoreOutput(
+                request_id=children[1].request_id,
+                new_token_ids=[3],
+                finish_reason=FinishReason.STOP,
+            ),
+        ]
+    )
+
+    assert processed.request_outputs == []
+    assert processed.reqs_to_abort == [children[1].request_id]
+    assert not output_processor.has_unfinished_requests()
+    output = collector.get_nowait()
+    assert isinstance(output, RequestOutput)
+    assert output.finished
+    assert output.error is not None
+    assert output.error.code == "multimodal_cache_miss"
+    assert output.error.retryable
+    assert any(item.finish_reason == "error" for item in output.outputs)
+
+
 @pytest.mark.skip_global_cleanup
 def test_pooling_cache_miss_is_a_request_error_and_batch_continues():
     output_processor = OutputProcessor(tokenizer=None, log_stats=False)
@@ -1952,6 +2053,7 @@ def test_async_pooling_cache_miss_does_not_fail_output_processor():
     output = queue.get_nowait()
     assert isinstance(output, PoolingRequestOutput)
     assert output.error is not None
+    assert output.error.code == "multimodal_cache_miss"
     assert output.error.retryable
     assert not output_processor.has_unfinished_requests()
 

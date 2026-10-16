@@ -405,6 +405,11 @@ class RequestState:
 
         if self.parent_req is None:
             outputs = [output]
+        elif error is not None:
+            self.parent_req.get_outputs(self.request_id, output)
+            outputs = [output]
+            finished = True
+            external_req_id = self.parent_req.external_req_id
         else:
             outputs, finished = self.parent_req.get_outputs(self.request_id, output)
             if not outputs:
@@ -417,6 +422,7 @@ class RequestState:
             finished,
             kv_transfer_params,
             ec_transfer_params,
+            error=error,
         )
 
     def _new_request_output(
@@ -470,6 +476,7 @@ class RequestState:
             num_cached_tokens=self.num_cached_tokens,
             num_cache_creation_tokens=self.num_cache_creation_tokens,
             metrics=self.stats,
+            error=error,
         )
 
     def _new_completion_output(
@@ -794,8 +801,7 @@ class OutputProcessor:
 
             request_error = None
             if (
-                req_state.detokenizer is None
-                and engine_core_output.mm_cache_miss_hashes
+                engine_core_output.mm_cache_miss_hashes
                 and finish_reason == FinishReason.ERROR
             ):
                 request_error = RequestError(
@@ -803,7 +809,8 @@ class OutputProcessor:
                     message="Multi-modal processor cache miss.",
                     retryable=True,
                 )
-                pooling_output = EMPTY_CPU_TENSOR
+                if req_state.detokenizer is None:
+                    pooling_output = EMPTY_CPU_TENSOR
 
             if pooling_output is None:
                 assert req_state.detokenizer is not None
@@ -854,6 +861,24 @@ class OutputProcessor:
                 else:
                     # LLMEngine: return list of RequestOutputs.
                     request_outputs.append(request_output)
+
+            if request_error is not None:
+                parent_req_id = (
+                    req_state.parent_req.request_id
+                    if req_state.parent_req is not None
+                    else None
+                )
+                self._finish_request(req_state)
+                if parent_req_id is not None:
+                    reqs_to_abort.extend(
+                        self.abort_requests([parent_req_id], internal=True)
+                    )
+                self._update_stats_from_finished(
+                    req_state, finish_reason, iteration_stats
+                )
+                if self.tracing_enabled:
+                    self.do_tracing(engine_core_output, req_state, iteration_stats)
+                continue
 
             # Free completed requests.
             if finish_reason is not None:

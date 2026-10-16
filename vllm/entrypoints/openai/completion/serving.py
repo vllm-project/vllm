@@ -39,7 +39,11 @@ from vllm.entrypoints.serve.engine.protocol import (
 )
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens, should_include_usage
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
-from vllm.exceptions import GenerationError, VLLMValidationError
+from vllm.exceptions import (
+    GenerationError,
+    RetryableRequestError,
+    VLLMValidationError,
+)
 from vllm.inputs import EngineInput
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
@@ -90,6 +94,8 @@ class OpenAIServingCompletion(GenerateBaseServing):
     async def render_completion_request(
         self,
         request: CompletionRequest,
+        *,
+        skip_mm_cache: bool = False,
     ) -> list[EngineInput] | ErrorResponse:
         """Validate the model and preprocess a completion request.
 
@@ -106,7 +112,57 @@ class OpenAIServingCompletion(GenerateBaseServing):
 
         self._preflight(request.n or 1)
 
-        return await self.online_renderer.render_completion(request)
+        return await self.online_renderer.render_completion(
+            request, skip_mm_cache=skip_mm_cache
+        )
+
+    async def _generate_with_retry(
+        self,
+        request: CompletionRequest,
+        engine_input: EngineInput,
+        sampling_params: SamplingParams,
+        request_id: str,
+        prompt_index: int,
+        generate_kwargs: dict,
+    ) -> AsyncGenerator[RequestOutput, None]:
+        has_yielded_output = False
+        skip_mm_cache = False
+        for attempt in range(2):
+            if attempt:
+                result = await self.render_completion_request(
+                    request, skip_mm_cache=skip_mm_cache
+                )
+                if isinstance(result, ErrorResponse):
+                    raise VLLMValidationError(result.error.message)
+                engine_input = result[prompt_index]
+
+            retry_error = None
+            async for output in self.engine_client.generate(
+                engine_input,
+                sampling_params,
+                request_id,
+                **generate_kwargs,
+            ):
+                error = output.error
+                if error is not None and error.retryable:
+                    if attempt or has_yielded_output:
+                        raise RetryableRequestError(
+                            error.message,
+                            code=error.code,
+                        )
+                    retry_error = error
+                    break
+                has_yielded_output = True
+                yield output
+
+            if retry_error is None:
+                return
+            skip_mm_cache = retry_error.code == "multimodal_cache_miss"
+            logger.warning(
+                "Retrying completion request %s once after retryable error %s.",
+                request_id,
+                retry_error.code,
+            )
 
     async def create_completion(
         self,
@@ -202,15 +258,19 @@ class OpenAIServingCompletion(GenerateBaseServing):
                     session_id=session_id,
                 )
             else:
-                generator = self.engine_client.generate(
+                generator = self._generate_with_retry(
+                    request,
                     engine_input,
                     sampling_params,
                     request_id_item,
-                    lora_request=lora_request,
-                    trace_headers=trace_headers,
-                    priority=self._get_priority(request, raw_request),
-                    data_parallel_rank=data_parallel_rank,
-                    session_id=session_id,
+                    i,
+                    {
+                        "lora_request": lora_request,
+                        "trace_headers": trace_headers,
+                        "priority": self._get_priority(request, raw_request),
+                        "data_parallel_rank": data_parallel_rank,
+                        "session_id": session_id,
+                    },
                 )
 
             generators.append(generator)

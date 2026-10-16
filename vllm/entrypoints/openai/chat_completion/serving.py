@@ -52,7 +52,11 @@ from vllm.entrypoints.serve.utils.tool_calls_utils import (
     maybe_filter_parallel_tool_calls,
     resolve_finish_reason,
 )
-from vllm.exceptions import GenerationError
+from vllm.exceptions import (
+    GenerationError,
+    RetryableRequestError,
+    VLLMValidationError,
+)
 from vllm.inputs import EngineInput, MultiModalPlaceholders
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
@@ -261,6 +265,8 @@ class OpenAIServingChat(GenerateBaseServing):
     async def render_chat_request(
         self,
         request: ChatCompletionRequest,
+        *,
+        skip_mm_cache: bool = False,
     ) -> tuple[list[ConversationMessage], list[EngineInput]] | ErrorResponse:
         """Validate the model and preprocess a chat completion request.
 
@@ -279,7 +285,67 @@ class OpenAIServingChat(GenerateBaseServing):
 
         self._preflight(request.n or 1)
 
-        return await self.online_renderer.render_chat(request)
+        return await self.online_renderer.render_chat(
+            request, skip_mm_cache=skip_mm_cache
+        )
+
+    async def _generate_with_retry(
+        self,
+        request: ChatCompletionRequest,
+        engine_input: EngineInput,
+        sampling_params: SamplingParams,
+        request_id: str,
+        prompt_index: int,
+        prompt_token_ids: list[int] | None,
+        generate_kwargs: dict[str, Any],
+        parser: Parser | None,
+        chat_template_kwargs: dict[str, Any],
+    ) -> AsyncGenerator[RequestOutput, None]:
+        has_yielded_output = False
+        skip_mm_cache = False
+        for attempt in range(2):
+            if attempt:
+                result = await self.render_chat_request(
+                    request, skip_mm_cache=skip_mm_cache
+                )
+                if isinstance(result, ErrorResponse):
+                    raise VLLMValidationError(result.error.message)
+                _, engine_inputs = result
+                engine_input = engine_inputs[prompt_index]
+                prompt_token_ids = self._extract_prompt_components(
+                    engine_input
+                ).token_ids
+
+            retry_error = None
+            async for output in self.engine_client.generate(
+                engine_input,
+                sampling_params,
+                request_id,
+                **generate_kwargs,
+                **self._engine_reasoning_kwargs(
+                    request, parser, chat_template_kwargs, prompt_token_ids
+                ),
+            ):
+                error = output.error
+                if error is not None and error.retryable:
+                    if attempt or has_yielded_output:
+                        raise RetryableRequestError(
+                            error.message,
+                            code=error.code,
+                        )
+                    retry_error = error
+                    break
+                has_yielded_output = True
+                yield output
+
+            if retry_error is None:
+                return
+            skip_mm_cache = retry_error.code == "multimodal_cache_miss"
+            logger.warning(
+                "Retrying chat request %s once after retryable error %s.",
+                request_id,
+                retry_error.code,
+            )
 
     async def create_chat_completion(
         self,
@@ -389,18 +455,22 @@ class OpenAIServingChat(GenerateBaseServing):
                     session_id=session_id,
                 )
             else:
-                generator = self.engine_client.generate(
+                generator = self._generate_with_retry(
+                    request,
                     engine_input,
                     sampling_params,
                     sub_request_id,
-                    lora_request=lora_request,
-                    trace_headers=trace_headers,
-                    priority=self._get_priority(request, raw_request),
-                    data_parallel_rank=data_parallel_rank,
-                    session_id=session_id,
-                    **self._engine_reasoning_kwargs(
-                        request, parser, chat_template_kwargs, prompt_token_ids
-                    ),
+                    i,
+                    prompt_token_ids,
+                    {
+                        "lora_request": lora_request,
+                        "trace_headers": trace_headers,
+                        "priority": self._get_priority(request, raw_request),
+                        "data_parallel_rank": data_parallel_rank,
+                        "session_id": session_id,
+                    },
+                    parser,
+                    chat_template_kwargs,
                 )
 
             generators.append(generator)
