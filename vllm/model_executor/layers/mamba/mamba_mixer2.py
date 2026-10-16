@@ -8,6 +8,7 @@ from dataclasses import replace
 import torch
 from torch import nn
 
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
 from vllm.config.mamba import MambaBackendEnum
 from vllm.distributed import (
@@ -811,10 +812,8 @@ class MambaMixer2(MambaBase, PluggableLayer):
             # - It will read the initial states for every sequence,
             #   that has "has_initial_states_p" == True,
             #   from "cache_indices", using "state_indices_tensor_p".
-            # - It updates the "conv_state" cache in positions pointed
-            #   to by "state_indices_tensor_p".
-            #   In particular, it will always write the state at the
-            #   sequence end.
+            # - It writes the state at the sequence end to the "conv_state"
+            #   cache in positions pointed to by "state_indices_tensor_p".
             x = hidden_states_B_C_p.transpose(
                 0, 1
             )  # this is the form that causal-conv see
@@ -891,6 +890,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
                     varlen_states,
                     ssm_state,
                     query_start_loc_p,
+                    state_len=self.conv_kernel_size - 1,
                 )
             ssm_state[state_indices_tensor_p] = final_states
             if ring_start is not None and self._updates_replayssm_trackers:
@@ -1214,6 +1214,7 @@ def share_replayssm_ring_trackers(
         replayssm_mixers[last_layer_name]._updates_replayssm_trackers = True
 
 
+@eager_break_during_capture
 def mamba_mixer2(
     projected_states: torch.Tensor,
     output: torch.Tensor,
