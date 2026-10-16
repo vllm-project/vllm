@@ -548,7 +548,7 @@ class Base(
                         "num_nextn_predict_layers",  # Most models
                         "mtp_num_hidden_layers",  # Qwen 3.5
                     )
-                    n_predict = getattr_iter(self.text_config, names, 0)
+                    n_predict = getattr_iter(self.text_config, names, 0) or 0
                     for i in range(num_hidden_layers, num_hidden_layers + n_predict):
                         mtp_prefix = f"{prefix}.{i}."
                         if mtp_prefix not in self.ignore_unexpected_prefixes:
