@@ -3,7 +3,7 @@
 """Define LoRA functionality mixin for model runners."""
 
 from collections.abc import Callable
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 
 import numpy as np
 import torch
@@ -75,6 +75,15 @@ class LoRAModelRunnerMixin:
             type=mapping_type,
         )
         self.lora_manager.set_active_adapters(lora_requests, lora_mapping)
+
+    def token_logits_rows(self, start: int, end: int) -> AbstractContextManager:
+        """Wrap `compute_logits(hidden_states[start:end])` calls on rows other
+        than the sampled ones, e.g. prompt logprobs, so an lm_head LoRA maps
+        each logits row to its batch token. See
+        `PunicaWrapperBase.token_logits_rows`."""
+        if not hasattr(self, "lora_manager"):
+            return nullcontext()
+        return self.lora_manager.token_logits_rows(start, end)
 
     def _ensure_lora_enabled(self) -> None:
         if not hasattr(self, "lora_manager"):
