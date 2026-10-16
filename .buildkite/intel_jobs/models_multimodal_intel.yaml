@@ -146,8 +146,10 @@ steps:
   - "!vllm/distributed/kv_transfer/"
   - tests/models/multimodal/generation
   - tests/models/multimodal/test_mapping.py
+  - tests/models/dots3_note
   commands:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
       'cd tests &&
-      pytest -v -s models/multimodal/test_mapping.py'
+      pytest -v -s models/multimodal/test_mapping.py &&
+      pytest -v -s models/dots3_note'
