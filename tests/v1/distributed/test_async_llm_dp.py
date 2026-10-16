@@ -366,10 +366,12 @@ async def test_dp_pause_late_request_does_not_block_drain():
 
         # A design that never reports the engines as running would satisfy
         # every drain assertion below while destroying the signal, so pin it
-        # down first.
+        # down first. Rank 0 reports the wave only after its first step, which
+        # can outlast the 2s on a cold device, so wait for the report rather
+        # than sample it.
         await asyncio.sleep(2)
         assert not long_request.done(), "the warmup request was too short to sample"
-        assert engine.engine_core.dp_engines_running(), (
+        assert await _poll_flag(engine, True, timeout=30), (
             "the coordinator does not report the engines as running while they are"
         )
 

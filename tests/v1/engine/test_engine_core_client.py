@@ -142,6 +142,9 @@ def test_mp_client_uses_env_timeout(monkeypatch: pytest.MonkeyPatch):
         def setsockopt(self, *_args, **_kwargs):
             pass
 
+        def getsockopt_string(self, _option):
+            return "inproc://dummy"
+
     monkeypatch.setattr(core_client_mod.zmq.Socket, "shadow", lambda *_: ShadowSocket())
     monkeypatch.setattr(
         core_client_mod, "make_zmq_socket", lambda *_, **__: DummySocket()
@@ -210,6 +213,7 @@ def _make_dplb_client(num_engines: int = 3, client_count: int = 1) -> DPLBAsyncM
     client = object.__new__(DPLBAsyncMPClient)
     client.client_count = client_count
     client.reqs_in_flight = {}
+    client.streaming_reqs = set()
     client.engine_inflight = Counter()
     client.core_engines = [bytes([i, 0]) for i in range(num_engines)]
     client.lb_engines = [[0, 0, 0.0] for _ in range(num_engines)]
@@ -407,11 +411,47 @@ def test_dplb_finished_requests_release_inflight():
     assert req.request_id not in client.reqs_in_flight
 
 
+@pytest.mark.parametrize("final_sent", [False, True])
+def test_dplb_streaming_session_abort_goes_to_all_engines(final_sent: bool):
+    """A streaming-input chunk in flight when its session finished may
+    re-create it on any engine, so an open session's abort reaches every
+    engine. Other aborts go only to the routed engine."""
+    client = _make_dplb_client(num_engines=3)
+    client.resources = SimpleNamespace(engine_dead=False)
+    sent: dict[bytes, list[str]] = {}
+
+    async def abort_requests(request_ids, engine):
+        sent[engine] = request_ids
+
+    client._abort_requests = abort_requests
+
+    chunk = make_request(SamplingParams(max_tokens=1))
+    chunk.resumable = True
+    client.get_core_engine_for_request(chunk)
+    if final_sent:
+        chunk.resumable = False
+        client.get_core_engine_for_request(chunk)
+    # The engine finished the session, dropping its routing entry.
+    outputs = EngineCoreOutputs(finished_requests={chunk.request_id})
+    asyncio.run(DPLBAsyncMPClient.process_engine_outputs(client, outputs))
+    client.reqs_in_flight["live"] = client.core_engines[1]
+
+    asyncio.run(client.abort_requests_async([chunk.request_id, "live"]))
+
+    if final_sent:
+        expected = {client.core_engines[1]: ["live"]}
+    else:
+        expected = {engine: [chunk.request_id] for engine in client.core_engines}
+        expected[client.core_engines[1]].append("live")
+    assert sent == expected
+    assert not client.streaming_reqs
+
+
 @pytest.mark.parametrize(
     ("effective_size", "other_size"),
     [(None, None), (4224, 4224), (4224, 1056), (4224, None)],
 )
-def test_apply_ready_response_syncs_block_size(effective_size, other_size):
+def test_apply_ready_response_syncs_engine_metadata(effective_size, other_size):
     import msgspec
 
     client = object.__new__(MPClient)
@@ -419,8 +459,11 @@ def test_apply_ready_response_syncs_block_size(effective_size, other_size):
     client.vllm_config = SimpleNamespace(
         cache_config=SimpleNamespace(block_size=16, num_gpu_blocks=0),
         model_config=SimpleNamespace(max_model_len=8192),
+        parallel_config=SimpleNamespace(_coord_store_port=0),
     )
     client.stats_update_address = None
+    client.coordinator_input_address = None
+    client.coordinator_output_address = None
 
     payload = msgspec.msgpack.encode(
         EngineCoreReadyResponse(
@@ -441,6 +484,9 @@ def test_apply_ready_response_syncs_block_size(effective_size, other_size):
             instance_id="test-instance",
             supports_lora=False,
             max_loras=0,
+            coord_store_port=1234,
+            coordinator_input_address="tcp://127.0.0.1:1235",
+            coordinator_output_address="tcp://127.0.0.1:1236",
         )
     )
     fields = msgspec.msgpack.decode(payload)
@@ -461,6 +507,9 @@ def test_apply_ready_response_syncs_block_size(effective_size, other_size):
 
     client._apply_ready_response(b"")
     assert cache_config.effective_attention_block_size is None
+    assert client.vllm_config.parallel_config._coord_store_port == 1234
+    assert client.coordinator_input_address == "tcp://127.0.0.1:1235"
+    assert client.coordinator_output_address == "tcp://127.0.0.1:1236"
 
 
 def test_apply_ready_response_syncs_mamba_block_size():
@@ -471,6 +520,7 @@ def test_apply_ready_response_syncs_mamba_block_size():
     client.vllm_config = SimpleNamespace(
         cache_config=SimpleNamespace(block_size=16, num_gpu_blocks=0),
         model_config=SimpleNamespace(max_model_len=8192),
+        parallel_config=SimpleNamespace(_coord_store_port=0),
     )
     client.stats_update_address = None
 
@@ -1541,6 +1591,7 @@ def test_apply_ready_response_retains_kv_event_sources():
     client.vllm_config = SimpleNamespace(
         cache_config=SimpleNamespace(block_size=16, num_gpu_blocks=0),
         model_config=SimpleNamespace(max_model_len=8192),
+        parallel_config=SimpleNamespace(_coord_store_port=0),
     )
 
     def ready(rank: int, config: KVEventsConfig | None) -> bytes:
