@@ -277,6 +277,8 @@ class DeviceCommunicatorBase:
         )
         # All-gather.
         dist.all_gather_into_tensor(output_tensor, input_, group=self.device_group)
+        if dim == 0:
+            return output_tensor
         # Reshape
         output_tensor = output_tensor.reshape((self.world_size,) + input_size)
         output_tensor = output_tensor.movedim(0, dim)
