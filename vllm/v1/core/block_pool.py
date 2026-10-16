@@ -479,8 +479,8 @@ class BlockPool:
             kv_cache_group_id: KV cache group that owns the partial entry.
             block_size: Cache block size for the owning group. The partial
                 entry hash itself is always the prefix-chain hash at
-                ``num_tokens``; ``block_size`` is used to assert that the
-                entry is partial within the owning cache block.
+                ``num_tokens``; ``block_size`` must be a multiple of the hash
+                block size.
             replace_existing_hashes: Whether the block contents were replaced
                 and all existing cache entries must be removed before the new
                 entry is registered.
@@ -494,9 +494,6 @@ class BlockPool:
             return None
 
         assert block_size % self.hash_block_size == 0
-        assert replace_existing_hashes or (
-            block_size > self.hash_block_size and num_tokens % block_size != 0
-        )
         block_hash = self._get_partial_block_hash(request, num_tokens)
         num_hash_blocks = num_tokens // self.hash_block_size
         block_hash_with_group_id = make_block_hash_with_group_id(
@@ -762,9 +759,11 @@ class BlockPool:
 
         """
         for block in blocks:
+            if block.is_null:
+                continue
             # ref_cnt=0 means this block is in the free list (i.e. eviction
             # candidate), so remove it.
-            if block.ref_cnt == 0 and not block.is_null:
+            if block.ref_cnt == 0:
                 self.free_block_queue.remove(block)
             block.ref_cnt += 1
             if self.metrics_collector:
@@ -788,11 +787,13 @@ class BlockPool:
         blocks_to_evict_first = []
         other_pools: dict[BlockPool, list[KVCacheBlock]] = {}
         for block in ordered_blocks:
+            if block.is_null:  # never pooled; its ref_cnt is not maintained
+                continue
             if block.pool is not None and block.pool is not self:
                 other_pools.setdefault(block.pool, []).append(block)
                 continue
             block.ref_cnt -= 1
-            if block.ref_cnt == 0 and not block.is_null:
+            if block.ref_cnt == 0:
                 if block.block_hash is None or not self.enable_caching:
                     # LIFO reuse of non-cached blocks for better GPU locality.
                     blocks_to_evict_first.append(block)
@@ -829,7 +830,7 @@ class BlockPool:
 
     def reset_prefix_cache(self) -> bool:
         """Reset prefix cache. This function may be used in RLHF
-        flows to invalid prefix caching after the weights are updated,
+        flows to invalidate prefix caching after the weights are updated,
         or used for resetting prefix caching status for benchmarking.
 
         Returns:
