@@ -113,6 +113,7 @@ logger = init_logger(__name__)
 
 
 HANDSHAKE_TIMEOUT_MINS = 5
+# Cooperative shutdown budget after the parent dies, before force-killing.
 PARENT_DEATH_SHUTDOWN_TIMEOUT_S = 15.0
 
 _R = TypeVar("_R")  # Return type for collective_rpc
@@ -1468,9 +1469,11 @@ class EngineCoreProc(EngineCore):
                 )
             try:
                 kill_process_tree(os.getpid())
+            except Exception:
+                logger.exception("[shutdown] EngineCore: force-kill failed")
             finally:
-                # Still exit if a child vanishes mid-walk and the call raises.
-                os.kill(os.getpid(), signal.SIGKILL)
+                # Only reached if kill_process_tree raised before killing us.
+                os._exit(1)
 
         monitor_parent_death(death_pipe, on_parent_death, name="EngineCoreDeathMonitor")
         try:
@@ -1575,7 +1578,10 @@ class EngineCoreProc(EngineCore):
                 and engine_core is not None
                 and engine_core.shutdown_state == EngineShutdownState.SHUTTING_DOWN
                 and not engine_core.has_work()
-                and engine_core.vllm_config.shutdown_timeout == 0
+                and (
+                    engine_core.parent_exited
+                    or engine_core.vllm_config.shutdown_timeout == 0
+                )
             )
             raise
         except Exception as e:

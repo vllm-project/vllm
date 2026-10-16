@@ -198,6 +198,7 @@ def test_engine_core_process_shutdown_timeout(
         "shutdown_state",
         "has_work",
         "shutdown_timeout",
+        "parent_exited",
         "exit_code",
         "expected_calls",
     ),
@@ -207,14 +208,25 @@ def test_engine_core_process_shutdown_timeout(
             EngineShutdownState.SHUTTING_DOWN,
             False,
             0,
+            False,
             None,
             ["shutdown", "freeze"],
         ),
-        (False, EngineShutdownState.SHUTTING_DOWN, False, 0, None, ["shutdown"]),
-        (True, EngineShutdownState.RUNNING, False, 0, None, ["shutdown"]),
-        (True, EngineShutdownState.SHUTTING_DOWN, True, 0, None, ["shutdown"]),
-        (True, EngineShutdownState.SHUTTING_DOWN, False, 7, None, ["shutdown"]),
-        (True, EngineShutdownState.SHUTTING_DOWN, False, 0, 1, ["shutdown"]),
+        (False, EngineShutdownState.SHUTTING_DOWN, False, 0, False, None, ["shutdown"]),
+        (True, EngineShutdownState.RUNNING, False, 0, False, None, ["shutdown"]),
+        (True, EngineShutdownState.SHUTTING_DOWN, True, 0, False, None, ["shutdown"]),
+        (True, EngineShutdownState.SHUTTING_DOWN, False, 7, False, None, ["shutdown"]),
+        # The parent died, so the engine aborted despite the drain timeout.
+        (
+            True,
+            EngineShutdownState.SHUTTING_DOWN,
+            False,
+            7,
+            True,
+            None,
+            ["shutdown", "freeze"],
+        ),
+        (True, EngineShutdownState.SHUTTING_DOWN, False, 0, False, 1, ["shutdown"]),
     ],
 )
 def test_freeze_gc_after_clean_rocm_engine_core_shutdown(
@@ -223,6 +235,7 @@ def test_freeze_gc_after_clean_rocm_engine_core_shutdown(
     shutdown_state: EngineShutdownState,
     has_work: bool,
     shutdown_timeout: int,
+    parent_exited: bool,
     exit_code: int | None,
     expected_calls: list[str],
 ):
@@ -232,6 +245,7 @@ def test_freeze_gc_after_clean_rocm_engine_core_shutdown(
         shutdown_state=EngineShutdownState.RUNNING,
         has_work=lambda: has_work,
         vllm_config=vllm_config,
+        parent_exited=parent_exited,
     )
 
     def run_busy_loop():
