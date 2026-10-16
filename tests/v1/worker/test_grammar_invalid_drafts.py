@@ -117,12 +117,8 @@ def test_request_bound_asserts_when_exceeded():
     # at or below the live request count; exceeding it is a bug and asserts.
     h = _handler(max_num_reqs=2)
     h._draft_tokens_by_req = {"a": [1, 1], "b": [2, 2], "c": [3, 3]}
-    try:
+    with pytest.raises(AssertionError):
         h._assert_request_bound()
-        raised = False
-    except AssertionError:
-        raised = True
-    assert raised, "expected the max_num_reqs bound to assert"
 
 
 def _proposal_states(rows, req_ids):
