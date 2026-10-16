@@ -147,7 +147,7 @@ export MORI_SHMEM_HEAP_SIZE="${MORI_SHMEM_HEAP_SIZE:-16G}"
 # Pin to gfx950 to avoid jit compilation failures with other archs on this cluster.
 export MORI_GPU_ARCHS="gfx950"
 
-# NIXL: UCX RC on ionic_0 with GPU-direct RDMA (KV goes GPU memory to GPU memory).
+# NIXL UCX defaults: RC on ionic_0, GPU-direct RDMA.
 if [[ "${KV_CONNECTOR:-}" == Nixl* ]]; then
     export UCX_TLS="${UCX_TLS:-rc_verbs,ud_verbs,tcp,self,rocm}"
     export UCX_NET_DEVICES="${UCX_NET_DEVICES:-ionic_0:1,lo}"

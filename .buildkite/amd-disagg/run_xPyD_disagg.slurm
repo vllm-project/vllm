@@ -248,7 +248,7 @@ export PREFILL_PORT DECODE_PORT PROXY_PORT ROUTER_METRICS_PORT
 export SERVE_PORT RPC_PORT KV_PORT LOCAL_PING_PORT
 export PREFLIGHT PREFLIGHT_MAX_VRAM_PCT PREFLIGHT_GPU_SETTLE_S
 
-# MoRIIO workers register with the router. NIXL has no discovery, so pass the URLs.
+# NIXL has no discovery service, so pass the worker URLs.
 ROUTER_KV_ARGS="--kv-connector moriio --vllm-discovery-address 0.0.0.0:${PROXY_PING_PORT}"
 if [[ "${KV_CONNECTOR}" == Nixl* ]]; then
     nixl_startup_timeout=1800
