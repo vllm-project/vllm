@@ -73,19 +73,19 @@ def _minimax_m2_arg_converter(raw_args: str, partial: bool) -> str:
         # between `>` and `</parameter>`, so surrounding whitespace is data.
         params[name] = match.group("value")
 
-    if partial:
-        remaining = _PARAM_RE.sub("", raw_args)
-        match = _PARTIAL_PARAM_RE.search(remaining)
-        if match:
-            name = (
-                match.group("dq_name")
-                or match.group("sq_name")
-                or match.group("bare_name")
-                or ""
-            ).strip()
-            if name:
-                # Verbatim, same as the complete-match loop above.
-                params[name] = match.group("value")
+    # The model may omit </parameter> before closing the invocation.
+    remaining = _PARAM_RE.sub("", raw_args)
+    match = _PARTIAL_PARAM_RE.search(remaining)
+    if match:
+        name = (
+            match.group("dq_name")
+            or match.group("sq_name")
+            or match.group("bare_name")
+            or ""
+        ).strip()
+        if name:
+            # Verbatim, same as the complete-match loop above.
+            params[name] = match.group("value")
 
     return json.dumps(params, ensure_ascii=False)
 
