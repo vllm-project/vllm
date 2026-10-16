@@ -405,14 +405,18 @@ def mhc_pre_big_fuse_with_norm_tilelang(
             for j, k in T.Parallel(hc_mult, hc_mult):
                 cm[j, k] = cm[j, k] / (col_sum[k] + hc_sinkhorn_eps)
 
-            for _ in T.serial(sinkhorn_repeat - 1):
-                T.reduce_sum(cm, row_sum, dim=1)
-                for j, k in T.Parallel(hc_mult, hc_mult):
-                    cm[j, k] = cm[j, k] / (row_sum[j] + hc_sinkhorn_eps)
+            # A NaN input row (e.g. CUDA-graph padding) has a NaN RMS, so every
+            # logit and the whole result is NaN already. Skip the remaining
+            # iterations: IEEE division takes a slow path on NaN.
+            if T.isfinite(rms[0]):
+                for _ in T.serial(sinkhorn_repeat - 1):
+                    T.reduce_sum(cm, row_sum, dim=1)
+                    for j, k in T.Parallel(hc_mult, hc_mult):
+                        cm[j, k] = cm[j, k] / (row_sum[j] + hc_sinkhorn_eps)
 
-                T.reduce_sum(cm, col_sum, dim=0)
-                for j, k in T.Parallel(hc_mult, hc_mult):
-                    cm[j, k] = cm[j, k] / (col_sum[k] + hc_sinkhorn_eps)
+                    T.reduce_sum(cm, col_sum, dim=0)
+                    for j, k in T.Parallel(hc_mult, hc_mult):
+                        cm[j, k] = cm[j, k] / (col_sum[k] + hc_sinkhorn_eps)
 
             for j, k in T.Parallel(hc_mult, hc_mult):
                 comb_mix[i, j * hc_mult + k] = cm[j, k]
