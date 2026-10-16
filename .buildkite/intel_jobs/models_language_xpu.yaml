@@ -174,11 +174,10 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
     pytest -v -s models/language/generation_ppl_test || true'
-- label: ':nvidia: (H200 MIG 35GB) Language Models (Extended Pooling) Shard %N'
+- label: ':nvidia: (H200 MIG 35GB) Language Models (Extended Pooling)'
   key: language-models-test-extended-pooling
   device: intel_gpu
   timeout_in_minutes: 120
-  parallelism: 4
   optional: true
   working_dir: .
   no_plugin: true
@@ -190,8 +189,9 @@ steps:
     label: production
     gpu: 1+
     mem: 24+
+  automatic_shard: true
   _raw_old_commands:
-  - pytest -v -s models/language/pooling -m 'not core_model' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+  - pytest -v -s models/language/pooling -m 'not core_model'
   source_file_dependencies:
   - vllm/
   - '!vllm/distributed/kv_transfer/'
@@ -200,8 +200,8 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -v -s models/language/pooling -m not core_model --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB || true'
-- label: ':nvidia: (H200 MIG 18GB) Language Models (MTEB)'
+    pytest -v -s models/language/pooling -m not core_model || true'
+- label: ':nvidia: (H200 MIG 35GB) Language Models (MTEB)'
   key: language-models-test-mteb
   device: intel_gpu
   timeout_in_minutes: 68

@@ -2,11 +2,10 @@ group: Attention XPU
 depends_on:
   - image-build-xpu
 steps:
-- label: ':nvidia: (H100) V1 Attention Shard %N'
+- label: ':nvidia: (H100) V1 Attention'
   key: v1-attention-h100-mi300
   device: intel_gpu
   timeout_in_minutes: 85
-  parallelism: 2
   optional: true
   working_dir: .
   no_plugin: true
@@ -18,6 +17,7 @@ steps:
     label: production
     gpu: 1+
     mem: 16+
+  automatic_shard: true
   _raw_old_commands:
   - pytest -v -s v1/attention --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   source_file_dependencies:
@@ -29,4 +29,5 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -v -s v1/attention --ignore v1/attention/test_cuda_backend_probe_errors.py --ignore v1/attention/test_sparse_indexer_decode_seq_lens.py --ignore v1/attention/test_kpool_tail_slot_mapping.py --ignore v1/attention/test_deepseek_v4_rocm_adaptive.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT || true'
+    pytest -v -s v1/attention --ignore v1/attention/test_cuda_backend_probe_errors.py --ignore v1/attention/test_sparse_indexer_decode_seq_lens.py --ignore v1/attention/test_kpool_tail_slot_mapping.py --ignore v1/attention/test_deepseek_v4_rocm_adaptive.py || true'
+
