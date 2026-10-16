@@ -277,7 +277,7 @@ class CustomOp(nn.Module):
                 "global settings.",
                 cls.__name__,
             )
-            return CustomOp.default_on()
+            return cls.default_on()
 
         enabled = f"+{cls.name}" in custom_ops
         disabled = f"-{cls.name}" in custom_ops
@@ -287,14 +287,15 @@ class CustomOp(nn.Module):
                 f"{cls.name}. Remove either the '+' or '-' directive"
             )
 
-        return (CustomOp.default_on() or enabled) and not disabled
+        return (cls.default_on() or enabled) and not disabled
 
     @staticmethod
     def default_on() -> bool:
         """Behavior controlled by `CompilationConfig.custom_ops`: On by default if
         'all', off by default if 'none'.
         When PyTorch Inductor is used, 'none' is the default value,
-        otherwise 'all'.
+        otherwise 'all'. Subclasses can override this default while retaining
+        explicit per-op enable/disable directives.
         """
         compilation_config = get_cached_compilation_config()
         count_none = compilation_config.custom_ops.count("none")

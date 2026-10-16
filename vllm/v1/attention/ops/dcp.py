@@ -12,7 +12,6 @@ from typing import TYPE_CHECKING, Any, Protocol
 import torch
 import torch.distributed as dist
 
-import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed import get_dcp_group
 from vllm.logger import init_logger
@@ -30,9 +29,8 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backend import max_decode_query_len
 from vllm.v1.attention.ops.cp_common import (
+    DirectCPCollective,
     DirectCPWorkspace,
-    direct_cp_enabled,
-    direct_cp_multicast_enabled,
 )
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
@@ -1101,9 +1099,7 @@ def get_direct_dcp_a2a_workspace(
     dtype: torch.dtype,
     num_ubatches: int,
 ) -> DirectDCPA2AWorkspace | None:
-    if not direct_cp_enabled(
-        group, dtype, envs.VLLM_USE_DIRECT_DCP_A2A, _A2A_SUPPORTED_DTYPES
-    ):
+    if not DirectDCPA2AReduce.is_supported(group, dtype):
         return None
     return DirectDCPA2AWorkspace(
         group.device_group,
@@ -1246,7 +1242,7 @@ def get_direct_dcp_q_gather_workspace(
     num_ubatches: int,
     padded_num_heads: int | None = None,
 ) -> DirectDCPQGatherWorkspace | None:
-    if not direct_cp_multicast_enabled(group, dtype, envs.VLLM_USE_DIRECT_DCP_Q_GATHER):
+    if not DirectDCPQGather.is_supported(group, dtype):
         return None
     if not _q_gather_layout_supported(
         group.world_size, heads_per_rank, head_dim, dtype, padded_num_heads
@@ -1342,12 +1338,7 @@ def get_direct_dcp_kv_gather_workspace(
     dtype: torch.dtype,
     num_ubatches: int,
 ) -> DirectDCPKVGatherWorkspace | None:
-    if not direct_cp_multicast_enabled(
-        group,
-        dtype,
-        envs.VLLM_USE_DIRECT_DCP_KV_GATHER,
-        _KV_GATHER_SUPPORTED_DTYPES,
-    ):
+    if not DirectDCPKVGather.is_supported(group, dtype):
         return None
     if not _kv_gather_layout_supported(token_dim, dtype):
         return None
@@ -1365,7 +1356,9 @@ def get_direct_dcp_kv_gather_workspace(
 
 
 @CustomOp.register("direct_dcp_q_gather")
-class DirectDCPQGather(CustomOp):
+class DirectDCPQGather(DirectCPCollective):
+    requires_multicast = True
+
     def __init__(self, workspace: DirectDCPQGatherWorkspace) -> None:
         super().__init__()
         self.workspace = workspace
@@ -1402,7 +1395,9 @@ class DirectDCPQGather(CustomOp):
 
 
 @CustomOp.register("direct_dcp_a2a_lse_reduce")
-class DirectDCPA2AReduce(CustomOp):
+class DirectDCPA2AReduce(DirectCPCollective):
+    supported_dtypes = _A2A_SUPPORTED_DTYPES
+
     def __init__(self, workspace: DirectDCPA2AWorkspace) -> None:
         super().__init__()
         self.workspace = workspace
@@ -1472,7 +1467,10 @@ class DirectDCPA2AReduce(CustomOp):
 
 
 @CustomOp.register("direct_dcp_kv_gather")
-class DirectDCPKVGather(CustomOp):
+class DirectDCPKVGather(DirectCPCollective):
+    supported_dtypes = _KV_GATHER_SUPPORTED_DTYPES
+    requires_multicast = True
+
     def __init__(self, workspace: DirectDCPKVGatherWorkspace) -> None:
         super().__init__()
         self.workspace = workspace

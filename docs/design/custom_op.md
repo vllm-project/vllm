@@ -337,8 +337,10 @@ class PluginDCPQGather(DirectDCPQGather):
         return gather_query(local_query, self.workspace)
 ```
 
-`custom_ops=["none"]` selects Torch collectives; `["all"]` enables kernels or
-replacements. Enable one OOT op with `["none", "+DirectDCPQGather"]`.
+Eligible direct kernels stay enabled, including with Inductor and `["none"]`.
+Use `["-direct_dcp_q_gather"]` to select Torch for an in-tree op, or
+`["-DirectDCPQGather"]` for its OOT replacement. These controls replace the
+`VLLM_USE_DIRECT_DCP_*` env vars; CUDA, dtype and topology checks remain.
 
 Preserve output layouts, both LSE bases, empty-shard handling and workspace
 synchronization/epochs. All ranks must use the same plugin/config and collective
