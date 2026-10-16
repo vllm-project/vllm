@@ -176,6 +176,7 @@ class PromptLogprobsWorker:
         prompt_start_loc_np = np.zeros(len(num_prompt_tokens) + 1, dtype=np.int32)
         np.cumsum(num_prompt_tokens, out=prompt_start_loc_np[1:])
         num_tokens = int(prompt_start_loc_np[-1])
+        prompt_scores = None
         if num_tokens > 0:
             prompt_rows = None
             if num_tokens != input_batch.num_tokens:
@@ -199,15 +200,13 @@ class PromptLogprobsWorker:
                 if np.any(start_offsets)
                 else None,
             )
-            prompt_token_ids, prompt_logprobs, prompt_ranks = (
-                compute_prompt_logprobs_with_chunking(
-                    prompt_logprobs_token_ids,
-                    hidden_states[: input_batch.num_tokens],
-                    logits_fn,
-                    max_num_prompt_logprobs,
-                    self.logprobs_mode,
-                    prompt_rows,
-                )
+            prompt_scores = compute_prompt_logprobs_with_chunking(
+                prompt_logprobs_token_ids,
+                hidden_states[: input_batch.num_tokens],
+                logits_fn,
+                max_num_prompt_logprobs,
+                self.logprobs_mode,
+                prompt_rows,
             )
 
         prompt_logprobs_dict: dict[str, LogprobsTensors] = {}
@@ -221,6 +220,8 @@ class PromptLogprobsWorker:
             end_idx = prompt_start_loc_np[i + 1]
             logprobs = None
             if start_idx < end_idx:
+                assert prompt_scores is not None
+                prompt_token_ids, prompt_logprobs, prompt_ranks = prompt_scores
                 width = (
                     prompt_logprobs.shape[1]
                     if req_num_prompt_logprobs == -1
