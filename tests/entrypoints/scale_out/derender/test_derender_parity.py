@@ -126,7 +126,7 @@ async def _disagg(
                 ],
             },
             "prompt_tokens": prompt_tokens,
-            "chat_request": chat_request,
+            "chat_request": {"return_token_ids": True, **chat_request},
         },
     )
     assert resp.status_code == 200, resp.text
@@ -142,13 +142,30 @@ def _tool_sig(response_choice: dict) -> list[tuple[str, dict]]:
     ]
 
 
+def _tool_id_shapes(response_choice: dict) -> list[str | None]:
+    return [
+        _tool_call_id_shape(tc["id"])
+        for tc in (response_choice["message"].get("tool_calls") or [])
+    ]
+
+
+def _engine_finish_reason(coupled_finish_reason: str) -> str:
+    """Undo the chat level `"tool_calls"` rewrite of `"stop"` so derender
+    gets what the engine reported and has to reapply the rewrite itself."""
+    if coupled_finish_reason == "tool_calls":
+        return "stop"
+    return coupled_finish_reason
+
+
 def _assert_parity(coupled: dict, disagg: dict) -> None:
     """Both paths saw the same tokens, so they must agree unconditionally."""
     c, d = coupled["choices"][0], disagg["choices"][0]
     assert d["message"]["content"] == c["message"]["content"]
     assert d["message"].get("reasoning") == c["message"].get("reasoning")
     assert _tool_sig(d) == _tool_sig(c)
+    assert _tool_id_shapes(d) == _tool_id_shapes(c)
     assert d["finish_reason"] == c["finish_reason"]
+    assert d["token_ids"] == c["token_ids"]
     assert disagg["usage"]["prompt_tokens"] == coupled["usage"]["prompt_tokens"]
     assert disagg["usage"]["completion_tokens"] == len(c["token_ids"])
 
@@ -165,7 +182,7 @@ async def _run_parity_case(
         client,
         ch["token_ids"],
         coupled["usage"]["prompt_tokens"],
-        ch["finish_reason"],
+        _engine_finish_reason(ch["finish_reason"]),
         chat_request,
     )
     return coupled, disagg
@@ -315,13 +332,18 @@ async def test_parity_logprobs(client):
 
 
 async def _coupled_stream(
-    client: httpx.AsyncClient, messages: list[dict], **extra
-) -> tuple[list[dict], list[int]]:
+    client: httpx.AsyncClient,
+    messages: list[dict],
+    require_token_ids: bool = True,
+    **extra,
+) -> tuple[list[dict], list[int] | None]:
     """Stream `/v1/chat/completions` and return the choices that carry
     `token_ids` along with the prompt token IDs.
 
     The leading role only chunk has no `token_ids` and no counterpart on
-    `/inference/v1/generate`, so it is dropped.
+    `/inference/v1/generate`, so it is dropped. With `require_token_ids`
+    off every choice is kept and `prompt_token_ids` may be `None`, for
+    requests where the coupled server hides token ids (hidden reasoning).
     """
     choices: list[dict] = []
     prompt_token_ids: list[int] | None = None
@@ -350,9 +372,12 @@ async def _coupled_stream(
             if chunk.get("prompt_token_ids") is not None:
                 prompt_token_ids = chunk["prompt_token_ids"]
             choices.extend(
-                ch for ch in chunk["choices"] if ch.get("token_ids") is not None
+                ch
+                for ch in chunk["choices"]
+                if not require_token_ids or ch.get("token_ids") is not None
             )
-    assert prompt_token_ids is not None
+    if require_token_ids:
+        assert prompt_token_ids is not None
     return choices, prompt_token_ids
 
 
@@ -386,10 +411,10 @@ async def _run_stream_parity_case(
         [tid for ch in coupled_choices for tid in ch["token_ids"]],
         [len(ch["token_ids"]) for ch in coupled_choices]
         + ([0] if finish_only_tail else []),
-        {"model": MODEL, "messages": messages, **extra},
+        {"model": MODEL, "messages": messages, "return_token_ids": True, **extra},
         len(prompt_token_ids),
         prompt_token_ids,
-        finish_reason="stop" if finish_reason == "tool_calls" else finish_reason,
+        finish_reason=_engine_finish_reason(finish_reason),
     )
     coupled = assemble_stream(coupled_choices)
     for message in (coupled, disagg):
@@ -470,6 +495,151 @@ async def test_stream_parity_reasoning_and_tool_call(client, chunking):
         assert any(len(ch["token_ids"]) > 1 for ch in coupled_choices)
     if not (coupled["reasoning"] and coupled["tool_calls"]):
         pytest.skip("Model did not emit both a <think> block and a tool call")
+
+
+# ---------------------------------------------------------------------------
+# Streaming logprobs on the parser path
+# ---------------------------------------------------------------------------
+
+
+def _logprob_tokens(choice: dict) -> list[tuple[str, list[int] | None]] | None:
+    lp = choice.get("logprobs")
+    if lp is None or lp.get("content") is None:
+        return None
+    return [(e["token"], e.get("bytes")) for e in lp["content"]]
+
+
+def _sampled_generate_logprobs(choice: dict) -> dict | None:
+    """`GenerateLogProbs` for one coupled stream chunk from its `token_ids`
+    and per-token logprob values, without `top_logprobs`.
+
+    The coupled stream's `token_ids` are the integer ids a GPU-less worker
+    would have sent, so one stream is both the derender input and the string
+    reference. A second greedy run is not needed, and greedy decoding is not
+    bit-reproducible across calls on every platform anyway.
+    """
+    lp = choice.get("logprobs")
+    if lp is None or lp.get("content") is None:
+        return None
+    content = lp["content"]
+    assert len(content) == len(choice["token_ids"]), choice
+    return {
+        "content": [
+            {"token_id": tid, "logprob": entry["logprob"], "top_logprobs": []}
+            for tid, entry in zip(choice["token_ids"], content)
+        ]
+    }
+
+
+async def _run_stream_logprob_parity_case(
+    client: httpx.AsyncClient, messages: list[dict], **extra
+) -> tuple[dict, list[dict], list[dict]]:
+    """Stream with logprobs through the coupled server, replay the same
+    chunks through the streaming derender endpoint and compare per chunk.
+    Returns the assembled coupled message, the coupled choices and the
+    derender choices.
+    """
+    extra = {"logprobs": True, **extra}
+    coupled_choices, prompt_token_ids = await _coupled_stream(client, messages, **extra)
+    finish_reason = coupled_choices[-1]["finish_reason"]
+    derender_choices: list[dict] = []
+    disagg = await stream_chat_derender(
+        client,
+        [tid for ch in coupled_choices for tid in ch["token_ids"]],
+        [len(ch["token_ids"]) for ch in coupled_choices],
+        {"model": MODEL, "messages": messages, **extra},
+        len(prompt_token_ids),
+        prompt_token_ids,
+        finish_reason="stop" if finish_reason == "tool_calls" else finish_reason,
+        logprobs=[_sampled_generate_logprobs(ch) for ch in coupled_choices],
+        raw_choices=derender_choices,
+    )
+    coupled = assemble_stream(coupled_choices)
+    for message in (coupled, disagg):
+        for tc in message["tool_calls"]:
+            tc["id"] = _tool_call_id_shape(tc["id"])
+    assert disagg == coupled
+    assert len(derender_choices) == len(coupled_choices)
+    for ref, der in zip(coupled_choices, derender_choices):
+        assert _logprob_tokens(der) == _logprob_tokens(ref), (ref, der)
+    return coupled, coupled_choices, derender_choices
+
+
+@pytest.mark.asyncio
+async def test_stream_parity_logprobs_reasoning(client):
+    """Per-chunk logprobs on the parser path match the coupled stream across
+    the reasoning -> content transition."""
+    messages = [{"role": "user", "content": "What is 17 times 23? Think it through."}]
+    coupled, _, derender_choices = await _run_stream_logprob_parity_case(
+        client, messages, include_reasoning=True, max_tokens=256
+    )
+    if not coupled["reasoning"]:
+        pytest.skip("Model did not emit a <think> block")
+    assert any(
+        ch["delta"].get("reasoning") and ch.get("logprobs") for ch in derender_choices
+    )
+
+
+@pytest.mark.asyncio
+async def test_stream_parity_logprobs_tool_call(client):
+    """Chunks the parser swallows (tool call markup) still carry their
+    logprobs, on both sides, so no token's logprobs are lost."""
+    messages = [{"role": "user", "content": "What's the weather in Paris?"}]
+    coupled, _, derender_choices = await _run_stream_logprob_parity_case(
+        client,
+        messages,
+        tools=TOOLS,
+        tool_choice=FORCE_WEATHER_TOOL,
+        include_reasoning=True,
+        max_tokens=512,
+    )
+    if not coupled["tool_calls"]:
+        pytest.skip("Model did not emit a tool call")
+    swallowed = [
+        ch
+        for ch in derender_choices
+        if ch.get("logprobs")
+        and not ch["delta"].get("content")
+        and not ch["delta"].get("reasoning")
+        and not ch["delta"].get("tool_calls")
+    ]
+    assert swallowed, "expected at least one buffered-markup chunk with logprobs"
+
+
+@pytest.mark.asyncio
+async def test_stream_parity_logprobs_hidden_reasoning(client):
+    """With `include_reasoning=False` and a parser configured, neither side
+    returns logprobs on any chunk; derender still emits the content."""
+    messages = [{"role": "user", "content": "What is 17 times 23? Think it through."}]
+    extra = {"logprobs": True, "max_tokens": 256}
+    # Token ids come from a shown-reasoning run: the coupled server hides
+    # them along with the logprobs when reasoning is hidden.
+    shown_choices, prompt_token_ids = await _coupled_stream(
+        client, messages, include_reasoning=True, **extra
+    )
+    hidden_choices, _ = await _coupled_stream(
+        client, messages, require_token_ids=False, include_reasoning=False, **extra
+    )
+    assert all(ch.get("logprobs") is None for ch in hidden_choices)
+    assert assemble_stream(hidden_choices)["reasoning"] is None
+
+    finish_reason = shown_choices[-1]["finish_reason"]
+    derender_choices: list[dict] = []
+    disagg = await stream_chat_derender(
+        client,
+        [tid for ch in shown_choices for tid in ch["token_ids"]],
+        [len(ch["token_ids"]) for ch in shown_choices],
+        {"model": MODEL, "messages": messages, "include_reasoning": False, **extra},
+        len(prompt_token_ids),
+        prompt_token_ids,
+        finish_reason="stop" if finish_reason == "tool_calls" else finish_reason,
+        logprobs=[_sampled_generate_logprobs(ch) for ch in shown_choices],
+        raw_choices=derender_choices,
+    )
+    assert all(ch.get("logprobs") is None for ch in derender_choices)
+    shown = assemble_stream(shown_choices)
+    assert disagg["reasoning"] is None
+    assert disagg["content"] == shown["content"]
 
 
 # ---------------------------------------------------------------------------

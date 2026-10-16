@@ -5,7 +5,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 from math import prod
-from typing import final
+from typing import Any, final
 
 import torch
 
@@ -103,6 +103,9 @@ class ExpertTokensMetadata:
     expert_num_tokens: torch.Tensor | None
     expert_num_tokens_cpu: torch.Tensor | None
     psum_recv_per_rank: torch.Tensor | None = None
+    # local->global expert-id offset, set when globalization is deferred to the
+    # experts' fused align kernel.
+    rank_expert_offset: int | None = None
 
     @staticmethod
     def make_from_list(
@@ -254,6 +257,15 @@ class FusedMoEPrepareAndFinalize(ABC):
         finalize_async.
         """
         return False
+
+    def supports_dbo(self) -> bool:
+        """Indicates whether or not this class can run under DBO.
+
+        Defaults to supports_async(). A class whose synchronous prepare and
+        finalize do their own DBO compute/comm handoff can return True here
+        while keeping supports_async() False.
+        """
+        return self.supports_async()
 
     def supports_deferred_moe_finalize(self) -> bool:
         """Whether ``finalize`` can be skipped for a deferring consumer.
@@ -567,8 +579,14 @@ class FusedMoEExperts(ABC):
             return False, _make_reason(
                 f"parallel config {moe_config.moe_parallel_config}"
             )
-        elif moe_config.has_hash_routing and cls.is_monolithic():
+        elif (
+            moe_config.has_hash_routing
+            and cls.is_monolithic()
+            and not cls._supports_hash_routing()
+        ):
             return False, _make_reason("hash routing")
+        elif moe_config.require_decomposed_backend and cls.is_monolithic():
+            return False, _make_reason("routes adjusted after routing")
         elif not cls._supports_routing_method(
             moe_config.routing_method, weight_key, activation_key
         ):
@@ -644,6 +662,15 @@ class FusedMoEExperts(ABC):
         in addition to the experts if certain routers are not supported.
         """
         return True
+
+    @staticmethod
+    def _supports_hash_routing() -> bool:
+        """Whether a monolithic kernel implements hash routing itself.
+
+        Kernels that return True receive `input_ids` and `hash_indices_table`
+        in `apply()` for layers with a hash-routing table.
+        """
+        return False
 
     @staticmethod
     def _supports_router_logits_dtype(
@@ -1046,6 +1073,18 @@ class FusedMoEKernelModularImpl:
     ):
         self.prepare_finalize = prepare_finalize
         self.fused_experts = fused_experts
+        # Experts that globalize recv_topk_idx themselves let a capable prepare
+        # stage skip its standalone launch.
+        from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
+            HummingIndexedExperts,
+        )
+
+        if (
+            current_platform.is_cuda()
+            and isinstance(fused_experts, HummingIndexedExperts)
+            and hasattr(prepare_finalize, "defer_globalize")
+        ):
+            prepare_finalize.defer_globalize = True
         self.shared_experts: SharedExperts | None = None
         moe_parallel_config = fused_experts.moe_config.moe_parallel_config
         self.moe_parallel_config = moe_parallel_config
@@ -1189,7 +1228,7 @@ class FusedMoEKernelModularImpl:
             # We shouldn't be running an a2a kernel that doesn't
             # support async prepare/finalize
             # TODO(lucas): enable in follow-up
-            assert not dbo_enabled()
+            assert not dbo_enabled() or self.prepare_finalize.supports_dbo()
 
             (
                 a1q,
@@ -1377,7 +1416,7 @@ class FusedMoEKernelModularImpl:
 
         """
         if not self.prepare_finalize.supports_async():
-            assert not dbo_enabled()
+            assert not dbo_enabled() or self.prepare_finalize.supports_dbo()
 
             self.prepare_finalize.finalize(
                 output,
@@ -1558,11 +1597,20 @@ class FusedMoEKernelMonolithicImpl:
         topk_group: int | None = None,
         *,
         routing_sink: RoutedExpertsSink | None,
+        input_ids: torch.Tensor | None = None,
+        hash_indices_table: torch.Tensor | None = None,
     ) -> torch.Tensor | UnfinalizedMoEOutput:
         """Same as forward(), except uses router_logits as opposed
         to the topk_ids and topk_weights. This is used for kernels
         that have fused router + experts (e.g. FLASHINFER_TRTLLM).
         """
+        # Only experts with _supports_hash_routing() accept these.
+        hash_kwargs: dict[str, Any] = {}
+        if hash_indices_table is not None:
+            hash_kwargs = {
+                "input_ids": input_ids,
+                "hash_indices_table": hash_indices_table,
+            }
         a1q, a1q_scale, router_logits = self.prepare_finalize.prepare(
             hidden_states,
             router_logits=router_logits,
@@ -1579,6 +1627,11 @@ class FusedMoEKernelMonolithicImpl:
                     f"kernel {type(self.fused_experts).__name__}."
                 )
             routing_replay_out = routing_sink.buffer[: len(a1q)]
+        hash_kwargs = (
+            {"input_ids": input_ids, "hash_indices_table": hash_indices_table}
+            if hash_indices_table is not None
+            else {}
+        )
         fused_out = self.fused_experts.apply(
             hidden_states=a1q,
             w1=w1,
@@ -1595,6 +1648,7 @@ class FusedMoEKernelMonolithicImpl:
             routed_scaling_factor=routed_scaling_factor,
             topk_group=topk_group,
             routing_replay_out=routing_replay_out,
+            **hash_kwargs,
         )
         if routing_sink is not None:
             routing_sink.capture_fn(routing_replay_out)
@@ -1707,6 +1761,8 @@ class FusedMoEKernel:
         topk_group: int | None = None,
         *,
         routing_sink: RoutedExpertsSink | None,
+        input_ids: torch.Tensor | None = None,
+        hash_indices_table: torch.Tensor | None = None,
     ) -> torch.Tensor | UnfinalizedMoEOutput:
         assert isinstance(self.impl, FusedMoEKernelMonolithicImpl)
         return self.impl.apply(
@@ -1723,6 +1779,8 @@ class FusedMoEKernel:
             routed_scaling_factor=routed_scaling_factor,
             topk_group=topk_group,
             routing_sink=routing_sink,
+            input_ids=input_ids,
+            hash_indices_table=hash_indices_table,
         )
 
     def apply(
