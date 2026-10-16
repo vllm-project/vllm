@@ -125,6 +125,7 @@ class EngineCoreOutput(
     spec_decode_metrics: object | None = None
     prompt_token_id_logprobs: object | None = None
     error: RequestError | None = None
+    aux_output_keys: list[str] | None = None
 
 
 class ExtendedEngineCoreOutput(EngineCoreOutput):
@@ -252,6 +253,7 @@ outputs = EngineCoreOutputs(
                 [2, 1, 2],
                 msgspec.msgpack.Ext(3, np.arange(4, dtype=np.uint8).tobytes()),
             ],
+            aux_output_keys=["r3:block-0", "r3-tail:end"],
         )
     ],
     finished_requests={"req-1"},

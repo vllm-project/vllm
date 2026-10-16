@@ -354,6 +354,8 @@ async fn generate_merges_outputs_by_stream_interval() {
                     (&[6], "v7", None),
                     (&[7], "v7", Some(EngineCoreFinishReason::Length)),
                 ];
+                // Auxiliary-output keys published by each step.
+                let keys: [&[&str]; 6] = [&[], &["k0"], &[], &["k1", "k2"], &[], &["tail"]];
                 for (step, (token_ids, weight_version, finish_reason)) in
                     steps.into_iter().enumerate()
                 {
@@ -371,6 +373,8 @@ async fn generate_merges_outputs_by_stream_interval() {
                         vec![token_ids.len(), 1, 2],
                         rows,
                     )));
+                    output.aux_output_keys = (!keys[step].is_empty())
+                        .then(|| keys[step].iter().map(|key| key.to_string()).collect());
                     send_outputs(
                         push,
                         RequestBatchOutputs {
@@ -455,6 +459,16 @@ async fn generate_merges_outputs_by_stream_interval() {
                 vec![7, 1, 2],
                 vec![1, 0, 2, 0, 3, 0, 4, 0, 5, 0, 6, 0, 7, 0],
             )))
+        ]
+    );
+    let aux_output_keys: Vec<_> =
+        outputs.iter().map(|output| output.aux_output_keys.clone()).collect();
+    assert_eq!(
+        aux_output_keys,
+        [
+            None,
+            None,
+            Some(vec!["k0".into(), "k1".into(), "k2".into(), "tail".into()])
         ]
     );
     let last_token_timestamps: Vec<_> =
@@ -580,6 +594,7 @@ async fn collect_output_rejects_partial_sampling_mask() {
         spec_decode_metrics: None,
         weight_versions: None,
         routed_experts: None,
+        aux_output_keys: None,
         timestamps: Default::default(),
     };
 

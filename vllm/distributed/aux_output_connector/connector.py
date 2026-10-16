@@ -71,8 +71,10 @@ class AuxOutputSchedulerConnector:
             self._sent_hash_counts.setdefault(request_id, 0)
             request = requests[request_id]
             stats = request.prefill_stats
+            start = request.num_computed_tokens
             if (
                 is_new
+                and start % self._hash_block_size
                 and request.num_preemptions == 0
                 and stats is not None
                 and stats.num_external_cached_tokens
@@ -84,11 +86,9 @@ class AuxOutputSchedulerConnector:
                         "Remote KV reuse requires aux_output_prefix with matching "
                         "R3 block_size and ordered keys covering the uncropped prompt"
                     )
-                start = request.num_computed_tokens
-                if start % self._hash_block_size:
-                    remote_tails[request_id] = prefix["keys"][
-                        start // self._hash_block_size
-                    ]
+                remote_tails[request_id] = prefix["keys"][
+                    start // self._hash_block_size
+                ]
             packed = self._take_new_hashes(
                 request, request.num_computed_tokens + num_tokens
             )
