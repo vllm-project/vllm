@@ -322,7 +322,7 @@ In addition, you can also register all your `CustomOp` at one place for better m
 views; ops own communication and reduction.
 
 Register through `vllm.general_plugins` on every worker before model construction.
-Override `forward_cuda` on CUDA or `forward_oot` on an OOT platform:
+Override `forward_cuda`:
 
 ```python
 import torch
