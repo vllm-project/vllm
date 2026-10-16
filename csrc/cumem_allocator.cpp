@@ -554,7 +554,7 @@ void my_free(void* ptr, ssize_t size, int device, CUstream stream) {
   // still held as a placeholder reservation. Skip unmap/release (freeing the
   // placeholder address happens below).
   if (num_chunks > 0) {
-    unmap_and_release(device, size, d_mem, p_memHandle, chunk_sizes,
+    unmap_and_release(device, recv_size, d_mem, p_memHandle, chunk_sizes,
                       num_chunks);
   }
 #else
@@ -566,12 +566,16 @@ void my_free(void* ptr, ssize_t size, int device, CUstream stream) {
 
   CUmemGenericAllocationHandle* p_memHandle =
       (CUmemGenericAllocationHandle*)recv_p_memHandle;
-  unmap_and_release(device, size, d_mem, p_memHandle);
+  unmap_and_release(device, recv_size, d_mem, p_memHandle);
 #endif
 
   // Free the virtual address. On ROCm this also covers an asleep allocation,
   // whose placeholder reservation made by sleep() is still held here.
-  CUDA_CHECK(cuMemAddressFree(d_mem, size));
+  // `size` is what PyTorch asked for; `recv_size` is what my_malloc rounded
+  // up to the allocation granularity and actually reserved and mapped. The
+  // driver rejects an unaligned size, which would leak the handle and the
+  // virtual address range.
+  CUDA_CHECK(cuMemAddressFree(d_mem, recv_size));
 #ifndef USE_ROCM
   free(p_memHandle);
 #else
