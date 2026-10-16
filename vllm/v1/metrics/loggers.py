@@ -626,6 +626,19 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             gauge_kv_cache_usage, per_engine_labelvalues
         )
 
+        # Children are created lazily since the KV cache types are only known
+        # to the engine core.
+        self.gauge_kv_cache_usage_by_type = self._gauge_cls(
+            name="vllm:kv_cache_usage_perc_by_type",
+            documentation=(
+                "KV-cache usage per KV cache type for hybrid models, as a "
+                "fraction of the shared KV cache pool. Values across types sum "
+                "to vllm:kv_cache_usage_perc."
+            ),
+            multiprocess_mode="mostrecent",
+            labelnames=labelnames + ["kv_cache_type"],
+        )
+
         if envs.VLLM_COMPUTE_NANS_IN_LOGITS:
             counter_corrupted_requests = self._counter_cls(
                 name="vllm:corrupted_requests",
@@ -1163,6 +1176,12 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                     scheduler_stats.num_kv_fetch_reqs_by_stage.get(stage, 0)
                 )
             self.gauge_kv_cache_usage[engine_idx].set(scheduler_stats.kv_cache_usage)
+            if scheduler_stats.kv_cache_usage_by_type:
+                engine_labelvalues = self.per_engine_labelvalues[engine_idx]
+                for kind, usage in scheduler_stats.kv_cache_usage_by_type.items():
+                    self.gauge_kv_cache_usage_by_type.labels(
+                        *engine_labelvalues, kind
+                    ).set(usage)
 
             self.counter_prefix_cache_queries[engine_idx].inc(
                 scheduler_stats.prefix_cache_stats.queries

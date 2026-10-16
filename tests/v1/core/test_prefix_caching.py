@@ -2587,6 +2587,119 @@ def test_prefill_hybrid_model_mamba_align():
     manager.free(req0)
 
 
+@pytest.mark.parametrize(
+    ("second_spec_type", "expected_hit_tokens"),
+    # Mamba "align" mode only caches at checkpoint boundaries, so req1 misses.
+    [("sliding_window", 48), ("mamba", 0)],
+)
+def test_hybrid_usage_by_type(second_spec_type: str, expected_hit_tokens: int):
+    """Per-type usage partitions the pool usage of a hybrid model, including
+    blocks that come back from the free queue through prefix-cache hits."""
+    block_size = 16
+    manager = make_kv_cache_manager(
+        make_kv_cache_config_hybrid_model(
+            block_size, 41, 2, second_spec_type=second_spec_type
+        ),
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+        log_stats=True,
+    )
+
+    def check() -> dict[str, float]:
+        usage = manager.get_usage_by_type()
+        assert usage is not None
+        assert set(usage) == {"full_attention", second_spec_type}
+        assert sum(usage.values()) == pytest.approx(manager.usage)
+        return usage
+
+    assert check() == {"full_attention": 0.0, second_spec_type: 0.0}
+
+    token_ids = [i for i in range(3) for _ in range(block_size)] + [3] * 7
+    req0 = make_request("0", token_ids, block_size, sha256)
+    computed, num_computed, _ = manager.get_computed_blocks(req0)
+    assert manager.allocate_slots(req0, 55, num_computed, computed) is not None
+    # 55 tokens need 4 full-attention blocks out of the 40 usable ones.
+    usage = check()
+    assert usage["full_attention"] == pytest.approx(4 / 40)
+    assert usage[second_spec_type] > 0
+
+    manager.free(req0)
+    assert check() == {"full_attention": 0.0, second_spec_type: 0.0}
+
+    # Cached blocks are revived from the free queue and charged to the group
+    # that wrote them.
+    req1 = make_request("1", token_ids[:48] + [4] * 5, block_size, sha256)
+    computed, num_computed, _ = manager.get_computed_blocks(req1)
+    assert num_computed == expected_hit_tokens
+    assert (
+        manager.allocate_slots(
+            req1, len(req1.all_token_ids) - num_computed, num_computed, computed
+        )
+        is not None
+    )
+    assert check()["full_attention"] == pytest.approx(4 / 40)
+
+    manager.free(req1)
+    assert check() == {"full_attention": 0.0, second_spec_type: 0.0}
+
+
+def test_usage_by_type_disabled():
+    block_size = 16
+    single_group = make_kv_cache_manager(
+        make_kv_cache_config(block_size, 11),
+        max_model_len=8192,
+        hash_block_size=block_size,
+        log_stats=True,
+    )
+    assert single_group.get_usage_by_type() is None
+
+    no_stats = make_kv_cache_manager(
+        make_kv_cache_config_hybrid_model(block_size, 21, 2),
+        max_model_len=8192,
+        hash_block_size=block_size,
+    )
+    assert no_stats.get_usage_by_type() is None
+    assert no_stats.block_pool.get_num_used_blocks_by_group() is None
+
+
+def test_block_pool_group_usage_tracking():
+    """Per-group counts follow every ref_cnt 0 <-> >0 transition, including
+    paths outside allocate/free, so they partition the used blocks."""
+    pool = BlockPool(num_gpu_blocks=8, enable_caching=True, hash_block_size=16)
+    pool.enable_group_usage_tracking(2)
+
+    def used_by_group() -> tuple[int, ...]:
+        used = pool.get_num_used_blocks_by_group()
+        assert used is not None
+        assert sum(used) == pool.num_gpu_blocks - 1 - pool.get_num_free_blocks()
+        return used
+
+    full = pool.get_new_blocks(3, kv_cache_group_id=0)
+    swa = pool.get_new_blocks(2, kv_cache_group_id=1)
+    assert used_by_group() == (3, 2)
+
+    # Extra refs taken outside the pool (CoW retention) do not change usage.
+    full[0].ref_cnt += 1
+    pool.free_blocks([full[0]])
+    assert used_by_group() == (3, 2)
+
+    # Unpinned blocks count as free; a later hit charges the allocating group.
+    pool.unpin_blocks([swa[0]], on_reuse=lambda block: None)
+    assert used_by_group() == (3, 1)
+    pool.touch([swa[0]])
+    assert used_by_group() == (3, 2)
+
+    pool.free_blocks(full + swa)
+    assert used_by_group() == (0, 0)
+
+    # A caller that omits the group id is left untracked rather than failing.
+    untracked = pool.get_new_blocks(2)
+    assert pool.get_num_used_blocks_by_group() == (0, 0)
+    pool.free_blocks(untracked)
+    assert used_by_group() == (0, 0)
+
+
 def test_hybrid_cache_mamba_align_shared_prefix_detection():
     """Test shared prefix detection heuristic for mamba align cache mode
 
