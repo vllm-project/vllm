@@ -171,6 +171,16 @@ class ModelOptKVCacheMethod(BaseKVCacheMethod):
         super().__init__(quant_config)
 
 
+# W4A16 checkpoints carry no (or a deprecated) input_scale: a layerwise reload
+# neither waits for it (weight_loader_numel = 0) nor rejects a late copy. The
+# suffixes apply to the whole config, so in a mixed-precision checkpoint an
+# input_scale matching no parameter (e.g. a misnamed FP8 one) is dropped too.
+_W4A16_IGNORE_UNEXPECTED_SUFFIXES = (
+    *QuantizationConfig._ignore_unexpected_suffixes,
+    ".input_scale",
+)
+
+
 class ModelOptQuantConfigBase(QuantizationConfig):
     # ModelOpt quant-algo string, set by each subclass. Fed to resolve() to
     # build the QuantSpec for the generic ModelOptLinearMethod. The mixed
@@ -409,7 +419,14 @@ class ModelOptQuantConfigBase(QuantizationConfig):
 
 
 class ModelOptFp8Config(ModelOptQuantConfigBase):
-    """Config class for ModelOpt FP8."""
+    """Config class for ModelOpt FP8.
+
+    Attributes:
+        w8a16: Serve the per-tensor static ``FP8`` linears as W8A16 with
+            `ModelOptFp8W8A16LinearMethod` instead of W8A8. Set it with
+            `use_fp8_w8a16` before the model is built.
+
+    """
 
     def __init__(
         self,
@@ -422,6 +439,7 @@ class ModelOptFp8Config(ModelOptQuantConfigBase):
         self.quant_method = quant_method
         self.is_checkpoint_fp8_serialized = is_checkpoint_fp8_serialized
         self.kv_cache_quant_method = kv_cache_quant_method
+        self.w8a16 = False
 
         # Validate the quant_algo; resolve() maps it to a QuantSpec at dispatch.
         supported = algos_owned_by("modelopt")
@@ -495,6 +513,8 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         super().__init__(moe_config)
         self.quant_config = quant_config
         assert self.quant_config.is_checkpoint_fp8_serialized
+        if quant_config.w8a16:
+            raise NotImplementedError("ModelOpt FP8 W8A16 covers linear layers only")
 
         # Select Fp8 MoE backend
         self.fp8_backend, self.experts_cls = select_fp8_moe_backend(
@@ -760,6 +780,8 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
                 f"Unsupported ModelOpt NVFP4 quant_algo: {quant_method}. "
                 f"Supported: {' / '.join(supported)}."
             )
+        if quant_method == "W4A16_NVFP4":
+            self._ignore_unexpected_suffixes = _W4A16_IGNORE_UNEXPECTED_SUFFIXES
 
     def get_name(self) -> QuantizationMethods:
         return "modelopt_fp4"
@@ -1023,6 +1045,9 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             weight_loader=weight_loader,
         )
         layer.register_parameter("w2_input_scale", w2_input_scale)
+        if self.use_a16:
+            w13_input_scale.weight_loader_numel = 0
+            w2_input_scale.weight_loader_numel = 0
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         """Convert NVFP4 MoE weights into kernel format and setup the kernel."""
@@ -1599,6 +1624,11 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
         self.nvfp4_config = nvfp4_config
         self.w4a16_nvfp4_config = w4a16_nvfp4_config
         self.mxfp8_config = mxfp8_config
+        if any(
+            info.get("quant_algo", "").upper() == "W4A16_NVFP4"
+            for info in quantized_layers.values()
+        ):
+            self._ignore_unexpected_suffixes = _W4A16_IGNORE_UNEXPECTED_SUFFIXES
 
         block_sizes = {
             int(layer_info.get("group_size", 128))
@@ -2519,9 +2549,9 @@ class _DropInputScale(FormatScheme):
 
     def extra_weights(self, layer, shapes, ctx, wl) -> None:
         data = torch.full((shapes.num_partitions,), torch.nan)
-        layer.register_parameter(
-            "input_scale", PerTensorScaleParameter(data=data, weight_loader=wl)
-        )
+        scale = PerTensorScaleParameter(data=data, weight_loader=wl)
+        scale.weight_loader_numel = 0
+        layer.register_parameter("input_scale", scale)
 
     def post_process(self, layer) -> None:
         scale = getattr(layer, "input_scale", None)
@@ -2686,6 +2716,103 @@ class ModelOptLinearMethod(LinearMethodBase):
         )
 
 
+@register_weight_loader_v2_supported_method
+class ModelOptFp8W8A16LinearMethod(LinearMethodBase):
+    """Per-tensor static FP8 (``FP8``) linear served as W8A16.
+
+    Loads the checkpoint's FP8 ``weight``, per-tensor ``weight_scale`` and
+    ``input_scale`` like the W8A8 method, then drops ``input_scale``:
+    activations stay unquantized. After loading, `dequantize` turns the weight
+    into the activation dtype once and `UnquantizedLinearMethod` runs it, so
+    under batch invariance the layer computes
+    ``linear_batch_invariant(x, W, bias)``, i.e. ``x @ W.T + bias``.
+
+    A layerwise reload restores the FP8 parameters, so a weight update sends
+    the same tensors as for W8A8. The layer is dequantized again once all three
+    have arrived; until then none of its names is missing, which a linear's own
+    ``load_weights`` would not tolerate.
+    """
+
+    def __init__(self) -> None:
+        self.unquantized = UnquantizedLinearMethod()
+
+    @staticmethod
+    def dequantize(
+        weight: torch.Tensor,
+        weight_scale: torch.Tensor,
+        logical_widths: list[int],
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        """Dequantize an FP8 weight with its per-tensor scales.
+
+        Each logical shard's rows are scaled by that shard's scale. A tensor
+        fused on disk has one scale, loaded into every shard, so this is
+        ``(weight.to(torch.float32) * weight_scale).to(dtype)`` bitwise.
+
+        Args:
+            weight: FP8 weight of shape ``[out, in]``.
+            weight_scale: fp32 scale per logical shard.
+            logical_widths: Output rows of each logical shard.
+            dtype: Activation dtype of the result.
+
+        Returns:
+            The dequantized ``[out, in]`` weight.
+
+        """
+        widths = torch.tensor(logical_widths, device=weight_scale.device)
+        scale = weight_scale.to(torch.float32).repeat_interleave(widths)
+        return (weight.to(torch.float32) * scale.unsqueeze(1)).to(dtype)
+
+    def create_weights(
+        self,
+        layer,
+        input_size_per_partition: int,
+        output_partition_sizes: list[int],
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ) -> None:
+        del input_size, output_size
+        weight_loader = extra_weight_attrs.get("weight_loader")
+        layer.logical_widths = output_partition_sizes
+        layer.input_size_per_partition = input_size_per_partition
+        layer.output_size_per_partition = sum(output_partition_sizes)
+        shapes = Shapes(output_partition_sizes, input_size_per_partition, params_dtype)
+        SCHEME_FOR[kFp8StaticTensorSym].create_weights(
+            layer, WEIGHT, CkptCtx(), shapes, weight_loader
+        )
+        SCHEME_FOR[kFp8StaticTensorSym].create_weights(
+            layer, ACT, CkptCtx(), shapes, weight_loader
+        )
+
+    def process_weights_after_loading(self, layer) -> None:
+        weight = self.dequantize(
+            layer.weight, layer.weight_scale, layer.logical_widths, layer.orig_dtype
+        )
+        del layer.weight_scale, layer.input_scale
+        layer.weight = Parameter(weight, requires_grad=False)
+        self.unquantized.process_weights_after_loading(layer)
+
+    def apply(self, layer, x, bias=None):
+        return self.unquantized.apply(layer, x, bias)
+
+
+def use_fp8_w8a16(quant_config: QuantizationConfig | None) -> None:
+    """Serve a ModelOpt config's per-tensor FP8 linears as W8A16.
+
+    Call before the model is built. A no-op for a config without ModelOpt FP8
+    linears.
+    """
+    if isinstance(quant_config, ModelOptMixedPrecisionConfig):
+        fp8_config = quant_config.fp8_config
+    elif isinstance(quant_config, ModelOptFp8Config):
+        fp8_config = quant_config
+    else:
+        return
+    fp8_config.w8a16 = True
+
+
 def resolve(algo: str, subcfg, prefix: str):
     """Turn a sub-config into (QuantSpec, CkptCtx, format_scheme).
 
@@ -2762,6 +2889,12 @@ def build_linear_method(config, algo: str, prefix: str) -> LinearMethodBase:
     mixed-precision dispatch, so a new format plugs in without editing either
     ``get_quant_method``.
     """
+    if isinstance(config, ModelOptFp8Config) and config.w8a16:
+        if algo != "FP8":
+            raise NotImplementedError(
+                f"ModelOpt FP8 W8A16 serves per-tensor FP8 linears, not {algo}"
+            )
+        return ModelOptFp8W8A16LinearMethod()
     builder = LINEAR_METHOD_BUILDERS.get(algo)
     if builder is not None:
         return builder(config, prefix)

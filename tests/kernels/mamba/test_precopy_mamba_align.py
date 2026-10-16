@@ -12,6 +12,8 @@ with byte-identical semantics to the scalar V1 copy specs
 * temporal state (conv_width == 0): ``token_bias`` selects the accepted
   speculative column -- ``state[bt[src_col + token_bias]]`` ->
   ``state[bt[dst_col]]``.
+* running-column state (conv_width == -1, ``get_running_state_copy_spec``):
+  ``state[bt[src_col]]`` -> ``state[bt[dst_col]]`` whatever ``token_bias``.
 
 The kernel must also no-op when ``src_col < 0`` (fresh request) or
 ``src_col == dst_col`` (no boundary crossed). V2 callers pass an explicit
@@ -90,7 +92,7 @@ def _build_state(num_blocks, device, conv_state_dim_first):
     return convs, ssms
 
 
-def _build_meta(convs, ssms, device, conv_state_dim_first):
+def _build_meta(convs, ssms, device, conv_state_dim_first, running_column=False):
     """Flattened per-(layer, state-type) metadata, ordered conv, ssm per layer."""
     n = NUM_LAYERS * 2
     base = torch.zeros(n, dtype=torch.int64, device=device)
@@ -117,17 +119,19 @@ def _build_meta(convs, ssms, device, conv_state_dim_first):
             width[i] = conv.size(1)
             inner[i] = conv.stride(1)
         i += 1
-        # ssm (temporal): width = 0, inner = elems per block
+        # ssm (temporal): width = 0 (-1 running column), inner = elems per block
         base[i] = ssm.data_ptr()
         blk_stride[i] = ssm.stride(0) * ssm.element_size()
         elem[i] = ssm.element_size()
-        width[i] = 0
+        width[i] = -1 if running_column else 0
         inner[i] = ssm[0].numel()
         i += 1
     return base, blk_stride, elem, inner, width, group, drc, drs
 
 
-def _reference(convs, ssms, bt, src_col, dst_col, bias, num_reqs, conv_dim_first):
+def _reference(
+    convs, ssms, bt, src_col, dst_col, bias, num_reqs, conv_dim_first, running=False
+):
     """Apply the V1 copy semantics on clones, reading from the pre-copy state."""
     conv_pre = [c.clone() for c in convs]
     ssm_pre = [s.clone() for s in ssms]
@@ -138,7 +142,8 @@ def _reference(convs, ssms, bt, src_col, dst_col, bias, num_reqs, conv_dim_first
         if sc < 0 or sc == dc:
             continue
         sblk, dblk = int(bt[r, sc]), int(bt[r, dc])
-        tblk = int(bt[r, sc + tb])  # temporal src column shifted by bias
+        # temporal src column shifted by bias, unless kept in the running column
+        tblk = int(bt[r, sc if running else sc + tb])
         for layer in range(NUM_LAYERS):
             if conv_dim_first:
                 conv_ref[layer][dblk, :, : CONV_WIDTH - tb] = conv_pre[layer][
@@ -155,6 +160,7 @@ def _reference(convs, ssms, bt, src_col, dst_col, bias, num_reqs, conv_dim_first
 @_parametrize("token_bias", [0, 1, 2])
 @_parametrize("has_idx_mapping", [True, False])
 @_parametrize("temporal_tiles", [1, _TEMPORAL_TILES])
+@_parametrize("running_column", [False, True])
 @_cuda_required
 def test_precopy_matches_v1_copy_specs(
     num_reqs,
@@ -162,6 +168,7 @@ def test_precopy_matches_v1_copy_specs(
     has_idx_mapping,
     conv_state_dim_first,
     temporal_tiles,
+    running_column,
 ):
     device = torch.device("cuda")
     torch.manual_seed(0)
@@ -193,10 +200,11 @@ def test_precopy_matches_v1_copy_specs(
         bias.cpu(),
         num_reqs,
         conv_state_dim_first,
+        running_column,
     )
 
     base, blk_stride, elem, inner, width, group, drc, drs = _build_meta(
-        convs, ssms, device, conv_state_dim_first
+        convs, ssms, device, conv_state_dim_first, running_column
     )
     bt_ptrs = torch.tensor([bt.data_ptr()], dtype=torch.int64, device=device)
     # Non-identity mapping: block-table rows are request slots, not batch rows.

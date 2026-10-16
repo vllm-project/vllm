@@ -12,6 +12,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateCopyFuncsByType,
     get_conv_copy_spec,
+    get_running_state_copy_spec,
     get_temporal_copy_spec,
     is_conv_state_dim_first,
 )
@@ -347,9 +348,13 @@ def _copy_mamba_state_block(
         return
 
     # Temporal state: copy state[bt[src_col + token_bias]] -> state[bt[dst_col]]
+    # (state[bt[src_col]] for a running-column state, conv_width < 0).
     # Body u64 range is partitioned across TEMPORAL_TILES CTAs to keep the
     # SMs filled at small batch.
-    actual_src_block_id = tl.load(block_table_base + src_col + token_bias).to(tl.int64)
+    src_col_bias = tl.where(conv_width < 0, 0, token_bias)
+    actual_src_block_id = tl.load(block_table_base + src_col + src_col_bias).to(
+        tl.int64
+    )
     src_addr = state_base_addr + actual_src_block_id * state_block_stride
     # Use natural block data size (inner_size * elem_size), NOT
     # state_block_stride which is the page stride and can exceed the
@@ -384,7 +389,7 @@ def postprocess_mamba_fused_kernel(
     state_block_strides_ptr,  # bytes per block for each state
     state_elem_sizes_ptr,  # element size for each state
     state_inner_sizes_ptr,  # number of elements in inner dimensions
-    state_conv_widths_ptr,  # conv width for conv states (0 for temporal)
+    state_conv_widths_ptr,  # conv width; 0 temporal, -1 running column
     state_group_indices_ptr,  # maps state_idx to group index in block table
     # DS conv row metadata. Zero keeps the single-region copy path.
     state_dim_row_count_ptr,  # int32: per-block dim row count for DS conv
@@ -788,7 +793,7 @@ class MambaSpecDecodeGPUContext:
     state_block_strides: torch.Tensor  # int64: bytes per block
     state_elem_sizes: torch.Tensor  # int32: element size in bytes
     state_inner_sizes: torch.Tensor  # int64: elements in inner dimensions
-    state_conv_widths: torch.Tensor  # int32: conv width (0 for temporal states)
+    state_conv_widths: torch.Tensor  # int32 conv width; 0 temporal, -1 running
     state_group_indices: torch.Tensor  # int32: maps state_idx to group index
     # DS conv row metadata. Zero keeps the single-region copy path.
     state_dim_row_count: torch.Tensor  # int32: per-block dim row count
@@ -1022,9 +1027,10 @@ class MambaSpecDecodeGPUContext:
                     # Element size
                     self.state_elem_sizes[idx] = state.element_size()
 
-                    assert (
-                        copy_func is get_conv_copy_spec
-                        or copy_func is get_temporal_copy_spec
+                    assert copy_func in (
+                        get_conv_copy_spec,
+                        get_temporal_copy_spec,
+                        get_running_state_copy_spec,
                     ), f"unexpected copy func: {copy_func}"
                     if copy_func is get_conv_copy_spec:
                         if state.dim() != 3:
@@ -1051,7 +1057,11 @@ class MambaSpecDecodeGPUContext:
                         # which gives the correct byte count even when the
                         # state tensor is as_strided with padded page strides
                         # (state_block_stride would be the page size, too big).
-                        self.state_conv_widths[idx] = 0
+                        # -1 marks a running-column state (no accepted-
+                        # token column offset), 0 a temporal state.
+                        self.state_conv_widths[idx] = (
+                            -1 if copy_func is get_running_state_copy_spec else 0
+                        )
                         self.state_inner_sizes[idx] = (
                             state[0].numel() if state.dim() > 1 else 1
                         )

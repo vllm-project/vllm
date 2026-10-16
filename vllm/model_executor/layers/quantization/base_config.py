@@ -109,7 +109,7 @@ def method_has_implemented_embedding(method_class: type[QuantizeMethodBase]) -> 
 class QuantizationConfig(ABC):
     """Base class for quantization configs."""
 
-    _ignore_unexpected_suffixes = (
+    _ignore_unexpected_suffixes: tuple[str, ...] = (
         ".q_scale",
         ".k_scale",
         ".v_scale",
