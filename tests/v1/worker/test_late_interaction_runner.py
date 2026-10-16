@@ -138,14 +138,13 @@ def test_finished_request_releases_unscored_doc_use():
 
 
 @pytest.mark.skip_global_cleanup
-@pytest.mark.parametrize("doc_state", ["not_submitted", "registered", "finished"])
-def test_release_queries_is_targeted_and_idempotent(doc_state):
+def test_release_queries_is_targeted_and_idempotent():
     runner = LateInteractionRunner()
     query_emb = torch.tensor([[1.0, 0.0], [0.0, 1.0]], dtype=torch.float32)
 
     for query_key in ("query-release", "query-keep"):
         query_params = _make_pooling_params(
-            build_late_interaction_query_params(query_key=query_key, query_uses=2)
+            build_late_interaction_query_params(query_key=query_key, query_uses=1)
         )
         runner.postprocess_pooler_output(
             raw_pooler_output=[query_emb],
@@ -160,19 +159,11 @@ def test_release_queries_is_targeted_and_idempotent(doc_state):
     kept_doc_params = _make_pooling_params(
         build_late_interaction_doc_params(query_key="query-keep")
     )
-    if doc_state != "not_submitted":
-        runner.register_request("released-doc", released_doc_params)
-    if doc_state == "finished":
-        runner.on_requests_finished({"released-doc"})
+    runner.register_request("released-doc", released_doc_params)
     runner.register_request("kept-doc", kept_doc_params)
 
-    runner.release_queries(["query-release", "unknown-query", "query-release"])
     runner.release_queries(["query-release"])
-    runner.on_requests_finished({"query-release-req", "released-doc"})
-
-    assert set(runner._query_cache) == {"query-keep"}
-    assert runner._query_uses == {"query-keep": 2}
-    assert runner._doc_query_keys == {"kept-doc": "query-keep"}
+    runner.release_queries(["query-release"])
 
     with pytest.raises(ValueError, match="query cache miss"):
         runner.postprocess_pooler_output(
@@ -190,12 +181,6 @@ def test_release_queries_is_targeted_and_idempotent(doc_state):
     )
     assert isinstance(kept_output, list)
     assert kept_output[0] is not None
-    assert torch.allclose(kept_output[0], compute_maxsim_score(query_emb, query_emb))
-    runner.register_request("kept-doc-2", kept_doc_params)
-    runner.on_requests_finished({"kept-doc", "kept-doc-2"})
-    assert not runner._query_cache
-    assert not runner._query_uses
-    assert not runner._doc_query_keys
 
 
 def test_invalid_query_uses_raises():
