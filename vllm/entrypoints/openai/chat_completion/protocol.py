@@ -19,21 +19,18 @@ from pydantic import (
 )
 
 from vllm.config import ModelConfig
-from vllm.entrypoints.chat_utils import (
-    ChatCompletionMessageParam,
-    ChatTemplateContentFormatOption,
-    has_non_text_content,
-)
 from vllm.entrypoints.generate.base.protocol import (
     AnyResponseFormat,
     DeltaMessage,
     FunctionCall,
     FunctionDefinition,
+    MMPayload,
     PerRequestMetrics,
     StopParam,
     StreamOptions,
     ToolCall,
     TopLogprobsParam,
+    resolve_return_mm_kwargs_alias,
     structured_outputs_from_response_format,
     validate_cache_salt,
     validate_structural_tag_response_format,
@@ -44,6 +41,11 @@ from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
+from vllm.renderers.chat_utils import (
+    ChatCompletionMessageParam,
+    ChatTemplateContentFormatOption,
+    has_non_text_content,
+)
 from vllm.sampling_params import (
     BeamSearchParams,
     RepetitionDetectionParams,
@@ -458,6 +460,28 @@ class ChatCompletionRequest(OpenAIBaseModel):
         ),
     )
 
+    mm_payload: MMPayload = Field(
+        default="tensors",
+        description=(
+            "What the render response's `features` carry for multimodal "
+            "items. 'tensors' serializes the processed tensors into "
+            "`kwargs_data` and `mm_metadata`. 'none' sets both to null for "
+            "callers that need only the token layout and item hashes, such as "
+            "cache-aware routers. Do not send a 'none' response to "
+            "`/inference/v1/generate` which reads a null `kwargs_data` as "
+            "every item being cached. Only supported on the render endpoints. "
+            "Ignored on regular generation endpoints."
+        ),
+    )
+    return_mm_kwargs: bool | None = Field(
+        default=None,
+        deprecated="return_mm_kwargs is deprecated in favor of the mm_payload field",
+        description=(
+            "Deprecated alias: false is the same as `mm_payload='none'`. "
+            "Ignored when `mm_payload` is set."
+        ),
+    )
+
     cache_salt: str | None = Field(
         default=None,
         min_length=1,
@@ -513,6 +537,11 @@ class ChatCompletionRequest(OpenAIBaseModel):
     )
 
     # --8<-- [end:chat-completion-extra-params]
+
+    @model_validator(mode="before")
+    @classmethod
+    def apply_return_mm_kwargs_alias(cls, data: Any) -> Any:
+        return resolve_return_mm_kwargs_alias(data)
 
     @model_validator(mode="before")
     @classmethod
