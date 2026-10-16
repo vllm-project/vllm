@@ -701,12 +701,19 @@ class NixlBaseConnectorWorker:
                 else nixl_agent_config(num_threads=num_threads, capture_telemetry=True)
             )
 
-        if vllm_config.model_config.enable_sleep_mode:
-            # UCX's registration cache and peers' cuda_ipc imports would keep the
-            # slept KV cache resident. UCX reads both when the agent is created.
-            os.environ.setdefault("UCX_RCACHE_ENABLE", "n")
-            os.environ.setdefault("UCX_TLS", "^cuda_ipc")
+        sleep_mode = vllm_config.model_config.enable_sleep_mode and config is not None
+        if sleep_mode:
+            config = nixl_agent_config(backends=[], capture_telemetry=True)
         self.nixl_wrapper = nixl_wrapper_cls(str(uuid.uuid4()), config)
+        if sleep_mode:
+            # Keep slept pages unpinned, for this agent only; UCX_* env vars win.
+            self.nixl_wrapper.create_backend(
+                "UCX",
+                {
+                    "num_threads": str(num_threads),
+                    "engine_config": "RCACHE_ENABLE=n,TLS=^cuda_ipc",
+                },
+            )
         # Map of engine_id -> {(pp_rank, tp_rank): agent_name, ...}.
         # non-PP remote uses pp_rank 0, i.e. (0, tp_rank).
         self._remote_agents: dict[EngineId, dict[tuple[int, int], str]] = defaultdict(
