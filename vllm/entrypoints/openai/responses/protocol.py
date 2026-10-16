@@ -478,7 +478,11 @@ class ResponsesRequest(OpenAIBaseModel):
 
     def extract_structured_outputs(self) -> StructuredOutputsParams | None:
         """Normalize request constraints into ``StructuredOutputsParams``."""
-        if self.text is None or self.text.format is None:
+        if (
+            self.text is None
+            or self.text.format is None
+            or self.text.format.type == "text"
+        ):
             return self.structured_outputs
 
         if self.structured_outputs is not None:
