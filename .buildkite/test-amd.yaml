@@ -3439,6 +3439,26 @@ steps:
   commands:
   - pytest -v -s tests/kernels/test_rocm_gemm_rs_ar.py
 
+- label: ":amd: (MI355) Qwen4 Exp SP"
+  timeout_in_minutes: 30
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_4
+  num_gpus: 4
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/config/parallel.py
+  - vllm/models/common/ops/sequence_parallel.py
+  - vllm/models/qwen4_exp/
+  - vllm/model_executor/layers/vocab_parallel_embedding.py
+  - vllm/model_executor/models/qwen3_next.py
+  - vllm/platforms/rocm.py
+  - tests/models/qwen4_exp/test_ple.py
+  - tests/models/qwen4_exp/test_tpsp.py
+  commands:
+  - pytest -v -s models/qwen4_exp/test_tpsp.py
+
 - label: ":amd: (MI355) Distributed DP Basic" # TBD
   timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
