@@ -711,7 +711,11 @@ class Qwen4ExpPLEPinnedHostEmbedding(Qwen4ExpPLEEmbedding):
         slot_size, slot_offset = self._get_dp_gather_slot(ngram_ids.shape[0])
         gathered_ids = self._gather_dp_ids(ngram_ids, slot_size)
         embeddings = self._lookup(gathered_ids)
-        embeddings = self._reduce_etp_embeddings(embeddings)
+        if self.reduce_results:
+            embeddings = self._reduce_etp_embeddings(embeddings)
+        else:
+            # The outer TP reduce-scatter requires ETP=TP.
+            assert self.etp_data_parallel_size == 1
         return self._select_embeddings(
             embeddings,
             ngram_ids.shape[0],
