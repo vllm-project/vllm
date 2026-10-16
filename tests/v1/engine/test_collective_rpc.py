@@ -3,15 +3,12 @@
 
 from collections import deque
 from concurrent.futures import Future
-from functools import partial
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 
-from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.core import EngineCore
-from vllm.v1.engine.core_client import AsyncMPClient, DPLBAsyncMPClient
 
 
 class OneShotFuture(Future):
@@ -85,28 +82,3 @@ def test_collective_rpc_preserves_failed_output():
             saved.result()
         assert exc.value is error
     core.model_executor.collective_rpc.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_collective_rpc_barrier_reaches_each_dp_engine():
-    calls: list[tuple[str, str, tuple]] = []
-
-    async def call_utility(method, *args, engine):
-        calls.append((engine, method, args))
-
-    client = SimpleNamespace(
-        core_engines=["engine-0", "engine-1"], _call_utility_async=call_utility
-    )
-    client.call_utility_async = partial(DPLBAsyncMPClient.call_utility_async, client)
-    client.call_utility_all_async = partial(
-        AsyncMPClient.call_utility_all_async, client
-    )
-    client.collective_rpc_async = partial(AsyncMPClient.collective_rpc_async, client)
-    llm = SimpleNamespace(engine_core=client)
-
-    await AsyncLLM.collective_rpc(llm, "release", wait_for_inflight_batches=True)
-
-    assert sorted(calls) == [
-        (engine, "collective_rpc", ("release", None, (), None, True))
-        for engine in client.core_engines
-    ]

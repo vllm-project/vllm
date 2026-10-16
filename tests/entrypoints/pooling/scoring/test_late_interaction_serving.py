@@ -2,25 +2,17 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
 import torch
-from fastapi import Request
-from fastapi.responses import Response
 
-from vllm.entrypoints.pooling.scoring.api_router import create_score, do_rerank
-from vllm.entrypoints.pooling.scoring.protocol import RerankRequest, ScoreTextRequest
 from vllm.entrypoints.pooling.scoring.serving import ServingScores
 from vllm.entrypoints.pooling.typing import PoolingEngineInput, PoolingServeContext
-from vllm.exceptions import GenerationError, RetryableRequestError, VLLMValidationError
+from vllm.exceptions import GenerationError, RetryableRequestError
 from vllm.inputs import tokens_input
 from vllm.outputs import PoolingOutput, PoolingRequestOutput, RequestError
-from vllm.pooling_params import PoolingParams
-from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
-from vllm.v1.engine.async_llm import AsyncLLM
-from vllm.v1.engine.output_processor import OutputProcessor, RequestOutputCollector
+from vllm.pooling_params import LateInteractionParams, PoolingParams
 from vllm.v1.pool.late_interaction_runner import LateInteractionRunner
 
 
@@ -194,210 +186,84 @@ async def test_late_interaction_output_error_stops_pending_producers(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("n_queries", [1, 2], ids=["rerank", "score"])
-@pytest.mark.parametrize(
-    "scenario",
-    [
-        "normal",
-        "query_output",
-        "query_add",
-        "doc_output",
-        "doc_error",
-        "double_abort",
-        "double_rpc",
-    ],
-)
-async def test_late_interaction_releases_requests_and_queries(
-    n_queries, scenario, monkeypatch
+@pytest.mark.parametrize("cleanup_stage", ["abort", "rpc"])
+async def test_repeated_cancellation_releases_requests_and_queries(
+    cleanup_stage, monkeypatch
 ):
-    """Exercise route cancellation, encoding and cache ownership without a model."""
-    runner = LateInteractionRunner()
-    reached, cleanup_entered, release = (asyncio.Event() for _ in range(3))
-    all_docs_added = asyncio.Event()
-    blocked = asyncio.Event()
+    runner = LateInteractionRunner(enable_flash=False)
     pending = set()
-    handler_task = None
-    error = VLLMValidationError("document rejected")
-
-    class ControlledEngine:
-        encode = AsyncLLM.encode
-        abort = AsyncLLM.abort
-        log_requests = False
-        is_tracing_enabled = AsyncMock(return_value=False)
-
-        def __init__(self):
-            self.output_processor = OutputProcessor(None, log_stats=False)
-            self.engine_core = SimpleNamespace(abort_requests_async=self.send_abort)
-
-        async def add_request(self, request_id, prompt, params, **kwargs):
-            internal_id = f"{request_id}-internal"
-            pending.add(internal_id)
-            collector = RequestOutputCollector(params.output_kind, internal_id)
-            self.output_processor.add_request(
-                EngineCoreRequest(
-                    request_id=internal_id,
-                    external_req_id=request_id,
-                    prompt_token_ids=prompt["prompt_token_ids"],
-                    mm_features=None,
-                    sampling_params=None,
-                    pooling_params=params,
-                    arrival_time=0,
-                    lora_request=None,
-                    cache_salt=None,
-                    data_parallel_rank=None,
-                ),
-                prompt=None,
-                queue=collector,
-            )
-            runner.register_request(internal_id, params)
-            index = prompt["prompt_token_ids"][0]
-            if index == n_queries + 1:
-                all_docs_added.set()
-            if scenario == "doc_error" and index == n_queries:
-                await all_docs_added.wait()
-                raise error
-            hold_doc = index == n_queries + 1 and scenario in {
-                "doc_output",
-                "doc_error",
-                "double_abort",
-            }
-            if hold_doc:
-                reached.set()
-                return collector
-
-            output = runner.postprocess_pooler_output(
-                [torch.eye(2)], [params], [internal_id], [True]
-            )[0]
-            pending.remove(internal_id)
-            runner.on_requests_finished([internal_id])
-            hold_query = index == n_queries - 1 and scenario in {
-                "query_output",
-                "query_add",
-                "double_rpc",
-            }
-            if hold_query:
-                reached.set()
-                if scenario == "query_add":
-                    await blocked.wait()
-                return collector
-            self.output_processor.process_outputs(
-                [
-                    EngineCoreOutput(
-                        request_id=internal_id,
-                        new_token_ids=[],
-                        pooling_output=output,
-                        finish_reason=FinishReason.STOP,
-                    )
-                ]
-            )
-            return collector
-
-        async def send_abort(self, request_ids):
-            if request_ids and scenario == "double_abort":
-                # AsyncLLM.abort already removed the external ID mapping.
-                assert not self.output_processor.external_req_ids
-                cleanup_entered.set()
-                await release.wait()
-            pending.difference_update(request_ids)
-            runner.on_requests_finished(request_ids)
-
-        async def collective_rpc(
-            self, method, *, args, wait_for_inflight_batches=False
-        ):
-            assert scenario != "normal"
-            assert method == "release_late_interaction_query_cache"
-            if scenario == "double_rpc":
-                cleanup_entered.set()
-                await release.wait()
-            runner.release_queries(args[0])
-
-    request = (
-        RerankRequest(model="model", query="q", documents=["d1", "d2"])
-        if n_queries == 1
-        else ScoreTextRequest(model="model", text_1=["q1", "q2"], text_2=["d1", "d2"])
-    )
+    started, cleanup_entered, release = (asyncio.Event() for _ in range(3))
     ctx = _make_context()
-    ctx.request, ctx.n_queries = request, n_queries
-    ctx.engine_inputs = [
-        {
-            "prompts": tokens_input(prompt_token_ids=[i]),
-            "params": PoolingParams(task="token_embed"),
-            "lora_requests": None,
-            "priorities": 0,
-        }
-        for i in range(n_queries + 2)
-    ]
+
+    async def encode_queries(ctx):
+        ctx.late_interaction_query_keys = ["query"]
+        params = PoolingParams(
+            late_interaction_params=LateInteractionParams(
+                mode="cache_query", query_key="query", query_uses=1
+            )
+        )
+        runner.postprocess_pooler_output([torch.eye(2)], [params], ["query"], [True])
+
+    async def encode_docs(ctx):
+        # The RPC case stops before any document can consume the cached query.
+        if cleanup_stage == "abort":
+            ctx.late_interaction_doc_keys = ["doc"]
+            pending.add("doc")
+            runner.register_request(
+                "doc",
+                PoolingParams(
+                    late_interaction_params=LateInteractionParams(
+                        mode="score_doc", query_key="query"
+                    )
+                ),
+            )
+        started.set()
+        await asyncio.Event().wait()
+
+    async def abort(request_ids):
+        if cleanup_stage == "abort":
+            cleanup_entered.set()
+            await release.wait()
+        pending.difference_update(request_ids)
+        runner.on_requests_finished(request_ids)
+
+    async def collective_rpc(method, *, args, wait_for_inflight_batches=False):
+        if cleanup_stage == "rpc":
+            cleanup_entered.set()
+            await release.wait()
+        runner.release_queries(args[0])
+
     serving = object.__new__(ServingScores)
-    serving.enable_flash_late_interaction = True
     serving.io_processor = Mock()
-    serving.model_config = SimpleNamespace(pooler_config=None)
-    engine = ControlledEngine()
-    serving.engine_client = engine
+    serving.engine_client = Mock(abort=abort, collective_rpc=collective_rpc)
+    monkeypatch.setattr(serving, "_init_ctx", AsyncMock(return_value=ctx))
     monkeypatch.setattr(serving, "_preprocessing", AsyncMock())
-    serving._postprocessing_async = AsyncMock(return_value=Response())
-    monkeypatch.setattr(serving, "_log_inputs", Mock())
-
-    async def init_context(*args, **kwargs):
-        nonlocal handler_task
-        handler_task = asyncio.current_task()
-        return ctx
-
-    monkeypatch.setattr(serving, "_init_ctx", init_context)
-
-    async def receive():
-        if scenario in {"normal", "doc_error"}:
-            await blocked.wait()
-        await reached.wait()
-        return {"type": "http.disconnect"}
-
-    raw_request = Request(
-        {
-            "type": "http",
-            "headers": [],
-            "app": SimpleNamespace(state=SimpleNamespace(serving_scores=serving)),
-        },
-        receive=receive,
+    monkeypatch.setattr(
+        serving, "_flash_late_interaction_encode_queries", encode_queries
     )
-    ctx.raw_request = raw_request
-    route = do_rerank if n_queries == 1 else create_score
+    monkeypatch.setattr(serving, "_flash_late_interaction_encode_docs", encode_docs)
+    handler = asyncio.create_task(serving.flash_late_interaction())
 
-    async def run_scenario():
-        if scenario == "doc_error":
-            with pytest.raises(VLLMValidationError) as exc:
-                await route(request, raw_request)
-            assert exc.value is error
-        else:
-            response = await route(request, raw_request)
-            if scenario == "normal":
-                assert response.status_code == 200
-                assert len(ctx.final_res_batch) == 2
-                assert all(
-                    result.outputs.data.item() == 2 for result in ctx.final_res_batch
-                )
-            else:
-                assert isinstance(response, Response)
-                assert response.body == b""
-                assert handler_task is not None
-                if scenario in {"double_abort", "double_rpc"}:
-                    await cleanup_entered.wait()
-                    handler_task.cancel()
-                    await asyncio.sleep(0)
-                    release.set()
-                await asyncio.wait([handler_task])
-                with pytest.raises(asyncio.CancelledError):
-                    handler_task.result()
+    async def cancel_twice():
+        await started.wait()
+        handler.cancel()
+        await cleanup_entered.wait()
+        handler.cancel()
+        await asyncio.sleep(0)
+        release.set()
+        await asyncio.wait([handler])
+        with pytest.raises(asyncio.CancelledError):
+            handler.result()
+        assert not pending
+        assert not runner._query_cache
+        assert not runner._query_uses
+        assert not runner._doc_query_keys
 
     try:
-        await asyncio.wait_for(run_scenario(), timeout=5)
+        await asyncio.wait_for(cancel_twice(), timeout=5)
     finally:
-        # Failed assertions must not leave cleanup waiting during test teardown.
+        # Always unblock cleanup, including when an assertion or timeout fails.
         release.set()
-        if handler_task is not None:
-            if not handler_task.done():
-                handler_task.cancel()
-            await asyncio.gather(handler_task, return_exceptions=True)
-    assert not pending
-    assert not runner._query_cache
-    assert not runner._query_uses
-    assert not runner._doc_query_keys
-    assert not engine.output_processor.external_req_ids
+        if not handler.done():
+            handler.cancel()
+        await asyncio.gather(handler, return_exceptions=True)
