@@ -142,6 +142,7 @@ def make_feature_matrix(csv_file_path: str):
                     rank_worker,
                     vllm_config,
                     env_dict,
+                    None,
                     config,
                     weights,
                 )

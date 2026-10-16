@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import dataclasses
 import os
+import time
 import traceback
 from collections.abc import Callable
 from typing import Any, Concatenate
@@ -145,22 +146,45 @@ def parallel_launch_with_config(
     worker: Callable[Concatenate[ProcessGroupInfo, VllmConfig, Any, P], None],
     vllm_config: VllmConfig,
     env_dict: dict[Any, Any] | None,
+    join_timeout_s: float | None,
     *args: P.args,
     **kwargs: P.kwargs,
 ) -> None:
-    spawn(
-        _worker_parallel_launch,
-        args=(
-            world_size,
-            world_size,
-            0,
-            f"tcp://{os.getenv('LOCALHOST', 'localhost')}:{get_open_port()}",
-            worker,
-            vllm_config,
-            env_dict,
-            kwargs,
+    spawn_args = (
+        world_size,
+        world_size,
+        0,
+        f"tcp://{os.getenv('LOCALHOST', 'localhost')}:{get_open_port()}",
+        worker,
+        vllm_config,
+        env_dict,
+        kwargs,
+    ) + args
+
+    if join_timeout_s is None:
+        spawn(
+            _worker_parallel_launch,
+            args=spawn_args,
+            nprocs=world_size,
+            join=True,
         )
-        + args,
+        return
+
+    ctx = spawn(
+        _worker_parallel_launch,
+        args=spawn_args,
         nprocs=world_size,
-        join=True,
+        join=False,
     )
+    assert ctx is not None
+    deadline = time.monotonic() + join_timeout_s
+    while not ctx.join(timeout=min(10.0, join_timeout_s)):
+        if time.monotonic() >= deadline:
+            for process in ctx.processes:
+                if process.is_alive():
+                    process.kill()
+            for process in ctx.processes:
+                process.join()
+            raise TimeoutError(
+                f"parallel worker group did not finish within {join_timeout_s}s"
+            )
