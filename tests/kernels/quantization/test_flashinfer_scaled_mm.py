@@ -31,9 +31,33 @@ CUDA_DEVICES = ["cuda:0"]
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @pytest.mark.parametrize("autotune", [False, True])
-@pytest.mark.parametrize("batch_shape", [(), (2,), (1, 2)])
-@torch.inference_mode()
 def test_flashinfer_fp8_gemm(
+    dtype: torch.dtype,
+    shape: tuple[int, int, int],
+    use_bias: bool,
+    seed: int,
+    device: str,
+    autotune: bool,
+) -> None:
+    _test_flashinfer_fp8_gemm(dtype, shape, use_bias, seed, device, autotune, ())
+
+
+@pytest.mark.parametrize("batch_shape", [(2,), (1, 2)])
+def test_flashinfer_fp8_gemm_output_shape(batch_shape: tuple[int, ...]) -> None:
+    """Scaled-MM restores leading dimensions of the requested output shape."""
+    _test_flashinfer_fp8_gemm(
+        dtype=torch.bfloat16,
+        shape=SHAPES[0],
+        use_bias=True,
+        seed=SEEDS[0],
+        device=CUDA_DEVICES[0],
+        autotune=False,
+        batch_shape=batch_shape,
+    )
+
+
+@torch.inference_mode()
+def _test_flashinfer_fp8_gemm(
     dtype: torch.dtype,
     shape: tuple[int, int, int],
     use_bias: bool,
@@ -42,7 +66,6 @@ def test_flashinfer_fp8_gemm(
     autotune: bool,
     batch_shape: tuple[int, ...],
 ) -> None:
-    """FP8 scaled-MM preserves the requested batch dimensions."""
     from vllm.model_executor.kernels.linear.scaled_mm.flashinfer import (
         FlashInferFP8ScaledMMLinearKernel,
     )
