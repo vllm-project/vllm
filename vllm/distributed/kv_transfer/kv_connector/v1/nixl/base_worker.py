@@ -3940,7 +3940,7 @@ class NixlBaseConnectorWorker:
         except Exception:
             logger.exception("NIXL remote-engine cleanup failed at shutdown.")
         try:
-            if not self._kv_unregistered:  # a sleep already deregistered it
+            if not self._kv_unregistered:
                 for desc in self._registered_descs:
                     self.nixl_wrapper.deregister_memory(desc)
         finally:
