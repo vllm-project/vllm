@@ -328,7 +328,28 @@ void reshape_and_cache_nvfp4_dispatch(
                   "key_cache last dim must be data_dim + scale_dim, got ",
                   key_cache.size(3), " expected ", full_dim);
 
-  int block_size = key_cache.size(1);
+  // Callers pass the cache in one of two conventions:
+  //   - logical view:  [num_blocks, block_size, num_heads, full_dim]
+  //     (physical layout encoded in strides; used by kernel tests)
+  //   - physical HND:  [num_blocks, num_heads, block_size, full_dim]
+  //     (runtime HND caches are allocated in this shape, see e.g.
+  //      flashinfer attention backend)
+  // Disambiguate which dim is the head dim using num_heads from `key`.
+  // Reading size(1) unconditionally misreads num_heads as block_size for
+  // physical HND caches; when num_heads % 4 == 0 that passed the divisibility
+  // check below and silently corrupted the cache (issue #49012).
+  // If size(1) == size(2) the shape is ambiguous; keep the logical-view
+  // interpretation (pre-existing behavior; both dims agree on block_size).
+  int block_dim = 1;
+  int head_dim = 2;
+  if (key_cache.size(2) != num_heads && key_cache.size(1) == num_heads) {
+    block_dim = 2;
+    head_dim = 1;
+  }
+  STD_TORCH_CHECK(key_cache.size(head_dim) == num_heads, "key_cache head dim (",
+                  key_cache.size(head_dim), ") does not match key num_heads (",
+                  num_heads, ")");
+  int block_size = key_cache.size(block_dim);
 
   STD_TORCH_CHECK(head_size % 16 == 0,
                   "head_size must be divisible by 16 for NVFP4 KV cache");
@@ -338,7 +359,7 @@ void reshape_and_cache_nvfp4_dispatch(
 
   // Detect physical layout from strides (based on full_dim).
   // HND: head stride > block_offset stride.
-  bool is_hnd = key_cache.stride(2) > key_cache.stride(1);
+  bool is_hnd = key_cache.stride(head_dim) > key_cache.stride(block_dim);
 
   int64_t data_block_stride = key_cache.stride(0);  // page_bytes
   int64_t data_head_stride, data_block_offset_stride;
