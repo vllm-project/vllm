@@ -65,7 +65,7 @@ def test_background_store_publishes_without_blocking_caller():
 
 
 def _make_connector():
-    return AuxOutputSchedulerConnector()
+    return AuxOutputSchedulerConnector(_BLOCK_SIZE)
 
 
 @dataclass
@@ -1282,6 +1282,28 @@ def test_store_does_not_evict_referenced_aux_outputs():
     store.close()
 
 
+def test_store_eviction_does_not_rescan_referenced_keys():
+    class CountingDict(dict):
+        lookups = 0
+
+        def __contains__(self, key):
+            CountingDict.lookups += 1
+            return super().__contains__(key)
+
+    store = _make_store(max_bytes=4 * 1000)
+    store._references = CountingDict()
+    referenced = [f"referenced-{i}" for i in range(900)]
+    store.put([BlockObject(key, b"rrrr") for key in referenced], retain_keys=referenced)
+    store.put([BlockObject(f"old-{i}", b"oooo") for i in range(100)])
+
+    for i in range(100):
+        store.put([BlockObject(f"new-{i}", b"nnnn")])
+
+    # Without the fix, each put scans all 900 referenced keys again.
+    assert CountingDict.lookups < 2 * 1000
+    store.close()
+
+
 def test_store_terminal_put_preserves_tail_first_eviction_order():
     store = _make_store(max_bytes=8)
     keys = ["first", "second", "third"]
@@ -1818,6 +1840,26 @@ def test_scheduler_connector_sends_each_block_hash_once():
     assert list(first.block_hashes[request.request_id]) == [b"a" * 32, b"b" * 32]
     assert list(second.block_hashes[request.request_id]) == [b"c" * 32]
     assert request.request_id not in third.block_hashes
+
+
+def test_scheduler_connector_sends_hashes_of_scheduled_blocks_only():
+    connector = _make_connector()
+    hashes = [b"a" * 32, b"b" * 32, b"c" * 32]
+    request = _scheduler_request("request", hashes, num_tokens=12)
+    request.num_computed_tokens = 0
+
+    first = connector.build_connector_meta(
+        _step_output([request.request_id], [0], [4]), {request.request_id: request}
+    )
+    request.num_computed_tokens = 4
+    second = connector.build_connector_meta(
+        _step_output([request.request_id], [4], [8]), {request.request_id: request}
+    )
+
+    # The worker pins a store object per sent hash, so blocks of later prefill
+    # chunks must not be pinned before they have KV.
+    assert list(first.block_hashes[request.request_id]) == hashes[:1]
+    assert list(second.block_hashes[request.request_id]) == hashes[1:]
 
 
 def test_scheduler_connector_sends_unscheduled_hash_update():
