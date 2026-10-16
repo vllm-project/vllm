@@ -751,7 +751,10 @@ class Platform:
         """Ensure block_size is compatible with the attention backend.
         For hybrid models, also aligns block_size with mamba page sizes.
         """
-        from vllm.config.cache import CacheConfig
+        from vllm.config.cache import (
+            CacheConfig,
+            maybe_apply_hybrid_eagle_retention_default,
+        )
 
         cache_config = vllm_config.cache_config
         model_config = vllm_config.model_config
@@ -792,6 +795,15 @@ class Platform:
         if cache_config.kv_cache_dtype_skip_layers:
             cls._align_heterogeneous_kv_block_size(vllm_config, backend_classes[0])
         cls._check_aligned_block_size(vllm_config, backend_classes, pre_block_size)
+
+        maybe_apply_hybrid_eagle_retention_default(
+            cache_config,
+            is_hybrid=model_config.is_hybrid,
+            use_eagle=(
+                vllm_config.speculative_config is not None
+                and vllm_config.speculative_config.use_eagle()
+            ),
+        )
 
     @classmethod
     def _check_aligned_block_size(
