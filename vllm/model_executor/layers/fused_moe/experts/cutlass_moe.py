@@ -1237,12 +1237,6 @@ def run_cutlass_moe_w4a8_fp8(
     )
     expert_offsets = expert_first_token_offset[:-1]
 
-    if not per_act_token:
-        # Rows past the valid routes (non-local experts, or invalid routes such
-        # as -1 for padding tokens) are never written by the grouped GEMM, but
-        # the dynamic per-tensor scale of act_out reduces over every row.
-        mm1_out.fill_(0)
-
     ops.cutlass_w4a8_moe_mm(
         mm1_out,
         a1q,
