@@ -65,6 +65,67 @@ export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://$JAEGER_IP:4318/v1/traces
 vllm serve facebook/opt-125m --otlp-traces-endpoint="$OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"
 ```
 
+## Inference spans
+
+With `--otlp-traces-endpoint` configured, `llm_request` spans are created at
+frontend engine admission using the request arrival timestamp. Tool and non-tool
+requests use the same lifecycle: non-streaming API spans finish after response
+conversion, while streaming API spans finish after streaming and generator cleanup.
+Errors, cancellation, and disconnects also close the spans. Direct engine callers
+without an API owner finish at engine completion; Responses background work has
+its own owner and can outlive the initial HTTP response.
+
+Multiple engine requests, such as parallel choices, retain separate spans.
+Existing `gen_ai.latency.*` attributes still measure engine timings; span duration
+can be longer because it includes API response processing. Requests that never
+reach engine admission do not produce an inference span.
+
+### Tool-calling attributes
+
+Chat Completions and Messages requests get the following attributes when they
+explicitly supply non-null `tools`, `tool_choice`, or `parallel_tool_calls`.
+Other requests still produce ordinary inference spans, without these attributes.
+Presence does not require a nonempty tools list: for example, Chat
+`tool_choice="none"` without tools qualifies. API validation is unchanged:
+Chat rejects `tools=[]`, while Messages accepts it.
+
+| Attribute | Type | Meaning |
+| --- | --- | --- |
+| `vllm.tool_calling.present` | Boolean | Tool-related request fields are present. |
+| `vllm.tool_calling.tool_count` | Integer | Number of received tool definitions. |
+| `vllm.tool_calling.tool_choice` | String | `unset`, `auto`, `none`, `required`, `named`, or `other`. |
+| `vllm.tool_calling.api_surface` | String | `chat_completions` or `messages`. |
+| `vllm.tool_calling.response_has_tool_calls` | Boolean | The response count is greater than zero, including partial streams. |
+| `vllm.tool_calling.tool_calls_count` | Integer | Tool-call objects included in server output. |
+| `vllm.tool_calling.parser_status` | String | Response outcome, defined below. |
+
+Request summaries are captured before parser mutation or Messages-to-Chat
+conversion. Choices are normalized from the validated native request; Messages
+`any` becomes `required` and `tool` becomes `named`. Counts reflect filtered Chat
+choices or converted Messages `tool_use` blocks, not raw parser output. Repeated
+streaming argument fragments count once per tool call. These are request-level
+totals repeated on each owned inference span, not per-choice counts to sum.
+
+| `parser_status` | Meaning |
+| --- | --- |
+| `success` | Response processing completed with at least one tool call. |
+| `no_tool_calls` | Response processing completed without tool calls. |
+| `parse_failure` | A parsing exception surfaced, including invalid Messages tool arguments during conversion. |
+| `interrupted` | Response processing did not complete normally, for example after an engine error, cancellation, or disconnect. |
+
+Interrupted streams retain counts already emitted; they are not reported as
+successful. A surfaced `parse_failure` takes precedence over interruption.
+Errors swallowed by a parser cannot be detected by these attributes. Output
+counts do not prove client receipt, tool execution, argument correctness, or
+preservation of fields by an upstream router.
+
+Summaries are attached only to recording spans and follow the configured trace
+sampler. Unsampled requests do not export tool observations. Prometheus counters
+remain independent of sampling and keep their existing eligibility rules.
+Trace propagation remains limited to W3C `traceparent` and `tracestate`; tool
+metadata is not carried in headers. The summary attributes include no tool names,
+schemas, arguments, prompt/response text, exception text, or content-derived hashes.
+
 ## Instrumentation of FastAPI
 
 OpenTelemetry allows automatic instrumentation of FastAPI.
