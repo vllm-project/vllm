@@ -102,14 +102,9 @@ class SharedOffloadRegion:
         barrier: Callable[[], None] | None = None,
         *,
         creator_memory_check: Callable[[int], None] | None = None,
-        populate_only_on_creator: bool = False,
         populate_shard: tuple[int, int] | None = None,
         unlink_owner: bool,
     ) -> None:
-        if populate_only_on_creator and barrier is None:
-            raise ValueError("Creator-only population requires a barrier.")
-        if populate_only_on_creator and populate_shard is not None:
-            raise ValueError("Choose either creator-only or sharded population.")
         self.page_size = mmap.PAGESIZE
         assert kv_bytes_per_chunk % self.page_size == 0
 
@@ -196,12 +191,6 @@ class SharedOffloadRegion:
                 if barrier is not None:
                     barriers_remaining -= 1
                     barrier()
-            elif populate_only_on_creator and created_path:
-                populate_write_fn = _get_populate_write_fn(self.mmap_obj)
-                populate_write_fn(self.mmap_obj, 0, self.total_size_bytes)
-                if barrier is not None:
-                    barriers_remaining -= 1
-                    barrier()
             elif barrier is not None:
                 barriers_remaining -= 1
                 barrier()
@@ -233,7 +222,7 @@ class SharedOffloadRegion:
             self._canonical_offset = 0
             self.is_pinned = False
 
-            if populate_only_on_creator or populate_shard is not None:
+            if populate_shard is not None:
                 return
             self._initialize_buffer(rank, cpu_page_size)
         except Exception:
