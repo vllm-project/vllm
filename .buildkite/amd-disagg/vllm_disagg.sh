@@ -350,6 +350,10 @@ build_ep_cmd() {
         --distributed-timeout-seconds "${DISTRIBUTED_TIMEOUT_SECONDS}"
     )
     local _mc; read -ra _mc <<< "${MODEL_CONFIG}"; CMD+=("${_mc[@]}")
+    # 2P2D EP16 only. At 0.85 the AITER MoE sort buffer runs out of memory.
+    if [[ "${KV_CONNECTOR:-}" == "NixlConnector" && "${ROLE}" == "prefill" && "${xP}" -gt 1 ]]; then
+        CMD+=(--gpu-memory-utilization 0.75)
+    fi
 
     if [[ "${IS_MASTER}" == "1" ]]; then
         CMD+=(--api-server-count="${GPUS_PER_NODE}")
