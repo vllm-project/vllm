@@ -66,7 +66,7 @@ def model_factory(monkeypatch):
         compilation_config=CompilationConfig(mode=0, custom_ops=["none"]),
     )
 
-    def build(*, hf_overrides=None, **overrides):
+    def build(*, hf_overrides=None, quant_config=None, **overrides):
         kwargs = dict(
             vocab_size=32,
             hidden_size=16,
@@ -100,6 +100,7 @@ def model_factory(monkeypatch):
         vc.model_config = SimpleNamespace(
             hf_config=cfg, head_dtype=None, dtype=torch.float32
         )
+        vc.quant_config = quant_config
         with set_current_vllm_config(vc):
             model = dory.DoryForCausalLM(vllm_config=vc)
 
@@ -269,3 +270,105 @@ def test_weight_loader_rejects_silent_truncation(model_factory, name, shape):
     model = model_factory()
     with pytest.raises(ValueError, match="expected shape"):
         model.load_weights([(name, torch.zeros(shape))])
+
+
+@pytest.fixture(params=["mxfp8", "nvfp4"])
+def quantized_model(request, monkeypatch, model_factory):
+    from vllm.model_executor.layers.quantization import modelopt
+    from vllm.model_executor.layers.quantization.compressed_tensors import (
+        compressed_tensors,
+    )
+    from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
+        compressed_tensors_w8a8_mxfp8,
+    )
+
+    # Exercise real parameter allocation and loaders without requiring GPU kernels.
+    kernel = SimpleNamespace(input_quant_key=lambda: None)
+    monkeypatch.setattr(modelopt, "select_linear_kernel", lambda *a, **kw: kernel)
+    monkeypatch.setattr(
+        compressed_tensors_w8a8_mxfp8,
+        "init_mxfp8_linear_kernel",
+        lambda **kw: kernel,
+    )
+    CompressedTensorsConfig = compressed_tensors.CompressedTensorsConfig
+    monkeypatch.setattr(
+        CompressedTensorsConfig, "_check_scheme_supported", lambda *a: None
+    )
+    if request.param == "nvfp4":
+        quant = modelopt.ModelOptNvFp4Config(
+            quant_method="W4A16_NVFP4", is_checkpoint_nvfp4_serialized=True
+        )
+    else:
+        quant = CompressedTensorsConfig.from_config(
+            {
+                "format": "mxfp8-quantized",
+                "config_groups": {
+                    "weights": {
+                        "targets": ["Linear"],
+                        "weights": {
+                            "num_bits": 8,
+                            "type": "float",
+                            "strategy": "group",
+                            "group_size": 32,
+                            "symmetric": True,
+                            "dynamic": False,
+                            "scale_dtype": "torch.uint8",
+                        },
+                    }
+                },
+            }
+        )
+    quant.packed_modules_mapping = dory.DoryForCausalLM.packed_modules_mapping
+    return model_factory(
+        quant_config=quant, hidden_size=64, intermediate_size=96, head_dim=32
+    )
+
+
+@torch.inference_mode()
+def test_quantized_projection_weights_and_scales_load(quantized_model):
+    """Packed columns, block scales and scalar scales retain every shard's values."""
+    model = quantized_model
+    cases = [
+        (0, "qkv_proj", ["q_proj", "k_proj", "v_proj"], [64, 32, 32]),
+        (1, "gate_up_proj", ["gate_proj", "up_proj"], [96, 96]),
+        (0, "g_proj", ["g_proj"], [64]),
+        (0, "o_proj", ["o_proj"], [64]),
+        (1, "down_proj", ["down_proj"], [64]),
+    ]
+    for index, target, sources, rows in cases:
+        prefix = f"backbone.layers.{index}.mixer"
+        layer = model.get_submodule(f"{prefix}.{target}")
+        for suffix in ("weight", "weight_scale", "weight_scale_2"):
+            param = getattr(layer, suffix, None)
+            if param is None:
+                continue
+            scalar = suffix == "weight_scale_2"
+            pieces = [
+                torch.full(
+                    () if scalar else (n, param.shape[1]), i + 1, dtype=param.dtype
+                )
+                for i, n in enumerate(rows)
+            ]
+            loaded = model.load_weights(
+                reversed(
+                    list(
+                        zip(
+                            [f"{prefix}.{source}.{suffix}" for source in sources],
+                            pieces,
+                        )
+                    )
+                )
+            )
+            assert loaded == {f"{prefix}.{target}.{suffix}"}
+            expected = torch.stack(pieces) if scalar else torch.cat(pieces)
+            torch.testing.assert_close(param.float(), expected.float())
+
+
+@pytest.mark.parametrize("suffix", ["weight", "weight_scale"])
+def test_quantized_loader_rejects_oversized_shards(quantized_model, suffix):
+    param = getattr(quantized_model.backbone.layers[0].mixer.qkv_proj, suffix)
+    oversized = torch.zeros((65, param.shape[1]), dtype=param.dtype)
+    with pytest.raises(ValueError, match="expected shape"):
+        quantized_model.load_weights(
+            [(f"backbone.layers.0.mixer.q_proj.{suffix}", oversized)]
+        )

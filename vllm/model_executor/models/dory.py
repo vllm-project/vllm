@@ -26,6 +26,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.parameter import PerTensorScaleParameter
 from vllm.sequence import IntermediateTensors
 
 from .utils import maybe_prefix
@@ -292,8 +293,6 @@ class DoryForCausalLM(nn.Module):
         config.validate()
         if get_tensor_model_parallel_world_size() != 1:
             raise ValueError("Dory currently supports tensor_parallel_size=1 only")
-        if vllm_config.quant_config is not None:
-            raise ValueError("Dory weight quantization is not supported")
         self.backbone = DoryBackbone(
             config,
             vllm_config.cache_config,
@@ -356,7 +355,12 @@ class DoryForCausalLM(nn.Module):
                     rows = heads * self.config.head_dim
                 else:
                     rows = self.config.intermediate_size
-                self._check_weight_shape(name, w, (rows, self.config.hidden_size))
+                if isinstance(param, PerTensorScaleParameter):
+                    shape = () if w.ndim == 0 else (1,)
+                else:
+                    # Preserve packed input columns and per-block scale columns.
+                    shape = (rows, *param.shape[1:])
+                self._check_weight_shape(name, w, shape)
                 param.weight_loader(param, w, shard_id)
                 loaded.add(pname)  # report the MODEL param name, not the artifact name
                 mapped = True
@@ -370,6 +374,8 @@ class DoryForCausalLM(nn.Module):
                 if name in ("backbone.embeddings.weight", "lm_head.weight")
                 else tuple(param.shape)
             )
+            if isinstance(param, PerTensorScaleParameter) and w.ndim == 0:
+                shape = ()
             self._check_weight_shape(name, w, shape)
             getattr(param, "weight_loader", default_weight_loader)(param, w)
             loaded.add(name)
