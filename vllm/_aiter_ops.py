@@ -14,6 +14,7 @@ import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     rocm_aiter_sparse_attn_indexer,
@@ -1490,6 +1491,181 @@ def _rocm_aiter_rmsnorm_fp8_group_quant_fake(
         torch.empty_like(x, dtype=FP8_DTYPE, device=x.device),
         torch.empty(scale_shape, dtype=torch.float32, device=x.device),
     )
+
+
+# rocm_aiter_rmsnorm_mxfp4_quant: Gemma RMSNorm with a residual add and MXFP4
+# quantization in one AITER HIP kernel (add_rmsnorm_quant, module_rmsnorm_quant). The
+# kernel takes rows up to 8192 wide and writes one e8m0 scale per 32 values, shuffled
+# into whole tiles of 256 rows by 8 groups (aiter's e8m0_shuffle layout, the one the
+# asm MXFP4 GEMM reads).
+# ROCM_AITER_MXFP4_NORM_QUANT_MAX_K and rocm_aiter_rmsnorm_mxfp4_quant_args_error are
+# public so that a fusion pass asks the op itself whether a site is takeable: pass and
+# op then cannot disagree.
+ROCM_AITER_MXFP4_NORM_QUANT_MAX_K = 8192
+_MXFP4_NORM_QUANT_OP = "rocm_aiter_rmsnorm_mxfp4_quant"
+_MXFP4_GROUP_SIZE = 32
+_MXFP4_SCALE_ROW_TILE = 256
+_MXFP4_SCALE_COL_TILE = 8
+
+
+def rocm_aiter_rmsnorm_mxfp4_quant_args_error(
+    x: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor
+) -> str | None:
+    """Why rocm_aiter_rmsnorm_mxfp4_quant refuses these arguments (None: it takes them).
+
+    The one home of the op's argument contract: the impl and the fake raise the returned
+    message as a ValueError, and the fusion pass asks this function whether a site is
+    takeable instead of restating the rules. The kernel works through raw pointers and
+    trusts its arguments, so each one is checked against x: x is 2D bfloat16 with K a
+    positive multiple of 32 up to ROCM_AITER_MXFP4_NORM_QUANT_MAX_K, residual has x's
+    dtype and width, weight has x's dtype and shape (K,), and the inner stride of all
+    three is 1 (row strides are free).
+
+    Pure: it reads shapes, dtypes and strides and allocates nothing. It never compares
+    the row counts of x and residual: in a trace they carry separate symbols for M and
+    comparing them would add a guard on M, so the impl compares them. K must be a
+    concrete int; a caller that may hold a symbolic hidden size has to refuse it first.
+    """
+    op = _MXFP4_NORM_QUANT_OP
+    if x.dim() != 2:
+        return (
+            f"{op} needs a 2D input (M, K), got a {x.dim()}D input of shape "
+            f"{tuple(x.shape)}"
+        )
+    if x.dtype != torch.bfloat16:
+        return f"{op} needs a bfloat16 input, got {x.dtype}"
+    if weight.dtype != x.dtype:
+        return (
+            f"{op} needs a weight of the input dtype {x.dtype}, got weight dtype "
+            f"{weight.dtype}"
+        )
+    k = x.shape[1]
+    if k > ROCM_AITER_MXFP4_NORM_QUANT_MAX_K:
+        return (
+            f"{op} supports hidden size <= {ROCM_AITER_MXFP4_NORM_QUANT_MAX_K}, "
+            f"got K={k}"
+        )
+    if k == 0 or k % _MXFP4_GROUP_SIZE != 0:
+        return (
+            f"{op} needs a hidden size that is a positive multiple of "
+            f"{_MXFP4_GROUP_SIZE}, got K={k}"
+        )
+    if residual.dim() != 2 or residual.shape[1] != k or residual.dtype != x.dtype:
+        return (
+            f"{op} needs a residual like the input: (M, {k}) {x.dtype}, got "
+            f"{tuple(residual.shape)} {residual.dtype}"
+        )
+    if tuple(weight.shape) != (k,):
+        return f"{op} needs a weight of shape ({k},), got {tuple(weight.shape)}"
+    if x.stride(1) != 1 or residual.stride(1) != 1 or weight.stride(0) != 1:
+        return (
+            f"{op} needs unit stride along the hidden dimension (rows may be strided), "
+            f"got strides x={tuple(x.stride())} residual={tuple(residual.stride())} "
+            f"weight={tuple(weight.stride())}"
+        )
+    return None
+
+
+def _rocm_aiter_rmsnorm_mxfp4_quant_check_and_alloc(
+    x: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Check the arguments of rocm_aiter_rmsnorm_mxfp4_quant, then allocate its outputs.
+
+    Shared by the impl (which fills the outputs) and the fake (which returns them), so a
+    compile fails at trace time with the ValueError the op raises when it runs; the
+    rules are rocm_aiter_rmsnorm_mxfp4_quant_args_error's.
+
+    Returns the codes (M, K // 2) in float4_e2m1fn_x2, the shuffled scales
+    (pad256(M), pad8(K // 32)) in float8_e8m0fnu (the kernel writes only the positions
+    in use, the rest is uninitialized) and the residual output like x. M may be
+    symbolic.
+    """
+    error = rocm_aiter_rmsnorm_mxfp4_quant_args_error(x, residual, weight)
+    if error is not None:
+        raise ValueError(error)
+    m, k = x.shape
+    scale_shape = (
+        round_up(m, _MXFP4_SCALE_ROW_TILE),
+        round_up(k // _MXFP4_GROUP_SIZE, _MXFP4_SCALE_COL_TILE),
+    )
+    return (
+        torch.empty(m, k // 2, dtype=torch.float4_e2m1fn_x2, device=x.device),
+        torch.empty(scale_shape, dtype=torch.float8_e8m0fnu, device=x.device),
+        torch.empty_like(x),
+    )
+
+
+def _rocm_aiter_rmsnorm_mxfp4_quant_impl(
+    x: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    epsilon: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Gemma RMSNorm of x + residual, quantized to MXFP4, in one AITER HIP kernel.
+
+    M == 0 returns empty outputs without launching the kernel.
+
+    Args:
+        x: (M, K) bfloat16 hidden states. Rows may be strided, the inner stride must
+            be 1.
+        residual: (M, K) bfloat16, added to x before the norm. Not modified.
+        weight: (K,) bfloat16, the RAW Gemma norm weight. The kernel applies
+            weight + 1 itself (gemma_norm=True), so the caller must not add 1.
+        epsilon: the norm's epsilon.
+
+    Returns:
+        x_q: (M, K // 2) float4_e2m1fn_x2, two MXFP4 codes per byte.
+        x_scales: (pad256(M), pad8(K // 32)) float8_e8m0fnu, one scale per 32 values in
+            aiter's shuffled layout. Only the positions of that layout are written
+            (see aiter e8m0_shuffle); the padding is uninitialized.
+        residual_out: (M, K) bfloat16, x + residual. A new tensor: the op is out of
+            place, x and residual are left alone.
+
+    Raises:
+        ValueError: x is not 2D bfloat16, K is not a positive multiple of 32 up to
+            ROCM_AITER_MXFP4_NORM_QUANT_MAX_K, residual or weight does not match x
+            (dtype, width, shape, row count), or an inner stride is not 1. The fake
+            raises the same errors, except the row count, which only this impl can
+            compare.
+
+    """
+    import aiter as rocm_aiter
+
+    out, scale, residual_out = _rocm_aiter_rmsnorm_mxfp4_quant_check_and_alloc(
+        x, residual, weight
+    )
+    if residual.shape[0] != x.shape[0]:  # concrete here; the fake must not compare M
+        raise ValueError(
+            f"{_MXFP4_NORM_QUANT_OP} needs a residual with the input's "
+            f"{x.shape[0]} rows, got {residual.shape[0]}"
+        )
+    if x.shape[0] == 0:  # the kernel's empty grid leaves a launch error for the next op
+        return out, scale, residual_out
+    rocm_aiter.add_rmsnorm_quant(
+        out,
+        x,
+        residual,
+        residual_out,
+        # The kernel types its scale argument as uint8; this is the same buffer as the
+        # e8m0 tensor returned below, not a copy.
+        scale.view(torch.uint8),
+        weight,
+        epsilon,
+        group_size=_MXFP4_GROUP_SIZE,
+        shuffle_scale=True,
+        gemma_norm=True,
+    )
+    return out, scale, residual_out
+
+
+def _rocm_aiter_rmsnorm_mxfp4_quant_fake(
+    x: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    epsilon: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    # Same checks and shapes as the impl; M may be symbolic and is never compared.
+    return _rocm_aiter_rmsnorm_mxfp4_quant_check_and_alloc(x, residual, weight)
 
 
 def _rocm_aiter_fused_rms_gated_fp8_group_quant_impl(
@@ -3092,6 +3268,12 @@ class rocm_aiter_ops:
                 op_name="rocm_aiter_rmsnorm_with_add_fp8_group_quant",
                 op_func=_rocm_aiter_rmsnorm_with_add_fp8_group_quant_impl,
                 fake_impl=_rocm_aiter_rmsnorm_with_add_fp8_group_quant_fake,
+            )
+
+            direct_register_custom_op(
+                op_name=_MXFP4_NORM_QUANT_OP,
+                op_func=_rocm_aiter_rmsnorm_mxfp4_quant_impl,
+                fake_impl=_rocm_aiter_rmsnorm_mxfp4_quant_fake,
             )
 
             direct_register_custom_op(

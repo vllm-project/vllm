@@ -227,6 +227,12 @@ Supported quantization scheme/hardware combinations:
 - FP8 static per-tensor: CUDA & HIP kernel
 - FP8 dynamic per-token: CUDA & HIP kernel, AITER
 - FP8 dynamic per-token-group (128/64): CUDA & HIP kernel, AITER
+- MXFP4 dynamic (Gemma post-attention `fused_add_rms_norm` → asm MXFP4 GEMM): ROCm AITER on gfx950 only,
+  opt-in with `VLLM_ROCM_AITER_FP4_POSTNORM_QUANT_FUSION=1` (needs `VLLM_ROCM_USE_AITER=1` and `VLLM_ROCM_USE_AITER_FP4_ASM_GEMM=1`,
+  tensor parallel size 1 and a graph split at the attention ops)
+- MXFP4 dynamic (Gemma input `fused_add_rms_norm` that starts a decoder layer → asm MXFP4 GEMM): same hardware and requirements,
+  opt-in with `VLLM_ROCM_AITER_FP4_INPUTNORM_QUANT_FUSION=1`; a norm that feeds two GEMMs (a gated delta net layer)
+  is quantized once and both GEMMs take its output
 
 **Code locations.**
 
@@ -252,6 +258,12 @@ Supported quantization scheme/hardware combinations:
 - FP8 dynamic per-group (128/64): CUDA kernel (sm89+, not active when DeepGemm is used on sm100+)
 - NVFP4 dynamic: CUDA sm100+ only with FlashInfer
 - FP8 per-token-group (128): ROCm AITER only
+- MXFP4 dynamic (SiLU/GELU+Mul → asm MXFP4 GEMM): ROCm AITER on gfx950 only,
+  opt-in with `VLLM_ROCM_AITER_FP4_ACT_QUANT_FUSION=1` (needs `VLLM_ROCM_USE_AITER=1` and `VLLM_ROCM_USE_AITER_FP4_ASM_GEMM=1`)
+
+The MXFP4 fusions (this one and the RMSNorm ones above) fail the start when their flag is on and
+the target model graph gets no rewrite in a compile range; the graphs of speculative decoding are
+only logged. The startup log has one line per compile range, `Fused ... at N sites (graph=...)`.
 
 **Code locations.**
 
