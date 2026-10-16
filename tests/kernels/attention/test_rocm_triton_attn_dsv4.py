@@ -1295,6 +1295,210 @@ def test_sparse_attn_decode_split_k_kernel(
     torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
 
 
+def _hip_sparse_decode_available() -> bool:
+    if not current_platform.is_rocm():
+        return False
+    from vllm.v1.attention.ops import rocm_aiter_mla_sparse as mod
+
+    return mod._hip_sparse_decode_available()
+
+
+requires_hip_sparse_decode = pytest.mark.skipif(
+    not _hip_sparse_decode_available(),
+    reason="the HIP sparse MLA decode kernel is gfx942-only",
+)
+
+
+def _hip_sparse_decode_inputs(with_extra: bool, block_size: int = 64) -> dict:
+    device = torch.device("cuda")
+    num_heads = 16
+    # Row counts cover an empty query, partial tiles and several full tiles;
+    # -1 entries are skipped like the Triton kernel's invalid slots.
+    main_rows = [list(range(37)), [], [5, -1, 9, 2], list(range(100, 132))]
+    main_rows += [[(7 * i + j) % 200 for i in range(53)] for j in range(3)]
+    num_queries = len(main_rows)
+    q = (
+        torch.randn(
+            num_queries, num_heads, HEAD_DIM, dtype=torch.bfloat16, device=device
+        )
+        * 0.125
+    )
+    main_kv = torch.randn(200, HEAD_DIM, dtype=torch.bfloat16, device=device) * 0.5
+    main_use_fnuz = current_platform.is_fp8_fnuz()
+    inputs = dict(
+        q=q,
+        main_rows=main_rows,
+        main_use_fnuz=main_use_fnuz,
+        main_cache=_pack_fp8_ds_mla_cache(main_kv, block_size, use_fnuz=main_use_fnuz),
+        extra_rows=None,
+        extra_cache=None,
+        block_size=block_size,
+    )
+    if with_extra:
+        extra_rows = [
+            [(11 * i + j) % 300 for i in range(n)]
+            for j, n in enumerate([129, 3, 0, 512, 17, 64, 1])
+        ]
+        extra_kv = torch.randn(300, HEAD_DIM, dtype=torch.bfloat16, device=device)
+        inputs.update(
+            extra_rows=extra_rows,
+            extra_cache=_pack_fp8_ds_mla_cache(extra_kv, block_size, use_fnuz=False),
+        )
+    return inputs
+
+
+def _run_hip_sparse_decode(inputs: dict, attn_sink, num_splits: int) -> torch.Tensor:
+    from vllm import _custom_ops as ops
+
+    device = inputs["q"].device
+    main_indices, main_indptr = _ragged_from_rows(inputs["main_rows"], device)
+    extra = (None, None, None)
+    if inputs["extra_cache"] is not None:
+        extra_indices, extra_indptr = _ragged_from_rows(inputs["extra_rows"], device)
+        extra = (inputs["extra_cache"], extra_indices, extra_indptr)
+    out = torch.empty_like(inputs["q"])
+    ops.rocm_sparse_mla_decode_fp8_ds_mla(
+        out,
+        inputs["q"],
+        inputs["main_cache"],
+        main_indices,
+        main_indptr,
+        *extra,
+        attn_sink,
+        HEAD_DIM**-0.5,
+        not inputs["main_use_fnuz"],
+        True,
+        num_splits,
+    )
+    return out
+
+
+@requires_hip_sparse_decode
+@pytest.mark.parametrize("num_splits", [1, 2, 3, 8])
+@pytest.mark.parametrize("with_extra", [True, False])
+@pytest.mark.parametrize("with_sink", [True, False])
+@torch.inference_mode()
+def test_hip_sparse_mla_decode_matches_reference(
+    num_splits: int, with_extra: bool, with_sink: bool
+) -> None:
+    torch.manual_seed(11)
+    inputs = _hip_sparse_decode_inputs(with_extra)
+    attn_sink = (
+        torch.linspace(-0.5, 0.5, 16, dtype=torch.float32, device="cuda")
+        if with_sink
+        else None
+    )
+    actual = _run_hip_sparse_decode(inputs, attn_sink, num_splits)
+    expected = _ref_sparse_decode_ragged(
+        q=inputs["q"],
+        main_cache=inputs["main_cache"],
+        main_rows=[[s for s in row if s >= 0] for row in inputs["main_rows"]],
+        scale=HEAD_DIM**-0.5,
+        attn_sink=attn_sink,
+        block_size=inputs["block_size"],
+        extra_cache=inputs["extra_cache"],
+        extra_rows=inputs["extra_rows"],
+        main_use_fnuz=inputs["main_use_fnuz"],
+    )
+    torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
+
+
+@requires_hip_sparse_decode
+@pytest.mark.parametrize("num_splits", [1, 4])
+@torch.inference_mode()
+def test_hip_sparse_mla_decode_scrubs_nans(num_splits: int) -> None:
+    """NaN elements of gathered rows count as zero."""
+    torch.manual_seed(3)
+    inputs = _hip_sparse_decode_inputs(with_extra=True)
+    block_size = inputs["block_size"]
+    extra_cache = inputs["extra_cache"]
+    nan_byte_offset = 9 * 576 + 100
+    # Zero rows with unit scales: what the poisoned rows below must match.
+    for slot in (0, 77):
+        pos = slot % block_size
+        block = extra_cache[slot // block_size].view(-1)
+        block[pos * 576 : (pos + 1) * 576] = 0
+        block[block_size * 576 + pos * 8 :][:7] = 127
+    inputs["main_cache"].view(-1)[nan_byte_offset] = 0
+    attn_sink = torch.zeros(16, dtype=torch.float32, device="cuda")
+    expected = _run_hip_sparse_decode(inputs, attn_sink, num_splits)
+    torch.testing.assert_close(
+        expected,
+        _ref_sparse_decode_ragged(
+            q=inputs["q"],
+            main_cache=inputs["main_cache"],
+            main_rows=[[s for s in row if s >= 0] for row in inputs["main_rows"]],
+            scale=HEAD_DIM**-0.5,
+            attn_sink=attn_sink,
+            block_size=block_size,
+            extra_cache=extra_cache,
+            extra_rows=inputs["extra_rows"],
+            main_use_fnuz=inputs["main_use_fnuz"],
+        ),
+        atol=2e-2,
+        rtol=2e-2,
+    )
+
+    # Every element of these rows decodes to NaN: zero data under an inf
+    # scale, an OCP NaN byte and a NaN rope element.
+    for slot in (0, 77):
+        _poison_fp8_ds_mla_cache_row(extra_cache, block_size, slot)
+    # A NaN byte (0x80 in FNUZ, 0x7F in OCP) in an otherwise valid main row.
+    nan_byte = 0x80 if inputs["main_use_fnuz"] else 0x7F
+    inputs["main_cache"].view(-1)[nan_byte_offset] = nan_byte
+    actual = _run_hip_sparse_decode(inputs, attn_sink, num_splits)
+    assert torch.equal(actual, expected)
+
+
+@pytest.mark.parametrize("num_tokens,use_hip", [(8, False), (64, True)])
+def test_rocm_sparse_attn_decode_hip_dispatch(
+    monkeypatch, num_tokens: int, use_hip: bool
+) -> None:
+    from vllm.v1.attention.ops import rocm_aiter_mla_sparse as mod
+
+    calls = []
+    monkeypatch.setattr(mod, "_HIP_SPARSE_DECODE_MIN_TOKENS", 64)
+    monkeypatch.setattr(mod, "_hip_sparse_decode_available", lambda: True)
+    monkeypatch.setattr(
+        mod, "_rocm_sparse_attn_decode_hip", lambda **kw: calls.append("hip")
+    )
+
+    def fake_triton(**kw):
+        calls.append("triton")
+        return kw["q"]
+
+    monkeypatch.setattr(mod, "_rocm_sparse_attn_decode_triton", fake_triton)
+    q = torch.zeros(num_tokens, 16, HEAD_DIM, dtype=torch.bfloat16)
+    cache = torch.zeros(1, 64, 584, dtype=torch.uint8)
+    indices = torch.zeros(num_tokens, 1, dtype=torch.int32)
+    lens = torch.ones(num_tokens, dtype=torch.int32)
+    rotated = mod.rocm_sparse_attn_decode(
+        q=q,
+        kv_cache=None,
+        swa_k_cache=cache,
+        swa_only=True,
+        topk_indices=None,
+        topk_lens=None,
+        swa_indices=indices,
+        swa_lens=lens,
+        swa_ragged_indices=None,
+        swa_ragged_indptr=None,
+        topk_ragged_indices=None,
+        topk_ragged_indptr=None,
+        attn_sink=None,
+        scale=HEAD_DIM**-0.5,
+        head_dim=HEAD_DIM,
+        nope_head_dim=NOPE_HEAD_DIM,
+        rope_head_dim=ROPE_HEAD_DIM,
+        output=torch.empty_like(q),
+        inv_rope_positions=torch.zeros(num_tokens, dtype=torch.int64),
+        inv_rope_cos_sin_cache=torch.zeros(8, ROPE_HEAD_DIM),
+    )
+    assert calls == (["hip"] if use_hip else ["triton"])
+    # The HIP kernel leaves the inverse RoPE to the caller.
+    assert rotated == (0 if use_hip else num_tokens)
+
+
 @requires_gfx950
 @torch.inference_mode()
 def test_sparse_attn_decode_gfx950_adaptive_reduce_ignores_stale_scratch() -> None:

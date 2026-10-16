@@ -95,6 +95,17 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "                str mfma_type,"
       "                bool use_interleaved_v_cache=False) -> ()");
   rocm_ops.impl("paged_attention", torch::kCUDA, &paged_attention);
+
+  // Sparse MLA decode over fp8_ds_mla caches (DeepSeek-V4/V4.1, gfx942 only).
+  rocm_ops.def(
+      "sparse_mla_decode_fp8_ds_mla(Tensor! out, Tensor q, Tensor main_cache,"
+      "                             Tensor main_indices, Tensor main_indptr,"
+      "                             Tensor? extra_cache, Tensor? extra_indices,"
+      "                             Tensor? extra_indptr, Tensor? attn_sink,"
+      "                             float scale, bool main_ocp, bool extra_ocp,"
+      "                             int num_splits) -> ()");
+  rocm_ops.impl("sparse_mla_decode_fp8_ds_mla", torch::kCUDA,
+                &sparse_mla_decode_fp8_ds_mla);
 }
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)

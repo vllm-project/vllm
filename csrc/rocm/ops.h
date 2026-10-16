@@ -51,3 +51,12 @@ void paged_attention(
     const std::string& kv_cache_dtype, torch::Tensor& k_scale,
     torch::Tensor& v_scale, const std::optional<torch::Tensor>& fp8_out_scale,
     const std::string& mfma_type, bool use_interleaved_v_cache);
+
+void sparse_mla_decode_fp8_ds_mla(
+    torch::Tensor& out, const torch::Tensor& q, const torch::Tensor& main_cache,
+    const torch::Tensor& main_indices, const torch::Tensor& main_indptr,
+    const std::optional<torch::Tensor>& extra_cache,
+    const std::optional<torch::Tensor>& extra_indices,
+    const std::optional<torch::Tensor>& extra_indptr,
+    const std::optional<torch::Tensor>& attn_sink, double scale, bool main_ocp,
+    bool extra_ocp, int64_t num_splits);
