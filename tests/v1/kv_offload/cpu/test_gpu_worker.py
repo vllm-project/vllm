@@ -698,3 +698,51 @@ def test_load_waits_for_pending_compute_stream_writes(default_vllm_config) -> No
                 torch.testing.assert_close(gpu_tensor[block_id].cpu(), expected)
     finally:
         worker.shutdown()
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="stream ordering test requires a CUDA-like platform",
+)
+@torch.inference_mode()
+def test_stream_wait_orders_compute_without_host_wait(default_vllm_config) -> None:
+    """stream_wait orders compute after a transfer without a host wait."""
+    device = DEVICES[0]
+    page_size_bytes = 1024
+    gpu_tensor = torch.zeros((4, page_size_bytes), dtype=torch.int8, device=device)
+    worker = CPUOffloadingWorker(
+        kv_caches=CanonicalKVCaches(
+            tensors=[
+                CanonicalKVCacheTensor(
+                    tensor=gpu_tensor, page_size_bytes=page_size_bytes
+                )
+            ],
+            group_data_refs=[
+                [CanonicalKVCacheRef(tensor_idx=0, page_size_bytes=page_size_bytes)]
+            ],
+        ),
+        blocks_per_chunk=1,
+        num_cpu_chunks=4,
+    )
+    handler = worker._load_handler
+    job_id = 1
+    transfer_stream = torch.cuda.Stream()
+    end_event = torch.Event(enable_timing=True)
+
+    try:
+        # Stand in for a slow in-flight load into gpu_tensor.
+        with torch.cuda.stream(transfer_stream):
+            torch.cuda._sleep(50_000_000)
+            gpu_tensor.fill_(0x5A)
+            end_event.record(transfer_stream)
+        handler._transfer_events[job_id] = end_event
+
+        worker.stream_wait({job_id})
+        assert not end_event.query()
+
+        loaded = gpu_tensor.clone()
+        torch.accelerator.synchronize()
+        assert torch.all(loaded == 0x5A)
+    finally:
+        handler._transfer_events.pop(job_id, None)
+        worker.shutdown()

@@ -58,8 +58,8 @@ class OffloadingConnectorWorker:
             or self.spec.config.parallel.rank == 0
         )
 
-        # job_id -> req_id for in-flight loads.
-        self._load_jobs: dict[int, ReqId] = {}
+        # job_id -> req_id for in-flight loads (None for sync loads).
+        self._load_jobs: dict[int, ReqId | None] = {}
         self._unsubmitted_store_jobs: list[
             tuple[int, GPULoadStoreSpec, LoadStoreSpec]
         ] = []
@@ -250,11 +250,19 @@ class OffloadingConnectorWorker:
             assert success
         self._unsubmitted_store_jobs.clear()
 
+        sync_job_ids: set[int] = set()
         for job_id, entry in metadata.load_jobs.items():
-            self._load_jobs[job_id] = entry.req_id
+            if entry.sync:
+                # Its request already runs this step: no finished_recving.
+                sync_job_ids.add(job_id)
+                self._load_jobs[job_id] = None
+            else:
+                self._load_jobs[job_id] = entry.req_id
             assert isinstance(entry.dst_spec, GPULoadStoreSpec)
             success = self.worker.submit_load(job_id, entry.src_spec, entry.dst_spec)
             assert success
+        if sync_job_ids:
+            self.worker.stream_wait(sync_job_ids)
 
     def prepare_store_kv(self, metadata: OffloadingConnectorMetadata):
         for job_id, entry in metadata.store_jobs.items():
