@@ -146,6 +146,8 @@ class AsyncOutput(AsyncModelRunnerOutput):
             copy_stream.wait_stream(main_stream)
 
             if sampler_output is None:
+                # Non-last PP stages pass None for both sampling arguments;
+                # auxiliary output uses broadcast counts, or zeros if absent.
                 assert pending_aux_output is not None
                 if pending_recv is None:
                     num_reqs = len(pending_aux_output.request_ids)
@@ -196,6 +198,7 @@ class AsyncOutput(AsyncModelRunnerOutput):
         self.copy_event.synchronize()
 
         if self.sampler_output is None:
+            # Non-last PP stages attach auxiliary output without sampled tokens.
             assert self.pending_aux_output is not None
             output = self.model_runner_output
             if output is EMPTY_MODEL_RUNNER_OUTPUT:
