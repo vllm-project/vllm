@@ -83,33 +83,11 @@ def test_permuted_wo_a_consumes_fused_output():
     )
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
-@pytest.mark.parametrize("tokens,hidden", [(0, 5120), (129, 8192), (4097, 5120)])
-def test_packed_scale_swizzle_matches_flashinfer_layout(tokens, hidden):
-    """DeepGEMM's packed scales, padded stride included, become F8_128x4."""
-    from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
-        swizzle_mxfp8_scale,
-    )
-    from vllm.models.deepseek_v41.nvidia.flash_mla_mega_attn import (
-        swizzle_packed_mxfp8_scale,
-    )
-    from vllm.utils.deep_gemm import get_tma_aligned_size
-
-    raw = torch.randint(0, 255, (tokens, hidden // 32), device="cuda").to(torch.uint8)
-    aligned = get_tma_aligned_size(tokens, 4) + 4
-    packed = torch.empty((hidden // 128, aligned), device="cuda", dtype=torch.int32)
-    packed = packed.t()[:tokens]
-    packed.copy_(raw.view(torch.int32))
-    torch.testing.assert_close(
-        swizzle_packed_mxfp8_scale(packed), swizzle_mxfp8_scale(raw, tokens, hidden)
-    )
-
-
 @pytest.mark.skipif(
     not current_platform.is_device_capability_family(100),
     reason="Mega attention requires SM100",
 )
-@pytest.mark.parametrize("tokens,groups", [(1024, 1), (8193, 8)])
+@pytest.mark.parametrize("tokens,groups", [(1, 8), (129, 1), (8193, 8)])
 @torch.inference_mode()
 def test_quantized_o_proj_matches_quantized_bf16(tokens, groups):
     """wo_a's MXFP8 output equals wo_b quantizing the BF16 z, also on replay."""
@@ -154,9 +132,16 @@ def test_quantized_o_proj_matches_quantized_bf16(tokens, groups):
         layer._can_quantize_o_proj = quantize
         return DeepseekV4MegaAttnAttention._o_proj(layer, o, None)
 
+    def scale_rows(scale):
+        # F8_128x4 words back to one row per token; padded rows are unwritten.
+        words = scale.view(torch.int32).view(-1, groups * n // 128, 32, 4)
+        return words.permute(0, 3, 2, 1).reshape(-1, groups * n // 128)[:tokens]
+
     def assert_same(actual, expected):
-        for a, e in zip(actual, expected):
-            torch.testing.assert_close(a.view(torch.uint8), e.view(torch.uint8))
+        torch.testing.assert_close(
+            actual[0].view(torch.uint8), expected[0].view(torch.uint8)
+        )
+        torch.testing.assert_close(scale_rows(actual[1]), scale_rows(expected[1]))
 
     assert_same(projection(True), projection(False))
     graph = torch.cuda.CUDAGraph()

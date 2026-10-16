@@ -45,9 +45,8 @@ from vllm.models.deepseek_v41.sparse_mla import (
     FlashMLAMegaAttnBackend,
 )
 from vllm.platforms import current_platform
-from vllm.triton_utils import tl, triton
 from vllm.utils.deep_gemm import fp8_einsum, get_tma_aligned_size
-from vllm.utils.math_utils import round_up
+from vllm.utils.math_utils import cdiv, round_up
 from vllm.v1.attention.ops.flashmla import is_flashmla_sparse_supported
 from vllm.v1.worker.workspace import current_workspace_manager
 
@@ -139,42 +138,6 @@ def alloc_mega_attn_output(
     )
 
 
-# From this many tokens, wo_a writing wo_b's MXFP8 input beats wo_b
-# quantizing a BF16 z (break-even is about 512 on GB300).
-_QUANTIZED_WO_A_MIN_TOKENS = 1024
-
-
-@triton.jit(do_not_specialize=["num_tokens", "stride", "size"])
-def _swizzle_packed_mxfp8_scale_kernel(
-    src,
-    dst,
-    num_tokens,
-    stride,
-    size,
-    WORDS: tl.constexpr,
-    BLOCK: tl.constexpr,
-):
-    offsets = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
-    row = offsets // (128 * WORDS) * 128 + offsets % 4 * 32 + offsets % 128 // 4
-    col = offsets // 128 % WORDS
-    values = tl.load(src + col * stride + row, row < num_tokens, 0)
-    tl.store(dst + offsets, values, offsets < size)
-
-
-def swizzle_packed_mxfp8_scale(sf: torch.Tensor) -> torch.Tensor:
-    """Convert DeepGEMM's MN-major packed UE8M0 scales to FlashInfer F8_128x4."""
-    assert sf.ndim == 2 and sf.dtype == torch.int32 and sf.stride(0) == 1
-    tokens, words = sf.shape
-    out = torch.empty(
-        round_up(tokens, 128) * words, device=sf.device, dtype=torch.int32
-    )
-    if tokens:
-        _swizzle_packed_mxfp8_scale_kernel[(triton.cdiv(out.numel(), 1024),)](
-            sf, out, tokens, sf.stride(1), out.numel(), words, 1024
-        )
-    return out.view(torch.uint8)
-
-
 def _token_slice(out: QuantizedActivation, start: int, end: int) -> QuantizedActivation:
     """The ``[start, end)`` token slice of a mega-attention output buffer."""
     data = out.data[start:end]
@@ -261,23 +224,20 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
         """
         groups = self.n_local_groups
         num_tokens = attn_out.data.shape[0]
-        quantize = (
-            num_tokens >= _QUANTIZED_WO_A_MIN_TOKENS and self._can_quantize_o_proj
-        )
+        quantize = self._can_quantize_o_proj
         z = torch.empty(
             (num_tokens, groups, self.o_lora_rank),
             dtype=torch.float8_e4m3fn if quantize else torch.bfloat16,
             device=attn_out.data.device,
         )
         if quantize:
-            # wo_a writes wo_b's MXFP8 input, with one packed int32 of UE8M0
-            # scales per 128 values.
-            aligned = get_tma_aligned_size(num_tokens, torch.int32.itemsize)
+            # wo_a writes wo_b's MXFP8 input with F8_128x4 UE8M0 scales. Padded
+            # scale rows stay unwritten and only reach wo_b rows it never stores.
             z_scale = torch.empty(
-                (groups * self.o_lora_rank // 128, aligned),
+                (cdiv(num_tokens, 128), groups * self.o_lora_rank // 128, 128),
                 dtype=torch.int32,
                 device=z.device,
-            ).t()[:num_tokens]
+            )
         fp8_einsum(
             "bhr,hdr->bhd",
             (attn_out.data[:, :groups], attn_out.scale[:, :groups]),
@@ -288,7 +248,7 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
         z = z.flatten(1)
         if not quantize:
             return self._wo_b_proj(z)
-        scale = swizzle_packed_mxfp8_scale(z_scale)
+        scale = z_scale.view(-1).view(torch.uint8)
         return self._wo_b_proj(
             QuantizedActivation(z, scale, torch.bfloat16, z.shape, kMxfp8Dynamic)
         )
