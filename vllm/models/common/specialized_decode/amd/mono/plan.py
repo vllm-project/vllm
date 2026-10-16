@@ -99,22 +99,33 @@ def padded(n: int, align: int) -> int:
 
 # ---------------------------------------------------------------- build keys
 _SCALARS = (int, float, bool, str, enum.Enum)
-_ROOT = Path(__file__).resolve().parents[1]  # the mono package
+SHARED = Path(__file__).resolve().parent
+"""This package, which every model's digest covers alongside its own."""
 
 
 @functools.cache
-def source_digest(*paths: str) -> str:
-    """sha256 of every ``.py`` file under ``paths`` (files or directories,
-    relative to the mono package), each file's path and contents: one model's
-    kernel sources, so an edit to another model's rebuilds none of these."""
+def source_digest(*roots: Path) -> str:
+    """sha256 of every ``.py`` file under ``roots`` (files or directories), each
+    file's path within its root and its contents: one model's kernel sources, so
+    an edit to another model's rebuilds none of these.
+
+    Args:
+        roots: Absolute paths. A model passes its own package and ``SHARED``.
+
+    Returns:
+        The digest's first 16 hex characters.
+
+    Raises:
+        FileNotFoundError: A root holds no ``.py`` file.
+
+    """
     h = hashlib.sha256()
-    for rel in paths:
-        root = _ROOT / rel
+    for root in roots:
         files = [root] if root.is_file() else sorted(root.rglob("*.py"))
         if not files:
             raise FileNotFoundError(f"no kernel sources at {root}")
         for f in files:
-            h.update(str(f.relative_to(_ROOT)).encode())
+            h.update(str(f.relative_to(root.parent)).encode())
             h.update(f.read_bytes())
     return h.hexdigest()[:16]
 

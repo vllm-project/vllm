@@ -49,19 +49,22 @@ class _StubRunner:
         return ("ffn", args)
 
 
+_MONO = "vllm.models.deepseek_v41.amd.specialized_decode.mono"
+
+
 def _stub_modules(monkeypatch) -> None:
     """The FlyDSL runner package, as a spec-shaped stub."""
-    runner: Any = ModuleType("vllm.models.deepseek_v41.amd.mono.runner")
+    runner: Any = ModuleType(f"{_MONO}.runner")
     runner.BLOCKS = BLOCKS
     runner.MAX_TOKENS = 64
     runner.DSV41MonoLayer = _StubRunner
     runner.MonoLayerWeights = _weights_stub
     runner.AttnWeights = _weights_stub
-    plan: Any = ModuleType("vllm.models.deepseek_v41.amd.mono.attention.plan")
+    plan: Any = ModuleType(f"{_MONO}.attention.plan")
     plan.Dims = lambda world: world
     for name, module in (
-        ("vllm.models.deepseek_v41.amd.mono.runner", runner),
-        ("vllm.models.deepseek_v41.amd.mono.attention.plan", plan),
+        (f"{_MONO}.runner", runner),
+        (f"{_MONO}.attention.plan", plan),
     ):
         monkeypatch.setitem(sys.modules, name, module)
 

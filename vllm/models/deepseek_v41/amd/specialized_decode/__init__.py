@@ -90,7 +90,10 @@ class LayerPlan:
 class DSV41Kernel:
     def __init__(self, vllm_config, model, widths: tuple[int, ...]):
         from vllm.models.common.specialized_decode.guards import tp_group
-        from vllm.models.deepseek_v41.amd.mono.runner import MAX_TOKENS, DSV41MonoLayer
+        from vllm.models.deepseek_v41.amd.specialized_decode.mono.runner import (
+            MAX_TOKENS,
+            DSV41MonoLayer,
+        )
 
         assert MAX_TOKENS >= MAX_ROWS, MAX_TOKENS
         rank, world, cpu_group = tp_group()
@@ -378,7 +381,7 @@ def _refuse_config(vllm_config) -> list[str]:
             "needs AITER's A8W4 MoE (VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4 unset)"
         )
     try:
-        import vllm.models.deepseek_v41.amd.mono.runner  # noqa: F401
+        import vllm.models.deepseek_v41.amd.specialized_decode.mono.runner  # noqa: F401
     except ImportError as err:
         reasons.append(f"needs FlyDSL and AITER's FlyDSL helpers ({err})")
     return reasons
@@ -389,7 +392,7 @@ def _refuse_model(model) -> list[str]:
     kernels read every one of the 384 experts on each rank, TP-sharded, in
     AITER's A8W4 MXFP4 layout, from CTAs that all stay resident."""
     from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
-    from vllm.models.deepseek_v41.amd.mono.runner import BLOCKS
+    from vllm.models.deepseek_v41.amd.specialized_decode.mono.runner import BLOCKS
     from vllm.platforms.rocm import get_cdna_version
 
     reasons = []
@@ -466,7 +469,9 @@ def _skip_step(vllm_config, decode: DSV41Kernel, width: int) -> str | None:
 
 
 def _weights(layer, ffn_only: bool, world: int):
-    from vllm.models.deepseek_v41.amd.mono.runner import MonoLayerWeights
+    from vllm.models.deepseek_v41.amd.specialized_decode.mono.runner import (
+        MonoLayerWeights,
+    )
 
     a, f = layer.attn, layer.ffn
     e, sh = f.experts.routed_experts, f.shared_experts
@@ -496,8 +501,8 @@ def _weights(layer, ffn_only: bool, world: int):
 
 
 def _attn_weights(a, world: int):
-    from vllm.models.deepseek_v41.amd.mono.attention.plan import Dims
-    from vllm.models.deepseek_v41.amd.mono.runner import AttnWeights
+    from vllm.models.deepseek_v41.amd.specialized_decode.mono.attention.plan import Dims
+    from vllm.models.deepseek_v41.amd.specialized_decode.mono.runner import AttnWeights
 
     attn = AttnWeights(
         layer_id=a.layer_id,

@@ -49,7 +49,7 @@ from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr import math as fmath
 from flydsl.expr.typing import T
 
-from vllm.models.deepseek_v41.amd.mono.common.mx import (
+from vllm.models.common.specialized_decode.amd.mono.mx import (
     FP4,
     FP8,
     FP8_MAX,
@@ -61,7 +61,7 @@ from vllm.models.deepseek_v41.amd.mono.common.mx import (
     rcp_pow2,
     scale_index,
 )
-from vllm.models.deepseek_v41.amd.mono.common.ops import (
+from vllm.models.common.specialized_decode.amd.mono.ops import (
     CM_DEV,
     CM_NT,
     _hw_f32,
@@ -84,20 +84,22 @@ from vllm.models.deepseek_v41.amd.mono.common.ops import (
     sum_partials,
     traced,
 )
-from vllm.models.deepseek_v41.amd.mono.common.plan import (
+from vllm.models.common.specialized_decode.amd.mono.plan import (
     BLOCKS,
     THREADS,
     WAVES,
     first_task,
     pair_layout,
 )
-from vllm.models.deepseek_v41.amd.mono.common.sync import preg, publish, sreg
-from vllm.models.deepseek_v41.amd.mono.stages import moe_plan as mplan
-from vllm.models.deepseek_v41.amd.mono.stages.dims import UG_PART
+from vllm.models.common.specialized_decode.amd.mono.sync import preg, publish, sreg
+from vllm.models.deepseek_v41.amd.specialized_decode.mono.stages import (
+    moe_plan as mplan,
+)
+from vllm.models.deepseek_v41.amd.specialized_decode.mono.stages.dims import UG_PART
 
 # helpers the kernel calls are imported by name: FlyDSL keys a build by the
 # source of the same-directory functions it names, never through a module
-from vllm.models.deepseek_v41.amd.mono.stages.gemv import (
+from vllm.models.deepseek_v41.amd.specialized_decode.mono.stages.gemv import (
     ROWS,
     TILE,
     gemv_fp8_loads,
@@ -110,18 +112,23 @@ from vllm.models.deepseek_v41.amd.mono.stages.gemv import (
     tile_rows,
     token_tiles,
 )
-from vllm.models.deepseek_v41.amd.mono.stages.moe_shape import (
+from vllm.models.deepseek_v41.amd.specialized_decode.mono.stages.moe_shape import (
     MASK_WORDS,
     MoeBuild,
     route_shape,
 )
-from vllm.models.deepseek_v41.amd.mono.stages.router import PARTS as ROUTER_PARTS
-from vllm.models.deepseek_v41.amd.mono.stages.router import (
+from vllm.models.deepseek_v41.amd.specialized_decode.mono.stages.router import (
+    PARTS as ROUTER_PARTS,
+)
+from vllm.models.deepseek_v41.amd.specialized_decode.mono.stages.router import (
     router_tile_mfma,
     router_weight_loads,
     router_x_loads,
 )
-from vllm.models.deepseek_v41.amd.mono.stages.seam import HIDDEN, attn_peer_bytes
+from vllm.models.deepseek_v41.amd.specialized_decode.mono.stages.seam import (
+    HIDDEN,
+    attn_peer_bytes,
+)
 
 # a pick tile is a token tile's MFMA N: ``gather_x8r`` fills one from the other
 assert mplan.TILE == TILE
