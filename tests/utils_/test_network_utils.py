@@ -66,7 +66,7 @@ def test_dp_file_store_init_method_is_stable_per_token():
 
 
 def test_dp_file_store_init_method_creates_its_directory():
-    """torch's FileStore creates the file but not the directory above it."""
+    """The torch FileStore creates the file but not the directory above it."""
     token = get_open_port()
     try:
         method = get_dp_file_store_init_method(token, token)
