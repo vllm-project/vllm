@@ -110,6 +110,24 @@ def test_cpu_sampler_selects_cpu_state_implementations() -> None:
     assert isinstance(sampler.thinking_budget_state, CPUThinkingBudgetState)
 
 
+def test_cpu_sampler_suppresses_incomplete_prefill_samples() -> None:
+    sampler = object.__new__(CPUSampler)
+    sampler.req_states = SimpleNamespace(
+        prefill_len=SimpleNamespace(gpu=torch.tensor([10, 7, 4, 20], dtype=torch.int32))
+    )
+    input_batch = SimpleNamespace(
+        num_reqs=4,
+        seq_lens=torch.tensor([4, 6, 22, 7], dtype=torch.int32),
+        cu_num_logits=torch.tensor([0, 1, 2, 3, 4], dtype=torch.int32),
+        idx_mapping=torch.tensor([2, 0, 3, 1], dtype=torch.int64),
+    )
+
+    num_sampled, num_rejected = sampler._get_num_sampled_and_rejected(input_batch)
+
+    assert num_sampled.tolist() == [1, 0, 1, 1]
+    assert num_rejected.tolist() == [0, 0, 0, 0]
+
+
 def test_cpu_thinking_budget_forces_and_continues_end_marker() -> None:
     tokens = [1, START, 10, 11, 12]
     req_states = _make_req_states(tokens)

@@ -14,7 +14,6 @@ from vllm.platforms import current_platform
 from vllm.v1.worker.cpu import model_runner as cpu_model_runner
 from vllm.v1.worker.cpu.input_batch import (
     combine_sampled_and_draft_tokens,
-    get_num_sampled_and_rejected,
     post_update,
     prepare_pos_seq_lens,
     prepare_prefill_inputs,
@@ -275,25 +274,6 @@ def test_combine_sampled_and_draft_tokens_cpu_with_drafts() -> None:
     assert input_ids.tolist() == [350, 311, 312, 103, 104, 11, 12]
     assert logits_indices.tolist() == [0, 1, 2, 4, 5, 6]
     assert input_ids_storage[[0, 8]].tolist() == [99, 107]
-
-
-def test_get_num_sampled_and_rejected_cpu() -> None:
-    num_sampled = torch.tensor([1, 2, 2, 1], dtype=torch.int32)
-    seq_lens = torch.tensor([4, 6, 22, 7], dtype=torch.int32)
-    cu_num_logits = torch.tensor([0, 1, 5, 8, 10], dtype=torch.int32)
-    idx_mapping = torch.tensor([2, 0, 3, 1], dtype=torch.int64)
-    prefill_len = torch.tensor([10, 7, 4, 20], dtype=torch.int32)
-
-    actual_sampled, actual_rejected = get_num_sampled_and_rejected(
-        num_sampled,
-        seq_lens,
-        cu_num_logits,
-        idx_mapping,
-        prefill_len,
-    )
-
-    assert torch.equal(actual_sampled, torch.tensor([1, 0, 2, 1]))
-    assert torch.equal(actual_rejected, torch.tensor([0, 0, 1, 1]))
 
 
 def test_cpu_model_runner_postprocesses_sampled_tokens(monkeypatch) -> None:

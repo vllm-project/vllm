@@ -19,6 +19,7 @@ from vllm.v1.worker.cpu.logits_processors import (
     CPUPenalties,
 )
 from vllm.v1.worker.cpu.logprob import compute_topk_scores as compute_topk_scores_cpu
+from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.sample.logits_processor import LogitsContext
 from vllm.v1.worker.gpu.sample.logprob import LogprobTokenIdsState
 from vllm.v1.worker.gpu.sample.output import (
@@ -348,6 +349,25 @@ class CPUSampler(Sampler):
     @staticmethod
     def _get_num_nans(logits: torch.Tensor) -> torch.Tensor:
         return torch.isnan(logits).sum(dim=1, dtype=torch.int32)
+
+    def _get_num_sampled_and_rejected(
+        self, input_batch: InputBatch
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        num_reqs = input_batch.num_reqs
+        num_sampled = input_batch.seq_lens.new_ones(num_reqs)
+        num_rejected = torch.empty_like(num_sampled)
+        is_chunked_prefilling = (
+            input_batch.seq_lens[:num_reqs]
+            < self.req_states.prefill_len.gpu[input_batch.idx_mapping]
+        )
+        num_sampled.masked_fill_(is_chunked_prefilling, 0)
+        num_rejected.copy_(
+            input_batch.cu_num_logits[1 : num_reqs + 1]
+            - input_batch.cu_num_logits[:num_reqs]
+        )
+        num_rejected.sub_(num_sampled)
+        num_rejected.masked_fill_(is_chunked_prefilling, 0)
+        return num_sampled, num_rejected
 
     def _sample_random(
         self,
