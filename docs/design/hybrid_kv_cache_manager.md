@@ -115,9 +115,10 @@ Unfortunately, not all models have such a beautiful ratio, and approach in Case 
 - Group 0: 10 full attention layers (full.0 - full.9)
 - Group 1: 10 sliding window attention layers (sw.0 - sw.9)
 - Group 2: 10 sliding window attention layers (sw.10 - sw.19)
-- ...
-- Group 6: 10 sliding window attention layers (sw.40 - sw.49)
-- Group 7: 2 sliding window attention layers (sw.50 - sw.51) and 8 padding layers
+- Group 3: 10 sliding window attention layers (sw.20 - sw.29)
+- Group 4: 10 sliding window attention layers (sw.30 - sw.39)
+- Group 5: 10 sliding window attention layers (sw.40 - sw.49)
+- Group 6: 2 sliding window attention layers (sw.50 - sw.51) and 8 padding layers
 
 We will update this algorithm if this heuristic leads to a bad result when a new model comes out (e.g., 20 full + 30 sw, the group size should be 10 instead of 20).
 
@@ -203,7 +204,7 @@ The second question is the cache eviction policy. For now, we use one LRU queue 
 
 ### Case 3: mamba models
 
-The prefix caching support of the mamba model is work in progress. Once implemented, models with mamba layer + full attention layer can be supported via the full attention + X algorithm in case 2.
+Models with mamba layers + full attention layers support prefix caching via the full attention + X algorithm in case 2, with the Mamba state cached at block boundaries. See [Automatic Prefix Caching](../features/automatic_prefix_caching.md).
 
 ## Implementation
 

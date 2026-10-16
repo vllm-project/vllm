@@ -3,6 +3,7 @@
 """vLLM composition layer for Dots3Note image and audio encoders."""
 
 from collections.abc import Iterable
+from contextlib import contextmanager
 
 import torch
 from torch import nn
@@ -39,6 +40,21 @@ from ..common.processor import (
 from .audio import Dots3NoteAudioConfig, Dots3NoteAudioModel
 from .model import Dots3NoteLanguageModelForCausalLM
 from .vision import DotsMoEVitConfig, DotsMoEVitModel
+
+
+@contextmanager
+def _skip_linear_init():
+    """Skip initialization for VE Linear weights loaded immediately afterward."""
+    original_reset_parameters = nn.Linear.reset_parameters
+
+    def _noop_reset_parameters(_linear: nn.Linear) -> None:
+        return None
+
+    nn.Linear.reset_parameters = _noop_reset_parameters
+    try:
+        yield
+    finally:
+        nn.Linear.reset_parameters = original_reset_parameters
 
 
 @MULTIMODAL_REGISTRY.register_processor(
@@ -113,7 +129,10 @@ class Dots3NoteForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             self.visual: DotsMoEVitModel | None
             if image_enabled:
                 assert vision_config_dict is not None
-                self.visual = DotsMoEVitModel(DotsMoEVitConfig(**vision_config_dict))
+                with _skip_linear_init():
+                    self.visual = DotsMoEVitModel(
+                        DotsMoEVitConfig(**vision_config_dict)
+                    )
             else:
                 self.visual = None
             self.audio_tower: Dots3NoteAudioModel | None
@@ -141,6 +160,16 @@ class Dots3NoteForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             self.language_model.make_empty_intermediate_tensors
         )
 
+        orig_to_new_prefix = dict[str, None]()
+        if self.visual is None:
+            orig_to_new_prefix["visual."] = None
+        if self.audio_tower is None:
+            orig_to_new_prefix["audio_tower."] = None
+        if orig_to_new_prefix:
+            self.hf_to_vllm_mapper = self.hf_to_vllm_mapper | WeightsMapper(
+                orig_to_new_prefix=orig_to_new_prefix
+            )
+
     def _process_image_input(
         self,
         pixel_values: torch.Tensor,
@@ -148,9 +177,10 @@ class Dots3NoteForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
     ) -> tuple[torch.Tensor, ...]:
         if self.visual is None:
             return ()
-        image_embeds = self.visual(pixel_values, image_grid_thw)
         merge_size = self.visual.spatial_merge_size
         sizes = (image_grid_thw.prod(-1) // merge_size**2).tolist()
+        meta = self.visual.prepare_meta(image_grid_thw)
+        image_embeds = self.visual(pixel_values, meta)
         return image_embeds.split(sizes)
 
     def _process_audio_input(
@@ -283,12 +313,7 @@ class Dots3NoteForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        skip_prefixes = []
-        if self.visual is None:
-            skip_prefixes.append("visual.")
-        if self.audio_tower is None:
-            skip_prefixes.append("audio_tower.")
-        return AutoWeightsLoader(self, skip_prefixes=skip_prefixes).load_weights(
+        return AutoWeightsLoader(self).load_weights(
             weights,
             mapper=self.hf_to_vllm_mapper,
         )

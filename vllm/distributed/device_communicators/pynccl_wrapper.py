@@ -51,8 +51,18 @@ class ncclUniqueId(ctypes.Structure):
     _fields_ = [("internal", ctypes.c_byte * 128)]
 
 
-# NCCL 2.30+ ncclCommProperties_t. Only fields through ginType are read;
-# trailing fields keep the layout aligned with NCCL's versioned structure.
+NCCL_UNIQUE_ID_BYTES = ctypes.sizeof(ncclUniqueId)
+
+
+# Mirror of NCCL's versioned ncclCommProperties_t (nccl_device/core.h,
+# v2.31.2-1, 144 bytes). ncclCommQueryProperties fills fields gated by the
+# version the caller declares in props.version, not by props.size, so never
+# declare a version newer than this layout: clamp to
+# NCCL_COMM_PROPERTIES_LAYOUT_VERSION. To use fields added in a newer NCCL,
+# extend the layout and bump the constant.
+NCCL_COMM_PROPERTIES_LAYOUT_VERSION = 23102  # NCCL_VERSION(2, 31, 2)
+
+
 class ncclCommProperties(ctypes.Structure):
     _fields_ = [
         ("size", ctypes.c_size_t),
@@ -68,6 +78,12 @@ class ncclCommProperties(ctypes.Structure):
         ("nLsaTeams", ctypes.c_int),
         ("hostRmaSupport", ctypes.c_bool),
         ("railedGinType", ctypes.c_int),
+        # Filled only when the declared version is >= NCCL_VERSION(2, 31, 0).
+        ("commHash", ctypes.c_uint64),
+        ("ginMinStride", ctypes.c_int),
+        ("ginConnectionType", ctypes.c_int),
+        ("ginSupport", ctypes.c_bool * 64),
+        ("devCommRuntimeVersionSize", ctypes.c_size_t),
     ]
 
 
@@ -316,6 +332,10 @@ class NCCLLibrary:
         # shutdown when peer ranks may already be gone.
         # ncclResult_t  ncclCommAbort(ncclComm_t comm);
         Function("ncclCommAbort", ncclResult_t, [ncclComm_t]),
+        # ncclResult_t ncclCommSuspend(ncclComm_t comm, int flags);
+        Function("ncclCommSuspend", ncclResult_t, [ncclComm_t, ctypes.c_int]),
+        # ncclResult_t ncclCommResume(ncclComm_t comm);
+        Function("ncclCommResume", ncclResult_t, [ncclComm_t]),
         # ncclResult_t ncclGroupStart();
         Function("ncclGroupStart", ncclResult_t, []),
         # ncclResult_t ncclGroupEnd();
@@ -404,9 +424,20 @@ class NCCLLibrary:
                     elif func.name == "ncclCommQueryProperties":
                         # Optional on NCCL versions older than 2.29.
                         continue
+                    elif func.name in ("ncclCommSuspend", "ncclCommResume"):
+                        # RCCL doesn't export these; NCCL >= 2.29.7 does, and
+                        # vLLM's CUDA path already requires that version.
+                        # PyNcclCommunicator checks has_symbol() before
+                        # calling either.
+                        if current_platform.is_rocm():
+                            continue
                     raise
             NCCLLibrary.path_to_dict_mapping[so_file] = _funcs
         self._funcs = NCCLLibrary.path_to_dict_mapping[so_file]
+
+    def has_symbol(self, name: str) -> bool:
+        """Whether the loaded NCCL/RCCL library exports the given symbol."""
+        return name in self._funcs
 
     def ncclGetErrorString(self, result: ncclResult_t) -> str:
         return self._funcs["ncclGetErrorString"](result).decode("utf-8")
@@ -585,6 +616,12 @@ class NCCLLibrary:
 
     def ncclCommAbort(self, comm: ncclComm_t) -> None:
         self.NCCL_CHECK(self._funcs["ncclCommAbort"](comm))
+
+    def ncclCommSuspend(self, comm: ncclComm_t, flags: int) -> None:
+        self.NCCL_CHECK(self._funcs["ncclCommSuspend"](comm, flags))
+
+    def ncclCommResume(self, comm: ncclComm_t) -> None:
+        self.NCCL_CHECK(self._funcs["ncclCommResume"](comm))
 
     def ncclGroupStart(self) -> None:
         self.NCCL_CHECK(self._funcs["ncclGroupStart"]())

@@ -4,6 +4,7 @@
 types / modalities.
 """
 
+import itertools
 from pathlib import PosixPath
 
 from .....conftest import (
@@ -27,9 +28,14 @@ def run_single_image_test(
     vllm_runner: type[VllmRunner],
     image_assets: ImageTestAssets,
 ):
-    assert test_case.size_wrapper is not None
-    inputs = builders.build_single_image_inputs_from_test_info(
-        model_test_info, image_assets, test_case.size_wrapper, tmp_path
+    assert test_case.size_wrappers
+    inputs = list(
+        itertools.chain.from_iterable(
+            builders.build_single_image_inputs_from_test_info(
+                model_test_info, image_assets, size_wrapper, tmp_path
+            )
+            for size_wrapper in test_case.size_wrappers
+        )
     )
 
     core.run_test(
@@ -55,9 +61,14 @@ def run_multi_image_test(
     vllm_runner: type[VllmRunner],
     image_assets: ImageTestAssets,
 ):
-    assert test_case.size_wrapper is not None
-    inputs = builders.build_multi_image_inputs_from_test_info(
-        model_test_info, image_assets, test_case.size_wrapper, tmp_path
+    assert test_case.size_wrappers
+    inputs = list(
+        itertools.chain.from_iterable(
+            builders.build_multi_image_inputs_from_test_info(
+                model_test_info, image_assets, size_wrapper, tmp_path
+            )
+            for size_wrapper in test_case.size_wrappers
+        )
     )
 
     core.run_test(
@@ -82,9 +93,20 @@ def run_embedding_test(
     vllm_runner: type[VllmRunner],
     image_assets: ImageTestAssets,
 ):
-    assert test_case.size_wrapper is not None
-    inputs, vllm_embeddings = builders.build_embedding_inputs_from_test_info(
-        model_test_info, image_assets, test_case.size_wrapper
+    assert test_case.size_wrappers
+    inputs_and_embeddings = [
+        builders.build_embedding_inputs_from_test_info(
+            model_test_info, image_assets, size_wrapper
+        )
+        for size_wrapper in test_case.size_wrappers
+    ]
+    inputs = list(
+        itertools.chain.from_iterable(inputs for inputs, _ in inputs_and_embeddings)
+    )
+    vllm_embeddings = list(
+        itertools.chain.from_iterable(
+            embeddings for _, embeddings in inputs_and_embeddings
+        )
     )
 
     core.run_test(
@@ -110,14 +132,19 @@ def run_video_test(
     vllm_runner: type[VllmRunner],
     video_assets: VideoTestAssets,
 ):
-    assert test_case.size_wrapper is not None
+    assert test_case.size_wrappers
     assert test_case.num_video_frames is not None
-    inputs = builders.build_video_inputs_from_test_info(
-        model_test_info,
-        video_assets,
-        test_case.size_wrapper,
-        test_case.num_video_frames,
-        test_case.needs_video_metadata,
+    inputs = list(
+        itertools.chain.from_iterable(
+            builders.build_video_inputs_from_test_info(
+                model_test_info,
+                video_assets,
+                size_wrapper,
+                test_case.num_video_frames,
+                test_case.needs_video_metadata,
+            )
+            for size_wrapper in test_case.size_wrappers
+        )
     )
 
     core.run_test(

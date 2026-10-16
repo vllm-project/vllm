@@ -6,9 +6,12 @@ set -e
 
 # Default values
 # Keep DEEPGEMM_GIT_REF in sync with cmake/external_projects/deepgemm.cmake
-DEEPGEMM_GIT_REPO="https://github.com/deepseek-ai/DeepGEMM.git"
-# NOTE: This is currently targeting the nv_dev branch tip due to sm120 support
-DEEPGEMM_GIT_REF="8b1392b978f5a03c828dd1711090d7fb50958b8a"
+DEEPGEMM_GIT_REPO="https://github.com/vllm-project/DeepGEMM.git"
+# NOTE: This targets the vLLM fork's dev branch: upstream's 26/09/30 release
+# plus the sm120 and sm90 paged-MQA ports, the SwiGLU alpha/beta and SiTU
+# Mega MoE activations, NVFP4 Mega MoE, and BF16/FP8/NVFP4 swiglustep.
+# Uses the PyTorch 2.11 stable ABI and CPython 3.10 limited API.
+DEEPGEMM_GIT_REF="a7a927731b109fdfec770df7c2a5be5d7e2216b5"
 WHEEL_DIR=""
 
 # Parse command line arguments
@@ -91,6 +94,8 @@ pushd "$INSTALL_DIR/deepgemm"
 
 # Checkout the specific reference
 git checkout "$DEEPGEMM_GIT_REF"
+git submodule sync --recursive
+git submodule update --init --recursive
 
 # Clean previous build artifacts
 # (Based on https://github.com/deepseek-ai/DeepGEMM/blob/main/install.sh)

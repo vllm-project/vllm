@@ -13,14 +13,20 @@ from collections.abc import Callable, Iterable
 from math import lcm
 from typing import TypeGuard
 
+import regex as re
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from einops import rearrange
-from transformers.configuration_utils import PretrainedConfig
+from transformers.configuration_utils import PreTrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
+from vllm.config import (
+    CacheConfig,
+    ModelConfig,
+    VllmConfig,
+    get_current_vllm_config,
+    get_current_vllm_config_or_none,
+)
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
@@ -31,6 +37,7 @@ from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.activation import SiluAndMul, SwigluStepAndMul
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
+    GateLinear,
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -114,23 +121,10 @@ def bailing_v3_kda_attention(
     )
 
 
-def bailing_v3_kda_attention_fake(
-    q_proj_states: torch.Tensor,
-    k_proj_states: torch.Tensor,
-    v_proj_states: torch.Tensor,
-    g1: torch.Tensor,
-    beta: torch.Tensor,
-    core_attn_out: torch.Tensor,
-    layer_name: str,
-) -> None:
-    return
-
-
 direct_register_custom_op(
     op_name="bailing_v3_kda_attention",
     op_func=bailing_v3_kda_attention,
     mutates_args=["core_attn_out"],
-    fake_impl=bailing_v3_kda_attention_fake,
 )
 
 
@@ -163,7 +157,7 @@ def _get_kda_state_shape_for_config(
     return shapes
 
 
-def _build_rope_parameters(config: PretrainedConfig) -> dict | None:
+def _build_rope_parameters(config: PreTrainedConfig) -> dict | None:
     rope_parameters = copy.deepcopy(getattr(config, "rope_parameters", None)) or {}
     if "rope_theta" not in rope_parameters and hasattr(config, "rope_theta"):
         rope_parameters["rope_theta"] = config.rope_theta
@@ -181,6 +175,27 @@ def _build_rope_parameters(config: PretrainedConfig) -> dict | None:
         rope_parameters.update(rope_scaling)
 
     return rope_parameters or None
+
+
+def _build_mla_rotary_embedding(
+    config: PreTrainedConfig,
+    head_size: int,
+) -> nn.Module:
+    rope_parameters = _build_rope_parameters(config)
+    if rope_parameters is not None and "mrope_section" in rope_parameters:
+        rope_type = rope_parameters.get("rope_type", "default")
+        if rope_type != "default":
+            raise ValueError(
+                f"Bailing M-RoPE only supports rope_type='default', got {rope_type!r}"
+            )
+        rope_parameters["rope_type"] = "bailing_mrope"
+
+    return get_rope(
+        head_size=head_size,
+        max_position=getattr(config, "max_position_embeddings", 8192),
+        is_neox_style=False,
+        rope_parameters=rope_parameters,
+    )
 
 
 def _get_layer_swiglu_limit(limit_list: list | None, layer_idx: int) -> float | None:
@@ -214,9 +229,55 @@ def _is_block_fp8_config(
 
 def _configure_ling_fp8_quant_config(
     quant_config: QuantizationConfig | None,
+    config: PreTrainedConfig,
 ) -> None:
-    if _is_block_fp8_config(quant_config):
-        quant_config.ignored_layers_match_mode = "suffix"
+    if not _is_block_fp8_config(quant_config):
+        return
+
+    quant_config.ignored_layers_match_mode = "suffix"
+    hf_quant_config = getattr(config, "quantization_config", None)
+    if hf_quant_config is None:
+        vllm_config = get_current_vllm_config_or_none()
+        model_config = getattr(vllm_config, "model_config", None)
+        hf_quant_config = getattr(
+            getattr(model_config, "hf_config", None), "quantization_config", None
+        )
+    if not isinstance(hf_quant_config, dict):
+        return
+
+    quant_config.is_scale_e8m0 = (  # type: ignore[attr-defined]
+        hf_quant_config.get("scale_fmt") == "ue8m0"
+    )
+
+    routed_quant_method = hf_quant_config.get("routed_experts_quant_method")
+    if routed_quant_method is None:
+        return
+    if routed_quant_method != "mxfp4":
+        raise ValueError(
+            f"Unsupported routed experts quantization: {routed_quant_method!r}"
+        )
+
+    quant_config.store_dtype = "mxfp4"
+
+
+_LING_MXFP4_WEIGHTS_MAPPER = WeightsMapper(
+    orig_to_new_regex={
+        re.compile(
+            r"(\.mlp\.experts\.\d+\."
+            r"(?:gate_proj|up_proj|down_proj)\.weight_scale)_inv$"
+        ): r"\1"
+    }
+)
+
+
+def _maybe_remap_ling_mxfp4_weight_names(
+    weights: Iterable[tuple[str, torch.Tensor]],
+    quant_config: QuantizationConfig | None,
+) -> Iterable[tuple[str, torch.Tensor]]:
+    """Map Ling's MXFP4 expert scales to Mxfp4MoEMethod parameters."""
+    if isinstance(quant_config, Fp8Config) and quant_config.store_dtype == "mxfp4":
+        return _LING_MXFP4_WEIGHTS_MAPPER.apply(weights)
+    return weights
 
 
 def _is_fp8_module_excluded(
@@ -323,7 +384,7 @@ def _pad_block_fp8_mlp_checkpoint_tensor(
 
 def _maybe_pad_block_fp8_shared_expert_checkpoint_tensor(
     quant_config: QuantizationConfig | None,
-    config: PretrainedConfig,
+    config: PreTrainedConfig,
     name: str,
     loaded_weight: torch.Tensor,
 ) -> torch.Tensor:
@@ -361,7 +422,7 @@ class BailingMoeV3MLP(nn.Module):
     def __init__(
         self,
         intermediate_size: int,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         reduce_results: bool = True,
         prefix: str = "",
@@ -397,7 +458,7 @@ class BailingMoeV3MLP(nn.Module):
 class BailingMoeV3MLAAttention(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         layer_id: int = 0,
         prefix: str = "attention",
@@ -477,6 +538,26 @@ class BailingMoeV3MLAAttention(nn.Module):
             g_out = self.num_heads * self.v_head_dim
         else:
             g_out = 0
+        block_size = (
+            quant_config.weight_block_size
+            if _is_block_fp8_config(quant_config)
+            else None
+        )
+        self.replicate_g_proj = (
+            self.gated_attention_proj_granularity_type == "head_wise"
+            and tp_size > 1
+            and block_size is not None
+            and g_out <= block_size[0]
+            and not _is_fp8_module_excluded(quant_config, f"{prefix}.g_proj")
+            and self.num_local_heads % block_size[0] != 0
+        )
+        # A gate spanning at most one FP8 row block cannot split its scales
+        # across TP ranks. Replicate it and select each rank's heads instead.
+        self.g_proj_start = (
+            get_tensor_model_parallel_rank() * self.num_local_heads
+            if self.replicate_g_proj
+            else 0
+        )
         self.g_proj = (
             ColumnParallelLinear(
                 self.hidden_size,
@@ -484,6 +565,7 @@ class BailingMoeV3MLAAttention(nn.Module):
                 bias=False,
                 quant_config=quant_config,
                 prefix=f"{prefix}.g_proj",
+                disable_tp=self.replicate_g_proj,
             )
             if g_out > 0
             else None
@@ -496,11 +578,9 @@ class BailingMoeV3MLAAttention(nn.Module):
             prefix=f"{prefix}.dense",
         )
 
-        self.rotary_emb = get_rope(
+        self.rotary_emb = _build_mla_rotary_embedding(
+            config,
             head_size=self.qk_rope_head_dim,
-            max_position=getattr(config, "max_position_embeddings", 8192),
-            is_neox_style=False,
-            rope_parameters=_build_rope_parameters(config),
         )
         mla_modules = MLAModules(
             kv_a_layernorm=self.kv_a_layernorm,
@@ -534,9 +614,12 @@ class BailingMoeV3MLAAttention(nn.Module):
     def forward(self, hidden_states: torch.Tensor, positions: torch.Tensor):
         attn_out = self.mla_attn(positions, hidden_states)
         if self.g_proj is not None:
-            gate = torch.sigmoid(self.g_proj(hidden_states)[0].float()).to(
-                hidden_states.dtype
-            )
+            gate = self.g_proj(hidden_states)[0]
+            if self.replicate_g_proj:
+                gate = gate[
+                    ..., self.g_proj_start : self.g_proj_start + self.num_local_heads
+                ]
+            gate = torch.sigmoid(gate.float()).to(hidden_states.dtype)
             if self.gated_attention_proj_granularity_type == "head_wise":
                 attn_out = attn_out.view(-1, self.num_local_heads, self.v_head_dim)
                 attn_out = attn_out * gate.unsqueeze(-1)
@@ -578,7 +661,7 @@ class BailingMoeV3KimiDeltaAttention(PluggableLayer, MambaBase):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         layer_id: int = 0,
         prefix: str = "attention",
@@ -772,7 +855,10 @@ class BailingMoeV3KimiDeltaAttention(PluggableLayer, MambaBase):
             return
 
         assert isinstance(attn_metadata_map, dict)
-        attn_metadata = attn_metadata_map[self.prefix]
+        attn_metadata = attn_metadata_map.get(self.prefix)
+        if attn_metadata is None:
+            # Profile/warmup dummy runs skip mamba-family metadata.
+            return
         assert isinstance(attn_metadata, GDNAttentionMetadata)
         has_initial_state = attn_metadata.has_initial_state
         spec_query_start_loc = attn_metadata.spec_query_start_loc
@@ -1068,32 +1154,10 @@ class BailingMoeV3KimiDeltaAttention(PluggableLayer, MambaBase):
             core_attn_out[0, :num_actual_tokens] = out[0, :num_actual_tokens]
 
 
-class BailingMoeV3Gate(nn.Module):
-    def __init__(
-        self,
-        config: PretrainedConfig,
-        params_dtype: torch.dtype | None = None,
-    ) -> None:
-        super().__init__()
-        if params_dtype is None:
-            params_dtype = torch.float32
-        self.weight = nn.Parameter(
-            torch.empty((config.num_experts, config.hidden_size), dtype=params_dtype)
-        )
-        self.expert_bias = nn.Parameter(
-            torch.empty((config.num_experts,), dtype=torch.float32)
-        )
-
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        return F.linear(hidden_states.to(self.weight.dtype), self.weight).to(
-            hidden_states.dtype
-        )
-
-
 class BailingMoeV3MoE(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         layer_id: int = 0,
         prefix: str = "",
@@ -1103,7 +1167,16 @@ class BailingMoeV3MoE(nn.Module):
         self.top_k = config.num_experts_per_tok
         self.hidden_size = config.hidden_size
         self.routed_scaling_factor = getattr(config, "routed_scaling_factor", 1.0)
-        self.gate = BailingMoeV3Gate(config)
+        self.gate = GateLinear(
+            config.hidden_size,
+            config.num_experts,
+            out_dtype=torch.float32,
+            params_dtype=torch.float32,
+            prefix=f"{prefix}.gate",
+        )
+        self.gate.expert_bias = nn.Parameter(
+            torch.empty((config.num_experts,), dtype=torch.float32)
+        )
         self.expert_swiglu_limit = _get_layer_swiglu_limit(
             getattr(config, "expert_swiglu_limit_list", None), layer_id
         )
@@ -1146,7 +1219,7 @@ class BailingMoeV3MoE(nn.Module):
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_size = hidden_states.shape
         hidden_states = hidden_states.contiguous().view(-1, hidden_size)
-        router_logits = self.gate(hidden_states.to(torch.float32))
+        router_logits, _ = self.gate(hidden_states)
         hidden_states = self.experts(
             hidden_states=hidden_states, router_logits=router_logits
         )
@@ -1156,7 +1229,7 @@ class BailingMoeV3MoE(nn.Module):
 class BailingMoeV3DecoderLayer(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         layer_id: int = 0,
         prefix: str = "layer",
@@ -1351,7 +1424,7 @@ class BailingMoeV3ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsPP):
         super().__init__()
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
-        _configure_ling_fp8_quant_config(quant_config)
+        _configure_ling_fp8_quant_config(quant_config, config)
         self.config = config
         self.quant_config = quant_config
         self.model = BailingMoeV3Model(
@@ -1421,6 +1494,7 @@ class BailingMoeV3ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsPP):
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         weights = self.hf_to_vllm_mapper.apply(weights)
+        weights = _maybe_remap_ling_mxfp4_weight_names(weights, self.quant_config)
         params_dict = dict(self.named_parameters(remove_duplicate=False))
         loaded_params: set[str] = set()
         stacked_mappings = [

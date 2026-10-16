@@ -57,7 +57,6 @@ def test_selection_prefers_rdna3(dtype):
         act_type=dtype,
         group_size=128,
         zero_points=False,
-        has_g_idx=False,
     )
     assert choose_mp_linear_kernel(config).__name__ == "RDNA3W4A16LinearKernel"
 
@@ -83,7 +82,6 @@ def test_can_implement(weight_type, group_size, N, full_k, expected_ok):
         act_type=torch.float16,
         group_size=group_size,
         zero_points=False,
-        has_g_idx=False,
     )
     ok, reason = RDNA3W4A16LinearKernel.can_implement(config)
     assert ok is expected_ok, reason

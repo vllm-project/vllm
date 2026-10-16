@@ -29,7 +29,7 @@ if [[ -n "${BUILDKITE:-}" || -n "${BUILDKITE_COMMIT:-}" ]]; then
       image_tag="${image_name}:nightly-${tag_commit}"
     elif [[ "${variant}" == cu* ]]; then
       cuda_variant="${variant%%-*}"
-      remaining_variant="${variant#${cuda_variant}}"
+      remaining_variant="${variant#"${cuda_variant}"}"
       image_tag="${image_name}:${cuda_variant}-nightly-${tag_commit}${remaining_variant}"
     else
       image_tag="${image_name}:nightly-${tag_commit}${variant_suffix}"

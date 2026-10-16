@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Callable
 
 import torch
 
 import vllm._custom_ops as ops
 from tests.kernels.quant_utils import per_block_cast_to_int8
 from tests.kernels.quantization.nvfp4_utils import FLOAT4_E2M1_MAX, FLOAT8_E4M3_MAX
-from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.all2all_utils import (
     maybe_make_prepare_finalize,
@@ -28,13 +28,22 @@ from vllm.model_executor.layers.fused_moe.fused_moe import (
     fused_experts,
 )
 from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEKernel
+from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
+from vllm.model_executor.layers.fused_moe.moe_permute_unpermute import moe_unpermute
 from vllm.model_executor.layers.fused_moe.prepare_finalize.batched import (
     BatchedPrepareAndFinalize,
 )
 from vllm.model_executor.layers.fused_moe.router.fused_topk_router import fused_topk
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
+from vllm.model_executor.layers.quantization.utils.fp8_utils import is_fp8
+from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
+    ref_nvfp4_quant,
+)
+from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import per_block_cast_to_fp8
 from vllm.utils.math_utils import round_up
+
+DEVICE = current_platform.device_type
 
 
 def shuffle_weight(w: torch.Tensor) -> torch.Tensor:
@@ -57,8 +66,7 @@ def make_dummy_moe_config(
     max_num_tokens: int = 512,
     activation: MoEActivation = MoEActivation.SILU,
 ) -> FusedMoEConfig:
-    """
-    This is a dummy config for the mk constructor interface
+    """This is a dummy config for the mk constructor interface
     as most kernels like DeepGEMM, CUTLASSFp4, Triton, MARLIN
     do not actually use this config.
 
@@ -76,7 +84,7 @@ def make_dummy_moe_config(
         moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
         activation=activation,
         in_dtype=in_dtype,
-        device="cuda",
+        device=DEVICE,
         routing_method=RoutingMethodType.TopK,
         max_num_tokens=max_num_tokens,
     )
@@ -122,6 +130,7 @@ def batched_moe(
     quant_dtype: torch.dtype | None = None,
     per_act_token_quant: bool = False,
     block_shape: list[int] | None = None,
+    moe_config: FusedMoEConfig | None = None,
 ) -> torch.Tensor:
     max_num_tokens = round_up(a.shape[0], 64)
 
@@ -135,7 +144,8 @@ def batched_moe(
         a2_scale=a2_scale,
     )
 
-    moe_config = make_dummy_moe_config()
+    if moe_config is None:
+        moe_config = make_dummy_moe_config()
 
     fused_experts = FusedMoEKernel(
         BatchedPrepareAndFinalize(
@@ -234,7 +244,7 @@ def make_quantized_test_activations(
     block_shape: list[int] | None = None,
     per_act_token_quant: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
-    a = torch.randn((E, m, k), device="cuda", dtype=in_dtype) / 10
+    a = torch.randn((E, m, k), device=DEVICE, dtype=in_dtype) / 10
     a_q = a
     a_scale = None
 
@@ -263,11 +273,10 @@ def moe_quantize_weights_2d(
     per_token_quant: bool,
     block_shape: list[int] | None,
 ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
-    assert (
-        quant_dtype == torch.float8_e4m3fn
-        or quant_dtype == torch.int8
-        or quant_dtype == "nvfp4"
-    ), "only fp8/int8/nvfp4 supported"
+    is_fp8_dtype = is_fp8(quant_dtype)
+    assert is_fp8_dtype or quant_dtype == torch.int8 or quant_dtype == "nvfp4", (
+        "only fp8/int8/nvfp4 supported"
+    )
 
     w_gs = None
 
@@ -275,7 +284,7 @@ def moe_quantize_weights_2d(
         assert not per_token_quant
         if quant_dtype == torch.int8:
             w, w_s = per_block_cast_to_int8(w, block_shape)
-        elif quant_dtype == torch.float8_e4m3fn:
+        elif is_fp8_dtype:
             w, w_s = per_block_cast_to_fp8(w, block_shape)
         elif quant_dtype == "nvfp4":
             raise RuntimeError("blocked quantization not supported for nvfp4")
@@ -286,7 +295,7 @@ def moe_quantize_weights_2d(
             w, w_s = ops.scaled_int8_quant(
                 w, w_s, use_per_token_if_dynamic=per_token_quant
             )
-        elif quant_dtype == torch.float8_e4m3fn:
+        elif is_fp8_dtype:
             w, w_s = ops.scaled_fp8_quant(
                 w, w_s, use_per_token_if_dynamic=per_token_quant
             )
@@ -294,11 +303,32 @@ def moe_quantize_weights_2d(
             assert not per_token_quant
             w_amax = torch.abs(w).max().to(torch.float32)
             w_gs = FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / w_amax
-            w, w_s = ops.scaled_fp4_quant(w, w_gs)
+            if current_platform.is_rocm():
+                w, w_s = _scaled_fp4_quant_emulated(w, w_gs)
+            else:
+                w, w_s = ops.scaled_fp4_quant(w, w_gs)
         else:
             raise RuntimeError(f"Unsupported quant type {quant_dtype}")
 
     return w, w_s, w_gs
+
+
+def _pack_e2m1_fp4(fp4_values: torch.Tensor) -> torch.Tensor:
+    assert fp4_values.shape[-1] % 2 == 0
+
+    abs_values = fp4_values.abs()
+    codes = torch.empty_like(abs_values, dtype=torch.uint8)
+    for code, value in enumerate((0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)):
+        codes[abs_values == value] = code
+    codes = codes | ((fp4_values < 0).to(torch.uint8) << 3)
+    return codes[..., 0::2] | (codes[..., 1::2] << 4)
+
+
+def _scaled_fp4_quant_emulated(
+    w: torch.Tensor, w_gs: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    fp4_values, w_s = ref_nvfp4_quant(w, w_gs, block_size=16)
+    return _pack_e2m1_fp4(fp4_values), w_s.to(torch.float8_e4m3fn)
 
 
 def moe_quantize_weights(
@@ -344,7 +374,7 @@ def make_test_weight(
     block_shape: list[int] | None = None,
     per_out_ch_quant: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
-    w_16 = torch.randn((e, rows, cols), device="cuda", dtype=in_dtype) / 15
+    w_16 = torch.randn((e, rows, cols), device=DEVICE, dtype=in_dtype) / 15
 
     if quant_dtype is not None:
         w, w_s, w_gs = moe_quantize_weights(
@@ -424,8 +454,8 @@ def make_test_quant_config(
     a1_gscale: torch.Tensor | None = None
     a2_gscale: torch.Tensor | None = None
     if quant_dtype == "nvfp4":
-        a1_gscale = torch.ones((e,), device="cuda", dtype=torch.float32)
-        a2_gscale = torch.ones((e,), device="cuda", dtype=torch.float32)
+        a1_gscale = torch.ones((e,), device=DEVICE, dtype=torch.float32)
+        a2_gscale = torch.ones((e,), device=DEVICE, dtype=torch.float32)
         a1_scale = a1_gscale
         a2_scale = a2_gscale
     else:
@@ -521,107 +551,6 @@ class TestMLP(torch.nn.Module):
         return x
 
 
-def make_naive_shared_experts(
-    N: int,
-    K: int,
-    in_dtype: torch.dtype = torch.bfloat16,
-) -> torch.nn.Module:
-    w1 = torch.randn((K, N * 2), device="cuda", dtype=in_dtype) / 15
-    w2 = torch.randn((N, K), device="cuda", dtype=in_dtype) / 15
-    return TestMLP(w1, w2, out_dtype=in_dtype)
-
-
-class RealMLP(torch.nn.Module):
-    def __init__(
-        self,
-        hidden_size: int,
-        intermediate_size: int,
-        w1: torch.Tensor,
-        w2: torch.Tensor,
-        hidden_act: str = "silu",
-        quant_config=None,
-        reduce_results: bool = True,
-        prefix: str = "",
-        w1_s: torch.Tensor | None = None,
-        w2_s: torch.Tensor | None = None,
-    ) -> None:
-        from vllm.model_executor.layers.linear import (
-            MergedColumnParallelLinear,
-            RowParallelLinear,
-        )
-
-        super().__init__()
-        self.gate_up_proj = MergedColumnParallelLinear(
-            hidden_size,
-            [intermediate_size] * 2,
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.gate_up_proj",
-        )
-        self.gate_up_proj.register_parameter(
-            "weight", torch.nn.Parameter(w1, requires_grad=False)
-        )
-        self.gate_up_proj.register_parameter(
-            "weight_scale", torch.nn.Parameter(w1_s, requires_grad=False)
-        )
-        self.gate_up_proj.register_parameter(
-            "input_scale", None
-        )  # torch.nn.Parameter(None, requires_grad=False))
-        self.down_proj = RowParallelLinear(
-            intermediate_size,
-            hidden_size,
-            bias=False,
-            quant_config=quant_config,
-            reduce_results=reduce_results,
-            prefix=f"{prefix}.down_proj",
-        )
-        self.down_proj.register_parameter(
-            "weight", torch.nn.Parameter(w2, requires_grad=False)
-        )
-        self.down_proj.register_parameter(
-            "weight_scale", torch.nn.Parameter(w2_s, requires_grad=False)
-        )
-        self.down_proj.register_parameter(
-            "input_scale", None
-        )  # torch.nn.Parameter(None, requires_grad=False))
-        if hidden_act != "silu":
-            raise ValueError(
-                f"Unsupported activation: {hidden_act}. Only silu is supported for now."
-            )
-        self.act_fn = SiluAndMul()
-
-    def forward(self, x):
-        gate_up, _ = self.gate_up_proj(x)
-        x = self.act_fn(gate_up)
-        x, _ = self.down_proj(x)
-        return x
-
-
-def make_shared_experts_with_weights(
-    N: int,
-    K: int,
-    in_dtype: torch.dtype,
-    w1: torch.Tensor,
-    w2: torch.Tensor,
-    w1_s: torch.Tensor | None = None,
-    w2_s: torch.Tensor | None = None,
-    quant_dtype: torch.dtype | str | None = None,
-) -> torch.nn.Module:
-    old_dtype = torch.get_default_dtype()
-    try:
-        torch.set_default_dtype(in_dtype)
-        if quant_dtype == torch.float8_e4m3fn:
-            from vllm.model_executor.layers.quantization.fp8 import Fp8Config
-
-            quant_config = Fp8Config(True)
-        else:
-            quant_config = None
-
-        return RealMLP(K, N, w1, w2, "silu", quant_config, w1_s=w1_s, w2_s=w2_s)
-    finally:
-        torch.set_default_dtype(old_dtype)
-
-
 def modular_triton_fused_moe(
     moe_config: FusedMoEConfig,
     quant_config: FusedMoEQuantConfig,
@@ -634,25 +563,6 @@ def modular_triton_fused_moe(
             use_monolithic=False,
         ),
         TritonExperts(moe_config, quant_config),
-    )
-
-
-def make_shared_experts(
-    N: int,
-    K: int,
-    in_dtype: torch.dtype = torch.bfloat16,
-    quant_dtype: torch.dtype | str | None = None,
-) -> torch.nn.Module:
-    (_, w1, w1_s, _), (_, w2, w2_s, _) = make_test_weights(
-        1,
-        N,
-        K,
-        in_dtype=in_dtype,
-        quant_dtype=quant_dtype,
-    )
-
-    return make_shared_experts_with_weights(
-        N, K, in_dtype, w1, w2, w1_s=w1_s, w2_s=w2_s, quant_dtype=quant_dtype
     )
 
 
@@ -677,3 +587,72 @@ def check_accuracy(a, b, atol, rtol, percent):
             f"Mismatch percentage is {mismatch_percent:.4f} for rtol {rtol} "
             f"(threshold: {1 - percent:.4f})"
         )
+
+
+def check_deferred_moe_finalize(
+    moe_config: FusedMoEConfig,
+    run: Callable[[], torch.Tensor | UnfinalizedMoEOutput],
+    router_weights: torch.Tensor | None = None,
+    chunked: bool = False,
+) -> None:
+    """Check a kernel that defers its finalize against the finalize it skips.
+
+    ``run`` calls the kernel on fixed inputs, first as built and then with
+    ``moe_config`` asking to defer, which ``should_defer_moe_finalize`` must
+    report truthfully. A deferred output reduced by ``moe_unpermute``, the
+    TRT-LLM finalize kernel, must give the kernel's own finalized output bit for
+    bit, and modular experts hand the router's weights back as-is. A call the
+    experts split across kernel launches finalizes instead.
+    """
+    # The deferred output views the router's buffer, so compare with a copy.
+    expected_weights = None if router_weights is None else router_weights.clone()
+    finalized = run()
+    assert isinstance(finalized, torch.Tensor)
+    moe_config.defer_moe_finalize()
+    output = run()
+    assert moe_config.should_defer_moe_finalize(finalized.shape[0]) != chunked
+    if chunked:
+        torch.testing.assert_close(output, finalized, atol=0, rtol=0)
+        return
+
+    assert isinstance(output, UnfinalizedMoEOutput)
+    if expected_weights is not None:
+        torch.testing.assert_close(
+            output.expert_weights, expected_weights, atol=0, rtol=0
+        )
+    reference = torch.empty_like(finalized)
+    moe_unpermute(
+        reference,
+        output.gemm2_permuted,
+        output.expert_weights.float(),
+        output.expanded_idx_to_permuted_idx,
+        # The kernel reads its valid-row count through this pointer either way.
+        expert_first_token_offset=output.gemm2_permuted.new_full(
+            (1,), output.gemm2_permuted.shape[0], dtype=torch.int64
+        ),
+    )
+    torch.testing.assert_close(reference, finalized, atol=0, rtol=0)
+
+
+def mxfp4_w_layouts(mx_axis: int, num_warps: int = 8):
+    """Weight/scale layouts for mxfp4 MoE, as (layout, opts) pairs.
+
+    triton_kernels 3.8 returns layout instances; earlier versions return a
+    (layout, opts) tuple.
+    """
+    from triton_kernels.tensor_details import layout
+
+    from vllm.utils.import_utils import get_triton_kernels_version
+
+    if get_triton_kernels_version() == "3.8":
+        w = layout.make_default_matmul_mxfp4_w_layout(mx_axis=mx_axis)
+        s = layout.make_default_matmul_mxfp4_w_scale_layout(
+            mx_axis=mx_axis, num_warps=num_warps
+        )
+        return w, {}, s, {}
+
+    w, w_opts = layout.make_default_matmul_mxfp4_w_layout(mx_axis=mx_axis)
+    s, s_opts = layout.make_default_matmul_mxfp4_w_scale_layout(
+        mx_axis=mx_axis, num_warps=num_warps
+    )
+    return w, w_opts, s, s_opts
