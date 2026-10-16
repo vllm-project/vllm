@@ -324,7 +324,8 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "dsv3_fused_a_gemm(Tensor! output, Tensor mat_a, Tensor mat_b, "
       "bool enable_pdl=False) -> ()");
 
-  // BF16/FP32 x FP32 -> FP32 router GEMM for H=3072, E=256, M<=32 (SM90+).
+  // BF16/FP32 x FP32 -> FP32 router GEMM, M<=32 (SM90+); see
+  // fp32_router_gemm.cu for the instantiated (E, H) pairs.
   // conditionally compiled so impl registration is in source file
   ops.def("fp32_router_gemm(Tensor! output, Tensor mat_a, Tensor mat_b) -> ()");
 #endif
@@ -516,6 +517,17 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "Tensor!? q_fp8_out=None, float q_fp8_scale=1.0, "
       "Tensor? kv_k_scale=None, Tensor? kv_v_scale=None) -> ()");
 
+  // Horizontally-fused Muse-Spark QK-norm + GPT-J RoPE + KV-insert.
+  // cos_sin_cache=None selects a NoPE layer; kv_cache=None skips the insert.
+  ops.def(
+      "fused_muse_spark_qknorm_rope_kv_insert("
+      "Tensor! qkv, Tensor positions, int num_heads, int num_kv_heads, "
+      "int head_dim, float eps, Tensor? cos_sin_cache, int rotary_dim, "
+      "Tensor? slot_mapping, Tensor!? kv_cache, int block_size, "
+      "str kv_cache_dtype, Tensor? k_scale=None, Tensor? v_scale=None, "
+      "Tensor!? q_fp8_out=None, Tensor? q_scale=None) "
+      "-> ()");
+
 #ifdef VLLM_ENABLE_FUSED_KDA_DECODE
   ops.def(
       "fused_kda_decode("
@@ -597,6 +609,12 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "persistent_masked_m_silu_mul_quant(Tensor input, Tensor counts, Tensor! "
       "y_q, Tensor! y_s, bool use_ue8m0) -> ()");
   ops.def("weak_ref_tensor(Tensor input) -> Tensor");
+
+  // MuseSpark1x fused logits soft-cap:
+  //   out = soft_cap_temp * tanh(input * multiplier / soft_cap_temp)
+  ops.def(
+      "muse_spark_mul_tanh_soft_cap(Tensor! out, Tensor input, "
+      "float multiplier, float soft_cap_temp) -> ()");
 
   // Activation function used in SwiGLU.
   ops.def("silu_and_mul(Tensor! result, Tensor input) -> ()");
@@ -831,6 +849,8 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
 #endif
   ops.impl("fused_minimax_m3_qknorm_rope_kv_insert",
            TORCH_BOX(&fused_minimax_m3_qknorm_rope_kv_insert));
+  ops.impl("fused_muse_spark_qknorm_rope_kv_insert",
+           TORCH_BOX(&fused_muse_spark_qknorm_rope_kv_insert));
 #ifdef VLLM_ENABLE_FUSED_KDA_DECODE
   ops.impl("fused_kda_decode", TORCH_BOX(&fused_kda_decode));
 #endif
@@ -864,6 +884,8 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
            TORCH_BOX(&persistent_masked_m_silu_mul_quant));
   ops.impl("weak_ref_tensor", TORCH_BOX(&weak_ref_tensor));
   ops.impl("silu_and_mul_quant", TORCH_BOX(&silu_and_mul_quant));
+  ops.impl("muse_spark_mul_tanh_soft_cap",
+           TORCH_BOX(&muse_spark_mul_tanh_soft_cap));
   ops.impl("silu_and_mul", TORCH_BOX(&silu_and_mul));
   ops.impl("mul_and_silu", TORCH_BOX(&mul_and_silu));
   ops.impl("gelu_and_mul", TORCH_BOX(&gelu_and_mul));
