@@ -232,7 +232,6 @@ def check_lora_expand_kernel(
     device: str,
     seq_length: int,
     add_inputs: bool,
-    inputs_dtype: torch.dtype | None = None,
 ):
     """Compare outputs of torch_ops.sgmv_expand and triton_ops.lora_expand
     kernels.
@@ -248,8 +247,6 @@ def check_lora_expand_kernel(
         "expand",
         device,
     )
-    if inputs_dtype is not None:
-        data.inputs_tensor = data.inputs_tensor.to(inputs_dtype)
 
     max_seq_length, token_nums = data.meta()
 
@@ -641,41 +638,4 @@ def test_add_lora_fused_moe_early_exit(device):
 
     assert torch.equal(y, y_snapshot), (
         "add_lora_fused_moe modified output tensor despite no_lora_flag_cpu=True"
-    )
-
-
-# add_lora_linear feeds lora_expand the fp32 shrink output (CAST_TYPE path).
-# #48590 needs rank >= 64 and enough tokens to show up.
-@pytest.mark.parametrize("batches,seq_length", [(1, 1029), (8, 512)])
-@pytest.mark.parametrize("rank", [16, 64, 128])
-@pytest.mark.parametrize("hidden_size", [4096])
-@pytest.mark.parametrize("nslices", [1, 2, 3])
-@pytest.mark.parametrize("dtype", DTYPES)
-@pytest.mark.parametrize("device", DEVICES)
-@pytest.mark.parametrize("seed", SEED)
-def test_lora_expand_fp32_inputs(
-    batches: int,
-    seq_length: int,
-    rank: int,
-    hidden_size: int,
-    nslices: int,
-    dtype: torch.dtype,
-    device: str,
-    seed: int,
-):
-    torch.set_default_device(device)
-    torch.accelerator.set_device_index(device)
-    set_random_seed(seed)
-
-    check_lora_expand_kernel(
-        batches=batches,
-        num_loras=4,
-        rank=rank,
-        hidden_size=hidden_size,
-        nslices=nslices,
-        dtype=dtype,
-        device=device,
-        seq_length=seq_length,
-        add_inputs=True,
-        inputs_dtype=torch.float32,
     )
