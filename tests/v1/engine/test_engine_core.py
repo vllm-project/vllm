@@ -6,7 +6,7 @@ import time
 import uuid
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
-from unittest.mock import MagicMock, PropertyMock, patch
+from unittest.mock import MagicMock, PropertyMock, call, patch
 
 import pytest
 from transformers import AutoTokenizer
@@ -26,7 +26,15 @@ from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.core.sched.interface import PauseState
 from vllm.v1.engine import EngineCoreRequest
-from vllm.v1.engine.core import DPEngineCoreProc, EngineCore, EngineCoreProc
+from vllm.v1.engine.core import (
+    EXECUTE_MODEL_STAGE,
+    EXECUTE_MODEL_WAIT_STAGE,
+    SAMPLE_TOKENS_STAGE,
+    SAMPLE_TOKENS_WAIT_STAGE,
+    DPEngineCoreProc,
+    EngineCore,
+    EngineCoreProc,
+)
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.executor.uniproc_executor import UniProcExecutor
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -424,8 +432,31 @@ def test_async_step_skips_sampling_for_mm_encoder_only(encoder_only):
     core.scheduler.update_from_output.assert_called_once_with(scheduled, output)
     if encoder_only:
         core.model_executor.sample_tokens.assert_not_called()
+        expected_stages = [EXECUTE_MODEL_STAGE]
+        expected_future_stage = EXECUTE_MODEL_WAIT_STAGE
     else:
         core.model_executor.sample_tokens.assert_called_once()
+        expected_stages = [EXECUTE_MODEL_STAGE, SAMPLE_TOKENS_STAGE]
+        expected_future_stage = SAMPLE_TOKENS_WAIT_STAGE
+
+    timeout_snapshot = core.execution_timeout_diagnostics.make_snapshot.return_value
+    assert core.mock_calls.index(
+        call.execution_timeout_diagnostics.monitor(
+            EXECUTE_MODEL_STAGE, timeout_snapshot
+        )
+    ) < core.mock_calls.index(
+        call.model_executor.execute_model(scheduled, non_block=True)
+    )
+    assert [
+        call.args for call in core.execution_timeout_diagnostics.monitor.call_args_list
+    ] == [(stage, timeout_snapshot) for stage in expected_stages]
+    core.execution_timeout_diagnostics.monitor_future.assert_called_once_with(
+        core.model_executor.sample_tokens.return_value
+        if not encoder_only
+        else core.model_executor.execute_model.return_value,
+        expected_future_stage,
+        timeout_snapshot,
+    )
 
 
 @multi_gpu_test(num_gpus=2)
