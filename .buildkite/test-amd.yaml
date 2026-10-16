@@ -4704,15 +4704,31 @@ steps:
       kernels/test_fused_inv_rope_fp8_quant.py
       kernels/test_fused_minimax_m3_qknorm_rope_kv_insert.py
       kernels/test_fused_quant_activation.py
-      kernels/test_gate_linear_rocm_dispatch.py
       kernels/test_gemm_rs_ar.py
       kernels/test_kpool_decode_update_batched.py
       kernels/test_minimax_m3_amd_ops.py
       kernels/test_minimax_m3_sparse_attn_fp8_scale.py
       kernels/test_onednn.py
       kernels/test_relu2_fp8_quant.py
-      kernels/test_rocm_fp32_router_gemm.py
       --deselect=tests/kernels/test_bf16_skinny_gemm.py::test_every_dsv3_routed_shape_is_instantiated
+
+- label: ":amd: (MI355) Gate Linear Router Kernels"
+  timeout_in_minutes: 20
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_1
+  optional: true
+  working_dir: "/vllm-workspace/"
+  source_file_dependencies:
+  - vllm/model_executor/layers/fused_moe/router/gate_linear.py
+  - vllm/model_executor/layers/fused_moe/router/rocm_fp32_router_gemm.py
+  - vllm/model_executor/layers/fused_moe/router/bf16x3_router_gemm_rocm.py
+  - vllm/platforms/rocm.py
+  - tests/kernels/test_rocm_fp32_router_gemm.py
+  - tests/kernels/test_gate_linear_rocm_dispatch.py
+  - tests/kernels/test_bf16x3_router_gemm_rocm.py
+  commands:
+  - pytest -v -s tests/kernels/test_rocm_fp32_router_gemm.py tests/kernels/test_gate_linear_rocm_dispatch.py tests/kernels/test_bf16x3_router_gemm_rocm.py
 
 - label: ":amd: (MI355 DPX) Attention DiffKV Kernels"
   timeout_in_minutes: 35
