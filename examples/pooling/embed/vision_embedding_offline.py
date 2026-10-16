@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # ruff: noqa: E501
-"""
-This example shows how to use vLLM for running offline inference with
+"""This example shows how to use vLLM for running offline inference with
 the correct prompt format on vision language models for multimodal embedding.
 
 For most models, the prompt format should follow corresponding examples
@@ -224,7 +223,7 @@ def run_vlm2vec_qwen2vl(seed: int):
     from peft import PeftConfig, PeftModel
     from transformers import AutoModelForImageTextToText, AutoProcessor
 
-    from vllm.entrypoints.chat_utils import load_chat_template
+    from vllm.renderers.chat_utils import load_chat_template
 
     model_id = "TIGER-Lab/VLM2Vec-Qwen2VL-2B"
 

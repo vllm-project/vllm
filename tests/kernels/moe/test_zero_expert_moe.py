@@ -83,8 +83,7 @@ def test_zero_expert_moe_router_is_zero_expert_router(zero_expert_moe, num_token
 
 @pytest.mark.parametrize("num_tokens", [1, 32])
 def test_zero_expert_moe_forward(zero_expert_moe, num_tokens):
-    """
-    Run a forward pass through FusedMoEFactory with zero experts
+    """Run a forward pass through FusedMoEFactory with zero experts
     and verify output shape.
     """
     layer, vllm_config = zero_expert_moe

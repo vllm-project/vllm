@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Combined Top-K and Top-P Triton kernels.
+"""Combined Top-K and Top-P Triton kernels.
 
 Based on the paper "Qrita: High-performance Top-k and Top-p Algorithm for GPUs
 using Pivot-based Truncation and Selection" By Park et al.
@@ -104,7 +103,7 @@ def _update_min_larger_stats(data, above_mask, min_larger, num_min_larger, senti
     return min_larger, num_min_larger
 
 
-@triton.jit
+@triton.jit(do_not_specialize_on_alignment=["BATCH_SIZE"])
 def _topk_topp_kernel(
     LOGITS,
     LOGITS_STRIDE_0,
@@ -207,7 +206,10 @@ def _topk_topp_kernel(
                 k_pivots_num = tl.zeros((), dtype=tl.uint32)
                 min_larger = float("inf")
                 num_min_larger = tl.zeros((), dtype=tl.uint32)
-                if num_outliers > k:
+                if num_finite_total <= k:
+                    # All finite logits survive top-k; skip the cutoff search.
+                    k_pivot = -float("inf")
+                elif num_outliers > k:
                     max_range = max_logit
                     min_range = outlier_pivot
                     search_range = tl.cast(num_outliers, tl.int32)
@@ -1226,7 +1228,7 @@ def _topp_sb_combine(
     )
 
 
-@triton.jit
+@triton.jit(do_not_specialize_on_alignment=["ROUND"])
 def _topp_sb_step_kernel(
     LOGITS,
     LOGITS_STRIDE_0,
@@ -1617,8 +1619,7 @@ def apply_top_k_top_p_triton(
     p: torch.Tensor | None,
     mask_value: float = float("-inf"),
 ) -> torch.Tensor:
-    """
-    Apply combined top-k and top-p masking using Triton.
+    """Apply combined top-k and top-p masking using Triton.
 
     Top-k is applied first (by logit value), then top-p is applied
     to the remaining k values (by probability).
@@ -1634,6 +1635,7 @@ def apply_top_k_top_p_triton(
 
     Returns:
         The masked logits tensor. It may or may not be modified in-place.
+
     """
     assert logits.ndim == 2
     assert logits.dtype == torch.float32

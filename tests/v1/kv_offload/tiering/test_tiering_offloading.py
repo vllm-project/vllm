@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Unit tests for TieringOffloadingManager and ExampleSecondaryTierManager.
+"""Unit tests for TieringOffloadingManager and ExampleSecondaryTierManager.
 
 These tests verify:
 1. Basic tiered offloading operations (store, load, lookup)
@@ -12,7 +11,7 @@ These tests verify:
 """
 
 from collections.abc import Iterable
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
@@ -40,6 +39,7 @@ from vllm.v1.kv_offload.base import (
     TierMatcher,
     make_offload_key,
 )
+from vllm.v1.kv_offload.cpu.policies.lru import LRUCachePolicy
 from vllm.v1.kv_offload.tiering.base import (
     JobResult,
     SecondaryTierManager,
@@ -53,6 +53,7 @@ from vllm.v1.kv_offload.tiering.manager import (
     TieringOffloadingManager,
 )
 from vllm.v1.kv_offload.tiering.spec import TieringOffloadingSpec
+from vllm.v1.metrics.cache_hit_source import CacheHitSource
 
 _CTX = ReqContext(req_id="test")
 _MOCK_OFFLOADING_SPEC = MagicMock()
@@ -98,7 +99,8 @@ def has_histogram_count(reduced: dict[str, int | float], metric_name: str) -> bo
 
 
 class MetricsSecondaryTierManager(SecondaryTierManager):
-    """Test-only secondary tier that declares and emits one labeled metric."""
+    """Test-only secondary tier that declares and emits one labeled metric,
+    and publishes one config fact."""
 
     MY_TIER_METRIC = "my_tier_metric"
 
@@ -110,6 +112,13 @@ class MetricsSecondaryTierManager(SecondaryTierManager):
                 labelnames=("tier",),
             )
         }
+
+    @classmethod
+    def config_info_keys(cls, extra_config):
+        return ("path",)
+
+    def config_info(self):
+        return {"path": f"/mnt/{self.tier_type}"}
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -246,6 +255,19 @@ class TestExampleSecondaryTierManager:
 
         # Third chunk not present
         assert tier.lookup(chunks[2], _CTX) is LookupResult.MISS
+
+    def test_config_info_keys_match_the_filled_values(self):
+        """A name the declaration misses becomes a dropped label at runtime."""
+        mock_view = memoryview(torch.zeros((10, 16), dtype=torch.int8).numpy())
+        tier = ExampleSecondaryTierManager(
+            offloading_spec=_MOCK_OFFLOADING_SPEC,
+            primary_kv_view=mock_view,
+            tier_type="example",
+            custom_param=67,
+        )
+        info = tier.config_info()
+        assert tuple(info) == ExampleSecondaryTierManager.config_info_keys({})
+        assert info["example_info"] == 67
 
 
 # What a request-level cascade does with a key already present in the primary
@@ -500,13 +522,26 @@ class TestTieringOffloadingManager:
         # Lookup should find all chunks in primary
         assert count_hits(self.manager, chunks) == 3
 
-    def test_promotion_from_secondary(self, manager_setup):
+    @pytest.mark.parametrize(
+        "source",
+        [CacheHitSource.EXTERNAL_UNSPECIFIED, CacheHitSource.DISK, CacheHitSource.P2P],
+    )
+    def test_promotion_from_secondary(self, manager_setup, monkeypatch, source):
         """Test promotion of chunks from secondary to primary tier."""
+        monkeypatch.setattr(ExampleSecondaryTierManager, "cache_hit_source", source)
         chunks = to_keys(range(3))
 
         # Manually add chunks to secondary tier (simulate previous cascade)
         for chunk in chunks:
             self.secondary_tier1.chunks[chunk] = True
+
+        original_submit_load = self.secondary_tier1.submit_load
+
+        def submit_load(job_metadata):
+            assert job_metadata.job_id in self.manager._jobs
+            original_submit_load(job_metadata)
+
+        self.secondary_tier1.submit_load = submit_load
 
         # Lookup each chunk to initiate promotion for all of them
         for chunk in chunks:
@@ -519,12 +554,46 @@ class TestTieringOffloadingManager:
         # End of step 2: processes the completed promotion jobs
         self._simulate_on_schedule_end()
 
+        stats = self.manager.get_stats()
+        assert stats is not None
+        reduced = stats.reduce()
+        assert (
+            reduced[
+                histogram_count_key(
+                    TieringOffloadingMetrics.PROMOTION_LATENCY,
+                    ("1:example", "success"),
+                )
+            ]
+            == 1
+        )
+
         # Now chunks should be in primary tier
         assert count_hits(self.primary_tier, chunks) == 3
 
         # Next lookup should succeed
         assert count_hits(self.manager, chunks) == 3
 
+        # The request that caused the promotion retains the secondary origin.
+        assert all(
+            self.manager.get_load_source(chunk, _CTX) == source for chunk in chunks
+        )
+
+        # A later request sees the chunks as ordinary host-memory primary hits.
+        later_context = ReqContext(req_id="later")
+        self.manager.on_new_request(later_context)
+        assert all(
+            self.manager.lookup(chunk, later_context) is LookupResult.HIT
+            for chunk in chunks
+        )
+        assert all(
+            self.manager.get_load_source(chunk, later_context) == "host"
+            for chunk in chunks
+        )
+
+    @pytest.mark.parametrize(
+        "source",
+        [CacheHitSource.EXTERNAL_UNSPECIFIED, CacheHitSource.DISK, CacheHitSource.P2P],
+    )
     @pytest.mark.parametrize(
         ("successful_indices", "expected_results"),
         [
@@ -540,8 +609,9 @@ class TestTieringOffloadingManager:
         ids=["partial", "legacy-full-failure"],
     )
     def test_failed_promotion_keeps_only_successful_chunks(
-        self, manager_setup, successful_indices, expected_results
+        self, manager_setup, monkeypatch, source, successful_indices, expected_results
     ):
+        monkeypatch.setattr(ExampleSecondaryTierManager, "cache_hit_source", source)
         chunks = to_keys(range(3))
         for chunk in chunks:
             self.secondary_tier1.chunks[chunk] = True
@@ -571,6 +641,14 @@ class TestTieringOffloadingManager:
         assert [
             self.primary_tier.lookup(chunk, _CTX) for chunk in chunks
         ] == expected_results
+        expected_source_keys = (
+            set()
+            if successful_indices is None
+            else {chunks[i] for i in successful_indices}
+        )
+        assert set(self.manager._request_load_sources[_CTX.req_id]) == (
+            expected_source_keys
+        )
 
     def test_lookup_reports_sync_delay_for_resolved_lookups(self, manager_setup):
         """Resolved lookups report one sync delay sample per tier and chunk."""
@@ -753,13 +831,63 @@ class TestTieringOffloadingManager:
         # Touch chunks
         self.manager.touch(chunks, _CTX)
 
-        # Verify touch was called on primary tier (check LRU order)
-        primary_keys = list(self.primary_tier._policy.evictable_chunks.keys())
-        assert primary_keys[-3:] == list(reversed(chunks))
+        # Verify touch was called on the primary tier (head is most recent).
+        policy = self.primary_tier._policy
+        assert isinstance(policy, LRUCachePolicy)
+        ranks = policy._ranks
+        assert ranks[chunks[2]] < ranks[chunks[1]] < ranks[chunks[0]]
 
         # Verify touch was propagated to all secondary tiers
         self.secondary_tier1.touch.assert_called_once_with(chunks, _CTX)
         self.secondary_tier2.touch.assert_called_once_with(chunks, _CTX)
+
+    def test_request_order_survives_late_cascade_completion(self, manager_setup):
+        """Cascade completion must not replace request order with I/O order."""
+        chunks = to_keys(range(5))
+        self._start_request()
+        output = self.manager.prepare_store(chunks, _CTX)
+        assert output is not None
+        self.manager.complete_store(chunks, _CTX, success=True)
+
+        # Finalize while both secondary-tier cascades still pin primary chunks.
+        self.manager.on_request_finished(_CTX)
+        self._simulate_on_schedule_end()
+        self._simulate_on_schedule_end()
+
+        evict_ctx = ReqContext(req_id="evict")
+        self._start_request(evict_ctx)
+        output = self.manager.prepare_store(to_keys([5]), evict_ctx)
+        assert output is not None
+        assert output.evicted_keys == [chunks[-1]]
+
+    def test_late_old_store_submission_does_not_override_newer_request_order(
+        self, manager_setup
+    ):
+        """Cascade submission after finish is not a new primary access."""
+        old_blocks = to_keys(range(2))
+        old_ctx = ReqContext(req_id="old")
+        self._start_request(old_ctx)
+        assert self.manager.prepare_store(old_blocks, old_ctx) is not None
+        self.manager.on_request_finished(old_ctx)
+
+        new_blocks = to_keys(range(2, 5))
+        new_ctx = ReqContext(req_id="new")
+        self._start_request(new_ctx)
+        assert self.manager.prepare_store(new_blocks, new_ctx) is not None
+        self.manager.complete_store(new_blocks, new_ctx, success=True)
+        self.manager.on_request_finished(new_ctx)
+
+        # The old GPU->primary write lands after the newer request finished.
+        # Its cascade pins must not turn it into the more recent request.
+        self.manager.complete_store(old_blocks, old_ctx, success=True)
+        self._simulate_on_schedule_end()
+        self._simulate_on_schedule_end()
+
+        evict_ctx = ReqContext(req_id="evict")
+        self._start_request(evict_ctx)
+        output = self.manager.prepare_store(to_keys([5]), evict_ctx)
+        assert output is not None
+        assert output.evicted_keys == [old_blocks[-1]]
 
     def test_failed_store_no_cascade(self, manager_setup):
         """Test that failed GPU→primary store doesn't cascade."""
@@ -873,10 +1001,10 @@ class TestTieringOffloadingManager:
         job_metadata = self.secondary_tier1.submit_store.call_args.args[0]
         assert job_metadata.req_context is ctx
 
-    def test_on_request_finished_delays_secondary_until_store_submitted(
+    def test_on_request_finished_delays_only_secondary_until_store_submitted(
         self, manager_setup
     ):
-        """Manager hook is eager; secondary hooks wait for cascade submission."""
+        """Primary order commits immediately; secondary cleanup waits."""
         chunks = to_keys(range(2))
         ctx = ReqContext(req_id="req_delayed_secondary")
         calls: list[tuple[str, str]] = []
@@ -1265,6 +1393,7 @@ class TestTieringOffloadingManager:
         # Orchestrator state cleared.
         assert self.manager._jobs == {}
         assert self.manager._pending_load_submissions == {}
+        assert self.manager._request_load_sources == {}
         assert set(self.manager._req_state) == {_CTX.req_id, rl_ctx.req_id}
         assert self.manager._processed_jobs_this_step is False
 
@@ -1458,3 +1587,175 @@ def test_parse_tier_filter_skips_bad_entries():
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+def test_tiering_manager_reports_one_config_info_series_for_each_tier():
+    """The info metric holds one series for each tier, and the tier label tells
+    the series apart. A tier cannot know its own index, so the manager adds the
+    label. A tier fills the names it owns only, so the CPU primary tier fills
+    its cpu_ labels on its own series alone."""
+    mock_region = _mock_mmap_region(5)
+    primary_tier = CPUPrimaryTierOffloadingManager(
+        num_chunks=5, mmap_region=mock_region
+    )
+    secondary_tiers = [
+        MetricsSecondaryTierManager(
+            offloading_spec=_MOCK_OFFLOADING_SPEC,
+            primary_kv_view=mock_region.create_kv_memoryview(),
+            tier_type="test_metrics",
+        )
+        for _ in range(2)
+    ]
+    manager = TieringOffloadingManager(
+        primary_tier=primary_tier,
+        secondary_tiers=secondary_tiers,
+    )
+
+    assert manager.config_info() == [
+        {"tier": "0:primary", "cpu_num_chunks": 5},
+        {"tier": "1:test_metrics", "path": "/mnt/test_metrics"},
+        {"tier": "2:test_metrics", "path": "/mnt/test_metrics"},
+    ]
+
+
+def test_tiering_manager_reports_the_primary_series_with_no_secondary_tier():
+    """A tiering manager runs with no secondary tier, and the info metric then
+    holds the primary series alone. The series still carries the tier label, so
+    the frontend publishes one series and not a bare metric."""
+    mock_region = _mock_mmap_region(5)
+    manager = TieringOffloadingManager(
+        primary_tier=CPUPrimaryTierOffloadingManager(
+            num_chunks=5, mmap_region=mock_region
+        ),
+        secondary_tiers=[],
+    )
+
+    assert manager.config_info() == [{"tier": "0:primary", "cpu_num_chunks": 5}]
+
+
+def test_tiering_manager_rejects_a_primary_tier_with_two_info_mappings():
+    """This manager holds one primary tier, so two mappings would give two
+    series with one tier label. If the two mappings agree on every declared
+    name, the frontend cache then collapses them into one series and warns
+    about nothing. The unpack fails at engine start instead."""
+
+    class _TwoMappingPrimary(CPUPrimaryTierOffloadingManager):
+        def config_info(self):
+            return [{"path": "/a"}, {"path": "/b"}]
+
+    mock_region = _mock_mmap_region(5)
+    manager = TieringOffloadingManager(
+        primary_tier=_TwoMappingPrimary(num_chunks=5, mmap_region=mock_region),
+        secondary_tiers=[],
+    )
+
+    with pytest.raises(ValueError):
+        manager.config_info()
+
+
+def test_tiering_manager_keeps_the_tier_label_out_of_the_tier_mapping():
+    """The manager adds the tier label to a copy. A tier that returns a stored
+    mapping must not gain a foreign key that outlives the call."""
+
+    class _StoredInfoTier(MetricsSecondaryTierManager):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.info: dict[str, str] = {"path": "/mnt/a"}
+
+        def config_info(self):
+            return self.info
+
+    mock_region = _mock_mmap_region(5)
+    tier = _StoredInfoTier(
+        offloading_spec=_MOCK_OFFLOADING_SPEC,
+        primary_kv_view=mock_region.create_kv_memoryview(),
+        tier_type="test_metrics",
+    )
+    manager = TieringOffloadingManager(
+        primary_tier=CPUPrimaryTierOffloadingManager(
+            num_chunks=5, mmap_region=mock_region
+        ),
+        secondary_tiers=[tier],
+    )
+
+    manager.config_info()
+
+    assert tier.info == {"path": "/mnt/a"}
+
+
+def test_tiering_spec_declares_the_config_info_keys_the_manager_fills():
+    """The spec declares the info label names in the API-server process, and
+    the manager fills the values in the engine process. A drift between the two
+    empties every declared label and drops every filled value, so this pins
+    both sides to the same literal names. The frontend reads a value by name,
+    so the order of the names does not have to agree."""
+    tier_configs = [{"type": "test_metrics"}, {"type": "test_metrics"}]
+    mock_region = _mock_mmap_region(5)
+    manager = TieringOffloadingManager(
+        primary_tier=CPUPrimaryTierOffloadingManager(
+            num_chunks=5, mmap_region=mock_region
+        ),
+        secondary_tiers=[
+            MetricsSecondaryTierManager(
+                offloading_spec=_MOCK_OFFLOADING_SPEC,
+                primary_kv_view=mock_region.create_kv_memoryview(),
+                tier_type=tier_config["type"],
+            )
+            for tier_config in tier_configs
+        ],
+    )
+
+    with patch.object(
+        SecondaryTierFactory,
+        "get_tier_class",
+        return_value=MetricsSecondaryTierManager,
+    ):
+        keys = TieringOffloadingSpec.config_info_keys({"secondary_tiers": tier_configs})
+
+    assert keys == ("cpu_num_chunks", "tier", "path")
+    filled: set[str] = set()
+    for info in manager.config_info():
+        assert set(info) <= set(keys)
+        filled |= set(info)
+    assert filled == set(keys)
+
+
+def test_tiering_spec_passes_each_tier_its_own_config():
+    """A tier reads its own parameters out of its own config dict, not out of
+    the instance-wide kv_connector_extra_config. A tier that names a label
+    after one of its own keys declares nothing from the wrong dict."""
+    seen: list[dict] = []
+
+    class _RecordingTier(MetricsSecondaryTierManager):
+        @classmethod
+        def config_info_keys(cls, extra_config):
+            seen.append(extra_config)
+            return ()
+
+    tier_configs = [{"type": "test_metrics", "root_dir": "/mnt/a"}]
+    with patch.object(
+        SecondaryTierFactory, "get_tier_class", return_value=_RecordingTier
+    ):
+        TieringOffloadingSpec.config_info_keys({"secondary_tiers": tier_configs})
+
+    assert seen == tier_configs
+
+
+def test_tiering_spec_rejects_a_tier_that_declares_the_reserved_tier_label():
+    """TieringOffloadingManager.config_info() writes the tier label over the
+    value of a tier, so a tier that declares the name loses its own value with
+    no message. The declaration must fail at start-up instead."""
+
+    class _ReservedLabelTier(MetricsSecondaryTierManager):
+        @classmethod
+        def config_info_keys(cls, extra_config):
+            return ("tier",)
+
+    tier_configs = [{"type": "test_metrics"}]
+    with (
+        patch.object(
+            SecondaryTierFactory, "get_tier_class", return_value=_ReservedLabelTier
+        ),
+        pytest.raises(AssertionError, match="reserved label 'tier'"),
+    ):
+        TieringOffloadingSpec.config_info_keys({"secondary_tiers": tier_configs})

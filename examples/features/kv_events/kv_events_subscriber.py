@@ -18,7 +18,7 @@ class EventBatch(msgspec.Struct, array_like=True, omit_defaults=True, gc=False):
 
 
 class KVCacheEvent(msgspec.Struct, omit_defaults=True, gc=False, tag=True):
-    """Base class for all KV cache-related events"""
+    """Base class for all KV cache-related events."""
 
 
 class BlockStored(KVCacheEvent):

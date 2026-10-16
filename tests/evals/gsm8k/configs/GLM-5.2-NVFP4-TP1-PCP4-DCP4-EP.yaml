@@ -3,10 +3,13 @@ accuracy_threshold: 0.90
 num_questions: 1319
 num_fewshot: 5
 max_concurrency: 100
+# Preserve KV-cache headroom after CUDA graph memory profiling and bound the
+# DCP-aware FlashInfer workspace to 2.39 GiB at the 4,096-token scheduler cap.
 server_args: >-
   --compilation-config '{"cudagraph_mode":"PIECEWISE"}'
+  --gpu-memory-utilization 0.96
   --max-model-len 4096
-  --max-num-batched-tokens 32768
+  --max-num-batched-tokens 4096
   --safetensors-load-strategy prefetch
   --moe-backend flashinfer_cutlass
   --prefill-context-parallel-size 4
