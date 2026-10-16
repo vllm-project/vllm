@@ -612,6 +612,17 @@ inline __attribute__((always_inline)) __m512 _mm512_rcp14_sigmoid_glu_ps(__m512 
   return _mm512_mul_ps(x, _mm512_rcp14_sigmoid_ps(xa));
 }
 
+// tanh-approx GELU(x) * x, i.e. gelu_tanh(x) used as an activation-and-mul input, via
+// tanh(z) = 2 * sigmoid(2z) - 1, so gelu_tanh(x) = 0.5*x*(1+tanh(z)) simplifies to
+// x * sigmoid(2z) with z = sqrt(2/pi) * (x + 0.044715 * x^3).
+inline __attribute__((always_inline)) __m512 _mm512_rcp14_gelu_tanh_ps(__m512 x) {
+  const __m512 c0 = _mm512_set1_ps(1.5957691216057308f);   // 2 * sqrt(2/pi)
+  const __m512 c1 = _mm512_set1_ps(0.07135481627260025f);  // 2 * sqrt(2/pi) * 0.044715
+  __m512 x2 = _mm512_mul_ps(x, x);
+  __m512 z2 = _mm512_fmadd_ps(_mm512_mul_ps(c1, x2), x, _mm512_mul_ps(c0, x));  // c0*x + c1*x^3
+  return _mm512_mul_ps(x, _mm512_rcp14_sigmoid_ps(z2));
+}
+
 #endif
 
 inline at::vec::Vectorized<float> fast_sigmoid(const at::vec::Vectorized<float>& x) {
@@ -628,6 +639,30 @@ inline at::vec::Vectorized<float> fast_silu(const at::vec::Vectorized<float>& x)
   return at::vec::Vectorized<float>(_mm512_rcp14_silu_ps(x));
 #else
   return x * fast_sigmoid(x);
+#endif
+}
+
+// exact (erf) gelu, matching torch.nn.functional.gelu(approximate="none")
+inline at::vec::Vectorized<float> fast_gelu(const at::vec::Vectorized<float>& x) {
+  const auto half = at::vec::Vectorized<float>(0.5f);
+  const auto one = at::vec::Vectorized<float>(1.f);
+  const auto inv_sqrt2 = at::vec::Vectorized<float>(0.70710678118654752440f);
+  return half * x * (one + (x * inv_sqrt2).erf());
+}
+
+// tanh-approx gelu, matching torch.nn.functional.gelu(approximate="tanh")
+// (a.k.a. "gelu_pytorch_tanh", used by Gemma-style models):
+//   gelu_tanh(x) = 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
+// Using tanh(z) = 2 * sigmoid(2z) - 1 this simplifies to x * sigmoid(2z), reusing the
+// existing fast_sigmoid (rcp14-based on AVX512) instead of a dedicated tanh primitive.
+inline at::vec::Vectorized<float> fast_gelu_tanh(const at::vec::Vectorized<float>& x) {
+#if defined(CPU_CAPABILITY_AVX512)
+  return at::vec::Vectorized<float>(_mm512_rcp14_gelu_tanh_ps(x));
+#else
+  const auto c0 = at::vec::Vectorized<float>(1.5957691216057308f);   // 2 * sqrt(2/pi)
+  const auto c1 = at::vec::Vectorized<float>(0.07135481627260025f);  // 2 * sqrt(2/pi) * 0.044715
+  const auto z2 = c0 * x + c1 * x * x * x;
+  return x * fast_sigmoid(z2);
 #endif
 }
 

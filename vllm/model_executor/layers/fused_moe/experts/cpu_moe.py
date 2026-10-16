@@ -466,7 +466,7 @@ class CPUExpertsFp8(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
-        return activation == MoEActivation.SILU
+        return activation in (MoEActivation.SILU, MoEActivation.GELU_TANH)
 
     @staticmethod
     def _supports_parallel_config(
@@ -577,6 +577,8 @@ class CPUExpertsFp8(mk.FusedMoEExpertsModular):
             None,  # alpha
             None,  # limit
             True,  # is_vnni
+            None,  # a1_scale
+            activation.value,
         )
 
 
@@ -634,7 +636,11 @@ class CPUExpertsMxfp4(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
-        return activation in (MoEActivation.SILU, MoEActivation.SWIGLUOAI)
+        return activation in (
+            MoEActivation.SILU,
+            MoEActivation.SWIGLUOAI,
+            MoEActivation.GELU_TANH,
+        )
 
     @staticmethod
     def _supports_parallel_config(
@@ -739,6 +745,8 @@ class CPUExpertsMxfp4(mk.FusedMoEExpertsModular):
             alpha,
             limit,
             True,  # is_vnni
+            None,  # a1_scale
+            activation.value,
         )
 
 
@@ -850,7 +858,7 @@ class CPUExpertsInt4(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
-        return activation == MoEActivation.SILU
+        return activation in (MoEActivation.SILU, MoEActivation.GELU_TANH)
 
     @staticmethod
     def _supports_parallel_config(
@@ -970,6 +978,8 @@ class CPUExpertsInt4(mk.FusedMoEExpertsModular):
             None,  # alpha
             None,  # limit
             True,  # is_vnni
+            None,  # a1_scale
+            activation.value,
         )
 
 
@@ -1037,7 +1047,7 @@ class CPUExpertsInt8(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
-        return activation == MoEActivation.SILU
+        return activation in (MoEActivation.SILU, MoEActivation.GELU_TANH)
 
     @staticmethod
     def _supports_parallel_config(
@@ -1145,6 +1155,8 @@ class CPUExpertsInt8(mk.FusedMoEExpertsModular):
             None,  # alpha
             None,  # limit
             True,  # is_vnni
+            None,  # a1_scale
+            activation.value,
         )
 
 
@@ -1686,7 +1698,7 @@ class CPUExpertsFp8W8A8(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
-        return activation == MoEActivation.SILU
+        return activation in (MoEActivation.SILU, MoEActivation.GELU_TANH)
 
     @staticmethod
     def _supports_parallel_config(
@@ -1828,4 +1840,5 @@ class CPUExpertsFp8W8A8(mk.FusedMoEExpertsModular):
             None,  # limit
             True,  # is_vnni
             x_scales,  # a1_scale: per-token FP8 activation scales
+            activation.value,
         )

@@ -9,7 +9,7 @@
 
 namespace {
 
-template <typename scalar_t, int BLOCK_N>
+template <typename scalar_t, int BLOCK_N, CPUActMethod ACT = CPUActMethod::silu_and_mul>
 inline void silu_and_mul(
     scalar_t* __restrict__ C,
     const int32_t* __restrict__ C0,  // x: x0, x1
@@ -56,7 +56,11 @@ inline void silu_and_mul(
   auto silu_and_mul = [&](auto col) {
     __m512 x = vc0[col];
     __m512 y = vc1[col];
-    vc0[col] = _mm512_mul_ps(_mm512_rcp14_silu_ps(x), y);
+    if constexpr (ACT == CPUActMethod::gelu_tanh_and_mul) {
+      vc0[col] = _mm512_mul_ps(_mm512_rcp14_gelu_tanh_ps(x), y);
+    } else {
+      vc0[col] = _mm512_mul_ps(_mm512_rcp14_silu_ps(x), y);
+    }
   };
 
   using bVec = at::vec::Vectorized<scalar_t>;
@@ -122,7 +126,7 @@ inline void scale_C(
 }
 
 /// gemm for w13
-template <typename scalar_t, int BLOCK_M, int BLOCK_N>
+template <typename scalar_t, int BLOCK_M, int BLOCK_N, CPUActMethod ACT = CPUActMethod::silu_and_mul>
 struct tinygemm_kernel_vnni {
   static inline void apply(
       const uint8_t* __restrict__ A,
@@ -143,8 +147,8 @@ struct tinygemm_kernel_vnni {
 };
 
 #if defined(CPU_CAPABILITY_AVX512)
-template <int BLOCK_M, int BLOCK_N>
-struct tinygemm_kernel_vnni<at::BFloat16, BLOCK_M, BLOCK_N> {
+template <int BLOCK_M, int BLOCK_N, CPUActMethod ACT>
+struct tinygemm_kernel_vnni<at::BFloat16, BLOCK_M, BLOCK_N, ACT> {
   static inline void apply(
       const uint8_t* __restrict__ A,
       const int8_t* __restrict__ B0,
@@ -236,8 +240,13 @@ struct tinygemm_kernel_vnni<at::BFloat16, BLOCK_M, BLOCK_N> {
         __m512 x1 = _mm512_castsi512_ps(vc0[row * COLS + col + 1]);
         __m512 y0 = _mm512_castsi512_ps(vc1[row * COLS + col + 0]);
         __m512 y1 = _mm512_castsi512_ps(vc1[row * COLS + col + 1]);
-        x0 = _mm512_mul_ps(_mm512_rcp14_silu_ps(x0), y0);
-        x1 = _mm512_mul_ps(_mm512_rcp14_silu_ps(x1), y1);
+        if constexpr (ACT == CPUActMethod::gelu_tanh_and_mul) {
+          x0 = _mm512_mul_ps(_mm512_rcp14_gelu_tanh_ps(x0), y0);
+          x1 = _mm512_mul_ps(_mm512_rcp14_gelu_tanh_ps(x1), y1);
+        } else {
+          x0 = _mm512_mul_ps(_mm512_rcp14_silu_ps(x0), y0);
+          x1 = _mm512_mul_ps(_mm512_rcp14_silu_ps(x1), y1);
+        }
 
         _mm512_storeu_si512(
             reinterpret_cast<__m512i*>((C + row * ldc + col * 16)),
@@ -249,8 +258,8 @@ struct tinygemm_kernel_vnni<at::BFloat16, BLOCK_M, BLOCK_N> {
 };
 #endif
 
-#define LAUNCH_TINYGEMM_KERNEL_VNNI(MB_SIZE, NB_SIZE)      \
-  tinygemm_kernel_vnni<scalar_t, MB_SIZE, NB_SIZE>::apply( \
+#define LAUNCH_TINYGEMM_KERNEL_VNNI(MB_SIZE, NB_SIZE)           \
+  tinygemm_kernel_vnni<scalar_t, MB_SIZE, NB_SIZE, ACT>::apply( \
       A + mb_start * lda,                                  \
       B0 + nb_start * 4,                                   \
       B1 + nb_start * 4,                                   \
@@ -265,7 +274,7 @@ struct tinygemm_kernel_vnni<at::BFloat16, BLOCK_M, BLOCK_N> {
       ldb,                                                 \
       ldc);
 
-template <typename scalar_t>
+template <typename scalar_t, CPUActMethod ACT = CPUActMethod::silu_and_mul>
 void tinygemm_kernel(
     const uint8_t* __restrict__ A,
     const int8_t* __restrict__ B0,
@@ -496,7 +505,8 @@ void fused_experts_int8_kernel_impl(
     int64_t K,
     int64_t E,
     int64_t topk,
-    int64_t num_tokens_post_pad) {
+    int64_t num_tokens_post_pad,
+    CPUActMethod act_func) {
   // handle 2 tiles per block
   constexpr int64_t BLOCK_M = block_size_m();
   constexpr int64_t BLOCK_N = block_size_n();
@@ -591,25 +601,47 @@ void fused_experts_int8_kernel_impl(
 
         // 1.d silu and mul
         const int64_t offset = offsets[mb];
-        silu_and_mul<scalar_t, BLOCK_N>(
-            ic1 + offset * N + nb * BLOCK_N, C0, C1, As, Bs0, Bs1, Bcomp0, Bcomp1, m_size, N);
+        if (act_func == CPUActMethod::gelu_tanh_and_mul) {
+          silu_and_mul<scalar_t, BLOCK_N, CPUActMethod::gelu_tanh_and_mul>(
+              ic1 + offset * N + nb * BLOCK_N, C0, C1, As, Bs0, Bs1, Bcomp0, Bcomp1, m_size, N);
+        } else {
+          silu_and_mul<scalar_t, BLOCK_N, CPUActMethod::silu_and_mul>(
+              ic1 + offset * N + nb * BLOCK_N, C0, C1, As, Bs0, Bs1, Bcomp0, Bcomp1, m_size, N);
+        }
       } else {
         // fused 1.bcd: silu_and_mul(A @ B0, A @ B1)
         const int64_t offset = offsets[mb];
-        tinygemm_kernel(
-            /* A     */ A,
-            /* B0    */ B0,
-            /* B1    */ B1,
-            /* C     */ ic1 + offset * N + nb * BLOCK_N,
-            /* As    */ As,
-            /* Bs0   */ Bs0,
-            /* Bs1   */ Bs1,
-            /* M     */ m_size,
-            /* N     */ n_size,
-            /* K     */ K,
-            /* lda   */ K,
-            /* ldb   */ n_size,
-            /* ldc   */ N);
+        if (act_func == CPUActMethod::gelu_tanh_and_mul) {
+          tinygemm_kernel<scalar_t, CPUActMethod::gelu_tanh_and_mul>(
+              /* A     */ A,
+              /* B0    */ B0,
+              /* B1    */ B1,
+              /* C     */ ic1 + offset * N + nb * BLOCK_N,
+              /* As    */ As,
+              /* Bs0   */ Bs0,
+              /* Bs1   */ Bs1,
+              /* M     */ m_size,
+              /* N     */ n_size,
+              /* K     */ K,
+              /* lda   */ K,
+              /* ldb   */ n_size,
+              /* ldc   */ N);
+        } else {
+          tinygemm_kernel<scalar_t, CPUActMethod::silu_and_mul>(
+              /* A     */ A,
+              /* B0    */ B0,
+              /* B1    */ B1,
+              /* C     */ ic1 + offset * N + nb * BLOCK_N,
+              /* As    */ As,
+              /* Bs0   */ Bs0,
+              /* Bs1   */ Bs1,
+              /* M     */ m_size,
+              /* N     */ n_size,
+              /* K     */ K,
+              /* lda   */ K,
+              /* ldb   */ n_size,
+              /* ldc   */ N);
+        }
       }
     });
 
@@ -734,7 +766,8 @@ void fused_experts_int8_kernel_impl(
       int64_t K,                                      \
       int64_t E,                                      \
       int64_t topk,                                   \
-      int64_t num_tokens_post_pad)
+      int64_t num_tokens_post_pad,                    \
+      CPUActMethod act_func)
 
 INSTANTIATE_MOE_INT8_TEMPLATE(at::BFloat16);
 INSTANTIATE_MOE_INT8_TEMPLATE(at::Half);
