@@ -9,6 +9,7 @@ from torch import nn
 from transformers import Qwen4ExpTextConfig
 
 from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
+from vllm.distributed import get_etp_group, get_tp_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import MergedColumnParallelLinear
@@ -21,7 +22,13 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
 )
+from vllm.model_executor.layers.quantization.utils.fp8_utils import is_fp8
 from vllm.model_executor.models.utils import AutoWeightsLoader
+from vllm.models.common.ops.sequence_parallel import (
+    sp_all_gather,
+    sp_reduce_scatter,
+    sp_shard,
+)
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.attention.backends.short_conv_attn import (
@@ -182,8 +189,10 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         data_parallel_rank: int = 0,
         quant_config: QuantizationConfig | None = None,
         params_dtype: torch.dtype | None = None,
+        use_sequence_parallel: bool = False,
     ) -> None:
         super().__init__()
+        self.use_sequence_parallel = use_sequence_parallel
         self.embedding_dim = embedding_dim
         self.layer_name = layer_name
         self.ngram_size = int(config.ngram_size)
@@ -253,6 +262,11 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             if engram_config is not None and engram_config.cpu_offload
             else Qwen4ExpPLEDeviceEmbedding
         )
+        # A TP reduce-scatter covers all vocabulary owners only when ETP=TP.
+        self.use_reduce_scatter = (
+            self.use_sequence_parallel
+            and get_etp_group().world_size == get_tp_group().world_size
+        )
         self.ngram_embedding = embedding_cls(
             padded_vocab_size,
             self.head_dim,
@@ -263,6 +277,7 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             num_ngram_heads=self.ngram_heads,
             max_total_tokens=max_total_tokens,
             data_parallel_rank=data_parallel_rank,
+            reduce_results=not self.use_reduce_scatter,
         )
         logger.info(
             "Initialized AMD PLE embedding %s: quantization_method=%s, "
@@ -274,12 +289,25 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             self.ngram_embedding.weight.is_pinned(),
         )
 
+    def _sp_shard_embeddings(self, embeddings: torch.Tensor) -> torch.Tensor:
+        """Shard embedding token rows, optionally reducing vocabulary contributions."""
+        # Each embedding element has one vocabulary owner, including FP8 bytes.
+        output_dtype = embeddings.dtype
+        if is_fp8(embeddings):
+            embeddings = embeddings.view(torch.int8)
+        if self.use_reduce_scatter:
+            embeddings = sp_reduce_scatter(embeddings)
+        else:
+            embeddings = sp_shard(embeddings)
+        return embeddings.view(output_dtype)
+
     def forward(
         self,
         input_ids: torch.Tensor,
         query_start_loc: torch.Tensor,
         ngram_context: torch.Tensor,
     ) -> torch.Tensor:
+        """Return full embeddings or a token shard after combining vocabulary owners."""
         input_ids = input_ids.reshape(-1)
         ngram_ids = input_ids.new_empty(
             (input_ids.shape[0], self.ngram_heads), dtype=torch.int64
@@ -302,17 +330,19 @@ class Qwen4ExpNGramEmbedding(nn.Module):
                 output,
                 self.layer_name,
             )
+        else:
+            output = ngram_ids.new_empty(
+                (ngram_ids.shape[0], self.embedding_dim),
+                dtype=embedding.params_dtype,
+            )
+            torch.ops.vllm.qwen4_exp_amd_ple_ngram_embedding(
+                ngram_ids,
+                output,
+                self.layer_name,
+            )
+        if not self.use_sequence_parallel:
             return output
-        output = ngram_ids.new_empty(
-            (ngram_ids.shape[0], self.embedding_dim),
-            dtype=embedding.params_dtype,
-        )
-        torch.ops.vllm.qwen4_exp_amd_ple_ngram_embedding(
-            ngram_ids,
-            output,
-            self.layer_name,
-        )
-        return output
+        return self._sp_shard_embeddings(output)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Load hash buffers and checkpoint-split embedding rows."""
@@ -388,8 +418,10 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
         layer_idx: int = 0,
         ple_dense_layer_id: int | None = None,
         prefix: str = "",
+        use_sequence_parallel: bool = False,
     ) -> None:
         super().__init__()
+        self.use_sequence_parallel = use_sequence_parallel
         model_config = vllm_config.model_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
@@ -420,8 +452,9 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
             data_parallel_rank=vllm_config.parallel_config.data_parallel_rank,
             quant_config=quant_config,
             params_dtype=model_config.dtype,
+            use_sequence_parallel=self.use_sequence_parallel,
         )
-        # The PLE cache is TP-replicated, so this merged projection is too.
+        # Projection weights stay replicated even when their token rows are sharded.
         self.kv_proj = MergedColumnParallelLinear(
             int(config.ple_embed_dim),
             [self.hc_hidden_size, self.hidden_size],
@@ -486,7 +519,7 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
         self,
         inputs: torch.Tensor,
         residual: torch.Tensor,
-        outer_residual: torch.Tensor,
+        outer_residual: torch.Tensor | None,
         metadata: PleShortConvAttentionMetadata,
         conv_state: torch.Tensor,
         conv_weights: torch.Tensor,
@@ -501,7 +534,8 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
         has_non_spec = has_prefill or has_decode
         inputs = inputs[: metadata.num_actual_tokens]
         residual = residual[: metadata.num_actual_tokens]
-        outer_residual = outer_residual[: metadata.num_actual_tokens]
+        if outer_residual is not None:
+            outer_residual = outer_residual[: metadata.num_actual_tokens]
 
         spec_token_indices = None
         non_spec_token_indices = None
@@ -553,11 +587,14 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
                 residual_d, residual_p = torch.split(
                     residual, [num_decode_tokens, num_prefill_tokens], dim=0
                 )
-                outer_residual_d, outer_residual_p = torch.split(
-                    outer_residual,
-                    [num_decode_tokens, num_prefill_tokens],
-                    dim=0,
-                )
+                outer_residual_d: torch.Tensor | None = None
+                outer_residual_p: torch.Tensor | None = None
+                if outer_residual is not None:
+                    outer_residual_d, outer_residual_p = torch.split(
+                        outer_residual,
+                        [num_decode_tokens, num_prefill_tokens],
+                        dim=0,
+                    )
                 token_indices_d = None
                 token_indices_p = None
             else:
@@ -628,14 +665,16 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
         self,
         inputs: torch.Tensor,
         residual: torch.Tensor,
-        outer_residual: torch.Tensor,
+        outer_residual: torch.Tensor | None,
     ) -> None:
+        """Update convolution state, optionally fusing both residual additions."""
         forward_context = get_forward_context()
         attn_metadata = forward_context.attn_metadata
         # Profiling omits all metadata or this Mamba entry. Short convolution
         # is a no-op there, but preserve the outer residual addition.
         if attn_metadata is None:
-            residual.add_(outer_residual)
+            if outer_residual is not None:
+                residual.add_(outer_residual)
             return
 
         if not isinstance(attn_metadata, dict):
@@ -646,7 +685,8 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
 
         layer_attn_metadata = attn_metadata.get(self.prefix)
         if layer_attn_metadata is None:
-            residual.add_(outer_residual)
+            if outer_residual is not None:
+                residual.add_(outer_residual)
             return
         if not isinstance(layer_attn_metadata, PleShortConvAttentionMetadata):
             raise TypeError(
@@ -687,7 +727,10 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
         ngram_context: torch.Tensor,
     ) -> torch.Tensor:
         input_ids = input_ids.reshape(-1)
-        if input_ids.shape[0] != hidden_states.shape[0]:
+        if (
+            not self.use_sequence_parallel
+            and input_ids.shape[0] != hidden_states.shape[0]
+        ):
             raise ValueError(
                 "PLE expects input_ids and hidden_states to have the same "
                 f"token length, got {input_ids.shape[0]} and "
@@ -711,12 +754,23 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
         # The short-conv op is a piecewise-graph splitting op: state routing
         # reads runtime request metadata. It accumulates the convolution and
         # the outer residual into gated_output.
-        torch.ops.vllm.qwen4_exp_ple_short_conv(
-            conv_input,
-            gated_output,
-            hidden_states,
-            self.prefix,
-        )
+        if self.use_sequence_parallel:
+            # Only convolution needs full tokens. Add residuals on local shards.
+            conv_input = sp_all_gather(conv_input)[: input_ids.shape[0]]
+            # Metadata may omit padding tokens or all tokens during profiling.
+            conv_output = torch.zeros_like(conv_input)
+            torch.ops.vllm.qwen4_exp_ple_short_conv(
+                conv_input, conv_output, None, self.prefix
+            )
+            gated_output.add_(sp_shard(conv_output))
+            gated_output.add_(hidden_states)
+        else:
+            torch.ops.vllm.qwen4_exp_ple_short_conv(
+                conv_input,
+                gated_output,
+                hidden_states,
+                self.prefix,
+            )
         return gated_output
 
 
@@ -787,7 +841,7 @@ def qwen4_exp_amd_ple_ngram_embedding_pinned(
 def qwen4_exp_ple_short_conv(
     inputs: torch.Tensor,
     residual: torch.Tensor,
-    outer_residual: torch.Tensor,
+    outer_residual: torch.Tensor | None,
     layer_name: str,
 ) -> None:
     layer = get_forward_context().no_compile_layers[layer_name]
