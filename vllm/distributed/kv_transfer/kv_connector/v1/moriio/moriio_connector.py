@@ -2841,7 +2841,9 @@ class MoRIIOConnectorWorker:
         if not statuses:
             return
         try:
-            self.moriio_wrapper.waiting_for_transfer_complete(statuses)
+            self.moriio_wrapper.waiting_for_transfer_complete(
+                statuses, fail_fast=self._has_mamba
+            )
         except TransferError:
             if self._has_mamba:
                 logger.exception(
@@ -3117,14 +3119,6 @@ class MoRIIOConnectorWorker:
             # would miss). Only fall back to the lazy background handshake for an
             # engine it did not cover.
             dp0_remote_engine_id = self.get_engine_name_with_dp(remote_engine_id, 0)
-            # Lazy-handshake reads would land after the forward; keep unreachable.
-            assert (
-                remote_engine_id in self._eager_handshaked_engines
-                or dp0_remote_engine_id in self._remote_agents
-            ), (
-                f"MoRIIO READ: eager handshake did not cover {remote_engine_id}; "
-                "reads would escape the pre-forward barrier"
-            )
             if (
                 remote_engine_id not in self._eager_handshaked_engines
                 and dp0_remote_engine_id not in self._remote_agents

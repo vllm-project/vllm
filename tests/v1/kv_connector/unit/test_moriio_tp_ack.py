@@ -462,7 +462,7 @@ def test_failed_read_reports_blocks_only_without_hma(has_mamba, expected_invalid
 
 def test_hybrid_step_barrier_fails_closed():
     class FailingWrapper:
-        def waiting_for_transfer_complete(self, _statuses):
+        def waiting_for_transfer_complete(self, _statuses, fail_fast=True):
             raise TransferError("failed")
 
         def shutdown(self):
@@ -482,7 +482,7 @@ def test_step_barrier_awaits_every_read_before_forward():
         def __init__(self):
             self.awaited = []
 
-        def waiting_for_transfer_complete(self, statuses):
+        def waiting_for_transfer_complete(self, statuses, fail_fast=True):
             self.awaited.append(list(statuses))
 
         def shutdown(self):
@@ -515,7 +515,7 @@ def test_wait_for_layer_load_is_noop():
 def test_step_barrier_without_mamba_does_not_raise_on_failure():
     # Without HMA, failures go to get_block_ids_with_load_errors.
     class FailingWrapper:
-        def waiting_for_transfer_complete(self, _statuses):
+        def waiting_for_transfer_complete(self, _statuses, fail_fast=True):
             raise TransferError("failed")
 
         def shutdown(self):
@@ -528,6 +528,72 @@ def test_step_barrier_without_mamba_does_not_raise_on_failure():
 
     worker._await_reads_issued_this_step()
     assert worker._reads_issued_this_step == []
+
+
+class _ReadStatus:
+    def __init__(self, state: str):
+        self.state = state
+
+    def Succeeded(self):
+        return self.state == "success"
+
+    def Failed(self):
+        return self.state == "failed"
+
+    def Message(self):
+        return "SQ full"
+
+    def Code(self):
+        return -1
+
+
+def _worker_with_failed_and_late_read(has_mamba, monkeypatch):
+    """Request a's read has failed; request b's lands 0.2 s later."""
+    failed_a, late_b = _ReadStatus("failed"), _ReadStatus("in_progress")
+    worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
+    worker._has_mamba = has_mamba
+    worker.world_size = 1
+    worker.moriio_config = SimpleNamespace(recv_abort_timeout=600.0)
+    worker.moriio_wrapper = MoRIIOWrapper(moriio_engine=object(), transfer_timeout=5.0)
+    monkeypatch.setattr(worker.moriio_wrapper, "send_notify", lambda *a, **kw: None)
+    worker._reads_issued_this_step = [failed_a, late_b]
+    worker._recving_transfers = {
+        "a": {"layer0": [failed_a]},
+        "b": {"layer0": [late_b]},
+    }
+    worker._recving_transfers_callback_addr = {
+        "a": ("127.0.0.1", "7000", "tx-a"),
+        "b": ("127.0.0.1", "7000", "tx-b"),
+    }
+    worker._recving_transfers_start = {}
+    worker._recving_local_blocks = {"a": [1, 2], "b": [3, 4]}
+    worker._invalid_block_ids = set()
+    timer = threading.Timer(0.2, lambda: setattr(late_b, "state", "success"))
+    return worker, late_b, timer
+
+
+def test_step_barrier_failure_still_awaits_other_requests(monkeypatch):
+    worker, late_b, timer = _worker_with_failed_and_late_read(False, monkeypatch)
+    timer.start()
+    try:
+        worker._await_reads_issued_this_step()
+    finally:
+        timer.cancel()
+
+    assert late_b.Succeeded()
+    assert worker._pop_done_transfers() == {"tx-b"}
+    assert worker.get_block_ids_with_load_errors() == {1, 2}
+
+
+def test_hybrid_step_barrier_failure_does_not_wait(monkeypatch):
+    worker, late_b, timer = _worker_with_failed_and_late_read(True, monkeypatch)
+    timer.start()
+    try:
+        with pytest.raises(TransferError, match="SQ full"):
+            worker._await_reads_issued_this_step()
+        assert not late_b.Succeeded()
+    finally:
+        timer.cancel()
 
 
 def test_step_barrier_noop_when_no_reads_posted():
