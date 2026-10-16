@@ -2271,6 +2271,7 @@ def mx_worker(mx_client, monkeypatch):
     worker.vllm_config = worker.weight_transfer_engine.vllm_config
     worker._weight_update_active = False
     worker._weight_update_is_draft = False
+    worker._asleep_tags = set()
     worker.model_runner = MagicMock()
     return worker
 
