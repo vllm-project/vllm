@@ -80,8 +80,14 @@ TRACE_HEADERS = {
 pytestmark = [pytest.mark.cpu_test, pytest.mark.skip_global_cleanup]
 
 
-def model(architecture: str, logprobs_mode: str = "raw_logprobs") -> Any:
-    return SimpleNamespace(architecture=architecture, logprobs_mode=logprobs_mode)
+def model(
+    architecture: str, logprobs_mode: str = "raw_logprobs", multimodal: bool = False
+) -> Any:
+    return SimpleNamespace(
+        architecture=architecture,
+        logprobs_mode=logprobs_mode,
+        supports_multimodal_inputs=multimodal,
+    )
 
 
 def test_strategy_selection():
@@ -197,6 +203,19 @@ def test_decisions_state_initializes(qwen):
 
     assert isinstance(strategy, NextTokenStrategy)
     assert isinstance(state.openai_serving_decisions, OpenAIServingDecisions)
+
+
+@pytest.mark.parametrize("multimodal", [True, False])
+def test_next_token_takes_images_when_the_model_does(qwen, multimodal):
+    tokenizer, _ = qwen
+    engine = SimpleNamespace(
+        model_config=model("Qwen3_5ForConditionalGeneration", multimodal=multimodal)
+    )
+    renderer = SimpleNamespace(
+        renderer=SimpleNamespace(get_tokenizer=lambda: tokenizer)
+    )
+    strategy = NextTokenStrategy(ReadContext(engine, renderer, None, "auto", {}))
+    assert strategy.modalities == (frozenset({"image"}) if multimodal else frozenset())
 
 
 def test_unsupported_decisions_state_does_not_block_startup():
@@ -864,7 +883,9 @@ def decision_server(qwen):
     tokenizer, _ = qwen
 
     class Engine:
-        model_config = SimpleNamespace(is_encoder_decoder=False)
+        model_config = SimpleNamespace(
+            is_encoder_decoder=False, supports_multimodal_inputs=False
+        )
         renderer = input_processor = None
         errored = False
         failure = None
