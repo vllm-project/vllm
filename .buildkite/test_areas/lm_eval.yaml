@@ -460,6 +460,7 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI355) LM Eval Qwen3.5 Models"
+      automatic_shard: true
       dind: false
       device: mi355_2
       timeout_in_minutes: 75
