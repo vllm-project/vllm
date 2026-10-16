@@ -733,7 +733,6 @@ _FP8_PREFILL_TILE_Q = 256
 _FP8_PREFILL_NUM_HEADS = (16, 32, 48, 64, 96, 128)
 
 _FUSED_PREFILL_LONG_CONTEXT = 8192
-_FUSED_PREFILL_MAX_HEADS = 32
 _FUSED_PREFILL_SHORT_QUERY = 256
 
 
@@ -1451,7 +1450,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         self, query_lens: torch.Tensor, context_lens: torch.Tensor
     ) -> bool:
         """Shape rule for prefills with context."""
-        if self.num_heads > _FUSED_PREFILL_MAX_HEADS:
+        if self.num_heads > 32:
             return True
         if int(context_lens.min()) >= _FUSED_PREFILL_LONG_CONTEXT:
             return True
