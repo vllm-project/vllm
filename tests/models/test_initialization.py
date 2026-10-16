@@ -178,6 +178,12 @@ def can_initialize(
         if not (current_platform.is_cuda() or current_platform.is_rocm()):
             pytest.skip("Deepseek V4 vision is only supported on CUDA and ROCm")
 
+    if model_arch.startswith("Step5"):
+        from vllm.platforms import current_platform
+
+        if not current_platform.is_rocm():
+            pytest.skip("Step-5 is only supported on ROCm")
+
     with (
         patch.object(V1EngineCore, "_initialize_kv_caches", _initialize_kv_caches_v1),
         monkeypatch.context() as m,

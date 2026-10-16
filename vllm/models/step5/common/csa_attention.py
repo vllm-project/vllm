@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 import torch
 
+import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.forward_context import get_forward_context
 from vllm.models.step5.common.csa_cache import Step5CSAMetadata
@@ -26,6 +27,15 @@ from vllm.v1.attention.backends.rocm_attn import RocmAttentionMetadata
 if TYPE_CHECKING:
     from vllm.models.step5.amd.model import Step5Attention
 
+# Peak bytes per (row, group, region) across scoring and select_regions: FP32
+# scores, the masked copy and the sort's values, int64 indices and workspace.
+_SCORE_BYTES = 48
+
+
+def _rows_per_chunk(groups: int, max_regions: int) -> int:
+    budget = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
+    return max(1, budget // (_SCORE_BYTES * groups * max(max_regions, 1)))
+
 
 def step5_csa_attention(
     hidden_states: torch.Tensor,
@@ -43,7 +53,13 @@ def step5_csa_attention(
     if isinstance(metadata, list):
         metadata = metadata[0]
     if not isinstance(metadata, dict):
-        output.zero_()  # profiling run: caches are not bound yet
+        # Profiling run: caches are not bound yet; claim the scoring budget.
+        torch.empty(
+            envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024,
+            dtype=torch.uint8,
+            device=output.device,
+        )
+        output.zero_()
         return
     indexer = layer.indexer
     assert indexer is not None
@@ -85,17 +101,24 @@ def step5_csa_attention(
     )
 
     max_regions = index_md.max_seq_len // region_size
-    scores = indexer_scores_paged(
-        index_q,
-        weights,
-        summary_pages,
-        summary_md.block_table,
-        req,
-        pos,
-        max_regions=max_regions,
-        region_size=region_size,
+    regions = torch.empty(
+        (n, index_q.shape[1], indexer.topk + 1), dtype=torch.int32, device=query.device
     )
-    regions = select_regions(scores, pos, region_size, indexer.topk)
+    step = _rows_per_chunk(index_q.shape[1], max_regions)
+    for start in range(0, n, step):
+        rows = slice(start, min(start + step, n))
+        scores = indexer_scores_paged(
+            index_q[rows],
+            weights[rows],
+            summary_pages,
+            summary_md.block_table,
+            req[rows],
+            pos[rows],
+            max_regions=max_regions,
+            region_size=region_size,
+        )
+        regions[rows] = select_regions(scores, pos[rows], region_size, indexer.topk)
+        del scores
     key_cache, value_cache = layer.attn.kv_cache.transpose(1, 2).split(
         layer.head_dim, dim=-1
     )
