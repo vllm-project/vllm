@@ -47,14 +47,16 @@ from vllm.entrypoints.serve.utils.tool_calls_utils import (
 from vllm.logger import init_logger
 from vllm.parser import Parser, ParserManager
 from vllm.renderers import BaseRenderer
-from vllm.renderers.chat_utils import ChatTemplateContentFormatOption
+from vllm.renderers.chat_utils import (
+    ChatTemplateContentFormatOption,
+    make_tool_call_id,
+)
 from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.detokenizer_utils import (
     convert_prompt_ids_to_tokens,
     detokenize_incrementally,
     get_leading_space_marker,
 )
-from vllm.utils import random_uuid
 from vllm.utils.async_utils import make_async
 from vllm.v1.engine.detokenizer import uses_fast_detokenizer
 
@@ -334,7 +336,10 @@ class OnlineDerenderer:
             reasoning = None
 
         tc_items = (
-            [ToolCall(id=random_uuid(), function=tc) for tc in tool_calls]
+            [
+                ToolCall(id=tc.id or make_tool_call_id(), function=tc)
+                for tc in tool_calls
+            ]
             if tool_calls
             else []
         )
