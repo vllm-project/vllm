@@ -289,7 +289,7 @@ class OnlineDerenderer:
         outputs: Sequence[CompletionOutput],
         parse_context: ParseContext | None,
         prompt_token_ids: list[int] | None,
-    ) -> list[ChatMessage]:
+    ) -> list[tuple[ChatMessage, str]]:
         """Parse the engine's decoded output text into assistant messages.
 
         Args:
@@ -299,7 +299,7 @@ class OnlineDerenderer:
             prompt_token_ids: Prompt token IDs, if known.
 
         Returns:
-            One message per output, in order.
+            One message and chat `finish_reason` per output in order.
 
         """
         return await self._derender_text_choices_async(
@@ -311,9 +311,15 @@ class OnlineDerenderer:
         outputs: Sequence[CompletionOutput],
         parse_context: ParseContext | None,
         prompt_token_ids: list[int] | None,
-    ) -> list[ChatMessage]:
+    ) -> list[tuple[ChatMessage, str]]:
         if self.parser is None:
-            return [ChatMessage(role="assistant", content=o.text) for o in outputs]
+            return [
+                (
+                    ChatMessage(role="assistant", content=o.text),
+                    resolve_finish_reason(o.finish_reason, None, False),
+                )
+                for o in outputs
+            ]
 
         assert parse_context is not None
         tokenizer = self.renderer.get_tokenizer()
@@ -325,8 +331,9 @@ class OnlineDerenderer:
                 **parse_context.model_dump(exclude={"history_tool_call_cnt"}),
             }
         )
-        return [
-            self._parse_and_assemble(
+        results: list[tuple[ChatMessage, str]] = []
+        for output in outputs:
+            message = self._parse_and_assemble(
                 tokenizer,
                 output.text,
                 output.token_ids,
@@ -335,8 +342,11 @@ class OnlineDerenderer:
                 prompt_token_ids,
                 history_tool_call_count=parse_context.history_tool_call_cnt,
             )
-            for output in outputs
-        ]
+            finish_reason = resolve_finish_reason(
+                output.finish_reason, chat_request, bool(message.tool_calls)
+            )
+            results.append((message, finish_reason))
+        return results
 
     def _resolve_chat_template_kwargs(
         self, chat_request: ChatCompletionRequest

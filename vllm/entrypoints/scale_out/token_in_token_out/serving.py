@@ -3,6 +3,7 @@
 
 
 import asyncio
+import itertools
 import math
 import time
 from collections.abc import AsyncGenerator
@@ -20,6 +21,7 @@ from vllm.entrypoints.generate.base.protocol import (
 from vllm.entrypoints.generate.base.serving import (
     GenerateBaseServing,
     build_spec_decoding_metrics,
+    chat_top_logprobs_limit,
     clamp_prompt_logprobs,
     format_token_id_placeholder,
 )
@@ -236,7 +238,8 @@ class ServingTokens(GenerateBaseServing):
                 "loads a tokenizer, or use output_mode='tokens'."
             )
         if request.output_mode == "derender":
-            # TODO(#57442): reject return_token_logprobs once it lands.
+            # TODO(#57442, #60915): reject the sampled-only and top-k logprob
+            # flags here once either lands.
             if request.stream:
                 return self.create_error_response(
                     "output_mode='derender' does not support stream=true."
@@ -422,6 +425,16 @@ class ServingTokens(GenerateBaseServing):
         derender_mode = request.output_mode == "derender"
         text_mode = request.output_mode == "text" or derender_mode
         tokenizer = self._logprobs_tokenizer(text_mode)
+        # The derender level returns chat logprobs, so it honors
+        # logprob_token_ids and applies the chat top_logprobs cut.
+        if derender_mode:
+            num_logprobs = sampling_params.num_logprobs
+            top_limit = chat_top_logprobs_limit(
+                sampling_params.logprobs, bool(sampling_params.logprob_token_ids)
+            )
+        else:
+            num_logprobs = sampling_params.logprobs
+            top_limit = None
 
         try:
             async for res in result_generator:
@@ -442,7 +455,7 @@ class ServingTokens(GenerateBaseServing):
             out_logprobs = output.logprobs
 
             # This is top_logprobs in completions API
-            if sampling_params.logprobs is not None:
+            if num_logprobs is not None:
                 assert out_logprobs is not None, "Did not output logprobs"
                 logprobs: GenerateLogProbs | ChatCompletionLogProbs | None
                 if text_mode:
@@ -450,6 +463,7 @@ class ServingTokens(GenerateBaseServing):
                         token_ids=token_ids,
                         top_logprobs=out_logprobs,
                         tokenizer=tokenizer,
+                        top_limit=top_limit,
                     )
                 else:
                     logprobs = self._create_tokens_logprobs(
@@ -494,7 +508,7 @@ class ServingTokens(GenerateBaseServing):
             assert self.online_derenderer is not None
             parse_context = request.parse_context
             try:
-                messages = await self.online_derenderer.derender_text_choices(
+                parsed = await self.online_derenderer.derender_text_choices(
                     final_res.outputs, parse_context, final_res.prompt_token_ids
                 )
             except (ValueError, VLLMValidationError) as e:
@@ -502,9 +516,10 @@ class ServingTokens(GenerateBaseServing):
             hide_logprobs = (
                 parse_context is not None and not parse_context.include_reasoning
             )
-            # TODO(#59324): map finish_reason with resolve_finish_reason so
-            # auto tool calls report "tool_calls" like coupled chat.
-            for message, fields in zip(messages, derender_choice_fields, strict=True):
+            for (message, finish_reason), fields in zip(
+                parsed, derender_choice_fields, strict=True
+            ):
+                fields["finish_reason"] = finish_reason
                 if hide_logprobs:
                     fields["logprobs"] = None
                 derender_choices.append(
@@ -780,14 +795,15 @@ class ServingTokens(GenerateBaseServing):
         token_ids: GenericSequence[int],
         top_logprobs: GenericSequence[dict[int, Logprob] | None],
         tokenizer: TokenizerLike | None = None,
+        top_limit: int | None = None,
     ) -> ChatCompletionLogProbs:
-        """Create OpenAI-style logprobs for ``output_mode="text"``.
+        """Create OpenAI style logprobs for `output_mode="text"`.
 
-        With a ``tokenizer`` the tokens are decoded strings and carry ``bytes``;
-        without one (``--return-tokens-as-token-ids``) they are ``token_id:N``
-        placeholders. Like tokens mode, ``top_logprobs`` carries every candidate
-        the engine returned (the sampled token first, then the top k), not cut
-        to the requested count.
+        With a `tokenizer` the tokens are decoded strings and carry `bytes`.
+        Without one (`--return-tokens-as-token-ids`) they are `token_id:N`
+        placeholders. `top_logprobs` keeps the first `top_limit` candidates
+        the engine returned (the sampled token first, then the top k) or all
+        of them when `top_limit` is None, as in tokens mode.
         """
         logprobs_content: list[ChatCompletionLogProbsContent] = []
 
@@ -809,7 +825,9 @@ class ServingTokens(GenerateBaseServing):
                         bytes=token_bytes,
                         top_logprobs=[
                             _top_logprob(top_id, logprob, tokenizer)
-                            for top_id, logprob in step_top_logprobs.items()
+                            for top_id, logprob in itertools.islice(
+                                step_top_logprobs.items(), top_limit
+                            )
                         ],
                     )
                 )

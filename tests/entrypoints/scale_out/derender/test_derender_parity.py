@@ -924,9 +924,8 @@ def _assert_inline_parity(coupled: dict, inline: dict) -> None:
         assert i["message"]["content"] == c["message"]["content"]
         assert i["message"].get("reasoning") == c["message"].get("reasoning")
         assert _tool_sig(i) == _tool_sig(c)
-        # TODO(#59324): compare tool call finish_reason once it is mapped.
-        if not _tool_sig(c):
-            assert i["finish_reason"] == c["finish_reason"]
+        assert _tool_id_shapes(i) == _tool_id_shapes(c)
+        assert i["finish_reason"] == c["finish_reason"]
 
 
 @pytest.mark.asyncio
@@ -988,16 +987,24 @@ async def test_inline_derender_parity(client, content, extra):
         assert len(_tool_sig(inline["choices"][0])) <= 1
 
 
+def _top_tokens(entry: dict) -> list[str]:
+    return [top["token"] for top in entry["top_logprobs"]]
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("include_reasoning", [True, False])
-async def test_inline_derender_logprobs(client, include_reasoning):
-    """Logprobs match coupled chat and are dropped when reasoning is hidden."""
+@pytest.mark.parametrize(
+    ("include_reasoning", "extra"),
+    [
+        pytest.param(True, {"top_logprobs": 3}, id="top3"),
+        pytest.param(False, {"top_logprobs": 3}, id="top3-reasoning-hidden"),
+        pytest.param(True, {"logprob_token_ids": [15, 16, 17]}, id="token-ids"),
+    ],
+)
+async def test_inline_derender_logprobs(client, include_reasoning, extra):
+    """Logprobs match coupled chat, including the `top_logprobs` cut and
+    `logprob_token_ids`, and are dropped when reasoning is hidden."""
     messages = [{"role": "user", "content": "What is 2+2?"}]
-    extra = {
-        "logprobs": True,
-        "top_logprobs": 3,
-        "include_reasoning": include_reasoning,
-    }
+    extra = {"logprobs": True, "include_reasoning": include_reasoning, **extra}
     inline = (await _inline_derender(client, messages, **extra))["choices"][0]
 
     if not include_reasoning:
@@ -1010,3 +1017,11 @@ async def test_inline_derender_logprobs(client, include_reasoning):
     assert [(e["token"], e["bytes"]) for e in i_content] == [
         (e["token"], e["bytes"]) for e in c_content
     ]
+    if "top_logprobs" in extra:
+        # Near ties can reorder candidates across the two generations, so
+        # compare the cut, not the candidates.
+        assert all(len(e["top_logprobs"]) == 3 for e in i_content)
+    else:
+        assert [sorted(_top_tokens(e)) for e in i_content] == [
+            sorted(_top_tokens(e)) for e in c_content
+        ]

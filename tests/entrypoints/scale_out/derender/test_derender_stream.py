@@ -464,15 +464,19 @@ def test_derender_text_choices_builds_request_from_parse_context(
             "history_tool_call_cnt": 3,
         }
     )
-    output = MagicMock(text="raw", token_ids=[1, 2])
+    output = MagicMock(text="raw", token_ids=[1, 2], finish_reason="stop")
 
-    (message,) = derenderer._derender_text_choices([output], parse_context, [11])
+    ((message, finish_reason),) = derenderer._derender_text_choices(
+        [output], parse_context, [11]
+    )
 
     chat_request = parser.parse.call_args.args[1]
     assert chat_request.tool_choice == parse_context.tool_choice
     parser.set_prompt_token_ids.assert_called_once_with([11])
     parser.set_history_tool_call_count.assert_called_once_with(3)
     assert len(message.tool_calls) == 1
+    # A forced named tool reports "stop", like coupled chat.
+    assert finish_reason == ("stop" if isinstance(tool_choice, dict) else "tool_calls")
 
 
 class TestDetokenizeDelta:
