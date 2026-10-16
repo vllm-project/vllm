@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""PP broadcast requirements and deferred state updates."""
+"""Which rows the PP sampled-token broadcast must carry."""
 
 from unittest.mock import Mock
 
@@ -48,6 +48,19 @@ def test_excludes_non_final_prefill_chunks():
     assert mask.tolist() == [False, True]
 
 
+def test_no_broadcast_when_no_row_samples():
+    """Unchanged behaviour: an all-prefill batch needs no broadcast at all."""
+    batch = _batch(
+        num_computed=[0, 512],
+        prefill_len=[4096, 4096],
+        num_scheduled=[448, 448],
+    )
+
+    need_broadcast, _ = pp_utils.compute_pp_output_requirements(batch)
+
+    assert not need_broadcast
+
+
 def test_keeps_decoding_request_past_its_length_cap():
     """A decoding request must never be dropped from the broadcast.
 
@@ -84,6 +97,26 @@ def test_decode_row_ahead_of_a_prefill_chunk():
 
     assert need_broadcast
     assert mask.tolist() == [True, False]
+
+
+def test_excludes_final_prefill_chunk_reaching_its_length_cap():
+    """A max_tokens=1 final chunk hands its token off and leaves the engine.
+
+    Disaggregated prefill submits max_tokens=1, so the request finishes with
+    the final chunk's single sample and no follow-up step on this engine
+    reads the broadcast payload.
+    """
+    batch = _batch(
+        num_computed=[1000],
+        prefill_len=[1004],
+        num_scheduled=[4],
+        is_prefilling=[True],
+        max_seq_len=[1005],
+    )
+
+    need_broadcast, _ = pp_utils.compute_pp_output_requirements(batch)
+
+    assert not need_broadcast
 
 
 def test_keeps_final_prefill_chunk_with_generation_budget_left():
@@ -124,7 +157,7 @@ def test_length_cap_overrun_decode_row_is_kept():
 
 
 def test_finishing_prefill_row_does_not_drop_a_sibling_row():
-    """Only the decoding sibling needs a deferred update."""
+    """Only finishing rows are excluded; a decoding sibling keeps its row."""
     batch = _batch(
         num_computed=[1000, 10],
         prefill_len=[1004, 8],
