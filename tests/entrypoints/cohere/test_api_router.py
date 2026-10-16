@@ -598,6 +598,21 @@ class TestCohereErrorEnvelope:
         assert "message" in body
         assert isinstance(body["message"], str) and body["message"]
 
+    @pytest.mark.parametrize("path", ["/cohere/v2/chat", "/cohere/v2/chat/render"])
+    def test_required_tool_choice_without_tools_returns_400(self, path):
+        """Reject an impossible tool choice before reaching either handler."""
+        app = _build_app_with_vllm_handlers(handler=None)
+        with TestClient(app) as client:
+            response = client.post(
+                path,
+                json={**_minimal_request_body(), "tool_choice": "REQUIRED"},
+            )
+        assert response.status_code == HTTPStatus.BAD_REQUEST
+        body = response.json()
+        assert "error" not in body
+        assert "REQUIRED" in body["message"]
+        assert "tools" in body["message"]
+
     def test_http_error_body_is_cohere_shaped(self):
         # A raised ``HTTPException`` from anywhere in the request cycle
         # is routed through ``http_exception_handler`` (producing the
