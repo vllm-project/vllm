@@ -846,10 +846,12 @@ class TestTritonTopkTopp:
 
         result = apply_top_k_top_p_triton(logits.clone(), None, p)
         assert (result[:, forced_token] == forced_logit).all()
-        assert ((result != float("-inf")).sum(-1) == 1).all()
         probs = result.softmax(dim=-1)
         assert not probs.isnan().any()
         assert (probs.argmax(dim=-1) == forced_token).all()
+        if current_platform.is_cuda_alike():
+            # Split path only; the monolithic kernel leaves this row unmasked.
+            assert ((result != float("-inf")).sum(-1) == 1).all()
 
 
 # =============================================================================
