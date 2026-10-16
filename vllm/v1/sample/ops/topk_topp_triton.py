@@ -1406,8 +1406,9 @@ def _apply_topp_split(
     )
 
 
-def _top_k_top_p_warmup_inputs(vllm_config: Any) -> dict[str, Any]:
-    """Batch shapes that reach distinct kernel variants, with/without k and p."""
+def _apply_top_k_top_p_warmup_inputs(vllm_config: Any) -> dict[str, Any]:
+    """Warmup inputs for apply_top_k_top_p_triton: a batch size at each
+    boundary where the compiled kernels change, with and without k and p."""
     vocab_size = vllm_config.model_config.get_vocab_size()
     max_batch_size = _max_sampler_batch_size(vllm_config)
     num_sm = num_compute_units()
@@ -1429,7 +1430,7 @@ def _top_k_top_p_warmup_inputs(vllm_config: Any) -> dict[str, Any]:
     )
 
 
-@triton_warmup_launcher(_top_k_top_p_warmup_inputs)
+@triton_warmup_launcher(_apply_top_k_top_p_warmup_inputs)
 def apply_top_k_top_p_triton(
     logits: torch.Tensor,
     k: torch.Tensor | None,
