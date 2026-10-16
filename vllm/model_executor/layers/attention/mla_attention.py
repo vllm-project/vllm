@@ -2024,6 +2024,7 @@ def build_mla_chunked_context_metadata(
     dcp_local_block_size: int,
     dcp_virtual_block_size: int,
     dcp_manager: MLADCPManager | None = None,
+    align_indptr: bool = False,
 ) -> "MLACommonPrefillMetadata.ChunkedContextMetadata | None":
     """Build chunked-context metadata for an MLA prefill.
 
@@ -2043,6 +2044,7 @@ def build_mla_chunked_context_metadata(
         dcp_local_block_size: Per-rank interleave block size for DCP.
         dcp_virtual_block_size: ``dcp_local_block_size * dcp_world_size``.
         dcp_manager: Shared MLA DCP collective manager.
+        align_indptr: Align packed int32 indptr slices to 16 bytes for CuTe DSL.
 
     Returns:
         The chunked-context metadata, or None when no prefill has any context.
@@ -2123,13 +2125,14 @@ def build_mla_chunked_context_metadata(
         num_tokens = sum(plan.seq_lens)
         num_local_tokens = num_tokens
 
-        # Align every int32 indptr slice to 16 bytes for CuTe prefill.
-        padding = -boundary_offset % 4
-        cu_seq_lens_flat.extend([0] * padding)
-        cu_seqlens_q_flat.extend([0] * padding)
-        if use_dcp:
-            padded_local_cu_seq_lens_flat.extend([0] * padding)
-        boundary_offset += padding
+        if align_indptr:
+            # CuTe DSL requires 16-byte-aligned int32 indptrs.
+            padding = -boundary_offset % 4
+            cu_seq_lens_flat.extend([0] * padding)
+            cu_seqlens_q_flat.extend([0] * padding)
+            if use_dcp:
+                padded_local_cu_seq_lens_flat.extend([0] * padding)
+            boundary_offset += padding
 
         seq_lens_flat.extend(plan.seq_lens)
         cu_seq_lens_flat.extend(itertools.accumulate(plan.seq_lens, initial=0))
@@ -2636,6 +2639,10 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 dcp_local_block_size=self.dcp_local_block_size,
                 dcp_virtual_block_size=self.dcp_virtual_block_size,
                 dcp_manager=self.dcp_manager,
+                align_indptr=(
+                    self.vllm_config.attention_config.trtllm_ragged_backend
+                    == "cute-dsl"
+                ),
             )
 
             prefill_metadata = MLACommonPrefillMetadata(

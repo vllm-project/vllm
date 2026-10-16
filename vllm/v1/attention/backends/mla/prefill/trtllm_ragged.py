@@ -79,11 +79,10 @@ class TrtllmRaggedPrefillBackend(MLAPrefillBackend):
             v_head_dim=v_head_dim,
             vllm_config=vllm_config,
         )
-        self._use_cute_context = (
-            vllm_config.attention_config.use_cute_dsl_prefill_context
-        )
-        self._use_cute_new_tokens = (
-            vllm_config.attention_config.use_cute_dsl_prefill_new_tokens
+        self._context_backend = (
+            "cute-dsl"
+            if vllm_config.attention_config.trtllm_ragged_backend == "cute-dsl"
+            else "trtllm-gen"
         )
         self._workspace_spec = (
             (envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE,),
@@ -179,7 +178,6 @@ class TrtllmRaggedPrefillBackend(MLAPrefillBackend):
             cum_seq_lens_kv=self._prefill_metadata.query_start_loc,
             enable_pdl=False,
             is_causal=True,
-            backend="cute-dsl" if self._use_cute_new_tokens else "trtllm-gen",
             return_lse=return_softmax_lse,
             out=out,
             skip_all_rows_active_check=True,
@@ -232,7 +230,7 @@ class TrtllmRaggedPrefillBackend(MLAPrefillBackend):
             cum_seq_lens_kv=chunk.cu_seq_lens,
             enable_pdl=False,
             is_causal=False,
-            backend="cute-dsl" if self._use_cute_context else "trtllm-gen",
+            backend=self._context_backend,
             return_lse=True,
             out=out,
             skip_all_rows_active_check=True,
