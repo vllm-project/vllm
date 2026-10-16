@@ -8,6 +8,7 @@ from types import UnionType
 from typing import Any, Literal, NamedTuple, Union, get_args, get_origin
 
 import jinja2.nodes
+import transformers.utils.chat_template_utils as hf_chat_utils
 from typing_extensions import get_type_hints
 
 from vllm.exceptions import VLLMValidationError
@@ -38,8 +39,6 @@ def _parse_chat_template(chat_template: str) -> jinja2.nodes.Template:
     parses through it for content-format detection, and the supported
     transformers range (``>=5.16.1,<5.20``) keeps the helper.
     """
-    import transformers.utils.chat_template_utils as hf_chat_utils
-
     compiled = hf_chat_utils._compile_jinja_template(chat_template)
     return compiled.environment.parse(chat_template)
 
