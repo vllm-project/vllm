@@ -21,7 +21,10 @@ from vllm.entrypoints.pooling.offline import PoolingOfflineMixin
 from vllm.entrypoints.pooling.token_embed.late_chunking import (
     build_late_chunking_metadata,
 )
-from vllm.entrypoints.pooling.token_embed.protocol import TokenEmbeddingRequest
+from vllm.entrypoints.pooling.token_embed.protocol import (
+    TokenEmbeddingRequest,
+    TokenEmbeddingResponse,
+)
 from vllm.entrypoints.pooling.token_embed.serving import ServingTokenEmbedding
 from vllm.entrypoints.pooling.typing import (
     OfflineEncodeInputsContext,
@@ -385,6 +388,56 @@ def test_embed_preserves_task_validation(runner, task, supported_tasks, error):
     with pytest.raises(ValueError, match=error):
         PoolingOfflineMixin.embed(llm, "text", use_tqdm=False)
     llm._run_tiling_engine.assert_not_called()
+
+
+@pytest.mark.parametrize("chunk_size", [None, 1])
+@pytest.mark.parametrize(
+    "response_cls, dtype",
+    [
+        (JSONResponse, torch.float32),
+        (ORJSONResponse, torch.float32),
+        (ORJSONResponse, torch.bfloat16),
+    ],
+)
+def test_token_embedding_response_preserves_ndarray_and_optional_ranges(
+    late_chunk_processor, chunk_size, response_cls, dtype
+):
+    if response_cls is ORJSONResponse:
+        pytest.importorskip("orjson")
+    ctx = _online_chunk_context("a b", chunk_size=chunk_size)
+    processor = late_chunk_processor
+    ctx.engine_inputs = [
+        processor.render(r) for r in processor.get_request_factory_online(ctx)
+    ]
+    output = _chunk_output(0, rows=4)
+    # Exercise the existing encoder's contiguous-copy and dtype fallback paths.
+    data = (torch.arange(16).reshape(4, 4).to(dtype) / 10).T
+    output.outputs.data = data
+    ctx.final_res_batch = [output]
+    processor.post_process_online(ctx)
+    serving = object.__new__(ServingTokenEmbedding)
+    serving.json_response_cls = response_cls
+
+    with mock.patch.object(
+        response_cls, "render", autospec=True, side_effect=response_cls.render
+    ) as render:
+        response = serving._build_response(ctx)
+    encoded = render.call_args.args[1]["data"][0]["embedding"]
+    if response_cls is ORJSONResponse and dtype == torch.float32:
+        # An ndarray must reach the renderer, without Pydantic expanding it.
+        assert torch.equal(torch.from_numpy(encoded), data)
+    body = json.loads(response.body)
+    TokenEmbeddingResponse.model_validate(body)
+    item = body["data"][0]
+    torch.testing.assert_close(torch.tensor(item["embedding"], dtype=dtype), data)
+    if chunk_size is None:
+        assert "late_chunking" not in item
+        assert not ctx.late_chunking
+        assert not processor.renderer.render_cmpl.call_args.kwargs[
+            "tok_params"
+        ].return_token_offsets
+    else:
+        assert item["late_chunking"]["chunks"][0]["char_range"] is None
 
 
 @pytest.mark.parametrize("response_cls", [JSONResponse, ORJSONResponse])
