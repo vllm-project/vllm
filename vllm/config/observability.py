@@ -221,5 +221,6 @@ class ObservabilityConfig:
             )
         return self
 
+    @cached_property
     def is_tracing_enabled(self) -> bool:
         return self.otlp_traces_endpoint is not None

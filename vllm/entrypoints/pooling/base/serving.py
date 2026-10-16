@@ -29,10 +29,10 @@ from vllm.utils.async_utils import make_async, merge_async_iterators
 from ...serve.engine.protocol import ErrorResponse
 from ..typing import AnyPoolingRequest, PoolingServeContext
 from .io_processor import PoolingIOProcessor
-from .observability import PoolingServingObservabilityMixin
+from .observability import TO_S, ObservabilityMixin
 
 
-class PoolingBaseServing(BaseServing, PoolingServingObservabilityMixin, ABC):
+class PoolingBaseServing(BaseServing, ObservabilityMixin, ABC):
     request_id_prefix: ClassVar[str]
 
     def __init__(
@@ -66,20 +66,20 @@ class PoolingBaseServing(BaseServing, PoolingServingObservabilityMixin, ABC):
             self._postprocessing, executor=self._executor
         )
 
-        PoolingServingObservabilityMixin.__init__(self)
+        ObservabilityMixin.__init__(self)
 
     async def __call__(
         self,
         request: AnyPoolingRequest,
         raw_request: Request | None = None,
     ) -> Response:
-        arrival_time = time.time_ns()
+        arrival_time_ns = time.time_ns()
 
         io_processor = self.get_io_processor(request)
         ctx = await self._init_ctx(io_processor, request, raw_request)
-        ctx.arrival_time = arrival_time
+        ctx.arrival_time_ns = arrival_time_ns
 
-        async with self._maybe_tracing(ctx, io_processor, raw_request):
+        async with self.maybe_tracing(ctx, io_processor, raw_request):
             await self._preprocessing(io_processor, ctx)
             await self._engine_call(ctx)
             return await self._postprocessing_async(io_processor, ctx)
@@ -91,17 +91,28 @@ class PoolingBaseServing(BaseServing, PoolingServingObservabilityMixin, ABC):
     async def _preprocessing(
         self, io_processor: PoolingIOProcessor, ctx: PoolingServeContext
     ):
-        requests = io_processor.get_request_factory_online(ctx)
+        async with self.maybe_start_span_async(
+            ctx.entrypoint_tracer,
+            self.span_entrypoint_preprocessing,
+            context=ctx.request_span_context,
+        ):
+            requests = io_processor.get_request_factory_online(ctx)
 
-        if len(requests) == 0:
-            raise ValueError("You must pass at least one prompt")
+            if len(requests) == 0:
+                raise ValueError("You must pass at least one prompt")
 
-        ctx.engine_inputs = await asyncio.gather(
-            *[io_processor.render_async(request) for request in requests]
-        )
+            ctx.engine_inputs = await asyncio.gather(
+                *[io_processor.render_async(request) for request in requests]
+            )
 
         if self.is_tracing_request:
             ctx.preprocessing_finished = time.time_ns()
+
+            assert ctx.engine_inputs is not None
+            for engine_inputs in ctx.engine_inputs:
+                engine_inputs["prompts"]["arrival_time"] = (
+                    ctx.preprocessing_finished / TO_S
+                )
 
     async def _collect_batch(
         self,
@@ -129,9 +140,17 @@ class PoolingBaseServing(BaseServing, PoolingServingObservabilityMixin, ABC):
 
         ctx.final_res_batch = [res for res in final_res_batch if res is not None]
 
-    async def _engine_call(self, ctx):
-        await self._prepare_generators(ctx)
-        await self._collect_batch(ctx)
+    async def _engine_call(self, ctx: PoolingServeContext):
+        async with self.maybe_start_span_async(
+            ctx.entrypoint_tracer,
+            self.span_entrypoint_engine_call,
+            context=ctx.request_span_context,
+        ) as span:
+            if span is not None:
+                ctx.trace_headers = self._get_span_trace_headers(span)
+
+            await self._prepare_generators(ctx)
+            await self._collect_batch(ctx)
 
         if self.is_tracing_request:
             ctx.engine_call_finished = time.time_ns()
@@ -140,9 +159,13 @@ class PoolingBaseServing(BaseServing, PoolingServingObservabilityMixin, ABC):
     def _postprocessing(
         self, io_processor: PoolingIOProcessor, ctx: PoolingServeContext
     ):
-
-        io_processor.post_process_online(ctx)
-        response = self._build_response(ctx)
+        with self.maybe_start_span(
+            ctx.entrypoint_tracer,
+            self.span_entrypoint_postprocessing,
+            context=ctx.request_span_context,
+        ):
+            io_processor.post_process_online(ctx)
+            response = self._build_response(ctx)
 
         if self.is_tracing_request:
             ctx.postprocessing_finished = time.time_ns()
@@ -199,12 +222,6 @@ class PoolingBaseServing(BaseServing, PoolingServingObservabilityMixin, ABC):
 
         generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
 
-        trace_headers = (
-            None
-            if ctx.raw_request is None
-            else await self._get_trace_headers(ctx.raw_request.headers)
-        )
-
         assert ctx.pooling_params is not None
         pooling_params = ctx.pooling_params
         pooling_params.verify(self.model_config)
@@ -229,7 +246,7 @@ class PoolingBaseServing(BaseServing, PoolingServingObservabilityMixin, ABC):
                 pooling_params=engine_input["params"],
                 lora_request=engine_input["lora_requests"],
                 priority=engine_input["priorities"],
-                trace_headers=trace_headers,
+                trace_headers=ctx.trace_headers,
             )
 
             generators.append(generator)

@@ -1,14 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
+import threading
 import time
 from collections.abc import Mapping
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 
 from fastapi import Request
+from opentelemetry.sdk.trace import Span
 from opentelemetry.trace import (
     NonRecordingSpan,
     Status,
     StatusCode,
+    Tracer,
     set_span_in_context,
 )
 
@@ -24,21 +28,21 @@ TO_S = 1000_000_000
 TO_MS = 1000_000
 
 
-class PoolingServingObservabilityMixin:
+class ObservabilityMixin:
     vllm_config: VllmConfig
     renderer: BaseRenderer
 
     scope_request: str = "request"
     span_request = "request"
 
-    scope_endpoint: str = "entrypoint"
+    scope_entrypoint: str = "entrypoint"
     span_entrypoint_preprocessing = "preprocessing"
     span_entrypoint_engine_call = "engine_call"
     span_entrypoint_postprocessing = "postprocessing"
 
     def __init__(self):
         observability_config = self.vllm_config.observability_config
-        self.is_tracing_request = observability_config.is_tracing_enabled()
+        self.is_tracing_request = observability_config.is_tracing_enabled
 
         if not self.is_tracing_request:
             return
@@ -57,7 +61,7 @@ class PoolingServingObservabilityMixin:
         }
 
     @asynccontextmanager
-    async def _maybe_tracing(
+    async def maybe_tracing(
         self,
         ctx: PoolingServeContext,
         io_processor: PoolingIOProcessor,
@@ -75,10 +79,14 @@ class PoolingServingObservabilityMixin:
             raw_trace_headers if raw_trace_headers is not None else {}
         )
         request_span = request_tracer.start_span(
-            self.span_request, context=trace_context, start_time=ctx.arrival_time
+            self.span_request, context=trace_context, start_time=ctx.arrival_time_ns
         )
         request_span_context = get_span_context(request_span)
         ctx.request_span_context = request_span_context
+
+        ctx.entrypoint_tracer = self.trace_provider.get_tracer(
+            self.scope_entrypoint, attributes=self.scope_endpoint_attributes
+        )
 
         try:
             yield
@@ -95,6 +103,42 @@ class PoolingServingObservabilityMixin:
             end_time = time.time_ns()
             request_span.end(end_time)
 
+    @contextmanager
+    def maybe_start_span(self, tracer: Tracer | None, *args, **kwargs):
+        if tracer is None:
+            yield None
+        else:
+            start_time = time.time_ns()
+            attributes = kwargs.pop("attributes", {})
+            attributes[SpanAttributes.GEN_AI_PROCESS_ID] = str(os.getpid())
+            attributes[SpanAttributes.GEN_AI_THREADING_ID] = str(threading.get_ident())
+
+            span = tracer.start_span(
+                *args, start_time=start_time, attributes=attributes, **kwargs
+            )
+
+            yield span
+            end_time = time.time_ns()
+            span.end(end_time)
+
+    @asynccontextmanager
+    async def maybe_start_span_async(self, tracer: Tracer | None, *args, **kwargs):
+        if tracer is None:
+            yield None
+        else:
+            start_time = time.time_ns()
+            attributes = kwargs.pop("attributes", {})
+            attributes[SpanAttributes.GEN_AI_PROCESS_ID] = str(os.getpid())
+            attributes[SpanAttributes.GEN_AI_THREADING_ID] = str(threading.get_ident())
+
+            span = tracer.start_span(
+                *args, start_time=start_time, attributes=attributes, **kwargs
+            )
+
+            yield span
+            end_time = time.time_ns()
+            span.end(end_time)
+
     def _get_request_span_attributes(
         self,
         ctx: PoolingServeContext,
@@ -105,7 +149,7 @@ class PoolingServingObservabilityMixin:
             SpanAttributes.GEN_AI_POOLING_IO_PROCESSOR: io_processor.__class__.__name__,
             SpanAttributes.GEN_AI_POOLING_REQUEST_CLASS: ctx.request.__class__.__name__,
             SpanAttributes.GEN_AI_LATENCY_PREPROCESSING: (
-                ctx.preprocessing_finished - ctx.arrival_time
+                ctx.preprocessing_finished - ctx.arrival_time_ns
             )
             / TO_MS,
             SpanAttributes.GEN_AI_LATENCY_ENGINE_CALL: (
@@ -118,6 +162,12 @@ class PoolingServingObservabilityMixin:
             / TO_MS,
         }
 
+    def _get_span_trace_headers(self, span: Span) -> Mapping[str, str]:
+        trace_headers: Mapping[str, str] = {}
+        span_context = get_span_context(span)
+        self.propagator.inject(trace_headers, context=span_context)
+        return trace_headers
+
     async def _get_trace_headers(
         self, headers: Mapping[str, str]
     ) -> Mapping[str, str] | None:
@@ -126,7 +176,7 @@ class PoolingServingObservabilityMixin:
         return extract_trace_headers(headers)
 
 
-def get_span_context(span):
+def get_span_context(span: Span):
     return set_span_in_context(NonRecordingSpan(span.get_span_context()))
 
 

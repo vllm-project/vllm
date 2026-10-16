@@ -130,14 +130,11 @@ class PoolingServeContext(Generic[PoolingRequestT]):
     trace_headers: Mapping[str, str] | None = None
     entrypoint_tracer: Tracer | None = None
     request_span_context: Any | None = None
-    entrypoint_span_links: Any | None = None
     ## timestamp time_ns()
-    arrival_time: int = 0
+    arrival_time_ns: int = 0
     preprocessing_finished: int = 0
     engine_call_finished: int = 0
     postprocessing_finished: int = 0
-    ## request attributes
-    request_attributes: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
