@@ -19,12 +19,14 @@ if TYPE_CHECKING:
     from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorWorkerMetadata
     from vllm.distributed.ec_transfer.ec_connector.metrics import ECConnectorStats
     from vllm.distributed.kv_events import KVConnectorKVEvents
+    from vllm.distributed.kv_transfer.kv_checksum.worker import KVChecksumOutput
     from vllm.distributed.kv_transfer.kv_connector.v1.base import (
         KVConnectorWorkerMetadata,
     )
     from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 else:
     AuxRequestOutput = object
+    KVChecksumOutput = object
     KVConnectorStats = object
     KVConnectorWorkerMetadata = object
     KVConnectorKVEvents = object
@@ -231,6 +233,8 @@ class KVConnectorOutput:
     # It captures a static setup info and should almost always remain constant
     # for a given connector after discovery. Default value entails no change.
     expected_finished_count: int = 0
+    # This step's KV checksums, when KV checksums are enabled.
+    kv_checksums: KVChecksumOutput | None = None
 
     def is_empty(self):
         return (
@@ -241,6 +245,7 @@ class KVConnectorOutput:
             and not self.invalid_block_ids
             and not self.failed_recving
             and not self.kv_connector_worker_meta
+            and self.kv_checksums is None
         )
 
 
