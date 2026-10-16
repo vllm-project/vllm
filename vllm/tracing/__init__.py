@@ -3,7 +3,12 @@
 
 import functools
 from collections.abc import Callable
-from typing import Any, TypeAlias
+from contextlib import contextmanager
+from contextvars import ContextVar
+from typing import TYPE_CHECKING, Any, TypeAlias
+
+if TYPE_CHECKING:
+    from opentelemetry.trace import Span
 
 # Import the implementation details
 from .otel import (
@@ -35,6 +40,9 @@ __all__ = [
     "SpanKind",
     "StatusCode",
     "start_span",
+    "RequestTrace",
+    "get_request_trace",
+    "use_request_trace",
     "extract_trace_context",
     "extract_trace_headers",
     "log_tracing_disabled_warning",
@@ -65,6 +73,44 @@ _REGISTERED_TRACING_BACKENDS: dict[
         manual_instrument_otel,
     ),
 }
+
+
+class RequestTrace:
+    """Frontend ownership of engine spans until final response processing."""
+
+    def __init__(self):
+        self.spans: list[Span] = []
+        self.closed = False
+        self.failed = False
+
+    def end(self, *, error: bool = False) -> None:
+        if self.closed:
+            return
+        self.closed = True
+        for span in self.spans:
+            if (error or self.failed) and span.is_recording():
+                span.set_status(StatusCode.ERROR)
+            span.end()
+        self.spans.clear()
+
+
+_REQUEST_TRACE: ContextVar[RequestTrace | None] = ContextVar(
+    "vllm_request_trace", default=None
+)
+
+
+def get_request_trace() -> RequestTrace | None:
+    owner = _REQUEST_TRACE.get()
+    return owner if owner is not None and not owner.closed else None
+
+
+@contextmanager
+def use_request_trace(owner: RequestTrace):
+    token = _REQUEST_TRACE.set(owner)
+    try:
+        yield
+    finally:
+        _REQUEST_TRACE.reset(token)
 
 
 def init_tracer(
