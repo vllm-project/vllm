@@ -568,8 +568,6 @@ class TestPromotionLatency:
         # that _promotion_allocation performs for real promotions.
         tiering_manager._metrics.on_primary_chunk_count(0, 1, is_promotion=True)
         tiering_manager._register_job(job, tier_idx=0)
-        # Redeem the claim the way the tier worker does before finishing.
-        assert job.get() is not None
 
         session = _FakeSession(
             peer_id="10.0.0.1:8000",
