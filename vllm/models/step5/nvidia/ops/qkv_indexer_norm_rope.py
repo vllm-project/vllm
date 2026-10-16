@@ -124,7 +124,7 @@ def _prepare_main(
     tl.store(VCache + offset, result, valid & (h >= QH + KH)[:, None] & (slot >= 0))
 
 
-@triton.jit(do_not_specialize=["CSA_ROWS", "TOKENS"])
+@triton.jit(do_not_specialize=["CSA_ROWS", "TOKENS", "MAIN_SLOT_ROWS"])
 def _joint_prepare(
     Q,
     K,
@@ -177,7 +177,7 @@ def _joint_prepare(
     MAIN_STRIDE: tl.constexpr,
     MAIN_ROTARY: tl.constexpr,
     MAIN_ROPE_STRIDE: tl.constexpr,
-    MAIN_SLOT_ROWS: tl.constexpr,
+    MAIN_SLOT_ROWS,
     MAIN_BLOCK_SIZE: tl.constexpr,
     MAIN_CACHE_BLOCK: tl.constexpr,
     MAIN_CACHE_TOKEN: tl.constexpr,
