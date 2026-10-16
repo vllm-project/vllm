@@ -33,6 +33,11 @@ from vllm.v1.attention.ops.cp_common import (
     direct_cp_enabled,
     direct_cp_multicast_enabled,
 )
+from vllm.v1.attention.ops.dcp_custom_ops import (
+    DirectDCPA2AReduce,
+    DirectDCPKVGather,
+    DirectDCPQGather,
+)
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 logger = init_logger(__name__)
@@ -1098,13 +1103,16 @@ class DirectDCPA2AWorkspace(DirectCPWorkspace):
         is_lse_base_on_e: bool,
         seq_lens: torch.Tensor | None = None,
         query_start_loc: torch.Tensor | None = None,
+        kernel: Callable[..., None] | None = None,
     ) -> torch.Tensor:
         ubatch = dbo_current_ubatch_id()
         num_tokens = partial_output.shape[0]
         output = partial_output.new_empty(
             (num_tokens, self.heads_per_rank, self.head_dim)
         )
-        torch.ops._C.direct_dcp_a2a_lse_reduce(
+        if kernel is None:
+            kernel = torch.ops._C.direct_dcp_a2a_lse_reduce
+        kernel(
             partial_output,
             partial_lse,
             seq_lens,
@@ -1245,7 +1253,11 @@ class DirectDCPQGatherWorkspace(DirectCPWorkspace):
         self.completion = self.received_signal.new_zeros((num_ubatches, 1))
         torch.accelerator.synchronize()
 
-    def gather(self, local_query: torch.Tensor) -> torch.Tensor:
+    def gather(
+        self,
+        local_query: torch.Tensor,
+        kernel: Callable[..., None] | None = None,
+    ) -> torch.Tensor:
         ubatch = dbo_current_ubatch_id()
         if not 0 <= ubatch < self.num_ubatches:
             raise ValueError(
@@ -1268,7 +1280,9 @@ class DirectDCPQGatherWorkspace(DirectCPWorkspace):
             ),
         )
         query_multicast_ptr, signal_multicast_ptr = self.multicast_ptrs[ubatch]
-        torch.ops._C.direct_dcp_q_gather(
+        if kernel is None:
+            kernel = torch.ops._C.direct_dcp_q_gather
+        kernel(
             local_query,
             output,
             self.received_signal[ubatch],
@@ -1381,14 +1395,21 @@ class DirectDCPKVGatherWorkspace(DirectCPWorkspace):
         self.completion = self.received_signal.new_zeros((num_ubatches, 2))
         torch.accelerator.synchronize()
 
-    def gather(self, gathered_kv: torch.Tensor, local_kv: torch.Tensor) -> None:
+    def gather(
+        self,
+        gathered_kv: torch.Tensor,
+        local_kv: torch.Tensor,
+        kernel: Callable[..., None] | None = None,
+    ) -> None:
         ubatch = dbo_current_ubatch_id()
         if not 0 <= ubatch < self.num_ubatches:
             raise ValueError(
                 f"DCP kv-gather ubatch {ubatch} exceeds {self.num_ubatches} slots"
             )
         kv_multicast_ptr, signal_multicast_ptr = self.multicast_ptrs[ubatch]
-        torch.ops._C.direct_dcp_kv_gather(
+        if kernel is None:
+            kernel = torch.ops._C.direct_dcp_kv_gather
+        kernel(
             local_kv,
             self.received_kv[ubatch],
             self.received_signal[ubatch],
@@ -1521,6 +1542,7 @@ class MLADCPManager:
                 self._direct_workspace_combine,
                 direct_workspace,
                 is_lse_base_on_e=is_lse_base_on_e,
+                kernel=DirectDCPA2AReduce().forward,
             )
 
         combine_fn = (
@@ -1544,6 +1566,7 @@ class MLADCPManager:
         is_lse_base_on_e: bool,
         seq_lens: torch.Tensor | None = None,
         query_start_loc: torch.Tensor | None = None,
+        kernel: Callable[..., None] | None = None,
     ) -> torch.Tensor:
         # Forced MQA path pass all batch tokens (including prefill) into combine,
         # which may exceed the direct symmetric-memory workspace. Fall back to
@@ -1555,6 +1578,7 @@ class MLADCPManager:
                 is_lse_base_on_e,
                 seq_lens,
                 query_start_loc,
+                kernel=kernel,
             )
         return dcp_a2a_lse_reduce(
             partial_output,
@@ -1586,6 +1610,7 @@ class MLADCPManager:
             return functools.partial(
                 self._direct_workspace_query_gather,
                 direct_workspace,
+                kernel=DirectDCPQGather().forward,
             )
         return self._gather_query
 
@@ -1599,12 +1624,13 @@ class MLADCPManager:
         self,
         direct_workspace: DirectDCPQGatherWorkspace,
         query: torch.Tensor,
+        kernel: Callable[..., None] | None = None,
     ) -> torch.Tensor:
         # Forced MQA path can be taken for long sparse MLA prefills, whose batch size
         # may exceed the direct symmetric-memory workspace. Fall back to allgather
         # for those cases.
         if query.shape[0] <= direct_workspace.max_num_tokens:
-            return direct_workspace.gather(query)
+            return direct_workspace.gather(query, kernel=kernel)
         return self._gather_query(query)
 
     def init_kv_gather(
@@ -1634,7 +1660,9 @@ class MLADCPManager:
             logger.info_once(
                 "Using direct symmetric-memory DCP chunked-context KV gather for MLA."
             )
-            self._kv_gather = direct_workspace.gather
+            self._kv_gather = functools.partial(
+                direct_workspace.gather, kernel=DirectDCPKVGather().forward
+            )
         else:
             self._kv_gather = functools.partial(
                 torch.distributed.all_gather_into_tensor,

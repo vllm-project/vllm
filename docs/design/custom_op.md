@@ -314,3 +314,74 @@ In addition, you can also register all your `CustomOp` at one place for better m
     for op_name, op_cls in REGISTERED_CUSTOM_OPS.items():
         CustomOp.register_oot(_decorated_op_cls=op_cls, name=op_name)
     ```
+
+### Direct DCP Collective Kernels
+
+`DirectDCPQGather`, `DirectDCPA2AReduce` and `DirectDCPKVGather` in
+`vllm.v1.attention.ops.dcp_custom_ops` support OOT implementations of the
+direct symmetric-memory query gather, output exchange/LSE reduction and KV gather.
+`MLADCPManager` binds their `forward` methods during model construction and
+passes them as kernel arguments to the existing workspace methods. Core owns
+the symmetric buffers, output views, microbatch slots and capacity fallbacks.
+Cached workspaces do not retain plugin implementations.
+
+For a plugin running on CUDA, override `forward_cuda`. `forward_oot` applies to
+an OOT platform, rather than an OOT package running on an in-tree platform.
+Register the subclass from a `vllm.general_plugins` entry point before model
+construction on every worker:
+
+```python
+import torch
+
+from my_plugin.kernels import launch_query_gather
+from vllm.v1.attention.ops.dcp_custom_ops import DirectDCPQGather
+
+
+@DirectDCPQGather.register_oot
+class PluginDCPQGather(DirectDCPQGather):
+    def forward_cuda(
+        self,
+        local_query: torch.Tensor,
+        final_query: torch.Tensor,
+        received_signal: torch.Tensor,
+        completion: torch.Tensor,
+        epoch: torch.Tensor,
+        world_size: int,
+        rank: int,
+        max_num_tokens: int,
+        padded_num_heads: int,
+        query_mc_ptr: int,
+        signal_mc_ptr: int,
+    ) -> None:
+        launch_query_gather(
+            local_query, final_query, received_signal, completion, epoch,
+            world_size, rank, max_num_tokens, padded_num_heads,
+            query_mc_ptr, signal_mc_ptr,
+        )
+```
+
+Implement the complete launch with the same argument order and buffer and
+synchronization protocol as the native operation. Query gather publishes into
+the supplied `[T, world_size * H, D]` output view and waits for peer publication.
+The final query buffer is reusable only after the downstream attention combine
+orders all peers after consumption. A2A exchanges the supplied `[T, world_size * H, D]`
+partial outputs and matching LSEs into the double-buffered peer workspaces, then
+writes the combined `[T, H, D]` output. Preserve epoch advancement, parity,
+completion counters, release/acquire ordering, both LSE bases and empty-shard
+masking. KV gather publishes local rows through its double-buffered workspace
+and copies rank-ordered rows to the supplied output. All ranks must use the
+same plugin/config and collective order.
+
+The inherited `forward_native` calls the existing native collective, so
+`custom_ops=["none"]` still performs communication and synchronization.
+With current OOT registration semantics, explicit plugin opt-in uses the
+original class names:
+`["none", "+DirectDCPQGather", "+DirectDCPA2AReduce", "+DirectDCPKVGather"]`.
+Without replacements, the registered names are `direct_dcp_q_gather` and
+`direct_dcp_a2a_lse_reduce` and `direct_dcp_kv_gather`. `all` enables either
+implementation.
+
+Warm up plugin kernels before CUDA graph capture and keep launch bindings and
+buffer addresses fixed through replay. The compiled CUDA MLA path retains its
+existing opaque attention-op boundary. `CustomOp` itself does not provide a
+Torch mutation schema or fake implementation for standalone collective tracing.
