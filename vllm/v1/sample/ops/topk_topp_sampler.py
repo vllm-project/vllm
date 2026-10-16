@@ -492,9 +492,7 @@ def apply_top_k_top_p(
     """Apply top-k and/or top-p masking to logits.
 
     has_topp_only_rows must be True if any row has p < 1 and
-    k >= logits.shape[-1] (no active top-k). False lets small batches skip
-    the split top-p pipeline; passing it for a batch with such a row
-    silently drops that row's top-p.
+    k >= logits.shape[-1] (no active top-k).
     """
     if p is None and k is None:
         return logits
