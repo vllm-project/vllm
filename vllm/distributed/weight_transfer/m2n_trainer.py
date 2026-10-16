@@ -15,10 +15,9 @@ in every caller.
 
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Self, cast
 
 import torch
-from typing_extensions import Self
 
 from vllm.distributed.weight_transfer.base import (
     TrainerInitInfo,
@@ -411,4 +410,6 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
         if self._executor is not None:
             self._executor.shutdown()
             self._executor = None
-        self.group = None
+        if self.group is not None:
+            self.group.destroy()
+            self.group = None
