@@ -229,15 +229,14 @@ class _Engine:
 
         ``received``: checksums the connector received with the loads.
         """
-        checksums = None
+        checksums = []
         for worker in self.workers:
-            worker_output = worker.post_forward(
+            pending = worker.post_forward(
                 finished_recving, set(), output.finished_req_ids, received
             )
-            if checksums is None:
-                checksums = worker_output
-            elif worker_output is not None:
-                checksums = checksums.aggregate(worker_output)
+            if pending is not None:
+                pending.enqueue_cpu_copy()
+                checksums.append(pending.process_output())
         requests = [self.scheduler.requests[i] for i in output.num_scheduled_tokens]
         model_runner_output = create_model_runner_output(requests)
         # Like the model runner, sample nothing for a prefill not yet done.
@@ -245,7 +244,7 @@ class _Engine:
             if request.is_prefill_chunk:
                 model_runner_output.sampled_token_ids[i] = []
         model_runner_output.kv_connector_output = KVConnectorOutput(
-            finished_recving=finished_recving, kv_checksums=checksums
+            finished_recving=finished_recving, kv_checksums=checksums or None
         )
         return self.scheduler.update_from_output(output, model_runner_output)
 

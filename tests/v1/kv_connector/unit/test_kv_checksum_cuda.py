@@ -17,6 +17,8 @@ from vllm.distributed.kv_transfer.kv_checksum.checksum import (
     KVChecksumScheduled,
 )
 from vllm.triton_utils import HAS_TRITON
+from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
+from vllm.v1.worker.gpu.async_utils import AsyncKVChecksumOutput, KVChecksumCopy
 
 from .test_kv_checksum import (
     BLOCKS,
@@ -146,24 +148,32 @@ def test_triton_kernel_sums_split_mamba_rows(dim_first):
 
 
 def test_copy_is_ordered_after_checksums_for_any_reader():
-    """The copy is queued with the checksums, so another thread finalizing
-    (as the async output thread does) reads complete values even while the
-    main stream is still busy."""
+    """The model runner's copy on its output copy stream is ordered after the
+    checksums, so another thread getting the output (as the async output
+    thread does) reads complete values even while the main stream is busy."""
     logical = _logical_kv(heads=2)
     worker = _worker(_config(_group(_spec(2))), {_name(0): _cache(logical).cuda()})
     main_stream = torch.cuda.Stream()
+    copy_stream = torch.cuda.Stream()
     torch.cuda.set_stream(main_stream)
     try:
         torch.cuda._sleep(200_000_000)
         worker.bind(KVChecksumScheduled(reqs_to_send={"req": BLOCKS}))
-        output = worker.post_forward(None, set(), set())
+        pending = worker.post_forward(None, set(), set())
+        assert pending is not None
+        async_output = AsyncKVChecksumOutput(
+            EMPTY_MODEL_RUNNER_OUTPUT,
+            KVChecksumCopy(pending, main_stream, copy_stream),
+        )
     finally:
         torch.cuda.set_stream(torch.cuda.default_stream())
 
-    records = []
-    reader = threading.Thread(target=lambda: records.extend(output.finalize()))
+    outputs = []
+    reader = threading.Thread(target=lambda: outputs.append(async_output.get_output()))
     reader.start()
     reader.join()
+    assert EMPTY_MODEL_RUNNER_OUTPUT.kv_connector_output is None
+    [record] = outputs[0].kv_connector_output.kv_checksums
     np.testing.assert_array_equal(
-        records[0].checksums["req"][0].values[:, 0], _reference({0: logical})
+        record.checksums["req"][0].values[:, 0], _reference({0: logical})
     )

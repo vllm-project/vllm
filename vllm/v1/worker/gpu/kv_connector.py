@@ -24,6 +24,7 @@ from vllm.v1.outputs import (
 )
 
 if TYPE_CHECKING:
+    from vllm.distributed.kv_transfer.kv_checksum.worker import PendingKVChecksums
     from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.worker.gpu.input_batch import InputBatch
@@ -50,6 +51,11 @@ class KVConnector:
 
     def finalize_step(self) -> None:
         pass
+
+    def take_kv_checksums(self) -> "PendingKVChecksums | None":
+        """The KV checksums the last ``post_forward`` queued, for the model
+        runner to copy to host with the step's outputs."""
+        return None
 
     def no_forward(self, scheduler_output: "SchedulerOutput") -> ModelRunnerOutput:
         return EMPTY_MODEL_RUNNER_OUTPUT
@@ -78,6 +84,7 @@ class ActiveKVConnector(KVConnector):
         )
 
         self._pending_load_kwargs: dict[str, Any] | None = None
+        self._pending_kv_checksums: PendingKVChecksums | None = None
         self._disabled = False
 
     def pre_forward(
@@ -166,7 +173,9 @@ class ActiveKVConnector(KVConnector):
             self.kv_connector.build_connector_worker_meta()
         )
         if self.kv_checksum_worker is not None:
-            output.kv_checksums = self.kv_checksum_worker.post_forward(
+            # Every post_forward's checksums must reach an output.
+            assert self._pending_kv_checksums is None
+            self._pending_kv_checksums = self.kv_checksum_worker.post_forward(
                 transfer_results.finished_recving,
                 transfer_results.failed_recving,
                 finished_req_ids,
@@ -181,6 +190,10 @@ class ActiveKVConnector(KVConnector):
             return
         self.kv_connector.wait_for_save()
         self.kv_connector.clear_connector_metadata()
+
+    def take_kv_checksums(self) -> "PendingKVChecksums | None":
+        pending, self._pending_kv_checksums = self._pending_kv_checksums, None
+        return pending
 
     def no_forward(self, scheduler_output: "SchedulerOutput") -> ModelRunnerOutput:
         if self._disabled:

@@ -305,18 +305,17 @@ class KVChecksumScheduler:
         """
         if kv_connector_output is None:
             return set()
-        if (output := kv_connector_output.kv_checksums) is not None:
-            for record in output.finalize():
-                worker = (record.pp_rank, record.tp_rank)
-                for req_id, groups in record.checksums.items():
-                    pending = self._sends.get(req_id) or self._recvs.get(req_id)
-                    if pending is not None:
-                        pending.reports[worker] = (groups, record)
-                # Every worker of the consumer may receive the same checksums.
-                for req_id, data in record.received.items():
-                    pending = self._recvs.get(req_id)
-                    if pending is not None and pending.expected is None:
-                        pending.set_expected(req_id, data)
+        for record in kv_connector_output.kv_checksums or ():
+            worker = (record.pp_rank, record.tp_rank)
+            for req_id, groups in record.checksums.items():
+                pending = self._sends.get(req_id) or self._recvs.get(req_id)
+                if pending is not None:
+                    pending.reports[worker] = (groups, record)
+            # Every worker of the consumer may receive the same checksums.
+            for req_id, data in record.received.items():
+                pending = self._recvs.get(req_id)
+                if pending is not None and pending.expected is None:
+                    pending.set_expected(req_id, data)
 
         failed: set[str] = set()
         for req_id in kv_connector_output.finished_recving or ():

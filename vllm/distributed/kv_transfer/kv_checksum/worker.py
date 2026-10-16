@@ -7,9 +7,9 @@ head) it holds, each weighed by its global layer and head (see
 ``checksum.py``). Parts from all TP ranks and PP stages add up to the block's
 checksum.
 
-Results are copied to pinned host memory on a side stream ordered after the
-work that produces them; readers wait only for that copy's event, never for
-the main stream.
+The results stay on the device until the model runner copies them to host
+memory with the step's other outputs, on its output copy stream (see
+``PendingKVChecksums`` and ``vllm/v1/worker/gpu/async_utils.py``).
 """
 
 import hashlib
@@ -39,7 +39,7 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.logger import init_logger
 from vllm.triton_utils import HAS_TRITON
-from vllm.utils.torch_utils import PIN_MEMORY, current_stream, get_dtype_size
+from vllm.utils.torch_utils import PIN_MEMORY, get_dtype_size
 from vllm.v1.core.kv_cache_planning import layer_tp_replicas
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -496,43 +496,40 @@ class _GroupBatch:
         return np.stack([block_ids, first_tokens, valid_tokens])
 
 
-class KVChecksumOutput:
-    """KV checksums of one step.
+class PendingKVChecksums:
+    """A worker's KV checksums of one step, until they reach host memory.
 
-    A worker's output holds its device results and their in-flight copy to
-    host memory. ``finalize`` waits for the copy and turns them into a record,
-    and ``aggregate`` merges the records of all workers.
+    ``post_forward`` queues the checksum kernels on the main stream. The model
+    runner then calls ``enqueue_cpu_copy`` on its output copy stream, ordered
+    after them, and ``process_output`` once that copy is done.
     """
 
     def __init__(
         self,
-        pp_rank: int = 0,
-        tp_rank: int = 0,
-        skipped_groups: frozenset[int] = frozenset(),
-        fingerprints: dict[int, int] | None = None,
+        pp_rank: int,
+        tp_rank: int,
+        skipped_groups: frozenset[int],
+        fingerprints: dict[int, int],
+        received: dict[str, bytes],
     ):
         self._rank = (pp_rank, tp_rank)
         self._skipped_groups = skipped_groups
-        self._fingerprints = fingerprints or {}
+        self._fingerprints = fingerprints
+        self._received = received
         self._req_ids: list[str] = []
-        self._received: dict[str, bytes] = {}
-        # group id -> (segments, replica keys, [rows, len(replica keys)] int64
-        # values). The device values stay referenced until the copy is done.
-        self._groups: dict[
-            int, tuple[list[tuple[str, int, int]], list[ReplicaKey], torch.Tensor]
-        ] = {}
-        self._host: dict[int, torch.Tensor] = {}
-        self._copy_event: torch.cuda.Event | None = None
-        self._records: list[KVChecksumRecord] = []
+        # (group id, segments, replica keys, [rows, len(replica keys)] int64
+        # values) per checksum pass of a group: the loads and the sends of one
+        # step are separate passes over the same groups.
+        self._groups: list[
+            tuple[int, list[tuple[str, int, int]], list[ReplicaKey], torch.Tensor]
+        ] = []
+        self._host: list[torch.Tensor] | None = None
 
     def __bool__(self) -> bool:
-        return bool(self._req_ids or self._received or self._records)
+        return bool(self._req_ids or self._received)
 
     def add_requests(self, req_ids: Iterable[str]) -> None:
         self._req_ids.extend(req_ids)
-
-    def add_received(self, received: dict[str, bytes]) -> None:
-        self._received.update(received)
 
     def add_group(
         self,
@@ -541,68 +538,39 @@ class KVChecksumOutput:
         replica_keys: list[ReplicaKey],
         values: torch.Tensor,
     ) -> None:
-        self._groups[group_id] = (segments, replica_keys, values)
+        self._groups.append((group_id, segments, replica_keys, values))
 
-    def start_cpu_copy(self, copy_stream: torch.cuda.Stream) -> None:
-        """Queue the copy to host memory on ``copy_stream``, after the work
-        queued so far."""
-        if not self._groups:
-            return
-        main_stream = current_stream()
-        copy_stream.wait_stream(main_stream)
-        torch.cuda.set_stream(copy_stream)
-        try:
-            self._host = {
-                g: v.to("cpu", non_blocking=True)
-                for g, (_, _, v) in self._groups.items()
-            }
-        finally:
-            torch.cuda.set_stream(main_stream)
-        # Blocking (sleep) event to avoid busy-polling the CUDA driver lock.
-        self._copy_event = torch.cuda.Event(blocking=True)
-        self._copy_event.record(copy_stream)
+    def enqueue_cpu_copy(self) -> None:
+        """Enqueue the asynchronous D2H copy; call on the output copy stream,
+        after it waits for the main stream."""
+        assert self._host is None
+        self._host = [
+            values.to("cpu", non_blocking=True) for *_, values in self._groups
+        ]
 
-    def finalize(self) -> list[KVChecksumRecord]:
-        """Wait for the copy, if any, and return the records."""
-        if not self._req_ids and not self._received:
-            return self._records
-        if self._copy_event is not None:
-            self._copy_event.synchronize()
+    def process_output(self) -> KVChecksumRecord:
+        """The step's record; call once the copy is done."""
+        assert self._host is not None or not self._groups
         checksums: dict[str, dict[int, KVChecksumGroup]] = {
             req_id: {} for req_id in self._req_ids
         }
-        for group_id, (segments, replica_keys, _) in self._groups.items():
-            values = self._host[group_id].numpy().view(np.uint64)
+        for (group_id, segments, replica_keys, _), host in zip(
+            self._groups, self._host or ()
+        ):
+            values = host.numpy().view(np.uint64)
             row = 0
             for req_id, start, num_rows in segments:
                 checksums[req_id][group_id] = KVChecksumGroup(
                     start, replica_keys, values[row : row + num_rows]
                 )
                 row += num_rows
-        self._records.append(
-            KVChecksumRecord(
-                *self._rank,
-                checksums,
-                self._skipped_groups,
-                self._fingerprints,
-                self._received,
-            )
+        return KVChecksumRecord(
+            *self._rank,
+            checksums,
+            self._skipped_groups,
+            self._fingerprints,
+            self._received,
         )
-        self._req_ids.clear()
-        self._received = {}
-        self._groups.clear()
-        self._host.clear()
-        self._copy_event = None
-        return self._records
-
-    def aggregate(self, other: "KVChecksumOutput") -> "KVChecksumOutput":
-        self._records = self.finalize() + other.finalize()
-        return self
-
-    def __getstate__(self) -> dict:
-        # Device tensors and CUDA events cannot cross processes.
-        self.finalize()
-        return self.__dict__
 
 
 class KVChecksumWorker:
@@ -652,7 +620,6 @@ class KVChecksumWorker:
                 self._layer_views[group_id] = views
                 self._block_sizes[group_id] = group.kv_cache_spec.block_size
 
-        self._copy_stream = torch.cuda.Stream()
         for views in self._layer_views.values():
             for view in views:
                 view.warm_up()
@@ -672,9 +639,8 @@ class KVChecksumWorker:
         failed_recving: set[str],
         finished_req_ids: set[str],
         received: dict[str, bytes] | None = None,
-    ) -> KVChecksumOutput | None:
-        """Checksum this step's sends and finished loads, and start copying the
-        results to host.
+    ) -> PendingKVChecksums | None:
+        """Queue the checksums of this step's sends and finished loads.
 
         Args:
             finished_recving: Requests whose load this worker finished.
@@ -684,7 +650,8 @@ class KVChecksumWorker:
                 loads, passed on to the scheduler.
 
         Returns:
-            The step's checksums, or None if there is nothing to report.
+            The step's checksums, still on the device, or None if there is
+            nothing to report.
 
         """
         for req_id in finished_req_ids:
@@ -696,20 +663,22 @@ class KVChecksumWorker:
             and req_id not in failed_recving
         }
 
-        output = KVChecksumOutput(
-            self.pp_rank, self.tp_rank, self._skipped_groups, self._fingerprints
+        pending = PendingKVChecksums(
+            self.pp_rank,
+            self.tp_rank,
+            self._skipped_groups,
+            self._fingerprints,
+            received or {},
         )
-        output.add_received(received or {})
-        self._compute(loaded, output, replica_zero_only=False)
-        self._compute(self._reqs_to_send, output, replica_zero_only=True)
+        self._compute(loaded, pending, replica_zero_only=False)
+        self._compute(self._reqs_to_send, pending, replica_zero_only=True)
         self._reqs_to_send = {}
-        output.start_cpu_copy(self._copy_stream)
-        return output or None
+        return pending or None
 
     def _compute(
         self,
         reqs: dict[str, KVChecksumBlocks],
-        output: KVChecksumOutput,
+        output: PendingKVChecksums,
         replica_zero_only: bool,
     ) -> None:
         """Checksum the blocks of ``reqs`` into ``output``.

@@ -20,8 +20,8 @@ from vllm.distributed.kv_transfer.kv_checksum.checksum import (
 )
 from vllm.distributed.kv_transfer.kv_checksum.scheduler import _sum_replicas
 from vllm.distributed.kv_transfer.kv_checksum.worker import (
-    KVChecksumOutput,
     KVChecksumWorker,
+    PendingKVChecksums,
 )
 from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateShapeCalculator
@@ -154,10 +154,18 @@ def _reference(
     return sums
 
 
+def _finish(pending: PendingKVChecksums | None) -> KVChecksumRecord:
+    """Copy the checksums to host as the model runner does, and wait."""
+    assert pending is not None
+    pending.enqueue_cpu_copy()
+    if torch.accelerator.is_available():
+        torch.accelerator.synchronize()
+    return pending.process_output()
+
+
 def _send_record(worker: KVChecksumWorker, blocks=BLOCKS) -> KVChecksumRecord:
     worker.bind(KVChecksumScheduled(reqs_to_send={"req": blocks}))
-    [record] = worker.post_forward(None, set(), set()).finalize()
-    return record
+    return _finish(worker.post_forward(None, set(), set()))
 
 
 def _send(worker: KVChecksumWorker, blocks=BLOCKS):
@@ -166,7 +174,7 @@ def _send(worker: KVChecksumWorker, blocks=BLOCKS):
 
 def _recv(worker: KVChecksumWorker, blocks=BLOCKS):
     worker.bind(KVChecksumScheduled(reqs_to_recv={"req": blocks}))
-    [record] = worker.post_forward({"req"}, set(), set()).finalize()
+    record = _finish(worker.post_forward({"req"}, set(), set()))
     return record.checksums["req"]
 
 
@@ -386,7 +394,7 @@ def _check_requests_and_groups_of_one_step(device: str) -> None:
         "b": KVChecksumBlocks(num_tokens=21, groups={0: (1, [2])}),
     }
     worker.bind(KVChecksumScheduled(reqs_to_recv=reqs))
-    [record] = worker.post_forward(set(reqs), set(), set()).finalize()
+    record = _finish(worker.post_forward(set(reqs), set(), set()))
     for req_id, blocks in reqs.items():
         for group_id, (start, block_ids) in blocks.groups.items():
             kv = first if group_id == 0 else second
@@ -930,17 +938,34 @@ def test_recv_checksummed_only_when_its_load_finishes():
     assert worker.post_forward(None, set(), set()) is None
 
     worker.bind(None)
-    [record] = worker.post_forward({"a", "b", "c"}, {"b"}, {"c"}).finalize()
+    record = _finish(worker.post_forward({"a", "b", "c"}, {"b"}, {"c"}))
     assert set(record.checksums) == {"a"}
 
     worker.bind(None)
     assert worker.post_forward({"b", "c"}, set(), set()) is None
 
 
+def test_send_and_finished_load_in_one_step():
+    """A step that both finishes a load and finishes a request to send
+    reports the checksums of both, in every group."""
+    worker = _worker(_config(_group(_spec(2))), {_name(0): _cache(_LOGICAL)})
+    worker.bind(
+        KVChecksumScheduled(
+            reqs_to_send={"send": BLOCKS}, reqs_to_recv={"recv": BLOCKS}
+        )
+    )
+    record = _finish(worker.post_forward({"recv"}, set(), set()))
+    expected = _reference({0: _LOGICAL})
+    for req_id in ("send", "recv"):
+        np.testing.assert_array_equal(
+            record.checksums[req_id][0].values[:, 0], expected
+        )
+
+
 def test_outputs_serialize_and_aggregate_across_workers():
-    """Outputs finalize when serialized for the scheduler (deepcopy goes
-    through the same __getstate__ as pickling), and the aggregator merges
-    every worker's records."""
+    """Workers' records are plain host data that serialize for the scheduler
+    (deepcopy goes through the same path as pickling), and the aggregator
+    merges every worker's records."""
     logical = _logical_kv(heads=4)
     outputs = []
     for rank in range(2):
@@ -953,7 +978,7 @@ def test_outputs_serialize_and_aggregate_across_workers():
         )
         worker.bind(KVChecksumScheduled(reqs_to_send={"req": BLOCKS}))
         kv_output = KVConnectorOutput(
-            kv_checksums=worker.post_forward(None, set(), set())
+            kv_checksums=[_finish(worker.post_forward(None, set(), set()))]
         )
         assert not kv_output.is_empty()
         outputs.append(
@@ -961,9 +986,8 @@ def test_outputs_serialize_and_aggregate_across_workers():
         )
 
     merged = KVOutputAggregator(expected_finished_count=2).aggregate(outputs)
-    checksums = merged.kv_connector_output.kv_checksums
-    assert isinstance(checksums, KVChecksumOutput)
-    records = checksums.finalize()
+    records = merged.kv_connector_output.kv_checksums
+    assert records is not None
     assert sorted(r.tp_rank for r in records) == [0, 1]
     total = sum(r.checksums["req"][0].values[:, 0] for r in records)
     np.testing.assert_array_equal(total, _reference({0: logical}))

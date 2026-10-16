@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
 from collections.abc import Iterator
+from copy import copy
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -12,6 +13,7 @@ import vllm.envs as envs
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
 from vllm.v1.outputs import (
     AsyncModelRunnerOutput,
+    KVConnectorOutput,
     LogprobsTensors,
     ModelRunnerOutput,
     PoolerOutput,
@@ -21,6 +23,7 @@ from vllm.v1.worker.utils import raise_if_nan_logits
 
 if TYPE_CHECKING:
     from vllm.distributed.aux_output_connector.worker import PendingAuxOutput
+    from vllm.distributed.kv_transfer.kv_checksum.worker import PendingKVChecksums
     from vllm.v1.worker.gpu.input_batch import InputBatch
 
 
@@ -130,6 +133,7 @@ class AsyncOutput(AsyncModelRunnerOutput):
         self.sampler_output = sampler_output
         self.num_sampled_tokens = num_sampled_tokens
         self.pending_aux_output = pending_aux_output
+        self.kv_checksums: KVChecksumCopy | None = None
         # Blocking (sleep) event to avoid busy-polling the CUDA driver lock.
         self.copy_event = torch.cuda.Event(blocking=True)
         self._has_fault: torch.Tensor | None = None
@@ -172,6 +176,8 @@ class AsyncOutput(AsyncModelRunnerOutput):
 
     def get_output(self) -> ModelRunnerOutput:
         self.copy_event.synchronize()
+        if self.kv_checksums is not None:
+            self.kv_checksums.add_to(self.model_runner_output)
 
         # NOTE(woosuk): The following code is to ensure compatibility with
         # the existing model runner.
@@ -228,6 +234,7 @@ class AsyncPoolingOutput(AsyncModelRunnerOutput):
     ):
         self.model_runner_output = model_runner_output
         self.pooler_output = pooler_output
+        self.kv_checksums: KVChecksumCopy | None = None
         # Blocking (sleep) event to avoid busy-polling the CUDA driver lock.
         self.copy_event = torch.cuda.Event(blocking=True)
 
@@ -258,6 +265,58 @@ class AsyncPoolingOutput(AsyncModelRunnerOutput):
             pooler_output = self.pooler_output_cpu
         self.copy_event.synchronize()
         self.model_runner_output.pooler_output = pooler_output
+        if self.kv_checksums is not None:
+            self.kv_checksums.add_to(self.model_runner_output)
+        return self.model_runner_output
+
+
+class KVChecksumCopy:
+    """A step's KV checksums on their way to host memory.
+
+    The checksum kernels run in the KV connector's ``post_forward``, after the
+    step's other outputs were queued for copying (and, with a speculator, after
+    it wrote its KV), so they get their own copy and event on the same stream.
+    """
+
+    def __init__(
+        self,
+        pending: "PendingKVChecksums",
+        main_stream: torch.cuda.Stream,
+        copy_stream: torch.cuda.Stream,
+    ):
+        self.pending = pending
+        # Blocking (sleep) event to avoid busy-polling the CUDA driver lock.
+        self.copy_event = torch.cuda.Event(blocking=True)
+        with stream(copy_stream, main_stream):
+            copy_stream.wait_stream(main_stream)
+            pending.enqueue_cpu_copy()
+            self.copy_event.record(copy_stream)
+
+    def add_to(self, output: ModelRunnerOutput) -> None:
+        """Wait for the copy and add the checksums to ``output``, which must
+        not be the shared empty output."""
+        self.copy_event.synchronize()
+        record = self.pending.process_output()
+        if output.kv_connector_output is None:
+            output.kv_connector_output = KVConnectorOutput()
+        output.kv_connector_output.kv_checksums = [record]
+
+
+class AsyncKVChecksumOutput(AsyncModelRunnerOutput):
+    """An output whose only asynchronous part is the step's KV checksums: the
+    output of a step without sampling (no forward, or a non-last PP rank)."""
+
+    def __init__(
+        self,
+        model_runner_output: ModelRunnerOutput,
+        kv_checksums: KVChecksumCopy,
+    ):
+        # A copy, as this may be the shared empty output.
+        self.model_runner_output = copy(model_runner_output)
+        self.kv_checksums = kv_checksums
+
+    def get_output(self) -> ModelRunnerOutput:
+        self.kv_checksums.add_to(self.model_runner_output)
         return self.model_runner_output
 
 
