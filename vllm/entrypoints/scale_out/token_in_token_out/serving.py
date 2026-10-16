@@ -29,6 +29,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionLogProb,
     ChatCompletionLogProbs,
     ChatCompletionLogProbsContent,
+    ChatCompletionRequest,
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.engine.protocol import (
@@ -125,7 +126,7 @@ class ServingTokens(GenerateBaseServing):
         models: OpenAIServingModels,
         online_renderer: OnlineRenderer,
         *,
-        online_derenderer: OnlineDerenderer | None = None,
+        online_derenderer: OnlineDerenderer,
         request_logger: RequestLogger | None,
         force_no_detokenize: bool = False,
         return_tokens_as_token_ids: bool = False,
@@ -237,6 +238,8 @@ class ServingTokens(GenerateBaseServing):
                 "--skip-tokenizer-init). Send the request to a server that "
                 "loads a tokenizer, or use output_mode='tokens'."
             )
+        # Built before generating so an invalid parse_context fails fast.
+        derender_request: ChatCompletionRequest | None = None
         if request.output_mode == "derender":
             # TODO(#57442, #60915): reject the sampled-only and top-k logprob
             # flags here once either lands.
@@ -244,18 +247,17 @@ class ServingTokens(GenerateBaseServing):
                 return self.create_error_response(
                     "output_mode='derender' does not support stream=true."
                 )
-            if self.online_derenderer is None:
-                return self.create_error_response(
-                    "output_mode='derender' is not available on this server."
-                )
-            if self.online_derenderer.parser is not None and (
-                request.parse_context is None
-            ):
-                return self.create_error_response(
-                    "output_mode='derender' requires parse_context on a server "
-                    "with a tool or reasoning parser. Use the one returned by "
-                    "/render."
-                )
+            if self.online_derenderer.parser is not None:
+                if request.parse_context is None:
+                    return self.create_error_response(
+                        "output_mode='derender' requires parse_context on a "
+                        "server with a tool or reasoning parser. Use the one "
+                        "returned by /render."
+                    )
+                try:
+                    derender_request = request.parse_context.to_chat_request()
+                except (ValueError, VLLMValidationError) as e:
+                    return self.create_error_response(e)
         try:
             msgspec.msgpack.encode(
                 (
@@ -408,7 +410,12 @@ class ServingTokens(GenerateBaseServing):
             )
 
         return await self.serve_tokens_full_generator(
-            request, result_generator, request_id, model_name, request_metadata
+            request,
+            result_generator,
+            request_id,
+            model_name,
+            request_metadata,
+            derender_request=derender_request,
         )
 
     async def serve_tokens_full_generator(
@@ -418,6 +425,7 @@ class ServingTokens(GenerateBaseServing):
         request_id: str,
         model_name: str,
         request_metadata: RequestResponseMetadata,
+        derender_request: ChatCompletionRequest | None = None,
     ) -> ErrorResponse | GenerateResponse:
         created_time = int(time.time())
         final_res: RequestOutput | None = None
@@ -505,23 +513,32 @@ class ServingTokens(GenerateBaseServing):
 
         derender_choices: list[GenerateDerenderChoice] = []
         if derender_mode:
-            assert self.online_derenderer is not None
-            parse_context = request.parse_context
+            history_tool_call_cnt = (
+                request.parse_context.history_tool_call_cnt
+                if request.parse_context is not None
+                else 0
+            )
             try:
                 parsed = await self.online_derenderer.derender_text_choices(
-                    final_res.outputs, parse_context, final_res.prompt_token_ids
+                    final_res.outputs,
+                    derender_request,
+                    history_tool_call_cnt,
+                    final_res.prompt_token_ids,
                 )
             except (ValueError, VLLMValidationError) as e:
                 return self.create_error_response(e)
-            hide_logprobs = (
-                parse_context is not None and not parse_context.include_reasoning
+            # Like coupled chat, hide per-token metadata when a parser hides
+            # the reasoning: logprobs or token IDs would leak it.
+            hide_metadata = (
+                derender_request is not None and not derender_request.include_reasoning
             )
             for (message, finish_reason), fields in zip(
                 parsed, derender_choice_fields, strict=True
             ):
                 fields["finish_reason"] = finish_reason
-                if hide_logprobs:
+                if hide_metadata:
                     fields["logprobs"] = None
+                    fields["token_ids"] = None
                 derender_choices.append(
                     GenerateDerenderChoice(message=message, **fields)
                 )
@@ -797,7 +814,7 @@ class ServingTokens(GenerateBaseServing):
         tokenizer: TokenizerLike | None = None,
         top_limit: int | None = None,
     ) -> ChatCompletionLogProbs:
-        """Create OpenAI style logprobs for `output_mode="text"`.
+        """Create OpenAI style logprobs for the `text` and `derender` levels.
 
         With a `tokenizer` the tokens are decoded strings and carry `bytes`.
         Without one (`--return-tokens-as-token-ids`) they are `token_id:N`

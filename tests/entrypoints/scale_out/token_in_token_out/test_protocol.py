@@ -178,6 +178,13 @@ def test_parse_context_is_accepted_at_other_levels():
     assert GenerateRequest.model_validate(payload).output_mode == "tokens"
 
 
+def test_parse_context_rejects_unknown_fields():
+    """A misspelled field would otherwise be dropped and parse silently wrong."""
+    payload = {**_base_payload(), "parse_context": {"tool_choise": "auto"}}
+    with pytest.raises(ValidationError, match="tool_choise"):
+        GenerateRequest.model_validate(payload)
+
+
 def test_derender_mode_rejects_detokenize_false():
     payload = {
         "token_ids": [1, 2, 3],

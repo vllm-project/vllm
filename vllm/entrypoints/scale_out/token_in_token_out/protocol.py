@@ -51,6 +51,8 @@ class ParseContext(BaseModel):
     only when `output_mode="derender"`.
     """
 
+    model_config = ConfigDict(extra="forbid")
+
     tools: list[ChatCompletionToolsParam] | None = None
     tool_choice: (
         Literal["none", "auto", "required"] | ChatCompletionNamedToolChoiceParam | None
@@ -61,6 +63,24 @@ class ParseContext(BaseModel):
     """Template kwargs with the render server's defaults already applied."""
     history_tool_call_cnt: int = Field(default=0, ge=0)
     """Tool calls already in the rendered conversation, for sequential IDs."""
+
+    def to_chat_request(self) -> ChatCompletionRequest:
+        """Build the message less chat request the parser reads.
+
+        Validated from plain data because the request validators only accept
+        a named `tool_choice` as a dict.
+
+        Raises:
+            ValueError: If the context fails the chat request validators.
+            VLLMValidationError: Same for the tool usage validators.
+
+        """
+        return ChatCompletionRequest.model_validate(
+            {
+                "messages": [],
+                **self.model_dump(exclude={"history_tool_call_cnt"}),
+            }
+        )
 
 
 class PlaceholderRangeInfo(BaseModel):
