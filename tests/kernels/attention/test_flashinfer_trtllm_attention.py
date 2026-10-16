@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
@@ -644,4 +646,112 @@ def test_flashinfer_trtllm_prefill_with_baseline(
     (
         torch.testing.assert_close(output, output_trtllm, atol=atol, rtol=rtol),
         f"{torch.max(torch.abs(output - output_trtllm))}",
+    )
+
+
+@pytest.mark.parametrize("num_heads", [(8, 1), (16, 2)])
+@pytest.mark.parametrize("context_lens", [[0, 37, 1000, 0, 4096], [0, 0]])
+@torch.inference_mode
+def test_flashinfer_dcp_prefill_trtllm_context(
+    num_heads: tuple[int, int], context_lens: list[int]
+) -> None:
+    """The trtllm-gen DCP prefill context pass matches the native one for
+    requests with DCP-local context, and writes zeros for requests without
+    it (the DCP combine masks their LSE)."""
+    from vllm.v1.attention.backends.flashinfer import (
+        BatchDCPPrefillWrapper,
+        TrtllmDCPContextParams,
+    )
+
+    set_random_seed(42)
+    device = "cuda"
+    dtype = torch.bfloat16
+    head_size, block_size, num_blocks, dcp_world_size = 128, 16, 2048, 2
+    num_qo_heads, num_kv_heads = num_heads
+    sm_scale = head_size**-0.5
+
+    batch_size = len(context_lens)
+    ctx_lens = torch.tensor(context_lens, dtype=torch.int32, device="cpu")
+    q_lens = torch.randint(1, 64, (batch_size,), dtype=torch.int32, device="cpu")
+    qo_indptr = torch.zeros(batch_size + 1, dtype=torch.int32, device="cpu")
+    torch.cumsum(q_lens, dim=0, out=qo_indptr[1:])
+    num_pages = (ctx_lens + block_size - 1) // block_size
+    kv_indptr = torch.zeros(batch_size + 1, dtype=torch.int32, device="cpu")
+    torch.cumsum(num_pages, dim=0, out=kv_indptr[1:])
+    last_page_lens = ctx_lens - (num_pages - 1).clamp(min=0) * block_size
+
+    max_pages = max(int(num_pages.max()), 1)
+    block_tables = torch.randperm(num_blocks, dtype=torch.int32, device=device)[
+        : batch_size * max_pages
+    ].view(batch_size, max_pages)
+    kv_indices = torch.cat(
+        [block_tables[i, :n] for i, n in enumerate(num_pages.tolist())]
+    )
+
+    # K and V packed in the head dim, as in the FlashInfer backend's KV cache.
+    kv_cache = torch.randn(
+        num_blocks, num_kv_heads, block_size, 2 * head_size, dtype=dtype, device=device
+    )
+    kv_cache_tuple = kv_cache.split(head_size, dim=-1)
+    # The context pass sees the query heads of all DCP ranks.
+    query = torch.randn(
+        int(qo_indptr[-1]),
+        num_qo_heads * dcp_world_size,
+        head_size,
+        dtype=dtype,
+        device=device,
+    )
+    layer = SimpleNamespace(_k_scale_float=1.0, _v_scale_float=1.0)
+    workspace = torch.zeros(128 * 1024 * 1024, dtype=torch.uint8, device=device)
+
+    def make_wrapper(trtllm_context):
+        wrapper = BatchDCPPrefillWrapper("HND", workspace)
+        wrapper.plan(
+            qo_indptr_cpu=qo_indptr,
+            paged_kv_indptr_cpu=kv_indptr,
+            paged_kv_indices=kv_indices,
+            paged_kv_last_page_len_cpu=last_page_lens,
+            kv_lens_cpu=ctx_lens,
+            page_size=block_size,
+            num_qo_heads=num_qo_heads,
+            dcp_world_size=dcp_world_size,
+            num_kv_heads=num_kv_heads,
+            head_dim=head_size,
+            sm_scale=sm_scale,
+            window_left=-1,
+            logits_soft_cap=None,
+            q_data_type=dtype,
+            kv_cache_dtype=dtype,
+            prefill_fixed_split_size=-1,
+            # Split-KV scratch for the native pass would not fit the workspace.
+            disable_split_kv=True,
+            trtllm_context=trtllm_context,
+        )
+        return wrapper
+
+    trtllm_wrapper = make_wrapper(
+        TrtllmDCPContextParams.from_cpu(
+            block_tables=block_tables,
+            qo_indptr_cpu=qo_indptr,
+            context_lens_cpu=ctx_lens,
+            page_size=block_size,
+            sm_scale=sm_scale,
+        )
+    )
+    output, lse = trtllm_wrapper._run_trtllm_context(layer, query, kv_cache_tuple)
+
+    has_context = torch.repeat_interleave(ctx_lens > 0, q_lens).to(device)
+    assert torch.all(output[~has_context] == 0)
+    if not has_context.any():
+        return
+
+    native_wrapper = make_wrapper(None)
+    ref_output, ref_lse = native_wrapper._context.run(
+        query, kv_cache_tuple, k_scale=1.0, v_scale=1.0, return_lse=True
+    )
+    torch.testing.assert_close(
+        output[has_context], ref_output[has_context], atol=1e-2, rtol=1e-2
+    )
+    torch.testing.assert_close(
+        lse[has_context], ref_lse[has_context], atol=1e-2, rtol=1e-3
     )
