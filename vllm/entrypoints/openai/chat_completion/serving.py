@@ -69,6 +69,7 @@ from vllm.renderers.chat_utils import (
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
+from vllm.tracing import get_request_trace
 from vllm.utils.collection_utils import as_list
 from vllm.utils.serial_utils import numpy2base64
 
@@ -294,6 +295,9 @@ class OpenAIServingChat(GenerateBaseServing):
         for the API specification. This API mimics the OpenAI
         Chat Completion API.
         """
+        trace = get_request_trace()
+        if trace is not None and request._api_surface != "messages":
+            trace.capture_tool_request(request, "chat_completions")
         return await self._with_kv_transfer_rejection_cleanup(
             self._create_chat_completion(request, raw_request), request, raw_request
         )
@@ -497,6 +501,8 @@ class OpenAIServingChat(GenerateBaseServing):
             ) as stream:
                 async for chunk in stream:
                     if isinstance(chunk, ErrorResponse):
+                        if trace := get_request_trace():
+                            trace.failed = True
                         data = chunk.model_dump_json()
                     else:
                         data = chunk.model_dump_json(
@@ -537,8 +543,16 @@ class OpenAIServingChat(GenerateBaseServing):
         num_cached_tokens = None
         num_cache_creation_tokens = None
         tools_streamed = [False] * num_choices
+        trace = get_request_trace()
+        metric_tools_present = bool(request.tools)
         emitted_tool_calls: set[tuple[int, int]] | None = (
-            set() if request.tools and request._api_surface != "messages" else None
+            set()
+            if request._api_surface != "messages"
+            and (
+                metric_tools_present
+                or (trace is not None and trace.tool_attributes is not None)
+            )
+            else None
         )
         parse_failed = False
         stream_completed = False
@@ -978,7 +992,7 @@ class OpenAIServingChat(GenerateBaseServing):
             logger.exception("Error in chat completion stream generator.")
             yield self.create_error_response(e)
         finally:
-            if emitted_tool_calls is not None:
+            if emitted_tool_calls is not None and metric_tools_present:
                 record_tool_call_response(
                     request,
                     tool_calls_count=len(emitted_tool_calls),
@@ -988,6 +1002,15 @@ class OpenAIServingChat(GenerateBaseServing):
             elif request.tools and parse_failed:
                 # Messages counts emitted blocks after its own conversion.
                 record_tool_call_response(request, parse_failed=True, completed=False)
+            if trace is not None:
+                if emitted_tool_calls is not None:
+                    trace.record_tool_response(
+                        tool_calls_count=len(emitted_tool_calls),
+                        parse_failed=parse_failed,
+                        completed=stream_completed,
+                    )
+                elif parse_failed:
+                    trace.record_tool_response(parse_failed=True)
 
     async def chat_completion_full_generator(
         self,
@@ -1002,6 +1025,7 @@ class OpenAIServingChat(GenerateBaseServing):
         mm_token_counts: dict[str, int] | None = None,
     ) -> ErrorResponse | ChatCompletionResponse:
         created_time = int(time.time())
+        trace = get_request_trace()
         final_res: RequestOutput | None = None
 
         try:
@@ -1062,6 +1086,8 @@ class OpenAIServingChat(GenerateBaseServing):
                 except Exception:
                     if request.tools:
                         record_tool_call_response(request, parse_failed=True)
+                    if trace is not None:
+                        trace.record_tool_response(parse_failed=True)
                     raise
                 suppress_metadata = not request.include_reasoning and parser is not None
                 if not request.include_reasoning:
@@ -1289,9 +1315,14 @@ class OpenAIServingChat(GenerateBaseServing):
                         delta=False,
                     )
 
-        if request.tools and request._api_surface != "messages":
+        if request._api_surface != "messages" and (
+            request.tools or (trace is not None and trace.tool_attributes is not None)
+        ):
             tool_calls_count = sum(len(choice.message.tool_calls) for choice in choices)
-            record_tool_call_response(request, tool_calls_count=tool_calls_count)
+            if request.tools:
+                record_tool_call_response(request, tool_calls_count=tool_calls_count)
+            if trace is not None:
+                trace.record_tool_response(tool_calls_count=tool_calls_count)
         return response
 
     def _get_top_logprobs(

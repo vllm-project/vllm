@@ -1148,7 +1148,7 @@ def tool_response_record(monkeypatch):
     ],
 )
 async def test_message_stream_metrics_count_only_emitted_tool_blocks(
-    tool_response_record, failure, caplog
+    tool_response_record, failure, caplog, tool_trace
 ):
     request = _convert(
         _make_request(
@@ -1159,6 +1159,9 @@ async def test_message_stream_metrics_count_only_emitted_tool_blocks(
             else [{"name": "f", "input_schema": {}}],
         )
     )
+    trace, exporter = tool_trace
+    if failure != "no-tools":
+        trace.capture_tool_request(request, "messages")
     closed = False
 
     async def source():
@@ -1246,6 +1249,19 @@ async def test_message_stream_metrics_count_only_emitted_tool_blocks(
     if failure == "close-error":
         assert "Error closing Messages stream generator." in caplog.text
         assert "private cleanup detail" not in caplog.text
+    trace.end(error=cancelled or failure.startswith("close-"))
+    attributes = exporter.get_finished_spans()[0].attributes
+    if failure == "no-tools":
+        assert not any(key.startswith("vllm.tool_calling.") for key in attributes)
+    else:
+        assert attributes["vllm.tool_calling.tool_calls_count"] == count
+        assert attributes["vllm.tool_calling.parser_status"] == (
+            "success"
+            if failure == "none"
+            else "no_tool_calls"
+            if failure in ("no-calls", "metadata-only")
+            else "interrupted"
+        )
 
 
 class TestMessageStreamConverterToolUseContentBuffering:
@@ -1682,7 +1698,7 @@ class TestMessagesFullConverter:
     ],
 )
 async def test_messages_full_metrics_wait_for_successful_conversion(
-    tool_response_record, arguments, has_tools, error
+    tool_response_record, arguments, has_tools, error, tool_trace
 ):
     handler = _make_full_converter()
     handler.create_messages = AnthropicServingMessages.create_messages.__get__(handler)
@@ -1726,6 +1742,23 @@ async def test_messages_full_metrics_wait_for_successful_conversion(
         )
     else:
         tool_response_record.assert_not_called()
+    trace, exporter = tool_trace
+    trace.end(error=error is not None)
+    attributes = exporter.get_finished_spans()[0].attributes
+    if has_tools:
+        assert attributes["vllm.tool_calling.api_surface"] == "messages"
+        assert attributes["vllm.tool_calling.tool_calls_count"] == (
+            0 if error is not None else len(arguments)
+        )
+        assert attributes["vllm.tool_calling.parser_status"] == (
+            "parse_failure"
+            if error is not None
+            else "success"
+            if arguments
+            else "no_tool_calls"
+        )
+    else:
+        assert not any(key.startswith("vllm.tool_calling.") for key in attributes)
 
 
 # ======================================================================
