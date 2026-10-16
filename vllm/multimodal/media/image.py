@@ -16,7 +16,7 @@ from vllm.utils.sparse_utils import (
     safe_to_dense,
 )
 
-from ..image import convert_image_mode, normalize_image, open_image
+from ..image import convert_image_mode, normalize_image, open_image, rgba_to_rgb
 from .base import MediaDecodedBudget, MediaIO, MediaWithBytes
 
 MAGIC_NUMPY_PREFIX = b"\x93NUMPY"  # https://numpy.org/devdocs/reference/generated/numpy.lib.format.html#format-version-1-0
@@ -74,9 +74,14 @@ class ImageMediaIO(MediaIO[Image.Image]):
         """Convert image mode with custom background color."""
         if isinstance(image, MediaWithBytes):
             image = image.media
-        if self.image_mode is None:
+        if self.image_mode is None or image.mode == self.image_mode:
             return image
-        return convert_image_mode(image, self.image_mode, self.rgba_background_color)
+        elif image.mode == "RGBA" and self.image_mode == "RGB":
+            return rgba_to_rgb(image, self.rgba_background_color)
+        else:
+            return convert_image_mode(
+                image, self.image_mode, self.rgba_background_color
+            )
 
     def load_bytes(self, data: bytes) -> MediaWithBytes[Image.Image]:
         try:
@@ -93,7 +98,19 @@ class ImageMediaIO(MediaIO[Image.Image]):
                 self.decoded_budget.charge(w * h * 4)
             image = normalize_image(image)
             image.load()
-            converted = self._convert_image_mode(image)
+            if (
+                self.image_mode == "RGB"
+                and image.mode == "RGB"
+                and "transparency" in image.info
+            ):
+                # An RGB PNG can mark one color as transparent (tRNS chunk).
+                # convert_image_mode leaves RGB images alone because Pillow
+                # also keeps that info when converting palette images to RGB.
+                converted = rgba_to_rgb(
+                    image.convert("RGBA"), self.rgba_background_color
+                )
+            else:
+                converted = self._convert_image_mode(image)
         except (OSError, Image.UnidentifiedImageError) as e:
             raise ValueError(f"Failed to load image: {e}") from e
 

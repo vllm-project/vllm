@@ -69,17 +69,19 @@ def test_palette_with_trns_to_rgb():
     assert (r, g, b) == (255, 0, 0)
 
 
-@pytest.mark.parametrize("background_color", [(255, 255, 255), (12, 34, 56)])
-def test_rgb_with_trns_to_rgb(background_color):
-    image = Image.new("RGB", (2, 1), (255, 0, 0))
-    image.putpixel((1, 0), (0, 0, 255))
-    image.info["transparency"] = (255, 0, 0)
+def test_rgb_converted_from_palette_is_unchanged():
+    """Pillow keeps a palette image's transparent color in ``info`` when
+    converting it to RGB. Opaque pixels can share that color, so an RGB
+    image passed in memory must not be treated as color-keyed."""
+    img = Image.new("P", (2, 1))
+    img.putpalette([0] * 768)  # index 0 (transparent) and 1 are both black
+    img.putpixel((1, 0), 1)
+    img.info["transparency"] = 0
+    rgb = img.convert("RGB")
+    assert rgb.info["transparency"] == (0, 0, 0)
 
-    converted = convert_image_mode(image, "RGB", background_color)
-
-    assert converted.mode == "RGB"
-    assert converted.getpixel((0, 0)) == background_color
-    assert converted.getpixel((1, 0)) == (0, 0, 255)
+    converted = convert_image_mode(rgb, "RGB")
+    assert converted.getpixel((1, 0)) == (0, 0, 0)
 
 
 def test_l_mode_no_trns_to_rgb():
