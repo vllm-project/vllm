@@ -15,6 +15,7 @@ from torch.distributed import ProcessGroup, ReduceOp, Store
 import vllm.envs as envs
 from vllm.config.fault_tolerance import FaultToleranceConfig
 from vllm.config.utils import config
+from vllm.distributed.utils import cpu_all_reduce_
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_ports_list
@@ -183,7 +184,7 @@ class ParallelConfig:
     """Whether the deployed model is MoE (if known)."""
     enable_hc_sp: bool = False
     """Enable sequence parallelism for HyperConnection (HC) computation.
-    Currently supported by Qwen4Exp on CUDA with TP>1 and PP=1 (ignored when TP=1).
+    Currently supported by Qwen4Exp on CUDA/ROCm with TP>1 and PP=1 (ignored when TP=1).
     Does not change MoE parallelism. MoE SP may enable HC SP independently of this flag.
     """
     enable_expert_parallel: bool = False
@@ -887,7 +888,7 @@ class ParallelConfig:
         tensor = torch.tensor(
             [int(has_unfinished), int(pending_pause)], dtype=torch.int32, device="cpu"
         )
-        torch.distributed.all_reduce(tensor, op=ReduceOp.SUM, group=dp_group)
+        cpu_all_reduce_(tensor, dp_group)
         dp_size = dp_group.size()
         pause_count = tensor[1].item()
         has_unfinished_global = tensor[0].item() > 0 or pause_count % dp_size != 0
