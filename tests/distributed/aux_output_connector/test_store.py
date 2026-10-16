@@ -790,6 +790,8 @@ def test_worker_publishes_entire_batch_before_materializing_prefix():
     assert output is not None
     np.testing.assert_array_equal(output["consumer"].rows, logical)
     np.testing.assert_array_equal(output["producer"].rows, logical[:4])
+    assert np.shares_memory(output["consumer"].rows, output.rows)
+    assert np.shares_memory(output["producer"].rows, output.rows)
     worker.close()
 
 
@@ -2018,16 +2020,14 @@ def test_large_aux_snapshot_survives_worker_shm_slot_reuse():
         writer.enqueue(
             AuxStepOutput(
                 rows,
-                {"request": (0, 0, 1)},
-                {"prefix": AuxRequestOutput(0, rows.copy())},
+                {"request": (0, 0, 1), "prefix": (0, 0, len(rows))},
             )
         )
         output = reader.dequeue(timeout=1)
         writer.enqueue(
             AuxStepOutput(
                 np.full_like(rows, 2),
-                {"request": (0, 0, 1)},
-                {"prefix": AuxRequestOutput(0, np.full_like(rows, 2))},
+                {"request": (0, 0, 1), "prefix": (0, 0, len(rows))},
             )
         )
         reader.dequeue(timeout=1)

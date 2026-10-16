@@ -45,26 +45,21 @@ class AuxRequestOutput:
 class AuxStepOutput(Mapping[str, AuxRequestOutput]):
     """Request outputs sharing captured rows for worker-to-engine IPC.
 
-    Each span is ``(token_start, lo, hi)``; historical outputs remain separate.
+    Each span is ``(token_start, lo, hi)`` in the shared rows array.
     """
 
     rows: np.ndarray
     spans: dict[str, tuple[int, int, int]]
-    materialized: dict[str, AuxRequestOutput]
 
     def __getitem__(self, request_id: str) -> AuxRequestOutput:
-        span = self.spans.get(request_id)
-        if span is None:
-            return self.materialized[request_id]
-        token_start, lo, hi = span
+        token_start, lo, hi = self.spans[request_id]
         return AuxRequestOutput(token_start, self.rows[lo:hi])
 
     def __iter__(self) -> Iterator[str]:
         yield from self.spans
-        yield from self.materialized
 
     def __len__(self) -> int:
-        return len(self.spans) + len(self.materialized)
+        return len(self.spans)
 
 
 class AuxOutputSchedulerConnector:

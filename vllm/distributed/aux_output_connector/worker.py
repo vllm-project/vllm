@@ -15,7 +15,6 @@ import torch
 from vllm.config import VllmConfig
 from vllm.distributed.aux_output_connector.connector import (
     AuxOutputConnectorMetadata,
-    AuxRequestOutput,
     AuxStepOutput,
 )
 from vllm.distributed.aux_output_connector.routed_experts import (
@@ -203,7 +202,6 @@ class AuxOutputWorkerConnector:
         materialize_outputs: list[tuple[str, int, int]] = []
         block_batches = []
         spans: dict[str, tuple[int, int, int]] = {}
-        materialized: dict[str, AuxRequestOutput] = {}
         packed = []
         num_packed = 0
 
@@ -292,10 +290,12 @@ class AuxOutputWorkerConnector:
                     )
             else:
                 rows = buffer.read(request_id, emit_start, token_end)
-            materialized[request_id] = AuxRequestOutput(emit_start, rows)
+            spans[request_id] = (emit_start, num_packed, num_packed + len(rows))
+            packed.append(rows)
+            num_packed += len(rows)
             state.emit_cursor = token_end
         packed_rows = np.concatenate(packed) if packed else routed_experts[:0]
-        return AuxStepOutput(packed_rows, spans, materialized)
+        return AuxStepOutput(packed_rows, spans)
 
     def _publish_blocks(
         self,
