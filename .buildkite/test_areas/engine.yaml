@@ -115,6 +115,7 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI250) E2E Scheduling Accuracy"
+      automatic_shard: true
       dind: false
       device: mi250_1
       timeout_in_minutes: 55
