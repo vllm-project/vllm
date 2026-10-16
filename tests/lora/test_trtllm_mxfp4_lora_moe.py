@@ -24,14 +24,15 @@ from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
 from vllm.utils.torch_utils import set_random_seed
 
-if pytest and (
-    not has_flashinfer_trtllm_fused_moe()
-    or not current_platform.is_device_capability_family(100)
-):
-    pytest.skip(
-        "Requires flashinfer TRTLLM fused MoE (SM100)",
-        allow_module_level=True,
-    )
+# FlashInfer's TRTLLM MoE LoRA kernels only run on SM100-family GPUs.
+pytestmark = [
+    pytest.mark.skipif(
+        not current_platform.is_device_capability_family(100)
+        or not has_flashinfer_trtllm_fused_moe(),
+        reason="Requires an SM100-family GPU and FlashInfer TRTLLM fused MoE",
+    ),
+    pytest.mark.skip_global_cleanup,
+]
 
 E, N, K, T, TOPK = 16, 256, 512, 33, 4
 E2M1 = [0, 0.5, 1, 1.5, 2, 3, 4, 6]
