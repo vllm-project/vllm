@@ -3150,7 +3150,7 @@ class VllmConfig:
         self, log_stats: bool, multiprocess_mode: bool
     ) -> None:
         observability = self.observability_config
-        observability.enable_iteration_timing = False
+        observability.iteration_timing_enabled = False
         if not log_stats or not observability.enable_logging_iteration_details:
             return
         reason = (
@@ -3159,7 +3159,7 @@ class VllmConfig:
             else "In-process EngineCore cannot deliver idle timing records"
         )
         if reason is None:
-            observability.enable_iteration_timing = True
+            observability.iteration_timing_enabled = True
         else:
             logger.warning("Logging iteration counts without GPU timing: %s", reason)
 

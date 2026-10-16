@@ -30,10 +30,10 @@ def make_iteration_details() -> SchedulerIterationDetails:
 
 
 def make_fake_engine(
-    log_stats: bool = True, enable_iteration_timing: bool = False
+    log_stats: bool = True, iteration_timing_enabled: bool = False
 ) -> SimpleNamespace:
     observability = ObservabilityConfig(enable_logging_iteration_details=True)
-    observability.enable_iteration_timing = enable_iteration_timing
+    observability.iteration_timing_enabled = iteration_timing_enabled
     return SimpleNamespace(
         log_stats=log_stats,
         vllm_config=SimpleNamespace(observability_config=observability),
@@ -74,11 +74,11 @@ def test_iteration_logging_enables_supported_timing_only(
     config.observability_config = ObservabilityConfig(
         enable_logging_iteration_details=logging
     )
-    config.observability_config.enable_iteration_timing = previously_enabled
+    config.observability_config.iteration_timing_enabled = previously_enabled
 
     config.resolve_iteration_timing(stats, mp)
 
-    assert config.observability_config.enable_iteration_timing is expected
+    assert config.observability_config.iteration_timing_enabled is expected
     if logging and stats and not expected:
         assert "Logging iteration counts without GPU timing" in caplog.text
 
@@ -87,7 +87,7 @@ def test_iteration_logging_enables_supported_timing_only(
 def test_legacy_iteration_details_skip_disabled_logging_and_gpu_timing(
     log_stats, gpu_timing
 ):
-    engine = make_fake_engine(log_stats, enable_iteration_timing=gpu_timing)
+    engine = make_fake_engine(log_stats, iteration_timing_enabled=gpu_timing)
 
     with EngineCore.capture_iteration_details(engine, None) as iteration_details:
         assert iteration_details is None

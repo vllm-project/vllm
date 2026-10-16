@@ -110,10 +110,9 @@ class IterationTimer:
                 if not self._pending_lock.acquire(blocking=False):
                     break
                 try:
-                    completed = self._pending.popleft()
+                    self._pending.popleft()
                 finally:
                     self._pending_lock.release()
-                assert completed is pending
                 ready.append((pending.iteration_id, elapsed_ms * 1e-3))
                 self._event_pool.put((pending.start_event, pending.end_event))
         finally:
@@ -134,24 +133,16 @@ class IterationTimer:
 
 def make_iteration_timer(
     vllm_config: VllmConfig,
-    is_output_rank: bool,
+    rank: int,
 ) -> IterationTimer | None:
     """Allocate events only when timing is enabled on the model-output rank."""
-    if (
-        not vllm_config.observability_config.enable_iteration_timing
-        or not is_output_rank
-    ):
+    if not vllm_config.observability_config.iteration_timing_enabled:
         return None
-    return IterationTimer(
-        num_event_pairs=max(2, vllm_config.max_concurrent_batches + 1)
-    )
-
-
-def is_iteration_output_rank(vllm_config: VllmConfig, rank: int) -> bool:
-    """Match the executor's ModelRunnerOutput rank within a DP replica."""
     parallel_config = vllm_config.parallel_config
     output_rank = parallel_config.world_size - (
         parallel_config.tensor_parallel_size
         * parallel_config.prefill_context_parallel_size
     )
-    return rank == output_rank
+    if rank != output_rank:
+        return None
+    return IterationTimer(num_event_pairs=vllm_config.max_concurrent_batches + 1)

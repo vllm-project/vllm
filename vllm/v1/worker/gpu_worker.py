@@ -94,7 +94,6 @@ from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.metrics.iteration_timing import (
     IterationTimer,
-    is_iteration_output_rank,
     make_iteration_timer,
 )
 from vllm.v1.outputs import (
@@ -580,8 +579,7 @@ class Worker(WorkerBase):
         )
         self.model_runner: GPUModelRunner = self._make_model_runner()
         self.model_runner.iteration_timer = make_iteration_timer(
-            self.vllm_config,
-            is_output_rank=is_iteration_output_rank(self.vllm_config, self.rank),
+            self.vllm_config, self.rank
         )
         if self.rank == 0:
             # If usage stat is enabled, collect relevant info.
@@ -1490,13 +1488,13 @@ class Worker(WorkerBase):
     def execute_dummy_batch(
         self, iteration_metrics_id: int | None = None
     ) -> tuple[tuple[int, float], ...] | None:
-        num_tokens = getattr(self.model_runner, "uniform_decode_query_len", 1)
-        randomize_inputs = self.randomize_dummy_inputs
         with _time_dummy_batch(
             self.model_runner.iteration_timer, iteration_metrics_id
         ) as samples:
             self.model_runner._dummy_run(
-                num_tokens, uniform_decode=True, randomize_inputs=randomize_inputs
+                getattr(self.model_runner, "uniform_decode_query_len", 1),
+                uniform_decode=True,
+                randomize_inputs=self.randomize_dummy_inputs,
             )
         return samples
 

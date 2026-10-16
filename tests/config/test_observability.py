@@ -9,9 +9,9 @@ from vllm.config.observability import ObservabilityConfig
 
 
 def test_iteration_timing_is_not_a_constructor_option():
-    with pytest.raises(ValidationError, match="enable_iteration_timing"):
+    with pytest.raises(ValidationError, match="iteration_timing_enabled"):
         TypeAdapter(ObservabilityConfig).validate_python(
-            {"enable_iteration_timing": True}
+            {"iteration_timing_enabled": True}
         )
 
 

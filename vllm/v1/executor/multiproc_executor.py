@@ -367,16 +367,9 @@ class MultiprocExecutor(Executor):
     def execute_dummy_batch(
         self, iteration_metrics_id: int | None = None
     ) -> tuple[tuple[int, float], ...] | None:
-        if iteration_metrics_id is None:
-            self.collective_rpc(
-                "execute_dummy_batch",
-                unique_reply_rank=self.output_rank,
-                timeout=envs.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS,
-            )
-            return None
         return self.collective_rpc(
             "execute_dummy_batch",
-            args=(iteration_metrics_id,),
+            args=() if iteration_metrics_id is None else (iteration_metrics_id,),
             unique_reply_rank=self.output_rank,
             timeout=envs.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS,
         )

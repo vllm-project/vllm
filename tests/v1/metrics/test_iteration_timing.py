@@ -8,7 +8,6 @@ import pytest
 
 from vllm.v1.metrics.iteration_timing import (
     IterationTimer,
-    is_iteration_output_rank,
     make_iteration_timer,
 )
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
@@ -63,9 +62,9 @@ def test_disabled_timing_allocates_no_events(monkeypatch):
     factory = Mock(side_effect=AssertionError("unexpected timing event allocation"))
     monkeypatch.setattr(IterationTimer, "_make_event", factory)
     config = SimpleNamespace(
-        observability_config=SimpleNamespace(enable_iteration_timing=False)
+        observability_config=SimpleNamespace(iteration_timing_enabled=False)
     )
-    assert make_iteration_timer(config, is_output_rank=True) is None
+    assert make_iteration_timer(config, rank=0) is None
     factory.assert_not_called()
 
 
@@ -73,7 +72,7 @@ def test_only_one_worker_per_replica_allocates_timing_events(monkeypatch):
     factory = Mock(return_value=Mock())
     monkeypatch.setattr(IterationTimer, "_make_event", factory)
     config = SimpleNamespace(
-        observability_config=SimpleNamespace(enable_iteration_timing=True),
+        observability_config=SimpleNamespace(iteration_timing_enabled=True),
         max_concurrent_batches=2,
         parallel_config=SimpleNamespace(
             world_size=8,
@@ -81,10 +80,7 @@ def test_only_one_worker_per_replica_allocates_timing_events(monkeypatch):
             prefill_context_parallel_size=2,
         ),
     )
-    timers = [
-        make_iteration_timer(config, is_iteration_output_rank(config, rank))
-        for rank in range(8)
-    ]
+    timers = [make_iteration_timer(config, rank) for rank in range(8)]
     assert sum(timer is not None for timer in timers) == 1
     assert timers[4] is not None
     assert factory.call_count == 6

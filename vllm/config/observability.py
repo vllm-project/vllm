@@ -101,9 +101,8 @@ class ObservabilityConfig:
     where supported. Unsupported configurations log counts without durations.
     Requires log statistics to be enabled."""
 
-    enable_iteration_timing: bool = Field(default=False, init=False, repr=False)
-    """Effective timing state resolved before worker initialization.
-    Not a constructor or CLI option; independent of console logging."""
+    iteration_timing_enabled: bool = Field(default=False, init=False, repr=False)
+    """Internal state resolved at EngineCore startup; not a user option."""
 
     jit_monitor_mode: Literal["warn", "error"] = "warn"
     """How to handle post-warmup JIT compilation events."""

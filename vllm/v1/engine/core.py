@@ -190,7 +190,7 @@ class EngineCore:
         self._initialize_effective_attention_block_size()
         self.iteration_metrics = (
             IterationMetricsCollector()
-            if vllm_config.observability_config.enable_iteration_timing
+            if vllm_config.observability_config.iteration_timing_enabled
             else None
         )
         self.use_spec_decode = vllm_config.speculative_config is not None
@@ -594,7 +594,7 @@ class EngineCore:
             self.vllm_config.observability_config.enable_logging_iteration_details
         )
         if (
-            self.vllm_config.observability_config.enable_iteration_timing
+            self.vllm_config.observability_config.iteration_timing_enabled
             or not self.log_stats
             or not enable_details
         ):

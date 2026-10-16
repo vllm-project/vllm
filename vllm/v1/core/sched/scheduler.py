@@ -611,7 +611,7 @@ class Scheduler(SchedulerInterface):
             self.log_stats
             and self.observability_config.enable_logging_iteration_details
         ) or (
-            self.observability_config.enable_iteration_timing
+            self.observability_config.iteration_timing_enabled
             or self.vllm_config.profiler_config.profiler is not None
         ):
             iteration_details = IterationDetails()
