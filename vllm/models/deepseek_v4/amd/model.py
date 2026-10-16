@@ -74,11 +74,15 @@ from vllm.model_executor.models.utils import (
     make_layers,
     maybe_prefix,
 )
-from vllm.models.deepseek_v4.amd.mega_moe import DeepseekV4AiterMegaMoEExperts
+from vllm.models.deepseek_v4.amd.mega_moe import (
+    DeepseekV4AiterMegaMoEExperts,
+    finalize_mega_moe_weights,
+)
 from vllm.models.deepseek_v4.amd.rocm import DeepseekV4ROCMAiterMLAAttention
 from vllm.platforms import current_platform
-from vllm.platforms.rocm import on_gfx950
+from vllm.platforms.rocm import on_gfx950, on_gfx1250
 from vllm.sequence import IntermediateTensors
+from vllm.v1.worker.ubatching import dbo_current_ubatch_token_offset
 
 from ..common.mm_preprocess import IMAGE_SENTINEL_BASE_ID
 
@@ -138,6 +142,11 @@ class DeepseekV4MLP(nn.Module):
         # B-preshuffle the gate_up_proj weight in place (single weight).
         if not self._gateup:
             return
+        # aiter's gemm_a8w8_blockscale_bpreshuffle currently disabled on gfx1250.
+        # Leaving _gateup_scale as None -> "not preshuffled"
+        # forward() falls back to the standard gate_up_proj linear
+        if on_gfx1250():
+            return
         from vllm.model_executor.layers.quantization.utils.fp8_utils import (
             _upcast_e8m0_to_fp32,
             get_fp8_block_weight_scale,
@@ -153,11 +162,13 @@ class DeepseekV4MLP(nn.Module):
             return
         if ws.dtype == torch.float8_e8m0fnu:
             ws = _upcast_e8m0_to_fp32(ws).contiguous()
-        replace_parameter(
-            self.gate_up_proj,
-            "weight",
-            rocm_aiter_ops.shuffle_weight(w.data, layout=(16, 16)),
-        )
+        # Skip when the linear kernel already B-preshuffled this weight.
+        if not getattr(self.gate_up_proj, "aiter_bpreshuffled", False):
+            replace_parameter(
+                self.gate_up_proj,
+                "weight",
+                rocm_aiter_ops.shuffle_weight(w.data, layout=(16, 16)),
+            )
         self._gateup_scale = ws
 
     def forward(self, x):
@@ -604,7 +615,10 @@ class DeepseekV4MoE(nn.Module):
         self.image_sentinel_lo = (
             IMAGE_SENTINEL_BASE_ID if getattr(config, "vision_n_layers", 0) > 0 else 0
         )
-        is_hash_moe = extract_layer_index(prefix) < config.num_hash_layers
+        num_hash_layers = getattr(config, "num_hash_layers", None)  # Set by V4.1
+        if num_hash_layers is None:
+            num_hash_layers = config.mlp_layer_types.count("hash_moe")
+        is_hash_moe = extract_layer_index(prefix) < num_hash_layers
         self.hash_indices_dtype = torch.int32
         if is_hash_moe:
             # hash MoE doesn't use e_score_correction_bias
@@ -690,6 +704,10 @@ class DeepseekV4MoE(nn.Module):
                 hidden_size=config.hidden_size,
                 intermediate_size=config.moe_intermediate_size,
                 swiglu_limit=self.swiglu_limit,
+                fuse_shared_expert=(
+                    config.n_shared_experts == 1
+                    and envs.VLLM_ROCM_AITER_MEGA_MOE_FUSE_SHARED_EXPERTS
+                ),
                 prefix=f"{prefix}.experts",
             )
             return
@@ -1221,7 +1239,13 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
 
         if self._mtp_hidden_buffer is not None:
             num_tokens = hidden_states.shape[0]
-            self._mtp_hidden_buffer[:num_tokens].copy_(hidden_states.flatten(1))
+            # Each DBO ubatch owns a different slice of the batch. Writing
+            # from row 0 in both threads would let one ubatch clobber the
+            # other's rows in the buffer the MTP drafter reads after the step.
+            offset = dbo_current_ubatch_token_offset()
+            self._mtp_hidden_buffer[offset : offset + num_tokens].copy_(
+                hidden_states.flatten(1)
+            )
 
         hidden_states = self.hc_head_op(
             hidden_states,
@@ -1257,14 +1281,6 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             if name not in params_dict and inv_name in params_dict:
                 return inv_name
             return name
-
-        # TP for attention
-        tp_size = get_tensor_model_parallel_world_size()
-        tp_rank = get_tensor_model_parallel_rank()
-        n_head = self.config.num_attention_heads
-        n_local_head = n_head // tp_size
-        head_rank_start = n_local_head * tp_rank
-        head_rank_end = n_local_head * (tp_rank + 1)
 
         # Pre-compute expert mapping ONCE.
         expert_mapping = self.get_expert_mapping()
@@ -1354,14 +1370,6 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                             name = name_mapped
                             break
                     loaded_params.add(name_mapped)
-                    continue
-                elif "attn_sink" in name:
-                    if is_pp_missing_parameter(name, self):
-                        continue
-                    narrow_weight = loaded_weight[head_rank_start:head_rank_end]
-                    n = narrow_weight.shape[0]
-                    params_dict[name][:n].copy_(narrow_weight)
-                    loaded_params.add(name)
                     continue
                 else:
                     if is_pp_missing_parameter(name, self):
@@ -1524,6 +1532,8 @@ class DeepseekV4ForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def process_weights_after_loading(self) -> None:
+        # Must precede the gate_up preshuffle of the fused shared experts.
+        finalize_mega_moe_weights(self)
         # After per-layer quant finalize, so we preshuffle the final fp8 weights.
         fused_compressor_layers = 0
         for module in self.modules():
@@ -1532,8 +1542,6 @@ class DeepseekV4ForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
                 module.prepare_attn_preshuffle()
             elif isinstance(module, DeepseekV4MLP):
                 module.prepare_gateup_preshuffle()
-            elif isinstance(module, DeepseekV4AiterMegaMoEExperts):
-                module.finalize_weights()
         if fused_compressor_layers:
             logger.info(
                 "Fused the C4 compressor GEMMs in %d DeepSeek V4 layers",
