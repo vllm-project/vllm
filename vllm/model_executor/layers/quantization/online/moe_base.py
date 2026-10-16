@@ -56,6 +56,12 @@ class OnlineMoEMethodBase(OnlineRequantizationMixin, FusedMoEMethodBase):
             )
             return
 
+        # Padding from maybe_roundup_sizes is never loaded from the checkpoint.
+        unpadded_hidden = self.moe.hidden_dim_unpadded
+        unpadded_intermediate = self.moe.intermediate_size_per_partition_unpadded
+        assert unpadded_hidden is not None and unpadded_intermediate is not None
+        unpadded_up = self.moe.w13_num_shards * unpadded_intermediate
+
         # Fused gate_up_proj (column parallel) — full precision on meta device
         w13_weight = torch.nn.Parameter(
             torch.empty(
@@ -69,6 +75,7 @@ class OnlineMoEMethodBase(OnlineRequantizationMixin, FusedMoEMethodBase):
         )
         layer.register_parameter("w13_weight", w13_weight)
         set_weight_attrs(w13_weight, extra_weight_attrs)
+        w13_weight.weight_loader_numel = num_experts * unpadded_up * unpadded_hidden
 
         # down_proj (row parallel) — full precision on meta device
         w2_weight = torch.nn.Parameter(
@@ -83,6 +90,9 @@ class OnlineMoEMethodBase(OnlineRequantizationMixin, FusedMoEMethodBase):
         )
         layer.register_parameter("w2_weight", w2_weight)
         set_weight_attrs(w2_weight, extra_weight_attrs)
+        w2_weight.weight_loader_numel = (
+            num_experts * unpadded_hidden * unpadded_intermediate
+        )
 
         # BIASES (for models like GPT-OSS that have biased MoE)
         if self.moe.has_bias:
@@ -97,6 +107,7 @@ class OnlineMoEMethodBase(OnlineRequantizationMixin, FusedMoEMethodBase):
             )
             layer.register_parameter("w13_bias", w13_bias)
             set_weight_attrs(w13_bias, extra_weight_attrs)
+            w13_bias.weight_loader_numel = num_experts * unpadded_up
 
             w2_bias = torch.nn.Parameter(
                 torch.zeros(
@@ -109,6 +120,7 @@ class OnlineMoEMethodBase(OnlineRequantizationMixin, FusedMoEMethodBase):
             )
             layer.register_parameter("w2_bias", w2_bias)
             set_weight_attrs(w2_bias, extra_weight_attrs)
+            w2_bias.weight_loader_numel = num_experts * unpadded_hidden
 
         layer.w13_input_scale = None
         layer.w2_input_scale = None
