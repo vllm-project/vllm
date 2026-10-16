@@ -9,8 +9,9 @@ set -e
 DEEPGEMM_GIT_REPO="https://github.com/vllm-project/DeepGEMM.git"
 # NOTE: This targets the vLLM fork's dev branch: upstream's 26/09/30 release
 # plus the sm120 and sm90 paged-MQA ports, the SwiGLU alpha/beta and SiTU
-# Mega MoE activations, and NVFP4 Mega MoE.
-DEEPGEMM_GIT_REF="6ce1c5ec6627a6bf11dbcc698b0b1e19c9248432"
+# Mega MoE activations, NVFP4 Mega MoE, and BF16/FP8/NVFP4 swiglustep.
+# Uses the PyTorch 2.11 stable ABI and CPython 3.10 limited API.
+DEEPGEMM_GIT_REF="a7a927731b109fdfec770df7c2a5be5d7e2216b5"
 WHEEL_DIR=""
 
 # Parse command line arguments
