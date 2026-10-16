@@ -384,10 +384,6 @@ class DeepseekV4DecoderLayer(nn.Module):
         if self.use_sequence_parallel:
             x = sp_reduce_scatter(x)
         elif not self.attn.wo_b.reduce_results:
-            # A partial-layer specialized decode: the FFN launch takes wo_b's
-            # TP partial and the rest of the layer. Whole-layer launches never
-            # come through here, and a new kernel should cover a whole layer
-            # instead of reaching into one.
             if decode_ffn is not None:
                 out = decode_ffn(x, residual, post_mix, res_mix, attn_pre)
                 if out is not None:
