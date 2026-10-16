@@ -1728,12 +1728,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     def _merge_ec_connector_no_forward(
         self, scheduler_output: SchedulerOutput, output: ModelRunnerOutput
-    ) -> ModelRunnerOutput | AsyncModelRunnerOutput:
+    ) -> ModelRunnerOutput:
         """Let the EC connector send/recv on a step with no work to run."""
-        output = ModelRunnerOutput.with_ec_conn_output(
+        return ModelRunnerOutput.with_ec_conn_output(
             output, self.ec_connector.no_forward(scheduler_output).ec_connector_output
         )
-        return self.kv_connector.add_kv_checksums(output)
 
     @torch.inference_mode()
     def execute_model(
@@ -1763,9 +1762,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if scheduler_output.total_num_scheduled_tokens == 0:
                 # No need to run the model.
                 empty_output = self.kv_connector.no_forward(scheduler_output)
-                return self._merge_ec_connector_no_forward(
+                output = self._merge_ec_connector_no_forward(
                     scheduler_output, empty_output
                 )
+                return self.kv_connector.add_kv_checksums(output)
 
         # Get batch descriptor and sync across DP ranks.
         num_reqs = len(scheduler_output.num_scheduled_tokens)
@@ -1820,7 +1820,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if batch_desc.num_tokens == 0:
             # All DP ranks have zero tokens to run.
             empty_output = self.kv_connector.no_forward(scheduler_output)
-            return self._merge_ec_connector_no_forward(scheduler_output, empty_output)
+            output = self._merge_ec_connector_no_forward(scheduler_output, empty_output)
+            return self.kv_connector.add_kv_checksums(output)
 
         cudagraph_stats = None
         if not dummy_run:
