@@ -232,7 +232,8 @@ class MatcherMRotaryEmbedding(MatcherCustomOp):
 
 
 class MatcherRMSNormGated(MatcherCustomOp):
-    """Matches RMSNormGated with norm_before_gate=True and group_size=None."""
+    """Matches RMSNormGated, by default with norm_before_gate=True,
+    group_size=None and swish gating."""
 
     def __init__(
         self,
@@ -240,6 +241,7 @@ class MatcherRMSNormGated(MatcherCustomOp):
         enabled: bool | None = None,
         norm_before_gate: bool = True,
         group_size: int | None = None,
+        activation: str = "swish",
     ) -> None:
         if enabled is None:
             enabled = RMSNormGated.enabled()
@@ -248,6 +250,7 @@ class MatcherRMSNormGated(MatcherCustomOp):
         self.epsilon = epsilon
         self.norm_before_gate = norm_before_gate
         self.group_size = group_size
+        self.activation = activation
 
     def inputs(self) -> list[torch.Tensor]:
         x = self.empty(5, 16)
@@ -273,6 +276,7 @@ class MatcherRMSNormGated(MatcherCustomOp):
             eps=self.epsilon,
             group_size=self.group_size,
             norm_before_gate=self.norm_before_gate,
+            activation=self.activation,
         )
 
     def forward_native(
@@ -289,6 +293,7 @@ class MatcherRMSNormGated(MatcherCustomOp):
             self.model_dtype,
             group_size=self.group_size,
             norm_before_gate=self.norm_before_gate,
+            activation=self.activation,
         )
 
 

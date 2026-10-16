@@ -795,3 +795,175 @@ def test_aiter_fusion_rmsnorm_gated_quant_no_gdn_layers(
         model_fused(x, z)
 
         assert fusion_pass.matched_count == 0
+
+
+class _AiterMxfp4OutProj(torch.nn.Module):
+    """MXFP4 linear on AiterMxfp4LinearKernel, as an online-MXFP4 out_proj."""
+
+    def __init__(self, in_features: int, out_features: int):
+        super().__init__()
+        from types import SimpleNamespace
+
+        from aiter.ops.triton.quant import dynamic_mxfp4_quant
+
+        from vllm.model_executor.kernels.linear.mxfp4.aiter import (
+            AiterMxfp4LinearKernel,
+        )
+        from vllm.model_executor.kernels.linear.mxfp4.base import (
+            MxFp4LinearLayerConfig,
+        )
+        from vllm.model_executor.layers.quantization.utils.quant_utils import (
+            kMxfp4Dynamic,
+        )
+
+        kernel = AiterMxfp4LinearKernel(
+            MxFp4LinearLayerConfig(activation_quant_key=kMxfp4Dynamic)
+        )
+        w = torch.randn(out_features, in_features) * 0.02
+        w_q, w_s = dynamic_mxfp4_quant(w)
+        self.weight = torch.nn.Parameter(w_q, requires_grad=False)
+        self.weight_scale = torch.nn.Parameter(w_s, requires_grad=False)
+        kernel.process_weights_after_loading(self)
+        self.quant_method = SimpleNamespace(kernel=kernel)
+
+    def forward(self, x):
+        return self.quant_method.kernel.apply_weights(self, x)
+
+
+class TestGatedMxfp4Model(torch.nn.Module):
+    """RMSNormGated on per-head tensors + reshape + MXFP4 out_proj, the GDN
+    output projection with online MXFP4."""
+
+    def __init__(
+        self,
+        num_heads: int,
+        head_dim: int,
+        out_features: int,
+        eps: float,
+        activation: str,
+        flatten_heads: bool,
+        out_flatten: bool = False,
+    ):
+        super().__init__()
+        self.num_heads = num_heads
+        self.head_dim = head_dim
+        self.flatten_heads = flatten_heads
+        self.out_flatten = out_flatten
+        self.norm = RMSNormGated(
+            head_dim,
+            eps=eps,
+            group_size=None,
+            norm_before_gate=True,
+            activation=activation,
+        )
+        self.norm.weight.data.normal_(1.0, 0.1)
+        self.out_proj = _AiterMxfp4OutProj(num_heads * head_dim, out_features)
+
+    def forward(self, x, z):
+        x = torch.relu(x).reshape(-1, self.num_heads, self.head_dim)
+        z = z.reshape(-1, self.num_heads, self.head_dim)
+        if self.flatten_heads:
+            x = x.reshape(-1, self.head_dim)
+            z = z.reshape(-1, self.head_dim)
+        normed = self.norm(x, z)
+        if self.out_flatten:
+            # GDN's _output_projection: a reshape to the symbolic token count.
+            return self.out_proj(normed.flatten(-2))
+        return self.out_proj(normed.reshape(-1, self.num_heads * self.head_dim))
+
+
+@pytest.mark.parametrize("num_tokens", [8, 64])
+@pytest.mark.parametrize("activation", ["swish", "sigmoid"])
+@pytest.mark.parametrize(
+    "flatten_heads, out_flatten", [(True, False), (False, False), (False, True)]
+)
+@pytest.mark.skipif(
+    (not current_platform.is_rocm() or not IS_AITER_FOUND),
+    reason="Only test on ROCm with aiter package installed",
+)
+def test_aiter_fusion_rmsnorm_gated_mxfp4_gemm(
+    num_tokens: int,
+    activation: str,
+    flatten_heads: bool,
+    out_flatten: bool,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from vllm.platforms.rocm import on_gfx950
+
+    if not on_gfx950():
+        pytest.skip("The AITER ASM FP4 GEMM needs gfx950")
+
+    # N=8192, K=2048 has a tuned preshuffled FP4 GEMM config in AITER, so
+    # M < 32 takes the fused quant and M >= 32 the unfused fallback.
+    num_heads, head_dim, out_features, eps = 16, 128, 8192, 1e-6
+    dtype = torch.bfloat16
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(dtype=dtype),
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            # TODO: also cover +rms_norm_gated once the FP8 gated pattern stops
+            # registering duplicate patterns for the FLA custom op.
+            custom_ops=["-rms_norm", "-silu_and_mul", "-rms_norm_gated"],
+            pass_config=PassConfig(fuse_norm_quant=True, eliminate_noops=True),
+        ),
+    )
+
+    with vllm.config.set_current_vllm_config(vllm_config), monkeypatch.context() as m:
+        from vllm.compilation.passes.fusion.rocm_aiter_fusion import (
+            AiterRMSNormGatedMxfp4GemmPattern,
+            RocmAiterRMSNormQuantFusionPass,
+        )
+
+        m.setenv("VLLM_ROCM_USE_AITER", "1")
+        m.setenv("VLLM_ROCM_USE_AITER_FP4_ASM_GEMM", "1")
+        rocm_aiter_ops.refresh_env_variables()
+
+        torch.set_default_device("cuda")
+        torch.set_default_dtype(dtype)
+        torch.manual_seed(1)
+
+        model = TestGatedMxfp4Model(
+            num_heads,
+            head_dim,
+            out_features,
+            eps,
+            activation,
+            flatten_heads,
+            out_flatten,
+        )
+        assert model.out_proj.quant_method.kernel.use_asm_gemm
+
+        mock_gdn = _MockGDNLayer(num_v_heads=num_heads, head_v_dim=head_dim)
+        # The mock is an uninitialized nn.Module, so bypass submodule
+        # registration.
+        object.__setattr__(mock_gdn, "norm", model.norm)
+        object.__setattr__(mock_gdn, "out_proj", model.out_proj)
+        vllm_config.compilation_config.static_forward_context["mock_gdn_layer"] = (
+            mock_gdn
+        )
+        fusion_pass = RocmAiterRMSNormQuantFusionPass(vllm_config)
+
+        noop_pass = NoOpEliminationPass(vllm_config)
+        cleanup_pass = PostCleanupPass(vllm_config)
+        backend = TestBackend(noop_pass, fusion_pass, cleanup_pass)
+        backend2 = TestBackend(noop_pass, cleanup_pass)
+
+        hidden_dim = num_heads * head_dim
+        x = torch.randn(num_tokens, hidden_dim)
+        z = torch.randn(num_tokens, hidden_dim)
+        torch._dynamo.mark_dynamic(x, 0)
+        torch._dynamo.mark_dynamic(z, 0)
+
+        result_fused = torch.compile(model, backend=backend)(x, z)
+        result_unfused = torch.compile(model, backend=backend2)(x, z)
+
+        assert fusion_pass.matched_count == 1
+        backend.check_after_ops([AiterRMSNormGatedMxfp4GemmPattern.FUSED_OP])
+
+        # The fused kernel rounds to E2M1 in Triton while the unfused path
+        # quantizes with per_1x32_f4_quant_hip, so below M=32 the two
+        # activations differ in rounding; at M >= 32 both run the same ops.
+        err = (result_fused.float() - result_unfused.float()).norm() / (
+            result_unfused.float().norm()
+        )
+        assert err < (0.2 if num_tokens < 32 else 1e-3), err
