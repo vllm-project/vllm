@@ -95,16 +95,14 @@ def test_cpu_prompt_logprobs_scores_requested_token_ids() -> None:
     torch.testing.assert_close(actual, expected)
 
 
-def test_cpu_runner_selects_prompt_logprobs_worker_without_triton(monkeypatch) -> None:
+def test_cpu_runner_selects_prompt_logprobs_worker_without_triton() -> None:
     from vllm.v1.worker.cpu import model_runner as cpu_model_runner
 
-    runner = object.__new__(cpu_model_runner.CPUModelRunner)
+    triton_runner = object.__new__(cpu_model_runner.CPUModelRunner)
+    no_triton_runner = object.__new__(cpu_model_runner.NoTritonCPUModelRunner)
 
-    monkeypatch.setattr(cpu_model_runner, "HAS_TRITON", False)
-    assert runner.prompt_logprobs_worker_cls is CPUPromptLogprobsWorker
-
-    monkeypatch.setattr(cpu_model_runner, "HAS_TRITON", True)
-    assert runner.prompt_logprobs_worker_cls is PromptLogprobsWorker
+    assert triton_runner.prompt_logprobs_worker_cls is PromptLogprobsWorker
+    assert no_triton_runner.prompt_logprobs_worker_cls is CPUPromptLogprobsWorker
 
 
 def _make_logprob_token_ids_state(

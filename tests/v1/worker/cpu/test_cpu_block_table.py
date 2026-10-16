@@ -122,13 +122,11 @@ def test_compute_slot_mappings_cpu_dcp() -> None:
         assert torch.equal(actual[1], 160 + positions)
 
 
-def test_cpu_runner_selects_block_tables_only_without_triton(monkeypatch) -> None:
+def test_cpu_runner_selects_block_tables_only_without_triton() -> None:
     from vllm.v1.worker.cpu import model_runner as cpu_model_runner
 
-    runner = object.__new__(cpu_model_runner.CPUModelRunner)
+    triton_runner = object.__new__(cpu_model_runner.CPUModelRunner)
+    no_triton_runner = object.__new__(cpu_model_runner.NoTritonCPUModelRunner)
 
-    monkeypatch.setattr(cpu_model_runner, "HAS_TRITON", False)
-    assert runner.block_tables_cls is CPUBlockTables
-
-    monkeypatch.setattr(cpu_model_runner, "HAS_TRITON", True)
-    assert runner.block_tables_cls is BlockTables
+    assert triton_runner.block_tables_cls is BlockTables
+    assert no_triton_runner.block_tables_cls is CPUBlockTables
