@@ -15,10 +15,13 @@ from unittest.mock import MagicMock
 
 import pytest
 import torch
+from transformers import LlamaConfig, Qwen3NextConfig
 
-from vllm.config import CacheConfig
+from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.model_executor.layers.mamba.abstract import MambaBase
-from vllm.utils.torch_utils import get_dtype_size
+from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+from vllm.utils.torch_utils import get_dtype_size, nvfp4_kv_cache_full_dim
+from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.kv_cache_planning import (
     _get_kv_cache_bytes_per_block,
@@ -39,6 +42,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     KVCacheLayout,
     KVCacheSpec,
+    KVQuantMode,
     MambaSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
@@ -83,6 +87,8 @@ def _mock_vllm_config(layout: str | None):
     config.cache_config.num_gpu_blocks_override = None
     config.cache_config.kv_cache_layout = layout
     config.attention_config.hisparse_config = None
+    config.model_config.is_hybrid = False
+    config.quant_config.has_layerwise_kv_cache.return_value = False
     return config
 
 
@@ -600,7 +606,170 @@ class TestSlidingWindowBucketCap:
         )
 
 
+@pytest.fixture
+def layerwise_config(tmp_path, request):
+    if getattr(request, "param", True):
+        hf_config = Qwen3NextConfig(
+            architectures=["Qwen3NextForCausalLM"],
+            num_hidden_layers=2,
+            layer_types=["linear_attention", "full_attention"],
+        )
+    else:
+        hf_config = LlamaConfig(architectures=["LlamaForCausalLM"], num_hidden_layers=2)
+    hf_config.save_pretrained(tmp_path)
+
+    class LayerwiseKVConfig(Fp8Config):
+        def has_layerwise_kv_cache(self):
+            return True
+
+    config = VllmConfig(
+        cache_config=CacheConfig(block_size=64, kv_cache_layout="BLHNC"),
+        quant_config=LayerwiseKVConfig(),
+    )
+    config.model_config = ModelConfig(
+        model=str(tmp_path), max_model_len=64, skip_tokenizer_init=True
+    )
+    config.scheduler_config.disable_hybrid_kv_cache_manager = False
+    return config
+
+
 class TestDensePacking:
+    @pytest.mark.skip_global_cleanup
+    def test_layerwise_hybrid_prefers_block_outer_layout(self, layerwise_config):
+        config = layerwise_config
+        config.cache_config.kv_cache_layout = None
+        specs = (
+            FullAttentionSpec(
+                block_size=64,
+                num_kv_heads=1,
+                head_size=128,
+                dtype=torch.uint8,
+                kv_quant_mode=KVQuantMode.FP8_PER_TENSOR,
+            ),
+            FullAttentionSpec(
+                block_size=64,
+                num_kv_heads=1,
+                head_size=128,
+                dtype=torch.uint8,
+                kv_quant_mode=KVQuantMode.NVFP4,
+                num_head_slots=2,
+                state_content_bytes=nvfp4_kv_cache_full_dim(128),
+            ),
+            MambaSpec(
+                block_size=64,
+                shapes=((32_768,),),
+                dtypes=(torch.bfloat16,),
+                mamba_cache_mode="align",
+            ),
+        )
+
+        layout = resolve_kv_cache_layout(config, [["LBHNC", "BLHNC"]], specs)
+
+        assert layout is KVCacheLayout.BLHNC
+
+    @pytest.mark.skip_global_cleanup
+    def test_layerwise_hybrid_packing_preserves_capacity_and_granularity(
+        self, layerwise_config
+    ):
+        config = layerwise_config
+        config.cache_config.kv_cache_layout = "BLHNC"
+        config.cache_config.block_size = 64
+        config.cache_config.enable_prefix_caching = True
+        config.cache_config.mamba_cache_mode = "align"
+        specs = {
+            **{
+                f"fp8.{i}": FullAttentionSpec(
+                    block_size=64,
+                    num_kv_heads=1,
+                    head_size=128,
+                    dtype=torch.uint8,
+                    kv_quant_mode=KVQuantMode.FP8_PER_TENSOR,
+                )
+                for i in range(2)
+            },
+            **{
+                f"nvfp4.{i}": FullAttentionSpec(
+                    block_size=64,
+                    num_kv_heads=1,
+                    head_size=128,
+                    dtype=torch.uint8,
+                    kv_quant_mode=KVQuantMode.NVFP4,
+                    num_head_slots=2,
+                    state_content_bytes=nvfp4_kv_cache_full_dim(128),
+                )
+                for i in range(2)
+            },
+            "mamba.0": MambaSpec(
+                block_size=64,
+                shapes=((20_000,),),
+                dtypes=(torch.bfloat16,),
+                mamba_cache_mode="align",
+            ),
+        }
+
+        groups = get_kv_cache_groups(config, specs)
+        bytes_per_block = _get_kv_cache_bytes_per_block(groups, KVCacheLayout.BLHNC)
+        fp8_page = specs["fp8.0"].page_size_bytes
+        nvfp4_page = specs["nvfp4.0"].page_size_bytes
+        exact_attention_bytes = 2 * fp8_page + 2 * nvfp4_page
+        padded_attention_bytes = 4 * fp8_page
+        assert bytes_per_block == exact_attention_bytes
+        assert bytes_per_block < padded_attention_bytes
+        assert all(group.kv_cache_spec.block_size == 64 for group in groups)
+
+        available_memory = bytes_per_block * 32
+        kv_cache_config = get_kv_cache_config_from_groups(
+            config, groups, available_memory
+        )
+        assert kv_cache_config.num_blocks == 32
+        assert resolve_kv_cache_block_sizes(kv_cache_config, config) == (64, 64)
+        assert available_memory // padded_attention_bytes == 25
+
+        views = _bind(kv_cache_config, "BLHNC")
+        assert set(views) == set(specs)
+        for name, view in views.items():
+            assert view.shape[0] == 32, name
+
+    @pytest.mark.skip_global_cleanup
+    @pytest.mark.parametrize("layerwise_config", [False], indirect=True)
+    def test_layerwise_homogeneous_attention_preserves_exact_pages(
+        self, layerwise_config
+    ):
+        config = layerwise_config
+        config.cache_config.kv_cache_layout = "BLHNC"
+        config.cache_config.block_size = 64
+        specs = {
+            "fp8.0": FullAttentionSpec(
+                block_size=64,
+                num_kv_heads=1,
+                head_size=128,
+                dtype=torch.uint8,
+                kv_quant_mode=KVQuantMode.FP8_PER_TENSOR,
+            ),
+            "nvfp4.0": FullAttentionSpec(
+                block_size=64,
+                num_kv_heads=1,
+                head_size=128,
+                dtype=torch.uint8,
+                kv_quant_mode=KVQuantMode.NVFP4,
+                num_head_slots=2,
+                state_content_bytes=nvfp4_kv_cache_full_dim(128),
+            ),
+        }
+
+        groups = get_kv_cache_groups(config, specs)
+        expected_bytes = sum(spec.page_size_bytes for spec in specs.values())
+        assert (
+            _get_kv_cache_bytes_per_block(groups, KVCacheLayout.BLHNC) == expected_bytes
+        )
+
+        kv_cache_config = get_kv_cache_config_from_groups(
+            config, groups, expected_bytes * 16
+        )
+        assert kv_cache_config.num_blocks == 16
+        assert resolve_kv_cache_block_sizes(kv_cache_config, config) == (64, 64)
+        assert set(_bind(kv_cache_config, "BLHNC")) == set(specs)
+
     def test_bytes_per_block_is_largest_group(self):
         groups, g1, g2 = _mixed_page_groups()
         assert _get_kv_cache_bytes_per_block(
