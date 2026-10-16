@@ -65,6 +65,7 @@ from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     initialize_mamba_ssu_backend,
 )
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
+from vllm.model_executor.layers.rotation import bind_rotation_transforms
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.reload.inplace import reload_weights
 from vllm.model_executor.models.interfaces import (
@@ -5080,6 +5081,9 @@ class GPUModelRunner(
                         assert hasattr(self.drafter, "set_eplb_state")
                         self.drafter.set_eplb_state(self.eplb_state)
                         eplb_models += 1
+
+                draft_model = getattr(getattr(self, "drafter", None), "model", None)
+                bind_rotation_transforms(self.model, draft_model)
 
                 self._setup_eagle3_aux_hidden_state_outputs()
 

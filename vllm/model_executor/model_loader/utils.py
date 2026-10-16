@@ -79,6 +79,10 @@ def initialize_model(
     model_config: ModelConfig | None = None,
 ) -> nn.Module:
     """Initialize a model with the given configurations."""
+    # Import lazily because rotation uses helpers from models.utils,
+    # which in turn exposes initialize_model through a local import.
+    from vllm.model_executor.layers.rotation import prepare_rotation_transforms
+
     if model_config is None:
         model_config = vllm_config.model_config
     if model_class is None:
@@ -99,6 +103,7 @@ def initialize_model(
         # new-style model class
         with set_current_vllm_config(vllm_config, check_compile=True, prefix=prefix):
             model = model_class(vllm_config=vllm_config, prefix=prefix)
+            prepare_rotation_transforms(model, vllm_config, model_config)
             record_metadata_for_reloading(model)
             return model
 
@@ -131,6 +136,7 @@ def initialize_model(
         kwargs["scheduler_config"] = vllm_config.scheduler_config
     with set_current_vllm_config(vllm_config, check_compile=True, prefix=prefix):
         model = model_class(**kwargs)
+        prepare_rotation_transforms(model, vllm_config, model_config)
         record_metadata_for_reloading(model)
 
     return model
