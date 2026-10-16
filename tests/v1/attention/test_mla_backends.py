@@ -2192,11 +2192,10 @@ def test_chunked_context_backend_correctness(
     use_prefill_query_quantization: bool,
 ):
     """Split, packed, and context-free requests match the SDPA reference."""
-    if (
-        trtllm_ragged_backend == "cute-dsl"
-        and prefill_backend != MLAPrefillBackendEnum.TRTLLM_RAGGED
+    if prefill_backend != MLAPrefillBackendEnum.TRTLLM_RAGGED and (
+        trtllm_ragged_backend == "cute-dsl" or use_prefill_query_quantization
     ):
-        pytest.skip("CuTe DSL is only selectable for TRTLLM_RAGGED prefill")
+        pytest.skip("TRTLLM ragged-specific test configuration")
     if use_prefill_query_quantization and kv_cache_dtype == "auto":
         pytest.skip("FP8 prefill queries require an FP8 KV cache")
     if trtllm_ragged_backend == "cute-dsl":
