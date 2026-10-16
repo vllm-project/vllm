@@ -605,6 +605,85 @@ initialize_native_environment() {
   fi
 }
 
+# Per-job compile and kernel caches (Inductor, Triton, vLLM, AITER JIT modules)
+# kept as one archive per job on the persistent HF volume, so they outlive the
+# ephemeral pod. The archive is replaced atomically and written by one job key,
+# which avoids file locks on the shared NFS volume. PR builds only read it:
+# the archive holds generated code that later main builds would load.
+compile_cache_archive=""
+compile_cache_publish=0
+compile_cache_marker=""
+
+aiter_jit_dir() {
+  python3 -c 'import importlib.util, os; s = importlib.util.find_spec("aiter"); print(os.path.join(os.path.dirname(s.origin), "jit") if s else "")' 2>/dev/null
+}
+
+restore_compile_cache() {
+  local versions arch slug cache_root jit_dir t0="${SECONDS}"
+
+  [[ "${VLLM_CI_PERSISTENT_COMPILE_CACHE:-0}" == "1" ]] || return 0
+  versions=$(python3 -c '
+import importlib.metadata as m
+out = []
+for dist in ("torch", "triton", "pytorch-triton-rocm", "amd-aiter"):
+    try:
+        out.append(f"{dist}={m.version(dist)}")
+    except m.PackageNotFoundError:
+        pass
+print(";".join(out))' 2>/dev/null) || return 0
+  arch=$(rocminfo 2>/dev/null | grep -o -m1 'gfx[0-9a-f]*') || return 0
+  slug="${BUILDKITE_STEP_KEY:-${BUILDKITE_LABEL:-local}}${BUILDKITE_PARALLEL_JOB:+-${BUILDKITE_PARALLEL_JOB}}"
+  slug=$(printf '%s' "${slug}" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-150)
+  compile_cache_archive="${HF_HOME}/vllm-ci-compile-cache/v1/${arch}/$(printf '%s' "${versions}" | sha256sum | cut -c1-16)/${slug}.tar"
+  if [[ "${BUILDKITE_PULL_REQUEST:-false}" == "false" ]]; then
+    compile_cache_publish=1
+  fi
+
+  cache_root=$(dirname "${TORCHINDUCTOR_CACHE_DIR}")
+  compile_cache_marker="${cache_root}/.restore-marker"
+  touch "${compile_cache_marker}"
+  if [[ ! -f "${compile_cache_archive}" ]]; then
+    echo "Compile cache: no archive at ${compile_cache_archive}"
+    return 0
+  fi
+  if ! tar -C "${cache_root}" -xf "${compile_cache_archive}"; then
+    echo "Compile cache: failed to extract ${compile_cache_archive}; continuing cold" >&2
+    return 0
+  fi
+  jit_dir=$(aiter_jit_dir)
+  if [[ -n "${jit_dir}" && -d "${cache_root}/aiter" ]]; then
+    cp -n "${cache_root}"/aiter/*.so "${jit_dir}/" 2>/dev/null || true
+  fi
+  touch "${compile_cache_marker}"
+  echo "Compile cache: restored $(du -sh "${compile_cache_archive}" | cut -f1) from ${compile_cache_archive} in $((SECONDS - t0))s"
+}
+
+save_compile_cache() {
+  local cache_root jit_dir tmp t0="${SECONDS}"
+  local max_mb="${VLLM_CI_COMPILE_CACHE_MAX_MB:-4096}"
+
+  [[ -n "${compile_cache_archive}" && "${compile_cache_publish}" == "1" ]] || return 0
+  cache_root=$(dirname "${TORCHINDUCTOR_CACHE_DIR}")
+  mkdir -p "${cache_root}/aiter"
+  jit_dir=$(aiter_jit_dir)
+  if [[ -n "${jit_dir}" ]]; then
+    find "${jit_dir}" -maxdepth 1 -name '*.so' -newer "${compile_cache_marker}" \
+      -exec cp -n {} "${cache_root}/aiter/" \;
+  fi
+  if [[ $(du -sm "${cache_root}/torchinductor" "${cache_root}/triton" "${cache_root}/vllm" "${cache_root}/aiter" | awk '{s += $1} END {print s}') -gt "${max_mb}" ]]; then
+    echo "Compile cache: larger than ${max_mb} MiB; not saving"
+    return 0
+  fi
+  mkdir -p "$(dirname "${compile_cache_archive}")" || return 0
+  tmp="${compile_cache_archive}.tmp.$$"
+  if tar -C "${cache_root}" -cf "${tmp}" torchinductor triton vllm aiter \
+    && mv -f "${tmp}" "${compile_cache_archive}"; then
+    echo "Compile cache: saved $(du -sh "${compile_cache_archive}" | cut -f1) in $((SECONDS - t0))s"
+  else
+    rm -f "${tmp}"
+  fi
+}
+
 check_dpx_gpu_exclusivity() {
   local devices=(/dev/dri/renderD*)
   local device_id lock_status
@@ -1483,6 +1562,7 @@ if is_native_runtime; then
     if [[ -n "${artifact_work_dir}" ]]; then
       rm -rf "${artifact_work_dir}"
     fi
+    save_compile_cache || true
     handle_amd_runner_exit "${exit_code}"
   }
   trap cleanup_native_workspace EXIT
@@ -1531,6 +1611,7 @@ if is_native_runtime; then
 
   echo "Native test commands: $commands"
   run_native_preflight || exit 1
+  restore_compile_cache || true
   echo "--- Test log"
   # Keep AMD CI orchestration variables out of vLLM's runtime environment.
   clear_ci_orchestration_env
