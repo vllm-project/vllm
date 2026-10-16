@@ -97,7 +97,7 @@ def _make_runner(**overrides: Any) -> Any:
     runner.kv_connector = SimpleNamespace(
         set_disabled=lambda *_: None,
         post_forward=lambda *_, **__: None,
-        take_kv_checksums=lambda: None,
+        add_kv_checksums=lambda output: output,
     )
     runner.eplb = eplb.EPLBController(runner.parallel_config, runner.device)
     runner.jit_warmup_registry = JitWarmupRegistry(runner.vllm_config)

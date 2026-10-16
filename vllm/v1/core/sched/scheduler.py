@@ -1401,10 +1401,9 @@ class Scheduler(SchedulerInterface):
                     # only the successfully loaded tokens.
                     request.num_computed_tokens = num_computed_tokens
                     if self.kv_checksum is not None:
+                        blocks = self.kv_cache_manager.get_blocks(request_id)
                         self.kv_checksum.add_recv(
-                            request,
-                            self.kv_cache_manager.get_blocks(request_id),
-                            num_new_local_computed_tokens,
+                            request, blocks, num_new_local_computed_tokens
                         )
                     self._inflight_prefills.add(request)
                     self._set_kv_fetch_stage(request, KV_FETCH_IN_PROGRESS)

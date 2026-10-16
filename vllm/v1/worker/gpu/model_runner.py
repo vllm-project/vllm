@@ -90,10 +90,8 @@ from vllm.v1.worker.block_table import get_block_table_width
 from vllm.v1.worker.cp_utils import check_attention_cp_compatibility
 from vllm.v1.worker.gpu import pcp_manager as pcp
 from vllm.v1.worker.gpu.async_utils import (
-    AsyncKVChecksumOutput,
     AsyncOutput,
     AsyncPoolingOutput,
-    KVChecksumCopy,
     StepTimingCollector,
 )
 from vllm.v1.worker.gpu.attn_utils import (
@@ -810,7 +808,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.kv_connector = NO_OP_KV_CONNECTOR
         else:
             self.kv_connector = get_kv_connector(
-                self.vllm_config, self.kv_cache_config, kv_caches_dict
+                self.vllm_config,
+                self.kv_cache_config,
+                kv_caches_dict,
+                self.output_copy_stream,
             )
 
             # AuxOutput connector requires resolved kv_cache_config.
@@ -1726,30 +1727,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     def _merge_ec_connector_no_forward(
         self, scheduler_output: SchedulerOutput, output: ModelRunnerOutput
-    ) -> ModelRunnerOutput:
+    ) -> ModelRunnerOutput | AsyncModelRunnerOutput:
         """Let the EC connector send/recv on a step with no work to run."""
-        return ModelRunnerOutput.with_ec_conn_output(
+        output = ModelRunnerOutput.with_ec_conn_output(
             output,
             self.ec_connector.no_forward(scheduler_output).ec_connector_output,
         )
-
-    def _kv_checksum_copy(self) -> KVChecksumCopy | None:
-        """Start copying to host the KV checksums of the KV connector's last
-        ``post_forward``, if any."""
-        pending = self.kv_connector.take_kv_checksums()
-        if pending is None:
-            return None
-        return KVChecksumCopy(pending, self.main_stream, self.output_copy_stream)
-
-    def _with_kv_checksums(
-        self, output: ModelRunnerOutput
-    ) -> ModelRunnerOutput | AsyncModelRunnerOutput:
-        """``output`` of a step without sampling, with the KV checksums of the
-        KV connector's last ``post_forward``."""
-        kv_checksums = self._kv_checksum_copy()
-        if kv_checksums is None:
-            return output
-        return AsyncKVChecksumOutput(output, kv_checksums)
+        return self.kv_connector.add_kv_checksums(output)
 
     @torch.inference_mode()
     def execute_model(
@@ -1779,8 +1763,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if scheduler_output.total_num_scheduled_tokens == 0:
                 # No need to run the model.
                 empty_output = self.kv_connector.no_forward(scheduler_output)
-                return self._with_kv_checksums(
-                    self._merge_ec_connector_no_forward(scheduler_output, empty_output)
+                return self._merge_ec_connector_no_forward(
+                    scheduler_output, empty_output
                 )
 
         # Get batch descriptor and sync across DP ranks.
@@ -1836,9 +1820,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if batch_desc.num_tokens == 0:
             # All DP ranks have zero tokens to run.
             empty_output = self.kv_connector.no_forward(scheduler_output)
-            return self._with_kv_checksums(
-                self._merge_ec_connector_no_forward(scheduler_output, empty_output)
-            )
+            return self._merge_ec_connector_no_forward(scheduler_output, empty_output)
 
         cudagraph_stats = None
         if not dummy_run:
@@ -2165,9 +2147,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             kv_connector_output = self.kv_connector.post_forward(finished_req_ids)
             # The first PP rank holds the encoder cache, so pass its EC output on.
             output = ModelRunnerOutput.with_kv_conn_output_only(kv_connector_output)
-            return self._with_kv_checksums(
-                ModelRunnerOutput.with_ec_conn_output(output, ec_connector_output)
-            )
+            output = ModelRunnerOutput.with_ec_conn_output(output, ec_connector_output)
+            return self.kv_connector.add_kv_checksums(output)
 
         # Last rank: sample tokens
         assert hidden_states is not None
@@ -2239,8 +2220,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         model_runner_output.kv_connector_output = self.kv_connector.post_forward(
             finished_req_ids, defer_finalize=defer_kv_finalize
         )
-        # The drafter's KV is not checksummed, so this does not wait for it.
-        async_output.kv_checksums = self._kv_checksum_copy()
 
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None
         # The encoder runner exists only on the first PP rank, so later ranks
@@ -2327,7 +2306,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.kv_connector.finalize_step()
         model_runner_output.ec_connector_output = ec_connector_output
 
-        return async_output
+        return self.kv_connector.add_kv_checksums(async_output)
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         return self.draft_tokens_handler.get_draft_tokens()
@@ -2351,9 +2330,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if not self.is_last_pp_rank:
             self.postprocess_num_computed_tokens(input_batch)
             output = ModelRunnerOutput.with_kv_conn_output_only(kv_connector_output)
-            return self._with_kv_checksums(
-                ModelRunnerOutput.with_ec_conn_output(output, ec_connector_output)
-            )
+            output = ModelRunnerOutput.with_ec_conn_output(output, ec_connector_output)
+            return self.kv_connector.add_kv_checksums(output)
 
         assert self.pooling_runner is not None
         pooler_output, finished_mask = self.pooling_runner.pool(
@@ -2374,10 +2352,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             main_stream=self.main_stream,
             copy_stream=self.output_copy_stream,
         )
-        async_output.kv_checksums = self._kv_checksum_copy()
 
         self.postprocess_num_computed_tokens(input_batch)
-        return async_output
+        return self.kv_connector.add_kv_checksums(async_output)
 
     def postprocess_num_computed_tokens(self, input_batch: InputBatch) -> None:
         # Update the number of computed tokens.
