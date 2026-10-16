@@ -1494,13 +1494,18 @@ class DeepseekV41LLMForCausalLM(
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         loaded_params = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
-        self.process_weights_after_loading()
+        self.finalize_weights()
         return loaded_params
 
-    def process_weights_after_loading(self) -> None:
+    def finalize_weights(self) -> None:
         self.model.finalize_mega_moe_weights()
         self.model.finalize_mhc_broadcast_weights()
-        if self.specialized_decode_spec is not None:
+
+    def process_weights_after_loading(self) -> None:
+        # The loader calls this once every module's own post-load processing has
+        # run, which is what the specialized decode reads its weights in.
+        self.finalize_weights()
+        if self.specialized_decode_spec is not None and self.specialized_decode is None:
             self.specialized_decode = SpecializedDecode(
                 self.model, self.vllm_config, self.specialized_decode_spec
             )
