@@ -16,6 +16,7 @@ from vllm.tasks import GenerationTask
 from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.mrope import MRoPEPositionState
 from vllm.v1.worker.encoder_cudagraph import EncoderCudaGraphManager
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
@@ -126,6 +127,9 @@ class ModelState(ABC):
 
     def apply_staged_writes(self) -> None:
         return None
+
+    def take_mrope_position_states(self) -> dict[str, MRoPEPositionState]:
+        return {}
 
     def initialize_kv_cache(
         self, kv_cache_config: KVCacheConfig, block_tables: BlockTables

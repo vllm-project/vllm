@@ -18,6 +18,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_connector import (
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.connector import (
     MooncakeStoreKVEvents,
 )
+from vllm.v1.mrope import MRoPEPositionState
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 
 pytestmark = pytest.mark.cpu_test
@@ -348,3 +349,22 @@ def test_salvaged_event_votes_are_one_shot():
     events = aggregated.kv_connector_output.kv_cache_events
     assert events is not None
     assert [e.token_ids for e in lmcache_published(events)] == [[5, 6, 7, 8]]
+
+
+@pytest.mark.parametrize("replay", [False, True])
+def test_aggregate_mrope_position_state_from_first_pipeline_stage(replay):
+    state = MRoPEPositionState(positions=[[0, 1], [0, 2], [0, 3]], delta=-7)
+    first_stage = DummyModelRunnerOutput()
+    first_stage.kv_connector_output.mrope_position_states = {"req": state}
+    last_stage = DummyModelRunnerOutput()
+    aggregator = KVOutputAggregator(expected_finished_count=2)
+    if replay:
+        aggregator.ft_defer_kv_connector_outputs(
+            [first_stage.kv_connector_output, None]
+        )
+        first_stage = DummyModelRunnerOutput()
+
+    output = aggregator.aggregate([first_stage, last_stage], output_rank=1)
+
+    assert output is last_stage
+    assert output.kv_connector_output.mrope_position_states == {"req": state}
