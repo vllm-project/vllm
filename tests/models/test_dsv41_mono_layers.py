@@ -227,7 +227,7 @@ def _decode(vllm_runner, monkeypatch, tp: int, mono: bool, prompts, path: str):
         hf_overrides=TRUNCATED,
         worker_extension_cls=f"{__name__}.MonoProbe",
         moe_backend="aiter",
-        monokernel=mono,
+        specialized_decode=mono,
         language_model_only=True,
         tokenizer_mode="deepseek_v41",
         attention_config={"indexer_kv_dtype": "mxfp4", "indexer_sparse_logits": True},

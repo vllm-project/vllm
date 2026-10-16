@@ -159,7 +159,7 @@ def make_config(**overrides) -> Any:
 
     """
     config = SimpleNamespace(
-        kernel_config=SimpleNamespace(monokernel=True),
+        kernel_config=SimpleNamespace(specialized_decode=True),
         model_config=SimpleNamespace(dtype=torch.bfloat16, enable_sleep_mode=False),
         scheduler_config=SimpleNamespace(max_num_seqs=4),
         parallel_config=SimpleNamespace(

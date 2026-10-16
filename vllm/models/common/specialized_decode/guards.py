@@ -65,8 +65,8 @@ def tp_agree(ok: bool, group) -> bool:
 
 
 def _enabled(vllm_config: "VllmConfig") -> bool:
-    """Whether ``--monokernel`` asked for the model's specialized decode."""
-    return bool(vllm_config.kernel_config.monokernel)
+    """Whether ``--specialized-decode`` asked for the model's specialized decode."""
+    return bool(vllm_config.kernel_config.specialized_decode)
 
 
 def _features_in_use(vllm_config: "VllmConfig") -> set[Feature]:
@@ -182,7 +182,7 @@ def select_decode_spec(
         specs: The model's variants, in the order they are preferred.
 
     Returns:
-        The variant this config runs, or None with ``--monokernel`` off.
+        The variant this config runs, or None with ``--specialized-decode`` off.
 
     Raises:
         DecodeUnsupported: Every variant refused this config.

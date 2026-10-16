@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Specialized decode (RFC #60904, ``--monokernel``): a model's decode step
+"""Specialized decode (RFC #60904, ``--specialized-decode``): a model's decode step
 in one launch."""
 
 from vllm.models.common.specialized_decode.dispatch import SpecializedDecode

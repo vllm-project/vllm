@@ -42,7 +42,7 @@ class TestReferenceSpec(DecodeConformance):
 
 def test_switch_off_means_no_spec():
     config = reference.make_config()
-    config.kernel_config.monokernel = False
+    config.kernel_config.specialized_decode = False
     assert select_decode_spec(config, SPECS) is None
 
 
