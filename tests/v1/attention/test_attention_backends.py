@@ -1030,6 +1030,87 @@ def test_flashinfer_xqa_single_token_decode_preserves_cudagraph_padding(monkeypa
     AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
     reason="FlashInfer is not available.",
 )
+@pytest.mark.parametrize("cache_dtype", ["fp8_e4m3", "fp8_e5m2", "nvfp4"])
+@pytest.mark.parametrize("layer_type", ["full", "chunked", "sink"])
+def test_flashinfer_resolves_layerwise_cache_dtype(cache_dtype, layer_type):
+    from vllm.model_executor.layers.attention import Attention
+    from vllm.model_executor.layers.attention.chunked_local_attention import (
+        ChunkedLocalAttention,
+    )
+    from vllm.model_executor.layers.attention.static_sink_attention import (
+        StaticSinkAttention,
+    )
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    cls = {
+        "full": Attention,
+        "chunked": ChunkedLocalAttention,
+        "sink": StaticSinkAttention,
+    }[layer_type]
+    layer: Attention = object.__new__(cls)
+    torch.nn.Module.__init__(layer)
+    layer.kv_cache_dtype = cache_dtype
+    layer.kv_cache_torch_dtype = torch.uint8
+    layer.num_kv_heads = 8
+    layer.head_size = layer.head_size_v = 128
+    layer.attn_type = AttentionType.DECODER
+    layer.sliding_window = None
+    layer.attention_chunk_size = 1024
+    layer.sink_len = 4
+
+    builder = object.__new__(flashinfer_backend.FlashInferMetadataBuilder)
+    builder.cache_config = SimpleNamespace(cache_dtype="auto", block_size=64)
+    builder.vllm_config = SimpleNamespace(
+        cache_config=builder.cache_config,
+        compilation_config=SimpleNamespace(static_forward_context={"layer": layer}),
+    )
+    builder.layer_names = ["layer"]
+    builder.kv_cache_spec = layer.get_kv_cache_spec(builder.vllm_config)
+
+    assert builder.kv_cache_spec.kv_quant_mode != KVQuantMode.NONE
+    assert builder._resolve_cache_dtype() == cache_dtype
+
+
+@pytest.mark.skipif(
+    AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
+    reason="FlashInfer is not available.",
+)
+def test_flashinfer_global_cache_dtype_overrides_layer_dtype():
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    builder = object.__new__(flashinfer_backend.FlashInferMetadataBuilder)
+    builder.cache_config = SimpleNamespace(cache_dtype="fp8_e4m3")
+    builder.vllm_config = SimpleNamespace()
+
+    assert builder._resolve_cache_dtype() == "fp8_e4m3"
+
+
+@pytest.mark.skipif(
+    AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
+    reason="FlashInfer is not available.",
+)
+@pytest.mark.parametrize("cache_dtype", [None, "auto"])
+def test_flashinfer_rejects_unresolved_quantized_layer(monkeypatch, cache_dtype):
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    builder = object.__new__(flashinfer_backend.FlashInferMetadataBuilder)
+    builder.cache_config = SimpleNamespace(cache_dtype="auto")
+    builder.vllm_config = SimpleNamespace()
+    builder.layer_names = ["layer"]
+    monkeypatch.setattr(
+        flashinfer_backend,
+        "get_kv_cache_dtype_from_layers",
+        lambda *_: cache_dtype,
+    )
+
+    with pytest.raises(ValueError, match="requires a resolved KV cache dtype"):
+        builder._resolve_cache_dtype()
+
+
+@pytest.mark.skipif(
+    AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
+    reason="FlashInfer is not available.",
+)
 def test_flashinfer_xqa_query_lens_require_exact_uniform_product():
     from vllm.v1.attention.backends import flashinfer as flashinfer_backend
 
