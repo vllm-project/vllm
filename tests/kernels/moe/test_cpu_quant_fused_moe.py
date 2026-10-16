@@ -829,6 +829,72 @@ def test_mxfp4_cpu_fused_moe_bias_swiglu(M, N, K, E, topk, seed):
     torch.testing.assert_close(ref_out.bfloat16(), out, atol=1e-2, rtol=1e-2)
 
 
+@pytest.mark.parametrize("M", [1, 32])
+@pytest.mark.parametrize("N,K,E,topk", [(128, 128, 4, 2), (64, 64, 4, 2)])
+@pytest.mark.parametrize("seed", [0])
+def test_mxfp4_cpu_fused_moe_bias_swigluoai_activation_string(M, N, K, E, topk, seed):
+    """Regression test: CPUExpertsMxfp4.apply() always passes
+    activation="swigluoai" (MoEActivation.SWIGLUOAI.value) alongside
+    gemm1_alpha/gemm1_clamp_limit, not the bare "swiglu" string. Must match
+    the alpha/limit-only dispatch exercised by
+    test_mxfp4_cpu_fused_moe_bias_swiglu.
+    """
+    set_random_seed(seed)
+    dtype = torch.bfloat16
+    alpha = 1.702
+    limit = 7.0
+
+    a = torch.randn(M, K, dtype=dtype) / 10
+
+    w1_bf16 = torch.randn(E, 2 * N, K, dtype=dtype) / 10
+    w1q, w1s = MXFP4QuantizeUtil.quantize(w1_bf16)
+    w1s = w1s.reshape(E, 2 * N, K // 32)
+    w1dq = MXFP4QuantizeUtil.dequantize(w1q, dtype, w1s)
+    w1_b = torch.randn(E, 2 * N, dtype=torch.float32) / 10
+
+    w2_bf16 = torch.randn(E, K, N, dtype=dtype) / 10
+    w2q, w2s = MXFP4QuantizeUtil.quantize(w2_bf16)
+    w2s = w2s.reshape(E, K, N // 32)
+    w2dq = MXFP4QuantizeUtil.dequantize(w2q, dtype, w2s)
+    w2_b = torch.randn(E, K, dtype=torch.float32) / 10
+
+    score = torch.randn(M, E, dtype=dtype)
+    score = torch.softmax(score, dim=-1, dtype=torch.float32)
+    topk_weight, topk_ids = torch.topk(score, topk)
+    topk_ids = topk_ids.to(torch.int32)
+
+    ref_out = ref_mxfp4_fused_moe_gptoss(
+        a, w1dq, w2dq, w1_b, w2_b, topk_weight, topk_ids, alpha, limit
+    )
+
+    pw1, pw1s = _prepack_mxfp4_experts(w1q, w1s)
+    pw2, pw2s = _prepack_mxfp4_experts(w2q, w2s)
+
+    a_in = a.clone()
+    out = torch.empty_like(a_in)
+    ops.fused_experts_cpu(
+        out,
+        a_in,
+        pw1,
+        pw2,
+        topk_weight,
+        topk_ids,
+        ops.CPUQuantMethod.MXFP4,
+        pw1s,  # w1_scale
+        pw2s,  # w2_scale
+        None,  # w1_zero
+        None,  # w2_zero
+        None,  # block_size
+        w1_bias=w1_b,
+        w2_bias=w2_b,
+        alpha=alpha,
+        limit=limit,
+        activation="swigluoai",
+    )
+
+    torch.testing.assert_close(ref_out.bfloat16(), out, atol=1e-2, rtol=1e-2)
+
+
 # ===========================================================================
 # INT4 W4A16 MoE
 # ===========================================================================

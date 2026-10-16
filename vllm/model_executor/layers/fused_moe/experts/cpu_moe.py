@@ -466,7 +466,15 @@ class CPUExpertsFp8(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
-        return activation in (MoEActivation.SILU, MoEActivation.GELU_TANH)
+        # moe_fp8.cpp's fused_experts_fp_kernel_impl also implements
+        # exact-erf GELU and clamped swiglu, but apply() below never threads
+        # gemm1_alpha/gemm1_clamp_limit through, so swiglu can't actually
+        # work here yet - don't advertise it.
+        return activation in (
+            MoEActivation.SILU,
+            MoEActivation.GELU,
+            MoEActivation.GELU_TANH,
+        )
 
     @staticmethod
     def _supports_parallel_config(
@@ -639,6 +647,7 @@ class CPUExpertsMxfp4(mk.FusedMoEExpertsModular):
         return activation in (
             MoEActivation.SILU,
             MoEActivation.SWIGLUOAI,
+            MoEActivation.GELU,
             MoEActivation.GELU_TANH,
         )
 
