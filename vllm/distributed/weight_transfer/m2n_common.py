@@ -505,33 +505,6 @@ def source_plan_digest(params: Sequence[M2NWireParam]) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def complete_plan_digest(
-    source_digest: str,
-    dst_mesh: M2NMesh,
-    dst_placements: Sequence[Placements | None],
-) -> str:
-    """Return a digest of the agreed source and destination plan."""
-    if not isinstance(source_digest, str) or not source_digest:
-        raise ValueError("source digest must be a non-empty string")
-    payload = json.dumps(
-        {
-            "schema_version": M2N_WIRE_SCHEMA_VERSION,
-            "source_digest": source_digest,
-            "destination_mesh": {
-                "dims": list(dst_mesh.dims),
-                "start_rank": dst_mesh.start_rank,
-            },
-            "destination_placements": [
-                None if placement is None else list(placement)
-                for placement in dst_placements
-            ],
-        },
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode()
-    return hashlib.sha256(payload).hexdigest()
-
-
 def check_source_plan_agreement(
     group: "StatelessProcessGroup",
     params: Sequence[M2NWireParam],
@@ -613,70 +586,6 @@ def check_source_plan_agreement(
             "nccl_m2n source preflight rejected before NCCL init: " + "; ".join(errors)
         )
     return canonical
-
-
-def check_complete_plan_agreement(
-    group: "StatelessProcessGroup",
-    source_digest: str,
-    dst_mesh: M2NMesh,
-    dst_placements: Sequence[Placements | None],
-    local_error: str | None = None,
-) -> str:
-    """Require every rank to accept the same complete transfer plan."""
-    prepared_error = local_error
-    digest: str | None = None
-    if prepared_error is None:
-        try:
-            digest = complete_plan_digest(source_digest, dst_mesh, dst_placements)
-        except Exception as exc:
-            prepared_error = f"{type(exc).__name__}: {exc}"
-    elif not isinstance(prepared_error, str) or not prepared_error:
-        prepared_error = "TypeError: local plan error must be a non-empty string"
-
-    gathered = group.all_gather_obj(
-        {"phase": "complete_plan", "digest": digest, "error": prepared_error}
-    )
-    errors: list[str] = []
-    valid: list[tuple[int, str]] = []
-    expected_fields = {"phase", "digest", "error"}
-    if len(gathered) != group.world_size:
-        errors.append(
-            "control-plane all-gather returned "
-            f"{len(gathered)} records for world size {group.world_size}"
-        )
-    for rank, item in enumerate(gathered):
-        if (
-            not isinstance(item, Mapping)
-            or set(item) != expected_fields
-            or item.get("phase") != "complete_plan"
-        ):
-            errors.append(f"rank {rank}: invalid complete-plan envelope")
-            continue
-        error = item["error"]
-        if error is not None:
-            if not isinstance(error, str) or not error:
-                errors.append(f"rank {rank}: invalid complete-plan error")
-            else:
-                errors.append(f"rank {rank}: {error}")
-            continue
-        rank_digest = item["digest"]
-        if not isinstance(rank_digest, str) or not rank_digest:
-            errors.append(f"rank {rank}: invalid complete-plan digest")
-            continue
-        valid.append((rank, rank_digest))
-    if not errors:
-        canonical = valid[0][1]
-        for rank, rank_digest in valid[1:]:
-            if rank_digest != canonical:
-                errors.append(
-                    f"rank {rank}: complete-plan digest disagrees with rank 0"
-                )
-    if errors:
-        raise RuntimeError(
-            "nccl_m2n complete-plan preflight rejected before first reshard: "
-            + "; ".join(errors)
-        )
-    return valid[0][1]
 
 
 def check_runtime_ready_agreement(
@@ -833,53 +742,4 @@ def to_mesh(m2n: Any, mesh: M2NMesh) -> Any:
 def to_placements(m2n: Any, placements: Placements) -> list[Any]:
     return [
         m2n.Replicate() if code == REPLICATE else m2n.Shard(code) for code in placements
-    ]
-
-
-def publish_destination_placements(
-    comm: Any,
-    device: torch.device,
-    stream: torch.cuda.Stream,
-    first_worker_rank: int,
-    placements: "Sequence[Placements | None] | None",
-    num_parameters: int,
-) -> list[Placements | None]:
-    """Share the worker-side destination plan with every rank in the group.
-
-    The trainer must issue each reshard with the same destination the workers
-    use, but once destinations are per-parameter they depend on the inference
-    model, which only the workers can see. The first worker publishes them here,
-    over the shared NCCL communicator; trainer ranks pass `None` and receive
-    them, and the other workers pass their own so a disagreement is caught
-    rather than deadlocking later.
-
-    Only placements travel: the destination *mesh* is still derived from the
-    rank split, identically on both sides. The plan is published on the data
-    plane before any M2N reshard collective.
-    """
-    replicated_sentinel = REPLICATE - 1
-    encoded = torch.full(
-        (num_parameters, MESH_NDIMS),
-        replicated_sentinel,
-        dtype=torch.int8,
-        device=device,
-    )
-    if comm.rank == first_worker_rank:
-        if placements is None or len(placements) != num_parameters:
-            raise ValueError(
-                f"publishing rank needs {num_parameters} destination placements"
-            )
-        rows = [
-            [replicated_sentinel] * MESH_NDIMS if placement is REPLICATED else placement
-            for placement in placements
-        ]
-        if rows:
-            encoded.copy_(torch.tensor(rows, dtype=torch.int8, device=device))
-
-    comm.broadcast(encoded, encoded, root=first_worker_rank, stream=stream)
-    return [
-        REPLICATED
-        if all(code == replicated_sentinel for code in row)
-        else cast(Placements, tuple(row))
-        for row in encoded.tolist()
     ]
