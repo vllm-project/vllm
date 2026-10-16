@@ -2925,6 +2925,7 @@ def mx_worker(mx_client, monkeypatch):
     worker._weight_update_is_draft = False
     worker._kv_cache_reclaimable = False
     worker._weight_update_kv_cache_loan = ExitStack()
+    worker._asleep_tags = set()
     worker.model_runner = MagicMock(extensible_kv_cache=None)
     return worker
 
