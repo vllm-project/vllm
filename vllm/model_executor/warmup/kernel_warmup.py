@@ -457,7 +457,11 @@ def flashinfer_autotune(runner: "GPUModelRunner", *, skip_attn: bool = False) ->
         f"{cache_path.stem}_dp{dp_rank}_rank{world.rank_in_group}{cache_path.suffix}"
     )
     if is_leader:
-        logger.info_once("Using FlashInfer autotune cache file: %s", cache_path)
+        logger.info_once(
+            "Using FlashInfer autotune cache file: %s. Pass "
+            "--no-enable-flashinfer-autotune to skip autotuning.",
+            cache_path,
+        )
 
     # We skip EPLB here since we don't want to record dummy metrics.
     # Randomize inputs to avoid every token pick the same experts,
