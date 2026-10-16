@@ -132,9 +132,10 @@ def decode_summary_scores(
     ``row_groups`` query rows is one token of ``slots``; each ``query_len``
     tokens are one request of ``block_table``/``seq_lens``.
     """
-    # query: [tokens, groups, 8, 256] and weights: [tokens, groups, 8], each
+    # query: [tokens, groups, heads, 256] and weights: [tokens, groups, heads], each
     # group's heads contiguous; groups may be the outer storage dimension.
-    tokens, groups = query.shape[:2]
+    tokens, groups, heads, dim = query.shape
+    assert heads in (4, 8, 16) and dim == 256
     assert groups == row_groups and query.stride(3) == 1 and query.stride(2) == 256
     assert weights.shape == query.shape[:3] and weights.stride(2) == 1
     assert mean.stride(1) == 256 and mean.stride(2) == 1
@@ -177,7 +178,7 @@ def decode_summary_scores(
         mean.stride(0),
         capacity,
         scores.stride(0),
-        8,
+        heads,
         128,
         workers,
         row_groups,
