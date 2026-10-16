@@ -87,7 +87,12 @@ def get_attn_isa(
         block_size if block_size else 32,
     )
 
-
+def cpu_attn_has_isa(isa: str) -> bool:
+    try:
+        return bool(torch.ops._C.cpu_attn_has_isa(isa))
+    except (AttributeError, RuntimeError):
+        return False
+    
 # rand number generation takes too much time, cache rand tensors
 @functools.lru_cache(maxsize=128, typed=False)
 def tensor_cache(elem_num: int, dtype: torch.dtype, tag: str = "none") -> torch.Tensor:
@@ -701,6 +706,53 @@ def varlen_with_paged_kv(
         f"{torch.max(torch.abs(out_without_split - ref_output))}",
     )
 
+@pytest.mark.parametrize(
+    "seq_lens",
+    [
+        [(1, 33), (1, 65)],
+        [(7, 41), (3, 17)],
+    ],
+)
+@pytest.mark.parametrize("num_heads", [(8, 1), (9, 3)])
+@pytest.mark.parametrize("head_size", [96, 128])
+@pytest.mark.parametrize("block_size", [32])
+@pytest.mark.parametrize("sliding_window", [None])
+@pytest.mark.parametrize("dtype", QTYPES)
+@pytest.mark.parametrize("soft_cap", [None])
+@pytest.mark.parametrize("num_blocks", [32])
+@pytest.mark.parametrize("use_alibi", [False])
+@pytest.mark.parametrize("use_sink", [False])
+@pytest.mark.parametrize("isa", ["sve"])
+@pytest.mark.skipif(
+    not cpu_attn_has_isa("sve"),
+    reason="The loaded CPU extension does not contain SVE attention kernels.",
+)
+def test_varlen_with_paged_kv_normal_sve(
+    seq_lens: list[tuple[int, int]],
+    num_heads: tuple[int, int],
+    head_size: int,
+    sliding_window: int | None,
+    dtype: torch.dtype,
+    block_size: int,
+    soft_cap: float | None,
+    num_blocks: int,
+    use_alibi: bool,
+    use_sink: bool,
+    isa: str,
+) -> None:
+    varlen_with_paged_kv(
+        seq_lens=seq_lens,
+        num_heads=num_heads,
+        head_size=head_size,
+        sliding_window=sliding_window,
+        dtype=dtype,
+        block_size=block_size,
+        soft_cap=soft_cap,
+        num_blocks=num_blocks,
+        use_alibi=use_alibi,
+        use_sink=use_sink,
+        isa=isa,
+    )
 
 @pytest.mark.parametrize("seq_lens", ENCODER_SEQ_LENS)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)

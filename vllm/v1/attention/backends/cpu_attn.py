@@ -486,6 +486,12 @@ class CPUAttentionBackendImpl(AttentionImpl):
             kv_cache_dtype=self.kv_cache_dtype,
         )
 
+def _arm_supports_sve() -> bool:
+    """Whether the loaded CPU extension contains SVE attention kernels."""
+    try:
+        return bool(torch.ops._C.cpu_attn_has_isa("sve"))
+    except (AttributeError, RuntimeError):
+        return False
 
 @functools.lru_cache(maxsize=1)
 def _riscv_supports_rvv() -> bool:
@@ -544,7 +550,10 @@ def _get_attn_isa(
     if supports_amx and dtype in (torch.bfloat16,) and block_size % 32 == 0:
         return "amx"
     elif supports_arm:
-        return "neon"
+        if _arm_supports_sve() and (block_size % 32 == 0):
+            return "sve"
+        else:
+            return "neon"
     elif block_size % 32 == 0:
         if supports_riscv and _riscv_supports_rvv():
             return "rvv"
