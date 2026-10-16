@@ -54,7 +54,7 @@ The request field `output_mode` selects how much of the postprocessing the serve
 | --- | --- | --- |
 | `tokens` (default) | nothing, token IDs only | nothing |
 | `text` | `text` on every choice and decoded tokens with `bytes` in `logprobs` | a tokenizer |
-| `derender` | the parsed assistant `message` (`content`, `reasoning`, `tool_calls`) on every choice, plus the `text` level's `logprobs` | a tokenizer and the parser flags you'd give `vllm serve` |
+| `derender` | the parsed assistant `message` (`content`, `reasoning`, `tool_calls`) on every choice, plus `logprobs` shaped like coupled chat's | a tokenizer and the parser flags you'd give `vllm serve` |
 
 `text` returns text and token IDs in a single call, without a separate [derender](derenderer.md) hop per chunk. This suits latency sensitive streaming, where the derender hop lands on every output token.
 
@@ -91,8 +91,8 @@ print(response["choices"][0]["token_ids"])
 - The parser reads the engine's `text`, so it sees the stop string cut and the post `adjust_request` decode flags. That makes it match coupled chat for parsers whose `adjust_request` changes decoding which `/derender` can't.
 - A server with a tool or reasoning parser needs `parse_context`. Without a parser, `message.content` is the plain text.
 - `parse_context` is ignored at other levels, so a rendered request can go to a prefill leg unchanged.
-- `logprobs` are dropped when `include_reasoning` is false, so they don't expose the hidden reasoning. Coupled chat still returns them until [#59590](https://github.com/vllm-project/vllm/pull/59590) lands.
-- `finish_reason` is the engine's value. Coupled chat reports `tool_calls` when a tool is called which this level doesn't do yet.
+- `logprobs` follow coupled chat. `top_logprobs` is cut to `sampling_params.logprobs`, `logprob_token_ids` is honored and `logprobs` are dropped when `include_reasoning` is false so they don't expose the hidden reasoning.
+- `finish_reason` follows coupled chat too. It's `tool_calls` when the message has tool calls except with a named `tool_choice` or a `length` cut.
 - `stream: true` isn't supported yet.
 
 ### Logprobs
