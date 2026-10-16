@@ -763,12 +763,20 @@ class SwitchedLoRALinear(nn.Module):
         ctx = self._lora_ctx
         remapped = ctx.remapped_indices if ctx is not None else None
         if remapped is not None and self._num_applicable > 0:
-            M = x.shape[0]
             # Kernel-local indices were gathered once for all modules in
             # prepare_and_store(); this is a stride-1 contiguous row-view into
             # ctx.remapped_indices [num_modules, num_tokens] - no per-module
             # gather op, no launch.
-            adapter_indices = remapped[self._module_idx, :M]
+            #
+            # Deliberately NOT sliced to x.shape[0]. The table is built with
+            # exactly the width it is indexed at, so the slice is a no-op, and
+            # under torch.compile it is actively harmful: x.shape[0] is a
+            # computed symint for the dual-stream [2M, H] stack, which makes
+            # this getitem depend on a node in a later graph partition while
+            # the splitter reassigns the getitem itself to the partition that
+            # produced `remapped`. That is a cycle, and it fails graph
+            # splitting outright at PP>1.
+            adapter_indices = remapped[self._module_idx]
             self._run_expand(x_ext, adapter_indices, ctx)
 
         if self._row_parallel_reduce:
@@ -805,7 +813,8 @@ class SwitchedLoRALinear(nn.Module):
         remapped = ctx.remapped_indices if ctx is not None else None
         bitmasks = ctx.per_module_bitmasks if ctx is not None else None
         if remapped is not None and bitmasks is not None and self._num_applicable > 0:
-            adapter_indices = remapped[self._module_idx, :M]
+            # Unsliced for the reason given in forward().
+            adapter_indices = remapped[self._module_idx]
             bitmask = bitmasks[self._module_idx]
         else:
             # No kernel metadata / no applicable adapters: a zero bitmask makes
@@ -1811,7 +1820,9 @@ class WCrossShunt(nn.Module):
         if remapped is not None and bitmasks is not None and self._num_applicable > 0:
             # Keyed by the M-length REAL adapter ids: base tokens (id 0) map to
             # kernel-local 0, for which the shrink kernel emits exactly zero.
-            adapter_indices = remapped[self._module_idx, :M]
+            # remapped_indices_shunt is already M wide, so no slice - see
+            # SwitchedLoRALinear.forward for why slicing here breaks compile.
+            adapter_indices = remapped[self._module_idx]
             bitmask = bitmasks[self._module_idx]
             x_ext = torch.mm(h_base, self.w_ext_cross.T)  # [M, sum_r n_r*rank]
             # The op takes NA_16..NA_512 as separate ints, so unpack the tuple
@@ -2931,6 +2942,15 @@ class GraniteSwitchModel(nn.Module):
                     dtype=torch.long,
                     device=fallback_device,
                 )
+                # Rebuild the metadata from those all-base indices rather than
+                # leaving whatever the previous call left behind: the kernel
+                # reads the tables at their full width, so a stale table from a
+                # differently-sized batch would misroute instead of degrading
+                # to the base model.
+                if self.lora_ctx is not None:
+                    self.decoder_interface.prepare_kernel_meta(
+                        self.lora_meta, adapter_indices, self.lora_ctx
+                    )
 
         # Step 2: embeddings, or the hidden states from the previous PP stage.
         if get_pp_group().is_first_rank:
