@@ -1,13 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Callable, Mapping
+from enum import Enum
+from types import MappingProxyType
 from typing import Any
 
 import torch
 
-from vllm.config.quantization import QuantizationConfigArgs, QuantSpec
+from vllm.config.quantization import (
+    _ONLINE_SHORTHANDS,
+    QuantizationConfigArgs,
+    QuantSpec,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
+    FusedMoEMethodBase,
     RoutedExperts,
 )
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
@@ -32,9 +40,14 @@ from vllm.model_executor.layers.quantization.online.fp8 import (
     Fp8PerTensorOnlineMoEMethod,
     Fp8PtpcOnlineLinearMethod,
     Fp8PtpcOnlineMoEMethod,
+    OnlineLinearBase,
 )
 from vllm.model_executor.layers.quantization.online.int8 import (
     Int8OnlineMoEMethod,
+)
+from vllm.model_executor.layers.quantization.online.mxfp4 import (
+    Mxfp4OnlineLinearMethod,
+    Mxfp4OnlineMoEMethod,
 )
 from vllm.model_executor.layers.quantization.online.mxfp8 import (
     Mxfp8OnlineLinearMethod,
@@ -43,17 +56,32 @@ from vllm.model_executor.layers.quantization.online.mxfp8 import (
 from vllm.model_executor.layers.quantization.online.nvfp4 import (
     Nvfp4OnlineMoEMethod,
 )
+from vllm.model_executor.layers.quantization.utils.config_utils import (
+    find_matching_patterns,
+    get_layer_name_after_index,
+)
+from vllm.model_executor.layers.quantization.utils.mxfp4_utils import mxfp4_quantize
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8Static128BlockSym,
     kFp8StaticChannelSym,
     kFp8StaticTensorSym,
+    kInt4Static32,
     kInt8StaticChannelSym,
+    kMxfp4Static,
     kMxfp8Dynamic,
     kNvfp4Static,
 )
 
 logger = init_logger(__name__)
+
+
+class OnlineQuantizationSource(str, Enum):
+    """Supported online quantization configuration sources."""
+
+    linear = "linear"  # LinearBase
+    moe = "moe"  # RoutedExperts
+    targets = "targets"
 
 
 # Online dispatch tables, keyed by the QuantSpec.weight QuantKey. The
@@ -64,6 +92,7 @@ _ONLINE_LINEAR_METHODS: dict[QuantKey, type] = {
     kFp8Static128BlockSym: Fp8PerBlockOnlineLinearMethod,
     kFp8StaticChannelSym: Fp8PtpcOnlineLinearMethod,
     kMxfp8Dynamic: Mxfp8OnlineLinearMethod,
+    kMxfp4Static: Mxfp4OnlineLinearMethod,
 }
 
 _ONLINE_MOE_METHODS: dict[QuantKey, type] = {
@@ -71,9 +100,52 @@ _ONLINE_MOE_METHODS: dict[QuantKey, type] = {
     kFp8Static128BlockSym: Fp8PerBlockOnlineMoEMethod,
     kFp8StaticChannelSym: Fp8PtpcOnlineMoEMethod,
     kMxfp8Dynamic: Mxfp8OnlineMoEMethod,
+    kMxfp4Static: Mxfp4OnlineMoEMethod,
     kInt8StaticChannelSym: Int8OnlineMoEMethod,
     kNvfp4Static: Nvfp4OnlineMoEMethod,
 }
+
+# Quantizers for full-precision fused shared-expert weights, keyed by the routed
+# experts' weight QuantKey. Each shard is quantized to the checkpoint layout on
+# arrival, so only block-local schemes are supported.
+ONLINE_SHARED_EXPERT_QUANTIZERS: dict[
+    QuantKey, Callable[[torch.Tensor], tuple[torch.Tensor, torch.Tensor]]
+] = {
+    kMxfp4Static: mxfp4_quantize,
+}
+
+
+def _find_matching_targets(
+    prefix: str,
+    targets: Mapping[str, str],
+    fused_mapping: Mapping[str, list[str]] = MappingProxyType({}),
+) -> list[str]:
+    per_shard_matches = find_matching_patterns(
+        prefix, targets, fused_mapping, use_fnmatch=True
+    )
+    if all(len(matches) == 0 for matches in per_shard_matches):
+        return []
+    if any(len(matches) == 0 for matches in per_shard_matches):
+        raise ValueError(
+            f"Found unmatched shards for {prefix}: {per_shard_matches}. vLLM "
+            "requires all shards of a fused layer to match a target."
+        )
+    if any(len(matches) > 1 for matches in per_shard_matches):
+        raise ValueError(
+            f"Found multiple quantization_config.targets matches for the "
+            f"shards of {prefix}: {per_shard_matches}. Each shard may match "
+            "at most one target."
+        )
+
+    matched_patterns = [next(iter(matches)) for matches in per_shard_matches]
+    quant_key_strs = {targets[pattern] for pattern in matched_patterns}
+    if len(quant_key_strs) > 1:
+        raise ValueError(
+            f"Found different quantization_config.targets values for the "
+            f"shards of {prefix}: {matched_patterns}. vLLM requires all "
+            "shards of a fused layer to use the same target."
+        )
+    return [matched_patterns[0]]
 
 
 class OnlineQuantizationConfig(QuantizationConfig):
@@ -85,14 +157,45 @@ class OnlineQuantizationConfig(QuantizationConfig):
         args: QuantizationConfigArgs,
     ) -> None:
         super().__init__()
-        if args.linear is None and args.moe is None:
+        if args.linear is None and args.moe is None and args.targets is None:
             raise ValueError(
                 "OnlineQuantizationConfig requires at least one of "
-                "quantization_config.linear or quantization_config.moe "
-                "to be set."
+                "quantization_config.linear, quantization_config.moe, or "
+                "quantization_config.targets to be set."
             )
         self.args = args
         self.ignored_layers: list[str] = args.ignore
+        self.quantized_layers: dict[str, tuple[str, str, str | None]] = {}
+        self.online_quantization_time = 0.0
+
+    @property
+    def quantized_layer_summaries(self) -> list[str]:
+        counts: dict[tuple[str, str, str | None, str], int] = {}
+        for layer_name, (
+            source,
+            quant_key_str,
+            target_pattern,
+        ) in self.quantized_layers.items():
+            key = (
+                get_layer_name_after_index(layer_name),
+                source,
+                target_pattern,
+                quant_key_str,
+            )
+            counts[key] = counts.get(key, 0) + 1
+
+        summaries = []
+        # Build summary entries as
+        # `self_attn.o_proj: 24 (from targets: re:.*self_attn\.o_proj, mxfp4`
+        for (layer_type, source, target_pattern, quant_key_str), count in sorted(
+            counts.items()
+        ):
+            pattern_prefix = f"{target_pattern}, " if target_pattern else ""
+            summaries.append(
+                f"{layer_type}: {count} "
+                f"(from {source}: {pattern_prefix}{quant_key_str})"
+            )
+        return summaries
 
     @classmethod
     def get_name(cls) -> QuantizationMethods:
@@ -120,18 +223,33 @@ class OnlineQuantizationConfig(QuantizationConfig):
             "quantization='fp8_per_tensor'/'fp8_per_block' instead."
         )
 
-    def _dispatch(
+    def _get_method_cls(
         self,
         spec: QuantSpec | None,
         table: dict[QuantKey, type],
-        layer: torch.nn.Module,
-    ) -> "QuantizeMethodBase | None":
+        layer_cls: type[torch.nn.Module],
+    ) -> type | None:
+        """Resolve the online method class for a layer's quantization spec.
+
+        Args:
+            spec: Quantization specification to resolve.
+            table: Mapping from weight quantization keys to method classes.
+            layer_cls: Type of the layer that will use the resolved method.
+
+        Returns:
+            The matching method class, or None when ``spec`` has no weight
+            quantization.
+
+        """
         if spec is None or spec.weight is None:
+            return None
+        # Load-time gfx942 requant, not online conversion. Mxfp4MoEMethod owns it.
+        if spec.weight == kInt4Static32:
             return None
         cls = table.get(spec.weight)
         if cls is None:
             raise ValueError(
-                f"online quantization for {type(layer).__name__} with "
+                f"online quantization for {layer_cls.__name__} with "
                 f"weight={spec.weight} is not supported; supported weight "
                 f"keys: {sorted(str(k) for k in table)}"
             )
@@ -143,33 +261,151 @@ class OnlineQuantizationConfig(QuantizationConfig):
                 f"activation override (activation={spec.activation}) is not "
                 f"yet supported for online {cls.__name__}"
             )
-        if isinstance(layer, RoutedExperts):
-            return cls(layer=layer)
-        return cls()
+        return cls
+
+    def resolve_quant_method_cls(
+        self, layer_cls: type[torch.nn.Module], prefix: str
+    ) -> tuple[OnlineQuantizationSource, str, str | None, QuantSpec, type] | None:
+        """Resolve quantization metadata and method class without instantiating it.
+
+        Args:
+            layer_cls: Type of layer for which to resolve online quantization.
+            prefix: Fully qualified layer name.
+
+        Returns:
+            A tuple of source, quantization key string, target pattern, spec,
+            and method class. Returns None when online quantization does not
+            apply to the layer.
+
+        """
+        quant_spec: QuantSpec | None
+        if self.args.targets is not None:
+            resolved_pattern = self._resolve_targets_quant_method_metadata(
+                prefix, layer_cls
+            )
+            if resolved_pattern is None:
+                return None
+            source, quant_key_str, target_pattern, quant_spec, table = resolved_pattern
+        else:
+            if issubclass(layer_cls, LinearBase):
+                source = OnlineQuantizationSource.linear
+                quant_spec = self.args.linear
+                table = _ONLINE_LINEAR_METHODS
+            elif issubclass(layer_cls, RoutedExperts):
+                source = OnlineQuantizationSource.moe
+                quant_spec = self.args.moe
+                table = _ONLINE_MOE_METHODS
+            else:
+                return None
+
+            if should_ignore_layer(
+                prefix,
+                ignore=self.ignored_layers,
+                fused_mapping=self.packed_modules_mapping,
+                use_fnmatch=True,
+            ):
+                return None
+            quant_key_str = str(quant_spec)
+            target_pattern = None
+
+        quant_method_cls = self._get_method_cls(quant_spec, table, layer_cls)
+        if quant_method_cls is None:
+            return None
+        assert quant_spec is not None
+        return source, quant_key_str, target_pattern, quant_spec, quant_method_cls
+
+    def _resolve_targets_quant_method_metadata(
+        self, prefix: str, layer_cls: type[torch.nn.Module]
+    ) -> (
+        tuple[OnlineQuantizationSource, str, str, QuantSpec, dict[QuantKey, type]]
+        | None
+    ):
+        """Resolve target-pattern quantization metadata and dispatch table.
+
+        Args:
+            prefix: Fully qualified layer name.
+            layer_cls: Type of layer matched against configured target patterns.
+
+        Returns:
+            A tuple of source, quantization key string, target pattern, spec,
+            and dispatch table. Returns None when no pattern applies or the
+            layer is ignored.
+
+        """
+        assert self.args.targets is not None
+        ignored = should_ignore_layer(
+            prefix,
+            ignore=self.ignored_layers,
+            fused_mapping=self.packed_modules_mapping,
+            use_fnmatch=True,
+        )
+        matches = _find_matching_targets(
+            prefix, self.args.targets, fused_mapping=self.packed_modules_mapping
+        )
+        if ignored and matches:
+            raise ValueError(
+                f"Layer {prefix} matches both quantization_config.ignore "
+                f"and quantization_config.targets ({matches}); a layer may "
+                f"not be referenced by both."
+            )
+        if ignored or not matches:
+            return None
+        if len(matches) > 1:
+            raise ValueError(
+                f"Layer {prefix} matches multiple quantization_config."
+                f"targets patterns: {matches}. Each layer may match at most "
+                f"one target."
+            )
+        target_pattern = matches[0]
+        quant_key_str = self.args.targets[target_pattern]
+        shorthand = _ONLINE_SHORTHANDS[quant_key_str]
+        if issubclass(layer_cls, LinearBase):
+            quant_spec = shorthand.linear
+            table = _ONLINE_LINEAR_METHODS
+        elif issubclass(layer_cls, RoutedExperts):
+            quant_spec = shorthand.moe
+            table = _ONLINE_MOE_METHODS
+        else:
+            raise ValueError(
+                f"Layer {prefix} was matched by quantization_config.targets "
+                f"({target_pattern}), but online quantization is not supported for "
+                f"{layer_cls.__name__}."
+            )
+        if quant_spec is None:
+            raise ValueError(
+                f"targets pattern {target_pattern} = {quant_key_str} does "
+                f"not define a QuantSpec for {layer_cls.__name__} layers "
+                f"(matched at {prefix})."
+            )
+        return (
+            OnlineQuantizationSource.targets,
+            quant_key_str,
+            target_pattern,
+            quant_spec,
+            table,
+        )
 
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
     ) -> "QuantizeMethodBase | None":
-        if isinstance(layer, LinearBase):
-            if should_ignore_layer(
-                prefix,
-                ignore=self.ignored_layers,
-                fused_mapping=self.packed_modules_mapping,
-            ):
-                return UnquantizedLinearMethod()
-            method = self._dispatch(self.args.linear, _ONLINE_LINEAR_METHODS, layer)
-            return method if method is not None else UnquantizedLinearMethod()
-        elif isinstance(layer, RoutedExperts):
-            if should_ignore_layer(
-                prefix,
-                ignore=self.ignored_layers,
-                fused_mapping=self.packed_modules_mapping,
-            ):
-                return UnquantizedFusedMoEMethod(layer.moe_config)
-            method = self._dispatch(self.args.moe, _ONLINE_MOE_METHODS, layer)
-            return (
-                method
-                if method is not None
-                else UnquantizedFusedMoEMethod(layer.moe_config)
+        # `targets` takes precedence over `moe` and `linear` and is exclusive.
+        resolved = self.resolve_quant_method_cls(type(layer), prefix)
+        if resolved is not None:
+            source, quant_key_str, target_pattern, _, quant_method_cls = resolved
+            self.quantized_layers[prefix] = (
+                source.value,
+                quant_key_str,
+                target_pattern,
             )
+            if isinstance(layer, RoutedExperts):
+                assert issubclass(quant_method_cls, FusedMoEMethodBase)
+                return quant_method_cls(moe=layer.moe_config)
+
+            assert issubclass(quant_method_cls, OnlineLinearBase)
+            return quant_method_cls()
+
+        if isinstance(layer, LinearBase):
+            return UnquantizedLinearMethod()
+        if isinstance(layer, RoutedExperts):
+            return UnquantizedFusedMoEMethod(layer.moe_config)
         return None

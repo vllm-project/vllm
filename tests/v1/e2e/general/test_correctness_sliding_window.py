@@ -35,8 +35,7 @@ model_config = {
 def test_sliding_window_retrieval(
     model, batch_size, seed, disable_hybrid_kv_cache_manager, vllm_runner
 ):
-    """
-    The test does a bunch of assignments "x1 = 10\nx2 = 33\n..." and then
+    """The test does a bunch of assignments "x1 = 10\nx2 = 33\n..." and then
     asks for value of one of them (which is outside the sliding window).
     If we tell it upfront which we are going to be looking for, then
     it answers correctly (mostly).
@@ -83,15 +82,43 @@ def test_sliding_window_retrieval(
         )
 
 
-def check_length(prompts: list[str], llm: LLM, sliding_window: int):
+@pytest.mark.parametrize("model", ["google/gemma-3-1b-it"])
+def test_hybrid_kv_cache_manager_output_equivalence(model, vllm_runner):
+    """Disabling the hybrid KV cache manager must not change what the model
+    computes: it promotes the sliding-window layers to full-attention *storage*
+    only, so the global layers must keep attending globally.
+
+    Guards against the group's KV cache spec, which then covers windowed and
+    global layers alike, imposing its window on the global layers too.
     """
-    Check if the prompt length is valid, i.e., longer than the sliding window
+    prompts, _, _ = prep_prompts(2, ln_range=model_config[model].ln_range)
+    sampling_params = SamplingParams(temperature=0.0, max_tokens=32)
+    enforce_eager = current_platform.is_rocm()
+
+    outputs = []
+    for disable_hybrid in (False, True):
+        with vllm_runner(
+            model,
+            max_model_len=None,
+            enable_chunked_prefill=None,
+            disable_hybrid_kv_cache_manager=disable_hybrid,
+            enforce_eager=enforce_eager,
+        ) as runner:
+            responses = runner.get_llm().generate(prompts, sampling_params)
+            outputs.append([response.outputs[0].text for response in responses])
+
+    assert outputs[0] == outputs[1]
+
+
+def check_length(prompts: list[str], llm: LLM, sliding_window: int):
+    """Check if the prompt length is valid, i.e., longer than the sliding window
     size and shorter than the model's max length.
 
     Args:
         prompts: list of prompts
         llm: LLM object
         sliding_window: Sliding window size
+
     """
     tokenizer = llm.get_tokenizer()
     max_model_len = llm.llm_engine.model_config.max_model_len

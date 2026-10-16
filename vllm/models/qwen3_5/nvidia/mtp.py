@@ -6,8 +6,10 @@ from collections.abc import Iterable
 
 import torch
 from torch import nn
+from transformers import Qwen3_5MoeTextConfig, Qwen3_5TextConfig
 
 from vllm.config import VllmConfig
+from vllm.distributed import tensor_model_parallel_all_gather
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import ColumnParallelLinear
@@ -22,10 +24,7 @@ from vllm.model_executor.models.interfaces import (
     SupportsMultiModal,
     _require_is_multimodal,
 )
-from vllm.model_executor.models.qwen3_next import (
-    QwenNextMixtureOfExperts,
-    _all_gather_hidden_and_residual,
-)
+from vllm.model_executor.models.qwen3_next import QwenNextMixtureOfExperts
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     PPMissingLayer,
@@ -34,12 +33,28 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.qwen3_5 import Qwen3_5TextConfig
-from vllm.transformers_utils.configs.qwen3_5_moe import Qwen3_5MoeTextConfig
 
 from .model import Qwen3_5DecoderLayer, Qwen3_5Model, Qwen3_5RMSNorm
 
 logger = init_logger(__name__)
+
+
+def _all_gather_hidden_and_residual(
+    hidden_states: torch.Tensor,
+    residual: torch.Tensor | None,
+    full_num_tokens: int,
+    hidden_size: int,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    if residual is None:
+        hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
+        hidden_states = hidden_states[:full_num_tokens]
+        return hidden_states, None
+
+    combined_states = torch.cat([hidden_states, residual], dim=-1)
+    combined_states = tensor_model_parallel_all_gather(combined_states, 0)
+    combined_states = combined_states[:full_num_tokens]
+    hidden_states, residual = combined_states.split([hidden_size, hidden_size], dim=-1)
+    return hidden_states, residual
 
 
 class Qwen3_5MultiTokenPredictor(nn.Module):

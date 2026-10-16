@@ -1,70 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Test that verifies no implicit GPU-CPU synchronization occurs during
-speculative decoding generation under expected conditions.
-"""
-
-import multiprocessing
-import sys
-import traceback
+"""Tests for sync-free speculative decoding with async scheduling."""
 
 import pytest
-import torch
-
-
-@pytest.fixture
-def sync_tracker():
-    """
-    Fixture that patches CommonAttentionMetadata.seq_lens_cpu to detect
-    lazy init syncs. Prints stack traces immediately when syncs occur.
-    """
-    from vllm.v1.attention.backend import CommonAttentionMetadata
-
-    # Shared counter for cross-process communication (inherited by fork)
-    sync_count = multiprocessing.Value("i", 0)
-
-    # Save original property
-    original_prop = CommonAttentionMetadata.seq_lens_cpu
-    original_fget = original_prop.fget
-
-    # Create tracking wrapper
-    def tracking_seq_lens_cpu(self):
-        if self._seq_lens_cpu is None:
-            # Increment counter
-            with sync_count.get_lock():
-                sync_count.value += 1
-                count = sync_count.value
-            # Print stack trace immediately (shows in subprocess output)
-            print(f"\n{'=' * 60}", file=sys.stderr)
-            print(f"SYNC #{count}: seq_lens_cpu lazy init triggered!", file=sys.stderr)
-            print(f"{'=' * 60}", file=sys.stderr)
-            traceback.print_stack(file=sys.stderr)
-            print(f"{'=' * 60}\n", file=sys.stderr)
-            sys.stderr.flush()
-        return original_fget(self)
-
-    # Apply patch
-    CommonAttentionMetadata.seq_lens_cpu = property(tracking_seq_lens_cpu)
-
-    class SyncTracker:
-        @property
-        def count(self) -> int:
-            return sync_count.value
-
-        def assert_no_sync(self, msg: str = ""):
-            count = sync_count.value
-            assert count == 0, (
-                f"Unexpected GPU-CPU sync: seq_lens_cpu lazy init triggered "
-                f"{count} times. See stack traces above. {msg}"
-            )
-
-    yield SyncTracker()
-
-    # Restore original property
-    CommonAttentionMetadata.seq_lens_cpu = original_prop
-    torch._dynamo.reset()
-
 
 # Test configurations: (model, spec_model, method, num_spec_tokens, backend_env)
 SPEC_DECODE_CONFIGS = [
@@ -97,19 +35,18 @@ SPEC_DECODE_CONFIGS = [
     SPEC_DECODE_CONFIGS,
 )
 def test_no_sync_with_spec_decode(
-    sync_tracker,
     model: str,
     spec_model: str,
     method: str,
     num_spec_tokens: int,
+    monkeypatch,
+    vllm_runner,
 ):
-    """
-    Test that no implicit GPU-CPU sync occurs during speculative decoding
-    generation.
-    """
-    # Import vLLM AFTER sync_tracker fixture has applied the patch
-    from vllm import LLM, SamplingParams
-    from vllm.distributed import cleanup_dist_env_and_memory
+    """Test generation while the worker rejects unintended GPU-CPU syncs."""
+    monkeypatch.setenv("VLLM_GPU_SYNC_CHECK", "error")
+
+    from vllm import SamplingParams
+    from vllm.config import CompilationConfig
 
     # Qwen3.5 is a VLM; without this, profile_run runs the ViT warmup
     # and peaks well above the 18GB MIG slice used by one of the CI lanes.
@@ -119,8 +56,10 @@ def test_no_sync_with_spec_decode(
     if "Qwen3.5" in model:
         extra_kwargs["limit_mm_per_prompt"] = {"image": 0, "video": 0}
 
-    llm = LLM(
-        model=model,
+    with vllm_runner(
+        model,
+        block_size=None,
+        trust_remote_code=False,
         max_model_len=256,
         speculative_config={
             "method": method,
@@ -129,24 +68,29 @@ def test_no_sync_with_spec_decode(
         },
         enforce_eager=True,
         async_scheduling=True,
+        enable_chunked_prefill=None,
+        compilation_config=CompilationConfig(),
         **extra_kwargs,
-    )
+    ) as runner:
+        llm = runner.llm
 
-    # Assert async scheduling is actually active before running inference.
-    assert llm.llm_engine.vllm_config.scheduler_config.async_scheduling, (
-        f"Expected async_scheduling=True for spec decode, got False. method={method}"
-    )
+        # Assert async scheduling is actually active before running inference.
+        assert llm.llm_engine.vllm_config.scheduler_config.async_scheduling, (
+            f"Expected async_scheduling=True for spec decode, got False. "
+            f"method={method}, target={model}, draft={spec_model}"
+        )
 
-    outputs = llm.generate(
-        ["Hello, my name is"],
-        SamplingParams(temperature=0, max_tokens=10),
-    )
+        outputs = llm.generate(
+            ["Hello, my name is"],
+            SamplingParams(temperature=0, max_tokens=10),
+        )
 
-    assert len(outputs) == 1
-    assert len(outputs[0].outputs[0].text) > 0
-
-    del llm
-    torch.accelerator.empty_cache()
-    cleanup_dist_env_and_memory()
-
-    sync_tracker.assert_no_sync()
+        assert len(outputs) == 1, (
+            f"{method} target={model}: expected one request output, got {len(outputs)}"
+        )
+        assert outputs[0].outputs, (
+            f"{method} target={model}: request output has no completion candidates"
+        )
+        assert outputs[0].outputs[0].text, (
+            f"{method} target={model}: generated completion text is empty"
+        )

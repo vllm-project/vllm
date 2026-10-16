@@ -7,6 +7,10 @@ from typing import Any
 import torch
 
 from vllm.config import VllmConfig
+from vllm.model_executor.layers.mamba.checkpoint import (
+    MambaPrefillCheckpointBuilder,
+    MambaPrefillCheckpointMetadata,
+)
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -23,8 +27,7 @@ def compute_varlen_chunk_metadata(
     query_start_loc: torch.Tensor,
     chunk_size: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """
-    Build chunk-aligned, variable-length metadata used by Mamba2 SSD kernels.
+    """Build chunk-aligned, variable-length metadata used by Mamba2 SSD kernels.
 
     Given per-sequence cumulative token starts `query_start_loc` of shape [B+1]
     and a physical `chunk_size`, returns three tensors on the same device:
@@ -110,6 +113,11 @@ class Mamba2AttentionMetadata(BaseMambaAttentionMetadata):
     # Chunk-related metadata (only for prefill)
     seq_idx_p: torch.Tensor | None = None
 
+    # Internal prefill checkpoints, one entry per prefill row. The chunk
+    # index selects the varlen_states row holding the checkpoint state.
+    checkpoint_chunk_idx: torch.Tensor | None = None
+    checkpoint_meta: MambaPrefillCheckpointMetadata | None = None
+
 
 class Mamba2AttentionMetadataBuilder(
     BaseMambaAttentionMetadataBuilder[Mamba2AttentionMetadata]
@@ -129,6 +137,9 @@ class Mamba2AttentionMetadataBuilder(
             "chunk_size needs to be set in the model config for Mamba2 models"
         )
         self.chunk_size: int = chunk_size
+        self.checkpoint_builder = MambaPrefillCheckpointBuilder(
+            vllm_config, kv_cache_spec
+        )
 
     def build(
         self,
@@ -140,28 +151,52 @@ class Mamba2AttentionMetadataBuilder(
         common = self._compute_common_metadata(
             common_attn_metadata,
             num_accepted_tokens=kwargs.get("num_accepted_tokens"),
-            prev_last_scheduled_idx=kwargs.get("prev_last_scheduled_idx"),
+            num_decode_draft_tokens_cpu=kwargs.get("num_decode_draft_tokens_cpu"),
         )
 
         seq_idx_p = None
         cu_chunk_seqlen_p = None
         last_chunk_indices_p = None
+        checkpoint_chunk_idx = None
+        checkpoint_meta = None
         prep_initial_states = False
 
         # Compute seq_idx for prefill only
         if common.num_prefills > 0:
-            prep_initial_states = (
-                torch.any(common.has_initial_states_p).item()
-                if common.has_initial_states_p is not None
-                else False
-            )
-
-            cu_chunk_seqlen_p, seq_idx_p, last_chunk_indices_p = (
-                self._build_chunk_metadata_tensors(
-                    self.chunk_size,
-                    common,
+            prep_initial_states = False
+            if common.has_initial_states_p is not None:
+                # Same condition as `has_initial_states_p`, but derived from CPU
+                # data so it needs no D2H. `seq_lens_cpu_upper_bound` is precise
+                # for prefill rows, which is all this slice covers.
+                num_computed_tokens_p_cpu, _ = self._prefill_cpu_metadata(
                     common_attn_metadata,
+                    common.num_reqs,
+                    common.num_prefills,
+                    common.num_decode_tokens,
                 )
+                prep_initial_states = bool((num_computed_tokens_p_cpu > 0).any())
+
+            checkpoint_offsets_p = None
+            first = common.num_reqs - common.num_prefills
+            checkpoint = self.checkpoint_builder.build(
+                common_attn_metadata,
+                list(range(first, common.num_reqs)),
+            )
+            if checkpoint is not None:
+                # The host offsets place a chunk boundary on the checkpoint.
+                checkpoint_offsets_p = checkpoint.offsets
+                checkpoint_meta = checkpoint
+
+            (
+                cu_chunk_seqlen_p,
+                seq_idx_p,
+                last_chunk_indices_p,
+                checkpoint_chunk_idx,
+            ) = self._build_chunk_metadata_tensors(
+                self.chunk_size,
+                common,
+                common_attn_metadata,
+                checkpoint_offsets_p,
             )
 
         return replace(
@@ -171,4 +206,22 @@ class Mamba2AttentionMetadataBuilder(
             seq_idx_p=seq_idx_p,
             cu_chunk_seqlen_p=cu_chunk_seqlen_p,
             last_chunk_indices_p=last_chunk_indices_p,
+            checkpoint_chunk_idx=checkpoint_chunk_idx,
+            checkpoint_meta=checkpoint_meta,
+        )
+
+    def update_block_table(
+        self,
+        metadata: Mamba2AttentionMetadata,
+        blk_table: torch.Tensor,
+        slot_mapping: torch.Tensor,
+    ) -> Mamba2AttentionMetadata:
+        new_metadata = super().update_block_table(metadata, blk_table, slot_mapping)
+        if metadata.checkpoint_meta is None:
+            return new_metadata
+        # Checkpoint destinations are block-table entries, so each group
+        # re-gathers its own rather than writing into the source group's.
+        return replace(
+            new_metadata,
+            checkpoint_meta=metadata.checkpoint_meta.regather_state_indices(blk_table),
         )

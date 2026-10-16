@@ -1,12 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from transformers import Qwen3_5Config, Qwen3_5MoeConfig, Qwen3_5MoeTextConfig
+
 from vllm.model_executor.models.qwen3_vl import Qwen3VLProcessingInfo
-from vllm.transformers_utils.configs.qwen3_5 import Qwen3_5Config
-from vllm.transformers_utils.configs.qwen3_5_moe import (
-    Qwen3_5MoeConfig,
-    Qwen3_5MoeTextConfig,
-)
 
 
 class Qwen3_5ProcessingInfo(Qwen3VLProcessingInfo):

@@ -12,6 +12,9 @@ from tests.kernels.quant_utils import (
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import fused_experts, fused_topk
+from vllm.model_executor.layers.quantization.utils.int8_utils import (
+    per_token_group_quant_int8,
+)
 from vllm.platforms import current_platform
 
 if current_platform.get_device_capability() < (7, 0):
@@ -64,7 +67,7 @@ def torch_w8a8_block_int8_moe(a, w1, w2, w1_s, w2_s, score, topk, block_shape):
     topk_ids = topk_ids.view(-1)
 
     _, block_k = block_shape[0], block_shape[1]
-    a_q, a_s = native_per_token_group_quant_int8(a, block_k)
+    a_q, a_s = native_per_token_group_quant_int8(a, block_k, round_to_nearest=False)
     for i in range(w1.shape[0]):
         mask = topk_ids == i
         if mask.sum():
@@ -72,7 +75,9 @@ def torch_w8a8_block_int8_moe(a, w1, w2, w1_s, w2_s, score, topk, block_shape):
                 a_q[mask], w1[i], a_s[mask], w1_s[i], block_shape, output_dtype=a.dtype
             )
             act_out = SiluAndMul().forward_native(inter_out)
-            act_out_q, act_out_s = native_per_token_group_quant_int8(act_out, block_k)
+            act_out_q, act_out_s = native_per_token_group_quant_int8(
+                act_out, block_k, round_to_nearest=False
+            )
             act_out = act_out.to(torch.float32)
             out[mask] = native_w8a8_block_matmul(
                 act_out_q, w2[i], act_out_s, w2_s[i], block_shape, output_dtype=a.dtype
@@ -132,3 +137,27 @@ def test_w8a8_block_int8_fused_moe(M, N, K, E, topk, block_size, dtype, seed):
 
     # Check results
     torch.testing.assert_close(out, ref_out, atol=0.065, rtol=0.065)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+def test_block_int8_quantization_truncates_fractional_values(dtype):
+    """Block INT8 quantization truncates, unlike per-token round-to-nearest."""
+    device = current_platform.device_type
+    x = torch.tensor(
+        [[-127, -1.75, -0.75, 0.75, 1.75, 127] + [0] * 122],
+        dtype=dtype,
+        device=device,
+    )
+    expected = torch.tensor(
+        [[-127, -1, 0, 0, 1, 127] + [0] * 122], dtype=torch.int8, device=device
+    )
+
+    out_q, scale = per_token_group_quant_int8(x, group_size=128)
+    ref_q, ref_s = native_per_token_group_quant_int8(
+        x, group_size=128, round_to_nearest=False
+    )
+
+    torch.testing.assert_close(out_q, expected, atol=0, rtol=0)
+    torch.testing.assert_close(ref_q, expected, atol=0, rtol=0)
+    torch.testing.assert_close(scale, torch.ones_like(scale), atol=0, rtol=0)
+    torch.testing.assert_close(ref_s, scale, atol=0, rtol=0)
