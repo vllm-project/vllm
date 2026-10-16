@@ -409,9 +409,6 @@ class SamplingParams(
     allowed_token_ids: list[int] | None = None
     """If provided, the engine will construct a logits processor which only
     retains scores for the given token ids."""
-    # Internal beam scoring: IDs or packed little-endian int32 grammar mask.
-    # Restricts selection, not normalization.
-    _logprob_candidate_token_ids: list[int] | bytes | None = None
     extra_args: dict[str, Any] | None = None
     """Arbitrary additional args, that can be used by custom sampling
     implementations, plugins, etc. Not used by any in-tree sampling
@@ -913,20 +910,6 @@ class SamplingParams(
         self._validate_trace_replay(model_config, speculative_config)
         self._validate_stop_token_ids(model_config)
         self._validate_allowed_token_ids(model_config)
-        if isinstance(self._logprob_candidate_token_ids, bytes):
-            mask = self._logprob_candidate_token_ids
-            vocab_size = model_config.get_vocab_size()
-            bits = np.unpackbits(np.frombuffer(mask, dtype=np.uint8), bitorder="little")
-            if (
-                len(mask) != ((vocab_size + 31) // 32) * 4
-                or not bits[:vocab_size].any()
-                or bits[vocab_size:].any()
-            ):
-                raise ValueError("Invalid packed logprob candidate mask")
-        elif self._logprob_candidate_token_ids is not None:
-            SamplingParams(
-                allowed_token_ids=self._logprob_candidate_token_ids
-            )._validate_allowed_token_ids(model_config)
         self._validate_spec_decode(speculative_config)
         self._validate_diffusion(model_config)
         self._validate_structured_outputs(
@@ -1225,7 +1208,6 @@ class SamplingParams(
             or self.logit_bias
             or self.bad_words
             or self.allowed_token_ids
-            or self._logprob_candidate_token_ids
         ):
             raise VLLMValidationError(
                 "The temperature, min_p, seed, min_tokens, logit_bias, "

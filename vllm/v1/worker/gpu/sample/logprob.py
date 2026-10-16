@@ -7,7 +7,6 @@ import torch
 from vllm.sampling_params import MAX_LOGPROB_TOKEN_IDS, SamplingParams
 from vllm.triton_utils import tl, triton
 from vllm.v1.outputs import LogprobsTensors
-from vllm.v1.sample.ops.logprobs import constrained_topk
 from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor, UvaBackedTensor
 
 # Upper bound on the topk kernel's per-iteration gather width.
@@ -118,8 +117,6 @@ def compute_topk_scores(
     expanded_idx_mapping: torch.Tensor | None = None,
     max_per_req_token_ids: int = 0,
     logits_mode: bool = False,
-    candidates: dict[int, list[int] | bytes] | None = None,
-    max_rows_per_request: int = 1,
 ) -> LogprobsTensors:
     assert num_logprobs >= 0
     batch_size, vocab_size = logits.shape
@@ -128,13 +125,7 @@ def compute_topk_scores(
         # Fast path: no request asked for custom logprob_token_ids.
         logprob_token_ids = sampled_token_ids.unsqueeze(-1)
         if num_logprobs > 0:
-            topk_indices = constrained_topk(
-                logits,
-                num_logprobs,
-                candidates,
-                expanded_idx_mapping,
-                max_rows_per_request,
-            )[1]
+            topk_indices = torch.topk(logits, num_logprobs, dim=-1).indices
             logprob_token_ids = torch.cat((logprob_token_ids, topk_indices), dim=1)
         if logits_mode:
             scores = logits.gather(-1, logprob_token_ids).to(torch.float32)
@@ -149,13 +140,7 @@ def compute_topk_scores(
         assert expanded_idx_mapping is not None
 
         if num_logprobs > 0:
-            topk_token_ids = constrained_topk(
-                logits,
-                num_logprobs,
-                candidates,
-                expanded_idx_mapping,
-                max_rows_per_request,
-            )[1]
+            topk_token_ids = torch.topk(logits, num_logprobs, dim=-1).indices
             topk_token_ids = topk_token_ids.to(torch.int32)
         else:
             # This tensor just used as an int32 pointer, data not accessed.

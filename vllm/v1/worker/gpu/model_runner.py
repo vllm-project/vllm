@@ -1120,8 +1120,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         req_idx = self.req_states.remove_request(req_id)
         if req_idx is None:
             return False
-        if isinstance(self.sampler, Sampler):
-            self.sampler.remove_request(req_idx)
         if self.pooling_runner is not None:
             self.pooling_runner.remove_request(req_idx)
         if self.pp_handler is not None:

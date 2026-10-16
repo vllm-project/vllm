@@ -26,16 +26,32 @@ from .utils import (
     BeamSearchInstance,
     BeamSearchOutput,
     BeamSearchSequence,
+    configure_beam_logprobs,
     create_sort_beams_key_function,
 )
 
 logger = init_logger(__name__)
 
+# Engine-side cap on `SamplingParams.allowed_token_ids`; keep in sync with
+# MAX_NUM_ALLOWED_TOKEN_IDS in vllm/v1/worker/gpu/sample/logit_bias.py.
+_MAX_NUM_ALLOWED_TOKEN_IDS = 1024
 
-def _token_in_bitmask(token_id: int, bitmask: bytes) -> bool:
-    return 0 <= token_id < len(bitmask) * 8 and bool(
-        bitmask[token_id // 8] & (1 << (token_id % 8))
-    )
+
+_bitmask_cache: dict[int, tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
+
+
+def _bitmask_to_token_ids(bitmask_row: torch.Tensor, vocab_size: int) -> list[int]:
+    """Convert a packed int32 bitmask row to a list of allowed token IDs."""
+    if vocab_size not in _bitmask_cache:
+        indices = torch.arange(vocab_size)
+        _bitmask_cache[vocab_size] = (
+            indices,
+            indices >> 5,  # i // 32
+            indices & 31,  # i % 32
+        )
+    indices, word_indices, bit_indices = _bitmask_cache[vocab_size]
+    mask = ((bitmask_row[word_indices] >> bit_indices) & 1).bool()
+    return indices[mask].tolist()
 
 
 class BeamSearchOfflineMixin(OfflineInferenceMixin):
@@ -68,12 +84,7 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
         temperature = params.temperature
         ignore_eos = params.ignore_eos
         length_penalty = params.length_penalty
-        request_allowed_token_ids = params.allowed_token_ids
         self.llm_engine.input_processor.resolve_watermarking(params)
-        if request_allowed_token_ids is not None:
-            SamplingParams(
-                allowed_token_ids=request_allowed_token_ids
-            )._validate_allowed_token_ids(self.model_config)
 
         tokenizer = self.renderer.get_tokenizer()
         eos_token_id = tokenizer.eos_token_id
@@ -95,14 +106,6 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
         structured_output_backend: StructuredOutputBackend | None = None
         structured_output_key = None
         structured_output_bitmask = None
-        if params.structured_outputs is not None:
-            (
-                structured_output_backend,
-                structured_output_key,
-                structured_output_bitmask,
-            ) = self._init_beam_search_structured_output(
-                params.structured_outputs, tokenizer
-            )
 
         # generate 2 * beam_width candidates at each step
         # following the huggingface transformers implementation
@@ -113,13 +116,20 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
             temperature=temperature,
             watermarking=False,
             detokenize=False,
-            _logprob_candidate_token_ids=(
-                list(dict.fromkeys(request_allowed_token_ids))
-                if request_allowed_token_ids is not None
-                else None
-            ),
             skip_clone=True,  # Internal beam search, safe to skip clone
         )
+        configure_beam_logprobs(
+            base_sampling_params, params, self.llm_engine.input_processor.vllm_config
+        )
+        if params.structured_outputs is not None:
+            (
+                structured_output_backend,
+                structured_output_key,
+                structured_output_bitmask,
+            ) = self._init_beam_search_structured_output(
+                params.structured_outputs, tokenizer
+            )
+
         instances: list[BeamSearchInstance] = []
 
         for lora_req, prompt in zip(lora_requests, engine_inputs):
@@ -167,7 +177,6 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
                         structured_output_backend=structured_output_backend,
                         structured_output_key=structured_output_key,
                         structured_output_bitmask=structured_output_bitmask,
-                        request_allowed_token_ids=request_allowed_token_ids,
                     )
                     if should_stop:
                         break
@@ -176,12 +185,10 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
                 structured_output_backend.destroy()
 
         outputs = []
-        for input_index, instance in enumerate(instances):
+        for instance in instances:
             instance.completed.extend(instance.beams)
-            if not instance.completed:
-                raise ValueError(
-                    f"Beam search has no valid continuation for input {input_index}"
-                )
+            if params.allowed_token_ids is not None and not instance.completed:
+                raise ValueError("Beam search has no valid continuation")
             sorted_completed = sorted(
                 instance.completed, key=sort_beams_key, reverse=True
             )
@@ -207,7 +214,6 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
         structured_output_backend: StructuredOutputBackend | None,
         structured_output_key: tuple | None,
         structured_output_bitmask: torch.Tensor | None,
-        request_allowed_token_ids: list[int] | None,
     ) -> bool:
         """Run one token step of beam search across a batch of instances.
 
@@ -237,19 +243,16 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
                 structured_output_backend,
                 structured_output_key,
                 structured_output_bitmask,
-                request_allowed_token_ids,
             )
             active_indices = [
-                i
-                for i, entry in enumerate(beam_entries)
-                if entry is not None and entry[1]
+                i for i, entry in enumerate(beam_entries) if entry is not None
             ]
             for i, entry in enumerate(beam_entries):
                 if entry is None:
                     beam = all_beams[i]
                     assert beam.orig_prompt["type"] != "enc_dec"
                     prompt_len = len(beam.orig_prompt["prompt_token_ids"])
-                    if len(beam.tokens) >= prompt_len:
+                    if len(beam.tokens) > prompt_len:
                         for (s, e), inst in zip(
                             instance_start_and_end,
                             instances_batch,
@@ -258,8 +261,6 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
                                 inst.completed.append(beam)
                                 break
 
-            for instance in instances_batch:
-                instance.beams = []
             if not active_indices:
                 return True
 
@@ -275,7 +276,8 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
                 base_sampling_params, len(all_beams)
             )
 
-        # Only one scoring request per active beam.
+        # only runs for one step
+        # we don't need to use tqdm here
         active_output = self._render_and_run_requests(
             prompts=(beam.get_prompt() for beam in active_beams),
             params=active_params,
@@ -285,24 +287,24 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
         )
 
         output: list[RequestOutput | None] = [None] * len(all_beams)
-        for active_idx, result in zip(active_indices, active_output):
-            output[active_idx] = result
+        for idx, active_idx in enumerate(active_indices):
+            output[active_idx] = active_output[idx]
 
-        # The sampled-token column can be outside the scoring candidates.
-        request_allowed_set = (
-            set(request_allowed_token_ids)
-            if request_allowed_token_ids is not None
+        # Logprobs are computed from raw logits before
+        # allowed_token_ids masking, so they may contain
+        # tokens outside the grammar's allowed set. This filtering is also
+        # the only grammar enforcement for beams whose allowed set exceeds
+        # the engine-side allowed_token_ids cap.
+        request_allowed = (
+            set(base_sampling_params.logprob_token_ids)
+            if base_sampling_params.logprob_token_ids is not None
             else None
         )
-        allowed_sets: list[set[int] | bytes | None] = [request_allowed_set] * len(
-            all_beams
-        )
+        allowed_sets: list[set[int] | None] = [request_allowed] * len(all_beams)
         if structured_output_backend is not None:
             for i, entry in enumerate(beam_entries):
                 if entry is not None:
-                    allowed_sets[i] = (
-                        entry[1] if isinstance(entry[1], bytes) else set(entry[1])
-                    )
+                    allowed_sets[i] = set(entry[1])
 
         for (start, end), instance in zip(instance_start_and_end, instances_batch):
             instance_output = output[start:end]
@@ -327,20 +329,18 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
 
                 if result.outputs[0].logprobs is not None:
                     logprobs = result.outputs[0].logprobs[0]
-                    if allowed_sets[i] is not None:
-                        # Candidate columns are not global vocabulary ranks.
-                        for logprob in logprobs.values():
-                            logprob.rank = None
+                    if request_allowed is not None:
+                        logprobs = {
+                            token: score
+                            for token, score in logprobs.items()
+                            if token in request_allowed and math.isfinite(score.logprob)
+                        }
+                        for score in logprobs.values():
+                            score.rank = None
                     allowed = allowed_sets[i]
                     for token_id, logprob_obj in logprobs.items():
-                        if not math.isfinite(logprob_obj.logprob):
+                        if allowed is not None and token_id not in allowed:
                             continue
-                        if allowed is not None:
-                            if isinstance(allowed, bytes):
-                                if not _token_in_bitmask(token_id, allowed):
-                                    continue
-                            elif token_id not in allowed:
-                                continue
                         new_beam = BeamSearchSequence(
                             current_beam.orig_prompt,
                             tokens=current_beam.tokens + [token_id],
@@ -439,20 +439,14 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
         backend: StructuredOutputBackend,
         structured_output_key: tuple,
         bitmask: torch.Tensor,
-        request_allowed_token_ids: list[int] | None,
-    ) -> list[tuple[SamplingParams, list[int] | bytes] | None]:
+    ) -> list[tuple[SamplingParams, list[int]] | None]:
         """Build per-beam SamplingParams and allowed token IDs from grammar.
 
         Returns None for beams where the grammar has terminated.
         """
         vocab_size = self.model_config.get_vocab_size()
         request_type, grammar_spec = structured_output_key
-        request_allowed_set = (
-            set(request_allowed_token_ids)
-            if request_allowed_token_ids is not None
-            else None
-        )
-        result: list[tuple[SamplingParams, list[int] | bytes] | None] = []
+        result: list[tuple[SamplingParams, list[int]] | None] = []
 
         for beam in beams:
             # Fresh grammar per beam, replaying generated tokens.
@@ -471,43 +465,27 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
                 continue
 
             grammar.fill_bitmask(bitmask, 0)
-            mask = bitmask[0].clone()
-            if vocab_size % 32:
-                mask[-1] &= (1 << (vocab_size % 32)) - 1
-            packed = mask.numpy().astype("<i4", copy=False).tobytes()
-            eos_token_id = backend.tokenizer.eos_token_id
-            can_finish = eos_token_id is not None and _token_in_bitmask(
-                eos_token_id, packed
-            )
-            allowed_ids: list[int] | bytes
-            if request_allowed_set is not None:
-                allowed_ids = [
-                    token_id
-                    for token_id in request_allowed_set
-                    if _token_in_bitmask(token_id, packed)
-                ]
-            else:
-                allowed_ids = packed if any(packed) else []
+            allowed_ids = _bitmask_to_token_ids(bitmask[0], vocab_size)
 
             if not allowed_ids:
-                # Prove completion without adding a forbidden EOS to the beam.
-                if (
-                    can_finish
-                    and grammar.accept_tokens("beam", [eos_token_id])
-                    and grammar.is_terminated()
-                ):
-                    result.append(None)
-                else:
-                    result.append((base_params, []))
+                result.append(None)
                 continue
 
+            # The engine caps the size of allowed_token_ids. While the
+            # grammar still allows more tokens than the cap (e.g. inside
+            # free-form strings), skip the engine-side constraint and rely
+            # on the logprobs filtering in _beam_search_step instead.
             beam_params = SamplingParams(
                 logprobs=base_params.logprobs,
                 max_tokens=1,
                 temperature=base_params.temperature,
                 watermarking=base_params.watermarking,
                 detokenize=False,
-                _logprob_candidate_token_ids=allowed_ids,
+                allowed_token_ids=(
+                    allowed_ids
+                    if len(allowed_ids) <= _MAX_NUM_ALLOWED_TOKEN_IDS
+                    else None
+                ),
                 skip_clone=True,
             )
             result.append((beam_params, allowed_ids))

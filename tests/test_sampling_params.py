@@ -3,7 +3,6 @@
 from dataclasses import dataclass
 from types import SimpleNamespace
 
-import msgspec
 import pytest
 
 from vllm import SamplingParams
@@ -24,20 +23,6 @@ class MockModelConfig:
         return 1024
 
 
-def test_packed_logprob_candidates_transport_and_validation():
-    mask = (1 << 31).to_bytes(128, "little")
-    params = SamplingParams(logprobs=4, _logprob_candidate_token_ids=mask)
-    decoded = msgspec.msgpack.decode(
-        msgspec.msgpack.encode(params), type=SamplingParams
-    )
-    decoded.verify(MockModelConfig(), None, None, None)
-    assert decoded.clone()._logprob_candidate_token_ids == mask
-    for invalid in (b"", bytes(128), mask[:-1]):
-        params._logprob_candidate_token_ids = invalid
-        with pytest.raises(ValueError, match="packed logprob candidate mask"):
-            params.verify(MockModelConfig(), None, None, None)
-
-
 @pytest.mark.parametrize(
     "kwargs",
     [
@@ -49,7 +34,6 @@ def test_packed_logprob_candidates_transport_and_validation():
         {"logit_bias": {0: 1.0}},
         {"bad_words": ["foo"]},
         {"allowed_token_ids": [0, 1]},
-        {"_logprob_candidate_token_ids": [0, 1]},
     ],
 )
 def test_diffusion_rejects_unsupported_params(kwargs: dict):

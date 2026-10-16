@@ -3,7 +3,6 @@
 """Test that batched_count_greater_than does not trigger 0/1 specialization
 recompiles when batch_size varies."""
 
-import pytest
 import torch
 
 from vllm.platforms import current_platform
@@ -90,45 +89,3 @@ def test_gather_logprobs_no_recompile():
         logprobs_module.batched_count_greater_than = orig_fn
         sampler_module.batched_count_greater_than = orig_fn
         torch._dynamo.reset()
-
-
-@pytest.mark.parametrize("packed", [False, True])
-@pytest.mark.parametrize("candidate_count", [1, 129, 1025])
-def test_constrained_topk_preserves_scores(candidate_count, packed):
-    from vllm.v1.sample.ops.logprobs import constrained_topk
-
-    device = DEVICE or "cpu"
-    scores = (
-        torch.arange(2050, dtype=torch.float32, device=device)[None, :]
-        .mul(torch.tensor([1, -1, 2, -2], device=device)[:, None])
-        .log_softmax(-1)
-    )
-    candidates = {7: list(range(candidate_count)), 3: [10, 20]}
-    selection = dict(candidates)
-    if packed:
-        selection[7] = ((1 << candidate_count) - 1).to_bytes(260, "little")
-    values, ids = constrained_topk(
-        scores,
-        4,
-        selection,
-        torch.tensor([7, 9, 3, 7], device=device),
-        max_rows_per_request=2,
-    )
-    for row, allowed in enumerate(
-        [candidates[7], list(range(2050)), candidates[3], candidates[7]]
-    ):
-        expected = sorted(allowed, key=lambda i: scores[row, i], reverse=True)[:4]
-        assert set(ids[row].tolist()) == set(expected)
-        torch.testing.assert_close(values[row], scores[row, ids[row]])
-
-
-def test_packed_candidates_keep_distinct_ids_when_scores_are_infinite():
-    from vllm.v1.sample.ops.logprobs import constrained_topk
-
-    scores = torch.full((2, 65), -torch.inf, device=DEVICE or "cpu")
-    allowed = [1, 3, 5, 31, 32, 48, 64]
-    mask = sum(1 << i for i in allowed).to_bytes(12, "little")
-    values, ids = constrained_topk(scores, 4, {0: mask})
-    assert len(set(ids[0].tolist())) == 4
-    assert set(ids[0].tolist()) <= set(allowed)
-    torch.testing.assert_close(values, scores.gather(1, ids))

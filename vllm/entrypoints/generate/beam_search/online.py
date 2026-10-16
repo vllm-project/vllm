@@ -19,6 +19,7 @@ from vllm.utils.async_utils import collect_from_async_generator
 
 from .utils import (
     BeamSearchSequence,
+    configure_beam_logprobs,
     create_sort_beams_key_function,
 )
 
@@ -62,22 +63,18 @@ class BeamSearchOnlineMixin(ABC):
 
         tokenized_length = len(prompt_token_ids)
 
-        allowed_token_ids = params.allowed_token_ids
-        allowed_token_ids_set = (
-            set(allowed_token_ids) if allowed_token_ids is not None else None
-        )
+        logprobs_num = 2 * beam_width
         sampling_params = SamplingParams(
-            logprobs=2 * beam_width,
+            logprobs=logprobs_num,
             max_tokens=1,
             temperature=temperature,
             watermarking=False,
             detokenize=False,
-            _logprob_candidate_token_ids=(
-                list(dict.fromkeys(allowed_token_ids))
-                if allowed_token_ids is not None
-                else None
-            ),
         )
+        configure_beam_logprobs(
+            sampling_params, params, self.engine_client.input_processor.vllm_config
+        )
+        allowed = set(params.allowed_token_ids) if params.allowed_token_ids else None
         all_beams = [
             BeamSearchSequence(
                 orig_prompt=prompt,
@@ -147,18 +144,15 @@ class BeamSearchOnlineMixin(ABC):
 
                 if result.outputs[0].logprobs is not None:
                     logprobs = result.outputs[0].logprobs[0]
-                    if allowed_token_ids_set is not None:
-                        # Candidate columns are not global vocabulary ranks.
-                        for logprob in logprobs.values():
-                            logprob.rank = None
+                    if allowed is not None:
+                        logprobs = {
+                            token: score
+                            for token, score in logprobs.items()
+                            if token in allowed and math.isfinite(score.logprob)
+                        }
+                        for score in logprobs.values():
+                            score.rank = None
                     for token_id, logprob_obj in logprobs.items():
-                        if not math.isfinite(logprob_obj.logprob):
-                            continue
-                        if (
-                            allowed_token_ids_set is not None
-                            and token_id not in allowed_token_ids_set
-                        ):
-                            continue
                         candidate_logprob = (
                             current_beam.cum_logprob + logprob_obj.logprob
                         )
@@ -218,7 +212,7 @@ class BeamSearchOnlineMixin(ABC):
                 break
 
         completed.extend(all_beams)
-        if not completed:
+        if allowed is not None and not completed:
             raise ValueError("Beam search has no valid continuation")
         sorted_completed = sorted(completed, key=sort_beams_key, reverse=True)
         best_beams = sorted_completed[:beam_width]

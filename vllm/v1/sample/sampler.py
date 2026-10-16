@@ -12,7 +12,7 @@ from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.outputs import LogprobsTensors, SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.ops.bad_words import apply_bad_words
-from vllm.v1.sample.ops.logprobs import batched_count_greater_than, constrained_topk
+from vllm.v1.sample.ops.logprobs import batched_count_greater_than
 from vllm.v1.sample.ops.penalties import apply_all_penalties
 from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler
 
@@ -112,17 +112,13 @@ class Sampler(nn.Module):
         # Handle logprob_token_ids if specified (more efficient than full vocab)
         # This is used by generative_scoring API to get logprobs for specific tokens
         logprob_token_ids_tensors = None
-        if sampling_metadata.logprob_token_ids and not predict_bonus_token:
+        if sampling_metadata.logprob_token_ids:
             assert raw_logprobs is not None
             logprob_token_ids_tensors = self.gather_specific_token_logprobs(
-                raw_logprobs,
-                sampling_metadata.logprob_token_ids,
-                sampled,
-                sampling_metadata.logprob_candidate_token_ids,
-                num_logprobs or 0,
+                raw_logprobs, sampling_metadata.logprob_token_ids, sampled
             )
 
-        if logprob_token_ids_tensors is not None or num_logprobs is None:
+        if num_logprobs is None:
             logprobs_tensors = logprob_token_ids_tensors
         elif num_logprobs == -1:
             # Return the full unsorted and unranked logprobs.
@@ -132,11 +128,13 @@ class Sampler(nn.Module):
         else:
             # Gather the logprobs and ranks of the topk and sampled token.
             logprobs_tensors = self.gather_logprobs(
-                raw_logprobs,
-                num_logprobs,
-                token_ids=sampled,
-                candidates=sampling_metadata.logprob_candidate_token_ids,
+                raw_logprobs, num_logprobs, token_ids=sampled
             )
+
+        # If we have both num_logprobs and logprob_token_ids, prefer
+        # logprob_token_ids as it's more specific
+        if logprob_token_ids_tensors is not None and num_logprobs is not None:
+            logprobs_tensors = logprob_token_ids_tensors
 
         # Use int32 to reduce the tensor size.
         sampled = sampled.to(torch.int32)
@@ -156,8 +154,6 @@ class Sampler(nn.Module):
         logprobs: torch.Tensor,
         logprob_token_ids: dict[int, list[int]],
         sampled: torch.Tensor,
-        candidates: dict[int, list[int] | bytes] | None = None,
-        num_logprobs: int = 0,
     ) -> LogprobsTensors | None:
         """Gather logprobs for specific token IDs requested per request.
 
@@ -170,8 +166,6 @@ class Sampler(nn.Module):
                 gather from.
             logprob_token_ids: dict mapping req_index -> list of token IDs
             sampled: [batch_size] tensor of sampled token IDs
-            candidates: per-row beam scoring candidates.
-            num_logprobs: number of scoring candidates to return.
 
         Returns:
             LogprobsTensors with logprobs for the specified tokens, or None
@@ -186,8 +180,6 @@ class Sampler(nn.Module):
 
         # Find max number of tokens across all requests
         max_num_tokens = max(len(tids) for tids in logprob_token_ids.values())
-        if candidates:
-            max_num_tokens = max(max_num_tokens, num_logprobs)
         pin = self.pin_memory
 
         # Build the padded token_ids and valid_mask matrices on pinned CPU,
@@ -212,12 +204,6 @@ class Sampler(nn.Module):
         # Sampled token in column 0 — fill on-device from the sampled GPU
         # tensor so we don't need to D2H + re-upload.
         token_ids_tensor[:, 0] = sampled
-
-        if candidates:
-            _, top_ids = constrained_topk(logprobs, num_logprobs, candidates)
-            rows = list(candidates)
-            token_ids_tensor[rows, 1 : num_logprobs + 1] = top_ids[rows]
-            valid_mask[rows, 1 : num_logprobs + 1] = True
 
         # Gather logprobs at the requested token ids.
         gathered_logprobs = logprobs.gather(-1, token_ids_tensor)
@@ -327,7 +313,6 @@ class Sampler(nn.Module):
         logprobs: torch.Tensor,
         num_logprobs: int,
         token_ids: torch.Tensor,
-        candidates: dict[int, list[int] | bytes] | None = None,
     ) -> LogprobsTensors:
         """Gather logprobs for topk and sampled/prompt token.
 
@@ -340,7 +325,6 @@ class Sampler(nn.Module):
                      logprobs); 1D token ID tensor
                      with (num tokens) elements
                      Must be int64.
-          candidates: optional request-row to scoring-candidate IDs mapping.
 
         Returns:
           Top-k int indices tensor, (num tokens) x (num_logprobs + 1)
@@ -350,9 +334,7 @@ class Sampler(nn.Module):
         """
         assert token_ids.dtype == torch.int64
         # Find the topK values.
-        topk_logprobs, topk_indices = constrained_topk(
-            logprobs, num_logprobs, candidates
-        )
+        topk_logprobs, topk_indices = torch.topk(logprobs, num_logprobs, dim=-1)
 
         # Get with the logprob of the prompt or sampled token.
         token_ids = token_ids.unsqueeze(-1)

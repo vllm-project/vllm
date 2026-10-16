@@ -269,7 +269,6 @@ class InputBatch:
         # req_id -> list of specific token IDs to compute logprobs for
         # More efficient than num_logprobs=-1 when only a few tokens are needed
         self.logprob_token_ids: dict[str, list[int]] = {}
-        self.logprob_candidate_token_ids: dict[str, list[int] | bytes] = {}
 
         # Internal representation of per-step batch state changes, used for
         # reordering persistent batch and generating logitsprocs batch state
@@ -438,10 +437,6 @@ class InputBatch:
                 )
 
             # Store specific token IDs to compute logprobs for (more efficient)
-            if sampling_params._logprob_candidate_token_ids is not None:
-                self.logprob_candidate_token_ids[req_id] = (
-                    sampling_params._logprob_candidate_token_ids
-                )
             if sampling_params.logprob_token_ids is not None:
                 self.logprob_token_ids[req_id] = sampling_params.logprob_token_ids
 
@@ -573,7 +568,6 @@ class InputBatch:
         self.generators.pop(req_index, None)
         self.num_logprobs.pop(req_id, None)
         self.logprob_token_ids.pop(req_id, None)
-        self.logprob_candidate_token_ids.pop(req_id, None)
         if self.prev_req_id_to_index is not None:
             self.prev_req_id_to_index.pop(req_id, None)
 
@@ -948,11 +942,6 @@ class InputBatch:
             generators=self.generators,
             max_num_logprobs=self.max_num_logprobs,
             logprob_token_ids=logprob_token_ids_by_index,
-            logprob_candidate_token_ids={
-                self.req_id_to_index[req_id]: ids
-                for req_id, ids in self.logprob_candidate_token_ids.items()
-                if req_id in self.req_id_to_index
-            },
             prompt_token_ids=prompt_token_ids,
             frequency_penalties=self.frequency_penalties[:num_reqs],
             presence_penalties=self.presence_penalties[:num_reqs],
