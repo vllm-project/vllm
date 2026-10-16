@@ -1989,7 +1989,11 @@ class EngineCoreProc(EngineCore):
 
                 buffer = reuse_buffers.pop() if reuse_buffers else bytearray()
                 if self.vllm_config.aux_output_config.enable_return_routed_experts:
-                    outputs.pack_routed_experts()
+                    from vllm.distributed.aux_output_connector.routed_experts import (
+                        pack_routed_experts,
+                    )
+
+                    pack_routed_experts(outputs)
                 buffers = encoder.encode_into(outputs, buffer)
                 tracker = self._send_msg_tracking_payload(
                     sockets[client_index], buffers

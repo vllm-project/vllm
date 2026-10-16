@@ -285,33 +285,18 @@ class EngineCoreOutputs(
     # Weight version used for this step.
     weight_version: str | None = None
 
+    # Packed messages require matching client support for the batch payload.
     routed_experts: tuple[np.ndarray, list[int]] | None = None
 
     def __post_init__(self):
         if self.timestamp == 0.0:
             self.timestamp = time.monotonic()
         if self.routed_experts is not None:
-            rows, lengths = self.routed_experts
-            offset = 0
-            for output, length in zip(self.outputs, lengths, strict=True):
-                if length >= 0:
-                    output.routed_experts = rows[offset : offset + length]
-                    offset += length
-            assert offset == len(rows)
-            self.routed_experts = None
+            from vllm.distributed.aux_output_connector.routed_experts import (
+                unpack_routed_experts,
+            )
 
-    def pack_routed_experts(self) -> None:
-        """Send one R3 array per message without delaying per-request output."""
-        chunks = [output.routed_experts for output in self.outputs]
-        present = [rows for rows in chunks if rows is not None]
-        if not present:
-            return
-        self.routed_experts = (
-            np.concatenate(present),
-            [-1 if rows is None else len(rows) for rows in chunks],
-        )
-        for output in self.outputs:
-            output.routed_experts = None
+            unpack_routed_experts(self)
 
 
 class EngineCoreRequestType(enum.Enum):

@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import numpy as np
 
@@ -51,13 +51,6 @@ class AuxStepOutput(Mapping[str, AuxRequestOutput]):
     rows: np.ndarray
     spans: dict[str, tuple[int, int, int]]
     materialized: dict[str, AuxRequestOutput]
-
-    def __setstate__(self, state: dict[str, Any]) -> None:
-        self.__dict__.update(state)
-        # Multiproc dequeue releases its SHM slot before the output thread sends.
-        self.rows = self.rows.copy()
-        for output in self.materialized.values():
-            output.rows = output.rows.copy()
 
     def __getitem__(self, request_id: str) -> AuxRequestOutput:
         span = self.spans.get(request_id)

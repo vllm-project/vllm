@@ -19,6 +19,11 @@ from tests.v1.engine.utils import (
 )
 from vllm import PoolingParams
 from vllm.config.watermarking import WatermarkConfig
+from vllm.distributed.aux_output_connector.routed_experts import (
+    append_routed_experts,
+    pack_routed_experts,
+    snapshot_routed_experts,
+)
 from vllm.logprobs import FlatLogprobs, Logprob, PromptLogprobs, SampleLogprobs
 from vllm.lora.request import LoRARequest
 from vllm.outputs import (
@@ -1523,7 +1528,8 @@ async def test_request_output_collector():
 @pytest.mark.parametrize(
     "finish_reason", [FinishReason.LENGTH, FinishReason.STOP, FinishReason.ABORT]
 )
-def test_routed_experts_are_accumulated_until_finish(finish_reason):
+@pytest.mark.parametrize("stream_input", [False, True])
+def test_routed_experts_are_accumulated_until_finish(finish_reason, stream_input):
     state = RequestState(
         request_id="request-int",
         external_req_id="request",
@@ -1545,16 +1551,18 @@ def test_routed_experts_are_accumulated_until_finish(finish_reason):
         queue=None,
         log_stats=False,
         stream_interval=1,
+        stream_input=stream_input,
     )
     prompt_chunk = np.arange(24, dtype=np.uint8).reshape(4, 3, 2)
     decode_chunk = np.arange(12, dtype=np.uint8).reshape(2, 3, 2) + 24
-    state._append_routed_experts(prompt_chunk)
+    state.routed_experts = append_routed_experts(state.routed_experts, prompt_chunk)
 
     partial = state.make_request_output([5], None, None, None)
     assert partial is not None
     assert partial.outputs[0].routed_experts is None
 
-    state._append_routed_experts(decode_chunk)
+    state.routed_experts = append_routed_experts(state.routed_experts, decode_chunk)
+    accumulated = state.routed_experts[0]
     finished = state.make_request_output([6], None, finish_reason, None)
     assert finished is not None
     np.testing.assert_array_equal(
@@ -1562,9 +1570,13 @@ def test_routed_experts_are_accumulated_until_finish(finish_reason):
         np.concatenate((prompt_chunk, decode_chunk)),
     )
     snapshot = finished.outputs[0].routed_experts
-    assert snapshot.flags.owndata and snapshot.flags.writeable
-    # A segment snapshot must not pin the accumulator or change on more input.
-    state._append_routed_experts(decode_chunk)
+    assert snapshot.flags.writeable
+    assert (
+        np.shares_memory(snapshot, np.frombuffer(accumulated, np.uint8)) != stream_input
+    )
+    assert (state.routed_experts is None) != stream_input
+    # Resumed input and later accumulators cannot alter an earlier output.
+    state.routed_experts = append_routed_experts(state.routed_experts, decode_chunk)
     np.testing.assert_array_equal(
         snapshot, np.concatenate((prompt_chunk, decode_chunk))
     )
@@ -1597,7 +1609,7 @@ async def test_aborted_request_preserves_incremental_batched_routed_experts(
     message = EngineCoreOutputs(
         outputs=[EngineCoreOutput("request-int", [3], routed_experts=rows)]
     )
-    message.pack_routed_experts()
+    pack_routed_experts(message)
     decoded = MsgpackDecoder(EngineCoreOutputs).decode(MsgpackEncoder().encode(message))
     processor.process_outputs(decoded.outputs)
     assert (await collector.get()).outputs[0].routed_experts is None
@@ -1623,16 +1635,15 @@ def test_stop_truncation_preserves_earlier_routed_experts(dtype, step_rows):
     state.detokenizer.num_output_tokens.return_value = 5
     earlier = np.arange(24, dtype=dtype).reshape(4, 3, 2)
     current = np.ones((step_rows, 3, 2), dtype=dtype)
-    state._append_routed_experts(earlier)
-    state._append_routed_experts(current)
+    state.routed_experts = append_routed_experts(state.routed_experts, earlier)
+    state.routed_experts = append_routed_experts(state.routed_experts, current)
     output = EngineCoreOutput("request", [10, 11, 12], routed_experts=current)
 
     OutputProcessor._trim_surplus_tokens(state, output, num_prev_tokens=4)
 
     assert output.new_token_ids == [10]
-    data, stored_dtype, shape = state.routed_experts
     np.testing.assert_array_equal(
-        np.frombuffer(data, stored_dtype).reshape(-1, *shape),
+        snapshot_routed_experts(state.routed_experts),
         np.concatenate((earlier, current[:-2])),
     )
 

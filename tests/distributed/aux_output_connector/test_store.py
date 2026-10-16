@@ -1,12 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import subprocess
-import sys
 import threading
 from contextlib import nullcontext
 from dataclasses import dataclass, field
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -24,6 +21,7 @@ from vllm.distributed.aux_output_connector.connector import (
 from vllm.distributed.aux_output_connector.routed_experts import (
     RoutedExpertsBuffer,
     materialize_routed_experts,
+    pack_routed_experts,
     publish_routed_experts,
     routed_experts_keys,
 )
@@ -1946,7 +1944,7 @@ def test_scheduler_connector_reset_derives_emit_start_from_request():
 
 
 def test_routed_expert_message_packing_preserves_missing_and_empty_rows():
-    """Rust's inline/OOB fixtures must match the production Python encoder."""
+    """Inline/OOB wire fixtures stay identical without requiring Rust sources."""
     rows = np.arange(6, dtype=np.uint8).reshape(3, 1, 2)
     outputs = EngineCoreOutputs(
         outputs=[
@@ -1961,21 +1959,52 @@ def test_routed_expert_message_packing_preserves_missing_and_empty_rows():
         timestamp=1.0,
         weight_version="v7",
     )
-    outputs.pack_routed_experts()
-    fixture = (
-        Path(__file__).resolve().parents[3]
-        / "rust/src/engine-core-client/src/tests/python_compat.py"
+    pack_routed_experts(outputs)
+    header = (
+        "9a0094dc0012a57265712d30920708c0c0c001c0c0c0c0c0c0c000c0c0c0c0"
+        "dc0012a57265712d31920708c0c0c001c0c0c0c0c0c0c000c0c0c0c0"
+        "dc0012a57265712d32920708c0c0c001c0c0c0c0c0c0c000c0c0c0c0"
+        "dc0012a57265712d33920708c0c0c001c0c0c0c0c0c0c000c0c0c0c0"
+        "c0cb3ff0000000000000c0c0c0c0a27637"
     )
-    expected = subprocess.check_output([sys.executable, str(fixture)], text=True)
-    for threshold, line in zip((256, 1), expected.splitlines()[-2:], strict=True):
+    fixtures = (
+        (256, [header + "9293a37c753193030102c706030001020304059401ff0002"]),
+        (1, [header + "9293a37c753193030102019401ff0002", "000102030405"]),
+    )
+    for threshold, expected in fixtures:
         encoded = MsgpackEncoder(size_threshold=threshold).encode(outputs)
-        assert [bytes(frame).hex() for frame in encoded] == line.split()
+        assert [bytes(frame).hex() for frame in encoded] == expected
         decoded = MsgpackDecoder(EngineCoreOutputs).decode(encoded)
         assert decoded.weight_version == "v7"
         assert decoded.outputs[1].routed_experts is None
         np.testing.assert_array_equal(decoded.outputs[0].routed_experts, rows[:1])
         np.testing.assert_array_equal(decoded.outputs[2].routed_experts, rows[:0])
         np.testing.assert_array_equal(decoded.outputs[3].routed_experts, rows[1:])
+
+
+@pytest.mark.parametrize("lengths", [[-2], [0], [2], [], [1, 0]])
+def test_routed_expert_unpack_rejects_invalid_row_counts(lengths):
+    message = EngineCoreOutputs(outputs=[EngineCoreOutput("request", [1])])
+    message.routed_experts = (np.ones((1, 2, 3), dtype=np.uint8), lengths)
+    with pytest.raises(ValueError, match="row counts"):
+        MsgpackDecoder(EngineCoreOutputs).decode(MsgpackEncoder().encode(message))
+
+
+@pytest.mark.parametrize(
+    "other", [np.ones((1, 2, 3), dtype=np.uint16), np.ones((1, 1, 3), dtype=np.uint8)]
+)
+def test_routed_expert_packing_rejects_mixed_profiles(other):
+    first = np.ones((1, 2, 3), dtype=np.uint8)
+    message = EngineCoreOutputs(
+        outputs=[
+            EngineCoreOutput("first", [1], routed_experts=first),
+            EngineCoreOutput("second", [2], routed_experts=other),
+        ]
+    )
+    with pytest.raises(ValueError, match="profiles differ"):
+        pack_routed_experts(message)
+    assert message.outputs[0].routed_experts is first
+    assert message.outputs[1].routed_experts is other
 
 
 def test_large_aux_snapshot_survives_worker_shm_slot_reuse():
