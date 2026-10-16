@@ -5,6 +5,7 @@
 import torch
 
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import PIN_MEMORY
 
 
 @torch.compile(backend=current_platform.simple_compile_backend)
@@ -39,17 +40,23 @@ def constrained_topk(
     if not candidates or k == 0:
         return values, indices
 
+    pin_memory = PIN_MEMORY and scores.device.type != "cpu"
     keys = sorted(candidates)
     width = max(len(candidates[key]) for key in keys)
-    ids = torch.zeros((len(keys), width), dtype=torch.long, device="cpu")
+    ids = torch.zeros(
+        (len(keys), width), dtype=torch.long, device="cpu", pin_memory=pin_memory
+    )
     lengths = [len(candidates[key]) for key in keys]
+    ids_np = ids.numpy()
     for i, key in enumerate(keys):
-        ids[i, : lengths[i]] = torch.tensor(
-            candidates[key], dtype=torch.long, device="cpu"
-        )
-    ids = ids.to(scores.device)
-    lengths_tensor = torch.tensor(lengths, device=scores.device)
-    rows = torch.tensor(keys, device=scores.device)
+        ids_np[i, : lengths[i]] = candidates[key]
+    ids = ids.to(scores.device, non_blocking=True)
+    lengths_tensor = torch.tensor(
+        lengths, dtype=torch.long, device="cpu", pin_memory=pin_memory
+    ).to(scores.device, non_blocking=True)
+    rows = torch.tensor(keys, dtype=torch.long, device="cpu", pin_memory=pin_memory).to(
+        scores.device, non_blocking=True
+    )
     num_rows = scores.shape[0]
     if row_mapping is not None:
         # Fixed-size row selection avoids a CUDA nonzero synchronization.
