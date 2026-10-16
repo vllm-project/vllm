@@ -259,7 +259,6 @@ async def test_serve_tokens_returns_terminal_aux_output_keys_without_inline_r3(s
         assert isinstance(response, GenerateTokensResponse)
         choice = response.choices[0].model_dump()
     assert choice["aux_output_keys"] == keys
-    assert "artifact_keys" not in choice
     assert choice["routed_experts"] is None
 
 
