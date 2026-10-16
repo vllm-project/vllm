@@ -53,6 +53,15 @@ _fi_ar_quant_workspace_failed = False
 _fi_ar_workspace_groups: dict[int, ProcessGroup] = {}
 
 
+def _require_workspace_group(workspace: Any, group: ProcessGroup) -> Any:
+    workspace_group = _fi_ar_workspace_groups.get(id(workspace))
+    if workspace_group is not group:
+        raise RuntimeError(
+            "FlashInfer all-reduce workspace belongs to a different process group"
+        )
+    return workspace
+
+
 def _get_tuned_standalone_max_size(
     world_size: int,
     backend: str,
@@ -191,8 +200,10 @@ def get_fi_ar_workspace(
     VLLM_FLASHINFER_ALLREDUCE_BACKEND env var.
     """
     global _fi_ar_workspace, _fi_ar_workspace_failed
-    if _fi_ar_workspace is not None or _fi_ar_workspace_failed:
-        return _fi_ar_workspace
+    if _fi_ar_workspace is not None:
+        return _require_workspace_group(_fi_ar_workspace, group)
+    if _fi_ar_workspace_failed:
+        return None
 
     backend, allow_trtllm_fallback = _resolve_fi_ar_backend(group)
 
@@ -216,7 +227,7 @@ def get_fi_ar_workspace(
     def _get_or_create(be: str):
         # Reuse the quant workspace if it was already created with the same backend
         if _fi_ar_quant_workspace is not None and _fi_ar_quant_workspace.backend == be:
-            return _fi_ar_quant_workspace
+            return _require_workspace_group(_fi_ar_quant_workspace, group)
         return _create_workspace(
             be, world_size, rank, max_token_num, hidden_dim, dtype, group
         )
@@ -260,8 +271,10 @@ def get_fi_ar_quant_workspace(
     only on single-node topologies where mnnvl multicast is unavailable.
     """
     global _fi_ar_quant_workspace, _fi_ar_quant_workspace_failed
-    if _fi_ar_quant_workspace is not None or _fi_ar_quant_workspace_failed:
-        return _fi_ar_quant_workspace
+    if _fi_ar_quant_workspace is not None:
+        return _require_workspace_group(_fi_ar_quant_workspace, group)
+    if _fi_ar_quant_workspace_failed:
+        return None
 
     backend, allow_trtllm_fallback = _resolve_fi_ar_backend(group)
 
@@ -278,7 +291,7 @@ def get_fi_ar_quant_workspace(
     # Reuse the non-quant workspace if it was already created with the same
     # backend.
     if _fi_ar_workspace is not None and _fi_ar_workspace.backend == backend:
-        _fi_ar_quant_workspace = _fi_ar_workspace
+        _fi_ar_quant_workspace = _require_workspace_group(_fi_ar_workspace, group)
         return _fi_ar_quant_workspace
 
     if (
@@ -287,7 +300,7 @@ def get_fi_ar_quant_workspace(
         and allow_trtllm_fallback
         and backend != "trtllm"
     ):
-        _fi_ar_quant_workspace = _fi_ar_workspace
+        _fi_ar_quant_workspace = _require_workspace_group(_fi_ar_workspace, group)
         return _fi_ar_quant_workspace
 
     _fi_ar_quant_workspace = _create_workspace(
@@ -301,7 +314,9 @@ def get_fi_ar_quant_workspace(
         )
         backend = "trtllm"
         if _fi_ar_workspace is not None and _fi_ar_workspace.backend == backend:
-            _fi_ar_quant_workspace = _fi_ar_workspace
+            _fi_ar_quant_workspace = _require_workspace_group(
+                _fi_ar_workspace, group
+            )
         else:
             _fi_ar_quant_workspace = _create_workspace(
                 backend, world_size, rank, max_token_num, hidden_dim, dtype, group

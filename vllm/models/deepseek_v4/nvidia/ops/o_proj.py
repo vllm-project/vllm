@@ -5,6 +5,11 @@ from collections.abc import Callable
 import torch
 import torch.nn as nn
 
+from vllm.distributed import (
+    get_o_proj_tp_group,
+    get_tensor_model_parallel_rank,
+    tensor_model_parallel_all_gather,
+)
 from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Dynamic128Sym,
@@ -14,6 +19,22 @@ from vllm.models.deepseek_v4.common.ops.fused_inv_rope_fp8_quant import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import fp8_einsum, get_tma_aligned_size
+
+
+def get_o_proj_partition(
+    n_groups: int, o_lora_rank: int, tp_size: int
+) -> tuple[int, int]:
+    """Return local WO-A groups and the TP ranks sharing each group."""
+    if n_groups <= 0 or tp_size <= 0 or o_lora_rank <= 0:
+        raise ValueError("O-projection dimensions and TP size must be positive")
+    if n_groups % tp_size == 0:
+        return n_groups // tp_size, 1
+    if tp_size % n_groups:
+        raise ValueError("O-groups and TP size must divide each other")
+    ranks_per_group = tp_size // n_groups
+    if o_lora_rank % ranks_per_group:
+        raise ValueError("WO-A output channels must divide across each O-group's ranks")
+    return 1, ranks_per_group
 
 
 def compute_fp8_einsum_recipe(
@@ -46,6 +67,7 @@ def deep_gemm_fp8_o_proj(
     o_lora_rank: int,
     einsum_recipe: tuple[int, int, int],
     tma_aligned_scales: bool,
+    ranks_per_group: int = 1,
 ) -> torch.Tensor:
     """O projection: inverse RoPE + grouped wo_a + wo_b.
 
@@ -58,6 +80,15 @@ def deep_gemm_fp8_o_proj(
     kernel, one ``wo_a`` group per slot with the live groups first, so only
     the padding groups are sliced off.
     """
+    if ranks_per_group > 1:
+        if isinstance(o, QuantizedActivation):
+            raise ValueError("Cross-rank O-groups require unquantized attention output")
+        assert n_groups == 1
+        o = tensor_model_parallel_all_gather(o[:, :heads_per_group].contiguous(), dim=1)
+        heads_per_group *= ranks_per_group
+        start = get_tensor_model_parallel_rank() // ranks_per_group * heads_per_group
+        o = o[:, start : start + heads_per_group].contiguous()
+        o_lora_rank //= ranks_per_group
     use_fp8 = wo_a.weight.dtype == torch.float8_e4m3fn
     if isinstance(o, QuantizedActivation):
         assert use_fp8
@@ -100,7 +131,17 @@ def deep_gemm_fp8_o_proj(
             grouped_weight.transpose(1, 2),
             out=z.transpose(0, 1),
         )
-    return wo_b(z.flatten(1))
+    z_flat = z.flatten(1)
+    if ranks_per_group > 1:
+        z_all = tensor_model_parallel_all_gather(z_flat, dim=-1)
+        group_width = z_flat.shape[-1] * ranks_per_group
+        group = get_o_proj_tp_group().rank_in_group
+        z_flat = z_all[:, group * group_width : (group + 1) * group_width]
+        z_flat = z_flat.contiguous()
+    output = wo_b(z_flat)
+    if ranks_per_group > 1:
+        output = get_o_proj_tp_group().all_reduce(output)
+    return output
 
 
 # TRTLLM-gen's DSv4 RopeQuant epilogue (flashinfer-ai/flashinfer#4918) has one
@@ -120,6 +161,8 @@ def rope_quant_unsupported_reason(layer: torch.nn.Module) -> str | None:
     cache) is what the SM100 layer uses anyway. What varies is the local head
     count and the configs the layer also serves unquantized.
     """
+    if layer.o_proj_ranks_per_group > 1:
+        return "RopeQuant requires rank-local O-groups"
     if layer.n_local_heads != _ROPE_QUANT_NUM_HEADS:
         # Padding fewer heads up to the kernel's fixed 128 costs more
         # attention than the fused epilogue saves.

@@ -240,15 +240,12 @@ class FusedInvRopeFP8QuantKernel(
         if hf_config is None:
             return []
 
-        tp_size = vllm_config.parallel_config.tensor_parallel_size
         num_heads = int(getattr(hf_config, "num_attention_heads", 0) or 0)
         num_groups = int(getattr(hf_config, "o_groups", 0) or 0)
         if num_heads <= 0 or num_groups <= 0:
             return []
 
-        local_heads = num_heads // tp_size
-        local_groups = num_groups // tp_size
-        if local_groups <= 0:
+        if num_heads % num_groups:
             return []
 
         capability = current_platform.get_device_capability()
@@ -257,16 +254,24 @@ class FusedInvRopeFP8QuantKernel(
 
         head_dim = int(getattr(hf_config, "head_dim", 512) or 512)
         rope_dim = int(getattr(hf_config, "qk_rope_head_dim", 64) or 64)
-        return self._trace_dispatch(self.dispatch)(
-            heads_per_group=local_heads // local_groups,
-            head_dim=head_dim,
-            nope_dim=head_dim - rope_dim,
-            rope_dim=rope_dim,
-            quant_group_size=128,
-            tma_aligned_scales=capability.major >= 10,
-            launch_pdl=current_platform.is_arch_support_pdl(),
-            quantize=True,
+        tp_size = vllm_config.parallel_config.tensor_parallel_size
+        quant_group_sizes = (
+            (32, 128) if tp_size > num_groups and capability.major >= 10 else (128,)
         )
+        return [
+            key
+            for quant_group_size in quant_group_sizes
+            for key in self._trace_dispatch(self.dispatch)(
+                heads_per_group=num_heads // num_groups,
+                head_dim=head_dim,
+                nope_dim=head_dim - rope_dim,
+                rope_dim=rope_dim,
+                quant_group_size=quant_group_size,
+                tma_aligned_scales=capability.major >= 10,
+                launch_pdl=current_platform.is_arch_support_pdl(),
+                quantize=True,
+            )
+        ]
 
     def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
         head_dim = compile_key.chunks_per_head * compile_key.quant_group_size

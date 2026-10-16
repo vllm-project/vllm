@@ -40,7 +40,11 @@ from vllm.config import (
     VllmConfig,
     get_current_vllm_config,
 )
-from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.distributed import (
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+    init_o_proj_tp_group,
+)
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -219,6 +223,13 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         self.nope_head_dim = self.head_dim - self.rope_head_dim
         self.n_groups = config.o_groups
         self.n_local_groups = self.n_groups // tp_size
+        self.o_proj_ranks_per_group = 1
+        if current_platform.is_cuda():
+            from .nvidia.ops.o_proj import get_o_proj_partition
+
+            self.n_local_groups, self.o_proj_ranks_per_group = get_o_proj_partition(
+                self.n_groups, self.o_lora_rank, tp_size
+            )
         self.window_size = config.sliding_window
         # Vision variant: image spans are visible bidirectionally, widening
         # prefill SWA index rows by up to max_image_tokens columns.
@@ -273,13 +284,22 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         )
         self.wo_a.is_bmm = True
         self.wo_a.bmm_batch_size = self.n_local_groups
+        wo_b_tp_rank = None
+        wo_b_tp_size = None
+        if self.o_proj_ranks_per_group > 1:
+            init_o_proj_tp_group(self.n_groups)
+            wo_b_tp_rank = get_tensor_model_parallel_rank() % self.n_groups
+            wo_b_tp_size = self.n_groups
         self.wo_b = RowParallelLinear(
             self.n_groups * self.o_lora_rank,
             self.hidden_size,
             bias=False,
             quant_config=quant_config,
+            reduce_results=self.o_proj_ranks_per_group == 1,
             return_bias=False,
             prefix=f"{prefix}.wo_b",
+            tp_rank=wo_b_tp_rank,
+            tp_size=wo_b_tp_size,
         )
 
         # Initialize rotary embedding before the indexer/compressor consume it.

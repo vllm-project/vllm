@@ -53,7 +53,11 @@ from vllm.config import (
     get_current_vllm_config,
 )
 from vllm.config.cache import CacheDType
-from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.distributed import (
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+    init_o_proj_tp_group,
+)
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -308,6 +312,13 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         self.nope_head_dim = self.head_dim - self.rope_head_dim
         self.n_groups = config.o_groups
         self.n_local_groups = self.n_groups // tp_size
+        self.o_proj_ranks_per_group = 1
+        if current_platform.is_cuda():
+            from vllm.models.deepseek_v4.nvidia.ops.o_proj import get_o_proj_partition
+
+            self.n_local_groups, self.o_proj_ranks_per_group = get_o_proj_partition(
+                self.n_groups, self.o_lora_rank, tp_size
+            )
         self.window_size = config.sliding_window
         # ---- v4.1 sparse-attention topology ----
         # compress_ratios has one entry per layer (MTP layers included):
@@ -399,13 +410,22 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         self._o_proj_block_size = (
             32 if getattr(self.wo_a, "weight_block_size", None) == [1, 32] else 128
         )
+        wo_b_tp_rank = None
+        wo_b_tp_size = None
+        if self.o_proj_ranks_per_group > 1:
+            init_o_proj_tp_group(self.n_groups)
+            wo_b_tp_rank = get_tensor_model_parallel_rank() % self.n_groups
+            wo_b_tp_size = self.n_groups
         self.wo_b = RowParallelLinear(
             self.n_groups * self.o_lora_rank,
             self.hidden_size,
             bias=False,
             quant_config=quant_config,
+            reduce_results=self.o_proj_ranks_per_group == 1,
             return_bias=False,
             prefix=f"{prefix}.wo_b",
+            tp_rank=wo_b_tp_rank,
+            tp_size=wo_b_tp_size,
         )
         # Set by ``bind_gemm_rs`` when the decoder layer runs sequence
         # parallel and the fused GEMM + reduce-scatter kernel accepts wo_b.
@@ -741,6 +761,8 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             get_gemm_rs_ar,
         )
 
+        if self.o_proj_ranks_per_group > 1:
+            raise ValueError("GEMM-RS does not support cross-rank O-groups")
         # The layer owns the reduction under sequence parallel.
         assert not self.wo_b.reduce_results
         gemm_rs = get_gemm_rs_ar()
