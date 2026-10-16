@@ -10,7 +10,9 @@ from vllm.triton_utils import tl, triton
 from .sparse_indexer import DecodeIndexerMetadata
 
 
-@triton.jit
+@triton.jit(
+    do_not_specialize=["CAPACITY", "SCORE_ROW", "Q_GROUP", "W_GROUP", "WORKERS"]
+)
 def _direct_scores(
     Q,
     W,
@@ -25,9 +27,9 @@ def _direct_scores(
     Lengths,
     TopKLengths,
     Q_TOKEN: tl.constexpr,
-    Q_GROUP: tl.constexpr,
+    Q_GROUP,
     W_TOKEN: tl.constexpr,
-    W_GROUP: tl.constexpr,
+    W_GROUP,
     TABLE_COLS: tl.constexpr,
     TABLE_ROW: tl.constexpr,
     SLOT_STRIDE: tl.constexpr,
@@ -35,11 +37,11 @@ def _direct_scores(
     CACHE_PAGES: tl.constexpr,
     REGIONS_PER_BLOCK: tl.constexpr,
     MEAN_BLOCK: tl.constexpr,
-    CAPACITY: tl.constexpr,
-    SCORE_ROW: tl.constexpr,
+    CAPACITY,
+    SCORE_ROW,
     HEADS: tl.constexpr,
     TILE: tl.constexpr,
-    WORKERS: tl.constexpr,
+    WORKERS,
     ROW_GROUPS: tl.constexpr,
     QUERY_LEN: tl.constexpr,
     USE_BF16_DOT: tl.constexpr,
