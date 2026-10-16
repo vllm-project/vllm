@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import json
 import os
+import threading
 from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, call, patch
@@ -26,6 +28,7 @@ from vllm.profiler.wrapper import (
     validate_worker_profiler_config,
 )
 from vllm.v1.core.sched.output import CachedRequestData
+from vllm.v1.executor.abstract import Executor
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.v1.worker.gpu_worker import Worker
 from vllm.v1.worker.xpu_worker import XPUWorker
@@ -98,17 +101,25 @@ def test_torch_profiler_rebuilds_one_shot_profiler_each_round(tmp_path):
 
 
 def test_torch_profiler_records_each_profile_round(tmp_path):
-    traces: list[torch.profiler.profile] = []
+    trace_paths: list[str] = []
+
+    def export_trace(prof: torch.profiler.profile) -> None:
+        # Export as each round stops instead of parsing every round at the end.
+        path = str(tmp_path / f"round_{len(trace_paths)}.json")
+        prof.export_chrome_trace(path)
+        trace_paths.append(path)
+
     wrapper = TorchProfilerWrapper(
         ProfilerConfig(
             profiler="torch",
             torch_profiler_dir=str(tmp_path),
             torch_profiler_dump_cuda_time_total=False,
+            torch_profiler_with_stack=False,
         ),
         worker_name="worker",
         local_rank=1,
         activities=["CPU"],
-        on_trace_ready=traces.append,
+        on_trace_ready=export_trace,
     )
 
     for run in range(2):
@@ -117,10 +128,16 @@ def test_torch_profiler_records_each_profile_round(tmp_path):
             pass
         wrapper.stop()
 
-    assert len(traces) == 2
-    for run, trace in enumerate(traces):
+    assert len(trace_paths) == 2
+    for run, path in enumerate(trace_paths):
+        # The CPU profiler records every thread in the process, and an event
+        # name from elsewhere in a long session can hold invalid UTF-8.
+        with open(path, encoding="utf-8", errors="replace") as f:
+            events = json.load(f)["traceEvents"]
         assert {
-            event.name for event in trace.events() if event.name.startswith("run_")
+            event["name"]
+            for event in events
+            if event.get("name", "").startswith("run_")
         } == {f"run_{run}"}
 
 
@@ -145,11 +162,31 @@ def test_torch_profiler_device_summary(tmp_path, capsys, activities, dump_device
         wrapper.start()
         wrapper.stop()
 
-    summary = tmp_path / "profiler_out_0.txt"
+    summary = tmp_path / "worker.profiler_out.txt"
     assert summary.exists() == dump_device_time
     assert ("device times" in capsys.readouterr().out) == dump_device_time
     if dump_device_time:
         assert summary.read_text() == "device times\n"
+
+
+def test_torch_profiler_summary_follows_output_name(tmp_path):
+    config = ProfilerConfig(
+        profiler="torch",
+        torch_profiler_dir=str(tmp_path),
+    )
+    with patch("vllm.profiler.wrapper.torch.profiler.profile") as profile:
+        table = profile.return_value.key_averages.return_value.table
+        table.side_effect = ["first run", "second run"]
+        wrapper = TorchProfilerWrapper(
+            config, worker_name="initial", local_rank=1, activities=["CUDA"]
+        )
+        for output_name in ["first_rank1", "second_rank1"]:
+            wrapper.set_output_name(output_name)
+            wrapper.start()
+            wrapper.stop()
+
+    assert (tmp_path / "first_rank1.profiler_out.txt").read_text() == "first run\n"
+    assert (tmp_path / "second_rank1.profiler_out.txt").read_text() == "second run\n"
 
 
 @pytest.mark.parametrize(
@@ -168,6 +205,30 @@ def test_torch_profiler_activities_reject_invalid_values(activities):
 def test_torch_profiler_activities_require_torch_profiler():
     with pytest.raises(ValueError, match="only applicable"):
         ProfilerConfig(torch_profiler_activities=["CPU"])
+
+
+@pytest.mark.parametrize(
+    ("profiler", "activities", "ignore_frontend", "expected"),
+    [
+        ("torch", None, False, True),
+        ("torch", ["CPU"], False, True),
+        ("torch", ["CPU", "CUDA"], False, True),
+        ("torch", ["CUDA"], False, False),
+        ("torch", ["CPU"], True, False),
+        ("cuda", None, False, False),
+    ],
+)
+def test_should_profile_frontend(
+    profiler, activities, ignore_frontend, expected, tmp_path
+):
+    config = ProfilerConfig(
+        profiler=profiler,
+        torch_profiler_dir=str(tmp_path) if profiler == "torch" else "",
+        torch_profiler_activities=activities,
+        ignore_frontend=ignore_frontend,
+    )
+
+    assert config.should_profile_frontend is expected
 
 
 @pytest.mark.parametrize(
@@ -256,14 +317,79 @@ def test_worker_reuses_torch_wrapper_across_profile_rounds(worker_type):
         patch("vllm.distributed.utils.get_worker_rank_suffix", return_value="rank0"),
         patch("vllm.profiler.wrapper.TorchProfilerWrapper") as wrapper,
     ):
-        worker.profile()
+        worker.profile(
+            profile_prefix="first",
+            delay_iterations=5,
+            max_iterations=2,
+        )
         worker.profile(is_start=False)
-        worker.profile()
+        worker.profile(profile_prefix="second")
 
     assert worker.profiler is wrapper.return_value
     wrapper.assert_called_once()
-    assert wrapper.return_value.start.call_count == 2
+    assert wrapper.return_value.set_output_name.call_args_list == [
+        call("first_rank0"),
+        call("second_rank0"),
+    ]
+    assert wrapper.return_value.start.call_args_list == [
+        call(delay_iterations=5, max_iterations=2),
+        call(delay_iterations=None, max_iterations=None),
+    ]
     wrapper.return_value.stop.assert_called_once_with()
+
+
+def test_executor_profile_only_forwards_supplied_override_kwargs():
+    executor = MagicMock()
+    executor.vllm_config.parallel_config.worker_cls = "vllm.v1.worker.gpu_worker.Worker"
+
+    Executor.profile(executor, True, "default")
+    Executor.profile(
+        executor,
+        True,
+        "bounded",
+        delay_iterations=5,
+        max_iterations=2,
+    )
+
+    assert executor.collective_rpc.call_args_list == [
+        call("profile", args=(True, "default"), kwargs=None),
+        call(
+            "profile",
+            args=(True, "bounded"),
+            kwargs={"delay_iterations": 5, "max_iterations": 2},
+        ),
+    ]
+
+
+class _LegacyProfileWorker:
+    def profile(self, is_start: bool = True, profile_prefix: str | None = None):
+        pass
+
+
+def test_executor_rejects_overrides_unsupported_by_worker():
+    """Out-of-tree workers with the old ``profile`` signature are rejected
+    before dispatch, so a failed collective_rpc cannot leave replies queued."""
+    executor = MagicMock()
+    executor.vllm_config.parallel_config.worker_cls = f"{__name__}._LegacyProfileWorker"
+
+    with pytest.raises(ValueError, match="max_iterations"):
+        Executor.profile(executor, True, None, max_iterations=2)
+    Executor.profile(executor, True, "legacy")
+
+    executor.collective_rpc.assert_called_once_with(
+        "profile", args=(True, "legacy"), kwargs=None
+    )
+
+
+def test_worker_rejects_invalid_profile_prefix():
+    worker = object.__new__(Worker)
+    worker.profiler = None
+    worker.profiler_config = ProfilerConfig(
+        profiler="torch", torch_profiler_dir="/tmp/mock"
+    )
+
+    with pytest.raises(ValueError, match="profile_prefix"):
+        worker.profile(profile_prefix="../trace")
 
 
 def test_immediate_start_stop(default_profiler_config):
@@ -277,6 +403,33 @@ def test_immediate_start_stop(default_profiler_config):
     profiler.stop()
     assert profiler._running is False
     assert profiler._active is False
+    assert profiler.stop_call_count == 1
+
+
+def test_stop_waits_for_inflight_start(default_profiler_config):
+    """A stop() from another thread during a slow start() must still stop the
+    backend instead of leaving it running with the session marked inactive."""
+    profiler = ConcreteWorkerProfiler(default_profiler_config)
+    in_start = threading.Event()
+    release_start = threading.Event()
+
+    def slow_start():
+        in_start.set()
+        release_start.wait()
+
+    with patch.object(profiler, "_start", side_effect=slow_start):
+        start_thread = threading.Thread(target=profiler.start)
+        start_thread.start()
+        assert in_start.wait(timeout=5)
+        stop_thread = threading.Thread(target=profiler.stop)
+        stop_thread.start()
+        stop_thread.join(timeout=0.1)
+        release_start.set()
+        start_thread.join(timeout=5)
+        stop_thread.join(timeout=5)
+
+    assert profiler._active is False
+    assert profiler._running is False
     assert profiler.stop_call_count == 1
 
 
@@ -386,19 +539,37 @@ def test_delayed_start_and_max_iters(default_profiler_config):
     assert profiler.stop_call_count == 1
 
 
-def test_idempotency(default_profiler_config):
-    """Test that calling start/stop multiple times doesn't break logic."""
+def test_duplicate_start_is_ignored(default_profiler_config):
     profiler = ConcreteWorkerProfiler(default_profiler_config)
 
-    # Double Start
     profiler.start()
     profiler.start()
-    assert profiler.start_call_count == 1  # Should only start once
+    assert profiler.start_call_count == 1
 
-    # Double Stop
     profiler.stop()
     profiler.stop()
-    assert profiler.stop_call_count == 1  # Should only stop once
+    assert profiler.stop_call_count == 1
+
+
+def test_session_bounds_override_and_reset_to_defaults():
+    profiler = ConcreteWorkerProfiler(
+        ProfilerConfig(
+            profiler="torch",
+            torch_profiler_dir="/tmp/mock",
+            delay_iterations=3,
+            max_iterations=4,
+        )
+    )
+
+    profiler.start(delay_iterations=1, max_iterations=2)
+    assert profiler._delay_iters == 1
+    assert profiler._max_iters == 2
+    profiler.stop()
+
+    profiler.start()
+    assert profiler._delay_iters == 3
+    assert profiler._max_iters == 4
+    profiler.stop()
 
 
 def test_step_inactive(default_profiler_config):
@@ -609,6 +780,15 @@ def make_proton_wrapper(
 _requires_cuda_for_proton = pytest.mark.skipif(
     not current_platform.is_cuda(),
     reason="Proton profiling tests require an NVIDIA CUDA platform.",
+)
+
+# Proton subscribes to CUPTI itself, and a process gets one CUPTI subscriber.
+# CI's kernel-launch recorder is another, injected through CUDA_INJECTION64_PATH
+# on recording runs, and there Proton's cuptiSubscribe fails with error 39.
+_requires_no_injected_cupti_tool = pytest.mark.skipif(
+    bool(os.environ.get("CUDA_INJECTION64_PATH")),
+    reason="Another CUPTI tool is injected (CUDA_INJECTION64_PATH); "
+    "Proton has to be the only one.",
 )
 
 
@@ -1072,7 +1252,9 @@ def test_gpu_worker_creates_proton_profiler():
         Worker.profile(worker)
 
     wrapper.assert_called_once_with(worker.profiler_config, worker_name="rank1")
-    worker.profiler.start.assert_called_once_with()
+    worker.profiler.start.assert_called_once_with(
+        delay_iterations=None, max_iterations=None
+    )
 
 
 @_requires_cuda_for_proton
@@ -1118,7 +1300,9 @@ def test_gpu_worker_reuses_cuda_graph_proton_session():
         Worker.profile(worker, is_start=False)
 
     worker.profiler.set_output_name.assert_called_once_with("first_rank1")
-    worker.profiler.start.assert_called_once_with()
+    worker.profiler.start.assert_called_once_with(
+        delay_iterations=None, max_iterations=None
+    )
     worker.profiler.stop.assert_called_once_with()
 
 
@@ -1176,6 +1360,7 @@ def test_proton_initializes_before_cuda_graph_capture():
 
 
 @_requires_cuda_for_proton
+@_requires_no_injected_cupti_tool
 @pytest.mark.parametrize("context", ["shadow", "python"])
 @pytest.mark.parametrize("output_format", ["hatchet", "hatchet_msgpack"])
 def test_proton_cuda_graph_replay_attribution_on_gpu(tmp_path, context, output_format):

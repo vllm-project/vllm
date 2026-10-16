@@ -16,7 +16,7 @@ from transformers import (
     BaseImageProcessor,
     BaseVideoProcessor,
     BatchFeature,
-    PretrainedConfig,
+    PreTrainedConfig,
     ProcessorMixin,
 )
 from transformers.image_utils import ImageInput
@@ -1305,7 +1305,7 @@ def exif_transpose(
 
 def build_flat_image_bool_length(
     image_grids: torch.LongTensor,
-    hf_config: PretrainedConfig,
+    hf_config: PreTrainedConfig,
     image_use_col_tokens: bool = True,
     use_single_crop_col_tokens: bool | None = None,
     use_single_crop_start_token: bool = True,
@@ -1393,7 +1393,7 @@ def build_flat_image_bool_length(
 
 def build_flat_video_bool_length(
     video_grids: torch.LongTensor,
-    hf_config: PretrainedConfig,
+    hf_config: PreTrainedConfig,
 ) -> tuple[torch.LongTensor, torch.LongTensor]:
     image_patch_id = hf_config.image_patch_id
     frame_start_id = hf_config.frame_start_token_id
