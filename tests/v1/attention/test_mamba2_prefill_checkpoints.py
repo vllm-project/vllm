@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Internal prefill checkpoints for Mamba2 align-mode prefix caching."""
 
+from dataclasses import asdict
+
 import torch
 
 from tests.v1.attention.utils import (
@@ -153,9 +155,10 @@ def test_cross_group_build_regathers_checkpoint_blocks():
 
     # A second group's table: same shape as the first, disjoint block ids.
     other_table = common.block_table_tensor + 1000
-    updated = _create_mamba2_builder().build(
-        0, common.replace(block_table_tensor=other_table)
-    )
+    other = common.replace(block_table_tensor=other_table)
+    updated = _create_mamba2_builder().build(0, other)
+    expected = _create_mamba2_builder().build(0, other.replace(_cross_group_cache=None))
+    torch.testing.assert_close(asdict(updated), asdict(expected))
 
     # Row 0 checkpoints in column cdiv(900, 256) - 2 == 2; row 1 declined.
     assert updated.checkpoint_meta is not None

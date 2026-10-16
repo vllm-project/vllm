@@ -243,7 +243,9 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         )
         if group_cache is not None:
             group_cache[cache_key] = metadata
-        return metadata
+        return self._update_state_indices(
+            metadata, common_attn_metadata.block_table_tensor
+        )
 
     @staticmethod
     def _compute_chunk_metadata(
@@ -409,7 +411,8 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         num_accepted_tokens: torch.Tensor | None = None,
         num_decode_draft_tokens_cpu: torch.Tensor | None = None,
     ) -> M:
-        """Compute metadata common to both Mamba1 and Mamba2."""
+        """Compute the batch-level metadata. _update_state_indices adds each
+        group's state indices and FULL cudagraph staging."""
         num_reqs = common_attn_metadata.num_reqs
 
         # Treat multi-token queries as decode requests when
@@ -480,22 +483,6 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         write_pos_d = None
         is_flush_d = None
         replayssm_scratch = None
-
-        state_indices_tensor = self._get_state_indices(
-            common_attn_metadata.block_table_tensor,
-            common_attn_metadata.seq_lens,
-        )
-
-        if state_indices_tensor.dim() == 1:
-            state_indices_tensor = state_indices_tensor.unsqueeze(-1)
-
-        state_indices_tensor_d, state_indices_tensor_p = torch.split(
-            state_indices_tensor,
-            [num_decodes, num_prefills],
-            dim=0,
-        )
-        state_indices_tensor_d = state_indices_tensor_d[:, : 1 + self.num_spec_tokens]
-        state_indices_tensor_p = state_indices_tensor_p[:, 0]
 
         if num_decodes > 0 and self.use_spec_decode:
             query_start_loc_d = common_attn_metadata.query_start_loc[: num_decodes + 1]
@@ -617,15 +604,15 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         ):
             bc_pre_scratch = self.decode_bc_pre_scratch[:num_decodes]
 
-        metadata = self.metadata_cls(
+        return self.metadata_cls(
             num_prefills=num_prefills,
             num_prefill_tokens=num_prefill_tokens,
             num_decodes=num_decodes,
             num_decode_tokens=num_decode_tokens,
             query_start_loc_p=query_start_loc_p,
             has_initial_states_p=has_initial_states_p,
-            state_indices_tensor_p=state_indices_tensor_p,
-            state_indices_tensor_d=state_indices_tensor_d,
+            state_indices_tensor_p=None,
+            state_indices_tensor_d=None,
             write_pos_d=write_pos_d,
             is_flush_d=is_flush_d,
             bc_pre_scratch=bc_pre_scratch,
@@ -638,8 +625,6 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             batch_ptr=batch_ptr,
             token_chunk_offset_ptr=token_chunk_offset_ptr,
         )
-
-        return self._update_metadata_for_cudagraph_capture(metadata)
 
     def _update_metadata_for_cudagraph_capture(
         self,

@@ -5,7 +5,7 @@ reclassification of non-spec decodes as prefills when spec decodes exist.
 Covers the fix for https://github.com/vllm-project/vllm/issues/34845.
 """
 
-from dataclasses import dataclass, fields
+from dataclasses import asdict, dataclass, fields
 
 import pytest
 import torch
@@ -227,12 +227,11 @@ def test_cross_group_build(
         _create_gdn_builder(test_case.num_speculative_tokens, full_cuda_graph)
         for _ in range(3)
     )
-    cache: dict = {}
-    source_common, common = (
-        create_common_attn_metadata(batch, BLOCK_SIZE, DEVICE).replace(
-            _cross_group_cache=cache
-        )
-        for _ in range(2)
+    source_common = create_common_attn_metadata(batch, BLOCK_SIZE, DEVICE).replace(
+        _cross_group_cache={}
+    )
+    common = source_common.replace(
+        block_table_tensor=source_common.block_table_tensor + 100
     )
     for builder in (src, dst, ref):
         builder.vllm_config.cache_config.mamba_cache_mode = mamba_cache_mode
@@ -257,12 +256,11 @@ def test_cross_group_build(
     )
     for field in fields(GDNAttentionMetadata):
         actual = getattr(meta, field.name)
+        torch.testing.assert_close(actual, getattr(expected, field.name))
         if field.name not in state_fields:
             assert actual is getattr(source, field.name)
-            continue
-        torch.testing.assert_close(actual, getattr(expected, field.name))
         # FULL graph state indices land in this group's own buffers.
-        if full_cuda_graph and meta.num_prefills == 0 and actual is not None:
+        elif full_cuda_graph and meta.num_prefills == 0 and actual is not None:
             assert actual.data_ptr() == getattr(dst, field.name).data_ptr()
 
 
@@ -484,12 +482,7 @@ def test_cross_group_build_regathers_checkpoint(num_spec):
 
     assert source.checkpoint is not None and expected.checkpoint is not None
     assert actual.checkpoint is not None
-    torch.testing.assert_close(
-        actual.checkpoint.state_indices, expected.checkpoint.state_indices
-    )
-    torch.testing.assert_close(
-        actual.checkpoint.checkpoint_offsets, expected.checkpoint.checkpoint_offsets
-    )
+    torch.testing.assert_close(asdict(actual), asdict(expected))
     assert not torch.equal(
         actual.checkpoint.state_indices, source.checkpoint.state_indices
     )

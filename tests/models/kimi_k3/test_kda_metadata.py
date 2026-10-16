@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from dataclasses import asdict, fields
+from dataclasses import asdict, fields, is_dataclass
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -487,6 +487,15 @@ def test_internal_checkpoint_metadata_skips_unaligned_offset():
         ),
         pytest.param(
             BatchSpec(seq_lens=[40, 30], query_lens=[1, 1]),
+            None,
+            0,
+            True,
+            [False, False],
+            None,
+            id="regular-decode-full-cudagraph",
+        ),
+        pytest.param(
+            BatchSpec(seq_lens=[40, 30], query_lens=[1, 1]),
             [0, 0],
             2,
             False,
@@ -560,6 +569,11 @@ def test_kimi_k3_kda_metadata_matches_shared_gdn(
     assert (
         reference.uniform_spec_sequence_length == expected_uniform_spec_sequence_length
     )
+    if share_metadata:
+        fresh = _make_builder(
+            KimiK3KDAMetadataBuilder, num_speculative_tokens, full_cuda_graph
+        ).build(0, common_attn_metadata.replace(_cross_group_cache=None), **kwargs)
+        torch.testing.assert_close(asdict(actual), asdict(fresh))
 
 
 def test_cross_group_build_recoverssm_checkpoint(monkeypatch: pytest.MonkeyPatch):
@@ -617,14 +631,13 @@ def test_cross_group_build_recoverssm_checkpoint(monkeypatch: pytest.MonkeyPatch
         actual = getattr(meta, field.name)
         if field.name == "recoverssm_context":
             assert actual is second.recoverssm_context
-        elif field.name not in state_fields:
-            assert actual is getattr(first_meta, field.name)
-        elif field.name in {"recoverssm_commit", "checkpoint"} and actual is not None:
-            torch.testing.assert_close(
-                asdict(actual), asdict(getattr(expected, field.name))
-            )
-        else:
-            torch.testing.assert_close(actual, getattr(expected, field.name))
+            continue
+        expected_value = getattr(expected, field.name)
+        if is_dataclass(actual):
+            actual, expected_value = asdict(actual), asdict(expected_value)
+        torch.testing.assert_close(actual, expected_value)
+        if field.name not in state_fields:
+            assert getattr(meta, field.name) is getattr(first_meta, field.name)
 
 
 def test_mixed_regular_and_spec_decode_uses_packed_decode_metadata():
