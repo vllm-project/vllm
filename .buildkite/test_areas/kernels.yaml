@@ -939,7 +939,7 @@ steps:
 
 - label: ":nvidia: (B200) FusedMoE Layer Kernels"
   key: kernels-fusedmoe-layer-test-2-b200s
-  timeout_in_minutes: 90
+  timeout_in_minutes: 45
   device: b200-k8s
   num_devices: 2
   source_file_dependencies:
