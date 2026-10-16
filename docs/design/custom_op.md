@@ -318,15 +318,11 @@ In addition, you can also register all your `CustomOp` at one place for better m
 ### Direct DCP Collectives
 
 `DirectDCPQGather`, `DirectDCPA2AReduce` and `DirectDCPKVGather` in
-`vllm.v1.attention.ops.dcp` support OOT implementations of direct query gather,
-output exchange/LSE reduction and chunked-context KV gather. Each `CustomOp`
-holds its core-owned workspace. `MLADCPManager` constructs the ops during model
-initialization; cached workspaces own buffers, layout/protocol metadata and buffer
-views. The ops own communication and reduction.
+`vllm.v1.attention.ops.dcp` support OOT replacements. Workspaces own buffers and
+views; ops own communication and reduction.
 
-On CUDA, override `forward_cuda`. `forward_oot` applies to an OOT platform.
-Register from a `vllm.general_plugins` entry point before model construction on
-every worker:
+Register through `vllm.general_plugins` on every worker before model construction.
+Override `forward_cuda` on CUDA or `forward_oot` on an OOT platform:
 
 ```python
 import torch
@@ -341,27 +337,9 @@ class PluginDCPQGather(DirectDCPQGather):
         return gather_query(local_query, self.workspace)
 ```
 
-The CUDA implementations launch the existing dedicated kernels using workspace
-buffers. Replacements implement the complete collective: Q gather returns
-`[T, world_size * H, D]` with the workspace's reserved head storage; A2A returns
-`[T, H, D]` with both LSE bases and empty-shard masking; KV gather fills the
-supplied rank-ordered output. When reusing the core symmetric buffers, preserve
-publication/wait ordering, completion counters, epoch advancement and parity.
-Q storage is reusable after the downstream DCP combine orders peers after
-attention consumption. Core retains workspace capacity and oversized-input
-fallbacks.
+`custom_ops=["none"]` selects Torch collectives; `["all"]` enables kernels or
+replacements. Enable one OOT op with `["none", "+DirectDCPQGather"]`.
 
-`forward_native` uses `torch.distributed.all_gather_into_tensor` for Q/KV and
-`torch.distributed.all_to_all_single` plus the existing PyTorch LSE combine for
-A2A. These paths leave dedicated signal/counter/epoch state untouched.
-`custom_ops=["none"]` selects Torch collectives; enabled CUDA dispatch selects
-the dedicated implementation or its OOT replacement. Explicit plugin opt-in
-uses the original class names:
-`["none", "+DirectDCPQGather", "+DirectDCPA2AReduce", "+DirectDCPKVGather"]`.
-Without replacements, the registered names are `direct_dcp_q_gather`,
-`direct_dcp_a2a_lse_reduce` and `direct_dcp_kv_gather`. `all` enables either.
-
-All ranks must load the same plugin/config and follow the same collective order.
-Warm kernels before graph capture and keep bindings and buffers stable through
-replay. The compiled MLA path retains its existing opaque attention-op boundary;
-this does not add standalone collective tracing support.
+Preserve output layouts, both LSE bases, empty-shard handling and workspace
+synchronization/epochs. All ranks must use the same plugin/config and collective
+order. Keep buffers and bindings stable through CUDA graph replay.
