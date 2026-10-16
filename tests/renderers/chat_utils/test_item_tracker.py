@@ -5,7 +5,11 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from vllm.renderers.chat_utils import AsyncMultiModalItemTracker
+from vllm.config import ModelConfig
+from vllm.renderers.chat_utils import (
+    AsyncMultiModalItemTracker,
+    MultiModalItemTracker,
+)
 
 
 @pytest.mark.asyncio
@@ -93,4 +97,66 @@ async def test_resolve_items_does_not_leak_tasks_on_partial_failure():
     assert not leaked_tasks, (
         f"resolve_items left {len(leaked_tasks)} task(s) running after "
         f"raising: {leaked_tasks}"
+    )
+
+
+MISTRAL_MODEL_ID = "mistralai/Mistral-Small-3.1-24B-Instruct-2503"
+PHI3V_MODEL_ID = "microsoft/Phi-3.5-vision-instruct"
+
+
+@pytest.fixture(scope="function")
+def mistral_model_config():
+    return ModelConfig(
+        MISTRAL_MODEL_ID,
+        runner="generate",
+        limit_mm_per_prompt={
+            "image": 2,
+        },
+    )
+
+
+@pytest.fixture(scope="function")
+def phi3v_model_config():
+    return ModelConfig(
+        PHI3V_MODEL_ID,
+        runner="generate",
+        trust_remote_code=True,
+        limit_mm_per_prompt={
+            "image": 2,
+        },
+    )
+
+
+@pytest.mark.parametrize(
+    "tracker_cls",
+    [MultiModalItemTracker, AsyncMultiModalItemTracker],
+)
+def test_tracker_media_io_kwargs_mistral_disables_image_orientation(
+    mistral_model_config,
+    tracker_cls,
+):
+    """The Mistral chat template re-decodes images from their source bytes
+    without EXIF normalization; vLLM's decode must match it or the image
+    token grids computed from the two decodes disagree."""
+    tracker = tracker_cls(mistral_model_config)
+
+    assert tracker.uses_mistral_chat_template
+    assert tracker.media_io_kwargs == {"image": {"normalize_orientation": False}}
+
+
+@pytest.mark.parametrize(
+    "tracker_cls",
+    [MultiModalItemTracker, AsyncMultiModalItemTracker],
+)
+def test_tracker_media_io_kwargs_non_mistral_keeps_default(
+    phi3v_model_config,
+    tracker_cls,
+):
+    tracker = tracker_cls(phi3v_model_config)
+
+    assert not tracker.uses_mistral_chat_template
+    assert (
+        (tracker.media_io_kwargs or {})
+        .get("image", {})
+        .get("normalize_orientation", True)
     )
