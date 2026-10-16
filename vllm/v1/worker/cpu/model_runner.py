@@ -13,6 +13,7 @@ from vllm.v1.worker.cpu.block_table import CPUBlockTables
 from vllm.v1.worker.cpu.input_batch import (
     combine_sampled_and_draft_tokens,
     post_update,
+    post_update_num_computed_tokens,
     prepare_pos_seq_lens,
     prepare_prefill_inputs,
 )
@@ -210,6 +211,16 @@ class CPUModelRunner(GPUModelRunner):
 
         self.model_state.postprocess_state(
             idx_mapping, num_sampled, self.req_states.num_computed_tokens.gpu
+        )
+
+    def postprocess_num_computed_tokens(self, input_batch: InputBatch) -> None:
+        if HAS_TRITON:
+            return super().postprocess_num_computed_tokens(input_batch)
+
+        post_update_num_computed_tokens(
+            input_batch.idx_mapping,
+            self.req_states.num_computed_tokens.gpu,
+            input_batch.query_start_loc,
         )
 
     @property
