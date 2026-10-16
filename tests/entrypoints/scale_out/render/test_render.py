@@ -142,11 +142,11 @@ async def test_render_tool_outcomes(api_surface, outcome, tool_request, render_s
         assert span.parent.span_id == int(TRACEPARENT.split("-")[2], 16)
         assert dict(span.attributes) == (
             {
-                "tool_calling.present": True,
-                "tool_calling.tool_count": 1,
-                "tool_calling.tool_choice": "named",
-                "tool_calling.api_surface": api_surface,
-                "tool_calling.render_status": labels["status"],
+                "vllm.tool_calling.present": True,
+                "vllm.tool_calling.tool_count": 1,
+                "vllm.tool_calling.tool_choice": "named",
+                "vllm.tool_calling.api_surface": api_surface,
+                "vllm.tool_calling.render_status": labels["status"],
             }
             if tool_request
             else {}

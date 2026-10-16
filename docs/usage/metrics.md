@@ -59,8 +59,9 @@ Configure the render server's existing `--otlp-traces-endpoint` option to
 export W3C-linked server spans for rendering, tokenization, detokenization,
 and derendering. Tool-summary attributes are limited to Chat Completions
 and Messages render requests. Recording spans for tool requests include
-`tool_calling.present`, `tool_calling.tool_count`, `tool_calling.tool_choice`,
-`tool_calling.api_surface`, and `tool_calling.render_status`. Choices are
+`vllm.tool_calling.present`, `vllm.tool_calling.tool_count`,
+`vllm.tool_calling.tool_choice`, `vllm.tool_calling.api_surface`, and
+`vllm.tool_calling.render_status`. Choices are
 normalized to `unset`, `auto`, `none`, `required`, `named`, or `other`;
 Messages `any` maps to `required` and `tool` maps to `named`.
 Names, schemas, arguments, bodies, and exception text are not included in
