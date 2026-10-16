@@ -2187,6 +2187,13 @@ class VllmConfig:
         # before the HMA check below, which inspects the connector class.
         self._post_init_kv_transfer_config()
         self._verify_aux_output_compatibility()
+        if self.aux_output_config.enabled and not (
+            self.kv_events_config and self.kv_events_config.enable_kv_cache_events
+        ):
+            # R3 retention follows KV cache events; nothing is published.
+            self.kv_events_config = KVEventsConfig(
+                enable_kv_cache_events=True, publisher="null"
+            )
 
         # Hybrid KV cache manager (HMA) runtime rules:
         # - Explicit enable (--enable-hybrid-kv-cache-manager): error if runtime

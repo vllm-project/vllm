@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import threading
+from collections import Counter
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from types import SimpleNamespace
@@ -15,6 +16,7 @@ from vllm.distributed.aux_output_connector.connector import (
     AuxOutputConnectorMetadata,
     AuxOutputSchedulerConnector,
     AuxRequestOutput,
+    KVCacheRetention,
     PackedBlockHashes,
 )
 from vllm.distributed.aux_output_connector.routed_experts import (
@@ -32,6 +34,8 @@ from vllm.distributed.aux_output_connector.store import (
 from vllm.distributed.aux_output_connector.worker import (
     AuxOutputWorkerConnector,
 )
+from vllm.distributed.kv_events import BlockRemoved, BlockStored
+from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.worker.gpu import async_utils
@@ -185,6 +189,7 @@ def _make_worker(
     )
     worker._requests = {}
     worker._generation = 0
+    worker._cache_pins = Counter()
     worker._step_metadata = None
     worker._pending_outputs = []
     worker._lock = threading.Lock()
@@ -1865,3 +1870,127 @@ def test_scheduler_connector_reset_derives_emit_start_from_request():
     assert metadata.generation == 1
     assert metadata.requests[request.request_id] == 4
     assert list(metadata.block_hashes[request.request_id]) == [b"a" * 32]
+
+
+# Two hash blocks per KV block: blocks (h0, h1) and (h2, h3).
+_HASHES = [bytes([index]) * 32 for index in range(4)]
+
+
+def _retention(cached: dict, num_blocks: int = 0) -> KVCacheRetention:
+    manager = SimpleNamespace(
+        coordinator=SimpleNamespace(
+            single_type_managers=[SimpleNamespace(block_size=2 * _BLOCK_SIZE)]
+        ),
+        block_pool=SimpleNamespace(
+            get_cached_block=lambda h, _: cached.get(h),
+            hash_block_size=_BLOCK_SIZE,
+            num_gpu_blocks=num_blocks,
+        ),
+    )
+    return KVCacheRetention(manager)
+
+
+def _kv_event(event_type, medium: str, block_hash: bytes):
+    hashes = [maybe_convert_block_hash(block_hash)]
+    if event_type is BlockRemoved:
+        return BlockRemoved(block_hashes=hashes, medium=medium, group_idx=0)
+    return BlockStored(
+        block_hashes=hashes,
+        parent_block_hash=None,
+        token_ids=[],
+        block_size=0,
+        lora_id=None,
+        medium=medium,
+        lora_name=None,
+        group_idx=0,
+    )
+
+
+def _held_request(cached: dict) -> _SchedulerRequest:
+    # The request holds both GPU-cached blocks.
+    cached.update({_HASHES[1]: [Mock(ref_cnt=1)], _HASHES[3]: [Mock(ref_cnt=1)]})
+    return _SchedulerRequest("request", list(_HASHES), 17, num_computed_tokens=16)
+
+
+def _release(cached: dict, retention: KVCacheRetention, request) -> None:
+    for blocks in cached.values():
+        blocks[0].ref_cnt = 0
+    retention.request_finished(request)
+
+
+def test_retention_keeps_released_blocks_while_a_kv_tier_caches_them():
+    cached: dict = {}
+    retention = _retention(cached, num_blocks=1)
+    request = _held_request(cached)
+    assert retention.max_hit_tokens(request) == 16
+    _release(cached, retention, request)
+    assert retention.pins == _HASHES
+    assert retention.max_hit_tokens(request) == 16
+
+    # The second block moves to the CPU tier and stays kept.
+    retention.observe([_kv_event(BlockStored, "CPU", _HASHES[3])])
+    del cached[_HASHES[3]]
+    retention.observe([_kv_event(BlockRemoved, "GPU", _HASHES[3])])
+    assert not retention.unpins
+    assert retention.max_hit_tokens(request) == 16
+
+    # A block cached by no tier is released, which ends the kept prefix.
+    del cached[_HASHES[1]]
+    retention.observe([_kv_event(BlockRemoved, "GPU", _HASHES[1])] * 2)
+    assert retention.unpins == _HASHES[:2]
+    assert retention.max_hit_tokens(request) == 0
+    retention.observe([_kv_event(BlockRemoved, "CPU", _HASHES[3])])
+    assert retention.unpins == _HASHES
+
+
+@pytest.mark.parametrize("loading", [False, True], ids=["idle", "loading"])
+def test_retention_drops_oldest_cpu_only_block_unless_loading(loading):
+    cached: dict = {}
+    retention = _retention(cached, num_blocks=1)
+    request = _held_request(cached)
+    _release(cached, retention, request)
+    if loading:
+        retention.request_loading(request, 16)
+    # Both blocks leave the GPU, the second one first; one spare slot is left.
+    for block_hash in (_HASHES[3], _HASHES[1]):
+        retention.observe([_kv_event(BlockStored, "CPU", block_hash)])
+        del cached[block_hash]
+        retention.observe([_kv_event(BlockRemoved, "GPU", block_hash)])
+    assert retention.unpins == ([] if loading else _HASHES[2:])
+    assert retention.max_hit_tokens(request) == (16 if loading else 8)
+
+
+def test_scheduler_connector_sends_only_computed_hashes():
+    cached: dict = {}
+    connector = AuxOutputSchedulerConnector(_retention(cached))
+    request = _held_request(cached)
+    request.num_computed_tokens = 0
+    metadata = connector.build_connector_meta(
+        _step_output([request.request_id], [0], [8]), {request.request_id: request}
+    )
+    assert list(metadata.block_hashes[request.request_id]) == _HASHES[:2]
+
+    # An aborted chunked prefill does not send its uncomputed hashes.
+    request.num_computed_tokens = 8
+    connector.request_finished(request)
+    terminal = connector.build_connector_meta(_step_output([], [], []), {})
+    assert terminal.finished_requests == (request.request_id,)
+    assert request.request_id not in terminal.block_hashes
+
+
+def test_worker_holds_retention_pins_until_unpinned_or_reset():
+    worker = _make_worker(1)
+    store = worker._store
+    keys = routed_experts_keys(_HASHES[:2], "0")
+    step = _metadata(0, [], {})
+    step.metadata.pinned_hashes = PackedBlockHashes(b"".join(_HASHES[:2]), 32)
+    _begin_step(worker, step)
+    assert all(store._references[key] == 1 for key in keys)
+
+    step = _metadata(0, [], {})
+    step.metadata.unpinned_hashes = PackedBlockHashes(_HASHES[0], 32)
+    _begin_step(worker, step)
+    assert keys[0] not in store._references
+
+    _begin_step(worker, _metadata(1, [], {}))
+    assert not store._references

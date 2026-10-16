@@ -9,7 +9,10 @@ from typing import Any
 
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import KVEventsConfig, VllmConfig
-from vllm.distributed.aux_output_connector.connector import AuxOutputSchedulerConnector
+from vllm.distributed.aux_output_connector.connector import (
+    AuxOutputSchedulerConnector,
+    KVCacheRetention,
+)
 from vllm.distributed.ec_transfer.ec_connector.base import (
     ECConnectorBase,
     ECConnectorMetadata,
@@ -450,11 +453,11 @@ class Scheduler(SchedulerInterface):
         if self.log_stats and vllm_config.observability_config.enable_mfu_metrics:
             self.perf_metrics = ModelMetrics(vllm_config)
 
-        self.aux_output_connector = (
-            AuxOutputSchedulerConnector()
-            if vllm_config.aux_output_config.enabled
-            else None
-        )
+        self.r3_retention: KVCacheRetention | None = None
+        self.aux_output_connector: AuxOutputSchedulerConnector | None = None
+        if vllm_config.aux_output_config.enabled:
+            self.r3_retention = KVCacheRetention(self.kv_cache_manager)
+            self.aux_output_connector = AuxOutputSchedulerConnector(self.r3_retention)
         self.return_sampling_mask = vllm_config.model_config.return_sampling_mask
 
         self._pause_state: PauseState = PauseState.UNPAUSED
@@ -586,14 +589,18 @@ class Scheduler(SchedulerInterface):
         return max(end - start, 0)
 
     def _get_local_prefix_cache_hit(
-        self, request: Request
+        self, request: Request, max_hit: int | None = None
     ) -> tuple[KVCacheBlocks, int, int, bool]:
         connector = self.connector
-        if connector is not None and connector.supports_divergent_local_hybrid_hits:
+        if (
+            max_hit is None
+            and connector is not None
+            and connector.supports_divergent_local_hybrid_hits
+        ):
             return self.kv_cache_manager.get_computed_blocks_for_connector(request)
 
         blocks, num_local, shared_prefix_boundary = (
-            self.kv_cache_manager.get_computed_blocks(request)
+            self.kv_cache_manager.get_computed_blocks(request, max_hit)
         )
         return blocks, num_local, shared_prefix_boundary, False
 
@@ -1014,12 +1021,15 @@ class Scheduler(SchedulerInterface):
                 # Get already-cached tokens.
                 if request.num_computed_tokens == 0:
                     did_prefix_cache_lookup = True
+                    # Hits must not outlive the R3 objects they would return.
+                    retention = self.r3_retention
+                    max_hit = retention.max_hit_tokens(request) if retention else None
                     (
                         new_computed_blocks,
                         num_new_local_computed_tokens,
                         request.shared_prefix_boundary,
                         hit_diverged,
-                    ) = self._get_local_prefix_cache_hit(request)
+                    ) = self._get_local_prefix_cache_hit(request, max_hit)
 
                     # Get externally-cached tokens if using a KVConnector.
                     if self.connector is not None:
@@ -1080,6 +1090,19 @@ class Scheduler(SchedulerInterface):
                             load_kv_async = False
                         else:
                             num_external_computed_tokens = ext_tokens
+
+                        if retention is not None and max_hit is not None:
+                            # R3 capture resumes on a kept block boundary, and a
+                            # Mamba state exists only at the end of the load.
+                            local = num_new_local_computed_tokens
+                            num_hit = min(local + num_external_computed_tokens, max_hit)
+                            num_hit -= num_hit % self.block_size
+                            max_ext = max(num_hit - local, 0)
+                            if num_external_computed_tokens > max_ext:
+                                num_external_computed_tokens = (
+                                    0 if self.has_mamba_layers else max_ext
+                                )
+                                load_kv_async &= num_external_computed_tokens > 0
 
                         if hit_diverged and num_external_computed_tokens == 0:
                             # No external tokens back the deeper local hit, so its
@@ -1396,6 +1419,8 @@ class Scheduler(SchedulerInterface):
                     # _update_waiting_for_remote_kv will then cache
                     # only the successfully loaded tokens.
                     request.num_computed_tokens = num_computed_tokens
+                    if self.r3_retention is not None:
+                        self.r3_retention.request_loading(request, num_computed_tokens)
                     self._inflight_prefills.add(request)
                     self._set_kv_fetch_stage(request, KV_FETCH_IN_PROGRESS)
                     skip_request(request_queue)
@@ -1607,6 +1632,9 @@ class Scheduler(SchedulerInterface):
             meta = self._build_kv_connector_meta(self.connector, scheduler_output)
             scheduler_output.kv_connector_metadata = meta
 
+        if self.r3_retention is not None:
+            # Release this step's evictions before the worker stores new objects.
+            self.r3_retention.observe(self.kv_cache_manager.block_pool.kv_event_queue)
         if self.aux_output_connector is not None:
             scheduler_output.aux_output_connector_metadata = (
                 self.aux_output_connector.build_connector_meta(
@@ -2460,6 +2488,9 @@ class Scheduler(SchedulerInterface):
                 else:
                     events.extend(connector_events)
 
+        if self.r3_retention is not None:
+            self.r3_retention.observe(events)
+
         # publish collected KV cache events
         if events:
             batch = KVEventBatch(ts=time.time(), events=events)
@@ -2981,6 +3012,8 @@ class Scheduler(SchedulerInterface):
 
         if self.connector.reset_cache() is False:
             return False
+        if self.r3_retention is not None:
+            self.r3_retention.cpu_cleared()
 
         if self.log_stats:
             assert self.connector_prefix_cache_stats is not None

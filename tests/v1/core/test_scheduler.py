@@ -22,6 +22,7 @@ from vllm.config import (
 from vllm.distributed.aux_output_connector.connector import (
     AuxOutputSchedulerConnector,
     AuxRequestOutput,
+    KVCacheRetention,
 )
 from vllm.distributed.ec_transfer.ec_connector.metrics import ECConnectorStats
 from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import (
@@ -181,6 +182,80 @@ def test_routed_experts_prompt_start_at_prompt_end(max_tokens):
     output = outputs[request.client_index].outputs[0]
     assert output.new_token_ids == [0]
     assert output.routed_experts.shape == (0, 1, 1)
+
+
+@pytest.mark.parametrize(
+    "matched_tokens,max_hit_tokens,expected_hit",
+    [(0, 48, 48), (0, 16, 16), (32, 80, 32), (31, 80, 16), (32, 16, 16), (32, 0, 0)],
+    ids=[
+        "local-kept",
+        "local-capped",
+        "external-kept",
+        "external-unaligned",
+        "external-capped",
+        "none",
+    ],
+)
+def test_prefix_hit_is_capped_at_kept_routed_experts(
+    matched_tokens, max_hit_tokens, expected_hit
+):
+    scheduler = create_scheduler(
+        enable_prefix_caching=True,
+        use_kv_connector=(
+            mock_kv(matched_tokens=matched_tokens, is_async=False)
+            if matched_tokens
+            else None
+        ),
+    )
+    first, second = create_requests(num_requests=2, num_tokens=80, same_prompt=True)
+    if not matched_tokens:
+        # Cache the prompt's blocks locally.
+        scheduler.add_request(first)
+        scheduler.schedule()
+        scheduler.finish_requests(first.request_id, RequestStatus.FINISHED_ABORTED)
+    scheduler.r3_retention = Mock(**{"max_hit_tokens.return_value": max_hit_tokens})
+
+    scheduler.add_request(second)
+    output = scheduler.schedule()
+
+    assert output.num_scheduled_tokens[second.request_id] == 80 - expected_hit
+
+
+def _retaining_scheduler(num_blocks: int):
+    scheduler = create_scheduler(enable_prefix_caching=True, num_blocks=num_blocks)
+    block_pool = scheduler.kv_cache_manager.block_pool
+    block_pool.enable_kv_cache_events = True
+    block_pool.kv_event_queue = []
+    scheduler.r3_retention = KVCacheRetention(scheduler.kv_cache_manager)
+    scheduler.aux_output_connector = AuxOutputSchedulerConnector(scheduler.r3_retention)
+    return scheduler
+
+
+def test_prefix_hit_on_blocks_held_by_a_running_request():
+    scheduler = _retaining_scheduler(num_blocks=100)
+    first, second = create_requests(num_requests=2, num_tokens=64, same_prompt=True)
+    scheduler.add_request(first)
+    scheduler.schedule()
+    scheduler.add_request(second)
+
+    output = scheduler.schedule()
+
+    assert output.num_scheduled_tokens[second.request_id] == 16
+
+
+def test_evicted_routed_experts_are_released_in_the_evicting_step():
+    # Four usable blocks: the second prompt evicts every block of the first.
+    scheduler = _retaining_scheduler(num_blocks=5)
+    first, second = create_requests(num_requests=2, num_tokens=64)
+    scheduler.add_request(first)
+    scheduler.schedule()
+    scheduler.finish_requests(first.request_id, RequestStatus.FINISHED_ABORTED)
+
+    scheduler.add_request(second)
+    metadata = scheduler.schedule().aux_output_connector_metadata
+
+    assert list(metadata.pinned_hashes) == first.block_hashes
+    assert sorted(metadata.unpinned_hashes) == sorted(first.block_hashes)
 
 
 def test_finish_request():
@@ -4533,6 +4608,7 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     scheduler.finished_req_ids = set()
     scheduler.finished_req_ids_dict = None
     scheduler.aux_output_connector = None
+    scheduler.r3_retention = None
     scheduler.grammar_compile_error_reqs = set()
     scheduler.encoder_cache_mismatch_reqs = set()
     scheduler.vllm_config = Mock()
