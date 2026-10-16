@@ -1,16 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Reasoning-content parser for MuseGlimmer.
-Port of the ``reasoning_content`` rule from the HuggingFace MuseGlimmer
-``MUSE_GLIMMER_RESPONSE_SCHEMA`` (synced with internal master). MuseGlimmer emits
-chain-of-thought in ``to=self`` channels delimited by ``<|message|>`` ... ``<|eom|>``:
+"""Reasoning-content parser for Muse (Muse Spark and Muse Glimmer).
+Port of the ``reasoning_content`` rule from the HuggingFace Muse Glimmer
+``MUSE_GLIMMER_RESPONSE_SCHEMA`` (synced with internal master), which Muse Spark
+shares. Muse emits chain-of-thought in ``to=self`` channels delimited by
+``<|message|>`` ... ``<|eom|>``:
     to=self<|message|>...reasoning...<|eom|>
 A turn may contain several ``to=self`` blocks interleaved with tool calls, and a
-tool call or final answer follows in its own channel.
-Because MuseGlimmer's framing markers (``<|message|>``, ``<|eom|>``) are not guaranteed
+tool call or final answer follows in its own channel. A recipient-less
+``<|message|>`` header also opens a reasoning block. ``to=user`` answers and
+``to=commentary`` updates between tool calls are content; ``to=developer``
+messages are dropped.
+Because Muse's framing markers (``<|message|>``, ``<|eom|>``) are not guaranteed
 to be single vocab tokens across every checkpoint's tokenizer, this parser works
 on the decoded text with regexes rather than the single start/end-token base class.
-Usage: ``--reasoning-parser muse_glimmer``
+Usage: ``--reasoning-parser muse``
 """
 
 from __future__ import annotations
@@ -26,24 +30,42 @@ from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
 
 _EOM = "<|eom|>"
 _EOT = "<|eot|>"
+_START = "<|start|>"
+_MESSAGE = "<|message|>"
 _FUNCTION_CALLS_OPEN = "<atem:function_calls>"
-_REASONING_OPEN = "to=self<|message|>"
 _ASSISTANT_TURN_OPEN = "<|start|>assistant"
-# A channel header: ``to=<recipient><|message|>`` where recipient is ``self``
-# (reasoning), ``user`` (final answer) or ``<tool>[.<fn>]`` (tool call).
-_CHANNEL_HEADER_RE = re.compile(r"to=(?P<recipient>[^\s<]+)<\|message\|>")
-_HEADER_PAT = r"to=[^\s<]+<\|message\|>"
-# Collapse the gap between reasoning blocks so multiple to=self spans join.
+_REASONING_RECIPIENTS = (None, "self")
+_CONTENT_RECIPIENTS = ("user", "commentary")
+_NON_TOOL_RECIPIENTS = (*_REASONING_RECIPIENTS, *_CONTENT_RECIPIENTS, "developer")
+# A channel header: ``[to=<recipient>]<|message|>`` where recipient is ``self``
+# or absent (reasoning), ``user``/``commentary`` (content), ``developer``
+# (dropped) or ``<tool>[.<fn>]`` (tool call).
+_CHANNEL_HEADER_RE = re.compile(r"(?:to=(?P<recipient>[^\s<]+))?<\|message\|>")
+_HEADER_PAT = r"(?:to=[^\s<]+)?<\|message\|>"
+_TRAILING_RECIPIENT_RE = re.compile(r"to=(?P<recipient>[^\s<]+)\s*$")
+_REASONING_HEADER_PAT = r"(?:to=self|(?<!to=[^\s<]*))<\|message\|>"
+_REASONING_HEADER_RE = re.compile(_REASONING_HEADER_PAT)
+# Collapse the gap between reasoning blocks so multiple reasoning spans join.
 _COLLAPSE_RE = re.compile(
-    r"<\|eom\|>(?:(?!to=self<\|message\|>).)*?to=self<\|message\|>", re.DOTALL
+    r"<\|eom\|>(?:(?!" + _REASONING_HEADER_PAT + r").)*?" + _REASONING_HEADER_PAT,
+    re.DOTALL,
 )
-_REASONING_RE = re.compile(r"to=self<\|message\|>(.*?)<\|eom\|>", re.DOTALL)
+# A CLOSED reasoning span never crosses the next channel header: when the model
+# skips <|eom|> before a tool header, the open-span patterns below take over.
+_REASONING_BODY_PAT = r"(?:(?!" + _HEADER_PAT + r").)*?"
+_REASONING_RE = re.compile(
+    _REASONING_HEADER_PAT + r"(" + _REASONING_BODY_PAT + r")<\|eom\|>", re.DOTALL
+)
 _CONTENT_RE = re.compile(
-    r"to=user<\|message\|>(.*?)(?=<\|eot\|>|<\|eom\|>|$)", re.DOTALL
+    r"to=(?:user|commentary)<\|message\|>(.*?)(?=<\|eot\|>|<\|eom\|>|$)", re.DOTALL
 )
 # Strip a CLOSED reasoning span (header .. <|eom|>).
 _STRIP_REASONING_RE = re.compile(
-    r"(?:<\|start\|>assistant\s*)?to=self<\|message\|>.*?<\|eom\|>", re.DOTALL
+    r"(?:<\|start\|>assistant\s*)?"
+    + _REASONING_HEADER_PAT
+    + _REASONING_BODY_PAT
+    + r"<\|eom\|>",
+    re.DOTALL,
 )
 # An UNTERMINATED trailing reasoning span. The model sometimes leaves the
 # analysis channel WITHOUT emitting <|eom|>, writing a bare
@@ -57,18 +79,21 @@ _STRIP_REASONING_RE = re.compile(
 # never leaves the reasoning phase, the tool parser is never invoked, and the
 # entire generation is dropped (empty reasoning, empty content, no tool call).
 _STRIP_OPEN_REASONING_RE = re.compile(
-    r"(?:<\|start\|>assistant\s*)?to=self<\|message\|>"
-    r"(?:(?!<\|eom\|>)(?!" + _HEADER_PAT + r").)*"
+    r"(?:<\|start\|>assistant\s*)?"
+    + _REASONING_HEADER_PAT
+    + r"(?:(?!<\|eom\|>)(?!"
+    + _HEADER_PAT
+    + r").)*"
     r"(?=" + _HEADER_PAT + r"|$)",
     re.DOTALL,
 )
 _OPEN_REASONING_RE = re.compile(
-    r"to=self<\|message\|>((?:(?!<\|eom\|>)(?!" + _HEADER_PAT + r").)*)"
+    _REASONING_HEADER_PAT + r"((?:(?!<\|eom\|>)(?!" + _HEADER_PAT + r").)*)"
     r"(?=" + _HEADER_PAT + r"|$)",
     re.DOTALL,
 )
 # Markers whose PREFIX could appear at the tail of an OPEN (still-streaming) body.
-_HOLDBACK_MARKERS = (_EOM, _EOT, "<|start|>", "<|message|>")
+_HOLDBACK_MARKERS = (_EOM, _EOT, _START, _MESSAGE)
 # A trailing fragment that could still grow into a channel header (" t", " to",
 # " to=", " to=skill"). Without this the recipient name leaks into reasoning and
 # then has to be un-emitted once ``<|message|>`` arrives.
@@ -78,7 +103,7 @@ _OPEN_TAIL_HEADER_RE = re.compile(r"[\s](?:t|to|to=[^\s<]*)$")
 def _current_assistant_turn(text: str) -> str:
     """Return only the text generated in the current assistant turn.
     ``is_reasoning_end`` is evaluated on the PROMPT token-ids at stream start,
-    and an MuseGlimmer prompt legitimately contains ATEM markers (``render_tool_defs``
+    and a Muse prompt legitimately contains ATEM markers (``render_tool_defs``
     writes a literal ``<atem:function_calls>`` example into the system message,
     and prior assistant turns may carry real tool calls). Anchoring on the last
     channel-open keeps prompt text from deciding the phase.
@@ -111,7 +136,7 @@ def _trim_open_body(body: str) -> str:
         body = trimmed
 
 
-class MuseGlimmerReasoningParser(ReasoningParser):
+class MuseReasoningParser(ReasoningParser):
     def __init__(self, tokenizer, *args, **kwargs) -> None:
         super().__init__(tokenizer, *args, **kwargs)
         # Cursors over what was ACTUALLY emitted. Diffing a freshly reclassified
@@ -121,16 +146,17 @@ class MuseGlimmerReasoningParser(ReasoningParser):
         self._emitted_reasoning: str = ""
         self._emitted_content: str = ""
         self._tool_handoff_done: bool = False
+        self._marker_ids: tuple[int | None, set[int]] | None = None
 
     def adjust_request(
         self, request: ChatCompletionRequest | ResponsesRequest
     ) -> ChatCompletionRequest | ResponsesRequest:
-        """Preserve MuseGlimmer's ATEM framing tokens in the decoded output.
+        """Preserve Muse's ATEM framing tokens in the decoded output.
         vLLM's serving default is ``skip_special_tokens=True``, which strips
         ``<|start|>`` / ``<|message|>`` / ``<|eom|>`` / ``<|eot|>`` before the
         parsers run, collapsing reasoning into content and breaking channel
         scoping. Unlike the base tool-parser hook we do NOT touch
-        ``structured_outputs`` -- MuseGlimmer emits native ATEM, not JSON.
+        ``structured_outputs`` -- Muse emits native ATEM, not JSON.
         """
         request.skip_special_tokens = False
         return request
@@ -161,6 +187,31 @@ class MuseGlimmerReasoningParser(ReasoningParser):
         # path uses extract_reasoning() for the final split.
         return []
 
+    def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
+        """Count reasoning-body tokens, excluding header and marker tokens."""
+        if self._marker_ids is None:
+            vocab = self.vocab
+            boundaries = {vocab[m] for m in (_EOM, _EOT, _START) if m in vocab}
+            self._marker_ids = (vocab.get(_MESSAGE), boundaries)
+        message_id, boundary_ids = self._marker_ids
+
+        count = 0
+        header_start = 0
+        in_reasoning = False
+        for i, token_id in enumerate(token_ids):
+            if token_id == message_id:
+                header = self.model_tokenizer.decode(list(token_ids[header_start:i]))
+                match = _TRAILING_RECIPIENT_RE.search(header)
+                recipient = match.group("recipient") if match else None
+                in_reasoning = recipient in _REASONING_RECIPIENTS
+                header_start = i + 1
+            elif token_id in boundary_ids:
+                in_reasoning = False
+                header_start = i + 1
+            elif in_reasoning:
+                count += 1
+        return count
+
     @classmethod
     def _scoped_turn(cls, text: str) -> str:
         """Current assistant turn with reasoning spans removed."""
@@ -180,7 +231,7 @@ class MuseGlimmerReasoningParser(ReasoningParser):
         """
         scoped = cls._scoped_turn(text)
         for match in _CHANNEL_HEADER_RE.finditer(scoped):
-            if match.group("recipient") not in ("self", "user"):
+            if match.group("recipient") not in _NON_TOOL_RECIPIENTS:
                 return scoped[match.start() :]
         return ""
 
@@ -211,11 +262,11 @@ class MuseGlimmerReasoningParser(ReasoningParser):
             body = text[body_start:body_end]
             if not terminators:
                 body = _trim_open_body(body)
-            if recipient == "self":
+            if recipient in _REASONING_RECIPIENTS:
                 reasoning_parts.append(body)
             elif (
                 # Never surface tool XML echoed into a user channel.
-                recipient == "user"
+                recipient in _CONTENT_RECIPIENTS
                 and _FUNCTION_CALLS_OPEN not in body
                 and "<atem:invoke" not in body
             ):
@@ -234,7 +285,8 @@ class MuseGlimmerReasoningParser(ReasoningParser):
         """Promote un-surfaced content when the stream ends mid-reasoning.
         ``DelegatingParser.finalize_generation`` calls this when
         ``reasoning_ended`` is still False. Returns only the channel-classified
-        ``to=user`` body, and only the portion not already streamed.
+        ``to=user`` / ``to=commentary`` bodies, and only the portion not already
+        streamed.
         """
         _, content_body = self._classify_bodies(previous_text)
         remainder = content_body[len(self._emitted_content) :]
@@ -264,10 +316,10 @@ class MuseGlimmerReasoningParser(ReasoningParser):
         remainder = _STRIP_OPEN_REASONING_RE.sub("", remainder)
         if "<atem:invoke" in remainder or _FUNCTION_CALLS_OPEN in remainder:
             return reasoning, (remainder or None)
-        content_match = _CONTENT_RE.search(model_output)
-        if content_match:
-            content = content_match.group(1) or None
-        elif _REASONING_OPEN in model_output:
+        content_bodies = _CONTENT_RE.findall(model_output)
+        if content_bodies:
+            content = "".join(content_bodies) or None
+        elif _REASONING_HEADER_RE.search(model_output):
             content = None
         else:
             content = model_output or None

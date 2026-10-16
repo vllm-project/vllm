@@ -385,6 +385,19 @@ void fused_minimax_m3_qknorm_rope_kv_insert(
     std::optional<torch::stable::Tensor> kv_k_scale,
     std::optional<torch::stable::Tensor> kv_v_scale);
 
+// Horizontally-fused Muse-Spark QK-norm (weightless) + GPT-J RoPE + KV insert.
+void fused_muse_spark_qknorm_rope_kv_insert(
+    torch::stable::Tensor& qkv, torch::stable::Tensor const& positions,
+    int64_t num_heads, int64_t num_kv_heads, int64_t head_dim, double eps,
+    std::optional<torch::stable::Tensor> cos_sin_cache, int64_t rotary_dim,
+    std::optional<torch::stable::Tensor> slot_mapping,
+    std::optional<torch::stable::Tensor> kv_cache, int64_t block_size,
+    const std::string& kv_cache_dtype,
+    std::optional<torch::stable::Tensor> k_scale,
+    std::optional<torch::stable::Tensor> v_scale,
+    std::optional<torch::stable::Tensor> q_fp8_out,
+    std::optional<torch::stable::Tensor> q_scale);
+
 #ifdef VLLM_ENABLE_FUSED_KDA_DECODE
 void fused_kda_decode(
     torch::stable::Tensor const& x, torch::stable::Tensor const& weight,
@@ -545,6 +558,11 @@ std::tuple<int64_t, torch::stable::Tensor> allocate_shared_buffer_and_handle(
     int64_t size);
 int64_t open_mem_handle(torch::stable::Tensor& mem_handle);
 void free_shared_buffer(int64_t buffer);
+
+// MuseSpark1x fused logits soft-cap.
+void muse_spark_mul_tanh_soft_cap(torch::stable::Tensor& out,
+                                  torch::stable::Tensor& input,
+                                  double multiplier, double soft_cap_temp);
 
 // Activation kernels (shared CUDA/ROCm)
 void silu_and_mul(torch::stable::Tensor& out, torch::stable::Tensor& input);

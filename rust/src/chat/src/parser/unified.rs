@@ -7,7 +7,7 @@ use std::sync::LazyLock;
 
 pub use vllm_parser::unified::{
     Gemma4UnifiedParser, HfTemplateError, HfUnifiedParser, HyV3UnifiedParser, HyV4UnifiedParser,
-    InklingUnifiedParser, KimiK3UnifiedParser, ResponseTemplate, UnifiedParser,
+    InklingUnifiedParser, KimiK3UnifiedParser, MuseUnifiedParser, ResponseTemplate, UnifiedParser,
 };
 use vllm_tokenizer::DynTokenizer;
 
@@ -21,6 +21,11 @@ pub mod names {
     pub const HY_V4: &str = "hy_v4";
     pub const INKLING: &str = "inkling";
     pub const KIMI_K3: &str = "kimi_k3";
+    pub const MUSE: &str = "muse";
+    /// Alias of [`MUSE`]: the Muse Glimmer parser name released upstream.
+    pub const MUSE_GLIMMER: &str = "muse_glimmer";
+    /// Alias of [`MUSE`]: the parser name of the original Muse Spark plugin.
+    pub const MUSE_SPARK_1X: &str = "musespark1x";
 
     /// Executes the checkpoint's Hugging Face `response_template`. Registered for
     /// name resolution only: it is built from the model's template, never by its
@@ -53,6 +58,9 @@ impl UnifiedParserFactory {
         factory.register_parser::<HyV4UnifiedParser>(names::HY_V4);
         factory.register_parser::<InklingUnifiedParser>(names::INKLING);
         factory.register_parser::<KimiK3UnifiedParser>(names::KIMI_K3);
+        factory.register_parser::<MuseUnifiedParser>(names::MUSE);
+        factory.register_parser::<MuseUnifiedParser>(names::MUSE_GLIMMER);
+        factory.register_parser::<MuseUnifiedParser>(names::MUSE_SPARK_1X);
         // Opt-in only: no model patterns map to it.
         factory.register_parser::<HfUnifiedParser>(names::HF);
 
@@ -63,7 +71,9 @@ impl UnifiedParserFactory {
             .register_pattern("hy4", names::HY_V4)
             .register_pattern("inkling", names::INKLING)
             .register_pattern("kimi-k3", names::KIMI_K3)
-            .register_pattern("kimi_k3", names::KIMI_K3);
+            .register_pattern("kimi_k3", names::KIMI_K3)
+            .register_pattern("muse-glimmer", names::MUSE)
+            .register_pattern("muse-spark", names::MUSE);
 
         factory
     }
@@ -157,6 +167,36 @@ mod tests {
             Some(names::KIMI_K3)
         );
         factory.create(names::KIMI_K3, &[], Arc::new(tokenizer)).unwrap();
+    }
+
+    #[test]
+    fn factory_registers_muse() {
+        let factory = UnifiedParserFactory::new();
+        let tokenizer = TestTokenizer::new()
+            .with_regular_token("<|start|>", 200022)
+            .with_regular_token("<|message|>", 200023)
+            .with_regular_token("<|eom|>", 200007)
+            .with_regular_token("<|eot|>", 200008);
+
+        for model_id in [
+            "meta-models/Muse-Spark-1.2-820B-A42B-NVFP4",
+            "meta-models/Muse-Glimmer-30B",
+        ] {
+            assert_eq!(factory.resolve_name_for_model(model_id), Some(names::MUSE));
+            assert_eq!(
+                crate::ParserSelection::Auto.resolve_reasoning_name(model_id),
+                Some(names::MUSE)
+            );
+            assert_eq!(
+                crate::ParserSelection::Auto.resolve_tool_name(model_id),
+                Some(names::MUSE)
+            );
+        }
+        for name in [names::MUSE, names::MUSE_GLIMMER, names::MUSE_SPARK_1X] {
+            factory.create(name, &[], Arc::new(tokenizer.clone())).unwrap();
+            let explicit = crate::ParserSelection::Explicit(name.to_owned());
+            crate::parser::validate_parser_overrides(&explicit, &explicit).unwrap();
+        }
     }
 
     #[test]

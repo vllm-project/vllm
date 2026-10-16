@@ -4,14 +4,76 @@ import pickle
 from copy import deepcopy
 
 import pytest
-from transformers import AutoTokenizer
+from tokenizers import Tokenizer
+from tokenizers.models import WordLevel
+from transformers import AutoTokenizer, TokenizersBackend
 
 from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.hf import (
+    CachedHfTokenizer,
     ThreadSafeHFTokenizerMixin,
+    _load_chat_template_fallback,
     get_cached_tokenizer,
     maybe_make_thread_pool,
 )
+
+
+@pytest.fixture
+def local_tokenizer_dir(tmp_path):
+    tokenizer = TokenizersBackend(
+        tokenizer_object=Tokenizer(WordLevel({"[UNK]": 0}, unk_token="[UNK]")),
+        unk_token="[UNK]",
+    )
+    tokenizer.save_pretrained(tmp_path)
+    return tmp_path
+
+
+def test_cached_tokenizer_loads_standalone_chat_template(local_tokenizer_dir):
+    template = "{{ messages[0].content }}"
+    (local_tokenizer_dir / "custom_chat.jinja").write_text(template)
+
+    tokenizer = CachedHfTokenizer.from_pretrained(local_tokenizer_dir)
+    messages = [{"role": "user", "content": "hello"}]
+    assert tokenizer.apply_chat_template(messages, tokenize=False) == "hello"
+
+
+def test_cached_tokenizer_preserves_standard_chat_template(local_tokenizer_dir):
+    (local_tokenizer_dir / "chat_template.jinja").write_text("standard")
+    (local_tokenizer_dir / "custom_chat.jinja").write_text("fallback")
+
+    tokenizer = CachedHfTokenizer.from_pretrained(local_tokenizer_dir)
+    assert tokenizer.chat_template == "standard"
+
+
+@pytest.mark.parametrize(
+    "templates",
+    [{"a.jinja": "{{ messages }}", "b.jinja": "{{ messages }}"}, {"c.jinja": " \n"}],
+    ids=["ambiguous", "empty"],
+)
+def test_chat_template_fallback_rejects_unusable_templates(tmp_path, templates):
+    for name, text in templates.items():
+        (tmp_path / name).write_text(text)
+    assert _load_chat_template_fallback(tmp_path) is None
+
+
+def test_chat_template_fallback_uses_cached_revision_and_subfolder(tmp_path):
+    revision = "a" * 40
+    model_dir = tmp_path / "models--org--model" / "snapshots" / revision
+    template_dir = model_dir / "tokenizer"
+    template_dir.mkdir(parents=True)
+    (model_dir / "unrelated.jinja").write_text("wrong subfolder")
+    (template_dir / "custom_chat.jinja").write_text("cached template")
+
+    assert (
+        _load_chat_template_fallback(
+            "org/model",
+            revision=revision,
+            cache_dir=str(tmp_path),
+            subfolder="tokenizer",
+            local_files_only=True,
+        )
+        == "cached template"
+    )
 
 
 @pytest.mark.parametrize("model_id", ["openai-community/gpt2", "zai-org/chatglm3-6b"])
