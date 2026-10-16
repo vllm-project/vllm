@@ -123,54 +123,23 @@ def test_pcp_gathers_routing_ids_once_after_local_input_preparation(
             routing_ids = routing_ids.repeat(pcp_size)
         torch.testing.assert_close(run_layers.call_args.args[3], routing_ids)
     assert gather.call_count == 2 * int(needs_gather)
-    if pcp_size == 2 and not use_ep and not use_sp:
-        replay = Mock(return_value=(embed(local_ids), embed(local_ids)))
-        replay.replay_batch = object()
-        model.decoder_replay_layers = replay
-        model_module.DeepseekV4Model.forward(model, local_ids, torch.arange(4), None)
-        torch.testing.assert_close(replay.call_args.args[2], local_ids)
 
-
-@pytest.mark.parametrize("rows", [[], [0, 3]])
-def test_pcp_replay_pads_inputs_and_scatters_only_real_rows(rows):
-    """Empty peers still run padded layers without overwriting real outputs."""
-    hidden = torch.arange(4, dtype=torch.float32)[:, None]
-
-    def run_layers(values):
-        assert values.shape == (4, 1)
-        torch.testing.assert_close(values[: len(rows)], hidden[rows])
-        assert not values[len(rows) :].count_nonzero()
-        return (values + 1,)
-
-    layers = DecoderReplayLayers(2, run_layers, lambda *args: None, set(), "swa")
-    layers.replay_batch = ReplayBatch(
-        torch.tensor(rows, dtype=torch.int64),
-        ForwardContext(no_compile_layers={}, attn_metadata={}, slot_mapping={}),
-        num_padded=4,
-    )
-    (output,) = layers(hidden)
-    expected = torch.zeros_like(hidden)
-    expected[rows] = hidden[rows] + 1
-    torch.testing.assert_close(output, expected)
-
-
-def test_pcp_replay_gathers_compacted_routing_ids(monkeypatch):
-    gather = Mock(side_effect=lambda ids, dim: ids.repeat(2))
-    monkeypatch.setattr(
-        model_module, "get_pcp_group", lambda: SimpleNamespace(all_gather=gather)
-    )
-    run_layers = Mock(side_effect=lambda _, hidden, *args: (hidden,) * 5)
-    model = SimpleNamespace(
+@pytest.mark.parametrize("method,adaptive", [("mtp", False), ("dspark", True)])
+def test_pcp_rejects_speculation_other_than_fixed_length_dspark(method, adaptive):
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(hf_config=SimpleNamespace()),
+        quant_config=None,
         parallel_config=SimpleNamespace(
-            prefill_context_parallel_size=2, enable_expert_parallel=False
+            prefill_context_parallel_size=2,
+            pipeline_parallel_size=1,
+            data_parallel_size=1,
+            decode_context_parallel_size=1,
+            use_ubatching=False,
         ),
-        decoder_replay_layers=SimpleNamespace(replay_batch=object()),
-        decoder_replay_start=1,
-        end_layer=2,
-        aux_hidden_state_layers=(),
-        _run_layers=run_layers,
-        _collapse=lambda hidden, *args: hidden,
+        speculative_config=SimpleNamespace(
+            use_dspark=lambda: method == "dspark",
+            enable_adaptive_verification=adaptive,
+        ),
     )
-    values = torch.tensor([3, 7])
-    model_module.DeepseekV4Model._run_replay_layers(model, *([values] * 7))
-    torch.testing.assert_close(run_layers.call_args.args[3], values.repeat(2))
+    with pytest.raises(NotImplementedError, match="fixed-length DSpark"):
+        model_module.DeepseekV4Model(vllm_config=config)
