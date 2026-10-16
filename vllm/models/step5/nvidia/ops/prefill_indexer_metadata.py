@@ -6,14 +6,13 @@ from typing import NamedTuple
 
 import torch
 
-from vllm.triton_utils import tl, triton
-
-from .sparse_indexer import (
+from vllm.models.step5.common.ops.sparse_indexer import (
     PagedPrefillMetadata,
     _emit_all_regions,
     _emit_indexer_schedule,
     _emit_prefill_pages,
 )
+from vllm.triton_utils import tl, triton
 
 
 class PrefillIndexerMetadata(NamedTuple):

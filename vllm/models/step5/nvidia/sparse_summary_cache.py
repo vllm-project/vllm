@@ -72,7 +72,10 @@ class Step5SparseSummaryCache:
 
         ``prefix_metadata`` covers rows before each request's last window.
         """
-        from .ops.summary_update import update_prefill, update_request_journal
+        from vllm.models.step5.common.ops.summary_update import (
+            update_prefill,
+            update_request_journal,
+        )
 
         args = (
             key,
@@ -178,7 +181,7 @@ class Step5SparseSummaryCache:
 
     def update_decode(self, key, z, slots):
         if key.is_cuda:
-            from .ops.summary_update import update_decode
+            from vllm.models.step5.common.ops.summary_update import update_decode
 
             update_decode(
                 key,
@@ -240,7 +243,9 @@ class Step5SparseSummaryCache:
         return self.prefill_metadata(prefix, device)
 
     def prefill_metadata(self, slots: np.ndarray, device) -> torch.Tensor | None:
-        from .ops.summary_update import make_prefill_metadata_from_slots
+        from vllm.models.step5.common.ops.summary_update import (
+            make_prefill_metadata_from_slots,
+        )
 
         return make_prefill_metadata_from_slots(
             np.asarray(slots), self.block_size, device
@@ -262,7 +267,7 @@ class Step5SparseSummaryCache:
         prefill_metadata: torch.Tensor | None = None,
     ) -> None:
         if prefill_metadata is not None:
-            from .ops.summary_update import update_prefill
+            from vllm.models.step5.common.ops.summary_update import update_prefill
 
             update_prefill(
                 key,
@@ -280,7 +285,7 @@ class Step5SparseSummaryCache:
         if not groups:
             return
         if key.is_cuda:
-            from .ops.summary_update import update_prefill
+            from vllm.models.step5.common.ops.summary_update import update_prefill
 
             update_prefill(
                 key,

@@ -7,9 +7,8 @@ from typing import NamedTuple
 import numpy as np
 import torch
 
+from vllm.models.step5.common.ops.sparse_indexer import PagedPrefillMetadata
 from vllm.triton_utils import tl, triton
-
-from .sparse_indexer import PagedPrefillMetadata
 
 
 @triton.jit(do_not_specialize=["REGION_COUNT", "REGION_ROW"])

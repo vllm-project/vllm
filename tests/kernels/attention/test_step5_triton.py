@@ -4,6 +4,7 @@
 
 import pytest
 import torch
+
 from vllm.platforms import current_platform
 
 pytestmark = pytest.mark.skipif(
@@ -15,11 +16,11 @@ pytestmark = pytest.mark.skipif(
 @pytest.mark.parametrize("rotary_dim", [64, 192])
 @pytest.mark.parametrize("fused_summary", [False, True])
 def test_joint_and_standalone_qkv_preserve_paged_cache(rotary_dim, fused_summary):
-    from vllm.models.step5.nvidia.ops.indexer_norm_rope import indexer_norm_rope
-    from vllm.models.step5.nvidia.ops.qkv_indexer_norm_rope import (
+    from vllm.models.step5.common.ops.indexer_norm_rope import indexer_norm_rope
+    from vllm.models.step5.common.ops.qkv_indexer_norm_rope import (
         qkv_indexer_norm_rope,
     )
-    from vllm.models.step5.nvidia.ops.qkv_norm_rope_cache import qkv_norm_rope_cache
+    from vllm.models.step5.common.ops.qkv_norm_rope_cache import qkv_norm_rope_cache
 
     torch.manual_seed(904)
     device, dtype = "cuda", torch.bfloat16
@@ -135,10 +136,10 @@ def test_joint_and_standalone_qkv_preserve_paged_cache(rotary_dim, fused_summary
 
 @pytest.mark.parametrize("splits", [1, 2])
 def test_gated_swa_and_sparse_decode_match_causal_reference(splits):
-    from vllm.models.step5.nvidia.ops.sparse_decode_attention import (
+    from vllm.models.step5.common.ops.sparse_decode_attention import (
         sparse_decode_attention,
     )
-    from vllm.models.step5.nvidia.ops.swa_decode import swa_decode_gated
+    from vllm.models.step5.common.ops.swa_decode import swa_decode_gated
 
     torch.manual_seed(7)
     device, dtype = "cuda", torch.bfloat16
@@ -196,7 +197,7 @@ def test_gated_swa_and_sparse_decode_match_causal_reference(splits):
 
 @pytest.mark.parametrize("heads", [4, 8, 16])
 def test_summary_scores_use_all_local_heads(heads):
-    from vllm.models.step5.nvidia.ops.sparse_indexer_scores import decode_summary_scores
+    from vllm.models.step5.common.ops.sparse_indexer_scores import decode_summary_scores
 
     torch.manual_seed(91)
     query = torch.randn(2, 1, heads, 256, device="cuda").to(torch.float8_e4m3fn)
@@ -223,7 +224,7 @@ def test_summary_scores_use_all_local_heads(heads):
 
 
 def test_prefill_summary_then_decode_continues_partial_region():
-    from vllm.models.step5.nvidia.ops.summary_update import (
+    from vllm.models.step5.common.ops.summary_update import (
         build_prefill_groups,
         update_prefill,
     )
@@ -267,7 +268,7 @@ def test_prefill_summary_then_decode_continues_partial_region():
 
 
 def test_headwise_gate_preserves_bf16_rounding_and_inactive_rows():
-    from vllm.models.step5.nvidia.ops.attention_gate import headwise_sigmoid_gate
+    from vllm.models.step5.common.ops.attention_gate import headwise_sigmoid_gate
 
     torch.manual_seed(12)
     x = torch.randn(3, 4 * 192, device="cuda", dtype=torch.bfloat16)
