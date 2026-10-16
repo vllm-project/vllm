@@ -71,6 +71,7 @@ logger = init_logger(__name__)
 _TEXT_GENERATION_MODELS = {
     # [Decoder-only]
     "AfmoeForCausalLM": ("afmoe", "AfmoeForCausalLM"),
+    "AliceAIForCausalLM": ("alice_ai", "AliceAIForCausalLM"),
     "ApertusForCausalLM": ("apertus", "ApertusForCausalLM"),
     "AXK1ForCausalLM": ("AXK1", "AXK1ForCausalLM"),
     "BailingMoeForCausalLM": ("bailing_moe", "BailingMoeForCausalLM"),
@@ -695,7 +696,6 @@ _SPECULATIVE_DECODING_MODELS = {
     "Glm4MoeLiteMTPModel": ("glm4_moe_lite_mtp", "Glm4MoeLiteMTP"),
     "GlmOcrMTPModel": ("glm_ocr_mtp", "GlmOcrMTP"),
     "Glm5NextMTPModel": ("vllm.models.glm5next", "Glm5NextMTP"),
-    "MedusaModel": ("medusa", "Medusa"),
     "OpenPanguMTPModel": ("openpangu_mtp", "OpenPanguMTP"),
     "ParseAuxMTPModel": ("nemotron_parse_mtp", "ParseAuxMTPModel"),
     "Qwen3NextMTP": ("qwen3_next_mtp", "Qwen3NextMTP"),
@@ -707,9 +707,6 @@ _SPECULATIVE_DECODING_MODELS = {
     "HYV3MTPModel": ("hy_v3_mtp", "HYV3MTP"),
     "HYV4MTPModel": ("vllm.models.hy_v4", "HYV4MTP"),
     "KimiK3MTPModel": ("vllm.models.kimi_k3", "KimiK3MTP"),
-    # Temporarily disabled.
-    # # TODO(woosuk): Re-enable this once the MLP Speculator is supported in V1.
-    # "MLPSpeculatorPreTrainedModel": ("mlp_speculator", "MLPSpeculator"),
 }
 
 _TRANSFORMERS_SUPPORTED_MODELS = {

@@ -33,6 +33,7 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.models.interfaces import requires_raw_input_tokens
 from vllm.model_executor.offloader.base import get_offloader
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
@@ -690,7 +691,8 @@ class ModelCudaGraphManager(CudaGraphManager):
             }
             if not self.is_first_pp_rank:
                 # Update for non-first PP ranks.
-                model_inputs["input_ids"] = None
+                if not requires_raw_input_tokens(model):
+                    model_inputs["input_ids"] = None
                 model_inputs["inputs_embeds"] = None
                 assert intermediate_tensors is not None
                 model_inputs["intermediate_tensors"] = intermediate_tensors[:num_tokens]
@@ -743,6 +745,9 @@ class ModelCudaGraphManager(CudaGraphManager):
 
             # Capture with dummy rows marked as padding.
             input_buffers.is_padding.fill_(True)
+            is_padding = input_buffers.is_padding[:num_tokens]
+            if pcp_manager is not None:
+                is_padding = pcp_manager.moe_is_padding(is_padding)
 
             def forward_fn(cg_mode: CUDAGraphMode) -> None:
                 batch_descriptor = None
@@ -760,7 +765,7 @@ class ModelCudaGraphManager(CudaGraphManager):
                     num_tokens_across_dp=num_tokens_across_dp,
                     slot_mapping=slot_mappings,
                     batch_descriptor=batch_descriptor,
-                    is_padding=input_buffers.is_padding[:num_tokens],
+                    is_padding=is_padding,
                 ):
                     if cg_mode == CUDAGraphMode.PIECEWISE:
                         # PIECEWISE graph (compiled PW or breakable, chosen inside
@@ -837,7 +842,7 @@ def prepare_inputs_to_capture(
         num_reqs, num_tokens, input_buffers, max_query_len=max_query_len
     )
     if pcp_manager is not None:
-        input_batch = pcp_manager.prepare_inputs_to_capture(input_batch)
+        input_batch = pcp_manager.prepare_inputs_for_capture_or_profile(input_batch)
 
     block_table_provider = pcp_manager or block_tables
     input_block_tables = block_table_provider.get_dummy_block_tables(num_reqs)
