@@ -2627,6 +2627,14 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 query_start_loc_cpu[reqs_start:] - query_start_loc_cpu[reqs_start]
             )
 
+            align_indptr = False
+            if (
+                self._prefill_backend.get_name() == "TRTLLM_RAGGED"
+                and self.vllm_config.attention_config.trtllm_ragged_backend
+                == "cute-dsl"
+            ):
+                align_indptr = True
+
             chunked_context_metadata = build_mla_chunked_context_metadata(
                 context_lens_cpu=context_lens_cpu,
                 prefill_query_start_loc_cpu=prefill_query_start_loc_cpu,
@@ -2639,10 +2647,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 dcp_local_block_size=self.dcp_local_block_size,
                 dcp_virtual_block_size=self.dcp_virtual_block_size,
                 dcp_manager=self.dcp_manager,
-                align_indptr=(
-                    self.vllm_config.attention_config.trtllm_ragged_backend
-                    == "cute-dsl"
-                ),
+                align_indptr=align_indptr,
             )
 
             prefill_metadata = MLACommonPrefillMetadata(
