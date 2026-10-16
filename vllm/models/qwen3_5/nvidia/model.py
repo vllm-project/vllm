@@ -523,6 +523,11 @@ class Qwen3_5MoeForCausalLM(Qwen3_5ForCausalLMBase, QwenNextMixtureOfExperts):
 class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid):
     supports_multimodal_pruning = True
 
+    hf_to_vllm_mapper = (
+        Qwen3VLForConditionalGeneration.hf_to_vllm_mapper
+        | WeightsMapper(orig_to_new_prefix={"mtp.": None})
+    )
+
     packed_modules_mapping = Qwen3VLForConditionalGeneration.packed_modules_mapping | {
         "in_proj_qkvz": ["in_proj_qkv", "in_proj_z"],
         "in_proj_ba": ["in_proj_b", "in_proj_a"],
