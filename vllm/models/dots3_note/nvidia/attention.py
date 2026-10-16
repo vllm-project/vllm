@@ -452,6 +452,9 @@ class Dots3NoteTritonMLABackend(TritonMLABackend):
 
 
 class Dots3NoteTritonMLAImpl(TritonMLAImpl):
+    # Sliding-window prefill and decode have their own paths here.
+    supports_batch_invariant_mqa_prefill: bool = False
+
     def __init__(
         self,
         num_heads: int,
