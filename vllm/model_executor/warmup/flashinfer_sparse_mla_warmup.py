@@ -275,7 +275,6 @@ def _run_sparse_mla_decode_autotune_v2(
     if not warmup_executed:
         return False
 
-    # Unreachable while v2 eligibility requires a single rank.
     if world.world_size > 1:
         world.barrier()
         autotune_v2_reload()

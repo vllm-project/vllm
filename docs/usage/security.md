@@ -284,8 +284,6 @@ Certain API request parameters can have a large impact on resource consumption a
 
 To mitigate this, vLLM enforces a configurable upper bound on the `n` parameter via the `VLLM_MAX_N_SEQUENCES` environment variable (default: **16384**). Requests exceeding this limit are rejected before reaching the engine.
 
-FlashInfer SM120 sparse MLA also maintains a separate calibration cache controlled by `FLASHINFER_AUTOTUNE_DIR`. Managed-cache reload does not synchronize its calibration parameters across ranks. Pre-calibrate on idle, compatible hardware and deploy a consistent calibration artifact when reproducible kernel selection is required.
-
 ### Recommendations
 
 - **Public-facing deployments:** Consider setting `VLLM_MAX_N_SEQUENCES` to a value appropriate for your workload (e.g., `64` or `128`) to limit the blast radius of a single request.
@@ -403,16 +401,12 @@ Most cache paths default to subdirectories under a single root. Changing `VLLM_C
 | --- | --- | --- |
 | `VLLM_CACHE_ROOT` | `~/.cache/vllm` | Base directory for vLLM-owned caches. Respects `XDG_CACHE_HOME` if set. |
 | *(torch.compile)* | `$VLLM_CACHE_ROOT/torch_compile_cache/` | Compilation cache for AOT-compiled models, Inductor graphs, and Triton kernels. Controlled by `VLLM_DISABLE_COMPILE_CACHE` (set to `1` to disable). |
-| `VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR` | FlashInfer's managed-cache default, or the legacy path described below | Overrides FlashInfer autotune cache placement for both cache APIs. |
+| `VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR` | Managed: FlashInfer's default below; legacy: `$VLLM_CACHE_ROOT/flashinfer_autotune_cache/<flashinfer-version>/<arch>/<cache-hash>/` | Overrides cache placement for both FlashInfer autotune cache APIs. |
+| `FLASHINFER_AUTOTUNE_CACHE_DIR` | `~/.cache/flashinfer/autotune` | FlashInfer-owned managed-cache root, used when the vLLM override is unset. `FLASHINFER_WORKSPACE_BASE` relocates its default; `VLLM_CACHE_ROOT` does not. |
+| `FLASHINFER_AUTOTUNE_DIR` | `autotune/` under FlashInfer's workspace | FlashInfer-owned SM120 sparse-MLA calibration cache, separate from the autotuner cache and unaffected by the vLLM override. |
 | `VLLM_ASSETS_CACHE` | `$VLLM_CACHE_ROOT/assets/` | Downloaded assets (e.g., tokenizer files). |
 | `VLLM_XLA_CACHE_PATH` | `$VLLM_CACHE_ROOT/xla_cache/` | XLA/TPU compilation cache. |
 | `VLLM_MEDIA_CACHE` | *(disabled)* | Optional cache for downloaded media (images, video, audio). Not enabled unless explicitly set. |
-
-Single-rank deployments with Elastic EP disabled use FlashInfer's managed autotune cache when available. Multi-rank deployments retain legacy cache synchronization until the pinned FlashInfer coordinates cache-hit decisions before profiling. Without a vLLM override, FlashInfer uses `FLASHINFER_AUTOTUNE_CACHE_DIR`, or its default `~/.cache/flashinfer/autotune` (relocated by `FLASHINFER_WORKSPACE_BASE`). `VLLM_CACHE_ROOT` does not relocate this managed store. Use a separate store root for each independently tuning deployment, including separate prefill and decode instances. Directory sharing alone does not synchronize cache-hit decisions. After interrupted tuning, use a fresh store root when diagnosing incomplete caches.
-
-The legacy fallback retains `$VLLM_CACHE_ROOT/flashinfer_autotune_cache/<flashinfer-version>/<arch>/<cache-hash>/`. Each rank saves its own `autotune_configs_dp<dp>_rank<rank>.json`. With PP>1, each stage's TP group coordinates cache loading and profiling independently.
-
-FlashInfer SM120 sparse MLA also maintains a separate calibration cache controlled by `FLASHINFER_AUTOTUNE_DIR`. Managed-cache reload does not synchronize its calibration parameters across ranks. Pre-calibrate on idle, compatible hardware and deploy a consistent calibration artifact when reproducible kernel selection is required.
 
 ### Recommendations
 

@@ -513,7 +513,6 @@ def flashinfer_autotune(runner: "GPUModelRunner", *, skip_attn: bool = False) ->
     if world.world_size > 1:
         world.barrier()
     if use_autotune_v2:
-        # Unreachable while v2 eligibility requires a single rank.
         if world.world_size > 1:
             # All ranks serve the shared store's final state after publishing.
             autotune_v2_reload()
