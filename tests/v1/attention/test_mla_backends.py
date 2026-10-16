@@ -48,6 +48,9 @@ from vllm.v1.attention.backends.mla.prefill.base import MLADimensions
 from vllm.v1.attention.backends.mla.prefill.selector import (
     MLAPrefillSelectorConfig,
 )
+from vllm.v1.attention.backends.mla.prefill.trtllm_ragged import (
+    is_cute_dsl_mla_prefill_supported,
+)
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.ops.flashmla import is_flashmla_dense_supported
 from vllm.v1.kv_cache_interface import (
@@ -1896,6 +1899,11 @@ def _run_backend_correctness(
         q_mha = torch.cat([q_nope, q_pe], dim=-1)  # [q_len, num_heads, total_dim]
         k_pe_full_expanded = k_pe_full.expand(-1, num_q_heads, -1)
         k_full = torch.cat([k_nope_full, k_pe_full_expanded], dim=-1)
+        if use_prefill_query_quantization:
+            fp8_dtype = current_platform.fp8_dtype()
+            q_mha = q_mha.to(fp8_dtype).to(dtype)
+            k_full = k_full.to(fp8_dtype).to(dtype)
+            v_full = v_full.to(fp8_dtype).to(dtype)
 
         # Create custom attention mask:
         # - Query tokens can attend to all context tokens
@@ -2191,8 +2199,16 @@ def test_chunked_context_backend_correctness(
         pytest.skip("CuTe DSL is only selectable for TRTLLM_RAGGED prefill")
     if use_prefill_query_quantization and kv_cache_dtype == "auto":
         pytest.skip("FP8 prefill queries require an FP8 KV cache")
-    if trtllm_ragged_backend == "cute-dsl" and not use_prefill_query_quantization:
-        pytest.skip("CuTe DSL context prefill only supports FP8 queries")
+    if trtllm_ragged_backend == "cute-dsl":
+        query_dtype = (
+            current_platform.fp8_dtype()
+            if use_prefill_query_quantization
+            else torch.bfloat16
+        )
+        if not is_cute_dsl_mla_prefill_supported(
+            qk_nope_head_dim + 64, v_head_dim, query_dtype
+        ):
+            pytest.skip("Unsupported CuTe DSL prefill dimensions or query dtype")
     _run_backend_correctness(
         default_vllm_config,
         dist_init,

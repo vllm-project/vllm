@@ -22,6 +22,17 @@ if TYPE_CHECKING:
     from vllm.platforms.interface import DeviceCapability
 
 
+def is_cute_dsl_mla_prefill_supported(
+    qk_head_dim: int, v_head_dim: int, query_dtype: torch.dtype
+) -> bool:
+    # FlashInfer has no public compatibility API; replace these checks when available.
+    return (
+        query_dtype in (torch.float16, torch.bfloat16, torch.float8_e4m3fn)
+        and (qk_head_dim, v_head_dim) in ((128, 128), (192, 128))
+        and (qk_head_dim != 192 or query_dtype == torch.float8_e4m3fn)
+    )
+
+
 class TrtllmRaggedPrefillBackend(MLAPrefillBackend):
     """TRT-LLM Ragged backend for MLA prefill."""
 
@@ -200,10 +211,11 @@ class TrtllmRaggedPrefillBackend(MLAPrefillBackend):
             )
 
         if self._context_backend == "cute-dsl":
-            if q.dtype != torch.float8_e4m3fn:
+            if not is_cute_dsl_mla_prefill_supported(q.shape[-1], v.shape[-1], q.dtype):
                 raise ValueError(
-                    "CuTe DSL context prefill only supports FP8 queries. "
-                    "Enable FP8 KV cache and use_prefill_query_quantization."
+                    "CuTe DSL context prefill does not support "
+                    f"Q/K head dimension {q.shape[-1]}, "
+                    f"V head dimension {v.shape[-1]}, and query dtype {q.dtype}."
                 )
             # Generic MLA supplies V as a projection slice; CuTe requires packed V.
             v = v.contiguous()
