@@ -95,6 +95,7 @@ class _SchedulerRequest:
     sampling_params: SimpleNamespace = field(
         default_factory=lambda: SimpleNamespace(routed_experts_prompt_start=0)
     )
+    kv_transfer_params: dict | None = None
 
     @property
     def num_prompt_tokens(self) -> int:
@@ -1793,6 +1794,53 @@ def test_prompt_end_offset_through_worker_and_scheduler(chunk_size, max_tokens):
             np.testing.assert_array_equal(
                 connector.take_output(request, output), rows[4:]
             )
+    finally:
+        worker.close()
+
+
+def test_pd_decode_emits_rows_from_first_local_forward():
+    """A P/D decode request loads KV up to a mid-block token; the prefill
+    instance returns the rows before it."""
+    connector = _make_connector()
+    worker = _make_worker(1)
+    request = _scheduler_request(
+        "decode", [b"a" * 32], num_tokens=6, num_output_tokens=0
+    )
+    request.num_computed_tokens = 5
+    request.kv_transfer_params = {"remote_engine_id": "prefill"}
+    requests = {request.request_id: request}
+    rows = np.arange(10 * 3 * 2, dtype=_DTYPE).reshape(10, *_SHAPE)
+    try:
+        for start in range(5, 9):
+            metadata = connector.build_connector_meta(
+                _step_output([request.request_id], [start], [1]), requests
+            )
+            assert metadata.requests == {request.request_id: start}
+            output = _process_output(
+                worker,
+                metadata,
+                rows[start : start + 1],
+                [request.request_id],
+                np.array([0]),
+                token_starts=(start,),
+                num_tokens=(1,),
+            )
+            request.num_tokens = start + 2
+            request.num_output_tokens = start - 4
+            request.num_computed_tokens = start + 1
+            np.testing.assert_array_equal(
+                connector.take_output(request, output), rows[start : start + 1]
+            )
+
+        # Preemption keeps the floor: the blocks loaded from the prefill
+        # instance have no rows here.
+        connector.request_finished(request)
+        request.num_output_tokens = 0
+        request.num_computed_tokens = 0
+        metadata = connector.build_connector_meta(
+            _step_output([request.request_id], [0], [4]), requests
+        )
+        assert metadata.requests == {request.request_id: 5}
     finally:
         worker.close()
 
