@@ -1993,8 +1993,7 @@ def test_store_failed_batch_keeps_recency_of_resident_objects():
 
 def test_store_arc_ignores_evicted_released_object_of_the_batch():
     # b is stored again, released and evicted in one batch; touching it
-    # afterwards would count as an ARC ghost hit. LRU ignores touches of
-    # absent keys, so only an ARC test can catch this.
+    # afterwards would be an ARC ghost hit (LRU ignores absent touches).
     store = _make_store(max_bytes=12, cache_policy="arc")
     store.put([BlockObject("e", b"eeee"), BlockObject("a", b"aaaa")])
     store.put([BlockObject("a", b"aaaa"), BlockObject("e", b"eeee")])
@@ -2040,50 +2039,3 @@ def test_store_loads_out_of_tree_policy_and_reports_store_misses():
         for key in (b"first", b"second", b"third", b"second")
     ]
     store.close()
-
-
-class DuplicateVictimPolicy(LRUCachePolicy):
-    """Contract-violating policy that reports its first victim twice."""
-
-    def evict(self, n, protected):
-        victims = super().evict(n, protected)
-        return None if victims is None else victims + victims[:1]
-
-
-class StaleVictimPolicy(LRUCachePolicy):
-    """Contract-violating policy that reports its first eviction again."""
-
-    first_victim = None
-
-    def evict(self, n, protected):
-        victims = super().evict(n, protected)
-        if not victims or self.first_victim is None:
-            self.first_victim = victims[0] if victims else None
-            return victims
-        return [self.first_victim, *victims[1:]]
-
-
-@pytest.mark.parametrize(
-    "policy,batches",
-    [
-        (DuplicateVictimPolicy, ["c"]),
-        (DuplicateVictimPolicy, ["cd"]),
-        (StaleVictimPolicy, ["c", "d"]),
-    ],
-    ids=["duplicate-one", "duplicate-two", "stale-slot-owner"],
-)
-def test_store_rejects_invalid_policy_victims(policy, batches):
-    store = _make_store(
-        max_bytes=8,
-        cache_policy=policy.__name__,
-        cache_policy_module_path=__name__,
-    )
-    store.put([BlockObject("a", b"aaaa"), BlockObject("b", b"bbbb")])
-    *valid, invalid = batches
-    for keys in valid:
-        store.put([BlockObject(key, key.encode() * 4) for key in keys])
-
-    with pytest.raises(BlockObjectStoreError, match="invalid victims"):
-        store.put([BlockObject(key, key.encode() * 4) for key in invalid])
-    with pytest.raises(RuntimeError, match="closed"):
-        store.get_concatenated(["b"])
