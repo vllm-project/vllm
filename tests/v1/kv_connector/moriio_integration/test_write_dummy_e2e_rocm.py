@@ -10,19 +10,23 @@ cache-group kind and the MoE is cut to a handful of experts. Dummy weights are
 seeded, so the prefill, decode and reference servers hold identical weights.
 
 Prefill runs on one GPU, decode on another, and MoRI moves the KV over xGMI.
-Prefill computes the first ``n - 1`` prompt tokens and decode computes the last
-one from the transferred KV and recurrent state. A direct serve splits the same
-prompt the same way when the first ``n - 1`` tokens end on a chunk boundary
-that both servers share, so the prompts are chosen to make that happen: one is
-a single chunk plus one token, the others are a whole number of hybrid cache
-blocks plus one token (prefix caching ends chunks on block boundaries). With
-the split matched, a correct transfer reproduces the direct serve's first-token
-log-probabilities exactly, so the comparison needs no noise allowance. The
+Either way decode computes the last prompt token itself. For hybrid models
+prefill computes only the first ``n - 1`` tokens and transfers the KV and the
+recurrent state after them. For attention-only models prefill computes and
+transfers all ``n``, and decode's scheduler, seeing the whole prompt cached,
+recomputes the last token. A direct serve splits the same prompt the same way
+when the first ``n - 1`` tokens end on a chunk boundary that both servers share,
+so the prompts are chosen to make that happen: one is a single chunk plus one
+token, the others are a whole number of hybrid cache blocks plus one token
+(prefix caching ends chunks on block boundaries) or, for attention-only models,
+a whole number of chunks plus one token. With the split matched, a correct
+transfer reproduces the direct serve's first-token log-probabilities exactly,
+so the comparison needs no noise allowance. The
 servers compile with Inductor's deterministic mode, since otherwise each one
 benchmarks its own reduction launch configs and separately started servers
 can drift apart by a few bf16 logit steps. Guards:
 
-* decode must report an external prefix-cache hit for every token but the last
+* decode must report an external prefix-cache hit for every transferred token
   of every prompt, so the match is not a local recompute;
 * changing the first half of a prompt must move the direct serve's log-probs by
   at least ``MIN_CONTEXT_EFFECT``, so a wrong prefix would be visible;
@@ -85,6 +89,8 @@ PREFILL_CHUNK = 299
 SHORT_PROMPT_LEN = PREFILL_CHUNK + 1
 # Hybrid blocks per aligned prompt, before the trailing token.
 ALIGNED_BLOCKS = (1, 2)
+# Prefill chunks per long attention-only prompt, before the trailing token.
+ALIGNED_CHUNKS = (2, 4)
 
 
 def _mori_available() -> bool:
@@ -138,6 +144,11 @@ def _qwen3_5_moe_overrides(cfg) -> dict[str, Any]:
     }
 
 
+def _qwen3_dense_overrides(cfg) -> dict[str, Any]:
+    # Attention-only: decode gets the KV for the whole prompt.
+    return {"num_hidden_layers": 4}
+
+
 @dataclass(frozen=True)
 class ArchCase:
     model: str
@@ -147,6 +158,8 @@ class ArchCase:
     corrupt_overrides: dict[str, Any]
     env: dict[str, str] = field(default_factory=dict)
     args: tuple[str, ...] = ()
+    # Has recurrent-state (mamba-style) layers, so prefill stops at n - 1.
+    hybrid: bool = True
 
 
 ARCHS: dict[str, ArchCase] = {
@@ -165,6 +178,13 @@ ARCHS: dict[str, ArchCase] = {
         # MoRIIO's recurrent-state transfer requires.
         env={"VLLM_ROCM_USE_AITER": "0"},
         args=("--language-model-only",),
+    ),
+    "qwen3_dense": ArchCase(
+        model="Qwen/Qwen3-32B",
+        overrides=_qwen3_dense_overrides,
+        corrupt_overrides={"rms_norm_eps": 1.0},
+        env={"VLLM_ROCM_USE_AITER": "0"},
+        hybrid=False,
     ),
 }
 
@@ -220,6 +240,9 @@ CASES = [
     # ROCM_ATTN keeps a (2, num_blocks, ...) KV layout and opts out of KV
     # connectors, so the second ROCm attention backend is the unified one.
     Case("qwen3_5_moe", "ROCM_AITER_UNIFIED_ATTN", _DEFAULT, _DEFAULT),
+    # Attention-only: prefill transfers the whole prompt.
+    Case("qwen3_dense", "TRITON_ATTN", _DEFAULT, _DEFAULT),
+    Case("qwen3_dense", "ROCM_AITER_UNIFIED_ATTN", _DEFAULT, _DEFAULT),
 ]
 
 
@@ -465,13 +488,17 @@ def _block_size(server: RemoteOpenAIServer) -> int:
     return sizes.pop()
 
 
-def _prompt_lengths(block_size: int) -> list[int]:
+def _prompt_lengths(arch: ArchCase, server: RemoteOpenAIServer) -> list[int]:
+    # Hybrid chunks end on cache-block boundaries; attention-only chunks end on
+    # the prefill budget, so the last token is computed on its own either way.
+    if arch.hybrid:
+        unit, counts = _block_size(server), ALIGNED_BLOCKS
+    else:
+        unit, counts = PREFILL_CHUNK, ALIGNED_CHUNKS
     aligned = [
-        k * block_size + 1
-        for k in ALIGNED_BLOCKS
-        if k * block_size + 1 + MAX_TOKENS <= MAX_MODEL_LEN
+        k * unit + 1 for k in counts if k * unit + 1 + MAX_TOKENS <= MAX_MODEL_LEN
     ]
-    assert aligned, f"block size {block_size} leaves no aligned prompt"
+    assert aligned, f"alignment unit {unit} leaves no aligned prompt"
     return [SHORT_PROMPT_LEN, *aligned]
 
 
@@ -522,10 +549,13 @@ def _external_hits(server: RemoteOpenAIServer) -> float:
 class Reference:
     prompts: list[list[int]]
     logprobs: list[dict[str, float]]
+    hybrid: bool
 
     @property
     def expected_external_hits(self) -> int:
-        return sum(len(p) - 1 for p in self.prompts)
+        # Hybrid prefill stops one token short; attention-only prefill hands
+        # decode the whole prompt.
+        return sum(len(p) - int(self.hybrid) for p in self.prompts)
 
 
 def _reference(arch: ArchCase, overrides: dict[str, Any], case: Case) -> Reference:
@@ -543,7 +573,7 @@ def _reference(arch: ArchCase, overrides: dict[str, Any], case: Case) -> Referen
         selector,
     ) as server:
         url = server.url_root
-        lengths = _prompt_lengths(_block_size(server))
+        lengths = _prompt_lengths(arch, server)
         prompts = _prompts(lengths)
         refs = [_first_step(url, arch.model, p) for p in prompts]
         # Same tail, different early context: the comparison has to see it.
@@ -560,7 +590,7 @@ def _reference(arch: ArchCase, overrides: dict[str, Any], case: Case) -> Referen
         # Determinism of the reference itself (served from its prefix cache).
         again = _first_step(url, arch.model, prompts[-1])
         print(f"[noise] repeat distance={_distance(refs[-1], again)}")
-    return Reference(prompts, refs)
+    return Reference(prompts, refs, arch.hybrid)
 
 
 def _pd_distances(
@@ -596,7 +626,7 @@ def test_write_matches_direct_serve(case: Case):
     ref = _reference(arch, overrides, case)
     distances, hits = _pd_distances(arch, overrides, overrides, case, ref)
 
-    # Every token but the last of every prompt must come from prefill.
+    # Every transferred token of every prompt must come from prefill.
     assert hits == ref.expected_external_hits, (
         f"decode reported {hits} external prefix-cache hits, expected "
         f"{ref.expected_external_hits}; it did not use all the transferred KV"
