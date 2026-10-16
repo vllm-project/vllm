@@ -23,7 +23,7 @@ LOG_ROOT="${LOG_ROOT:-/data/${USER:-$(id -un)}/disagg_logs}"
 RUN_AFTER_HEALTH="${RUN_AFTER_HEALTH:-accuracy}"   # bench | accuracy
 DRY_RUN="${DRY_RUN:-0}"
 MORIIO_READ_MODE="${MORIIO_READ_MODE:-0}"   # 0 -> prefill writes (default); 1 -> decode reads KV (read_mode)
-KV_CONNECTOR="${KV_CONNECTOR:-MoRIIOConnector}"   # MoRIIOConnector | NixlConnector
+KV_CONNECTOR="${KV_CONNECTOR:-MoRIIOConnector}"   # MoRIIOConnector | NixlConnector | NixlPushConnector
 
 # ---- router / gateway (host-side; also forwarded into the container) --------
 # vllm-router -> external `vllm/vllm-router` container started on the rank-0 node (default)
@@ -250,7 +250,7 @@ export PREFLIGHT PREFLIGHT_MAX_VRAM_PCT PREFLIGHT_GPU_SETTLE_S
 
 # MoRIIO workers register with the router. NIXL has no discovery, so pass the URLs.
 ROUTER_KV_ARGS="--kv-connector moriio --vllm-discovery-address 0.0.0.0:${PROXY_PING_PORT}"
-if [[ "${KV_CONNECTOR}" == "NixlConnector" ]]; then
+if [[ "${KV_CONNECTOR}" == Nixl* ]]; then
     nixl_startup_timeout=1800
     [[ "${WIDE_EP_MODE}" == "1" && "${xP}" -gt 1 ]] && nixl_startup_timeout=7200
     ROUTER_KV_ARGS="--kv-connector nixl --worker-startup-timeout-secs ${nixl_startup_timeout}"
