@@ -21,6 +21,7 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.torch_utils import direct_register_custom_op
 
 from .Mxfp8LinearKernel import Mxfp8LinearKernel, Mxfp8LinearLayerConfig
 from .rocm_block32_gemm import BLOCK_ROWS, rocm_mxfp8_block32_gemm
@@ -293,3 +294,182 @@ class RocmDotScaledMxfp8LinearKernel(Mxfp8LinearKernel):
         if bias is not None:
             out = out + bias
         return out
+
+
+def shuffle_mxfp8_scale_gfx950(scale: torch.Tensor) -> torch.Tensor:
+    """Convert row-major MXFP8 scales to gfx950 ``32x8`` storage."""
+    if scale.ndim != 2:
+        raise ValueError(f"scale must be two-dimensional, got shape {scale.shape}")
+
+    rows, columns = scale.shape
+    padded_rows = (rows + 31) // 32 * 32
+    padded_columns = (columns + 7) // 8 * 8
+    padded = torch.zeros(
+        (padded_rows, padded_columns), dtype=scale.dtype, device=scale.device
+    )
+    padded[:rows, :columns] = scale
+    return (
+        padded.view(padded_rows // 32, 2, 16, padded_columns // 8, 2, 4)
+        .permute(0, 3, 5, 2, 4, 1)
+        .contiguous()
+        .view(padded_rows, padded_columns)
+    )
+
+
+def _rocm_mxfp8_dot_scaled_mm_gfx950_impl(
+    x: torch.Tensor,
+    x_scale: torch.Tensor,
+    w: torch.Tensor,
+    w_scale: torch.Tensor,
+    output_dtype: torch.dtype,
+) -> torch.Tensor:
+    M, K = x.shape
+    N = w.shape[0]
+    assert K % 128 == 0, f"input columns must be divisible by 128, got {K}"
+    expected_scale_columns = (K // MXFP8_BLOCK_SIZE + 7) // 8 * 8
+    assert x_scale.shape == ((M + 31) // 32 * 32, expected_scale_columns)
+    assert w_scale.shape == ((N + 31) // 32 * 32, expected_scale_columns)
+    assert x_scale.dtype == MXFP8_SCALE_DTYPE
+    assert w_scale.dtype == MXFP8_SCALE_DTYPE
+    assert x_scale.is_contiguous()
+    assert w_scale.is_contiguous()
+    from aiter import HipblasLtMatmulScaleMode, hipb_mm
+
+    from vllm._aiter_ops import _ensure_hipb_mm_extension_initialized
+
+    _ensure_hipb_mm_extension_initialized()
+    mode = HipblasLtMatmulScaleMode.BLK32_UE8M0_32_8_EXT
+    return hipb_mm(
+        x,
+        w.mT,
+        solution_index=-1,
+        out_dtype=output_dtype,
+        scaleA=x_scale,
+        scaleB=w_scale,
+        scaleA_mode=mode,
+        scaleB_mode=mode,
+    )
+
+
+def _rocm_mxfp8_dot_scaled_mm_fake(
+    x: torch.Tensor,
+    x_scale: torch.Tensor,
+    w: torch.Tensor,
+    w_scale: torch.Tensor,
+    output_dtype: torch.dtype,
+) -> torch.Tensor:
+    del x_scale, w_scale
+    return torch.empty(
+        (x.shape[0], w.shape[0]),
+        dtype=output_dtype,
+        device=x.device,
+    )
+
+
+def _rocm_aiter_mxfp8_quantize_gfx950_impl(
+    input: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    from aiter import dynamic_per_group_scaled_quant
+
+    output, scale = _allocate_mxfp8_quantize_gfx950_outputs(input)
+    dynamic_per_group_scaled_quant(
+        output,
+        input,
+        scale,
+        group_size=MXFP8_BLOCK_SIZE,
+        shuffle_scale=True,
+    )
+    return output, scale
+
+
+def _rocm_aiter_mxfp8_quantize_gfx950_fake(
+    input: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return _allocate_mxfp8_quantize_gfx950_outputs(input)
+
+
+def _allocate_mxfp8_quantize_gfx950_outputs(
+    input: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    rows, columns = input.shape
+    assert input.dtype in {
+        torch.float16,
+        torch.bfloat16,
+    }, f"input dtype must be float16 or bfloat16, got {input.dtype}"
+    assert columns % 128 == 0, f"input columns must be divisible by 128, got {columns}"
+    padded_rows = (rows + 31) // 32 * 32
+    scale_columns = (columns // MXFP8_BLOCK_SIZE + 7) // 8 * 8
+    return (
+        torch.empty_like(input, dtype=torch.float8_e4m3fn),
+        torch.empty(
+            (padded_rows, scale_columns),
+            dtype=MXFP8_SCALE_DTYPE,
+            device=input.device,
+        ),
+    )
+
+
+def _mxfp8_dot_scaled_linear_gfx950(
+    x: torch.Tensor,
+    w: torch.Tensor,
+    w_scale: torch.Tensor,
+) -> torch.Tensor:
+    x_q, x_scale = torch.ops.vllm.rocm_aiter_mxfp8_quantize_gfx950(x)
+    return torch.ops.vllm.rocm_mxfp8_dot_scaled_mm_gfx950(
+        x_q,
+        x_scale,
+        w,
+        w_scale,
+        x.dtype,
+    )
+
+
+class RocmHipbmmMxfp8LinearKernel(RocmDotScaledMxfp8LinearKernel):
+    """gfx950 MXFP8 linear using AITER quantization and standalone hipb_mm."""
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        weight = layer.weight.data
+        N, K = weight.shape
+        assert K % 128 == 0, f"weight columns must be divisible by 128, got {K}"
+        scale_k = K // MXFP8_BLOCK_SIZE
+        weight_scale = layer.weight_scale.data[:N, :scale_k].contiguous()
+        layer.weight = Parameter(weight.contiguous(), requires_grad=False)
+        layer.weight_scale = Parameter(
+            shuffle_mxfp8_scale_gfx950(weight_scale), requires_grad=False
+        )
+
+    def apply_weights(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if layer.weight_scale.dtype != MXFP8_SCALE_DTYPE:
+            raise ValueError(
+                f"Expected {MXFP8_SCALE_DTYPE} weight_scale, got "
+                f"{layer.weight_scale.dtype}."
+            )
+        assert x.shape[-1] % 128 == 0, (
+            f"input columns must be divisible by 128, got {x.shape[-1]}"
+        )
+        out_shape = (*x.shape[:-1], layer.weight.shape[0])
+        x2d = x.reshape(-1, x.shape[-1])
+        out = _mxfp8_dot_scaled_linear_gfx950(
+            x2d, layer.weight, layer.weight_scale
+        ).reshape(out_shape)
+        if bias is not None:
+            out = out + bias
+        return out
+
+
+direct_register_custom_op(
+    op_name="rocm_aiter_mxfp8_quantize_gfx950",
+    op_func=_rocm_aiter_mxfp8_quantize_gfx950_impl,
+    fake_impl=_rocm_aiter_mxfp8_quantize_gfx950_fake,
+)
+
+direct_register_custom_op(
+    op_name="rocm_mxfp8_dot_scaled_mm_gfx950",
+    op_func=_rocm_mxfp8_dot_scaled_mm_gfx950_impl,
+    fake_impl=_rocm_mxfp8_dot_scaled_mm_fake,
+)
