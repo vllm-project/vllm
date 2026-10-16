@@ -19,8 +19,6 @@
 //! [`MmKwargsItem`]: vllm_engine_core_client::protocol::multimodal::MmKwargsItem
 
 mod error;
-mod object_storage;
-mod ring_buffer;
 mod sender;
 mod serde;
 #[cfg(test)]

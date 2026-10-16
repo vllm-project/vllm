@@ -15,12 +15,13 @@ use parking_lot::Mutex;
 use thiserror_ext::AsReport as _;
 use tracing::{debug, warn};
 
-use super::object_storage::{PutFailure, SingleWriterShmObjectStorage};
-use super::ring_buffer::SingleWriterShmRingBuffer;
 use super::serde::serialize_mm_item;
 use crate::Result;
 use vllm_engine_core_client::protocol::multimodal::{
     MmBatchedField, MmField, MmFieldElem, MmKwargValue, MmKwargsItem,
+};
+use vllm_shm_object_storage::{
+    PutFailure, SingleWriterShmObjectStorage, SingleWriterShmRingBuffer,
 };
 
 /// Configuration for the writer-side multimodal processor shm cache.

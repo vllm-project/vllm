@@ -9,8 +9,8 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// Public error type for the shm multimodal cache.
 #[derive(Debug, Error, Macro)]
 pub enum Error {
-    #[error("failed to create shm multimodal cache {name:?}: {message}")]
-    MmShmCacheCreate { name: String, message: String },
+    #[error("shm object storage error")]
+    ShmStorage(#[from] vllm_shm_object_storage::Error),
 
     #[error("failed to serialize multimodal item for shm cache: {0}")]
     Serialize(#[from] vllm_engine_core_client::Error),

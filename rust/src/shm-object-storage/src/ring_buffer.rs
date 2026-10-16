@@ -12,24 +12,24 @@ use std::os::unix::fs::OpenOptionsExt;
 
 use memmap2::MmapMut;
 
-use crate::error::{Error, Result, bail_mm_shm_cache_create};
+use crate::error::{Error, Result, bail_shm_storage_create};
 
 const ID_NBYTES: usize = 4;
 const SIZE_NBYTES: usize = 4;
 /// 4 bytes for id, 4 bytes for buffer size.
-pub(crate) const MD_SIZE: usize = ID_NBYTES + SIZE_NBYTES;
+pub const MD_SIZE: usize = ID_NBYTES + SIZE_NBYTES;
 /// Size of the handle-signing secret stored at the start of the segment.
-pub(crate) const AUTH_SECRET_BYTES: usize = 32;
+pub const AUTH_SECRET_BYTES: usize = 32;
 /// Physical offset of the ring buffer chunks inside the segment; logical
 /// addresses are unchanged, so every chunk lives at `DATA_OFFSET + logical`.
-pub(crate) const DATA_OFFSET: usize = AUTH_SECRET_BYTES;
+pub const DATA_OFFSET: usize = AUTH_SECRET_BYTES;
 /// Exclusive monotonic id bound, so `2**31 - 1` is the max value.
 const ID_MAX: u32 = 1 << 31;
 
 /// Marker for `MemoryError: "Not enough space in the data buffer"`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error("not enough space in the data buffer, try freeing up space first")]
-pub(crate) struct NotEnoughSpace;
+pub struct NotEnoughSpace;
 
 /// A single-writer, multiple-reader ring buffer implementation using shared
 /// memory. This struct provides a thread-safe ring buffer where one process
@@ -63,7 +63,7 @@ pub(crate) struct NotEnoughSpace;
 ///
 /// The monotonic_id ensures data integrity - readers can verify they're
 /// accessing the correct data even after buffer wraparound or reuse.
-pub(crate) struct SingleWriterShmRingBuffer {
+pub struct SingleWriterShmRingBuffer {
     /// POSIX shm object name without the leading slash, as reported to the
     /// Python engine via `VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME`.
     name: String,
@@ -83,9 +83,9 @@ impl SingleWriterShmRingBuffer {
     /// Python's `shared_memory.SharedMemory(name=X, create=True)` maps to the
     /// file `/dev/shm/X` (tmpfs), so a plain exclusive-create file plus
     /// `memmap2` is layout-compatible with it.
-    pub(crate) fn create(data_buffer_size: usize, name: &str) -> Result<Self> {
+    pub fn create(data_buffer_size: usize, name: &str) -> Result<Self> {
         if data_buffer_size == 0 {
-            bail_mm_shm_cache_create!(name = name.to_string(), "buffer size must be positive");
+            bail_shm_storage_create!(name = name.to_string(), "buffer size must be positive");
         }
         let path = format!("/dev/shm/{name}");
 
@@ -105,7 +105,7 @@ impl SingleWriterShmRingBuffer {
             Err(error) => {
                 // On failure after creation, unlink the segment we created.
                 let _ = std::fs::remove_file(&path);
-                bail_mm_shm_cache_create!(name = name.to_string(), "{error}");
+                bail_shm_storage_create!(name = name.to_string(), "{error}");
             }
         };
 
@@ -131,12 +131,12 @@ impl SingleWriterShmRingBuffer {
     }
 
     /// Return the current handle-signing secret.
-    pub(crate) fn auth_secret(&self) -> [u8; AUTH_SECRET_BYTES] {
+    pub fn auth_secret(&self) -> [u8; AUTH_SECRET_BYTES] {
         self.map[..AUTH_SECRET_BYTES].try_into().expect("secret region is 32 bytes")
     }
 
     /// Clear the ring buffer.
-    pub(crate) fn clear(&mut self) {
+    pub fn clear(&mut self) {
         self.metadata.clear();
         // Keep IDs increasing so handles issued before the clear (e.g. for
         // requests still draining) fail the ID check once their chunk is
@@ -151,7 +151,7 @@ impl SingleWriterShmRingBuffer {
     /// `[4-byte monotonic_id][4-byte size][buffer data...]`
     ///
     /// Returns the logical start address and the assigned monotonic id.
-    pub(crate) fn allocate_buf(
+    pub fn allocate_buf(
         &mut self,
         size: usize,
     ) -> std::result::Result<(usize, u32), NotEnoughSpace> {
@@ -192,7 +192,7 @@ impl SingleWriterShmRingBuffer {
 
     /// Read the `[4-byte monotonic_id][4-byte size]` chunk header at the
     /// logical `address`.
-    pub(crate) fn chunk_header(&self, address: usize) -> (u32, usize) {
+    pub fn chunk_header(&self, address: usize) -> (u32, usize) {
         let offset = self.chunk_offset(address);
         let id = self.read_i32(offset) as u32;
         let size = self.read_i32(offset + ID_NBYTES) as usize;
@@ -204,7 +204,7 @@ impl SingleWriterShmRingBuffer {
     ///
     /// Readers in other processes update this field concurrently, so the read
     /// is done byte-wise with volatile semantics.
-    pub(crate) fn reader_count(&self, address: usize) -> i32 {
+    pub fn reader_count(&self, address: usize) -> i32 {
         let offset = self.chunk_offset(address) + MD_SIZE;
         let bytes = &self.map[offset..offset + 4];
         let mut out = [0u8; 4];
@@ -218,7 +218,7 @@ impl SingleWriterShmRingBuffer {
 
     /// Write `data` at `payload_offset` bytes into the payload of the chunk at
     /// the logical `address`.
-    pub(crate) fn write_payload(&mut self, address: usize, payload_offset: usize, data: &[u8]) {
+    pub fn write_payload(&mut self, address: usize, payload_offset: usize, data: &[u8]) {
         let offset = self.chunk_offset(address) + MD_SIZE + payload_offset;
         assert!(
             offset + data.len() <= self.segment_size(),
@@ -242,7 +242,7 @@ impl SingleWriterShmRingBuffer {
     /// reader reference count, which is all the writer's free check needs.
     ///
     /// Returns the monotonic ids of the freed chunks.
-    pub(crate) fn free_buf(
+    pub fn free_buf(
         &mut self,
         is_free_fn: impl Fn(u32, i32) -> bool,
         nbytes: Option<usize>,

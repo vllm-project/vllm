@@ -1,0 +1,20 @@
+[package]
+name = "vllm-shm-object-storage"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+test-util = []
+
+[dependencies]
+hmac.workspace = true
+memmap2.workspace = true
+rand.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+thiserror-ext.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

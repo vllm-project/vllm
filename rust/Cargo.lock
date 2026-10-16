@@ -5918,17 +5918,14 @@ name = "vllm-mm-cache"
 version = "0.1.0"
 dependencies = [
  "expect-test",
- "hmac",
- "memmap2",
  "parking_lot",
- "rand 0.9.5",
  "rmpv",
- "sha2",
  "thiserror 2.0.18",
  "thiserror-ext",
  "tracing",
  "uuid",
  "vllm-engine-core-client",
+ "vllm-shm-object-storage",
 ]
 
 [[package]]
@@ -6049,6 +6046,19 @@ dependencies = [
  "vllm-text",
  "vllm-tokenizer",
  "zeromq",
+]
+
+[[package]]
+name = "vllm-shm-object-storage"
+version = "0.1.0"
+dependencies = [
+ "hmac",
+ "memmap2",
+ "rand 0.9.5",
+ "sha2",
+ "thiserror 2.0.18",
+ "thiserror-ext",
+ "tracing",
 ]
 
 [[package]]

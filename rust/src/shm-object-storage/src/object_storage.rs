@@ -23,7 +23,7 @@ const FLAG_BYTES: usize = 4;
 /// Why a `put` could not cache the item; the sender cache turns every variant
 /// into an inline fallback, mirroring the Python sender.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-pub(crate) enum PutFailure {
+pub enum PutFailure {
     /// The key already exists in the storage (concurrent duplicate insert).
     /// Benign: no warning is logged for this case.
     #[error("key already exists in the storage")]
@@ -62,7 +62,7 @@ struct CachedEntry {
 ///
 /// Memory Layout per Object:
 /// `[4-byte reference_count][0x01 format marker][msgpack body]`
-pub(crate) struct SingleWriterShmObjectStorage {
+pub struct SingleWriterShmObjectStorage {
     ring_buffer: SingleWriterShmRingBuffer,
     max_object_size: usize,
     n_readers: u32,
@@ -78,7 +78,7 @@ pub(crate) struct SingleWriterShmObjectStorage {
 }
 
 impl SingleWriterShmObjectStorage {
-    pub(crate) fn new(ring_buffer: SingleWriterShmRingBuffer, max_object_size: usize) -> Self {
+    pub fn new(ring_buffer: SingleWriterShmRingBuffer, max_object_size: usize) -> Self {
         Self {
             ring_buffer,
             max_object_size,
@@ -93,12 +93,12 @@ impl SingleWriterShmObjectStorage {
         }
     }
 
-    pub(crate) fn set_n_readers(&mut self, n_readers: u32) {
+    pub fn set_n_readers(&mut self, n_readers: u32) {
         self.n_readers = n_readers;
     }
 
     /// Clear the object storage.
-    pub(crate) fn clear(&mut self) {
+    pub fn clear(&mut self) {
         self.ring_buffer.clear();
         self.key_index.clear();
         self.id_index.clear();
@@ -108,18 +108,18 @@ impl SingleWriterShmObjectStorage {
     }
 
     /// Check if the object with the given key is cached.
-    pub(crate) fn is_cached(&self, key: &str) -> bool {
+    pub fn is_cached(&self, key: &str) -> bool {
         self.key_index.contains_key(key)
     }
 
     /// Number of cached keys, for the sender cache's shadow-map pruning.
-    pub(crate) fn cached_len(&self) -> usize {
+    pub fn cached_len(&self) -> usize {
         self.key_index.len()
     }
 
     /// Get the cached object by key if it exists, bumping its writer flag and
     /// releasing its touch protection.
-    pub(crate) fn get_cached(&mut self, key: &str) -> Option<(usize, u32)> {
+    pub fn get_cached(&mut self, key: &str) -> Option<(usize, u32)> {
         let entry = self.key_index.get(key)?;
         let (address, monotonic_id) = (entry.address, entry.monotonic_id);
         self.increment_writer_flag(monotonic_id);
@@ -128,25 +128,25 @@ impl SingleWriterShmObjectStorage {
     }
 
     /// Stop protecting touched items that were not looked up.
-    pub(crate) fn release_touches(&mut self) {
+    pub fn release_touches(&mut self) {
         self.touched.clear();
     }
 
     /// Number of items currently protected by `touch`, for tests.
     #[cfg(feature = "test-util")]
-    pub(crate) fn touched_len(&self) -> usize {
+    pub fn touched_len(&self) -> usize {
         self.touched.len()
     }
 
     /// Sign the handle of a cached object so readers can verify it.
-    pub(crate) fn get_signature(&self, key: &str) -> Option<[u8; 32]> {
+    pub fn get_signature(&self, key: &str) -> Option<[u8; 32]> {
         let entry = self.key_index.get(key)?;
         Some(self.make_signature(key, entry.address, entry.monotonic_id))
     }
 
     /// HMAC-SHA256 over `sha256(key) + address_le8 + monotonic_id_le4`,
     /// keyed by the secret stored at the start of the shared memory.
-    pub(crate) fn make_signature(&self, key: &str, address: usize, monotonic_id: u32) -> [u8; 32] {
+    pub fn make_signature(&self, key: &str, address: usize, monotonic_id: u32) -> [u8; 32] {
         let mut payload = Sha256::digest(key.as_bytes()).to_vec();
         payload.extend_from_slice(&(address as u64).to_le_bytes());
         payload.extend_from_slice(&monotonic_id.to_le_bytes());
@@ -160,7 +160,7 @@ impl SingleWriterShmObjectStorage {
     ///
     /// For writers (`ShmObjectStoreSenderCache`): protect the item from
     /// eviction until get_cached or release_touches.
-    pub(crate) fn touch(&mut self, key: &str) {
+    pub fn touch(&mut self, key: &str) {
         let Some(entry) = self.key_index.get(key) else {
             return;
         };
@@ -175,7 +175,7 @@ impl SingleWriterShmObjectStorage {
     /// `body` is the serialized object payload as produced by
     /// `super::serde::serialize_mm_item`: the 0x01 format marker followed by
     /// the msgpack body.
-    pub(crate) fn put(&mut self, key: &str, body: &[u8]) -> Result<(usize, u32), PutFailure> {
+    pub fn put(&mut self, key: &str, body: &[u8]) -> Result<(usize, u32), PutFailure> {
         if self.key_index.contains_key(key) {
             return Err(PutFailure::DuplicateKey);
         }

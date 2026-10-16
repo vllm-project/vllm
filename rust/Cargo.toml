@@ -13,6 +13,7 @@ members = [
     "src/mock-engine",
     "src/parser",
     "src/server",
+    "src/shm-object-storage",
     "src/text",
     "src/tokenizer",
     "src/tracing",
@@ -154,6 +155,7 @@ vllm-mm-cache = { path = "src/mm-cache" }
 vllm-parser = { path = "src/parser" }
 vllm-proto = { path = "proto" }
 vllm-server = { path = "src/server" }
+vllm-shm-object-storage = { path = "src/shm-object-storage" }
 vllm-text = { path = "src/text" }
 vllm-tokenizer = { path = "src/tokenizer" }
 vllm-tracing = { path = "src/tracing" }
