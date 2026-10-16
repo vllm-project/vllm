@@ -42,13 +42,13 @@ def test_excludes_non_final_prefill_chunks():
         num_scheduled=[448, 4],
     )
 
-    need_broadcast, mask = pp_utils.compute_pp_output_requirements(batch)
+    mask = pp_utils.compute_need_sampled_mask(batch)
 
-    assert need_broadcast
+    assert mask is not None
     assert mask.tolist() == [False, True]
 
 
-def test_no_broadcast_when_no_row_samples():
+def test_none_when_no_row_samples():
     """Unchanged behaviour: an all-prefill batch needs no broadcast at all."""
     batch = _batch(
         num_computed=[0, 512],
@@ -56,9 +56,7 @@ def test_no_broadcast_when_no_row_samples():
         num_scheduled=[448, 448],
     )
 
-    need_broadcast, _ = pp_utils.compute_pp_output_requirements(batch)
-
-    assert not need_broadcast
+    assert pp_utils.compute_need_sampled_mask(batch) is None
 
 
 def test_keeps_decoding_request_past_its_length_cap():
@@ -79,9 +77,9 @@ def test_keeps_decoding_request_past_its_length_cap():
         num_scheduled=[8],
     )
 
-    need_broadcast, mask = pp_utils.compute_pp_output_requirements(batch)
+    mask = pp_utils.compute_need_sampled_mask(batch)
 
-    assert need_broadcast
+    assert mask is not None
     assert mask.tolist() == [True]
 
 
@@ -93,9 +91,9 @@ def test_decode_row_ahead_of_a_prefill_chunk():
         num_scheduled=[1, 448],
     )
 
-    need_broadcast, mask = pp_utils.compute_pp_output_requirements(batch)
+    mask = pp_utils.compute_need_sampled_mask(batch)
 
-    assert need_broadcast
+    assert mask is not None
     assert mask.tolist() == [True, False]
 
 
@@ -114,9 +112,24 @@ def test_excludes_final_prefill_chunk_reaching_its_length_cap():
         max_seq_len=[1005],
     )
 
-    need_broadcast, _ = pp_utils.compute_pp_output_requirements(batch)
+    assert pp_utils.compute_need_sampled_mask(batch) is None
 
-    assert not need_broadcast
+
+def test_aux_output_broadcasts_for_final_prefill_chunk_reaching_its_length_cap():
+    """Earlier stages need the sample counts to emit the finishing request's
+    auxiliary output, but must not update its state."""
+    batch = _batch(
+        num_computed=[1000, 0],
+        prefill_len=[1004, 4096],
+        num_scheduled=[4, 448],
+        is_prefilling=[True, True],
+        max_seq_len=[1005, 4096 + 256],
+    )
+
+    mask = pp_utils.compute_need_sampled_mask(batch, need_aux_output=True)
+
+    assert mask is not None
+    assert mask.tolist() == [False, False]
 
 
 def test_keeps_final_prefill_chunk_with_generation_budget_left():
@@ -129,9 +142,9 @@ def test_keeps_final_prefill_chunk_with_generation_budget_left():
         max_seq_len=[1004 + 256],
     )
 
-    need_broadcast, mask = pp_utils.compute_pp_output_requirements(batch)
+    mask = pp_utils.compute_need_sampled_mask(batch)
 
-    assert need_broadcast
+    assert mask is not None
     assert mask.tolist() == [True]
 
 
@@ -150,9 +163,9 @@ def test_length_cap_overrun_decode_row_is_kept():
         max_seq_len=[12176],
     )
 
-    need_broadcast, mask = pp_utils.compute_pp_output_requirements(batch)
+    mask = pp_utils.compute_need_sampled_mask(batch)
 
-    assert need_broadcast
+    assert mask is not None
     assert mask.tolist() == [True]
 
 
@@ -166,7 +179,7 @@ def test_finishing_prefill_row_does_not_drop_a_sibling_row():
         max_seq_len=[1005, 1024],
     )
 
-    need_broadcast, mask = pp_utils.compute_pp_output_requirements(batch)
+    mask = pp_utils.compute_need_sampled_mask(batch)
 
-    assert need_broadcast
+    assert mask is not None
     assert mask.tolist() == [False, True]

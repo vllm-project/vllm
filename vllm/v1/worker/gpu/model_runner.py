@@ -89,7 +89,6 @@ from vllm.v1.worker.block_table import get_block_table_width
 from vllm.v1.worker.cp_utils import check_attention_cp_compatibility
 from vllm.v1.worker.gpu import pcp_manager as pcp
 from vllm.v1.worker.gpu.async_utils import (
-    AsyncAuxOutput,
     AsyncOutput,
     AsyncPoolingOutput,
     StepTimingCollector,
@@ -1753,6 +1752,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.update_requests(scheduler_output)
             self.block_tables.apply_staged_writes()
             if self.aux_output_connector is not None:
+                # Register this step before the GPU forward.
                 self.aux_output_connector.begin_step(
                     scheduler_output.aux_output_connector_metadata
                 )
@@ -2106,7 +2106,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     @step_eplb_after()
     def sample_tokens(
         self, grammar_output: GrammarOutput | None
-    ) -> AsyncOutput | AsyncAuxOutput | ModelRunnerOutput | None:
+    ) -> AsyncOutput | ModelRunnerOutput | None:
         if self.execute_model_state is None:
             # The prior execute_model call must have failed.
             return None
@@ -2151,12 +2151,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 )
             if pending_aux_output is None:
                 return output
-            return AsyncAuxOutput(
+            return AsyncOutput(
                 model_runner_output=output,
-                pending_aux_output=pending_aux_output,
-                pending_recv=pending_recv,
+                sampler_output=None,
+                num_sampled_tokens=None,
                 main_stream=self.main_stream,
                 copy_stream=self.output_copy_stream,
+                check_ep_fault=False,
+                pending_aux_output=pending_aux_output,
+                pending_recv=pending_recv,
             )
 
         # Last rank: sample tokens
