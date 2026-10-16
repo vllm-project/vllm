@@ -25,6 +25,7 @@ MoE layer. If we have 32 EP ranks, then each GPU will hold 288 / 32 = 9 local
 physical experts.
 """
 
+import os
 import threading
 import time
 from collections.abc import Sequence
@@ -1041,6 +1042,15 @@ class EplbState:
                     "Draining async EPLB worker for model %s",
                     model_key,
                 )
+            # Diagnostic only. This loop has no deadline, and a scale down was
+            # seen spinning in it for two hours without a single line of
+            # output. If one rank stops producing results while the others
+            # keep theirs, the reduce never reaches the group size and nobody
+            # ever leaves, so the state of each rank is the only way to tell
+            # which one dropped out.
+            started = time.perf_counter()
+            report_every = float(os.getenv("VLLM_EEP_DEBUG_WATCHDOG") or 0)
+            next_report = report_every
             while ms.rebalanced:
                 if self._all_ranks_result_ready(ms):
                     result = ms.pending_result
@@ -1051,6 +1061,19 @@ class EplbState:
                     result.consumed_event.record()
                 else:
                     time.sleep(0.001)
+                elapsed = time.perf_counter() - started
+                if report_every > 0 and elapsed > next_report:
+                    next_report += report_every
+                    worker = self.async_worker
+                    logger.warning(
+                        "[EEP-DEBUG] still draining %s after %.0f s: "
+                        "pending_result=%s, stop_requested=%s, worker=%s",
+                        model_key,
+                        elapsed,
+                        ms.pending_result is not None,
+                        self.async_stop_requested,
+                        "alive" if worker is not None and worker.is_alive() else "gone",
+                    )
             if needs_drain:
                 logger.info(
                     "Async EPLB worker drained for model %s",

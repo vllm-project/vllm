@@ -79,7 +79,7 @@ steps:
       label: ':amd: (MI355) Elastic EP Scaling'
       dind: false
       device: mi355_4
-      timeout_in_minutes: 90
+      timeout_in_minutes: 120
       working_dir: /vllm-workspace/tests
       depends_on:
       - image-build-amd
@@ -93,43 +93,39 @@ steps:
       - requirements/kv_connectors_rocm.txt
       commands:
       - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
-      # Early retirement of the replaced groups is real code now, and build 95346
-      # is the first one that ever came back green on MI355 with IPC enabled:
-      # four of seven passes that carry it went all the way through, and not one
-      # of them saw hsa_status 4097 at either reconfiguration. Three of them
-      # completed the scale down, which used to refuse regularly.
+      # Early retirement of the replaced groups is real code now, and it removed
+      # the hsa_status 4097 refusal from the scale up: the expert reshuffle on
+      # the fresh groups completes, and in build 95355 a whole scale up with
+      # CUDA graphs and traffic came back with better accuracy than it started.
+      # It did not remove the refusal at the scale down, where the groups being
+      # replaced are still in use and cannot be retired in advance.
       #
-      # Two experiments are gone after one round each. Routing the first
-      # collective on the new EP group over the CPU group failed four times out
-      # of four, every time with the 4097 refusal at the scale down, so
-      # establishing those registrations early is what helps and avoiding them
-      # makes it worse. UCX_MEM_EVENTS=no made no difference at all, so it is
-      # deleted rather than flagged, which also stops it from breaking the
-      # upstream EPLB Execution suite.
+      # Build 95355 ran the file whole for the first time and all four real
+      # cases failed, while the same four pass locally. What it caught is two
+      # faults that are not the ROCm refusal at all:
       #
-      # What is left is a rank that dies during the scale up with no Python
-      # frames, while NIXL is moving expert weights. The survivors only see
-      # NIXL_ERR_REMOTE_DISCONNECT, which is the victim's view, and the dying
-      # rank prints nothing but rocdevice.cpp:3431 "Unknown Event Type".
+      # A rank that just joined crashes, and vLLM's handler prints the frames.
+      # Once inside ProcessGroupNCCL::allreduce, once inside PyObject_Malloc
+      # while writing a log line, once failing to even find a GPU kernel
+      # ("Cannot find the function: Cijk_..."). Three unrelated crash sites mean
+      # the state of the process is already damaged by the time any of them
+      # runs, so this is host memory corruption, not an IPC refusal.
       #
-      # The first two passes carry a transfer trace through the NIXL expert
-      # moves. It costs one log line per layer on each side of the wait, it does
-      # not touch timing, and it is the only thing that can say how far the
-      # dying rank got and whether it died in the wait or in the barrier.
-      - VLLM_EEP_DEBUG_TRANSFER_TRACE=1 VLLM_EEP_DEBUG_GROUP_PRESSURE=1 VLLM_EEP_DEBUG_SYNC_RESHUFFLE=1 VLLM_EEP_DEBUG_OFF=1 AMD_LOG_LEVEL=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=VLLM_EEP_DEBUG_TRANSFER_TRACE,VLLM_EEP_DEBUG_GROUP_PRESSURE,VLLM_EEP_DEBUG_SYNC_RESHUFFLE,VLLM_EEP_DEBUG_OFF,AMD_LOG_LEVEL pytest -v -s distributed/test_elastic_ep.py -k enforce_eager_none || true
-      - VLLM_EEP_DEBUG_TRANSFER_TRACE=1 VLLM_EEP_DEBUG_GROUP_PRESSURE=1 VLLM_EEP_DEBUG_SYNC_RESHUFFLE=1 VLLM_EEP_DEBUG_OFF=1 AMD_LOG_LEVEL=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=VLLM_EEP_DEBUG_TRANSFER_TRACE,VLLM_EEP_DEBUG_GROUP_PRESSURE,VLLM_EEP_DEBUG_SYNC_RESHUFFLE,VLLM_EEP_DEBUG_OFF,AMD_LOG_LEVEL pytest -v -s distributed/test_elastic_ep.py -k enforce_eager_none || true
-      # The last two drop the reshuffle synchronisation while keeping the trace.
-      # It was added for the fault during the traffic right after a scale up and
-      # it costs about five seconds of downtime, but the death now happens
-      # inside that same awaited call, so it has to be ruled in or out.
-      - VLLM_EEP_DEBUG_TRANSFER_TRACE=1 VLLM_EEP_DEBUG_GROUP_PRESSURE=1 VLLM_EEP_DEBUG_OFF=1 AMD_LOG_LEVEL=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=VLLM_EEP_DEBUG_TRANSFER_TRACE,VLLM_EEP_DEBUG_GROUP_PRESSURE,VLLM_EEP_DEBUG_OFF,AMD_LOG_LEVEL pytest -v -s distributed/test_elastic_ep.py -k enforce_eager_none || true
-      - VLLM_EEP_DEBUG_TRANSFER_TRACE=1 VLLM_EEP_DEBUG_GROUP_PRESSURE=1 VLLM_EEP_DEBUG_OFF=1 AMD_LOG_LEVEL=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=VLLM_EEP_DEBUG_TRANSFER_TRACE,VLLM_EEP_DEBUG_GROUP_PRESSURE,VLLM_EEP_DEBUG_OFF,AMD_LOG_LEVEL pytest -v -s distributed/test_elastic_ep.py -k enforce_eager_none || true
-      # The last pass runs the file whole, and it answers the coverage question.
-      # Every round so far measured only enforce_eager_none, the one case of
-      # five with no traffic during the scaling, so nothing is known about the
-      # three traffic cases or the two CUDA graph cases on MI355. It runs last
-      # because its duration is unknown: if it overruns the step budget, the
-      # passes above have already produced their log.
-      - VLLM_EEP_DEBUG_GROUP_PRESSURE=1 VLLM_EEP_DEBUG_SYNC_RESHUFFLE=1 VLLM_EEP_DEBUG_OFF=1 AMD_LOG_LEVEL=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=VLLM_EEP_DEBUG_GROUP_PRESSURE,VLLM_EEP_DEBUG_SYNC_RESHUFFLE,VLLM_EEP_DEBUG_OFF,AMD_LOG_LEVEL pytest -v -s distributed/test_elastic_ep.py || true
+      # A scale down hung for two hours with no output at all, in drain_async,
+      # whose loop has no deadline and spins on an all_reduce over the EP CPU
+      # group. If one rank stops producing results the reduce never reaches the
+      # group size and nobody leaves. That one has nothing to do with ROCm.
+      #
+      # So this round carries a watchdog instead of a transfer trace. Every
+      # 60 s that a reconfiguration phase has not finished, each rank dumps the
+      # stacks of all its threads, and the drain loop reports whose result is
+      # missing. A hung rank cannot report anything else, which is exactly why
+      # the two hours above produced nothing.
+      #
+      # --timeout bounds a hang so one stuck case cannot eat the step budget,
+      # and the whole file runs twice, because a group that passes sometimes is
+      # not a group that passes.
+      - VLLM_EEP_DEBUG_WATCHDOG=60 VLLM_EEP_DEBUG_GROUP_PRESSURE=1 VLLM_EEP_DEBUG_SYNC_RESHUFFLE=1 VLLM_EEP_DEBUG_OFF=1 AMD_LOG_LEVEL=1 PYTHONFAULTHANDLER=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=VLLM_EEP_DEBUG_WATCHDOG,VLLM_EEP_DEBUG_GROUP_PRESSURE,VLLM_EEP_DEBUG_SYNC_RESHUFFLE,VLLM_EEP_DEBUG_OFF,AMD_LOG_LEVEL,PYTHONFAULTHANDLER pytest -v -s --timeout=780 --timeout-method=thread distributed/test_elastic_ep.py || true
+      - VLLM_EEP_DEBUG_WATCHDOG=60 VLLM_EEP_DEBUG_GROUP_PRESSURE=1 VLLM_EEP_DEBUG_SYNC_RESHUFFLE=1 VLLM_EEP_DEBUG_OFF=1 AMD_LOG_LEVEL=1 PYTHONFAULTHANDLER=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=VLLM_EEP_DEBUG_WATCHDOG,VLLM_EEP_DEBUG_GROUP_PRESSURE,VLLM_EEP_DEBUG_SYNC_RESHUFFLE,VLLM_EEP_DEBUG_OFF,AMD_LOG_LEVEL,PYTHONFAULTHANDLER pytest -v -s --timeout=780 --timeout-method=thread distributed/test_elastic_ep.py || true
       # Every command ends in || true, so the step stays green and the log is the
       # deliverable rather than the result.
