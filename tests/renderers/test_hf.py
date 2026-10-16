@@ -6,7 +6,6 @@ from unittest.mock import patch
 import jinja2
 import pytest
 import regex as re
-from huggingface_hub.errors import GatedRepoError
 
 from vllm.config import ModelConfig
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
@@ -564,46 +563,28 @@ _HF_FALLBACK_CHAT_MODELS = [
 ]
 
 
-def _is_gated_model_error(exc: BaseException) -> bool:
-    seen: set[int] = set()
-    current: BaseException | None = exc
-    while current is not None and id(current) not in seen:
-        seen.add(id(current))
-        if isinstance(current, GatedRepoError):
-            return True
-        if "gated repo" in str(current).lower():
-            return True
-        current = current.__cause__ or current.__context__
-    return False
-
-
 def _assert_real_template_checks_dropped_roles(model: str) -> None:
     """Valid turns render, typo roles do not vanish, ignored schema roles warn."""
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
     model_info.check_available_online(on_fail="skip")
 
-    try:
-        model_config = ModelConfig(
-            model,
-            tokenizer=model_info.tokenizer or model,
-            tokenizer_mode=model_info.tokenizer_mode,
-            revision=model_info.revision,
-            trust_remote_code=model_info.trust_remote_code,
-            hf_overrides=model_info.hf_overrides,
-            skip_tokenizer_init=model_info.require_embed_inputs,
-            enable_prompt_embeds=model_info.require_embed_inputs,
-            enable_mm_embeds=model_info.require_embed_inputs,
-            enforce_eager=model_info.enforce_eager,
-            dtype=model_info.dtype,
-        )
-        tokenizer = get_tokenizer(
-            model,
-            trust_remote_code=model_config.trust_remote_code,
-        )
-    except (GatedRepoError, OSError) as exc:
-        if _is_gated_model_error(exc):
-            pytest.skip(f"{model} is a gated repo")
-        raise
+    model_config = ModelConfig(
+        model,
+        tokenizer=model_info.tokenizer or model,
+        tokenizer_mode=model_info.tokenizer_mode,
+        revision=model_info.revision,
+        trust_remote_code=model_info.trust_remote_code,
+        hf_overrides=model_info.hf_overrides,
+        skip_tokenizer_init=model_info.require_embed_inputs,
+        enable_prompt_embeds=model_info.require_embed_inputs,
+        enable_mm_embeds=model_info.require_embed_inputs,
+        enforce_eager=model_info.enforce_eager,
+        dtype=model_info.dtype,
+    )
+    tokenizer = get_tokenizer(
+        model,
+        trust_remote_code=model_config.trust_remote_code,
+    )
 
     user_text = "hello from the user"
     rendered = safe_apply_chat_template(
