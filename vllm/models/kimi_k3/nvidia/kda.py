@@ -456,7 +456,7 @@ def _flashinfer_kda_prefill(
         beta_is_logit=True,
         seq_order=seq_order,
         prefill_workspace=prefill_workspace,
-        backend="cute-dsl",
+        backend="auto",
     )
     return output, initial_state
 
