@@ -901,6 +901,7 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI355) DeepEP FP8 MoE Kernels"
+      automatic_shard: true
       dind: false
       device: mi355_2
       timeout_in_minutes: 55
