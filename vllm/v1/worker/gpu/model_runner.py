@@ -79,6 +79,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.outputs import (
     DraftTokenIds,
     ECConnectorOutput,
+    KVConnectorOutput,
     ModelRunnerOutput,
 )
 from vllm.v1.watermarking import create_watermarker
@@ -1189,6 +1190,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             for mm_hash in scheduler_output.free_encoder_mm_hashes:
                 self.encoder_cache.free_encoder_cache(mm_hash)
 
+    def _attach_mrope_position_states(
+        self, kv_connector_output: KVConnectorOutput | None
+    ) -> None:
+        position_states = self.model_state.take_mrope_position_states()
+        if not position_states:
+            return
+        if kv_connector_output is None:
+            raise RuntimeError(
+                "M-RoPE position state was produced without a KV connector output"
+            )
+        kv_connector_output.mrope_position_states = position_states
+
     def update_pp_decode_requests(self):
         # For non-last PP ranks, update decode requests with sampler output from
         # the prior step in which they were scheduled (pp_size steps ago).
@@ -2148,6 +2161,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
             # Post-step KV connector related operations.
             kv_connector_output = self.kv_connector.post_forward(finished_req_ids)
+            self._attach_mrope_position_states(kv_connector_output)
             # The first PP rank holds the encoder cache, so pass its EC output on.
             output = ModelRunnerOutput.with_kv_conn_output_only(kv_connector_output)
             return ModelRunnerOutput.with_ec_conn_output(output, ec_connector_output)
@@ -2219,9 +2233,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Collect KV transfer results now; finalize saves after the drafter runs.
         defer_kv_finalize = self.speculator is not None
-        model_runner_output.kv_connector_output = self.kv_connector.post_forward(
+        kv_connector_output = self.kv_connector.post_forward(
             finished_req_ids, defer_finalize=defer_kv_finalize
         )
+        self._attach_mrope_position_states(kv_connector_output)
+        model_runner_output.kv_connector_output = kv_connector_output
 
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None
         # The encoder runner exists only on the first PP rank, so later ranks
@@ -2328,6 +2344,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Post-step KV connector related operations.
         kv_connector_output = self.kv_connector.post_forward(finished_req_ids)
+        self._attach_mrope_position_states(kv_connector_output)
 
         if not self.is_last_pp_rank:
             self.postprocess_num_computed_tokens(input_batch)

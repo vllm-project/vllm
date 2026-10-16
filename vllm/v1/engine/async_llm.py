@@ -74,6 +74,7 @@ from vllm.v1.metrics.loggers import (
 )
 from vllm.v1.metrics.prometheus import shutdown_prometheus
 from vllm.v1.metrics.stats import IterationStats
+from vllm.v1.mrope import MROPE_POSITION_STATE_KEY
 
 logger = init_logger(__name__)
 
@@ -968,13 +969,15 @@ class AsyncLLM(EngineClient):
         """Submit a pre-aborted request so the connector's request_finished
         hook runs to free any pre-admission KV-transfer resources (e.g. NIXL
         prefill blocks pinned on the P node)."""
+        cleanup_kv_transfer_params = dict(kv_transfer_params)
+        cleanup_kv_transfer_params.pop(MROPE_POSITION_STATE_KEY, None)
         request = EngineCoreRequest(
             request_id=request_id,
             prompt_token_ids=[0],
             mm_features=None,
             sampling_params=SamplingParams(
                 max_tokens=1,
-                extra_args={"kv_transfer_params": dict(kv_transfer_params)},
+                extra_args={"kv_transfer_params": cleanup_kv_transfer_params},
                 watermarking=False,
             ),
             pooling_params=None,

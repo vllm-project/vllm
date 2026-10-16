@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import pytest
 import torch
 
+from vllm import SamplingParams
 from vllm.multimodal.inputs import (
     MultiModalBatchedField,
     MultiModalFeatureSpec,
@@ -11,6 +13,8 @@ from vllm.multimodal.inputs import (
 )
 from vllm.multimodal.utils import strip_covered_mm_data
 from vllm.v1.core.sched.output import NewRequestData
+from vllm.v1.mrope import MROPE_POSITION_STATE_KEY, MRoPEPositionState
+from vllm.v1.request import Request
 
 
 def _create_new_requests_data(prompt_embeds: torch.Tensor | None) -> NewRequestData:
@@ -42,6 +46,58 @@ def test_repr_with_multi_element_tensor() -> None:
 
     assert "prompt_embeds_shape=torch.Size([10, 768])" in repr(new_requests_data)
     assert "prompt_embeds_shape=torch.Size([10, 768])" in new_requests_data.anon_repr()
+
+
+def test_mrope_position_state_payload_round_trip() -> None:
+    state = MRoPEPositionState(positions=[[0, 1, 7], [0, 2, 7], [0, 3, 7]], delta=-11)
+    params = {MROPE_POSITION_STATE_KEY: state.to_payload()}
+
+    assert MRoPEPositionState.from_kv_transfer_params(params, prompt_len=3) == state
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        [],
+        {"version": True, "positions": [[0]], "delta": 0},
+        {"version": 2, "positions": [[0]], "delta": 0},
+        {"version": 1, "positions": [], "delta": 0},
+        {"version": 1, "positions": [[0, 1]], "delta": 0},
+        {"version": 1, "positions": [[True]], "delta": 0},
+        {"version": 1, "positions": [[0]], "delta": 0.5},
+    ],
+)
+def test_mrope_position_state_rejects_invalid_payload(payload: object) -> None:
+    with pytest.raises(ValueError):
+        MRoPEPositionState.from_kv_transfer_params(
+            {MROPE_POSITION_STATE_KEY: payload}, prompt_len=1
+        )
+
+
+def test_mrope_position_state_is_optional() -> None:
+    assert MRoPEPositionState.from_kv_transfer_params({}, prompt_len=3) is None
+
+
+def test_remote_prefill_state_reaches_new_request_data() -> None:
+    state = MRoPEPositionState(positions=[[0, 1, 7], [0, 2, 7], [0, 3, 7]], delta=-11)
+    sampling_params = SamplingParams(
+        max_tokens=1,
+        extra_args={
+            "kv_transfer_params": {MROPE_POSITION_STATE_KEY: state.to_payload()}
+        },
+    )
+    request = Request(
+        request_id="req",
+        prompt_token_ids=[1, 2, 3],
+        sampling_params=sampling_params,
+        pooling_params=None,
+    )
+
+    new_request = NewRequestData.from_request(
+        request, block_ids=([0],), prefill_token_ids=[1, 2, 3], uses_mrope=True
+    )
+
+    assert new_request.mrope_position_state == state
 
 
 def _mm_feature(offset: int, length: int) -> MultiModalFeatureSpec:

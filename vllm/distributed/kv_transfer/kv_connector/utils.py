@@ -21,6 +21,7 @@ from vllm.platforms import current_platform
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig
+from vllm.v1.mrope import MRoPEPositionState
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 
 if TYPE_CHECKING:
@@ -104,6 +105,7 @@ class KVOutputAggregator:
         aggregated_kv_connector_worker_meta = None
         combined_kv_cache_events = None
         invalid_block_ids = set[int]()
+        mrope_position_states: dict[str, MRoPEPositionState] = {}
         for model_runner_output in outputs:
             assert model_runner_output is not None
             kv_output = model_runner_output.kv_connector_output
@@ -167,6 +169,13 @@ class KVOutputAggregator:
 
             invalid_block_ids |= kv_output.invalid_block_ids
             self._failed_recving_pending |= kv_output.failed_recving
+            for req_id, state in (kv_output.mrope_position_states or {}).items():
+                previous = mrope_position_states.setdefault(req_id, state)
+                if previous != state:
+                    raise ValueError(
+                        "Workers produced inconsistent M-RoPE position state "
+                        f"for request {req_id}"
+                    )
 
         failed_recving = self._failed_recving_pending & finished_recving
         self._failed_recving_pending -= failed_recving
@@ -184,6 +193,7 @@ class KVOutputAggregator:
             invalid_block_ids=invalid_block_ids,
             failed_recving=failed_recving,
             expected_finished_count=self._expected_finished_count,
+            mrope_position_states=mrope_position_states or None,
         )
 
         return output
