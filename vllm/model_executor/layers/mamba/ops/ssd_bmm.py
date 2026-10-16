@@ -8,6 +8,7 @@
 
 import torch
 
+from vllm.model_executor.layers.mamba.ops.triton_helpers import launch_autotuned
 from vllm.triton_utils import tl, triton
 
 
@@ -185,26 +186,28 @@ def _bmm_chunk_fwd(a, b, chunk_size, cu_chunk_seqlens, causal=False, output_dtyp
         * triton.cdiv(chunk_size, META["BLOCK_SIZE_N"]),
         nchunks * ngroups,
     )
-    with torch.accelerator.device_index(a.device.index):
-        _bmm_chunk_fwd_kernel[grid](
-            a_ptr=a,
-            b_ptr=b,
-            out_ptr=out,
-            cu_chunk_seqlens_ptr=cu_chunk_seqlens,
-            chunk_size=chunk_size,
-            K=k,
-            ngroups=ngroups,
-            stride_a_seqlen=a.stride(0),
-            stride_a_head=a.stride(1),
-            stride_ak=a.stride(2),
-            stride_b_seqlen=b.stride(0),
-            stride_b_head=b.stride(1),
-            stride_bk=b.stride(2),
-            stride_out_chunk=out.stride(0),
-            stride_out_head=out.stride(1),
-            stride_outm=out.stride(-2),
-            stride_outn=out.stride(-1),
-            IS_CAUSAL=causal,
-            dot_dtype=dot_dtype,
-        )
+    launch_autotuned(
+        _bmm_chunk_fwd_kernel,
+        grid,
+        (chunk_size, k, causal, a.dtype, b.dtype, out_dtype, cu_chunk_seqlens.dtype),
+        a_ptr=a,
+        b_ptr=b,
+        out_ptr=out,
+        cu_chunk_seqlens_ptr=cu_chunk_seqlens,
+        chunk_size=chunk_size,
+        K=k,
+        ngroups=ngroups,
+        stride_a_seqlen=a.stride(0),
+        stride_a_head=a.stride(1),
+        stride_ak=a.stride(2),
+        stride_b_seqlen=b.stride(0),
+        stride_b_head=b.stride(1),
+        stride_bk=b.stride(2),
+        stride_out_chunk=out.stride(0),
+        stride_out_head=out.stride(1),
+        stride_outm=out.stride(-2),
+        stride_outn=out.stride(-1),
+        IS_CAUSAL=causal,
+        dot_dtype=dot_dtype,
+    )
     return out
