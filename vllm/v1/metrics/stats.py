@@ -277,6 +277,12 @@ class RequestStateStats:
     # Track if this request is corrupted (NaNs in logits)
     is_corrupted: bool = False
 
+    # Track if this request was sampled with the engine watermark
+    is_watermarked: bool = False
+
+    # Track if this request asked for the watermark but could not use it
+    is_watermark_skipped: bool = False
+
 
 @dataclass
 class FinishedRequestStats:
@@ -470,6 +476,10 @@ class IterationStats:
 
     def __init__(self):
         self.iteration_timestamp = time.time()
+        # Read once per iteration: update_from_output runs per request per
+        # step, and each envs attribute access re-reads the environment
+        # in processes that never enable the envs cache (the API server).
+        self.compute_nans_in_logits = envs.VLLM_COMPUTE_NANS_IN_LOGITS
         self.num_generation_tokens = 0
         self.prompt_token_stats = PromptTokenStats()
         self.num_preempted_reqs = 0
@@ -479,6 +489,9 @@ class IterationStats:
         self.time_to_first_tokens_iter: list[float] = []
         self.inter_token_latencies_iter: list[float] = []
         self.num_corrupted_reqs: int = 0
+        self.num_watermarked_reqs: int = 0
+        self.num_watermark_skipped_reqs: int = 0
+        self.num_not_watermarked_reqs: int = 0
 
     def __repr__(self) -> str:
         field_to_value_str = ", ".join(f"{k}={v}" for k, v in vars(self).items())
@@ -518,7 +531,7 @@ class IterationStats:
         # Track if this request is corrupted (only check once per request)
         # Early exit if already marked as corrupted to avoid redundant checks
         if (
-            envs.VLLM_COMPUTE_NANS_IN_LOGITS
+            self.compute_nans_in_logits
             and not req_stats.is_corrupted
             and output.num_nans_in_logits > 0
         ):
@@ -623,6 +636,13 @@ class IterationStats:
         # Count corrupted requests when they finish (only once per request)
         if req_stats.is_corrupted:
             self.num_corrupted_reqs += 1
+
+        if req_stats.is_watermarked:
+            self.num_watermarked_reqs += 1
+        elif req_stats.is_watermark_skipped:
+            self.num_watermark_skipped_reqs += 1
+        else:
+            self.num_not_watermarked_reqs += 1
 
 
 class LoRAStats:

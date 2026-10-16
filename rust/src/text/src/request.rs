@@ -65,6 +65,7 @@ impl Default for Prompt {
 ///
 /// Original Python definition:
 /// <https://github.com/vllm-project/vllm/blob/f22d6e026798a74e6542a52ef776c054f2de572a/vllm/sampling_params.py#L155-L291>
+#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SamplingParams {
@@ -319,5 +320,24 @@ mod tests {
         assert!(err.is_request_validation_error());
         assert!(err.to_string().contains("stop strings cannot be empty"));
         assert!(err.to_string().contains("req-empty-stop"));
+    }
+
+    #[test]
+    fn sampling_params_serialization_omits_unset_fields() {
+        let params = SamplingParams {
+            max_tokens: Some(64),
+            ..Default::default()
+        };
+
+        let value = serde_json::to_value(&params).unwrap();
+        let obj = value.as_object().unwrap();
+        assert!(
+            obj.values().all(|v| !v.is_null()),
+            "unexpected null in {value}"
+        );
+        assert_eq!(obj["max_tokens"], 64);
+
+        let back: SamplingParams = serde_json::from_value(value).unwrap();
+        assert_eq!(back, params);
     }
 }

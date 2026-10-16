@@ -71,7 +71,7 @@ def get_hisparse_kv_cache_groups(
     if not mla_specs:
         return None
 
-    from vllm.v1.core.kv_cache_utils import get_kv_cache_groups
+    from vllm.v1.core.kv_cache_planning import get_kv_cache_groups
 
     mla_group_spec = UniformTypeKVCacheSpecs.from_specs(mla_specs)
     assert mla_group_spec is not None
@@ -323,7 +323,7 @@ def get_hisparse_kv_cache_config(
     available_memory: int,
     host_budget: int,
 ) -> KVCacheConfig:
-    from vllm.v1.core.kv_cache_utils import (
+    from vllm.v1.core.kv_cache_planning import (
         _get_kv_cache_bytes_per_block,
         may_override_num_blocks,
         validate_kv_cache_layout,

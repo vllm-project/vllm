@@ -2,9 +2,10 @@
 
 One fused decoder layer for vLLM's decode steps on MI355X: the attention seam,
 the attention, the attention all-reduce, the FFN seam, the MoE and the MoE
-all-reduce, in two persistent launches a layer. The other backbone layers keep
-vLLM's attention and run the rest -- the attention all-reduce, the FFN seam,
-the MoE and its all-reduce -- as one launch (the FFN launch). ATOM's V4.1 mono decode
+all-reduce, in two persistent launches a layer. A layer outside the whole-layer
+kernels keeps vLLM's attention and runs the rest -- the attention all-reduce,
+the FFN seam, the MoE and its all-reduce -- as one launch (the FFN launch).
+ATOM's V4.1 mono decode
 (ROCm/ATOM `atom/models/deepseek_v41/mono`) is the reference design: the seam
 and MoE stages (`stages/`) and the framework under them (`common/`) are adapted
 from it, each file naming its origin; the attention stages (`attention/`) are
@@ -12,13 +13,15 @@ new, reading vLLM's KV records and weights as loaded.
 
 ## Scope
 
-- Layers: the whole layer on every backbone layer with the standard seam and no
-  compressor / indexer: 3-7, 9-13, 15-19 (compress ratio 2) and 21-23, 25-27,
-  29-31, 33-35, 37-39 (ratio 1), 30 of 40. The FFN launch on the other 10:
-  layer 0 (embedding-broadcast seam), layer 1 (Engram at the seam) and the
-  compressor / indexer layers 2, 8, 14 (also Engram), 20, 24, 28, 32, 36,
-  whose wo_b leaves its TP reduce to it. The DSpark draft layers keep vLLM's
-  path. The paths interleave freely (same tensors at the layer boundary).
+- Layers: the whole layer on all 40 backbone layers. K1 takes the residual
+  settled, without folding the previous output in, on layer 0 (the embedding
+  broadcast to the four streams) and after an Engram write (layers 1 and 14,
+  vLLM's Engram running before K1). On the index sources (2, 8, 14, 20 with
+  their compressor; 24, 28, 32, 36) K1 also hands out its normed input and bf16
+  qr, vLLM's compressor and indexer run between K1 and K2, and K2 builds the
+  key table from that top-k. The FFN launch serves a layer outside these (an
+  MXFP8 KV cache, another indexer); the DSpark draft layers keep vLLM's path.
+  The paths interleave freely (same tensors at the layer boundary).
 - Steps: decode only (FULL graph or eager), M <= 48 rows (8 requests x 6
   DSpark tokens), TP2 / TP4, `fp8_ds_mla` KV records (ROCm), text tokens (the
   routing bias is `e_score_correction_bias`).

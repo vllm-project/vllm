@@ -6,6 +6,9 @@ import torch.nn as nn
 from vllm.config import VllmConfig, replace
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.lora.layers.base import BaseLayerWithLoRA
+from vllm.model_executor.layers.quantization.online.lm_head import (
+    quantized_lm_head_copy,
+)
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.model_loader.utils import get_draft_load_config
 from vllm.model_executor.models.utils import PPMissingLayer
@@ -106,9 +109,14 @@ def load_eagle_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mod
     if target_lm_head is not None and _should_share(
         eagle_model, "has_own_lm_head", draft_lm_head, target_lm_head
     ):
+        draft_head = target_lm_head
+        if speculative_config.draft_lm_head_quantization is not None:
+            draft_head = quantized_lm_head_copy(
+                target_lm_head, speculative_config.draft_lm_head_quantization
+            )
         if draft_lm_head is not None:
             del eagle_model.lm_head
-        eagle_model.lm_head = target_lm_head
+        eagle_model.lm_head = draft_head
 
         # MTP layers route logits through layer.shared_head.head, not
         # eagle_model.lm_head, so the per-layer copies need fixing up too.
@@ -119,7 +127,11 @@ def load_eagle_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mod
                 sh = getattr(layer, "shared_head", None)
                 if sh is not None and hasattr(sh, "head"):
                     del sh.head
-                    sh.head = target_lm_head
+                    sh.head = draft_head
+    elif speculative_config.draft_lm_head_quantization is not None:
+        raise ValueError(
+            "draft_lm_head_quantization needs a drafter that shares the target lm_head."
+        )
 
     # MTP shares topk_indices_buffer with the target model. We update
     # every module in the draft that holds a buffer reference so that

@@ -83,6 +83,7 @@ from vllm.multimodal.processing.processor import (
     PromptUpdate,
     PromptUpdateDetails,
 )
+from vllm.multimodal.utils import copy_mm_embedding_modality
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.processor import cached_processor_from_config
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
@@ -1498,8 +1499,12 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
 
             audio_in_video_item_idx += 1
 
+            # Match the fps the processor used, as HF and the mrope positions do.
+            processed_second_per_grid_ts = out_mm_data.get("second_per_grid_ts")
             second_per_grid_ts = hf_processor_mm_kwargs.get("second_per_grid_ts", None)
-            if second_per_grid_ts:
+            if isinstance(processed_second_per_grid_ts, torch.Tensor):
+                video_second_per_grid_t = processed_second_per_grid_ts[item_idx].item()
+            elif second_per_grid_ts:
                 video_second_per_grid_t = second_per_grid_ts[item_idx]
             else:
                 video_second_per_grid_t = 2.0
@@ -1904,7 +1909,9 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
                     embeddings_main, embeddings_multiscale = torch.split(
                         embeddings, [visual_dim, multi_dim], dim=-1
                     )
-                    multimodal_embeddings[index] = embeddings_main
+                    multimodal_embeddings[index] = copy_mm_embedding_modality(
+                        embeddings, embeddings_main
+                    )
                     multimodal_embeddings_multiscale.append(embeddings_multiscale)
                     if not is_interleaved:
                         current_positions = mm_positions[

@@ -20,6 +20,7 @@ def default_server_args():
         "--max-num-seqs",
         "128",
         "--enforce-eager",
+        "--enable-per-request-metrics",
     ]
 
 
@@ -247,3 +248,59 @@ async def test_kv_transfer_prompt_token_ids_streaming(client: openai.AsyncOpenAI
     # streamed text-out, reconstructed from deltas, with generated token ids.
     assert content
     assert delta_token_ids
+
+
+def _assert_complete_timing_metrics(metrics: object) -> None:
+    assert isinstance(metrics, dict)
+    timing_fields = {
+        "time_to_first_token_ms",
+        "generation_time_ms",
+        "queue_time_ms",
+        "mean_itl_ms",
+        "tokens_per_second",
+    }
+    assert timing_fields <= metrics.keys()
+    assert all(metrics[field] >= 0 for field in timing_fields)
+
+
+@pytest.mark.asyncio
+async def test_per_request_metrics_non_streaming(client: openai.AsyncOpenAI):
+    response = await client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "Count to four."}],
+        max_completion_tokens=4,
+        temperature=0,
+        extra_body={"min_tokens": 4},
+    )
+
+    _assert_complete_timing_metrics(response.model_extra.get("metrics"))
+
+
+@pytest.mark.asyncio
+async def test_per_request_metrics_on_final_usage_chunk(client: openai.AsyncOpenAI):
+    stream = await client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "Say hello."}],
+        max_completion_tokens=1,
+        temperature=0,
+        stream=True,
+        stream_options={"include_usage": True},
+        extra_body={"min_tokens": 1},
+    )
+
+    chunks = [chunk async for chunk in stream]
+    assert len(chunks) > 1
+    for chunk in chunks[:-1]:
+        assert chunk.usage is None
+        assert "metrics" not in (chunk.model_extra or {})
+
+    usage_chunk = chunks[-1]
+    assert usage_chunk.usage is not None
+    assert usage_chunk.choices == []
+    metrics = (usage_chunk.model_extra or {}).get("metrics")
+    assert isinstance(metrics, dict)
+    assert metrics["time_to_first_token_ms"] >= 0
+    assert metrics["generation_time_ms"] >= 0
+    assert metrics["queue_time_ms"] >= 0
+    assert metrics["tokens_per_second"] >= 0
+    assert "mean_itl_ms" not in metrics

@@ -7,7 +7,7 @@ requires = [
     "setuptools>=77.0.3,<81.0.0",
     "setuptools-scm>=8.0",
     "setuptools-rust>=1.9.0",
-    "torch == 2.13.0",
+    "torch == 2.14.0",
     "wheel",
     "jinja2",
 ]
@@ -226,6 +226,8 @@ view_seperator = "view_seperator"
 inverse_std_variences = "inverse_std_variences"
 
 [tool.typos.default.extend-words]
+MoNE = "MoNE"
+mone = "mone"
 Hel = "Hel"
 wether = "wether"
 iy = "iy"

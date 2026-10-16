@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import subprocess
+import sys
+
 import pytest
 import torch
 
@@ -29,6 +32,20 @@ def test_platform_plugins():
         "possibly because current_platform is imported before the plugin"
         f" is loaded. The first import:\n{_init_trace}"
     )
+
+
+def test_import_vllm_does_not_resolve_platform():
+    # Platform plugins must be loaded after `import vllm` completes; resolving
+    # current_platform during it runs plugins against a half-imported vLLM.
+    # Needs a fresh interpreter, since vllm is already imported here.
+    code = (
+        "import sys, vllm\n"
+        "p = sys.modules.get('vllm.platforms')\n"
+        "assert p is None or p._current_platform is None, p._init_trace\n"
+        "from vllm.platforms import current_platform\n"
+        "assert current_platform.device_name == 'DummyDevice'\n"
+    )
+    subprocess.run([sys.executable, "-c", code], check=True)
 
 
 def test_oot_custom_op(default_vllm_config, monkeypatch: pytest.MonkeyPatch):

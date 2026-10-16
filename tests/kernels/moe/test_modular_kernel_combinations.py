@@ -16,7 +16,13 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
-from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import AiterExperts
+from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+    AiterExperts,
+    AiterFp8BlockExperts,
+    AiterFp8ChannelExperts,
+    AiterFp8TensorExperts,
+    AiterUnquantizedExperts,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8DynamicTensorSym,
     kFp8StaticTensorSym,
@@ -80,10 +86,10 @@ def assert_aiter_quant_scheme_case(config: Config) -> None:
     indirectly through the general quant-config sweep.
     See https://github.com/vllm-project/vllm/issues/54966."""
     fe_cls = config.fused_experts_type
-    if fe_cls is not AiterExperts:
+    if not issubclass(fe_cls, AiterExperts):
         return
 
-    if config.quant_config is None:
+    if config.quant_config is None or config.quant_dtype is None:
         w_key, a_key = None, None
     else:
         w_key, a_key = config.fp8_quant_key_pair()
@@ -101,7 +107,7 @@ def assert_aiter_activation_case(config: Config) -> None:
     AiterExperts being reached only indirectly through the general
     activation sweep. See https://github.com/vllm-project/vllm/issues/54966."""
     fe_cls = config.fused_experts_type
-    if fe_cls is not AiterExperts:
+    if not issubclass(fe_cls, AiterExperts):
         return
 
     assert fe_cls._supports_activation(config.activation), (
@@ -156,7 +162,7 @@ def rank_worker(
             if (
                 topk == 1
                 and config.supports_apply_weight_on_input()
-                and config.fused_experts_type is AiterExperts
+                and issubclass(config.fused_experts_type, AiterExperts)
                 and config.quant_block_shape is not None
             ):
                 print(
@@ -172,7 +178,7 @@ def rank_worker(
             # https://github.com/vllm-project/vllm/issues/57029
             if (
                 config.world_size > 1
-                and config.fused_experts_type is AiterExperts
+                and issubclass(config.fused_experts_type, AiterExperts)
                 and getattr(config.prepare_finalize_type, "__name__", "")
                 in ("DeepEPHTPrepareAndFinalize", "MoriPrepareAndFinalize")
             ):
@@ -210,7 +216,7 @@ def rank_worker(
 
             is_aiter_fp8 = (
                 _cp.is_rocm()
-                and config.fused_experts_type is AiterExperts
+                and issubclass(config.fused_experts_type, AiterExperts)
                 and config.quant_config is not None
             )
             if is_aiter_fp8:
@@ -270,7 +276,7 @@ def is_nyi_config(config: Config) -> bool:
             return True
 
     if config.activation != MoEActivation.SILU:
-        if config.fused_experts_type is not AiterExperts:
+        if not issubclass(config.fused_experts_type, AiterExperts):
             return True  # AITER-only for this axis, for now
         if config.quant_dtype is not None:
             return True  # unquantized-only for this axis, for now
@@ -591,7 +597,7 @@ def test_aiter_moe_sorting_backend_dispatch_env_matrix(
         dtype=torch.bfloat16,
         quant_config=None,
         prepare_finalize_type=MoEPrepareAndFinalizeNoDPEPModular,
-        fused_experts_type=AiterExperts,
+        fused_experts_type=AiterUnquantizedExperts,
         world_size=1,
     )
     assert config.is_valid()[0]
@@ -671,7 +677,7 @@ def test_aiter_moe_dispatch_policy_forwarded_through_apply(dispatch_policy: int)
         dtype=torch.bfloat16,
         quant_config=None,
         prepare_finalize_type=MoEPrepareAndFinalizeNoDPEPModular,
-        fused_experts_type=AiterExperts,
+        fused_experts_type=AiterUnquantizedExperts,
         world_size=1,
     )
     assert config.is_valid()[0]
@@ -736,6 +742,20 @@ _PADDING_QUANT_IDS = [
     "fp8_tensor_token",
     "fp8_block_token",
 ]
+
+
+def _padding_matrix_fe_cls(
+    quant_config: TestMoEQuantConfig | None,
+) -> type[AiterExperts]:
+    """Map a _PADDING_QUANT_CONFIGS entry to the AiterExperts leaf class that
+    supports it (mirrors Config.fp8_quant_key_pair's scheme derivation)."""
+    if quant_config is None:
+        return AiterUnquantizedExperts
+    if quant_config.block_shape is not None:
+        return AiterFp8BlockExperts
+    if quant_config.per_out_ch_quant:
+        return AiterFp8ChannelExperts
+    return AiterFp8TensorExperts
 
 
 def _slice_gate_up_rows(t: torch.Tensor, real_per_half: int) -> torch.Tensor:
@@ -950,7 +970,7 @@ def test_aiter_moe_padding_matrix(mode: str, quant_config: TestMoEQuantConfig | 
         dtype=torch.bfloat16,
         quant_config=quant_config,
         prepare_finalize_type=MoEPrepareAndFinalizeNoDPEPModular,
-        fused_experts_type=AiterExperts,
+        fused_experts_type=_padding_matrix_fe_cls(quant_config),
         world_size=1,
         hidden_dim_unpadded=_PADDING_K_UNPADDED if pad_hidden else None,
         intermediate_size_per_partition_unpadded=(
@@ -1113,7 +1133,7 @@ def test_aiter_moe_token_padding_garbage_rows(
         dtype=torch.bfloat16,
         quant_config=quant_config,
         prepare_finalize_type=MoEPrepareAndFinalizeNoDPEPModular,
-        fused_experts_type=AiterExperts,
+        fused_experts_type=_padding_matrix_fe_cls(quant_config),
         world_size=1,
     )
     assert config.is_valid()[0]

@@ -14,7 +14,7 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.distributed.parallel_state import get_tp_group
-from vllm.forward_context import get_forward_context
+from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.platforms import current_platform
 
@@ -85,102 +85,73 @@ class RoutedExpertsCapturer:
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
 
     def capture(self, layer_id: int, topk_ids: torch.Tensor) -> None:
-        """Capture expert routing decisions for a specific layer.
-
-        Under data parallelism, ``topk_ids`` may have four different batch
-        layouts depending on where the DP combine happens and whether
-        Expert Parallelism (EP) or Sequence Parallelism (SP) is active for the
-        MoE layer:
-          - ``n == total`` (naive dispatch): all DP ranks' tokens are
-            concatenated before routing; we slice out this rank's span
-            using the cumulative per-rank counts.
-          - ``n == token_num_per_dp`` (modular-kernel path): DP combine
-            happens inside ``quant_method.apply``; ``select_experts`` only
-            ever sees this rank's tokens, so we take the whole tensor.
-          - ``n == sum(dp_metadata.local_sizes)`` (naive DP+EP dispatch):
-            sequence-parallel shards from every DP rank are gathered through
-            the flattened EP group. The shard sizes include CUDA-graph / SP
-            padding, so we use them to locate this DP rank's unpadded rows.
-          - ``n == ceil(token_num_per_dp / tp_size)`` (SP + modular-kernel
-            path): tokens were split along dim=0 across the TP group by
-            ``_sequence_parallel_context``
-            (``moe_runner_base.py:_sequence_parallel_context``), so each
-            TP rank only sees its shard. We all-gather along dim=0 to
-            reconstruct this DP rank's full routing tensor. SP pads with
-            ceil-div (see ``_compute_sp_num_tokens`` in
-            ``forward_context.py``), so the gathered tensor may contain a
-            few trailing padding rows which are trimmed by the downstream
-            ``[:token_num_per_dp]`` slice.
-
-        Args:
-            layer_id: The layer index.
-            topk_ids: Tensor of shape (batch_size, num_routed_experts).
-
-        """
-        ctx = get_forward_context()
-        if ctx.dp_metadata is None:
-            local_topk_ids = topk_ids
-        else:
-            num_tokens_dp = ctx.dp_metadata.num_tokens_across_dp_cpu
-            num_local_tokens = int(num_tokens_dp[self.dp_rank].item())
-            total = int(num_tokens_dp.sum().item())
-            n = topk_ids.shape[0]
-            shard_sizes = getattr(ctx.dp_metadata, "local_sizes", None)
-            gathered_size = sum(shard_sizes) if shard_sizes is not None else -1
-
-            if n == total:
-                end = int(num_tokens_dp[: self.dp_rank + 1].sum().item())
-                local_topk_ids = topk_ids[end - num_local_tokens : end]
-            elif n == num_local_tokens:
-                local_topk_ids = topk_ids
-            elif shard_sizes is not None and n == gathered_size:
-                # Naive DP+EP dispatch gathers the sequence-parallel shards in
-                # flattened DP-then-TP order. ``local_sizes`` is the exact
-                # all-gatherv layout, including padding. Select this DP rank's
-                # contiguous shard group, then trim its trailing padding.
-                num_dp_ranks = len(num_tokens_dp)
-                assert len(shard_sizes) % num_dp_ranks == 0
-                shards_per_dp_rank = len(shard_sizes) // num_dp_ranks
-                first_shard = self.dp_rank * shards_per_dp_rank
-                start = sum(shard_sizes[:first_shard])
-                local_topk_ids = topk_ids[start : start + num_local_tokens]
-            elif (
-                self.tp_size > 1
-                and n == (num_local_tokens + self.tp_size - 1) // self.tp_size
-            ):
-                # SP + modular-kernel path. All-gather across the TP
-                # group along dim=0 to reconstruct the full per-DP-rank
-                # tensor; keep only the first ``token_num_per_dp`` rows
-                # (trailing rows are SP ceil-div padding). The TP group
-                # is always initialized on real rollout workers, and
-                # every rank in the group reaches this branch in
-                # lockstep (bind is per-FusedMoEFactory layer, SP is a global
-                # condition), so a bare all_gather here will not
-                # deadlock -- let it raise if the precondition is
-                # violated rather than skip silently.
-                #
-                # ``topk_ids`` is already whatever the router produced
-                # (typically int32/int64, both supported by NCCL); the
-                # downstream buffer assignment narrows to the capture dtype.
-                local_topk_ids = get_tp_group().all_gather(topk_ids, dim=0)[
-                    :num_local_tokens
-                ]
-            else:
-                sp_expected = (num_local_tokens + self.tp_size - 1) // self.tp_size
-                raise AssertionError(
-                    "RoutedExpertsCapturer: unexpected topk_ids batch "
-                    f"dim {n} (expected {total}, {num_local_tokens}, "
-                    f"{gathered_size}, or {sp_expected} for "
-                    f"dp_rank={self.dp_rank}, tp_size={self.tp_size})"
-                )
-
         if not 0 <= layer_id < self.device_buffer.shape[1]:
             raise IndexError(
                 f"routed-experts layer {layer_id} exceeds capture buffer "
                 f"layer count {self.device_buffer.shape[1]}"
             )
 
+        local_topk_ids = self._restore_local_topk_ids(topk_ids, get_forward_context())
         self.device_buffer[: len(local_topk_ids), layer_id] = local_topk_ids
+
+    def _restore_local_topk_ids(
+        self, topk_ids: torch.Tensor, ctx: ForwardContext
+    ) -> torch.Tensor:
+        """Restore this DP rank's token rows, trimming trailing SP padding.
+
+        Layout priority: cross-DP batch, local batch, gathered DP/TP shards,
+        then a local TP shard. Gathered rows are DP-major/TP-minor; preserve
+        this priority when layout sizes coincide. PCP is unsupported.
+
+        Without DP metadata, use the pre-SP batch descriptor. Unknown counts
+        pass through; known counts must match a full, sharded or padded batch.
+        A full local batch avoids gathering, including zero/one-token batches
+        where only the publishing TP0 rank needs the real rows.
+        """
+        n = topk_ids.shape[0]
+        dp_metadata = ctx.dp_metadata
+        if dp_metadata is None:
+            if ctx.batch_descriptor is None:
+                return topk_ids
+            num_local_tokens = ctx.batch_descriptor.num_tokens
+        else:
+            num_tokens_dp = dp_metadata.num_tokens_across_dp_cpu
+            num_local_tokens = int(num_tokens_dp[self.dp_rank].item())
+            if n == int(num_tokens_dp.sum().item()):
+                end = int(num_tokens_dp[: self.dp_rank + 1].sum().item())
+                return topk_ids[end - num_local_tokens : end]
+
+        if n == num_local_tokens:
+            return topk_ids
+
+        if dp_metadata is not None:
+            shard_sizes = dp_metadata.local_sizes
+            if shard_sizes is not None and n == sum(shard_sizes):
+                num_dp_ranks = len(num_tokens_dp)
+                if len(shard_sizes) % num_dp_ranks != 0:
+                    raise ValueError(
+                        "RoutedExpertsCapturer: gathered shard count "
+                        f"{len(shard_sizes)} is not divisible by DP rank count "
+                        f"{num_dp_ranks}"
+                    )
+                shards_per_dp_rank = len(shard_sizes) // num_dp_ranks
+                first_shard = self.dp_rank * shards_per_dp_rank
+                start = sum(shard_sizes[:first_shard])
+                return topk_ids[start : start + num_local_tokens]
+
+        shard_n = (num_local_tokens + self.tp_size - 1) // self.tp_size
+        if n == shard_n:
+            return get_tp_group().all_gather(topk_ids.contiguous(), dim=0)[
+                :num_local_tokens
+            ]
+        if dp_metadata is None and n == shard_n * self.tp_size:
+            return topk_ids[:num_local_tokens]
+
+        raise AssertionError(
+            f"RoutedExpertsCapturer: unexpected topk_ids batch dim {n} "
+            f"(local_tokens={num_local_tokens}, "
+            f"dp_rank={self.dp_rank}, tp_size={self.tp_size})"
+        )
 
     def snapshot_routing_data(self, num_tokens: int) -> torch.Tensor:
         """Return a stable snapshot of the current routing data."""

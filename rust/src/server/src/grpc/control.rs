@@ -216,6 +216,7 @@ impl pb::control_server::Control for ControlServiceImpl {
             max_batched_tokens: ready.max_num_batched_tokens,
             max_loras: ready.max_loras,
             rl_capabilities: Some(self.rl_capabilities()),
+            proto_version: pb::VERSION.to_string(),
             effective_attention_block_size: self.client().effective_attention_block_size(),
         }))
     }

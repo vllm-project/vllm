@@ -195,6 +195,7 @@ def _make_stream_chunk(
     metrics: PerRequestMetrics | None = None,
     logprobs: dict | None = None,
     prompt_token_ids: list[int] | None = None,
+    stop_reason: int | str | None = None,
 ) -> GenerateStreamResponse:
     """Build a GenerateStreamResponse SSE chunk."""
     return GenerateTokensStreamResponse(
@@ -204,6 +205,7 @@ def _make_stream_chunk(
                 index=index,
                 token_ids=token_ids,
                 finish_reason=finish_reason,
+                stop_reason=stop_reason,
                 logprobs=logprobs,
             )
         ],
@@ -344,6 +346,85 @@ def test_non_streaming_derender_initializes_parser_prefix(
     parser.set_prompt_token_ids.assert_called_once_with([11, 12])
     assert choices[0].message.tool_calls[0].function.name == "tool"
     assert choices[0].finish_reason == "length"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stop", "include_stop_str_in_output", "dropped"),
+    [
+        ("eos", False, True),
+        ("stop_token_id", False, True),
+        ("stop_string", False, False),
+        ("eos", True, False),
+    ],
+)
+async def test_parsed_derender_leaves_out_stop_token_like_engine(
+    tokenizer, stop, include_stop_str_in_output, dropped
+):
+    """A parser keeps special tokens in the decoded text, so the token that
+    stopped generation must be dropped the way the engine drops it."""
+    eos = tokenizer.eos_token_id
+    answer_ids = tokenizer.encode("answer", add_special_tokens=False)
+    bang = tokenizer.encode("!", add_special_tokens=False)[-1]
+    last_id, stop_reason = {
+        "eos": (eos, None),
+        "stop_token_id": (bang, bang),
+        "stop_string": (bang, "!"),
+    }[stop]
+
+    parser = MagicMock()
+    parser.parse.side_effect = lambda text, *args, **kwargs: (None, text, [])
+    parser.parse_delta.side_effect = lambda text, *args, **kwargs: DeltaMessage(
+        content=text
+    )
+    request = _chat_request(include_stop_str_in_output=include_stop_str_in_output)
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        renderer = MagicMock()
+        renderer.get_tokenizer.return_value = tokenizer
+        renderer.get_eos_token_id.return_value = eos
+        renderer._executor = executor
+        model_config = MagicMock()
+        model_config.hf_config.model_type = "llama"
+        model_config.model = MODEL_NAME
+        model_config.try_get_generation_config.return_value = {}
+        derenderer = OnlineDerenderer(
+            model_config=model_config,
+            renderer=renderer,
+            request_logger=None,
+            chat_template=None,
+            chat_template_content_format="string",
+        )
+        derenderer.parser = MagicMock(return_value=parser)
+
+        def batch_content(token_ids: list[int], finish_reason: str) -> str:
+            choice = GenerateTokensChoice(
+                index=0,
+                token_ids=token_ids,
+                finish_reason=finish_reason,
+                stop_reason=stop_reason if finish_reason == "stop" else None,
+            )
+            response = GenerateTokensResponse(
+                request_id="test", prompt_token_ids=[11, 12], choices=[choice]
+            )
+            return derenderer._derender_chat(response, request)[0].message.content
+
+        # Same decode window and seeding; "length" never drops a token.
+        expected = batch_content(
+            answer_ids if dropped else answer_ids + [last_id], "length"
+        )
+        batch = batch_content(answer_ids + [last_id], "stop")
+        stream, _ = await derenderer.derender_chat_stream(
+            model=MODEL_NAME,
+            generate_chunk=_make_stream_chunk(
+                answer_ids + [last_id], finish_reason="stop", stop_reason=stop_reason
+            ),
+            chat_request=request,
+            prompt_token_ids=[11, 12],
+        )
+
+    assert batch == expected
+    assert stream.choices[0].delta.content == expected
 
 
 class TestDetokenizeDelta:
@@ -886,6 +967,19 @@ class TestDerenderCompletionStream:
         )
         assert chunk.choices[0].finish_reason == "length"
 
+    @pytest.mark.asyncio
+    async def test_stop_reason_forwarded(self, derenderer, tokenizer):
+        """stop_reason from the final generate chunk reaches the derendered
+        choice, matching what the coupled server reports."""
+        token_ids = tokenizer.encode("done")[:2]
+        chunk, _ = await derenderer.derender_completion_stream(
+            model=MODEL_NAME,
+            generate_chunk=_make_stream_chunk(
+                token_ids, finish_reason="stop", stop_reason="\n\n"
+            ),
+        )
+        assert chunk.choices[0].stop_reason == "\n\n"
+
 
 class TestStreamLogprobs:
     """Streaming derender must carry per-chunk logprobs with token ids
@@ -1274,7 +1368,15 @@ class TestDerenderChatStreamParsed:
         assert state.last_tool_call_ids == [first_id]
 
     @pytest.mark.asyncio
-    async def test_finish_reason_rewritten_to_tool_calls(self, parsed_derenderer):
+    @pytest.mark.parametrize(
+        ("engine_finish_reason", "expected_finish_reason"),
+        [("stop", "tool_calls"), ("length", "length")],
+    )
+    async def test_finish_reason_rewritten_to_tool_calls(
+        self, parsed_derenderer, engine_finish_reason, expected_finish_reason
+    ):
+        """A streamed tool call is reported as ``tool_calls`` only at a
+        natural stop; a ``length`` cut must stay visible."""
         chat_request = _chat_request(
             tools=[{"type": "function", "function": {"name": "get_weather"}}],
             tool_choice="auto",
@@ -1282,11 +1384,12 @@ class TestDerenderChatStreamParsed:
         chunk, _ = await parsed_derenderer.derender_chat_stream(
             model=MODEL_NAME,
             generate_chunk=_make_stream_chunk(
-                [_FakeParser.TOOL_START, _FakeParser.TOOL_ARG], finish_reason="stop"
+                [_FakeParser.TOOL_START, _FakeParser.TOOL_ARG],
+                finish_reason=engine_finish_reason,
             ),
             chat_request=chat_request,
         )
-        assert chunk.choices[0].finish_reason == "tool_calls"
+        assert chunk.choices[0].finish_reason == expected_finish_reason
 
     @pytest.mark.asyncio
     async def test_finish_reason_stop_for_named_tool_choice(self, parsed_derenderer):
@@ -1311,7 +1414,7 @@ class TestDerenderChatStreamParsed:
     async def test_include_reasoning_false_suppresses_reasoning(
         self, parsed_derenderer
     ):
-        chat_request = _chat_request(include_reasoning=False)
+        chat_request = _chat_request(include_reasoning=False, return_token_ids=True)
         chunk, _ = await parsed_derenderer.derender_chat_stream(
             model=MODEL_NAME,
             generate_chunk=_make_stream_chunk(
@@ -1320,6 +1423,7 @@ class TestDerenderChatStreamParsed:
             chat_request=chat_request,
         )
         delta = chunk.choices[0].delta
+        assert chunk.choices[0].token_ids is None
         assert delta.reasoning is None
         assert delta.content == "c"
 

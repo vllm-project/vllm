@@ -3,11 +3,18 @@
 
 """Tests for the /derender endpoints (postprocessing counterpart to /render)."""
 
+from unittest.mock import MagicMock
+
 import httpx
 import pytest
 import pytest_asyncio
 
 from tests.utils import RemoteLaunchRenderServer
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
+    GenerateTokensResponse,
+)
+from vllm.renderers.online_derenderer import OnlineDerenderer
 from vllm.tokenizers import get_tokenizer
 
 MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
@@ -110,6 +117,38 @@ async def test_derender_chat_roundtrip(client):
     assert len(data["choices"]) == 1
     assert data["choices"][0]["message"]["content"]
     assert data["choices"][0]["message"]["role"] == "assistant"
+
+
+@pytest.mark.asyncio
+async def test_derender_chat_passes_stop_reason_through(client):
+    """The coupled server reports the stop string or token id that ended
+    generation; derender must carry the generate value through unchanged."""
+    gen_req = await _render_chat(client)
+    generate_response = _make_generate_response(gen_req["token_ids"][:3])
+    generate_response["choices"][0]["stop_reason"] = "\n\n"
+
+    response = await client.post(
+        "/v1/chat/completions/derender",
+        json={"model": MODEL_NAME, "generate_response": generate_response},
+    )
+    assert response.status_code == 200
+    assert response.json()["choices"][0]["stop_reason"] == "\n\n"
+
+
+@pytest.mark.asyncio
+async def test_derender_completion_passes_stop_reason_through(client):
+    gen_req = await _render_completion(client, "Hello world")
+    generate_response = _make_completion_generate_response(
+        gen_req["token_ids"][:3], "gen-stop"
+    )
+    generate_response["choices"][0]["stop_reason"] = 151645
+
+    response = await client.post(
+        "/v1/completions/derender",
+        json={"model": MODEL_NAME, "generate_responses": [generate_response]},
+    )
+    assert response.status_code == 200
+    assert response.json()["choices"][0]["stop_reason"] == 151645
 
 
 @pytest.mark.asyncio
@@ -1400,3 +1439,55 @@ async def test_e2e_harmony_reasoning(harmony_client, harmony_tokenizer):
     assert msg["reasoning"] is not None
     assert reasoning_text in msg["reasoning"]
     assert answer_text in (msg["content"] or "")
+
+
+_HERMES_TOOL_CALL_TEXT = (
+    '<tool_call>\n{"name": "get_weather", "arguments": {"city": "Paris"}}\n</tool_call>'
+)
+
+
+@pytest.mark.parametrize(
+    ("tool_choice", "text", "engine_finish_reason", "expected_finish_reason"),
+    [
+        ("auto", _HERMES_TOOL_CALL_TEXT, "stop", "tool_calls"),
+        ("auto", _HERMES_TOOL_CALL_TEXT, "length", "length"),
+        ("required", "Hello there", "stop", "stop"),
+    ],
+)
+def test_derender_chat_finish_reason_matches_chat_completion(
+    tool_choice, text, engine_finish_reason, expected_finish_reason
+):
+    """/derender applies the same finish_reason rule as the coupled chat
+    path: ``tool_calls`` only for a real call at a natural stop."""
+    tokenizer = get_tokenizer(MODEL_NAME)
+    renderer = MagicMock()
+    renderer.get_tokenizer.return_value = tokenizer
+    model_config = MagicMock()
+    model_config.model = MODEL_NAME
+    model_config.hf_config.model_type = "llama"
+    derenderer = OnlineDerenderer(
+        model_config,
+        renderer,
+        request_logger=None,
+        chat_template="{{ messages }}",
+        chat_template_content_format="auto",
+        enable_auto_tools=True,
+        tool_parser="hermes",
+    )
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "Weather in Paris?"}],
+        tools=_E2E_TOOLS,
+        tool_choice=tool_choice,
+    )
+    response = GenerateTokensResponse.model_validate(
+        _make_generate_response(
+            tokenizer.encode(text, add_special_tokens=False),
+            finish_reason=engine_finish_reason,
+        )
+    )
+
+    (choice,) = derenderer._derender_chat(response, request)
+
+    assert choice.finish_reason == expected_finish_reason
+    assert bool(choice.message.tool_calls) == (text == _HERMES_TOOL_CALL_TEXT)

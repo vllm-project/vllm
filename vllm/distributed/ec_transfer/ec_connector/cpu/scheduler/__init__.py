@@ -16,11 +16,13 @@ import torch
 from vllm.distributed.ec_transfer.ec_connector.cpu.common import (
     ECCPUConnectorMetadata,
     ECCPUWorkerMetadata,
-    _get_encoder_cache_hidden_dim,
     create_ec_shared_region,
 )
 from vllm.distributed.ec_transfer.ec_connector.cpu.scheduler.embedding_cache import (
     EmbeddingCache,
+)
+from vllm.distributed.ec_transfer.ec_connector.encoder_output_width import (
+    get_encoder_output_width,
 )
 from vllm.distributed.ec_transfer.ec_connector.utils import (
     PlaceholderMetadataResolver,
@@ -49,6 +51,7 @@ class ECCPUScheduler:
     """Scheduler delegate for the ECCPUConnector."""
 
     def __init__(self, vllm_config: "VllmConfig") -> None:
+        self._vllm_config = vllm_config
         ec_config = vllm_config.ec_transfer_config
         assert ec_config is not None
         self._is_producer: bool = ec_config.is_ec_producer
@@ -61,8 +64,8 @@ class ECCPUScheduler:
 
         # mm_hash → block IDs allocated this step for GPU→mmap saves.
         self._pending_saves: dict[str, list[int]] = {}
-        # mm_hash → (transfer_id, block IDs) to load from mmap→GPU this step.
-        self._pending_loads: dict[str, tuple[int, list[int]]] = {}
+        # mm_hash → (transfer_id, block IDs, shape) to load from mmap→GPU.
+        self._pending_loads: dict[str, tuple[int, list[int], tuple[int, int]]] = {}
 
         # Dispatched loads awaiting completion reports, keyed by transfer id:
         # transfer_id → (mm_hash, reports still outstanding). The pin taken at
@@ -108,11 +111,9 @@ class ECCPUScheduler:
         self._unrecoverable: set[str] = set()
         self._peer_host: str | None = None
         self._peer_port: int | None = None
-        # Model shape for size checks + compat hash; only set by
-        # _setup_nixl (the gate-off path never touches model_config).
-        self._dtype: torch.dtype | None = None
-        self._hidden_dim: int = 0
-        self._element_size: int = 0
+        dtype = vllm_config.model_config.dtype
+        assert isinstance(dtype, torch.dtype)
+        self._dtype = dtype
         self._ack_timeout_s: float = 0.0
         if self._nixl_enabled:
             try:
@@ -148,9 +149,6 @@ class ECCPUScheduler:
             )
         engine_id = self._ec_config.engine_id
         assert engine_id is not None
-        self._dtype = vllm_config.model_config.dtype
-        self._hidden_dim = _get_encoder_cache_hidden_dim(vllm_config)
-        self._element_size = torch.empty(0, dtype=self._dtype).element_size()
         # How long a consumer waits for an XferAck. The producer answers from
         # its scheduler step, so its reply latency scales with the encoder's
         # batch size: a deployment whose steps run longer must raise this.
@@ -296,22 +294,30 @@ class ECCPUScheduler:
             # held by a quarantined/settling DMA and cannot be reused.
             return False
 
-        expected = pos.length * self._hidden_dim * self._element_size
         try:
             size = int(remote["size_bytes"])
+            shape = tuple(int(dim) for dim in remote["shape"])
         except (KeyError, TypeError, ValueError) as error:
             raise _RemoteUnavailable("the announced size was unusable") from error
-        if size != expected:
+        # The width is the producer's to report; the row count is not.
+        num_embeds = pos.get_num_embeds()
+        if (
+            len(shape) != 2
+            or shape[0] != num_embeds
+            or size != self._num_blocks(shape) * self._region.block_size_bytes
+        ):
             logger.warning(
-                "EC consumer: size mismatch mm_hash=%s announced=%d expected=%d",
+                "EC consumer: size mismatch mm_hash=%s announced=%d shape=%s "
+                "expected %d rows",
                 mm_hash,
                 size,
-                expected,
+                shape,
+                num_embeds,
             )
             raise _RemoteUnavailable("the announced size was wrong")
 
         try:
-            started = self._start_xfer(mm_hash, remote, expected)
+            started = self._start_xfer(mm_hash, remote, size, (shape[0], shape[1]))
         except Exception as error:
             logger.exception(
                 "EC consumer: failed to start NIXL xfer mm_hash=%s", mm_hash
@@ -377,7 +383,11 @@ class ECCPUScheduler:
         return failed
 
     def _start_xfer(
-        self, mm_hash: str, info: "dict[str, Any]", size_bytes: int
+        self,
+        mm_hash: str,
+        info: "dict[str, Any]",
+        size_bytes: int,
+        shape: tuple[int, int],
     ) -> bool:
         """Allocate a not-ready cache entry and start a NIXL READ into it.
 
@@ -391,7 +401,7 @@ class ECCPUScheduler:
         )
 
         n_blocks = max(1, ceil(size_bytes / self._region.block_size_bytes))
-        entry = self._cache.alloc(mm_hash, n_blocks)
+        entry = self._cache.alloc(mm_hash, n_blocks, shape)
         if entry is None:
             logger.debug(
                 "EC consumer: cache full for mm_hash=%s (%d blocks); deferring",
@@ -491,22 +501,36 @@ class ECCPUScheduler:
         """
         self._step_completed.clear()
 
+    def _num_blocks(self, shape: tuple[int, ...]) -> int:
+        size_bytes = shape[0] * shape[1] * self._dtype.itemsize
+        block_size = self._region.block_size_bytes
+        return (size_bytes + block_size - 1) // block_size
+
     def update_state_after_alloc(self, request: "Request", index: int) -> None:
         feature = request.mm_features[index]
         mm_hash = feature.identifier
 
         if self._is_producer and self._cache.get(mm_hash) is None:
-            entry = self._cache.alloc(mm_hash, feature.mm_position.length)
+            shape = (
+                feature.mm_position.get_num_embeds(),
+                get_encoder_output_width(self._vllm_config, feature.modality),
+            )
+            entry = self._cache.alloc(mm_hash, self._num_blocks(shape), shape)
             if entry is not None:
                 self._pending_saves[mm_hash] = list(entry.block_ids)
 
         if self._is_consumer and mm_hash not in self._pending_loads:
             entry = self._cache.get(mm_hash)
             if entry is not None and entry.ready:
+                assert entry.shape is not None
                 self._cache.pin(mm_hash)
                 transfer_id = self._next_transfer_id
                 self._next_transfer_id += 1
-                self._pending_loads[mm_hash] = (transfer_id, list(entry.block_ids))
+                self._pending_loads[mm_hash] = (
+                    transfer_id,
+                    list(entry.block_ids),
+                    entry.shape,
+                )
                 self._load_acks[transfer_id] = (mm_hash, self._expected_load_reports)
 
     def build_connector_meta(
@@ -608,13 +632,13 @@ class ECCPUScheduler:
             # A read arriving before the save lands is NACKed NACK_NOT_READY,
             # which the consumer retries on a later step rather than treating
             # as a miss.
-            size_bytes = (
-                feature.mm_position.length * self._hidden_dim * self._element_size
-            )
+            assert entry.shape is not None
+            size_bytes = len(entry.block_ids) * self._region.block_size_bytes
             items[mm_hash].update(
                 peer_host=self._peer_host,
                 peer_port=self._peer_port,
                 size_bytes=size_bytes,
+                shape=list(entry.shape),
             )
         logger.debug(
             "EC producer: announcing NIXL-readable encodings req_id=%s items=%s",

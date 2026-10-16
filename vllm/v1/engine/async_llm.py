@@ -22,7 +22,11 @@ from vllm.distributed.weight_transfer.base import (
 )
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient, StreamingInput
-from vllm.entrypoints.serve.elastic_ep.middleware import set_scaling_elastic_ep
+from vllm.entrypoints.serve.elastic_ep.middleware import (
+    get_elastic_ep_rank_retired,
+    set_elastic_ep_rank_retired,
+    set_scaling_elastic_ep,
+)
 from vllm.exceptions import (
     GracefulHTTPError,
     MaxQueuedTokensError,
@@ -53,7 +57,11 @@ from vllm.v1.engine.admission_control import SharedAdmissionStats
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
 from vllm.v1.engine.input_processor import InputProcessor
-from vllm.v1.engine.output_processor import OutputProcessor, RequestOutputCollector
+from vllm.v1.engine.output_processor import (
+    OutputProcessor,
+    RequestOutputCollector,
+    StreamingInputOutputCollector,
+)
 from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.executor import Executor
 from vllm.v1.fault_tolerance.utils import FaultToleranceRequest, FaultToleranceResult
@@ -348,7 +356,7 @@ class AsyncLLM(EngineClient):
                 else self.get_num_unfinished_requests()
             )
             if current_requests + n > max_num_reqs:
-                logger.info(
+                logger.debug(
                     "Request queue full - rejecting request %s "
                     "(current=%d, n=%d, max=%d).",
                     request_id,
@@ -356,20 +364,27 @@ class AsyncLLM(EngineClient):
                     n,
                     max_num_reqs,
                 )
+                self._record_admission_rejection("max_num_queued_reqs")
                 raise QueueOverflowError()
 
         max_queued_tokens = self.scheduler_config.max_num_queued_tokens
         if max_queued_tokens is not None:
             current_tokens = self.get_num_queued_tokens()
             if current_tokens >= max_queued_tokens:
-                logger.info(
+                logger.debug(
                     "Max queued tokens reached - rejecting request %s "
                     "(current_tokens=%d, max=%d).",
                     request_id,
                     current_tokens,
                     max_queued_tokens,
                 )
+                self._record_admission_rejection("max_num_queued_tokens")
                 raise MaxQueuedTokensError()
+
+    def _record_admission_rejection(self, reason: str) -> None:
+        """Increment the frontend admission rejection counter if logging is on."""
+        if self.logger_manager is not None:
+            self.logger_manager.record_admission_rejection(reason)
 
     async def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         if not hasattr(self, "_supported_tasks"):
@@ -613,7 +628,9 @@ class AsyncLLM(EngineClient):
         self.input_processor.assign_request_id(final_req)
         internal_req_id = final_req.request_id
 
-        queue = RequestOutputCollector(sampling_params.output_kind, internal_req_id)
+        queue = StreamingInputOutputCollector(
+            sampling_params.output_kind, internal_req_id
+        )
 
         async def handle_inputs():
             cancelled = False
@@ -621,6 +638,13 @@ class AsyncLLM(EngineClient):
             any_added = False
             try:
                 async for input_chunk in input_stream:
+                    # Stop once the session has finished (aborted or errored).
+                    # There is no await between this check and the ADD send,
+                    # so any chunk already sent precedes the engine abort.
+                    if any_added and not self.output_processor.has_request(
+                        internal_req_id
+                    ):
+                        break
                     sp = input_chunk.sampling_params
                     if sp:
                         self._validate_streaming_input_sampling_params(sp)
@@ -656,8 +680,10 @@ class AsyncLLM(EngineClient):
                 if not cancelled:
                     if any_added:
                         # Send empty final request to indicate that inputs have
-                        # finished. Don't send if cancelled (session was aborted).
-                        await self._add_request(final_req, None, None, 0, queue)
+                        # finished. Don't send if cancelled or if the session
+                        # already finished (aborted or errored).
+                        if self.output_processor.has_request(internal_req_id):
+                            await self._add_request(final_req, None, None, 0, queue)
                     elif not errored:
                         queue.put(STREAM_FINISHED)
 
@@ -896,6 +922,12 @@ class AsyncLLM(EngineClient):
                             mm_cache_stats=renderer.stat_mm_cache(),
                         )
             except Exception as e:
+                if get_elastic_ep_rank_retired() and isinstance(e, EngineDeadError):
+                    logger.info(
+                        "[Elastic EP] Retired rank stopped receiving EngineCore outputs"
+                    )
+                    output_processor.propagate_error(e)
+                    return
                 logger.exception("AsyncLLM output_handler failed.")
                 output_processor.propagate_error(e)
 
@@ -1081,6 +1113,8 @@ class AsyncLLM(EngineClient):
 
     async def check_health(self) -> None:
         logger.debug("Called check_health.")
+        if get_elastic_ep_rank_retired():
+            return
         if self.errored:
             raise self.dead_error
 
@@ -1230,8 +1264,13 @@ class AsyncLLM(EngineClient):
                 "waiting for requests to drain before scaling"
             )
             await self.wait_for_requests_to_drain(drain_timeout)
-        except BaseException:
-            set_scaling_elastic_ep(False)
+        except BaseException as e:
+            if self.vllm_config.parallel_config.data_parallel_external_lb:
+                await self.engine_core.abort_external_elastic_ep(
+                    str(e) or type(e).__name__
+                )
+            else:
+                set_scaling_elastic_ep(False)
             raise
 
     async def scale_elastic_ep(
@@ -1244,7 +1283,8 @@ class AsyncLLM(EngineClient):
     async def _scale_elastic_ep(
         self, new_data_parallel_size: int, drain_timeout: int
     ) -> None:
-        old_data_parallel_size = self.vllm_config.parallel_config.data_parallel_size
+        parallel_config = self.vllm_config.parallel_config
+        old_data_parallel_size = parallel_config.data_parallel_size
         if old_data_parallel_size == new_data_parallel_size:
             logger.info(
                 "Data parallel size is already %s, skipping scale",
@@ -1275,9 +1315,36 @@ class AsyncLLM(EngineClient):
         if envs.VLLM_ELASTIC_EP_DRAIN_REQUESTS:
             await self._drain_requests_for_elastic_ep(drain_timeout)
 
-        await self.engine_core.commit_elastic_ep()
-        self.vllm_config.parallel_config.data_parallel_size = new_data_parallel_size
-        set_scaling_elastic_ep(False)
+        rank_will_retire = (
+            parallel_config.data_parallel_external_lb
+            and new_data_parallel_size < old_data_parallel_size
+            and parallel_config.data_parallel_rank >= new_data_parallel_size
+        )
+        if rank_will_retire:
+            set_elastic_ep_rank_retired(True)
+
+        commit_succeeded = False
+        try:
+            await self.engine_core.commit_elastic_ep()
+            parallel_config.data_parallel_size = new_data_parallel_size
+            commit_succeeded = True
+            if rank_will_retire:
+                logger.info(
+                    "[Elastic EP] Data-parallel rank %s is retired and awaiting "
+                    "external process shutdown",
+                    parallel_config.data_parallel_rank,
+                )
+        finally:
+            if rank_will_retire and not commit_succeeded:
+                set_elastic_ep_rank_retired(False)
+            # A failed commit may leave engines partially reconfigured or paused.
+            if commit_succeeded:
+                set_scaling_elastic_ep(False)
+
+    async def get_external_elastic_ep_status(
+        self,
+    ) -> dict[str, str | int | None] | None:
+        return await self.engine_core.get_external_elastic_ep_status()
 
     async def handle_fault(
         self, fault_tolerance_request: FaultToleranceRequest
@@ -1300,6 +1367,10 @@ class AsyncLLM(EngineClient):
     @property
     def errored(self) -> bool:
         return self.engine_core.resources.engine_dead or not self.is_running
+
+    @property
+    def should_keep_api_server_alive(self) -> bool:
+        return get_elastic_ep_rank_retired()
 
     @property
     def dead_error(self) -> BaseException:

@@ -893,6 +893,7 @@ class QkNormRopeKvCacheFusionPass(VllmPatternMatcherPass):
                     layer.head_size,
                 )
                 continue
+            layer.impl.set_interleaved_v_cache()
             if supports_rope:
                 for epsilon in [1e-5, 1e-6]:
                     for neox in [True, False]:
@@ -903,7 +904,6 @@ class QkNormRopeKvCacheFusionPass(VllmPatternMatcherPass):
                                 is_neox=neox,
                                 quant_query=quant_q,
                             ).register(self.patterns)
-
             if supports_mrope:
                 for section, is_interleaved in self.mrope_configs:
                     rotary_dim = 2 * sum(section)

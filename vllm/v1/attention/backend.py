@@ -552,9 +552,7 @@ M = TypeVar("M")
 
 
 class AttentionCGSupport(Enum):
-    """Constants for the cudagraph support of the attention backend
-    Here we do not consider the cascade attention, as currently
-    it is never cudagraph supported."""
+    """Constants for the cudagraph support of the attention backend"""
 
     ALWAYS = 3
     """Cudagraph always supported; supports mixed-prefill-decode"""
@@ -692,7 +690,8 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
         Some builders (MLA) require reorder_batch to be called prior to build.
 
         Args:
-            common_prefix_len: The length of the common prefix of the batch.
+            common_prefix_len: Deprecated and always 0. Kept for compatibility
+                with out-of-tree builders.
             common_attn_metadata: The common attention metadata.
             fast_build: The meta-data will prioritize speed of building over
                 then speed at execution. Can be used for spec-decode where the
@@ -757,20 +756,6 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
         tensors that ``metadata`` already references.
         """
         raise NotImplementedError
-
-    def use_cascade_attention(
-        self,
-        common_prefix_len: int,
-        query_lens: np.ndarray,
-        num_query_heads: int,
-        num_kv_heads: int,
-        use_alibi: bool,
-        use_sliding_window: bool,
-        use_local_attention: bool,
-        num_sms: int,
-        dcp_world_size: int,
-    ) -> bool:
-        return False
 
 
 class AttentionLayer(Protocol):
@@ -963,6 +948,16 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
 
     def fused_qk_norm_mrope_kvcache_supported(self):
         """Whether this implementation supports fused QKNorm+MRoPE+KVCache."""
+        return False
+
+    def set_interleaved_v_cache(self):
+        """Opt this implementation into the interleaved V-cache layout for all of
+        its cache writers and readers. QkNormRopeKvCacheFusionPass calls this
+        for every eligible layer when it is constructed, i.e. before any KV
+        cache is written, so fused and unfused paths stay consistent whether or
+        not the pattern matches. Default is a no-op; backends whose kernels
+        read an interleaved V-cache under this fusion (e.g. ROCM_ATTN) override.
+        """
         return False
 
     def fused_rope_kvcache_supported(self):

@@ -147,7 +147,7 @@ Priority is **1 = highest** (tried first).
 
 --8<-- "gen:priority-mla"
 
-> **\*** For sparse MLA, FP8 KV cache always prefers `FLASHINFER_MLA_SPARSE`. With BF16 KV cache, `FLASHINFER_MLA_SPARSE` is preferred for low query-head counts (<= 16), while `FLASHMLA_SPARSE` is preferred otherwise.
+> **\*** For sparse MLA, FP8 KV cache always prefers `FLASHINFER_MLA_SPARSE`. With BF16 KV cache, `FLASH_ATTN_MLA_SPARSE_FA4` (then `FLASHINFER_MLA_SPARSE`) is preferred for low query-head counts (<= 16) on SM 10.x, while `FLASHMLA_SPARSE` is preferred otherwise.
 >
 > **Note:** ROCm and CPU platforms have their own selection logic. See the platform-specific documentation for details.
 
@@ -258,6 +258,12 @@ compressed pages, C4 compression,
 64 query heads of dimension 128, and DCP/PCP size 1. Speculative rows are
 flattened before C4 length division. The metadata builder computes prefill
 windows and AITER schedules once per step for reuse across indexer layers.
+Both prefill and decode use AITER's host-shape persistent-grid selector rather
+than a vLLM-specific CTA floor. Prefill selection uses the current chunk's row
+count and logits width; no device-to-host synchronization is needed.
 Decode schedules use builder-owned storage refreshed before graph replay.
+Decode logits are temporary storage sized to the current batch or captured
+graph's row count, not the scheduler's maximum: full-graph capture owns them
+in its graph pool, while eager execution releases them after top-k selection.
 Prefill chunks are bounded by query rows times the maximum compressed request
 length, rather than the sum of gathered request lengths.

@@ -583,7 +583,6 @@ def test_mamba_cpu_offload_boundary(model: str, block_size: int, tp_size: int):
         kv_transfer_config=kv_transfer_config,
         language_model_only=True,
         enable_prefix_caching=True,
-        mamba_cache_mode="align",
         # Use lossless state storage so this exact-equality regression isolates
         # offload boundary selection from low-precision Mamba checkpointing.
         mamba_cache_dtype="float32",

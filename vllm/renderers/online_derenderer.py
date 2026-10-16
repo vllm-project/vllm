@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Sequence
+from functools import cached_property
 from typing import Any
 
 from vllm.config import ModelConfig
@@ -8,7 +9,11 @@ from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
     ToolCall,
 )
-from vllm.entrypoints.generate.base.serving import decode_token_ids
+from vllm.entrypoints.generate.base.serving import (
+    chat_top_logprobs_limit,
+    completion_top_logprobs_limit,
+    decode_token_ids,
+)
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionLogProb,
     ChatCompletionLogProbs,
@@ -37,6 +42,7 @@ from vllm.entrypoints.serve.engine.protocol import UsageInfo
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.entrypoints.serve.utils.tool_calls_utils import (
     maybe_filter_parallel_tool_calls,
+    resolve_finish_reason,
 )
 from vllm.logger import init_logger
 from vllm.parser import Parser, ParserManager
@@ -69,7 +75,7 @@ class OnlineDerenderer:
         exclude_tools_when_tool_choice_none: bool = False,
         tool_parser: str | None = None,
         reasoning_parser: str | None = None,
-        tool_strict_level: str = "auto",
+        tool_strict_level: str | None = None,
         default_chat_template_kwargs: dict[str, Any] | None = None,
         log_error_stack: bool = False,
     ) -> None:
@@ -129,6 +135,43 @@ class OnlineDerenderer:
             generate_response, chat_request, prompt_token_ids
         )
 
+    @cached_property
+    def _model_eos_token_ids(self) -> frozenset[int]:
+        """EOS ids the engine stops on: the tokenizer's and generation_config's."""
+        eos_ids: set[int] = set()
+        if (eos_token_id := self.renderer.get_eos_token_id()) is not None:
+            eos_ids.add(eos_token_id)
+        config_eos = self.model_config.try_get_generation_config().get("eos_token_id")
+        if config_eos is not None:
+            eos_ids.update([config_eos] if isinstance(config_eos, int) else config_eos)
+        return frozenset(eos_ids)
+
+    def _text_token_ids(
+        self,
+        token_ids: list[int],
+        finish_reason: str | None,
+        stop_reason: int | str | None,
+        request: ChatCompletionRequest | None,
+    ) -> list[int]:
+        """The ids whose text the engine returns. Like its detokenizer, leave
+        out the token that stopped generation (EOS when `stop_reason` is None,
+        a `stop_token_ids` entry when it is an int) unless
+        `include_stop_str_in_output` is set. The last-id check guards against
+        `finish_reason` defaulting to "stop" when the client sends neither."""
+        if (
+            finish_reason != "stop"
+            or isinstance(stop_reason, str)
+            or not token_ids
+            or (request is not None and request.include_stop_str_in_output)
+        ):
+            return token_ids
+        last = token_ids[-1]
+        if stop_reason is None:
+            stopped = last in self._model_eos_token_ids
+        else:
+            stopped = last == stop_reason
+        return token_ids[:-1] if stopped else token_ids
+
     def _derender_chat(
         self,
         generate_response: GenerateTokensResponse,
@@ -160,12 +203,22 @@ class OnlineDerenderer:
             else {}
         )
 
+        return_token_ids = (
+            chat_request is not None
+            and chat_request.return_token_ids
+            and (not has_parser or chat_request.include_reasoning)
+        )
+        top_limit = _chat_top_logprobs_limit(chat_request)
         for choice in generate_response.choices:
             if not choice.token_ids:
                 raise ValueError(f"choice {choice.index} has empty or null token_ids")
 
             resolved_logprobs = (
-                _resolve_logprobs(choice.logprobs, tokenizer)
+                _resolve_logprobs(
+                    choice.logprobs,
+                    tokenizer,
+                    top_limit=top_limit,
+                )
                 if choice.logprobs is not None
                 else None
             )
@@ -176,7 +229,12 @@ class OnlineDerenderer:
             # (default True when no request was given).
             decoded_text, _ = self._detokenize_delta(
                 tokenizer,
-                choice.token_ids,
+                self._text_token_ids(
+                    choice.token_ids,
+                    choice.finish_reason,
+                    choice.stop_reason,
+                    chat_request,
+                ),
                 seed_state,
                 skip_special_tokens=skip_special,
                 spaces_between_special_tokens=spaces_between,
@@ -200,7 +258,11 @@ class OnlineDerenderer:
                     index=choice.index,
                     message=message,
                     logprobs=resolved_logprobs,
-                    finish_reason=choice.finish_reason,
+                    finish_reason=resolve_finish_reason(
+                        choice.finish_reason, chat_request, bool(message.tool_calls)
+                    ),
+                    stop_reason=choice.stop_reason,
+                    token_ids=choice.token_ids if return_token_ids else None,
                 )
             )
 
@@ -432,11 +494,15 @@ class OnlineDerenderer:
         stream_choices: list[ChatCompletionResponseStreamChoice] = []
         updated_state = state
 
+        return_token_ids = chat_request is not None and chat_request.return_token_ids
+        top_limit = _chat_top_logprobs_limit(chat_request)
         for choice in generate_chunk.choices:
             delta_tids = choice.token_ids or []
             new_text, updated_state = await self._detokenize_delta_async(
                 tokenizer,
-                delta_tids,
+                self._text_token_ids(
+                    delta_tids, choice.finish_reason, choice.stop_reason, chat_request
+                ),
                 updated_state,
                 skip_special_tokens=skip_special,
                 spaces_between_special_tokens=spaces_between,
@@ -455,6 +521,7 @@ class OnlineDerenderer:
                     choice.logprobs,
                     tokenizer,
                     initial_context_token_ids=state.logprob_context_token_ids,
+                    top_limit=top_limit,
                 )
 
             include_role = not updated_state.role_sent
@@ -477,6 +544,8 @@ class OnlineDerenderer:
                     delta=delta,
                     logprobs=resolved_logprobs,
                     finish_reason=choice.finish_reason,
+                    stop_reason=choice.stop_reason,
+                    token_ids=choice.token_ids if return_token_ids else None,
                 )
             )
 
@@ -583,6 +652,10 @@ class OnlineDerenderer:
         tools_streamed = state.tools_streamed
         last_tool_call_ids = list(state.last_tool_call_ids)
 
+        return_token_ids = (
+            chat_request.return_token_ids and chat_request.include_reasoning
+        )
+
         # At most one choice: the caller (derender_chat_stream) already
         # rejects >1 before dispatching here. role_sent/tools_streamed/
         # output_token_ids below are updated for that single choice, not
@@ -600,7 +673,12 @@ class OnlineDerenderer:
                 # in this method's docstring.
                 text, detok_state = self._detokenize_delta(
                     tokenizer,
-                    delta_tids,
+                    self._text_token_ids(
+                        delta_tids,
+                        choice.finish_reason,
+                        choice.stop_reason,
+                        chat_request,
+                    ),
                     detok_state,
                     skip_special_tokens=skip_special,
                     spaces_between_special_tokens=spaces_between,
@@ -650,16 +728,16 @@ class OnlineDerenderer:
 
             finish_reason = choice.finish_reason
             if finish_reason is not None:
-                is_named_tool_choice = (
-                    type(chat_request.tool_choice) is ChatCompletionNamedToolChoiceParam
+                finish_reason = resolve_finish_reason(
+                    finish_reason, chat_request, tools_streamed
                 )
-                if tools_streamed and not is_named_tool_choice:
-                    finish_reason = "tool_calls"
 
             stream_choice = ChatCompletionResponseStreamChoice(
                 index=choice.index,
                 delta=delta_message,
                 finish_reason=finish_reason,
+                stop_reason=choice.stop_reason,
+                token_ids=choice.token_ids if return_token_ids else None,
             )
             stream_choices.append(
                 maybe_filter_parallel_tool_calls(stream_choice, chat_request)
@@ -727,6 +805,7 @@ class OnlineDerenderer:
         total_prompt_tokens = 0
         total_completion_tokens = 0
         index = 0
+        top_limit = _completion_top_logprobs_limit(completion_request)
 
         for gen, pt, seed_ids_override in zip(
             generate_responses, prompt_tokens_list, prompt_token_ids_list
@@ -755,15 +834,20 @@ class OnlineDerenderer:
                 )
                 completion_logprobs = None
                 if choice.logprobs is not None:
-                    resolved = _resolve_logprobs(choice.logprobs, tokenizer)
+                    resolved = _resolve_logprobs(
+                        choice.logprobs,
+                        tokenizer,
+                        top_limit=top_limit,
+                    )
                     completion_logprobs = _convert_chat_logprobs_to_completion_logprobs(
-                        resolved
+                        resolved, choice.logprobs
                     )
                 choices.append(
                     CompletionResponseChoice(
                         index=index,
                         text=decoded_text,
                         finish_reason=choice.finish_reason,
+                        stop_reason=choice.stop_reason,
                         logprobs=completion_logprobs,
                     )
                 )
@@ -829,6 +913,7 @@ class OnlineDerenderer:
         stream_choices: list[CompletionResponseStreamChoice] = []
         updated_state = state
 
+        top_limit = _completion_top_logprobs_limit(completion_request)
         for choice in generate_chunk.choices:
             delta_tids = choice.token_ids or []
             new_text, updated_state = await self._detokenize_delta_async(
@@ -845,9 +930,12 @@ class OnlineDerenderer:
                     choice.logprobs,
                     tokenizer,
                     initial_context_token_ids=state.logprob_context_token_ids,
+                    top_limit=top_limit,
                 )
                 completion_logprobs = _convert_chat_logprobs_to_completion_logprobs(
-                    resolved, initial_text_offset=state.logprob_text_offset
+                    resolved,
+                    choice.logprobs,
+                    initial_text_offset=state.logprob_text_offset,
                 )
 
             updated_state = updated_state.model_copy(
@@ -865,6 +953,7 @@ class OnlineDerenderer:
                     text=new_text,
                     logprobs=completion_logprobs,
                     finish_reason=choice.finish_reason,
+                    stop_reason=choice.stop_reason,
                 )
             )
 
@@ -998,10 +1087,38 @@ def _correct_decoded_token(
     return ""
 
 
+def _chat_top_logprobs_limit(chat_request: ChatCompletionRequest | None) -> int | None:
+    """The cut `/v1/chat/completions` applies (`chat_top_logprobs_limit`, the
+    same helper its `_get_top_logprobs` uses). None keeps every candidate, which
+    is also what happens without a `chat_request` or with one that does not ask
+    for logprobs: it then says nothing about the cut, so the candidates
+    generate returned are passed through."""
+    if chat_request is None or not chat_request.logprobs:
+        return None
+    return chat_top_logprobs_limit(
+        chat_request.top_logprobs, bool(chat_request.logprob_token_ids)
+    )
+
+
+def _completion_top_logprobs_limit(
+    completion_request: CompletionRequest | None,
+) -> int | None:
+    """The cut `/v1/completions` applies (`completion_top_logprobs_limit`, the
+    same helper `_create_completion_logprobs` uses). None keeps every candidate,
+    which is also what happens without a `completion_request` or with one that
+    does not ask for logprobs (`logprobs` unset)."""
+    if completion_request is None:
+        return None
+    return completion_top_logprobs_limit(
+        completion_request.logprobs, bool(completion_request.logprob_token_ids)
+    )
+
+
 def _resolve_logprobs(
     logprobs: GenerateLogProbs,
     tokenizer: TokenizerLike,
     initial_context_token_ids: Sequence[int] = (),
+    top_limit: int | None = None,
 ) -> ChatCompletionLogProbs:
     """Convert generate's integer-id logprobs to the OpenAI chat shape.
 
@@ -1011,6 +1128,11 @@ def _resolve_logprobs(
     ids as context). ``initial_context_token_ids`` seeds that context with
     sampled IDs from preceding chunks (streaming), so multi-byte characters
     split across chunk boundaries still resolve.
+
+    Generate returns every candidate the engine produced for a position (the
+    sampled token first, then the top k). ``top_limit`` applies the target
+    endpoint's cut before decoding, so each derender endpoint returns what its
+    coupled counterpart would; None keeps all of them.
     """
     if logprobs.content is None:
         return ChatCompletionLogProbs()
@@ -1019,9 +1141,12 @@ def _resolve_logprobs(
     resolved_content = []
 
     for entry in logprobs.content:
-        # One batch per position: the sampled id and its top-k ids.
+        top_entries = (
+            entry.top_logprobs if top_limit is None else entry.top_logprobs[:top_limit]
+        )
+        # One batch per position: the sampled id and its kept top-k ids.
         (token_str, token_bytes), *top_decoded = decode_token_ids(
-            [entry.token_id, *(top.token_id for top in entry.top_logprobs)],
+            [entry.token_id, *(top.token_id for top in top_entries)],
             tokenizer,
         )
 
@@ -1032,7 +1157,7 @@ def _resolve_logprobs(
             token_bytes = list(token_str.encode("utf-8"))
 
         resolved_top = []
-        for top, (top_str, top_bytes) in zip(entry.top_logprobs, top_decoded):
+        for top, (top_str, top_bytes) in zip(top_entries, top_decoded):
             if top_str.endswith("\ufffd"):
                 top_str = _correct_decoded_token(
                     top.token_id, context_token_ids, tokenizer
@@ -1062,10 +1187,16 @@ def _resolve_logprobs(
 
 def _convert_chat_logprobs_to_completion_logprobs(
     logprobs: ChatCompletionLogProbs,
+    generate_logprobs: GenerateLogProbs,
     initial_text_offset: int = 0,
 ) -> CompletionLogProbs:
     """Convert ChatCompletionLogProbs (per-token objects) to CompletionLogProbs
     (parallel flat lists) as required by the /v1/completions response schema.
+
+    ``generate_logprobs`` is what ``logprobs`` was resolved from. A position
+    with no candidates there had no logprobs in the engine output, which
+    /v1/completions reports as ``None``; every other position is a dict of
+    the candidates the cut kept.
 
     ``initial_text_offset`` keeps ``text_offset`` absolute across streaming
     chunks, mirroring the generate streaming path.
@@ -1079,13 +1210,13 @@ def _convert_chat_logprobs_to_completion_logprobs(
     text_offset: list[int] = []
 
     offset = initial_text_offset
-    for entry in logprobs.content:
+    for entry, source in zip(logprobs.content, generate_logprobs.content or ()):
         text_offset.append(offset)
         tokens.append(entry.token)
         token_logprobs.append(entry.logprob)
         top_logprobs_list.append(
             {t.token: t.logprob for t in entry.top_logprobs}
-            if entry.top_logprobs
+            if source.top_logprobs
             else None
         )
         offset += len(entry.token)

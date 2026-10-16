@@ -12,6 +12,7 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     VllmTritonJitKernel,
     triton_scalar_specialization_rep,
 )
+from vllm.transformers_utils.deepseek_v4_utils import get_compress_ratios
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
 
@@ -124,7 +125,7 @@ class CompressedSlotMappingKernel(
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
         hf_text_config = vllm_config.model_config.hf_text_config
         configured_ratios = (
-            *(getattr(hf_text_config, "compress_ratios", None) or ()),
+            *get_compress_ratios(hf_text_config),
             getattr(hf_text_config, "index_kpool", 1) or 1,
         )
         compress_ratios = tuple(

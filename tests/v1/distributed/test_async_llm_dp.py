@@ -368,9 +368,11 @@ async def test_dp_pause_late_request_does_not_block_drain():
         # down first. The front-end sets its own copy optimistically when it
         # forwards the wake, so sample only after several coordinator
         # publishes (every 100ms while stats change) have overwritten it.
+        # Rank 0 reports the wave only after its first step, which can outlast
+        # the 2s on a cold device, so wait for the report rather than sample it.
         await asyncio.sleep(2)
         assert not long_request.done(), "the warmup request was too short to sample"
-        assert engine.engine_core.dp_engines_running(), (
+        assert await _poll_flag(engine, True, timeout=30), (
             "the coordinator does not report the engines as running while they are"
         )
 

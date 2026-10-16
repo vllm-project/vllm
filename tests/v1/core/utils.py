@@ -36,6 +36,10 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheSpec,
+    KVQuantMode,
+    MambaSpec,
+    MLAAttentionSpec,
+    SlidingWindowSpec,
 )
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
@@ -81,6 +85,7 @@ def create_scheduler(
     kv_cache_spec: KVCacheSpec | None = None,
     runner: RunnerOption = "auto",
     per_request_spec_decode_metrics: str = "none",
+    prefill_schedule_interval: int = 1,
     scheduling_policy: SchedulerPolicy = "fcfs",
     diffusion_canvas_length: int | None = None,
     scheduler_cls: type[Scheduler] | None = None,
@@ -130,6 +135,7 @@ def create_scheduler(
         enable_chunked_prefill=enable_chunked_prefill,
         async_scheduling=async_scheduling,
         is_encoder_decoder=model_config.is_encoder_decoder,
+        prefill_schedule_interval=prefill_schedule_interval,
         # Ensure admission/preemption mechanics are deterministic
         watermark=0.0,
         policy=scheduling_policy,
@@ -333,3 +339,73 @@ def create_requests(
         )
         requests.append(request)
     return requests
+
+
+def new_kv_cache_spec(
+    block_size=16,
+    num_kv_heads=2,
+    head_size=64,
+    dtype=torch.float32,
+    page_size_padded=None,
+    sliding_window=None,
+    attention_chunk_size=None,
+    kv_quant_mode=KVQuantMode.NONE,
+):
+    return FullAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=num_kv_heads,
+        head_size=head_size,
+        dtype=dtype,
+        page_size_padded=page_size_padded,
+        sliding_window=sliding_window,
+        attention_chunk_size=attention_chunk_size,
+        kv_quant_mode=kv_quant_mode,
+    )
+
+
+def new_sliding_window_spec(
+    block_size=16,
+    num_kv_heads=2,
+    head_size=64,
+    dtype=torch.float32,
+    page_size_padded=None,
+    sliding_window=1,
+):
+    return SlidingWindowSpec(
+        block_size=block_size,
+        num_kv_heads=num_kv_heads,
+        head_size=head_size,
+        dtype=dtype,
+        page_size_padded=page_size_padded,
+        sliding_window=sliding_window,
+    )
+
+
+def new_mamba_spec(
+    block_size=16,
+    shapes=((2, 512), (3, 32, 32)),
+    dtypes=(torch.float32, torch.float32),
+    num_speculative_blocks=2,
+    mamba_cache_mode="none",
+    page_size_padded=None,
+):
+    return MambaSpec(
+        block_size=block_size,
+        shapes=shapes,
+        dtypes=dtypes,
+        page_size_padded=page_size_padded,
+        mamba_cache_mode=mamba_cache_mode,
+        num_speculative_blocks=num_speculative_blocks,
+    )
+
+
+def new_mla_spec(cache_dtype_str=None, block_size: int = 16):
+    # head_size = kv_lora_rank(512) + qk_rope_head_dim(64) = 576
+    return MLAAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        max_tp_shards=1,
+        head_size=576,
+        dtype=torch.float32,
+        cache_dtype_str=cache_dtype_str,
+    )

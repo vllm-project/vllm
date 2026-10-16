@@ -16,7 +16,10 @@ from tests.utils import create_new_process_for_each_test
 from vllm import LLM, SamplingParams, TokensPrompt
 from vllm.config import CacheConfig
 from vllm.distributed import cleanup_dist_env_and_memory
-from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFunc
+from vllm.model_executor.layers.mamba.mamba_utils import (
+    MambaStateCopyFunc,
+    is_conv_state_dim_first,
+)
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
@@ -59,6 +62,10 @@ MODEL = "Qwen/Qwen3-Next-80B-A3B-Instruct-FP8"
 # where block boundaries fall. XPU rounds GDN block sizes up to a multiple of 64
 # (XPUPlatform.update_block_size_for_backend), so use one.
 BLOCK_SIZE = 576
+# The step actions also encode the split at the prompt's last block boundary,
+# which a GDN prefill backend with internal checkpoints (FlashInfer) skips; see
+# get_internal_checkpoint_step_configs.
+GDN_PREFILL_CONFIG = {"gdn_prefill_backend": "triton"}
 DEVICE_TYPE = current_platform.device_type
 NUM_HIDDEN_LAYERS = 1
 cur_step_action_idx = 0
@@ -129,6 +136,10 @@ def get_fake_propose_draft_token_ids_fn():
             first_token_id_index = (
                 num_computed_tokens + 1
             )  # bonus token isn't considered as computed
+        # num_accepted_tokens_cpu is filled by a non-blocking D2H copy in the
+        # same step; wait for it or a lagging GPU yields stale counts.
+        if self.num_accepted_tokens_event is not None:
+            self.num_accepted_tokens_event.synchronize()
         first_token_id_index += self.input_batch.num_accepted_tokens_cpu[0].item()
         proposed_draft_token_ids = [
             prompt_token_ids[
@@ -878,6 +889,73 @@ def get_mamba_prefix_cache_step_configs(
     return tests
 
 
+def get_internal_checkpoint_step_configs() -> dict[str, TestConfig]:
+    """Async-scheduling steps when the GDN prefill exports the checkpoint at
+    the prompt's last block boundary itself, so the final chunk runs whole.
+
+    The checkpoint goes in the second-to-last block the chunk reaches, keyed to
+    the boundary: column 1 holds the state at B for a 2B + 10 prompt.
+    """
+    B = BLOCK_SIZE
+    return {
+        "prompt_2_block_size": TestConfig(
+            num_prompt_tokens=B * 2,
+            num_generated_tokens=10,
+            num_accepted_tokens=4,
+            step_actions=[
+                StepAction(0, B * 2, [1, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B * 2, 4, [1, 1, 1, 1, 1, 1], (1, 2), (-1, -1)),
+            ],
+        ),
+        "prompt_2_block_size_10": TestConfig(
+            num_prompt_tokens=B * 2 + 10,
+            num_generated_tokens=10,
+            num_accepted_tokens=4,
+            step_actions=[
+                StepAction(0, B * 2 + 10, [0, 1, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B * 2 + 10, 4, [0, 1, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+            ],
+        ),
+        "prompt_10_block_size": TestConfig(
+            num_prompt_tokens=B * 10,
+            num_generated_tokens=10,
+            num_accepted_tokens=4,
+            step_actions=[
+                StepAction(0, B * 5, [0, 0, 0, 0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(
+                    B * 5,
+                    B * 5,
+                    [0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 1, 1],
+                    (4, 9),
+                    (-1, -1),
+                ),
+                StepAction(
+                    B * 10,
+                    4,
+                    [0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 1, 1, 1],
+                    (9, 10),
+                    (-1, -1),
+                ),
+            ],
+        ),
+        "prompt_10_block_size_10": TestConfig(
+            num_prompt_tokens=B * 10 + 10,
+            num_generated_tokens=10,
+            num_accepted_tokens=4,
+            step_actions=[
+                StepAction(0, B * 5, [0, 0, 0, 0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(
+                    B * 5,
+                    B * 5 + 10,
+                    [0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 1, 1, 1, 1],
+                    (4, 10),
+                    (-1, -1),
+                ),
+            ],
+        ),
+    }
+
+
 def _run_mamba_prefix_cache_mrv1(
     monkeypatch: pytest.MonkeyPatch, async_scheduling: bool
 ):
@@ -898,7 +976,7 @@ def _run_mamba_prefix_cache_mrv1(
         load_format="dummy",
         enable_prefix_caching=True,
         block_size=BLOCK_SIZE,
-        mamba_cache_mode="align",
+        additional_config=GDN_PREFILL_CONFIG,
         speculative_config={
             "method": "qwen3_next_mtp",
             "num_speculative_tokens": num_speculative_tokens,
@@ -954,8 +1032,11 @@ def test_mamba_prefix_cache_mrv1_async(monkeypatch: pytest.MonkeyPatch):
 
 
 def _run_mamba_prefix_cache_mrv2(
-    monkeypatch: pytest.MonkeyPatch, async_scheduling: bool
+    monkeypatch: pytest.MonkeyPatch,
+    async_scheduling: bool,
+    additional_config: dict[str, Any] = GDN_PREFILL_CONFIG,
 ):
+    internal_checkpoints = additional_config["gdn_prefill_backend"] == "flashinfer"
     global async_scheduling_mode
     async_scheduling_mode = async_scheduling
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
@@ -1095,7 +1176,23 @@ def _run_mamba_prefix_cache_mrv2(
             with gpu_sync_allowed():
                 start_pos = input_batch.positions[input_batch.query_start_loc[0]].item()
             assert cur_step_action.num_computed_tokens_start == start_pos
+        if scheduler_output.scheduled_new_reqs and "snapshot_col" in captured:
+            captured["snapshot"] = block_states(self, captured.pop("snapshot_col"))
         return ret
+
+    def block_states(runner: MRV2GPUModelRunner, col: int) -> list[list[torch.Tensor]]:
+        # Each Mamba layer's (conv, temporal) states in block column col.
+        kv_cache_config = captured["kv_cache_config"]
+        forward_context = runner.vllm_config.compilation_config.static_forward_context
+        return [
+            [
+                temporal_block(state, captured["block_tables"][group_id], col).clone()
+                for state in forward_context[layer_name].kv_cache
+            ]
+            for group_ids in get_mamba_groups(kv_cache_config).values()
+            for group_id in group_ids
+            for layer_name in kv_cache_config.kv_cache_groups[group_id].layer_names
+        ]
 
     def fake_sample(
         self: MRV2GPUModelRunner,
@@ -1158,7 +1255,7 @@ def _run_mamba_prefix_cache_mrv2(
         skip_tokenizer_init=True,
         enable_prefix_caching=True,
         block_size=BLOCK_SIZE,
-        mamba_cache_mode="align",
+        additional_config=additional_config,
         speculative_config={
             "method": "qwen3_next_mtp",
             "num_speculative_tokens": num_speculative_tokens,
@@ -1171,7 +1268,11 @@ def _run_mamba_prefix_cache_mrv2(
     )
 
     try:
-        tests = get_mamba_prefix_cache_step_configs(async_scheduling)
+        tests = (
+            get_internal_checkpoint_step_configs()
+            if internal_checkpoints
+            else get_mamba_prefix_cache_step_configs(async_scheduling)
+        )
 
         global step_actions
         global cur_step_action_idx
@@ -1217,6 +1318,35 @@ def _run_mamba_prefix_cache_mrv2(
             f"got events={second_events!r}"
         )
         assert engine.llm_engine.engine_core.engine_core.scheduler.reset_prefix_cache()
+
+        if internal_checkpoints:
+            # The checkpoint a 2B + 10 prefill exports at B (column 1) is the
+            # final state of a prefill that stops at B (column 0). Distinct
+            # tokens make a shifted conv window visible.
+            tokens = [(i * 7919) % 30000 + 1 for i in range(BLOCK_SIZE * 2 + 10)]
+            scheduler = engine.llm_engine.engine_core.engine_core.scheduler
+            states = []
+            for num_tokens, col in ((BLOCK_SIZE, 0), (len(tokens), 1)):
+                captured["snapshot_col"] = col
+                _ = engine.generate(
+                    [TokensPrompt(prompt_token_ids=tokens[:num_tokens])],
+                    sampling_params=sampling_params,
+                )
+                states.append(captured.pop("snapshot"))
+                assert scheduler.reset_prefix_cache()
+            hf_config = engine.llm_engine.model_config.hf_text_config
+            state_len = hf_config.linear_conv_kernel_dim - 1
+            for (ref_conv, ref_ssm), (conv, ssm) in zip(*states):
+                if not is_conv_state_dim_first():
+                    ref_conv, conv = ref_conv.mT, conv.mT
+                # Under MTP the conv state has num_spec scratch columns after
+                # the window.
+                for new, ref in (
+                    (conv[..., :state_len], ref_conv[..., :state_len]),
+                    (ssm, ref_ssm),
+                ):
+                    rel_err = (new.float() - ref.float()).norm() / ref.float().norm()
+                    assert rel_err < 1e-2, rel_err
     finally:
         del engine
         torch.accelerator.empty_cache()
@@ -1231,3 +1361,26 @@ def test_mamba_prefix_cache_mrv2(monkeypatch: pytest.MonkeyPatch):
 @create_new_process_for_each_test()
 def test_mamba_prefix_cache_mrv2_async(monkeypatch: pytest.MonkeyPatch):
     _run_mamba_prefix_cache_mrv2(monkeypatch, async_scheduling=True)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda()
+    or not (
+        current_platform.is_device_capability(90)
+        or (
+            (
+                current_platform.is_device_capability_family(100)
+                or current_platform.is_device_capability_family(120)
+            )
+            and current_platform.get_cuda_runtime_major() >= 13
+        )
+    ),
+    reason="FlashInfer GDN prefill needs SM90, or SM100/SM120 with CUDA 13.",
+)
+@create_new_process_for_each_test()
+def test_mamba_prefix_cache_mrv2_async_flashinfer(monkeypatch: pytest.MonkeyPatch):
+    _run_mamba_prefix_cache_mrv2(
+        monkeypatch,
+        async_scheduling=True,
+        additional_config={"gdn_prefill_backend": "flashinfer"},
+    )

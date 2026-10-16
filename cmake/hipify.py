@@ -65,7 +65,7 @@ if __name__ == "__main__":
         project_directory=args.project_dir,
         output_directory=args.output_dir,
         # Hipify resolves quoted includes next to the including file first; vLLM
-        # uses paths relative to csrc/ (e.g. "libtorch_stable/torch_utils.h"
+        # uses paths relative to csrc/ (e.g. "torch_utils.h"
         # from quantization/w8a8/fp8/*.cu). Without an include root here, those
         # headers are never found and are not hipified or rewritten in dependents.
         header_include_dirs=["."],

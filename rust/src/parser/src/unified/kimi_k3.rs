@@ -46,9 +46,7 @@
 //! now only applies to `argument` and `json` blocks inside a call body, which
 //! are still parsed from text.
 
-mod structural_tag;
-
-pub use structural_tag::KimiK3StructuralTagBuilder;
+mod grammar;
 
 use serde_json::{Map, Value};
 use vllm_tokenizer::{DecodedText, DynTokenizer, Tokenizer};
@@ -58,11 +56,8 @@ use winnow::error::{ContextError, ErrMode, ModalResult, StrContext};
 use winnow::prelude::*;
 use winnow::token::{literal, rest, take_till, take_until, take_while};
 
-use self::structural_tag::KIMI_K3_STRUCTURAL_TAG_BUILDER;
 use super::{Result, UnifiedParser, UnifiedParserOutput, special_token};
-use crate::output_grammar::{
-    self, BuiltOutputGrammar, OutputGrammarContext, visible_format_from_builder,
-};
+use crate::output_grammar::{self, BuiltOutputGrammar, OutputGrammarContext};
 use crate::tool::{Tool, ToolCallDelta};
 use crate::unified::parsing_failed;
 use crate::utils::{
@@ -347,10 +342,7 @@ impl UnifiedParser for KimiK3UnifiedParser {
         &self,
         ctx: &OutputGrammarContext<'_>,
     ) -> output_grammar::Result<Option<BuiltOutputGrammar>> {
-        Ok(
-            visible_format_from_builder(Some(&KIMI_K3_STRUCTURAL_TAG_BUILDER), ctx)?
-                .map(BuiltOutputGrammar::final_output_only),
-        )
+        grammar::build_output_grammar(&self.mode, ctx)
     }
 
     fn parse_into(&mut self, delta: DecodedText, output: &mut UnifiedParserOutput) -> Result<()> {

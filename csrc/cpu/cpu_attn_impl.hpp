@@ -14,7 +14,7 @@
 namespace cpu_attention {
 enum class ISA { AMX, VEC, VEC16, NEON, VXE, RVV, VSX, AMX_FP8 };
 
-// Mirrors csrc/attention/dtype_fp8.cuh Fp8KVCacheDataType exactly.
+// Mirrors csrc/core/vec_dtypes/dtype_fp8.cuh Fp8KVCacheDataType exactly.
 enum class Fp8KVCacheDataType {
   kAuto = 0,
   kFp8E4M3 = 1,

@@ -251,8 +251,17 @@ class TestTritonTopkTopp:
         triton_kept = (result_triton != float("-inf")).sum(dim=-1)
 
         if p is None:
-            # Top-k only: expect exact match
-            assert torch.equal(pytorch_kept, triton_kept), (
+            # Top-k only: Triton keeps exactly k (index-ordered tie-break at
+            # the k-th value) while the sort-based reference keeps all ties,
+            # so PyTorch may only keep extra tokens tied with the k-th value.
+            pytorch_mask = result_pytorch != float("-inf")
+            triton_mask = result_triton != float("-inf")
+            kth = torch.where(triton_mask, logits.float(), float("inf"))
+            kth = kth.amin(dim=-1, keepdim=True).expand_as(logits)
+            extra = pytorch_mask & ~triton_mask
+            assert not (triton_mask & ~pytorch_mask).any() and torch.equal(
+                logits.float()[extra], kth[extra]
+            ), (
                 f"Top-k mask mismatch: PyTorch kept {pytorch_kept.tolist()}, "
                 f"Triton kept {triton_kept.tolist()}"
             )

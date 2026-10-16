@@ -104,7 +104,7 @@ class ParserManager:
         enable_auto_tools: bool = False,
         model_name: str | None = None,
         is_harmony: bool = False,
-        tool_strict_level: str = "auto",
+        tool_strict_level: str | None = None,
         tokenizer: TokenizerLike | None = None,
     ) -> type[Parser] | None:
         """Get a Parser that handles both reasoning and tool parsing.
@@ -119,7 +119,8 @@ class ParserManager:
             is_harmony: Whether the selected model uses the Harmony format.
                         If True, HarmonyParser is always returned.
             tool_strict_level: Server-side floor for tool-call structural
-                tags (``--tool-strict-level``).
+                tags (``--tool-strict-level``), or ``None`` for the tool
+                parser's default level.
             tokenizer: Tokenizer the composed parser is validated against
                 at startup (see :meth:`validate_parser_tokenizer`). ``None``
                 skips the check (e.g. ``skip_tokenizer_init``).
@@ -155,7 +156,7 @@ class ParserManager:
         enable_auto_tools: bool,
         model_name: str | None,
         is_harmony: bool,
-        tool_strict_level: str,
+        tool_strict_level: str | None,
         tokenizer: TokenizerLike | None,
     ) -> type[Parser] | None:
         if not tool_parser_name and not reasoning_parser_name:
@@ -169,7 +170,11 @@ class ParserManager:
         if reasoning_parser_cls is None and tool_parser_cls is None:
             return None
 
-        strict_level = ToolStrictLevel.from_name(tool_strict_level)
+        strict_level = (
+            None
+            if tool_strict_level is None
+            else ToolStrictLevel.from_name(tool_strict_level)
+        )
 
         if is_harmony:
             from vllm.parser.harmony import HarmonyParser

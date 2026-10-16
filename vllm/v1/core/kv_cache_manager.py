@@ -14,7 +14,7 @@ from vllm.v1.core.kv_cache_coordinator import (
     get_kv_cache_coordinator,
 )
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
-from vllm.v1.core.kv_cache_utils import KVCacheBlock, KVCacheBlockCopy
+from vllm.v1.core.kv_cache_utils import KVCacheBlock, KVCacheBlockCopy, trim_null_head
 from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -117,7 +117,7 @@ class KVCacheBlocks:
         return [
             [
                 block.block_id
-                for block in group
+                for block in trim_null_head(group)
                 if block.block_hash is None and not block.is_null
             ]
             for group in self.blocks
@@ -689,39 +689,9 @@ class KVCacheManager:
         return True
 
     def get_num_common_prefix_blocks(self, running_request_id: str) -> list[int]:
-        """Calculate the number of common prefix blocks for each kv cache group.
-
-        The function selects a running request and iterates through its blocks.
-        A block is considered a common prefix block if ALL requests with
-        allocated KV cache share it (i.e., ref_cnt equals the number of entries
-        in req_to_blocks).
-
-        NOTE(woosuk): The number of requests with allocated KV cache is **greater
-        than or equal to** the number of requests scheduled in the current step.
-        This is because having allocated KV cache only indicates that:
-        1. The request has not yet finished, and
-        2. The request holds its blocks unfreed.
-
-        While all scheduled requests must have allocated KV cache, the inverse
-        is not necessarily true. There may be requests with allocated KV cache
-        that are not scheduled in the current step.
-
-        This can result in an edge case where the number of common prefix blocks
-        is 0, even though all scheduled requests share a common prefix. This
-        occurs because there may be unscheduled requests that do not share the
-        common prefix. Currently, this case cannot be easily detected, so the
-        function returns 0 in such cases.
-
-        Args:
-            running_request_id: The request ID of any running request, used to
-                identify the common prefix blocks.
-
-        Returns:
-            list[int]: The number of common prefix blocks for each kv cache
-            group.
-
-        """
-        return self.coordinator.get_num_common_prefix_blocks(running_request_id)
+        """Deprecated: cascade attention has been removed. Always returns 0
+        for each KV cache group. Kept for out-of-tree schedulers."""
+        return [0] * self.num_kv_cache_groups
 
     def take_events(self) -> list[KVCacheEvent]:
         """Take the KV cache events from the block pool.

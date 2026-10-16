@@ -16,6 +16,9 @@ class _Pos:
     def __init__(self, offset, length):
         self.offset, self.length = offset, length
 
+    def get_num_embeds(self):
+        return self.length
+
 
 class _Feature:
     def __init__(self, mm_hash, length=1):
@@ -53,11 +56,8 @@ def test_request_finished_producer_emits_params(monkeypatch):
     # Simulate NIXL-enabled producer bookkeeping without building real NIXL.
     s._nixl_enabled = True
     s._peer_host, s._peer_port = "1.2.3.4", 5601
-    # _setup_nixl normally computes these from model_config; set them
-    # directly since this test builds gate-off then flips fields on.
-    s._hidden_dim, s._element_size = 32, 2
     # feature length=2, hidden_dim=32, element_size=2 -> 128 bytes -> 2 blocks.
-    entry = s._cache.alloc("h1", 2)
+    entry = s._cache.alloc("h1", 2, (2, 32))
     assert entry is not None
     s._cache.mark_ready("h1")
 
@@ -71,6 +71,7 @@ def test_request_finished_producer_emits_params(monkeypatch):
             "peer_host": "1.2.3.4",
             "peer_port": 5601,
             "size_bytes": 2 * 32 * 2,
+            "shape": [2, 32],
         }
     }
     s.shutdown()
@@ -84,8 +85,7 @@ def test_request_finished_announces_not_ready_entry(monkeypatch):
     s = _sched_gate_off(monkeypatch)
     s._nixl_enabled = True
     s._peer_host, s._peer_port = "1.2.3.4", 5601
-    s._hidden_dim, s._element_size = 32, 2
-    s._cache.alloc("h1", 2)  # allocated but not marked ready
+    s._cache.alloc("h1", 2, (2, 32))  # allocated but not marked ready
 
     delay, params = s.request_finished(_Request([_Feature("h1", length=2)]))
     assert delay is False
@@ -96,6 +96,7 @@ def test_request_finished_announces_not_ready_entry(monkeypatch):
             "peer_host": "1.2.3.4",
             "peer_port": 5601,
             "size_bytes": 2 * 32 * 2,
+            "shape": [2, 32],
         }
     }
     s.shutdown()
@@ -105,7 +106,6 @@ def test_request_finished_skips_unallocated_entry(monkeypatch):
     s = _sched_gate_off(monkeypatch)
     s._nixl_enabled = True
     s._peer_host, s._peer_port = "1.2.3.4", 5601
-    s._hidden_dim, s._element_size = 32, 2
     # No alloc() for "h1" at all — e.g. the cache was full at save time.
 
     delay, params = s.request_finished(_Request([_Feature("h1", length=2)]))

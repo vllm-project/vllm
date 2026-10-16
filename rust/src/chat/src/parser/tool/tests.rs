@@ -86,10 +86,10 @@ fn factory_distinguishes_qwen_tool_formats() {
 
     for (model, expected) in [
         ("Qwen/Qwen3.5-0.8B", Some(names::QWEN3_CODER)),
-        ("Qwen/Qwen3-0.6B", Some(names::QWEN3_XML)),
+        ("Qwen/Qwen3-0.6B", Some(names::QWEN3_JSON)),
         ("Qwen/Qwen3-Coder-30B", Some(names::QWEN3_CODER)),
-        ("Qwen/QwQ-32B", Some(names::HERMES)),
-        ("Qwen/Qwen2.5-0.5B-Instruct", Some(names::HERMES)),
+        ("Qwen/QwQ-32B", Some(names::QWEN3_JSON)),
+        ("Qwen/Qwen2.5-0.5B-Instruct", Some(names::QWEN3_JSON)),
         ("Qwen/Qwen2-1.5B-Instruct", None),
     ] {
         assert_eq!(factory.resolve_name_for_model(model), expected, "{model}");
@@ -97,13 +97,36 @@ fn factory_distinguishes_qwen_tool_formats() {
 }
 
 #[test]
-fn factory_parses_qwen2_5_coder_template_with_hermes() {
+fn factory_parses_qwen2_5_coder_template_with_qwen3_json() {
     let factory = ToolParserFactory::new();
     let tool_call = r#"<tool_call>
 {"name":"get_weather","arguments":{"location":"Tokyo"}}
 </tool_call>"#;
 
     let mut parser = factory.create_for_model("Qwen/Qwen2.5-Coder-7B-Instruct", &[]).unwrap();
+    let mut output = ToolParserOutput::default();
+    parser.parse_into(tool_call, &mut output).unwrap();
+    output.append(parser.finish().unwrap());
+    let output = output.coalesce();
+
+    assert!(output.normal_text().is_empty());
+    assert_eq!(output.calls().len(), 1);
+    assert_eq!(output.calls()[0].name.as_deref(), Some("get_weather"));
+    assert_eq!(output.calls()[0].arguments, r#"{"location":"Tokyo"}"#);
+}
+
+#[test]
+fn factory_parses_qwen3_coder_format_with_qwen3_xml() {
+    let factory = ToolParserFactory::new();
+    let tool_call = "<tool_call>
+<function=get_weather>
+<parameter=location>
+Tokyo
+</parameter>
+</function>
+</tool_call>";
+
+    let mut parser = factory.create(names::QWEN3_XML, &[]).unwrap();
     let mut output = ToolParserOutput::default();
     parser.parse_into(tool_call, &mut output).unwrap();
     output.append(parser.finish().unwrap());

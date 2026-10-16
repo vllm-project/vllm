@@ -45,6 +45,34 @@ KEY = (
 SPEC = TensorSpec((2, 2), "torch.float32", 16)
 
 
+def test_push_shapes_follow_each_modality(monkeypatch):
+    """Each push is sized at its modality's measured encoder output width."""
+    from vllm.distributed.ec_transfer.ec_connector.mooncake import scheduler
+
+    monkeypatch.setattr(scheduler, "ensure_mooncake_available", lambda: None)
+    widths = {"image": 8192, "audio": 2048}
+    config = create_ec_vllm_config(ec_role="ec_producer", encoder_output_widths=widths)
+    request = SimpleNamespace(
+        request_id="mixed",
+        mm_features=[SimpleNamespace(identifier=m, modality=m) for m in widths],
+        get_num_encoder_embeds=lambda index: 2,
+        ec_transfer_params={
+            "consumer_zmq": "tcp://consumer:1234",
+            "ec_items": [{"mm_hash": m, "transfer_id": m} for m in widths],
+        },
+    )
+    instance = scheduler.ECMooncakeScheduler(config)
+    try:
+        for index in range(len(widths)):
+            instance.update_state_after_alloc(request, index)
+        metadata = instance.build_connector_meta(
+            SimpleNamespace(free_encoder_mm_hashes=[], preempted_req_ids=set())
+        )
+        assert [spec.shape for spec in metadata.pushes] == [(2, 8192), (2, 2048)]
+    finally:
+        instance.close()
+
+
 def test_embedding_key_combines_namespace_and_identifier():
     config = create_ec_vllm_config(ec_role="ec_producer")
     config.ec_transfer_config.ec_connector_extra_config.update(

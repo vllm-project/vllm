@@ -757,6 +757,117 @@ def test_worker_rejects_incompatible_mamba_specs_before_registration():
         worker.register_kv_caches({"kda.0": object(), "kda.1": object()})
 
 
+def _make_register_worker(caches, geoms, *, disable_hma: bool = True):
+    worker = _FakeWorker(
+        mode=MoRIIOMode.READ,
+        _transfer_layer_names=set(caches),
+        block_size=16,
+        engine_id="e0",
+        dst_num_blocks={},
+        block_lens={},
+        layer_name_to_local_kv_cache_metadata={},
+        kv_caches_base_addr={},
+        kv_layer_mr_offset={},
+        local_kv_cache_size=[],
+        block_window_per_layer=[],
+        moriio_wrapper=SimpleNamespace(
+            register_local_tensor=lambda _t: b"m",
+            get_agent_metadata=lambda: b"a",
+            async_wait_reqid=lambda: None,
+        ),
+        world_size=1,
+        layer_to_spec={},
+        backend_name="TRITON_ATTN",
+        side_channel_port=6301,
+        tp_rank=0,
+        dp_rank=0,
+        is_producer=False,
+        vllm_config=SimpleNamespace(
+            model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="x")),
+            scheduler_config=SimpleNamespace(
+                disable_hybrid_kv_cache_manager=disable_hma
+            ),
+        ),
+    )
+    worker._is_mamba_layer = lambda _n: False
+    worker._is_mla_cache_layer = lambda _n: False
+    worker._get_layer_transfer_geometry = lambda n, remote_num_blocks=None: geoms[n]
+    worker._iter_layer_registration_regions = lambda n: [(caches[n], caches[n].nbytes)]
+    worker._moriio_handshake_listener = (
+        lambda _m, ready_event, *_a, **_k: ready_event.set()
+    )
+    return worker
+
+
+def test_register_kv_caches_allows_hybrid_divergent_block_len():
+    """GLM-5.2 / MiniMax HMA: divergent per-layer block_len is allowed."""
+    Geom = moriio_layout.LayerTransferGeometry
+    caches = {
+        "layer0": torch.zeros(2, 4, 16, 1, 8, dtype=torch.float16),
+        "layer1": torch.zeros(2, 4, 16, 1, 8, dtype=torch.float16),
+    }
+    # Same tokens-per-block (16); different bytes-per-block (2112 vs 9216).
+    geoms = {
+        "layer0": Geom(4, 16, 2112, 132, 2112, None, None, 1, 1, False),
+        "layer1": Geom(4, 16, 9216, 576, 9216, None, None, 1, 1, False),
+    }
+    worker = _make_register_worker(caches, geoms)
+    worker.register_kv_caches(caches)
+
+    assert worker.block_lens == {"layer0": 2112, "layer1": 9216}
+    assert worker.block_len == 9216
+
+
+def test_register_kv_caches_rejects_divergent_block_size():
+    """Without HMA, block_size (tokens/page) must stay uniform."""
+    Geom = moriio_layout.LayerTransferGeometry
+    caches = {
+        "layer0": torch.zeros(2, 4, 16, 1, 8, dtype=torch.float16),
+        "layer1": torch.zeros(2, 4, 16, 1, 8, dtype=torch.float16),
+    }
+    geoms = {
+        "layer0": Geom(4, 16, 2112, 132, 2112, None, None, 1, 1, False),
+        "layer1": Geom(4, 32, 2112, 66, 2112, None, None, 1, 1, False),
+    }
+    worker = _make_register_worker(caches, geoms, disable_hma=True)
+    with pytest.raises(ValueError, match="block size mismatch"):
+        worker.register_kv_caches(caches)
+
+
+def test_register_kv_caches_rejects_divergent_block_size_even_if_block_len_differs():
+    """Without HMA, size+len both differing must still raise."""
+    Geom = moriio_layout.LayerTransferGeometry
+    caches = {
+        "layer0": torch.zeros(2, 4, 16, 1, 8, dtype=torch.float16),
+        "layer1": torch.zeros(2, 4, 16, 1, 8, dtype=torch.float16),
+    }
+    # Previously buggy: size+len both differ → registration continued.
+    geoms = {
+        "layer0": Geom(4, 16, 2112, 132, 2112, None, None, 1, 1, False),
+        "layer1": Geom(4, 32, 9216, 288, 9216, None, None, 1, 1, False),
+    }
+    worker = _make_register_worker(caches, geoms, disable_hma=True)
+    with pytest.raises(ValueError, match="block size mismatch"):
+        worker.register_kv_caches(caches)
+
+
+def test_register_kv_caches_allows_hma_divergent_block_size():
+    """Gemma4 HMA (#53721): SWA vs full-attn may differ in tokens/page."""
+    Geom = moriio_layout.LayerTransferGeometry
+    caches = {
+        "layer0": torch.zeros(2, 4, 16, 1, 8, dtype=torch.float16),
+        "layer1": torch.zeros(2, 4, 16, 1, 8, dtype=torch.float16),
+    }
+    geoms = {
+        "layer0": Geom(4, 16, 2112, 132, 2112, None, None, 1, 1, False),
+        "layer1": Geom(4, 32, 4224, 132, 4224, None, None, 1, 1, False),
+    }
+    worker = _make_register_worker(caches, geoms, disable_hma=False)
+    worker.register_kv_caches(caches)
+    assert worker.block_lens == {"layer0": 2112, "layer1": 4224}
+    assert worker.block_len == 4224
+
+
 # --------------------------------------------------------------------------
 # _truncate_mamba_request_for_prefill
 # --------------------------------------------------------------------------
@@ -806,12 +917,50 @@ def test_truncate_mamba_request_noop_for_single_token_prompt():
 # --------------------------------------------------------------------------
 # get_num_new_matched_tokens  (hybrid N-1 accounting)
 # --------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "params,expected",
+    [
+        (None, (0, False)),
+        ({}, (0, False)),
+        ({"do_remote_prefill": False}, (0, False)),
+        ({"do_remote_prefill": True}, (31, False)),
+    ],
+)
+def test_read_matches_only_requests_with_pending_remote_prefill(params, expected):
+    scheduler = _FakeScheduler(is_producer=False, mode=MoRIIOMode.READ)
+    request = SimpleNamespace(num_prompt_tokens=32, kv_transfer_params=params)
+
+    assert scheduler.get_num_new_matched_tokens(request, 0) == expected
+
+
+def test_read_rematch_after_alloc_keeps_queued_transfer():
+    """Clearing the flag blocks another external hit, not the queued READ."""
+    sched = _make_read_scheduler()
+    request = _make_read_request([[10, 11], [91]])
+    request.num_prompt_tokens = 32
+    assert sched.get_num_new_matched_tokens(request, 0) == (31, False)
+
+    sched.update_state_after_alloc(
+        request, _FakeBlocks(all_groups=([100, 101], [200])), num_external_tokens=31
+    )
+
+    assert sched._reqs_need_recv["req"][1] == [[100, 101], [200]]
+    assert request.kv_transfer_params["do_remote_prefill"] is False
+
+    meta = sched.build_connector_meta(SchedulerOutput.make_empty())
+    queued = meta.reqs_to_recv["req"]
+    assert queued.transfer_id == "tx"
+    assert queued.local_block_ids == [[100, 101], [200]]
+    assert queued.remote_block_ids == [[10, 11], [91]]
+    assert sched.get_num_new_matched_tokens(request, 0) == (0, False)
+
+
 def test_get_num_new_matched_tokens_read_recomputes_last_token():
     sched = _FakeScheduler(is_producer=False, mode=MoRIIOMode.READ, _has_mamba=True)
     req = SimpleNamespace(
         num_prompt_tokens=10,
         prompt_token_ids=list(range(10)),
-        kv_transfer_params=None,
+        kv_transfer_params={"do_remote_prefill": True},
     )
     n, is_async = sched.get_num_new_matched_tokens(req, num_computed_tokens=0)
     # READ always recomputes the final token locally: N-1 - computed.

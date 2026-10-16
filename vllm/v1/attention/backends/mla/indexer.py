@@ -21,6 +21,7 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     triton_scalar_specialization_rep,
 )
 from vllm.platforms import current_platform
+from vllm.transformers_utils.deepseek_v4_utils import get_compress_ratios
 from vllm.triton_utils import tl, triton
 from vllm.utils.deep_gemm import (
     get_paged_mqa_logits_metadata,
@@ -85,6 +86,7 @@ def aiter_mxfp4_available() -> bool:
                 if not required.issubset(inspect.signature(function).parameters):
                     return False
         for function, parameters in (
+            (decode.default_varctx_parallel_unit_num, {"batch_size", "max_seq_len"}),
             (decode.flydsl_pa_mqa_logits_fp4, {"cta_info", "total_ctas"}),
             (prefill.flydsl_pa_mqa_logits_fp4_prefill, {"cta_info", "n_ctas"}),
             (
@@ -293,19 +295,16 @@ class PrepareUniformDecodeKernel(
         )
 
 
-# Below this many rows per rank, stay replicated (TP4 engages at 64K rows).
-MIN_TP_SHARD_ROWS_PER_RANK = 16_384
-
-
 def balanced_prefill_row_shard(
     seq_lens_cpu: torch.Tensor,
     query_lens_cpu: torch.Tensor,
     compress_ratio: int,
     tp_size: int,
+    min_rows: int,
 ) -> list[int] | None:
     """Return contiguous TP row counts balanced by indexer MQA work."""
     num_rows = int(query_lens_cpu.sum())
-    if tp_size < 2 or num_rows < MIN_TP_SHARD_ROWS_PER_RANK * tp_size:
+    if tp_size < 2 or num_rows < max(min_rows, tp_size):
         return None
 
     query_lens = query_lens_cpu.to(torch.int64)
@@ -446,12 +445,6 @@ class DeepseekV4IndexerBackend(DeepseekV32IndexerBackend):
 
 
 class DeepseekV41IndexerBackend(DeepseekV4IndexerBackend):
-    @classmethod
-    def supports_device_cpu_query_lens_mismatch(cls) -> bool:
-        # The ROCm flattened-query support above is validated for the
-        # DeepSeek-V4 adaptive DSpark path only.
-        return DeepseekV32IndexerBackend.supports_device_cpu_query_lens_mismatch()
-
     @staticmethod
     def get_name() -> str:
         return "DEEPSEEK_V41_INDEXER"
@@ -556,6 +549,9 @@ class DeepseekV32IndexerPrefillChunkMetadata:
     cu_seq_lens: torch.Tensor
     token_to_seq: torch.Tensor
     total_seq_lens: int
+    # Host upper bound on cu_seqlen_ke - cu_seqlen_ks, sizing the compressed
+    # DeepGEMM prefill logits.
+    max_seqlen_k: int
     token_start: int
     token_end: int
     num_reqs: int
@@ -770,7 +766,7 @@ class BuildPrefillChunkMetadataKernel(
             dict.fromkeys(
                 max(1, int(ratio))
                 for ratio in (
-                    *(getattr(hf_text_config, "compress_ratios", None) or (1,)),
+                    *(get_compress_ratios(hf_text_config) or (1,)),
                     getattr(hf_text_config, "index_kpool", 1) or 1,
                 )
             )
@@ -893,7 +889,6 @@ class DeepSeekV32IndexerDecodeMetadata:
     # Views into builder-owned storage, refreshed before each graph replay.
     fp4_cta_info: torch.Tensor | None = None
     fp4_total_ctas: int | None = None
-    fp4_logits: torch.Tensor | None = None
 
 
 @dataclass
@@ -1079,15 +1074,16 @@ class KpoolTailMetadataBuilder(AttentionMetadataBuilder):
 
 def get_max_prefill_buffer_size(vllm_config: VllmConfig):
     max_model_len = vllm_config.model_config.max_model_len
-    # NOTE(Chen): 40 is a magic number for controlling the prefill buffer size.
+    factor = vllm_config.attention_config.sparse_mla_prefill_workspace_factor
+    assert factor is not None
     # Each entry is 128 fp8 bytes and 4 scale bytes for a total of 132 bytes.
-    # The flashmla_sparse backend uses a workspace size of 5 * max_model_len.
+    # The flashmla_sparse backend uses a workspace size of factor * max_model_len.
     # The memory usage of the workspace there is 576 * 2 bytes; so we size this as
-    # (576 * 2 // 132) * 5 = 40 to maximize this workspace size while still fitting
-    # within the flashmla_sparse workspace.
+    # (576 * 2 // 132) * factor (40 at factor 5) to maximize this workspace
+    # size while still fitting within the flashmla_sparse workspace.
     # For DeepSeek-V3.2, the max_model_len is 163840.
     #   40 * 163840 * 132 = 865075200 bytes = 825 MB
-    return max_model_len * 40
+    return max_model_len * (576 * 2 // 132) * factor
 
 
 def _supports_varlen_paged_mqa_logits() -> bool:
@@ -1111,7 +1107,10 @@ def _rocm_supports_flattened_device_query_lens(vllm_config: VllmConfig) -> bool:
     return (
         current_platform.is_rocm()
         and model_config is not None
-        and "DeepseekV4ForCausalLM" in model_config.architectures
+        and (
+            "DeepseekV4ForCausalLM" in model_config.architectures
+            or "DeepseekV41ForCausalLM" in model_config.architectures
+        )
     )
 
 
@@ -1302,28 +1301,29 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             raise ValueError("ROCm MXFP4 indexer requires C4 and 64-token pages")
 
         self.fp4_cta_info_buffer: torch.Tensor | None = None
-        self.fp4_decode_logits_buffer: torch.Tensor | None = None
         self.fp4_prefill_logits_buffer: torch.Tensor | None = None
         if self.use_rocm_fp4:
+            from aiter.ops.flydsl.kernels.mqa_logits.pa_mqa_logits_fp4 import (
+                default_varctx_parallel_unit_num,
+            )
+
             compilation_config = self.vllm_config.compilation_config
             max_decode_tokens = max(
                 scheduler_config.max_num_seqs * next_n,
                 compilation_config.max_cudagraph_capture_size or 0,
                 max(compilation_config.cudagraph_capture_sizes or (), default=0),
             )
-            # Stable storage shared by every indexer layer in this attention group.
-            # build() refreshes its contents before eager execution or graph replay.
-            self.fp4_cta_info_buffer = torch.empty(
-                (max(512, max_decode_tokens), 4),
-                dtype=torch.int32,
-                device=self.device,
-            )
             self.fp4_max_seq_len = (
                 self.vllm_config.model_config.max_model_len // self.compress_ratio
             )
-            self.fp4_decode_logits_buffer = torch.empty(
-                (max_decode_tokens, self.fp4_max_seq_len),
-                dtype=torch.float32,
+            max_parallel_unit_num = default_varctx_parallel_unit_num(
+                max_decode_tokens, self.fp4_max_seq_len
+            )
+            # Stable storage shared by every indexer layer in this attention group.
+            # build() refreshes its contents before eager execution or graph replay.
+            self.fp4_cta_info_buffer = torch.empty(
+                (max_parallel_unit_num, 4),
+                dtype=torch.int32,
                 device=self.device,
             )
 
@@ -1857,6 +1857,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     prefill_query_lens_cpu,
                     self.compress_ratio,
                     self.tp_size,
+                    self.vllm_config.attention_config.indexer_tp_shard_min_rows,
                 )
             prefill_metadata = DeepseekV32IndexerPrefillMetadata(
                 chunks,
@@ -2028,16 +2029,18 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
 
             fp4_cta_info = None
             fp4_total_ctas = None
-            fp4_logits = None
             if self.fp4_cta_info_buffer is not None and num_decode_tokens > 0:
                 from aiter.ops.flydsl.kernels.mqa_logits.pa_mqa_logits_fp4 import (
                     compute_varctx_schedule,
+                    default_varctx_parallel_unit_num,
                 )
 
                 # FP4 flattens speculative rows before C4 length conversion, so
                 # AITER sees next_n=1 and one exact context bound per output row.
                 assert seq_lens.shape == (num_decode_tokens, 1)
-                parallel_unit_num = max(512, num_decode_tokens)
+                parallel_unit_num = default_varctx_parallel_unit_num(
+                    num_decode_tokens, self.fp4_max_seq_len
+                )
                 assert parallel_unit_num <= self.fp4_cta_info_buffer.shape[0]
                 _, fp4_cta_info, fp4_total_ctas = compute_varctx_schedule(
                     seq_lens[:, 0],
@@ -2047,9 +2050,6 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     next_n=1,
                     cta_info_out=self.fp4_cta_info_buffer[:parallel_unit_num],
                 )
-                assert self.fp4_decode_logits_buffer is not None
-                assert num_decode_tokens <= self.fp4_decode_logits_buffer.shape[0]
-                fp4_logits = self.fp4_decode_logits_buffer[:num_decode_tokens]
 
             decode_metadata = DeepSeekV32IndexerDecodeMetadata(
                 block_table=block_table,
@@ -2064,7 +2064,6 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 write_max_decode_len=max_decode_len,
                 fp4_cta_info=fp4_cta_info,
                 fp4_total_ctas=fp4_total_ctas,
-                fp4_logits=fp4_logits,
             )
 
         attn_metadata = DeepseekV32IndexerMetadata(
@@ -2269,11 +2268,16 @@ def build_prefill_chunk_metadata(
             qs_start,
         )
         if logits_width > fp4_topk_tokens:
+            from aiter.ops.flydsl.kernels.mqa_logits.pa_mqa_logits_fp4 import (
+                default_varctx_parallel_unit_num,
+            )
             from aiter.ops.flydsl.kernels.mqa_logits.pa_mqa_logits_fp4_prefill import (
                 compute_prefill_schedule,
             )
 
-            parallel_unit_num = max(512, output_query_len)
+            parallel_unit_num = default_varctx_parallel_unit_num(
+                output_query_len, logits_width
+            )
             _, fp4_cta_info, fp4_total_ctas = compute_prefill_schedule(
                 *fp4_windows,
                 block_k=256,
@@ -2288,6 +2292,7 @@ def build_prefill_chunk_metadata(
         cu_seq_lens=cu_seq_lens,
         token_to_seq=token_to_seq,
         total_seq_lens=total_seq_lens,
+        max_seqlen_k=int(compressed_seq_lens_cpu[start_idx:end_idx].max()),
         block_table=block_table[start_idx:end_idx],
         token_start=token_start,
         token_end=token_end,

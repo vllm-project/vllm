@@ -35,8 +35,6 @@ from transformers import PreTrainedConfig
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (
     get_pp_group,
-    get_tensor_model_parallel_rank,
-    get_tensor_model_parallel_world_size,
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import fused_moe_make_expert_params_mapping
@@ -433,12 +431,6 @@ class HYV4Model(nn.Module):
         split_expert_params_mapping = self.get_expert_mapping()
         loaded_params: set[str] = set()
 
-        # Sink weights are sharded like the q/k/v linears.
-        sink_tp_size = get_tensor_model_parallel_world_size()
-        sink_tp_rank = get_tensor_model_parallel_rank()
-        n_local_head = self.config.num_attention_heads // sink_tp_size
-        head_rank_start = n_local_head * sink_tp_rank
-        head_rank_end = n_local_head * (sink_tp_rank + 1)
         base_layer = (
             "base_layer." if any(".base_layer." in name for name in params_dict) else ""
         )
@@ -570,48 +562,36 @@ class HYV4Model(nn.Module):
                 if loaded_expert_param_names:
                     loaded_params.update(loaded_expert_param_names)
                     continue
-                if "learnable_sink_param" in name:
-                    if is_pp_missing_parameter(name, self):
-                        continue
-                    narrow_weight = loaded_weight[head_rank_start:head_rank_end]
-                    n = narrow_weight.shape[0]
-                    with torch.no_grad():
-                        params_dict[name][:n].copy_(narrow_weight)
-                else:
-                    if is_expert_weight:
-                        # An expert weight that is not mapped to this rank.
-                        continue
-                    if "gate.e_score_correction_bias" in name:
-                        name = name.replace(
-                            "gate.e_score_correction_bias", "expert_bias"
-                        )
-                    if "router.gate." in name:
-                        name = name.replace("router.", "")
-                    if "hc_fn" in name:
-                        name = name.replace("hc_fn", "hc_fn.weight")
-                    if "hc_head_fn" in name:
-                        name = name.replace("hc_head_fn", "hc_head_fn.weight")
+                if is_expert_weight:
+                    # An expert weight that is not mapped to this rank.
+                    continue
+                if "gate.e_score_correction_bias" in name:
+                    name = name.replace("gate.e_score_correction_bias", "expert_bias")
+                if "router.gate." in name:
+                    name = name.replace("router.", "")
+                if "hc_fn" in name:
+                    name = name.replace("hc_fn", "hc_fn.weight")
+                if "hc_head_fn" in name:
+                    name = name.replace("hc_head_fn", "hc_head_fn.weight")
 
-                    if is_pp_missing_parameter(name, self):
-                        continue
+                if is_pp_missing_parameter(name, self):
+                    continue
 
-                    if name not in params_dict:
-                        if _should_skip_missing_param(name):
-                            continue
-                        logger.warning_once(
-                            "Skipping unknown checkpoint weight: %s",
-                            name,
-                        )
+                if name not in params_dict:
+                    if _should_skip_missing_param(name):
                         continue
-
-                    param = params_dict[name]
-                    weight_loader = getattr(
-                        param, "weight_loader", default_weight_loader
+                    logger.warning_once(
+                        "Skipping unknown checkpoint weight: %s",
+                        name,
                     )
-                    if stacked_shard_id is None:
-                        weight_loader(param, loaded_weight)
-                    else:
-                        weight_loader(param, loaded_weight, stacked_shard_id)
+                    continue
+
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                if stacked_shard_id is None:
+                    weight_loader(param, loaded_weight)
+                else:
+                    weight_loader(param, loaded_weight, stacked_shard_id)
             loaded_params.add(name)
 
         return loaded_params
