@@ -462,7 +462,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "OlmoHybridForCausalLM": _HfExamplesInfo("allenai/Olmo-Hybrid-7B"),
     "OlmoeForCausalLM": _HfExamplesInfo("allenai/OLMoE-1B-7B-0924-Instruct"),
     "OPTForCausalLM": _HfExamplesInfo(
-        "facebook/opt-125m", {"1b": "facebook/opt-iml-max-1.3b"}
+        "facebook/opt-125m",
+        {"350m": "facebook/opt-350m", "1b": "facebook/opt-iml-max-1.3b"},
     ),
     "OrionForCausalLM": _HfExamplesInfo(
         "OrionStarAI/Orion-14B-Chat", trust_remote_code=True
@@ -731,7 +732,13 @@ _SEQUENCE_CLASSIFICATION_EXAMPLE_MODELS = {
     ),
     "D3ForSequenceClassification": _HfExamplesInfo(
         "vllm-sr/d3-edge",
-        extras={"d3": "vllm-sr/d3", "d3-mini": "vllm-sr/d3-mini"},
+        extras={
+            "d3": "vllm-sr/d3",
+            "d3-flash": "vllm-sr/d3-flash",
+            "d3-mini": "vllm-sr/d3-mini",
+            "d3-nano": "vllm-sr/d3-nano",
+            "d3-lite": "vllm-sr/d3-lite",
+        },
         max_model_len=4096,
     ),
     "GPT2ForSequenceClassification": _HfExamplesInfo(

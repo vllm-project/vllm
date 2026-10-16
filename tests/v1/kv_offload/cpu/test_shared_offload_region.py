@@ -653,6 +653,41 @@ def test_madvise_unexpected_oserror_propagates(iid, monkeypatch):
     assert exc_info.value.errno == errno.EIO
 
 
+def test_segmented_region_maps_files_back_to_back(iid, monkeypatch):
+    """Rows split over three shm files mapped back to back: each worker sees
+    the other's writes in every file, and the creator removes every file."""
+    monkeypatch.setattr(region_module, "_MIN_SEGMENT_BYTES", PAGE_SIZE)
+    regions = [
+        SharedOffloadRegion(
+            engine_id=iid,
+            num_chunks=5,
+            rank=rank,
+            kv_bytes_per_chunk=2 * PAGE_SIZE,
+            cpu_page_size=PAGE_SIZE,
+            num_segments=3,
+        )
+        for rank in range(2)
+    ]
+    segments = regions[0]._segments
+    try:
+        assert [length // PAGE_SIZE for _, _, length in segments] == [4, 4, 2]
+        for rank, region in enumerate(regions):
+            ranges = list(region.iter_worker_slot_ranges())
+            first_row = rank * 5 // 2
+            assert ranges[0] == ((first_row * 2 + rank) * PAGE_SIZE, PAGE_SIZE)
+            assert sorted(ranges) == [
+                ((row * 2 + rank) * PAGE_SIZE, PAGE_SIZE) for row in range(5)
+            ]
+            region.create_next_worker_view(PAGE_SIZE).fill_(rank + 1)
+        rows = regions[0].base_tensor.view(5, 2, PAGE_SIZE)
+        assert (rows[:, 0] == 1).all() and (rows[:, 1] == 2).all()
+        del rows
+    finally:
+        for region in regions:
+            region.cleanup()
+    assert not any(os.path.exists(path) for path, _, _ in segments)
+
+
 # ---------------------------------------------------------------------------
 # Multi-worker race — concurrent construction
 # ---------------------------------------------------------------------------
@@ -899,6 +934,7 @@ def _unmapped_registration_region(num_chunks, slot_size, num_workers):
     region.cpu_page_size = slot_size
     region._row_stride = num_workers * slot_size
     region.total_size_bytes = region.num_chunks * region._row_stride
+    region._segments = [("unused", 0, region.total_size_bytes)]
     region._base = SimpleNamespace(data_ptr=lambda: 0x100000)
     region.pinned_addresses = []
     region.is_pinned = False
