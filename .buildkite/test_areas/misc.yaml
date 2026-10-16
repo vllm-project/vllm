@@ -190,16 +190,15 @@ steps:
   - pytest -v -s -rs v1/kv_connector/unit/test_moriio_*.py
 
 # Single-node MoRIIO WRITE P/D on dummy weights: prefill and decode on separate
-# GPUs over xGMI, compared exactly against a direct serve. Cases share the toy
-# proxy's fixed discovery port, so they run serially on one 2-GPU agent.
+# GPUs over xGMI, compared exactly against a direct serve.
 - label: ":amd: (MI355) MoRIIO WRITE P/D Dummy-Weight E2E Shard %N"
   key: amd-moriio-write-dummy-e2e-mi355
   dind: false
   device: mi355_2
   num_devices: 2
-  # ~3.5 min per case; pytest-shard hashes test ids, so with 20 cases the
-  # largest of 6 shards holds 5 (~17 min). Every case picks its own ports and
-  # compile-cache dir, so shards sharing a host do not collide.
+  # ~3.5-5 min per case; pytest-shard hashes test ids, so with 20 cases the
+  # largest of 6 shards holds 5 (~22 min on MI355). Every case picks free ports
+  # for its servers and proxy and its own compile-cache dir.
   parallelism: 6
   timeout_in_minutes: 45
   working_dir: /vllm-workspace/tests

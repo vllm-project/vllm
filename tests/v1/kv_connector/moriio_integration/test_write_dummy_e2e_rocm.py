@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Single-node MoRIIO WRITE P/D checks on dummy weights.
 
-Each case serves a real model architecture with ``--load-format dummy``: the
+Each case serves a real model architecture with ``--load-format dummy``, widened
+by ``moriio_wide_dummy`` (see ``DUMMY_WEIGHT_RANGE``): the
 config keeps the real hidden size, head geometry, MLA ranks and recurrent-state
 shapes, so the connector registers and transfers exactly the production cache
 layout, but the layer stack is cut to a few layers that still contain every
@@ -74,11 +75,13 @@ _PROXY = (
 TOLERANCE = float(os.getenv("MORIIO_DUMMY_E2E_TOL", "1e-5"))
 # Several bf16 steps of the logits at DUMMY_WEIGHT_RANGE.
 MIN_CONTEXT_EFFECT = 0.05
-# Half-width of the uniform dummy init. The loader default (1e-3) shrinks every
-# activation so far that a context change moves the first-token log-probs by
-# ~1e-4; at 0.1 it moves them by >0.1 and a corrupted prefill changes the top-k
-# set entirely.
+# Half-width of the uniform dummy init for 16/32-bit float weights, applied in
+# every server worker by moriio_wide_dummy.py. The loader default (1e-3) shrinks
+# every activation so far that a context change moves the first-token log-probs
+# by ~1e-4; at 0.1 it moves them by >0.1 and a corrupted prefill changes the
+# top-k set entirely.
 DUMMY_WEIGHT_RANGE = 0.1
+_WIDE_DUMMY_DIR = Path(__file__).resolve().parent
 TOP_K = 20
 MAX_TOKENS = 4
 MAX_MODEL_LEN = 4096
@@ -362,8 +365,8 @@ def _server(
         str(port),
         "--load-format",
         "dummy",
-        "--model-loader-extra-config",
-        json.dumps({"dummy_weight_range": DUMMY_WEIGHT_RANGE}),
+        "--worker-extension-cls",
+        "moriio_wide_dummy.WideDummyWeights",
         "--hf-overrides",
         json.dumps(overrides),
         "--dtype",
@@ -395,6 +398,11 @@ def _server(
         "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
         "VLLM_SSM_CONV_STATE_LAYOUT": "DS",
         "VLLM_CACHE_ROOT": str(_CACHE_ROOT / role),
+        # Only this directory, so the source tree cannot shadow installed vllm.
+        "PYTHONPATH": os.pathsep.join(
+            filter(None, [str(_WIDE_DUMMY_DIR), os.environ.get("PYTHONPATH")])
+        ),
+        "MORIIO_DUMMY_WEIGHT_RANGE": str(DUMMY_WEIGHT_RANGE),
         **arch.env,
     }
     return RemoteOpenAIServer(
