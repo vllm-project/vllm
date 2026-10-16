@@ -10,6 +10,7 @@ window split, and a combine kernel merges splits and applies the gate.
 
 import torch
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 from .sparse_decode_attention import _PDL, _gate
@@ -301,7 +302,7 @@ def swa_decode_gated(
         64,
         _PDL,
         num_warps=4,
-        launch_pdl=_PDL,
+        **({"launch_pdl": _PDL} if current_platform.is_cuda() else {}),
     )
     if splits > 1:
         _swa_decode_combine[(tokens, heads)](
@@ -319,5 +320,5 @@ def swa_decode_gated(
             triton.next_power_of_2(splits),
             _PDL,
             num_warps=4,
-            launch_pdl=_PDL,
+            **({"launch_pdl": _PDL} if current_platform.is_cuda() else {}),
         )

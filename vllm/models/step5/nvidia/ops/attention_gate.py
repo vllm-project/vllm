@@ -4,7 +4,7 @@
 
 import torch
 
-from vllm.triton_utils import tl, triton
+from vllm.triton_utils import tl, tldevice, triton
 
 
 @triton.jit
@@ -32,7 +32,7 @@ def _headwise_sigmoid_gate(
         col < WIDTH,
         other=0,
     ).to(tl.float32)
-    sigmoid = tl.div_rn(1.0, 1.0 + tl.extra.cuda.libdevice.exp(-gate))
+    sigmoid = tl.div_rn(1.0, 1.0 + tldevice.exp(-gate))
     # PyTorch materializes sigmoid in gate dtype before the multiply.
     sigmoid = sigmoid.to(Gate.dtype.element_ty).to(tl.float32)
     value = tl.load(

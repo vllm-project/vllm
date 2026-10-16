@@ -5,9 +5,7 @@
 import numpy as np
 import torch
 
-from vllm.triton_utils import tl, triton
-
-libdevice = tl.extra.cuda.libdevice
+from vllm.triton_utils import tl, tldevice, triton
 
 
 @triton.jit
@@ -44,8 +42,8 @@ def _update_decode_values(
     denominator = tl.where(fresh, 0, denominator)
     maximum = tl.where(fresh, -float("inf"), maximum)
     updated_max = _maximum(maximum, tl.reduce(z, 0, _maximum))
-    scale = tl.where(denominator > 0, libdevice.exp(maximum - updated_max), 0)
-    weight = libdevice.exp(z - updated_max)
+    scale = tl.where(denominator > 0, tldevice.exp(maximum - updated_max), 0)
+    weight = tldevice.exp(z - updated_max)
     numerator = numerator * scale + weight * key
     denominator = denominator * scale + weight
     summary = tl.div_rn(numerator, _maximum(denominator, 1e-20)).to(tl.bfloat16)
@@ -168,8 +166,8 @@ def _accumulate_prefill(
             other=0,
         ).to(tl.float32)
         updated_max = _maximum(maximum, tl.reduce(z, 0, _maximum))
-        scale = tl.where(denominator > 0, libdevice.exp(maximum - updated_max), 0)
-        weight = libdevice.exp(z - updated_max)
+        scale = tl.where(denominator > 0, tldevice.exp(maximum - updated_max), 0)
+        weight = tldevice.exp(z - updated_max)
         updated_num = numerator * scale + weight * key
         updated_den = denominator * scale + weight
         numerator = tl.where(valid, updated_num, numerator)

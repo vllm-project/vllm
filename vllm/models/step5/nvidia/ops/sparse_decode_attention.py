@@ -11,7 +11,7 @@ combine kernel merges splits and clears inactive rows.
 import torch
 
 from vllm.platforms import current_platform
-from vllm.triton_utils import tl, triton
+from vllm.triton_utils import tl, tldevice, triton
 
 # PDL: kernels launch during the producer's tail and gdc_wait before reading
 # its outputs. No early trigger, so their writes stay visible downstream.
@@ -234,7 +234,7 @@ def _gate(Gate, token, head, mask, GATED: tl.constexpr, GATE_ROW, GATE_HEAD):
         gate = tl.load(
             Gate + token.to(tl.int64) * GATE_ROW + head * GATE_HEAD, mask, other=0.0
         ).to(tl.float32)
-        sigmoid = tl.div_rn(1.0, 1.0 + tl.extra.cuda.libdevice.exp(-gate))
+        sigmoid = tl.div_rn(1.0, 1.0 + tldevice.exp(-gate))
         return sigmoid.to(Gate.dtype.element_ty).to(tl.float32)
     return tl.full(head.shape, 1.0, tl.float32)
 
@@ -332,7 +332,7 @@ def sparse_decode_attention(
         fp8,
         _PDL,
         num_warps=4,
-        launch_pdl=_PDL,
+        **({"launch_pdl": _PDL} if current_platform.is_cuda() else {}),
     )
     if splits > 1:
         _sparse_decode_combine[(rows, heads)](
@@ -353,5 +353,5 @@ def sparse_decode_attention(
             gate.stride(1) if gate is not None else 0,
             _PDL,
             num_warps=4,
-            launch_pdl=_PDL,
+            **({"launch_pdl": _PDL} if current_platform.is_cuda() else {}),
         )
