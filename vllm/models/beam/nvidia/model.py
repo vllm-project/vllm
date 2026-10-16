@@ -126,7 +126,10 @@ class BeamDecoderLayer(nn.Module):
         )
         fuse_mlp_reduce = allreduce_workspace is not None and (
             isinstance(self.mlp, BeamMLP)
-            or self.mlp.experts.moe_config.skip_final_all_reduce
+            or (
+                not self.mlp.is_sequence_parallel
+                and self.mlp.experts.moe_config.skip_final_all_reduce
+            )
         )
         self.mlp_boundary = (
             fused_boundary if fuse_mlp_reduce else beam_norm_residual_norm
@@ -158,6 +161,13 @@ class BeamDecoderLayer(nn.Module):
         )
         self.post_feedforward_layernorm = (
             RMSNorm(config.hidden_size) if config.enable_sandwich_norm else None
+        )
+        self.mlp_post_norm_fused = isinstance(
+            self.mlp, BeamSparseMoeBlock
+        ) and self.mlp.fuse_output_post_norm(
+            self.post_feedforward_layernorm,
+            self.rms_norm_eps,
+            workspace=allreduce_workspace,
         )
 
         self.attn_scales = (
@@ -196,6 +206,20 @@ class BeamDecoderLayer(nn.Module):
             self.attn_scales,
         )
         assert x is not None
+        if isinstance(self.mlp, BeamSparseMoeBlock) and self.mlp.output_boundary_fused:
+            return self.mlp.forward_boundary(
+                x,
+                hidden_states,
+                self.post_feedforward_layernorm.weight
+                if self.post_feedforward_layernorm is not None
+                else None,
+                self.rms_norm_eps
+                if self.post_feedforward_layernorm is not None
+                else None,
+                next_norm_weight,
+                self.rms_norm_eps if next_norm_weight is not None else None,
+                self.mlp_scales,
+            )
         x = self.mlp(x)
         boundary = self.mlp_boundary
         if isinstance(x, UnfinalizedMoEOutput):
@@ -206,8 +230,12 @@ class BeamDecoderLayer(nn.Module):
             hidden_states,
             self.post_feedforward_layernorm.weight
             if self.post_feedforward_layernorm is not None
+            and not self.mlp_post_norm_fused
             else None,
-            self.rms_norm_eps if self.post_feedforward_layernorm is not None else None,
+            self.rms_norm_eps
+            if self.post_feedforward_layernorm is not None
+            and not self.mlp_post_norm_fused
+            else None,
             next_norm_weight,
             self.rms_norm_eps if next_norm_weight is not None else None,
             self.mlp_scales,
@@ -290,7 +318,10 @@ class BeamModel(nn.Module, EagleModelMixin):
                 vllm_config.scheduler_config.max_num_seqs,
             ),
             vllm_config.model_config.dtype,
+            device_group=tp_group.device_group,
         )
+        if self.allreduce_workspace is not None:
+            self.allreduce_workspace.all_gather = partial(tp_group.all_gather, dim=0)
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: BeamDecoderLayer(
@@ -407,8 +438,6 @@ class BeamForCausalLM(
                 "Beam has not been validated with EPLB; run without --enable-eplb."
             )
         if parallel_config.use_sequence_parallel_moe:
-            # Data-parallel attention with expert-parallel MoE routes tokens
-            # through the sequence-parallel path, which is not yet validated.
             raise NotImplementedError(
                 "Beam has not been validated with sequence-parallel MoE "
                 "(data parallelism with expert parallelism)."

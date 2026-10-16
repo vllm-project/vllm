@@ -8,7 +8,7 @@ import torch
 
 import vllm.envs as envs
 from vllm.config import ParallelConfig, SchedulerConfig
-from vllm.config.kernel import MoEBackend
+from vllm.config.kernel import FLASHINFER_MOE_EP_CUTEDSL, MoEBackend
 from vllm.distributed import get_dp_group, get_pcp_group, get_tensor_model_parallel_rank
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
@@ -1475,22 +1475,38 @@ class FusedMoEConfig:
         Evaluated on read rather than in ``__post_init__`` because deferral is
         requested after construction, like ``skip_final_all_reduce``.
         """
-        # Replicated-token EP can use the same all-reduce if the consumer
-        # handles nonlocal experts. Dispatched tokens require a combine, and
-        # consumers cannot strip hidden-dim padding from GEMM2 rows.
-        return (
-            self._defer_moe_finalize
-            and (
-                (self.tp_size > 1 and self.ep_size == 1)
-                or (
-                    self._defer_moe_finalize_allow_ep
-                    and self.tp_size == 1
-                    and self.ep_size > 1
+        from vllm.model_executor.layers.fused_moe.flashinfer_moe_ep import (
+            supports_flashinfer_moe_ep_deferred_finalize,
+        )
+
+        if (
+            self.moe_backend == FLASHINFER_MOE_EP_CUTEDSL
+            and self._defer_moe_finalize_allow_ep
+        ):
+            # FLASHINFER_MOE_EP_CUTEDSL supports deferred moe finalize for EP
+            parallelism_supported = (
+                supports_flashinfer_moe_ep_deferred_finalize()
+                and self.tp_size == 1
+                and self.ep_size > 1
+                and not self.is_sequence_parallel
+            )
+        else:
+            parallelism_supported = (
+                self.dp_size == 1
+                and not self.is_sequence_parallel
+                and (
+                    (self.tp_size > 1 and self.ep_size == 1)
+                    or (
+                        self._defer_moe_finalize_allow_ep
+                        and self.tp_size == 1
+                        and self.ep_size > 1
+                    )
                 )
             )
-            and self.dp_size == 1
+        return (
+            self._defer_moe_finalize
+            and parallelism_supported
             and self.pcp_size == 1
-            and not self.is_sequence_parallel
             and self.hidden_dim == self.hidden_dim_unpadded
         )
 
@@ -1501,16 +1517,16 @@ class FusedMoEConfig:
 
         A layer whose consumer can fuse the top-k reduction (e.g. into its TP
         all-reduce) calls this once while the model is built, and only when its
-        experts are TRTLLM-Gen ones that can stop after GEMM2 (the
-        ``do_finalize=False`` path). Other experts ignore the request and
-        always finalize, which ``should_defer_moe_finalize`` can't see, so the
+        experts support ``do_finalize=False`` (TRTLLM-Gen or MegaMoE).
+        Other experts ignore the request and always finalize, which
+        ``should_defer_moe_finalize`` can't see, so the
         layer checks the quant method's ``experts_cls`` first, as Kimi-K3 does.
         From then on:
 
         - The experts return an ``UnfinalizedMoEOutput`` instead of finalized
           states for every call ``should_defer_moe_finalize`` accepts.
         - ``should_defer_moe_finalize(num_tokens)`` is the answer for a call:
-          it requires TP or explicitly supported replicated-token EP, no padding
+          it requires TP or explicitly supported EP, no padding
           (``use_deferred_moe_finalize``), a non-empty call and at most
           ``defer_moe_finalize_max_num_tokens`` tokens. The cap starts at
           ``max_num_tokens`` and only ever goes down: experts that would split a
@@ -1523,11 +1539,15 @@ class FusedMoEConfig:
           consumer then owns the top-k reduction, the shared-expert add and the
           all-reduce.
 
+        MegaMoE fixes deferral when its workspace is created. Its consumer must
+        also enter the producer on empty DP ranks to participate in communication,
+        then finalize only the local rows.
+
         Args:
             max_num_tokens: Most tokens per call the consumer can take in
                 deferred form. Negative means no limit of its own.
-            allow_ep: The consumer handles nonlocal expert rows and reduces
-                across the replicated-token EP group.
+            allow_ep: The consumer handles replicated-token EP reduction or
+                local DP finalization / SP gathering of MegaMoE outputs.
 
         """
         self._defer_moe_finalize = True

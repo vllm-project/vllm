@@ -4,6 +4,7 @@
 
 import functools
 import hashlib
+from collections.abc import Callable
 from pathlib import Path
 
 import torch
@@ -48,6 +49,8 @@ class BeamAllReduceWorkspace:
         hidden_size: int,
         max_tokens: int,
         dtype: torch.dtype,
+        *,
+        device_group: torch.distributed.ProcessGroup | None = None,
     ) -> "BeamAllReduceWorkspace | None":
         # The CUDA epilogue handles one packed load per thread.
         if (
@@ -69,10 +72,15 @@ class BeamAllReduceWorkspace:
         supported = supported and is_multicast_supported(device)
         if not all_ranks_agree(TorchDistBackend(group=group), supported):
             return None
-        return cls(group, hidden_size, max_tokens)
+        return cls(group, hidden_size, max_tokens, device_group=device_group)
 
     def __init__(
-        self, group: torch.distributed.ProcessGroup, hidden_size: int, max_tokens: int
+        self,
+        group: torch.distributed.ProcessGroup,
+        hidden_size: int,
+        max_tokens: int,
+        *,
+        device_group: torch.distributed.ProcessGroup | None = None,
     ) -> None:
         from flashinfer.comm import create_allreduce_fusion_workspace
         from flashinfer.comm.mnnvl import TorchDistBackend
@@ -81,11 +89,18 @@ class BeamAllReduceWorkspace:
         self.rank = torch.distributed.get_rank(group)
         self.hidden_size = hidden_size
         self.max_tokens = max_tokens
+        self.device_group = device_group
+        self.all_gather: Callable[[torch.Tensor], torch.Tensor] | None = None
         # Scale one-shot cutoffs by the BF16 payload staged across all ranks.
         token_bytes = hidden_size * 2
         rank_token_bytes = self.world_size * token_bytes
         self.small_batch_max_tokens = 3200 * 1024 // rank_token_bytes
         self.ep_finalize_oneshot_max_tokens = 2560 * 1024 // rank_token_bytes
+        # GB300 TP2/4, H=5120, top-k=8: one-shot helps at one token;
+        # two-shot wins through 131072 tokens. Keep the unfused cutoff tunable
+        # for other geometries instead of imposing an unmeasured crossover.
+        self.moe_gather_oneshot_max_tokens = 1
+        self.moe_gather_separate_norm_min_tokens: int | None = None
         # Two-shot reserves two rows per token; one-shot needs one per rank.
         workspace_tokens = max(
             max_tokens,
