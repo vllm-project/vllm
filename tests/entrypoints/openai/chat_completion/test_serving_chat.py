@@ -810,7 +810,7 @@ async def test_chat_per_request_metrics_suppressed_for_n_greater_than_one():
 )
 @pytest.mark.parametrize("api_surface", ["chat_completions", "messages"])
 async def test_full_tool_response_metrics_count_returned_calls_once(
-    monkeypatch, fields, calls_per_choice, n, expected_count, api_surface
+    monkeypatch, fields, calls_per_choice, n, expected_count, api_surface, tool_trace
 ):
     record = MagicMock()
     monkeypatch.setattr(
@@ -837,6 +837,8 @@ async def test_full_tool_response_metrics_count_returned_calls_once(
         **{"tools": [{"type": "function", "function": {"name": "f"}}], **fields},
     )
     request._api_surface = api_surface
+    trace, exporter = tool_trace
+    trace.capture_tool_request(request, api_surface)
     output = _make_metrics_request_output()
     output.outputs = [replace(output.outputs[0], index=i) for i in range(n)]
     response = await serving.chat_completion_full_generator(
@@ -859,12 +861,24 @@ async def test_full_tool_response_metrics_count_returned_calls_once(
             record.assert_not_called()
         else:
             record.assert_called_once_with(request, tool_calls_count=expected_count)
+    trace.end()
+    attributes = exporter.get_finished_spans()[0].attributes
+    assert attributes["vllm.tool_calling.tool_calls_count"] == (
+        returned_count if api_surface == "chat_completions" else 0
+    )
+    assert attributes["vllm.tool_calling.parser_status"] == (
+        "interrupted"
+        if api_surface == "messages"
+        else "success"
+        if returned_count
+        else "no_tool_calls"
+    )
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("api_surface", ["chat_completions", "messages"])
 async def test_full_tool_response_metrics_report_parse_error_not_emitted_calls(
-    monkeypatch, api_surface
+    monkeypatch, api_surface, tool_trace
 ):
     record = MagicMock()
     monkeypatch.setattr(
@@ -889,6 +903,8 @@ async def test_full_tool_response_metrics_report_parse_error_not_emitted_calls(
         messages=[], n=2, tools=[{"type": "function", "function": {"name": "f"}}]
     )
     request._api_surface = api_surface
+    trace, exporter = tool_trace
+    trace.capture_tool_request(request, api_surface)
     output = _make_metrics_request_output()
     output.outputs = [replace(output.outputs[0], index=i) for i in range(2)]
     with pytest.raises(ValueError) as caught:
@@ -904,6 +920,10 @@ async def test_full_tool_response_metrics_report_parse_error_not_emitted_calls(
         )
     assert caught.value is error
     record.assert_called_once_with(request, parse_failed=True)
+    trace.end(error=True)
+    attributes = exporter.get_finished_spans()[0].attributes
+    assert attributes["vllm.tool_calling.tool_calls_count"] == 0
+    assert attributes["vllm.tool_calling.parser_status"] == "parse_failure"
 
 
 @pytest.fixture
@@ -934,6 +954,7 @@ def tool_metrics_stream_serving(monkeypatch):
     ],
 )
 @pytest.mark.parametrize("api_surface", ["chat_completions", "messages"])
+@pytest.mark.parametrize("mutate_tools", [False, True])
 async def test_stream_tool_response_metrics_deduplicate_filtered_fragments(
     tool_metrics_stream_serving,
     fields,
@@ -941,6 +962,8 @@ async def test_stream_tool_response_metrics_deduplicate_filtered_fragments(
     n,
     expected_count,
     api_surface,
+    tool_trace,
+    mutate_tools,
 ):
     serving, parser, record = tool_metrics_stream_serving
     request = ChatCompletionRequest(
@@ -951,6 +974,15 @@ async def test_stream_tool_response_metrics_deduplicate_filtered_fragments(
         **{"tools": [{"type": "function", "function": {"name": "f"}}], **fields},
     )
     request._api_surface = api_surface
+    trace, exporter = tool_trace
+    trace.capture_tool_request(request, api_surface)
+    if mutate_tools:
+
+        def make_parser(*args, **kwargs):
+            request.tools = None
+            return parser
+
+        serving._make_parser.side_effect = make_parser
     parser.parse_delta.side_effect = [
         DeltaMessage(
             content="answer" if not calls_per_choice else None,
@@ -1011,6 +1043,18 @@ async def test_stream_tool_response_metrics_deduplicate_filtered_fragments(
                 parse_failed=False,
                 completed=True,
             )
+    trace.end()
+    attributes = exporter.get_finished_spans()[0].attributes
+    assert attributes["vllm.tool_calling.tool_calls_count"] == (
+        len(set(emitted)) if api_surface == "chat_completions" else 0
+    )
+    assert attributes["vllm.tool_calling.parser_status"] == (
+        "interrupted"
+        if api_surface == "messages"
+        else "success"
+        if emitted
+        else "no_tool_calls"
+    )
 
 
 @pytest.mark.asyncio
@@ -1021,7 +1065,7 @@ async def test_stream_tool_response_metrics_deduplicate_filtered_fragments(
 )
 @pytest.mark.parametrize("api_surface", ["chat_completions", "messages"])
 async def test_stream_tool_response_metrics_retain_calls_without_false_outcomes(
-    tool_metrics_stream_serving, failure, emitted_first, api_surface
+    tool_metrics_stream_serving, failure, emitted_first, api_surface, tool_trace
 ):
     serving, parser, record = tool_metrics_stream_serving
     request = ChatCompletionRequest(
@@ -1030,6 +1074,8 @@ async def test_stream_tool_response_metrics_retain_calls_without_false_outcomes(
         tools=[{"type": "function", "function": {"name": "f"}}],
     )
     request._api_surface = api_surface
+    trace, exporter = tool_trace
+    trace.capture_tool_request(request, api_surface)
     parser_failed = failure == "parser"
     parser.parse_delta.side_effect = (
         [DeltaMessage(tool_calls=[DeltaToolCall(index=0)])] if emitted_first else []
@@ -1102,12 +1148,20 @@ async def test_stream_tool_response_metrics_retain_calls_without_false_outcomes(
             parse_failed=parser_failed,
             completed=False,
         )
+    trace.end(error=True)
+    attributes = exporter.get_finished_spans()[0].attributes
+    assert attributes["vllm.tool_calling.tool_calls_count"] == (
+        int(emitted_first) if api_surface == "chat_completions" else 0
+    )
+    assert attributes["vllm.tool_calling.parser_status"] == (
+        "parse_failure" if parser_failed else "interrupted"
+    )
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("emitted_first", [False, True])
 async def test_messages_stream_tool_response_metrics_count_parser_failure_once(
-    monkeypatch, tool_metrics_stream_serving, emitted_first
+    monkeypatch, tool_metrics_stream_serving, emitted_first, tool_trace
 ):
     serving, parser, record = tool_metrics_stream_serving
     monkeypatch.setattr(
@@ -1119,6 +1173,8 @@ async def test_messages_stream_tool_response_metrics_count_parser_failure_once(
         tools=[{"type": "function", "function": {"name": "f"}}],
     )
     request._api_surface = "messages"
+    trace, exporter = tool_trace
+    trace.capture_tool_request(request, "messages")
     parser.parse_delta.side_effect = (
         [
             DeltaMessage(
@@ -1153,6 +1209,10 @@ async def test_messages_stream_tool_response_metrics_count_parser_failure_once(
         call(request, parse_failed=True, completed=False),
         call(request, tool_calls_count=int(emitted_first), completed=False),
     ]
+    trace.end()
+    attributes = exporter.get_finished_spans()[0].attributes
+    assert attributes["vllm.tool_calling.tool_calls_count"] == int(emitted_first)
+    assert attributes["vllm.tool_calling.parser_status"] == "parse_failure"
 
 
 @pytest.mark.asyncio

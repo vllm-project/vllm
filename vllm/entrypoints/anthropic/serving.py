@@ -58,6 +58,7 @@ from vllm.parser.metrics import record_tool_call_response
 from vllm.renderers.chat_utils import ChatTemplateContentFormatOption
 from vllm.renderers.hf import HfRenderer, resolve_chat_template
 from vllm.renderers.online_renderer import OnlineRenderer
+from vllm.tracing import get_request_trace
 
 logger = init_logger(__name__)
 
@@ -803,6 +804,9 @@ class AnthropicServingMessages(OpenAIServingChat):
         See https://docs.anthropic.com/en/api/messages
         for the API specification. This API mimics the Anthropic messages API.
         """
+        trace = get_request_trace()
+        if trace is not None:
+            trace.capture_tool_request(request, "messages")
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug("Received messages request %s", request.model_dump_json())
         disabled_thinking_effort: AnthropicDisabledThinkingEffort = "none"
@@ -822,11 +826,18 @@ class AnthropicServingMessages(OpenAIServingChat):
 
         elif isinstance(generator, ChatCompletionResponse):
             response = self.messages_full_converter(generator, request=chat_req)
-            if chat_req.tools:
+            if chat_req.tools or (
+                trace is not None and trace.tool_attributes is not None
+            ):
                 tool_calls_count = sum(
                     block.type == "tool_use" for block in response.content
                 )
-                record_tool_call_response(chat_req, tool_calls_count=tool_calls_count)
+                if chat_req.tools:
+                    record_tool_call_response(
+                        chat_req, tool_calls_count=tool_calls_count
+                    )
+                if trace is not None:
+                    trace.record_tool_response(tool_calls_count=tool_calls_count)
             return response
 
         return self.message_stream_converter(generator, request=chat_req)
@@ -882,6 +893,8 @@ class AnthropicServingMessages(OpenAIServingChat):
             except (json.JSONDecodeError, ValidationError):
                 if request is not None and request.tools:
                     record_tool_call_response(request, parse_failed=True)
+                if trace := get_request_trace():
+                    trace.record_tool_response(parse_failed=True)
                 raise
             content += [anthropic_tool_call]
 
@@ -901,6 +914,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         *,
         request: ChatCompletionRequest | None = None,
     ) -> AsyncGenerator[str, None]:
+        trace = get_request_trace()
         emitted_tool_calls = 0
         stream_completed = False
         stream_failed = False
@@ -1266,6 +1280,13 @@ class AnthropicServingMessages(OpenAIServingChat):
                 if request is not None and request.tools:
                     record_tool_call_response(
                         request,
+                        tool_calls_count=emitted_tool_calls,
+                        completed=stream_completed and not stream_failed,
+                    )
+                if trace is not None:
+                    if stream_failed:
+                        trace.failed = True
+                    trace.record_tool_response(
                         tool_calls_count=emitted_tool_calls,
                         completed=stream_completed and not stream_failed,
                     )

@@ -4,6 +4,7 @@
 import asyncio
 from argparse import Namespace
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from fastapi import FastAPI, Request
@@ -16,61 +17,6 @@ from vllm.entrypoints.serve.utils.api_utils import (
     redact_sensitive_args,
     should_include_usage,
 )
-
-
-@pytest.fixture
-def inference_spans(monkeypatch):
-    sdk = pytest.importorskip("opentelemetry.sdk.trace")
-    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
-    from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
-        InMemorySpanExporter,
-    )
-
-    from vllm.sampling_params import SamplingParams
-    from vllm.tracing import otel
-    from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
-    from vllm.v1.engine.output_processor import OutputProcessor
-    from vllm.v1.metrics.stats import IterationStats
-
-    if not otel.is_otel_available():
-        pytest.skip("OTel required")
-    provider = sdk.TracerProvider()
-    exporter = InMemorySpanExporter()
-    provider.add_span_processor(SimpleSpanProcessor(exporter))
-    monkeypatch.setattr(otel.trace, "get_tracer", provider.get_tracer)
-    processor = OutputProcessor(None, log_stats=False, tracing_enabled=True)
-
-    def finish_engine(request_id="request"):
-        request = EngineCoreRequest(
-            request_id=request_id,
-            external_req_id=request_id,
-            prompt_token_ids=[1],
-            mm_features=None,
-            sampling_params=SamplingParams(detokenize=False),
-            pooling_params=None,
-            arrival_time=1,
-            lora_request=None,
-            cache_salt=None,
-            data_parallel_rank=None,
-        )
-        processor.add_request(request, None)
-        span = processor.request_states[request_id].trace_span
-        processor.process_outputs(
-            [
-                EngineCoreOutput(
-                    request_id=request_id,
-                    new_token_ids=[2],
-                    finish_reason=FinishReason.STOP,
-                )
-            ],
-            1,
-            IterationStats(),
-        )
-        return span
-
-    yield exporter, finish_engine
-    processor.shutdown()
-    provider.shutdown()
 
 
 def _traced_request(*, enabled=True):
@@ -89,9 +35,23 @@ def _traced_request(*, enabled=True):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("api,num_choices", [("chat", 1), ("chat", 2), ("messages", 1)])
-@pytest.mark.parametrize("has_tools", [False, True])
+@pytest.mark.parametrize(
+    "tool_fields",
+    [
+        "plain",
+        "null",
+        "tools",
+        "empty",
+        "auto",
+        "none",
+        "required",
+        "named",
+        "parallel",
+    ],
+)
+@pytest.mark.parametrize("sampled", [False, True])
 async def test_inference_spans_wait_for_api_conversion(
-    inference_spans, api, num_choices, has_tools
+    inference_spans, api, num_choices, tool_fields, sampled, monkeypatch
 ):
     """Both native routes finish their conversions before exporting engine spans."""
     from vllm.entrypoints.anthropic.api_router import create_messages
@@ -106,16 +66,31 @@ async def test_inference_spans_wait_for_api_conversion(
         ChatCompletionResponseChoice,
         ChatMessage,
     )
+    from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
     from vllm.entrypoints.serve.engine.protocol import UsageInfo
+    from vllm.exceptions import VLLMValidationError
     from vllm.tracing import get_request_trace
 
     exporter, finish_engine = inference_spans
     raw_request = _traced_request()
+    headers = {
+        "traceparent": f"00-{'1' * 32}-{'2' * 16}-{'01' if sampled else '00'}",
+        "tracestate": "test=parent",
+        "vllm.tool_calling.tool_count": "999",
+        "vllm.tool_calling.tool_choice": "private-spoof",
+    }
+    original_headers = headers.copy()
 
     async def complete(request, raw_request):
-        spans = [finish_engine(str(index)) for index in range(num_choices)]
-        assert all(span.is_recording() for span in spans)
+        # Rendering/parsing may mutate the request after native intent is captured.
+        request.tools = []
+        request.tool_choice = "none"
+        spans = [finish_engine(str(index), headers) for index in range(num_choices)]
+        assert all(span.is_recording() == sampled for span in spans)
         assert not exporter.get_finished_spans()
+        trace = get_request_trace()
+        assert trace is not None
+        trace.record_tool_response()
         response = ChatCompletionResponse(
             model="test-model",
             choices=[
@@ -128,52 +103,114 @@ async def test_inference_spans_wait_for_api_conversion(
             ],
             usage=UsageInfo(prompt_tokens=1, completion_tokens=1, total_tokens=2),
         )
-        if api == "messages":
-            response = AnthropicServingMessages.__new__(
-                AnthropicServingMessages
-            ).messages_full_converter(response)
-            assert all(span.is_recording() for span in spans)
         return response
 
+    fields: dict[str, Any] = {}
+    choice_label = "unset"
+    tool_count = 0
+    if tool_fields == "null":
+        fields = {"tools": None, "tool_choice": None}
+    elif tool_fields == "empty":
+        fields = {"tools": []}
+    elif tool_fields == "parallel":
+        # Native Messages has no parallel_tool_calls field.
+        fields = {"parallel_tool_calls": False} if api == "chat" else {"tools": []}
+        if api == "chat":
+            choice_label = "none"
+    elif tool_fields == "none":
+        fields = {"tool_choice": "none" if api == "chat" else {"type": "none"}}
+        choice_label = "none"
+    elif tool_fields != "plain":
+        tool_count = 1
+        fields = {
+            "tools": [{"type": "function", "function": {"name": "private-tool"}}]
+            if api == "chat"
+            else [{"name": "private-tool", "input_schema": {"type": "object"}}]
+        }
+        if tool_fields != "tools":
+            choice_label = tool_fields
+            if tool_fields == "named":
+                fields["tool_choice"] = (
+                    {"type": "function", "function": {"name": "private-tool"}}
+                    if api == "chat"
+                    else {"type": "tool", "name": "private-tool"}
+                )
+            else:
+                fields["tool_choice"] = (
+                    tool_fields
+                    if api == "chat"
+                    else {"type": "any" if tool_fields == "required" else tool_fields}
+                )
+        if api == "chat" and tool_fields == "tools":
+            choice_label = "auto"  # Chat normalizes the default during validation.
+
     if api == "chat":
-        raw_request.app.state.openai_serving_chat = SimpleNamespace(
-            create_chat_completion=complete
-        )
-        request = ChatCompletionRequest(
-            messages=[],
-            n=num_choices,
-            tools=[{"type": "function", "function": {"name": "test"}}]
-            if has_tools
-            else None,
-        )
+        handler = OpenAIServingChat.__new__(OpenAIServingChat)
+        handler.has_kv_connector = False
+        monkeypatch.setattr(handler, "_create_chat_completion", complete)
+        raw_request.app.state.openai_serving_chat = handler
+        if tool_fields == "empty":
+            with pytest.raises(VLLMValidationError, match="must not be an empty array"):
+                ChatCompletionRequest(messages=[], **fields)
+            assert not exporter.get_finished_spans()
+            return
+        request = ChatCompletionRequest(messages=[], n=num_choices, **fields)
         response = await create_chat_completion(request, raw_request)
     else:
-        raw_request.app.state.anthropic_serving_messages = SimpleNamespace(
-            create_messages=complete
-        )
+        handler = AnthropicServingMessages.__new__(AnthropicServingMessages)
+        handler.has_kv_connector = False
+        handler._merge_inline_system = False
+        monkeypatch.setattr(handler, "_create_chat_completion", complete)
+        raw_request.app.state.anthropic_serving_messages = handler
         request = AnthropicMessagesRequest(
             model="test-model",
             max_tokens=1,
             messages=[],
-            tools=[{"name": "test", "input_schema": {"type": "object"}}]
-            if has_tools
-            else None,
+            **fields,
         )
         response = await create_messages(request, raw_request)
 
     assert response.status_code == 200
     assert b"hello" in response.body
-    assert len(exporter.get_finished_spans()) == num_choices
+    finished = exporter.get_finished_spans()
+    assert len(finished) == (num_choices if sampled else 0)
+    for span in finished:
+        attributes = {
+            key: value
+            for key, value in span.attributes.items()
+            if key.startswith("vllm.tool_calling.")
+        }
+        assert attributes == (
+            {}
+            if tool_fields in ("plain", "null")
+            else {
+                "vllm.tool_calling.present": True,
+                "vllm.tool_calling.tool_count": tool_count,
+                "vllm.tool_calling.tool_choice": choice_label,
+                "vllm.tool_calling.api_surface": "chat_completions"
+                if api == "chat"
+                else "messages",
+                "vllm.tool_calling.response_has_tool_calls": False,
+                "vllm.tool_calling.tool_calls_count": 0,
+                "vllm.tool_calling.parser_status": "no_tool_calls",
+            }
+        )
+        assert span.context.trace_id == int("1" * 32, 16)
+        assert span.parent.span_id == int("2" * 16, 16)
+        assert "private" not in str(span.attributes)
+    assert headers == original_headers
     assert get_request_trace() is None
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("has_tools", [False, True])
 @pytest.mark.parametrize(
     "outcome",
     ["completed", "disconnect", "send_error", "cancel", "api_error", "cleanup_error"],
 )
-async def test_streaming_inference_span_completion(inference_spans, outcome):
+async def test_streaming_inference_span_completion(inference_spans, outcome, has_tools):
     """The ASGI response owns spans even when interruption happens during send."""
+    from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
     from vllm.tracing import StatusCode, get_request_trace
 
     exporter, finish_engine = inference_spans
@@ -181,6 +218,10 @@ async def test_streaming_inference_span_completion(inference_spans, outcome):
 
     @api_utils.with_cancellation
     async def handler(body, raw_request):
+        trace = get_request_trace()
+        assert trace is not None
+        trace.capture_tool_request(body, "chat_completions")
+
         async def stream():
             span = finish_engine()
             assert span.is_recording()
@@ -197,12 +238,18 @@ async def test_streaming_inference_span_completion(inference_spans, outcome):
                     yield serving.create_streaming_error_response("sensitive error")
             finally:
                 assert span.is_recording()
+                trace.record_tool_response()
                 if outcome == "cleanup_error":
                     raise RuntimeError("cleanup failed")
 
         return StreamingResponse(stream(), headers={"x-test": "kept"})
 
-    response = await handler({}, raw_request)
+    response = await handler(
+        ChatCompletionRequest(messages=[], parallel_tool_calls=False)
+        if has_tools
+        else ChatCompletionRequest(messages=[]),
+        raw_request,
+    )
     from starlette.background import BackgroundTask
 
     background_calls: list[bool] = []
@@ -244,6 +291,12 @@ async def test_streaming_inference_span_completion(inference_spans, outcome):
 
     (span,) = exporter.get_finished_spans()
     assert (span.status.status_code == StatusCode.ERROR) == (outcome != "completed")
+    if has_tools:
+        assert span.attributes["vllm.tool_calling.parser_status"] == (
+            "no_tool_calls" if outcome == "completed" else "interrupted"
+        )
+    else:
+        assert not any(key.startswith("vllm.tool_calling.") for key in span.attributes)
     assert (b"x-test", b"kept") in sent[0]["headers"]
     assert (b"x-added", b"also-kept") in sent[0]["headers"]
     assert sent[0]["status"] == 201
