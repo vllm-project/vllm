@@ -330,9 +330,12 @@ class MooncakeStoreScheduler:
         # Handle new requests
         for request in scheduler_output.scheduled_new_reqs:
             load_spec = self.load_specs.pop(request.req_id, None)
-            num_tokens_to_compute = (
+            prefill_tokens = _new_req_prefill_tokens(request)
+            # Scheduled speculative slots do not yet have accepted token IDs.
+            num_tokens_to_compute = min(
                 request.num_computed_tokens
-                + scheduler_output.num_scheduled_tokens[request.req_id]
+                + scheduler_output.num_scheduled_tokens[request.req_id],
+                len(prefill_tokens),
             )
             assert request.req_id in self._unfinished_requests
             request_tuple = self._unfinished_requests.get(request.req_id)
@@ -342,7 +345,6 @@ class MooncakeStoreScheduler:
                 request.block_ids[group_id].copy() for group_id in self._store_group_ids
             )
 
-            prefill_tokens = _new_req_prefill_tokens(request)
             request_tracker = RequestTracker(
                 req_id=request.req_id,
                 token_len=num_tokens_to_compute,
@@ -390,13 +392,14 @@ class MooncakeStoreScheduler:
                     load_spec = self.load_specs.pop(req_id, None)
                     request_tuple = self._unfinished_requests.get(req_id)
                     request_real = request_tuple[0]  # type: ignore[index]
-                    num_tokens_to_compute = (
-                        request_real.num_computed_tokens
-                        + scheduler_output.num_scheduled_tokens[req_id]
-                    )
                     # On resume, the request re-prefills prompt + previously
                     # generated tokens (all_token_ids).
                     prefill_tokens = list(request_real.all_token_ids)
+                    num_tokens_to_compute = min(
+                        request_real.num_computed_tokens
+                        + scheduler_output.num_scheduled_tokens[req_id],
+                        len(prefill_tokens),
+                    )
                     request_tracker = RequestTracker(
                         req_id=req_id,
                         token_len=num_tokens_to_compute,

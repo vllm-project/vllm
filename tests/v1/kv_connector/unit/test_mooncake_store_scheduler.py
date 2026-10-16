@@ -12,6 +12,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator imp
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
     BoundaryPut,
+    ChunkedTokenDatabase,
+    KeyMetadata,
     LoadSpec,
     MooncakeLookupResult,
     MooncakeStoreConnectorMetadata,
@@ -172,6 +174,39 @@ def _make_new_scheduler_output() -> SimpleNamespace:
         scheduled_spec_decode_tokens={},
         kv_connector_block_state=_make_connector_block_state(block_ids=([0, 1],)),
     )
+
+
+@pytest.mark.parametrize("resume_mode", ["new", "v1", "v2"])
+def test_save_excludes_speculative_padding(resume_mode: str):
+    scheduler = _make_bare_scheduler()
+    output = _make_new_scheduler_output()
+    request = output.request
+    request.prompt_token_ids = list(range(31 if resume_mode == "new" else 15))
+    request.num_prompt_tokens = len(request.prompt_token_ids)
+    request.prefill_token_ids = list(range(31)) if resume_mode == "v2" else None
+    request.num_computed_tokens = 30
+    request.block_hashes = [b"h0"]
+    output.num_scheduled_tokens["req-0"] = 5
+    scheduler._unfinished_requests["req-0"] = (request, request.block_ids)
+    if resume_mode == "v1":
+        request.all_token_ids = list(range(31))
+        output.scheduled_new_reqs = []
+        output.scheduled_cached_reqs = SimpleNamespace(
+            req_ids=["req-0"],
+            new_block_ids=[request.block_ids],
+            num_computed_tokens=[30],
+            resumed_req_ids={"req-0"},
+        )
+
+    [req_meta] = scheduler.build_connector_meta(output).requests
+    db = ChunkedTokenDatabase(KeyMetadata("model", 0, 0, 0, 0), block_size=16)
+
+    # The four unaccepted draft slots must not create a save at token 32.
+    assert list(db.process_tokens(req_meta.token_len_chunk, req_meta.block_hashes)) == [
+        (0, 16, b"h0")
+    ]
+    assert scheduler._request_trackers["req-0"].token_len == 31
+    assert req_meta.completed_token_len == 31
 
 
 def test_scheduler_only_tracks_token_ids_for_kv_events():
