@@ -11,7 +11,6 @@ Used when --enable-auto-tool-choice --tool-call-parser apertus are set.
 import json
 from collections.abc import Sequence
 
-import regex as re
 from partial_json_parser.core.options import Allow
 
 from vllm.entrypoints.generate.base.protocol import (
@@ -89,14 +88,6 @@ class ApertusToolParser(ToolParser):
                 "The model tokenizer must be passed to the ToolParser "
                 "constructor during construction."
             )
-        # Regex to extract tool calls block (suffix is optional for incomplete outputs)
-        self.tool_call_regex = re.compile(
-            rf"{re.escape(TOOL_CALLS_PREFIX)}"
-            rf"(.*?)"
-            rf"(?:{re.escape(TOOL_CALLS_SUFFIX)}|$)",
-            re.DOTALL,
-        )
-
         self._reset_streaming_state()
 
     def _reset_streaming_state(self) -> None:
@@ -171,6 +162,28 @@ class ApertusToolParser(ToolParser):
         self.buffered_delta_text = ""
         return text
 
+    @staticmethod
+    def _find_tool_suffix(text: str, start: int) -> int:
+        """Find a tool boundary outside JSON strings, including incomplete JSON."""
+        if text.find(TOOL_CALLS_SUFFIX, start) == -1:
+            return -1
+        in_string = False
+        escaped = False
+        for index in range(start, len(text)):
+            char = text[index]
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == '"':
+                    in_string = False
+            elif char == '"':
+                in_string = True
+            elif text.startswith(TOOL_CALLS_SUFFIX, index):
+                return index
+        return -1
+
     def extract_tool_calls(
         self,
         model_output: str,
@@ -199,15 +212,17 @@ class ApertusToolParser(ToolParser):
             'get_weather'
 
         """
-        match = self.tool_call_regex.search(model_output)
-        if not match:
+        prefix_idx = model_output.find(TOOL_CALLS_PREFIX)
+        if prefix_idx == -1:
             return ExtractedToolCallInformation(
                 tools_called=False, tool_calls=[], content=model_output
             )
 
         try:
-            # group(1) might contain trailing text if the suffix is missing
-            matched_text = match.group(1)
+            json_start = prefix_idx + len(TOOL_CALLS_PREFIX)
+            suffix_idx = self._find_tool_suffix(model_output, json_start)
+            json_end = suffix_idx if suffix_idx != -1 else len(model_output)
+            matched_text = model_output[json_start:json_end]
             stripped_text = matched_text.lstrip()
 
             try:
@@ -240,10 +255,9 @@ class ApertusToolParser(ToolParser):
 
             # Content combines any generated text
             # prior to and safely after the tool block
-            content_str = model_output[: match.start()].strip()
+            content_str = model_output[:prefix_idx].strip()
 
-            # Surface any hallucinated text inside
-            # the regex group (due to missing suffix)
+            # Surface trailing text when the suffix is missing.
             if trailing_in_group.strip():
                 trailing = trailing_in_group.replace(TOOL_CALLS_SUFFIX, "").strip()
                 if trailing:
@@ -251,7 +265,11 @@ class ApertusToolParser(ToolParser):
 
             # Surface text natively generated after the explicit suffix
             after_suffix = (
-                model_output[match.end() :].replace(TOOL_CALLS_SUFFIX, "").strip()
+                model_output[suffix_idx + len(TOOL_CALLS_SUFFIX) :]
+                .replace(TOOL_CALLS_SUFFIX, "")
+                .strip()
+                if suffix_idx != -1
+                else ""
             )
             if after_suffix:
                 content_str = (content_str + "\n" + after_suffix).strip()
@@ -308,6 +326,10 @@ class ApertusToolParser(ToolParser):
         if not delta_text:
             return None
 
+        # Keep absolute offsets aligned with the text released by the buffer.
+        if self.buffered_delta_text:
+            current_text = current_text[: -len(self.buffered_delta_text)]
+
         # Fast path: normal text generation before any tools are invoked
         if TOOL_CALLS_PREFIX not in current_text:
             return DeltaMessage(content=delta_text)
@@ -332,69 +354,36 @@ class ApertusToolParser(ToolParser):
             A `DeltaMessage` containing the `content` delta and/or `tool_calls` delta.
 
         """
-        prefix_idx = current_text.rfind(TOOL_CALLS_PREFIX)
-        suffix_idx = current_text.rfind(TOOL_CALLS_SUFFIX)
-
-        is_inside_tools = prefix_idx > suffix_idx
-
-        json_completed = False
-        json_end_idx: int | None = None
-
-        # Check if the JSON array successfully closed implicitly
-        if is_inside_tools:
-            json_start = prefix_idx + len(TOOL_CALLS_PREFIX)
-            s = current_text[json_start:].lstrip()
-            try:
-                # If raw_decode succeeds,
-                # the JSON array is fully formed and implicitly closed
-                _, idx = json.JSONDecoder().raw_decode(s)
-                json_end_idx = len(current_text) - len(s) + idx
-                json_completed, is_inside_tools = True, False
-            except Exception:
-                pass
-
-        just_finished = (TOOL_CALLS_SUFFIX in delta_text) or json_completed
-
-        # 1. Fast path: Output normal text immediately
-        # if we are completely outside tool block constraints
-        if not is_inside_tools and not just_finished:
-            text = delta_text.replace(TOOL_CALLS_PREFIX, "").replace(
-                TOOL_CALLS_SUFFIX, ""
-            )
-            return DeltaMessage(content=text) if text else None
-
-        # 2. Extract leading and trailing normal text directly adjacent to tool blocks
-        content_str = ""
-        if TOOL_CALLS_PREFIX in delta_text:
-            content_str += delta_text.split(TOOL_CALLS_PREFIX)[0].replace(
-                TOOL_CALLS_SUFFIX, ""
-            )
-
-        if just_finished:
-            if json_completed and json_end_idx is not None:
-                # The tool block finished in this chunk via implicit JSON completion
-                # Ensure we strictly isolate
-                # and extract only trailing text that is part of `delta_text`
-                delta_start_idx = len(current_text) - len(delta_text)
-                content_start = max(json_end_idx, delta_start_idx)
-                if content_start < len(current_text):
-                    content_str += current_text[content_start:].replace(
-                        TOOL_CALLS_SUFFIX, ""
-                    )
-            else:
-                content_str += delta_text.split(TOOL_CALLS_SUFFIX)[-1]
-
-        # 3. Extract the isolated JSON array string for the active block
+        prefix_idx = current_text.find(TOOL_CALLS_PREFIX)
         json_start = prefix_idx + len(TOOL_CALLS_PREFIX)
-        json_end = suffix_idx if suffix_idx > prefix_idx else json_end_idx
-        json_str = current_text[json_start:json_end]
+        suffix_idx = self._find_tool_suffix(current_text, json_start)
+        json_end = suffix_idx if suffix_idx != -1 else len(current_text)
+        is_inside_tools = suffix_idx == -1
 
+        # A complete JSON value also closes the block when the suffix is omitted.
+        json_str = current_text[json_start:json_end].lstrip()
+        try:
+            _, idx = json.JSONDecoder().raw_decode(json_str)
+            json_end = json_end - len(json_str) + idx
+            is_inside_tools = False
+        except json.JSONDecodeError:
+            pass
+
+        delta_start = len(current_text) - len(delta_text)
+        content_str = (
+            current_text[delta_start:prefix_idx] if delta_start < prefix_idx else ""
+        )
+        if not is_inside_tools:
+            content_start = max(json_end, delta_start)
+            content_str += current_text[content_start:].replace(TOOL_CALLS_SUFFIX, "")
+
+        json_str = current_text[json_start:json_end]
         tool_calls = self._parse_and_diff_json(json_str, is_final=not is_inside_tools)
 
         if tool_calls or content_str:
             return DeltaMessage(
                 content=content_str if content_str else None,
-                tool_calls=tool_calls if tool_calls else None,
+                tool_calls=tool_calls,
             )
 
         return None
