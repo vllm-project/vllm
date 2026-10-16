@@ -2065,95 +2065,105 @@ def test_adjust_request_response_format_generates_grammar(
 
 
 @pytest.mark.parametrize(
-    "tool_choice, expected_method, not_called_method",
+    (
+        "request_kwargs",
+        "expected_json_only",
+        "expected_mode",
+        "expected_tools_present",
+    ),
     [
-        ("none", "get_lark_for_json_schema", None),
-        ("auto", "get_lark_from_jinja", "get_lark_for_json_schema"),
+        (
+            {
+                "tool_choice": "none",
+                "structured_outputs": StructuredOutputsParams(
+                    json='{"type": "object"}'
+                ),
+            },
+            True,
+            "none",
+            False,
+        ),
+        (
+            {
+                "tool_choice": "auto",
+                "structured_outputs": StructuredOutputsParams(
+                    json='{"type": "object"}'
+                ),
+            },
+            False,
+            MistralToolChoiceEnum.auto,
+            True,
+        ),
+        (
+            {
+                "tools": None,
+                "tool_choice": None,
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "x",
+                        "schema": {"type": "object"},
+                    },
+                },
+            },
+            True,
+            "none",
+            False,
+        ),
+        (
+            {
+                "tools": None,
+                "tool_choice": "none",
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "x",
+                        "schema": {"type": "object"},
+                    },
+                },
+            },
+            True,
+            "none",
+            False,
+        ),
     ],
-    ids=["none_uses_json_schema_factory", "auto_uses_jinja_factory"],
+    ids=[
+        "tools_tool_choice_none_schema_only",
+        "tools_tool_choice_auto_schema_plus_tools",
+        "no_tools_tool_choice_null_schema_only",
+        "no_tools_tool_choice_none_schema_only",
+    ],
 )
-def test_adjust_request_tool_choice_with_json_schema_factory_routing(
+def test_adjust_request_json_schema_grammar_kwargs(
     mistral_tool_parser: MistralToolParser,
-    tool_choice: str,
-    expected_method: str,
-    not_called_method: str | None,
+    request_kwargs: dict,
+    expected_json_only: bool,
+    expected_mode: object,
+    expected_tools_present: bool,
 ) -> None:
-    request = _make_request(
-        tool_choice=tool_choice,
-        structured_outputs=StructuredOutputsParams(json='{"type": "object"}'),
-    )
+    request = _make_request(**request_kwargs)
     factory = mistral_tool_parser.model_tokenizer.grammar_factory
 
-    patches = {
-        expected_method: patch.object(
-            factory,
-            expected_method,
-            wraps=getattr(factory, expected_method),
-        ),
-    }
-    if not_called_method:
-        patches[not_called_method] = patch.object(
-            factory,
-            not_called_method,
-            wraps=getattr(factory, not_called_method),
-        )
+    with patch.object(
+        factory,
+        "get_lark_from_jinja",
+        wraps=factory.get_lark_from_jinja,
+    ) as mock_jinja:
+        result = mistral_tool_parser.adjust_request(request)
 
-    with patches[expected_method] as mock_expected:
-        ctx = patches[not_called_method] if not_called_method else None
-        if ctx:
-            with ctx as mock_not_called:
-                result = mistral_tool_parser.adjust_request(request)
-                mock_not_called.assert_not_called()
-        else:
-            result = mistral_tool_parser.adjust_request(request)
-
-        mock_expected.assert_called_once()
-        assert mock_expected.call_args.kwargs["json_schema"] == {"type": "object"}
+    mock_jinja.assert_called_once()
+    kw = mock_jinja.call_args.kwargs
+    assert kw["json_only"] is expected_json_only
+    assert kw["json_schema"] == {"type": "object"}
+    assert kw["mode"] == expected_mode
+    if expected_tools_present:
+        assert kw["tools"] is not None and len(kw["tools"]) > 0
+    else:
+        assert kw["tools"] is None
 
     assert result.structured_outputs is not None
     assert isinstance(result.structured_outputs.grammar, str)
     assert len(result.structured_outputs.grammar) > 0
-
-
-@pytest.mark.parametrize(
-    "tool_choice",
-    [None, "none"],
-    ids=["null", "none"],
-)
-def test_adjust_request_json_schema_without_tools_uses_json_schema_factory(
-    mistral_tool_parser: MistralToolParser,
-    tool_choice: str | None,
-) -> None:
-    request = _make_request(
-        tools=None,
-        tool_choice=tool_choice,
-        response_format={
-            "type": "json_schema",
-            "json_schema": {"name": "x", "schema": {"type": "object"}},
-        },
-    )
-    factory = mistral_tool_parser.model_tokenizer.grammar_factory
-
-    sentinel = "SENTINEL_SCHEMA_ONLY_GRAMMAR"
-    with (
-        patch.object(
-            factory,
-            "get_lark_for_json_schema",
-            return_value=sentinel,
-        ) as mock_json_schema,
-        patch.object(
-            factory,
-            "get_lark_from_jinja",
-            wraps=factory.get_lark_from_jinja,
-        ) as mock_jinja,
-    ):
-        result = mistral_tool_parser.adjust_request(request)
-        mock_jinja.assert_not_called()
-        mock_json_schema.assert_called_once()
-        assert mock_json_schema.call_args.kwargs["json_schema"] == {"type": "object"}
-
-    assert result.structured_outputs is not None
-    assert result.structured_outputs.grammar == sentinel
 
 
 def test_grammar_from_parser_default_false() -> None:

@@ -467,20 +467,17 @@ class MistralParser(ParserEngine):
                 )
 
         has_tools = mistral_tools is not None and len(mistral_tools) > 0
-        match tool_choice, has_tools, json_schema is not None:
-            case (_, False, True) | (MistralToolChoiceEnum.none, True, True):
-                lark_grammar = grammar_factory.get_lark_for_json_schema(
-                    template=template, json_schema=json_schema
-                )
-            case _, _, _:
-                lark_grammar = grammar_factory.get_lark_from_jinja(
-                    template=template,
-                    mode=tool_choice,
-                    tools=mistral_tools,
-                    json_schema=json_schema,
-                    parallel_tool_calls=request.parallel_tool_calls,
-                    json_only=False,
-                )
+        schema_only = json_schema is not None and (
+            not has_tools or tool_choice == MistralToolChoiceEnum.none
+        )
+        lark_grammar = grammar_factory.get_lark_from_jinja(
+            template=template,
+            mode="none" if schema_only else tool_choice,
+            tools=None if schema_only else mistral_tools,
+            json_schema=json_schema,
+            parallel_tool_calls=True if schema_only else request.parallel_tool_calls,
+            json_only=schema_only,
+        )
 
         request.structured_outputs = StructuredOutputsParams(grammar=lark_grammar)
         request._grammar_from_parser = True
