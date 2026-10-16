@@ -609,6 +609,27 @@ def _dcp_a2a_lse_pack_dim(output_dtype: torch.dtype) -> int:
     raise ValueError(f"Cannot pack fp32 LSE into output dtype {output_dtype}.")
 
 
+def _dcp_a2a_send_recv_buffers(
+    shape: tuple[int, ...],
+    device: torch.device,
+    dtype: torch.dtype,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    # Don't use the shared WorkspaceManager here. A FULL cudagraph bakes in the
+    # buffer address at capture, but the workspace is growable and sized only to
+    # the largest *captured* batch (the cudagraph capture cap). Any eager a2a
+    # with a bigger batch regrows it, freeing that address and poisoning every
+    # captured graph -> illegal memory access on replay. This bites the very
+    # first request: the post-capture warmup runs an eager decode at
+    # max_num_seqs (> the cap), so the graphs are already dangling before the
+    # server is ready. torch.empty buffers instead live in the graph's private
+    # pool and stay valid for its lifetime (as _dcp_a2a_unpack_combine and the
+    # AG+RS combine path already rely on).
+    return (
+        torch.empty(shape, device=device, dtype=dtype),
+        torch.empty(shape, device=device, dtype=dtype),
+    )
+
+
 @triton.jit
 def _dcp_a2a_pack_send_kernel(
     out_ptr,
@@ -957,16 +978,8 @@ def dcp_a2a_lse_reduce(
     H_per_rank = H // world_size
     lse_pack_dim = _dcp_a2a_lse_pack_dim(cp_attn_out.dtype)
 
-    buffer_shape = (world_size, B, H_per_rank, D + lse_pack_dim)
-    # Per-call allocations live in the CUDA graph's private pool. A growable
-    # shared workspace could invalidate captured addresses after eager growth.
-    send_buffer = torch.empty(
-        buffer_shape,
-        device=cp_attn_out.device,
-        dtype=cp_attn_out.dtype,
-    )
-    recv_buffer = torch.empty(
-        buffer_shape,
+    send_buffer, recv_buffer = _dcp_a2a_send_recv_buffers(
+        (world_size, B, H_per_rank, D + lse_pack_dim),
         device=cp_attn_out.device,
         dtype=cp_attn_out.dtype,
     )
