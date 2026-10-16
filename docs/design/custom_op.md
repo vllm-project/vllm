@@ -321,8 +321,8 @@ In addition, you can also register all your `CustomOp` at one place for better m
 `vllm.v1.attention.ops.dcp` support OOT implementations of direct query gather,
 output exchange/LSE reduction and chunked-context KV gather. Each `CustomOp`
 holds its core-owned workspace. `MLADCPManager` constructs the ops during model
-initialization; cached workspaces retain buffers and protocol state independently
-of the selected implementation.
+initialization; cached workspaces only allocate and hold buffers and layout/protocol
+metadata. The ops own output-view preparation, communication and reduction.
 
 On CUDA, override `forward_cuda`. `forward_oot` applies to an OOT platform.
 Register from a `vllm.general_plugins` entry point before model construction on
@@ -341,8 +341,8 @@ class PluginDCPQGather(DirectDCPQGather):
         return gather_query(local_query, self.workspace)
 ```
 
-The CUDA implementations call the existing workspace methods and dedicated
-kernels. Replacements implement the complete collective: Q gather returns
+The CUDA implementations launch the existing dedicated kernels using workspace
+buffers. Replacements implement the complete collective: Q gather returns
 `[T, world_size * H, D]` with the workspace's reserved head storage; A2A returns
 `[T, H, D]` with both LSE bases and empty-shard masking; KV gather fills the
 supplied rank-ordered output. When reusing the core symmetric buffers, preserve

@@ -3,6 +3,7 @@
 """Tests for direct symmetric-memory DCP collectives."""
 
 import functools
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -75,26 +76,46 @@ def test_oot_collective_dispatch_preserves_native_fallback(
         "explicit_on": ["none", f"+{op_cls.__name__}"],
         "explicit_off": ["all", f"-{op_cls.__name__}"],
     }
-    workspace = MagicMock(world_size=2)
+    workspace = SimpleNamespace(
+        group=object(),
+        world_size=2,
+        rank=0,
+        num_ubatches=1,
+        max_num_tokens=2,
+        heads_per_rank=1,
+        head_dim=2,
+        epoch=torch.zeros(1, dtype=torch.int64),
+        received_signal=torch.zeros(1, 2, 2, dtype=torch.int32),
+        completion=torch.zeros(1, 2, dtype=torch.int32),
+    )
     args: list[Any]
     if op_cls is dcp.DirectDCPQGather:
-        output = torch.zeros(2, 2, 2)
-        workspace.query_output.return_value = output
+        workspace.final_query = torch.zeros(1, 2, 2, 2)
+        workspace.gathered_num_heads = workspace.padded_num_heads = 2
+        workspace.multicast_ptrs = [(1, 2)]
+        output = workspace.final_query[0]
         args = [torch.full((2, 1, 2), 42.0)]
-        cuda_method = workspace.gather
+        kernel_name, output_index = "direct_dcp_q_gather", 1
     elif op_cls is dcp.DirectDCPKVGather:
+        workspace.received_kv = torch.zeros(1, 2, 4, 2)
+        workspace.max_gathered_tokens = 4
+        workspace.multicast_ptrs = [(1, 2)]
         output = torch.zeros(4, 2)
         args = [output, torch.full((2, 2), 42.0)]
-        cuda_method = workspace.gather
+        kernel_name, output_index = "direct_dcp_kv_gather", 5
     else:
+        workspace.received_output = torch.zeros(1, 2, 2, 2, 1, 2)
+        workspace.received_lse = torch.zeros(1, 2, 2, 2, 1)
+        workspace.peer_output_ptrs = torch.zeros(1, 2, dtype=torch.int64)
+        workspace.peer_lse_ptrs = torch.zeros(1, 2, dtype=torch.int64)
+        workspace.peer_signal_ptrs = torch.zeros(1, 2, dtype=torch.int64)
         output = torch.zeros(2, 1, 2)
         args = [torch.full((2, 2, 2), 42.0), torch.zeros(2, 2), True]
-        cuda_method = workspace.lse_reduce
+        kernel_name, output_index = "direct_dcp_a2a_lse_reduce", 11
     collective_calls: list[None] = []
 
-    def cuda_collective(*args: Any) -> torch.Tensor:
-        output.fill_(42)
-        return output
+    def cuda_collective(*inputs: Any) -> None:
+        inputs[output_index].fill_(42)
 
     def torch_collective(
         destination: torch.Tensor, source: torch.Tensor, *, group: Any
@@ -103,7 +124,8 @@ def test_oot_collective_dispatch_preserves_native_fallback(
         collective_calls.append(None)
         destination.fill_(42)
 
-    cuda_method.side_effect = cuda_collective
+    cuda_method = MagicMock(side_effect=cuda_collective)
+    monkeypatch.setattr(torch.ops._C, kernel_name, cuda_method, raising=False)
     monkeypatch.setattr(dist, "all_gather_into_tensor", torch_collective)
     monkeypatch.setattr(dist, "all_to_all_single", torch_collective)
     config = VllmConfig(
@@ -464,8 +486,12 @@ def _manager_config(dcp_comm_backend: str = "a2a"):
 
 def test_mla_dcp_manager_selects_direct_backends(monkeypatch, default_vllm_config):
     default_vllm_config.compilation_config.custom_ops = ["all"]
-    for op_cls in (dcp.DirectDCPQGather, dcp.DirectDCPA2AReduce, dcp.DirectDCPKVGather):
-        monkeypatch.setattr(op_cls, "forward_cpu", op_cls.forward_cuda)
+    query_gather = MagicMock(return_value=torch.empty(1, 4, 8))
+    a2a_reduce = MagicMock(return_value=torch.empty(1, 2, 4))
+    kv_gather = MagicMock()
+    monkeypatch.setattr(dcp.DirectDCPQGather, "forward_cpu", query_gather)
+    monkeypatch.setattr(dcp.DirectDCPA2AReduce, "forward_cpu", a2a_reduce)
+    monkeypatch.setattr(dcp.DirectDCPKVGather, "forward_cpu", kv_gather)
 
     import vllm.v1.attention.ops.dcp as dcp_manager
 
@@ -504,12 +530,12 @@ def test_mla_dcp_manager_selects_direct_backends(monkeypatch, default_vllm_confi
 
     query = torch.empty(1, 2, 8)
     assert manager.query_gather is not None, "Direct manager must bind query gather"
-    assert manager.query_gather(query) is direct_query.gather.return_value
-    direct_query.gather.assert_called_once_with(query)
+    assert manager.query_gather(query) is query_gather.return_value
+    query_gather.assert_called_once_with(query)
     manager.init_kv_gather(workspace, 64)
     gathered_kv, local_kv = torch.empty(4, 8), torch.empty(2, 8)
     manager.kv_gather(gathered_kv, local_kv)
-    direct_kv.gather.assert_called_once_with(gathered_kv, local_kv)
+    kv_gather.assert_called_once_with(gathered_kv, local_kv)
     output, lse = torch.empty(1), torch.empty(1)
     seq_lens = torch.ones(1, dtype=torch.int32)
     query_start_loc = torch.tensor([0, 1], dtype=torch.int32)
@@ -519,7 +545,7 @@ def test_mla_dcp_manager_selects_direct_backends(monkeypatch, default_vllm_confi
         seq_lens=seq_lens,
         query_start_loc=query_start_loc,
     )
-    direct_a2a.lse_reduce.assert_called_once_with(
+    a2a_reduce.assert_called_once_with(
         output,
         lse,
         False,
@@ -532,7 +558,7 @@ def test_mla_dcp_manager_selects_direct_backends(monkeypatch, default_vllm_confi
     large_query = torch.empty(17, 2, 8)
     manager.query_gather(large_query)
     group.all_gather.assert_called_once_with(large_query, dim=1)
-    direct_query.gather.assert_called_once()
+    query_gather.assert_called_once()
     large_output, large_lse = torch.empty(17, 4, 4), torch.empty(17, 4)
     manager.combine(
         large_output,
@@ -540,7 +566,7 @@ def test_mla_dcp_manager_selects_direct_backends(monkeypatch, default_vllm_confi
         seq_lens=seq_lens,
         query_start_loc=query_start_loc,
     )
-    direct_a2a.lse_reduce.assert_called_once()
+    a2a_reduce.assert_called_once()
     fallback_combine.assert_called_once_with(
         large_output,
         large_lse,
