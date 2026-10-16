@@ -122,6 +122,7 @@ def paged_attention_rocm(
     v_scale: torch.Tensor,
     fp8_out_scale: torch.Tensor | None = None,
     mfma_type: str = "fp8" if envs.VLLM_ROCM_FP8_MFMA_PAGE_ATTN else "f16",
+    use_interleaved_v_cache: bool = False,
 ) -> None:
     torch.ops._rocm_C.paged_attention(
         out,
@@ -144,6 +145,7 @@ def paged_attention_rocm(
         v_scale,
         fp8_out_scale,
         mfma_type,
+        use_interleaved_v_cache,
     )
 
 
@@ -2195,6 +2197,32 @@ def moe_align_block_size(
     )
 
 
+def fused_globalize_align_block_size(
+    topk_idx: torch.Tensor,
+    psum: torch.Tensor,
+    rank_expert_offset: int,
+    global_num_experts: int,
+    local_num_experts: int,
+    block_size: int,
+    sorted_ids: torch.Tensor,
+    expert_ids: torch.Tensor,
+    num_tokens_post_pad: torch.Tensor,
+    scatter_idx: torch.Tensor | None = None,
+) -> None:
+    torch.ops._moe_C.fused_globalize_align_block_size(
+        topk_idx,
+        psum,
+        rank_expert_offset,
+        global_num_experts,
+        local_num_experts,
+        block_size,
+        sorted_ids,
+        expert_ids,
+        num_tokens_post_pad,
+        scatter_idx,
+    )
+
+
 def batched_moe_align_block_size(
     max_tokens_per_batch: int,
     block_size: int,
@@ -2528,6 +2556,7 @@ def reshape_and_cache(
     kv_cache_dtype: str,
     k_scale: torch.Tensor,
     v_scale: torch.Tensor,
+    interleaved_v: bool = False,
 ) -> None:
     torch.ops._C_cache_ops.reshape_and_cache(
         key,
@@ -2538,6 +2567,7 @@ def reshape_and_cache(
         kv_cache_dtype,
         k_scale,
         v_scale,
+        interleaved_v,
     )
 
 
@@ -2587,6 +2617,8 @@ def fused_minimax_m3_qknorm_rope_kv_insert(
     skip_index_branch: bool = False,
     q_fp8_out: torch.Tensor | None = None,
     q_fp8_scale: float = 1.0,
+    kv_k_scale: torch.Tensor | None = None,
+    kv_v_scale: torch.Tensor | None = None,
 ) -> None:
     """Fused MiniMax-M3 attention pre-processing (in-place).
 
@@ -2610,7 +2642,14 @@ def fused_minimax_m3_qknorm_rope_kv_insert(
     attention's flat TMA descriptor.
 
     If ``q_fp8_out`` is given, the same normalized q is also written in FP8
-    E4M3 using ``q_fp8_scale`` as its dequantization scale.
+    E4M3 using ``q_fp8_scale`` as its dequantization scale. Without ``q_out``,
+    q is then written only in FP8 and the q slice of ``qkv`` is left as is.
+
+    ``kv_cache_dtype="nvfp4"`` quantizes k/v into the packed HND
+    ``[num_blocks, 2 * num_kv_heads, block_size, 72]`` uint8 cache using the
+    device dequantization scales ``kv_k_scale``/``kv_v_scale``. Slot
+    ``2 * head + side`` (K = 0, V = 1) holds that head's E2M1 data followed by
+    its E4M3 block scales, so every head is one contiguous run of the page.
 
     When ``skip_index_branch`` is true, sparse rows still keep their packed
     ``[index_q | index_k]`` tail, but the kernel only processes the main q/k/v
@@ -2641,6 +2680,8 @@ def fused_minimax_m3_qknorm_rope_kv_insert(
         skip_index_branch,
         q_fp8_out,
         q_fp8_scale,
+        kv_k_scale,
+        kv_v_scale,
     )
 
 
@@ -3666,7 +3707,7 @@ def causal_conv1d_fwd_cpu(
     cache_indices: torch.Tensor | None,
     has_initial_state: torch.Tensor | None,
     silu_activation: bool,
-    is_vnni: bool,
+    is_weight_packed: bool,
 ) -> torch.Tensor:
     return torch.ops._C.causal_conv1d_fwd_cpu(
         x,
@@ -3678,7 +3719,7 @@ def causal_conv1d_fwd_cpu(
         has_initial_state,
         silu_activation,
         -1,
-        is_vnni,
+        is_weight_packed,
     )
 
 
@@ -3689,7 +3730,7 @@ def causal_conv1d_update_cpu(
     bias: torch.Tensor | None,
     silu_activation: bool,
     conv_state_indices: torch.Tensor | None,
-    is_vnni: bool,
+    is_weight_packed: bool,
     num_accepted_tokens: torch.Tensor | None = None,
 ) -> torch.Tensor:
     return torch.ops._C.causal_conv1d_update_cpu(
@@ -3701,7 +3742,7 @@ def causal_conv1d_update_cpu(
         num_accepted_tokens,
         conv_state_indices,
         -1,
-        is_vnni,
+        is_weight_packed,
     )
 
 
@@ -4434,23 +4475,22 @@ def cpu_gemm_wna16(
     pack_factor: int,
     isa_hint: str,
 ) -> torch.Tensor:
-    output = torch.empty((input.size(0), scales.size(1)), dtype=input.dtype)
+    # Match int4_scaled_mm_cpu: flatten >2-D activations to [M, K] for the
+    # C++ kernel, then restore the original leading dims on the output.
+    x_shape = input.shape
+    x_2d = input.reshape(-1, x_shape[-1]) if len(x_shape) > 2 else input
+    out = torch.empty((x_2d.size(0), scales.size(1)), dtype=input.dtype)
     torch.ops._C.cpu_gemm_wna16(
-        input,
+        x_2d,
         q_weight,
-        output,
+        out,
         scales,
         zeros,
         bias,
         pack_factor,
         isa_hint,
     )
-    return output
-
-
-def cpu_activation_lut_bf16(input: torch.Tensor, activation: str) -> torch.Tensor:
-    out = torch.empty_like(input)
-    torch.ops._C.activation_lut_bf16(out, input, activation)
+    out = out.reshape(x_shape[:-1] + (out.size(-1),)) if len(x_shape) > 2 else out
     return out
 
 
