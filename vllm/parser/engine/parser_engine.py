@@ -678,6 +678,11 @@ class ParserEngine(Parser):
     def reasoning_end_token_ids(self) -> frozenset[int]:
         return self._reasoning_end_token_ids
 
+    @property
+    def implicit_reasoning_end_token_ids(self) -> frozenset[int]:
+        """Reasoning-end tokens that are also content, e.g. a tool-call start."""
+        return self._reasoning_end_token_ids - {self._reasoning_end_token_id}
+
     def find_reasoning_end(self, token_ids: Sequence[int]) -> ReasoningEnd | None:
         """First reasoning end in `token_ids`, and if its token is content."""
         end_ids = self._reasoning_end_token_ids
