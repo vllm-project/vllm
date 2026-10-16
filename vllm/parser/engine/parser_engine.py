@@ -342,8 +342,10 @@ class ParserEngine(Parser):
         their unterminated content instead of buffering long arguments until
         the closing tag arrives.
 
-        Also returns whether the prefix ends inside that streamed trailing
-        string value.
+        Also returns whether the returned prefix stops inside that trailing
+        string, so streamed text may be appended to it.  This holds even when
+        *json_str* closes the string: converters serialise an open raw value
+        as a closed JSON string.
         """
         last_colon = -1
         last_key: str | None = None
@@ -675,6 +677,11 @@ class ParserEngine(Parser):
     @property
     def reasoning_end_token_ids(self) -> frozenset[int]:
         return self._reasoning_end_token_ids
+
+    @property
+    def implicit_reasoning_end_token_ids(self) -> frozenset[int]:
+        """Reasoning-end tokens that are also content, e.g. a tool-call start."""
+        return self._reasoning_end_token_ids - {self._reasoning_end_token_id}
 
     def find_reasoning_end(self, token_ids: Sequence[int]) -> ReasoningEnd | None:
         """First reasoning end in `token_ids`, and if its token is content."""
@@ -1053,11 +1060,8 @@ class ParserEngine(Parser):
         if not self._stream_arg_deltas:
             return None
 
-        structural = self._arg_structural_chars
-        if structural is not None and structural.isdisjoint(raw_delta):
-            return None
-
         slot = self._tool_slots[idx]
+        structural = self._arg_structural_chars
         if slot.extend_open_value is not None:
             diff = slot.extend_open_value(raw_delta)
             if diff is not None:
@@ -1066,6 +1070,8 @@ class ParserEngine(Parser):
                 slot.append_streamed(diff)
                 return diff
             slot.extend_open_value = None
+        elif structural is not None and structural.isdisjoint(raw_delta):
+            return None
 
         try:
             current_json = converter(slot.args, True)
