@@ -9,9 +9,10 @@
 // into at most kBins bins: collisions are rare, plain shared atomics suffice
 // and each lane keeps U independent elements in flight. Levels repeat inside
 // the boundary bin until it is one code wide; codes above it are emitted, then
-// ties until K.
+// ties until K. K (the row's top-k: 512, 1024 or 2048) is a runtime value;
+// shared-memory scratch is sized for kMaxK.
 namespace fast_select {
-constexpr unsigned K = 2048, Full = 0xffffffffu, kBins = 1024, U = 8;
+constexpr unsigned kMaxK = 2048, Full = 0xffffffffu, kBins = 1024, U = 8;
 
 // Bin (descending) where the cumulative count first reaches `rank`;
 // `above` = elements in higher bins. Lane l owns bins kBins-1-32l .. -31.
@@ -50,7 +51,7 @@ __device__ __forceinline__ unsigned find_bin(const unsigned* hist,
 // Requires count >= K (callers recover rows with fewer candidates).
 __device__ void select_row(unsigned* codes, unsigned count,
                            const uint16_t* values, const int32_t* packed,
-                           int32_t* out, unsigned* hist) {
+                           int32_t* out, unsigned K, unsigned* hist) {
   const unsigned lane = threadIdx.x & 31;
   unsigned lo = 0xffffffffu, hi = 0;
   unsigned j = lane;
@@ -157,7 +158,7 @@ struct IdentityKey {
 template <typename KeyOf = IdentityKey>
 __device__ void select_resident(const uint16_t* hi, const uint8_t* lo,
                                 unsigned count, unsigned s0, int32_t* out,
-                                unsigned* hist, KeyOf key_of = {}) {
+                                unsigned K, unsigned* hist, KeyOf key_of = {}) {
   const unsigned lane = threadIdx.x & 31;
   unsigned lo_code = 0xffffffffu, hi_code = 0;
   for (unsigned j = lane; j < count; j += 32) {
@@ -225,7 +226,7 @@ constexpr unsigned kSamplesPerLane = 16;
 // 8 elements per 16-byte shared load, per-lane counts with one warp prefix scan
 // (no per-element ballots), output staged in shared memory and copied out with
 // 16-byte stores. hi_row/lo_row are indexed by key index.
-constexpr unsigned kMid3Cap = 1024, kScratch3Bytes = K * 4 + kMid3Cap * 2;
+constexpr unsigned kMid3Cap = 1024, kScratch3Bytes = kMaxK * 4 + kMid3Cap * 2;
 
 __device__ __forceinline__ unsigned warp_exclusive_scan(unsigned v,
                                                         unsigned& total) {
@@ -259,7 +260,7 @@ template <typename KeyOf = IdentityKey>
 __device__ bool select_resident_bracket(const uint16_t* hi_row,
                                         const uint8_t* lo_row, unsigned s0,
                                         unsigned count, int32_t* out,
-                                        unsigned char* scratch,
+                                        unsigned K, unsigned char* scratch,
                                         KeyOf key_of = {}) {
   const unsigned lane = threadIdx.x & 31, lt = (1u << lane) - 1u;
   // hi16 bracket from 512 strided samples (+-40 sample ranks around the
@@ -301,7 +302,7 @@ __device__ bool select_resident_bracket(const uint16_t* hi_row,
            pm = warp_exclusive_scan(nm, mid);
   if (above >= K || above + mid < K || mid > kMid3Cap) return false;
   int32_t* stage = reinterpret_cast<int32_t*>(scratch);
-  uint16_t* midbuf = reinterpret_cast<uint16_t*>(scratch + K * 4);
+  uint16_t* midbuf = reinterpret_cast<uint16_t*>(scratch + kMaxK * 4);
 #pragma unroll 2
   for (unsigned unit = lane; unit < units; unit += 32)
     classify8(hv[unit], a0 + unit * 8, s0, end, h_hi, h_lo,
@@ -362,7 +363,7 @@ __device__ bool select_resident_bracket(const uint16_t* hi_row,
 // (rare).
 template <typename CodeOf, typename KeyOf>
 __device__ void select_hist_generic(CodeOf code_of, unsigned count,
-                                    int32_t* out, unsigned* hist,
+                                    int32_t* out, unsigned K, unsigned* hist,
                                     KeyOf key_of) {
   const unsigned lane = threadIdx.x & 31;
   unsigned lo_code = 0xffffffffu, hi_code = 0;

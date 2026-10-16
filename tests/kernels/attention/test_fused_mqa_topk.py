@@ -17,11 +17,12 @@ requires_fused = pytest.mark.skipif(
     reason="Requires the SM100 fused MQA+top-k extension",
 )
 
+TOPKS = (512, 1024, 2048)
 TOPK = 2048
 LOGITS_BUDGET = 512 * 1024**2
 
 
-def _dense(q, k, scales, weights, starts, ends):
+def _dense(q, k, scales, weights, starts, ends, topk=TOPK):
     """Upstream dense path: budgeted DeepGEMM logits + top_k_per_row_prefill."""
     from vllm.model_executor.layers.sparse_attn_indexer import as_fp32_logits
     from vllm.utils.deep_gemm import (
@@ -36,7 +37,7 @@ def _dense(q, k, scales, weights, starts, ends):
         exp = torch.log2(scales).round().to(torch.int64) + 127
         k_scale = (exp * 0x01010101).to(torch.int32)
     rows = q.shape[0]
-    out = torch.full((rows, TOPK), -1, device=q.device, dtype=torch.int32)
+    out = torch.full((rows, topk), -1, device=q.device, dtype=torch.int32)
     lens = ends - starts
     max_len = max(1, int(lens.max()))
     step = max(1, LOGITS_BUDGET // (4 * max_len))
@@ -58,7 +59,7 @@ def _dense(q, k, scales, weights, starts, ends):
             j - i,
             logits.stride(0),
             logits.stride(1),
-            TOPK,
+            topk,
         )
     return out
 
@@ -81,9 +82,10 @@ def _check(rel, q, k, scales, weights, starts, ends, scores=True):
     ``scores`` compares the selected scores with the exact fp32 top-k; the
     SM100 dense path rounds its logits to bf16, so it is checked without.
     """
+    topk = rel.shape[1]
     visible = (ends - starts).clamp(min=0)
     valid = rel >= 0
-    assert (valid.sum(1) == visible.clamp(max=TOPK)).all(), "valid count"
+    assert (valid.sum(1) == visible.clamp(max=topk)).all(), "valid count"
     assert (rel[~valid] == -1).all(), "padding must be -1"
     idx = rel.long() + starts[:, None].long()
     assert ((~valid) | ((idx >= starts[:, None]) & (idx < ends[:, None]))).all()
@@ -96,7 +98,7 @@ def _check(rel, q, k, scales, weights, starts, ends, scores=True):
     for i in range(0, q.shape[0], step):
         j = min(q.shape[0], i + step)
         logits = _logits(q[i:j], k, scales, weights[i:j], starts[i:j], ends[i:j])
-        ref = logits.topk(TOPK, dim=1).values
+        ref = logits.topk(topk, dim=1).values
         chosen = logits.gather(1, idx[i:j].clamp(min=0)).masked_fill(
             ~valid[i:j], -torch.inf
         )
@@ -115,6 +117,7 @@ def _inputs(rows, keys, seed=913):
 
 
 @requires_fused
+@pytest.mark.parametrize("topk", TOPKS)
 @pytest.mark.parametrize(
     "keys,rows,case",
     [
@@ -128,27 +131,27 @@ def _inputs(rows, keys, seed=913):
         (1048576, 16, "causal"),
     ],
 )
-def test_single_request_matches_dense(keys, rows, case):
+def test_single_request_matches_dense(keys, rows, case, topk):
     q, k, scales, weights = _inputs(rows, keys)
     starts = torch.zeros(rows, device="cuda", dtype=torch.int32)
     ends = torch.arange(keys - rows + 1, keys + 1, device="cuda", dtype=torch.int32)
-    if case == "early":  # rows with fewer than 2048 visible keys
+    if case == "early":  # rows around each top-k's visible-key boundary
         ends = torch.tensor(
             [
                 0,
                 1,
-                31,
-                127,
+                511,
+                512,
+                513,
+                1023,
                 1024,
+                1025,
                 2047,
                 2048,
                 2049,
                 4096,
-                6144,
                 8192,
-                10000,
                 12000,
-                14000,
                 16000,
                 keys,
             ],
@@ -163,21 +166,22 @@ def test_single_request_matches_dense(keys, rows, case):
     elif case == "hot":
         weights = weights.abs()
         scales[:12288] = 4
-    out = torch.empty(rows, TOPK, device="cuda", dtype=torch.int32)
+    out = torch.empty(rows, topk, device="cuda", dtype=torch.int32)
     assert fused_mqa_topk_prefill(q, k, scales, weights, starts, ends, out)
     _check(out, q, k, scales, weights, starts, ends)
     # Same convention and valid counts as the dense path (key sets may differ
     # only among equal scores at the top-k boundary).
-    dense = _dense(q, k, scales, weights, starts, ends)
+    dense = _dense(q, k, scales, weights, starts, ends, topk)
     _check(dense, q, k, scales, weights, starts, ends, scores=False)
     assert ((out >= 0).sum(1) == (dense >= 0).sum(1)).all()
 
 
 @requires_fused
+@pytest.mark.parametrize("topk", TOPKS)
 @pytest.mark.parametrize(
     "lens", [[3000, 5000, 1000], [40000, 1500, 70000, 9], [600000, 200000]]
 )
-def test_multi_request_chunk_matches_dense(lens):
+def test_multi_request_chunk_matches_dense(lens, topk):
     """Packed requests: rows of request r see [cu[r], cu[r] + causal_end)."""
     q_lens = [min(n, 1024) for n in lens]
     rows, keys = sum(q_lens), sum(lens)
@@ -189,18 +193,20 @@ def test_multi_request_chunk_matches_dense(lens):
         base += n
     starts = torch.tensor(starts, device="cuda", dtype=torch.int32)
     ends = torch.tensor(ends, device="cuda", dtype=torch.int32)
-    out = torch.empty(rows, TOPK, device="cuda", dtype=torch.int32)
+    out = torch.empty(rows, topk, device="cuda", dtype=torch.int32)
     assert fused_mqa_topk_prefill(q, k, scales, weights, starts, ends, out)
     _check(out, q, k, scales, weights, starts, ends)
-    dense = _dense(q, k, scales, weights, starts, ends)
+    dense = _dense(q, k, scales, weights, starts, ends, topk)
     _check(dense, q, k, scales, weights, starts, ends, scores=False)
     assert ((out >= 0).sum(1) == (dense >= 0).sum(1)).all()
-    # Both paths agree on (nearly) every selected key.
+    # Both paths agree on (nearly) every selected key. The dense path's bf16
+    # logits blur the k-th boundary, the more so for small k at long contexts
+    # (~98.6% overlap for top-512 over 600K keys; the fused keys are exact).
     overlap = sum(
         len(set(a[a >= 0].tolist()) & set(b[b >= 0].tolist()))
         for a, b in zip(out.cpu(), dense.cpu())
     )
-    assert overlap >= 0.99 * int((dense >= 0).sum())
+    assert overlap >= 0.98 * int((dense >= 0).sum())
 
 
 @requires_fused
@@ -249,9 +255,7 @@ def test_unsupported_inputs_fall_back():
     assert not fused_mqa_topk_prefill(
         q[:, :16], k, scales, weights[:, :16], starts, ends, out
     )
-    assert not fused_mqa_topk_prefill(
-        q, k, scales, weights, starts, ends, out[:, :1024]
-    )
+    assert not fused_mqa_topk_prefill(q, k, scales, weights, starts, ends, out[:, :768])
     q17 = torch.zeros(16385, 32, 128, device="cuda").to(torch.float8_e4m3fn)
     assert not fused_mqa_topk_prefill(q17, k, scales, weights, starts, ends, out)
 

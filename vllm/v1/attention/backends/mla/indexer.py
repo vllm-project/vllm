@@ -1565,7 +1565,6 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     and current_platform.is_device_capability_family(100)
                     and not self.indexer_uses_fp4
                     and self.dcp_world_size == 1
-                    and self.pcp_world_size == 1
                     and fused_mqa_topk_available()
                 ):
                     chunk_options["use_fused_mqa_topk"] = True

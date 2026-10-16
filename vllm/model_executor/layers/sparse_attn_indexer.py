@@ -504,10 +504,11 @@ def sparse_attn_indexer(
             )
             profile_specs.extend(gather_spec * 2)
         current_workspace_manager().get_simultaneous(*profile_specs)
+        # Under PCP every rank ranks its rows over the whole (gathered)
+        # context; pure DCP needs the per-shard top-k merge, so it stays dense.
         uses_fused = (
             envs.VLLM_USE_FUSED_MQA_TOPK
-            and not use_pcp
-            and dcp_world_size == 1
+            and (use_pcp or dcp_world_size == 1)
             and not use_fp4_cache
             and candidate_blocks is None
             and fused_mqa_topk_config_supported(q_quant, topk_tokens)
@@ -730,12 +731,13 @@ def sparse_attn_indexer(
                         torch.int32 if mqa_logits_use_mx_scales() else torch.float32
                     ).squeeze(-1)
                 # Single-launch fused MQA-logits + top-k (SM100, FP8, 32 heads,
-                # top-k 2048): no logits buffer, any context length. DCP/PCP,
+                # top-k 512/1024/2048): no logits buffer, any context length.
+                # It needs every row's whole context: no DCP, or PCP + DCP after
+                # the de-interleaving gather. Pure DCP (per-shard top-k + merge),
                 # the FP4 cache and v4.1 candidate selection stay dense.
                 use_fused = (
                     envs.VLLM_USE_FUSED_MQA_TOPK
-                    and not use_pcp
-                    and dcp_world_size == 1
+                    and (dcp_world_size == 1 or deinterleave_idx is not None)
                     and not current_platform.is_xpu()
                 )
                 if (

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Persistent fused FP8 MQA logits + per-row top-2048 (SM100),
+// Persistent fused FP8 MQA logits + per-row top-K (K = 512, 1024, 2048; SM100),
 // DeepGEMM/FA4-style: one CTA per SM, barriers and TMEM initialised once, every
 // warp role runs its own loop over blocks claimed (heaviest first) from a
 // global counter, and the sample and scan tiles of a block flow through ONE
@@ -12,7 +12,7 @@
 //   warp 10  UMMA issuer
 //   warp 11  drain of math WG0 rows (> 16K keys), idle otherwise
 //   warps 0-7 math: sample histogram -> gate -> scan/emit -> selection
-// A block whose candidate count leaves [2048, 16384] pauses the role loops; the
+// A block whose candidate count leaves [K, 16384] pauses the role loops; the
 // CTA rescans it exactly (fallback.cuh) and resumes the loops with freshly
 // initialised barriers.
 #pragma once
@@ -162,9 +162,9 @@ __device__ __forceinline__ void compute_lin_rows(PStorage<3>& sm,
   }
 }
 
-// > 16K gate: the k-th largest sample (k = count * target / visible) of one row
-// from its 2048-bin histogram; one warp per row. Same result as finish_sample
-// (count = histogram total).
+// Gate: the k-th largest sample (k = count * target / visible, count = the
+// histogram total) of one row from its 2048-bin histogram; one warp per row.
+// -inf when the row sees at most `target` keys or has no samples.
 __device__ __noinline__ void finish_sample_histogram(const unsigned* hist,
                                                      float* gate,
                                                      unsigned visible,
@@ -224,8 +224,10 @@ struct alignas(16) PHandoffData {
   uint32_t bases[2][8];
 };
 
+// samples: gate sample tiles of the block (0 when no row sees more keys than
+// the gate target, so every gate is -inf).
 struct ClaimEntry {
-  unsigned vblock, all_short, kv_base, splits, slot;
+  unsigned vblock, all_short, kv_base, splits, slot, samples;
   unsigned starts[8], ends[8];
 };
 
@@ -366,7 +368,7 @@ __device__ __forceinline__ void ho_drain(PHandoffData& d, TBar* hfull,
   hempty[bank * 8 + producer].arrive();
 }
 
-template <unsigned Interval, unsigned KVS>
+template <unsigned Interval, unsigned KVS, unsigned TopK>
 __global__ __launch_bounds__(384, 1) void fused_mqa_topk_fp8_prefill_kernel(
     unsigned rows, unsigned keys, const unsigned* starts_g,
     const unsigned* ends_g, uint16_t* vals, int* indices, int* counts,
@@ -385,6 +387,8 @@ __global__ __launch_bounds__(384, 1) void fused_mqa_topk_fp8_prefill_kernel(
   constexpr uint32_t kCandGlobalCap = 16384;
   using St = PStorage<KVS>;
   using B = BarIdx<KVS>;
+  // Compile-time: a runtime top-k costs ~0.5% in the > 16K scan (codegen).
+  constexpr unsigned topk = TopK;
   // > 16K keys: rebalanced scan (linear term on the tensor core, per-warpgroup
   // N=144 MMAs).
   constexpr bool kLin = !kSmem;
@@ -478,7 +482,18 @@ __global__ __launch_bounds__(384, 1) void fused_mqa_topk_fp8_prefill_kernel(
 
 // ---------------- host: launch configuration (> kResidentKeys keys)
 // ----------------
-using PersistentKernel = decltype(&fused_mqa_topk_fp8_prefill_kernel<4, 2>);
+using PersistentKernel =
+    decltype(&fused_mqa_topk_fp8_prefill_kernel<4, 2, 2048>);
+
+template <unsigned TopK>
+PersistentKernel persistent_kernel(unsigned keys) {
+  return keys <= 8192     ? fused_mqa_topk_fp8_prefill_kernel<4, 2, TopK>
+         : keys <= 16384  ? fused_mqa_topk_fp8_prefill_kernel<8, 2, TopK>
+         : keys <= 32768  ? fused_mqa_topk_fp8_prefill_kernel<16, 3, TopK>
+         : keys <= 131072 ? fused_mqa_topk_fp8_prefill_kernel<32, 3, TopK>
+         : keys <= 524288 ? fused_mqa_topk_fp8_prefill_kernel<64, 3, TopK>
+                          : fused_mqa_topk_fp8_prefill_kernel<128, 3, TopK>;
+}
 
 struct LaunchConfig {
   PersistentKernel kernel;
@@ -490,19 +505,34 @@ struct LaunchConfig {
 };
 
 // Picks the kernel instantiation, sizes its shared memory (setting the opt-in
-// limit) and the gate sample for `keys` keys.
-inline cudaError_t launch_config(unsigned keys, LaunchConfig& c) {
-  // <= 16K keys: shared candidates (cap kCandCap), so aim lower: 2560
-  // candidates. Up to 128K: 3072. Both size the sample so the gate's quantile
-  // rank is ~100 (about 10% count error). Longer contexts aim for 4096 with
-  // rank 64, clamped to 16-32 sample tiles (rank ~32 at 1M keys): a sample tile
-  // costs about two scan tiles, so a larger sample costs more than the smaller
-  // candidate set saves.
+// limit) and the gate sample for `keys` keys and top-`topk` rows.
+inline cudaError_t launch_config(unsigned keys, unsigned topk,
+                                 LaunchConfig& c) {
+  // The gate aims for `target` candidates per row and sizes the sample so its
+  // quantile rank is `rank` (count error ~1/sqrt(rank)); a row whose count
+  // falls below the top-k is rescanned exactly. Up to 128K keys the candidate
+  // stream dominates, so smaller top-ks aim lower with a coarser sample. At
+  // <= 16K the candidates live in shared memory (cap kCandCap); top-2048 needs
+  // rank 100 there to keep 2560 candidates above 2048. Above 128K the sample is
+  // clamped to 16-32 tiles (rank ~32 at 1M keys): a sample tile costs about two
+  // scan tiles, so a larger sample costs more than a smaller candidate set
+  // saves. Tuned on B300 real captures.
+  struct Gate {
+    unsigned target, rank;
+  };
+  constexpr Gate kGates[3][3] = {
+      // <= 16K       <= 128K       > 128K
+      {{2048, 50}, {1024, 32}, {1536, 64}},   // top-512
+      {{2048, 50}, {1536, 48}, {2048, 48}},   // top-1024
+      {{2560, 100}, {3072, 64}, {4096, 64}},  // top-2048
+  };
   const bool small = keys <= 16384, long_ctx = keys > 131072;
-  c.sample_target = small ? 2560u : (long_ctx ? 4096u : 3072u);
-  const unsigned rank = long_ctx ? 64u : 100u;
+  const Gate gate = kGates[topk == 512 ? 0 : (topk == 1024 ? 1 : 2)]
+                          [small ? 0 : (long_ctx ? 2 : 1)];
+  c.sample_target = gate.target;
+  const unsigned rank = gate.rank;
   const unsigned rank_tiles = std::max(
-      2u, unsigned((uint64_t(rank) * keys + 256ull * c.sample_target - 1) /
+      1u, unsigned((uint64_t(rank) * keys + 256ull * c.sample_target - 1) /
                    (256ull * c.sample_target)));
   c.sample_tiles =
       long_ctx ? std::min(32u, std::max(16u, rank_tiles)) : rank_tiles;
@@ -510,12 +540,9 @@ inline cudaError_t launch_config(unsigned keys, LaunchConfig& c) {
       1u, (keys + 256u * c.sample_tiles - 1) / (256u * c.sample_tiles));
   c.sample_groups =
       (keys - c.sample_stride / 2 + c.sample_stride - 1) / c.sample_stride;
-  c.kernel = keys <= 8192     ? fused_mqa_topk_fp8_prefill_kernel<4, 2>
-             : small          ? fused_mqa_topk_fp8_prefill_kernel<8, 2>
-             : keys <= 32768  ? fused_mqa_topk_fp8_prefill_kernel<16, 3>
-             : keys <= 131072 ? fused_mqa_topk_fp8_prefill_kernel<32, 3>
-             : keys <= 524288 ? fused_mqa_topk_fp8_prefill_kernel<64, 3>
-                              : fused_mqa_topk_fp8_prefill_kernel<128, 3>;
+  c.kernel = topk == 512    ? persistent_kernel<512>(keys)
+             : topk == 1024 ? persistent_kernel<1024>(keys)
+                            : persistent_kernel<2048>(keys);
 
   // The recovery rescan reuses the same dynamic shared memory with the fallback
   // core's layout.
