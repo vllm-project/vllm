@@ -49,6 +49,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     PUSH_REG_NOTIF_PREFIX,
+    NixlAgentMetadata,
     NixlConnectorMetadata,
     RemoteMeta,
     ReqId,
@@ -133,6 +134,22 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
 
         self._push_writer_stop = threading.Event()
         self._push_writer_thread: threading.Thread | None = None
+
+    def _validate_remote_parallel_config(
+        self, agent_metadata: NixlAgentMetadata
+    ) -> None:
+        super()._validate_remote_parallel_config(agent_metadata)
+        local = (self.block_size, self._physical_blocks_per_logical_kv_block)
+        remote = (
+            agent_metadata.block_size,
+            agent_metadata.physical_blocks_per_logical_kv_block,
+        )
+        if local != remote:
+            raise NotImplementedError(
+                "NixlPushConnector requires identical P/D block sizes. Kernel "
+                "block size and kernel blocks per logical block: local "
+                f"{local}, remote engine {agent_metadata.engine_id} {remote}."
+            )
 
     # --- Lifecycle ----------------------------------------------------- #
 
