@@ -692,11 +692,13 @@ def test_kda_spec_decode_correctness(
         pytest.param(True, False, None, True, id="aligned"),
     ],
 )
+@pytest.mark.parametrize("state_dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("accepted", [(2, 8), (3, 4), (5, 8)])
 @torch.inference_mode()
 def test_kda_recoverssm_verify_and_group_commit(
     accepted: tuple[int, int],
     monkeypatch: pytest.MonkeyPatch,
+    state_dtype: torch.dtype,
     lower_bound: float | None,
     use_request_indices: bool,
     conv_state_dim_first: bool,
@@ -793,6 +795,7 @@ def test_kda_recoverssm_verify_and_group_commit(
             dtype=torch.float32,
             device=DEVICE,
         )
+        checkpoint = checkpoint.to(state_dtype)
         conv_shape = (
             (num_blocks, conv_dim, history_len + query_len - 1)
             if conv_state_dim_first
