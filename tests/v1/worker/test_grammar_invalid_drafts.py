@@ -60,29 +60,26 @@ def test_follow_the_device_layout_under_adaptive_verification():
 # --- DraftTokensHandler per-request retention (no CUDA: dict logic only) ---
 
 
-def _handler():
+def _handler(max_num_reqs: int = 8):
     # Skip __init__ (creates CUDA stream/event); the tests exercise the
     # retention logic, with a no-op event standing in for the copy sync.
     h = object.__new__(DraftTokensHandler)
-    h.req_ids = []
-    h.draft_tokens_np = None
-    h.num_draft_tokens = 2
-    h._latest = {}
-    h._pending = []
+    h.max_num_reqs = max_num_reqs
+    h._draft_tokens_by_req = {}
+    h._copy_pending = False
     h.copy_event = SimpleNamespace(synchronize=lambda: None)
     return h
 
 
-def _queue_batch(h, req_ids, drafts):
-    h._pending.append((list(req_ids), np.array(drafts, dtype=np.int64)))
-
-
 def test_each_request_gets_its_own_drafts_back():
-    # PP overlap: "g" was sampled two batches ago; the batch in between must
-    # not shadow it. Fold both, then fetch: "g" returns its own row.
+    # PP overlap: "g" was sampled in an earlier batch; batches in between
+    # must not shadow it. Fetch returns each request's own row.
     h = _handler()
-    _queue_batch(h, ["g", "x"], [[10, 11], [12, 13]])
-    _queue_batch(h, ["y"], [[14, 15]])
+    h._draft_tokens_by_req = {
+        "g": np.array([10, 11]),
+        "x": np.array([12, 13]),
+        "y": np.array([14, 15]),
+    }
     out = h.get_draft_tokens()
     got = dict(zip(out.req_ids, out.draft_token_ids))
     assert got["g"] == [10, 11]
@@ -90,39 +87,35 @@ def test_each_request_gets_its_own_drafts_back():
     assert got["y"] == [14, 15]
 
 
-def test_unstructured_batch_gets_placeholders_retained_keep_drafts():
-    # Latest batch took the fast path (no structured reqs): its request "b"
-    # has no retained drafts -> placeholder; "a" from an earlier structured
-    # batch keeps its real drafts.
+def test_unstructured_width_placeholder_keeps_structured_drafts():
+    # A batch with no structured reqs stores only the draft width per
+    # request; an earlier structured batch's real drafts are preserved and
+    # the unstructured request gets a -1 placeholder of the right width.
     h = _handler()
-    _queue_batch(h, ["a"], [[7, 8]])
-    h.get_draft_tokens()
-    h.req_ids = ["a", "b"]
-    h.draft_tokens_np = None
-    h.num_draft_tokens = 2
+    h._draft_tokens_by_req = {"a": [7, 8], "b": 2}
     out = h.get_draft_tokens()
     got = dict(zip(out.req_ids, out.draft_token_ids))
     assert got["a"] == [7, 8]
     assert got["b"] == [-1, -1]
 
 
-def test_discard_folds_pending_before_popping():
-    # discard() for a re-added request must see drafts already in flight:
-    # fold first, then pop, or the request's first real drafts would be lost.
+def test_discard_drops_only_the_named_request():
+    # discard() on a re-added (or finished) request must not touch others.
     h = _handler()
-    _queue_batch(h, ["x", "keep"], [[1, 1], [2, 2]])
+    h._draft_tokens_by_req = {"x": [1, 1], "keep": [2, 2]}
     h.discard("x")
-    assert "x" not in h._latest
-    assert h._latest["keep"] == [2, 2]
-    assert h._pending == []
+    assert "x" not in h._draft_tokens_by_req
+    assert h._draft_tokens_by_req["keep"] == [2, 2]
 
 
-def test_retention_cap_evicts_least_recently_updated():
-    h = _handler()
-    n = DraftTokensHandler._MAX_RETAINED + 1
-    rows = [[i, i] for i in range(n)]
-    _queue_batch(h, [f"r{i}" for i in range(n)], rows)
-    h.get_draft_tokens()
-    assert len(h._latest) == DraftTokensHandler._MAX_RETAINED
-    assert "r0" not in h._latest  # oldest evicted
-    assert h._latest[f"r{n - 1}"] == [n - 1, n - 1]  # newest retained
+def test_request_bound_asserts_when_exceeded():
+    # Retention is bounded by max_num_reqs: discard-on-remove keeps the dict
+    # at or below the live request count; exceeding it is a bug and asserts.
+    h = _handler(max_num_reqs=2)
+    h._draft_tokens_by_req = {"a": [1, 1], "b": [2, 2], "c": [3, 3]}
+    try:
+        h._assert_request_bound()
+        raised = False
+    except AssertionError:
+        raised = True
+    assert raised, "expected the max_num_reqs bound to assert"

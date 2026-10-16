@@ -307,7 +307,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.use_aux_hidden_state_outputs = True
 
         # Draft tokens propagation - for spec-dec + struct outputs.
-        self.draft_tokens_handler = DraftTokensHandler(self.device)
+        self.draft_tokens_handler = DraftTokensHandler(
+            max_num_reqs=self.max_num_reqs, device=self.device
+        )
 
         self.pcp_manager: pcp.PCPManager | None = None
 
