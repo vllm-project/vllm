@@ -731,9 +731,6 @@ class AiterMLAMetadata(MLACommonMetadata[AiterMLADecodeMetadata]):
 # Tile size used by the mla_prefill_ps_asm_fwd assembly kernel.
 _FP8_PREFILL_TILE_Q = 256
 _FP8_PREFILL_NUM_HEADS = (16, 32, 48, 64, 96, 128)
-_FP8_PREFILL_MIN_QUERY_LEN = 8192
-_FP8_PREFILL_MANY_HEADS = 64
-_FP8_PREFILL_MANY_HEADS_MIN_QUERY_LEN = 4096
 
 _FUSED_PREFILL_LONG_CONTEXT = 8192
 _FUSED_PREFILL_MAX_HEADS = 32
@@ -1446,9 +1443,9 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
 
     def _use_fp8_prefill(self, query_lens: torch.Tensor) -> bool:
         """Shape rule for prefills without context."""
-        if self.num_heads >= _FP8_PREFILL_MANY_HEADS:
-            return int(query_lens.min()) >= _FP8_PREFILL_MANY_HEADS_MIN_QUERY_LEN
-        return int(query_lens.min()) >= _FP8_PREFILL_MIN_QUERY_LEN
+        if self.num_heads >= 64:
+            return int(query_lens.min()) >= 4096
+        return int(query_lens.min()) >= 8192
 
     def _use_fused_prefill(
         self, query_lens: torch.Tensor, context_lens: torch.Tensor
