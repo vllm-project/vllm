@@ -87,7 +87,7 @@ class AttentionConfig:
 
     trtllm_ragged_backend: Literal["trtllm-gen", "cute-dsl"] = "trtllm-gen"
     """Kernel backend for cached-context TRTLLM_RAGGED MLA prefill.
-    New-token prefill always uses TRTLLM."""
+    CuTe DSL requires FP8 queries. New-token prefill always uses TRTLLM."""
 
     indexer_kv_dtype: IndexerKVDType = "auto"
     """Data type for the sparse-attention indexer K cache. "auto" picks the

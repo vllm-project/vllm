@@ -199,6 +199,15 @@ class TrtllmRaggedPrefillBackend(MLAPrefillBackend):
                 "TRTLLM ragged context prefill contains an empty query or KV row"
             )
 
+        if self._context_backend == "cute-dsl":
+            if q.dtype != torch.float8_e4m3fn:
+                raise ValueError(
+                    "CuTe DSL context prefill only supports FP8 queries. "
+                    "Enable FP8 KV cache and use_prefill_query_quantization."
+                )
+            # Generic MLA supplies V as a projection slice; CuTe requires packed V.
+            v = v.contiguous()
+
         if out is None:
             out = torch.empty(
                 q.shape[0],
