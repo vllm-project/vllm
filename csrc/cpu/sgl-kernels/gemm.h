@@ -103,11 +103,14 @@ enum class CPUActMethod : int {
 
 // swiglu is selected by its (alpha, limit) parameters rather than by name and
 // takes precedence; the name is still validated, so it cannot pass silently.
+// vLLM's MoEActivation enum names this family "swigluoai" (gpt-oss-style
+// clamped swiglu), not "swiglu" - accept both so the Python-side value
+// actually matches.
 inline CPUActMethod act_method_from_string(const std::optional<std::string>& activation, bool has_swiglu_params) {
   const bool unnamed_or_silu = !activation.has_value() || activation.value() == "silu";
   if (has_swiglu_params) {
     TORCH_CHECK(
-        unnamed_or_silu || activation.value() == "swiglu",
+        unnamed_or_silu || activation.value() == "swiglu" || activation.value() == "swigluoai",
         "Unsupported activation with clamped swiglu parameters: ",
         activation.value());
     return CPUActMethod::swiglu;
