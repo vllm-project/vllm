@@ -156,7 +156,7 @@ export MORI_GPU_ARCHS="gfx950"
 # path fails to come up.
 export MORI_ENABLE_HOST_PROXY="${MORI_ENABLE_HOST_PROXY:-1}"
 
-# NIXL: UCX RC on ionic_0 with GPU-direct RDMA (KV goes GPU memory to GPU memory).
+# NIXL UCX defaults: RC on ionic_0, GPU-direct RDMA.
 if [[ "${KV_CONNECTOR:-}" == Nixl* ]]; then
     export UCX_TLS="${UCX_TLS:-rc_verbs,ud_verbs,tcp,self,rocm}"
     export UCX_NET_DEVICES="${UCX_NET_DEVICES:-ionic_0:1,lo}"

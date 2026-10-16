@@ -102,7 +102,7 @@ moriio_read_mode_kv() {
     esac
 }
 
-# NIXL KV config (UCX backend). Peers are found through the NIXL side channel.
+# NIXL KV config. UCX backend.
 nixl_kv_cfg() {
     cat <<EOF
 {
