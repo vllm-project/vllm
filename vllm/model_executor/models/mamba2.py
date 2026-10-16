@@ -201,8 +201,7 @@ class Mamba2ForCausalLM(
             Tuple containing:
             - conv_state_shape: Shape for convolutional state cache
             - temporal_state_shape: Shape for state space model cache
-            - in batch-invariant mode: the partial-chunk buffer shapes
-              (x, dt, B), see MambaStateShapeCalculator.mamba2_state_shape
+            - batch-invariant mode only: partial-chunk buffer shapes (x, dt, B)
 
         """
         parallel_config = vllm_config.parallel_config
