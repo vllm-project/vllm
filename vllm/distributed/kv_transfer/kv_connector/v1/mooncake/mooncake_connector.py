@@ -11,7 +11,7 @@ import time
 from collections import OrderedDict, defaultdict
 from collections.abc import Collection
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import TYPE_CHECKING, Any, Final
 
@@ -683,6 +683,10 @@ class SendBlockMeta:
     need_send: int = 0
     sent: int = 0
     sending: int = 0
+    # Set when the prefiller drops the transfer, so a connector whose peer
+    # waits for these blocks stops waiting instead of running into its own
+    # timeout.
+    aborted: asyncio.Event = field(default_factory=asyncio.Event)
 
 
 class MooncakeConnectorMetadata(KVConnectorMetadata):
@@ -739,9 +743,14 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
             self.connector_worker: MooncakeConnectorWorker | None = None
         elif role == KVConnectorRole.WORKER:
             self.connector_scheduler = None
-            self.connector_worker = MooncakeConnectorWorker(
-                vllm_config, self.engine_id, kv_cache_config
-            )
+            self.connector_worker = self._build_worker(vllm_config, kv_cache_config)
+
+    def _build_worker(
+        self, vllm_config: VllmConfig, kv_cache_config: "KVCacheConfig"
+    ) -> "MooncakeConnectorWorker":
+        """The worker this connector drives; the pull connector swaps it."""
+        assert self.engine_id is not None
+        return MooncakeConnectorWorker(vllm_config, self.engine_id, kv_cache_config)
 
     @classmethod
     def get_required_kvcache_layout(cls, vllm_config: VllmConfig):
@@ -1207,6 +1216,13 @@ class MooncakeConnectorScheduler:
 class MooncakeConnectorWorker:
     """Implementation of Worker side methods."""
 
+    # Name this worker registers with, which peers compare against the
+    # connector they run.
+    connector_name = "MooncakeConnector"
+    # Prefillers predating the connector-name report can only run the push
+    # protocol, so an unnamed peer is still a valid push peer.
+    allow_missing_peer_connector = True
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -1261,6 +1277,8 @@ class MooncakeConnectorWorker:
         )
 
         self._remote_agents: dict[EngineId, dict[int, dict[int, str]]] = {}
+        # Connector each peer engine reported when it registered.
+        self._peer_connectors: dict[EngineId, str | None] = {}
         self._pending_bootstrap_queries: dict[str, asyncio.Event] = {}
         self.side_channel_port: int = 0  # we will bind it in register_kv_caches()
         self.engine_id: EngineId = engine_id
@@ -1444,6 +1462,7 @@ class MooncakeConnectorWorker:
             tp_rank=self.tp_rank,
             pp_rank=self.pp_rank,
             addr=worker_addr,
+            connector=self.connector_name,
         )
         timeout = envs.VLLM_MOONCAKE_CONNECTOR_TIMEOUT
         max_attempts = _BOOTSTRAP_MAX_ATTEMPTS
@@ -1526,22 +1545,36 @@ class MooncakeConnectorWorker:
             try:
                 identity, metadata_bytes = await self.sender_worker_queue.get()
                 try:
-                    metadata = self._xfer_meta_decoder.decode(metadata_bytes)
-                    await self.send_kv_to_decode(identity, sock, metadata)
+                    await self._handle_side_channel_message(
+                        identity, metadata_bytes, sock
+                    )
                 except Exception as e:
                     logger.error("Error processing Mooncake xfer request: %s", e)
-                    error_response = MooncakeXferResponse(
-                        status=MooncakeXferResponseStatus.ERROR, err_msg=str(e)
-                    )
-                    await sock.send_multipart(
-                        (identity, self._encoder.encode(error_response))
-                    )
+                    await self._send_side_channel_error(identity, sock, str(e))
                 finally:
                     self.sender_worker_queue.task_done()
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.error("Error in _sender_worker: %s", e)
+
+    async def _handle_side_channel_message(
+        self,
+        identity: bytes,
+        metadata_bytes: bytes,
+        sock: zmq.asyncio.Socket,
+    ) -> None:
+        """Handle one side-channel request in this connector's protocol."""
+        metadata = self._xfer_meta_decoder.decode(metadata_bytes)
+        await self.send_kv_to_decode(identity, sock, metadata)
+
+    async def _send_side_channel_error(
+        self, identity: bytes, sock: zmq.asyncio.Socket, err_msg: str
+    ) -> None:
+        error_response = MooncakeXferResponse(
+            status=MooncakeXferResponseStatus.ERROR, err_msg=err_msg
+        )
+        await sock.send_multipart((identity, self._encoder.encode(error_response)))
 
     async def send_kv_to_decode(
         self, identity: bytes, sock: zmq.asyncio.Socket, meta: MooncakeXferMetadata
@@ -2317,7 +2350,7 @@ class MooncakeConnectorWorker:
             if (
                 send_meta.p_req_id
                 and send_meta.expire_time < now
-                and send_meta.sending == 0
+                and self._send_idle(transfer_id)
             ):
                 logger.warning(
                     "Request %s timed out after %d seconds without "
@@ -2330,9 +2363,14 @@ class MooncakeConnectorWorker:
                 expired_transfer_id.append(transfer_id)
 
         for transfer_id in expired_transfer_id:
+            self.reqs_need_send[transfer_id].aborted.set()
             del self.reqs_need_send[transfer_id]
 
         return finished_sending_reqs
+
+    def _send_idle(self, transfer_id: TransferId) -> bool:
+        """Whether a transfer's blocks are free to be released."""
+        return self.reqs_need_send[transfer_id].sending == 0
 
     def get_finished(self) -> tuple[set[str] | None, set[str] | None]:
         """Get requests that are done sending or recving on this specific worker.
@@ -2569,6 +2607,9 @@ class MooncakeConnectorWorker:
                 data: dict = response.json()
                 for _, dp_entry in data.items():
                     remote_engine_id = dp_entry["engine_id"]
+                    self._peer_connectors[remote_engine_id] = (
+                        dp_entry.get("connector") or None
+                    )
                     self._remote_agents[remote_engine_id] = {
                         int(tp_rank): {
                             int(pp_rank): worker_addr
@@ -2644,6 +2685,27 @@ class MooncakeConnectorWorker:
             )
             return
 
+        peer_connector = self._peer_connectors.get(remote_engine_id)
+        if peer_connector is not None and peer_connector != self.connector_name:
+            self._handle_failed_recv(
+                pull_metas,
+                list(pull_metas),
+                f"Prefiller engine {remote_engine_id} registered the "
+                f"{peer_connector} connector while this instance runs "
+                f"{self.connector_name}; the two protocols are not "
+                "interchangeable and the KV must be recomputed.",
+            )
+            return
+        if peer_connector is None and not self.allow_missing_peer_connector:
+            self._handle_failed_recv(
+                pull_metas,
+                list(pull_metas),
+                f"Prefiller engine {remote_engine_id} did not report which "
+                f"connector it runs, and this instance needs a prefiller that "
+                f"runs {self.connector_name}.",
+            )
+            return
+
         self.receive_kv(remote_engine_id, pull_metas)
 
     async def _start_load_kv(
@@ -2684,6 +2746,7 @@ class MooncakeConnectorWorker:
             send_meta = self.reqs_need_send.pop(transfer_id)
             if send_meta:
                 assert not send_meta.ready.is_set()
+                send_meta.aborted.set()
 
     def start_load_kv(self, metadata: MooncakeConnectorMetadata):
         if not self.is_kv_producer and metadata.reqs_to_recv:

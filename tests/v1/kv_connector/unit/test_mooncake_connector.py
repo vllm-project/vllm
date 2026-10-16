@@ -872,6 +872,7 @@ def _make_local_register_worker_stub():
         dp_rank=0,
         tp_rank=0,
         pp_rank=0,
+        connector_name="MooncakeConnector",
     )
 
 
@@ -884,6 +885,7 @@ def _make_register_worker_stub():
         dp_rank=0,
         tp_rank=0,
         pp_rank=0,
+        connector_name="MooncakeConnector",
     )
 
 
