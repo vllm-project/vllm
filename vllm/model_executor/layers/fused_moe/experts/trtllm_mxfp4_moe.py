@@ -122,6 +122,22 @@ class TrtLlmMxfp4ExpertsBase:
         p = current_platform
         return p.is_cuda() and p.is_device_capability_family(100) and has_flashinfer()
 
+    def _max_supported_tokens(self, top_k: int, global_num_experts: int) -> int:
+        """Max tokens per kernel call before the batched-GEMM grid overflows.
+
+        The TRTLLM-Gen batched GEMM launches a static grid whose batch (Y)
+        dimension is ``getMaxNumCtasInBatchDim(num_tokens, top_k, num_experts,
+        tileTokensDim)`` and must stay <= 65535. Solving that for num_tokens
+        with the smallest tile the kernel may pick (tileTokensDim=8, the runner
+        default) gives a bound that is safe regardless of the tactic selected.
+        Without it, large batches (e.g. Kimi-K3 top_k=16, EP16 profiling with
+        131072 gathered tokens) overflow the grid and the GEMM launch fails.
+        """
+        MAX_GRID_Y = 65535
+        MIN_TILE_TOKENS_DIM = 8
+        max_tokens = (MAX_GRID_Y - global_num_experts) * MIN_TILE_TOKENS_DIM // top_k
+        return max(1, min(300000, max_tokens))
+
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
         return False
@@ -332,22 +348,6 @@ class TrtLlmMxfp4ExpertsModular(TrtLlmMxfp4ExpertsBase, mk.FusedMoEExpertsModula
         workspace2 = (0,)
         output = (M, self.hidden_dim_unpadded)
         return (workspace1, workspace2, output)
-
-    def _max_supported_tokens(self, top_k: int, global_num_experts: int) -> int:
-        """Max tokens per kernel call before the batched-GEMM grid overflows.
-
-        The TRTLLM-Gen batched GEMM launches a static grid whose batch (Y)
-        dimension is ``getMaxNumCtasInBatchDim(num_tokens, top_k, num_experts,
-        tileTokensDim)`` and must stay <= 65535. Solving that for num_tokens
-        with the smallest tile the kernel may pick (tileTokensDim=8, the runner
-        default) gives a bound that is safe regardless of the tactic selected.
-        Without it, large batches (e.g. Kimi-K3 top_k=16, EP16 profiling with
-        131072 gathered tokens) overflow the grid and the GEMM launch fails.
-        """
-        MAX_GRID_Y = 65535
-        MIN_TILE_TOKENS_DIM = 8
-        max_tokens = (MAX_GRID_Y - global_num_experts) * MIN_TILE_TOKENS_DIM // top_k
-        return max(1, min(300000, max_tokens))
 
     def _invoke_kernel(
         self,

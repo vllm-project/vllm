@@ -19,6 +19,7 @@ Constraints (matching the PR support matrix; final gating lives in the oracle):
 
 """
 
+import functools
 from abc import abstractmethod
 
 import torch
@@ -51,10 +52,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.utils.flashinfer import (
-    has_flashinfer_trtllm_fp4_lora_delta,
-    has_flashinfer_trtllm_fused_moe,
-)
+from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
 
 
 @triton.jit
@@ -592,14 +590,6 @@ class TrtLlmMxfp4LoRAExperts(_TrtLlmLoRAExpertsBase, TrtLlmMxfp4ExpertsBase):
         _TrtLlmLoRAExpertsBase.__init__(self, moe_config, quant_config)
         # gemm1_alpha / gemm1_beta / gemm1_clamp_limit, hidden_dim_unpadded.
         TrtLlmMxfp4ExpertsBase.__init__(self, moe_config, quant_config)
-        self._w13_bias_up_gate_index: torch.Tensor | None = None
-
-    @staticmethod
-    def _supports_current_device() -> bool:
-        return (
-            _TrtLlmLoRAExpertsBase._supports_current_device()
-            and has_flashinfer_trtllm_fp4_lora_delta()
-        )
 
     @staticmethod
     def _supports_quant_scheme(
@@ -630,28 +620,16 @@ class TrtLlmMxfp4LoRAExperts(_TrtLlmLoRAExpertsBase, TrtLlmMxfp4ExpertsBase):
         # flashinfer manages its own workspace and drops the hidden padding.
         return (0,), (0,), (M, self.hidden_dim_unpadded)
 
-    def _max_supported_tokens(self, top_k: int, global_num_experts: int) -> int:
-        # See TrtLlmMxfp4ExpertsModular._max_supported_tokens.
-        return max(1, min(300000, (65535 - global_num_experts) * 8 // top_k))
+    @functools.cached_property
+    def _w13_bias_up_gate_index(self) -> torch.Tensor:
+        """Columns of the kernel-format FC1 bias in [up | gate] order."""
+        from flashinfer.fused_moe.core import get_w2_permute_indices_with_cache
 
-    def _w13_bias_up_gate(self) -> torch.Tensor | None:
-        """FC1 bias as (local_num_experts, 2I) float32 in [up | gate] order."""
-        w1_bias = self.w1_bias
-        if w1_bias is None:
-            return None
-        w1_bias = w1_bias.reshape(self.local_num_experts, -1)
-        if self._w13_bias_up_gate_index is None:
-            from flashinfer.fused_moe.core import get_w2_permute_indices_with_cache
-
-            # Kernel format is the (up_i, gate_i) bias permuted for the tile.
-            permute = get_w2_permute_indices_with_cache(
-                {}, w1_bias[0].reshape(-1, 1), 128
-            ).to(w1_bias.device)
-            interleaved = torch.argsort(permute)
-            self._w13_bias_up_gate_index = torch.cat(
-                [interleaved[0::2], interleaved[1::2]]
-            )
-        return w1_bias[:, self._w13_bias_up_gate_index].to(torch.float32)
+        # Kernel format is the (up_i, gate_i) bias permuted for the tile.
+        bias = self.w1_bias.reshape(self.local_num_experts, -1)[0]
+        permute = get_w2_permute_indices_with_cache({}, bias.reshape(-1, 1), 128)
+        interleaved = torch.argsort(permute.to(bias.device))
+        return torch.cat([interleaved[0::2], interleaved[1::2]])
 
     def prepare_gemm1_lora_delta(
         self,
@@ -660,37 +638,27 @@ class TrtLlmMxfp4LoRAExperts(_TrtLlmLoRAExpertsBase, TrtLlmMxfp4ExpertsBase):
         topk_ids: torch.Tensor,
     ) -> torch.Tensor:
         """Bring the W13 delta to [up | gate] halves and fold in the FC1 bias."""
-        delta = gemm1_lora_delta
-        intermediate_size = delta.size(-1) // 2
-        # SWIGLUOAI weights, and the deltas that follow them, are interleaved.
-        interleaved = self.moe_config.activation == MoEActivation.SWIGLUOAI
-        if lora_context.w13_num_slices == 2:
-            if interleaved:
-                # (up_0, gate_0, up_1, gate_1, ...) -> [up | gate]
-                delta = (
-                    delta.unflatten(-1, (intermediate_size, 2))
-                    .transpose(-1, -2)
-                    .flatten(-2)
-                )
-        elif interleaved:
-            # (gate_0, up_0, gate_1, up_1, ...) -> [up | gate]
-            delta = (
-                delta.unflatten(-1, (intermediate_size, 2))
-                .flip(-1)
-                .transpose(-1, -2)
-                .flatten(-2)
-            )
+        intermediate_size = gemm1_lora_delta.size(-1) // 2
+        # View as (I, 2) pairs of the first and second w13 half. SWIGLUOAI
+        # weights, and the deltas that follow them, are interleaved.
+        if self.moe_config.activation == MoEActivation.SWIGLUOAI:
+            pairs = gemm1_lora_delta.unflatten(-1, (intermediate_size, 2))
         else:
-            # [gate | up] -> [up | gate]
-            delta = delta.roll(intermediate_size, dims=-1)
+            pairs = gemm1_lora_delta.unflatten(-1, (2, intermediate_size)).mT
+        # Per-expert deltas arrive as (up, gate); fused 3D ones follow the
+        # checkpoint (gate, up) order.
+        if lora_context.w13_num_slices != 2:
+            pairs = pairs.flip(-1)
+        delta = pairs.mT.flatten(-2)  # [up | gate]
 
         # The kernel has a single FC1 bias slot, shared by the static bias and
         # the per-token delta, so the static bias rides along in the delta.
-        bias = self._w13_bias_up_gate()
-        if bias is not None:
-            local_ids = topk_ids.to(torch.int64) - self.ep_rank * self.local_num_experts
+        if self.w1_bias is not None:
+            bias = self.w1_bias.reshape(self.local_num_experts, -1)
+            bias = bias[:, self._w13_bias_up_gate_index].float()
+            local_ids = topk_ids.long() - self.ep_rank * self.local_num_experts
             local_ids = local_ids.clamp_(0, self.local_num_experts - 1)
-            delta = (delta.to(torch.float32) + bias[local_ids]).to(torch.bfloat16)
+            delta = (delta.float() + bias[local_ids]).to(torch.bfloat16)
         return delta.contiguous()
 
     def invoke_routed_moe(
@@ -708,15 +676,13 @@ class TrtLlmMxfp4LoRAExperts(_TrtLlmLoRAExpertsBase, TrtLlmMxfp4ExpertsBase):
         from flashinfer import trtllm_fp4_block_scale_routed_moe
 
         assert a1q_scale is None and hidden_states.dtype == torch.bfloat16
-        assert self.w1_scale is not None and self.w2_scale is not None
         topk_ids, topk_weights = topk_ids_and_weights
-        num_tokens = hidden_states.size(0)
+        # The LoRA token mapping covers the whole batch: no chunking here.
         max_tokens = self._max_supported_tokens(self.topk, global_num_experts)
-        if num_tokens > max_tokens:
-            # The LoRA token mapping covers the whole batch: no chunking here.
+        if hidden_states.size(0) > max_tokens:
             raise ValueError(
                 f"TrtLlmMxfp4LoRAExperts supports at most {max_tokens} tokens "
-                f"per call for top_k={self.topk}, got {num_tokens}."
+                f"per call for top_k={self.topk}, got {hidden_states.size(0)}."
             )
 
         # See TrtLlmBf16LoRAExperts.invoke_routed_moe for the return contract.
@@ -758,6 +724,4 @@ class TrtLlmMxfp4LoRAExperts(_TrtLlmLoRAExpertsBase, TrtLlmMxfp4ExpertsBase):
             tune_max_num_tokens=fi_moe_largest_bucket(self.moe_config),
             gemm1_lora_delta=gemm1_lora_delta,
         )
-        if not do_finalize:
-            return list(ret)
-        return [output]
+        return [output] if do_finalize else list(ret)

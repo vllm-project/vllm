@@ -21,15 +21,15 @@ from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     convert_weight_to_mxfp4_moe_kernel_format,
 )
 from vllm.platforms import current_platform
-from vllm.utils.flashinfer import has_flashinfer_trtllm_fp4_lora_delta
+from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
 from vllm.utils.torch_utils import set_random_seed
 
 if pytest and (
-    not has_flashinfer_trtllm_fp4_lora_delta()
+    not has_flashinfer_trtllm_fused_moe()
     or not current_platform.is_device_capability_family(100)
 ):
     pytest.skip(
-        "Requires flashinfer TRTLLM FP4 MoE with gemm1_lora_delta (SM100)",
+        "Requires flashinfer TRTLLM fused MoE (SM100)",
         allow_module_level=True,
     )
 
