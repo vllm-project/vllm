@@ -467,7 +467,7 @@ def test_derender_text_choices_builds_request_from_parse_context(
     output = MagicMock(text="raw", token_ids=[1, 2], finish_reason="stop")
 
     ((message, finish_reason),) = derenderer._derender_text_choices(
-        [output], parse_context, [11]
+        [output], parse_context.to_chat_request(), 3, [11]
     )
 
     chat_request = parser.parse.call_args.args[1]

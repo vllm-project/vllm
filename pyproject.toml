@@ -225,6 +225,8 @@ FoPE = "FoPE"
 k_ot = "k_ot"
 view_seperator = "view_seperator"
 inverse_std_variences = "inverse_std_variences"
+# deliberate misspelling in a test that unknown fields are rejected
+tool_choise = "tool_choise"
 
 [tool.typos.default.extend-words]
 MoNE = "MoNE"

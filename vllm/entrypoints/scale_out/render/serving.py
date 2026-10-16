@@ -35,10 +35,7 @@ from vllm.renderers.inputs.preprocess import (
     extract_prompt_components,
     extract_prompt_len,
 )
-from vllm.renderers.online_renderer import (
-    OnlineRenderer,
-    resolve_chat_template_kwargs,
-)
+from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import SamplingParams
 
 logger = init_logger(__name__)
@@ -155,7 +152,10 @@ class ServingRender(BaseServing):
 
         # Resolve here what OpenAIServingChat passes to the engine:
         # `_grammar_from_parser` (set by `adjust_request`) is not serialized.
-        reasoning_parser_kwargs = self._reasoning_parser_kwargs(request)
+        chat_template_kwargs = self.online_renderer.effective_chat_template_kwargs(
+            request
+        )
+        reasoning_parser_kwargs = self._reasoning_parser_kwargs(chat_template_kwargs)
         parser = None
         if reasoning_parser_kwargs is not None:
             assert self.online_renderer.parser is not None
@@ -189,22 +189,21 @@ class ServingRender(BaseServing):
             cache_salt=request.cache_salt,
             priority=request.priority,
             token_offsets=engine_input.get("prompt_token_offsets"),
-            parse_context=self._build_parse_context(request),
+            parse_context=self._build_parse_context(request, chat_template_kwargs),
         )
 
-    def _build_parse_context(self, request: ChatCompletionRequest) -> ParseContext:
-        renderer = self.online_renderer
+    def _build_parse_context(
+        self, request: ChatCompletionRequest, chat_template_kwargs: dict[str, Any]
+    ) -> ParseContext:
         return ParseContext(
             tools=request.tools,
             tool_choice=request.tool_choice,
             parallel_tool_calls=request.parallel_tool_calls,
             include_reasoning=request.include_reasoning,
-            chat_template_kwargs=resolve_chat_template_kwargs(
-                request,
-                renderer.chat_template,
-                renderer.chat_template_content_format,
-                renderer.default_chat_template_kwargs,
-                use_harmony=renderer.use_harmony,
+            # Like the derenderer, Harmony output is parsed without template
+            # kwargs.
+            chat_template_kwargs=(
+                {} if self.online_renderer.use_harmony else chat_template_kwargs
             ),
             history_tool_call_cnt=count_history_tool_calls(request),
         )
@@ -352,7 +351,9 @@ class ServingRender(BaseServing):
             ),
             sampling_params=params,
             model=request.model,
-            reasoning_parser_kwargs=self._reasoning_parser_kwargs(request),
+            reasoning_parser_kwargs=self._reasoning_parser_kwargs(
+                self.online_renderer.effective_chat_template_kwargs(request)
+            ),
             stream=bool(request.stream),
             cache_salt=request.cache_salt,
             priority=request.priority,
@@ -362,16 +363,12 @@ class ServingRender(BaseServing):
         )
 
     def _reasoning_parser_kwargs(
-        self, request: ChatCompletionRequest | ResponsesRequest
+        self, chat_template_kwargs: dict[str, Any]
     ) -> ReasoningParserKwargs | None:
         parser_cls = self.online_renderer.parser
         if parser_cls is None or parser_cls.reasoning_parser_cls is None:
             return None
-        return ReasoningParserKwargs(
-            chat_template_kwargs=self.online_renderer.effective_chat_template_kwargs(
-                request
-            )
-        )
+        return ReasoningParserKwargs(chat_template_kwargs=chat_template_kwargs)
 
     def _placeholder_metadata_fields(self, modality: str) -> set[str]:
         """Fields the EC consumer still requires after embeddings transfer."""

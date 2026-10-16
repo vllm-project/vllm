@@ -91,7 +91,7 @@ print(response["choices"][0]["token_ids"])
 - The parser reads the engine's `text`, so it sees the stop string cut and the post `adjust_request` decode flags. That makes it match coupled chat for parsers whose `adjust_request` changes decoding which `/derender` can't.
 - A server with a tool or reasoning parser needs `parse_context`. Without a parser, `message.content` is the plain text.
 - `parse_context` is ignored at other levels, so a rendered request can go to a prefill leg unchanged.
-- `logprobs` follow coupled chat. `top_logprobs` is cut to `sampling_params.logprobs`, `logprob_token_ids` is honored and `logprobs` are dropped when `include_reasoning` is false so they don't expose the hidden reasoning.
+- `logprobs` follow coupled chat. `top_logprobs` is cut to `sampling_params.logprobs`, `logprob_token_ids` is honored. When a parser hides the reasoning with `include_reasoning: false`, `logprobs` and `token_ids` are dropped so they don't expose it.
 - `finish_reason` follows coupled chat too. It's `tool_calls` when the message has tool calls except with a named `tool_choice` or a `length` cut.
 - `stream: true` isn't supported yet.
 
@@ -104,9 +104,9 @@ With `output_mode: "tokens"`, logprobs are `GenerateLogProbs` with an integer `t
 The server returns a 400 for:
 
 - `output_mode: "text"` or `"derender"` on a server without a tokenizer (`--tokens-only` or `--skip-tokenizer-init`).
-- `output_mode: "text"` with `sampling_params.detokenize: false`.
+- `output_mode: "text"` or `"derender"` with `sampling_params.detokenize: false`.
 - `output_mode: "derender"` with `stream: true`.
-- `output_mode: "derender"` without `parse_context` on a server with a tool or reasoning parser.
+- `output_mode: "derender"` without `parse_context` on a server with a tool or reasoning parser or with a `parse_context` that a chat request would reject, such as `tool_choice: "required"` without `tools`. This is checked before generating.
 - An unsupported `output_mode` value.
 
 For using `output_mode` with separate prefill and decode pools, see [Disaggregated Prefilling](../../features/disagg_prefill.md#generate-api-output-modes).

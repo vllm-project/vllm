@@ -1009,6 +1009,7 @@ async def test_inline_derender_logprobs(client, include_reasoning, extra):
 
     if not include_reasoning:
         assert inline["logprobs"] is None
+        assert inline["token_ids"] is None
         return
 
     coupled = (await _coupled(client, messages, **extra))["choices"][0]
