@@ -283,20 +283,15 @@ class AuxOutputWorkerConnector:
             stored_end = (
                 min(token_end // block_size, len(state.aux_output_keys)) * block_size
             )
-            keys = None
+            keys = state.aux_output_keys[
+                emit_start // block_size : stored_end // block_size
+            ]
             if self._return_keys:
-                keys = state.aux_output_keys[
-                    emit_start // block_size : stored_end // block_size
-                ]
                 chunks = []
                 cursor = max(emit_start, stored_end)
                 for block_start, block in state.pending_blocks:
                     if block_start <= cursor < block_start + block_size:
-                        chunk = block[
-                            cursor - block_start : min(
-                                block_size, token_end - block_start
-                            )
-                        ]
+                        chunk = block[cursor - block_start : token_end - block_start]
                         chunks.append(chunk)
                         cursor += len(chunk)
                 if cursor < token_end:
@@ -305,9 +300,7 @@ class AuxOutputWorkerConnector:
             elif emit_start < stored_end:
                 rows = materialize_routed_experts(
                     store,
-                    state.aux_output_keys[
-                        emit_start // block_size : stored_end // block_size
-                    ],
+                    keys,
                     shape_per_token=buffer.shape_per_token,
                     dtype=buffer.dtype,
                 )[emit_start % block_size :]
@@ -317,7 +310,9 @@ class AuxOutputWorkerConnector:
                     )
             else:
                 rows = buffer.read(request_id, emit_start, token_end)
-            outputs[request_id] = AuxRequestOutput(emit_start, rows, keys)
+            outputs[request_id] = AuxRequestOutput(
+                emit_start, rows, keys if self._return_keys else None
+            )
             state.emit_cursor = token_end
         if self._return_keys and outputs:
             store.flush()
