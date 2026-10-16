@@ -312,7 +312,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             max_num_reqs=self.max_num_reqs, device=self.device
         )
         # Debug canary: "" / "0" off, "1" warn, "2" raise.
-        self.debug_draft_vintage = envs.VLLM_DEBUG_DRAFT_VINTAGE
+        self.debug_draft_vintage = envs.VLLM_DEBUG_DRAFT_HANDOFF
 
         self.pcp_manager: pcp.PCPManager | None = None
 

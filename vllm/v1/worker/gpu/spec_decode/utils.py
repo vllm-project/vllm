@@ -150,7 +150,7 @@ def check_draft_vintage(
     All-(-1) scheduled rows are width placeholders (unstructured requests,
     or drafts the scheduler fully rejected) and carry no ids to compare.
     Performs a D2H sync per checked request — only call when
-    VLLM_DEBUG_DRAFT_VINTAGE is enabled. level "2" raises on divergence,
+    VLLM_DEBUG_DRAFT_HANDOFF is enabled. level "2" raises on divergence,
     any other non-"0" value warns.
     """
     stale: list[str] = []
