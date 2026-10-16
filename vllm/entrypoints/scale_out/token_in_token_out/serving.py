@@ -48,6 +48,7 @@ from vllm.multimodal.inputs import (
 from vllm.outputs import RequestOutput
 from vllm.renderers.chat_utils import AsyncMultiModalItemTracker
 from vllm.renderers.online_derenderer import OnlineDerenderer
+from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.collection_utils import as_list
@@ -58,11 +59,11 @@ from .mm_features import (
     placeholder_ranges_from_engine_input,
 )
 from .protocol import (
+    GenerateDerenderChoice,
+    GenerateDerenderResponse,
     GenerateLogProb,
     GenerateLogProbs,
     GenerateLogProbsContent,
-    GenerateDerenderChoice,
-    GenerateDerenderResponse,
     GenerateRequest,
     GenerateResponse,
     GenerateTextChoice,
