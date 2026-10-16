@@ -531,6 +531,9 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             msa_decode_backend=(
                 vllm_config.attention_config.minimax_m3_msa_decode_backend
             ),
+            msa_decode_fp16_dot=(
+                vllm_config.attention_config.minimax_m3_msa_decode_fp16_dot
+            ),
         )
         # Self-contained nn.Module: owns its side cache, selects its impl in init.
         self.indexer = MiniMaxM3Indexer(

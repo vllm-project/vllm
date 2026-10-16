@@ -204,6 +204,7 @@ class MiniMaxM3SparseMSAImpl(MiniMaxM3SparseImpl):
         topk_blocks: int,
         sparse_block_size: int,
         msa_decode_backend: MiniMaxM3MSADecodeBackend = "triton",
+        msa_decode_fp16_dot: bool = False,
     ) -> None:
         super().__init__(
             num_heads,
@@ -213,6 +214,7 @@ class MiniMaxM3SparseMSAImpl(MiniMaxM3SparseImpl):
             kv_cache_dtype,
             topk_blocks=topk_blocks,
             sparse_block_size=sparse_block_size,
+            msa_decode_fp16_dot=msa_decode_fp16_dot,
         )
         self.use_nvfp4_kv = is_nvfp4_kv_cache(kv_cache_dtype)
         self.use_cutlass_decode = supports_cutlass_sparse_decode(
@@ -332,6 +334,7 @@ class MiniMaxM3SparseMSAImpl(MiniMaxM3SparseImpl):
                     d.decode_query_len,
                     k_scale=k_scale,
                     v_scale=v_scale,
+                    fp16_dot=self.fp16_dot,
                 )
 
         # Prefill [nd:]: MSA sparse FMHA over the selected blocks.
