@@ -3002,6 +3002,7 @@ def cp_gather_and_upconvert_nvfp4_kv_cache(
     block_table: torch.Tensor,
     workspace_starts: torch.Tensor,
     batch_size: int,
+    seq_starts: torch.Tensor | None = None,
 ) -> None:
     """Gather and upconvert an nvfp4_ds_mla KV cache to a BF16 workspace.
 
@@ -3011,6 +3012,8 @@ def cp_gather_and_upconvert_nvfp4_kv_cache(
         block_table: Block indices [num_reqs, max_blocks]
         workspace_starts: Workspace start offsets [num_reqs]
         batch_size: Number of requests
+        seq_starts: Per-request token offset into the context to start
+            reading from [num_reqs]; None reads from the first token.
 
     """
     torch.ops._C_cache_ops.cp_gather_and_upconvert_nvfp4_kv_cache(
@@ -3019,6 +3022,7 @@ def cp_gather_and_upconvert_nvfp4_kv_cache(
         block_table,
         workspace_starts,
         batch_size,
+        seq_starts,
     )
 
 
