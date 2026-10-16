@@ -7,13 +7,12 @@ from __future__ import annotations
 import mmap
 import queue
 import threading
-from collections import OrderedDict
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
 
-if TYPE_CHECKING:
-    from vllm.distributed.aux_output_connector.policy import ExpertCachePolicy
+from vllm.v1.kv_offload.base import OffloadKey, ReqContext
+from vllm.v1.kv_offload.cpu.policies.base import ChunkStatus
+from vllm.v1.kv_offload.cpu.policies.factory import CachePolicyFactory
 
 
 @dataclass(frozen=True)
@@ -102,7 +101,13 @@ class BackgroundBlockObjectStore:
 
 
 class BlockObjectStore:
-    """Single-owner bounded store that fails closed after an eviction."""
+    """Single-owner bounded store that fails closed after an eviction.
+
+    Recency and victim selection use the KV offload `CachePolicy`, so routed
+    experts follow the same retention rules as offloaded KV blocks. Policies
+    are resolved by name through `CachePolicyFactory` (built in: "lru",
+    "arc"; out-of-tree policies via `cache_policy_module_path`).
+    """
 
     _UNALLOCATED_SLOT = -1
 
@@ -111,7 +116,8 @@ class BlockObjectStore:
         *,
         max_bytes: int,
         object_nbytes: int,
-        policy: ExpertCachePolicy | None = None,
+        cache_policy: str = "lru",
+        cache_policy_module_path: str | None = None,
     ) -> None:
         if object_nbytes <= 0:
             raise ValueError("auxiliary output object size must be positive")
@@ -119,8 +125,14 @@ class BlockObjectStore:
             raise ValueError("auxiliary output store must fit at least one object")
         self.object_nbytes = object_nbytes
         self.num_slots = max_bytes // object_nbytes
-        self._policy = policy
-        self._lru: OrderedDict[str, int] = OrderedDict()
+        policy_cls = CachePolicyFactory.get_cache_policy_cls(
+            cache_policy, cache_policy_module_path
+        )
+        self._policy = policy_cls(cache_capacity=self.num_slots)
+        # Keys are not tied to a request; built-in policies ignore the context.
+        self._req_context = ReqContext(req_id="aux-output-store")
+        self._num_objects = 0
+        # References may arrive before the object is stored.
         self._references: dict[str, int] = {}
         self._free_slots: list[int] = []
         self._next_slot = 0
@@ -128,45 +140,30 @@ class BlockObjectStore:
             -1, self.num_slots * self.object_nbytes
         )
 
+    def _touch(self, keys: Iterable[str]) -> None:
+        """Mark stored keys as used, head first, like a KV prefix access."""
+        present = [
+            offload_key
+            for key in keys
+            if self._policy.get(offload_key := _offload_key(key)) is not None
+        ]
+        if present:
+            self._policy.touch(present, self._req_context)
+
     def _evict_to_fit(self, protected: set[str]) -> None:
-        excess = len(self._lru) - self.num_slots
+        excess = self._num_objects - self.num_slots
         if excess <= 0:
             return
-        if self._policy is None:
-            victims = []
-            for key in self._lru:
-                if key not in self._references and key not in protected:
-                    victims.append(key)
-                    if len(victims) == excess:
-                        break
-        else:
-            candidates = (
-                key
-                for key in self._lru
-                if key not in self._references and key not in protected
-            )
-            selected = self._policy.select_victims(candidates, excess)
-            victims = list(selected) if selected is not None else []
-        if len(victims) != excess or (
-            self._policy is not None
-            and (
-                len(set(victims)) != excess
-                or any(
-                    key not in self._lru or key in self._references or key in protected
-                    for key in victims
-                )
-            )
-        ):
+        victims = self._policy.evict(excess, {_offload_key(key) for key in protected})
+        if victims is None:
             raise BlockObjectStoreError(
                 "auxiliary output store cannot retain the requested batch: "
                 f"limit={self.num_slots} objects"
             )
-        for victim in victims:
-            slot = self._lru.pop(victim)
-            if slot != self._UNALLOCATED_SLOT:
-                self._free_slots.append(slot)
-        if self._policy is not None:
-            self._policy.on_remove(victims, reason="eviction")
+        self._num_objects -= len(victims)
+        for _, chunk in victims:
+            if chunk.chunk_id != self._UNALLOCATED_SLOT:
+                self._free_slots.append(chunk.chunk_id)
 
     def _allocate_slot(self) -> int:
         if self._free_slots:
@@ -188,40 +185,45 @@ class BlockObjectStore:
         unique = {obj.key: obj for obj in objects}
         self._retain(retain_keys)
         terminal_order = self._release(release_keys)
+        inserted = []
         for key in unique:
-            self._lru.setdefault(key, self._UNALLOCATED_SLOT)
-            self._lru.move_to_end(key)
-        for key in terminal_order:
-            if key in self._lru:
-                self._lru.move_to_end(key)
+            offload_key = _offload_key(key)
+            if self._policy.get(offload_key) is not None:
+                self._policy.touch([offload_key], self._req_context)
+                continue
+            chunk = ChunkStatus(self._UNALLOCATED_SLOT)
+            chunk.ref_cnt = self._references.get(key, 0)
+            self._policy.insert(offload_key, chunk)
+            self._num_objects += 1
+            inserted.append(offload_key)
+        # Released keys arrive tail first; the policy expects prefix order.
+        self._touch(reversed(terminal_order))
         try:
             self._evict_to_fit(set(unique) - set(terminal_order))
         except BlockObjectStoreError:
-            removed = []
-            for key in unique:
-                if self._lru.get(key) == self._UNALLOCATED_SLOT:
-                    del self._lru[key]
-                    removed.append(key)
-            if self._policy is not None and removed:
-                self._policy.on_remove(removed, reason="rollback")
+            for offload_key in inserted:
+                self._policy.remove(offload_key)
+            self._num_objects -= len(inserted)
             raise
         for object_id, obj in unique.items():
-            slot = self._lru.get(object_id)
-            if slot is None:
-                continue
-            if slot != self._UNALLOCATED_SLOT:
+            stored = self._policy.get(_offload_key(object_id))
+            if stored is None or stored.chunk_id != self._UNALLOCATED_SLOT:
                 continue
             slot = self._allocate_slot()
             offset = slot * self.object_nbytes
             arena[offset : offset + self.object_nbytes] = obj.payload
-            self._lru[object_id] = slot
+            stored.chunk_id = slot
 
     def _retain(self, keys: Iterable[str]) -> None:
         for key in keys:
             references = self._references.get(key, 0)
             self._references[key] = references + 1
-            if self._policy is not None:
-                self._policy.on_reference_change(key, references, references + 1)
+            offload_key = _offload_key(key)
+            chunk = self._policy.get(offload_key)
+            if chunk is not None:
+                if chunk.ref_cnt == 0:
+                    self._policy.mark_non_evictable(offload_key)
+                chunk.ref_cnt += 1
 
     def _release(self, keys: Iterable[str]) -> list[str]:
         terminal_order = []
@@ -232,37 +234,48 @@ class BlockObjectStore:
             else:
                 del self._references[key]
                 terminal_order.append(key)
-            if self._policy is not None:
-                self._policy.on_reference_change(key, references + 1, references)
+            offload_key = _offload_key(key)
+            chunk = self._policy.get(offload_key)
+            if chunk is not None:
+                chunk.ref_cnt -= 1
+                if chunk.ref_cnt == 0:
+                    self._policy.mark_evictable(offload_key)
         return terminal_order
 
     def get_concatenated(self, keys: list[str]) -> bytes:
         arena_obj = self._arena
         if arena_obj is None:
             raise RuntimeError("auxiliary output store is closed")
-        try:
-            entries = [self._lru[key] for key in keys]
-        except KeyError as error:
+        chunks = [self._policy.get(_offload_key(key)) for key in keys]
+        if any(chunk is None for chunk in chunks):
             raise BlockObjectStoreError(
                 "auxiliary output object does not exist; the object may have been "
-                f"evicted (used={len(self._lru)}, "
+                f"evicted (used={self._num_objects}, "
                 f"limit={self.num_slots} objects). Increase "
                 "aux_output_config.max_bytes when a KV cache hit requires it."
-            ) from error
+            )
         arena = memoryview(arena_obj)
         try:
             payload = b"".join(
-                arena[slot * self.object_nbytes : (slot + 1) * self.object_nbytes]
-                for slot in entries
+                arena[
+                    chunk.chunk_id * self.object_nbytes : (chunk.chunk_id + 1)
+                    * self.object_nbytes
+                ]
+                for chunk in chunks
+                if chunk is not None
             )
         finally:
             arena.release()
-        for key in keys:
-            self._lru.move_to_end(key)
+        self._touch(keys)
         return payload
 
     def close(self) -> None:
         arena = self._arena
         if arena is not None:
             self._arena = None
+            self._policy.clear()
             arena.close()
+
+
+def _offload_key(key: str) -> OffloadKey:
+    return OffloadKey(key.encode())

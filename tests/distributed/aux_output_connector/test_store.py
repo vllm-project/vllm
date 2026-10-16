@@ -33,6 +33,7 @@ from vllm.distributed.aux_output_connector.worker import (
     AuxOutputWorkerConnector,
 )
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
+from vllm.v1.kv_offload.cpu.policies.lru import LRUCachePolicy
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.worker.gpu import async_utils
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
@@ -530,10 +531,12 @@ def _make_store(
     *,
     max_bytes: int = 1 << 20,
     object_nbytes: int = 4,
+    **policy_kwargs,
 ):
     return BlockObjectStore(
         max_bytes=max_bytes,
         object_nbytes=object_nbytes,
+        **policy_kwargs,
     )
 
 
@@ -1852,3 +1855,55 @@ def test_scheduler_connector_reset_derives_emit_start_from_request():
     assert metadata.generation == 1
     assert metadata.requests[request.request_id] == 4
     assert list(metadata.block_hashes[request.request_id]) == [b"a" * 32]
+
+
+class NewestFirstCachePolicy(LRUCachePolicy):
+    """Out-of-tree style policy that evicts the most recently used key first."""
+
+    def evict(self, n, protected):
+        victims = sorted(
+            (key for key in self._evictable if key not in protected),
+            key=self._ranks.__getitem__,
+            reverse=True,
+        )[:n]
+        if len(victims) < n:
+            return None
+        evicted = [(key, self.chunks[key]) for key in victims]
+        for key in victims:
+            self.remove(key)
+        return evicted
+
+
+@pytest.mark.parametrize("cache_policy", ["lru", "arc"], ids=["lru", "arc"])
+def test_store_cache_policy_respects_references_and_rollback(cache_policy):
+    store = _make_store(max_bytes=8, cache_policy=cache_policy)
+    store.put(
+        [BlockObject("first", b"1111"), BlockObject("second", b"2222")],
+        retain_keys=["first", "second"],
+    )
+
+    with pytest.raises(BlockObjectStoreError, match="cannot retain"):
+        store.put([BlockObject("third", b"3333")])
+    assert store.get_concatenated(["first", "second"]) == b"11112222"
+
+    store.put([BlockObject("third", b"3333")], release_keys=["second"])
+    assert store.get_concatenated(["first", "third"]) == b"11113333"
+    with pytest.raises(BlockObjectStoreError, match="does not exist"):
+        store.get_concatenated(["second"])
+    store.put([], release_keys=["first"])
+    store.close()
+
+
+def test_store_loads_out_of_tree_cache_policy():
+    store = _make_store(
+        max_bytes=8,
+        cache_policy=NewestFirstCachePolicy.__name__,
+        cache_policy_module_path=__name__,
+    )
+    store.put([BlockObject("first", b"1111"), BlockObject("second", b"2222")])
+    store.put([BlockObject("third", b"3333")])
+
+    assert store.get_concatenated(["first", "third"]) == b"11113333"
+    with pytest.raises(BlockObjectStoreError, match="does not exist"):
+        store.get_concatenated(["second"])
+    store.close()
