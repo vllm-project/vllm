@@ -701,15 +701,21 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             or self.parallel_config.data_parallel_size != 1
             or self.parallel_config.decode_context_parallel_size != 1
             or self.parallel_config.use_ubatching
-            or vllm_config.speculative_config is not None
+            or (
+                vllm_config.speculative_config is not None
+                and (
+                    not vllm_config.speculative_config.use_dspark()
+                    or vllm_config.speculative_config.enable_adaptive_verification
+                )
+            )
             or vllm_config.kv_transfer_config is not None
             or vllm_config.cache_config.enable_prefix_caching
             or vllm_config.kernel_config.moe_backend in MEGA_MOE_BACKENDS
         ):
             raise NotImplementedError(
                 "DeepSeek-V4.1 PCP currently requires PP=DP=DCP=1, with no "
-                "microbatching, speculative decoding, KV transfer, prefix "
-                "caching, or MegaMoE."
+                "microbatching, speculative decoding other than fixed-length DSpark, "
+                "adaptive verification, KV transfer, prefix caching, or MegaMoE."
             )
         self.use_native_mega_moe = (
             vllm_config.kernel_config.moe_backend in NATIVE_MEGA_MOE_BACKENDS
