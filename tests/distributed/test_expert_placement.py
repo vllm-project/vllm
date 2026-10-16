@@ -1,11 +1,69 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from dataclasses import replace
+
 import pytest
 
+from vllm.model_executor.layers.fused_moe.config import FusedMoEParallelConfig
 from vllm.model_executor.layers.fused_moe.expert_map_manager import (
+    ExpertMapManager,
     determine_expert_map,
 )
+
+
+def test_expert_map_manager_lookups_follow_ep_updates():
+    """Host-side expert queries follow EP reconfiguration."""
+    parallel_config = FusedMoEParallelConfig(
+        tp_size=2,
+        pcp_size=1,
+        dp_size=1,
+        ep_size=2,
+        tp_rank=0,
+        pcp_rank=0,
+        dp_rank=0,
+        ep_rank=0,
+        sp_size=1,
+        use_ep=True,
+        all2all_backend="allgather_reducescatter",
+        enable_eplb=False,
+    )
+    manager = ExpertMapManager(
+        max_num_batched_tokens=1,
+        top_k=1,
+        global_num_experts=4,
+        num_redundant_experts=0,
+        num_expert_group=None,
+        moe_parallel_config=parallel_config,
+        placement_strategy="linear",
+        enable_eplb=False,
+    )
+
+    configurations = (
+        (parallel_config, [0, 1, -1, -1], [0, 1], "0->0, 1->1"),
+        (
+            replace(parallel_config, tp_rank=1, ep_rank=1),
+            [-1, -1, 0, 1],
+            [2, 3],
+            "0->2, 1->3",
+        ),
+        (
+            replace(parallel_config, tp_size=1, ep_size=1, use_ep=False),
+            [0, 1, 2, 3],
+            [0, 1, 2, 3],
+            "[0..3]",
+        ),
+    )
+    for config, expected_map, expected_local_ids, expected_map_string in configurations:
+        if config is not parallel_config:
+            manager.update(config, global_num_experts=4)
+        for global_id, expected_local_id in enumerate(expected_map):
+            local_id = manager.map_global_to_local(global_id)
+            assert isinstance(local_id, int)
+            assert local_id == expected_local_id
+            assert manager.is_local_expert(global_id) is (expected_local_id != -1)
+        assert manager.get_local_expert_ids() == expected_local_ids
+        assert manager.get_compressed_map_string() == expected_map_string
 
 
 def verify_round_robin_pattern(expert_map, ep_rank, ep_size, global_num_experts):
