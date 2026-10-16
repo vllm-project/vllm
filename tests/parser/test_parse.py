@@ -9,7 +9,9 @@ import pytest
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.parser.abstract_parser import DelegatingParser
+from vllm.parser.engine.parser_engine import ParserEngine
 from vllm.parser.parser_manager import ParserManager
+from vllm.parser.qwen3 import qwen3_config
 from vllm.parser.utils import count_history_tool_calls
 from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
 from vllm.tool_parsers.hermes_tool_parser import Hermes2ProToolParser
@@ -429,11 +431,26 @@ CONTINUE_MESSAGES = [
     {"role": "assistant", "content": "Sure,"},
 ]
 REASONED_OUTPUT = "<think>\nlet me think\n</think>\n\n" + PLAIN_TEXT
+TOOL_TURN_MESSAGES = [
+    {"role": "user", "content": "Weather in Paris?"},
+    {
+        "role": "assistant",
+        "content": "<think>\nneed a tool\n</think>\n\n",
+        "tool_calls": [
+            {
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": "get_weather", "arguments": "{}"},
+            }
+        ],
+    },
+    {"role": "tool", "tool_call_id": "call_1", "content": "sunny"},
+]
 
 
-def qwen3_parser(tokenizer):
+def reasoning_parser(tokenizer, name="qwen3"):
     parser_cls = ParserManager.get_parser(
-        reasoning_parser_name="qwen3", tokenizer=tokenizer
+        reasoning_parser_name=name, tokenizer=tokenizer
     )
     return parser_cls(tokenizer, None)
 
@@ -468,6 +485,15 @@ def prompt_case(tokenizer, case):
             enable_thinking=False,
         )
         return encode(tokenizer, prompt), make_request(), PLAIN_TEXT
+    if case == "earlier_turn_closed_reasoning":
+        # Only a previous assistant turn closes reasoning; this one is open.
+        prompt = tokenizer.apply_chat_template(
+            TOOL_TURN_MESSAGES,
+            tools=[{"type": "function", "function": {"name": "get_weather"}}],
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+        return encode(tokenizer, prompt), make_request(), REASONED_OUTPUT
     assert case == "reasoning_open"
     prompt = tokenizer.apply_chat_template(
         [{"role": "user", "content": "hi"}],
@@ -480,7 +506,7 @@ def prompt_case(tokenizer, case):
 @pytest.mark.parametrize("case", ["continue_final_message", "template_closed_thinking"])
 def test_parse_prompt_closed_reasoning_is_content(tokenizer, case):
     prompt_ids, request, output = prompt_case(tokenizer, case)
-    parser = qwen3_parser(tokenizer)
+    parser = reasoning_parser(tokenizer)
     parser.set_prompt_token_ids(prompt_ids)
 
     reasoning, content, _ = parser.parse(
@@ -492,9 +518,19 @@ def test_parse_prompt_closed_reasoning_is_content(tokenizer, case):
     assert parser.count_reasoning_tokens(encode(tokenizer, output)) == 0
 
 
-def test_parse_prompt_open_reasoning_still_extracted(tokenizer):
-    prompt_ids, request, output = prompt_case(tokenizer, "reasoning_open")
-    parser = qwen3_parser(tokenizer)
+@pytest.mark.parametrize(
+    ("parser_name", "case"),
+    [
+        ("qwen3", "reasoning_open"),
+        ("qwen3", "earlier_turn_closed_reasoning"),
+        # BaseThinkingReasoningParser scans the prompt without turn
+        # boundaries, so it must not decide non-streaming classification.
+        ("deepseek_r1", "earlier_turn_closed_reasoning"),
+    ],
+)
+def test_parse_prompt_open_reasoning_still_extracted(tokenizer, parser_name, case):
+    prompt_ids, request, output = prompt_case(tokenizer, case)
+    parser = reasoning_parser(tokenizer, parser_name)
     parser.set_prompt_token_ids(prompt_ids)
 
     reasoning, content, _ = parser.parse(
@@ -506,15 +542,37 @@ def test_parse_prompt_open_reasoning_still_extracted(tokenizer):
     assert parser.count_reasoning_tokens(encode(tokenizer, output)) > 0
 
 
+def test_parse_prompt_ignored_without_turn_boundaries(tokenizer):
+    """Without turn boundaries, an earlier turn's </think> looks like this
+    turn's, so the engine must not start the output in content."""
+    prompt_ids, request, output = prompt_case(
+        tokenizer, "earlier_turn_closed_reasoning"
+    )
+    parser = ParserEngine(tokenizer, parser_engine_config=qwen3_config(thinking=True))
+    parser.set_prompt_token_ids(prompt_ids)
+
+    reasoning, content, _ = parser.parse(
+        output, request, model_output_token_ids=encode(tokenizer, output)
+    )
+
+    assert reasoning.strip() == "let me think"
+    assert content.strip() == PLAIN_TEXT
+
+
 @pytest.mark.parametrize(
     "case",
-    ["continue_final_message", "template_closed_thinking", "reasoning_open"],
+    [
+        "continue_final_message",
+        "template_closed_thinking",
+        "reasoning_open",
+        "earlier_turn_closed_reasoning",
+    ],
 )
 def test_prompt_reasoning_streaming_matches_non_streaming(tokenizer, case):
     prompt_ids, request, output = prompt_case(tokenizer, case)
     output_ids = encode(tokenizer, output)
 
-    parser = qwen3_parser(tokenizer)
+    parser = reasoning_parser(tokenizer)
     parser.set_prompt_token_ids(prompt_ids)
     reasoning, content, _ = parser.parse(
         output, request, model_output_token_ids=output_ids
@@ -522,7 +580,7 @@ def test_prompt_reasoning_streaming_matches_non_streaming(tokenizer, case):
     non_streaming = (reasoning or "", content or "")
     non_streaming_count = parser.count_reasoning_tokens(output_ids)
 
-    parser = qwen3_parser(tokenizer)
+    parser = reasoning_parser(tokenizer)
     streamed_reasoning = streamed_content = ""
     for i, token_id in enumerate(output_ids):
         delta = parser.parse_delta(
