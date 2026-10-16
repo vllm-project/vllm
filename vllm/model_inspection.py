@@ -2,7 +2,99 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Model inspection utilities for vLLM."""
 
+import enum
+
 import torch.nn as nn
+
+# Attributes on a quant method or scheme that hold the kernel resolved for a
+# layer. The name varies by method, and the values are selected in either
+# `create_weights` or `process_weights_after_loading`. Kept in the order they
+# are reported: a concrete kernel object is preferred over the backend enum
+# below, which is recorded earlier and can go stale (e.g. the MXFP4 MoE method
+# defaults the enum to MARLIN, then selects Cutlass experts without updating
+# it).
+_KERNEL_ATTRIBUTES = (
+    "moe_kernel",
+    "fp8_linear",
+    "linear_kernel",
+    "ocp_mx_linear",
+    "kernel",
+    # MoE methods that keep only the selected experts implementation.
+    "experts_cls",
+)
+
+# MoE methods that record the resolved backend as an enum. Only consulted when
+# no kernel object was found above, and only when the value really is an enum,
+# so string-valued `backend` style config fields are ignored.
+_BACKEND_ATTRIBUTES = (
+    "mxfp4_backend",
+    "mxfp8_backend",
+    "nvfp4_backend",
+    "int8_backend",
+    "fp8_backend",
+    "w4a8_backend",
+    "wna16_backend",
+    "wna16_moe_backend",
+    "unquantized_backend",
+    "backend",
+)
+
+# `FusedMoEKernel` carries no name of its own; the experts implementation it
+# dispatches to is what identifies the backend that was chosen.
+_MOE_EXPERTS_ATTRIBUTE = "fused_experts"
+
+
+def _describe_kernel(kernel: object) -> str:
+    """Name a resolved kernel, which may be stored as a class or an instance."""
+    experts = getattr(kernel, _MOE_EXPERTS_ATTRIBUTE, None)
+    kernel_name = kernel.__name__ if isinstance(kernel, type) else type(kernel).__name__
+    if experts is not None:
+        experts_name = (
+            experts.__name__ if isinstance(experts, type) else type(experts).__name__
+        )
+        return f"{kernel_name}(experts={experts_name})"
+    return kernel_name
+
+
+def _get_selected_kernel(quant_method: object, scheme: object | None) -> str | None:
+    """Name the quantization kernel/backend resolved for a layer.
+
+    Returns None when no kernel has been selected yet, which is the case for
+    unquantized layers and for inspection that runs before the weights have
+    been processed.
+    """
+    for source in (scheme, quant_method):
+        if source is None:
+            continue
+        for attribute in _KERNEL_ATTRIBUTES:
+            kernel = getattr(source, attribute, None)
+            if kernel is not None:
+                return _describe_kernel(kernel)
+        for attribute in _BACKEND_ATTRIBUTES:
+            backend = getattr(source, attribute, None)
+            if isinstance(backend, enum.Enum):
+                return backend.name
+
+    return None
+
+
+def _get_quant_info(module: nn.Module) -> str | None:
+    """Get the quantization description for a module, if it is quantized."""
+    quant_method = getattr(module, "quant_method", None)
+    if quant_method is None:
+        return None
+
+    # For CompressedTensors, the scheme holds both the name and the kernel.
+    scheme = getattr(module, "scheme", None)
+    quant_name = type(scheme if scheme is not None else quant_method).__name__
+    # Skip unquantized methods
+    if "Unquantized" in quant_name:
+        return None
+
+    kernel_name = _get_selected_kernel(quant_method, scheme)
+    if kernel_name is None:
+        return f"quant={quant_name}"
+    return f"quant={quant_name}(kernel={kernel_name})"
 
 
 def _get_module_info(module: nn.Module) -> str:
@@ -10,17 +102,9 @@ def _get_module_info(module: nn.Module) -> str:
     class_name = type(module).__name__
     parts = []
 
-    # Add quant_method if present
-    quant_method = getattr(module, "quant_method", None)
-    if quant_method is not None:
-        quant_name = type(quant_method).__name__
-        # For CompressedTensors, show the underlying scheme instead
-        scheme = getattr(module, "scheme", None)
-        if scheme is not None:
-            quant_name = type(scheme).__name__
-        # Skip unquantized methods
-        if "Unquantized" not in quant_name:
-            parts.append(f"quant={quant_name}")
+    quant_info = _get_quant_info(module)
+    if quant_info is not None:
+        parts.append(quant_info)
 
     # If module has extra_repr, use it
     if hasattr(module, "extra_repr"):
