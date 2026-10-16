@@ -3,6 +3,8 @@
 import sys
 from abc import ABC, abstractmethod
 from bisect import bisect_left
+from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
 import tokenizers.decoders
 from tokenizers import Tokenizer
@@ -17,6 +19,9 @@ from vllm.tokenizers.detokenizer_utils import (
 from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.v1.engine import EngineCoreRequest
 
+if TYPE_CHECKING:
+    from vllm.reasoning import ReasoningParser
+
 logger = init_logger(__name__)
 
 # Error string from https://github.com/huggingface/tokenizers/blob/909fdde2a4ffedd9295206f705eb612be2a91b12/tokenizers/src/tokenizer/mod.rs#L1042
@@ -26,6 +31,40 @@ INVALID_PREFIX_ERR_MSG = "Invalid prefix encountered"
 def uses_fast_detokenizer(tokenizer: TokenizerLike) -> bool:
     """Whether the engine detokenizes with `FastIncrementalDetokenizer`."""
     return isinstance(tokenizer, TokenizersBackend)
+
+
+class ReasoningEndFinder:
+    """Finds where a request's reasoning ends in its streamed output tokens."""
+
+    def __init__(self, reasoner: "ReasoningParser", prompt_token_ids: Sequence[int]):
+        from vllm.parser.engine.adapters import ParserEngineReasoningAdapter
+
+        self._reasoner = reasoner
+        self._find_reasoning_end = (
+            reasoner.find_reasoning_end
+            if isinstance(reasoner, ParserEngineReasoningAdapter)
+            and reasoner.reasoning_end_token_ids
+            else None
+        )
+        # Legacy parsers check the end against the whole sequence so far.
+        self._token_ids = (
+            [] if self._find_reasoning_end is not None else list(prompt_token_ids)
+        )
+
+    def find_content_start(self, new_token_ids: Sequence[int]) -> int | None:
+        """Index in `new_token_ids` of the first content token (possibly
+        `len(new_token_ids)`), or None if reasoning has not ended."""
+        if self._find_reasoning_end is not None:
+            end = self._find_reasoning_end(new_token_ids)
+            if end is None or end.offset == len(new_token_ids):
+                return None
+            # An implicit end token, e.g. a tool-call start, is itself content.
+            return end.offset if end.implicit else end.offset + 1
+        for i, token_id in enumerate(new_token_ids):
+            self._token_ids.append(token_id)
+            if self._reasoner.is_reasoning_end_streaming(self._token_ids, (token_id,)):
+                return i + 1
+        return None
 
 
 class IncrementalDetokenizer:
@@ -51,6 +90,7 @@ class IncrementalDetokenizer:
         cls,
         tokenizer: TokenizerLike | None,
         request: EngineCoreRequest,
+        reasoning_parser_cls: type["ReasoningParser"] | None = None,
     ) -> "IncrementalDetokenizer":
         assert request.sampling_params is not None
 
@@ -58,16 +98,39 @@ class IncrementalDetokenizer:
             # No tokenizer => skipping detokenization.
             return IncrementalDetokenizer()
 
+        # Stop strings apply to the response, not the reasoning, so they stay
+        # dormant until reasoning ends when the prompt leaves the model in it.
+        reasoning_end_finder = None
+        if (
+            request.sampling_params.stop
+            and request.reasoning_ended is False
+            and reasoning_parser_cls is not None
+        ):
+            reasoner = reasoning_parser_cls(
+                tokenizer, **(request.reasoning_parser_kwargs or {})
+            )
+            reasoning_end_finder = ReasoningEndFinder(
+                reasoner, request.prompt_token_ids or []
+            )
+
         if uses_fast_detokenizer(tokenizer):
             # Fast tokenizer => use tokenizers library DecodeStream.
-            return FastIncrementalDetokenizer(tokenizer, request)
+            return FastIncrementalDetokenizer(
+                tokenizer, request, reasoning_end_finder=reasoning_end_finder
+            )
 
         # Fall back to slow python-based incremental detokenization.
-        return SlowIncrementalDetokenizer(tokenizer, request)
+        return SlowIncrementalDetokenizer(
+            tokenizer, request, reasoning_end_finder=reasoning_end_finder
+        )
 
 
 class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
-    def __init__(self, request: EngineCoreRequest):
+    def __init__(
+        self,
+        request: EngineCoreRequest,
+        reasoning_end_finder: ReasoningEndFinder | None = None,
+    ):
         super().__init__()
 
         # Stop strings
@@ -81,6 +144,9 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
             self.stop = params.stop
         self.min_tokens = params.min_tokens
         self.include_stop_str_in_output = params.include_stop_str_in_output
+        self._reasoning_end_finder = reasoning_end_finder
+        # Stop strings may only start at or after this output text offset.
+        self._stop_search_start = 0
 
         # Number of chars to hold back when stop strings are to be excluded
         # from streamed output.
@@ -131,14 +197,25 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
 
         # 2) Evaluate stop strings.
         stop_string = None
+        if token_offsets is not None and self._reasoning_end_finder is not None:
+            content_start = self._reasoning_end_finder.find_content_start(new_token_ids)
+            if content_start is None:
+                return None
+            self._reasoning_end_finder = None
+            self._stop_search_start = token_offsets[content_start]
+
         if token_offsets is not None and self.num_output_tokens() > self.min_tokens:
             # Support min_tokens, see https://github.com/vllm-project/vllm/pull/22014
-            stop_check_offset = token_offsets[max(self.min_tokens - num_prev_tokens, 0)]
+            stop_check_offset = max(
+                token_offsets[max(self.min_tokens - num_prev_tokens, 0)],
+                self._stop_search_start,
+            )
             stop = check_stop_strings(
                 output_text=self.output_text,
                 new_char_count=len(self.output_text) - stop_check_offset,
                 stop=self.stop,
                 include_in_output=self.include_stop_str_in_output,
+                search_start=self._stop_search_start,
             )
             if stop is not None:
                 stop_string, truncate_to = stop
@@ -177,8 +254,13 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
 
 
 class FastIncrementalDetokenizer(BaseIncrementalDetokenizer):
-    def __init__(self, tokenizer: TokenizersBackend, request: EngineCoreRequest):
-        super().__init__(request)
+    def __init__(
+        self,
+        tokenizer: TokenizersBackend,
+        request: EngineCoreRequest,
+        reasoning_end_finder: ReasoningEndFinder | None = None,
+    ):
+        super().__init__(request, reasoning_end_finder)
 
         sampling_params = request.sampling_params
         assert sampling_params is not None
@@ -260,8 +342,13 @@ class FastIncrementalDetokenizer(BaseIncrementalDetokenizer):
 
 
 class SlowIncrementalDetokenizer(BaseIncrementalDetokenizer):
-    def __init__(self, tokenizer: TokenizerLike, request: EngineCoreRequest):
-        super().__init__(request)
+    def __init__(
+        self,
+        tokenizer: TokenizerLike,
+        request: EngineCoreRequest,
+        reasoning_end_finder: ReasoningEndFinder | None = None,
+    ):
+        super().__init__(request, reasoning_end_finder)
 
         self.tokenizer = tokenizer
         params = request.sampling_params
@@ -323,6 +410,7 @@ def check_stop_strings(
     new_char_count: int,
     stop: list[str],
     include_in_output: bool,
+    search_start: int = 0,
 ) -> tuple[str, int] | None:
     """Check if any stop strings are matched and truncate sequence
     output text accordingly.
@@ -337,7 +425,7 @@ def check_stop_strings(
     example when speculative decoding appends multiple tokens in a single
     step), the stop string that completes earliest in the text is selected,
     so the result matches appending one token at a time. Ties are broken by
-    stop-list order.
+    stop-list order. Matches must start at or after `search_start`.
     """
     if not new_char_count or not stop:
         return None
@@ -348,7 +436,13 @@ def check_stop_strings(
     for stop_str in stop:
         stop_string_len = len(stop_str)
         # Avoid searching already-searched text.
-        stop_index = output_text.find(stop_str, 1 - new_char_count - stop_string_len)
+        stop_index = output_text.find(
+            stop_str,
+            max(
+                len(output_text) + 1 - new_char_count - stop_string_len,
+                search_start,
+            ),
+        )
         if stop_index == -1:
             continue
 

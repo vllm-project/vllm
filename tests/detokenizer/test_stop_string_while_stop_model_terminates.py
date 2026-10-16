@@ -3,10 +3,16 @@
 
 import numpy as np
 import pytest
+from transformers import AutoTokenizer
 
+from vllm.reasoning import ReasoningParserManager
 from vllm.sampling_params import SamplingParams
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
-from vllm.v1.engine.detokenizer import BaseIncrementalDetokenizer
+from vllm.v1.engine.detokenizer import (
+    BaseIncrementalDetokenizer,
+    IncrementalDetokenizer,
+    ReasoningEndFinder,
+)
 from vllm.v1.engine.output_processor import OutputProcessor
 from vllm.v1.outputs import LogprobsLists, SamplingMaskLists
 
@@ -17,12 +23,23 @@ def include_stop_str_in_output(request):
 
 
 class _DummyDetokenizer(BaseIncrementalDetokenizer):
-    def __init__(self, request: EngineCoreRequest):
-        super().__init__(request)
+    def __init__(
+        self,
+        request: EngineCoreRequest,
+        reasoning_end_finder: ReasoningEndFinder | None = None,
+    ):
+        super().__init__(request, reasoning_end_finder)
 
     def decode_next(self, next_token_id: int) -> str:
         # Map token id to single ASCII character for deterministic testing.
         return chr(next_token_id)
+
+
+class _PipeEndsReasoning:
+    """Token-id reasoner whose reasoning ends at "|"."""
+
+    def is_reasoning_end_streaming(self, input_ids, delta_ids) -> bool:
+        return ord("|") in delta_ids
 
 
 def _make_request(stop, include_stop_str_in_output: bool, min_tokens: int = 0):
@@ -202,3 +219,58 @@ def test_stop_string_trims_speculative_overflow(
     assert result.sampling_mask.token_ids == [[token] for token in expected_token_ids]
     assert result.routed_experts is not None
     assert result.routed_experts.ravel().tolist() == expected_token_ids
+
+
+@pytest.mark.parametrize("step", [1, 3, 64])
+def test_stop_string_dormant_until_reasoning_ends(
+    include_stop_str_in_output: bool, step: int
+):
+    """A stop string in the reasoning must not end the request; it still
+    applies to the response, however the tokens are batched."""
+    token_ids = [ord(c) for c in "a cd b|x cd y"]
+    req = _make_request(
+        stop=["cd"], include_stop_str_in_output=include_stop_str_in_output
+    )
+    detok = _DummyDetokenizer(req, ReasoningEndFinder(_PipeEndsReasoning(), []))
+
+    for i in range(0, len(token_ids), step):
+        if result := detok.update(token_ids[i : i + step], False):
+            break
+
+    assert result == "cd"
+    assert detok.output_text == (
+        "a cd b|x cd" if include_stop_str_in_output else "a cd b|x "
+    )
+
+
+def test_stop_string_cannot_span_reasoning_end(monkeypatch):
+    """When the end marker decodes to no text, a stop string formed across
+    the boundary must not match; one wholly in the response does."""
+    req = _make_request(stop=["cd"], include_stop_str_in_output=False)
+    detok = _DummyDetokenizer(req, ReasoningEndFinder(_PipeEndsReasoning(), []))
+    monkeypatch.setattr(detok, "decode_next", lambda t: "" if t == ord("|") else chr(t))
+
+    assert detok.update([ord(c) for c in "abc|d"], False) is None
+    assert detok.update([ord(c) for c in "xcd"], False) == "cd"
+    assert detok.output_text == "abcdx"
+
+
+@pytest.mark.parametrize("reasoning_ended", [False, None])
+def test_stop_string_after_qwen3_reasoning(reasoning_ended: bool | None):
+    """With a registered reasoning parser, stop strings skip the reasoning
+    only when the serving layer reports the prompt leaves the model in it."""
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-0.6B")
+    req = _make_request(stop=["</block>"], include_stop_str_in_output=False)
+    req.prompt_token_ids = tokenizer.encode("<|im_start|>assistant\n<think>\n")
+    req.reasoning_ended = reasoning_ended
+    detok = IncrementalDetokenizer.from_new_request(
+        tokenizer, req, ReasoningParserManager.get_reasoning_parser("qwen3")
+    )
+    assert isinstance(detok, BaseIncrementalDetokenizer)
+
+    output = "Safe, so <block>no</block>.\n</think>\n\n<block>no</block>"
+    assert detok.update(tokenizer.encode(output), False) == "</block>"
+    if reasoning_ended is False:
+        assert detok.output_text == "Safe, so <block>no</block>.\n</think>\n\n<block>no"
+    else:
+        assert detok.output_text == "Safe, so <block>no"
