@@ -103,10 +103,8 @@ class BackgroundBlockObjectStore:
 class BlockObjectStore:
     """Single-owner bounded store that fails closed after an eviction.
 
-    Recency and victim selection use the KV offload `CachePolicy`, so routed
-    experts follow the same retention rules as offloaded KV blocks. Policies
-    are resolved by name through `CachePolicyFactory` (built in: "lru",
-    "arc"; out-of-tree policies via `cache_policy_module_path`).
+    Victims are chosen by a KV offload `CachePolicy` ("lru" by default), so
+    routed experts follow the same retention rules as offloaded KV blocks.
     """
 
     _UNALLOCATED_SLOT = -1
@@ -133,28 +131,18 @@ class BlockObjectStore:
         self._req_context = ReqContext(req_id="aux-output-store")
         self._num_objects = 0
         # References may arrive before the object is stored.
-        self._references: dict[str, int] = {}
+        self._references: dict[OffloadKey, int] = {}
         self._free_slots: list[int] = []
         self._next_slot = 0
         self._arena: mmap.mmap | None = mmap.mmap(
             -1, self.num_slots * self.object_nbytes
         )
 
-    def _touch(self, keys: Iterable[str]) -> None:
-        """Mark stored keys as used, head first, like a KV prefix access."""
-        present = [
-            offload_key
-            for key in keys
-            if self._policy.get(offload_key := _offload_key(key)) is not None
-        ]
-        if present:
-            self._policy.touch(present, self._req_context)
-
-    def _evict_to_fit(self, protected: set[str]) -> None:
+    def _evict_to_fit(self, protected: set[OffloadKey]) -> None:
         excess = self._num_objects - self.num_slots
         if excess <= 0:
             return
-        victims = self._policy.evict(excess, {_offload_key(key) for key in protected})
+        victims = self._policy.evict(excess, protected)
         if victims is None:
             raise BlockObjectStoreError(
                 "auxiliary output store cannot retain the requested batch: "
@@ -182,31 +170,33 @@ class BlockObjectStore:
         arena = self._arena
         if arena is None:
             raise RuntimeError("auxiliary output store is closed")
-        unique = {obj.key: obj for obj in objects}
-        self._retain(retain_keys)
-        terminal_order = self._release(release_keys)
+        unique = {_offload_key(obj.key): obj for obj in objects}
+        self._retain(map(_offload_key, retain_keys))
+        terminal_order = self._release(map(_offload_key, release_keys))
         inserted = []
         for key in unique:
-            offload_key = _offload_key(key)
-            if self._policy.get(offload_key) is not None:
-                self._policy.touch([offload_key], self._req_context)
+            if self._policy.get(key) is not None:
+                self._policy.touch([key], self._req_context)
                 continue
             chunk = ChunkStatus(self._UNALLOCATED_SLOT)
             chunk.ref_cnt = self._references.get(key, 0)
-            self._policy.insert(offload_key, chunk)
-            self._num_objects += 1
-            inserted.append(offload_key)
+            self._policy.insert(key, chunk)
+            inserted.append(key)
+        self._num_objects += len(inserted)
         # Released keys arrive tail first; the policy expects prefix order.
-        self._touch(reversed(terminal_order))
+        released = [
+            key for key in reversed(terminal_order) if self._policy.get(key) is not None
+        ]
+        self._policy.touch(released, self._req_context)
         try:
-            self._evict_to_fit(set(unique) - set(terminal_order))
+            self._evict_to_fit(unique.keys() - set(terminal_order))
         except BlockObjectStoreError:
-            for offload_key in inserted:
-                self._policy.remove(offload_key)
+            for key in inserted:
+                self._policy.remove(key)
             self._num_objects -= len(inserted)
             raise
-        for object_id, obj in unique.items():
-            stored = self._policy.get(_offload_key(object_id))
+        for key, obj in unique.items():
+            stored = self._policy.get(key)
             if stored is None or stored.chunk_id != self._UNALLOCATED_SLOT:
                 continue
             slot = self._allocate_slot()
@@ -214,18 +204,17 @@ class BlockObjectStore:
             arena[offset : offset + self.object_nbytes] = obj.payload
             stored.chunk_id = slot
 
-    def _retain(self, keys: Iterable[str]) -> None:
+    def _retain(self, keys: Iterable[OffloadKey]) -> None:
         for key in keys:
             references = self._references.get(key, 0)
             self._references[key] = references + 1
-            offload_key = _offload_key(key)
-            chunk = self._policy.get(offload_key)
+            chunk = self._policy.get(key)
             if chunk is not None:
                 if chunk.ref_cnt == 0:
-                    self._policy.mark_non_evictable(offload_key)
+                    self._policy.mark_non_evictable(key)
                 chunk.ref_cnt += 1
 
-    def _release(self, keys: Iterable[str]) -> list[str]:
+    def _release(self, keys: Iterable[OffloadKey]) -> list[OffloadKey]:
         terminal_order = []
         for key in keys:
             references = self._references[key] - 1
@@ -234,46 +223,44 @@ class BlockObjectStore:
             else:
                 del self._references[key]
                 terminal_order.append(key)
-            offload_key = _offload_key(key)
-            chunk = self._policy.get(offload_key)
+            chunk = self._policy.get(key)
             if chunk is not None:
                 chunk.ref_cnt -= 1
                 if chunk.ref_cnt == 0:
-                    self._policy.mark_evictable(offload_key)
+                    self._policy.mark_evictable(key)
         return terminal_order
 
     def get_concatenated(self, keys: list[str]) -> bytes:
         arena_obj = self._arena
         if arena_obj is None:
             raise RuntimeError("auxiliary output store is closed")
-        chunks = [self._policy.get(_offload_key(key)) for key in keys]
-        if any(chunk is None for chunk in chunks):
-            raise BlockObjectStoreError(
-                "auxiliary output object does not exist; the object may have been "
-                f"evicted (used={self._num_objects}, "
-                f"limit={self.num_slots} objects). Increase "
-                "aux_output_config.max_bytes when a KV cache hit requires it."
-            )
+        offload_keys = [_offload_key(key) for key in keys]
+        entries = []
+        for key in offload_keys:
+            chunk = self._policy.get(key)
+            if chunk is None:
+                raise BlockObjectStoreError(
+                    "auxiliary output object does not exist; the object may have "
+                    f"been evicted (used={self._num_objects}, "
+                    f"limit={self.num_slots} objects). Increase "
+                    "aux_output_config.max_bytes when a KV cache hit requires it."
+                )
+            entries.append(chunk.chunk_id)
         arena = memoryview(arena_obj)
         try:
             payload = b"".join(
-                arena[
-                    chunk.chunk_id * self.object_nbytes : (chunk.chunk_id + 1)
-                    * self.object_nbytes
-                ]
-                for chunk in chunks
-                if chunk is not None
+                arena[slot * self.object_nbytes : (slot + 1) * self.object_nbytes]
+                for slot in entries
             )
         finally:
             arena.release()
-        self._touch(keys)
+        self._policy.touch(offload_keys, self._req_context)
         return payload
 
     def close(self) -> None:
         arena = self._arena
         if arena is not None:
             self._arena = None
-            self._policy.clear()
             arena.close()
 
 
