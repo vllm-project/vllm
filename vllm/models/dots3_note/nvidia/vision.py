@@ -12,7 +12,7 @@ from torch.nn import LayerNorm
 from transformers.configuration_utils import PreTrainedConfig
 from transformers.modeling_utils import PreTrainedModel
 
-from vllm.third_party.deep_gemm import per_block_cast_to_fp8
+from vllm.utils.deep_gemm import per_block_cast_to_fp8
 
 from .vision_attention import (
     VisionRMSNorm,
@@ -218,10 +218,11 @@ def _per_block_cast_to_fp8_padded(
         _ceil_to_multiple(columns, block_size),
     )
     padded[:rows, :columns] = weight
+    # Same math as DeepGEMM's per_block_cast_to_fp8(..., gran_k=block_size).
     return per_block_cast_to_fp8(
         padded.contiguous(),
+        block_size=[block_size, block_size],
         use_ue8m0=False,
-        gran_k=block_size,
     )
 
 
