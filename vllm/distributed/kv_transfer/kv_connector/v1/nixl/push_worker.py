@@ -100,9 +100,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
 
         # Push-specific state.
         # P-side: outgoing WRITE handles awaiting completion, keyed by
-        # request_id. Mutated by writer (submit) and main thread
-        # (``_pop_done_transfers``); guarded by
-        # ``_sending_transfers_lock``.
+        # request_id. Shared with the model thread through result queues.
         self._sending_transfers = defaultdict[ReqId, list[TransferHandle]](list)
         self._send_failures: set[ReqId] = set()
         self._sending_transfers_lock = threading.Lock()
@@ -868,14 +866,15 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             done_pushing.update(done)
             failed_pushing.update(failed)
 
-        # Remember failures until the final sibling WRITE completes.
-        self._send_failures.update(failed_pushing)
-        successful = {
-            req_id
-            for req_id in done_pushing - self._send_failures
-            if req_id in self._reqs_to_send or req_id in self._reqs_to_process
-        }
-        self._send_failures.difference_update(done_pushing | done_sending)
+        with self._sending_transfers_lock:
+            # Remember failures until the final sibling WRITE completes.
+            self._send_failures.update(failed_pushing)
+            successful = {
+                req_id
+                for req_id in done_pushing - self._send_failures
+                if req_id in self._reqs_to_send or req_id in self._reqs_to_process
+            }
+            self._send_failures.difference_update(done_pushing | done_sending)
         # Expired requests were already reported, even if their WRITEs finish later.
         done_pushing = successful
         for req_id in done_pushing:
