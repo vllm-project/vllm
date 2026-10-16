@@ -153,6 +153,9 @@ class PassConfig:
     for layers that support it. Auto-enabled at O2+ on ROCm for models
     with QK-norm (e.g. Qwen3-MoE and Qwen3-VL-class architectures)."""
 
+    fuse_gemm_add_rms: bool = None  # type: ignore[assignment]
+    """Fuse GEMM + residual add + RMSNorm on ROCm/AITER (ranges <= 256 tokens)."""
+
     rope_kvcache_fusion_max_token_num: int = 256
     """The threshold for ROCm AITER RoPE+KVCache fusion e.g. for small batch decode.
     Larger batch sizes e.g. during prefill will use the unfused kernels.
@@ -224,6 +227,7 @@ class PassConfig:
         "fuse_mla_dual_rms_norm",
         "fuse_rope_kvcache",
         "fuse_qk_norm_rope_kvcache",
+        "fuse_gemm_add_rms",
         "enable_qk_norm_rope_fusion",
         "fuse_rope_kvcache_cat_mla",
         mode="wrap",
@@ -291,6 +295,12 @@ class PassConfig:
                 "The fusion will be disabled."
             )
             self.fuse_qk_norm_rope_kvcache = False
+        if self.fuse_gemm_add_rms and not current_platform.is_rocm():
+            logger.warning_once(
+                "GEMM + add RMSNorm fusion requires ROCm with AITER. "
+                "The fusion will be disabled."
+            )
+            self.fuse_gemm_add_rms = False
         if self.fuse_rope_kvcache_cat_mla and not current_platform.is_cuda_alike():
             logger.warning_once(
                 "MLA KV cache update with RoPE fusion enabled but the "

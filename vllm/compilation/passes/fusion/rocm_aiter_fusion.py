@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Callable
+from itertools import product
 from typing import Any
 
 import torch
@@ -11,8 +12,10 @@ from torch._inductor.pattern_matcher import PatternMatcherPass
 
 import vllm.ir.ops
 import vllm.model_executor.layers.quantization.utils.fp8_utils  # noqa: F401
+import vllm.model_executor.layers.utils  # noqa: F401
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig, get_layers_from_vllm_config
+from vllm.config.utils import Range
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
@@ -40,6 +43,7 @@ from .matcher_utils import (
 )
 from .rms_quant_fusion import (
     FusedRMSQuantKey,
+    _rms_input_weight_dtype_match,
 )
 
 logger = init_logger(__name__)
@@ -1370,3 +1374,88 @@ class MLADualRMSNormFusionPass(VllmFusionPatternMatcherPass):
             self.register(MLADualRMSNormPattern(epsilon))
             self.register(MLADualRMSPerTokenQuantPattern(epsilon))
             self.register(MLADualRMSGroupQuantPattern(epsilon))
+
+
+class AiterGemmAddRMSNormPattern(VllmPatternReplacement):
+    """Fuse an unquantized GEMM into the residual add + RMSNorm that consumes it."""
+
+    def __init__(self, epsilon: float, gemma_norm: bool) -> None:
+        self.epsilon = epsilon
+        self.gemma_norm = gemma_norm
+        self.GEMM_ADD_RMSNORM_OP = rocm_aiter_ops.get_gemm_add_rmsnorm_op()
+
+    def extra_check(self, match: pm.Match) -> bool:
+        # The plain form must not bind its weight to Gemma's fp32 (w + 1).
+        return self.gemma_norm or _rms_input_weight_dtype_match(match)
+
+    def get_inputs(self) -> list[torch.Tensor]:
+        return [
+            self.empty_bf16(5, 32),  # x
+            self.empty_bf16(16, 32),  # weight
+            self.empty_bf16(5, 16),  # residual
+            self.empty_bf16(16),  # norm_weight
+        ]
+
+    @property
+    def pattern(self):
+        def _pattern(
+            x: torch.Tensor,
+            weight: torch.Tensor,
+            residual: torch.Tensor,
+            norm_weight: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            y = torch.ops.vllm.rocm_unquantized_gemm.default(x, weight, None)
+            w = norm_weight.float() + 1.0 if self.gemma_norm else norm_weight
+            return vllm.ir.ops.fused_add_rms_norm(y, residual, w, self.epsilon)
+
+        return _pattern
+
+    @property
+    def replacement(self):
+        def _replacement(
+            x: torch.Tensor,
+            weight: torch.Tensor,
+            residual: torch.Tensor,
+            norm_weight: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            out = self.GEMM_ADD_RMSNORM_OP(
+                x=x,
+                weight=weight,
+                residual=residual,
+                norm_weight=norm_weight,
+                variance_epsilon=self.epsilon,
+                gemma_norm=self.gemma_norm,
+            )
+            return out[0], out[1]
+
+        return _replacement
+
+
+class RocmAiterGemmAddRMSNormFusionPass(VllmFusionPatternMatcherPass):
+    """Fuse unquantized GEMM + residual add + RMSNorm on decode-sized ranges."""
+
+    max_token_num = 256
+
+    def __init__(self, config: VllmConfig) -> None:
+        super().__init__(config, "rocm_aiter_gemm_add_rmsnorm_fusion_pass")
+
+        for epsilon, gemma_norm in product([1e-5, 1e-6], [False, True]):
+            self.register(AiterGemmAddRMSNormPattern(epsilon, gemma_norm))
+
+        self.dump_patterns(config, self.pm_pass)
+
+    @enable_fake_mode
+    def register(self, pr: VllmPatternReplacement) -> None:
+        assert isinstance(pr, AiterGemmAddRMSNormPattern)
+        pm.register_replacement(
+            pr.pattern,
+            pr.replacement,
+            pr.get_inputs(),
+            self._trace_fn,
+            self.pm_pass,
+            extra_check=pr.extra_check,
+        )
+        self._pattern_replacements.append(pr)
+
+    def is_applicable_for_range(self, compile_range: Range) -> bool:
+        return compile_range.end <= self.max_token_num
