@@ -15,6 +15,7 @@ fn factory_contains_and_lists_registered_parsers() {
     assert!(factory.contains(names::SEED_OSS));
     assert!(factory.contains(names::STEP3P5));
     assert!(factory.contains(names::MINIMAX_M3));
+    assert!(factory.contains(names::POOLSIDE_V1));
     assert!(factory.list().contains(&names::QWEN3.to_string()));
     assert!(factory.list().contains(&names::DEEPSEEK_V4.to_string()));
     assert!(factory.list().contains(&names::SEED_OSS.to_string()));
@@ -53,6 +54,15 @@ fn factory_distinguishes_qwen_model_families() {
     assert_eq!(
         factory.resolve_name_for_model("Qwen/Qwen2.5-0.5B-Instruct"),
         None
+    );
+}
+
+#[test]
+fn factory_routes_poolside_models() {
+    let factory = ReasoningParserFactory::new();
+    assert_eq!(
+        factory.resolve_name_for_model("poolside/Laguna-S-2.1"),
+        Some(names::POOLSIDE_V1)
     );
 }
 
