@@ -454,6 +454,7 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI355 DPX) Spec Decode AL DFlash Nightly"
+      automatic_shard: true
       dind: false
       device: mi355_dpx
       timeout_in_minutes: 120
