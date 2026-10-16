@@ -401,7 +401,9 @@ Example (OpenAI-compatible completions request):
 
 `SimpleCPUOffloadConnector` accepts an optional `num_cpu_blocks` in
 `kv_connector_extra_config`. The scheduler and every worker use this exact
-number of offload blocks. Use the same positive integer on all ranks, chosen
+number of offload blocks instead of automatic sizing from
+`cpu_bytes_to_use_per_rank` or `cpu_bytes_to_use / world_size`.
+Use the same positive integer on all ranks, chosen
 to fit the smallest per-worker capacity. This supports pipeline stages with
 different KV cache sizes without adding a collective during initialization.
 

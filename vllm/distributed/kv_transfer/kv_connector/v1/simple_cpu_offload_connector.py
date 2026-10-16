@@ -101,6 +101,8 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
                 )
             cpu_capacity_per_rank = explicit
 
+        # Fix the pool size across PP stages instead of sizing each stage
+        # independently from its byte budget.
         num_cpu_blocks = extra_config.get("num_cpu_blocks")
         if num_cpu_blocks is not None and (
             type(num_cpu_blocks) is not int or num_cpu_blocks <= 0
@@ -166,6 +168,12 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
             kv_offload_backend,
             disk_path or "none",
         )
+        if num_cpu_blocks is not None:
+            logger.info(
+                "Using explicit num_cpu_blocks=%d for offload pool sizing "
+                "instead of automatic sizing from byte budgets.",
+                num_cpu_blocks,
+            )
 
         if role == KVConnectorRole.SCHEDULER:
             from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
