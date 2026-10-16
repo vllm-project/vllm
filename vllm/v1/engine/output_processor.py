@@ -24,10 +24,12 @@ from vllm.outputs import (
 from vllm.sampling_params import RequestOutputKind
 from vllm.tokenizers import TokenizerLike
 from vllm.tracing import (
+    RequestTrace,
     SpanAttributes,
     SpanKind,
     StatusCode,
     extract_trace_context,
+    get_request_trace,
     start_span,
 )
 from vllm.utils import length_from_prompt_token_ids_or_embeds
@@ -238,6 +240,7 @@ class RequestState:
 
         self.stats = RequestStateStats(arrival_time=arrival_time) if log_stats else None
         self.trace_span: Span | None = None
+        self.trace_owner: RequestTrace | None = None
 
         # Routed experts accumulation (prompt + sample chunks)
         self.routed_experts_chunks: list[np.ndarray] = []
@@ -257,9 +260,10 @@ class RequestState:
 
     def end_tracing(self, *, error: bool = False) -> None:
         if self.trace_span is not None:
-            if error:
+            if error and self.trace_span.is_recording():
                 self.trace_span.set_status(StatusCode.ERROR)
-            self.trace_span.end()
+            if self.trace_owner is None:
+                self.trace_span.end()
             self.trace_span = None
 
     def apply_streaming_update(self, update: StreamingUpdate) -> None:
@@ -711,6 +715,10 @@ class OutputProcessor:
                 context=extract_trace_context(request.trace_headers),
                 kind=SpanKind.SERVER,
             )
+            if req_state.trace_span is not None:
+                req_state.trace_owner = get_request_trace()
+                if req_state.trace_owner is not None:
+                    req_state.trace_owner.spans.append(req_state.trace_span)
         self.request_states[request_id] = req_state
         if parent_req:
             self.parent_requests[parent_req.request_id] = parent_req
