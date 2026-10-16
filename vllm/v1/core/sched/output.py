@@ -253,7 +253,7 @@ class SchedulerOutput:
     # freed from the encoder cache.
     free_encoder_mm_hashes: list[str]
 
-    # Optional scheduling-time snapshot, before worker-side token adjustments.
+    # Scheduling-time counts, before workers trim invalid draft slots (e.g. ngram_gpu).
     iteration_details: IterationDetails | None = None
     iteration_metrics_id: int | None = None
 
