@@ -2219,3 +2219,36 @@ def test_unquantized_bf16_flashinfer_trtllm_backend(
 
     close = torch.isclose(trtllm_output, baseline_output, atol=1e-1, rtol=0.85)
     assert close.float().mean() > 0.925
+
+
+@pytest.mark.parametrize("m", [1, 16, 32, 64, 128, 512, 1024])
+@pytest.mark.parametrize("fp32_dtype", ["float32", "fp32", torch.float32])
+def test_fused_moe_default_config_float32(m: int, fp32_dtype) -> None:
+    """Verify that float32 MoE configurations respect hardware shared memory limits
+    (e.g., SM89 101,376 bytes limit) across batch sizes."""
+    config = fused_moe_module.get_default_config(
+        M=m,
+        E=8,
+        N=1792,
+        K=2048,
+        topk=2,
+        dtype=fp32_dtype,
+    )
+    assert config["num_stages"] == 2
+    assert config["BLOCK_SIZE_K"] <= 64
+    assert config["BLOCK_SIZE_M"] <= 64
+    assert config["BLOCK_SIZE_N"] <= 64
+
+    # Calculate shared memory required per stage (in bytes)
+    # A tile: BLOCK_SIZE_M * BLOCK_SIZE_K * 4
+    # B tile: BLOCK_SIZE_K * BLOCK_SIZE_N * 4
+    element_size = 4
+    bytes_per_stage = (
+        config["BLOCK_SIZE_M"] * config["BLOCK_SIZE_K"]
+        + config["BLOCK_SIZE_K"] * config["BLOCK_SIZE_N"]
+    ) * element_size
+    total_smem = bytes_per_stage * config["num_stages"]
+
+    # Must fit comfortably within SM89's 101,376-byte hardware limit
+    sm89_hardware_limit = 101376
+    assert total_smem <= sm89_hardware_limit
