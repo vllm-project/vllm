@@ -401,6 +401,13 @@ class MoRIIOConstants:
     # ZMQ message types
     GET_META_MSG = b"get_meta_msg"
     POP_DONE_RECV = b"pop_done_recv"
+    # Sent to every peer that fetched our metadata before our KV cache is
+    # deregistered; the peer drops it and handshakes again on next use.
+    INVALIDATE_MSG = b"invalidate_msg"
+    INVALIDATE_ACK = b"invalidate_ack"
+    # Handshake reply in place of the metadata while the KV cache is
+    # unregistered.
+    KV_UNAVAILABLE = b"kv_unavailable"
     OVER = b"OVER"
     COMPLETION_PREFIX = "cmpl"
     TRANSFER_PREFIX = "tx"
@@ -519,6 +526,9 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
         self.reqs_to_save: dict[ReqId, ReqMeta] = {}
         self.reqs_to_send: dict[ReqId, float] = {}
         self.transfer_id_to_request_id: dict[TransferId, ReqId] = {}
+        # WRITE consumer: transfers whose blocks were sent to the producer and
+        # whose completion has not been reported yet.
+        self.awaiting_write: dict[TransferId, ReqId] = {}
 
     def __repr__(self):
         return (

@@ -10,6 +10,7 @@ wiring.
 """
 
 import importlib
+import threading
 from dataclasses import asdict
 from types import SimpleNamespace
 
@@ -56,6 +57,7 @@ class _FakeScheduler(moriio_connector.MoRIIOConnectorScheduler):  # type: ignore
         self._attn_group_ids: list[int] = [0]
         self._num_ssm_scratch_blocks = 0
         self._is_hma_required = False
+        self._awaiting_write: dict = {}
         self.kv_cache_config = SimpleNamespace(
             kv_cache_groups=[None, None],
             select_transfer_block_ids=lambda block_ids: tuple(block_ids),
@@ -719,6 +721,8 @@ def test_write_producer_queues_grouped_attention_blocks():
 
 def test_session_build_rejects_per_layer_region_count_mismatch():
     worker = _FakeWorker(
+        _handshake_lock=threading.Lock(),
+        _kv_released=False,
         built_write_session={},
         layer_name_to_local_kv_cache_metadata={"kda.0": ["conv", "ssm"]},
         layer_name_to_remote_kv_cache_metadata={"prefill": {"kda.0": ["conv"]}},
@@ -766,6 +770,7 @@ def _make_register_worker(caches, geoms, *, disable_hma: bool = True):
         dst_num_blocks={},
         block_lens={},
         layer_name_to_local_kv_cache_metadata={},
+        _region_tensors={},
         kv_caches_base_addr={},
         kv_layer_mr_offset={},
         local_kv_cache_size=[],

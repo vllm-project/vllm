@@ -163,6 +163,7 @@ def test_kv_connector_allows_expandable_segments_with_cumem_allocator(
         ("NixlConnector", {}, None),
         ("MooncakeConnector", {"mooncake_protocol": "tcp"}, None),
         ("MooncakeConnector", {}, "MC_USE_TENT"),
+        ("MoRIIOConnector", {"backend": "xgmi"}, None),
     ],
 )
 def test_sleep_mode_refuses_unsupported_kv_connector(
@@ -176,6 +177,14 @@ def test_sleep_mode_refuses_unsupported_kv_connector(
             kv_connector_extra_config=extra_config,
             enable_sleep_mode=True,
         )
+
+
+def test_sleep_mode_accepts_moriio_over_rdma():
+    _build_config(
+        kv_connector="MoRIIOConnector",
+        kv_connector_extra_config={"backend": "rdma"},
+        enable_sleep_mode=True,
+    )
 
 
 def test_kv_connector_allows_other_alloc_conf(monkeypatch):

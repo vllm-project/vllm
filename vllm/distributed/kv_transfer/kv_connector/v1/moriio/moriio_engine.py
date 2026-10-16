@@ -215,6 +215,7 @@ class MoRIIOWriter:
                     task.request_id,
                 )
                 self._mark_request_done(task.transfer_id)
+                self._send_write_failed(task)
 
     def _process_deferred_tasks(self) -> None:
         """Process tasks that were previously deferred."""
@@ -237,6 +238,7 @@ class MoRIIOWriter:
                         task.request_id,
                     )
                     self._mark_request_done(task.transfer_id)
+                    self._send_write_failed(task)
             elif (
                 now - task.enqueue_time > defer_timeout
                 and self.worker.moriio_wrapper.fail_unallocated_write(task.transfer_id)
@@ -255,8 +257,12 @@ class MoRIIOWriter:
             task.request_id,
             age,
         )
-        # No remote allocation arrived, so the decode DP rank that owns the
-        # request is unknown. Tell every rank; the others drop it.
+        self._send_write_failed(task)
+
+    def _send_write_failed(self, task: WriteTask) -> None:
+        """Tell the consumer the load failed so it does not wait for it. The
+        decode DP rank that owns the request may be unknown: tell every rank;
+        the others drop it."""
         for decode_dp_rank in range(max(task.remote_dp_size, 1)):
             remote_ip, remote_port = self._resolve_notify_endpoint(task, decode_dp_rank)
             try:
@@ -268,7 +274,7 @@ class MoRIIOWriter:
                 )
             except Exception:
                 logger.exception(
-                    "Failed to notify decode DP rank %d that transfer %s timed out",
+                    "Failed to notify decode DP rank %d that transfer %s failed",
                     decode_dp_rank,
                     task.transfer_id,
                 )
@@ -367,16 +373,12 @@ class MoRIIOWriter:
             task.dst_engine_id, request_info.decode_dp_rank
         )
 
-        # Get or create sessions
-        sessions, remote_moriio_meta = self.worker._get_built_session(
-            task.dst_engine_id
-        )
-
-        # Prepare transfer plan
-        plan = self._prepare_transfer_plan(task, request_info, remote_moriio_meta)
-
-        # Execute transfer
-        transfer_statuses = self._do_layer_write(plan, sessions)
+        with self.worker._transfer_post_lock:
+            sessions, remote_moriio_meta = self.worker._get_built_session(
+                task.dst_engine_id
+            )
+            plan = self._prepare_transfer_plan(task, request_info, remote_moriio_meta)
+            transfer_statuses = self._do_layer_write(plan, sessions)
         with self._write_state_lock:
             request_info.transfer_statuses.extend(transfer_statuses)
 
@@ -664,7 +666,7 @@ class MoRIIOWrapper:
             self.moriio_engine.allocate_transfer_uid(),
         )
 
-        return transfer_status
+        return self._track(transfer_status)
 
     def write_remote_data(
         self, transfer_size_byte, local_offset=0, remote_offset=0, session=None
@@ -676,7 +678,7 @@ class MoRIIOWrapper:
         transfer_status = session.batch_write(
             local_offset, remote_offset, transfer_size_byte, write_uid
         )
-        return transfer_status
+        return self._track(transfer_status)
 
     def write_remote_data_single(
         self, transfer_size_byte, local_offset=0, remote_offset=0, sess_idx=0
@@ -689,6 +691,17 @@ class MoRIIOWrapper:
             transfer_size_byte,
             self.moriio_engine.allocate_transfer_uid(),
         )
+        return self._track(transfer_status)
+
+    def _track(self, transfer_status):
+        """Keep a posted transfer for drain_transfers(), which runs before the
+        memory behind it is deregistered."""
+        with self.lock:
+            if len(self.transfer_status) >= 1024:
+                self.transfer_status = [
+                    s for s in self.transfer_status if not (s.Succeeded() or s.Failed())
+                ]
+            self.transfer_status.append(transfer_status)
         return transfer_status
 
     def poll_transfer_batch(self, transfer_statuses: list[Any]) -> TransferBatchState:
@@ -722,6 +735,32 @@ class MoRIIOWrapper:
             return
 
         self._poll_transfers_until_done(transfers_to_wait)
+
+    def drain_transfers(self, timeout: float) -> int:
+        """Wait until every posted transfer has completed or failed, for up to
+        ``timeout`` seconds. Transfers still pending then are no longer tracked.
+        Concurrent callers each wait for all of them.
+
+        Returns:
+            The number of transfers still pending at the timeout.
+
+        """
+        deadline = time.monotonic() + timeout
+        with self.lock:
+            pending = self.transfer_status[:]
+        while True:
+            pending = [s for s in pending if not (s.Succeeded() or s.Failed())]
+            if not pending or time.monotonic() > deadline:
+                break
+            time.sleep(0.001)
+        stuck = {id(s) for s in pending}
+        with self.lock:
+            self.transfer_status = [
+                s
+                for s in self.transfer_status
+                if id(s) not in stuck and not (s.Succeeded() or s.Failed())
+            ]
+        return len(pending)
 
     def _poll_transfers_until_done(self, transfers_to_wait: list[Any]) -> None:
         """Fallback for mori builds without the batched wait.
