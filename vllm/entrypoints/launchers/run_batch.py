@@ -942,12 +942,14 @@ async def dispatch_batch(
     tracker: BatchProgressTracker,
     max_inflight: int,
     window: int | None = None,
+    engine_client: EngineClient | None = None,
 ) -> None:
     """Run every request with at most `max_inflight` alive at once.
 
     Responses are written in input order, with at most `window` requests,
     `max_inflight` by default, dispatched but not yet written. The first
-    request to raise, rather than return an error response, cancels the rest.
+    request to raise, rather than return an error response, cancels the rest,
+    as does an error response once `engine_client` is dead.
     """
     window = max(window or max_inflight, max_inflight)
     running = asyncio.Semaphore(max_inflight)
@@ -968,6 +970,13 @@ async def dispatch_batch(
             # Handlers answer a cancellation with an error response; drop it.
             if stopping:
                 return
+            # A dead engine answers every request with an error; keep a prefix.
+            if (
+                response.error is not None
+                and engine_client is not None
+                and engine_client.errored
+            ):
+                raise engine_client.dead_error
             finished[index] = response.model_dump_json()
             while next_index in finished:
                 print(finished.pop(next_index), file=output_file)
@@ -1054,10 +1063,8 @@ async def run_batch(
                 tracker,
                 max_inflight,
                 window,
+                engine_client,
             )
-        # A dead engine answers every request with an error; fail before upload.
-        if engine_client.errored:
-            raise engine_client.dead_error
 
 
 async def main(args: Namespace):

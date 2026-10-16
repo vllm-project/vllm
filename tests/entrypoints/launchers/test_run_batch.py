@@ -36,6 +36,7 @@ from vllm.entrypoints.launchers.run_batch import (
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.exceptions import VLLMValidationError
 from vllm.utils.mem_constants import MiB_bytes
+from vllm.v1.engine.exceptions import EngineDeadError
 
 CHAT_MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
 EMBEDDING_MODEL_NAME = "intfloat/multilingual-e5-small"
@@ -1541,6 +1542,78 @@ async def test_dispatch_batch_keeps_responses_written_before_a_failure(
         for line in output_path.read_text().strip().split("\n")
     ]
     assert written == ["request-0"]
+
+
+@pytest.mark.asyncio
+async def test_dispatch_batch_stops_writing_once_the_engine_dies(tmp_path, monkeypatch):
+    """Error rows from a dead engine must not extend the resumable prefix."""
+    input_path = _write_batch(tmp_path, [json.dumps(r) for r in _chat_requests(8)])
+    output_path = tmp_path / "output.jsonl"
+    engine = SimpleNamespace(errored=False, dead_error=EngineDeadError())
+
+    async def fake_run_one_request(request_json, endpoint_registry):
+        if json.loads(request_json)["custom_id"] != "request-1":
+            return _response(request_json)
+        # Later requests finish and wait behind this one before the engine dies.
+        await asyncio.sleep(0.01)
+        engine.errored = True
+        response = _response(request_json)
+        response.error = "engine dead"
+        return response
+
+    monkeypatch.setattr(run_batch_module, "run_one_request", fake_run_one_request)
+
+    with (
+        open(input_path, encoding="utf-8") as input_file,
+        open(output_path, "w", encoding="utf-8") as output_file,
+        pytest.raises(EngineDeadError),
+    ):
+        await dispatch_batch(
+            input_file,
+            output_file,
+            {},
+            BatchProgressTracker(),
+            max_inflight=4,
+            engine_client=engine,
+        )
+
+    written = [
+        BatchRequestOutput.model_validate_json(line).custom_id
+        for line in output_path.read_text().strip().split("\n")
+    ]
+    assert written == ["request-0"]
+
+
+@pytest.mark.asyncio
+async def test_dispatch_batch_keeps_a_response_finished_as_the_engine_dies(
+    tmp_path, monkeypatch
+):
+    """A complete response is still written if the engine dies after it."""
+    input_path = _write_batch(tmp_path, [json.dumps(r) for r in _chat_requests(2)])
+    output_path = tmp_path / "output.jsonl"
+    engine = SimpleNamespace(errored=False, dead_error=EngineDeadError())
+
+    async def fake_run_one_request(request_json, endpoint_registry):
+        if json.loads(request_json)["custom_id"] == "request-1":
+            engine.errored = True
+        return _response(request_json)
+
+    monkeypatch.setattr(run_batch_module, "run_one_request", fake_run_one_request)
+
+    with (
+        open(input_path, encoding="utf-8") as input_file,
+        open(output_path, "w", encoding="utf-8") as output_file,
+    ):
+        await dispatch_batch(
+            input_file,
+            output_file,
+            {},
+            BatchProgressTracker(),
+            max_inflight=1,
+            engine_client=engine,
+        )
+
+    assert len(output_path.read_text().strip().split("\n")) == 2
 
 
 @pytest.mark.asyncio
