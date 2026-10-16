@@ -84,7 +84,7 @@ def _apply_post_tokenization_to_token_type_ids(
         pad_length = tok_params.max_input_tokens
 
     if pad_length is not None and pad_length > len(token_type_ids):
-        pad_token_type_id = token_type_ids[-1] if token_type_ids else 0
+        pad_token_type_id = getattr(tokenizer, "pad_token_type_id", 0) or 0
         token_type_ids = token_type_ids + [pad_token_type_id] * (
             pad_length - len(token_type_ids)
         )
@@ -548,7 +548,11 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
                 yield ScoringRenderParams(
                     data_1=data_1[i],
                     data_2=data_2[i],
-                    chat_template=ctx.chat_template,
+                    chat_template=(
+                        self.chat_template
+                        if ctx.chat_template is None
+                        else ctx.chat_template
+                    ),
                     max_tokens_per_query=max_tokens_per_query,
                     max_tokens_per_doc=max_tokens_per_doc,
                     tok_params=tok_params,
