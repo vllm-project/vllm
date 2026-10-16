@@ -489,9 +489,13 @@ def test_mla_dcp_manager_selects_direct_backends(monkeypatch, default_vllm_confi
     query_gather = MagicMock(return_value=torch.empty(1, 4, 8))
     a2a_reduce = MagicMock(return_value=torch.empty(1, 2, 4))
     kv_gather = MagicMock()
-    monkeypatch.setattr(dcp.DirectDCPQGather, "forward_cpu", query_gather)
-    monkeypatch.setattr(dcp.DirectDCPA2AReduce, "forward_cpu", a2a_reduce)
-    monkeypatch.setattr(dcp.DirectDCPKVGather, "forward_cpu", kv_gather)
+    for op_cls, implementation in (
+        (dcp.DirectDCPQGather, query_gather),
+        (dcp.DirectDCPA2AReduce, a2a_reduce),
+        (dcp.DirectDCPKVGather, kv_gather),
+    ):
+        monkeypatch.setattr(op_cls, "forward_cpu", implementation)
+        monkeypatch.setattr(op_cls, "forward_cuda", implementation)
 
     import vllm.v1.attention.ops.dcp as dcp_manager
 
