@@ -249,10 +249,15 @@ class ClientRole:
         self._lookup_deadlines.pop(kv_request_id, None)
 
     def mark_fetch_sent(self, msg: dict) -> bool:
-        """Mark a live fetch as possibly sent; reject retired or cancelled messages."""
+        """Mark a live fetch as possibly sent; reject retired or expired messages."""
         st = self._requests.get(msg[FetchMsg.KV_REQUEST_ID])
         load = st.loads.get(msg[FetchMsg.ROUND_SEQ]) if st is not None else None
-        if load is None or load.pending_fetch is not msg or load.aborted_at is not None:
+        if (
+            load is None
+            or load.pending_fetch is not msg
+            or load.aborted_at is not None
+            or time.monotonic() - load.submitted_at >= _LOAD_TIMEOUT_S
+        ):
             return False
         load.pending_fetch = None
         return True

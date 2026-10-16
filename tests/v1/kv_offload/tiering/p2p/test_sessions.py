@@ -3045,8 +3045,9 @@ class TestDisconnect:
         assert session.poll().loads == [LoadResult(8, "req-7", success=False)]
 
     @pytest.mark.parametrize("finished", [False, True])
+    @pytest.mark.parametrize("handshake_before_poll", [False, True])
     def test_queued_fetch_timeout_does_not_quarantine_or_flush_after_failure(
-        self, finished
+        self, finished, handshake_before_poll
     ):
         session, conn, _ = _make_session()
         session.request_blocks(7, "req-7", [b"k"], [0])
@@ -3055,6 +3056,11 @@ class TestDisconnect:
         else:
             _client_load(session, "req-7").submitted_at = (
                 time.monotonic() - _LOAD_TIMEOUT_S - 1.0
+            )
+        if handshake_before_poll:
+            conn.enqueue(_peer_connect_msg())
+            conn.enqueue(
+                {TYPE_KEY: ConnectAckMsg.TYPE, ConnectAckMsg.PEER_ID: "peer:8000"}
             )
 
         assert session.poll().loads == [
@@ -3067,7 +3073,8 @@ class TestDisconnect:
         ]
         assert not session.has_pending_work
         session.request_blocks(8, "req-7", [b"replacement"], [1])
-        _activate(session, conn)
+        if not handshake_before_poll:
+            _activate(session, conn)
         assert [
             msg[FetchMsg.BLOCK_INDEXES]
             for msg in conn._sent

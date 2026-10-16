@@ -1785,6 +1785,28 @@ class _DrainCtrl:
 
 
 class TestDrainJobs:
+    @pytest.mark.parametrize("memory_safe", [False, True])
+    def test_drain_checks_failed_load_after_session_reaped(self, memory_safe):
+        mgr = _make_manager()
+        mgr._control = _DrainCtrl()
+        mgr._data = _FakeData(mgr._local_id)
+        mgr._sessions["fake:1"] = _FakeSession(
+            alive=False,
+            close_jobs=[5],
+            close_req_ids=["req-5"],
+            close_memory_safe_jobs=frozenset({5}) if memory_safe else frozenset(),
+        )
+
+        if memory_safe:
+            mgr.drain_jobs()
+        else:
+            with pytest.raises(UnsafeTransferError, match="quarantined slots"):
+                mgr.drain_jobs()
+        assert not mgr._sessions
+        assert list(mgr.get_finished_jobs()) == [
+            JobResult(5, success=False, memory_safe=memory_safe)
+        ]
+
     @pytest.mark.parametrize("confirmed", [False, True])
     def test_drain_rejects_new_unsafe_result_unless_confirmed(
         self, monkeypatch, confirmed
