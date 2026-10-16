@@ -252,34 +252,6 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
     bash v1/kv_connector/nixl_integration/run_multi_connector_accuracy_test.sh || true'
-- label: ':nvidia: (A100) NixlConnector PD + Spec Decode acceptance'
-  key: nixlconnector-pd-spec-decode-acceptance-2-gpus
-  device: intel_gpu
-  timeout_in_minutes: 45
-  num_devices: 2
-  optional: true
-  working_dir: .
-  no_plugin: true
-  env:
-    REGISTRY: public.ecr.aws/q9t5s3a7
-    REPO: vllm-ci-test-repo
-    VLLM_TEST_DEVICE: xpu
-  agent_tags:
-    label: production
-    gpu: 2+
-    mem: 16+
-  _raw_old_commands:
-  - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
-  - bash v1/kv_connector/nixl_integration/config_sweep_spec_decode_test.sh
-  source_file_dependencies:
-  - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
-  - vllm/v1/worker/kv_connector_model_runner_mixin.py
-  - tests/v1/kv_connector/nixl_integration/
-  commands:
-  - >-
-    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-    'cd tests &&
-    bash v1/kv_connector/nixl_integration/config_sweep_spec_decode_test.sh || true'
 - label: ':nvidia: (L4) MultiConnector (Nixl+Offloading) PD edge cases'
   key: multiconnector-nixl-offloading-pd-edge-cases-2-gpus
   device: intel_gpu

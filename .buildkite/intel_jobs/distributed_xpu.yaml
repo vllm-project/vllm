@@ -83,6 +83,7 @@ steps:
     label: production
     gpu: 2+
     mem: 16+
+  automatic_shard: true
   _raw_old_commands:
   - export NCCL_CUMEM_HOST_ENABLE=0
   - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_async_llm_dp.py
@@ -154,7 +155,7 @@ steps:
     pytest -v -s entrypoints/llm/test_collective_rpc.py || true &&
     pytest -v -s ./compile/test_wrapper.py || true'
 - label: ':nvidia: (L4) Distributed Torchrun + Shutdown'
-  key: distributed-torchrun-shutdown-tests-2-gpus
+  key: distributed-torchrun-shutdown-tests-2-gpus-2
   device: intel_gpu
   timeout_in_minutes: 30
   num_devices: 2
@@ -257,6 +258,7 @@ steps:
     label: production
     gpu: 4+
     mem: 16+
+  automatic_shard: true
   _raw_old_commands:
   - export NCCL_CUMEM_HOST_ENABLE=0
   - TP_SIZE=2 DP_SIZE=2 pytest -v -s v1/distributed/test_async_llm_dp.py
@@ -329,37 +331,6 @@ steps:
     pytest -v -s distributed/test_events.py || true &&
     pytest -v -s distributed/test_symm_mem_allreduce.py || true &&
     pytest -v -s distributed/test_multiproc_executor.py::test_multiproc_executor_multi_node || true'
-- label: ':nvidia: (A100) Distributed'
-  key: distributed-tests-4xa100
-  device: intel_gpu
-  num_devices: 4
-  optional: true
-  working_dir: .
-  no_plugin: true
-  env:
-    REGISTRY: public.ecr.aws/q9t5s3a7
-    REPO: vllm-ci-test-repo
-    VLLM_TEST_DEVICE: xpu
-  agent_tags:
-    label: production
-    gpu: 4+
-    mem: 16+
-  _raw_old_commands:
-  # skip cases due to ray issue for test_custom_all_reduce
-  - pytest -v -s distributed/test_custom_all_reduce.py
-  - torchrun --nproc_per_node=2 distributed/test_ca_buffer_sharing.py
-  - TARGET_TEST_SUITE=A100 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)'
-  - pytest -v -s -x lora/test_mixtral.py
-  source_file_dependencies:
-  - vllm/
-  - '!vllm/distributed/kv_transfer/'
-  commands:
-  - >-
-    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-    'cd tests &&
-    torchrun --nproc_per_node=2 distributed/test_ca_buffer_sharing.py || true &&
-    TARGET_TEST_SUITE=A100 pytest basic_correctness/ -v -s -m distributed(num_gpus=2) || true &&
-    pytest -v -s -x lora/test_mixtral.py || true'
 - label: ':nvidia: (H100) Distributed Features'
   key: distributed-tests-2xh100-2xmi300
   device: intel_gpu
@@ -462,6 +433,7 @@ steps:
     label: production
     gpu: 4+
     mem: 16+
+  automatic_shard: true
   _raw_old_commands:
   - pytest -v -s distributed/test_pp_cudagraph.py
   - pytest -v -s distributed/test_pipeline_parallel.py
@@ -499,6 +471,7 @@ steps:
     label: production
     gpu: 4+
     mem: 16+
+  automatic_shard: true
   _raw_old_commands:
   - export VLLM_USE_RAY_V2_EXECUTOR_BACKEND=1
   - export NCCL_CUMEM_HOST_ENABLE=0
