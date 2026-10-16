@@ -29,6 +29,7 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     MambaStateSplit,
 )
+from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import FinishReason, Request, RequestStatus
 
@@ -622,6 +623,27 @@ def test_drafter_groups_are_ignored(producer_group):
     request = create_request(1, NUM_TOKENS, do_remote_prefill=True)
     errors = _error_ids(_load(producer, consumer, request, transfer))
     assert errors == (set() if producer_group == "draft" else {request.request_id})
+
+
+def test_load_from_a_cache_tier_is_not_checksummed(monkeypatch):
+    """A consumer request whose KV is loaded from a cache tier (e.g. by an
+    offloading connector in a MultiConnector) rather than from its producer is
+    not checksummed: the tier's KV need not match the producer's bit for bit."""
+    producer = _Engine("kv_producer")
+    consumer = _Engine("kv_consumer", fail_closed=True)
+    transfer = _prefill(producer, create_request(1, NUM_TOKENS, do_remote_decode=True))
+    monkeypatch.setattr(
+        consumer.scheduler.connector,
+        "get_external_cache_hit_sources",
+        lambda request, num_tokens: {CacheHitSource.HOST: num_tokens},
+    )
+
+    request = create_request(1, NUM_TOKENS, do_remote_prefill=True)
+    request.kv_transfer_params = {**transfer.params, "do_remote_prefill": True}
+    consumer.scheduler.add_request(request)
+    output = consumer.schedule()
+    assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    assert output.kv_checksum_scheduled is None
 
 
 def test_requests_without_pd_params_are_not_checksummed():

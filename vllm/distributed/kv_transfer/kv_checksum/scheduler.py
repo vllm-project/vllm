@@ -36,6 +36,7 @@ from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.engine import FinishReason
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec, SlidingWindowSpec
+from vllm.v1.metrics.cache_hit_source import CacheHitSource
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -197,10 +198,16 @@ class _Pending:
 class KVChecksumScheduler:
     """Schedules KV checksums and verifies loaded KV against the producer's."""
 
-    def __init__(self, vllm_config: "VllmConfig", kv_cache_config: KVCacheConfig):
+    def __init__(
+        self,
+        vllm_config: "VllmConfig",
+        kv_cache_config: KVCacheConfig,
+        connector: KVConnectorBase_V1,
+    ):
         kv_transfer_config = vllm_config.kv_transfer_config
         assert kv_transfer_config is not None
         parallel_config = vllm_config.parallel_config
+        self._connector = connector
         self._fail_closed = kv_transfer_config.kv_checksum_fail_closed
         self._tp_size = parallel_config.tensor_parallel_size
         self._num_workers = self._tp_size * parallel_config.pipeline_parallel_size
@@ -224,7 +231,7 @@ class KVChecksumScheduler:
     ) -> "KVChecksumScheduler | None":
         if connector is None or not kv_checksum_enabled(vllm_config):
             return None
-        return cls(vllm_config, kv_cache_config)
+        return cls(vllm_config, kv_cache_config, connector)
 
     def on_new_request(self, request: "Request") -> None:
         """Note a consumer request, before its connector starts its load (and
@@ -260,8 +267,11 @@ class KVChecksumScheduler:
         blocks: "KVCacheBlocks",
         num_local_computed_tokens: int,
     ) -> None:
-        """Checksum the blocks a load starting this step writes, once it
-        finishes.
+        """Checksum the blocks a consumer request's load starting this step
+        writes, once it finishes.
+
+        Only a load from the producer is checksummed, not one from a cache tier
+        (e.g. an offloading connector in a MultiConnector).
 
         ``request.num_computed_tokens`` must already include the loaded
         tokens.
@@ -269,6 +279,11 @@ class KVChecksumScheduler:
         if request.request_id not in self._remote_prefills:
             return
         self._remote_prefills.discard(request.request_id)
+        sources = self._connector.get_external_cache_hit_sources(
+            request, request.num_computed_tokens - num_local_computed_tokens
+        )
+        if sources.keys() != {CacheHitSource.P2P}:
+            return
         checksum_blocks = self._blocks(
             blocks, num_local_computed_tokens, request.num_computed_tokens
         )
