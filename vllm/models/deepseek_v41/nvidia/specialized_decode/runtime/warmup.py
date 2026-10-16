@@ -2,14 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tuning and compiling the specialized decode's kernels.
 
-The model state calls ``warm_up`` once the executor is built, before memory
+The model state calls ``warm_up`` once the executors are built, before memory
 profiling and CUDA graph capture, so no kernel compiles or tunes inside a
 capture. FlashInfer's tuner times each tactic on every TP rank and reduces the
 timings over the TP group, so every rank makes the same calls in the same
 order.
 """
 
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager, nullcontext
 
 import torch
@@ -26,12 +26,19 @@ from ..attention.step import AttentionStep, key_weight, side_weights
 from ..logits.lm_head import autotune_low_batch_lm_head, warmup_low_batch_lm_head
 from ..moe.step import deferred_finalize
 from .decode import SpecializedDecode
+from .draft import DraftDecode
 
 
-def warm_up(decode: SpecializedDecode, vllm_config: VllmConfig) -> None:
-    """Tune (unless FlashInfer autotuning is off) and compile the executor's
-    GEMMs for every row count it runs them at."""
+def warm_up(
+    decode: SpecializedDecode,
+    vllm_config: VllmConfig,
+    drafts: Sequence[DraftDecode] = (),
+) -> None:
+    """Tune (unless FlashInfer autotuning is off) and compile the GEMMs of the
+    executor and of the DSpark draft's (``drafts``) for every row count they
+    run them at."""
     steps = [plan.attention for plan in decode.plans]
+    steps += [plan.attention for draft in drafts for plan in draft.plans]
     linears = shape_representatives(
         linear
         for step in steps

@@ -15,7 +15,8 @@ tensors with CuTe DSL kernels sized for at most eight rows::
                                                   ▼
                          GEMM1 ─► h (MXFP8) ─► GEMM2 ─► unweighted permuted rows
                                                           │
-       UnfinalizedMoEOutput (fused all-reduce + mHC) ◄────┘
+       UnfinalizedMoEOutput (fused all-reduce + mHC) ◄────┤
+                                finalize ─► BF16 output ◄─┘
 
 * ``routed_expert_route_cute.py`` builds the expert-major, 8-row-tile
   permutation and the per-tile record both GEMMs read, as FlashInfer's routing
@@ -29,6 +30,9 @@ tensors with CuTe DSL kernels sized for at most eight rows::
   quantization of the routed input and the route kernel with one launch whose
   outputs are bitwise those of the three; it is built for the target's 384
   experts and top-6.
+* ``routed_expert_finalize_cute.py`` reduces GEMM2's rows over the top-k as
+  FlashInfer's small-batch finalize does, for layers that finalize locally (the
+  DSpark draft).
 
 The kernels read the tensors vLLM prepares for the TRT-LLM-gen MXFP4 backend:
 ``w13`` [E, 1280, 2560] u8 (interleaved up/gate rows shuffled for 128-row
@@ -57,6 +61,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 
 from ...ops.cute_dsl.primitives import current_cu_stream
+from .routed_expert_finalize_cute import RoutedExpertFinalize
 from .routed_expert_front_cute import RoutedExpertFront
 from .routed_expert_gemm_cute import (
     RoutedExpertGemm1,
@@ -128,8 +133,8 @@ class Routing:
 
 
 class RoutedExpertGemm:
-    """The route kernel (or fused front) and GEMM pair bound to one MoE
-    layer's TRT-LLM-gen MXFP4 experts (see the module docstring)."""
+    """The route kernel (or fused front), GEMM pair and finalize bound to one
+    MoE layer's TRT-LLM-gen MXFP4 experts (see the module docstring)."""
 
     def __init__(
         self,
@@ -153,6 +158,7 @@ class RoutedExpertGemm:
         _route_kernel(self.device_index)
         _gemm1_kernel(self.device_index)
         _gemm2_kernel(self.device_index)
+        _finalize_kernel(self.device_index)
         # The modular kernel's input quantization, reused so the activations
         # match its path bit for bit.
         self.prepare_finalize = prepare_finalize
@@ -317,6 +323,25 @@ class RoutedExpertGemm:
             expanded_idx_to_permuted_idx=routing.permuted,
         )
 
+    def finalize(self, routed: UnfinalizedMoEOutput) -> torch.Tensor:
+        """Reduce GEMM2's rows over the top-k: BF16 [rows, 5120]."""
+        rows, top_k = routed.expert_weights.shape
+        output = torch.empty(
+            (rows, HIDDEN),
+            dtype=torch.bfloat16,
+            device=routed.gemm2_permuted.device,
+        )
+        _finalize_kernel(self.device_index)(
+            _pointer(cutlass.BFloat16, routed.gemm2_permuted, 16),
+            _pointer(cutlass.Int32, routed.expanded_idx_to_permuted_idx, 4),
+            _pointer(cutlass.Float32, routed.expert_weights, 4),
+            _pointer(cutlass.BFloat16, output, 16),
+            Int32(rows),
+            Int32(top_k),
+            current_cu_stream(),
+        )
+        return output
+
 
 def _pointer(dtype: type[cutlass.Numeric], tensor: torch.Tensor, align: int):
     """A CuTe DSL global-memory pointer to ``tensor``'s data."""
@@ -411,6 +436,22 @@ def _gemm2_kernel(device_index: int):
             Int32(MAX_EXPERTS),
             Int32(4),
             Int32(1),
+            make_fake_stream(),
+        )
+
+
+@cache
+def _finalize_kernel(device_index: int):
+    """``RoutedExpertFinalize`` compiled for a device."""
+    with torch.accelerator.device_index(device_index):
+        return cute.compile(
+            RoutedExpertFinalize(),
+            _fake(cutlass.BFloat16, 16),
+            _fake(cutlass.Int32, 4),
+            _fake(cutlass.Float32, 4),
+            _fake(cutlass.BFloat16, 16),
+            Int32(1),
+            Int32(TOP_K),
             make_fake_stream(),
         )
 
@@ -560,11 +601,12 @@ def front_applies(gemm: RoutedExpertGemm, runner: torch.nn.Module) -> bool:
 
 
 def build_routed_expert_gemms(
-    runners: list[torch.nn.Module],
+    runners: list[torch.nn.Module], fused_front: bool = True
 ) -> list[RoutedExpertGemm | None]:
     """A ``RoutedExpertGemm`` for each MoE runner that supports it (None for the
-    others), with the fused front where the router allows it. Needs the MoE
-    kernels that the loader's per-layer quantization finalize builds."""
+    others); with ``fused_front``, with the fused front where the router allows
+    it. Needs the MoE kernels that the loader's per-layer quantization finalize
+    builds."""
     reasons: Counter[str] = Counter()
     gemms: list[RoutedExpertGemm | None] = []
     fronts = 0
@@ -590,7 +632,7 @@ def build_routed_expert_gemms(
                 )
             except ValueError as error:
                 reasons[str(error)] += 1
-        if gemm is not None:
+        if gemm is not None and fused_front:
             front = _front_config(runner)
             if isinstance(front, str):
                 reasons[f"fused front: {front}"] += 1

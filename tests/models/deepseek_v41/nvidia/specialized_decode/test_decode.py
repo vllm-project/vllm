@@ -9,11 +9,14 @@ executor issues cross-rank collectives, so whether a forward runs it, and
 which of its paths a step takes, must be a function of host state alone:
 nothing here has a GPU, so a gate that read device state would fail. Only
 FULL-graph captures of pure decode steps run the executor; with the default
-``auto`` the model and its model state are the stock ones.
+``auto`` the model and its model state are the stock ones, and so are the
+DSpark draft model's forward, its Markov sampling and the region after the
+target forward.
 
 About 40 seconds on the CPU platform; on a CUDA platform the two-rank test
 needs two GPUs."""
 
+import gc
 import inspect
 import tempfile
 from contextlib import contextmanager, nullcontext
@@ -47,6 +50,7 @@ from vllm.models.deepseek_v41.nvidia.specialized_decode.runtime.decode import (
     SpecializedDecode,
     step_gates,
 )
+from vllm.models.deepseek_v41.nvidia.specialized_decode.runtime.draft import DraftDecode
 from vllm.models.deepseek_v41.nvidia.specialized_decode.runtime.metadata_graphs import (
     AttnMetadataCudaGraphs,
 )
@@ -370,6 +374,20 @@ def test_no_forward_context_runs_stock(monkeypatch):
     assert _executor().plan(torch.empty(6), None) is None
 
 
+@pytest.mark.parametrize("case", [case for case in _PLANS if not _PLANS[case][4]])
+def test_draft_runs_its_executor_where_the_target_does(monkeypatch, case):
+    """The DSpark draft's executor takes the same forwards as the target's."""
+    rows, capturing, mode, metadata, _, runs = _PLANS[case]
+    executor = object.__new__(DraftDecode)
+    executor._swa_prefixes = SWA_PREFIXES
+    with _forward(monkeypatch, capturing, mode, metadata):
+        step = executor.plan(torch.empty(rows))
+    if runs:
+        assert step is not None and step.rows == rows and step.executor is executor
+    else:
+        assert step is None
+
+
 ROWS = (1, 6, 8, 9, 16, 17, 48, 49, 384)
 
 
@@ -542,6 +560,91 @@ def test_forward_passes_the_planned_step():
     llm(torch.empty(6), positions)
     assert llm.model.decode_step == "step"
     assert len(plans) == 1 and plans[0][0] is positions and plans[0][1] is None
+
+
+def _draft(requested: bool, backbone: object):
+    """A DSpark draft model with only the state its decode seams read."""
+    from vllm.models.deepseek_v41.nvidia.dspark import DSparkDeepseekV4ForCausalLM
+
+    draft = object.__new__(DSparkDeepseekV4ForCausalLM)
+    torch.nn.Module.__init__(draft)
+    draft.specialized_decode_requested = requested
+    draft.specialized_decode = None
+    draft.model = backbone
+    return draft
+
+
+def test_draft_forward_passes_the_planned_step():
+    """No executor: no step; an executor: its plan, which may be None."""
+    from vllm.models.deepseek_v41.nvidia.dspark import DSparkDeepseekV4Model
+
+    forward = inspect.signature(DSparkDeepseekV4Model.forward)
+    assert forward.parameters["decode_step"].default is None
+    draft = _draft(False, _Backbone())
+    draft(torch.empty(6), torch.empty(6))
+    assert draft.model.decode_step is None
+    plans = []
+
+    def plan(positions):
+        plans.append(positions)
+        return "step"
+
+    draft = _draft(True, _Backbone())
+    draft.specialized_decode = SimpleNamespace(plan=plan)
+    positions = torch.empty(6)
+    draft(torch.empty(6), positions)
+    assert draft.model.decode_step == "step"
+    assert len(plans) == 1 and plans[0] is positions
+
+
+def test_drafts_are_handed_to_the_model_state_once():
+    """The DSpark drafts built with decode_backend=latency_specialized, in build
+    order; a draft no longer alive is dropped."""
+    specialized_decode.take_drafts()
+    first, second = _draft(True, None), _draft(True, None)
+    specialized_decode.register_draft(first)
+    specialized_decode.register_draft(_draft(True, None))
+    specialized_decode.register_draft(second)
+    gc.collect()
+    assert specialized_decode.take_drafts() == [first, second]
+    assert specialized_decode.take_drafts() == []
+
+
+@pytest.mark.parametrize("on", [False, True])
+def test_dspark_sampling_and_post_forward_graphs_follow_the_opt_in(on):
+    """The DSpark draft model shares its Markov weights with the fused and
+    sharded samplers only with decode_backend=latency_specialized (otherwise the
+    speculator keeps its eager loop), and the runner builds post-forward
+    graphs only for a model state that offers them."""
+    from vllm.model_executor.layers.vocab_parallel_embedding import (
+        UnquantizedEmbeddingMethod,
+    )
+    from vllm.v1.worker.gpu.post_forward_cudagraph import PostForwardCudaGraphs
+    from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
+
+    embed = torch.zeros(8, 2, dtype=torch.bfloat16)
+    head = torch.zeros(8, 2, dtype=torch.bfloat16)
+    markov_head = SimpleNamespace(
+        markov_w1=SimpleNamespace(weight=embed),
+        markov_w2=SimpleNamespace(
+            quant_method=UnquantizedEmbeddingMethod(), weight=head
+        ),
+    )
+    draft = _draft(on, SimpleNamespace(markov_head=markov_head))
+    draft.logits_processor = SimpleNamespace(
+        scale=1.0, soft_cap=None, logits_as_input=False, head_dtype=None
+    )
+    assert draft.markov_embed_weight() is (embed if on else None)
+    assert draft.markov_bias_weight() is (head if on else None)
+
+    state_cls = DeepseekV41SpecializedDecodeModelState if on else DeepseekV41ModelState
+    assert getattr(state_cls, "post_forward_cudagraphs", False) is on
+    if not on:
+        runner = SimpleNamespace(
+            speculator=object.__new__(DSparkSpeculator),
+            model_state=object.__new__(state_cls),
+        )
+        assert PostForwardCudaGraphs.create(runner) is None
 
 
 def test_stock_seams_default_to_the_stock_behavior(monkeypatch):

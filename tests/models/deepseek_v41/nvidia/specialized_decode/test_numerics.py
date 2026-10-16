@@ -133,6 +133,7 @@ def _check_all_reduce_mhc(arm, rank):
         empty_quantized_layer_input,
     )
 
+    boundaries = Boundaries(arm, torch.cuda.Stream())
     step = 0
     for rows in (1, 6, 48, 384):
         mix = _mix(rows)
@@ -160,6 +161,11 @@ def _check_all_reduce_mhc(arm, rank):
         _late(rank, step := step + 1)
         out = arm(x, mix["residual"], mix["post"], mix["comb"], None, None, 1e-6)
         _assert_equal(out, (streams, None), f"residual only, {rows} rows")
+        # The DSpark draft's last layer: a plain partial, residual-only.
+        state = BoundaryState(mix["residual"], mix["post"], mix["comb"], mix["pre"], x)
+        _late(rank, step := step + 1)
+        got = boundaries.post_only(state, fuse_partial=True)
+        _assert_equal((got,), (streams,), f"residual-only partial, {rows} rows")
 
         # A deferred MoE finalize reduces as the plain call on the finalized
         # sum; also residual-only, at an Engram or the last layer.
@@ -182,7 +188,7 @@ def _check_all_reduce_mhc(arm, rank):
             mix["residual"], mix["post"], mix["comb"], mix["pre"], moe_output
         )
         _late(rank, step := step + 1)
-        got = Boundaries(arm).post_only(state)
+        got = boundaries.post_only(state)
         _assert_equal((got,), want[:1], f"residual-only finalize, {rows} rows")
 
 
@@ -213,7 +219,7 @@ def _check_boundaries(arm, rank):
     scale = torch.tensor([0.5, 0.25, 1.0], device="cuda")
     base = torch.randn(mix_size, generator=generator, device="cuda")
     side = torch.cuda.Stream()
-    boundaries = Boundaries(arm)
+    boundaries = Boundaries(arm, side)
     step = 0
     for rows in (1, 6, 48, 384):
         mix = _mix(rows)
@@ -226,7 +232,6 @@ def _check_boundaries(arm, rank):
             hc_eps=1e-6,
             hc_post_alpha=2.0,
             hc_sinkhorn_iters=20,
-            mhc_stream=side,
         )
         gemm2, weights, permuted, shared = _moe_partial(rows, rank)
         deferred = MoEOutput(
@@ -273,7 +278,7 @@ def _check_boundaries(arm, rank):
                 state, layer_input, _, aux = boundaries.sublayer(
                     layer, False, state, decode_step, capture_aux=True
                 )
-                boundaries.join(layer, decode_step)
+                boundaries.join(decode_step)
                 _assert_equal(
                     (state.residual, aux),
                     (streams, streams.mean(dim=1)),
