@@ -222,7 +222,8 @@ def test_leaves_columns_past_end_untouched():
     """
     from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
         _MASK_TILE,
-        _ON_MI3XX,
+        _ON_GFX942,
+        _ON_GFX950,
         _apply_candidate_mask_strided,
     )
 
@@ -239,8 +240,9 @@ def test_leaves_columns_past_end_untouched():
     sentinel = 1.5
     logits.fill_(sentinel)
     _apply_candidate_mask_strided(logits, row_ks, row_ke, candidates, BLOCK_SIZE, 1)
+    fused = _ON_GFX950 or _ON_GFX942
     for row, end in enumerate(ends):
-        touched = end if _ON_MI3XX else min(-(-end // _MASK_TILE) * _MASK_TILE, WIDE)
+        touched = end if fused else min(-(-end // _MASK_TILE) * _MASK_TILE, WIDE)
         tail = logits[row, touched:]
         assert torch.equal(tail, torch.full_like(tail, sentinel)), (
             f"row {row} (end {end}) was written past column {touched}"

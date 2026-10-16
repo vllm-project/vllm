@@ -22,11 +22,10 @@ from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if current_platform.is_rocm():
-    from vllm.platforms.rocm import _ON_GFX942, _ON_GFX950, _ON_MI3XX
+    from vllm.platforms.rocm import _ON_GFX942, _ON_GFX950
 else:
     _ON_GFX942 = False
     _ON_GFX950 = False
-    _ON_MI3XX = False
 
 logger = init_logger(__name__)
 
@@ -1124,7 +1123,7 @@ def _apply_candidate_mask_strided(
     nblocks = triton.cdiv(width, block_size)
     start_stride = row_ks.stride(0) if row_ks is not None else 0
     tile = _MASK_TILE
-    if _ON_MI3XX and rows >= 16:
+    if (_ON_GFX950 or _ON_GFX942) and rows >= 16:
         # Every live tile of the fused kernel scans the row's candidate list,
         # so wider tiles win once there are enough rows to fill the GPU
         # without them. Measured on gfx950.
@@ -1134,7 +1133,7 @@ def _apply_candidate_mask_strided(
     # the kernel is data-dependent. The min keeps narrow widths from launching
     # programs that would only fall through.
     grid_cols = min(_MASK_GRID_COLS, triton.cdiv(width, tile))
-    if _ON_MI3XX:
+    if _ON_GFX950 or _ON_GFX942:
         flags = torch.empty((rows, nblocks), device=logits.device, dtype=torch.uint8)
         _mask_candidates_fused_kernel[(rows, grid_cols)](
             logits,
