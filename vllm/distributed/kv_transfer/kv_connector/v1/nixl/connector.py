@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 import torch
 
 from vllm.config import KVTransferConfig, VllmConfig
+from vllm.distributed.kv_transfer.kv_checksum.checksum import KVChecksumCarrier
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     EngineId,
 )
@@ -366,6 +367,16 @@ class NixlPullConnector(NixlBaseConnector):
             self.connector_worker = NixlPullConnectorWorker(
                 vllm_config, self.engine_id, kv_cache_config
             )
+
+    def kv_checksum_carrier(
+        self, request: "Request", receiving: bool
+    ) -> KVChecksumCarrier | None:
+        params = request.kv_transfer_params
+        # do_remote_decode marks the producer. A load with it set is a
+        # bidirectional load of a consumer's blocks, which have no checksums.
+        if not params or bool(params.get("do_remote_decode")) == receiving:
+            return None
+        return KVChecksumCarrier.KV_TRANSFER_PARAMS
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         assert self.connector_worker is not None

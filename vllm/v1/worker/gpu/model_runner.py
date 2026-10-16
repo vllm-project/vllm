@@ -806,7 +806,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if is_profiling:
             self.kv_connector = NO_OP_KV_CONNECTOR
         else:
-            self.kv_connector = get_kv_connector(self.vllm_config, kv_caches_dict)
+            self.kv_connector = get_kv_connector(
+                self.vllm_config, self.kv_cache_config, kv_caches_dict
+            )
 
             # AuxOutput connector requires resolved kv_cache_config.
             if self.vllm_config.aux_output_config.enabled:

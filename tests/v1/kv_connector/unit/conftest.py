@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from unittest.mock import MagicMock
+
 import pytest
+import torch
 
 from vllm.platforms import current_platform
 
@@ -25,3 +28,14 @@ def _mock_cpu_backend_block_sizes(monkeypatch):
         "get_supported_kernel_block_sizes",
         staticmethod(lambda kv_cache_spec=None: [MultipleOf(16)]),
     )
+
+
+@pytest.fixture
+def cuda_stream_stubs(monkeypatch):
+    """Stub CUDA streams and events where CUDA is unavailable, as the CPU
+    worker does (vllm/v1/worker/cpu/shm.py)."""
+    if torch.cuda.is_available():
+        return
+    monkeypatch.setattr(torch.cuda, "Stream", lambda *args, **kwargs: MagicMock())
+    monkeypatch.setattr(torch.cuda, "Event", lambda *args, **kwargs: MagicMock())
+    monkeypatch.setattr(torch.cuda, "set_stream", lambda stream: None)
