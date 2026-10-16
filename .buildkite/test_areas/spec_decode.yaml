@@ -436,6 +436,7 @@ steps:
 
 - label: ":nvidia: (H200 MIG 35GB) Spec Decode AL DFlash Nightly"
   key: spec-decode-dflash-nightly
+  automatic_shard: true
   timeout_in_minutes: 90
   device: h200_35gb
   optional: true
