@@ -24,7 +24,6 @@ If you only need to use the distributed environment without model/pipeline
 """
 
 import contextlib
-import ctypes
 import gc
 import pickle
 import weakref
@@ -2059,35 +2058,6 @@ def _engram_dp_shard_size(
     return shard_size
 
 
-def _in_one_nvlink_domain() -> bool:
-    """Whether every rank's GPU is in the same multi-node NVLink clique."""
-    from vllm.platforms import current_platform
-    from vllm.utils.import_utils import import_pynvml
-
-    clique = None
-    try:
-        pynvml = import_pynvml()
-        pynvml.nvmlInit()
-        index = current_platform.visible_device_id_to_physical_device_id(
-            torch.accelerator.current_device_index()
-        )
-        info = pynvml.c_nvmlGpuFabricInfoV_t()
-        handle = pynvml.nvmlDeviceGetHandleByIndex(index)
-        pynvml.nvmlDeviceGetGpuFabricInfoV(handle, ctypes.byref(info))
-        pynvml.nvmlShutdown()
-        # Raw bytes: pynvml's structures decode char fields as UTF-8.
-        field = type(info).clusterUuid
-        uuid = ctypes.string_at(ctypes.addressof(info) + field.offset, field.size)
-        if info.state == pynvml.NVML_GPU_FABRIC_STATE_COMPLETED and not info.status:
-            clique = (uuid, info.cliqueId)
-    except Exception as error:
-        logger.debug("GPU fabric info unavailable: %s", error)
-    group = get_world_group()
-    cliques: list[Any] = [None] * group.world_size
-    torch.distributed.all_gather_object(cliques, clique, group=group.cpu_group)
-    return cliques[0] is not None and cliques.count(cliques[0]) == len(cliques)
-
-
 def initialize_model_parallel(
     tensor_model_parallel_size: int = 1,
     pipeline_model_parallel_size: int = 1,
@@ -2225,22 +2195,22 @@ def initialize_model_parallel(
         and config.model_config.architecture == "DeepseekV41ForCausalLM"
         and not enable_elastic_ep
     ):
-        engram_dp_size = _engram_dp_shard_size(
-            world_size,
-            data_parallel_size,
-            tensor_model_parallel_size
-            * pipeline_model_parallel_size
-            * prefill_context_model_parallel_size,
-        )
         if (
             not engram_config.cpu_offload
             and engram_config.embedding_across_dp
             and tensor_model_parallel_size == 1
-            and _in_one_nvlink_domain()
         ):
-            # Ranks read GPU table rows from peers' HBM over (MN)NVLink, so the
-            # group may span nodes within one NVLink domain.
+            # GPU tables are read from peers' HBM, so every DP rank must share
+            # one NVLink domain (e.g. GB200 NVL72).
             engram_dp_size = data_parallel_size
+        else:
+            engram_dp_size = _engram_dp_shard_size(
+                world_size,
+                data_parallel_size,
+                tensor_model_parallel_size
+                * pipeline_model_parallel_size
+                * prefill_context_model_parallel_size,
+            )
     if 1 < engram_dp_size < data_parallel_size:
         group_ranks = (
             all_ranks.permute(0, 2, 3, 4, 1).reshape(-1, engram_dp_size).unbind(0)

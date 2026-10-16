@@ -100,27 +100,37 @@ def _reference(weight, scale_inv, ids) -> torch.Tensor:
 
 
 @pytest.mark.parametrize(
-    "architecture,options,edp_ranks,etp_ranks",
+    "architecture,options,tp_size,edp_ranks,etp_ranks",
     [
-        ("DeepseekV41ForCausalLM", {}, [0, 2], [0, 1]),
-        ("Qwen4ExpForCausalLM", {}, None, [0, 1]),
+        ("DeepseekV41ForCausalLM", {}, 2, [0, 2], [0, 1]),
+        # GPU tables span every DP rank only with embedding_across_dp.
+        ("DeepseekV41ForCausalLM", {"cpu_offload": False}, 1, [0, 1], [0]),
+        (
+            "DeepseekV41ForCausalLM",
+            {"cpu_offload": False, "embedding_across_dp": True},
+            1,
+            [0, 1, 2, 3],
+            [0, 1, 2, 3],
+        ),
+        ("Qwen4ExpForCausalLM", {}, 2, None, [0, 1]),
         (
             "Qwen4ExpForCausalLM",
             {"embedding_across_dp": True},
+            2,
             None,
             [0, 1, 2, 3],
         ),
-        ("Qwen4ExpForConditionalGeneration", {}, None, [0, 1]),
+        ("Qwen4ExpForConditionalGeneration", {}, 2, None, [0, 1]),
     ],
 )
 def test_engram_group_creation_honors_model_and_options(
-    monkeypatch, architecture, options, edp_ranks, etp_ranks
+    monkeypatch, architecture, options, tp_size, edp_ranks, etp_ranks
 ):
     config = SimpleNamespace(
         model_config=SimpleNamespace(architecture=architecture, is_moe=False),
         parallel_config=ParallelConfig(
-            tensor_parallel_size=2,
-            data_parallel_size=2,
+            tensor_parallel_size=tp_size,
+            data_parallel_size=4 // tp_size,
             distributed_executor_backend="mp",
         ),
         engram_config=EngramConfig(**options),
@@ -141,7 +151,8 @@ def test_engram_group_creation_honors_model_and_options(
     monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
     monkeypatch.setattr(torch.distributed, "get_world_size", lambda: 4)
     monkeypatch.setattr(torch.distributed, "get_rank", lambda: 0)
-    monkeypatch.setattr(parallel_state, "get_node_count", lambda: 1)
+    # Two ranks per node.
+    monkeypatch.setattr(parallel_state, "_engram_dp_shard_size", lambda *args: 2)
 
     def make_group(group_ranks, *args, **kwargs):
         ranks = next(ranks for ranks in group_ranks if 0 in ranks)
@@ -149,49 +160,13 @@ def test_engram_group_creation_honors_model_and_options(
 
     monkeypatch.setattr(parallel_state, "init_model_parallel_group", make_group)
     with set_current_vllm_config(config):
-        initialize_model_parallel(tensor_model_parallel_size=2, backend="nccl")
+        initialize_model_parallel(tensor_model_parallel_size=tp_size, backend="nccl")
     group = get_engram_dp_group()
     assert (group.ranks if group is not None else None) == edp_ranks
     assert parallel_state.get_etp_group().ranks == etp_ranks
-
-
-@pytest.mark.parametrize("one_nvlink_domain", [False, True])
-def test_gpu_engram_tables_span_dp_only_within_nvlink_domain(
-    monkeypatch, one_nvlink_domain
-):
-    """Peer reads need every member's HBM, so GPU tables leave the node-local
-    group only when all ranks share one NVLink domain, then reuse DP's group."""
-    config = SimpleNamespace(
-        model_config=SimpleNamespace(
-            architecture="DeepseekV41ForCausalLM", is_moe=False
-        ),
-        parallel_config=ParallelConfig(
-            data_parallel_size=4, distributed_executor_backend="mp"
-        ),
-        engram_config=EngramConfig(cpu_offload=False, embedding_across_dp=True),
-    )
-    for name in ("_TP", "_ETP", "_ENGRAM_DP", "_DCP", "_PCP", "_PP", "_DP", "_EP"):
-        monkeypatch.setattr(parallel_state, name, None)
-    monkeypatch.setattr(parallel_state, "_EPLB", None)
-    monkeypatch.setattr(parallel_state, "_WORLD", SimpleNamespace(local_rank=0))
-    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
-    monkeypatch.setattr(torch.distributed, "get_world_size", lambda: 4)
-    monkeypatch.setattr(torch.distributed, "get_rank", lambda: 0)
-    monkeypatch.setattr(parallel_state, "_engram_dp_shard_size", lambda *args: 2)
-    monkeypatch.setattr(
-        parallel_state, "_in_one_nvlink_domain", lambda: one_nvlink_domain
-    )
-
-    def make_group(group_ranks, *args, **kwargs):
-        ranks = next(ranks for ranks in group_ranks if 0 in ranks)
-        return SimpleNamespace(ranks=ranks, rank_in_group=0, world_size=len(ranks))
-
-    monkeypatch.setattr(parallel_state, "init_model_parallel_group", make_group)
-    with set_current_vllm_config(config):
-        initialize_model_parallel(backend="nccl")
-    group = get_engram_dp_group()
-    assert group.ranks == ([0, 1, 2, 3] if one_nvlink_domain else [0, 1])
-    assert (group is parallel_state._DP) == one_nvlink_domain
+    # A group with the DP group's ranks reuses its communicators.
+    full_dp = edp_ranks is not None and len(edp_ranks) == 4 // tp_size
+    assert (group is parallel_state._DP) == full_dp
 
 
 def _worker(rank: int, tp_size: int, port: int) -> None:
@@ -495,7 +470,7 @@ def _check_table(
                     layer.weight_scale_inv, loader_scale
                 )
             # Shared host tables and GPU peer reads look up only local tokens.
-            local = dp_shared_memory or layer.peer_rows > 0
+            local = layer.dp_size == 1
             assert (layer.peer_rows > 0) == (not cpu_offload and tp_size == 1)
             if dp_shared_memory:
                 assert layer.dp_size == 1
@@ -563,9 +538,10 @@ def _check_table(
                 and not dp_shared_memory
                 and sequence_parallel == (tp_size > 1)
             )
+            or layer.peer_rows > 0
         )
-        if replay or (layer.peer_rows and n_heads == 7):
-            # Peer reads are FULL-graph safe and have no eager breaks to count.
+        if replay:
+            # Peer reads have no eager breaks to count.
             captures = ("full",) if layer.peer_rows else ("full", "breakable")
             for capture in captures:
                 _check_prefetch_replay(

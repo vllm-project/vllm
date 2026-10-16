@@ -689,25 +689,21 @@ def _engram_lookup_kernel(
             local = index - vocab_start
         local = tl.where(owned, local, 0)
         if PEER_ROWS:
+            # `weight` holds each rank's buffer: PEER_ROWS rows, then scales.
             owner = local // PEER_ROWS
-            base = tl.load(weight + owner, mask=owned, other=0)
+            peer = tl.load(weight + owner, mask=owned, other=0)
             local -= owner * PEER_ROWS
-            row_weight = base.to(tl.pointer_type(tl.float8e4nv))
-            row_scales = (base + PEER_ROWS * DIM).to(tl.pointer_type(tl.uint8))
+            row_weight = peer.to(tl.pointer_type(tl.float8e4nv))
+            row_scales = (peer + PEER_ROWS * DIM).to(tl.pointer_type(tl.uint8))
         else:
-            row_weight = weight + tl.zeros((BLOCK_R,), dtype=tl.int64)
-            row_scales = scales + tl.zeros((BLOCK_R,), dtype=tl.int64)
+            row_weight, row_scales = weight, scales
+        row_weight += local * DIM
+        row_scales += local * (DIM // QUANT_BLOCK)
         values = tl.load(
-            row_weight[:, None] + local[:, None] * DIM + cols[None, :],
-            mask=owned[:, None],
-            other=0.0,
+            row_weight[:, None] + cols[None, :], mask=owned[:, None], other=0.0
         )
         scale = tl.load(
-            row_scales[:, None]
-            + local[:, None] * (DIM // QUANT_BLOCK)
-            + scale_cols[None, :],
-            mask=owned[:, None],
-            other=0,
+            row_scales[:, None] + scale_cols[None, :], mask=owned[:, None], other=0
         )
         if PACKED:
             width: tl.constexpr = DIM + DIM // QUANT_BLOCK
@@ -990,6 +986,15 @@ class ParallelEngramEmbedding(nn.Module):
                     "DP replicas to be co-located."
                 )
             self.dp_size = 1
+        # GPU tables split rows over the DP group and every rank reads its own
+        # tokens' rows from the owning peer's HBM, so lookups need no collective.
+        peer_group = None
+        if (
+            not cpu_offload
+            and self.dp_size > 1
+            and get_tensor_model_parallel_world_size() == 1
+        ):
+            peer_group, self.dp_size = get_engram_dp_group(), 1
         if cpu_offload and not is_uva_available():
             raise RuntimeError("Engram CPU offload requires UVA support")
         self._views: tuple[torch.Tensor, torch.Tensor] | None = None
@@ -998,33 +1003,29 @@ class ParallelEngramEmbedding(nn.Module):
         self.dim = dim
         self.block_size = block_size
         self.n_hash_cols = len(head_sizes)
-        self.head_sizes = head_sizes
         self.tp_size = get_tensor_model_parallel_world_size()
         num_shards, head_rank = self._get_shard_info()
         self.part_n_hash_cols = triton.cdiv(self.n_hash_cols, num_shards)
-        # GPU tables split rows over the DP group and every rank reads its own
-        # tokens' rows from the owning peer's HBM, so lookups need no collective.
-        self.peer_rows = 0
-        if not cpu_offload and self.dp_size > 1 and self.tp_size == 1:
-            self.peer_rows = triton.cdiv(sum(head_sizes), num_shards)
-            self.part_n_hash_cols = self.n_hash_cols
-            self.head_start = 0
-            self.vocab_start_idx = min(head_rank * self.peer_rows, sum(head_sizes))
-            self.vocab_end_idx = min(
-                self.vocab_start_idx + self.peer_rows, sum(head_sizes)
-            )
-            self.dp_size = 1
-        else:
-            # TODO: Support row-wise sharding of host tables too.
-            assert (num_shards - 1) * self.part_n_hash_cols < self.n_hash_cols, (
-                f"Engram sharding leaves ranks without hash heads: "
-                f"{self.n_hash_cols} heads over {num_shards} shards"
-            )
-            self.head_start = head_rank * self.part_n_hash_cols
-            head_end = self.head_start + self.part_n_hash_cols
-            self.vocab_start_idx = sum(head_sizes[: self.head_start])
-            self.vocab_end_idx = sum(head_sizes[:head_end])
+        # TODO: Support row-wise sharding when there are too few hash heads.
+        assert (num_shards - 1) * self.part_n_hash_cols < self.n_hash_cols, (
+            f"Engram sharding leaves ranks without hash heads: "
+            f"{self.n_hash_cols} heads over {num_shards} shards"
+        )
+        self.head_start = head_rank * self.part_n_hash_cols
+        head_end = self.head_start + self.part_n_hash_cols
+        self.vocab_start_idx = sum(head_sizes[: self.head_start])
+        self.vocab_end_idx = sum(head_sizes[:head_end])
         self.part_num_embeddings = self.vocab_end_idx - self.vocab_start_idx
+        # Peer tables keep the full lookup range but store one row slice.
+        self.peer_rows, row_start = 0, self.vocab_start_idx
+        if peer_group is not None:
+            self.peer_rows = triton.cdiv(self.vocab_end_idx, peer_group.world_size)
+            row_start = min(
+                peer_group.rank_in_group * self.peer_rows, self.vocab_end_idx
+            )
+            self.part_num_embeddings = min(
+                self.peer_rows, self.vocab_end_idx - row_start
+            )
         self._num_sms = torch.cuda.get_device_properties(
             torch.accelerator.current_device_index()
         ).multi_processor_count
@@ -1036,7 +1037,7 @@ class ParallelEngramEmbedding(nn.Module):
                 param,
                 {
                     "weight_loader": self._weight_loader,
-                    "engram_vocab_start": self.vocab_start_idx,
+                    "engram_vocab_start": row_start,
                 },
             )
         if cpu_offload:
@@ -1074,7 +1075,6 @@ class ParallelEngramEmbedding(nn.Module):
 
             group = get_engram_dp_group()
             assert group is not None
-            # One buffer per rank: peer_rows FP8 rows, then their scales.
             values = self.peer_rows * self.dim
             device = torch.device("cuda", torch.accelerator.current_device_index())
             buffer = symm_mem.empty(
@@ -1086,7 +1086,7 @@ class ParallelEngramEmbedding(nn.Module):
                 torch.tensor(handle.buffer_ptrs, dtype=torch.int64, device=device),
                 persistent=False,
             )
-            self._symm = (buffer, handle)
+            self._symm_handle = handle
             rows = self.part_num_embeddings
             return (
                 buffer[: rows * self.dim].view(torch.float8_e4m3fn).view(rows, -1),
@@ -1167,8 +1167,6 @@ class ParallelEngramEmbedding(nn.Module):
         if not rows:
             return
         weight, scales = self._storage()
-        if self.peer_rows:
-            weight = self.peer_ptrs
         ids_stride_t, ids_stride_h = indices.stride()
         sort_min_rows, _ = _engram_lookup_thresholds(indices.device)
         sort = (
@@ -1192,13 +1190,13 @@ class ParallelEngramEmbedding(nn.Module):
         tiles = triton.cdiv(rows, 16)
         grid = min(tiles, self._num_sms // 2 if background else self._num_sms)
         _engram_lookup_kernel[(grid,)](
-            weight,
+            self.peer_ptrs if self.peer_rows else weight,
             scales,
             indices,
             dst,
             out,
-            0 if self.peer_rows else self.vocab_start_idx,
-            sum(self.head_sizes) if self.peer_rows else self.vocab_end_idx,
+            self.vocab_start_idx,
+            self.vocab_end_idx,
             rows,
             ids_stride_t,
             ids_stride_h,
