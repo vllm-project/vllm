@@ -184,6 +184,11 @@ def union_dict_and_str(val: str) -> str | dict[str, str] | None:
     return optional_type(json.loads)(val)
 
 
+def parse_reasoning_parser(val: str) -> str:
+    """Map `none` (any case) to the unset default, as `vllm-rs serve` does."""
+    return "" if val.lower() == "none" else val
+
+
 def is_type(type_hint: TypeHint, type: TypeHintT) -> TypeIs[TypeHintT]:
     """Check if the type hint is a specific type."""
     return type_hint is type or get_origin(type_hint) is type
@@ -1114,6 +1119,10 @@ class EngineArgs:
 
         # Structured outputs arguments
         structured_outputs_kwargs = get_kwargs(StructuredOutputsConfig)
+        structured_outputs_kwargs["reasoning_parser"]["type"] = parse_reasoning_parser
+        structured_outputs_kwargs["reasoning_parser"]["help"] += (
+            "\n\n`none` disables reasoning parsing, the same as leaving it unset."
+        )
         structured_outputs_group = parser.add_argument_group(
             title="StructuredOutputsConfig",
             description=StructuredOutputsConfig.__doc__,
@@ -2928,10 +2937,14 @@ class EngineArgs:
         try:
             device_memory = current_platform.get_device_total_memory()
             device_name = current_platform.get_device_name().lower()
+            # GB10 (DGX Spark, cc 12.1) has the memory but not the compute of
+            # a large discrete GPU, keep it on the small tier.
+            is_gb10 = current_platform.is_device_capability((12, 1))
         except Exception:
             # This is only used to set default_max_num_batched_tokens
             device_memory = 0
             device_name = ""
+            is_gb10 = False
 
         # NOTE(Kuntai): Setting large `max_num_batched_tokens` for A100 reduces
         # throughput, see PR #17885 for more details.
@@ -2946,7 +2959,11 @@ class EngineArgs:
                 UsageContext.LLM_CLASS: 1024,
                 UsageContext.OPENAI_API_SERVER: 1024,
             }
-        elif device_memory >= 70 * GiB_bytes and "a100" not in device_name:
+        elif (
+            device_memory >= 70 * GiB_bytes
+            and "a100" not in device_name
+            and not is_gb10
+        ):
             # For GPUs like H100 and H200, use larger offline defaults.
             default_max_num_batched_tokens = {
                 UsageContext.LLM_CLASS: 16384,
@@ -3225,7 +3242,9 @@ class AsyncEngineArgs(EngineArgs):
             help="Enable logging request information, dependent on log level:\n"
             "- INFO: Request ID, parameters and LoRA request.\n"
             "- DEBUG: Prompt inputs (e.g: text, token IDs).\n"
-            "You can set the minimum log level via `VLLM_LOGGING_LEVEL`.",
+            "You can set the minimum log level via `VLLM_LOGGING_LEVEL`.\n"
+            "You can also set a separate log level for request JSON body "
+            "via `VLLM_REQUEST_BODY_LOG_LEVEL` (default: DEBUG).",
         )
         current_platform.pre_register_and_update(parser)
         return parser

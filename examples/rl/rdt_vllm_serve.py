@@ -76,7 +76,6 @@ def launch_vllm_serve(
     env = dict(
         os.environ,
         VLLM_SERVER_DEV_MODE="1",
-        VLLM_USE_RAY_V2_EXECUTOR_BACKEND="1",
     )
     # Pin the child to THIS Ray cluster. vLLM's ray DP backend reaches Ray
     # through a bare ``ray.init()``, which STARTS a cluster rather than

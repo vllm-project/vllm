@@ -79,7 +79,9 @@ def test_deepseek_v41_mxfp8_scale_loading(
     quant_config._resolved_expert_dtype = "fp4"
     for module in (model_module, linear_module):
         monkeypatch.setattr(module, "get_tensor_model_parallel_world_size", lambda: 2)
-        monkeypatch.setattr(module, "get_tensor_model_parallel_rank", lambda: tp_rank)
+    monkeypatch.setattr(
+        linear_module, "get_tensor_model_parallel_rank", lambda: tp_rank
+    )
     block = torch.nn.Module()
     block.attn = torch.nn.Module()
     block.attn.wq_b = ColumnParallelLinear(
