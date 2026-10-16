@@ -168,17 +168,6 @@ def test_compressed_tensors_rejects_unsupported_moe_sparsity_method(method):
         )
 
 
-@pytest.mark.parametrize("counts", [[], [0], [True], ["4"], [4, 0]])
-def test_compressed_tensors_rejects_malformed_moe_sparsity_counts(counts):
-    with pytest.raises(ValueError, match="moe_sparsity_config.num_experts"):
-        CompressedTensorsConfig.from_config(
-            {
-                **_compressed_tensors_actorder_config(None),
-                "moe_sparsity_config": _moe_sparsity_config(counts),
-            }
-        )
-
-
 @pytest.mark.parametrize(
     "model_args",
     [
@@ -583,20 +572,27 @@ def test_compressed_tensors_transforms_perplexity(
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda() or not current_platform.has_device_capability(100),
-    reason="NVFP4 requires Blackwell or newer.",
+    not current_platform.is_cuda() or not current_platform.has_device_capability(89),
+    reason="FP8 requires Ada/Hopper or newer.",
 )
 @pytest.mark.parametrize(
     "model,prompt,exp_perplexity",
     [
         (
-            "nm-testing/Qwen3.6-35B-A3B-NVFP4-REAP10-nonuniform",
-            "Flat is better than nested.\nSparse is better than dense.",
-            20.0,
+            "inference-optimization/Qwen3-1.6B-A0.9B-FP8-REAP-15-uniform",
+            "According to all known laws of aviation, "
+            "there is no way a bee should be able to fly.",
+            5.0,
+        ),
+        (
+            "inference-optimization/Qwen3-1.6B-A0.9B-FP8-REAP-15-nonuniform",
+            "According to all known laws of aviation, "
+            "there is no way a bee should be able to fly.",
+            5.0,
         ),
     ],
 )
-def test_compressed_tensors_reap_nonuniform_perplexity(
+def test_compressed_tensors_expert_sparsity_perplexity(
     vllm_runner, model, prompt, exp_perplexity
 ):
     with vllm_runner(model, enforce_eager=True, enable_chunked_prefill=True) as llm:

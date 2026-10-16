@@ -304,21 +304,7 @@ class CompressedTensorsConfig(QuantizationConfig):
                 "'prune' (REAP) checkpoints, which drop pruned experts and "
                 "compact the retained ones, are supported"
             )
-        counts = moe_sparsity_config.get("num_experts")
-        if not isinstance(counts, list) or not counts:
-            raise ValueError(
-                "moe_sparsity_config.num_experts must be a non-empty list of "
-                "per-layer retained expert counts"
-            )
-        for layer_idx, count in enumerate(counts):
-            if count is None:
-                continue
-            if not isinstance(count, int) or isinstance(count, bool) or count < 1:
-                raise ValueError(
-                    f"moe_sparsity_config.num_experts[{layer_idx}] must be a "
-                    f"positive expert count or None, got {count!r}"
-                )
-        return counts
+        return moe_sparsity_config.get("num_experts")
 
     @classmethod
     def _parse_sparsity_config(
