@@ -87,10 +87,10 @@ def _gemma4_layer_weights_mapper(config) -> WeightsMapper:
     """Stack each decoder layer's projections the way its modules are built.
 
     gate/up pack into `mlp.gate_up_proj`. Layers with a qkv_proj pack q/k/v
-    into it; `attention_k_eq_v` full-attention layers ship k_proj only, so K
-    is loaded into both the K and V shards and no v_proj is expected. KV-shared
-    layers only have q_proj; the K/V tensors original checkpoints still ship
-    for them are dropped.
+    into it; `attention_k_eq_v` full-attention layers ship k_proj only, so
+    their `qkk_proj` loads K into both the K and V shards and no v_proj is
+    expected. KV-shared layers only have q_proj; the K/V tensors original
+    checkpoints still ship for them are dropped.
     """
     num_layers = config.num_hidden_layers
     first_kv_shared = num_layers - getattr(config, "num_kv_shared_layers", 0)
@@ -111,7 +111,7 @@ def _gemma4_layer_weights_mapper(config) -> WeightsMapper:
     }
     stacked |= {
         f"layers.{i}.self_attn.{shard}_proj.": (
-            f"layers.{i}.self_attn.qkv_proj.",
+            f"layers.{i}.self_attn.{'qkk' if i in k_eq_v_layers else 'qkv'}_proj.",
             shard_id,
         )
         for i in range(first_kv_shared)
@@ -400,10 +400,16 @@ class Gemma4Attention(nn.Module):
         self.scaling = 1.0
 
         layer_idx = extract_layer_index(prefix)
+        layer_type = config.layer_types[layer_idx]
         num_kv_shared_layers = getattr(config, "num_kv_shared_layers", 0)
         first_kv_shared_layer_idx = config.num_hidden_layers - num_kv_shared_layers
         self.is_kv_shared_layer = (
             num_kv_shared_layers > 0 and layer_idx >= first_kv_shared_layer_idx
+        )
+        self.is_k_eq_v = (
+            not self.is_kv_shared_layer
+            and getattr(config, "attention_k_eq_v", False)
+            and layer_type == "full_attention"
         )
 
         if self.is_kv_shared_layer:
@@ -420,15 +426,20 @@ class Gemma4Attention(nn.Module):
             # QKVParallelLinear handles GQA correctly for all layer types.
             # k_eq_v layers load K weights into both K and V slots via
             # hf_to_vllm_mapper — no structural difference needed.
-            self.qkv_proj = QKVParallelLinear(
+            proj_name = "qkk_proj" if self.is_k_eq_v else "qkv_proj"
+            qkv_proj = QKVParallelLinear(
                 hidden_size,
                 self.head_dim,
                 self.total_num_heads,
                 self.total_num_kv_heads,
                 bias=config.attention_bias,
                 quant_config=quant_config,
-                prefix=f"{prefix}.qkv_proj",
+                prefix=f"{prefix}.{proj_name}",
             )
+            if self.is_k_eq_v:
+                self.qkk_proj = qkv_proj
+            else:
+                self.qkv_proj = qkv_proj
             self.k_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
             # V norm: no learnable scale (pure normalization only)
             self.v_norm = RMSNorm(
@@ -445,8 +456,6 @@ class Gemma4Attention(nn.Module):
         # Q norm: output = norm(x) * weight (learnable per-head scale)
         self.q_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
 
-        # Determine layer type and sliding window
-        layer_type = config.layer_types[layer_idx]
         self.is_sliding = layer_type == "sliding_attention"
         sliding_window = config.sliding_window if self.is_sliding else None
 
@@ -534,8 +543,9 @@ class Gemma4Attention(nn.Module):
             attn_output = self.attn(q, None, None)
         else:
             # For k_eq_v, K weights are loaded into both K and V slots of
-            # qkv_proj, so V == K automatically.
-            qkv, _ = self.qkv_proj(hidden_states)
+            # qkk_proj, so V == K automatically.
+            qkv_proj = self.qkk_proj if self.is_k_eq_v else self.qkv_proj
+            qkv, _ = qkv_proj(hidden_states)
             q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
             q = q.unflatten(-1, (self.num_heads, self.head_dim))
@@ -1419,12 +1429,17 @@ class Gemma4ForCausalLM(
         },
     )
     # KV-shared layers only have q_proj, so qkv_proj packing applies to
-    # the other layers.
+    # the other layers. `attention_k_eq_v` full-attention layers use V = K.
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
             "k_proj",
             "v_proj",
+        ],
+        "qkk_proj": [
+            "q_proj",
+            "k_proj",
+            "k_proj",
         ],
         "gate_up_proj": [
             "gate_proj",
