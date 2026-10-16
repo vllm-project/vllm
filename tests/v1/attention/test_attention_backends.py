@@ -763,7 +763,7 @@ def test_flashinfer_cross_layer_layout(
 
     _test_backend_correctness(
         batch_spec=BATCH_SPECS[batch_spec_name],
-        model="meta-llama/Meta-Llama-3-8B",
+        model="Qwen/Qwen3-0.6B",
         backend_to_test=[AttentionBackendEnum.FLASHINFER],
         mask_mod=causal_mask_mod,
         kv_cache_dtype=kv_cache_dtype,
@@ -786,7 +786,7 @@ def test_flashinfer_cross_layer_layout(
         "single_prefill",
     ],
 )
-@pytest.mark.parametrize("model", ["meta-llama/Meta-Llama-3-8B"])
+@pytest.mark.parametrize("model", ["Qwen/Qwen3-0.6B"])
 @pytest.mark.parametrize("tensor_parallel_size", [1, 2, 4])
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8", "fp8_e4m3"])
 def test_causal_backend_correctness(
@@ -1582,7 +1582,7 @@ def test_flashinfer_native_prefill_with_sinks(default_vllm_config):
 
     _test_backend_correctness(
         BATCH_SPECS["small_prefill"],
-        "meta-llama/Meta-Llama-3-8B",
+        "Qwen/Qwen3-0.6B",
         [AttentionBackendEnum.FLASHINFER],
         causal_mask_mod,
         use_sinks=True,
@@ -1629,7 +1629,7 @@ def test_flashinfer_xqa_decode_correctness(default_vllm_config):
 
     batch_spec = BATCH_SPECS["small_decode"]
     vllm_config = create_vllm_config(
-        model_name="meta-llama/Meta-Llama-3-8B",
+        model_name="Qwen/Qwen3-0.6B",
         max_model_len=max(batch_spec.seq_lens),
         block_size=16,
     )
@@ -1691,7 +1691,7 @@ def test_flashinfer_xqa_decode_correctness(default_vllm_config):
 
     _test_backend_correctness(
         batch_spec,
-        "meta-llama/Meta-Llama-3-8B",
+        "Qwen/Qwen3-0.6B",
         [AttentionBackendEnum.FLASHINFER],
         causal_mask_mod,
     )
@@ -1714,7 +1714,11 @@ def test_flashinfer_xqa_nvfp4_decode_correctness(
     from vllm.v1.attention.backends import flashinfer as fi
 
     seq_lens, bs, d = [40, 300, 1027], 16, 256
-    config = create_vllm_config(max_model_len=max(seq_lens), block_size=bs)
+    config = create_vllm_config(
+        model_name="Qwen/Qwen3-0.6B",
+        max_model_len=max(seq_lens),
+        block_size=bs,
+    )
     # GQA 6 at head_dim 256, as Qwen3.8-27B at TP=2.
     config.model_config.model_arch_config = replace(
         config.model_config.model_arch_config,
@@ -1990,7 +1994,7 @@ if current_platform.is_rocm():
         "mixed_small",
     ],
 )
-@pytest.mark.parametrize("model", ["meta-llama/Meta-Llama-3-8B"])
+@pytest.mark.parametrize("model", ["Qwen/Qwen3-0.6B"])
 def test_non_causal_backend_correctness(
     default_vllm_config,
     batch_spec_name: str,
