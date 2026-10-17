@@ -614,13 +614,13 @@ def test_set_active_mm_loras_builds_tower_and_connector_mappings():
     encoder_cache = EncoderCache()
     encoder_cache.mm_features["req-with-lora"] = [
         MultiModalFeatureSpec(
-            data=None,
+            data=Mock(),
             modality="image",
             identifier="img-0",
             mm_position=PlaceholderRange(offset=0, length=2),
         ),
         MultiModalFeatureSpec(
-            data=None,
+            data=Mock(),
             modality="image",
             identifier="img-1",
             mm_position=PlaceholderRange(offset=2, length=3),
@@ -628,7 +628,7 @@ def test_set_active_mm_loras_builds_tower_and_connector_mappings():
     ]
     encoder_cache.mm_features["req-no-lora"] = [
         MultiModalFeatureSpec(
-            data=None,
+            data=Mock(),
             modality="image",
             identifier="img-2",
             mm_position=PlaceholderRange(offset=0, length=1),
@@ -687,7 +687,7 @@ def test_set_active_mm_loras_follows_modality_sorted_encoder_order():
     for req_id, modality, length in [("req-a", "video", 1), ("req-b", "image", 2)]:
         encoder_cache.mm_features[req_id] = [
             MultiModalFeatureSpec(
-                data=None,
+                data=Mock(),
                 modality=modality,
                 identifier=f"{req_id}-0",
                 mm_position=PlaceholderRange(offset=0, length=length),
@@ -710,6 +710,82 @@ def test_set_active_mm_loras_follows_modality_sorted_encoder_order():
     # The image is encoded before the video, so its tokens come first.
     _, tower_mapping = lora_manager.set_active_adapters.call_args_list[0].args
     assert tower_mapping.index_mapping == (0, 0, 7)
+
+
+def test_set_active_mm_loras_skips_items_without_data():
+    """Cache-served items (data=None) are skipped by
+    EncoderRunner.prepare_mm_inputs, so they must not add mapping rows."""
+    model = Mock()
+    model.get_mm_lora_token_counts.side_effect = (
+        lambda *, modality, mm_kwargs, num_mm_embeds: (
+            num_mm_embeds + 1,
+            num_mm_embeds + 11,
+        )
+    )
+    model.get_mm_mapping.return_value = SimpleNamespace(connector=True)
+
+    lora_manager = Mock()
+    lora_manager.supports_tower_connector_lora.return_value = True
+
+    encoder_cache = EncoderCache()
+    encoder_cache.mm_features["req-with-lora"] = [
+        MultiModalFeatureSpec(
+            data=Mock(),
+            modality="image",
+            identifier="img-0",
+            mm_position=PlaceholderRange(offset=0, length=2),
+        ),
+        MultiModalFeatureSpec(
+            data=None,
+            modality="image",
+            identifier="img-1",
+            mm_position=PlaceholderRange(offset=2, length=3),
+        ),
+    ]
+
+    lora_state = LoraState(max_num_reqs=4)
+    lora_request = LoRARequest("vision-lora", 7, "/tmp/vision-lora")
+    lora_state.add_request("req-with-lora", 0, lora_request)
+
+    set_active_mm_loras(
+        model=model,
+        lora_manager=lora_manager,
+        encoder_cache=encoder_cache,
+        req_id_to_index={"req-with-lora": 0},
+        lora_state=lora_state,
+        scheduled_encoder_inputs={"req-with-lora": [0, 1]},
+    )
+
+    # Only img-0 (data present) contributes rows: 2 embeds -> 3 tower and
+    # 13 connector tokens. The cache-served img-1 adds nothing, matching
+    # EncoderRunner.prepare_mm_inputs.
+    assert lora_manager.set_active_adapters.call_count == 2
+    _, tower_mapping = lora_manager.set_active_adapters.call_args_list[0].args
+    assert tower_mapping.type is LoRAMappingType.TOWER
+    assert tower_mapping.prompt_mapping == (7,)
+    assert tower_mapping.index_mapping == (7, 7, 7)
+    _, connector_mapping = lora_manager.set_active_adapters.call_args_list[1].args
+    assert connector_mapping.type is LoRAMappingType.CONNECTOR
+    assert connector_mapping.prompt_mapping == (7,)
+    assert connector_mapping.index_mapping == (7,) * 13
+
+    # A step where every scheduled item is cache-served maps nothing.
+    lora_manager.reset_mock()
+    encoder_cache.mm_features["req-with-lora"][0] = MultiModalFeatureSpec(
+        data=None,
+        modality="image",
+        identifier="img-0",
+        mm_position=PlaceholderRange(offset=0, length=2),
+    )
+    set_active_mm_loras(
+        model=model,
+        lora_manager=lora_manager,
+        encoder_cache=encoder_cache,
+        req_id_to_index={"req-with-lora": 0},
+        lora_state=lora_state,
+        scheduled_encoder_inputs={"req-with-lora": [0, 1]},
+    )
+    lora_manager.set_active_adapters.assert_not_called()
 
 
 def test_batch_mm_inputs_from_scheduler_sorts_by_modality():

@@ -40,7 +40,14 @@ def set_active_mm_loras(
 
         lora_id = int(lora_state.lora_ids[req_idx])
         mm_features = encoder_cache.mm_features[req_id]
-        mm_items.extend((lora_id, mm_features[i]) for i in encoder_input_ids)
+        # Cache-served items (data=None) are skipped by
+        # EncoderRunner.prepare_mm_inputs, so they must not contribute mapping
+        # rows, or every later item's rows shift onto the wrong LoRA.
+        mm_items.extend(
+            (lora_id, mm_features[i])
+            for i in encoder_input_ids
+            if mm_features[i].data is not None
+        )
 
         if lora_id > 0:
             lora_request = lora_state.lora_requests.get(req_id)
