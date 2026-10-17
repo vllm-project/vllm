@@ -98,6 +98,19 @@ By default, a **compatibility hash** is checked during handshake. P and D instan
   resulting KV block layout is validated at handshake time rather than via the
   compatibility hash)
 
+### Hybrid SSM/Mamba models
+
+Hybrid SSM/Mamba models require the hybrid memory allocator (HMA). For hybrid
+transfers, set `VLLM_SSM_CONV_STATE_LAYOUT=DS` on both the prefill and decode
+instances:
+
+```bash
+VLLM_SSM_CONV_STATE_LAYOUT=DS
+```
+
+The `DS` layout (`dim, state_len`) is required by NixlConnector's Mamba
+convolution-state transfer path; the default `SD` layout is not supported.
+
 ### KV cache layout
 
 - NixlConnector defaults to **`LBHNC`** (head-major, formerly `HND`) layout for optimal transfer performance (non-MLA models).
