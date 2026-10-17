@@ -14,6 +14,7 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_up
+from vllm.utils.torch_utils import current_stream
 from vllm.v1.worker.ubatching import (
     dbo_current_ubatch_id,
     dbo_enabled,
@@ -24,6 +25,23 @@ from vllm.v1.worker.ubatching import (
     dbo_yield_and_switch_from_comm_to_compute,
     dbo_yield_and_switch_from_compute_to_comm,
 )
+
+
+def _dbo_record_stream(*tensors: torch.Tensor | None) -> None:
+    """Mark tensors allocated on the other DBO stream as used by this one.
+
+    Under DBO, DeepEP allocates its outputs on the comm stream while the
+    experts read them on the compute stream, and the reverse holds for the
+    dispatch and combine inputs. Without this, the caching allocator can hand
+    a freed block to the other ubatch while kernels on this stream still read
+    it.
+    """
+    if not dbo_enabled():
+        return
+    stream = current_stream()
+    for t in tensors:
+        if t is not None:
+            t.record_stream(stream)
 
 
 class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
@@ -124,6 +142,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         # kernel will block the CPU so we want to queue up all the compute
         # for the other ubatch before the dispatch kernel starts.
         dbo_yield_and_switch_from_compute_to_comm()
+        _dbo_record_stream(tokens, token_scales, rank_topk_ids, rank_topk_weights)
 
         (
             num_tokens_per_rank,
@@ -209,6 +228,9 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             expert_x, expert_x_scale = token_data
         else:
             expert_x, expert_x_scale = token_data, None
+        _dbo_record_stream(
+            expert_x, expert_x_scale, expert_topk_ids, expert_topk_weights
+        )
 
         # The existing MOE kernels assume that all entries of topk_ids are
         # valid. To that effect, set the -1s in expert_topk_ids to some expert
@@ -370,6 +392,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             )
         previous_event = dbo_get_previous_event(self.buffer.capture)
         dbo_yield_and_switch_from_compute_to_comm()
+        _dbo_record_stream(fused_expert_output)
         assert fused_expert_output.dtype == torch.bfloat16, (
             f"Expected fused_expert_output bfloat16, got {fused_expert_output.dtype}"
         )
