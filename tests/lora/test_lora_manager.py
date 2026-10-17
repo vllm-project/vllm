@@ -5,7 +5,7 @@ import os
 
 import pytest
 import torch
-from safetensors.torch import load_file
+from safetensors.torch import load_file, save_file
 from torch import nn
 
 from vllm.config import ModelConfig, VllmConfig
@@ -30,6 +30,7 @@ from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager, WorkerLoRAManager
 from vllm.model_executor.layers.fused_moe import GateLinear
+from vllm.model_executor.models.utils import PPMissingLayer
 from vllm.platforms import current_platform
 
 from .utils import create_peft_lora
@@ -987,6 +988,84 @@ def test_worker_adapter_manager(dist_init, dummy_model_gate_up, device, tmp_path
         DEFAULT_LANGUAGE_WRAPPER_KEY
     )
     assert punica_wrapper.device == device
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_worker_rejects_adapter_matching_no_module(
+    dist_init, dummy_model, device, tmp_path
+):
+    """An adapter named for another model class must not silently no-op."""
+    lora_config = LoRAConfig(
+        max_lora_rank=8, max_cpu_loras=4, max_loras=4, lora_dtype=DEFAULT_DTYPE
+    )
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(max_model_len=16), lora_config=lora_config
+    )
+    worker_adapter_manager = WorkerLoRAManager(vllm_config, device, EMBEDDING_MODULES)
+    worker_adapter_manager.vocab_size = dummy_model.unpadded_vocab_size
+    worker_adapter_manager.create_lora_manager(dummy_model, vllm_config)
+
+    lora_dir = f"{tmp_path}/lora_adapter"
+    os.makedirs(lora_dir, exist_ok=True)
+    tensors = create_peft_lora(
+        dummy_model,
+        save_dir=lora_dir,
+        target_modules=["layer1.dense1", "dense2"],
+        lora_dtype=DEFAULT_DTYPE,
+    )
+    save_file(
+        {
+            k.replace("base_model.model.", "base_model.model.model."): v
+            for k, v in tensors.items()
+        },
+        os.path.join(lora_dir, "adapter_model.safetensors"),
+    )
+
+    with pytest.raises(ValueError, match="would have no effect"):
+        worker_adapter_manager.set_active_adapters(
+            [LoRARequest("1", 1, lora_dir)], LoRAMapping([], [])
+        )
+    assert worker_adapter_manager.list_adapters() == set()
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_validate_lora_module_names(
+    default_vllm_config, dist_init, dummy_model, device, caplog_vllm
+):
+    # Simulate a pipeline-parallel worker that does not own `layer1`.
+    dummy_model.layer1 = PPMissingLayer()
+    manager = LoRAModelManager(
+        dummy_model,
+        1,
+        1,
+        1,
+        LoRAConfig(
+            max_lora_rank=8, max_cpu_loras=1, max_loras=1, lora_dtype=DEFAULT_DTYPE
+        ),
+        device=device,
+        vllm_config=default_vllm_config,
+    )
+
+    def make_lora(names: list[str]) -> LoRAModel:
+        return LoRAModel(
+            1,
+            8,
+            {
+                n: LoRALayerWeights(n, 8, 16, torch.zeros(8, 4), torch.zeros(4, 8))
+                for n in names
+            },
+        )
+
+    # Weights for layers on other pipeline stages are expected to be skipped.
+    manager._validate_lora_module_names(make_lora(["dense1", "layer1.dense1"]))
+    manager._validate_lora_module_names(make_lora(["layer1.dense1"]))
+    assert "do not match" not in caplog_vllm.text
+
+    manager._validate_lora_module_names(make_lora(["dense1", "model.dense2"]))
+    assert "model.dense2" in caplog_vllm.text
+
+    with pytest.raises(ValueError, match="would have no effect"):
+        manager._validate_lora_module_names(make_lora(["model.dense1", "model.dense2"]))
 
 
 @pytest.mark.parametrize("device", DEVICES)
