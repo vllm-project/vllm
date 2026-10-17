@@ -28,6 +28,7 @@ from vllm.entrypoints.serve.elastic_ep.middleware import (
     set_scaling_elastic_ep,
 )
 from vllm.exceptions import (
+    GenerationError,
     GracefulHTTPError,
     MaxQueuedTokensError,
     ProfilerAlreadyActiveError,
@@ -809,7 +810,7 @@ class AsyncLLM(EngineClient):
             raise
 
         # Request validation error or admission control rejection.
-        except (VLLMClientError, GracefulHTTPError) as e:
+        except (VLLMClientError, GracefulHTTPError, GenerationError) as e:
             if q is not None:
                 # E.g. a paused engine rejected one child: reclaim its n>1 siblings.
                 await self.abort(q.request_id, internal=True)
@@ -986,8 +987,8 @@ class AsyncLLM(EngineClient):
         """Pause generation to allow model weight updates.
 
         All mode handling (abort / wait / keep) and cache clearing is done
-        in the engine. In ``abort`` and ``wait`` mode, requests submitted after
-        this returns are rejected with a retryable ``EnginePausedError`` until
+        in the engine. In ``abort`` and ``wait`` mode, new requests are rejected
+        with ``RetryableRequestError`` from when the pause starts until
         :meth:`resume_generation`; ``keep`` accepts and queues them.
 
         Args:
@@ -1003,7 +1004,9 @@ class AsyncLLM(EngineClient):
         """
         if clear_cache:
             await self.renderer.clear_mm_cache_async()
-        await self.engine_core.pause_scheduler_async(mode=mode, clear_cache=clear_cache)
+        await self.engine_core.pause_scheduler_async(
+            mode=mode, clear_cache=clear_cache, reject_new=True
+        )
         # Small sleep to help ensure that final outputs from any in-flight requests are
         # returned prior to this method returning. These outputs come out of the engine
         # prior to the wait-for-idle completion event, but involve additional async
@@ -1085,7 +1088,7 @@ class AsyncLLM(EngineClient):
             raise
 
         # Request validation error or admission control rejection.
-        except (VLLMClientError, GracefulHTTPError):
+        except (VLLMClientError, GracefulHTTPError, GenerationError):
             if self.log_requests:
                 logger.info("Request %s failed (bad request).", request_id)
             raise

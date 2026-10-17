@@ -38,6 +38,7 @@ from vllm.multimodal.cache import (
     MultiModalCacheMissError,
     engine_receiver_cache_from_config,
 )
+from vllm.outputs import RequestError
 from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.tracing import instrument, maybe_init_worker_tracer
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
@@ -1154,6 +1155,7 @@ class EngineCoreProc(EngineCore):
         identity = self.engine_index.to_bytes(length=2, byteorder="little")
         self.engines_running = False
         self.shutdown_state = EngineShutdownState.RUNNING
+        self.reject_new_requests = False
 
         # Receiver for tensor IPC
         self.tensor_ipc_receiver: TensorIpcReceiver | None = None
@@ -1750,17 +1752,25 @@ class EngineCoreProc(EngineCore):
         return True
 
     def _reject_add_while_paused(self, request: Request) -> bool:
-        # A cleanup marker carries no work; it must still reach the KV connector.
+        # KV cleanup markers and inputs to open streaming sessions are not new work.
         if (
-            request.abort_immediately
-            or self.scheduler.pause_state != PauseState.PAUSED_NEW
+            not self.reject_new_requests
+            or request.abort_immediately
+            or request.request_id in self.scheduler.requests  # type: ignore
         ):
             return False
-        self._send_finish_outputs_to_client(
-            [request.request_id], request.client_index, FinishReason.PAUSED
+        error = RequestError(
+            code="engine_paused",
+            message="Generation is paused. Please retry after it resumes.",
+            retryable=True,
         )
-        # The client drops a rejected id, so end any open session under it.
-        self.abort_requests([request.request_id])
+        self._send_finish_outputs_to_client(
+            [request.request_id], request.client_index, FinishReason.ERROR, error
+        )
+        if request.kv_transfer_params:
+            # Let the KV connector free any remote blocks held for it.
+            request.abort_immediately = True
+            self.add_request(request)
         return True
 
     def _reject_utility_in_shutdown(
@@ -2109,23 +2119,29 @@ class EngineCoreProc(EngineCore):
         self._send_error_outputs_to_client([request.request_id], request.client_index)
 
     def pause_scheduler(
-        self, mode: PauseMode = "abort", clear_cache: bool = True
+        self,
+        mode: PauseMode = "abort",
+        clear_cache: bool = True,
+        reject_new: bool = False,
     ) -> Future | None:
         """Pause generation; behavior depends on mode.
 
-        "abort" and "wait" reject new adds; "keep" queues them. "abort" and
-        "keep" skip step(); "wait" allows step() so in-flight requests can drain.
+        All pause modes queue new adds -- "abort" and "keep" skip step();
+        "wait" allows step() so in-flight requests can drain. With
+        ``reject_new``, "abort" and "wait" instead reject new requests with a
+        retryable error until resume.
 
         - ``abort``: Set PAUSED_NEW, abort all requests, wait for abort
           outputs to be sent (when running with output_queue), optionally
           clear caches, then complete the returned Future.
-        - ``wait``: Set PAUSED_NEW (reject adds, keep stepping); when drained,
+        - ``wait``: Set PAUSED_NEW (queue adds, keep stepping); when drained,
           optionally clear caches, then complete the returned Future.
         - ``keep``: Set PAUSED_ALL; return a Future that completes when the
           output queue is empty.
         """
         if mode not in get_args(PauseMode):
             raise ValueError(f"Invalid pause mode: {mode}")
+        self.reject_new_requests = reject_new and mode != "keep"
 
         def engine_idle_callback(engine: "EngineCoreProc", future: Future[Any]) -> None:
             try:
@@ -2152,6 +2168,10 @@ class EngineCoreProc(EngineCore):
         self._idle_state_callbacks.append(partial(engine_idle_callback, future=future))
         return future
 
+    def resume_scheduler(self) -> None:
+        self.reject_new_requests = False
+        super().resume_scheduler()
+
     def _pause_complete(self) -> bool:
         """Returns True if the pause has fully completed and the caller can
         return ``None`` synchronously; False if the pause is still pending
@@ -2160,10 +2180,14 @@ class EngineCoreProc(EngineCore):
         return not self.has_work()
 
     def _send_finish_outputs_to_client(
-        self, req_ids: list[str], client_index: int, finish_reason: FinishReason
+        self,
+        req_ids: list[str],
+        client_index: int,
+        finish_reason: FinishReason,
+        error: RequestError | None = None,
     ) -> None:
         outputs = [
-            EngineCoreOutput(req_id, [], finish_reason=finish_reason)
+            EngineCoreOutput(req_id, [], finish_reason=finish_reason, error=error)
             for req_id in req_ids
         ]
         eco = EngineCoreOutputs(finished_requests=req_ids, outputs=outputs)

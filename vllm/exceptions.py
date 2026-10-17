@@ -198,17 +198,3 @@ class ProfilerAlreadyActiveError(GracefulHTTPError):
             "starting another session.",
             HTTPStatus.CONFLICT,
         )
-
-
-class EnginePausedError(GracefulHTTPError):
-    """Raised when a request arrives while generation is paused.
-
-    Returns HTTP 503 (Service Unavailable) so that load balancers and
-    client SDKs retry the request once the engine resumes.
-    """
-
-    def __init__(self):
-        super().__init__(
-            "Generation is paused. Please retry after it resumes.",
-            HTTPStatus.SERVICE_UNAVAILABLE,
-        )

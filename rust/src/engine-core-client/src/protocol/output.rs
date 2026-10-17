@@ -55,8 +55,6 @@ pub enum EngineCoreFinishReason {
     Error = 3,
     /// A repetitive token pattern was detected.
     Repetition = 4,
-    /// Rejected on arrival because generation is paused.
-    Paused = 5,
 }
 
 /// Event types emitted by engine-core for one request.
@@ -145,6 +143,24 @@ pub struct EngineCoreOutput {
     /// the first output of a request that asked for them.
     #[serde(default)]
     pub prompt_token_id_logprobs: Option<Box<WireNdArray>>,
+    /// Request-level error sent with [`EngineCoreFinishReason::Error`], e.g.
+    /// when a paused engine rejects a request.
+    #[serde(default)]
+    pub error: Option<Box<RequestError>>,
+}
+
+/// A request-level error that does not mark the engine as unhealthy.
+///
+/// Python models this as a plain `@dataclass`, so it is serialized by msgspec
+/// as a map (named fields).
+///
+/// Original Python definition: `RequestError` in `vllm/outputs.py`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RequestError {
+    pub code: String,
+    pub message: String,
+    #[serde(default)]
+    pub retryable: bool,
 }
 
 /// Raw per-sequence speculative-decoding accumulator.
@@ -558,6 +574,7 @@ mod tests {
                             new_sampling_mask: None,
                             spec_decode_metrics: None,
                             prompt_token_id_logprobs: None,
+                            error: None,
                         },
                     ],
                     scheduler_stats: None,

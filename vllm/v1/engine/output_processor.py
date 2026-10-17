@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any, cast
 import numpy as np
 import torch
 
-from vllm.exceptions import EnginePausedError
+from vllm.exceptions import GenerationError, RetryableRequestError
 from vllm.lora.request import LoRARequest
 from vllm.outputs import (
     STREAM_FINISHED,
@@ -762,6 +762,23 @@ class OutputProcessor:
                 # Ignore output for already-aborted request.
                 continue
 
+            error = engine_core_output.error
+            if error is not None and req_state.queue is not None:
+                # Rejected on arrival, e.g. by a paused engine; nothing was run.
+                req_state.queue.put(
+                    RetryableRequestError(error.message)
+                    if error.retryable
+                    else GenerationError(error.message)
+                )
+                if req_state.parent_req is not None:
+                    req_state.parent_req.child_requests.discard(req_id)
+                self.lora_states.request_finished(req_id, req_state.lora_name)
+                self._finish_request(req_state)
+                if req_state.streaming_input:
+                    # Input chunks sent since may re-create the session.
+                    reqs_to_abort.append(req_id)
+                continue
+
             # 1) Compute stats for this iteration.
             self._update_stats_from_output(
                 req_state, engine_core_output, engine_core_timestamp, iteration_stats
@@ -770,9 +787,6 @@ class OutputProcessor:
             new_token_ids = engine_core_output.new_token_ids
             pooling_output = engine_core_output.pooling_output
             finish_reason = engine_core_output.finish_reason
-            if finish_reason == FinishReason.PAUSED and req_state.detokenizer is None:
-                # Rejected on arrival, so there is nothing to pool.
-                pooling_output = EMPTY_CPU_TENSOR
             stop_reason = engine_core_output.stop_reason
             kv_transfer_params = engine_core_output.kv_transfer_params
             ec_transfer_params = engine_core_output.ec_transfer_params
@@ -836,8 +850,7 @@ class OutputProcessor:
                 req_state.logprobs_processor.update_from_output(engine_core_output)
 
             streaming_chunk_boundary = req_state.streaming_input and (
-                finish_reason
-                not in (FinishReason.ABORT, FinishReason.ERROR, FinishReason.PAUSED)
+                finish_reason not in (FinishReason.ABORT, FinishReason.ERROR)
             )
 
             # 4) Create and handle RequestOutput objects.
@@ -859,9 +872,6 @@ class OutputProcessor:
                 else:
                     # LLMEngine: return list of RequestOutputs.
                     request_outputs.append(request_output)
-            if finish_reason == FinishReason.PAUSED and req_state.queue is not None:
-                # Retryable rejection; overrides any output still to be consumed.
-                req_state.queue.put(EnginePausedError())
 
             # Free completed requests.
             if finish_reason is not None:

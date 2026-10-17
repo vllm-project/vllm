@@ -33,8 +33,8 @@ use vllm_engine_core_client::protocol::logprobs::{
     Logprobs, MaybeWireLogprobs, PositionLogprobs, TokenLogprob,
 };
 use vllm_engine_core_client::protocol::output::{
-    EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, RequestBatchOutputs, StopReason,
-    UtilityCallOutput,
+    EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, RequestBatchOutputs, RequestError,
+    StopReason, UtilityCallOutput,
 };
 use vllm_engine_core_client::protocol::request::EngineCoreRequest;
 use vllm_engine_core_client::protocol::utility::{UtilityOutput, UtilityResultEnvelope};
@@ -614,7 +614,7 @@ fn qwen_multimodal_model_info_with_limits(
 
 async fn test_models_with_engine_outputs_and_backend_inner(
     engine_id: impl Into<EngineId>,
-    output_specs: Vec<(Vec<u32>, Option<EngineCoreFinishReason>)>,
+    outputs: impl FnOnce(&str) -> EngineCoreOutputs + Send + 'static,
     check_request: impl FnOnce(&EngineCoreRequest) + Send + 'static,
     backend: Arc<dyn ChatTextBackend>,
 ) -> (ChatLlm, MockEngineTask) {
@@ -631,11 +631,7 @@ async fn test_models_with_engine_outputs_and_backend_inner(
                 let request: EngineCoreRequest =
                     rmp_serde::from_slice(&add[1]).expect("decode request");
                 check_request(&request);
-                send_outputs(
-                    push,
-                    engine_outputs_for_request(&request.request_id, output_specs),
-                )
-                .await;
+                send_outputs(push, outputs(&request.request_id)).await;
             })
         },
     ));
@@ -662,8 +658,13 @@ async fn test_models_with_engine_outputs_and_backend(
     output_specs: Vec<(Vec<u32>, Option<EngineCoreFinishReason>)>,
     backend: Arc<dyn ChatTextBackend>,
 ) -> (ChatLlm, MockEngineTask) {
-    test_models_with_engine_outputs_and_backend_inner(engine_id, output_specs, |_| {}, backend)
-        .await
+    test_models_with_engine_outputs_and_backend_inner(
+        engine_id,
+        move |request_id| engine_outputs_for_request(request_id, output_specs),
+        |_| {},
+        backend,
+    )
+    .await
 }
 
 async fn test_chat_with_engine_outputs(
@@ -1548,7 +1549,7 @@ async fn render_chat_response_can_be_submitted_to_generate_unchanged() {
 
     let (chat, engine_task) = test_models_with_engine_outputs_and_backend_inner(
         b"engine-render-generate-round-trip",
-        default_stream_output_specs(),
+        |request_id| engine_outputs_for_request(request_id, default_stream_output_specs()),
         move |request| {
             assert_eq!(
                 request.prompt_token_ids.as_deref(),
@@ -3737,9 +3738,9 @@ async fn invalid_terminal_finish_reason_is_returned_as_openai_error_sse() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
-async fn request_rejected_by_paused_engine_returns_engine_paused() {
-    // A paused rejection is a retryable `engine_paused` error on every route:
-    // a 503 when it arrives before the response starts, an SSE error after.
+async fn retryable_engine_error_returns_service_unavailable() {
+    // A retryable engine error (e.g. a paused engine's rejection) is a 503 on
+    // every route when it arrives before the response starts, an SSE error after.
     let model = "Qwen/Qwen1.5-0.5B-Chat";
     let messages = json!([{"role": "user", "content": "hello"}]);
     let raw = |stream: bool| {
@@ -3762,9 +3763,32 @@ async fn request_rejected_by_paused_engine_returns_engine_paused() {
         ("/inference/v1/generate", raw(true), StatusCode::OK),
     ];
     for (uri, request, status) in cases {
-        let (mut app, engine_task) =
-            test_app_with_stream_output_specs(vec![(vec![], Some(EngineCoreFinishReason::Paused))])
-                .await;
+        let (chat, engine_task) = test_models_with_engine_outputs_and_backend_inner(
+            b"engine-openai",
+            |request_id| {
+                RequestBatchOutputs {
+                    outputs: vec![EngineCoreOutput {
+                        request_id: request_id.to_string(),
+                        finish_reason: Some(EngineCoreFinishReason::Error),
+                        error: Some(Box::new(RequestError {
+                            code: "engine_paused".to_string(),
+                            message: "Generation is paused.".to_string(),
+                            retryable: true,
+                        })),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }
+                .into()
+            },
+            |_| {},
+            Arc::new(FakeChatBackend::new()),
+        )
+        .await;
+        let mut app = build_router_with_scale_out_endpoints(
+            Arc::new(AppState::new(vec![model.to_string()], chat)),
+            true,
+        );
         let response = app
             .call(
                 Request::builder()
@@ -6694,7 +6718,11 @@ async fn pause_route_uses_python_compatible_default_query_values() {
             assert_eq!(array[2], Value::from("pause_scheduler"));
             assert_eq!(
                 array[3],
-                Value::Array(vec![Value::from("abort"), Value::from(true)])
+                Value::Array(vec![
+                    Value::from("abort"),
+                    Value::from(true),
+                    Value::from(true)
+                ])
             );
 
             send_outputs(push, utility_outputs(call_id, utility_none_result())).await;

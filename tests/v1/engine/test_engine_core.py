@@ -36,7 +36,6 @@ from vllm.v1.executor.abstract import Executor
 from vllm.v1.executor.uniproc_executor import UniProcExecutor
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import ModelRunnerOutput
-from vllm.v1.request import RequestStatus
 
 from ...utils import create_new_process_for_each_test, multi_gpu_test
 
@@ -756,42 +755,55 @@ def _pausable_engine_core_proc() -> EngineCoreProc:
 
 
 @pytest.mark.parametrize(
-    "pause_state,cleanup_marker,rejected",
+    "mode,reject_new,kind,rejected",
     [
-        pytest.param(PauseState.PAUSED_NEW, False, True, id="abort-or-wait"),
-        pytest.param(PauseState.PAUSED_NEW, True, False, id="kv-cleanup-marker"),
-        pytest.param(PauseState.PAUSED_ALL, False, False, id="keep"),
-        pytest.param(PauseState.UNPAUSED, False, False, id="running"),
+        pytest.param("abort", True, "new", True, id="abort"),
+        pytest.param("wait", True, "new", True, id="wait"),
+        pytest.param("abort", True, "pd", True, id="pd-request"),
+        pytest.param("keep", True, "new", False, id="keep"),
+        pytest.param("abort", False, "new", False, id="sleep-or-elastic-ep"),
+        pytest.param("abort", True, "cleanup", False, id="kv-cleanup-marker"),
+        pytest.param("abort", True, "session", False, id="open-session-input"),
     ],
 )
-def test_add_rejected_while_paused_at_a_boundary(pause_state, cleanup_marker, rejected):
-    """A boundary pause rejects new requests before they reach the scheduler
-    or DP wave state; `keep` queues them across the pause. A KV-transfer
-    cleanup marker must still reach the connector. The client drops a rejected
-    id, so any open session under it is ended too."""
+def test_pause_generation_rejects_new_requests(mode, reject_new, kind, rejected):
+    """`pause_generation` rejects new requests with a retryable error until
+    resume; `keep` and internal pauses (sleep, elastic EP) queue them. KV
+    cleanup markers and inputs to an open streaming session are not new work,
+    and a rejected P/D request still reaches the connector as a cleanup marker."""
     core = _pausable_engine_core_proc()
-    core.scheduler.pause_state = pause_state
     core.shutdown_state = EngineShutdownState.RUNNING
+    core.scheduler.requests = {"r": MagicMock()} if kind == "session" else {}
     core.add_request = MagicMock()
     core._send_finish_outputs_to_client = MagicMock()
     request = MagicMock(
-        request_id="r", client_index=1, abort_immediately=cleanup_marker
+        request_id="r",
+        client_index=1,
+        abort_immediately=kind == "cleanup",
+        kv_transfer_params={"do_remote_prefill": True} if kind == "pd" else None,
     )
 
+    core.pause_scheduler(mode=mode, clear_cache=False, reject_new=reject_new)
     core._handle_client_request(EngineCoreRequestType.ADD, (request, 0))
 
     if rejected:
-        core.add_request.assert_not_called()
-        core.scheduler.finish_requests.assert_called_once_with(
-            ["r"], RequestStatus.FINISHED_ABORTED
-        )
-        core._send_finish_outputs_to_client.assert_called_once_with(
-            ["r"], 1, FinishReason.PAUSED
-        )
+        [(req_ids, client_index, reason, error)] = [
+            call.args for call in core._send_finish_outputs_to_client.call_args_list
+        ]
+        assert (req_ids, client_index, reason) == (["r"], 1, FinishReason.ERROR)
+        assert error.code == "engine_paused" and error.retryable
     else:
-        core.add_request.assert_called_once_with(request, 0)
-        core.scheduler.finish_requests.assert_not_called()
         core._send_finish_outputs_to_client.assert_not_called()
+    if rejected and kind != "pd":
+        core.add_request.assert_not_called()
+    else:
+        assert request.abort_immediately == (kind in ("cleanup", "pd"))
+        core.add_request.assert_called_once()
+
+    core.resume_scheduler()
+    core.add_request.reset_mock()
+    core._handle_client_request(EngineCoreRequestType.ADD, (request, 0))
+    core.add_request.assert_called_once_with(request, 0)
 
 
 @pytest.mark.parametrize(

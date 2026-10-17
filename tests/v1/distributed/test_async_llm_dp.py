@@ -14,7 +14,7 @@ from vllm import SamplingParams
 from vllm.config import VllmConfig
 from vllm.config.parallel import DataParallelBackend
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.exceptions import EnginePausedError
+from vllm.exceptions import RetryableRequestError
 from vllm.inputs import PromptType
 from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
@@ -390,7 +390,7 @@ async def test_dp_pause_late_request_does_not_block_drain():
         assert not await _poll_flag(engine, True, timeout=5)
 
         # The engine rejected it rather than carrying it across the boundary.
-        with pytest.raises(EnginePausedError):
+        with pytest.raises(RetryableRequestError):
             await asyncio.wait_for(collector.get(), timeout=60)
         assert not engine.output_processor.has_unfinished_requests()
         await engine.resume_generation()
@@ -482,11 +482,12 @@ async def test_dp_sleep_late_request_does_not_block_drain():
         )
         assert not await _poll_flag(engine, True, timeout=5)
 
-        with pytest.raises(EnginePausedError):
-            await asyncio.wait_for(collector.get(), timeout=60)
-        assert not engine.output_processor.has_unfinished_requests()
         await engine.wake_up()
         assert not await engine.is_sleeping()
+        while True:
+            out = await asyncio.wait_for(collector.get(), timeout=60)
+            if out.finished:
+                break
 
 
 @pytest.mark.asyncio

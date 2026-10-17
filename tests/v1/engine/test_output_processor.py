@@ -19,12 +19,13 @@ from tests.v1.engine.utils import (
 )
 from vllm import PoolingParams
 from vllm.config.watermarking import WatermarkConfig
-from vllm.exceptions import EnginePausedError
+from vllm.exceptions import RetryableRequestError
 from vllm.logprobs import FlatLogprobs, Logprob, PromptLogprobs, SampleLogprobs
 from vllm.lora.request import LoRARequest
 from vllm.outputs import (
     CompletionOutput,
     PoolingRequestOutput,
+    RequestError,
     RequestOutput,
     SamplingMask,
     WeightVersionSpan,
@@ -1813,13 +1814,10 @@ def test_abort_requests(runner: str, abort_by: str, dummy_test_vectors):
 
 
 @pytest.mark.parametrize("runner", ["generate", "pooling"])
-@pytest.mark.parametrize("async_consumer", [False, True])
-def test_request_rejected_while_paused(
-    runner: str, async_consumer: bool, dummy_test_vectors
-):
-    """A paused engine rejects a request with no output of any kind: it still
-    finishes cleanly, as a retryable error for AsyncLLM and as a "paused"
-    result for LLMEngine, and a streaming-input session stops taking input."""
+def test_request_rejected_by_engine(runner: str, dummy_test_vectors):
+    """A request the engine rejects on arrival (e.g. while paused) raises its
+    retryable error to the caller, leaves no stats behind, and ends a
+    streaming-input session, including any input chunks sent since."""
     output_processor = OutputProcessor(dummy_test_vectors.tokenizer, log_stats=True)
     request = EngineCoreRequest(
         request_id="request-0",
@@ -1834,27 +1832,26 @@ def test_request_rejected_while_paused(
         pooling_params=PoolingParams(task="embed") if runner == "pooling" else None,
         resumable=runner == "generate",
     )
-    queue = (
-        RequestOutputCollector(RequestOutputKind.FINAL_ONLY, request.request_id)
-        if async_consumer
-        else None
-    )
+    queue = RequestOutputCollector(RequestOutputKind.FINAL_ONLY, request.request_id)
     output_processor.add_request(request, None, queue=queue)
+    error = RequestError(code="engine_paused", message="paused", retryable=True)
+    iteration_stats = IterationStats()
 
     result = output_processor.process_outputs(
-        [EngineCoreOutput(request.request_id, [], finish_reason=FinishReason.PAUSED)]
+        [
+            EngineCoreOutput(
+                request.request_id, [], finish_reason=FinishReason.ERROR, error=error
+            )
+        ],
+        iteration_stats=iteration_stats,
     )
 
-    # The input task stops once its request is gone.
     assert not output_processor.has_request(request.request_id)
-    # Chunks the input task sent after the rejection must not outlive it.
     assert result.reqs_to_abort == ([request.request_id] if request.resumable else [])
-    if queue is not None:
-        with pytest.raises(EnginePausedError):
-            queue.get_nowait()
-    else:
-        [output] = result.request_outputs
-        assert output.finished
+    assert not iteration_stats.finished_requests
+    assert not iteration_stats.time_to_first_tokens_iter
+    with pytest.raises(RetryableRequestError, match="paused"):
+        queue.get_nowait()
 
 
 @pytest.mark.parametrize("output_kind", list(RequestOutputKind))

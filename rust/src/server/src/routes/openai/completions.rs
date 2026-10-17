@@ -36,7 +36,7 @@ use super::utils::logprobs::{
 use super::utils::metrics::PerRequestMetrics;
 use super::utils::types::{StreamResponseEnvelope, Usage};
 use crate::config::ApiServerOptions;
-use crate::error::{ApiError, bail_server_error, server_error, text_submit_error};
+use crate::error::{ApiError, bail_server_error, engine_error, server_error, text_submit_error};
 use crate::lora::LoraModelResolution;
 use crate::routes::openai::completions::types::{
     CompletionChoice, CompletionResponse, CompletionSseChunk, CompletionStreamChoice,
@@ -490,10 +490,7 @@ fn completion_finish_reason_to_openai(
         FinishReason::Repetition(_) => Ok("repetition"),
         FinishReason::Length => Ok("length"),
         FinishReason::Abort => Ok("abort"),
-        FinishReason::Error => {
-            bail_server_error!("Internal server error");
-        }
-        FinishReason::Paused => Err(ApiError::EnginePaused),
+        FinishReason::Error(error) => Err(engine_error(error.as_deref())),
     }
 }
 
@@ -663,7 +660,7 @@ mod tests {
 
     #[test]
     fn final_chunk_rejects_error_finish_reason() {
-        assert!(final_chunk(&stream_envelope(), FinishReason::Error).is_err());
+        assert!(final_chunk(&stream_envelope(), FinishReason::Error(None)).is_err());
     }
 
     #[tokio::test]

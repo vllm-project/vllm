@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, call
 import pytest
 
 import vllm.v1.engine.async_llm as async_llm_module
-from vllm import SamplingParams
+from vllm import PoolingParams, SamplingParams
 from vllm.assets.image import ImageAsset
 from vllm.config import LoggingConfig, ProfilerConfig, VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -23,8 +23,8 @@ from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.exceptions import (
-    EnginePausedError,
     ProfilerAlreadyActiveError,
+    RetryableRequestError,
     VLLMValidationError,
 )
 from vllm.inputs import PromptType
@@ -113,6 +113,31 @@ def _mock_vllm_config() -> MagicMock:
     vllm_config.observability_config.otlp_traces_endpoint = None
     vllm_config.scheduler_config.stream_interval = 1
     return vllm_config
+
+
+@pytest.mark.parametrize("method", ["generate", "encode"])
+def test_retryable_request_error_reaches_caller(
+    monkeypatch: pytest.MonkeyPatch, method: str
+):
+    """A retryable engine rejection (e.g. while paused) reaches the caller as
+    is, not wrapped as an engine failure."""
+    vllm_config = _mock_vllm_config()
+    vllm_config.profiler_config.should_profile_frontend = False
+    engine_core = _mock_async_llm_dependencies(monkeypatch)
+    engine_core.abort_requests_async = AsyncMock()
+    engine = AsyncLLM(vllm_config, MagicMock(), log_stats=False)
+    collector = MagicMock(request_id="r")
+    collector.get_nowait.return_value = None
+    collector.get = AsyncMock(side_effect=RetryableRequestError("paused"))
+    monkeypatch.setattr(engine, "add_request", AsyncMock(return_value=collector))
+    params = SamplingParams() if method == "generate" else PoolingParams(task="embed")
+
+    async def run():
+        async for _ in getattr(engine, method)(TEXT_PROMPT, params, "r"):
+            pass
+
+    with pytest.raises(RetryableRequestError):
+        asyncio.run(run())
 
 
 def test_cuda_profiler_requests_reach_engine_core(monkeypatch: pytest.MonkeyPatch):
@@ -1367,7 +1392,7 @@ async def test_pause_admission_policy_per_mode(mode: str):
         # A utility call is handled after the add, so the paused engine saw it.
         assert await asyncio.wait_for(engine.is_paused(), timeout=60)
         if mode != "keep":
-            with pytest.raises(EnginePausedError):
+            with pytest.raises(RetryableRequestError):
                 await asyncio.wait_for(collector.get(), timeout=60)
 
             # The other child's rejection may still be in flight.
@@ -1395,26 +1420,34 @@ async def test_pause_mid_fanout_rejects_the_whole_request(
             engine = AsyncLLM.from_engine_args(TEXT_ENGINE_ARGS)
         after.callback(engine.shutdown)
 
-        original = engine.engine_core.add_request_async
-        submitted = 0
+        original_add = engine.engine_core.add_request_async
+        original_abort = engine.engine_core.abort_requests_async
+        submitted: list[str] = []
+        aborted: list[str] = []
 
         async def pause_after_first_child(request):
-            nonlocal submitted
-            if submitted == 0:
+            if not submitted:
                 # Keep the first child queued, where a wait pause leaves it.
                 await engine.pause_generation(mode="keep")
-            await original(request)
-            submitted += 1
-            if submitted == 1:
+            await original_add(request)
+            submitted.append(request.request_id)
+            if len(submitted) == 1:
                 await engine.pause_generation(mode="wait")
+
+        async def record_abort(request_ids):
+            aborted.extend(request_ids)
+            await original_abort(request_ids)
 
         monkeypatch.setattr(
             engine.engine_core, "add_request_async", pause_after_first_child
         )
-        with pytest.raises(EnginePausedError):
+        monkeypatch.setattr(engine.engine_core, "abort_requests_async", record_abort)
+        with pytest.raises(RetryableRequestError):
             await _generate(engine, "fanout", n=3)
         monkeypatch.undo()
 
+        # The queued child is reclaimed in the engine, not just the frontend.
+        assert submitted[0] in aborted
         assert not engine.output_processor.has_unfinished_requests()
         assert not engine.output_processor.parent_requests
         await engine.resume_generation()
