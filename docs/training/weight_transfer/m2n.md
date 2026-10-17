@@ -10,31 +10,29 @@ The `nccl_m2n` weight transfer engine uses [NCCL M2N](https://github.com/NVIDIA/
 
 ## Requirements
 
-This backend depends on the `nccl-extensions` Python package (and its `nccl4py` dependency), which vLLM does not install. It needs NCCL 2.30.5 or newer, and `libnccl_m2n.so` is linked against a specific NCCL build, so vLLM must load the same library:
-
-```bash
-export VLLM_NCCL_SO_PATH=/path/to/the/same/libnccl.so
-```
+This backend depends on the `nccl-extensions` Python package (and its `nccl4py` dependency), which vLLM does not install. Install both against a compatible NCCL 2.30.5 or newer runtime. The backend creates its data-plane communicator through `nccl4py` and passes that communicator directly to `nccl.m2n`.
 
 The backend imports the runtime lazily, so vLLM is unaffected unless you select it.
 
 ## How It Works
 
-1. The trainer ranks and all inference workers join **one** NCCL communicator via `StatelessProcessGroup`. Trainer ranks occupy `[0, T)` and workers `[T, T + N)` — m2n meshes are contiguous rank intervals, which is exactly what vLLM's existing `rank_offset` convention produces.
-2. At the init handshake the trainer ships the full transfer plan: both meshes — one per side, shared by every parameter — then each parameter's name, dtype, shape and placement. The workers resolve the matching **destination placements** and publish them back over the shared group; the meshes themselves are declared, not negotiated.
+1. A `StatelessProcessGroup` exchanges metadata and the NCCL unique ID. During this metadata-only phase, trainers agree on each parameter's source layout and workers resolve their rank-local destinations. Every participant agrees on the complete ordered source and destination plans before entering NCCL initialization.
+2. After plan agreement, the trainer ranks and all inference workers create **one** `nccl.core.Communicator`: trainer ranks occupy `[0, T)` and workers `[T, T + N)`. The communicator is passed directly to each M2N collective.
 3. Each round, both sides issue one `reshard` per parameter in the same order. Every rank in the communicator participates in every reshard, so — as with the NCCL engine — the worker must be inside `update_weights` while the trainer sends. The trainer engine handles that concurrency itself.
 
 ### Destination resolution
 
-A parameter is resharded **directly into the live vLLM parameter** when its checkpoint name maps 1:1 onto a model parameter whose shape is either identical to the checkpoint shape (replicated) or differs on exactly one dim by the tensor-parallel factor. That rank then only ever receives its own shard.
+A parameter uses one collectively agreed destination mode:
 
-Anything else falls back to receiving the full tensor and letting `load_weights` do the sharding, exactly as the NCCL engine does for every parameter. The fallback covers:
+- **In place:** M2N writes a validated exact-name live vLLM parameter.
+- **Rank-local staging:** a model module declares the local shard it owns and a callback that installs it into model-native storage. M2N transfers only that shard to the worker.
+- **Full fallback:** when the producer explicitly permits it, M2N reconstructs the complete logical tensor on each worker and passes it through `load_weights`.
 
-- fused parameters (`qkv_proj`, `gate_up_proj`, MoE `w13`/`w2`), whose checkpoint names do not name a model parameter
-- quantized models, where the weight loader does more than a sharded copy
-- pipeline-parallel deployments
+The first model-native integration is unquantized `RoutedExperts`. It receives only locally owned expert shards and uses the existing loading path to place logical gate/up and down projections into fused `w13_weight` and `w2_weight` storage. This is an example of the generic destination contract, not a model-name rule in the transport engine.
 
-Correctness never depends on a parameter resolving. The engine logs how many parameters took each path at init.
+Other fused parameters, quantized models, pipeline-parallel deployments, or modules without a semantic target use full fallback only when the source permits it. Otherwise initialization fails before the data-plane communicator is created.
+
+`plan_summary()` reports how many parameters and logical bytes use each mode, plus the aggregate receiver payload implied by the agreed plan.
 
 ## Configuration
 
@@ -83,19 +81,31 @@ engine.send_weights()
 
 `send_weights()` drives the whole round — `start_weight_update`, `update_weights`, `finish_weight_update`. Every rank in the communicator must be inside the same reshard, so `update_weights` has to be in flight while the trainer sends; the engine runs it on a helper thread so the trainer loop does not have to open-code that.
 
-Trainers with a custom producer (a Megatron export, MoE re-fusing) subclass `M2NWeightSource` and supply layouts explicitly.
+Trainers with a custom producer (a Megatron export, MoE re-fusing) subclass
+`M2NWeightSource` and supply layouts explicitly. A source may yield any
+nccl4py-compatible CUDA buffer: a torch tensor, a CUDA Array Interface object,
+or a raw device pointer. vLLM keeps buffer owners alive through stream
+completion, using allocator stream tracking when the buffer provides it.
+Sources must provide buffers on the communicator's current device; nccl4py
+resolves their pointers but does not verify device ownership. Raw-pointer
+sources are additionally responsible for pointer lifetime and matching their
+declared dtype and local shape.
 
 See [`examples/rl/rlhf_m2n.py`](../../../examples/rl/rlhf_m2n.py) for a runnable FSDP → TP example.
 
 ## Limitations
 
-- Tensor rank 1..3; 4-D parameters are rejected.
-- dtypes: int8/uint8, fp8 e4m3/e5m2, fp16, bf16, int32/uint32, fp32, int64/uint64, fp64. No fp4.
-- The trainer's device mesh must cover a contiguous rank interval starting at 0, and be 1-D or 2-D.
+- vLLM validates tensor-rank and dtype support while agreeing on the complete
+  plan; the installed M2N runtime validates them again for each reshard.
+- Each parameter's source mesh must cover the same contiguous trainer-rank interval starting at 0, and be 1-D or 2-D.
 - `Partial` placements are not supported.
 - Models with known model-level checkpoint preprocessing use the full-tensor
   fallback for the affected module.
+- Model-native rank-local targets currently require an unquantized PP1
+  deployment. The first production consumer additionally requires TP1,
+  expert parallelism, and uniform contiguous expert ownership.
 - A reshard cannot be issued from inside a CUDA graph capture (weight updates run outside capture, so this only matters for custom callers).
-- The reshard plan is capped per *shard*, not per mesh: at most 16 source shards may feed one destination shard, and one source shard may feed at most 64 destination shards (`MAX_SOURCES` / `MAX_TARGETS` in the m2n build; raising either needs a rebuild).
-- A directly-resharded parameter spreads over `tp_size` destination shards, so each one is fed by fewer source shards. A parameter on the fallback path is replicated, i.e. a single destination shard fed by every source shard, so a trainer that **sharded** its parameters is still limited to 16 ranks whenever any parameter falls back — which fused parameters always do. A replicated trainer is unaffected.
+- vLLM checks every parameter's shard overlap against conservative 16-source
+  and 64-target capacities before committing the plan. The installed M2N
+  runtime remains authoritative and validates each reshard again.
 - Each communicator holds a cached staging pool (~256 MiB by default: 4 channels x 64 MiB).
