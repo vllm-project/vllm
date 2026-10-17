@@ -6,8 +6,8 @@
 use std::sync::LazyLock;
 
 pub use vllm_parser::unified::{
-    Gemma4UnifiedParser, HfTemplateError, HfUnifiedParser, HyV3UnifiedParser, HyV4UnifiedParser,
-    InklingUnifiedParser, KimiK3UnifiedParser, ResponseTemplate, UnifiedParser,
+    BeamUnifiedParser, Gemma4UnifiedParser, HfTemplateError, HfUnifiedParser, HyV3UnifiedParser,
+    HyV4UnifiedParser, InklingUnifiedParser, KimiK3UnifiedParser, ResponseTemplate, UnifiedParser,
 };
 use vllm_tokenizer::DynTokenizer;
 
@@ -26,6 +26,9 @@ pub mod names {
     /// name resolution only: it is built from the model's template, never by its
     /// registry constructor.
     pub const HF: &str = "hf";
+    /// Beam checkpoints: [`HF`] with Beam's tool-call grammar, built from the
+    /// model's template the same way.
+    pub const BEAM: &str = "beam";
 }
 
 /// Constructor signature for one registered unified parser implementation.
@@ -55,6 +58,7 @@ impl UnifiedParserFactory {
         factory.register_parser::<KimiK3UnifiedParser>(names::KIMI_K3);
         // Opt-in only: no model patterns map to it.
         factory.register_parser::<HfUnifiedParser>(names::HF);
+        factory.register_parser::<BeamUnifiedParser>(names::BEAM);
 
         factory
             .register_pattern("gemma-4", names::GEMMA4)

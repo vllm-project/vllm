@@ -33,7 +33,7 @@ import vllm.envs as envs
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.compilation.wrapper import compile_model_with_stock_torch
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.distributed.aux_output_connector.worker import (
     AuxOutputWorkerConnector,
@@ -45,6 +45,9 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     initialize_mamba_ssu_backend,
+)
+from vllm.model_executor.layers.quantization.online.lm_head import (
+    refresh_quantized_lm_heads,
 )
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.reload.inplace import reload_weights
@@ -156,6 +159,7 @@ from vllm.v1.worker.gpu.spec_decode.adaptive_verification import (
     resolve_adaptive_cudagraph_mode,
 )
 from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
+    requires_aux_hidden_states,
     set_eagle3_aux_hidden_state_layers,
     verify_supports_aux_hidden_states_over_pp,
 )
@@ -297,19 +301,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     self.vllm_config, self.device, self.req_states
                 )
 
-            if self.speculative_config.method in (
-                "eagle3",
-                "dflash",
-                "dspark",
-                "extract_hidden_states",
-            ):
-                # Drafting may require auxiliary hidden states from target model outputs
-                self.use_aux_hidden_state_outputs = True
+            self.use_aux_hidden_state_outputs = requires_aux_hidden_states(
+                self.speculative_config
+            )
 
         # Draft tokens propagation - for spec-dec + struct outputs.
         self.draft_tokens_handler = DraftTokensHandler(self.device)
 
-        self.pcp_manager: pcp.PCPManager | None = None
+        # Built before memory profiling; block tables are attached at KV init.
+        self.pcp_manager = pcp.maybe_build_pcp_manager(
+            self.vllm_config,
+            self.device,
+            self.supports_mm_inputs,
+            cls=self.pcp_manager_cls,
+        )
 
         # Pooling models.
         self.is_pooling_model = self.model_config.runner_type == "pooling"
@@ -458,9 +463,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.vllm_config, self.req_states, self.is_pooling_model, config_processors
         )
         if self.is_last_pp_rank and not self.is_pooling_model:
-            # V2 bypasses TopKTopPSampler, which registers native warmups.
-            # ROCm only: on CUDA these warmups add ~2 min to every engine start.
-            if current_platform.is_rocm():
+            # Speculative verification uses native top-k/top-p masking even
+            # when target-only sampling can use FlashInfer's fused sampler.
+            if current_platform.is_rocm() or (
+                current_platform.is_cuda() and self.speculative_config is not None
+            ):
                 from vllm.v1.sample.ops.topk_topp_sampler import (
                     register_top_k_top_p_warmups,
                 )
@@ -564,6 +571,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if not isinstance(speculator, DraftModelSpeculator):
             return None
         return speculator.model
+
+    def reset_lora_state(self) -> None:
+        super().reset_lora_state()
+        # Called whenever the target's weights are replaced (reload, weight
+        # transfer), so draft weights derived from them must follow.
+        draft_model = self.get_draft_model()
+        if draft_model is not None:
+            with set_current_vllm_config(self.vllm_config):
+                refresh_quantized_lm_heads(draft_model)
 
     def reload_weights(
         self,
@@ -702,13 +718,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             cp_rank=self.dcp_rank,
             cp_interleave=self.cp_interleave,
         )
-        self.pcp_manager = pcp.maybe_build_pcp_manager(
-            self.vllm_config,
-            self.device,
-            self.supports_mm_inputs,
-            self.block_tables,
-            cls=self.pcp_manager_cls,
-        )
+        if self.pcp_manager is not None:
+            self.pcp_manager.set_block_tables(self.block_tables)
         self.ubatch_runner = maybe_build_ubatch_runner(
             self.vllm_config,
             self.device,
@@ -1850,7 +1861,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 # All-zero input_ids route every token to the same experts.
                 input_batch.input_ids.random_(0, self.vocab_size)
             if self.pcp_manager is not None:
-                input_batch = self.pcp_manager.prepare_inputs_to_capture(input_batch)
+                input_batch = self.pcp_manager.prepare_inputs_for_capture_or_profile(
+                    input_batch
+                )
             if skip_attn_for_dummy_run:
                 assert batch_desc.cg_mode != CUDAGraphMode.FULL, (
                     "Attention metadata must be prepared for dummy runs when using "
@@ -1969,7 +1982,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         }
         if not self.is_first_pp_rank:
             # Update for non-first PP ranks.
-            model_inputs["input_ids"] = None
+            if not requires_raw_input_tokens(self.model):
+                model_inputs["input_ids"] = None
             model_inputs["inputs_embeds"] = None
 
             # Prepare the intermediate tensors.
