@@ -180,6 +180,25 @@ def test_rust_build_cache_excludes_git_metadata() -> None:
         assert "bash tools/build_rust.sh" in exact_version_stage
 
 
+def test_dockerignore_keeps_tracked_root_paths() -> None:
+    """Excluding tracked files dirties the git tree inside the build, which
+    fails tools/check_repo.sh in release builds and adds a dirty suffix to
+    the wheel version."""
+    rooted = [
+        line.strip().strip("/")
+        for line in (REPO_ROOT / ".dockerignore").read_text().splitlines()
+        if line.startswith("/")
+    ]
+    tracked = subprocess.run(
+        ["git", "ls-files", "--", *rooted],
+        check=True,
+        cwd=REPO_ROOT,
+        stdout=subprocess.PIPE,
+        text=True,
+    ).stdout.split()
+    assert tracked == []
+
+
 def test_rocm_ci_base_bake_embeds_content_hash_label() -> None:
     bake_file = (REPO_ROOT / "docker" / "docker-bake-rocm.hcl").read_text()
 
