@@ -417,11 +417,20 @@ def test_mla_attention_quant_pattern(
     model_name: str,
     model_class: type[MLAAttentionQuantPatternModel],
     backend: AttentionBackendEnum,
+    use_aiter: bool,
     dist_init,
     disable_vllm_compile_cache,
     workspace_init,
+    request: pytest.FixtureRequest,
 ):
     """Test MLA AttentionQuantPattern fusion pass."""
+    if use_aiter and custom_ops == "+quant_fp8":
+        request.applymarker(
+            pytest.mark.xfail(
+                reason="MLAAttnQuantFusionPass has no AITER static FP8 quant pattern",
+                strict=True,
+            )
+        )
     if (
         model_class is TestMLAAttentionNvfp4QuantPatternModel
         and not is_nvfp4_supported()
