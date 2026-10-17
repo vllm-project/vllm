@@ -17,8 +17,14 @@ flip just that field, and write the whole string back.
 """
 
 import os
+from collections.abc import Generator
+from contextlib import contextmanager
 
 import torch
+
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 # Checked in torch's own precedence order: the accelerator-agnostic variable
 # wins, then the CUDA one, then the HIP one (which is what ROCm users set).
@@ -117,3 +123,68 @@ def set_alloc_conf(conf: str) -> None:
         setter(conf)
         return
     torch.cuda.memory._set_allocator_settings(conf)
+
+
+_non_expandable_depth = 0
+
+
+@contextmanager
+def non_expandable_allocations(enabled: bool = True) -> Generator[bool, None, None]:
+    """Run the body with ``expandable_segments`` off, then restore the config.
+
+    Yields whether the toggle was actually applied. Re-entrant: only the
+    outermost context writes to the allocator. The restore is unconditional --
+    a stale or unavailable reader costs a log line, never allocator state.
+    """
+    global _non_expandable_depth
+    if not enabled or _non_expandable_depth > 0:
+        yield False
+        return
+
+    prev_conf = current_alloc_conf()
+    live = expandable_segments_enabled()
+    was_enabled = (
+        live if live is not None else conf_flag_enabled(prev_conf, EXPANDABLE_SEGMENTS)
+    )
+    if not was_enabled:
+        yield False
+        return
+
+    _non_expandable_depth += 1
+    prev_env = {n: os.environ[n] for n in ALLOC_CONF_ENV_VARS if n in os.environ}
+    try:
+        try:
+            set_alloc_conf(with_conf_flag(prev_conf, EXPANDABLE_SEGMENTS, False))
+            for name, value in prev_env.items():
+                os.environ[name] = with_conf_flag(value, EXPANDABLE_SEGMENTS, False)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Could not disable expandable_segments (%s); "
+                "leaving the allocator alone.",
+                exc,
+            )
+            yield False
+            return
+
+        if expandable_segments_enabled():
+            logger.warning(
+                "Requested non-expandable allocations, but the allocator still "
+                "reports expandable_segments=True; allocations made here may "
+                "stay VMM-backed and non-IPC-exportable."
+            )
+            yield False
+            return
+
+        logger.info(
+            "Disabled expandable_segments so that allocations made here stay "
+            "IPC-exportable; the previous allocator config is restored on exit."
+        )
+        yield True
+    finally:
+        _non_expandable_depth -= 1
+        for name, value in prev_env.items():
+            os.environ[name] = value
+        try:
+            set_alloc_conf(prev_conf)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Could not restore the allocator config: %s", exc)
