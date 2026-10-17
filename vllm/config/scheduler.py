@@ -302,7 +302,7 @@ class SchedulerConfig:
                 "Encoder-decoder models do not support chunked prefill nor"
                 " prefix caching; disabling both."
             )
-        if max_model_len < self.max_num_batched_tokens：
+        if max_model_len < self.max_num_batched_tokens:
             self.max_num_batched_tokens = max_model_len
             self.max_num_seqs = max_model_len
         self.max_num_encoder_input_tokens = self.max_num_batched_tokens
