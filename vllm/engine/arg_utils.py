@@ -2618,6 +2618,21 @@ class EngineArgs:
             target_model_config=model_config,
             target_parallel_config=parallel_config,
         )
+
+        # Validate ngram_gpu compatibility with disabled compilation
+        if (
+            speculative_config is not None
+            and getattr(speculative_config, "method", None) == "ngram_gpu"
+            and self.compilation_config is not None
+            and getattr(self.compilation_config, "mode", None) == "NONE"
+        ):
+            raise ValueError(
+                'speculative_config.method="ngram_gpu" requires torch.compile / '
+                'CUDA graph support, but compilation_config.mode="NONE" disables '
+                'it. Use method="ngram" with compilation_config.mode="NONE", '
+                "or enable compilation."
+            )
+
         diffusion_config = self.create_diffusion_config()
         watermark_config = self.create_watermark_config()
 
