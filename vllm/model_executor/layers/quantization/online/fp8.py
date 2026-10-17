@@ -247,6 +247,9 @@ class Fp8PerTensorOnlineLinearMethod(OnlineLinearBase):
 
         # Update layer with new values.
         replace_parameter(layer, "weight", qweight.t().data)
+        # Transposed to (K, N); retag so layout-aware kernels see it.
+        layer.weight.input_dim = 0
+        layer.weight.output_dim = 1
         replace_parameter(layer, "weight_scale", weight_scale.data)
 
         if self.use_marlin and hasattr(self.fp8_linear, "marlin_input_dtype"):
@@ -437,6 +440,9 @@ class Fp8PtpcOnlineLinearMethod(OnlineLinearBase):
         qweight = _fp8_quant_per_channel(weight, weight_scale)
 
         replace_parameter(layer, "weight", qweight.t())
+        # Transposed to (K, N); retag so layout-aware kernels see it.
+        layer.weight.input_dim = 0
+        layer.weight.output_dim = 1
         replace_parameter(layer, "weight_scale", weight_scale)
 
         self.fp8_linear.process_weights_after_loading(layer)

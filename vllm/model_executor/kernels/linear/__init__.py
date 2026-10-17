@@ -827,6 +827,9 @@ def fp8_scaled_mm_is_batch_invariant(
     kernel: FP8ScaledMMLinearKernel | Fp8BlockScaledMMLinearKernel,
 ) -> bool:
     """Whether a row's output from the kernel is independent of the other rows."""
+    # Weight-only here, and Humming honors VLLM_BATCH_INVARIANT itself.
+    if isinstance(kernel, HummingFP8ScaledMMLinearKernel):
+        return True
     if not isinstance(
         kernel, (CutlassFP8ScaledMMLinearKernel, TritonFP8ScaledMMLinearKernel)
     ):

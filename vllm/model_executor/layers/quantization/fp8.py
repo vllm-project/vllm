@@ -406,6 +406,9 @@ class Fp8LinearMethod(LinearMethodBase):
 
             # Update layer with new values.
             replace_parameter(layer, "weight", weight.data)
+            # The helper returns (K, N); retag so layout-aware kernels see it.
+            layer.weight.input_dim = 0
+            layer.weight.output_dim = 1
             replace_parameter(layer, "weight_scale", weight_scale.data)
 
         if input_scale is not None:
