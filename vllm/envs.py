@@ -263,6 +263,9 @@ if TYPE_CHECKING:
     VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB: int | None = None
     VLLM_ROCM_QUICK_REDUCE_MIN_SIZE_BYTES_MB: int | None = None
     VLLM_ROCM_QUICK_REDUCE_QUANTIZATION_MIN_SIZE_KB: int | None = None
+    VLLM_ROCM_ISLAND_ALLREDUCE: bool = True
+    VLLM_ROCM_ISLAND_AR_CUSTOM_MAX_BYTES: int = 2304 * 1024
+    VLLM_ROCM_ISLAND_AR_HIER_MIN_BYTES: int = 2304 * 1024
     VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT: int = 480
     VLLM_MOONCAKE_CONNECTOR_TIMEOUT: float = 30.0
     VLLM_ENABLE_CUDAGRAPH_GC: bool = False
@@ -1408,6 +1411,21 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_QUICK_REDUCE_CAST_BF16_TO_FP16": lambda: (
         os.getenv("VLLM_ROCM_QUICK_REDUCE_CAST_BF16_TO_FP16", "True").lower()
         in ("true", "1")
+    ),
+    # Two-level all-reduce for a TP group of 8 spanning two fully connected
+    # XGMI islands joined by PCIe (e.g. 8x MI210): hierarchical RCCL from
+    # HIER_MIN_BYTES, otherwise custom all-reduce inside the island
+    # then across GPU pairs below CUSTOM_MAX_BYTES (0 disables it). The 2.25 MiB
+    # defaults are the end-to-end break-even on 8x MI210, above the ~1 MiB
+    # crossover of the two paths in isolation.
+    "VLLM_ROCM_ISLAND_ALLREDUCE": lambda: (
+        os.getenv("VLLM_ROCM_ISLAND_ALLREDUCE", "True").lower() in ("true", "1")
+    ),
+    "VLLM_ROCM_ISLAND_AR_CUSTOM_MAX_BYTES": lambda: int(
+        os.getenv("VLLM_ROCM_ISLAND_AR_CUSTOM_MAX_BYTES", str(2304 * 1024))
+    ),
+    "VLLM_ROCM_ISLAND_AR_HIER_MIN_BYTES": lambda: int(
+        os.getenv("VLLM_ROCM_ISLAND_AR_HIER_MIN_BYTES", str(2304 * 1024))
     ),
     # Custom quick allreduce kernel for MI3* cards.
     # Controls the maximum allowed number of data bytes(MB) for custom quick
