@@ -461,6 +461,9 @@ class DFlashSpeculator(DraftModelSpeculator):
         num_speculative_tokens: int | None = None,
     ) -> torch.Tensor:
         num_reqs = input_batch.num_reqs
+        if dummy_run and dp_sync_state is not None:
+            # The target dummy batch may already carry its graph request capacity.
+            num_reqs = min(num_reqs, dp_sync_state.max_num_reqs)
         num_target_tokens = input_batch.num_tokens
         num_query_tokens = num_reqs * self.num_query_per_req
         max_seq_len = input_batch.seq_lens_cpu_upper_bound[:num_reqs].max().item()
@@ -538,11 +541,15 @@ class DFlashSpeculator(DraftModelSpeculator):
                 self.max_num_tokens,
                 self.max_model_len,
                 self.sample_from_anchor,
+                num_reqs=num_reqs,
             )
 
         batch_sync, num_batch_tokens = (
             self._build_uniform_batch_dp_sync(
-                dp_sync_state, num_reqs, self.num_query_per_req
+                dp_sync_state,
+                num_reqs,
+                self.num_query_per_req,
+                max_num_reqs=dp_sync_state.max_num_reqs,
             )
             if dp_sync_state is not None
             else (None, num_query_tokens)
@@ -861,8 +868,9 @@ def prepare_dflash_inputs(
     max_num_tokens: int,
     max_model_len: int,
     sample_from_anchor: bool = False,
+    *,
+    num_reqs: int,
 ) -> None:
-    num_reqs = input_batch.num_reqs
     assert num_reqs > 0
     # Cover the longest possible per-request span (ctx + query). Use the max
     # per-request query length, not the total token count across the batch.

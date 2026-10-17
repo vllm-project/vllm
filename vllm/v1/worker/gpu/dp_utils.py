@@ -38,6 +38,8 @@ class DPSyncState:
     # Agreed upper bound on any rank's request count. Holds the padded count when
     # a FULL descriptor imposed one, else the most any rank scheduled.
     num_reqs: int
+    # DP-wide request maximum before target CUDA graph padding.
+    max_num_reqs: int
 
 
 def sync_cudagraph_and_dp_padding(
@@ -80,6 +82,7 @@ def sync_cudagraph_and_dp_padding(
     max_query_lens_across_dp = tensor[3]
     allow_ubatching_across_dp = tensor[4]
     num_reqs_across_dp = tensor[5]
+    max_num_reqs = int(num_reqs_across_dp.max())
 
     # If ranks disagree on the uniform token count, or its 0 (means None) set to None
     synced_uniform_token_count: int | None = int(uniform_token_counts_across_dp[0])
@@ -148,6 +151,7 @@ def sync_cudagraph_and_dp_padding(
                 uniform_token_count=synced_uniform_token_count,
                 eager=ubatch_desc.cg_mode == CUDAGraphMode.NONE,
                 num_reqs=num_reqs,
+                max_num_reqs=max_num_reqs,
             )
 
     synced_cg_mode = CUDAGraphMode(int(cg_mode_across_dp.min()))
@@ -166,6 +170,7 @@ def sync_cudagraph_and_dp_padding(
                 uniform_token_count=synced_uniform_token_count,
                 eager=True,
                 num_reqs=int(num_reqs_across_dp.max()),
+                max_num_reqs=max_num_reqs,
             ),
         )
 
@@ -205,6 +210,7 @@ def sync_cudagraph_and_dp_padding(
             and synced_desc.num_reqs is not None
             else int(num_reqs_across_dp.max())
         ),
+        max_num_reqs=max_num_reqs,
     )
 
 
