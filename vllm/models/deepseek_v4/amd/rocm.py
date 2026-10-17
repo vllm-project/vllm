@@ -783,6 +783,8 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         o_padded: torch.Tensor,
     ) -> None:
         """Run the ROCm fork/join (HCA or CSA) inside the capture boundary."""
+        from aiter.tuned_gemm import tgemm
+
         aux_streams = self.aux_stream_list
         # The sequential pipeline disables aux_stream_list before calling
         # back with real projection inputs; aux_streams is None ends that
@@ -831,10 +833,10 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             return q, qr_out, qr_scale_out, kv_out
 
         def main_compressor_chain() -> None:
-            score = torch.mm(
+            score = tgemm.mm(
                 hidden_states,
-                compressor.fused_wkv_wgate.weight.T,
-                out_dtype=torch.float32,
+                compressor.fused_wkv_wgate.weight,
+                otype=torch.float32,
             )
             compressor(score, positions, self.rotary_emb)
 
@@ -858,10 +860,10 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             return
 
         def indexer_compressor_chain() -> None:
-            score = torch.mm(
+            score = tgemm.mm(
                 hidden_states,
-                indexer.compressor.fused_wkv_wgate.weight.T,
-                out_dtype=torch.float32,
+                indexer.compressor.fused_wkv_wgate.weight,
+                otype=torch.float32,
             )
             indexer.compressor(score, positions, self.indexer_rotary_emb)
 
@@ -1107,9 +1109,20 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         torch.Tensor | None,
         torch.Tensor | None,
     ]:
+        from aiter.tuned_gemm import tgemm
+
         fused_weight = self._fused_compressor_weight
         split_sizes = self._fused_compressor_split_sizes
         if fused_weight is None or split_sizes is None:
+            if self.compressor is not None and self.indexer is None:
+                # HCA (cr=128) layers
+                qr_kv = self._fused_wqa_wkv_gemm(hidden_states)
+                kv_score = tgemm.mm(
+                    hidden_states,
+                    self.compressor.fused_wkv_wgate.weight,
+                    otype=torch.float32,
+                )
+                return qr_kv, kv_score, None, None
             return super()._run_parallel_input_projections(hidden_states)
 
         indexer = self.indexer
@@ -1117,10 +1130,10 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             raise RuntimeError("Fused compressor weight requires a C4 indexer")
 
         qr_kv = self._fused_wqa_wkv_gemm(hidden_states)
-        fused_scores = torch.mm(
+        fused_scores = tgemm.mm(
             hidden_states,
-            fused_weight.T,
-            out_dtype=torch.float32,
+            fused_weight,
+            otype=torch.float32,
         )
         kv_score, indexer_kv_score = fused_scores.split(split_sizes, dim=-1)
         indexer_weights, _ = indexer.weights_proj(hidden_states)
