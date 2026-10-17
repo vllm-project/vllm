@@ -1039,7 +1039,7 @@ def test_aiter_indexer_impl_matches_reference(
     ):
         pytest.skip(f"AITER MSA indexer unavailable: {reason}")
 
-    torch.manual_seed(0)
+    set_random_seed(0)
     device = torch.device("cuda")
     monkeypatch.setattr(indexer_mod, "get_tensor_model_parallel_world_size", lambda: 1)
 
