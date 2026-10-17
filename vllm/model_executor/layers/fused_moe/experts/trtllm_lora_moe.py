@@ -681,14 +681,6 @@ class TrtLlmMxfp4LoRAExperts(_TrtLlmLoRAExpertsBase, TrtLlmMxfp4ExpertsBase):
 
         assert a1q_scale is None and hidden_states.dtype == torch.bfloat16
         topk_ids, topk_weights = topk_ids_and_weights
-        # The LoRA token mapping covers the whole batch: no chunking here.
-        max_tokens = self._max_supported_tokens(self.topk, global_num_experts)
-        if hidden_states.size(0) > max_tokens:
-            raise ValueError(
-                f"TrtLlmMxfp4LoRAExperts supports at most {max_tokens} tokens "
-                f"per call for top_k={self.topk}, got {hidden_states.size(0)}."
-            )
-
         # See TrtLlmBf16LoRAExperts.invoke_routed_moe for the return contract.
         do_finalize = gemm1_lora_delta is None
         ret = trtllm_fp4_block_scale_routed_moe(
