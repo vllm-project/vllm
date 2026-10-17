@@ -692,7 +692,7 @@ def test_default_cudagraph_capture_sizes_keep_all_sizes_bounded():
     token_grid += list(range(256, token_grid_max + 1, 16))
 
     max_request_count = min(max_num_seqs, default_max_graph_size)
-    request_counts = [count for count in [1, 2, 4] if count <= max_request_count]
+    request_counts = list(range(1, min(max_request_count, 8) + 1))
     request_counts += list(range(8, min(max_request_count + 1, 256), 8))
     request_counts += list(range(256, max_request_count + 1, 16))
     request_counts.append(max_request_count)

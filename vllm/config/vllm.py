@@ -2403,9 +2403,10 @@ class VllmConfig:
 
         `max_num_batched_tokens` is also appended to the list if it fits
         within `max_cudagraph_capture_size`, so the max batch size is captured
-        even when off-stride. Uniform decode sizes are appended when they fit
-        within the platform's default capture ceiling, since they need not land
-        on an 8- or 16-token stride.
+        even when off-stride. Uniform decode sizes (every request count up to
+        8, then 8- and 16-request strides, times the decode query length) are
+        appended when they fit within the platform's default capture ceiling,
+        since they need not land on an 8- or 16-token stride.
 
         In the end, `vllm_config.compilation_config.cudagraph_capture_sizes`
         will be the final sizes to capture cudagraph (in ascending order).
@@ -2479,7 +2480,9 @@ class VllmConfig:
                         # At most the platform default number of requests,
                         # mirroring the one-token-per-request decode ceiling.
                         max_reqs = min(max_reqs, default_max_graph_size)
-                        counts = [n for n in (1, 2, 4) if n <= max_reqs]
+                        # Every count up to 8: a padded request costs
+                        # decode_query_len tokens in every GEMM and MoE.
+                        counts = list(range(1, min(max_reqs, 8) + 1))
                         counts += list(range(8, min(max_reqs + 1, 256), 8))
                         counts += list(range(256, max_reqs + 1, 16))
                         return sorted(set(counts + [max_reqs]))
