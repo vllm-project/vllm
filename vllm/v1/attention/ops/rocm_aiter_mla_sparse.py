@@ -3341,6 +3341,7 @@ def _sparse_attn_decode_reduce_kernel(
     HAS_ATTN_SINK: tl.constexpr,
     ADAPTIVE_SPLITS: tl.constexpr,
     COMB_DIM: tl.constexpr,
+    COMB_BLOCK: tl.constexpr,
     BLOCK_H: tl.constexpr,
     NUM_SPLITS: tl.constexpr,
     SPLITS_PAD: tl.constexpr,
@@ -3354,7 +3355,16 @@ def _sparse_attn_decode_reduce_kernel(
 
     head_offsets = pid_h * BLOCK_H + tl.arange(0, BLOCK_H)
     head_mask = head_offsets < num_heads
-    comb_offsets = tl.arange(0, COMB_DIM)
+    # Fused epilogues require an unpadded width.
+    tl.static_assert(COMB_BLOCK == COMB_DIM or not (FUSE_INV_ROPE or QUANT_OUT))
+
+    comb_offsets = tl.arange(0, COMB_BLOCK)
+
+    # Preserve existing codegen for power-of-two widths.
+    if COMB_BLOCK == COMB_DIM:
+        comb_mask = tl.full([COMB_BLOCK], True, tl.int1)
+    else:
+        comb_mask = comb_offsets < COMB_DIM
     # SPLITS_PAD is NUM_SPLITS rounded up to a power of two so the parallel
     # split-axis load is a legal arange for any split count; padding lanes are
     # masked off.
@@ -3404,7 +3414,7 @@ def _sparse_attn_decode_reduce_kernel(
     # for each split only depends on the (already known) global max, so the
     # acc loads carry no cross-split dependency and the compiler can pipeline
     # them; only the cheap FMA into `acc` is loop-carried.
-    acc = tl.zeros((BLOCK_H, COMB_DIM), dtype=tl.float32)
+    acc = tl.zeros((BLOCK_H, COMB_BLOCK), dtype=tl.float32)
     for s in tl.static_range(NUM_SPLITS):
         m_s = tl.load(
             part_m_ptr + query_idx * pm_stride0 + s * pm_stride_s + head_offsets,
@@ -3424,13 +3434,13 @@ def _sparse_attn_decode_reduce_kernel(
         if ADAPTIVE_SPLITS:
             acc_s = tl.load(
                 acc_base + comb_offsets[None, :],
-                mask=head_mask[:, None] & active_split[:, None],
+                mask=head_mask[:, None] & active_split[:, None] & comb_mask[None, :],
                 other=0.0,
             )
         else:
             acc_s = tl.load(
                 acc_base + comb_offsets[None, :],
-                mask=head_mask[:, None],
+                mask=head_mask[:, None] & comb_mask[None, :],
                 other=0.0,
             )
         acc += w_s[:, None] * acc_s
@@ -3476,7 +3486,7 @@ def _sparse_attn_decode_reduce_kernel(
     tl.store(
         out_row_ptr + comb_offsets[None, :],
         out.to(out_ptr.dtype.element_ty),
-        mask=head_mask[:, None],
+        mask=head_mask[:, None] & comb_mask[None, :],
     )
 
 
@@ -3951,6 +3961,7 @@ def _rocm_sparse_attn_decode_ragged_bf16_triton(
         HAS_ATTN_SINK=has_attn_sink,
         ADAPTIVE_SPLITS=False,
         COMB_DIM=comb_dim,
+        COMB_BLOCK=triton.next_power_of_2(comb_dim),
         BLOCK_H=1,
         NUM_SPLITS=num_splits,
         SPLITS_PAD=triton.next_power_of_2(num_splits),
@@ -4286,6 +4297,7 @@ def _rocm_sparse_attn_decode_ragged_triton(
         HAS_ATTN_SINK=has_attn_sink,
         ADAPTIVE_SPLITS=adaptive_splits,
         COMB_DIM=comb_dim,
+        COMB_BLOCK=triton.next_power_of_2(comb_dim),
         BLOCK_H=1,
         NUM_SPLITS=num_splits,
         SPLITS_PAD=triton.next_power_of_2(num_splits),

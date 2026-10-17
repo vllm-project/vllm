@@ -361,6 +361,7 @@ def _launch_sparse_decode_reduce(
         HAS_ATTN_SINK=False,
         ADAPTIVE_SPLITS=adaptive_splits,
         COMB_DIM=HEAD_DIM,
+        COMB_BLOCK=HEAD_DIM,
         BLOCK_H=1,
         NUM_SPLITS=num_splits,
         SPLITS_PAD=1 << (num_splits - 1).bit_length(),
@@ -675,6 +676,88 @@ def test_sparse_attn_decode_bf16_split_k_matches_ragged(
         num_splits=num_splits,
     )
     torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
+
+
+def _sparse_mla_reference(
+    q: torch.Tensor,
+    kv: torch.Tensor,
+    rows: list[list[int]],
+    scale: float,
+    out_dim: int,
+    attn_sink: torch.Tensor | None,
+) -> torch.Tensor:
+    """Float32 sparse MLA reference, ignoring invalid KV slots.
+
+    Attention sinks contribute to normalization but not the output.
+    """
+    out = torch.zeros(q.shape[0], q.shape[1], out_dim, device=q.device)
+    for i, row in enumerate(rows):
+        slots = [slot for slot in row if 0 <= slot < kv.shape[0]]
+        if not slots:
+            continue
+        k = kv[slots].float()
+        logits = (q[i].float() @ k.T) * scale
+        if attn_sink is not None:
+            logits = torch.cat([logits, attn_sink[:, None]], dim=-1)
+        probs = torch.softmax(logits, dim=-1)[:, : len(slots)]
+        out[i] = probs @ k[:, :out_dim]
+    return out
+
+
+@pytest.mark.parametrize(
+    ("nope_dim", "rope_dim", "out_dim"),
+    [(512, 0, 512), (512, 64, 512), (512, 64, 576)],
+    ids=["nope_only", "rope_nope_out", "rope_full_out"],
+)
+@pytest.mark.parametrize("num_splits", [1, 3, 32])
+@pytest.mark.parametrize("with_sink", [False, True])
+@torch.inference_mode()
+def test_sparse_attn_decode_bf16_matches_reference(
+    nope_dim: int, rope_dim: int, out_dim: int, num_splits: int, with_sink: bool
+) -> None:
+    """Check BF16 sparse decode across padded widths and split counts."""
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+        rocm_sparse_attn_decode_bf16,
+    )
+
+    device = torch.device("cuda")
+    set_random_seed(0)
+    head_dim = nope_dim + rope_dim
+    num_heads = 12
+    num_kv = 4096
+    # Cover empty splits, invalid indices, and rows with no valid KV.
+    rows = [torch.randperm(num_kv)[:n].tolist() for n in (0, 1, 37, 600, 2048)]
+    rows[-1][:2] = [-1, num_kv]
+    rows.append([-1, -1])
+    indices, indptr = _ragged_from_rows(rows, device)
+    q = torch.randn(len(rows), num_heads, head_dim, device=device).bfloat16()
+    kv = torch.randn(num_kv, head_dim, device=device).bfloat16()
+    attn_sink = (
+        torch.randn(num_heads, dtype=torch.float32, device=device) * 2
+        if with_sink
+        else None
+    )
+    output = torch.empty(
+        len(rows), num_heads, out_dim, dtype=torch.bfloat16, device=device
+    )
+    scale = head_dim**-0.5
+
+    rocm_sparse_attn_decode_bf16(
+        q=q,
+        kv=kv.view(num_kv, 1, head_dim),
+        scale=scale,
+        head_dim=head_dim,
+        nope_head_dim=nope_dim,
+        rope_head_dim=rope_dim,
+        attn_sink=attn_sink,
+        output=output,
+        ragged_indices=indices,
+        ragged_indptr=indptr,
+        num_splits=num_splits,
+    )
+
+    expected = _sparse_mla_reference(q, kv, rows, scale, out_dim, attn_sink)
+    torch.testing.assert_close(output.float(), expected, atol=2e-2, rtol=2e-2)
 
 
 def _sparse_prefill_ragged_inputs(nope_dim: int, rope_dim: int) -> dict:
