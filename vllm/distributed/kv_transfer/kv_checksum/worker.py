@@ -32,7 +32,7 @@ from vllm.distributed.kv_transfer.kv_checksum.checksum import (
     ReplicaKey,
     kv_checksum_enabled,
 )
-from vllm.distributed.kv_transfer.kv_checksum.kernels import layer_checksum
+from vllm.distributed.kv_transfer.kv_checksum.kernels import layers_checksum
 from vllm.distributed.parallel_state import (
     get_pp_group,
     get_tensor_model_parallel_rank,
@@ -82,8 +82,8 @@ class _LayerView:
     ``offset_weights`` to them. Pieces narrower than 8 bytes count as
     unsigned.
 
-    On CUDA with Triton the sums come from ``layer_checksum``; otherwise from
-    PyTorch ops on gathered blocks.
+    On CUDA with Triton the sums come from ``_FusedLayers``, for all layers
+    of a layout in one launch; otherwise from PyTorch ops on gathered blocks.
     """
 
     def __init__(
@@ -127,12 +127,6 @@ class _LayerView:
             1, _MAX_GATHER_BYTES // (tokens_per_block * heads * num_pieces * 8)
         )
 
-    def warm_up(self) -> None:
-        """Compile the Triton kernel now rather than in a serving step."""
-        if self.use_triton:
-            zeros = torch.zeros(1, dtype=torch.int64, device=self.pieces.device)
-            self.accumulate(zeros, zeros, zeros, torch.zeros_like(zeros))
-
     def accumulate(
         self,
         block_ids: torch.Tensor,
@@ -150,16 +144,7 @@ class _LayerView:
             out: ``[n]`` int64 accumulator, wrapping around (mod 2**64).
 
         """
-        if self.use_triton:
-            layer_checksum(
-                self.pieces,
-                self.first_slice,
-                block_ids,
-                first_tokens,
-                valid_tokens,
-                out,
-            )
-            return
+        assert not self.use_triton
         dims = (1, 2, 3, 4)
         for start in range(0, block_ids.shape[0], self.rows_per_gather):
             end = start + self.rows_per_gather
@@ -172,6 +157,91 @@ class _LayerView:
             out[start:end] += (rows * self.weights).sum(dim=dims) + first_tokens[
                 start:end
             ] * (rows * self.offset_weights).sum(dim=dims)
+
+
+class _FusedLayers:
+    """Layers of a group whose caches share one layout (shape, strides and
+    dtype), each adding into its column of the group's checksums: in one
+    Triton launch on CUDA, else layer by layer."""
+
+    def __init__(self, views: list[_LayerView], columns: list[int]) -> None:
+        self.views = views
+        self.columns = columns
+        self.use_triton = views[0].use_triton
+        if self.use_triton:
+            self.layers = torch.tensor(
+                [
+                    [view.pieces.data_ptr(), view.first_slice, column]
+                    for view, column in zip(views, columns)
+                ],
+                dtype=torch.int64,
+                device=views[0].pieces.device,
+            )
+
+    def accumulate(
+        self,
+        block_ids: torch.Tensor,
+        first_tokens: torch.Tensor,
+        valid_tokens: torch.Tensor,
+        out: torch.Tensor,
+    ) -> None:
+        """Like ``_LayerView.accumulate``, into the ``[n, num_columns]``
+        ``out``."""
+        if self.use_triton:
+            layers_checksum(
+                self.views[0].pieces,
+                self.layers,
+                block_ids,
+                first_tokens,
+                valid_tokens,
+                out,
+            )
+            return
+        for view, column in zip(self.views, self.columns):
+            view.accumulate(block_ids, first_tokens, valid_tokens, out[:, column])
+
+    def warm_up(self, num_columns: int) -> None:
+        """Compile the Triton kernel now rather than in a serving step."""
+        if self.use_triton:
+            device = self.views[0].pieces.device
+            zeros = torch.zeros(1, dtype=torch.int64, device=device)
+            out = torch.zeros(1, num_columns, dtype=torch.int64, device=device)
+            self.accumulate(zeros, zeros, zeros, out)
+
+
+@dataclass
+class _GroupPlan:
+    """How a worker checksums a group's layers: one launch per cache layout,
+    adding into one column per replica key."""
+
+    replica_keys: list[ReplicaKey]
+    launches: list[_FusedLayers]
+
+    @classmethod
+    def create(cls, views: list[_LayerView]) -> "_GroupPlan | None":
+        if not views:
+            return None
+        replica_keys = list(dict.fromkeys(view.replica_key for view in views))
+        layouts: dict[tuple, list[_LayerView]] = defaultdict(list)
+        for view in views:
+            pieces = view.pieces
+            layouts[
+                (pieces.dtype, pieces.device, pieces.shape, pieces.stride())
+            ].append(view)
+        return cls(
+            replica_keys,
+            [
+                _FusedLayers(
+                    same_layout,
+                    [replica_keys.index(view.replica_key) for view in same_layout],
+                )
+                for same_layout in layouts.values()
+            ],
+        )
+
+    @property
+    def device(self) -> torch.device:
+        return self.launches[0].views[0].pieces.device
 
 
 def _layer_spec(group_spec: KVCacheSpec, layer_name: str) -> KVCacheSpec:
@@ -590,7 +660,11 @@ class KVChecksumWorker:
     ):
         self.tp_rank = tp_rank
         self.pp_rank = pp_rank
-        self._layer_views: dict[int, list[_LayerView]] = {}
+        # Per group: loads check every replica of this worker's layers, while
+        # a producer only needs the first replica of each layer, as any replica
+        # describes the same KV and consumers check each of theirs against it.
+        self._recv_plans: dict[int, _GroupPlan] = {}
+        self._send_plans: dict[int, _GroupPlan] = {}
         self._block_sizes: dict[int, int] = {}
         skipped_groups = set()
         self._fingerprints: dict[int, int] = {}
@@ -622,13 +696,17 @@ class KVChecksumWorker:
                 )
                 skipped_groups.add(group_id)
                 continue
-            if views:
-                self._layer_views[group_id] = views
-                self._block_sizes[group_id] = group.kv_cache_spec.block_size
+            self._block_sizes[group_id] = group.kv_cache_spec.block_size
+            if recv_plan := _GroupPlan.create(views):
+                self._recv_plans[group_id] = recv_plan
+            if send_plan := _GroupPlan.create(
+                [view for view in views if view.replica_key[1] == 0]
+            ):
+                self._send_plans[group_id] = send_plan
 
-        for views in self._layer_views.values():
-            for view in views:
-                view.warm_up()
+        for plan in (*self._recv_plans.values(), *self._send_plans.values()):
+            for launch in plan.launches:
+                launch.warm_up(len(plan.replica_keys))
         self._skipped_groups = frozenset(skipped_groups)
         self._reqs_to_send: dict[str, KVChecksumBlocks] = {}
         self._reqs_to_recv: dict[str, KVChecksumBlocks] = {}
@@ -674,8 +752,8 @@ class KVChecksumWorker:
             self._fingerprints,
             transfer_results.kv_checksums,
         )
-        self._compute(loaded, pending, replica_zero_only=False)
-        self._compute(self._reqs_to_send, pending, replica_zero_only=True)
+        self._compute(loaded, pending, self._recv_plans)
+        self._compute(self._reqs_to_send, pending, self._send_plans)
         self._reqs_to_send = {}
         return pending or None
 
@@ -683,37 +761,25 @@ class KVChecksumWorker:
         self,
         reqs: dict[str, KVChecksumBlocks],
         output: PendingKVChecksums,
-        replica_zero_only: bool,
+        plans: dict[int, _GroupPlan],
     ) -> None:
-        """Checksum the blocks of ``reqs`` into ``output``.
-
-        A producer only needs the first replica of each layer: any replica of
-        it describes the same KV, and consumers check each of theirs against it.
-        """
+        """Checksum the blocks of ``reqs`` into ``output``, as ``plans`` say."""
         output.add_requests(reqs)
         batches: dict[int, _GroupBatch] = defaultdict(_GroupBatch)
         for req_id, blocks in reqs.items():
             for group_id, (start, block_ids) in blocks.groups.items():
-                if group_id not in self._layer_views or not block_ids:
+                if group_id not in plans or not block_ids:
                     continue
                 batch = batches[group_id]
                 batch.segments.append((req_id, start, len(block_ids)))
                 batch.block_ids.extend(block_ids)
                 batch.num_tokens.append(blocks.num_tokens)
-
-        device = None
-        groups = []
-        for group_id, batch in batches.items():
-            layers = [
-                layer
-                for layer in self._layer_views[group_id]
-                if not replica_zero_only or layer.replica_key[1] == 0
-            ]
-            if layers:
-                device = layers[0].pieces.device
-                groups.append((group_id, batch, layers))
-        if device is None:
+        if not batches:
             return
+        groups = [
+            (group_id, batch, plans[group_id]) for group_id, batch in batches.items()
+        ]
+        device = groups[0][2].device
 
         # One copy for every group. Each group starts at an even column, so
         # the slices are 16-byte aligned like those the kernel was warmed up on.
@@ -728,25 +794,19 @@ class KVChecksumWorker:
             host[:, column : column + rows.shape[1]] = rows
         device_rows = _to_device(host, device)
 
-        for (group_id, batch, layers), column in zip(groups, columns):
+        for (group_id, batch, plan), column in zip(groups, columns):
             num_rows = len(batch.block_ids)
             block_ids, first_tokens, valid_tokens = device_rows[
                 :, column : column + num_rows
             ]
-            replica_keys = list(dict.fromkeys(layer.replica_key for layer in layers))
             values = torch.zeros(
-                (num_rows, len(replica_keys)),
+                (num_rows, len(plan.replica_keys)),
                 dtype=torch.int64,
                 device=device,
             )
-            for layer in layers:
-                layer.accumulate(
-                    block_ids,
-                    first_tokens,
-                    valid_tokens,
-                    values[:, replica_keys.index(layer.replica_key)],
-                )
-            output.add_group(group_id, batch.segments, replica_keys, values)
+            for launch in plan.launches:
+                launch.accumulate(block_ids, first_tokens, valid_tokens, values)
+            output.add_group(group_id, batch.segments, plan.replica_keys, values)
 
 
 def _to_device(values: np.ndarray, device: torch.device) -> torch.Tensor:

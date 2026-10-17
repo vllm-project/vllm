@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Triton kernel for one layer's part of KV block checksums: the sums of
-``_LayerView.accumulate``'s PyTorch path."""
+"""Triton kernel for the KV block checksums of several layers of one layout:
+the sums of ``_LayerView.accumulate``'s PyTorch path, in one launch."""
 
 import torch
 
@@ -11,21 +11,21 @@ from vllm.triton_utils import tl, triton
 _CHUNK = 16 * 1024
 
 
-# One variant per layer shape; the output column may be any strided view.
-@triton.jit(do_not_specialize=["first_slice", "out_ptr", "out_stride"])
-def _layer_checksum_kernel(
+# One variant per layout; the output may have any number of columns.
+@triton.jit(do_not_specialize=["out_stride"])
+def _layers_checksum_kernel(
     pieces_ptr,  # int [num_blocks, kernel_blocks, heads, tokens, pieces]
     stride_block,
     stride_kernel_block,
     stride_head,
     stride_token,
     stride_piece,
+    layers_ptr,  # int64 [num_layers, 3]: base address, first slice, column
     block_ids_ptr,  # int64 [num_rows]
     first_tokens_ptr,  # int64 [num_rows]
     valid_tokens_ptr,  # int64 [num_rows]
-    out_ptr,  # int64 [num_rows], accumulated into
+    out_ptr,  # int64 [num_rows, num_columns], accumulated into
     out_stride,
-    first_slice,
     kernel_blocks: tl.constexpr,
     heads: tl.constexpr,
     tokens: tl.constexpr,
@@ -33,17 +33,28 @@ def _layer_checksum_kernel(
     PIECE_BITS: tl.constexpr,
     CHUNK: tl.constexpr,
     BLOCK: tl.constexpr,
+    SINGLE_LAYER: tl.constexpr,
 ):
     row = tl.program_id(0)
     chunk = tl.program_id(1)
+    layer = tl.program_id(2)
+    if SINGLE_LAYER:
+        # The cache's own pointer, whose alignment Triton knows: up to a third
+        # faster than one loaded from the table.
+        layer_ptr = pieces_ptr
+    else:
+        layer_ptr = tl.load(layers_ptr + 3 * layer).to(
+            tl.pointer_type(pieces_ptr.dtype.element_ty)
+        )
+    first_slice = tl.load(layers_ptr + 3 * layer + 1).to(tl.uint64)
+    column = tl.load(layers_ptr + 3 * layer + 2)
     block_id = tl.load(block_ids_ptr + row)
     first_token = tl.load(first_tokens_ptr + row).to(tl.uint64)
     valid_tokens = tl.load(valid_tokens_ptr + row)
-    block_ptr = pieces_ptr + block_id * stride_block
+    block_ptr = layer_ptr + block_id * stride_block
     slice_size = tokens * num_pieces
     num_pieces_in_block = kernel_blocks * heads * slice_size
     # uint64 arithmetic wraps around: mod 2**64.
-    first_slice = first_slice.to(tl.uint64)
     acc = tl.zeros((BLOCK,), dtype=tl.uint64)
     chunk_start = chunk * CHUNK
     chunk_end = tl.minimum(chunk_start + CHUNK, num_pieces_in_block)
@@ -75,44 +86,49 @@ def _layer_checksum_kernel(
             x = x & ((1 << PIECE_BITS) - 1)
         x = x.to(tl.uint64, bitcast=True)
         acc += x * (slice_weight * (2 * position + 1))
-    # Chunks of a row add up in any order: integer addition is exact.
-    tl.atomic_add(out_ptr + row * out_stride, tl.sum(acc).to(tl.int64, bitcast=True))
+    # Chunks and layers add up in any order: integer addition is exact.
+    tl.atomic_add(
+        out_ptr + row * out_stride + column, tl.sum(acc).to(tl.int64, bitcast=True)
+    )
 
 
-def layer_checksum(
+def layers_checksum(
     pieces: torch.Tensor,
-    first_slice: int,
+    layers: torch.Tensor,
     block_ids: torch.Tensor,
     first_tokens: torch.Tensor,
     valid_tokens: torch.Tensor,
     out: torch.Tensor,
 ) -> None:
-    """Add one layer's weighted piece sum of each block row into ``out``.
+    """Add each layer's weighted piece sum of each block row into its column
+    of ``out``.
 
     Args:
-        pieces: The layer's cache as integer pieces
+        pieces: The first layer's cache as integer pieces
             ``[num_blocks, kernel_blocks, heads, tokens, pieces]``, read as
-            unsigned.
-        first_slice: ``layer * H + head`` of the first head in ``pieces``.
+            unsigned. Every layer's cache has its shape, strides and dtype.
+        layers: ``[num_layers, 3]`` int64 on the device: each layer's cache
+            address, ``layer * H + head`` of its first head, and its column
+            of ``out``.
         block_ids: ``[n]`` int64 logical block ids.
         first_tokens: ``[n]`` int64 position in the request of each block's
             first token.
         valid_tokens: ``[n]`` int64 tokens to include from each block's start.
-        out: ``[n]`` int64 accumulator.
+        out: ``[n, num_columns]`` int64 accumulator with unit column stride.
 
     """
     _, kernel_blocks, heads, tokens, num_pieces = pieces.shape
     num_pieces_in_block = kernel_blocks * heads * tokens * num_pieces
-    grid = (block_ids.shape[0], triton.cdiv(num_pieces_in_block, _CHUNK))
-    _layer_checksum_kernel[grid](
+    grid = (block_ids.shape[0], triton.cdiv(num_pieces_in_block, _CHUNK), len(layers))
+    _layers_checksum_kernel[grid](
         pieces,
         *pieces.stride(),
+        layers,
         block_ids,
         first_tokens,
         valid_tokens,
         out,
         out.stride(0),
-        first_slice,
         kernel_blocks,
         heads,
         tokens,
@@ -120,4 +136,5 @@ def layer_checksum(
         PIECE_BITS=8 * pieces.element_size(),
         CHUNK=_CHUNK,
         BLOCK=min(triton.next_power_of_2(num_pieces_in_block), 1024),
+        SINGLE_LAYER=len(layers) == 1,
     )

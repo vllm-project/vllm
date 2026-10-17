@@ -58,9 +58,10 @@ needs_triton = pytest.mark.skipif(not HAS_TRITON, reason="needs Triton")
 @pytest.mark.parametrize("token_major", [False, True])
 @pytest.mark.parametrize("kernel_split", [1, 2])
 def test_triton_kernel_matches_definition(token_major, kernel_split):
-    """On CUDA the per-layer sums come from the Triton kernel, which must give
-    the definition's values for any layout, kernel block split and partial
-    last block, including a layer with a large slice factor."""
+    """On CUDA the sums come from the Triton kernel, in one launch for layers
+    of one layout, which must give the definition's values for any layout,
+    kernel block split and partial last block, including a layer with a large
+    slice factor."""
     layers = {0: _logical_kv(heads=2, seed=1), 3: _logical_kv(heads=2, seed=2)}
     caches = {
         _name(number): _cache(
@@ -69,7 +70,8 @@ def test_triton_kernel_matches_definition(token_major, kernel_split):
         for number, kv in layers.items()
     }
     worker = _worker(_config(_group(_spec(2), *caches)), caches)
-    assert all(view.use_triton for view in worker._layer_views[0])
+    [launch] = worker._recv_plans[0].launches
+    assert launch.use_triton and len(launch.views) == 2
     [group] = _send(worker).values()
     np.testing.assert_array_equal(group.values[:, 0], _reference(layers))
 
@@ -98,21 +100,44 @@ def test_triton_kernel_tiles_large_single_head_blocks():
 
 
 @needs_triton
-def test_triton_kernel_accumulates_into_a_strided_column():
-    """With several replica keys a group's sums form a matrix, each layer
-    adding into one column: the kernel must honor the column's offset and
-    stride and leave the other columns alone."""
-    logical = _logical_kv(heads=2, seed=3)
-    pieces = checksum_worker._as_pieces(_cache(logical).cuda(), NUM_BLOCKS)
-    view = checksum_worker._LayerView(pieces, first_slice=0, replica_key=(1, 0))
+def test_triton_kernel_accumulates_into_each_layers_column():
+    """With several replica keys a group's sums form a matrix, each layer of a
+    launch adding into its own column: the kernel must honor each layer's
+    column and leave the other columns alone."""
+    layers = {0: _logical_kv(heads=2, seed=3), 3: _logical_kv(heads=2, seed=4)}
+    views = [
+        checksum_worker._LayerView(
+            checksum_worker._as_pieces(_cache(kv).cuda(), NUM_BLOCKS),
+            first_slice=number * MAX_KV_HEADS_PER_LAYER,
+            replica_key=(1, 0),
+        )
+        for number, kv in layers.items()
+    ]
+    launch = checksum_worker._FusedLayers(views, columns=[1, 3])
     block_ids = torch.tensor([3, 1, 4], device="cuda")
     first_tokens = torch.tensor([0, 16, 32], device="cuda")
     valid_tokens = torch.tensor([16, 16, 8], device="cuda")
-    out = torch.zeros(3, 3, dtype=torch.int64, device="cuda")
-    view.accumulate(block_ids, first_tokens, valid_tokens, out[:, 1])
+    out = torch.zeros(3, 4, dtype=torch.int64, device="cuda")
+    launch.accumulate(block_ids, first_tokens, valid_tokens, out)
     values = out.cpu().numpy().view(np.uint64)
-    np.testing.assert_array_equal(values[:, 1], _reference({0: logical}))
+    np.testing.assert_array_equal(values[:, 1], _reference({0: layers[0]}))
+    np.testing.assert_array_equal(values[:, 3], _reference({3: layers[3]}))
     assert not values[:, 0].any() and not values[:, 2].any()
+
+
+@needs_triton
+def test_triton_kernel_launches_once_per_layout():
+    """Layers whose caches differ in layout take separate launches, which add
+    up to the definition."""
+    layers = {0: _logical_kv(heads=2, seed=5), 1: _logical_kv(heads=2, seed=6)}
+    caches = {
+        _name(0): _cache(layers[0], token_major=False).cuda(),
+        _name(1): _cache(layers[1], token_major=True).cuda(),
+    }
+    worker = _worker(_config(_group(_spec(2), *caches)), caches)
+    assert len(worker._recv_plans[0].launches) == 2
+    [group] = _send(worker).values()
+    np.testing.assert_array_equal(group.values[:, 0], _reference(layers))
 
 
 @needs_triton
@@ -146,7 +171,7 @@ def test_triton_kernel_sums_split_mamba_rows(dim_first):
             tp_rank=rank,
             tp_size=2,
         )
-        assert all(view.use_triton for view in worker._layer_views[0])
+        assert all(launch.use_triton for launch in worker._recv_plans[0].launches)
         for group in _send(worker, MAMBA_BLOCKS).values():
             with np.errstate(over="ignore"):
                 total += group.values.sum(dtype=np.uint64)
