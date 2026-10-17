@@ -358,6 +358,8 @@ if current_platform.is_cuda():
     )
 elif current_platform.is_rocm():
     PREFILL_BACKENDS_TO_TEST.append(MLAPrefillBackendEnum.ROCM_AITER_FA)
+elif current_platform.is_xpu():
+    PREFILL_BACKENDS_TO_TEST.append(MLAPrefillBackendEnum.FLASH_ATTN)
 
 MLA_DIMENSIONS_TO_TEST = [
     ("deepseek", 128, 128),
@@ -370,25 +372,20 @@ def _prefill_backend_dimension_params():
     params = []
     for prefill_backend in PREFILL_BACKENDS_TO_TEST:
         for dimensions_id, qk_nope_head_dim, v_head_dim in MLA_DIMENSIONS_TO_TEST:
-            if device_capability is None:
-                invalid_reasons = ["device capability unavailable"]
-            else:
-                try:
-                    invalid_reasons = (
-                        prefill_backend.get_class().validate_configuration(
-                            device_capability,
-                            MLAPrefillSelectorConfig(
-                                dtype=torch.bfloat16,
-                                mla_dimensions=MLADimensions(
-                                    qk_nope_head_dim=qk_nope_head_dim,
-                                    qk_rope_head_dim=64,
-                                    v_head_dim=v_head_dim,
-                                ),
-                            ),
-                        )
-                    )
-                except ImportError:
-                    invalid_reasons = ["ImportError"]
+            try:
+                invalid_reasons = prefill_backend.get_class().validate_configuration(
+                    device_capability,
+                    MLAPrefillSelectorConfig(
+                        dtype=torch.bfloat16,
+                        mla_dimensions=MLADimensions(
+                            qk_nope_head_dim=qk_nope_head_dim,
+                            qk_rope_head_dim=64,
+                            v_head_dim=v_head_dim,
+                        ),
+                    ),
+                )
+            except ImportError:
+                invalid_reasons = ["ImportError"]
 
             marks = []
             if invalid_reasons:
@@ -420,6 +417,11 @@ for backend in BACKENDS_TO_TEST:
     )
     if query_len_support != QueryLenSupport.SINGLE_ONLY:
         SPEC_DECODE_BACKENDS.append(backend)
+
+# Backends whose decode pipeline replays device-trimmed verify batches.
+ADAPTIVE_VARLEN_BACKENDS = [
+    b for b in BACKENDS_TO_TEST if b == AttentionBackendEnum.ROCM_AITER_MLA
+]
 
 BACKEND_BLOCK_SIZES = {}
 for backend in BACKENDS_TO_TEST:
@@ -472,6 +474,10 @@ BATCH_SPECS = {
     "single_prefill": BatchSpec(seq_lens=[1024], query_lens=[64]),
     "spec_decode_small": BatchSpec(
         seq_lens=[128, 256, 512, 1024], query_lens=[4, 4, 4, 4]
+    ),
+    # Adaptive verification: verify requests trimmed to 1..k+1 tokens on device.
+    "spec_decode_ragged_small": BatchSpec(
+        seq_lens=[128, 256, 512, 1024], query_lens=[8, 3, 1, 5]
     ),
     "spec_decode_medium": BatchSpec(
         seq_lens=[512, 1024, 2048, 512, 1024, 2048], query_lens=[8, 8, 8, 8, 8, 8]
@@ -1584,6 +1590,42 @@ def run_attention_backend(
         return output
 
 
+def _with_even_cpu_query_split(
+    common_attn_metadata: CommonAttentionMetadata,
+) -> CommonAttentionMetadata:
+    """Host query lengths as adaptive verification leaves them.
+
+    The device keeps the trimmed per-request lengths; the host sees the same
+    total spread evenly, the first requests taking the remainder
+    (AdaptiveVerificationManager.compact_batch).
+    """
+    num_reqs = common_attn_metadata.num_reqs
+    total = int(common_attn_metadata.query_start_loc_cpu[num_reqs])
+    cpu_lens = torch.full((num_reqs,), total // num_reqs, dtype=torch.int32)
+    cpu_lens[: total % num_reqs] += 1
+    query_start_loc_cpu = torch.zeros_like(common_attn_metadata.query_start_loc_cpu)
+    torch.cumsum(cpu_lens, dim=0, out=query_start_loc_cpu[1 : num_reqs + 1])
+    return common_attn_metadata.replace(
+        query_start_loc_cpu=query_start_loc_cpu,
+        max_query_len=int(
+            (
+                common_attn_metadata.query_start_loc[1:]
+                - common_attn_metadata.query_start_loc[:-1]
+            )
+            .max()
+            .item()
+        ),
+    )
+
+
+def _fp8_cache_roundtrip(tensor: torch.Tensor, scale: float) -> torch.Tensor:
+    """Reproduce cache storage rounding for the SDPA reference."""
+    fp8_dtype = current_platform.fp8_dtype()
+    limits = torch.finfo(fp8_dtype)
+    quantized = (tensor.float() / scale).clamp(limits.min, limits.max).to(fp8_dtype)
+    return (quantized.float() * scale).to(tensor.dtype)
+
+
 def _run_backend_correctness(
     default_vllm_config,
     dist_init,
@@ -1598,6 +1640,7 @@ def _run_backend_correctness(
     qk_nope_head_dim: int,
     v_head_dim: int,
     chunked_prefill_workspace_size: int | None = None,
+    adaptive_verification: bool = False,
 ):
     """Test that all backends produce similar outputs to a reference implementation
     using torch.nn.functional.scaled_dot_product_attention.
@@ -1629,6 +1672,10 @@ def _run_backend_correctness(
     ) and AttentionBackendEnum.CUTLASS_MLA in backends_to_test:
         # CUTLASS_MLA does not support non-1 Q/K scales
         backends_to_test.remove(AttentionBackendEnum.CUTLASS_MLA)
+    if adaptive_verification:
+        backends_to_test = [
+            b for b in backends_to_test if b in ADAPTIVE_VARLEN_BACKENDS
+        ]
     if not backends_to_test:
         pytest.skip(f"No backends support kv_cache_dtype={kv_cache_dtype}")
 
@@ -1668,19 +1715,26 @@ def _run_backend_correctness(
         block_size=default_block_size,
         hf_config_override=hf_config_override,
     )
+    if hf_config_override and current_platform.is_xpu():
+        vllm_config.model_config.model_arch_config.total_num_attention_heads = (
+            hf_config_override["num_attention_heads"]
+        )
     vllm_config.cache_config.cache_dtype = kv_cache_dtype
 
     # For spec decode tests, add a speculative_config to set the reorder_batch_threshold
     if is_spec_decode_test:
         from vllm.config import SpeculativeConfig
 
-        # Get the query length from the batch spec (they should all be uniform)
-        query_len = batch_spec.query_lens[0]
+        # Get the query length from the batch spec (they should all be uniform,
+        # except under adaptive verification, where the longest is k+1)
+        query_len = max(batch_spec.query_lens)
         # Set num_speculative_tokens to query_len - 1
         # (since threshold is 1 + num_spec_tokens)
         # Use ngram method which doesn't require a draft model
         vllm_config.speculative_config = SpeculativeConfig(
-            method="ngram", num_speculative_tokens=query_len - 1
+            method="ngram",
+            num_speculative_tokens=query_len - 1,
+            enable_adaptive_verification=adaptive_verification,
         )
 
     device = torch.device(f"{DEVICE_TYPE}:0")
@@ -1755,6 +1809,19 @@ def _run_backend_correctness(
         # K_PE (rope component): [s_len, 1, qk_rope_head_dim]
         k_pe_full = torch.randn(s_len, 1, qk_rope_head_dim, dtype=dtype, device=device)
 
+        kv_c_cached, k_pe_cached = kv_c_full, k_pe_full
+        kv_c_prefill, k_pe_prefill = kv_c_full, k_pe_full
+        if kv_cache_dtype.startswith("fp8"):
+            kv_c_cached = _fp8_cache_roundtrip(kv_c_full, k_scale)
+            k_pe_cached = _fp8_cache_roundtrip(k_pe_full, k_scale)
+            # Prefill reads cached context and unquantized new tokens.
+            kv_c_prefill = torch.cat(
+                [kv_c_cached[:context_len], kv_c_full[context_len:]]
+            )
+            k_pe_prefill = torch.cat(
+                [k_pe_cached[:context_len], k_pe_full[context_len:]]
+            )
+
         # Determine if this sequence uses the decode pipeline or prefill
         # pipeline for each backend
         # NOTE: For spec decode tests with uniform query_len > 1, backends that
@@ -1804,10 +1871,10 @@ def _run_backend_correctness(
         q_mqa = torch.cat([ql_nope, q_pe], dim=-1)
         # K: [s_len, kv_lora_rank + qk_rope_head_dim]
         # (broadcasted to all heads)
-        k_mqa = torch.cat([kv_c_full, k_pe_full.squeeze(1)], dim=-1)
+        k_mqa = torch.cat([kv_c_cached, k_pe_cached.squeeze(1)], dim=-1)
         k_mqa = k_mqa.unsqueeze(1).expand(-1, num_q_heads, -1)
         # V: [s_len, kv_lora_rank] (broadcasted to all heads)
-        v_mqa = kv_c_full.unsqueeze(1).expand(-1, num_q_heads, -1)
+        v_mqa = kv_c_cached.unsqueeze(1).expand(-1, num_q_heads, -1)
 
         # Create custom attention mask for decode path:
         # - Query tokens can attend to all context tokens
@@ -1836,12 +1903,12 @@ def _run_backend_correctness(
         #######################################################
         # Prefill path: MHA-style attention with full sequence
         # Apply kv_b_proj to the full kv_c tensor
-        kv_nope_full = torch.einsum("sl,lnh->snh", kv_c_full, kv_b_proj_weight)
+        kv_nope_full = torch.einsum("sl,lnh->snh", kv_c_prefill, kv_b_proj_weight)
         k_nope_full, v_full = kv_nope_full.split([qk_nope_head_dim, v_head_dim], dim=-1)
 
         # Build attention inputs for full sequence
         q_mha = torch.cat([q_nope, q_pe], dim=-1)  # [q_len, num_heads, total_dim]
-        k_pe_full_expanded = k_pe_full.expand(-1, num_q_heads, -1)
+        k_pe_full_expanded = k_pe_prefill.expand(-1, num_q_heads, -1)
         k_full = torch.cat([k_nope_full, k_pe_full_expanded], dim=-1)
 
         # Create custom attention mask:
@@ -1949,6 +2016,13 @@ def _run_backend_correctness(
             scale=k_scale,
         )
         kv_cache_per_block_size[block_size] = kv_cache
+
+        if adaptive_verification:
+            # Only after the cache is filled: prepopulation reads the context
+            # lengths off the host query lengths.
+            metadata_per_block_size[block_size] = _with_even_cpu_query_split(
+                common_attn_metadata
+            )
 
     # 4. Run vLLM backends and compare
     rtol = 1e-2
@@ -2134,4 +2208,30 @@ def test_chunked_context_backend_correctness(
         qk_nope_head_dim=qk_nope_head_dim,
         v_head_dim=v_head_dim,
         chunked_prefill_workspace_size=1024,
+    )
+
+
+@pytest.mark.skipif(
+    not ADAPTIVE_VARLEN_BACKENDS, reason="No adaptive varlen decode backend"
+)
+def test_adaptive_varlen_decode_correctness(
+    default_vllm_config, dist_init, workspace_init
+):
+    """Device query lengths 1..k+1 against an even host split, as adaptive
+    verification hands them to the target model's attention. TP 8 gives 16
+    heads, the padded Kimi-K3 count."""
+    _run_backend_correctness(
+        default_vllm_config,
+        dist_init,
+        workspace_init,
+        "spec_decode_ragged_small",
+        "deepseek-ai/DeepSeek-R1",
+        8,
+        "fp8",
+        1.0,
+        1.0,
+        None,
+        128,
+        128,
+        adaptive_verification=True,
     )
