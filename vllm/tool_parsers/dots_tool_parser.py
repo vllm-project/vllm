@@ -98,7 +98,7 @@ class DotsToolParser(ToolParser):
                 return value
         # Shared helper: keeps a literal "null" for string params, nulls it
         # when the schema allows null, and never emits non-finite floats
-        # (inf/nan) that would serialize as invalid JSON (#60516 review).
+        # (inf/nan) that would serialize as invalid JSON.
         return coerce_to_schema_type(value, schema_types)
 
     def _resolve_param_type(
