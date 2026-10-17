@@ -38,6 +38,7 @@ from vllm.multimodal.cache import (
     MultiModalCacheMissError,
     engine_receiver_cache_from_config,
 )
+from vllm.outputs import RequestError
 from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.tracing import instrument, maybe_init_worker_tracer
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
@@ -1154,6 +1155,7 @@ class EngineCoreProc(EngineCore):
         identity = self.engine_index.to_bytes(length=2, byteorder="little")
         self.engines_running = False
         self.shutdown_state = EngineShutdownState.RUNNING
+        self.reject_new_requests = False
 
         # Receiver for tensor IPC
         self.tensor_ipc_receiver: TensorIpcReceiver | None = None
@@ -1712,7 +1714,7 @@ class EngineCoreProc(EngineCore):
             return
         elif request_type == EngineCoreRequestType.ADD:
             req, request_wave = request
-            if self._reject_add_in_shutdown(req):
+            if self._reject_add_in_shutdown(req) or self._reject_add_while_paused(req):
                 return
             self.add_request(req, request_wave)
         elif request_type == EngineCoreRequestType.ABORT:
@@ -1747,6 +1749,28 @@ class EngineCoreProc(EngineCore):
             request.request_id,
         )
         self._send_abort_outputs_to_client([request.request_id], request.client_index)
+        return True
+
+    def _reject_add_while_paused(self, request: Request) -> bool:
+        # KV cleanup markers and inputs to open streaming sessions are not new work.
+        if (
+            not self.reject_new_requests
+            or request.abort_immediately
+            or self.scheduler.has_request(request.request_id)
+        ):
+            return False
+        error = RequestError(
+            code="engine_paused",
+            message="Generation is paused. Please retry after it resumes.",
+            retryable=True,
+        )
+        self._send_finish_outputs_to_client(
+            [request.request_id], request.client_index, FinishReason.ERROR, error
+        )
+        if request.kv_transfer_params:
+            # Let the KV connector free any remote blocks held for it.
+            request.abort_immediately = True
+            self.add_request(request)
         return True
 
     def _reject_utility_in_shutdown(
@@ -2138,6 +2162,20 @@ class EngineCoreProc(EngineCore):
         self._idle_state_callbacks.append(partial(engine_idle_callback, future=future))
         return future
 
+    def pause_generation(
+        self, mode: PauseMode = "abort", clear_cache: bool = True
+    ) -> Future | None:
+        """``pause_scheduler`` for a user pause: "abort" and "wait" also reject
+        new requests with a retryable error until resume, rather than queue
+        them. Other pauses (e.g. sleep) leave this policy unchanged."""
+        future = self.pause_scheduler(mode, clear_cache)
+        self.reject_new_requests = mode != "keep"
+        return future
+
+    def resume_scheduler(self) -> None:
+        self.reject_new_requests = False
+        super().resume_scheduler()
+
     def _pause_complete(self) -> bool:
         """Returns True if the pause has fully completed and the caller can
         return ``None`` synchronously; False if the pause is still pending
@@ -2146,10 +2184,14 @@ class EngineCoreProc(EngineCore):
         return not self.has_work()
 
     def _send_finish_outputs_to_client(
-        self, req_ids: list[str], client_index: int, finish_reason: FinishReason
+        self,
+        req_ids: list[str],
+        client_index: int,
+        finish_reason: FinishReason,
+        error: RequestError | None = None,
     ) -> None:
         outputs = [
-            EngineCoreOutput(req_id, [], finish_reason=finish_reason)
+            EngineCoreOutput(req_id, [], finish_reason=finish_reason, error=error)
             for req_id in req_ids
         ]
         eco = EngineCoreOutputs(finished_requests=req_ids, outputs=outputs)

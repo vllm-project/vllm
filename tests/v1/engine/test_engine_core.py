@@ -25,8 +25,13 @@ from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.core.sched.interface import PauseState
-from vllm.v1.engine import EngineCoreRequest, EngineCoreRequestType
-from vllm.v1.engine.core import DPEngineCoreProc, EngineCore, EngineCoreProc
+from vllm.v1.engine import EngineCoreRequest, EngineCoreRequestType, FinishReason
+from vllm.v1.engine.core import (
+    DPEngineCoreProc,
+    EngineCore,
+    EngineCoreProc,
+    EngineShutdownState,
+)
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.executor.uniproc_executor import UniProcExecutor
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -747,6 +752,63 @@ def _pausable_engine_core_proc() -> EngineCoreProc:
     core.engines_running = False
     core._idle_state_callbacks = []
     return core
+
+
+@pytest.mark.parametrize(
+    "mode,user_pause,kind,rejected",
+    [
+        pytest.param("abort", True, "new", True, id="abort"),
+        pytest.param("wait", True, "new", True, id="wait"),
+        pytest.param("abort", True, "pd", True, id="pd-request"),
+        pytest.param("keep", True, "new", False, id="keep"),
+        pytest.param("abort", False, "new", False, id="sleep-or-elastic-ep"),
+        pytest.param("abort", True, "cleanup", False, id="kv-cleanup-marker"),
+        pytest.param("abort", True, "session", False, id="open-session-input"),
+    ],
+)
+def test_pause_generation_rejects_new_requests(mode, user_pause, kind, rejected):
+    """`pause_generation` rejects new requests with a retryable error until
+    resume, even across a later internal pause; `keep` and internal pauses
+    (sleep, elastic EP) queue them. KV cleanup markers and inputs to an open
+    streaming session are not new work, and a rejected P/D request still reaches
+    the connector as a cleanup marker."""
+    core = _pausable_engine_core_proc()
+    core.shutdown_state = EngineShutdownState.RUNNING
+    core.reject_new_requests = False
+    core.scheduler.has_request.return_value = kind == "session"
+    core.add_request = MagicMock()
+    core._send_finish_outputs_to_client = MagicMock()
+    request = MagicMock(
+        request_id="r",
+        client_index=1,
+        abort_immediately=kind == "cleanup",
+        kv_transfer_params={"do_remote_prefill": True} if kind == "pd" else None,
+    )
+
+    pause = core.pause_generation if user_pause else core.pause_scheduler
+    pause(mode=mode, clear_cache=False)
+    # An internal pause on top (e.g. sleep) leaves the policy alone.
+    core.pause_scheduler(mode="abort", clear_cache=False)
+    core._handle_client_request(EngineCoreRequestType.ADD, (request, 0))
+
+    if rejected:
+        [(req_ids, client_index, reason, error)] = [
+            call.args for call in core._send_finish_outputs_to_client.call_args_list
+        ]
+        assert (req_ids, client_index, reason) == (["r"], 1, FinishReason.ERROR)
+        assert error.code == "engine_paused" and error.retryable
+    else:
+        core._send_finish_outputs_to_client.assert_not_called()
+    if rejected and kind != "pd":
+        core.add_request.assert_not_called()
+    else:
+        assert request.abort_immediately == (kind in ("cleanup", "pd"))
+        core.add_request.assert_called_once()
+
+    core.resume_scheduler()
+    core.add_request.reset_mock()
+    core._handle_client_request(EngineCoreRequestType.ADD, (request, 0))
+    core.add_request.assert_called_once_with(request, 0)
 
 
 @pytest.mark.parametrize(

@@ -2702,6 +2702,9 @@ class Scheduler(SchedulerInterface):
         """Returns the fraction of the KV cache currently in use (0.0-1.0)."""
         return self.kv_cache_manager.usage
 
+    def has_request(self, request_id: str) -> bool:
+        return request_id in self.requests
+
     def add_request(self, request: Request) -> None:
         existing = self.requests.get(request.request_id)
         if existing is not None:
