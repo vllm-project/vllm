@@ -1,8 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from unittest.mock import patch
+
 import jinja2
 import pytest
+import regex as re
 
 from vllm.config import ModelConfig
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
@@ -542,6 +545,146 @@ def test_resolve_content_format_fallbacks(model, expected_format):
     assert resolved_format == expected_format
 
 
+# Same models and skip path as the content-format tests above.
+_HF_DEFINED_CHAT_MODELS = [
+    "microsoft/Phi-3.5-vision-instruct",
+    "Qwen/Qwen2-VL-2B-Instruct",
+    "Qwen/Qwen2.5-VL-3B-Instruct",
+    "Qwen/Qwen3.5-4B",
+    "fixie-ai/ultravox-v0_5-llama-3_2-1b",
+    "Qwen/Qwen2-Audio-7B-Instruct",
+    "meta-llama/Llama-Guard-3-1B",
+    "XiaomiMiMo/MiMo-V2.5-Pro",
+]
+_HF_FALLBACK_CHAT_MODELS = [
+    "Salesforce/blip2-opt-2.7b",
+    "deepseek-ai/deepseek-vl2-tiny",
+    "google/paligemma-3b-mix-224",
+]
+
+
+def _assert_real_template_checks_dropped_roles(model: str) -> None:
+    """Valid turns render, typo roles do not vanish, ignored schema roles warn."""
+    model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
+    model_info.check_available_online(on_fail="skip")
+
+    model_config = ModelConfig(
+        model,
+        tokenizer=model_info.tokenizer or model,
+        tokenizer_mode=model_info.tokenizer_mode,
+        revision=model_info.revision,
+        trust_remote_code=model_info.trust_remote_code,
+        hf_overrides=model_info.hf_overrides,
+        skip_tokenizer_init=model_info.require_embed_inputs,
+        enable_prompt_embeds=model_info.require_embed_inputs,
+        enable_mm_embeds=model_info.require_embed_inputs,
+        enforce_eager=model_info.enforce_eager,
+        dtype=model_info.dtype,
+    )
+    tokenizer = get_tokenizer(
+        model,
+        trust_remote_code=model_config.trust_remote_code,
+    )
+
+    user_text = "hello from the user"
+    rendered = safe_apply_chat_template(
+        model_config,
+        tokenizer,
+        [{"role": "user", "content": user_text}],
+        chat_template=None,
+        tokenize=False,
+        add_generation_prompt=False,
+    )
+    assert isinstance(rendered, str)
+    assert user_text in rendered
+
+    typo_text = "typo payload zebra"
+    try:
+        typo_rendered = safe_apply_chat_template(
+            model_config,
+            tokenizer,
+            [{"role": "usr", "content": typo_text}],
+            chat_template=None,
+            tokenize=False,
+            add_generation_prompt=False,
+        )
+    except VLLMValidationError as exc:
+        # Our checker names the typo. A template that rejects the turn
+        # itself is also not a silent drop.
+        if "check for a typo in `role`" in str(exc):
+            assert exc.parameter == "messages"
+            assert exc.value == "usr"
+    else:
+        assert isinstance(typo_rendered, str)
+        assert typo_text in typo_rendered
+
+    system_text = "system prompt zebra"
+    with patch(
+        "vllm.renderers.chat_utils.rendered_roles.logger.warning_once"
+    ) as system_warn:
+        try:
+            system_rendered = safe_apply_chat_template(
+                model_config,
+                tokenizer,
+                [
+                    {"role": "system", "content": system_text},
+                    {"role": "user", "content": user_text},
+                ],
+                chat_template=None,
+                tokenize=False,
+                add_generation_prompt=False,
+            )
+        except VLLMValidationError as exc:
+            assert "check for a typo in `role`" not in str(exc)
+        else:
+            assert isinstance(system_rendered, str)
+            assert user_text in system_rendered
+            if system_text not in system_rendered:
+                assert system_warn.called
+                assert "system" in str(system_warn.call_args)
+
+    function_text = "function result zebra"
+    with patch("vllm.renderers.chat_utils.rendered_roles.logger.warning_once") as warn:
+        try:
+            function_rendered = safe_apply_chat_template(
+                model_config,
+                tokenizer,
+                [
+                    {"role": "user", "content": user_text},
+                    {
+                        "role": "function",
+                        "name": "lookup",
+                        "content": function_text,
+                    },
+                ],
+                chat_template=None,
+                tokenize=False,
+                add_generation_prompt=False,
+            )
+        except VLLMValidationError as exc:
+            # The template rejected the role itself. Our checker must not
+            # be the one calling it a typo.
+            assert "check for a typo in `role`" not in str(exc)
+            return
+    assert isinstance(function_rendered, str)
+    assert user_text in function_rendered
+    if function_text not in function_rendered:
+        assert warn.called
+        assert "function" in str(warn.call_args)
+
+
+@pytest.mark.parametrize("model", _HF_DEFINED_CHAT_MODELS)
+def test_hf_defined_template_checks_dropped_roles(model):
+    """Built-in HF chat templates must not silently drop a turn."""
+    _assert_real_template_checks_dropped_roles(model)
+
+
+@pytest.mark.parametrize("model", _HF_FALLBACK_CHAT_MODELS)
+def test_hf_fallback_template_checks_dropped_roles(model):
+    """Fallback HF chat templates must not silently drop a turn."""
+    _assert_real_template_checks_dropped_roles(model)
+
+
 @pytest.mark.parametrize(
     ("template_path", "expected_format"),
     [
@@ -1006,6 +1149,169 @@ def test_template_error_reason_prefers_template_error():
 def test_template_error_reason_falls_back_to_message():
     err = ValueError("plain failure")
     assert _template_error_reason(err) == "plain failure"
+
+
+# Role dispatch copied from the Qwen2.5 chat template: roles other than
+# system/user/assistant/tool produce no prompt text.
+_QWEN_ROLE_TEMPLATE = """
+{%- if messages[0]['role'] == 'system' -%}
+{{- '<|im_start|>system\\n' + messages[0]['content'] + '<|im_end|>\\n' -}}
+{%- endif -%}
+{%- for message in messages -%}
+    {%- if (message.role == "user") or (message.role == "system" and not loop.first)
+        or (message.role == "assistant" and not message.tool_calls) -%}
+        {{- '<|im_start|>' + message.role + '\\n'
+            + message.content + '<|im_end|>\\n' -}}
+    {%- elif message.role == "assistant" -%}
+        {{- '<|im_start|>' + message.role + '\\n'
+            + (message.content or '') + '<|im_end|>\\n' -}}
+    {%- elif message.role == "tool" -%}
+        {{- '<tool_response>\\n' + message.content + '\\n</tool_response>' -}}
+    {%- endif -%}
+{%- endfor -%}
+{%- if add_generation_prompt -%}
+    {{- '<|im_start|>assistant\\n' -}}
+{%- endif -%}
+"""
+
+_ELSE_ROLE_TEMPLATE = """
+{% for message in messages %}
+{% if message['role'] == 'user' %}
+user:{{ message['content'] }}
+{% elif message['role'] == 'assistant' %}
+assistant:{{ message['content'] }}
+{% else %}
+{{ message['role'] }}:{{ message['content'] }}
+{% endif %}
+{% endfor %}
+"""
+
+
+class TestChatTemplateDropsUnhandledRoles:
+    """Non-empty messages that a template drops must be HTTP 400.
+
+    Custom roles stay valid when the template actually emits their content.
+    Empty content is not an error: there is nothing to drop.
+    """
+
+    @pytest.fixture
+    def model_config(self):
+        return ModelConfig(
+            "facebook/opt-125m",
+            tokenizer="facebook/opt-125m",
+            tokenizer_mode="auto",
+            trust_remote_code=False,
+            dtype="float16",
+        )
+
+    @pytest.fixture
+    def tokenizer(self):
+        return get_tokenizer("facebook/opt-125m")
+
+    def test_ignored_function_role_warns(self, model_config, tokenizer):
+        with patch(
+            "vllm.renderers.chat_utils.rendered_roles.logger.warning_once"
+        ) as warn:
+            result = safe_apply_chat_template(
+                model_config,
+                tokenizer,
+                [
+                    {"role": "user", "content": "hello"},
+                    {
+                        "role": "function",
+                        "name": "lookup",
+                        "content": "result",
+                    },
+                ],
+                chat_template=_QWEN_ROLE_TEMPLATE,
+                tokenize=False,
+                add_generation_prompt=False,
+            )
+        assert "hello" in result
+        assert "result" not in result
+        warn.assert_called_once()
+        assert "function" in str(warn.call_args)
+
+    @pytest.mark.parametrize("role", ["system", "user", "assistant", "tool"])
+    def test_known_roles_render(self, model_config, tokenizer, role):
+        result = safe_apply_chat_template(
+            model_config,
+            tokenizer,
+            [{"role": role, "content": "hello"}],
+            chat_template=_QWEN_ROLE_TEMPLATE,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+        assert "hello" in result
+        assert "vllmprobe" not in result
+
+    @pytest.mark.parametrize("role", ["usr", "assistan", "USER", "wizard", "", " "])
+    def test_typo_role_is_bad_request(self, model_config, tokenizer, role):
+        with pytest.raises(VLLMValidationError, match=re.escape(repr(role))) as exc:
+            safe_apply_chat_template(
+                model_config,
+                tokenizer,
+                [{"role": role, "content": "hello"}],
+                chat_template=_QWEN_ROLE_TEMPLATE,
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+        assert exc.value.parameter == "messages"
+        assert exc.value.value == role
+
+    def test_typo_role_rejected_when_tokenizing(self, model_config, tokenizer):
+        with pytest.raises(VLLMValidationError, match="'usr'"):
+            safe_apply_chat_template(
+                model_config,
+                tokenizer,
+                [
+                    {"role": "system", "content": "You are terse."},
+                    {"role": "usr", "content": "The launch code is TANGERINE-42."},
+                    {"role": "user", "content": "What is the launch code?"},
+                ],
+                chat_template=_QWEN_ROLE_TEMPLATE,
+                tokenize=True,
+                add_generation_prompt=True,
+            )
+
+    @pytest.mark.parametrize("content", ["", "   "])
+    def test_empty_content_unknown_role_is_allowed(
+        self, model_config, tokenizer, content
+    ):
+        result = safe_apply_chat_template(
+            model_config,
+            tokenizer,
+            [{"role": "wizard", "content": content}],
+            chat_template=_QWEN_ROLE_TEMPLATE,
+            tokenize=False,
+            add_generation_prompt=False,
+        )
+        assert "wizard" not in result
+
+    def test_custom_role_rendered_by_template(self, model_config, tokenizer):
+        result = safe_apply_chat_template(
+            model_config,
+            tokenizer,
+            [{"role": "wizard", "content": "hello from a custom role"}],
+            chat_template=_ELSE_ROLE_TEMPLATE,
+            tokenize=False,
+            add_generation_prompt=False,
+        )
+        assert "wizard:hello from a custom role" in result
+        # The inclusion probe must not leak into the prompt that is served.
+        assert "vllmprobe" not in result
+
+    def test_chatml_renders_custom_role(self, model_config, tokenizer):
+        result = safe_apply_chat_template(
+            model_config,
+            tokenizer,
+            [{"role": "wizard", "content": "hello"}],
+            chat_template=CHATML_TEMPLATE,
+            tokenize=False,
+            add_generation_prompt=False,
+        )
+        assert "wizard" in result
+        assert "hello" in result
 
 
 class TestConsolidateSystemMessages:
