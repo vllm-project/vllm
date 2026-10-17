@@ -508,6 +508,10 @@ class _Fp8OnlineMoEBase(OnlineMoEMethodBase):
                 weight_key = kFp8StaticTensorSym
                 activation_key = kFp8DynamicTensorSym
 
+        if envs.VLLM_BATCH_INVARIANT and activation_key == kFp8DynamicTensorSym:
+            activation_key = kFp8DynamicTokenSym
+            self.per_act_token_quant = True
+
         # Select Fp8 MoE backend
         self.fp8_backend, self.experts_cls = select_fp8_moe_backend(
             config=self.moe,

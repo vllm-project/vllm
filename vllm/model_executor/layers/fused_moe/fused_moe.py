@@ -860,6 +860,8 @@ def invoke_fused_moe_triton_kernel(
     # loads tensor-wise activation scales through a pointer.
     if A_scale is not None and A_scale.ndim == 0:
         A_scale = A_scale.reshape(1)
+    if per_channel_quant and B_scale is not None and B_scale.ndim == 1:
+        B_scale = B_scale.view(-1, 1).expand(-1, B.size(1))
 
     fused_moe_kernel[grid](
         A,
