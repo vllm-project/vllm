@@ -60,6 +60,9 @@ from vllm.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_BUFFER_SIZE_BYTES,
     DEFAULT_PACKED_NUM_BUFFERS,
 )
+from vllm.distributed.weight_transfer.sparse_disk_engine import (
+    SparseDiskTrainerInitInfo,
+)
 from vllm.distributed.weight_transfer.sparse_nccl_engine import (
     SparseNCCLTrainerInitInfo,
     SparseNCCLTrainerWeightTransferEngine,
@@ -2078,6 +2081,108 @@ def test_sparse_nccl_trainer_non_sender_skips_client():
     engine.send_weights([_sparse_patch()])
     engine.send_weight_chunk([_sparse_patch()])
     assert client.order == []
+
+
+# --- Sparse Disk ---
+
+
+class _CheckpointModel(torch.nn.Module):
+    """A model whose `load_weights` copies checkpoint tensors onto same-named
+    parameters, standing in for a real model's native loader."""
+
+    def __init__(self):
+        super().__init__()
+        self.w = torch.nn.Parameter(torch.zeros(2, 3), requires_grad=False)
+        self.b = torch.nn.Parameter(torch.zeros(4), requires_grad=False)
+
+    def load_weights(self, weights):
+        loaded = set()
+        for name, tensor in weights:
+            self.get_parameter(name).data.copy_(tensor)
+            loaded.add(name)
+        return loaded
+
+
+class _WorkerClient:
+    """A VLLMWeightSyncClient that drives one in-process worker engine."""
+
+    def __init__(self, model: torch.nn.Module):
+        self.engine = WeightTransferEngineFactory.create_engine(
+            WeightTransferConfig(backend="sparse_disk"),
+            create_mock_vllm_config(),
+            torch.device("cpu"),
+            model,
+        )
+
+    def init_weight_transfer_engine(self, init_info: dict) -> None:
+        self.engine.init_transfer_engine(self.engine.parse_init_info(init_info))
+
+    def start_weight_update(self) -> None:
+        self.engine.start_weight_update()
+
+    def update_weights(self, update_info: dict) -> None:
+        self.engine.receive_weights(self.engine.parse_update_info(update_info))
+
+    def finish_weight_update(self, weight_version: str | None = None) -> None:
+        self.engine.finish_weight_update()
+
+
+def test_sparse_disk_patches_reach_worker_model(tmp_path):
+    """Patches sent by the trainer engine change only the addressed elements of
+    the worker's model, and no patch file outlives the round."""
+    model = _CheckpointModel()
+    trainer = WeightTransferTrainerFactory.trainer_init(
+        init_info=SparseDiskTrainerInitInfo(patch_dir=str(tmp_path), rank=0),
+        client=_WorkerClient(model),
+    )
+
+    trainer.send_weights(
+        [
+            SparseWeightPatch(
+                name="w",
+                indices=torch.tensor([1, 5], dtype=torch.int32),
+                values=torch.tensor([1.5, -2.0]),
+                full_shape=(2, 3),
+            ),
+            SparseWeightPatch(
+                name="b",
+                indices=torch.tensor([3], dtype=torch.int32),
+                values=torch.tensor([7.0]),
+                full_shape=(4,),
+            ),
+        ]
+    )
+
+    assert torch.equal(model.w, torch.tensor([[0.0, 1.5, 0.0], [0.0, 0.0, -2.0]]))
+    assert torch.equal(model.b, torch.tensor([0.0, 0.0, 0.0, 7.0]))
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_sparse_disk_worker_rejects_other_safetensors_files(tmp_path):
+    """Pointing the worker at a full checkpoint must fail without loading it."""
+    from safetensors.torch import save_file
+
+    checkpoint = tmp_path / "model.safetensors"
+    save_file({"w": torch.ones(2, 3)}, checkpoint)
+    model = _CheckpointModel()
+
+    with pytest.raises(ValueError, match="sparse patch file"):
+        _WorkerClient(model).update_weights({"patch_path": str(checkpoint)})
+    assert torch.equal(model.w, torch.zeros(2, 3))
+
+
+def test_sparse_disk_trainer_non_sender_writes_nothing(tmp_path):
+    client = RecordingClient()
+    engine = WeightTransferTrainerFactory.trainer_init(
+        init_info=SparseDiskTrainerInitInfo(patch_dir=str(tmp_path), rank=1),
+        client=client,
+    )
+
+    engine.send_weights([_sparse_patch()])
+    engine.send_weight_chunk([_sparse_patch()])
+
+    assert client.order == []
+    assert list(tmp_path.iterdir()) == []
 
 
 # --- Optional ModelExpress Client Lifecycle ---
