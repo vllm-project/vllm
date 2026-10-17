@@ -33,6 +33,7 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache,
     moe_kernel_quantize_input,
+    moe_padding_mask,
     swiglu_limit_func,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
@@ -518,6 +519,13 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             self.activation(
                 activation, intermediate_cache2, intermediate_cache1.view(-1, N)
             )
+
+            if a2_scale_is_global:
+                is_padding = moe_padding_mask(num_tokens)
+                if is_padding is not None:
+                    intermediate_cache2.view(num_tokens, top_k_num, -1).masked_fill_(
+                        is_padding[:, None, None], 0
+                    )
 
             qintermediate_cache2, a2q_scale = moe_kernel_quantize_input(
                 intermediate_cache2,

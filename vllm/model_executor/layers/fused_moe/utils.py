@@ -12,6 +12,7 @@ from torch import nn
 import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.config_utils import (
     is_shared_expert_quant_fse_compatible,
@@ -50,6 +51,13 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization import QuantizationConfig
 
 logger = init_logger(__name__)
+
+
+def moe_padding_mask(num_tokens: int) -> torch.Tensor | None:
+    if not is_forward_context_available():
+        return None
+    is_padding = get_forward_context().is_padding
+    return None if is_padding is None else is_padding[:num_tokens]
 
 
 def resolve_layer_fused_shared_expert(
