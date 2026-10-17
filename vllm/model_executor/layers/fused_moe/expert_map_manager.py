@@ -240,7 +240,7 @@ class ExpertMapManager:
         self._init_aiter_shared_experts_topK_buffer()
 
         if self.use_ep and self.rocm_aiter_enabled:
-            expert_mask = self.expert_mask
+            expert_mask = self._expert_mask
             assert expert_mask is None or torch.all(
                 (expert_mask == 0) | (expert_mask == 1)
             ), "Aiter Fused MoE kernel only supports expert_map with 0 and 1s."
@@ -357,7 +357,7 @@ class ExpertMapManager:
         """Check if expert is assigned to this rank."""
         if self._expert_map is None:
             return True
-        return self._expert_map[global_id] != -1
+        return bool(self._expert_map[global_id] != -1)
 
     def update(
         self,
@@ -433,18 +433,26 @@ class ExpertMapManager:
 
     def _calculate_expert_maps(self) -> None:
         """Calculate expert mappings based on placement strategy."""
-        (
-            self._local_num_experts,
-            self._expert_map,
-            self._expert_mask,
-        ) = determine_expert_map(
-            ep_size=self.ep_size,
-            ep_rank=self.ep_rank,
-            global_num_experts=self.global_num_experts,
-            expert_placement_strategy=self._placement_strategy,
-            num_fused_shared_experts=self.num_fused_shared_experts,
-            return_expert_mask=self.rocm_aiter_enabled,
-        )
+        device = torch.get_default_device()
+        if device.type == "meta":
+            # Meta-device construction (e.g. IPC weight-cache loading) never
+            # materializes plain attributes, but host-side queries need real
+            # data. The kernel-facing copy is the RoutedExperts buffer, which
+            # the IPC loader re-registers with the daemon's real tensor.
+            device = torch.device("cpu")
+        with device:
+            (
+                self._local_num_experts,
+                self._expert_map,
+                self._expert_mask,
+            ) = determine_expert_map(
+                ep_size=self.ep_size,
+                ep_rank=self.ep_rank,
+                global_num_experts=self.global_num_experts,
+                expert_placement_strategy=self._placement_strategy,
+                num_fused_shared_experts=self.num_fused_shared_experts,
+                return_expert_mask=self.rocm_aiter_enabled,
+            )
 
         self._local_num_experts += self.num_fused_shared_experts
 
