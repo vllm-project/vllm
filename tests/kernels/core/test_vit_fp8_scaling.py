@@ -125,12 +125,14 @@ def test_dynamic_scaling_updates_scales(_make_attention) -> None:
 
     S, H, D = 32, NUM_HEADS, HEAD_DIM
     q = torch.full((S, H, D), 2.0, device="cuda", dtype=torch.bfloat16)
-    k = torch.full((S, H, D), 3.0, device="cuda", dtype=torch.bfloat16)
+    k = torch.full((S, H, D), -3.0, device="cuda", dtype=torch.bfloat16)
     v = torch.full((S, H, D), 4.0, device="cuda", dtype=torch.bfloat16)
 
+    # Include a larger negative outlier, an all-negative tensor, and positives.
+    q.flatten()[0] = -8.0
     attn._record_amax_and_update_scales(q, k, v)
 
-    expected_q_scale = 2.0 / _FP8_MAX
+    expected_q_scale = 8.0 / _FP8_MAX
     expected_k_scale = 3.0 / _FP8_MAX
     expected_v_scale = 4.0 / _FP8_MAX
 
