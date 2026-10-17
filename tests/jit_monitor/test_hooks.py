@@ -23,11 +23,16 @@ pytestmark = pytest.mark.cpu_test
 # ------------------------------------------------------------------
 
 
-def _make_fake_knobs(*, autotuning_print=False, jit_hook=None):
+def _make_fake_knobs(
+    *, autotuning_print=False, jit_hook=None, listener=None, with_listener=True
+):
     """Build a minimal fake ``triton.knobs`` namespace."""
     autotuning = SimpleNamespace(print=autotuning_print)
     runtime = SimpleNamespace(jit_post_compile_hook=jit_hook)
-    return SimpleNamespace(autotuning=autotuning, runtime=runtime)
+    knobs = SimpleNamespace(autotuning=autotuning, runtime=runtime)
+    if with_listener:
+        knobs.compilation = SimpleNamespace(listener=listener)
+    return knobs
 
 
 def _fake_cute_import_modules(compile_fn):
@@ -136,7 +141,9 @@ def test_activate_is_idempotent():
     with _patch_jit_modules(fake):
         jit_monitor.activate()
         first_hook = fake.runtime.jit_post_compile_hook
+        first_listener = fake.compilation.listener
         jit_monitor.activate()
+        assert fake.compilation.listener is first_listener
         assert fake.runtime.jit_post_compile_hook is first_hook
 
 
@@ -194,68 +201,121 @@ def test_autotuning_print_noop_when_user_already_enabled():
 
 
 # ------------------------------------------------------------------
-# Triton JIT hook
+# Triton JIT listener
 # ------------------------------------------------------------------
 
 
-def test_triton_hook_is_registered():
+def test_triton_listener_is_registered():
     fake = _make_fake_knobs()
+    assert fake.compilation.listener is None
+    with _patch_jit_modules(fake):
+        jit_monitor.activate()
+    assert fake.compilation.listener is not None
+    # The post-compile hook stays untouched on the listener path.
     assert fake.runtime.jit_post_compile_hook is None
-    with _patch_jit_modules(fake):
-        jit_monitor.activate()
-    assert fake.runtime.jit_post_compile_hook is not None
 
 
-def test_triton_hook_logs_warning():
+def test_triton_listener_warns_on_compilation():
     fake = _make_fake_knobs()
     with _patch_jit_modules(fake):
         jit_monitor.activate()
 
-    hook = fake.runtime.jit_post_compile_hook
+    listener = fake.compilation.listener
 
     with (
         mock.patch.object(jit_monitor.logger, "warning_once") as m,
         mock.patch.object(jit_monitor.logger, "warning") as warning,
+        mock.patch.object(jit_monitor.logger, "info") as info,
     ):
-        hook(**_triton_hook_kwargs("test_kernel"))
+        listener(src=SimpleNamespace(name="test_kernel"), cache_hit=False)
 
     m.assert_called_once()
     warning.assert_not_called()
+    info.assert_not_called()
     msg = m.call_args[0][0] % m.call_args[0][1:]
     assert "Triton kernel JIT compilation during inference" in msg
     assert "test_kernel" in msg
 
 
-def test_triton_hook_chains_existing_hook():
-    existing = mock.MagicMock(return_value="existing_result")
-    fake = _make_fake_knobs(jit_hook=existing)
+def test_triton_listener_logs_cache_hits_at_info():
+    fake = _make_fake_knobs()
     with _patch_jit_modules(fake):
         jit_monitor.activate()
 
-    hook = fake.runtime.jit_post_compile_hook
-    result = hook(**_triton_hook_kwargs("chained_kernel"))
+    listener = fake.compilation.listener
+
+    with (
+        mock.patch.object(jit_monitor.logger, "warning_once") as warning_once,
+        mock.patch.object(jit_monitor.logger, "info") as info,
+    ):
+        listener(src=SimpleNamespace(name="cached_kernel"), cache_hit=True)
+
+    warning_once.assert_not_called()
+    info.assert_called_once()
+    msg = info.call_args[0][0] % info.call_args[0][1:]
+    assert "served from disk cache" in msg
+    assert "cached_kernel" in msg
+
+
+def test_triton_listener_chains_existing_listener():
+    existing = mock.MagicMock(return_value="existing_result")
+    fake = _make_fake_knobs(listener=existing)
+    with _patch_jit_modules(fake):
+        jit_monitor.activate()
+
+    listener = fake.compilation.listener
+    result = listener(src=SimpleNamespace(name="chained_kernel"), cache_hit=False)
 
     existing.assert_called_once()
+    assert existing.call_args.kwargs["cache_hit"] is False
     assert result == "existing_result"
 
 
-def test_triton_hook_works_without_existing_hook():
-    fake = _make_fake_knobs(jit_hook=None)
+def test_triton_listener_works_without_existing_listener():
+    fake = _make_fake_knobs(listener=None)
     with _patch_jit_modules(fake):
         jit_monitor.activate()
 
-    hook = fake.runtime.jit_post_compile_hook
-    assert hook(**_triton_hook_kwargs("solo_kernel")) is None
+    listener = fake.compilation.listener
+    assert listener(src=SimpleNamespace(name="solo_kernel"), cache_hit=False) is None
 
 
-def test_triton_hook_error_mode_raises():
+def test_triton_listener_error_mode_raises_on_compilation():
     fake = _make_fake_knobs()
     with _patch_jit_modules(fake):
         jit_monitor.activate(mode="error")
 
-    hook = fake.runtime.jit_post_compile_hook
+    listener = fake.compilation.listener
     with pytest.raises(RuntimeError, match="Triton kernel JIT compilation"):
-        hook(**_triton_hook_kwargs("error_kernel"))
+        listener(src=SimpleNamespace(name="error_kernel"), cache_hit=False)
+
+
+def test_triton_listener_error_mode_allows_cache_hits():
+    fake = _make_fake_knobs()
+    with _patch_jit_modules(fake):
+        jit_monitor.activate(mode="error")
+
+    listener = fake.compilation.listener
+    with mock.patch.object(jit_monitor.logger, "info"):
+        assert (
+            listener(src=SimpleNamespace(name="cached_kernel"), cache_hit=True) is None
+        )
+
+
+def test_triton_fallback_hook_without_listener():
+    """Triton without ``knobs.compilation.listener`` keeps the old hook."""
+    fake = _make_fake_knobs(with_listener=False)
+    with _patch_jit_modules(fake):
+        jit_monitor.activate()
+
+    assert fake.runtime.jit_post_compile_hook is not None
+
+    with mock.patch.object(jit_monitor.logger, "warning_once") as m:
+        fake.runtime.jit_post_compile_hook(**_triton_hook_kwargs("legacy_kernel"))
+
+    m.assert_called_once()
+    msg = m.call_args[0][0] % m.call_args[0][1:]
+    assert "legacy_kernel" in msg
 
 
 # ------------------------------------------------------------------
