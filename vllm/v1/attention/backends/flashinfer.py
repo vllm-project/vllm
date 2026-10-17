@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with FlashInfer."""
 
+import os
 from dataclasses import dataclass, replace
 from enum import Enum
 from functools import partial
@@ -633,6 +634,26 @@ class FlashInferDecodeKernel(Enum):
     TRTLLM_GEN = "trtllm-gen"
 
 
+FLASHINFER_MULTI_WAVE_KV_SPLIT_ENV = "FLASHINFER_TRTLLM_GEN_MULTI_WAVE_KV_SPLIT"
+
+
+def _maybe_enable_multi_wave_kv_split(
+    decode_kernel: FlashInferDecodeKernel | None,
+) -> None:
+    """Apply VLLM_FLASHINFER_MULTI_WAVE_KV_SPLIT to the final decode kernel.
+
+    Only trtllm-gen uses the FlashInfer setting. FlashInfer reads it once, at
+    the first call to its loaded trtllm-gen FMHA runner, which can be a prefill
+    (context) call. So this must run before any such call. A value already set
+    in the environment wins.
+    """
+    if (
+        envs.VLLM_FLASHINFER_MULTI_WAVE_KV_SPLIT
+        and decode_kernel == FlashInferDecodeKernel.TRTLLM_GEN
+    ):
+        os.environ.setdefault(FLASHINFER_MULTI_WAVE_KV_SPLIT_ENV, "1")
+
+
 def _is_xqa_head_dim_supported(head_dim: int) -> bool:
     return 16 <= head_dim <= 256 and head_dim % 16 == 0
 
@@ -915,6 +936,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.use_xqa = (
             self.flashinfer_trtllm_api_decode_kernel == FlashInferDecodeKernel.XQA
         )
+        # After the XQA and DCP fallbacks: the decode kernel is final here.
+        _maybe_enable_multi_wave_kv_split(self.flashinfer_trtllm_api_decode_kernel)
         self.use_trtllm_gen_varlen_decode = self._uses_trtllm_gen_varlen_decode(
             vllm_config, self.flashinfer_trtllm_api_decode_kernel, self.use_dcp
         )

@@ -45,6 +45,8 @@ DEFAULT_ENV_VAR_PREFIXES: set[str] = {
 
 DEFAULT_EXTRA_ENV_VARS: set[str] = {
     "PYTHONHASHSEED",
+    # Read by FlashInfer on each worker; a driver value must win there too.
+    "FLASHINFER_TRTLLM_GEN_MULTI_WAVE_KV_SPLIT",
 }
 
 
