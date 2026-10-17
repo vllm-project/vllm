@@ -287,17 +287,17 @@ class MooncakeStoreScheduler:
             self.load_specs[request.request_id].can_load = False
             return
 
-        assert (
-            num_external_tokens > 0
-            and num_external_tokens
-            == self.load_specs[request.request_id].kvpool_cached_tokens
-            - self.load_specs[request.request_id].vllm_cached_tokens
-        ), (
+        load_spec = self.load_specs[request.request_id]
+        num_hit_tokens = load_spec.kvpool_cached_tokens - load_spec.vllm_cached_tokens
+        assert 0 < num_external_tokens <= num_hit_tokens, (
             f"Mismatch in number of tokens: {num_external_tokens} vs "
-            f"{self.load_specs[request.request_id].kvpool_cached_tokens} - "
-            f"{self.load_specs[request.request_id].vllm_cached_tokens}"
+            f"{load_spec.kvpool_cached_tokens} - {load_spec.vllm_cached_tokens}"
             f" for request {request.request_id}"
         )
+        if num_external_tokens < num_hit_tokens:
+            # The scheduler accepted a shorter, block-aligned prefix of the hit.
+            load_spec.kvpool_cached_tokens -= num_hit_tokens - num_external_tokens
+            load_spec.tail_key_boundaries = ()
 
         self.load_specs[request.request_id].can_load = True
 
