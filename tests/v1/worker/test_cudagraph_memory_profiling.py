@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The minimal KV cache the CUDA graph profiler bootstraps.
 
-OVERRIDE     the block override is restored even when config building raises
-REGISTRY     V1 still validates the KV cache spec registry
 SCALE_CACHE  teardown clears quantized scale views, with or without a kv_cache
 """
 
@@ -13,53 +11,7 @@ import pytest
 import torch
 
 import vllm.v1.worker.utils as worker_utils
-from vllm.v1.core import kv_cache_planning
 from vllm.v1.worker import gpu_model_runner as v1
-
-
-@pytest.mark.parametrize("raises", [False, True])
-def test_override_is_restored_even_when_config_computation_raises(monkeypatch, raises):
-    """A failure here must not leak the profiling override into real sizing."""
-    cfg = SimpleNamespace(num_gpu_blocks_override=7)
-    runner = SimpleNamespace(vllm_config=None, cache_config=cfg, max_num_reqs=4)
-    runner.compilation_config = SimpleNamespace(max_cudagraph_capture_size=8)
-    seen = []
-
-    def from_groups(vllm_config, groups, available_memory):
-        seen.append(cfg.num_gpu_blocks_override)
-        if raises:
-            raise RuntimeError("boom")
-        return "minimal"
-
-    monkeypatch.setattr(kv_cache_planning, "get_kv_cache_groups", lambda c, s: [])
-    monkeypatch.setattr(
-        kv_cache_planning, "get_kv_cache_config_from_groups", from_groups
-    )
-
-    if raises:
-        with pytest.raises(RuntimeError, match="boom"):
-            worker_utils.build_minimal_kv_cache_config(runner, object())
-    else:
-        assert worker_utils.build_minimal_kv_cache_config(runner, object()) == "minimal"
-    # The override was in force while the config was built, and is gone after.
-    assert seen == [4]
-    assert cfg.num_gpu_blocks_override == 7
-
-
-def test_registry_v1_validates_the_spec_before_building_the_config(monkeypatch):
-    runner = v1.GPUModelRunner.__new__(v1.GPUModelRunner)
-    checked: list = []
-    spec, cfg, events = object(), SimpleNamespace(num_blocks=1), []
-    runner.get_kv_cache_spec = lambda: spec
-    runner.cache_config = SimpleNamespace(num_gpu_blocks=None)
-    runner.initialize_kv_cache = lambda config, is_profiling: events.append("init")
-
-    registry = v1.KVCacheSpecRegistry
-    monkeypatch.setattr(registry, "check_kv_cache_spec_registry", checked.append)
-    monkeypatch.setattr(v1, "build_minimal_kv_cache_config", lambda r, s: cfg)
-
-    runner._init_minimal_kv_cache_for_profiling()
-    assert checked == [spec] and events == ["init"]
 
 
 def _layer(with_kv_cache):

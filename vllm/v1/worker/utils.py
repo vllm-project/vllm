@@ -885,35 +885,6 @@ def bind_kv_cache_to_layers(
     share_replayssm_ring_trackers(ordered_layer_names, forward_context, kv_cache_groups)
 
 
-def build_minimal_kv_cache_config(runner, kv_cache_spec) -> KVCacheConfig:
-    """The smallest KV cache config that still lets every graph be captured.
-
-    ``num_gpu_blocks_override`` is restored even when config computation
-    raises, so a failure here cannot leak the profiling override into the
-    real KV cache sizing that follows.
-    """
-    from vllm.v1.core.kv_cache_planning import (
-        get_kv_cache_config_from_groups,
-        get_kv_cache_groups,
-    )
-
-    kv_cache_groups = get_kv_cache_groups(runner.vllm_config, kv_cache_spec)
-    # At least one block per sequence is required to capture the graphs.
-    min_blocks = (
-        min(runner.max_num_reqs, runner.compilation_config.max_cudagraph_capture_size)
-        or 1
-    )
-    cache_config = runner.cache_config
-    saved_override = cache_config.num_gpu_blocks_override
-    cache_config.num_gpu_blocks_override = min_blocks
-    try:
-        return get_kv_cache_config_from_groups(
-            runner.vllm_config, kv_cache_groups, available_memory=0
-        )
-    finally:
-        cache_config.num_gpu_blocks_override = saved_override
-
-
 def clear_layer_kv_caches(layers: Iterable[Any]) -> None:
     """Detach the KV/state cache tensors installed by bind_kv_cache().
 
