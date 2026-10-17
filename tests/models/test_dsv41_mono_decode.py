@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The DeepSeek-V4.1 mono decode layer runs only where its kernels are exact:
-decode-only steps of at most MAX_ROWS rows with causal SWA windows, eager or in
-a FULL graph. A PIECEWISE capture is replayed for mixed batches, so it must
-never record the mono launches. Layers outside the whole-layer kernels run the
-FFN launch on the same steps, from wo_b's unreduced output."""
+decode-only steps of at most MAX_ROWS rows (MAX_ROWS_GFX942 on gfx942) with
+causal SWA windows, eager or in a FULL graph. A PIECEWISE capture is replayed
+for mixed batches, so it must never record the mono launches. Layers outside
+the whole-layer kernels run the FFN launch on the same steps, from wo_b's
+unreduced output."""
 
 import sys
 from types import ModuleType, SimpleNamespace
@@ -30,8 +31,8 @@ class _Runner:
     def first_pre_mix(self, rows):
         return torch.zeros(rows, 4)
 
-    def ffn(self, *args):
-        self.calls.append((args, {}))
+    def ffn(self, *args, **kwargs):
+        self.calls.append((args, kwargs))
         return ("ffn outputs",)
 
 
@@ -86,8 +87,12 @@ def run(monkeypatch):
         ffn_only=False,
         entry=None,
         layer=None,
+        max_rows=md.MAX_ROWS,
         **inputs,
     ):
+        # The row limit depends on the GPU (MAX_ROWS_GFX942 on gfx942), so the
+        # test sets it and does not ask the GPU of the machine it runs on.
+        monkeypatch.setattr(md, "_max_rows", lambda: max_rows)
         if metadata is None:
             metadata = {
                 "swa": _swa(),
@@ -194,7 +199,16 @@ def test_other_steps_take_the_original_path(run, case):
     assert out is None and not calls
 
 
-def _decoder_layer(engram=None, **attn):
+def _linear():
+    """A dense linear whose weights vLLM processes at load."""
+    return SimpleNamespace(
+        weight=object(),
+        weight_scale=object(),
+        quant_method=SimpleNamespace(process_weights_after_loading=lambda layer: None),
+    )
+
+
+def _decoder_layer(engram=None, routing=md.TARGET_ROUTING, **attn):
     attn = (
         dict(
             layer_id=21,
@@ -204,18 +218,22 @@ def _decoder_layer(engram=None, **attn):
             kv_mxfp8=False,
             kv_cache_dtype="fp8_ds_mla",
         )
+        | {name: _linear() for name in md.ATTN_LINEARS_942}
         | attn
     )
     backend = Mxfp4MoeBackend.AITER_MXFP4_BF16
-    quant_method = SimpleNamespace(mxfp4_backend=backend)
+    # On gfx942, create wraps process_weights_after_loading to copy the experts.
+    quant_method = SimpleNamespace(
+        mxfp4_backend=backend, process_weights_after_loading=lambda layer: None
+    )
     ffn = SimpleNamespace(
         experts=SimpleNamespace(
             routed_experts=SimpleNamespace(quant_method=quant_method)
         ),
-        shared_experts=object(),
+        shared_experts=SimpleNamespace(gate_up_proj=_linear(), down_proj=_linear()),
         gate=SimpleNamespace(tid2eid=None),
-        n_routed_experts=384,
-        n_activated_experts=6,
+        n_routed_experts=routing[0],
+        n_activated_experts=routing[1],
         routed_scaling_factor=1.5,
         swiglu_limit=10.0,
         scoring_func="sqrtsoftplus",
@@ -276,6 +294,7 @@ def test_decode_step_runs_ffn_launch(run, mode):
     out, calls = run(mode, ffn_only=True, metadata={"swa": _swa()})
     assert out == ("ffn outputs",) and len(calls) == 1
     assert calls[0][0][1].shape == (M, 5120)  # wo_b's unreduced output
+    assert calls[0][1] == {"topk": md.TARGET_ROUTING[1]}
 
 
 def test_ffn_layer_never_runs_whole(run):
@@ -313,14 +332,29 @@ def _config(monokernel=True, **parallel):
     )
 
 
-def _deployment(monkeypatch, cdna=4, cus=256):
-    """A deployment the kernels take (the runner module stubbed: no FlyDSL)."""
+def _deployment(monkeypatch, cdna=4, cus=256, tp=2, target=None):
+    """A deployment the kernels take (the runner module stubbed: no FlyDSL).
+    ``target`` is the architecture FlyDSL compiles for, by default the GPU's."""
     import vllm.platforms.rocm as rocm
 
     monkeypatch.delenv("VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4", raising=False)
     monkeypatch.setattr(rocm, "get_cdna_version", lambda: cdna)
-    monkeypatch.setattr(md, "get_tensor_model_parallel_world_size", lambda: 2)
+    monkeypatch.setattr(md, "get_tensor_model_parallel_world_size", lambda: tp)
     monkeypatch.setattr(md, "_compute_units", lambda: cus)
+    gpu = "gfx942" if cdna == 3 else "gfx950"
+    monkeypatch.setattr(md, "_gpu_arch", lambda: gpu)
+    arch = ModuleType("vllm.models.deepseek_v41.amd.mono.common.arch")
+    arch.target_arch = lambda: target or gpu  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, arch.__name__, arch)
+    # On gfx942, create builds the top-k extension with hipcc. These tests do
+    # not need it, so they skip the build.
+    from vllm.models.deepseek_v41.amd import ops
+    from vllm.models.deepseek_v41.amd.ops import topk
+
+    monkeypatch.setattr(topk, "build", lambda: True)
+    # create records --monokernel for the gfx942 helper ops. The test puts the
+    # recorded value back afterwards, so that no later test sees this one's.
+    monkeypatch.setattr(ops, "_monokernel", ops._monokernel)
     name = "vllm.models.deepseek_v41.amd.mono.runner"
     runner = ModuleType(name)
     runner.BLOCKS = 256  # type: ignore[attr-defined]
@@ -335,10 +369,33 @@ def test_off_without_the_flag(monkeypatch):
     )
 
 
-@pytest.mark.parametrize("cdna", [3, 5])
+@pytest.mark.parametrize("on", [True, False])
+def test_create_records_the_flag_for_the_gfx942_helpers(monkeypatch, on):
+    """The gfx942 decode helpers (amd/ops) run in forward passes, where vLLM's
+    current config is not set, so create records --monokernel for them."""
+    from vllm.models.deepseek_v41.amd import ops
+
+    _deployment(monkeypatch, cdna=3, tp=4)
+    md.MonoDecodeLayer.create(_decoder_layer(), _config(monokernel=on))
+    assert ops._monokernel is on
+
+
+@pytest.mark.parametrize("cdna", [2, 5])
 def test_opt_in_outside_the_kernels_cdna_raises(monkeypatch, cdna):
     _deployment(monkeypatch, cdna=cdna)
-    with pytest.raises(ValueError, match="needs CDNA4"):
+    with pytest.raises(ValueError, match="needs CDNA3/4"):
+        md.MonoDecodeLayer.create(_decoder_layer(), _config())
+
+
+@pytest.mark.parametrize(
+    "cdna, tp, target", [(3, 4, "gfx950"), (4, 2, "gfx942")], ids=["gfx942", "gfx950"]
+)
+def test_opt_in_with_another_arch_for_flydsl_raises(monkeypatch, cdna, tp, target):
+    """An ARCH environment variable that names another architecture than the
+    GPU's would make FlyDSL build kernels that do not match the weight copies,
+    so the opt-in stops the server."""
+    _deployment(monkeypatch, cdna=cdna, tp=tp, target=target)
+    with pytest.raises(ValueError, match=f"makes it compile for {target}"):
         md.MonoDecodeLayer.create(_decoder_layer(), _config())
 
 
@@ -370,3 +427,148 @@ def test_opt_in_outside_the_kernels_moe_raises(monkeypatch, case, match):
     layer = case.get("layer", _decoder_layer)()
     with pytest.raises(ValueError, match=match):
         md.MonoDecodeLayer.create(layer, _config(**case.get("parallel", {})))
+
+
+@pytest.mark.parametrize("rows, runs", [(md.MAX_ROWS_GFX942, True), (48, False)])
+def test_gfx942_decode_steps_of_up_to_42_rows(run, rows, runs):
+    """On gfx942 the kernels take steps of up to MAX_ROWS_GFX942 rows. A step of
+    48 rows, which gfx950 takes, runs vLLM's path there."""
+    swa = _swa(num_decode_tokens=rows)
+    comp = SimpleNamespace(block_size=128, block_table=None)
+    out, calls = run(
+        metadata={"swa": swa, "comp": comp},
+        max_rows=md.MAX_ROWS_GFX942,
+        **_inputs(rows),
+    )
+    assert (out == ("mono outputs",)) == runs and len(calls) == int(runs)
+
+
+def _kind(mono):
+    if mono is None:
+        return None
+    return f"ffn top {mono.topk}" if mono.ffn_only else "whole"
+
+
+def _indexer_942():
+    from vllm.models.deepseek_v41.attention import DeepseekV4Indexer
+
+    return object.__new__(DeepseekV4Indexer)
+
+
+@pytest.mark.parametrize(
+    "layer, kind",
+    [
+        (_decoder_layer(), "whole"),
+        (_decoder_layer(compress_ratio=0), "whole"),
+        (_decoder_layer(compress_ratio=0, engram=object()), "whole"),
+        (_decoder_layer(engram=object()), "whole"),
+        (_decoder_layer(compressor=object(), indexer=_indexer_942()), "whole"),
+        (_decoder_layer(indexer=_indexer_942()), "whole"),
+        (_decoder_layer(compressor=object()), "ffn top 6"),
+        (_decoder_layer(indexer=object()), "ffn top 6"),
+        (_decoder_layer(kv_cache_dtype="auto"), "ffn top 6"),
+        (_decoder_layer(layer_id=40, routing=md.DRAFT_ROUTING), "ffn top 3"),
+        (_decoder_layer(layer_id=40), None),
+    ],
+    ids=[
+        "standard",
+        "first",
+        "window-engram",
+        "engram",
+        "kv-source",
+        "index-source",
+        "compressor-only",
+        "other-indexer",
+        "kv",
+        "draft",
+        "draft-target-routing",
+    ],
+)
+def test_gfx942_layers(monkeypatch, layer, kind):
+    """On gfx942 every backbone layer runs whole, as on gfx950. Its index
+    layers have vLLM's FP8 indexer, because the MXFP4 indexer cache needs
+    CDNA4. The DSpark draft layers run the FFN launch with the draft's routing
+    of 128 experts and top 3."""
+    _deployment(monkeypatch, cdna=3, tp=4)
+    assert _kind(md.MonoDecodeLayer.create(layer, _config())) == kind
+
+
+def test_gfx942_tp2_runs_vllm_path(monkeypatch):
+    """The gfx942 kernels are built for TP4 only. At TP2 every layer runs
+    vLLM's path, and that is not an error."""
+    _deployment(monkeypatch, cdna=3, tp=2)
+    assert md.MonoDecodeLayer.create(_decoder_layer(), _config()) is None
+
+
+def test_gfx942_takes_any_moe_backend(monkeypatch):
+    """The gfx942 kernels read their own copies of the experts, made before
+    vLLM's MoE backend converts them, so a backend other than AITER_MXFP4_BF16
+    is not an error there."""
+    _deployment(monkeypatch, cdna=3, tp=4)
+    assert _kind(md.MonoDecodeLayer.create(_other_backend(), _config())) == "whole"
+
+
+@pytest.mark.parametrize(
+    "make, copied",
+    [
+        (_decoder_layer, ("gate_up_proj", "down_proj", *md.ATTN_LINEARS_942)),
+        (
+            lambda: _decoder_layer(layer_id=40, routing=md.DRAFT_ROUTING),
+            ("gate_up_proj", "down_proj"),
+        ),
+    ],
+    ids=["standard", "draft"],
+)
+def test_gfx942_copies_dense_linears_at_load(monkeypatch, make, copied):
+    """On gfx942 the kernels' copies of the dense linears are made when vLLM
+    processes each linear's weights at load, so that vLLM counts them as model
+    memory when it sizes the KV cache. A draft layer runs vLLM's attention, so
+    its attention linears get no copies."""
+    _deployment(monkeypatch, cdna=3, tp=4)
+    weights942 = ModuleType("vllm.models.deepseek_v41.amd.mono.weights942")
+    weights942.linear_copy = lambda w, s: ("copy", w, s)  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, weights942.__name__, weights942)
+    layer = make()
+    assert md.MonoDecodeLayer.create(layer, _config()) is not None
+    sh = layer.ffn.shared_experts
+    linears = {"gate_up_proj": sh.gate_up_proj, "down_proj": sh.down_proj}
+    linears |= {name: getattr(layer.attn, name) for name in md.ATTN_LINEARS_942}
+    for linear in linears.values():
+        linear.quant_method.process_weights_after_loading(linear)
+    made = {name for name, linear in linears.items() if hasattr(linear, "mono942")}
+    assert made == set(copied)
+    for name in copied:
+        linear = linears[name]
+        assert linear.mono942 == ("copy", linear.weight, linear.weight_scale)
+
+
+def test_gfx942_reload_writes_the_copies_in_place(monkeypatch):
+    """A reload of the weights (reload_weights, or a weight update in RL) runs
+    process_weights_after_loading again. The kernels and captured CUDA graphs
+    read the first copies by their addresses, so the copies of the reload are
+    written into the first copies instead of replacing them."""
+    _deployment(monkeypatch, cdna=3, tp=4)
+    weights942 = ModuleType("vllm.models.deepseek_v41.amd.mono.weights942")
+    weights942.linear_copy = lambda w, s: (w.clone(), s.clone())  # type: ignore[attr-defined]
+    weights942.moe_copies = lambda w13, w13_s, w2, w2_s, inter: tuple(  # type: ignore[attr-defined]
+        t.clone() for t in (w13, w13_s, w2, w2_s)
+    )
+    monkeypatch.setitem(sys.modules, weights942.__name__, weights942)
+    layer = _decoder_layer()
+    assert md.MonoDecodeLayer.create(layer, _config()) is not None
+    experts, linear = layer.ffn.experts.routed_experts, layer.attn.wo_a
+
+    def load(value):
+        u8 = dict(dtype=torch.uint8)
+        for name in ("w13_weight", "w13_weight_scale", "w2_weight", "w2_weight_scale"):
+            setattr(experts, name, torch.full((2, 4), value, **u8))
+        linear.weight = torch.full((4, 8), value, **u8)
+        linear.weight_scale = torch.full((4, 1), value, **u8)
+        for module in (experts, linear):
+            module.quant_method.process_weights_after_loading(module)
+
+    load(1)
+    first = (experts.mono942, linear.mono942)
+    load(2)
+    assert experts.mono942 is first[0] and linear.mono942 is first[1]
+    assert all(bool((t == 2).all()) for t in (*first[0], *first[1]))

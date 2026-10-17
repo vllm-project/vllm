@@ -49,6 +49,7 @@ from .model import (
     _linear_scale_param_name,
     _use_sequence_parallel,
 )
+from .ops import draft_lm_head
 
 logger = init_logger(__name__)
 
@@ -354,7 +355,11 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """Base logits U_k = lm_head(norm(head_hidden))."""
-        return self.logits_processor(self.lm_head, self.model.norm(hidden_states))
+        # On gfx942 with --monokernel, the 5 rows of one request take the
+        # torch GEMM instead of wvSplitK (ops/draft_lm_head.py).
+        return draft_lm_head.compute_logits(
+            self.logits_processor, self.lm_head, self.model.norm(hidden_states)
+        )
 
     def compute_draft_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
         # Full-vocab draft: base logits, no d2t scatter.

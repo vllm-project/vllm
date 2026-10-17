@@ -287,3 +287,22 @@ steps:
   commands:
   - pytest -v -s tests/models/test_dsv41_mono_numerics.py
   - pytest -v -s tests/models/test_dsv41_mono_layers.py
+
+- label: ':amd: (MI300) DeepSeek-V4.1 gfx942 Mono Decode Layers'
+  key: dsv41-mono-decode-layers-gfx942-amd
+  dind: false
+  device: mi300_4
+  num_devices: 4
+  timeout_in_minutes: 40
+  working_dir: /vllm-workspace/
+  depends_on:
+  - image-build-amd
+  source_file_dependencies:
+  - docker/Dockerfile.rocm_base
+  - vllm/models/deepseek_v41/amd/
+  - vllm/v1/attention/ops/rocm_aiter_mla_sparse.py
+  - tests/models/test_dsv41_mono_numerics.py
+  - tests/models/test_dsv41_mono_layers.py
+  commands:
+  - pytest -v -s tests/models/test_dsv41_mono_numerics.py
+  - pytest -v -s tests/models/test_dsv41_mono_layers.py
