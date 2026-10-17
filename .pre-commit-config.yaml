@@ -52,7 +52,7 @@ repos:
         --python-platform, x86_64-manylinux_2_28,
         --python-version, "3.12",
       ]
-      files: ^requirements/(common|cuda|test/cuda)\.(in|txt)$
+      files: ^(requirements/(common|cuda|test/cuda)\.(in|txt)|pyproject\.toml|\.pre-commit-config\.yaml)$
     - id: pip-compile
       alias: pip-compile-rocm
       name: pip-compile-rocm
@@ -121,7 +121,7 @@ repos:
         --no-emit-package, nvidia-nvshmem-cu13,
         --no-emit-package, nvidia-nvtx-cu13,
       ]
-      files: ^requirements/(common|rocm|test/rocm)\.(in|txt)$
+      files: ^(requirements/(common|rocm|test/rocm)\.(in|txt)|pyproject\.toml|\.pre-commit-config\.yaml)$
     - id: pip-compile
       alias: pip-compile-xpu
       name: pip-compile-xpu
@@ -133,7 +133,7 @@ repos:
         --python-platform, x86_64-manylinux_2_39,
         --python-version, "3.12",
       ]
-      files: ^requirements/(common|xpu|test/xpu)\.(in|txt)$
+      files: ^(requirements/(common|xpu|test/xpu)\.(in|txt)|pyproject\.toml|\.pre-commit-config\.yaml)$
     - id: pip-compile
       alias: pip-compile-cpu
       name: pip-compile-cpu
@@ -145,7 +145,7 @@ repos:
         --python-platform, x86_64-manylinux_2_28,
         --python-version, "3.12",
       ]
-      files: ^requirements/(common|cpu|test/(cuda|cpu))\.(in|txt)$
+      files: ^(requirements/(common|cpu|test/(cuda|cpu))\.(in|txt)|pyproject\.toml|\.pre-commit-config\.yaml)$
       exclude: ^requirements/test/cuda\.txt$
     - id: pip-compile
       alias: pip-compile-docs
@@ -156,7 +156,7 @@ repos:
         --python-platform, x86_64-manylinux_2_28,
         --python-version, "3.12",
       ]
-      files: ^requirements/docs\.(in|txt)$
+      files: ^(requirements/docs\.(in|txt)|pyproject\.toml|\.pre-commit-config\.yaml)$
 - repo: https://github.com/pre-commit/pre-commit-hooks
   rev: 3e8a8703264a2f4a69428a0aa4dcb512790b2c8c
   hooks:
