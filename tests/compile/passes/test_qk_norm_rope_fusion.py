@@ -32,7 +32,6 @@ from vllm.platforms import current_platform
 from vllm.v1.attention.backend import AttentionType
 
 RSQRT_OP = torch.ops.aten.rsqrt.default
-INDEX_SELECT_OP = torch.ops.aten.index.Tensor
 
 
 class QKNormRoPETestModel(torch.nn.Module):
@@ -82,7 +81,6 @@ class QKNormRoPETestModel(torch.nn.Module):
         )
         self.test_scattered_split = test_scattered_split
         self.enable_rms_norm_custom_op = self.q_norm.enabled()
-        self.enable_rope_custom_op = self.rotary_emb.enabled()
 
     def forward(self, qkv: torch.Tensor, positions: torch.Tensor):
         if self.test_scattered_split:
@@ -102,13 +100,12 @@ class QKNormRoPETestModel(torch.nn.Module):
 
     def ops_in_model_before(self) -> list[OpOverload | OpOverloadPacket]:
         ops: list[OpOverload | OpOverloadPacket] = [torch.ops.vllm_ir.rms_norm]
-        if self.enable_rope_custom_op:
-            if self.rotary_emb.use_flashinfer:
-                ops.append(FLASHINFER_ROTARY_OP)
-            else:
-                ops.append(ROTARY_OP)
+        if self.rotary_emb.use_flashinfer:
+            ops.append(FLASHINFER_ROTARY_OP)
+        elif not current_platform.is_rocm() and self.rotary_emb.enabled():
+            ops.append(ROTARY_OP)
         else:
-            ops.append(INDEX_SELECT_OP)
+            ops.append(torch.ops.vllm_ir.rotary_embedding.default)
         return ops
 
     def ops_in_model_after(self) -> list[OpOverload | OpOverloadPacket]:
@@ -119,7 +116,7 @@ class QKNormRoPETestModel(torch.nn.Module):
 @pytest.mark.parametrize("eps", [1e-5, 1e-6])
 @pytest.mark.parametrize("is_neox", [True, False])
 @pytest.mark.parametrize("enable_rms_norm_custom_op", [True, False])
-@pytest.mark.parametrize("enable_rope_custom_op", [True])
+@pytest.mark.parametrize("enable_rope_custom_op", [True, False])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.skipif(
     not (current_platform.is_cuda_alike() or current_platform.is_xpu()),

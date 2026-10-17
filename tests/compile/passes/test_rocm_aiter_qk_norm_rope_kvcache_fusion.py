@@ -16,12 +16,13 @@ from tests.v1.attention.utils import (
     create_common_attn_metadata,
     dense_kv_cache_views,
 )
+from vllm import ir
 from vllm._aiter_ops import (
     IS_AITER_FOUND,
     is_aiter_found_and_supported,
     rocm_aiter_ops,
 )
-from vllm.compilation.passes.fusion.matcher_utils import MROPE_OP, ROTARY_OP
+from vllm.compilation.passes.fusion.matcher_utils import MROPE_OP
 from vllm.compilation.passes.fusion.qk_norm_rope_kvcache_fusion import (
     QkNormRopeKvCacheFusionPass,
 )
@@ -64,7 +65,6 @@ if not is_aiter_found_and_supported():
         allow_module_level=True,
     )
 
-INDEX_SELECT_OP = torch.ops.aten.index.Tensor
 FP8_DTYPE = current_platform.fp8_dtype()
 
 
@@ -130,8 +130,6 @@ class QKNormRoPEKVCacheTestModel(torch.nn.Module):
             is_neox_style=is_neox,
             dtype=self.dtype,
         )
-
-        self.enable_rope_custom_op = self.rotary_emb.enabled()
 
         self.attn = Attention(
             num_heads=num_heads,
@@ -261,16 +259,7 @@ class QKNormRoPEKVCacheTestModel(torch.nn.Module):
         return q, k, v, kv_cache_dummy_dep
 
     def ops_in_model_before(self) -> list[torch._ops.OpOverload]:
-        ops: list[torch._ops.OpOverload] = []
-        # RoPE is not yet IR-migrated, so its custom op still surfaces
-        # directly in the graph based on `enable_rope_custom_op`.
-        if self.enable_rope_custom_op:
-            if rocm_aiter_ops.is_triton_rotary_embed_enabled():
-                ops.append(torch.ops.vllm.rocm_aiter_triton_rotary_embedding.default)
-            else:
-                ops.append(ROTARY_OP)
-        else:
-            ops.append(INDEX_SELECT_OP)
+        ops = [torch.ops.vllm_ir.rotary_embedding.default]
         ops.append(torch.ops.vllm.unified_kv_cache_update.default)
         return ops
 
@@ -297,7 +286,6 @@ class QKNormMRoPEKVCacheTestModel(QKNormRoPEKVCacheTestModel):
             mrope_section=list(mrope_section),
             mrope_interleaved=mrope_interleaved,
         )
-        self.enable_rope_custom_op = self.rotary_emb.enabled()
 
     def forward(
         self, qkv: torch.Tensor, positions: torch.Tensor
@@ -368,6 +356,11 @@ def _run_qk_norm_rope_kvcache_fusion_test(
     # Set AITER toggles before VllmConfig initialization enables env caching.
     monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
     monkeypatch.setenv("VLLM_ROCM_USE_AITER_LINEAR", "1")
+    monkeypatch.setenv(
+        "VLLM_ROCM_USE_AITER_TRITON_ROPE",
+        "1" if enable_aiter_triton_rope else "0",
+    )
+    monkeypatch.setenv("VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT", use_shuffle_kv_layout)
     rocm_aiter_ops.refresh_env_variables()
 
     vllm_config = VllmConfig(
@@ -391,15 +384,18 @@ def _run_qk_norm_rope_kvcache_fusion_test(
         ),
     )
 
-    with vllm.config.set_current_vllm_config(vllm_config), monkeypatch.context() as m:
-        m.setenv("VLLM_ROCM_USE_AITER", "1")
-        m.setenv("VLLM_ROCM_USE_AITER_LINEAR", "1")
-        m.setenv(
-            "VLLM_ROCM_USE_AITER_TRITON_ROPE",
-            "1" if enable_aiter_triton_rope else "0",
-        )
-        m.setenv("VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT", use_shuffle_kv_layout)
-        rocm_aiter_ops.refresh_env_variables()
+    with (
+        vllm.config.set_current_vllm_config(vllm_config),
+        monkeypatch.context() as m,
+        vllm_config.kernel_config.ir_op_priority.set_priority(),
+    ):
+        if custom_op != "+rotary_embedding":
+            expected_provider = "native"
+        elif enable_aiter_triton_rope:
+            expected_provider = "aiter"
+        else:
+            expected_provider = "vllm_c"
+        assert ir.ops.rotary_embedding.get_priority()[0] == expected_provider
 
         expected_query_quant_group_shape = None
         if use_quark_scalar_query_scale:
@@ -517,13 +513,9 @@ def _run_qk_norm_rope_kvcache_fusion_test(
             # Query quantization remains separate after the prologue fusion.
             assert backend.op_count(expected_quant_op) > 0
 
-        # Sweep-backed (18.2k pts, PR #42749): native-rope ref worst 7.7e-3 -> 1e-2;
-        # AITER-triton-rope ref is itself approximate (plateau 1.28e-2) -> 2e-2.
-        ATOL, RTOL = (
-            (2e-2, 2e-2)
-            if enable_aiter_triton_rope or mrope_section is not None
-            else (1e-2, 1e-2)
-        )
+        # Sweep-backed (18.2k pts, PR #42749): fused and unfused BF16 paths
+        # can differ by up to two ULPs at long sequence lengths.
+        ATOL, RTOL = (2e-2, 2e-2)
         is_fp8_cache = model.kv_cache_dtype != dtype
 
         if q_fused.dtype == FP8_DTYPE:

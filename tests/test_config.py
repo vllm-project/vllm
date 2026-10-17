@@ -4061,13 +4061,63 @@ def test_ir_op_platform_defaults_support_sparse_gelu(mode, backend):
     from vllm import ir
 
     config = SimpleNamespace(
-        compilation_config=CompilationConfig(mode=mode, backend=backend)
+        compilation_config=CompilationConfig(
+            mode=mode, backend=backend, custom_ops=["all"]
+        )
     )
     priority = current_platform.get_default_ir_op_priority(config)
     expected = ["triton", "native"] if current_platform.is_cuda() else ["native"]
 
     with priority.set_priority():
         assert ir.ops.gelu_and_mul_sparse.get_priority() == expected
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm-only priority")
+@pytest.mark.parametrize("custom_ops", [["all"], ["none"]])
+def test_rocm_rotary_priority_honors_custom_ops(custom_ops, monkeypatch):
+    from vllm import ir
+    from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
+
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER_TRITON_ROPE", "1")
+    rocm_aiter_ops.refresh_env_variables()
+
+    config = SimpleNamespace(
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            backend="inductor",
+            custom_ops=custom_ops,
+        )
+    )
+    priority = current_platform.get_default_ir_op_priority(config)
+    if custom_ops == ["none"]:
+        expected_provider = "native"
+    elif is_aiter_found_and_supported():
+        expected_provider = "aiter"
+    else:
+        expected_provider = "vllm_c"
+    with priority.set_priority():
+        assert ir.ops.rotary_embedding.get_priority()[0] == expected_provider
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm-only priority")
+def test_rocm_rotary_explicit_priority_ignores_legacy_env(monkeypatch):
+    from vllm import ir
+    from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
+    from vllm.config.kernel import IrOpPriorityConfig
+
+    if not is_aiter_found_and_supported():
+        pytest.skip("AITER is not available")
+
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", "0")
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER_TRITON_ROPE", "0")
+    rocm_aiter_ops.refresh_env_variables()
+
+    priority = IrOpPriorityConfig.with_default(
+        ["native"], rotary_embedding=["aiter", "native"]
+    )
+    with priority.set_priority():
+        assert ir.ops.rotary_embedding.get_priority()[0] == "aiter"
 
 
 def test_ir_op_priority_str():
