@@ -8,8 +8,14 @@ import torch
 import torch.nn.functional as F
 
 from tests.v1.sample.utils import create_allowed_token_ids
+from vllm.config import VllmConfig
 from vllm.platforms import current_platform
-from vllm.v1.sample.logits_processor import LogitsProcessors
+from vllm.sampling_params import SamplingParams
+from vllm.v1.sample.logits_processor import (
+    BatchUpdate,
+    LogitsProcessors,
+    MinTokensLogitsProcessor,
+)
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import (
     PLACEHOLDER_TOKEN_ID,
@@ -1184,3 +1190,49 @@ def test_placeholder_draft_token_rejected_random(rejection_sampler):
     assert sampled[0, 1].item() == vocab_size - 1
     recovered = sampled[0, 2].item()
     assert 0 <= recovered < vocab_size
+
+
+@pytest.mark.parametrize("rejected_position", [None, 0, 1, 2])
+def test_min_tokens_bonus_and_rejected_drafts(rejected_position):
+    """Only a fully accepted draft may use the bonus row's EOS eligibility."""
+    device = torch.device(DEVICE_TYPE)
+    spec_tokens = [[1, 1, 1], []]
+    metadata = create_sampling_metadata(
+        all_greedy=True, output_token_ids=[[1] * 6, [1] * 6]
+    )
+    metadata.spec_token_ids = spec_tokens
+    processor = MinTokensLogitsProcessor(VllmConfig(), device, False)
+    processor.update_state(
+        BatchUpdate(
+            batch_size=2,
+            removed=(),
+            added=[
+                (i, SamplingParams(min_tokens=7, stop_token_ids=[0]), None, ids)
+                for i, ids in enumerate(metadata.output_token_ids)
+            ],
+            moved=(),
+        )
+    )
+    metadata.logitsprocs = LogitsProcessors([processor])
+    spec_metadata = SpecDecodeMetadata.make_dummy(spec_tokens, device=device)
+    spec_metadata.target_logits_indices = torch.tensor([0, 1, 2], device=device)
+    spec_metadata.bonus_logits_indices = torch.tensor([3, 4], device=device)
+    logits = torch.zeros((5, 3), device=device)
+    logits[:, 1] = 1
+    logits[3:, 0] = 2
+    if rejected_position is not None:
+        logits[rejected_position, 0] = 3
+        logits[rejected_position, 2] = 2
+    output = RejectionSampler(Sampler())(spec_metadata, None, logits, metadata)
+    expected = [1, 1, 1, 0]
+    if rejected_position is not None:
+        recovered = 2 if rejected_position == 0 else 0
+        expected = (
+            [1] * rejected_position
+            + [recovered]
+            + [PLACEHOLDER_TOKEN_ID] * (3 - rejected_position)
+        )
+    assert output.sampled_token_ids.tolist() == [
+        expected,
+        [1, PLACEHOLDER_TOKEN_ID, PLACEHOLDER_TOKEN_ID, PLACEHOLDER_TOKEN_ID],
+    ]

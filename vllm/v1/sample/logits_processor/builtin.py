@@ -291,6 +291,8 @@ class MinTokensLogitsProcessor(LogitsProcessor):
         self,
         logits: torch.Tensor,
         num_draft_tokens: list[int],
+        *,
+        predict_bonus_token: bool = False,
     ) -> torch.Tensor:
         """Spec-decode version of apply().
 
@@ -300,6 +302,9 @@ class MinTokensLogitsProcessor(LogitsProcessor):
         Example: ``num_draft_tokens = [2, 3, 1]``
           -> ``logits`` shape ``[6, V]``, ``cumsum = [0, 2, 5, 6]``
           -> request 0 owns rows 0-1, request 1 rows 2-4, request 2 row 5.
+
+        For bonus tokens, logits has one row per request at the position
+        after all of that request's drafts.
         """
         if not self.min_toks:
             return logits
@@ -334,11 +339,15 @@ class MinTokensLogitsProcessor(LogitsProcessor):
 
         for req_idx, min_tok, current_len, stop_toks, uses_structured_output in entries:
             remaining = min_tok - current_len
-            # How many leading draft positions still need stop-token masking.
-            n_mask = int(min(max(remaining, 0), num_draft_arr[req_idx]))
+            if predict_bonus_token:
+                n_mask = int(remaining > num_draft_arr[req_idx])
+                offset = req_idx
+            else:
+                # How many leading draft positions still need stop-token masking.
+                n_mask = int(min(max(remaining, 0), num_draft_arr[req_idx]))
+                offset = cumsum[req_idx]
 
             if n_mask > 0:
-                offset = cumsum[req_idx]
                 row_indices = np.arange(offset, offset + n_mask, dtype=np.int64)
                 n_stop = len(stop_toks)
                 rows = np.repeat(row_indices, n_stop)

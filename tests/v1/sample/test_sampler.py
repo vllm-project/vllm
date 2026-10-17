@@ -6,10 +6,16 @@ import pytest
 import torch
 
 from tests.v1.sample.utils import create_allowed_token_ids
+from vllm.config import VllmConfig
 from vllm.platforms import current_platform
+from vllm.sampling_params import SamplingParams
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.torch_utils import make_tensor_with_pad
-from vllm.v1.sample.logits_processor import LogitsProcessors
+from vllm.v1.sample.logits_processor import (
+    BatchUpdate,
+    LogitsProcessors,
+    MinTokensLogitsProcessor,
+)
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.sampler import Sampler
 
@@ -444,3 +450,54 @@ def test_sampler_bad_words(
                 assert logits_for_req[token_id] == -float("inf")
             else:
                 assert logits_for_req[token_id] != -float("inf")
+
+
+@pytest.mark.parametrize("predict_bonus_token", [False, True])
+@pytest.mark.parametrize("stop_token_id", [0, 1])
+def test_min_tokens_uses_bonus_position(predict_bonus_token, stop_token_id):
+    """Bonus EOS eligibility includes drafts, independently for each request."""
+    device = torch.device(DEVICE_TYPE)
+    # Below, at, and above the boundary; zero drafts; already at min_tokens;
+    # and a request with min_tokens disabled, interleaved in the same batch.
+    output_lengths = [6, 6, 6, 6, 7, 6, 6]
+    draft_lengths = [3, 0, 1, 3, 0, 3, 2]
+    min_tokens = [7, 7, 7, 10, 7, 0, 9]
+    metadata = _create_default_sampling_metadata(6, 7, 3, device)
+    metadata.output_token_ids = [[2] * n for n in output_lengths]
+    metadata.spec_token_ids = [[2] * n for n in draft_lengths]
+    metadata.max_num_logprobs = None
+    processor = MinTokensLogitsProcessor(VllmConfig(), device, False)
+    processor.update_state(
+        BatchUpdate(
+            batch_size=7,
+            removed=(),
+            added=[
+                (
+                    i,
+                    SamplingParams(min_tokens=n, stop_token_ids=[stop_token_id]),
+                    None,
+                    metadata.output_token_ids[i],
+                )
+                for i, n in enumerate(min_tokens)
+            ],
+            moved=(),
+        )
+    )
+    metadata.logitsprocs = LogitsProcessors([processor])
+    logits = torch.zeros((7, 3), device=device)
+    logits[:, stop_token_id] = 2
+    logits[:, 2] = 1
+    output = Sampler()(
+        logits.clone(), metadata, predict_bonus_token=predict_bonus_token
+    )
+    expected = [
+        stop_token_id if committed + (drafts if predict_bonus_token else 0) >= n else 2
+        for committed, drafts, n in zip(output_lengths, draft_lengths, min_tokens)
+    ]
+    assert output.sampled_token_ids.flatten().tolist() == expected
+    # Bonus processing must not change the processor's committed-length state.
+    ordinary = Sampler()(logits, metadata)
+    assert ordinary.sampled_token_ids.flatten().tolist() == [
+        stop_token_id if committed >= n else 2
+        for committed, n in zip(output_lengths, min_tokens)
+    ]
