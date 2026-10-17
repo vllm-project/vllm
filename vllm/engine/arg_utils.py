@@ -2916,6 +2916,41 @@ class EngineArgs:
                 _raise_unsupported_error(feature_name=name)
 
     @classmethod
+    def _use_high_bw_batch_defaults(
+        cls,
+        device_memory: int,
+        device_name: str,
+        *,
+        is_gb10: bool = False,
+    ) -> bool:
+        """Return whether to use the H100/H200 token and seq defaults.
+
+        Full cards use the 70 GiB gate. MIG slices of those GPUs report far
+        less memory but keep the same memory generation, so option 1 of
+        issue #55381 (torch memory fallback) is not enough by itself.
+        GB10 (DGX Spark, cc 12.1) has the memory but not the compute of a
+        large discrete GPU, so it stays on the small tier.
+        """
+        high_bw_mig_markers = (
+            "h100",
+            "h200",
+            "h20",
+            "h800",
+            "b200",
+            "b300",
+            "gb200",
+        )
+        if is_gb10 or "a100" in device_name:
+            return False
+        if device_memory >= 70 * GiB_bytes:
+            return True
+        return (
+            "mig" in device_name
+            and device_memory >= 24 * GiB_bytes
+            and any(marker in device_name for marker in high_bw_mig_markers)
+        )
+
+    @classmethod
     def get_batch_defaults(
         cls,
         world_size: int,
@@ -2940,11 +2975,39 @@ class EngineArgs:
             # GB10 (DGX Spark, cc 12.1) has the memory but not the compute of
             # a large discrete GPU, keep it on the small tier.
             is_gb10 = current_platform.is_device_capability((12, 1))
-        except Exception:
-            # This is only used to set default_max_num_batched_tokens
+        except Exception as e:
+            # MIG/NVML may raise; try torch before using 0 memory.
+            logger.warning(
+                "Failed to query device memory/name from the current "
+                "platform (%s: %s). Scheduler batch defaults may be "
+                "conservative.",
+                type(e).__name__,
+                e,
+            )
             device_memory = 0
             device_name = ""
             is_gb10 = False
+            try:
+                if torch.cuda.is_available():
+                    props = torch.cuda.get_device_properties(0)
+                    device_memory = int(props.total_memory)
+                    name = getattr(props, "name", None)
+                    if name:
+                        device_name = str(name).lower()
+                    is_gb10 = (
+                        getattr(props, "major", None) == 12
+                        and getattr(props, "minor", None) == 1
+                    )
+            except Exception as fallback_error:
+                logger.warning(
+                    "Failed to fall back to torch.cuda device memory "
+                    "(%s: %s). Using smallest-GPU scheduler defaults.",
+                    type(fallback_error).__name__,
+                    fallback_error,
+                )
+                device_memory = 0
+                device_name = ""
+                is_gb10 = False
 
         # NOTE(Kuntai): Setting large `max_num_batched_tokens` for A100 reduces
         # throughput, see PR #17885 for more details.
@@ -2959,10 +3022,10 @@ class EngineArgs:
                 UsageContext.LLM_CLASS: 1024,
                 UsageContext.OPENAI_API_SERVER: 1024,
             }
-        elif (
-            device_memory >= 70 * GiB_bytes
-            and "a100" not in device_name
-            and not is_gb10
+        elif cls._use_high_bw_batch_defaults(
+            device_memory,
+            device_name,
+            is_gb10=is_gb10,
         ):
             # For GPUs like H100 and H200, use larger offline defaults.
             default_max_num_batched_tokens = {
