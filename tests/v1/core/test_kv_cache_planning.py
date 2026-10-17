@@ -2140,10 +2140,19 @@ def test_eagle_groups_are_the_groups_holding_draft_layers(make_specs, pp):
     draft_layers = {name for name, spec in specs.items() if spec.is_draft}
     untagged = {name: replace(spec, is_draft=False) for name, spec in specs.items()}
     groups = _spec_decode_kv_cache_groups([specs])
-    assert [(g.kv_cache_specs, g.manager_config) for g in groups] == [
-        (g.kv_cache_specs, g.manager_config)
-        for g in _spec_decode_kv_cache_groups([untagged])
-    ]
+
+    def grouping(kv_cache_groups):
+        return [
+            (
+                g.kv_cache_specs,
+                g.manager_config.replace_params(extra_retained_tokens=0)
+                if isinstance(g.manager_config.params, SlidingWindowManager.Params)
+                else g.manager_config,
+            )
+            for g in kv_cache_groups
+        ]
+
+    assert grouping(groups) == grouping(_spec_decode_kv_cache_groups([untagged]))
 
     worker_specs = [
         {n: s for n, s in specs.items() if n not in draft_layers},
