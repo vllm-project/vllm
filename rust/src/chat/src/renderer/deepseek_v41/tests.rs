@@ -166,7 +166,9 @@ fn image_part(uuid: &str) -> ChatContentPart {
 fn maps_reasoning_effort_to_reference_numeric_budget() {
     for (effort, budget) in [
         (None, 75),
+        (Some(EffortValue::from("minimal")), 50),
         (Some(EffortValue::from("low")), 50),
+        (Some(EffortValue::from("medium")), 75),
         (Some(EffortValue::from("high")), 75),
         (Some(EffortValue::from("xhigh")), 75),
         (Some(EffortValue::from("max")), 100),
@@ -189,7 +191,9 @@ fn accepts_numeric_template_effort_with_top_level_precedence() {
         (json!(1), 1),
         (json!(42), 42),
         (json!(100), 100),
+        (json!("minimal"), 50),
         (json!("low"), 50),
+        (json!("medium"), 75),
     ] {
         let mut request = request();
         request.chat_options.template_kwargs.insert("reasoning_effort".into(), effort);
@@ -234,23 +238,9 @@ fn enabling_with_none_inherits_deployment_effort_and_reports_numeric_control() {
 
 #[test]
 fn rejects_undefined_effort_names_and_invalid_numeric_budgets() {
-    for effort in [
-        json!("medium"),
-        json!("minimal"),
-        json!(-1),
-        json!(0),
-        json!(101),
-        json!(true),
-        json!(1.5),
-    ] {
+    for effort in [json!(-1), json!(0), json!(101), json!(true), json!(1.5)] {
         let mut request = request();
         request.chat_options.template_kwargs.insert("reasoning_effort".into(), effort);
-        let error = DeepSeekV41ChatRenderer::default().render(&request).unwrap_err();
-        assert!(error.is_request_validation_error());
-    }
-    for effort in [EffortValue::from("minimal"), EffortValue::from("medium")] {
-        let mut request = request();
-        request.chat_options.reasoning_effort = Some(effort);
         let error = DeepSeekV41ChatRenderer::default().render(&request).unwrap_err();
         assert!(error.is_request_validation_error());
     }
