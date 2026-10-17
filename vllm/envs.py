@@ -246,6 +246,7 @@ if TYPE_CHECKING:
     VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE: int = 163840
     VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS: int = 1
     VLLM_ENFORCE_STRICT_TOOL_CALLING: bool = True
+    VLLM_BEAM_ALWAYS_CONSTRAIN_OUTPUT: bool = True
     VLLM_MQ_MAX_CHUNK_BYTES_MB: int = 16
     VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: int = 300
     VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS: int = 5
@@ -1844,6 +1845,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ENFORCE_STRICT_TOOL_CALLING": lambda: (
         os.getenv("VLLM_ENFORCE_STRICT_TOOL_CALLING", "True").lower() in ("true", "1")
     ),
+    # Constrain every `beam` output to its response template's format, also
+    # without tool or structured output constraints.
+    "VLLM_BEAM_ALWAYS_CONSTRAIN_OUTPUT": lambda: (
+        os.getenv("VLLM_BEAM_ALWAYS_CONSTRAIN_OUTPUT", "True").lower() in ("true", "1")
+    ),
     # Control the max chunk bytes (in MB) for the rpc message queue.
     # Object larger than this threshold will be broadcast to worker
     # processes via zmq.
@@ -2366,6 +2372,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_RANDOMIZE_DP_DUMMY_INPUTS",
         "VLLM_MODEL_REDIRECT_PATH",
         "VLLM_HOST_IP",
+        "VLLM_RAY_BUNDLE_INDICES",
         "VLLM_ELASTIC_EP_SCALE_UP_LAUNCH",
         "VLLM_FORCE_AOT_LOAD",
         "S3_ACCESS_KEY_ID",
