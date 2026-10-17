@@ -224,9 +224,8 @@ class MiniMaxM3IndexerMetadataBuilder(
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         hf_config = vllm_config.model_config.hf_config
         text_config = getattr(hf_config, "text_config", hf_config)
-        sparse_cfg = text_config.sparse_attention_config
         # Index-query head count from model config (cache spec has 1 vec/token).
-        total_index_heads = sparse_cfg["sparse_num_index_heads"]
+        total_index_heads = text_config.index_n_heads
         tp_size = get_tensor_model_parallel_world_size()
         if total_index_heads >= tp_size:
             assert total_index_heads % tp_size == 0

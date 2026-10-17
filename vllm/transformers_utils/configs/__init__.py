@@ -43,9 +43,7 @@ _CLASS_TO_MODULE: dict[str, str] = {
     # `FalconConfig` class from the official HuggingFace transformers library.
     "RWConfig": "vllm.transformers_utils.configs.falcon",
     "MiDashengLMConfig": "vllm.transformers_utils.configs.midashenglm",
-    "MiniMaxM3Config": "vllm.transformers_utils.configs.minimax_m3",
     "MiniMaxM3MTPConfig": "vllm.transformers_utils.configs.minimax_m3",
-    "MiniMaxM3TextConfig": "vllm.transformers_utils.configs.minimax_m3",
     "Moondream3Config": "vllm.transformers_utils.configs.moondream3",
     "Moondream3TextConfig": "vllm.transformers_utils.configs.moondream3",
     "Moondream3VisionConfig": "vllm.transformers_utils.configs.moondream3",
@@ -83,6 +81,7 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "DeepseekV3Config": "transformers",
     "HyperCLOVAXConfig": "transformers",
     "Kimi_K25Config": "transformers",
+    "MiniMaxM3VLConfig": "transformers",
 }
 
 __all__ = [
@@ -113,9 +112,8 @@ __all__ = [
     "IsaacConfig",
     "RWConfig",
     "MiDashengLMConfig",
-    "MiniMaxM3Config",
     "MiniMaxM3MTPConfig",
-    "MiniMaxM3TextConfig",
+    "MiniMaxM3VLConfig",
     "Moondream3Config",
     "Moondream3TextConfig",
     "Moondream3VisionConfig",
