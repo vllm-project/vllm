@@ -4,6 +4,11 @@
 
 """Text encoding adapted from the DeepSeek V4.1 reference encoder.
 
+Differences from the reference:
+- `developer` messages are supported and render as user turns.
+- Images arrive as placeholders; deepseek_v41.py flattens content first.
+- Tool namespaces (`ns::name`) are not supported.
+
 Message normalization and serving controls live in deepseek_v41.py.
 """
 

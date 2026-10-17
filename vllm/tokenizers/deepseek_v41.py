@@ -28,6 +28,8 @@ def _reject_image_placeholder(text: Any) -> None:
 def _normalize_messages(
     messages: list[ChatCompletionMessageParam],
 ) -> list[dict[str, Any]]:
+    # vLLM additions to the reference: Responses API part types, image_pil,
+    # and ValueError (400) instead of the reference's asserts.
     result = [dict(message) for message in copy.deepcopy(messages)]
     for message in result:
         role = message.get("role")
