@@ -327,6 +327,7 @@ class ServingRender(BaseServing):
             ),
             sampling_params=params,
             model=request.model,
+            reasoning_ended=True if request._grammar_from_parser else None,
             reasoning_parser_kwargs=self._reasoning_parser_kwargs(request),
             stream=bool(request.stream),
             cache_salt=request.cache_salt,

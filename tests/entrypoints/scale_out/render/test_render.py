@@ -11,6 +11,7 @@ import httpx
 import pytest
 import pytest_asyncio
 
+from tests.parser.test_beam_parser import PROMPT_TOKEN_IDS, make_parser
 from tests.utils import RemoteLaunchRenderServer
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
@@ -214,7 +215,42 @@ async def test_render_responses_rejects_empty_token_ids():
 
 @pytest.mark.asyncio
 @pytest.mark.skip_global_cleanup
-async def test_render_responses_carries_reasoning_parser_kwargs():
+@pytest.mark.parametrize("inside_reasoning", [False, True])
+async def test_render_responses_carries_parser_grammar_hint(inside_reasoning):
+    """A Beam parser grammar that covers reasoning framing from the message
+    start must reach generate as reasoning_ended=True; inside open reasoning
+    the parser leaves the flag unset and the hint stays None."""
+    serving = _build_serving_render()
+    online = serving.online_renderer
+    online.chat_template = None
+    online.chat_template_content_format = "auto"
+    online.default_chat_template_kwargs = {}
+    online.effective_chat_template_kwargs = (
+        OnlineRenderer.effective_chat_template_kwargs.__get__(online)
+    )
+    prompt_ids = PROMPT_TOKEN_IDS + ([201, 101, 202] if inside_reasoning else [])
+    online.render_responses = AsyncMock(
+        return_value=MagicMock(
+            messages=[],
+            engine_input={"prompt_token_ids": prompt_ids},
+        )
+    )
+    request = ResponsesRequest(model=MODEL_NAME, input="Test prompt")
+    parser = make_parser(prompt_ids, tools=[])
+    online.parser = type(parser)
+    online.renderer.get_tokenizer.return_value = parser.model_tokenizer
+    parser.adjust_request(request)
+
+    response = await serving.render_responses_request(request)
+
+    assert not isinstance(response, ErrorResponse)
+    assert response.reasoning_ended is (None if inside_reasoning else True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("grammar_from_parser", [False, True])
+async def test_render_responses_carries_reasoning_parser_kwargs(grammar_from_parser):
     """/v1/responses gives the engine's reasoning parser the effective template
     kwargs, so the rendered request must carry them to generate."""
     serving = _build_serving_render()
@@ -234,10 +270,12 @@ async def test_render_responses_carries_reasoning_parser_kwargs():
         input="Test prompt",
         chat_template_kwargs={"enable_thinking": False},
     )
+    request._grammar_from_parser = grammar_from_parser
 
     response = await serving.render_responses_request(request)
 
     assert not isinstance(response, ErrorResponse)
+    assert response.reasoning_ended is (True if grammar_from_parser else None)
     assert response.reasoning_parser_kwargs is not None
     kwargs = response.reasoning_parser_kwargs.chat_template_kwargs
     assert kwargs["enable_thinking"] is False
