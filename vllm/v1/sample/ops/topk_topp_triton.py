@@ -1513,6 +1513,7 @@ def _topp_sb_mask_kernel(
             cum = tl.cumsum(dmask.to(tl.int32)).to(tl.float32) + num_preceding
             keep_dup = dmask & (cum <= numkeep)
             keep = keep & (~dmask | keep_dup)
+            num_preceding += tl.sum(dmask.to(tl.float32))
         tl.store(ROW + i + offs, tl.where(keep, x, MASK_VALUE), mask=mask_n)
 
 
