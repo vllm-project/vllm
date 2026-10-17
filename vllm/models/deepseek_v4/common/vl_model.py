@@ -85,8 +85,8 @@ def stream_language_model_first(
     """Yield ``language_model.*`` weights as they arrive, then the rest.
 
     Keeps the language model's weights in one contiguous group without
-    materializing the stream. Deferred weights are cloned in case the loader
-    reuses their buffers.
+    materializing the stream. Deferred weights are cloned so they do not keep
+    the loader's per-shard storage alive until the end of the load.
     """
     rest = []
     for name, tensor in weights:

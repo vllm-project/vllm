@@ -59,10 +59,11 @@ def test_load_weights_streams_language_model_group(wrapper) -> None:
     model.hf_to_vllm_mapper = WeightsMapper()
 
     def interleaved_weights():
-        yield "vision.tensor_b", torch.tensor([2.0])
         yield "language_model.tensor_a", torch.tensor([1.0])
         # Loaded before the stream is drained, not after.
         assert model.language_model.tensor_a.item() == 1.0
+        # Splits the language model's weights unless the wrapper regroups them.
+        yield "vision.tensor_b", torch.tensor([2.0])
         yield "language_model.tensor_c", torch.tensor([3.0])
 
     loaded = model.load_weights(interleaved_weights())

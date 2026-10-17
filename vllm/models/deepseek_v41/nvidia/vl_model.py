@@ -318,8 +318,8 @@ class DeepseekV41ForCausalLM(
         return self.language_model.get_mtp_target_hidden_states()
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        # The child finalizes fused expert weights in load_weights, so its
-        # weights must reach it as one contiguous group.
+        # The child finalizes in load_weights, so its weights must reach it as
+        # one contiguous group.
         mapped = stream_language_model_first(self.hf_to_vllm_mapper.apply(weights))
         loader = AutoWeightsLoader(self)
         loaded_params = loader.load_weights(mapped)
