@@ -371,6 +371,9 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         w._has_packed_cache = False
         w._reqs_to_process = set()
         w._reqs_to_send = {}
+        w.draft_tp_mappings = {}
+        w._head_sharded_draft_kv_heads = None
+        w._head_sharded_draft_regions = set()
         w.consumer_notification_counts_by_req = defaultdict(int)
         w.tp_rank = 0
         w.pcp_rank = 0
@@ -2111,6 +2114,21 @@ def test_layer_alignment_rejects_inconsistent_region_geometry(field):
     with pytest.raises(AssertionError, match="lengths disagree"):
         worker._align_remote_regions_by_layer(metadata)
     assert msgspec.msgpack.encode(metadata) == original
+
+
+def test_head_sharded_draft_push_rejects_heterogeneous_tp():
+    """Push mode writes a head-sharded draft's KV under an MLA target only at
+    equal TP; heterogeneous TP is the pull path's job."""
+    w = _StubWriterWorker.fresh()
+    w._head_sharded_draft_regions = {1}
+    w.transfer_topo = MagicMock(tp_size=4)
+    meta = MagicMock(spec=NixlAgentMetadata)
+    with patch.object(
+        NixlBaseConnectorWorker, "_validate_remote_agent_handshake", return_value=None
+    ):
+        w._validate_remote_agent_handshake(meta, remote_tp_size=4)
+        with pytest.raises(NotImplementedError, match="push mode"):
+            w._validate_remote_agent_handshake(meta, remote_tp_size=1)
 
 
 def test_set_region_layers_rejects_duplicate_local_layer():
