@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any
 
 import pytest
 
@@ -35,15 +36,20 @@ class ArgsTest:
     expected_acceptance_len: float
     expected_gsm8k_accuracy: float = 0.0  # skip by default
     # Defaults
+    method: str = "draft_model"
     enforce_eager: bool = True
     parallel_drafting: bool = False
     target_tensor_parallel_size: int = 1
     draft_tensor_parallel_size: int = 1
+    pipeline_parallel_size: int = 1
+    async_scheduling: bool | None = None
+    max_num_seqs: int = 100  # limit cudagraph capture runtime
     max_model_len: int = 2048
     gpu_memory_utilization: float = 0.5
     dataset: str = "test_prompts"
     # Doubling 100 to 200 reduces sampling standard error by about 29%.
     num_prompts: int = 200
+    engine_kwargs: dict[str, Any] = field(default_factory=dict)
 
 
 def get_messages(dataset: str, n: int) -> list[Messages]:
@@ -362,28 +368,8 @@ def assert_draft_model_correctness(args: ArgsTest, vllm_runner):
         dataset=args.dataset, n=args.num_prompts
     )
 
-    with vllm_runner(
-        args.target_model,
-        block_size=None,
-        trust_remote_code=False,
-        enable_chunked_prefill=None,
-        compilation_config=CompilationConfig(),
-        speculative_config={
-            "model": args.draft_model,
-            "method": "draft_model",
-            "num_speculative_tokens": args.num_speculative_tokens,
-            "max_model_len": args.max_model_len,
-            "enforce_eager": args.enforce_eager,
-            "draft_tensor_parallel_size": args.draft_tensor_parallel_size,
-            "parallel_drafting": args.parallel_drafting,
-        },
-        max_num_seqs=100,  # limit cudagraph capture runtime
-        max_model_len=args.max_model_len,
-        gpu_memory_utilization=args.gpu_memory_utilization,
-        tensor_parallel_size=args.target_tensor_parallel_size,
-        enforce_eager=args.enforce_eager,
-        disable_log_stats=False,  # enables get_metrics()
-    ) as spec_runner:
+    kwargs = vllm_runner_kwargs(args)
+    with vllm_runner(args.target_model, **kwargs) as spec_runner:
         spec_llm = spec_runner.llm
 
         # we don't check the outputs, only check the metrics
@@ -421,3 +407,31 @@ def assert_draft_model_correctness(args: ArgsTest, vllm_runner):
         has_async = spec_llm.llm_engine.vllm_config.scheduler_config.async_scheduling
 
     assert has_async, "Expected async_scheduling=True for draft_model spec decode"
+
+
+def vllm_runner_kwargs(args: ArgsTest) -> dict[str, Any]:
+    kwargs = dict(
+        block_size=None,
+        trust_remote_code=False,
+        enable_chunked_prefill=None,
+        compilation_config=CompilationConfig(),
+        speculative_config={
+            "model": args.draft_model,
+            "method": args.method,
+            "num_speculative_tokens": args.num_speculative_tokens,
+            "max_model_len": args.max_model_len,
+            "enforce_eager": args.enforce_eager,
+            "draft_tensor_parallel_size": args.draft_tensor_parallel_size,
+            "parallel_drafting": args.parallel_drafting,
+        },
+        max_num_seqs=args.max_num_seqs,
+        async_scheduling=args.async_scheduling,
+        max_model_len=args.max_model_len,
+        gpu_memory_utilization=args.gpu_memory_utilization,
+        tensor_parallel_size=args.target_tensor_parallel_size,
+        pipeline_parallel_size=args.pipeline_parallel_size,
+        enforce_eager=args.enforce_eager,
+        disable_log_stats=False,  # enables get_metrics()
+    )
+    kwargs.update(args.engine_kwargs)
+    return kwargs

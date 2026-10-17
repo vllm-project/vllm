@@ -12,8 +12,10 @@ at a position the model really does sample.
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 import torch
 
+from vllm.v1.worker.gpu.spec_decode.utils import check_draft_vintage
 from vllm.v1.worker.gpu.structured_outputs import grammar_invalid_drafts
 
 
@@ -54,3 +56,53 @@ def test_follow_the_device_layout_under_adaptive_verification():
     # 3 for "b": the real rows are a=0..2, b=3..6, not the scheduled 0..3, 4..7.
     batch = _input_batch(["a", "b"], [3, 3], num_admitted=[2, 3])
     assert _invalid_rows(batch, ["a", "b"], [1, 0]) == [2, 4, 5, 6]
+
+
+# --- DraftTokensHandler per-request retention (no CUDA: dict logic only) ---
+
+
+def _proposal_states(rows, req_ids):
+    """req_states stand-in: draft_tokens tensor [num_reqs, width] + mapping."""
+    width = max((len(r) for r in rows), default=1)
+    tensor = torch.zeros(len(rows), width, dtype=torch.int64)
+    for i, row in enumerate(rows):
+        tensor[i, : len(row)] = torch.tensor(row, dtype=torch.int64)
+    return tensor, {req_id: i for i, req_id in enumerate(req_ids)}
+
+
+def test_vintage_check_detects_stale_scheduler_ids():
+    # The scheduler advanced the grammar over ids the worker never proposed:
+    # the #54437 silent-corruption precondition must be reported.
+    tensor, mapping = _proposal_states([[5, 6, 7]], ["r0"])
+    assert check_draft_vintage("1", {"r0": [5, 6, 9]}, mapping, tensor) == ["r0"]
+
+
+def test_vintage_check_passes_on_matching_vintage():
+    tensor, mapping = _proposal_states([[5, 6, 7]], ["r0"])
+    assert check_draft_vintage("1", {"r0": [5, 6, 7]}, mapping, tensor) == []
+
+
+def test_vintage_check_trims_invalid_tail():
+    # The scheduler validated [5, 6] and padded the rejected tail with -1;
+    # the worker's raw proposal row keeps its own value at that position.
+    tensor, mapping = _proposal_states([[5, 6, 9]], ["r0"])
+    assert check_draft_vintage("1", {"r0": [5, 6, -1]}, mapping, tensor) == []
+
+
+def test_vintage_check_skips_width_placeholders():
+    # All-(-1) scheduled rows are width placeholders (unstructured request,
+    # or drafts the scheduler fully rejected) — no ids to compare.
+    tensor, mapping = _proposal_states([[5, 6, 7]], ["r0"])
+    assert check_draft_vintage("1", {"r0": [-1, -1, -1]}, mapping, tensor) == []
+
+
+def test_vintage_check_skips_removed_request():
+    # A request removed mid-flight has no slot; discard() already ran.
+    tensor, mapping = _proposal_states([[5, 6, 7]], ["r0"])
+    assert check_draft_vintage("1", {"gone": [5, 6, 7]}, mapping, tensor) == []
+
+
+def test_vintage_check_assert_mode_raises():
+    tensor, mapping = _proposal_states([[5, 6, 7]], ["r0"])
+    with pytest.raises(AssertionError):
+        check_draft_vintage("2", {"r0": [5, 6, 9]}, mapping, tensor)
