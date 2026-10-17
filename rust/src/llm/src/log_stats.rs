@@ -393,6 +393,7 @@ fn spec_decoding_log_stats(
     let accepted_tokens = curr
         .spec_decode_num_accepted_tokens
         .wrapping_sub(prev.spec_decode_num_accepted_tokens);
+    let committed_tokens = raw_log_stats.spec_committed_tokens;
 
     let (accepted_throughput, draft_throughput) = if elapsed > 0.0 {
         (
@@ -418,7 +419,7 @@ fn spec_decoding_log_stats(
     };
 
     Some(SpecDecodingLogStats {
-        mean_acceptance_length: 1.0 + accepted_tokens as f64 / num_drafts as f64,
+        mean_acceptance_length: committed_tokens as f64 / num_drafts as f64,
         accepted_throughput,
         draft_throughput,
         accepted_tokens,
@@ -496,6 +497,7 @@ mod tests {
     fn spec_decoding_log_stats_uses_interval_deltas() {
         let raw_log_stats = SchedulerLogStatsInterval {
             spec_num_drafts: 4,
+            spec_committed_tokens: 10,
             spec_accepted_tokens_per_pos: vec![4, 2, 1],
             ..Default::default()
         };
@@ -514,7 +516,7 @@ mod tests {
 
         let stats = spec_decoding_log_stats(&curr, &prev, 2.0, &raw_log_stats).unwrap();
 
-        assert_eq!(stats.mean_acceptance_length, 4.0);
+        assert_eq!(stats.mean_acceptance_length, 2.5);
         assert_eq!(stats.accepted_throughput, 6.0);
         assert_eq!(stats.draft_throughput, 10.0);
         assert_eq!(stats.accepted_tokens, 12);
