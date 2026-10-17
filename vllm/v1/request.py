@@ -324,6 +324,16 @@ class Request:
             return self.pooling_params.skip_reading_prefix_cache
         return False
 
+    @property
+    def max_cache_hit_length(self) -> int:
+        limit = self.num_tokens - 1
+        params = self.sampling_params
+        if params is not None and params.prompt_logprob_token_ids is not None:
+            # KV alone cannot supply the logits for a skipped scoring row.
+            start = params.prompt_logprob_start or 0
+            limit = min(limit, start if params.prompt_logprobs is None else 0)
+        return limit
+
     def is_finished(self) -> bool:
         return RequestStatus.is_finished(self.status)
 

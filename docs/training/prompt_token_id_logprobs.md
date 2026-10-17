@@ -55,12 +55,31 @@ lists of Python ints are much slower to copy and serialize. With a logits
 - The longest row at most `--max-logprobs` candidates.
 - No `--kv-sharing-fast-prefill`.
 
-The request skips reading the prefix cache (local and KV connector), since
-cached rows have no logits to score.
+By default, the request skips reading the prefix cache (local and KV connector),
+since cached rows have no logits to score.
+
+## Reusing the context prefix
+
+Set `skip_reading_prefix_cache=False` to reuse local KV before
+`prompt_logprob_start`. Every requested scoring row is still computed, even if
+the cache contains a previous copy of the entire response. Cache hits are rounded
+down to the available block boundary. For example, a 2048-token context has
+`prompt_logprob_start=2047`; with 16-token blocks, at most 2032 tokens are reused.
+
+This path supports text token inputs, one causal full-attention KV group,
+unquantized KV, `max_tokens=1`, and single-GPU or tensor-parallel
+execution. Chunked prefill and prefill preemption retain the scoring boundary.
+The generated token is still returned; scoring callers can discard it.
+
+Requests that also ask for ordinary `prompt_logprobs` use full recomputation.
+So do configurations with KV/offload connectors, auxiliary
+output capture, hybrid or sliding-window attention, partial-block reuse,
+multimodal inputs or prompt embeddings, LoRA, speculative decoding, resumable
+sessions, or other parallel topologies. The existing input validation still
+applies. Neither the scoring output format nor the no-read default changes.
+An unsupported opt-in configuration logs a warning once before falling back.
 
 ## Limitations
 
 - Non-streaming only; `stream=true` requests are rejected.
 - Not exposed through the OpenAI-compatible endpoints.
-- If a prefill starts past the first scored row (e.g. `skip_reading_prefix_cache=False`
-  with a cache hit), the result is `None` rather than a partial matrix.
