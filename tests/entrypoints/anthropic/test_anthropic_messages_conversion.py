@@ -32,6 +32,7 @@ from vllm.entrypoints.anthropic.protocol import (
 )
 from vllm.entrypoints.anthropic.serving import (
     AnthropicServingMessages,
+    DisabledThinkingEffortResolver,
     _build_anthropic_usage,
 )
 from vllm.entrypoints.generate.base.protocol import (
@@ -2046,18 +2047,20 @@ class TestProbeDisabledThinkingEffort:
 
     @staticmethod
     async def _probe(render):
-        obj = MagicMock(spec=AnthropicServingMessages)
-        obj.online_renderer = MagicMock()
-        obj.online_renderer.render_chat = AsyncMock(
-            side_effect=lambda req: ([], [render(req.reasoning_effort)])
+        renderer = MagicMock()
+        renderer.model_config.is_encoder_decoder = False
+        renderer.render_chat = AsyncMock(
+            side_effect=lambda req: (
+                [],
+                [{"prompt_token_ids": render(req.reasoning_effort)}],
+            )
         )
-        obj._extract_prompt_components = lambda engine_input: SimpleNamespace(
-            token_ids=engine_input, text=None
-        )
-        obj._render_probe_prompt = (
-            AnthropicServingMessages._render_probe_prompt.__get__(obj)
-        )
-        return await AnthropicServingMessages._probe_disabled_thinking_effort(obj)
+        resolver = DisabledThinkingEffortResolver(renderer)
+        effort = await resolver.resolve()
+        calls = renderer.render_chat.await_count
+        assert await resolver.resolve() == effort
+        assert renderer.render_chat.await_count == calls
+        return effort
 
     @staticmethod
     def _reject_none(effort):
