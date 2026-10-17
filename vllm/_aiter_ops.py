@@ -1187,6 +1187,12 @@ def _rocm_aiter_fused_allreduce_rmsnorm_impl(
 
         device_comm = get_tp_group().device_communicator
         qr_comm = getattr(device_comm, "qr_comm", None)
+        if qr_comm is not None and qr_comm.should_fused_allreduce_rmsnorm(
+            input_, residual, weight
+        ):
+            return qr_comm.fused_allreduce_rmsnorm(
+                input_, residual, weight, epsilon, gemma_norm
+            )
         hidden_dim = input_.shape[-1]
         row_size = hidden_dim * input_.element_size()
         fused_qr_rmsnorm_ok = (
