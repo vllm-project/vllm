@@ -1359,6 +1359,54 @@ class MiniMaxM3DecoderLayer(nn.Module):
         return hidden_states, residual
 
 
+class MonoDecodeLayer(MiniMaxM3DecoderLayer):
+    """A decoder layer that runs on the fused mono kernel when the step allows.
+
+    One launch replaces the layer's norms, attention, both all-reduces and its MoE.
+    A subclass rather than a wrapper so the module tree, and so every checkpoint
+    weight name, is exactly ``MiniMaxM3DecoderLayer``'s.
+
+    What the kernel leaves in ``(ar, res)`` is the ``(hidden_states, residual)``
+    pair this layer would have returned, so the model's loop, its Eagle3 aux
+    capture and its final norm drive either path without knowing which ran.
+    """
+
+    # Attached by MonoDecode once the layers exist; a layer the kernels cannot
+    # serve, or a build without them, keeps both as None and never leaves super().
+    mono = None
+    mono_slot: int | None = None
+
+    def forward(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        mono, slot = self.mono, self.mono_slot
+        if mono is None or slot is None:
+            return super().forward(positions, hidden_states, residual)
+        # The first sparse layer settles the step; the rest only read its verdict,
+        # so they cannot disagree and strand each other in an in-kernel all-reduce.
+        if slot == 0:
+            mono.begin(hidden_states.shape[0], positions, residual)
+        if not mono.active:
+            return super().forward(positions, hidden_states, residual)
+        return mono.run_layer(slot, positions, hidden_states, residual)
+
+
+def _mono_decode(model: nn.Module):
+    """The model's mono dispatcher, or None where the kernels are unavailable.
+
+    Imported here rather than at module scope: the kernels are written in flydsl
+    and compile for gfx95x alone, while this module has to import anywhere.
+    """
+    try:
+        from vllm.models.minimax_m3.amd.mono.dispatch import MonoDecode
+    except ImportError:
+        return None
+    return MonoDecode(model)
+
+
 class MiniMaxM3Model(nn.Module, EagleModelMixin):
     fall_back_to_pt_during_load = False
 
@@ -1439,7 +1487,7 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
 
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: MiniMaxM3DecoderLayer(
+            lambda prefix: MonoDecodeLayer(
                 config,
                 prefix,
                 cache_config=cache_config,
@@ -1449,6 +1497,10 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             ),
             prefix=f"{prefix}.layers",
         )
+        # Hands each sparse layer its slot in the kernels' chain. Only the per-step
+        # decision is made here; the kernels themselves are built on the first step
+        # they could serve, once the KV caches exist.
+        self.mono = _mono_decode(self)
         self.is_fused_shared_expert_enabled = is_model_fused_shared_expert_compatible(
             self.layers,
             MiniMaxM3MoE,
