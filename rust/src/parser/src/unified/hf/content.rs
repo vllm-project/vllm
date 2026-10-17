@@ -6,12 +6,8 @@
 //! Port of `content_parsers.py`. Each parser takes a chunk of captured text and
 //! parses it into a single key in the output message dictionary.
 
-use std::borrow::Cow;
-
 use regex_automata::meta::Regex;
-use regex_automata::util::iter::Searcher;
 use regex_automata::util::syntax;
-use regex_automata::{Input, Match};
 use serde::Deserialize;
 use serde_json::{Map, Value};
 use thiserror_ext::AsReport as _;
@@ -25,10 +21,6 @@ use crate::unified::{self, parsing_failed};
 // that should never appear in real LLM output.
 const LAX_OPEN: char = '\u{1}';
 const LAX_CLOSE: char = '\u{2}';
-
-/// Name of the group that stands for the lookahead ending an `xml-inline` tag
-/// pattern.
-const AHEAD_GROUP: &str = "lookahead";
 
 /// A configured content parser (`content` plus `content_args` of one field).
 #[derive(Debug, Clone)]
@@ -74,9 +66,6 @@ pub(super) struct XmlInlineArgs {
     key_group: usize,
     /// Index of the `value` group, if the pattern declares one.
     value_group: Option<usize>,
-    /// Index of the group standing for the lookahead that ends the pattern,
-    /// and the lookahead's own pattern, if any.
-    lookahead: Option<(usize, String)>,
     value_parser: Option<Box<ContentParser>>,
     /// Collect duplicate keys into a list.
     merge_duplicates: bool,
@@ -154,8 +143,7 @@ impl ContentParser {
             }
             ContentKind::XmlInline => {
                 let spec: XmlInlineSpec = deserialize(&args, &context)?;
-                let (pattern, lookahead) = final_lookahead(&spec.tag_pattern);
-                let tag_pattern = compile_regex(scope, &pattern)?;
+                let tag_pattern = compile_regex(scope, &spec.tag_pattern)?;
                 let group_info = tag_pattern.group_info();
                 let Some(key_group) = group_info.to_index(Default::default(), "key") else {
                     return Err(invalid!(
@@ -164,14 +152,10 @@ impl ContentParser {
                     ));
                 };
                 let value_group = group_info.to_index(Default::default(), "value");
-                let lookahead = group_info
-                    .to_index(Default::default(), AHEAD_GROUP)
-                    .zip(lookahead.map(str::to_string));
                 Self::XmlInline(XmlInlineArgs {
                     tag_pattern,
                     key_group,
                     value_group,
-                    lookahead,
                     value_parser: ValueParserSpec::compile(scope, spec.value_parser)?,
                     merge_duplicates: spec.merge_duplicates,
                 })
@@ -209,32 +193,6 @@ impl ContentParser {
             Self::KvLines(args) => args.parse(text),
         }
     }
-
-    /// The pattern of the lookahead that ends an `xml-inline` tag pattern, if
-    /// any.
-    pub fn lookahead(&self) -> Option<&str> {
-        match self {
-            Self::XmlInline(args) => args.lookahead.as_ref().map(|(_, ahead)| ahead.as_str()),
-            _ => None,
-        }
-    }
-}
-
-/// `pattern` with a lookahead that ends it matched as the group
-/// [`AHEAD_GROUP`] instead, as the Rust regex engine has no lookahead, and
-/// the lookahead's own pattern. The engine rejects any other lookahead.
-fn final_lookahead(pattern: &str) -> (Cow<'_, str>, Option<&str>) {
-    if let Some((head, rest)) = pattern.split_once("(?=") {
-        // Only closing parentheses may follow a lookahead that ends the pattern.
-        let ahead = rest.trim_end_matches(')');
-        if ahead.len() < rest.len() && !ahead.contains(['(', ')']) {
-            return (
-                format!("{head}(?P<{AHEAD_GROUP}>{rest}").into(),
-                Some(ahead),
-            );
-        }
-    }
-    (pattern.into(), None)
 }
 
 impl ValueParserSpec {
@@ -300,21 +258,7 @@ impl XmlInlineArgs {
     /// Parse shallow XML-ish tags into a dict.
     fn parse(&self, text: &str) -> unified::Result<Value> {
         let mut out = Map::new();
-        let mut captures = self.tag_pattern.create_captures();
-        let mut tags = Searcher::new(Input::new(text));
-        while tags
-            .advance(|input| {
-                self.tag_pattern.search_captures(input, &mut captures);
-                // The lookahead's text is not part of the tag.
-                let ahead =
-                    self.lookahead.as_ref().and_then(|(group, _)| captures.get_group(*group));
-                Ok(captures.get_match().map(|tag| match ahead {
-                    Some(ahead) => Match::new(tag.pattern(), tag.start()..ahead.start),
-                    None => tag,
-                }))
-            })
-            .is_some()
-        {
+        for captures in self.tag_pattern.captures_iter(text) {
             let key =
                 captures.get_group(self.key_group).map(|span| &text[span.range()]).ok_or_else(
                     || parsing_failed!("xml-inline: named group 'key' did not participate"),
@@ -544,25 +488,6 @@ mod tests {
             value,
             json!({"locations": [{"city": "Paris"}], "unit": ["celsius", 2]})
         );
-    }
-
-    #[test]
-    fn xml_inline_tags_may_end_where_the_pattern_looks_ahead() {
-        let xml = parser(
-            "xml-inline",
-            json!({
-                "tag_pattern": r#"<arg name="(?P<key>\w+)">(?P<value>.*?)\n(?:</arg>|(?=<arg name="))"#,
-            }),
-        );
-        let value = xml
-            .parse("<arg name=\"a\">1\n<arg name=\"b\">x <arg name=\"c\"> y\n</arg>")
-            .unwrap();
-        assert_eq!(value, json!({"a": "1", "b": "x <arg name=\"c\"> y"}));
-        assert_eq!(xml.lookahead(), Some("<arg name=\""));
-
-        // Any other lookahead is unsupported.
-        let args = json!({"tag_pattern": r"(?P<key>\w+)(?=:)(?P<value>.*)"});
-        assert!(ContentParser::new("test", kind("xml-inline"), args.as_object().unwrap()).is_err());
     }
 
     #[test]

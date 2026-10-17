@@ -3,7 +3,6 @@
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import replace
-from functools import partial
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -447,7 +446,6 @@ class DraftModelSpeculator(BaseSpeculator):
         draft_step: torch.Tensor,
         draft_logits: torch.Tensor | None,
         spec_step_idx: int = 0,
-        num_steps: int = 1,
     ) -> torch.Tensor:
         if draft_logits is None and self.use_local_argmax_reduction:
             return self.get_draft_top_tokens(hidden_states, spec_step_idx)
@@ -457,7 +455,7 @@ class DraftModelSpeculator(BaseSpeculator):
             sampler = (
                 gumbel_sample
                 if self.draft_watermarker is None
-                else partial(self.draft_watermarker.sample, num_steps=num_steps)
+                else self.draft_watermarker.sample
             )
             sampled = sampler(
                 logits,

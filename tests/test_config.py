@@ -2095,8 +2095,8 @@ def test_draft_parallel_config_preserves_ep_without_model(
     [
         pytest.param("eagle3", False, 0, id="eagle3"),
         pytest.param("eagle3", True, 7, id="p-eagle"),
-        pytest.param("dflash", True, 0, id="dflash"),
-        pytest.param("dspark", True, 0, id="dspark"),
+        pytest.param("dflash", True, 8, id="dflash"),
+        pytest.param("dspark", True, 7, id="dspark"),
         pytest.param("mtp", False, 0, id="mtp"),
         pytest.param("ngram", False, 0, id="ngram"),
         pytest.param("draft_model", False, 1, id="draft-model"),
@@ -3732,48 +3732,34 @@ def test_dual_key_gumbel_requires_probabilistic_drafting():
         config._check_supports_watermarking()
 
 
-@pytest.mark.parametrize(
-    ("method", "parallel_drafting"),
-    [
-        ("eagle", False),
-        ("eagle3", False),
-        ("mtp", False),
-        ("dspark", True),
-        ("dflash", True),
-    ],
-)
-def test_dual_key_gumbel_supports_probabilistic_speculative_decoding(
-    method, parallel_drafting
-):
+@pytest.mark.parametrize("method", ["eagle", "eagle3", "mtp"])
+def test_dual_key_gumbel_supports_probabilistic_speculative_decoding(method):
     config = _watermarked_vllm_config()
     config.watermark_config = WatermarkConfig(algorithm="dual_key_gumbel", key=42)
     config.speculative_config = SimpleNamespace(
         method=method,
         draft_sample_method="probabilistic",
         rejection_sample_method="standard",
-        parallel_drafting=parallel_drafting,
+        parallel_drafting=False,
     )
 
     config._check_supports_watermarking()
 
 
-@pytest.mark.parametrize("architecture", ["DFlash2DraftModel", "LiLiCorrDraftModel"])
-def test_dual_key_gumbel_rejects_dflash_candidate_drafts(architecture):
+def test_dual_key_gumbel_supports_dspark():
     config = _watermarked_vllm_config()
     config.watermark_config = WatermarkConfig(algorithm="dual_key_gumbel", key=42)
     config.speculative_config = SimpleNamespace(
-        method="dflash",
+        method="dspark",
         draft_sample_method="probabilistic",
         rejection_sample_method="standard",
         parallel_drafting=True,
-        draft_model_config=SimpleNamespace(architectures=[architecture]),
     )
 
-    with pytest.raises(ValueError, match="candidate-head drafters"):
-        config._check_supports_watermarking()
+    config._check_supports_watermarking()
 
 
-def test_dual_key_gumbel_rejects_unsupported_speculative_method():
+def test_dual_key_gumbel_rejects_non_autoregressive_speculation():
     config = _watermarked_vllm_config()
     config.watermark_config = WatermarkConfig(algorithm="dual_key_gumbel", key=42)
     config.speculative_config = SimpleNamespace(
@@ -3783,7 +3769,7 @@ def test_dual_key_gumbel_rejects_unsupported_speculative_method():
         parallel_drafting=False,
     )
 
-    with pytest.raises(ValueError, match="Watermarking supports only"):
+    with pytest.raises(ValueError, match="autoregressive model-based"):
         config._check_supports_watermarking()
 
 
@@ -4144,7 +4130,7 @@ def test_revision_resolved_for_model(mock_resolve):
 
 
 @pytest.mark.parametrize(
-    "enabled,supported,cuda_alike,tp_size,pp_size,error",
+    "enabled,supported,is_cuda,tp_size,pp_size,error",
     [
         (True, True, True, 2, 1, None),
         (True, False, True, 2, 1, "not supported for this model"),
@@ -4155,7 +4141,7 @@ def test_revision_resolved_for_model(mock_resolve):
         (False, False, False, 2, 1, None),
     ],
 )
-def test_hc_sp_model_support(enabled, supported, cuda_alike, tp_size, pp_size, error):
+def test_hc_sp_model_support(enabled, supported, is_cuda, tp_size, pp_size, error):
     """Validate active HC SP configurations and ignore the flag with TP=1."""
     from vllm.model_executor.models.registry import ModelRegistry
 
@@ -4173,10 +4159,7 @@ def test_hc_sp_model_support(enabled, supported, cuda_alike, tp_size, pp_size, e
         distributed_executor_backend="mp",
     )
     with (
-        patch(
-            "vllm.config.model.current_platform.is_cuda_alike",
-            return_value=cuda_alike,
-        ),
+        patch("vllm.config.model.current_platform.is_cuda", return_value=is_cuda),
         patch.object(ModelRegistry, "is_hc_sp_supported_model", return_value=supported),
         patch.object(ModelRegistry, "is_pp_supported_model", return_value=True),
     ):

@@ -77,7 +77,7 @@ def _run(inp: dict, use_fused: bool, out: torch.Tensor | None = None, **kw):
         output_final_state=True,
         use_qk_l2norm_in_kernel=True,
         cu_seqlens=inp["cu"],
-        backend=kw.pop("backend", "fused" if use_fused else "triton"),
+        use_fused_chunk=use_fused,
         out=out,
         **kw,
     )
@@ -110,27 +110,6 @@ def test_fused_chunk_matches_triton(seqlens: list[int]) -> None:
 
     torch.testing.assert_close(o_fused.float(), o_ref.float(), rtol=2e-2, atol=2e-2)
     torch.testing.assert_close(state_fused, state_ref, rtol=1e-3, atol=1e-3)
-
-
-@pytest.mark.parametrize(
-    "seqlens",
-    [[1], [64], [1024], [4096], [513, 64, 1, 1200], [512] * 6],
-)
-def test_gluon_chunk_matches_triton(seqlens: list[int]) -> None:
-    """AITER's Gluon chunk_kda must match the Triton chunk path too."""
-    from vllm._aiter_ops import rocm_aiter_ops
-
-    if not rocm_aiter_ops.is_kda_gluon_prefill_available():
-        pytest.skip("AITER Gluon chunk_kda is not available here")
-
-    inp = _inputs(seqlens, seed=len(seqlens))
-    o_ref, state_ref = _run(inp, use_fused=False)
-    o_gluon, state_gluon = _run(inp, use_fused=False, backend="gluon")
-
-    torch.testing.assert_close(o_gluon.float(), o_ref.float(), rtol=2e-2, atol=2e-2)
-    torch.testing.assert_close(state_gluon, state_ref, rtol=5e-3, atol=5e-3)
-    state_rel = (state_gluon - state_ref).norm() / state_ref.norm()
-    assert state_rel < 5e-3, f"final state relative L2 error {state_rel:.2e}"
 
 
 @pytest.mark.parametrize("use_fused", [False, True])
@@ -669,7 +648,7 @@ def _run_paged(inp: dict, cache, idx, warm, use_fused: bool, **kw):
         has_initial_state=warm,
         use_qk_l2norm_in_kernel=True,
         cu_seqlens=inp["cu"],
-        backend="fused" if use_fused else "triton",
+        use_fused_chunk=use_fused,
         **kw,
     )
 

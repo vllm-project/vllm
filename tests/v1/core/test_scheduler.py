@@ -2159,46 +2159,6 @@ def test_draft_slots_budgeted_per_scheduled_request(tmp_path, monkeypatch):
     assert scheduler.schedule().num_scheduled_tokens == {"0": 10, "1": 4}
 
 
-@pytest.mark.parametrize(("method", "max_num_reqs"), [("dflash", 4), ("dspark", 5)])
-def test_block_drafters_cap_requests_instead_of_draft_slots(
-    tmp_path, method, max_num_reqs
-):
-    (tmp_path / "config.json").write_text(
-        '{"architectures": ["OPTForCausalLM"], "model_type": "opt"}'
-    )
-    base = create_scheduler(
-        model=str(tmp_path),
-        max_num_batched_tokens=20,
-        num_speculative_tokens=4,
-        parallel_drafting=True,
-        skip_tokenizer_init=True,
-    )
-    # DFlash/DSpark need a resolvable draft model, so switch the ngram config in
-    # place and redo the config step. DSpark then has 4 lookahead tokens, not 5.
-    vllm_config = base.vllm_config
-    object.__setattr__(vllm_config.speculative_config, "method", method)
-    object.__setattr__(
-        vllm_config.speculative_config,
-        "draft_model_config",
-        SimpleNamespace(hf_config=SimpleNamespace()),
-    )
-    vllm_config._set_max_num_scheduled_tokens()
-    scheduler = Scheduler(
-        vllm_config=vllm_config,
-        kv_cache_config=base.kv_cache_config,
-        structured_output_manager=base.structured_output_manager,
-        block_size=base.block_size,
-    )
-    for request in create_requests(num_requests=8, num_tokens=2):
-        scheduler.add_request(request)
-
-    # Admission stops at 20 // num_lookahead_tokens, and no draft slots are
-    # charged: each admitted prompt is scheduled in full.
-    assert scheduler.schedule().num_scheduled_tokens == {
-        str(i): 2 for i in range(max_num_reqs)
-    }
-
-
 # Note - these test cases mirror some of those in test_rejection_sampler.py
 @pytest.mark.parametrize(
     "spec_tokens,output_tokens,expected,expected_per_req",

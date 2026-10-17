@@ -42,7 +42,6 @@ from vllm.v1.engine.output_processor import (
     OutputProcessor,
     RequestOutputCollector,
     RequestState,
-    StreamingInputOutputCollector,
 )
 from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.metrics.loggers import PrometheusStatLogger
@@ -1641,53 +1640,6 @@ async def test_cumulative_output_collector_n():
     third = [k for k in result.outputs if k.index == 2]
     assert len(third) == 1
     assert third[0].text == "c"
-
-
-def _make_boundary_output(
-    token_id: int, finish_reason: str | None, finished: bool = False
-) -> RequestOutput:
-    return RequestOutput(
-        request_id="my-request-id",
-        prompt=None,
-        prompt_token_ids=[1, 2, 3],
-        prompt_logprobs=None,
-        outputs=[
-            CompletionOutput(
-                index=0,
-                text="a",
-                token_ids=[token_id],
-                cumulative_logprob=None,
-                logprobs=None,
-                finish_reason=finish_reason,
-            )
-        ],
-        finished=finished,
-    )
-
-
-@pytest.mark.asyncio
-async def test_streaming_input_collector_preserves_chunk_boundary():
-    """A pending chunk-boundary marker (finish_reason on a non-finished
-    output) must not be erased by merging the next chunk's output into it."""
-    collector = StreamingInputOutputCollector(
-        RequestOutputKind.DELTA, request_id="my-request-id-int"
-    )
-
-    collector.put(_make_boundary_output(0, "stop"))
-    collector.put(_make_boundary_output(1, None))
-    collector.put(_make_boundary_output(2, None))
-
-    boundary = await collector.get()
-    assert boundary.outputs[0].finish_reason == "stop"
-    assert boundary.outputs[0].token_ids == [0]
-
-    following = await collector.get()
-    assert following.outputs[0].finish_reason is None
-    assert following.outputs[0].token_ids == [1, 2]
-
-    assert collector.output is None
-    assert not collector._backlog
-    assert not collector.ready.is_set()
 
 
 def _make_streaming_input_request(

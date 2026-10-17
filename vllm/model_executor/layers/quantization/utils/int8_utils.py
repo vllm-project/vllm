@@ -12,6 +12,35 @@ from vllm.triton_utils import tl, triton
 logger = logging.getLogger(__name__)
 
 
+def block_dequant(
+    x_q_block: torch.Tensor,
+    x_s: torch.Tensor,
+    block_size: list[int],
+) -> torch.Tensor:
+    """This function conducts block-wise dequantization.
+    The inputs are block-wise quantization tensor `x_q_block`,
+    block-wise quantization scale and the block size.
+    The outputs are dequantized tensor.
+    """
+    block_n, block_k = block_size[0], block_size[1]
+    n, k = x_q_block.shape
+    n_tiles = (n + block_n - 1) // block_n
+    k_tiles = (k + block_k - 1) // block_k
+    assert n_tiles == x_s.shape[0]
+    assert k_tiles == x_s.shape[1]
+
+    x_dq_block = x_q_block.to(torch.float32)
+
+    for i in range(k_tiles):
+        for j in range(n_tiles):
+            x_dq_block[
+                j * block_n : min((j + 1) * block_n, n),
+                i * block_k : min((i + 1) * block_k, k),
+            ] *= x_s[j][i]
+
+    return x_dq_block
+
+
 if current_platform.is_rocm():
 
     @triton.jit

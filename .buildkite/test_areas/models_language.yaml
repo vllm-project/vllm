@@ -216,9 +216,9 @@ steps:
       parallelism: 4
       commands:
         - "pytest -v -s models/language/pooling -m 'not core_model' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB"
-      label: ":amd: (MI355 DPX) Language Models (Extended Pooling) Shard %N"
+      label: ":amd: (MI300) Language Models (Extended Pooling) Shard %N"
       dind: false
-      device: mi355_dpx
+      device: mi300_1
       timeout_in_minutes: 95
       depends_on:
       - image-build-amd

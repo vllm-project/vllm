@@ -113,53 +113,6 @@ class RequestOutputCollector:
             self._input_stream_task = None
 
 
-def _is_chunk_boundary(
-    output: RequestOutput | PoolingRequestOutput | Exception | None,
-) -> bool:
-    """Whether the output marks the end of a streaming-input chunk: a
-    finish_reason on a request that has not finished."""
-    return (
-        isinstance(output, RequestOutput)
-        and not output.finished
-        and any(completion.finished() for completion in output.outputs)
-    )
-
-
-class StreamingInputOutputCollector(RequestOutputCollector):
-    """Collector for streaming-input requests. Doesn't merge across input
-    chunk boundaries (a finish_reason on a non-finished output)."""
-
-    def __init__(self, output_kind: RequestOutputKind, request_id: str):
-        super().__init__(output_kind, request_id)
-        self._backlog: deque[RequestOutput] = deque()
-
-    def put(self, output: RequestOutput | PoolingRequestOutput | Exception) -> None:
-        if isinstance(output, Exception):
-            self._backlog.clear()
-        elif self._backlog or _is_chunk_boundary(self.output):
-            assert isinstance(output, RequestOutput)
-            if self._backlog and not _is_chunk_boundary(self._backlog[-1]):
-                self._backlog[-1].add(output, aggregate=self.aggregate)
-            else:
-                self._backlog.append(output)
-            return
-        super().put(output)
-
-    async def get(self) -> RequestOutput | PoolingRequestOutput:
-        output = await super().get()
-        if self._backlog:
-            self.output = self._backlog.popleft()
-            self.ready.set()
-        return output
-
-    def get_nowait(self) -> RequestOutput | PoolingRequestOutput | None:
-        output = super().get_nowait()
-        if self._backlog:
-            self.output = self._backlog.popleft()
-            self.ready.set()
-        return output
-
-
 @dataclass
 class OutputProcessorOutput:
     request_outputs: list[RequestOutput | PoolingRequestOutput]

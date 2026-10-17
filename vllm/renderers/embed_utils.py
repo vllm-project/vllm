@@ -91,17 +91,11 @@ def safe_load_prompt_embeds(
             parameter="prompt_embeds",
         )
 
-    # Pin each tensor to the model's text embedding width. Validating here
+    # Pin each tensor to the model's hidden_size. Validating here
     # also transitively guarantees cross-tensor consistency for requests that
     # include multiple `prompt_embeds` parts, which is required by downstream
     # concatenation in `_build_mixed_prompt_embeds`.
-    # OPT projects token embeddings to hidden_size inside its decoder. CLIP
-    # and SigLIP still accept text embeddings at hidden_size, not projection_dim.
-    expected_hidden_size = getattr(
-        model_config.hf_text_config,
-        "word_embed_proj_dim",
-        model_config.get_hidden_size(),
-    )
+    expected_hidden_size = model_config.get_hidden_size()
     if tensor.shape[1] != expected_hidden_size:
         raise VLLMValidationError(
             f"`prompt_embeds` hidden_size {tensor.shape[1]} does not match "

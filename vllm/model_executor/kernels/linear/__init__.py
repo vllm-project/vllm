@@ -88,9 +88,6 @@ from vllm.model_executor.kernels.linear.mxfp4.humming import (
 from vllm.model_executor.kernels.linear.mxfp4.marlin import (
     MarlinMxFp4LinearKernel,
 )
-from vllm.model_executor.kernels.linear.mxfp4.pytorch import (
-    TorchMxFp4LinearKernel,
-)
 from vllm.model_executor.kernels.linear.mxfp4.xpu import (
     XPUMxFp4LinearKernel,
 )
@@ -344,7 +341,6 @@ _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type]] = {
         ChannelWiseTorchFP8ScaledMMLinearKernel,
         RowWiseTorchFP8ScaledMMLinearKernel,
         BlockWiseTorchFP8ScaledMMLinearKernel,
-        TorchMxFp4LinearKernel,
         TorchMxFp8LinearKernel,
         TorchNvFp4LinearKernel,
     },
@@ -628,7 +624,6 @@ _POSSIBLE_MXFP4_KERNELS: dict[PlatformEnum, list[type[MxFp4LinearKernel]]] = {
     ],
     PlatformEnum.XPU: [
         XPUMxFp4LinearKernel,
-        TorchMxFp4LinearKernel,
     ],
 }
 

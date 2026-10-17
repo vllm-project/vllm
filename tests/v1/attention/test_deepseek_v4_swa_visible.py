@@ -529,7 +529,7 @@ def make_builder(
     window: int = WINDOW,
     max_image_tokens: int = MAX_IMG,
     max_num_batched_tokens: int = 64,
-    model_name: str = "Qwen/Qwen3-0.6B",
+    model_name: str = "meta-llama/Meta-Llama-3-8B",
     builder_cls: type[
         DeepseekSparseSWAMetadataBuilder
     ] = DeepseekSparseSWAMetadataBuilder,

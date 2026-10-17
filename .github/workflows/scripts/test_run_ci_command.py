@@ -883,42 +883,6 @@ class RunCiCommandTest(unittest.TestCase):
         self.assertEqual(buildkite.created_builds, [])
         self.assertIn("AMD CI is already running", github.comments[0])
 
-    def test_amd_run_ignores_finished_webhook_build_for_author(self) -> None:
-        webhook_build = {
-            "created_at": "2026-08-18T01:00:00Z",
-            "meta_data": {},
-            "number": 122,
-            "pull_request": {"id": 42},
-            "source": "webhook",
-            "state": "passed",
-            "web_url": "https://buildkite.example/amd-ci/builds/122",
-        }
-        ui_build = {**webhook_build, "source": "ui"}
-        command_build = {
-            **webhook_build,
-            "meta_data": {"github-comment-id": "98"},
-            "source": "api",
-        }
-        for build, allowed in (
-            (webhook_build, True),
-            (ui_build, False),
-            (command_build, False),
-        ):
-            with self.subTest(source=build["source"]):
-                github = FakeGitHub(
-                    permission="read",
-                    pr=make_pr(labels=[{"name": "ready"}]),
-                )
-                buildkite = FakeBuildkite([[], [build]])
-
-                run(make_event(COMMAND_RUN_AMD_CI, "author"), github, buildkite)
-
-                self.assertEqual(bool(buildkite.created_builds), allowed)
-                if not allowed:
-                    self.assertIn(
-                        "AMD CI already ran on this commit", github.comments[0]
-                    )
-
     def test_run_all_sets_buildkite_environment(self) -> None:
         github = FakeGitHub()
         buildkite = FakeBuildkite([[], []])
@@ -1264,29 +1228,6 @@ class RunCiCommandTest(unittest.TestCase):
             "No AMD CI build exists for the current PR head", github.comments[0]
         )
         self.assertIn("Use `/amd-ci run`", github.comments[0])
-
-    def test_amd_ci_retry_ignores_webhook_build_for_the_current_head(self) -> None:
-        github = FakeGitHub(
-            permission="read",
-            pr=make_pr(labels=[{"name": "ready"}]),
-        )
-        webhook_build = {
-            "created_at": "2026-08-18T01:00:00Z",
-            "meta_data": {},
-            "number": 122,
-            "pull_request": {"id": 42},
-            "source": "webhook",
-            "state": "passed",
-            "web_url": "https://buildkite.example/amd-ci/builds/122",
-        }
-        buildkite = FakeBuildkite([[webhook_build]])
-
-        run(make_event(COMMAND_RETRY_AMD_FAILED, "author"), github, buildkite)
-
-        self.assertEqual(buildkite.retry_calls, [])
-        self.assertIn(
-            "No AMD CI build exists for the current PR head", github.comments[0]
-        )
 
     def test_ci_retry_creates_filtered_build_for_new_head(self) -> None:
         github = FakeGitHub(

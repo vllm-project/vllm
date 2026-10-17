@@ -1257,8 +1257,6 @@ def test_hisparse_worker_shutdown_releases_pinned_state(monkeypatch):
     worker.cache_handles = []
     worker.pinned_host_pools = []
     worker.shared_host_region = object()
-    worker.vllm_config = SimpleNamespace(instance_id="shutdown")
-    pool = hisparse_runtime_module.get_hisparse_host_pool(worker.vllm_config, None)
     released = False
 
     def release_pinned_state(runtimes, pinned_host_pools, shared_host_region):
@@ -1275,9 +1273,6 @@ def test_hisparse_worker_shutdown_releases_pinned_state(monkeypatch):
     worker.shutdown()
 
     assert released
-    new_pool = hisparse_runtime_module.get_hisparse_host_pool(worker.vllm_config, None)
-    assert new_pool is not pool
-    hisparse_runtime_module.drop_hisparse_host_pool(worker.vllm_config)
 
 
 class _TestReplaySSMMixer(MambaMixer2):

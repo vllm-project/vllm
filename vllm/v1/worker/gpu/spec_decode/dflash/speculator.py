@@ -366,7 +366,6 @@ class DFlashSpeculator(DraftModelSpeculator):
             self.seeds,
             self.sample_col[:num_sample],
             self.draft_logits,
-            num_steps=self.num_speculative_steps,
         )
         self.draft_tokens[:num_reqs] = draft_tokens.view(
             num_reqs, self.num_speculative_steps

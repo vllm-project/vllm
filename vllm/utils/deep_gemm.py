@@ -948,7 +948,7 @@ def fp8_fp4_paged_sparse_mqa_logits(
     Args:
         q: ``(q_values, q_scale)``; q_values is [num_q_tokens, 1, H, D].
         kv_cache: Fused paged cache [num_pages, page_kv, 1, D' + 4] uint8,
-            page stride 256B-aligned.
+            page stride 512B-aligned.
         weights: [num_q_tokens, H] ``torch.bfloat16``.
         metadata: From `get_paged_sparse_mqa_logits_metadata`.
         num_max_sparse_blocks: Candidate blocks per row.

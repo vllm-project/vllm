@@ -5,7 +5,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 from math import prod
-from typing import Any, final
+from typing import final
 
 import torch
 
@@ -579,11 +579,7 @@ class FusedMoEExperts(ABC):
             return False, _make_reason(
                 f"parallel config {moe_config.moe_parallel_config}"
             )
-        elif (
-            moe_config.has_hash_routing
-            and cls.is_monolithic()
-            and not cls._supports_hash_routing()
-        ):
+        elif moe_config.has_hash_routing and cls.is_monolithic():
             return False, _make_reason("hash routing")
         elif moe_config.require_decomposed_backend and cls.is_monolithic():
             return False, _make_reason("routes adjusted after routing")
@@ -662,15 +658,6 @@ class FusedMoEExperts(ABC):
         in addition to the experts if certain routers are not supported.
         """
         return True
-
-    @staticmethod
-    def _supports_hash_routing() -> bool:
-        """Whether a monolithic kernel implements hash routing itself.
-
-        Kernels that return True receive `input_ids` and `hash_indices_table`
-        in `apply()` for layers with a hash-routing table.
-        """
-        return False
 
     @staticmethod
     def _supports_router_logits_dtype(
@@ -842,11 +829,6 @@ class FusedMoEExpertsModular(FusedMoEExperts):
     def workspace_dtype(self, act_dtype: torch.dtype) -> torch.dtype:
         """Workspace type: The dtype to use for the workspace tensors."""
         return act_dtype
-
-    def output_hidden_dim(self, hidden_dim: int) -> int:
-        """Hidden size of the finalized output. Experts that drop the hidden
-        padding return the unpadded size."""
-        return hidden_dim
 
     @abstractmethod
     def workspace_shapes(
@@ -1326,8 +1308,7 @@ class FusedMoEKernelModularImpl:
         # low-latency kernels are always batched and can never run into
         # the tensor.numel() == 0 case.
         if M_full == 0:
-            out_dim = self.fused_experts.output_hidden_dim(a1q.size(-1))
-            return a1q.new_empty((*a1q.shape[:-1], out_dim), dtype=in_dtype)
+            return torch.empty_like(a1q, dtype=in_dtype)
 
         workspace13, workspace2, fused_out, fused_out_is_specialized = (
             self._allocate_buffers(
@@ -1511,12 +1492,7 @@ class FusedMoEKernelModularImpl:
             a fused consumer.
 
         """
-        output = hidden_states.new_empty(
-            (
-                *hidden_states.shape[:-1],
-                self.fused_experts.output_hidden_dim(hidden_states.size(-1)),
-            )
-        )
+        output = torch.empty_like(hidden_states)
 
         local_num_experts = w1.shape[0]
         if global_num_experts == -1:
@@ -1608,20 +1584,11 @@ class FusedMoEKernelMonolithicImpl:
         topk_group: int | None = None,
         *,
         routing_sink: RoutedExpertsSink | None,
-        input_ids: torch.Tensor | None = None,
-        hash_indices_table: torch.Tensor | None = None,
     ) -> torch.Tensor | UnfinalizedMoEOutput:
         """Same as forward(), except uses router_logits as opposed
         to the topk_ids and topk_weights. This is used for kernels
         that have fused router + experts (e.g. FLASHINFER_TRTLLM).
         """
-        # Only experts with _supports_hash_routing() accept these.
-        hash_kwargs: dict[str, Any] = {}
-        if hash_indices_table is not None:
-            hash_kwargs = {
-                "input_ids": input_ids,
-                "hash_indices_table": hash_indices_table,
-            }
         a1q, a1q_scale, router_logits = self.prepare_finalize.prepare(
             hidden_states,
             router_logits=router_logits,
@@ -1638,11 +1605,6 @@ class FusedMoEKernelMonolithicImpl:
                     f"kernel {type(self.fused_experts).__name__}."
                 )
             routing_replay_out = routing_sink.buffer[: len(a1q)]
-        hash_kwargs = (
-            {"input_ids": input_ids, "hash_indices_table": hash_indices_table}
-            if hash_indices_table is not None
-            else {}
-        )
         fused_out = self.fused_experts.apply(
             hidden_states=a1q,
             w1=w1,
@@ -1659,7 +1621,6 @@ class FusedMoEKernelMonolithicImpl:
             routed_scaling_factor=routed_scaling_factor,
             topk_group=topk_group,
             routing_replay_out=routing_replay_out,
-            **hash_kwargs,
         )
         if routing_sink is not None:
             routing_sink.capture_fn(routing_replay_out)
@@ -1772,8 +1733,6 @@ class FusedMoEKernel:
         topk_group: int | None = None,
         *,
         routing_sink: RoutedExpertsSink | None,
-        input_ids: torch.Tensor | None = None,
-        hash_indices_table: torch.Tensor | None = None,
     ) -> torch.Tensor | UnfinalizedMoEOutput:
         assert isinstance(self.impl, FusedMoEKernelMonolithicImpl)
         return self.impl.apply(
@@ -1790,8 +1749,6 @@ class FusedMoEKernel:
             routed_scaling_factor=routed_scaling_factor,
             topk_group=topk_group,
             routing_sink=routing_sink,
-            input_ids=input_ids,
-            hash_indices_table=hash_indices_table,
         )
 
     def apply(

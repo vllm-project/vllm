@@ -82,7 +82,6 @@ from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import make_zmq_path
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.kv_cache_interface import (
-    AttentionSpec,
     CircularBufferSpec,
     FullAttentionSpec,
     KVCacheLayout,
@@ -2671,22 +2670,6 @@ class NixlBaseConnectorWorker:
             raise RuntimeError(
                 "Heterogeneous TP head-dimension splitting requires contiguous heads. "
                 "Use a block-contiguous layout (e.g. LBHNC) on the prefill side."
-            )
-        # NVFP4 pages store all heads' data before all heads' scales, so a
-        # head's bytes are not a contiguous slice of the page.
-        if (
-            not self.use_mla
-            and self.transfer_topo.local_physical_heads
-            != max(1, self.transfer_topo.total_num_kv_heads // remote_tp_size)
-            and any(
-                isinstance(spec, AttentionSpec) and spec.kv_quant_mode.is_nvfp4
-                for spec in self._layer_specs.values()
-            )
-        ):
-            raise RuntimeError(
-                "NIXL KV-head re-sharding is not supported for NVFP4 KV cache "
-                f"(local TP {self.transfer_topo.tp_size}, remote TP "
-                f"{remote_tp_size}). Use matching TP sizes on prefill and decode."
             )
 
         # Per-region block_len validation enforcing the P/D invariant.

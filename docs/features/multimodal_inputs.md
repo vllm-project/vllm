@@ -187,7 +187,7 @@ Multi-image input can be extended to perform video captioning. We show this with
 
 #### Custom RGBA Background Color
 
-When loading images with transparency (including RGBA images and PNGs with a tRNS chunk), vLLM converts them to RGB format. By default, transparent pixels are replaced with white background. You can customize this background color using the `rgba_background_color` parameter in `media_io_kwargs`.
+When loading RGBA images (images with transparency), vLLM converts them to RGB format. By default, transparent pixels are replaced with white background. You can customize this background color using the `rgba_background_color` parameter in `media_io_kwargs`.
 
 ??? code
 
@@ -212,7 +212,7 @@ When loading images with transparency (including RGBA images and PNGs with a tRN
 
 !!! note
     - The `rgba_background_color` accepts RGB values as a list `[R, G, B]` or tuple `(R, G, B)` where each value is 0-255
-    - This setting affects images with transparency, including RGB PNGs with a transparent color; opaque RGB images are unchanged
+    - This setting only affects RGBA images with transparency; RGB images are unchanged
     - If not specified, the default white background `(255, 255, 255)` is used for backward compatibility
 
 #### Moondream3 Prompt Recipes { #moondream3-prompt-recipes }
@@ -1089,7 +1089,7 @@ By passing this metadata, the model can better understand the temporal distribut
 
 #### Custom RGBA Background Color
 
-To use a custom background color for images with transparency, pass the `rgba_background_color` parameter via `--media-io-kwargs`:
+To use a custom background color for RGBA images, pass the `rgba_background_color` parameter via `--media-io-kwargs`:
 
 ```bash
 # Example: Black background for dark theme

@@ -157,6 +157,8 @@ cryptography==50.0.1
     #   azure-storage-blob
     #   msal
     #   pyjwt
+cupy-cuda12x==13.6.0
+    # via ray
 cycler==0.12.1
     # via matplotlib
 datamodel-code-generator==0.79.0
@@ -237,6 +239,8 @@ fastavro==1.12.2
     # via cohere
 fastparquet==2024.11.0
     # via genai-perf
+fastrlock==0.8.2
+    # via cupy-cuda12x
 fastsafetensors==0.3.3
     # via -r requirements/test/cuda.in
 filelock==4.0.7
@@ -565,6 +569,7 @@ numpy==2.2.6
     #   albumentations
     #   bm25s
     #   contourpy
+    #   cupy-cuda12x
     #   datasets
     #   decord
     #   einx

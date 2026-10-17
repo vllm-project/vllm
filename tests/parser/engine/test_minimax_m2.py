@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import dataclasses
 import json
 
 import pytest
@@ -16,14 +15,11 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionToolsParam,
     FunctionDefinition,
 )
-from vllm.parser.engine.parser_engine import ParserEngine
 from vllm.parser.minimax_m2 import (
     THINK_END,
     TOOL_CALL_END,
     TOOL_CALL_START,
     MinimaxM2Parser,
-    _minimax_m2_arg_value_extender,
-    minimax_m2_config,
 )
 
 
@@ -240,123 +236,6 @@ class TestStreaming:
 
         assert collect_function_name(results) is None
         assert collect_tool_arguments(results) == ""
-
-
-WRITE_CALL_HEAD = (
-    '<minimax:tool_call>\n<invoke name="write_file">\n'
-    '<parameter name="path">/repo/app.py</parameter>\n'
-    '<parameter name="mode">644</parameter>\n'
-    '<parameter name="content">'
-)
-WRITE_CALL_TAIL = "</parameter>\n</invoke>\n</minimax:tool_call>"
-# Escapes, non-ASCII, blank lines and tag-like text that must stay inside
-# the value, including prefixes of the closing and next-parameter tags.
-CONTENT_LINE = 'if a < b > c: print("x\\y")  # </p> </param <parameter\té\n\n'
-
-
-class TestArgValueExtender:
-    """The open parameter value streams without re-running the converter."""
-
-    @pytest.fixture
-    def write_tool(self):
-        return ChatCompletionToolsParam(
-            function=FunctionDefinition(
-                name="write_file",
-                parameters={
-                    "type": "object",
-                    "properties": {
-                        "path": {"type": "string"},
-                        "mode": {"type": "integer"},
-                        "content": {"type": "string"},
-                    },
-                },
-            ),
-        )
-
-    @pytest.mark.parametrize("use_schema", [False, True], ids=["no_schema", "schema"])
-    def test_long_call_streams_non_streaming_arguments(
-        self, mock_tokenizer, mock_request, write_tool, use_schema
-    ):
-        mock_request.tools = [write_tool] if use_schema else []
-        text = WRITE_CALL_HEAD + CONTENT_LINE * 200 + WRITE_CALL_TAIL
-
-        results = simulate_tool_streaming(
-            MinimaxM2Parser(mock_tokenizer),
-            mock_request,
-            [text[i : i + 7] for i in range(0, len(text), 7)],
-        )
-        result = MinimaxM2Parser(mock_tokenizer).extract_tool_calls(text, mock_request)
-
-        arguments = collect_tool_arguments(results)
-        assert arguments == result.tool_calls[0].function.arguments
-        assert json.loads(arguments)["content"] == CONTENT_LINE * 200
-        assert ('"mode": 644,' if use_schema else '"mode": "644",') in arguments
-
-    def test_conversions_do_not_grow_with_argument_length(
-        self, mock_tokenizer, mock_request, write_tool
-    ):
-        mock_request.tools = [write_tool]
-        base = minimax_m2_config()
-        converter = base.arg_converter
-        assert converter is not None
-
-        def streaming_conversions(lines: int) -> int:
-            calls = 0
-
-            def counting_converter(raw_args: str, partial: bool) -> str:
-                nonlocal calls
-                calls += partial
-                return converter(raw_args, partial)
-
-            parser = ParserEngine(
-                mock_tokenizer,
-                parser_engine_config=dataclasses.replace(
-                    base, arg_converter=counting_converter
-                ),
-            )
-            text = WRITE_CALL_HEAD + CONTENT_LINE * lines + WRITE_CALL_TAIL
-            simulate_tool_streaming(
-                parser,
-                mock_request,
-                [text[i : i + 4] for i in range(0, len(text), 4)],
-            )
-            return calls
-
-        assert streaming_conversions(lines=20) == streaming_conversions(lines=200)
-
-    def test_extender_stops_at_split_end_tag(self):
-        extend = _minimax_m2_arg_value_extender('<parameter name="k">')
-        assert extend is not None
-        deltas = ['a"\n', "</param", "eter>"]
-        assert [extend(d) for d in deltas] == ['a\\"\\n', "</param", None]
-
-    def test_extender_stops_at_split_next_parameter(self):
-        extend = _minimax_m2_arg_value_extender("<parameter name='k'>x")
-        assert extend is not None
-        assert [extend(d) for d in ["< parameter", " name ="]] == ["< parameter", None]
-
-    @pytest.mark.parametrize(
-        "raw_args",
-        [
-            '<parameter name="k">x</parameter>',
-            '<parameter name="k',
-            (
-                '<parameter name="k">1</parameter><parameter name="j">2</parameter>'
-                '<parameter name="k">3'
-            ),
-            '<parameter name="a<parameter name=k>x',
-            '<parameter name="k>x',
-        ],
-        ids=[
-            "closed_value",
-            "open_name",
-            "repeated_key_not_last",
-            "earlier_unmatched_opener",
-            "bare_name_opens_quote",
-        ],
-    )
-    def test_no_extender_unless_open_value_is_stable(self, raw_args):
-        assert _minimax_m2_arg_value_extender(raw_args) is None
 
 
 class TestReasoning:

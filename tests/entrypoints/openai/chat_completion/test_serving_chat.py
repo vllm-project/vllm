@@ -28,7 +28,6 @@ from vllm.entrypoints.generate.base.serving import build_per_request_timing_metr
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     ChatCompletionResponse,
-    ChatCompletionStreamResponse,
 )
 from vllm.entrypoints.openai.chat_completion.serving import (
     OpenAIServingChat,
@@ -44,7 +43,7 @@ from vllm.entrypoints.openai.models.serving import (
 from vllm.entrypoints.openai.parser.harmony_utils import get_encoding
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.utils.tool_calls_utils import resolve_finish_reason
-from vllm.exceptions import GenerationError, QueueOverflowError, VLLMValidationError
+from vllm.exceptions import QueueOverflowError, VLLMValidationError
 from vllm.inputs import TokensPrompt
 from vllm.logprobs import Logprob
 from vllm.multimodal.inputs import PlaceholderRange
@@ -717,149 +716,6 @@ async def _collect_metrics_stream_chunks(
     return chunks
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("raw", [False, True])
-async def test_streaming_chunks_keep_usage_and_metadata(raw):
-    serving = _build_minimal_metrics_serving_chat(False)
-    request = ChatCompletionRequest(
-        model="test-model",
-        messages=[{"role": "user", "content": "Test"}],
-        stream=True,
-        stream_options={"include_usage": True},
-    )
-    metadata = RequestResponseMetadata(request_id="chatcmpl-test")
-    method = (
-        serving.chat_completion_stream_generator_raw
-        if raw
-        else serving.chat_completion_stream_generator
-    )
-    chunks = [
-        chunk
-        async for chunk in method(
-            request,
-            _single_request_output(_make_metrics_request_output()),
-            "chatcmpl-test",
-            "test-model",
-            conversation=[],
-            tokenizer=MagicMock(),
-            request_metadata=metadata,
-        )
-    ]
-    if raw:
-        assert all(isinstance(chunk, ChatCompletionStreamResponse) for chunk in chunks)
-    else:
-        assert chunks[-1] == "data: [DONE]\n\n"
-        first = json.loads(chunks[0].removeprefix("data: "))
-        assert first["choices"][0]["logprobs"] is None
-        usage = json.loads(chunks[-2].removeprefix("data: "))
-        assert "system_fingerprint" not in usage
-        assert "prompt_tokens_details" not in usage["usage"]
-        chunks = [
-            ChatCompletionStreamResponse.model_validate_json(
-                chunk.removeprefix("data: ")
-            )
-            for chunk in chunks[:-1]
-        ]
-    assert len(chunks) == 3
-    assert chunks[0].choices[0].delta.role == "assistant"
-    assert chunks[1].choices[0].delta.content == "Hello"
-    assert chunks[1].choices[0].finish_reason == "stop"
-    assert chunks[2].choices == []
-    assert chunks[2].usage.prompt_tokens == 3
-    assert chunks[2].usage.completion_tokens == 2
-    assert metadata.final_usage_info.total_tokens == 5
-
-
-@pytest.mark.asyncio
-async def test_streaming_serialization_failure_emits_error_and_done():
-    serving = _build_minimal_metrics_serving_chat(False)
-    serving.parser_cls = HarmonyParser
-    parser = MagicMock()
-    parser.parse_delta.return_value = DeltaMessage(
-        content="Hello", extra_object=object()
-    )
-    serving._make_parser = MagicMock(return_value=parser)
-    request = ChatCompletionRequest(
-        model="test-model", messages=[{"role": "user", "content": "Test"}], stream=True
-    )
-    frames = [
-        frame
-        async for frame in serving.chat_completion_stream_generator(
-            request,
-            _single_request_output(_make_metrics_request_output()),
-            "chatcmpl-test",
-            "test-model",
-            conversation=[],
-            tokenizer=MagicMock(),
-            request_metadata=RequestResponseMetadata(request_id="chatcmpl-test"),
-        )
-    ]
-    assert frames[-1] == "data: [DONE]\n\n"
-    error = ErrorResponse.model_validate_json(frames[-2].removeprefix("data: "))
-    assert "serialize" in error.error.message
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("raw", [False, True])
-@pytest.mark.parametrize(
-    "failure", ["parser", "before_first", "after_content", "generation"]
-)
-async def test_streaming_errors_preserve_envelope(raw, failure):
-    serving = _build_minimal_metrics_serving_chat(False)
-    error = (
-        GenerationError("backend failed")
-        if failure == "generation"
-        else ValueError("backend failed")
-    )
-    if failure == "parser":
-        serving.parser_cls = HarmonyParser
-        serving._make_parser = MagicMock(side_effect=error)
-
-    async def results():
-        if failure == "after_content":
-            output = _make_metrics_request_output()
-            output.outputs[0].finish_reason = None
-            output.finished = False
-            yield output
-        raise error
-
-    request = ChatCompletionRequest(
-        model="test-model", messages=[{"role": "user", "content": "Test"}], stream=True
-    )
-    method = (
-        serving.chat_completion_stream_generator_raw
-        if raw
-        else serving.chat_completion_stream_generator
-    )
-    chunks = [
-        chunk
-        async for chunk in method(
-            request,
-            results(),
-            "chatcmpl-test",
-            "test-model",
-            conversation=[],
-            tokenizer=MagicMock(),
-            request_metadata=RequestResponseMetadata(request_id="chatcmpl-test"),
-        )
-    ]
-    if raw:
-        assert all(
-            isinstance(chunk, (ChatCompletionStreamResponse, ErrorResponse))
-            for chunk in chunks
-        )
-        assert isinstance(chunks[-1], ErrorResponse)
-        error_response = chunks[-1]
-    else:
-        assert chunks[-1] == "data: [DONE]\n\n"
-        assert chunks.count("data: [DONE]\n\n") == 1
-        error_response = ErrorResponse.model_validate_json(
-            chunks[-2].removeprefix("data: ")
-        )
-    assert error_response.error.message == "backend failed"
-    assert error_response.error.code == (500 if failure == "generation" else 400)
-
-
 def test_build_per_request_timing_metrics_valid_timestamps():
     metrics = build_per_request_timing_metrics(
         _PER_REQUEST_STATS, num_generation_tokens=10
@@ -1332,15 +1188,6 @@ async def test_streaming_reasoning_usage_lifecycle_edges(
         await iterator.aclose()
 
     error_chunks = [c for c in chunks if isinstance(c, dict) and "error" in c]
-    if name == "empty-finish":
-        # A choice that finishes without output still gets its last chunk, unparsed.
-        assert any(
-            choice.get("finish_reason") == "stop"
-            for item in chunks
-            if isinstance(item, dict)
-            for choice in item.get("choices", [])
-        )
-        parsers[0].parse_delta.assert_not_called()
     call_count = sum(parser.count_reasoning_tokens.call_count for parser in parsers)
     if expected_tokens is not None:
         assert outcome == "exhausted" and chunks[-1] == "[DONE]" and not error_chunks

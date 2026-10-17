@@ -4,7 +4,6 @@
 
 #include "core/utils.hpp"
 #include "core/cuda_compat.h"
-#include "cuda_vec_utils.cuh"
 #include "dispatch_utils.h"
 #include "quantization/w8a8/fp8/common.cuh"
 
@@ -44,7 +43,7 @@ template <typename scalar_t, scalar_t (*ACT_FN)(const scalar_t&),
 __global__ void act_and_mul_quant_kernel(
     fp8_type* __restrict__ out,          // [..., d]
     const scalar_t* __restrict__ input,  // [..., 2, d]
-    const float* scale, const int d, const bool vectorize) {
+    const float* scale, const int d) {
   const int32_t blocks_per_token = gridDim.y;
 
   const int32_t elems_per_128bit_load = (128 / 8) / sizeof(scalar_t);
@@ -65,12 +64,9 @@ __global__ void act_and_mul_quant_kernel(
   const scalar_t* __restrict__ y_ptr = input + token_idx * 2 * d + d;
   fp8_type* __restrict__ out_ptr = out + token_idx * d;
 
-  // 128-bit vectorized code, when d and the data pointers allow 16-byte
-  // loads and 8-byte stores on every row; otherwise the cleanup loop below
-  // handles the whole block.
-  const int32_t vec_loop_end = vectorize ? round_to_previous_multiple_of(
-                                               block_end, elems_per_128bit_load)
-                                         : block_start;
+  // 128-bit vectorized code
+  const int32_t vec_loop_end =
+      round_to_previous_multiple_of(elems_per_128bit_load, block_end);
   const int32_t vec_end_idx = vec_loop_end / elems_per_128bit_load;
   const int32_t vec_start_idx = block_start / elems_per_128bit_load;
 
@@ -563,30 +559,26 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
 }  // namespace vllm
 
 // Launch activation, gating, and quantize kernel.
-#define LAUNCH_ACTIVATION_GATE_KERNEL(KERNEL)                                 \
-  int d = input.size(-1) / 2;                                                 \
-  int64_t num_tokens = input.numel() / input.size(-1);                        \
-  dim3 grid(num_tokens, num_tokens > 16 ? num_tokens > 32 ? 1 : 2 : 4);       \
-  dim3 block(std::min(d, 512));                                               \
-  const torch::stable::accelerator::DeviceGuard device_guard(                 \
-      input.get_device_index());                                              \
-  const cudaStream_t stream =                                                 \
-      get_current_cuda_stream(input.get_device_index());                      \
-  VLLM_STABLE_DISPATCH_FLOATING_TYPES(                                        \
-      input.scalar_type(), "act_and_mul_kernel", [&] {                        \
-        VLLM_STABLE_DISPATCH_FP8_TYPES(                                       \
-            out.scalar_type(), "act_and_mul_quant_kernel_fp8_type", [&] {     \
-              const scalar_t* in_ptr = input.const_data_ptr<scalar_t>();      \
-              fp8_t* out_ptr = out.mutable_data_ptr<fp8_t>();                 \
-              const bool vectorize = d % (16 / sizeof(scalar_t)) == 0 &&      \
-                                     vllm::is_16byte_aligned(in_ptr) &&       \
-                                     vllm::is_16byte_aligned(out_ptr);        \
-              vllm::act_and_mul_quant_kernel<scalar_t, KERNEL<scalar_t>,      \
-                                             fp8_t>                           \
-                  <<<grid, block, 0, stream>>>(out_ptr, in_ptr,               \
-                                               scale.const_data_ptr<float>(), \
-                                               d, vectorize);                 \
-            });                                                               \
+#define LAUNCH_ACTIVATION_GATE_KERNEL(KERNEL)                             \
+  int d = input.size(-1) / 2;                                             \
+  int64_t num_tokens = input.numel() / input.size(-1);                    \
+  dim3 grid(num_tokens, num_tokens > 16 ? num_tokens > 32 ? 1 : 2 : 4);   \
+  dim3 block(std::min(d, 512));                                           \
+  const torch::stable::accelerator::DeviceGuard device_guard(             \
+      input.get_device_index());                                          \
+  const cudaStream_t stream =                                             \
+      get_current_cuda_stream(input.get_device_index());                  \
+  VLLM_STABLE_DISPATCH_FLOATING_TYPES(                                    \
+      input.scalar_type(), "act_and_mul_kernel", [&] {                    \
+        VLLM_STABLE_DISPATCH_FP8_TYPES(                                   \
+            out.scalar_type(), "act_and_mul_quant_kernel_fp8_type", [&] { \
+              vllm::act_and_mul_quant_kernel<scalar_t, KERNEL<scalar_t>,  \
+                                             fp8_t>                       \
+                  <<<grid, block, 0, stream>>>(                           \
+                      out.mutable_data_ptr<fp8_t>(),                      \
+                      input.const_data_ptr<scalar_t>(),                   \
+                      scale.const_data_ptr<float>(), d);                  \
+            });                                                           \
       });
 
 void silu_and_mul_quant(torch::stable::Tensor& out,    // [..., d]

@@ -415,7 +415,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     "csrc/cuda_view.cu"
     "csrc/cuda_utils_kernels.cu"
     "csrc/activation_kernels.cu"
-    "csrc/muse_spark_mul_tanh_soft_cap_kernel.cu"
     "csrc/ngram_embedding_kernels.cu"
     "csrc/vocab_parallel_embedding_kernels.cu"
     "csrc/quantization/activation_kernels.cu"
@@ -424,7 +423,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     "csrc/quantization/w8a8/fp8/per_token_group_quant.cu"
     "csrc/quantization/gptq/q_gemm.cu"
     "csrc/pos_encoding_kernels.cu"
-    "csrc/fused_muse_spark_qknorm_rope_kv_insert_kernel.cu"
     "csrc/fused_qknorm_rope_kernel.cu"
     "csrc/fused_minimax_m3_qknorm_rope_kv_insert_kernel.cu"
     "csrc/layernorm_kernels.cu"
@@ -442,11 +440,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     "csrc/custom_all_reduce.cu"
     "csrc/fused_deepseek_v4_qnorm_rope_kv_insert_kernel.cu"
     "csrc/fused_kimi_k3_mla_key_concat_kv_cache_kernel.cu")
-
-  if(VLLM_GPU_LANG STREQUAL "CUDA")
-    list(APPEND VLLM_STABLE_EXT_SRC
-      "csrc/fused_qknorm_rope_cache_kernel.cu")
-  endif()
 
   if(VLLM_GPU_LANG STREQUAL "CUDA" AND
      DEFINED CMAKE_CUDA_COMPILER_VERSION AND
