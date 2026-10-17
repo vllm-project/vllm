@@ -49,6 +49,39 @@ docker run --rm --gpus all \
 See [Faster Startup](../configuration/optimization.md#faster-startup) for the
 mechanism and for what invalidates the cache.
 
+## Keep model weights in GPU memory across engine restarts
+
+Restarting the `vllm serve` container reloads the model from disk. The [preload](../features/preload.md) feature keeps the weights in a long-lived weight cache daemon container, and a restarted engine container maps them through CUDA IPC:
+
+```bash
+# Long-lived daemon: holds the weights.
+docker run -d --name vllm-weight-cache \
+    --gpus all --ipc=host --pid=host \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    -v vllm-weight-cache:/run/vllm-weight-cache \
+    -v vllm-cache:/root/.cache/vllm \
+    --health-cmd "curl -sf http://localhost:8001/health || exit 1" \
+    --health-interval 10s --health-start-period 10m \
+    --entrypoint vllm \
+    vllm/vllm-openai:latest \
+    preload --model meta-llama/Llama-3.1-8B-Instruct \
+        --weight-cache-socket-dir /run/vllm-weight-cache/sockets \
+        --weight-cache-health-port 8001
+
+# Engine: restarted by Docker, loads from the daemon.
+docker run -d --name vllm \
+    --gpus all --ipc=host --pid=host --restart always \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    -v vllm-weight-cache:/run/vllm-weight-cache \
+    -v vllm-cache:/root/.cache/vllm \
+    -p 8000:8000 \
+    vllm/vllm-openai:latest \
+    meta-llama/Llama-3.1-8B-Instruct --load-format ipc_cache \
+    --model-loader-extra-config '{"socket_dir": "/run/vllm-weight-cache/sockets", "fallback": false}'
+```
+
+Both containers must share the host IPC and PID namespaces, the socket volume, the vLLM cache volume, the GPUs, the user and the image tag. See [Preload: Docker](../features/preload.md#docker) for the reason behind each requirement, a Docker Compose version and the Kubernetes pattern.
+
 ## Run as a non-root user
 
 The CUDA `vllm/vllm-openai` image runs as root by default for backward
