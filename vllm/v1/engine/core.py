@@ -1127,8 +1127,24 @@ class EngineCore:
         ):
             return False
         try:
-            remaining = self.model_executor.collective_rpc("recapture_sleep_graph")
-            self._sleep_graph_pending = any(count > 0 for count in remaining)
+            results: list[tuple[bool, int]] = self.model_executor.collective_rpc(
+                "recapture_sleep_graph"
+            )
+            if any(failed for failed, _ in results):
+                # A rank ran out of memory and discarded its graphs. Converge
+                # every rank to eager inside this same idle boundary, before
+                # any request can be dispatched onto asymmetric graphs —
+                # the collectives embedded in FULL graphs deadlock if only
+                # some ranks replay them. Recapture is re-armed on the next
+                # full wake.
+                logger.warning(
+                    "Sleep graph recapture failed on at least one rank; "
+                    "discarding graphs on all ranks and staying eager"
+                )
+                self.model_executor.collective_rpc("discard_sleep_graphs")
+                self._sleep_graph_pending = False
+            else:
+                self._sleep_graph_pending = any(count > 0 for _, count in results)
         except Exception as exc:
             self._sleep_graph_pending = False
             self._sleep_graph_error = f"Sleep graph recapture failed: {exc}"

@@ -378,12 +378,18 @@ class Worker(WorkerBase):
 
         self.synchronize_device()
 
-    def recapture_sleep_graph(self) -> int:
-        """Run only at an idle EngineCore boundary with all allocations awake."""
+    def recapture_sleep_graph(self) -> tuple[bool, int]:
+        """Run only at an idle EngineCore boundary with all allocations awake.
+
+        Returns (failed, remaining). failed=True means this rank hit a
+        recoverable allocation failure and has already discarded its graphs;
+        the engine must converge all ranks to eager before serving continues,
+        because tensor-parallel ranks must not diverge on graph availability.
+        """
         runner = cast("GPUModelRunnerV2", self.model_runner)
         assert runner.cudagraph_manager is not None
         try:
-            return runner.capture_one_sleep_graph()
+            return (False, runner.capture_one_sleep_graph())
         except torch.OutOfMemoryError:
             # A successful sync distinguishes a recoverable allocation failure
             # from a poisoned CUDA context. Unknown CUDA failures propagate.
@@ -392,7 +398,21 @@ class Worker(WorkerBase):
             gc.collect()
             torch.accelerator.empty_cache()
             logger.warning("Sleep graph recapture ran out of memory; staying eager")
-            return 0
+            return (True, 0)
+
+    def discard_sleep_graphs(self) -> None:
+        """Discard any (possibly partially recaptured) sleep graphs.
+
+        Used to converge all tensor-parallel ranks to eager execution when
+        any rank failed recapture; asymmetric graph availability across ranks
+        would desynchronize the collectives embedded in FULL graphs.
+        """
+        runner = cast("GPUModelRunnerV2", self.model_runner)
+        if runner.cudagraph_manager is None:
+            return
+        runner.cudagraph_manager.discard_full_graphs()
+        gc.collect()
+        torch.accelerator.empty_cache()
 
     def discard(self, tags: tuple[str, ...]) -> None:
         if has_kv_transfer_group() and "kv_cache" in tags:

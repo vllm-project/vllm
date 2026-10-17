@@ -1074,6 +1074,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if desc not in manager.graphs
         ]
         if not pending:
+            manager._sleep_partial = False
             return 0
         # Preserve startup order: the first output buffer must fit the largest
         # descriptor. Subsequent captures retain its address and the same pool.
@@ -1092,6 +1093,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 torch.accelerator.synchronize()
         finally:
             manager._capture_descs = descriptors
+        manager._sleep_partial = len(pending) - 1 > 0
         logger.info(
             "Sleep graph recapture: %s; remaining=%d", pending[0], len(pending) - 1
         )

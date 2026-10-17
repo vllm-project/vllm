@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Opt-in, single-GPU graph destruction for level-1 sleep."""
+"""Opt-in graph destruction for level-1 sleep (single or tensor-parallel)."""
 
 import os
 import sys
@@ -33,11 +33,13 @@ def validate_graph_sleep(config: "VllmConfig") -> None:
         or mc.enable_nccl_comm_suspend
         or set(mc.architectures) - supported_models
         or not mc.architectures
-        or pc.world_size != 1
         or pc.data_parallel_size != 1
+        or pc.pipeline_parallel_size != 1
         or pc.prefill_context_parallel_size != 1
         or pc.decode_context_parallel_size != 1
-        or pc.distributed_executor_backend != "uni"
+        or pc.enable_expert_parallel
+        or pc.enable_eplb
+        or pc.distributed_executor_backend not in ("uni", "mp", "ray")
         or pc.worker_cls != "vllm.v1.worker.gpu_worker.Worker"
         or pc.use_ubatching
         or config.scheduler_config.async_scheduling
@@ -54,8 +56,9 @@ def validate_graph_sleep(config: "VllmConfig") -> None:
     ):
         raise ValueError(
             "Graph-discard sleep requires an unquantized Qwen3 text model, "
-            "the V2 CUDA runner, one GPU, uni executor, cuMem sleep, FULL "
-            "graphs without torch.compile, and synchronous scheduling. "
+            "the V2 CUDA runner, tensor parallelism only (no DP/PP/CP, no "
+            "expert parallel or EPLB), the uni/mp/ray executor, cuMem sleep, "
+            "FULL graphs without torch.compile, and synchronous scheduling. "
             "Additional offloaders, adapters, transfers and checkpointing "
             "are not supported."
         )
