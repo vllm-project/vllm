@@ -517,8 +517,16 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         return True
 
     @override
+    def _num_kv_copies(self) -> int:
+        return super()._num_kv_copies() // self.config.canonical_kv_replicas
+
+    @override
     def create_worker(self, kv_caches: CanonicalKVCaches) -> CPUOffloadingWorker:
-        rank = 0 if self.replicated_layout else self.config.parallel.rank
+        rank = (
+            0
+            if self.replicated_layout
+            else self.config.parallel.rank // self.config.canonical_kv_replicas
+        )
         worker_mmap = SharedOffloadRegion(
             engine_id=self._engine_id,
             num_chunks=self.num_chunks,
