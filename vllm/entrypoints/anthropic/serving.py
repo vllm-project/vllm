@@ -14,6 +14,7 @@ from typing import Any, Literal, get_args
 
 import jinja2
 from fastapi import Request
+from pydantic import ValidationError
 
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.anthropic.protocol import (
@@ -53,6 +54,7 @@ from vllm.entrypoints.serve.engine.protocol import ErrorResponse, UsageInfo
 from vllm.entrypoints.serve.exception_handling.utils import sanitize_message
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.logger import init_logger
+from vllm.parser.metrics import record_tool_call_response
 from vllm.renderers.chat_utils import ChatTemplateContentFormatOption
 from vllm.renderers.hf import HfRenderer, resolve_chat_template
 from vllm.renderers.online_renderer import OnlineRenderer
@@ -346,6 +348,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         cls._handle_thinking(req, anthropic_request, disabled_thinking_effort)
         cls._convert_tool_choice(anthropic_request, req)
         cls._convert_tools(anthropic_request, req)
+        req._api_surface = "messages"
         return req
 
     @classmethod
@@ -818,13 +821,21 @@ class AnthropicServingMessages(OpenAIServingChat):
             return generator
 
         elif isinstance(generator, ChatCompletionResponse):
-            return self.messages_full_converter(generator)
+            response = self.messages_full_converter(generator, request=chat_req)
+            if chat_req.tools:
+                tool_calls_count = sum(
+                    block.type == "tool_use" for block in response.content
+                )
+                record_tool_call_response(chat_req, tool_calls_count=tool_calls_count)
+            return response
 
-        return self.message_stream_converter(generator)
+        return self.message_stream_converter(generator, request=chat_req)
 
     def messages_full_converter(
         self,
         generator: ChatCompletionResponse,
+        *,
+        request: ChatCompletionRequest | None = None,
     ) -> AnthropicMessagesResponse:
         result = AnthropicMessagesResponse(
             id=generator.id,
@@ -861,12 +872,17 @@ class AnthropicServingMessages(OpenAIServingChat):
             )
 
         for tool_call in choice.message.tool_calls:
-            anthropic_tool_call = AnthropicContentBlock(
-                type="tool_use",
-                id=tool_call.id,
-                name=tool_call.function.name,
-                input=json.loads(tool_call.function.arguments),
-            )
+            try:
+                anthropic_tool_call = AnthropicContentBlock(
+                    type="tool_use",
+                    id=tool_call.id,
+                    name=tool_call.function.name,
+                    input=json.loads(tool_call.function.arguments),
+                )
+            except (json.JSONDecodeError, ValidationError):
+                if request is not None and request.tools:
+                    record_tool_call_response(request, parse_failed=True)
+                raise
             content += [anthropic_tool_call]
 
         # Anthropic's canonical shape for an empty completion is a single
@@ -882,7 +898,12 @@ class AnthropicServingMessages(OpenAIServingChat):
     async def message_stream_converter(
         self,
         generator: AsyncGenerator[str, None],
+        *,
+        request: ChatCompletionRequest | None = None,
     ) -> AsyncGenerator[str, None]:
+        emitted_tool_calls = 0
+        stream_completed = False
+        stream_failed = False
         try:
 
             class _ActiveBlockState:
@@ -1003,6 +1024,7 @@ class AnthropicServingMessages(OpenAIServingChat):
                         data = stop_message.model_dump_json(
                             exclude_unset=True, exclude_none=True
                         )
+                        stream_completed = True
                         yield wrap_data_with_event(data, "message_stop")
                     else:
                         origin_chunk = ChatCompletionStreamResponse.model_validate_json(
@@ -1155,6 +1177,7 @@ class AnthropicServingMessages(OpenAIServingChat):
                                                 input={},
                                             )
                                         )
+                                        emitted_tool_calls += 1
                                         yield start_event
                                     # Handle initial arguments if present
                                     if (
@@ -1211,6 +1234,7 @@ class AnthropicServingMessages(OpenAIServingChat):
                                         )
                             continue
                 else:
+                    stream_failed = True
                     error_response = AnthropicStreamEvent(
                         type="error",
                         error=AnthropicError(
@@ -1222,6 +1246,7 @@ class AnthropicServingMessages(OpenAIServingChat):
                     yield wrap_data_with_event(data, "error")
 
         except Exception as e:
+            stream_failed = True
             logger.exception("Error in message stream converter.")
             error_response = AnthropicStreamEvent(
                 type="error",
@@ -1231,6 +1256,19 @@ class AnthropicServingMessages(OpenAIServingChat):
             )
             data = error_response.model_dump_json(exclude_unset=True)
             yield wrap_data_with_event(data, "error")
+        finally:
+            # Closing here also finalizes parser-failure reporting in Chat.
+            try:
+                await generator.aclose()
+            except Exception:
+                logger.error("Error closing Messages stream generator.")
+            finally:
+                if request is not None and request.tools:
+                    record_tool_call_response(
+                        request,
+                        tool_calls_count=emitted_tool_calls,
+                        completed=stream_completed and not stream_failed,
+                    )
 
     async def count_tokens(
         self,

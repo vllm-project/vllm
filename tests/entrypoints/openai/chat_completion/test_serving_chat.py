@@ -4,9 +4,9 @@ import asyncio
 import json
 from collections.abc import AsyncIterator
 from contextlib import suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, call
 
 import pytest
 import pytest_asyncio
@@ -20,8 +20,12 @@ from tests.entrypoints.openai.utils import (
 from tests.utils import RemoteOpenAIServer
 from vllm._aiter_ops import is_aiter_found_and_supported
 from vllm.config import MultiModalConfig
+from vllm.entrypoints.anthropic.serving import AnthropicServingMessages
 from vllm.entrypoints.generate.base.protocol import (
+    DeltaFunctionCall,
     DeltaMessage,
+    DeltaToolCall,
+    FunctionCall,
     RequestResponseMetadata,
 )
 from vllm.entrypoints.generate.base.serving import build_per_request_timing_metrics
@@ -789,6 +793,366 @@ async def test_chat_per_request_metrics_suppressed_for_n_greater_than_one():
         request_metadata=RequestResponseMetadata(request_id="chatcmpl-test-id"),
     )
     assert response.metrics is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "fields, calls_per_choice, n, expected_count",
+    [
+        ({"tool_choice": "auto"}, 2, 2, 4),
+        ({"tool_choice": "auto", "parallel_tool_calls": False}, 2, 2, 2),
+        ({"tool_choice": "auto"}, 0, 1, 0),
+        ({"tool_choice": "none"}, 2, 1, 0),
+        ({"tool_choice": "required"}, 1, 1, 1),
+        ({"tool_choice": {"type": "function", "function": {"name": "f"}}}, 1, 1, 1),
+        ({"tools": None, "tool_choice": "none"}, 0, 1, None),
+    ],
+)
+@pytest.mark.parametrize("api_surface", ["chat_completions", "messages"])
+async def test_full_tool_response_metrics_count_returned_calls_once(
+    monkeypatch, fields, calls_per_choice, n, expected_count, api_surface
+):
+    record = MagicMock()
+    monkeypatch.setattr(
+        "vllm.entrypoints.openai.chat_completion.serving.record_tool_call_response",
+        record,
+    )
+    serving = _build_minimal_metrics_serving_chat(enable_per_request_metrics=False)
+    serving.enable_auto_tools = True
+    serving.parser_cls = MagicMock(tool_parser_cls=object())
+    serving.default_chat_template_kwargs = {}
+    serving.chat_template = None
+    serving.chat_template_content_format = "auto"
+    parser = MagicMock()
+    parser.parse.return_value = (
+        None,
+        "answer",
+        [FunctionCall(name="f", arguments="{}") for _ in range(calls_per_choice)],
+    )
+    parser.count_reasoning_tokens.return_value = 0
+    serving._make_parser = MagicMock(return_value=parser)
+    request = ChatCompletionRequest(
+        messages=[],
+        n=n,
+        **{"tools": [{"type": "function", "function": {"name": "f"}}], **fields},
+    )
+    request._api_surface = api_surface
+    output = _make_metrics_request_output()
+    output.outputs = [replace(output.outputs[0], index=i) for i in range(n)]
+    response = await serving.chat_completion_full_generator(
+        request,
+        _single_request_output(output),
+        "test-id",
+        "test-model",
+        [],
+        MagicMock(),
+        RequestResponseMetadata(request_id="test-id"),
+        parser=parser,
+    )
+    returned_count = sum(len(choice.message.tool_calls) for choice in response.choices)
+    if expected_count is None:
+        record.assert_not_called()
+        assert returned_count == 0
+    else:
+        assert returned_count == expected_count
+        if api_surface == "messages":
+            record.assert_not_called()
+        else:
+            record.assert_called_once_with(request, tool_calls_count=expected_count)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("api_surface", ["chat_completions", "messages"])
+async def test_full_tool_response_metrics_report_parse_error_not_emitted_calls(
+    monkeypatch, api_surface
+):
+    record = MagicMock()
+    monkeypatch.setattr(
+        "vllm.entrypoints.openai.chat_completion.serving.record_tool_call_response",
+        record,
+    )
+    serving = _build_minimal_metrics_serving_chat(enable_per_request_metrics=False)
+    serving.enable_auto_tools = True
+    serving.parser_cls = MagicMock(tool_parser_cls=object())
+    serving.default_chat_template_kwargs = {}
+    serving.chat_template = None
+    serving.chat_template_content_format = "auto"
+    error = ValueError("fixture parse error")
+    parser = MagicMock()
+    parser.parse.side_effect = [
+        (None, "", [FunctionCall(name="f", arguments="{}")]),
+        error,
+    ]
+    parser.count_reasoning_tokens.return_value = 0
+    serving._make_parser = MagicMock(return_value=parser)
+    request = ChatCompletionRequest(
+        messages=[], n=2, tools=[{"type": "function", "function": {"name": "f"}}]
+    )
+    request._api_surface = api_surface
+    output = _make_metrics_request_output()
+    output.outputs = [replace(output.outputs[0], index=i) for i in range(2)]
+    with pytest.raises(ValueError) as caught:
+        await serving.chat_completion_full_generator(
+            request,
+            _single_request_output(output),
+            "test-id",
+            "test-model",
+            [],
+            MagicMock(),
+            RequestResponseMetadata(request_id="test-id"),
+            parser=parser,
+        )
+    assert caught.value is error
+    record.assert_called_once_with(request, parse_failed=True)
+
+
+@pytest.fixture
+def tool_metrics_stream_serving(monkeypatch):
+    record = MagicMock()
+    monkeypatch.setattr(
+        "vllm.entrypoints.openai.chat_completion.serving.record_tool_call_response",
+        record,
+    )
+    serving = _build_minimal_metrics_serving_chat(enable_per_request_metrics=False)
+    serving.parser_cls = MagicMock()
+    parser = MagicMock()
+    serving._make_parser = MagicMock(return_value=parser)
+    return serving, parser, record
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "fields, calls_per_choice, n, expected_count",
+    [
+        ({"tool_choice": "auto"}, 2, 2, 4),
+        ({"tool_choice": "auto", "parallel_tool_calls": False}, 2, 2, 2),
+        ({"tool_choice": "auto"}, 0, 1, 0),
+        ({"tool_choice": "none"}, 0, 1, 0),
+        ({"tool_choice": "required"}, 1, 1, 1),
+        ({"tool_choice": {"type": "function", "function": {"name": "f"}}}, 1, 1, 1),
+        ({"tools": None, "tool_choice": "none"}, 0, 1, None),
+    ],
+)
+@pytest.mark.parametrize("api_surface", ["chat_completions", "messages"])
+async def test_stream_tool_response_metrics_deduplicate_filtered_fragments(
+    tool_metrics_stream_serving,
+    fields,
+    calls_per_choice,
+    n,
+    expected_count,
+    api_surface,
+):
+    serving, parser, record = tool_metrics_stream_serving
+    request = ChatCompletionRequest(
+        messages=[],
+        stream=True,
+        n=n,
+        stream_options={"include_usage": True},
+        **{"tools": [{"type": "function", "function": {"name": "f"}}], **fields},
+    )
+    request._api_surface = api_surface
+    parser.parse_delta.side_effect = [
+        DeltaMessage(
+            content="answer" if not calls_per_choice else None,
+            tool_calls=[
+                DeltaToolCall(
+                    index=j,
+                    id=f"call-{j}" if first else None,
+                    function=DeltaFunctionCall(
+                        name="f" if first else None,
+                        arguments="{" if first else "}",
+                    ),
+                )
+                for j in range(calls_per_choice)
+            ],
+        )
+        for first in (True, False)
+        for _ in range(n)
+    ]
+    outputs = []
+    for finish in (None, "stop", "stop"):
+        output = _make_metrics_request_output()
+        output.outputs = [
+            replace(output.outputs[0], index=i, finish_reason=finish) for i in range(n)
+        ]
+        outputs.append(output)
+    chunks = [
+        line
+        async for line in serving.chat_completion_stream_generator(
+            request,
+            _stream_request_outputs(*outputs),
+            "test-id",
+            "test-model",
+            [],
+            MagicMock(),
+            RequestResponseMetadata(request_id="test-id"),
+        )
+    ]
+    emitted = [
+        (choice["index"], call["index"])
+        for line in chunks[:-1]
+        for choice in json.loads(line.removeprefix("data: "))["choices"]
+        for call in choice["delta"].get("tool_calls", [])
+    ]
+    assert chunks[-1] == "data: [DONE]\n\n"
+    assert parser.parse_delta.call_count == 2 * n  # Finished choices are ignored.
+    if expected_count is None:
+        assert not emitted
+        record.assert_not_called()
+    else:
+        assert len(set(emitted)) == expected_count
+        assert len(emitted) == 2 * expected_count
+        if api_surface == "messages":
+            record.assert_not_called()
+        else:
+            record.assert_called_once_with(
+                request,
+                tool_calls_count=expected_count,
+                parse_failed=False,
+                completed=True,
+            )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("emitted_first", [False, True])
+@pytest.mark.parametrize(
+    "failure",
+    ["parser", "engine", "generation", "cancel", "close"],
+)
+@pytest.mark.parametrize("api_surface", ["chat_completions", "messages"])
+async def test_stream_tool_response_metrics_retain_calls_without_false_outcomes(
+    tool_metrics_stream_serving, failure, emitted_first, api_surface
+):
+    serving, parser, record = tool_metrics_stream_serving
+    request = ChatCompletionRequest(
+        messages=[],
+        stream=True,
+        tools=[{"type": "function", "function": {"name": "f"}}],
+    )
+    request._api_surface = api_surface
+    parser_failed = failure == "parser"
+    parser.parse_delta.side_effect = (
+        [DeltaMessage(tool_calls=[DeltaToolCall(index=0)])] if emitted_first else []
+    ) + [ValueError("fixture parse error") if parser_failed else DeltaMessage()]
+
+    source_closed = MagicMock()
+
+    async def source():
+        output = _reasoning_lifecycle_output()
+        try:
+            if emitted_first:
+                yield output
+            if failure == "engine":
+                raise RuntimeError("fixture engine error")
+            if failure == "cancel":
+                raise asyncio.CancelledError()
+            output = _reasoning_lifecycle_output(
+                finish="error" if failure == "generation" else "stop"
+            )
+            yield output
+        finally:
+            source_closed()
+
+    iterator = source()
+    stream = serving.chat_completion_stream_generator(
+        request,
+        iterator,
+        "test-id",
+        "test-model",
+        [],
+        MagicMock(),
+        RequestResponseMetadata(request_id="test-id"),
+    )
+    chunks = []
+    cancelled = False
+    try:
+        async for line in stream:
+            chunks.append(line)
+            if failure == "close" and (
+                not emitted_first
+                or any(
+                    choice["delta"].get("tool_calls")
+                    for choice in json.loads(line.removeprefix("data: "))["choices"]
+                )
+            ):
+                break
+    except asyncio.CancelledError:
+        cancelled = True
+    finally:
+        await stream.aclose()
+        await iterator.aclose()
+        source_closed.assert_called_once_with()
+
+    assert cancelled == (failure == "cancel")
+    if failure in ("cancel", "close"):
+        assert "data: [DONE]\n\n" not in chunks
+    else:
+        assert chunks[-1] == "data: [DONE]\n\n"
+        errors = [json.loads(line.removeprefix("data: ")) for line in chunks[:-1]]
+        assert sum("error" in chunk for chunk in errors) == 1
+    if api_surface == "messages":
+        if parser_failed:
+            record.assert_called_once_with(request, parse_failed=True, completed=False)
+        else:
+            record.assert_not_called()
+    else:
+        record.assert_called_once_with(
+            request,
+            tool_calls_count=int(emitted_first),
+            parse_failed=parser_failed,
+            completed=False,
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("emitted_first", [False, True])
+async def test_messages_stream_tool_response_metrics_count_parser_failure_once(
+    monkeypatch, tool_metrics_stream_serving, emitted_first
+):
+    serving, parser, record = tool_metrics_stream_serving
+    monkeypatch.setattr(
+        "vllm.entrypoints.anthropic.serving.record_tool_call_response", record
+    )
+    request = ChatCompletionRequest(
+        messages=[],
+        stream=True,
+        tools=[{"type": "function", "function": {"name": "f"}}],
+    )
+    request._api_surface = "messages"
+    parser.parse_delta.side_effect = (
+        [
+            DeltaMessage(
+                tool_calls=[
+                    DeltaToolCall(
+                        index=0,
+                        id="call-0",
+                        function=DeltaFunctionCall(name="f", arguments="{}"),
+                    )
+                ]
+            )
+        ]
+        if emitted_first
+        else []
+    ) + [ValueError("fixture parse error")]
+    outputs = [_reasoning_lifecycle_output()] * (2 if emitted_first else 1)
+    chat_stream = serving.chat_completion_stream_generator(
+        request,
+        _stream_request_outputs(*outputs),
+        "test-id",
+        "test-model",
+        [],
+        MagicMock(),
+        RequestResponseMetadata(request_id="test-id"),
+    )
+    stream = AnthropicServingMessages.message_stream_converter(
+        serving, chat_stream, request=request
+    )
+    chunks = [chunk async for chunk in stream]
+    assert any("event: error" in chunk for chunk in chunks)
+    assert record.call_args_list == [
+        call(request, parse_failed=True, completed=False),
+        call(request, tool_calls_count=int(emitted_first), completed=False),
+    ]
 
 
 @pytest.mark.asyncio
