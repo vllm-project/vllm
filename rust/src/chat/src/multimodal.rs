@@ -1319,6 +1319,63 @@ mod tests {
         .assert_debug_eq(&uuids);
     }
 
+    #[test]
+    fn developer_fallback_keeps_media_aligned_with_rendered_placeholders() {
+        use crate::renderer::hf::{HfChatRenderer, MultimodalRenderInfo};
+        use crate::{ChatRenderer, ChatTemplateContentFormatOption};
+
+        let request = ChatRequest {
+            messages: vec![
+                ChatMessage::user(vec![
+                    ChatContentPart::text("A"),
+                    ChatContentPart::image_url("image-a"),
+                ]),
+                ChatMessage::developer(
+                    vec![
+                        ChatContentPart::text("B"),
+                        ChatContentPart::image_url("image-b"),
+                    ],
+                    None,
+                ),
+            ],
+            ..ChatRequest::for_test()
+        };
+        for (format, template) in [
+            (
+                ChatTemplateContentFormatOption::String,
+                "{% for message in messages %}{{ message.role }}={{ message.content }};{% endfor %}",
+            ),
+            (
+                ChatTemplateContentFormatOption::OpenAi,
+                "{% for message in messages %}{{ message.role }}={% for part in message.content %}{% if part.type == 'text' %}{{ part.text }}{% elif part.type == 'image' %}<image>{% endif %}{% endfor %};{% endfor %}",
+            ),
+        ] {
+            let rendered =
+                HfChatRenderer::new(Some(template.to_string()), Default::default(), format)
+                    .unwrap()
+                    .with_multimodal(Some(MultimodalRenderInfo {
+                        image_token: Some("<image>".to_string()),
+                        video_token: None,
+                        audio_token: None,
+                    }))
+                    .render(&request)
+                    .unwrap();
+            assert_eq!(
+                rendered.prompt,
+                vllm_text::Prompt::Text("system=B<image>;user=A<image>;".to_string())
+            );
+            let urls = extract_media_parts(&request, rendered.media_order.as_deref())
+                .unwrap()
+                .into_iter()
+                .map(|part| match part {
+                    MediaContentPart::ImageUrl { url, .. } => url,
+                    _ => panic!("expected image"),
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(urls, ["image-b", "image-a"]);
+        }
+    }
+
     fn image_url_part() -> MediaContentPart {
         MediaContentPart::ImageUrl {
             url: "https://example.com/image.png".to_string(),

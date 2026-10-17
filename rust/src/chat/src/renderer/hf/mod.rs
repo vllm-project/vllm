@@ -26,6 +26,7 @@ use crate::{
 mod error;
 mod format;
 mod generation;
+mod media;
 mod template;
 mod tojson;
 
@@ -192,7 +193,20 @@ impl HfChatRenderer {
             &request.messages,
             effective_template.content_format(),
             self.multimodal.as_ref(),
+            effective_template.supports_developer_role(),
         )?;
+        let has_developer_messages = request
+            .messages
+            .iter()
+            .any(|message| matches!(message, ChatMessage::Developer { .. }));
+        let mut media_order = None;
+        if has_developer_messages && !effective_template.supports_developer_role() {
+            media_order = Some(media::consolidated_media_order(
+                &request.messages,
+                &messages,
+            ));
+            messages = consolidate_system_messages(messages);
+        }
 
         // Handling of `continue_final_message`:
         // Append a sentinel tag to the final message content, render as usual, then
@@ -247,7 +261,7 @@ impl HfChatRenderer {
 
         Ok(RenderedPrompt {
             prompt: Prompt::Text(prompt),
-            media_order: None,
+            media_order,
             effective_template_kwargs,
         })
     }
@@ -297,6 +311,91 @@ enum TemplateContentPart {
     Audio,
 }
 
+/// Match Python vLLM's fallback for templates that do not support `developer`.
+fn consolidate_system_messages<'a>(messages: Vec<TemplateMessage<'a>>) -> Vec<TemplateMessage<'a>> {
+    let needs_consolidation = messages
+        .iter()
+        .enumerate()
+        .any(|(index, message)| message.role == "system" && index > 0)
+        || messages.iter().filter(|message| message.role == "system").count() > 1;
+    if !needs_consolidation {
+        return messages;
+    }
+
+    let mut system_contents = Vec::new();
+    let mut non_system = Vec::with_capacity(messages.len());
+    for message in messages {
+        if message.role == "system" {
+            system_contents.push(message.content);
+        } else {
+            non_system.push(message);
+        }
+    }
+
+    let mut consolidated = Vec::with_capacity(non_system.len() + 1);
+    consolidated.push(TemplateMessage {
+        role: "system",
+        content: merge_system_content(system_contents),
+        tools: None,
+        reasoning: None,
+        reasoning_content: None,
+        tool_calls: None,
+        tool_call_id: None,
+    });
+    consolidated.extend(non_system);
+    consolidated
+}
+
+/// Merge system/developer content without changing the format selected by the
+/// chat template. OpenAI content arrays retain all text and multimodal parts.
+fn merge_system_content(contents: Vec<TemplateContent>) -> TemplateContent {
+    let mut contents = contents.into_iter();
+    let Some(mut merged) = contents.next() else {
+        return TemplateContent::String(String::new());
+    };
+
+    for content in contents {
+        merged = match (merged, content) {
+            (TemplateContent::String(mut left), TemplateContent::String(right)) => {
+                if !left.is_empty() && !right.is_empty() {
+                    left.push_str("\n\n");
+                }
+                left.push_str(&right);
+                TemplateContent::String(left)
+            }
+            (TemplateContent::OpenAi(mut left), TemplateContent::OpenAi(mut right)) => {
+                if !left.is_empty() && !right.is_empty() {
+                    left.push(TemplateContentPart::Text {
+                        text: "\n\n".to_string(),
+                    });
+                }
+                left.append(&mut right);
+                TemplateContent::OpenAi(left)
+            }
+            (left, right) => {
+                let mut left = into_openai_parts(left);
+                let mut right = into_openai_parts(right);
+                if !left.is_empty() && !right.is_empty() {
+                    left.push(TemplateContentPart::Text {
+                        text: "\n\n".to_string(),
+                    });
+                }
+                left.append(&mut right);
+                TemplateContent::OpenAi(left)
+            }
+        };
+    }
+
+    merged
+}
+
+fn into_openai_parts(content: TemplateContent) -> Vec<TemplateContentPart> {
+    match content {
+        TemplateContent::String(text) => vec![TemplateContentPart::Text { text }],
+        TemplateContent::OpenAi(parts) => parts,
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct TemplateToolCall {
     id: String,
@@ -333,10 +432,13 @@ fn to_template_messages<'a>(
     messages: &'a [ChatMessage],
     content_format: ChatTemplateContentFormat,
     multimodal: Option<&MultimodalRenderInfo>,
+    supports_developer_role: bool,
 ) -> Result<Vec<TemplateMessage<'a>>> {
     messages
         .iter()
-        .map(|message| to_template_message(message, content_format, multimodal))
+        .map(|message| {
+            to_template_message(message, content_format, multimodal, supports_developer_role)
+        })
         .collect()
 }
 
@@ -344,6 +446,7 @@ fn to_template_message<'a>(
     message: &'a ChatMessage,
     content_format: ChatTemplateContentFormat,
     multimodal: Option<&MultimodalRenderInfo>,
+    supports_developer_role: bool,
 ) -> Result<TemplateMessage<'a>> {
     Ok(match message {
         ChatMessage::System { content } => TemplateMessage {
@@ -356,9 +459,15 @@ fn to_template_message<'a>(
             tool_call_id: None,
         },
         ChatMessage::Developer { content, tools } => TemplateMessage {
-            role: "developer",
+            role: if supports_developer_role {
+                "developer"
+            } else {
+                "system"
+            },
             content: to_template_content(content, content_format, multimodal)?,
-            tools: tools.as_deref().map(to_template_tools),
+            tools: supports_developer_role
+                .then(|| tools.as_deref().map(to_template_tools))
+                .flatten(),
             reasoning: None,
             reasoning_content: None,
             tool_calls: None,
@@ -666,7 +775,7 @@ mod tests {
         };
 
         let rendered = render(
-            Some("{{ messages|length }}:{{ messages[0].role }}:{{ messages[0].tools[0].function.name }}:{{ tools[0].function.name }}"),
+            Some("{% set developer_role = 'developer' %}{{ messages|length }}:{{ messages[0].role }}:{{ messages[0].tools[0].function.name }}:{{ tools[0].function.name }}"),
             &request,
         )
         .unwrap();
@@ -818,6 +927,31 @@ mod tests {
         assert_eq!(
             rendered.prompt,
             Prompt::Text("a<|audio_pad|><|audio_pad|>b".to_string())
+        );
+    }
+
+    #[test]
+    fn developer_fallback_preserves_openai_content_parts() {
+        let request = sample_request(vec![
+            ChatMessage::system(vec![
+                ChatContentPart::text("base policy"),
+                ChatContentPart::image_url("data:image/png;base64,test"),
+            ]),
+            ChatMessage::developer("additional policy", None),
+            ChatMessage::user("question"),
+        ]);
+        let rendered = render_mm(
+            "{% for message in messages %}{{ message.role }}={% for part in message.content %}{% if part.type == 'text' %}{{ part.text }}{% elif part.type == 'image' %}<image>{% endif %}{% endfor %};{% endfor %}",
+            &request,
+            ChatTemplateContentFormatOption::OpenAi,
+        )
+        .unwrap();
+
+        assert_eq!(
+            rendered.prompt,
+            Prompt::Text(
+                "system=base policy<image>\n\nadditional policy;user=question;".to_string()
+            )
         );
     }
 
@@ -1029,12 +1163,32 @@ mod tests {
         )]);
 
         let rendered = render(
-            Some("{{ messages[0].role }}|{{ messages[0].content }}|{{ messages[0].tools[0].function.name }}|{{ messages[0].tools[0].function.parameters.required[0] }}"),
+            Some("{% set developer_role = 'developer' %}{{ messages[0].role }}|{{ messages[0].content }}|{{ messages[0].tools[0].function.name }}|{{ messages[0].tools[0].function.parameters.required[0] }}"),
             &request,
         )
         .unwrap();
 
         assert_eq!(rendered, "developer|policy|get_weather|city");
+    }
+
+    #[test]
+    fn chat_template_without_developer_role_consolidates_developer_as_system() {
+        let request = sample_request(vec![
+            ChatMessage::system("base policy"),
+            ChatMessage::user("question"),
+            ChatMessage::developer("additional policy", None),
+        ]);
+
+        let rendered = render(
+            Some("{% for m in messages %}{{ m.role }}={{ m.content }};{% endfor %}"),
+            &request,
+        )
+        .unwrap();
+
+        assert_eq!(
+            rendered,
+            "system=base policy\n\nadditional policy;user=question;"
+        );
     }
 
     #[test]
