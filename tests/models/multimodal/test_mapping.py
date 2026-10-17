@@ -184,6 +184,44 @@ def test_cosmos3_edge_checkpoint_weights_mapper():
     )
 
 
+def test_cosmos3_edge_modelopt_quantizer_weights_mapper():
+    """ModelOpt/Diffusers FP8 checkpoints ship native fake-quant buffers
+    (``*_quantizer._amax`` / ``._scale``) alongside the vLLM-consumable
+    ``weight_scale`` / ``input_scale`` sidecars. vLLM must drop the former
+    (it has no parameter for them) while keeping the latter."""
+    from vllm.model_executor.models.cosmos3_edge import Cosmos3EdgeForConditionalGeneration
+
+    mapper = Cosmos3EdgeForConditionalGeneration.hf_to_vllm_mapper
+
+    # Native ModelOpt quantizer buffers are dropped.
+    assert (
+        mapper.apply_list(
+            [
+                "layers.0.self_attn.to_q.input_quantizer._amax",
+                "layers.0.self_attn.to_q.weight_quantizer._amax",
+                "layers.0.self_attn.to_q.weight_quantizer._scale",
+                "layers.0.mlp.down_proj.output_quantizer._amax",
+            ]
+        )
+        == []
+    )
+
+    # The FP8 scale sidecars vLLM actually consumes are kept and remapped.
+    assert mapper.apply_list(
+        [
+            "layers.0.self_attn.to_q.weight",
+            "layers.0.self_attn.to_q.weight_scale",
+            "layers.0.self_attn.to_q.input_scale",
+            "layers.0.mlp.down_proj.input_scale",
+        ]
+    ) == [
+        "language_model.model.layers.0.mixer.qkv_proj.weight",
+        "language_model.model.layers.0.mixer.qkv_proj.weight_scale",
+        "language_model.model.layers.0.mixer.qkv_proj.input_scale",
+        "language_model.model.layers.1.mixer.down_proj.input_scale",
+    ]
+
+
 @pytest.mark.cpu_test
 def test_bailing_vl_mapper_handles_module_and_parameter_names():
     from vllm.model_executor.models.bailing_moe_v3_vl import (
