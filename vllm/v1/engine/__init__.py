@@ -241,6 +241,7 @@ class EngineCoreOutput(
 
     # [num_scored_rows, num_token_ids]; appended last for array_like compatibility.
     prompt_token_id_logprobs: torch.Tensor | None = None
+    aux_output_keys: list[str] | None = None
 
     @property
     def finished(self) -> bool:

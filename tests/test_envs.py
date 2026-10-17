@@ -23,6 +23,17 @@ def test_object_storage_shm_default_name():
     assert len(envs._generate_shm_name()) <= 30
 
 
+def test_aux_mooncake_config_passes_strict_environment_validation(monkeypatch):
+    from vllm.platforms import current_platform
+
+    for name in tuple(os.environ):
+        if name.startswith("VLLM_"):
+            monkeypatch.delenv(name)
+    monkeypatch.setenv("VLLM_AUX_OUTPUT_MOONCAKE_CONFIG_PATH", "/tmp/aux.json")
+    current_platform.validate_environ(hard_fail=True)
+    assert envs.VLLM_AUX_OUTPUT_MOONCAKE_CONFIG_PATH == "/tmp/aux.json"
+
+
 def test_getattr_without_cache(monkeypatch: pytest.MonkeyPatch):
     assert envs.VLLM_HOST_IP == ""
     assert envs.VLLM_PORT is None

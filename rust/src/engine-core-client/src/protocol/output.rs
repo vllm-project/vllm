@@ -143,6 +143,10 @@ pub struct EngineCoreOutput {
     /// the first output of a request that asked for them.
     #[serde(default)]
     pub prompt_token_id_logprobs: Option<Box<WireNdArray>>,
+    /// Ordered keys of auxiliary-output objects published for this output's
+    /// rows by a keys-only backend; the frontend returns them on completion.
+    #[serde(default)]
+    pub aux_output_keys: Option<Vec<String>>,
 }
 
 /// Raw per-sequence speculative-decoding accumulator.
@@ -556,6 +560,7 @@ mod tests {
                             new_sampling_mask: None,
                             spec_decode_metrics: None,
                             prompt_token_id_logprobs: None,
+                            aux_output_keys: None,
                         },
                     ],
                     scheduler_stats: None,

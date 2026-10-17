@@ -65,6 +65,8 @@ pub struct CollectedGenerateOutput {
     /// Per-request speculative-decoding metrics from the terminal output.
     pub spec_decode_metrics: Option<RequestSpecDecodeMetrics>,
     pub weight_versions: Option<Vec<WeightVersionSpan>>,
+    /// Ordered keys of the request's published auxiliary-output objects.
+    pub aux_output_keys: Option<Vec<String>>,
 }
 
 /// Prompt-scoped metadata emitted only once on the first [`GenerateOutput`] for
@@ -184,6 +186,9 @@ pub struct GenerateOutput {
     pub spec_decode_metrics: Option<Box<RequestSpecDecodeMetrics>>,
     /// Weight-version spans over all output tokens, set on terminal outputs only.
     pub weight_versions: Option<Vec<WeightVersionSpan>>,
+    /// Ordered keys of the request's published auxiliary-output objects, set
+    /// on terminal outputs only.
+    pub aux_output_keys: Option<Vec<String>>,
     /// Snapshot of engine lifecycle timestamps after this output.
     ///
     /// Every output carries a snapshot because text decoding may finish the
@@ -244,6 +249,7 @@ impl GenerateOutput {
         self.ec_transfer_params = next.ec_transfer_params;
         self.spec_decode_metrics = next.spec_decode_metrics;
         self.weight_versions = next.weight_versions;
+        self.aux_output_keys = next.aux_output_keys;
         self.timestamps = next.timestamps;
     }
 }
@@ -274,6 +280,7 @@ impl GenerateOutput {
             sampling_mask: None,
             spec_decode_metrics: None,
             weight_versions: None,
+            aux_output_keys: None,
             timestamps: RequestTimestamps::default(),
         }
     }
@@ -292,6 +299,8 @@ pub struct GenerateOutputStream {
     /// (weight version, first output-token index) for each span.
     weight_version_starts: Vec<(Arc<str>, usize)>,
     num_output_tokens: usize,
+    /// Auxiliary-output keys received so far, returned on the terminal output.
+    aux_output_keys: Option<Vec<String>>,
     /// Removes this request's external→internal tracking edge on drop. Held for
     /// its `Drop` side effect only; never read directly.
     _request_guard: RequestGuard,
@@ -316,6 +325,7 @@ impl GenerateOutputStream {
             request_metrics,
             weight_version_starts: Vec::new(),
             num_output_tokens: 0,
+            aux_output_keys: None,
             _request_guard: request_guard,
         }
     }
@@ -358,6 +368,9 @@ impl GenerateOutputStream {
         self.num_output_tokens += num_new_tokens;
 
         let raw = raw.output;
+        if let Some(keys) = raw.aux_output_keys {
+            self.aux_output_keys.get_or_insert_default().extend(keys);
+        }
 
         // Populate the one-time prompt info on the first output.
         if let Some(info) = &mut self.pending_prompt_info
@@ -398,6 +411,11 @@ impl GenerateOutputStream {
         } else {
             None
         };
+        let aux_output_keys = if finish_reason.is_some() {
+            self.aux_output_keys.take()
+        } else {
+            None
+        };
 
         let output = GenerateOutput {
             request_id: raw.request_id,
@@ -411,6 +429,7 @@ impl GenerateOutputStream {
             sampling_mask,
             spec_decode_metrics: raw.spec_decode_metrics,
             weight_versions,
+            aux_output_keys,
             timestamps: self.request_metrics.timestamps(),
         };
 
@@ -540,6 +559,7 @@ impl<T: Stream<Item = Result<GenerateOutput>> + Send> T {
                         sampling_mask,
                         spec_decode_metrics: None,
                         weight_versions: None,
+                        aux_output_keys: None,
                     });
                 }
 
@@ -555,6 +575,7 @@ impl<T: Stream<Item = Result<GenerateOutput>> + Send> T {
                     collected.ec_transfer_params = output.ec_transfer_params.map(|value| *value);
                     collected.spec_decode_metrics = output.spec_decode_metrics.map(|value| *value);
                     collected.weight_versions = output.weight_versions;
+                    collected.aux_output_keys = output.aux_output_keys;
                     if let Some(mask) = collected.sampling_mask.as_ref()
                         && mask.rows.len() != collected.token_ids.len()
                     {

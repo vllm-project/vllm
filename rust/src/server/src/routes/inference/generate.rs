@@ -235,6 +235,7 @@ async fn generate_chunk_stream(
                         finish_reason: finish_reason.map(|reason| reason.as_str().to_string()),
                         stop_reason,
                         token_ids,
+                        aux_output_keys: output.aux_output_keys,
                         sampling_mask: output.sampling_mask.map(|mask| mask.rows),
                         weight_versions: output.weight_versions,
                     }],
@@ -339,6 +340,7 @@ fn collect_generate(
             finish_reason: Some(finish_reason),
             stop_reason,
             token_ids: collected.token_ids,
+            aux_output_keys: collected.aux_output_keys,
             sampling_mask: collected.sampling_mask.map(|mask| mask.rows),
             weight_versions: collected.weight_versions,
         }],
@@ -639,6 +641,7 @@ mod tests {
                 sampling_mask: None,
                 spec_decode_metrics: None,
                 weight_versions: None,
+                aux_output_keys: None,
                 timestamps: Default::default(),
             }),
             Ok(GenerateOutput {
@@ -657,6 +660,7 @@ mod tests {
                 sampling_mask: None,
                 spec_decode_metrics: None,
                 weight_versions: None,
+                aux_output_keys: None,
                 timestamps: Default::default(),
             }),
         ]);
@@ -745,6 +749,7 @@ mod tests {
             sampling_mask: None,
             spec_decode_metrics: None,
             weight_versions: None,
+            aux_output_keys: None,
             timestamps: Default::default(),
         }
     }
@@ -779,6 +784,31 @@ mod tests {
         let chunks = collect_chunks(vec![output], false, None).await;
 
         assert_eq!(chunks[0].choices[0].sampling_mask, Some(vec![vec![33, 44]]));
+    }
+
+    #[tokio::test]
+    async fn generate_chunk_stream_returns_aux_output_keys_on_final_chunk() {
+        let mut terminal = stream_output(None, vec![44], Some(FinishReason::Length));
+        terminal.aux_output_keys = Some(vec!["r3:block-0".into(), "r3-tail:end".into()]);
+
+        let chunks = collect_chunks(
+            vec![stream_output(Some(&[11]), vec![33], None), terminal],
+            false,
+            None,
+        )
+        .await;
+
+        let choices: Vec<_> = chunks
+            .iter()
+            .map(|chunk| {
+                serde_json::to_value(chunk).expect("serialize chunk")["choices"][0].clone()
+            })
+            .collect();
+        assert!(choices[0].get("aux_output_keys").is_none());
+        assert_eq!(
+            choices[1]["aux_output_keys"],
+            serde_json::json!(["r3:block-0", "r3-tail:end"])
+        );
     }
 
     #[tokio::test]
@@ -921,6 +951,7 @@ mod tests {
             }),
             spec_decode_metrics: None,
             weight_versions: None,
+            aux_output_keys: None,
         };
 
         let response = collect_generate(
@@ -941,6 +972,51 @@ mod tests {
         assert!(response.prompt_token_ids.is_none());
         assert!(response.mm_placeholders.is_none());
         assert_eq!(response.choices[0].sampling_mask, Some(vec![vec![30, 40]]));
+    }
+
+    #[test]
+    fn collect_generate_returns_aux_output_keys() {
+        let output = CollectedGenerateOutput {
+            request_id: "raw-keys".to_string(),
+            prompt_logprobs: None,
+            prompt_token_id_logprobs: None,
+            token_ids: vec![30],
+            logprobs: None,
+            finish_reason: FinishReason::Length,
+            usage: TokenUsage::default(),
+            kv_transfer_params: None,
+            ec_transfer_params: None,
+            prompt_token_ids: vec![10],
+            sampling_mask: None,
+            spec_decode_metrics: None,
+            weight_versions: None,
+            aux_output_keys: Some(vec!["r3:block-0".into(), "r3-tail:end".into()]),
+        };
+        let without_keys = CollectedGenerateOutput {
+            aux_output_keys: None,
+            ..output.clone()
+        };
+
+        let choice = |output| {
+            let response = collect_generate(
+                output,
+                "raw-keys".to_string(),
+                ApiServerOptions::default(),
+                ResponseOptions::default(),
+                None,
+            )
+            .expect("response");
+            serde_json::to_value(&response).expect("serialize response")["choices"][0].clone()
+        };
+        assert_eq!(
+            choice(output)["aux_output_keys"],
+            serde_json::json!(["r3:block-0", "r3-tail:end"])
+        );
+        // Non-streaming responses serialize absent keys as explicit null.
+        assert_eq!(
+            choice(without_keys).get("aux_output_keys"),
+            Some(&serde_json::Value::Null)
+        );
     }
 
     #[test]
@@ -976,6 +1052,7 @@ mod tests {
             sampling_mask: None,
             spec_decode_metrics: Some(metrics.clone()),
             weight_versions: None,
+            aux_output_keys: None,
         };
 
         let response = collect_generate(
@@ -1069,6 +1146,7 @@ mod tests {
             sampling_mask: None,
             spec_decode_metrics: None,
             weight_versions: None,
+            aux_output_keys: None,
         };
 
         let response = collect_generate(
@@ -1105,6 +1183,7 @@ mod tests {
             sampling_mask: None,
             spec_decode_metrics: None,
             weight_versions: None,
+            aux_output_keys: None,
             prompt_token_ids,
         };
 
@@ -1183,6 +1262,7 @@ mod tests {
             sampling_mask: None,
             spec_decode_metrics: None,
             weight_versions: None,
+            aux_output_keys: None,
         };
 
         let response = collect_generate(

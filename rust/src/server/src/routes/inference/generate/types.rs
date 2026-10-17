@@ -74,6 +74,8 @@ pub(super) struct GenerateResponseChoice {
     pub finish_reason: Option<String>,
     pub stop_reason: Option<StopReason>,
     pub token_ids: Vec<u32>,
+    /// Ordered keys of published R3 objects, set on the terminal response.
+    pub aux_output_keys: Option<Vec<String>>,
     pub sampling_mask: Option<Vec<Vec<u32>>>,
     pub weight_versions: Option<Vec<WeightVersionSpan>>,
 }
@@ -87,6 +89,8 @@ pub(super) struct GenerateResponseStreamChoice {
     pub finish_reason: Option<String>,
     pub stop_reason: Option<StopReason>,
     pub token_ids: Vec<u32>,
+    /// Set on the final chunk only; ordered keys of published R3 objects.
+    pub aux_output_keys: Option<Vec<String>>,
     pub sampling_mask: Option<Vec<Vec<u32>>>,
     /// Set on the final chunk only; covers the whole output.
     pub weight_versions: Option<Vec<WeightVersionSpan>>,
