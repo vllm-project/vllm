@@ -30,7 +30,7 @@ steps:
     timeout_in_minutes: 120
 
   # The only GPU run of the exact shipped image; its failure keeps it out of ECR, Docker Hub and S3.
-  - label: ":rocm: ${ROCM_STACK} GPU smoke (MI300)"
+  - label: ":rocm: ${ROCM_STACK} GPU smoke (MI250)"
     key: rel-gpu
     depends_on: rel-build
     agents: {queue: amd_mi250_1}

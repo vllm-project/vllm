@@ -11,7 +11,6 @@
 #   keys     Print current Ks/Kr keys and whether their images exist (on-call debug).
 #   base     Ensure stack + runtime images exist; write their refs to Buildkite metadata.
 #   ci       Build and push this build's per-commit test image.
-#   check    Build + smoke (no push) — pre-merge signal gated on rocm-relevant files.
 #   csrc     All-arch csrc compile into the BuildKit cache (release, serialized per stack).
 #   release  Full release image + wheels from the CI-tested layers.
 #
@@ -21,6 +20,7 @@
 # Trust: ci-infra sets ROCM_CI_REPO.
 #   Trusted main builds: rocm/vllm-ci
 #   PR / fork builds:    rocm/vllm-ci-pr  (PR-namespaced tags, separate cache)
+# ROCM_CI_TRUSTED_REPO / ROCM_CI_CACHE_REPO only point a local run at a sandbox registry.
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
@@ -29,14 +29,16 @@ set -euo pipefail
 STACK=$1
 MODE=$2
 REPO=${ROCM_CI_REPO:?ROCM_CI_REPO must be set by ci-infra}
+TRUSTED=${ROCM_CI_TRUSTED_REPO:-rocm/vllm-ci}
 
 export STACK PUSH=true
-export CACHE=rocm/vllm-ci-cache        # every build reads the trusted layer cache
-export CACHE_TO=rocm/vllm-ci-cache:latest  # main builds also write it
+export CACHE=${ROCM_CI_CACHE_REPO:-rocm/vllm-ci-cache}  # every build reads the trusted cache
+export CACHE_TO=$CACHE:                     # ref prefix trusted builds write (HCL appends <stack>-<name>)
+export BUILDKIT_PROGRESS=${BUILDKIT_PROGRESS:-plain}  # TTY progress redraws bloat CI logs
 
 # PR builds write to a per-PR cache and prefix their image tags.
 PFX=""
-if [[ $REPO != rocm/vllm-ci ]]; then
+if [[ $REPO != "$TRUSTED" ]]; then
   PFX="pr${BUILDKITE_PULL_REQUEST:-local}-"
   CACHE_TO=$REPO:cache-pr${BUILDKITE_PULL_REQUEST:-local}-
 fi
@@ -64,31 +66,43 @@ if ! docker buildx inspect vllm-rocm >/dev/null 2>&1; then
     || docker buildx inspect vllm-rocm >/dev/null
 fi
 export BUILDX_BUILDER=vllm-rocm
+docker buildx version
 
 # ---------------------------------------------------------------------------
 # Git tags — required by the version stage
 # ---------------------------------------------------------------------------
-# setuptools_scm needs a reachable v* tag. Agents clone shallow and tagless;
-# --force updates tags that moved (e.g. a re-tag after a release candidate).
+# setuptools_scm needs a reachable v* tag. Agents clone without tags, partially
+# and with their objects in a host mirror (--reference) that the build context
+# cannot see; --force updates tags that moved (e.g. a re-tag after a release
+# candidate). The version stage reads .git_archival.txt instead of .git.
 git fetch -q --force --tags --filter=tree:0 origin
 git describe --tags --match 'v[0-9]*' >/dev/null 2>&1 \
   || git fetch -q --unshallow --filter=tree:0 origin
+printf 'node: %s\nnode-date: %s\ndescribe-name: %s\n' "$(git rev-parse HEAD)" \
+  "$(git log -1 --format=%cI)" "$(git describe --tags --long --abbrev=40 --match 'v[0-9]*')" \
+  > .git_archival.txt
 
 # ---------------------------------------------------------------------------
 # Helper functions
 # ---------------------------------------------------------------------------
 
 # digest <ref>
-#   Print the manifest digest of <ref>.
-#   Returns 1 (without error output) if the tag does not exist.
-#   Any other registry error is fatal: kill $$ instead of exit 1 because
-#   this function is called from $() subshells where exit only exits the subshell.
+#   Print the sha256 digest of <ref>. Returns 1 if the tag does not exist.
+#   The "Digest:" line of the plain output is parsed and validated (as the old CI
+#   scripts did): --format output and stray stderr are not safe to splice into a ref.
+#   Any other registry error, after retries, is fatal: kill $$ instead of exit 1
+#   because this function is called from $() subshells where exit only exits the subshell.
 digest() {
-  local out
-  out=$(docker buildx imagetools inspect "$1" \
-          --format '{{.Manifest.Digest}}' 2>&1) && { echo "$out"; return 0; }
-  grep -qiE 'not found|manifest unknown' <<<"$out" && return 1
-  echo "registry error for $1: $out" >&2
+  local out rc d try
+  for try in 1 2 3; do
+    rc=0
+    out=$(docker buildx imagetools inspect "$1" 2>&1) || rc=$?
+    d=$(awk '$1 == "Digest:" { print $2; exit }' <<<"$out")
+    if ((rc == 0)) && [[ $d =~ ^sha256:[0-9a-f]{64}$ ]]; then echo "$d"; return 0; fi
+    if ((rc != 0)) && grep -qiE 'not found|manifest unknown' <<<"$out"; then return 1; fi
+    ((try == 3)) || sleep 5
+  done
+  echo "registry error for $1 (exit $rc): $out" >&2
   kill $$
 }
 
@@ -124,6 +138,7 @@ Kr=$(
       tools/install_torchcodec_rocm.sh
   } | sha256sum | cut -c1-16
 )
+echo "build.sh $STACK $MODE: repo=$REPO trusted=$TRUSTED Ks=$Ks Kr=$Kr"
 
 # ---------------------------------------------------------------------------
 # ensure <bake-target> <tag-suffix> [<sibling-suffix>]
@@ -136,17 +151,23 @@ Kr=$(
 # A <sibling-suffix> means the image only counts as present when the sibling
 # tag also exists (used by stack: must have both the image and -wheels).
 ensure() {
-  local target=$1 tag=$2 sibling=${3:-} ref digest_val
+  local target=$1 tag=$2 sibling=${3:-} ref d
 
-  for ref in "rocm/vllm-ci:$tag" "$REPO:$PFX$tag"; do
-    digest_val=$(digest "$ref") \
-      && { [[ -z $sibling ]] || digest "$ref$sibling" >/dev/null; } \
-      && { echo "$ref@$digest_val"; return 0; }
+  for ref in "$TRUSTED:$tag" "$REPO:$PFX$tag"; do
+    if d=$(digest "$ref") && { [[ -z $sibling ]] || digest "$ref$sibling" >/dev/null; }; then
+      echo "Reusing $ref@$d" >&2
+      echo "$ref@$d"
+      return 0
+    fi
   done
 
   # Neither copy found — build and push.
-  TAG=$REPO:$PFX$tag bake "$target" >&2
-  digest_val=$(digest "$REPO:$PFX$tag") && echo "$REPO:$PFX$tag@$digest_val"
+  ref=$REPO:$PFX$tag
+  echo "--- :docker: Building $target as $ref" >&2
+  # Explicit checks: $(ensure ...) runs in a subshell, where set -e does not apply.
+  TAG=$ref bake "$target" >&2 || { echo "building $ref failed" >&2; return 1; }
+  d=$(digest "$ref") || { echo "$ref is missing from the registry after its push" >&2; return 1; }
+  echo "$ref@$d"
 }
 
 # load — read stack/runtime refs from Buildkite metadata (written by base mode).
@@ -165,37 +186,33 @@ case $MODE in
   keys)
     # Print current content keys and registry status (useful for on-call triage).
     for t in "stack-$STACK-$Ks" "runtime-$STACK-$Kr"; do
-      echo "$t  $(digest "rocm/vllm-ci:$t" 2>/dev/null || echo MISSING)"
+      echo "$t  $(digest "$TRUSTED:$t" || echo MISSING)"
     done
     ;;
 
   base)
     # Ensure the stack and runtime images exist; record their digests in metadata
     # so subsequent ci / release modes can pull them without re-resolving.
-    STACK_IMAGE=$(ensure "stack-${STACK}" "stack-${STACK}-${Ks}" -wheels)
+    # The "base" bake group builds the stack and its -wheels sibling together.
+    STACK_IMAGE=$(ensure base "stack-$STACK-$Ks" -wheels)
     export STACK_IMAGE
     RUNTIME=$(ensure runtime "runtime-$STACK-$Kr")
-    wheels_ref=${STACK_IMAGE%@*}-wheels
+    STACK_WHEELS=${STACK_IMAGE%@*}-wheels
+    STACK_WHEELS=$STACK_WHEELS@$(digest "$STACK_WHEELS")
 
     meta set "rocm-$STACK-stack"        "$STACK_IMAGE"
     meta set "rocm-$STACK-runtime"      "$RUNTIME"
-    meta set "rocm-$STACK-stack-wheels" "$wheels_ref@$(digest "$wheels_ref")"
+    meta set "rocm-$STACK-stack-wheels" "$STACK_WHEELS"
+    echo "stack=$STACK_IMAGE runtime=$RUNTIME stack-wheels=$STACK_WHEELS"
     ;;
 
   ci)
     # Build and push the per-commit test image for GPU test steps.
     load
     export TAG=$REPO:build-$BUILDKITE_BUILD_ID
-    # AITER nightly injects a specific AITER wheel via AITER_SPEC.
-    [[ ${AITER_NIGHTLY:-0} != 1 ]] \
-      || export AITER_SPEC=${AITER_SPEC:?AITER_SPEC must be set by the nightly schedule}
+    # AITER nightly (AITER_NIGHTLY=1 from the schedule): the test stage installs the newest
+    # AITER nightly that fits the image; an AITER_SPEC in the environment pins one instead.
     bake ci
-    ;;
-
-  check)
-    # Smoke-build for a file-gated pre-merge check (no push).
-    load
-    PUSH=false bake test-smoke
     ;;
 
   csrc)
@@ -208,10 +225,10 @@ case $MODE in
   release)
     # Build and push the final release image + wheels from the CI-tested layers.
     # Trusted builds only: the released image carries the rocm/vllm-ci namespace.
-    [[ $REPO == rocm/vllm-ci ]] \
+    [[ $REPO == "$TRUSTED" ]] \
       || { echo "release mode is for trusted builds only" >&2; exit 1; }
     load
-    export TAG=rocm/vllm-ci:$STACK-$BUILDKITE_COMMIT
+    export TAG=$TRUSTED:$STACK-$BUILDKITE_COMMIT
 
     # Resolve the vLLM version from the commit (setuptools_scm).
     PUSH=false bake version

@@ -758,7 +758,7 @@ steps:
       - label: ":s3: Upload ROCm 10.0 wheels"
         key: upload-rocm100-wheels
         depends_on: build-rocm100-amd
-        agents: {queue: amd-cpu}
+        agents: {queue: cpu_queue_release}
         timeout_in_minutes: 60
         env: {S3_BUCKET: vllm-wheels}
         command: bash .buildkite/scripts/rocm/publish.sh rocm wheels
@@ -773,7 +773,7 @@ steps:
           - step: block-build-release-images
             allow_failure: true
           - build-rocm100-amd
-        agents: {queue: amd-cpu}
+        agents: {queue: small_cpu_queue_release}
         command: bash .buildkite/scripts/rocm/publish.sh rocm images
         plugins: *rocm_hub_login
 

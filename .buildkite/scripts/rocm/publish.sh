@@ -30,7 +30,7 @@ STACK=$1
 MODE=$2
 COMMIT=${BUILDKITE_COMMIT:?BUILDKITE_COMMIT must be set}
 
-SRC=rocm/vllm-ci:${STACK}-${COMMIT}
+SRC=${ROCM_CI_TRUSTED_REPO:-rocm/vllm-ci}:${STACK}-${COMMIT}
 ECR=${ECR:-public.ecr.aws/q9t5s3a7/vllm-release-repo}
 HUB=${HUB:-vllm/vllm-openai-rocm}
 
@@ -38,8 +38,14 @@ HUB=${HUB:-vllm/vllm-openai-rocm}
 # Helper functions
 # ---------------------------------------------------------------------------
 
-# pin <ref>  — resolve <ref> to a pinned ref@digest (resolves once, stable for the rest of the script)
-pin() { echo "$1@$(docker buildx imagetools inspect "$1" --format '{{.Manifest.Digest}}')"; }
+# pin <ref>  — resolve <ref> to a pinned ref@digest (resolves once, stable for the rest of the script).
+#   Parses the validated "Digest:" line, as build.sh does.
+pin() {
+  local d
+  d=$(docker buildx imagetools inspect "$1" | awk '$1 == "Digest:" { print $2; exit }')
+  [[ $d =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "cannot resolve the digest of $1" >&2; return 1; }
+  echo "$1@$d"
+}
 
 # variant <ref>  — read the ai.vllm.rocm.variant image label
 variant() {
@@ -52,6 +58,9 @@ variant() {
 # ---------------------------------------------------------------------------
 IMG=$(pin "$SRC")
 V=$(variant "$IMG")      # e.g. rocm100 — used in S3 paths, ECR tags and Hub tags
+[[ $V =~ ^rocm[0-9]+$ ]] || { echo "$IMG has no valid ai.vllm.rocm.variant label: '$V'" >&2; exit 1; }
+# For the steps after either mode: root-index generation and publish-release-images.sh.
+buildkite-agent meta-data set "rocm-$STACK-variant" "$V"
 
 # ---------------------------------------------------------------------------
 # Mode dispatch
@@ -123,10 +132,6 @@ EOF
 
     docker buildx imagetools create -t "$ECR:$COMMIT-$V"       "$IMG"
     docker buildx imagetools create -t "$ECR:$COMMIT-$V-base"  "$RT"
-
-    # Write variant to Buildkite metadata so downstream steps
-    # (root-index generation, publish-release-images.sh) can read it.
-    buildkite-agent meta-data set "rocm-$STACK-variant" "$V"
 
     ECR_IMG="$ECR:$COMMIT-$V"
     ECR_BASE="$ECR:$COMMIT-$V-base"

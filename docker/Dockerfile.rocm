@@ -351,9 +351,13 @@ RUN mkdir -p /opt/rocm-triton-kernels \
     && test -f /opt/rocm-triton-kernels/__init__.py \
     && rm /tmp/rocm-triton.tar.gz
 
-# The version every per-commit artifact carries. Needs .git and a v* tag in the context.
+# The version every per-commit artifact carries. build.sh writes .git_archival.txt from the host's
+# `git describe` (CI checkouts keep their objects in a mirror outside the build context, which git
+# here would refetch from GitHub); without it, e.g. locally, .git and a v* tag are used.
 FROM dev AS version-calc
-RUN --mount=type=bind,target=/src,rw cd /src && git config --global --add safe.directory '*' \
+RUN --mount=type=bind,target=/src,rw cd /src \
+    && if [ -f .git_archival.txt ]; then mv .git /tmp/unused-git; \
+       else git config --global --add safe.directory '*'; fi \
     && python3 -c "from setuptools_scm import get_version; print(get_version(git_describe_command=['git', 'describe', '--dirty', '--tags', '--long', '--abbrev=40', '--match', 'v[0-9]*']))" \
         > /vllm-version.txt \
     && cat /vllm-version.txt && ! grep -q '^0\.1\.dev' /vllm-version.txt
@@ -410,8 +414,12 @@ COPY csrc csrc/
 COPY vllm/envs.py vllm/__init__.py vllm/
 # Empty: the stack's full PYTORCH_ROCM_ARCH (release); CI passes the arches it can test.
 ARG ARCH
+# setup.py reads requirements/rocm.txt for install_requires. This wheel only carries the .so files
+# the wheel stage repackages with the real requirements, so empty files keep a requirements bump
+# from recompiling HIP.
 RUN --mount=type=cache,id=vllm-rocm-ccache,target=/root/.cache/ccache \
-    { grep -Fq "set(TRITON_KERNELS_TAG \"${ROCM_TRITON_KERNELS_COMMIT}\")" \
+    mkdir -p requirements && : > requirements/rocm.txt \
+    && { grep -Fq "set(TRITON_KERNELS_TAG \"${ROCM_TRITON_KERNELS_COMMIT}\")" \
         cmake/external_projects/triton_kernels.cmake \
         || echo "WARNING: Dockerfile.rocm ROCM_TRITON_KERNELS_COMMIT (${ROCM_TRITON_KERNELS_COMMIT}) does not match cmake TRITON_KERNELS_TAG; the Docker build uses the Dockerfile pin, cmake governs only non-Docker builds"; } \
     && CCACHE_BASEDIR="$PWD" PYTORCH_ROCM_ARCH="${ARCH:-$PYTORCH_ROCM_ARCH}" \
@@ -433,9 +441,11 @@ RUN --mount=type=bind,target=/src,rw cd /src && cp /rust/* vllm/ \
        VLLM_PRECOMPILED_WHEEL_LOCATION="$(ls /precompiled/*.whl)" VLLM_DOCKER_BUILD_CONTEXT=1 \
        PYTHONDONTWRITEBYTECODE=1 python3 setup.py bdist_wheel --dist-dir=/dist
 
+# Bytecode compiled as if installed at / (not /out), so tracebacks name the real paths.
 FROM runtime AS install
 RUN --mount=type=bind,from=wheel,src=/dist,target=/dist \
-    pip install --no-deps --no-compile --root /out /dist/*.whl
+    pip install --no-deps --no-compile --root /out /dist/*.whl \
+    && python3 -m compileall -q -j 0 -s /out -p / /out
 
 FROM runtime AS vllm-openai
 COPY --link --from=install /out /
@@ -458,12 +468,20 @@ COPY --from=rust-toolchain /root/.rustup /root/.rustup
 ENV CARGO_HOME=/root/.cargo RUSTUP_HOME=/root/.rustup PATH=/root/.cargo/bin:$PATH
 RUN --mount=type=bind,source=requirements/test/rocm.txt,target=/t.txt --mount=type=bind,source=tests/vllm_test_utils,target=/tu,rw \
     --mount=type=cache,id=vllm-rocm-uv,target=/root/.cache/uv \
-    pip freeze | sort >/tmp/shipped && uv pip install --system -c /etc/rocm-constraints.txt -r /t.txt /tu \
-    && ! pip freeze | sort | comm -23 /tmp/shipped - | grep . # a test dep changed a shipped package
-# AITER nightly: replace the stack's aiter with the newest nightly wheel (never cached, see the bake file).
+    sp="$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')" \
+    && pip freeze --path "$sp" | sort >/tmp/shipped && uv pip install --system -c /etc/rocm-constraints.txt -r /t.txt /tu \
+    && ! pip freeze --path "$sp" | sort | comm -23 /tmp/shipped - | grep . # a test dep changed a shipped package (apt's python3-* may be shadowed)
+# AITER nightly: replace the stack's aiter with the newest nightly wheel that fits this image's ROCm,
+# torch and Python (never cached, see the bake file). AITER_SPEC pins a pip spec instead.
+ARG AITER_NIGHTLY
 ARG AITER_SPEC
-RUN if [ -n "$AITER_SPEC" ]; then pip install --pre --no-deps --force-reinstall $AITER_SPEC \
-    && python3 -c 'import aiter'; fi
+RUN --mount=type=bind,source=.buildkite/scripts/rocm/select_aiter_nightly_wheel.py,target=/tmp/select.py \
+    set -e; spec="$AITER_SPEC"; \
+    if [ -z "$spec" ] && [ "$AITER_NIGHTLY" = 1 ]; then \
+        out="$(python3 -P /tmp/select.py)" || { echo "$out" >&2; exit 1; }; \
+        echo "$out"; spec="$(echo "$out" | head -n 1)"; \
+    fi; \
+    if [ -n "$spec" ]; then pip install --pre --no-deps --force-reinstall "$spec" && python3 -c 'import aiter'; fi
 # Catch GPU<->CPU syncs in execute_model/sample_tokens during tests.
 ENV VLLM_GPU_SYNC_CHECK=error
 ENV HF_XET_HIGH_PERFORMANCE=1

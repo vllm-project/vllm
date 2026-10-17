@@ -17,7 +17,9 @@ set -o pipefail
 commands=${VLLM_TEST_COMMANDS:?VLLM_TEST_COMMANDS must be set by the pipeline}
 gpus=${VLLM_CI_EXPECTED_GPU_COUNT:-1}
 job=${BUILDKITE_JOB_ID:-local}
-root=/tmp/vllm-ci-${BUILDKITE_JOB_ID:-local}
+# Short: Ray puts AF_UNIX sockets under $TMPDIR, whose paths may not exceed 107 bytes.
+root=/tmp/vllm-${job##*-}
+root=${root:0:22}
 
 # ---------------------------------------------------------------------------
 # Cache directories — all under $root so they are job-local and isolated.
@@ -167,7 +169,8 @@ _teardown_log workload_started "timeout_s=${CONTAINER_TIMEOUT_S:-0}"
 rc=0
 if [[ ${CONTAINER_TIMEOUT_S:-0} -gt 0 ]]; then
   # timeout fires TERM, then KILL after 10 s — mirrors the old docker run path.
-  timeout --verbose --foreground --signal=TERM --kill-after=10s \
+  # Not --foreground: the whole process group (pytest, engine workers) must stop, not just bash.
+  timeout --verbose --signal=TERM --kill-after=10s \
     "${CONTAINER_TIMEOUT_S}s" bash -o pipefail -c "$commands" || rc=$?
 else
   bash -o pipefail -c "$commands" || rc=$?
