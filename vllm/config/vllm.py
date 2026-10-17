@@ -2326,8 +2326,26 @@ class VllmConfig:
                     "NCCL_GRAPH_REGISTER=%s pins the CUDA graph pool during sleep.",
                     value,
                 )
+        self._resolve_uva_stage_min_tokens()
+
         # Log the custom passes that are enabled
         self.compilation_config.pass_config.log_enabled_passes()
+
+    def _resolve_uva_stage_min_tokens(self) -> None:
+        """Resolve "auto" for `cpu_offload_stage_min_tokens` once the CUDA graph
+        capture sizes are known. The worker may only lower them later (spec
+        decode rounding), so the threshold stays above every captured size."""
+        uva = self.offload_config.uva
+        max_capture = self.compilation_config.max_cudagraph_capture_size or 0
+        explicit = uva.cpu_offload_stage_min_tokens
+        uva.cpu_offload_stage_min_tokens = uva.resolve_stage_min_tokens(max_capture)
+        if 0 < explicit <= max_capture:
+            logger.warning_once(
+                "cpu_offload_stage_min_tokens=%d: steps of up to %d tokens run "
+                "in CUDA graphs and are never staged.",
+                explicit,
+                max_capture,
+            )
 
     def _set_max_num_scheduled_tokens(self):
         """In most cases, the scheduler may schedule a batch with as many tokens as the

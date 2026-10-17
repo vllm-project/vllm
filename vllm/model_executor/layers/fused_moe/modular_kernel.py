@@ -36,6 +36,7 @@ from vllm.model_executor.layers.fused_moe.utils import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
 )
+from vllm.model_executor.offloader.base import get_offloader
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.worker.ubatching import (
@@ -490,6 +491,10 @@ class FusedMoEExperts(ABC):
     # expert_map. RoutedExperts.expert_map reads this flag to pick which to hand
     # the active experts kernel.
     consumes_expert_mask: bool = False
+    # Whether apply() reads the w1/w2 tensors it is passed. Experts that keep
+    # their own copy of the weights set this False, so the UVA offloader does
+    # not stage weights they never read.
+    reads_weight_args: bool = True
 
     def __init__(
         self,
@@ -1530,6 +1535,14 @@ class FusedMoEKernelModularImpl:
             expert_map,
             apply_router_weight_on_input,
         )
+
+        # Large steps may read UVA-offloaded experts from a device copy. After
+        # _prepare: it can yield to the other micro-batch under DBO.
+        if self.fused_experts.reads_weight_args:
+            offloader = get_offloader()
+            num_tokens = hidden_states.size(0)
+            w1 = offloader.maybe_stage(w1, num_tokens, "w1")
+            w2 = offloader.maybe_stage(w2, num_tokens, "w2")
 
         # Stash the original unquantized hidden states on the LoRA context
         # so apply_w13_lora sees correct-magnitude activations instead of

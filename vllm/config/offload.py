@@ -3,9 +3,9 @@
 """Configuration for model weight offloading."""
 
 import warnings
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 
 from vllm.config.utils import config
 
@@ -42,6 +42,36 @@ class UVAOffloadConfig:
             - "expert" or "w2" will NOT match (must be exact segments).
     This allows distinguishing parameters like "w2_weight" and "w2_weight_scale".
     """
+
+    cpu_offload_stage_min_tokens: int = Field(default=0, ge=-1)
+    """Steps with at least this many tokens copy each layer's offloaded
+    fused-MoE expert weights into a device buffer before the expert kernel,
+    which then reads the copy instead of host memory. The kernel reads an
+    expert once per tile of its tokens, so in large steps a single copy moves
+    fewer bytes than reading in place; small steps (decode) read only the
+    routed experts and are better off in place. One buffer per distinct
+    offloaded expert-weight shape is shared by all layers and counted by memory
+    profiling, so it comes out of the KV cache.
+        - 0 (default): never stage.
+        - "auto" (or -1): stage every step that runs without CUDA graphs, i.e.
+          more than `compilation_config.max_cudagraph_capture_size` tokens,
+          and at least 512.
+        - N > 0: stage steps with at least N tokens.
+    Steps inside CUDA graphs never stage. CUDA only.
+    """
+
+    @field_validator("cpu_offload_stage_min_tokens", mode="before")
+    @classmethod
+    def _parse_auto(cls, value: Any) -> Any:
+        if isinstance(value, str) and value.strip().lower() == "auto":
+            return -1
+        return value
+
+    def resolve_stage_min_tokens(self, max_cudagraph_capture_size: int) -> int:
+        """`cpu_offload_stage_min_tokens` with "auto" (-1) resolved."""
+        if self.cpu_offload_stage_min_tokens >= 0:
+            return self.cpu_offload_stage_min_tokens
+        return max((max_cudagraph_capture_size or 0) + 1, 512)
 
 
 @config
@@ -139,14 +169,18 @@ class OffloadConfig:
     def compute_hash(self) -> str:
         """Provide a hash that uniquely identifies all the offload configs.
 
-        All fields are included because PrefetchOffloader patches module
-        forwards and inserts custom ops (wait_prefetch, start_prefetch)
-        into the computation graph. Changing any offload setting can
-        alter which layers are hooked and how prefetch indices are
-        computed, so the compilation cache must distinguish them.
+        All fields but the UVA staging threshold are included because
+        PrefetchOffloader patches module forwards and inserts custom ops
+        (wait_prefetch, start_prefetch) into the computation graph. Changing
+        any offload setting can alter which layers are hooked and how prefetch
+        indices are computed, so the compilation cache must distinguish them.
         """
         from vllm.config.utils import get_hash_factors, hash_factors
 
-        factors = get_hash_factors(self, ignored_factors=set())
+        factors = get_hash_factors(self, ignored_factors={"uva"})
+        # The staging threshold only acts inside the opaque moe_forward op.
+        factors["uva"] = get_hash_factors(
+            self.uva, ignored_factors={"cpu_offload_stage_min_tokens"}
+        )
         hash_str = hash_factors(factors)
         return hash_str
