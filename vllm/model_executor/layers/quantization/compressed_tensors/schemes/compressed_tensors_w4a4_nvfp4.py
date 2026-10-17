@@ -97,18 +97,61 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
         layer.weight = layer.weight_packed
         del layer.weight_packed
 
-        # Check for mismatched weight global scales
-        if torch.unique(layer.weight_global_scale).numel() != 1:
+        weight_global_scales = layer.weight_global_scale.detach().to(torch.float32)
+        has_non_uniform_scales = not torch.allclose(
+            weight_global_scales,
+            weight_global_scales[0].expand_as(weight_global_scales),
+        )
+
+        output_partition_rescale = None
+
+        if len(layer.logical_widths) == 2 and has_non_uniform_scales:
+            # Use the minimum divisor as the common base so that all
+            # post-GEMM correction factors are <= 1.
+            base_divisor = weight_global_scales.min()
+
+            output_partition_rescale = torch.empty(
+                sum(layer.logical_widths),
+                dtype=torch.float32,
+                device=weight_global_scales.device,
+            )
+            offset = 0
+            for width, partition_divisor in zip(
+                layer.logical_widths, weight_global_scales
+            ):
+                output_partition_rescale[offset : offset + width] = (
+                    base_divisor / partition_divisor
+                )
+                offset += width
+
             logger.warning_once(
-                "In NVFP4 linear, the weight global scale is different"
-                " for parallel layers (e.g. q_proj, k_proj, v_proj). This "
-                " will likely result in reduced accuracy. Please verify the model"
-                " accuracy. Consider using a checkpoint with a shared global NVFP4"
-                " scale for fused layers."
+                "Detected non-uniform NVFP4 weight global scales in a "
+                "two-partition fused linear layer. Applying per-partition "
+                "output rescaling."
+            )
+            logger.debug(
+                "NVFP4 partition scales=%s, rescale=%s",
+                weight_global_scales.tolist(),
+                output_partition_rescale.tolist(),
             )
 
+            weight_global_scale = base_divisor
+        else:
+            if has_non_uniform_scales:
+                logger.warning_once(
+                    "In NVFP4 linear, the weight global scale differs "
+                    "across fused logical partitions. This may reduce "
+                    "model accuracy."
+                )
+            weight_global_scale = weight_global_scales.max()
+
+        layer._output_partition_rescale = (
+            Parameter(output_partition_rescale, requires_grad=False)
+            if output_partition_rescale is not None
+            else None
+        )
+
         # Process weight global scale (CT stores as divisors, i.e. 1/scale)
-        weight_global_scale = layer.weight_global_scale.max().to(torch.float32)
         layer.weight_global_scale = Parameter(
             1.0 / weight_global_scale, requires_grad=False
         )
@@ -146,4 +189,11 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        rescale = getattr(layer, "_output_partition_rescale", None)
+        if rescale is not None:
+            out = self.kernel.apply_weights(layer=layer, x=x, bias=None)
+            out = out * rescale.to(dtype=out.dtype)
+            if bias is not None:
+                out = out + bias
+            return out
         return self.kernel.apply_weights(layer=layer, x=x, bias=bias)
