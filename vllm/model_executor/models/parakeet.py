@@ -18,12 +18,43 @@ from vllm.model_executor.layers.activation import ReLUSquaredActivation
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.transformers.utils import recursive_replace_linear
 from vllm.model_executor.models.utils import maybe_prefix
 from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.parakeet import ExtractorConfig, ParakeetConfig
 
 logger = init_logger(__name__)
+
+
+def _recursive_replace_linear_with_replicated(
+    module: nn.Module, *, prefix: str, skip_names: set[str]
+) -> None:
+    """Recursively replace ``nn.Linear`` submodules with vLLM's
+    ``ReplicatedLinear`` so they can receive LoRA, except for submodules
+    whose (unqualified) attribute name is in ``skip_names``.
+
+    The replaced linears are left freshly initialized -- the model's
+    ``load_weights`` finds them by their (unchanged) qualified name and
+    overwrites them with the real checkpoint values afterwards, same as
+    every other vLLM-native linear in the model.
+    """
+    for child_name, child_module in module.named_children():
+        qual_name = maybe_prefix(prefix, child_name)
+        if isinstance(child_module, nn.Linear) and child_name not in skip_names:
+            setattr(
+                module,
+                child_name,
+                ReplicatedLinear(
+                    child_module.in_features,
+                    child_module.out_features,
+                    bias=child_module.bias is not None,
+                    return_bias=False,
+                    prefix=qual_name,
+                ),
+            )
+        else:
+            _recursive_replace_linear_with_replicated(
+                child_module, prefix=qual_name, skip_names=skip_names
+            )
 
 
 class ParakeetProjection(nn.Module):
@@ -90,17 +121,9 @@ class ProjectedParakeet(nn.Module):
         tower mapping per modality, so that projection cannot safely share the
         audio mapping in a batch containing different adapters, and is left as
         a plain ``nn.Linear``.
-
-        The replaced linears are left freshly initialized -- ``load_weights``
-        finds them by their (unchanged) qualified name and overwrites them
-        with the real checkpoint values afterwards, same as every other
-        vLLM-native linear in the model.
         """
-        recursive_replace_linear(
-            self.encoder,
-            quant_config=None,
-            prefix=prefix,
-            skip_names={"relative_k_proj"},
+        _recursive_replace_linear_with_replicated(
+            self.encoder, prefix=prefix, skip_names={"relative_k_proj"}
         )
 
     def forward(

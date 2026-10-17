@@ -78,11 +78,10 @@ def test_parakeet_replaces_only_same_length_encoder_linears():
             output_size,
             *,
             bias,
-            quant_config=None,
             return_bias,
             prefix,
         ):
-            del quant_config, return_bias, prefix
+            del return_bias, prefix
             super().__init__(input_size, output_size, bias=bias)
 
     encoder = torch.nn.Module()
@@ -96,9 +95,7 @@ def test_parakeet_replaces_only_same_length_encoder_linears():
     torch.nn.Module.__init__(model)
     model.encoder = encoder
 
-    # _replace_encoder_linears delegates to recursive_replace_linear, which
-    # constructs the replacement class in transformers.utils, not parakeet.
-    target = "vllm.model_executor.models.transformers.utils.ReplicatedLinear"
+    target = "vllm.model_executor.models.parakeet.ReplicatedLinear"
     with patch(target, _FakeReplicatedLinear):
         model._replace_encoder_linears(prefix="sound_encoder.encoder")
 
