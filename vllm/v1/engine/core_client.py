@@ -1761,7 +1761,9 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                 # Start from client_index to help with balancing when engines
                 # are empty.
                 idx = (self.eng_start_index + i) % num_engines
-                waiting, running, kv_cache_usage = current_counts[idx]
+                # Snapshots may carry extra trailing load-balancing fields;
+                # unpack only the first three.
+                waiting, running, kv_cache_usage = current_counts[idx][:3]
                 # Estimate engine load as the greater of the coordinator's
                 # latest (waiting + running) snapshot and this client's own
                 # in-flight count (scaled by the number of clients). The
