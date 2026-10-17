@@ -25,6 +25,7 @@ MoE layer. If we have 32 EP ranks, then each GPU will hold 288 / 32 = 9 local
 physical experts.
 """
 
+import os
 import threading
 import time
 from collections.abc import Sequence
@@ -287,6 +288,11 @@ class EplbState:
         self.async_worker: threading.Thread | None = None
         """
         Background thread handling async transfers.
+        """
+        self.async_stop_requested: bool = False
+        """
+        Asks :func:`transfer_run_periodically` to leave its loop.  See
+        :meth:`stop_async_worker`.
         """
         self.device_index: int | None = None
         """
@@ -985,10 +991,33 @@ class EplbState:
         if not self.is_async:
             return
         if self.async_worker is None:
+            self.async_stop_requested = False
             self.async_worker = start_async_worker(
                 self,
                 is_profile=is_profile,
             )
+
+    def stop_async_worker(self, timeout: float = 60.0) -> bool:
+        """Ask the background transfer thread to exit, and wait for it.
+
+        The thread runs collectives on the EPLB group and keeps a reference to
+        it, so it has to be gone before that group is destroyed. It is also a
+        daemon thread, so without this it is killed wherever it happens to be,
+        including inside a collective. Returns whether the thread exited.
+        """
+        thread = self.async_worker
+        if thread is None:
+            return True
+        self.async_stop_requested = True
+        # The thread parks on rearrange_event, so only a record wakes it.
+        self.rearrange_event.record_if_idle()
+        thread.join(timeout)
+        if thread.is_alive():
+            logger.warning("Async EPLB worker did not exit within %.1f s", timeout)
+            return False
+        self.async_worker = None
+        self.async_stop_requested = False
+        return True
 
     def drain_async(self) -> None:
         """Drain in-flight async EPLB by consuming all remaining layer results.
@@ -1003,9 +1032,17 @@ class EplbState:
         interfere.
 
         No-op when no async cycle is in progress (rebalanced=False).
+
+        The wait is bounded. Draining takes well under a second when the async
+        worker is healthy, but a rank that stops producing results leaves the
+        others reducing a flag that can never reach the group size, and a
+        reconfiguration was seen spinning here for two hours without printing
+        anything at all. Failing with the state of this rank is strictly more
+        useful than waiting forever.
         """
         if not self.is_async:
             return
+        timeout = float(os.getenv("VLLM_EEP_DRAIN_TIMEOUT_S") or 300.0)
         for model_key, ms in self.model_states.items():
             needs_drain = ms.rebalanced
             if needs_drain:
@@ -1013,6 +1050,12 @@ class EplbState:
                     "Draining async EPLB worker for model %s",
                     model_key,
                 )
+            # The periodic report is diagnostic only. The rank that dropped out
+            # is the one whose pending_result stays false while the others have
+            # theirs, and nothing else in the log names it.
+            started = time.perf_counter()
+            report_every = float(os.getenv("VLLM_EEP_DEBUG_WATCHDOG") or 0)
+            next_report = report_every
             while ms.rebalanced:
                 if self._all_ranks_result_ready(ms):
                     result = ms.pending_result
@@ -1023,6 +1066,33 @@ class EplbState:
                     result.consumed_event.record()
                 else:
                     time.sleep(0.001)
+                elapsed = time.perf_counter() - started
+                worker = self.async_worker
+                worker_state = (
+                    "alive" if worker is not None and worker.is_alive() else "gone"
+                )
+                if report_every > 0 and elapsed > next_report:
+                    next_report += report_every
+                    logger.warning(
+                        "[EEP-DEBUG] still draining %s after %.0f s: "
+                        "pending_result=%s, stop_requested=%s, worker=%s",
+                        model_key,
+                        elapsed,
+                        ms.pending_result is not None,
+                        self.async_stop_requested,
+                        worker_state,
+                    )
+                if timeout > 0 and elapsed > timeout:
+                    raise RuntimeError(
+                        f"Draining the async EPLB worker for model {model_key} "
+                        f"did not finish within {timeout:.0f} s "
+                        f"(pending_result={ms.pending_result is not None}, "
+                        f"stop_requested={self.async_stop_requested}, "
+                        f"async worker {worker_state}). Every EP rank has to "
+                        f"produce a result for each layer before any of them "
+                        f"can leave this loop, so one rank that stopped "
+                        f"producing holds up all of them."
+                    )
             if needs_drain:
                 logger.info(
                     "Async EPLB worker drained for model %s",

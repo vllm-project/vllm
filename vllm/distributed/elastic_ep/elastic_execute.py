@@ -1,6 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import faulthandler
 import gc
+import os
+import threading
+import time
 import weakref
 from collections.abc import Iterable, Iterator, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -22,6 +26,7 @@ from vllm.distributed import (
     get_tp_group,
     get_world_group,
 )
+from vllm.distributed.elastic_ep import rocm_debug
 from vllm.distributed.elastic_ep.standby_state import (
     create_standby_groups,
     get_standby_dp_group,
@@ -159,7 +164,6 @@ class ElasticEPScalingExecutor:
             max_workers=1, thread_name_prefix="ElasticEPAsync"
         )
         self._async_future: Future[None] | None = None
-        self._group_cleanup_future: Future[None] | None = None
 
     @property
     def worker(self):
@@ -250,22 +254,155 @@ class ElasticEPScalingExecutor:
             if group is not None:
                 group.destroy()
 
-    def _start_group_cleanup(self, groups: tuple[GroupCoordinator | None, ...]) -> None:
-        assert self._group_cleanup_future is None
-        self._group_cleanup_future = self._async_executor.submit(
-            self._destroy_retired_groups, groups
+    @contextmanager
+    def _watchdog(self, label: str) -> Iterator[None]:
+        """Dump every thread's stack while a reconfiguration phase is stuck.
+
+        A scale down hung inside drain_async for two hours without printing a
+        single line. A rank stuck there cannot report anything by itself: the
+        loop spins on an all_reduce over the EP CPU group and never returns to
+        any logging statement, so the stacks of all its threads are the only
+        evidence of who is waiting and on what. Samples repeat, because one
+        snapshot cannot tell a slow phase from a stopped one.
+
+        Diagnostic only.
+        """
+        seconds = float(os.getenv("VLLM_EEP_DEBUG_WATCHDOG") or 0)
+        if seconds <= 0:
+            yield
+            return
+        done = threading.Event()
+
+        def bark() -> None:
+            samples = 0
+            while not done.wait(seconds):
+                samples += 1
+                logger.warning(
+                    "[EEP-DEBUG] watchdog: %s has been running for %.0f s, "
+                    "dumping all thread stacks (sample %d)",
+                    label,
+                    samples * seconds,
+                    samples,
+                )
+                faulthandler.dump_traceback(all_threads=True)
+
+        barker = threading.Thread(target=bark, name="eep-watchdog", daemon=True)
+        barker.start()
+        started = time.perf_counter()
+        try:
+            yield
+        finally:
+            done.set()
+            barker.join(timeout=5)
+            logger.warning(
+                "[EEP-DEBUG] %s finished in %.3f s",
+                label,
+                time.perf_counter() - started,
+            )
+
+    @contextmanager
+    def _timed(self, label: str) -> Iterator[None]:
+        """Record how long one step of a reconfiguration took.
+
+        commit_scale_up was measured running past 120 s on the CI machine,
+        against a few seconds locally, and a rank crashes somewhere inside that
+        window. The watchdog says the phase is slow but not which step is slow,
+        and the stacks it dumps are a single instant rather than a breakdown.
+
+        Diagnostic only.
+        """
+        if not os.getenv("VLLM_EEP_DEBUG_WATCHDOG"):
+            yield
+            return
+        started = time.perf_counter()
+        try:
+            yield
+        finally:
+            logger.warning(
+                "[EEP-DEBUG] step %s took %.3f s",
+                label,
+                time.perf_counter() - started,
+            )
+
+    def _retire_groups(self, groups: tuple[GroupCoordinator | None, ...]) -> None:
+        """Destroy the groups the reconfiguration replaced.
+
+        This has to happen before the first collective on the new groups, and
+        it has to be synchronous. RCCL exports IPC handles when it sets up the
+        P2P transport for a new communicator, and on MI355 the export is
+        refused with hsa_status 4097 whenever the communicators of the previous
+        configuration are still alive: three passes that only waited two
+        seconds here were refused, five that destroyed the groups were not.
+        Handing the teardown to a background thread is not enough either, since
+        it then runs while the new transport is being set up, which faulted the
+        GPU with a write to a read-only page.
+        """
+        live = sum(1 for group in groups if group is not None)
+        if not live:
+            return
+        started = time.perf_counter()
+        self._destroy_retired_groups(groups)
+        logger.info(
+            "[Elastic EP] Retired %d stale group(s) in %.3f s",
+            live,
+            time.perf_counter() - started,
         )
 
-    def _wait_for_group_cleanup(self) -> None:
-        if (future := self._group_cleanup_future) is not None:
-            self._group_cleanup_future = None
-            future.result()
+    def _dump_group_pressure(self, label: str) -> None:
+        """Record what is alive at the moments where the refusal happens.
+
+        RCCL refuses to create IPC memory inside ncclCommInitRank at scale down
+        and during the first collective on the new group at scale up, and both
+        times there is no teardown in flight, so the only remaining candidate is
+        how much is registered and alive right then. Nothing exposes the IPC
+        registrations themselves, so count the communicators that own them.
+        Diagnostic only.
+        """
+        if os.getenv("VLLM_EEP_DEBUG_GROUP_PRESSURE") != "1":
+            return
+        free_bytes, total_bytes = torch.accelerator.get_memory_info()
+        comms = sum(
+            1 for obj in gc.get_objects() if type(obj).__name__ == "PyNcclCommunicator"
+        )
+        logger.warning(
+            "[EEP-DEBUG] pressure %s: %d pynccl comm(s), reserved %.2f GiB, "
+            "allocated %.2f GiB, free %.2f of %.2f GiB",
+            label,
+            comms,
+            torch.accelerator.memory_reserved() / 2**30,
+            torch.accelerator.memory_allocated() / 2**30,
+            free_bytes / 2**30,
+            total_bytes / 2**30,
+        )
+
+    def _drain_reshuffle_if_requested(self) -> None:
+        """Wait for the previous reshuffle before touching the groups again.
+
+        prepare_reconfiguration waits for the group cleanup but not for the
+        expert copies that commit_scale_up scheduled asynchronously, and the
+        drain that does wait for them runs later, inside the commit. On MI355
+        the scale down request arrives 34 to 36 s into a 39 s copy window, and
+        create_standby_groups then either gets hipIpcGetMemHandle refused with
+        hsa_status 4097 or faults the GPU inside ncclCommInitRank. Draining
+        here means no reconfiguration ever overlaps copies in flight.
+
+        Diagnostic only.
+        """
+        if os.getenv("VLLM_EEP_DEBUG_DRAIN_BEFORE_RECONFIG") != "1":
+            return
+        eplb_state = self.worker.model_runner.eplb_state
+        if eplb_state is None:
+            return
+        started = time.perf_counter()
+        eplb_state.drain_async()
+        torch.accelerator.synchronize()
+        logger.warning(
+            "[EEP-DEBUG] drained in-flight expert resharding in %.3f s",
+            time.perf_counter() - started,
+        )
 
     def shutdown(self) -> None:
-        try:
-            self._wait_for_group_cleanup()
-        finally:
-            self._async_executor.shutdown()
+        self._async_executor.shutdown()
 
     def load_model(self) -> None:
         self.worker.load_model(load_dummy_weights=True)
@@ -273,30 +410,44 @@ class ElasticEPScalingExecutor:
     def prepare_reconfiguration(
         self, reconfig_request: ReconfigureDistributedRequest, use_all2all: bool
     ) -> None:
-        self._wait_for_group_cleanup()
+        self._drain_reshuffle_if_requested()
         self.reconfig_request = reconfig_request
         new_dp_size = reconfig_request.new_data_parallel_size
         old_dp_size = get_dp_group().world_size
         parallel_config = self.worker.vllm_config.parallel_config
         world_size = parallel_config.world_size
         new_world_size_across_dp = world_size * new_dp_size
-        create_standby_groups(
-            new_dp_size=new_dp_size,
-            new_world_size_across_dp=new_world_size_across_dp,
-            master_ip=reconfig_request.new_data_parallel_master_ip,
-            coord_store_port=reconfig_request.coord_store_port,
-            use_all2all=use_all2all,
-            enable_eplb=parallel_config.enable_eplb,
-        )
+        self._dump_group_pressure(f"before standby groups for dp={new_dp_size}")
+        with self._timed("prepare create_standby_groups"):
+            create_standby_groups(
+                new_dp_size=new_dp_size,
+                new_world_size_across_dp=new_world_size_across_dp,
+                master_ip=reconfig_request.new_data_parallel_master_ip,
+                coord_store_port=reconfig_request.coord_store_port,
+                use_all2all=use_all2all,
+                enable_eplb=parallel_config.enable_eplb,
+            )
+        self._dump_group_pressure(f"after standby groups for dp={new_dp_size}")
         standby_ep_group = get_standby_ep_group()
         assert standby_ep_group is not None
+        if current_platform.is_rocm():
+            rocm_debug.dump_static()
+            rocm_debug.dump(
+                "prepare",
+                {"dp": get_standby_dp_group(), "ep": standby_ep_group},
+                heavy=True,
+            )
         all2all_manager = get_ep_all2all_manager(standby_ep_group)
-        all2all_manager.stage_ep_size()
+        with self._timed("prepare stage_ep_size"):
+            all2all_manager.stage_ep_size()
         if not self._can_reuse_fused_moe_kernel():
-            self.stage_standby_moe_quant_methods(all2all_manager)
-        self._prepare_eplb_communicator(get_standby_eplb_group())
+            with self._timed("prepare stage_quant_methods"):
+                self.stage_standby_moe_quant_methods(all2all_manager)
+        with self._timed("prepare eplb_communicator"):
+            self._prepare_eplb_communicator(get_standby_eplb_group())
         if new_dp_size > old_dp_size:
-            self.transfer_weights(old_dp_size, new_dp_size)
+            with self._timed("prepare transfer_weights"):
+                self.transfer_weights(old_dp_size, new_dp_size)
         # On ROCm this deadlocks while serving; warm_and_capture warms these at commit.
         if not current_platform.is_rocm():
             self._warm_target_groups(get_standby_dp_group(), standby_ep_group)
@@ -462,15 +613,28 @@ class ElasticEPScalingExecutor:
         torch.accelerator.empty_cache()
 
     def switch_and_remove(self) -> None:
-        # Removing ranks skipped preparation, so wait for prior cleanup here.
-        self._wait_for_group_cleanup()
+        # The EPLB worker is a daemon thread that runs collectives on the EPLB
+        # group, and the group is destroyed a few lines below. Every removed
+        # worker was observed with that thread still alive here, and one of
+        # them segfaulted with no Python frames, only __clone, which is what a
+        # daemon thread killed inside a native call looks like.
+        eplb_state = self.worker.model_runner.eplb_state
+        if eplb_state is not None:
+            started = time.perf_counter()
+            stopped = eplb_state.stop_async_worker()
+            # Diagnostic only, to tell a pass that ran this from one that did
+            # not. Drop together with the rest of the EEP-DEBUG lines.
+            logger.warning(
+                "[EEP-DEBUG] eplb async worker %s in %.3f s",
+                "stopped" if stopped else "STILL RUNNING",
+                time.perf_counter() - started,
+            )
         self._release_cuda_graphs()
         retired_groups = _replace_active_groups(
             world=None, dp=None, ep=None, eplb=None, node_count=None
         )
-        self._start_group_cleanup(retired_groups)
         # Finish collective cleanup before this worker is shut down.
-        self._wait_for_group_cleanup()
+        self._retire_groups(retired_groups)
 
     def switch_and_prepare(self) -> tuple[GroupCoordinator | None, ...]:
         if not self._can_reuse_fused_moe_kernel():
@@ -566,6 +730,13 @@ class ElasticEPScalingExecutor:
         rank_mapping: dict[int, int] | None = None,
         async_op: bool = False,
     ) -> None:
+        if async_op and os.getenv("VLLM_EEP_DEBUG_SYNC_RESHUFFLE") == "1":
+            # Diagnostic only: the scheduled copies are the one thing left that
+            # can explain the fault during the traffic right after scale up,
+            # and nothing cheaper isolates them.
+            async_op = False
+            logger.warning("[EEP-DEBUG] expert resharding forced to sync mode")
+
         if get_ep_group().rank == 0:
             logger.info("[Elastic EP] Starting expert resharding...")
 
@@ -595,34 +766,47 @@ class ElasticEPScalingExecutor:
             )
 
     def commit_scale_up(self, is_existing_worker: bool) -> None:
-        if is_existing_worker:
-            self.broadcast_expert_mapping()
-            retired_groups = self.switch_and_prepare()
-        else:
-            mapping = self.receive_expert_mapping()
-            self.worker.model_runner.setup_eplb_from_mapping(mapping)
-        if not self._can_reuse_fused_moe_kernel():
-            # warm_and_capture's dummy run warms the deferred dp/ep groups.
-            self.warm_and_capture()
-        elif current_platform.is_rocm():
-            # Reuse path skips warm_and_capture; warm the deferred groups here.
-            self._warm_target_groups(get_dp_group(), get_ep_group())
-        self._perform_eplb_reshuffle(async_op=True)
-        if is_existing_worker:
-            self._start_group_cleanup(retired_groups)
+        with self._watchdog("commit_scale_up"):
+            with self._timed("scale_up switch"):
+                if is_existing_worker:
+                    self.broadcast_expert_mapping()
+                    self._retire_groups(self.switch_and_prepare())
+                else:
+                    mapping = self.receive_expert_mapping()
+                    self.worker.model_runner.setup_eplb_from_mapping(mapping)
+            if current_platform.is_rocm():
+                with self._timed("scale_up empty_cache"):
+                    groups = {"dp": get_dp_group(), "ep": get_ep_group()}
+                    rocm_debug.dump("scale_up before empty_cache", groups)
+                    torch.accelerator.empty_cache()
+                    rocm_debug.dump("scale_up after empty_cache", groups)
+                    rocm_debug.warm_each(groups, "scale_up")
+            if not self._can_reuse_fused_moe_kernel():
+                with self._timed("scale_up warm_and_capture"):
+                    self.warm_and_capture()
+            with self._timed("scale_up reshuffle"):
+                self._perform_eplb_reshuffle(async_op=True)
 
     def commit_scale_down(self, new_dp_size: int, removing: bool) -> None:
-        self.perform_scale_down_eplb_reshuffle(new_dp_size)
-        if removing:
-            self.switch_and_remove()
-        else:
-            retired_groups = self.switch_and_prepare()
-            if not self._can_reuse_fused_moe_kernel():
-                self.warm_and_capture()
-            elif current_platform.is_rocm():
-                # Reuse path skips warm_and_capture; warm the deferred groups here.
-                self._warm_target_groups(get_dp_group(), get_ep_group())
-            self._start_group_cleanup(retired_groups)
+        with self._watchdog("commit_scale_down"):
+            with self._timed("scale_down reshuffle"):
+                self.perform_scale_down_eplb_reshuffle(new_dp_size)
+            if removing:
+                with self._timed("scale_down switch_and_remove"):
+                    self.switch_and_remove()
+            else:
+                with self._timed("scale_down switch"):
+                    self._retire_groups(self.switch_and_prepare())
+                if current_platform.is_rocm():
+                    with self._timed("scale_down empty_cache"):
+                        groups = {"dp": get_dp_group(), "ep": get_ep_group()}
+                        rocm_debug.dump("scale_down before empty_cache", groups)
+                        torch.accelerator.empty_cache()
+                        rocm_debug.dump("scale_down after empty_cache", groups)
+                        rocm_debug.warm_each(groups, "scale_down")
+                if not self._can_reuse_fused_moe_kernel():
+                    with self._timed("scale_down warm_and_capture"):
+                        self.warm_and_capture()
 
     def perform_scale_down_eplb_reshuffle(self, new_dp_size: int) -> None:
         eplb_state = self.worker.model_runner.eplb_state

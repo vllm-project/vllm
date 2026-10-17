@@ -3,6 +3,7 @@
 """EPLB communicator implementations and factory."""
 
 import contextlib
+import os
 import time
 import uuid
 from abc import ABC, abstractmethod
@@ -618,9 +619,25 @@ class NixlEplbCommunicator(EplbCommunicator):
             "set_transfer_context() must be called before execute() "
             "if any add_recv() calls were made"
         )
+        trace = os.getenv("VLLM_EEP_DEBUG_TRANSFER_TRACE") == "1"
+        if trace:
+            # Diagnostic only. A rank dies somewhere in here with no Python
+            # frames at all, and the survivors only report
+            # NIXL_ERR_REMOTE_DISCONNECT, which is the victim's view. The last
+            # line the dying rank printed is the only thing that says how far
+            # it got, and whether it was the wait or the barrier.
+            logger.warning(
+                "[EEP-DEBUG] layer %s: waiting for %d expert transfer(s)",
+                self._layer_idx,
+                len(self._xfer_entries),
+            )
         try:
             self._wait_for_all_transfers([x[2] for x in self._xfer_entries])
-
+            if trace:
+                logger.warning(
+                    "[EEP-DEBUG] layer %s: transfers done, entering barrier",
+                    self._layer_idx,
+                )
             self._post_read_barrier()
         finally:
             for local_h, remote_h, xfer_h in self._xfer_entries:

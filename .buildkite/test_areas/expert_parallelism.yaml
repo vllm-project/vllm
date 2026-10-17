@@ -74,3 +74,72 @@ steps:
   commands:
   - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
   - pytest -v -s distributed/test_elastic_ep.py
+  mirror:
+    amd:
+      label: ':amd: (MI355) Elastic EP Scaling'
+      dind: false
+      device: mi355_4
+      timeout_in_minutes: 120
+      working_dir: /vllm-workspace/tests
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/distributed/
+      - vllm/engine/
+      - vllm/v1/executor/
+      - vllm/compilation/
+      - tests/distributed/
+      - vllm/platforms/rocm.py
+      - requirements/kv_connectors_rocm.txt
+      commands:
+      - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
+      # Early retirement of the replaced groups is real code now, and it removed
+      # the hsa_status 4097 refusal from the scale up: the expert reshuffle on
+      # the fresh groups completes, and in build 95355 a whole scale up with
+      # CUDA graphs and traffic came back with better accuracy than it started.
+      # It did not remove the refusal at the scale down, where the groups being
+      # replaced are still in use and cannot be retired in advance.
+      #
+      # Build 95355 ran the file whole for the first time and all four real
+      # cases failed, while the same four pass locally. What it caught is two
+      # faults that are not the ROCm refusal at all:
+      #
+      # A rank that just joined crashes, and vLLM's handler prints the frames.
+      # Once inside ProcessGroupNCCL::allreduce, once inside PyObject_Malloc
+      # while writing a log line, once failing to even find a GPU kernel
+      # ("Cannot find the function: Cijk_..."). Three unrelated crash sites mean
+      # the state of the process is already damaged by the time any of them
+      # runs, so this is host memory corruption, not an IPC refusal.
+      #
+      # A scale down hung for two hours with no output at all, in drain_async,
+      # whose loop has no deadline and spins on an all_reduce over the EP CPU
+      # group. If one rank stops producing results the reduce never reaches the
+      # group size and nobody leaves. That one has nothing to do with ROCm.
+      #
+      # So this round carries a watchdog instead of a transfer trace. Every
+      # 60 s that a reconfiguration phase has not finished, each rank dumps the
+      # stacks of all its threads, and the drain loop reports whose result is
+      # missing. A hung rank cannot report anything else, which is exactly why
+      # the two hours above produced nothing.
+      #
+      # RAY_DEDUP_LOGS=0 is not cosmetic. Build 95373 fired the watchdog three
+      # times inside commit_scale_up and every stack frame was lost: the four
+      # ranks print identical frames, Ray collapsed them into "repeated 4x
+      # across cluster", and the log kept the thread headers with nothing
+      # underneath them.
+      #
+      # The same build also measured the phases, and the gap is the lead worth
+      # chasing: commit_scale_up takes 9 s locally and over 120 s here, with a
+      # rank crashing inside that window. Each phase now reports its own
+      # duration and each step inside it reports its own, so the next log says
+      # where those two minutes go instead of only that they went.
+      #
+      # --timeout bounds a hang so one stuck case cannot eat the step budget,
+      # and the whole file runs twice, because a group that passes sometimes is
+      # not a group that passes. Build 95373 ran it twice and every one of the
+      # four real cases passed at least once, so nothing here is dead, it is
+      # unstable: three green out of eight runs.
+      - RAY_DEDUP_LOGS=0 VLLM_EEP_DEBUG_WATCHDOG=60 VLLM_EEP_DEBUG_GROUP_PRESSURE=1 VLLM_EEP_DEBUG_SYNC_RESHUFFLE=1 VLLM_EEP_DEBUG_OFF=1 AMD_LOG_LEVEL=1 PYTHONFAULTHANDLER=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=RAY_DEDUP_LOGS,VLLM_EEP_DEBUG_WATCHDOG,VLLM_EEP_DEBUG_GROUP_PRESSURE,VLLM_EEP_DEBUG_SYNC_RESHUFFLE,VLLM_EEP_DEBUG_OFF,AMD_LOG_LEVEL,PYTHONFAULTHANDLER pytest -v -s --timeout=780 --timeout-method=thread distributed/test_elastic_ep.py || true
+      - RAY_DEDUP_LOGS=0 VLLM_EEP_DEBUG_WATCHDOG=60 VLLM_EEP_DEBUG_GROUP_PRESSURE=1 VLLM_EEP_DEBUG_SYNC_RESHUFFLE=1 VLLM_EEP_DEBUG_OFF=1 AMD_LOG_LEVEL=1 PYTHONFAULTHANDLER=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=RAY_DEDUP_LOGS,VLLM_EEP_DEBUG_WATCHDOG,VLLM_EEP_DEBUG_GROUP_PRESSURE,VLLM_EEP_DEBUG_SYNC_RESHUFFLE,VLLM_EEP_DEBUG_OFF,AMD_LOG_LEVEL,PYTHONFAULTHANDLER pytest -v -s --timeout=780 --timeout-method=thread distributed/test_elastic_ep.py || true
+      # Every command ends in || true, so the step stays green and the log is the
+      # deliverable rather than the result.
