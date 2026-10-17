@@ -320,8 +320,8 @@ In addition, you can also register all your `CustomOp` at one place for better m
 `DirectDCPQGather`, `DirectDCPA2AReduce` and `DirectDCPKVGather` in
 `vllm.v1.attention.ops.dcp` support OOT replacements. Workspaces own buffers and
 views; ops own communication, reduction and fallbacks. `workspace` may be `None`.
-`can_use_direct_workspace(group, dtype)` gates allocation. CUDA calls
-`forward_native` for absent/oversized workspaces; native methods use Torch collectives.
+CUDA preserves the existing direct kernels, eligibility controls and fallbacks;
+`forward_native` uses Torch collectives.
 
 Register through `vllm.general_plugins` on every worker before model construction.
 Override `forward_cuda`; handle absent/oversized workspaces or call `super()`:
@@ -341,8 +341,8 @@ class PluginDCPQGather(DirectDCPQGather):
 
 Eligible direct kernels stay enabled, including with Inductor and `["none"]`.
 Use `["-direct_dcp_q_gather"]` to select Torch for an in-tree op, or
-`["-DirectDCPQGather"]` for its OOT replacement. These controls replace the
-`VLLM_USE_DIRECT_DCP_*` env vars; CUDA, dtype and topology checks remain.
+`["-DirectDCPQGather"]` for its OOT replacement. `VLLM_USE_DIRECT_DCP_*` continues
+to control direct workspace allocation with its existing semantics.
 
 Preserve output layouts, both LSE bases, empty-shard handling and workspace
 synchronization/epochs. All ranks must use the same plugin/config and collective

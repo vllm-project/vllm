@@ -67,7 +67,7 @@ class _OOTKVGather(dcp.DirectDCPKVGather):
     "mode",
     ["eager_default", "inductor_default", "all", "none", "explicit_on", "explicit_off"],
 )
-def test_oot_collective_dispatch_preserves_native_fallback(
+def test_oot_collective_dispatch_preserves_cuda_fallback(
     monkeypatch: pytest.MonkeyPatch,
     op_cls: type[CustomOp],
     oot_cls: type[CustomOp],
@@ -147,6 +147,11 @@ def test_oot_collective_dispatch_preserves_native_fallback(
         collective_calls.append(None)
         destination.fill_(42)
 
+    group.all_gather = MagicMock(
+        side_effect=lambda query, dim: torch.cat((query, query), dim=dim)
+    )
+    a2a_fallback = MagicMock(return_value=output.fill_(42))
+    monkeypatch.setattr(dcp, "dcp_a2a_lse_reduce", a2a_fallback)
     cuda_method = MagicMock(side_effect=cuda_collective)
     monkeypatch.setattr(torch.ops._C, kernel_name, cuda_method, raising=False)
     monkeypatch.setattr(dist, "all_gather_into_tensor", torch_collective)
@@ -170,65 +175,59 @@ def test_oot_collective_dispatch_preserves_native_fallback(
         "Communication must run even with custom ops off"
     )
     cuda_enabled = mode != "explicit_off"
-    assert cuda_method.call_count == int(
-        cuda_enabled and workspace_state == "available"
-    ), "Direct kernels must stay enabled under Inductor unless explicitly disabled"
+    uses_direct = cuda_enabled and (
+        workspace_state == "available"
+        or (op_cls is dcp.DirectDCPKVGather and workspace_state == "oversized")
+    )
+    assert cuda_method.call_count == int(uses_direct), (
+        "Direct kernels must stay enabled under Inductor unless explicitly disabled"
+    )
     if use_oot:
         assert op.calls == int(cuda_enabled), "Enabled dispatch must use the OOT op"
+    cuda_fallback = cuda_enabled and not uses_direct
+    assert group.all_gather.call_count == int(
+        cuda_fallback and op_cls is dcp.DirectDCPQGather
+    ), "CUDA query fallback must preserve GroupCoordinator's gather dispatch"
+    assert a2a_fallback.call_count == int(
+        cuda_fallback and op_cls is dcp.DirectDCPA2AReduce
+    ), "CUDA A2A fallback must preserve the NCCL/Triton implementation"
     assert len(collective_calls) == int(
-        not cuda_enabled or workspace_state != "available"
-    ), "Native dispatch and all CUDA fallbacks must use built-in Torch collectives"
+        not cuda_enabled or (cuda_fallback and op_cls is dcp.DirectDCPKVGather)
+    ), "Native dispatch uses Torch; CUDA KV fallback preserves Torch's gather"
 
 
-@pytest.mark.parametrize("backend", ["native", "cuda", "oot"])
-@pytest.mark.parametrize("world_size, num_heads", [(1, 3), (2, 3), (2, 4)])
-def test_direct_dcp_a2a_checks_before_dispatch(
+@pytest.mark.parametrize("backend", ["native", "cuda"])
+@pytest.mark.parametrize("world_size, num_heads", [(1, 3), (2, 3)])
+def test_direct_dcp_a2a_fallback_checks(
     monkeypatch: pytest.MonkeyPatch,
     backend: str,
     world_size: int,
     num_heads: int,
 ) -> None:
-    monkeypatch.setattr(custom_op, "op_registry_oot", custom_op.op_registry_oot.copy())
     op_cls = dcp.DirectDCPA2AReduce
-    if backend == "oot":
-        op_cls.register_oot(_OOTA2AReduce)
-    else:
-        monkeypatch.setattr(op_cls, "forward_cpu", op_cls.forward_cuda)
-    partial_output = torch.ones(2, num_heads, 4)
-    partial_lse = torch.zeros(2, num_heads)
-    dispatched_output = torch.ones(2, num_heads // world_size, 4)
-    dispatch = MagicMock(return_value=dispatched_output)
-    monkeypatch.setattr(
-        op_cls, "forward_native" if backend == "native" else "forward_cuda", dispatch
-    )
-    if backend == "cuda":
-        monkeypatch.setattr(op_cls, "forward_cpu", dispatch)
+    monkeypatch.setattr(op_cls, "forward_cpu", op_cls.forward_cuda)
     config = VllmConfig(
         compilation_config=CompilationConfig(
             custom_ops=[f"-{op_cls.name}"] if backend == "native" else ["all"]
         )
     )
     with set_current_vllm_config(config):
-        op = op_cls(SimpleNamespace(world_size=world_size), workspace=object())
-    seq_lens = torch.ones(1, dtype=torch.int32)
-    query_start_loc = torch.tensor([0, 2], dtype=torch.int32)
-    kwargs = dict(
-        is_lse_base_on_e=False,
-        seq_lens=seq_lens,
-        query_start_loc=query_start_loc,
-    )
+        op = op_cls(SimpleNamespace(world_size=world_size))
+    partial_output = torch.ones(2, num_heads, 4)
+    partial_lse = torch.zeros(2, num_heads)
     if world_size == 1:
-        assert op(partial_output, partial_lse, **kwargs) is partial_output, (
-            "Single-rank combine must return its input without backend work"
+        assert op(partial_output, partial_lse, True) is partial_output, (
+            "Single-rank fallback must return its input without communication"
         )
-        dispatch.assert_not_called()
-    elif num_heads % world_size != 0:
-        with pytest.raises(ValueError, match="H=3 must be divisible.*2"):
-            op(partial_output, partial_lse, **kwargs)
-        dispatch.assert_not_called()
     else:
-        assert op(partial_output, partial_lse, **kwargs) is dispatched_output
-        dispatch.assert_called_once_with(partial_output, partial_lse, **kwargs)
+        with pytest.raises(ValueError, match="H=3 must be divisible.*2"):
+            op(partial_output, partial_lse, True)
+
+
+def _torch_group_all_gather(group: Any, query: torch.Tensor, dim: int) -> torch.Tensor:
+    shards = [torch.empty_like(query) for _ in range(dist.get_world_size(group))]
+    dist.all_gather(shards, query.contiguous(), group=group)
+    return torch.cat(shards, dim=dim)
 
 
 def _collective_test_op(
@@ -247,7 +246,9 @@ def _collective_test_op(
     )
     with set_current_vllm_config(config):
         group = SimpleNamespace(
-            world_size=workspace.world_size, device_group=workspace.group
+            world_size=workspace.world_size,
+            device_group=workspace.group,
+            all_gather=functools.partial(_torch_group_all_gather, workspace.group),
         )
         kwargs = (
             {"padded_num_heads": workspace.padded_num_heads}
@@ -401,6 +402,7 @@ class _FakeProcessGroup:
         ),
     ],
 )
+@pytest.mark.parametrize("use_direct", [None, False, True])
 @pytest.mark.parametrize(
     "cuda, symmetric_memory, same_node, multicast, dtype, expected",
     [
@@ -418,6 +420,7 @@ def test_direct_dcp_workspace_eligibility(
     workspace_cls: str,
     dimensions: tuple[int, ...],
     expected_index: int,
+    use_direct: bool | None,
     cuda: bool,
     symmetric_memory: bool,
     same_node: bool,
@@ -425,6 +428,14 @@ def test_direct_dcp_workspace_eligibility(
     dtype: torch.dtype,
     expected: tuple[bool, bool, bool],
 ) -> None:
+    env_name = (
+        "VLLM_USE_DIRECT_DCP_A2A",
+        "VLLM_USE_DIRECT_DCP_Q_GATHER",
+        "VLLM_USE_DIRECT_DCP_KV_GATHER",
+    )[expected_index]
+    monkeypatch.setattr(dcp.envs, env_name, use_direct)
+    if use_direct is not None:
+        expected = (use_direct, use_direct and multicast, use_direct and multicast)
     monkeypatch.setattr(cp_common.current_platform, "is_cuda", lambda: cuda)
     monkeypatch.setattr(cp_common, "symm_mem_available", symmetric_memory)
     monkeypatch.setattr(
@@ -439,7 +450,7 @@ def test_direct_dcp_workspace_eligibility(
         _FakeGroupCoordinator(), torch.device("cpu"), *dimensions, dtype, 1
     )
     assert result is (workspace if expected[expected_index] else None), (
-        "Only supported CUDA, dtype and topology combinations may allocate a workspace"
+        "Workspace allocation must preserve automatic and forced env-var choices"
     )
     assert allocate.call_count == int(expected[expected_index])
     factory.cache_clear()
@@ -581,7 +592,13 @@ def test_mla_dcp_manager_selects_fallback_backends(monkeypatch, default_vllm_con
         monkeypatch.setattr(op_cls, "forward_cpu", op_cls.forward_cuda)
     import vllm.v1.attention.ops.dcp as dcp_manager
 
-    group = SimpleNamespace(world_size=2, device_group=object())
+    group = SimpleNamespace(
+        world_size=2,
+        device_group=object(),
+        all_gather=MagicMock(
+            side_effect=lambda query, dim: torch.cat((query, query), dim)
+        ),
+    )
     monkeypatch.setattr(dcp_manager, "get_dcp_group", lambda: group)
     monkeypatch.setattr(
         dcp_manager, "get_direct_dcp_a2a_workspace", MagicMock(return_value=None)
@@ -618,15 +635,14 @@ def test_mla_dcp_manager_selects_fallback_backends(monkeypatch, default_vllm_con
     all_gather.assert_called_once_with(output, local, group=group.device_group)
     assert torch.equal(output, torch.cat((local, local), dim=0))
 
-    all_gather.reset_mock()
     query = torch.arange(16, dtype=torch.float32).reshape(1, 2, 8)
     assert manager.query_gather is not None
     assert torch.equal(manager.query_gather(query), torch.cat((query, query), dim=1))
-    all_gather.assert_called_once()
-    assert all_gather.call_args.kwargs["group"] is group.device_group
+    group.all_gather.assert_called_once_with(query, dim=1)
 
-    all_to_all = MagicMock(side_effect=lambda dst, src, **kwargs: dst.copy_(src))
-    monkeypatch.setattr(torch.distributed, "all_to_all_single", all_to_all)
+    fallback_output = torch.full((1, 2, 4), 42.0)
+    a2a_fallback = MagicMock(return_value=fallback_output)
+    monkeypatch.setattr(dcp_manager, "dcp_a2a_lse_reduce", a2a_fallback)
     partial_output, partial_lse = torch.full((1, 4, 4), 42.0), torch.zeros(1, 4)
     seq_lens = torch.ones(1, dtype=torch.int32)
     query_start_loc = torch.tensor([0, 1], dtype=torch.int32)
@@ -637,8 +653,14 @@ def test_mla_dcp_manager_selects_fallback_backends(monkeypatch, default_vllm_con
         query_start_loc=query_start_loc,
     )
     assert torch.equal(combined, torch.full((1, 2, 4), 42.0))
-    all_to_all.assert_called_once()
-    assert all_to_all.call_args.kwargs["group"] is group.device_group
+    a2a_fallback.assert_called_once_with(
+        partial_output,
+        partial_lse,
+        cp_group=group,
+        is_lse_base_on_e=True,
+        seq_lens=seq_lens,
+        query_start_loc=query_start_loc,
+    )
 
 
 @pytest.mark.parametrize(

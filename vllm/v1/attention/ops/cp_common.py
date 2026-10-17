@@ -58,32 +58,43 @@ def _symm_mem_spans_group(group: GroupCoordinator) -> bool:
     return spans
 
 
-class DirectCPCollective(CustomOp):
-    """Direct collectives stay enabled under Inductor unless explicitly disabled."""
+def direct_cp_enabled(
+    group: GroupCoordinator,
+    dtype: torch.dtype,
+    use_direct: bool | None,
+    supported_dtypes: tuple[torch.dtype, ...] | None = None,
+) -> bool:
+    if use_direct is not None:
+        return use_direct
+    return (
+        symm_mem_available
+        and current_platform.is_cuda()
+        and (supported_dtypes is None or dtype in supported_dtypes)
+        and (
+            all(in_the_same_node_as(group.cpu_group, source_rank=0))
+            or _symm_mem_spans_group(group)
+        )
+    )
 
-    supported_dtypes: tuple[torch.dtype, ...] | None = None
-    requires_multicast: bool = False
+
+def direct_cp_multicast_enabled(
+    group: GroupCoordinator,
+    dtype: torch.dtype,
+    use_direct: bool | None,
+    supported_dtypes: tuple[torch.dtype, ...] | None = None,
+) -> bool:
+    return direct_cp_enabled(
+        group, dtype, use_direct, supported_dtypes
+    ) and _symm_mem_spans_group(group)
+
+
+class DirectCPCollective(CustomOp):
+    """Preserve collective CUDA dispatch under Inductor's global custom-op default."""
 
     @staticmethod
     def default_on() -> bool:
         CustomOp.default_on()  # Validate the global all/none mode.
         return True
-
-    @classmethod
-    def can_use_direct_workspace(
-        cls, group: GroupCoordinator, dtype: torch.dtype
-    ) -> bool:
-        if not (
-            symm_mem_available
-            and current_platform.is_cuda()
-            and (cls.supported_dtypes is None or dtype in cls.supported_dtypes)
-        ):
-            return False
-        if cls.requires_multicast:
-            return _symm_mem_spans_group(group)
-        return all(in_the_same_node_as(group.cpu_group, source_rank=0)) or (
-            _symm_mem_spans_group(group)
-        )
 
 
 class DirectCPWorkspace:
