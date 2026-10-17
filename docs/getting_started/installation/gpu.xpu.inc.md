@@ -145,6 +145,9 @@ docker run -it \
 --8<-- [end:build-image-from-source]
 --8<-- [start:supported-features]
 
+For the opt-in Qwen MoE decode fusion, including compile-only, XPU graph and
+eager behavior, see [XPU MoE + Shared Expert](../../design/fusions.md#xpu-moe--shared-expert-fuse_xpu_moe_shared).
+
 XPU platform supports **tensor parallel** inference/serving and also supports **pipeline parallel** as a beta feature for online serving. For **pipeline parallel**, we support it on single node with mp as the backend. For example, a reference execution like following:
 
 ```bash
