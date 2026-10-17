@@ -1188,6 +1188,15 @@ async def test_streaming_reasoning_usage_lifecycle_edges(
         await iterator.aclose()
 
     error_chunks = [c for c in chunks if isinstance(c, dict) and "error" in c]
+    if name == "empty-finish":
+        # A choice that finishes without output still gets its last chunk, unparsed.
+        assert any(
+            choice.get("finish_reason") == "stop"
+            for item in chunks
+            if isinstance(item, dict)
+            for choice in item.get("choices", [])
+        )
+        parsers[0].parse_delta.assert_not_called()
     call_count = sum(parser.count_reasoning_tokens.call_count for parser in parsers)
     if expected_tokens is not None:
         assert outcome == "exhausted" and chunks[-1] == "[DONE]" and not error_chunks
