@@ -5,7 +5,7 @@
 import json
 import threading
 from collections.abc import Callable
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import msgspec
 
@@ -13,6 +13,8 @@ from vllm.distributed import stateless_destroy_torch_distributed_process_group
 from vllm.distributed.utils import stateless_init_torch_distributed_process_group
 from vllm.logger import init_logger
 from vllm.utils.network_utils import get_open_port
+from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine import (
     FT_STATUS_CALL_ID,
     EngineCoreOutputs,
@@ -20,6 +22,7 @@ from vllm.v1.engine import (
     UtilityOutput,
 )
 from vllm.v1.fault_tolerance.utils import FaultToleranceRequest, FaultToleranceResult
+from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import RequestStatus
 from vllm.v1.serial_utils import UtilityResult, run_method
 
@@ -86,8 +89,7 @@ class EngineCoreSentinel:
         engine = self.engine
         aborted = engine.scheduler.finish_requests(None, RequestStatus.FINISHED_ABORTED)
         engine._send_abort_outputs(aborted)
-        if engine.batch_queue is not None:
-            engine.batch_queue.clear()
+
         if (
             hasattr(engine.model_executor, "is_failed")
             and engine.model_executor.is_failed
@@ -103,6 +105,43 @@ class EngineCoreSentinel:
             exc_info=exc,
         )
         self._push_status()
+
+    def _drain_batch_queue(self) -> None:
+        """Drain the batch queue instead of clearing it directly.
+
+        Consume the get-and-clear kv_connector_output of pre-fault steps
+        via update_from_output() with an empty SchedulerOutput (all
+        requests were aborted, so only connector bookkeeping runs).
+        """
+        engine = self.engine
+        if engine.batch_queue is None:
+            return
+        scheduler = cast(Scheduler, engine.scheduler)
+
+        while engine.batch_queue:
+            future, _, _ = engine.batch_queue.pop()
+            try:
+                model_output = future.result()
+            except Exception as e:
+                # Failed step: kv_connector_output has already been merged
+                # into the executor's KVOutputAggregator (in get_response),
+                # so it is safe to drop the exception here.
+                logger.warning(
+                    "[FT] Dropping exception from batch queue during fault "
+                    "handling: %s",
+                    e,
+                )
+                continue
+            kv_connector_output = (
+                model_output.kv_connector_output if model_output is not None else None
+            )
+            if kv_connector_output is None or kv_connector_output.is_empty():
+                continue
+            scheduler.update_from_output(
+                SchedulerOutput.make_empty(),
+                ModelRunnerOutput.with_kv_conn_output_only(kv_connector_output),
+            )
+        engine.batch_queue.clear()
 
     def _push_status(self):
         """Push current health to the client so it can refresh its cache."""
@@ -127,7 +166,7 @@ class EngineCoreSentinel:
             engine.step_counter = 0
 
         executor.collective_rpc("handle_ft_command", args=(ft_request,))
-
+        self._drain_batch_queue()
         self.status_type = EngineStatusType.HEALTHY
         logger.info("[FT] Engine %d status -> HEALTHY", self.engine_index)
         self.resumed.set()
