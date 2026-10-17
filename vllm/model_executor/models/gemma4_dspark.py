@@ -328,5 +328,13 @@ class Gemma4DSparkForCausalLM(Qwen3DSparkForCausalLM):
                         includes_confidence_head = True
         if not includes_confidence_head:
             self.model.confidence_head = None
+        if self.config.markov_rank == 0:
+            # A DFlash checkpoint (markov_rank == 0) ships no Markov weights:
+            # the head is zero-width, so it biases the draft logits by zero.
+            # Report its empty parameters as loaded so the weight tracker does
+            # not reject the checkpoint.
+            loaded.update(
+                name for name, _ in self.named_parameters() if ".markov_head." in name
+            )
         self.model._build_fused_kv_buffers()
         return loaded

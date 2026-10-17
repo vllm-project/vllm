@@ -85,6 +85,44 @@ def test_gemma4_dspark_loads_confidence_head(
     torch.testing.assert_close(model.compute_confidence(hidden, markov), expected)
 
 
+@pytest.mark.usefixtures("dist_init")
+def test_gemma4_dspark_markov_rank_zero_needs_no_markov_weights(monkeypatch) -> None:
+    """A DFlash checkpoint (markov_rank == 0) ships no Markov weights (#49614).
+
+    The zero-width head biases the draft logits by zero, so its empty
+    parameters must not make the weight tracker reject the checkpoint.
+    """
+    config = SimpleNamespace(
+        vocab_size=64,
+        hidden_size=8,
+        target_layer_ids=[0, 1],
+        num_hidden_layers=0,
+        rms_norm_eps=1e-6,
+        markov_rank=0,
+        enable_confidence_head=False,
+    )
+    vllm_config = SimpleNamespace(
+        compilation_config=CompilationConfig(mode=CompilationMode.NONE),
+        model_config=SimpleNamespace(dtype=torch.bfloat16),
+        speculative_config=SimpleNamespace(
+            draft_model_config=SimpleNamespace(hf_config=config),
+        ),
+    )
+    monkeypatch.setattr(Gemma4DSparkModel, "_build_fused_kv_buffers", lambda _: None)
+    model = Gemma4DSparkForCausalLM(vllm_config=cast(VllmConfig, vllm_config))
+
+    markov_params = {
+        name for name, _ in model.named_parameters() if ".markov_head." in name
+    }
+    assert markov_params, "the zero-width Markov head still registers parameters"
+    assert all(
+        param.numel() == 0
+        for name, param in model.named_parameters()
+        if name in markov_params
+    )
+    assert markov_params <= model.load_weights([])
+
+
 @pytest.mark.cpu_test
 @pytest.mark.usefixtures("dist_init")
 def test_checkpoint_lm_head_can_override_tied_config(monkeypatch) -> None:
