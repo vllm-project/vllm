@@ -9,7 +9,7 @@ from dataclasses import replace
 from functools import partial, reduce
 from typing import Any
 
-from vllm.config import VllmConfig
+from vllm.config import SpeculativeConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import format_gib
@@ -1038,120 +1038,20 @@ def _get_packed_kv_cache_groups(
             assert group_spec is not None
             groups.append(KVCacheGroupSpec(group_layer_names, group_spec))
 
-    _annotate_eagle_groups(
-        vllm_config,
-        kv_cache_spec,
-        groups,
-        use_trailing_layer_fallback=_uses_trailing_mtp_layers(vllm_config),
-    )
-    _warn_if_unannotated_eagle_mamba(vllm_config, groups)
     return groups
 
 
-def _uses_trailing_mtp_layers(vllm_config: VllmConfig) -> bool:
-    """Whether the drafter's KV layers can be located positionally.
-
-    MTP drafters register their KV layers after the target layers, without a
-    distinguishing spec marker. DeepseekV4/V4.1 do this with ``dspark`` too.
-    The annotator separately checks that the groups partition the layers exactly.
-    """
-    spec_config = vllm_config.speculative_config
-    if spec_config is None or not spec_config.use_eagle():
-        return False
-    if spec_config.method == "mtp":
-        return True
-    model_config = vllm_config.model_config
-    return model_config is not None and model_config.hf_config.model_type in (
-        "deepseek_v4",
-        "deepseek_v41",
-    )
-
-
-def _groups_partition_layers_exactly(
-    kv_cache_spec: dict[str, KVCacheSpec],
-    kv_cache_groups: list[KVCacheGroupSpec],
-) -> bool:
-    """Whether the groups cover every layer of ``kv_cache_spec`` exactly once.
-
-    The trailing-layer draft fallback is only meaningful when the last
-    registered layer is guaranteed to appear in exactly one group.
-    """
-    names = [name for group in kv_cache_groups for name in group.layer_names]
-    return len(names) == len(kv_cache_spec) and set(names) == set(kv_cache_spec)
-
-
-def _annotate_eagle_groups(
-    vllm_config: VllmConfig,
-    kv_cache_spec: dict[str, KVCacheSpec],
-    kv_cache_groups: list[KVCacheGroupSpec],
-    use_trailing_layer_fallback: bool = False,
-) -> None:
-    """Flag the KV cache groups that hold drafter attention layers.
-
-    Two detection rules, in order of preference:
-
-    1. Spec-driven. ``non_causal_multi_token_decode`` is declared on
-       MLAAttentionSpec and set by drafter attention layers that run a
-       non-causal multi-token decode (today only Kimi-K3 DSpark). It survives
-       MLAAttentionSpec.merge, so it still identifies a group after per-group
-       spec merging, wherever grouping happens to land. It is sufficient but
-       not necessary: a drafter whose spec is indistinguishable from the
-       target's cannot be found this way.
-    2. Positional fallback for MTP drafters (including DeepseekV4/V4.1 DSpark), whose
-       MTP block reuses the target's own decoder layer and so carries no spec
-       marker. Their draft attention layers always register after every
-       target layer, so flag whichever group holds the last registered layer.
-       This rule is only valid where the groups partition exactly the layers
-       of ``kv_cache_spec``, which is re-checked here before applying it.
-       When a drafter's trailing caches span several groups, this rule flags
-       only the group holding the very last layer and must be generalized.
-       FIXME(yifan): avoid/generalize this hacky check.
-
-    Args:
-        vllm_config: Config supplying the speculative method, if any.
-        kv_cache_spec: The kv cache spec of each attention layer, in layer
-            registration order. Only read by rule 2.
-        kv_cache_groups: Groups to annotate in place.
-        use_trailing_layer_fallback: Enable rule 2. Callers gate this on
-            ``_uses_trailing_mtp_layers``.
-
-    """
-    spec_config = vllm_config.speculative_config
-    if spec_config is None or not spec_config.use_eagle_block_drop():
-        return
-
-    for group in kv_cache_groups:
-        if any(
-            getattr(spec, "non_causal_multi_token_decode", False)
-            for spec in iter_layer_specs(group.kv_cache_spec)
-        ):
-            group.is_eagle_group = True
-
-    if not use_trailing_layer_fallback:
-        return
-    if not _groups_partition_layers_exactly(kv_cache_spec, kv_cache_groups):
-        return
-    last_layer = next(reversed(kv_cache_spec))
-    for group in kv_cache_groups:
-        if last_layer in group.layer_names:
-            group.is_eagle_group = True
-            break
-
-
 def _warn_if_unannotated_eagle_mamba(
-    vllm_config: VllmConfig,
+    spec_config: SpeculativeConfig,
     kv_cache_groups: list[KVCacheGroupSpec],
 ) -> None:
     """Warn when no KV cache group could be identified as the draft model's.
 
     Args:
-        vllm_config: Config supplying the speculative method, if any.
+        spec_config: Config supplying the speculative method.
         kv_cache_groups: Groups as they will be handed to consumers.
 
     """
-    spec_config = vllm_config.speculative_config
-    if spec_config is None or not spec_config.use_eagle():
-        return
     if any(group.is_eagle_group for group in kv_cache_groups):
         return
     mamba_groups = [
@@ -1297,13 +1197,6 @@ def get_kv_cache_groups(
             aligned = replace(spec, block_size=new_bs, page_size_padded=common_page)
             groups.append(KVCacheGroupSpec([name], aligned))
 
-    _annotate_eagle_groups(
-        vllm_config,
-        kv_cache_spec,
-        groups,
-        use_trailing_layer_fallback=_uses_trailing_mtp_layers(vllm_config),
-    )
-    _warn_if_unannotated_eagle_mamba(vllm_config, groups)
     return groups
 
 
@@ -1556,7 +1449,7 @@ def _project_kv_cache_groups_to_worker(
             KVCacheGroupSpec(
                 worker_layer_names,
                 group_spec,
-                is_eagle_group=group.is_eagle_group and bool(worker_layer_names),
+                is_eagle_group=group.is_eagle_group,
                 host_resident=group.host_resident,
                 enable_kv_transfer=group.enable_kv_transfer,
                 role=group.role,
@@ -1636,6 +1529,14 @@ def get_kv_cache_configs(
     global_kv_cache_groups = get_kv_cache_groups_from_builder(
         builder, vllm_config, merged_kv_cache_specs
     )
+    spec_config = vllm_config.speculative_config
+    if spec_config is not None and spec_config.use_eagle_block_drop():
+        draft_layer_names = {
+            name for name, spec in merged_kv_cache_specs.items() if spec.is_draft
+        }
+        for group in global_kv_cache_groups:
+            group.is_eagle_group = not draft_layer_names.isdisjoint(group.layer_names)
+        _warn_if_unannotated_eagle_mamba(spec_config, global_kv_cache_groups)
 
     # If original_max_model_len was -1, automatically
     # determine the maximum model length that fits in available GPU memory.
