@@ -223,6 +223,24 @@ def get_block_size(dtype: torch.dtype) -> int:
         return 64
 
 
+def _fit_block_to_shared_memory(
+    block: int, head_dim: int, element_size: int, device: torch.device
+) -> int:
+    """Halve the tile until the Q, K and V tiles fit the device's shared memory.
+
+    The default tile of 128 for a head_dim of 256 needs 163,840 bytes of shared
+    memory, which GPUs with a 99 KiB opt-in limit per block (consumer Ampere,
+    Ada and Blackwell: sm_86, sm_89, sm_120) cannot provide.
+    """
+    if not current_platform.is_cuda() or device.type != "cuda":
+        return block
+    limit = torch.cuda.get_device_properties(device).shared_memory_per_block_optin
+    padded_head_dim = triton.next_power_of_2(head_dim)
+    while block > 16 and 3 * block * padded_head_dim * element_size > limit:
+        block //= 2
+    return block
+
+
 def context_attention_fwd(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -247,6 +265,7 @@ def context_attention_fwd(
     BLOCK = get_block_size(q.dtype)
     if Lk >= 512:
         BLOCK = min(BLOCK, 32)
+    BLOCK = _fit_block_to_shared_memory(BLOCK, Lk, q.element_size(), q.device)
 
     sm_scale = 1.0 / (Lq**0.5) if softmax_scale is None else softmax_scale
     # rescale with 1/ln(2) for triton exp2
