@@ -3,6 +3,7 @@
 import dataclasses
 from concurrent.futures import Future
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import Mock, patch
 
 import numpy as np
@@ -2157,6 +2158,194 @@ def test_draft_slots_budgeted_per_scheduled_request(tmp_path, monkeypatch):
         scheduler.add_request(request)
 
     assert scheduler.schedule().num_scheduled_tokens == {"0": 10, "1": 4}
+
+
+@pytest.fixture
+def uno_scheduler_factory(tmp_path, monkeypatch):
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    monkeypatch.setattr("vllm.config.vllm.HAS_TRITON", True)
+    # Exercise the CUDA-only async contract in the CPU scheduler tests.
+    from vllm.platforms import current_platform
+
+    monkeypatch.setattr(
+        current_platform, "apply_config_platform_defaults", lambda _config: None
+    )
+    monkeypatch.setattr(
+        current_platform, "check_and_update_config", lambda _config: None
+    )
+    (tmp_path / "config.json").write_text(
+        '{"architectures": ["OPTForCausalLM"], "model_type": "opt"}'
+    )
+
+    def create(**kwargs):
+        options: dict[str, Any] = dict(
+            model=str(tmp_path),
+            skip_tokenizer_init=True,
+            use_v2_model_runner=True,
+            async_scheduling=True,
+            num_speculative_tokens=4,
+            speculative_method="uno",
+            device="cpu",
+            block_size=4,
+            max_num_seqs=1,
+            max_num_batched_tokens=32,
+        )
+        options.update(kwargs)
+        async_scheduling = options["async_scheduling"]
+        if options["speculative_method"] == "uno":
+            # Uno currently requires async in the serving config. Construct a
+            # valid config, then exercise the base scheduler's CPU contract.
+            options["async_scheduling"] = True
+        else:
+            monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
+            options["use_v2_model_runner"] = False
+        scheduler = create_scheduler(**options)
+        if not async_scheduling and options["speculative_method"] == "uno":
+            scheduler.vllm_config.scheduler_config.async_scheduling = False
+            return Scheduler(
+                vllm_config=scheduler.vllm_config,
+                kv_cache_config=scheduler.kv_cache_config,
+                structured_output_manager=scheduler.structured_output_manager,
+                block_size=scheduler.block_size,
+                log_stats=scheduler.log_stats,
+            )
+        return scheduler
+
+    return create
+
+
+@pytest.mark.parametrize("num_available_blocks", [1, 2])
+def test_uno_reserves_suffix_before_first_draft(
+    uno_scheduler_factory, num_available_blocks
+):
+    """Admission must fit the seed/noise suffix even before drafts exist."""
+    scheduler = uno_scheduler_factory(num_blocks=num_available_blocks + 1)
+    (request,) = create_requests(num_requests=1, num_tokens=1, block_size=4)
+    scheduler.add_request(request)
+    manager = scheduler.kv_cache_manager
+
+    output = scheduler.schedule()
+    if num_available_blocks == 1:
+        assert not output.num_scheduled_tokens
+        assert request.status == RequestStatus.WAITING
+        assert not manager.get_blocks(request.request_id).blocks[0]
+        assert manager.block_pool.get_num_free_blocks() == num_available_blocks
+    else:
+        assert output.num_scheduled_tokens == {request.request_id: 1}
+        assert not output.scheduled_spec_decode_tokens
+        assert len(manager.get_block_ids(request.request_id)[0]) == 2
+        assert manager.block_pool.get_num_free_blocks() == 0
+
+    scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
+    assert manager.block_pool.get_num_free_blocks() == num_available_blocks
+
+
+def test_uno_context_limit_uses_the_scheduler_spec_token_cap(uno_scheduler_factory):
+    """Uno needs no scheduler change at max_model_len.
+
+    The scheduler already trims a request's scheduled drafts so its input
+    positions stay below max_model_len, and allocate_slots caps Uno's K
+    lookahead slots there; the drafter writes PAD slots past the limit (see
+    test_draft_does_not_write_null_or_unallocated_or_out_of_context_slots).
+    Accept every draft so the request leaps K + 1 tokens per step, and check
+    that no step schedules or allocates past the limit.
+    """
+    k, block_size, max_model_len = 4, 4, 18
+    scheduler = uno_scheduler_factory(
+        num_speculative_tokens=k,
+        block_size=block_size,
+        max_model_len=max_model_len,
+        num_blocks=16,
+    )
+    (request,) = create_requests(
+        num_requests=1, num_tokens=3, max_tokens=100, block_size=block_size
+    )
+    scheduler.add_request(request)
+    rid = request.request_id
+    manager = scheduler.kv_cache_manager
+    max_blocks = -(-max_model_len // block_size)
+
+    scheduled_drafts = []
+    next_token = 100
+    output = scheduler.schedule()
+    for _ in range(max_model_len):
+        assert request.num_computed_tokens <= max_model_len - 1
+        assert len(manager.get_block_ids(rid)[0]) <= max_blocks
+        drafts = output.scheduled_spec_decode_tokens.get(rid, [])
+        scheduled_drafts.append(len(drafts))
+        sampled = list(drafts) + [next_token]
+        next_token += 1
+        _model_output(scheduler, output, [sampled])
+        if request.is_finished():
+            break
+        scheduler.update_draft_token_ids(
+            DraftTokenIds([rid], [list(range(next_token, next_token + k))])
+        )
+        next_token += k
+        output = scheduler.schedule()
+
+    assert request.status == RequestStatus.FINISHED_LENGTH_CAPPED
+    assert request.num_tokens == max_model_len
+    # Full drafts while there is room, then the existing cap trims the last.
+    assert scheduled_drafts == [0, k, k, k - 1]
+
+
+@pytest.mark.parametrize("num_accepted", [0, 3, 4])
+@pytest.mark.parametrize("preempt", [False, True])
+def test_uno_verification_rolls_back_and_releases_suffix(
+    uno_scheduler_factory, num_accepted, preempt
+):
+    """K+1 verification commits accepted tokens and frees temporary KV on exit."""
+    scheduler = uno_scheduler_factory(num_blocks=9)
+    (request,) = create_requests(num_requests=1, num_tokens=3, block_size=4)
+    scheduler.add_request(request)
+    rid = request.request_id
+    manager = scheduler.kv_cache_manager
+    initial_free_blocks = manager.block_pool.get_num_free_blocks()
+
+    def update(output, token_ids):
+        scheduler.update_from_output(
+            output,
+            ModelRunnerOutput(
+                req_ids=[rid],
+                req_id_to_index={rid: 0},
+                sampled_token_ids=[token_ids],
+                logprobs=None,
+                prompt_logprobs_dict={},
+                pooler_output=[],
+            ),
+        )
+
+    update(scheduler.schedule(), [10])
+    draft_ids = [11, 12, 13, 14]
+    scheduler.update_draft_token_ids(DraftTokenIds([rid], [draft_ids]))
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens == {rid: 5}
+    assert output.scheduled_spec_decode_tokens == {rid: draft_ids}
+    assert len(manager.get_block_ids(rid)[0]) == 3
+
+    accepted_ids = draft_ids[:num_accepted] + [20]
+    update(output, accepted_ids)
+    assert list(request.output_token_ids) == [10] + accepted_ids
+    assert request.num_computed_tokens == 4 + num_accepted
+    assert request.num_tokens == request.num_computed_tokens + 1
+
+    if preempt:
+        scheduler.update_draft_token_ids(DraftTokenIds([rid], [[21, 22, 23, 24]]))
+        scheduler.running.remove(request)
+        scheduler._preempt_request(request, 0.0)
+        assert request.status == RequestStatus.PREEMPTED
+        assert request.num_computed_tokens == 0
+        assert not request.spec_token_ids
+        assert not manager.get_blocks(rid).blocks[0]
+        assert manager.block_pool.get_num_free_blocks() == initial_free_blocks
+        resumed = scheduler.schedule()
+        assert resumed.num_scheduled_tokens == {rid: request.num_tokens}
+        assert not resumed.scheduled_spec_decode_tokens
+
+    scheduler.finish_requests(rid, RequestStatus.FINISHED_ABORTED)
+    assert not manager.get_blocks(rid).blocks[0]
+    assert manager.block_pool.get_num_free_blocks() == initial_free_blocks
 
 
 @pytest.mark.parametrize(("method", "max_num_reqs"), [("dflash", 4), ("dspark", 5)])
