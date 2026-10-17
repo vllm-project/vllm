@@ -40,7 +40,6 @@ from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel, UsageInfo
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
-from vllm.outputs import WeightVersionSpan
 from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
 from vllm.renderers.chat_utils import (
     ChatCompletionMessageParam,
@@ -130,8 +129,6 @@ class ChatCompletionResponseChoice(OpenAIBaseModel):
     # ``None`` if (a) the request was aborted before any forward pass,
     # or (b) ``enable_return_routed_experts`` is off server-side.
     routed_experts: str | None = None
-    # Contiguous weight version spans over output-token indexes.
-    weight_versions: list[WeightVersionSpan] | None = None
 
 
 class ChatCompletionResponse(OpenAIBaseModel):
@@ -171,8 +168,6 @@ class ChatCompletionResponseStreamChoice(OpenAIBaseModel):
     stop_reason: int | str | None = None
     # not part of the OpenAI spec but for tracing the tokens
     token_ids: list[int] | None = None
-    # Set on the final chunk only; covers the whole output.
-    weight_versions: list[WeightVersionSpan] | None = None
 
 
 class ChatCompletionStreamResponse(OpenAIBaseModel):
@@ -433,15 +428,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "only in the first chunk, and token_ids contains the delta tokens "
             "for each chunk. This is useful for debugging or when you "
             "need to map generated text back to input tokens."
-        ),
-    )
-    return_weight_versions: bool = Field(
-        default=False,
-        description=(
-            "If true, each choice includes weight_versions: the weight-version "
-            "label that sampled each half-open range of its output tokens. "
-            "When streaming, only the last chunk of each choice includes it. "
-            "Beam search does not return it."
         ),
     )
     routed_experts_prompt_start: int = Field(
@@ -710,7 +696,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
         return BeamSearchParams(
             beam_width=n,
-            allowed_token_ids=self.allowed_token_ids,
             max_tokens=max_tokens,
             ignore_eos=self.ignore_eos,
             temperature=temperature,

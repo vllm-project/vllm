@@ -1732,14 +1732,14 @@ class Scheduler(SchedulerInterface):
 
         Discards the last sampled output token from the prior input chunk.
         """
-        # Keep all output tokens but the final sampled one.
-        keep_end = session.num_tokens - 1
-        assert keep_end >= session.num_computed_tokens
+        # Current streaming input behaviour: Keep only computed output tokens
+        # (discard final sampled output token).
+        num_computed_tokens = session.num_computed_tokens
         kept_output_tokens = session._all_token_ids[
-            session.num_prompt_tokens : keep_end
+            session.num_prompt_tokens : num_computed_tokens
         ]
-        del session._all_token_ids[keep_end:]
-        del session.block_hashes[keep_end // self.hash_block_size :]
+        del session._all_token_ids[num_computed_tokens:]
+        del session.block_hashes[num_computed_tokens // self.hash_block_size :]
         session._output_token_ids.clear()
         assert session.prompt_token_ids is not None
         # Extend prompt with kept output tokens.
@@ -2155,8 +2155,6 @@ class Scheduler(SchedulerInterface):
         # to avoid expensive operations inside the loop.
         stopped_running_reqs: set[Request] = set()
         stopped_preempted_reqs: set[Request] = set()
-        # Stopped resumable requests to re-enqueue, in output order.
-        continuing_reqs: list[Request] = []
         for req_id, num_tokens_scheduled in num_scheduled_tokens.items():
             assert num_tokens_scheduled > 0
             request = self.requests.get(req_id)
@@ -2322,8 +2320,6 @@ class Scheduler(SchedulerInterface):
                         kv_transfer_params["remote_prefill_cached_tokens"] = (
                             prefill_stats.num_cached_tokens
                         )
-                else:
-                    continuing_reqs.append(request)
 
                 if status_before_stop == RequestStatus.RUNNING:
                     stopped_running_reqs.add(request)
@@ -2375,16 +2371,14 @@ class Scheduler(SchedulerInterface):
                 assert not prompt_logprobs_tensors
                 assert prompt_token_id_logprobs is None
 
-        # Remove stopped requests from their queues, then enqueue the ones
-        # that continue, so each ends up in exactly one queue.
+        # Remove the stopped requests from the running and waiting queues.
         if stopped_running_reqs:
             self.running = remove_all(self.running, stopped_running_reqs)
         if stopped_preempted_reqs:
+            # This is a rare case and unlikely to impact performance.
             self.waiting.remove_requests(stopped_preempted_reqs)
             self.kv_holding_waiting.remove_requests(stopped_preempted_reqs)
             self.deferred_waiting.difference_update(stopped_preempted_reqs)
-        for request in continuing_reqs:
-            self._enqueue_waiting_request(request)
 
         error_req_ids = set(self.grammar_compile_error_reqs)
         self.grammar_compile_error_reqs.clear()
@@ -2574,11 +2568,13 @@ class Scheduler(SchedulerInterface):
             request.status = RequestStatus.WAITING_FOR_STREAMING_REQ
             self.num_waiting_for_streaming_input += 1
 
+        self._enqueue_waiting_request(request)
         return False
 
     def _update_request_with_output(
         self, request: Request, new_token_ids: list[int], is_stale: bool = False
     ) -> tuple[list[int], bool]:
+        # is_stale is only used by the AsyncScheduler override.
         # Append generated tokens and check for stop. Note that if
         # a request is still being prefilled, we expect the model runner
         # to return empty token ids for the request.
@@ -2590,10 +2586,6 @@ class Scheduler(SchedulerInterface):
             # This must be called before we make the EngineCoreOutput.
             stopped = check_stop(request, self.max_model_len)
             if stopped:
-                # num_computed_tokens covers all new tokens but the last one.
-                # Keep that true after trimming: resumable requests resume from it.
-                if not is_stale:
-                    request.num_computed_tokens -= len(new_token_ids) - num_new
                 del new_token_ids[num_new:]  # Trim new tokens if needed.
                 break
         return new_token_ids, stopped

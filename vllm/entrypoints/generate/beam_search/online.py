@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
-import math
 from abc import ABC
 from collections.abc import AsyncGenerator, Mapping
 
@@ -17,10 +16,7 @@ from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.utils import random_uuid
 from vllm.utils.async_utils import collect_from_async_generator
 
-from .utils import (
-    BeamSearchSequence,
-    create_sort_beams_key_function,
-)
+from .utils import BeamSearchSequence, create_sort_beams_key_function
 
 
 class BeamSearchOnlineMixin(ABC):
@@ -70,10 +66,6 @@ class BeamSearchOnlineMixin(ABC):
             watermarking=False,
             detokenize=False,
         )
-        params.configure_logprobs(
-            sampling_params, self.engine_client.input_processor.vllm_config
-        )
-        allowed = set(params.allowed_token_ids) if params.allowed_token_ids else None
         all_beams = [
             BeamSearchSequence(
                 orig_prompt=prompt,
@@ -143,18 +135,6 @@ class BeamSearchOnlineMixin(ABC):
 
                 if result.outputs[0].logprobs is not None:
                     logprobs = result.outputs[0].logprobs[0]
-                    if allowed is not None:
-                        logprobs = {
-                            token: score
-                            for token, score in sorted(
-                                logprobs.items(),
-                                key=lambda item: item[1].logprob,
-                                reverse=True,
-                            )
-                            if token in allowed and math.isfinite(score.logprob)
-                        }
-                        for score in logprobs.values():
-                            score.rank = None
                     for token_id, logprob_obj in logprobs.items():
                         candidate_logprob = (
                             current_beam.cum_logprob + logprob_obj.logprob

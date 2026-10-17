@@ -452,12 +452,6 @@ class SpeculativeConfig:
     speculative methods. This is an experimental option for measuring the
     acceptance-rate impact of reusing that block. It does not disable the
     speculative drafter itself."""
-    draft_lm_head_quantization: Literal["fp8", "nvfp4"] | None = None
-    """Quantize the drafter's copy of a target lm_head it shares (EAGLE and
-    MTP). "fp8" uses per-row weight and per-token activation scales on the
-    platform's FP8 linear kernel; "nvfp4" is weight-only on the platform's
-    W4A16 kernel. The target verifies with its own head, so only the
-    acceptance length can change. Model Runner V2 only."""
     use_local_argmax_reduction: bool = False
     """Use vocab-parallel local argmax instead of all-gathering full logits
     for draft token generation. Reduces communication from O(vocab_size) to
@@ -1786,20 +1780,6 @@ class SpeculativeConfig:
                 "n_predict parameter."
             )
 
-        if self.draft_lm_head_quantization is not None:
-            # Gemma-4 MTP scores tied embedding rows directly; no lm_head to share.
-            if self.method not in ("eagle", "eagle3", "mtp") or self.use_gemma4_mtp():
-                raise ValueError(
-                    "draft_lm_head_quantization is not supported for method "
-                    f"{self.method!r}."
-                )
-            draft = self.draft_model_config
-            if draft is not None and draft.head_dtype != draft.dtype:
-                raise ValueError(
-                    "draft_lm_head_quantization needs the lm_head to run in the "
-                    f"model dtype, got head_dtype={draft.head_dtype}."
-                )
-
         if self.num_speculative_tokens <= 0:
             raise ValueError(
                 "Expected num_speculative_tokens to be greater "
@@ -1873,21 +1853,19 @@ class SpeculativeConfig:
         ==================== ============= ======== ================
         EAGLE3               eagle3        No       0
         P-EAGLE              eagle3        Yes      K - 1
-        DFlash               dflash        Yes      0
-        DSpark               dspark        Yes      0
+        DFlash               dflash        Yes      K
+        DSpark               dspark        Yes      K - 1
         MTP                  mtp           No       0
         N-gram               ngram         No       0
         Draft model          draft_model   No       1
         PARD                 draft_model   Yes      K
         ==================== ============= ======== ================
-
-        DFlash and DSpark draft in a separate query pass rather than adding
-        rows to the target batch.
         """
         num_draft_tokens = self.num_speculative_tokens
 
-        if self.use_dflash() or self.use_dspark():
-            return 0
+        if self.use_dflash():
+            # DFlash uses one bonus query followed by K mask queries.
+            return num_draft_tokens
 
         if self.parallel_drafting:
             if self.uses_draft_model():

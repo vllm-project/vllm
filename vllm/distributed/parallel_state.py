@@ -50,7 +50,6 @@ from vllm.distributed.device_communicators.base_device_communicator import (
 )
 from vllm.distributed.utils import (
     StatelessProcessGroup,
-    cpu_all_reduce_,
     create_tcp_store,
     get_cached_tcp_store_client,
 )
@@ -1376,10 +1375,6 @@ class GroupCoordinator:
         device. Use the CPU group instead.
         """
         torch.distributed.barrier(group=self.cpu_group)
-
-    def cpu_all_reduce_(self, tensor: torch.Tensor) -> torch.Tensor:
-        """In-place SUM all-reduce of a small CPU tensor over `cpu_group`."""
-        return cpu_all_reduce_(tensor, self.cpu_group)
 
     def send(self, tensor: torch.Tensor, dst: int | None = None) -> None:
         """Sends a tensor to the destination rank in a blocking way."""

@@ -14,7 +14,7 @@ from vllm.v1.core.kv_cache_coordinator import (
     get_kv_cache_coordinator,
 )
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
-from vllm.v1.core.kv_cache_utils import KVCacheBlock, KVCacheBlockCopy, trim_null_head
+from vllm.v1.core.kv_cache_utils import KVCacheBlock, KVCacheBlockCopy
 from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -117,7 +117,7 @@ class KVCacheBlocks:
         return [
             [
                 block.block_id
-                for block in trim_null_head(group)
+                for block in group
                 if block.block_hash is None and not block.is_null
             ]
             for group in self.blocks

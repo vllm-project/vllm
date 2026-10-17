@@ -76,8 +76,8 @@ def make_fake_gemm_tensors(
     a_dtype: torch.dtype,
     b_dtype: torch.dtype,
     divisibility: int,
-    output_dtype: torch.dtype = torch.float32,
 ):
+    from cutlass import Float32
     from quack.compile_utils import make_fake_tensor
 
     hidden_states = make_fake_tensor(
@@ -86,7 +86,7 @@ def make_fake_gemm_tensors(
     router_weight = make_fake_tensor(
         cutlass_dtype(b_dtype), (N, K), divisibility=divisibility
     )
-    output = make_fake_tensor(cutlass_dtype(output_dtype), (M, N), divisibility=1)
+    output = make_fake_tensor(Float32, (M, N), divisibility=1)
     return hidden_states, router_weight, output
 
 
@@ -97,7 +97,6 @@ def validate_common_gemm_inputs(
     *,
     op_name: str,
     k_multiple: int | None = None,
-    output_dtypes: tuple[torch.dtype, ...] = (torch.float32,),
 ) -> None:
     if hidden_states.dim() != 2 or router_weight.dim() != 2:
         raise ValueError("hidden_states and router_weight must be 2D tensors")
@@ -107,11 +106,8 @@ def validate_common_gemm_inputs(
         raise ValueError(
             "hidden_states and router_weight must be on the same CUDA device"
         )
-    if output_dtype not in output_dtypes:
-        raise ValueError(
-            f"{op_name} only supports output_dtype="
-            + " or ".join(str(dtype) for dtype in output_dtypes)
-        )
+    if output_dtype != torch.float32:
+        raise ValueError(f"{op_name} only supports output_dtype=torch.float32")
     if hidden_states.shape[1] != router_weight.shape[1]:
         raise ValueError(
             "hidden_states and router_weight must have matching K dimensions"

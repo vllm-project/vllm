@@ -175,10 +175,6 @@ class KVCacheSpec:
     ``MultipleOf(n)``: whole kernel blocks, when blocks are split into kernel
     blocks of up to ``n`` tokens."""
 
-    is_draft: bool = field(default=False, kw_only=True, compare=False)
-    """Whether a draft model owns this layer; excluded from equality so it never
-    affects grouping."""
-
     def __post_init__(self):
         alignment = self.block_stride_alignment
         if isinstance(alignment, int) and alignment <= 0:
@@ -664,8 +660,6 @@ class FullAttentionSpec(AttentionSpec):
         )
         for spec in specs:
             for f in fields(AttentionSpec):
-                if not f.compare:
-                    continue
                 assert getattr(spec, f.name) == getattr(merged_spec, f.name), (
                     "All attention layers in the same KV cache group must have "
                     "the same attention spec."
@@ -753,8 +747,6 @@ class MLAAttentionSpec(FullAttentionSpec):
         )
         for spec in specs:
             for f in fields(AttentionSpec):
-                if not f.compare:
-                    continue
                 assert getattr(spec, f.name) == getattr(merged_spec, f.name), (
                     "All attention layers in the same KV cache group must have "
                     "the same attention spec."
@@ -1216,8 +1208,6 @@ class SinkFullAttentionSpec(FullAttentionSpec):
         )
         for spec in specs:
             for f in fields(AttentionSpec):
-                if not f.compare:
-                    continue
                 assert getattr(spec, f.name) == getattr(merged_spec, f.name), (
                     "All attention layers in the same KV cache group must have "
                     "the same attention spec."
@@ -1455,7 +1445,7 @@ class KVCacheGroupSpec:
     layer_names: list[str]
     # The KV cache spec of this manager layer
     kv_cache_spec: KVCacheSpec
-    # Whether this group holds draft layers and takes the EAGLE last-block drop.
+    # Whether this group contains EAGLE/MTP draft attention layers.
     is_eagle_group: bool = False
     # Host groups use the dedicated HiSparse pool; others share the device pool.
     host_resident: bool = False

@@ -566,7 +566,7 @@ def test_invalid_output_dtype():
     with pytest.raises(ValueError, match="output_dtype=torch.float32"):
         from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import ll_bf16_gemm
 
-        ll_bf16_gemm(a, b, output_dtype=torch.float16)
+        ll_bf16_gemm(a, b, output_dtype=torch.bfloat16)
 
 
 def test_cache_miss_compiles_dotprod():
@@ -579,30 +579,6 @@ def test_cache_miss_compiles_dotprod():
     out = kernel(a, b)
     assert out.shape == (3, 17)
     _assert_close(out, _ref(a, b), context="cache miss dotprod")
-
-
-@pytest.mark.parametrize("M", [1, 2, 8, 16])
-@pytest.mark.parametrize("N", [1792, 3584])
-@torch.inference_mode()
-def test_bf16_output_and_fp32_cache_coexist(M, N):
-    """BF16 epilogues retain FP32 accumulation and can replay with new inputs."""
-    from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import ll_bf16_gemm
-
-    torch.manual_seed(42)
-    x = torch.randn(M, 5120, device="cuda", dtype=torch.bfloat16)
-    w = torch.randn(N, 5120, device="cuda", dtype=torch.bfloat16) * 0.01
-    for dtype in (torch.float32, torch.bfloat16):
-        actual = ll_bf16_gemm(x, w, output_dtype=dtype)
-        assert actual.dtype == dtype
-        reference = (x.double() @ w.double().T).to(dtype)
-        torch.testing.assert_close(actual, reference, rtol=0.008, atol=1e-5)
-    graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph):
-        actual = ll_bf16_gemm(x, w, output_dtype=torch.bfloat16)
-    x.normal_()
-    graph.replay()
-    reference = (x.double() @ w.double().T).bfloat16()
-    torch.testing.assert_close(actual, reference, rtol=0.008, atol=1e-5)
 
 
 if __name__ == "__main__":
