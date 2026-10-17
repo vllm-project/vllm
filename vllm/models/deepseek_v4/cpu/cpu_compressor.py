@@ -21,6 +21,7 @@ from vllm._custom_ops import (
     save_partial_states_cpu,
 )
 from vllm.forward_context import get_forward_context
+from vllm.model_executor.utils import register_derived_buffer, set_derived_buffer
 from vllm.models.deepseek_v4.compressor import CompressorMetadata, DeepseekCompressor
 from vllm.models.deepseek_v4.cpu.cpu_utils import map_local_to_global_slots_cpu
 
@@ -43,7 +44,15 @@ class DeepseekV4CPUCompressor(DeepseekCompressor):
         ``DeepseekV4CPUAttention.process_weights_after_loading``) -- the CPU
         kernel requires fp32/contiguous but the checkpoint loads this weight
         in bf16, and it never changes after loading."""
-        self._norm_weight_fp32 = self.norm.weight.to(torch.float32).contiguous()
+        # This class is swapped in after construction; declare the schema here.
+        if "_norm_weight_fp32" not in self._buffers:
+            register_derived_buffer(self, "_norm_weight_fp32")
+        set_derived_buffer(
+            self, "_norm_weight_fp32", self.norm.weight.to(torch.float32).contiguous()
+        )
+
+    def post_weights_reload(self) -> None:
+        self.cache_norm_weight_fp32()
 
     def forward(
         self,
