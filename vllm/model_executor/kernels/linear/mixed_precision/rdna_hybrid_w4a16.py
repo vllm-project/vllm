@@ -619,6 +619,8 @@ class RDNAHybridW4A16LinearKernel(MPLinearKernel):
             permute_param_layout_(w_zp_raw, input_dim=1, output_dim=0, packed_dim=0)
             w_zp = w_zp_raw.data.contiguous()
             self._transform_param(layer, self.w_zp_name, lambda x: w_zp)
+        else:
+            self.w_zp_name = None
 
         self._transform_param(layer, self.w_q_name, lambda x: w_q_skinny)
         self._transform_param(layer, self.w_s_name, lambda x: w_s_skinny)
