@@ -16,6 +16,7 @@ File naming:  <base_path>_r<rank>/<hhh>/<hh>_g<group_idx>/<hash_hex>.bin
 
 import functools
 import json
+import math
 import os
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, ClassVar
@@ -44,6 +45,7 @@ from vllm.v1.kv_offload.tiering.backpressure import BackpressureDetector
 from vllm.v1.kv_offload.tiering.base import (
     JobId,
     JobResult,
+    JobTimeoutStatus,
     RequestOffloadingContext,
     ScheduleEndContext,
     SecondaryTierManager,
@@ -117,6 +119,7 @@ class FileSystemTierManager(SecondaryTierManager):
         enable_kv_events: bool = False,
         locality: str | None = None,
         backpressure_detector: BackpressureDetector | None = None,
+        io_timeout_seconds: float | None = None,
     ):
         """Args:
         offloading_spec: Contains normalized offloading configuration and
@@ -132,11 +135,18 @@ class FileSystemTierManager(SecondaryTierManager):
         locality: Whether this tier's storage is LOCAL or REMOTE relative
             to the publishing vLLM instance.
         backpressure_detector: Optional backpressure detector.
+        io_timeout_seconds: Maximum time from submission to logical job failure.
+            The primary slots remain reserved until the I/O worker returns.
 
         """
         super().__init__(
             offloading_spec, primary_kv_view, tier_type, backpressure_detector
         )
+        if io_timeout_seconds is not None and (
+            not math.isfinite(io_timeout_seconds) or io_timeout_seconds <= 0
+        ):
+            raise ValueError("io_timeout_seconds must be finite and positive")
+        self._io_timeout_seconds = io_timeout_seconds
         self.locality = Locality(locality) if locality is not None else None
 
         self.events: list[OffloadingEvent] | None = None
@@ -157,12 +167,8 @@ class FileSystemTierManager(SecondaryTierManager):
         self._load_job_keys: dict[JobId, list[OffloadKey]] = {}
         # Block count per in-flight job, used to report transfer_bytes.
         self._job_block_counts: dict[JobId, int] = {}
+        self._job_deadlines: dict[JobId, float] = {}
         # Per load job: how many blocks loaded before a failure (partial keep).
-        # Written by the pool worker inside the load task before it raises (so
-        # before task_done publishes the job); read on the scheduler thread in
-        # get_finished_jobs only for job ids the finished queue returned. Under
-        # the GIL that read cannot observe the finished job without the prior
-        # write, so no extra lock is needed (get_finished is itself lock-free).
         self._load_progress: dict[JobId, int] = {}
 
         # Extract block size from primary view
@@ -219,6 +225,28 @@ class FileSystemTierManager(SecondaryTierManager):
             return LookupResult.RETRY
         return LookupResult.HIT if result else LookupResult.MISS
 
+    @property
+    @override
+    def io_timeout_seconds(self) -> float | None:
+        return self._io_timeout_seconds
+
+    @override
+    def on_job_timeout(self, job_metadata: TransferJob) -> JobTimeoutStatus:
+        job_id = job_metadata.job_id
+        status = self._pool.resolve_timeout(job_id)
+        if status is JobTimeoutStatus.COMPLETED:
+            return status
+        if job_metadata.is_promotion:
+            self._lookup_manager.mark_miss(job_metadata.keys)
+        self._store_job_keys.pop(job_id, None)
+        if status is JobTimeoutStatus.RUNNING:
+            return status
+        self._job_deadlines.pop(job_id, None)
+        self._job_block_counts.pop(job_id, None)
+        self._load_job_keys.pop(job_id, None)
+        self._load_progress.pop(job_id, None)
+        return status
+
     @override
     def submit_store(self, job_metadata: TransferJob) -> None:
         keys = list(job_metadata.keys)
@@ -233,6 +261,10 @@ class FileSystemTierManager(SecondaryTierManager):
             self._use_o_direct,
         )
         self._job_block_counts[job_metadata.job_id] = len(keys)
+        if self.io_timeout_seconds is not None:
+            self._job_deadlines[job_metadata.job_id] = (
+                job_metadata.submit_time + self.io_timeout_seconds
+            )
         self._pool.enqueue_store(job_metadata.job_id, 1, [task])
 
     @override
@@ -243,6 +275,10 @@ class FileSystemTierManager(SecondaryTierManager):
         keys = list(job_metadata.keys)
         self._load_job_keys[job_id] = keys
         self._job_block_counts[job_id] = len(keys)
+        if self.io_timeout_seconds is not None:
+            self._job_deadlines[job_id] = (
+                job_metadata.submit_time + self.io_timeout_seconds
+            )
         paths = [self.file_mapper.get_file_name(key) for key in keys]
         offsets = [int(cid) * self._block_size for cid in job_metadata.chunk_ids]
 
@@ -280,7 +316,11 @@ class FileSystemTierManager(SecondaryTierManager):
         """Collect finished jobs; a failed promotion marks only its failed keys
         as a miss here (scheduler thread)."""
         results = []
-        for job_id, success, transfer_time in self._pool.get_finished():
+        for job_id, success, transfer_time, completed_at in self._pool.get_finished():
+            deadline = self._job_deadlines.pop(job_id, None)
+            expired = deadline is not None and completed_at >= deadline
+            if expired:
+                success = False
             block_count = self._job_block_counts.pop(job_id, 0)
             transfer_bytes = block_count * self._block_size if block_count else None
             if self.events is not None:
@@ -296,6 +336,8 @@ class FileSystemTierManager(SecondaryTierManager):
                     )
             load_keys = self._load_job_keys.pop(job_id, None)
             num_succeeded = self._load_progress.pop(job_id, 0)
+            if expired:
+                num_succeeded = 0
             if load_keys is not None and not success:
                 # A batched load stops at the first bad block and reports how
                 # many loaded before it. Those earlier blocks are kept in the
@@ -311,6 +353,7 @@ class FileSystemTierManager(SecondaryTierManager):
                         successful_keys=tuple(successful) if successful else None,
                         transfer_time=transfer_time,
                         transfer_bytes=transfer_bytes,
+                        completed_at=completed_at,
                     )
                 )
                 continue
@@ -320,6 +363,7 @@ class FileSystemTierManager(SecondaryTierManager):
                     success=success,
                     transfer_time=transfer_time,
                     transfer_bytes=transfer_bytes,
+                    completed_at=completed_at,
                 )
             )
         return results

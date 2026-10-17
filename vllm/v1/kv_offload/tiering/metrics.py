@@ -121,12 +121,27 @@ class TieringMetricsTracker:
             state.primary_read_chunk_count += chunk_count
 
     def on_job_finished(
-        self, job_metadata: _JobMetadataLike, result: JobResult
+        self,
+        job_metadata: _JobMetadataLike,
+        result: JobResult,
+        *,
+        hold_primary: bool = False,
     ) -> None:
+        if result.timed_out:
+            self._stats.increase_counter(
+                TieringOffloadingMetrics.IO_TIMEOUTS,
+                labelvalues=(
+                    *self.tier_label(job_metadata.tier_idx),
+                    "load" if job_metadata.transfer_job.is_promotion else "store",
+                ),
+            )
         self._observe_finished_job_stats(job_metadata, result)
         if job_metadata.transfer_job.is_promotion:
             self._observe_promotion_latency(job_metadata, result)
-        self._decrement_tier_state(job_metadata)
+        self._decrement_tier_state(job_metadata, release_primary=not hold_primary)
+
+    def on_job_released(self, job_metadata: _JobMetadataLike) -> None:
+        self._release_primary_usage(job_metadata)
 
     def on_promotion_allocation_failure(self) -> None:
         self._stats.increase_counter(
@@ -187,18 +202,28 @@ class TieringMetricsTracker:
             for state in self._tier_states
         )
 
-    def _decrement_tier_state(self, job_metadata: _JobMetadataLike) -> None:
+    def _decrement_tier_state(
+        self, job_metadata: _JobMetadataLike, *, release_primary: bool
+    ) -> None:
+        transfer_job = job_metadata.transfer_job
+        state = self._tier_states[job_metadata.tier_idx]
+        if transfer_job.is_promotion:
+            assert state.active_promotion_count > 0
+            state.active_promotion_count -= 1
+        else:
+            assert state.active_cascade_count > 0
+            state.active_cascade_count -= 1
+        if release_primary:
+            self._release_primary_usage(job_metadata)
+
+    def _release_primary_usage(self, job_metadata: _JobMetadataLike) -> None:
         transfer_job = job_metadata.transfer_job
         state = self._tier_states[job_metadata.tier_idx]
         chunk_count = len(transfer_job.chunk_ids)
         if transfer_job.is_promotion:
-            assert state.active_promotion_count > 0
-            state.active_promotion_count -= 1
             state.primary_write_chunk_count -= chunk_count
             assert state.primary_write_chunk_count >= 0
         else:
-            assert state.active_cascade_count > 0
-            state.active_cascade_count -= 1
             state.primary_read_chunk_count -= chunk_count
             assert state.primary_read_chunk_count >= 0
 
