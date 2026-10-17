@@ -412,3 +412,25 @@ def test_hermes_streaming_content_and_tool_call_in_single_chunk(
     assert tool_parts[0].function.name == "f"
     args_str = "".join(tc.function.arguments or "" for tc in tool_parts)
     assert json.loads(args_str) == {"x": 1}
+
+
+@pytest.mark.parametrize("stream_interval", [1, 2, 3, 5, 8, 9999])
+def test_hermes_streaming_close_tag_in_arguments(
+    qwen_tokenizer: TokenizerLike,
+    any_chat_request: ChatCompletionRequest,
+    stream_interval: int,
+) -> None:
+    """End tag text inside arguments must stream as argument text."""
+    text = (
+        '<tool_call>{"name": "echo", '
+        '"arguments": {"text": "literal </tool_call> inside"}}</tool_call>'
+    )
+    parser = Hermes2ProToolParser(qwen_tokenizer)
+    deltas = _simulate_streaming(
+        qwen_tokenizer, parser, any_chat_request, text, stream_interval
+    )
+
+    tool_parts = [tc for d in deltas if d.tool_calls for tc in d.tool_calls]
+    assert tool_parts[0].function.name == "echo"
+    args_str = "".join(tc.function.arguments or "" for tc in tool_parts)
+    assert json.loads(args_str) == {"text": "literal </tool_call> inside"}
