@@ -21,8 +21,14 @@ from vllm.model_executor.layers.fused_moe.experts.trtllm_mxfp4_moe import (
 )
 from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
+from vllm.model_executor.layers.linear import (
+    LinearMethodBase,
+    ReplicatedLinear,
+    UnquantizedLinearMethod,
+)
 from vllm.model_executor.warmup.cutedsl_warmup import cutedsl_warmup
 from vllm.models.kimi_k3.nvidia import latent_moe_runner
+from vllm.models.kimi_k3.nvidia.model import KimiRoutedOutputTransform
 from vllm.models.kimi_k3.nvidia.ops.latent_moe_tail import KimiK3LatentMoETailOp
 from vllm.platforms import current_platform
 
@@ -32,8 +38,10 @@ EPS = 0.1
 TOP_K = 8
 
 
+@pytest.mark.parametrize("quantized_up_proj", [False, True])
 def test_deferred_finalize_enabled_before_moe_kernel_setup(
     monkeypatch: pytest.MonkeyPatch,
+    quantized_up_proj: bool,
 ) -> None:
     class FakeMoEConfig:
         tp_size = 8
@@ -59,7 +67,8 @@ def test_deferred_finalize_enabled_before_moe_kernel_setup(
     transform = SimpleNamespace(
         norm=SimpleNamespace(weight=norm_weight, variance_epsilon=EPS),
         up_proj=SimpleNamespace(
-            weight=SimpleNamespace(shape=(HIDDEN_SIZE, LATENT_SIZE))
+            weight=SimpleNamespace(shape=(HIDDEN_SIZE, LATENT_SIZE)),
+            quant_method=(object() if quantized_up_proj else UnquantizedLinearMethod()),
         ),
     )
 
@@ -99,9 +108,49 @@ def test_deferred_finalize_enabled_before_moe_kernel_setup(
 
     latent_moe_runner.LatentMoERunner()
 
+    if quantized_up_proj:
+        assert not moe_config.use_deferred_moe_finalize
+        assert not initialized_with
+        return
     assert moe_config.use_deferred_moe_finalize
     assert moe_config.defer_moe_finalize_max_num_tokens == 128
     assert initialized_with["experts_per_token"] == 16
+
+
+@pytest.mark.parametrize(
+    "quantized,with_residual", [(False, True), (True, False), (True, True)]
+)
+def test_routed_output_transform_honors_weight_scales(
+    monkeypatch, default_vllm_config, quantized, with_residual
+):
+    class ScaledLinearMethod(LinearMethodBase):
+        def create_weights(self, layer, *args, **kwargs):
+            raise NotImplementedError
+
+        def apply(self, layer, x, bias=None):
+            return F.linear(x, layer.weight.to(x.dtype) * 2, bias)
+
+    monkeypatch.setattr(
+        "vllm.distributed.parallel_state.get_tp_group",
+        lambda: SimpleNamespace(world_size=1, rank_in_group=0),
+    )
+    up_proj = ReplicatedLinear(2, 3, bias=False, params_dtype=torch.float32)
+    up_proj.weight.data.fill_(1)
+    if quantized:
+        up_proj.weight = torch.nn.Parameter(
+            up_proj.weight.to(torch.float8_e4m3fn), requires_grad=False
+        )
+        up_proj.quant_method = ScaledLinearMethod()
+    transform = KimiRoutedOutputTransform(None, up_proj)
+    x = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
+    residual = torch.ones(2, 3) if with_residual else None
+    expected = F.linear(x, torch.ones(3, 2) * (2 if quantized else 1))
+    if residual is not None:
+        expected = expected + residual
+    actual = transform(x, residual)
+    torch.testing.assert_close(actual, expected)
+    if residual is not None:
+        assert actual.data_ptr() == residual.data_ptr()
 
 
 def _make_deferred_routed_output(
