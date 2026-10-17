@@ -30,6 +30,83 @@ from vllm.tool_parsers.utils import (
 logger = init_logger(__name__)
 
 
+def join_newline_separated_calls(text: str) -> str:
+    """Join top-level calls with commas without rewriting string contents.
+
+    A newline separates calls only outside strings and brackets. Newlines
+    inside parentheses stay, so a call pretty-printed across lines is one
+    call. Raw control characters inside a non-triple-quoted string are
+    escaped so ``ast.parse`` keeps the original value.
+    """
+    parts: list[str] = []
+    buf: list[str] = []
+    quote: str | None = None
+    depth = 0
+    index, length = 0, len(text)
+
+    def flush() -> None:
+        part = "".join(buf).strip()
+        buf.clear()
+        if part:
+            parts.append(part)
+
+    while index < length:
+        if quote in {'"""', "'''"}:
+            if text.startswith(quote, index):
+                buf.append(quote)
+                index += 3
+                quote = None
+                continue
+            buf.append(text[index])
+            index += 1
+            continue
+        if quote is not None:
+            char = text[index]
+            if char == "\\" and index + 1 < length:
+                buf.append(char)
+                buf.append(text[index + 1])
+                index += 2
+                continue
+            if char == quote:
+                buf.append(char)
+                quote = None
+            elif char == "\n":
+                buf.append("\\n")
+            elif char == "\r":
+                buf.append("\\r")
+            elif char == "\t":
+                buf.append("\\t")
+            elif char == "\x00":
+                buf.append("\\x00")
+            else:
+                buf.append(char)
+            index += 1
+            continue
+        if text.startswith('"""', index) or text.startswith("'''", index):
+            quote = text[index : index + 3]
+            buf.append(quote)
+            index += 3
+            continue
+        char = text[index]
+        if char in {"'", '"'}:
+            quote = char
+            buf.append(char)
+        elif char in "([{":
+            depth += 1
+            buf.append(char)
+        elif char in ")]}":
+            if depth:
+                depth -= 1
+            buf.append(char)
+        elif char == "\n" and depth == 0:
+            flush()
+        else:
+            buf.append(char)
+        index += 1
+    flush()
+    return ", ".join(parts)
+
+
 class Olmo3PythonicToolParser(ToolParser):
     """Tool call parser for Olmo 3 models that produce tool calls as
     newline-separated pythonic strings.
@@ -79,26 +156,18 @@ class Olmo3PythonicToolParser(ToolParser):
         if match:
             model_output = match.group(1).strip()
         # Make the newline separated function calls into a list.
-        model_output = ", ".join(
-            [line.strip() for line in model_output.splitlines() if line.strip()]
-        )
+        model_output = join_newline_separated_calls(model_output)
         model_output = f"[{model_output}]"
 
-        is_tool_call_pattern = False
         try:
-            is_tool_call_pattern = (
-                self.TOOL_CALL_REGEX.match(
-                    model_output, timeout=envs.VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS
-                )
-                is not None
+            _ = self.TOOL_CALL_REGEX.match(
+                model_output, timeout=envs.VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS
             )
         except TimeoutError:
             logger.warning("Regex timeout occurred when matching tool call pattern.")
             logger.debug(
                 "Regex timeout occurred when matching user input: %s", model_output
             )
-
-        if not is_tool_call_pattern:
             return ExtractedToolCallInformation(
                 tools_called=False, tool_calls=[], content=original_model_output
             )
@@ -154,9 +223,7 @@ class Olmo3PythonicToolParser(ToolParser):
             valid_text, added_text = valid_and_added_text
 
             # Make the newline separated function calls into a list.
-            valid_text = ", ".join(
-                [line.strip() for line in valid_text.splitlines() if line.strip()]
-            )
+            valid_text = join_newline_separated_calls(valid_text)
             valid_text = f"[{valid_text}]"
             module = ast.parse(valid_text)
             parsed = getattr(module.body[0], "value", None)
