@@ -1371,8 +1371,8 @@ class SpeculativeConfig:
                         f"Unsupported speculative method: '{self.method}'"
                     )
 
-                if self.method in ("eagle", "eagle3"):
-                    # EAGLE drafts share the target's positional space; a
+                if self.method in ("eagle", "eagle3", "dflash"):
+                    # EAGLE and DFlash drafts share the target's positional space; a
                     # draft checkpoint with a smaller max_position_embeddings
                     # than the target under-sizes its rotary cache (#48894).
                     SpeculativeConfig._maybe_override_draft_max_position_embeddings(
@@ -1651,7 +1651,7 @@ class SpeculativeConfig:
         draft_hf_config: PreTrainedConfig,
         target_max_model_len: int,
     ) -> None:
-        """Raise an EAGLE draft's max_position_embeddings up to the target's.
+        """Raise an EAGLE or DFlash draft's position limit up to the target's.
 
         The proposer feeds the draft positions up to the target's
         max_model_len, while max_position_embeddings sizes the draft's
@@ -1674,7 +1674,7 @@ class SpeculativeConfig:
             return
         logger.info(
             "Overriding draft model max_position_embeddings from %d to the "
-            "target model's max_model_len (%d); EAGLE drafts share the "
+            "target model's max_model_len (%d); these drafts share the "
             "target's positional space.",
             draft_max_position_embeddings,
             target_max_model_len,
