@@ -84,12 +84,19 @@ class FlashInferNVLinkTwoSidedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeMo
         global_num_tokens_cpu = get_local_sizes()
         top_k = topk_ids.size(1)
 
+        # NVFP4 expects the reciprocal a1_gscale, while
+        # FP8 expects a1_scale to use as a divisor.
+        input_sf = (
+            quant_config.a1_gscale
+            if quant_config.use_nvfp4_w4a4
+            else quant_config.a1_scale
+        )
         (self.alltoall_info, topk_ids, topk_weights, a1q, a1q_scale) = (
             flashinfer_alltoall_dispatch(
                 self.all2all_manager,
                 global_num_tokens_cpu,
                 a1,
-                quant_config.a1_gscale,
+                input_sf,
                 topk_ids,
                 topk_weights,
                 top_k,
@@ -126,7 +133,7 @@ def flashinfer_alltoall_dispatch(
     all2all_manager: All2AllManagerBase,
     global_num_tokens_cpu: list[int],
     x: torch.Tensor,
-    gs: torch.Tensor,
+    gs: torch.Tensor | None,
     topk_ids: torch.Tensor,
     topk_weights: torch.Tensor,
     top_k: int,
@@ -185,13 +192,23 @@ def flashinfer_alltoall_dispatch(
             ep_size,
         )
 
-        if x_sf is not None:
+        # Route activation scales to follow the token dispatch: per-token /
+        # per-block scales (numel > 1) move with their tokens.
+        if x_sf is not None and x_sf.numel() > 1:
             x_sf = MnnvlMoe.mnnvl_moe_alltoallv(
                 x_sf,
                 alltoall_info,
                 all2all_manager.workspace_tensor,  # type: ignore[attr-defined]
                 ep_rank,
                 ep_size,
+            )
+        elif x_sf is not None and x_sf.numel() == 1 and gs is not None:
+            pass  # static per-tensor scale is global; nothing to route
+        else:
+            raise ValueError(
+                "flashinfer_all2allv supports only per-token/per-block or "
+                "static per-tensor activation scales; dynamic per-tensor "
+                "quantization is not supported"
             )
 
         # Swizzle after the A2A if MoE kernel expects swizzled scales.
