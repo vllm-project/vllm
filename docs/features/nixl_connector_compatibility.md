@@ -81,6 +81,7 @@ By default, a **compatibility hash** is checked during handshake. P and D instan
 - Model (architecture, dtype, number of KV heads, head size, number of hidden layers)
 - Attention backend
 - KV cache dtype (`cache_dtype`)
+- Effective hybrid KV cache manager (HMA) enabled/disabled state
 - EAGLE/MTP-style speculative method and draft-model configuration
 - NIXL transfer mode (push vs pull) — a push (WRITE) connector and a pull (READ)
   connector use incompatible transfer protocols and must never be paired
@@ -97,6 +98,37 @@ By default, a **compatibility hash** is checked during handshake. P and D instan
 - Draft-model `attention_backend` (each instance auto-selects independently; the
   resulting KV block layout is validated at handshake time rather than via the
   compatibility hash)
+
+### Troubleshooting an HMA compatibility mismatch
+
+`NIXL compatibility hash mismatch` means that at least one of the
+[required settings](#what-must-match-between-p-and-d) differs. One possible
+cause is a different effective HMA state, even when both instances omit
+`--disable-hybrid-kv-cache-manager`.
+
+`MultiConnector` supports HMA only when **every configured child connector**
+supports it. With automatic HMA selection, adding a child without HMA support
+disables the hybrid KV cache manager on that instance and logs
+`Turning off hybrid kv cache manager`. A peer using `NixlConnector` alone may
+keep HMA enabled, causing the handshake to reject the transfer.
+
+To resolve this case:
+
+1. Check the connector configurations and startup warnings on **both** prefill
+   and decode instances, including all `MultiConnector` children.
+2. If the model and enabled features support running without HMA, pass
+   `--disable-hybrid-kv-cache-manager` to **both** instances and restart them.
+   Otherwise, use HMA-capable connectors on both sides, including every child
+   of a `MultiConnector`.
+3. If the handshake still fails, compare the other required settings above.
+   Matching the HMA state alone does not establish compatibility.
+
+!!! warning
+    Hybrid SSM/Mamba models and HiSparse require HMA; disabling it is not a
+    workaround for those configurations. Disabling HMA can also reduce
+    sliding-window attention efficiency. Do not bypass the compatibility hash
+    check to work around mismatched configurations: it protects against
+    incompatible KV cache transfers.
 
 ### KV cache layout
 
