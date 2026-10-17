@@ -12,7 +12,7 @@ kinds ``mark_sp_region`` wraps:
 - ``o``/``down``: a ``RowParallelLinear`` *exiting* an SP region -- GEMM,
   then reduce-scatter the output back to a token shard.
 
-For each, four candidates are timed:
+For each, five candidates are timed:
 
 - ``gemm``: the GEMM alone, on the same (already-gathered) input the fused/
   unfused paths feed it -- the compute floor.
@@ -24,6 +24,13 @@ For each, four candidates are timed:
 - ``fused``: what ``--enable-async-tp`` swaps in instead -- a
   symmetric-memory kernel that overlaps the collective with the GEMM,
   chosen by ``init_fused_comm_kernel`` exactly as in serving.
+- ``baseline``: plain TP with neither SP nor AsyncTP enabled. For
+  ``qkv``/``gate_up`` this is identical to ``gemm`` (the input is already
+  full/replicated, so there is no collective at this boundary at all). For
+  ``o``/``down`` this is the GEMM followed by a full
+  ``tensor_model_parallel_all_reduce`` of the ``[M, N]`` partial sums --
+  what ``RowParallelLinear(reduce_results=True)`` actually runs -- not the
+  smaller reduce-scatter ``collective``/``unfused``/``fused`` use.
 
 Run a TP2 sweep over the Qwen3-32B projections with:
 
@@ -46,6 +53,7 @@ import torch.distributed as dist
 
 from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
 from vllm.distributed import cleanup_dist_env_and_memory
+from vllm.distributed.communication_op import tensor_model_parallel_all_reduce
 from vllm.distributed.parallel_state import (
     get_tp_group,
     init_distributed_environment,
@@ -343,6 +351,13 @@ def benchmark_shape(
             "fused": [
                 lambda k=k, x=x: k.apply(x) for k, x in zip(fused_kernels, locals_)
             ],
+            # Plain TP (no SP): the input entering this projection is
+            # already full/replicated across ranks, so there is no
+            # collective here at all -- this is just the GEMM alone,
+            # identical to "gemm" above.
+            "baseline": [
+                lambda ln=ln, x=x: bare_gemm(ln, x) for ln, x in zip(linears, gathered)
+            ],
         }
         correctness_input = locals_[0]
         # Both paths all-gather the full token dim first, so every rank's
@@ -366,6 +381,12 @@ def benchmark_shape(
         def bare_collective(x: torch.Tensor) -> torch.Tensor:
             return sp_reduce_scatter(x)
 
+        def bare_gemm_allreduce(linear=None, x=None) -> torch.Tensor:
+            # Plain TP (no SP): GEMM on the local K-shard, then a full
+            # all-reduce of the [M, N] partial sums (not a reduce-scatter)
+            # -- what RowParallelLinear(reduce_results=True) does.
+            return tensor_model_parallel_all_reduce(bare_gemm(linear, x))
+
         candidates = {
             "gemm": [
                 lambda ln=ln, x=x: bare_gemm(ln, x) for ln, x in zip(linears, fulls)
@@ -376,6 +397,10 @@ def benchmark_shape(
             ],
             "fused": [
                 lambda k=k, x=x: k.apply(x) for k, x in zip(fused_kernels, fulls)
+            ],
+            "baseline": [
+                lambda ln=ln, x=x: bare_gemm_allreduce(ln, x)
+                for ln, x in zip(linears, fulls)
             ],
         }
         correctness_input = fulls[0]
@@ -416,6 +441,8 @@ def benchmark_shape(
         "fused_us": times["fused"],
         "latency_change": (times["fused"] - times["unfused"]) / times["unfused"],
         "floor_gap": (times["fused"] - floor) / floor,
+        "baseline_us": times["baseline"],
+        "vs_baseline": (times["fused"] - times["baseline"]) / times["baseline"],
     }
 
 
@@ -425,15 +452,17 @@ def print_results(results: list[dict[str, float | int | str]]) -> None:
     print(f"### {proj} SP kernels (bf16, fused={kernel})")
     print(
         "| M | N | K | GEMM (us) | collective (us) | floor (us) | "
-        "unfused (us) | fused (us) | vs unfused | vs floor |"
+        "unfused (us) | fused (us) | vs unfused | vs floor | "
+        "baseline (us) | vs baseline |"
     )
-    print("|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
+    print("|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
     for r in results:
         print(
             f"| {r['M']} | {r['N']} | {r['K']} | {r['gemm_us']:.1f} | "
             f"{r['collective_us']:.1f} | {r['floor_us']:.1f} | "
             f"{r['unfused_us']:.1f} | {r['fused_us']:.1f} | "
-            f"{r['latency_change']:+.1%} | {r['floor_gap']:+.1%} |"
+            f"{r['latency_change']:+.1%} | {r['floor_gap']:+.1%} | "
+            f"{r['baseline_us']:.1f} | {r['vs_baseline']:+.1%} |"
         )
 
 
