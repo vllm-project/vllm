@@ -515,6 +515,7 @@ def _make_read_scheduler():
         _reqs_need_recv={},
         _reqs_need_save={},
         _reqs_need_send={},
+        _reqs_need_abort={},
         _req_kv_params={},
         _max_decode_tail_blocks=1,
     )

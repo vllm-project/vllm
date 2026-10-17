@@ -116,6 +116,7 @@ def _real_wrapper() -> MoRIIOWrapper:
     wrapper.done_write_cache_req_ids = []
     wrapper.failed_write_cache_req_ids = []
     wrapper._terminal_transfer_ids = OrderedDict()
+    wrapper._aborted_write_endpoints = {}
     return wrapper
 
 
@@ -364,6 +365,8 @@ def test_write_failed_is_reported_as_failed_recving_on_owning_rank():
         moriio_wrapper=wrapper,
         transfer_id_to_request_id={"tA": "req-1"},
         _unmatched_write_failures=OrderedDict(),
+        _reported_write_transfers=set(),
+        _completed_write_transfers=OrderedDict(),
         get_finished=lambda: (set(), set()),
     )
 
