@@ -5,6 +5,7 @@ import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from threading import Event
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -93,6 +94,30 @@ class MockEngineReasoner(ParserEngineReasoningAdapter):
             if token in self.reasoning_end_token_ids:
                 return ReasoningEnd(offset, token == self.marker)
         return ReasoningEnd(len(token_ids), False)
+
+
+def test_constraint_boundary_does_not_pass_extra_plugin_kwargs():
+    class VariadicReasoner(MockReasoner):
+        def is_reasoning_end_streaming(self, input_ids, delta_ids, **kwargs):
+            assert not kwargs
+            return super().is_reasoning_end_streaming(input_ids, delta_ids)
+
+    request = Request(
+        request_id="prompt-context",
+        prompt_token_ids=[10, 11],
+        sampling_params=SamplingParams(
+            structured_outputs=StructuredOutputsParams(json=JSON_SCHEMA)
+        ),
+        pooling_params=None,
+        reasoning_ended=False,
+    )
+
+    reasoner = VariadicReasoner(None, marker=12)
+    manager = SimpleNamespace(
+        enable_in_reasoning=False, _get_reasoner=lambda _: reasoner
+    )
+    bounds = StructuredOutputManager._get_constraint_bounds(manager, request, [12, 13])
+    assert bounds.grammar_start == bounds.constraint_start == 1
 
 
 def _single_token(tokenizer, text: str) -> int:
