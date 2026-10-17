@@ -49,22 +49,40 @@ from vllm.v1.kv_offload.base import OffloadKey, ReqContext
 logger = init_logger(__name__)
 
 
-class LookupPhase(Enum):
-    """Lifecycle phase of a lookup probe."""
+@dataclass(frozen=True, slots=True)
+class LookupToken:
+    """Lookup key plus the request and resolved generation that observed it."""
+
+    key: OffloadKey
+    req_id: str
+    generation: int
+
+
+class LookupSubmissionStatus(Enum):
+    """Lifecycle of the shared lookup submission."""
 
     PENDING = auto()  # Accumulated in _lookup_batch, but not yet submitted.
     IN_FLIGHT = auto()  # Submitted to the worker, but not yet resolved.
-    RESOLVED = auto()  # A final verdict has been applied to the state.
+    RESOLVED = auto()  # The worker result has been published to requests.
+
+
+class LookupResultStatus(Enum):
+    """Result observed by one request for a lookup."""
+
+    PENDING = auto()
+    HIT = auto()
+    MISS = auto()
+    MARKED_MISS = auto()
 
 
 @dataclass(slots=True)
 class LookupState:
     generation: int
-    phase: LookupPhase = LookupPhase.PENDING
-    # None while pending/in flight; True if the key exists; False if absent or
-    # explicitly marked missing after a failed load.
-    result: bool | None = None
-    request_ids: set[str] = field(default_factory=set)  # requests asking for the lookup
+    # Submission status is shared by all requests that reuse this probe.
+    submission_status: LookupSubmissionStatus = LookupSubmissionStatus.PENDING
+    # The mapping is also the ownership index: every key is a request holding
+    # this state, and its value is that request's result.
+    request_statuses: dict[str, LookupResultStatus] = field(default_factory=dict)
 
 
 class AsyncLookupManager(ABC):
@@ -160,9 +178,44 @@ class AsyncLookupManager(ABC):
             self._next_generation += 1
             self._lookup_state[key] = state
             self._lookup_batch.append((key, req_context, state.generation))
-        state.request_ids.add(req_id)
         self._req_keys.setdefault(req_id, set()).add(key)
-        return state.result
+        if req_id not in state.request_statuses:
+            if state.submission_status is LookupSubmissionStatus.RESOLVED:
+                # A MARKED_MISS belongs to the request that experienced the
+                # failed promotion. Use another request's probe result when
+                # one is available, so it cannot leak to a new request.
+                request_status = next(
+                    (
+                        status
+                        for status in state.request_statuses.values()
+                        if status
+                        in (
+                            LookupResultStatus.HIT,
+                            LookupResultStatus.MISS,
+                        )
+                    ),
+                    LookupResultStatus.MISS,
+                )
+            else:
+                request_status = LookupResultStatus.PENDING
+            state.request_statuses[req_id] = request_status
+        request_status = state.request_statuses[req_id]
+        if request_status is LookupResultStatus.PENDING:
+            return None
+        return request_status is LookupResultStatus.HIT
+
+    def lookup_token(self, key: OffloadKey, req_id: str) -> LookupToken:
+        """Return the resolved lookup generation held by ``req_id``."""
+        state = self._lookup_state.get(key)
+        assert state is not None and req_id in state.request_statuses, (
+            f"request {req_id!r} holds no lookup for key {key!r}"
+        )
+        assert state.request_statuses[req_id] in (
+            LookupResultStatus.HIT,
+            LookupResultStatus.MISS,
+            LookupResultStatus.MARKED_MISS,
+        ), f"lookup for key {key!r} is unresolved"
+        return LookupToken(key=key, req_id=req_id, generation=state.generation)
 
     def flush(self) -> None:
         """Post this step's accumulated keys to the worker thread.
@@ -182,8 +235,10 @@ class AsyncLookupManager(ABC):
             state = self._lookup_state.get(key)
             if state is None or state.generation != generation:
                 continue
-            assert state.phase is LookupPhase.PENDING
-            state.phase = LookupPhase.IN_FLIGHT
+            assert state.submission_status is LookupSubmissionStatus.PENDING
+            state.submission_status = LookupSubmissionStatus.IN_FLIGHT
+            for req_id in state.request_statuses:
+                assert state.request_statuses[req_id] is LookupResultStatus.PENDING
             in_flight_batch.append((key, req_context, generation))
         if in_flight_batch:
             self._lookup_queue.put(in_flight_batch)
@@ -202,32 +257,36 @@ class AsyncLookupManager(ABC):
                 state = self._lookup_state.get(key)
                 if state is None or state.generation != generation:
                     continue
-                if not state.request_ids:
+                if not state.request_statuses:
                     del self._lookup_state[key]
                     continue
-                assert state.phase is LookupPhase.IN_FLIGHT
+                assert state.submission_status is LookupSubmissionStatus.IN_FLIGHT
                 # Each lookup generation is enqueued exactly once. A matching
                 # generation must not receive a second result; stale
                 # generations were discarded above.
-                assert state.result is None, (
-                    "cached key received a second lookup result; the "
-                    "enqueue-once invariant is broken and could reopen the "
-                    "failed-load livelock"
+                result_status = (
+                    LookupResultStatus.HIT if result else LookupResultStatus.MISS
                 )
-                state.result = result
-                state.phase = LookupPhase.RESOLVED
+                state.submission_status = LookupSubmissionStatus.RESOLVED
+                for req_id in state.request_statuses:
+                    if state.request_statuses[req_id] is LookupResultStatus.PENDING:
+                        state.request_statuses[req_id] = result_status
 
-    def mark_miss(self, keys: Collection[OffloadKey]) -> None:
-        """Force the cached verdict for ``keys`` to False after a failed load, so
-        the scheduler stops re-issuing the doomed promotion (livelock, #49176).
-        Keys with no cached entry are skipped, and so are keys whose entry is
-        a newer probe still PENDING or IN_FLIGHT: its own result will land,
-        and forcing it to RESOLVED here would trip the phase asserts in
-        flush() / drain_results() on the scheduler thread."""
-        for key in keys:
-            state = self._lookup_state.get(key)
-            if state is not None and state.phase is LookupPhase.RESOLVED:
-                state.result = False
+    def mark_miss(self, tokens: Collection[LookupToken]) -> None:
+        """Mark a failed promotion only for the request that started it."""
+        for token in tokens:
+            state = self._lookup_state.get(token.key)
+            if state is None or state.generation != token.generation:
+                continue
+            if state.submission_status is not LookupSubmissionStatus.RESOLVED:
+                continue
+            if state.request_statuses.get(token.req_id) not in (
+                LookupResultStatus.HIT,
+                LookupResultStatus.MISS,
+                LookupResultStatus.MARKED_MISS,
+            ):
+                continue
+            state.request_statuses[token.req_id] = LookupResultStatus.MARKED_MISS
 
     def cleanup(self, req_id: str) -> None:
         """Release request references, retaining in-flight lookups.
@@ -236,9 +295,14 @@ class AsyncLookupManager(ABC):
         index to visit only keys associated with this request.
         """
         for key in self._req_keys.pop(req_id, ()):
-            state = self._lookup_state[key]
-            state.request_ids.discard(req_id)
-            if not state.request_ids and state.phase is not LookupPhase.IN_FLIGHT:
+            state = self._lookup_state.get(key)
+            if state is None:
+                continue
+            state.request_statuses.pop(req_id, None)
+            if (
+                not state.request_statuses
+                and state.submission_status is not LookupSubmissionStatus.IN_FLIGHT
+            ):
                 del self._lookup_state[key]
 
     def shutdown(self) -> None:

@@ -106,6 +106,7 @@ def make_job(
     job_id: int,
     keys: list[OffloadKey],
     chunk_ids: list[int] | None = None,
+    req_context: ReqContext = _CTX,
 ) -> TransferJob:
     if chunk_ids is None:
         chunk_ids = list(range(len(keys)))
@@ -114,7 +115,7 @@ def make_job(
         keys=keys,
         chunk_ids=np.array(chunk_ids, dtype=np.int32),
         is_promotion=False,
-        req_context=_CTX,
+        req_context=req_context,
     )
 
 
@@ -319,6 +320,8 @@ class TestMockObjTierBasic:
         results = drain(self.tier)
         assert results[0].success
 
+        # A promotion's request always holds a resolved verdict for its keys.
+        lookup_and_wait(self.tier, [key(1), key(2)])
         self.tier.submit_load(make_job(2, [key(1), key(2)], [0, 1]))
         results = drain(self.tier)
         assert len(results) == 1
@@ -355,7 +358,7 @@ class TestMockObjTierBasic:
 
         # The promotion the HIT triggered fails.
         self.agent.check_xfer_state = lambda h: "ERR"
-        self.tier.submit_load(make_job(2, [key(1)], [0]))
+        self.tier.submit_load(make_job(2, [key(1)], [0], req_context=ctx))
         results = drain(self.tier)
         assert len(results) == 1 and not results[0].success
 
@@ -450,6 +453,7 @@ class TestMockObjTierFailures:
     def test_submit_load_register_memory_failure_reported_in_get_finished(self):
         tier, agent = _make_tier(num_blocks=4)
         agent.register_memory = lambda *a, **k: None
+        lookup_and_wait(tier, [key(1)])
         tier.submit_load(make_job(2, [key(1)], [0]))
         results = list(tier.get_finished_jobs())
         assert len(results) == 1
@@ -672,6 +676,7 @@ class TestObjTierKVEvents:
         assert results[0].success
         list(self.tier.take_events())
 
+        lookup_and_wait(self.tier, [key(1)])
         self.tier.submit_load(make_job(2, [key(1)], [0]))
         results = drain(self.tier)
         assert len(results) == 1
