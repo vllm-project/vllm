@@ -42,6 +42,10 @@ VLLM_BATCH_INVARIANT=1 vllm serve Qwen/Qwen3-1.7B \
     --attention-config.backend TRITON_ATTN
 ```
 
+### FP8 KV Cache on Blackwell
+
+In batch-invariant mode the `FLASH_ATTN` backend uses FlashAttention 2 instead of FlashAttention 4 on SM100, and FlashAttention 2 does not support an FP8 KV cache. For checkpoints that enable an FP8 KV cache by default (for example the `nvidia/*-FP4` ModelOpt checkpoints), leave the attention backend on automatic selection, which picks `TRITON_ATTN`, or select `TRITON_ATTN` explicitly; an explicit `FLASH_ATTN` or `FLEX_ATTENTION` request is rejected at startup.
+
 ## Enabling Batch Invariance
 
 Batch invariance can be enabled by setting the `VLLM_BATCH_INVARIANT` environment variable to `1`:
@@ -124,12 +128,13 @@ for output in outputs:
 Batch invariance has been tested and verified on the following models:
 
 - **DeepSeek series**: `deepseek-ai/DeepSeek-V3`, `deepseek-ai/DeepSeek-V3-0324`, `deepseek-ai/DeepSeek-R1`, `deepseek-ai/DeepSeek-V3.1`
-- **Qwen3 (Dense)**: `Qwen/Qwen3-1.7B`, `Qwen/Qwen3-8B`, `Qwen/Qwen3-4B-AWQ`, `Qwen/Qwen3-8B-AWQ`
+- **DeepSeek-R1 Distill**: `deepseek-ai/DeepSeek-R1-Distill-Qwen-32B`
+- **Qwen3 (Dense)**: `Qwen/Qwen3-1.7B`, `Qwen/Qwen3-8B`, `Qwen/Qwen3-4B-AWQ`, `Qwen/Qwen3-8B-AWQ`, `Qwen/Qwen3-32B`
 - **Qwen3-VL (Vision-Language)**: `Qwen/Qwen3-VL-2B-Instruct`, `Qwen/Qwen3-VL-4B-Instruct` (single image and video inputs)
-- **Qwen3 (MoE)**: `Qwen/Qwen3-30B-A3B`, `Qwen/Qwen3-Next-80B-A3B-Instruct`, `Qwen/Qwen3-30B-A3B-Thinking-2507-FP8`
-- **Qwen2.5**: `Qwen/Qwen2.5-0.5B-Instruct`, `Qwen/Qwen2.5-1.5B-Instruct`, `Qwen/Qwen2.5-3B-Instruct`, `Qwen/Qwen2.5-7B-Instruct`, `Qwen/Qwen2.5-14B-Instruct`, `Qwen/Qwen2.5-32B-Instruct`, `Qwen/Qwen2.5-Coder-7B-Instruct`
+- **Qwen3 (MoE)**: `Qwen/Qwen3-30B-A3B`, `Qwen/Qwen3-235B-A22B`, `Qwen/Qwen3-Coder-30B-A3B-Instruct`, `Qwen/Qwen3-30B-A3B-Thinking-2507-FP8`, `Qwen/Qwen3-235B-A22B-Thinking-2507-FP8`
+- **QwQ**: `Qwen/QwQ-32B`
+- **Qwen2.5**: `Qwen/Qwen2.5-0.5B-Instruct`, `Qwen/Qwen2.5-1.5B-Instruct`, `Qwen/Qwen2.5-3B-Instruct`, `Qwen/Qwen2.5-7B-Instruct`, `Qwen/Qwen2.5-14B-Instruct`, `Qwen/Qwen2.5-32B-Instruct`, `Qwen/Qwen2.5-Coder-7B-Instruct`, `Qwen/Qwen2.5-72B-Instruct`
 - **Llama 3**: Llama3.1 and 3.2 series, `meta-llama/Llama-3.2-1B-Instruct`, `meta-llama/Llama-3.2-3B-Instruct` for example
-- **GPT-OSS**: `openai/gpt-oss-20b`, `openai/gpt-oss-120b`
 - **Mistral**: `mistralai/Mistral-7B-v0.3`
 - **GLM-4 series**: `zai-org/glm-4-9b-chat`
 - **Phi series**: `microsoft/Phi-3.5-mini-instruct`, `microsoft/phi-4`
@@ -140,6 +145,9 @@ Batch invariance has been tested and verified on the following models:
 - **ERNIE 4.5**: `baidu/ERNIE-4.5-0.3B-PT`
 - **SmolLM2**: `HuggingFaceTB/SmolLM2-1.7B-Instruct`
 - **PLaMo3**: `pfnet/plamo-3-nict-2b-base`
+- **NVFP4 (ModelOpt, Blackwell)**: `nvidia/Llama-3.1-8B-Instruct-FP4`, `nvidia/Qwen3-30B-A3B-FP4`
+
+Hybrid Gated DeltaNet models (for example, Qwen3-Next and Qwen3.5) are not currently supported in batch-invariant mode; see [issue #42960](https://github.com/vllm-project/vllm/issues/42960). MXFP4 MoE models such as `openai/gpt-oss-20b` and `openai/gpt-oss-120b` are not currently supported either, because no MXFP4 MoE kernel supports batch invariance.
 
 Other models may also work, but these have been explicitly validated. If you encounter issues with a specific model, please report them on the [GitHub issue tracker](https://github.com/vllm-project/vllm/issues/new/choose).
 
