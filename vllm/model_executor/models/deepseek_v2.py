@@ -969,6 +969,9 @@ class DeepSeekV2FusedQkvAProjLinear(MergedColumnParallelLinear):
 
         # Check if the DeepSeek V3 fused A GEMM kernel can be used.
         # This kernel supports PDL and is optimized for low batch size.
+        # It only handles up to 16 tokens and larger batches fall back to
+        # F.linear, so the GEMM would change with the batch size; in
+        # batch-invariant mode use the batch-invariant linear path instead.
         self._use_min_latency_gemm = (
             hasattr(self, "weight")
             and self.weight.dtype == torch.bfloat16
@@ -979,6 +982,7 @@ class DeepSeekV2FusedQkvAProjLinear(MergedColumnParallelLinear):
                 current_platform.is_device_capability(90)
                 or current_platform.is_device_capability_family(100)
             )
+            and not envs.VLLM_BATCH_INVARIANT
         )
 
     def forward(
