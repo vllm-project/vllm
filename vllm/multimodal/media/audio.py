@@ -39,8 +39,12 @@ except ImportError:
 
 try:
     from torchcodec.decoders import AudioDecoder
-except (ImportError, RuntimeError) as exc:
+except (ImportError, RuntimeError, OSError) as exc:
     # RuntimeError: torchcodec is installed but the system ffmpeg is missing.
+    # OSError: torchcodec's bundled native library failed to load, e.g. it is
+    # linked against a CUDA runtime that is not installed (see
+    # vllm-project/vllm#60406). torchcodec audio decoding is then unavailable,
+    # but the module must still import so unrelated serving paths can start.
     AudioDecoder = None  # type: ignore[assignment]
     _torchcodec_import_exc: BaseException | None = exc
 else:
