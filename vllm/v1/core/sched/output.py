@@ -328,9 +328,6 @@ class SchedulerOutput:
     # block lifecycle. Side storage must only consume its owner's mappings.
     kv_cache_block_copies_by_group: list[list[KVCacheBlockCopy]] | None = None
 
-    # Complete block-table rows that replace incrementally appended block IDs.
-    block_table_updates: dict[str, tuple[list[int], ...]] | None = None
-
     # Scheduler-local; always None by the time this reaches a worker.
     kv_connector_block_state: KVConnectorBlockState | None = None
 

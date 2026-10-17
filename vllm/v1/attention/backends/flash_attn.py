@@ -1511,7 +1511,8 @@ class FlashAttentionImpl(AttentionImpl):
                 layer,
             )
 
-        key_cache, value_cache = self._split_kv_cache(kv_cache)
+        # (B, H, N, 2*D) -> ((B, N, H, D), (B, N, H, D))
+        key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
         # Fix degenerate strides on size-1 dims (e.g. num_kv_heads=1 with TP).
         # FA3/4 on H100+ uses TMA, which requires ≥16-byte stride alignment.
         # See vllm.utils.torch_utils.canonicalize_singleton_dim_strides.
@@ -1730,13 +1731,6 @@ class FlashAttentionImpl(AttentionImpl):
                 )
             return output
 
-    # Subclasses can override this seam when they pin a different KV layout.
-    def _split_kv_cache(
-        self, kv_cache: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        # (B, H, N, 2*D) -> ((B, N, H, D), (B, N, H, D))
-        return kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
-
     def do_kv_cache_update(
         self,
         layer: torch.nn.Module,
@@ -1752,7 +1746,8 @@ class FlashAttentionImpl(AttentionImpl):
 
         # Scatter write into the KV cache using slot_mapping indices.
         # No TMA kernel is invoked here, so stride canonicalization is not needed.
-        key_cache, value_cache = self._split_kv_cache(kv_cache)
+        # (B, H, N, 2*D) -> ((B, N, H, D), (B, N, H, D))
+        key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
 
         # Reshape the input keys and values and store them in the cache.
         # Skip this if sharing KV cache with an earlier attention layer.
