@@ -128,6 +128,29 @@ clear_ci_orchestration_env() {
     VLLM_ALLOW_DEPRECATED_BEAM_SEARCH
 }
 
+configure_kernrec_docker_args() {
+  kernrec_docker_args=()
+  [[ "$1" == *recorders/kernrec/ci_setup.sh* ]] || return 0
+  local checkout="${BUILDKITE_BUILD_CHECKOUT_PATH:-}"
+  if [[ -z "$checkout" || ! -d "$checkout" ]] ||
+      ! mkdir -p "$checkout/.kernrec" || ! chmod 0777 "$checkout/.kernrec"; then
+    echo "kernrec: checkout unavailable; container recordings cannot be uploaded" >&2
+    return 0
+  fi
+  kernrec_docker_args=(
+    -v "$checkout/.kernrec:/tmp/kernrec-checkout/.kernrec"
+    -e "KERNREC_CHECKOUT_PATH=/tmp/kernrec-checkout"
+    -e BUILDKITE_JOB_ID
+    -e BUILDKITE_STEP_KEY
+    -e BUILDKITE_LABEL
+    -e BUILDKITE_BUILD_NUMBER
+    -e BUILDKITE_COMMIT
+    -e KERNREC_PYTHON
+    -e VLLM_WORKER_MULTIPROC_METHOD
+    -e VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS
+  )
+}
+
 amd_ci_teardown_log() {
   local event=$1
   shift
@@ -1465,6 +1488,11 @@ handle_amd_runner_exit() {
   return 0
 }
 
+# Sourcing exposes the shell helpers without starting a CI workload.
+if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+  return 0
+fi
+
 # Catch both test failures and wrapper/setup failures. Runtime-specific cleanup
 # traps below replace this trap and call the same handler after cleanup.
 trap handle_amd_runner_exit EXIT
@@ -1770,6 +1798,7 @@ else
   fi
 
   exit_code=0
+  configure_kernrec_docker_args "$commands"
   # shellcheck disable=SC2086  # word splitting is intentional: both hold multiple docker flags
   run_docker_with_ci_timeout docker run \
     "${docker_run_terminal_args[@]}" \
@@ -1806,6 +1835,7 @@ else
     -e "PYTORCH_ROCM_ARCH=" \
     "${cpu_platform_env[@]}" \
     "${standalone_merge_base_env[@]}" \
+    "${kernrec_docker_args[@]}" \
     --name "${container_name}" \
     "${image_name}" \
     /bin/bash -c "${CONTAINER_PREFLIGHT} && ${commands}" || exit_code=$?

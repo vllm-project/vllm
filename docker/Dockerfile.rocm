@@ -336,6 +336,23 @@ RUN --mount=type=bind,source=pyproject.toml,target=${COMMON_WORKDIR}/vllm/pyproj
     && echo "=== ccache stats after ROCm native build ===" \
     && (ccache --show-stats || true)
 
+FROM csrc-build AS kernel-symbol-map-build
+ARG VLLM_KERNEL_SYMBOL_MAP=0
+ARG buildkite_commit=""
+COPY tools/ci/kernel_symbol_map.py tools/ci/rocm_kernel_symbol_map.py tools/ci/
+RUN if [ "${VLLM_KERNEL_SYMBOL_MAP}" = "1" ]; then \
+        uv venv --system-site-packages /tmp/kernel-map/.venv \
+        && /tmp/kernel-map/.venv/bin/python tools/ci/kernel_symbol_map.py \
+            --backend rocm --build-root build --source-root . \
+            --commit "${buildkite_commit}" \
+            --out dist/kernel_symbol_map.rocm.json.gz \
+        && rm -rf /tmp/kernel-map; \
+    fi
+
+FROM scratch AS kernel-symbol-map-rocm
+ARG COMMON_WORKDIR
+COPY --from=kernel-symbol-map-build ${COMMON_WORKDIR}/vllm/dist/kernel_symbol_map.rocm.json.gz /
+
 # Build the full vLLM ROCm wheel by reusing the native extension wheel from
 # csrc-build. This stage still rebuilds for Python/package changes, but skips
 # the expensive dependency installation and HIP/C++ compilation when their

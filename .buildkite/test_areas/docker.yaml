@@ -9,12 +9,19 @@ steps:
   source_file_dependencies:
     - .buildkite/release-pipeline.yaml
     - .buildkite/scripts/docker-build-metadata-args.sh
+    - .buildkite/scripts/hardware_ci/run-amd-test.sh
+    - .buildkite/scripts/rocm/build-config.sh
     - docker/Dockerfile
     - docker/Dockerfile.cpu
     - docker/docker-bake.hcl
     - tests/tools/test_docker_build_metadata_args.py
+    - tests/tools/test_amd_runner.py
+    - tests/tools/test_kernel_symbol_map.py
+    - tools/ci/kernel_symbol_map.py
+    - tools/ci/rocm_kernel_symbol_map.py
   commands:
-    - pytest -v -s tools/test_docker_build_metadata_args.py
+    - pytest -v -s tools/test_docker_build_metadata_args.py tools/test_amd_runner.py
+    - pytest -v -s tools/test_kernel_symbol_map.py
   mirror:
     amd:
       label: ":amd: (MI250) Docker Build Metadata"
@@ -32,3 +39,6 @@ steps:
       - docker/ci-rocm.hcl
       - docker/docker-bake-rocm.hcl
       - tests/tools/test_docker_build_metadata_args.py
+      - tests/tools/test_kernel_symbol_map.py
+      - tools/ci/kernel_symbol_map.py
+      - tools/ci/rocm_kernel_symbol_map.py
