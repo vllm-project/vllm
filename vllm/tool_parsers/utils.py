@@ -97,14 +97,19 @@ def find_common_prefix(s1: str, s2: str) -> str:
     e.g. find_common_prefix('{"fruit": "ap"}', '{"fruit": "apple"}') ->
     '{"fruit": "ap'
     """
-    prefix = ""
-    min_length = min(len(s1), len(s2))
-    for i in range(0, min_length):
-        if s1[i] == s2[i]:
-            prefix += s1[i]
+    # Binary search on slice equality so the scan runs at C speed; streaming
+    # parsers call this on the whole argument string for every delta.
+    lo, hi = 0, min(len(s1), len(s2))
+    if s1[:hi] == s2[:hi]:
+        return s1[:hi]
+    # Invariant: s1[:lo] == s2[:lo] and s1[:hi] != s2[:hi].
+    while hi - lo > 1:
+        mid = (lo + hi) // 2
+        if s1[:mid] == s2[:mid]:
+            lo = mid
         else:
-            break
-    return prefix
+            hi = mid
+    return s1[:lo]
 
 
 def find_common_suffix(s1: str, s2: str) -> str:
