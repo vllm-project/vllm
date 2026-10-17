@@ -481,6 +481,12 @@ class Platform:
         else:  # Hopper (SM90) and older
             priorities = [MLAPrefillBackendEnum.FLASH_ATTN]
 
+        from vllm.v1.attention.backends.mla.prefill.selector import (
+            prioritize_query_quantization,
+        )
+
+        priorities = prioritize_query_quantization(priorities, mla_selector_config)
+
         all_invalid_reasons: dict[str, list[str]] = {}
 
         for backend_enum in priorities:
