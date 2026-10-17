@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
+import math
 from collections.abc import Callable, Sequence
 
 import torch
@@ -104,14 +105,6 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
         structured_output_backend: StructuredOutputBackend | None = None
         structured_output_key = None
         structured_output_bitmask = None
-        if params.structured_outputs is not None:
-            (
-                structured_output_backend,
-                structured_output_key,
-                structured_output_bitmask,
-            ) = self._init_beam_search_structured_output(
-                params.structured_outputs, tokenizer
-            )
 
         # generate 2 * beam_width candidates at each step
         # following the huggingface transformers implementation
@@ -124,6 +117,18 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
             detokenize=False,
             skip_clone=True,  # Internal beam search, safe to skip clone
         )
+        params.configure_logprobs(
+            base_sampling_params, self.llm_engine.input_processor.vllm_config
+        )
+        if params.structured_outputs is not None:
+            (
+                structured_output_backend,
+                structured_output_key,
+                structured_output_bitmask,
+            ) = self._init_beam_search_structured_output(
+                params.structured_outputs, tokenizer
+            )
+
         instances: list[BeamSearchInstance] = []
 
         for lora_req, prompt in zip(lora_requests, engine_inputs):
@@ -287,7 +292,12 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
         # tokens outside the grammar's allowed set. This filtering is also
         # the only grammar enforcement for beams whose allowed set exceeds
         # the engine-side allowed_token_ids cap.
-        allowed_sets: list[set[int] | None] = [None] * len(all_beams)
+        request_allowed = (
+            set(base_sampling_params.logprob_token_ids)
+            if base_sampling_params.logprob_token_ids is not None
+            else None
+        )
+        allowed_sets: list[set[int] | None] = [request_allowed] * len(all_beams)
         if structured_output_backend is not None:
             for i, entry in enumerate(beam_entries):
                 if entry is not None:
@@ -316,6 +326,18 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
 
                 if result.outputs[0].logprobs is not None:
                     logprobs = result.outputs[0].logprobs[0]
+                    if request_allowed is not None:
+                        logprobs = {
+                            token: score
+                            for token, score in sorted(
+                                logprobs.items(),
+                                key=lambda item: item[1].logprob,
+                                reverse=True,
+                            )
+                            if token in request_allowed and math.isfinite(score.logprob)
+                        }
+                        for score in logprobs.values():
+                            score.rank = None
                     allowed = allowed_sets[i]
                     for token_id, logprob_obj in logprobs.items():
                         if allowed is not None and token_id not in allowed:
