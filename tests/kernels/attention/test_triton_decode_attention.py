@@ -325,3 +325,57 @@ def test_decode_attention_cross_layer_view(H_Q, H_KV, D_QK, D_V, is_mla, PAGE_SI
     # Same data and same compute order; only addressing differs.
     assert torch.equal(o_ref, o_xl)
     assert torch.equal(lse_ref, lse_xl)
+
+
+@pytest.mark.parametrize("PAGE_SIZE", [16])
+def test_decode_attention_mla_fp8_shared_memory(PAGE_SIZE):
+    """MLA tile (Lk=576, Lv=512, one latent KV head) with an fp8 cache.
+
+    With two pipeline stages this configuration needs 102400 bytes of shared
+    memory, which exceeds the 101376-byte limit of consumer GPUs (sm_86,
+    sm_89, sm_120); see vllm-project/vllm#60172. The launcher must fall back
+    to one stage instead of raising OutOfResources, and the result must still
+    match the bf16 reference.
+    """
+    B, L, H_Q, H_KV, D_QK, D_V, CACHE_SIZE = 4, 1000, 32, 1, 576, 512, 16384
+    dtype = torch.bfloat16
+    sm_scale = 1.0 / (D_QK**0.5)
+    num_kv_splits = 2
+
+    num_pages_per_batch = cdiv(L, PAGE_SIZE)
+    req_to_page = torch.randint(
+        0, CACHE_SIZE // PAGE_SIZE, (B, num_pages_per_batch), device=DEVICE_TYPE
+    )
+    b_seq_len = torch.full((B,), L, device=DEVICE_TYPE)
+    q = torch.randn(B, H_Q, D_QK, dtype=dtype, device=DEVICE_TYPE)
+    k_bf16 = torch.randn(
+        CACHE_SIZE // PAGE_SIZE, PAGE_SIZE, H_KV, D_QK, dtype=dtype, device=DEVICE_TYPE
+    )
+
+    def run(k_buffer, **scales):
+        o = torch.zeros(B, H_Q, D_V, dtype=dtype, device=DEVICE_TYPE)
+        lse = torch.zeros(B, H_Q, dtype=dtype, device=DEVICE_TYPE)
+        attn_logits = torch.empty(
+            (B, H_Q, num_kv_splits, D_V + 1), dtype=torch.float32, device=DEVICE_TYPE
+        )
+        decode_attention_fwd(
+            q,
+            k_buffer,
+            k_buffer[..., :D_V],
+            o,
+            lse,
+            req_to_page,
+            b_seq_len=b_seq_len,
+            attn_logits=attn_logits,
+            num_kv_splits=num_kv_splits,
+            sm_scale=sm_scale,
+            page_size=PAGE_SIZE,
+            is_mla=True,
+            **scales,
+        )
+        return o
+
+    o_ref = run(k_bf16)
+    k_fp8, k_scale = _quantize_to_fp8(k_bf16)
+    o_fp8 = run(k_fp8, k_scale=k_scale, v_scale=k_scale)
+    torch.testing.assert_close(o_ref, o_fp8, atol=5e-1, rtol=1e-2)
