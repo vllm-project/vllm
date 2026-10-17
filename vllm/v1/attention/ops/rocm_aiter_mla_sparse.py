@@ -923,8 +923,23 @@ def rocm_fp8_mqa_logits(
     if _ON_GFX942 and rocm_aiter_ops.is_enabled():
         from aiter.ops.flydsl import flydsl_fp8_mqa_logits
 
+        seq_len = q.shape[0]
+        seq_len_kv = k_fp8.shape[0]
+        # gfx942 auto-selects mfma_r4_w2 once both lengths are in this
+        # range. Four waves is faster there. The KV tile stays 128.
+        variant = (
+            "mfma_r4_w4"
+            if seq_len >= 2048 and seq_len_kv >= 8192
+            else None
+        )
         return flydsl_fp8_mqa_logits(
-            q, k_fp8, scale, weights, cu_seqlen_ks, cu_seqlen_ke
+            q,
+            k_fp8,
+            scale,
+            weights,
+            cu_seqlen_ks,
+            cu_seqlen_ke,
+            variant=variant,
         )
 
     aiter_mqa_logits_module = None
