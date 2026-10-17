@@ -172,6 +172,45 @@ class DeepSeekV31ToolParser(ToolParser):
                 delta_text = delta_text.split(self.tool_call_end_token)[0].rstrip()
                 text_portion = delta_text.split(self.tool_call_end_token)[-1].lstrip()
 
+            # case -- one or more complete tool calls (a begin tag and its
+            #   matching end tag) arrived within this single delta. The
+            #   count-based branches below assume every tool call spends at
+            #   least one delta in a "started but not yet closed" state
+            #   (start_count > end_count) before its end tag is seen. When a
+            #   whole call arrives at once, start_count == end_count on the
+            #   first pass, so it would fall into the "closing" branch with an
+            #   empty prev_tool_call_arr and be silently dropped. Re-use the
+            #   non-streaming regex to parse every complete block and emit the
+            #   ones we have not streamed yet.
+            if (
+                cur_tool_start_count == cur_tool_end_count
+                and cur_tool_start_count > prev_tool_start_count
+                and prev_tool_start_count == prev_tool_end_count
+            ):
+                complete_calls = self.tool_call_regex.findall(current_text)
+                new_calls = complete_calls[self.current_tool_id + 1 :]
+                if not new_calls:
+                    return None
+                delta_tool_calls = []
+                for function_name, function_args in new_calls:
+                    self.current_tool_id += 1
+                    self.current_tool_name_sent = True
+                    self.streamed_args_for_tool.append(function_args)
+                    self.prev_tool_call_arr.append(
+                        {"name": function_name, "arguments": function_args}
+                    )
+                    delta_tool_calls.append(
+                        DeltaToolCall(
+                            index=self.current_tool_id,
+                            type="function",
+                            id=make_tool_call_id(),
+                            function=DeltaFunctionCall(
+                                name=function_name, arguments=function_args
+                            ).model_dump(exclude_none=True),
+                        )
+                    )
+                return DeltaMessage(tool_calls=delta_tool_calls)
+
             # case -- we're starting a new tool call
             if (
                 cur_tool_start_count > cur_tool_end_count
