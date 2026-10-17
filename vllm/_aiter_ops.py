@@ -2290,6 +2290,18 @@ class rocm_aiter_ops:
         return cls.is_rdna_aiter_enabled() and cls._LINEAR_ENABLED
 
     @classmethod
+    def is_rdna_unified_attn_enabled(cls) -> bool:
+        """RDNA4 (gfx12) analog of is_triton_unified_attn_enabled(). On by
+        default with aiter, but an explicit
+        VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION=0 opts out of this kernel while
+        keeping aiter's other Triton paths, e.g. linear GEMM."""
+        opted_out = (
+            envs.is_set("VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION")
+            and not cls._TRITON_UNIFIED_ATTN_ENABLED
+        )
+        return cls.is_rdna_aiter_enabled() and not opted_out
+
+    @classmethod
     @if_aiter_supported
     def is_linear_enabled(cls) -> bool:
         return cls._AITER_ENABLED and cls._LINEAR_ENABLED
