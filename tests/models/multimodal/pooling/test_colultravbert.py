@@ -19,6 +19,9 @@ def colultravbert_model(vllm_runner):
         MODEL_NAME,
         runner="pooling",
         dtype=DTYPE,
+        # A page splits into up to 27 tiles plus the global view, 1,792 image
+        # tokens.
+        max_model_len=2048,
         enforce_eager=True,
     ) as vllm_model:
         yield vllm_model
