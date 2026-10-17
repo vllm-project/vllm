@@ -56,6 +56,11 @@ class ServeSubcommand(CLISubcommand):
         if hasattr(args, "model_tag") and args.model_tag is not None:
             args.model = args.model_tag
 
+        if getattr(args, "snapshot_config", None) is not None:
+            from vllm.snapshot.startup import validate_startup_snapshot_args
+
+            validate_startup_snapshot_args(args)
+
         if getattr(args, "grpc", False):
             from vllm.entrypoints.launchers.grpc_server import serve_grpc
 

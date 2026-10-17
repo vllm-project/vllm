@@ -38,6 +38,7 @@ async def build_async_engine_client(
     *,
     usage_context: UsageContext = UsageContext.OPENAI_API_SERVER,
     client_config: dict[str, Any] | None = None,
+    snapshot_startup: bool = False,
 ) -> AsyncIterator[EngineClient]:
     if os.getenv("VLLM_WORKER_MULTIPROC_METHOD") == "forkserver":
         # The executor is expected to be mp.
@@ -62,6 +63,7 @@ async def build_async_engine_client(
         engine_args,
         usage_context=usage_context,
         client_config=client_config,
+        snapshot_startup=snapshot_startup,
     ) as engine:
         yield engine
 
@@ -72,6 +74,7 @@ async def build_async_engine_client_from_engine_args(
     *,
     usage_context: UsageContext = UsageContext.OPENAI_API_SERVER,
     client_config: dict[str, Any] | None = None,
+    snapshot_startup: bool = False,
 ) -> AsyncIterator[EngineClient]:
     """Create EngineClient, either:
         - in-process using the AsyncLLMEngine Directly
@@ -81,6 +84,10 @@ async def build_async_engine_client_from_engine_args(
     """
     # Create the EngineConfig (determines if we can use V1).
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
+    if snapshot_startup:
+        from vllm.snapshot.startup import validate_startup_snapshot_config
+
+        validate_startup_snapshot_config(vllm_config)
 
     from vllm.v1.engine.async_llm import AsyncLLM
 
@@ -108,6 +115,14 @@ async def build_async_engine_client_from_engine_args(
         await async_llm.reset_mm_cache()
 
         yield async_llm
+    except BaseException:
+        if snapshot_startup and async_llm is not None:
+            try:
+                async_llm.shutdown(timeout=0)
+            except Exception:
+                logger.exception("Could not shut down failed snapshot engine")
+            async_llm = None
+        raise
     finally:
         if async_llm:
             async_llm.shutdown(timeout=vllm_config.shutdown_timeout)
@@ -172,6 +187,12 @@ async def run_server(args, **uvicorn_kwargs) -> None:
         raise KeyboardInterrupt("terminated")
 
     signal.signal(signal.SIGTERM, _interrupt_init)
+
+    if getattr(args, "snapshot_config", None) is not None:
+        from vllm.snapshot.startup import run_startup_snapshot_server
+
+        await run_startup_snapshot_server(args, **uvicorn_kwargs)
+        return
 
     listen_address, sock = setup_server(args, reuse_port=False)
     await run_server_worker(listen_address, sock, args, **uvicorn_kwargs)
