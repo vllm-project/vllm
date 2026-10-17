@@ -156,6 +156,8 @@ class Gemma4Proposer(SpecDecodeBaseProposer):
         sliding layers to fall back to FLASH_ATTN which cannot handle
         KV-shared cache. Override to carry the target's backend through.
         """
+        from vllm.model_executor.models.utils import install_draft_quant_config
+
         base = super()._create_draft_vllm_config()
         target_backend = self.vllm_config.attention_config.backend
         if target_backend is not None:
@@ -166,7 +168,7 @@ class Gemma4Proposer(SpecDecodeBaseProposer):
                     backend=target_backend,
                 ),
             )
-        return base
+        return install_draft_quant_config(base)
 
     def _maybe_share_embeddings(self, target_language_model: nn.Module) -> None:
         """Gemma4 MTP requires dim-mismatched embedding sharing.

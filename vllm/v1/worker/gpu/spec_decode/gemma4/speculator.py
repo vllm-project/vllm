@@ -91,7 +91,9 @@ class Gemma4Speculator(TargetDependentARSpeculator):
                     backend=target_backend,
                 ),
             )
-        return draft_vllm_config
+        from vllm.model_executor.models.utils import install_draft_quant_config
+
+        return install_draft_quant_config(draft_vllm_config)
 
     def _setup_gemma4_kv_sharing(
         self,

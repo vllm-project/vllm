@@ -38,8 +38,10 @@ from .qwen3_dflash import DFlashQwen3ForCausalLM, DFlashQwen3Model
 from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
+    capture_eagle_vocab_map,
     maybe_prefix,
     process_eagle_weight,
+    validate_eagle_vocab_map,
 )
 
 logger = init_logger(__name__)
@@ -315,9 +317,10 @@ class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
         includes_lm_head = False
         includes_draft_id_mapping = False
         includes_confidence_head = False
+        vocab_map: dict[str, torch.Tensor] = {}
         for name, loaded_weight in weights:
-            # t2d is training-only; the draft remaps via d2t at sampling time.
-            if "t2d" in name:
+            # t2d is checked against d2t, then skipped. Sampling remaps via d2t.
+            if capture_eagle_vocab_map(name, loaded_weight, vocab_map):
                 continue
             if "d2t" in name:
                 name = name.replace("d2t", "draft_id_to_target_id")
@@ -334,6 +337,8 @@ class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
             # Sets has_own_embed_tokens / has_own_lm_head so load_dspark_model
             # knows whether to keep these or alias the target's.
             process_eagle_weight(self, name)
+
+        validate_eagle_vocab_map(vocab_map)
 
         # mask_embedding is an unused placeholder param; DSpark masks via the vocab row.
         # embed_tokens / lm_head are optional; when omitted they are shared from

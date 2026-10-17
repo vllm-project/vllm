@@ -323,6 +323,107 @@ def test_modelopt_nvfp4_leaves_excluded_parallel_lm_head_unquantized():
     assert isinstance(method, UnquantizedLinearMethod)
 
 
+def test_flat_modelopt_nvfp4_config_honors_exclude_modules():
+    """Flat ModelOpt configs record skipped layers in exclude_modules."""
+    config = ModelOptNvFp4Config.from_config(
+        {
+            "quant_method": "modelopt",
+            "quant_algo": "NVFP4",
+            "kv_cache_quant_algo": None,
+            "exclude_modules": ["lm_head", "embed_tokens"],
+        }
+    )
+    assert config.exclude_modules == ["lm_head", "embed_tokens"]
+    assert config.is_layer_excluded("lm_head")
+    assert config.is_layer_excluded("model.embed_tokens")
+
+    method = config.get_quant_method(_mock_lm_head(), prefix="lm_head")
+    assert isinstance(method, UnquantizedLinearMethod)
+    layer = torch.nn.Module()
+    with (
+        patch(
+            "vllm.model_executor.parameter.get_tensor_model_parallel_rank",
+            return_value=0,
+        ),
+        patch(
+            "vllm.model_executor.parameter.get_tensor_model_parallel_world_size",
+            return_value=1,
+        ),
+    ):
+        method.create_weights(
+            layer,
+            input_size_per_partition=64,
+            output_partition_sizes=[32],
+            input_size=64,
+            output_size=32,
+            params_dtype=torch.bfloat16,
+            weight_loader=lambda *args, **kwargs: None,
+        )
+    assert tuple(layer.weight.shape) == (32, 64)
+    assert layer.weight.dtype == torch.bfloat16
+
+    embed = Mock(spec=VocabParallelEmbedding)
+    embed.__class__ = VocabParallelEmbedding
+    assert config.get_quant_method(embed, prefix="model.embed_tokens") is None
+
+    from vllm.model_executor.layers.linear import LinearBase
+
+    linear = Mock(spec=LinearBase)
+    linear.__class__ = LinearBase
+    quantized = config.get_quant_method(linear, prefix="model.layers.0.mlp.down_proj")
+    assert isinstance(quantized, ModelOptLinearMethod)
+
+
+def test_flat_modelopt_ignore_is_exclude_modules_fallback():
+    """Compressed-tensors flat configs still record skips under ignore."""
+    config = ModelOptNvFp4Config.from_config(
+        {
+            "quant_method": "modelopt",
+            "quant_algo": "NVFP4",
+            "ignore": ["lm_head"],
+        }
+    )
+    assert config.exclude_modules == ["lm_head"]
+    assert config.is_layer_excluded("lm_head")
+
+
+def test_flat_modelopt_exclude_modules_takes_precedence_over_ignore():
+    config = ModelOptNvFp4Config.from_config(
+        {
+            "quant_method": "modelopt",
+            "quant_algo": "NVFP4",
+            "exclude_modules": ["embed_tokens"],
+            "ignore": ["lm_head"],
+        }
+    )
+    assert config.exclude_modules == ["embed_tokens"]
+
+
+def test_flat_modelopt_nvfp4_reads_kv_cache_quant_algo():
+    config = ModelOptNvFp4Config.from_config(
+        {
+            "quant_method": "modelopt",
+            "quant_algo": "NVFP4",
+            "kv_cache_quant_algo": "fp8",
+            "exclude_modules": [],
+        }
+    )
+    assert config.kv_cache_quant_algo == "FP8"
+
+
+def test_flat_modelopt_kv_cache_scheme_still_maps_to_fp8():
+    config = ModelOptFp8Config.from_config(
+        {
+            "quant_method": "modelopt",
+            "quant_algo": "FP8",
+            "kv_cache_scheme": {"type": "float", "num_bits": 8},
+            "ignore": ["lm_head"],
+        }
+    )
+    assert config.kv_cache_quant_method == "FP8"
+    assert config.exclude_modules == ["lm_head"]
+
+
 def test_modelopt_mixed_precision_quantizes_parallel_lm_head():
     config = _mixed_precision_config(
         {"lm_head": {"quant_algo": "NVFP4", "group_size": 16}}

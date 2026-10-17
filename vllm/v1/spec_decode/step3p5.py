@@ -8,7 +8,7 @@ import torch
 from vllm.config import VllmConfig, get_layers_from_vllm_config, replace
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-from vllm.model_executor.models.utils import get_draft_quant_config
+from vllm.model_executor.models.utils import install_draft_quant_config
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
@@ -161,10 +161,8 @@ class Step3p5MTPProposer(EagleProposer):
 
     def _create_draft_vllm_config(self) -> VllmConfig:
         base = super()._create_draft_vllm_config()
-        return replace(
-            base,
-            model_config=self.draft_model_config,
-            quant_config=get_draft_quant_config(base),
+        return install_draft_quant_config(
+            replace(base, model_config=self.draft_model_config)
         )
 
     def validate_same_kv_cache_group(self, kv_cache_config: KVCacheConfig) -> None:

@@ -95,12 +95,16 @@ class DFlashProposer(SpecDecodeBaseProposer):
         arch = base.model_config.model_arch_config
         if arch.is_mm_prefix_lm:
             base.model_config.model_arch_config = replace(arch, is_mm_prefix_lm=False)
-        return replace(
-            base,
-            attention_config=replace(
-                base.attention_config,
-                use_non_causal=not self.dflash_causal,
-            ),
+        from vllm.model_executor.models.utils import install_draft_quant_config
+
+        return install_draft_quant_config(
+            replace(
+                base,
+                attention_config=replace(
+                    base.attention_config,
+                    use_non_causal=not self.dflash_causal,
+                ),
+            )
         )
 
     @override

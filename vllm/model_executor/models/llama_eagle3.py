@@ -32,9 +32,11 @@ from vllm.multimodal.inputs import NestedTensors
 from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
+    capture_eagle_vocab_map,
     get_draft_quant_config,
     maybe_prefix,
     process_eagle_weight,
+    validate_eagle_vocab_map,
 )
 
 logger = init_logger(__name__)
@@ -192,6 +194,7 @@ class LlamaModel(nn.Module):
         self.embed_tokens = VocabParallelEmbedding(
             self.config.vocab_size,
             self.config.hidden_size,
+            quant_config=self.quant_config,
             prefix=maybe_prefix(prefix, "embed_tokens"),
         )
 
@@ -422,8 +425,9 @@ class Eagle3LlamaForCausalLM(_Eagle3LlamaForCausalLMBase):
         includes_draft_id_mapping = False
         includes_embed_tokens = False
         includes_mask_hidden = False
+        vocab_map: dict[str, torch.Tensor] = {}
         for name, loaded_weight in weights:
-            if "t2d" in name:
+            if capture_eagle_vocab_map(name, loaded_weight, vocab_map):
                 continue
             if "d2t" in name:
                 name = name.replace("d2t", "draft_id_to_target_id")
@@ -453,6 +457,7 @@ class Eagle3LlamaForCausalLM(_Eagle3LlamaForCausalLMBase):
                 "model is configured for parallel drafting. "
                 "Please provide mask_hidden in the weights."
             )
+        validate_eagle_vocab_map(vocab_map)
 
         orig_to_new_substr = {"mask_hidden": None}
         if not includes_draft_id_mapping:

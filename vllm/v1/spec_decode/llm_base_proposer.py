@@ -1298,7 +1298,11 @@ class SpecDecodeBaseProposer:
                 ),
             )
 
-        return base
+        from vllm.model_executor.models.utils import install_draft_quant_config
+
+        # The replaces above already copied the target config. Pin after them
+        # so __post_init__ cannot refill a missing draft quant config.
+        return install_draft_quant_config(base)
 
     def _get_model(self) -> nn.Module:
         """Default method to call get_model(). Can be overridden by subclasses which

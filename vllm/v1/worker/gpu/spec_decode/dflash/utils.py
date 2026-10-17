@@ -18,6 +18,7 @@ def load_dflash_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
     from vllm.model_executor.models.qwen3_dflash import (
         dflash_has_any_non_causal,
     )
+    from vllm.model_executor.models.utils import install_draft_quant_config
 
     speculative_config = vllm_config.speculative_config
     assert speculative_config is not None
@@ -41,6 +42,7 @@ def load_dflash_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
         ),
         load_config=get_pp_safe_draft_load_config(get_draft_load_config(vllm_config)),
     )
+    draft_vllm_config = install_draft_quant_config(draft_vllm_config)
     with set_model_tag("dflash_head"):
         dflash_model = get_model(
             vllm_config=draft_vllm_config, model_config=draft_model_config

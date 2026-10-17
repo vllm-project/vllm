@@ -55,8 +55,15 @@ class SpeculatorsConfig(PreTrainedConfig):
                 "Please ensure you're loading a speculators-format model."
             )
 
-        # Start with transformer layer configuration if present
-        pre_trained_config = config_dict.get("transformer_layer_config", {})
+        # Copy so quant metadata is not written back onto the caller's dict.
+        # That metadata lives on the outer speculators config.
+        layer_config = config_dict.get("transformer_layer_config") or {}
+        pre_trained_config = dict(layer_config)
+        quant_config = config_dict.get("quantization_config")
+        if "quantization_config" not in pre_trained_config and quant_config is not None:
+            pre_trained_config["quantization_config"] = (
+                dict(quant_config) if isinstance(quant_config, dict) else quant_config
+            )
         # Apply anything specific to the supported algorithm
         algo_updater = SUPPORTED_SPECULATORS_TYPES[speculators_model_type]
         algo_updater(config_dict=config_dict, pre_trained_config=pre_trained_config)

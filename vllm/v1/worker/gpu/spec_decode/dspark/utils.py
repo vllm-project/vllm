@@ -77,7 +77,7 @@ def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
     from vllm.compilation.backends import set_model_tag
     from vllm.model_executor.model_loader import get_model
     from vllm.model_executor.models.qwen3_dflash import dflash_has_any_non_causal
-    from vllm.model_executor.models.utils import get_draft_quant_config
+    from vllm.model_executor.models.utils import install_draft_quant_config
     from vllm.v1.worker.gpu.spec_decode.eagle.utils import (
         _should_share,
         get_target_lm_head,
@@ -112,9 +112,7 @@ def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
         ),
         load_config=get_pp_safe_draft_load_config(get_draft_load_config(vllm_config)),
     )
-    # VllmConfig post-init restores the target's quant config because the target
-    # config is retained for DSpark's target-layer metadata, so we must override it.
-    draft_vllm_config.quant_config = get_draft_quant_config(vllm_config)
+    draft_vllm_config = install_draft_quant_config(draft_vllm_config)
 
     with set_model_tag("dspark_head"):
         draft_model = get_model(

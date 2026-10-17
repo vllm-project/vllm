@@ -48,6 +48,34 @@ def test_dspark_updater_keeps_legacy_qwen3_checkpoint_loadable() -> None:
     assert config["architectures"] == ["Qwen3DSparkModel"]
 
 
+def test_eagle3_extract_keeps_outer_quantization_config() -> None:
+    """Quant metadata lives on the speculators config, not the layer config."""
+    outer = {
+        "speculators_model_type": "eagle3",
+        "draft_vocab_size": 32000,
+        "transformer_layer_config": {
+            "model_type": "llama",
+            "hidden_size": 5376,
+            "vocab_size": 262144,
+        },
+        "quantization_config": {
+            "quant_method": "modelopt",
+            "quant_algo": "NVFP4",
+            "exclude_modules": ["lm_head", "embed_tokens"],
+        },
+    }
+
+    config = SpeculatorsConfig.extract_transformers_pre_trained_config(outer)
+
+    assert config["architectures"] == ["Eagle3LlamaForCausalLM"]
+    assert config["quantization_config"]["exclude_modules"] == [
+        "lm_head",
+        "embed_tokens",
+    ]
+    assert "quantization_config" not in outer["transformer_layer_config"]
+    assert config["quantization_config"] is not outer["quantization_config"]
+
+
 def test_dspark_updater_maps_bonus_anchor_semantics() -> None:
     outer_config = _make_dspark_config("Qwen3DSparkModel")
     outer_config["sample_from_anchor"] = False
