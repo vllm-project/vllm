@@ -24,6 +24,7 @@ from http import HTTPStatus
 import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 
 from vllm.entrypoints.cohere import api_router as api_router_mod
@@ -613,7 +614,15 @@ class TestCohereErrorEnvelope:
         assert "REQUIRED" in body["message"]
         assert "tools" in body["message"]
 
-    def test_http_error_body_is_cohere_shaped(self):
+    @pytest.mark.parametrize(
+        "status_code,headers",
+        [
+            (418, {}),
+            (401, {"WWW-Authenticate": "Bearer"}),
+            (429, {"Retry-After": "30"}),
+        ],
+    )
+    def test_http_error_body_is_cohere_shaped(self, status_code, headers):
         # A raised ``HTTPException`` from anywhere in the request cycle
         # is routed through ``http_exception_handler`` (producing the
         # ``ErrorResponse`` shape) and must be translated.
@@ -621,13 +630,47 @@ class TestCohereErrorEnvelope:
 
         @app.get("/cohere/v2/boom")
         async def _boom():
-            raise HTTPException(status_code=418, detail="teapot")
+            raise HTTPException(status_code, detail="request rejected", headers=headers)
 
         with TestClient(app) as client:
             r = client.get("/cohere/v2/boom")
-        assert r.status_code == 418
+        assert r.status_code == status_code
         body = r.json()
-        assert body == {"message": "teapot"}
+        assert body == {"message": "request rejected"}
+        for name, value in headers.items():
+            assert r.headers.get(name) == value
+
+    @pytest.mark.parametrize("translate", [True, False])
+    def test_error_response_preserves_headers_and_content_length(self, translate):
+        app = _build_app_with_vllm_handlers(handler=None)
+
+        @app.get("/cohere/v2/busy")
+        async def _busy():
+            body = (
+                ErrorResponse(
+                    error=ErrorInfo(message="busy", type="Too Many Requests", code=429)
+                ).model_dump()
+                if translate
+                else {"message": "busy"}
+            )
+            response = JSONResponse(
+                body,
+                status_code=429,
+                headers={"Retry-After": "30"},
+            )
+            response.set_cookie("first", "1")
+            response.set_cookie("second", "2")
+            return response
+
+        with TestClient(app) as client:
+            response = client.get("/cohere/v2/busy")
+
+        assert response.status_code == 429
+        assert response.json() == {"message": "busy"}
+        assert response.headers.get("Retry-After") == "30"
+        assert len(response.headers.get_list("set-cookie")) == 2
+        assert response.headers["content-type"] == "application/json"
+        assert int(response.headers["content-length"]) == len(response.content)
 
     def test_non_cohere_path_is_not_translated(self):
         app = _build_app_with_vllm_handlers(handler=None)
