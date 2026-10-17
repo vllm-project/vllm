@@ -9,14 +9,17 @@ from vllm.parser.qwen3 import (
     _PARAM_RE,
     _PARTIAL_PARAM_RE,
     CHATML_TURN_BOUNDARIES,
+    FUNC_END,
     Qwen3Parser,
     qwen3_config,
 )
 
 
 def _mimo_arg_converter(raw_args: str, partial: bool) -> str:
+    closed = raw_args.endswith(FUNC_END)
+    raw_args = raw_args.removesuffix(FUNC_END)
     params = {m.group(1): m.group(2) for m in _PARAM_RE.finditer(raw_args)}
-    if partial:
+    if partial or closed:
         match = _PARTIAL_PARAM_RE.search(_PARAM_RE.sub("", raw_args))
         if match and match.group(1):
             params[match.group(1)] = match.group(2)
