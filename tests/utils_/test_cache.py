@@ -138,3 +138,31 @@ def test_lru_cache_put_if_fits():
 
     with pytest.raises(ValueError, match="value too large"):
         cache.put("big", 11)
+
+
+def test_lru_cache_view_tracks_replacement():
+    cache = LRUCache[str, str](2)
+    cache.put("one", "old")
+    view = cache.cache
+    cache.put("one", "new")
+    assert view["one"] == "new"
+    assert cache.stat() == CacheInfo(hits=0, total=0)
+
+
+def test_lru_cache_view_tracks_eviction():
+    cache = LRUCache[str, str](2)
+    cache.put("one", "first")
+    view = cache.cache
+    cache.put("two", "second")
+    cache.put("three", "third")
+    assert list(view.items()) == [("two", "second"), ("three", "third")]
+    assert len(view) == len(cache) == 2
+
+
+def test_lru_cache_view_is_read_only():
+    cache = LRUCache[str, str](2)
+    cache.put("one", "first")
+    view = cache.cache
+    with pytest.raises(TypeError):
+        view["one"] = "changed"  # type: ignore[index]
+    assert view["one"] == cache.get("one") == "first"
