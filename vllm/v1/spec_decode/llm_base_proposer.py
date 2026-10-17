@@ -105,6 +105,12 @@ class SpecDecodeBaseProposer:
         draft_hf_config = self.draft_model_config.hf_config
         if get_compress_ratios(draft_hf_config) and hasattr(draft_hf_config, "hc_mult"):
             self.hidden_size = self.hidden_size * draft_hf_config.hc_mult
+        # Qwen4-Exp MTP consumes the target's wide hyper-connection residual
+        # [T, hc_count * hidden_size]. Expand the buffer so it fits.
+        if getattr(draft_hf_config, "model_type", None) == "qwen4_exp_mtp":
+            self.hidden_size = self.hidden_size * getattr(
+                draft_hf_config, "hc_count", 1
+            )
 
         # Unifying eagle, draft model, and parallel drafting support.
         # DFlash always uses parallel drafting (all tokens in one pass),

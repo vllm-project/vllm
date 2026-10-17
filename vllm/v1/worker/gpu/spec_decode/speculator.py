@@ -131,7 +131,13 @@ class DraftModelSpeculator(BaseSpeculator):
         # (hc_mult=4) but its MTP head consumes the collapsed states, so
         # widening it feeds propose() a 4x-too-wide buffer.
         if _target_feeds_hc_residual(vllm_config):
-            hc_mult = getattr(self.draft_model_config.hf_config, "hc_mult", 1)
+            # Qwen4-Exp names this attribute ``hc_count`` while DeepSeek-V4 /
+            # HY-V4 use ``hc_mult``; fall back so the HC-widened buffer is
+            # sized correctly for both.
+            hf_cfg = self.draft_model_config.hf_config
+            hc_mult = getattr(hf_cfg, "hc_mult", None)
+            if hc_mult is None:
+                hc_mult = getattr(hf_cfg, "hc_count", 1)
             self.hidden_size = self.hidden_size * hc_mult
         self.vocab_size = self.draft_model_config.get_vocab_size()
         self.dtype = vllm_config.model_config.dtype
