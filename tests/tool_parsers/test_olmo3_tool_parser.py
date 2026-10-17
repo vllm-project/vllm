@@ -66,6 +66,11 @@ ESCAPED_STRING_FUNCTION_CALL = FunctionCall(
     name="get_weather",
     arguments='{"city": "Martha\'s Vineyard", "metric": "\\"cool units\\""}',
 )
+NUMBERS_FUNCTION_OUTPUT = "locate(lat=37.7749, lon=-122.4194, scale=1.5e3, eps=5e-3)"
+NUMBERS_FUNCTION_CALL = FunctionCall(
+    name="locate",
+    arguments='{"lat": 37.7749, "lon": -122.4194, "scale": 1500.0, "eps": 0.005}',
+)
 
 
 @pytest.mark.parametrize("streaming", [True, False])
@@ -179,6 +184,18 @@ TEST_CASES = [
         f"<function_calls>{SIMPLE_FUNCTION_OUTPUT}\n{MORE_TYPES_FUNCTION_OUTPUT}</function_calls>",
         [SIMPLE_FUNCTION_CALL, MORE_TYPES_FUNCTION_CALL],
         id="parallel_calls_nonstreaming",
+    ),
+    pytest.param(
+        True,
+        f"<function_calls>{SIMPLE_FUNCTION_OUTPUT}\n{NUMBERS_FUNCTION_OUTPUT}</function_calls>",
+        [SIMPLE_FUNCTION_CALL, NUMBERS_FUNCTION_CALL],
+        id="numbers_after_call_streaming",
+    ),
+    pytest.param(
+        False,
+        f"<function_calls>{SIMPLE_FUNCTION_OUTPUT}\n{NUMBERS_FUNCTION_OUTPUT}</function_calls>",
+        [SIMPLE_FUNCTION_CALL, NUMBERS_FUNCTION_CALL],
+        id="numbers_after_call_nonstreaming",
     ),
 ]
 
