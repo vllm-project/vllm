@@ -872,6 +872,7 @@ def _make_local_register_worker_stub():
         dp_rank=0,
         tp_rank=0,
         pp_rank=0,
+        connector_name="MooncakeConnector",
     )
 
 
@@ -884,6 +885,7 @@ def _make_register_worker_stub():
         dp_rank=0,
         tp_rank=0,
         pp_rank=0,
+        connector_name="MooncakeConnector",
     )
 
 
@@ -1518,7 +1520,7 @@ async def test_kv_producer(monkeypatch):
             mock_socket.send_multipart.assert_called_once()
             _, sent_payload = mock_socket.send_multipart.call_args[0][0]
             response = prefill_worker._xfer_resp_decoder.decode(sent_payload)
-            assert response.err_msg == "P num blocks less than D"
+            assert response.err_msg == "producer num blocks less than consumer"
             assert response.err_reqs == ["d-req-1"]
 
             # Timeout
