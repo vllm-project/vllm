@@ -225,11 +225,17 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             self._init_moe_kernel(layer)
             return
 
-        # Padding may allocate a same-shaped strided view. Copy it back instead
-        # of rebinding `.data`, since CUDA graphs capture the parameter storage
-        # address.
-        layer.w13_weight.data.copy_(self._maybe_pad_weight(layer.w13_weight.data))
-        layer.w2_weight.data.copy_(self._maybe_pad_weight(layer.w2_weight.data))
+        # ROCm MoE padding changes the storage layout (same shape, larger
+        # row stride), so it can only take effect by rebinding `.data` to the
+        # padded storage; copying it back into the original storage would
+        # silently drop it. Rebind on the initial load only. On weight updates
+        # (e.g. RL weight sync) CUDA graphs may have captured the parameter
+        # addresses, and the parameters already carry the padded layout that
+        # the weight loaders wrote into in place, so leave them untouched.
+        is_weight_update = self.moe_kernel is not None  # type: ignore[has-type]
+        if not is_weight_update:
+            layer.w13_weight.data = self._maybe_pad_weight(layer.w13_weight.data)
+            layer.w2_weight.data = self._maybe_pad_weight(layer.w2_weight.data)
 
         if self.unquantized_backend in [
             UnquantizedMoeBackend.TPU,
