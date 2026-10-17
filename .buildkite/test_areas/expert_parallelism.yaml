@@ -9,13 +9,22 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/distributed/eplb
+  - vllm/model_executor/layers/fused_moe/router/base_router.py
   - tests/distributed/test_eplb_algo.py
   - tests/distributed/test_eplb_migration_scheduler.py
   - tests/distributed/test_eplb_utils.py
+  - tests/distributed/test_eplb_mlb_policy.py
+  - tests/distributed/test_eplb_mlb_routing.py
+  - tests/distributed/test_eplb_replica_shares_kernel.py
   commands:
   - pytest -v -s distributed/test_eplb_algo.py
   - pytest -v -s distributed/test_eplb_migration_scheduler.py
   - pytest -v -s distributed/test_eplb_utils.py
+  # The MoE Load Balancer tests skip themselves when the optional
+  # moe_load_balancer package is not installed.
+  - pytest -v -s distributed/test_eplb_mlb_policy.py
+  - pytest -v -s distributed/test_eplb_mlb_routing.py
+  - pytest -v -s distributed/test_eplb_replica_shares_kernel.py
   mirror:
     amd:
       label: ":amd: (MI355 DPX) EPLB Algorithm"
@@ -26,8 +35,12 @@ steps:
       - image-build-amd
       source_file_dependencies:
       - vllm/distributed/eplb
+      - vllm/model_executor/layers/fused_moe/router/base_router.py
       - tests/distributed/test_eplb_algo.py
       - tests/distributed/test_eplb_utils.py
+      - tests/distributed/test_eplb_mlb_policy.py
+      - tests/distributed/test_eplb_mlb_routing.py
+      - tests/distributed/test_eplb_replica_shares_kernel.py
       - vllm/platforms/rocm.py
 
 - label: ":nvidia: (L4) EPLB Execution"

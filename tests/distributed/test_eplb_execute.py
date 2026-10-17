@@ -3,6 +3,7 @@
 
 import random
 
+import numpy as np
 import pytest
 import torch
 import torch.distributed
@@ -15,6 +16,8 @@ from vllm.distributed.eplb.eplb_communicator import (
     has_nixl,
 )
 from vllm.distributed.eplb.rebalance_execute import (
+    experts_being_acquired,
+    get_ep_ranks_with_experts_batch,
     move_from_buffer,
     rearrange_expert_weights_inplace,
     transfer_layer,
@@ -853,6 +856,71 @@ def test_rearrange_expert_weights_profile_mode(world_size):
         _test_rearrange_expert_weights_profile_mode,
         world_size,
     )
+
+
+@pytest.mark.parametrize("seed", range(20))
+def test_narrowed_send_query_drops_only_experts_with_nowhere_to_send(seed: int):
+    """Experts move_to_buffer stops asking about could not have sent anything.
+
+    move_to_buffer asks get_ep_ranks_with_experts_batch only about experts that
+    occupy a position where the new placement differs from the old, rather than
+    about every expert resident on the rank. That is sound only because the
+    send loop skips any expert whose ranks_to_recv is empty, and an expert
+    acquired by no rank has exactly that. The narrowing and the skip live in
+    different functions with nothing tying them together, so assert the
+    implication against the real mapping instead of trusting the argument for
+    it -- a change to how recv ranks are derived would otherwise turn this into
+    silently dropped transfers.
+    """
+    rng = np.random.default_rng(seed)
+    ep_size, num_local = 8, 34
+    num_physical = ep_size * num_local
+    num_logical = 256
+
+    old_indices = np.concatenate(
+        [
+            np.arange(num_logical),
+            rng.choice(num_logical, num_physical - num_logical, replace=False),
+        ]
+    )
+    rng.shuffle(old_indices)
+    new_indices = old_indices.copy()
+    moved = rng.choice(num_physical, int(rng.integers(1, 24)), replace=False)
+    new_indices[moved] = rng.choice(num_logical, moved.size, replace=False)
+
+    arriving = experts_being_acquired(old_indices, new_indices)
+
+    dropped_any = False
+    kept_with_work = False
+    for ep_rank in range(ep_size):
+        local = slice(ep_rank * num_local, (ep_rank + 1) * num_local)
+        resident = np.unique(old_indices[local])
+
+        dropped = resident[~np.isin(resident, arriving)]
+        if dropped.size:
+            dropped_any = True
+            _, recv_map = get_ep_ranks_with_experts_batch(
+                dropped, num_local, old_indices, new_indices
+            )
+            for expert in dropped.tolist():
+                assert not recv_map[int(expert)], (
+                    f"rank {ep_rank} expert {expert} was dropped by the "
+                    f"narrowing but has receivers {recv_map[int(expert)]}"
+                )
+
+        kept = resident[np.isin(resident, arriving)]
+        if kept.size:
+            _, recv_map = get_ep_ranks_with_experts_batch(
+                kept, num_local, old_indices, new_indices
+            )
+            kept_with_work |= any(recv_map[int(e)] for e in kept.tolist())
+
+    # Both guard against a vacuous pass: nothing dropped means the narrowing
+    # was never exercised, and nothing kept with receivers means the placement
+    # asked for no transfers at all, in which case an empty recv_map says
+    # nothing about whether the narrowing is selective.
+    assert dropped_any, "narrowing dropped nothing -- the case is not exercised"
+    assert kept_with_work, "no expert had receivers -- recv_map is empty for all"
 
 
 def _test_eplb_communicator_pipeline_parallel(env, world_size, backend):
