@@ -329,6 +329,21 @@ Connections that fail (ZMQ socket errors, handshake failures) are handled gracef
 - **Public-facing deployments with P2P enabled:** Lower `VLLM_P2P_MAX_PEERS` to the expected number of legitimate peers (e.g., `16` or `32`).
 - **Sensitive deployments:** Consider deploying behind a reverse proxy that strips or validates `kv_transfer_params` from API requests to prevent client-supplied peer addresses entirely.
 
+### KV hints
+
+The chat completions endpoint accepts a `kv_hints` envelope from any client.
+`kv.retain` actions in it can protect KV-cache blocks from eviction. The
+protection is soft: the LRU free list is drained first and then the
+lowest-priority protected blocks are evicted, so hinted requests can change
+the eviction order but never make the cache unevictable. Per-request caps
+still bound the number of actions (16), directives (128), and the protection
+duration. The `scope`
+that owns a claim is chosen by the client and is not authenticated, so scope
+ownership is not a security boundary: any client can lower or release a claim
+by naming its scope. Actions of other types are forwarded to their consumers
+without validation. If API clients are untrusted, deploy vLLM behind a trusted
+gateway that sets or strips `kv_hints`.
+
 ## Tool Server and MCP Security
 
 vLLM supports connecting to external tool servers via the `--tool-server` argument. This enables models to call tools through the Responses API (`/v1/responses`). Tool server support works with all models — it is not limited to specific model architectures.

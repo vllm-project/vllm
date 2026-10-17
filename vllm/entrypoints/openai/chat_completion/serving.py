@@ -398,6 +398,7 @@ class OpenAIServingChat(GenerateBaseServing):
                     priority=self._get_priority(request, raw_request),
                     data_parallel_rank=data_parallel_rank,
                     session_id=session_id,
+                    kv_hints=request.kv_hints_envelope,
                     **self._engine_reasoning_kwargs(
                         request, parser, chat_template_kwargs, prompt_token_ids
                     ),
