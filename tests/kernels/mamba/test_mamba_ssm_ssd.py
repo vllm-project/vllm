@@ -6,6 +6,10 @@ import torch
 import torch.nn.functional as F
 from einops import rearrange, repeat
 
+from vllm.model_executor.layers.mamba.ops.ssd_chunk_scan import (
+    _chunk_scan_fwd,
+    _chunk_scan_fwd_kernel,
+)
 from vllm.model_executor.layers.mamba.ops.ssd_combined import (
     mamba_chunk_scan_combined_varlen,
 )
@@ -578,3 +582,46 @@ def test_mamba_chunk_scan_cont_batch_prefill_chunking(chunk_size, seqlens):
             rtol=rtol,
             msg=lambda x, i=i: f"seq{i} state " + x,
         )
+
+
+def test_chunk_scan_fwd_every_config_matches(monkeypatch):
+    """The autotuner picks a config by speed only, so every config in the list
+    must give the same finite output. On sm90, configs that pipeline a wgmma
+    with `cb` in registers wrote NaN into whole rows (#61603)."""
+    from triton.runtime.errors import OutOfResources
+
+    set_random_seed(0)
+    nheads, headdim, ngroups, dstate, chunk_size = 64, 64, 8, 128, 128
+    cu_chunk_seqlens = torch.tensor([0, 128, 181], dtype=torch.int32, device=DEVICE)
+    seqlen, nchunks = 181, 2
+    x = torch.randn(seqlen, nheads, headdim, dtype=torch.bfloat16, device=DEVICE)
+    C = torch.randn(seqlen, ngroups, dstate, dtype=torch.bfloat16, device=DEVICE)
+    cb = torch.randn(nchunks, ngroups, chunk_size, chunk_size, device=DEVICE)
+    dt = torch.rand(nheads, nchunks, chunk_size, device=DEVICE) * 0.1
+    dA_cumsum = -torch.rand(nheads, nchunks, chunk_size, device=DEVICE).cumsum(-1)
+    states = torch.randn(nchunks, nheads, headdim, dstate, device=DEVICE) * 0.1
+    seq_idx = torch.zeros(nchunks, dtype=torch.int32, device=DEVICE)
+    D = torch.randn(nheads, headdim, device=DEVICE) * 0.1
+
+    ref = None
+    for config in list(_chunk_scan_fwd_kernel.configs):
+        monkeypatch.setattr(_chunk_scan_fwd_kernel, "configs", [config])
+        for _ in range(10):
+            out = torch.empty_like(x)
+            try:
+                _chunk_scan_fwd(
+                    cb, x, dt, dA_cumsum, C, states, cu_chunk_seqlens, out, seq_idx, D
+                )
+            except OutOfResources:
+                # The autotuner skips configs that do not fit this device.
+                break
+            assert torch.isfinite(out).all(), f"non-finite output with {config}"
+            if ref is None:
+                ref = out
+            torch.testing.assert_close(
+                out,
+                ref,
+                atol=2e-2,
+                rtol=2e-2,
+                msg=lambda m, config=config: f"{config}: {m}",
+            )
