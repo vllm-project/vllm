@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Self
 
 from pydantic import model_validator
-from typing_extensions import Self
 
 from vllm.config.utils import config, get_hash_factors, hash_factors
 
@@ -67,8 +66,6 @@ class EngramConfig:
 
     def verify_model_config(self, model_config: "ModelConfig | None") -> None:
         """Reject Engram configuration for models without n-gram embeddings."""
-        from vllm.platforms import current_platform
-
         field = (
             _NGRAM_LAYER_FIELDS.get(model_config.architecture)
             if model_config is not None
@@ -77,13 +74,11 @@ class EngramConfig:
         if (
             model_config is None
             or field is None
-            or not current_platform.is_cuda_alike()
             or not getattr(model_config.hf_text_config, field, None)
         ):
             raise ValueError(
                 "EngramConfig requires a model with supported Engram "
-                "embeddings, non-empty n-gram layer ids, and a CUDA-alike "
-                "device (CUDA or ROCm)."
+                "embeddings and non-empty n-gram layer ids."
             )
 
     def resolve_dp_shared_memory(self, parallel_config: "ParallelConfig") -> None:

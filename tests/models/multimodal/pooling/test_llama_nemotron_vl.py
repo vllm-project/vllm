@@ -18,13 +18,13 @@ import torch
 from PIL import Image
 from transformers import AutoModel, AutoModelForSequenceClassification, AutoProcessor
 
-from vllm.entrypoints.chat_utils import (
-    ChatCompletionContentPartImageParam,
-    ChatCompletionContentPartTextParam,
-)
 from vllm.entrypoints.pooling.scoring.typing import ScoreMultiModalParam
 from vllm.model_executor.layers.fusion.mm_input_norm import FusedMMInputNorm
 from vllm.platforms import current_platform
+from vllm.renderers.chat_utils import (
+    ChatCompletionContentPartImageParam,
+    ChatCompletionContentPartTextParam,
+)
 from vllm.transformers_utils.processors.nemotron_vl import (
     SIGLIP_MEAN,
     SIGLIP_STD,
@@ -190,7 +190,7 @@ def test_models(
     _run_test(
         hf_runner,
         vllm_runner,
-        input_cases,  # type: ignore[arg-type]
+        input_cases,
         model,
         dtype=dtype,
     )
