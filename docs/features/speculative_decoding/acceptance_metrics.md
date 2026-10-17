@@ -29,6 +29,34 @@ vllm serve <target-model> \
 
 Collection is gated at the source: with `none`, nothing is accumulated.
 
+## Request-Level Synthetic Acceptance
+
+For GPU benchmarks, set `synthetic_acceptance_length` in `vllm_xargs` to override
+acceptance without restarting the server:
+
+```python
+client.chat.completions.create(
+    model="your-model",
+    messages=[{"role": "user", "content": "Your prompt"}],
+    extra_body={"vllm_xargs": {"synthetic_acceptance_length": 2.6}},
+)
+```
+
+Use a number in `[1, num_speculative_tokens + 1]` to enable synthetic acceptance.
+Use `null` in JSON, or `None` in Python, to select real acceptance.
+Omit the key to use the server default.
+Offline requests use `SamplingParams(extra_args={"synthetic_acceptance_length": 2.6})`.
+Both chat completions and completions accept this field.
+
+All requests in a batch must use the same setting, including the same numeric AL.
+Wait for outstanding requests to finish before changing the setting.
+Do not overlap explicit overrides with requests that omit the key.
+Mixed settings trigger an assertion and stop the engine.
+Speculative decoding must be enabled, and block verification is unsupported.
+Synthetic acceptance changes generated tokens and is intended for performance benchmarks.
+Draft sampling follows `draft_sample_method` in both modes.
+Warm up each acceptance mode before measuring performance.
+
 ## Response Format
 
 Acceptance metrics share the top-level `metrics` object with the timing

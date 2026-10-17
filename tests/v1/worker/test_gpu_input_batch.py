@@ -657,6 +657,38 @@ def _make_token_request(req_id: str) -> CachedRequestState:
     )
 
 
+@pytest.mark.parametrize("length", [None, 1.0, 2.6])
+def test_synthetic_acceptance_setting_survives_batch_reordering(length):
+    batch = _make_input_batch()
+    for req_id in ("a", "b"):
+        request = _make_token_request(req_id)
+        request.sampling_params.extra_args = {"synthetic_acceptance_length": length}
+        batch.add_request(request)
+    expected = 0.0 if length is None else length
+    assert batch._make_sampling_metadata().synthetic_acceptance_length == expected
+    batch.swap_states(0, 1)
+    batch.remove_request("a")
+    batch.condense()
+    batch.refresh_metadata()
+    assert batch._make_sampling_metadata().synthetic_acceptance_length == expected
+    batch.remove_request("b")
+    batch.condense()
+    batch.add_request(_make_token_request("c"))
+    assert batch._make_sampling_metadata().synthetic_acceptance_length == -1.0
+
+
+@pytest.mark.parametrize("other", [None, 3.0, "inherit"])
+def test_mixed_synthetic_acceptance_settings_fail_before_sampling(other):
+    batch = _make_input_batch()
+    for req_id, length in (("a", 2.6), ("b", other)):
+        request = _make_token_request(req_id)
+        if length != "inherit":
+            request.sampling_params.extra_args = {"synthetic_acceptance_length": length}
+        batch.add_request(request)
+    with pytest.raises(AssertionError, match="same synthetic_acceptance_length"):
+        batch._make_sampling_metadata()
+
+
 def test_remove_request_releases_prompt_embeds():
     """A finished prompt-embeds request must not keep its tensor referenced by
     the persistent batch; an empty batch owns no prompt embeds."""
