@@ -41,6 +41,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     PUSH_REG_NOTIF_PREFIX,
+    HeartbeatInfo,
     NixlAgentMetadata,
     NixlConnectorMetadata,
 )
@@ -354,11 +355,14 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         w._reg_send_inbox = queue.Queue()
         w._finished_blocks_inbox = queue.Queue()
         w._pending_completion_notifs = queue.Queue()
+        w._heartbeat_inbox = queue.Queue()
+        w._push_result_inbox = queue.Queue()
         w._evict_finished_inbox = queue.Queue()
         w._deferred_push_inbox = queue.Queue()
         w._push_writer_wake = threading.Event()
         w._push_writer_stop = threading.Event()
         w._push_writer_thread = None
+        w._nixl_io_lock = threading.Lock()
 
         # Base worker fields touched by start_load_kv / _get_new_notifs.
         w._recving_metadata = {}
@@ -917,6 +921,27 @@ def test_start_load_kv_skips_liveness_for_unconnected_engine():
 
 
 class TestPushWriterNotifs:
+    def test_heartbeats_are_deferred_to_writer(self):
+        w = _StubWriterWorker.fresh()
+        w.nixl_wrapper = MagicMock()
+        w.nixl_wrapper.get_new_notifs.return_value = {}
+        metadata = NixlConnectorMetadata()
+        metadata.heartbeat_by_engine["prefill"] = HeartbeatInfo(
+            req_ids={"req"},
+            host="10.0.0.1",
+            port=1234,
+            tp_size=1,
+        )
+
+        with patch.object(
+            NixlBaseConnectorWorker, "_send_heartbeats"
+        ) as send_heartbeats:
+            w.start_load_kv(metadata)
+            send_heartbeats.assert_not_called()
+
+            w._drain_heartbeats()
+            send_heartbeats.assert_called_once_with(metadata)
+
     def test_get_new_notifs_processes_forwarded_completion_notif(self):
         """Non-PUSH_REG notifs forwarded by the writer thread are drained
         on the engine main thread inside ``_get_new_notifs``."""
@@ -978,6 +1003,11 @@ class TestPushWriterNotifs:
         w._reqs_to_process.add(request_id)
         return request_id
 
+    @staticmethod
+    def _poll_and_get(w: _StubWriterWorker) -> KVConnectorTransferResults:
+        w._poll_sending_transfers()
+        return w.get_transfer_results()
+
     def test_failed_push_send_is_not_reported_done_sending(self):
         """A failed P-side WRITE must not surface as finished sending.
 
@@ -989,7 +1019,7 @@ class TestPushWriterNotifs:
         request_id = self._make_sending_req(w)
         w.nixl_wrapper.check_xfer_state.side_effect = ["ERR", "DONE"]
 
-        results = w.get_transfer_results()
+        results = self._poll_and_get(w)
 
         assert request_id not in results.finished_sending
         # Lease tracking is preserved so the watchdog can reschedule.
@@ -997,6 +1027,18 @@ class TestPushWriterNotifs:
         assert request_id in w._reqs_to_process
         # Both handles were still cleaned up.
         assert request_id not in w._sending_transfers
+
+    def test_model_thread_does_not_poll_write_handles(self):
+        w = self._pollable_worker()
+        request_id = self._make_sending_req(w)
+        w.nixl_wrapper.check_xfer_state.return_value = "DONE"
+
+        assert w.get_transfer_results().finished_sending == set()
+        w.nixl_wrapper.check_xfer_state.assert_not_called()
+        assert request_id in w._sending_transfers
+
+        assert self._poll_and_get(w).finished_sending == {request_id}
+        w.nixl_wrapper.check_xfer_state.assert_called()
 
     @pytest.mark.parametrize(("pp_size", "is_hma"), [(1, False), (2, True)])
     def test_completed_push_send_releases_blocks_without_consumer_notif(
@@ -1009,19 +1051,19 @@ class TestPushWriterNotifs:
         request_id = self._make_sending_req(w)
         w.nixl_wrapper.check_xfer_state.side_effect = ["DONE", "PROC", "DONE"]
 
-        results = w.get_transfer_results()
+        results = self._poll_and_get(w)
 
         assert request_id not in results.finished_sending
         assert request_id in w._reqs_to_send
         assert w._sending_transfers[request_id] == [102]
         assert w._evict_finished_inbox.empty()
 
-        results = w.get_transfer_results()
+        results = self._poll_and_get(w)
         assert results.finished_sending == {request_id}
         assert request_id not in w._reqs_to_send
         assert request_id not in w._reqs_to_process
         assert w._evict_finished_inbox.get_nowait() == request_id
-        assert w.get_transfer_results().finished_sending == set()
+        assert self._poll_and_get(w).finished_sending == set()
         assert w._evict_finished_inbox.empty()
         assert w.nixl_wrapper.release_xfer_handle.call_count == 2
         w.xfer_stats.record_kv_expired_req.assert_not_called()
@@ -1033,9 +1075,9 @@ class TestPushWriterNotifs:
         request_id = self._make_sending_req(w)
         w.nixl_wrapper.check_xfer_state.side_effect = ["ERR", "PROC", sibling_state]
 
-        assert w.get_transfer_results().finished_sending == set()
+        assert self._poll_and_get(w).finished_sending == set()
         assert w._sending_transfers[request_id] == [102]
-        assert w.get_transfer_results().finished_sending == set()
+        assert self._poll_and_get(w).finished_sending == set()
         assert request_id not in w._sending_transfers
         assert request_id in w._reqs_to_send
         assert w._evict_finished_inbox.empty()
@@ -1083,7 +1125,7 @@ class TestPushWriterNotifs:
             w._sending_transfers[request_id].append(handle)
         w.nixl_wrapper.check_xfer_state.return_value = "DONE"
 
-        assert w.get_transfer_results().finished_sending == set()
+        assert self._poll_and_get(w).finished_sending == set()
         assert request_id in w._reqs_to_send
         assert request_id not in w._sending_transfers
         assert w._evict_finished_inbox.empty()
@@ -1099,14 +1141,14 @@ class TestPushWriterNotifs:
             "PROC",
             "DONE",
         ]
-        assert w.get_transfer_results().finished_sending == set()
+        assert self._poll_and_get(w).finished_sending == set()
 
         w.expected_consumer_notifications_by_req = {}
         w._reqs_to_send[request_id] = time.perf_counter() - 1
         assert w.get_transfer_results().finished_sending == {request_id}
         assert w._evict_finished_inbox.get_nowait() == request_id
 
-        assert w.get_transfer_results().finished_sending == set()
+        assert self._poll_and_get(w).finished_sending == set()
         assert request_id not in w._sending_transfers
         assert request_id not in w._send_failures
         assert w._evict_finished_inbox.empty()
