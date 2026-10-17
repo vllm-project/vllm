@@ -102,6 +102,10 @@ _SHARED_REGION_GROUP_ID = -1
 # invalidated, eg due to a persistent RDMA fault.
 _INVALID_PEER_MIN_BACKOFF_S = 1.0
 _INVALID_PEER_MAX_BACKOFF_S = 60.0
+# Failed requests from a pull peer, with no completed read in between, before
+# it is released and re-handshaked. A failed connection fails every later read,
+# so the next read reaches the threshold, while an isolated error keeps the peer.
+_PEER_FAILED_REQS_BEFORE_RELEASE = 2
 
 
 def _region_sort_key(layer_name: str) -> tuple[tuple[int, int | str], ...]:
@@ -647,8 +651,9 @@ class NixlBaseConnectorWorker:
         self._remote_agents: dict[EngineId, dict[tuple[int, int], str]] = defaultdict(
             dict
         )
-        # Failed reads need a local metadata probe; invalid peers wait for drain.
-        self._failed_remote_engines: set[EngineId] = set()
+        # Engine -> requests whose reads from it failed since its last completed
+        # read. Enough of them invalidate the peer, which then waits for drain.
+        self._failed_reqs_by_engine: dict[EngineId, set[ReqId]] = defaultdict(set)
         self._invalid_remote_engines: set[EngineId] = set()
         # Invalid engine -> (backoff, earliest release time). Kept across release
         # so that repeat invalidations back off.
@@ -2920,6 +2925,8 @@ class NixlBaseConnectorWorker:
 
             self._send_pending_recv_notifs(req_id)
             assert meta.remote is not None
+            # A completed read shows the connection to the peer works.
+            self._failed_reqs_by_engine.pop(meta.remote.engine_id, None)
             if self.use_host_buffer:
                 self.sync_recved_kv_to_device(req_id, meta)
 
@@ -3155,7 +3162,7 @@ class NixlBaseConnectorWorker:
                 and (meta := self._recving_metadata.get(req_id)) is not None
                 and meta.remote is not None
             ):
-                self._failed_remote_engines.add(meta.remote.engine_id)
+                self._failed_reqs_by_engine[meta.remote.engine_id].add(req_id)
         if failed_req_ids is not None:
             failed_req_ids.add(req_id)
         return handle is None or self._try_release_xfer_handle(req_id, handle)
@@ -3615,10 +3622,15 @@ class NixlBaseConnectorWorker:
         now = time.perf_counter()
         # A failed read can leave the backend connection to the peer failed
         # while its metadata stays loaded, so only a fresh handshake recovers.
-        for engine_id in self._failed_remote_engines - self._invalid_remote_engines:
-            if engine_id in self._remote_agents:
+        for engine_id, req_ids in list(self._failed_reqs_by_engine.items()):
+            if engine_id not in self._remote_agents:
+                del self._failed_reqs_by_engine[engine_id]
+            elif (
+                engine_id not in self._invalid_remote_engines
+                and len(req_ids) >= _PEER_FAILED_REQS_BEFORE_RELEASE
+            ):
+                del self._failed_reqs_by_engine[engine_id]
                 self._mark_remote_engine_invalid(engine_id, now)
-        self._failed_remote_engines.clear()
         # Invalid peers keep rejecting new reads until their backoff has elapsed.
         invalid = {
             engine_id
@@ -3644,7 +3656,7 @@ class NixlBaseConnectorWorker:
             )
 
     def _mark_remote_engine_invalid(self, engine_id: EngineId, now: float) -> None:
-        """Schedule release of an engine after a failed read.
+        """Schedule release of an engine whose reads keep failing.
 
         The first invalidation is released as soon as reads drain. Repeats
         before the peer has stayed healthy for the max backoff double the
@@ -3664,7 +3676,8 @@ class NixlBaseConnectorWorker:
         self._invalid_engine_backoff[engine_id] = (backoff, now + backoff)
         self._invalid_remote_engines.add(engine_id)
         logger.warning(
-            "Read from remote engine %s failed; re-handshaking after reads drain%s.",
+            "Reads from remote engine %s keep failing; "
+            "re-handshaking after reads drain%s.",
             engine_id,
             f" and a {backoff:.0f}s backoff" if backoff else "",
         )
@@ -3692,7 +3705,7 @@ class NixlBaseConnectorWorker:
         for agent_name in agents.values():
             self.nixl_wrapper.remove_remote_agent(agent_name)
 
-        self._failed_remote_engines.discard(engine_id)
+        self._failed_reqs_by_engine.pop(engine_id, None)
         self._invalid_remote_engines.discard(engine_id)
 
         self.kv_caches_base_addr.pop(engine_id, None)
