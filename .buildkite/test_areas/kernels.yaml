@@ -572,6 +572,7 @@ steps:
   num_devices: 1
   source_file_dependencies:
   - vllm/models/minimax_m3/
+  - vllm/config/attention.py
   - vllm/config/cache.py
   - vllm/v1/kv_cache_interface.py
   - tests/v1/attention/utils.py
