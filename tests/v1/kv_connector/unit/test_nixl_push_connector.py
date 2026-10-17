@@ -54,9 +54,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
     ReadSpec,
     TPMapping,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import (
-    get_base_request_id,
-)
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 from vllm.v1.outputs import KVConnectorOutput
 
@@ -77,6 +74,7 @@ def _make_request(
     remote_port: int = 5601,
     tp_size: int = 1,
     finished: bool = True,
+    transfer_id: str | None = "xfer-0",
 ) -> MagicMock:
     """Build a minimal Request mock used by request_finished."""
     from vllm.v1.request import RequestStatus
@@ -102,6 +100,8 @@ def _make_request(
             "do_remote_prefill": False,
             "do_remote_decode": True,
         }
+    if transfer_id is not None:
+        params["transfer_id"] = transfer_id
     req.kv_transfer_params = params
     req.status = (
         RequestStatus.FINISHED_LENGTH_CAPPED if finished else RequestStatus.RUNNING
@@ -177,6 +177,40 @@ class TestPushScheduler:
         # Tracked as awaiting a recv.
         assert request.request_id in sched._reqs_need_recv
 
+    def test_d_side_without_transfer_id_prefills_locally(self):
+        # Given
+        sched = make_nixl_push_scheduler()
+        _stub_sw_clipping(sched)
+        request = _make_request(request_id="req-d-1", transfer_id=None)
+        request.prompt_token_ids = list(range(64))
+        sched.on_new_request(request)
+
+        # When
+        matched = sched.get_num_new_matched_tokens(request, 0)
+        heartbeats = dict(sched._heartbeat_req_engine)
+        sched.update_state_after_alloc(request, _BlocksMock(([1],)), 0)
+        sched.request_finished(request, ([1],))
+
+        # Then
+        assert matched == (0, False)
+        assert heartbeats == {}
+        assert sched._push_pending_registrations == {}
+        assert sched._reqs_need_recv == {}
+
+    def test_p_side_without_transfer_id_frees_blocks(self):
+        # Given
+        sched = make_nixl_push_scheduler()
+        _stub_sw_clipping(sched)
+        request = _make_request(request_id="req-p-1", is_d_side=False, transfer_id=None)
+
+        # When
+        result = sched.request_finished(request, ([4, 5],))
+
+        # Then
+        assert result == (False, None)
+        assert sched._newly_finished_push_blocks == {}
+        assert sched._reqs_not_processed == {"req-p-1"}
+
     def test_p_side_request_finished_stages_blocks(self):
         """P scheduler pushes blocks into both _finished_request_blocks (lease)
         and _newly_finished_push_blocks (metadata for next step)."""
@@ -203,11 +237,13 @@ class TestPushScheduler:
         _stub_sw_clipping(sched)
 
         # Stage one D registration and one P finished entry.
-        d_req = _make_request(request_id="req-d-9")
+        d_req = _make_request(request_id="req-d-9", transfer_id="xfer-9")
         sched.update_state_after_alloc(
             d_req, _BlocksMock(([1, 2, 3],)), num_external_tokens=48
         )
-        p_req = _make_request(request_id="req-p-9", is_d_side=False)
+        p_req = _make_request(
+            request_id="req-p-9", is_d_side=False, transfer_id="xfer-9"
+        )
         sched.request_finished(p_req, ([4, 5, 6],))
 
         scheduler_output = MagicMock()
@@ -226,8 +262,8 @@ class TestPushScheduler:
             meta = sched.build_connector_meta(scheduler_output)
 
         assert isinstance(meta, NixlConnectorMetadata)
-        assert "req-d-9" in meta.push_registrations
-        assert "req-p-9" in meta.push_finished_blocks
+        assert meta.push_registrations["req-d-9"]["transfer_id"] == "xfer-9"
+        assert meta.push_finished_blocks == {"req-p-9": (([4, 5, 6],), "xfer-9")}
         # Staging dicts cleared.
         assert sched._push_pending_registrations == {}
         assert sched._newly_finished_push_blocks == {}
@@ -428,8 +464,9 @@ def _registration_data(
     remote_host: str = "10.0.0.1",
     remote_port: int = 5601,
     remote_tp_size: int = 1,
+    transfer_id: str | None = "xfer-0",
 ) -> dict[str, Any]:
-    return {
+    data: dict[str, Any] = {
         "request_id": request_id,
         "decode_engine_id": decode_engine_id,
         "decode_host": decode_host,
@@ -441,6 +478,9 @@ def _registration_data(
         "remote_port": remote_port,
         "remote_tp_size": remote_tp_size,
     }
+    if transfer_id is not None:
+        data["transfer_id"] = transfer_id
+    return data
 
 
 class TestPushWriterRegSend:
@@ -528,7 +568,7 @@ class TestPushWriterMatching:
         """PUSH_REG arrives second (P finished first): match + fire."""
         w = _StubWriterWorker.fresh()
         # P had already finished; its blocks were stashed via metadata.
-        w._push_finished_blocks["req-A"] = ([200, 201, 202],)
+        w._push_finished_blocks["req-A"] = (([200, 201, 202],), "xfer-0")
 
         notif = PUSH_REG_NOTIF_PREFIX + msgspec.msgpack.encode(
             _registration_data("req-A")
@@ -554,30 +594,7 @@ class TestPushWriterMatching:
         w._handle_push_reg_notif(notif)
 
         assert len(w.start_push_calls) == 0
-        assert "req-B" in w._pending_d_registrations
-
-    def test_handle_push_reg_matches_after_stripping_random_suffix(self):
-        """P and D assign the same logical request the same
-        ``cmpl-<uuid>-<index>`` but different per-engine random suffixes;
-        the writer should still match P's finished blocks via the
-        suffix-stripping fallback in ``_pop_matching_finished_blocks``.
-        """
-        w = _StubWriterWorker.fresh()
-        # Same base id + completion index; differ only in the trailing
-        # ``-<8 hex>`` randomization suffix.
-        p_id = "cmpl-12345678-aaaa-bbbb-cccc-1234567890ab-0-aaaaaaaa"
-        d_id = "cmpl-12345678-aaaa-bbbb-cccc-1234567890ab-0-bbbbbbbb"
-        # Sanity: same base id under the helper used by the connector.
-        assert get_base_request_id(p_id) == get_base_request_id(d_id)
-
-        w._push_finished_blocks[p_id] = ([1, 2, 3],)
-        notif = PUSH_REG_NOTIF_PREFIX + msgspec.msgpack.encode(_registration_data(d_id))
-        w._handle_push_reg_notif(notif)
-
-        # Suffix-stripped fallback matched and fired.
-        assert len(w.start_push_calls) == 1
-        assert w.start_push_calls[0][0] == p_id
-        assert p_id not in w._push_finished_blocks
+        assert ("decode-engine", "req-B") in w._pending_d_registrations
 
     def test_handle_push_reg_drops_malformed(self, caplog):
         # The writer logs WARNING/ERROR when it sees these bad payloads;
@@ -599,32 +616,104 @@ class TestPushWriterMatching:
         assert w.start_push_calls == []
 
 
-class TestPushWriterStartLoadKv:
-    def test_finished_blocks_inbox_matches_stashed_registration(self):
-        """Run the writer-loop's finished-blocks drain against a
-        pre-populated _pending_d_registrations entry."""
+class TestPushWriterTransferId:
+    def test_pairs_by_transfer_id_when_prefill_finishes_first(self):
+        # Given
+        p_1, p_2 = "cmpl-shared-0-aaaaaaaa", "cmpl-shared-0-cccccccc"
+        d_1, d_2 = "cmpl-shared-0-bbbbbbbb", "cmpl-shared-0-dddddddd"
         w = _StubWriterWorker.fresh()
-        w._pending_d_registrations["req-C"] = _registration_data("req-C")
+        w._handle_finished_blocks(p_1, ([1],), "xfer-1")
+        w._handle_finished_blocks(p_2, ([2],), "xfer-2")
 
-        # Simulate start_load_kv enqueuing finished blocks.
-        w._finished_blocks_inbox.put(("req-C", ([10, 11, 12],)))
+        # When
+        for d_id, transfer_id in ((d_2, "xfer-2"), (d_1, "xfer-1")):
+            w._handle_push_reg_notif(
+                PUSH_REG_NOTIF_PREFIX
+                + msgspec.msgpack.encode(
+                    _registration_data(d_id, transfer_id=transfer_id)
+                )
+            )
 
-        # Drain like the writer loop does.
-        while True:
-            try:
-                rid, blocks = w._finished_blocks_inbox.get_nowait()
-            except queue.Empty:
-                break
-            matched = w._pop_matching_registration(rid)
-            if matched is not None:
-                w._do_start_push_kv(rid, blocks, matched)
-            else:
-                w._push_finished_blocks[rid] = blocks
+        # Then
+        pushes = [
+            (p_id, blocks, reg["request_id"])
+            for p_id, blocks, reg in w.start_push_calls
+        ]
+        assert pushes == [(p_2, ([2],), d_2), (p_1, ([1],), d_1)]
 
-        assert len(w.start_push_calls) == 1
-        assert w.start_push_calls[0][0] == "req-C"
-        assert "req-C" not in w._pending_d_registrations
+    def test_pairs_by_transfer_id_when_registration_arrives_first(self):
+        # Given
+        p_1, p_2 = "cmpl-shared-0-aaaaaaaa", "cmpl-shared-0-cccccccc"
+        d_1, d_2 = "cmpl-shared-0-bbbbbbbb", "cmpl-shared-0-dddddddd"
+        w = _StubWriterWorker.fresh()
+        for d_id, transfer_id in ((d_2, "xfer-2"), (d_1, "xfer-1")):
+            w._handle_push_reg_notif(
+                PUSH_REG_NOTIF_PREFIX
+                + msgspec.msgpack.encode(
+                    _registration_data(d_id, transfer_id=transfer_id)
+                )
+            )
 
+        # When
+        w._handle_finished_blocks(p_1, ([1],), "xfer-1")
+        w._handle_finished_blocks(p_2, ([2],), "xfer-2")
+
+        # Then
+        pushes = [
+            (p_id, blocks, reg["request_id"])
+            for p_id, blocks, reg in w.start_push_calls
+        ]
+        assert pushes == [(p_1, ([1],), d_1), (p_2, ([2],), d_2)]
+
+    def test_same_request_id_on_two_decode_engines(self):
+        # Given
+        p_1, p_2 = "cmpl-shared-0-aaaaaaaa", "cmpl-shared-0-cccccccc"
+        d_id = "cmpl-shared-0"
+        w = _StubWriterWorker.fresh()
+        for engine_id, transfer_id in (("decode-1", "xfer-1"), ("decode-2", "xfer-2")):
+            w._handle_push_reg_notif(
+                PUSH_REG_NOTIF_PREFIX
+                + msgspec.msgpack.encode(
+                    _registration_data(
+                        d_id, decode_engine_id=engine_id, transfer_id=transfer_id
+                    )
+                )
+            )
+
+        # When
+        w._handle_finished_blocks(p_1, ([1],), "xfer-1")
+        w._handle_finished_blocks(p_2, ([2],), "xfer-2")
+
+        # Then
+        pushes = [
+            (p_id, blocks, reg["decode_engine_id"])
+            for p_id, blocks, reg in w.start_push_calls
+        ]
+        assert pushes == [(p_1, ([1],), "decode-1"), (p_2, ([2],), "decode-2")]
+
+    def test_registration_without_transfer_id_is_dropped(self, caplog):
+        # Given
+        caplog.set_level(
+            logging.CRITICAL,
+            logger=("vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_worker"),
+        )
+        p_1 = "cmpl-shared-0-aaaaaaaa"
+        d_1 = "cmpl-shared-0-bbbbbbbb"
+        w = _StubWriterWorker.fresh()
+        w._handle_finished_blocks(p_1, ([1],), "xfer-1")
+
+        # When
+        w._handle_push_reg_notif(
+            PUSH_REG_NOTIF_PREFIX
+            + msgspec.msgpack.encode(_registration_data(d_1, transfer_id=None))
+        )
+
+        # Then
+        assert w.start_push_calls == []
+        assert w._pending_d_registrations == {}
+
+
+class TestPushWriterStartLoadKv:
     def test_start_load_kv_enqueues_to_writer(self):
         """``start_load_kv`` should hand registrations + finished blocks
         to the writer queues without doing matching itself."""
@@ -640,14 +729,18 @@ class TestPushWriterStartLoadKv:
             "req-D": _registration_data("req-D"),
         }
         meta.push_finished_blocks = {
-            "req-E": ([5, 6, 7],),
+            "req-E": (([5, 6, 7],), "xfer-E"),
         }
 
         w.start_load_kv(meta)
 
         # Things are queued for the writer; nothing fires yet.
         assert w._reg_send_inbox.qsize() == 1
-        assert w._finished_blocks_inbox.qsize() == 1
+        assert w._finished_blocks_inbox.get_nowait() == (
+            "req-E",
+            ([5, 6, 7],),
+            "xfer-E",
+        )
         assert w._push_writer_wake.is_set()
         assert w.start_push_calls == []
 
@@ -659,7 +752,7 @@ class TestPushWriterStartLoadKv:
         w._send_heartbeats = MagicMock()
 
         meta = NixlConnectorMetadata()
-        meta.push_finished_blocks["req"] = ([1, 2],)
+        meta.push_finished_blocks["req"] = (([1, 2],), "xfer-0")
         meta.reqs_in_batch.add("req")
         meta.reqs_to_send["req"] = time.perf_counter() + 10
 
@@ -1215,22 +1308,6 @@ class TestPushWriterNegative:
         w = _StubWriterWorker.fresh()
         assert w._pop_matching_finished_blocks("nope") is None
 
-    def test_pop_matching_registration_no_match_when_base_ids_differ(self):
-        """A registration whose base id (after stripping the random suffix)
-        does NOT match the lookup request_id must not be popped."""
-        w = _StubWriterWorker.fresh()
-        # Two unrelated requests: different base UUIDs, so stripping the
-        # trailing ``-<8 hex>`` suffix still yields different base ids.
-        unrelated_d = "cmpl-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa-0-11111111"
-        lookup = "cmpl-bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb-0-22222222"
-        assert get_base_request_id(unrelated_d) != get_base_request_id(lookup)
-
-        w._pending_d_registrations[unrelated_d] = _registration_data(unrelated_d)
-        result = w._pop_matching_registration(lookup)
-        assert result is None
-        # Original entry untouched.
-        assert unrelated_d in w._pending_d_registrations
-
     def test_handle_push_reg_with_non_dict_payload_is_dropped(self, caplog):
         """msgpack-encoded non-dict payload (e.g. a list) should be
         dropped without raising."""
@@ -1268,7 +1345,7 @@ class TestPushWriterNegative:
         )
         w._handle_push_reg_notif(notif)
         w._handle_push_reg_notif(notif)
-        assert "req-dup" in w._pending_d_registrations
+        assert ("decode-engine", "req-dup") in w._pending_d_registrations
         assert len(w._pending_d_registrations) == 1
         assert w.start_push_calls == []
 

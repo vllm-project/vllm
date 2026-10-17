@@ -6,12 +6,15 @@ import contextlib
 from collections.abc import Iterator
 from typing import Any
 
-import regex as re
 import zmq
 
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import TransferId
+from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import make_zmq_socket
 from vllm.v1.kv_cache_interface import KVCacheSpec, UniformTypeKVCacheSpecs
+
+logger = init_logger(__name__)
 
 # Supported platforms and types of kv transfer buffer.
 # {device: tuple of supported kv buffer types}
@@ -57,11 +60,16 @@ def get_representative_spec_type(spec: KVCacheSpec) -> type[KVCacheSpec]:
     return type(spec)
 
 
-# Trailing 8-hex randomization suffix appended by
-# ``input_processor.assign_request_id`` as ``-{random_uuid():.8}``.
-_RANDOM_SUFFIX_RE = re.compile(r"-[0-9a-f]{8}$", re.IGNORECASE)
-
-
-def get_base_request_id(request_id: str) -> str:
-    """Strip the per-request ``-<8 hex>`` randomization suffix, if present."""
-    return _RANDOM_SUFFIX_RE.sub("", request_id)
+def get_transfer_id(
+    kv_transfer_params: dict[str, Any], request_id: str
+) -> TransferId | None:
+    """Id the router sets on the prefill and decode request of one dispatch."""
+    transfer_id = kv_transfer_params.get("transfer_id")
+    if isinstance(transfer_id, str) and transfer_id:
+        return transfer_id
+    logger.warning(
+        "Missing transfer_id in kv_transfer_params from router. "
+        "Request %s will not utilize KVTransfer.",
+        request_id,
+    )
+    return None
