@@ -32,6 +32,7 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsCapturer,
     bind_routed_experts_capturer,
 )
+from vllm.utils.math_utils import cdiv
 from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
 
 if TYPE_CHECKING:
@@ -121,7 +122,20 @@ class AuxOutputWorkerConnector:
         block_nbytes = hash_block_size * int(np.prod(shape_per_token)) * dtype.itemsize
         max_bytes = vllm_config.aux_output_config.max_bytes
         if max_bytes is None:
-            max_bytes = kv_cache_config.num_blocks * hashes_per_kv_block * block_nbytes
+            # A finished or preempted request's keys are released only after
+            # its in-flight steps are processed, but the scheduler reuses its
+            # KV blocks in the meantime. Each such schedule keys at most the
+            # blocks its scheduled tokens cover.
+            scheduler_config = vllm_config.scheduler_config
+            reused_blocks_per_step = (
+                cdiv(max_num_batched_tokens, hash_block_size)
+                + scheduler_config.max_num_seqs
+            )
+            num_objects = (
+                kv_cache_config.num_blocks * hashes_per_kv_block
+                + (vllm_config.max_concurrent_batches - 1) * reused_blocks_per_step
+            )
+            max_bytes = num_objects * block_nbytes
         self._store = BackgroundBlockObjectStore(
             BlockObjectStore(max_bytes=max_bytes, object_nbytes=block_nbytes),
             max_pending_batches=2 * vllm_config.scheduler_config.max_num_seqs,

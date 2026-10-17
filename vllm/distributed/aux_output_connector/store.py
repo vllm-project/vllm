@@ -127,8 +127,11 @@ class BlockObjectStore:
         if excess <= 0:
             return
         victims = []
+        referenced = []
         for key in self._lru:
-            if key not in self._references and key not in protected:
+            if key in self._references:
+                referenced.append(key)
+            elif key not in protected:
                 victims.append(key)
                 if len(victims) == excess:
                     break
@@ -137,6 +140,10 @@ class BlockObjectStore:
                 "auxiliary output store cannot retain the requested batch: "
                 f"limit={self.num_slots} objects"
             )
+        # Referenced keys move to the end on release, so their position does
+        # not matter. Move them past the scan so later evictions skip them.
+        for key in referenced:
+            self._lru.move_to_end(key)
         for victim in victims:
             slot = self._lru.pop(victim)
             if slot != self._UNALLOCATED_SLOT:
