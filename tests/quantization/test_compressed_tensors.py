@@ -15,6 +15,7 @@ from compressed_tensors.quantization import (
     QuantizationStrategy,
     QuantizationType,
 )
+from torch.nn import Parameter
 
 from tests.models.utils import check_logprobs_close
 from tests.quantization.utils import load_model_without_vllm_runner
@@ -23,6 +24,10 @@ from vllm.config.kernel import KernelConfig
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.kernels.linear import (
     Fp8BlockScaledMMLinearKernel,
+)
+from vllm.model_executor.kernels.linear.nvfp4.base import NvFp4LinearLayerConfig
+from vllm.model_executor.kernels.linear.nvfp4.emulation import (
+    EmulationNvFp4LinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm import (
     MarlinFP8ScaledMMLinearKernel,
@@ -50,6 +55,11 @@ from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     find_matched_target,
 )
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
+from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
+    FLOAT4_E2M1_MAX,
+    ref_nvfp4_quant,
+    ref_nvfp4_quant_dequant,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     QuantKey,
@@ -461,6 +471,74 @@ def test_compressed_tensors_nvfp4(args, dist_init, workspace_init):
     assert isinstance(qkv_proj.scheme, CompressedTensorsW4A4Fp4)
     assert qkv_proj.scheme.use_a16 == use_a16
     assert qkv_proj.scheme.group_size == 16
+
+
+FLOAT8_E4M3_MAX = torch.finfo(torch.float8_e4m3fn).max
+
+
+def _quantize_nvfp4_shard(w: torch.Tensor):
+    """Quantize like llm-compressor: one global scale (a divisor) per tensor."""
+    global_scale = (FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / w.abs().max()).float()
+    fp4, block_scale = ref_nvfp4_quant(w, global_scale, block_size=16)
+    codes = torch.zeros_like(fp4, dtype=torch.uint8)
+    for code, value in enumerate((0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)):
+        codes[fp4.abs() == value] = code
+    codes |= (fp4 < 0).to(torch.uint8) << 3
+    packed = codes[:, 0::2] | (codes[:, 1::2] << 4)
+    dequant = (fp4.unflatten(-1, (-1, 16)) * block_scale.unsqueeze(-1)).flatten(-2)
+    return packed, block_scale.to(torch.float8_e4m3fn), global_scale, dequant
+
+
+@pytest.mark.parametrize(
+    "logical_widths,magnitudes",
+    [([32, 32], [1.0, 3.0]), ([32, 32, 16, 16], [1.0, 1.0, 1.0, 0.3])],
+)
+def test_compressed_tensors_nvfp4_fused_shards_keep_global_scales(
+    monkeypatch, logical_widths, magnitudes
+):
+    """Fused shards quantized with different weight global scales (e.g.
+    in_proj_qkv + in_proj_z of Qwen3.5) must each be dequantized with their
+    own scale."""
+    from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (  # noqa: E501
+        compressed_tensors_w4a4_nvfp4 as nvfp4_scheme,
+    )
+
+    monkeypatch.setattr(
+        nvfp4_scheme,
+        "init_nvfp4_linear_kernel",
+        lambda use_a16=False: EmulationNvFp4LinearKernel(NvFp4LinearLayerConfig()),
+    )
+    device = "cuda" if current_platform.is_cuda_alike() else "cpu"
+    torch.manual_seed(0)
+    k = 64
+    shards = [
+        _quantize_nvfp4_shard(torch.randn(n, k, device=device) * m)
+        for n, m in zip(logical_widths, magnitudes)
+    ]
+
+    x = torch.randn(4, k, device=device)
+    input_global_scale = (FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / x.abs().max()).float()
+
+    layer = torch.nn.Module()
+    layer.logical_widths = logical_widths
+    layer.input_size_per_partition = k
+    layer.output_size_per_partition = sum(logical_widths)
+    params = {
+        "weight_packed": torch.cat([s[0] for s in shards]),
+        "weight_scale": torch.cat([s[1] for s in shards]),
+        "weight_global_scale": torch.stack([s[2] for s in shards]),
+        "input_global_scale": input_global_scale.repeat(len(shards)),
+    }
+    for name, data in params.items():
+        layer.register_parameter(name, Parameter(data, requires_grad=False))
+    scheme = CompressedTensorsW4A4Fp4()
+    scheme.process_weights_after_loading(layer)
+    bias = torch.randn(sum(logical_widths), device=device)
+    out = scheme.apply_weights(layer, x, bias=bias)
+
+    x_dq = ref_nvfp4_quant_dequant(x, input_global_scale, block_size=16)
+    w_ref = torch.cat([s[3] / s[2] for s in shards])
+    torch.testing.assert_close(out, x_dq @ w_ref.t() + bias)
 
 
 @pytest.mark.skipif(
