@@ -217,6 +217,7 @@ from vllm.v1.worker.ubatch_utils import (
 )
 from vllm.v1.worker.utils import (
     EncoderTimingStats,
+    clear_layer_kv_caches,
     raise_if_nan_logits,
 )
 from vllm.v1.worker.workspace import lock_workspace
@@ -6238,19 +6239,7 @@ class GPUModelRunner(
         # "runtime" pool; the real initialize_kv_cache rebuilds it.
         self._init_block_sizes = []
 
-        for layer in self.compilation_config.static_forward_context.values():
-            if hasattr(layer, "kv_cache"):
-                kv_cache = layer.kv_cache
-                layer.kv_cache = (
-                    torch.tensor([]) if isinstance(kv_cache, torch.Tensor) else []
-                )
-            # Clean up quantized KV cache scale views
-            # (int8_per_token_head, fp8_per_token_head)
-            if hasattr(layer, "impl"):
-                if hasattr(layer.impl, "_k_scale_cache"):
-                    layer.impl._k_scale_cache = None
-                if hasattr(layer.impl, "_v_scale_cache"):
-                    layer.impl._v_scale_cache = None
+        clear_layer_kv_caches(self.compilation_config.static_forward_context.values())
 
         gc.collect()
         torch.accelerator.empty_cache()
