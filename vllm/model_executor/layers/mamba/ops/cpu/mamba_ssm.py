@@ -61,6 +61,39 @@ def _mamba_chunk_scan_combined_fwd_cpu(
             d = d.squeeze(-1)
         D_1d = d.contiguous()
 
+    out_dtype = state_dtype if state_dtype is not None else x.dtype
+    if return_intermediate_states:
+        assert cu_chunk_seqlens is not None
+        assert seq_idx is not None
+        num_chunks = cu_chunk_seqlens.size(0) - 1
+        chunk_states = torch.empty(
+            num_chunks, nheads, headdim, dstate, dtype=out_dtype, device=x.device
+        )
+        cu_chunks = cu_chunk_seqlens.tolist()
+        seq_indices = seq_idx.tolist()
+        for c in range(num_chunks):
+            c_start, c_end = cu_chunks[c], cu_chunks[c + 1]
+            c_len = c_end - c_start
+            s_idx = seq_indices[c]
+            single_state = all_states[s_idx : s_idx + 1]
+            single_cu = torch.tensor(
+                [0, c_len], dtype=torch.int32, device=x.device
+            )
+            ops.mamba_chunk_scan_fwd_cpu(
+                out[c_start:c_end],
+                single_state,
+                x[c_start:c_end],
+                dt_f[c_start:c_end],
+                A,
+                B[c_start:c_end],
+                C[c_start:c_end],
+                D_1d,
+                z[c_start:c_end] if z is not None else None,
+                single_cu,
+            )
+            chunk_states[c].copy_(single_state[0].to(out_dtype))
+        return chunk_states
+
     ops.mamba_chunk_scan_fwd_cpu(
         out,
         all_states,
@@ -74,7 +107,6 @@ def _mamba_chunk_scan_combined_fwd_cpu(
         cu_seqlens.to(torch.int32),
     )
 
-    out_dtype = state_dtype if state_dtype is not None else x.dtype
     all_states = all_states.to(out_dtype)
 
     return all_states

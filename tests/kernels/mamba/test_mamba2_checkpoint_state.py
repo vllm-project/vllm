@@ -167,3 +167,108 @@ def test_store_selects_the_checkpoint_from_all_chunk_states(dim_first, spec_slot
     torch.testing.assert_close(ssm_state[2], varlen_states[3], **exact)
     assert not conv_state[:2].any() and not ssm_storage[:2].any()
     assert not ssm_storage[:, row:].any(), "wrote into the page padding"
+
+
+def test_cpu_chunk_scan_return_intermediate_states_and_alignment(monkeypatch):
+    """CPU _mamba_chunk_scan_combined_fwd_cpu supports return_intermediate_states
+    and MambaMixer2 declares get_prefill_checkpoint_alignment() == 1."""
+    from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
+    from vllm.model_executor.layers.mamba.ops.cpu.mamba_ssm import (
+        _mamba_chunk_scan_combined_fwd_cpu,
+    )
+
+    assert MambaMixer2.get_prefill_checkpoint_alignment(None) == 1  # type: ignore[arg-type]
+
+    def _ref_mamba_chunk_scan_fwd_cpu(
+        out, final_states, x, dt, A, B, C, D, z, cu_seqlens
+    ):
+        nheads = final_states.size(1)
+        ngroups = B.size(1)
+        nheads_per_group = nheads // ngroups
+        A_1d = A.reshape(nheads).float()
+        for b in range(cu_seqlens.size(0) - 1):
+            for t in range(int(cu_seqlens[b].item()), int(cu_seqlens[b + 1].item())):
+                for h in range(nheads):
+                    g = h // nheads_per_group
+                    dt_val = dt[t, h]
+                    dA = torch.exp(A_1d[h] * dt_val)
+                    s_new = (
+                        final_states[b, h] * dA
+                        + x[t, h].float().unsqueeze(-1) * dt_val * B[t, g].float()
+                    )
+                    final_states[b, h].copy_(s_new)
+                    y = (s_new * C[t, g].float()).sum(dim=-1)
+                    if D is not None:
+                        y = y + x[t, h].float() * D.reshape(nheads)[h].float()
+                    out[t, h].copy_(y.to(out.dtype))
+
+    monkeypatch.setattr(
+        "vllm._custom_ops.mamba_chunk_scan_fwd_cpu", _ref_mamba_chunk_scan_fwd_cpu
+    )
+
+    seqlen, chunk_size, nheads, headdim, ngroups, dstate = 64, 16, 4, 8, 2, 8
+    checkpoint_offset = 24
+    x = torch.randn(seqlen, nheads, headdim)
+    dt = torch.randn(seqlen, nheads)
+    A = -torch.rand(nheads)
+    B = torch.randn(seqlen, ngroups, dstate)
+    C = torch.randn(seqlen, ngroups, dstate)
+
+    cu, seq_idx, last, ckpt = compute_chunk_metadata(
+        chunk_size,
+        1,
+        torch.tensor([0]),
+        torch.tensor([0, seqlen]),
+        checkpoint_offsets_p=[checkpoint_offset],
+    )
+    out_ckpt = torch.empty_like(x)
+    chunk_states = _mamba_chunk_scan_combined_fwd_cpu(
+        x,
+        dt,
+        A,
+        B,
+        C,
+        chunk_size,
+        out_ckpt,
+        return_intermediate_states=True,
+        seq_idx=torch.tensor(seq_idx, dtype=torch.int32),
+        cu_seqlens=torch.tensor([0, seqlen], dtype=torch.int32),
+        cu_chunk_seqlens=torch.tensor(cu, dtype=torch.int32),
+        last_chunk_indices=torch.tensor(last, dtype=torch.int32),
+        dt_softplus=True,
+        state_dtype=torch.float32,
+    )
+
+    out_prefix = torch.empty_like(x[:checkpoint_offset])
+    prefix_final = _mamba_chunk_scan_combined_fwd_cpu(
+        x[:checkpoint_offset],
+        dt[:checkpoint_offset],
+        A,
+        B[:checkpoint_offset],
+        C[:checkpoint_offset],
+        chunk_size,
+        out_prefix,
+        return_intermediate_states=False,
+        cu_seqlens=torch.tensor([0, checkpoint_offset], dtype=torch.int32),
+        dt_softplus=True,
+        state_dtype=torch.float32,
+    )
+
+    out_full = torch.empty_like(x)
+    full_final = _mamba_chunk_scan_combined_fwd_cpu(
+        x,
+        dt,
+        A,
+        B,
+        C,
+        chunk_size,
+        out_full,
+        return_intermediate_states=False,
+        cu_seqlens=torch.tensor([0, seqlen], dtype=torch.int32),
+        dt_softplus=True,
+        state_dtype=torch.float32,
+    )
+
+    torch.testing.assert_close(chunk_states[ckpt[0]], prefix_final[0])
+    torch.testing.assert_close(chunk_states[last[0]], full_final[0])
+    torch.testing.assert_close(out_ckpt, out_full)
