@@ -311,6 +311,10 @@ class SparseIndexerTopk(torch.nn.Module):
         """Run the resolved decode top-k implementation, writing into
         topk_indices (int32, -1 fill for rows shorter than topk_tokens).
         """
+        # A captured graph can replay with longer device-side row lengths.
+        # Do not bake the warmup batch's short bound into top-k kernels.
+        if logits.is_cuda and torch.cuda.is_current_stream_capturing():
+            max_seq_len = logits.shape[1]
         backend = self.resolve_backend(logits, topk_tokens, logits.shape[0])
         if backend == "deep_select":
             row_ends = self._row_ends(seq_lens, next_n, logits.shape[0])
@@ -333,9 +337,9 @@ class SparseIndexerTopk(torch.nn.Module):
             )
             # persistent_topk's last argument is the host-side "max seq_len
             # across rows" bound (it gates the sampled_topk path and clamps
-            # per-row lengths), not the padded row width: logits is sized to
-            # max_model_len, so passing its width would incorrectly enable the
-            # long-row kernels on short-context batches.
+            # per-row lengths). Outside capture, use the batch bound rather
+            # than the allocated width to avoid long-row kernels for short
+            # contexts. Captured graphs need the replay-safe bound above.
             torch.ops._C.persistent_topk(
                 logits,
                 seq_lens,

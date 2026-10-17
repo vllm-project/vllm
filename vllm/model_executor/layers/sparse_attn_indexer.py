@@ -29,6 +29,12 @@ from vllm.model_executor.kernels.attention.dsa.candidate_blocks import (
 from vllm.model_executor.kernels.attention.dsa.candidate_blocks import (
     select_candidate_blocks as _select_candidate_blocks,
 )
+from vllm.model_executor.kernels.attention.dsa.candidate_gather import (
+    candidate_gather_decode_available,
+    candidate_gather_decode_profitable,
+    candidate_gather_score_decode,
+    candidate_gather_workspace_specs,
+)
 from vllm.model_executor.layers.indexer_topk import (
     RADIX_TOPK_WORKSPACE_SIZE,
     get_indexer_topk,
@@ -496,7 +502,40 @@ def sparse_attn_indexer(
                 total_seq_lens, head_dim, fp8_dtype, use_fp4_cache
             )
             profile_specs.extend(gather_spec * 2)
-        current_workspace_manager().get_simultaneous(*profile_specs)
+        workspace_manager = current_workspace_manager()
+        workspace_manager.get_simultaneous(*profile_specs)
+
+        # Candidate-only decode uses a larger simultaneously-live scratch set.
+        # Profiling has no decode metadata, so reserve the scheduler's maximum
+        # decode rows rather than max_num_batched_tokens (which includes prefill).
+        if (
+            candidate_blocks is not None
+            and not candidate_write
+            and candidate_gather_decode_available(
+                use_fp4_cache=use_fp4_cache,
+                dcp_world_size=dcp_world_size,
+                use_pcp=use_pcp,
+                candidate_block_size=candidate_block_size,
+                num_candidates=candidate_blocks.shape[1],
+                topk_tokens=topk_tokens,
+                topk_backend=topk_backend,
+            )
+        ):
+            vllm_config = get_current_vllm_config()
+            max_decode_rows = min(
+                topk_indices_buffer.shape[0],
+                vllm_config.scheduler_config.max_num_seqs
+                * (1 + vllm_config.num_speculative_tokens),
+            )
+            workspace_manager.get_simultaneous(
+                *candidate_gather_workspace_specs(
+                    max_decode_rows,
+                    candidate_blocks.shape[1],
+                    candidate_block_size,
+                    head_dim,
+                    topk_tokens,
+                )
+            )
 
         # Dummy allocation to simulate for peak logits tensor memory during inference.
         # FP8 elements so elements == bytes
@@ -858,7 +897,74 @@ def sparse_attn_indexer(
             if use_fp4_cache
             else padded_q_quant_decode_tokens
         )
-        if current_platform.is_xpu():
+        use_cand_gather = False
+        if (
+            candidate_blocks is not None
+            and not candidate_write
+            and candidate_gather_decode_available(
+                use_fp4_cache=use_fp4_cache,
+                dcp_world_size=dcp_world_size,
+                use_pcp=use_pcp,
+                candidate_block_size=candidate_block_size,
+                num_candidates=candidate_blocks.shape[1],
+                topk_tokens=topk_tokens,
+                topk_backend=topk_backend,
+            )
+        ):
+            use_cand_gather = candidate_gather_decode_profitable(
+                decode_metadata.max_seq_len,
+                num_padded_tokens,
+                candidate_blocks.shape[1],
+                candidate_block_size,
+            )
+            if not use_cand_gather:
+                # The gates are deployment-tunable, so report the observed
+                # shape once instead of silently keeping the dense path.
+                logger.info_once(
+                    "SM90 candidate-gather decode scoring supported but gated "
+                    "off: decode rows=%d (need >= %d), compressed decode "
+                    "context=%d, scanned work rows x context=%d (need >= %d = "
+                    "%d x candidate width %d).",
+                    num_padded_tokens,
+                    envs.VLLM_DSA_CANDIDATE_GATHER_MIN_ROWS,
+                    decode_metadata.max_seq_len,
+                    num_padded_tokens * decode_metadata.max_seq_len,
+                    envs.VLLM_DSA_CANDIDATE_GATHER_MIN_WORK_RATIO
+                    * candidate_blocks.shape[1]
+                    * candidate_block_size,
+                    envs.VLLM_DSA_CANDIDATE_GATHER_MIN_WORK_RATIO,
+                    candidate_blocks.shape[1] * candidate_block_size,
+                )
+        if use_cand_gather:
+            logger.info_once(
+                "SM90 candidate-gather decode scoring active: consumer "
+                "indexers score only candidate blocks (gather + dense kernel)."
+            )
+            # SM90 candidate consumers: gather candidate K and score only the
+            # candidates, instead of dense full-context scoring + masking.
+            # kv_cache was viewed as 4D for the paged kernel above; squeeze
+            # recovers the raw 3D [num_blocks, block_size, head_dim + 4].
+            topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
+            candidate_gather_score_decode(
+                padded_q_quant_decode_tokens.view(
+                    num_padded_tokens, *q_quant.shape[1:]
+                ),
+                kv_cache.squeeze(-2),
+                weights[:num_padded_tokens],
+                seq_lens,
+                decode_metadata.block_table,
+                candidate_blocks[:num_padded_tokens],
+                candidate_block_size,
+                next_n,
+                topk_tokens,
+                topk_backend,
+                topk_indices,
+                head_dim,
+                decode_metadata.max_seq_len,
+                fp8_dtype,
+            )
+            logits = None
+        elif current_platform.is_xpu():
             if padded_q_scale is not None:
                 raise RuntimeError("XPU fp8_paged_mqa_logits does not support FP4 Q")
             seq_lens_xpu = (
@@ -891,8 +997,8 @@ def sparse_attn_indexer(
             # DCP need fp32. SM100 decode is varlen: one context length per row.
             if topk_backend != "deep_select" or dcp_world_size != 1:
                 logits = as_fp32_logits(logits, seq_lens.view(-1))
-        num_rows = logits.shape[0]
-        if candidate_blocks is not None:
+        num_rows = num_padded_tokens
+        if candidate_blocks is not None and not use_cand_gather:
             # Two-level selection (v4.1) on the decode logits; columns are
             # request-local compressed positions. seq_lens is (B, next_n)
             # for native spec decode (per-row effective lens) and (B, 1)
@@ -920,20 +1026,22 @@ def sparse_attn_indexer(
                     candidate_block_size,
                     row_repeat,
                 )
-        topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
+        if not use_cand_gather:
+            topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
 
-        # The backend comes from the layer (config is only readable at model
-        # construction); dispatchers are cached per backend.
-        get_indexer_topk(topk_backend)(
-            logits,
-            seq_lens,
-            next_n,
-            topk_indices,
-            topk_tokens,
-            attn_metadata_narrowed.max_seq_len,
-        )
+            # The backend comes from the layer (config is only readable at
+            # model construction); dispatchers are cached per backend.
+            get_indexer_topk(topk_backend)(
+                logits,
+                seq_lens,
+                next_n,
+                topk_indices,
+                topk_tokens,
+                attn_metadata_narrowed.max_seq_len,
+            )
 
         if decode_metadata.global_seq_lens is not None:
+            assert not use_cand_gather
             _merge_dcp_topk_global(
                 logits,
                 topk_indices,
