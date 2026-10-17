@@ -133,10 +133,13 @@ class KimiK3ToolParser(ToolParser):
             _O + r"\s*response\s*" + _S + r"(?P<c>.*?)" + _C + r"\s*response\s*" + _S,
             re.DOTALL,
         )
+        self._call_close_re = re.compile(_C + r"\s*call\s*" + _S)
 
         # streaming state
         self._sent_content_idx = 0
         self._sent_tool_call_count = 0
+        self._stream_call_close_idx = 0
+        self._stream_call_parse_idx = 0
 
         if not self.model_tokenizer:
             raise ValueError(
@@ -365,24 +368,35 @@ class KimiK3ToolParser(ToolParser):
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
     ) -> DeltaMessage | None:
-        # Conservative streaming: stream unwrapped response-channel text, then
-        # buffer tool calls and emit each call once its block closes.
         content = self._extract_response_content(current_text)
-
-        # tools channel is open: parse fully-closed calls we have not emitted yet
         m_tools = self._tools_open_re.search(current_text)
         if m_tools is None:
             return DeltaMessage(content=content) if content else None
 
-        section = current_text[m_tools.end() :]
-        calls = [
-            tc
-            for m in self._call_re.finditer(section)
-            if (tc := self._decode_call(m["attrs"], m["body"])) is not None
-        ]
-        if len(calls) <= self._sent_tool_call_count:
+        self._stream_call_parse_idx = max(self._stream_call_parse_idx, m_tools.end())
+        self._stream_call_close_idx = max(self._stream_call_close_idx, m_tools.end())
+        new_calls: list[ToolCall] = []
+        while True:
+            m_close = self._call_close_re.search(
+                current_text, self._stream_call_close_idx, partial=True
+            )
+            if m_close is None:
+                self._stream_call_close_idx = len(current_text)
+                break
+            if m_close.partial:
+                self._stream_call_close_idx = m_close.start()
+                break
+            self._stream_call_close_idx = m_close.end()
+            for call_match in self._call_re.finditer(
+                current_text, self._stream_call_parse_idx, m_close.end()
+            ):
+                tool_call = self._decode_call(call_match["attrs"], call_match["body"])
+                if tool_call is not None:
+                    new_calls.append(tool_call)
+                self._stream_call_parse_idx = call_match.end()
+
+        if not new_calls:
             return DeltaMessage(content=content) if content else None
-        new = calls[self._sent_tool_call_count :]
 
         deltas = [
             DeltaToolCall(
@@ -393,7 +407,7 @@ class KimiK3ToolParser(ToolParser):
                     name=tc.function.name, arguments=tc.function.arguments
                 ).model_dump(exclude_none=True),
             )
-            for i, tc in enumerate(new)
+            for i, tc in enumerate(new_calls)
         ]
-        self._sent_tool_call_count = len(calls)
+        self._sent_tool_call_count += len(new_calls)
         return DeltaMessage(content=content, tool_calls=deltas)
