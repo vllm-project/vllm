@@ -343,12 +343,12 @@ class StructuredOutputManager:
                 return ConstraintBounds(i + 1, i + 1)
         return ConstraintBounds(1, 1)
 
-    def validate_tokens(self, request: "Request", spec_tokens: list[int]) -> list[int]:
-        """Return the longest unconstrained or grammar-valid prefix of `spec_tokens`."""
+    def trim_spec_tokens(self, request: "Request", spec_tokens: list[int]) -> list[int]:
+        """Trim padding and tokens after the first grammar-invalid token."""
+        spec_tokens = strip_speculative_padding(spec_tokens)
         if not request.use_structured_output:
             return spec_tokens
 
-        spec_tokens = strip_speculative_padding(spec_tokens)
         grammar_start, _ = self._get_constraint_bounds(request, spec_tokens)
         if grammar_start >= len(spec_tokens):
             return spec_tokens
@@ -360,8 +360,8 @@ class StructuredOutputManager:
         if TYPE_CHECKING:
             assert isinstance(grammar, StructuredOutputGrammar)
         prefix = spec_tokens[:grammar_start]
-        validated = grammar.validate_tokens(spec_tokens[grammar_start:])
-        return prefix + validated
+        len_validated = len(grammar.validate_tokens(spec_tokens[grammar_start:]))
+        return prefix + spec_tokens[grammar_start : grammar_start + len_validated + 1]
 
     def grammar_bitmask(
         self,
@@ -441,13 +441,25 @@ class StructuredOutputManager:
                     assert isinstance(grammar, StructuredOutputGrammar)
 
                 req_tokens = scheduled_spec_decode_tokens.get(req_id, list())
+                unpadded_tokens = strip_speculative_padding(req_tokens)
                 grammar_start, constraint_start = self._get_constraint_bounds(
-                    request, strip_speculative_padding(req_tokens)
+                    request, unpadded_tokens
                 )
                 # Rows before constraint_start are still reasoning.
                 masked_ids = (
                     self._masked_reasoning_ends(request) if constraint_start else ()
                 )
+
+                # TODO: Remove this validate_tokens() check once
+                # accept_tokens() is atomic-on-failure for every backend.
+                # Some backends can partially advance or enter an error state
+                # on rejection.
+                grammar_valid_end = grammar_start
+                if grammar_start < len(unpadded_tokens):
+                    grammar_valid_end += len(
+                        grammar.validate_tokens(unpadded_tokens[grammar_start:])
+                    )
+
                 state_advancements = 0
                 seen_padding = False
                 # Row filled from the last valid grammar state before a draft
@@ -455,19 +467,25 @@ class StructuredOutputManager:
                 failed_index: int | None = None
                 bitmask = self._grammar_bitmask
                 for i, token in enumerate(req_tokens):
+                    if seen_padding:
+                        self._fill_bitmasks(((grammar, cumulative_index, False, ()),))
+                        cumulative_index += 1
+                        continue
+
                     if failed_index is not None:
+                        seen_padding = token == -1
                         bitmask[cumulative_index].copy_(bitmask[failed_index])
                         cumulative_index += 1
                         continue
-                    apply_bitmask = not seen_padding and i >= constraint_start
-                    reasoning = not seen_padding and i < constraint_start
-                    row_masked = masked_ids if reasoning else ()
+
+                    apply_bitmask = constraint_start <= i <= grammar_valid_end
+                    row_masked = masked_ids if i < constraint_start else ()
                     self._fill_bitmasks(
                         ((grammar, cumulative_index, apply_bitmask, row_masked),)
                     )
                     if token == -1:
                         seen_padding = True
-                    elif not seen_padding and i >= grammar_start:
+                    elif grammar_start <= i < grammar_valid_end:
                         if not grammar.is_terminated() and grammar.accept_tokens(
                             req_id, [token]
                         ):
@@ -485,16 +503,19 @@ class StructuredOutputManager:
                 # Diffusion LLMs don't sample a bonus token after the
                 # scheduled positions, so skip its bitmask in that case.
                 if not (self.vllm_config.model_config.is_diffusion and req_tokens):
-                    if failed_index is not None:
+                    if seen_padding:
+                        self._fill_bitmasks(((grammar, cumulative_index, False, ()),))
+                    elif failed_index is not None:
                         bitmask[cumulative_index].copy_(bitmask[failed_index])
                     else:
-                        bonus_apply = not seen_padding and constraint_start <= len(
-                            req_tokens
+                        bonus_apply = (
+                            constraint_start <= len(req_tokens) <= grammar_valid_end
                         )
-                        bonus_reasoning = not seen_padding and not bonus_apply
-                        bonus_masked = masked_ids if bonus_reasoning else ()
+                        row_masked = (
+                            masked_ids if len(req_tokens) < constraint_start else ()
+                        )
                         self._fill_bitmasks(
-                            ((grammar, cumulative_index, bonus_apply, bonus_masked),)
+                            ((grammar, cumulative_index, bonus_apply, row_masked),)
                         )
                     cumulative_index += 1
 

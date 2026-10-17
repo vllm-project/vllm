@@ -2647,10 +2647,15 @@ class Scheduler(SchedulerInterface):
                     request.spec_token_ids = []
                 continue
 
+            # In autoregressive decoding, -1 marks trailing speculative
+            # padding. Diffusion uses -1 as a meaningful canvas placeholder.
+            if self.num_sampled_tokens_per_step > 0:
+                spec_token_ids = self.structured_output_manager.trim_spec_tokens(
+                    request, spec_token_ids
+                )
+
             # Add newly generated spec token ids to the request.
-            request.spec_token_ids = self.structured_output_manager.validate_tokens(
-                request, spec_token_ids
-            )
+            request.spec_token_ids = spec_token_ids
 
     def update_draft_token_ids_in_output(
         self, draft_token_ids: DraftTokenIds, scheduler_output: SchedulerOutput
@@ -2675,10 +2680,7 @@ class Scheduler(SchedulerInterface):
             # Trim drafts to scheduled number of spec tokens
             # (needed for chunked prefill case for example).
             del spec_token_ids[orig_num_spec_tokens:]
-            # Filter out spec tokens which do not adhere to the grammar.
-            spec_token_ids = self.structured_output_manager.validate_tokens(
-                request, spec_token_ids
-            )
+            # Preserve draft slots; rejection sampling handles grammar violations.
             # Pad to original number of spec tokens.
             num_invalid_tokens = orig_num_spec_tokens - len(spec_token_ids)
             if num_invalid_tokens:

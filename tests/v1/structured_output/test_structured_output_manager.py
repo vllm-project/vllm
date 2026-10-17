@@ -5,6 +5,8 @@ import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from threading import Event
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 import numpy as np
 import pytest
@@ -46,9 +48,9 @@ def tokenizer():
 
 @dataclass(frozen=True)
 class FlowCase:
-    """One validate -> bitmask -> accept -> post-accept bitmask scenario."""
+    """One bitmask -> accept -> post-accept bitmask scenario."""
 
-    raw_drafts: tuple[str, ...]
+    raw_drafts: tuple[str | int, ...]
     expected_row_pattern: str
     expected_reasoning: bool | None
     expect_terminated: bool
@@ -101,10 +103,14 @@ def _single_token(tokenizer, text: str) -> int:
     return token_ids[0]
 
 
-def _to_token_ids(tokenizer, texts: tuple[str, ...]) -> list[int]:
-    """Convert literal text (or EOS sentinel) to token IDs."""
+def _to_token_ids(tokenizer, texts: tuple[str | int, ...]) -> list[int]:
+    """Convert literal text, EOS, or speculative-padding tokens to IDs."""
     return [
-        tokenizer.eos_token_id if t == EOS else _single_token(tokenizer, t)
+        t
+        if isinstance(t, int)
+        else tokenizer.eos_token_id
+        if t == EOS
+        else _single_token(tokenizer, t)
         for t in texts
     ]
 
@@ -181,6 +187,37 @@ def _build_harness(
     return manager, request
 
 
+@pytest.mark.parametrize(
+    ("use_structured_output", "spec_tokens", "validated_tokens", "expected"),
+    [
+        (False, [1, 2, -1, 3], None, [1, 2]),
+        (True, [10, 20, 30, -1], [20, 30], [10, 20, 30]),
+        (True, [10, 20, 30, 40], [20], [10, 20, 30]),
+    ],
+    ids=["unstructured", "all_valid", "retains_first_invalid_token"],
+)
+def test_trim_spec_tokens(
+    use_structured_output, spec_tokens, validated_tokens, expected
+):
+    manager = object.__new__(StructuredOutputManager)
+    grammar = Mock()
+    if validated_tokens is not None:
+        grammar.validate_tokens.return_value = validated_tokens
+    request = SimpleNamespace(
+        use_structured_output=use_structured_output,
+        structured_output_request=SimpleNamespace(grammar=grammar),
+    )
+
+    with patch.object(manager, "_get_constraint_bounds", return_value=(1, 1)):
+        assert manager.trim_spec_tokens(request, spec_tokens) == expected
+    if validated_tokens is not None:
+        grammar.validate_tokens.assert_called_once_with(
+            [token for token in spec_tokens[1:] if token >= 0]
+        )
+    else:
+        grammar.validate_tokens.assert_not_called()
+
+
 def _row_pattern(bitmask, masked_ids=()) -> str:
     """U: unconstrained; R: all but `masked_ids` allowed; C: grammar rows."""
     reasoning_row = np.full(bitmask.shape[1], -1, dtype=np.int32)
@@ -209,21 +246,14 @@ def _run_real_flow(
 ) -> None:
     assert len(expected_validated) <= len(raw_drafts)
 
-    validated = manager.validate_tokens(request, list(raw_drafts))
-    assert validated == expected_validated
-
-    padded = validated + [-1] * (len(raw_drafts) - len(validated))
     bitmask = manager.grammar_bitmask(
         requests={request.request_id: request},
         structured_output_request_ids=[request.request_id],
-        scheduled_spec_decode_tokens={request.request_id: padded},
+        scheduled_spec_decode_tokens={request.request_id: raw_drafts},
     )
     assert bitmask is not None
     assert bitmask.shape[0] == len(raw_drafts) + 1
     assert _row_pattern(bitmask, masked_ids or ()) == expected_row_pattern
-
-    # grammar_bitmask() must rollback any speculative state it advanced.
-    assert manager.validate_tokens(request, list(raw_drafts)) == expected_validated
 
     structured_req = request.structured_output_request
     assert structured_req is not None
@@ -236,8 +266,7 @@ def _run_real_flow(
     expected_post_accept_row = bitmask[len(expected_validated)].copy()
 
     # Mirror the scheduler flow: sampled tokens are appended before
-    # StructuredOutputManager.accept_tokens() trims them to the
-    # grammar-constrained suffix.
+    # StructuredOutputManager.accept_tokens() advances the grammar.
     request.append_output_token_ids(list(expected_validated))
     assert manager.accept_tokens(request, list(expected_validated))
 
@@ -266,8 +295,9 @@ FLOW_CASES = [
     pytest.param(
         FlowCase(
             prefix='{"a"',
-            raw_drafts=(":", ' "', "b", '"}'),
-            expected_row_pattern="CCCCC",
+            raw_drafts=(":", ' "', "b", '"}', -1, -1),
+            expected_validated=(":", ' "', "b", '"}'),
+            expected_row_pattern="CCCCCUU",
             expected_reasoning=True,
             expect_terminated=False,
             reasoning_ended=True,
@@ -488,7 +518,6 @@ def test_reasoning_rows_mask_grammar_invalid_implicit_end(
     )
     manager.reasoner_cls = MockEngineReasoner
     drafts = _to_token_ids(tokenizer, raw_drafts)
-    assert manager.validate_tokens(request, drafts) == drafts
 
     bitmask = manager.grammar_bitmask(
         requests={request.request_id: request},
@@ -562,17 +591,14 @@ def test_initial_constraint_activation(
         },
     )
 
-    # "{" is valid JSON start; "z" is not. Truncation proves grammar is active.
     open_brace = _single_token(tokenizer, "{")
-    z = _single_token(tokenizer, "z")
-    assert manager.validate_tokens(request, [open_brace, z]) == [open_brace]
-
     bitmask = manager.grammar_bitmask(
         requests={request.request_id: request},
         structured_output_request_ids=[request.request_id],
         scheduled_spec_decode_tokens={},
     )
     assert bitmask is not None
+    assert _row_pattern(bitmask) == "C"
     request.append_output_token_ids([open_brace])
     assert manager.accept_tokens(request, [open_brace])
 
@@ -624,11 +650,10 @@ def test_regex_flow(
 
 
 @pytest.mark.parametrize("backend", REGEX_BACKENDS)
-def test_rejected_draft_keeps_later_rows_constrained(
+def test_rejected_draft_unconstrains_later_rows(
     tokenizer, backend: StructuredOutputsBackend
 ):
-    """A draft the grammar rejects during bitmask fill must not unconstrain
-    the remaining rows or the bonus row."""
+    """A draft rejected by validation unconstrains later speculative rows."""
     manager, request = _build_harness(
         tokenizer,
         backend,
@@ -642,9 +667,7 @@ def test_rejected_draft_keeps_later_rows_constrained(
         scheduled_spec_decode_tokens={request.request_id: drafts},
     )
     assert bitmask is not None
-    assert _row_pattern(bitmask) == "CCCC"
-    assert (bitmask[2] == bitmask[1]).all()
-    assert (bitmask[3] == bitmask[1]).all()
+    assert _row_pattern(bitmask) == "CCUU"
 
 
 def test_outlines_termination(tokenizer):
