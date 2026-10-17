@@ -75,6 +75,7 @@ from vllm.model_executor.layers.quantization.online.base import (
 from vllm.model_executor.layers.quantization.online.fp8 import (
     Fp8PerBlockOnlineLinearMethod,
     Fp8PerBlockOnlineMoEMethod,
+    Fp8PerChannelWeightOnlyOnlineLinearMethod,
     Fp8PerTensorOnlineLinearMethod,
     Fp8PerTensorOnlineMoEMethod,
     Fp8PtpcOnlineLinearMethod,
@@ -123,6 +124,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     weight_amax,
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import (
+    ParallelLMHead,
     VocabParallelEmbedding,
 )
 from vllm.model_executor.model_loader import weight_utils
@@ -2127,6 +2129,36 @@ def test_online_quantization_targets_ignore_collision() -> None:
     )
     with pytest.raises(ValueError, match="matches both quantization_config.ignore"):
         config.resolve_quant_method_cls(LinearBase, "model.layers.0.self_attn.o_proj")
+
+
+@pytest.mark.parametrize(
+    ("args", "expected"),
+    [
+        (
+            QuantizationConfigArgs(targets={"lm_head": "fp8_per_channel"}),
+            "weight_only",
+        ),
+        (QuantizationConfigArgs(targets={"lm_head": "fp8_per_tensor"}), "error"),
+        (quant_config_args(linear="fp8_per_channel"), None),
+    ],
+    ids=["targets_per_channel", "targets_per_tensor", "linear_spec"],
+)
+def test_online_quantization_lm_head_needs_explicit_per_channel_target(
+    args: QuantizationConfigArgs, expected: str | None
+) -> None:
+    """The lm_head is quantized online only when a target names it, only with
+    per-channel scales (vocab padding rows are never loaded), and weight-only."""
+    config = OnlineQuantizationConfig(args)
+    if expected == "error":
+        with pytest.raises(ValueError, match="is not supported"):
+            config.resolve_quant_method_cls(ParallelLMHead, "lm_head")
+        return
+    resolved = config.resolve_quant_method_cls(ParallelLMHead, "lm_head")
+    if expected is None:
+        assert resolved is None
+    else:
+        assert resolved is not None
+        assert resolved[-1] is Fp8PerChannelWeightOnlyOnlineLinearMethod
 
 
 def test_online_quantization_targets_reject_unsupported_layer() -> None:
