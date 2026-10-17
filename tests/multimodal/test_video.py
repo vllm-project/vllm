@@ -741,9 +741,8 @@ def test_qwen3_vl_unknown_source_fps_matches_hf(
     the metadata carries the fps HF assumes, which the frame timestamps use."""
     get_video_metadata = OpenCVVideoBackendMixin.get_video_metadata
 
-    def unknown_fps(cap, data) -> tuple[VideoSourceMetadata, bool]:
-        source, consumed = get_video_metadata(cap, data)
-        return source._replace(original_fps=0.0, duration=0.0), consumed
+    def unknown_fps(data) -> VideoSourceMetadata:
+        return get_video_metadata(data)._replace(original_fps=0.0, duration=0.0)
 
     monkeypatch.setattr(
         OpenCVVideoBackendMixin, "get_video_metadata", staticmethod(unknown_fps)

@@ -38,13 +38,9 @@ def decode_opencv(
         int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
         int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
     )
-    source, stream_consumed = OpenCVVideoBackendMixin.get_video_metadata(cap, data)
-    if stream_consumed:
-        # The frame-counting fallback read the stream to its end, and
-        # stream backends can report a successful seek without actually
-        # rewinding — reopen the byte stream before sampling.
-        cap = OpenCVVideoBackendMixin.open_video_capture(data)
-    source = loader_cls._prepare_source(source)
+    source = loader_cls._prepare_source(
+        OpenCVVideoBackendMixin.get_video_metadata(data)
+    )
     frame_idx = loader_cls.compute_frames_index_to_sample(
         source=source, target=target, **sampling_kwargs
     )
@@ -92,12 +88,9 @@ class OpenCVVideoBackendMixin:
         # Python stream binding does not safely own the stream object, and
         # reading through a freed one segfaults the interpreter.
         buf = BytesIO(data)
-        try:
-            demux_cap = cv2.VideoCapture(
-                buf, cls.get_cv2_video_api(), [cv2.CAP_PROP_FORMAT, -1]
-            )
-        except cv2.error:
-            return 0
+        demux_cap = cv2.VideoCapture(
+            buf, cls.get_cv2_video_api(), [cv2.CAP_PROP_FORMAT, -1]
+        )
         if not demux_cap.isOpened():
             return 0
         count = 0
@@ -107,14 +100,13 @@ class OpenCVVideoBackendMixin:
         return count
 
     @staticmethod
-    def get_video_metadata(
-        cap: "cv2.VideoCapture", data: bytes
-    ) -> tuple[VideoSourceMetadata, bool]:
+    def get_video_metadata(data: bytes) -> VideoSourceMetadata:
         """Read the source metadata, recovering it when the header lacks it.
 
-        Returns the metadata and whether the capture stream was consumed by
-        a fallback frame-counting pass and must be reopened before reading.
+        Opens its own capture, so the frame-counting fallback may read the
+        stream to its end without affecting frame sampling.
         """
+        cap = OpenCVVideoBackendMixin.open_video_capture(data)
         total_frames_num = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         original_fps = cap.get(cv2.CAP_PROP_FPS)
         if total_frames_num <= 0:
@@ -122,19 +114,14 @@ class OpenCVVideoBackendMixin:
             # headers; the FFMPEG backend reports a bogus negative value.
             # Count frames via a demux-only pass first, without decoding.
             total_frames_num = OpenCVVideoBackendMixin._count_frames_demux(data)
-            consumed = False
             if total_frames_num == 0:
                 # Fall back to counting frames with a sequential decode pass.
                 while cap.grab():
                     total_frames_num += 1
-                consumed = True
             if total_frames_num == 0:
                 raise ValueError("Could not determine the number of video frames")
             duration = total_frames_num / original_fps if original_fps > 0 else 0
-            return (
-                VideoSourceMetadata(total_frames_num, original_fps, duration),
-                consumed,
-            )
+            return VideoSourceMetadata(total_frames_num, original_fps, duration)
         # CAP_PROP_FRAME_COUNT counts every physical sample in the container,
         # overstating the presentable frames when an mp4 edit list hides the
         # decode lead-in (e.g. a lossless `ffmpeg -ss ... -c copy` trim).
@@ -157,13 +144,10 @@ class OpenCVVideoBackendMixin:
                 )
                 total_frames_num = visible_frames
         duration = total_frames_num / original_fps if original_fps > 0 else 0
-        return (
-            VideoSourceMetadata(
-                total_frames_num=total_frames_num,
-                original_fps=original_fps,
-                duration=duration,
-            ),
-            False,
+        return VideoSourceMetadata(
+            total_frames_num=total_frames_num,
+            original_fps=original_fps,
+            duration=duration,
         )
 
     @classmethod
