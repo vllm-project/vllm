@@ -1596,7 +1596,7 @@ class MLADCPManager:
 
     def _aiter_query_gather(self, aiter_comm: Any, query: torch.Tensor) -> torch.Tensor:
         num_tokens, num_heads, head_dim = query.shape
-        # aiter gathers only on the last dim, so flattenning the query makes it gather
+        # aiter gathers only on the last dim, so flattening the query makes it gather
         # the heads
         rows = query.reshape(num_tokens, num_heads * head_dim)
         # aiter has no fp8 gather. The copy only moves bytes, so view fp8 pairs as bf16
