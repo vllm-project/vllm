@@ -191,19 +191,26 @@ def _make_xqa_ragged_draft_block_mask(
 
 def _query_token_request_indices(
     query_start_loc: torch.Tensor, num_tokens: int
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Return per-request query lengths and each packed query token's request."""
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Map each packed query token to its request without a host sync.
+
+    Returns per-request query lengths, each token's request index and token
+    index, and whether the token belongs to a request. A full CUDA graph batch
+    pads ``num_tokens`` past ``query_start_loc[-1]`` and pads requests with
+    zero-length queries; padding tokens map to the last request and are
+    flagged so callers can give them harmless values.
+    """
     query_lens = query_start_loc[1:] - query_start_loc[:-1]
-    request_indices = torch.repeat_interleave(
-        torch.arange(
-            query_lens.shape[0],
-            dtype=torch.int32,
-            device=query_start_loc.device,
-        ),
-        query_lens,
-        output_size=num_tokens,
+    token_indices = torch.arange(
+        num_tokens,
+        dtype=query_start_loc.dtype,
+        device=query_start_loc.device,
     )
-    return query_lens, request_indices
+    request_indices = torch.searchsorted(
+        query_start_loc[1:], token_indices, out_int32=True, right=True
+    ).clamp_(max=query_lens.shape[0] - 1)
+    is_query_token = token_indices < query_start_loc[-1]
+    return query_lens, request_indices, token_indices, is_query_token
 
 
 def _make_token_causal_mask(
@@ -211,9 +218,14 @@ def _make_token_causal_mask(
     causal: torch.Tensor,
     num_tokens: int,
 ) -> torch.Tensor:
-    """Expand per-request causal flags (bool or int) to one bool per query token."""
-    _, request_indices = _query_token_request_indices(query_start_loc, num_tokens)
-    return causal[request_indices] != 0
+    """Expand per-request causal flags (bool or int) to one bool per query token.
+
+    Padding tokens are marked non-causal; no kernel reads their rows.
+    """
+    _, request_indices, _, is_query_token = _query_token_request_indices(
+        query_start_loc, num_tokens
+    )
+    return (causal[request_indices] != 0) & is_query_token
 
 
 def _make_variable_window_bounds(
@@ -230,15 +242,11 @@ def _make_variable_window_bounds(
     For bidirectional requests a sliding window is symmetric, matching the
     semantics used by DiffusionGemma's FlashAttention reference path.
     ``causal`` holds one flag per request, as bool or int (DiffusionGemma's
-    persistent buffer is int32).
+    persistent buffer is int32). Padding tokens get the empty-safe bound [0, 0];
+    no kernel reads their rows.
     """
-    query_lens, request_indices = _query_token_request_indices(
-        query_start_loc, num_tokens
-    )
-    token_indices = torch.arange(
-        num_tokens,
-        dtype=torch.int32,
-        device=query_start_loc.device,
+    query_lens, request_indices, token_indices, is_query_token = (
+        _query_token_request_indices(query_start_loc, num_tokens)
     )
     query_positions = (
         seq_lens[request_indices]
@@ -258,6 +266,8 @@ def _make_variable_window_bounds(
             query_positions + window_left, token_seq_lens - 1
         )
     ends = torch.where(token_causal, query_positions, bidirectional_ends)
+    starts = torch.where(is_query_token, starts, 0)
+    ends = torch.where(is_query_token, ends, 0)
     return starts.contiguous(), ends.contiguous()
 
 
@@ -1065,6 +1075,23 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.paged_kv_last_page_len = CpuGpuBuffer(
             max_num_reqs, dtype=torch.int32, device=self.device, pin_memory=False
         )
+        # Per-token mixed-causal metadata (variable-window bounds, causal
+        # flags), kept at fixed addresses so FULL CUDA graphs replay with each
+        # step's values.
+        self._mixed_causal_buffers: dict[str, torch.Tensor] = {}
+
+    def _persistent_copy(self, key: str, src: torch.Tensor) -> torch.Tensor:
+        """Copy ``src`` into a buffer that keeps its address across builds."""
+        buf = self._mixed_causal_buffers.get(key)
+        if buf is None:
+            buf = torch.empty(
+                self.max_num_batched_tokens, dtype=src.dtype, device=src.device
+            )
+            self._mixed_causal_buffers[key] = buf
+        assert src.dtype == buf.dtype and src.numel() <= buf.numel()
+        out = buf[: src.numel()]
+        out.copy_(src)
+        return out
 
     @property
     def kv_cache_layout(self) -> KVCacheLayout:
@@ -1683,9 +1710,13 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 # TRTLLM prefill has no cross-rank combine for DCP-sharded KV;
                 # use_trtllm_attention never selects it when DCP is enabled.
                 assert not self.use_dcp
-                # Create GPU versions
+                # Create GPU versions. Without decodes, reuse query_start_loc
+                # (it starts at 0) so a captured graph keeps reading the
+                # runner's persistent buffer.
                 qo_indptr_prefill_gpu = (
-                    qo_indptr[prefill_start:] - qo_indptr[prefill_start]
+                    qo_indptr
+                    if prefill_start == 0
+                    else qo_indptr[prefill_start:] - qo_indptr[prefill_start]
                 )
                 # Compute cum_seq_lens_kv on GPU to avoid CPU sync.
                 # This is the cumulative sum of the number of KV cache
@@ -1736,22 +1767,29 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     # Sliding layers use the VariableWindow kernel. Full-attention
                     # layers instead merge causal and dense launches (see
                     # FlashInferImpl.forward), which need no VariableWindow cubin
-                    # for their head dim.
-                    variable_window_bounds = {
-                        window_left: _make_variable_window_bounds(
+                    # for their head dim. Both live in persistent buffers.
+                    variable_window_bounds = {}
+                    for window_left in self.window_lefts:
+                        if window_left < 0:
+                            continue
+                        starts, ends = _make_variable_window_bounds(
                             qo_indptr_prefill_gpu,
                             prefill_seq_lens,
                             causal[prefill_start:],
                             window_left,
                             num_prefill_tokens,
                         )
-                        for window_left in self.window_lefts
-                        if window_left >= 0
-                    }
-                    token_causal = _make_token_causal_mask(
-                        qo_indptr_prefill_gpu,
-                        causal[prefill_start:],
-                        num_prefill_tokens,
+                        variable_window_bounds[window_left] = (
+                            self._persistent_copy(f"starts_{window_left}", starts),
+                            self._persistent_copy(f"ends_{window_left}", ends),
+                        )
+                    token_causal = self._persistent_copy(
+                        "token_causal",
+                        _make_token_causal_mask(
+                            qo_indptr_prefill_gpu,
+                            causal[prefill_start:],
+                            num_prefill_tokens,
+                        ),
                     )
                 attn_metadata.prefill = TRTLLMPrefill(
                     block_tables=prefill_block_tables,
