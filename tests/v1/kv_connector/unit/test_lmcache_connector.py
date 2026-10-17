@@ -76,6 +76,12 @@ def mock_connector():
 class TestGetKVConnectorKVCacheEvents:
     """Test get_kv_connector_kv_cache_events method."""
 
+    def test_returns_none_when_engine_has_no_events_api(self, mock_connector):
+        """Native and older engines may not implement the optional events hook."""
+        mock_connector._lmcache_engine = object()
+
+        assert mock_connector.get_kv_connector_kv_cache_events() is None
+
     def test_returns_none_when_no_events(self, mock_connector):
         """Test that None is returned when lmcache engine has no events."""
         mock_connector._lmcache_engine.get_kv_events.return_value = None
