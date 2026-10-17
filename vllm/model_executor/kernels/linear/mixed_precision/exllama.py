@@ -58,6 +58,14 @@ class ExllamaLinearKernel(MPLinearKernel):
                 "Exllama does not support channelwise quantization",
             )
 
+        # The kernels advance K 32 at a time and only switch groups between
+        # steps.
+        if c.group_size % 32 != 0:
+            return (
+                False,
+                f"Group size ({c.group_size}) must be a multiple of 32 for Exllama",
+            )
+
         if c.full_weight_shape[0] % c.group_size != 0:
             return (
                 False,
