@@ -27,10 +27,13 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector import (
     MoRIIOConnectorScheduler,
     MoRIIOConnectorWorker,
-    get_moriio_write_target_tp_ranks,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_engine import (
     MoRIIOWrapper,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_tp_mapping import (
+    MoRIIOWriteTPMapping,
+    compute_write_tp_mapping,
 )
 
 from .utils import make_moriio_writer
@@ -49,13 +52,19 @@ def _fake_worker(
         lock=threading.Lock(),
         done_req_ids=[],
         sent_notifies=[],
+        sent_fields=[],
         waited_statuses=[],
     )
-    wrapper.send_notify = lambda transfer_id, remote_ip, remote_port, message_type: (
+
+    def send_notify(
+        transfer_id, remote_ip, remote_port, message_type, message_fields=None
+    ):
         wrapper.sent_notifies.append(
             (transfer_id, remote_ip, remote_port, message_type)
         )
-    )
+        wrapper.sent_fields.append(message_fields)
+
+    wrapper.send_notify = send_notify
     wrapper.waiting_for_transfer_complete = lambda statuses: (
         wrapper.waited_statuses.append(list(statuses))
     )
@@ -100,8 +109,7 @@ def _write_task(
     remote_dp_size_local: int = 0,
     remote_dp_size: int = 1,
     request_id: str = "req",
-    target_tp_ranks: tuple[int, ...] = (),
-    remote_tp_size: int = 0,
+    tp_mapping: MoRIIOWriteTPMapping | None = None,
 ) -> WriteTask:
     return WriteTask(
         request_id=request_id,
@@ -116,49 +124,13 @@ def _write_task(
         multi_pod_hosts=multi_pod_hosts or [],
         remote_dp_size_local=remote_dp_size_local,
         remote_dp_size=remote_dp_size,
-        target_tp_ranks=target_tp_ranks,
-        remote_tp_size=remote_tp_size,
+        remote_tp_size=None if tp_mapping is None else tp_mapping.consumer_tp_size,
+        tp_mapping=tp_mapping,
     )
 
 
-@pytest.mark.parametrize(
-    (
-        "producer_tp_rank",
-        "producer_tp_size",
-        "consumer_tp_size",
-        "is_mla",
-        "expected",
-    ),
-    [
-        (0, 2, 4, True, (0, 1)),
-        (1, 2, 4, True, (2, 3)),
-        (0, 4, 8, True, (0, 1)),
-        (1, 4, 8, True, (2, 3)),
-        (2, 4, 8, True, (4, 5)),
-        (3, 4, 8, True, (6, 7)),
-        (2, 4, 4, True, (2,)),
-        (0, 4, 2, True, (0,)),
-        (3, 4, 2, True, (1,)),
-        (0, 2, 4, False, (0,)),
-        (1, 2, 4, False, (2,)),
-    ],
-)
-def test_get_moriio_write_target_tp_ranks(
-    producer_tp_rank: int,
-    producer_tp_size: int,
-    consumer_tp_size: int,
-    is_mla: bool,
-    expected: tuple[int, ...],
-):
-    assert (
-        get_moriio_write_target_tp_ranks(
-            producer_tp_rank,
-            producer_tp_size,
-            consumer_tp_size,
-            is_mla,
-        )
-        == expected
-    )
+# Prefill rank 1 of TP2 writing an MLA latent to decode TP4: ranks 2 and 3.
+MLA_FANOUT = compute_write_tp_mapping(1, 2, 4, 1, True, False)
 
 
 def _real_wrapper() -> MoRIIOWrapper:
@@ -167,6 +139,7 @@ def _real_wrapper() -> MoRIIOWrapper:
     wrapper.done_req_ids = []
     wrapper.done_remote_allocate_req_dict = {}
     wrapper.done_write_cache_req_ids = []
+    wrapper._write_done_counts = {}
     wrapper.failed_write_cache_req_ids = []
     wrapper._terminal_transfer_ids = OrderedDict()
     return wrapper
@@ -320,7 +293,7 @@ def test_execute_write_task_writes_every_fanout_target():
     write_sessions: list[list[str]] = []
 
     def _prepare_transfer_plan(
-        task, request_info, remote_moriio_meta, remote_engine_id=None
+        task, request_info, remote_moriio_meta, remote_engine_id=None, target=None
     ):
         return "plan"
 
@@ -331,12 +304,7 @@ def test_execute_write_task_writes_every_fanout_target():
     writer._prepare_transfer_plan = _prepare_transfer_plan
     writer._do_layer_write = _do_layer_write
 
-    task = _write_task(
-        "tA",
-        "10.0.0.1",
-        target_tp_ranks=(2, 3),
-        remote_tp_size=4,
-    )
+    task = _write_task("tA", "10.0.0.1", tp_mapping=MLA_FANOUT)
     task.event = SimpleNamespace(synchronize=lambda: None)
     writer._execute_write_task(task)
 
@@ -361,17 +329,12 @@ def test_fanout_write_done_notifies_every_target_after_completion():
     worker = _fake_worker(alloc, tp_rank=0)
     writer = make_moriio_writer(worker)
 
-    task = _write_task(
-        "tA",
-        "10.0.0.1",
-        target_tp_ranks=(2, 3),
-        remote_tp_size=4,
-    )
+    task = _write_task("tA", "10.0.0.1", tp_mapping=MLA_FANOUT)
     writer._execute_write_task(task)
 
     assert info.completion_notify_targets == {
-        ("10.0.0.1", base + get_port_offset(1, 2)),
-        ("10.0.0.1", base + get_port_offset(1, 3)),
+        ("10.0.0.1", base + get_port_offset(1, 2)): 1,
+        ("10.0.0.1", base + get_port_offset(1, 3)): 1,
     }
 
     info.writes_expected = 1
@@ -406,6 +369,7 @@ def test_write_blocks_for_req_forwards_routing_to_schedule_write():
     worker.world_size = 1
     worker.use_mla = False
     worker._has_mamba = False
+    worker.model_config = SimpleNamespace(get_total_num_kv_heads=lambda: 8)
     captured: dict[str, Any] = {}
 
     def _capture_schedule_write_blocks(**kwargs: Any) -> None:
@@ -434,6 +398,7 @@ def test_write_blocks_for_req_falls_back_when_multi_pod_hosts_empty():
     worker.world_size = 1
     worker.use_mla = False
     worker._has_mamba = False
+    worker.model_config = SimpleNamespace(get_total_num_kv_heads=lambda: 8)
     captured: dict[str, Any] = {}
 
     def _capture_schedule_write_blocks(**kwargs: Any) -> None:
@@ -471,7 +436,7 @@ def test_write_blocks_for_req_schedules_mla_write_fanout():
     meta = _req_meta(tp_size=4)
     worker._write_blocks_for_req("req-c", meta, "layer0", kv_layer=None)
 
-    assert captured["target_tp_ranks"] == (2, 3)
+    assert captured["tp_mapping"].target_tp_ranks == (2, 3)
     assert captured["remote_tp_size"] == 4
 
 
@@ -482,6 +447,7 @@ def _fanout_save_worker(remote_agents: set[str]) -> MoRIIOConnectorWorker:
     worker.tp_rank = 0
     worker.world_size = 1
     worker.use_mla = True
+    worker._has_mamba = False
     worker._remote_agents = {engine_id: {"agent"} for engine_id in remote_agents}
     # Set by the handshake callback even when one of the targets failed.
     worker.write_ready_flags = {"10.0.0.1:2": True}
@@ -602,8 +568,7 @@ def test_deferred_write_timeout_notifies_every_fanout_target():
         "10.0.0.1",
         remote_dp_size_local=2,
         remote_dp_size=2,
-        target_tp_ranks=(2, 3),
-        remote_tp_size=4,
+        tp_mapping=MLA_FANOUT,
     )
     task.enqueue_time = time.perf_counter() - 2 * writer._defer_timeout
     writer._deferred_tasks.append(task)
@@ -666,16 +631,21 @@ def test_write_failed_is_reported_as_failed_recving_on_owning_rank():
     assert list(worker._unmatched_write_failures) == ["tOtherRank"]
 
 
-def test_hybrid_write_rejects_unequal_tp_before_scheduling_any_layer():
+def test_write_rejects_unmappable_tp_before_scheduling_any_layer():
     from unittest.mock import Mock
 
     worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
     worker._has_mamba = True
+    worker.use_mla = False
+    worker.tp_rank = 0
     worker.world_size = 2
+    worker.model_config = SimpleNamespace(get_total_num_kv_heads=lambda: 8)
     worker.schedule_write_blocks = Mock()
 
-    with pytest.raises(NotImplementedError, match="heterogeneous-TP"):
-        worker._write_blocks_for_req("req", _req_meta(), "attention", kv_layer=None)
+    with pytest.raises(ValueError, match="multiple of the other"):
+        worker._write_blocks_for_req(
+            "req", _req_meta(tp_size=3), "attention", kv_layer=None
+        )
 
     worker.schedule_write_blocks.assert_not_called()
 

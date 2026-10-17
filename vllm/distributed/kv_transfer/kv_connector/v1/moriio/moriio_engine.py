@@ -45,6 +45,9 @@ if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector import (
         MoRIIOConnectorWorker,
     )
+    from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_tp_mapping import (
+        WriteTarget,
+    )
 
 logger = init_logger(__name__)
 try:
@@ -346,18 +349,19 @@ class MoRIIOWriter:
         request_info = self._get_remote_alloc_info(task.transfer_id)
         with self._write_state_lock:
             request_info.completion_request_id = task.request_id
+            # Resolve the final notify endpoints under the lock so finalize
+            # only reads them.
             notify_targets = self._resolve_notify_endpoints(
                 task, request_info.decode_dp_rank
             )
-            if task.target_tp_ranks:
-                request_info.completion_notify_targets.update(notify_targets)
-            else:
-                # Resolve the final notify endpoint under the lock so finalize
-                # only reads it.
+            if task.tp_mapping is None:
                 (
                     request_info.completion_remote_ip,
                     request_info.completion_notify_port,
-                ) = notify_targets[0]
+                ) = next(iter(notify_targets))
+            else:
+                request_info.completion_notify_targets.update(notify_targets)
+                request_info.completion_targets_resolved = True
             if task.transfer_id in self._sealed_writes:
                 request_info.writes_expected = self._sealed_writes[task.transfer_id]
 
@@ -376,41 +380,33 @@ class MoRIIOWriter:
         # This event is used to synchronize the kv transfer and computation tasks.
         task.event.synchronize()
 
-        if task.target_tp_ranks:
-            target_engine_ids = [
-                self.worker.get_engine_name_with_dp_tp(
-                    task.dst_engine_id,
-                    request_info.decode_dp_rank,
-                    target_tp_rank,
-                )
-                for target_tp_rank in task.target_tp_ranks
-            ]
-        else:
-            # Update engine ID with DP rank
-            task.dst_engine_id = self.worker.get_engine_name_with_dp(
-                task.dst_engine_id, request_info.decode_dp_rank
-            )
-            target_engine_ids = [task.dst_engine_id]
-
-        plans: list[LayerTransferPlan] | None = None
+        is_mamba = self.worker._is_mamba_layer(task.layer_name)
         transfer_statuses: list[Any] = []
-        for target_engine_id in target_engine_ids:
+        for target in self._write_targets(task):
+            if target is not None and not is_mamba and not target.num_heads:
+                # Another producer rank writes this attention copy.
+                continue
+            target_engine_id = self._target_engine_id(
+                task, request_info.decode_dp_rank, target
+            )
             # Get or create sessions
             sessions, remote_moriio_meta = self.worker._get_built_session(
                 target_engine_id
             )
-            if plans is None:
-                if self.worker._is_mamba_layer(task.layer_name):
-                    plans = self._prepare_mamba_transfer_plans(task, request_info)
-                else:
-                    plans = [
-                        self._prepare_transfer_plan(
-                            task,
-                            request_info,
-                            remote_moriio_meta,
-                            remote_engine_id=target_engine_id,
-                        )
-                    ]
+            if is_mamba:
+                plans = self._prepare_mamba_transfer_plans(
+                    task, request_info, target, remote_moriio_meta
+                )
+            else:
+                plans = [
+                    self._prepare_transfer_plan(
+                        task,
+                        request_info,
+                        remote_moriio_meta,
+                        remote_engine_id=target_engine_id,
+                        target=target,
+                    )
+                ]
             for plan in plans:
                 transfer_statuses.extend(self._do_layer_write(plan, sessions))
         with self._write_state_lock:
@@ -425,6 +421,7 @@ class MoRIIOWriter:
         request_info: RemoteAllocInfo,
         remote_moriio_meta: MoRIIOAgentMetadata,
         remote_engine_id: str | None = None,
+        target: "WriteTarget | None" = None,
     ) -> LayerTransferPlan:
         """Prepare the transfer plan for a layer.
 
@@ -433,6 +430,8 @@ class MoRIIOWriter:
             request_info: Remote allocation information
             remote_moriio_meta: Metadata of the remote MoRIIO agent
             remote_engine_id: Destination engine ID used to resolve remote offsets
+            target: Consumer rank and head slice to write; None writes the
+                whole shard
 
         Returns:
             The transfer plan
@@ -441,7 +440,8 @@ class MoRIIOWriter:
         layer_cache = self.worker.kv_caches[task.layer_name]
         if remote_engine_id is None:
             remote_engine_id = task.dst_engine_id
-        key = (task.layer_name, *_get_write_geometry_key(layer_cache))
+        target_rank = -1 if target is None else target.tp_rank
+        key = (task.layer_name, *_get_write_geometry_key(layer_cache), target_rank)
         offsets = request_info.transfer_offsets.get(key)
         if offsets is None:
             group = self.worker.layer_to_group[task.layer_name]
@@ -451,13 +451,32 @@ class MoRIIOWriter:
             if self.worker._has_mamba:
                 # D can reserve a tail block for the token recomputed locally.
                 remote_blocks = remote_blocks[: len(local_blocks)]
-            offsets = self.worker._compute_block_transfer_offsets(
-                task.layer_name,
-                local_blocks,
-                remote_blocks,
-                remote_moriio_meta,
-                remote_engine_id=remote_engine_id,
-            )
+            if (
+                target is None
+                or task.tp_mapping is None
+                or (
+                    task.tp_mapping.copies_whole_block(target)
+                    and self.worker._block_copy_matches_peer(
+                        task.layer_name, remote_moriio_meta
+                    )
+                )
+            ):
+                offsets = self.worker._compute_block_transfer_offsets(
+                    task.layer_name,
+                    local_blocks,
+                    remote_blocks,
+                    remote_moriio_meta,
+                    remote_engine_id=remote_engine_id,
+                )
+            else:
+                offsets = self.worker._compute_head_slice_transfer_offsets(
+                    task.layer_name,
+                    local_blocks,
+                    remote_blocks,
+                    remote_moriio_meta,
+                    target,
+                    remote_engine_id=remote_engine_id,
+                )
             request_info.transfer_offsets[key] = offsets
 
         # One session per registered region; attention layers map to a single
@@ -478,7 +497,11 @@ class MoRIIOWriter:
         )
 
     def _prepare_mamba_transfer_plans(
-        self, task: WriteTask, request_info: RemoteAllocInfo
+        self,
+        task: WriteTask,
+        request_info: RemoteAllocInfo,
+        target: "WriteTarget | None" = None,
+        remote_moriio_meta: MoRIIOAgentMetadata | None = None,
     ) -> list[LayerTransferPlan]:
         """Plan both registered regions as one scheduled layer write."""
         assert request_info.block_ids is not None
@@ -492,12 +515,25 @@ class MoRIIOWriter:
             raise MoRIIOError(
                 "Hybrid WRITE requires one running-state slot per Mamba group"
             )
-        local, remote, sizes, n_conv = self.worker._compute_mamba_transfer_offsets(
-            task.layer_name,
-            local_slots,
-            remote_slots,
-            remote_tp_size=task.remote_tp_size,
-        )
+        if (
+            target is None
+            or target.local_slices == target.remote_slices == 1
+            or remote_moriio_meta is None
+        ):
+            local, remote, sizes, n_conv = self.worker._compute_mamba_transfer_offsets(
+                task.layer_name,
+                local_slots,
+                remote_slots,
+                remote_tp_size=task.remote_tp_size,
+            )
+        else:
+            local, remote, sizes, n_conv = self.worker._compute_mamba_slice_offsets(
+                task.layer_name,
+                local_slots,
+                remote_slots,
+                remote_moriio_meta,
+                target,
+            )
         conv_session, ssm_session = self.worker._region_session_indices(task.layer_name)
         return [
             LayerTransferPlan(
@@ -566,14 +602,17 @@ class MoRIIOWriter:
             if request_info.completion_notified:
                 return
             request_id = request_info.completion_request_id
-            notify_targets = sorted(request_info.completion_notify_targets)
-            if not notify_targets:
+            if request_id is None:
+                return
+            notify_targets = dict(
+                sorted(request_info.completion_notify_targets.items())
+            )
+            if not request_info.completion_targets_resolved:
                 remote_port = request_info.completion_notify_port
                 remote_ip = request_info.completion_remote_ip
-                if remote_port is not None and remote_ip is not None:
-                    notify_targets = [(remote_ip, remote_port)]
-            if request_id is None or not notify_targets:
-                return
+                if remote_port is None or remote_ip is None:
+                    return
+                notify_targets = {(remote_ip, remote_port): 1}
             transfer_statuses = list(request_info.transfer_statuses)
             request_info.transfer_statuses.clear()
             request_info.completion_notified = True
@@ -586,9 +625,16 @@ class MoRIIOWriter:
         # Consider including the first gen token from prefill in the notification
 
         # Send completion notification
-        for remote_ip, remote_port in notify_targets:
+        for (remote_ip, remote_port), num_writers in notify_targets.items():
             self.worker.moriio_wrapper.send_notify(
-                transfer_id, remote_ip, remote_port, message_type="write_done"
+                transfer_id,
+                remote_ip,
+                remote_port,
+                message_type="write_done",
+                # The consumer rank has its KV once every writer reported.
+                message_fields=(
+                    {"num_writers": num_writers} if num_writers != 1 else None
+                ),
             )
         # mark request as done, then we can free the blocks
         with self.worker.moriio_wrapper.lock:
@@ -635,13 +681,39 @@ class MoRIIOWriter:
 
     def _resolve_notify_endpoints(
         self, task: WriteTask, decode_dp_rank: int
-    ) -> list[tuple[str, int]]:
-        if not task.target_tp_ranks:
-            return [self._resolve_notify_endpoint(task, decode_dp_rank)]
-        return [
-            self._resolve_notify_endpoint(task, decode_dp_rank, target_tp_rank)
-            for target_tp_rank in task.target_tp_ranks
-        ]
+    ) -> dict[tuple[str, int], int]:
+        """Notify endpoint of every target -> producer ranks writing into it."""
+        if task.tp_mapping is None:
+            return {self._resolve_notify_endpoint(task, decode_dp_rank): 1}
+        return {
+            self._resolve_notify_endpoint(
+                task, decode_dp_rank, target.tp_rank
+            ): target.num_writers
+            for target in task.tp_mapping.targets
+        }
+
+    @staticmethod
+    def _write_targets(task: WriteTask) -> list["WriteTarget | None"]:
+        if task.tp_mapping is None:
+            return [None]
+        return list(task.tp_mapping.targets)
+
+    def _target_engine_id(
+        self, task: WriteTask, decode_dp_rank: int, target: "WriteTarget | None"
+    ) -> str:
+        # A single target uses the DP-keyed session the handshake built for the
+        # mapped rank; fan-out keys one session per target rank.
+        if (
+            target is None
+            or task.tp_mapping is None
+            or (len(task.tp_mapping.targets) == 1)
+        ):
+            return self.worker.get_engine_name_with_dp(
+                task.dst_engine_id, decode_dp_rank
+            )
+        return self.worker.get_engine_name_with_dp_tp(
+            task.dst_engine_id, decode_dp_rank, target.tp_rank
+        )
 
 
 class MoRIIOWrapper:
@@ -677,6 +749,8 @@ class MoRIIOWrapper:
         self.done_remote_allocate_req_dict: dict[TransferId, RemoteAllocInfo] = {}
         self.done_write_cache_req_ids: list[str] = []
         self.failed_write_cache_req_ids: list[str] = []
+        # write_done messages received per transfer whose writers are not all in.
+        self._write_done_counts: dict[TransferId, int] = {}
         self._terminal_transfer_ids: OrderedDict[TransferId, None] = OrderedDict()
         self._transfer_timeout = transfer_timeout
         self.notify_thread: threading.Thread | None = None
@@ -1000,13 +1074,20 @@ class MoRIIOWrapper:
             "Only decode can get WRITE completion messages"
         )
         transfer_id = data["transfer_id"]
+        num_writers = int(data.get("num_writers", 1))
         with self.lock:
+            received = self._write_done_counts.get(transfer_id, 0) + 1
+            if received < num_writers:
+                self._write_done_counts[transfer_id] = received
+                return
+            self._write_done_counts.pop(transfer_id, None)
             self.done_write_cache_req_ids.append(transfer_id)
 
     def _handle_write_failed_message(self, data: dict):
         assert get_role() != ROLE.PRODUCER, "Only decode can get WRITE failure messages"
         transfer_id = data["transfer_id"]
         with self.lock:
+            self._write_done_counts.pop(transfer_id, None)
             self.failed_write_cache_req_ids.append(transfer_id)
 
     def _handle_release_message(self, data: dict):
