@@ -951,6 +951,8 @@ class Scheduler(SchedulerInterface):
             )
             assert len(scheduled_loras) <= self.lora_config.max_loras
 
+        prefill_for_spec_padding = prefill_scheduled
+
         # Next, schedule the WAITING requests.
         if not preempted_reqs and self._pause_state != PauseState.PAUSED_ALL:
             step_skipped_waiting: deque[Request] = deque()
@@ -1155,6 +1157,7 @@ class Scheduler(SchedulerInterface):
                 duplicate_encoder_inputs = []
                 new_encoder_compute_budget = encoder_compute_budget
                 pad_spec_decode = False
+                request_is_prefill = request.is_prefill_chunk
 
                 # SWA bounded replay: recompute the tail of the hit without
                 # rewriting its cached KV. An async load replays once the KV
@@ -1182,6 +1185,13 @@ class Scheduler(SchedulerInterface):
                     # `request.num_prompt_tokens` to consider the resumed
                     # requests, which have output tokens.
                     num_new_tokens = request.num_tokens - num_computed_tokens
+                    # New requests have not reached _update_after_schedule yet,
+                    # so their lifecycle bit is still at its constructor value.
+                    # Use token counts only for that ordinary admission case;
+                    # an explicit replay/streaming state takes precedence.
+                    request_is_prefill = request.is_prefill_chunk or (
+                        num_computed_tokens < request.num_prompt_tokens
+                    )
 
                     # Pad new decode requests to uniform spec decoding size to
                     # preserve full cudagraph for this step.
@@ -1190,7 +1200,7 @@ class Scheduler(SchedulerInterface):
                         (self.num_spec_tokens > 0 and self.dynamic_sd_lookup is None)
                         and self.num_sampled_tokens_per_step > 0
                         and num_new_tokens == 1
-                        and not prefill_scheduled
+                        and not prefill_for_spec_padding
                         and (scheduled_running_reqs or num_computed_tokens > 0)
                     ):
                         padded_num_tokens = 1 + self.num_spec_tokens
@@ -1442,6 +1452,7 @@ class Scheduler(SchedulerInterface):
                 # and every remote-KV resume, since those set
                 # num_computed_tokens = num_tokens - 1.
                 prefill_admitted |= num_computed_tokens < request.num_tokens - 1
+                prefill_for_spec_padding |= request_is_prefill
                 # Only track requests that will still be prefilling after this chunk.
                 if num_computed_tokens + num_new_tokens < request.num_tokens:
                     self._inflight_prefills.add(request)
@@ -1669,6 +1680,9 @@ class Scheduler(SchedulerInterface):
         self._inflight_prefills.discard(request)
         request.status = RequestStatus.PREEMPTED
         request.num_computed_tokens = 0
+        # A resumed request must replay its prompt and prior output through
+        # the prefill attention path.
+        request.is_prefill_chunk = True
         if request.spec_token_ids:
             request.spec_token_ids = []
         # Async scheduling: mark all in-flight output as stale. Its tokens are
@@ -1741,6 +1755,10 @@ class Scheduler(SchedulerInterface):
         del session._all_token_ids[keep_end:]
         del session.block_hashes[keep_end // self.hash_block_size :]
         session._output_token_ids.clear()
+        # Drafts from the previous input chunk are invalid after a streaming
+        # update extends the prompt.  They must not leak into the new prefill
+        # lifecycle (the next decode step will generate fresh drafts).
+        session.spec_token_ids.clear()
         assert session.prompt_token_ids is not None
         # Extend prompt with kept output tokens.
         session.prompt_token_ids.extend(kept_output_tokens)
@@ -1755,6 +1773,11 @@ class Scheduler(SchedulerInterface):
 
         session._all_token_ids.extend(update.prompt_token_ids or ())
         session.prompt_token_ids.extend(update.prompt_token_ids or ())
+        # A streaming update extends the input and starts a new prefill
+        # lifecycle before the request re-enters the waiting queue. This must
+        # happen before scheduling so a one-token update is not padded as a
+        # speculative decode alongside an existing decode batch.
+        session.is_prefill_chunk = True
         # Update block hashes for the new tokens.
         session.update_block_hashes()
         session.num_prompt_tokens = len(session.prompt_token_ids)
@@ -1782,6 +1805,7 @@ class Scheduler(SchedulerInterface):
         all_token_ids: dict[str, list[int]] = {}
         num_computed_tokens: list[int] = []
         num_output_tokens: list[int] = []
+        is_prefill_chunk: list[bool] = []
         resumed_req_ids = set()
 
         num_running_reqs = len(running_reqs)
@@ -1816,6 +1840,9 @@ class Scheduler(SchedulerInterface):
             num_output_tokens.append(
                 req.num_output_tokens + req.num_output_placeholders
             )
+            # Capture state before _update_after_schedule advances counters.
+            # The resumed list is an explicit replay boundary.
+            is_prefill_chunk.append(req.is_prefill_chunk or idx >= num_running_reqs)
 
         return CachedRequestData(
             req_ids=req_ids,
@@ -1825,6 +1852,7 @@ class Scheduler(SchedulerInterface):
             new_block_ids=new_block_ids,
             num_computed_tokens=num_computed_tokens,
             num_output_tokens=num_output_tokens,
+            is_prefill_chunk=is_prefill_chunk,
         )
 
     def _reject_on_encoder_cache_embed_mismatch(
@@ -3422,6 +3450,11 @@ class Scheduler(SchedulerInterface):
                         request.num_computed_tokens - req_num_computed_tokens
                     )
                     request.num_computed_tokens = req_num_computed_tokens
+
+                # Recompute starts a new prefill lifecycle. Keep the state in
+                # the scheduler and propagate it with CachedRequestData.
+                request.is_prefill_chunk = True
+                self._inflight_prefills.add(request)
 
                 affected_req_ids.add(request.request_id)
 

@@ -88,6 +88,175 @@ from vllm.v1.worker.cp_utils import (
 
 logger = init_logger(__name__)
 
+_SWA_QUERY_TILE_SIZE = 32
+
+
+@dataclass
+class _SWATileAlignmentBuffers:
+    query_start_loc: torch.Tensor
+    seqused_q: torch.Tensor
+    query_indices: torch.Tensor
+    phases: torch.Tensor
+    request_starts: torch.Tensor
+    token_request_indices: torch.Tensor
+    token_offsets: torch.Tensor
+
+    @classmethod
+    def allocate(
+        cls,
+        device: torch.device,
+        max_num_reqs: int,
+        max_num_tokens: int,
+    ) -> "_SWATileAlignmentBuffers":
+        return cls(
+            query_start_loc=torch.empty(
+                max_num_reqs + 1, dtype=torch.int32, device=device
+            ),
+            seqused_q=torch.empty(max_num_reqs, dtype=torch.int32, device=device),
+            query_indices=torch.empty(max_num_tokens, dtype=torch.int64, device=device),
+            phases=torch.empty(max_num_reqs, dtype=torch.int32, device=device),
+            request_starts=torch.empty(max_num_reqs, dtype=torch.int64, device=device),
+            token_request_indices=torch.empty(
+                max_num_tokens, dtype=torch.int64, device=device
+            ),
+            token_offsets=torch.empty(max_num_tokens, dtype=torch.int64, device=device),
+        )
+
+
+_SWA_TILE_ALIGNMENT_BUFFERS: dict[
+    tuple[torch.device, int, int, int],
+    tuple[_SWATileAlignmentBuffers, ...],
+] = {}
+
+
+def _get_swa_tile_alignment_buffers(
+    device: torch.device,
+    max_num_reqs: int,
+    max_num_tokens: int,
+    num_ubatches: int,
+) -> tuple[_SWATileAlignmentBuffers, ...]:
+    key = (device, max_num_reqs, max_num_tokens, num_ubatches)
+    buffers = _SWA_TILE_ALIGNMENT_BUFFERS.get(key)
+    if buffers is None:
+        buffers = tuple(
+            _SWATileAlignmentBuffers.allocate(
+                device,
+                max_num_reqs,
+                max_num_tokens,
+            )
+            for _ in range(num_ubatches)
+        )
+        _SWA_TILE_ALIGNMENT_BUFFERS[key] = buffers
+    return buffers
+
+
+def _build_swa_tile_alignment_metadata(
+    query_start_loc: torch.Tensor,
+    query_start_loc_cpu: torch.Tensor,
+    seq_lens: torch.Tensor,
+    num_actual_tokens: int,
+    num_query_rows: int,
+    buffers: _SWATileAlignmentBuffers,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    num_reqs = query_start_loc_cpu.numel() - 1
+    if num_reqs > buffers.seqused_q.numel():
+        raise ValueError(
+            f"SWA tile alignment received {num_reqs} requests, but its buffer "
+            f"capacity is {buffers.seqused_q.numel()}."
+        )
+    if num_actual_tokens > buffers.query_indices.numel():
+        raise ValueError(
+            f"SWA tile alignment received {num_actual_tokens} tokens, but its "
+            f"buffer capacity is {buffers.query_indices.numel()}."
+        )
+
+    query_start_loc_np = query_start_loc_cpu.numpy()
+    query_lens_np = np.diff(query_start_loc_np)
+    if np.any(query_lens_np < 0):
+        raise ValueError("SWA tile alignment requires nondecreasing query starts.")
+    num_mapped_tokens = int(query_start_loc_np[-1])
+    if num_mapped_tokens > num_actual_tokens:
+        raise ValueError(
+            "SWA tile alignment query lengths exceed the actual token count, "
+            f"got {num_mapped_tokens} and {num_actual_tokens}."
+        )
+
+    token_request_indices_np = np.repeat(
+        np.arange(num_reqs, dtype=np.int64),
+        query_lens_np,
+    )
+    query_starts_np = query_start_loc_np[:-1].astype(np.int64, copy=False)
+    token_offsets_np = np.arange(num_mapped_tokens, dtype=np.int64)
+    token_offsets_np -= query_starts_np[token_request_indices_np]
+
+    seqused_q = buffers.seqused_q[:num_reqs]
+    torch.sub(
+        query_start_loc[1 : num_reqs + 1],
+        query_start_loc[:num_reqs],
+        out=seqused_q,
+    )
+    phases = buffers.phases[:num_reqs]
+    torch.sub(seq_lens[:num_reqs], seqused_q, out=phases)
+    torch.remainder(phases, _SWA_QUERY_TILE_SIZE, out=phases)
+    phases.masked_fill_(seqused_q == 0, 0)
+
+    seqused_q.add_(phases)
+    padded_query_start_loc = buffers.query_start_loc[: num_reqs + 1]
+    padded_query_start_loc[:1].zero_()
+    torch.cumsum(seqused_q, dim=0, out=padded_query_start_loc[1:])
+
+    request_starts = buffers.request_starts[:num_reqs]
+    request_starts.copy_(padded_query_start_loc[:num_reqs])
+    request_starts.add_(phases)
+
+    query_indices = buffers.query_indices[:num_actual_tokens]
+    if num_mapped_tokens:
+        token_request_indices = buffers.token_request_indices[:num_mapped_tokens]
+        token_request_indices.copy_(torch.from_numpy(token_request_indices_np))
+        token_offsets = buffers.token_offsets[:num_mapped_tokens]
+        token_offsets.copy_(torch.from_numpy(token_offsets_np))
+        torch.index_select(
+            request_starts,
+            0,
+            token_request_indices,
+            out=query_indices[:num_mapped_tokens],
+        )
+        query_indices[:num_mapped_tokens].add_(token_offsets)
+
+    num_padding_tokens = num_actual_tokens - num_mapped_tokens
+    num_nonempty_reqs = int(np.count_nonzero(query_lens_np))
+    scratch_start = num_query_rows - num_padding_tokens
+    minimum_scratch_start = (
+        num_mapped_tokens + (_SWA_QUERY_TILE_SIZE - 1) * num_nonempty_reqs
+    )
+    if scratch_start < minimum_scratch_start:
+        raise ValueError(
+            "SWA tile alignment has insufficient query rows: "
+            f"{scratch_start=} < {minimum_scratch_start=}."
+        )
+    if num_padding_tokens:
+        torch.arange(
+            scratch_start,
+            num_query_rows,
+            dtype=torch.int64,
+            device=query_indices.device,
+            out=query_indices[num_mapped_tokens:],
+        )
+    return padded_query_start_loc, seqused_q, query_indices
+
+
+def _prepare_swa_tile_alignment_workspace(
+    padded_query: torch.Tensor,
+    padded_output: torch.Tensor,
+    query_indices: torch.Tensor,
+    query: torch.Tensor,
+) -> None:
+    # FA does not write graph-padding rows outside cu_seqlens_q. Clear every
+    # row gathered after the call so shared workspace contents cannot leak.
+    padded_output.index_fill_(0, query_indices, 0)
+    padded_query.index_copy_(0, query_indices, query)
+
+
 FA4_DENSE_FLOAT_DTYPES = (torch.bfloat16, torch.float16)
 FA4_DENSE_Q_TILE = 128
 FA4_DENSE_NUM_BLOCKS = 256
@@ -559,6 +728,15 @@ class FlashAttentionMetadata:
     rswa_window: int | None = None
     rswa_window_tensor: torch.Tensor | None = None
 
+    # Absolute-position query tile alignment for FA3 sliding-window attention.
+    # Keep these fields after the legacy fields so positional construction
+    # remains compatible with older callers.
+    swa_query_start_loc: torch.Tensor | None = None
+    swa_seqused_q: torch.Tensor | None = None
+    swa_query_indices: torch.Tensor | None = None
+    swa_num_query_rows: int = 0
+    swa_max_query_len: int = 0
+
 
 def _get_sliding_window_configs(
     vllm_config: VllmConfig,
@@ -743,6 +921,34 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             self.compilation_config.cudagraph_mode.has_full_cudagraphs()
         )
         self.max_cudagraph_size = self.compilation_config.max_cudagraph_capture_size
+
+        group_sliding_window = getattr(kv_cache_spec, "sliding_window", None)
+        self.swa_tile_alignment = (
+            envs.VLLM_BATCH_INVARIANT
+            and self.dcp_world_size == 1
+            and group_sliding_window is not None
+            and get_flash_attn_version(
+                requires_alibi=self.model_config.uses_alibi,
+                head_size=self.headdim,
+            )
+            == 3
+        )
+        self.swa_max_num_seqs = vllm_config.scheduler_config.max_num_seqs
+        if self.swa_tile_alignment:
+            max_metadata_reqs = max(
+                self.swa_max_num_seqs,
+                self.max_cudagraph_size or 0,
+            )
+            max_metadata_tokens = max(
+                vllm_config.scheduler_config.max_num_batched_tokens,
+                self.max_cudagraph_size or 0,
+            )
+            self.swa_metadata_buffers = _get_swa_tile_alignment_buffers(
+                self.device,
+                max_metadata_reqs,
+                max_metadata_tokens,
+                max(1, self.parallel_config.num_ubatches),
+            )
 
         if self.use_full_cuda_graph and self.aot_schedule:
             # FA3 scheduler_metadata size: 1 + round_up(batch_size, 4) * 4
@@ -943,6 +1149,35 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
                 causal=causal,
                 max_num_splits=max_num_splits,
             )
+
+        swa_query_start_loc = None
+        swa_seqused_q = None
+        swa_query_indices = None
+        swa_num_query_rows = 0
+        swa_max_query_len = 0
+        if self.swa_tile_alignment:
+            ubatch_id = self.ubatch_id
+            if ubatch_id >= len(self.swa_metadata_buffers):
+                raise RuntimeError(
+                    f"SWA tile alignment has no buffers for ubatch {ubatch_id}."
+                )
+            swa_num_query_rows = (
+                num_actual_tokens + (_SWA_QUERY_TILE_SIZE - 1) * self.swa_max_num_seqs
+            )
+            (
+                swa_query_start_loc,
+                swa_seqused_q,
+                swa_query_indices,
+            ) = _build_swa_tile_alignment_metadata(
+                query_start_loc,
+                common_attn_metadata.query_start_loc_cpu,
+                seq_lens,
+                num_actual_tokens,
+                swa_num_query_rows,
+                self.swa_metadata_buffers[ubatch_id],
+            )
+            swa_max_query_len = max_query_len + _SWA_QUERY_TILE_SIZE - 1
+
         scheduler_metadata = self._store_scheduler_metadata(scheduler_metadata)
 
         if isinstance(causal, torch.Tensor) and causal.dtype != torch.int32:
@@ -968,6 +1203,11 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             num_prefill_tokens=num_prefill_tokens,
             scheduler_metadata=scheduler_metadata,
             max_num_splits=max_num_splits,
+            swa_query_start_loc=swa_query_start_loc,
+            swa_seqused_q=swa_seqused_q,
+            swa_query_indices=swa_query_indices,
+            swa_num_query_rows=swa_num_query_rows,
+            swa_max_query_len=swa_max_query_len,
             causal=causal,
         )
 
@@ -1159,6 +1399,29 @@ class FlashAttentionImpl(AttentionImpl):
             not uses_sm90_fa4_fp8_kv_dequant
         )
 
+        vllm_config = get_current_vllm_config_or_none()
+        if (
+            self.batch_invariant_enabled
+            and self.vllm_flash_attn_version == 3
+            and self.dcp_world_size == 1
+            and self.sliding_window[0] >= 0
+            and vllm_config is not None
+        ):
+            max_num_query_rows = (
+                vllm_config.scheduler_config.max_num_batched_tokens
+                + (_SWA_QUERY_TILE_SIZE - 1) * vllm_config.scheduler_config.max_num_seqs
+            )
+            padded_shape = (
+                max_num_query_rows,
+                self.num_heads,
+                self.head_size,
+            )
+            dtype = vllm_config.model_config.dtype
+            current_workspace_manager().reserve_all_ubatches(
+                (padded_shape, dtype),
+                (padded_shape, dtype),
+            )
+
         dcp_a2a = (
             vllm_config is not None
             and vllm_config.parallel_config.decode_context_parallel_size > 1
@@ -1274,11 +1537,47 @@ class FlashAttentionImpl(AttentionImpl):
             value_cache = value_cache.view(current_platform.fp8_dtype())
 
         cu_seqlens_q = attn_metadata.query_start_loc
+        seqused_q = None
         seqused_k = attn_metadata.seq_lens
         max_seqlen_q = attn_metadata.max_query_len
         max_seqlen_k = attn_metadata.max_seq_len
         block_table = attn_metadata.block_table
         scheduler_metadata = attn_metadata.scheduler_metadata
+        swa_window = self.sliding_window
+
+        use_swa_tile_alignment = (
+            envs.VLLM_BATCH_INVARIANT
+            and self.vllm_flash_attn_version == 3
+            and self.dcp_world_size == 1
+            and swa_window is not None
+            and swa_window[0] >= 0
+            and attn_metadata.swa_query_start_loc is not None
+            and attn_metadata.swa_seqused_q is not None
+            and attn_metadata.swa_query_indices is not None
+        )
+        attn_query = query[:num_actual_tokens]
+        attn_output = output[:num_actual_tokens]
+        if use_swa_tile_alignment:
+            padded_shape = (
+                attn_metadata.swa_num_query_rows,
+                *attn_query.shape[1:],
+            )
+            padded_query, padded_output = current_workspace_manager().get_simultaneous(
+                (padded_shape, attn_query.dtype),
+                (padded_shape, attn_output.dtype),
+            )
+            _prepare_swa_tile_alignment_workspace(
+                padded_query,
+                padded_output,
+                attn_metadata.swa_query_indices,
+                attn_query,
+            )
+            attn_query = padded_query
+            attn_output = padded_output
+            cu_seqlens_q = attn_metadata.swa_query_start_loc
+            seqused_q = attn_metadata.swa_seqused_q
+            max_seqlen_q = attn_metadata.swa_max_query_len
+            scheduler_metadata = None
 
         descale_shape = (cu_seqlens_q.shape[0] - 1, self.num_kv_heads)
 
@@ -1397,11 +1696,12 @@ class FlashAttentionImpl(AttentionImpl):
                 num_splits = 1
 
             _FA4_DENSE_ATTENTION_KERNEL(
-                q=query[:num_actual_tokens],
+                q=attn_query,
                 k=key_cache,
                 v=value_cache,
-                out=output[:num_actual_tokens],
+                out=attn_output,
                 cu_seqlens_q=cu_seqlens_q,
+                seqused_q=seqused_q,
                 max_seqlen_q=max_seqlen_q,
                 seqused_k=seqused_k,
                 max_seqlen_k=max_seqlen_k,
@@ -1422,6 +1722,13 @@ class FlashAttentionImpl(AttentionImpl):
                 mask_mod=rswa_mask_mod_fn or mm_mask_mod,
                 aux_tensors=rswa_aux or mm_aux,
             )
+            if use_swa_tile_alignment:
+                torch.index_select(
+                    attn_output,
+                    0,
+                    attn_metadata.swa_query_indices,
+                    out=output[:num_actual_tokens],
+                )
             return output
 
     def do_kv_cache_update(

@@ -618,6 +618,7 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
         self.layer_names = layer_names
         self.vllm_config = vllm_config
         self.device = device
+        self.ubatch_id = 0
 
     @classmethod
     def get_cudagraph_support(

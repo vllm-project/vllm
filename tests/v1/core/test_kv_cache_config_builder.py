@@ -285,7 +285,10 @@ class TestBytesPerBlockProbe:
 
         vc = _make_vllm_config()
         vc.cache_config.num_gpu_blocks_override = None
-        groups = [KVCacheGroupSpec([name], MagicMock()) for name in "ab"]
+        spec = FullAttentionSpec(
+            block_size=16, num_kv_heads=1, head_size=128, dtype="float16"
+        )
+        groups = [KVCacheGroupSpec([name], spec) for name in "ab"]
         builder = PerGroupAllocationBuilder()
         if declares_pool_bytes:
             assert _pool_bytes_per_block_from_builder(builder, vc, groups) == 96

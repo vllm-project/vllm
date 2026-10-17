@@ -1,15 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from copy import copy
 from typing import Any
 
 import torch
 import torch.nn as nn
 
+from vllm.compilation.breakable_cudagraph import is_breakable_cudagraph_enabled
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
-from vllm.forward_context import BatchDescriptor, set_forward_context
+from vllm.forward_context import (
+    BatchDescriptor,
+    make_local_num_tokens_across_dp,
+    set_forward_context,
+)
 from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
+from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.dp_utils import DPSyncState, dispatch_cg_and_sync_dp
@@ -27,6 +34,7 @@ logger = init_logger(__name__)
 class MultiModuleMTPSpeculator(DraftModelSpeculator):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
+        self.requested_cudagraph_mode = vllm_config.compilation_config.cudagraph_mode
 
         self.hidden_states = torch.zeros(
             self.max_num_tokens, self.hidden_size, dtype=self.dtype, device=device
@@ -95,9 +103,36 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
             device=self.device,
         )
 
+    @property
+    def attn_vllm_config(self) -> VllmConfig:
+        # Metadata builders must prepare FULL-graph buffers using the draft's
+        # requested mode, before it is narrowed by the draft attention support.
+        config = copy(self.vllm_config)
+        config.compilation_config = copy(config.compilation_config)
+        config.compilation_config.cudagraph_mode = self.requested_cudagraph_mode
+        return config
+
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
-        # TODO(TheEpicDolphin): Support piecewise cudagraph for multi-module MTP.
-        if cudagraph_mode.has_piecewise_cudagraphs():
+        # Draft attention can support FULL decode even when target verification
+        # falls back to PIECEWISE (for example, SWA draft over a DSA target).
+        if (
+            self.requested_cudagraph_mode is not None
+            and self.requested_cudagraph_mode.has_full_cudagraphs()
+            and not self.draft_model_config.enforce_eager
+            and self.attn_cg_support.min_cg_support.value
+            >= AttentionCGSupport.UNIFORM_BATCH.value
+        ):
+            cudagraph_mode = (
+                CUDAGraphMode.FULL_AND_PIECEWISE
+                if cudagraph_mode.has_piecewise_cudagraphs()
+                and is_breakable_cudagraph_enabled()
+                else CUDAGraphMode.FULL_DECODE_ONLY
+            )
+        # Compiled piecewise graphs do not specialize the Python module index.
+        if (
+            cudagraph_mode.has_piecewise_cudagraphs()
+            and not is_breakable_cudagraph_enabled()
+        ):
             cudagraph_mode = (
                 CUDAGraphMode.FULL_DECODE_ONLY
                 if cudagraph_mode.has_full_cudagraphs()
@@ -117,7 +152,11 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
         self.last_token_indices.zero_()
         assert self.cudagraph_manager is not None
         if self.cudagraph_manager.use_breakable_cg:
-            self.cudagraph_manager.init_breakable_cg_runner(self.model)
+            num_layers = self.draft_model_config.hf_config.num_nextn_predict_layers
+            self.cudagraph_manager.init_breakable_cg_runner(
+                self.model,
+                key_fn=lambda **kwargs: kwargs["spec_step_idx"] % num_layers,
+            )
         self.cudagraph_manager.capture(
             self._generate_drafts,
             self.model_state,
@@ -193,18 +232,25 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
         uniform_token_count = get_uniform_decode_token_count(
             num_reqs, num_tokens, max_query_len, input_batch.decode_graph_eligible
         )
+        dense_draft = bool(getattr(self.model, "is_dense_mtp", False))
         batch_desc, batch_sync = dispatch_cg_and_sync_dp(
             self.cudagraph_manager,
             num_reqs,
-            input_batch.num_tokens_after_padding,
+            num_tokens if dense_draft else input_batch.num_tokens_after_padding,
             uniform_token_count,
-            dp_size=self.dp_size,
-            dp_rank=self.dp_rank,
+            dp_size=1 if dense_draft else self.dp_size,
+            dp_rank=0 if dense_draft else self.dp_rank,
             need_eager=is_profile,
-            dp_sync_state=dp_sync_state,
+            dp_sync_state=None if dense_draft else dp_sync_state,
         )
         num_tokens_across_dp = (
-            batch_sync.num_tokens_across_dp if batch_sync is not None else None
+            make_local_num_tokens_across_dp(
+                self.vllm_config.parallel_config, batch_desc.num_tokens
+            )
+            if dense_draft
+            else batch_sync.num_tokens_across_dp
+            if batch_sync is not None
+            else None
         )
 
         # Rebuild the slot mappings and attention metadata.

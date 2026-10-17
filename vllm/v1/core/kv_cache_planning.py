@@ -15,7 +15,10 @@ from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import format_gib
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.core.kv_cache_config_builder import KVCacheConfigBuilder
-from vllm.v1.core.kv_cache_utils import _kv_cache_device_name
+from vllm.v1.core.kv_cache_utils import (
+    _kv_cache_device_name,
+    _required_blocks_per_group,
+)
 from vllm.v1.hisparse.layout import (
     get_hisparse_host_pool_bytes,
     get_hisparse_kv_cache_config,
@@ -1271,16 +1274,7 @@ def _max_memory_usage_bytes_from_groups(
     bytes_per_block = _pool_bytes_per_block_from_builder(
         builder, vllm_config, kv_cache_groups
     )
-    total_blocks = 0
-    for group in kv_cache_groups:
-        spec = group.kv_cache_spec
-        if isinstance(spec, UniformTypeKVCacheSpecs):
-            total_blocks += spec.max_memory_usage_pages(vllm_config)
-        else:
-            total_blocks += cdiv(
-                spec.max_memory_usage_bytes(vllm_config),
-                spec.page_size_bytes,
-            )
+    total_blocks = sum(_required_blocks_per_group(vllm_config, kv_cache_groups))
 
     return bytes_per_block * total_blocks
 

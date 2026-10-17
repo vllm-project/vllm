@@ -131,6 +131,18 @@ class KVCacheCoordinator(ABC):
         # Conservatively fall back to flag all groups when no group is flagged.
         if use_eagle and not self.eagle_group_ids:
             self.eagle_group_ids = set(range(len(kv_cache_config.kv_cache_groups)))
+        eagle_specs = [
+            kv_cache_config.kv_cache_groups[i].kv_cache_spec
+            for i in self.eagle_group_ids
+        ]
+        # Hybrid lookup batches equal specs together. If any member performs
+        # the EAGLE proof lookup, every manager in that spec group must retain
+        # the same proof tail.
+        self.eagle_proof_group_ids = {
+            i
+            for i, group in enumerate(kv_cache_config.kv_cache_groups)
+            if any(group.kv_cache_spec == spec for spec in eagle_specs)
+        }
 
         # During chunked prefill with EAGLE, the single next prefill lookahead
         # token past the chunk boundary is combined with the final hidden state
@@ -167,6 +179,7 @@ class KVCacheCoordinator(ABC):
                 pcp_world_size=pcp_world_size,
                 scheduler_block_size=self.scheduler_block_size,
                 needs_kv_cache_zeroing=self.kv_cache_config.needs_kv_cache_zeroing,
+                retain_eagle_proof=(enable_caching and i in self.eagle_proof_group_ids),
             )
             for i, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups)
         )

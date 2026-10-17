@@ -864,8 +864,35 @@ class SlidingWindowSpec(AttentionSpec):
     # of the sequence, and thus needs to delay freeing/caching of blocks.
     extra_retained_tokens: int = 0
 
+    def retained_window_size(
+        self,
+        scheduler_block_size: int | None = None,
+        retain_eagle_proof: bool = False,
+    ) -> int:
+        """Return the live KV span needed below the current position."""
+        if not retain_eagle_proof:
+            return self.sliding_window + self.extra_retained_tokens
+
+        if scheduler_block_size is None:
+            scheduler_block_size = self.block_size
+        if scheduler_block_size <= 0:
+            raise ValueError("scheduler_block_size must be positive")
+
+        # Prefix hits land on scheduler-block boundaries. Keep the SWA window,
+        # one EAGLE proof block, and worst-case drift from the latest boundary.
+        window_blocks = cdiv(self.sliding_window - 1, self.block_size)
+        proof_blocks = 1
+        drift_blocks = cdiv(scheduler_block_size, self.block_size)
+        return (
+            window_blocks + proof_blocks + drift_blocks
+        ) * self.block_size + self.extra_retained_tokens
+
     def max_admission_blocks_per_request(
-        self, max_in_flight_tokens: int, max_model_len: int
+        self,
+        max_in_flight_tokens: int,
+        max_model_len: int,
+        scheduler_block_size: int | None = None,
+        retain_eagle_proof: bool = False,
     ) -> int:
         """Per-request admission cap, in blocks.
 
@@ -878,13 +905,15 @@ class SlidingWindowSpec(AttentionSpec):
         `max_in_flight_tokens` is the max tokens scheduled but not yet settled
         (one batch per concurrent step); see `VllmConfig.max_in_flight_tokens`.
         """
-        # During chunked prefill, we hold KV for the last `sliding_window-1`
-        # computed tokens plus the in-flight tokens (frees happen on the
-        # processed-token basis); never more than `max_model_len`. An additional
-        # `extra_retained_tokens` trailing tokens are kept alive below the
-        # window for multi-module spec decoding, and must be accounted here too.
+        retained_window = self.retained_window_size(
+            scheduler_block_size=scheduler_block_size,
+            retain_eagle_proof=retain_eagle_proof,
+        )
+        # During chunked prefill, hold the retained local span plus in-flight
+        # tokens. The retained span includes any MTP re-prefill and prefix
+        # proof tails.
         num_tokens = min(
-            self.sliding_window - 1 + self.extra_retained_tokens + max_in_flight_tokens,
+            retained_window - 1 + max_in_flight_tokens,
             max_model_len,
         )
         # +1 because the sliding window may not start from the beginning of
@@ -909,6 +938,7 @@ class SlidingWindowSpec(AttentionSpec):
         return all(
             isinstance(spec, SlidingWindowSpec)
             and spec.sliding_window == self.sliding_window
+            and spec.extra_retained_tokens == self.extra_retained_tokens
             for spec in kv_cache_specs.values()
         )
 
@@ -1034,6 +1064,7 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
         return all(
             isinstance(spec, SlidingWindowMLASpec)
             and spec.sliding_window == self.sliding_window
+            and spec.extra_retained_tokens == self.extra_retained_tokens
             and spec.bounded_replay == self.bounded_replay
             for spec in kv_cache_specs.values()
         )

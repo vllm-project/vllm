@@ -495,6 +495,9 @@ class Attention(nn.Module, AttentionLayerBase):
         # definition specify the output tensor shape.
         output_shape: torch.Size | None = None,
         output_dtype: torch.dtype | None = None,
+        # Models that write KV cache through a fused projection can provide the
+        # ordering token instead of issuing a duplicate cache update.
+        kv_cache_dummy_dep: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """The KV cache is stored inside this class and is accessed via
         `self.kv_cache`.
@@ -536,12 +539,13 @@ class Attention(nn.Module, AttentionLayerBase):
             key = key.view(-1, self.num_kv_heads, self.head_size)
         if value is not None:
             value = value.view(-1, self.num_kv_heads, self.head_size_v)
-        kv_cache_dummy_dep = None
         if self.use_direct_call:
-            # Skip this if sharing KV cache with an earlier attention layer.
+            # Skip this if sharing KV cache with an earlier attention layer, or if
+            # the caller already performed the write and passed in its dep token.
             if (
                 not self.attn_backend.forward_includes_kv_cache_update
                 and self.kv_sharing_target_layer_name is None
+                and kv_cache_dummy_dep is None
                 and key is not None
                 and value is not None
             ):
@@ -557,11 +561,13 @@ class Attention(nn.Module, AttentionLayerBase):
                 kv_cache_dummy_dep=kv_cache_dummy_dep,
             )
         else:
-            # Skip this if sharing KV cache with an earlier attention layer.
+            # Skip this if sharing KV cache with an earlier attention layer, or if
+            # the caller already performed the write and passed in its dep token.
             encoded = _encode_layer_name(self.layer_name)
             if (
                 not self.attn_backend.forward_includes_kv_cache_update
                 and self.kv_sharing_target_layer_name is None
+                and kv_cache_dummy_dep is None
                 and key is not None
                 and value is not None
             ):

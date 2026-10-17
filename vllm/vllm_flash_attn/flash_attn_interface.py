@@ -214,6 +214,7 @@ def flash_attn_varlen_func(
     aux_tensors=None,
     aux_tensor_leading_dims=None,
     dynamic_causal: "torch.Tensor | None" = None,
+    seqused_q=None,
     gather_kv_indices=None,
     gather_kv_valid_length=None,
 ):
@@ -292,6 +293,7 @@ def flash_attn_varlen_func(
         aux_tensors: auxiliary tensors consumed by mask_mod. FA4 only.
         aux_tensor_leading_dims: leading dimensions of each entry in aux_tensors.
         dynamic_causal: optional per-sequence causal offsets. FA4 only.
+        seqused_q: optional per-request effective query lengths. Unavailable in FA2.
         gather_kv_indices: (total_q, k) int32 KV rows per query token, `-1` padded,
             k a multiple of 128. Requires q_v, excludes block_table. FA4 only.
         gather_kv_valid_length: (total_q,) int32, real entries per row. FA4 only.
@@ -349,6 +351,8 @@ def flash_attn_varlen_func(
             raise NotImplementedError("FA2 does not support s_aux")
         if num_splits > 1:
             raise NotImplementedError("FA2 does not support num_splits > 1")
+        if seqused_q is not None:
+            raise NotImplementedError("FA2 does not support seqused_q")
         if mask_mod is not None:
             raise NotImplementedError("FA2 does not support mask_mod")
         if aux_tensors is not None:
@@ -396,7 +400,7 @@ def flash_attn_varlen_func(
             cu_seqlens_q,
             cu_seqlens_k,  # cu_seqlens_k
             None,  # cu_seqlens_k_new
-            None,
+            seqused_q,
             seqused_k,  # seqused_q, seqused_k
             max_seqlen_q,
             max_seqlen_k,
@@ -426,6 +430,8 @@ def flash_attn_varlen_func(
         )
     elif fa_version == 4:
         assert alibi_slopes is None, "Alibi is not supported in FA4"
+        if seqused_q is not None:
+            raise NotImplementedError("FA4 does not support seqused_q")
         if block_sparse_tensors is not None:
             assert block_sparse_tensors.full_block_cnt is not None, (
                 "FA4 block_sparse_tensors must materialize empty full_block_cnt "

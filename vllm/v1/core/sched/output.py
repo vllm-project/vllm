@@ -150,6 +150,9 @@ class CachedRequestData:
     new_block_ids: list[tuple[list[int], ...] | None]
     num_computed_tokens: list[int]
     num_output_tokens: list[int]
+    # Lifecycle state for the input chunk represented by each cached request.
+    # Captured before the scheduler advances request counters.
+    is_prefill_chunk: list[bool] = field(default_factory=list)
 
     # Version of dataclass repr with token IDs obfuscated.
     def anon_repr(self) -> str:
@@ -165,7 +168,8 @@ class CachedRequestData:
             f"all_token_ids_lens={all_token_ids_lens},"
             f"new_block_ids={self.new_block_ids},"
             f"num_computed_tokens={self.num_computed_tokens},"
-            f"num_output_tokens={self.num_output_tokens}"
+            f"num_output_tokens={self.num_output_tokens},"
+            f"is_prefill_chunk={self.is_prefill_chunk}"
             f")"
         )
 
@@ -186,7 +190,21 @@ class CachedRequestData:
         """
         return dict(zip(self.req_ids, self.num_output_tokens))
 
+    @cached_property
+    def _req_id_to_is_prefill_chunk(self) -> dict[str, bool]:
+        """Map request IDs to lifecycle state for O(1) phase lookup."""
+        if len(self.is_prefill_chunk) != len(self.req_ids):
+            return {}
+        return dict(zip(self.req_ids, self.is_prefill_chunk))
+
     def is_context_phase(self, req_id: str) -> bool:
+        # The scheduler lifecycle bit is authoritative for the input chunk.
+        # A resumed/reset-prefix request may already have generated output
+        # tokens, while its replay still must use the context/prefill path.
+        # Keep the token-count check as a compatibility fallback for scheduler
+        # producers created before ``is_prefill_chunk`` was added.
+        if self._req_id_to_is_prefill_chunk:
+            return self._req_id_to_is_prefill_chunk.get(req_id, False)
         num_output_tokens = self._req_id_to_num_output_tokens.get(req_id)
         return num_output_tokens is not None and num_output_tokens == 0
 
@@ -200,6 +218,7 @@ class CachedRequestData:
             new_block_ids=[],
             num_computed_tokens=[],
             num_output_tokens=[],
+            is_prefill_chunk=[],
         )
 
 

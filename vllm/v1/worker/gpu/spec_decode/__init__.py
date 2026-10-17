@@ -54,7 +54,10 @@ def init_speculator(
         )
 
         return Gemma4Speculator(vllm_config, device)
-    elif speculative_config.use_multi_module_mtp():
+    elif speculative_config.use_multi_module_mtp() or (
+        speculative_config.use_step_mtp()
+        and speculative_config.num_speculative_tokens == 1
+    ):
         from vllm.v1.worker.gpu.spec_decode.multi_module_mtp.speculator import (
             MultiModuleMTPSpeculator,
         )

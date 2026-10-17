@@ -337,6 +337,8 @@ class AttentionGroup:
             )
             for _ in range(num_metadata_builders)
         ]
+        for ubatch_id, builder in enumerate(self.metadata_builders):
+            builder.ubatch_id = ubatch_id
 
     def build_metadata(
         self,

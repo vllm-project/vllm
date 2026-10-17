@@ -4,7 +4,13 @@ include requirements/cuda.txt
 include requirements/rocm.txt
 include requirements/cpu.txt
 include CMakeLists.txt
+include rust-toolchain.toml
 include tools/build_rust.py
 
 recursive-include cmake *
 recursive-include csrc *
+recursive-include rust *
+include rust/.gitattributes
+include rust/.gitignore
+recursive-include rust/.config *
+prune rust/target

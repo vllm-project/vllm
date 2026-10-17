@@ -221,6 +221,10 @@ _TOOL_PARSERS_TO_REGISTER = {
         "step3p5_tool_parser",
         "Step3p5ToolParser",
     ),
+    "step5": (
+        "step5_tool_parser",
+        "Step5ToolParser",
+    ),
     "inkling": (
         "inkling_tool_parser",
         "InklingEngineToolParser",

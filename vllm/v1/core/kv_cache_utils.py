@@ -29,6 +29,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     KVCacheSpec,
     MambaSpec,
+    SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
     iter_layer_specs,
 )
@@ -1029,11 +1030,8 @@ def get_max_concurrency_for_kv_cache_config(
     """
     num_blocks_per_request = 0
     host_blocks_per_request = 0
-    for group in kv_cache_config.kv_cache_groups:
-        required = cdiv(
-            group.kv_cache_spec.max_memory_usage_bytes(vllm_config),
-            group.kv_cache_spec.page_size_bytes,
-        )
+    groups = kv_cache_config.kv_cache_groups
+    for group, required in zip(groups, _required_blocks_per_group(vllm_config, groups)):
         if group.host_resident:
             host_blocks_per_request += required
         else:
@@ -1215,3 +1213,62 @@ def resolve_block_hashes(
         return block_hashes
     assert block_size % hash_block_size == 0
     return BlockHashListWithBlockSize(block_hashes, hash_block_size, block_size)
+
+
+def _get_scheduler_kv_cache_spec(spec: KVCacheSpec) -> KVCacheSpec:
+    """The spec the scheduler sees, as in ``generate_scheduler_kv_cache_config``."""
+    if isinstance(spec, UniformTypeKVCacheSpecs):
+        return next(iter(spec.kv_cache_specs.values()))
+    return spec
+
+
+def _required_blocks_per_group(
+    vllm_config: VllmConfig, groups: list[KVCacheGroupSpec]
+) -> list[int]:
+    proof_ids: set[int] = set()
+    speculative = getattr(vllm_config, "speculative_config", None)
+    if (
+        speculative is not None
+        and speculative.use_eagle()
+        and vllm_config.cache_config.enable_prefix_caching
+    ):
+        draft_ids = {i for i, group in enumerate(groups) if group.is_eagle_group}
+        if not draft_ids:
+            draft_ids = set(range(len(groups)))
+        specs = [_get_scheduler_kv_cache_spec(group.kv_cache_spec) for group in groups]
+        proof_ids = {
+            i
+            for i, spec in enumerate(specs)
+            if any(spec == specs[j] for j in draft_ids)
+        }
+    scheduler_block_size = (
+        math.lcm(
+            *(
+                resolve_dcp_kv_block_size(
+                    group.kv_cache_spec,
+                    vllm_config.parallel_config.decode_context_parallel_size,
+                )
+                for group in groups
+            )
+        )
+        if proof_ids
+        else None
+    )
+
+    def count(spec: KVCacheSpec, retain_proof: bool) -> int:
+        if isinstance(spec, UniformTypeKVCacheSpecs):
+            return max(
+                count(child, retain_proof) for child in spec.kv_cache_specs.values()
+            )
+        if retain_proof and isinstance(spec, SlidingWindowSpec):
+            return spec.max_admission_blocks_per_request(
+                max_in_flight_tokens=vllm_config.max_in_flight_tokens,
+                max_model_len=vllm_config.model_config.max_model_len,
+                scheduler_block_size=scheduler_block_size,
+                retain_eagle_proof=True,
+            )
+        return cdiv(spec.max_memory_usage_bytes(vllm_config), spec.page_size_bytes)
+
+    return [
+        count(group.kv_cache_spec, i in proof_ids) for i, group in enumerate(groups)
+    ]

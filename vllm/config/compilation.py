@@ -1391,6 +1391,10 @@ class CompilationConfig:
             self.cudagraph_mode = CUDAGraphMode.NONE
             return CUDAGraphMode.NONE
 
+        breakable_available = (
+            envs.VLLM_USE_BREAKABLE_CUDAGRAPH and piecewise_capture_available
+        )
+
         # Check cudagraph for mixed batch is supported
         if (
             cudagraph_mode.mixed_mode() == CUDAGraphMode.FULL
@@ -1428,7 +1432,13 @@ class CompilationConfig:
                 f"with {min_cg_attn_backend} backend (support: "
                 f"{min_cg_support})"
             )
-            if self.mode == CompilationMode.VLLM_COMPILE and (
+            if breakable_available:
+                msg += (
+                    "; setting cudagraph_mode=PIECEWISE because "
+                    "breakable CUDA graphs are available"
+                )
+                cudagraph_mode = CUDAGraphMode.PIECEWISE
+            elif self.mode == CompilationMode.VLLM_COMPILE and (
                 self.splitting_ops_contain_attention()
                 or self.use_inductor_graph_partition
             ):
@@ -1457,7 +1467,7 @@ class CompilationConfig:
                 f" with spec-decode for attention backend "
                 f"{min_cg_attn_backend} (support: {min_cg_support})"
             )
-            if self.splitting_ops_contain_attention():
+            if breakable_available or self.splitting_ops_contain_attention():
                 msg += "; setting cudagraph_mode=PIECEWISE"
                 cudagraph_mode = CUDAGraphMode.PIECEWISE
             else:

@@ -143,6 +143,17 @@ class AttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
         "vllm.models.minimax_m3.nvidia.sparse_attention_msa."
         "MiniMaxM3SparseTritonBackend"
     )
+    # Step5 GQA + DSA backends live alongside the model. The model passes these
+    # classes to
+    # Attention(attn_backend=...) directly, and Attention.__init__ reverse-looks
+    # up the class by get_name() here, so all three names must exist.
+    # STEP5_FLASH_ATTN is plain FlashAttention on the split KV layout the DSA
+    # layers pin; the sliding-window layers use it so the shared KV allocation
+    # has a single layout.
+    STEP5_DSA = "vllm.models.step5.nvidia.sparse_attention.Step5DSAAttentionBackend"
+    STEP5_FLASH_ATTN = (
+        "vllm.models.step5.nvidia.sparse_attention.Step5SplitKVFlashAttentionBackend"
+    )
     NO_ATTENTION = "vllm.v1.attention.backends.no_attention.NoAttentionBackend"
     FLEX_ATTENTION = "vllm.v1.attention.backends.flex_attention.FlexAttentionBackend"
     # HPC Attention Backend:

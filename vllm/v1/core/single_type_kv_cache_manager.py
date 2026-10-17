@@ -4,7 +4,7 @@ import itertools
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, ClassVar, cast
 
 from vllm.distributed.kv_events import MEDIUM_CPU
 from vllm.utils.math_utils import cdiv
@@ -1166,9 +1166,40 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
             The number of tokens that will be skipped for attention computation.
 
         """
-        return max(
-            0,
-            num_computed_tokens - self.sliding_window + 1 - self.extra_retained_tokens,
+        retained_window = cast(
+            SlidingWindowSpec, self.kv_cache_spec
+        ).retained_window_size(
+            scheduler_block_size=self.scheduler_block_size,
+            retain_eagle_proof=self.enable_caching and self.use_eagle,
+        )
+        return max(0, num_computed_tokens - retained_window + 1)
+
+    def allocate_external_computed_blocks(
+        self,
+        request_id: str,
+        num_local_computed_tokens: int,
+        num_external_computed_tokens: int,
+        record_for_zeroing: bool = True,
+    ) -> None:
+        # Like a local hit, an external hit only provides the attended window.
+        # Retained blocks below it would never be written, yet would be cached.
+        num_total_computed_tokens = (
+            num_local_computed_tokens + num_external_computed_tokens
+        )
+        num_unattended_blocks = (
+            max(0, num_total_computed_tokens - self.sliding_window + 1)
+            // self.block_size
+        )
+        req_blocks = self.req_to_blocks[request_id]
+        if len(req_blocks) < num_unattended_blocks:
+            req_blocks.extend(
+                [self._null_block] * (num_unattended_blocks - len(req_blocks))
+            )
+        super().allocate_external_computed_blocks(
+            request_id,
+            num_local_computed_tokens,
+            num_external_computed_tokens,
+            record_for_zeroing,
         )
 
 
@@ -2615,16 +2646,33 @@ def get_manager_for_kv_cache_spec(
     assert manager_class is not None, (
         f"No manager registered for KVCacheSpec {type(kv_cache_spec)}"
     )
+    scheduler_block_size = kwargs.get("scheduler_block_size")
+    retain_eagle_proof = kwargs.pop("retain_eagle_proof", False)
     # SlidingWindow / ChunkedLocalAttention managers recycle blocks;
     # the runtime admission cap must match the recycling-aware bound the
     # startup pool sizer uses (single source of truth: the spec method).
     # R-SWA also recycles gap blocks but peak physical KV still fits the
     # full-attention bound (prefix + window <= max_model_len), so it inherits
     # FullAttentionSpec sizing without a separate admission cap.
-    if isinstance(
-        kv_cache_spec,
-        (SlidingWindowSpec, ChunkedLocalAttentionSpec, HiSparseResidentSpec),
-    ):
+    if isinstance(kv_cache_spec, SlidingWindowSpec):
+        if retain_eagle_proof:
+            kwargs["max_admission_blocks_per_request"] = (
+                kv_cache_spec.max_admission_blocks_per_request(
+                    max_in_flight_tokens=max_in_flight_tokens,
+                    max_model_len=max_model_len,
+                    scheduler_block_size=scheduler_block_size,
+                    retain_eagle_proof=True,
+                )
+            )
+        else:
+            # Keep the legacy override shape for ordinary SWA callers.
+            kwargs["max_admission_blocks_per_request"] = (
+                kv_cache_spec.max_admission_blocks_per_request(
+                    max_in_flight_tokens=max_in_flight_tokens,
+                    max_model_len=max_model_len,
+                )
+            )
+    elif isinstance(kv_cache_spec, (ChunkedLocalAttentionSpec, HiSparseResidentSpec)):
         kwargs["max_admission_blocks_per_request"] = (
             kv_cache_spec.max_admission_blocks_per_request(
                 max_in_flight_tokens=max_in_flight_tokens,
