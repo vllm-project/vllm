@@ -66,7 +66,14 @@ def _split_config(layout: str = "LBHNC", block_size: int = 16):
     return vllm_config
 
 
-def _register(vllm_config, block_size: int, layout: str, num_layers: int = 2):
+def _register(
+    vllm_config,
+    block_size: int,
+    layout: str,
+    num_layers: int = 2,
+    tp_size: int = 1,
+    tp_rank: int = 0,
+):
     """Run register_kv_caches on dense FlashInfer split-slot caches.
 
     Returns (worker, caches, block_runs, raw).
@@ -86,6 +93,10 @@ def _register(vllm_config, block_size: int, layout: str, num_layers: int = 2):
         patch(f"{NIXL_WORKER}.threading.Event"),
         patch(f"{NIXL_WORKER}.threading.Thread") as mock_thread,
         patch(f"{NIXL_WORKER}.get_current_attn_backends") as mock_backends,
+        patch(
+            f"{NIXL_WORKER}.get_tensor_model_parallel_world_size", return_value=tp_size
+        ),
+        patch(f"{NIXL_WORKER}.get_tensor_model_parallel_rank", return_value=tp_rank),
         set_current_vllm_config(vllm_config),
     ):
         mock_backends.return_value = [FlashInferBackend]
@@ -258,3 +269,91 @@ def test_handshake_with_separate_kv_slab_peer(default_vllm_config, dist_init):
         for b in range(NUM_BLOCKS)
     ]
     assert [tuple(int(x) for x in row) for row in blocks] == expected
+
+
+@pytest.mark.parametrize(
+    ("local_tp", "remote_tp", "tp_rank"),
+    [
+        (1, 2, 0),  # D TP1 gathers its 4 heads from two P ranks with 2 each
+        (2, 1, 1),  # D rank 1 of TP2 reads the 2nd half of each P region
+    ],
+)
+def test_heterogeneous_tp_slices_heads_within_each_kv_region(
+    default_vllm_config, dist_init, local_tp, remote_tp, tp_rank
+):
+    """Each K or V region keeps its heads contiguous, so head re-sharding reads
+    a per-rank slice of that region, never crossing the K/V boundary."""
+    block_size = 16
+    num_layers = 2
+    worker, caches, _runs, _raw, spec = _register(
+        _split_config("LBHNC", block_size),
+        block_size,
+        "LBHNC",
+        num_layers,
+        tp_size=local_tp,
+        tp_rank=tp_rank,
+    )
+    # Locally registered page holds this rank's heads only.
+    local_half = spec.page_size_bytes // 2
+    local_heads = NUM_KV_HEADS
+    total_heads = local_heads * local_tp
+    remote_heads = total_heads // remote_tp
+    remote_half = local_half * remote_heads // local_heads
+    worker.transfer_topo.total_num_kv_heads = total_heads
+    worker.transfer_topo.local_physical_heads = local_heads
+
+    worker.nixl_wrapper = FakeNixlWrapper("local")
+    captured = []
+    real_prep = worker.nixl_wrapper.prep_xfer_dlist
+
+    def capture(agent_name, descs, *args, **kwargs):
+        captured.append((agent_name, descs))
+        return real_prep(agent_name, descs, *args, **kwargs)
+
+    worker.nixl_wrapper.prep_xfer_dlist = capture
+    num_regions = 2 * num_layers
+    remote_bases = [
+        0x10000000 + r * NUM_BLOCKS * remote_half for r in range(num_regions)
+    ]
+    for remote_rank in range(max(1, remote_tp // local_tp)):
+        meta = NixlAgentMetadata(
+            engine_id=FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
+            agent_metadata=FakeNixlWrapper.AGENT_METADATA,
+            kv_caches_base_addr=remote_bases,
+            device_id=0,
+            num_blocks=NUM_BLOCKS,
+            block_lens=[remote_half] * num_regions,
+            block_strides=[remote_half] * num_regions,
+            kv_cache_layout="LBHNC",
+            block_size=block_size,
+            ssm_sizes=(0, 0),
+            attn_backend_name=worker.backend_name,
+            physical_blocks_per_logical_kv_block=1,
+        )
+        worker.add_remote_agent(
+            meta, remote_tp_rank=remote_rank, remote_tp_size=remote_tp
+        )
+
+    remote = [d for name, d in captured if name == FakeNixlWrapper.REMOTE_AGENT_NAME]
+    assert remote
+    blocks = expand_strided_descs(remote[0])
+    if local_tp < remote_tp:
+        # Each remote rank contributes its whole region; this rank reads
+        # remote_half per block from it (the local half is split by reads).
+        read_len, offset = remote_half, 0
+    else:
+        # This rank reads its contiguous head slice of the remote region.
+        read_len = local_half
+        offset = (tp_rank % (local_tp // remote_tp)) * local_half
+    expected = [
+        (remote_bases[r] + offset + b * remote_half, read_len, 0)
+        for r in range(num_regions)
+        for b in range(NUM_BLOCKS)
+    ]
+    assert [tuple(int(x) for x in row) for row in blocks] == expected
+    # No read crosses from a K region into the V region that follows it.
+    for r in range(num_regions):
+        for b in range(NUM_BLOCKS):
+            addr, length, _ = (int(x) for x in blocks[r * NUM_BLOCKS + b])
+            start = remote_bases[r] + b * remote_half
+            assert start <= addr and addr + length <= start + remote_half
