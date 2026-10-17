@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
+from types import SimpleNamespace
 from typing import Literal
 from unittest.mock import MagicMock, patch
 
@@ -30,7 +31,8 @@ if current_platform.is_rocm():
 else:
     RocmPlatform = None  # type: ignore[misc]  # Unavailable platform import.
 
-from vllm.v1.attention.backend import AttentionType
+from vllm.utils.import_utils import resolve_obj_by_qualname
+from vllm.v1.attention.backend import AttentionCGSupport, AttentionType
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.selector import (
     AttentionSelectorConfig,
@@ -917,3 +919,94 @@ def test_rswa_selection_does_not_reuse_causal_result(blackwell_selection):
             get_attn_backend(256, torch.bfloat16, None)
         config.attention_config.backend = AttentionBackendEnum.TRITON_ATTN
         assert get_attn_backend(256, torch.bfloat16, None).get_name() == "TRITON_ATTN"
+
+
+@contextmanager
+def _sm120_with_flash_attn_graphs(
+    support: AttentionCGSupport, vllm_config: VllmConfig | None = None
+):
+    """SM120 selection, with FLASH_ATTN's builder declaring `support` the way
+    FA2 (UNIFORM_BATCH) or FA3/FA4 (ALWAYS) do."""
+    from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadataBuilder
+
+    with (
+        patch.object(
+            type(current_platform),
+            "get_device_capability",
+            return_value=DeviceCapability(12, 0),
+        ),
+        patch.object(FlashAttentionMetadataBuilder, "_cudagraph_support", support),
+        set_current_vllm_config(vllm_config or VllmConfig()),
+    ):
+        yield
+
+
+def _adaptive_selector_config(use_adaptive_verification: bool):
+    """A verifier layer's selection: both adaptive verification requirements."""
+    return AttentionSelectorConfig(
+        head_size=128,
+        dtype=torch.bfloat16,
+        kv_cache_dtype=None,
+        block_size=None,
+        use_adaptive_verification=use_adaptive_verification,
+        use_varlen_decode_cudagraphs=use_adaptive_verification,
+    )
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA backend selection")
+@pytest.mark.parametrize(
+    "flash_attn_support,use_adaptive_verification,expected",
+    [
+        (AttentionCGSupport.UNIFORM_BATCH, True, "TRITON_ATTN"),
+        (AttentionCGSupport.UNIFORM_BATCH, False, "FLASH_ATTN"),
+        (AttentionCGSupport.ALWAYS, True, "FLASH_ATTN"),
+    ],
+)
+def test_adaptive_verification_skips_backends_without_varlen_decode_graphs(
+    flash_attn_support, use_adaptive_verification, expected, caplog_vllm
+):
+    """Adaptive verification replays decode graphs whose per-request query
+    lengths vary; automatic selection must skip FA2, whose graphs cannot."""
+    config = _adaptive_selector_config(use_adaptive_verification)
+    with _sm120_with_flash_attn_graphs(flash_attn_support):
+        backend_path = CudaPlatform.get_attn_backend_cls(None, config)
+    assert resolve_obj_by_qualname(backend_path).get_name() == expected
+    precluded = "precluded higher-priority attention backend(s) FLASH_ATTN"
+    assert (precluded in caplog_vllm.text) == (expected == "TRITON_ATTN")
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA backend selection")
+def test_adaptive_verification_rejects_selected_fa2():
+    """An explicit FLASH_ATTN that runs FA2 fails at selection, not at startup."""
+    config = _adaptive_selector_config(True)
+    with (
+        _sm120_with_flash_attn_graphs(AttentionCGSupport.UNIFORM_BATCH),
+        pytest.raises(ValueError, match="variable-length decode cudagraphs"),
+    ):
+        CudaPlatform.get_attn_backend_cls(AttentionBackendEnum.FLASH_ATTN, config)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA backend selection")
+@pytest.mark.parametrize(
+    "model_tag,expected", [("backbone", "TRITON_ATTN"), ("eagle_head", "FLASH_ATTN")]
+)
+def test_adaptive_verification_varlen_graphs_only_required_for_verifier(
+    model_tag, expected
+):
+    """EAGLE-style drafters replay FULL graphs only on untrimmed, uniform
+    batches, so only the verifier has to skip FA2."""
+    from vllm.compilation.backends import set_model_tag
+
+    vllm_config = VllmConfig()
+    object.__setattr__(
+        vllm_config,
+        "speculative_config",
+        SimpleNamespace(enable_adaptive_verification=True),
+    )
+    tag = nullcontext() if model_tag == "backbone" else set_model_tag(model_tag)
+    with (
+        _sm120_with_flash_attn_graphs(AttentionCGSupport.UNIFORM_BATCH, vllm_config),
+        tag,
+    ):
+        backend = get_attn_backend(128, torch.bfloat16, None)
+    assert backend.get_name() == expected
