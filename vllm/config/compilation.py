@@ -140,6 +140,29 @@ class PassConfig:
     fuse_rope_kvcache_cat_mla: bool = None  # type: ignore[assignment]
     """Enable fused MLA KV cache update with RoPE."""
 
+    # XPU specific fusions
+    fuse_xpu_moe_shared: bool = False
+    """Fuse routed and shared-expert MoE into one XPU kernel for small token
+    counts (see `xpu_moe_shared_fusion_max_token_num`)."""
+    xpu_moe_shared_fusion_max_token_num: int = 8
+    """Largest compile-range end for which the XPU MoE + shared-expert fusion
+    is applied; larger token counts keep the unfused path."""
+    fuse_xpu_qkv_norm_rope: bool = False
+    """Fuse the gated QKV split, q/k RMSNorm and (M)RoPE of full attention
+    into one XPU kernel."""
+    fuse_xpu_fp8_gemm_pair: bool = False
+    """Run two XPU fp8 linears sharing their input as one op (one GEMV launch
+    for decode-sized inputs)."""
+    fuse_xpu_norm_fp8_gemm: bool = False
+    """Fuse the (gated or residual-add Gemma) RMSNorm feeding an XPU fp8
+    linear into the linear (one GEMV launch for decode rows)."""
+    xpu_gdn_output_alloc: bool = False
+    """Allocate the XPU GDN core output uninitialized instead of zero-filled
+    (the XPU op defines every row itself)."""
+    xpu_inplace_all_reduce: bool = False
+    """Run the XPU tensor-parallel all-reduce in place (no input copy) where
+    its input is a fresh intermediate with no other user."""
+
     # ROCm/AITER specific fusions
     fuse_act_padding: bool = None  # type: ignore[assignment]
     """Fuse the custom RMSNorm + padding ops."""
@@ -291,6 +314,42 @@ class PassConfig:
                 "The fusion will be disabled."
             )
             self.fuse_qk_norm_rope_kvcache = False
+        if self.fuse_xpu_moe_shared and not current_platform.is_xpu():
+            logger.warning_once(
+                "XPU MoE + shared-expert fusion enabled but the current platform "
+                "is not XPU. The fusion will be disabled."
+            )
+            self.fuse_xpu_moe_shared = False
+        if self.fuse_xpu_qkv_norm_rope and not current_platform.is_xpu():
+            logger.warning_once(
+                "XPU QKV norm+RoPE fusion enabled but the current platform is "
+                "not XPU. The fusion will be disabled."
+            )
+            self.fuse_xpu_qkv_norm_rope = False
+        if self.fuse_xpu_fp8_gemm_pair and not current_platform.is_xpu():
+            logger.warning_once(
+                "XPU fp8 GEMM pair fusion enabled but the current platform is not "
+                "XPU. The fusion will be disabled."
+            )
+            self.fuse_xpu_fp8_gemm_pair = False
+        if self.fuse_xpu_norm_fp8_gemm and not current_platform.is_xpu():
+            logger.warning_once(
+                "XPU norm + fp8 GEMM fusion enabled but the current platform is "
+                "not XPU. The fusion will be disabled."
+            )
+            self.fuse_xpu_norm_fp8_gemm = False
+        if self.xpu_gdn_output_alloc and not current_platform.is_xpu():
+            logger.warning_once(
+                "XPU GDN output allocation pass enabled but the current platform "
+                "is not XPU. It will be disabled."
+            )
+            self.xpu_gdn_output_alloc = False
+        if self.xpu_inplace_all_reduce and not current_platform.is_xpu():
+            logger.warning_once(
+                "XPU in-place all-reduce enabled but the current platform is "
+                "not XPU. It will be disabled."
+            )
+            self.xpu_inplace_all_reduce = False
         if self.fuse_rope_kvcache_cat_mla and not current_platform.is_cuda_alike():
             logger.warning_once(
                 "MLA KV cache update with RoPE fusion enabled but the "

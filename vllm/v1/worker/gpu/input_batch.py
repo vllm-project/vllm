@@ -131,6 +131,7 @@ class InputBatch:
         input_buffers: InputBuffers,
         max_query_len: int | None = None,
         is_padding: bool = True,
+        decode_query_len: int | None = None,
     ) -> "InputBatch":
         assert 0 < num_reqs <= num_tokens
         device = input_buffers.device
@@ -183,6 +184,14 @@ class InputBatch:
         # Copy so set_dummy_context can add context in place without touching
         # num_scheduled_tokens.
         seq_lens_cpu_upper_bound = torch.from_numpy(num_scheduled_tokens.copy())
+        # Compile warmup can have longer rows than a speculative verify step.
+        # Those rows must not access the fixed-size speculative state slots.
+        is_prefilling_np = (
+            num_scheduled_tokens > decode_query_len
+            if decode_query_len is not None
+            else np.zeros(num_reqs, dtype=np.bool_)
+        )
+        has_prefill = bool(is_prefilling_np.any())
         return cls(
             req_ids=req_ids,
             num_reqs=num_reqs,
@@ -202,12 +211,12 @@ class InputBatch:
             seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
             dcp_local_seq_lens=None,
             num_computed_tokens_np=np.zeros(num_reqs, dtype=np.int32),
-            prefill_len_np=np.zeros(num_reqs, dtype=np.int32),
+            prefill_len_np=np.where(is_prefilling_np, num_scheduled_tokens, 0),
             num_computed_prefill_tokens_np=np.zeros(num_reqs, dtype=np.int32),
-            is_prefilling_np=np.zeros(num_reqs, dtype=np.bool_),
-            has_prefill=False,
+            is_prefilling_np=is_prefilling_np,
+            has_prefill=has_prefill,
             max_seq_len_np=None,
-            decode_graph_eligible=True,
+            decode_graph_eligible=not has_prefill,
             input_ids=input_ids,
             positions=positions,
             is_padding=is_padding,
