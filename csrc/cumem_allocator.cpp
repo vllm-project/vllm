@@ -335,6 +335,7 @@ PyObject* create_tuple_from_c_mixed(unsigned long long a, unsigned long long b,
 
 // use CUstream instead of cudaStream_t, to avoid including cuda_runtime_api.h
 void* my_malloc(ssize_t size, int device, CUstream stream) {
+  error_code = no_error;
   ensure_context(device);
 
   // first allocation, align the size, and reserve an address, and also allocate
