@@ -17,6 +17,7 @@ from vllm.renderers import renderer_from_config
 from vllm.renderers.chat_utils import load_chat_template
 from vllm.renderers.online_derenderer import OnlineDerenderer
 from vllm.renderers.online_renderer import OnlineRenderer
+from vllm.tracing import init_tracer
 
 
 async def init_render_app_state(
@@ -39,6 +40,10 @@ async def init_render_app_state(
             for name in served_model_names
         ],
     )
+
+    tracing_endpoint = vllm_config.observability_config.otlp_traces_endpoint
+    if tracing_endpoint is not None:
+        init_tracer("vllm.renderer", tracing_endpoint)
 
     if args.enable_log_requests:
         request_logger = RequestLogger(max_log_len=args.max_log_len)

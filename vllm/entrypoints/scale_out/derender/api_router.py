@@ -6,7 +6,11 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
-from vllm.entrypoints.serve.utils.api_utils import validate_json_request
+from vllm.entrypoints.serve.utils.api_utils import (
+    request_span,
+    set_span_error,
+    validate_json_request,
+)
 from vllm.logger import init_logger
 
 from ..token_in_token_out.protocol import (
@@ -62,19 +66,25 @@ async def derender_chat_completion(
         )
 
     if isinstance(request, DerenderChatStreamRequest):
-        stream_result = await handler.derender_chat_stream_response(request)
-        if isinstance(stream_result, ErrorResponse):
-            return JSONResponse(
-                content=stream_result.model_dump(),
-                status_code=stream_result.error.code,
-            )
+        async with request_span(raw_request, "derender_chat_completion") as span:
+            stream_result = await handler.derender_chat_stream_response(request)
+            if isinstance(stream_result, ErrorResponse):
+                set_span_error(span)
+                return JSONResponse(
+                    content=stream_result.model_dump(),
+                    status_code=stream_result.error.code,
+                )
         chunk, stream_state = stream_result
         response = DerenderChatStreamResponse(chunk=chunk, stream_state=stream_state)
         return JSONResponse(content=response.model_dump())
 
-    result = await handler.derender_chat_response(request)
-    if isinstance(result, ErrorResponse):
-        return JSONResponse(content=result.model_dump(), status_code=result.error.code)
+    async with request_span(raw_request, "derender_chat_completion") as span:
+        result = await handler.derender_chat_response(request)
+        if isinstance(result, ErrorResponse):
+            set_span_error(span)
+            return JSONResponse(
+                content=result.model_dump(), status_code=result.error.code
+            )
     return JSONResponse(content=result.model_dump())
 
 
@@ -108,19 +118,25 @@ async def derender_completion(
         raise NotImplementedError("The model does not support Completions Derender API")
 
     if isinstance(request, DerenderCompletionStreamRequest):
-        stream_result = await handler.derender_completion_stream_response(request)
-        if isinstance(stream_result, ErrorResponse):
-            return JSONResponse(
-                content=stream_result.model_dump(),
-                status_code=stream_result.error.code,
-            )
+        async with request_span(raw_request, "derender_completion") as span:
+            stream_result = await handler.derender_completion_stream_response(request)
+            if isinstance(stream_result, ErrorResponse):
+                set_span_error(span)
+                return JSONResponse(
+                    content=stream_result.model_dump(),
+                    status_code=stream_result.error.code,
+                )
         chunk, stream_state = stream_result
         response = DerenderCompletionStreamResponse(
             chunk=chunk, stream_state=stream_state
         )
         return JSONResponse(content=response.model_dump())
 
-    result = await handler.derender_completion_response(request)
-    if isinstance(result, ErrorResponse):
-        return JSONResponse(content=result.model_dump(), status_code=result.error.code)
+    async with request_span(raw_request, "derender_completion") as span:
+        result = await handler.derender_completion_response(request)
+        if isinstance(result, ErrorResponse):
+            set_span_error(span)
+            return JSONResponse(
+                content=result.model_dump(), status_code=result.error.code
+            )
     return JSONResponse(content=result.model_dump())

@@ -28,6 +28,12 @@ class SpanAttributes:
     GEN_AI_RESPONSE_MODEL = "gen_ai.response.model"
 
     # Custom attributes added until they are standardized
+    TOOL_CALLING_PRESENT = "vllm.tool_calling.present"
+    TOOL_CALLING_TOOL_COUNT = "vllm.tool_calling.tool_count"
+    TOOL_CALLING_TOOL_CHOICE = "vllm.tool_calling.tool_choice"
+    TOOL_CALLING_API_SURFACE = "vllm.tool_calling.api_surface"
+    TOOL_CALLING_RENDER_STATUS = "vllm.tool_calling.render_status"
+
     GEN_AI_REQUEST_ID = "gen_ai.request.id"
     GEN_AI_REQUEST_N = "gen_ai.request.n"
     GEN_AI_USAGE_NUM_SEQUENCES = "gen_ai.usage.num_sequences"

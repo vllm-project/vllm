@@ -6,10 +6,11 @@ import dataclasses
 import functools
 import os
 from argparse import Namespace
+from contextlib import asynccontextmanager
 from http import HTTPStatus
 from logging import Logger
 from string import Template
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from fastapi import Request
 from fastapi.exceptions import RequestValidationError
@@ -23,7 +24,12 @@ from vllm.entrypoints.generate.base.protocol import StreamOptions
 from vllm.entrypoints.openai.models.protocol import LoRAModulePath
 from vllm.logger import current_formatter_type, init_logger
 from vllm.platforms import current_platform
+from vllm.tracing import SpanKind, extract_trace_context
+from vllm.tracing.otel import is_otel_available, trace
 from vllm.utils.argparse_utils import FlexibleArgumentParser
+
+if TYPE_CHECKING:
+    from opentelemetry.trace import Span
 
 logger = init_logger(__name__)
 
@@ -94,6 +100,37 @@ def with_cancellation(handler_func):
         return Response()
 
     return wrapper
+
+
+@functools.cache
+def _request_tracer():
+    return trace.get_tracer(__name__)
+
+
+@asynccontextmanager
+async def request_span(raw_request: Request, span_name: str):
+    """Yield a server span linked to the caller's W3C trace context."""
+    if not is_otel_available():
+        yield None
+        return
+    tracer = _request_tracer()
+    with tracer.start_as_current_span(
+        span_name,
+        context=extract_trace_context(raw_request.headers),
+        kind=SpanKind.SERVER,
+        record_exception=False,
+        set_status_on_exception=False,
+    ) as span:
+        try:
+            yield span
+        except Exception:
+            set_span_error(span)
+            raise
+
+
+def set_span_error(span: "Span | None") -> None:
+    if span is not None:
+        span.set_status(trace.StatusCode.ERROR)
 
 
 _ERROR_REF = {"$ref": "#/components/schemas/ErrorResponse"}
