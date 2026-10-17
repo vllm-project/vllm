@@ -61,9 +61,6 @@ class UltraBertConfig(PreTrainedConfig):
 
 
 class ColUltraVBertConfig(PreTrainedConfig):
-    """The `ultravbert` config of a ColUltraVBERT Sentence Transformers package;
-    the package's `1_Dense` module holds the output projection."""
-
     model_type = "ultravbert"
 
     def __init__(
