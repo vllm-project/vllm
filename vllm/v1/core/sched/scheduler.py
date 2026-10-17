@@ -451,7 +451,14 @@ class Scheduler(SchedulerInterface):
             self.perf_metrics = ModelMetrics(vllm_config)
 
         self.aux_output_connector = (
-            AuxOutputSchedulerConnector()
+            AuxOutputSchedulerConnector(
+                enable_routed_experts=(
+                    vllm_config.aux_output_config.enable_return_routed_experts
+                ),
+                enable_logprobs=vllm_config.aux_output_config.enable_return_logprobs,
+                logprobs_mode=vllm_config.model_config.logprobs_mode,
+                hash_block_size=self.hash_block_size,
+            )
             if vllm_config.aux_output_config.enabled
             else None
         )
@@ -2283,7 +2290,11 @@ class Scheduler(SchedulerInterface):
             should_emit_output = bool(
                 new_token_ids or pooler_output is not None or stopped
             )
-            if self.aux_output_connector is not None and should_emit_output:
+            if (
+                self.aux_output_connector is not None
+                and self.vllm_config.aux_output_config.enable_return_routed_experts
+                and should_emit_output
+            ):
                 routed_experts = self.aux_output_connector.take_output(
                     request, model_runner_output.aux_output_connector_output
                 )
@@ -2302,6 +2313,12 @@ class Scheduler(SchedulerInterface):
                 and logprobs
             ):
                 new_logprobs = logprobs.slice_request(req_index, len(new_token_ids))
+            if self.aux_output_connector is not None and new_token_ids:
+                replayed = self.aux_output_connector.take_logprobs(
+                    request, model_runner_output.aux_output_connector_output
+                )
+                if replayed is not None:
+                    new_logprobs = replayed.slice_request(0, len(new_token_ids))
 
             finish_reason = None
             if stopped:

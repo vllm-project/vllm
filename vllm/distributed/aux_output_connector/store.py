@@ -24,10 +24,125 @@ class BlockObjectStoreError(RuntimeError):
     """AuxOutput storage or retrieval failed."""
 
 
+class VariableBlockObjectStore:
+    """Bounded byte store for typed auxiliary-output artifacts.
+
+    R3 uses :class:`BlockObjectStore`, whose fixed-size arena is intentional.
+    Logprob rows have a request-dependent width, so they use this store while
+    sharing the same retain/release and LRU semantics.
+    """
+
+    def __init__(self, *, max_bytes: int) -> None:
+        if max_bytes <= 0:
+            raise ValueError("auxiliary output store capacity must be positive")
+        self._max_bytes = max_bytes
+        self._used_bytes = 0
+        self._lru: OrderedDict[str, bytes] = OrderedDict()
+        self._references: dict[str, int] = {}
+
+    def _eviction_victims(
+        self,
+        extra: int,
+        protected: set[str],
+        reference_updates: dict[str, int],
+    ) -> list[str]:
+        required = self._used_bytes + extra - self._max_bytes
+        if required <= 0:
+            return []
+        victims = []
+        reclaimed = 0
+        for key, payload in self._lru.items():
+            references = reference_updates.get(key, self._references.get(key, 0))
+            if references > 0 or key in protected:
+                continue
+            victims.append(key)
+            reclaimed += len(payload)
+            if reclaimed >= required:
+                return victims
+        raise BlockObjectStoreError(
+            "auxiliary output store cannot retain the requested batch: "
+            f"limit={self._max_bytes} bytes"
+        )
+
+    def put(
+        self,
+        objects: list[BlockObject],
+        *,
+        retain_keys: Iterable[str] = (),
+        release_keys: Iterable[str] = (),
+    ) -> None:
+        unique = {obj.key: obj.payload for obj in objects}
+        retains = tuple(retain_keys)
+        releases = tuple(release_keys)
+        reference_updates: dict[str, int] = {}
+        for key in retains:
+            count = reference_updates.get(key, self._references.get(key, 0))
+            reference_updates[key] = count + 1
+        terminal = []
+        for key in releases:
+            count = reference_updates.get(key, self._references.get(key, 0)) - 1
+            reference_updates[key] = max(count, 0)
+            if count <= 0:
+                terminal.append(key)
+        extra = sum(
+            len(payload) - len(self._lru.get(key, b""))
+            for key, payload in unique.items()
+        )
+        victims = self._eviction_victims(
+            extra, set(unique) - set(terminal), reference_updates
+        )
+        for key, count in reference_updates.items():
+            if count > 0:
+                self._references[key] = count
+            else:
+                self._references.pop(key, None)
+        for victim in victims:
+            self._used_bytes -= len(self._lru.pop(victim))
+        for key, payload in unique.items():
+            if key in self._lru:
+                self._used_bytes += len(payload) - len(self._lru[key])
+                self._lru[key] = payload
+                self._lru.move_to_end(key)
+                continue
+            self._lru[key] = payload
+            self._used_bytes += len(payload)
+        for key in terminal:
+            if key in self._lru:
+                self._lru.move_to_end(key)
+
+    def get_concatenated(self, keys: list[str]) -> bytes:
+        try:
+            payload = b"".join(self._lru[key] for key in keys)
+        except KeyError as error:
+            raise BlockObjectStoreError(
+                "auxiliary output object does not exist; the object may have been "
+                "evicted"
+            ) from error
+        for key in keys:
+            self._lru.move_to_end(key)
+        return payload
+
+    def get_optional(self, key: str) -> bytes | None:
+        payload = self._lru.get(key)
+        if payload is not None:
+            self._lru.move_to_end(key)
+        return payload
+
+    def close(self) -> None:
+        self._lru.clear()
+        self._references.clear()
+        self._used_bytes = 0
+
+
 class BackgroundBlockObjectStore:
     """Serialize store mutations on a background thread."""
 
-    def __init__(self, store: BlockObjectStore, *, max_pending_batches: int) -> None:
+    def __init__(
+        self,
+        store: BlockObjectStore | VariableBlockObjectStore,
+        *,
+        max_pending_batches: int,
+    ) -> None:
         self._store = store
         self._queue: queue.Queue[
             tuple[list[BlockObject], tuple[str, ...], tuple[str, ...]] | None
@@ -85,6 +200,11 @@ class BackgroundBlockObjectStore:
         self._queue.join()
         self._raise_if_failed()
         return self._store.get_concatenated(keys)
+
+    def get_optional(self, key: str) -> bytes | None:
+        self._queue.join()
+        self._raise_if_failed()
+        return self._store.get_optional(key)
 
     def close(self) -> None:
         if self._closed:
@@ -225,6 +345,23 @@ class BlockObjectStore:
             arena.release()
         for key in keys:
             self._lru.move_to_end(key)
+        return payload
+
+    def get_optional(self, key: str) -> bytes | None:
+        arena_obj = self._arena
+        if arena_obj is None:
+            raise RuntimeError("auxiliary output store is closed")
+        slot = self._lru.get(key)
+        if slot is None:
+            return None
+        arena = memoryview(arena_obj)
+        try:
+            payload = bytes(
+                arena[slot * self.object_nbytes : (slot + 1) * self.object_nbytes]
+            )
+        finally:
+            arena.release()
+        self._lru.move_to_end(key)
         return payload
 
     def close(self) -> None:

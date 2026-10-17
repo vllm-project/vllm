@@ -150,6 +150,51 @@ class TestStreamingScheduler(unittest.TestCase):
                     logprobs.sampled_token_ranks,
                 )
 
+    def test_aux_logprobs_are_consumed_before_streaming_parameters_change(self):
+        scheduler = create_scheduler()
+        connector = MagicMock()
+        seen_sampling_params = []
+        connector.take_logprobs.side_effect = lambda request, _: (
+            seen_sampling_params.append(request.sampling_params) or logprobs
+        )
+        scheduler.aux_output_connector = connector
+
+        session = DummyRequest("session", prompt_token_ids=[1, 2, 3])
+        session.sampling_params = SamplingParams(
+            stop_token_ids=[STOP_TOKEN],
+            max_tokens=16,
+            logprobs=0,
+            extra_args={"aux_output_enabled": True},
+        )
+        request_params = session.sampling_params
+        scheduler.add_request(session)
+        scheduled = scheduler.schedule()
+
+        continuation = DummyRequest("session", prompt_token_ids=[4, 5])
+        scheduler.add_request(continuation)
+
+        logprobs = LogprobsLists(
+            logprob_token_ids=np.array([[STOP_TOKEN]], dtype=np.int32),
+            logprobs=np.array([[-0.25]], dtype=np.float32),
+            sampled_token_ranks=np.array([1], dtype=np.int32),
+        )
+        runner_output = ModelRunnerOutput(
+            req_ids=[session.request_id],
+            req_id_to_index={session.request_id: 0},
+            sampled_token_ids=[[STOP_TOKEN]],
+            prompt_logprobs_dict={},
+            pooler_output=[],
+            aux_output_connector_output={},
+        )
+        outputs = scheduler.update_from_output(scheduled, runner_output)
+        [output] = outputs[session.client_index].outputs
+
+        assert seen_sampling_params == [request_params]
+        assert seen_sampling_params[0] is not session.sampling_params
+        np.testing.assert_array_equal(
+            output.new_logprobs.logprob_token_ids, logprobs.logprob_token_ids
+        )
+
     def test_add_request(self):
         scheduler = create_scheduler()
 
@@ -214,6 +259,7 @@ class TestStreamingScheduler(unittest.TestCase):
 
     def test_update_request_as_session(self):
         scheduler = create_scheduler()
+        scheduler.aux_output_connector = MagicMock()
 
         session = DummyRequest(
             request_id="session",
