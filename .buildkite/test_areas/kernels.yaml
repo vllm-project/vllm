@@ -1090,6 +1090,7 @@ steps:
   - tests/kernels/models/amd/test_dsv41_gfx942_cand_logits.py
   - tests/kernels/models/amd/test_dsv41_gfx942_decode_meta.py
   - tests/kernels/models/amd/test_dsv41_gfx942_fused_markov.py
+  - tests/kernels/models/amd/test_dsv41_gfx942_draft_lm_head.py
   - tests/kernels/models/amd/test_dsv41_mono_gfx942.py
   commands:
-  - pytest -v -s tests/kernels/models/amd/test_dsv41_gfx942_topk.py tests/kernels/models/amd/test_dsv41_gfx942_cand_logits.py tests/kernels/models/amd/test_dsv41_gfx942_decode_meta.py tests/kernels/models/amd/test_dsv41_gfx942_fused_markov.py tests/kernels/models/amd/test_dsv41_mono_gfx942.py
+  - pytest -v -s tests/kernels/models/amd/test_dsv41_gfx942_topk.py tests/kernels/models/amd/test_dsv41_gfx942_cand_logits.py tests/kernels/models/amd/test_dsv41_gfx942_decode_meta.py tests/kernels/models/amd/test_dsv41_gfx942_fused_markov.py tests/kernels/models/amd/test_dsv41_gfx942_draft_lm_head.py tests/kernels/models/amd/test_dsv41_mono_gfx942.py

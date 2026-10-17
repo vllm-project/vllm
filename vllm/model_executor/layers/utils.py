@@ -338,7 +338,7 @@ def rocm_unquantized_gemm_impl(
 
         return linear_batch_invariant(x, weight, bias)
 
-    from vllm.platforms.rocm import on_gfx1x, on_gfx9, on_gfx11, on_gfx942, on_gfx950
+    from vllm.platforms.rocm import on_gfx1x, on_gfx9, on_gfx11, on_gfx950
 
     n = x.numel() // x.size(-1)
     m = weight.shape[0]
@@ -390,18 +390,12 @@ def rocm_unquantized_gemm_impl(
         on_gfx11() and weight.stride(1) == 1
     )
 
-    # On gfx942 wvSplitK with 5 rows reads the DSpark draft's
-    # 32320 x 5120 lm_head shard at 1.1 TB/s (297 us), against 73 us
-    # with 4 rows and 91 us on hipBLASLt. So on gfx942, 5 rows go to the
-    # torch GEMM below.
-    max_skinny_rows = 4 if on_gfx942() else 5
-
     use_wvsplitk = (
         skinny_gemm_enabled
         and weight_ok_for_wvsplitk
         and (bias is None or bias.is_contiguous())
         and (m == 1 or m > 8)
-        and 0 < n <= max_skinny_rows
+        and 0 < n <= 5
     )
 
     use_llmm1 = (
