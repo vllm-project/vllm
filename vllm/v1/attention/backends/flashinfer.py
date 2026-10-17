@@ -748,6 +748,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.model_config = vllm_config.model_config
         self.attention_config = vllm_config.attention_config
         self._num_speculative_tokens = vllm_config.num_speculative_tokens
+        self._async_scheduling = vllm_config.scheduler_config.async_scheduling or False
         self._workspace_buffer = None
         self._prefill_wrapper: (
             BatchPrefillWithPagedKVCacheWrapper | BatchDCPPrefillWrapper | None
@@ -1509,9 +1510,14 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         if needs_seq_lens_cpu:
             if (
                 self._num_speculative_tokens == 0
+                and not self._async_scheduling
                 and common_attn_metadata.seq_lens_cpu_upper_bound is not None
             ):
                 # No speculative token accounting, so the upper bound is exact.
+                # This shortcut is safe only when the scheduler is synchronous:
+                # with async scheduling the CPU may plan step N+1 while step N's
+                # pinned workspace copy is still in flight, causing the GPU to
+                # read a step's plan data. See #61239.
                 seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
             else:
                 with gpu_sync_allowed():
