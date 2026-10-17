@@ -63,6 +63,7 @@ class CPUOffloadingManager(OffloadingManager):
         cache_policy: str = "lru",
         cache_policy_module_path: str | None = None,
         enable_events: bool = False,
+        self_describing_kv_events: bool = False,
         store_threshold: int = 1,
         max_tracker_size: int = 64_000,
     ):
@@ -74,6 +75,7 @@ class CPUOffloadingManager(OffloadingManager):
         self._num_allocated_chunks: int = 0
         self._free_list: list[int] = []
         self.events: list[OffloadingEvent] | None = [] if enable_events else None
+        self._self_describing_kv_events = self_describing_kv_events
         policy_cls = CachePolicyFactory.get_cache_policy_cls(
             cache_policy, cache_policy_module_path
         )
@@ -398,6 +400,9 @@ class CPUOffloadingManager(OffloadingManager):
                     keys=stored_keys,
                     medium=self.medium,
                     removed=False,
+                    req_context=(
+                        req_context if self._self_describing_kv_events else None
+                    ),
                 )
             )
 
@@ -444,6 +449,10 @@ class CPUOffloadingManager(OffloadingManager):
 
         self._free_list.clear()
         self._num_allocated_chunks = 0
+        if self.events is not None:
+            # Stores queued before the reset no longer describe residency.
+            # Keep removals so consumers can invalidate prior announcements.
+            self.events = [event for event in self.events if event.removed]
 
     @override
     def take_events(self) -> Iterable[OffloadingEvent]:

@@ -172,7 +172,9 @@ class OffloadingEvent:
     locality: Locality | None = None
     # Secondary tier identifier that generated the event, or None for primary.
     ownership: str | None = None
-    removal_expected: bool = False
+    # Request context for request-originated stores, when available.
+    # Inventory events and removals do not carry it.
+    req_context: ReqContext | None = field(default=None, repr=False, compare=False)
 
 
 """

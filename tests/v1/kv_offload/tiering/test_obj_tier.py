@@ -214,13 +214,17 @@ class MockNixlAgent:
 # ---------------------------------------------------------------------------
 
 
-def _make_events_spec(enable_kv_cache_events: bool) -> SimpleNamespace:
+def _make_events_spec(
+    enable_kv_cache_events: bool,
+    *,
+    self_describing_kv_events: bool = False,
+) -> SimpleNamespace:
     """Offloading spec stub with an explicit global KV events flag."""
     return SimpleNamespace(
         config=_make_offloading_config(enable_kv_cache_events),
         kv_events_config=OffloadingKVEventsConfig(
             enable_kv_cache_events=enable_kv_cache_events,
-            self_describing_kv_events=False,
+            self_describing_kv_events=self_describing_kv_events,
         ),
     )
 
@@ -606,7 +610,10 @@ class TestMockObjTierShutdown:
 class TestObjTierKVEvents:
     def setup_method(self):
         self.tier, self.agent = _make_tier(
-            offloading_spec=_make_events_spec(enable_kv_cache_events=True),
+            offloading_spec=_make_events_spec(
+                enable_kv_cache_events=True,
+                self_describing_kv_events=True,
+            ),
             enable_kv_events=True,
             locality="REMOTE",
         )
@@ -619,10 +626,13 @@ class TestObjTierKVEvents:
 
         events = list(self.tier.take_events())
         assert len(events) == 1
-        assert events[0].keys == keys
-        assert events[0].medium == Medium.STORAGE
-        assert events[0].locality is Locality.REMOTE
-        assert not events[0].removed
+        event = events[0]
+        assert event.keys == keys
+        assert event.medium == Medium.STORAGE
+        assert event.locality is Locality.REMOTE
+        assert not event.removed
+        assert event.req_context is _CTX
+        assert self.tier._store_event_metadata == {}
         # take_events drains the buffer.
         assert list(self.tier.take_events()) == []
 
@@ -644,6 +654,7 @@ class TestObjTierKVEvents:
             events = list(tier.take_events())
             assert len(events) == 1
             assert events[0].locality is expected
+            assert events[0].req_context is None
         finally:
             tier.shutdown()
 
@@ -663,7 +674,7 @@ class TestObjTierKVEvents:
         events = list(self.tier.take_events())
         assert len(events) == 1
         assert events[0].keys == [key(2)]
-        assert self.tier._store_job_keys == {}
+        assert self.tier._store_event_metadata == {}
 
     def test_load_job_emits_no_event(self):
         self.tier.submit_store(make_job(1, [key(1)], [0]))
@@ -684,7 +695,7 @@ class TestObjTierKVEvents:
         results = drain(self.tier)
         assert not results[0].success
         assert list(self.tier.take_events()) == []
-        assert self.tier._store_job_keys == {}
+        assert self.tier._store_event_metadata == {}
 
     def test_submission_failure_emits_no_event(self):
         self.agent.make_prepped_xfer = lambda *a, **k: None
@@ -692,7 +703,7 @@ class TestObjTierKVEvents:
         results = list(self.tier.get_finished_jobs())
         assert not results[0].success
         assert list(self.tier.take_events()) == []
-        assert self.tier._store_job_keys == {}
+        assert self.tier._store_event_metadata == {}
 
     def test_events_disabled_by_default(self):
         tier, _ = _make_tier()
@@ -701,7 +712,7 @@ class TestObjTierKVEvents:
         assert len(results) == 1
         assert results[0].success
         assert tier.events is None
-        assert tier._store_job_keys == {}
+        assert tier._store_event_metadata == {}
         assert list(tier.take_events()) == []
 
     def test_events_require_global_kv_events_flag(self):
@@ -715,7 +726,7 @@ class TestObjTierKVEvents:
         assert len(results) == 1
         assert results[0].success
         assert tier.events is None
-        assert tier._store_job_keys == {}
+        assert tier._store_event_metadata == {}
         assert list(tier.take_events()) == []
 
 

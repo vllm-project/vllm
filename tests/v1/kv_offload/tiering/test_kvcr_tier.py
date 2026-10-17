@@ -581,7 +581,6 @@ def test_kvcr_tier_stores_and_emits_inventory(monkeypatch):
         ([key], Medium.CPU, "kvcr", False),
         ([key], Medium.STORAGE, "kvcr", False),
     ]
-    assert all(event.removal_expected for event in events)
     tier.shutdown()
 
 
