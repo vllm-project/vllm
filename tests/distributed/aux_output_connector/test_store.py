@@ -69,16 +69,17 @@ def test_background_store_publishes_without_blocking_caller():
 
 def _kv_cache_manager(cached: dict, hashes_per_block: int = 1) -> SimpleNamespace:
     """A KV cache manager whose GPU prefix cache holds the keys of `cached`."""
-    block_size = hashes_per_block * _BLOCK_SIZE
+    block_pool = SimpleNamespace(
+        get_cached_block=lambda block_hash, _: cached.get(block_hash),
+        hash_block_size=_BLOCK_SIZE,
+        kv_event_queue=[],
+    )
+    manager = SimpleNamespace(
+        block_size=hashes_per_block * _BLOCK_SIZE, block_pool=block_pool
+    )
     return SimpleNamespace(
-        coordinator=SimpleNamespace(
-            single_type_managers=[SimpleNamespace(block_size=block_size)]
-        ),
-        block_pool=SimpleNamespace(
-            get_cached_block=lambda block_hash, _: cached.get(block_hash),
-            hash_block_size=_BLOCK_SIZE,
-            kv_event_queue=[],
-        ),
+        coordinator=SimpleNamespace(single_type_managers=[manager]),
+        block_pool=block_pool,
     )
 
 

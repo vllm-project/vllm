@@ -1020,16 +1020,15 @@ class Scheduler(SchedulerInterface):
                         request.shared_prefix_boundary,
                         hit_diverged,
                     ) = self._get_local_prefix_cache_hit(request)
-                    # Hits must not outlive the auxiliary outputs they return.
-                    aux = self.aux_output_connector
-                    max_hit = aux.max_cache_hit(request) if aux else None
-                    if max_hit is not None and num_new_local_computed_tokens > max_hit:
-                        # Only partial-block and sparse hits lack retained
-                        # outputs; a Mamba or sliding-window hit cannot be cut.
-                        new_computed_blocks = (
-                            self.kv_cache_manager.empty_kv_cache_blocks
+                    if self.aux_output_connector is not None:
+                        # Hits must not outlive the auxiliary outputs they return.
+                        new_computed_blocks, num_new_local_computed_tokens = (
+                            self.aux_output_connector.cap_local_hit(
+                                request,
+                                new_computed_blocks,
+                                num_new_local_computed_tokens,
+                            )
                         )
-                        num_new_local_computed_tokens = 0
 
                     # Get externally-cached tokens if using a KVConnector.
                     if self.connector is not None:
@@ -1091,18 +1090,15 @@ class Scheduler(SchedulerInterface):
                         else:
                             num_external_computed_tokens = ext_tokens
 
-                        if max_hit is not None:
-                            # Capture resumes on a block boundary, and a Mamba
-                            # state exists only at the end of the load.
-                            local = num_new_local_computed_tokens
-                            num_hit = min(local + num_external_computed_tokens, max_hit)
-                            num_hit -= num_hit % self.block_size
-                            max_ext = max(num_hit - local, 0)
-                            if num_external_computed_tokens > max_ext:
-                                num_external_computed_tokens = (
-                                    0 if self.has_mamba_layers else max_ext
+                        if self.aux_output_connector is not None:
+                            num_external_computed_tokens = (
+                                self.aux_output_connector.cap_external_hit(
+                                    request,
+                                    num_new_local_computed_tokens,
+                                    num_external_computed_tokens,
                                 )
-                                load_kv_async &= num_external_computed_tokens > 0
+                            )
+                            load_kv_async &= num_external_computed_tokens > 0
 
                         if hit_diverged and num_external_computed_tokens == 0:
                             # No external tokens back the deeper local hit, so its

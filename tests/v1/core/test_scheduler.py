@@ -214,9 +214,9 @@ def test_prefix_hit_is_capped_at_retained_auxiliary_outputs(
         scheduler.add_request(first)
         scheduler.schedule()
         scheduler.finish_requests(first.request_id, RequestStatus.FINISHED_ABORTED)
-    scheduler.aux_output_connector = Mock(
-        **{"max_cache_hit.return_value": max_cache_hit}
-    )
+    connector = AuxOutputSchedulerConnector(scheduler.kv_cache_manager)
+    connector.max_cache_hit = Mock(return_value=max_cache_hit)
+    scheduler.aux_output_connector = connector
     scheduler.add_request(second)
 
     output = scheduler.schedule()
@@ -2059,7 +2059,9 @@ def test_prefix_cache_stats_counted_once_for_retried_then_scheduled_request():
 
 def test_scheduler_reset_prefix_cache():
     scheduler = create_scheduler(enable_prefix_caching=True)
-    scheduler.aux_output_connector = Mock(**{"max_cache_hit.return_value": 0})
+    scheduler.aux_output_connector = Mock(
+        wraps=AuxOutputSchedulerConnector(scheduler.kv_cache_manager)
+    )
     requests = create_requests(num_requests=10)
     for request in requests:
         scheduler.add_request(request)

@@ -2196,9 +2196,12 @@ class VllmConfig:
             )
         if self.aux_output_config.enabled and self.kv_transfer_config is not None:
             # Offloaded chunks must name every block they hold.
-            self.kv_transfer_config.kv_connector_extra_config.setdefault(
-                "self_describing_kv_events", True
-            )
+            extra_config = self.kv_transfer_config.kv_connector_extra_config
+            for config in [extra_config] + [
+                child.setdefault("kv_connector_extra_config", {})
+                for child in extra_config.get("connectors", ())
+            ]:
+                config.setdefault("self_describing_kv_events", True)
 
         # Hybrid KV cache manager (HMA) runtime rules:
         # - Explicit enable (--enable-hybrid-kv-cache-manager): error if runtime

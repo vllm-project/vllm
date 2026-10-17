@@ -17,7 +17,7 @@ from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
 
 if TYPE_CHECKING:
     from vllm.distributed.kv_events import ExternalBlockHash, KVCacheEvent
-    from vllm.v1.core.kv_cache_manager import KVCacheManager
+    from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
     from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
     from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.request import Request
@@ -68,8 +68,11 @@ class AuxOutputSchedulerConnector:
         # Full attention caches the whole prefix that a hit can reuse.
         coordinator = kv_cache_manager.coordinator
         self._group_id = getattr(coordinator, "full_attention_group_id", None) or 0
+        self._kv_cache_manager = kv_cache_manager
         self._block_pool = kv_cache_manager.block_pool
-        self._block_size = coordinator.single_type_managers[self._group_id].block_size
+        # HiSparse moves this group's cache to a host pool after construction.
+        self._manager = coordinator.single_type_managers[self._group_id]
+        self._block_size = self._manager.block_size
         # Retained block -> its hash-block hashes; the last is the block's hash.
         self._kv_cached: dict[ExternalBlockHash, Sequence[BlockHash]] = {}
         # CPU chunks holding each block; overlapping chunks announce it again.
@@ -85,8 +88,11 @@ class AuxOutputSchedulerConnector:
         requests: dict[str, Request],
     ) -> AuxOutputConnectorMetadata:
         """Build one step's incremental worker metadata."""
-        # Release this step's GPU evictions before the worker stores new outputs.
-        self.update_kv_cache_events(self._block_pool.kv_event_queue)
+        # Release this step's evictions before the worker stores new outputs;
+        # update_kv_cache_events counts these events later.
+        for event in self._block_pool.kv_event_queue:
+            for block in getattr(event, "block_hashes", ()):
+                self._release_uncached(block)
         scheduled_requests: dict[str, int] = {}
         block_hashes_by_request: dict[str, PackedBlockHashes] = {}
         for request_id in scheduler_output.num_scheduled_tokens:
@@ -146,11 +152,45 @@ class AuxOutputSchedulerConnector:
             num_blocks += 1
         return min(num_blocks * self._block_size, request.num_tokens - 1)
 
+    def cap_local_hit(
+        self, request: Request, blocks: KVCacheBlocks, num_tokens: int
+    ) -> tuple[KVCacheBlocks, int]:
+        """Drop a local hit past the retained outputs; it cannot be cut shorter.
+
+        With a full-attention group every GPU-cached block is retained or held
+        by a running request, so only partial-block and sparse hits are dropped.
+        """
+        if num_tokens <= self.max_cache_hit(request):
+            return blocks, num_tokens
+        return self._kv_cache_manager.empty_kv_cache_blocks, 0
+
+    def cap_external_hit(
+        self, request: Request, num_local: int, num_external: int
+    ) -> int:
+        """Trim an external hit to the retained outputs.
+
+        Capture resumes on a block boundary, and a Mamba state exists only at
+        the end of the load.
+        """
+        num_hit = min(num_local + num_external, self.max_cache_hit(request))
+        num_hit -= num_hit % self._kv_cache_manager.coordinator.scheduler_block_size
+        if num_external <= (max_external := max(num_hit - num_local, 0)):
+            return num_external
+        return (
+            0
+            if self._kv_cache_manager.kv_cache_config.has_mamba_layers
+            else max_external
+        )
+
     def request_loading(self, request: Request, num_tokens: int) -> None:
         """Keep an async load's blocks retained until its request is scheduled."""
         num_blocks = num_tokens // self._block_size
         blocks = islice(self._kv_blocks(request.block_hashes), num_blocks)
+        previous = self._loading.get(request.request_id, ())
         self._loading[request.request_id] = {block for block, _ in blocks}
+        # A retried load may cover fewer blocks than the failed one.
+        for block in previous:
+            self._release_uncached(block)
 
     def _end_loading(self, request_id: str) -> None:
         for block in self._loading.pop(request_id, ()):
@@ -189,7 +229,7 @@ class AuxOutputSchedulerConnector:
             self._released_hashes.extend(keys)
 
     def _gpu_cached(self, block_hash: BlockHash) -> list[KVCacheBlock] | None:
-        return self._block_pool.get_cached_block(block_hash, [self._group_id])
+        return self._manager.block_pool.get_cached_block(block_hash, [self._group_id])
 
     def _kv_blocks(
         self, hashes: Sequence[BlockHash]
