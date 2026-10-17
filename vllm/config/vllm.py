@@ -1827,6 +1827,14 @@ class VllmConfig:
                 "KernelConfig.enable_flashinfer_autotune must be set after applying "
                 "optimization level defaults."
             )
+        if (
+            not self.kernel_config.enable_flashinfer_autotune
+            and self.kernel_config.flashinfer_autotune_execution_mode != "auto"
+        ):
+            raise ValueError(
+                "flashinfer_autotune_execution_mode requires "
+                "enable_flashinfer_autotune=True."
+            )
 
         self._maybe_disable_dynamic_sd_for_data_parallel()
         self._maybe_override_dynamic_sd_cudagraph_mode()
