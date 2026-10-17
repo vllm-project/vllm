@@ -60,7 +60,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import (
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 from vllm.v1.outputs import KVConnectorOutput
 
-from .utils import create_request, make_nixl_push_scheduler
+from .utils import create_request, expand_strided_descs, make_nixl_push_scheduler
 
 # ----------------------------------------------------------------- #
 #  Helpers / fakes                                                   #
@@ -379,12 +379,15 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         w.pp_size = 1
         w.engine_id = "test-decode-engine"
         w._remote_agents = {}
+        w._failed_remote_engines = set()
+        w._invalid_remote_engines = set()
         w._handshake_lock = threading.RLock()
         w._physical_blocks_per_logical_kv_block = 1
         w._uses_region_group_mapping = False
         w.region_group_ids = [0]
         w._transfer_layer_names = ()
         w._transfer_layer_region_indices = ()
+        w._packed_member_layouts = {}
         w._transfer_layer_group_ids = ()
         w.dst_region_num_blocks = {}
         w.dst_region_group_ids = {}
@@ -1256,7 +1259,7 @@ class TestPushWriterNegative:
         w = _StubWriterWorker.fresh()
         for bogus_rid in (123, None, 4.5, b"bytes-not-str"):
             payload = _registration_data("placeholder")
-            payload["request_id"] = bogus_rid  # type: ignore[assignment]
+            payload["request_id"] = bogus_rid
             notif = PUSH_REG_NOTIF_PREFIX + msgspec.msgpack.encode(payload)
             w._handle_push_reg_notif(notif)
         assert w._pending_d_registrations == {}
@@ -1357,6 +1360,7 @@ class TestPushWriterNegative:
         assert notified == set()
         # Did not register anywhere.
         assert "never-heard-of-you" not in w._recving_transfers
+        assert w.xfer_stats.data["num_notifications_after_expiry"] == [1]
 
     def test_start_load_kv_with_empty_metadata_is_noop(self):
         """Empty metadata must not wake the writer or enqueue anything."""
@@ -2005,8 +2009,13 @@ def test_layer_descriptors_pair_layers_across_asymmetric_pp_split(
     assert consumer.kv_caches_base_addr == [0xB000, 0xC000, 0xC000]
 
     plan = TPMapping(((0,), (0,)), (0,), {0: 0}, 0)
-    local_descs = worker._build_fa_local([0x1000, 0x2000], block_size_ratio=1)
-    remote_descs = worker._build_fa_remote(plan, consumer, block_size_ratio=1)
+    # Builders emit one strided run per region; expand to per-block descriptors.
+    local_descs = expand_strided_descs(
+        worker._build_fa_local([0x1000, 0x2000], block_size_ratio=1)
+    )
+    remote_descs = expand_strided_descs(
+        worker._build_fa_remote(plan, consumer, block_size_ratio=1)
+    )
     local_counts = [local_num_blocks[i] for i in worker._transfer_layer_region_indices]
     local_ids = worker._compute_desc_ids(
         [[1, 2], [3]], 4, None, 1, region_num_blocks=local_counts

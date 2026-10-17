@@ -3,7 +3,7 @@
 
 import random
 from collections.abc import Callable
-from typing import NamedTuple, TypeAlias
+from typing import NamedTuple, NoReturn, TypeAlias
 
 import numpy as np
 import pytest
@@ -13,6 +13,7 @@ from tests.utils import create_new_process_for_each_test
 from tests.v1.sample.utils import (
     LogitsprocsTestFakes,
     create_fake_logits,
+    create_mock_reasoning_config,
     create_penalty_tensor,
     create_prompt_tokens_tensor,
     fake_apply_logitsprocs,
@@ -103,14 +104,6 @@ class LogitsProcsRequestParams:
         return f"MyClass({summ})"
 
 
-class MockReasoningConfig:
-    """Minimal reasoning config for ``ThinkingBudgetStateHolder`` tests."""
-
-    reasoning_start_token_ids = [THINK_START_TOKEN_ID]
-    reasoning_end_token_ids = [THINK_END_TOKEN_ID]
-    enabled = True
-
-
 def _generate_fake_sampling_metadata(
     num_output_tokens: int,
     batch_size: int,
@@ -131,7 +124,9 @@ def _generate_fake_sampling_metadata(
         )
 
     vllm_config = VllmConfig()
-    vllm_config.reasoning_config = MockReasoningConfig()
+    vllm_config.reasoning_config = create_mock_reasoning_config(
+        [THINK_START_TOKEN_ID], [THINK_END_TOKEN_ID]
+    )
 
     logitsprocs = build_logitsprocs(
         vllm_config=vllm_config,
@@ -242,7 +237,7 @@ def _raise_error_invalid(
     request_params: LogitsProcsRequestParams,
     step_idx: int,
     err_cls: type[Exception] = ValueError,
-) -> None:
+) -> NoReturn:
     raise err_cls(
         f"Validation failed for step={step_idx}, "
         f"batch_index={batch_index}, "
@@ -268,6 +263,7 @@ def _logit_bias_validate(
 ) -> None:
     """Validate logit bias logitproc applied correctly."""
     logit_bias = request_params.params.logit_bias
+    assert logit_bias is not None
     logits_old = test_fakes.logits[persistent_batch[batch_index].workload_index].cpu()
     logits_new = logits_new[batch_index].cpu()
     for token_id in range(VOCAB_SIZE):
@@ -368,9 +364,7 @@ def _min_tokens_validate(
     ref_num_out_tokens = len(request_params.out_tokens)
     min_reached = ref_num_out_tokens >= MIN_TOKENS_LEN_THRESHOLD
     ref_all_stop_token_ids = request_params.params.all_stop_token_ids
-    mt_lp: MinTokensLogitsProcessor = next(
-        test_fakes.get_logitsprocs_by_cls(MinTokensLogitsProcessor)
-    )
+    mt_lp = next(test_fakes.get_logitsprocs_by_cls(MinTokensLogitsProcessor))
     assert isinstance(mt_lp, MinTokensLogitsProcessor)
     min_tok = mt_lp.min_toks.get(batch_index, None)
 
@@ -689,7 +683,7 @@ class LogitsprocTestHelpers(NamedTuple):
     gen_request_fxn: Callable | None = None
 
 
-logitsprocs_test_mapping = {
+logitsprocs_test_mapping: dict[LogitprocType, LogitsprocTestHelpers] = {
     STR_NO_LOGITPROC: LogitsprocTestHelpers(eval_fxn=_none_validate),
     LogitBiasLogitsProcessor: LogitsprocTestHelpers(
         gen_request_fxn=_logit_bias_params, eval_fxn=_logit_bias_validate
@@ -706,22 +700,22 @@ logitsprocs_test_mapping = {
 }
 
 
-def _get_test_cases() -> list[list[str]]:
+def _get_test_cases() -> list[list[LogitprocType]]:
     """Each test case is a set of logitsprocs."""
-    logitsprocs_types = list(logitsprocs_test_mapping.keys())
+    logitsprocs_types: list[LogitprocType] = list(logitsprocs_test_mapping.keys())
 
     # Isolate thinking-budget handling from other processors to avoid cross-talk.
     thinking_id: LogitprocType = STR_THINKING_BUDGET
-    other_processors = [
+    other_processors: list[LogitprocType] = [
         p for p in logitsprocs_types if p != STR_NO_LOGITPROC and p != thinking_id
     ]
 
-    return (
-        [[STR_NO_LOGITPROC]]
-        + [[logitproc_type, STR_NO_LOGITPROC] for logitproc_type in other_processors]
-        + [other_processors]
-        + [[thinking_id]]
+    test_cases: list[list[LogitprocType]] = [[STR_NO_LOGITPROC]]
+    test_cases.extend(
+        [logitproc_type, STR_NO_LOGITPROC] for logitproc_type in other_processors
     )
+    test_cases.extend([other_processors, [thinking_id]])
+    return test_cases
 
 
 def _generate_fake_step_update(
@@ -774,6 +768,7 @@ def _generate_fake_step_update(
     for add_req_params in workload_params[wdx : (wdx + num_step_add_replace)]:
         # Replace as many removed requests as possible with added requests
         add_remove_idx = batch_update_builder.pop_removed()
+        assert add_remove_idx is not None
         batch_update_builder.added.append(
             (
                 add_remove_idx,
@@ -976,13 +971,6 @@ def test_logitsprocs(
         step_idx += 1
 
 
-class MockReasoningNoEndTokens:
-    """Reasoning config with no end token ids (disables enforcement in holder)."""
-
-    reasoning_start_token_ids = [THINK_START_TOKEN_ID]
-    reasoning_end_token_ids: list[int] = []
-
-
 def test_maybe_create_thinking_budget_holder_without_reasoning():
     cfg = VllmConfig()
     assert cfg.reasoning_config is None
@@ -1000,7 +988,9 @@ def test_maybe_create_thinking_budget_holder_without_reasoning():
 
 def test_thinking_budget_holder_has_tracked_after_sync_add():
     vc = VllmConfig()
-    vc.reasoning_config = MockReasoningConfig()
+    vc.reasoning_config = create_mock_reasoning_config(
+        [THINK_START_TOKEN_ID], [THINK_END_TOKEN_ID]
+    )
     h = ThinkingBudgetStateHolder(
         vc.reasoning_config,
         vc.scheduler_config.max_num_seqs,
@@ -1030,7 +1020,9 @@ def test_thinking_budget_holder_has_tracked_after_sync_add():
 
 def test_thinking_budget_holder_sync_remove_clears_state():
     vc = VllmConfig()
-    vc.reasoning_config = MockReasoningConfig()
+    vc.reasoning_config = create_mock_reasoning_config(
+        [THINK_START_TOKEN_ID], [THINK_END_TOKEN_ID]
+    )
     h = ThinkingBudgetStateHolder(
         vc.reasoning_config,
         vc.scheduler_config.max_num_seqs,
@@ -1060,7 +1052,9 @@ def test_thinking_budget_holder_sync_remove_clears_state():
 
 def test_thinking_budget_holder_sync_add_without_budget_drops_row():
     vc = VllmConfig()
-    vc.reasoning_config = MockReasoningConfig()
+    vc.reasoning_config = create_mock_reasoning_config(
+        [THINK_START_TOKEN_ID], [THINK_END_TOKEN_ID]
+    )
     h = ThinkingBudgetStateHolder(
         vc.reasoning_config,
         vc.scheduler_config.max_num_seqs,
@@ -1081,7 +1075,9 @@ def test_thinking_budget_holder_sync_add_without_budget_drops_row():
 
 def test_thinking_budget_holder_swap_exchanges_state():
     vc = VllmConfig()
-    vc.reasoning_config = MockReasoningConfig()
+    vc.reasoning_config = create_mock_reasoning_config(
+        [THINK_START_TOKEN_ID], [THINK_END_TOKEN_ID]
+    )
     h = ThinkingBudgetStateHolder(
         vc.reasoning_config,
         vc.scheduler_config.max_num_seqs,
@@ -1125,7 +1121,9 @@ def test_thinking_budget_holder_swap_exchanges_state():
 
 def test_thinking_budget_holder_unidirectional_move():
     vc = VllmConfig()
-    vc.reasoning_config = MockReasoningConfig()
+    vc.reasoning_config = create_mock_reasoning_config(
+        [THINK_START_TOKEN_ID], [THINK_END_TOKEN_ID]
+    )
     h = ThinkingBudgetStateHolder(
         vc.reasoning_config,
         vc.scheduler_config.max_num_seqs,
@@ -1163,7 +1161,9 @@ def test_thinking_budget_holder_unidirectional_move():
 
 def test_thinking_budget_holder_update_state_repeat_indices_last_row_wins():
     vc = VllmConfig()
-    vc.reasoning_config = MockReasoningConfig()
+    vc.reasoning_config = create_mock_reasoning_config(
+        [THINK_START_TOKEN_ID], [THINK_END_TOKEN_ID]
+    )
     h = ThinkingBudgetStateHolder(
         vc.reasoning_config,
         vc.scheduler_config.max_num_seqs,
@@ -1197,7 +1197,7 @@ def test_thinking_budget_holder_update_state_repeat_indices_last_row_wins():
 
 def test_thinking_budget_holder_spec_mode_tensor_layout():
     h = ThinkingBudgetStateHolder(
-        MockReasoningConfig(),
+        create_mock_reasoning_config([THINK_START_TOKEN_ID], [THINK_END_TOKEN_ID]),
         8,
         2,
         torch.device("cpu"),
@@ -1209,7 +1209,7 @@ def test_thinking_budget_holder_spec_mode_tensor_layout():
 
 def test_thinking_budget_holder_empty_end_tokens_disables_row():
     vc = VllmConfig()
-    vc.reasoning_config = MockReasoningNoEndTokens()
+    vc.reasoning_config = create_mock_reasoning_config([THINK_START_TOKEN_ID], [])
     h = ThinkingBudgetStateHolder(
         vc.reasoning_config,
         vc.scheduler_config.max_num_seqs,
@@ -1253,7 +1253,9 @@ def test_thinking_budget_enforced_without_penalties():
     passing an empty list (the pre-fix behavior) prevents budget enforcement.
     """
     vc = VllmConfig()
-    vc.reasoning_config = MockReasoningConfig()
+    vc.reasoning_config = create_mock_reasoning_config(
+        [THINK_START_TOKEN_ID], [THINK_END_TOKEN_ID]
+    )
     budget = 3  # allow 3 thinking tokens
 
     h = ThinkingBudgetStateHolder(
@@ -1346,7 +1348,11 @@ def test_thinking_budget_long_thinking_section_end_marker_found_at_correct_index
     """Test thinking budget enforced for a long thinking run,
     then a natural end marker."""
     h = ThinkingBudgetStateHolder(
-        MockReasoningConfig(), 8, 0, torch.device("cpu"), False
+        create_mock_reasoning_config([THINK_START_TOKEN_ID], [THINK_END_TOKEN_ID]),
+        8,
+        0,
+        torch.device("cpu"),
+        False,
     )
     h.sync_batch(
         BatchUpdate(
@@ -1356,8 +1362,8 @@ def test_thinking_budget_long_thinking_section_end_marker_found_at_correct_index
             moved=(),
         )
     )
-    start = MockReasoningConfig.reasoning_start_token_ids
-    end = MockReasoningConfig.reasoning_end_token_ids
+    start = [THINK_START_TOKEN_ID]
+    end = [THINK_END_TOKEN_ID]
 
     out: list[int] = list(start)
     h.update_state([out], None, None)
@@ -1396,13 +1402,9 @@ class TestThinkingBudgetReentry:
 
     @staticmethod
     def _make_holder(end_token_ids: list[int]) -> ThinkingBudgetStateHolder:
-        class FakeReasoningConfig:
-            reasoning_start_token_ids = [TestThinkingBudgetReentry.THINK_START]
-            reasoning_end_token_ids: list[int] = []
-            enabled = True
-
-        cfg = FakeReasoningConfig()
-        cfg.reasoning_end_token_ids = end_token_ids
+        cfg = create_mock_reasoning_config(
+            [TestThinkingBudgetReentry.THINK_START], end_token_ids
+        )
         return ThinkingBudgetStateHolder(
             reasoning_config=cfg,
             max_num_seqs=8,
@@ -1526,21 +1528,12 @@ class TestThinkingBudgetNaturalEndReentry:
 
     @staticmethod
     def _make_holder(end_token_ids):
-        from dataclasses import dataclass
-
         from vllm.v1.sample.thinking_budget_state import (
             ThinkingBudgetStateHolder,
         )
 
-        @dataclass
-        class FakeReasoningConfig:
-            reasoning_start_token_ids: list[int]
-            reasoning_end_token_ids: list[int]
-            enabled: bool = True
-
-        cfg = FakeReasoningConfig(
-            reasoning_start_token_ids=[TestThinkingBudgetNaturalEndReentry.THINK_START],
-            reasoning_end_token_ids=end_token_ids,
+        cfg = create_mock_reasoning_config(
+            [TestThinkingBudgetNaturalEndReentry.THINK_START], end_token_ids
         )
         return ThinkingBudgetStateHolder(
             reasoning_config=cfg,
@@ -1830,21 +1823,11 @@ class TestThinkingBudgetNaturalEndReentry:
         natural </think> exit, continue_thinking is cleared and Block 2
         enforcement works correctly.
         """
-        from dataclasses import dataclass
         from unittest.mock import MagicMock
 
         from vllm.v1.sample.thinking_budget_state import ThinkingBudgetStateHolder
 
-        @dataclass
-        class FakeReasoningConfig:
-            reasoning_start_token_ids: list[int]
-            reasoning_end_token_ids: list[int]
-            enabled: bool = True
-
-        cfg = FakeReasoningConfig(
-            reasoning_start_token_ids=[self.THINK_START],
-            reasoning_end_token_ids=self.THINK_END_SINGLE,
-        )
+        cfg = create_mock_reasoning_config([self.THINK_START], self.THINK_END_SINGLE)
         holder = ThinkingBudgetStateHolder(
             reasoning_config=cfg,
             max_num_seqs=8,

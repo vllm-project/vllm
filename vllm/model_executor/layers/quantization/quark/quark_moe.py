@@ -69,6 +69,9 @@ from vllm.model_executor.layers.quantization.quark.utils import (
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     validate_fp8_block_shape_moe,
 )
+from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
+    dequantize_nvfp4_moe_weights,
+)
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
     _ACTIVATION_QUANT_KEY_MAP,
     _WEIGHT_QUANT_KEY_MAP,
@@ -1644,8 +1647,10 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         # If no native backend available, use emulation.
         if self.mxfp4_backend is Mxfp4MoeBackend.NONE:
             self.mxfp4_backend = Mxfp4MoeBackend.EMULATION
+            self.experts_cls = None
 
-        self.experts_cls = backend_to_kernel_cls(self.mxfp4_backend)[0]
+        if self.experts_cls is None:
+            self.experts_cls = backend_to_kernel_cls(self.mxfp4_backend)[0]
 
         logger.info_once(
             f"Using {self.mxfp4_backend.value} backend for {self.ocp_mx_scheme}"
@@ -1976,6 +1981,11 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             global_num_experts=layer.global_num_experts,
             expert_map=layer.expert_map,
             apply_router_weight_on_input=layer.apply_router_weight_on_input,
+            num_expert_group=layer.num_expert_group,
+            topk_group=layer.topk_group,
+            e_score_correction_bias=layer.e_score_correction_bias,
+            routed_scaling_factor=layer.routed_scaling_factor,
+            routing_sink=layer.routing_sink,
         )
 
 
@@ -2104,6 +2114,22 @@ class QuarkNvfp4MoEMethod(QuarkMoEMethod):
         )
         layer.register_parameter("w2_input_scale_2", w2_input_scale_2)
         set_weight_attrs(w2_input_scale_2, extra_weight_attrs)
+
+    def dequantize_weight(
+        self, layer: torch.nn.Module
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Dequantize Quark NVFP4 expert weights for requantization."""
+        return dequantize_nvfp4_moe_weights(
+            layer.w13_weight,
+            layer.w13_weight_scale,
+            layer.w13_weight_scale_2,
+            layer.w2_weight,
+            layer.w2_weight_scale,
+            layer.w2_weight_scale_2,
+            layer.params_dtype,
+            group_size=self.group_size,
+            invert_global_scales=False,
+        )
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         """Convert NVFP4 MoE weights into kernel format and setup the kernel."""
