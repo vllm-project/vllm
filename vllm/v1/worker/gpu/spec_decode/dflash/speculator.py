@@ -461,7 +461,7 @@ class DFlashSpeculator(DraftModelSpeculator):
     ) -> torch.Tensor:
         num_reqs = input_batch.num_reqs
         if dummy_run and dp_sync_state is not None:
-            num_reqs = min(num_reqs, dp_sync_state.num_reqs_unpadded)
+            num_reqs = min(num_reqs, dp_sync_state.num_reqs)
         num_target_tokens = input_batch.num_tokens
         num_query_tokens = num_reqs * self.num_query_per_req
         max_seq_len = input_batch.seq_lens_cpu_upper_bound[:num_reqs].max().item()
@@ -547,7 +547,6 @@ class DFlashSpeculator(DraftModelSpeculator):
                 dp_sync_state,
                 num_reqs,
                 self.num_query_per_req,
-                max_num_reqs=dp_sync_state.num_reqs_unpadded,
             )
             if dp_sync_state is not None
             else (None, num_query_tokens)
