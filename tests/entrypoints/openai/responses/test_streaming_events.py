@@ -304,3 +304,29 @@ class TestCustomToolStreaming:
         assert delta.delta == "hello"  # full authoritative resend, not a dropped suffix
         assert done_input == "hello"
         assert events[-1].item.input == "hello"
+
+
+@pytest.mark.parametrize("status", ["completed", "incomplete"])
+def test_client_tool_search_streams_as_tool_search_call(status):
+    """A tool_search call is one tool_search_call item, without argument deltas."""
+    processor = SimpleStreamingEventProcessor(client_tool_search=True)
+    events = _run_through_processor(
+        processor,
+        DeltaMessage(
+            tool_calls=[_make_tool_call(0, name="tool_search", arguments='{"query":')]
+        ),
+    )
+    events += _run_through_processor(
+        processor, DeltaMessage(tool_calls=[_make_tool_call(0, arguments='"x"}')])
+    )
+    events += processor.close_current(status)
+
+    assert [(e.type, e.item.type) for e in events] == [
+        ("response.output_item.added", "tool_search_call"),
+        ("response.output_item.done", "tool_search_call"),
+    ]
+    done = events[-1].item
+    assert done.execution == "client"
+    assert done.status == status
+    assert done.arguments == {"query": "x"}
+    assert processor.output_items == [done]
