@@ -11,6 +11,7 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
+    ChunkedLocalAttentionSpec,
     FullAttentionSpec,
     KVCacheGroupRole,
     KVCacheSpec,
@@ -207,7 +208,9 @@ def build_offloading_config(
                 )
             if isinstance(spec, (SlidingWindowMLASpec, MLAAttentionSpec)):
                 return False
-            if not isinstance(spec, (FullAttentionSpec, SlidingWindowSpec)):
+            if not isinstance(
+                spec, (FullAttentionSpec, SlidingWindowSpec, ChunkedLocalAttentionSpec)
+            ):
                 return False
             return (
                 total_kv_heads % tp_size == 0 or tp_size % total_kv_heads == 0

@@ -11,6 +11,9 @@ import torch
 
 from tests.v1.kv_connector.unit.offloading_connector.utils import MockOffloadingSpec
 from vllm.config import KVTransferConfig, ParallelConfig, VllmConfig
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.canonical_mapping import (
+    derive_canonical_mappings,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import (
     build_offloading_config,
 )
@@ -22,6 +25,7 @@ from vllm.utils.math_utils import round_up
 from vllm.v1.core.kv_cache_planning import kv_cache_groups_tp_replicas
 from vllm.v1.core.kv_cache_utils import generate_scheduler_kv_cache_config
 from vllm.v1.kv_cache_interface import (
+    ChunkedLocalAttentionSpec,
     CircularBufferSpec,
     FullAttentionSpec,
     HiddenStateCacheSpec,
@@ -30,6 +34,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     KVCacheSpec,
     KVCacheTensor,
+    KVQuantMode,
     MambaSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
@@ -37,7 +42,12 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
-from vllm.v1.kv_offload.base import CanonicalKVCaches
+from vllm.v1.kv_offload.base import (
+    CanonicalKVCacheRef,
+    CanonicalKVCaches,
+    CanonicalKVCacheTensor,
+    make_offload_key,
+)
 from vllm.v1.kv_offload.file_mapper import FileMapper
 from vllm.v1.kv_offload.tiering.spec import TieringOffloadingSpec
 
@@ -1188,6 +1198,134 @@ def test_canonical_layout_gate(kv_cache_groups, certified):
     assert _parallelism_agnostic(kv_cache_groups, canonical=True) is certified
 
 
+@pytest.mark.parametrize("tp_size", [1, 2, 4])
+@pytest.mark.parametrize("hybrid", [False, True])
+@pytest.mark.parametrize("v2", [False, True])
+def test_chunked_local_canonical_gate(tp_size, hybrid, v2):
+    """Chunked-local head shards are portable only with canonical storage."""
+    spec = ChunkedLocalAttentionSpec(
+        block_size=16,
+        num_kv_heads=4 // tp_size,
+        head_size=128,
+        dtype=torch.float32,
+        attention_chunk_size=128,
+    )
+    specs: list[KVCacheSpec] = [spec]
+    if hybrid:
+        specs.append(replace(_full_attention_spec(), num_kv_heads=4 // tp_size))
+    kv_config = KVCacheConfig(
+        num_blocks=0, kv_cache_tensors=[], kv_cache_groups=_groups(*specs)
+    )
+    for canonical in (False, True):
+        config = _make_vllm_config(
+            tensor_parallel_size=tp_size,
+            extra_config={"canonical_layout": canonical},
+        )
+        config.use_v2_model_runner = v2
+        assert (
+            build_offloading_config(config, kv_config).parallel.is_parallelism_agnostic
+            is canonical
+        )
+
+
+@pytest.mark.parametrize(
+    "unsupported", ["heads", "quantization", "mamba", "pp", "pcp", "dcp"]
+)
+def test_chunked_local_canonical_gate_rejects_unsupported(unsupported):
+    """Adding a spec type must retain per-layer and topology restrictions."""
+    spec = ChunkedLocalAttentionSpec(
+        block_size=16,
+        num_kv_heads=2,
+        head_size=128,
+        dtype=torch.float32,
+        attention_chunk_size=128,
+    )
+    config = _make_vllm_config(
+        tensor_parallel_size=2, extra_config={"canonical_layout": True}
+    )
+    if unsupported == "heads":
+        spec = replace(spec, num_kv_heads=1)
+    elif unsupported == "quantization":
+        spec = replace(spec, kv_quant_mode=KVQuantMode.FP8_PER_TOKEN_HEAD)
+    elif unsupported in ("pp", "pcp", "dcp"):
+        axis = {"pp": "pipeline", "pcp": "prefill_context", "dcp": "decode_context"}
+        setattr(config.parallel_config, f"{axis[unsupported]}_parallel_size", 2)
+        if unsupported != "dcp":
+            config.parallel_config.world_size = 4
+    groups = _groups(spec)
+    if unsupported == "mamba":
+        groups.extend(_make_mamba_hybrid_kv_cache_config().kv_cache_groups)
+    kv_config = KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=groups)
+    assert not build_offloading_config(
+        config, kv_config
+    ).parallel.is_parallelism_agnostic
+
+
+def test_chunked_local_canonical_namespace_across_tp():
+    """Real configs share keys across TP only within one canonical format."""
+    paths: dict[tuple[bool, str], set[str]] = {}
+    for canonical, layout in [(False, "LBNHC"), (True, "LBNHC"), (True, "LBHNC")]:
+        paths[canonical, layout] = set()
+        for tp in (1, 2, 4):
+            config = _make_vllm_config(
+                tensor_parallel_size=tp,
+                extra_config={"canonical_layout": canonical},
+            )
+            config.use_v2_model_runner = False
+            config.cache_config.kv_cache_layout = layout
+            config.parallel_config.rank = tp - 1
+            cache_spec = ChunkedLocalAttentionSpec(
+                block_size=16,
+                num_kv_heads=4 // tp,
+                head_size=128,
+                dtype=torch.float32,
+                attention_chunk_size=128,
+            )
+            kv_config = KVCacheConfig(
+                num_blocks=0, kv_cache_tensors=[], kv_cache_groups=_groups(cache_spec)
+            )
+            spec = MockOffloadingSpec(build_offloading_config(config, kv_config))
+            mapper = FileMapper.from_offloading_spec(
+                "/cache", spec, parallel_agnostic=True
+            )
+            paths[canonical, layout].add(
+                mapper.get_file_name(make_offload_key(b"kv", 0))
+            )
+    assert len(paths[False, "LBNHC"]) == 3
+    assert len(paths[True, "LBNHC"]) == len(paths[True, "LBHNC"]) == 1
+    assert len(set.union(*paths.values())) == 5
+
+
+def test_chunked_local_canonical_rejects_uncertified_runtime_layout():
+    """A static portability claim cannot admit opaque bytes into a shared tier."""
+    spec = ChunkedLocalAttentionSpec(
+        block_size=16,
+        num_kv_heads=2,
+        head_size=128,
+        dtype=torch.float32,
+        attention_chunk_size=128,
+    )
+    config = _make_vllm_config(
+        tensor_parallel_size=2,
+        extra_config={"canonical_layout": True, "cpu_bytes_to_use": 1 << 20},
+    )
+    kv_config = KVCacheConfig(
+        num_blocks=2, kv_cache_tensors=[], kv_cache_groups=_groups(spec)
+    )
+    offload_config = build_offloading_config(config, kv_config)
+    assert offload_config.parallel.is_parallelism_agnostic
+    # The shape is recognized, but K/V are interleaved along the token axis.
+    cache = torch.zeros(2, 16, 2, 2, 128).permute(0, 2, 1, 3, 4)
+    mapping = derive_canonical_mappings(config, kv_config, {"l0": cache})["l0"]
+    assert not mapping.parallelism_agnostic
+    kv_caches = CanonicalKVCaches(
+        tensors=[CanonicalKVCacheTensor(cache, spec.page_size_bytes)],
+        group_data_refs=[[CanonicalKVCacheRef(0, spec.page_size_bytes, mapping)]],
+    )
+    with pytest.raises(RuntimeError, match="could not certify every layer"):
+        TieringOffloadingSpec(offload_config)._validate_canonical_refs(kv_caches)
+
+
 @pytest.mark.parametrize(
     ("spec"),
     [_SWA_MLA_SPEC, _mla_spec(tokens_per_state=2)],
@@ -1281,8 +1419,11 @@ def test_canonical_mla_dsa_rows_are_tp_independent(tp_size, scheduler):
 
 @pytest.mark.parametrize("total_kv_heads", [1, 2, 4])
 @pytest.mark.parametrize("tp_size", [1, 2, 4])
+@pytest.mark.parametrize("spec_type", [FullAttentionSpec, ChunkedLocalAttentionSpec])
 @pytest.mark.parametrize("canonical", [False, True])
-def test_canonical_gqa_file_size_matches_across_tp(total_kv_heads, tp_size, canonical):
+def test_canonical_gqa_file_size_matches_across_tp(
+    total_kv_heads, tp_size, spec_type, canonical
+):
     """A shared file namespace must not grow when TP replicates KV heads."""
     config = _make_vllm_config(
         tensor_parallel_size=tp_size,
@@ -1291,11 +1432,15 @@ def test_canonical_gqa_file_size_matches_across_tp(total_kv_heads, tp_size, cano
     config.model_config.get_total_num_kv_heads.return_value = total_kv_heads
     config.cache_config.kv_cache_layout = "LBNHC"
     config.parallel_config.distributed_executor_backend = "mp"
-    cache_spec = FullAttentionSpec(
+    kwargs = (
+        {"attention_chunk_size": 128} if spec_type is ChunkedLocalAttentionSpec else {}
+    )
+    cache_spec = spec_type(
         block_size=16,
         num_kv_heads=max(1, total_kv_heads // tp_size),
         head_size=128,
         dtype=torch.float16,
+        **kwargs,
     )
     kv_config = KVCacheConfig(
         num_blocks=16,
