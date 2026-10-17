@@ -311,6 +311,17 @@ class Request:
     def has_encoder_inputs(self) -> bool:
         return self.num_encoder_inputs > 0
 
+    @property
+    def max_cache_hit_length(self) -> int:
+        limit = self.num_tokens - 1
+        params = self.sampling_params
+        if params is not None and params.prompt_logprob_token_ids is not None:
+            if params.prompt_logprobs is not None:
+                return 0
+            # The first scored causal row must still be computed.
+            limit = min(limit, params.prompt_logprob_start or 0)
+        return limit
+
     def get_skip_reading_prefix_cache(self) -> bool:
         if (
             self.sampling_params is not None
