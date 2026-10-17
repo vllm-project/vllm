@@ -370,9 +370,31 @@ class RustFrontendProcessManager:
 
         redacted_json = json.dumps(redact_sensitive_args(args_dict), sort_keys=True)
         logger.info("Launching Rust frontend: %s", " ".join(cmd[:-1] + [redacted_json]))
+        rust_env = os.environ.copy()
+        media_limit_mb = envs.VLLM_MAX_MEDIA_DOWNLOAD_SIZE_MB
+        for modality, limits_mb in (
+            ("IMAGE", (media_limit_mb,)),
+            ("VIDEO", (media_limit_mb,)),
+            ("AUDIO", (media_limit_mb, envs.VLLM_MAX_AUDIO_CLIP_FILESIZE_MB)),
+        ):
+            enabled_limits = [limit for limit in limits_mb if limit > 0]
+            if not enabled_limits:
+                continue
+            name = f"SMG_{modality}_MAX_INPUT_BYTES"
+            limit_bytes = min(enabled_limits) * (1 << 20)
+            existing_limit = rust_env.get(name, "")
+            configured_limit = (
+                int(existing_limit) if existing_limit.isdecimal() else None
+            )
+            # The pinned llm-multimodal crate defaults to 256 MiB per modality.
+            crate_limit = (
+                configured_limit if configured_limit is not None else 256 * (1 << 20)
+            )
+            limit_bytes = min(limit_bytes, crate_limit)
+            rust_env[name] = str(limit_bytes)
         self._listeners = [input_listener, output_listener]
         try:
-            self._proc = subprocess.Popen(cmd, pass_fds=inherited_fds)
+            self._proc = subprocess.Popen(cmd, pass_fds=inherited_fds, env=rust_env)
         except BaseException:
             for listener in self._listeners:
                 listener.cleanup()
