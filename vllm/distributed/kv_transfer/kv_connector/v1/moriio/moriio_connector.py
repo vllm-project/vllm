@@ -631,6 +631,9 @@ class MoRIIOConnectorScheduler:
         max_decode_tail_tokens = 1 + vllm_config.num_lookahead_tokens
         # Per attention group: not prefix-cacheable, so read even on a full hit.
         self._attn_group_is_state: list[bool] = []
+        # Per attention group: tokens per page if READ can select by token
+        # range, i.e. full attention with a complete table; else None.
+        self._attn_read_block_sizes: list[int | None] = []
         if self._has_mamba:
             attn_specs = [
                 kv_cache_config.transfer_groups[group_id].kv_cache_spec
@@ -640,11 +643,16 @@ class MoRIIOConnectorScheduler:
                 not spec.prefix_cacheable for spec in attn_specs
             ]
             dcp_size = vllm_config.parallel_config.decode_context_parallel_size
-            # The smallest attention block bounds every group's local tail.
-            attn_block_size = min(
+            attn_block_sizes = [
                 spec.block_size * (dcp_size if spec.dcp_sharded else 1)
                 for spec in attn_specs
-            )
+            ]
+            self._attn_read_block_sizes = [
+                block_size if is_full_attention_spec(spec) else None
+                for spec, block_size in zip(attn_specs, attn_block_sizes, strict=True)
+            ]
+            # The smallest attention block bounds every group's local tail.
+            attn_block_size = min(attn_block_sizes)
             # Admission can pad the final prompt token to 1 + num_spec rows;
             # allocate_slots reserves drafter lookahead in addition to those.
             max_decode_tail_tokens += vllm_config.num_speculative_tokens
@@ -1126,18 +1134,30 @@ class MoRIIOConnectorScheduler:
                                 ]
                                 aligned_local_attn: list[list[int]] = []
                                 aligned_remote_attn: list[list[int]] = []
-                                for local_group, remote_group in zip(
+                                for local_group, remote_group, read_block_size in zip(
                                     attn_block_groups,
                                     remote_block_ids[:num_attn],
+                                    self._attn_read_block_sizes,
                                     strict=True,
                                 ):
-                                    aligned_local, aligned_remote = (
-                                        self._align_read_blocks(
-                                            local_group,
-                                            list(remote_group),
-                                            self._max_decode_tail_blocks,
+                                    if read_block_size is None:
+                                        aligned_local, aligned_remote = (
+                                            self._align_read_blocks(
+                                                local_group,
+                                                list(remote_group),
+                                                self._max_decode_tail_blocks,
+                                            )
                                         )
-                                    )
+                                    else:
+                                        aligned_local, aligned_remote = (
+                                            self._select_read_attention(
+                                                request,
+                                                num_external_tokens,
+                                                local_group,
+                                                list(remote_group),
+                                                read_block_size,
+                                            )
+                                        )
                                     aligned_local_attn.append(aligned_local)
                                     aligned_remote_attn.append(aligned_remote)
                                 aligned_local_mamba: list[list[int]] = []
@@ -1578,6 +1598,37 @@ class MoRIIOConnectorScheduler:
             for group_id in self._mamba_group_ids
         ]
         return attn, mamba_groups
+
+    @staticmethod
+    def _select_read_attention(
+        request: "Request",
+        num_external_tokens: int,
+        local_block_ids: list[int],
+        remote_block_ids: list[int],
+        block_size: int,
+    ) -> tuple[list[int], list[int]]:
+        """Select missing pages from complete P/D attention block tables."""
+        # READ imports through N-1; D computes the final prompt token. Use the
+        # final allocation count, not a prior lookup or receive-page hashes.
+        remote_end = request.num_prompt_tokens - 1
+        local_end = remote_end - num_external_tokens
+        first_block = local_end // block_size
+        end_block = cdiv(remote_end, block_size)
+        if not (
+            0 <= local_end < remote_end
+            and end_block <= len(local_block_ids)
+            and end_block <= len(remote_block_ids)
+        ):
+            raise MoRIIOError(
+                "MoRIIO hybrid READ attention tables do not cover "
+                f"token range [{local_end}, {remote_end}): "
+                f"local={len(local_block_ids)}, remote={len(remote_block_ids)}, "
+                f"block_size={block_size}"
+            )
+        return (
+            local_block_ids[first_block:end_block],
+            remote_block_ids[first_block:end_block],
+        )
 
     @staticmethod
     def _align_read_blocks(
