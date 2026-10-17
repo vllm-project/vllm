@@ -168,12 +168,17 @@ class SpinCondition:
             self.poller.register(self.read_cancel_socket, zmq.POLLIN)
             self.poller.register(self.local_notify_socket, zmq.POLLIN)
         else:
-            # Writer side publishes write notifications
+            # Writer side publishes write notifications. Keep the default high
+            # water mark: the readers' CONFLATE already collapses a burst of
+            # pings into one. A PUB drops a message once its pipe looks full,
+            # and zmq refreshes that view only when the socket processes the
+            # subscriber's activation command, which a send does at most once
+            # per ~3M CPU-counter ticks (~1 ms on x86, ~3 ms on aarch64). With
+            # a high water mark of 1, a ping sent that soon after the previous
+            # one is dropped even though the reader already consumed the
+            # previous one, and a reader that parked in between sleeps until
+            # SHM_READER_RECHECK_INTERVAL_MS.
             self.local_notify_socket: zmq.Socket = context.socket(PUB)  # type: ignore
-            # Set high water mark to 1 - we don't need to send a massive amount of
-            # pings during busy operation. PUB sockets will silently drop subsequent
-            # messages after the high water mark is reached.
-            self.local_notify_socket.setsockopt(zmq.SNDHWM, 1)
             self.local_notify_socket.bind(notify_address)
 
             self.last_read = 0
