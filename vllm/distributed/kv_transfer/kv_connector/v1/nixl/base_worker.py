@@ -3746,7 +3746,7 @@ class NixlBaseConnectorWorker:
         )
 
     def _cleanup_remote_engines(self) -> None:
-        """Release replaced or locally invalid pull peers after their reads drain."""
+        """Release replaced or invalid pull peers after their reads drain."""
         # TODO: Also handle push mode, which handshakes in both directions.
         if self._TRANSFER_MODE != "pull":
             return
@@ -3762,7 +3762,9 @@ class NixlBaseConnectorWorker:
             try:
                 # No descriptors: query local existence, not peer health.
                 if not all(map(self.nixl_wrapper.check_remote_metadata, agents)):
-                    self._mark_remote_engine_invalid(engine_id, now)
+                    self._mark_remote_engine_invalid(
+                        engine_id, now, "local NIXL metadata was invalidated"
+                    )
             except Exception:
                 logger.warning(
                     "Could not check local NIXL metadata for engine %s.",
@@ -3790,12 +3792,14 @@ class NixlBaseConnectorWorker:
         for engine_id in (replaced - busy) | invalid:
             self._cleanup_remote_engine(engine_id, log_eviction=False)
             logger.info(
-                "Released NIXL state for replaced or locally invalid remote engine %s.",
+                "Released NIXL state for replaced or invalid remote engine %s.",
                 engine_id,
             )
 
-    def _mark_remote_engine_invalid(self, engine_id: EngineId, now: float) -> None:
-        """Schedule release of an engine whose local NIXL metadata is gone.
+    def _mark_remote_engine_invalid(
+        self, engine_id: EngineId, now: float, reason: str
+    ) -> None:
+        """Reject new reads from an engine and schedule its release.
 
         The first invalidation is released as soon as reads drain. Repeats
         before the peer has stayed healthy for the max backoff double the
@@ -3815,9 +3819,10 @@ class NixlBaseConnectorWorker:
         self._invalid_engine_backoff[engine_id] = (backoff, now + backoff)
         self._invalid_remote_engines.add(engine_id)
         logger.warning(
-            "Local NIXL metadata for remote engine %s was invalidated; "
+            "Rejecting new reads from remote engine %s (%s); "
             "re-handshaking after reads drain%s.",
             engine_id,
+            reason,
             f" and a {backoff:.0f}s backoff" if backoff else "",
         )
 
