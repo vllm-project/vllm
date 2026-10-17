@@ -34,6 +34,13 @@ def test_aggregate_multiple_workers():
     assert result.completed_jobs == {42: 3, 43: 2, 7: 2, 8: 2}
 
 
+def test_aggregate_keeps_a_failure_reported_by_any_worker():
+    ok = OffloadingWorkerMetadata(completed_jobs={1: 1})
+    failed = OffloadingWorkerMetadata(completed_jobs={1: 1}, failed_jobs={1})
+    assert ok.aggregate(failed).failed_jobs == {1}
+    assert failed.aggregate(ok).failed_jobs == {1}
+
+
 def test_aggregate_transfer_stats():
     meta1 = OffloadingWorkerMetadata(
         transfer_stats=TransferStats(
