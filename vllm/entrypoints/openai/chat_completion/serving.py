@@ -651,17 +651,21 @@ class OpenAIServingChat(GenerateBaseServing):
 
                     delta_text = output.text
 
-                    if (
+                    nothing_generated = (
                         not delta_text
                         and not output.token_ids
                         and not previous_num_tokens[i]
-                    ):
+                    )
+                    if nothing_generated and output.finish_reason is None:
                         # Chunked prefill case, don't return empty chunks
                         continue
 
                     delta_message: DeltaMessage | None
 
-                    if parser is not None:
+                    if nothing_generated:
+                        # Finished without output: send the final chunk unparsed.
+                        delta_message = DeltaMessage()
+                    elif parser is not None:
                         delta_message = parser.parse_delta(
                             delta_text=delta_text,
                             delta_token_ids=as_list(output.token_ids),
@@ -772,6 +776,11 @@ class OpenAIServingChat(GenerateBaseServing):
                             stop_reason=output.stop_reason,
                             token_ids=(
                                 as_list(output.token_ids) if include_token_ids else None
+                            ),
+                            weight_versions=(
+                                output.weight_versions
+                                if request.return_weight_versions
+                                else None
                             ),
                         )
 
@@ -1097,6 +1106,9 @@ class OpenAIServingChat(GenerateBaseServing):
                     else None
                 ),
                 routed_experts=routed_experts_b64,
+                weight_versions=(
+                    output.weight_versions if request.return_weight_versions else None
+                ),
             )
             choice_data = maybe_filter_parallel_tool_calls(choice_data, request)
 
