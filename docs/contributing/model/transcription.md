@@ -203,16 +203,15 @@ Relevant server logic:
 ??? code "_preprocess_speech_to_text()"
 
     ```python
-    # vllm/entrypoints/openai/speech_to_text.py
-    async def _preprocess_speech_to_text(...):
-        language = self.model_cls.validate_language(request.language)
+    # vllm/entrypoints/speech_to_text/base/serving.py
+    async def _preprocess_speech_to_text(self, request, audio_data, request_id):
+        request.language = self.model_cls.validate_language(request.language)
         ...
-        y, sr = load_audio(bytes_, sr=self.asr_config.sample_rate)
-        duration = get_audio_duration(y=y, sr=sr)
-        do_split_audio = (self.asr_config.allow_audio_chunking
-                        and duration > self.asr_config.max_audio_clip_s)
-        chunks = [y] if not do_split_audio else self._split_audio(y, int(sr))
-        prompts = []
+        # Decode, resample to `asr_config.sample_rate`, and optionally chunk
+        # (via `split_audio`) in a thread pool.
+        chunks, duration = await self._decode_and_chunk_speech_async(audio_data)
+        ...
+        parsed_prompts = []
         for chunk in chunks:
             stt_params = request.build_stt_params(
                 audio=chunk,
@@ -221,8 +220,9 @@ Relevant server logic:
                 task_type=self.task_type,
             )
             prompt = self.model_cls.get_generation_prompt(stt_params)
-            prompts.append(prompt)
-        return prompts, duration
+            parsed_prompts.append(parse_model_prompt(self.model_config, prompt))
+        engine_inputs = await self.renderer.render_cmpl_async(parsed_prompts)
+        return engine_inputs, duration, chunk_start_offsets
     ```
 
 ## Exposing tasks automatically
