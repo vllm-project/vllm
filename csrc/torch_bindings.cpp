@@ -616,7 +616,15 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
   // Activation ops
   ops.def(
       "persistent_masked_m_silu_mul_quant(Tensor input, Tensor counts, Tensor! "
-      "y_q, Tensor! y_s, bool use_ue8m0) -> ()");
+      "y_q, Tensor! y_s, bool use_ue8m0, float clamp_limit=0.0, "
+      "bool full_tokens=False, bool original_numerics=False) -> ()");
+#ifndef USE_ROCM
+  ops.def(
+      "fused_silu_mul_per_token_group_quant(Tensor input, Tensor! output_q, "
+      "Tensor! output_s, int group_size, float eps, float min_8bit, "
+      "float max_8bit, float clamp_limit, bool round_scale, bool scale_ue8m0, "
+      "bool fuse_silu_and_mul, Tensor? masked_m) -> ()");
+#endif
   ops.def("weak_ref_tensor(Tensor input) -> Tensor");
 
   ops.def(
@@ -891,6 +899,10 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   // Activation kernels (shared CUDA/ROCm)
   ops.impl("persistent_masked_m_silu_mul_quant",
            TORCH_BOX(&persistent_masked_m_silu_mul_quant));
+#ifndef USE_ROCM
+  ops.impl("fused_silu_mul_per_token_group_quant",
+           TORCH_BOX(&vllm::batch_invariant::fused_silu_mul_per_token_group_quant));
+#endif
   ops.impl("weak_ref_tensor", TORCH_BOX(&weak_ref_tensor));
   ops.impl("silu_and_mul_quant", TORCH_BOX(&silu_and_mul_quant));
   ops.impl("muse_spark_mul_tanh_soft_cap",
