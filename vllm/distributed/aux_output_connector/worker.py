@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-from collections import Counter
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from threading import Lock
@@ -101,8 +100,6 @@ class AuxOutputWorkerConnector:
         self._buffer: RoutedExpertsBuffer | None = None
         self._requests: dict[str, _WorkerRequestState] = {}
         self._generation = 0
-        # Objects kept for KV-cached blocks; sibling blocks can share keys.
-        self._cache_pins: Counter[str] = Counter()
         self._step_metadata: AuxOutputConnectorMetadata | None = None
         # Steps whose asynchronous copy has not been consumed yet. The engine
         # consumes step outputs in order, so at most max_concurrent_batches
@@ -122,11 +119,9 @@ class AuxOutputWorkerConnector:
         )
         hashes_per_kv_block = scheduler_block_size // hash_block_size
         block_nbytes = hash_block_size * int(np.prod(shape_per_token)) * dtype.itemsize
-        # Objects for every GPU-cached block and as many CPU-only ones.
-        min_bytes = 2 * kv_cache_config.num_blocks * hashes_per_kv_block * block_nbytes
-        max_bytes = vllm_config.aux_output_config.max_bytes or min_bytes
-        if max_bytes < min_bytes:
-            raise ValueError(f"aux_output_config.max_bytes must be >= {min_bytes}")
+        max_bytes = vllm_config.aux_output_config.max_bytes
+        if max_bytes is None:
+            max_bytes = kv_cache_config.num_blocks * hashes_per_kv_block * block_nbytes
         self._store = BackgroundBlockObjectStore(
             BlockObjectStore(max_bytes=max_bytes, object_nbytes=block_nbytes),
             max_pending_batches=2 * vllm_config.scheduler_config.max_num_seqs,
@@ -351,7 +346,12 @@ class AuxOutputWorkerConnector:
             "auxiliary output metadata generation moved backwards"
         )
         with self._lock:
-            release_keys: list[str] = []
+            # KV cache blocks are retained and released in the sending generation.
+            namespace = str(self._generation)
+            hashes = metadata.retained_block_hashes or ()
+            retained_keys = routed_experts_keys(hashes, namespace)
+            hashes = metadata.released_block_hashes or ()
+            release_keys = routed_experts_keys(hashes, namespace)
             if metadata.generation > self._generation:
                 # A generation change follows a prefix-cache reset, which the
                 # scheduler only performs once all model output is consumed.
@@ -363,8 +363,6 @@ class AuxOutputWorkerConnector:
                     for state in self._requests.values()
                     for key in reversed(state.aux_output_keys)
                 )
-                release_keys.extend(self._cache_pins.elements())
-                self._cache_pins.clear()
                 self._buffer.reset()
                 self._requests.clear()
                 self._generation = metadata.generation
@@ -381,19 +379,9 @@ class AuxOutputWorkerConnector:
             block_batches: list[
                 tuple[_WorkerRequestState, list[tuple[int, np.ndarray]]]
             ] = []
-            retained_keys: list[str] = []
-            namespace = str(self._generation)
-            if metadata.pinned_hashes is not None:
-                keys = routed_experts_keys(metadata.pinned_hashes, namespace)
-                self._cache_pins.update(keys)
-                retained_keys.extend(keys)
-            if metadata.unpinned_hashes is not None:
-                keys = routed_experts_keys(metadata.unpinned_hashes, namespace)
-                self._cache_pins -= Counter(keys)
-                release_keys.extend(keys)
             for request_id, block_hashes in metadata.block_hashes.items():
                 state = self._requests[request_id]
-                keys = routed_experts_keys(block_hashes, namespace)
+                keys = routed_experts_keys(block_hashes, str(self._generation))
                 state.aux_output_keys.extend(keys)
                 retained_keys.extend(keys)
                 block_batches.append((state, []))

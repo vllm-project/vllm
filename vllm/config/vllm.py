@@ -2190,9 +2190,14 @@ class VllmConfig:
         if self.aux_output_config.enabled and not (
             self.kv_events_config and self.kv_events_config.enable_kv_cache_events
         ):
-            # R3 retention follows KV cache events; nothing is published.
+            # Auxiliary outputs follow KV cache events; nothing is published.
             self.kv_events_config = KVEventsConfig(
                 enable_kv_cache_events=True, publisher="null"
+            )
+        if self.aux_output_config.enabled and self.kv_transfer_config is not None:
+            # Offloaded chunks must name every block they hold.
+            self.kv_transfer_config.kv_connector_extra_config.setdefault(
+                "self_describing_kv_events", True
             )
 
         # Hybrid KV cache manager (HMA) runtime rules:

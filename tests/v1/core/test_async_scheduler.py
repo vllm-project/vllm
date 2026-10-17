@@ -320,7 +320,6 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     scheduler.encoder_cache_mismatch_reqs = set()
     scheduler.vllm_config = Mock()
     scheduler.aux_output_connector = None
-    scheduler.r3_retention = None
     scheduler.return_sampling_mask = False
     scheduler.recompute_kv_load_failures = False
     scheduler.defer_block_free = False
