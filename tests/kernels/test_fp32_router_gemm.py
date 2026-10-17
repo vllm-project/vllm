@@ -3,11 +3,11 @@
 """Tests for fp32_router_gemm kernel: activation×weight→fp32.
 
 Supported (hidden_size, num_experts) pairs:
-  (3072, 256), (6144, 128), (5120, 256)
+  (3072, 256), (6144, 128), (5120, 256), (4096, 352), (8192, 256)
 
 Correctness baseline: F.linear in float32. Every supported M is covered so
 all tuned geometries (wide-block, experts-per-block, token-group; boundaries
-at M=4/5, odd/even, M=15/16) are exercised on Blackwell, and the legacy
+at M=4/5, M=9/10, M=12/13, odd/even, M=15/16) are exercised on Blackwell, and the legacy
 128/1 geometry everywhere else.
 """
 
@@ -18,7 +18,7 @@ from vllm._custom_ops import fp32_router_gemm
 from vllm.platforms import current_platform
 
 # (hidden_size, num_experts)
-SHAPES = [(3072, 256), (6144, 128), (5120, 256)]
+SHAPES = [(3072, 256), (6144, 128), (5120, 256), (4096, 352), (8192, 256)]
 CASES = [
     (m, hidden, experts)
     for hidden, experts in SHAPES
@@ -126,11 +126,11 @@ def test_topk_routing_consistency(num_tokens: int, hidden_dim: int, num_experts:
                 )
 
 
-def test_zero_tokens_returns_empty():
+@pytest.mark.parametrize("hidden_dim,num_experts", SHAPES)
+def test_zero_tokens_returns_empty(hidden_dim, num_experts):
     """M=0 is a graceful no-op returning an empty [0, E] tensor."""
     _requires_sm90()
     device = torch.device("cuda")
-    hidden_dim, num_experts = SHAPES[0]
     mat_a = torch.empty(0, hidden_dim, dtype=torch.float32, device=device)
     mat_b = torch.randn(num_experts, hidden_dim, dtype=torch.float32, device=device)
     out = fp32_router_gemm(mat_a, mat_b)
@@ -183,8 +183,13 @@ def test_rejects_invalid_inputs(hidden_dim, num_experts):
 @pytest.mark.parametrize(
     "tokens", [*range(1, 17), 17, 24, 32, 33, 40, 48, 56, 64, 65, 128]
 )
+@pytest.mark.parametrize(
+    "hidden_dim,num_experts", [(5120, 256), (4096, 352), (8192, 256)]
+)
 @torch.inference_mode()
-def test_router_retains_fp32_weights_and_logits(default_vllm_config, dist_init, tokens):
+def test_router_retains_fp32_weights_and_logits(
+    default_vllm_config, dist_init, tokens, hidden_dim, num_experts
+):
     """Low-latency routing must retain FP32 weight precision and logits."""
     from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
     from vllm.platforms import current_platform
@@ -193,16 +198,16 @@ def test_router_retains_fp32_weights_and_logits(default_vllm_config, dist_init, 
         pytest.skip("SM100 required")
     torch.manual_seed(42)
     router = GateLinear(
-        5120, 256, params_dtype=torch.float32, out_dtype=torch.float32
+        hidden_dim, num_experts, params_dtype=torch.float32, out_dtype=torch.float32
     ).cuda()
     router.weight.normal_(std=0.01)
-    x = torch.randn(tokens, 5120, device="cuda", dtype=torch.bfloat16)
+    x = torch.randn(tokens, hidden_dim, device="cuda", dtype=torch.bfloat16)
     expected = (x.double() @ router.weight.double().T).float()
     actual, bias = router(x)
     assert bias is None and actual.dtype == torch.float32
     torch.testing.assert_close(actual, expected, rtol=2e-5, atol=2e-5)
     torch.testing.assert_close(actual.topk(8).indices, expected.topk(8).indices)
-    if tokens in (1, 16, 48, 56):
+    if tokens in (1, 16, 32, 33, 48, 56):
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
             captured, _ = router(x)

@@ -47,7 +47,13 @@ class GateLinear(ReplicatedLinear):
     """
 
     # (hidden_size, num_experts) pairs with an instantiated fp32 kernel.
-    FP32_SUPPORTED_SHAPES = {(3072, 256), (6144, 128), (5120, 256)}
+    FP32_SUPPORTED_SHAPES = {
+        (3072, 256),
+        (6144, 128),
+        (5120, 256),
+        (4096, 352),
+        (8192, 256),
+    }
     FP32_MAX_TOKENS = 32
     # Largest batch for which tier 1 beats the cuBLAS epilogue. Subclasses
     # whose router shape stays ahead further up the range may raise it.
