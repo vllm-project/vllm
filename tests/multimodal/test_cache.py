@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import asyncio
 import multiprocessing as mp
+import threading
+from contextlib import suppress
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import Mock
@@ -8,7 +11,9 @@ from unittest.mock import Mock
 import numpy as np
 import pytest
 import torch
+from PIL import Image
 
+from vllm import PoolingParams
 from vllm.config import ModelConfig, ParallelConfig, VllmConfig
 from vllm.config.multimodal import MultiModalConfig
 from vllm.multimodal.cache import (
@@ -39,11 +44,20 @@ from vllm.multimodal.inputs import (
     PlaceholderRange,
 )
 from vllm.multimodal.processing import PromptInsertion
+from vllm.outputs import PoolingRequestOutput
 from vllm.renderers import renderer_from_config
+from vllm.sampling_params import RequestOutputKind
 from vllm.utils.async_utils import make_async
 from vllm.utils.mem_constants import GiB_bytes, MiB_bytes
+from vllm.v1.engine import (
+    EngineCoreOutput,
+    EngineCoreOutputs,
+    EngineCoreRequest,
+    FinishReason,
+)
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.llm_engine import LLMEngine
+from vllm.v1.engine.output_processor import OutputProcessor, RequestOutputCollector
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 
 from ..models.utils import build_model_context
@@ -1097,6 +1111,123 @@ async def test_release_kv_cache_resends_mm_payload(use_async, release_error):
     payload, _ = sender.get_and_update_item((item, []), mm_hash)
     assert payload is item
     assert receiver.get_and_update_item(payload, mm_hash) is item
+
+
+@pytest.mark.asyncio
+async def test_cache_drift_invalidation_waits_for_render_without_delaying_outputs(
+    monkeypatch,
+):
+    """Apply drift invalidation between renders, including already queued work."""
+    model_config = ModelConfig(
+        model="hf-internal-testing/tiny-random-Qwen2VLForConditionalGeneration",
+        max_model_len=2048,
+        mm_processor_cache_gb=1,
+    )
+    renderer = renderer_from_config(VllmConfig(model_config=model_config))
+    prompt = {
+        "prompt": "<|vision_start|><|image_pad|><|vision_end|>Describe.",
+        "multi_modal_data": {"image": Image.new("RGB", (56, 56))},
+    }
+    primed = (await renderer.render_cmpl_async([prompt]))[0]
+    mm_hash = primed["mm_hashes"]["image"][0]
+    processor = renderer.get_mm_processor()
+    get_missing = processor._get_cache_missing_items
+    entered = asyncio.Event()
+    release = threading.Event()
+    loop = asyncio.get_running_loop()
+
+    def hold_cache_hit(*args, **kwargs):
+        result = get_missing(*args, **kwargs)
+        assert result[0] == {"image": [True]}
+        loop.call_soon_threadsafe(entered.set)
+        assert release.wait(timeout=10)
+        return result
+
+    monkeypatch.setattr(processor, "_get_cache_missing_items", hold_cache_hit)
+    output_processor = OutputProcessor(tokenizer=None, log_stats=False)
+    collectors = []
+    for idx in range(2):
+        request = EngineCoreRequest(
+            request_id=str(idx),
+            external_req_id=str(idx),
+            prompt_token_ids=[1],
+            mm_features=None,
+            sampling_params=None,
+            pooling_params=PoolingParams(task="embed"),
+            arrival_time=0,
+            lora_request=None,
+            cache_salt=None,
+            data_parallel_rank=None,
+        )
+        collector = RequestOutputCollector(RequestOutputKind.FINAL_ONLY, str(idx))
+        output_processor.add_request(request, prompt=None, queue=collector)
+        collectors.append(collector)
+    outputs: asyncio.Queue[EngineCoreOutputs] = asyncio.Queue()
+    engine = SimpleNamespace(
+        output_handler=None,
+        engine_core=SimpleNamespace(get_output_async=outputs.get),
+        output_processor=output_processor,
+        log_stats=False,
+        logger_manager=None,
+        renderer=renderer,
+    )
+    AsyncLLM._run_output_handler(engine)
+    render = asyncio.create_task(renderer.render_cmpl_async([prompt]))
+    queued_render = None
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=10)
+        # This render is queued before the output handler learns about the miss.
+        queued_render = renderer._process_multimodal_async(
+            renderer.get_tokenizer().encode(prompt["prompt"]),
+            prompt["multi_modal_data"],
+            mm_uuids=None,
+            mm_processor_kwargs=None,
+        )
+        outputs.put_nowait(
+            EngineCoreOutputs(
+                outputs=[
+                    EngineCoreOutput(
+                        request_id="0",
+                        new_token_ids=[],
+                        finish_reason=FinishReason.ERROR,
+                        mm_cache_miss_hashes=[mm_hash],
+                    )
+                ]
+            )
+        )
+        failed = await asyncio.wait_for(collectors[0].get(), timeout=5)
+        assert isinstance(failed, PoolingRequestOutput)
+        assert failed.error is not None
+        assert failed.error.code == "multimodal_cache_miss"
+        outputs.put_nowait(
+            EngineCoreOutputs(
+                outputs=[
+                    EngineCoreOutput(
+                        request_id="1",
+                        new_token_ids=[],
+                        finish_reason=FinishReason.STOP,
+                        pooling_output=torch.tensor([1.0]),
+                    )
+                ]
+            )
+        )
+        succeeded = await asyncio.wait_for(collectors[1].get(), timeout=5)
+        assert isinstance(succeeded, PoolingRequestOutput)
+        assert succeeded.error is None
+        monkeypatch.setattr(processor, "_get_cache_missing_items", get_missing)
+        release.set()
+        assert (await render)[0]["mm_kwargs"]["image"][0] is None
+        resent = await queued_render
+        assert resent["mm_kwargs"]["image"][0] is not None
+    finally:
+        release.set()
+        await asyncio.gather(render, return_exceptions=True)
+        if queued_render is not None:
+            await asyncio.gather(queued_render, return_exceptions=True)
+        engine.output_handler.cancel()
+        with suppress(asyncio.CancelledError):
+            await engine.output_handler
+        renderer.shutdown()
 
 
 _SLEEP_VISION_PROMPT = (

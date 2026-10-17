@@ -9,6 +9,7 @@ from concurrent.futures import Executor, Future, ThreadPoolExecutor
 from contextlib import ExitStack
 from dataclasses import replace
 from functools import cached_property
+from queue import Empty, SimpleQueue
 from typing import TYPE_CHECKING, Any, Generic, overload
 
 from typing_extensions import TypeVar
@@ -170,6 +171,7 @@ class BaseRenderer(ABC, Generic[_T]):
         )
 
         self._mm_processor_cache: BaseMultiModalProcessorCache | None = None
+        self._pending_mm_cache_invalidations: SimpleQueue[str] = SimpleQueue()
 
         # A second processor with its own processor-only cache.
         # Used by the tokenize endpoint so that tokenize-only
@@ -390,6 +392,26 @@ class BaseRenderer(ABC, Generic[_T]):
         """Serialize clear_mm_cache through the multimodal executor to avoid
         races with concurrent process_inputs on the mm_processor_cache."""
         await self._clear_mm_cache_async()
+
+    def queue_mm_cache_invalidations(self, mm_hashes: Sequence[str]) -> None:
+        """Mark stale sender entries without interrupting ongoing processing."""
+        if self.mm_processor_cache is not None:
+            for mm_hash in mm_hashes:
+                self._pending_mm_cache_invalidations.put(mm_hash)
+
+    def _drain_mm_cache_invalidations(self) -> None:
+        cache = self.mm_processor_cache
+        while True:
+            try:
+                mm_hash = self._pending_mm_cache_invalidations.get_nowait()
+            except Empty:
+                return
+            if cache is not None:
+                try:
+                    cache.invalidate(mm_hash)
+                except Exception:
+                    self._pending_mm_cache_invalidations.put(mm_hash)
+                    raise
 
     def shutdown(self) -> None:
         # Wait for any background MM warmup to finish first: it runs on the
@@ -909,6 +931,7 @@ class BaseRenderer(ABC, Generic[_T]):
         *,
         skip_mm_cache: bool = False,
     ) -> "MultiModalInput":
+        self._drain_mm_cache_invalidations()
         mm_processor = self.get_mm_processor()
 
         mm_req_id = f"renderer{self.api_process_rank}-mm-{self._mm_req_counter.inc(1)}"
