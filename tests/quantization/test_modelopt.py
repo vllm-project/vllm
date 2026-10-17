@@ -8,7 +8,7 @@ Run `pytest tests/quantization/test_modelopt.py`.
 import os
 from contextlib import nullcontext
 from types import MethodType, SimpleNamespace
-from typing import Any, NoReturn
+from typing import Any, NoReturn, cast
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest
@@ -1128,6 +1128,7 @@ def test_modelopt_nvfp4_moe_ep_validates_only_local_experts(
     local_num_experts, expert_map, _ = determine_expert_map(
         ep_size=2, ep_rank=1, global_num_experts=8
     )
+    assert expert_map is not None
     moe = _make_nvfp4_moe()
     layer = _create_nvfp4_moe_layer(moe, num_experts=local_num_experts)
 
@@ -1155,7 +1156,7 @@ def test_modelopt_nvfp4_moe_ep_validates_only_local_experts(
             continue
         for name, shard_id in checkpoint_scales:
             loaded = RoutedExperts.weight_loader(
-                loader,
+                cast(RoutedExperts, loader),
                 getattr(layer, name),
                 torch.tensor(0.01),
                 name,
