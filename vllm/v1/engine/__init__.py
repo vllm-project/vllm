@@ -178,6 +178,7 @@ class EngineCoreEventType(enum.IntEnum):
     QUEUED = 1
     SCHEDULED = 2
     PREEMPTED = 3
+    THINKING_LOOP_BREAK = 4
 
 
 class EngineCoreEvent(msgspec.Struct):
