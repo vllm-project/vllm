@@ -81,7 +81,7 @@ from vllm.v1.attention.backends.gdn_attn import (
     FLASHINFER_GDN_CHECKPOINT_ALIGNMENT,
     GDNAttentionMetadata,
 )
-from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec, MambaStateSplit
+from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec
 from vllm.v1.worker.workspace import current_workspace_manager
 
 # Optional ROCm AITER Triton kernels for the GDN decode path.
@@ -523,15 +523,6 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             self.head_v_dim,
             self.conv_kernel_size,
             self.num_spec,
-        )
-
-    def get_state_splits(self) -> tuple[MambaStateSplit, ...] | None:
-        return MambaStateShapeCalculator.gated_delta_net_state_splits(
-            self.tp_size,
-            self.num_k_heads,
-            self.num_v_heads,
-            self.head_k_dim,
-            self.head_v_dim,
         )
 
     def __init__(

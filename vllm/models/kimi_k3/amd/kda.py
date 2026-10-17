@@ -65,7 +65,7 @@ from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
-from vllm.v1.kv_cache_interface import MambaSpec, MambaStateSplit
+from vllm.v1.kv_cache_interface import MambaSpec
 
 logger = init_logger(__name__)
 
@@ -88,11 +88,6 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             self.head_dim,
             conv_kernel_size=self.conv_size,
             num_spec=self.num_spec,
-        )
-
-    def get_state_splits(self) -> tuple[MambaStateSplit, ...] | None:
-        return MambaStateShapeCalculator.kda_state_splits(
-            self.tp_size, self.num_heads, self.head_dim
         )
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> MambaSpec:

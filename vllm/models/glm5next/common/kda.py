@@ -46,7 +46,7 @@ from vllm.model_executor.utils import (
 from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
-from vllm.v1.kv_cache_interface import MambaSpec, MambaStateSplit
+from vllm.v1.kv_cache_interface import MambaSpec
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if current_platform.is_rocm():
@@ -199,11 +199,6 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             self.head_dim,
             conv_kernel_size=self.conv_size,
             num_spec=self.num_spec,
-        )
-
-    def get_state_splits(self) -> tuple[MambaStateSplit, ...] | None:
-        return MambaStateShapeCalculator.kda_state_splits(
-            self.tp_size, self.num_heads, self.head_dim
         )
 
     def __init__(
