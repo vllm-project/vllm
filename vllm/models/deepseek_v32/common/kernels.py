@@ -120,6 +120,69 @@ def _fp8_quant_and_cache_write(
 
 
 @triton.jit
+def _mxfp4_quantize(vals, HEAD_DIM: tl.constexpr):
+    """[HEAD_DIM] fp32 to MXFP4: ([HEAD_DIM // 2] e2m1 pairs, low nibble
+    first, [HEAD_DIM // 32] e8m0 scales of 2^ceil(log2(amax / 6))), so no
+    value saturates. gfx950 only: one v_cvt_scalef32_pk_fp4_f32 per pair."""
+    N_BLOCKS: tl.constexpr = HEAD_DIM // 32
+    blocks = tl.reshape(vals, (N_BLOCKS, 32))
+    ratio = tl.maximum(tl.max(tl.abs(blocks), axis=1), 6.0 * (2**-126)) / 6.0
+    # Exact ceil(log2): a nonzero mantissa carries into the exponent.
+    e8m0 = (ratio.to(tl.uint32, bitcast=True) + 0x7FFFFF) >> 23
+    inv_scale = ((254 - e8m0) << 23).to(tl.float32, bitcast=True)
+    lo, hi = tl.split(tl.reshape(blocks * inv_scale[:, None], (N_BLOCKS, 16, 2)))
+    packed = tl.inline_asm_elementwise(
+        "v_cvt_scalef32_pk_fp4_f32 $0, $1, $2, $3",
+        "=v,v,v,v",
+        args=[lo, hi, 1.0],
+        dtype=tl.int32,
+        is_pure=True,
+        pack=1,
+    ).to(tl.uint8)
+    return tl.reshape(packed, (HEAD_DIM // 2,)), e8m0.to(tl.uint8)
+
+
+@triton.jit
+def _mxfp4_quant_and_cache_write(
+    vals,
+    slot_idx,
+    kv_cache_ptr,
+    cache_block_size,
+    cache_block_stride,
+    HEAD_DIM: tl.constexpr,
+    N_PER_TILE: tl.constexpr,
+    D_PER_TILE: tl.constexpr,
+    SCALE_LANES: tl.constexpr,
+):
+    """Store one key in the paged MXFP4 order aiter's MQA-logits kernel reads
+    (see `RocmPagedMxfp4CacheLayout`): a page's values, then its scales."""
+    packed, e8m0 = _mxfp4_quantize(vals, HEAD_DIM)
+    TOKEN_BYTES: tl.constexpr = HEAD_DIM // 2
+    N_BLOCKS: tl.constexpr = HEAD_DIM // 32
+    S_HI: tl.constexpr = N_BLOCKS // SCALE_LANES
+    page = kv_cache_ptr + (slot_idx // cache_block_size) * cache_block_stride
+    pos = slot_idx % cache_block_size
+    group = pos // N_PER_TILE
+    lane = pos % N_PER_TILE
+    byte = tl.arange(0, TOKEN_BYTES)
+    scale_idx = tl.arange(0, N_BLOCKS)
+    value_off = (
+        group * (N_PER_TILE * TOKEN_BYTES)
+        + byte // D_PER_TILE * (N_PER_TILE * D_PER_TILE)
+        + lane * D_PER_TILE
+        + byte % D_PER_TILE
+    )
+    scale_off = (
+        group * (N_PER_TILE * N_BLOCKS)
+        + scale_idx % SCALE_LANES * (N_PER_TILE * S_HI)
+        + lane * S_HI
+        + scale_idx // SCALE_LANES
+    )
+    tl.store(page + value_off, packed)
+    tl.store(page + cache_block_size * TOKEN_BYTES + scale_off, e8m0)
+
+
+@triton.jit
 def _fused_norm_rope_kernel(
     pos_ptr,
     # Q RMS norm
@@ -173,6 +236,11 @@ def _fused_norm_rope_kernel(
     INDEXER_CACHE_BLOCK_TILE: tl.constexpr,
     INDEXER_CACHE_HEAD_TILE: tl.constexpr,
     INDEXER_CACHE_MX_SCALE: tl.constexpr,
+    # Index K MXFP4 cache (ROCm), in place of the FP8 one
+    INDEXER_CACHE_MXFP4: tl.constexpr,
+    MXFP4_N_PER_TILE: tl.constexpr,
+    MXFP4_D_PER_TILE: tl.constexpr,
+    MXFP4_SCALE_LANES: tl.constexpr,
     # MLA KV cache (concat kv_c_normed + k_pe_roped, uses slot_mapping_ptr)
     mla_cache_ptr,
     mla_cache_block_stride,
@@ -494,23 +562,37 @@ def _fused_norm_rope_kernel(
         # PCP inserts index K after gathering; other paths write it directly.
         if indexer_cache_ptr is not None and indexer_slot_mapping_ptr is not None:
             slot_idx = tl.load(indexer_slot_mapping_ptr + tok_idx)
-            _fp8_quant_and_cache_write(
-                result,
-                index_k_mask,
-                slot_idx,
-                indexer_cache_ptr,
-                indexer_cache_scale_ptr,
-                indexer_cache_block_size,
-                indexer_cache_stride,
-                index_k_block,
-                INDEX_K_DIM,
-                INDEXER_CACHE_SHUFFLE,
-                INDEXER_CACHE_BLOCK_TILE,
-                INDEXER_CACHE_HEAD_TILE,
-                INDEXER_CACHE_MX_SCALE,
-                FP8_MAX,
-                USE_FNUZ,
-            )
+            if INDEXER_CACHE_MXFP4:
+                if slot_idx >= 0:
+                    _mxfp4_quant_and_cache_write(
+                        result,
+                        slot_idx,
+                        indexer_cache_ptr,
+                        indexer_cache_block_size,
+                        indexer_cache_stride,
+                        INDEX_K_DIM,
+                        MXFP4_N_PER_TILE,
+                        MXFP4_D_PER_TILE,
+                        MXFP4_SCALE_LANES,
+                    )
+            else:
+                _fp8_quant_and_cache_write(
+                    result,
+                    index_k_mask,
+                    slot_idx,
+                    indexer_cache_ptr,
+                    indexer_cache_scale_ptr,
+                    indexer_cache_block_size,
+                    indexer_cache_stride,
+                    index_k_block,
+                    INDEX_K_DIM,
+                    INDEXER_CACHE_SHUFFLE,
+                    INDEXER_CACHE_BLOCK_TILE,
+                    INDEXER_CACHE_HEAD_TILE,
+                    INDEXER_CACHE_MX_SCALE,
+                    FP8_MAX,
+                    USE_FNUZ,
+                )
 
 
 def fused_norm_rope(
@@ -534,6 +616,7 @@ def fused_norm_rope(
     indexer_slot_mapping: torch.Tensor | None = None,
     indexer_k_cache: torch.Tensor | None = None,
     indexer_cache_shuffled: bool = False,
+    indexer_cache_mxfp4: tuple[int, int, int] | None = None,
     mla_kv_cache: torch.Tensor | None = None,
     mla_kv_cache_dtype: str = "auto",
     mla_k_scale: torch.Tensor | None = None,
@@ -574,7 +657,22 @@ def fused_norm_rope(
         slot_mapping = None
 
     # --- Indexer K cache setup ---
-    if indexer_k_cache is not None:
+    # (n_per_tile, d_per_tile, scale_lanes) of a paged MXFP4 cache, see
+    # RocmPagedMxfp4CacheLayout; (1, 1, 1) when the cache is FP8.
+    mxfp4_layout = (1, 1, 1)
+    if indexer_k_cache is not None and indexer_cache_mxfp4 is not None:
+        assert indexer_k_cache.dtype == torch.uint8
+        assert index_k.shape[-1] == 128, "the MXFP4 cache is written for D=128"
+        if indexer_slot_mapping is None:
+            indexer_slot_mapping = slot_mapping
+        mxfp4_layout = indexer_cache_mxfp4
+        idx_cache_scale_view = None
+        idx_cache_mx_scale = False
+        idx_cache_block_size = indexer_k_cache.shape[1]
+        idx_cache_stride = indexer_k_cache.stride(0)
+        idx_cache_shuffle = False
+        idx_cache_head_tile = _INDEXER_CACHE_HEAD_TILE_BYTES
+    elif indexer_k_cache is not None:
         assert slot_mapping is not None
         if indexer_slot_mapping is None:
             indexer_slot_mapping = slot_mapping
@@ -713,6 +811,8 @@ def fused_norm_rope(
         _INDEXER_CACHE_BLOCK_TILE,
         idx_cache_head_tile,
         idx_cache_mx_scale,
+        indexer_cache_mxfp4 is not None,
+        *mxfp4_layout,
         # MLA KV cache (uses same slot_mapping)
         mla_kv_cache,
         mla_block_stride,
@@ -763,6 +863,9 @@ def _fused_q_kernel(
     index_q_fp8_ptr,
     index_q_fp8_stride0,
     index_q_fp8_stride1,
+    index_q_scale_ptr,
+    index_q_scale_stride0,
+    index_q_scale_stride1,
     INDEX_Q_HEAD_DIM: tl.constexpr,
     # MQA query pack: quantize ql_nope and RoPE+quantize q_pe into mqa_q_fp8
     ql_nope_ptr,
@@ -789,6 +892,7 @@ def _fused_q_kernel(
     HAS_INDEXER: tl.constexpr,
     INDEX_ROPE_INTERLEAVE: tl.constexpr,
     QUANTIZE_MQA: tl.constexpr,
+    INDEX_Q_MXFP4: tl.constexpr,
     USE_PDL: tl.constexpr,
     FP8_MAX: tl.constexpr,
     USE_FNUZ: tl.constexpr,
@@ -938,22 +1042,40 @@ def _fused_q_kernel(
         roped = index_q * cos_full + sign * partner * sin_full
         index_q = tl.where(in_rope, roped, index_q)
 
-        # Index Q Quantize (from registers)
-        index_q_fp8, index_q_scale = _fp8_ue8m0_quantize(index_q, FP8_MAX, USE_FNUZ)
-        tl.store(
-            index_q_fp8_ptr
-            + tok_idx * index_q_fp8_stride0
-            + head_idx * index_q_fp8_stride1
-            + index_q_block,
-            index_q_fp8,
-        )
-
         # Index weights update
         index_weights = tl.load(
             index_weights_ptr + tok_idx * index_weights_stride + head_idx
         )
         index_weights = index_weights.to(tl.float32)
-        index_weights *= index_q_scale
+
+        # Index Q Quantize (from registers)
+        if INDEX_Q_MXFP4:
+            # The scorer takes the block scales, so none fold into the weights.
+            index_q_fp4, index_q_e8m0 = _mxfp4_quantize(index_q, INDEX_Q_HEAD_DIM)
+            tl.store(
+                index_q_fp8_ptr
+                + tok_idx * index_q_fp8_stride0
+                + head_idx * index_q_fp8_stride1
+                + tl.arange(0, INDEX_Q_HEAD_DIM // 2),
+                index_q_fp4,
+            )
+            tl.store(
+                index_q_scale_ptr
+                + tok_idx * index_q_scale_stride0
+                + head_idx * index_q_scale_stride1
+                + tl.arange(0, INDEX_Q_HEAD_DIM // 32),
+                index_q_e8m0,
+            )
+        else:
+            index_q_fp8, index_q_scale = _fp8_ue8m0_quantize(index_q, FP8_MAX, USE_FNUZ)
+            tl.store(
+                index_q_fp8_ptr
+                + tok_idx * index_q_fp8_stride0
+                + head_idx * index_q_fp8_stride1
+                + index_q_block,
+                index_q_fp8,
+            )
+            index_weights *= index_q_scale
         index_weights *= index_weights_softmax_scale
         index_weights *= index_weights_head_scale
         tl.store(
@@ -977,7 +1099,10 @@ def fused_q(
     has_indexer: bool = True,
     index_rope_interleave: bool = False,
     quantize_mqa: bool = True,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    index_q_mxfp4: bool = False,
+) -> tuple[
+    torch.Tensor | tuple[torch.Tensor, torch.Tensor], torch.Tensor, torch.Tensor
+]:
     """Fuse the MQA-query and indexer-query RoPE/quantization.
 
     Returns ``(index_q_fp8, index_weights_out, mqa_q)``. When ``quantize_mqa``
@@ -985,6 +1110,10 @@ def fused_q(
     packing ``[ql_nope; q_pe]``. When False (FlashMLA sparse, bf16 query) it is
     the RoPE'd ``q_pe`` in bf16; the caller pairs it with ``ql_nope`` as the
     ``(ql_nope, q_pe)`` tuple the backend expects.
+
+    With ``index_q_mxfp4`` (gfx950) the index query is MXFP4 instead:
+    ``(packed e2m1 [T, H, D // 2], e8m0 scales as one int32 per head [T, H])``,
+    and the weights carry no query scale.
     """
     assert positions.ndim == 1
     assert positions.dtype == torch.int64
@@ -1012,7 +1141,7 @@ def fused_q(
     # fused_q is shared with the ROCm path, and the CuTeDSL module imports
     # cutlass at module scope, so only reach for it on CUDA.
     cutedsl_kernel: Callable[..., None] | None = None
-    if current_platform.is_cuda():
+    if current_platform.is_cuda() and not index_q_mxfp4:
         from vllm.models.deepseek_v32.nvidia.ops.fused_q_cutedsl import (
             fused_q_cutedsl,
             is_fused_q_cutedsl_supported,
@@ -1045,7 +1174,19 @@ def fused_q(
         mqa_q_fp8 = q_pe_out  # unused placeholder for the fp8 pack pointer
         mqa_q = q_pe_out
 
-    index_q_fp8 = torch.empty_like(index_q, dtype=_FP8_DTYPE)
+    if index_q_mxfp4:
+        assert has_indexer and index_q_head_dim == 128, (
+            "MXFP4 scales pack as one int32 per head"
+        )
+        index_q_fp8 = index_q.new_empty(
+            (num_tokens, num_index_q_heads, index_q_head_dim // 2), dtype=torch.uint8
+        )
+        index_q_scale = index_q.new_empty(
+            (num_tokens, num_index_q_heads, index_q_head_dim // 32), dtype=torch.uint8
+        )
+    else:
+        index_q_fp8 = torch.empty_like(index_q, dtype=_FP8_DTYPE)
+        index_q_scale = index_q_fp8
     index_weights_out = torch.empty_like(index_weights, dtype=torch.float32)
     if cutedsl_kernel is not None:
         cutedsl_kernel(
@@ -1091,6 +1232,9 @@ def fused_q(
         index_q_fp8,
         index_q_fp8.stride(0),
         index_q_fp8.stride(1),
+        index_q_scale,
+        index_q_scale.stride(0),
+        index_q_scale.stride(1),
         index_q_head_dim,
         ql_nope,
         ql_nope.stride(0),
@@ -1113,6 +1257,7 @@ def fused_q(
         HAS_INDEXER=has_indexer,
         INDEX_ROPE_INTERLEAVE=index_rope_interleave,
         QUANTIZE_MQA=quantize_mqa,
+        INDEX_Q_MXFP4=index_q_mxfp4,
         FP8_MAX=_FP8_MAX,
         USE_FNUZ=_USE_FNUZ,
         **pdl_kwargs,
@@ -1121,6 +1266,9 @@ def fused_q(
         # per-program compute bound (swept 1/2/4/8 — 1 wins or ties everywhere).
         num_warps=1,
     )
+    if index_q_mxfp4:
+        q_scale_i32 = index_q_scale.view(torch.int32).squeeze(-1)
+        return (index_q_fp8, q_scale_i32), index_weights_out, mqa_q
     return index_q_fp8, index_weights_out, mqa_q
 
 
