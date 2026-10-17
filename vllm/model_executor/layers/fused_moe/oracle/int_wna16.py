@@ -455,7 +455,12 @@ def make_wna16_moe_kernel(
     )
     if backend == WNA16MoEBackend.HUMMING:
         allowed_experts += tuple(backend_to_kernel_cls(WNA16MoEBackend.HUMMING))
-    assert experts_cls in allowed_experts
+    # Model-specific subclasses (e.g. MuseSpark1x's post-expert-norm CPU
+    # experts) inherit the vetting of the backend they specialize.
+    assert any(
+        experts_cls is allowed or issubclass(experts_cls, allowed)
+        for allowed in allowed_experts
+    )
 
     is_monolithic = experts_cls.is_monolithic()
 

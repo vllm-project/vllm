@@ -175,11 +175,34 @@ class INCConfigParser:
                 for name in self._config.block_name_to_quantize
             )
 
-        if self._config.extra_config and "fusedmoe" in layer.__class__.__name__.lower():
+        from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
+
+        if self._config.extra_config and isinstance(layer, RoutedExperts):
+            # A RoutedExperts layer's own name is conventionally
+            # "...mlp.experts" (see e.g. Qwen3MoE's
+            # `FusedMoEFactory(..., prefix=f"{prefix}.experts")`), with
+            # per-expert overrides keyed like "...mlp.experts.0.w1". Require
+            # the matched key to actually be a per-expert override (rather
+            # than merely sharing a string prefix with layer_name) so that an
+            # unrelated sibling submodule whose name happens to start with
+            # the same characters (e.g. a router/gate override at
+            # "...mlp.gate") isn't mistaken for one of this layer's experts.
+            is_experts_layer = layer_name.endswith(".experts") or layer_name == "experts"
+
+            def _is_per_expert_key(name: str) -> bool:
+                for candidate in (layer_name, f"model.{layer_name}"):
+                    prefix_dot = f"{candidate}."
+                    if not name.startswith(prefix_dot):
+                        continue
+                    remainder = name[len(prefix_dot) :]
+                    if is_experts_layer or remainder.startswith("experts."):
+                        return True
+                return False
+
             moe_configs = [
                 get_config(name, quantized)
                 for name in self._config.extra_config
-                if name.startswith(layer_name)
+                if _is_per_expert_key(name)
             ]
             if moe_configs:
                 if len(set(moe_configs)) == 1:

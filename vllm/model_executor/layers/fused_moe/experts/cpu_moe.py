@@ -878,6 +878,7 @@ class CPUExpertsInt4(mk.FusedMoEExpertsModular):
             RoutingMethodType.Default,
             RoutingMethodType.Renormalize,
             RoutingMethodType.RenormalizeNaive,
+            RoutingMethodType.MiniMax2,
         ]
 
     @staticmethod

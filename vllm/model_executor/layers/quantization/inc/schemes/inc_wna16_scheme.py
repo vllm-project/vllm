@@ -159,13 +159,6 @@ class INCWna16Scheme(INCScheme):
         layer_config: "INCLayerConfig",
     ):
         del config, prefix
-        # CPU does not support quantized MoE yet.
-        if current_platform.is_cpu():
-            from vllm.model_executor.layers.fused_moe import (
-                UnquantizedFusedMoEMethod,
-            )
-
-            return UnquantizedFusedMoEMethod(layer.moe_config)
         # CUDA low-bit (2/3/5/6/7): route to the humming MoE kernel (see above).
         if (
             current_platform.is_cuda()
@@ -196,9 +189,10 @@ def _resolve_gptq_moe(layer: "torch.nn.Module", layer_config: "INCLayerConfig"):
     )
 
     # AutoGPTQMoEMethod selects its fused-MoE backend through the WNA16 oracle
-    # (Marlin on CUDA, XPUExpertsWNA16 on XPU). Gate only on the layer-shape
-    # check like compressed-tensors does; the capability-based
-    # check_marlin_supported is skipped so the XPU path is reachable.
+    # (Marlin on CUDA, XPUExpertsWNA16 on XPU, CPUExpertsInt4 on CPU). Gate
+    # only on the layer-shape check like compressed-tensors does; the
+    # capability-based check_marlin_supported is skipped so the non-CUDA
+    # paths are reachable.
     use_marlin = (layer_config.bits, layer_config.sym) in {
         (4, True),
         (8, True),
