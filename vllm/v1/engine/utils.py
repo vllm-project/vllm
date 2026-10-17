@@ -252,6 +252,14 @@ class CoreEngineProcManager:
         client_handshake_address: str | None = None,
         tensor_queue: Queue | None = None,
     ):
+        # Engines started together share this host's /dev/shm, and each can
+        # only check room for its own CPU KV offload region.
+        from vllm.v1.kv_offload.cpu.shared_offload_region import (
+            check_local_engines_offload_shm,
+        )
+
+        check_local_engines_offload_shm(vllm_config, local_engine_count)
+
         self._request_shutdown_timeout = vllm_config.shutdown_timeout
         context = get_mp_context()
         common_kwargs = {
