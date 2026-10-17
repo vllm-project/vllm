@@ -67,22 +67,46 @@ class Olmo3PythonicToolParser(ToolParser):
     def current_tool_index(self, value: int) -> None:
         self.current_tool_id = value
 
+    @staticmethod
+    def _to_call_list(text: str) -> str:
+        """Make the newline separated function calls into a list."""
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        return f"[{', '.join(lines)}]"
+
+    @classmethod
+    def _strip_function_calls_tags(cls, model_output: str) -> str:
+        """Return the body of the <function_calls> block.
+
+        A string argument may itself contain "</function_calls>", so the
+        first closing tag is not necessarily the real one. Use the first
+        closing tag whose body parses as Python, and fall back to the first
+        closing tag otherwise.
+        """
+        start = model_output.find("<function_calls>")
+        if start == -1:
+            return model_output
+        body_start = start + len("<function_calls>")
+        first_end = model_output.find("</function_calls>", body_start)
+        if first_end == -1:
+            return model_output
+        end = first_end
+        while end != -1:
+            body = model_output[body_start:end]
+            try:
+                ast.parse(cls._to_call_list(body))
+                return body.strip()
+            except (SyntaxError, ValueError):
+                end = model_output.find("</function_calls>", end + 1)
+        return model_output[body_start:first_end].strip()
+
     def extract_tool_calls(
         self, model_output: str, request: ChatCompletionRequest
     ) -> ExtractedToolCallInformation:
         """Extract the tool calls from a complete model response."""
         original_model_output = model_output
         # Remove xml tags.
-        match = re.search(
-            r"<function_calls>(.*?)</function_calls>", model_output, re.DOTALL
-        )
-        if match:
-            model_output = match.group(1).strip()
-        # Make the newline separated function calls into a list.
-        model_output = ", ".join(
-            [line.strip() for line in model_output.splitlines() if line.strip()]
-        )
-        model_output = f"[{model_output}]"
+        model_output = self._strip_function_calls_tags(model_output)
+        model_output = self._to_call_list(model_output)
 
         is_tool_call_pattern = False
         try:
