@@ -66,7 +66,40 @@ class Gemma4Speculator(TargetDependentARSpeculator):
             )
         self._setup_gemma4_kv_sharing(draft_model, target_attn_layer_names)
         self._share_embeddings(draft_model, target_model)
+        self.use_local_argmax_reduction = (
+            self.draft_logits is None and not self.use_acceptance_estimator
+        )
+        self._configure_relaxed_mtp()
         return draft_model
+
+    def _configure_relaxed_mtp(self) -> None:
+        import os
+
+        from vllm.model_executor.models.gemma4 import set_gemma4_moe_cap
+        from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
+            set_v2_cot_lenience,
+        )
+
+        relaxed_flag = bool(
+            getattr(self.speculative_config, "enable_relaxed_mtp", False)
+            or os.environ.get("VLLM_GEMMA4_RELAXED_MTP", "0") == "1"
+        )
+        cap_s = int(
+            os.environ.get(
+                "VLLM_GEMMA4_MOE_CAP_S",
+                getattr(self.speculative_config, "moe_expert_cap", 0)
+                or (14 if relaxed_flag else 0),
+            )
+        )
+        cot_margin = float(
+            os.environ.get(
+                "VLLM_GEMMA4_COT_LENIENCE_MARGIN",
+                getattr(self.speculative_config, "cot_lenience_margin", 0.0)
+                or (1.8 if relaxed_flag else 0.0),
+            )
+        )
+        set_gemma4_moe_cap(cap_s, 1 + self.num_speculative_steps, self.device)
+        set_v2_cot_lenience(cot_margin)
 
     def _create_draft_vllm_config(self) -> VllmConfig:
         """Preserve the target's forced TRITON_ATTN backend for draft layers.

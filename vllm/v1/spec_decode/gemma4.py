@@ -43,6 +43,7 @@ class Gemma4Proposer(SpecDecodeBaseProposer):
             pass_hidden_states_to_model=True,
             runner=runner,
         )
+        self.use_local_argmax_reduction = not self._enable_probabilistic_draft_probs
         # All draft steps predict from the same position (the last
         # target-model position), so positions and seq_lens must not
         # advance between steps.

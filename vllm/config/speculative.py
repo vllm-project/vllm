@@ -463,6 +463,16 @@ class SpeculativeConfig:
     for draft token generation. Reduces communication from O(vocab_size) to
     O(2 * tp_size) per token. Only applies to greedy draft selection in
     non-tree speculation."""
+    enable_relaxed_mtp: bool = False
+    """Enable relaxed MTP verification optimizations (MoE active expert
+    capping |S|=14 and CoT-gated lenient acceptance inside thinking blocks)."""
+    moe_expert_cap: int = 0
+    """Maximum number of unique active MoE experts per speculative verification
+    chunk per request (0 disables capping; 14 is used when enable_relaxed_mtp=True)."""
+    cot_lenience_margin: float = 0.0
+    """Logit margin for lenient draft token acceptance inside CoT thinking
+    spans (<|channel> ... <channel|>; 0.0 disables, 1.8 when
+    enable_relaxed_mtp=True)."""
 
     use_heterogeneous_vocab: bool = False
     """Allow draft and target models to use different vocabularies.
