@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch.nn as nn
 
-from vllm.config import VllmConfig, replace
+from vllm.config import CacheConfig, VllmConfig, replace
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.model_loader.utils import get_draft_load_config
 from vllm.v1.worker.gpu.spec_decode.eagle.utils import (
@@ -11,6 +11,26 @@ from vllm.v1.worker.gpu.spec_decode.eagle.utils import (
     maybe_share_target_embed,
 )
 from vllm.v1.worker.gpu.spec_decode.utils import get_pp_safe_draft_load_config
+
+# KV cache formats only MLA backends serve. The target's sparse MLA layers
+# canonicalize the shared cache_config to one of these while they are built
+# (mla_attention writes it back), so a drafter loaded afterwards would
+# otherwise inherit a format none of its attention backends supports (#58733).
+_MLA_ONLY_KV_CACHE_DTYPES = ("fp8_ds_mla", "nvfp4_ds_mla")
+
+
+def _draft_cache_config(vllm_config: VllmConfig) -> CacheConfig:
+    speculative_config = vllm_config.speculative_config
+    assert speculative_config is not None
+    cache_config = vllm_config.cache_config
+    if speculative_config.kv_cache_dtype is not None:
+        return replace(cache_config, cache_dtype=speculative_config.kv_cache_dtype)
+    if (
+        cache_config.cache_dtype in _MLA_ONLY_KV_CACHE_DTYPES
+        and not speculative_config.draft_model_config.use_mla
+    ):
+        return replace(cache_config, cache_dtype="auto")
+    return cache_config
 
 
 def load_dflash_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Module:
@@ -31,14 +51,7 @@ def load_dflash_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
             use_non_causal=dflash_has_any_non_causal(draft_model_config.hf_config),
             backend=speculative_config.attention_backend,
         ),
-        cache_config=(
-            replace(
-                vllm_config.cache_config,
-                cache_dtype=speculative_config.kv_cache_dtype,
-            )
-            if speculative_config.kv_cache_dtype is not None
-            else vllm_config.cache_config
-        ),
+        cache_config=_draft_cache_config(vllm_config),
         load_config=get_pp_safe_draft_load_config(get_draft_load_config(vllm_config)),
     )
     with set_model_tag("dflash_head"):
