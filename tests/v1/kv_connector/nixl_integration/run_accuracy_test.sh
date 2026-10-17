@@ -122,7 +122,18 @@ cleanup_instances() {
   echo "Cleaning up any running vLLM instances..."
   pkill -f "toy_proxy_server.py" || true
   pkill -TERM -f "vllm serve" || true
-  sleep 3
+  # CI test-selection traces these jobs with subprocess coverage
+  # (sigterm=true): servers flush coverage only if they get to handle
+  # SIGTERM. "vllm serve" matches the serve parent only; spawned EngineCore
+  # workers exit through the parent's shutdown() (terminate, 5s join, then
+  # kill-process-tree). Give the parent a 10s polling window to finish that
+  # gracefully. The SIGKILL below must keep matching ONLY the serve parent:
+  # it is the leak backstop for a wedged parent, and widening it to workers
+  # would kill them mid-flush and discard coverage.
+  for _ in $(seq 1 10); do
+    pgrep -f "vllm serve" > /dev/null || break
+    sleep 1
+  done
   pkill -9 -f "vllm serve" || true
   sleep 2
   wait_for_gpu_memory_release
