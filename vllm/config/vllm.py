@@ -3195,6 +3195,32 @@ class VllmConfig:
 
         return unsupported
 
+    def _iteration_timing_unsupported_reason(self) -> str | None:
+        if self.device_config.device_type != "cuda":
+            return "Iteration GPU timing requires a CUDA device"
+        if self.model_config is None or self.model_config.runner_type != "generate":
+            return "Iteration GPU timing supports generative models only"
+        if self.parallel_config.distributed_executor_backend not in (None, "uni", "mp"):
+            return "Iteration GPU timing supports uni and mp executors only"
+        return None
+
+    def resolve_iteration_timing(
+        self, log_stats: bool, multiprocess_mode: bool
+    ) -> None:
+        observability = self.observability_config
+        observability.iteration_timing_enabled = False
+        if not log_stats or not observability.enable_logging_iteration_details:
+            return
+        reason = (
+            self._iteration_timing_unsupported_reason()
+            if multiprocess_mode
+            else "In-process EngineCore cannot collect pending GPU timings while idle"
+        )
+        if reason is None:
+            observability.iteration_timing_enabled = True
+        else:
+            logger.warning("Logging iteration counts without GPU timing: %s", reason)
+
     def _validate_profiler_config(self) -> None:
         if self.profiler_config.profiler != "proton":
             return

@@ -3,7 +3,6 @@
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from functools import cached_property
 from typing import TYPE_CHECKING
 
 from vllm.config.ec_manager_config import EncoderCacheManagerMetadata
@@ -150,6 +149,8 @@ class CachedRequestData:
     new_block_ids: list[tuple[list[int], ...] | None]
     num_computed_tokens: list[int]
     num_output_tokens: list[int]
+    # Only collected for detailed worker profiling.
+    prefill_req_ids: set[str] | None = None
 
     # Version of dataclass repr with token IDs obfuscated.
     def anon_repr(self) -> str:
@@ -176,20 +177,6 @@ class CachedRequestData:
     def num_reqs(self) -> int:
         return len(self.req_ids)
 
-    @cached_property
-    def _req_id_to_num_output_tokens(self) -> dict[str, int]:
-        """Cache mapping of req_id to num_output_tokens for O(1) lookup.
-
-        This cached property is safe because CachedRequestData instances
-        are created fresh each scheduling iteration and not mutated during
-        computation of iteration details.
-        """
-        return dict(zip(self.req_ids, self.num_output_tokens))
-
-    def is_context_phase(self, req_id: str) -> bool:
-        num_output_tokens = self._req_id_to_num_output_tokens.get(req_id)
-        return num_output_tokens is not None and num_output_tokens == 0
-
     @classmethod
     def make_empty(cls) -> "CachedRequestData":
         return cls(
@@ -204,11 +191,15 @@ class CachedRequestData:
 
 
 @dataclass
-class ScheduledEncoderInputStats:
-    """Stats for encoder inputs scheduled in one iteration."""
+class IterationDetails:
+    """Scheduled prefill/decode request and input counts."""
 
-    num_inputs: int = 0
-    output_tokens: int = 0
+    num_prefill_requests: int = 0
+    num_prefill_tokens: int = 0
+    num_decode_requests: int = 0
+    num_decode_tokens: int = 0
+    num_encoder_inputs: int = 0
+    num_encoder_output_tokens: int = 0
 
 
 @dataclass
@@ -262,7 +253,9 @@ class SchedulerOutput:
     # freed from the encoder cache.
     free_encoder_mm_hashes: list[str]
 
-    scheduled_encoder_input_stats: ScheduledEncoderInputStats | None = None
+    # Scheduling-time counts, before workers trim invalid draft slots (e.g. ngram_gpu).
+    iteration_details: IterationDetails | None = None
+    iteration_metrics_id: int | None = None
 
     # Request IDs that are preempted in this step.
     # Only used for v2 model runner.
