@@ -2704,6 +2704,52 @@ def test_hybrid_model_mamba_align_with_dynamic_draft_tokens():
     manager.free(req0)
 
 
+@pytest.mark.parametrize("start", [None, 0, 15, 16, 17, 32, 63])
+@pytest.mark.parametrize("skip_read", [None, True, False])
+@pytest.mark.parametrize("ordinary_logprobs", [None, 0])
+def test_target_token_prefix_cache_boundary(start, skip_read, ordinary_logprobs):
+    """A cached answer must not skip any requested scoring row, even on resume."""
+    block_size = 16
+    manager = make_kv_cache_manager(
+        make_kv_cache_config(block_size, 16),
+        max_model_len=128,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+    tokens = list(range(65))
+    warm = make_request("warm", tokens, block_size, sha256)
+    assert manager.allocate_slots(warm, len(tokens)) is not None
+    manager.free(warm)
+    params = SamplingParams(
+        max_tokens=1,
+        prompt_logprob_token_ids=[[10]] * (len(tokens) - 1 - (start or 0)),
+        prompt_logprob_start=start,
+        prompt_logprobs=ordinary_logprobs,
+        skip_reading_prefix_cache=skip_read,
+    )
+    request = Request(
+        "scoring",
+        tokens,
+        params,
+        None,
+        block_hasher=get_request_block_hasher(block_size, sha256),
+    )
+    expected = (
+        (start or 0) // block_size * block_size
+        if skip_read is False and ordinary_logprobs is None
+        else 0
+    )
+    for preemptions in (0, 1):
+        request.num_preemptions = preemptions
+        blocks, hit, _ = manager.get_computed_blocks(request)
+        assert hit == expected
+        assert len(blocks.blocks[0]) == expected // block_size
+        assert (
+            manager.allocate_slots(request, len(tokens) - hit, hit, blocks) is not None
+        )
+        manager.free(request)
+
+
 def test_prefill_plp():
     """Test prefill with APC and some prompt logprobs (plp) requests.
 

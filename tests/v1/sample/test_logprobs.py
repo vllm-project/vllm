@@ -1532,13 +1532,40 @@ def test_prompt_logprob_token_ids_with_chunking_and_preemption(monkeypatch):
             assert scores[row] == pytest.approx(expected, abs=1e-3)
 
 
-def test_prompt_logprob_token_ids_drop_partially_scored_prefills(monkeypatch):
-    """A prefill that starts past the first scored row returns no scores.
+@pytest.mark.cpu_test
+def test_prompt_token_scores_reject_incomplete_prefill():
+    from vllm.v1.worker.gpu.sample.prompt_logprob import PromptLogprobsWorker
 
-    Such a prefill (here a prefix-cache hit the caller opted back into) never
-    computes the leading rows, so emitting the buffer would return values the
-    model never produced for them.
-    """
+    worker = PromptLogprobsWorker(1, torch.device("cpu"))
+    params = SamplingParams(
+        max_tokens=1,
+        prompt_logprob_start=16,
+        prompt_logprob_token_ids=np.ones((31, 1), dtype=np.int32),
+    )
+    worker.add_request("req", 0, params)
+    batch = SimpleNamespace(
+        req_ids=["req"],
+        idx_mapping_np=[0],
+        num_computed_prefill_tokens_np=[32],
+        num_scheduled_tokens=[16],
+        prefill_len_np=[48],
+    )
+
+    def unexpected_logits(hidden_states):
+        raise AssertionError("An incomplete scoring buffer must not be emitted")
+
+    assert (
+        worker.compute_prompt_token_id_logprobs(
+            unexpected_logits, torch.empty(0), batch, np.array([48])
+        )
+        == {}
+    )
+    assert "req" not in worker.token_id_scores
+
+
+@pytest.mark.parametrize("enforce_eager", [True, False])
+def test_prompt_logprob_token_ids_bounded_prefix_reuse(monkeypatch, enforce_eager):
+    """A cached answer preserves every scoring row and candidate order."""
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
 
     text = "The capital of France is Paris. " * 20
@@ -1547,25 +1574,42 @@ def test_prompt_logprob_token_ids_drop_partially_scored_prefills(monkeypatch):
         "Qwen/Qwen3-0.6B",
         max_model_len=512,
         enable_prefix_caching=True,
+        block_size=16,
+        max_num_seqs=4,
+        max_num_batched_tokens=48,
+        enforce_eager=enforce_eager,
+        async_scheduling=True,
+        enable_chunked_prefill=True,
         gpu_memory_utilization=0.25,
     ) as vllm_model:
         token_ids = vllm_model.llm.get_tokenizer()(text).input_ids
         prompt = TokensPrompt(prompt_token_ids=token_ids)
-        sampling_params = SamplingParams(
-            temperature=0.0,
-            max_tokens=1,
-            prompt_logprob_token_ids=np.tile([10, 100, 1000], (len(token_ids) - 1, 1)),
-            skip_reading_prefix_cache=False,
-        )
+        for start in (0, 15, 16, 17, 31, 32):
+            candidates = np.tile([1000, 10, -1], (len(token_ids) - 1 - start, 1))
+            params = SamplingParams(
+                temperature=0.0,
+                max_tokens=1,
+                prompt_logprob_start=start,
+                prompt_logprob_token_ids=candidates,
+            )
+            first = vllm_model.llm.generate([prompt], params)[0]
+            assert first.num_cached_tokens == 0
+            params.skip_reading_prefix_cache = False
+            second = vllm_model.llm.generate([prompt], params)[0]
+            assert second.num_cached_tokens == start // 16 * 16
+            scores = second.prompt_token_id_logprobs
+            assert scores is not None and scores.shape == candidates.shape
+            assert np.isfinite(scores[:, :2]).all()
+            assert np.isneginf(scores[:, 2]).all()
+            np.testing.assert_allclose(
+                scores, first.prompt_token_id_logprobs, rtol=0.02, atol=0.2
+            )
 
-        first = vllm_model.llm.generate([prompt], sampling_params)[0]
-        assert first.prompt_token_id_logprobs is not None
-        assert math.isfinite(float(first.prompt_token_id_logprobs.min()))
-
-        # The re-send is served from the prefix cache, so its prefill starts
-        # past row 0 and the leading rows are never computed.
-        second = vllm_model.llm.generate([prompt], sampling_params)[0]
-        assert second.prompt_token_id_logprobs is None
+        params.prompt_logprobs = 0
+        both = vllm_model.llm.generate([prompt], params)[0]
+        assert both.num_cached_tokens == 0
+        assert both.prompt_token_id_logprobs is not None
+        assert len(both.prompt_logprobs) == len(token_ids)
 
 
 @large_gpu_mark(min_gb=24)
