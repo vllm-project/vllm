@@ -45,7 +45,10 @@ class BatchUpdate:
     # Key assumption: the `output_tok_ids` list (which is an element of each
     # tuple in `added`) is a reference to the request's running output tokens
     # list; via this reference, the logits processors always see the latest
-    # list of generated output tokens.
+    # list of generated output tokens. This live view of the *values* is only
+    # guaranteed for processors that declare `needs_output_token_ids()` (or
+    # when async scheduling is disabled); otherwise the entries may be `-1`
+    # placeholders under async scheduling.
     #
     # NOTE:
     # * Added or moved requests may replace existing requests with the same
@@ -92,6 +95,23 @@ class LogitsProcessor(ABC):
         depending on subclass implementation.
         """
         raise NotImplementedError
+
+    @classmethod
+    def needs_output_token_ids(cls) -> bool:
+        """True if this processor reads the *values* of each request's output
+        token ids, not just their count.
+
+        Under async scheduling the worker-side output token id lists are padded
+        with ``-1`` placeholders each step; the real ids are only patched back
+        in when some processor in the batch declares that it needs them. A
+        processor that inspects generated token values must return ``True`` or
+        it will silently run on placeholder ids.
+
+        The default is ``True`` so that out-of-tree processors are correct by
+        default; value-agnostic processors may override to ``False`` to avoid
+        an unnecessary device sync under async scheduling.
+        """
+        return True
 
     @abstractmethod
     def update_state(
