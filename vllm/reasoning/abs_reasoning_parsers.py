@@ -192,15 +192,6 @@ class ReasoningParser:
         """Adjust request parameters; override in subclasses as needed."""
         return request
 
-    def set_prompt_token_ids(self, prompt_token_ids: Sequence[int]) -> None:
-        """Provide the rendered prompt before the output is parsed.
-
-        Parsers that can tell whether the prompt already closes reasoning
-        (e.g. continue_final_message) use it to classify the output.
-        Default is a no-op; override in subclasses as needed.
-        """
-        return
-
     def adjust_initial_state_from_prompt(self, prompt_token_ids: Sequence[int]) -> None:
         """Hook called once at the start of streaming with the prompt tokens.
 

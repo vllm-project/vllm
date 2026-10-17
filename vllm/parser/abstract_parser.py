@@ -118,9 +118,8 @@ class Parser:
     # Subclasses should override these if they use specific parser classes
     reasoning_parser_cls: type[ReasoningParser] | None = None
     tool_parser_cls: type[ToolParser] | None = None
-    # Server-side floor for tool-call structural tags (--tool-strict-level), or
-    # None for the tool parser's default level.
-    tool_strict_level: ToolStrictLevel | None = None
+    # Server-side floor for tool-call structural tags (--tool-strict-level).
+    tool_strict_level: ToolStrictLevel = ToolStrictLevel.AUTO
     always_adjust_request: bool = False
 
     def __init__(
@@ -520,7 +519,10 @@ class DelegatingParser(Parser):
         is_auto = request.tool_choice == "auto"
         single_call = request.parallel_tool_calls is False
         strict_level = self.tool_strict_level
-        if strict_level is None:
+        if (
+            strict_level == ToolStrictLevel.AUTO
+            and tool_parser.default_tool_strict_level is not None
+        ):
             strict_level = tool_parser.default_tool_strict_level
         if single_call and not (is_auto and structured_outputs is not None):
             # Limiting the call count needs the call envelope in the grammar.
@@ -769,10 +771,6 @@ class DelegatingParser(Parser):
             return False
         return self._reasoning_parser.is_reasoning_end(input_ids)
 
-    def set_prompt_token_ids(self, prompt_token_ids: Sequence[int]) -> None:
-        if self._reasoning_parser is not None:
-            self._reasoning_parser.set_prompt_token_ids(prompt_token_ids)
-
     def _is_reasoning_end_streaming(
         self, input_ids: list[int], delta_ids: list[int]
     ) -> bool:
@@ -862,7 +860,6 @@ class DelegatingParser(Parser):
 
         if not state.prompt_reasoning_checked and prompt_token_ids is not None:
             state.prompt_reasoning_checked = True
-            self.set_prompt_token_ids(prompt_token_ids)
             if self._reasoning_parser is None or self.is_reasoning_end(
                 prompt_token_ids
             ):

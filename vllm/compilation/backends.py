@@ -94,13 +94,10 @@ def make_copy_and_call(
     return copy_and_call
 
 
-def make_compiler(
-    compilation_config: CompilationConfig, *, use_aot_compile: bool
-) -> CompilerInterface:
-    assert (
-        not (use_aot_compile and envs.VLLM_USE_MEGA_AOT_ARTIFACT)
-        or envs.VLLM_USE_STANDALONE_COMPILE
-    ), "VLLM_USE_MEGA_AOT_ARTIFACT=1 requires VLLM_USE_STANDALONE_COMPILE=1"
+def make_compiler(compilation_config: CompilationConfig) -> CompilerInterface:
+    assert not envs.VLLM_USE_MEGA_AOT_ARTIFACT or envs.VLLM_USE_STANDALONE_COMPILE, (
+        "VLLM_USE_MEGA_AOT_ARTIFACT=1 requires VLLM_USE_STANDALONE_COMPILE=1"
+    )
 
     if compilation_config.backend == "inductor":
         # Use standalone compile only if requested, version is new enough,
@@ -110,12 +107,11 @@ def make_compiler(
         ):
             logger.debug("Using InductorStandaloneAdaptor")
             return InductorStandaloneAdaptor(
-                compilation_config.compile_cache_save_format,
-                use_aot_compile=use_aot_compile,
+                compilation_config.compile_cache_save_format
             )
         else:
             logger.debug("Using InductorAdaptor")
-            return InductorAdaptor(use_aot_compile=use_aot_compile)
+            return InductorAdaptor()
     elif compilation_config.backend == "eager":
         logger.debug("Using EagerAdaptor")
         return EagerAdaptor()
@@ -140,16 +136,11 @@ class CompilerManager:
     support int as key.
     """
 
-    def __init__(
-        self, compilation_config: CompilationConfig, *, use_aot_compile: bool
-    ) -> None:
+    def __init__(self, compilation_config: CompilationConfig) -> None:
         self.cache: dict[tuple[Range, int, str], Any] = dict()
         self.is_cache_updated = False
         self.compilation_config = compilation_config
-        self.use_aot_compile = use_aot_compile
-        self.compiler = make_compiler(
-            compilation_config, use_aot_compile=use_aot_compile
-        )
+        self.compiler = make_compiler(compilation_config)
         self.loaded_artifacts: dict[str, Any] = {}
         self.prefix: str = ""
 
@@ -194,11 +185,7 @@ class CompilerManager:
         self.cache_file_path = os.path.join(cache_dir, "vllm_compile_cache.py")
         self.prefix = prefix
 
-        if (
-            self.use_aot_compile
-            and not disable_cache
-            and os.path.exists(self.cache_file_path)
-        ):
+        if not disable_cache and os.path.exists(self.cache_file_path):
             # load the cache from the file
             with open(self.cache_file_path) as f:
                 # we use ast.literal_eval to parse the data
@@ -229,7 +216,7 @@ class CompilerManager:
         )
 
     def save_to_file(self) -> None:
-        if not self.use_aot_compile or self.disable_cache or not self.is_cache_updated:
+        if self.disable_cache or not self.is_cache_updated:
             return
         printer = pprint.PrettyPrinter(indent=4)
         data = printer.pformat(self.cache)
@@ -243,8 +230,6 @@ class CompilerManager:
         graph_index: int,
         compile_range: Range,
     ) -> Callable[..., Any] | None:
-        if not self.use_aot_compile:
-            return None
         if (compile_range, graph_index, self.compiler.name) not in self.cache:
             return None
 
@@ -385,11 +370,7 @@ class CompilerManager:
         assert compiled_graph is not None, "Failed to compile the graph"
 
         # store the artifact in the cache
-        if (
-            self.use_aot_compile
-            and is_compile_cache_enabled(additional_inductor_config)
-            and handle is not None
-        ):
+        if is_compile_cache_enabled(additional_inductor_config) and handle is not None:
             self.cache[(compile_range, graph_index, self.compiler.name)] = {
                 "graph_handle": handle,
                 "cache_key": cache_key,
@@ -858,7 +839,6 @@ class VllmBackend:
         vllm_config: VllmConfig,
         prefix: str = "",
         is_encoder: bool = False,
-        use_aot_compile: bool = True,
     ) -> None:
         # if the model is initialized with a non-empty prefix,
         # then usually it's enough to use that prefix,
@@ -879,10 +859,9 @@ class VllmBackend:
 
         self.vllm_config = vllm_config
         self.compilation_config = vllm_config.compilation_config
-        self.use_mega_artifact = use_aot_compile and envs.VLLM_USE_MEGA_AOT_ARTIFACT
 
         self.compiler_manager: CompilerManager = CompilerManager(
-            self.compilation_config, use_aot_compile=use_aot_compile
+            self.compilation_config
         )
 
         # Deepcopy the inductor config to detach the post-grad custom pass
@@ -913,7 +892,7 @@ class VllmBackend:
                   returns_tuple
 
         """
-        if not self.use_mega_artifact:
+        if not envs.VLLM_USE_MEGA_AOT_ARTIFACT:
             return None, None, None
 
         from .caching import StandaloneCompiledArtifacts
@@ -1214,7 +1193,7 @@ class VllmBackend:
         # keep a split_gm copy from BEFORE the interpreter replaces
         # submodules with PiecewiseBackend -- used for serialization
         original_split_gm = None
-        if self.use_mega_artifact:
+        if envs.VLLM_USE_MEGA_AOT_ARTIFACT:
             original_split_gm = deepcopy(self.split_gm)
 
         from torch._dynamo.utils import lazy_format_graph_code
@@ -1306,7 +1285,9 @@ class VllmBackend:
             logger.debug_once("Computation graph saved to %s", graph_path)
 
         self._called = True
-        graph_to_serialize = original_split_gm if self.use_mega_artifact else self.graph
+        graph_to_serialize = (
+            original_split_gm if envs.VLLM_USE_MEGA_AOT_ARTIFACT else self.graph
+        )
 
         execution_code, submod_names, consts = generate_execution_code(self.split_gm)
         # Use getattr to get correct callables: __dict__ has PiecewiseBackend

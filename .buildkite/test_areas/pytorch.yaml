@@ -160,7 +160,6 @@ steps:
     amd:
       label: ':amd: (MI300) PyTorch Compilation Passes'
       dind: false
-      automatic_shard: true
       device: mi300_1
       timeout_in_minutes: 80
       working_dir: /vllm-workspace/tests

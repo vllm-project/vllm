@@ -251,7 +251,7 @@ class CohereServingChatV2(OpenAIServingChat):
         reasoning_parser: str = "",
         enable_auto_tools: bool = False,
         tool_parser: str | None = None,
-        tool_strict_level: str | None = None,
+        tool_strict_level: str = "auto",
         enable_prompt_tokens_details: bool = False,
         enable_force_include_usage: bool = False,
         enable_log_outputs: bool = False,
@@ -321,14 +321,7 @@ class CohereServingChatV2(OpenAIServingChat):
             case ChatCompletionResponse():
                 return self._chat_completion_to_v2(generator, request)
             case _:
-                return generator
-
-    def chat_completion_stream_generator(
-        self, *args: Any, **kwargs: Any
-    ) -> AsyncGenerator[str, None]:
-        return self._chat_completion_stream_to_v2(
-            self.chat_completion_stream_generator_raw(*args, **kwargs)
-        )
+                return self._chat_completion_stream_to_v2(generator, request)
 
     def to_chat_completion_request(
         self, request: CohereChatV2Request
@@ -608,7 +601,7 @@ class CohereServingChatV2(OpenAIServingChat):
             json_schema=(
                 JsonSchemaResponseFormat(
                     name="cohere_v2_json_schema",
-                    schema=rf.json_schema,
+                    json_schema=rf.json_schema,
                 )
                 if rf.json_schema
                 else None
@@ -1435,9 +1428,10 @@ class CohereServingChatV2(OpenAIServingChat):
 
     async def _chat_completion_stream_to_v2(
         self,
-        generator: AsyncGenerator[ChatCompletionStreamResponse | ErrorResponse, None],
+        generator: AsyncGenerator[str, None],
+        request: CohereChatV2Request,
     ) -> AsyncGenerator[str, None]:
-        """Translate raw OpenAI chat completion chunks into Cohere's
+        """Translate an OpenAI-style chat completion SSE stream into Cohere's
         v2 stream-event format.
 
         Cohere's v2 stream lifecycle is:
@@ -1451,9 +1445,19 @@ class CohereServingChatV2(OpenAIServingChat):
         state = _StreamState()
 
         try:
-            async for chunk in generator:
-                if isinstance(chunk, ErrorResponse):
-                    raise RuntimeError(chunk.error.message)
+            async for item in generator:
+                if not item.startswith("data:"):
+                    continue
+                data_str = item[len("data:") :].strip().rstrip("\n")
+                if not data_str:
+                    continue
+                if data_str == "[DONE]":
+                    # OpenAI's stream terminator. Fall through to the
+                    # post-loop cleanup so we always emit ``message-end``
+                    # even if the usage-only chunk was skipped.
+                    break
+
+                chunk = ChatCompletionStreamResponse.model_validate_json(data_str)
                 state.last_chunk_id = chunk.id
 
                 if not state.started:
@@ -1510,9 +1514,7 @@ class CohereServingChatV2(OpenAIServingChat):
 
         except Exception as exc:
             logger.exception("Error converting chat completion stream to v2")
-            if not state.ended:
-                for ev in self._close_open_blocks(state):
-                    yield ev
+            if state.started and not state.ended:
                 yield _sse(
                     json.dumps(
                         {
@@ -1528,7 +1530,11 @@ class CohereServingChatV2(OpenAIServingChat):
             yield _DONE_FRAME
             return
 
-        # Ensure message-end is emitted even without a final usage chunk.
+        # Normal completion or ``[DONE]``: ensure ``message-end`` is always
+        # emitted. Upstream may close the stream without sending the final
+        # usage-only chunk (e.g. on shutdown, or when ``[DONE]`` is the only
+        # terminator); without this fallback Cohere clients would hang
+        # waiting for the closing event.
         if state.started and not state.ended:
             for ev in self._close_open_blocks(state):
                 yield ev

@@ -316,8 +316,9 @@ class ShardedRDTWeightTransferEngine(
             raise ValueError(
                 f"The 'sharded_rdt' weight transfer backend requires "
                 f"distributed_executor_backend='ray', got {backend!r}. Pass "
-                f"--distributed-executor-backend ray so the workers are "
-                f"RayExecutorV2 actors with tensor transport."
+                f"--distributed-executor-backend ray (and keep "
+                f"VLLM_USE_RAY_V2_EXECUTOR_BACKEND=1, the default, so the "
+                f"workers are RayExecutorV2 actors with tensor transport)."
             )
         # Ownership table, routing rules, and (once bound) every producer's
         # handle — pulls go to one owner per chunk, but free_group fans out to

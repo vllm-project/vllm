@@ -279,6 +279,7 @@ jobs:
               "speculative-decoding": {
                 keywords: [
                   { term: "eagle",  searchIn: "title" },
+                  { term: "medusa", searchIn: "title" },
                 ],
                 substrings: [
                   { term: "speculative decoding", searchIn: "title" },

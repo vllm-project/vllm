@@ -501,27 +501,6 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "float eps) -> (Tensor, Tensor)");
 #endif
 
-#ifndef USE_ROCM
-  ops.def(
-      "fused_qknorm_rope_cache("
-      "Tensor! q_out, Tensor! k_out, Tensor! v_out, Tensor qkv, "
-      "Tensor q_weight, Tensor k_weight, Tensor cos, Tensor sin, "
-      "Tensor positions, Tensor slot_mapping, Tensor! k_cache, "
-      "Tensor! v_cache, int head_dim, int num_q_heads, int num_kv_heads, "
-      "int rotary_pairs, float epsilon, float norm_weight_bias, "
-      "str kv_cache_dtype=\"auto\", Tensor? k_scale=None, Tensor? "
-      "v_scale=None) -> ()");
-#endif
-
-  ops.def(
-      "fused_muse_spark_qknorm_rope_kv_insert("
-      "Tensor! qkv, Tensor positions, int num_heads, int num_kv_heads, "
-      "int head_dim, float eps, Tensor? cos_sin_cache, int rotary_dim, "
-      "Tensor? slot_mapping, Tensor!? kv_cache, int block_size, "
-      "str kv_cache_dtype, Tensor? k_scale=None, Tensor? v_scale=None, "
-      "Tensor!? q_fp8_out=None, Tensor? q_scale=None) "
-      "-> ()");
-
   // Horizontally-fused MiniMax-M3 QK-norm + partial NeoX RoPE + KV-insert.
   ops.def(
       "fused_minimax_m3_qknorm_rope_kv_insert("
@@ -619,10 +598,6 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "y_q, Tensor! y_s, bool use_ue8m0) -> ()");
   ops.def("weak_ref_tensor(Tensor input) -> Tensor");
 
-  ops.def(
-      "muse_spark_mul_tanh_soft_cap(Tensor! out, Tensor input, "
-      "float multiplier, float soft_cap_temp) -> ()");
-
   // Activation function used in SwiGLU.
   ops.def("silu_and_mul(Tensor! result, Tensor input) -> ()");
 
@@ -665,6 +640,9 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "situ_and_mul_quant(Tensor! out, Tensor! scale, Tensor input, "
       "float beta=1.0, float linear_beta=-1.0, int group_size=0, "
       "Tensor? num_valid_tokens=None, int topk=1) -> ()");
+  ops.def(
+      "masked_situ_and_mul(Tensor! out, Tensor input, Tensor "
+      "expert_num_tokens, float beta=1.0, float linear_beta=-1.0) -> ()");
   ops.def(
       "masked_moe_activation(Tensor! out, Tensor input, Tensor "
       "valid_token_counts, str activation, float clamp_limit=0.0, float "
@@ -853,11 +831,7 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
            TORCH_BOX(&fused_kimi_k3_mla_decode_q_concat_ds_mla_insert));
 #ifndef USE_ROCM
   ops.impl("minimax_allreduce_rms_qk", TORCH_BOX(&minimax_allreduce_rms_qk));
-  ops.impl("fused_qknorm_rope_cache",
-           TORCH_BOX(&vllm::fused_qknorm_rope_cache));
 #endif
-  ops.impl("fused_muse_spark_qknorm_rope_kv_insert",
-           TORCH_BOX(&fused_muse_spark_qknorm_rope_kv_insert));
   ops.impl("fused_minimax_m3_qknorm_rope_kv_insert",
            TORCH_BOX(&fused_minimax_m3_qknorm_rope_kv_insert));
 #ifdef VLLM_ENABLE_FUSED_KDA_DECODE
@@ -893,8 +867,6 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
            TORCH_BOX(&persistent_masked_m_silu_mul_quant));
   ops.impl("weak_ref_tensor", TORCH_BOX(&weak_ref_tensor));
   ops.impl("silu_and_mul_quant", TORCH_BOX(&silu_and_mul_quant));
-  ops.impl("muse_spark_mul_tanh_soft_cap",
-           TORCH_BOX(&muse_spark_mul_tanh_soft_cap));
   ops.impl("silu_and_mul", TORCH_BOX(&silu_and_mul));
   ops.impl("mul_and_silu", TORCH_BOX(&mul_and_silu));
   ops.impl("gelu_and_mul", TORCH_BOX(&gelu_and_mul));
@@ -903,6 +875,7 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   ops.impl("swigluoai_and_mul", TORCH_BOX(&swigluoai_and_mul));
   ops.impl("situ_and_mul", TORCH_BOX(&situ_and_mul));
   ops.impl("situ_and_mul_quant", TORCH_BOX(&situ_and_mul_quant));
+  ops.impl("masked_situ_and_mul", TORCH_BOX(&masked_situ_and_mul));
   ops.impl("masked_moe_activation", TORCH_BOX(&masked_moe_activation));
   ops.impl("gelu_new", TORCH_BOX(&gelu_new));
   ops.impl("gelu_fast", TORCH_BOX(&gelu_fast));
@@ -982,8 +955,7 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C_cache_ops, ops) {
       "                  Tensor! key_cache, Tensor! value_cache,"
       "                  Tensor slot_mapping,"
       "                  str kv_cache_dtype,"
-      "                  Tensor k_scale, Tensor v_scale,"
-      "                  bool interleaved_v=False) -> ()");
+      "                  Tensor k_scale, Tensor v_scale) -> ()");
 
   // Reshape the key and value tensors and cache them.
   ops.def(

@@ -104,12 +104,12 @@ def convert_image_mode(
     to_mode: str,
     background_color: tuple[int, int, int] | list[int] = (255, 255, 255),
 ) -> Image.Image:
+    if image.mode == to_mode:
+        return image
+
     if to_mode == "RGB" and _has_transparency(image):
         if image.mode != "RGBA":
             image = image.convert("RGBA")
         return rgba_to_rgb(image, background_color)
-
-    if image.mode == to_mode:
-        return image
 
     return image.convert(to_mode)

@@ -12,5 +12,4 @@ server_args: >-
   --enable-expert-parallel
   --mamba-backend triton
   --moe-backend triton
-  --attention-backend ROCM_AITER_FA
   --speculative-config '{"method":"mtp","num_speculative_tokens":5}'

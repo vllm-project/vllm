@@ -18,7 +18,6 @@ from vllm.transformers_utils.config import (
     ConfigFormat,
     get_safetensors_params_metadata,
 )
-from vllm.transformers_utils.deepseek_v4_utils import get_compress_ratios
 from vllm.transformers_utils.repo_utils import (
     file_or_path_exists,
     get_hf_file_to_dict,
@@ -91,7 +90,7 @@ class ModelArchConfigConvertorBase:
     def get_head_size(self) -> int:
         if self.is_deepseek_mla():
             # special case for deepseek_v4
-            if get_compress_ratios(self.hf_text_config):
+            if hasattr(self.hf_text_config, "compress_ratios"):
                 return self.hf_text_config.head_dim
             qk_rope_head_dim = self._get_qk_rope_head_dim()
             if not envs.VLLM_MLA_DISABLE:
@@ -319,7 +318,7 @@ class ModelArchConfigConvertorBase:
             "hy_v4_mtp",
         ):
             # check is deepseek_v4 model
-            if get_compress_ratios(self.hf_text_config):
+            if hasattr(self.hf_text_config, "compress_ratios"):
                 return getattr(self.hf_text_config, "head_dim", None) is not None
             else:
                 return getattr(self.hf_text_config, "kv_lora_rank", None) is not None
@@ -497,6 +496,14 @@ class TerratorchModelArchConfigConvertor(ModelArchConfigConvertorBase):
         return 0
 
 
+class MedusaModelArchConfigConvertor(ModelArchConfigConvertorBase):
+    def get_head_size(self) -> int:
+        return 0
+
+    def get_total_num_kv_heads(self) -> int:
+        return 0
+
+
 class Zamba2ModelArchConfigConvertor(ModelArchConfigConvertorBase):
     def get_head_size(self) -> int:
         return getattr(self.hf_text_config, "attention_head_dim", 0)
@@ -634,17 +641,6 @@ class Qwen3_5ModelArchConfigConvertor(ModelArchConfigConvertorBase):
                 hf_config.architectures = ["ClefFlashForJointSchema"]
                 hf_config.joint_head_config = get_hf_file_to_dict(
                     "joint_head_config.json", model_path, revision
-                )
-        elif getattr(hf_config, "architectures", None) == ["Qwen3_5Model"]:
-            # Decision 3.0 checkpoints are a bare backbone plus a code readout
-            # described by decision_config.json.
-            model_path = hf_config.name_or_path
-            if model_path and file_or_path_exists(
-                model_path, "decision_config.json", revision
-            ):
-                hf_config.architectures = ["D3ForSequenceClassification"]
-                hf_config.decision_config = get_hf_file_to_dict(
-                    "decision_config.json", model_path, revision
                 )
         super().__init__(hf_config, hf_text_config, revision)
 
@@ -842,6 +838,7 @@ MODEL_ARCH_CONFIG_CONVERTORS = {
     "longcat_flash": LongCatFlashModelArchConfigConvertor,
     "longcat_flash_mtp": LongCatFlashMTPModelArchConfigConvertor,
     "mamba": MambaModelArchConfigConvertor,
+    "medusa": MedusaModelArchConfigConvertor,
     "mimo_mtp": MimoMTPModelArchConfigConvertor,
     "mimo_v2": MimoV2ModelArchConfigConvertor,
     "mimo_v2_flash": MimoV2ModelArchConfigConvertor,

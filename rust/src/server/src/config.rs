@@ -238,9 +238,8 @@ pub struct Config {
     pub tool_call_parser: ParserSelection,
     /// Reasoning parser selection.
     pub reasoning_parser: ParserSelection,
-    /// Server-side floor for tool-call structural tags, or `None` for the
-    /// tool parser's default level.
-    pub tool_strict_level: Option<ToolStrictLevel>,
+    /// Server-side floor for tool-call structural tags.
+    pub tool_strict_level: ToolStrictLevel,
     /// Chat renderer selection.
     pub renderer: RendererSelection,
     /// Disable frontend-side multimodal preprocessing and render the model as

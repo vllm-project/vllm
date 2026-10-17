@@ -6,6 +6,7 @@ from torch import nn
 
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
+from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.spec_decode.dflash2.speculator import DFlash2Speculator
 from vllm.v1.worker.gpu.spec_decode.eagle.utils import get_target_lm_head
 
@@ -22,9 +23,6 @@ class LiLiCorrSpeculator(DFlash2Speculator):
         )
         self.anchor_valid = torch.zeros(
             self.max_num_reqs, dtype=torch.bool, device=device
-        )
-        self._num_rejected = torch.zeros(
-            self.max_num_reqs, dtype=torch.int32, device=device
         )
 
     def load_draft_model(
@@ -69,14 +67,11 @@ class LiLiCorrSpeculator(DFlash2Speculator):
         return model
 
     def prepare_context_anchor(
-        self,
-        num_reqs: int,
-        query_start_loc: torch.Tensor,
-        num_rejected: torch.Tensor | None,
+        self, input_batch: InputBatch, num_rejected: torch.Tensor
     ) -> None:
-        assert num_rejected is not None
-        starts = query_start_loc[:num_reqs]
-        ends = query_start_loc[1 : num_reqs + 1] - num_rejected[:num_reqs]
+        num_reqs = input_batch.num_reqs
+        starts = input_batch.query_start_loc[:num_reqs]
+        ends = input_batch.query_start_loc[1 : num_reqs + 1] - num_rejected[:num_reqs]
         valid = ends > starts
         indices = (ends - 1).clamp_min(0).long()
         self.anchor_hidden.zero_()

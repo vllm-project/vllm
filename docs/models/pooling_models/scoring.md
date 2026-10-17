@@ -455,8 +455,6 @@ Score templates are supported for **cross-encoder** models only. If you are usin
 
 Some scoring models require a specific prompt format to work correctly. You can specify a custom score template using the `--chat-template` parameter (see [Chat Template](../../serving/online_serving/README.md#chat-template)).
 
-For offline scoring, pass `chat_template` to the `LLM` constructor to use it for every `LLM.score` call. A `chat_template` passed to `LLM.score` overrides the constructor's template for that call.
-
 Like chat templates, the score template receives a `messages` list. For scoring, each message has a `role` attribute—either `"query"` or `"document"`. For the usual kind of point-wise cross-encoder, you can expect exactly two messages: one query and one document. To access the query and document content, use Jinja's `selectattr` filter:
 
 - **Query**: `{{ (messages | selectattr("role", "eq", "query") | first).content }}`

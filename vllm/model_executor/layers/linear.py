@@ -31,7 +31,6 @@ from vllm.model_executor.layers.quantization.base_config import (
 )
 from vllm.model_executor.layers.utils import (
     dispatch_unquantized_gemm,
-    maybe_pad_weight_avoid_cache_aliasing,
 )
 from vllm.model_executor.parameter import (
     BasevLLMParameter,
@@ -226,8 +225,6 @@ class UnquantizedLinearMethod(LinearMethodBase):
                 and weight.stride(0) != 1
             ):
                 layer.weight.data = weight.t().contiguous().t()
-        elif current_platform.is_rocm():
-            layer.weight.data = maybe_pad_weight_avoid_cache_aliasing(layer.weight.data)
 
     def apply(
         self,
@@ -519,20 +516,6 @@ class ColumnParallelLinear(LinearBase):
         self._maybe_allow_fp8_block_shape_mismatch()
         self.gather_output = gather_output
 
-        from vllm.model_executor.layers.quantization.online.fp8 import OnlineLinearBase
-
-        quant_method = self.quant_method
-        if (
-            isinstance(quant_method, OnlineLinearBase)
-            and quant_method.requantization_source is not None
-        ):
-            quant_method = quant_method.requantization_source
-        weight_loader = (
-            self.weight_loader_v2
-            if quant_method.__class__.__name__ in WEIGHT_LOADER_V2_SUPPORTED
-            else self.weight_loader
-        )
-
         self.quant_method.create_weights(
             layer=self,
             input_size_per_partition=self.input_size_per_partition,
@@ -540,7 +523,11 @@ class ColumnParallelLinear(LinearBase):
             input_size=self.input_size,
             output_size=self.output_size,
             params_dtype=self.params_dtype,
-            weight_loader=weight_loader,
+            weight_loader=(
+                self.weight_loader_v2
+                if self.quant_method.__class__.__name__ in WEIGHT_LOADER_V2_SUPPORTED
+                else self.weight_loader
+            ),
         )
 
         if bias:
@@ -1710,20 +1697,6 @@ class RowParallelLinear(LinearBase):
         self.input_is_parallel = input_is_parallel
         self.reduce_results = reduce_results
 
-        from vllm.model_executor.layers.quantization.online.fp8 import OnlineLinearBase
-
-        quant_method = self.quant_method
-        if (
-            isinstance(quant_method, OnlineLinearBase)
-            and quant_method.requantization_source is not None
-        ):
-            quant_method = quant_method.requantization_source
-        weight_loader = (
-            self.weight_loader_v2
-            if quant_method.__class__.__name__ in WEIGHT_LOADER_V2_SUPPORTED
-            else self.weight_loader
-        )
-
         self.quant_method.create_weights(
             layer=self,
             input_size_per_partition=self.input_size_per_partition,
@@ -1731,7 +1704,11 @@ class RowParallelLinear(LinearBase):
             input_size=self.input_size,
             output_size=self.output_size,
             params_dtype=self.params_dtype,
-            weight_loader=weight_loader,
+            weight_loader=(
+                self.weight_loader_v2
+                if self.quant_method.__class__.__name__ in WEIGHT_LOADER_V2_SUPPORTED
+                else self.weight_loader
+            ),
         )
         if not reduce_results and (bias and not skip_bias_add):
             raise ValueError(

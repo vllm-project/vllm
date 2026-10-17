@@ -54,14 +54,6 @@ impl ManagedEngineConfig {
         format!("tcp://{}:{}", self.handshake_host, self.handshake_port)
     }
 
-    /// Env vars every managed engine needs when serving the Rust frontend:
-    /// `VLLM_USE_RUST_FRONTEND=1` tells Python vLLM to keep frontend-side
-    /// multimodal normalization (`mm_device_do_normalize = False`,
-    /// vllm/config/model.py) instead of expecting raw uint8 pixels.
-    pub fn rust_frontend_envs() -> Vec<(String, String)> {
-        vec![("VLLM_USE_RUST_FRONTEND".to_string(), "1".to_string())]
-    }
-
     /// Build the concrete Python command line for the managed headless engine.
     pub fn to_command(&self) -> StdCommand {
         let mut command = StdCommand::new(&self.python);
@@ -78,7 +70,6 @@ impl ManagedEngineConfig {
             .arg("--data-parallel-size")
             .arg(self.data_parallel_size.to_string())
             .args(&self.python_args);
-        command.envs(Self::rust_frontend_envs());
         command
     }
 }
@@ -265,32 +256,6 @@ mod tests {
             ]
         "#]]
         .assert_debug_eq(&args);
-
-        let envs = command.get_envs().collect::<Vec<_>>();
-        expect![[r#"
-            [
-                (
-                    "VLLM_USE_RUST_FRONTEND",
-                    Some(
-                        "1",
-                    ),
-                ),
-            ]
-        "#]]
-        .assert_debug_eq(&envs);
-    }
-
-    #[test]
-    fn rust_frontend_envs_include_rust_frontend_flag() {
-        expect![[r#"
-            [
-                (
-                    "VLLM_USE_RUST_FRONTEND",
-                    "1",
-                ),
-            ]
-        "#]]
-        .assert_debug_eq(&ManagedEngineConfig::rust_frontend_envs());
     }
 
     #[test]

@@ -11,10 +11,6 @@ symbols to both the ``TYPE_CHECKING`` imports and ``_EXPORTS``, using
 import importlib
 from typing import TYPE_CHECKING, Any
 
-import torch
-
-from vllm.utils.platform_utils import num_compute_units
-
 if TYPE_CHECKING:
     from humming import dtypes as dtypes
     from humming.config import GemmType as GemmType
@@ -54,9 +50,8 @@ if TYPE_CHECKING:
     from humming.schema.modelopt import (
         ModeloptNvfp4WeightSchema as ModeloptNvfp4WeightSchema,
     )
-    from humming.transform import (
-        prepare_and_transform_humming_tensors as prepare_and_transform_humming_tensors,
-    )
+    from humming.transform import prepare_layer_config as prepare_layer_config
+    from humming.transform import transform_humming_tensors as transform_humming_tensors
     from humming.tune import get_heuristics_config as get_heuristics_config
     from humming.utils.weight import quantize_weight as quantize_weight
 
@@ -73,9 +68,8 @@ _EXPORTS: dict[str, str] = {
     "may_process_input": "humming.forward:may_process_input",
     "process_input": "humming.ops:process_input",
     "may_quant_input": "humming.forward:may_quant_input",
-    "prepare_and_transform_humming_tensors": (
-        "humming.transform:prepare_and_transform_humming_tensors"
-    ),
+    "prepare_layer_config": "humming.transform:prepare_layer_config",
+    "transform_humming_tensors": "humming.transform:transform_humming_tensors",
     "get_heuristics_config": "humming.tune:get_heuristics_config",
     "BaseInputSchema": "humming.schema:BaseInputSchema",
     "BaseWeightSchema": "humming.schema:BaseWeightSchema",
@@ -97,82 +91,10 @@ _EXPORTS: dict[str, str] = {
 }
 
 
-def create_humming_locks(device: torch.device | str) -> torch.Tensor:
-    device = torch.device(device)
-    device_index = device.index
-    if device_index is None:
-        device_index = torch.accelerator.current_device_index()
-    return torch.zeros(
-        num_compute_units(device_index) * 8,
-        dtype=torch.int32,
-        device=device,
-    )
-
-
-_patched = False
-
-
-def _patch_humming() -> None:
-    """Make humming's per-call ``DeviceInfo(device)`` lookups traceable.
-
-    The forward path (``LayerConfig.check_device``, PDL heuristics) builds a
-    ``DeviceInfo`` on every call, which breaks vLLM's fullgraph compile:
-    Dynamo recurses forever in ``DeviceInfo.__getattr__``
-    (vllm-project/humming#147) and, with that fixed (#148), still cannot
-    trace the extension's ``_DeviceInfo`` constructor. Hand out one cached
-    instance per device instead; ``prepare_layer_config`` creates it eagerly
-    during weight processing.
-
-    TODO: remove after bumping humming to a release with
-    vllm-project/humming#149.
-    """
-    global _patched
-    if _patched:
-        return
-    _patched = True
-
-    import humming.config.config
-    import humming.transform
-    import humming.tune
-    import humming.tune.process_input
-    import humming.utils.smem
-    from humming.device import DeviceInfo, get_device_index
-
-    def __getattr__(self, name: str) -> Any:
-        if name.startswith("_"):
-            raise AttributeError(
-                f"{type(self).__name__!r} object has no attribute {name!r}"
-            )
-        return getattr(self._get_value(), name)
-
-    DeviceInfo.__getattr__ = __getattr__
-
-    device_infos: dict[int, DeviceInfo] = {}
-
-    def cached_device_info(index: int | torch.device | None = None) -> DeviceInfo:
-        if isinstance(index, torch.device) and index.type != "cuda":
-            return DeviceInfo(index)
-        device_index = get_device_index(index)
-        if device_index not in device_infos:
-            device_infos[device_index] = DeviceInfo(device_index)
-        return device_infos[device_index]
-
-    for module in (
-        humming.config.config,
-        humming.transform,
-        humming.tune,
-        humming.tune.process_input,
-        humming.utils.smem,
-    ):
-        if getattr(module, "DeviceInfo", None) is DeviceInfo:
-            module.DeviceInfo = cached_device_info
-
-
 def __getattr__(name: str) -> Any:
     spec = _EXPORTS.get(name)
     if spec is None:
         raise AttributeError(f"module 'vllm.utils.humming' has no attribute {name!r}")
-    _patch_humming()
     if ":" in spec:
         mod_path, attr = spec.split(":", 1)
         obj = getattr(importlib.import_module(mod_path), attr)

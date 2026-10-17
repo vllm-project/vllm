@@ -2,7 +2,6 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use super::{GlmXmlToolParser, Separator};
-use crate::output_grammar::ToolStrictLevel;
 use crate::tool::{Result, StructuralTagBuilder, Tool, ToolParser, ToolParserOutput};
 
 /// Tool parser for GLM-4.7 MoE XML-style tool calls.
@@ -24,11 +23,6 @@ impl ToolParser for Glm47MoeToolParser {
         Self: Sized + 'static,
     {
         Ok(Box::new(Self::new(tools)))
-    }
-
-    // Constrain auto tool calls by default, like the Python `glm47` parser.
-    fn default_tool_strict_level(&self) -> ToolStrictLevel {
-        ToolStrictLevel::Function
     }
 
     fn structural_tag_builder(&self) -> Option<&dyn StructuralTagBuilder> {

@@ -5,12 +5,9 @@ description: Find vLLM deployment recipes and configs for LLMs and Hugging Face 
 
 # Model Recipes
 
-Model serving recipes are maintained in this repository's
-[recipes/models/ directory](../../../recipes/models). Omni (image, video,
-audio) recipes stay in vllm-project/recipes for now (moving to vllm-omni),
-and Ascend NPU content is inline in these recipes (moving to vllm-ascend
-overlays). The published catalog, rendered by
-[vllm-project/recipes](https://github.com/vllm-project/recipes), is at
+Model serving recipes are maintained in the
+[models/ directory of vllm-project/recipes](https://github.com/vllm-project/recipes/tree/main/models).
+The published catalog is at
 [recipes.vllm.ai](https://recipes.vllm.ai).
 
 ## Usage notes
@@ -149,9 +146,6 @@ uploads, untested hardware claims, or non-standard flags that only work for one
 setup. Before opening a pull request, confirm that the user ran the
 configuration and can share the results.
 
-Edit the YAML under [recipes/models/](../../../recipes/models) in this
-repository, following the recipes repository's
+Follow the recipes repository's
 [add-recipe skill](https://github.com/vllm-project/recipes/blob/main/.agents/skills/add-recipe/SKILL.md)
-for the schema. Validate and preview it from a checkout of
-`vllm-project/recipes` pointed at this directory, as
-[recipes/README.md](../../../recipes/README.md) describes.
+in a checkout of `vllm-project/recipes` or the user's intended fork.

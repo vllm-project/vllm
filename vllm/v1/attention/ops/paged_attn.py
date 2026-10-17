@@ -38,7 +38,6 @@ class PagedAttention:
         kv_cache_dtype: str,
         k_scale: torch.Tensor,
         v_scale: torch.Tensor,
-        interleaved_v: bool,
     ) -> None:
         ops.reshape_and_cache(
             key,
@@ -49,5 +48,4 @@ class PagedAttention:
             kv_cache_dtype,
             k_scale,
             v_scale,
-            interleaved_v,
         )

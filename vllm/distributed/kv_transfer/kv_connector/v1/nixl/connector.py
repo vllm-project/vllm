@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
-from vllm.config import KVTransferConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     EngineId,
 )
@@ -140,10 +140,6 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
     ############################################################
     # Class Methods
     ############################################################
-    @classmethod
-    def supports_sleep_mode(cls, kv_transfer_config: KVTransferConfig) -> bool:
-        return False
-
     @classmethod
     def get_required_kvcache_layout(cls, vllm_config: VllmConfig):
         if vllm_config.model_config is None:

@@ -11,7 +11,6 @@ from argparse import (
     ArgumentDefaultsHelpFormatter,
     ArgumentParser,
     ArgumentTypeError,
-    BooleanOptionalAction,
     Namespace,
     RawDescriptionHelpFormatter,
     _ArgumentGroup,
@@ -117,42 +116,6 @@ class SortedHelpFormatter(ArgumentDefaultsHelpFormatter, RawDescriptionHelpForma
         super().add_arguments(actions)
 
 
-class EnableDisableAction(BooleanOptionalAction):
-    """`BooleanOptionalAction` that pairs `--enable-x` with `--disable-x`.
-
-    `--no-enable-x` and `--no-disable-x` are still accepted for backwards
-    compatibility, but are hidden from help.
-    """
-
-    _inverse_prefixes = {"--enable-": "--disable-", "--disable-": "--enable-"}
-
-    def __init__(self, option_strings, dest, *args, **kwargs):
-        super().__init__(option_strings, dest, *args, **kwargs)
-        inverses = [
-            inverse + opt.removeprefix(prefix)
-            for opt in option_strings
-            for prefix, inverse in self._inverse_prefixes.items()
-            if opt.startswith(prefix)
-        ]
-        negated = {opt for opt in self.option_strings if opt not in option_strings}
-        self.negative_option_strings = negated | set(inverses)
-        self.visible_option_strings = (
-            [*option_strings, *inverses] if inverses else list(self.option_strings)
-        )
-        self.option_strings = [*self.option_strings, *inverses]
-
-    def __call__(self, parser, namespace, values, option_string=None):
-        setattr(namespace, self.dest, option_string not in self.negative_option_strings)
-
-
-def _register_action(action: Action, deprecated: bool, deprecated_actions: set):
-    # Hidden option strings stay registered with the parser but leave help.
-    if isinstance(action, EnableDisableAction):
-        action.option_strings = action.visible_option_strings
-    if deprecated:
-        deprecated_actions.add(action)
-
-
 class FlexibleArgumentParser(ArgumentParser):
     """ArgumentParser that allows both underscore and dash in names."""
 
@@ -176,7 +139,6 @@ class FlexibleArgumentParser(ArgumentParser):
         # Pop kwarg "add_json_tip" to control whether to add the JSON tip
         self.add_json_tip = kwargs.pop("add_json_tip", True)
         super().__init__(*args, **kwargs)
-        self.register("action", BooleanOptionalAction, EnableDisableAction)
         self._show_serve_task_hint = False
 
     def error(self, message: str) -> NoReturn:
@@ -207,28 +169,29 @@ class FlexibleArgumentParser(ArgumentParser):
                     logger.warning_once("argument '%s' is deprecated", dest)
             return namespace, args
 
-    def add_argument(self, *args, **kwargs):
-        # Python 3.13+ handles the deprecated kwarg natively
-        deprecated = sys.version_info < (3, 13) and kwargs.pop("deprecated", False)
-        action = super().add_argument(*args, **kwargs)
-        _register_action(action, deprecated, self._deprecated)
-        return action
-
-    class _FlexibleArgumentGroup(_ArgumentGroup):
-        def __init__(self, container, *args, **kwargs):
-            super().__init__(container, *args, **kwargs)
-            self._deprecated: set[Action] = container._deprecated
-
         def add_argument(self, *args, **kwargs):
-            deprecated = sys.version_info < (3, 13) and kwargs.pop("deprecated", False)
+            deprecated = kwargs.pop("deprecated", False)
             action = super().add_argument(*args, **kwargs)
-            _register_action(action, deprecated, self._deprecated)
+            if deprecated:
+                self._deprecated.add(action)
             return action
 
-    def add_argument_group(self, *args, **kwargs):
-        group = self._FlexibleArgumentGroup(self, *args, **kwargs)
-        self._action_groups.append(group)
-        return group
+        class _FlexibleArgumentGroup(_ArgumentGroup):
+            def __init__(self, container, *args, **kwargs):
+                super().__init__(container, *args, **kwargs)
+                self._deprecated: set[Action] = container._deprecated
+
+            def add_argument(self, *args, **kwargs):
+                deprecated = kwargs.pop("deprecated", False)
+                action = super().add_argument(*args, **kwargs)
+                if deprecated:
+                    self._deprecated.add(action)
+                return action
+
+        def add_argument_group(self, *args, **kwargs):
+            group = self._FlexibleArgumentGroup(self, *args, **kwargs)
+            self._action_groups.append(group)
+            return group
 
     def format_help(self):
         # Only use custom help formatting for bottom level parsers

@@ -405,9 +405,7 @@ fn adopt_listener(fd: RawFd) -> Result<zeromq::Listener> {
     // transferring ownership to the listener constructed below.
     let fd = unsafe { OwnedFd::from_raw_fd(fd) };
     let socket: socket2::Socket = fd.into();
-    // `Socket::domain` (SO_DOMAIN) exists only on Linux, Android, FreeBSD and
-    // Fuchsia; the bound address carries the family on every platform.
-    let domain = socket.local_addr()?.domain();
+    let domain = socket.domain()?;
 
     if domain == socket2::Domain::IPV4 || domain == socket2::Domain::IPV6 {
         let listener: std::net::TcpListener = socket.into();
@@ -673,30 +671,5 @@ mod tests {
 
         assert_eq!(endpoint.to_string(), format!("tcp://{expected}"));
         assert!(router.close().await.is_empty());
-    }
-
-    #[tokio::test]
-    async fn inherited_unix_listener_is_adopted_without_rebinding() {
-        let path = std::env::temp_dir().join(format!(
-            "vllm-inherited-listener-{}-{}.sock",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("clock after epoch")
-                .as_nanos()
-        ));
-        let listener = std::os::unix::net::UnixListener::bind(&path).expect("bind listener");
-        let mut router = RouterSocket::new();
-
-        let endpoint = router
-            .bind_listener(
-                adopt_listener(listener.into_raw_fd()).expect("adopt inherited listener fd"),
-            )
-            .await
-            .expect("bind inherited listener");
-
-        assert!(endpoint.to_string().starts_with("ipc://"), "{endpoint}");
-        assert!(router.close().await.is_empty());
-        let _ = std::fs::remove_file(&path);
     }
 }

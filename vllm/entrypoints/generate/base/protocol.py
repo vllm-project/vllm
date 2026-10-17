@@ -33,8 +33,6 @@ TopLogprobsParam: TypeAlias = Annotated[
     BeforeValidator(lambda v: 0 if v is None else v, json_schema_input_type=int | None),
 ]
 
-MMPayload: TypeAlias = Literal["tensors", "none"]
-
 _CACHE_SALT_FORBIDDEN_CHARS = frozenset("@/\\\x00")
 _MAX_CACHE_SALT_LENGTH = 128
 
@@ -56,17 +54,6 @@ def validate_cache_salt(cache_salt: object) -> None:
             "not contain '@', '/', '\\\\', or NUL.",
             parameter="cache_salt",
         )
-
-
-def resolve_return_mm_kwargs_alias(data: Any) -> Any:
-    """Map the deprecated `return_mm_kwargs=False` onto `mm_payload="none"`."""
-    if (
-        isinstance(data, dict)
-        and data.get("return_mm_kwargs") is False
-        and "mm_payload" not in data
-    ):
-        data = {**data, "mm_payload": "none"}
-    return data
 
 
 def validate_request_mm_kwargs(

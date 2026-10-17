@@ -607,7 +607,6 @@ class ParallelLMHead(VocabParallelEmbedding):
         prefix: str = "",
         *,
         disable_tp: bool = False,
-        quant_method: QuantizeMethodBase | None = None,
     ):
         self.has_bias = bias
         super().__init__(
@@ -619,7 +618,6 @@ class ParallelLMHead(VocabParallelEmbedding):
             quant_config,
             prefix,
             disable_tp=disable_tp,
-            quant_method=quant_method,
         )
         self.quant_config = quant_config
         if bias:

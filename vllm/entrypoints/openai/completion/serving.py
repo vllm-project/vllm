@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
-import itertools
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
@@ -20,7 +19,6 @@ from vllm.entrypoints.generate.base.serving import (
     build_per_request_timing_metrics,
     build_spec_decoding_metrics,
     clamp_prompt_logprobs,
-    completion_top_logprobs_limit,
     format_token_id_placeholder,
 )
 from vllm.entrypoints.openai.completion.protocol import (
@@ -376,7 +374,6 @@ class OpenAIServingCompletion(GenerateBaseServing):
                             not delta_text
                             and not delta_token_ids
                             and not previous_num_tokens[i]
-                            and finish_reason is None
                         ):
                             # Chunked prefill case, don't return empty chunks
                             continue
@@ -420,11 +417,6 @@ class OpenAIServingCompletion(GenerateBaseServing):
                                 token_ids=(
                                     as_list(output.token_ids)
                                     if request.return_token_ids
-                                    else None
-                                ),
-                                weight_versions=(
-                                    output.weight_versions
-                                    if request.return_weight_versions
                                     else None
                                 ),
                             )
@@ -600,11 +592,6 @@ class OpenAIServingCompletion(GenerateBaseServing):
                         as_list(output.token_ids) if request.return_token_ids else None
                     ),
                     routed_experts=routed_experts_b64,
-                    weight_versions=(
-                        output.weight_versions
-                        if request.return_weight_versions
-                        else None
-                    ),
                 )
                 choices.append(choice_data)
 
@@ -734,12 +721,10 @@ class OpenAIServingCompletion(GenerateBaseServing):
                             tokenizer,
                             return_as_token_id=should_return_as_token_id,
                         ): max(top_lp[1].logprob, -9999.0)
-                        for top_lp in itertools.islice(
-                            step_top_logprobs.items(),
-                            completion_top_logprobs_limit(
-                                num_output_top_logprobs, bool(logprob_token_ids)
-                            ),
-                        )
+                        for i, top_lp in enumerate(step_top_logprobs.items())
+                        if logprob_token_ids
+                        or num_output_top_logprobs == -1
+                        or num_output_top_logprobs >= i
                     }
                 )
 

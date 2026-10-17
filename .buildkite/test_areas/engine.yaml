@@ -141,7 +141,7 @@ steps:
     - tests/v1/e2e/general/
   commands:
     - pytest -v -s v1/e2e/general/test_kv_sharing_fast_prefill.py
-    - pytest -v -s v1/e2e/general/test_mamba_prefix_cache.py::test_mamba_prefix_cache_mrv2 v1/e2e/general/test_mamba_prefix_cache.py::test_mamba_prefix_cache_mrv2_async v1/e2e/general/test_mamba_prefix_cache.py::test_mamba_prefix_cache_mrv2_async_flashinfer
+    - pytest -v -s v1/e2e/general/test_mamba_prefix_cache.py::test_mamba_prefix_cache_mrv2 v1/e2e/general/test_mamba_prefix_cache.py::test_mamba_prefix_cache_mrv2_async
   mirror:
     amd:
       label: ":amd: (MI355 DPX) E2E Core Large Memory"
@@ -238,9 +238,9 @@ steps:
     - pytest -v -s v1/e2e/test_hybrid_chunked_prefill.py
   mirror:
     amd:
-      label: ":amd: (MI355 DPX) V1 E2E Hybrid Chunked Prefill"
+      label: ":amd: (MI300) V1 E2E Hybrid Chunked Prefill"
       dind: false
-      device: mi355_dpx
+      device: mi300_1
       timeout_in_minutes: 35
       depends_on:
       - image-build-amd

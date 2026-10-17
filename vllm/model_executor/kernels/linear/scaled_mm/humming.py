@@ -11,7 +11,6 @@ from vllm.model_executor.layers.quantization.utils.humming import (
     prepare_humming_linear_layer_config,
 )
 from vllm.platforms import current_platform
-from vllm.utils.humming import create_humming_locks
 from vllm.utils.import_utils import has_humming
 
 from .ScaledMMLinearKernel import (
@@ -82,7 +81,7 @@ class HummingFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         convert_linear_layer_to_humming_standard(layer=layer, name_map=name_map)
         self.layer_config = prepare_humming_linear_layer_config(layer, quant_config)
         self.compute_config = get_humming_linear_compute_config()
-        self.locks = create_humming_locks(layer.weight.device)
+        self.locks = torch.zeros(1024, dtype=torch.int32, device=layer.weight.device)
 
     def apply_weights(
         self,
@@ -149,7 +148,7 @@ class HummingInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
         convert_linear_layer_to_humming_standard(layer=layer, name_map=name_map)
         self.layer_config = prepare_humming_linear_layer_config(layer, quant_config)
         self.compute_config = get_humming_linear_compute_config()
-        self.locks = create_humming_locks(layer.weight.device)
+        self.locks = torch.zeros(1024, dtype=torch.int32, device=layer.weight.device)
 
     def apply_weights(
         self,

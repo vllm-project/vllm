@@ -19,7 +19,6 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     triton_scalar_specialization_rep,
 )
 from vllm.platforms import current_platform
-from vllm.transformers_utils.deepseek_v4_utils import get_compress_ratios
 from vllm.triton_utils import tl, triton
 from vllm.utils.deep_gemm import (
     get_paged_mqa_logits_metadata,
@@ -205,16 +204,19 @@ class PrepareUniformDecodeKernel(
         )
 
 
+# Below this many rows per rank, stay replicated (TP4 engages at 64K rows).
+MIN_TP_SHARD_ROWS_PER_RANK = 16_384
+
+
 def balanced_prefill_row_shard(
     seq_lens_cpu: torch.Tensor,
     query_lens_cpu: torch.Tensor,
     compress_ratio: int,
     tp_size: int,
-    min_rows: int,
 ) -> list[int] | None:
     """Return contiguous TP row counts balanced by indexer MQA work."""
     num_rows = int(query_lens_cpu.sum())
-    if tp_size < 2 or num_rows < max(min_rows, tp_size):
+    if tp_size < 2 or num_rows < MIN_TP_SHARD_ROWS_PER_RANK * tp_size:
         return None
 
     query_lens = query_lens_cpu.to(torch.int64)
@@ -355,6 +357,12 @@ class DeepseekV4IndexerBackend(DeepseekV32IndexerBackend):
 
 
 class DeepseekV41IndexerBackend(DeepseekV4IndexerBackend):
+    @classmethod
+    def supports_device_cpu_query_lens_mismatch(cls) -> bool:
+        # The ROCm flattened-query support above is validated for the
+        # DeepSeek-V4 adaptive DSpark path only.
+        return DeepseekV32IndexerBackend.supports_device_cpu_query_lens_mismatch()
+
     @staticmethod
     def get_name() -> str:
         return "DEEPSEEK_V41_INDEXER"
@@ -608,7 +616,7 @@ class BuildPrefillChunkMetadataKernel(
             dict.fromkeys(
                 max(1, int(ratio))
                 for ratio in (
-                    *(get_compress_ratios(hf_text_config) or (1,)),
+                    *(getattr(hf_text_config, "compress_ratios", None) or (1,)),
                     getattr(hf_text_config, "index_kpool", 1) or 1,
                 )
             )
@@ -945,10 +953,7 @@ def _rocm_supports_flattened_device_query_lens(vllm_config: VllmConfig) -> bool:
     return (
         current_platform.is_rocm()
         and model_config is not None
-        and (
-            "DeepseekV4ForCausalLM" in model_config.architectures
-            or "DeepseekV41ForCausalLM" in model_config.architectures
-        )
+        and "DeepseekV4ForCausalLM" in model_config.architectures
     )
 
 
@@ -1581,7 +1586,6 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     prefill_query_lens_cpu,
                     self.compress_ratio,
                     self.tp_size,
-                    self.vllm_config.attention_config.indexer_tp_shard_min_rows,
                 )
             prefill_metadata = DeepseekV32IndexerPrefillMetadata(
                 chunks,
