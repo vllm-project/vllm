@@ -67,6 +67,7 @@ class _VllmConfig:
 
 class _InputProcessor:
     vllm_config = _VllmConfig()
+    generation_config_fields: dict[str, Any] = {}
 
     def resolve_watermarking(self, params):
         return self.vllm_config._check_supports_watermarking(params)
@@ -128,7 +129,7 @@ class _OfflineServing(BeamSearchOfflineMixin):
         self,
         instances_batch: list[BeamSearchInstance],
         base_sampling_params: SamplingParams,
-        eos_token_id: int | None,
+        eos_token_ids: set[int],
         ignore_eos: bool,
         beam_width: int,
         sort_beams_key: Callable[..., Any],
@@ -138,6 +139,62 @@ class _OfflineServing(BeamSearchOfflineMixin):
     ) -> bool:
         assert base_sampling_params.watermarking is False
         return True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("offline", [False, True])
+@pytest.mark.parametrize("config_eos", [None, 11, [0, 11]])
+@pytest.mark.parametrize("ignore_eos", [False, True])
+async def test_beam_search_respects_generation_config_eos(
+    monkeypatch, offline: bool, config_eos: int | list[int] | None, ignore_eos: bool
+) -> None:
+    """Model-specific end-of-turn tokens must finish beams like tokenizer EOS."""
+    monkeypatch.setattr(
+        _InputProcessor, "generation_config_fields", {"eos_token_id": config_eos}
+    )
+    prompt: TokensInput = {
+        "type": "token",
+        "prompt_token_ids": [1],
+    }
+    params = BeamSearchParams(
+        beam_width=1,
+        max_tokens=3,
+        ignore_eos=ignore_eos,
+        include_stop_str_in_output=True,
+        watermarking=False,
+    )
+    result = await anext(
+        _EngineClient().generate(prompt, SamplingParams(watermarking=False))
+    )
+    result.outputs[0].logprobs = [{11: Logprob(-0.1)}]
+    should_stop = config_eos is not None and not ignore_eos
+    expected_tokens = [11] if should_stop else [11, 11, 11]
+
+    if offline:
+        offline_serving = _OfflineServing()
+        monkeypatch.setattr(
+            _OfflineServing,
+            "_beam_search_step",
+            BeamSearchOfflineMixin._beam_search_step,
+        )
+        monkeypatch.setattr(
+            offline_serving, "_render_and_run_requests", lambda **_: [result]
+        )
+        beam = offline_serving.beam_search(cast(list, [prompt]), params)[0].sequences[0]
+        assert beam.tokens == [1, *expected_tokens]
+    else:
+
+        async def generate(*args, **kwargs):
+            yield result
+
+        online_serving = _AsyncServing()
+        monkeypatch.setattr(online_serving.engine_client, "generate", generate)
+        output = (
+            await anext(online_serving.beam_search(prompt, "request", params))
+        ).outputs[0]
+        assert output.token_ids == expected_tokens
+        assert output.finish_reason == ("stop" if should_stop else "length")
+        assert output.stop_reason == (11 if should_stop else None)
 
 
 @pytest.mark.asyncio
