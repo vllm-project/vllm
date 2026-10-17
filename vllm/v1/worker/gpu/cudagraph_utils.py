@@ -148,6 +148,9 @@ def has_compiled_submodule(model: nn.Module) -> bool:
 
 
 class CudaGraphManager:
+    # Opt out if decode always runs decode_query_len tokens per request.
+    dynamic_sd_query_lens: bool = True
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -277,6 +280,7 @@ class CudaGraphManager:
         if (
             speculative_config
             and speculative_config.uses_dynamic_speculative_decoding()
+            and self.dynamic_sd_query_lens
             and self.decode_query_len > self.vllm_config.num_speculative_tokens
         ):
             # decode_query_len = num_speculative_steps + num_new_sampled_tokens

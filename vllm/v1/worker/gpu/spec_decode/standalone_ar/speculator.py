@@ -17,7 +17,7 @@ from vllm.v1.spec_decode.utils import next_power_of_2
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
-from vllm.v1.worker.gpu.dp_utils import DPSyncState
+from vllm.v1.worker.gpu.dp_utils import DPSyncState, dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
@@ -126,6 +126,21 @@ class StandaloneARSpeculator(DraftModelSpeculator):
                 prefix="draft_model",
             )
 
+    def _sync_dp_num_tokens(
+        self, num_reqs: int, num_tokens: int
+    ) -> torch.Tensor | None:
+        # Draft forwards run different token counts than the target's.
+        _, sync = dispatch_cg_and_sync_dp(
+            None,
+            num_reqs,
+            num_tokens,
+            uniform_token_count=None,
+            dp_size=self.dp_size,
+            dp_rank=self.dp_rank,
+            need_eager=True,
+        )
+        return sync.num_tokens_across_dp if sync is not None else None
+
     @torch.inference_mode()
     def _run_model(
         self,
@@ -171,7 +186,6 @@ class StandaloneARSpeculator(DraftModelSpeculator):
         last_sampled: torch.Tensor,
         num_reqs: int,
         skip_attn: bool,
-        num_tokens_across_dp: torch.Tensor | None,
     ) -> None:
         if skip_attn:
             src_tokens = input_batch.num_tokens
@@ -183,7 +197,7 @@ class StandaloneARSpeculator(DraftModelSpeculator):
                 input_batch.positions[:src_tokens],
                 None,
                 None,
-                num_tokens_across_dp,
+                self._sync_dp_num_tokens(num_reqs, src_tokens),
             )
             positions_buf = input_batch.positions
         else:
@@ -205,7 +219,7 @@ class StandaloneARSpeculator(DraftModelSpeculator):
             )
 
             prefill_slot_mappings = block_tables.compute_slot_mappings(
-                input_batch.idx_mapping,
+                self.idx_mapping[:num_reqs],
                 self.input_buffers.query_start_loc[: num_reqs + 1],
                 self.expanded_positions[:total_expanded],
                 total_expanded,
@@ -225,7 +239,8 @@ class StandaloneARSpeculator(DraftModelSpeculator):
                 num_reqs=num_reqs,
                 query_start_loc_np=query_start_loc_cpu_expanded.numpy(),
                 seq_lens_cpu_upper_bound=input_batch.seq_lens_cpu_upper_bound,
-                step=0,
+                # Include the correction token appended to each request.
+                step=1,
                 slot_mappings=prefill_slot_mappings,
             )
             prefill_slot_maps_by_layer = build_slot_mappings_by_layer(
@@ -236,7 +251,7 @@ class StandaloneARSpeculator(DraftModelSpeculator):
                 self.expanded_positions[:total_expanded],
                 prefill_attn_md,
                 prefill_slot_maps_by_layer,
-                num_tokens_across_dp,
+                self._sync_dp_num_tokens(num_reqs, total_expanded),
             )
             positions_buf = self.expanded_positions
 
@@ -258,7 +273,6 @@ class StandaloneARSpeculator(DraftModelSpeculator):
         num_rejected: torch.Tensor,
         num_reqs: int,
         skip_attn: bool,
-        num_tokens_across_dp: torch.Tensor | None,
     ) -> None:
         if skip_attn:
             last_positions = input_batch.positions[
@@ -282,7 +296,8 @@ class StandaloneARSpeculator(DraftModelSpeculator):
             self.arange_gpu[: num_reqs + 1]
         )
 
-        idx_mapping = input_batch.idx_mapping
+        idx_mapping = self.idx_mapping[:num_reqs]
+        num_tokens_across_dp = self._sync_dp_num_tokens(num_reqs, num_reqs)
 
         for step in range(1, self.num_speculative_steps):
             self.input_buffers.input_ids[:num_reqs].copy_(
@@ -373,9 +388,6 @@ class StandaloneARSpeculator(DraftModelSpeculator):
 
         num_reqs = input_batch.num_reqs
         skip_attn = dummy_run and skip_attn_for_dummy_run
-        num_tokens_across_dp = (
-            dp_sync_state.num_tokens_across_dp if dp_sync_state is not None else None
-        )
 
         # Copy per-request temperature/seeds/idx_mapping into pre-allocated
         # buffers so sample_draft can read them without extra slicing.
@@ -384,6 +396,7 @@ class StandaloneARSpeculator(DraftModelSpeculator):
             input_batch.idx_mapping,
             temperature,
             seeds,
+            dummy_run=dummy_run,
         )
 
         self._prefill(
@@ -392,7 +405,6 @@ class StandaloneARSpeculator(DraftModelSpeculator):
             last_sampled,
             num_reqs,
             skip_attn,
-            num_tokens_across_dp,
         )
 
         if self.num_speculative_steps == 1:
@@ -403,7 +415,6 @@ class StandaloneARSpeculator(DraftModelSpeculator):
             num_rejected,
             num_reqs,
             skip_attn,
-            num_tokens_across_dp,
         )
 
         return self.draft_tokens[:num_reqs]
