@@ -12,6 +12,7 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 IndexerKVDType = Literal["auto", "bf16", "fp8", "mxfp4", "nvfp4"]
 MiniMaxM3MSADecodeBackend = Literal["triton", "cutlass"]
+IndexerCacheSharding = Literal["off", "auto", "on"]
 
 
 @config
@@ -95,6 +96,11 @@ class AttentionConfig:
     model's default (bf16 for MiniMax M3, fp8 for the DeepSeek sparse
     indexer). Quantized formats (fp8, mxfp4, nvfp4) require indexer kernel
     support in the backend."""
+
+    indexer_cache_sharding: IndexerCacheSharding = "off"
+    """Shard the indexer cache across TP ranks on supported backends.
+    "auto" uses backend-specific selection criteria; "on" requests sharding
+    wherever supported."""
 
     indexer_sparse_logits: bool = False
     """DeepSeek V4.1 two-level indexer: score only the candidate blocks with
