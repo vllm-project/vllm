@@ -1203,7 +1203,7 @@ class AnthropicServingMessages(OpenAIServingChat):
             error_response = AnthropicStreamEvent(
                 type="error",
                 error=AnthropicError(
-                    type="internal_error", message=sanitize_message(str(e))
+                    type="api_error", message=sanitize_message(str(e))
                 ),
             )
             data = error_response.model_dump_json(exclude_unset=True)

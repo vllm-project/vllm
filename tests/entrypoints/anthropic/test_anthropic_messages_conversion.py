@@ -1090,7 +1090,7 @@ async def test_stream_error_preserves_message_and_closes_block(block_type):
         "error",
         {
             "type": "error",
-            "error": {"type": "internal_error", "message": "backend failed"},
+            "error": {"type": "api_error", "message": "backend failed"},
         },
     )
     assert not any(event_type == "message_stop" for event_type, _ in events)
