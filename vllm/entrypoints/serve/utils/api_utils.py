@@ -102,13 +102,18 @@ def with_cancellation(handler_func):
     return wrapper
 
 
+@functools.cache
+def _request_tracer():
+    return trace.get_tracer(__name__)
+
+
 @asynccontextmanager
 async def request_span(raw_request: Request, span_name: str):
     """Yield a server span linked to the caller's W3C trace context."""
     if not is_otel_available():
         yield None
         return
-    tracer = trace.get_tracer(__name__)
+    tracer = _request_tracer()
     with tracer.start_as_current_span(
         span_name,
         context=extract_trace_context(raw_request.headers),
