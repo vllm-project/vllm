@@ -22,6 +22,8 @@ ROUTER_SHAPES = [
     (2816, 256),  # Hunyuan-V4
     (4096, 352),  # Step-5
     (8192, 64),  # ERNIE-4.5-300B-A47B
+    (5120, 256),  # Beam-1.0
+    (8192, 256),  # Muse Spark Open
 ]
 # M=1 is left out: there cuBLAS's fp32 GEMV is slightly more accurate for K >= 6144.
 NUM_TOKENS = [8, 33, 64, 100, 256, 384, 513, 1024, 1536, 2048, 3072, 8192]
@@ -197,16 +199,19 @@ def _record_bf16x3_calls(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("input_size", "output_size"),
+    ("input_size", "output_size", "num_tokens"),
     [
-        (3072, 256),  # fp32 GEMV shape: tier 2 dispatches above 32 tokens
-        (5120, 160),  # generic shape: tier 4
+        # fp32 GEMV shapes: tier 2 dispatches above 24 tokens
+        (3072, 256, 25),
+        (3072, 256, 1024),
+        (5120, 256, 32),
+        (5120, 256, 48),
+        # generic shape: tier 4
+        (5120, 160, 33),
+        (5120, 160, 1024),
     ],
 )
-@pytest.mark.parametrize("num_tokens", [33, 1024])
-def test_gate_linear_uses_bf16x3_above_32_tokens(
-    monkeypatch, input_size, output_size, num_tokens
-):
+def test_gate_linear_uses_bf16x3(monkeypatch, input_size, output_size, num_tokens):
     gate = _make_gate_linear(monkeypatch, input_size, output_size)
     assert gate.allow_bf16x3_router_gemm
     gate.weight.data.normal_(0, ROUTER_WEIGHT_SCALE)
@@ -219,12 +224,19 @@ def test_gate_linear_uses_bf16x3_above_32_tokens(
     _check_against_fp32(x, gate.weight, out)
 
 
-def test_gate_linear_keeps_fp32_gemv_for_small_batches(monkeypatch):
-    gate = _make_gate_linear(monkeypatch, 3072, 256)
+@pytest.mark.parametrize(
+    ("input_size", "output_size"),
+    [(3072, 256), (6144, 128), (5120, 256), (4096, 352), (8192, 256)],
+)
+def test_gate_linear_keeps_fp32_gemv_for_small_batches(
+    monkeypatch, input_size, output_size
+):
+    gate = _make_gate_linear(monkeypatch, input_size, output_size)
     assert gate.allow_fp32_router_gemm
     calls = _record_bf16x3_calls(monkeypatch)
 
-    gate(torch.randn(32, 3072, device="cuda").to(torch.bfloat16))
+    for num_tokens in (1, 16, 24):
+        gate(torch.randn(num_tokens, input_size, device="cuda").to(torch.bfloat16))
 
     assert calls == []
 

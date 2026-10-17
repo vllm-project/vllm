@@ -420,12 +420,20 @@ class _GateLinearMethod(UnquantizedLinearMethod):
 
 
 _FP32_ROUTER_GEMM_MAX_TOKENS = GateLinear.FP32_MAX_TOKENS
+# H200: BF16x3 overtakes the fp32 kernel at 18-28 tokens depending on the
+# shape; 24 keeps every instantiated shape within 1.5 us of the faster one.
+_SM90_FP32_ROUTER_GEMM_MAX_TOKENS = 24
+
+
+@cache
+def _is_hopper() -> bool:
+    return current_platform.is_device_capability((9, 0))
 
 
 @cache
 def bf16x3_router_gemm_module():
     """The CuteDSL bf16x3 router GEMM module for this device (SM90 or SM100)."""
-    if current_platform.is_device_capability((9, 0)):
+    if _is_hopper():
         from vllm.model_executor.layers.fused_moe.router import (
             bf16x3_router_gemm_sm90,
         )
@@ -512,13 +520,12 @@ def fp32_router_gemm_dispatch_impl(
             return torch.mm(x, weight.T, out_dtype=torch.float32)
         return torch.nn.functional.linear(x.float(), weight)
     max_tokens = _FP32_ROUTER_GEMM_MAX_TOKENS
-    if (
-        allow_bf16x3_router_gemm
-        and x.dtype == torch.bfloat16
-        and weight.shape == (256, 5120)
-    ):
-        # GB200: four token groups win through 48 for multiples of eight.
-        max_tokens = 48 if x.shape[0] % 8 == 0 else 16
+    if allow_bf16x3_router_gemm and x.dtype == torch.bfloat16:
+        if _is_hopper():
+            max_tokens = _SM90_FP32_ROUTER_GEMM_MAX_TOKENS
+        elif weight.shape == (256, 5120):
+            # GB200: four token groups win through 48 for multiples of eight.
+            max_tokens = 48 if x.shape[0] % 8 == 0 else 16
     if x.shape[0] <= max_tokens:
         return ops.fp32_router_gemm(x, weight)
 
