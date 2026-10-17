@@ -305,6 +305,9 @@ class ModelRunnerOutput:
     # information related to cudagraph execution
     cudagraph_stats: CUDAGraphStat | None = None
 
+    # Verified draft prefix lengths, in req_ids order.
+    num_verified_draft_tokens_per_req: list[int] | None = None
+
     aux_output_connector_output: dict[str, AuxRequestOutput] | None = None
 
     # ``None`` when ``return_sampling_mask`` is off.

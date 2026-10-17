@@ -98,3 +98,14 @@ all-`n == 1` workloads):
 | `num_spec_steps` | `vllm:spec_decode_num_drafts_total` |
 | `num_draft_tokens` | `vllm:spec_decode_num_draft_tokens_total` |
 | `num_accepted_draft_tokens` | `vllm:spec_decode_num_accepted_tokens_total` |
+
+When adaptive verification is turned on (`enable_adaptive_verification=True`), the metric `vllm:spec_decode_num_verified_draft_tokens_total`
+counts draft-token positions sent to the target verifier for the same requests counted by `num_draft_tokens` (i.e. results for already-finished requests are excluded). It excludes bonus tokens and can be smaller than `num_draft_tokens`, which counts proposals.
+For example, a five-token proposal shortened to three verification positions
+adds five to the draft counter and three to the verified counter. The mean
+verified draft width can be estimated by dividing the verified draft tokens by the draft steps over the same time window.
+
+With async scheduling and structured outputs, grammar-invalid draft positions may
+still be sent to the target verifier. These positions are excluded from
+`num_draft_tokens` but included in the verified counter, so the verified count
+can exceed `num_draft_tokens`.

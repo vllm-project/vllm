@@ -3,6 +3,7 @@
 
 import time
 from dataclasses import dataclass, field
+from functools import partial
 
 import numpy as np
 import prometheus_client
@@ -26,6 +27,7 @@ class SpecDecodingStats:
     num_spec_tokens: int
     num_drafts: int = 0
     num_draft_tokens: int = 0
+    num_verified_draft_tokens: int = 0
     num_accepted_tokens: int = 0
     num_accepted_tokens_per_pos: list[int] = field(default_factory=list)
     num_draft_tokens_per_pos: list[int] = field(default_factory=list)
@@ -38,10 +40,17 @@ class SpecDecodingStats:
             num_draft_tokens_per_pos=[0] * num_spec_tokens,
         )
 
-    def observe_draft(self, num_draft_tokens: int, num_accepted_tokens: int):
+    def observe_draft_stats_per_req(
+        self,
+        num_draft_tokens: int,
+        num_accepted_tokens: int,
+        num_verified_draft_tokens: int | None = None,
+    ):
         self.num_drafts += 1
         self.num_draft_tokens += num_draft_tokens
         self.num_accepted_tokens += num_accepted_tokens
+        if num_verified_draft_tokens is not None:
+            self.num_verified_draft_tokens += num_verified_draft_tokens
         assert num_accepted_tokens <= self.num_spec_tokens
         for i in range(num_accepted_tokens):
             self.num_accepted_tokens_per_pos[i] += 1
@@ -57,16 +66,24 @@ class SpecDecodingLogging:
     before resetting to zero.
     """
 
-    def __init__(self, is_diffusion: bool = False):
+    def __init__(
+        self,
+        is_diffusion: bool = False,
+        enable_adaptive_verification: bool = False,
+    ):
         # Diffusion (dLLM) models reuse the spec-decode data path with
         # overloaded semantics, so the raw spec-decode framing (drafts, bonus
         # token, per-position vector) is logged with diffusion-native terms.
         self.is_diffusion = is_diffusion
+        # Without adaptive verification every drafted token is verified, so
+        # the verified count would only duplicate the drafted count.
+        self.enable_adaptive_verification = enable_adaptive_verification
         self.reset()
 
     def reset(self):
         self.num_drafts: list[int] = []
         self.num_draft_tokens: list[int] = []
+        self.num_verified_draft_tokens: list[int] = []
         self.num_accepted_tokens: list[int] = []
         self.accepted_tokens_per_pos_lists: list[list[int]] = []
         self.last_log_time = time.monotonic()
@@ -74,6 +91,9 @@ class SpecDecodingLogging:
     def observe(self, spec_decoding_stats: SpecDecodingStats):
         self.num_drafts.append(spec_decoding_stats.num_drafts)
         self.num_draft_tokens.append(spec_decoding_stats.num_draft_tokens)
+        self.num_verified_draft_tokens.append(
+            spec_decoding_stats.num_verified_draft_tokens
+        )
         self.num_accepted_tokens.append(spec_decoding_stats.num_accepted_tokens)
         self.accepted_tokens_per_pos_lists.append(
             spec_decoding_stats.num_accepted_tokens_per_pos
@@ -84,7 +104,11 @@ class SpecDecodingLogging:
             return
         num_drafts = np.sum(self.num_drafts)
         num_draft_tokens = np.sum(self.num_draft_tokens)
+        num_verified_draft_tokens = np.sum(self.num_verified_draft_tokens)
         num_accepted_tokens = np.sum(self.num_accepted_tokens)
+        if num_drafts == 0:
+            self.reset()
+            return
         draft_throughput = 0
         accepted_throughput = 0
 
@@ -117,6 +141,12 @@ class SpecDecodingLogging:
         acceptance_rates = np.sum(pos_matrix, axis=0) / num_drafts
         rates_str = ", ".join(f"{p:.3f}" for p in acceptance_rates)
 
+        verified_part = (
+            f"Verified: {num_verified_draft_tokens} tokens, "
+            if self.enable_adaptive_verification
+            else ""
+        )
+
         log_fn(
             "SpecDecoding metrics: "
             "Mean acceptance length: %.2f, "
@@ -124,7 +154,8 @@ class SpecDecodingLogging:
             "Drafted throughput: %.2f tokens/s, "
             "Accepted: %d tokens, "
             "Drafted: %d tokens, "
-            "Per-position acceptance rate: %s, "
+            + verified_part
+            + "Per-position acceptance rate: %s, "
             "Avg Draft acceptance rate: %.1f%%",
             mean_acceptance_length,
             accepted_throughput,
@@ -193,6 +224,14 @@ class SpecDecodingProm:
 
       vllm:spec_decode_num_accepted_tokens_per_pos_total[$interval] /
       vllm:spec_decode_num_drafts_total[$interval]
+
+    With adaptive verification, the mean verified draft width is:
+
+      rate(vllm:spec_decode_num_verified_draft_tokens_total[$interval]) /
+      rate(vllm:spec_decode_num_drafts_total[$interval])
+
+    The verified count excludes bonus tokens and can be smaller than the
+    proposed draft count.
     """
 
     _counter_cls = prometheus_client.Counter
@@ -203,6 +242,7 @@ class SpecDecodingProm:
         labelnames: list[str],
         per_engine_labelvalues: dict[int, list[object]],
         is_diffusion: bool = False,
+        registry: prometheus_client.CollectorRegistry | None = None,
     ):
         # Diffusion (dLLM) models reuse the spec-decode counters but expose them
         # under diffusion-native names; the per-position acceptance vector does
@@ -211,6 +251,9 @@ class SpecDecodingProm:
         self.spec_decoding_enabled = speculative_config is not None or is_diffusion
         if not self.spec_decoding_enabled:
             return
+
+        if registry is not None:
+            self._counter_cls = partial(self._counter_cls, registry=registry)
 
         if is_diffusion:
             counter_specs = [
@@ -244,6 +287,19 @@ class SpecDecodingProm:
         self.counter_spec_decode_num_draft_tokens = counters[1]
         self.counter_spec_decode_num_accepted_tokens = counters[2]
 
+        self.counter_spec_decode_num_verified_draft_tokens = None
+        if not is_diffusion:
+            assert speculative_config is not None
+            if speculative_config.enable_adaptive_verification:
+                metric = self._counter_cls(
+                    name="vllm:spec_decode_num_verified_draft_tokens",
+                    documentation="Draft tokens actually verified by the target.",
+                    labelnames=labelnames,
+                )
+                self.counter_spec_decode_num_verified_draft_tokens = (
+                    create_metric_per_engine(metric, per_engine_labelvalues)
+                )
+
         self.counter_spec_decode_num_accepted_tokens_per_pos: dict[
             int, list[prometheus_client.Counter]
         ] = {}
@@ -275,6 +331,10 @@ class SpecDecodingProm:
         self.counter_spec_decode_num_accepted_tokens[engine_idx].inc(
             spec_decoding_stats.num_accepted_tokens
         )
+        if self.counter_spec_decode_num_verified_draft_tokens is not None:
+            self.counter_spec_decode_num_verified_draft_tokens[engine_idx].inc(
+                spec_decoding_stats.num_verified_draft_tokens
+            )
         for pos, counter in enumerate(
             self.counter_spec_decode_num_accepted_tokens_per_pos.get(engine_idx, [])
         ):
