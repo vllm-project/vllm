@@ -1,13 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 from dataclasses import dataclass
 from functools import partial
 from itertools import accumulate
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 import torch
+from safetensors import safe_open
+from safetensors.torch import save_file
 from torch import nn
 from torch.nn import functional as F
 from transformers import Qwen4ExpTextConfig
@@ -15,6 +19,7 @@ from transformers import Qwen4ExpTextConfig
 import vllm.model_executor.layers.vocab_parallel_embedding as embedding_module
 import vllm.model_executor.parameter as parameter_module
 import vllm.models.qwen4_exp.common.ngram_embedding as ngram_embedding_module
+import vllm.models.qwen4_exp.nvidia.ngram_embedding as nvidia_ngram_embedding_module
 from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
 from vllm.config import SpeculativeConfig, VllmConfig
 from vllm.config.compilation import CUDAGraphMode
@@ -39,11 +44,13 @@ from vllm.models.qwen4_exp.common.ple import (
 from vllm.models.qwen4_exp.nvidia.ngram_embedding import (
     Qwen4ExpNGramEmbedding,
     Qwen4ExpPLEDeviceEmbedding,
+    Qwen4ExpPLEDiskOffloadEmbedding,
     Qwen4ExpPLEEmbeddingMethod,
     Qwen4ExpPLEFp8EmbeddingMethod,
     Qwen4ExpPLENvFp4EmbeddingMethod,
     Qwen4ExpPLEPinnedHostEmbedding,
     Qwen4ExpPLEUnquantizedEmbeddingMethod,
+    stage_checkpoint_rows,
 )
 from vllm.models.qwen4_exp.nvidia.ple_layer import Qwen4ExpPLELayer
 from vllm.platforms import current_platform
@@ -1040,6 +1047,185 @@ def test_ple_fp8_embedding_supports_mixed_precision_config() -> None:
             quant_config,
             "model.language_model.layers.2.moe.gate_proj",
         )
+
+
+def _save_ple_checkpoint(path: Path, fmt: str) -> None:
+    """Save a 24-row, 32-wide PLE table as four checkpoint shards of 6 rows."""
+    tensors: dict[str, torch.Tensor] = {}
+    if fmt == "nvfp4":
+        planes = {
+            "weight": torch.arange(24 * 16).reshape(24, 16).to(torch.uint8),
+            "weight_scale": (torch.arange(48).reshape(24, 2) / 8 + 0.25).to(
+                torch.float8_e4m3fn
+            ),
+        }
+        tensors["ngram_embedding.weight_scale_2"] = torch.tensor(0.37)
+    else:
+        values = torch.linspace(-2, 2, 24 * 32).reshape(24, 32)
+        planes = {"weight": values.to(torch.bfloat16)}
+        if fmt == "fp8":
+            planes = {"weight": values.to(torch.float8_e4m3fn)}
+            tensors["ngram_embedding.weight_scale"] = torch.tensor([0.25])
+    for name, table in planes.items():
+        for index, shard in enumerate(table.split(6)):
+            tensors[f"ngram_embedding.shard_{index}.{name}"] = shard.clone()
+    save_file(tensors, path)
+
+
+def _make_ple_from_checkpoint(
+    monkeypatch: pytest.MonkeyPatch,
+    path: Path,
+    fmt: str,
+    *,
+    disk_offload: bool,
+    device: str = "cpu",
+    load: bool = True,
+) -> Qwen4ExpNGramEmbedding:
+    """Build a two-head PLE embedding and load `path` through file-backed views."""
+    _mock_etp_group(monkeypatch)
+    for module in (embedding_module, parameter_module):
+        monkeypatch.setattr(module, "get_tensor_model_parallel_rank", lambda: 0)
+        monkeypatch.setattr(module, "get_tensor_model_parallel_world_size", lambda: 1)
+    group = SimpleNamespace(world_size=1)
+    vllm_config = SimpleNamespace(
+        load_config=SimpleNamespace(load_format="auto"),
+        engram_config=SimpleNamespace(disk_offload=disk_offload, cpu_offload=False),
+    )
+    for name, value in (
+        ("get_current_vllm_config", vllm_config),
+        ("get_etp_group", group),
+        ("get_tp_group", group),
+    ):
+        monkeypatch.setattr(nvidia_ngram_embedding_module, name, lambda v=value: v)
+    config = SimpleNamespace(
+        ngram_size=2,
+        heads_per_ngram=2,
+        eos_token_id=0,
+        vocab_size=64,
+        split_ngram_parts=4,
+        ngram_vocab_size_base=8,
+        make_ngram_vocab_size_divisible_by=1,
+        ple_embedding_dtype={"nvfp4": "nvfp4", "fp8": "float8_e4m3fn"}.get(fmt),
+    )
+    with torch.device(device):
+        module = Qwen4ExpNGramEmbedding(
+            config,
+            64,
+            0,
+            8,
+            data_parallel_rank=0,
+            prefix="t",
+            params_dtype=torch.bfloat16,
+        )
+    if load:
+        with safe_open(path, framework="pt") as checkpoint:
+            module.load_weights(
+                (name, checkpoint.get_tensor(name))
+                for name in checkpoint.keys()  # noqa: SIM118
+            )
+        embedding = module.ngram_embedding
+        embedding.quant_method.process_weights_after_loading(embedding)
+    return module
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="disk offload is CUDA-only")
+@pytest.mark.parametrize("fmt", ["bf16", "fp8", "nvfp4"])
+def test_disk_offload_matches_resident_table_under_graph_replay(
+    monkeypatch, tmp_path, fmt
+) -> None:
+    """Staged rows equal the resident lookup of the same ids in a replayed graph."""
+    path = tmp_path / "model.safetensors"
+    _save_ple_checkpoint(path, fmt)
+    gather, resident = (
+        _make_ple_from_checkpoint(
+            monkeypatch, path, fmt, disk_offload=disk_offload, device="cuda"
+        )
+        for disk_offload in (True, False)
+    )
+    assert isinstance(gather.ngram_embedding, Qwen4ExpPLEDiskOffloadEmbedding)
+    assert gather.ngram_embedding.weight.numel() == 0
+    hidden_states = torch.zeros(8, 64, device="cuda")
+    query_start_loc = torch.tensor([0, 5, 8], dtype=torch.int32, device="cuda")
+    ngram_context = torch.tensor([[3], [0]], dtype=torch.int32, device="cuda")
+    input_ids = torch.randint(1, 64, (8,), device="cuda")
+
+    def stage() -> None:
+        stage_checkpoint_rows(
+            [(gather, gather.ngram_embedding)],
+            input_ids,
+            query_start_loc,
+            ngram_context,
+        )
+
+    def forward(module: Qwen4ExpNGramEmbedding) -> torch.Tensor:
+        return module(hidden_states, input_ids, query_start_loc, ngram_context)
+
+    stage()
+    forward(gather)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        output = forward(gather)
+    for seed in range(2):
+        torch.manual_seed(seed)
+        input_ids.copy_(torch.randint(1, 64, (8,)))
+        stage()
+        graph.replay()
+        expected = forward(resident)
+        assert torch.equal(output.view(torch.uint8), expected.view(torch.uint8))
+
+
+@pytest.mark.parametrize(
+    ("corrupt", "error"),
+    [
+        pytest.param(
+            lambda tensors: {k: v.float() for k, v in tensors.items()},
+            "must match the embedding dtype",
+            id="dtype",
+        ),
+        pytest.param(
+            lambda tensors: {k: v for k, v in tensors.items() if "_2." not in k},
+            "cover 18 of 24 rows",
+            id="missing_shard",
+        ),
+        pytest.param(
+            lambda tensors: {k: v.clone() for k, v in tensors.items()},
+            "not a file-backed view",
+            id="copied",
+        ),
+    ],
+)
+def test_disk_offload_rejects_shards_it_cannot_serve_from_files(
+    monkeypatch, tmp_path, corrupt, error
+) -> None:
+    path = tmp_path / "model.safetensors"
+    _save_ple_checkpoint(path, "bf16")
+    module = _make_ple_from_checkpoint(
+        monkeypatch, path, "bf16", disk_offload=True, load=False
+    )
+    embedding = module.ngram_embedding
+    with safe_open(path, framework="pt") as checkpoint:
+        tensors = {name: checkpoint.get_tensor(name) for name in checkpoint.keys()}  # noqa: SIM118
+        with pytest.raises(ValueError, match=error):
+            module.load_weights(corrupt(tensors).items())
+            embedding.quant_method.process_weights_after_loading(embedding)
+
+
+def test_disk_offload_fails_closed_on_truncation_and_reload(
+    monkeypatch, tmp_path
+) -> None:
+    path = tmp_path / "model.safetensors"
+    _save_ple_checkpoint(path, "bf16")
+    module = _make_ple_from_checkpoint(monkeypatch, path, "bf16", disk_offload=True)
+    embedding = module.ngram_embedding
+    assert isinstance(embedding, Qwen4ExpPLEDiskOffloadEmbedding)
+    embedding.copy_ids_to_host(torch.tensor([[0, 23], [5, 6], [12, 17], [23, 23]]))
+    embedding.stage_rows(4)
+    os.truncate(path, path.stat().st_size - 4)
+
+    with pytest.raises(ValueError, match="truncated at offset"):
+        embedding.stage_rows(4)
+    with pytest.raises(RuntimeError, match="does not support weight reload"):
+        module.load_weights([("ngram_embedding.shard_0.weight", torch.zeros(6, 32))])
 
 
 def test_dilated_ple_spec_state_rolls_back_before_next_forward() -> None:
