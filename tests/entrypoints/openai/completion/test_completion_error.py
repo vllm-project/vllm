@@ -952,6 +952,32 @@ def test_completion_logprobs_honors_requested_count(
     assert len(logprobs.top_logprobs[0]) == expected
 
 
+def test_completion_logprobs_missing_sampled_token_falls_back():
+    """A step map that lacks the sampled token id must not raise KeyError.
+
+    The chat path already treats a missing entry like a missing step, but the
+    completion path indexed `step_top_logprobs[token_id]` directly, so an
+    incomplete map (e.g. a recomputed prompt-logprobs pass, #61490) crashed
+    the request instead of serving the placeholder.
+    """
+    tokenizer = MagicMock()
+    tokenizer.decode = lambda token_id: f"tok{token_id}"
+    step_logprobs = {
+        11: Logprob(logprob=-0.2, decoded_token="b"),
+    }
+
+    logprobs = _minimal_serving_completion()._create_completion_logprobs(
+        token_ids=[10],  # sampled token absent from the step map
+        top_logprobs=[step_logprobs],
+        num_output_top_logprobs=1,
+        tokenizer=tokenizer,
+    )
+
+    assert logprobs.tokens == ["tok10"]
+    assert logprobs.token_logprobs == [None]
+    assert logprobs.top_logprobs == [None]
+
+
 def test_logprobs_below_minus_one_rejected():
     """Values more negative than -1 stay invalid."""
     with pytest.raises(Exception, match="must be a positive value or -1"):
