@@ -13,7 +13,10 @@ from vllm.parser.engine.adapters import ParserEngineReasoningAdapter
 from vllm.reasoning import ReasoningParserManager
 from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.utils.import_utils import LazyLoader
-from vllm.v1.structured_output.backend_guidance import GuidanceBackend
+from vllm.v1.structured_output.backend_guidance import (
+    GuidanceBackend,
+    GuidanceGrammar,
+)
 from vllm.v1.structured_output.backend_types import (
     StructuredOutputBackend,
     StructuredOutputGrammar,
@@ -393,9 +396,33 @@ class StructuredOutputManager:
         # These are stored inline in the tensor and unpacked by the gpu runner.
         cumulative_index = 0
 
+        # llguidance computes all masks of a non-spec batch in parallel
+        # on its own native thread pool.
+        if max_num_spec_tokens == 0 and isinstance(self.backend, GuidanceBackend):
+            guidance_batch: list[tuple[GuidanceGrammar, int]] = []
+            for req_id in structured_output_request_ids:
+                request = requests[req_id]
+                structured_output_request = request.structured_output_request
+                if TYPE_CHECKING:
+                    assert structured_output_request is not None
+                grammar = structured_output_request.grammar
+                if TYPE_CHECKING:
+                    assert isinstance(grammar, GuidanceGrammar)
+
+                apply_bitmask = (
+                    self._get_constraint_bounds(request, ()).constraint_start == 0
+                )
+                if apply_bitmask and not grammar.is_terminated():
+                    guidance_batch.append((grammar, cumulative_index))
+                else:
+                    self._grammar_bitmask[cumulative_index].fill_(self._full_mask)
+                cumulative_index += 1
+            if guidance_batch:
+                self.backend.fill_bitmasks(self._grammar_bitmask, guidance_batch)
+
         # Optimized parallel filling of bitmasks for
         # non-spec, large-batch-size cases
-        if (
+        elif (
             len(structured_output_request_ids) > self.fill_bitmask_parallel_threshold
             and max_num_spec_tokens == 0
         ):

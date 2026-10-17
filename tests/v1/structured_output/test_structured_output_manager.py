@@ -647,6 +647,66 @@ def test_rejected_draft_keeps_later_rows_constrained(
     assert (bitmask[3] == bitmask[1]).all()
 
 
+def test_guidance_batched_fill_matches_per_row_fill(tokenizer):
+    """Without spec decoding, guidance fills all rows in one parallel call;
+    rows must equal the per-row fill, and unconstrained rows stay full."""
+    manager = StructuredOutputManager(
+        VllmConfig(
+            model_config=ModelConfig(tokenizer=TOKENIZER),
+            device_config=DeviceConfig(device="cpu"),
+            structured_outputs_config=StructuredOutputsConfig(backend="guidance"),
+        )
+    )
+    manager.reasoner_cls = MockReasoner
+    think_end = _single_token(tokenizer, THINK_END)
+    cases = [
+        (StructuredOutputsParams(json=JSON_SCHEMA), None, "", "C"),
+        (StructuredOutputsParams(regex=DIGITS_REGEX), None, "1", "C"),
+        # Still reasoning: unconstrained.
+        (StructuredOutputsParams(json=JSON_SCHEMA), {"marker": think_end}, "", "U"),
+        # Terminated: unconstrained.
+        (StructuredOutputsParams(regex=DIGITS_REGEX), None, "1" + EOS, "U"),
+        (StructuredOutputsParams(json='{"type": "array"}'), None, "[", "C"),
+    ]
+    requests = {}
+    for i, (params, reasoning_kwargs, accepted, _) in enumerate(cases):
+        sampling_params = SamplingParams(structured_outputs=params)
+        params._backend = "guidance"
+        sampling_params.update_from_generation_config({}, tokenizer.eos_token_id)
+        request = Request(
+            request_id=f"guidance-batch-{i}",
+            prompt_token_ids=[],
+            sampling_params=sampling_params,
+            pooling_params=None,
+            reasoning_ended=False if reasoning_kwargs else None,
+            reasoning_parser_kwargs=reasoning_kwargs,
+        )
+        manager.grammar_init(request)
+        _wait_for_grammar(request)
+        if accepted:
+            texts = ("1", EOS) if accepted.endswith(EOS) else (accepted,)
+            assert manager.accept_tokens(request, _to_token_ids(tokenizer, texts))
+        requests[request.request_id] = request
+
+    bitmask = manager.grammar_bitmask(
+        requests=requests,
+        structured_output_request_ids=list(requests),
+        scheduled_spec_decode_tokens={},
+    )
+    assert bitmask is not None
+    assert manager.backend is not None
+    assert manager.backend._ll_executor is not None
+    assert _row_pattern(bitmask) == "".join(c[3] for c in cases)
+
+    expected = manager.backend.allocate_token_bitmask(len(cases))
+    for i, request in enumerate(requests.values()):
+        if cases[i][3] == "C":
+            assert request.structured_output_request is not None
+            grammar = request.structured_output_request.grammar
+            grammar.fill_bitmask(expected, i)
+    assert (bitmask == expected.numpy()).all()
+
+
 def test_outlines_termination(tokenizer):
     """outlines_core never advances on EOS; termination must still be
     tracked exactly once per accepted EOS and undone by rollback."""
