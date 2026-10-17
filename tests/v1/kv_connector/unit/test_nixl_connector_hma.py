@@ -697,6 +697,8 @@ def test_read_blocks_for_req_expands_remote_ids(
     worker._physical_blocks_per_logical_kv_block = local_physical_per_logical
     worker._invalid_remote_engines = set()
     worker._remote_agents = {"remote-engine": {}}
+    worker._engine_by_address = {}
+    worker._handshake_lock = threading.RLock()
     worker._engine_last_active = {}
     worker._recving_transfers = {}
     worker._bidirectional_kv_xfer_enabled = False

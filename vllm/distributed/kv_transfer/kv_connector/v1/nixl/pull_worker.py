@@ -141,6 +141,32 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 req_id, None, self._recv_failures, record_failed_transfer=False
             )
             return
+        address = (meta.remote.host, meta.remote.port)
+        known_address = None
+        with self._handshake_lock:
+            if (
+                engine_id in self._remote_agents
+                and self._engine_by_address.get(address) != engine_id
+            ):
+                known_address = next(
+                    (a for a, e in self._engine_by_address.items() if e == engine_id),
+                    None,
+                )
+        if known_address is not None:
+            logger.error(
+                "Remote engine_id %s is advertised by %s:%d but is already "
+                "registered at %s:%d. Failing request %s instead of reading "
+                "KV from the wrong peer. Each vLLM instance needs a unique "
+                "engine_id.",
+                engine_id,
+                address[0],
+                address[1],
+                known_address[0],
+                known_address[1],
+                req_id,
+            )
+            self._handle_failed_transfer(req_id, None, self._recv_failures)
+            return
         if engine_id not in self._remote_agents:
             # Also re-handshakes queued requests that outlived invalid-peer cleanup.
             self._background_nixl_handshake(req_id, engine_id, meta)

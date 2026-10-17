@@ -829,6 +829,85 @@ class TestNixlHandshake:
         "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
         FakeNixlWrapper,
     )
+    def test_duplicate_engine_id_from_different_address_fails(
+        self,
+        default_vllm_config,
+        # dist_init is a fixture that initializes the distributed environment.
+        dist_init,
+    ):
+        """A second live peer reusing a known engine_id must not be read from.
+
+        Decode skips the handshake for an engine_id it already knows. Without a
+        check, a second prefill instance advertising the same engine_id from a
+        different address would be read through the first peer's agent, i.e.
+        KV blocks would be fetched from the wrong peer.
+        """
+        block_size = maybe_update_block_size(16)
+        vllm_config = create_vllm_config(block_size=block_size)
+        kv_cache_config = make_kv_cache_config(block_size=block_size, num_blocks=10)
+        connector = NixlConnector(vllm_config, KVConnectorRole.WORKER, kv_cache_config)
+        connector.connector_worker = FakeNixlConnectorWorker(
+            vllm_config,
+            connector.engine_id,
+            hand_shake_latency=0,
+            kv_cache_config=kv_cache_config,
+        )
+        worker = connector.connector_worker
+        worker.dst_xfer_side_handles = {
+            FakeNixlConnectorWorker.REMOTE_ENGINE_ID: {0: 1}
+        }
+        dummy_ctx = ForwardContext(
+            no_compile_layers={},
+            attn_metadata={},
+            slot_mapping={},
+        )
+
+        def step(request_id=None, host=None, port=None) -> set[str]:
+            metadata = NixlConnectorMetadata()
+            if request_id is not None:
+                metadata.add_new_req_to_recv(
+                    request_id=request_id,
+                    local_block_ids=([1, 2, 3],),
+                    kv_transfer_params={
+                        "remote_block_ids": ([4, 5, 6],),
+                        "remote_engine_id": FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
+                        "remote_request_id": f"prefill-{request_id}",
+                        "remote_host": host,
+                        "remote_port": port,
+                        "remote_tp_size": 1,
+                    },
+                )
+            connector.bind_connector_metadata(metadata)
+            connector.start_load_kv(dummy_ctx)
+            connector.clear_connector_metadata()
+            _, done_recving = connector.get_finished(finished_req_ids=set())
+            return done_recving
+
+        # First peer: handshake and read succeed.
+        done = step("req-a", "host-a", 1234)
+        deadline = time.perf_counter() + 5
+        while "req-a" not in done and time.perf_counter() < deadline:
+            time.sleep(0.01)
+            done |= step()
+        assert "req-a" in done
+        assert connector.get_block_ids_with_load_errors() == set()
+
+        # Second peer reuses the engine_id from another address: the request
+        # fails and no transfer is issued through the first peer's agent.
+        with patch.object(
+            worker.nixl_wrapper,
+            "make_prepped_xfer",
+            wraps=worker.nixl_wrapper.make_prepped_xfer,
+        ) as make_xfer:
+            done = step("req-b", "host-b", 5678)
+            make_xfer.assert_not_called()
+        assert "req-b" in done
+        assert connector.get_block_ids_with_load_errors() == {1, 2, 3}
+
+    @patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+        FakeNixlWrapper,
+    )
     @pytest.mark.parametrize(
         "decode_tp_size, prefill_tp_size",
         [
