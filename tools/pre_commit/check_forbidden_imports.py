@@ -64,6 +64,7 @@ CHECK_IMPORTS = {
             "tests/distributed/test_weight_transfer.py",
             "vllm/utils/hashing.py",
             "tests/multimodal/media/test_base.py",
+            "tests/test_config.py",
             "tests/tokenizers_/test_hf.py",
             "tests/utils_/test_hashing.py",
             "tests/compile/test_aot_compile.py",
