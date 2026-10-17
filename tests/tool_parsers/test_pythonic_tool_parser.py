@@ -58,6 +58,16 @@ ESCAPED_STRING_FUNCTION_CALL = FunctionCall(
     name="get_weather",
     arguments='{"city": "Martha\'s Vineyard", "metric": "\\"cool units\\""}',
 )
+# A raw (unescaped) newline inside a string argument is invalid Python, but the
+# intent is unambiguous; the parser escapes control chars before parsing.
+RAW_NEWLINE_FUNCTION_OUTPUT = "write_file(content='line1\nline2')"
+RAW_NEWLINE_FUNCTION_CALL = FunctionCall(
+    name="write_file",
+    arguments='{"content": "line1\\nline2"}',
+)
+RAW_NEWLINE_PARALLEL_FUNCTION_OUTPUT = (
+    "write_file(content='line1\nline2'), get_weather(city='SF')"
+)
 
 
 @pytest.mark.parametrize("streaming", [True, False])
@@ -147,6 +157,36 @@ TEST_CASES = [
         f"[{ESCAPED_STRING_FUNCTION_OUTPUT}]",
         [ESCAPED_STRING_FUNCTION_CALL],
         id="escaped_string_nonstreaming",
+    ),
+    pytest.param(
+        True,
+        f"[{RAW_NEWLINE_FUNCTION_OUTPUT}]",
+        [RAW_NEWLINE_FUNCTION_CALL],
+        id="raw_newline_in_string_streaming",
+    ),
+    pytest.param(
+        False,
+        f"[{RAW_NEWLINE_FUNCTION_OUTPUT}]",
+        [RAW_NEWLINE_FUNCTION_CALL],
+        id="raw_newline_in_string_nonstreaming",
+    ),
+    pytest.param(
+        True,
+        f"[{RAW_NEWLINE_PARALLEL_FUNCTION_OUTPUT}]",
+        [
+            RAW_NEWLINE_FUNCTION_CALL,
+            FunctionCall(name="get_weather", arguments='{"city": "SF"}'),
+        ],
+        id="raw_newline_parallel_calls_streaming",
+    ),
+    pytest.param(
+        False,
+        f"[{RAW_NEWLINE_PARALLEL_FUNCTION_OUTPUT}]",
+        [
+            RAW_NEWLINE_FUNCTION_CALL,
+            FunctionCall(name="get_weather", arguments='{"city": "SF"}'),
+        ],
+        id="raw_newline_parallel_calls_nonstreaming",
     ),
     pytest.param(
         True,

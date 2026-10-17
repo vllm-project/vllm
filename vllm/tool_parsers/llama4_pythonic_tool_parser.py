@@ -23,6 +23,7 @@ from vllm.tool_parsers.abstract_tool_parser import (
 from vllm.tool_parsers.utils import (
     UnexpectedAstError,
     compute_tool_delta,
+    escape_ctrl_chars_in_strings,
     handle_single_tool,
     make_valid_python,
 )
@@ -93,7 +94,7 @@ class Llama4PythonicToolParser(ToolParser):
             )
 
         try:
-            module = ast.parse(model_output)
+            module = ast.parse(escape_ctrl_chars_in_strings(model_output))
             parsed = getattr(module.body[0], "value", None)
             if isinstance(parsed, ast.List) and all(
                 isinstance(e, ast.Call) for e in parsed.elts
@@ -136,7 +137,9 @@ class Llama4PythonicToolParser(ToolParser):
                 current_text = current_text[len("<|python_start|>") :]
             if current_text.endswith("<|python_end|>"):
                 current_text = current_text[: current_text.rfind("<|python_end|>")]
-            valid_and_added_text = make_valid_python(current_text)
+            valid_and_added_text = make_valid_python(
+                escape_ctrl_chars_in_strings(current_text)
+            )
             if valid_and_added_text is None:
                 return None
             valid_text, added_text = valid_and_added_text
