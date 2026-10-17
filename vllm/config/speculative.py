@@ -1401,6 +1401,14 @@ class SpeculativeConfig:
                         self.draft_model_config.hf_config = eagle_config
                         self.update_arch_()
 
+                    # The draft's rotary embedding comes from the draft
+                    # config only; surface the resolved base so a silent
+                    # default can't go unnoticed (#61231).
+                    SpeculativeConfig._log_draft_rope_resolution(
+                        self.draft_model_config.hf_config,
+                        self.target_model_config.hf_config,
+                    )
+
                 if (
                     self.method == "dspark"
                     and "DSparkDraftModel" in self.draft_model_config.architectures
@@ -1680,6 +1688,58 @@ class SpeculativeConfig:
             target_max_model_len,
         )
         draft_hf_config.max_position_embeddings = target_max_model_len
+
+    @staticmethod
+    def _log_draft_rope_resolution(
+        draft_hf_config: PreTrainedConfig,
+        target_hf_config: PreTrainedConfig,
+    ) -> None:
+        """Log the EAGLE draft's resolved RoPE base; warn on silent defaults.
+
+        An EAGLE/EAGLE-3 draft head builds its rotary embedding from the
+        draft checkpoint's own config only. When that config carries no rope
+        keys, transformers fills `rope_parameters` with its defaults (base
+        10000), which silently mismatches a target running at a different
+        base (#61231). This changes no numerics; it only makes the resolved
+        values visible at startup.
+
+        Args:
+            draft_hf_config: The draft model's HF config (after EAGLE wrap).
+            target_hf_config: The target model's HF config.
+
+        """
+        draft_params = getattr(draft_hf_config, "rope_parameters", None) or {}
+        target_params = getattr(target_hf_config, "rope_parameters", None) or {}
+        # Mirror get_rope's resolution so the log matches what the model
+        # actually builds.
+        draft_base = draft_params.get("rope_theta", 10000)
+        draft_type = draft_params.get("rope_type", "default")
+        target_base = target_params.get("rope_theta", 10000)
+
+        logger.info(
+            "EAGLE draft model resolves rope base %s (rope_type=%s).",
+            draft_base,
+            draft_type,
+        )
+
+        if draft_base == target_base:
+            return
+        if draft_type == "default" and draft_base == 10000:
+            # Indistinguishable from transformers' silent default: either the
+            # draft config omits rope keys or it pins the default explicitly.
+            # Either way the operator should confirm the checkpoint's intent.
+            logger.warning(
+                "EAGLE draft model rope base (%s, rope_type=%s) differs from "
+                "the target model's rope base (%s). The draft's rotary "
+                "embedding is resolved from the draft checkpoint config "
+                "only; a draft config without rope keys silently defaults "
+                "to base 10000 (#61231). If the draft was trained with the "
+                "target's rope settings, set rope_theta/rope_scaling in the "
+                "draft config; otherwise draft acceptance may degrade.",
+                draft_base,
+                draft_type,
+                target_base,
+            )
 
     @staticmethod
     def _verify_and_get_draft_tp(
