@@ -25,6 +25,7 @@ If you only need to use the distributed environment without model/pipeline
 
 import contextlib
 import gc
+import os
 import pickle
 import weakref
 from collections import deque, namedtuple
@@ -1906,6 +1907,31 @@ def init_distributed_environment(
                 world_size,
                 rank,
                 distributed_init_method,
+            )
+    if "GLOO_SOCKET_IFNAME" not in os.environ and config is not None:
+        if (
+            config.parallel_config.nnodes == 1
+            and config.parallel_config.distributed_executor_backend in ("mp", None)
+        ):
+            os.environ["GLOO_SOCKET_IFNAME"] = "lo"
+            logger.info_once(
+                "Defaulting GLOO_SOCKET_IFNAME='lo' for single-node "
+                "multiprocessing to prevent Gloo from resolving to container "
+                "bridge or external interfaces."
+            )
+        elif (
+            config.parallel_config.nnodes == 1
+            and config.parallel_config.pipeline_parallel_size > 1
+        ):
+            logger.warning_once(
+                "Single-node pipeline parallelism is enabled "
+                "(pipeline_parallel_size=%d) but GLOO_SOCKET_IFNAME is not "
+                "set. In containerized environments (such as Docker default "
+                "bridge), Gloo may resolve to the bridge IP and incur high "
+                "per-step latency (~500ms). Consider setting "
+                "GLOO_SOCKET_IFNAME=lo if all ranks share the same network "
+                "namespace.",
+                config.parallel_config.pipeline_parallel_size,
             )
     if not torch.distributed.is_initialized():
         logger.info(
