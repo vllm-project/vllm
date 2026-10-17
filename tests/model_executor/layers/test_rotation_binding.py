@@ -10,16 +10,22 @@ import pytest
 import torch
 
 from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.rotation.composite_hadamard import (
+    CompositeHadamardRotation,
+)
 from vllm.model_executor.layers.rotation.norm import PreRotationRMSNorm
 from vllm.model_executor.layers.rotation.replacement import (
     bind_rotation_transforms,
     prepare_rotation_transforms,
 )
+from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
 
 pytestmark = pytest.mark.usefixtures("default_vllm_config")
 
 
-def _prepared_model(targets: list[str]) -> torch.nn.Module:
+def _prepared_model(
+    targets: list[str], *, draft_dtype: torch.dtype | None = None
+) -> torch.nn.Module:
     config = SimpleNamespace(
         rotation_config={
             "rotations": {
@@ -39,8 +45,15 @@ def _prepared_model(targets: list[str]) -> torch.nn.Module:
             ],
         }
     )
-    model_config = SimpleNamespace(hf_config=config)
-    vllm_config = SimpleNamespace(model_config=model_config, speculative_config=None)
+    model_config = SimpleNamespace(hf_config=config, dtype=torch.bfloat16)
+    speculative_config = (
+        SimpleNamespace(draft_model_config=SimpleNamespace(dtype=draft_dtype))
+        if draft_dtype is not None
+        else None
+    )
+    vllm_config = SimpleNamespace(
+        model_config=model_config, speculative_config=speculative_config
+    )
     model = torch.nn.Module()
     model.add_module("norm", RMSNorm(16))
     prepare_rotation_transforms(model, vllm_config, model_config)
@@ -48,6 +61,32 @@ def _prepared_model(targets: list[str]) -> torch.nn.Module:
         model.rotations["final"].sign.fill_(1)
         model.rotations["final"].hk.fill_(1)
     return model
+
+
+@pytest.mark.parametrize("draft_dtype", [None, torch.bfloat16, torch.float16])
+def test_prepare_registers_mtp_warmup_before_draft_loading(monkeypatch, draft_dtype):
+    """Prepare covers MTP-only targets and deduplicates equal main/draft keys."""
+    from vllm.model_executor.kernels.rotation.composite_hadamard.warmup import (
+        CompositeHadamardEpilogueKernel,
+    )
+
+    kernel = CompositeHadamardEpilogueKernel()
+    monkeypatch.setattr(
+        CompositeHadamardRotation,
+        "register_warmup",
+        lambda self, **kwargs: kernel.register_warmup(k=self.k, p=self.p, **kwargs),
+    )
+    registry = JitWarmupRegistry(None)
+    with registry.activate():
+        _prepared_model(["model.layers.45.shared_head.norm"], draft_dtype=draft_dtype)
+    dtypes = {torch.bfloat16}
+    if draft_dtype is not None:
+        dtypes.add(draft_dtype)
+    assert len(registry) == len(dtypes)
+    compiled: list[CompositeHadamardEpilogueKernel.CompileKey] = []
+    monkeypatch.setattr(kernel, "compile", compiled.append)
+    registry.warmup()
+    assert set(compiled) == {kernel.CompileKey(1, 16, True, dtype) for dtype in dtypes}
 
 
 def test_main_norm_binds_without_optional_mtp_model(caplog_vllm):

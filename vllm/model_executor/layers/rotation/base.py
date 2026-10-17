@@ -46,5 +46,8 @@ class RotationTransform(nn.Module, ABC):
         """Apply the transform or its inverse to the last tensor dimension."""
         raise NotImplementedError
 
+    def register_warmup(self, *, inverse: bool, dtype: torch.dtype) -> None:
+        """Register any JIT kernels required by this transform."""
+
 
 __all__ = ["RotationTransform"]

@@ -17,9 +17,9 @@ from vllm.model_executor.kernels.rotation.composite_hadamard import (
     composite_hadamard_torch,
 )
 from vllm.model_executor.kernels.rotation.composite_hadamard.utils import (
-    make_hadamard_gemm_matrix,
     resolve_hadamard_dim,
 )
+from vllm.platforms import current_platform
 
 from .base import RotationTransform
 
@@ -60,14 +60,6 @@ class CompositeHadamardRotation(RotationTransform):
         )
         self.hk = nn.Parameter(
             hk.detach().to(dtype=torch.float32).contiguous(), requires_grad=False
-        )
-        self.register_buffer(
-            "h_gemm",
-            make_hadamard_gemm_matrix(
-                device=self.sign.device,
-                dtype=torch.bfloat16,
-            ),
-            persistent=False,
         )
         self.k = k
         self.p = power_of_two_part
@@ -119,7 +111,6 @@ class CompositeHadamardRotation(RotationTransform):
             x,
             self.sign.to(device=x.device),
             self.hk.to(device=x.device, dtype=torch.float32),
-            self.h_gemm.to(device=x.device, dtype=x.dtype),
             inverse=inverse,
             k=self.k,
             p=self.p,
@@ -132,6 +123,23 @@ class CompositeHadamardRotation(RotationTransform):
             return self.forward_cuda(x, inverse=inverse)
         raise NotImplementedError(
             f"composite_hadamard does not support device {x.device.type!r}"
+        )
+
+    def register_warmup(self, *, inverse: bool, dtype: torch.dtype) -> None:
+        if not current_platform.is_cuda() or dtype not in (
+            torch.float16,
+            torch.bfloat16,
+        ):
+            return
+        from vllm.model_executor.kernels.rotation.composite_hadamard.warmup import (
+            COMPOSITE_HADAMARD_EPILOGUE,
+        )
+
+        COMPOSITE_HADAMARD_EPILOGUE.register_warmup(
+            k=self.k,
+            p=self.p,
+            inverse=inverse,
+            dtype=dtype,
         )
 
     def extra_repr(self) -> str:

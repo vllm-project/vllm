@@ -9,6 +9,8 @@ import math
 import pytest
 import torch
 
+from vllm.platforms import current_platform
+
 
 def _fwht_cpu(x: torch.Tensor) -> torch.Tensor:
     """Apply an unnormalized Hadamard transform using CPU butterflies."""
@@ -48,26 +50,25 @@ def _reference(
 
 @pytest.fixture(scope="module")
 def rotation_api():
-    if not torch.cuda.is_available():
-        pytest.skip("Composite Hadamard requires a CUDA GPU")
+    if not current_platform.is_cuda() or not torch.cuda.is_available():
+        pytest.skip("Composite Hadamard CUDA tests require an NVIDIA GPU")
     pytest.importorskip("tilelang")
     from vllm.model_executor.kernels.rotation.composite_hadamard import (
         composite_hadamard,
     )
-    from vllm.model_executor.kernels.rotation.composite_hadamard.utils import (
-        make_hadamard_gemm_matrix,
-    )
 
-    return composite_hadamard, make_hadamard_gemm_matrix
+    return composite_hadamard
 
 
 @pytest.mark.parametrize(
     "k,p,rows,dtype,noncontiguous",
     [
-        pytest.param(1, 4096, 1, torch.bfloat16, False, id="glm53-decode"),
+        pytest.param(1, 4096, 1, torch.bfloat16, False, id="power-of-two"),
         pytest.param(12, 512, 4, torch.bfloat16, False, id="composite"),
-        pytest.param(12, 16, 4, torch.bfloat16, False, id="below-gemm"),
-        pytest.param(12, 32, 4, torch.bfloat16, False, id="gemm-boundary"),
+        pytest.param(12, 512, 4, torch.float16, False, id="fp16"),
+        pytest.param(12, 512, 685, torch.bfloat16, False, id="prefill-tail"),
+        pytest.param(12, 32, 4, torch.bfloat16, False, id="width-32"),
+        pytest.param(12, 32, 2, torch.bfloat16, False, id="partial-warp"),
         pytest.param(12, 32, 4, torch.bfloat16, True, id="noncontiguous"),
         pytest.param(1, 4096, 1, torch.float32, False, id="fp32"),
     ],
@@ -76,8 +77,7 @@ def test_forward_and_inverse_match_cpu_reference(
     rotation_api, k, p, rows, dtype, noncontiguous
 ):
     """Both directions match an independent reference at key kernel boundaries."""
-    op, make_matrix = rotation_api
-    h_gemm = make_matrix(device="cuda", dtype=dtype)
+    op = rotation_api
     generator = torch.Generator().manual_seed(20261015 + k * p)
     if noncontiguous:
         x = torch.randn((k * p, rows), generator=generator, dtype=dtype).T
@@ -98,7 +98,8 @@ def test_forward_and_inverse_match_cpu_reference(
     hk = hk.cuda().contiguous()
 
     for inverse in (False, True):
-        actual = op(x, sign, hk, h_gemm, inverse=inverse, k=k, p=p)
+        original = x.clone()
+        actual = op(x, sign, hk, inverse=inverse, k=k, p=p)
         expected = _reference(x, sign, hk, k, p, inverse)
         relative_error = (
             (actual.cpu().float() - expected).norm() / expected.norm()
@@ -108,33 +109,80 @@ def test_forward_and_inverse_match_cpu_reference(
         assert actual.dtype == dtype
         assert actual.is_contiguous()
         assert relative_error < tolerance
+        torch.testing.assert_close(x, original, rtol=0, atol=0)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            captured = op(x, sign, hk, inverse=inverse, k=k, p=p)
+        graph.replay()
+        torch.testing.assert_close(captured, actual, rtol=0, atol=0)
         if noncontiguous:
             torch.library.opcheck(
                 torch.ops.vllm.composite_hadamard_tilelang.default,
-                (x, sign, hk, h_gemm, inverse, k, p),
+                (x, sign, hk, inverse, k, p),
                 test_utils=("test_faketensor",),
             )
 
 
 def test_empty_batch_does_not_launch_kernel(rotation_api):
     """An empty batch must return without launching a zero-grid kernel."""
-    op, make_matrix = rotation_api
-    h_gemm = make_matrix(device="cuda")
+    op = rotation_api
     x = torch.empty((0, 4096), device="cuda", dtype=torch.bfloat16)
     sign = torch.ones(4096, device="cuda", dtype=torch.int8)
     hk = torch.ones((1, 1), device="cuda", dtype=torch.float32)
-    result = op(x, sign, hk, h_gemm, inverse=True, k=1, p=4096)
+    result = op(x, sign, hk, inverse=True, k=1, p=4096)
     assert result.shape == x.shape
 
 
 def test_invalid_dimensions_are_rejected(rotation_api):
     """Invalid width or K/P factorization fails before compiling a GPU kernel."""
-    op, make_matrix = rotation_api
-    h_gemm = make_matrix(device="cuda")
+    op = rotation_api
     x = torch.zeros((1, 72), device="cuda", dtype=torch.bfloat16)
     sign = torch.ones(72, device="cuda", dtype=torch.int8)
     hk = torch.eye(12, device="cuda", dtype=torch.float32)
     with pytest.raises(ValueError, match="power of two"):
-        op(x, sign, hk, h_gemm, inverse=False, k=12, p=6)
+        op(x, sign, hk, inverse=False, k=12, p=6)
     with pytest.raises(ValueError, match="hidden_size must equal"):
-        op(x, sign, hk, h_gemm, inverse=False, k=12, p=4)
+        op(x, sign, hk, inverse=False, k=12, p=4)
+
+
+@pytest.mark.parametrize("startup_warmup", [False, True])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+def test_epilogue_cache_with_and_without_startup_warmup(
+    rotation_api, monkeypatch, startup_warmup, dtype
+):
+    """Warmup or the first call compiles once; eager/graph reuse dynamic rows."""
+    from vllm.model_executor.kernels.rotation.composite_hadamard import warmup
+    from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
+
+    kernel = warmup.CompositeHadamardEpilogueKernel()
+    monkeypatch.setattr(warmup, "COMPOSITE_HADAMARD_EPILOGUE", kernel)
+    registry = JitWarmupRegistry(None)
+    key = dict(k=12, p=512, inverse=True, dtype=dtype)
+    with registry.activate():
+        kernel.register_warmup(**key)
+
+    compiled: list[warmup.CompositeHadamardEpilogueKernel.CompileKey] = []
+    compile_kernel = kernel.compile
+
+    def record_compile(compile_key):
+        compiled.append(compile_key)
+        compile_kernel(compile_key)
+
+    monkeypatch.setattr(kernel, "compile", record_compile)
+    if startup_warmup:
+        registry.warmup()
+    assert len(compiled) == int(startup_warmup)
+    sign = torch.ones(6144, device="cuda", dtype=torch.int8)
+    hk = torch.eye(12, device="cuda", dtype=torch.float32) * math.sqrt(12)
+    for rows in (1, 32):
+        x = torch.randn(rows, 6144, device="cuda", dtype=dtype)
+        actual = rotation_api(x, sign, hk, inverse=True, k=12, p=512)
+        expected = _reference(x, sign, hk, 12, 512, True)
+        error = (actual.cpu().float() - expected).norm() / expected.norm()
+        assert error < 0.02
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            captured = rotation_api(x, sign, hk, inverse=True, k=12, p=512)
+        graph.replay()
+        torch.testing.assert_close(captured, actual, rtol=0, atol=0)
+        assert compiled == [kernel.CompileKey(**key)]

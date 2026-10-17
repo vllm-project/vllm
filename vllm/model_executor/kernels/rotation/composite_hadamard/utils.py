@@ -2,14 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # SPDX-FileCopyrightText: Copyright (c) 2026 MetaX Integrated Circuits (Shanghai) Co., Ltd.
 
-"""Shape selection and matrix construction for Hadamard kernels."""
+"""Shape selection for composite Hadamard transforms."""
 
 from __future__ import annotations
 
-import torch
-
 KNOWN_HADAMARD_ORDERS = (1, 12, 20, 28, 36, 40, 52, 60, 108, 140, 156, 172)
-GEMM_HADAMARD_ORDER = 32
 
 
 def is_pow2(value: int) -> bool:
@@ -50,15 +47,3 @@ def resolve_hadamard_dim(
     if not is_pow2(p):
         raise ValueError("P must be a power of two")
     return k, p
-
-
-def make_hadamard_gemm_matrix(
-    device: str | torch.device = "cuda",
-    dtype: torch.dtype = torch.bfloat16,
-) -> torch.Tensor:
-    order = GEMM_HADAMARD_ORDER
-    matrix = torch.empty((order, order), dtype=torch.float32)
-    for row in range(order):
-        for column in range(order):
-            matrix[row, column] = 1.0 if (row & column).bit_count() % 2 == 0 else -1.0
-    return matrix.to(device=device, dtype=dtype).contiguous()
