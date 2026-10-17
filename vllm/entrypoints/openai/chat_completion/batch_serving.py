@@ -288,11 +288,15 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                         request=single_request,
                         model_output_token_ids=output.token_ids,
                     )
+                    suppress_metadata = not request.include_reasoning
                     if not request.include_reasoning:
                         reasoning = None
+                    if suppress_metadata:
+                        logprobs = None
                 else:
                     reasoning = None
                     content = output.text
+                    suppress_metadata = False
 
                 role = (
                     self.response_role
@@ -326,7 +330,9 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                     else "stop",
                     stop_reason=output.stop_reason,
                     token_ids=(
-                        as_list(output.token_ids) if request.return_token_ids else None
+                        as_list(output.token_ids)
+                        if request.return_token_ids and not suppress_metadata
+                        else None
                     ),
                 )
                 choices.append(choice_data)
