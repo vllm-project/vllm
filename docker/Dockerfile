@@ -502,7 +502,11 @@ RUN --mount=type=cache,target=/opt/uv/cache \
             > /tmp/nccl-override.txt && \
         export UV_OVERRIDE=/tmp/nccl-override.txt; \
     fi && \
-    export TORCH_CUDA_ARCH_LIST='9.0a 10.0a' && \
+    if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ]; then \
+        export TORCH_CUDA_ARCH_LIST='9.0a 10.0a 10.3a 10.7a'; \
+    else \
+        export TORCH_CUDA_ARCH_LIST='9.0a 10.0a 10.3a'; \
+    fi && \
     /tmp/install_python_libraries.sh \
         --workspace /tmp/ep_kernels_workspace \
         --mode wheel \
