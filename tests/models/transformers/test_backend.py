@@ -18,6 +18,10 @@ from transformers import AutoConfig, AutoModel, PreTrainedConfig
 from vllm.config import ModelConfig, VllmConfig
 from vllm.model_executor.models.interfaces import SupportsMultiModal
 from vllm.model_executor.models.transformers.base import Base
+from vllm.model_executor.models.transformers.causal import (
+    LM_HEAD_TRANSFORM_ATTR,
+    CausalMixin,
+)
 from vllm.model_executor.models.transformers.fusers import AttentionFuser
 from vllm.model_executor.models.transformers.fusers.attention import VLLM_ATTN_IMPL
 from vllm.model_executor.models.transformers.multimodal import MultiModalMixin
@@ -131,6 +135,25 @@ def test_models(
         model,
         num_fused=num_fused,
         model_impl=model_impl,
+    )
+
+
+def test_output_head_transform(
+    hf_runner: type[HfRunner],
+    vllm_runner: type[VllmRunner],
+    example_prompts: list[str],
+) -> None:
+    """ModernBERT decoder passes the hidden states through a head of its own
+    (dense -> act -> norm) before its output embeddings, which have a bias.
+
+    Compared in float32 because the tiny model has near-tied logits in bfloat16."""
+    check_implementation(
+        hf_runner,
+        vllm_runner,
+        example_prompts,
+        "jhu-clsp/ettin-decoder-17m",
+        num_fused=(0, 1),  # `Wi` already holds the input and gate projections
+        dtype="float32",
     )
 
 
@@ -627,6 +650,44 @@ def test_marking_skipped_without_tokenizer():
     """
     vision_tower = build_marked_model(0, skip_tokenizer_init=True).vision_tower
     assert not isinstance(vision_tower, StageMissingLayer)
+
+
+class OutputHeadStub:
+    """Just enough of the backend to find a model's output head."""
+
+    config: PreTrainedConfig
+    model_config: Any
+    model: nn.Module
+    _output_head = CausalMixin._output_head
+    _rename_output_head = CausalMixin._rename_output_head
+
+
+@pytest.mark.parametrize(
+    ("model_type", "embeddings", "transform"),
+    [
+        ("llama", "lm_head", None),  # does not override `get_output_embeddings`
+        ("gpt_neox", "lm_head", None),  # overrides it, but the head is plain
+        ("modernbert-decoder", "decoder", "lm_head"),  # dense -> act -> norm
+    ],
+)
+def test_output_head(model_type: str, embeddings: str, transform: str | None):
+    """Output heads which transform the hidden states are found and renamed."""
+    stub = OutputHeadStub()
+    stub.config = AutoConfig.for_model(model_type, num_hidden_layers=1)
+    stub.model_config = SimpleNamespace(dtype=torch.float32)
+    with torch.device("meta"):
+        stub.model = AutoModel.from_config(stub.config)
+
+    output_head = stub._output_head
+    assert (output_head.embeddings, output_head.transform) == (embeddings, transform)
+    assert stub._rename_output_head(f"{embeddings}.bias") == "lm_head.bias"
+    if transform is not None:
+        assert isinstance(output_head.transform_module, nn.Module)
+        renamed = stub._rename_output_head(f"{transform}.dense.weight")
+        assert renamed == f"{LM_HEAD_TRANSFORM_ATTR}.dense.weight"
+    assert stub._rename_output_head("model.layers.0.mlp.Wo.weight") == (
+        "model.layers.0.mlp.Wo.weight"
+    )
 
 
 NUM_LAYERS = 4

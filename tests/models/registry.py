@@ -443,6 +443,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
             "tiny-random": "TitanML/tiny-mixtral",
         },
     ),
+    "ModernBertDecoderForCausalLM": _HfExamplesInfo(
+        "jhu-clsp/ettin-decoder-150m", {"tiny": "jhu-clsp/ettin-decoder-17m"}
+    ),
     "NemotronForCausalLM": _HfExamplesInfo("nvidia/Minitron-8B-Base"),
     "NemotronHForCausalLM": _HfExamplesInfo(
         "nvidia/Nemotron-H-8B-Base-8K", trust_remote_code=True
