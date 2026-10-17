@@ -51,7 +51,7 @@ class INCMxfp4LinearMethod(INCLinearScheme):
         params_dtype: torch.dtype,
         **extra_weight_attrs: Any,
     ) -> None:
-        del input_size, output_size
+        del output_size
         output_size_per_partition = sum(output_partition_sizes)
         layer.logical_widths = output_partition_sizes
         layer.input_size_per_partition = input_size_per_partition
