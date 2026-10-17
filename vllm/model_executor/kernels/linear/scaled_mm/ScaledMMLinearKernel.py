@@ -13,10 +13,12 @@ from vllm.model_executor.layers.fusion.quant_activation import (
     as_quantized_activation,
 )
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
+from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
 )
 from vllm.platforms import current_platform
+from vllm.utils.math_utils import round_up
 
 from ..base import MMLinearLayerConfig
 
@@ -123,6 +125,17 @@ class FP8ScaledMMLinearKernel(
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         pass
 
+    def pad_weight_k(self, layer: torch.nn.Module) -> None:
+        """Zero-pad the (K, N) weight's K to a multiple of 16, which
+        torch._scaled_mm requires; apply_weights pads the input to match."""
+        weight_name = self.layer_param_names[0]
+        weight = getattr(layer, weight_name)
+        pad_k = round_up(weight.shape[0], 16) - weight.shape[0]
+        if pad_k > 0:
+            # Pad the (N, K) view so the weight stays column-major.
+            padded = torch.nn.functional.pad(weight.t(), (0, pad_k)).t()
+            replace_parameter(layer, weight_name, padded.data)
+
     def _get_layer_params(self, layer) -> _FP8ParamsT:
         w, w_s, x_s, x_s_ub = self.layer_param_names
         return (
@@ -159,6 +172,9 @@ class FP8ScaledMMLinearKernel(
         x_2d_q = x_2d
         if qa is None:
             x_2d_q, x_s = self.quant_fp8(x_2d, x_s, x_s_ub)
+        if x_2d_q.shape[1] < w.shape[0]:
+            # The weight's K was zero-padded (pad_weight_k); pad the input too.
+            x_2d_q = torch.nn.functional.pad(x_2d_q, (0, w.shape[0] - x_2d_q.shape[1]))
         return self.apply_scaled_mm(
             A=x_2d_q,
             B=w,
