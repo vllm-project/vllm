@@ -20,7 +20,7 @@ def _min_p_kernel(
     if min_p == 0.0:
         return
 
-    max_val = float("-inf")
+    max_val = tl.full((BLOCK_SIZE,), float("-inf"), tl.float32)
     for i in range(0, vocab_size, BLOCK_SIZE):
         block = i + tl.arange(0, BLOCK_SIZE)
         mask = block < vocab_size
@@ -29,8 +29,8 @@ def _min_p_kernel(
             mask=mask,
             other=float("-inf"),
         )
-        max_val = tl.max(tl.maximum(logits, max_val))
-    max_val = max_val.to(tl.float32)  # type: ignore
+        max_val = tl.maximum(logits, max_val)
+    max_val = tl.max(max_val, 0)
 
     threshold = max_val + tl.log(min_p)
     for i in range(0, vocab_size, BLOCK_SIZE):
@@ -49,7 +49,9 @@ def apply_min_p(
     logits: torch.Tensor, expanded_idx_mapping: torch.Tensor, min_p: torch.Tensor
 ) -> None:
     num_tokens, vocab_size = logits.shape
-    BLOCK_SIZE = 1024
+    # Wider loads amortize the serial scan for small batches. Keep the smaller
+    # tile for larger batches to avoid increasing register pressure.
+    BLOCK_SIZE = 8192 if vocab_size > 16384 and num_tokens <= 8 else 1024
     _min_p_kernel[(num_tokens,)](
         logits,
         logits.stride(0),
