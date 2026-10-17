@@ -161,6 +161,34 @@ class MuseGlimmerReasoningParser(ReasoningParser):
         # path uses extract_reasoning() for the final split.
         return []
 
+    def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
+        """Count generated tokens that belong to ``to=self`` reasoning bodies.
+
+        MuseGlimmer's framing markers are not guaranteed to be single vocab
+        tokens, so the marker-token counting used by ``BaseThinkingReasoningParser``
+        does not apply. Decode the generated ids, reuse the channel
+        classification that already drives extraction, and re-encode the
+        reasoning body. Re-encoding approximates the original token count at
+        span boundaries, which is acceptable for usage accounting.
+        """
+        if not token_ids:
+            return 0
+        try:
+            text = self.model_tokenizer.decode(token_ids)
+        except Exception:
+            return 0
+        # token_ids are generation-only, so no prompt anchoring is needed.
+        # Do NOT scope to _current_assistant_turn here: the model re-opens the
+        # turn mid-generation (``<|eom|><|start|>assistant to=user<|message|>``),
+        # and anchoring on the LAST turn-open would slice off the reasoning
+        # that precedes it.
+        reasoning_body, _ = self._classify_bodies(text)
+        if not reasoning_body:
+            return 0
+        return len(
+            self.model_tokenizer.encode(reasoning_body, add_special_tokens=False)
+        )
+
     @classmethod
     def _scoped_turn(cls, text: str) -> str:
         """Current assistant turn with reasoning spans removed."""
