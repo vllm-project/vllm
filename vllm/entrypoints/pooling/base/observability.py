@@ -20,7 +20,7 @@ TO_S = 1000_000_000
 TO_MS = 1000_000
 
 
-class ObservabilityMixinBase:
+class _ObservabilityMixin:
     vllm_config: VllmConfig
     renderer: BaseRenderer
 
@@ -33,7 +33,7 @@ class ObservabilityMixinBase:
 
         # will raise ValueError: OpenTelemetry is not available.
         self.trace_provider = init_otel_trace_provider(
-            observability_config.otlp_traces_endpoint
+            observability_config.get_otlp_traces_endpoint()
         )
 
     @asynccontextmanager
@@ -43,7 +43,9 @@ class ObservabilityMixinBase:
         io_processor: PoolingIOProcessor,
         raw_request: Request | None = None,
     ):
-        raw_trace_headers = await self._get_trace_headers(raw_request.headers)
+        raw_trace_headers = await self._get_trace_headers(
+            raw_request if raw_request is None else raw_request.headers
+        )
 
         ctx.trace_headers = raw_trace_headers
         yield
@@ -70,9 +72,7 @@ class ObservabilityMixinBase:
         return {}
 
 
-if not _IS_OTEL_AVAILABLE:
-    ObservabilityMixin = ObservabilityMixinBase
-else:
+if _IS_OTEL_AVAILABLE:
     from opentelemetry.sdk.trace import Span
     from opentelemetry.trace import (
         NonRecordingSpan,
@@ -89,7 +89,7 @@ else:
     )
     from vllm.tracing.otel import init_otel_trace_provider
 
-    class ObservabilityMixin(ObservabilityMixinBase):
+    class _ObservabilityMixinWithOpenTelemetry(_ObservabilityMixin):
         vllm_config: VllmConfig
         renderer: BaseRenderer
 
@@ -245,3 +245,7 @@ else:
 
     def get_status_error():
         return Status(StatusCode.ERROR)
+
+    ObservabilityMixin = _ObservabilityMixinWithOpenTelemetry
+else:
+    ObservabilityMixin = _ObservabilityMixin
