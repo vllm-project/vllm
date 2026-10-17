@@ -39,12 +39,14 @@ from vllm.v1.kv_offload.base import (
     TierMatcher,
     make_offload_key,
 )
+from vllm.v1.kv_offload.cpu.common import CPUOffloadingMetrics
 from vllm.v1.kv_offload.cpu.policies.lru import LRUCachePolicy
 from vllm.v1.kv_offload.tiering.base import (
     JobResult,
     SecondaryTierManager,
     TieringOffloadingMetrics,
     TransferJob,
+    UnsafeTransferError,
 )
 from vllm.v1.kv_offload.tiering.example.manager import ExampleSecondaryTierManager
 from vllm.v1.kv_offload.tiering.factory import SecondaryTierFactory
@@ -369,6 +371,149 @@ class TestTieringOffloadingManager:
         ):
             self.manager._process_finished_jobs()
         completed.assert_called_once_with(to_keys([1, 2]), _CTX, False)
+
+    @pytest.mark.parametrize("terminal_success", [True, False])
+    @pytest.mark.parametrize("completion_path", ["step", "poll_tiers", "drain"])
+    def test_unsafe_promotion_reserves_slots_until_confirmation(
+        self, manager_setup, terminal_success, completion_path
+    ):
+        """Failed remote loads must not let a late WRITE corrupt reused slots."""
+        self._start_request()
+        keys = to_keys(range(5))
+        prepared = self.primary_tier.prepare_write(keys, _CTX)
+        assert prepared is not None
+        job_id = self.manager._next_job_id()
+        self.manager._register_job(
+            TransferJob(
+                job_id=job_id,
+                keys=keys,
+                chunk_ids=np.asarray(prepared.store_spec.chunk_ids),
+                is_promotion=True,
+                req_context=_CTX,
+            ),
+            0,
+        )
+        unsafe = JobResult(job_id=job_id, success=False, memory_safe=False)
+        if completion_path == "drain":
+
+            def fail_drain():
+                self.secondary_tier1.completed_jobs.append(unsafe)
+                raise UnsafeTransferError("P2P drain encountered an unsafe WRITE")
+
+            with (
+                patch.object(
+                    self.secondary_tier1, "drain_jobs", side_effect=fail_drain
+                ),
+                pytest.raises(RuntimeError, match="quarantined slots"),
+            ):
+                self.manager.reset_cache()
+        else:
+            self.secondary_tier1.completed_jobs.append(unsafe)
+            if completion_path == "poll_tiers":
+                self.manager._polled_tiers = [self.secondary_tier1]
+                with self.manager.lock:
+                    self.manager.poll_tiers()
+            else:
+                self.manager._process_finished_jobs()
+
+        stats = self.manager.get_stats()
+        assert stats is not None
+        values = stats.data["data"]
+        assert values[CPUOffloadingMetrics.CPU_CACHE_WRITE_USAGE_PERC][()] == 1.0
+        assert values[CPUOffloadingMetrics.CPU_CACHE_READ_USAGE_PERC][()] == 0.0
+        label = ("1:example",)
+        assert values[TieringOffloadingMetrics.PRIMARY_WRITE_USAGE_PERC][label] == 1.0
+        assert values[TieringOffloadingMetrics.ACTIVE_PROMOTION_JOBS][label] == 1
+        assert values[TieringOffloadingMetrics.PROMOTION_JOB_FAILURES][label] == 1
+        assert (
+            len(values[TieringOffloadingMetrics.PROMOTION_LATENCY][(*label, "failure")])
+            == 1
+        )
+        assert all(
+            self.primary_tier.lookup(key, _CTX) is LookupResult.MISS for key in keys
+        )
+        replacement = to_keys([99])
+        assert self.primary_tier.prepare_write(replacement, _CTX) is None
+        with (
+            patch.object(
+                self.secondary_tier1,
+                "drain_jobs",
+                side_effect=AssertionError("reset tried to drain an unconfirmed WRITE"),
+            ),
+            pytest.raises(RuntimeError, match="quarantined slots"),
+        ):
+            self.manager.reset_cache()
+        assert self.primary_tier.prepare_write(replacement, _CTX) is None
+
+        self.secondary_tier1.completed_jobs.append(
+            JobResult(job_id=job_id, success=terminal_success)
+        )
+        if completion_path == "poll_tiers":
+            with self.manager.lock:
+                self.manager.poll_tiers()
+        self.manager.reset_cache()
+        stats = self.manager.get_stats()
+        assert stats is not None
+        values = stats.data["data"]
+        assert values[CPUOffloadingMetrics.CPU_CACHE_WRITE_USAGE_PERC][()] == 0.0
+        assert values[TieringOffloadingMetrics.PRIMARY_WRITE_USAGE_PERC][label] == 0.0
+        assert values[TieringOffloadingMetrics.ACTIVE_PROMOTION_JOBS][label] == 0
+        assert TieringOffloadingMetrics.PROMOTION_JOB_FAILURES not in values
+        assert TieringOffloadingMetrics.PROMOTION_LATENCY not in values
+        assert self.primary_tier.prepare_write(replacement, _CTX) is not None
+
+    @pytest.mark.parametrize("drain_error", [UnsafeTransferError, RuntimeError])
+    def test_reset_retries_confirmed_unsafe_drain_but_preserves_other_errors(
+        self, manager_setup, drain_error
+    ):
+        self._start_request()
+        keys = to_keys(range(5))
+        prepared = self.primary_tier.prepare_write(keys, _CTX)
+        assert prepared is not None
+        job_id = self.manager._next_job_id()
+        self.manager._register_job(
+            TransferJob(
+                job_id=job_id,
+                keys=keys,
+                chunk_ids=np.asarray(prepared.store_spec.chunk_ids),
+                is_promotion=True,
+                req_context=_CTX,
+            ),
+            0,
+        )
+
+        def fail_drain():
+            self.secondary_tier1.completed_jobs.extend(
+                [
+                    JobResult(job_id=job_id, success=False, memory_safe=False),
+                    JobResult(job_id=job_id, success=False),
+                ]
+            )
+            raise drain_error("drain stopped")
+
+        with (
+            patch.object(self.secondary_tier1, "drain_jobs") as drain,
+            patch.object(self.secondary_tier2, "drain_jobs") as other_drain,
+            patch.object(
+                self.primary_tier, "reset_cache", wraps=self.primary_tier.reset_cache
+            ) as reset,
+        ):
+
+            def drain_once():
+                if drain.call_count == 1:
+                    fail_drain()
+
+            drain.side_effect = drain_once
+            if drain_error is UnsafeTransferError:
+                self.manager.reset_cache()
+                assert drain.call_count == 2
+                other_drain.assert_called_once()
+                reset.assert_called_once()
+            else:
+                with pytest.raises(RuntimeError, match="drain stopped"):
+                    self.manager.reset_cache()
+                other_drain.assert_not_called()
+                reset.assert_not_called()
 
     def test_successful_promotion_finalizes_primary_with_success(self, manager_setup):
         from unittest.mock import patch

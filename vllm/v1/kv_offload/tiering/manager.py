@@ -55,6 +55,7 @@ from vllm.v1.kv_offload.tiering.base import (
     ParentManager,
     SecondaryTierManager,
     TransferJob,
+    UnsafeTransferError,
 )
 from vllm.v1.kv_offload.tiering.metrics import TieringMetricsTracker
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
@@ -136,6 +137,7 @@ class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
             enable_events=enable_events,
         )
         self._mmap_region = mmap_region
+        self._quarantined_chunk_ids: set[int] = set()
         # read/write is for CPU<->secondary transfers,
         # load/store is for CPU<->GPU transfers.
         # These aliases avoid calling prepare_load inside a store path.
@@ -154,6 +156,30 @@ class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
         request accesses, so they must not alter request-scoped recency.
         """
         return self._prepare_load(keys, req_context, record_access=False)
+
+    def quarantine_write(self, keys: Collection[OffloadKey]) -> None:
+        """Remove failed keys without returning possible WRITE targets to the pool."""
+        for key in keys:
+            chunk = self._policy.get(key)
+            if chunk is not None and not chunk.is_ready:
+                self._policy.remove(key)
+                self._quarantined_chunk_ids.add(chunk.chunk_id)
+
+    def release_quarantined_write(self, chunk_ids: Iterable[int]) -> None:
+        """Recycle quarantined slots after the peer confirms completion."""
+        for chunk_id in chunk_ids:
+            self._quarantined_chunk_ids.remove(chunk_id)
+            self._num_write_pending_chunks -= 1
+            self._free_list.append(chunk_id)
+
+    @override
+    def reset_cache(self) -> None:
+        if self._quarantined_chunk_ids:
+            raise RuntimeError(
+                "Cannot reset the KV cache while remote WRITEs may still target "
+                "quarantined slots. Restart the engine after stopping its peers."
+            )
+        super().reset_cache()
 
     def get_kv_memoryview(self) -> memoryview:
         """Return the memoryview over the primary tier's KV cache buffer.
@@ -248,6 +274,7 @@ class TieringOffloadingManager(OffloadingManager):
         #   True:  secondary → primary (promotion)
         #   False: primary → secondary (cascade)
         self._jobs: dict[JobId, JobMetadata] = {}
+        self._quarantined_jobs: dict[JobId, JobMetadata] = {}
         primary_view = self.primary_tier.get_kv_memoryview()
         assert primary_view.strides is not None
         self._metrics = TieringMetricsTracker(
@@ -488,11 +515,16 @@ class TieringOffloadingManager(OffloadingManager):
                 True,
             )
         if failed_keys:
-            self.primary_tier.complete_write(
-                failed_keys,
-                transfer_job.req_context,
-                False,
-            )
+            if completed_job.memory_safe:
+                self.primary_tier.complete_write(
+                    failed_keys,
+                    transfer_job.req_context,
+                    False,
+                )
+            else:
+                assert not successful_keys
+                self.primary_tier.quarantine_write(failed_keys)
+                self._quarantined_jobs[transfer_job.job_id] = job_metadata
 
     def _process_finished_jobs(
         self,
@@ -520,6 +552,17 @@ class TieringOffloadingManager(OffloadingManager):
             i = self._tier_index[tier]
             for completed_job in tier.get_finished_jobs():
                 job_id = completed_job.job_id
+                quarantined = self._quarantined_jobs.get(job_id)
+                if quarantined is not None:
+                    assert quarantined.tier_idx == i
+                    if completed_job.memory_safe:
+                        self.primary_tier.release_quarantined_write(
+                            int(chunk_id)
+                            for chunk_id in quarantined.transfer_job.chunk_ids
+                        )
+                        self._metrics.on_quarantined_job_released(quarantined)
+                        del self._quarantined_jobs[job_id]
+                    continue
                 job_metadata = self._pop_job(job_id)
                 assert job_metadata is not None, (
                     f"Finished job_id {job_id} from tier #{i}"
@@ -530,6 +573,7 @@ class TieringOffloadingManager(OffloadingManager):
                     f" but belongs to tier #{job_metadata.tier_idx}"
                 )
                 transfer_job = job_metadata.transfer_job
+                assert completed_job.memory_safe or transfer_job.is_promotion
                 self._metrics.on_job_finished(job_metadata, completed_job)
 
                 if transfer_job.is_promotion:
@@ -1128,26 +1172,43 @@ class TieringOffloadingManager(OffloadingManager):
         for tier in self.secondary_tiers:
             yield from tier.take_events()
 
+    def _raise_if_quarantined(self) -> None:
+        if self._quarantined_jobs:
+            raise RuntimeError(
+                "Cannot reset the KV cache while remote WRITEs may still target "
+                "quarantined slots. Restart the engine after stopping its peers."
+            )
+
     @override
     def reset_cache(self) -> None:
         """Reset transfer bookkeeping and primary-tier cache.
 
         Called during sleep, weight update, or resume. Each secondary tier
         drains its in-flight transfers via drain_jobs() so no tier I/O is
-        touching primary memory before the primary tier is reset. A stuck
-        tier will block here visibly — preferable to silent corruption
-        from reusing primary slots while a transfer is mid-copy.
+        touching primary memory before the primary tier is reset. A failed
+        transfer whose memory safety is unconfirmed rejects reset, including
+        when the failure is discovered while draining.
 
         Secondary tiers are intentionally not reset: persistent stores
         (FS, network) keep their data across resets. Active request state is
         retained so those requests can continue after the reset; finished
         requests are finalized and removed.
         """
-        for tier in self.secondary_tiers:
-            tier.drain_jobs()
-        # All tier I/O has stopped; consume their completion notifications
-        # so manager bookkeeping is consistent before the primary reset.
         self._process_finished_jobs()
+        self._raise_if_quarantined()
+        for tier in self.secondary_tiers:
+            while True:
+                try:
+                    tier.drain_jobs()
+                except Exception as exc:
+                    self._process_finished_jobs()
+                    self._raise_if_quarantined()
+                    if not isinstance(exc, UnsafeTransferError):
+                        raise
+                else:
+                    break
+        self._process_finished_jobs()
+        self._raise_if_quarantined()
         assert not self._jobs
 
         # Deferred promotion submissions reserve primary slots that the

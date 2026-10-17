@@ -261,10 +261,14 @@ def _reduce_kv_connector_stats(runner):
     return reduced
 
 
-def test_partial_tail_store_uses_attention_and_recurrent_cow_sources():
+@pytest.mark.parametrize("finish_state", ["active", "signaled", "retired"])
+def test_partial_tail_store_uses_attention_and_recurrent_cow_sources(finish_state):
     scheduler = _make_partial_tail_scheduler()
     _make_partial_tail_request(scheduler)
     req_status = scheduler._req_status["req"]
+    req_status.finished_signaled = finish_state == "signaled"
+    if finish_state == "retired":
+        del scheduler._req_status["req"]
     req_status.group_states[0].block_ids[:] = [11, 12]
     req_status.group_states[1].block_ids[:] = [0, 21]
     scheduler.manager.prepare_store.side_effect = lambda keys, req_context: (
@@ -280,6 +284,10 @@ def test_partial_tail_store_uses_attention_and_recurrent_cow_sources():
     )
     jobs = scheduler._build_partial_tail_store_jobs(output)
 
+    if finish_state != "active":
+        assert not jobs
+        scheduler.manager.prepare_store.assert_not_called()
+        return
     assert len(jobs) == 1
     offered_keys = scheduler.manager.prepare_store.call_args.args[0]
     req_context = scheduler._req_status["req"].req_context
@@ -324,10 +332,14 @@ def test_partial_tail_store_uses_attention_and_recurrent_cow_sources():
     assert recurrent_event.parent_block_hash is None
 
 
-def test_aligned_boundary_store_uses_exact_source_with_partial_tail():
+@pytest.mark.parametrize("finish_state", ["active", "signaled", "retired"])
+def test_aligned_boundary_store_uses_exact_source_with_partial_tail(finish_state):
     scheduler = _make_partial_tail_scheduler()
     _make_partial_tail_request(scheduler)
     req_status = scheduler._req_status["req"]
+    req_status.finished_signaled = finish_state == "signaled"
+    if finish_state == "retired":
+        del scheduler._req_status["req"]
     req_status.group_states[0].block_ids[:] = [11, 12]
     req_status.group_states[1].block_ids[:] = [0, 21]
     scheduler.manager.prepare_store.side_effect = lambda keys, req_context: (
@@ -343,6 +355,10 @@ def test_aligned_boundary_store_uses_exact_source_with_partial_tail():
     )
     jobs = scheduler._build_partial_tail_store_jobs(output)
 
+    if finish_state != "active":
+        assert not jobs
+        scheduler.manager.prepare_store.assert_not_called()
+        return
     assert len(jobs) == 2
     src_spec = next(
         job.src_spec for job in jobs.values() if len(job.src_spec.block_ids) == 1
@@ -2883,9 +2899,61 @@ def test_reset_cache(request_runner, async_scheduling: bool):
             assert group_state.next_stored_chunk_idx == 0
 
 
+def test_reset_cache_finalizes_bound_p2p_store_before_drain():
+    from tests.v1.kv_offload.tiering.p2p.test_manager import (
+        _build_paired_managers,
+        _job_metadata,
+        _remote_decoder_kv_params,
+        _remote_prefiller_kv_params,
+        _req_context,
+    )
+    from vllm.v1.kv_offload.tiering.manager import (
+        CPUPrimaryTierOffloadingManager,
+        TieringOffloadingManager,
+    )
+
+    producer, consumer = _build_paired_managers()
+    region = MagicMock()
+    region.create_kv_memoryview.return_value = memoryview(
+        torch.zeros((5, 16), dtype=torch.int8).numpy()
+    )
+    primary = CPUPrimaryTierOffloadingManager(num_chunks=5, mmap_region=region)
+    manager = TieringOffloadingManager(primary, [producer], tier_poll_interval_s=0)
+    producer_ctx = _req_context(_remote_decoder_kv_params())
+    consumer_params = _remote_prefiller_kv_params("A", 1)
+    manager.on_new_request(producer_ctx)
+    consumer.on_new_request(_req_context(consumer_params))
+    consumer.submit_load(
+        _job_metadata(100, keys=[b"demand"], kv_params=consumer_params)
+    )
+    for _ in range(4):
+        list(consumer.get_finished_jobs())
+        producer._poll_once()
+    assert "req-1" in producer._kv_to_session
+
+    supplied = [make_offload_key(b"different-supply", 0)]
+    assert manager.prepare_store(supplied, producer_ctx) is not None
+    manager.complete_store(supplied, producer_ctx)
+    assert manager._jobs
+    assert not producer._kv_to_session["req-1"].has_pending_work
+
+    scheduler = _make_partial_tail_scheduler()
+    scheduler.manager = manager
+    scheduler._req_status[producer_ctx.req_id] = SimpleNamespace(
+        req=SimpleNamespace(is_finished=lambda: True),
+        req_context=producer_ctx,
+        finished_signaled=False,
+    )
+    scheduler.reset_cache()
+    assert not manager._jobs
+    assert not manager._req_state
+    assert producer_ctx.req_id not in scheduler._req_status
+
+
 @pytest.mark.parametrize("async_scheduling", [True, False])
+@pytest.mark.parametrize("reset_rejected", [False, True])
 def test_reset_cache_finalizes_finished_request_with_pending_store(
-    request_runner, async_scheduling: bool
+    request_runner, async_scheduling: bool, reset_rejected: bool
 ):
     """reset_cache fires on_request_finished for a finished request whose
     in-flight stores it discards, exactly once.
@@ -2930,6 +2998,45 @@ def test_reset_cache_finalizes_finished_request_with_pending_store(
     cs.request_finished(req_status.req)
     assert finalized == []
     assert req_id in cs._req_status
+
+    def reset_manager():
+        assert finalized == [req_id], "parked producer jobs need finish before drain"
+        if reset_rejected:
+            raise RuntimeError("quarantined slots")
+
+    runner.manager.reset_cache.side_effect = reset_manager
+    if reset_rejected:
+        pending_jobs = set(cs._jobs)
+        stale_threshold = cs._stale_job_threshold
+        for _ in range(2):
+            with pytest.raises(RuntimeError, match="quarantined slots"):
+                cs.reset_cache()
+            assert cs._req_status[req_id] is req_status
+            assert set(cs._jobs) == pending_jobs
+            assert not cs._current_batch_jobs_to_flush
+            assert cs._stale_job_threshold == stale_threshold
+            assert finalized == [req_id]
+
+        finished_output = SchedulerOutput.make_empty()
+        finished_output.finished_req_ids = {req_id}
+        stores_before = runner.manager.prepare_store.call_count
+        meta = cs.build_connector_meta(finished_output)
+        assert isinstance(meta, OffloadingConnectorMetadata)
+        assert not meta.store_jobs
+        assert runner.manager.prepare_store.call_count == stores_before
+        assert finalized == [req_id]
+
+        cs.update_connector_output(
+            KVConnectorOutput(
+                kv_connector_worker_meta=OffloadingWorkerMetadata(
+                    completed_jobs={jid: cs.config.num_workers for jid in pending_jobs}
+                )
+            )
+        )
+        assert not cs._jobs
+        assert not req_status.transfer_jobs
+        assert req_id not in cs._req_status
+        runner.manager.reset_cache.side_effect = None
 
     # reset_cache discards both the in-flight and not-yet-prepared final stores,
     # so it issues the deferred notification before dropping the state.

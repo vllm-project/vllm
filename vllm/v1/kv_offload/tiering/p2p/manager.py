@@ -31,6 +31,7 @@ from vllm.v1.kv_offload.tiering.base import (
     JobResult,
     SecondaryTierManager,
     TransferJob,
+    UnsafeTransferError,
 )
 from vllm.v1.kv_offload.tiering.p2p.control import ControlTransport, ZmqTransport
 from vllm.v1.kv_offload.tiering.p2p.data import DataTransport, NixlTransport
@@ -615,7 +616,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             len(block_ids),
             session.ready,
         )
-        session.request_blocks(job_id, kv_request_id, keys, block_ids)
+        session.request_blocks(job_id, kv_request_id, keys, block_ids.tolist())
 
     @override
     def get_finished_jobs(self) -> Iterable[JobResult]:
@@ -645,12 +646,21 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         are NOT cancelled — the caller (``TieringOffloadingManager.reset_cache``)
         needs the primary memoryview to be quiescent, not aborted. Results
         accumulate in ``_finished_jobs`` and are surfaced by the next
-        ``get_finished_jobs()`` call.
+        ``get_finished_jobs()`` call. An unconfirmed unsafe failure raises
+        instead of waiting indefinitely for a terminal notification.
         """
         start = time.monotonic()
         warned = False
         while True:
             self._poll_once()
+            latest_safety = {
+                result.job_id: result.memory_safe for result in self._finished_jobs
+            }
+            if not all(latest_safety.values()):
+                raise UnsafeTransferError(
+                    "Cannot drain P2P jobs while remote WRITEs may still target "
+                    "quarantined slots."
+                )
             pending = any(s.has_pending_work for s in self._sessions.values())
             if not pending:
                 return
@@ -816,7 +826,13 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                 del self._kv_to_session[kid]
             close_result = session.close()
             for job_id in close_result.failed_jobs:
-                self._finished_jobs.append(JobResult(job_id=job_id, success=False))
+                self._finished_jobs.append(
+                    JobResult(
+                        job_id=job_id,
+                        success=False,
+                        memory_safe=job_id in close_result.memory_safe_jobs,
+                    )
+                )
             for job_id in close_result.failed_stores:
                 self._finished_jobs.append(JobResult(job_id=job_id, success=False))
             # Fail every client-side request (in-flight loads plus unresolved
@@ -914,7 +930,13 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                 del self._kv_to_session[kid]
             close_result = session.close()
             for job_id in close_result.failed_jobs:
-                self._finished_jobs.append(JobResult(job_id=job_id, success=False))
+                self._finished_jobs.append(
+                    JobResult(
+                        job_id=job_id,
+                        success=False,
+                        memory_safe=job_id in close_result.memory_safe_jobs,
+                    )
+                )
             for job_id in close_result.failed_stores:
                 self._finished_jobs.append(JobResult(job_id=job_id, success=False))
             self._failed_req_ids.update(close_result.failed_req_ids)
@@ -954,9 +976,17 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             result = session.poll()
             for lr in result.loads:
                 self._finished_jobs.append(
-                    JobResult(job_id=lr.job_id, success=lr.success)
+                    JobResult(
+                        job_id=lr.job_id,
+                        success=lr.success,
+                        memory_safe=lr.memory_safe,
+                    )
                 )
-                if not lr.success:
+                if (
+                    not lr.success
+                    and not lr.failure_reported
+                    and not lr.request_finished
+                ):
                     self._failed_req_ids.add(lr.kv_request_id)
             for sr in result.stores:
                 self._finished_jobs.append(

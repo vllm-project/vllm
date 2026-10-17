@@ -28,6 +28,7 @@ from vllm.v1.kv_offload.tiering.base import (
     JobResult,
     TieringOffloadingMetrics,
     TransferJob,
+    UnsafeTransferError,
 )
 from vllm.v1.kv_offload.tiering.manager import TieringOffloadingManager
 from vllm.v1.kv_offload.tiering.p2p import manager as manager_module
@@ -717,6 +718,7 @@ class _FakeSession:
         close_stores: list[int] | None = None,
         close_failed_serves: list[ReqContext] | None = None,
         last_activity_at: float | None = None,
+        close_memory_safe_jobs: frozenset[int] = frozenset(),
     ) -> None:
         self.peer_id = peer_id
         self.alive = alive
@@ -729,6 +731,7 @@ class _FakeSession:
         self._close_req_ids = close_req_ids or []
         self._close_stores = close_stores or []
         self._close_failed_serves = close_failed_serves or []
+        self._close_memory_safe_jobs = close_memory_safe_jobs
         self.requests: list[tuple[int, str]] = []
         self.stores_added: list[tuple[str, list, object, int]] = []
         self.attached: list[object] = []
@@ -776,6 +779,7 @@ class _FakeSession:
             failed_req_ids=self._close_req_ids,
             failed_stores=self._close_stores,
             failed_serves=self._close_failed_serves,
+            memory_safe_jobs=self._close_memory_safe_jobs,
         )
 
 
@@ -805,7 +809,8 @@ class TestGetFinished:
         # Second call returns empty.
         assert list(mgr.get_finished_jobs()) == []
 
-    def test_reaps_dead_sessions(self):
+    @pytest.mark.parametrize("memory_safe", [True, False])
+    def test_reaps_dead_sessions(self, memory_safe):
         """Dead connected sessions are removed and their pending jobs failed."""
 
         class FakeData:
@@ -821,6 +826,7 @@ class TestGetFinished:
             close_jobs=[20],
             close_req_ids=["req-load"],
             close_stores=[10, 11],
+            close_memory_safe_jobs=frozenset({20}) if memory_safe else frozenset(),
         )
         mgr._sessions["dead:1234"] = dead
 
@@ -829,7 +835,7 @@ class TestGetFinished:
         assert len(results) == 5
         assert JobResult(job_id=10, success=False) in results
         assert JobResult(job_id=11, success=False) in results
-        assert JobResult(job_id=20, success=False) in results
+        assert JobResult(job_id=20, success=False, memory_safe=memory_safe) in results
         assert "dead:1234" not in mgr._sessions
         assert "req-load" in mgr._failed_req_ids
 
@@ -1584,6 +1590,41 @@ class TestAcceptNewPeers:
 
 
 class TestPollOnce:
+    def test_cancelled_queued_fetch_does_not_refail_finished_request(self):
+        mgr = _make_manager()
+        mgr._control = _DrainCtrl()
+        peer = "10.0.0.1:8000"
+        sess = _FakeSession(peer_id=peer)
+        mgr._sessions[peer] = sess
+        ctx = _req_context(kv_params=_remote_prefiller_kv_params(kv_request_id="req-5"))
+        mgr.on_request_finished(ctx)
+        sess._loads = [LoadResult(5, "req-5", success=False, request_finished=True)]
+
+        results = list(mgr.get_finished_jobs())
+        assert results == [JobResult(job_id=5, success=False)]
+        assert "req-5" not in mgr._failed_req_ids
+        assert mgr.lookup(b"key1", ctx) is LookupResult.HIT
+
+    def test_quarantine_release_does_not_refail_finished_request(self):
+        mgr = _make_manager()
+        mgr._control = _DrainCtrl()
+        peer = "10.0.0.1:8000"
+        sess = _FakeSession(
+            peer_id=peer,
+            loads=[LoadResult(5, "req-5", success=False, memory_safe=False)],
+        )
+        mgr._sessions[peer] = sess
+        mgr._poll_once()
+        assert "req-5" in mgr._failed_req_ids
+        ctx = _req_context(kv_params=_remote_prefiller_kv_params(kv_request_id="req-5"))
+        mgr.on_request_finished(ctx)
+        assert "req-5" not in mgr._failed_req_ids
+
+        sess._loads = [LoadResult(5, "req-5", success=False, failure_reported=True)]
+        mgr._poll_once()
+        assert mgr._finished_jobs[-1] == JobResult(job_id=5, success=False)
+        assert "req-5" not in mgr._failed_req_ids
+
     """_poll_once must drain control, accept new peers, poll every session,
     surface results, and reap dead sessions — in that order."""
 
@@ -1696,7 +1737,8 @@ class TestPollOnce:
         assert mgr._kv_to_session["req-fast"] is sess
         assert sess.stores_added == []
 
-    def test_failed_load_records_kv_request_id(self):
+    @pytest.mark.parametrize("memory_safe", [True, False])
+    def test_failed_load_records_kv_request_id(self, memory_safe):
         """A LoadResult(success=False) from session.poll() must add its
         kv_request_id to _failed_req_ids so future lookups return MISS."""
         mgr = _make_manager()
@@ -1705,7 +1747,14 @@ class TestPollOnce:
             peer_id=peer,
             alive=True,
             connected=True,
-            loads=[LoadResult(job_id=5, kv_request_id="req-5", success=False)],
+            loads=[
+                LoadResult(
+                    job_id=5,
+                    kv_request_id="req-5",
+                    success=False,
+                    memory_safe=memory_safe,
+                )
+            ],
         )
         mgr._sessions[peer] = sess
 
@@ -1717,7 +1766,9 @@ class TestPollOnce:
 
         mgr._poll_once()
 
-        assert mgr._finished_jobs == [JobResult(job_id=5, success=False)]
+        assert mgr._finished_jobs == [
+            JobResult(job_id=5, success=False, memory_safe=memory_safe)
+        ]
         assert "req-5" in mgr._failed_req_ids
 
 
@@ -1734,6 +1785,60 @@ class _DrainCtrl:
 
 
 class TestDrainJobs:
+    @pytest.mark.parametrize("memory_safe", [False, True])
+    def test_drain_checks_failed_load_after_session_reaped(self, memory_safe):
+        mgr = _make_manager()
+        mgr._control = _DrainCtrl()
+        mgr._data = _FakeData(mgr._local_id)
+        mgr._sessions["fake:1"] = _FakeSession(
+            alive=False,
+            close_jobs=[5],
+            close_req_ids=["req-5"],
+            close_memory_safe_jobs=frozenset({5}) if memory_safe else frozenset(),
+        )
+
+        if memory_safe:
+            mgr.drain_jobs()
+        else:
+            with pytest.raises(UnsafeTransferError, match="quarantined slots"):
+                mgr.drain_jobs()
+        assert not mgr._sessions
+        assert list(mgr.get_finished_jobs()) == [
+            JobResult(5, success=False, memory_safe=memory_safe)
+        ]
+
+    @pytest.mark.parametrize("confirmed", [False, True])
+    def test_drain_rejects_new_unsafe_result_unless_confirmed(
+        self, monkeypatch, confirmed
+    ):
+        mgr = _make_manager()
+        mgr._control = _DrainCtrl()
+        sess = _FakeSession(
+            loads=[LoadResult(5, "req-5", success=False, memory_safe=False)]
+        )
+        sess._client._inbound[6] = object()
+        mgr._sessions["fake:1"] = sess
+        if confirmed:
+            sess._loads.append(
+                LoadResult(5, "req-5", success=False, failure_reported=True)
+            )
+
+        def drain_sleep(_seconds):
+            assert confirmed, "drain waited on an unconfirmed unsafe WRITE"
+            sess._client._inbound.clear()
+
+        monkeypatch.setattr(
+            manager_module,
+            "time",
+            SimpleNamespace(monotonic=time.monotonic, sleep=drain_sleep),
+        )
+        if confirmed:
+            mgr.drain_jobs()
+        else:
+            with pytest.raises(UnsafeTransferError, match="quarantined slots"):
+                mgr.drain_jobs()
+        assert mgr._finished_jobs[0] == JobResult(5, success=False, memory_safe=False)
+
     def test_returns_immediately_when_quiescent(self):
         """No sessions and no inflight: drain_jobs returns without sleeping."""
         mgr = _make_manager()
