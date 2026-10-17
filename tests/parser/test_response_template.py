@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from openai.types.responses import NamespaceTool
+from openai.types.responses import NamespaceTool, ToolChoiceAllowed
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedToolChoiceParam,
@@ -1214,6 +1214,16 @@ def test_call_cut_off_before_its_closer_is_parsed():
                 )
             ),
             "named tool choice",
+        ),
+        (
+            request(
+                ToolChoiceAllowed(
+                    type="allowed_tools",
+                    mode="auto",
+                    tools=[{"type": "function", "name": "set_alarm"}],
+                )
+            ),
+            "allowed tools",
         ),
         (request("auto", parallel_tool_calls=False), "parallel_tool_calls=False"),
         (
