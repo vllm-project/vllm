@@ -1,5 +1,7 @@
 # Features
 
+- [Confident Decoding](confident_decoding.md)
+
 ## Compatibility Matrix
 
 The tables below show mutually exclusive features and the support on some hardware.
