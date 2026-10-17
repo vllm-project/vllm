@@ -14,6 +14,7 @@ variable "CACHE_TO"     { default = "" }       # ref prefix this build writes ("
 variable "AITER_SPEC"   { default = "" }       # pins the AITER nightly wheel (pip spec)
 variable "AITER_NIGHTLY" { default = "" }      # "1": test the newest AITER nightly wheel
 variable "VLLM_VERSION" { default = "" }       # release: image version label (build.sh reuse check)
+variable "CACHE_CI"     { default = true }     # false (PR builds): skip the full ci cache; compile-cache still exports
 
 function "cfrom" {   # trusted cache, plus this PR's own cache when CACHE_TO points elsewhere
   params = [names]
@@ -69,7 +70,7 @@ target "_app" {
   dockerfile = "docker/Dockerfile.rocm"
   contexts   = ctx()
   args       = { ARCH = "", AITER_SPEC = AITER_SPEC, AITER_NIGHTLY = AITER_NIGHTLY, VLLM_VERSION = VLLM_VERSION }
-  cache-from = cfrom(["runtime", "ci", "csrc", "release"])   # dev/csrc records are shared
+  cache-from = cfrom(["runtime", "ci", "compile", "csrc", "release"])   # dev/csrc records are shared
 }
 target "test" {
   inherits = ["_app"]
@@ -77,13 +78,26 @@ target "test" {
   args     = { ARCH = CI_ARCH }
   tags     = [TAG]
   output   = [PUSH ? "type=registry" : "type=docker"]   # per-build image: rewrite-timestamp would cost ~13 min per push
-  cache-to = cto("ci")
+  cache-to = CACHE_CI ? cto("ci") : []
   no-cache-filter = AITER_SPEC == "" && AITER_NIGHTLY != "1" ? [] : ["test-base"]   # AITER nightly: always fetch the newest wheel
 }
 target "test-smoke" {
   inherits = ["test"]
   target   = "test-smoke"
   output   = ["type=cacheonly"]
+  cache-to = []
+}
+target "compile-cache" {   # csrc + rust-deps on their own: a fresh builder (or a new PR) reuses them
+  inherits = ["_app"]
+  target   = "compile"
+  args     = { ARCH = CI_ARCH }
+  output   = ["type=cacheonly"]
+  cache-to = cto("compile")
+}
+target "vllm-wheel" {      # the python-only install test's wheel, uploaded as a build artifact
+  inherits = ["test"]
+  target   = "vllm-wheel"
+  output   = ["type=local,dest=.rocm-wheel"]
   cache-to = []
 }
 target "vllm-openai" {
@@ -118,4 +132,4 @@ target "version" {
 
 group "default" { targets = ["test"] }
 group "base"    { targets = ["stack-${STACK}", "stack-wheels"] }   # build.sh pushes runtime separately (own key)
-group "ci"      { targets = ["test", "test-smoke"] }
+group "ci"      { targets = ["test", "test-smoke", "compile-cache", "vllm-wheel"] }

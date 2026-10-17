@@ -1,6 +1,7 @@
 /.venv
 /build
 /.rocm-version/
+/.rocm-wheel/
 dist
 vllm/*.so
 vllm/vllm-rs

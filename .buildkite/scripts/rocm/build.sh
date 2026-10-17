@@ -41,6 +41,8 @@ PFX=""
 if [[ $REPO != "$TRUSTED" ]]; then
   PFX="pr${BUILDKITE_PULL_REQUEST:-local}-"
   CACHE_TO=$REPO:cache-pr${BUILDKITE_PULL_REQUEST:-local}-
+  # Only the compile stages' cache: everything else is cheap or in the trusted cache.
+  export CACHE_CI=false
 fi
 
 # Stack Dockerfile — literal path used by ci-infra ci_selector (images.py).
@@ -212,7 +214,10 @@ case $MODE in
     export TAG=$REPO:build-$BUILDKITE_BUILD_ID
     # AITER nightly (AITER_NIGHTLY=1 from the schedule): the test stage installs the newest
     # AITER nightly that fits the image; an AITER_SPEC in the environment pins one instead.
+    rm -rf .rocm-wheel
     bake ci
+    # For the python-only install test (run-amd-test.sh downloads it); not in the image.
+    buildkite-agent artifact upload ".rocm-wheel/vllm-*.whl"
     ;;
 
   csrc)

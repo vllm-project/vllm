@@ -376,8 +376,10 @@ RUN --mount=type=bind,source=rust-toolchain.toml,target=/tmp/rust-toolchain.toml
     && rustc --version \
     && cargo --version
 
-# Builds the `vllm-rs` frontend so the wheel build does not need the rust toolchain.
-FROM rust-toolchain AS rust-build
+# Compiles the `vllm-rs` frontend once per change to the rust sources, so the wheel build does not
+# need the rust toolchain. The crates, their downloads and target/ stay in this stage's layers (no
+# cache mounts), so rust-build always continues from the target/ of these exact sources.
+FROM rust-toolchain AS rust-deps
 # Cap cargo parallelism to avoid exhausting the AMD CI host's open-file limit
 # (rustc spawns enough concurrent processes to hit RLIMIT_NOFILE otherwise).
 ENV CARGO_BUILD_JOBS=4
@@ -392,13 +394,15 @@ COPY rust/proto rust/proto
 COPY rust/src rust/src
 COPY rust-toolchain.toml rust-toolchain.toml
 COPY tools/build_rust.py tools/build_rust.sh tools/
+RUN SETUPTOOLS_SCM_PRETEND_VERSION=0.0.0 bash tools/build_rust.sh
+
+# Per commit: vllm-rs embeds the vLLM version, so cargo recompiles only the crates that read it and
+# relinks (~30 s). Those few rustc processes stay far from the open-file limit, and the job count
+# also caps the thin-LTO threads, so lift the cap.
+FROM rust-deps AS rust-build
 COPY --from=version /vllm-version.txt /tmp/vllm-version.txt
-# Cargo's registry/git caches can be written by concurrent BuildKit jobs on shared
-# workers, so lock those cache mounts. Do not cache target/: stale target metadata
-# can outlive source updates across BuildKit cache reuse.
-RUN --mount=type=cache,id=vllm-rocm-cargo-registry,target=/root/.cargo/registry,sharing=locked \
-    --mount=type=cache,id=vllm-rocm-cargo-git,target=/root/.cargo/git,sharing=locked \
-    SETUPTOOLS_SCM_PRETEND_VERSION="$(cat /tmp/vllm-version.txt)" bash tools/build_rust.sh \
+RUN CARGO_BUILD_JOBS="$(nproc)" SETUPTOOLS_SCM_PRETEND_VERSION="$(cat /tmp/vllm-version.txt)" \
+    bash tools/build_rust.sh \
     && test -x vllm/vllm-rs
 
 # Native extensions only: copies just the files that affect the HIP/C++ build.
@@ -441,13 +445,25 @@ RUN --mount=type=bind,target=/src,rw cd /src && cp /rust/* vllm/ \
        VLLM_PRECOMPILED_WHEEL_LOCATION="$(ls /precompiled/*.whl)" VLLM_DOCKER_BUILD_CONTEXT=1 \
        PYTHONDONTWRITEBYTECODE=1 python3 setup.py bdist_wheel --dist-dir=/dist
 
+# The installed csrc extensions (~700 MB), as their own layer: it depends only on the csrc stage,
+# so a commit that leaves csrc alone reuses the layer and pulls only the Python one below.
+FROM dev AS native
+RUN --mount=type=bind,from=csrc,src=/dist,target=/csrc \
+    sp="$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')" \
+    && mkdir -p "/out$sp" && unzip -q /csrc/*.whl 'vllm/*.so' -d "/out$sp"
+
 # Bytecode compiled as if installed at / (not /out), so tracebacks name the real paths.
+# The csrc extensions come from the native layer instead.
 FROM runtime AS install
 RUN --mount=type=bind,from=wheel,src=/dist,target=/dist \
+    --mount=type=bind,from=csrc,src=/dist,target=/csrc \
     pip install --no-deps --no-compile --root /out /dist/*.whl \
+    && sp="$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')" \
+    && unzip -Z1 /csrc/*.whl 'vllm/*.so' | sed "s|^|/out$sp/|" | xargs rm \
     && python3 -m compileall -q -j 0 -s /out -p / /out
 
 FROM runtime AS vllm-openai
+COPY --link --from=native /out /
 COPY --link --from=install /out /
 COPY --link benchmarks /app/vllm/benchmarks
 COPY --link examples /app/vllm/examples
@@ -487,9 +503,8 @@ RUN --mount=type=bind,source=.buildkite/scripts/rocm/select_aiter_nightly_wheel.
 ENV HF_XET_HIGH_PERFORMANCE=1
 
 FROM test-base AS test
+COPY --link --from=native /out /
 COPY --link --from=install /out /
-# The vLLM wheel, for python-only install tests.
-COPY --link --from=wheel /dist/ /opt/vllm-wheels/
 COPY --link --exclude=vllm --exclude=.git . /vllm-workspace/
 # Source under src/ so it does not shadow the installed package in tests.
 COPY --link vllm /vllm-workspace/src/vllm
@@ -501,3 +516,11 @@ RUN --network=none python3 -c "import vllm, vllm._C, vllm._rocm_C; print(vllm.__
 FROM scratch AS wheels
 COPY --link --from=stack-wheels / /
 COPY --link --from=wheel /dist/ /
+
+# CI: the vLLM wheel alone (a build artifact for the python-only install test), and the expensive
+# compile stages, whose cache PR builds export.
+FROM scratch AS vllm-wheel
+COPY --link --from=wheel /dist/ /
+FROM scratch AS compile
+COPY --link --from=csrc /dist /csrc
+COPY --link --from=rust-deps /app/vllm/rust/Cargo.lock /rust/

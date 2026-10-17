@@ -78,13 +78,16 @@ export PYTEST_ADDOPTS="${PYTEST_ADDOPTS:-} \
 # ---------------------------------------------------------------------------
 # Wheel reinstall — python_only_compile.sh path
 # ---------------------------------------------------------------------------
-# python_only_compile.sh re-imports vLLM from /opt/vllm-wheels/, which is
-# baked into the CI image by build.sh. No artifact download is needed:
-# the image IS the artifact in the pod-based CI model.
+# python_only_compile.sh reinstalls vLLM around this build's wheel, which build.sh uploads as an
+# artifact of the image build step (kept out of the image: only this test needs it).
 if [[ $commands == *python_only_compile.sh* ]]; then
-  VLLM_VERSION_OVERRIDE=$(python3 -c \
+  wheel_dir=$(mktemp -d)
+  buildkite-agent artifact download ".rocm-wheel/vllm-*.whl" "$wheel_dir" --step image-build-amd \
+    || exit 1
+  VLLM_PRECOMPILED_WHEEL_LOCATION=$(echo "$wheel_dir"/.rocm-wheel/vllm-*.whl)
+  VLLM_VERSION_OVERRIDE=$(python3 -P -c \
     'import importlib.metadata as m; print(m.version("vllm"))') || exit 1
-  export VLLM_TARGET_DEVICE=rocm VLLM_VERSION_OVERRIDE
+  export VLLM_TARGET_DEVICE=rocm VLLM_VERSION_OVERRIDE VLLM_PRECOMPILED_WHEEL_LOCATION
 fi
 
 # ---------------------------------------------------------------------------
