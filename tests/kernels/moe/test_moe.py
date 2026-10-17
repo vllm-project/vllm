@@ -2176,6 +2176,7 @@ def test_unquantized_bf16_flashinfer_trtllm_backend(
             "FLASHINFER_TRTLLM backend should use monolithic forward"
         )
         layer = torch.nn.Module()
+        layer.moe_config = moe_config
         layer.w13_weight = Parameter(w1.clone(), requires_grad=False)
         layer.w2_weight = Parameter(w2.clone(), requires_grad=False)
         layer.global_num_experts = e
@@ -2193,6 +2194,7 @@ def test_unquantized_bf16_flashinfer_trtllm_backend(
         layer.routed_scaling_factor = 2.446
         layer.shared_experts = None
         layer._expert_routing_tables = lambda: None
+        layer.routing_sink = None
 
         quant_method.process_weights_after_loading(layer)
 

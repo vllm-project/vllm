@@ -213,7 +213,7 @@ def test_w8a8_block_fp8_cutlass_matmul(M):
 
 
 @pytest.mark.skipif(
-    not (current_platform.is_cuda() and current_platform.has_device_capability(90)),
+    not (current_platform.is_cuda() and current_platform.is_device_capability(90)),
     reason="torch._scaled_mm DeepSeek-style block scaling only supports SM90.",
 )
 def test_w8a8_block_fp8_torch_scaled_mm_matmul():
