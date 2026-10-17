@@ -25,9 +25,9 @@ HEAD_DIM = 512
 def _load(checkpoint: torch.Tensor, perm: torch.Tensor, dim: int) -> torch.Tensor:
     """Load ``checkpoint`` into a fresh parameter through a permuting loader."""
     param = torch.nn.Parameter(torch.empty_like(checkpoint), requires_grad=False)
-    param.weight_loader = default_weight_loader  # type: ignore[attr-defined]
+    param.weight_loader = default_weight_loader
     permute_on_load(param, perm, dim)
-    param.weight_loader(param, checkpoint)  # type: ignore[attr-defined]
+    param.weight_loader(param, checkpoint)
     return param.data
 
 

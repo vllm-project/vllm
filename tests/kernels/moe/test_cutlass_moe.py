@@ -229,6 +229,7 @@ def test_cutlass_fp4_moe_supports_expert_parallel_config():
 def _slice_moe_quant_config(
     quant_config: FusedMoEQuantConfig, start: int, end: int
 ) -> FusedMoEQuantConfig:
+    assert quant_config.w1_scale is not None
     num_experts = quant_config.w1_scale.shape[0]
     sliced_config = copy.deepcopy(quant_config)
     for desc_name in ("_a1", "_a2", "_w1", "_w2"):
@@ -359,6 +360,7 @@ def test_cutlass_fp4_moe_EP(
         "apply_router_weight_on_input": False,
     }
     reference = kernel.apply(**apply_kwargs)
+    assert isinstance(reference, torch.Tensor)
     sharded = run_with_expert_maps(
         num_experts,
         num_local_experts,
@@ -444,7 +446,9 @@ def test_cutlass_fp4_moe_padded_routes_do_not_change_valid_output(quantization: 
             (m * topk, n), workspace_value, device=device, dtype=dtype
         )
 
-        runner(
+        # mypy maps the variable-length *quant_args onto every remaining
+        # positional parameter, so the trailing positionals look like extras.
+        runner(  # type: ignore[call-arg, misc]
             output,
             hidden_states,
             *quant_args,
@@ -745,18 +749,11 @@ def run_8_bit(
     per_out_ch: bool,
     num_local_experts: int | None = None,
 ) -> torch.Tensor:
-    assert not any(
-        [
-            t is None
-            for t in [
-                moe_tensors.w1_q,
-                moe_tensors.w2_q,
-                moe_tensors.w1_scale,
-                moe_tensors.w2_scale,
-                moe_tensors.a_scale,
-            ]
-        ]
-    )
+    assert moe_tensors.w1_q is not None
+    assert moe_tensors.w2_q is not None
+    assert moe_tensors.w1_scale is not None
+    assert moe_tensors.w2_scale is not None
+    assert moe_tensors.a_scale is not None
 
     quant_config = fp8_w8a8_moe_quant_config(
         w1_scale=moe_tensors.w1_scale,
@@ -768,13 +765,13 @@ def run_8_bit(
         a1_scale=None,
     )
 
-    num_experts = moe_tensors.w1.size(0)  # type: ignore[attr-defined]
+    num_experts = moe_tensors.w1.size(0)
     with_ep = num_local_experts is not None or num_local_experts == num_experts
 
     kwargs = {
         "hidden_states": moe_tensors.a,
-        "w1": moe_tensors.w1_q,  # type: ignore[union-attr]
-        "w2": moe_tensors.w2_q,  # type: ignore[union-attr]
+        "w1": moe_tensors.w1_q,
+        "w2": moe_tensors.w2_q,
         "topk_weights": topk_weights,
         "topk_ids": topk_ids,
         "global_num_experts": num_experts,
@@ -789,8 +786,8 @@ def run_8_bit(
             experts_per_token=topk_ids.shape[1],
             num_experts=num_experts,
             num_local_experts=num_local_experts,
-            hidden_dim=moe_tensors.w2_q.shape[1],  # type: ignore[union-attr]
-            intermediate_size=moe_tensors.w2_q.shape[2],  # type: ignore[union-attr]
+            hidden_dim=moe_tensors.w2_q.shape[1],
+            intermediate_size=moe_tensors.w2_q.shape[2],
             in_dtype=moe_tensors.a.dtype,
         )
         kernel = mk.FusedMoEKernel(

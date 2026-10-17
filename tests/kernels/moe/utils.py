@@ -292,7 +292,9 @@ def moe_quantize_weights_2d(
             raise RuntimeError(f"Unsupported quant type {quant_dtype}")
     else:
         if quant_dtype == torch.int8:
-            w, w_s = ops.scaled_int8_quant(
+            # Stale reference: scaled_int8_quant no longer accepts
+            # use_per_token_if_dynamic and returns (q, scale, azp).
+            w, w_s = ops.scaled_int8_quant(  # type: ignore[call-arg, misc]
                 w, w_s, use_per_token_if_dynamic=per_token_quant
             )
         elif is_fp8_dtype:

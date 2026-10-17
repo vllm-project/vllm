@@ -2313,7 +2313,7 @@ def test_fused_kv_insert_split(num_tokens: int, kv_block_size: int):
 
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm stream coverage")
-def test_v41_rocm_csa2_full_pipeline():
+def test_v41_rocm_csa2_full_pipeline(monkeypatch):
     """_forward_csa2_full: one fork, then K write and q-side after the join.
 
     The default chain must run first on the current stream, the compressor
@@ -2359,8 +2359,8 @@ def test_v41_rocm_csa2_full_pipeline():
         streams["insert_cache"] = torch.cuda.current_stream()
         main_cache.fill_(5)
 
-    compressor.forward = compressor_forward
-    compressor.insert_cache = compressor_insert
+    monkeypatch.setattr(compressor, "forward", compressor_forward)
+    monkeypatch.setattr(compressor, "insert_cache", compressor_insert)
 
     def weights_proj(hidden_states_):
         order.append("weights_proj")

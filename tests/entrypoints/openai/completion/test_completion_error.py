@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -338,13 +339,16 @@ def _deepseek_v4_suffix_renderer(
 
 @pytest.mark.asyncio
 @pytest.mark.skip_global_cleanup
-async def test_completion_suffix_uses_renderer_capability():
+async def test_completion_suffix_uses_renderer_capability(
+    monkeypatch: pytest.MonkeyPatch,
+):
     model_config = MockModelConfig()
     online_renderer = _build_online_renderer_for_completion(
         model_config,
         renderer=_deepseek_v4_suffix_renderer(model_config),
     )
-    online_renderer.preprocess_completion = AsyncMock(return_value=[{"ok": True}])
+    preprocess_completion = AsyncMock(return_value=[{"ok": True}])
+    monkeypatch.setattr(online_renderer, "preprocess_completion", preprocess_completion)
 
     request = CompletionRequest(
         model=MODEL_NAME,
@@ -356,8 +360,8 @@ async def test_completion_suffix_uses_renderer_capability():
     result = await online_renderer.render_completion(request)
 
     assert result == [{"ok": True}]
-    online_renderer.preprocess_completion.assert_awaited_once()
-    assert online_renderer.preprocess_completion.call_args.kwargs["prompt_input"] == (
+    preprocess_completion.assert_awaited_once()
+    assert preprocess_completion.call_args.kwargs["prompt_input"] == (
         f"{DEEPSEEK_V4_FIM_BEGIN}def fib(n):\n    return "
         f"{DEEPSEEK_V4_FIM_HOLE}\n\nprint(fib(10))"
         f"{DEEPSEEK_V4_FIM_END}"
@@ -366,13 +370,16 @@ async def test_completion_suffix_uses_renderer_capability():
 
 @pytest.mark.asyncio
 @pytest.mark.skip_global_cleanup
-async def test_completion_suffix_supports_text_prompt_list():
+async def test_completion_suffix_supports_text_prompt_list(
+    monkeypatch: pytest.MonkeyPatch,
+):
     model_config = MockModelConfig()
     online_renderer = _build_online_renderer_for_completion(
         model_config,
         renderer=_deepseek_v4_suffix_renderer(model_config),
     )
-    online_renderer.preprocess_completion = AsyncMock(return_value=[{"ok": True}])
+    preprocess_completion = AsyncMock(return_value=[{"ok": True}])
+    monkeypatch.setattr(online_renderer, "preprocess_completion", preprocess_completion)
 
     request = CompletionRequest(
         model=MODEL_NAME,
@@ -383,7 +390,7 @@ async def test_completion_suffix_supports_text_prompt_list():
     result = await online_renderer.render_completion(request)
 
     assert result == [{"ok": True}]
-    assert online_renderer.preprocess_completion.call_args.kwargs["prompt_input"] == [
+    assert preprocess_completion.call_args.kwargs["prompt_input"] == [
         (
             f"{DEEPSEEK_V4_FIM_BEGIN}prefix A"
             f"{DEEPSEEK_V4_FIM_HOLE} suffix{DEEPSEEK_V4_FIM_END}"
@@ -397,10 +404,13 @@ async def test_completion_suffix_supports_text_prompt_list():
 
 @pytest.mark.asyncio
 @pytest.mark.skip_global_cleanup
-async def test_completion_suffix_rejects_renderer_without_fim_support():
+async def test_completion_suffix_rejects_renderer_without_fim_support(
+    monkeypatch: pytest.MonkeyPatch,
+):
     model_config = MockModelConfig()
     online_renderer = _build_online_renderer_for_completion(model_config)
-    online_renderer.preprocess_completion = AsyncMock()
+    preprocess_completion = AsyncMock()
+    monkeypatch.setattr(online_renderer, "preprocess_completion", preprocess_completion)
 
     request = CompletionRequest(
         model=MODEL_NAME,
@@ -412,18 +422,19 @@ async def test_completion_suffix_rejects_renderer_without_fim_support():
 
     assert isinstance(result, ErrorResponse)
     assert "FIM completion rendering" in result.error.message
-    online_renderer.preprocess_completion.assert_not_awaited()
+    preprocess_completion.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 @pytest.mark.skip_global_cleanup
-async def test_completion_suffix_rejects_echo():
+async def test_completion_suffix_rejects_echo(monkeypatch: pytest.MonkeyPatch):
     model_config = MockModelConfig()
     online_renderer = _build_online_renderer_for_completion(
         model_config,
         renderer=_deepseek_v4_suffix_renderer(model_config),
     )
-    online_renderer.preprocess_completion = AsyncMock()
+    preprocess_completion = AsyncMock()
+    monkeypatch.setattr(online_renderer, "preprocess_completion", preprocess_completion)
 
     request = CompletionRequest(
         model=MODEL_NAME,
@@ -436,18 +447,21 @@ async def test_completion_suffix_rejects_echo():
 
     assert isinstance(result, ErrorResponse)
     assert "Echo is unsupported with suffix" in result.error.message
-    online_renderer.preprocess_completion.assert_not_awaited()
+    preprocess_completion.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 @pytest.mark.skip_global_cleanup
-async def test_completion_suffix_rejects_prompt_embeds():
+async def test_completion_suffix_rejects_prompt_embeds(
+    monkeypatch: pytest.MonkeyPatch,
+):
     model_config = MockModelConfig()
     online_renderer = _build_online_renderer_for_completion(
         model_config,
         renderer=_deepseek_v4_suffix_renderer(model_config),
     )
-    online_renderer.preprocess_completion = AsyncMock()
+    preprocess_completion = AsyncMock()
+    monkeypatch.setattr(online_renderer, "preprocess_completion", preprocess_completion)
 
     request = CompletionRequest(
         model=MODEL_NAME,
@@ -460,19 +474,22 @@ async def test_completion_suffix_rejects_prompt_embeds():
 
     assert isinstance(result, ErrorResponse)
     assert "suffix is not supported with prompt_embeds" in result.error.message
-    online_renderer.preprocess_completion.assert_not_awaited()
+    preprocess_completion.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("prompt", ([1, 2, 3], [[1, 2, 3]]))
-async def test_completion_suffix_rejects_token_prompt(prompt):
+async def test_completion_suffix_rejects_token_prompt(
+    prompt, monkeypatch: pytest.MonkeyPatch
+):
     model_config = MockModelConfig()
     online_renderer = _build_online_renderer_for_completion(
         model_config,
         renderer=_deepseek_v4_suffix_renderer(model_config),
     )
-    online_renderer.preprocess_completion = AsyncMock()
+    preprocess_completion = AsyncMock()
+    monkeypatch.setattr(online_renderer, "preprocess_completion", preprocess_completion)
 
     request = CompletionRequest(
         model=MODEL_NAME,
@@ -484,7 +501,7 @@ async def test_completion_suffix_rejects_token_prompt(prompt):
 
     assert isinstance(result, ErrorResponse)
     assert "requires text prompt input" in result.error.message
-    online_renderer.preprocess_completion.assert_not_awaited()
+    preprocess_completion.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -537,7 +554,9 @@ async def test_completion_error_non_stream():
 
 
 @pytest.mark.asyncio
-async def test_openai_completion_keeps_mm_cache_for_engine_execution():
+async def test_openai_completion_keeps_mm_cache_for_engine_execution(
+    monkeypatch: pytest.MonkeyPatch,
+):
     mock_engine = MagicMock(spec=AsyncLLM)
     mock_engine.errored = False
     mock_engine.model_config = MockModelConfig()
@@ -545,8 +564,11 @@ async def test_openai_completion_keeps_mm_cache_for_engine_execution():
     mock_engine.renderer = _build_renderer(mock_engine.model_config)
 
     serving_completion = _build_serving_completion(mock_engine)
-    serving_completion.online_renderer.preprocess_completion = AsyncMock(
-        return_value=[{"prompt_token_ids": [1, 2, 3]}]
+    preprocess_completion = AsyncMock(return_value=[{"prompt_token_ids": [1, 2, 3]}])
+    monkeypatch.setattr(
+        serving_completion.online_renderer,
+        "preprocess_completion",
+        preprocess_completion,
     )
 
     request = CompletionRequest(
@@ -557,15 +579,12 @@ async def test_openai_completion_keeps_mm_cache_for_engine_execution():
     result = await serving_completion.render_completion_request(request)
 
     assert isinstance(result, list)
-    assert (
-        serving_completion.online_renderer.preprocess_completion.call_args.kwargs[
-            "skip_mm_cache"
-        ]
-        is False
-    )
+    assert preprocess_completion.call_args.kwargs["skip_mm_cache"] is False
 
 
-def _build_serving_render(engine: AsyncLLM) -> ServingRender:
+def _build_serving_render(
+    engine: AsyncLLM, monkeypatch: pytest.MonkeyPatch
+) -> ServingRender:
     models = OpenAIServingModels(
         engine_client=engine,
         base_model_paths=BASE_MODEL_PATHS,
@@ -587,24 +606,31 @@ def _build_serving_render(engine: AsyncLLM) -> ServingRender:
             [{"prompt_token_ids": [1, 2, 3]}],
         )
 
-    serving_render.online_renderer.preprocess_chat = AsyncMock(
-        side_effect=_fake_preprocess_chat
+    monkeypatch.setattr(
+        serving_render.online_renderer,
+        "preprocess_chat",
+        AsyncMock(side_effect=_fake_preprocess_chat),
     )
     return serving_render
 
 
 @pytest.mark.asyncio
-async def test_renderer_only_completion_request_skips_mm_cache():
+async def test_renderer_only_completion_request_skips_mm_cache(
+    monkeypatch: pytest.MonkeyPatch,
+):
     mock_engine = MagicMock(spec=AsyncLLM)
     mock_engine.errored = False
     mock_engine.model_config = MockModelConfig()
     mock_engine.input_processor = MagicMock()
     mock_engine.renderer = _build_renderer(mock_engine.model_config)
 
-    serving_render = _build_serving_render(mock_engine)
+    serving_render = _build_serving_render(mock_engine, monkeypatch)
 
-    serving_render.online_renderer.preprocess_completion = AsyncMock(
-        return_value=[{"prompt_token_ids": [1, 2, 3]}]
+    preprocess_completion = AsyncMock(return_value=[{"prompt_token_ids": [1, 2, 3]}])
+    monkeypatch.setattr(
+        serving_render.online_renderer,
+        "preprocess_completion",
+        preprocess_completion,
     )
 
     request = CompletionRequest(
@@ -615,12 +641,7 @@ async def test_renderer_only_completion_request_skips_mm_cache():
     result = await serving_render.render_completion_request(request)
 
     assert isinstance(result, list)
-    assert (
-        serving_render.online_renderer.preprocess_completion.call_args.kwargs[
-            "skip_mm_cache"
-        ]
-        is True
-    )
+    assert preprocess_completion.call_args.kwargs["skip_mm_cache"] is True
 
 
 @pytest.mark.asyncio
@@ -695,6 +716,7 @@ async def test_completion_error_stream(include_usage: bool):
 
     response = await serving_completion.create_completion(request)
 
+    assert isinstance(response, AsyncGenerator)
     chunks = []
     async for chunk in response:
         chunks.append(chunk)
@@ -755,6 +777,7 @@ async def test_completion_error_stream_first_chunk(include_usage: bool):
 
     response = await serving_completion.create_completion(request)
 
+    assert isinstance(response, AsyncGenerator)
     chunks = []
     async for chunk in response:
         chunks.append(chunk)

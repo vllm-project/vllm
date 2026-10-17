@@ -887,10 +887,9 @@ def test_guidance_no_additional_properties(vllm_runner):
             "<|im_end|>\n<|im_start|>assistant\n"
         )
 
-        def generate_with_backend(backend):
+        def generate():
             structured_outputs_params = StructuredOutputsParams(
                 json=schema,
-                backend=backend,
                 disable_any_whitespace=True,
                 disable_additional_properties=True,
             )
@@ -909,7 +908,7 @@ def test_guidance_no_additional_properties(vllm_runner):
             jsonschema.validate(instance=parsed_json, schema=schema)
             return parsed_json
 
-        generated = generate_with_backend("guidance")
+        generated = generate()
         assert "a1" in generated
         assert "a2" in generated
         assert "a3" in generated

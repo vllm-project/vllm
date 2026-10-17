@@ -1394,6 +1394,7 @@ def _test_body_eplb(
         ),
     )
 
+    assert eplb_moe_layer.router.eplb_state is not None
     eplb_moe_layer.router.eplb_state.should_record_tensor = torch.ones(
         (), dtype=torch.bool, device=device
     )
@@ -1801,7 +1802,9 @@ def _parallel_worker(
             # buffer is destroyed in the same process.
             if current_platform.is_cuda() and test_config.backend in DEEPEP_BACKENDS:
                 torch.accelerator.synchronize()
-                all2all_manager = get_ep_group().device_communicator.all2all_manager
+                device_communicator = get_ep_group().device_communicator
+                assert device_communicator is not None
+                all2all_manager = device_communicator.all2all_manager
                 if all2all_manager is not None:
                     all2all_manager.destroy()
             elif (
@@ -1812,7 +1815,9 @@ def _parallel_worker(
                 # The manager cache is weak. Keep its handle alive until the
                 # launcher hard-exits this ROCm worker, otherwise each subtest
                 # implicitly destroys and recreates the DeepEP buffer.
-                all2all_manager = get_ep_group().device_communicator.all2all_manager
+                device_communicator = get_ep_group().device_communicator
+                assert device_communicator is not None
+                all2all_manager = device_communicator.all2all_manager
                 if all2all_manager is not None:
                     handle_cache = getattr(all2all_manager, "handle_cache", None)
                     if handle_cache is not None and not deep_ep_handle_keepalive:

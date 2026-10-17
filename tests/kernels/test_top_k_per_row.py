@@ -653,8 +653,9 @@ def test_aiter_c4a_prefill_topk_returns_sequence_local_indices() -> None:
         num_rows=logits.shape[0],
     ):
         pytest.skip("AITER top-k is unavailable")
+    # The launcher fills `indices` in place; the test pins that it returns nothing.
     assert (
-        _launch_aiter_top_k_per_row_prefill(
+        _launch_aiter_top_k_per_row_prefill(  # type: ignore[func-returns-value]
             logits,
             row_starts,
             row_ends,

@@ -14,7 +14,7 @@ from vllm.assets.base import VLLM_S3_BUCKET_URL
 from vllm.assets.image import VLM_IMAGES_DIR
 from vllm.outputs import RequestOutput
 from vllm.utils.torch_utils import set_random_seed
-from vllm.v1.metrics.reader import Metric
+from vllm.v1.metrics.reader import Counter, Gauge, Metric
 
 
 def _skip_if_insufficient_gpus_for_tp(tp_size: int):
@@ -183,6 +183,7 @@ def get_spec_decode_metric_value(metrics: Sequence[Metric], metric_name: str) ->
         "Available spec-decode metrics: "
         f"{sorted(name for name in name2metric if 'spec_decode' in name) or ['<none>']}"
     )
+    assert isinstance(metric, Counter | Gauge), f"{metric_name!r} has no scalar value"
     return float(metric.value)
 
 

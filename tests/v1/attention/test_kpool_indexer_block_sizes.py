@@ -3,16 +3,17 @@
 """CPU tests for the kpool indexer's kernel block selection."""
 
 from types import SimpleNamespace
+from typing import Protocol
 
 import pytest
 import torch
 
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.models.glm5next.common.attention import Glm5NextIndexerCache
-from vllm.v1.attention.backend import AttentionBackend, MultipleOf
+from vllm.v1.attention.backend import MultipleOf
 from vllm.v1.attention.backends.mla import indexer as indexer_mod
 from vllm.v1.attention.backends.mla.indexer import Glm5NextIndexerBackend
-from vllm.v1.kv_cache_interface import MLAAttentionSpec
+from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec
 from vllm.v1.worker.utils import prepare_kernel_block_sizes, select_common_block_size
 
 pytestmark = pytest.mark.cpu_test
@@ -49,8 +50,20 @@ def _kpool_storage_spec(manager_block: int) -> MLAAttentionSpec:
     return spec
 
 
+class _KernelBlockSizeBackend(Protocol):
+    """The backend hooks ``prepare_kernel_block_sizes`` reads off each group."""
+
+    @staticmethod
+    def get_supported_kernel_block_sizes(
+        kv_cache_spec: KVCacheSpec | None = None,
+    ) -> list[int | MultipleOf]: ...
+
+    @staticmethod
+    def get_name() -> str: ...
+
+
 def _prepare(
-    spec: MLAAttentionSpec, backends: list[type[AttentionBackend]]
+    spec: MLAAttentionSpec, backends: list[type[_KernelBlockSizeBackend]]
 ) -> list[int]:
     kv_cache_config = SimpleNamespace(
         kv_cache_groups=[SimpleNamespace(kv_cache_spec=spec, layer_names=[])],
@@ -79,7 +92,8 @@ def test_kpool_group_maps_pool_pages(
 
     # The kpool group's AttentionGroup selects its kernel block this way.
     selected = [
-        select_common_block_size(manager_block, [Glm5NextIndexerBackend], [spec])
+        # indexer backend has no impl class
+        select_common_block_size(manager_block, [Glm5NextIndexerBackend], [spec])  # type: ignore[type-abstract]
     ]
     assert selected == [expected]
     assert selected != [manager_block]

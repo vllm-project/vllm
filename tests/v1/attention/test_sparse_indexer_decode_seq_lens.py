@@ -18,6 +18,8 @@ expansion consequences via the pure-torch expand/append pair that the fused
 kernel is documented to replicate.
 """
 
+from types import ModuleType
+
 import torch
 
 # Bootstrap the glm5next package before importing kpool_compress directly: its
@@ -38,10 +40,15 @@ from vllm.models.glm5next.common.sparse_indexer import (
 )
 from vllm.platforms import current_platform
 
+indexer_mod: ModuleType
 if current_platform.is_rocm():
-    from vllm.models.glm5next.amd import sparse_indexer as indexer_mod
+    from vllm.models.glm5next.amd import sparse_indexer as amd_indexer_mod
+
+    indexer_mod = amd_indexer_mod
 else:
-    from vllm.models.glm5next.nvidia import sparse_indexer as indexer_mod
+    from vllm.models.glm5next.nvidia import sparse_indexer as nvidia_indexer_mod
+
+    indexer_mod = nvidia_indexer_mod
 
 KPOOL = 4
 TOPK_TOKENS = 16
