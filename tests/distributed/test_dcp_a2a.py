@@ -9,6 +9,7 @@ Tests cover:
 """
 
 import math
+from types import SimpleNamespace
 
 import multiprocess as mp
 import pytest
@@ -16,9 +17,15 @@ import torch
 import torch.distributed as dist
 
 import vllm.envs as envs
+import vllm.platforms
+from vllm.config.attention import AttentionConfig
+from vllm.config.cache import CacheConfig
 from vllm.config.parallel import ParallelConfig
+from vllm.model_executor.models.config import GlmMoeDsaForCausalLM
+from vllm.platforms.interface import DeviceCapability, Platform, PlatformEnum
 from vllm.utils.network_utils import get_file_store_init_method
 from vllm.utils.system_utils import update_environment_variables
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 mp.set_start_method("spawn", force=True)
 
@@ -27,6 +34,17 @@ class _FakeCPGroup:
     def __init__(self, world_size: int, device_group: dist.ProcessGroup):
         self.world_size = world_size
         self.device_group = device_group
+
+
+def _fake_cuda_platform(major: int, minor: int) -> Platform:
+    class FakeCudaPlatform(Platform):
+        _enum = PlatformEnum.CUDA
+
+        @classmethod
+        def get_device_capability(cls, device_id: int = 0) -> DeviceCapability:
+            return DeviceCapability(major, minor)
+
+    return FakeCudaPlatform()
 
 
 def _dtype_from_name(dtype_name: str) -> torch.dtype:
@@ -133,6 +151,67 @@ class TestDCPCommBackendConfig:
             decode_context_parallel_size=1,
         )
         assert config.dcp_comm_backend == "ag_rs"
+
+    @staticmethod
+    def _glm_moe_dsa_defaults(
+        monkeypatch: pytest.MonkeyPatch,
+        capability: tuple[int, int],
+        attn_backend: AttentionBackendEnum | None = None,
+        cache_config: CacheConfig | None = None,
+        **parallel_kwargs,
+    ) -> tuple[str, bool]:
+        monkeypatch.setattr(
+            vllm.platforms, "current_platform", _fake_cuda_platform(*capability)
+        )
+        parallel_config = ParallelConfig(
+            tensor_parallel_size=4, decode_context_parallel_size=4, **parallel_kwargs
+        )
+        vllm_config = SimpleNamespace(
+            parallel_config=parallel_config,
+            attention_config=AttentionConfig(backend=attn_backend),
+            cache_config=cache_config or CacheConfig(),
+            speculative_config=None,
+        )
+        GlmMoeDsaForCausalLM.verify_and_update_config(vllm_config)
+        # VllmConfig.__post_init__ fills whatever the model hook left unset.
+        parallel_config.set_dcp_defaults()
+        return parallel_config.dcp_comm_backend, parallel_config.dcp_q_replicate
+
+    @pytest.mark.parametrize(
+        ("capability", "attn_backend", "expected"),
+        [
+            ((10, 0), None, ("a2a", True)),
+            ((9, 0), None, ("ag_rs", False)),
+            ((10, 0), AttentionBackendEnum.FLASHMLA_SPARSE, ("ag_rs", False)),
+        ],
+    )
+    def test_glm_moe_dsa_default_follows_backend(
+        self, monkeypatch, capability, attn_backend, expected
+    ):
+        """GLM DSA asks for a2a + qrep unless FlashMLA sparse, which only
+        accepts ag_rs, serves DCP: forced, or the only DCP-capable sparse
+        backend on SM90."""
+        assert self._glm_moe_dsa_defaults(monkeypatch, capability, attn_backend) == (
+            expected
+        )
+
+    def test_glm_moe_dsa_keeps_explicit_backend(self, monkeypatch):
+        """An explicit --dcp-comm-backend is never overridden by the model."""
+        comm_backend, _ = self._glm_moe_dsa_defaults(
+            monkeypatch, (9, 0), dcp_comm_backend="a2a"
+        )
+        assert comm_backend == "a2a"
+
+    def test_glm_moe_dsa_flashmla_sparse_keeps_fp8_kv_default(self, monkeypatch):
+        """Leaving the DCP defaults alone must not skip the SM10x fp8 KV default."""
+        cache_config = CacheConfig()
+        self._glm_moe_dsa_defaults(
+            monkeypatch,
+            (10, 0),
+            AttentionBackendEnum.FLASHMLA_SPARSE,
+            cache_config=cache_config,
+        )
+        assert cache_config.cache_dtype == "fp8_e4m3"
 
 
 class TestLSEWeightedCombine:
