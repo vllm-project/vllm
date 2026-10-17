@@ -930,12 +930,13 @@ def _get_packed_kv_cache_groups(
     page_sizes = {spec.page_size_bytes for spec in kv_cache_spec.values()}
     if not layout.is_block_outermost or len(page_sizes) <= 1:
         return None
+    dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
 
     buckets: list[dict[str, KVCacheSpec]] = []
     for name, spec in kv_cache_spec.items():
         for bucket in buckets:
             candidate = {**bucket, name: spec}
-            if UniformTypeKVCacheSpecs.is_uniform_type(candidate):
+            if UniformTypeKVCacheSpecs.is_uniform_type(candidate, dcp_world_size):
                 bucket[name] = spec
                 break
         else:
@@ -943,7 +944,7 @@ def _get_packed_kv_cache_groups(
 
     bucketed = []
     for bucket in buckets:
-        uniform_spec = UniformTypeKVCacheSpecs.from_specs(bucket)
+        uniform_spec = UniformTypeKVCacheSpecs.from_specs(bucket, dcp_world_size)
         assert uniform_spec is not None
         page_size_layers: dict[int, list[str]] = defaultdict(list)
         for layer_name, layer_spec in bucket.items():
@@ -1034,7 +1035,9 @@ def _get_packed_kv_cache_groups(
             group_layer_specs = {
                 name: spec.kv_cache_specs[name] for name in group_layer_names
             }
-            group_spec = UniformTypeKVCacheSpecs.from_specs(group_layer_specs)
+            group_spec = UniformTypeKVCacheSpecs.from_specs(
+                group_layer_specs, dcp_world_size
+            )
             assert group_spec is not None
             groups.append(KVCacheGroupSpec(group_layer_names, group_spec))
 
@@ -1140,7 +1143,9 @@ def get_kv_cache_groups(
         # most models. Allocate the same amount of memory for
         # each layer.
         return _get_kv_cache_groups_uniform_spec(kv_cache_spec)
-    elif uniform_spec := UniformTypeKVCacheSpecs.from_specs(kv_cache_spec):
+    elif uniform_spec := UniformTypeKVCacheSpecs.from_specs(
+        kv_cache_spec, vllm_config.parallel_config.decode_context_parallel_size
+    ):
         # All layers need the same number of token slots (e.g., all layers are
         # full attention, or all layers are sliding window attention with the
         # same window size). Put all layers into one group.

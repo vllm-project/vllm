@@ -18,6 +18,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     MambaSpec,
+    MLAAttentionSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.gpu.async_utils import async_copy_to_np
@@ -64,16 +65,16 @@ def test_non_last_pp_rank_uses_global_batch_for_sample_feedback():
     runner.pcp_manager.restore_for_sampling.assert_not_called()
 
 
-def test_qsa_circular_group_uses_custom_slot_mapping(monkeypatch):
+def test_initialize_kv_cache_uses_mixed_group_slot_mapping(monkeypatch):
     runner = GPUModelRunner.__new__(GPUModelRunner)
     runner.max_model_len = 262144
     runner.is_encoder_decoder = False
-    runner.dcp_size = 1
+    runner.dcp_size = 2
     runner.dcp_rank = 0
     runner.cp_interleave = 1
     runner.cache_config = SimpleNamespace(enable_prefix_caching=True)
     parallel_config = SimpleNamespace(
-        decode_context_parallel_size=1,
+        decode_context_parallel_size=2,
         cp_kv_cache_interleave_size=1,
     )
     runner.parallel_config = parallel_config
@@ -106,6 +107,27 @@ def test_qsa_circular_group_uses_custom_slot_mapping(monkeypatch):
         head_size=128,
         dtype=torch.bfloat16,
     )
+
+    class IndependentSelector(MLAAttentionSpec):
+        @property
+        def has_independent_slot_mapping(self) -> bool:
+            return True
+
+        @property
+        def uses_slot_mapping(self) -> bool:
+            return False
+
+    selector_spec = IndependentSelector(
+        block_size=524288,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.bfloat16,
+        dcp_sharded=False,
+    )
+    mixed_spec = UniformTypeKVCacheSpecs.from_specs(
+        {"selector": selector_spec, "compressed": compressed_spec}, 2
+    )
+    assert mixed_spec is not None
     kv_cache_config = KVCacheConfig(
         num_blocks=1,
         kv_cache_tensors=[],
@@ -117,7 +139,9 @@ def test_qsa_circular_group_uses_custom_slot_mapping(monkeypatch):
                     kv_cache_specs={"raw": raw_spec},
                 ),
             ),
-            KVCacheGroupSpec(layer_names=["compressed"], kv_cache_spec=compressed_spec),
+            KVCacheGroupSpec(
+                layer_names=["selector", "compressed"], kv_cache_spec=mixed_spec
+            ),
         ],
     )
 
