@@ -4,6 +4,7 @@ import torch
 from torch import fx
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
 from torch._higher_order_ops.triton_kernel_wrap import TritonKernelWrapperFunctional
+from torch._inductor.fx_utils import get_node_storage
 from torch._ops import HigherOrderOperator, OpOverload
 
 from vllm.config import VllmConfig
@@ -69,6 +70,23 @@ def user_writes_to_node(user: fx.Node, node: fx.Node) -> bool:
     return False
 
 
+def would_alias_graph_io(clone: fx.Node, original: fx.Node) -> bool:
+    """Whether folding clone into original makes a graph output share storage with
+    a graph input or another output, whose uses outside this graph are unknown."""
+    # The fx graph output node is the return, so grab the buffer ids of its args
+    outputs = {get_node_storage(n) for n in clone.graph.output_node().all_input_nodes}
+    # If the clone node isn't returned, it's safe to potentially fold the clone
+    clone_buffer_id = get_node_storage(clone)
+    if clone_buffer_id not in outputs:
+        return False
+
+    # Otherwise get the buffer ids of all inputs to the graph
+    inputs = {get_node_storage(n) for n in clone.graph.find_nodes(op="placeholder")}
+    orig_buffer_id = get_node_storage(original)
+
+    return orig_buffer_id in inputs or orig_buffer_id in outputs
+
+
 class UnsafeCloneEliminationPass(VllmInductorPass):
     """This pass removes clone nodes that are no longer needed after vLLM IR lowering.
     It uses donated_input_ids to eliminate clones of donated graph inputs, preserving
@@ -116,6 +134,9 @@ class UnsafeCloneEliminationPass(VllmInductorPass):
                 node_to_idx[u] for u in node.users if user_writes_to_node(u, node)
             ]
             assert len(write_idxs) in (0, 1)
+            if not write_idxs and would_alias_graph_io(node, original_node):
+                logger.debug("skipped a clone removal to avoid aliasing a graph IO")
+                continue
             if write_idxs:
                 # Check if a user of original_node occurs after a write
                 write_idx = write_idxs[0]
