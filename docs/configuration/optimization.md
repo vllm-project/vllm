@@ -156,10 +156,42 @@ GPU. vLLM can pin each worker with `numactl` before the Python subprocess starts
 so the interpreter, imports, and early allocator state are created with the
 desired NUMA policy from the beginning.
 
-Use `--numa-bind` to enable the feature. By default, vLLM auto-detects the
-GPU-to-NUMA mapping and uses `--cpunodebind=<node> --membind=<node>` for each
-worker. When you need a custom CPU policy, add `--numa-bind-cpus` and vLLM will
-switch to `--physcpubind=<cpu-list> --membind=<node>`.
+By default, vLLM binds automatically when the environment supports it:
+CUDA-alike platform, multiple NUMA nodes, `numactl` installed, permission to
+set NUMA memory policy, unrestricted CPU affinity, a default NUMA memory policy,
+the `spawn` multiprocessing start method (the CLI default), and a local `mp` or
+`uni` executor with multiprocessing DP. Ray, external launchers, `--device-ids`
+remapping, and prefill context parallelism (PCP) are excluded from automatic binding.
+Otherwise vLLM starts unbound. Use
+`--numa-bind` to make a missing `numactl` or undetectable GPU-to-NUMA topology a
+startup error, or `--no-numa-bind` to disable binding. Passing
+`--numa-bind-nodes` or `--numa-bind-cpus` implies `--numa-bind`.
+Automatic binding preserves an existing non-default memory policy, such as
+interleave, preferred-node, or bind. Explicit enablement may override it.
+
+Automatic binding uses `--cpunodebind=<node> --preferred=<node>` for each worker:
+memory allocations prefer the GPU-local node but can fall back to other nodes.
+EngineCore prefers its shard's nodes with `--preferred-many=<nodes>` when the
+shard spans multiple NUMA nodes, or `--preferred=<node>` for a single-node shard.
+Explicit `--numa-bind` or binding lists retain strict `--membind=<nodes>`.
+When you need a custom CPU policy, add `--numa-bind-cpus` and vLLM will switch
+to `--physcpubind=<cpu-list>`.
+
+Automatic eligibility and topology validation happen in each local launcher
+before starting its first bound subprocess, using freshly discovered topology.
+The mapping must cover all visible GPUs and local workers, and each mapped NUMA
+node must have CPUs. The resolved decision and mapping are passed to spawned
+children, so an already-bound EngineCore does not repeat detection under its
+restricted CPU affinity.
+Multi-node multiprocessing launchers resolve their own host-local mapping;
+NUMA node IDs are never interpreted as cluster-wide IDs.
+
+Before each bound launch, vLLM probes the selected policy with
+`numactl <args> true`. If CPU-and-memory binding is rejected, it retries with
+CPU-only binding; if that is also rejected, the subprocess starts unbound.
+Logs report the selected policy or fallback. If `--preferred-many` is unsupported,
+automatic mode falls back to CPU-only binding, never strict memory binding.
+These probes test policy acceptance, not future allocation capacity.
 
 These `--numa-bind*` options only apply to GPU execution processes. They do not
 configure the CPU backend's separate thread-affinity controls. Automatic
@@ -174,7 +206,7 @@ order as the GPU indices. Each CPU list must use
 `numactl --physcpubind` syntax such as `0-3`, `0,2,4-7`, or `16-31,48-63`.
 
 ```bash
-# Auto-detect NUMA nodes for visible GPUs
+# Require binding, auto-detecting NUMA nodes for visible GPUs
 vllm serve meta-llama/Llama-3.1-8B-Instruct \
   --tensor-parallel-size 4 \
   --numa-bind
@@ -195,10 +227,12 @@ vllm serve meta-llama/Llama-3.1-8B-Instruct \
 
 Notes:
 
-- CLI usage forces multiprocessing to use the `spawn` method automatically. If you enable NUMA binding through the Python API, also set `VLLM_WORKER_MULTIPROC_METHOD=spawn`.
-- Automatic detection relies on NVML and NUMA support from the host. If it cannot determine the mapping reliably, pass `--numa-bind-nodes` explicitly.
+- The CLI defaults to `spawn` when `VLLM_WORKER_MULTIPROC_METHOD` is unset. Automatic NUMA binding never changes the start method: if it is `fork`, default binding stays off. Python API usage normally defaults to `fork`; set `VLLM_WORKER_MULTIPROC_METHOD=spawn` to allow binding and follow Python's `if __name__ == "__main__":` requirements.
+- Automatic memory preference permits allocations on other NUMA nodes when local memory is unavailable. Explicit `--numa-bind` still uses `--membind`, which restricts host allocations to the selected nodes; for host-memory-heavy setups (e.g. large CPU KV offload), avoid explicit strict binding if workers need memory from other nodes. The policy probes do not check allocation capacity or container memory limits.
+- Automatic detection relies on NVML (CUDA) or amdsmi (ROCm) and NUMA support from the host. If it cannot determine the mapping reliably, default mode starts unbound; pass `--numa-bind-nodes` to provide a mapping explicitly.
 - Explicit `--numa-bind-nodes` and `--numa-bind-cpus` values must be valid `numactl` inputs. vLLM does a small amount of validation, but the effective binding semantics are still determined by `numactl`.
 - The current implementation binds GPU execution processes such as `EngineCore` and multiprocessing workers. It does not apply NUMA binding to frontend API server processes or the DP coordinator.
+- Ray actors are not bound by the multiprocessing executable wrapper. Enabling automatic NUMA binding for Ray requires a separate actor-launch implementation.
 - In containerized environments, NUMA policy syscalls may require extra permissions, such as `--cap-add SYS_NICE` when running via `docker run`.
 
 ### CPU Backend Thread Affinity
