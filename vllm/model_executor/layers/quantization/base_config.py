@@ -84,6 +84,14 @@ class QuantizeMethodBase(ABC):
         """
         return
 
+    def get_post_load_parameter_name(self, name: str) -> str:
+        """Resolve a parameter renamed by weight post-processing.
+
+        The loader uses this to restore CPU residency after processing weights
+        on the accelerator. Methods that rename parameters override it.
+        """
+        return name
+
     def dequantize_weight(
         self, layer: nn.Module
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
