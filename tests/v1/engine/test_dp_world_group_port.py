@@ -3,6 +3,8 @@
 """The DP world group picks its port when it binds, not ahead of time."""
 
 import multiprocessing as mp
+import os
+import shutil
 import socket
 import traceback
 from multiprocessing.queues import Queue
@@ -11,7 +13,7 @@ import pytest
 import torch
 
 from vllm.distributed.utils import create_tcp_store
-from vllm.utils.network_utils import get_open_port
+from vllm.utils.network_utils import get_dp_rendezvous_dir, get_open_port
 
 RESULT_TIMEOUT_S = 240
 
@@ -107,3 +109,83 @@ def test_dp_world_group_survives_a_taken_preallocated_port(with_coord_store: boo
     finally:
         if squatter is not None:
             squatter.close()
+
+
+def _join_offline_dp_world_group(
+    dp_rank: int, dp_master_port: int, result: Queue
+) -> None:
+    """Bring up one DP rank the way an offline launcher does: through env vars
+    and with no coordination store to publish a bound port."""
+    try:
+        import torch.distributed as dist
+
+        from vllm.config import VllmConfig, set_current_vllm_config
+        from vllm.config.parallel import ParallelConfig
+        from vllm.distributed.parallel_state import init_distributed_environment
+
+        os.environ["VLLM_DP_RANK"] = str(dp_rank)
+        os.environ["VLLM_DP_RANK_LOCAL"] = str(dp_rank)
+        os.environ["VLLM_DP_SIZE"] = "2"
+        os.environ["VLLM_DP_MASTER_IP"] = "127.0.0.1"
+        os.environ["VLLM_DP_MASTER_PORT"] = str(dp_master_port)
+
+        parallel_config = ParallelConfig()
+        assert parallel_config.data_parallel_master_port == dp_master_port
+        assert parallel_config._coord_store_port == 0
+
+        with set_current_vllm_config(VllmConfig(parallel_config=parallel_config)):
+            init_distributed_environment(
+                world_size=1, rank=0, local_rank=0, backend="gloo"
+            )
+
+        reduced = torch.tensor([dp_rank + 1])
+        dist.all_reduce(reduced)
+        result.put((dp_rank, int(reduced.item()), None))
+    except Exception:
+        result.put((dp_rank, None, traceback.format_exc()))
+
+
+@pytest.mark.skipif(
+    not torch.distributed.is_gloo_available(), reason="gloo backend required"
+)
+def test_offline_dp_world_group_survives_a_taken_launcher_port():
+    """An offline launcher probes a port, releases it and hands the number to
+    every rank, so a peer can hold it by the time they rendezvous. The ranks
+    treat the number as a file store token and start anyway.
+    """
+    squatter = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        squatter.bind(("127.0.0.1", 0))
+        squatter.listen(1)
+        dp_master_port = squatter.getsockname()[1]
+
+        ctx = mp.get_context("spawn")
+        result: Queue = ctx.Queue()
+        procs = [
+            ctx.Process(
+                target=_join_offline_dp_world_group,
+                args=(dp_rank, dp_master_port, result),
+            )
+            for dp_rank in range(2)
+        ]
+        for proc in procs:
+            proc.start()
+        reports: list[tuple[int, int | None, str | None]] = []
+        try:
+            while len(reports) < len(procs):
+                reports.append(result.get(timeout=RESULT_TIMEOUT_S))
+                if reports[-1][2] is not None:
+                    break  # the peer would wait on this rank; do not wait for it
+        finally:
+            for proc in procs:
+                proc.join(timeout=30)
+                if proc.is_alive():
+                    proc.kill()
+
+        for dp_rank, reduced, error in sorted(reports):
+            assert error is None, f"DP rank {dp_rank} failed:\n{error}"
+            # Both ranks joined the same group: 1 + 2 over the two ranks.
+            assert reduced == 3, f"DP rank {dp_rank} all-reduced to {reduced}"
+    finally:
+        squatter.close()
+        shutil.rmtree(get_dp_rendezvous_dir(dp_master_port), ignore_errors=True)
