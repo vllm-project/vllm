@@ -159,7 +159,8 @@ class AiterMxfp4LinearKernel(MxFp4LinearKernel):
 
     def __init__(self, config: MxFp4LinearLayerConfig) -> None:
         super().__init__(config)
-        self.use_asm_gemm = rocm_aiter_ops.is_asm_fp4_gemm_dynamic_quant_enabled()
+        self.asm_gemm_supported = rocm_aiter_ops.is_asm_fp4_gemm_supported()
+        self.use_asm_gemm = False
         self.out_dtype = torch.get_default_dtype()
 
     @classmethod
@@ -199,6 +200,13 @@ class AiterMxfp4LinearKernel(MxFp4LinearKernel):
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        # Use preshuffled ASM (P) and Triton (D) GEMM when tuned in aiter
+        if self.asm_gemm_supported:
+            n, k_bytes = layer.weight.shape
+            self.use_asm_gemm = rocm_aiter_ops.is_asm_fp4_gemm_tuned(
+                n, k_bytes
+            ) and rocm_aiter_ops.is_triton_gemm_afp4wfp4_presh_ws_tuned(n, k_bytes)
+
         if self.use_asm_gemm and not _asm_fp4_scale_swizzle_supported(
             layer.weight_scale.data
         ):

@@ -120,6 +120,14 @@ def _make_engine_args(args: argparse.Namespace, cases: list[BenchCase]):
 
 
 def run_case(runner, case: BenchCase, args: argparse.Namespace) -> dict[str, Any]:
+    required_drafts = max((r.num_draft_tokens for r in case.requests), default=0)
+    if required_drafts > runner.num_speculative_steps:
+        raise ValueError(
+            f"Case {case.name!r} needs {required_drafts} draft tokens per request, "
+            f"but the runner supports {runner.num_speculative_steps}. "
+            "Set --speculative-config with a sufficient num_speculative_tokens."
+        )
+
     from vllm.benchmarks.forward.batch import build_batch
     from vllm.benchmarks.forward.capture import ForwardBench
     from vllm.benchmarks.forward.kv_init import touched_kv_views, zero_kv_blocks

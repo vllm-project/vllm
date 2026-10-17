@@ -11,6 +11,8 @@ import importlib
 import importlib.util
 import threading
 import time
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -127,3 +129,62 @@ def test_wait_blocks_until_terminal():
         assert time.monotonic() - start >= 0.15
     finally:
         timer.cancel()
+
+
+@pytest.mark.parametrize("timeout,expected_ms", [(0.05, 50), (0.0001, 1)])
+def test_native_wait_receives_all_statuses_and_a_positive_deadline(
+    timeout, expected_ms
+):
+    statuses = [_pending(), _ok()]
+    engine = SimpleNamespace(
+        wait_all=Mock(return_value=moriio_engine.StatusCode.SUCCESS)
+    )
+    wrapper = MoRIIOWrapper(moriio_engine=engine, transfer_timeout=timeout)
+    wrapper.waiting_for_transfer_complete(statuses)
+    engine.wait_all.assert_called_once_with(statuses, timeout_ms=expected_ms)
+
+
+@pytest.mark.parametrize(
+    "result,statuses,message",
+    [
+        ("ERR_RDMA_OP", [_pending(), _bad()], "SQ full"),
+        ("IN_PROGRESS", [_pending(), _ok()], "timed out"),
+        ("ERR_INVALID_ARGS", [_pending()], "ERR_INVALID_ARGS"),
+    ],
+)
+def test_native_wait_reports_failure_or_timeout(result, statuses, message):
+    engine = SimpleNamespace(
+        wait_all=Mock(return_value=getattr(moriio_engine.StatusCode, result))
+    )
+    wrapper = MoRIIOWrapper(moriio_engine=engine, transfer_timeout=0.05)
+    with pytest.raises(TransferError, match=message):
+        wrapper.waiting_for_transfer_complete(statuses)
+
+
+def test_wait_falls_back_without_native_status_enum(monkeypatch):
+    monkeypatch.setattr(moriio_engine, "StatusCode", None)
+    engine = SimpleNamespace(wait_all=Mock())
+    wrapper = MoRIIOWrapper(moriio_engine=engine, transfer_timeout=0.05)
+    with pytest.raises(TransferError, match="SQ full"):
+        wrapper.waiting_for_transfer_complete([_bad(), _ok()])
+    engine.wait_all.assert_not_called()
+
+
+def test_nonblocking_poll_does_not_call_native_wait():
+    engine = SimpleNamespace(wait_all=Mock())
+    wrapper = MoRIIOWrapper(moriio_engine=engine, transfer_timeout=0.05)
+    assert wrapper.poll_transfer_batch([_pending()]) is TransferBatchState.PENDING
+    wrapper.waiting_for_transfer_complete([])
+    engine.wait_all.assert_not_called()
+
+
+def test_native_wait_drains_only_the_unscoped_status_snapshot():
+    statuses = [_pending(), _ok()]
+    engine = SimpleNamespace(
+        wait_all=Mock(return_value=moriio_engine.StatusCode.SUCCESS)
+    )
+    wrapper = MoRIIOWrapper(moriio_engine=engine, transfer_timeout=0.05)
+    wrapper.transfer_status.extend(statuses)
+    wrapper.waiting_for_transfer_complete()
+    engine.wait_all.assert_called_once_with(statuses, timeout_ms=50)
+    assert wrapper.transfer_status == []
