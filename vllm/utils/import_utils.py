@@ -12,7 +12,7 @@ import os
 import sys
 from functools import cache
 from types import ModuleType
-from typing import Any, Never
+from typing import Any, Never, cast
 
 import regex as re
 
@@ -111,8 +111,17 @@ def import_from_path(module_name: str, file_path: str | os.PathLike) -> ModuleTy
     assert spec.loader is not None
 
     module = importlib.util.module_from_spec(spec)
+    missing = object()
+    previous_module = sys.modules.get(module_name, missing)
     sys.modules[module_name] = module
-    spec.loader.exec_module(module)
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        if previous_module is missing:
+            sys.modules.pop(module_name, None)
+        else:
+            sys.modules[module_name] = cast(ModuleType, previous_module)
+        raise
     return module
 
 
