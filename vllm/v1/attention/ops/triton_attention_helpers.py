@@ -166,6 +166,7 @@ def compute_tile_loop_bounds(
     MAX_MM_RANGES: tl.constexpr = 0,
     mm_prefix_range_ptr=None,
     seq_idx=0,
+    segm_tile_start_or_0=0,
 ):
     """Compute the tile-loop bounds ``(loop_lo, loop_hi)`` and the
     derived ``max_seq_prefix_len`` used for per-tile masking.
@@ -182,8 +183,8 @@ def compute_tile_loop_bounds(
        window-clamped multimodal prefix mask, the bounds include the union of
        the base mask and each image range intersecting the query block.
     3. 3D scoping: when ``IS_3D`` is True, further narrows to the
-       segment's slice via ``(segm_idx * tiles_per_segment,
-       (segm_idx + 1) * tiles_per_segment)``.
+       segment's slice via ``segm_tile_start + (segm_idx * tiles_per_segment,
+       (segm_idx + 1) * tiles_per_segment)`` (see ``compute_3d_segments``).
     """
     # compute the length of the longest sequence prefix spanned by any
     # query token in the current q_block (q_block_local_idx)
@@ -273,13 +274,53 @@ def compute_tile_loop_bounds(
         tile_end = tl.minimum((last_allowed_key // TILE_SIZE) + 1, num_tiles)
 
     if IS_3D:
-        loop_lo = max(segm_idx_or_0 * tiles_per_segment_or_0, tile_start)
-        loop_hi = min((segm_idx_or_0 + 1) * tiles_per_segment_or_0, tile_end)
+        segm_lo = segm_tile_start_or_0 + segm_idx_or_0 * tiles_per_segment_or_0
+        loop_lo = max(segm_lo, tile_start)
+        loop_hi = min(segm_lo + tiles_per_segment_or_0, tile_end)
     else:
         loop_lo = tile_start
         loop_hi = tile_end
 
     return loop_lo, loop_hi, max_seq_prefix_len
+
+
+@triton.jit
+def compute_3d_segments(
+    seq_len,
+    context_len,
+    TILE_SIZE: tl.constexpr,
+    NUM_SEGMENTS_PER_SEQ: tl.constexpr,
+    SLIDING_WINDOW: tl.constexpr,
+    WINDOW_SEGMENTS: tl.constexpr,
+):
+    """Split a sequence's KV tiles into the 3D path's segments.
+
+    Returns ``(segm_tile_start, tiles_per_segment)``: segment ``i`` covers
+    tiles ``segm_tile_start + [i, i + 1) * tiles_per_segment``, and holds any
+    iff its first key ``(segm_tile_start + i * tiles_per_segment) * TILE_SIZE``
+    is below ``seq_len``.
+
+    Without ``WINDOW_SEGMENTS`` the segments split all of the sequence's
+    tiles, computed as before this helper existed, so the kernel compiles to
+    the same code. With it they split only the tiles from
+    ``segm_tile_start``, the tile holding the first key in the sliding window
+    of the sequence's first query (at ``context_len``). Far past the window,
+    splitting the whole sequence leaves the window's tiles in one segment and
+    the others with no work. Callers set ``WINDOW_SEGMENTS`` only when
+    ``compute_tile_loop_bounds`` prunes to that window: its first allowed key
+    is then never before ``context_len - SLIDING_WINDOW + 1``.
+
+    The attention kernel (which segments run, and their tiles) and
+    ``reduce_segments`` (which segments to combine) must agree, so both
+    call this.
+    """
+    segm_tile_start = 0
+    if WINDOW_SEGMENTS:
+        segm_tile_start = tl.maximum(context_len - SLIDING_WINDOW + 1, 0) // TILE_SIZE
+    tiles_per_segment = cdiv_fn(
+        seq_len - segm_tile_start * TILE_SIZE, NUM_SEGMENTS_PER_SEQ * TILE_SIZE
+    )
+    return segm_tile_start, tiles_per_segment
 
 
 @triton.jit
