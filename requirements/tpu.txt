@@ -11,4 +11,4 @@ ray[default]
 ray[data]
 setuptools-rust>=1.9.0
 nixl==0.3.0
-tpu-inference==0.30.0
+tpu-inference==0.31.0
