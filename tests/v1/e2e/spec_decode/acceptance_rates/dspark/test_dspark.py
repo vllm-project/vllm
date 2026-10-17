@@ -5,11 +5,10 @@ from dataclasses import dataclass
 
 import pytest
 
-from tests.evals.gsm8k.gsm8k_eval import evaluate_gsm8k_offline
 from vllm.config import CompilationConfig
 from vllm.platforms import current_platform
 
-from ...utils import compute_acceptance_len, compute_acceptance_rate
+from ...utils import assert_spec_decode_metrics, evaluate_llm_for_gsm8k
 
 REGRESSION_TOLERANCE = 0.95
 
@@ -124,33 +123,24 @@ def test_dspark_correctness_and_acceptance_rate(
         runner_config["language_model_only"] = True
 
     with vllm_runner(config.model, **runner_config) as spec_runner:
-        spec_llm = spec_runner.llm
-        results = evaluate_gsm8k_offline(
-            spec_llm,
+        evaluate_llm_for_gsm8k(
+            spec_runner.llm,
+            config.reference_accuracy * REGRESSION_TOLERANCE,
             num_questions=config.num_questions,
             max_tokens=config.max_tokens,
             temperature=1.0,
             use_chat_completions=config.use_chat_completions,
             chat_template_kwargs=config.chat_template_kwargs,
         )
-        accuracy = results["accuracy"]
-        metrics = spec_llm.get_metrics()
-        acceptance_rate = compute_acceptance_rate(metrics)
-        acceptance_len = compute_acceptance_len(metrics)
-        context = f"DSpark target={config.model}, draft={config.draft_model}"
-        metrics_summary = (
-            f"gsm8k_accuracy={accuracy:.3f}, "
-            f"acceptance_rate={acceptance_rate:.3f}, "
-            f"acceptance_len={acceptance_len:.3f}"
-        )
-        print(f"{context}: {metrics_summary}")
+        metrics = spec_runner.llm.get_metrics()
 
-        assert accuracy >= config.reference_accuracy * REGRESSION_TOLERANCE, (
-            f"{context}: {metrics_summary}"
-        )
-        assert (
-            acceptance_rate >= config.reference_acceptance_rate * REGRESSION_TOLERANCE
-        ), f"{context}: {metrics_summary}"
-        assert (
-            acceptance_len >= config.reference_acceptance_len * REGRESSION_TOLERANCE
-        ), f"{context}: {metrics_summary}"
+    assert_spec_decode_metrics(
+        metrics=metrics,
+        expected_acceptance_rate=(
+            config.reference_acceptance_rate * REGRESSION_TOLERANCE
+        ),
+        expected_acceptance_len=(
+            config.reference_acceptance_len * REGRESSION_TOLERANCE
+        ),
+        context=f"DSpark target={config.model}, draft={config.draft_model}",
+    )
