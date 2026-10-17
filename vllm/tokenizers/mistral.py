@@ -372,16 +372,17 @@ class MistralTokenizer(TokenizerLike):
         max_length: int | None = None,
         add_special_tokens: bool = True,
     ) -> list[int]:
-        # NOTE: transformers guards truncation with `if max_length and ...`, so
-        # `max_length=0` returns the full sequence instead of an empty one. vLLM
-        # treats `truncate_prompt_tokens=0` as an empty prompt, so keep slicing
-        # here until that is fixed upstream.
-        encoded = self.tokenizer.encode(text, bos=add_special_tokens, eos=False)
+        # Transformers does not truncate when max_length=0.
+        should_truncate = truncation is not False and max_length is not None
+        if should_truncate and max_length == 0:
+            return []
 
-        if truncation is not False and max_length is not None:
-            return encoded[:max_length]
-        else:
-            return encoded
+        return self.transformers_tokenizer.encode(
+            text,
+            truncation=should_truncate,
+            max_length=max_length,
+            add_special_tokens=add_special_tokens,
+        )
 
     def apply_chat_template(
         self,
