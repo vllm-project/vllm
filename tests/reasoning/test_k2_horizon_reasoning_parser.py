@@ -130,6 +130,25 @@ def test_non_streaming_explicit_and_implicit_boundaries():
     )
 
 
+def test_unfinished_reasoning_matches_streaming():
+    """Output cut off before any boundary is reasoning in both modes."""
+    output = "<ifm|think>still planning"
+    streaming_parser = K2HorizonReasoningParser(_k2_tokenizer())
+    delta = streaming_parser.extract_reasoning_streaming(
+        previous_text="",
+        current_text=output,
+        delta_text=output,
+        previous_token_ids=[],
+        current_token_ids=[],
+        delta_token_ids=[],
+    )
+    assert delta is not None
+    assert (delta.reasoning, delta.content) == ("still planning", None)
+
+    parser = K2HorizonReasoningParser(_k2_tokenizer())
+    assert parser.extract_reasoning(output, _request()) == ("still planning", None)
+
+
 @pytest.mark.parametrize("reasoning", ["plan", " ", "\n", " \n"])
 def test_character_split_reasoning_stream(reasoning: str):
     parser = K2HorizonReasoningParser(_k2_tokenizer())
