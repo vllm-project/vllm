@@ -5,6 +5,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from tests.tool_parsers.common_tests import (
+    ToolParserTestConfig,
+    ToolParserTests,
+    pythonic_style_test_config,
+)
 from tests.tool_parsers.utils import (
     run_tool_extraction,
     run_tool_extraction_streaming,
@@ -267,3 +272,29 @@ def test_regex_timeout_handling(streaming: bool, default_tokenizer: TokenizerLik
         assert content == fake_problematic_input
         assert len(tool_calls) == 0
         mock_regex.match.assert_called_once()
+
+
+class TestLlama4PythonicToolParser(ToolParserTests):
+    """Llama 4 wraps the pythonic call list in python_start/end markers."""
+
+    @pytest.fixture
+    def test_config(self) -> ToolParserTestConfig:
+        return pythonic_style_test_config(
+            "llama4_pythonic",
+            lambda calls: (f"<|python_start|>[{', '.join(calls)}]<|python_end|>"),
+            xfail_streaming={
+                "test_surrounding_text": (
+                    "pythonic format has no content/call delimiter"
+                ),
+                # Streaming emits the partial marker "<|python_start|" as
+                # content before recognising it; non-streaming returns None.
+                "test_streaming_reconstruction": (
+                    "streaming leaks a partial <|python_start| marker as content"
+                ),
+            },
+            xfail_nonstreaming={
+                "test_surrounding_text": (
+                    "pythonic format has no content/call delimiter"
+                ),
+            },
+        )
