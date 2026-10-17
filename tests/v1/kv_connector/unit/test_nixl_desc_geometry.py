@@ -574,8 +574,11 @@ def test_registration_ignores_a_sub_block_padding_tail(page_covers_view):
     assert _descriptor_geometry(padded) == _descriptor_geometry(unpadded)
 
 
-def _make_mla_hybrid_worker(local_block_size, kernel_block_size, num_logical_blocks):
-    """Build a real pull worker with a hybrid MLA + 2xKDA HMA layout."""
+def _make_mla_hybrid_worker(
+    local_block_size, kernel_block_size, num_logical_blocks, worker_cls=None
+):
+    """Build a real worker (pull by default) with a hybrid MLA + 2xKDA HMA
+    layout."""
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
         base_worker as bw,
     )
@@ -656,7 +659,9 @@ def _make_mla_hybrid_worker(local_block_size, kernel_block_size, num_logical_blo
         ),
         set_current_vllm_config(vllm_config),
     ):
-        worker = NixlConnectorWorker(vllm_config, "local-engine", kv_cache_config)
+        worker = (worker_cls or NixlConnectorWorker)(
+            vllm_config, "local-engine", kv_cache_config
+        )
         worker.use_mla = True
 
         # Attention caches are kernel-block granular on dim 0, as the
@@ -1097,22 +1102,29 @@ def test_hetero_non_divisible_block_sizes(local_block, remote_block, num_tokens)
 
 
 @pytest.mark.cpu_test
-def test_hetero_block_split_is_bounded():
-    """A pair whose gcd would split each block into very many transfers fails
-    the handshake rather than multiplying the descriptor lists."""
+@pytest.mark.parametrize(
+    "worker_cls,local_block,remote_block",
+    [(NixlPullConnectorWorker, 257, 256), (NixlPushConnectorWorker, 36, 20)],
+)
+def test_hetero_block_split_is_declined(worker_cls, local_block, remote_block):
+    """Pull pairs whose gcd would split each block into very many transfers,
+    and every push pair, fail the handshake instead of being split."""
     worker = _make_mla_hybrid_worker(
-        local_block_size=257, kernel_block_size=257, num_logical_blocks=8
+        local_block_size=local_block,
+        kernel_block_size=local_block,
+        num_logical_blocks=8,
+        worker_cls=worker_cls,
     )
     meta_r = _make_remote_meta(
         worker,
-        remote_block_size=256,
-        remote_kernel_block_size=256,
+        remote_block_size=remote_block,
+        remote_kernel_block_size=remote_block,
         remote_num_logical=8,
         remote_ssm_sizes=(24, 32),
     )
     with pytest.raises(AssertionError, match="not divisible"):
         _register_remote_agents(worker, meta_r, tp_size=2)
-    assert meta_r.block_size == 256
+    assert meta_r.block_size == remote_block
 
 
 @pytest.mark.cpu_test

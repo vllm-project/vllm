@@ -2407,7 +2407,8 @@ class NixlBaseConnectorWorker:
                 nixl_agent_meta.region_mem_types = nixl_agent_meta.region_mem_types[
                     start:end
                 ]
-        if self._has_mamba and self.use_mla:
+        # The push WRITE path is not validated with split remote blocks.
+        if self._has_mamba and self.use_mla and self._TRANSFER_MODE == "pull":
             self._split_remote_blocks(nixl_agent_meta)
 
         if (
