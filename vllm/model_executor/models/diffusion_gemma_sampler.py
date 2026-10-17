@@ -16,7 +16,7 @@ import torch
 from vllm.triton_utils import tl, triton
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["seed"])
 def _row_stats_kernel(
     logits_ptr,
     logits_stride,

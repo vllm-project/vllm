@@ -226,6 +226,10 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
     if process_local_only:
         return
 
+    model_state = getattr(worker.model_runner, "model_state", None)
+    if enable_jit_warmup and model_state is not None:
+        model_state.warmup_compiled()
+
     if current_platform.is_rocm():
         from vllm.model_executor.warmup.rocm_segmented_attn_autotune_warmup import (
             rocm_segmented_attn_autotune_warmup,

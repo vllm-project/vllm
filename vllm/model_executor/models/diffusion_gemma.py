@@ -23,6 +23,7 @@ from typing import Any
 import numpy as np
 import torch
 import torch._dynamo
+import torch.fx.experimental._config
 from torch import nn
 from torch.nn import functional as F
 from transformers import AutoModel, DiffusionGemmaConfig
@@ -329,11 +330,11 @@ class DiffusionGemmaForConditionalGeneration(
             logits = torch.nn.functional.linear(
                 hidden_states, self.lm_head.weight[allowed]
             ).float()
-            if self.final_logit_softcapping is not None:
-                logits = _softcap_logits(logits, self.final_logit_softcapping)
-            return logits
-        logits = self.logits_processor(self.lm_head, hidden_states)
+        else:
+            logits = self.logits_processor(self.lm_head, hidden_states)
         if logits is not None and self.final_logit_softcapping is not None:
+            torch._dynamo.decorators.mark_unbacked(logits, 0)
+            torch._dynamo.decorators.mark_unbacked(logits, 1)
             logits = _softcap_logits(logits, self.final_logit_softcapping)
         return logits
 
@@ -435,10 +436,13 @@ def _denoise_temperature(
     return t_min + (t_max - t_min) * (remaining / max_denoising_steps)
 
 
-# Tiles specialize the graph on batch size 1, on a tile as wide as the canvas,
-# on compute_sc and on sizes that coincide with the state buffers. That set
-# is small but passes Dynamo's default of 8, after which every step would run
-# eager: about twice as slow for a self-conditioned step.
+# DiffusionSampler.warmup() compiles every variant serving needs. For each of
+# the canvas width and a width of one: with self-conditioning, over the full
+# table, an allowed set, and an allowed set of one; without it, one graph (the
+# table is unused). That is 8, Dynamo's default limit, so the raised limit keeps
+# a stray variant compiled rather than eager. Duck sizing is off: a width equal
+# to the allowed-set size is a coincidence.
+@torch.fx.experimental._config.patch(use_duck_shape=False)
 @torch._dynamo.config.patch(recompile_limit=64)
 @torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
 def _compiled_sample_step(
@@ -472,7 +476,6 @@ def _compiled_sample_step(
     # Output tensors (modified in-place)
     sampled: torch.Tensor,  # [num_reqs, CL]
     num_sampled: torch.Tensor,  # [num_reqs]
-    draft_tokens: torch.Tensor,  # [max_num_reqs, >=CL]
     # Scalar config
     confidence_threshold: float,
     vocab_size: int,
@@ -495,6 +498,12 @@ def _compiled_sample_step(
     pass over the logits in ``sample_row_stats``."""
     num_decode = decode_slots.shape[0]
     device = decode_slots.device
+    torch._check(num_decode >= 1)
+    for t in (new_tokens, argmax_tokens, token_entropy, decode_idx, valid_canvas_len):
+        torch._check(t.shape[0] == num_decode)
+    num_reqs = all_slots.shape[0]
+    torch._check(sampled.shape[0] == num_reqs)
+    torch._check(num_sampled.shape[0] == num_reqs)
 
     # ---- Phase 3: Confidence ----
     # A canvas truncated near max_model_len is zero-padded up to CL by the
@@ -627,8 +636,28 @@ def _compiled_sample_step(
     )
     is_encoder_phase[decode_slots] &= ~read_only[decode_slots]
 
-    # ---- Phase 7: Copy canvas → draft_tokens for all slots ----
-    draft_tokens[all_slots, :CL] = canvas[all_slots]
+
+def _mark_dim0_unbacked(*tensors: torch.Tensor | None) -> None:
+    """Let one compiled graph serve every size of each tensor's first dim,
+    including 1."""
+    for t in tensors:
+        if t is not None:
+            torch._dynamo.decorators.mark_unbacked(t, 0)
+
+
+def _canvas_buffer(
+    *shape: int, canvas_dim: int, dtype: torch.dtype, device: torch.device
+) -> torch.Tensor:
+    """Zeros whose canvas dim is backed by one extra, unused column.
+
+    _compiled_sample_step receives [:, :W] views of these. Without the column
+    a view at the full width is contiguous and a narrower one is not, and
+    Dynamo compiles a graph for each."""
+    padded = list(shape)
+    padded[canvas_dim] += 1
+    return torch.zeros(padded, dtype=dtype, device=device).narrow(
+        canvas_dim, 0, shape[canvas_dim]
+    )
 
 
 class DiffusionGemmaRequestStates:
@@ -658,8 +687,8 @@ class DiffusionGemmaRequestStates:
             max_num_reqs, dtype=torch.bool, device=device
         )
         # Canvas tokens [max_num_reqs, canvas_length]
-        self.canvas = torch.zeros(
-            max_num_reqs, canvas_length, dtype=torch.int64, device=device
+        self.canvas = _canvas_buffer(
+            max_num_reqs, canvas_length, canvas_dim=1, dtype=torch.int64, device=device
         )
         # Step counter (counts up from 0 to max_denoising_steps)
         self.step = torch.zeros(
@@ -668,10 +697,11 @@ class DiffusionGemmaRequestStates:
             device=device,
         )
         # Accepted canvas history for stability check
-        self.accepted_canvas_history = torch.zeros(
+        self.accepted_canvas_history = _canvas_buffer(
             max_num_reqs,
             stability_threshold,
             canvas_length,
+            canvas_dim=2,
             dtype=torch.int64,
             device=device,
         )
@@ -683,8 +713,8 @@ class DiffusionGemmaRequestStates:
         # the next denoise step). We keep this separate from `canvas` because
         # canvas gets renoised in-place during denoise, while argmax_canvas is
         # the deterministic best-guess we ultimately emit.
-        self.argmax_canvas = torch.zeros(
-            max_num_reqs, canvas_length, dtype=torch.int64, device=device
+        self.argmax_canvas = _canvas_buffer(
+            max_num_reqs, canvas_length, canvas_dim=1, dtype=torch.int64, device=device
         )
 
         # Per-slot prompt length (set by add_request).
@@ -703,15 +733,15 @@ class DiffusionGemmaRequestStates:
         )
         # Seed canvases replace the random canvas after prefill. The host-side
         # sets gate the seed and read-only work so plain generation skips it.
-        self.seed_canvas = torch.zeros(
-            max_num_reqs, canvas_length, dtype=torch.int64, device=device
+        self.seed_canvas = _canvas_buffer(
+            max_num_reqs, canvas_length, canvas_dim=1, dtype=torch.int64, device=device
         )
         self.has_seed = torch.zeros(max_num_reqs, dtype=torch.bool, device=device)
         self.seeded_slots: set[int] = set()
         # Pinned positions keep their seed value on every denoise step, so a
         # multi-step read denoises the canvas the request seeded.
-        self.pin_mask = torch.zeros(
-            max_num_reqs, canvas_length, dtype=torch.bool, device=device
+        self.pin_mask = _canvas_buffer(
+            max_num_reqs, canvas_length, canvas_dim=1, dtype=torch.bool, device=device
         )
         # Read-only slots emit on their converging step and skip the commit
         # forward.
@@ -734,8 +764,13 @@ class DiffusionGemmaRequestStates:
         # of the full [.., vocab] distribution shrinks this buffer by
         # vocab/hidden (~170x) and moves the matmul to denoise time; the result
         # is identical (SC consumes probs @ embed_weight anyway).
-        self.self_conditioning_embeds = torch.zeros(
-            max_num_reqs, canvas_length, hidden_size, dtype=torch.float32, device=device
+        self.self_conditioning_embeds = _canvas_buffer(
+            max_num_reqs,
+            canvas_length,
+            hidden_size,
+            canvas_dim=1,
+            dtype=torch.float32,
+            device=device,
         )
 
     def init_canvas(self, slot_indices: torch.Tensor) -> None:
@@ -883,6 +918,7 @@ class DiffusionGemmaModelState(ModelState):
         )
         # compute_logits reads the step's shared allowed set from here.
         self.model.diffusion_states = self.diffusion_states
+        self._diffusion_sampler: DiffusionSampler | None = None
         self._req_id_to_index: dict[str, int] = {}
 
         # Persistent buffer for per-request causal flags, updated in-place
@@ -925,7 +961,7 @@ class DiffusionGemmaModelState(ModelState):
         embed_tokens = self.model.model.embed_tokens
         shard = embed_tokens.shard_indices
         tp_group = get_tp_group()
-        return DiffusionSampler(
+        diffusion_sampler = DiffusionSampler(
             sampler=sampler,
             diffusion_config=diffusion_config,
             vocab_size=self.model_config.get_vocab_size(),
@@ -940,7 +976,32 @@ class DiffusionGemmaModelState(ModelState):
             sc_vocab_end=shard.org_vocab_end_index,
             tp_size=tp_group.world_size,
             tp_group_name=tp_group.unique_name,
-        ), None
+        )
+        self._diffusion_sampler = diffusion_sampler
+        return diffusion_sampler, None
+
+    @torch.inference_mode()
+    def warmup_compiled(self) -> None:
+        """Compile the sampler graphs and the constrained-step softcap. The
+        profile run compiles the full-vocabulary softcap; a constrained step
+        (tensor parallel 1 only) softcaps fp32 logits."""
+        if self.model.final_logit_softcapping is not None and (
+            get_tp_group().world_size == 1
+        ):
+            hidden = torch.zeros(
+                2,
+                self.model_config.hf_text_config.hidden_size,
+                dtype=self.model_config.dtype,
+                device=self.diffusion_states.device,
+            )
+            saved = self.diffusion_states.step_allowed
+            self.diffusion_states.step_allowed = torch.arange(8, device=hidden.device)
+            try:
+                self.model.compute_logits(hidden)
+            finally:
+                self.diffusion_states.step_allowed = saved
+        if self._diffusion_sampler is not None:
+            self._diffusion_sampler.warmup()
 
     def apply_staged_writes(self) -> None:
         pass
@@ -1180,9 +1241,10 @@ class DiffusionSampler:
 
         max_num_reqs = diffusion_states.max_num_reqs
         device = diffusion_states.device
-        self._sampled = torch.zeros(
+        self._sampled = _canvas_buffer(
             max_num_reqs,
             self.canvas_length,
+            canvas_dim=1,
             dtype=torch.int32,
             device=device,
         )
@@ -1338,11 +1400,10 @@ class DiffusionSampler:
         self._query_lens.copy_to_uva()
         self._num_logits.copy_to_uva()
 
-        num_rejected = _compute_num_rejected(
-            self._num_logits.gpu[:num_reqs],
-            num_sampled,
-            input_batch.query_start_loc[: num_reqs + 1],
-        )
+        num_logits = self._num_logits.gpu[:num_reqs]
+        query_start_loc = input_batch.query_start_loc[: num_reqs + 1]
+        _mark_dim0_unbacked(num_logits, num_sampled, query_start_loc)
+        num_rejected = _compute_num_rejected(num_logits, num_sampled, query_start_loc)
 
         return SamplerOutput(
             sampled_token_ids=sampled,
@@ -1351,6 +1412,169 @@ class DiffusionSampler:
             num_sampled=num_sampled,
             num_rejected=num_rejected,
         )
+
+    def _denoise_tile(
+        self,
+        states: DiffusionGemmaRequestStates,
+        tile_logits: torch.Tensor,
+        tile_slots: torch.Tensor,
+        tile_idx: torch.Tensor,
+        tile_valid: torch.Tensor,
+        all_slots: torch.Tensor,
+        sampled: torch.Tensor,
+        num_sampled: torch.Tensor,
+        *,
+        W: int,
+        allowed: torch.Tensor | None,
+        embed_weight: torch.Tensor,
+        sc_vocab_start: int,
+        sc_vocab_end: int,
+        compute_sc: bool,
+    ) -> torch.Tensor:
+        """Denoise one tile of requests at width ``W`` from its
+        ``[n * W, vocab or K]`` logits, and return the tile's temperatures."""
+        n = tile_slots.shape[0]
+        sampled = sampled[:, :W]
+        _mark_dim0_unbacked(
+            tile_slots, tile_idx, tile_valid, all_slots, sampled, num_sampled
+        )
+        temp = _denoise_temperature(
+            states.step,
+            tile_slots,
+            float(states.max_denoising_steps),
+            self.t_min,
+            self.t_max,
+        )
+        probs_dtype = self.embed_weight.dtype if compute_sc else None
+        if tile_logits.is_cuda:
+            seed = int(torch.randint(0, 2**31 - 1, (1,)).item())
+            stats = sample_row_stats(tile_logits, temp, W, seed, probs_dtype)
+        else:
+            stats = sample_row_stats_reference(tile_logits, temp, W, probs_dtype)
+        argmax_rows, sample_rows, entropy_rows, probs_rows = stats
+        if allowed is not None:
+            # K-space picks back to token ids. The softmax stays K wide
+            # for the K-row self-conditioning matmul.
+            argmax_rows = allowed[argmax_rows]
+            sample_rows = allowed[sample_rows]
+        new_tokens = sample_rows.view(n, W)
+        argmax_tokens = argmax_rows.view(n, W)
+        token_entropy = entropy_rows.view(n, W)
+        probs = probs_rows.view(n, W, -1) if probs_rows is not None else None
+        _mark_dim0_unbacked(new_tokens, argmax_tokens, token_entropy, probs)
+        _compiled_sample_step(
+            new_tokens=new_tokens,
+            argmax_tokens=argmax_tokens,
+            token_entropy=token_entropy,
+            probs=probs,
+            decode_slots=tile_slots,
+            decode_idx=tile_idx,
+            all_slots=all_slots,
+            valid_canvas_len=tile_valid,
+            # State, viewed at this tile's width
+            canvas=states.canvas[:, :W],
+            argmax_canvas=states.argmax_canvas[:, :W],
+            step_tensor=states.step,
+            is_encoder_phase=states.is_encoder_phase,
+            confident_tensor=states.confident,
+            sc_embeds=states.self_conditioning_embeds[:, :W],
+            embed_weight=embed_weight,
+            normalizer=self.normalizer,
+            history=states.accepted_canvas_history[:, :, :W],
+            history_len_tensor=states.accepted_canvas_history_len,
+            max_steps_tensor=states.max_steps,
+            pin_mask=states.pin_mask[:, :W],
+            seed_canvas=states.seed_canvas[:, :W],
+            read_only=states.read_only,
+            # Output
+            sampled=sampled,
+            num_sampled=num_sampled,
+            # Config
+            confidence_threshold=self.confidence_threshold,
+            vocab_size=self.vocab_size,
+            CL=W,
+            ST=states.stability_threshold,
+            entropy_bound=self.entropy_bound,
+            sc_vocab_start=sc_vocab_start,
+            sc_vocab_end=sc_vocab_end,
+            tp_size=self.tp_size,
+            tp_group_name=self.tp_group_name,
+            compute_sc=compute_sc,
+        )
+        return temp
+
+    def warmup(self) -> None:
+        """Compile every sampler graph on scratch state before serving.
+
+        Dynamo guards on each input's dispatch keys, so inputs are made the way
+        __call__ gets them: buffers that persist across steps outside inference
+        mode, per-step tensors inside it."""
+        st = self.diffusion_states
+        device = st.device
+        n = min(st.max_num_reqs, 2)
+        with torch.inference_mode(False):
+            scratch = DiffusionGemmaRequestStates(
+                max_num_reqs=n,
+                canvas_length=st.canvas_length,
+                vocab_size=st.vocab_size,
+                max_denoising_steps=st.max_denoising_steps,
+                device=device,
+                hidden_size=st.self_conditioning_embeds.shape[-1],
+                stability_threshold=st.stability_threshold,
+            )
+            sampled = _canvas_buffer(
+                n, self.canvas_length, canvas_dim=1, dtype=torch.int32, device=device
+            )
+            num_sampled = torch.zeros(n, dtype=torch.int32, device=device)
+            slot_buf = torch.arange(n, dtype=torch.int64, device=device)
+            query_start_loc = torch.zeros(n + 1, dtype=torch.int32, device=device)
+        rng = torch.random.fork_rng(devices=[device], device_type=device.type)
+        with rng, torch.inference_mode():
+            idx_mapping = torch.arange(n, dtype=torch.int64, device=device)
+            sel = torch.arange(n, dtype=torch.int64, device=device)
+            allowed_sets: list[torch.Tensor | None] = [None]
+            if self.tp_size == 1:
+                allowed_sets += [
+                    torch.arange(k, device=device) for k in (min(8, self.vocab_size), 1)
+                ]
+            for W in sorted({self.canvas_length, 1}):
+                valid = torch.full((n,), W, dtype=torch.int64, device=device)
+                for allowed in allowed_sets:
+                    embed_weight = self.embed_weight
+                    sc_vocab_start, sc_vocab_end = (
+                        self.sc_vocab_start,
+                        self.sc_vocab_end,
+                    )
+                    cols = self.vocab_size
+                    if allowed is not None:
+                        embed_weight = self.embed_weight[allowed]
+                        sc_vocab_start, sc_vocab_end = 0, allowed.numel()
+                        cols = allowed.numel()
+                    logits = torch.zeros(n * W, cols, device=device)
+                    for compute_sc in (True, False):
+                        self._denoise_tile(
+                            scratch,
+                            logits,
+                            slot_buf[sel],
+                            slot_buf[sel],
+                            valid,
+                            idx_mapping[:n],
+                            sampled[:n],
+                            num_sampled[:n],
+                            W=W,
+                            allowed=allowed,
+                            embed_weight=embed_weight,
+                            sc_vocab_start=sc_vocab_start,
+                            sc_vocab_end=sc_vocab_end,
+                            compute_sc=compute_sc,
+                        )
+            num_logits = self._num_logits.copy_to_uva()[:n]
+            tile_sampled = num_sampled[:n]
+            query_start_loc = query_start_loc[: n + 1]
+            _mark_dim0_unbacked(num_logits, tile_sampled, query_start_loc)
+            _compute_num_rejected(num_logits, tile_sampled, query_start_loc)
+        del scratch, sampled
+        torch.accelerator.empty_cache()
 
     # ------------------------------------------------------------------
     # Main entry point
@@ -1440,7 +1664,6 @@ class DiffusionSampler:
         # so the self-conditioning matmul only needs those K embedding rows.
         allowed = states.step_allowed
         embed_weight = self.embed_weight
-        vocab_size = self.vocab_size
         sc_vocab_start, sc_vocab_end = self.sc_vocab_start, self.sc_vocab_end
         if allowed is not None:
             assert logits.shape[-1] == allowed.numel()
@@ -1471,9 +1694,8 @@ class DiffusionSampler:
         # Sample per tile. Decode requests are grouped by canvas width and each
         # tile runs the compiled step at that width over [:, :W] views of the
         # state, so a narrow read pays for its own rows rather than the served
-        # canvas. Widths ascend, so the last tile's canvas-to-draft copy (over
-        # all slots) is the widest. The fp32 pipeline keeps several live
-        # [tile * W, vocab] copies, so a tile is also bounded by free memory.
+        # canvas. The fp32 pipeline keeps several live [tile * W, vocab] copies,
+        # so a tile is also bounded by free memory.
         widths_np = states.canvas_width_np[decode_slots_np]
         order = np.argsort(widths_np, kind="stable")
         free = torch.accelerator.get_memory_info()[0] if num_decode > 0 else 0
@@ -1518,75 +1740,28 @@ class DiffusionSampler:
                     )
                 )
 
-                temp = _denoise_temperature(
-                    states.step,
+                temp = self._denoise_tile(
+                    states,
+                    tile_logits,
                     tile_slots,
-                    float(states.max_denoising_steps),
-                    self.t_min,
-                    self.t_max,
+                    decode_idx[sel],
+                    tile_valid,
+                    all_slots,
+                    sampled,
+                    num_sampled,
+                    W=W,
+                    allowed=allowed,
+                    embed_weight=embed_weight,
+                    sc_vocab_start=sc_vocab_start,
+                    sc_vocab_end=sc_vocab_end,
+                    compute_sc=compute_sc,
                 )
-                probs_dtype = self.embed_weight.dtype if compute_sc else None
-                if tile_logits.is_cuda:
-                    seed = int(torch.randint(0, 2**31 - 1, (1,)).item())
-                    stats = sample_row_stats(tile_logits, temp, W, seed, probs_dtype)
-                else:
-                    stats = sample_row_stats_reference(
-                        tile_logits, temp, W, probs_dtype
-                    )
-                argmax_rows, sample_rows, entropy_rows, probs_rows = stats
-                if allowed is not None:
-                    # K-space picks back to token ids. The softmax stays K wide
-                    # for the K-row self-conditioning matmul.
-                    argmax_rows = allowed[argmax_rows]
-                    sample_rows = allowed[sample_rows]
-                probs = probs_rows.view(n, W, -1) if probs_rows is not None else None
                 # Only the logprob stash reads the scaled logits.
                 scaled = None
                 if want_logprobs:
                     scaled = tile_logits.float().view(n, W, -1) / temp[
                         :, None, None
                     ].clamp(min=1e-10)
-
-                _compiled_sample_step(
-                    sample_rows.view(n, W),
-                    argmax_rows.view(n, W),
-                    entropy_rows.view(n, W),
-                    probs,
-                    tile_slots,
-                    decode_idx[sel],
-                    all_slots,
-                    tile_valid,
-                    # State, viewed at this tile's width
-                    states.canvas[:, :W],
-                    states.argmax_canvas[:, :W],
-                    states.step,
-                    states.is_encoder_phase,
-                    states.confident,
-                    states.self_conditioning_embeds[:, :W],
-                    embed_weight,
-                    self.normalizer,
-                    states.accepted_canvas_history[:, :, :W],
-                    states.accepted_canvas_history_len,
-                    states.max_steps,
-                    states.pin_mask[:, :W],
-                    states.seed_canvas[:, :W],
-                    states.read_only,
-                    # Output
-                    sampled[:, :W],
-                    num_sampled,
-                    self.req_states.draft_tokens,
-                    # Config
-                    confidence_threshold=self.confidence_threshold,
-                    vocab_size=vocab_size,
-                    CL=W,
-                    ST=states.stability_threshold,
-                    entropy_bound=self.entropy_bound,
-                    sc_vocab_start=sc_vocab_start,
-                    sc_vocab_end=sc_vocab_end,
-                    tp_size=self.tp_size,
-                    tp_group_name=self.tp_group_name,
-                    compute_sc=compute_sc,
-                )
 
                 # Stash newly converged logprobs, including reads that emit now.
                 if want_logprobs:
@@ -1661,6 +1836,10 @@ class DiffusionSampler:
                                 logits_mode=self.logits_mode,
                             )
             run_start = run_end
+
+        if num_decode > 0:
+            W = int(widths_np.max())
+            self.req_states.draft_tokens[all_slots, :W] = states.canvas[all_slots, :W]
 
         # Only emitting requests consume their stashed logprobs.
         logprobs_tensors = None
