@@ -428,21 +428,43 @@ class BatchDCPPrefillWrapper:
         return out
 
 
+def _separate_kv_head_slots_enabled() -> bool:
+    vllm_config = get_current_vllm_config_or_none()
+    return bool(
+        vllm_config is not None
+        and vllm_config.attention_config.flashinfer_separate_kv_head_slots
+    )
+
+
 class FlashInferBackend(AttentionBackend):
     @classmethod
     def customize_spec(cls, spec: "AttentionSpec") -> "AttentionSpec":
         """NVFP4 stores K and V as separate per-head slots of packed fp4 data
-        plus fp8 block scales."""
-        if spec.state_content_bytes is not None or not spec.kv_quant_mode.is_nvfp4:
+        plus fp8 block scales. With `flashinfer_separate_kv_head_slots`, an
+        unquantized cache uses the same K/V head-slot split."""
+        if spec.state_content_bytes is not None:
             return spec
-        hs_k = nvfp4_kv_cache_full_dim(spec.head_size)
-        hs_v = nvfp4_kv_cache_full_dim(spec.head_size_v)
-        assert hs_k == hs_v, "nvfp4 with asymmetric K/V head sizes not yet supported"
-        return replace(
-            spec,
-            num_head_slots=2 * spec.num_kv_heads,
-            state_content_bytes=hs_k * get_dtype_size(spec.dtype),
-        )
+        if spec.kv_quant_mode.is_nvfp4:
+            hs_k = nvfp4_kv_cache_full_dim(spec.head_size)
+            hs_v = nvfp4_kv_cache_full_dim(spec.head_size_v)
+            assert hs_k == hs_v, (
+                "nvfp4 with asymmetric K/V head sizes not yet supported"
+            )
+            return replace(
+                spec,
+                num_head_slots=2 * spec.num_kv_heads,
+                state_content_bytes=hs_k * get_dtype_size(spec.dtype),
+            )
+        if spec.kv_quant_mode == KVQuantMode.NONE and _separate_kv_head_slots_enabled():
+            assert spec.head_size == spec.head_size_v, (
+                "Separate K/V head slots require symmetric K/V head sizes."
+            )
+            return replace(
+                spec,
+                num_head_slots=2 * spec.num_kv_heads,
+                state_content_bytes=spec.head_size * get_dtype_size(spec.dtype),
+            )
+        return spec
 
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
@@ -602,6 +624,10 @@ class FlashInferBackend(AttentionBackend):
 
     @classmethod
     def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...] | None:
+        if _separate_kv_head_slots_enabled():
+            # Separate K/V head slots keep each half of the page contiguous only
+            # when [H, N, C] is contiguous inside a block.
+            return (KVCacheLayout.LBHNC, KVCacheLayout.BLHNC)
         capability = current_platform.get_device_capability()
         if capability is not None and capability.major == 10:
             # The trtllm-gen kernels consume head-major block interiors; the L/B
@@ -2150,8 +2176,9 @@ class FlashInferImpl(AttentionImpl):
             )
         kv_cache_permute = fixed
 
-        # Split K/V — zero-copy views. NVFP4 stores K/V as separate head
-        # groups; other dtypes pack K/V in the content dim.
+        # Split K/V — zero-copy views. NVFP4 (and unquantized caches with
+        # separate K/V head slots) store K/V as separate head groups; other
+        # dtypes pack K/V in the content dim.
         hs = self.head_size
         nvfp4_kv_data = None
         nvfp4_kv_block_scales = None
@@ -2163,6 +2190,12 @@ class FlashInferImpl(AttentionImpl):
             )
             nvfp4_kv_data, nvfp4_kv_block_scales, _ = _nvfp4_kv_views(
                 kv_cache, self.num_kv_heads
+            )
+        elif self._has_separate_kv_head_slots(kv_cache):
+            k_cache, v_cache = kv_cache.split(self.num_kv_heads, dim=1)
+            kv_cache_tuple = (
+                canonicalize_singleton_dim_strides(k_cache.permute(*stride_order)),
+                canonicalize_singleton_dim_strides(v_cache.permute(*stride_order)),
             )
         else:
             kv_cache_tuple = kv_cache_permute.split(hs, dim=-1)
@@ -2620,6 +2653,20 @@ class FlashInferImpl(AttentionImpl):
                     output[:num_decode_tokens].copy_(out)
         return output_padded
 
+    def _has_separate_kv_head_slots(self, kv_cache: torch.Tensor) -> bool:
+        """Whether an unquantized cache stores K and V as separate head slots.
+
+        The logical cache is ``[B, H_slots, N, C]``: ``(2H, N, D)`` with
+        separate K/V head slots, ``(H, N, 2D)`` when K and V are packed in the
+        content dim. Reading the shape keeps the impl in step with however the
+        cache was allocated (see ``flashinfer_separate_kv_head_slots``).
+        """
+        return (
+            not self.is_kvcache_nvfp4
+            and kv_cache.dim() == 4
+            and kv_cache.shape[-1] == self.head_size
+        )
+
     def do_kv_cache_update(
         self,
         layer: torch.nn.Module,
@@ -2649,7 +2696,7 @@ class FlashInferImpl(AttentionImpl):
                     kv_layout=kv_layout,
                 )
                 return
-            if self.is_kvcache_nvfp4:
+            if self.is_kvcache_nvfp4 or self._has_separate_kv_head_slots(kv_cache):
                 # (B, 2*H, N, full_dim) -> ((B, N, H, full_dim),
                 #                            (B, N, H, full_dim));
                 # K heads first, then V heads.
