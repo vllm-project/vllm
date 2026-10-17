@@ -71,7 +71,10 @@ from vllm.entrypoints.openai.responses.utils import (
     reuse_streamed_item_ids,
 )
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
-from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
+from vllm.entrypoints.serve.utils.api_utils import (
+    get_max_tokens,
+    run_with_inference_trace,
+)
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.entrypoints.serve.utils.tool_calls_utils import (
     maybe_filter_parallel_tool_calls,
@@ -95,6 +98,7 @@ from vllm.renderers.online_renderer import (
 )
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.tokenizers import TokenizerLike
+from vllm.tracing import get_request_trace
 from vllm.utils import random_uuid
 from vllm.utils.collection_utils import as_list
 
@@ -554,29 +558,35 @@ class OpenAIServingResponses(GenerateBaseServing):
             # Run the request in the background.
             if request.stream:
                 task = asyncio.create_task(
-                    self._run_background_request_stream(
-                        request,
-                        sampling_params,
-                        result_generator,
-                        context,
-                        model_name,
-                        tokenizer,
-                        request_metadata,
-                        created_time,
+                    run_with_inference_trace(
+                        self._run_background_request_stream(
+                            request,
+                            sampling_params,
+                            result_generator,
+                            context,
+                            model_name,
+                            tokenizer,
+                            request_metadata,
+                            created_time,
+                        ),
+                        enabled=get_request_trace() is not None,
                     ),
                     name=f"create_{request.request_id}",
                 )
             else:
                 task = asyncio.create_task(
-                    self._run_background_request(
-                        request,
-                        sampling_params,
-                        result_generator,
-                        context,
-                        model_name,
-                        tokenizer,
-                        request_metadata,
-                        created_time,
+                    run_with_inference_trace(
+                        self._run_background_request(
+                            request,
+                            sampling_params,
+                            result_generator,
+                            context,
+                            model_name,
+                            tokenizer,
+                            request_metadata,
+                            created_time,
+                        ),
+                        enabled=get_request_trace() is not None,
                     ),
                     name=f"create_{response.id}",
                 )
@@ -1100,6 +1110,8 @@ class OpenAIServingResponses(GenerateBaseServing):
 
         if isinstance(response, ErrorResponse):
             # If the request has failed, update the status to "failed".
+            if owner := get_request_trace():
+                owner.failed = True
             response_id = request.request_id
             async with self.response_store_lock:
                 stored_response = self.response_store.get(response_id)

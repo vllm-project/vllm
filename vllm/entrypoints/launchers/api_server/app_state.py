@@ -29,12 +29,12 @@ async def init_app_state(
 ) -> None:
     vllm_config = engine_client.vllm_config
 
-    if args.tool_call_parser is not None:
-        from vllm.parser.metrics import init_parser_metrics
+    from vllm.parser.metrics import init_parser_metrics
 
-        init_parser_metrics(
-            model_name=cast(str, vllm_config.model_config.served_model_name)
-        )
+    # Response counters also cover named/required calls without an auto-tool parser.
+    init_parser_metrics(
+        model_name=cast(str, vllm_config.model_config.served_model_name)
+    )
 
     if supported_tasks is None:
         warnings.warn(

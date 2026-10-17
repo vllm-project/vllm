@@ -8,12 +8,15 @@ import os
 import traceback
 from collections.abc import Mapping
 from contextlib import contextmanager
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from vllm.logger import init_logger
 from vllm.tracing.utils import TRACE_HEADERS, LoadingSpanAttributes
 
 logger = init_logger(__name__)
+
+if TYPE_CHECKING:
+    from opentelemetry.trace import Span
 
 try:
     from opentelemetry import trace
@@ -33,6 +36,7 @@ try:
     from opentelemetry.sdk.trace.export import BatchSpanProcessor
     from opentelemetry.trace import (
         SpanKind,  # noqa: F401
+        StatusCode,  # noqa: F401
         Tracer,
         set_tracer_provider,
     )
@@ -51,6 +55,7 @@ except ImportError:
     inject = None  # type: ignore
     Resource = None  # type: ignore
     SpanKind = Any  # type: ignore
+    StatusCode = Any  # type: ignore
 
 
 def is_otel_available() -> bool:
@@ -186,8 +191,21 @@ def manual_instrument_otel(
     kind: Any = None,  # SpanKind, but typed as Any for when OTEL unavailable
 ):
     """Manually create and end a span with explicit timestamps."""
+    span = start_span_otel(span_name, start_time, attributes, context, kind)
+    if span is not None:
+        span.end(end_time=end_time)
+
+
+def start_span_otel(
+    span_name: str,
+    start_time: int,
+    attributes: dict[str, Any] | None = None,
+    context: Context | None = None,
+    kind: Any = None,
+) -> "Span | None":
+    """Start a span whose caller is responsible for ending it."""
     if not _IS_OTEL_AVAILABLE:
-        return
+        return None
 
     tracer = trace.get_tracer(__name__)
     # Use provided context, or fall back to smart context detection
@@ -204,10 +222,7 @@ def manual_instrument_otel(
     span = tracer.start_span(**span_kwargs)
     if attributes:
         span.set_attributes(attributes)
-    if end_time is not None:
-        span.end(end_time=end_time)
-    else:
-        span.end()
+    return span
 
 
 def _get_smart_context() -> Context | None:

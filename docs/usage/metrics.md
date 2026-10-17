@@ -37,6 +37,48 @@ The following metrics are exposed:
 
 --8<-- "gen:metrics-general"
 
+## Tool-calling Metrics
+
+All three counters include `model_name`:
+
+| Counter | Additional labels | Counts |
+| --- | --- | --- |
+| `vllm:tool_call_parser_invocations_total` | `mode`, `outcome`, `request_type` | Parser invocations, not responses: once per choice in non-streaming mode or per delta in streaming mode. Coverage depends on the parser using the recording hook. |
+| `vllm:tool_call_responses_total` | `status`, `tool_choice`, `tool_count`, `api_surface` | One outcome per completed tool-bearing Chat Completions or Messages request, or per surfaced parsing failure. |
+| `vllm:tool_calls_emitted_total` | `api_surface` | Individual tool calls returned after filtering and API conversion. Repeated streaming argument fragments are not new calls. |
+
+`tool_choice` is normalized to `unset`, `auto`, `none`, `required`, `named`,
+or `other`; named choices never include the function name. The response
+counter's `tool_count` buckets are `0`, `1`, `2-5`, `6-10`, and `10+`
+(more than ten tools). These request dimensions are not weighted by streaming
+chunk count or the number of response choices.
+The response counters' `api_surface` is `chat_completions` or `messages`.
+Cohere v2 also uses the Chat handler, so its traffic is counted as
+`chat_completions` before Cohere response conversion.
+
+The existing parser counter keeps its labels and classifications unchanged:
+`mode` is `streaming` or `non_streaming`, `outcome` is `tool_call` or
+`no_tool_call`, and `request_type` is `chat_completions`, `responses`, or
+`other`. Internally converted Messages requests remain `chat_completions`,
+and exceptions remain `no_tool_call`. Native API attribution and surfaced
+parse failures are distinguished by the new response counter instead.
+
+Response `status` is `success` when calls are emitted, `no_tool_calls` for
+a completed response without calls, or `parse_failure` for a surfaced exception
+from the combined reasoning/tool parser, including reasoning-parser errors on
+tool-bearing requests. Failure takes precedence over earlier emitted calls.
+A failed full response emits zero calls. Non-streaming Messages
+argument-conversion errors also count as parse failures. Streaming forwards
+argument fragments without validating their JSON, so `success` does not
+guarantee valid or complete argument JSON. Interrupted streams retain calls
+already yielded but do not record a success/no-tool outcome. Generic engine
+errors and cancellation are not inferred to be parser failures.
+
+Requests without tools bypass the response counters. Errors swallowed inside
+a parser cannot be distinguished from ordinary no-tool output by these shared
+paths. The new tool dimensions contain no tool names, schemas, arguments,
+bodies, or content-derived hashes; existing application logging is separate.
+
 ## Speculative Decoding Metrics
 
 --8<-- "gen:metrics-spec-decode"

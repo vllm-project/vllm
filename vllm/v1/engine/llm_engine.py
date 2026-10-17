@@ -118,7 +118,7 @@ class LLMEngine:
             asyncio_mode=False,
             vllm_config=vllm_config,
             executor_class=executor_class,
-            log_stats=self.log_stats,
+            log_stats=self.log_stats or tracing_endpoint is not None,
             renderer=renderer,
         )
         self._profile_session_active = False
@@ -296,23 +296,31 @@ class LLMEngine:
             # Make a new RequestState and queue.
             self.output_processor.add_request(request, prompt_text, None, 0)
             # Add the request to EngineCore.
-            self.engine_core.add_request(request)
+            try:
+                self.engine_core.add_request(request)
+            except BaseException:
+                self.output_processor.abort_requests((req_id,), internal=True)
+                raise
             return req_id
 
         # Fan out child requests (for n>1).
         parent_req = ParentRequest(request)
-        for idx in range(n):
-            request_id, child_params = parent_req.get_child_info(idx)
-            child_request = request if idx == n - 1 else copy(request)
-            child_request.request_id = request_id
-            child_request.sampling_params = child_params
+        try:
+            for idx in range(n):
+                request_id, child_params = parent_req.get_child_info(idx)
+                child_request = request if idx == n - 1 else copy(request)
+                child_request.request_id = request_id
+                child_request.sampling_params = child_params
 
-            # Make a new RequestState and queue.
-            self.output_processor.add_request(
-                child_request, prompt_text, parent_req, idx
-            )
-            # Add the request to EngineCore.
-            self.engine_core.add_request(child_request)
+                # Make a new RequestState and queue.
+                self.output_processor.add_request(
+                    child_request, prompt_text, parent_req, idx
+                )
+                # Add the request to EngineCore.
+                self.engine_core.add_request(child_request)
+        except BaseException:
+            self.output_processor.abort_requests((req_id,), internal=True)
+            raise
 
         return req_id
 
@@ -324,12 +332,19 @@ class LLMEngine:
 
         # 1) Get EngineCoreOutput from the EngineCore.
         with record_function_or_nullcontext("llm_engine step: get_output"):
-            outputs = self.engine_core.get_output()
+            try:
+                outputs = self.engine_core.get_output()
+            except Exception:
+                self.output_processor.shutdown()
+                raise
 
         # 2) Process EngineCoreOutputs.
         with record_function_or_nullcontext("llm_engine step: process_outputs"):
             iteration_stats = (
-                IterationStats() if self.log_stats and outputs.outputs else None
+                IterationStats()
+                if (self.log_stats or self.output_processor.tracing_enabled)
+                and outputs.outputs
+                else None
             )
             processed_outputs = self.output_processor.process_outputs(
                 outputs.outputs,
@@ -519,6 +534,8 @@ class LLMEngine:
                 module.cleanup()
 
     def __del__(self):
+        if output_processor := getattr(self, "output_processor", None):
+            output_processor.shutdown()
         dp_group = getattr(self, "dp_group", None)
         if dp_group is not None and not self.external_launcher_dp:
             stateless_destroy_torch_distributed_process_group(dp_group)

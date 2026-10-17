@@ -24,10 +24,13 @@ from vllm.outputs import (
 from vllm.sampling_params import RequestOutputKind
 from vllm.tokenizers import TokenizerLike
 from vllm.tracing import (
+    RequestTrace,
     SpanAttributes,
     SpanKind,
+    StatusCode,
     extract_trace_context,
-    instrument_manual,
+    get_request_trace,
+    start_span,
 )
 from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
@@ -44,6 +47,8 @@ from vllm.v1.metrics.stats import (
 from vllm.v1.outputs import SamplingMaskLists
 
 if TYPE_CHECKING:
+    from opentelemetry.trace import Span
+
     from vllm.v1.engine.admission_control import SharedAdmissionStats
 
 # shared empty CPU tensor used as a placeholder pooling output
@@ -234,6 +239,8 @@ class RequestState:
         self.spec_decode_metrics: RequestSpecDecodeMetrics | None = None
 
         self.stats = RequestStateStats(arrival_time=arrival_time) if log_stats else None
+        self.trace_span: Span | None = None
+        self.trace_owner: RequestTrace | None = None
 
         # Routed experts accumulation (prompt + sample chunks)
         self.routed_experts_chunks: list[np.ndarray] = []
@@ -250,6 +257,14 @@ class RequestState:
         self.input_chunk_queue: deque[StreamingUpdate] | None = (
             deque() if stream_input else None
         )
+
+    def end_tracing(self, *, error: bool = False) -> None:
+        if self.trace_span is not None:
+            if error and self.trace_span.is_recording():
+                self.trace_span.set_status(StatusCode.ERROR)
+            if self.trace_owner is None:
+                self.trace_span.end()
+            self.trace_span = None
 
     def apply_streaming_update(self, update: StreamingUpdate) -> None:
         # Apply the update to the request state.
@@ -593,8 +608,13 @@ class OutputProcessor:
     def propagate_error(self, e: Exception):
         """Propagate error to all generate() tasks."""
         for _, state in self.request_states.items():
+            state.end_tracing(error=True)
             assert state.queue is not None
             state.queue.put(e)
+
+    def shutdown(self) -> None:
+        for state in self.request_states.values():
+            state.end_tracing(error=True)
 
     def abort_requests(self, request_ids: Iterable[str], internal: bool) -> list[str]:
         """Abort a list of requests.
@@ -632,6 +652,7 @@ class OutputProcessor:
         for request_id in internal_req_ids:
             req_state = self.request_states.pop(request_id, None)
             if req_state is not None:
+                req_state.end_tracing(error=True)
                 self.lora_states.request_finished(request_id, req_state.lora_name)
                 request_ids_to_abort.append(request_id)
                 # Produce final abort output.
@@ -681,9 +702,23 @@ class OutputProcessor:
             parent_req=parent_req,
             request_index=request_index,
             queue=queue,
-            log_stats=self.log_stats,
+            log_stats=self.log_stats or self.tracing_enabled,
             stream_interval=self.stream_interval,
         )
+        if self.tracing_enabled:
+            req_state.trace_span = start_span(
+                "llm_request",
+                start_time=int(request.arrival_time * 1e9),
+                attributes={
+                    SpanAttributes.GEN_AI_REQUEST_ID: req_state.external_req_id
+                },
+                context=extract_trace_context(request.trace_headers),
+                kind=SpanKind.SERVER,
+            )
+            if req_state.trace_span is not None:
+                req_state.trace_owner = get_request_trace()
+                if req_state.trace_owner is not None:
+                    req_state.trace_owner.spans.append(req_state.trace_span)
         self.request_states[request_id] = req_state
         if parent_req:
             self.parent_requests[parent_req.request_id] = parent_req
@@ -857,6 +892,8 @@ class OutputProcessor:
 
             # Free completed requests.
             if finish_reason is not None:
+                if self.tracing_enabled:
+                    self.do_tracing(engine_core_output, req_state, iteration_stats)
                 if streaming_chunk_boundary:
                     if req_state.input_chunk_queue:
                         update = req_state.input_chunk_queue.popleft()
@@ -875,8 +912,6 @@ class OutputProcessor:
                     self._update_stats_from_finished(
                         req_state, finish_reason, iteration_stats
                     )
-                    if self.tracing_enabled:
-                        self.do_tracing(engine_core_output, req_state, iteration_stats)
 
         return OutputProcessorOutput(
             request_outputs=request_outputs,
@@ -905,6 +940,7 @@ class OutputProcessor:
             req_state.routed_experts_chunks[-1] = output.routed_experts[:-num_dropped]
 
     def _finish_request(self, req_state: RequestState) -> None:
+        req_state.end_tracing()
         req_id = req_state.request_id
         self.request_states.pop(req_id)
 
@@ -932,12 +968,13 @@ class OutputProcessor:
         req_state: RequestState,
         iteration_stats: IterationStats | None,
     ) -> None:
+        span = req_state.trace_span
+        if span is None or not span.is_recording():
+            return
         assert req_state.stats is not None
         assert iteration_stats is not None
 
         metrics = req_state.stats
-        arrival_time_ns = int(metrics.arrival_time * 1e9)
-        trace_context = extract_trace_context(engine_core_output.trace_headers)
         prompt_length = length_from_prompt_token_ids_or_embeds(
             req_state.prompt_token_ids, req_state.prompt_embeds
         )
@@ -980,13 +1017,9 @@ class OutputProcessor:
         if req_state.n:
             attributes[SpanAttributes.GEN_AI_REQUEST_N] = req_state.n
 
-        instrument_manual(
-            span_name="llm_request",
-            start_time=arrival_time_ns,
-            attributes=attributes,
-            context=trace_context,
-            kind=SpanKind.SERVER,
-        )
+        span.set_attributes(attributes)
+        if engine_core_output.finish_reason in (FinishReason.ABORT, FinishReason.ERROR):
+            span.set_status(StatusCode.ERROR)
 
     def _update_stats_from_output(
         self,

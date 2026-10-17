@@ -192,7 +192,7 @@ class AsyncLLM(EngineClient):
         self.engine_core = EngineCoreClient.make_async_mp_client(
             vllm_config=vllm_config,
             executor_class=executor_class,
-            log_stats=self.log_stats,
+            log_stats=self.log_stats or tracing_endpoint is not None,
             client_addresses=client_addresses,
             client_count=client_count,
             client_index=client_index,
@@ -304,6 +304,9 @@ class AsyncLLM(EngineClient):
     def shutdown(self, timeout: float | None = None) -> None:
         """Shutdown, cleaning up the background proc and IPC."""
         shutdown_prometheus()
+
+        if output_processor := getattr(self, "output_processor", None):
+            output_processor.shutdown()
 
         if renderer := getattr(self, "renderer", None):
             renderer.shutdown()
@@ -580,7 +583,11 @@ class AsyncLLM(EngineClient):
         self.output_processor.add_request(request, prompt, parent_req, index, queue)
 
         # Add the EngineCoreRequest to EngineCore (separate process).
-        await self.engine_core.add_request_async(request)
+        try:
+            await self.engine_core.add_request_async(request)
+        except BaseException:
+            self.output_processor.abort_requests((request.request_id,), internal=True)
+            raise
 
         if self.log_requests:
             logger.info("Added request %s.", request.request_id)
@@ -850,7 +857,7 @@ class AsyncLLM(EngineClient):
         # object, or else it won't be garbage collected and cleaned up properly.
         engine_core = self.engine_core
         output_processor = self.output_processor
-        log_stats = self.log_stats
+        log_stats = self.log_stats or output_processor.tracing_enabled
         # We use a mutable list for logger_manager so that it can be updated
         # during elastic EP scaling (see scale_elastic_ep) without creating
         # a circular reference via self.
