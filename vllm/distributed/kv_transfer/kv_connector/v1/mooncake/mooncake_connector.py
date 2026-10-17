@@ -2955,6 +2955,11 @@ class MooncakeConnectorWorker:
                 return (
                     "Mooncake KV-head re-sharding is not supported for NVFP4 KV cache."
                 )
+            if spec.num_head_slots is not None:
+                return (
+                    "Mooncake KV-head re-sharding is not supported for KV caches "
+                    f"with separate K/V head slots (layer {region.layer_name})."
+                )
         return None
 
     def _get_transfer_regions(
