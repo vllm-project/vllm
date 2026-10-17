@@ -3737,36 +3737,55 @@ async fn invalid_terminal_finish_reason_is_returned_as_openai_error_sse() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
-async fn request_rejected_by_paused_engine_returns_503() {
-    let (app, engine_task) =
-        test_app_with_stream_output_specs(vec![(vec![], Some(EngineCoreFinishReason::Paused))])
-            .await;
-    let response = app
-        .clone()
-        .call(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/completions")
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    json!({
-                        "model": "Qwen/Qwen1.5-0.5B-Chat",
-                        "prompt": "hello",
-                        "stream": false
-                    })
-                    .to_string(),
-                ))
-                .expect("build request"),
-        )
-        .await
-        .expect("call app");
+async fn request_rejected_by_paused_engine_returns_engine_paused() {
+    // A paused rejection is a retryable `engine_paused` error on every route:
+    // a 503 when it arrives before the response starts, an SSE error after.
+    let model = "Qwen/Qwen1.5-0.5B-Chat";
+    let messages = json!([{"role": "user", "content": "hello"}]);
+    let raw = |stream: bool| {
+        json!({"model": model, "token_ids": [11, 22], "stream": stream,
+               "sampling_params": {"max_tokens": 2}})
+    };
+    let unavailable = StatusCode::SERVICE_UNAVAILABLE;
+    let cases = [
+        (
+            "/v1/completions",
+            json!({"model": model, "prompt": "hello"}),
+            unavailable,
+        ),
+        (
+            "/v1/chat/completions",
+            json!({"model": model, "messages": messages}),
+            unavailable,
+        ),
+        ("/inference/v1/generate", raw(false), unavailable),
+        ("/inference/v1/generate", raw(true), StatusCode::OK),
+    ];
+    for (uri, request, status) in cases {
+        let (mut app, engine_task) =
+            test_app_with_stream_output_specs(vec![(vec![], Some(EngineCoreFinishReason::Paused))])
+                .await;
+        let response = app
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .body(Body::from(request.to_string()))
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
 
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-
-    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
-    engine_task.await.expect("mock engine task");
-    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
-    assert_eq!(json["error"]["code"], "engine_paused");
+        assert_eq!(response.status(), status, "{uri} {request}");
+        let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+        engine_task.await.expect("mock engine task");
+        let text = String::from_utf8(body.to_vec()).expect("utf8 body");
+        assert!(
+            text.contains("\"code\":\"engine_paused\""),
+            "{uri} {request}: {text}"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

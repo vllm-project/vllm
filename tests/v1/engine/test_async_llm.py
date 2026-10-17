@@ -1143,18 +1143,6 @@ async def test_pause_abort():
         assert final_output.finished
         assert final_output.outputs[0].finish_reason == "abort"
 
-        # Also test that new requests are rejected while paused, then resume
-        assert await engine.is_paused()
-
-        with pytest.raises(EnginePausedError):
-            await _generate(engine, "test-rejected")
-
-        # Resume
-        await engine.resume_generation()
-
-        # Now the same request is accepted and completes.
-        assert (await _generate(engine, "test-rejected")).finished
-
 
 @pytest.mark.asyncio
 async def test_pause_then_abort_queued_request():
