@@ -37,6 +37,20 @@ def mock_get_cdna_version():
         yield
 
 
+@pytest.fixture(autouse=True)
+def refreshed_aiter_env():
+    """Sync rocm_aiter_ops class-level env flags around each test.
+
+    The flags are captured at import time; without this, monkeypatched
+    VLLM_ROCM_USE_AITER* values never reach backend selection.
+    """
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    rocm_aiter_ops.refresh_env_variables()
+    yield
+    rocm_aiter_ops.refresh_env_variables()
+
+
 @pytest.fixture
 def cleared_attention_selector_cache():
     from vllm.v1.attention.selector import _cached_get_attn_backend
@@ -404,11 +418,12 @@ def test_aiter_unified_attention_capture_preserves_query_start_locations():
             "ROCM_AITER_UNIFIED_ATTN",
             AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN.get_path(),
         ),
-        # Test Case 6: VLLM_ROCM_USE_AITER=1
+        # Test Case 6: VLLM_ROCM_USE_AITER=1 selects ROCM_AITER_FA over
+        # ROCM_ATTN (the opt-in outranks it, see #46596)
         (
             {"VLLM_ROCM_USE_AITER": "1"},
             None,
-            AttentionBackendEnum.ROCM_ATTN.get_path(),
+            AttentionBackendEnum.ROCM_AITER_FA.get_path(),
         ),
         # Test Case 7: VLLM_ROCM_USE_AITER=1 + explicit TRITON_ATTN
         (
@@ -451,6 +466,9 @@ def test_standard_attention_backend_selection(
     import vllm.envs as envs
 
     importlib.reload(envs)
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    rocm_aiter_ops.refresh_env_variables()
 
     # Convert string backend to enum if provided
     backend_enum = None
@@ -481,6 +499,71 @@ def test_standard_attention_backend_selection(
     )
 
     assert backend_path == expected_backend_path
+
+
+def test_aiter_mha_opt_in_falls_back_to_rocm_attn_when_fa_rejected(
+    mock_vllm_config, mock_get_cdna_version, monkeypatch
+):
+    """AITER FA rejected configs fall back to ROCM_ATTN under the opt-in.
+
+    head_size 96 is outside AITER FA's supported 64/128/256, so the demoted
+    ROCM_ATTN must still be selected (#46596).
+    """
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+
+    import importlib
+
+    import vllm.envs as envs
+
+    importlib.reload(envs)
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    rocm_aiter_ops.refresh_env_variables()
+
+    from vllm.platforms.rocm import RocmPlatform
+
+    backend_path = RocmPlatform.get_attn_backend_cls(
+        selected_backend=None,
+        attn_selector_config=AttentionSelectorConfig(
+            head_size=96,
+            dtype=torch.float16,
+            kv_cache_dtype="auto",
+            block_size=16,
+        ),
+    )
+
+    assert backend_path == AttentionBackendEnum.ROCM_ATTN.get_path()
+
+
+def test_aiter_mha_opt_in_with_kv_connector_keeps_aiter_fa_first(
+    mock_vllm_config, mock_get_cdna_version, monkeypatch
+):
+    """KV connectors exclude ROCM_ATTN; the opt-in must still pick AITER FA."""
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+
+    import importlib
+
+    import vllm.envs as envs
+
+    importlib.reload(envs)
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    rocm_aiter_ops.refresh_env_variables()
+
+    from vllm.platforms.rocm import RocmPlatform
+
+    backend_path = RocmPlatform.get_attn_backend_cls(
+        selected_backend=None,
+        attn_selector_config=AttentionSelectorConfig(
+            head_size=128,
+            dtype=torch.float16,
+            kv_cache_dtype="auto",
+            block_size=16,
+            use_kv_connector=True,
+        ),
+    )
+
+    assert backend_path == AttentionBackendEnum.ROCM_AITER_FA.get_path()
 
 
 @pytest.mark.parametrize("use_dcp", [False, True])
