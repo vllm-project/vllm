@@ -298,3 +298,28 @@ def test_warmup_failure_does_not_abort_startup(
         watermark_sample_warmup(_worker(WatermarkConfig(key=MASTER_KEY)))
 
     assert "Skipping watermark sampler warmup." in caplog.text
+
+
+@pytest.mark.parametrize("algorithm", ["chi_squared", "ppl_hard", "ppl_soft"])
+def test_binomial_score_watermarks_warm_only_the_chi_squared_bias(
+    monkeypatch: pytest.MonkeyPatch, algorithm: str
+) -> None:
+    """The generic sampler warmup runs these watermarkers on fp32 logits; only
+    chi-squared's bias kernel also reads logits in the model dtype."""
+    gumbel_calls = _capture_calls(monkeypatch)
+    worker = _worker(WatermarkConfig(key=MASTER_KEY, algorithm=algorithm))
+    watermarker = worker.model_runner.sampler.watermarker
+    bias_dtypes: list[torch.dtype] = []
+    if algorithm == "chi_squared":
+        monkeypatch.setattr(
+            watermarker,
+            "add_level_bias",
+            lambda logits, *args: bias_dtypes.append(logits.dtype),
+        )
+
+    watermark_sample_warmup(worker)
+
+    assert gumbel_calls == []
+    assert sorted(bias_dtypes, key=str) == (
+        [torch.bfloat16, torch.float32] if algorithm == "chi_squared" else []
+    )

@@ -1339,6 +1339,13 @@ class VllmConfig:
                     "Watermarking does not support DFlash2 and LiLiCorr "
                     "candidate-head drafters yet."
                 )
+            # Target-only recovery samples with the Gumbel-max key, which these
+            # algorithms do not use.
+            if watermark_config.algorithm in ("chi_squared", "ppl_hard", "ppl_soft"):
+                raise ValueError(
+                    f"The '{watermark_config.algorithm}' watermarking algorithm "
+                    "does not support speculative decoding."
+                )
             if (
                 not watermark_config.allow_target_only_watermarking
                 and not watermark_config.supports_speculative_decoding

@@ -1,5 +1,413 @@
 {
   "candidates": {
+    "chi-squared-philox-key42-cw4": {
+      "configuration": {
+        "detection_key": "42",
+        "fixture": {
+          "dominant_bias": 0,
+          "dominant_token": null,
+          "logit_denominator": 16,
+          "logit_modulus": 131,
+          "num_tokens": 64,
+          "prompt": [],
+          "vocabulary_size": 128
+        },
+        "key": "42",
+        "prf": "philox",
+        "prf_version": "philox4x32-10-v1",
+        "scheme": "chi_squared",
+        "scheme_config": {
+          "context_width": 4,
+          "delta": 1.0,
+          "detection_alpha": 0.1,
+          "detection_deduplicate_contexts": true,
+          "epsilon": 0.0,
+          "generation_alpha": 0.1,
+          "generation_deduplicate_contexts": "single_turn",
+          "generation_deduplicate_contexts_max_history": 8192,
+          "p_value_threshold": 0.01
+        }
+      },
+      "detection": {
+        "is_watermarked": true,
+        "num_scored_tokens": 60,
+        "p_value": 2.6990127772834643e-40,
+        "p_value_ratio": 2.699012777283464e-38,
+        "score": 1179.0
+      },
+      "generation": [
+        46,
+        42,
+        38,
+        34,
+        122,
+        33,
+        43,
+        117,
+        60,
+        17,
+        6,
+        122,
+        26,
+        40,
+        11,
+        7,
+        28,
+        70,
+        27,
+        23,
+        65,
+        54,
+        4,
+        85,
+        127,
+        123,
+        119,
+        76,
+        100,
+        22,
+        103,
+        53,
+        17,
+        91,
+        2,
+        83,
+        47,
+        43,
+        25,
+        120,
+        123,
+        13,
+        115,
+        1,
+        114,
+        4,
+        39,
+        120,
+        59,
+        73,
+        108,
+        26,
+        100,
+        25,
+        67,
+        17,
+        45,
+        94,
+        122,
+        125,
+        121,
+        110,
+        28,
+        17
+      ],
+      "resolved": {
+        "derived_keys": {
+          "key_a": null,
+          "key_b": null
+        },
+        "detector": {
+          "alpha": null,
+          "context_width": 4,
+          "deduplicate_contexts": true,
+          "key_b_prf_key": null,
+          "num_trials": 30,
+          "p_value_threshold": 0.01,
+          "prf_key": "42",
+          "type": "BinomialScoreWatermarkDetector"
+        },
+        "watermark_config": {
+          "algorithm": "chi_squared",
+          "allow_target_only_watermarking": false,
+          "alpha": 0.1,
+          "context_width": 4,
+          "deduplicate_contexts": "single_turn",
+          "deduplicate_contexts_max_history": 8192,
+          "delta": 1.0,
+          "epsilon": 0.0,
+          "prf": "philox"
+        }
+      },
+      "trace": {
+        "dedup_skips": 0,
+        "key_b_effective": null,
+        "key_b_routed": null,
+        "partial_context_skips": 0,
+        "routing_draws": 0
+      }
+    },
+    "chi-squared-philox-key42-cw4-wrong-key": {
+      "configuration": {
+        "detection_key": "43",
+        "fixture": {
+          "dominant_bias": 0,
+          "dominant_token": null,
+          "logit_denominator": 16,
+          "logit_modulus": 131,
+          "num_tokens": 64,
+          "prompt": [],
+          "vocabulary_size": 128
+        },
+        "key": "42",
+        "prf": "philox",
+        "prf_version": "philox4x32-10-v1",
+        "scheme": "chi_squared",
+        "scheme_config": {
+          "context_width": 4,
+          "delta": 1.0,
+          "detection_alpha": 0.1,
+          "detection_deduplicate_contexts": true,
+          "epsilon": 0.0,
+          "generation_alpha": 0.1,
+          "generation_deduplicate_contexts": "single_turn",
+          "generation_deduplicate_contexts_max_history": 8192,
+          "p_value_threshold": 0.01
+        }
+      },
+      "detection": {
+        "is_watermarked": false,
+        "num_scored_tokens": 60,
+        "p_value": 0.1444207955837929,
+        "p_value_ratio": 14.44207955837929,
+        "score": 923.0
+      },
+      "generation": [
+        46,
+        42,
+        38,
+        34,
+        122,
+        33,
+        43,
+        117,
+        60,
+        17,
+        6,
+        122,
+        26,
+        40,
+        11,
+        7,
+        28,
+        70,
+        27,
+        23,
+        65,
+        54,
+        4,
+        85,
+        127,
+        123,
+        119,
+        76,
+        100,
+        22,
+        103,
+        53,
+        17,
+        91,
+        2,
+        83,
+        47,
+        43,
+        25,
+        120,
+        123,
+        13,
+        115,
+        1,
+        114,
+        4,
+        39,
+        120,
+        59,
+        73,
+        108,
+        26,
+        100,
+        25,
+        67,
+        17,
+        45,
+        94,
+        122,
+        125,
+        121,
+        110,
+        28,
+        17
+      ],
+      "resolved": {
+        "derived_keys": {
+          "key_a": null,
+          "key_b": null
+        },
+        "detector": {
+          "alpha": null,
+          "context_width": 4,
+          "deduplicate_contexts": true,
+          "key_b_prf_key": null,
+          "num_trials": 30,
+          "p_value_threshold": 0.01,
+          "prf_key": "43",
+          "type": "BinomialScoreWatermarkDetector"
+        },
+        "watermark_config": {
+          "algorithm": "chi_squared",
+          "allow_target_only_watermarking": false,
+          "alpha": 0.1,
+          "context_width": 4,
+          "deduplicate_contexts": "single_turn",
+          "deduplicate_contexts_max_history": 8192,
+          "delta": 1.0,
+          "epsilon": 0.0,
+          "prf": "philox"
+        }
+      },
+      "trace": {
+        "dedup_skips": 0,
+        "key_b_effective": null,
+        "key_b_routed": null,
+        "partial_context_skips": 0,
+        "routing_draws": 0
+      }
+    },
+    "chi-squared-philox-key7-cw2-delta2": {
+      "configuration": {
+        "detection_key": "7",
+        "fixture": {
+          "dominant_bias": 0,
+          "dominant_token": null,
+          "logit_denominator": 16,
+          "logit_modulus": 131,
+          "num_tokens": 64,
+          "prompt": [],
+          "vocabulary_size": 128
+        },
+        "key": "7",
+        "prf": "philox",
+        "prf_version": "philox4x32-10-v1",
+        "scheme": "chi_squared",
+        "scheme_config": {
+          "context_width": 2,
+          "delta": 2.0,
+          "detection_alpha": 0.1,
+          "detection_deduplicate_contexts": true,
+          "epsilon": 0.0,
+          "generation_alpha": 0.1,
+          "generation_deduplicate_contexts": "single_turn",
+          "generation_deduplicate_contexts_max_history": 8192,
+          "p_value_threshold": 0.01
+        }
+      },
+      "detection": {
+        "is_watermarked": true,
+        "num_scored_tokens": 62,
+        "p_value": 1.2172192447751476e-50,
+        "p_value_ratio": 1.2172192447751476e-48,
+        "score": 1249.0
+      },
+      "generation": [
+        46,
+        42,
+        91,
+        55,
+        30,
+        72,
+        29,
+        60,
+        60,
+        45,
+        6,
+        2,
+        12,
+        47,
+        117,
+        60,
+        81,
+        45,
+        105,
+        51,
+        97,
+        93,
+        11,
+        85,
+        3,
+        38,
+        41,
+        122,
+        93,
+        68,
+        110,
+        88,
+        95,
+        6,
+        16,
+        33,
+        40,
+        89,
+        0,
+        81,
+        6,
+        115,
+        69,
+        5,
+        47,
+        50,
+        99,
+        10,
+        119,
+        34,
+        108,
+        65,
+        61,
+        11,
+        28,
+        102,
+        52,
+        9,
+        76,
+        1,
+        75,
+        92,
+        24,
+        59
+      ],
+      "resolved": {
+        "derived_keys": {
+          "key_a": null,
+          "key_b": null
+        },
+        "detector": {
+          "alpha": null,
+          "context_width": 2,
+          "deduplicate_contexts": true,
+          "key_b_prf_key": null,
+          "num_trials": 30,
+          "p_value_threshold": 0.01,
+          "prf_key": "7",
+          "type": "BinomialScoreWatermarkDetector"
+        },
+        "watermark_config": {
+          "algorithm": "chi_squared",
+          "allow_target_only_watermarking": false,
+          "alpha": 0.1,
+          "context_width": 2,
+          "deduplicate_contexts": "single_turn",
+          "deduplicate_contexts_max_history": 8192,
+          "delta": 2.0,
+          "epsilon": 0.0,
+          "prf": "philox"
+        }
+      },
+      "trace": {
+        "dedup_skips": 0,
+        "key_b_effective": null,
+        "key_b_routed": null,
+        "partial_context_skips": 0,
+        "routing_draws": 0
+      }
+    },
     "dual-key-gumbel-philox-key0-cw1-alpha0": {
       "configuration": {
         "detection_key": "0",
@@ -18,8 +426,10 @@
         "scheme": "dual_key_gumbel",
         "scheme_config": {
           "context_width": 1,
+          "delta": 1.0,
           "detection_alpha": 0.0,
           "detection_deduplicate_contexts": true,
+          "epsilon": 0.0,
           "generation_alpha": 0.0,
           "generation_deduplicate_contexts": "single_turn",
           "generation_deduplicate_contexts_max_history": 8192,
@@ -109,6 +519,7 @@
           "context_width": 1,
           "deduplicate_contexts": true,
           "key_b_prf_key": "9736202488081271922",
+          "num_trials": null,
           "p_value_threshold": 0.01,
           "prf_key": "15691511769010696906",
           "type": "DualKeyGumbelWatermarkDetector"
@@ -120,6 +531,8 @@
           "context_width": 1,
           "deduplicate_contexts": "single_turn",
           "deduplicate_contexts_max_history": 8192,
+          "delta": 1.0,
+          "epsilon": 0.0,
           "prf": "philox"
         }
       },
@@ -149,8 +562,10 @@
         "scheme": "dual_key_gumbel",
         "scheme_config": {
           "context_width": 4,
+          "delta": 1.0,
           "detection_alpha": 0.1,
           "detection_deduplicate_contexts": true,
+          "epsilon": 0.0,
           "generation_alpha": 0.1,
           "generation_deduplicate_contexts": "single_turn",
           "generation_deduplicate_contexts_max_history": 8192,
@@ -240,6 +655,7 @@
           "context_width": 4,
           "deduplicate_contexts": true,
           "key_b_prf_key": "9736202488081271922",
+          "num_trials": null,
           "p_value_threshold": 0.01,
           "prf_key": "15691511769010696906",
           "type": "DualKeyGumbelWatermarkDetector"
@@ -251,6 +667,8 @@
           "context_width": 4,
           "deduplicate_contexts": "single_turn",
           "deduplicate_contexts_max_history": 8192,
+          "delta": 1.0,
+          "epsilon": 0.0,
           "prf": "philox"
         }
       },
@@ -280,8 +698,10 @@
         "scheme": "dual_key_gumbel",
         "scheme_config": {
           "context_width": 5,
+          "delta": 1.0,
           "detection_alpha": 0.5,
           "detection_deduplicate_contexts": true,
+          "epsilon": 0.0,
           "generation_alpha": 0.5,
           "generation_deduplicate_contexts": "single_turn",
           "generation_deduplicate_contexts_max_history": 8192,
@@ -371,6 +791,7 @@
           "context_width": 5,
           "deduplicate_contexts": true,
           "key_b_prf_key": "10834826187781349534",
+          "num_trials": null,
           "p_value_threshold": 0.01,
           "prf_key": "9864452095710749384",
           "type": "DualKeyGumbelWatermarkDetector"
@@ -382,6 +803,8 @@
           "context_width": 5,
           "deduplicate_contexts": "single_turn",
           "deduplicate_contexts_max_history": 8192,
+          "delta": 1.0,
+          "epsilon": 0.0,
           "prf": "philox"
         }
       },
@@ -411,8 +834,10 @@
         "scheme": "dual_key_gumbel",
         "scheme_config": {
           "context_width": 4,
+          "delta": 1.0,
           "detection_alpha": 0.2,
           "detection_deduplicate_contexts": true,
+          "epsilon": 0.0,
           "generation_alpha": 0.1,
           "generation_deduplicate_contexts": "single_turn",
           "generation_deduplicate_contexts_max_history": 8192,
@@ -502,6 +927,7 @@
           "context_width": 4,
           "deduplicate_contexts": true,
           "key_b_prf_key": "15826636237805488045",
+          "num_trials": null,
           "p_value_threshold": 0.01,
           "prf_key": "37150756557148556",
           "type": "DualKeyGumbelWatermarkDetector"
@@ -513,6 +939,8 @@
           "context_width": 4,
           "deduplicate_contexts": "single_turn",
           "deduplicate_contexts_max_history": 8192,
+          "delta": 1.0,
+          "epsilon": 0.0,
           "prf": "philox"
         }
       },
@@ -542,8 +970,10 @@
         "scheme": "dual_key_gumbel",
         "scheme_config": {
           "context_width": 4,
+          "delta": 1.0,
           "detection_alpha": 0.1,
           "detection_deduplicate_contexts": true,
+          "epsilon": 0.0,
           "generation_alpha": 0.1,
           "generation_deduplicate_contexts": "single_turn",
           "generation_deduplicate_contexts_max_history": 8192,
@@ -577,6 +1007,7 @@
           "context_width": 4,
           "deduplicate_contexts": true,
           "key_b_prf_key": "7720047515392181251",
+          "num_trials": null,
           "p_value_threshold": 0.003,
           "prf_key": "3490214442843822077",
           "type": "DualKeyGumbelWatermarkDetector"
@@ -588,6 +1019,8 @@
           "context_width": 4,
           "deduplicate_contexts": "single_turn",
           "deduplicate_contexts_max_history": 8192,
+          "delta": 1.0,
+          "epsilon": 0.0,
           "prf": "philox"
         }
       },
@@ -617,8 +1050,10 @@
         "scheme": "dual_key_gumbel",
         "scheme_config": {
           "context_width": 16,
+          "delta": 1.0,
           "detection_alpha": 1.0,
           "detection_deduplicate_contexts": true,
+          "epsilon": 0.0,
           "generation_alpha": 1.0,
           "generation_deduplicate_contexts": "single_turn",
           "generation_deduplicate_contexts_max_history": 8192,
@@ -708,6 +1143,7 @@
           "context_width": 16,
           "deduplicate_contexts": true,
           "key_b_prf_key": "7399018451426338514",
+          "num_trials": null,
           "p_value_threshold": 0.01,
           "prf_key": "11075965703501209888",
           "type": "DualKeyGumbelWatermarkDetector"
@@ -719,6 +1155,8 @@
           "context_width": 16,
           "deduplicate_contexts": "single_turn",
           "deduplicate_contexts_max_history": 8192,
+          "delta": 1.0,
+          "epsilon": 0.0,
           "prf": "philox"
         }
       },
@@ -748,8 +1186,10 @@
         "scheme": "dual_key_gumbel",
         "scheme_config": {
           "context_width": 4,
+          "delta": 1.0,
           "detection_alpha": 0.4,
           "detection_deduplicate_contexts": true,
+          "epsilon": 0.0,
           "generation_alpha": 0.4,
           "generation_deduplicate_contexts": "single_turn",
           "generation_deduplicate_contexts_max_history": 8192,
@@ -839,6 +1279,7 @@
           "context_width": 4,
           "deduplicate_contexts": true,
           "key_b_prf_key": "7399018451426338514",
+          "num_trials": null,
           "p_value_threshold": 0.01,
           "prf_key": "11075965703501209888",
           "type": "DualKeyGumbelWatermarkDetector"
@@ -850,6 +1291,8 @@
           "context_width": 4,
           "deduplicate_contexts": "single_turn",
           "deduplicate_contexts_max_history": 8192,
+          "delta": 1.0,
+          "epsilon": 0.0,
           "prf": "philox"
         }
       },
@@ -879,8 +1322,10 @@
         "scheme": "dual_key_gumbel",
         "scheme_config": {
           "context_width": 1,
+          "delta": 1.0,
           "detection_alpha": 0.1,
           "detection_deduplicate_contexts": true,
+          "epsilon": 0.0,
           "generation_alpha": 0.1,
           "generation_deduplicate_contexts": "single_turn",
           "generation_deduplicate_contexts_max_history": 8192,
@@ -954,6 +1399,7 @@
           "context_width": 1,
           "deduplicate_contexts": true,
           "key_b_prf_key": "15826636237805488045",
+          "num_trials": null,
           "p_value_threshold": 0.01,
           "prf_key": "37150756557148556",
           "type": "DualKeyGumbelWatermarkDetector"
@@ -965,6 +1411,8 @@
           "context_width": 1,
           "deduplicate_contexts": "single_turn",
           "deduplicate_contexts_max_history": 8192,
+          "delta": 1.0,
+          "epsilon": 0.0,
           "prf": "philox"
         }
       },
@@ -994,8 +1442,10 @@
         "scheme": "dual_key_gumbel",
         "scheme_config": {
           "context_width": 4,
+          "delta": 1.0,
           "detection_alpha": 0.1,
           "detection_deduplicate_contexts": true,
+          "epsilon": 0.0,
           "generation_alpha": 0.1,
           "generation_deduplicate_contexts": "all",
           "generation_deduplicate_contexts_max_history": 8192,
@@ -1069,6 +1519,7 @@
           "context_width": 4,
           "deduplicate_contexts": true,
           "key_b_prf_key": "15826636237805488045",
+          "num_trials": null,
           "p_value_threshold": 0.01,
           "prf_key": "37150756557148556",
           "type": "DualKeyGumbelWatermarkDetector"
@@ -1080,6 +1531,8 @@
           "context_width": 4,
           "deduplicate_contexts": "all",
           "deduplicate_contexts_max_history": 8192,
+          "delta": 1.0,
+          "epsilon": 0.0,
           "prf": "philox"
         }
       },
@@ -1109,8 +1562,10 @@
         "scheme": "gumbel",
         "scheme_config": {
           "context_width": 1,
+          "delta": 1.0,
           "detection_alpha": 0.1,
           "detection_deduplicate_contexts": true,
+          "epsilon": 0.0,
           "generation_alpha": 0.1,
           "generation_deduplicate_contexts": "single_turn",
           "generation_deduplicate_contexts_max_history": 8192,
@@ -1200,6 +1655,7 @@
           "context_width": 1,
           "deduplicate_contexts": true,
           "key_b_prf_key": null,
+          "num_trials": null,
           "p_value_threshold": 0.01,
           "prf_key": "0",
           "type": "GumbelWatermarkDetector"
@@ -1211,6 +1667,8 @@
           "context_width": 1,
           "deduplicate_contexts": "single_turn",
           "deduplicate_contexts_max_history": 8192,
+          "delta": 1.0,
+          "epsilon": 0.0,
           "prf": "philox"
         }
       },
@@ -1240,8 +1698,10 @@
         "scheme": "gumbel",
         "scheme_config": {
           "context_width": 5,
+          "delta": 1.0,
           "detection_alpha": 0.1,
           "detection_deduplicate_contexts": false,
+          "epsilon": 0.0,
           "generation_alpha": 0.1,
           "generation_deduplicate_contexts": "none",
           "generation_deduplicate_contexts_max_history": 8192,
@@ -1331,6 +1791,7 @@
           "context_width": 5,
           "deduplicate_contexts": false,
           "key_b_prf_key": null,
+          "num_trials": null,
           "p_value_threshold": 0.01,
           "prf_key": "4294967296",
           "type": "GumbelWatermarkDetector"
@@ -1342,6 +1803,8 @@
           "context_width": 5,
           "deduplicate_contexts": "none",
           "deduplicate_contexts_max_history": 8192,
+          "delta": 1.0,
+          "epsilon": 0.0,
           "prf": "philox"
         }
       },
@@ -1371,8 +1834,10 @@
         "scheme": "gumbel",
         "scheme_config": {
           "context_width": 4,
+          "delta": 1.0,
           "detection_alpha": 0.1,
           "detection_deduplicate_contexts": true,
+          "epsilon": 0.0,
           "generation_alpha": 0.1,
           "generation_deduplicate_contexts": "single_turn",
           "generation_deduplicate_contexts_max_history": 8192,
@@ -1462,6 +1927,7 @@
           "context_width": 4,
           "deduplicate_contexts": true,
           "key_b_prf_key": null,
+          "num_trials": null,
           "p_value_threshold": 0.01,
           "prf_key": "42",
           "type": "GumbelWatermarkDetector"
@@ -1473,6 +1939,8 @@
           "context_width": 4,
           "deduplicate_contexts": "single_turn",
           "deduplicate_contexts_max_history": 8192,
+          "delta": 1.0,
+          "epsilon": 0.0,
           "prf": "philox"
         }
       },
@@ -1502,8 +1970,10 @@
         "scheme": "gumbel",
         "scheme_config": {
           "context_width": 4,
+          "delta": 1.0,
           "detection_alpha": 0.1,
           "detection_deduplicate_contexts": true,
+          "epsilon": 0.0,
           "generation_alpha": 0.1,
           "generation_deduplicate_contexts": "all",
           "generation_deduplicate_contexts_max_history": 8192,
@@ -1593,6 +2063,7 @@
           "context_width": 4,
           "deduplicate_contexts": true,
           "key_b_prf_key": null,
+          "num_trials": null,
           "p_value_threshold": 0.01,
           "prf_key": "42",
           "type": "GumbelWatermarkDetector"
@@ -1604,6 +2075,8 @@
           "context_width": 4,
           "deduplicate_contexts": "all",
           "deduplicate_contexts_max_history": 8192,
+          "delta": 1.0,
+          "epsilon": 0.0,
           "prf": "philox"
         }
       },
@@ -1639,8 +2112,10 @@
         "scheme": "gumbel",
         "scheme_config": {
           "context_width": 4,
+          "delta": 1.0,
           "detection_alpha": 0.1,
           "detection_deduplicate_contexts": true,
+          "epsilon": 0.0,
           "generation_alpha": 0.1,
           "generation_deduplicate_contexts": "all",
           "generation_deduplicate_contexts_max_history": 8192,
@@ -1730,6 +2205,7 @@
           "context_width": 4,
           "deduplicate_contexts": true,
           "key_b_prf_key": null,
+          "num_trials": null,
           "p_value_threshold": 0.01,
           "prf_key": "42",
           "type": "GumbelWatermarkDetector"
@@ -1741,6 +2217,8 @@
           "context_width": 4,
           "deduplicate_contexts": "all",
           "deduplicate_contexts_max_history": 8192,
+          "delta": 1.0,
+          "epsilon": 0.0,
           "prf": "philox"
         }
       },
@@ -1770,8 +2248,10 @@
         "scheme": "gumbel",
         "scheme_config": {
           "context_width": 4,
+          "delta": 1.0,
           "detection_alpha": 0.1,
           "detection_deduplicate_contexts": true,
+          "epsilon": 0.0,
           "generation_alpha": 0.1,
           "generation_deduplicate_contexts": "all",
           "generation_deduplicate_contexts_max_history": null,
@@ -1861,6 +2341,7 @@
           "context_width": 4,
           "deduplicate_contexts": true,
           "key_b_prf_key": null,
+          "num_trials": null,
           "p_value_threshold": 0.01,
           "prf_key": "42",
           "type": "GumbelWatermarkDetector"
@@ -1872,6 +2353,8 @@
           "context_width": 4,
           "deduplicate_contexts": "all",
           "deduplicate_contexts_max_history": null,
+          "delta": 1.0,
+          "epsilon": 0.0,
           "prf": "philox"
         }
       },
@@ -1901,8 +2384,10 @@
         "scheme": "gumbel",
         "scheme_config": {
           "context_width": 4,
+          "delta": 1.0,
           "detection_alpha": 0.1,
           "detection_deduplicate_contexts": true,
+          "epsilon": 0.0,
           "generation_alpha": 0.1,
           "generation_deduplicate_contexts": "single_turn",
           "generation_deduplicate_contexts_max_history": null,
@@ -1992,6 +2477,7 @@
           "context_width": 4,
           "deduplicate_contexts": true,
           "key_b_prf_key": null,
+          "num_trials": null,
           "p_value_threshold": 0.01,
           "prf_key": "42",
           "type": "GumbelWatermarkDetector"
@@ -2003,6 +2489,8 @@
           "context_width": 4,
           "deduplicate_contexts": "single_turn",
           "deduplicate_contexts_max_history": null,
+          "delta": 1.0,
+          "epsilon": 0.0,
           "prf": "philox"
         }
       },
@@ -2032,8 +2520,10 @@
         "scheme": "gumbel",
         "scheme_config": {
           "context_width": 4,
+          "delta": 1.0,
           "detection_alpha": 0.1,
           "detection_deduplicate_contexts": true,
+          "epsilon": 0.0,
           "generation_alpha": 0.1,
           "generation_deduplicate_contexts": "single_turn",
           "generation_deduplicate_contexts_max_history": 8,
@@ -2123,6 +2613,7 @@
           "context_width": 4,
           "deduplicate_contexts": true,
           "key_b_prf_key": null,
+          "num_trials": null,
           "p_value_threshold": 0.01,
           "prf_key": "42",
           "type": "GumbelWatermarkDetector"
@@ -2134,6 +2625,8 @@
           "context_width": 4,
           "deduplicate_contexts": "single_turn",
           "deduplicate_contexts_max_history": 8,
+          "delta": 1.0,
+          "epsilon": 0.0,
           "prf": "philox"
         }
       },
@@ -2163,8 +2656,10 @@
         "scheme": "gumbel",
         "scheme_config": {
           "context_width": 4,
+          "delta": 1.0,
           "detection_alpha": 0.1,
           "detection_deduplicate_contexts": false,
+          "epsilon": 0.0,
           "generation_alpha": 0.1,
           "generation_deduplicate_contexts": "none",
           "generation_deduplicate_contexts_max_history": null,
@@ -2254,6 +2749,7 @@
           "context_width": 4,
           "deduplicate_contexts": false,
           "key_b_prf_key": null,
+          "num_trials": null,
           "p_value_threshold": 0.01,
           "prf_key": "42",
           "type": "GumbelWatermarkDetector"
@@ -2265,6 +2761,8 @@
           "context_width": 4,
           "deduplicate_contexts": "none",
           "deduplicate_contexts_max_history": null,
+          "delta": 1.0,
+          "epsilon": 0.0,
           "prf": "philox"
         }
       },
@@ -2294,8 +2792,10 @@
         "scheme": "gumbel",
         "scheme_config": {
           "context_width": 4,
+          "delta": 1.0,
           "detection_alpha": 0.1,
           "detection_deduplicate_contexts": true,
+          "epsilon": 0.0,
           "generation_alpha": 0.1,
           "generation_deduplicate_contexts": "single_turn",
           "generation_deduplicate_contexts_max_history": 8192,
@@ -2329,6 +2829,7 @@
           "context_width": 4,
           "deduplicate_contexts": true,
           "key_b_prf_key": null,
+          "num_trials": null,
           "p_value_threshold": 0.0015,
           "prf_key": "42",
           "type": "GumbelWatermarkDetector"
@@ -2340,6 +2841,8 @@
           "context_width": 4,
           "deduplicate_contexts": "single_turn",
           "deduplicate_contexts_max_history": 8192,
+          "delta": 1.0,
+          "epsilon": 0.0,
           "prf": "philox"
         }
       },
@@ -2369,8 +2872,10 @@
         "scheme": "gumbel",
         "scheme_config": {
           "context_width": 4,
+          "delta": 1.0,
           "detection_alpha": 0.1,
           "detection_deduplicate_contexts": true,
+          "epsilon": 0.0,
           "generation_alpha": 0.1,
           "generation_deduplicate_contexts": "single_turn",
           "generation_deduplicate_contexts_max_history": 8192,
@@ -2460,6 +2965,7 @@
           "context_width": 4,
           "deduplicate_contexts": true,
           "key_b_prf_key": null,
+          "num_trials": null,
           "p_value_threshold": 0.01,
           "prf_key": "43",
           "type": "GumbelWatermarkDetector"
@@ -2471,6 +2977,8 @@
           "context_width": 4,
           "deduplicate_contexts": "single_turn",
           "deduplicate_contexts_max_history": 8192,
+          "delta": 1.0,
+          "epsilon": 0.0,
           "prf": "philox"
         }
       },
@@ -2500,8 +3008,10 @@
         "scheme": "gumbel",
         "scheme_config": {
           "context_width": 16,
+          "delta": 1.0,
           "detection_alpha": 0.1,
           "detection_deduplicate_contexts": true,
+          "epsilon": 0.0,
           "generation_alpha": 0.1,
           "generation_deduplicate_contexts": "all",
           "generation_deduplicate_contexts_max_history": 8192,
@@ -2591,6 +3101,7 @@
           "context_width": 16,
           "deduplicate_contexts": true,
           "key_b_prf_key": null,
+          "num_trials": null,
           "p_value_threshold": 0.01,
           "prf_key": "18446744073709551615",
           "type": "GumbelWatermarkDetector"
@@ -2602,6 +3113,8 @@
           "context_width": 16,
           "deduplicate_contexts": "all",
           "deduplicate_contexts_max_history": 8192,
+          "delta": 1.0,
+          "epsilon": 0.0,
           "prf": "philox"
         }
       },
@@ -2631,8 +3144,10 @@
         "scheme": "gumbel",
         "scheme_config": {
           "context_width": 1,
+          "delta": 1.0,
           "detection_alpha": 0.1,
           "detection_deduplicate_contexts": true,
+          "epsilon": 0.0,
           "generation_alpha": 0.1,
           "generation_deduplicate_contexts": "single_turn",
           "generation_deduplicate_contexts_max_history": 8192,
@@ -2706,6 +3221,7 @@
           "context_width": 1,
           "deduplicate_contexts": true,
           "key_b_prf_key": null,
+          "num_trials": null,
           "p_value_threshold": 0.01,
           "prf_key": "42",
           "type": "GumbelWatermarkDetector"
@@ -2717,6 +3233,8 @@
           "context_width": 1,
           "deduplicate_contexts": "single_turn",
           "deduplicate_contexts_max_history": 8192,
+          "delta": 1.0,
+          "epsilon": 0.0,
           "prf": "philox"
         }
       },
@@ -2746,8 +3264,10 @@
         "scheme": "gumbel",
         "scheme_config": {
           "context_width": 4,
+          "delta": 1.0,
           "detection_alpha": 0.1,
           "detection_deduplicate_contexts": true,
+          "epsilon": 0.0,
           "generation_alpha": 0.1,
           "generation_deduplicate_contexts": "all",
           "generation_deduplicate_contexts_max_history": 8192,
@@ -2821,6 +3341,7 @@
           "context_width": 4,
           "deduplicate_contexts": true,
           "key_b_prf_key": null,
+          "num_trials": null,
           "p_value_threshold": 0.01,
           "prf_key": "42",
           "type": "GumbelWatermarkDetector"
@@ -2832,6 +3353,8 @@
           "context_width": 4,
           "deduplicate_contexts": "all",
           "deduplicate_contexts_max_history": 8192,
+          "delta": 1.0,
+          "epsilon": 0.0,
           "prf": "philox"
         }
       },
@@ -2842,7 +3365,551 @@
         "partial_context_skips": 4,
         "routing_draws": 0
       }
+    },
+    "ppl-hard-philox-key42-cw4": {
+      "configuration": {
+        "detection_key": "42",
+        "fixture": {
+          "dominant_bias": 0,
+          "dominant_token": null,
+          "logit_denominator": 16,
+          "logit_modulus": 131,
+          "num_tokens": 64,
+          "prompt": [],
+          "vocabulary_size": 128
+        },
+        "key": "42",
+        "prf": "philox",
+        "prf_version": "philox4x32-10-v1",
+        "scheme": "ppl_hard",
+        "scheme_config": {
+          "context_width": 4,
+          "delta": 1.0,
+          "detection_alpha": 0.1,
+          "detection_deduplicate_contexts": true,
+          "epsilon": 0.0,
+          "generation_alpha": 0.1,
+          "generation_deduplicate_contexts": "single_turn",
+          "generation_deduplicate_contexts_max_history": 8192,
+          "p_value_threshold": 0.01
+        }
+      },
+      "detection": {
+        "is_watermarked": true,
+        "num_scored_tokens": 60,
+        "p_value": 2.7000132793023007e-57,
+        "p_value_ratio": 2.7000132793023005e-55,
+        "score": 1234.0
+      },
+      "generation": [
+        46,
+        42,
+        38,
+        34,
+        122,
+        33,
+        43,
+        117,
+        24,
+        52,
+        34,
+        30,
+        118,
+        96,
+        64,
+        92,
+        95,
+        13,
+        101,
+        33,
+        100,
+        89,
+        32,
+        7,
+        63,
+        112,
+        76,
+        37,
+        118,
+        29,
+        39,
+        99,
+        20,
+        27,
+        44,
+        104,
+        47,
+        11,
+        99,
+        120,
+        17,
+        13,
+        83,
+        12,
+        22,
+        89,
+        88,
+        127,
+        91,
+        62,
+        115,
+        107,
+        89,
+        25,
+        53,
+        84,
+        84,
+        122,
+        40,
+        1,
+        71,
+        39,
+        127,
+        6
+      ],
+      "resolved": {
+        "derived_keys": {
+          "key_a": null,
+          "key_b": null
+        },
+        "detector": {
+          "alpha": null,
+          "context_width": 4,
+          "deduplicate_contexts": true,
+          "key_b_prf_key": null,
+          "num_trials": 30,
+          "p_value_threshold": 0.01,
+          "prf_key": "42",
+          "type": "BinomialScoreWatermarkDetector"
+        },
+        "watermark_config": {
+          "algorithm": "ppl_hard",
+          "allow_target_only_watermarking": false,
+          "alpha": 0.1,
+          "context_width": 4,
+          "deduplicate_contexts": "single_turn",
+          "deduplicate_contexts_max_history": 8192,
+          "delta": 1.0,
+          "epsilon": 0.0,
+          "prf": "philox"
+        }
+      },
+      "trace": {
+        "dedup_skips": 0,
+        "key_b_effective": null,
+        "key_b_routed": null,
+        "partial_context_skips": 0,
+        "routing_draws": 0
+      }
+    },
+    "ppl-hard-philox-key7-cw2-epsilon0.5": {
+      "configuration": {
+        "detection_key": "7",
+        "fixture": {
+          "dominant_bias": 0,
+          "dominant_token": null,
+          "logit_denominator": 16,
+          "logit_modulus": 131,
+          "num_tokens": 64,
+          "prompt": [],
+          "vocabulary_size": 128
+        },
+        "key": "7",
+        "prf": "philox",
+        "prf_version": "philox4x32-10-v1",
+        "scheme": "ppl_hard",
+        "scheme_config": {
+          "context_width": 2,
+          "delta": 1.0,
+          "detection_alpha": 0.1,
+          "detection_deduplicate_contexts": true,
+          "epsilon": 0.5,
+          "generation_alpha": 0.1,
+          "generation_deduplicate_contexts": "single_turn",
+          "generation_deduplicate_contexts_max_history": 8192,
+          "p_value_threshold": 0.01
+        }
+      },
+      "detection": {
+        "is_watermarked": true,
+        "num_scored_tokens": 62,
+        "p_value": 1.847510107173431e-60,
+        "p_value_ratio": 1.847510107173431e-58,
+        "score": 1279.0
+      },
+      "generation": [
+        46,
+        42,
+        41,
+        16,
+        118,
+        107,
+        121,
+        0,
+        95,
+        31,
+        6,
+        26,
+        8,
+        4,
+        4,
+        53,
+        102,
+        84,
+        48,
+        62,
+        18,
+        114,
+        25,
+        109,
+        95,
+        91,
+        94,
+        37,
+        29,
+        28,
+        117,
+        28,
+        17,
+        59,
+        58,
+        5,
+        0,
+        53,
+        14,
+        123,
+        116,
+        19,
+        40,
+        26,
+        4,
+        81,
+        49,
+        63,
+        87,
+        80,
+        122,
+        100,
+        85,
+        78,
+        120,
+        62,
+        12,
+        126,
+        118,
+        82,
+        114,
+        17,
+        28,
+        20
+      ],
+      "resolved": {
+        "derived_keys": {
+          "key_a": null,
+          "key_b": null
+        },
+        "detector": {
+          "alpha": null,
+          "context_width": 2,
+          "deduplicate_contexts": true,
+          "key_b_prf_key": null,
+          "num_trials": 30,
+          "p_value_threshold": 0.01,
+          "prf_key": "7",
+          "type": "BinomialScoreWatermarkDetector"
+        },
+        "watermark_config": {
+          "algorithm": "ppl_hard",
+          "allow_target_only_watermarking": false,
+          "alpha": 0.1,
+          "context_width": 2,
+          "deduplicate_contexts": "single_turn",
+          "deduplicate_contexts_max_history": 8192,
+          "delta": 1.0,
+          "epsilon": 0.5,
+          "prf": "philox"
+        }
+      },
+      "trace": {
+        "dedup_skips": 0,
+        "key_b_effective": null,
+        "key_b_routed": null,
+        "partial_context_skips": 0,
+        "routing_draws": 0
+      }
+    },
+    "ppl-soft-philox-key42-cw4": {
+      "configuration": {
+        "detection_key": "42",
+        "fixture": {
+          "dominant_bias": 0,
+          "dominant_token": null,
+          "logit_denominator": 16,
+          "logit_modulus": 131,
+          "num_tokens": 64,
+          "prompt": [],
+          "vocabulary_size": 128
+        },
+        "key": "42",
+        "prf": "philox",
+        "prf_version": "philox4x32-10-v1",
+        "scheme": "ppl_soft",
+        "scheme_config": {
+          "context_width": 4,
+          "delta": 1.0,
+          "detection_alpha": 0.1,
+          "detection_deduplicate_contexts": true,
+          "epsilon": 0.0,
+          "generation_alpha": 0.1,
+          "generation_deduplicate_contexts": "single_turn",
+          "generation_deduplicate_contexts_max_history": 8192,
+          "p_value_threshold": 0.01
+        }
+      },
+      "detection": {
+        "is_watermarked": true,
+        "num_scored_tokens": 60,
+        "p_value": 2.7000132793023007e-57,
+        "p_value_ratio": 2.7000132793023005e-55,
+        "score": 1234.0
+      },
+      "generation": [
+        46,
+        42,
+        38,
+        34,
+        122,
+        33,
+        43,
+        117,
+        24,
+        52,
+        29,
+        115,
+        90,
+        57,
+        53,
+        78,
+        63,
+        6,
+        73,
+        62,
+        118,
+        31,
+        64,
+        49,
+        24,
+        77,
+        55,
+        122,
+        79,
+        68,
+        102,
+        99,
+        16,
+        119,
+        94,
+        37,
+        117,
+        29,
+        14,
+        56,
+        80,
+        79,
+        86,
+        5,
+        53,
+        43,
+        53,
+        63,
+        116,
+        94,
+        122,
+        65,
+        50,
+        11,
+        92,
+        31,
+        2,
+        30,
+        26,
+        40,
+        50,
+        25,
+        106,
+        70
+      ],
+      "resolved": {
+        "derived_keys": {
+          "key_a": null,
+          "key_b": null
+        },
+        "detector": {
+          "alpha": null,
+          "context_width": 4,
+          "deduplicate_contexts": true,
+          "key_b_prf_key": null,
+          "num_trials": 30,
+          "p_value_threshold": 0.01,
+          "prf_key": "42",
+          "type": "BinomialScoreWatermarkDetector"
+        },
+        "watermark_config": {
+          "algorithm": "ppl_soft",
+          "allow_target_only_watermarking": false,
+          "alpha": 0.1,
+          "context_width": 4,
+          "deduplicate_contexts": "single_turn",
+          "deduplicate_contexts_max_history": 8192,
+          "delta": 1.0,
+          "epsilon": 0.0,
+          "prf": "philox"
+        }
+      },
+      "trace": {
+        "dedup_skips": 0,
+        "key_b_effective": null,
+        "key_b_routed": null,
+        "partial_context_skips": 0,
+        "routing_draws": 0
+      }
+    },
+    "ppl-soft-philox-key7-cw2-epsilon0.5": {
+      "configuration": {
+        "detection_key": "7",
+        "fixture": {
+          "dominant_bias": 0,
+          "dominant_token": null,
+          "logit_denominator": 16,
+          "logit_modulus": 131,
+          "num_tokens": 64,
+          "prompt": [],
+          "vocabulary_size": 128
+        },
+        "key": "7",
+        "prf": "philox",
+        "prf_version": "philox4x32-10-v1",
+        "scheme": "ppl_soft",
+        "scheme_config": {
+          "context_width": 2,
+          "delta": 1.0,
+          "detection_alpha": 0.1,
+          "detection_deduplicate_contexts": true,
+          "epsilon": 0.5,
+          "generation_alpha": 0.1,
+          "generation_deduplicate_contexts": "single_turn",
+          "generation_deduplicate_contexts_max_history": 8192,
+          "p_value_threshold": 0.01
+        }
+      },
+      "detection": {
+        "is_watermarked": true,
+        "num_scored_tokens": 62,
+        "p_value": 8.323583627897634e-80,
+        "p_value_ratio": 8.323583627897634e-78,
+        "score": 1331.0
+      },
+      "generation": [
+        46,
+        42,
+        41,
+        16,
+        118,
+        122,
+        95,
+        39,
+        116,
+        24,
+        62,
+        2,
+        118,
+        82,
+        121,
+        112,
+        95,
+        91,
+        10,
+        115,
+        65,
+        32,
+        106,
+        49,
+        81,
+        59,
+        94,
+        89,
+        71,
+        122,
+        83,
+        113,
+        13,
+        73,
+        40,
+        89,
+        64,
+        31,
+        105,
+        62,
+        77,
+        101,
+        76,
+        26,
+        114,
+        81,
+        31,
+        49,
+        13,
+        126,
+        19,
+        57,
+        99,
+        110,
+        56,
+        19,
+        80,
+        97,
+        104,
+        95,
+        89,
+        25,
+        45,
+        20
+      ],
+      "resolved": {
+        "derived_keys": {
+          "key_a": null,
+          "key_b": null
+        },
+        "detector": {
+          "alpha": null,
+          "context_width": 2,
+          "deduplicate_contexts": true,
+          "key_b_prf_key": null,
+          "num_trials": 30,
+          "p_value_threshold": 0.01,
+          "prf_key": "7",
+          "type": "BinomialScoreWatermarkDetector"
+        },
+        "watermark_config": {
+          "algorithm": "ppl_soft",
+          "allow_target_only_watermarking": false,
+          "alpha": 0.1,
+          "context_width": 2,
+          "deduplicate_contexts": "single_turn",
+          "deduplicate_contexts_max_history": 8192,
+          "delta": 1.0,
+          "epsilon": 0.5,
+          "prf": "philox"
+        }
+      },
+      "trace": {
+        "dedup_skips": 0,
+        "key_b_effective": null,
+        "key_b_routed": null,
+        "partial_context_skips": 0,
+        "routing_draws": 0
+      }
     }
   },
-  "schema_version": 3
+  "schema_version": 4
 }

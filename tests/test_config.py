@@ -3672,6 +3672,27 @@ def test_gumbel_rejects_speculative_decoding_without_target_only():
         config._check_supports_watermarking()
 
 
+@pytest.mark.parametrize("algorithm", ["chi_squared", "ppl_hard", "ppl_soft"])
+def test_binomial_score_watermarks_reject_target_only_speculative_decoding(
+    algorithm,
+):
+    config = _watermarked_vllm_config()
+    config.watermark_config = WatermarkConfig(
+        algorithm=algorithm, key=42, allow_target_only_watermarking=True
+    )
+    config.speculative_config = SimpleNamespace(
+        method="mtp",
+        draft_sample_method="probabilistic",
+        rejection_sample_method="standard",
+        parallel_drafting=False,
+    )
+
+    with pytest.raises(
+        ValueError, match=f"'{algorithm}'.*does not support speculative decoding"
+    ):
+        config._check_supports_watermarking()
+
+
 def test_dual_key_gumbel_warns_that_configured_alpha_is_unused(
     caplog_vllm, disable_log_dedup
 ):
