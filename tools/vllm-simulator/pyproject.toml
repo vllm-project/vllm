@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vllm-simulator"
+dynamic = ["version"]
+description = "A High-Fidelity LLM inference simulator for vLLM"
+urls = { Homepage = "https://github.com/vllm-project/vllm" }
+dependencies = [
+    "numpy",
+    "scikit-learn",
+    "aiconfigurator"
+]
+
+[tool.setuptools.dynamic]
+version = { attr = "vllm_simulator.__version__" }
+
+[tool.setuptools.packages.find]
+where = ["src"]

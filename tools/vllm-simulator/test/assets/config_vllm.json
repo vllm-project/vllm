@@ -1,0 +1,19 @@
+{
+    "platform": {
+        "accelerator": {
+            "name": "b300_sxm",
+            "hbm_capacity_gb": 80000
+        }
+    },
+    "predictor": {
+        "name": "aiconfigurator",
+        "database_mode": "SOL"
+    },
+    "scheduler": {
+        "tp_size": 1,
+        "ep_size": 1,
+        "dp_size": 1,
+        "backend_name": "vllm",
+        "backend_version": "0.24.0"
+    }
+}
