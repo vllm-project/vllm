@@ -606,3 +606,94 @@ def test_cpu_fused_moe_unaligned_intermediate_size(
 
     atol, rtol = get_default_atol(output), get_default_rtol(output)
     torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol)
+
+
+def test_cpu_fused_moe_expert_map(default_vllm_config):
+    """EP rank outputs sum to the unsharded result for global expert IDs."""
+    set_random_seed(0)
+    global_expert_num = 4
+    local_expert_num = 2
+    hidden_size = intermediate_size = 128
+    topk_num = 2
+    batch_size = 5
+    dtype = torch.bfloat16
+    act = MoEActivation.SILU
+
+    input = torch.randn((batch_size, hidden_size), dtype=dtype) / (
+        0.5 * hidden_size**0.5
+    )
+    w13 = torch.randn(
+        (global_expert_num, 2 * intermediate_size, hidden_size), dtype=dtype
+    ) / (0.5 * hidden_size**0.5)
+    w2 = torch.randn(
+        (global_expert_num, hidden_size, intermediate_size), dtype=dtype
+    ) / (0.5 * intermediate_size**0.5)
+    topk_ids = torch.tensor([[0, 2], [2, 3], [0, 1], [1, 3], [2, 0]], dtype=torch.int32)
+    topk_weights = torch.rand((batch_size, topk_num), dtype=torch.float32)
+    topk_weights /= topk_weights.sum(dim=-1, keepdim=True)
+
+    ref_output = ref_fused_moe(input, w13, w2, None, None, topk_weights, topk_ids, act)
+    ep_output = torch.zeros_like(ref_output)
+
+    for ep_rank in range(2):
+        local_start = ep_rank * local_expert_num
+        local_end = local_start + local_expert_num
+        expert_map = torch.full((global_expert_num,), -1, dtype=torch.int32)
+        expert_map[local_start:local_end] = torch.arange(
+            local_expert_num, dtype=torch.int32
+        )
+        parallel_config = FusedMoEParallelConfig(
+            tp_size=1,
+            tp_rank=0,
+            pcp_size=1,
+            pcp_rank=0,
+            dp_size=1,
+            dp_rank=0,
+            ep_size=2,
+            ep_rank=ep_rank,
+            sp_size=1,
+            use_ep=True,
+            all2all_backend="allgather_reducescatter",
+            enable_eplb=False,
+        )
+        moe_config = FusedMoEConfig(
+            num_experts=global_expert_num,
+            experts_per_token=topk_num,
+            hidden_dim=hidden_size,
+            intermediate_size=intermediate_size,
+            num_local_experts=local_expert_num,
+            num_logical_experts=global_expert_num,
+            moe_parallel_config=parallel_config,
+            activation=act,
+            in_dtype=dtype,
+            device="cpu",
+            routing_method=RoutingMethodType.Default,
+        )
+        layer = _StubMoELayer(
+            w13[local_start:local_end], w2[local_start:local_end], act
+        )
+        experts = CPUUnquantizedExperts(moe_config, FusedMoEQuantConfig.make())
+        experts.process_weights_after_loading(layer)
+
+        rank_output = torch.empty_like(input)
+        experts.apply(
+            output=rank_output,
+            hidden_states=input,
+            w1=layer.w13_weight,
+            w2=layer.w2_weight,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            activation=act,
+            global_num_experts=global_expert_num,
+            expert_map=expert_map,
+            a1q_scale=None,
+            a2_scale=None,
+            workspace13=torch.empty(0),
+            workspace2=torch.empty(0),
+            expert_tokens_meta=None,
+            apply_router_weight_on_input=False,
+        )
+        ep_output += rank_output
+
+    atol, rtol = get_default_atol(ep_output), get_default_rtol(ep_output)
+    torch.testing.assert_close(ep_output, ref_output, atol=atol, rtol=rtol)
