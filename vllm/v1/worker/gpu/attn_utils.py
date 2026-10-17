@@ -201,7 +201,13 @@ def init_attn_backend(
     device: torch.device,
     active_layer_names: set[str] | None = None,
     draft_layer_names: set[str] | None = None,
+    # Replicated layers in a DCP-sharded group can have larger blocks and
+    # narrower per-layer rows than the runner's shared block table.
+    block_table_widths: list[int] | None = None,
 ) -> tuple[list[list[AttentionGroup]], AttentionCGSupportInfo, list[int]]:
+    if block_table_widths is not None:
+        assert len(block_table_widths) == len(kv_cache_config.kv_cache_groups)
+
     # Phase 1: discover attention groups for each kv cache group.
     attn_groups: list[list[AttentionGroup]] = []
 
@@ -230,6 +236,11 @@ def init_attn_backend(
 
         group_map: dict[tuple[tuple[str, str], KVCacheSpec, int], AttentionGroup] = {}
         group_order: list[tuple[tuple[str, str], KVCacheSpec, int]] = []
+        block_table_width = (
+            block_table_widths[kv_cache_group_id]
+            if block_table_widths is not None
+            else None
+        )
 
         for layer_name in layer_names:
             attn_backend = attn_layers[layer_name].get_attn_backend()
@@ -257,7 +268,11 @@ def init_attn_backend(
             key = (attn_backend.full_cls_name(), layer_kv_cache_spec, num_heads_q)
             if key not in group_map:
                 group_map[key] = AttentionGroup(
-                    attn_backend, [layer_name], layer_kv_cache_spec, kv_cache_group_id
+                    attn_backend,
+                    [layer_name],
+                    layer_kv_cache_spec,
+                    kv_cache_group_id,
+                    block_table_width=block_table_width,
                 )
                 group_order.append(key)
             else:

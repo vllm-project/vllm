@@ -24,7 +24,7 @@ from ..common.qsa_cache import (
 from .ops.qsa_prepare import qsa_prepare
 
 if TYPE_CHECKING:
-    from .qsa import Qwen4ExpQSAAttention
+    from .qsa import Qwen4ExpQSAAttention, Qwen4ExpQSAFlashAttentionImpl
 
 
 def apply_qsa_rope(
@@ -273,6 +273,7 @@ class QSAIndexer(nn.Module):
             return result, None
 
         from .ops.qsa import qsa_compress_groups_with_ratio, qsa_store_cache_rows
+        from .ops.qsa_dcp_selector import expand_localize_qsa_block_indices
         from .ops.qsa_indexer import (
             expand_qsa_block_indices,
             qsa_select_paged_decode,
@@ -424,6 +425,10 @@ class QSAIndexer(nn.Module):
         num_decode_tokens = compressed_metadata.num_decode_tokens
         decode_query_len = compressed_metadata.decode_query_len
         visible_blocks = compressed_metadata.visible_blocks[:num_tokens]
+        # The sharded selector scores only this rank's states; its merge in
+        # the select calls makes block_indices the global top-k again.
+        scored_blocks = compressed_metadata.local_visible_blocks[:num_tokens]
+        selector_shard = compressed_metadata.selector_shard
         block_indices = torch.empty(
             num_tokens,
             self.token_topk // self.compress_ratio,
@@ -441,11 +446,12 @@ class QSAIndexer(nn.Module):
                 q[decode_slice],
                 compressed_key_cache,
                 compressed_metadata.block_table[:num_decodes],
-                visible_blocks[decode_slice],
+                scored_blocks[decode_slice],
                 self.token_topk,
                 self.compress_ratio,
                 decode_query_len,
                 block_indices[decode_slice],
+                selector_shard,
             )
 
         # Prefill requests follow the leading decode rows in the reordered batch.
@@ -457,13 +463,28 @@ class QSAIndexer(nn.Module):
                 compressed_key_cache,
                 compressed_metadata.block_table[num_decodes:],
                 compressed_metadata.query_start_loc[num_decodes:],
-                visible_blocks[prefill_slice],
+                scored_blocks[prefill_slice],
                 self.token_topk,
                 self.compress_ratio,
                 compressed_metadata.max_query_len,
                 block_indices[prefill_slice],
                 compressed_metadata.max_seq_len,
+                selector_shard,
             )
+        impl = cast("Qwen4ExpQSAFlashAttentionImpl", attn.impl)
+        if selector_shard is not None:
+            # The sharded selector expands and keeps this rank's tokens in one
+            # launch: the rows localize_dcp_selection_ would write.
+            expand_localize_qsa_block_indices(
+                block_indices,
+                compressed_metadata.logical_positions[:num_tokens],
+                visible_blocks,
+                self.compress_ratio,
+                self.token_topk,
+                out,
+                impl.dcp_token_shard,
+            )
+            return out, main_outputs
         expand_qsa_block_indices(
             block_indices,
             compressed_metadata.logical_positions[:num_tokens],
@@ -472,6 +493,9 @@ class QSAIndexer(nn.Module):
             self.token_topk,
             out,
         )
+        # Under DCP, keep this rank's share as local token ids once per
+        # selection; skip_topk steps (above) reuse these rows as they are.
+        impl.localize_dcp_selection_(out)
         return out, main_outputs
 
 

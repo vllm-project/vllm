@@ -108,6 +108,17 @@ class AttentionConfig:
     candidate pool instead, with fp32 logits, and keeps the masked dense walk
     for steps whose contexts are too short for the pool to pay."""
 
+    qsa_dcp_selector: Literal["replicated", "sharded"] = "replicated"
+    """Qwen4Exp QSA selector layout under decode context parallelism (DCP).
+    "replicated" keeps the whole compressed indexer key cache on every DCP
+    rank, and every rank computes the full top-k. "sharded" stores and scores
+    each compressed key only on the DCP rank that owns its tokens; one
+    all-gather of the ranks' local top-k candidates per selection then gives
+    the same global top-k. "sharded" divides the selector cache memory and
+    scoring work per rank by the DCP size, for one extra collective per
+    selection. It needs `cp_kv_cache_interleave_size` to be a multiple of
+    the indexer compress ratio. Without DCP both values behave the same."""
+
     indexer_tp_shard_min_rows: int = Field(default=65536, ge=1)
     """Minimum total prefill rows for the sparse-attention indexer to split
     them across TP ranks instead of scoring every row on each rank."""
