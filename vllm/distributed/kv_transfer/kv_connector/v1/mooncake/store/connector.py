@@ -287,8 +287,8 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
     def reset_cache(self) -> bool | None:
         """Reset the external Mooncake store on prefix-cache reset.
 
-        Drains the worker send queue, then runs ``remove_all`` on the
-        Mooncake master. Caller must first pause generation (e.g.
+        Drains the worker send queue, then resets the configured cache prefix
+        on the Mooncake master. Caller must first pause generation (e.g.
         ``pause_generation``) so no new puts are enqueued during drain.
 
         Returns True on ack, False on failure, None for the worker role.

@@ -276,7 +276,7 @@ Strict isolation requires a Mooncake master started with `--enable_multi_tenants
 - `load_async` (bool): Enable asynchronous loading for better compute-I/O overlap. Default: `true`.
 - `lookup_async` (bool): Run the external prefix-cache lookup on a background thread so it never blocks the scheduler step. The request is held until the in-flight lookup completes, then resumed on a later step. Default: `false`.
 - `lookup_rpc_port` (int): Custom port for the ZMQ lookup RPC socket. Default: `0`.
-- `cache_prefix` (str): Namespace prepended to every store key. Lets separate deployments share one Mooncake master without polluting each other — instances configured with different prefixes never see each other's cached blocks, even for identical prompts. All instances that should share a prefix cache must use the same value. Default: `""` (no prefix; keys are byte-identical to the unprefixed format).
+- `cache_prefix` (str): Namespace prepended to every store key. Lets separate deployments share one Mooncake master without polluting each other — instances configured with different prefixes never see each other's cached blocks, even for identical prompts. All instances that should share a prefix cache must use the same value. Must not contain `@`, the key delimiter. Default: `""` (no prefix; keys are byte-identical to the unprefixed format).
 - `save_decode_cache` (bool): Enable offloading decode tokens' KV cache. A `kv_consumer` does not save during prefill; when decode starts, it fills any missing block-aligned prompt prefix before appending completed decode blocks. Default: `false`.
 - `store_tp_size` (int): Common Store TP for endpoints with different local TP sizes. It supports LBHNC and LBNHC local KV caches, with `store_tp_size >= local_tp_size` and `store_tp_size % local_tp_size == 0`. The current topology is one full-attention cache group, PCP/DCP disabled, and cross-layer blocks disabled. For GQA and MHA, the total KV-head count must be divisible by `store_tp_size`. Store shards contain fixed global KV-head ranges in the local layout. Shared endpoints use the same KV cache layout, pipeline-parallel size, and Store TP. The Store namespace includes the layout and PP size. Unsupported configurations use a topology-specific rank-local namespace.
 
@@ -312,3 +312,20 @@ To use a custom shared seed, set the same `PYTHONHASHSEED` on every instance tha
 ```bash
 PYTHONHASHSEED=<shared-value> vllm serve ...
 ```
+
+### Cache reset
+
+`LLM.reset_prefix_cache(reset_connector=True)` resets the local prefix cache
+and the external Store cache. With a non-empty `cache_prefix`, Store reset uses
+`remove_by_regex(..., force=True)` to remove keys beginning with the literal
+`cache_prefix + "@"`, across all models, ranks, cache groups and Store layouts.
+Other prefixes are preserved. An empty prefix retains `remove_all(force=True)`
+and clears the entire Store, including keys with non-empty prefixes.
+
+For deployments sharing a Store, assign a distinct non-empty prefix to each
+model or tenant, such as `tenant-a/model-v1`. Before reset, pause generation and
+finish lookups and transfers on **all instances sharing that prefix**. Reset
+drains only the handling worker's send queue. The SDK can skip incomplete
+replicas or active replication tasks even with `force=True`; a nonnegative
+removal count does not guarantee that every matching key was removed. SDK
+errors return `False`; scoped reset never falls back to global removal.
