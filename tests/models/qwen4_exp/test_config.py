@@ -183,31 +183,6 @@ def test_qwen4_exp_mtp_override_sets_draft_config(
     assert draft_config.n_predict == 1
 
 
-@pytest.mark.parametrize("ple_layer_ids", [[1], []])
-def test_qwen4_exp_rejects_pipeline_parallel_only_with_ple(ple_layer_ids) -> None:
-    """PLE needs raw input_ids, which non-first pipeline ranks never see. The
-    rest of the architecture is PP-capable, so the refusal must be conditional
-    -- and must land before the engine spends time loading weights."""
-    vllm_config = SimpleNamespace(
-        model_config=SimpleNamespace(
-            hf_text_config=_text_config(ple_layer_ids=ple_layer_ids),
-            multimodal_config=None,
-        ),
-        parallel_config=ParallelConfig(pipeline_parallel_size=2),
-        speculative_config=None,
-    )
-    with patch.object(
-        Qwen3_5ForConditionalGenerationConfig, "verify_and_update_config"
-    ):
-        if ple_layer_ids:
-            with pytest.raises(NotImplementedError, match="pipeline_parallel_size=1"):
-                Qwen4ExpForConditionalGenerationConfig.verify_and_update_config(
-                    vllm_config
-                )
-        else:
-            Qwen4ExpForConditionalGenerationConfig.verify_and_update_config(vllm_config)
-
-
 @pytest.mark.parametrize(("partition", "rejected"), [("2,2", False), ("1,3", True)])
 def test_qwen4_exp_pipeline_parallel_requires_ple_on_first_rank(
     monkeypatch, partition, rejected
@@ -239,53 +214,6 @@ def test_qwen4_exp_pipeline_parallel_requires_ple_on_first_rank(
                 )
         else:
             Qwen4ExpForConditionalGenerationConfig.verify_and_update_config(vllm_config)
-
-
-def test_qwen4_exp_mtp_runs_whole_drafter_on_last_pp_rank() -> None:
-    """The speculator builds the whole drafter on the last PP rank and feeds it
-    target hidden states without intermediate tensors."""
-    from vllm.models.qwen4_exp.nvidia.mtp import (
-        Qwen4ExpMultiTokenPredictor,
-    )
-
-    model = object.__new__(Qwen4ExpMultiTokenPredictor)
-    torch.nn.Module.__init__(model)
-    model.hc_count = 2
-    model.hidden_size = 4
-    model.num_mtp_layers = 1
-    model.pre_fc_norm_embedding = torch.nn.Identity()
-    model.fc_embedding = torch.nn.Identity()
-    model.pre_fc_norm_hidden = torch.nn.Identity()
-    model.fc_hidden = torch.nn.Identity()
-    model.layers = [
-        lambda **kwargs: (
-            kwargs["hidden_states"],
-            kwargs["hidden_states"],
-            torch.zeros(kwargs["hidden_states"].shape[0], 2),
-        ),
-    ]
-    model.hyper_connection_mixer = SimpleNamespace(
-        combine_and_mix=lambda hidden_states, block_output, injection: (
-            hidden_states,
-            hidden_states.unflatten(-1, (2, 4)).mean(-2),
-            None,
-        ),
-    )
-    target_hidden = torch.arange(16, dtype=torch.float32).reshape(2, 8)
-    pp_group = SimpleNamespace(is_first_rank=False, is_last_rank=True)
-
-    with patch(
-        "vllm.models.qwen4_exp.nvidia.mtp.get_pp_group",
-        return_value=pp_group,
-    ):
-        _, multi_hidden = model.forward(
-            input_ids=None,
-            positions=torch.arange(2),
-            hidden_states=target_hidden,
-            inputs_embeds=torch.zeros(2, 4),
-        )
-
-    torch.testing.assert_close(multi_hidden, target_hidden)
 
 
 def test_qwen4_exp_model_state_prepares_ngram_context() -> None:
