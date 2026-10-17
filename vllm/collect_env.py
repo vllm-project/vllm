@@ -5,6 +5,8 @@
 # code borrowed from https://github.com/pytorch/pytorch/blob/main/torch/utils/collect_env.py
 
 import datetime
+import ctypes
+import glob
 import locale
 import os
 import subprocess
@@ -41,6 +43,7 @@ SystemEnv = namedtuple(
         "python_version",
         "python_platform",
         "is_cuda_available",
+        "cuda_toolkit_version",
         "cuda_runtime_version",
         "cuda_module_loading",
         "nvidia_driver_version",
@@ -222,8 +225,67 @@ def get_gpu_info(run_lambda):
     return re.sub(uuid_regex, "", out)
 
 
-def get_running_cuda_version(run_lambda):
+def get_cuda_toolkit_version(run_lambda):
     return run_and_parse_first_match(run_lambda, "nvcc --version", r"release .+ V(.*)")
+
+
+def get_cuda_runtime_version():
+    if sys.platform != "linux" or not TORCH_AVAILABLE or not torch.cuda.is_available():
+        return None
+
+    def format_version(version):
+        if version == 0:
+            return None
+        return f"{version // 1000}.{(version % 1000) // 10}"
+
+    try:
+        cuda_runtime = torch.cuda.cudart()
+        get_version = getattr(cuda_runtime, "cudaRuntimeGetVersion")
+        status, version = get_version()
+        if status == 0:
+            return format_version(version)
+    except (AttributeError, RuntimeError, TypeError, ValueError):
+        pass
+
+    cuda_home = os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")
+    library_candidates = []
+    if cuda_home:
+        for directory in ("lib64", "lib"):
+            library_candidates.extend(
+                glob.glob(os.path.join(cuda_home, directory, "libcudart.so*"))
+            )
+    if TORCH_AVAILABLE and torch.version.cuda:
+        cuda_major = torch.version.cuda.split(".", 1)[0]
+        package_pattern = os.path.join(
+            "nvidia", f"cu{cuda_major}", "lib", "libcudart.so*"
+        )
+        library_candidates.extend(
+            path
+            for entry in sys.path
+            for path in glob.glob(os.path.join(entry, package_pattern))
+        )
+    library_candidates.append("libcudart.so")
+
+    cudart = None
+    for candidate in library_candidates:
+        try:
+            cudart = ctypes.CDLL(candidate)
+            break
+        except OSError:
+            continue
+    if cudart is None:
+        return None
+
+    version = ctypes.c_int()
+    try:
+        cudart.cudaRuntimeGetVersion.argtypes = [ctypes.POINTER(ctypes.c_int)]
+        cudart.cudaRuntimeGetVersion.restype = ctypes.c_int
+        status = cudart.cudaRuntimeGetVersion(ctypes.byref(version))
+    except AttributeError:
+        return None
+    if status != 0:
+        return None
+    return format_version(version.value)
 
 
 def get_cudnn_version(run_lambda):
@@ -778,7 +840,8 @@ def get_env_info():
         python_platform=get_python_platform(),
         is_cuda_available=cuda_available_str,
         cuda_compiled_version=cuda_version_str,
-        cuda_runtime_version=get_running_cuda_version(run_lambda),
+        cuda_toolkit_version=get_cuda_toolkit_version(run_lambda),
+        cuda_runtime_version=get_cuda_runtime_version(),
         cuda_module_loading=get_cuda_module_loading_config(),
         nvidia_gpu_models=get_gpu_info(run_lambda),
         nvidia_driver_version=get_nvidia_driver_version(run_lambda),
@@ -918,6 +981,7 @@ def pretty_str(envinfo):
 
     # If the machine doesn't have CUDA, report some fields as 'No CUDA'
     dynamic_cuda_fields = [
+        "cuda_toolkit_version",
         "cuda_runtime_version",
         "nvidia_gpu_models",
         "nvidia_driver_version",
@@ -992,7 +1056,8 @@ def pretty_str(envinfo):
        CUDA / GPU Info
 ==============================
 Is CUDA available            : {is_cuda_available}
-CUDA runtime version         : {cuda_runtime_version}
+CUDA Toolkit version         : {cuda_toolkit_version}
+CUDA Runtime version         : {cuda_runtime_version}
 CUDA_MODULE_LOADING set to   : {cuda_module_loading}
 GPU models and configuration : {nvidia_gpu_models}
 Nvidia driver version        : {nvidia_driver_version}
