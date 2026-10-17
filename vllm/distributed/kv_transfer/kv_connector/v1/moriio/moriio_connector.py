@@ -16,7 +16,7 @@ import numpy as np
 import torch
 import zmq
 
-from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.config import CUDAGraphMode, KVTransferConfig, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     BlockIds,
     clip_ssm_state_blocks,
@@ -229,6 +229,10 @@ def resolve_moriio_transfer_ack(
 class MoRIIOConnector(KVConnectorBase_V1, SupportsHMA):
     _cache_hit_source = CacheHitSource.P2P
 
+    @classmethod
+    def supports_sleep_mode(cls, kv_transfer_config: KVTransferConfig) -> bool:
+        return False
+
     @property
     def supports_divergent_local_hybrid_hits(self) -> bool:
         # The READ path always transfers the recurrent-state slot, including
@@ -334,7 +338,10 @@ class MoRIIOConnector(KVConnectorBase_V1, SupportsHMA):
         block_ids: BlockIds,
     ) -> tuple[bool, dict[str, Any] | None]:
         assert self.connector_scheduler is not None
-        if self.connector_scheduler._has_mamba:
+        if (
+            self.connector_scheduler._has_mamba
+            and self.connector_scheduler.mode == MoRIIOMode.READ
+        ):
             attn_block_ids, mamba_block_groups = (
                 self.connector_scheduler.split_block_groups(block_ids)
             )
@@ -416,6 +423,16 @@ class MoRIIOConnector(KVConnectorBase_V1, SupportsHMA):
         )
         self.connector_worker.wait_for_save(self._connector_metadata)
 
+    def has_pending_push_work(self) -> bool:
+        return (
+            self.mode == MoRIIOMode.WRITE
+            and self.connector_scheduler is not None
+            and bool(self.connector_scheduler._deferred_send_deadlines)
+        )
+
+    def get_loaded_kv_cache_group_ids(self, request: "Request") -> tuple[int, ...]:
+        return self._kv_cache_config.transfer_group_ids
+
     def shutdown(self):
         if self.connector_worker is not None:
             self.connector_worker.shutdown()
@@ -459,11 +476,10 @@ def _validate_hybrid_speculation(vllm_config: VllmConfig) -> None:
     speculative_config = vllm_config.speculative_config
     if speculative_config is None:
         return
-    # DSpark is allowlisted because it is the only hybrid speculative method
-    # validated end to end with MoRIIO READ.
+    # Other hybrid speculative methods need their own transfer validation.
     if not speculative_config.use_dspark():
         raise MoRIIOError(
-            "MoRIIO hybrid READ supports DSpark speculative decoding only, got "
+            "MoRIIO hybrid transfer supports DSpark speculative decoding only, got "
             f"method={speculative_config.method!r}"
         )
 
@@ -476,14 +492,14 @@ def _validate_mamba_specs(specs: Collection[MambaSpec]) -> MambaSpec | None:
     for spec in specs:
         if len(spec.shapes) != 2 or len(spec.dtypes) != 2:
             raise MoRIIOError(
-                "MoRIIO hybrid READ supports exactly two Mamba states "
+                "MoRIIO hybrid transfer supports exactly two Mamba states "
                 "(conv and SSM), got "
                 f"{len(spec.shapes)} shapes and {len(spec.dtypes)} dtypes"
             )
     reference = specs[0]
     if any(spec != reference for spec in specs[1:]):
         raise MoRIIOError(
-            "MoRIIO hybrid READ requires all transferable Mamba groups "
+            "MoRIIO hybrid transfer requires all transferable Mamba groups "
             "to use the same cache spec"
         )
     return reference
@@ -511,7 +527,9 @@ class MoRIIOConnectorScheduler:
         self._has_mamba = bool(self._mamba_group_ids)
         mamba_spec = None
         if self._has_mamba:
-            if len(self._attn_group_ids) != 1:
+            if not self._attn_group_ids:
+                raise MoRIIOError("MoRIIO hybrid transfer requires an attention group")
+            if self.mode == MoRIIOMode.READ and len(self._attn_group_ids) != 1:
                 raise MoRIIOError(
                     "MoRIIO hybrid READ requires exactly one transferable "
                     "attention group, got "
@@ -525,11 +543,6 @@ class MoRIIOConnectorScheduler:
             ]
             mamba_spec = _validate_mamba_specs(mamba_specs)
             _validate_hybrid_speculation(vllm_config)
-            if self.mode != MoRIIOMode.READ:
-                raise MoRIIOError(
-                    "MoRIIO hybrid (mamba/KDA) transfer is implemented for READ "
-                    "mode only; set kv_connector_extra_config.read_mode=true"
-                )
         self._num_ssm_scratch_blocks = (
             mamba_spec.num_speculative_blocks if mamba_spec is not None else 0
         )
@@ -577,11 +590,13 @@ class MoRIIOConnectorScheduler:
                     f"cache group spec(s): {sorted(set(unsupported))}. Pass "
                     "--disable-hybrid-kv-cache-manager to run without HMA."
                 )
-            if self.mode == MoRIIOMode.WRITE:
-                # TODO(simondanielsson): support HMA in WRITE mode
+            if self.mode == MoRIIOMode.WRITE and any(
+                isinstance(g.kv_cache_spec, SlidingWindowSpec)
+                for g in kv_cache_config.transfer_groups
+            ):
                 raise NotImplementedError(
-                    "MoRIIO WRITE mode does not support hybrid KV cache groups "
-                    "(sliding-window attention). Use READ mode, or pass "
+                    "MoRIIO WRITE mode does not support sliding-window "
+                    "cache groups. Use READ mode, or pass "
                     "--disable-hybrid-kv-cache-manager."
                 )
 
@@ -776,14 +791,15 @@ class MoRIIOConnectorScheduler:
 
         num_prompt_tokens = request.num_prompt_tokens
         num_external_tokens = max(num_prompt_tokens - num_computed_tokens, 0)
+        params = request.kv_transfer_params or {}
+        if not params.get("do_remote_prefill"):
+            return 0, False
         if self.mode == MoRIIOMode.WRITE:
-            params = request.kv_transfer_params or {}
-            if not params.get("do_remote_prefill"):
-                return 0, False
-            # MoriiO in write mode, no remote prefill. Hybrid models never get
-            # here: register_kv_caches refuses WRITE mode for them, so there is
-            # no recurrent-state accounting to do.
-            return num_external_tokens, True
+            if self._has_mamba:
+                # P pushes h(N-1). Do not publish it under the N-token hash
+                # when the scheduler caches a completed asynchronous load.
+                num_external_tokens = max(num_external_tokens - 1, 0)
+            return num_external_tokens, num_external_tokens > 0
 
         # READ mode always recomputes the last token locally on the decoder.
         #
@@ -1174,6 +1190,16 @@ class MoRIIOConnectorScheduler:
                                 f"remote_notify_port={remote_notify_port!r})"
                             )
 
+                    block_notify_list: list[int] | list[list[int]]
+                    if self._has_mamba:
+                        block_notify_list = list(
+                            self._clamp_to_prompt_blocks(
+                                request, blocks.get_block_ids()
+                            )
+                        )
+                    else:
+                        block_notify_list = blocks.get_block_ids()[0]
+
                     # Wide-EP multi-pod: a pod binds notify sockets only for
                     # its LOCAL ranks, so the port offset must use the per-pod
                     # local rank (% dp_local), not the global rank. Single-pod
@@ -1200,7 +1226,7 @@ class MoRIIOConnectorScheduler:
                         self.send_notify_block(
                             req_id=request.request_id,
                             transfer_id=request.kv_transfer_params["transfer_id"],
-                            block_notify_list=blocks.get_block_ids()[0],
+                            block_notify_list=block_notify_list,
                             host=_notify_host,
                             port=target_port,
                         )
@@ -1223,6 +1249,26 @@ class MoRIIOConnectorScheduler:
             sliding-window groups are left unchanged.
 
         """
+        if self._has_mamba:
+            # WRITE preserves transfer-group order, including a separate drafter
+            # attention group. READ retains its attention-first wire format.
+            transfer_blocks = self.kv_cache_config.select_transfer_block_ids(block_ids)
+            dcp_size = self.vllm_config.parallel_config.decode_context_parallel_size
+            clamped_hybrid: list[list[int]] = []
+            for group, blocks in zip(
+                self.kv_cache_config.transfer_groups, transfer_blocks, strict=True
+            ):
+                spec = group.kv_cache_spec
+                if isinstance(spec, MambaSpec):
+                    clamped_hybrid.append(
+                        clip_ssm_state_blocks(list(blocks), spec.num_speculative_blocks)
+                    )
+                else:
+                    block_size = spec.block_size * (dcp_size if spec.dcp_sharded else 1)
+                    clamped_hybrid.append(
+                        list(blocks[: cdiv(req.num_prompt_tokens, block_size)])
+                    )
+            return clamped_hybrid
         clamped = list(block_ids)
         changed = False
         for g, group_blocks in enumerate(block_ids):
@@ -1248,6 +1294,19 @@ class MoRIIOConnectorScheduler:
         num_scheduled = scheduler_output.num_scheduled_tokens.get(req.request_id, 0)
         return req.num_computed_tokens + num_scheduled >= req.num_prompt_tokens
 
+    def _get_write_blocks(
+        self, req: "Request", block_ids: BlockIds, scheduler_output: SchedulerOutput
+    ) -> BlockIds:
+        if self._has_mamba:
+            # Align-mode state slots can move without appending a new block.
+            # Resolve the authoritative table at the final prefill step.
+            block_state = scheduler_output.kv_connector_block_state
+            assert block_state is not None
+            current_blocks = block_state.get_block_ids(req.request_id)
+            assert current_blocks is not None
+            block_ids = current_blocks
+        return self._clamp_to_prompt_blocks(req, block_ids)
+
     def build_connector_meta(
         self,
         scheduler_output: SchedulerOutput,
@@ -1270,10 +1329,10 @@ class MoRIIOConnectorScheduler:
                 # reserved speculative-lookahead slack), so new_block_ids is None;
                 # still fall through to the final-chunk check below.
                 new_block_ids = scheduler_output.scheduled_cached_reqs.new_block_ids[i]
-                if new_block_ids is not None:
+                if new_block_ids is not None and not self._has_mamba:
                     existing_blocks = [
-                        existing_blocks[g] + new_block_ids[g]
-                        for g in range(len(new_block_ids))
+                        old + new
+                        for old, new in zip(existing_blocks, new_block_ids, strict=True)
                     ]
                     self._reqs_need_pending_save[req_id] = (req, existing_blocks)
                 if not self._is_final_prefill_chunk(req, scheduler_output):
@@ -1283,7 +1342,9 @@ class MoRIIOConnectorScheduler:
                 kv_params = self._req_kv_params.pop(
                     req_id, req.kv_transfer_params or {}
                 )
-                save_block_ids = self._clamp_to_prompt_blocks(req, existing_blocks)
+                save_block_ids = self._get_write_blocks(
+                    req, existing_blocks, scheduler_output
+                )
                 meta.add_new_req(
                     request_id=req_id,
                     local_block_ids=save_block_ids,
@@ -1324,7 +1385,7 @@ class MoRIIOConnectorScheduler:
             if not self._is_final_prefill_chunk(req, scheduler_output):
                 self._reqs_need_pending_save[req_id] = (req, block_ids)
                 continue
-            save_block_ids = self._clamp_to_prompt_blocks(req, block_ids)
+            save_block_ids = self._get_write_blocks(req, block_ids, scheduler_output)
             meta.add_new_req(
                 request_id=req_id,
                 local_block_ids=save_block_ids,
@@ -1421,7 +1482,7 @@ class MoRIIOConnectorScheduler:
         """Once a request is finished, determine whether request blocks
         should be freed now or will be sent asynchronously and freed later.
 
-        ``block_ids`` normally contains all cache groups. Hybrid callers from
+        ``block_ids`` normally contains all cache groups. Hybrid READ callers from
         ``request_finished_all_groups`` pass a flat attention list and the
         recurrent-state groups separately in ``mamba_block_groups``.
         """
@@ -1490,6 +1551,10 @@ class MoRIIOConnectorScheduler:
                 list(cast(list[int], block_ids)),
                 *[list(group) for group in mamba_block_groups],
             ]
+        elif self._has_mamba and self.mode == MoRIIOMode.WRITE:
+            computed_block_ids = self._clamp_to_prompt_blocks(
+                request, cast(BlockIds, block_ids)
+            )
         elif self._has_mamba:
             raise MoRIIOError("Hybrid request completion requires all KV cache groups")
         else:
@@ -1656,7 +1721,7 @@ class MoRIIOConnectorWorker:
         _, mamba_transfer_group_ids = _split_kv_cache_group_kinds(kv_cache_config)
         self._num_mamba_transfer_groups = len(mamba_transfer_group_ids)
         self._mamba_payload_index_by_layer = {
-            layer_name: payload_index
+            layer_name: group_id if self.mode == MoRIIOMode.WRITE else payload_index
             for payload_index, group_id in enumerate(mamba_transfer_group_ids, start=1)
             for layer_name in kv_cache_config.transfer_groups[group_id].layer_names
         }
@@ -1880,8 +1945,8 @@ class MoRIIOConnectorWorker:
         request_id: ReqId,
         transfer_id: TransferId,
         dst_engine_id: str,
-        local_block_ids: list[int],
-        remote_block_ids: list[int] | None,
+        local_block_ids: BlockIds,
+        remote_block_ids: BlockIds | None,
         layer_name: str,
         kv_layer: torch.Tensor,
         remote_notify_port: int,
@@ -1889,6 +1954,7 @@ class MoRIIOConnectorWorker:
         multi_pod_hosts: list[str],
         remote_dp_size_local: int,
         remote_dp_size: int,
+        remote_tp_size: int | None = None,
     ) -> None:
         """Schedule a block write operation.
 
@@ -1905,6 +1971,7 @@ class MoRIIOConnectorWorker:
             multi_pod_hosts: List of pod IPs for multi-pod Wide-EP
             remote_dp_size_local: Per-pod DP size for multi-pod
             remote_dp_size: Global DP size of the decode instance
+            remote_tp_size: Tensor parallel size advertised by the peer
 
         """
         # synchronization to prevent dirty reads between
@@ -1929,6 +1996,7 @@ class MoRIIOConnectorWorker:
             multi_pod_hosts=multi_pod_hosts,
             remote_dp_size_local=remote_dp_size_local,
             remote_dp_size=remote_dp_size,
+            remote_tp_size=remote_tp_size,
         )
         self._writer.schedule_write(task)
 
@@ -2355,15 +2423,6 @@ class MoRIIOConnectorWorker:
         self._has_mamba = any(
             self._is_mamba_layer(layer_name) for layer_name in kv_caches
         )
-        if self._has_mamba and self.mode == MoRIIOMode.WRITE:
-            # WRITE needs a distinct conv/ssm transfer plan. Reject before
-            # allocating or registering any regions rather than silently
-            # serving a zero recurrent state.
-            raise MoRIIOError(
-                "MoRIIO hybrid (mamba/KDA) transfer is implemented for READ "
-                "mode only; set kv_connector_extra_config.read_mode=true "
-                "for hybrid models"
-            )
         if self._has_mamba:
             mamba_specs = [
                 cast(MambaSpec, self.layer_to_spec[layer_name])
@@ -2449,10 +2508,15 @@ class MoRIIOConnectorWorker:
         caches_data = []
         self.layer_base_addr_index = {}
         base_addr_idx = 0
-
+        # HMA (#53721 Gemma4 SWA, GLM-5.2 DSA, MiniMax): transfers already
+        # size RDMA from per-layer geometry, so allow divergent block_len
+        # (bytes) always, and divergent block_size (tokens/page) only when
+        # the hybrid KV cache manager is enabled. Without HMA, block_size
+        # must stay uniform for the peer page handshake.
         hma_enabled = (
             not self.vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
         )
+
         for layer_name in kv_caches:
             self.layer_base_addr_index[layer_name] = base_addr_idx
             if self._is_mamba_layer(layer_name):
@@ -2467,16 +2531,31 @@ class MoRIIOConnectorWorker:
                     base_addr_idx += 1
                 continue
             geometry = self._get_layer_transfer_geometry(layer_name)
-            if hma_enabled:
-                if geometry.block_len != self.block_len:
+            if geometry.block_size != self.block_size:
+                if not hma_enabled:
                     raise ValueError(
-                        "MoRIIO KV cache block length mismatch for layer "
-                        f"{layer_name}: {geometry.block_len} != {self.block_len}"
+                        "MoRIIO KV cache block size mismatch for layer "
+                        f"{layer_name}: {geometry.block_size} != "
+                        f"{self.block_size}"
                     )
-            elif geometry.block_size != self.block_size:
-                raise ValueError(
-                    "MoRIIO KV cache block size mismatch for layer "
-                    f"{layer_name}: {geometry.block_size} != {self.block_size}"
+                logger.debug(
+                    "MoRIIO HMA per-layer block_size for %s: %d "
+                    "(page/default %d); continuing with per-layer sizes.",
+                    layer_name,
+                    geometry.block_size,
+                    self.block_size,
+                )
+            if geometry.block_len != self.block_len:
+                # Unlike block_size above, divergent block_len is allowed
+                # unconditionally (not gated on hma_enabled) -- it covers
+                # non-hybrid models too, e.g. GLM-5.2 DSA's per-layer
+                # geometry. Don't attribute it to HMA in the log.
+                logger.debug(
+                    "MoRIIO per-layer block_len for %s: %d "
+                    "(page/default %d); continuing with per-layer sizes.",
+                    layer_name,
+                    geometry.block_len,
+                    self.block_len,
                 )
             # num_blocks is advertised as a single scalar to the peer, so must it
             # be uniform
@@ -2506,6 +2585,7 @@ class MoRIIOConnectorWorker:
         # and a run that has three should not look identical in the log.
         distinct_block_lens = sorted(set(self.block_lens.values()))
         if len(distinct_block_lens) > 1:
+            self.block_len = max(distinct_block_lens)
             logger.info(
                 "MoRIIO registered %d attention layers with %d distinct block "
                 "lengths (bytes): %s; transfer sizes and strides are per layer, "
@@ -3267,6 +3347,9 @@ class MoRIIOConnectorWorker:
         )
 
     def _write_blocks_for_req(self, req_id: ReqId, meta: ReqMeta, layer_name, kv_layer):
+        if self._has_mamba:
+            # Reject before even an attention-layer write can be queued.
+            self._mamba_tp_ratio(int(meta.tp_size))
         # Compute per-request values to pass through the task (no shared state).
         # This avoids race conditions when concurrent requests target different
         # decode pods - each WriteTask carries its own routing info.
@@ -3278,16 +3361,12 @@ class MoRIIOConnectorWorker:
             if meta.remote_dp_size_local
             else int(meta.remote_dp_size)
         )
-        # WRITE does not support HMA, so unwrap blocks into flat lists.
-        # remote_block_ids can itself be empty so need to be careful when unwrapping.
-        local_block_ids = meta.local_block_ids[0]
-        remote_block_ids = meta.remote_block_ids[0] if meta.remote_block_ids else []
         self.schedule_write_blocks(
             request_id=req_id,
             transfer_id=meta.transfer_id,
             dst_engine_id=meta.remote_engine_id,
-            local_block_ids=local_block_ids,
-            remote_block_ids=remote_block_ids,
+            local_block_ids=meta.local_block_ids,
+            remote_block_ids=meta.remote_block_ids,
             layer_name=layer_name,
             kv_layer=kv_layer,
             remote_notify_port=meta.remote_notify_port,
@@ -3295,6 +3374,7 @@ class MoRIIOConnectorWorker:
             multi_pod_hosts=hosts,
             remote_dp_size_local=dp_local,
             remote_dp_size=int(meta.remote_dp_size),
+            remote_tp_size=int(meta.tp_size),
         )
 
     def merge_contiguous_blocks(

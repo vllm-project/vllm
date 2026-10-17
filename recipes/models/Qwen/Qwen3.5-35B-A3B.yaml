@@ -1,0 +1,254 @@
+meta:
+  title: "Qwen3.5-35B-A3B"
+  slug: "qwen3.5-35b-a3b"
+  provider: "Qwen"
+  description: "Compact Qwen3.5 multimodal MoE (35B total / 3B active) with gated delta networks, 256 experts, and 262K context"
+  date_added: 2026-04-22
+  date_updated: 2026-09-30
+  tasks:
+    - multimodal
+    - text
+  performance_headline: "Compact Qwen3.5 MoE — single-GPU FP8, 2x GPU or 2x Xeon 6 NUMA nodes or 4x Intel Arc Pro B60/B70 BF16 serving"
+  related_recipes:
+    - "Qwen/Qwen3.5-397B-A17B"
+    - "Qwen/Qwen3.5-122B-A10B"
+  hardware:
+    xeon6: verified
+    arc_pro_b60: verified
+    arc_pro_b70: verified
+
+model:
+  model_id: "Qwen/Qwen3.5-35B-A3B"
+  min_vllm_version: "0.17.0"
+  default_frontend: rust
+  architecture: moe
+  parameter_count: "35B"
+  active_parameters: "3B"
+  context_length: 262144
+  base_args:
+    - "--trust-remote-code"
+  base_env: {}
+
+features:
+  tool_calling:
+    description: "Enable automatic tool choice with Qwen3 Coder parser"
+    args:
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser"
+      - "qwen3_coder"
+  reasoning:
+    description: "Enable chain-of-thought reasoning with Qwen3 parser"
+    args:
+      - "--reasoning-parser"
+      - "qwen3"
+  spec_decoding:
+    description: "Multi-token prediction speculative decoding for lower latency"
+    args:
+      - "--speculative-config"
+      - '{"method":"mtp","num_speculative_tokens":1}'
+  text_only:
+    description: "Skip loading the vision encoder for text-only workloads — frees VRAM for KV cache. Mutually exclusive with encoder_parallel."
+    args:
+      - "--language-model-only"
+  encoder_parallel:
+    description: "Run the vision encoder in data-parallel mode — avoids TP comm overhead on the small encoder. Mutually exclusive with text_only."
+    args:
+      - "--mm-encoder-tp-mode"
+      - "data"
+  long_context:
+    description: "YaRN RoPE scaling past the native 262,144-token window to ~1,010,000 tokens. Static YaRN holds the scaling factor constant regardless of input length, so leave this off unless you actually serve long prompts; for ~524K, halve the factor to 2.0."
+    args:
+      - "--hf-overrides"
+      - '{"text_config": {"rope_parameters": {"mrope_interleaved": true, "mrope_section": [11, 11, 10], "rope_type": "yarn", "rope_theta": 10000000, "partial_rotary_factor": 0.25, "factor": 4.0, "original_max_position_embeddings": 262144}}}'
+      - "--max-model-len"
+      - "1010000"
+    env:
+      VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
+
+opt_in_features:
+  - spec_decoding
+  - text_only
+  - long_context
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 84
+    description: "Full precision BF16 — fits on 1x H200, 2x H100, 2x Xeon 6 NUMA nodes, or 4x Intel Arc Pro B60 / B70"
+    supported_hardware: [xeon6, arc_pro_b60, arc_pro_b70]
+  fp8:
+    model_id: "Qwen/Qwen3.5-35B-A3B-FP8"
+    precision: fp8
+    vram_minimum_gb: 42
+    description: "Qwen official FP8 checkpoint — single-GPU serving"
+    supported_hardware: [arc_pro_b60, arc_pro_b70]
+  gptq_int4:
+    model_id: "Qwen/Qwen3.5-35B-A3B-GPTQ-Int4"
+    precision: int4
+    vram_minimum_gb: 21
+    description: "GPTQ Int4 checkpoint — fits on a single 24GB GPU"
+    supported_hardware: [arc_pro_b60, arc_pro_b70]
+
+  redhat_fp8:
+    model_id: "RedHatAI/Qwen3.5-35B-A3B-FP8-dynamic"
+    precision: fp8
+    label: "FP8 Dynamic (RedHat)"
+    vram_minimum_gb: 42
+    description: "RedHatAI FP8 (E4M3) with dynamic per-token activation quantization"
+    supported_hardware: [arc_pro_b60, arc_pro_b70]
+    extra_args:
+      - "--kv-cache-dtype"
+      - "fp8"
+
+compatible_strategies:
+  - single_node_tp
+  - single_node_tep
+  - single_node_dep
+  - multi_node_tp
+  - multi_node_dep
+  - multi_node_tep
+
+hardware_overrides:
+  cpu:
+    extra_env:
+      # Allow cold weight downloads and CPU compilation to finish before startup times out.
+      VLLM_ENGINE_READY_TIMEOUT_S: "1800"
+  xpu:
+    extra_args:
+      - "--enforce-eager"
+
+strategy_overrides: {}
+
+guide: |
+  ## Overview
+
+  [Qwen3.5-35B-A3B](https://huggingface.co/Qwen/Qwen3.5-35B-A3B) is the smallest
+  MoE in the Qwen3.5 family, sharing the gated delta networks architecture with
+  35B total parameters and 3B activated per token (256 experts). With FP8 weights
+  it fits on a single 80 GB GPU and supports the full 262K context.
+
+  ## Prerequisites
+
+  - **vLLM version:** >= 0.17.0
+  - **Hardware (BF16):** 1x H200, 2x H100, 2x Xeon 6 NUMA nodes, 4x Intel Arc Pro B60 / B70
+  - **Hardware (FP8):** single H100/H200
+  - **Hardware (Int4):** single 24 GB GPU
+
+  ### Pip Install
+
+  #### NVIDIA
+  ```bash
+  uv venv
+  source .venv/bin/activate
+  uv pip install -U vllm --torch-backend=auto
+  ```
+
+  #### CPU
+  For Intel and AMD x86 CPUs, follow the [CPU pre-built wheels](https://docs.vllm.ai/en/latest/getting_started/installation/cpu/#pre-built-wheels) installation instructions.
+  ```bash
+  uv venv
+  source .venv/bin/activate
+  export VLLM_VERSION=$(curl -s https://api.github.com/repos/vllm-project/vllm/releases/latest | jq -r .tag_name | sed 's/^v//')
+  uv pip install https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cpu-cp38-abi3-manylinux_2_35_x86_64.whl --torch-backend cpu
+  ```
+
+  ### Docker
+  ```bash
+  docker pull vllm/vllm-openai-xpu:latest  # Intel XPU (B60 / B70)
+  ```
+
+  ## Launching the Server
+
+  ### Single-GPU FP8
+
+  ```bash
+  vllm serve Qwen/Qwen3.5-35B-A3B-FP8 \
+    --max-model-len 262144 \
+    --reasoning-parser qwen3
+  ```
+
+  ### BF16 on 2xH200 (TP2)
+
+  ```bash
+  vllm serve Qwen/Qwen3.5-35B-A3B \
+    --tensor-parallel-size 2 \
+    --max-model-len 262144 \
+    --reasoning-parser qwen3
+  ```
+
+  ### Intel Xeon 6 Deployment via Docker
+
+  Launch the x86 CPU vLLM Docker container for `Qwen/Qwen3.5-35B-A3B`:
+
+  ```bash
+  docker run \
+    --privileged --ipc=host -p 8000:8000 \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    -e VLLM_ENGINE_READY_TIMEOUT_S=1800 \
+    vllm/vllm-openai-cpu:latest-x86_64 Qwen/Qwen3.5-35B-A3B \
+    --trust-remote-code \
+    --tensor-parallel-size 1 \
+    --enable-auto-tool-choice \
+    --tool-call-parser qwen3_coder \
+    --reasoning-parser qwen3 \
+    --mm-encoder-tp-mode data
+  ```
+
+  ### MTP speculative decoding
+
+  ```bash
+  vllm serve Qwen/Qwen3.5-35B-A3B-FP8 \
+    --speculative-config '{"method": "mtp", "num_speculative_tokens": 1}' \
+    --reasoning-parser qwen3
+  ```
+
+  ### Docker (Intel XPU B60 / B70)
+
+  Validated on 4× Intel Arc Pro B60 / B70 (B60 24 GB, B70 32 GB per card) with the
+  official vLLM XPU image `vllm/vllm-openai-xpu:latest`.
+
+  ```bash
+  docker run --device /dev/dri \
+    -v /dev/dri/by-path:/dev/dri/by-path --shm-size=16g \
+    --privileged --ipc=host -p 8000:8000 \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    vllm/vllm-openai-xpu:latest \
+    Qwen/Qwen3.5-35B-A3B \
+    --reasoning-parser qwen3 \
+    --tensor-parallel-size 4 \
+    --max-model-len 8192 \
+    --enforce-eager
+  ```
+
+  ## Client Usage
+
+  ```python
+  from openai import OpenAI
+
+  client = OpenAI(api_key="EMPTY", base_url="http://localhost:8000/v1")
+  resp = client.chat.completions.create(
+      model="Qwen/Qwen3.5-35B-A3B",
+      messages=[{"role": "user", "content": "Explain gated delta networks in one paragraph."}],
+      max_tokens=512,
+  )
+  print(resp.choices[0].message.content)
+  ```
+
+  ## Troubleshooting
+
+  - **CPU startup timeout:** a cold weight download followed by CPU compilation
+    can exceed the default 600-second engine readiness timeout. The CPU recipe
+    sets `VLLM_ENGINE_READY_TIMEOUT_S=1800`; set any external health-check
+    deadline higher (for example, 2100 seconds). Increasing only the external
+    deadline does not prevent the frontend from timing out.
+  - **CUDA graph / Mamba cache size error:** reduce `--max-cudagraph-capture-size`
+    (default 512). See [vLLM PR #34571](https://github.com/vllm-project/vllm/pull/34571).
+  - **Disable reasoning:** add `--default-chat-template-kwargs '{"enable_thinking": false}'`.
+  - **Prefix Caching (Mamba):** currently experimental in "align" mode.
+
+  ## References
+
+  - [Model card](https://huggingface.co/Qwen/Qwen3.5-35B-A3B)
+  - [FP8 checkpoint](https://huggingface.co/Qwen/Qwen3.5-35B-A3B-FP8)
+  - [GPTQ-Int4 checkpoint](https://huggingface.co/Qwen/Qwen3.5-35B-A3B-GPTQ-Int4)
+  - [Qwen3.5-397B-A17B recipe](../Qwen3.5-397B-A17B)
