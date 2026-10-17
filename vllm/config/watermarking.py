@@ -32,7 +32,9 @@ class WatermarkConfig:
     algorithm: WatermarkingAlgorithm = "gumbel"
     """Algorithm used to watermark generated text."""
     alpha: float = Field(default=0.1, ge=0, le=1)
-    """Probability of selecting key B for dual-key watermarking."""
+    """Probability of selecting key B for dual-key watermarking. Under
+    speculative decoding the effective key-B share is 1 - accepted draft
+    tokens / generated tokens; pass that value as the detector's `alpha`."""
     context_width: int = Field(default=4, ge=1)
     """Number of prior tokens used by the watermark PRF."""
     deduplicate_contexts: WatermarkContextScope = "single_turn"
