@@ -545,28 +545,27 @@ class FlashInferBackend(AttentionBackend):
         unquantized cache uses the same K/V head-slot split."""
         if spec.state_content_bytes is not None:
             return spec
-        if not spec.kv_quant_mode.is_nvfp4:
-            if (
-                spec.kv_quant_mode == KVQuantMode.NONE
-                and _separate_kv_head_slots_enabled()
-            ):
-                assert spec.head_size == spec.head_size_v, (
-                    "Separate K/V head slots require symmetric K/V head sizes."
-                )
-                return replace(
-                    spec,
-                    num_head_slots=2 * spec.num_kv_heads,
-                    state_content_bytes=spec.head_size * get_dtype_size(spec.dtype),
-                )
-            return spec
-        hs_k = nvfp4_kv_cache_full_dim(spec.head_size)
-        hs_v = nvfp4_kv_cache_full_dim(spec.head_size_v)
-        assert hs_k == hs_v, "nvfp4 with asymmetric K/V head sizes not yet supported"
-        return replace(
-            spec,
-            num_head_slots=2 * spec.num_kv_heads,
-            state_content_bytes=hs_k * get_dtype_size(spec.dtype),
-        )
+        if spec.kv_quant_mode.is_nvfp4:
+            hs_k = nvfp4_kv_cache_full_dim(spec.head_size)
+            hs_v = nvfp4_kv_cache_full_dim(spec.head_size_v)
+            assert hs_k == hs_v, (
+                "nvfp4 with asymmetric K/V head sizes not yet supported"
+            )
+            return replace(
+                spec,
+                num_head_slots=2 * spec.num_kv_heads,
+                state_content_bytes=hs_k * get_dtype_size(spec.dtype),
+            )
+        if spec.kv_quant_mode == KVQuantMode.NONE and _separate_kv_head_slots_enabled():
+            assert spec.head_size == spec.head_size_v, (
+                "Separate K/V head slots require symmetric K/V head sizes."
+            )
+            return replace(
+                spec,
+                num_head_slots=2 * spec.num_kv_heads,
+                state_content_bytes=spec.head_size * get_dtype_size(spec.dtype),
+            )
+        return spec
 
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
