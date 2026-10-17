@@ -239,6 +239,35 @@ def test_sampling_replay_config(config, message):
             VllmConfig._verify_sampling_replay_config(config)
 
 
+@pytest.mark.parametrize(
+    ("is_hybrid", "disable_hybrid_kv_cache_manager", "should_raise"),
+    [
+        (True, True, True),
+        (True, False, False),
+        (False, True, False),
+    ],
+)
+def test_hybrid_model_requires_hybrid_kv_cache_manager(
+    is_hybrid: bool,
+    disable_hybrid_kv_cache_manager: bool,
+    should_raise: bool,
+):
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(is_hybrid=is_hybrid),
+        scheduler_config=SimpleNamespace(
+            disable_hybrid_kv_cache_manager=disable_hybrid_kv_cache_manager
+        ),
+    )
+
+    if should_raise:
+        with pytest.raises(
+            ValueError, match="Hybrid models.*require the hybrid KV cache manager"
+        ):
+            VllmConfig._verify_hybrid_kv_cache_manager(config)
+    else:
+        VllmConfig._verify_hybrid_kv_cache_manager(config)
+
+
 def test_kda_recoverssm_derivation_is_revalidated():
     config = SimpleNamespace(
         cache_config=SimpleNamespace(

@@ -1214,6 +1214,19 @@ class VllmConfig:
                         f"{connector_name}; PD auxiliary output is not supported."
                     )
 
+    def _verify_hybrid_kv_cache_manager(self) -> None:
+        if (
+            self.model_config is not None
+            and self.model_config.is_hybrid
+            and self.scheduler_config.disable_hybrid_kv_cache_manager
+        ):
+            raise ValueError(
+                "Hybrid models with attention and recurrent layers require the "
+                "hybrid KV cache manager. Remove "
+                "--disable-hybrid-kv-cache-manager or use a platform and KV "
+                "connector configuration that supports it."
+            )
+
     def _verify_kv_transfer_compat(self) -> None:
         """Reject configurations that silently corrupt KV transfers."""
         if (
@@ -2283,6 +2296,8 @@ class VllmConfig:
         if self.scheduler_config.disable_hybrid_kv_cache_manager is None:
             # Default to enable HMA if not explicitly disabled by user or logic above.
             self.scheduler_config.disable_hybrid_kv_cache_manager = False
+
+        self._verify_hybrid_kv_cache_manager()
 
         if (
             self.attention_config.hisparse_config is not None
