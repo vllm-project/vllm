@@ -72,6 +72,8 @@ def _get_or_create_aiter_qr_rmsnorm_comm(
         device_comm._aiter_qr_rmsnorm_comm = False
         return None
 
+    from aiter.dist.device_communicators.quick_all_reduce import qr_exchange_handles
+
     group = getattr(device_comm, "cpu_group", None)
     if group is None:
         device_comm._aiter_qr_rmsnorm_comm = False
@@ -88,11 +90,15 @@ def _get_or_create_aiter_qr_rmsnorm_comm(
 
     try:
         ptr = aiter.init_custom_qr(rank, world_size, qr_max_size)
-        handle = aiter.qr_get_handle(ptr)
-        handles = [None] * world_size
-        dist.all_gather_object(handles, handle, group=group)
-        aiter.qr_open_handles(ptr, handles)
-    except Exception:
+        qr_exchange_handles(ptr, world_size, group)
+    except Exception as e:
+        logger.warning_once(
+            "Fused AITER QuickReduce + RMSNorm is disabled: its communicator "
+            "could not be created (%s: %s). All-reduce and RMSNorm will run "
+            "as separate kernels.",
+            type(e).__name__,
+            e,
+        )
         device_comm._aiter_qr_rmsnorm_comm = False
         return None
 
@@ -1184,11 +1190,13 @@ def _rocm_aiter_fused_allreduce_rmsnorm_impl(
 
     if not use_1stage:
         from vllm.distributed import get_tp_group
+        from vllm.distributed.device_communicators.aiter_custom_all_reduce import (
+            qr_rmsnorm_supports_row,
+        )
 
         device_comm = get_tp_group().device_communicator
         qr_comm = getattr(device_comm, "qr_comm", None)
         hidden_dim = input_.shape[-1]
-        row_size = hidden_dim * input_.element_size()
         fused_qr_rmsnorm_ok = (
             # aiter.qr_all_reduce_rmsnorm does not implement Gemma's
             # (1 + weight) scaling.
@@ -1198,15 +1206,12 @@ def _rocm_aiter_fused_allreduce_rmsnorm_impl(
             and hasattr(qr_comm, "should_quick_allreduce")
             and qr_comm.should_quick_allreduce(input_)
             and input_.shape == residual.shape
-            and input_.dtype in (torch.bfloat16, torch.float16)
+            and qr_rmsnorm_supports_row(hidden_dim, input_.dtype)
             and input_.dtype == residual.dtype
             and input_.dtype == weight.dtype
             and weight.dim() == 1
             and weight.numel() == hidden_dim
             and input_.numel() % hidden_dim == 0
-            and row_size > 0
-            and row_size <= 32 * KB
-            and (32 * KB) % row_size == 0
         )
         if fused_qr_rmsnorm_ok:
             assert qr_comm is not None

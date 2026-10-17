@@ -17,6 +17,9 @@ import vllm.distributed as vllm_distributed
 import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.distributed.communication_op import tensor_model_parallel_all_reduce  # noqa
+from vllm.distributed.device_communicators.aiter_custom_all_reduce import (
+    AiterCustomAllreduce,
+)
 from vllm.distributed.device_communicators.quick_all_reduce import (
     KB,
     MB,
@@ -277,17 +280,29 @@ def test_rocm_aiter_fused_rmsnorm_uses_aiter_qr_rmsnorm_for_prefill(
     )
     monkeypatch.setattr(aiter_ops.dist, "get_world_size", lambda group: 2)
     monkeypatch.setattr(aiter_ops.dist, "get_rank", lambda group: 0)
-    monkeypatch.setattr(
-        aiter_ops.dist,
-        "all_gather_object",
-        lambda handles, handle, group: handles.__setitem__(0, handle),
+
+    def qr_get_handle(ptr, out_ptr):
+        raise AssertionError("the handshake goes through qr_exchange_handles")
+
+    exchanged = []
+    quick_all_reduce = types.ModuleType(
+        "aiter.dist.device_communicators.quick_all_reduce"
+    )
+    quick_all_reduce.qr_exchange_handles = (  # type: ignore[attr-defined]
+        lambda *args: exchanged.append(args)
+    )
+    for name in ("aiter.dist", "aiter.dist.device_communicators"):
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+    monkeypatch.setitem(
+        sys.modules,
+        "aiter.dist.device_communicators.quick_all_reduce",
+        quick_all_reduce,
     )
 
     calls = []
     fake_aiter = types.SimpleNamespace(
         init_custom_qr=lambda rank, world_size, qr_max_size: 123,
-        qr_get_handle=lambda ptr: b"handle",
-        qr_open_handles=lambda ptr, handles: None,
+        qr_get_handle=qr_get_handle,
     )
 
     def fake_qr_all_reduce_rmsnorm(
@@ -335,6 +350,7 @@ def test_rocm_aiter_fused_rmsnorm_uses_aiter_qr_rmsnorm_for_prefill(
         inp, residual, weight, 1e-6
     )
 
+    assert exchanged == [(123, 2, device_comm.cpu_group)]
     assert qr_comm.checked_input is inp
     assert len(calls) == 1
     assert calls[0]["ptr"] == 123
@@ -403,6 +419,49 @@ def test_rocm_aiter_fused_rmsnorm_keeps_1stage_decode_path(
     assert calls[0]["gemma_norm"] is False
     torch.testing.assert_close(out, inp + 1)
     torch.testing.assert_close(residual_out, residual + 1)
+
+
+def _qr_comm(qr_max_size: int = 2048 * MB, *, disabled: bool = False):
+    return SimpleNamespace(disabled=disabled, qr_max_size=qr_max_size)
+
+
+@pytest.mark.parametrize(
+    ("qr_max_size", "expected"),
+    [
+        # The fused kernel stages through the QuickReduce workspace.
+        (2048 * MB, 2048 * MB),
+        # A workspace below the pool must not shrink the pool's own gate.
+        (8 * MB, AiterCustomAllreduce.effective_max_size()),
+    ],
+)
+def test_fused_rms_max_size_follows_the_quickreduce_workspace(qr_max_size, expected):
+    # Hidden 4096 in bf16: the 64 MiB pool is 8192 tokens, so the default
+    # 16384-token prefill chunk only fits in the workspace.
+    assert (
+        AiterCustomAllreduce.fused_rms_max_size(
+            4096, torch.bfloat16, _qr_comm(qr_max_size)
+        )
+        == expected
+    )
+
+
+@pytest.mark.parametrize(
+    ("hidden_dim", "dtype", "qr_comm"),
+    [
+        (4096, torch.bfloat16, None),
+        (4096, torch.bfloat16, _qr_comm(disabled=True)),
+        (5120, torch.bfloat16, _qr_comm()),  # 10 KiB row does not divide the tile
+        (4096, torch.float32, _qr_comm()),
+    ],
+    ids=["no_qr", "qr_disabled", "row_not_dividing_tile", "dtype"],
+)
+def test_fused_rms_max_size_stays_on_the_pool_where_the_kernel_cannot_run(
+    hidden_dim, dtype, qr_comm
+):
+    assert (
+        AiterCustomAllreduce.fused_rms_max_size(hidden_dim, dtype, qr_comm)
+        == AiterCustomAllreduce.effective_max_size()
+    )
 
 
 @ray.remote(num_gpus=1, max_calls=1)
