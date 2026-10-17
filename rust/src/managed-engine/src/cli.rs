@@ -85,6 +85,9 @@ impl ManagedEngineArgs {
         self,
         model: String,
         revision: Option<String>,
+        tokenizer: Option<String>,
+        tokenizer_revision: Option<String>,
+        hf_config_path: Option<String>,
         max_logprobs: Option<i32>,
         profiler_config: Option<String>,
         reasoning_parser: Option<&str>,
@@ -100,6 +103,18 @@ impl ManagedEngineArgs {
         if let Some(revision) = revision {
             python_args.push("--revision".to_string());
             python_args.push(revision);
+        }
+        if let Some(tokenizer) = tokenizer {
+            python_args.push("--tokenizer".to_string());
+            python_args.push(tokenizer);
+        }
+        if let Some(tokenizer_revision) = tokenizer_revision {
+            python_args.push("--tokenizer-revision".to_string());
+            python_args.push(tokenizer_revision);
+        }
+        if let Some(hf_config_path) = hf_config_path {
+            python_args.push("--hf-config-path".to_string());
+            python_args.push(hf_config_path);
         }
         if let Some(max_model_len) = self.max_model_len {
             python_args.push("--max-model-len".to_string());
