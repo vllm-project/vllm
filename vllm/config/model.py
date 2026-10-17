@@ -405,6 +405,10 @@ class ModelConfig:
     definitions"""
     io_processor_plugin: str | None = None
     """IOProcessor plugin name to load at model startup"""
+    tokenizer_cache_gb: float = Field(default=0, ge=0, allow_inf_nan=False)
+    """CPU segment encoding cache budget in GiB per renderer/API process.
+    Zero disables it. Supported stateless HF ByteLevel BPE tokenizers reuse
+    added-token-delimited segments; other tokenizers use regular encoding."""
     renderer_num_workers: int = 1
     """Number of worker threads in the renderer thread pool. The pool is
     consumed by the async renderer path (e.g. the OpenAI-compatible API
@@ -470,6 +474,7 @@ class ModelConfig:
             "allowed_local_media_path",
             "allowed_media_domains",
             "tokenizer_revision",
+            "tokenizer_cache_gb",
             "spec_target_max_model_len",
             "enforce_eager",
             "return_sampling_mask",

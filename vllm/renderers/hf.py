@@ -70,6 +70,7 @@ if TYPE_CHECKING:
         ChatTemplateContentFormatOption,
         ConversationMessage,
     )
+    from vllm.tokenizers.segment_cache import SegmentTokenizerCache
 
     from .inputs import DictPrompt
     from .params import ChatParams
@@ -786,6 +787,30 @@ def safe_apply_chat_template(
     tokenize: bool = True,
     **kwargs,
 ) -> str | list[int]:
+    return _apply_chat_template_with_cache(
+        None,
+        model_config,
+        tokenizer,
+        conversation,
+        tools=tools,
+        chat_template=chat_template,
+        tokenize=tokenize,
+        **kwargs,
+    )
+
+
+def _apply_chat_template_with_cache(
+    tokenizer_cache: SegmentTokenizerCache | None,
+    /,
+    model_config: ModelConfig,
+    tokenizer: HfTokenizer,
+    conversation: list[ConversationMessage],
+    *,
+    tools: list[dict[str, Any]] | None = None,
+    chat_template: str | None = None,
+    tokenize: bool = True,
+    **kwargs,
+) -> str | list[int]:
     chat_template = resolve_chat_template(
         tokenizer,
         chat_template=chat_template,
@@ -822,6 +847,32 @@ def safe_apply_chat_template(
         resolved_kwargs["return_dict"] = False
 
     try:
+        if (
+            tokenizer_cache is not None
+            and tokenizer_cache.enabled
+            and tokenize
+            and not any(
+                resolved_kwargs.get(key)
+                for key in (
+                    "return_dict",
+                    "return_tensors",
+                    "return_assistant_tokens_mask",
+                    "padding",
+                    "truncation",
+                    "tokenizer_kwargs",
+                )
+            )
+        ):
+            text = tokenizer.apply_chat_template(
+                conversation=conversation,
+                tools=tools,
+                chat_template=chat_template,
+                tokenize=False,
+                **resolved_kwargs,
+            )
+            ids = tokenizer_cache.encode(text, add_special_tokens=False)
+            if ids is not None:
+                return ids
         plain = tokenizer.apply_chat_template(
             conversation=conversation,  # type: ignore[arg-type]
             tools=tools,  # type: ignore[arg-type]
@@ -962,7 +1013,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         )
 
         self._apply_chat_template_async = make_async(
-            safe_apply_chat_template, executor=self._executor
+            _apply_chat_template_with_cache, executor=self._executor
         )
 
         if self.tokenizer is not None:
@@ -1059,7 +1110,8 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
                 logger.warning_once(_TOKENIZE_OVERRIDE_WARNING)
             chat_template_kwargs["tokenize"] = True
 
-        prompt_raw = safe_apply_chat_template(
+        prompt_raw = _apply_chat_template_with_cache(
+            self._tokenizer_cache,
             model_config,
             tokenizer,
             conversation,
@@ -1165,6 +1217,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
 
         prompt_raw = await self._render_with_timeout(
             self._apply_chat_template_async(
+                self._tokenizer_cache,
                 model_config,
                 tokenizer,
                 conversation,
