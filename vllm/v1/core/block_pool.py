@@ -12,6 +12,7 @@ from vllm.distributed.kv_events import (
 )
 from vllm.logger import init_logger
 from vllm.multimodal.utils import get_mm_features_in_window
+from vllm.utils.math_utils import round_down
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
@@ -534,7 +535,7 @@ class BlockPool:
             )
             block_hashes = [block_hash]
             if report_all_hash_boundaries:
-                block_start = num_tokens // block_size * block_size
+                block_start = round_down(num_tokens, block_size)
                 first_hash_idx = block_start // self.hash_block_size
                 block_hashes = request.block_hashes[first_hash_idx:num_hash_blocks]
                 parent_hash = (
