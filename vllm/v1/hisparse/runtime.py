@@ -399,6 +399,7 @@ def allocate_hisparse_host_pools(
         barrier=tp_group.barrier,
         creator_memory_check=check_hisparse_host_memory,
         populate_shard=(tp_group.rank_in_group, tp_group.world_size),
+        unlink_owner=tp_group.rank_in_group == 0,
     )
     try:
         for start, end in _hisparse_registration_ranges(
@@ -412,7 +413,7 @@ def allocate_hisparse_host_pools(
             region.create_next_canonical_view(size).view(-1) for size in tensor_sizes
         ]
     except Exception:
-        region.cleanup()
+        region.abort_startup_cleanup()
         raise
     return pools, [], region
 
