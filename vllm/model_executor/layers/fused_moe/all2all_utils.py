@@ -100,6 +100,8 @@ def flashinfer_one_sided_dispatch_layout(
 
 logger = init_logger(__name__)
 
+NIXL_EP_MAX_DISPATCH_TOKENS_PER_RANK = 1024
+
 if current_platform.is_cuda_alike():
     if has_deep_ep():
         from .prepare_finalize.deepep_ht import DeepEPHTPrepareAndFinalize
@@ -418,6 +420,10 @@ def maybe_make_prepare_finalize(
 
     elif moe.use_nixl_ep_kernels:
         assert quant_config is not None
+        max_tokens_per_rank = min(
+            moe.max_num_tokens,
+            NIXL_EP_MAX_DISPATCH_TOKENS_PER_RANK,
+        )
         global_to_physical = physical_to_global = local_expert_global_ids = None
         if routing_tables is not None:
             (
@@ -426,7 +432,7 @@ def maybe_make_prepare_finalize(
                 local_expert_global_ids,
             ) = routing_tables
         all_to_all_args = dict(
-            max_num_tokens_per_dp_rank=moe.max_num_tokens,
+            max_num_tokens_per_dp_rank=max_tokens_per_rank,
             token_hidden_size=moe.hidden_dim,
             num_local_experts=moe.num_local_experts,
         )
@@ -441,7 +447,7 @@ def maybe_make_prepare_finalize(
 
         prepare_finalize = NixlEPPrepareAndFinalize(
             handle,
-            max_tokens_per_rank=moe.max_num_tokens,
+            max_tokens_per_rank=max_tokens_per_rank,
             num_dispatchers=all2all_manager.max_num_ep_ranks,
             expert_capacity=(moe.num_local_experts * all2all_manager.max_num_ep_ranks),
             use_fp8_dispatch=use_fp8_dispatch,
