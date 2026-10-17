@@ -1199,9 +1199,40 @@ def share_replayssm_ring_trackers(
                     "ReplaySSM layers in one cache group must share cache capacity"
                 )
 
-        ring_start = torch.zeros(num_blocks, dtype=torch.int32, device=device)
-        prev_num_accepted = torch.zeros_like(ring_start)
-        prev_query_len = torch.zeros_like(ring_start)
+        # Keep the trackers a previous bind created when they still cover the
+        # cache, as prefix views: CUDA graphs captured since then hold their
+        # addresses, and the kernels want the tracker length to match the
+        # cache. An extensible KV cache rebinds after capture with the same
+        # or fewer blocks.
+        trackers = (
+            first_mixer._replayssm_ring_start,
+            first_mixer._replayssm_prev_num_accepted,
+            first_mixer._replayssm_prev_query_len,
+        )
+        if (
+            trackers[0].numel() >= num_blocks
+            and trackers[0].device == device
+            and all(t.shape == trackers[0].shape for t in trackers)
+            and all(
+                mixer_tracker is tracker
+                for mixer in (replayssm_mixers[n] for n in group_layer_names)
+                for mixer_tracker, tracker in zip(
+                    (
+                        mixer._replayssm_ring_start,
+                        mixer._replayssm_prev_num_accepted,
+                        mixer._replayssm_prev_query_len,
+                    ),
+                    trackers,
+                )
+            )
+        ):
+            ring_start, prev_num_accepted, prev_query_len = (
+                t[:num_blocks] for t in trackers
+            )
+        else:
+            ring_start = torch.zeros(num_blocks, dtype=torch.int32, device=device)
+            prev_num_accepted = torch.zeros_like(ring_start)
+            prev_query_len = torch.zeros_like(ring_start)
         for layer_name in group_layer_names:
             mixer = replayssm_mixers[layer_name]
             mixer._replayssm_ring_start = ring_start

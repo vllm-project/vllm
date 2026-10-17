@@ -21,6 +21,7 @@ from lm_eval.api.registry import get_model
 from lm_eval.utils import simple_parse_args_string
 
 from vllm import LLM
+from vllm.config import CacheConfig
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -88,6 +89,7 @@ def _shutdown_lm(lm) -> None:
         return
     gpu_memory_utilization = (
         llm.llm_engine.vllm_config.cache_config.gpu_memory_utilization
+        or CacheConfig.DEFAULT_GPU_MEMORY_UTILIZATION
     )
     try:
         llm.llm_engine.engine_core.shutdown(timeout=ROCM_ENGINE_SHUTDOWN_TIMEOUT_S)
