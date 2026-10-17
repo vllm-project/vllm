@@ -2150,6 +2150,7 @@ def _metadata_config(
             max_model_len=max_model_len,
             original_max_model_len=-1 if auto_fit else None,
             use_mla=False,
+            supports_kv_cache_grouping=False,
         ),
         cache_config=SimpleNamespace(
             block_size=4,
@@ -2170,6 +2171,7 @@ def _metadata_config(
             max_num_seqs=4, disable_hybrid_kv_cache_manager=False
         ),
         num_prefill_lookahead_tokens=1,
+        speculative_config=None,
     )
 
 
@@ -2195,6 +2197,49 @@ def test_fixed_budget_leaves_room_for_late_metadata(metadata_spec):
     )[0]
     assert result.num_blocks == 15
     assert result.metadata_memory_bytes == 5 * page
+    assert _metadata_allocated_bytes(result) + result.metadata_memory_bytes == 20 * page
+
+
+@pytest.mark.parametrize("auto_fit", [True, False])
+def test_metadata_budget_uses_custom_builder(monkeypatch, metadata_spec, auto_fit):
+    from vllm.v1.core import kv_cache_config_builder
+
+    class PaddedBuilder(kv_cache_planning.DefaultKVCacheConfigBuilder):
+        def get_kv_cache_config_from_groups(self, config, groups, num_blocks):
+            result = super().get_kv_cache_config_from_groups(config, groups, num_blocks)
+            result.kv_cache_tensors = [
+                replace(
+                    tensor,
+                    size=2 * tensor.size,
+                    layer_stride=2 * tensor.layer_stride,
+                    block_stride=2 * tensor.block_stride,
+                )
+                for tensor in result.kv_cache_tensors
+            ]
+            return result
+
+    monkeypatch.setattr(
+        kv_cache_config_builder,
+        "get_kv_cache_config_builder",
+        lambda _: PaddedBuilder(),
+    )
+    cfg = _metadata_config(64, auto_fit=auto_fit)
+    page = metadata_spec.page_size_bytes
+    args = (cfg, [{"layer": metadata_spec}], [20 * page])
+
+    def reservation(groups, length):
+        return [((length + 3) // 4) * page]
+
+    if not auto_fit:
+        with pytest.raises(ValueError, match="estimated maximum model length is 24"):
+            get_kv_cache_configs(*args, reservation)
+        assert cfg.model_config.max_model_len == 64
+        return
+
+    result = get_kv_cache_configs(*args, reservation)[0]
+    assert cfg.model_config.max_model_len == 24
+    assert result.num_blocks == 7
+    assert result.metadata_memory_bytes == 6 * page
     assert _metadata_allocated_bytes(result) + result.metadata_memory_bytes == 20 * page
 
 
