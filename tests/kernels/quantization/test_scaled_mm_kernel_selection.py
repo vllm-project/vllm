@@ -28,6 +28,9 @@ from vllm.model_executor.kernels.linear import (
     init_int8_linear_kernel,
     register_linear_kernel,
 )
+from vllm.model_executor.kernels.linear.scaled_mm.ScaledMMLinearKernel import (
+    FP8ScaledMMLinearLayerConfig,
+)
 from vllm.model_executor.layers.quantization.utils.humming import prioritize_humming
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
@@ -97,6 +100,42 @@ def test_fp8_linear_backend_override(platform_mock, _):
         )
 
     assert type(kernel) is HummingFP8ScaledMMLinearKernel
+
+
+@pytest.mark.parametrize(
+    ("family", "weight_shape", "batch_invariant", "out_dtype", "expected"),
+    [
+        (120, (5120, 6144), False, torch.bfloat16, True),
+        (120, (5120, 6144), False, torch.float16, True),
+        (100, (5120, 6144), False, torch.bfloat16, False),
+        (120, (5120, 6144), True, torch.bfloat16, False),
+        (120, (5120, 6152), False, torch.bfloat16, False),
+        (120, (5120, 6144), False, torch.float32, False),
+    ],
+)
+def test_sm12x_per_tensor_fp8_small_m_dispatch(
+    monkeypatch, family, weight_shape, batch_invariant, out_dtype, expected
+):
+    """FlashInfer per-tensor FP8 sends small-M GEMMs to CUTLASS only on SM12x,
+    with 16-aligned N/K, bf16/fp16 output, and not in batch-invariant mode."""
+    from vllm.model_executor.kernels.linear.scaled_mm import flashinfer as fi
+
+    config = FP8ScaledMMLinearLayerConfig(
+        activation_quant_key=kFp8StaticTensorSym,
+        weight_quant_key=kFp8StaticTensorSym,
+        weight_shape=weight_shape,
+        input_dtype=out_dtype,
+        out_dtype=out_dtype,
+    )
+    monkeypatch.setattr(fi.envs, "VLLM_BATCH_INVARIANT", batch_invariant)
+    with (
+        patch.object(fi, "current_platform") as platform_mock,
+        patch.object(fi, "cutlass_fp8_supported", return_value=True),
+    ):
+        platform_mock.is_device_capability_family.side_effect = (
+            lambda cap: cap == family
+        )
+        assert fi._use_sm12x_small_m_dispatch(config) is expected
 
 
 def test_is_supported_is_abstract():

@@ -2,11 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+from collections.abc import Sequence
 from typing import ClassVar
 
 import torch
 
 import vllm.envs as envs
+from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
 )
@@ -14,6 +16,9 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     QuantKey,
     kFp8StaticTensorSym,
+)
+from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
+    cutlass_fp8_supported,
 )
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
@@ -35,8 +40,23 @@ from .ScaledMMLinearKernel import (
     FP8ScaledMMLinearLayerConfig,
 )
 
+logger = init_logger(__name__)
+
 
 class FlashInferFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
+    def __init__(
+        self, c: FP8ScaledMMLinearLayerConfig, layer_param_names: Sequence[str]
+    ) -> None:
+        super().__init__(c, layer_param_names)
+        self.cutlass_max_m = 0
+        if _use_sm12x_small_m_dispatch(c):
+            self.cutlass_max_m = SM12X_FP8_CUTLASS_MAX_M
+            logger.info_once(
+                "Using CUTLASS for per-tensor FP8 GEMMs with M <= %d on SM12x.",
+                SM12X_FP8_CUTLASS_MAX_M,
+                scope="global",
+            )
+
     @classmethod
     def is_supported(
         cls, compute_capability: int | None = None
@@ -81,8 +101,36 @@ class FlashInferFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         output_shape: list,
     ) -> torch.Tensor:
         return flashinfer_scaled_fp8_mm(
-            A, B, out_dtype=out_dtype, scale_a=As, scale_b=Bs, bias=bias
+            A,
+            B,
+            out_dtype=out_dtype,
+            scale_a=As,
+            scale_b=Bs,
+            bias=bias,
+            cutlass_max_m=self.cutlass_max_m,
         )
+
+
+# Largest M up to which CUTLASS beats FlashInfer bmm_fp8 on SM12x at every
+# tested size with both tuned and default cuBLASLt algorithms (RTX 5090 sweep).
+# At these sizes cuBLASLt often picks a split-K kernel that needs a memset
+# before the GEMM.
+SM12X_FP8_CUTLASS_MAX_M = 32
+
+
+def _use_sm12x_small_m_dispatch(c: FP8ScaledMMLinearLayerConfig) -> bool:
+    # Picking the kernel by M would make results depend on the batch size.
+    if envs.VLLM_BATCH_INVARIANT:
+        return False
+    n, k = c.weight_shape
+    return (
+        current_platform.is_device_capability_family(120)
+        # cutlass_scaled_mm only writes bf16/fp16.
+        and c.out_dtype in (torch.bfloat16, torch.float16)
+        and n % 16 == 0
+        and k % 16 == 0
+        and cutlass_fp8_supported()
+    )
 
 
 class FlashInferFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):

@@ -963,7 +963,19 @@ if has_flashinfer():
         B_scale: torch.Tensor,
         dtype: torch.dtype,
         backend: str,
+        cutlass_max_m: int = 0,
     ) -> torch.Tensor:
+        # Runs eagerly with a concrete M, so each captured CUDA graph size takes
+        # the branch for its own M. cutlass_scaled_mm is 2-D, so only the
+        # unbatched call from flashinfer_scaled_fp8_mm may enable it.
+        if cutlass_max_m > 0 and A.shape[1] <= cutlass_max_m:
+            assert A.shape[0] == 1 and B.shape[0] == 1, (
+                "cutlass_max_m requires an unbatched (1, M, K) x (1, K, N) call"
+            )
+            from vllm import _custom_ops as ops
+
+            return ops.cutlass_scaled_mm(A[0], B[0], A_scale, B_scale, dtype)[None]
+
         from flashinfer import bmm_fp8 as bmm_fp8_
 
         return bmm_fp8_(A, B, A_scale, B_scale, dtype, None, backend)
@@ -978,6 +990,7 @@ if has_flashinfer():
         B_scale: torch.Tensor,
         dtype: torch.dtype,
         backend: str,
+        cutlass_max_m: int = 0,
     ) -> torch.Tensor:
         return torch.empty(
             A.shape[0], A.shape[1], B.shape[2], dtype=dtype, device=A.device
@@ -1135,7 +1148,10 @@ def flashinfer_scaled_fp8_mm(
     scale_b: torch.Tensor,
     out_dtype: torch.dtype,
     bias: torch.Tensor | None = None,
+    cutlass_max_m: int = 0,
 ) -> torch.Tensor:
+    """FP8 GEMM through FlashInfer bmm_fp8; GEMMs with M <= cutlass_max_m run
+    vLLM's CUTLASS scaled_mm instead."""
     assert a.ndim == 2 and b.ndim == 2
     assert a.shape[1] == b.shape[0]
     assert scale_a.numel() == 1 and scale_b.numel() == 1
@@ -1151,6 +1167,7 @@ def flashinfer_scaled_fp8_mm(
         scale_b,
         out_dtype,
         "auto",
+        cutlass_max_m,
     ).view(a.shape[0], b.shape[1])
 
     if bias is not None:
