@@ -77,8 +77,11 @@ def test_inference_span_api_identity_preserves_parent_and_usage(
     provider = TracerProvider()
     provider.add_span_processor(SimpleSpanProcessor(exporter))
     monkeypatch.setattr(otel.trace, "get_tracer", provider.get_tracer)
-    headers = {"traceparent": "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"}
-    headers[SpanAttributes.API_SURFACE] = "client-controlled"
+    headers = {
+        "traceparent": "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01",
+        "api_surface": "client-controlled",
+        "vllm.api_surface": "client-controlled",
+    }
     state = Mock(
         spec=RequestState,
         external_req_id="request",
@@ -112,10 +115,11 @@ def test_inference_span_api_identity_preserves_parent_and_usage(
         assert span.parent.span_id == int("0123456789abcdef", 16)
         assert span.attributes[SpanAttributes.GEN_AI_USAGE_PROMPT_TOKENS] == 3
         assert span.attributes[SpanAttributes.GEN_AI_USAGE_COMPLETION_TOKENS] == 2
+        assert "api_surface" not in span.attributes
         if api_surface in ("messages", "chat_completions", "completions"):
-            assert span.attributes[SpanAttributes.API_SURFACE] == api_surface
+            assert span.attributes["vllm.api_surface"] == api_surface
         else:
-            assert SpanAttributes.API_SURFACE not in span.attributes
+            assert "vllm.api_surface" not in span.attributes
     finally:
         provider.shutdown()
 

@@ -68,11 +68,12 @@ This opt-in setting adds an `api_surface` label to the following request metrics
 
 Its values are `messages` for `/v1/messages`, `chat_completions` for
 `/v1/chat/completions`, `completions` for `/v1/completions`, and `unknown`
-for callers without one of these API identities, including offline generation.
+for callers without one of these API identities, including offline generation
+and Cohere requests.
 When enabled, the label applies to streaming and non-streaming generation,
-including requests without tools, and does not require tracing. Inference traces
-include the `api_surface` attribute for recognized APIs whenever tracing is
-enabled, independently of `--enable-api-surface-metrics`.
+including requests without tools, and does not require tracing. See the
+[OpenTelemetry guide](../../examples/observability/opentelemetry/README.md#api-attribution)
+for trace attribution.
 
 Histogram buckets and counting semantics are unchanged. These metrics describe
 engine requests: multiple generated choices contribute separately, and errors
