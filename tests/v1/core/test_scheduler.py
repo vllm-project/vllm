@@ -4535,6 +4535,7 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     scheduler.aux_output_connector = None
     scheduler.grammar_compile_error_reqs = set()
     scheduler.encoder_cache_mismatch_reqs = set()
+    scheduler.missing_encoder_data_reqs = set()
     scheduler.vllm_config = Mock()
     scheduler.return_sampling_mask = False
     scheduler.recompute_kv_load_failures = False
@@ -6756,6 +6757,93 @@ def test_encoder_cache_accepts_matching_embed_count():
     assert compatible.request_id in scheduler_output.num_scheduled_tokens
     assert compatible.request_id not in scheduler.encoder_cache_mismatch_reqs
     assert compatible.request_id not in scheduler_output.scheduled_encoder_inputs
+
+
+def test_missing_multimodal_data_fails_before_encoder_execution():
+    scheduler = create_scheduler(model="llava-hf/llava-1.5-7b-hf")
+    request = create_requests(
+        num_requests=1,
+        num_tokens=8,
+        mm_positions=[[PlaceholderRange(offset=0, length=4)]],
+    )[0]
+    request.mm_features[0].data = None
+    scheduler.add_request(request)
+
+    scheduler_output = scheduler.schedule()
+
+    assert not scheduler_output.num_scheduled_tokens
+    assert request.request_id in scheduler.missing_encoder_data_reqs
+    outputs = scheduler.update_from_output(
+        scheduler_output,
+        ModelRunnerOutput(req_ids=[], req_id_to_index={}),
+    )
+    assert request.status == RequestStatus.FINISHED_ERROR
+    assert outputs[request.client_index].outputs[0].finish_reason == FinishReason.ERROR
+
+    healthy_request = create_requests(num_requests=1, num_tokens=8)[0]
+    scheduler.add_request(healthy_request)
+    next_output = scheduler.schedule()
+    assert healthy_request.request_id in next_output.num_scheduled_tokens
+
+
+def test_cached_multimodal_data_can_be_omitted():
+    scheduler = create_scheduler(model="llava-hf/llava-1.5-7b-hf")
+    owner, cached = create_requests(
+        num_requests=2,
+        num_tokens=8,
+        mm_hashes_list=[["shared-image"], ["shared-image"]],
+        mm_positions=[
+            [PlaceholderRange(offset=0, length=4)],
+            [PlaceholderRange(offset=0, length=4)],
+        ],
+    )
+    scheduler.encoder_cache_manager.allocate(owner, 0)
+    cached.mm_features[0].data = None
+    scheduler.add_request(cached)
+
+    scheduler_output = scheduler.schedule()
+
+    assert cached.request_id in scheduler_output.num_scheduled_tokens
+    assert cached.request_id not in scheduler_output.scheduled_encoder_inputs
+    assert cached.request_id not in scheduler.missing_encoder_data_reqs
+
+
+def test_missing_future_multimodal_data_fails_before_worker_admission():
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf", max_num_seqs=1, max_num_batched_tokens=4
+    )
+    request = create_requests(
+        num_requests=1,
+        num_tokens=12,
+        mm_positions=[[PlaceholderRange(offset=6, length=4)]],
+    )[0]
+    request.mm_features[0].data = None
+    scheduler.add_request(request)
+
+    scheduler_output = scheduler.schedule()
+
+    assert not scheduler_output.scheduled_new_reqs
+    assert not scheduler_output.num_scheduled_tokens
+    assert request.request_id in scheduler.missing_encoder_data_reqs
+
+
+def test_external_encoder_data_can_supply_missing_payload():
+    scheduler = create_scheduler(model="llava-hf/llava-1.5-7b-hf")
+    request = create_requests(
+        num_requests=1,
+        num_tokens=8,
+        mm_positions=[[PlaceholderRange(offset=0, length=4)]],
+    )[0]
+    request.mm_features[0].data = None
+    scheduler.ec_connector = Mock()
+    scheduler.ec_connector.has_cache_item.return_value = True
+    scheduler.add_request(request)
+
+    scheduler_output = scheduler.schedule()
+
+    assert request.request_id in scheduler_output.num_scheduled_tokens
+    assert request.request_id not in scheduler_output.scheduled_encoder_inputs
+    assert request.request_id not in scheduler.missing_encoder_data_reqs
 
 
 def test_encoder_cache_rejects_mismatched_embed_count(caplog_vllm):
