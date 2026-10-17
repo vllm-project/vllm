@@ -2136,3 +2136,263 @@ def test_kv_cache_groups_tp_replicas(specs, tp_size, dcp_size, expected):
     """Replicas are the gcd of each layer's tp_size // max_tp_shards."""
     groups = [KVCacheGroupSpec([f"l.{i}"], spec) for i, spec in enumerate(specs)]
     assert kv_cache_groups_tp_replicas(groups, tp_size, dcp_size) == expected
+
+
+# Unprofiled attention metadata budgeting.
+
+
+def _metadata_config(
+    max_model_len=16, *, auto_fit=False, manual_bytes=None, blocks=None
+):
+    return SimpleNamespace(
+        device_config=SimpleNamespace(device_type="cuda"),
+        model_config=SimpleNamespace(
+            max_model_len=max_model_len,
+            original_max_model_len=-1 if auto_fit else None,
+            use_mla=False,
+            supports_kv_cache_grouping=False,
+        ),
+        cache_config=SimpleNamespace(
+            block_size=4,
+            num_gpu_blocks_override=blocks,
+            kv_cache_memory_bytes=manual_bytes,
+            cache_dtype="auto",
+            kv_cache_layout="LBNHC",
+            prefix_cache_retention_interval=None,
+            get_resolved_kv_cache_layout=lambda: KVCacheLayout.LBNHC,
+        ),
+        attention_config=SimpleNamespace(hisparse_config=None),
+        parallel_config=SimpleNamespace(
+            tensor_parallel_size=1,
+            decode_context_parallel_size=1,
+            prefill_context_parallel_size=1,
+        ),
+        scheduler_config=SimpleNamespace(
+            max_num_seqs=4, disable_hybrid_kv_cache_manager=False
+        ),
+        num_prefill_lookahead_tokens=1,
+        speculative_config=None,
+    )
+
+
+@pytest.fixture
+def metadata_spec():
+    return FullAttentionSpec(
+        block_size=4, num_kv_heads=1, head_size=8, dtype=torch.float32
+    )
+
+
+def _metadata_allocated_bytes(cache):
+    # Current cache tensors are views into a single backing allocation.
+    return max((tensor.size for tensor in cache.kv_cache_tensors), default=0)
+
+
+def test_fixed_budget_leaves_room_for_late_metadata(metadata_spec):
+    page = metadata_spec.page_size_bytes
+    result = get_kv_cache_configs(
+        _metadata_config(),
+        [{"layer": metadata_spec}],
+        [20 * page],
+        lambda groups, length: [5 * page],
+    )[0]
+    assert result.num_blocks == 15
+    assert result.metadata_memory_bytes == 5 * page
+    assert _metadata_allocated_bytes(result) + result.metadata_memory_bytes == 20 * page
+
+
+@pytest.mark.parametrize("auto_fit", [True, False])
+def test_metadata_budget_uses_custom_builder(monkeypatch, metadata_spec, auto_fit):
+    from vllm.v1.core import kv_cache_config_builder
+
+    class PaddedBuilder(kv_cache_planning.DefaultKVCacheConfigBuilder):
+        def get_kv_cache_config_from_groups(self, config, groups, num_blocks):
+            result = super().get_kv_cache_config_from_groups(config, groups, num_blocks)
+            result.kv_cache_tensors = [
+                replace(
+                    tensor,
+                    size=2 * tensor.size,
+                    layer_stride=2 * tensor.layer_stride,
+                    block_stride=2 * tensor.block_stride,
+                )
+                for tensor in result.kv_cache_tensors
+            ]
+            return result
+
+    monkeypatch.setattr(
+        kv_cache_config_builder,
+        "get_kv_cache_config_builder",
+        lambda _: PaddedBuilder(),
+    )
+    cfg = _metadata_config(64, auto_fit=auto_fit)
+    page = metadata_spec.page_size_bytes
+    args = (cfg, [{"layer": metadata_spec}], [20 * page])
+
+    def reservation(groups, length):
+        return [((length + 3) // 4) * page]
+
+    if not auto_fit:
+        with pytest.raises(ValueError, match="estimated maximum model length is 24"):
+            get_kv_cache_configs(*args, reservation)
+        assert cfg.model_config.max_model_len == 64
+        return
+
+    result = get_kv_cache_configs(*args, reservation)[0]
+    assert cfg.model_config.max_model_len == 24
+    assert result.num_blocks == 7
+    assert result.metadata_memory_bytes == 6 * page
+    assert _metadata_allocated_bytes(result) + result.metadata_memory_bytes == 20 * page
+
+
+@pytest.mark.parametrize("draft_length,expected_length", [(0, 40), (16, 32)])
+def test_auto_fit_solves_metadata_at_candidate_length(
+    metadata_spec, draft_length, expected_length
+):
+    cfg = _metadata_config(64, auto_fit=True)
+    draft_cfg = SimpleNamespace(max_model_len=draft_length)
+    page = metadata_spec.page_size_bytes
+    calls = []
+
+    def reservation(groups, length):
+        calls.append(length)
+        return [((length + 3) // 4 + draft_cfg.max_model_len // 4) * page]
+
+    result = get_kv_cache_configs(
+        cfg, [{"layer": metadata_spec}], [21 * page], reservation
+    )[0]
+    # Target metadata shrinks with auto-fit; independent draft metadata does not.
+    target_pages = expected_length // 4
+    assert cfg.model_config.max_model_len == expected_length
+    assert draft_cfg.max_model_len == draft_length
+    assert result.num_blocks == target_pages + 1
+    assert result.metadata_memory_bytes == (target_pages + draft_length // 4) * page
+    assert _metadata_allocated_bytes(result) + result.metadata_memory_bytes == 21 * page
+    assert len(calls) == len(set(calls))
+
+
+def test_uneven_workers_preserve_reservation_after_block_count_unification(
+    metadata_spec,
+):
+    cfg = _metadata_config(64, auto_fit=True)
+    page = metadata_spec.page_size_bytes
+    seen_groups = []
+
+    def reservation(groups, length):
+        seen_groups.append({name for group in groups for name in group.layer_names})
+        columns = (length + 3) // 4
+        return [columns * page, 2 * columns * page]
+
+    result = get_kv_cache_configs(
+        cfg,
+        [{"stage0": metadata_spec}, {"stage1": metadata_spec}],
+        [31 * page, 22 * page],
+        reservation,
+    )
+    assert cfg.model_config.max_model_len == 28
+    assert [cache.num_blocks for cache in result] == [8, 8]
+    assert [cache.metadata_memory_bytes for cache in result] == [7 * page, 14 * page]
+    assert all(names == {"stage0", "stage1"} for names in seen_groups)
+    for cache, budget in zip(result, [31 * page, 22 * page]):
+        assert _metadata_allocated_bytes(cache) + cache.metadata_memory_bytes <= budget
+
+
+@pytest.mark.parametrize("manual", ["bytes", "blocks"])
+def test_manual_capacity_does_not_silently_subtract_metadata(metadata_spec, manual):
+    page = metadata_spec.page_size_bytes
+    cfg = _metadata_config(
+        manual_bytes=20 * page if manual == "bytes" else None,
+        blocks=7 if manual == "blocks" else None,
+    )
+
+    def unexpected_query(groups, length):
+        pytest.fail("Manual capacity must not query automatic reservations")
+
+    result = get_kv_cache_configs(
+        cfg, [{"layer": metadata_spec}], [20 * page], unexpected_query
+    )[0]
+    assert result.num_blocks == (20 if manual == "bytes" else 7)
+    assert result.metadata_memory_bytes == 0
+
+
+def test_zero_reservation_keeps_original_auto_fit_path(metadata_spec):
+    page = metadata_spec.page_size_bytes
+    plain_config = _metadata_config(128, auto_fit=True)
+    queried_config = _metadata_config(128, auto_fit=True)
+    plain = get_kv_cache_configs(plain_config, [{"layer": metadata_spec}], [9 * page])[
+        0
+    ]
+    calls = []
+
+    def zero(groups, length):
+        calls.append(length)
+        return [0]
+
+    queried = get_kv_cache_configs(
+        queried_config, [{"layer": metadata_spec}], [9 * page], zero
+    )[0]
+    assert (
+        queried_config.model_config.max_model_len
+        == plain_config.model_config.max_model_len
+    )
+    assert queried.num_blocks == plain.num_blocks
+    assert queried.kv_cache_tensors == plain.kv_cache_tensors
+    assert calls == [128]
+
+
+@pytest.mark.parametrize("values", [[], [1, 2], [-1], [False], [float("nan")], ["1"]])
+def test_invalid_worker_reservations_fail_before_allocation(metadata_spec, values):
+    with pytest.raises(ValueError, match="reservation|reservations"):
+        get_kv_cache_configs(
+            _metadata_config(),
+            [{"layer": metadata_spec}],
+            [20 * metadata_spec.page_size_bytes],
+            lambda groups, length: values,
+        )
+
+
+def test_reservation_that_consumes_budget_fails_clearly(metadata_spec):
+    with pytest.raises(ValueError, match="after reserving attention metadata"):
+        get_kv_cache_configs(
+            _metadata_config(),
+            [{"layer": metadata_spec}],
+            [5 * metadata_spec.page_size_bytes],
+            lambda groups, length: [5 * metadata_spec.page_size_bytes],
+        )
+
+
+def test_auto_fit_rejects_when_even_one_token_does_not_fit(metadata_spec):
+    with pytest.raises(ValueError, match="Cannot auto-fit max_model_len"):
+        get_kv_cache_configs(
+            _metadata_config(64, auto_fit=True),
+            [{"layer": metadata_spec}],
+            [5 * metadata_spec.page_size_bytes],
+            lambda groups, length: [4 * metadata_spec.page_size_bytes],
+        )
+
+
+def test_failure_hint_does_not_subtract_reservation_twice(metadata_spec):
+    page = metadata_spec.page_size_bytes
+    with pytest.raises(ValueError, match="estimated maximum model length is 40"):
+        get_kv_cache_configs(
+            _metadata_config(64),
+            [{"layer": metadata_spec}],
+            [21 * page],
+            lambda groups, length: [((length + 3) // 4) * page],
+        )
+
+
+def test_failed_estimate_restores_context_length(metadata_spec):
+    cfg = _metadata_config(64, auto_fit=True)
+
+    def reservation(groups, length):
+        if length != 64:
+            raise RuntimeError("worker query failed")
+        return [metadata_spec.page_size_bytes]
+
+    with pytest.raises(RuntimeError, match="worker query failed"):
+        get_kv_cache_configs(
+            cfg,
+            [{"layer": metadata_spec}],
+            [21 * metadata_spec.page_size_bytes],
+            reservation,
+        )
+    assert cfg.model_config.max_model_len == 64
