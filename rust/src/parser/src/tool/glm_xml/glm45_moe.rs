@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use super::{GlmXmlToolParser, Separator};
 use crate::tool::{Result, Tool, ToolParser, ToolParserOutput};
 
@@ -40,5 +43,19 @@ impl ToolParser for Glm45MoeToolParser {
 
     fn reset(&mut self) -> String {
         self.0.reset()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Glm45MoeToolParser;
+    use crate::tool::tests::assert_tool_framing_preserves_body_whitespace;
+
+    #[test]
+    fn tool_framing_preserves_body_whitespace_across_chunk_boundaries() {
+        assert_tool_framing_preserves_body_whitespace::<Glm45MoeToolParser>(
+            "\n",
+            "<tool_call>get_weather\n</tool_call>",
+        );
     }
 }

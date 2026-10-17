@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from copy import copy
+
 from vllm import SamplingParams
 from vllm.outputs import CompletionOutput
 from vllm.sampling_params import RequestOutputKind
@@ -66,6 +68,20 @@ def test_parent_request_to_output_final_only() -> None:
     assert ([output_0, output_1], True) == parent_request.get_outputs(
         "child_id_1", output_1
     )
+
+
+def test_parallel_sampling_child_requests_preserve_session_id() -> None:
+    request = make_request(SamplingParams(n=2))
+    request.session_id = "session-1"
+    parent_request = ParentRequest(request)
+
+    for idx in range(parent_request.n):
+        request_id, child_params = parent_request.get_child_info(idx)
+        child_request = request if idx == parent_request.n - 1 else copy(request)
+        child_request.request_id = request_id
+        child_request.sampling_params = child_params
+
+        assert child_request.session_id == "session-1"
 
 
 def make_request(sampling_params: SamplingParams) -> EngineCoreRequest:

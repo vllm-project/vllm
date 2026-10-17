@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use anyhow::{Context as _, Result, anyhow, bail};
 use futures::{Stream, StreamExt as _, stream};
 use tokio::sync::mpsc;

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
@@ -27,8 +30,8 @@ const OFFLOADED_PATHS: &[&str] = &[
     "/detokenize",
     "/inference/v1/generate",
     // gRPC routes:
-    "/vllm.Generate/Generate",
-    "/vllm.Generate/GenerateStream",
+    "/vllm.Inference/Generate",
+    "/vllm.Inference/GenerateStream",
 ];
 
 /// Return a Tower layer that runs selected data-plane requests on the request runtime,
@@ -121,8 +124,8 @@ mod tests {
         assert!(should_offload("/tokenize"));
         assert!(should_offload("/detokenize"));
         assert!(should_offload("/inference/v1/generate"));
-        assert!(should_offload("/vllm.Generate/Generate"));
-        assert!(should_offload("/vllm.Generate/GenerateStream"));
+        assert!(should_offload("/vllm.Inference/Generate"));
+        assert!(should_offload("/vllm.Inference/GenerateStream"));
     }
 
     #[test]

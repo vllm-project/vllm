@@ -18,6 +18,7 @@ from unittest.mock import PropertyMock, patch
 import pytest
 
 from vllm.config import VllmConfig
+from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import RequestStatus
@@ -47,13 +48,17 @@ def _make_model_runner_output(
     )
 
 
-def _create_deferring_scheduler():
+def _create_deferring_scheduler(scheduling_policy="fcfs"):
     """Async scheduler with deferred block freeing forced on.
 
     The production gate additionally requires a PD KV-consumer connector;
     the mechanism itself is independent of it.
     """
-    scheduler = create_scheduler(model=MODEL, async_scheduling=True)
+    scheduler = create_scheduler(
+        model=MODEL,
+        async_scheduling=True,
+        scheduling_policy=scheduling_policy,
+    )
     scheduler.defer_block_free = True
     return scheduler
 
@@ -76,6 +81,24 @@ def _setup_request_with_inflight_step(scheduler, max_tokens: int = 5):
     out1 = scheduler.schedule()
     assert out1.num_scheduled_tokens[request.request_id] == 1
     return request, out0, out1
+
+
+def _fail_one_allocation(scheduler, call_number: int):
+    real_allocate = scheduler.kv_cache_manager.allocate_slots
+    calls = 0
+
+    def allocate(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == call_number:
+            return None
+        return real_allocate(*args, **kwargs)
+
+    return patch.object(
+        scheduler.kv_cache_manager,
+        "allocate_slots",
+        side_effect=allocate,
+    )
 
 
 def test_gate_enabled_for_async_consumer():
@@ -223,6 +246,54 @@ def test_preempt_defers_free_and_clears_bookkeeping():
     assert pool.get_num_free_blocks() == num_free_initially
 
 
+@pytest.mark.parametrize(
+    ("policy", "failed_call"),
+    [
+        ("fcfs", 1),
+        ("priority", 2),
+    ],
+)
+def test_allocation_retry_waits_for_fence_then_succeeds(policy, failed_call):
+    scheduler = _create_deferring_scheduler(policy)
+    requests = create_requests(
+        num_requests=3,
+        num_tokens=NUM_PROMPT_TOKENS,
+        max_tokens=10,
+        stop_token_ids=[STOP_TOKEN_ID],
+    )
+    for request in requests:
+        scheduler.add_request(request)
+    out0 = scheduler.schedule()
+    out1 = scheduler.schedule()
+
+    worst, trigger, tail = requests
+    worst.priority, trigger.priority, tail.priority = 9, 0, 1
+
+    with _fail_one_allocation(scheduler, failed_call) as allocate:
+        blocked = scheduler.schedule()
+    assert allocate.call_count == failed_call
+    assert not blocked.preempted_req_ids
+    retry_trigger = requests[failed_call - 1]
+    assert retry_trigger.request_id not in blocked.num_scheduled_tokens
+
+    for output in (out0, out1, blocked):
+        if output.total_num_scheduled_tokens:
+            scheduler.update_from_output(
+                output,
+                _make_model_runner_output(output),
+            )
+
+    expected_victim = worst if policy == "priority" else tail
+    with _fail_one_allocation(scheduler, failed_call) as allocate:
+        resumed = scheduler.schedule()
+
+    assert allocate.call_count > failed_call
+    assert expected_victim.request_id in resumed.preempted_req_ids
+    assert retry_trigger.request_id in resumed.num_scheduled_tokens
+    if policy == "priority":
+        assert tail.request_id in resumed.num_scheduled_tokens
+
+
 def test_multiple_deferred_frees_drain_in_order():
     scheduler = _create_deferring_scheduler()
     pool = scheduler.kv_cache_manager.block_pool
@@ -346,7 +417,7 @@ def test_abort_mid_prefill_defers_free():
     chunk is still in flight must withhold its blocks.
     """
     scheduler = create_scheduler(
-        model=MODEL, async_scheduling=True, long_prefill_token_threshold=16
+        model=MODEL, async_scheduling=True, max_num_batched_tokens=16
     )
     scheduler.defer_block_free = True
     pool = scheduler.kv_cache_manager.block_pool
@@ -412,3 +483,64 @@ def test_non_async_abort_defers_via_last_sched_seq():
     scheduler.update_from_output(out0, _make_model_runner_output(out0))
     assert not scheduler.deferred_frees
     assert pool.get_num_free_blocks() == num_free_initially
+
+
+def test_cow_retentions_deferred_until_copy_step_processed():
+    """The endpoints of a queued KV block copy must stay out of the free
+    pool until the step that runs the copy has been processed. Freed
+    earlier, an endpoint can be reallocated (e.g. as a PD KV-load
+    destination) and overwritten by a transfer that is not ordered against
+    the copy still pending in the in-flight step.
+    """
+    scheduler = _create_deferring_scheduler()
+    pool = scheduler.kv_cache_manager.block_pool
+    manager = scheduler.kv_cache_manager.coordinator.single_type_managers[0]
+
+    request = create_requests(
+        num_requests=1,
+        num_tokens=NUM_PROMPT_TOKENS,
+        max_tokens=5,
+        stop_token_ids=[STOP_TOKEN_ID],
+    )[0]
+    scheduler.add_request(request)
+
+    # Simulate a partial-hit CoW performed while scheduling step 1, whose
+    # hitting request was freed within the same step: the copy rides out0
+    # and each endpoint stays alive only through its copy retention.
+    src_block, dst_block = pool.get_new_blocks(2)
+    block_copy = KVCacheBlockCopy(
+        src_block_id=src_block.block_id, dst_block_id=dst_block.block_id
+    )
+    manager._pending_cow_copies.append((src_block, dst_block))
+    out0 = scheduler.schedule()
+    assert out0.kv_cache_block_copies == [block_copy]
+
+    # Exhaust the rest of the pool so the copy endpoints are the only blocks
+    # a new request could receive, then add one that fits exactly in them.
+    pool.get_new_blocks(pool.get_num_free_blocks())
+    late_request = create_requests(
+        num_requests=1,
+        num_tokens=2 * scheduler.block_size,
+        max_tokens=5,
+        req_ids=["late"],
+    )[0]
+    scheduler.add_request(late_request)
+
+    # Step 2 is scheduled while step 1 (which runs the copy) is still in
+    # flight: the retentions are released against the copy's fence, so the
+    # endpoints must not reach the free pool -- the late request must not be
+    # scheduled onto them.
+    out1 = scheduler.schedule()
+    assert src_block.ref_cnt == 1
+    assert dst_block.ref_cnt == 1
+    assert scheduler.deferred_frees
+    assert not out1.scheduled_new_reqs
+
+    # Step 1's output is processed: the copy has run, endpoints return to
+    # the pool and the late request can be scheduled onto them safely.
+    scheduler.update_from_output(out0, _make_model_runner_output(out0))
+    assert src_block.ref_cnt == 0
+    assert dst_block.ref_cnt == 0
+    assert not scheduler.deferred_frees
+    out2 = scheduler.schedule()
+    assert [r.req_id for r in out2.scheduled_new_reqs] == ["late"]

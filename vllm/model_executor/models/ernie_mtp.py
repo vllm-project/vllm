@@ -177,7 +177,7 @@ class ErnieMTP(nn.Module):
         )
 
         if self.config.tie_word_embeddings:
-            self.lm_head.weight = self.model.embed_tokens.weight
+            self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
@@ -214,6 +214,5 @@ class ErnieMTP(nn.Module):
                 if any(k in name for k in ("mtp", "embed_tokens", "lm_head")):
                     yield name, weight
 
-        skip_prefixes = ["lm_head"] if self.config.tie_word_embeddings else []
-        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(_filter(weights), mapper=self.hf_to_vllm_mapper)
