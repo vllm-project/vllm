@@ -117,6 +117,19 @@ async def test_uses_env_default_when_no_limit_specified():
 
 
 @pytest.mark.asyncio
+async def test_zero_limit_disables_upload_size_check():
+    """VLLM_MAX_AUDIO_CLIP_FILESIZE_MB=0 disables the upload size check."""
+    with patch("vllm.entrypoints.speech_to_text.base.utils.envs") as mock_envs:
+        mock_envs.VLLM_MAX_AUDIO_CLIP_FILESIZE_MB = 0
+        data = b"\x00" * (4 * 1024 * 1024)
+
+        upload = _make_upload_file(data, size=len(data))
+        result = await read_upload_with_limit(upload)
+
+    assert result == data
+
+
+@pytest.mark.asyncio
 async def test_chunked_read_does_not_fully_materialize():
     """Verify that for large oversized files, we stop reading early.
 
