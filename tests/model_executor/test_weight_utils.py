@@ -1,13 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
+import sys
 import tempfile
+import weakref
 from unittest.mock import Mock
 
 import huggingface_hub.constants
 import pytest
 import torch
 from huggingface_hub.utils import LocalEntryNotFoundError
+from safetensors.torch import save_file
 
 import vllm.model_executor.model_loader.weight_utils as weight_utils
 from vllm.model_executor.model_loader.weight_utils import (
@@ -16,6 +20,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     initialize_single_dummy_weight,
     load_attention_sink,
     maybe_remap_kv_scale_name,
+    safetensors_weights_iterator,
 )
 from vllm.platforms import current_platform
 
@@ -400,6 +405,47 @@ def test_drop_checkpoint_cache_releases_local_weight_files(
     monkeypatch.setattr("os.posix_fadvise", fadvise)
     drop_checkpoint_cache(str(tmp_path))
     fadvise.assert_called_once()
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="posix_fadvise is Linux-only")
+@pytest.mark.parametrize(
+    ("available_ram", "hold_tensors", "num_evicted"),
+    [(1, False, 2), (1, True, 0), (1 << 50, False, 0)],
+    ids=["streamed", "held", "fits-in-ram"],
+)
+def test_safetensors_iterator_evicts_released_shards(
+    tmp_path, monkeypatch, available_ram, hold_tensors, num_evicted
+):
+    """Evict a shard once its tensors are gone, only if the checkpoint is too big.
+
+    The last shard is still referenced when the iterator ends, so it stays.
+    """
+    shard_of: dict[str, str] = {}
+    for i in range(3):
+        path = str(tmp_path / f"model-{i + 1:05d}-of-00003.safetensors")
+        tensors = {f"layers.{i}.{suffix}": torch.full((4,), i) for suffix in "ab"}
+        save_file(tensors, path)
+        shard_of.update(dict.fromkeys(tensors, path))
+    files = sorted(set(shard_of.values()))
+    path_of_inode = {os.stat(path).st_ino: path for path in files}
+    yielded: dict[str, list[weakref.ref[torch.Tensor]]] = {p: [] for p in files}
+    evicted: list[str] = []
+
+    def fadvise(fd, offset, length, advice):
+        path = path_of_inode[os.fstat(fd).st_ino]
+        assert all(ref() is None for ref in yielded[path])
+        assert (offset, length, advice) == (0, 0, os.POSIX_FADV_DONTNEED)
+        evicted.append(path)
+
+    monkeypatch.setattr(weight_utils, "_get_available_ram_bytes", lambda: available_ram)
+    monkeypatch.setattr(os, "posix_fadvise", fadvise)
+    held = []
+    for name, tensor in safetensors_weights_iterator(files, False):
+        yielded[shard_of[name]].append(weakref.ref(tensor))
+        if hold_tensors:
+            held.append(tensor)
+
+    assert evicted == files[:num_evicted]
 
 
 @pytest.mark.parametrize("dtype", [torch.float8_e4m3fn, torch.float8_e5m2])

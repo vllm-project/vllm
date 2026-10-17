@@ -9,9 +9,11 @@ import glob
 import hashlib
 import json
 import os
+import sys
 import tempfile
 import threading
 import time
+import weakref
 from collections.abc import Callable, Generator, Iterable
 from contextlib import contextmanager, suppress
 from pathlib import Path
@@ -918,13 +920,17 @@ def drop_checkpoint_cache(
         )
         return
     for path in checkpoint_dir.glob("*.safetensors"):
-        try:
-            with path.open("rb") as file:
-                os.posix_fadvise(file.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)
-        except OSError as exc:
-            logger.warning(
-                "Could not release checkpoint page cache for %s: %s", path, exc
-            )
+        _drop_page_cache(path)
+
+
+def _drop_page_cache(path: str | Path) -> None:
+    if sys.platform != "linux":
+        return
+    try:
+        with open(path, "rb") as file:
+            os.posix_fadvise(file.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)
+    except OSError as exc:
+        logger.warning("Could not release checkpoint page cache for %s: %s", path, exc)
 
 
 def _get_checkpoints_size_bytes(files: list[str]) -> int:
@@ -1165,6 +1171,23 @@ def safetensors_weights_iterator(
             block_size=safetensors_prefetch_block_size,
         )
 
+    # Page cache counts toward a container's memory usage, and some runtimes
+    # act on that number before the kernel reclaims anything. A checkpoint
+    # this large cannot stay fully cached for the next load anyway, so evict
+    # each shard once nothing maps it.
+    evict_loaded_shards = (
+        not fits_in_ram
+        and safetensors_load_strategy in (None, "lazy")
+        and sys.platform == "linux"
+    )
+    if evict_loaded_shards:
+        logger.info_once(
+            "Evicting each checkpoint shard from the page cache once its "
+            "tensors are released."
+        )
+    # Mapped pages cannot be evicted, and every tensor of a shard maps it.
+    # Callers release tensors in order, so watch the last one of each shard.
+    loaded_shards: dict[str, weakref.ref[torch.Tensor]] = {}
     leftover_state_dict: dict[str, torch.Tensor] = {}
     for st_file in tqdm(
         sorted_files,
@@ -1209,12 +1232,22 @@ def safetensors_weights_iterator(
                 )
             yield from unflattened_state_dict.items()
         else:
+            last_tensor: weakref.ref[torch.Tensor] | None = None
             with safe_open(st_file, framework="pt") as f:
                 for name in f.keys():  # noqa: SIM118
                     if should_skip_weight(name, local_expert_ids):
                         continue
                     param = f.get_tensor(name)
+                    last_tensor = weakref.ref(param)
                     yield name, param
+                    # Callers drop a tensor only once a later one reaches
+                    # them, so check earlier shards on every step.
+                    for path, tensor in list(loaded_shards.items()):
+                        if tensor() is None:
+                            del loaded_shards[path]
+                            _drop_page_cache(path)
+            if evict_loaded_shards and last_tensor is not None:
+                loaded_shards[st_file] = last_tensor
 
 
 def multi_thread_safetensors_weights_iterator(
