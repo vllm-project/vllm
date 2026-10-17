@@ -1393,6 +1393,7 @@ class ModelConfig:
                 "modelopt_fp4",
                 "modelopt_mxfp8",
                 "mxfp8",
+                "inc_mxfp4",
                 "modelopt_mixed",
                 # Ensure heavy backends are probed last to avoid unnecessary
                 # imports during override detection (e.g., MXFP4 imports Triton)
