@@ -74,6 +74,10 @@ from vllm.v1.worker.worker_base import WorkerWrapperBase
 
 logger = init_logger(__name__)
 
+_FATAL_NON_OUTPUT_RPCS = frozenset(
+    {"execute_model", "sample_tokens", "execute_dummy_batch"}
+)
+
 
 class FutureWrapper(Future):
     def __init__(
@@ -1065,6 +1069,13 @@ class WorkerProc:
             # containing its string representation before transport.
             if output_rank is None or self.rank == output_rank:
                 self.handle_output(e)
+            elif isinstance(method, str) and method in _FATAL_NON_OUTPUT_RPCS:
+                # These model-step RPCs contain collectives. Continuing the
+                # dequeue loop on a failed non-output rank would let it enter
+                # the next collective while its peers are still handling the
+                # failed one, causing rank desynchronization and potentially a
+                # cross-rank deadlock.
+                raise
 
     @staticmethod
     def setup_proc_title_and_log_prefix(enable_ep: bool) -> None:
