@@ -241,6 +241,7 @@ class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
             w1_bias=getattr(layer, "w13_bias", None),
             w2_bias=getattr(layer, "w2_bias", None),
             per_act_token_quant=True,
+            per_out_ch_quant=True,
             layer=layer,
         )
 
