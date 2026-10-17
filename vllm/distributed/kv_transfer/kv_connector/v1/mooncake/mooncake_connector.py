@@ -1352,12 +1352,8 @@ class MooncakeConnectorWorker:
         self.finished_sending_reqs: set[ReqId] = set()
         self.finished_recving_reqs: set[ReqId] = set()
         # D-side: producer KV checksums of loads, put by the receiver loop
-        # before it finishes the load, and kept on the worker thread until
-        # reported with the load's finished_recving.
-        self._received_kv_checksums_queue: queue.Queue[tuple[ReqId, bytes]] = (
-            queue.Queue()
-        )
-        self._received_kv_checksums: dict[ReqId, bytes] = {}
+        # and reported by the next get_transfer_results.
+        self._received_kv_checksums: queue.Queue[tuple[ReqId, bytes]] = queue.Queue()
         # Written from the receiver loop, drained from the worker thread.
         self._invalid_block_ids: queue.Queue[set[int]] = queue.Queue()
         self._is_hma_required = len(kv_cache_config.kv_cache_groups) > 1
@@ -2393,17 +2389,14 @@ class MooncakeConnectorWorker:
         to track which workers are done.
         """
         finished_sending_reqs, finished_recving_reqs = self.get_finished()
+        kv_checksums: dict[ReqId, bytes] = {}
         while True:
             try:
-                req_id, checksums = self._received_kv_checksums_queue.get_nowait()
+                req_id, checksums = self._received_kv_checksums.get_nowait()
             except queue.Empty:
                 break
             # Every producer worker sending to this one sends the same.
-            self._received_kv_checksums.setdefault(req_id, checksums)
-        kv_checksums: dict[ReqId, bytes] = {}
-        for req_id in finished_recving_reqs or ():
-            if req_id in self._received_kv_checksums:
-                kv_checksums[req_id] = self._received_kv_checksums.pop(req_id)
+            kv_checksums[req_id] = checksums
 
         failed_recving_reqs: set[ReqId] = set()
         while True:
@@ -2558,7 +2551,7 @@ class MooncakeConnectorWorker:
             if pull_meta.failed:
                 continue
             if (checksums := kv_checksums.get(req_id)) is not None:
-                self._received_kv_checksums_queue.put((pull_meta.d_req_id, checksums))
+                self._received_kv_checksums.put((pull_meta.d_req_id, checksums))
             # No race because we are in async loop.
             pull_meta.pull_tasks_count -= 1
             # Empty pulls only release the producer's blocks; the consumer

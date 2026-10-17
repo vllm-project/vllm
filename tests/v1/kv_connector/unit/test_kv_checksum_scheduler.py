@@ -405,10 +405,12 @@ def _load(
     request: Request,
     transfer: _Transfer,
     corrupt: str | None = None,
+    early: bool = False,
 ):
     """Start the load of ``request`` on the consumer, copy the producer's
     blocks into the consumer's, and report the load finished with the
-    checksums the producer's connector sent, if any."""
+    checksums the producer's connector sent, if any, or a step before it
+    finishes if ``early``."""
     request.kv_transfer_params = {**transfer.params, "do_remote_prefill": True}
     consumer.scheduler.add_request(request)
     output = consumer.schedule()
@@ -427,6 +429,9 @@ def _load(
         x_bytes = 4 // consumer.tp_size * 16
         consumer.states[-1][state_block, x_bytes] ^= 1
     received = {request.request_id: transfer.sent} if transfer.sent else None
+    if early:
+        consumer.finish_step(output, received=received)
+        output, received = consumer.schedule(), None
     return consumer.finish_step(output, {request.request_id}, received)
 
 
@@ -597,6 +602,32 @@ def test_bad_load_follows_failure_policy(
         assert not _error_ids(engine_outputs)
         output = consumer.schedule()
         assert output.num_scheduled_tokens[request.request_id] == NUM_TOKENS
+
+
+@pytest.mark.parametrize("corrupt", [False, True])
+@pytest.mark.parametrize(
+    "connector",
+    ["NixlPushConnector", "MooncakeConnector"],
+    ids=["nixl-push", "mooncake"],
+)
+def test_checksums_received_before_the_load_finishes(connector, corrupt):
+    """Connectors report the producer's checksums when they receive them,
+    which may be a step before the load finishes."""
+    producer = _Engine("kv_producer", connector)
+    consumer = _Engine("kv_consumer", connector, fail_closed=True)
+    transfer = _prefill(producer, create_request(1, NUM_TOKENS, do_remote_decode=True))
+    assert transfer.sent is not None
+
+    request = create_request(1, NUM_TOKENS, do_remote_prefill=True)
+    engine_outputs = _load(
+        producer,
+        consumer,
+        request,
+        transfer,
+        corrupt="kv" if corrupt else None,
+        early=True,
+    )
+    assert _error_ids(engine_outputs) == ({request.request_id} if corrupt else set())
 
 
 @pytest.mark.parametrize("producer_group", ["skipped", "covered"])

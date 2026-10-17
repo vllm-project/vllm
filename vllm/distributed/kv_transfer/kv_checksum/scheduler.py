@@ -40,7 +40,7 @@ from vllm.v1.metrics.cache_hit_source import CacheHitSource
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-    from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+    from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
     from vllm.v1.core.kv_cache_utils import KVCacheBlock
     from vllm.v1.outputs import KVConnectorOutput
     from vllm.v1.request import Request
@@ -249,13 +249,25 @@ class KVChecksumScheduler:
         ):
             self._remote_prefills.add(request.request_id)
 
-    def add_send(self, request: "Request", blocks: "KVCacheBlocks") -> None:
-        """Checksum a producer request's KV in the step that finishes its
-        prefill, for its consumer to verify after loading it."""
+    def add_send(
+        self,
+        request: "Request",
+        num_scheduled_tokens: int,
+        kv_cache_manager: "KVCacheManager",
+    ) -> None:
+        """Checksum a producer request's KV if this step, which schedules
+        ``num_scheduled_tokens`` of it, finishes its prompt, for its consumer
+        to verify after loading it.
+        ``request.num_computed_tokens`` must already include this step's tokens.
+        """
+        num_tokens = request.num_computed_tokens
+        num_prompt_tokens = request.num_prompt_tokens
+        if num_tokens - num_scheduled_tokens < num_prompt_tokens <= num_tokens:
+            return
         params = request.kv_transfer_params
         if not params or not params.get("do_remote_decode"):
             return
-        num_tokens = request.num_computed_tokens
+        blocks = kv_cache_manager.get_blocks(request.request_id)
         checksum_blocks = self._blocks(blocks, 0, num_tokens)
         # A new prefill (after a preemption) replaces an earlier one.
         self._sends[request.request_id] = _Pending(checksum_blocks)

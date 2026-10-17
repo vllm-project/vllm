@@ -215,6 +215,7 @@ class TestPushScheduler:
         scheduler_output.scheduled_cached_reqs = MagicMock(
             req_ids=[], resumed_req_ids=set()
         )
+        scheduler_output.kv_checksums_to_send = None
 
         # Patch parent build_connector_meta so we don't have to set up
         # all the base scheduler plumbing.

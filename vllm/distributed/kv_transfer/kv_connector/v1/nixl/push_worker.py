@@ -125,7 +125,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         )
         self._pending_completion_notifs: queue.Queue[bytes] = queue.Queue()
         # D-side, main thread: KV checksums received on completion notifs,
-        # reported with the request's finished_recving.
+        # reported by the get_transfer_results that drains the notifs.
         self._received_kv_checksums: dict[ReqId, bytes] = {}
         # Main thread → writer: req_ids whose lease has expired or whose
         # WRITE has completed. Writer drops them from
@@ -791,7 +791,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                     logger.exception("Failed to decode a KV checksum notif")
                     continue
                 if req_id in self._recving_metadata:
-                    self._received_kv_checksums.setdefault(req_id, checksums)
+                    self._received_kv_checksums[req_id] = checksums
             else:
                 msg = notif.decode("utf-8")
                 if msg.startswith("HB:"):
@@ -859,7 +859,6 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         if done_sending:
             self._push_writer_wake.set()
 
-        for req_id in results.finished_recving:
-            if (checksums := self._received_kv_checksums.pop(req_id, None)) is not None:
-                results.kv_checksums[req_id] = checksums
+        results.kv_checksums = self._received_kv_checksums
+        self._received_kv_checksums = {}
         return results

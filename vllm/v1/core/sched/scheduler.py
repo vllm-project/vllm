@@ -1716,11 +1716,15 @@ class Scheduler(SchedulerInterface):
         # 3. If some tokens (e.g. spec tokens) are rejected later, the number of
         #    computed tokens will be adjusted in update_from_output.
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
+        kv_checksum = self.kv_checksum
         for req_id, num_scheduled_token in num_scheduled_tokens.items():
             request = self.requests[req_id]
             request.num_computed_tokens += num_scheduled_token
             request.num_in_flight_tokens += num_scheduled_token
-            self._add_kv_checksum_to_send(request, num_scheduled_token)
+            if kv_checksum is not None:
+                kv_checksum.add_send(
+                    request, num_scheduled_token, self.kv_cache_manager
+                )
             if self.defer_block_free:
                 # Record the in-flight step, to fence deferred block freeing.
                 request.last_sched_seq = self.sched_step_seq
@@ -1744,19 +1748,6 @@ class Scheduler(SchedulerInterface):
         # the scheduler output.
         self.finished_req_ids = set()
         self.reset_preempted_req_ids = set()
-
-    def _add_kv_checksum_to_send(
-        self, request: Request, num_scheduled_tokens: int
-    ) -> None:
-        """Checksum the request's KV if this step finishes its prompt."""
-        if (
-            self.kv_checksum is not None
-            and request.num_computed_tokens - num_scheduled_tokens
-            < request.num_prompt_tokens
-            <= request.num_computed_tokens
-        ):
-            blocks = self.kv_cache_manager.get_blocks(request.request_id)
-            self.kv_checksum.add_send(request, blocks)
 
     def _update_request_as_session(
         self, session: Request, update: StreamingUpdate
