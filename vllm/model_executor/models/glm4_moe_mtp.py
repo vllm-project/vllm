@@ -124,8 +124,12 @@ class Glm4MoeMultiTokenPredictorLayer(nn.Module):
         hidden_states, residual = self.mtp_block(
             positions=positions, hidden_states=hidden_states, residual=None
         )
-        hidden_states = residual + hidden_states
-        return hidden_states
+        # Apply the final norm once (fused add+norm) and recycle the
+        # post-final-norm hidden into the next draft step; compute_logits uses
+        # it directly. Matches the GLM MTP recycle contract from #47448 and
+        # vllm/models/glm5next/common/mtp.py.
+        hidden_states, _ = self.shared_head.norm(hidden_states, residual=residual)
+        return hidden_states, hidden_states
 
 
 class Glm4MoeMultiTokenPredictor(nn.Module):
@@ -185,9 +189,7 @@ class Glm4MoeMultiTokenPredictor(nn.Module):
     ) -> torch.Tensor:
         current_step_idx = spec_step_idx % self.num_mtp_layers
         mtp_layer = self.layers[str(self.mtp_start_layer_idx + current_step_idx)]
-        logits = self.logits_processor(
-            mtp_layer.shared_head.head, mtp_layer.shared_head(hidden_states)
-        )
+        logits = self.logits_processor(mtp_layer.shared_head.head, hidden_states)
         return logits
 
 
