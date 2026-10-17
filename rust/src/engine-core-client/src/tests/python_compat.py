@@ -238,6 +238,11 @@ outputs = EngineCoreOutputs(
             request_id="req-1",
             new_token_ids=[7, 8],
             finish_reason=FinishReason.LENGTH,
+            routed_experts=[
+                np.arange(4, dtype=np.uint8).reshape(2, 1, 2).dtype.str,
+                [2, 1, 2],
+                msgspec.msgpack.Ext(3, np.arange(4, dtype=np.uint8).tobytes()),
+            ],
         )
     ],
     finished_requests={"req-1"},
