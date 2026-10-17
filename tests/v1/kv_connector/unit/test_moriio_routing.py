@@ -14,6 +14,8 @@ stand-in rather than constructing a full scheduler.
 
 from types import SimpleNamespace
 
+import pytest
+
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector import (
     MoRIIOConnectorScheduler,
 )
@@ -93,6 +95,47 @@ def test_request_finished_no_kv_params_is_noop():
     req = _req("r3", None)
 
     delay_free, params = _request_finished(s, req, block_ids=[])
+
+    assert delay_free is False
+    assert params is None
+
+
+@pytest.mark.parametrize(
+    "status",
+    [RequestStatus.FINISHED_LENGTH_CAPPED, RequestStatus.FINISHED_STOPPED],
+)
+def test_request_finished_remote_decode_exports_blocks_on_stop_or_length(status):
+    # With max_tokens=1 the first token may be EOS/a stop token, in which case
+    # check_stop() yields FINISHED_STOPPED rather than FINISHED_LENGTH_CAPPED.
+    # Both are successful producer-side completions and must export the blocks.
+    s = _producer(global_dp_rank=0, dp_size=1, dp_size_local=1)
+    s.kv_cache_config = SimpleNamespace(
+        kv_cache_groups=[object()],
+        select_transfer_block_ids=lambda block_ids: block_ids,
+    )
+    s._reqs_need_send = {}
+    s._deferred_send_deadlines = {}
+    s._defer_timeout = 30.0
+    req = _req("r4", {"do_remote_decode": True, "transfer_id": "t4"}, status)
+
+    delay_free, params = _request_finished(s, req, block_ids=[[1, 2, 3]])
+
+    assert delay_free is True
+    assert params is not None
+    assert params["remote_block_ids"] == [[1, 2, 3]]
+    assert "r4" in s._reqs_need_send
+    assert "r4" in s._deferred_send_deadlines
+
+
+def test_request_finished_remote_decode_ignores_aborted():
+    s = _producer(global_dp_rank=0, dp_size=1, dp_size_local=1)
+    req = _req(
+        "r5",
+        {"do_remote_decode": True, "transfer_id": "t5"},
+        RequestStatus.FINISHED_ABORTED,
+    )
+
+    delay_free, params = _request_finished(s, req, block_ids=[[1]])
 
     assert delay_free is False
     assert params is None
