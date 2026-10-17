@@ -12,7 +12,12 @@ from fastapi import Request
 
 from vllm.config import VllmConfig
 from vllm.renderers import BaseRenderer
-from vllm.tracing.otel import _IS_OTEL_AVAILABLE, Span, Tracer
+from vllm.tracing import (
+    SpanAttributes,
+    contains_trace_headers,
+    extract_trace_headers,
+)
+from vllm.tracing.otel import _IS_OTEL_AVAILABLE, Span, Tracer, init_otel_trace_provider
 
 from ..base.io_processor import PoolingIOProcessor
 from ..typing import PoolingServeContext
@@ -94,13 +99,6 @@ else:
         set_span_in_context,
     )
 
-    from vllm.tracing import (
-        SpanAttributes,
-        contains_trace_headers,
-        extract_trace_headers,
-    )
-    from vllm.tracing.otel import init_otel_trace_provider
-
     class _ObservabilityMixinWithOpenTelemetry(_ObservabilityMixin):
         def __init__(self):
             super().__init__()
@@ -124,7 +122,6 @@ else:
             io_processor: PoolingIOProcessor,
             raw_request: Request | None = None,
         ):
-
             raw_trace_headers = await self._get_trace_headers(
                 {} if raw_request is None else raw_request.headers
             )
