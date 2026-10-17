@@ -33,10 +33,10 @@ from vllm.v1.hisparse.runtime import (
     update_hisparse_residency,
 )
 from vllm.v1.hisparse.types import (
-    SparseKVOffloadCommand,
-    SparseKVPageTransfer,
-    SparseKVResidencyUpdate,
-    SparseKVRowMirror,
+    HiSparsePageTransfer,
+    HiSparseResidencyUpdate,
+    HiSparseRowMirror,
+    HiSparseTransferCommand,
 )
 from vllm.v1.metrics.stats import KVCacheEvictionEvent
 from vllm.v1.worker.gpu.kv_connector import ActiveKVConnector
@@ -233,10 +233,10 @@ def test_draft_layer_rows_mirrored_after_drafter(monkeypatch, cg_mode):
 
     The drafter writes its layers' rows after the target forward. Mirroring
     them at the end of the target forward (the only mirror a FULL graph gets)
-    leaves pre-draft rows on the host, and the page is still reported clean.
+    leaves pre-draft rows on the host, and the page is still reported durable.
     """
     block_size, width = 4, 8
-    resident_block, host_block, transfer_id = 2, 1, 7
+    device_block, host_block, transfer_id = 2, 1, 7
     log: list[tuple[str, object]] = []
     _FakeEvent.log = log
 
@@ -258,14 +258,14 @@ def test_draft_layer_rows_mirrored_after_drafter(monkeypatch, cg_mode):
         lambda: SimpleNamespace(cudagraph_runtime_mode=cg_mode),
     )
 
-    slots = torch.arange(block_size) + resident_block * block_size
+    slots = torch.arange(block_size) + device_block * block_size
     request_state_indices = torch.full((1,), -1, dtype=torch.int32)
     handles = []
     for draft_layer in (False, True):
         runtime = SimpleNamespace(
             is_group_leader=True,
             eager_host_mirror=True,
-            resident_source_index=0,
+            device_group_index=0,
             host_cache=torch.zeros(4 * block_size, width),
             request_state_indices=request_state_indices,
             begin_forward=MagicMock(),
@@ -281,7 +281,7 @@ def test_draft_layer_rows_mirrored_after_drafter(monkeypatch, cg_mode):
         handles.append(handle)
     target, draft = handles
     # Rows the draft layer held before this step's drafter ran.
-    draft.view.cache[resident_block] = -1.0
+    draft.view.cache[device_block] = -1.0
 
     worker = HiSparseConnectorWorker(
         SimpleNamespace(
@@ -303,13 +303,13 @@ def test_draft_layer_rows_mirrored_after_drafter(monkeypatch, cg_mode):
     connector.connector_worker = worker
     connector._get_connector_metadata = MagicMock(
         return_value=HiSparseConnectorMetadata(
-            SparseKVOffloadCommand(
+            HiSparseTransferCommand(
                 [
-                    SparseKVPageTransfer(
+                    HiSparsePageTransfer(
                         transfer_id=transfer_id,
                         host_block_id=host_block,
-                        resident_block_ids=(resident_block,),
-                        after_forward=True,
+                        device_block_ids=(device_block,),
+                        runs_after_forward=True,
                     )
                 ]
             ),
@@ -317,8 +317,8 @@ def test_draft_layer_rows_mirrored_after_drafter(monkeypatch, cg_mode):
             (),
             {
                 "req": (
-                    SparseKVRowMirror(
-                        source_starts=(resident_block * block_size,),
+                    HiSparseRowMirror(
+                        source_starts=(device_block * block_size,),
                         destination_start=host_block * block_size,
                         num_rows=block_size,
                     ),
@@ -344,7 +344,7 @@ def test_draft_layer_rows_mirrored_after_drafter(monkeypatch, cg_mode):
         num_tokens=block_size,
         attn_metadata={"target": attn_metadata, "draft": attn_metadata},
     )
-    target.view.cache[resident_block] = 1.0
+    target.view.cache[device_block] = 1.0
     if cg_mode != CUDAGraphMode.FULL:
         target.finish_kv_update()
     connector.finish_forward()
@@ -353,7 +353,7 @@ def test_draft_layer_rows_mirrored_after_drafter(monkeypatch, cg_mode):
     # The drafter writes the draft layer's rows for the same positions.
     if cg_mode != CUDAGraphMode.FULL:
         draft.prepare_group_for_batch(attn_metadata)
-    draft.view.cache[resident_block] = 2.0
+    draft.view.cache[device_block] = 2.0
     if cg_mode != CUDAGraphMode.FULL:
         draft.finish_kv_update()
     # The next step's start mirrors the drafter's rows, then hands the page over.
@@ -448,8 +448,8 @@ def test_zero_token_step_holds_tp_ranks_after_host_write_wait(
     assert calls == expected
 
 
-def test_scheduled_prefix_hit_publishes_adopted_copies():
-    """Copies adopted after scheduling reach the worker as a residency update,
+def test_scheduled_prefix_hit_publishes_revived_copies():
+    """Copies revived after scheduling reach the worker as a residency update,
     leaving the block-table row the scheduler output carries untouched."""
     from tests.v1.core.test_prefix_caching import (
         HISPARSE_BLOCK_SIZE,
@@ -517,15 +517,15 @@ def test_residency_updates_persist_by_state_row():
     update_hisparse_residency(
         table,
         {
-            "a": SparseKVResidencyUpdate([0, 1, 2], ([1, 2, 3], [11, 12, 13])),
-            "b": SparseKVResidencyUpdate([0, 1], ([4, 5], [14, 15])),
+            "a": HiSparseResidencyUpdate([0, 1, 2], ([1, 2, 3], [11, 12, 13])),
+            "b": HiSparseResidencyUpdate([0, 1], ([4, 5], [14, 15])),
         },
         ["a", "b"],
         torch.tensor([2, 0], dtype=torch.int32),
     )
     update_hisparse_residency(
         table,
-        {"a": SparseKVResidencyUpdate([1, 3], ([0, 6], [0, 16]))},
+        {"a": HiSparseResidencyUpdate([1, 3], ([0, 6], [0, 16]))},
         ["b", "a"],
         torch.tensor([0, 2], dtype=torch.int32),
     )

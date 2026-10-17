@@ -447,7 +447,7 @@ def create_kv_cache_views(
 
 @dataclass(frozen=True, kw_only=True)
 class HiSparseHotSpec(KVCacheSpec):
-    """Ephemeral per-request HiSparse hot-cache allocation."""
+    """Ephemeral per-request HiSparse hot-buffer allocation."""
 
     page_size: int
     blocks_per_request: int
@@ -480,8 +480,8 @@ class HiSparseHotSpec(KVCacheSpec):
 
 
 @dataclass(frozen=True, kw_only=True)
-class HiSparseResidentSpec(KVCacheSpec):
-    """Reclaimable GPU-resident pages for host-backed HiSparse KV."""
+class HiSparseDeviceSpec(KVCacheSpec):
+    """Evictable device pages for host-backed HiSparse KV."""
 
     page_size: int
 
@@ -1441,7 +1441,7 @@ class KVCacheTensor:
 
 class KVCacheGroupRole(str, Enum):
     DEFAULT = "default"
-    HISPARSE_SOURCE = "hisparse_source"
+    HISPARSE_HOST = "hisparse_host"
     HISPARSE_INDEXER = "hisparse_indexer"
 
 
