@@ -65,6 +65,7 @@ from vllm.third_party.flash_linear_attention.ops import (
 )
 from vllm.third_party.flash_linear_attention.ops import (
     fused_post_conv_prep,
+    fused_recurrent_gated_delta_rule,
     fused_recurrent_gated_delta_rule_packed_decode,
     fused_sigmoid_gating_delta_rule_update,
 )
@@ -81,6 +82,7 @@ from vllm.v1.attention.backends.gdn_attn import (
     FLASHINFER_GDN_CHECKPOINT_ALIGNMENT,
     GDNAttentionMetadata,
 )
+from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec
 from vllm.v1.worker.workspace import current_workspace_manager
 
@@ -512,6 +514,10 @@ class ChunkGatedDeltaRule(CustomOp):
 
 @PluggableLayer.register("qwen_gated_delta_net_attention")
 class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
+    @property
+    def mamba_type(self) -> MambaAttentionBackendEnum:
+        return MambaAttentionBackendEnum.QWEN_GDN_ATTN
+
     def get_state_shape(
         self,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
@@ -1529,8 +1535,15 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         assert isinstance(attn_metadata, GDNAttentionMetadata)
 
+        recurrent_bi = envs.VLLM_BATCH_INVARIANT
+        if recurrent_bi and attn_metadata.spec_sequence_masks is not None:
+            raise NotImplementedError(
+                "Batch-invariant Qwen GDN does not support speculative decoding"
+            )
+
         if (
             self.enable_packed_recurrent_decode
+            and not recurrent_bi
             and attn_metadata.spec_sequence_masks is None
             and attn_metadata.num_prefills == 0
             and attn_metadata.num_decodes > 0
@@ -1639,6 +1652,50 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             )
         else:
             mixed_qkv_non_spec = None
+
+        if recurrent_bi:
+            assert mixed_qkv_non_spec is not None
+            assert non_spec_state_indices_tensor is not None
+            assert non_spec_query_start_loc is not None
+            indices = non_spec_state_indices_tensor
+            if has_initial_state is not None:
+                initial = ssm_state[indices]
+                initial = torch.where(
+                    has_initial_state[:, None, None, None], initial, 0
+                )
+                ssm_state[indices] = initial
+            q, k, v, g, beta = fused_post_conv_prep(
+                conv_output=mixed_qkv_non_spec,
+                a=a,
+                b=b,
+                A_log=self.A_log,
+                dt_bias=self.dt_bias,
+                num_k_heads=self.num_k_heads // self.tp_size,
+                head_k_dim=self.head_k_dim,
+                head_v_dim=self.head_v_dim,
+                apply_l2norm=False,
+                output_g_exp=False,
+            )
+            # The existing recurrent kernel stores state after every token and
+            # indexes a contiguous row of state IDs. All tokens share their
+            # request's slot; no per-token state allocation is needed.
+            repeated_indices = (
+                indices[:, None].expand(-1, max(1, num_actual_tokens)).contiguous()
+            )
+            output, _ = fused_recurrent_gated_delta_rule(
+                q=q.unsqueeze(0),
+                k=k.unsqueeze(0),
+                v=v.unsqueeze(0),
+                g=g.unsqueeze(0),
+                beta=beta.unsqueeze(0),
+                initial_state=ssm_state,
+                inplace_final_state=True,
+                cu_seqlens=non_spec_query_start_loc,
+                ssm_state_indices=repeated_indices,
+                use_qk_l2norm_in_kernel=True,
+            )
+            core_attn_out[:num_actual_tokens] = output.squeeze(0)
+            return
 
         query_spec, key_spec, value_spec = self.rearrange_mixed_qkv(mixed_qkv_spec)
 
