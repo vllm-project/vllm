@@ -2,13 +2,20 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Callable, Sequence
+from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock
 
 import pytest
 import torch
 
-from vllm import CompletionOutput, PromptType, RequestOutput, SamplingParams
+from vllm import (
+    CompletionOutput,
+    PromptType,
+    RequestOutput,
+    SamplingParams,
+    TokensPrompt,
+)
 from vllm import logger as vllm_logger
 from vllm.config import VllmConfig
 from vllm.entrypoints.generate.beam_search.offline import BeamSearchOfflineMixin
@@ -17,9 +24,10 @@ from vllm.entrypoints.generate.beam_search.utils import (
     BeamSearchInstance,
     BeamSearchSequence,
 )
+from vllm.exceptions import VLLMValidationError
 from vllm.inputs import EngineInput, TokensInput
 from vllm.logprobs import Logprob, SampleLogprobs
-from vllm.sampling_params import BeamSearchParams
+from vllm.sampling_params import BeamSearchParams, StructuredOutputsParams
 from vllm.v1.structured_output.backend_types import StructuredOutputBackend
 
 
@@ -48,8 +56,10 @@ class _Renderer:
 
 
 class _VllmConfig:
+    use_v2_model_runner = True
     watermark_config = object()
     speculative_config = None
+    model_config = SimpleNamespace(is_diffusion=False)
 
     def _check_supports_watermarking(self, params: BeamSearchParams) -> bool:
         return VllmConfig._check_supports_watermarking(cast(VllmConfig, self), params)
@@ -322,3 +332,89 @@ def test_offline_structured_beam_search_disables_internal_watermarking() -> None
     assert beam_params.watermarking is False
     assert beam_params.allowed_token_ids == [0]
     assert base_params.allowed_token_ids is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("offline", [False, True])
+@pytest.mark.parametrize("exhausted", [False, True])
+async def test_explicit_beam_allowlist_uses_exact_scores(offline, exhausted):
+    prompt: TokensInput = {"type": "token", "prompt_token_ids": [1]}
+    base = SamplingParams(watermarking=False)
+    template = [r async for r in _EngineClient().generate(prompt, base)][0]
+    template.outputs[0].logprobs[0] = dict(
+        reversed(list(template.outputs[0].logprobs[0].items()))
+    )
+    calls = []
+    if exhausted:
+        for logprob in template.outputs[0].logprobs[0].values():
+            logprob.logprob = float("-inf")
+
+    def score(params):
+        assert params.logprob_token_ids == [13, 14]
+        assert params.logprobs is None and params.allowed_token_ids is None
+        calls.append(params)
+        return template
+
+    class Client(_EngineClient):
+        async def generate(self, prompt, params, *args, **kwargs):
+            yield score(params)
+
+    class Offline(_OfflineServing):
+        _beam_search_step = BeamSearchOfflineMixin._beam_search_step
+
+        def _render_and_run_requests(self, prompts, params, output_type, **kwargs):
+            return [score(p) for p in params]
+
+    params = BeamSearchParams(beam_width=2, max_tokens=2, allowed_token_ids=[13, 14])
+    ids: list[Sequence[int]]
+    scores: list[float | None]
+    if offline:
+        result = (
+            Offline().beam_search([cast(TokensPrompt, prompt)], params)[0].sequences
+        )
+        ids = [b.tokens[1:] for b in result]
+        scores = [b.cum_logprob for b in result]
+        step_scores = [step for b in result for step in b.logprobs]
+    else:
+        serving = _AsyncServing()
+        serving.engine_client = Client()
+        online_result = [r async for r in serving.beam_search(prompt, "test", params)][
+            0
+        ]
+        ids = [b.token_ids for b in online_result.outputs]
+        scores = [b.cumulative_logprob for b in online_result.outputs]
+        step_scores = [
+            step for b in online_result.outputs for step in (b.logprobs or [])
+        ]
+    if exhausted:
+        assert len(calls) == 1
+        assert ids == scores == []
+        return
+    assert len(calls) == 3
+    assert ids[0] == [13, 13] and all(set(x) <= {13, 14} for x in ids)
+    assert scores == [-6.0, -7.0]
+    assert all(list(step) == [13, 14] for step in step_scores)
+    assert all(score.rank is None for step in step_scores for score in step.values())
+
+
+@pytest.mark.parametrize(
+    "case", ["empty", "grammar", "spec", "diffusion", "v1", "size", "id"]
+)
+def test_beam_allowlist_rejects_unsupported_requests(case):
+    config = SimpleNamespace(
+        use_v2_model_runner=case != "v1",
+        speculative_config=object() if case == "spec" else None,
+        model_config=SimpleNamespace(
+            is_diffusion=case == "diffusion",
+            max_logprobs=20,
+            get_vocab_size=lambda: 256,
+        ),
+    )
+    ids = {"empty": [], "size": list(range(129)), "id": [256]}.get(case, [13])
+    params = BeamSearchParams(2, 1, allowed_token_ids=ids)
+    if case == "grammar":
+        params.structured_outputs = StructuredOutputsParams(regex="a")
+    sampling = SamplingParams(logprobs=4)
+    with pytest.raises((ValueError, VLLMValidationError)):
+        params.configure_logprobs(sampling, config)
+        sampling._validate_logprobs(config.model_config)
