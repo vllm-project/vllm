@@ -2,8 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Script to test add_lora, remove_lora, pin_lora, list_loras functions."""
 
+import time
+
 import pytest
 
+from vllm import LLM, SamplingParams
 from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
 from vllm.entrypoints.launchers.api_server.entry import (
     build_async_engine_client_from_engine_args,
@@ -112,3 +115,31 @@ async def test_lora_functions_async():
         await run_check(llm.remove_lora, 12, [10, 11])
         await run_check(llm.remove_lora, 11, [10])
         await run_check(llm.remove_lora, 10, [])
+
+
+def test_invalid_lora_does_not_fail_engine(tmp_path):
+    """A failed dynamic LoRA load must only fail that call; the engine must keep
+    serving requests afterwards."""
+    llm = LLM(
+        model=MODEL_PATH,
+        enable_lora=True,
+        max_lora_rank=LORA_RANK,
+        max_model_len=128,
+        gpu_memory_utilization=0.8,
+        enforce_eager=True,
+        distributed_executor_backend="mp",
+    )
+    invalid_lora = LoRARequest(
+        lora_name="invalid",
+        lora_int_id=1,
+        lora_path=str(tmp_path / "missing_adapter"),
+    )
+
+    with pytest.raises(Exception, match="add_lora"):
+        llm.llm_engine.add_lora(invalid_lora)
+    # Give any asynchronous executor failure handling time to kick in.
+    time.sleep(2)
+
+    sampling_params = SamplingParams(temperature=0, max_tokens=16, ignore_eos=True)
+    outputs = llm.generate(["Hello, my name is"] * 4, sampling_params)
+    assert all(len(output.outputs[0].token_ids) == 16 for output in outputs)

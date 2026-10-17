@@ -20,7 +20,7 @@ from multiprocessing.connection import Connection
 from multiprocessing.process import BaseProcess
 from multiprocessing.synchronize import Lock as LockType
 from threading import Thread
-from typing import Any, cast
+from typing import Any, NoReturn, cast
 
 import cloudpickle
 import torch
@@ -608,8 +608,23 @@ class WorkerProc:
     """Wrapper that runs one Worker in a separate process."""
 
     READY_STR = "READY"
+    # Failures in these RPCs already fail the engine and can leave peer ranks
+    # blocked in collectives, so the worker exits and the executor's worker
+    # monitor shuts down the rest. Failures in other RPCs (e.g. loading an
+    # invalid LoRA adapter) are only returned to the caller.
+    FAIL_FAST_RPCS = frozenset(
+        {
+            "determine_available_memory",
+            "initialize_from_config",
+            "compile_or_warm_up_model",
+            "execute_model",
+            "sample_tokens",
+            "execute_dummy_batch",
+        }
+    )
     rpc_broadcast_mq: MessageQueue | None
     worker_response_mq: MessageQueue | None
+    exit_on_fatal_failure = False
 
     def _init_message_queues(
         self, input_shm_handle: Handle, vllm_config: VllmConfig
@@ -655,6 +670,11 @@ class WorkerProc:
         is_driver_worker: bool,
     ):
         self.rank = rank
+        # With fault tolerance, failed steps are recovered in place by the
+        # engine, so they must not take the worker down.
+        self.exit_on_fatal_failure = (
+            not vllm_config.parallel_config.enable_fault_tolerance
+        )
         wrapper = WorkerWrapperBase(rpc_rank=local_rank, global_rank=rank)
         # TODO: move `init_worker` to executor level as a collective rpc call
         all_kwargs: list[dict] = [
@@ -1032,6 +1052,10 @@ class WorkerProc:
 
         while True:
             output = self.async_output_queue.get()
+            if isinstance(output, threading.Event):
+                # Flush request from _flush_replies.
+                output.set()
+                continue
             self.enqueue_output(output)
 
     def worker_busy_loop(self):
@@ -1065,6 +1089,33 @@ class WorkerProc:
             # containing its string representation before transport.
             if output_rank is None or self.rank == output_rank:
                 self.handle_output(e)
+            if self.exit_on_fatal_failure and method in self.FAIL_FAST_RPCS:
+                self._exit_after_fatal_failure()
+
+    def _exit_after_fatal_failure(self) -> NoReturn:
+        """Exit at once so that the executor's worker monitor shuts down the
+        other ranks, which may be blocked in a collective with this one. The
+        normal teardown is skipped since it can block on those ranks."""
+        try:
+            logger.error("Exiting worker after a fatal RPC failure.")
+            self._flush_replies()
+        finally:
+            os._exit(1)
+
+    def _flush_replies(self) -> None:
+        """Send the pending replies, including the FAILURE reply, so that the
+        engine still reports the root cause once this process exits."""
+        if self.use_async_scheduling:
+            flushed = threading.Event()
+            self.async_output_queue.put(flushed)
+            if not flushed.wait(timeout=5):
+                # The output thread is stuck and may still be using the
+                # sockets, so leave them alone.
+                return
+        if (mq := self.worker_response_mq) is not None:
+            # os._exit drops zmq messages that are not sent yet, such as the
+            # wake-up of a reader waiting for the reply.
+            (mq.local_socket or mq.remote_socket).context.destroy(linger=1000)
 
     @staticmethod
     def setup_proc_title_and_log_prefix(enable_ep: bool) -> None:
