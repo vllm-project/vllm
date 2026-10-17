@@ -317,6 +317,7 @@ _SEQUENCE_CLASSIFICATION_MODELS = {
         "GteNewForSequenceClassification",
     ),
     "JambaForSequenceClassification": ("jamba", "JambaForSequenceClassification"),
+    "LayaForDecision": ("laya", "LayaForDecision"),
     "LlamaBidirectionalForSequenceClassification": (
         "llama",
         "LlamaBidirectionalForSequenceClassification",
