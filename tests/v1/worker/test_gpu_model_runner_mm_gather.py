@@ -85,6 +85,28 @@ def test_draft_shift_tolerates_missing_boundary_feature():
     assert int(is_mm_embed.sum()) == 7
 
 
+@pytest.mark.parametrize("shift", [1, 3])
+@pytest.mark.parametrize("num_computed", [8, 9])
+def test_draft_shift_ignores_freed_feature(shift, num_computed):
+    """A consumed feature may be freed without removing its request metadata."""
+    freed = _feature("freed", offset=0, length=8)
+    current = _feature("current", offset=8, length=8)
+
+    mm_embeds, is_mm_embed = _gather(
+        [freed, current],
+        [current],
+        num_scheduled=4,
+        shift=shift,
+        num_computed=num_computed,
+    )
+
+    start = num_computed + shift - current.mm_position.offset
+    expected = torch.arange(8 * HIDDEN, dtype=torch.float32).reshape(8, HIDDEN)
+    assert len(mm_embeds) == 1
+    torch.testing.assert_close(mm_embeds[0], expected[start : start + 4])
+    assert is_mm_embed.tolist() == [True] * 4
+
+
 def test_draft_shift_raises_on_interior_miss():
     """A miss for a feature within the processed range (not the look-ahead
     boundary) is a real invariant violation, even on the drafter path."""
