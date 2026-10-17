@@ -690,8 +690,11 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
                             )
                         else:
                             effective_max_length = doc_limit_max_length
-                        local_kwargs["truncation"] = "only_second"
-                        local_kwargs["max_length"] = effective_max_length
+                        # `only_second` needs at least one document token
+                        # left; otherwise keep the usual truncation.
+                        if len(query_tokens) + num_special < effective_max_length:
+                            local_kwargs["truncation"] = "only_second"
+                            local_kwargs["max_length"] = effective_max_length
 
                     prompt_inputs = tokenizer(
                         text=prompt_1, text_pair=prompt_2, **local_kwargs

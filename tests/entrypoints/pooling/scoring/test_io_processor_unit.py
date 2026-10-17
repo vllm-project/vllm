@@ -21,6 +21,7 @@ from vllm.entrypoints.pooling.scoring.io_processor import (
 from vllm.entrypoints.pooling.scoring.typing import ScoringData
 from vllm.entrypoints.pooling.scoring.utils import compress_token_type_ids
 from vllm.entrypoints.pooling.typing import OfflineScoringInputsContext
+from vllm.exceptions import VLLMValidationError
 from vllm.outputs import PoolingOutput, PoolingRequestOutput, RequestError
 from vllm.renderers import TokenizeParams
 
@@ -51,6 +52,7 @@ def llm_reranker_processor() -> CrossEncoderIOProcessor:
     backend.pre_tokenizer = pre_tokenizers.WhitespaceSplit()
     backend.post_processor = processors.TemplateProcessing(
         single="[CLS] $A [SEP]",
+        pair="[CLS] $A [SEP] $B:1 [SEP]:1",
         special_tokens=[("[CLS]", 1), ("[SEP]", 2)],
     )
 
@@ -81,6 +83,71 @@ def test_llm_reranker_tokenization_is_independent_of_nonbinding_doc_limit(
     expected = [1, 3, 5, 6, 2]
     assert uncapped["prompt_token_ids"] == expected
     assert nonbinding["prompt_token_ids"] == expected
+
+
+@pytest.fixture
+def cross_encoder_processor(
+    llm_reranker_processor: CrossEncoderIOProcessor,
+) -> CrossEncoderIOProcessor:
+    """A BERT-style cross-encoder: `[CLS] query [SEP] document [SEP]`."""
+    llm_reranker_processor.use_sep_token = True
+    return llm_reranker_processor
+
+
+QUERY = "a a a a a a"
+DOCUMENT = "bc bc bc bc bc bc bc bc"
+
+
+def test_doc_limit_cuts_only_the_document_when_the_query_fits(
+    cross_encoder_processor: CrossEncoderIOProcessor,
+):
+    encode_kwargs = TokenizeParams(
+        max_total_tokens=100, truncate_prompt_tokens=10
+    ).get_encode_kwargs()
+
+    _, prompt = cross_encoder_processor.get_score_prompt(
+        QUERY, DOCUMENT, encode_kwargs, max_tokens_per_doc=3
+    )
+
+    # 6 query and 3 special tokens leave room for 1 document token.
+    assert prompt["prompt_token_ids"] == [1, *[3] * 6, 2, 4, 2]
+
+
+@pytest.mark.parametrize(
+    ("document", "limited_document"),
+    [(DOCUMENT, "bc bc bc"), ("", "")],
+    ids=["document", "empty_document"],
+)
+def test_doc_limit_falls_back_when_the_query_fills_the_limit(
+    cross_encoder_processor: CrossEncoderIOProcessor,
+    document: str,
+    limited_document: str,
+):
+    encode_kwargs = TokenizeParams(
+        max_total_tokens=100, truncate_prompt_tokens=6
+    ).get_encode_kwargs()
+
+    _, prompt = cross_encoder_processor.get_score_prompt(
+        QUERY, document, encode_kwargs, max_tokens_per_doc=3
+    )
+
+    expected = cross_encoder_processor.tokenizer(
+        QUERY, limited_document, truncation=True, max_length=6
+    )
+    assert prompt["prompt_token_ids"] == expected["input_ids"]
+
+
+def test_doc_limit_keeps_the_context_length_error_for_a_long_query(
+    cross_encoder_processor: CrossEncoderIOProcessor,
+):
+    tok_params = TokenizeParams(max_total_tokens=5)
+
+    _, prompt = cross_encoder_processor.get_score_prompt(
+        QUERY, DOCUMENT, tok_params.get_encode_kwargs(), max_tokens_per_doc=3
+    )
+
+    with pytest.raises(VLLMValidationError, match="maximum context length"):
+        tok_params.apply_post_tokenization(cross_encoder_processor.tokenizer, prompt)
 
 
 @pytest.mark.parametrize(
