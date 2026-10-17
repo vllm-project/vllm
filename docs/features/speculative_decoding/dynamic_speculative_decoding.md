@@ -11,14 +11,16 @@ SD methods need to verify K tokens for each sequence during decoding. As BS incr
 
 ## `--speculative-config` schema
 
-To use Dynamic SD, add `num_speculative_tokens_per_batch_size` to the config of an SD method which is a list of list. Here, an entry is `[start_bs, end_bs, optimal_K]` which means when the concurrency is within range `[start_bs, end_bs]` then `optimal_K` number of draft tokens are used. For e.g.,
+To use Dynamic SD, add `speculative_token_schedule` to the config of an SD method which is a list of list. Here, an entry is `[start_bs, end_bs, optimal_K]` which means when the concurrency is within range `[start_bs, end_bs]` then `optimal_K` number of draft tokens are used. For e.g.,
+
+(The previous key name `num_speculative_tokens_per_batch_size` is still accepted as a deprecated alias.)
 
 ```bash
 --speculative-config '{
     "method": "eagle",
     "model": "yuhuili/EAGLE-LLaMA3.1-Instruct-8B",
     "num_speculative_tokens": 3,
-    "num_speculative_tokens_per_batch_size": [
+    "speculative_token_schedule": [
       [1, 64, 3],
       [65, 128, 1],
       [129, 512, 0]
@@ -42,7 +44,7 @@ VLLM_USE_V2_MODEL_RUNNER=0 vllm serve meta-llama/Llama-3.1-8B-Instruct \
     "method": "eagle",
     "model": "yuhuili/EAGLE-LLaMA3.1-Instruct-8B",
     "num_speculative_tokens": 3,
-    "num_speculative_tokens_per_batch_size": [
+    "speculative_token_schedule": [
       [1, 64, 3],
       [65, 128, 1],
       [129, 512, 0]
@@ -58,7 +60,7 @@ VLLM_USE_V2_MODEL_RUNNER=0 vllm serve meta-llama/Llama-3.1-8B-Instruct \
     "method": "eagle3",
     "model": "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B",
     "num_speculative_tokens": 3,
-    "num_speculative_tokens_per_batch_size": [
+    "speculative_token_schedule": [
       [1, 16, 5],
       [17, 32, 4],
       [33, 64, 3],
@@ -73,4 +75,4 @@ VLLM_USE_V2_MODEL_RUNNER=0 vllm serve meta-llama/Llama-3.1-8B-Instruct \
 
 * Tested with Eagle, Eagle-3, and DFlash. Other SD methods may or may not work out of the box
 * Full Cudagraph only works with Model Runner V2. MRv1 only supports piece-wise cuda graph with this feature
-* Not compatible with data parallelism (`--data-parallel-size > 1`). Each DP rank schedules independently, so ranks can pick different K values, causing DP collective divergence and deadlocks. When DP is enabled, vLLM automatically disables `num_speculative_tokens_per_batch_size` and falls back to the static `num_speculative_tokens` value.
+* Not compatible with data parallelism (`--data-parallel-size > 1`). Each DP rank schedules independently, so ranks can pick different K values, causing DP collective divergence and deadlocks. When DP is enabled, vLLM automatically disables `speculative_token_schedule` and falls back to the static `num_speculative_tokens` value.
