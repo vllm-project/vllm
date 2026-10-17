@@ -81,6 +81,8 @@ def _collect_phase_metrics(
     iterations: list[dict[str, float]],
     has_encoder: bool,
 ) -> list[MetricStats]:
+    if not iterations:
+        return []
     metrics = [_compute_metric(phase, desc, iterations) for desc in _BASE_METRICS]
     if has_encoder:
         metrics.append(_compute_metric(phase, _ENCODER_METRIC, iterations))
@@ -88,6 +90,8 @@ def _collect_phase_metrics(
 
 
 def _print_phase(phase_name: str, metrics: list[MetricStats]) -> None:
+    if not metrics:
+        return
     print(f"\n{phase_name}:")
     for m in metrics:
         print(f"Avg {m.display_name.lower()}: {m.avg:.2f} seconds")
