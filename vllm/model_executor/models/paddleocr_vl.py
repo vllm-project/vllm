@@ -72,7 +72,12 @@ from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .ernie45 import Ernie4_5ForCausalLM
-from .interfaces import MultiModalEmbeddings, SupportsMRoPE, SupportsMultiModal
+from .interfaces import (
+    MultiModalEmbeddings,
+    SupportsLoRA,
+    SupportsMRoPE,
+    SupportsMultiModal,
+)
 from .siglip import SiglipMLP
 from .utils import (
     AutoWeightsLoader,
@@ -927,13 +932,28 @@ class SiglipVisionModel(nn.Module):
     info=PaddleOCRVLProcessingInfo,
     dummy_inputs=PaddleOCRVLDummyInputsBuilder,
 )
-class PaddleOCRVLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsMRoPE):
+class PaddleOCRVLForConditionalGeneration(
+    nn.Module, SupportsMultiModal, SupportsMRoPE, SupportsLoRA
+):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
+            # PEFT adapters trained against the native transformers class
+            # carry `model.language_model.` prefixes; prefix rules are
+            # applied sequentially, so this must precede the generic
+            # `model.` rule below.
+            "model.language_model.": "language_model.model.",
             "model.": "language_model.model.",
             "lm_head.": "language_model.lm_head.",
         }
     )
+    packed_modules_mapping = {
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
+    }
+    embedding_modules = {
+        "embed_tokens": "input_embeddings",
+        "lm_head": "output_embeddings",
+    }
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
