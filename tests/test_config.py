@@ -312,6 +312,27 @@ def test_mismatched_float_kv_cache_is_rejected(cache_dtype, model_dtype, should_
         config._reject_mismatched_float_kv_cache()
 
 
+@pytest.mark.parametrize("dcp_size", [1, 2])
+def test_nvfp4_ds_mla_rejects_decode_context_parallelism(dcp_size):
+    # The nvfp4_ds_mla chunked-context gather is not validated under DCP, so
+    # the combination fails at startup instead of on the first request that
+    # carries cached context.
+    kwargs = dict(
+        cache_config=CacheConfig(cache_dtype="nvfp4_ds_mla"),
+        device_config=DeviceConfig(device="cpu"),
+        parallel_config=ParallelConfig(
+            tensor_parallel_size=2,
+            decode_context_parallel_size=dcp_size,
+            distributed_executor_backend="mp",
+        ),
+    )
+    if dcp_size > 1:
+        with pytest.raises(ValueError, match="decode context parallelism"):
+            VllmConfig(**kwargs)
+    else:
+        VllmConfig(**kwargs)
+
+
 def test_per_request_spec_decode_metrics_requires_spec_decode():
     # The flag only makes sense with speculative decoding configured; enabling
     # it without --speculative-config should fail fast rather than silently
