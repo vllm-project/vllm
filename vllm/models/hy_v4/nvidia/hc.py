@@ -8,11 +8,11 @@ channels to one hidden state (``HYV4HCPreLayer``), runs the sub-block, then
 scatters the result back over the channels (``HYV4HCPostLayer``). The final
 ``HYV4HCHeadLayer`` merges the channels before the model's output norm.
 
-NOTE: Each of the three steps has an optional single-kernel HPC replacement
-(``HpcIHCPre`` / ``HpcIHCPost`` / ``HpcIHCHead``). Pre and post fall back to
-in-tree Triton kernels on CUDA when HPC is unavailable, then to the eager path.
-TODO: port the cross-layer post+pre fusion (``HpcIHCPostPre``) as well; it
-requires restructuring the decoder-layer forward scheduling.
+Each of the three steps has an optional single-kernel HPC replacement
+(``HpcIHCPre`` / ``HpcIHCPost`` / ``HpcIHCHead``). The decoder can also fuse
+adjacent post and pre boundaries with ``HpcIHCPostPre``. Pre and post fall back
+to in-tree Triton kernels on CUDA when HPC is unavailable, then to the eager
+path.
 """
 
 import torch
