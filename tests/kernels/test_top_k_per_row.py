@@ -568,6 +568,70 @@ def test_top_k_per_row_decode_gfx950_k512_split_policy_boundaries(
     assert torch.equal(indices.sort(1).values, expected)
 
 
+@pytest.mark.parametrize(
+    ("rows", "row_length"),
+    [
+        pytest.param(4, 2_000, id="short-row-single-block"),
+        pytest.param(4, 4_095, id="single-block-before-4k"),
+        pytest.param(4, 4_096, id="two-splits-at-4k"),
+        pytest.param(32, 16_384, id="six-splits-at-16k"),
+        pytest.param(33, 16_384, id="four-splits-above-32-rows"),
+        pytest.param(64, 116_000, id="four-splits-upper-row-bound"),
+        pytest.param(65, 116_000, id="two-splits-above-64-rows"),
+        pytest.param(65, 8_000, id="three-splits-short-many-rows"),
+        pytest.param(256, 262_145, id="optimized-row-limit"),
+        pytest.param(257, 262_145, id="native-fallback"),
+    ],
+)
+@requires_gfx950
+@torch.inference_mode()
+def test_top_k_per_row_decode_gfx950_k2048_split_policy_boundaries(
+    rows: int, row_length: int
+) -> None:
+    """index_topk=2048 rows sized from max_model_len take the gfx950 path."""
+    width, top_k = 262_145, 2048
+    row = torch.arange(width, dtype=torch.float32, device="cuda")
+    logits = row.expand(rows, -1)
+    lengths = torch.full((rows,), row_length, dtype=torch.int32, device="cuda")
+    indices = torch.full((rows, top_k), -777, dtype=torch.int32, device="cuda")
+
+    _run_topk_backend("top_k_per_row_decode", logits, lengths, indices, top_k, width)
+
+    _assert_exact_topk(logits, indices, lengths)
+
+
+@requires_gfx950
+@torch.inference_mode()
+def test_top_k_per_row_decode_gfx950_k2048_graph_replay() -> None:
+    """Keep k=2048 exact when live lengths change under graph replay."""
+    rows, next_n, width, top_k = 24, 2, 262_145, 2048
+    logits = torch.randn((rows, width), dtype=torch.float32, device="cuda")
+    lengths = torch.full(
+        (rows // next_n, next_n), 200_000, dtype=torch.int32, device="cuda"
+    )
+    indices = torch.full((rows, top_k), -777, dtype=torch.int32, device="cuda")
+
+    def run() -> None:
+        _run_topk_backend(
+            "top_k_per_row_decode", logits, lengths, indices, top_k, width, next_n
+        )
+
+    run()
+    _assert_exact_topk(logits, indices, lengths)
+    torch.accelerator.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        run()
+
+    bounds = [0, 1, 2047, 2048, 4095, 4096, 16_383, 16_384, 116_000, 262_145]
+    row_bounds = torch.tensor(bounds, dtype=torch.int32, device="cuda")
+    repeats = (rows + len(bounds) - 1) // len(bounds)
+    lengths.flatten().copy_(row_bounds.repeat(repeats)[:rows])
+    indices.fill_(-777)
+    graph.replay()
+    _assert_exact_topk(logits, indices, lengths)
+
+
 @requires_gfx950
 @torch.inference_mode()
 def test_top_k_per_row_decode_gfx950_k512_masked_graph_replay() -> None:
