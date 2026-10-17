@@ -5,6 +5,7 @@ import threading
 from types import SimpleNamespace
 
 import pytest
+import torch
 
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     MoRIIOMode,
@@ -22,6 +23,115 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector import
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_engine import (
     MoRIIOWrapper,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
+    MambaConvSplitInfo,
+)
+from vllm.v1.kv_cache_interface import MambaSpec
+
+
+def _unaligned_cpu_backing():
+    raw = bytearray(12288)
+    original = torch.frombuffer(raw, dtype=torch.uint8)
+    offset = (128 - original.data_ptr()) % 4096
+    return torch.frombuffer(raw, dtype=torch.uint8, offset=offset, count=8192)
+
+
+def _mamba_registration_worker(caches):
+    worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
+    worker.kv_caches = caches
+    spec = MambaSpec(
+        block_size=16,
+        shapes=((4, 1), (2, 2)),
+        dtypes=(torch.float32, torch.float32),
+    )
+    worker.layer_to_spec = dict.fromkeys(caches, spec)
+    return worker
+
+
+def test_shared_registration_covers_final_ssm_with_unaligned_first_enabled_layer():
+    backing = _unaligned_cpu_backing()
+    # Earlier layers can be transfer-disabled. The first enabled layer need
+    # not begin at the aligned start of the common allocation.
+    cache = backing[-64:].view(2, 1, 1, 32)
+    worker = _mamba_registration_worker({"kda": cache})
+
+    registration, offsets = worker._build_shared_kv_mr(worker.kv_caches)
+
+    expected_base = cache.data_ptr() // 4096 * 4096
+    assert registration.data_ptr() == expected_base
+    assert registration.data_ptr() >= backing.data_ptr()
+    assert registration.data_ptr() + registration.numel() == (
+        backing.data_ptr() + backing.numel()
+    )
+    assert registration.untyped_storage().data_ptr() == backing.data_ptr()
+    assert offsets == {"kda": cache.data_ptr() - expected_base}
+
+
+def test_shared_registration_refuses_alignment_before_storage():
+    cache = _unaligned_cpu_backing()[:64].view(2, 1, 1, 32)
+    worker = _mamba_registration_worker({"kda": cache})
+
+    with pytest.raises(ValueError, match="outside.*storage"):
+        worker._build_shared_kv_mr(worker.kv_caches)
+
+
+def test_shared_registration_refuses_regions_from_other_storage():
+    backing = _unaligned_cpu_backing()
+    other = _unaligned_cpu_backing()
+    worker = _mamba_registration_worker(
+        {
+            "first": backing[-64:].view(2, 1, 1, 32),
+            "other": other[-64:].view(2, 1, 1, 32),
+        }
+    )
+
+    with pytest.raises(ValueError, match="same storage"):
+        worker._build_shared_kv_mr(worker.kv_caches)
+
+
+def test_mamba_reads_address_each_region_relative_to_shared_registration(monkeypatch):
+    cache = torch.zeros((2, 1, 1, 32), dtype=torch.uint8)
+    worker = _mamba_registration_worker({"kda": cache})
+    worker.world_size = 1
+    worker._conv_decomp = MambaConvSplitInfo(1, (1, 1, 2), 4, (16, 16))
+    worker._mamba_offset_templates = {}
+    worker.kv_region_mr_offsets = {"kda": [128, 144]}
+    worker.layer_base_addr_index = {"kda": 0}
+    worker.layer_name_to_remote_kv_cache_metadata = {"peer": {"kda": [4096, 4096]}}
+    worker.moriio_wrapper = MoRIIOWrapper(
+        moriio_engine=SimpleNamespace(allocate_transfer_uid=lambda: 1)
+    )
+    worker.moriio_wrapper.local_memory_registered = True
+    monkeypatch.setattr(
+        worker.moriio_wrapper,
+        "get_unpack_memory_metadata",
+        lambda address: SimpleNamespace(data=address),
+    )
+    posted = []
+
+    class Session:
+        def batch_read(self, local, remote, sizes, uid):
+            posted.append((local, remote, sizes))
+            return SimpleNamespace(Failed=lambda: False)
+
+    statuses = worker._post_mamba_reads(
+        "kda",
+        [Session(), Session()],
+        [0, 1],
+        [1],
+        [0],
+        1,
+        SimpleNamespace(kv_caches_base_addr=[4352, 4368]),
+        "peer",
+        "req",
+        float("inf"),
+    )
+
+    assert len(statuses) == 2
+    assert posted == [
+        ([160, 164, 168], [256, 260, 264], [4, 4, 8]),
+        ([176], [272], [16]),
+    ]
 
 
 def test_remote_tp_rank_same_tp_maps_to_self():
