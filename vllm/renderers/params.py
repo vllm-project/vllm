@@ -348,8 +348,19 @@ class TokenizeParams:
             needs_detokenization=needs_detokenization,
         )
 
-    def get_encode_kwargs(self) -> dict[str, Any]:
-        """The arguments to pass to `tokenizer.encode`."""
+    def get_encode_kwargs(
+        self, tokenizer: TokenizerLike | None = None
+    ) -> dict[str, Any]:
+        """The arguments to pass to `tokenizer.encode`.
+
+        When ``truncation_side`` is explicitly set and matches the tokenizer's
+        default side, we let the tokenizer handle truncation itself because it
+        correctly preserves special tokens at the truncation boundary. When the
+        requested side differs from the tokenizer default, we disable tokenizer
+        truncation and apply our own slice-based truncation in
+        ``_token_truncation``.  Character-level pre-trim in ``_text_len_check``
+        guards against unbounded tokenization in both cases.
+        """
         max_length = self.truncate_prompt_tokens
         if max_length is not None and max_length < 0:
             max_length = self.max_truncation_tokens
@@ -358,11 +369,29 @@ class TokenizeParams:
             # while still failing `self._token_len_check` as expected by users
             max_length = self.max_input_tokens + 1
 
-        # Explicit truncation-side overrides require the full token sequence
-        # so we can slice from the requested side in _token_truncation.
-        # Disable tokenizer-level truncation because its default side may
-        # differ from the requested side.  The defense against unbounded
-        # tokenization lives in _text_len_check (character-level pre-trim).
+        # When an explicit truncation side is requested and it matches the
+        # tokenizer's default, let the tokenizer handle truncation itself.
+        # It correctly preserves special tokens (BOS, CLS, SEP, ...) at the
+        # truncation boundary, whereas our slice-based truncation below
+        # would cut through them.
+        tokenizer_side = (
+            getattr(tokenizer, "truncation_side", None) if tokenizer else None
+        )
+        if (
+            self.truncation_side is not None
+            and self.truncate_prompt_tokens is not None
+            and self.truncation_side == tokenizer_side
+        ):
+            return dict(
+                truncation=True,
+                max_length=max_length,
+                truncation_side=self.truncation_side,
+                add_special_tokens=self.add_special_tokens,
+            )
+
+        # Explicit truncation-side overrides that differ from the tokenizer
+        # default require the full token sequence so we can slice from the
+        # requested side in _token_truncation.
         if self.truncation_side is not None and self.truncate_prompt_tokens is not None:
             return dict(
                 truncation=False,
