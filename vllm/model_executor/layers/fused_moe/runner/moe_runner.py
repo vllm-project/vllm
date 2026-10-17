@@ -79,7 +79,8 @@ def get_layer_from_name(layer_name: str) -> MoERunnerInterface:
             raise AssertionError(
                 "We expected the number of MOE layers in `all_moe_layers` "
                 "to be equal to the number of "
-                "{vllm.moe_forward, vllm.moe_forward_shared} calls."
+                "{vllm.moe_forward, vllm.moe_forward_shared} calls "
+                "(or of their _with_output variants)."
             )
         layer_name = all_moe_layers[moe_layer_index]
         forward_context.moe_layer_index += 1
@@ -195,8 +196,9 @@ def _moe_forward_shared_fake(
     return shared_out, fused_out
 
 
-# NOTE: `moe_forward` and `moe_forward_shared` being opaque custom ops is a
-# load-bearing assumption for the MoE-LoRA dual-stream path.
+# NOTE: `moe_forward` and `moe_forward_shared` (and their `_with_output`
+# variants) being opaque custom ops is a load-bearing assumption for the
+# MoE-LoRA dual-stream path.
 direct_register_custom_op(
     op_name="moe_forward",
     op_func=_moe_forward,
@@ -212,6 +214,154 @@ direct_register_custom_op(
     fake_impl=_moe_forward_shared_fake,
     tags=(torch.Tag.needs_fixed_stride_order,),
 )
+
+
+# Used instead of `moe_forward(_shared)` when the MoE ops are splitting ops.
+# Those return fresh tensors, which the next piecewise CUDA graph would read
+# from their capture-time address on replay. These write into outputs
+# allocated in the graph instead, like `unified_attention_with_output`.
+def _moe_forward_with_output(
+    hidden_states: torch.Tensor,
+    router_logits: torch.Tensor,
+    shared_experts_input: torch.Tensor | None,
+    input_ids: torch.Tensor | None,
+    output: torch.Tensor,
+    layer_name: _layer_name_type,
+    hidden_dim_unpadded: int,
+) -> None:
+    output.copy_(
+        _moe_forward(
+            hidden_states,
+            router_logits,
+            shared_experts_input,
+            input_ids,
+            layer_name,
+            hidden_dim_unpadded,
+        )
+    )
+
+
+def _moe_forward_with_output_fake(
+    hidden_states: torch.Tensor,
+    router_logits: torch.Tensor,
+    shared_experts_input: torch.Tensor | None,
+    input_ids: torch.Tensor | None,
+    output: torch.Tensor,
+    layer_name: _layer_name_type,
+    hidden_dim_unpadded: int,
+) -> None:
+    return None
+
+
+def _moe_forward_shared_with_output(
+    hidden_states: torch.Tensor,
+    router_logits: torch.Tensor,
+    shared_experts_input: torch.Tensor | None,
+    input_ids: torch.Tensor | None,
+    shared_output: torch.Tensor,
+    fused_output: torch.Tensor,
+    layer_name: _layer_name_type,
+    hidden_dim_unpadded: int,
+) -> None:
+    shared_out, fused_out = _moe_forward_shared(
+        hidden_states,
+        router_logits,
+        shared_experts_input,
+        input_ids,
+        layer_name,
+        hidden_dim_unpadded,
+    )
+    shared_output.copy_(shared_out)
+    fused_output.copy_(fused_out)
+
+
+def _moe_forward_shared_with_output_fake(
+    hidden_states: torch.Tensor,
+    router_logits: torch.Tensor,
+    shared_experts_input: torch.Tensor | None,
+    input_ids: torch.Tensor | None,
+    shared_output: torch.Tensor,
+    fused_output: torch.Tensor,
+    layer_name: _layer_name_type,
+    hidden_dim_unpadded: int,
+) -> None:
+    return None
+
+
+direct_register_custom_op(
+    op_name="moe_forward_with_output",
+    op_func=_moe_forward_with_output,
+    mutates_args=["output"],
+    fake_impl=_moe_forward_with_output_fake,
+    tags=(torch.Tag.needs_fixed_stride_order,),
+)
+
+
+direct_register_custom_op(
+    op_name="moe_forward_shared_with_output",
+    op_func=_moe_forward_shared_with_output,
+    mutates_args=["shared_output", "fused_output"],
+    fake_impl=_moe_forward_shared_with_output_fake,
+    tags=(torch.Tag.needs_fixed_stride_order,),
+)
+
+
+# The fake impls are pure shape functions, so they also allocate the outputs.
+def _moe_forward_into_output(
+    hidden_states: torch.Tensor,
+    router_logits: torch.Tensor,
+    shared_experts_input: torch.Tensor | None,
+    input_ids: torch.Tensor | None,
+    layer_name: _layer_name_type,
+    hidden_dim_unpadded: int,
+) -> torch.Tensor:
+    output = _moe_forward_fake(
+        hidden_states,
+        router_logits,
+        shared_experts_input,
+        input_ids,
+        layer_name,
+        hidden_dim_unpadded,
+    )
+    torch.ops.vllm.moe_forward_with_output(
+        hidden_states,
+        router_logits,
+        shared_experts_input,
+        input_ids,
+        output,
+        layer_name,
+        hidden_dim_unpadded,
+    )
+    return output
+
+
+def _moe_forward_shared_into_output(
+    hidden_states: torch.Tensor,
+    router_logits: torch.Tensor,
+    shared_experts_input: torch.Tensor | None,
+    input_ids: torch.Tensor | None,
+    layer_name: _layer_name_type,
+    hidden_dim_unpadded: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    shared_output, fused_output = _moe_forward_shared_fake(
+        hidden_states,
+        router_logits,
+        shared_experts_input,
+        input_ids,
+        layer_name,
+        hidden_dim_unpadded,
+    )
+    torch.ops.vllm.moe_forward_shared_with_output(
+        hidden_states,
+        router_logits,
+        shared_experts_input,
+        input_ids,
+        shared_output,
+        fused_output,
+        layer_name,
+        hidden_dim_unpadded,
+    )
+    return shared_output, fused_output
 
 
 def _unpack(
@@ -320,11 +470,15 @@ class MoERunner(MoERunnerInterface):
             # trace, so CPU can always call the fused-MoE op directly.
             return _moe_forward if self._shared_experts is None else _moe_forward_shared
 
-        return (
-            torch.ops.vllm.moe_forward
-            if self._shared_experts is None
-            else torch.ops.vllm.moe_forward_shared
-        )
+        cc = get_current_vllm_config().compilation_config
+        splitting_ops = {op.removesuffix(".default") for op in cc.splitting_ops or []}
+        if self._shared_experts is None:
+            if "vllm::moe_forward_with_output" in splitting_ops:
+                return _moe_forward_into_output
+            return torch.ops.vllm.moe_forward
+        if "vllm::moe_forward_shared_with_output" in splitting_ops:
+            return _moe_forward_shared_into_output
+        return torch.ops.vllm.moe_forward_shared
 
     @property
     def shared_experts(self) -> SharedExperts | None:

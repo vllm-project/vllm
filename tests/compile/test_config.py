@@ -373,7 +373,8 @@ def test_splitting_ops_dynamic():
 
 def test_moe_splitting_ops_deepep_ht_inductor_partition():
     # Inductor partition case: user-provided splitting_ops should be
-    # preserved and MoE ops should be appended for DeepEP HT with dp>1.
+    # preserved for DeepEP HT with dp>1, with the MoE ops mapped to their
+    # with_output variants.
     config = VllmConfig(
         parallel_config=ParallelConfig(
             all2all_backend="deepep_high_throughput",
@@ -385,15 +386,15 @@ def test_moe_splitting_ops_deepep_ht_inductor_partition():
             splitting_ops=[
                 "vllm::unified_attention_with_output",
                 "vllm::moe_forward",
-                "vllm::moe_forward_shared",
+                "vllm::moe_forward_shared.default",
             ],
         ),
     )
     splitting_ops = config.compilation_config.splitting_ops
     assert splitting_ops == [
         "vllm::unified_attention_with_output",
-        "vllm::moe_forward",
-        "vllm::moe_forward_shared",
+        "vllm::moe_forward_with_output",
+        "vllm::moe_forward_shared_with_output",
     ]
 
 
