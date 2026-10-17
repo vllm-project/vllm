@@ -535,12 +535,15 @@ def get_metadata_memory_reservation(
     max_model_len: int,
     *,
     num_metadata_builders: int,
+    kv_cache_layout: KVCacheLayout | None = None,
 ) -> tuple[int, list[int]]:
     """Reserve unprofiled buffers using the runtime's grouping and block widths."""
+    if kv_cache_layout is None:
+        kv_cache_layout = vllm_config.cache_config.get_resolved_kv_cache_layout()
     kernel_block_sizes = prepare_kernel_block_sizes(
         kv_cache_config,
         attn_groups,
-        kv_cache_layout=vllm_config.cache_config.get_resolved_kv_cache_layout(),
+        kv_cache_layout=kv_cache_layout,
     )
     total = 0
     for group_id, groups in enumerate(attn_groups):

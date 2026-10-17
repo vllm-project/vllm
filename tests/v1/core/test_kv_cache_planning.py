@@ -2198,23 +2198,28 @@ def test_fixed_budget_leaves_room_for_late_metadata(metadata_spec):
     assert _metadata_allocated_bytes(result) + result.metadata_memory_bytes == 20 * page
 
 
-def test_auto_fit_solves_metadata_at_candidate_length(metadata_spec):
+@pytest.mark.parametrize("draft_length,expected_length", [(0, 40), (16, 32)])
+def test_auto_fit_solves_metadata_at_candidate_length(
+    metadata_spec, draft_length, expected_length
+):
     cfg = _metadata_config(64, auto_fit=True)
+    draft_cfg = SimpleNamespace(max_model_len=draft_length)
     page = metadata_spec.page_size_bytes
     calls = []
 
     def reservation(groups, length):
         calls.append(length)
-        return [((length + 3) // 4) * page]
+        return [((length + 3) // 4 + draft_cfg.max_model_len // 4) * page]
 
     result = get_kv_cache_configs(
         cfg, [{"layer": metadata_spec}], [21 * page], reservation
     )[0]
-    # One KV page and one metadata page per four tokens, plus the null block.
-    # Reserving at the initial 64-token maximum would incorrectly fit only 16.
-    assert cfg.model_config.max_model_len == 40
-    assert result.num_blocks == 11
-    assert result.metadata_memory_bytes == 10 * page
+    # Target metadata shrinks with auto-fit; independent draft metadata does not.
+    target_pages = expected_length // 4
+    assert cfg.model_config.max_model_len == expected_length
+    assert draft_cfg.max_model_len == draft_length
+    assert result.num_blocks == target_pages + 1
+    assert result.metadata_memory_bytes == (target_pages + draft_length // 4) * page
     assert _metadata_allocated_bytes(result) + result.metadata_memory_bytes == 21 * page
     assert len(calls) == len(set(calls))
 

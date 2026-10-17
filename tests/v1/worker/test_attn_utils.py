@@ -1135,6 +1135,80 @@ def test_runner_metadata_reservation_projects_pp_and_counts_draft(
     assert global_groups[0].layer_names == original_names
 
 
+@pytest.mark.parametrize(
+    "draft_length,candidate_length,shared_model_config",
+    [
+        pytest.param(65536, 8192, False, id="independent-longer"),
+        pytest.param(8192, 65536, False, id="independent-shorter"),
+        pytest.param(65536, 8192, True, id="shared-model-distinct-config"),
+    ],
+)
+def test_draft_reservation_matches_builder_after_target_auto_fit(
+    monkeypatch, draft_length, candidate_length, shared_model_config
+):
+    """A draft's independent context must survive target-only auto-fit."""
+    from vllm.config import CacheConfig, replace
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+    from vllm.v1.worker.gpu.spec_decode.standalone_ar.speculator import (
+        StandaloneARSpeculator,
+    )
+    from vllm.v1.worker.gpu_worker import Worker
+
+    cfg = _metadata_config(length=65536)
+    draft_cfg = _metadata_config(length=draft_length)
+    for config in (cfg, draft_cfg):
+        config.parallel_config.use_ubatching = False
+    if shared_model_config:
+        draft_cfg.model_config = cfg.model_config
+    assert draft_cfg is not cfg
+    cfg.cache_config = CacheConfig()
+    draft_cfg.cache_config = replace(cfg.cache_config, cache_dtype="fp8")
+    # The worker receives the resolved layout after the draft config was copied.
+    cfg.cache_config.kv_cache_layout = "LBHNC"
+    kv_spec = _metadata_spec(block_size=64)
+    layer = _metadata_layer()
+    layer.kv_sharing_target_layer_name = None
+
+    def get_layers(*args, **kwargs):
+        return {"draft": layer}
+
+    monkeypatch.setattr(utils, "get_layers_from_vllm_config", get_layers)
+    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", get_layers)
+    monkeypatch.setattr(indexer, "num_compute_units", lambda _: 1)
+
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner.vllm_config = cfg
+    runner.parallel_config = cfg.parallel_config
+    runner.get_kv_cache_spec = lambda: {"draft": kv_spec}
+    runner.req_states = SimpleNamespace(max_model_len=cfg.model_config.max_model_len)
+    runner.speculator = None
+    groups = [KVCacheGroupSpec(["draft"], kv_spec)]
+    target_reservation = runner.estimate_metadata_memory(groups, candidate_length)
+    speculator = StandaloneARSpeculator.__new__(StandaloneARSpeculator)
+    speculator.vllm_config = cfg
+    speculator._draft_vllm_config = draft_cfg
+    speculator.speculative_config = SimpleNamespace(kv_cache_dtype="fp8")
+    speculator.draft_attn_layer_names = {"draft"}
+    runner.speculator = speculator
+    reserved = (
+        runner.estimate_metadata_memory(groups, candidate_length) - target_reservation
+    )
+    assert draft_cfg.cache_config.cache_dtype == "fp8"
+    assert draft_cfg.cache_config.kv_cache_layout is None
+
+    # Planning precedes the target-only update RPC and builder construction.
+    worker = Worker.__new__(Worker)
+    worker.model_config = cfg.model_config
+    worker.model_runner = runner
+    worker.update_max_model_len(candidate_length)
+    group = AttentionGroup(_IndexerReservationBackend, ["draft"], kv_spec, 0)
+    group.create_metadata_builders(
+        speculator.attn_vllm_config, torch.device("cpu"), kernel_block_size=64
+    )
+    actual = group.get_metadata_builder().expanded_block_table_buffer
+    assert reserved == actual.numel() * actual.element_size()
+
+
 class _TableBuilder:
     requires_block_table_width = False
     supports_update_block_table = False

@@ -683,12 +683,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 if draft_config.parallel_config.use_ubatching
                 else 1
             )
+            draft_max_model_len = (
+                max_model_len
+                if draft_config.model_config is self.vllm_config.model_config
+                else draft_config.model_config.max_model_len
+            )
             draft_reservation, _ = get_metadata_memory_reservation(
                 draft_config,
                 config,
                 draft_groups,
-                max_model_len,
+                draft_max_model_len,
                 num_metadata_builders=draft_count,
+                kv_cache_layout=(
+                    self.vllm_config.cache_config.get_resolved_kv_cache_layout()
+                ),
             )
             reservation += draft_reservation
         return reservation
