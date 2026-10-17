@@ -68,7 +68,9 @@ class LoadConfig:
 
     - None (default): Uses memory-mapped (lazy) loading. When an NFS
       filesystem is detected and the total checkpoint size fits within 90%%
-      of available RAM, prefetching is enabled automatically.
+      of available RAM, prefetching is enabled automatically. When it does
+      not fit, each shard is evicted from the page cache once its tensors
+      are released (Linux only; "lazy" does the same).
     - "lazy": Weights are memory-mapped from the file. This enables
       on-demand loading and is highly efficient for models on local storage.
       Unlike the default (None), auto-prefetch on NFS is not performed.
