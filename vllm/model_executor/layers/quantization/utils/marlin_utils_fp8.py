@@ -105,6 +105,7 @@ def prepare_fp8_layer_for_marlin(
     size_k_first: bool = True,
     input_dtype: torch.dtype | None = None,
 ) -> None:
+    """Pad and repack FP8 linear weights and scales for Marlin execution."""
     logger.warning_once(
         "Your GPU does not have native support for FP8 computation but "
         "FP8 quantization is being used. Weight-only FP8 compression will "
@@ -114,8 +115,8 @@ def prepare_fp8_layer_for_marlin(
     if input_dtype is not None and input_dtype.itemsize == 1:
         raise RuntimeError("Marlin W8A8 is not supported.")
 
-    part_size_n = layer.output_size_per_partition
-    part_size_k = layer.input_size_per_partition
+    part_size_n = layer.weight.shape[1 if size_k_first else 0]
+    part_size_k = layer.weight.shape[0 if size_k_first else 1]
     weight_block_size = getattr(layer, "weight_block_size", None)
     group_size = -1 if weight_block_size is None else weight_block_size[1]
     padded_n, padded_k = marlin_padded_nk(part_size_n, part_size_k, group_size)
