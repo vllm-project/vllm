@@ -54,6 +54,7 @@ def _req(
         request_id=request_id,
         kv_transfer_params=params,
         status=status,
+        num_prompt_tokens=1,
     )
 
 

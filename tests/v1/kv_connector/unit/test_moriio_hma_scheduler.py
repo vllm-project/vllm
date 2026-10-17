@@ -20,7 +20,11 @@ import torch
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.sched.output import KVConnectorBlockState, SchedulerOutput
 from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
-from vllm.v1.kv_cache_interface import FullAttentionSpec, UniformTypeKVCacheSpecs
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    SlidingWindowSpec,
+    UniformTypeKVCacheSpecs,
+)
 
 moriio_connector = importlib.import_module(
     "vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector"
@@ -739,12 +743,14 @@ def _make_read_scheduler():
         _reqs_need_send={},
         _req_kv_params={},
         _max_decode_tail_blocks=1,
+        _group_block_sizes=[16, 16],
     )
 
 
-def _make_read_request(remote_block_ids):
+def _make_read_request(remote_block_ids, num_prompt_tokens=257):
     return SimpleNamespace(
         request_id="req",
+        num_prompt_tokens=num_prompt_tokens,
         kv_transfer_params={
             "do_remote_prefill": True,
             "transfer_id": "tx",
@@ -883,6 +889,60 @@ def test_update_state_aligns_attention_only_decode_tail():
 
     assert sched._reqs_need_recv["req"][1] == [[100, 101]]
     assert sched._req_kv_params["req"]["remote_block_ids"] == [[10, 11]]
+
+
+def _swa_hybrid_read_scheduler():
+    def group(spec_cls, **kwargs):
+        spec = spec_cls(
+            block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32, **kwargs
+        )
+        return SimpleNamespace(enable_kv_transfer=True, kv_cache_spec=spec)
+
+    config = SimpleNamespace(
+        kv_cache_groups=[
+            group(FullAttentionSpec),
+            group(SlidingWindowSpec, sliding_window=32),
+        ],
+        select_transfer_block_ids=lambda blocks: tuple(blocks),
+    )
+    config.transfer_groups = tuple(config.kv_cache_groups)
+    return moriio_connector.MoRIIOConnectorScheduler(
+        _gate_vllm_config(num_lookahead_tokens=16), "engine", config
+    )
+
+
+@pytest.mark.usefixtures("restore_moriio_role")
+@pytest.mark.parametrize("prefill_tail,decode_tail", [(0, 0), (0, 1), (1, 0), (1, 1)])
+def test_read_sliding_window_pairs_same_positions_despite_lookahead_tail(
+    prefill_tail, decode_tail
+):
+    """Either leg may hold a lookahead block past the prompt. The windows
+    clipped from the end of each list must still pair the same positions."""
+    # 80 prompt tokens fill 5 blocks of 16; the 32-token window keeps the last 3.
+    prompt = range(80)
+    prefill = _swa_hybrid_read_scheduler()
+    prefill.is_producer = True
+    p_req = _mk_request(prompt, params={"do_remote_decode": True, "transfer_id": "tx"})
+    p_req.request_id = "req"
+    p_req.status = moriio_connector.RequestStatus.FINISHED_LENGTH_CAPPED
+    n = 5 + prefill_tail
+    _, params = prefill.request_finished(
+        p_req, (list(range(10, 10 + n)), list(range(20, 20 + n)))
+    )
+    remote = [list(range(10, 15)), [22, 23, 24]]
+    assert params["remote_block_ids"] == remote
+
+    decode = _swa_hybrid_read_scheduler()
+    d_req = _mk_request(prompt, params=params)
+    d_req.request_id = "req"
+    n = 5 + decode_tail
+    decode.update_state_after_alloc(
+        d_req,
+        _FakeBlocks((list(range(100, 100 + n)), list(range(200, 200 + n)))),
+        num_external_tokens=79,
+    )
+    assert decode._reqs_need_recv["req"][1] == [list(range(100, 105)), [202, 203, 204]]
+    assert decode._req_kv_params["req"]["remote_block_ids"] == remote
 
 
 def test_read_producer_does_not_queue_write_only_save_state():
