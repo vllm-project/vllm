@@ -31,6 +31,9 @@ Requests: `[N*]Q[@K][c][:D]`, comma-separated, per DP rank.
 | `2048@10240` | prefill after an 8192-token prefix-cache hit |
 | `2048@10240c` | chunked prefill: the prefix came from earlier chunks |
 
+Verify cases require `--speculative-config` with `num_speculative_tokens`
+at least as large as the case's draft count; insufficient capacity is rejected.
+
 Hit vs chunk only differs on models with SWA bounded replay (DSV4.1): a hit
 also recomputes the last window (128 tokens) of the prefix.
 

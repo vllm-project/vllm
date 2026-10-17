@@ -1,0 +1,156 @@
+meta:
+  title: "Glyph"
+  slug: "glyph"
+  provider: "GLM (Z-AI)"
+  description: "Visual-text compression framework that renders long text into images and processes them with a reasoning VLM, scaling effective context length"
+  date_added: 2025-10-28
+  date_updated: 2026-04-17
+  tasks:
+    - multimodal
+  performance_headline: "Reasoning multimodal model for visual-text compression, single-GPU deployable"
+  related_recipes: []
+  hardware:
+    h100: verified
+    mi300x: verified
+    mi325x: verified
+
+model:
+  model_id: "zai-org/Glyph"
+  min_vllm_version: "0.11.0"
+  architecture: dense
+  parameter_count: "10B"
+  active_parameters: "10B"
+  context_length: 131072
+  base_args:
+    - "--no-enable-prefix-caching"
+    - "--mm-processor-cache-gb"
+    - "0"
+    - "--limit-mm-per-prompt.video"
+    - "0"
+  base_env: {}
+
+features:
+  reasoning:
+    description: "GLM-4.5 reasoning parser for extracting reasoning traces from Glyph outputs"
+    args:
+      - "--reasoning-parser"
+      - "glm45"
+  text_only:
+    description: "Skip loading the vision encoder for text-only workloads — frees VRAM for KV cache. Mutually exclusive with encoder_parallel."
+    args:
+      - "--language-model-only"
+  encoder_parallel:
+    description: "Run the vision encoder in data-parallel mode — avoids TP comm overhead on the small encoder. Mutually exclusive with text_only."
+    args:
+      - "--mm-encoder-tp-mode"
+      - "data"
+
+opt_in_features:
+  - text_only
+  - encoder_parallel
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 24
+    description: "Full precision BF16 — single-GPU deployment on 1xH100"
+
+compatible_strategies:
+  - single_node_tp
+  - multi_node_tp
+
+kv_offload_support:
+  offloading_cpu: verified
+  offloading_fs: verified
+
+hardware_overrides: {}
+
+strategy_overrides: {}
+
+guide: |
+  ## Overview
+
+  [Glyph](https://github.com/thu-coai/Glyph) is a framework from Zhipu AI for scaling
+  context length via visual-text compression. It renders long textual sequences into
+  images and processes them with a vision-language model. This recipe covers the vLLM
+  deployment of the `zai-org/Glyph` VLM as a component in that framework.
+
+  Glyph is a reasoning multimodal model, so `--reasoning-parser glm45` is recommended
+  to parse reasoning traces from outputs.
+
+  ## Prerequisites
+
+  - **vLLM version:** latest stable
+  - **Hardware:** 1x H100 or 1x MI300X/MI325X
+
+  ### Install vLLM (NVIDIA)
+
+  ```bash
+  uv venv
+  source .venv/bin/activate
+  uv pip install -U vllm --torch-backend auto
+  ```
+
+  ### Install vLLM (AMD ROCm)
+
+  ```bash
+  uv pip install vllm --extra-index-url https://wheels.vllm.ai/rocm
+  ```
+
+  ROCm wheel requires Python 3.12, ROCm 7.0, glibc >= 2.35.
+
+  ## Launching the Server
+
+  ### Single H100 GPU
+
+  ```bash
+  vllm serve zai-org/Glyph \
+      --no-enable-prefix-caching \
+      --mm-processor-cache-gb 0 \
+      --reasoning-parser glm45 \
+      --limit-mm-per-prompt.video 0
+  ```
+
+  ### Single MI300X / MI325X
+
+  ```bash
+  VLLM_ROCM_USE_AITER=1 \
+  SAFETENSORS_FAST_GPU=1 \
+  vllm serve zai-org/Glyph \
+      --no-enable-prefix-caching \
+      --mm-processor-cache-gb 0 \
+      --reasoning-parser glm45 \
+      --limit-mm-per-prompt.video 0
+  ```
+
+  ### Configuration Tips
+
+  - `--no-enable-prefix-caching` and `--mm-processor-cache-gb 0` are recommended for
+    OCR-like workloads where image reuse is uncommon; they avoid unnecessary hashing
+    and caching overhead.
+  - Adjust `--max-num-batched-tokens` for throughput according to your hardware.
+
+  ## Benchmarking
+
+  ```bash
+  vllm bench serve \
+    --model zai-org/Glyph \
+    --dataset-name random \
+    --random-input-len 8192 \
+    --random-output-len 512 \
+    --request-rate 10000 \
+    --num-prompts 16 \
+    --ignore-eos
+  ```
+
+  ## Troubleshooting
+
+  - **Reasoning traces:** Use `--reasoning-parser glm45` to extract reasoning content.
+  - **Slow first inference:** Disabling prefix caching and multimodal processor caching
+    is intentional for Glyph's use case and trades off first-request latency for predictable throughput.
+
+  ## References
+
+  - [Model card](https://huggingface.co/zai-org/Glyph)
+  - [Glyph framework on GitHub](https://github.com/thu-coai/Glyph)
+  - [vLLM deployment section of Glyph docs](https://github.com/thu-coai/Glyph?tab=readme-ov-file#model-deployment-vllm-acceleration)
