@@ -8,7 +8,7 @@ from torch.nn.parameter import UninitializedParameter
 from torch.utils._python_dispatch import TorchDispatchMode
 
 from .sanitize import restore_layer_refs, sanitize_layer_refs
-from .types import LayerReloadingInfo, LayerTensors
+from .types import LayerMetadata, LayerReloadingInfo
 from .utils import get_layer_params_buffers, get_layer_tensors, get_tensor_load_numel
 
 __all__ = [
@@ -94,11 +94,11 @@ def _parameter_storage_ptrs(layer: torch.nn.Module) -> set[int]:
     }
 
 
-def capture_layer_to_meta(layer: torch.nn.Module) -> LayerTensors:
+def capture_layer_to_meta(layer: torch.nn.Module) -> LayerMetadata:
     if layer.__class__.__name__ in SKIP_MODULES:
         return ({}, {})
 
-    params, buffers = get_layer_params_buffers(layer)
+    params, _ = get_layer_params_buffers(layer)
     parameter_storage_ptrs = _parameter_storage_ptrs(layer)
     return (
         {
@@ -107,11 +107,19 @@ def capture_layer_to_meta(layer: torch.nn.Module) -> LayerTensors:
             if name not in SKIP_TENSORS
         },
         {
-            name: sanitize_layer_refs(to_meta_tensor(buffer), layer)
-            for name, buffer in buffers.items()
+            name: (
+                None
+                if buffer is None or name in getattr(layer, "_vllm_derived_buffers", ())
+                else sanitize_layer_refs(to_meta_tensor(buffer), layer)
+            )
+            for name, buffer in layer._buffers.items()
             if name not in SKIP_TENSORS
-            and not _is_non_persistent_parameter_alias_buffer(
-                layer, name, buffer, parameter_storage_ptrs
+            and (
+                buffer is None
+                or name in getattr(layer, "_vllm_derived_buffers", ())
+                or not _is_non_persistent_parameter_alias_buffer(
+                    layer, name, buffer, parameter_storage_ptrs
+                )
             )
         },
     )
@@ -138,8 +146,15 @@ def restore_layer_on_meta(layer: torch.nn.Module, info: LayerReloadingInfo):
 
     for name, buffer in restore_buffers.items():
         if name not in SKIP_TENSORS:
-            buffer = restore_layer_refs(buffer, layer)
+            if buffer is not None:
+                buffer = restore_layer_refs(buffer, layer)
             layer.register_buffer(name, buffer, persistent=name not in non_persistent)
+
+    # Some derived buffers are declared during PWAL or a runtime class swap,
+    # after constructor metadata was captured. Keep their schema on reload.
+    for name in getattr(layer, "_vllm_derived_buffers", ()):
+        if name not in layer._buffers:
+            layer.register_buffer(name, None, persistent=False)
 
 
 def materialize_layer(layer: torch.nn.Module, info: LayerReloadingInfo):
