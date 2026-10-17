@@ -66,6 +66,7 @@ CHECK_IMPORTS = {
             "tests/multimodal/media/test_base.py",
             "tests/tokenizers_/test_hf.py",
             "tests/utils_/test_hashing.py",
+            "tests/v1/core/test_output.py",
             "tests/compile/test_aot_compile.py",
             "benchmarks/kernels/graph_machete_bench.py",
             "benchmarks/kernels/benchmark_lora.py",
