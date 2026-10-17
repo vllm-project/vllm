@@ -1004,8 +1004,8 @@ class AsyncLLM(EngineClient):
         """
         if clear_cache:
             await self.renderer.clear_mm_cache_async()
-        await self.engine_core.pause_scheduler_async(
-            mode=mode, clear_cache=clear_cache, reject_new=True
+        await self.engine_core.pause_generation_async(
+            mode=mode, clear_cache=clear_cache
         )
         # Small sleep to help ensure that final outputs from any in-flight requests are
         # returned prior to this method returning. These outputs come out of the engine

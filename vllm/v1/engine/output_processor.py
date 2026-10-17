@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING, Any, cast
 import numpy as np
 import torch
 
-from vllm.exceptions import GenerationError, RetryableRequestError
 from vllm.lora.request import LoRARequest
 from vllm.outputs import (
     STREAM_FINISHED,
@@ -765,13 +764,7 @@ class OutputProcessor:
             error = engine_core_output.error
             if error is not None and req_state.queue is not None:
                 # Rejected on arrival, e.g. by a paused engine; nothing was run.
-                req_state.queue.put(
-                    RetryableRequestError(error.message)
-                    if error.retryable
-                    else GenerationError(error.message)
-                )
-                if req_state.parent_req is not None:
-                    req_state.parent_req.child_requests.discard(req_id)
+                req_state.queue.put(error.to_exception())
                 self._finish_request(req_state)
                 if req_state.streaming_input:
                     # Input chunks sent since may re-create the session.
@@ -932,8 +925,10 @@ class OutputProcessor:
 
         # Remove parent request if applicable.
         parent_req = req_state.parent_req
-        if parent_req and not parent_req.child_requests:
-            self.parent_requests.pop(parent_req.request_id, None)
+        if parent_req:
+            parent_req.child_requests.discard(req_id)
+            if not parent_req.child_requests:
+                self.parent_requests.pop(parent_req.request_id, None)
         self._update_admission_stats()
 
     def _update_admission_stats(self) -> None:

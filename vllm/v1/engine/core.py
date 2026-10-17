@@ -1756,7 +1756,7 @@ class EngineCoreProc(EngineCore):
         if (
             not self.reject_new_requests
             or request.abort_immediately
-            or request.request_id in self.scheduler.requests  # type: ignore
+            or self.scheduler.has_request(request.request_id)
         ):
             return False
         error = RequestError(
@@ -2119,18 +2119,12 @@ class EngineCoreProc(EngineCore):
         self._send_error_outputs_to_client([request.request_id], request.client_index)
 
     def pause_scheduler(
-        self,
-        mode: PauseMode = "abort",
-        clear_cache: bool = True,
-        reject_new: bool = False,
+        self, mode: PauseMode = "abort", clear_cache: bool = True
     ) -> Future | None:
         """Pause generation; behavior depends on mode.
 
         All pause modes queue new adds -- "abort" and "keep" skip step();
-        "wait" allows step() so in-flight requests can drain. ``reject_new``
-        marks a ``pause_generation`` call: "abort" and "wait" then reject new
-        requests with a retryable error until resume, and "keep" stops doing so.
-        Other pauses (e.g. sleep) leave that policy unchanged.
+        "wait" allows step() so in-flight requests can drain.
 
         - ``abort``: Set PAUSED_NEW, abort all requests, wait for abort
           outputs to be sent (when running with output_queue), optionally
@@ -2142,8 +2136,6 @@ class EngineCoreProc(EngineCore):
         """
         if mode not in get_args(PauseMode):
             raise ValueError(f"Invalid pause mode: {mode}")
-        if reject_new:
-            self.reject_new_requests = mode != "keep"
 
         def engine_idle_callback(engine: "EngineCoreProc", future: Future[Any]) -> None:
             try:
@@ -2168,6 +2160,16 @@ class EngineCoreProc(EngineCore):
 
         future = Future[Any]()
         self._idle_state_callbacks.append(partial(engine_idle_callback, future=future))
+        return future
+
+    def pause_generation(
+        self, mode: PauseMode = "abort", clear_cache: bool = True
+    ) -> Future | None:
+        """``pause_scheduler`` for a user pause: "abort" and "wait" also reject
+        new requests with a retryable error until resume, rather than queue
+        them. Other pauses (e.g. sleep) leave this policy unchanged."""
+        future = self.pause_scheduler(mode, clear_cache)
+        self.reject_new_requests = mode != "keep"
         return future
 
     def resume_scheduler(self) -> None:

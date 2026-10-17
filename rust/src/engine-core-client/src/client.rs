@@ -972,17 +972,10 @@ impl EngineCoreClient {
             .all(|fully_awake| fully_awake))
     }
 
-    /// Pause the scheduler so generation can be halted. With `reject_new`, the
-    /// `abort` and `wait` modes reject new requests with a retryable error until
-    /// resume.
-    pub async fn pause_scheduler(
-        &self,
-        mode: PauseMode,
-        clear_cache: bool,
-        reject_new: bool,
-    ) -> Result<()> {
-        self.call_utility::<(), _>("pause_scheduler", (mode, clear_cache, reject_new))
-            .await?;
+    /// Pause generation (e.g. for weight updates). In `abort` and `wait` mode
+    /// the engine rejects new requests with a retryable error until resume.
+    pub async fn pause_generation(&self, mode: PauseMode, clear_cache: bool) -> Result<()> {
+        self.call_utility::<(), _>("pause_generation", (mode, clear_cache)).await?;
         Ok(())
     }
 

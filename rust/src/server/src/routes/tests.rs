@@ -6715,14 +6715,10 @@ async fn pause_route_uses_python_compatible_default_query_values() {
             let array = payload.as_array().expect("utility payload array");
             let call_id = array[1].as_u64().expect("call id");
 
-            assert_eq!(array[2], Value::from("pause_scheduler"));
+            assert_eq!(array[2], Value::from("pause_generation"));
             assert_eq!(
                 array[3],
-                Value::Array(vec![
-                    Value::from("abort"),
-                    Value::from(true),
-                    Value::from(true)
-                ])
+                Value::Array(vec![Value::from("abort"), Value::from(true)])
             );
 
             send_outputs(push, utility_outputs(call_id, utility_none_result())).await;

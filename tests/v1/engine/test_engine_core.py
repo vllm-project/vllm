@@ -755,7 +755,7 @@ def _pausable_engine_core_proc() -> EngineCoreProc:
 
 
 @pytest.mark.parametrize(
-    "mode,reject_new,kind,rejected",
+    "mode,user_pause,kind,rejected",
     [
         pytest.param("abort", True, "new", True, id="abort"),
         pytest.param("wait", True, "new", True, id="wait"),
@@ -766,7 +766,7 @@ def _pausable_engine_core_proc() -> EngineCoreProc:
         pytest.param("abort", True, "session", False, id="open-session-input"),
     ],
 )
-def test_pause_generation_rejects_new_requests(mode, reject_new, kind, rejected):
+def test_pause_generation_rejects_new_requests(mode, user_pause, kind, rejected):
     """`pause_generation` rejects new requests with a retryable error until
     resume, even across a later internal pause; `keep` and internal pauses
     (sleep, elastic EP) queue them. KV cleanup markers and inputs to an open
@@ -775,7 +775,7 @@ def test_pause_generation_rejects_new_requests(mode, reject_new, kind, rejected)
     core = _pausable_engine_core_proc()
     core.shutdown_state = EngineShutdownState.RUNNING
     core.reject_new_requests = False
-    core.scheduler.requests = {"r": MagicMock()} if kind == "session" else {}
+    core.scheduler.has_request.return_value = kind == "session"
     core.add_request = MagicMock()
     core._send_finish_outputs_to_client = MagicMock()
     request = MagicMock(
@@ -785,7 +785,8 @@ def test_pause_generation_rejects_new_requests(mode, reject_new, kind, rejected)
         kv_transfer_params={"do_remote_prefill": True} if kind == "pd" else None,
     )
 
-    core.pause_scheduler(mode=mode, clear_cache=False, reject_new=reject_new)
+    pause = core.pause_generation if user_pause else core.pause_scheduler
+    pause(mode=mode, clear_cache=False)
     # An internal pause on top (e.g. sleep) leaves the policy alone.
     core.pause_scheduler(mode="abort", clear_cache=False)
     core._handle_client_request(EngineCoreRequestType.ADD, (request, 0))
