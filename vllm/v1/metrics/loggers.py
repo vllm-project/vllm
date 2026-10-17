@@ -1277,6 +1277,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         )
         if self.api_surface_metrics_enabled:
             prompt_stats_by_api = iteration_stats.prompt_token_stats_by_api_surface
+            assert prompt_stats_by_api is not None
             for api_surface, pts in prompt_stats_by_api.items():
                 request_key = self._request_metric_key(engine_idx, api_surface)
                 self.counter_prompt_tokens[request_key].inc(pts.total)
@@ -1288,6 +1289,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             generation_tokens_by_api = (
                 iteration_stats.num_generation_tokens_by_api_surface
             )
+            assert generation_tokens_by_api is not None
             for api_surface, num_tokens in generation_tokens_by_api.items():
                 self.counter_generation_tokens[
                     self._request_metric_key(engine_idx, api_surface)

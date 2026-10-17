@@ -485,7 +485,7 @@ class PromptTokenStats:
 class IterationStats:
     """Stats associated with a single set of EngineCoreOutputs."""
 
-    def __init__(self):
+    def __init__(self, enable_api_surface_metrics: bool = False):
         self.iteration_timestamp = time.time()
         # Read once per iteration: update_from_output runs per request per
         # step, and each envs attribute access re-reads the environment
@@ -493,12 +493,12 @@ class IterationStats:
         self.compute_nans_in_logits = envs.VLLM_COMPUTE_NANS_IN_LOGITS
         self.num_generation_tokens = 0
         self.prompt_token_stats = PromptTokenStats()
-        self.num_generation_tokens_by_api_surface: defaultdict[str, int] = defaultdict(
-            int
+        self.num_generation_tokens_by_api_surface: defaultdict[str, int] | None = (
+            defaultdict(int) if enable_api_surface_metrics else None
         )
-        self.prompt_token_stats_by_api_surface: defaultdict[str, PromptTokenStats] = (
-            defaultdict(PromptTokenStats)
-        )
+        self.prompt_token_stats_by_api_surface: (
+            defaultdict[str, PromptTokenStats] | None
+        ) = defaultdict(PromptTokenStats) if enable_api_surface_metrics else None
         self.num_preempted_reqs = 0
         self.finished_requests: list[FinishedRequestStats] = []
         self.max_num_generation_tokens_iter: list[int] = []
@@ -535,16 +535,19 @@ class IterationStats:
         num_new_generation_tokens = len(output.new_token_ids)
 
         self.num_generation_tokens += num_new_generation_tokens
-        api_surface = normalize_api_surface(req_stats.api_surface)
-        self.num_generation_tokens_by_api_surface[api_surface] += (
-            num_new_generation_tokens
-        )
-        if is_prefilling:
-            if output.prefill_stats is not None:
-                self.prompt_token_stats.update_from_output(output.prefill_stats)
+        if self.num_generation_tokens_by_api_surface is not None:
+            api_surface = normalize_api_surface(req_stats.api_surface)
+            self.num_generation_tokens_by_api_surface[api_surface] += (
+                num_new_generation_tokens
+            )
+            if is_prefilling and output.prefill_stats is not None:
+                assert self.prompt_token_stats_by_api_surface is not None
                 self.prompt_token_stats_by_api_surface[api_surface].update_from_output(
                     output.prefill_stats
                 )
+        if is_prefilling:
+            if output.prefill_stats is not None:
+                self.prompt_token_stats.update_from_output(output.prefill_stats)
 
             first_token_latency = self._time_since(req_stats.arrival_time)
             self.time_to_first_tokens_iter.append(
