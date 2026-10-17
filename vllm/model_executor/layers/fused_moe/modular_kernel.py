@@ -1522,6 +1522,17 @@ class FusedMoEKernelModularImpl:
         if global_num_experts == -1:
             global_num_experts = local_num_experts
 
+        # Stash the original unquantized hidden states on the LoRA context
+        # so apply_w13_lora sees correct-magnitude activations instead of
+        # the potentially quantized values produced by _prepare().
+        lora_ctx = getattr(self.fused_experts, "_lora_context", None)
+        if lora_ctx is not None:
+            lora_ctx.original_hidden_states = (
+                hidden_states * topk_weights.to(hidden_states.dtype)
+                if apply_router_weight_on_input
+                else hidden_states
+            )
+
         a1q, a1q_scale, expert_tokens_meta, topk_ids, topk_weights = self._prepare(
             hidden_states,
             topk_weights,
@@ -1530,13 +1541,6 @@ class FusedMoEKernelModularImpl:
             expert_map,
             apply_router_weight_on_input,
         )
-
-        # Stash the original unquantized hidden states on the LoRA context
-        # so apply_w13_lora sees correct-magnitude activations instead of
-        # the potentially quantized values produced by _prepare().
-        lora_ctx = getattr(self.fused_experts, "_lora_context", None)
-        if lora_ctx is not None:
-            lora_ctx.original_hidden_states = hidden_states
 
         fused_out = self._fused_experts(
             in_dtype=hidden_states.dtype,
