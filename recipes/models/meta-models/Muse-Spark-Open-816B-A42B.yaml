@@ -2,9 +2,9 @@ meta:
   title: "Muse Spark Open"
   slug: "muse-spark-open-816b-a42b"
   provider: "Muse (Meta)"
-  description: "Sparse MoE reasoning model with 816B total / 42B active parameters and a 1M-token context, built for long-horizon agentic coding. Native image and video perception, channel-scoped reasoning and tool calls via the `musespark1x` parsers, and an optional DSpark draft model for speculative decoding."
-  date_added: 2026-09-14
-  date_updated: 2026-10-15
+  description: "Sparse MoE reasoning model with 816B total / 42B active parameters and a 1M-token context, built for long-horizon agentic coding. Native image and video perception, channel-scoped reasoning and tool calls via the `muse` parsers, and an optional DSpark draft model for speculative decoding."
+  date_added: 2026-10-15
+  date_updated: 2026-10-16
   tasks:
     - text
     - multimodal
@@ -14,14 +14,16 @@ meta:
   default_variant:
     amd: mxfp4
   hardware:
+    h200: verified
+    gb200: verified
     gb300: verified
     mi350x: verified
     mi355x: verified
 
 model:
   model_id: "meta-models/Muse-Spark-Open-816B-A42B"
-  # Support is not upstream yet: it lives on the muse-spark-support branch
-  # (Inferact/mpk#5). Revise to the release that actually carries the merge.
+  # Support is not upstream yet: vllm-project/vllm#61879 lands it in the nightly
+  # wheel. Revise to the release that actually carries the merge.
   min_vllm_version: "0.33.0"
   nightly_required: true
   docker_image:
@@ -66,8 +68,9 @@ features:
       - "muse"
   spec_decoding:
     # The standalone draft checkpoint and its MuseSparkDSparkModel architecture
-    # are validated on ROCm gfx950 (MI350X/MI355X).
-    description: "DSpark speculative decoding with the fixed seven-token profile. Best for latency-bound serving with a few concurrent requests."
+    # are validated on NVIDIA Blackwell (NVFP4, on by default there via the
+    # variant's default_modes) and ROCm gfx950 (MI350X/MI355X).
+    description: "DSpark speculative decoding, drafting up to seven tokens per pass. On NVIDIA, adaptive verification keeps only the draft slots worth verifying, so it stays on at large batch sizes; on AMD it is a fixed seven-token profile, best for latency-bound serving."
     default_mode: dspark
     modes:
       dspark:
@@ -162,6 +165,9 @@ variants:
     # Checkpoint total_size 533,010,718,720 bytes, plus 20% serving headroom.
     vram_minimum_gb: 640
     description: "NVFP4 weights for Blackwell. The primary NVIDIA serving path."
+    # The launch blog's NVIDIA command runs DSpark on this checkpoint.
+    default_modes:
+      spec_decoding: dspark
 
 compatible_strategies:
   - single_node_tp
@@ -172,6 +178,10 @@ compatible_strategies:
   - multi_node_tep
   - multi_node_dep
   - pd_cluster
+
+# The vLLM launch blog serves NVFP4 as TP8 + --enable-expert-parallel (TEP);
+# TEP is also the MXFP4 throughput path on AMD (see the guide).
+default_strategy: single_node_tep
 
 # The ROCm MoE path requires DP1 (muse_moe_runner._validate_tp_post_norm_deployment).
 strategy_hardware:
@@ -247,9 +257,21 @@ guide: |
 
   - **vLLM**: Use Docker image for now until the code is in vLLM main repo.
   - **Hardware**: the checkpoints hold ~1.64 TB of weights in BF16 and
-    ~509 GB in Quark MXFP4, before KV cache. On AMD, all three variants are
-    validated on gfx950 (MI350X/MI355X). NVFP4 is the primary NVIDIA
-    Blackwell path.
+    ~509 GB in Quark MXFP4, before KV cache. NVFP4 (~533 GB) is the primary
+    NVIDIA Blackwell path and fits one 8-GPU node. On AMD, all three AMD
+    variants are validated on gfx950 (MI350X/MI355X).
+
+  ## NVIDIA
+
+  Meta ships BF16 and NVFP4 checkpoints. On Blackwell, serve
+  `meta-models/Muse-Spark-Open-816B-A42B-NVFP4` on one 8-GPU node with
+  **Tensor + Expert Parallel** (TP8 + `--enable-expert-parallel`), the default
+  strategy here. The command builder turns DSpark on by default for NVFP4; see
+  [Speculative decoding](#speculative-decoding-dspark).
+
+  NVIDIA supports every parallelism this recipe offers: TP, TP + PP, TP + expert
+  parallel, data + expert parallel, and prefill/decode disaggregation. AMD
+  supports only TP and TP + expert parallel.
 
   ## AMD ROCm variants
 
@@ -287,14 +309,19 @@ guide: |
 
   ## Launching the Server
 
+  NVIDIA Blackwell, NVFP4, TP8 + expert parallel, with DSpark:
+
   ```bash
+  export VLLM_USE_RUST_FRONTEND=1
+
   vllm serve meta-models/Muse-Spark-Open-816B-A42B-NVFP4 \
     --tensor-parallel-size 8 \
     --enable-expert-parallel \
     --max-model-len 1048576 \
     --reasoning-parser muse \
     --tool-call-parser muse \
-    --enable-auto-tool-choice
+    --enable-auto-tool-choice \
+    --speculative-config '{"method":"dspark","model":"Inferact/Muse-Spark-Open-DSpark","num_speculative_tokens":7,"draft_sample_method":"probabilistic","rejection_sample_method":"block","enable_adaptive_verification":true}'
   ```
 
   ## Frontends
@@ -344,6 +371,9 @@ guide: |
     }'
   ```
 
+  The audio track of a video is not processed. To include it, extract the
+  audio and send it as a separate audio part in the same request.
+
   Video sampling rate can be changed when starting the server.
 
   ```bash
@@ -355,6 +385,13 @@ guide: |
   Inferact trained a DSpark speculator for this model. The draft is a
   small sliding-window model that reads the target's residual stream at selected
   layers (`target_layer_ids`) and proposes a block per forward.
+
+  On NVIDIA, DSpark is on by default for NVFP4. It drafts up to seven tokens and
+  uses **adaptive verification** (`enable_adaptive_verification: true`), which
+  uses draft confidence to verify only the slots likely to be accepted. Because
+  of that it keeps paying off at large batch sizes, not just for single-request
+  latency. Turn off **Spec Decoding** in the builder to serve without the
+  draft.
 
   On AMD, selecting **DSpark** emits the fixed seven-token profile with AITER FA
   attention on every variant. Its causal multi-token decode is handled by

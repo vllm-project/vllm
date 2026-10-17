@@ -4,7 +4,7 @@ meta:
   provider: "Moonshot AI"
   description: "Pre-release 2.8T-parameter native multimodal MoE with Kimi Delta Attention, Gated MLA, Attention Residuals, and a 1M-token context window"
   date_added: 2026-07-27
-  date_updated: 2026-10-15
+  date_updated: 2026-10-16
   tasks:
     - multimodal
     - text
@@ -510,6 +510,82 @@ guide: |
   - **Decode context parallelism (DCP)**: enable the **Decode context parallelism** opt-in feature in the command builder to shard the decode KV cache across the tensor-parallel ranks for decode-heavy long-context serving. It emits `--decode-context-parallel-size 8 --dcp-comm-backend a2a --attention-backend TOKENSPEED_MLA` with `mla_prefill_backend: TRTLLM_RAGGED` (on MI355X: `--attention-backend ROCM_AITER_MLA` with `mla_prefill_backend: ROCM_AITER_FA`), and is scoped to the TP8 single-node profile because the DCP size must divide the tensor-parallel size. On builds that carry them, the `VLLM_USE_DIRECT_DCP_A2A`, `VLLM_USE_DIRECT_DCP_Q_GATHER` and `VLLM_USE_DIRECT_DCP_KV_GATHER` knobs default to auto and turn the direct DCP ops on where applicable; set them to `1` only to pin that path explicitly, or `0` to disable it. The MI355X DCP option sets all three to `0`, as InferenceX does.
   - Ascend W4A8 checkpoint (ModelScope): https://www.modelscope.cn/models/Eco-Tech/Kimi-K3-w4a8
   - vLLM Ascend tutorial: https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/Kimi-K3.html
+
+  ## Low latency serving
+
+  ### GB300: TP8/TP16 with DSpark
+
+  The `latency_specialized` decode backend provides a CuTe-based implementation for low-concurrency Kimi-K3 serving on Blackwell. The configurations below serve the default [moonshotai/Kimi-K3](https://huggingface.co/moonshotai/Kimi-K3) MXFP4 checkpoint with [Inferact/Kimi-K3-DSpark](https://huggingface.co/Inferact/Kimi-K3-DSpark), using one aggregated engine across 4-GPU GB300 NVLink compute nodes and the native Python vLLM frontend.
+
+  Use the vLLM nightly image on every node; it contains the implementation and needs no patches:
+
+  ```bash
+  docker pull vllm/vllm-openai:nightly
+  ```
+
+  For client concurrency 1 or 2, use TP16/DCP16 with five DSpark draft tokens. For concurrency 2 or 4, use TP8/DCP8 with seven draft tokens. Both presets keep `--max-num-seqs 8` and `--max-num-batched-tokens 16384`.
+
+  The explicit opt-in is `--additional-config '{"decode_backend":"latency_specialized"}'`; `auto` keeps the stock decode path in this image. The specialized path requires the V2 model runner, FULL decode CUDA graphs, and BF16 convolution state with FP32 recurrent state (`--mamba-ssm-cache-dtype float32`). Keep `FULL_AND_PIECEWISE` and the capture sizes together: the lists cover DSpark draft and verification shapes. Prefill and eager/piecewise steps still use the stock implementation. This recipe uses PP1, no expert parallelism, and at most seven draft tokens; do not combine it with `--enforce-eager`, ReplaySSM/RecoverSSM, or adaptive verification. See the pinned [backend requirements](https://github.com/vllm-project/vllm/blob/49cb2bbf71cfd36ee5aa33d1e184b1cddff55294/vllm/models/kimi_k3/nvidia/specialized_decode/runtime/__init__.py).
+
+  ### Launch on each node
+
+  Make the same target checkpoint available at the same local path on every node, and make `Inferact/Kimi-K3-DSpark` available through the mounted Hugging Face cache. Run the script below **inside the nightly image** on every allocated node, with four visible GPUs, host networking, sufficient shared memory, and the devices and network access required by your NVLink/RDMA deployment. Use the reachable address of rank 0 for `MASTER_ADDR` on every node and a distinct `NODE_RANK` from `0` through `NODES - 1`.
+
+  Save as `kimi-k3-low-latency.sh`:
+
+  ```bash
+  #!/usr/bin/env bash
+  set -eo pipefail
+
+  TP=${1:?Usage: bash kimi-k3-low-latency.sh TP MASTER_ADDR NODE_RANK MODEL_PATH}
+  MASTER_ADDR=${2:?Set the reachable rank-0 address}
+  NODE_RANK=${3:?Set the node rank}
+  MODEL_PATH=${4:?Set the mounted Kimi-K3 checkpoint path}
+
+  case "$TP" in
+    16) NODES=4; K=5; MAX_CAPTURE=48; CAPTURES='5,6,10,12,20,24,40,48' ;;
+    8) NODES=2; K=7; MAX_CAPTURE=64; CAPTURES='7,8,14,16,28,32,56,64' ;;
+    *) echo 'TP must be 8 or 16' >&2; exit 1 ;;
+  esac
+
+  export VLLM_USE_V2_MODEL_RUNNER=1
+  export VLLM_USE_RUST_FRONTEND=0
+  export VLLM_ALLREDUCE_USE_FLASHINFER=1
+  export VLLM_ENABLE_K3_LATENT_MOE_TAIL_FUSION=1
+  export VLLM_USE_DIRECT_DCP_A2A=1
+  export VLLM_USE_DIRECT_DCP_Q_GATHER=1
+  export VLLM_USE_DIRECT_DCP_KV_GATHER=1
+  export VLLM_PREFIX_CACHE_RETENTION_INTERVAL=0
+  export VLLM_RPC_TIMEOUT=600000
+  export VLLM_LOG_STATS_INTERVAL=1
+
+  API_ARGS=(--headless)
+  if [ "$NODE_RANK" -eq 0 ]; then
+    API_ARGS=(--host 0.0.0.0 --port 8000)
+  fi
+
+  exec vllm serve "$MODEL_PATH" \
+    --served-model-name moonshotai/Kimi-K3 \
+    --nnodes "$NODES" --node-rank "$NODE_RANK" --master-addr "$MASTER_ADDR" \
+    --device-ids 0,1,2,3 \
+    --tensor-parallel-size "$TP" --decode-context-parallel-size "$TP" \
+    --dcp-comm-backend a2a \
+    --additional-config '{"decode_backend":"latency_specialized"}' \
+    --attention-backend TOKENSPEED_MLA \
+    --attention-config '{"mla_prefill_backend":"TRTLLM_RAGGED","use_prefill_query_quantization":true}' \
+    --kv-cache-dtype fp8 --mamba-ssm-cache-dtype float32 \
+    --gpu-memory-utilization 0.92 \
+    --max-num-seqs 8 --max-num-batched-tokens 16384 \
+    --max-cudagraph-capture-size "$MAX_CAPTURE" \
+    --compilation-config "{\"cudagraph_mode\":\"FULL_AND_PIECEWISE\",\"cudagraph_capture_sizes\":[$CAPTURES]}" \
+    --speculative-config "{\"model\":\"Inferact/Kimi-K3-DSpark\",\"attention_backend\":\"TOKENSPEED_MLA\",\"method\":\"dspark\",\"num_speculative_tokens\":$K,\"draft_sample_method\":\"greedy\",\"rejection_sample_method\":\"block\"}" \
+    --enable-prefix-caching --prefix-match-unit 128 \
+    --no-enable-flashinfer-autotune \
+    --moe-backend auto --load-format fastsafetensors \
+    --stream-interval 10 --language-model-only --trust-remote-code \
+    --enable-auto-tool-choice --tool-call-parser kimi_k3 --reasoning-parser kimi_k3 \
+    "${API_ARGS[@]}"
+  ```
 
   ## GB200: InferenceX AgentX alignment
 
