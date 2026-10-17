@@ -4,7 +4,7 @@
 with real checksum workers, for NIXL pull (checksums in kv_transfer_params),
 NIXL push and Mooncake (checksums in the connector's messages): the consumer
 accepts a correct load whatever the TP and PP sizes, and handles a corrupted or
-unverifiable one per kv_checksum_fail_closed and kv_load_failure_policy."""
+unverifiable one per kv_load_failure_policy."""
 
 from dataclasses import dataclass
 from typing import Any
@@ -139,7 +139,6 @@ class _Engine:
         connector: str = "NixlConnector",
         tp_size: int = 1,
         pp_size: int = 1,
-        fail_closed: bool = False,
         policy: str = "fail",
         extra_group: str | None = None,
         mamba: bool | str = False,
@@ -158,7 +157,6 @@ class _Engine:
         )
         kv_transfer_config = vllm_config.kv_transfer_config
         kv_transfer_config.enable_kv_checksum = True
-        kv_transfer_config.kv_checksum_fail_closed = fail_closed
         vllm_config.parallel_config.tensor_parallel_size = tp_size
         vllm_config.parallel_config.pipeline_parallel_size = pp_size
         if mamba:
@@ -480,9 +478,7 @@ def test_correct_load_is_verified(connector, producer_tp_pp, consumer_tp_pp):
     any TP and PP pairing verifies."""
     (p_tp, p_pp), (c_tp, c_pp) = producer_tp_pp, consumer_tp_pp
     producer = _Engine("kv_producer", connector, tp_size=p_tp, pp_size=p_pp)
-    consumer = _Engine(
-        "kv_consumer", connector, tp_size=c_tp, pp_size=c_pp, fail_closed=True
-    )
+    consumer = _Engine("kv_consumer", connector, tp_size=c_tp, pp_size=c_pp)
     transfer = _prefill(producer, create_request(1, NUM_TOKENS, do_remote_decode=True))
 
     request = create_request(1, NUM_TOKENS, do_remote_prefill=True)
@@ -504,9 +500,7 @@ def test_different_block_sizes_are_compared(
     """With different block sizes the smaller blocks' checksums are summed
     and compared with the larger ones, including the last partial block."""
     producer = _Engine("kv_producer", connector, block_size=producer_block_size)
-    consumer = _Engine(
-        "kv_consumer", connector, fail_closed=True, block_size=consumer_block_size
-    )
+    consumer = _Engine("kv_consumer", connector, block_size=consumer_block_size)
     transfer = _prefill(producer, create_request(1, NUM_TOKENS, do_remote_decode=True))
 
     request = create_request(1, NUM_TOKENS, do_remote_prefill=True)
@@ -520,7 +514,7 @@ def test_prefix_hit_verifies_only_loaded_blocks():
     """With a local prefix hit the consumer loads, and checks, only the
     blocks after it."""
     producer = _Engine("kv_producer")
-    consumer = _Engine("kv_consumer", fail_closed=True)
+    consumer = _Engine("kv_consumer")
     prefix = BLOCK_SIZE
     transfer = _prefill(
         producer,
@@ -546,9 +540,7 @@ def test_load_starting_inside_a_producer_block_is_unverified():
     producer block cannot compare its first loaded block, so the load is
     unverified rather than verified without it."""
     producer = _Engine("kv_producer", "NixlPushConnector", block_size=32)
-    consumer = _Engine(
-        "kv_consumer", "NixlPushConnector", fail_closed=True, block_size=16
-    )
+    consumer = _Engine("kv_consumer", "NixlPushConnector", block_size=16)
     prefix = 16
     transfer = _prefill(
         producer, create_request(1, NUM_TOKENS, prefix, do_remote_decode=True)
@@ -571,18 +563,13 @@ def test_load_starting_inside_a_producer_block_is_unverified():
 
 
 @pytest.mark.parametrize("fault", ["corrupt", "no-checksums", "malformed"])
-@pytest.mark.parametrize(
-    "fail_closed,policy", [(False, "fail"), (True, "fail"), (True, "recompute")]
-)
+@pytest.mark.parametrize("policy", ["fail", "recompute"])
 @CONNECTORS
-def test_bad_load_follows_failure_policy(
-    connector, fault, fail_closed, policy, caplog_vllm
-):
-    """A corrupted load, or one with missing or malformed checksums, is only
-    logged when fail-open; when fail-closed it is a KV load failure: the
-    request fails, or recomputes its prompt locally."""
+def test_bad_load_follows_failure_policy(connector, fault, policy, caplog_vllm):
+    """A corrupted load, or one with missing or malformed checksums, is a KV
+    load failure: the request fails, or recomputes its prompt locally."""
     producer = _Engine("kv_producer", connector)
-    consumer = _Engine("kv_consumer", connector, fail_closed=fail_closed, policy=policy)
+    consumer = _Engine("kv_consumer", connector, policy=policy)
     transfer = _prefill(producer, create_request(1, NUM_TOKENS, do_remote_decode=True))
     if fault == "no-checksums":
         transfer.params.pop(KV_TRANSFER_PARAMS_KEY, None)
@@ -607,11 +594,7 @@ def test_bad_load_follows_failure_policy(
     )
     if fault == "corrupt":
         assert "KV checksum mismatch" in caplog_vllm.text
-    if not fail_closed:
-        assert not _error_ids(engine_outputs)
-        output = consumer.schedule()
-        assert output.num_scheduled_tokens[request.request_id] == 1
-    elif policy == "fail":
+    if policy == "fail":
         assert _error_ids(engine_outputs) == {request.request_id}
         assert request.status == RequestStatus.FINISHED_ERROR
     else:
@@ -630,7 +613,7 @@ def test_checksums_received_before_the_load_finishes(connector, corrupt):
     """Connectors report the producer's checksums when they receive them,
     which may be a step before the load finishes."""
     producer = _Engine("kv_producer", connector)
-    consumer = _Engine("kv_consumer", connector, fail_closed=True)
+    consumer = _Engine("kv_consumer", connector)
     transfer = _prefill(producer, create_request(1, NUM_TOKENS, do_remote_decode=True))
     assert transfer.sent is not None
 
@@ -651,7 +634,7 @@ def test_groups_skipped_on_both_sides_are_ignored(producer_group):
     """A group neither side can checksum (e.g. SSM state) is left out of the
     verdict; a group only one side checksums leaves the load unverified."""
     producer = _Engine("kv_producer", extra_group=producer_group)
-    consumer = _Engine("kv_consumer", fail_closed=True, extra_group="skipped")
+    consumer = _Engine("kv_consumer", extra_group="skipped")
     transfer = _prefill(producer, create_request(1, NUM_TOKENS, do_remote_decode=True))
 
     request = create_request(1, NUM_TOKENS, do_remote_prefill=True)
@@ -664,7 +647,7 @@ def test_drafter_groups_are_ignored(producer_group):
     """A group of drafter layers only, which no worker checksums, is left out
     of the verdict, unless the producer checksums it."""
     producer = _Engine("kv_producer", extra_group=producer_group)
-    consumer = _Engine("kv_consumer", fail_closed=True, extra_group="draft")
+    consumer = _Engine("kv_consumer", extra_group="draft")
     transfer = _prefill(producer, create_request(1, NUM_TOKENS, do_remote_decode=True))
 
     request = create_request(1, NUM_TOKENS, do_remote_prefill=True)
@@ -677,7 +660,7 @@ def test_load_from_a_cache_tier_is_not_checksummed(monkeypatch):
     offloading connector in a MultiConnector) rather than from its producer is
     not checksummed: the tier's KV need not match the producer's bit for bit."""
     producer = _Engine("kv_producer")
-    consumer = _Engine("kv_consumer", fail_closed=True)
+    consumer = _Engine("kv_consumer")
     transfer = _prefill(producer, create_request(1, NUM_TOKENS, do_remote_decode=True))
     monkeypatch.setattr(
         consumer.scheduler.connector,
@@ -715,7 +698,7 @@ def test_hybrid_model_verifies_mamba_state(connector, corrupt):
     """With a Mamba group, the request's running state is checksummed too: a
     correct load verifies, a flipped state bit is a mismatch."""
     producer = _Engine("kv_producer", connector, mamba=True)
-    consumer = _Engine("kv_consumer", connector, fail_closed=True, mamba=True)
+    consumer = _Engine("kv_consumer", connector, mamba=True)
     transfer = _prefill(producer, create_request(1, NUM_TOKENS, do_remote_decode=True))
     request = create_request(1, NUM_TOKENS, do_remote_prefill=True)
     errors = _error_ids(_load(producer, consumer, request, transfer, corrupt))
@@ -732,21 +715,19 @@ def test_split_mamba_state_compared_across_tp_sizes(
     consumers of different TP sizes: a correct load verifies, and a corrupted
     copy of a replicated sub-projection is a mismatch."""
     producer = _Engine("kv_producer", connector, tp_size=producer_tp, mamba="split")
-    consumer = _Engine(
-        "kv_consumer", connector, tp_size=consumer_tp, fail_closed=True, mamba="split"
-    )
+    consumer = _Engine("kv_consumer", connector, tp_size=consumer_tp, mamba="split")
     transfer = _prefill(producer, create_request(1, NUM_TOKENS, do_remote_decode=True))
     request = create_request(1, NUM_TOKENS, do_remote_prefill=True)
     errors = _error_ids(_load(producer, consumer, request, transfer, corrupt))
     assert errors == (set() if corrupt is None else {request.request_id})
 
 
-def test_mamba_state_not_compared_across_tp_sizes():
-    """TP-sharded Mamba state is laid out per TP size, so between TP 1 and
-    TP 2 it is left out like a group neither side checksums: the attention
-    groups still verify the load, even fail-closed."""
+def test_mamba_state_without_splits_is_unverified_across_tp_sizes():
+    """Without its TP splits, TP-sharded Mamba state is laid out per TP
+    size, so between TP 1 and TP 2 the load cannot be verified."""
     producer = _Engine("kv_producer", mamba=True)
-    consumer = _Engine("kv_consumer", tp_size=2, fail_closed=True, mamba=True)
+    consumer = _Engine("kv_consumer", tp_size=2, mamba=True)
     transfer = _prefill(producer, create_request(1, NUM_TOKENS, do_remote_decode=True))
     request = create_request(1, NUM_TOKENS, do_remote_prefill=True)
-    assert not _error_ids(_load(producer, consumer, request, transfer))
+    errors = _error_ids(_load(producer, consumer, request, transfer))
+    assert errors == {request.request_id}

@@ -970,6 +970,16 @@ def test_state_splits_cover_state_shapes():
             calc.kda_state_shape(tp_size, 8, 16, conv_kernel_size=4),
             calc.kda_state_splits(tp_size, 8, 16),
         )
+        yield (
+            calc.linear_attention_state_shape(
+                num_heads=8, tp_size=tp_size, head_dim=16
+            ),
+            calc.linear_attention_state_splits(tp_size, 8),
+        )
+        yield (
+            calc.short_conv_state_shape(tp_size, 64, 4),
+            calc.short_conv_state_splits(tp_size, 64),
+        )
         for n_groups in (1, 4):
             yield (
                 calc.mamba2_state_shape(tp_size, 64, n_groups, 8, 8, 16, 4),

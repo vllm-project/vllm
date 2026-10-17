@@ -96,14 +96,10 @@ class KVTransferConfig:
     do_remote_decode (producer) or do_remote_prefill (consumer) in their
     kv_transfer_params. The producer's checksums are added to the
     kv_transfer_params it returns, so a proxy that builds the consumer's request
-    from them (e.g. for NIXL in pull mode) must forward them unchanged."""
-
-    kv_checksum_fail_closed: bool = False
-    """Fail a KV load whose checksums mismatch or cannot be verified, as a KV
-    load failure handled by kv_load_failure_policy. Otherwise such loads are
-    only logged, and their blocks are used and prefix-cached as usual. Enable
-    KV checksums on producers first: loads without checksums are
-    unverified."""
+    from them (e.g. for NIXL in pull mode) must forward them unchanged. A load
+    whose checksums mismatch or cannot be verified (e.g. without the
+    producer's checksums) is a KV load failure, handled per
+    kv_load_failure_policy, so enable KV checksums on producers first."""
 
     def compute_hash(self) -> str:
         """WARNING: Whenever a new field is added to this config,

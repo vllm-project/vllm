@@ -307,6 +307,24 @@ class MambaStateShapeCalculator:
         return MambaStateSplit(0 if is_conv_state_dim_first() else 1, segments)
 
     @classmethod
+    def linear_attention_state_splits(
+        cls, tp_size: int, num_heads: int
+    ) -> tuple[MambaStateSplit, ...] | None:
+        """How TP splits ``linear_attention_state_shape``'s state: by head."""
+        if num_heads % tp_size:
+            return None
+        return (MambaStateSplit(0, ((num_heads // tp_size, 1),)),)
+
+    @classmethod
+    def short_conv_state_splits(
+        cls, tp_world_size: int, intermediate_size: int
+    ) -> tuple[MambaStateSplit, ...] | None:
+        """How TP splits ``short_conv_state_shape``'s conv state: by channel."""
+        if intermediate_size % tp_world_size:
+            return None
+        return (cls._conv_split((intermediate_size // tp_world_size, 1)),)
+
+    @classmethod
     def mamba1_state_splits(
         cls, tp_world_size: int, intermediate_size: int
     ) -> tuple[MambaStateSplit, ...] | None:

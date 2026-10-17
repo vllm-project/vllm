@@ -46,7 +46,7 @@ state, at position 0. A layer whose TP split is known
 (``MambaSpec.state_splits``) has one slice per global row of its states,
 the TP-split dimension, whose pieces are its 2- or 4-byte elements read
 unsigned; other Mamba layers have one slice per TP shard, which only
-producers and consumers of equal TP sizes compare.
+producers and consumers of equal TP sizes can compare.
 """
 
 from dataclasses import dataclass, field

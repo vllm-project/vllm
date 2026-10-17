@@ -216,7 +216,6 @@ class KVChecksumScheduler:
         assert kv_transfer_config is not None
         parallel_config = vllm_config.parallel_config
         self._connector = connector
-        self._fail_closed = kv_transfer_config.kv_checksum_fail_closed
         self._tp_size = parallel_config.tensor_parallel_size
         self._num_workers = self._tp_size * parallel_config.pipeline_parallel_size
         self._groups = {
@@ -469,7 +468,7 @@ class KVChecksumScheduler:
 
     def _verify(self, req_id: str, pending: _Pending) -> bool:
         """Compare a finished load with the producer's checksums and log the
-        outcome. Returns whether the load may proceed."""
+        outcome. Returns whether the load verified."""
         mismatches, unverified = self._compare(pending)
         if mismatches:
             logger.error(
@@ -490,7 +489,7 @@ class KVChecksumScheduler:
             )
         else:
             return True
-        return not self._fail_closed
+        return False
 
     def _compare(
         self, pending: _Pending
@@ -550,11 +549,11 @@ class KVChecksumScheduler:
         ):
             # Without its TP splits, a rank's share of sharded state depends on
             # the TP size.
-            logger.warning_once(
-                "KV checksums do not cover Mamba state between producers and "
-                "consumers of different TP sizes."
+            raise _Unverified(
+                "Mamba state without TP splits differs between TP sizes",
+                f"group {group_id}: producer TP {expected.tp_size}, "
+                f"consumer TP {self._tp_size}",
             )
-            return None
         sent = expected.groups.get(group_id)
         # No worker checksums a group of only drafter layers, as if skipped.
         unchecked = skipped or not pending.group_checksums(group_id)
