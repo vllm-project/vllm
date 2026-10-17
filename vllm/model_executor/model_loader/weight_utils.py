@@ -893,38 +893,67 @@ def np_cache_weights_iterator(
         yield name, torch.from_numpy(param)
 
 
+def _local_snapshot_dirs(model_name_or_path: str, cache_dir: str | None) -> list[Path]:
+    """Snapshot directories of a cached repo, found from the cache layout alone.
+
+    Offline, snapshot_download() resolves a revision only through refs/<revision>,
+    which a cache seeded at a pinned commit does not have.
+    """
+    snapshots = (
+        Path(cache_dir or huggingface_hub.constants.HF_HUB_CACHE)
+        / f"models--{model_name_or_path.replace('/', '--')}"
+        / "snapshots"
+    )
+    if not snapshots.is_dir():
+        return []
+    return [path for path in snapshots.iterdir() if path.is_dir()]
+
+
 def drop_checkpoint_cache(
     model_name_or_path: str,
     revision: str | None = None,
     cache_dir: str | None = None,
 ) -> None:
-    checkpoint_dir: Path | None = None
+    checkpoint_dirs: list[Path] = []
     if os.path.isdir(model_name_or_path):
-        checkpoint_dir = Path(model_name_or_path)
+        checkpoint_dirs = [Path(model_name_or_path)]
     else:
         with suppress(OSError, ValueError):
-            checkpoint_dir = Path(
-                hf_api().snapshot_download(
-                    model_name_or_path,
-                    revision=revision,
-                    cache_dir=cache_dir,
-                    local_files_only=True,
+            checkpoint_dirs = [
+                Path(
+                    hf_api().snapshot_download(
+                        model_name_or_path,
+                        revision=revision,
+                        cache_dir=cache_dir,
+                        local_files_only=True,
+                    )
                 )
-            )
-    if checkpoint_dir is None:
+            ]
+        if not checkpoint_dirs:
+            checkpoint_dirs = _local_snapshot_dirs(model_name_or_path, cache_dir)
+    if not checkpoint_dirs:
         logger.info_once(
             "No local checkpoint found for %s; skipping page-cache eviction",
             model_name_or_path,
         )
         return
-    for path in checkpoint_dir.glob("*.safetensors"):
-        try:
-            with path.open("rb") as file:
-                os.posix_fadvise(file.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)
-        except OSError as exc:
-            logger.warning(
-                "Could not release checkpoint page cache for %s: %s", path, exc
-            )
+    for checkpoint_dir in checkpoint_dirs:
+        dropped_bytes = 0
+        for path in checkpoint_dir.glob("*.safetensors"):
+            try:
+                with path.open("rb") as file:
+                    os.posix_fadvise(file.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)
+            except OSError as exc:
+                logger.warning(
+                    "Could not release checkpoint page cache for %s: %s", path, exc
+                )
+            else:
+                dropped_bytes += path.stat().st_size
+        logger.info(
+            "Released %.2f GiB of checkpoint page cache in %s",
+            dropped_bytes / 1024**3,
+            checkpoint_dir,
+        )
 
 
 def _get_checkpoints_size_bytes(files: list[str]) -> int:
