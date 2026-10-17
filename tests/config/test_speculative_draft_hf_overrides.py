@@ -16,10 +16,11 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
-from transformers import PreTrainedConfig
+from transformers import Glm5NextConfig, PreTrainedConfig
 
 from vllm.config.parallel import ParallelConfig
 from vllm.config.speculative import SpeculativeConfig
+from vllm.transformers_utils.configs.speculators.base import SpeculatorsConfig
 
 
 def _make_hf_config(**kwargs) -> PreTrainedConfig:
@@ -212,7 +213,7 @@ def _module_level_shrink(hf_config: PreTrainedConfig) -> PreTrainedConfig:
 @pytest.mark.parametrize(
     ("attributes", "explicit", "expected", "source"),
     [
-        ({"num_lookahead_tokens": 3}, None, 3, "num_lookahead_tokens"),
+        (None, None, 3, "num_lookahead_tokens"),
         ({"n_predict": 2, "num_lookahead_tokens": 3}, None, 2, "n_predict"),
         (
             {"n_predict": None, "num_lookahead_tokens": 3},
@@ -227,6 +228,14 @@ def _module_level_shrink(hf_config: PreTrainedConfig) -> PreTrainedConfig:
     ],
 )
 def test_draft_token_default(attributes, explicit, expected, source):
+    if attributes is None:
+        attributes = SpeculatorsConfig.extract_transformers_pre_trained_config(
+            {
+                "speculators_model_type": "eagle3",
+                "transformer_layer_config": {},
+                "speculators_config": {"proposal_methods": [{"speculative_tokens": 3}]},
+            }
+        )
     hf_config = _make_hf_config(**attributes)
     draft = MagicMock(hf_config=hf_config, max_model_len=128)
     target = MagicMock(max_model_len=128, quantization=None, hf_overrides={})
@@ -325,3 +334,21 @@ def test_mtp_index_share_override(
         speculative_config.draft_model_config.hf_config.index_share_for_mtp_iteration
         is expected
     )
+
+
+@pytest.mark.cpu_test
+def test_glm5_next_mtp_override_promotes_index_share():
+    """The flag lives on text_config, but the MTP proposers read the draft config."""
+    config = Glm5NextConfig(
+        architectures=["Glm5NextForConditionalGeneration"],
+        text_config={
+            "num_nextn_predict_layers": 1,
+            "index_share_for_mtp_iteration": True,
+        },
+    )
+
+    draft_config = SpeculativeConfig.hf_config_override(config)
+
+    assert draft_config.architectures == ["Glm5NextMTPModel"]
+    assert draft_config.n_predict == 1
+    assert draft_config.index_share_for_mtp_iteration is True
