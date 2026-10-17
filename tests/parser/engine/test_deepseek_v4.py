@@ -153,6 +153,15 @@ class TestArgConverter:
         result = json.loads(_dsml_arg_converter(raw, partial=False))
         assert result["data"] == "[broken"
 
+    @pytest.mark.parametrize("partial", [False, True])
+    def test_unclosed_last_non_string_param_keeps_literal(self, partial):
+        raw = _param("city", "true", "Seattle")
+        raw += f"<{_PARAM_OPEN.format(name='data', is_str='false')}[broken"
+        assert json.loads(_dsml_arg_converter(raw, partial=partial)) == {
+            "city": "Seattle",
+            "data": "[broken",
+        }
+
     def test_chinese_chars_preserved_in_json(self):
         raw = self._raw(("query", "true", "你好世界"))
         raw_json = _dsml_arg_converter(raw, partial=False)
@@ -258,6 +267,57 @@ class TestImplicitParameterClose:
         assert json.loads(arguments) == {
             "location": "Paris a<b>",
             "date": "tomorrow",
+        }
+
+
+@pytest.mark.parametrize(
+    ("is_str", "value", "expected"),
+    [
+        ("true", "celsius", "celsius"),
+        ("false", "42", 42),
+        ("false", "[broken", "[broken"),
+    ],
+)
+class TestUnclosedLastParameter:
+    def test_non_streaming_preserves_last_parameter(
+        self, mock_tokenizer, mock_request, is_str, value, expected
+    ):
+        text = (
+            f"{DSML_TOOL_START}"
+            f"{DSML_INVOKE_PREFIX}get_weather{DSML_INVOKE_NAME_END}"
+            f"{_param('city', 'true', 'Seattle')}"
+            f"<{_PARAM_OPEN.format(name='unit', is_str=is_str)}{value}"
+            f"{DSML_INVOKE_END}{DSML_TOOL_END}"
+        )
+
+        result = DeepSeekV4Parser(mock_tokenizer).extract_tool_calls(text, mock_request)
+
+        assert result.tools_called is True
+        assert json.loads(result.tool_calls[0].function.arguments) == {
+            "city": "Seattle",
+            "unit": expected,
+        }
+
+    def test_streaming_preserves_last_parameter(
+        self, mock_tokenizer, mock_request, is_str, value, expected
+    ):
+        chunks = [
+            DSML_TOOL_START,
+            f"{DSML_INVOKE_PREFIX}get_weather{DSML_INVOKE_NAME_END}",
+            _param("city", "true", "Seattle"),
+            f"<{_PARAM_OPEN.format(name='unit', is_str=is_str)}{value[:1]}",
+            value[1:],
+            DSML_INVOKE_END,
+            DSML_TOOL_END,
+        ]
+
+        results = simulate_tool_streaming(
+            DeepSeekV4Parser(mock_tokenizer), mock_request, chunks
+        )
+
+        assert json.loads(collect_tool_arguments(results)) == {
+            "city": "Seattle",
+            "unit": expected,
         }
 
 
