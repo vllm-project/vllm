@@ -133,10 +133,13 @@ and `dspark`. DFlash drafters with a candidate head (`DFlash2DraftModel`,
 A watermarking algorithm without native speculative-decoding support is
 rejected before model loading. Set
 `"allow_target_only_watermarking": true` to allow it: accepted draft tokens are
-not watermarked, while target-side rejection recovery and bonus sampling remain
-watermarked. The watermark signal is diluted in proportion to the share of
-output tokens supplied by accepted drafts; rejected drafts do not dilute it
-because their recovery tokens are watermarked.
+not watermarked and can weaken detectability, while target-side rejection
+recovery and bonus sampling still apply the watermark. For target-only Gumbel
+watermarking under standard rejection sampling, recovery applies the key to the
+normalized positive-part residual `max(p - q, 0)` of target probabilities `p`
+and draft probabilities `q`. Its signal strength depends on residual uncertainty:
+a peaked residual can weaken the signal, and a residual supported on one token
+leaves no key-dependent token choice.
 
 For `dual_key_gumbel`, `alpha` has no effect under speculative decoding. The
 speculative protocol selects the key for each token instead.
