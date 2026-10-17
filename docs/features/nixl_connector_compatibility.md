@@ -103,6 +103,7 @@ By default, a **compatibility hash** is checked during handshake. P and D instan
 - NixlConnector defaults to **`LBHNC`** (head-major, formerly `HND`) layout for optimal transfer performance (non-MLA models).
 - `LBNHC` (token-major, formerly `NHD`) layout is supported but does **not** allow heterogeneous TP head splitting.
 - Experimental `LBHNC` ↔ `LBNHC` permute: enable via `--kv-transfer-config '{"enable_permute_local_kv": true}'`. Not supported with HMA.
+- Separate K/V head slots (FlashInfer, unquantized KV): `--attention-config.flashinfer_separate_kv_head_slots=true` stores each page as `[K heads | V heads]` instead of packing K and V per token, and NixlConnector registers the K and V halves as two regions per layer. Use it to exchange KV with an engine that keeps K and V in separate per-layer slabs. Requires `LBHNC` or `BLHNC`; both instances must set the same value (it is part of the compatibility hash).
 
 ### Pipeline parallelism
 
