@@ -25,7 +25,7 @@ For each, four candidates are timed:
   symmetric-memory kernel that overlaps the collective with the GEMM,
   chosen by ``init_fused_comm_kernel`` exactly as in serving.
 
-Run a TP2 sweep over the Qwen3-1.7B projections with:
+Run a TP2 sweep over the Qwen3-32B projections with:
 
     torchrun --nproc-per-node=2 -- \\
         benchmarks/kernels/benchmark_sequence_parallel.py --proj qkv
@@ -102,7 +102,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model",
         choices=tuple(_MODEL_PROJECTIONS),
-        default="qwen3_1_7b",
+        default="qwen3_32b",
         help="Model whose projection shapes (BF16) to benchmark.",
     )
     parser.add_argument(
