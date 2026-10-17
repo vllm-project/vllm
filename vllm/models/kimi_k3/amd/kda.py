@@ -165,6 +165,10 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         )
         if self.in_proj_padding:
             self.in_proj_qkvgfab.weight.data[-self.in_proj_padding :].zero_()
+            # Alignment rows are not part of the checkpoint.
+            self.in_proj_qkvgfab.weight.weight_loader_numel = (
+                local_output_size * self.hidden_size
+            )
 
         self.f_b_proj = ColumnParallelLinear(
             self.head_dim,
