@@ -400,13 +400,22 @@ def map_mxfp4_backend(runner_backend: MoEBackend) -> list[Mxfp4MoeBackend]:
 def _get_priority_backends_for_gpt_oss() -> list[Mxfp4MoeBackend]:
     """Available backends in priority order, BF16-act variant before
     activation-quantized variant within each vendor family."""
+    if current_platform.is_rocm():
+        return [
+            Mxfp4MoeBackend.AITER_MXFP4_BF16,
+            Mxfp4MoeBackend.AITER_TRITON_MXFP4_BF16,
+            Mxfp4MoeBackend.AITER_MXFP4_FP8,
+            Mxfp4MoeBackend.AITER_MXFP4_MXFP4,
+            Mxfp4MoeBackend.AITER_TRITON_MXFP4_MXFP4,
+            Mxfp4MoeBackend.EMULATION,
+        ]
+    if current_platform.is_xpu():
+        return [Mxfp4MoeBackend.XPU]
+    if current_platform.is_cpu():
+        return [Mxfp4MoeBackend.CPU]
     _AVAILABLE_BACKENDS = [
         Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
         Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8,
-        Mxfp4MoeBackend.AITER_MXFP4_BF16,
-        Mxfp4MoeBackend.AITER_TRITON_MXFP4_BF16,
-        Mxfp4MoeBackend.AITER_MXFP4_FP8,
-        Mxfp4MoeBackend.AITER_MXFP4_MXFP4,
         Mxfp4MoeBackend.TRITON,
         Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16,
         Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_MXFP8,
@@ -417,9 +426,6 @@ def _get_priority_backends_for_gpt_oss() -> list[Mxfp4MoeBackend]:
         Mxfp4MoeBackend.MARLIN,
         Mxfp4MoeBackend.BATCHED_MARLIN,
         Mxfp4MoeBackend.HUMMING,
-        Mxfp4MoeBackend.XPU,
-        Mxfp4MoeBackend.CPU,
-        Mxfp4MoeBackend.EMULATION,
     ]
     if current_platform.is_cuda() and current_platform.is_device_capability_family(120):
         # Consumer Blackwell: the OAI Triton kernels run but their 99KB shared
@@ -766,12 +772,19 @@ def select_mxfp4_moe_backend(
             for backend, reason in unsupported_reasons
         ]
     )
+    platform_name = current_platform.device_name
+    candidate_names = [backend.value for backend in AVAILABLE_BACKENDS]
+    if not candidate_names:
+        raise NotImplementedError(
+            f"No MXFP4 MoE backend supports activation_key={activation_key} "
+            f"on platform '{platform_name}'."
+        )
+
     raise NotImplementedError(
-        "No MXFP4 MoE backend supports the deployment configuration. "
+        f"No MXFP4 MoE backend supports the deployment configuration on {platform_name}. "
         f"weight_key=kMxfp4Static, activation_key={activation_key}. "
-        f"Candidate backends were: "
-        f"{[backend.value for backend in AVAILABLE_BACKENDS]}. "
-        f"Unsupported reasons: {unsupported_log}. "
+        f"Candidate backends were: {candidate_names}. "
+        f"Unsupported reasons: {unsupported_log}."
     )
 
 
