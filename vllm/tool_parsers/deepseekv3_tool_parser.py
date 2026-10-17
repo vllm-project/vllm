@@ -46,12 +46,16 @@ class DeepSeekV3ToolParser(ToolParser):
         self.tool_call_start_token: str = "<｜tool▁call▁begin｜>"
         self.tool_call_end_token: str = "<｜tool▁call▁end｜>"
 
+        # The argument groups use [\s\S] rather than re.DOTALL so that a model
+        # that pretty-prints the JSON over several lines still matches, while
+        # the type and name groups stay line-bound and cannot run past the end
+        # of one tool call into the next.
         self.tool_call_regex = re.compile(
-            r"<｜tool▁call▁begin｜>(?P<type>.*)<｜tool▁sep｜>(?P<function_name>.*)\n```json\n(?P<function_arguments>.*)\n```<｜tool▁call▁end｜>"
+            r"<｜tool▁call▁begin｜>(?P<type>.*)<｜tool▁sep｜>(?P<function_name>.*)\n```json\n(?P<function_arguments>[\s\S]*?)\n```<｜tool▁call▁end｜>"
         )
 
         self.stream_tool_call_portion_regex = re.compile(
-            r"(?P<type>.*)<｜tool▁sep｜>(?P<function_name>.*)\n```json\n(?P<function_arguments>.*[^\n`])"
+            r"(?P<type>.*)<｜tool▁sep｜>(?P<function_name>.*)\n```json\n(?P<function_arguments>[\s\S]*[^\n`])"
         )
 
         self.stream_tool_call_name_regex = re.compile(
