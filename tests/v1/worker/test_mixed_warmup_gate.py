@@ -76,7 +76,7 @@ def test_kernel_warmup_restores_uncalibrated_adaptive_manager(monkeypatch, fail_
         rejection_sampler=rejection_sampler,
     )
 
-    def run_steps(model_runner, execute, sample, greedy=False):
+    def run_steps(model_runner, execute, sample, greedy=False, seeded=False):
         assert model_runner.adaptive_verification is None
         assert not model_runner.rejection_sampler.enable_adaptive_verification
         if fail_warmup:
@@ -91,3 +91,38 @@ def test_kernel_warmup_restores_uncalibrated_adaptive_manager(monkeypatch, fail_
     assert runner.adaptive_verification is manager
     assert manager.cost_tables is None
     assert rejection_sampler.enable_adaptive_verification
+
+
+@pytest.mark.parametrize("fused_backend", ["flashinfer", "xpu", None])
+def test_warmup_kernels_dispatches_seeded_pass_when_fused(monkeypatch, fused_backend):
+    """Verify that warmup_kernels dispatches a dedicated seeded pass (#54425)
+    when fused sampling (FlashInfer or XPU) is enabled, and skips it otherwise."""
+    passes_called = []
+
+    def mock_warmup_kernels(model_runner, execute, sample, greedy=False, seeded=False):
+        passes_called.append({"greedy": greedy, "seeded": seeded})
+
+    monkeypatch.setattr(warmup, "_warmup_kernels", mock_warmup_kernels)
+
+    sampler = SimpleNamespace(
+        use_flashinfer=(fused_backend == "flashinfer"),
+        use_xpu_sampler=(fused_backend == "xpu"),
+    )
+    runner = SimpleNamespace(
+        is_pooling_model=False,
+        adaptive_verification=None,
+        rejection_sampler=None,
+        sampler=sampler,
+    )
+
+    warmup.warmup_kernels(runner, _fail, _fail)
+
+    if fused_backend in ("flashinfer", "xpu"):
+        assert passes_called == [
+            {"greedy": False, "seeded": False},
+            {"greedy": False, "seeded": True},
+        ]
+    else:
+        assert passes_called == [
+            {"greedy": False, "seeded": False},
+        ]
