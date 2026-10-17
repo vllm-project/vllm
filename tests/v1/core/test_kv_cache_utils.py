@@ -2190,3 +2190,34 @@ def test_null_head_len():
         assert null_head_len(table) == expected
     blocks = KVCacheBlocks(([null] * 4 + real, [null] + real[:1] + [null]))
     assert blocks.get_unhashed_block_ids_all_groups() == [[1, 2, 3], [1]]
+
+
+@pytest.mark.parametrize(
+    "supported,expected",
+    [
+        # A hybrid model's backends only support block-outer layouts.
+        (["BLNHC", "BLHNC"], KVCacheLayout.BLHNC),
+        # No head-major candidate: the backends' first choice.
+        (["BLNHC"], KVCacheLayout.BLNHC),
+    ],
+)
+def test_connector_layout_fallback_keeps_head_order(monkeypatch, supported, expected):
+    """A connector that slices by head keeps heads outside tokens when it can."""
+    from vllm.v1.attention.backends import utils as backend_utils
+
+    monkeypatch.delenv("VLLM_KV_CACHE_LAYOUT", raising=False)
+    monkeypatch.setattr(
+        backend_utils, "get_kv_connector_cache_layout", lambda _: "LBHNC"
+    )
+    config = VllmConfig(model_config=ModelConfig(max_model_len=1024))
+    config.cache_config.kv_cache_layout = None
+    assert backend_utils.resolve_kv_cache_layout(config, [supported]) == expected
+
+
+def test_kv_cache_layout_is_head_major():
+    assert {layout for layout in KVCacheLayout if layout.is_head_major} == {
+        KVCacheLayout.LBHNC,
+        KVCacheLayout.LHBNC,
+        KVCacheLayout.BLHNC,
+        KVCacheLayout.BHLNC,
+    }
