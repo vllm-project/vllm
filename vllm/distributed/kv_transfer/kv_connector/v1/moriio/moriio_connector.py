@@ -88,7 +88,6 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import (
     make_zmq_path,
@@ -367,10 +366,8 @@ class MoRIIOConnector(KVConnectorBase_V1, SupportsHMA):
     def get_mem_pool_context(self) -> AbstractContextManager | None:
         # dmabuf export covers one physical allocation, so the KV cache must
         # not be split into ROCm's cuMem chunks to be registered as one region.
-        if not (
-            self._vllm_config.model_config.enable_sleep_mode
-            and current_platform.is_rocm()
-        ):
+        # MoRI runs only on ROCm.
+        if not self._vllm_config.model_config.enable_sleep_mode:
             return None
         from vllm.device_allocator.cumem import CuMemAllocator
 
@@ -1899,10 +1896,12 @@ class MoRIIOConnectorWorker:
         self._region_session_index: dict[str, list[int]] | None = None
         self.built_session = False
         self.built_write_session: defaultdict[str, list] = defaultdict(list)
-        # Sleep mode: the tensors behind each layer's registered regions, so
-        # they can be registered again after the KV cache is remapped, and the
-        # handshake listeners of peers that fetched our region metadata, by
-        # address: every TP/DP worker of a peer engine has its own listener.
+
+        # Sleep-mode state (this engine's sleep or a peer's).
+        # The tensors behind each layer's registered regions, so they can be
+        # registered again after the KV cache is remapped, and the handshake
+        # listeners of peers that fetched our region metadata, by address:
+        # every TP/DP worker of a peer engine has its own listener.
         self._region_tensors: dict[str, list[torch.Tensor]] = {}
         self._kv_released = False
         self._peer_listeners: dict[tuple[str, int], EngineId] = {}
@@ -1912,16 +1911,20 @@ class MoRIIOConnectorWorker:
         self._remote_epoch = 0
         self._dropped_peers: list[tuple[int, EngineId]] = []
         # Held from session lookup until the transfers are posted, so a drain
-        # never misses a transfer that is about to be posted.
+        # never misses a transfer that is about to be posted. Needed without
+        # local sleep mode too: a sleeping peer makes us drain our transfers
+        # to it. Uncontended outside a drain.
         self._transfer_post_lock = threading.RLock()
         # Arguments of the last handshake per remote engine key, to fetch a
-        # peer's region metadata again after it re-registers (sleep mode).
+        # peer's region metadata again after it re-registers.
         self._handshake_args: dict[str, tuple[Any, ...]] = {}
+
         # WRITE consumer: when each awaited transfer was first seen, and the
         # transfers given up on (their late completions are ignored).
         self._awaiting_write: dict[TransferId, ReqId] = {}
         self._write_wait_since: dict[TransferId, float] = {}
         self._timed_out_writes: OrderedDict[TransferId, None] = OrderedDict()
+
         backend = get_attn_backend(
             self.model_config.get_head_size(),
             self.model_config.dtype,
