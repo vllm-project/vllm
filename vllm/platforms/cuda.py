@@ -27,7 +27,6 @@ with contextlib.suppress(ImportError):
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.utils.import_utils import import_pynvml
-from vllm.utils.platform_utils import cuda_get_device_properties
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .interface import DeviceCapability, Platform, PlatformEnum, in_wsl
@@ -52,6 +51,21 @@ pynvml = import_pynvml()
 # pytorch 2.5 uses cudnn sdpa by default, which will cause crash on some models
 # see https://github.com/huggingface/diffusers/issues/9704 for details
 torch.backends.cuda.enable_cudnn_sdp(False)
+
+
+# Disable cuBLAS split-K GEMM to ensure deterministic floating-point reductions
+# across repeated generate() calls on the same engine instance. Without this,
+# cuBLAS may use split-K algorithms with atomicAdd reduction whose order
+# depends on GPU thread scheduling, causing tiny logit differences that can
+# flip greedy argmax boundaries (see vllm-project/vllm#61319).
+# Setting a small workspace size forces cuBLAS to use non-split-K kernels
+# and a fixed seed ensures deterministic algorithm selection.
+os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":16:8")
+os.environ.setdefault("CUBLASLT_WORKSPACE_SIZE", "1")
+
+# Make cuDNN use deterministic algorithms instead of autotuning.
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = False
 
 
 @lru_cache(maxsize=8)
@@ -803,14 +817,7 @@ class NvmlCudaPlatform(CudaPlatformBase):
     def get_device_total_memory(cls, device_id: int = 0) -> int:
         physical_device_id = cls.device_id_to_physical_device_id(device_id)
         handle = pynvml.nvmlDeviceGetHandleByIndex(physical_device_id)
-        try:
-            return int(pynvml.nvmlDeviceGetMemoryInfo(handle).total)
-        except pynvml.NVMLError:
-            # Integrated parts (e.g. GB10 / DGX Spark) do not implement the
-            # device-level NVML memory query - nvidia-smi reports [N/A] for
-            # memory.total there. Fall back to the same source
-            # NonNvmlCudaPlatform reads.
-            return int(cuda_get_device_properties(device_id, ("total_memory",))[0])
+        return int(pynvml.nvmlDeviceGetMemoryInfo(handle).total)
 
     @classmethod
     @with_nvml_context

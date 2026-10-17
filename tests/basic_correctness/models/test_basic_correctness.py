@@ -216,6 +216,15 @@ def test_models_distributed(
         pytest.skip(f"Skip test for {TARGET_TEST_SUITE}")
 
     with monkeypatch.context() as monkeypatch_context:
+        if (
+            model == "meta-llama/Llama-3.2-1B-Instruct"
+            and distributed_executor_backend == "ray"
+            and attention_backend == ""
+            and TARGET_TEST_SUITE == "L4"
+            and enable_prompt_embeds
+        ):  # noqa
+            pytest.skip("enable_prompt_embeds does not work with ray compiled dag.")
+
         for k, v in extra_env.items():
             monkeypatch_context.setenv(k, v)
 

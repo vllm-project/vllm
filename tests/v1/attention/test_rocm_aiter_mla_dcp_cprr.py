@@ -161,11 +161,6 @@ def _build(monkeypatch, route, gathered_heads, segmented_supported=True):
         lambda *args: segmented_supported,
     )
     monkeypatch.setattr(rocm_aiter_mla, "_fp8_mla_prefill_supported", lambda: False)
-    # These cases pick between cprr and segmented. On a gfx942 runner the real
-    # arch would add the Triton verify route, which this stub cannot build.
-    import vllm.platforms.rocm as rocm
-
-    monkeypatch.setattr(rocm, "on_gfx942", lambda: False)
     monkeypatch.setattr(
         rocm_aiter_mla, "get_dcp_group", lambda: SimpleNamespace(rank_in_group=0)
     )
@@ -269,46 +264,25 @@ def test_min_cprr_qlen_is_above_two():
 
 
 @pytest.mark.parametrize(
-    "segmented,triton,causal,qlen,asm,expected",
+    "supports,causal,qlen,asm,expected",
     [
-        (True, False, True, 1, True, Route.PLAIN),
-        (True, False, True, 2, True, Route.SEGMENTED),
-        (True, False, True, 3, True, Route.CPRR),
-        (True, False, True, 4, True, Route.CPRR),
-        (True, False, True, 4, False, Route.SEGMENTED),
-        (True, False, False, 2, True, Route.PLAIN),
-        (True, False, False, 4, False, Route.PLAIN),
-        (False, False, True, 3, True, Route.CPRR),
-        # gfx942: no cprr and no segmented, so causal verify goes to Triton.
-        (False, True, True, 1, False, Route.PLAIN),
-        (False, True, True, 2, False, Route.TRITON),
-        (False, True, True, 4, False, Route.TRITON),
-        (False, True, False, 4, False, Route.PLAIN),
-        # cprr still wins at or above its qlen floor.
-        (False, True, True, 4, True, Route.CPRR),
-        (False, True, True, 2, True, Route.TRITON),
+        (True, True, 1, True, Route.PLAIN),
+        (True, True, 2, True, Route.SEGMENTED),
+        (True, True, 3, True, Route.CPRR),
+        (True, True, 4, True, Route.CPRR),
+        (True, True, 4, False, Route.SEGMENTED),
+        (True, False, 2, True, Route.PLAIN),
+        (True, False, 4, False, Route.PLAIN),
+        (False, True, 3, True, Route.CPRR),
     ],
 )
-def test_dcp_decode_route(segmented, triton, causal, qlen, asm, expected):
-    route = _select_route(
-        supports_segmented=segmented,
-        supports_triton=triton,
-        causal=causal,
-        max_qo_len=qlen,
-        asm_selected=asm,
-    )
-    assert route is expected
+def test_dcp_decode_route(supports, causal, qlen, asm, expected):
+    assert _select_route(supports, causal, qlen, asm) is expected
 
 
 def test_causal_multi_token_batch_without_a_valid_route_fails():
     with pytest.raises(RuntimeError, match="requires either segmented MLA"):
-        _select_route(
-            supports_segmented=False,
-            supports_triton=False,
-            causal=True,
-            max_qo_len=2,
-            asm_selected=True,
-        )
+        _select_route(False, True, 2, True)
 
 
 # Kernel numerics live in test_rocm_aiter_mla_dcp_cprr_numerics.py, which runs

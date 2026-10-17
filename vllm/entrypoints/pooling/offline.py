@@ -325,8 +325,8 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
                 it is used to create the progress bar.
                 If `False`, no progress bar is created.
             lora_request: LoRA request to use for generation, if any.
-            chat_template: The chat template to use for scoring. If None, use
-                the chat template passed to the LLM constructor.
+            chat_template: The chat template to use for the scoring. If None, we
+                use the model's default chat template.
             tokenization_kwargs: Overrides for `tokenizer.encode`.
 
         Returns:

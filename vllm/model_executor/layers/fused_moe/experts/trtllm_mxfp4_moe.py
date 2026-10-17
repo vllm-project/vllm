@@ -122,9 +122,6 @@ class TrtLlmMxfp4ExpertsBase:
         p = current_platform
         return p.is_cuda() and p.is_device_capability_family(100) and has_flashinfer()
 
-    def output_hidden_dim(self, hidden_dim: int) -> int:
-        return self.hidden_dim_unpadded
-
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
         return False
