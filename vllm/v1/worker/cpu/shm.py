@@ -96,6 +96,9 @@ import vllm.v1.worker.gpu.buffer_utils as gpu_buffer_utils
 import vllm.v1.worker.cpu.buffer_utils as cpu_buffer_utils
 
 gpu_buffer_utils.UvaBuffer = cpu_buffer_utils.UvaBuffer
+gpu_buffer_utils.UvaBufferPool = cpu_buffer_utils.UvaBufferPool
+gpu_buffer_utils.UvaBackedTensor = cpu_buffer_utils.UvaBackedTensor
+gpu_buffer_utils.StagedWriteTensor = cpu_buffer_utils.StagedWriteTensor
 
 # Patch Triton
 from vllm.triton_utils import HAS_TRITON, tl
