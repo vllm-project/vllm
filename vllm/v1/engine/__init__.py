@@ -242,6 +242,10 @@ class EngineCoreOutput(
     # [num_scored_rows, num_token_ids]; appended last for array_like compatibility.
     prompt_token_id_logprobs: torch.Tensor | None = None
 
+    # [num_new_tokens, total_width] float32 auxiliary readouts
+    # (SamplingParams.aux_readouts); appended last for array_like compatibility.
+    new_aux_readouts: torch.Tensor | None = None
+
     @property
     def finished(self) -> bool:
         return self.finish_reason is not None

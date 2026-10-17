@@ -292,6 +292,10 @@ class ModelRunnerOutput:
     # req_id -> [num_scored_rows, num_token_ids] prompt_logprob_token_ids scores.
     prompt_token_id_logprobs_dict: dict[str, torch.Tensor] = field(default_factory=dict)
 
+    # req_id -> [num_logits, total_width] float32 auxiliary readouts of the
+    # requests that asked (SamplingParams.aux_readouts), at their logits rows.
+    aux_readouts: dict[str, torch.Tensor] | None = None
+
     # [num_reqs, hidden_size]
     pooler_output: list[torch.Tensor | None] | None = None
 

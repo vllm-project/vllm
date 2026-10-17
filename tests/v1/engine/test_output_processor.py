@@ -68,6 +68,7 @@ def test_delta_output_without_new_tokens_returns_empty_logprobs(
     state.request_index = 0
     state.sampling_mask_chunks = []
     state.routed_experts_chunks = []
+    state.aux_readout_slices = None
     state.spec_decode_metrics = None
 
     output = state._new_completion_output([], None, None)
@@ -93,6 +94,7 @@ def test_completion_output_preserves_each_sampling_mask_position() -> None:
         SamplingMaskLists(token_ids=np.array([30, 31, 32])),
     ]
     state.routed_experts_chunks = []
+    state.aux_readout_slices = None
     state.spec_decode_metrics = None
     state.weight_version_starts = []
 
@@ -1823,6 +1825,7 @@ def test_sampling_masks_follow_output_kind(output_kind):
     state.request_index = 0
     state.sampling_mask_chunks = []
     state.routed_experts_chunks = []
+    state.aux_readout_slices = None
     state.spec_decode_metrics = None
     state.weight_version_starts = []
 
