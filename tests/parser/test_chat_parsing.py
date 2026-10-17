@@ -1563,6 +1563,27 @@ class ToolArgCoercionTest(unittest.TestCase):
         self.assertEqual(_coerce("inf", ("integer",)), "inf")
         self.assertEqual(_coerce("NaN", ("integer",)), "NaN")
 
+    def test_parse_response_preserves_integer_argument_precision(self):
+        tools = _set_alarm_tools(record_id={"type": "integer"})
+        for raw, expected in [
+            ("9223372036854775807.0", 9223372036854775807),
+            ("9.007199254740993e15", 9007199254740993),
+            ("1.0000000000000001", "1.0000000000000001"),
+            ("1e-400", "1e-400"),
+            ("1e400", "1e400"),
+            ("1e-99999999999999999999", "1e-99999999999999999999"),
+        ]:
+            with self.subTest(raw=raw):
+                text = (
+                    "<tool_call><function=set_alarm>"
+                    f"<parameter=record_id>{raw}</parameter>"
+                    "</function></tool_call>"
+                )
+                parsed = parse_response(
+                    text, _XML_STRING_ARGS_TEMPLATE, prefix="", tools=tools
+                )
+                self.assertEqual(_first_tool_args(parsed)["record_id"], expected)
+
     def test_coerce_handles_any_of_and_null(self):
         self.assertEqual(_coerce("5", ("integer", "null")), 5)
         self.assertIsNone(_coerce("null", ("integer", "null")))
