@@ -6,6 +6,7 @@ import torch.nn as nn
 from vllm.config import VllmConfig, replace
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.lora.layers.base import BaseLayerWithLoRA
+from vllm.model_executor.determinism.scope import batch_invariance_exempt
 from vllm.model_executor.layers.quantization.online.lm_head import (
     quantized_lm_head_copy,
 )
@@ -89,7 +90,7 @@ def load_eagle_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mod
     )
     if draft_load_config is not vllm_config.load_config:
         vllm_config = replace(vllm_config, load_config=draft_load_config)
-    with set_model_tag("eagle_head"):
+    with set_model_tag("eagle_head"), batch_invariance_exempt():
         eagle_model = get_model(
             vllm_config=vllm_config, model_config=draft_model_config
         )
