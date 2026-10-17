@@ -3177,6 +3177,34 @@ def test_validate_mamba_align_subblock_prefill():
 
 
 @pytest.mark.parametrize(
+    ("max_num_batched_tokens", "expect_warning"), [(2048, True), (4096, False)]
+)
+def test_validate_mamba_align_warns_on_idle_prefill_budget(
+    caplog_vllm, max_num_batched_tokens: int, expect_warning: bool
+):
+    """Align-mode chunks end on the block grid: a 1152-token block caps a
+    2048-token budget at 1152 prefill tokens per step, while 4096 keeps 3456."""
+    config = SimpleNamespace(
+        cache_config=SimpleNamespace(block_size=1152, mamba_cache_mode="align"),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        scheduler_config=SimpleNamespace(
+            max_num_batched_tokens=max_num_batched_tokens,
+            max_num_scheduled_tokens=max_num_batched_tokens,
+            long_prefill_token_threshold=0,
+            max_num_seqs=256,
+            disable_chunked_mm_input=False,
+        ),
+        kv_transfer_config=None,
+        num_speculative_tokens=3,
+    )
+
+    VllmConfig.validate_block_size(config)
+
+    warned = "prefills at most 1152 of the 2048-token budget" in caplog_vllm.text
+    assert warned == expect_warning
+
+
+@pytest.mark.parametrize(
     ("model_id", "compilation_config", "optimization_level"),
     [
         (

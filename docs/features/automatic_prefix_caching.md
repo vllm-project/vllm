@@ -34,6 +34,10 @@ vllm serve <hybrid-model> \
 
 Choose a value that divides the block size of every prefix-cacheable KV cache group, and that is a multiple of the per-state compression ratio for models that use one, such as sparse MLA. vLLM validates both at startup and names the offending sizes in the error. Read the served block size from the startup log. 64 is a reasonable starting point.
 
+### Prefill token budget
+
+With prefix caching, intermediate prefill chunks of a long prompt also end on the Mamba block grid. Each step prefills the largest block multiple that fits the token budget, and the remainder stays idle. Hybrid models often use large blocks: with a 1152-token block, a 2048-token `--max-num-batched-tokens` (the API server default on GPUs below 70 GiB) prefills only 1152 tokens per step. Set `--max-num-batched-tokens` to a multiple of the block size plus headroom for the decode tokens scheduled in the same step. vLLM logs a warning at startup when more than a quarter of the budget would stay idle.
+
 ## Example workloads
 
 We describe two example workloads, where APC can provide huge performance benefit:
