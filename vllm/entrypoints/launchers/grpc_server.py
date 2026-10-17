@@ -67,6 +67,11 @@ async def serve_grpc(args: argparse.Namespace):
 
     # Create engine args
     engine_args = AsyncEngineArgs.from_cli_args(args)
+    if (
+        engine_args.kv_transfer_config is not None
+        and engine_args.kv_transfer_config.pd_role is not None
+    ):
+        raise ValueError("Runtime P/D role switching requires the Python HTTP frontend")
 
     # Build vLLM config
     vllm_config = engine_args.create_engine_config(

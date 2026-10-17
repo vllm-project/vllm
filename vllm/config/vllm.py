@@ -2209,6 +2209,28 @@ class VllmConfig:
         # Resolve kv_offloading-derived connector name into kv_transfer_config
         # before the HMA check below, which inspects the connector class.
         self._post_init_kv_transfer_config()
+
+        if self.kv_transfer_config and self.kv_transfer_config.pd_role is not None:
+            parallel = self.parallel_config
+            if (
+                parallel._api_process_count != 1
+                or parallel.data_parallel_external_lb
+                or parallel.data_parallel_hybrid_lb
+                or parallel.pipeline_parallel_size != 1
+                or parallel.prefill_context_parallel_size != 1
+                or parallel.decode_context_parallel_size != 1
+                or parallel.enable_elastic_ep
+                or self.speculative_config is not None
+                or self.model_config.enable_sleep_mode
+                or self.model_config.is_multimodal_model
+                or self.model_config.runner_type != "generate"
+            ):
+                raise ValueError(
+                    "Runtime P/D role switching requires one API process, internal "
+                    "DP load balancing, PP=PCP=DCP=1, and a text generation model "
+                    "without speculation, sleep mode, or elastic EP resizing."
+                )
+
         self._verify_aux_output_compatibility()
 
         # Hybrid KV cache manager (HMA) runtime rules:

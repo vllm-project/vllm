@@ -288,6 +288,10 @@ class EngineCoreClient(ABC):
     async def get_supported_tasks_async(self) -> tuple[SupportedTask, ...]:
         raise NotImplementedError
 
+    async def call_utility_all_async(self, method: str, *args) -> list[Any]:
+        """Call a utility on every managed engine and return all results."""
+        raise NotImplementedError
+
     async def add_request_async(self, request: EngineCoreRequest) -> None:
         raise NotImplementedError
 
@@ -1801,6 +1805,20 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
     async def call_utility_async(self, method: str, *args) -> Any:
         # Only the result from the first engine is returned.
         return (await self.call_utility_all_async(method, *args))[0]
+
+    async def call_utility_all_async(self, method: str, *args) -> list[Any]:
+        # Wait for every rank before the caller can roll back a partial prepare.
+        results = await asyncio.gather(
+            *[
+                self._call_utility_async(method, *args, engine=engine)
+                for engine in self.core_engines
+            ],
+            return_exceptions=True,
+        )
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
+        return results
 
     @staticmethod
     async def process_engine_outputs(
