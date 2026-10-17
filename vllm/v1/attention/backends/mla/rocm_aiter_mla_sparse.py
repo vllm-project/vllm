@@ -457,6 +457,14 @@ class ROCMAiterMLASparseMetadataBuilder(
         self._init_reorder_batch_threshold(1, supports_spec_as_decode=True)
 
         self.num_heads = self.model_config.get_num_attention_heads(parallel_config)
+        # Allow for pending rejection corrections and draft steps across
+        # all in-flight batches before treating the clamped key as exact.
+        spec_config = vllm_config.speculative_config
+        self._seq_lens_ub_slack = (
+            2 * spec_config.num_speculative_tokens * vllm_config.max_concurrent_batches
+            if spec_config is not None
+            else 0
+        )
         attention_context = vllm_config.compilation_config.static_forward_context
         # Sink decode must use AITER's nonpersistent path. In particular,
         # gfx942 has no persistent+LSE kernel, and its metadata heuristic
@@ -584,6 +592,35 @@ class ROCMAiterMLASparseMetadataBuilder(
         )
         return min(ideal_splits, self._num_compute_units)
 
+    def _metadata_key_seq_lens(
+        self, common_attn_metadata: CommonAttentionMetadata, query_lens: np.ndarray
+    ) -> np.ndarray:
+        """Host seq_lens for the persistent-metadata key, avoiding a D2H sync
+        when the host upper bound yields the same key.
+
+        The key only sees seq_lens and context lens clamped to
+        ``topk_tokens``. The upper bound is exact without spec decode. With
+        it, every live request's context must be at least ``topk_tokens``
+        after accounting for in-flight drafts. Rows without queries do not
+        affect the work metadata and are normalized to zero.
+        """
+        num_reqs = len(query_lens)
+        live = query_lens > 0
+        if not live.any():
+            return np.zeros(num_reqs, dtype=np.int32)
+        seq_lens_ub = common_attn_metadata.seq_lens_cpu_upper_bound
+        if seq_lens_ub is not None:
+            seq_lens_ub = np.where(live, seq_lens_ub[:num_reqs].numpy(), 0)
+            min_context = int((seq_lens_ub - query_lens)[live].min())
+            if (
+                self._seq_lens_ub_slack == 0
+                or min_context - self._seq_lens_ub_slack >= self.topk_tokens
+            ):
+                return seq_lens_ub
+        with gpu_sync_allowed():
+            seq_lens = common_attn_metadata.seq_lens[:num_reqs].cpu().numpy()
+        return np.where(live, seq_lens, 0)
+
     def build(
         self,
         common_prefix_len: int,
@@ -677,8 +714,9 @@ class ROCMAiterMLASparseMetadataBuilder(
             and not is_long_pure_bf16_prefill
             and num_tokens > 0
         ):
-            with gpu_sync_allowed():
-                seq_lens_cpu = common_attn_metadata.seq_lens[:num_reqs].cpu().numpy()
+            seq_lens_cpu = self._metadata_key_seq_lens(
+                common_attn_metadata, seg_lengths
+            )
             clamped_seq_lens = np.minimum(
                 seq_lens_cpu,
                 self.topk_tokens,
