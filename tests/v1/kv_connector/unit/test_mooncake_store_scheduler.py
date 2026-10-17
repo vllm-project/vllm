@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import dataclasses
 import time
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -13,13 +14,15 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator imp
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
     BoundaryPut,
-    BoundaryStoreStats,
     LoadSpec,
     MooncakeLookupResult,
     MooncakeStoreConnectorMetadata,
     MooncakeStoreWorkerMetadata,
     ReqMeta,
     RequestTracker,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.metrics import (
+    BoundaryStoreStats,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.scheduler import (
     MooncakeStoreScheduler,
@@ -72,6 +75,7 @@ def _make_bare_scheduler(
     scheduler._pinned_saves = {}
     scheduler._boundary_state_group_ids = frozenset({1})
     scheduler._boundary_store_stats = BoundaryStoreStats()
+    scheduler._reported_boundary_store_stats = BoundaryStoreStats()
     scheduler._last_boundary_stats_log = time.monotonic()
     scheduler._logged_boundary_drops = 0
     scheduler._store_coord = MooncakeStoreCoordinator(
@@ -1539,6 +1543,17 @@ def test_boundary_state_job_pins_exact_blocks_once():
     ]
 
 
+def _reported_handoffs(scheduler: MooncakeStoreScheduler) -> dict[str, int]:
+    """Hand-off outcome deltas in the metrics payload since the last report."""
+    stats = scheduler.get_kv_connector_stats()
+    assert stats is not None
+    reduced = stats.reduce()
+    return {
+        f.name: int(reduced.get(f"boundary_handoffs_{f.name}", 0))
+        for f in dataclasses.fields(BoundaryStoreStats)
+    }
+
+
 def test_boundary_store_stats_attribute_every_decline_reason():
     """Each declined hand-off is charged to the reason that declined it.
 
@@ -1562,13 +1577,12 @@ def test_boundary_store_stats_attribute_every_decline_reason():
         meta,
     )
 
-    stats = scheduler.get_boundary_store_stats()
-    assert stats.published == 4
-    assert stats.accepted == 1
-    assert stats.dropped == 3
-    assert stats.dropped_past_prefill_end == 1
-    assert stats.dropped_null_block == 1
-    assert stats.dropped_group_not_boundary == 1
+    handoffs = _reported_handoffs(scheduler)
+    assert handoffs["published"] == 4
+    assert handoffs["accepted"] == 1
+    assert handoffs["dropped_past_prefill_end"] == 1
+    assert handoffs["dropped_null_block"] == 1
+    assert handoffs["dropped_group_not_boundary"] == 1
     assert meta.requests[0].boundary_puts == [BoundaryPut(1, 7, 16)]
 
 
@@ -1580,10 +1594,10 @@ def test_boundary_store_stats_count_a_request_that_vanished_mid_step():
         {"req-gone": [(1, 7, 16), (1, 8, 20)]}, meta
     )
 
-    stats = scheduler.get_boundary_store_stats()
-    assert stats.published == 2
-    assert stats.dropped_request_gone == 2
-    assert stats.accepted == 0
+    handoffs = _reported_handoffs(scheduler)
+    assert handoffs["published"] == 2
+    assert handoffs["dropped_request_gone"] == 2
+    assert handoffs["accepted"] == 0
     assert not meta.requests
 
 
@@ -1600,10 +1614,10 @@ def test_boundary_store_stats_count_the_consumer_role_discard():
 
     meta = scheduler.build_connector_meta(out)
 
-    stats = scheduler.get_boundary_store_stats()
-    assert stats.published == 2
-    assert stats.dropped_consumer_role == 2
-    assert stats.accepted == 0
+    handoffs = _reported_handoffs(scheduler)
+    assert handoffs["published"] == 2
+    assert handoffs["dropped_consumer_role"] == 2
+    assert handoffs["accepted"] == 0
     assert all(not m.boundary_puts for m in meta.requests)
 
 
@@ -1624,22 +1638,25 @@ def test_boundary_store_stats_cover_the_finish_time_tail_path():
         request, ([3], [9]), [(1, 9, 40)]
     )
 
-    stats = scheduler.get_boundary_store_stats()
-    assert stats.published == 1
-    assert stats.accepted == 0
-    assert stats.dropped_past_prefill_end == 1
+    handoffs = _reported_handoffs(scheduler)
+    assert handoffs["published"] == 1
+    assert handoffs["accepted"] == 0
+    assert handoffs["dropped_past_prefill_end"] == 1
 
 
-def test_boundary_store_stats_are_a_snapshot():
+def test_boundary_store_stats_report_only_the_handoffs_since_the_last_report():
+    """The payload carries deltas, so successive reports do not overlap."""
     scheduler = _make_bare_scheduler(hash_block_size=4)
     meta = MooncakeStoreConnectorMetadata(set(), set())
     scheduler._handle_boundary_state_offloads({"req-gone": [(1, 7, 16)]}, meta)
 
-    snapshot = scheduler.get_boundary_store_stats()
+    first = _reported_handoffs(scheduler)
     scheduler._handle_boundary_state_offloads({"req-gone": [(1, 8, 20)]}, meta)
+    second = _reported_handoffs(scheduler)
 
-    assert snapshot.published == 1
-    assert scheduler.get_boundary_store_stats().published == 2
+    assert first["published"] == 1
+    assert second["published"] == 1
+    assert scheduler.get_kv_connector_stats() is None
 
 
 def test_store_job_pins_current_non_null_non_mamba_blocks():

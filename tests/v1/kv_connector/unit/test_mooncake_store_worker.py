@@ -18,7 +18,7 @@ import torch
 
 from tests.v1.attention.utils import dense_kv_cache_views
 from vllm.distributed import mooncake_store
-from vllm.distributed.kv_events import KVEventAggregator
+from vllm.distributed.kv_events import MEDIUM_CPU, KVEventAggregator
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake import (
     rdma_utils,
 )
@@ -141,6 +141,18 @@ def _make_tp_shared_db(
     return db, tensor
 
 
+def _store_event_groups(coord) -> list[tuple[int, object]]:
+    """Pair each Store group with the cache group id its events name.
+
+    Store group i is core group i for a coordinator whose groups are all
+    prefix-cacheable, which is what these stubs describe.
+    """
+    return [
+        (group_id, group.kv_cache_spec)
+        for group_id, group in enumerate(coord.kv_cache_groups)
+    ]
+
+
 def _make_store_sending_thread(
     store: MagicMock,
     *,
@@ -153,6 +165,7 @@ def _make_store_sending_thread(
     enable_group_semantics: bool = False,
     supports_group_ids: bool = False,
     enable_kv_event: bool = False,
+    event_groups: list[tuple[int, object]] | None = None,
 ) -> mooncake_store_worker.KVCacheStoreSendingThread:
     if coord is None:
         coord = _default_send_coord()
@@ -161,6 +174,8 @@ def _make_store_sending_thread(
         db.set_kv_caches_base_addr([0x1000])
         db.set_block_len([256])
         token_databases = [db]
+    if event_groups is None:
+        event_groups = _store_event_groups(coord)
     thread = mooncake_store_worker.KVCacheStoreSendingThread(
         store=store,
         token_databases=token_databases,
@@ -174,6 +189,7 @@ def _make_store_sending_thread(
         replicate_config=replicate_config,
         enable_group_semantics=enable_group_semantics,
         supports_group_ids=supports_group_ids,
+        event_groups=event_groups,
     )
     thread.request_queue.task_done = MagicMock()
     return thread
@@ -1420,6 +1436,10 @@ def test_block_aligned_snapshot_offload_announces_mamba_group():
     assert event.block_hashes == [maybe_convert_block_hash(BlockHash(hs[7]))]
     assert event.block_size == 16
     assert event.kv_cache_spec_kind == "mamba"
+    # A block-aligned hand-off keeps the hash of the block before it, and a
+    # boundary-only job has no token ids to publish.
+    assert event.parent_block_hash == maybe_convert_block_hash(BlockHash(hs[3]))
+    assert event.token_ids == []
 
 
 @pytest.mark.parametrize("saved_tokens", [0, 32])
@@ -1487,6 +1507,10 @@ def test_handoff_offload_announces_mamba_boundary_state():
         [maybe_convert_block_hash(BlockHash(b"a1"))],
         [maybe_convert_block_hash(BlockHash(b"a2"))],
     ]
+    assert [event.parent_block_hash for event in fa_events] == [
+        maybe_convert_block_hash(BlockHash(b"a0")),
+        maybe_convert_block_hash(BlockHash(b"a1")),
+    ]
     assert {event.kv_cache_spec_kind for event in fa_events} == {"full_attention"}
     # The mamba boundary state is the partial block ending at 12.
     assert len(mamba_events) == 1
@@ -1494,7 +1518,11 @@ def test_handoff_offload_announces_mamba_boundary_state():
     assert mamba_event.block_hashes == [maybe_convert_block_hash(BlockHash(b"a2"))]
     assert mamba_event.block_size == 12
     assert mamba_event.kv_cache_spec_kind == "mamba"
-    assert mamba_event.medium == "cpu"
+    assert mamba_event.medium == MEDIUM_CPU
+    # The sub-block tail starts at token 0, so it has no parent block, and a
+    # boundary-only job carries no token ids: the event is hash-only.
+    assert mamba_event.parent_block_hash is None
+    assert mamba_event.token_ids == []
 
 
 @pytest.mark.parametrize("tp_rank", [0, 1])
@@ -2569,6 +2597,10 @@ def test_worker_init_excludes_nonprefix_cache_groups(monkeypatch):
         group.kv_cache_spec.block_size for group in store_worker._kv_cache_groups
     ] == [800, 800]
     assert [db.block_size for db in store_worker.token_dbs] == [800, 800]
+    # The QSA group the Store drops leaves a gap, so the Store's own group 1 is
+    # cache group 2 and its events have to say so.
+    assert [group_id for group_id, _ in store_worker._event_groups] == [0, 2]
+    assert store_worker.group_tp_replication_factors == {0: 1, 2: 1}
 
 
 def _make_two_full_attention_groups_kv_cache_config():
@@ -3663,6 +3695,83 @@ def test_store_sending_thread_kv_events_use_group_chunk_metadata():
     assert swa_event.block_size == 8
     assert swa_event.token_ids == list(range(24, 32))
     assert swa_event.block_hashes == [maybe_convert_block_hash(BlockHash(hs[3]))]
+
+
+def test_residency_events_name_the_core_group_the_store_skips():
+    """The Store skips a cache group between the two it keeps, so its own group
+    1 is the core's group 2.
+
+    The event has to name the core's id so a consumer can join it with the
+    core's own block events, while the Store key keeps the Store's index.
+    """
+    from vllm.v1.kv_cache_interface import SlidingWindowSpec
+
+    store = MagicMock()
+    store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
+    store.batch_put_from_multi_buffers.return_value = [256, 256]
+
+    full_spec = FullAttentionSpec(
+        block_size=32, num_kv_heads=8, head_size=64, dtype=None
+    )
+    tail_spec = SlidingWindowSpec(
+        block_size=8,
+        num_kv_heads=8,
+        head_size=64,
+        dtype=None,
+        sliding_window=8,
+    )
+    coord = mooncake_store_worker.MooncakeStoreCoordinator(
+        [KVCacheGroupSpec(["L0"], full_spec), KVCacheGroupSpec(["L1"], tail_spec)],
+        scheduler_block_size=32,
+        hash_block_size=8,
+    )
+    db_full = ChunkedTokenDatabase(
+        KeyMetadata("test-model", 0, 0, 0, 0, group_id=0),
+        block_size=32,
+        hash_block_size=8,
+    )
+    db_full.set_kv_caches_base_addr([0x1000])
+    db_full.set_block_len([512])
+    db_tail = ChunkedTokenDatabase(
+        KeyMetadata("test-model", 0, 0, 0, 0, group_id=1),
+        block_size=8,
+        hash_block_size=8,
+    )
+    db_tail.set_kv_caches_base_addr([0x2000])
+    db_tail.set_block_len([128])
+
+    thread = _make_store_sending_thread(
+        store,
+        coord=coord,
+        token_databases=[db_full, db_tail],
+        block_size=32,
+        event_groups=[(0, full_spec), (2, tail_spec)],
+    )
+    thread.enable_kv_event = True
+
+    hs = [bytes([i + 1]) * 4 for i in range(4)]
+    _run_store_req(
+        thread,
+        ReqMeta(
+            req_id="r0",
+            token_len_chunk=32,
+            block_ids=([1], list(range(1, 5))),
+            block_hashes=hs,
+            can_save=True,
+            token_ids=list(range(32)),
+        ),
+    )
+
+    full_event, tail_event = thread.get_kv_events()
+    assert full_event.group_idx == 0
+    assert tail_event.group_idx == 2
+    assert tail_event.kv_cache_spec_kind == "sliding_window"
+    assert tail_event.kv_cache_spec_sliding_window == 8
+    assert tail_event.block_hashes == [maybe_convert_block_hash(BlockHash(hs[3]))]
+    # Store keys still address the Store's own group index.
+    keys = store.batch_put_from_multi_buffers.call_args.args[0]
+    assert any("@group:1@" in key for key in keys)
+    assert not any("@group:2@" in key for key in keys)
 
 
 def _make_event_store_req(token_len: int, token_ids_start: int = 0) -> ReqMeta:

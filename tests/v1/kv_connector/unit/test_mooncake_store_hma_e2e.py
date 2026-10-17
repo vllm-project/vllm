@@ -44,6 +44,14 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
 
+def _event_groups(coord) -> list[tuple[int, object]]:
+    """Pair each Store group with the cache group id its events name."""
+    return [
+        (group_id, group.kv_cache_spec)
+        for group_id, group in enumerate(coord.kv_cache_groups)
+    ]
+
+
 class _DictStore:
     """In-memory MooncakeDistributedStore stand-in."""
 
@@ -237,6 +245,7 @@ def test_e2e_swa_plus_full_save_then_lookup_hits():
         kv_role=worker.kv_role,
         ready_event=ready,
         enable_kv_event=False,
+        event_groups=worker._event_groups,
     )
 
     hs = [BlockHash(bytes([i + 1]) * 4) for i in range(4)]
@@ -447,6 +456,7 @@ def test_sub_block_partial_tail_offload_reads_cow_block():
         kv_role="kv_both",
         ready_event=threading.Event(),
         replicate_config=MagicMock(),
+        event_groups=_event_groups(coord),
     )
 
     # The surrounding metadata may describe a longer resumed replay, but the
@@ -528,6 +538,7 @@ def test_offload_syncs_event_before_put():
         kv_role="kv_both",
         ready_event=threading.Event(),
         replicate_config=MagicMock(),
+        event_groups=_event_groups(coord),
     )
 
     hs = [BlockHash(bytes([i + 1]) * 4) for i in range(3)]
@@ -611,6 +622,7 @@ def test_sub_block_partial_tail_offload_covers_smaller_group_blocks():
         kv_role="kv_both",
         ready_event=threading.Event(),
         replicate_config=MagicMock(),
+        event_groups=_event_groups(coord),
     )
 
     hs = [BlockHash(bytes([i + 1]) * 4) for i in range(3)]  # 3 hash units = 12 tok
@@ -703,6 +715,7 @@ def test_worker_lookup_hits_sub_block_partial_tail():
         kv_role="kv_both",
         ready_event=threading.Event(),
         replicate_config=MagicMock(),
+        event_groups=worker._event_groups,
     )
 
     # A 12-token prompt leaves a resend-safe sub-block checkpoint at 8.
@@ -811,6 +824,7 @@ def test_worker_setup_tolerates_finer_scratch_group():
         ready_event=threading.Event(),
         replicate_config=MagicMock(),
         group_participates=[True, True],
+        event_groups=worker._event_groups,
     )
 
     # Persist the sub-block partial tail at boundary 8 (keyed by hs[8//8-1]).
@@ -915,6 +929,7 @@ def test_ring_scratch_group_is_never_stored_and_does_not_block_hits():
         ready_event=threading.Event(),
         enable_kv_event=False,
         group_participates=[True],
+        event_groups=worker._event_groups,
     )
     hs = [BlockHash(bytes([i + 1]) * 4) for i in range(4)]
     save_req = ReqMeta(

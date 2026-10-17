@@ -7,7 +7,7 @@
 
 import time
 from collections.abc import Sequence
-from dataclasses import replace
+from dataclasses import fields, replace
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -18,12 +18,15 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator imp
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (  # noqa: E501
     BoundaryPut,
-    BoundaryStoreStats,
     LoadSpec,
     MooncakeStoreConnectorMetadata,
     MooncakeStoreWorkerMetadata,
     ReqMeta,
     RequestTracker,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.metrics import (
+    BoundaryStoreStats,
+    MooncakeStoreConnectorStats,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.worker import (  # noqa: E501
     LookupKeyClient,
@@ -211,6 +214,9 @@ class MooncakeStoreScheduler:
         self._finished_partial_tail_metas: dict[str, ReqMeta] = {}
 
         self._boundary_store_stats = BoundaryStoreStats()
+        # Counters as of the last stats report, so each report carries only the
+        # outcomes counted since the previous one.
+        self._reported_boundary_store_stats = BoundaryStoreStats()
         self._last_boundary_stats_log = time.monotonic()
         self._logged_boundary_drops = 0
 
@@ -784,9 +790,25 @@ class MooncakeStoreScheduler:
             stats.summary(),
         )
 
-    def get_boundary_store_stats(self) -> BoundaryStoreStats:
-        """Return a snapshot of the hand-off counters."""
-        return replace(self._boundary_store_stats)
+    def get_kv_connector_stats(self) -> MooncakeStoreConnectorStats | None:
+        """Report the hand-off outcomes counted since the last report.
+
+        ``store_mask`` keeps mamba groups out of the positional save, so a
+        declined hand-off is the only reason a mamba state is never persisted.
+        Reporting the deltas is what makes that visible in the metrics.
+        """
+        current = self._boundary_store_stats
+        reported = self._reported_boundary_store_stats
+        deltas = {
+            f.name: getattr(current, f.name) - getattr(reported, f.name)
+            for f in fields(current)
+        }
+        if not any(deltas.values()):
+            return None
+        self._reported_boundary_store_stats = replace(current)
+        stats = MooncakeStoreConnectorStats()
+        stats.record_boundary_handoffs(deltas)
+        return stats
 
     def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
         """Drop the block references of store jobs every rank has finished."""

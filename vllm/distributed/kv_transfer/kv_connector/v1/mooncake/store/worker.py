@@ -20,6 +20,7 @@ import time
 from collections.abc import Callable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import AbstractContextManager
+from functools import cached_property
 from typing import Any, NamedTuple, TypeVar
 
 import torch
@@ -33,7 +34,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
-from vllm.distributed.kv_events import BlockStored
+from vllm.distributed.kv_events import MEDIUM_CPU, BlockStored
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorTransferResults,
 )
@@ -95,9 +96,6 @@ from .metrics import MooncakeStoreConnectorStats
 logger = init_logger(__name__)
 
 MOONCAKE_NO_AVAILABLE_HANDLE = -200
-# Tier the Store objects written by this connector live on. Kept lowercase for
-# the consumers that already match on it.
-STORE_MEDIUM = "cpu"
 _T = TypeVar("_T")
 
 
@@ -394,18 +392,25 @@ class StoreResidencyEvents:
     """Residency events for the blocks this rank commits to the Store.
 
     The single place this connector builds a ``BlockStored`` event, so a write
-    path cannot end up persisting blocks without announcing them.
+    path cannot end up persisting blocks without announcing them. An event names
+    its cache group by the core's id, which the Store's own index differs from
+    whenever the Store skips a group the core keeps.
     """
 
-    def __init__(self, group_specs: Sequence[KVCacheSpec]) -> None:
-        # Mirrors KVCacheManager.kv_cache_event_metadata: consumers classify and
-        # filter a group from the spec of the group the event names.
-        self._group_metadata = tuple(
+    def __init__(self, event_groups: Sequence[tuple[int, KVCacheSpec]]) -> None:
+        # Indexed by the Store's own group order, which is what a StoreBlock
+        # carries, paired with the cache group id each position must publish and
+        # that group's spec. Consumers key group metadata by the id the core
+        # publishes, so publishing the Store index would attach this kind to a
+        # different core group. The spec half mirrors
+        # KVCacheManager.kv_cache_event_metadata.
+        self._groups = tuple(
             (
+                group_id,
                 get_kv_cache_spec_kind(spec).value,
                 get_kv_cache_spec_sliding_window(spec),
             )
-            for spec in group_specs
+            for group_id, spec in event_groups
         )
         self._lock = threading.Lock()
         self._events: list[BlockStored] = []
@@ -421,7 +426,7 @@ class StoreResidencyEvents:
         events: list[BlockStored] = []
         for block in blocks:
             start, end = block.token_span
-            kind, sliding_window = self._group_metadata[block.group_idx]
+            group_idx, kind, sliding_window = self._groups[block.group_idx]
             events.append(
                 BlockStored(
                     block_hashes=[maybe_convert_block_hash(block.block_hash)],
@@ -433,9 +438,9 @@ class StoreResidencyEvents:
                     token_ids=list(_event_token_ids(req_meta, start, end)),
                     block_size=end - start,
                     lora_id=None,
-                    medium=STORE_MEDIUM,
+                    medium=MEDIUM_CPU,
                     lora_name=None,
-                    group_idx=block.group_idx,
+                    group_idx=group_idx,
                     kv_cache_spec_kind=kind,
                     kv_cache_spec_sliding_window=sliding_window,
                 )
@@ -552,6 +557,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
         supports_group_ids: bool = False,
         record_operation: Callable[..., None] | None = None,
         group_participates: Sequence[bool] | None = None,
+        *,
+        event_groups: Sequence[tuple[int, KVCacheSpec]],
     ):
         super().__init__(
             store,
@@ -566,9 +573,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         self.group_put_steps = group_put_steps
         self.coord = coord
         self.kv_role = kv_role
-        self.residency_events = StoreResidencyEvents(
-            [group.kv_cache_spec for group in coord.kv_cache_groups]
-        )
+        self.residency_events = StoreResidencyEvents(event_groups)
         self.group_participates = (
             list(group_participates)
             if group_participates is not None
@@ -1728,6 +1733,21 @@ class MooncakeStoreWorker:
             for group in self._kv_cache_groups
         )
 
+    @cached_property
+    def _event_groups(self) -> tuple[tuple[int, KVCacheSpec], ...]:
+        """Each Store group paired with the cache group id its events name.
+
+        The Store keeps only the prefix-cacheable transferable groups, so a
+        position in ``_kv_cache_groups`` is not the id the core publishes for
+        that group. Store keys and every other Store-side address keep the
+        Store's own index; only the residency events name the core's id.
+        """
+        kv_cache_config = self._kv_cache_config
+        return tuple(
+            (group_id, kv_cache_config.kv_cache_groups[group_id].kv_cache_spec)
+            for group_id in kv_cache_config.prefix_cacheable_group_ids
+        )
+
     def _init_lookup_key_prefixes(self) -> None:
         def rank_namespaces(factor: int) -> tuple[tuple[int, int, int, int], ...]:
             if self.dcp_size > 1:
@@ -1927,6 +1947,7 @@ class MooncakeStoreWorker:
                     group.kv_cache_spec.prefix_cacheable
                     for group in self._kv_cache_groups
                 ],
+                event_groups=self._event_groups,
             )
             self.kv_send_thread.start()
 
@@ -2286,8 +2307,18 @@ class MooncakeStoreWorker:
         return []
 
     @property
-    def group_tp_replication_factors(self) -> tuple[int, ...]:
-        return self._group_tp_replication_factors
+    def group_tp_replication_factors(self) -> dict[int, int]:
+        """Per cache group id, the number of byte-identical TP replicas.
+
+        Keyed by the id the residency events name, which is the id the scheduler
+        counts a block's reports against.
+        """
+        return {
+            group_id: factor
+            for (group_id, _), factor in zip(
+                self._event_groups, self._group_tp_replication_factors, strict=True
+            )
+        }
 
     def close(self) -> None:
         """Release the MooncakeDistributedStore handle on teardown.
