@@ -8,3 +8,5 @@ include tools/build_rust.py
 
 recursive-include cmake *
 recursive-include csrc *
+# Local generator stamps; an sdist build must regenerate.
+recursive-exclude csrc *.hash

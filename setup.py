@@ -209,6 +209,13 @@ class CMakeExtension(Extension):
 # Environment variables CMake only reads on the first configure.
 CMAKE_ENV_VARS = (
     "CMAKE_ARGS",
+    "CMAKE_TOOLCHAIN_FILE",
+    "CMAKE_GENERATOR_PLATFORM",
+    "CMAKE_GENERATOR_TOOLSET",
+    "CMAKE_C_COMPILER_LAUNCHER",
+    "CMAKE_CXX_COMPILER_LAUNCHER",
+    "CMAKE_CUDA_COMPILER_LAUNCHER",
+    "CMAKE_HIP_COMPILER_LAUNCHER",
     "CC",
     "CXX",
     "CUDACXX",
@@ -219,6 +226,9 @@ CMAKE_ENV_VARS = (
     "CUDAFLAGS",
     "HIPFLAGS",
     "LDFLAGS",
+    "CUDAARCHS",
+    "HIPARCHS",
+    "FETCHCONTENT_SOURCE_DIR_ONEDNN",
 )
 
 
@@ -379,7 +389,11 @@ class cmake_build_ext(build_ext):
         # Make sure we use the nvcc from CUDA_HOME
         toolkit = None
         if _is_cuda() and CUDA_HOME is not None:
-            cmake_args += [f"-DCMAKE_CUDA_COMPILER={CUDA_HOME}/bin/nvcc"]
+            # Re-detect the local GPU arch rather than reuse a cached one.
+            cmake_args += [
+                f"-DCMAKE_CUDA_COMPILER={CUDA_HOME}/bin/nvcc",
+                "-UCUDA_GPU_DETECT_OUTPUT",
+            ]
             toolkit = os.path.realpath(CUDA_HOME)
         elif _is_hip() and ROCM_HOME is not None:
             cmake_args += [f"-DROCM_PATH={ROCM_HOME}"]

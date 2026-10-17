@@ -184,10 +184,10 @@ uv pip install -e . --torch-backend=auto
     The following environment variables can be set to configure the vLLM `sccache` remote: `SCCACHE_BUCKET=vllm-build-sccache SCCACHE_REGION=us-west-2 SCCACHE_S3_NO_CREDENTIALS=1`. We also recommend setting `SCCACHE_IDLE_TIMEOUT=0`.
 
 !!! note "Faster Kernel Development"
-    To rebuild after C++/CUDA changes, install the build dependencies once and re-run the install without build isolation. Editable installs keep their CMake build directory under `build/`, so only the changed files are recompiled:
+    To rebuild after C++/CUDA changes, install the build dependencies once (keeping your installed torch) and re-run the install without build isolation. Editable installs keep their CMake build directory under `build/`, so only the changed files are recompiled:
 
     ```bash
-    uv pip install -r requirements/build/cuda.txt --torch-backend=auto
+    grep -v '^torch==' requirements/build/cuda.txt | uv pip install -r -
     uv pip install -e . --no-build-isolation
     ```
 
