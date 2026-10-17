@@ -6,6 +6,7 @@ from vllm.v1.watermarking.gumbel import (
     DualKeyGumbelWatermarker,
     GumbelWatermarker,
 )
+from vllm.v1.watermarking.red_green import RedGreenWatermarker
 from vllm.v1.watermarking.watermarker import Watermarker
 
 
@@ -18,5 +19,14 @@ def create_watermarker(config: WatermarkConfig) -> Watermarker:
             config.context_width,
             config.prf,
             config.alpha,
+        )
+    if config.algorithm == "red_green":
+        delta = 2.0 if config.delta is None else config.delta
+        return RedGreenWatermarker(
+            config.key,
+            config.context_width,
+            config.prf,
+            delta,
+            config.gamma,
         )
     raise ValueError(f"Unknown watermarking algorithm: {config.algorithm}")

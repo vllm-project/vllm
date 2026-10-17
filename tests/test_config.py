@@ -3757,6 +3757,43 @@ def test_dual_key_gumbel_supports_probabilistic_speculative_decoding(
     config._check_supports_watermarking()
 
 
+def test_red_green_speculative_decoding_requires_target_only():
+    config = _watermarked_vllm_config()
+    config.watermark_config = WatermarkConfig(algorithm="red_green", key=42)
+    config.speculative_config = SimpleNamespace(
+        method="mtp",
+        draft_sample_method="probabilistic",
+        rejection_sample_method="standard",
+        parallel_drafting=False,
+    )
+
+    with pytest.raises(ValueError, match="allow_target_only_watermarking=true"):
+        config._check_supports_watermarking()
+
+
+def test_target_only_red_green_is_not_reported_as_diluted(
+    caplog_vllm, disable_log_dedup
+):
+    config = _watermarked_vllm_config()
+    config.watermark_config = WatermarkConfig(
+        algorithm="red_green", key=42, allow_target_only_watermarking=True
+    )
+    config.speculative_config = SimpleNamespace(
+        method="mtp",
+        draft_sample_method="probabilistic",
+        rejection_sample_method="standard",
+        parallel_drafting=False,
+    )
+
+    with caplog_vllm.at_level(logging.WARNING):
+        config._check_supports_watermarking()
+
+    assert "Target-only watermarking leaves accepted draft tokens" not in (
+        caplog_vllm.text
+    )
+
+
+def test_dual_key_gumbel_supports_dspark():
 @pytest.mark.parametrize("architecture", ["DFlash2DraftModel", "LiLiCorrDraftModel"])
 def test_dual_key_gumbel_rejects_dflash_candidate_drafts(architecture):
     config = _watermarked_vllm_config()
