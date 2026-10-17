@@ -745,6 +745,17 @@ class Scheduler(SchedulerInterface):
                 continue
 
             if (
+                self.num_sampled_tokens_per_step > 0
+                and request.spec_token_ids
+                and request.num_computed_tokens
+                >= request.num_tokens + request.num_output_placeholders
+            ):
+                # PP: the drafts follow a token sampled by a step that is still
+                # in flight. Schedule them together with that token later.
+                req_index += 1
+                continue
+
+            if (
                 self.ec_connector is not None
                 and request.mm_features
                 and not self.ec_connector.ensure_cache_available(

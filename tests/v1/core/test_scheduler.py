@@ -2568,6 +2568,27 @@ def test_no_spec_tokens_scheduled_for_prefill_chunks():
     assert len(output.scheduled_spec_decode_tokens[req.request_id]) == num_spec_tokens
 
 
+def test_no_draft_only_query_while_prefill_in_flight():
+    """With PP the engine hands over a batch's drafts before processing its
+    output. Drafts for a request whose final prefill chunk is still in flight
+    must wait for the sampled token instead of being scheduled without it.
+    """
+    scheduler = create_scheduler(num_speculative_tokens=2)
+    req = create_requests(num_requests=1, num_tokens=8)[0]
+    scheduler.add_request(req)
+
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens[req.request_id] == 8
+
+    scheduler.update_draft_token_ids(DraftTokenIds([req.request_id], [[1, 2]]))
+    assert req.request_id not in scheduler.schedule().num_scheduled_tokens
+
+    _model_output(scheduler, output, [[42]])
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens[req.request_id] == 3
+    assert output.scheduled_spec_decode_tokens[req.request_id] == [1, 2]
+
+
 def _model_output(scheduler, output, sampled):
     """Feed `sampled` (per-request list) back to the scheduler."""
     req_ids = list(output.num_scheduled_tokens.keys())
