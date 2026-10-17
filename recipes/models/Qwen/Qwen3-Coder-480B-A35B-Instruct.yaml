@@ -90,7 +90,7 @@ hardware_overrides:
   amd:
     # Verified on 8× MI300X / MI325X / MI355X (FP8 path uses --data-parallel-size 8
     # instead of TP8 — swap strategy to DP if deploying the FP8 checkpoint).
-    extra_args: []
+    extra_args: ["--attention-backend", "rocm_aiter_fa", "--moe-backend", "aiter"]
     extra_env:
       VLLM_ROCM_USE_AITER: "1"
 
@@ -146,6 +146,8 @@ guide: |
   ```bash
   VLLM_ROCM_USE_AITER=1 vllm serve Qwen/Qwen3-Coder-480B-A35B-Instruct \
     --max-model-len 32000 \
+    --attention-backend rocm_aiter_fa \
+    --moe-backend aiter \
     --enable-expert-parallel \
     --tensor-parallel-size 8 \
     --enable-auto-tool-choice \
@@ -157,6 +159,8 @@ guide: |
   VLLM_ROCM_USE_AITER=1 vllm serve Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8 \
     --trust-remote-code \
     --max-model-len 131072 \
+    --attention-backend rocm_aiter_fa \
+    --moe-backend aiter \
     --enable-expert-parallel \
     --data-parallel-size 8 \
     --enable-auto-tool-choice \
