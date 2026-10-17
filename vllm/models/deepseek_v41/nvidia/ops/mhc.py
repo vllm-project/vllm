@@ -60,7 +60,7 @@ def supports_mhc_all_reduce(vllm_config: VllmConfig) -> bool:
     parallel = vllm_config.parallel_config
     config = vllm_config.model_config.hf_config
     if (
-        parallel.tensor_parallel_size != 4
+        parallel.tensor_parallel_size not in (2, 4)
         or parallel.enable_expert_parallel
         or config.hidden_size != 5120
         or config.hc_mult != 4
