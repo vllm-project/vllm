@@ -13,6 +13,7 @@ import torch
 from torch import nn
 
 from vllm.config import CacheConfig, VllmConfig
+from vllm.distributed import tensor_model_parallel_all_gather
 from vllm.model_executor.layers.attention.encoder_only_attention import (
     EncoderOnlyAttention,
 )
@@ -20,9 +21,15 @@ from vllm.model_executor.layers.pooler.tokwise import pooler_for_token_classify
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.sequence import IntermediateTensors
 
-from .gpt_oss import GptOssForCausalLM, GptOssModel, OAIAttention, TransformerBlock
+from .gpt_oss import (
+    GptOssForCausalLM,
+    GptOssModel,
+    MLPBlock,
+    OAIAttention,
+    TransformerBlock,
+)
 from .interfaces_base import attn_type, default_pooling_type
-from .utils import AutoWeightsLoader, maybe_prefix
+from .utils import AutoWeightsLoader, maybe_prefix, sequence_parallel_chunk
 
 
 class OpenAIPrivacyFilterAttention(OAIAttention):
@@ -51,8 +58,27 @@ class OpenAIPrivacyFilterAttention(OAIAttention):
         )
 
 
+class OpenAIPrivacyFilterMLPBlock(MLPBlock):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        num_tokens = x.shape[0]
+        if self.is_sequence_parallel:
+            x = sequence_parallel_chunk(x)
+
+        bias = self.router.bias.float() if self.router.bias is not None else None
+        g = torch.nn.functional.linear(
+            x[:, : self.hidden_size].float(), self.router.weight.float(), bias
+        ).to(x.dtype)
+        x = self.experts(hidden_states=x, router_logits=g)[:, : self.hidden_size]
+
+        if self.is_sequence_parallel:
+            x = tensor_model_parallel_all_gather(x.contiguous(), 0)
+            x = x[:num_tokens]
+        return x
+
+
 class OpenAIPrivacyFilterDecoderLayer(TransformerBlock):
     attention_cls = OpenAIPrivacyFilterAttention
+    mlp_cls = OpenAIPrivacyFilterMLPBlock
 
 
 class OpenAIPrivacyFilterModel(GptOssModel):
