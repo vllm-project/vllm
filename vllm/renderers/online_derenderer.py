@@ -973,12 +973,17 @@ class OnlineDerenderer:
                     initial_text_offset=state.logprob_text_offset,
                 )
 
+            next_text_offset = state.logprob_text_offset + len(new_text)
+            if completion_logprobs is not None and completion_logprobs.tokens:
+                next_text_offset = completion_logprobs.text_offset[-1] + len(
+                    completion_logprobs.tokens[-1]
+                )
             updated_state = updated_state.model_copy(
                 update={
                     "logprob_context_token_ids": _logprob_context_tail(
                         state.logprob_context_token_ids, delta_tids
                     ),
-                    "logprob_text_offset": state.logprob_text_offset + len(new_text),
+                    "logprob_text_offset": next_text_offset,
                 }
             )
 

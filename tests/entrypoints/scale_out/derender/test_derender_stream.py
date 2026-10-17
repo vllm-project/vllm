@@ -1041,7 +1041,7 @@ class TestStreamLogprobs:
         self, derenderer, tokenizer
     ):
         """text_offset continues across chunks instead of restarting at 0."""
-        token_ids = tokenizer.encode("hello world")[:6]
+        token_ids = tokenizer.encode("hello world", add_special_tokens=False)[:6]
         mid = len(token_ids) // 2
 
         chunk1, state = await derenderer.derender_completion_stream(
@@ -1060,6 +1060,46 @@ class TestStreamLogprobs:
 
         assert chunk1.choices[0].logprobs.text_offset[0] == 0
         assert chunk2.choices[0].logprobs.text_offset[0] == len(chunk1.choices[0].text)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("skip_special_tokens", [False, True])
+    @pytest.mark.parametrize("chunk_size", [1, 2])
+    async def test_completion_offsets_include_skipped_special_tokens(
+        self, derenderer, tokenizer, skip_special_tokens, chunk_size
+    ):
+        """Offsets track reported logprob tokens, not filtered response text."""
+        token_ids = [
+            *tokenizer.encode("hello", add_special_tokens=False),
+            tokenizer.eos_token_id,
+            *tokenizer.encode(" world", add_special_tokens=False),
+        ]
+        request = CompletionRequest(
+            model=MODEL_NAME,
+            prompt="Hi",
+            logprobs=1,
+            ignore_eos=True,
+            skip_special_tokens=skip_special_tokens,
+        )
+        state = None
+        offset = 0
+        for start in range(0, len(token_ids), chunk_size):
+            ids = token_ids[start : start + chunk_size]
+            chunk, state = await derenderer.derender_completion_stream(
+                model=MODEL_NAME,
+                generate_chunk=_make_stream_chunk(
+                    ids, logprobs=_generate_logprobs(ids)
+                ),
+                state=state,
+                completion_request=request,
+            )
+            logprobs = chunk.choices[0].logprobs
+            assert logprobs is not None
+            assert len(logprobs.tokens) == len(ids)
+            for token, actual in zip(
+                logprobs.tokens, logprobs.text_offset, strict=True
+            ):
+                assert actual == offset
+                offset += len(token)
 
     @pytest.mark.asyncio
     async def test_stream_logprob_state_stays_bounded(self, derenderer, tokenizer):
