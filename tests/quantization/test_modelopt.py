@@ -7,8 +7,8 @@ Run `pytest tests/quantization/test_modelopt.py`.
 
 import os
 from contextlib import nullcontext
-from types import SimpleNamespace
-from typing import Any, NoReturn
+from types import MethodType, SimpleNamespace
+from typing import Any, NoReturn, cast
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest
@@ -796,6 +796,267 @@ def test_modelopt_nvfp4_moe_dispatches_to_marlin_when_w4a16(
         assert kwargs["activation_key"] is None
     else:
         assert kwargs["activation_key"] is kNvfp4Dynamic
+
+
+def _make_nvfp4_moe(quant_method="NVFP4", backend=None, per_token=False):
+    from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
+        NvFp4MoeBackend,
+    )
+    from vllm.model_executor.layers.quantization.modelopt import (
+        ModelOptNvFp4FusedMoE,
+    )
+
+    if backend is None:
+        backend = NvFp4MoeBackend.FLASHINFER_CUTEDSL
+    config = ModelOptNvFp4Config(
+        quant_method=quant_method,
+        is_checkpoint_nvfp4_serialized=True,
+        kv_cache_quant_algo=None,
+        exclude_modules=[],
+        group_size=16,
+        quantization_args=QuantizationConfigArgs(moe={"activation": "nvfp4_per_token"})
+        if per_token
+        else None,
+    )
+    moe_config = MagicMock()
+    moe_config.is_act_and_mul = True
+    with (
+        patch(
+            "vllm.model_executor.layers.quantization.modelopt.select_nvfp4_moe_backend",
+            return_value=(backend, MagicMock()),
+        ),
+        patch(
+            "vllm.model_executor.layers.quantization.modelopt."
+            "is_global_sf_supported_for_nvfp4_backend",
+            return_value=False,
+        ),
+    ):
+        return ModelOptNvFp4FusedMoE(config, moe_config)
+
+
+def _create_nvfp4_moe_layer(moe, num_experts=8):
+    layer = torch.nn.Module()
+    layer.layer_name = "test.moe.experts"
+    with (
+        patch(
+            "vllm.model_executor.parameter.get_tensor_model_parallel_rank",
+            return_value=0,
+        ),
+        patch(
+            "vllm.model_executor.parameter.get_tensor_model_parallel_world_size",
+            return_value=1,
+        ),
+    ):
+        moe.create_weights(
+            layer=layer,
+            num_experts=num_experts,
+            hidden_size=16,
+            intermediate_size_per_partition=32,
+            params_dtype=torch.float16,
+        )
+    return layer
+
+
+NVFP4_MOE_WEIGHT_SCALE_NAMES = ("w13_weight_scale_2", "w2_weight_scale_2")
+NVFP4_MOE_SCALE_NAMES = NVFP4_MOE_WEIGHT_SCALE_NAMES + (
+    "w13_input_scale",
+    "w2_input_scale",
+)
+
+
+def _fill_nvfp4_moe_scales(layer, names=NVFP4_MOE_SCALE_NAMES):
+    for name in names:
+        getattr(layer, name).data.fill_(0.01)
+
+
+def _patch_nvfp4_moe_conversion(moe):
+    """Stub the kernel-format conversion and kernel build, which need a GPU."""
+    return (
+        patch(
+            "vllm.model_executor.layers.quantization.modelopt."
+            "convert_to_nvfp4_moe_kernel_format",
+            side_effect=lambda **kw: (
+                kw["w13"],
+                kw["w13_scale"],
+                kw["w13_scale_2"],
+                kw["a13_scale"],
+                kw["w2"],
+                kw["w2_scale"],
+                kw["w2_scale_2"],
+                kw["a2_scale"],
+            ),
+        ),
+        patch.object(moe, "_build_moe_kernel"),
+    )
+
+
+@pytest.mark.parametrize(
+    ("backend_name", "quant_method", "force_a16", "missing", "rejected"),
+    [
+        ("FLASHINFER_CUTEDSL", "NVFP4", False, None, False),
+        *[
+            ("FLASHINFER_CUTEDSL", "NVFP4", False, n, True)
+            for n in NVFP4_MOE_SCALE_NAMES
+        ],
+        # W4A16 kernels and backends that compute their own activation scales
+        # never read the checkpoint's input scales.
+        *[
+            (backend, quant_method, force_a16, missing, missing == "w2_weight_scale_2")
+            for backend, quant_method, force_a16 in [
+                ("HUMMING", "NVFP4", False),
+                ("MARLIN", "NVFP4", False),
+                ("B12X", "W4A16_NVFP4", False),
+                ("B12X", "NVFP4", True),
+                ("FLASHINFER_B12X", "NVFP4", False),
+                ("FLASHINFER_MOE_EP_CUTEDSL", "NVFP4", False),
+            ]
+            for missing in ("w13_input_scale", "w2_weight_scale_2")
+        ],
+        ("B12X", "NVFP4", False, "w13_input_scale", True),
+    ],
+)
+def test_modelopt_nvfp4_moe_rejects_missing_expert_scales(
+    backend_name, quant_method, force_a16, missing, rejected, monkeypatch
+):
+    from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
+        NvFp4MoeBackend,
+    )
+
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.modelopt.envs."
+        "VLLM_B12X_MOE_FP4_FORCE_A16",
+        force_a16,
+    )
+    moe = _make_nvfp4_moe(
+        quant_method=quant_method, backend=NvFp4MoeBackend[backend_name]
+    )
+    layer = _create_nvfp4_moe_layer(moe)
+    _fill_nvfp4_moe_scales(layer)
+    if missing is not None:
+        getattr(layer, missing).data[2] = float("nan")
+
+    expected = (
+        pytest.raises(
+            ValueError, match=rf"layer 'test\.moe\.experts'.*'{missing}'.*\[2\]"
+        )
+        if rejected
+        else nullcontext()
+    )
+    convert, build = _patch_nvfp4_moe_conversion(moe)
+    with convert, build, expected:
+        moe.process_weights_after_loading(layer)
+
+
+def test_modelopt_nvfp4_moe_process_validates_before_conversion():
+    moe = _make_nvfp4_moe()
+    layer = _create_nvfp4_moe_layer(moe)
+    _fill_nvfp4_moe_scales(layer)
+    layer.w2_weight_scale_2.data[2] = float("nan")
+
+    convert, build = _patch_nvfp4_moe_conversion(moe)
+    with (
+        convert as converter,
+        build as build_kernel,
+        pytest.raises(ValueError, match=r"'w2_weight_scale_2'.*\[2\]"),
+    ):
+        moe.process_weights_after_loading(layer)
+
+    converter.assert_not_called()
+    build_kernel.assert_not_called()
+
+
+@pytest.mark.parametrize("missing_weight", [None, *NVFP4_MOE_WEIGHT_SCALE_NAMES])
+def test_modelopt_nvfp4_moe_per_token_fills_only_activation_scales(missing_weight):
+    from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import NvFp4MoeBackend
+
+    moe = _make_nvfp4_moe(backend=NvFp4MoeBackend.FLASHINFER_TRTLLM, per_token=True)
+    layer = _create_nvfp4_moe_layer(moe)
+    _fill_nvfp4_moe_scales(layer, NVFP4_MOE_WEIGHT_SCALE_NAMES)
+    if missing_weight is not None:
+        getattr(layer, missing_weight).data[2] = float("nan")
+    expected = (
+        pytest.raises(ValueError, match=rf"'{missing_weight}'.*\[2\]")
+        if missing_weight is not None
+        else nullcontext()
+    )
+    convert, build = _patch_nvfp4_moe_conversion(moe)
+    with convert as converter, build as build_kernel, expected:
+        moe.process_weights_after_loading(layer)
+
+    assert torch.all(layer.w13_input_scale == 1.0)
+    assert torch.all(layer.w2_input_scale == 1.0)
+    assert converter.called == (missing_weight is None)
+    assert build_kernel.called == (missing_weight is None)
+
+
+@pytest.mark.parametrize(
+    ("missing_global_ids", "expected_error"),
+    [
+        # EP rank 1 of 2 owns global experts 4-7; 0 and 2 belong to rank 0.
+        ({0, 2}, None),
+        # Global expert 5 is local expert 1 on rank 1.
+        ({5}, r"'w13_weight_scale_2'.*\[1\]"),
+    ],
+    ids=["non_local_missing", "local_missing"],
+)
+def test_modelopt_nvfp4_moe_ep_validates_only_local_experts(
+    missing_global_ids, expected_error
+):
+    from vllm.model_executor.layers.fused_moe.expert_map_manager import (
+        determine_expert_map,
+    )
+
+    local_num_experts, expert_map, _ = determine_expert_map(
+        ep_size=2, ep_rank=1, global_num_experts=8
+    )
+    assert expert_map is not None
+    moe = _make_nvfp4_moe()
+    layer = _create_nvfp4_moe_layer(moe, num_experts=local_num_experts)
+
+    # The scale-loading path of RoutedExperts.weight_loader on an EP rank.
+    loader = SimpleNamespace(
+        quant_config=None,
+        quant_method=moe,
+        _fused_shared_expert_quantizer=None,
+        _map_global_expert_id_to_local_expert_id=lambda e: int(expert_map[e]),
+        _to_scalar=RoutedExperts._to_scalar,
+    )
+    loader._load_per_tensor_weight_scale = MethodType(
+        RoutedExperts._load_per_tensor_weight_scale, loader
+    )
+    loader._load_single_value = MethodType(RoutedExperts._load_single_value, loader)
+    checkpoint_scales = [
+        ("w13_weight_scale_2", "w1"),
+        ("w13_weight_scale_2", "w3"),
+        ("w2_weight_scale_2", "w2"),
+        ("w13_input_scale", "w1"),
+        ("w13_input_scale", "w3"),
+        ("w2_input_scale", "w2"),
+    ]
+    for global_id in set(range(8)) - missing_global_ids:
+        for name, shard_id in checkpoint_scales:
+            loaded = RoutedExperts.weight_loader(
+                cast(RoutedExperts, loader),
+                getattr(layer, name),
+                torch.tensor(0.01),
+                name,
+                shard_id,
+                global_id,
+                return_success=True,
+            )
+            assert loaded == (expert_map[global_id] != -1)
+
+    expected = (
+        pytest.raises(ValueError, match=expected_error)
+        if expected_error is not None
+        else nullcontext()
+    )
+    convert, build = _patch_nvfp4_moe_conversion(moe)
+    with convert as converter, build as build_kernel, expected:
+        moe.process_weights_after_loading(layer)
+
+    assert converter.called == (expected_error is None)
+    assert build_kernel.called == (expected_error is None)
 
 
 @pytest.mark.parametrize("quantization", ["modelopt_fp4", "modelopt_mixed"])
