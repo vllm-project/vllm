@@ -36,6 +36,21 @@ float8_info = torch.finfo(current_platform.fp8_dtype())
 # Longest per-request query (e.g. 1 + num_speculative_tokens) run by split-K.
 MAX_3D_QUERY_LEN = 8
 
+is_gfx1201 = False
+if current_platform.is_rocm():
+    from vllm.platforms.rocm import on_gfx1201
+
+    is_gfx1201 = on_gfx1201()
+
+# gfx1201 2D launch configs for prefill / chunked-prefill / mixed batches:
+# head_size -> (config for 64 < max_seqlen_q < 4096, for max_seqlen_q >= 4096),
+# each config = (BLOCK_M, TILE_SIZE, num_warps, num_stages).
+_GFX1201_2D_CONFIGS = {
+    64: ((64, 64, 4, 1), (128, 64, 8, 1)),
+    128: ((64, 32, 4, 1), (128, 32, 8, 2)),
+    256: ((32, 32, 4, 1), (128, 32, 8, 1)),
+}
+
 
 @triton.jit
 def _cast_kv_tile(data, Q, tensor_scale, KV_QUANT_MODE: tl.constexpr):
@@ -980,6 +995,33 @@ def unified_attention(
         launch_num_warps = 8
         launch_num_stages = 2
 
+    # gfx1201: the default BLOCK_M=16 gives each program only 16 / GQA query
+    # rows, too few for prefill. Taller Q blocks are ~2x faster for prefill,
+    # chunked-prefill and mixed batches (synthetic sweep over head_dim
+    # 64/128/256, GQA 1-16, KV heads 1-8, block size 16/528, bf16).
+    gfx1201_tile_prefill = None
+    if (
+        is_gfx1201
+        and head_size in _GFX1201_2D_CONFIGS
+        and max_seqlen_q > 64
+        and num_queries_per_kv <= 16
+        and q.element_size() == 2
+        and not is_batch_invariant
+    ):
+        mid_cfg, long_cfg = _GFX1201_2D_CONFIGS[head_size]
+        cfg_block_m, cfg_tile, cfg_warps, cfg_stages = (
+            long_cfg if max_seqlen_q >= 4096 else mid_cfg
+        )
+        # A decode-heavy mixed batch with few Q heads per KV head would pad
+        # every decode sequence to BLOCK_Q rows; keep the default there.
+        avg_query_len = q.shape[0] // max(num_seqs, 1)
+        if not (cfg_block_m // num_queries_per_kv > 16 and avg_query_len < 16):
+            BLOCK_M = cfg_block_m
+            BLOCK_Q = BLOCK_M // num_queries_per_kv
+            gfx1201_tile_prefill = cfg_tile
+            launch_num_warps = cfg_warps
+            launch_num_stages = cfg_stages
+
     # Ideally we would launch with kernel with:
     # \sum_i[ceil(query_len[i] / BLOCK_Q)] blocks.
     # However, it is slow to realize the query_lens on cpu.
@@ -1012,6 +1054,8 @@ def unified_attention(
     # path (used when max_seqlen_q > 1) reads TILE_SIZE_PREFILL.
     if tuned_large_head:
         TILE_SIZE_PREFILL = 128
+    elif gfx1201_tile_prefill is not None and q.element_size() >= 2:
+        TILE_SIZE_PREFILL = gfx1201_tile_prefill
 
     # USE_TD requires BLOCK_SIZE % TILE_SIZE == 0 (enforced by a
     # ``tl.static_assert`` in the kernel).  The default prefill tile
@@ -1118,6 +1162,18 @@ def unified_attention(
     if not use_3d:
         grid = (total_num_q_blocks, num_kv_heads)
         tile_size = TILE_SIZE_PREFILL
+        # gfx1201 decode batches above the 3D threshold: a narrow KV tile with
+        # 2 warps is ~1.2x (head_dim 128) / ~1.5x (head_dim 256) faster.
+        if (
+            is_gfx1201
+            and max_seqlen_q == 1
+            and head_size in (128, 256)
+            and q.element_size() == 2
+            and not is_batch_invariant
+        ):
+            tile_size = 16
+            launch_num_warps = 2
+            launch_num_stages = 1
     else:
         grid = (total_num_q_blocks, num_kv_heads, num_par_softmax_segments)
         tile_size = TILE_SIZE_DECODE
