@@ -14,6 +14,8 @@ import pytest
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio import moriio_engine
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     ROLE,
+    LayerTransferPlan,
+    MoRIIOError,
     MoRIIOMode,
     RemoteAllocInfo,
     ReqMeta,
@@ -103,7 +105,7 @@ def _write_task(
         request_id=request_id,
         transfer_id=transfer_id,
         dst_engine_id="remote-engine",
-        local_block_ids=[1, 3],
+        local_block_ids=[[1, 3]],
         remote_block_ids_hint=None,
         layer_name="layer0",
         event=None,
@@ -311,6 +313,7 @@ def test_execute_write_task_writes_every_fanout_target():
         return [engine_id], f"metadata-{engine_id}"
 
     worker._get_built_session = _get_built_session
+    worker._is_mamba_layer = lambda layer_name: False
     writer = make_moriio_writer(worker)
     write_sessions: list[list[str]] = []
 
@@ -400,6 +403,7 @@ def test_write_blocks_for_req_forwards_routing_to_schedule_write():
     worker.tp_rank = 0
     worker.world_size = 1
     worker.use_mla = False
+    worker._has_mamba = False
     captured: dict[str, Any] = {}
 
     def _capture_schedule_write_blocks(**kwargs: Any) -> None:
@@ -417,8 +421,8 @@ def test_write_blocks_for_req_forwards_routing_to_schedule_write():
     assert captured["multi_pod_hosts"] == ["10.0.0.1", "10.0.0.2"]
     assert captured["remote_dp_size_local"] == 8
     assert captured["remote_ip"] == "10.0.0.1"
-    assert captured["local_block_ids"] == [1]
-    assert captured["remote_block_ids"] == [2]
+    assert captured["local_block_ids"] == [[1]]
+    assert captured["remote_block_ids"] == [[2]]
     assert not hasattr(worker, "multi_pod_hosts")
 
 
@@ -427,6 +431,7 @@ def test_write_blocks_for_req_falls_back_when_multi_pod_hosts_empty():
     worker.tp_rank = 0
     worker.world_size = 1
     worker.use_mla = False
+    worker._has_mamba = False
     captured: dict[str, Any] = {}
 
     def _capture_schedule_write_blocks(**kwargs: Any) -> None:
@@ -444,8 +449,8 @@ def test_write_blocks_for_req_falls_back_when_multi_pod_hosts_empty():
 
     assert captured["multi_pod_hosts"] == ["10.0.0.9"]
     assert captured["remote_dp_size_local"] == 4
-    assert captured["local_block_ids"] == [1]
-    assert captured["remote_block_ids"] == [2]
+    assert captured["local_block_ids"] == [[1]]
+    assert captured["remote_block_ids"] == [[2]]
 
 
 def test_write_blocks_for_req_schedules_mla_write_fanout():
@@ -453,6 +458,7 @@ def test_write_blocks_for_req_schedules_mla_write_fanout():
     worker.tp_rank = 1
     worker.world_size = 2
     worker.use_mla = True
+    worker._has_mamba = False
     captured: dict[str, Any] = {}
 
     def _capture_schedule_write_blocks(**kwargs: Any) -> None:
@@ -577,3 +583,73 @@ def test_write_failed_is_reported_as_failed_recving_on_owning_rank():
     assert results.failed_recving == {"req-1"}
     assert wrapper.pop_finished_write_req_ids() == set()
     assert list(worker._unmatched_write_failures) == ["tOtherRank"]
+
+
+def test_hybrid_write_rejects_unequal_tp_before_scheduling_any_layer():
+    from unittest.mock import Mock
+
+    worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
+    worker._has_mamba = True
+    worker.world_size = 2
+    worker.schedule_write_blocks = Mock()
+
+    with pytest.raises(NotImplementedError, match="heterogeneous-TP"):
+        worker._write_blocks_for_req("req", _req_meta(), "attention", kv_layer=None)
+
+    worker.schedule_write_blocks.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "notify,expected",
+    [
+        # Plain WRITE peers still send one flat attention list.
+        ([7, 8], [[7, 8]]),
+        # Hybrid WRITE sends one list per transfer group, kept as-is even
+        # when the first group is empty (full attention hit, state only).
+        ([[7], [9]], [[7], [9]]),
+        ([[], [9]], [[], [9]]),
+    ],
+)
+def test_remote_blocks_message_normalizes_to_grouped_block_ids(notify, expected):
+    wrapper = _real_wrapper()
+    with patch.object(moriio_engine, "get_role", return_value=ROLE.PRODUCER):
+        wrapper._handle_remote_blocks_message(
+            {"transfer_id": "tA", "block_notify_list": notify, "decode_rank": 2}
+        )
+    info = wrapper.done_remote_allocate_req_dict["tA"]
+    assert info.block_ids == expected
+    assert info.decode_dp_rank == 2
+
+
+def test_empty_layer_plan_posts_no_rdma_write():
+    from unittest.mock import Mock
+
+    wrapper = SimpleNamespace(write_remote_data=Mock(), write_remote_data_single=Mock())
+    writer = make_moriio_writer(SimpleNamespace(moriio_wrapper=wrapper))
+    plan = LayerTransferPlan(
+        request_id="req",
+        transfer_id="tA",
+        layer_name="layer0",
+        sess_idx=0,
+        transfer_local_offsets=[],
+        transfer_remote_offsets=[],
+        transfer_sizes=[],
+    )
+
+    assert writer._do_layer_write(plan, ["session"]) == []
+    wrapper.write_remote_data.assert_not_called()
+    wrapper.write_remote_data_single.assert_not_called()
+
+
+@pytest.mark.parametrize("local_state", [[], [1, 2]])
+def test_hybrid_write_requires_exactly_one_running_state_slot(local_state):
+    worker = SimpleNamespace(
+        _mamba_blocks_for_layer=lambda layer_name, block_ids: block_ids[1],
+    )
+    writer = make_moriio_writer(worker)
+    task = _write_task("tA", "10.0.0.1")
+    task.layer_name = "kda"
+    task.local_block_ids = [[], local_state]
+
+    with pytest.raises(MoRIIOError, match="one running-state slot"):
+        writer._prepare_mamba_transfer_plans(task, RemoteAllocInfo(block_ids=[[], [9]]))

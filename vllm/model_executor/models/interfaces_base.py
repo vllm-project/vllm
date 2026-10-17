@@ -51,6 +51,15 @@ class VllmModel(Protocol):
         self, input_ids: torch.Tensor, positions: torch.Tensor
     ) -> torch.Tensor: ...
 
+    def is_unused_checkpoint_weight(self, name: str) -> bool:
+        """Return True for checkpoint weights this model does not load.
+
+        Defining this method is optional for satisfying this interface.
+        Override with the same rule used in ``load_weights``. Models without
+        a selection rule keep every checkpoint weight by default.
+        """
+        return False
+
 
 def _check_vllm_model_init(model: type[object] | object) -> bool:
     model_init = getattr(model, "__init__")  # noqa: B009
@@ -134,10 +143,8 @@ def is_text_generation_model(
     if not is_vllm_model(model):
         return False
 
-    if isinstance(model, type):
-        return isinstance(model, VllmModelForTextGeneration)
-
-    return isinstance(model, VllmModelForTextGeneration)
+    # Optional protocol defaults are not inherited by structural models.
+    return callable(getattr(model, "compute_logits", None))
 
 
 @runtime_checkable

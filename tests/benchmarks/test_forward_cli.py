@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 
 from vllm.benchmarks.forward.batch import build_batch
+from vllm.benchmarks.forward.main import run_case
 from vllm.benchmarks.forward.shapes import jitter_kv_lens, parse_case
 from vllm.platforms import current_platform
 
@@ -82,6 +83,18 @@ def test_jitter_kv_lens():
     assert jitter_kv_lens(case, 0, 2048, 0) == case
     with pytest.raises(ValueError, match="KV length"):
         jitter_kv_lens(case, 0, 1000, 0)
+
+
+@pytest.mark.parametrize("capacity", [0, 2])
+def test_bench_forward_rejects_oversized_verify(capacity):
+    """Reject drafts beyond the runner's buffer before launching CUDA kernels."""
+    runner = SimpleNamespace(num_speculative_steps=capacity)
+    case = parse_case("verify=2*4@64:3")
+    with pytest.raises(
+        ValueError,
+        match=rf"Case 'verify' needs 3 draft tokens.*supports {capacity}",
+    ):
+        run_case(runner, case, SimpleNamespace())
 
 
 @pytest.mark.benchmark

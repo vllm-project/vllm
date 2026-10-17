@@ -63,17 +63,17 @@ class WriteTask:
     request_id: ReqId
     transfer_id: TransferId
     dst_engine_id: str
-    local_block_ids: list[int]
-    remote_block_ids_hint: list[int] | None
+    local_block_ids: BlockIds
+    remote_block_ids_hint: BlockIds | None
     layer_name: str
     event: torch.cuda.Event
     remote_notify_port: int
     remote_ip: str
+    remote_tp_size: int | None = None
     multi_pod_hosts: list[str] = field(default_factory=list)
     remote_dp_size_local: int = 0
     remote_dp_size: int = 1
     target_tp_ranks: tuple[int, ...] = ()
-    remote_tp_size: int = 0
     enqueue_time: float = field(default_factory=time.perf_counter)
     retried: int = 0
 
@@ -96,7 +96,7 @@ class LayerTransferPlan:
 class RemoteAllocInfo:
     """Information about remote block allocation."""
 
-    block_ids: list[int]
+    block_ids: BlockIds | None
     writes_done: int = 0
     writes_expected: int | None = None
     decode_dp_rank: int = 0
