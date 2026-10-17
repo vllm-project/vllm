@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Warmup and autotune helpers for FlashInfer sparse MLA backends."""
 
+import contextlib
 from typing import TYPE_CHECKING, cast
 
 import torch
@@ -48,6 +49,60 @@ _FLASHINFER_SM120_SPARSE_MLA_DECODE_LABELS = {
 }
 
 _SPARSE_MLA_MIXED_WARMUP_TOKENS = 16
+
+# Capture buckets the sparse-MLA decode kernel can serve: the crossover probe
+# grid caps at 64, so larger buckets never route to the decode form.
+_SPARSE_MLA_REFINE_TOKEN_CAP = 64
+
+
+def _sparse_mla_refine_tokens(worker: "Worker") -> tuple[int, ...]:
+    """Return capture buckets executable by the runner's uniform-decode dummy run.
+
+    A tuning-mode decode call at each bucket refines FlashInfer's cpb pick for
+    exactly that shape (``refine_cpb``).
+    """
+    sizes = (
+        getattr(worker.vllm_config.compilation_config, "cudagraph_capture_sizes", None)
+        or ()
+    )
+    runner = worker.model_runner
+    is_v2 = _uses_v2_model_runner(runner)
+    query_len = (
+        cast("V2GPUModelRunner", runner).decode_query_len
+        if is_v2
+        else runner.uniform_decode_query_len
+    )
+    cap = min(
+        _SPARSE_MLA_REFINE_TOKEN_CAP,
+        runner.max_num_reqs * query_len,
+        worker.scheduler_config.max_num_batched_tokens,
+    )
+    # V1 permits a final short request; V2 requires exact query-length multiples.
+    return tuple(
+        sorted({s for s in sizes if 0 < s <= cap and (not is_v2 or s % query_len == 0)})
+    )
+
+
+def _run_sparse_mla_refine_bucket(worker: "Worker", num_tokens: int) -> None:
+    """Run one uniform-decode step at ``num_tokens`` with attention forced."""
+    runner = worker.model_runner
+    if _uses_v2_model_runner(runner):
+        cast("V2GPUModelRunner", runner)._dummy_run(
+            num_tokens=num_tokens,
+            skip_eplb=True,
+            is_profile=True,
+            skip_attn=False,
+            uniform_decode=True,
+        )
+    else:
+        runner._dummy_run(
+            num_tokens=num_tokens,
+            skip_eplb=True,
+            is_profile=True,
+            force_attention=True,
+            uniform_decode=True,
+            allow_microbatching=False,
+        )
 
 
 def autotune_hisparse_flashinfer_attention(runner: "GPUModelRunner") -> None:
@@ -133,6 +188,16 @@ def _run_flashinfer_sparse_mla_decode_autotune(
         return False
     if not has_flashinfer() or not current_platform.is_device_capability_family(120):
         return False
+    if (
+        _uses_v2_model_runner(runner)
+        and getattr(runner, "ubatch_runner", None) is not None
+    ):
+        logger.warning(
+            "Skipping FlashInfer SM120 sparse MLA decode autotune: "
+            "V2 microbatching does not expose a serial warmup override."
+        )
+        return False
+    refine_tokens = _sparse_mla_refine_tokens(worker)
 
     try:
         from flashinfer.autotuner import AutoTuner
@@ -158,7 +223,7 @@ def _run_flashinfer_sparse_mla_decode_autotune(
 
     if use_flashinfer_autotune_v2(runner):
         return _run_sparse_mla_decode_autotune_v2(
-            worker, num_tokens, log_label, dummy_run_kwargs
+            worker, num_tokens, log_label, dummy_run_kwargs, refine_tokens
         )
 
     cache_path = resolve_flashinfer_autotune_file(runner)
@@ -198,6 +263,15 @@ def _run_flashinfer_sparse_mla_decode_autotune(
                 )
             else:
                 runner._dummy_run(**dummy_run_kwargs)
+        if warmup_executed and refine_tokens:
+            # Non-leaders replay the leader's buckets to keep collectives aligned.
+            with (
+                flashinfer_autotune(True, cache=str(cache_path))
+                if is_leader
+                else contextlib.nullcontext()
+            ):
+                for bucket in refine_tokens:
+                    _run_sparse_mla_refine_bucket(worker, bucket)
 
     if not warmup_executed:
         return False
@@ -236,6 +310,7 @@ def _run_sparse_mla_decode_autotune_v2(
     num_tokens: int,
     log_label: str,
     dummy_run_kwargs: dict,
+    refine_tokens: tuple[int, ...] = (),
 ) -> bool:
     """Run every rank's sparse warmup in the managed autotune context.
 
@@ -272,6 +347,10 @@ def _run_sparse_mla_decode_autotune_v2(
             warmup_executed = True
             with autotune_v2(mode="tune", cache_root=cache_root):
                 runner._dummy_run(**dummy_run_kwargs)
+        if warmup_executed and refine_tokens:
+            with autotune_v2(mode="tune", cache_root=cache_root):
+                for bucket in refine_tokens:
+                    _run_sparse_mla_refine_bucket(worker, bucket)
 
     if not warmup_executed:
         return False

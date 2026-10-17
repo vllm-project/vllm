@@ -313,9 +313,12 @@ def test_sparse_autotune_respects_cache_selection(
     runner.vllm_config.kernel_config = SimpleNamespace(enable_flashinfer_autotune=True)
     runner.vllm_config.parallel_config.enable_elastic_ep = elastic_ep
     runner.vllm_config.parallel_config.pipeline_parallel_size = pp_size
+    runner.vllm_config.compilation_config = SimpleNamespace(cudagraph_capture_sizes=[])
+    runner.uniform_decode_query_len = runner.decode_query_len = 1
     worker = SimpleNamespace(
         model_runner=runner,
         vllm_config=runner.vllm_config,
+        scheduler_config=runner.scheduler_config,
         execute_model=Mock(),
         sample_tokens=Mock(),
     )
