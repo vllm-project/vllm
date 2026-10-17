@@ -21,7 +21,7 @@ from vllm.distributed.weight_transfer.base import (
     WeightTransferUpdateRequest,
 )
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.engine.protocol import EngineClient, StreamingInput
+from vllm.engine.protocol import EngineClient, StreamingInput, kv_transfer_admission
 from vllm.entrypoints.serve.elastic_ep.middleware import (
     get_elastic_ep_rank_retired,
     set_elastic_ep_rank_retired,
@@ -784,6 +784,9 @@ class AsyncLLM(EngineClient):
                 reasoning_ended=reasoning_ended,
                 reasoning_parser_kwargs=reasoning_parser_kwargs,
             )
+
+            if admission := kv_transfer_admission.get():
+                admission.admitted = True
 
             # The output_handler task pushes items into the queue.
             # This task pulls from the queue and yields to caller.

@@ -16,6 +16,7 @@ logger = init_logger(__name__)
 NixlWrapper: Any
 nixl_agent_config: Any
 nixlXferTelemetry: Any
+nixlRemoteDisconnectError: Any
 
 
 def _maybe_set_ucx_rcache_limit() -> None:
@@ -43,7 +44,7 @@ def _get_nixl_package_name() -> str:
 
 def _get_nixl_module_name(name: str) -> str:
     package_name = _get_nixl_package_name()
-    if name == "nixlXferTelemetry":
+    if name in ("nixlXferTelemetry", "nixlRemoteDisconnectError"):
         return f"{package_name}._bindings"
     return f"{package_name}._api"
 
@@ -53,6 +54,7 @@ def _load_nixl_attr(name: str) -> Any:
         "NixlWrapper": "nixl_agent",
         "nixl_agent_config": "nixl_agent_config",
         "nixlXferTelemetry": "nixlXferTelemetry",
+        "nixlRemoteDisconnectError": "nixlRemoteDisconnectError",
     }[name]
 
     _maybe_set_ucx_rcache_limit()
@@ -130,6 +132,7 @@ __all__ = [
     "NixlWrapper",
     "nixl_agent_config",
     "nixlXferTelemetry",
+    "nixlRemoteDisconnectError",
     "is_nixl_available",
     "check_nixl_version",
     "alias_nixl_for_ray",
