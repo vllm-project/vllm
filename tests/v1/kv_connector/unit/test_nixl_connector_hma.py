@@ -5,6 +5,7 @@
 import gc
 import queue
 import threading
+from collections import defaultdict
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -62,7 +63,7 @@ def region_pull_worker():
     worker._transfer_layer_group_ids = ()
     worker._bidirectional_kv_xfer_enabled = False
     worker._recving_transfers = {}
-    worker._failed_remote_engines = set()
+    worker._failed_reqs_by_engine = defaultdict(set)
     worker._invalid_remote_engines = set()
     worker._remote_registration_generations = {}
     worker.use_mla, worker._has_mamba = True, False
