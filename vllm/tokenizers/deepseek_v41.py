@@ -17,6 +17,14 @@ from .hf import HfTokenizer, get_cached_tokenizer
 from .protocol import TokenizerLike
 
 
+def _reject_image_placeholder(text: Any) -> None:
+    if isinstance(text, str) and IMAGE_PLACEHOLDER in text:
+        raise ValueError(
+            f"DeepSeek V4.1 message text must not contain {IMAGE_PLACEHOLDER!r}; "
+            "send images as image content parts"
+        )
+
+
 def _normalize_messages(
     messages: list[ChatCompletionMessageParam],
 ) -> list[dict[str, Any]]:
@@ -27,13 +35,18 @@ def _normalize_messages(
             raise ValueError(f"Invalid role: {role}")
         if "reasoning" in message:
             message["reasoning_content"] = message["reasoning"]
+        # Validate every message before image parts become placeholders.
+        _reject_image_placeholder(message.get("reasoning_content"))
         content = message.get("content")
+        _reject_image_placeholder(content)
         if isinstance(content, list):
             parts = []
             for block in content:
                 part_type = block.get("type")
                 if part_type in ("text", "input_text", "output_text"):
-                    parts.append(block.get("text", ""))
+                    text = block.get("text", "")
+                    _reject_image_placeholder(text)
+                    parts.append(text)
                 elif part_type in ("image_url", "input_image", "image_pil"):
                     parts.append(IMAGE_PLACEHOLDER)
                 else:
