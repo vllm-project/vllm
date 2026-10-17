@@ -285,6 +285,9 @@ class TestWeightLoadingWithPaddedHiddenSize:
 
         experts = object.__new__(RoutedExperts)
         torch.nn.Module.__init__(experts)
+        experts.quant_method = SimpleNamespace(
+            intermediate_size_per_partition_alignment=1
+        )
         experts.moe_config = make_dummy_moe_config()
         experts.moe_config.moe_parallel_config.tp_size = 2
 
@@ -803,3 +806,26 @@ class TestPerTensorScaleCoercion:
         # numel > 1 must fail loudly instead of silently picking an element.
         with pytest.raises(RuntimeError):
             RoutedExperts._to_scalar(torch.tensor([0.1, 0.2]))
+
+
+@pytest.mark.parametrize("shard_id", ["w1", "w3", "w2"])
+def test_nvfp4_empty_tp_slice_clears_only_selected_shard(shard_id):
+    """A padded rank beyond the checkpoint must not retain allocation contents."""
+    layer = SimpleNamespace(
+        moe_config=SimpleNamespace(is_act_and_mul=True),
+        quant_method=SimpleNamespace(intermediate_size_per_partition_alignment=16),
+    )
+    if shard_id == "w2":
+        destination = torch.full((2, 16), 99.0)
+        RoutedExperts._load_w2(layer, destination, 1, torch.ones(2, 8), tp_rank=1)
+        assert torch.count_nonzero(destination) == 0
+    else:
+        destination = torch.full((32, 2), 99.0)
+        RoutedExperts._load_w13(
+            layer, destination, 0, shard_id, torch.ones(8, 2), tp_rank=1
+        )
+        selected, other = destination.chunk(2, dim=0)
+        if shard_id == "w3":
+            selected, other = other, selected
+        assert torch.count_nonzero(selected) == 0
+        assert torch.equal(other, torch.full_like(other, 99.0))
