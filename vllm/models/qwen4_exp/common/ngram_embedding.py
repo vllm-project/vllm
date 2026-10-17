@@ -7,16 +7,36 @@ n-gram embedding table can be kept in pinned host memory and looked up through
 Unified Virtual Addressing on any CUDA-alike platform.
 """
 
+import fcntl
+import hashlib
+import json
+import mmap
+import os
+import tempfile
 import threading
+import time
+import weakref
 from abc import ABC, abstractmethod
-from typing import ClassVar
+from contextlib import ExitStack
+from pathlib import Path
+from typing import ClassVar, NamedTuple
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
 
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
-from vllm.distributed import get_dp_group, get_etp_group, get_tp_group
+from vllm.distributed import (
+    get_dp_group,
+    get_engram_dp_group,
+    get_etp_group,
+    get_tp_group,
+)
+from vllm.distributed.device_communicators.shm_broadcast import (
+    SHM_PATH,
+    check_shm_free_space,
+)
 from vllm.forward_context import DPMetadata, get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
@@ -280,6 +300,12 @@ class Qwen4ExpPLEEmbeddingMethod(QuantizeMethodBase):
             BLOCK_D=triton.next_power_of_2(row_bytes),
         )
 
+    def process_weights_after_loading(self, layer: nn.Module) -> None:
+        """A file-shared table publishes or awaits its ready mark here."""
+        finish = getattr(layer, "finish_shared_table", None)
+        if finish is not None:
+            finish()
+
     @abstractmethod
     def dequantize(
         self,
@@ -366,6 +392,7 @@ class Qwen4ExpPLEFp8EmbeddingMethod(Qwen4ExpPLEEmbeddingMethod):
 
     def process_weights_after_loading(self, layer: nn.Module) -> None:
         """Reject FP8 PLE checkpoints without a global scale."""
+        super().process_weights_after_loading(layer)
         sentinel = torch.finfo(torch.float32).min
         if torch.any(layer.weight_scale == sentinel):
             raise ValueError("FP8 PLE checkpoint is missing its global scale")
@@ -449,6 +476,7 @@ class Qwen4ExpPLENvFp4EmbeddingMethod(Qwen4ExpPLEEmbeddingMethod):
 
     def process_weights_after_loading(self, layer: nn.Module) -> None:
         """Reject NVFP4 PLE checkpoints without a global scale."""
+        super().process_weights_after_loading(layer)
         sentinel = torch.finfo(torch.float32).min
         if torch.any(layer.weight_scale_2 == sentinel):
             raise ValueError("NVFP4 PLE checkpoint is missing its global scale")
@@ -817,3 +845,495 @@ class Qwen4ExpPLEPinnedHostEmbedding(Qwen4ExpPLEEmbedding):
             "Pinned-host PLE embedding requires "
             "start_prefetch() and finalize_prefetch()."
         )
+
+
+def _unregister_shared_ple_mapping(mapping: mmap.mmap, pointer: int) -> None:
+    # Torch storage retains the numpy owner, including through cached UVA views.
+    # Keep its mmap alive until CUDA has released the registration.
+    result = torch.cuda.cudart().cudaHostUnregister(pointer)
+    if result.value != 0:
+        logger.warning("PLE cudaHostUnregister failed: %s", result)
+
+
+_PLE_SHARE_DECISIONS: dict[tuple[int, int], bool] = {}
+
+
+def can_share_ple_table(num_bytes: int) -> bool:
+    """Whether co-located DP replicas exist and /dev/shm can hold the PLE table.
+
+    Only the leader checks, so every replica follows its decision — a peer
+    that decided differently would wait forever on the shared mapping's
+    collectives. Decided once per group and table size: every PLE layer asks,
+    and one broadcast answers them all. Mirrors ``can_share_engram_tables``.
+    """
+    group = get_engram_dp_group()
+    key = (id(group), num_bytes)
+    cached = _PLE_SHARE_DECISIONS.get(key)
+    if cached is not None:
+        return cached
+    decision = _decide_ple_table_sharing(group, num_bytes)
+    _PLE_SHARE_DECISIONS[key] = decision
+    return decision
+
+
+def _decide_ple_table_sharing(group, num_bytes: int) -> bool:
+    if group is None:
+        logger.warning_once(
+            "Engram DP replicas are not co-located on one node; "
+            "storing the offloaded PLE table per rank instead of sharing it."
+        )
+        return False
+    error = None
+    if group.rank_in_group == 0:
+        if not os.path.isdir(SHM_PATH):
+            error = f"{SHM_PATH} is not mounted"
+        else:
+            try:
+                check_shm_free_space(num_bytes, allocation_name="PLE table")
+            except Exception as exc:
+                error = f"{type(exc).__name__}: {exc}"
+    error = group.broadcast_object(error)
+    if error is not None:
+        logger.warning_once(
+            "Storing the offloaded PLE table per rank instead of sharing it: %s",
+            error,
+        )
+    return error is None
+
+
+def _map_shared_ple_file(
+    path: str, num_bytes: int
+) -> tuple[torch.Tensor, np.ndarray, mmap.mmap]:
+    """Map `path` MAP_SHARED and register it with CUDA for UVA lookups.
+
+    Returns the flat uint8 tensor, the numpy owner and the mapping; the owner's
+    finalizer unregisters the pages and keeps the mapping alive until then.
+    """
+    with open(path, "r+b") as file:
+        mapping = mmap.mmap(file.fileno(), num_bytes, flags=mmap.MAP_SHARED)
+    owner = np.frombuffer(mapping, dtype=np.uint8)
+    pointer = owner.ctypes.data
+    flat = torch.from_numpy(owner)
+    result = torch.cuda.cudart().cudaHostRegister(pointer, num_bytes, 0)
+    if result.value != 0:
+        raise RuntimeError(f"cudaHostRegister failed: {result}")
+    finalizer = weakref.finalize(
+        owner, _unregister_shared_ple_mapping, mapping, pointer
+    )
+    finalizer.atexit = False  # type: ignore[misc]
+    # The UVA helper otherwise allocates a private pinned copy.
+    if not flat.is_pinned():
+        raise RuntimeError("cudaHostRegister did not pin the shared PLE mapping")
+    return flat, owner, mapping
+
+
+class SharedPLETable(NamedTuple):
+    """Where independent processes share a model's PLE tables, and which model.
+
+    ``table_id`` names the model, revision and layer; each process adds the
+    shape, dtype and ETP shard it holds (``shared_ple_table_identity``).
+    """
+
+    directory: str
+    table_id: str
+
+
+def shared_ple_table_identity(
+    table_id: str,
+    shape: tuple[int, int],
+    dtype: torch.dtype,
+    *,
+    etp_rank: int,
+    etp_size: int,
+    vocab_range: tuple[int, int],
+) -> dict[str, object]:
+    """What one shared table file holds: one ETP shard of one PLE layer.
+
+    The table is vocab-sharded over the ETP group and every shard has the same
+    shape, so the shard is part of the identity: equal sizes must never let
+    one rank map another rank's rows.
+    """
+    return {
+        "table": table_id,
+        "shape": [int(shape[0]), int(shape[1])],
+        "dtype": str(dtype),
+        "etp_rank": int(etp_rank),
+        "etp_size": int(etp_size),
+        "vocab_range": [int(vocab_range[0]), int(vocab_range[1])],
+    }
+
+
+def shared_ple_table_path(directory: str, identity: dict[str, object]) -> str:
+    """The file independent processes share for one table shard."""
+    key = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+    return os.path.join(directory, f"vllm_ple_{key[:24]}")
+
+
+# How long a process waits for another, still running, to finish loading a
+# shared table. A loader that dies releases its lock, which waiters notice
+# within one poll instead.
+PLE_SHARED_TABLE_READY_TIMEOUT_S = 3600
+PLE_SHARED_TABLE_POLL_S = 0.5
+
+
+def _try_flock(fd: int, operation: int) -> bool:
+    try:
+        fcntl.flock(fd, operation | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return False
+    return True
+
+
+def _shared_table_loader_alive(lock_fd: int) -> bool:
+    """Whether a process holds the loader's exclusive lock.
+
+    Probed with a shared lock, which only an exclusive holder refuses, so
+    waiters probing at the same time never mistake each other for a loader.
+    """
+    if not _try_flock(lock_fd, fcntl.LOCK_SH):
+        return True
+    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+    return False
+
+
+def _check_shared_table_ready(
+    path: str, identity: dict[str, object], num_bytes: int
+) -> None:
+    """Refuse a ready table that is not the shard this process holds."""
+    mark = Path(path + ".ready").read_text()
+    try:
+        published = json.loads(mark)
+    except ValueError:
+        published = mark
+    expected = {**identity, "bytes": num_bytes}
+    if published != expected or os.stat(path).st_size != num_bytes:
+        raise RuntimeError(
+            f"shared PLE table {path} holds {published!r}, this process needs "
+            f"{expected!r}: remove the file and its .ready and .lock and start "
+            "again"
+        )
+
+
+def _claim_shared_table(
+    path: str, identity: dict[str, object], num_bytes: int
+) -> int | None:
+    """Become the process that loads ``path``, or wait until one has sized it.
+
+    The loader holds an exclusive ``flock`` on ``<path>.lock`` from before it
+    sizes the file until after it publishes ``<path>.ready``; the kernel
+    releases it when the process exits. So a file without a ready mark and
+    without a lock holder was left by a loader that died, and the next process
+    to take the lock loads it again; exactly one can. Returns the lock's file
+    descriptor for the loader (released by ``_publish_shared_table``), None for
+    a process that maps the table another loads or has loaded.
+    """
+    ready = path + ".ready"
+    if os.path.exists(ready):
+        _check_shared_table_ready(path, identity, num_bytes)
+        return None
+    lock_fd = os.open(path + ".lock", os.O_CREAT | os.O_RDWR, 0o600)
+    deadline = time.monotonic() + PLE_SHARED_TABLE_READY_TIMEOUT_S
+    try:
+        while True:
+            if os.path.exists(ready):
+                _check_shared_table_ready(path, identity, num_bytes)
+                return None
+            if _try_flock(lock_fd, fcntl.LOCK_EX):
+                # A loader publishes the mark before it unlocks.
+                if os.path.exists(ready):
+                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                    continue
+                _size_shared_table(path, num_bytes)
+                loader_fd, lock_fd = lock_fd, -1
+                return loader_fd
+            if _shared_table_loader_alive(lock_fd):
+                # A live loader: map the table once it is sized.
+                try:
+                    if os.stat(path).st_size == num_bytes:
+                        return None
+                except FileNotFoundError:
+                    pass
+            # Otherwise only waiters' probes held the lock: try again.
+            if time.monotonic() > deadline:
+                raise RuntimeError(
+                    f"shared PLE table {path} was not sized within "
+                    f"{PLE_SHARED_TABLE_READY_TIMEOUT_S} s by the process "
+                    "loading it"
+                )
+            time.sleep(PLE_SHARED_TABLE_POLL_S)
+    finally:
+        if lock_fd >= 0:
+            os.close(lock_fd)
+
+
+def _size_shared_table(path: str, num_bytes: int) -> None:
+    """Create or resize the table file. Never truncated below its size:
+    processes waiting on an interrupted load may already have its pages
+    mapped and pinned, and they see the reload in place."""
+    created = not os.path.exists(path)
+    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        current = os.fstat(fd).st_size
+        if current != num_bytes:
+            check_shm_free_space(
+                max(num_bytes - current, 0),
+                shm_path=os.path.dirname(path),
+                allocation_name="shared PLE table",
+            )
+            os.ftruncate(fd, num_bytes)
+    except Exception:
+        if created:
+            os.unlink(path)
+        raise
+    finally:
+        os.close(fd)
+
+
+def _publish_shared_table(
+    path: str, identity: dict[str, object], num_bytes: int, lock_fd: int
+) -> None:
+    """Loader: mark the table ready, then release the lock."""
+    mark = Path(path + ".ready")
+    tmp = mark.with_name(mark.name + ".tmp")
+    tmp.write_text(json.dumps({**identity, "bytes": num_bytes}, sort_keys=True))
+    os.replace(tmp, mark)
+    os.close(lock_fd)
+
+
+def _await_shared_table(path: str, identity: dict[str, object], num_bytes: int) -> None:
+    """Wait for the loader's ready mark; fail at once if the loader died.
+
+    This process has skipped the table's load by then, so it cannot take over:
+    it fails with the reason, and its restart (or any other process's) loads
+    the table, since nobody holds the lock any more.
+    """
+    ready = path + ".ready"
+    lock_fd = os.open(path + ".lock", os.O_CREAT | os.O_RDWR, 0o600)
+    deadline = time.monotonic() + PLE_SHARED_TABLE_READY_TIMEOUT_S
+    next_log = 0.0
+    try:
+        while not os.path.exists(ready):
+            if not _shared_table_loader_alive(lock_fd):
+                if os.path.exists(ready):
+                    break
+                raise RuntimeError(
+                    f"the process loading shared PLE table {path} exited "
+                    "before marking it ready; start this process again and "
+                    "the first to start loads it"
+                )
+            now = time.monotonic()
+            if now > deadline:
+                raise RuntimeError(
+                    f"shared PLE table {path} was not marked ready within "
+                    f"{PLE_SHARED_TABLE_READY_TIMEOUT_S} s by the process "
+                    "still loading it"
+                )
+            if now >= next_log:
+                logger.info(
+                    "Waiting for %s to be marked ready by the process loading it",
+                    path,
+                )
+                next_log = now + 30
+            time.sleep(PLE_SHARED_TABLE_POLL_S)
+    finally:
+        os.close(lock_fd)
+    _check_shared_table_ready(path, identity, num_bytes)
+
+
+class Qwen4ExpPLEFileSharedHostEmbedding(Qwen4ExpPLEPinnedHostEmbedding):
+    """PLE table in a named host file shared by independent engine processes.
+
+    No process group: each ETP shard of each layer is one file, named by its
+    identity (``shared_ple_table_identity``). The first process to take the
+    file's lock loads the shard and publishes a ``.ready`` mark after its
+    weights are loaded; every other process maps the same file, skips the
+    load and waits for the mark in ``process_weights_after_loading``. A load
+    interrupted by the loader's exit is taken over by the next process to
+    start. Lookups are the pinned backend's. The file outlives the processes
+    (see ``EngramConfig.shared_host_table_dir``).
+    """
+
+    def __init__(self, *args, shared_table: SharedPLETable, **kwargs) -> None:
+        self._shared_table = shared_table
+        self._table_path = ""
+        self._table_identity: dict[str, object] = {}
+        self._table_bytes = 0
+        self._table_lock_fd: int | None = None
+        self._shared_owner: np.ndarray | None = None
+        self._shared_mapping: mmap.mmap | None = None
+        super().__init__(*args, **kwargs)
+
+    @property
+    def _table_is_writer(self) -> bool:
+        return self._table_lock_fd is not None
+
+    @property
+    def ready_mark(self) -> str:
+        return self._table_path + ".ready"
+
+    def allocate_embedding_weight(
+        self,
+        num_embeddings: int,
+        embedding_dim: int,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        if self._table_bytes:
+            # Only the table (``weight``, allocated first) is shared; NVFP4's
+            # block scales stay per process, like the global scale.
+            return super().allocate_embedding_weight(
+                num_embeddings, embedding_dim, dtype
+            )
+        num_bytes = num_embeddings * embedding_dim * dtype.itemsize
+        self._table_bytes = num_bytes
+        self._table_identity = shared_ple_table_identity(
+            self._shared_table.table_id,
+            (num_embeddings, embedding_dim),
+            dtype,
+            etp_rank=self.tp_rank,
+            etp_size=self.tp_size,
+            vocab_range=(
+                self.shard_indices.org_vocab_start_index,
+                self.shard_indices.org_vocab_end_index,
+            ),
+        )
+        self._table_path = shared_ple_table_path(
+            self._shared_table.directory, self._table_identity
+        )
+        self._table_lock_fd = _claim_shared_table(
+            self._table_path, self._table_identity, num_bytes
+        )
+        flat, owner, mapping = _map_shared_ple_file(self._table_path, num_bytes)
+        self._shared_owner, self._shared_mapping = owner, mapping
+        logger.info(
+            "PLE table shard %d/%d %s %s (%.1f GiB); this process %s it",
+            self.tp_rank,
+            self.tp_size,
+            "created at" if self._table_is_writer else "mapped from",
+            self._table_path,
+            num_bytes / (1 << 30),
+            "loads" if self._table_is_writer else "reads",
+        )
+        return flat.view(dtype).view(num_embeddings, embedding_dim)
+
+    def weight_loader(
+        self,
+        param: torch.Tensor,
+        loaded_weight: torch.Tensor,
+        checkpoint_start: int | None = None,
+    ) -> None:
+        # Only the table is shared; the scales are every process's own.
+        if param is not self.weight or self._table_is_writer:
+            super().weight_loader(param, loaded_weight, checkpoint_start)
+
+    def finish_shared_table(self) -> None:
+        """Loader: publish the ready mark. Others: wait for it."""
+        if self._table_lock_fd is not None:
+            lock_fd, self._table_lock_fd = self._table_lock_fd, None
+            _publish_shared_table(
+                self._table_path, self._table_identity, self._table_bytes, lock_fd
+            )
+            logger.info("PLE table %s loaded and marked ready", self._table_path)
+            return
+        _await_shared_table(self._table_path, self._table_identity, self._table_bytes)
+
+
+class Qwen4ExpPLESharedHostEmbedding(Qwen4ExpPLEPinnedHostEmbedding):
+    """PLE table in one pinned host mapping shared by co-located DP replicas.
+
+    The pinned-host table is tens of GiB (48 GiB for Qwen3.8-Flash-Next), so
+    two single-card replicas on one node pinning their own copies exceed the
+    node's memory. With ``EngramConfig.dp_shared_memory`` the node-local Engram
+    DP group maps one ``/dev/shm`` file: rank 0 creates and loads it, every
+    rank maps it ``MAP_SHARED`` and registers it with CUDA for UVA lookups, and
+    the group's CPU collectives fence creation, mapping and loading. Lookups
+    are unchanged from the pinned backend. Mirrors ``DPSharedEngramStorage``
+    in the DeepSeek V4.1 Engram implementation.
+    """
+
+    def __init__(self, *args, **kwargs) -> None:
+        group = get_engram_dp_group()
+        if group is None:
+            raise RuntimeError(
+                "Qwen4ExpPLESharedHostEmbedding requires a node-local Engram DP group"
+            )
+        self._shared_group = group
+        self._shared_owner: np.ndarray | None = None
+        self._shared_mapping: mmap.mmap | None = None
+        super().__init__(*args, **kwargs)
+
+    def allocate_embedding_weight(
+        self,
+        num_embeddings: int,
+        embedding_dim: int,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        """Map and register one physical PLE table across the DP group."""
+        if self._shared_owner is not None:
+            # Only the table (``weight``, allocated first) is shared; NVFP4's
+            # block scales stay per rank, like the global scale.
+            return super().allocate_embedding_weight(
+                num_embeddings, embedding_dim, dtype
+            )
+        num_bytes = num_embeddings * embedding_dim * dtype.itemsize
+        group = self._shared_group
+        with ExitStack() as stack:
+            path = error = None
+            if group.rank_in_group == 0:
+                try:
+                    check_shm_free_space(num_bytes, allocation_name="shared PLE table")
+                    backing_file = stack.enter_context(
+                        tempfile.NamedTemporaryFile(prefix="vllm_ple_", dir=SHM_PATH)
+                    )
+                    backing_file.truncate(num_bytes)
+                    path = backing_file.name
+                except Exception as exc:
+                    error = f"{type(exc).__name__}: {exc}"
+            path, error = group.broadcast_object((path, error))
+            if error is not None:
+                raise RuntimeError(
+                    "shared PLE table creation failed on EDP rank 0: " + error
+                )
+            mapping = owner = flat = None
+            try:
+                flat, owner, mapping = _map_shared_ple_file(path, num_bytes)
+            except Exception as exc:
+                error = f"{type(exc).__name__}: {exc}"
+            # Also fences peer mappings before the leader unlinks the file.
+            errors: list[str | None] = [None] * group.world_size
+            torch.distributed.all_gather_object(errors, error, group=group.cpu_group)
+            failures = "; ".join(
+                f"EDP rank {rank}: {err}"
+                for rank, err in enumerate(errors)
+                if err is not None
+            )
+            if failures:
+                del flat, owner, mapping
+                raise RuntimeError(
+                    "shared PLE table initialization failed: " + failures
+                )
+            assert flat is not None and owner is not None
+        self._shared_owner = owner
+        self._shared_mapping = mapping
+        logger.info_once(
+            "PLE table shared across %d co-located DP replicas (%.1f GiB in %s)",
+            group.world_size,
+            num_bytes / (1 << 30),
+            SHM_PATH,
+        )
+        return flat.view(dtype).view(num_embeddings, embedding_dim)
+
+    def weight_loader(
+        self,
+        param: torch.Tensor,
+        loaded_weight: torch.Tensor,
+        checkpoint_start: int | None = None,
+    ) -> None:
+        # Only the table is shared; the per-tensor scale is every rank's own.
+        if param is not self.weight:
+            super().weight_loader(param, loaded_weight, checkpoint_start)
+            return
+        if self._shared_group.rank_in_group == 0:
+            super().weight_loader(param, loaded_weight, checkpoint_start)
+        # Read order may differ across ranks. Equal load counts ensure all shared
+        # weights are ready after the last weight-loader call returns.
+        torch.distributed.barrier(group=self._shared_group.cpu_group)
