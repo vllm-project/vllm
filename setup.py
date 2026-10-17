@@ -899,16 +899,39 @@ class precompiled_wheel_utils:
     # Publication lags main by roughly 5-10 commits; anything much older is
     # unlikely to still match the checkout's compiled sources.
     WHEEL_SEARCH_DEPTH = 20
-    # Changes here make an older wheel's extensions unusable.
+    # Changes here make an older wheel's extensions unusable, as do changes to
+    # pyproject.toml's [build-system] table.
     WHEEL_BLOCKING_PATHS = (
         "csrc",
         "cmake",
         "CMakeLists.txt",
-        "pyproject.toml",
         "vllm/_custom_ops.py",
     )
     # Changes here are usually harmless for an older wheel.
     WHEEL_WARNING_PATHS = ("rust", "setup.py")
+
+    @staticmethod
+    def build_system_changed(old: str, new: str) -> bool:
+        """Whether pyproject.toml's [build-system] table differs between commits."""
+        import tomllib
+
+        diff = ["git", "diff", "--name-only", old, new, "--", "pyproject.toml"]
+        if not subprocess.check_output(diff, text=True).strip():
+            return False
+        try:
+            old_table, new_table = (
+                tomllib.loads(
+                    subprocess.check_output(
+                        ["git", "show", f"{rev}:./pyproject.toml"],
+                        text=True,
+                        stderr=subprocess.DEVNULL,
+                    )
+                ).get("build-system")
+                for rev in (old, new)
+            )
+        except (subprocess.CalledProcessError, tomllib.TOMLDecodeError):
+            return True
+        return old_table != new_table
 
     @staticmethod
     def find_published_wheel_commit(
@@ -955,6 +978,8 @@ class precompiled_wheel_utils:
                 subprocess.check_output([*diff, *paths], text=True).strip()
                 for paths in (utils.WHEEL_BLOCKING_PATHS, utils.WHEEL_WARNING_PATHS)
             )
+            if not blocking and utils.build_system_changed(commit, base_commit):
+                blocking = "pyproject.toml [build-system]"
             if blocking:
                 raise ValueError(
                     f"No precompiled wheel is published yet for {base_commit}, and "
@@ -1686,44 +1711,6 @@ setup(
     ext_modules=ext_modules,
     rust_extensions=rust_extensions,
     install_requires=get_requirements(),
-    extras_require={
-        # AMD Zen CPU optimizations via zentorch
-        "zen": ["zentorch==2.14.0.1"],
-        "bench": ["pandas", "matplotlib", "seaborn", "datasets", "scipy", "plotly"],
-        "tensorizer": ["tensorizer==2.10.1"],
-        "fastsafetensors": ["fastsafetensors >= 0.3.3"],
-        "instanttensor": ["instanttensor >= 0.2.2"],
-        "runai": ["runai-model-streamer[s3,gcs,azure] >= 0.15.7"],
-        "audio": [
-            "av",
-            "scipy",
-            "soundfile",
-            "soxr",
-            "mistral_common[audio]",
-        ],  # Required for audio processing
-        "video": [],  # Kept for backwards compatibility
-        # NVIDIA DeepStream (NVDEC) GPU video-decode backend. Linux x86-64
-        # only; also needs system GStreamer + libv4l (see docs).
-        "deepstream": ["nvidia-deepstream-videodecode-cu13>=9.0.2"],
-        "flashinfer": [],  # Kept for backwards compatibility
-        "b12x": ["b12x==1.5.1"],
-        # Optional deps for Helion kernel development
-        # NOTE: When updating helion version, also update CI files:
-        #   - .buildkite/test_areas/kernels.yaml
-        #   - .buildkite/test-amd.yaml
-        "helion": ["helion==1.4.0"],
-        # Optional deps for gRPC server (vllm serve --grpc)
-        "grpc": ["smg-grpc-servicer[vllm] >= 0.5.2"],
-        # Optional deps for OpenTelemetry tracing
-        "otel": [
-            "opentelemetry-sdk>=1.26.0",
-            "opentelemetry-api>=1.26.0",
-            "opentelemetry-exporter-otlp>=1.26.0",
-            "opentelemetry-semantic-conventions-ai>=0.4.1",
-        ],
-        # extra quantization plugin
-        "extra-quant": ["vllm-gguf-plugin>=0.0.2"],
-    },
     cmdclass=cmdclass,
     package_data=package_data,
 )

@@ -276,7 +276,7 @@ steps:
     # Install zentorch directly (if-branch in Dockerfile.zen) instead of
     # `uv pip install "vllm[zen]"`, which forces uv to re-resolve vLLM's full
     # dependency closure and chokes on its transitive triton-cpu URL dependency.
-    # Keep this pin in sync with the `zen` extra in setup.py.
+    # Keep this pin in sync with the `zen` extra in pyproject.toml.
     ZENTORCH_VERSION: "2.14.0.1"
   retry:
     automatic:
