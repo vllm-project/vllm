@@ -1366,19 +1366,21 @@ def test_deepseek_topk_backends_no_error_and_reference(
 # 1-4 rows take the 16-CTA cluster on SM100 (8-CTA below), then 8, 4 and 2.
 @pytest.mark.parametrize("num_rows", [1, 4, 8, 33, 64])
 @pytest.mark.parametrize("stride", [65536, 1048576])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @torch.inference_mode()
 def test_cooperative_topk_rows_shorter_than_stride(
-    top_k: int, num_rows: int, stride: int
+    top_k: int, num_rows: int, stride: int, dtype: torch.dtype
 ) -> None:
     """Each row picks its single-pass or streaming path from its own length,
-    so one launch over a wide logits buffer mixes both."""
+    so one launch over a wide logits buffer mixes both. BF16 logits are read
+    as-is."""
     torch.set_default_device("cuda:0")
     set_random_seed(0)
     # Trivial (<= top_k), register (<= 16384) and cluster paths, the longest
     # rows streaming through two passes on small clusters.
     row_lengths = [min(stride, 300000), 40000, 16384, 5000, 300]
     lengths = [row_lengths[i % len(row_lengths)] for i in range(num_rows)]
-    logits = torch.randn(num_rows, stride)
+    logits = torch.randn(num_rows, stride).to(dtype)
     workspace = torch.empty(RADIX_TOPK_WORKSPACE_SIZE, dtype=torch.uint8)
     out = torch.empty(num_rows, top_k, dtype=torch.int32)
     torch.ops._C.cooperative_topk(
@@ -1388,6 +1390,9 @@ def test_cooperative_topk_rows_shorter_than_stride(
         k = min(top_k, length)
         idx = out[row]
         assert torch.all(idx[k:] == -1)
+        # BF16 logits carry exact ties, among which any index may win, so
+        # compare the selected values.
+        assert idx[:k].unique().numel() == k
         torch.testing.assert_close(
             logits[row, idx[:k].long()].sort().values,
             logits[row, :length].topk(k).values.sort().values,
@@ -1931,6 +1936,23 @@ def test_sparse_indexer_topk_backend_resolution() -> None:
     if not is_sm100:
         with pytest.raises(RuntimeError, match="SM100a/SM103a"):
             resolve("deep_select")
+
+    def takes_bf16(backend: str, t: torch.Tensor, num_rows: int = 64) -> bool:
+        cfg = VllmConfig(kernel_config={"sparse_indexer_topk_backend": backend})
+        with set_current_vllm_config(cfg):
+            return SparseIndexerTopk().takes_bf16_logits(t, 2048, num_rows)
+
+    # BF16 logits skip the FP32 upcast only where cooperative_topk reads them,
+    # which needs 16B-aligned (8-element) rows.
+    bf16_logits = logits.to(torch.bfloat16)
+    assert takes_bf16("auto", bf16_logits) == has_coop
+    assert not takes_bf16("auto", bf16_logits, num_rows=128)
+    # Row stride 131076 is 8B- but not 16B-aligned in BF16.
+    bf16_unaligned = torch.randn(64, 131076, dtype=torch.bfloat16, device="cuda")[
+        :, :131072
+    ]
+    assert not takes_bf16("auto", bf16_unaligned)
+    assert not takes_bf16("persistent", bf16_logits)
 
 
 def _patch_aiter_topk(monkeypatch, decode_kernel, enabled: bool = True) -> None:

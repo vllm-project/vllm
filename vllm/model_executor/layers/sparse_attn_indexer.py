@@ -887,9 +887,12 @@ def sparse_attn_indexer(
                 max_model_len=max_model_len,
                 indices=decode_metadata.indices,
             )
-            # Keeping bf16 halves top-k/candidate reads; other top-k backends and
-            # DCP need fp32. SM100 decode is varlen: one context length per row.
-            if topk_backend != "deep_select" or dcp_world_size != 1:
+            # Keeping bf16 halves top-k/candidate reads; top-k kernels that read
+            # only fp32, and DCP, need fp32. SM100 decode is varlen: one context
+            # length per row.
+            if dcp_world_size != 1 or not get_indexer_topk(
+                topk_backend
+            ).takes_bf16_logits(logits, topk_tokens, logits.shape[0]):
                 logits = as_fp32_logits(logits, seq_lens.view(-1))
         num_rows = logits.shape[0]
         if candidate_blocks is not None:
