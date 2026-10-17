@@ -910,7 +910,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
     def prepare_attn_preshuffle(self) -> None:
         from vllm._aiter_ops import rocm_aiter_ops
 
-        if not rocm_aiter_ops.is_enabled():
+        if not rocm_aiter_ops.is_enabled() or on_gfx1250():
             return
         # aiter's gemm_a8w8_blockscale_bpreshuffle currently disabled on gfx1250.
         # Leaving the block scales as None -> "not preshuffled"

@@ -10,7 +10,12 @@ equals N (not N // 2 like gated activations).
 import pytest
 import torch
 
-from tests.kernels.moe.utils import make_dummy_moe_config
+from tests.kernels.moe.utils import (
+    check_accuracy,
+    make_dummy_moe_config,
+    make_test_quant_config,
+)
+from tests.kernels.quant_utils import dequant
 from vllm.model_executor.layers.fused_moe.activation import (
     ApplyMoEActivationConfig,
     MoEActivation,
@@ -21,6 +26,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
 )
 from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
+from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.platforms import current_platform
 
 DEVICE = current_platform.device_type
@@ -93,38 +99,13 @@ def test_triton_activation_metadata_tracks_shared_apply(activation: MoEActivatio
     ) == apply_moe_activation_supported(activation)
 
 
-def make_test_tensors(
-    m: int,
-    n: int,
-    k: int,
-    num_experts: int,
-    topk: int,
-    dtype: torch.dtype = torch.bfloat16,
-    device: str = DEVICE,
-):
-    """Create test tensors for MoE with non-gated activation.
-
-    For non-gated activations (*_no_mul):
-    - w1: (E, N, K) - projects from K to N
-    - w2: (E, K, N) - projects from N back to K (note: N, not N//2)
-    """
-    hidden_states = torch.randn(m, k, dtype=dtype, device=device)
-
-    # For non-gated: w1 projects K -> N, w2 projects N -> K
-    w1 = torch.randn(num_experts, n, k, dtype=dtype, device=device) * 0.1
-    w2 = torch.randn(num_experts, k, n, dtype=dtype, device=device) * 0.1
-
-    topk_weights = torch.ones(m, topk, dtype=torch.float32, device=device) / topk
-    topk_ids = torch.randint(0, num_experts, (m, topk), device=device)
-
-    return hidden_states, w1, w2, topk_weights, topk_ids
-
-
 @pytest.mark.parametrize("m", M_SIZES)
 @pytest.mark.parametrize("n", N_SIZES)
 @pytest.mark.parametrize("k", K_SIZES)
 @pytest.mark.parametrize("topk", TOPK_VALUES)
 @pytest.mark.parametrize("activation", NO_MUL_ACTIVATIONS)
+@pytest.mark.parametrize("use_expert_map", [False, True])
+@pytest.mark.parametrize("quant_dtype", [None, current_platform.fp8_dtype()])
 @torch.inference_mode()
 def test_triton_experts_no_mul_activation(
     m: int,
@@ -132,14 +113,32 @@ def test_triton_experts_no_mul_activation(
     k: int,
     topk: int,
     activation: MoEActivation,
+    use_expert_map: bool,
+    quant_dtype: torch.dtype | None,
 ):
-    hidden_states, w1, w2, topk_weights, topk_ids = make_test_tensors(
-        m, n, k, NUM_EXPERTS, topk
+    if quant_dtype is not None and not current_platform.supports_fp8():
+        pytest.skip("FP8 is not supported on this device")
+    torch.manual_seed(0)
+    dtype = torch.bfloat16
+    hidden_states = torch.randn(m, k, dtype=dtype, device=DEVICE)
+    w1, w2, quant_config = make_test_quant_config(
+        NUM_EXPERTS, n, k, dtype, quant_dtype, make_gate=False
+    )
+    topk_weights = torch.full((m, topk), 1 / topk, device=DEVICE)
+    topk_ids = torch.randint(0, NUM_EXPERTS, (m, topk), device=DEVICE)
+    topk_ids[::2, 0] = -1
+    expert_map = (
+        torch.arange(NUM_EXPERTS, dtype=torch.int32, device=hidden_states.device)
+        if use_expert_map
+        else None
     )
 
     experts = TritonExperts(
         moe_config=make_dummy_moe_config(),
-        quant_config=FUSED_MOE_UNQUANTIZED_CONFIG,
+        quant_config=quant_config,
+    )
+    qhidden_states, a1_scale = moe_kernel_quantize_input(
+        hidden_states, None, quant_dtype, False
     )
 
     ws1_shape, ws2_shape, out_shape = experts.workspace_shapes(
@@ -153,42 +152,21 @@ def test_triton_experts_no_mul_activation(
         activation=activation,
     )
 
-    # Verify workspace shapes are correct for no_mul activation
-    # workspace1 should handle activation_out_dim = N (not N//2)
-    assert ws1_shape == (m, topk, max(n, k)), (
-        f"workspace1 shape mismatch: expected {(m, topk, max(n, k))}, got {ws1_shape}"
-    )
-    # workspace2 should handle max(N, K) for intermediate_cache1/cache3
-    assert ws2_shape == (m, topk, max(n, k)), (
-        f"workspace2 shape mismatch: expected {(m, topk, max(n, k))}, got {ws2_shape}"
-    )
-    assert out_shape == (m, k), (
-        f"output shape mismatch: expected {(m, k)}, got {out_shape}"
-    )
-
-    workspace1 = torch.empty(
-        ws1_shape[0] * ws1_shape[1] * ws1_shape[2],
-        dtype=hidden_states.dtype,
-        device=hidden_states.device,
-    )
-    workspace2 = torch.empty(
-        ws2_shape[0] * ws2_shape[1] * ws2_shape[2],
-        dtype=hidden_states.dtype,
-        device=hidden_states.device,
-    )
-    output = torch.zeros(m, k, dtype=hidden_states.dtype, device=hidden_states.device)
+    workspace1 = torch.empty(ws1_shape, dtype=dtype, device=DEVICE)
+    workspace2 = torch.full(ws2_shape, 1e4, dtype=dtype, device=DEVICE)
+    output = torch.empty(out_shape, dtype=dtype, device=DEVICE)
 
     experts.apply(
         output=output,
-        hidden_states=hidden_states,
+        hidden_states=qhidden_states,
         w1=w1,
         w2=w2,
         topk_weights=topk_weights,
         topk_ids=topk_ids,
         activation=activation,
         global_num_experts=NUM_EXPERTS,
-        expert_map=None,
-        a1q_scale=None,
+        expert_map=expert_map,
+        a1q_scale=a1_scale,
         a2_scale=None,
         workspace13=workspace1,
         workspace2=workspace2,
@@ -196,10 +174,27 @@ def test_triton_experts_no_mul_activation(
         apply_router_weight_on_input=False,
     )
 
-    assert output.shape == (m, k), f"Expected shape {(m, k)}, got {output.shape}"
-    assert not torch.isnan(output).any(), "Output contains NaN"
-    assert not torch.isinf(output).any(), "Output contains Inf"
-    assert output.abs().sum() > 0, "Output is all zeros"
+    ids = topk_ids.flatten().clamp_min(0)
+    a = dequant(qhidden_states, a1_scale, None, False).repeat_interleave(topk, 0)
+    w1_ref = dequant(w1, quant_config.w1_scale, None, False)
+    projected = torch.bmm(w1_ref[ids], a.unsqueeze(-1)).squeeze(-1).to(dtype)
+    projected[topk_ids.flatten() < 0] = 0
+    activated = torch.empty_like(projected)
+    apply_moe_activation(activation, activated, projected)
+    aq, scale = moe_kernel_quantize_input(activated, None, quant_dtype, False)
+    w2_ref = dequant(w2, quant_config.w2_scale, None, False)
+    expected = torch.bmm(
+        w2_ref[ids], dequant(aq, scale, None, False).unsqueeze(-1)
+    ).view(m, topk, k)
+    expected = (expected * topk_weights.unsqueeze(-1)).to(dtype).sum(dim=1)
+    if quant_dtype is None:
+        torch.testing.assert_close(output, expected, atol=2e-2, rtol=2e-2)
+    else:
+        # The kernel accumulates the first GEMM in another order, so an activation
+        # on an fp8 rounding boundary can quantize to its neighbour and move the
+        # outputs it feeds by a whole fp8 step. Unwritten slots or a polluted
+        # activation scale corrupt most outputs instead.
+        check_accuracy(output, expected, atol=2e-2, rtol=2e-2, percent=0.9)
 
 
 @torch.inference_mode()

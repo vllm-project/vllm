@@ -52,13 +52,13 @@ def _triton_kernel_moe_supports_current_device() -> bool:
         # shared memory; it is still ordered after MARLIN by the selector.
         return cap is not None and (9, 0) <= (cap.major, cap.minor) < (13, 0)
     if p.is_rocm():
-        from vllm.platforms.rocm import on_gfx1x, on_gfx9
+        from vllm.platforms.rocm import on_gfx1x, on_gfx9, on_gfx1250
 
         # gfx9 family: gfx90a (MI200), gfx942/gfx950 (MI3xx);
         # on_gfx9() already excludes gfx906/gfx908.
         # gfx1x family: gfx11xx (RDNA3/3.5) and gfx12xx (RDNA4);
         # on_gfx1x() excludes gfx10xx (RDNA1/RDNA2).
-        return on_gfx9() or on_gfx1x()
+        return on_gfx9() or on_gfx1x() or on_gfx1250()
     return False
 
 

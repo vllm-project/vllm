@@ -29,6 +29,7 @@ vLLM provides multiple communication backends for EP. Use `--all2all-backend` to
 | `flashinfer_nvlink_one_sided` | MNNVL systems | FlashInfer's one-sided A2A strategy for multi-node NVLink | High-throughput workloads |
 | `passthrough` | Any | Internal, not accepted on the CLI: bound automatically for MoE backends that dispatch and combine themselves, so no all-to-all runs in the framework | `--moe-backend flashinfer_moe_ep_*` (FlashInfer MoE-EP megakernels) |
 | `flashinfer_nvlink_two_sided` | MNNVL systems | FlashInfer's two-sided A2A strategy for multi-node NVLink | Systems with NVLink across nodes |
+| `mori` | ROCm | MoRI EP: EPv2 (dispatch/combine over a CCO symmetric-memory window) where supported, otherwise EPv1 | AMD Instinct; see [MoRI EP](#mori-ep-rocm) |
 
 ## Single Node Deployment
 
@@ -79,6 +80,38 @@ vllm serve deepseek-ai/DeepSeek-V3-0324 \
     --data-parallel-size 8 \         # Data parallelism across 8 processes
     --enable-expert-parallel         # Enable expert parallelism
 ```
+
+### MoRI EP (ROCm)
+
+`--all2all-backend mori` moves MoE tokens with MoRI. It runs MoRI EPv2 (`mori.ops.dispatch_combine_v2`, which reads and writes peer GPU memory directly through a MoRI CCO symmetric-memory window) where EPv2 is supported, and MoRI EPv1 otherwise.
+
+```bash
+VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_MOE=1 \
+VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=0 \
+vllm serve deepseek-ai/DeepSeek-V4-Pro \
+    --tensor-parallel-size 1 \
+    --data-parallel-size 8 \
+    --enable-expert-parallel \
+    --all2all-backend mori
+```
+
+`VLLM_MORI_EP_V2` selects the MoRI version:
+
+| `VLLM_MORI_EP_V2` | Behavior |
+| ----------------- | -------- |
+| unset | EPv2, falling back to EPv1 with a warning when the EP size exceeds 8 (except on gfx1250, whose UALink team can span hosts), `MORI_ENABLE_SDMA=1`, `--moe-backend aiter_mega_moe`, or a non-BF16 model |
+| `1` | Always EPv2. The checks above only log a warning; startup fails if the EP ranks are not in one CCO-LSA team |
+| `0` | EPv1 |
+
+On EPv1, `mori` uses the IntraNode kernel within one node. Across nodes it uses InterNodeV1LL when the per-rank token budget (`--max-num-batched-tokens`) is at most `VLLM_MORI_DISPATCH_INTER_KERNEL_SWITCH_THRESHOLD` (default 256), and InterNodeV1 otherwise. `mori_high_throughput` and `mori_low_latency` always run EPv1 and pin the inter-node kernel to InterNodeV1 and InterNodeV1LL respectively.
+
+EPv2 limitations:
+
+- All EP ranks must be in one MoRI CCO-LSA team, i.e. GPUs that can load and store each other's memory: one node, or one UALink fabric. Startup fails otherwise; there is no multi-node RDMA path yet.
+- Activations are dispatched in BF16, so the model dtype must be BF16 and the experts must take unquantized inputs (AITER fused MoE, which quantizes after the all-to-all, or BF16 experts). Experts that expect activations quantized before dispatch, such as FP8 or INT8 Triton experts, are rejected at startup.
+- AITER shared-expert fusion is not supported: set `VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=0`.
+- Install a MoRI build that ships `mori.ops.dispatch_combine_v2`. On NICs that limit a registered memory region to 2 GiB, the window registration fails once the dispatch arena outgrows that limit (DeepSeek-V4-Pro at EP8 already does at the default 16k batched tokens).
+- Older MoRI builds leave a stale HIP error behind when the fabric-handle probe fails (e.g. on a single MI355X node), and the next PyTorch allocation raises `operation not supported`.
 
 ## Multi-Node Deployment
 
