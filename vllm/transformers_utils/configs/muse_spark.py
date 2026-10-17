@@ -359,6 +359,11 @@ class MuseSparkVisionConfig(PreTrainedConfig):
         ) <= {"full_attention", "window_attention"}:
             raise ValueError("Invalid Muse Spark vision attention types")
 
+    def _validate_axial_rope_parameters(
+        self, rope_parameters: dict[str, Any], ignore_keys: set[str] | None = None
+    ) -> None:
+        self._validate_default_rope_parameters(rope_parameters, ignore_keys=ignore_keys)
+
 
 class MuseSparkAudioConfig(PreTrainedConfig):
     model_type = "muse_spark_audio"

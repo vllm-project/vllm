@@ -69,12 +69,15 @@ OMNI_WEIGHTS_MAPPER = WeightsMapper(
             r"^(model\.layers\.\d+)\.mlp\.gate\.e_score_correction_bias$": (
                 r"\1.feed_forward.expert_bias"
             ),
-            r"^(model\.layers\.\d+)\.mlp\.gate\.": r"\1.feed_forward.router.",
-            r"^(model\.layers\.\d+)\.mlp\.pre_expert_proj\.": (
-                r"\1.feed_forward.pooler."
+            # Lookahead (not a literal trailing dot) so these also match bare
+            # module-path keys with no further suffix, e.g. the quantization
+            # config's `extra_config` per-module bits overrides.
+            r"^(model\.layers\.\d+)\.mlp\.gate(?=\.|$)": r"\1.feed_forward.router",
+            r"^(model\.layers\.\d+)\.mlp\.pre_expert_proj(?=\.|$)": (
+                r"\1.feed_forward.pooler"
             ),
-            r"^(model\.layers\.\d+)\.mlp\.post_expert_proj\.": (
-                r"\1.feed_forward.unpooler."
+            r"^(model\.layers\.\d+)\.mlp\.post_expert_proj(?=\.|$)": (
+                r"\1.feed_forward.unpooler"
             ),
             r"^(model\.layers\.\d+)\.mlp\.": r"\1.feed_forward.",
             r"\.experts\.gate_up_proj_input_scale$": (".experts.w13_input_scale"),

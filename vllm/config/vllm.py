@@ -121,6 +121,11 @@ def default_breakable_cudagraph_architectures() -> frozenset[str]:
         # graphs are on. Enable this architecture so the published AMD
         # recipe can start.
         return frozenset({"DeepseekV41ForCausalLM"})
+    if current_platform.is_cpu():
+        # CUDA graphs don't exist on CPU, so this mechanism is meaningless
+        # there; opting in only has the side effect of forcing
+        # compilation_config.mode to NONE, silently disabling torch.compile.
+        return frozenset()
     return DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES
 
 
