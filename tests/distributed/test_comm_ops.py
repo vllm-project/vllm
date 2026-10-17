@@ -711,6 +711,50 @@ def test_async_intermediate_tensors_lazy_wait() -> None:
 
 
 @ray.remote(num_gpus=1, max_calls=1)
+def fp16_partial_sums_row_parallel_test_worker(
+    monkeypatch: pytest.MonkeyPatch,
+    tp_size: int,
+    pp_size: int,
+    rank: int,
+    distributed_init_port: str,
+):
+    """VLLM_TP_FP16_PARTIAL_SUMS: a TP row-parallel layer with FP16 partial sums
+    keeps the single-GPU error against an exact reference; BF16 partials do not."""
+    from vllm.config import VllmConfig, set_current_vllm_config
+    from vllm.model_executor.layers.linear import RowParallelLinear
+
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    device = torch.device(f"cuda:{rank}")
+    torch.accelerator.set_device_index(device)
+    init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
+
+    m, k, n = 64, 4096, 2048
+    shard = slice(rank * k // tp_size, (rank + 1) * k // tp_size)
+    gen = torch.Generator(device="cuda").manual_seed(0)
+    x = torch.randn(m, k, device="cuda", generator=gen).bfloat16()
+    w = (torch.randn(n, k, device="cuda", generator=gen) / k**0.5).bfloat16()
+    exact = x.double() @ w.double().T
+    rms = exact.pow(2).mean(-1, keepdim=True).sqrt()
+
+    def error(out: torch.Tensor) -> float:
+        return float(((out.double() - exact).abs() / rms).mean())
+
+    errors = {}
+    for flag in ("0", "1"):
+        monkeypatch.setenv("VLLM_TP_FP16_PARTIAL_SUMS", flag)
+        with set_current_vllm_config(VllmConfig()), torch.device("cuda"):
+            layer = RowParallelLinear(k, n, bias=False, params_dtype=torch.bfloat16)
+        assert layer._fp16_partials == ("gemm" if flag == "1" else None)
+        layer.weight.data.copy_(w[:, shard])
+        out, _ = layer(x[:, shard])
+        assert out.dtype == torch.bfloat16
+        errors[flag] = error(out)
+    one_gpu = error(exact.bfloat16())
+    assert errors["1"] < 1.05 * one_gpu, (errors, one_gpu)
+    assert errors["0"] > 1.2 * one_gpu, (errors, one_gpu)
+
+
+@ray.remote(num_gpus=1, max_calls=1)
 def send_recv_test_worker(
     monkeypatch: pytest.MonkeyPatch,
     tp_size: int,
@@ -748,6 +792,43 @@ def test_multi_process_tensor_parallel(
     test_target: Callable[..., Any],
 ):
     multi_process_parallel(monkeypatch, tp_size, 1, test_target)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+def test_tp_fp16_partial_sums_scale_is_exact_and_saturates():
+    """The 2^-k prescale of FP16 partial sums only moves the exponent, and
+    partial sums beyond the FP16 range saturate instead of becoming inf."""
+    from vllm.model_executor.layers.linear import _fp16_partial_linear
+
+    torch.manual_seed(0)
+    x = torch.randn(64, 512, device="cuda").bfloat16()
+    w = torch.randn(256, 512, device="cuda").bfloat16()
+    plain = _fp16_partial_linear(x, w, None, 1.0)
+    scaled = _fp16_partial_linear(x, w, None, 0.25).float() * 4
+    assert plain.dtype == torch.float16
+    # exact for normal FP16 values; subnormals bound the error by 2^-24 * 4
+    normal = plain.float().abs() >= 2.0**-14 * 4
+    torch.testing.assert_close(scaled[normal], plain.float()[normal], rtol=0, atol=0)
+    assert float((scaled - plain.float()).abs().max()) <= 2.0**-24 * 4
+
+    fp16_max = torch.finfo(torch.float16).max
+    c = (1.5 * fp16_max / float((x.double() @ w.double().T).abs().max())) ** 0.5
+    xb, wb = (x.float() * c).bfloat16(), (w.float() * c).bfloat16()
+    ref = xb.double() @ wb.double().T
+    assert ref.abs().max() > fp16_max
+    saturated = _fp16_partial_linear(xb, wb, None, 1.0)
+    assert torch.isfinite(saturated).all()
+    in_range = _fp16_partial_linear(xb, wb, None, 0.25).double() * 4
+    torch.testing.assert_close(
+        in_range, ref, rtol=2e-3, atol=1e-3 * float(ref.abs().max())
+    )
+
+
+@multi_gpu_test(num_gpus=2)
+def test_tp_fp16_partial_sums_row_parallel(monkeypatch: pytest.MonkeyPatch):
+    multi_process_parallel(
+        monkeypatch, 2, 1, fp16_partial_sums_row_parallel_test_worker
+    )
 
 
 @multi_gpu_test(num_gpus=2)

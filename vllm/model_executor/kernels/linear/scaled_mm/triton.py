@@ -197,6 +197,8 @@ class TritonFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
 
 
 class TritonFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
+    supports_partial_sum_dtype = True
+
     @classmethod
     def is_supported(cls, compute_capability=None):
         if not (current_platform.is_cuda_alike() or current_platform.is_xpu()):
@@ -210,13 +212,23 @@ class TritonFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         As: torch.Tensor,
         Bs: torch.Tensor,
     ) -> torch.Tensor:
+        return self.apply_block_scaled_mm_out(A, B, As, Bs, self.config.out_dtype)
+
+    def apply_block_scaled_mm_out(
+        self,
+        A: torch.Tensor,
+        B: torch.Tensor,
+        As: torch.Tensor,
+        Bs: torch.Tensor,
+        out_dtype: torch.dtype,
+    ) -> torch.Tensor:
         return torch.ops.vllm.w8a8_triton_block_scaled_mm_func(
             A,
             B,
             As,
             Bs,
             list(self.weight_group_shape),
-            self.config.out_dtype,
+            out_dtype,
         )
 
 

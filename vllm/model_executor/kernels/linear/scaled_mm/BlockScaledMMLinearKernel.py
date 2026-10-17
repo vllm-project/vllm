@@ -104,7 +104,8 @@ class Fp8BlockScaledMMLinearKernel(
         bias: torch.Tensor | None = None,
         **kwargs,
     ) -> torch.Tensor:
-        out_dtype = self.config.out_dtype
+        # RowParallelLinear may ask for FP16 partial sums (VLLM_TP_FP16_PARTIAL_SUMS)
+        out_dtype = getattr(layer, "partial_sum_dtype", None) or self.config.out_dtype
         params = self._get_layer_params(layer)
         weight = params.weight
         weight_scale = params.block_scale
@@ -128,15 +129,30 @@ class Fp8BlockScaledMMLinearKernel(
                 input_scale if input_scale is not None else input_2d.new_empty(1)
             )
 
-        output = self.apply_block_scaled_mm(
-            A=q_input,
-            B=weight,
-            As=input_scale,
-            Bs=weight_scale,
-        )
+        partial_sum_scale = 1.0
+        if out_dtype != self.config.out_dtype:
+            partial_sum_scale = getattr(layer, "partial_sum_scale", 1.0)
+            if partial_sum_scale != 1.0:
+                weight_scale = weight_scale * partial_sum_scale
+            output = self.apply_block_scaled_mm_out(
+                A=q_input,
+                B=weight,
+                As=input_scale,
+                Bs=weight_scale,
+                out_dtype=out_dtype,
+            )
+        else:
+            output = self.apply_block_scaled_mm(
+                A=q_input,
+                B=weight,
+                As=input_scale,
+                Bs=weight_scale,
+            )
 
         if bias is not None:
-            output = output + bias
+            if partial_sum_scale != 1.0:
+                bias = bias * partial_sum_scale
+            output = output + bias.to(output.dtype)
         return output.to(dtype=out_dtype).view(*output_shape)
 
     @abstractmethod
@@ -147,6 +163,18 @@ class Fp8BlockScaledMMLinearKernel(
         As: torch.Tensor,
         Bs: torch.Tensor,
     ) -> torch.Tensor:
+        raise NotImplementedError
+
+    def apply_block_scaled_mm_out(
+        self,
+        A: torch.Tensor,
+        B: torch.Tensor,
+        As: torch.Tensor,
+        Bs: torch.Tensor,
+        out_dtype: torch.dtype,
+    ) -> torch.Tensor:
+        """apply_block_scaled_mm with an explicit output dtype; implemented by
+        kernels that set ``supports_partial_sum_dtype``."""
         raise NotImplementedError
 
 
