@@ -28,7 +28,7 @@ from typing import NamedTuple
 
 import torch
 
-from vllm.models.inkling.amd.ops.gluon.utils import (
+from vllm.models.inkling.amd.gluon.utils import (
     _INV_LN2_VALUE,
     InputStrides,
     PagedKVStrides,

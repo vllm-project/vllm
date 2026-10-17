@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Compatibility shim for the ROCm relative-attention implementation.
+"""Compatibility shim for the Triton relative-attention implementation.
 
-ROCm uses a Triton kernel which is compiled by vLLM's normal model warmup. The
-NVIDIA path registers ahead-of-time CuTeDSL units; importing that provider on
-ROCm would pull in CUDA-only tml-fa4 code.
+The Triton kernel is compiled by vLLM's normal model warmup. The NVIDIA path
+registers ahead-of-time CuTeDSL units; importing that provider on ROCm or XPU
+would pull in CUDA-only tml-fa4 code.
 """
 
 from __future__ import annotations
