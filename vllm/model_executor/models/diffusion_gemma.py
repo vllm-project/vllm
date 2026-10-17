@@ -1477,6 +1477,14 @@ class DiffusionSampler:
         widths_np = states.canvas_width_np[decode_slots_np]
         order = np.argsort(widths_np, kind="stable")
         free = torch.accelerator.get_memory_info()[0] if num_decode > 0 else 0
+        # Use the minimum free memory across all ranks so every rank tiles the same.
+        tp_group = get_tp_group()
+        if tp_group.world_size > 1:
+            free_tensor = torch.tensor([free], dtype=torch.int64)
+            torch.distributed.all_reduce(
+                free_tensor, op=torch.distributed.ReduceOp.MIN, group=tp_group.cpu_group
+            )
+            free = int(free_tensor.item())
         run_start = 0
         while run_start < num_decode:
             W = int(widths_np[order[run_start]])
