@@ -230,6 +230,34 @@ def test_take_events_forwards_locality_to_placeholder_store():
     assert events[0].locality == "REMOTE"
 
 
+@pytest.mark.parametrize(
+    "kind,window", [("mamba", None), ("sliding_window", 16), (None, None)]
+)
+@pytest.mark.parametrize("reset", [False, True])
+@pytest.mark.parametrize("self_describing", [False, True])
+def test_placeholder_group_classification_survives_reset(
+    kind, window, reset, self_describing
+):
+    tracker = OffloadingEventsTracker(
+        OffloadingKVEventsConfig(True, self_describing),
+        {0: OffloadingEventGroupSpec(kind, window)},
+    )
+    if reset:
+        tracker.reset()
+    key = make_offload_key(_hash(0), 0)
+    # A removal can arrive before any store metadata is available.
+    removed, stored = tracker.take_events(
+        [_removed_event([key], ownership="kvcr"), _stored_event([key])]
+    )
+    assert (stored.block_size, stored.token_ids) == (0, [])
+    assert (stored.kv_cache_spec_kind, stored.kv_cache_spec_sliding_window) == (
+        (kind, window) if self_describing else (None, None)
+    )
+    # Removals stay group_idx + hash only; consumers classify from the store.
+    assert removed.ownership == "kvcr"
+    assert not hasattr(removed, "kv_cache_spec_kind")
+
+
 def test_partial_tail_event_describes_hash_aligned_physical_block_prefix():
     tracker = _tracker()
     group_config = _group_config(block_size=16, blocks_per_chunk=1)._replace(
