@@ -1082,37 +1082,27 @@ steps:
           DOCKER_BUILDKIT: "1"
           DOCKERHUB_USERNAME: "vllmbot"
 
-  - trigger: "perf-eval"
-    label: "Trigger perf-eval (CUDA)"
+  - label: "Trigger perf-eval (CUDA)"
     key: trigger-perf-eval-cuda
     if: build.env("NIGHTLY") == "1" || build.env("RUN_PERF_EVAL") == "1"
     depends_on:
       - build-release-image-x86
-    async: true
     soft_fail: true
-    build:
-      branch: "main"
-      message: "(NIGHTLY=${NIGHTLY:-0}) Evaluate vLLM $BUILDKITE_COMMIT (CUDA)"
-      env:
-        NIGHTLY: 1 # run all perf-eval workloads
-        VLLM_COMMIT: "$BUILDKITE_COMMIT"
-        VLLM_IMAGE_CUDA: "public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-x86_64"
+    agents:
+      queue: small_cpu_queue_release
+    commands:
+      - "bash .buildkite/scripts/trigger-perf-eval.sh cuda"
 
-  - trigger: "perf-eval"
-    label: "Trigger perf-eval (ROCm)"
+  - label: "Trigger perf-eval (ROCm)"
     key: trigger-perf-eval-rocm
     if: build.env("NIGHTLY") == "1" || build.env("RUN_PERF_EVAL") == "1"
     depends_on:
       - build-rocm-release-image
-    async: true
     soft_fail: true
-    build:
-      branch: "main"
-      message: "(NIGHTLY=${NIGHTLY:-0}) Evaluate vLLM $BUILDKITE_COMMIT (ROCm)"
-      env:
-        NIGHTLY: 1 # run all perf-eval workloads
-        VLLM_COMMIT: "$BUILDKITE_COMMIT"
-        VLLM_IMAGE_ROCM: "public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-rocm"
+    agents:
+      queue: small_cpu_queue_release
+    commands:
+      - "bash .buildkite/scripts/trigger-perf-eval.sh rocm"
 
   # =============================================================================
   # ROCk Release Pipeline (x86_64 only)
