@@ -8,7 +8,7 @@ namespace cpu_attention {
 namespace {
 // 16-1-16 pattern, 16 regs for A, 1 regs for B, 16 regs for C, [16, K] @ [k,
 // 16]
-template <typename kv_cache_t>
+template <typename kv_cache_t, bool prefill = false>
 class TileGemm161 {
  public:
   template <AttentionGemmPhase phase, int32_t k_size>
@@ -69,6 +69,25 @@ class TileGemm161 {
                          const int32_t block_size, const int32_t dynamic_k_size,
                          const bool accum_c) {
     static_assert(0 < M && M <= 16);
+#if defined(__AVX2__) && !defined(__AVX512F__)
+    if constexpr (prefill && std::is_same_v<kv_cache_t, float> && M > 4) {
+      gemm_micro<4>(a_tile, b_tile, c_tile, lda, ldb, ldc, block_size,
+                    dynamic_k_size, accum_c);
+      gemm_micro<M - 4>(a_tile + 4 * lda, b_tile, c_tile + 4 * ldc, lda, ldb,
+                        ldc, block_size, dynamic_k_size, accum_c);
+      return;
+    } else if constexpr (prefill && M > 8) {
+      gemm_micro<8>(a_tile, b_tile, c_tile, lda, ldb, ldc, block_size,
+                    dynamic_k_size, accum_c);
+      gemm_micro<M - 8>(a_tile + 8 * lda, b_tile, c_tile + 8 * ldc, lda, ldb,
+                        ldc, block_size, dynamic_k_size, accum_c);
+      return;
+    } else if constexpr (prefill && M > 4) {
+      gemm_avx2<M, 16>(a_tile, b_tile, c_tile, lda, ldb, ldc, dynamic_k_size,
+                       accum_c);
+      return;
+    }
+#endif
     using load_vec_t = typename VecTypeTrait<kv_cache_t>::vec_t;
 
     kv_cache_t* __restrict__ curr_b_0 = b_tile;
@@ -139,6 +158,14 @@ class AttentionImpl<ISA::VEC16, scalar_t, head_dim, kv_cache_scalar_t>
  public:
   template <template <typename tile_gemm_t> typename attention>
   FORCE_INLINE void execute_attention(DEFINE_CPU_ATTENTION_PARAMS) {
+#if defined(__AVX2__) && !defined(__AVX512F__)
+    // Keep the original tile for single-token work, including GQA decode.
+    if (q_token_num > 1) {
+      attention<TileGemm161<kv_cache_t, true>> attention_iteration;
+      attention_iteration(CPU_ATTENTION_PARAMS);
+      return;
+    }
+#endif
     attention<TileGemm161<kv_cache_t>> attention_iteration;
     attention_iteration(CPU_ATTENTION_PARAMS);
   }
