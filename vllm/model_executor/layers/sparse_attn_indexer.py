@@ -41,6 +41,8 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.deep_gemm import (
     fp8_fp4_mqa_logits,
     fp8_fp4_paged_mqa_logits,
+    get_num_sms,
+    get_paged_mqa_logits_metadata,
     has_deep_gemm,
     mqa_logits_mx_inputs,
     mqa_logits_use_mx_scales,
@@ -858,90 +860,123 @@ def sparse_attn_indexer(
             if use_fp4_cache
             else padded_q_quant_decode_tokens
         )
-        if current_platform.is_xpu():
-            if padded_q_scale is not None:
-                raise RuntimeError("XPU fp8_paged_mqa_logits does not support FP4 Q")
-            seq_lens_xpu = (
-                seq_lens[:, -1].contiguous() if seq_lens.ndim == 2 else seq_lens
-            )
-            logits = torch.ops.vllm.xpu_fp8_paged_mqa_logits(
-                padded_q_quant_cast,
-                kv_cache,
-                weights[:num_padded_tokens],
-                seq_lens_xpu,
-                decode_metadata.block_table,
-                decode_metadata.schedule_metadata,
-                max_model_len,
-            )
-        else:
+        decode_weights = weights[:num_padded_tokens]
+        if not current_platform.is_xpu():
             padded_q_scale, decode_weights = mqa_logits_mx_inputs(
-                padded_q_quant_cast, padded_q_scale, weights[:num_padded_tokens]
+                padded_q_quant_cast, padded_q_scale, decode_weights
             )
-            logits = fp8_fp4_paged_mqa_logits(
-                (padded_q_quant_cast, padded_q_scale),
-                kv_cache,
-                decode_weights,
-                seq_lens,
-                decode_metadata.block_table,
-                decode_metadata.schedule_metadata,
-                max_model_len=max_model_len,
-                indices=decode_metadata.indices,
-            )
-            # Keeping bf16 halves top-k/candidate reads; other top-k backends and
-            # DCP need fp32. SM100 decode is varlen: one context length per row.
-            if topk_backend != "deep_select" or dcp_world_size != 1:
-                logits = as_fp32_logits(logits, seq_lens.view(-1))
-        num_rows = logits.shape[0]
-        if candidate_blocks is not None:
-            # Two-level selection (v4.1) on the decode logits; columns are
-            # request-local compressed positions. seq_lens is (B, next_n)
-            # for native spec decode (per-row effective lens) and (B, 1)
-            # otherwise.
-            vis = seq_lens.reshape(-1)
-            row_repeat = next_n if vis.numel() != num_rows else 1
-            vis = vis[:num_rows]
-            decode_candidates = candidate_blocks[:num_rows]
-            if candidate_write:
-                _select_candidate_blocks(
-                    logits,
-                    None,
-                    vis,
-                    decode_candidates.shape[1],
-                    candidate_block_size,
-                    decode_candidates,
-                    row_repeat,
+        topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
+        chunk_size = batch_size
+        if (
+            current_platform.is_cuda()
+            and dcp_world_size == 1
+            and decode_metadata.indices is None
+            and decode_metadata.global_seq_lens is None
+        ):
+            max_logits_bytes = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
+            request_bytes = next_n * max_model_len * 4
+            chunk_size = min(batch_size, max(1, max_logits_bytes // request_bytes))
+        for batch_start in range(0, batch_size, chunk_size):
+            batch_end = min(batch_start + chunk_size, batch_size)
+            row_start, row_end = batch_start * next_n, batch_end * next_n
+            chunk_seq_lens = seq_lens[batch_start:batch_end]
+            chunk_block_table = decode_metadata.block_table[batch_start:batch_end]
+            chunk_schedule_metadata = decode_metadata.schedule_metadata
+            if chunk_size < batch_size:
+                chunk_schedule_metadata = get_paged_mqa_logits_metadata(
+                    chunk_seq_lens, kv_cache.shape[1], get_num_sms()
+                )
+            if current_platform.is_xpu():
+                if padded_q_scale is not None:
+                    raise RuntimeError(
+                        "XPU fp8_paged_mqa_logits does not support FP4 Q"
+                    )
+                seq_lens_xpu = (
+                    chunk_seq_lens[:, -1].contiguous()
+                    if chunk_seq_lens.ndim == 2
+                    else chunk_seq_lens
+                )
+                logits = torch.ops.vllm.xpu_fp8_paged_mqa_logits(
+                    padded_q_quant_cast[batch_start:batch_end],
+                    kv_cache,
+                    decode_weights[row_start:row_end],
+                    seq_lens_xpu,
+                    chunk_block_table,
+                    chunk_schedule_metadata,
+                    max_model_len,
                 )
             else:
-                _apply_candidate_mask(
-                    logits,
-                    None,
-                    vis,
-                    decode_candidates,
-                    candidate_block_size,
-                    row_repeat,
+                logits = fp8_fp4_paged_mqa_logits(
+                    (
+                        padded_q_quant_cast[batch_start:batch_end],
+                        padded_q_scale[batch_start:batch_end]
+                        if padded_q_scale is not None
+                        else None,
+                    ),
+                    kv_cache,
+                    decode_weights[row_start:row_end],
+                    chunk_seq_lens,
+                    chunk_block_table,
+                    chunk_schedule_metadata,
+                    max_model_len=max_model_len,
+                    indices=decode_metadata.indices,
                 )
-        topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
+                # Keeping bf16 halves top-k/candidate reads; other top-k backends and
+                # DCP need fp32. SM100 decode is varlen: one context length per row.
+                if topk_backend != "deep_select" or dcp_world_size != 1:
+                    logits = as_fp32_logits(logits, chunk_seq_lens.view(-1))
+            num_rows = logits.shape[0]
+            if candidate_blocks is not None:
+                # Two-level selection (v4.1) on the decode logits; columns are
+                # request-local compressed positions. seq_lens is (B, next_n)
+                # for native spec decode (per-row effective lens) and (B, 1)
+                # otherwise.
+                vis = chunk_seq_lens.reshape(-1)
+                row_repeat = next_n if vis.numel() != num_rows else 1
+                vis = vis[:num_rows]
+                decode_candidates = candidate_blocks[row_start:row_end]
+                if candidate_write:
+                    _select_candidate_blocks(
+                        logits,
+                        None,
+                        vis,
+                        decode_candidates.shape[1],
+                        candidate_block_size,
+                        decode_candidates,
+                        row_repeat,
+                    )
+                else:
+                    _apply_candidate_mask(
+                        logits,
+                        None,
+                        vis,
+                        decode_candidates,
+                        candidate_block_size,
+                        row_repeat,
+                    )
+            chunk_topk_indices = topk_indices[row_start:row_end]
 
-        # The backend comes from the layer (config is only readable at model
-        # construction); dispatchers are cached per backend.
-        get_indexer_topk(topk_backend)(
-            logits,
-            seq_lens,
-            next_n,
-            topk_indices,
-            topk_tokens,
-            attn_metadata_narrowed.max_seq_len,
-        )
-
-        if decode_metadata.global_seq_lens is not None:
-            _merge_dcp_topk_global(
+            # The backend comes from the layer (config is only readable at model
+            # construction); dispatchers are cached per backend.
+            get_indexer_topk(topk_backend)(
                 logits,
-                topk_indices,
+                chunk_seq_lens,
+                next_n,
+                chunk_topk_indices,
                 topk_tokens,
-                dcp_rank,
-                dcp_world_size,
-                cp_kv_cache_interleave_size,
+                attn_metadata_narrowed.max_seq_len,
             )
+
+            if decode_metadata.global_seq_lens is not None:
+                _merge_dcp_topk_global(
+                    logits,
+                    chunk_topk_indices,
+                    topk_tokens,
+                    dcp_rank,
+                    dcp_world_size,
+                    cp_kv_cache_interleave_size,
+                )
+            del logits
 
         if needs_padded_path:
             # if padded, we need to unpack

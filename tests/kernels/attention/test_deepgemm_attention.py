@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import random
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -408,3 +409,153 @@ def test_deepgemm_paged_mqa_packed_manager_block_stride():
         for cache, table in zip((compact_pages, packed_pages), tables)
     ]
     torch.testing.assert_close(*logits, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
+@pytest.mark.skipif(not has_deep_gemm(), reason="DeepGEMM not available")
+@pytest.mark.skipif(
+    not current_platform.has_device_capability(90), reason="SM90 and newer only"
+)
+@pytest.mark.skipif(
+    current_platform.is_device_capability_family(100),
+    reason="SM100 decode is varlen and not chunked",
+)
+@pytest.mark.parametrize("next_n", [1, 2])
+@pytest.mark.parametrize("select_k", [128, 512, 2048])
+@pytest.mark.parametrize("candidate_mode", ["none", "write", "read"])
+def test_chunked_decode_topk_matches_full_batch_and_graph_replay(
+    monkeypatch, workspace_init, next_n, select_k, candidate_mode
+):
+    if not native_next_n_supported(next_n):
+        pytest.skip(f"next_n={next_n} has no native kernel on this architecture")
+
+    from vllm.config import CUDAGraphMode
+    from vllm.model_executor.layers import sparse_attn_indexer as indexer
+    from vllm.v1.attention.backends.mla.indexer import (
+        DeepSeekV32IndexerDecodeMetadata,
+        DeepseekV32IndexerMetadata,
+    )
+
+    torch.manual_seed(17)
+    batch_size, heads, dim, block_size, max_len = 9, 32, 128, 64, 65536
+    q = torch.randn(batch_size, next_n, heads, dim, device="cuda").to(
+        torch.float8_e4m3fn
+    )
+    cache = kv_cache_cast_to_fp8(torch.randn(96, block_size, 1, dim, device="cuda"))
+    weights = torch.rand(batch_size * next_n, heads, device="cuda")
+    seq_lens = torch.tensor(
+        [500, 3000, 4096, 2049, 1024, 4000, 2500, 3200, 0],
+        dtype=torch.int32,
+        device="cuda",
+    )[:, None].repeat(1, next_n)
+    if next_n > 1:
+        seq_lens[:, 0] = (seq_lens[:, 0] - 1).clamp_min(0)
+    original_seq_lens = seq_lens.clone()
+    block_table = torch.arange(64, dtype=torch.int32, device="cuda").repeat(
+        batch_size, 1
+    )
+    metadata = get_paged_mqa_logits_metadata(seq_lens, block_size, get_num_sms())
+    expected = torch.empty(
+        batch_size * next_n, select_k, dtype=torch.int32, device="cuda"
+    )
+    actual = torch.empty_like(expected)
+    candidates = (
+        torch.tensor([0, 2, 3, -1], dtype=torch.int32, device="cuda").repeat(
+            batch_size * next_n, 1
+        )
+        if candidate_mode != "none"
+        else None
+    )
+    if candidates is not None:
+        candidates[1::2, 1] = 1
+    decode = DeepSeekV32IndexerDecodeMetadata(
+        block_table=block_table,
+        seq_lens=seq_lens,
+        decode_lens=torch.full((batch_size,), next_n, dtype=torch.int32, device="cuda"),
+        requires_padding=False,
+        schedule_metadata=metadata,
+    )
+    attn_metadata = DeepseekV32IndexerMetadata(
+        seq_lens=seq_lens,
+        max_seq_len=4096,
+        slot_mapping=torch.zeros(batch_size * next_n, dtype=torch.int64, device="cuda"),
+        num_decodes=batch_size,
+        num_decode_tokens=batch_size * next_n,
+        num_prefills=0,
+        num_prefill_tokens=0,
+        decode=decode,
+    )
+    monkeypatch.setattr(
+        indexer,
+        "get_forward_context",
+        lambda: SimpleNamespace(
+            attn_metadata={"test_indexer": attn_metadata},
+            cudagraph_runtime_mode=CUDAGraphMode.FULL,
+        ),
+    )
+    hidden = torch.empty(batch_size * next_n, 1, device="cuda")
+    allocations = []
+    paged_logits = indexer.fp8_fp4_paged_mqa_logits
+
+    def record_logits(*args, **kwargs):
+        logits = paged_logits(*args, **kwargs)
+        allocations.append(logits.numel() * logits.element_size())
+        return logits
+
+    monkeypatch.setattr(indexer, "fp8_fp4_paged_mqa_logits", record_logits)
+
+    def run(dst):
+        indexer.sparse_attn_indexer(
+            hidden,
+            "test_indexer",
+            cache.squeeze(-2),
+            q.reshape(batch_size * next_n, heads, dim),
+            None,
+            None,
+            weights,
+            dim,
+            "ue8m0",
+            select_k,
+            dim,
+            max_len,
+            0,
+            dst,
+            True,
+            False,
+            False,
+            "",
+            candidate_blocks=candidates,
+            candidate_block_size=1024 if candidates is not None else 0,
+            candidate_write=candidate_mode == "write",
+        )
+
+    def selected_indices(dst):
+        if candidate_mode == "read":
+            assert candidates is not None
+            # Ties among masked -inf entries may pick different indices.
+            blocks = dst.clamp_min(0) // 1024
+            allowed = (blocks[..., None] == candidates[:, None, :]).any(-1)
+            dst = torch.where(allowed, dst, -1)
+        return dst.sort(-1).values
+
+    monkeypatch.setattr(indexer.envs, "VLLM_SPARSE_INDEXER_MAX_LOGITS_MB", 512)
+    run(expected)
+    monkeypatch.setattr(indexer.envs, "VLLM_SPARSE_INDEXER_MAX_LOGITS_MB", 1)
+    allocations.clear()
+    run(actual)
+    assert len(allocations) > 1
+    assert max(allocations) <= 1024**2
+    torch.testing.assert_close(selected_indices(actual), selected_indices(expected))
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        run(actual)
+    for length in (2048, 4096):
+        seq_lens.copy_(original_seq_lens.clamp_max(length))
+        weights.copy_(torch.rand_like(weights))
+        metadata.copy_(
+            get_paged_mqa_logits_metadata(seq_lens, block_size, get_num_sms())
+        )
+        monkeypatch.setattr(indexer.envs, "VLLM_SPARSE_INDEXER_MAX_LOGITS_MB", 512)
+        run(expected)
+        graph.replay()
+        torch.testing.assert_close(selected_indices(actual), selected_indices(expected))
