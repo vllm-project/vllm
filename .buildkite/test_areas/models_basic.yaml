@@ -88,6 +88,7 @@ steps:
       - vllm/models/deepseek_v41/
       - tests/models/test_deepseek_v4_vl_rocm.py
       - tests/models/test_hyv4_rocm.py
+      - tests/models/test_vision.py
       - tests/models/transformers/test_layer_registry_e2e.py
       - tests/models/test_deepseek_v41_replay_start.py
       - tests/models/test_deepseek_v41_decoder_replay_layers.py
@@ -100,6 +101,7 @@ steps:
       commands:
       - pytest -v -s models/test_terratorch.py models/transformers/test_backend.py models/test_registry.py models/test_deepseek_v4_vl_rocm.py models/transformers/test_layer_registry_e2e.py models/test_deepseek_v41_replay_start.py models/test_deepseek_v41_decoder_replay_layers.py models/test_deepseek_v41_replay_batch.py models/test_deepseek_v41_amd_replay_forward.py models/test_deepseek_v4_dspark_rocm.py models/test_deepseek_v4_rocm_wo_a.py models/test_deepseek_v4_rocm_compressor_gemm_fusion.py models/test_dsv41_mono_decode.py
       - VLLM_ROCM_USE_AITER=1 pytest -v -s models/test_hyv4_rocm.py -m 'not distributed'
+      - pytest -v -s models/test_vision.py::test_simple_mrope_vision_model_spatial_merge
 
 - label: ":nvidia: (B200) Inkling"
   key: inkling-unit-tests-b200
@@ -160,6 +162,51 @@ steps:
       # The kernels/ file the NVIDIA job adds is CUDA-only (it imports
       # cuda.bindings.driver), so it is deliberately left out here.
       - pytest -v -s models/kimi_k3
+
+- label: ":amd: (MI300) Kimi K3"
+  key: amd-kimi-k3-mi300
+  dind: false
+  device: mi300_1
+  timeout_in_minutes: 65
+  working_dir: /vllm-workspace/tests
+  depends_on:
+  - image-build-amd
+  source_file_dependencies:
+  - vllm/third_party/flash_linear_attention/ops/kda.py
+  - vllm/third_party/flash_linear_attention/ops/chunk_delta_h.py
+  - vllm/third_party/flash_linear_attention/ops/l2norm.py
+  - vllm/models/kimi_k3/nvidia/kda.py
+  - vllm/models/kimi_k3/nvidia/kda_metadata.py
+  - vllm/models/kimi_k3/nvidia/ops/third_party/kda/
+  - vllm/models/kimi_k3/amd/
+  - CMakeLists.txt
+  - csrc/kimi_k3/fused_kda_decode_kernel_rocm.cu
+  - csrc/ops.h
+  - csrc/torch_bindings.cpp
+  - tests/models/kimi_k3/test_amd_attn_res.py
+  - tests/models/kimi_k3/test_amd_kda_decode.py
+  - tests/models/kimi_k3/test_kda.py
+  - tests/models/kimi_k3/test_kda_metadata.py
+  - vllm/_custom_ops.py
+  - vllm/platforms/rocm.py
+  commands:
+  - pytest -v -s models/kimi_k3/test_amd_attn_res.py models/kimi_k3/test_amd_kda_decode.py models/kimi_k3/test_kda.py models/kimi_k3/test_kda_metadata.py
+
+- label: ":amd: (MI355) Kimi K3 Multi-GPU"
+  key: amd-kimi-k3-multi-gpu-mi355
+  dind: false
+  device: mi355_4
+  num_devices: 4
+  timeout_in_minutes: 30
+  working_dir: /vllm-workspace/tests
+  depends_on:
+  - image-build-amd
+  source_file_dependencies:
+  - vllm/models/kimi_k3/
+  - tests/models/kimi_k3/
+  - vllm/platforms/rocm.py
+  commands:
+  - 'pytest -v -s -m "distributed" models/kimi_k3'
 
 - label: ":nvidia: (4xB200) Kimi K3 Prefix Cache"
   key: kimi-k3-prefix-cache-4xb200

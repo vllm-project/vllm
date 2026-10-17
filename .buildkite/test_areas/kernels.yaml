@@ -349,6 +349,28 @@ steps:
       commands:
       - pytest -v -s kernels/attention --ignore=kernels/attention/test_triton_unified_attention_diffkv.py --ignore=kernels/attention/test_rocm_aiter_mla_decode.py --ignore=kernels/attention/test_rocm_aiter_mla_decode_metadata.py --ignore=kernels/attention/test_rocm_aiter_mla_fp8_support.py --ignore=kernels/attention/test_rocm_aiter_mla_op_registration.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
+- label: ":amd: (MI355 DPX) Attention Kernels Shard %N"
+  key: amd-attention-kernels-mi355
+  dind: false
+  device: mi355_dpx
+  parallelism: 2
+  timeout_in_minutes: 90
+  working_dir: /vllm-workspace/tests
+  depends_on:
+  - image-build-amd
+  source_file_dependencies:
+  - csrc/attention/
+  - csrc/core/vec_dtypes/
+  - vllm/v1/attention
+  - vllm/model_executor/layers/attention
+  - tests/kernels/attention
+  - vllm/_aiter_ops.py
+  - vllm/envs.py
+  - vllm/platforms/rocm.py
+  - vllm/utils/flashinfer.py
+  commands:
+  - pytest -v -s kernels/attention --ignore=kernels/attention/test_triton_unified_attention_diffkv.py --ignore=kernels/attention/test_rocm_aiter_mla_decode.py --ignore=kernels/attention/test_rocm_aiter_mla_decode_metadata.py --ignore=kernels/attention/test_rocm_aiter_mla_fp8_support.py --ignore=kernels/attention/test_rocm_aiter_mla_op_registration.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+
 - label: ":nvidia: (H100) Attention DiffKV Kernels"
   key: kernels-attention-diffkv-test-h100
   timeout_in_minutes: 20
@@ -471,6 +493,34 @@ steps:
       commands:
       - pytest -v -s kernels/quantization -k "not test_nvfp4_dense_emulation" --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
+- label: ":amd: (MI355) Quantization Kernels Shard %N"
+  key: amd-quantization-kernels-mi355
+  dind: false
+  device: mi355_1
+  parallelism: 6
+  timeout_in_minutes: 120
+  working_dir: /vllm-workspace/tests
+  depends_on:
+  - image-build-amd
+  source_file_dependencies:
+  - csrc/quantization/
+  - csrc/rocm/
+  - vllm/model_executor/layers/quantization
+  - tests/kernels/quantization
+  - tests/kernels/quant_utils.py
+  - tests/kernels/utils.py
+  - vllm/_aiter_ops.py
+  - vllm/kernels/aiter_ops.py
+  - vllm/_custom_ops.py
+  - vllm/envs.py
+  - vllm/platforms/rocm.py
+  - vllm/model_executor/kernels/
+  - vllm/v1/attention/backends/rocm_aiter_fa.py
+  - vllm/config/
+  - tests/kernels/quantization/test_rocm_skinny_gemms.py
+  commands:
+  - 'pytest -v -s kernels/quantization -k "not test_nvfp4_dense_emulation" --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT'
+
 - label: ":nvidia: (L4) MoE Kernels Shard %N"
   key: kernels-moe-test
   device: l4
@@ -510,6 +560,63 @@ steps:
       - vllm/model_executor/layers/quantization/utils/quant_utils.py
       depends_on:
       - image-build-amd
+      commands:
+      - pytest -v -s kernels/moe --ignore=kernels/moe/test_modular_oai_triton_moe.py --ignore=kernels/moe/test_modular_kernel_combinations.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+      - pytest -v -s kernels/moe/test_modular_oai_triton_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+      - VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_MOE=1 pytest -v -s kernels/moe/test_modular_kernel_combinations.py -k "not multigpu" --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+
+- label: ":amd: (MI355 DPX) MoE Kernels Shard %N"
+  key: amd-moe-kernels-mi355
+  dind: false
+  device: mi355_dpx
+  parallelism: 5
+  timeout_in_minutes: 55
+  working_dir: /vllm-workspace/tests
+  depends_on:
+  - image-build-amd
+  source_file_dependencies:
+  - csrc/quantization/w8a8/cutlass/moe/
+  - csrc/moe/
+  - csrc/rocm/
+  - tests/kernels/moe
+  - tests/kernels/utils.py
+  - vllm/model_executor/layers/fused_moe/
+  - vllm/model_executor/layers/quantization/mxfp4.py
+  - vllm/model_executor/layers/quantization/utils/quant_utils.py
+  - vllm/distributed/device_communicators/
+  - vllm/envs.py
+  - vllm/config
+  - vllm/_aiter_ops.py
+  - vllm/platforms/rocm.py
+  commands:
+  - pytest -v -s kernels/moe --ignore=kernels/moe/test_modular_oai_triton_moe.py --ignore=kernels/moe/test_gpt_oss_triton_kernels.py --ignore=kernels/moe/test_moe.py --ignore=kernels/moe/test_block_int8.py --ignore=kernels/moe/test_triton_moe_no_act_mul.py --ignore=kernels/moe/test_triton_moe_ptpc_fp8.py --ignore=kernels/moe/test_deepep_moe.py --ignore=kernels/moe/test_moe_layer.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  - pytest -v -s kernels/moe/test_modular_oai_triton_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+
+- label: ":amd: (MI300) MoE Kernels Multi-GPU"
+  key: amd-moe-kernels-multi-gpu-mi300
+  dind: false
+  device: mi300_2
+  num_devices: 2
+  timeout_in_minutes: 30
+  working_dir: /vllm-workspace/tests
+  depends_on:
+  - image-build-amd
+  source_file_dependencies:
+  - csrc/quantization/w8a8/cutlass/moe/
+  - csrc/moe/
+  - csrc/rocm/
+  - tests/kernels/moe/test_modular_kernel_combinations.py
+  - tests/kernels/moe/modular_kernel_tools/
+  - tests/kernels/utils.py
+  - vllm/model_executor/layers/fused_moe/
+  - vllm/distributed/device_communicators/
+  - vllm/distributed/parallel_state.py
+  - vllm/envs.py
+  - vllm/config
+  - vllm/_aiter_ops.py
+  - vllm/platforms/rocm.py
+  commands:
+  - 'VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_MOE=1 pytest -v -s kernels/moe/test_modular_kernel_combinations.py -k "multigpu"'
 
 - label: ":nvidia: (H200 MIG 35GB) Mamba Kernels"
   device: h200_35gb
