@@ -2144,9 +2144,25 @@ class SpeculativeConfig:
     def use_multi_module_mtp(self) -> bool:
         if self.method != "mtp" or self.draft_model_config is None:
             return False
-        num_mtp_layers = getattr(
-            self.draft_model_config.hf_config, "num_nextn_predict_layers", 1
-        )
+        hf_config = self.draft_model_config.hf_config
+
+        # DeepSeek-style MTP declares its module count via
+        # `num_nextn_predict_layers`; Qwen3.5 MTP uses `mtp_num_hidden_layers`.
+        # Honor both so multi-layer Qwen3.5 MTP routes to the multi-module
+        # speculator (which selects a distinct module per draft step). On
+        # multimodal Qwen3.5 the field lives under the nested text config, so
+        # fall back to that (mirroring the n_predict resolution above).
+        def _num_mtp_layers(cfg: object) -> int | None:
+            n = getattr(cfg, "num_nextn_predict_layers", None)
+            if n is None:
+                n = getattr(cfg, "mtp_num_hidden_layers", None)
+            return n
+
+        num_mtp_layers = _num_mtp_layers(hf_config)
+        if num_mtp_layers is None:
+            num_mtp_layers = _num_mtp_layers(get_hf_text_config(hf_config))
+        if num_mtp_layers is None:
+            num_mtp_layers = 1
         return min(num_mtp_layers, self.num_speculative_tokens) > 1
 
     def __repr__(self) -> str:
