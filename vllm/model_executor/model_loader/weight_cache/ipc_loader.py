@@ -175,7 +175,7 @@ class IpcModelLoader(BaseModelLoader):
         loaded through this loader).
         """
         device_index = torch.accelerator.current_device_index()
-        entries = self._fetch_entries(model_config).entries
+        entries = self._fetch_entries(model_config, is_reload=True).entries
         params = dict(model.named_parameters())
         buffers = dict(model.named_buffers())
         for name, entry in entries.items():
@@ -342,7 +342,9 @@ class IpcModelLoader(BaseModelLoader):
                 continue
             _register(alias_name, obj, isinstance(obj, nn.Parameter))
 
-    def _fetch_entries(self, model_config: ModelConfig) -> WeightCacheState:
+    def _fetch_entries(
+        self, model_config: ModelConfig, *, is_reload: bool = False
+    ) -> WeightCacheState:
         dp_group = get_dp_group()
         pp_group = get_pp_group()
         cache_config = WeightCacheKey.from_model_config(
@@ -356,13 +358,10 @@ class IpcModelLoader(BaseModelLoader):
             is_draft=self.is_draft,
         )
         if not self.fallback:
-            return self._request_state_with_startup_wait(cache_config)
-        return self._request_state(cache_config)
-
-    def _request_state_with_startup_wait(
-        self, cache_config: WeightCacheKey
-    ) -> WeightCacheState:
-        return self._with_startup_wait(lambda: self._request_state(cache_config))
+            return self._with_startup_wait(
+                lambda: self._request_state(cache_config, is_reload=is_reload)
+            )
+        return self._request_state(cache_config, is_reload=is_reload)
 
     def _with_startup_wait(self, op: Callable[[], _T]) -> _T:
         """Retry op until the daemon answers or the state timeout elapses;
@@ -388,9 +387,18 @@ class IpcModelLoader(BaseModelLoader):
                     )
                 )
 
-    def _request_state(self, cache_config: WeightCacheKey) -> WeightCacheState:
+    def _request_state(
+        self, cache_config: WeightCacheKey, *, is_reload: bool = False
+    ) -> WeightCacheState:
         with self._connect(self.state_timeout_s) as conn:
-            send_msg(conn, {"cmd": "get_state", "cache_config": cache_config})
+            send_msg(
+                conn,
+                {
+                    "cmd": "get_state",
+                    "cache_config": cache_config,
+                    "is_reload": is_reload,
+                },
+            )
             response = recv_msg(conn)
         status = response.get("status")
         if status == "mismatch":
