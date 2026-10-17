@@ -21,7 +21,7 @@ from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
 )
 
 if TYPE_CHECKING:
-    from aiter import ActivationType, QuantType
+    from aiter import ActivationType
 
 logger = init_logger(__name__)
 
@@ -1492,6 +1492,74 @@ def _rocm_aiter_rmsnorm_fp8_group_quant_fake(
     )
 
 
+def _rocm_aiter_fused_rms_fp8_per_tensor_static_quant_impl(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    epsilon: float,
+    scale: torch.Tensor,
+    quant_dtype: torch.dtype,
+) -> torch.Tensor:
+    from aiter.ops.triton.fused_fp8_quant import fused_rms_fp8_per_tensor_static_quant
+
+    x_quant, _, _, _ = fused_rms_fp8_per_tensor_static_quant(
+        x,
+        weight,
+        epsilon,
+        scale,
+        None,
+        None,
+        None,
+        dtype_quant=quant_dtype,
+        res1=None,
+    )
+    return x_quant
+
+
+def _rocm_aiter_fused_rms_fp8_per_tensor_static_quant_fake(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    epsilon: float,
+    scale: torch.Tensor,
+    quant_dtype: torch.dtype,
+) -> torch.Tensor:
+    return torch.empty_like(x, dtype=quant_dtype)
+
+
+def _rocm_aiter_fused_add_rms_fp8_per_tensor_static_quant_impl(
+    x: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    epsilon: float,
+    scale: torch.Tensor,
+    quant_dtype: torch.dtype,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    from aiter.ops.triton.fused_fp8_quant import fused_rms_fp8_per_tensor_static_quant
+
+    x_quant, _, _, residual_out = fused_rms_fp8_per_tensor_static_quant(
+        x,
+        weight,
+        epsilon,
+        scale,
+        None,
+        None,
+        None,
+        dtype_quant=quant_dtype,
+        res1=residual,
+    )
+    return x_quant, residual_out
+
+
+def _rocm_aiter_fused_add_rms_fp8_per_tensor_static_quant_fake(
+    x: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    epsilon: float,
+    scale: torch.Tensor,
+    quant_dtype: torch.dtype,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return torch.empty_like(x, dtype=quant_dtype), torch.empty_like(residual)
+
+
 def _rocm_aiter_fused_rms_gated_fp8_group_quant_impl(
     x: torch.Tensor,
     weight: torch.Tensor,
@@ -2202,38 +2270,6 @@ class rocm_aiter_ops:
         }
         return mapping.get(name)
 
-    @staticmethod
-    def get_aiter_quant_type(quant_type_str: str) -> "QuantType | None":
-        """Given a quantization type as a string, returns the corresponding aiter QuantType enum.
-        Supported quantization types: "no", "per_tensor", "per_token", "per_1x32", "per_1x128", "per_128x128".
-        Returns None if the mapping fails.
-
-        Args:
-            quant_type_str (str): Quantization type as string.
-
-        Returns:
-            Aiter QuantType enum value, or None if not found.
-
-        """
-        try:
-            from aiter import QuantType
-        except ImportError:
-            return None
-
-        if not isinstance(quant_type_str, str):
-            return None
-
-        name = quant_type_str.strip().lower()
-        mapping = {
-            "no": QuantType.No,
-            "per_tensor": QuantType.per_Tensor,
-            "per_token": QuantType.per_Token,
-            "per_1x32": QuantType.per_1x32,
-            "per_1x128": QuantType.per_1x128,
-            "per_128x128": QuantType.per_128x128,
-        }
-        return mapping.get(name)
-
     @classmethod
     @if_aiter_supported
     def is_enabled(cls) -> bool:
@@ -2569,6 +2605,27 @@ class rocm_aiter_ops:
         from vllm.platforms.rocm import on_gfx950
 
         return cls.is_linear_enabled() and on_gfx950()
+
+    @staticmethod
+    @functools.cache
+    def _kda_gluon_prefill_importable() -> bool:
+        try:
+            from aiter.ops.triton.attention.chunk_kda import chunk_kda  # noqa: F401
+
+            return True
+        except ImportError:
+            return False
+
+    @classmethod
+    @if_aiter_supported
+    def is_kda_gluon_prefill_available(cls) -> bool:
+        from vllm.platforms.rocm import get_cdna_version
+
+        return (
+            cls._AITER_ENABLED
+            and get_cdna_version() >= 4
+            and cls._kda_gluon_prefill_importable()
+        )
 
     @classmethod
     def get_aiter_allreduce(cls):
@@ -3083,6 +3140,18 @@ class rocm_aiter_ops:
             )
 
             direct_register_custom_op(
+                op_name="rocm_aiter_fused_rms_fp8_per_tensor_static_quant",
+                op_func=_rocm_aiter_fused_rms_fp8_per_tensor_static_quant_impl,
+                fake_impl=_rocm_aiter_fused_rms_fp8_per_tensor_static_quant_fake,
+            )
+
+            direct_register_custom_op(
+                op_name="rocm_aiter_fused_add_rms_fp8_per_tensor_static_quant",
+                op_func=_rocm_aiter_fused_add_rms_fp8_per_tensor_static_quant_impl,
+                fake_impl=_rocm_aiter_fused_add_rms_fp8_per_tensor_static_quant_fake,
+            )
+
+            direct_register_custom_op(
                 op_name="rocm_aiter_fused_rms_gated_fp8_group_quant",
                 op_func=_rocm_aiter_fused_rms_gated_fp8_group_quant_impl,
                 fake_impl=_rocm_aiter_fused_rms_gated_fp8_group_quant_fake,
@@ -3212,6 +3281,16 @@ class rocm_aiter_ops:
         return torch.ops.vllm.rocm_aiter_rmsnorm_fp8_group_quant.default
 
     @staticmethod
+    def get_fused_rms_fp8_per_tensor_static_quant_op() -> OpOverload:
+        return torch.ops.vllm.rocm_aiter_fused_rms_fp8_per_tensor_static_quant.default
+
+    @staticmethod
+    def get_fused_add_rms_fp8_per_tensor_static_quant_op() -> OpOverload:
+        return (
+            torch.ops.vllm.rocm_aiter_fused_add_rms_fp8_per_tensor_static_quant.default
+        )
+
+    @staticmethod
     def get_fused_rms_gated_fp8_group_quant_op() -> OpOverload:
         """Return the fused gated-RMSNorm + FP8 group quant custom op."""
         return torch.ops.vllm.rocm_aiter_fused_rms_gated_fp8_group_quant.default
@@ -3223,6 +3302,10 @@ class rocm_aiter_ops:
     @staticmethod
     def get_per_token_quant_op() -> OpOverload:
         return torch.ops.vllm.rocm_aiter_per_token_quant.default
+
+    @staticmethod
+    def get_per_tensor_quant_op() -> OpOverload:
+        return torch.ops.vllm.rocm_aiter_per_tensor_quant.default
 
     @staticmethod
     def get_group_quant_op() -> OpOverload:
@@ -5047,6 +5130,50 @@ class rocm_aiter_ops:
             post_mix.view(*outer_shape, hc_mult, 1),
             comb_mix.view(*outer_shape, hc_mult, hc_mult),
             layer_input.view(*outer_shape, hidden_size),
+        )
+
+    @staticmethod
+    def kda_chunk_prefill(
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        g: torch.Tensor,
+        beta: torch.Tensor,
+        A_log: torch.Tensor,
+        dt_bias: torch.Tensor | None,
+        lower_bound: float | None,
+        cu_seqlens: torch.Tensor | None,
+        chunk_indices: torch.Tensor | None,
+        chunk_offsets: torch.Tensor | None,
+        scale: float,
+        out: torch.Tensor | None,
+        initial_state: torch.Tensor | None,
+        output_final_state: bool,
+        state_cache: torch.Tensor | None,
+        state_indices: torch.Tensor | None,
+        has_initial_state: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        from aiter.ops.triton.attention.chunk_kda import chunk_kda
+
+        return chunk_kda(
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            beta=beta,
+            A_log=A_log,
+            dt_bias=dt_bias,
+            lower_bound=lower_bound,
+            cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
+            chunk_offsets=chunk_offsets,
+            scale=scale,
+            out=out,
+            initial_state=initial_state,
+            output_final_state=output_final_state,
+            state_cache=state_cache,
+            state_indices=state_indices,
+            has_initial_state=has_initial_state,
         )
 
 
