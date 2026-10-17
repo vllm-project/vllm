@@ -230,7 +230,7 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
 
         self._sm_count = current_platform.num_compute_units()
 
-    def reserve_profiling_workspace(self) -> None:
+    def reserve_workspace(self) -> None:
         # The builder reserves after memory profiling; reserve its upper bound
         # here so the KV cache is sized around it.
         vllm_config = get_current_vllm_config()

@@ -1085,7 +1085,7 @@ class MLAAttentionImpl(AttentionImplBase[T], Generic[T]):
         """MQA-style decode forward pass."""
         raise NotImplementedError
 
-    def reserve_profiling_workspace(self) -> None:
+    def reserve_workspace(self) -> None:
         """Called in the memory profiling run to claim persistent workspace
         that is otherwise reserved after profiling."""
         return
