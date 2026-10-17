@@ -65,6 +65,7 @@ def _capturer_with_buffer(
     c.dp_rank = dp_rank
     c.tp_size = tp_size
     c.output_dtype = torch.uint8
+    c.start_layer = 0
     c.device_buffer = torch.full(
         (max_tokens, num_layers, num_experts_per_tok),
         -1,
@@ -456,6 +457,9 @@ def test_routed_experts_capturer_exposes_output_profile(
     import vllm.model_executor.layers.fused_moe.routed_experts_capturer as module
 
     monkeypatch.setattr(module, "current_platform", SimpleNamespace(device_type="cpu"))
+    monkeypatch.setattr(
+        module, "get_pp_group", lambda: SimpleNamespace(world_size=1, rank_in_group=0)
+    )
     config = SimpleNamespace(
         model_config=SimpleNamespace(
             get_total_num_hidden_layers=lambda: 3,
@@ -594,7 +598,7 @@ def test_routed_experts_capturer_rejects_layer_before_restoring_rows(layer_id):
     with (
         patch(f"{_REC_MODULE}.get_forward_context", return_value=ctx),
         patch(f"{_REC_MODULE}.get_tp_group") as get_tp_group,
-        pytest.raises(IndexError, match="exceeds capture buffer"),
+        pytest.raises(IndexError, match="outside the capture buffer"),
     ):
         capturer.capture(layer_id, torch.ones(2, 2, dtype=torch.int32))
     get_tp_group.assert_not_called()

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
 from collections.abc import Iterator
+from copy import copy
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -11,6 +12,7 @@ import torch
 import vllm.envs as envs
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
 from vllm.v1.outputs import (
+    EMPTY_MODEL_RUNNER_OUTPUT,
     AsyncModelRunnerOutput,
     LogprobsTensors,
     ModelRunnerOutput,
@@ -22,6 +24,7 @@ from vllm.v1.worker.utils import raise_if_nan_logits
 if TYPE_CHECKING:
     from vllm.distributed.aux_output_connector.worker import PendingAuxOutput
     from vllm.v1.worker.gpu.input_batch import InputBatch
+    from vllm.v1.worker.gpu.pp_utils import PendingRecv
 
 
 @dataclass(frozen=True)
@@ -113,15 +116,18 @@ class StepTimingCollector:
 
 
 class AsyncOutput(AsyncModelRunnerOutput):
+    """Async sampling output, or auxiliary-only output from a non-last PP stage."""
+
     def __init__(
         self,
         model_runner_output: ModelRunnerOutput,
-        sampler_output: SamplerOutput,
-        num_sampled_tokens: torch.Tensor,
+        sampler_output: SamplerOutput | None,
+        num_sampled_tokens: torch.Tensor | None,
         main_stream: torch.cuda.Stream,
         copy_stream: torch.cuda.Stream,
         check_ep_fault: bool,
         pending_aux_output: "PendingAuxOutput | None",
+        pending_recv: "PendingRecv | None" = None,
     ):
         # NOTE(woosuk): We must retain references to the GPU tensors,
         # as the copy operations are performed on a different CUDA stream than
@@ -130,6 +136,8 @@ class AsyncOutput(AsyncModelRunnerOutput):
         self.sampler_output = sampler_output
         self.num_sampled_tokens = num_sampled_tokens
         self.pending_aux_output = pending_aux_output
+        # Keep broadcast tensors alive until the copy stream finishes reading them.
+        self.pending_recv = pending_recv
         # Blocking (sleep) event to avoid busy-polling the CUDA driver lock.
         self.copy_event = torch.cuda.Event(blocking=True)
         self._has_fault: torch.Tensor | None = None
@@ -137,6 +145,22 @@ class AsyncOutput(AsyncModelRunnerOutput):
         with stream(copy_stream, main_stream):
             copy_stream.wait_stream(main_stream)
 
+            if sampler_output is None:
+                # Non-last PP stages pass None for both sampling arguments;
+                # auxiliary output uses broadcast counts, or zeros if absent.
+                assert pending_aux_output is not None
+                if pending_recv is None:
+                    num_reqs = len(pending_aux_output.request_ids)
+                    num_sampled = num_rejected = np.zeros(num_reqs, dtype=np.int32)
+                else:
+                    copy_stream.wait_event(pending_recv.event)
+                    num_sampled = async_copy_to_np(pending_recv.num_sampled)
+                    num_rejected = async_copy_to_np(pending_recv.num_rejected)
+                pending_aux_output.enqueue_cpu_copy(num_sampled, num_rejected)
+                self.copy_event.record(copy_stream)
+                return
+
+            assert num_sampled_tokens is not None
             self.sampled_token_ids = async_copy_to_np(sampler_output.sampled_token_ids)
             self.logprobs_tensors: LogprobsTensors | None = None
             if sampler_output.logprobs_tensors is not None:
@@ -172,6 +196,17 @@ class AsyncOutput(AsyncModelRunnerOutput):
 
     def get_output(self) -> ModelRunnerOutput:
         self.copy_event.synchronize()
+
+        if self.sampler_output is None:
+            # Non-last PP stages attach auxiliary output without sampled tokens.
+            assert self.pending_aux_output is not None
+            output = self.model_runner_output
+            if output is EMPTY_MODEL_RUNNER_OUTPUT:
+                output = copy(output)
+            output.aux_output_connector_output = (
+                self.pending_aux_output.process_output()
+            )
+            return output
 
         # NOTE(woosuk): The following code is to ensure compatibility with
         # the existing model runner.

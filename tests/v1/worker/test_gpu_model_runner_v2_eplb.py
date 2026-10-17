@@ -5,6 +5,7 @@
 from types import SimpleNamespace
 from typing import Any
 
+import numpy as np
 import torch
 
 from vllm.config import CompilationConfig, CompilationMode
@@ -101,6 +102,7 @@ def _make_runner(**overrides: Any) -> Any:
     runner.eplb = eplb.EPLBController(runner.parallel_config, runner.device)
     runner.jit_warmup_registry = JitWarmupRegistry(runner.vllm_config)
     runner.pooling_runner = None
+    runner.aux_output_connector = None
     runner.execute_model_state = None
     for key, value in overrides.items():
         setattr(runner, key, value)
@@ -261,16 +263,16 @@ def test_v2_sample_tokens_runs_eplb_on_non_last_pp_rank(monkeypatch):
         dp_sync_state=None,
         finished_req_ids=set(),
         ec_connector_output=None,
-        routed_experts=None,
         cudagraph_stats=None,
         num_spec_tokens_to_schedule=0,
+        aux_output_connector_metadata=None,
     )
     runner.req_states = SimpleNamespace()
 
     def fake_receive(*args, **kwargs):
         events.append("receive")
-        # all_decode_next=True, so model_state.postprocess_state is skipped.
-        return True
+        # Every request samples, so model_state.postprocess_state is skipped.
+        return SimpleNamespace(need_sampled_mask=np.ones(2, dtype=bool))
 
     runner.pp_handler = SimpleNamespace(receive=fake_receive)
     runner.postprocess_num_computed_tokens = lambda *args, **kwargs: events.append(

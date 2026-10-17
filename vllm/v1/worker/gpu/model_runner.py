@@ -333,6 +333,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 max_num_reqs=self.max_num_reqs,
                 num_speculative_steps=self.num_speculative_steps,
                 device=self.device,
+                need_aux_output=(
+                    vllm_config.aux_output_config.enable_return_routed_experts
+                ),
             )
 
         # Samplers and decode_query_len created in load_model() after
@@ -1318,7 +1321,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         has_prefill = bool(is_prefilling_np.any())
         max_seq_len_np = None
         if self.use_pp and has_prefill:
-            # consumed by the PP `compute_need_sampled_mask` for batches with prefill.
+            # Used to exclude terminal prefill rows from PP state updates.
             max_seq_len_np = self.req_states.max_seq_len[idx_mapping_np]
 
         num_draft_tokens_np = None
@@ -2127,11 +2130,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if self.pcp_manager is not None:
                 input_batch = self.pcp_manager.global_batch
             assert self.pp_handler is not None
-            all_decode_next = self.pp_handler.receive(input_batch)
+            pending_recv = self.pp_handler.receive(input_batch)
             # Optimistically update num_computed_tokens for entire batch here.
             # Will be adjusted for rejections if necessary in update_requests.
             self.postprocess_num_computed_tokens(input_batch)
-            if not all_decode_next:
+            if pending_recv is None or not pending_recv.need_sampled_mask.all():
                 # Might contain non-final prefill chunks, which will be scheduled
                 # in the immediate next step (rather than in pp_size steps).
                 self.model_state.postprocess_state(input_batch.idx_mapping, 0)
@@ -2140,7 +2143,24 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             kv_connector_output = self.kv_connector.post_forward(finished_req_ids)
             # The first PP rank holds the encoder cache, so pass its EC output on.
             output = ModelRunnerOutput.with_kv_conn_output_only(kv_connector_output)
-            return ModelRunnerOutput.with_ec_conn_output(output, ec_connector_output)
+            output = ModelRunnerOutput.with_ec_conn_output(output, ec_connector_output)
+            pending_aux_output = None
+            if self.aux_output_connector is not None:
+                pending_aux_output = self.aux_output_connector.prepare_output(
+                    input_batch
+                )
+            if pending_aux_output is None:
+                return output
+            return AsyncOutput(
+                model_runner_output=output,
+                sampler_output=None,
+                num_sampled_tokens=None,
+                main_stream=self.main_stream,
+                copy_stream=self.output_copy_stream,
+                check_ep_fault=False,
+                pending_aux_output=pending_aux_output,
+                pending_recv=pending_recv,
+            )
 
         # Last rank: sample tokens
         assert hidden_states is not None

@@ -13,7 +13,8 @@ from typing import Protocol, runtime_checkable
 import torch
 
 from vllm.config import VllmConfig
-from vllm.distributed.parallel_state import get_tp_group
+from vllm.distributed.parallel_state import get_pp_group, get_tp_group
+from vllm.distributed.utils import get_pp_indices
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.platforms import current_platform
@@ -46,6 +47,7 @@ class RoutedExpertsCapturer:
 
     Layer-level hooks call :meth:`capture` inside the forward pass. Routing
     rows owned by this DP rank are written into a preallocated device buffer.
+    Under pipeline parallelism the buffer only covers this stage's layers.
 
     The device buffer uses ``int32``. Stable snapshots use the narrowest dtype
     that can represent every logical expert ID.
@@ -64,7 +66,11 @@ class RoutedExpertsCapturer:
         num_layers, num_experts, num_experts_per_tok = _get_routed_experts_shape(
             vllm_config
         )
-        self.shape_per_token = (num_layers, num_experts_per_tok)
+        pp_group = get_pp_group()
+        self.start_layer, end_layer = get_pp_indices(
+            num_layers, pp_group.rank_in_group, pp_group.world_size
+        )
+        self.shape_per_token = (end_layer - self.start_layer, num_experts_per_tok)
         self.output_dtype_name = "uint8" if num_experts <= 256 else "uint16"
         self.output_dtype = getattr(torch, self.output_dtype_name)
         logger.info(
@@ -72,7 +78,7 @@ class RoutedExpertsCapturer:
             "max_tokens=%d, num_layers=%d, num_experts_per_tok=%d "
             "(hf_config.model_type=%s)",
             max_num_batched_tokens,
-            num_layers,
+            self.shape_per_token[0],
             num_experts_per_tok,
             vllm_config.model_config.hf_text_config.model_type,
         )
@@ -85,14 +91,16 @@ class RoutedExpertsCapturer:
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
 
     def capture(self, layer_id: int, topk_ids: torch.Tensor) -> None:
-        if not 0 <= layer_id < self.device_buffer.shape[1]:
+        local_layer_id = layer_id - self.start_layer
+        if not 0 <= local_layer_id < self.device_buffer.shape[1]:
             raise IndexError(
-                f"routed-experts layer {layer_id} exceeds capture buffer "
-                f"layer count {self.device_buffer.shape[1]}"
+                f"routed-experts layer {layer_id} is outside the capture buffer "
+                f"layers [{self.start_layer}, "
+                f"{self.start_layer + self.device_buffer.shape[1]})"
             )
 
         local_topk_ids = self._restore_local_topk_ids(topk_ids, get_forward_context())
-        self.device_buffer[: len(local_topk_ids), layer_id] = local_topk_ids
+        self.device_buffer[: len(local_topk_ids), local_layer_id] = local_topk_ids
 
     def _restore_local_topk_ids(
         self, topk_ids: torch.Tensor, ctx: ForwardContext
@@ -221,5 +229,6 @@ def bind_routed_experts_capturer(
                 f"{type(module.router).__name__}."
             )
 
-    if num_bound == 0:
+    # A PP stage may contain only dense layers.
+    if num_bound == 0 and get_pp_group().world_size == 1:
         raise ValueError("No supported MoE router found for routed-experts capture.")
