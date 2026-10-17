@@ -42,6 +42,9 @@ class LogprobsProcessor:
     num_prompt_logprobs: int | None
     # [num_scored_rows, num_token_ids], set once on the final prefill chunk.
     prompt_token_id_logprobs: np.ndarray | None = None
+    # Sampled-token logprob per position for ``sampled_logprobs_only``
+    # requests; ``logprobs`` stays None for them.
+    sampled_logprobs: list[float] | None = None
 
     @classmethod
     def from_new_request(
@@ -53,14 +56,16 @@ class LogprobsProcessor:
         assert sampling_params is not None
         num_logprobs = sampling_params.num_logprobs
         num_prompt_logprobs = sampling_params.prompt_logprobs
+        sampled_only = sampling_params.sampled_logprobs_only
         return cls(
             tokenizer=tokenizer,
             cumulative_logprob=(None if num_logprobs is None else 0.0),
             logprobs=(
                 None
-                if num_logprobs is None
+                if num_logprobs is None or sampled_only
                 else create_sample_logprobs(sampling_params.flat_logprobs)
             ),
+            sampled_logprobs=([] if sampled_only else None),
             prompt_logprobs=(
                 None
                 if num_prompt_logprobs is None
@@ -358,6 +363,11 @@ class LogprobsProcessor:
         return decoded_tokens_list
 
     def update_from_output(self, output: EngineCoreOutput) -> None:
+        if output.new_sampled_logprobs is not None:
+            assert self.sampled_logprobs is not None
+            assert self.cumulative_logprob is not None
+            self.sampled_logprobs.extend(output.new_sampled_logprobs)
+            self.cumulative_logprob += sum(output.new_sampled_logprobs)
         if output.new_logprobs is not None:
             self._update_sample_logprobs(output.new_logprobs)
         if output.new_prompt_logprobs_tensors is not None:

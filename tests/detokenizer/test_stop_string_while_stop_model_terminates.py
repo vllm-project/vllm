@@ -4,7 +4,7 @@
 import numpy as np
 import pytest
 
-from vllm.sampling_params import SamplingParams
+from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
 from vllm.v1.engine.detokenizer import BaseIncrementalDetokenizer
 from vllm.v1.engine.output_processor import OutputProcessor
@@ -202,3 +202,63 @@ def test_stop_string_trims_speculative_overflow(
     assert result.sampling_mask.token_ids == [[token] for token in expected_token_ids]
     assert result.routed_experts is not None
     assert result.routed_experts.ravel().tolist() == expected_token_ids
+
+
+@pytest.mark.parametrize(
+    "output_kind", [RequestOutputKind.DELTA, RequestOutputKind.FINAL_ONLY]
+)
+@pytest.mark.parametrize("num_prev_tokens", [0, 1])
+def test_stop_string_trims_speculative_overflow_sampled_logprobs(
+    include_stop_str_in_output: bool, output_kind, num_prev_tokens, monkeypatch
+):
+    """sampled_logprobs_only: the per-token floats are trimmed with the tokens,
+    so they stay aligned, the cumulative logprob excludes the dropped tokens,
+    and the DELTA slice returns the values of the kept tokens."""
+    decoded_tokens = ["a", "b", "c", "d", "e", "f"]
+    token_ids = list(range(len(decoded_tokens)))
+    values = [-0.25 * (i + 1) for i in token_ids]
+    keep = 4
+
+    req = _make_request(
+        stop=["cd"], include_stop_str_in_output=include_stop_str_in_output
+    )
+    req.external_req_id = req.request_id
+    assert req.sampling_params is not None
+    req.sampling_params.sampled_logprobs_only = True
+    req.sampling_params.logprobs = 0
+    req.sampling_params.output_kind = output_kind
+    detok = _DummyDetokenizer(req)
+    monkeypatch.setattr(detok, "decode_next", decoded_tokens.__getitem__)
+    processor = OutputProcessor(tokenizer=None, log_stats=False)
+    processor.add_request(req, prompt=None)
+    processor.request_states[req.request_id].detokenizer = detok
+
+    steps = [(0, num_prev_tokens), (num_prev_tokens, len(token_ids))]
+    results = []
+    for start, end in steps:
+        if start == end:
+            continue
+        outputs = processor.process_outputs(
+            [
+                EngineCoreOutput(
+                    request_id=req.request_id,
+                    new_token_ids=token_ids[start:end],
+                    new_sampled_logprobs=values[start:end],
+                )
+            ]
+        )
+        results.extend(out.outputs[0] for out in outputs.request_outputs)
+
+    final = results[-1]
+    assert final.stop_reason == "cd"
+    assert final.logprobs is None
+    assert final.cumulative_logprob == pytest.approx(sum(values[:keep]))
+    if output_kind == RequestOutputKind.DELTA:
+        got_tokens = [t for r in results for t in r.token_ids]
+        got_sampled = [v for r in results for v in r.sampled_logprobs or ()]
+    else:
+        assert len(results) == 1
+        got_tokens = list(final.token_ids)
+        got_sampled = final.sampled_logprobs
+    assert got_tokens == token_ids[:keep]
+    assert got_sampled == values[:keep]

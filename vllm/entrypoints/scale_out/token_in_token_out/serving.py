@@ -85,6 +85,13 @@ def _clamp_logprob(logprob: float) -> float:
     return -9999.0 if math.isnan(logprob) else max(logprob, -9999.0)
 
 
+def _sampled_logprobs(values: list[float] | None) -> GenerateLogProbs:
+    """``GenerateLogProbs`` for a ``sampled_logprobs_only`` request: only
+    ``sampled`` is set, clamped like ``content`` (``-inf`` and NaN become
+    ``-9999.0``) so it stays JSON-representable."""
+    return GenerateLogProbs(sampled=[_clamp_logprob(x) for x in values or ()])
+
+
 def _logprob_token(
     token_id: int, logprob: Logprob | None, tokenizer: TokenizerLike | None
 ) -> tuple[str, list[int] | None]:
@@ -200,6 +207,11 @@ class ServingTokens(GenerateBaseServing):
             raw_request.state.request_metadata = request_metadata
 
         sampling_params = request.sampling_params
+        if sampling_params.sampled_logprobs_only and request.output_mode != "tokens":
+            # ``sampled`` lives on the tokens-mode ``GenerateLogProbs``.
+            return self.create_error_response(
+                "sampling_params.sampled_logprobs_only requires output_mode='tokens'"
+            )
         max_num_seqs = self.engine_client.vllm_config.scheduler_config.max_num_seqs
         if sampling_params.n > max_num_seqs:
             return self.create_error_response(
@@ -417,9 +429,12 @@ class ServingTokens(GenerateBaseServing):
             out_logprobs = output.logprobs
 
             # This is top_logprobs in completions API
-            if sampling_params.logprobs is not None:
+            logprobs: GenerateLogProbs | ChatCompletionLogProbs | None
+            if sampling_params.sampled_logprobs_only:
+                # No per-token entries: content stays None, only sampled is set.
+                logprobs = _sampled_logprobs(output.sampled_logprobs)
+            elif sampling_params.logprobs is not None:
                 assert out_logprobs is not None, "Did not output logprobs"
-                logprobs: GenerateLogProbs | ChatCompletionLogProbs | None
                 if text_mode:
                     logprobs = self._create_text_logprobs(
                         token_ids=token_ids,
@@ -589,10 +604,12 @@ class ServingTokens(GenerateBaseServing):
                     ):
                         continue
 
-                    if sampling_params.logprobs is not None:
+                    logprobs: GenerateLogProbs | ChatCompletionLogProbs | None
+                    if sampling_params.sampled_logprobs_only:
+                        logprobs = _sampled_logprobs(output.sampled_logprobs)
+                    elif sampling_params.logprobs is not None:
                         out_logprobs = output.logprobs
                         assert out_logprobs is not None, "Did not output logprobs"
-                        logprobs: GenerateLogProbs | ChatCompletionLogProbs | None
                         if text_mode:
                             logprobs = self._create_text_logprobs(
                                 token_ids=delta_token_ids,
