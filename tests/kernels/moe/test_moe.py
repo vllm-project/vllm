@@ -501,6 +501,63 @@ def test_fused_shared_expert_alignment(workspace_init):
     torch.testing.assert_close(actual, expected, atol=2e-2, rtol=0)
 
 
+@pytest.mark.skipif(
+    not current_platform.is_device_capability((9, 0)),
+    reason="small BF16 SiLU expert path is Hopper-only",
+)
+@pytest.mark.parametrize("m", [1, 2])
+def test_small_bf16_silu_expert_path(m: int, workspace_init, monkeypatch):
+    import vllm.model_executor.layers.fused_moe.experts.triton_moe as triton_moe
+
+    calls = []
+    small_path = triton_moe.small_bf16_silu_experts
+
+    def spy(*args, **kwargs):
+        calls.append(args[0].shape[0])
+        return small_path(*args, **kwargs)
+
+    monkeypatch.setattr(triton_moe, "small_bf16_silu_experts", spy)
+
+    set_random_seed(7)
+    e, topk, k, n = 32, 8, 1024, 512
+    dtype = torch.bfloat16
+    a = torch.randn((m, k), device=DEVICE_TYPE, dtype=dtype) / 8
+    w1 = torch.randn((e, 2 * n, k), device=DEVICE_TYPE, dtype=dtype) / 32
+    w2 = torch.randn((e, k, n), device=DEVICE_TYPE, dtype=dtype) / 24
+    topk_ids = torch.stack(
+        [torch.randperm(e, device=DEVICE_TYPE)[:topk] for _ in range(m)]
+    ).to(torch.int32)
+    topk_weights = torch.rand((m, topk), device=DEVICE_TYPE, dtype=torch.float32)
+    topk_weights /= topk_weights.sum(dim=-1, keepdim=True)
+
+    moe_config = make_dummy_moe_config(
+        num_experts=e,
+        experts_per_token=topk,
+        hidden_dim=k,
+        intermediate_size=n,
+        in_dtype=dtype,
+        max_num_tokens=m,
+    )
+    modular_moe = modular_triton_fused_moe(moe_config, FUSED_MOE_UNQUANTIZED_CONFIG)
+
+    with set_current_vllm_config(vllm_config):
+        expected = torch_experts(a, w1, w2, topk_weights, topk_ids)
+        actual = modular_moe.apply(
+            hidden_states=a,
+            w1=w1,
+            w2=w2,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            activation=MoEActivation.SILU,
+            global_num_experts=e,
+            expert_map=None,
+            apply_router_weight_on_input=False,
+        )
+
+    assert calls == [m]
+    torch.testing.assert_close(actual, expected, atol=2e-2, rtol=0)
+
+
 def test_fused_moe_int64_overflow(workspace_init):
     """Regression test for int32 overflow in stride*offset products.
 
