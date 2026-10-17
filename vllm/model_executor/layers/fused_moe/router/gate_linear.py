@@ -7,6 +7,7 @@ import vllm._custom_ops as ops
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import PluggableLayer
+from vllm.model_executor.determinism.batch_invariant import mm_batch_invariant
 from vllm.model_executor.layers.linear import (
     ReplicatedLinear,
     UnquantizedLinearMethod,
@@ -350,6 +351,18 @@ class GateLinear(ReplicatedLinear):
                 output = torch.ops.vllm.fp32_router_gemm_dispatch(x, self.weight, False)
             else:
                 output = torch.mm(x, self.weight.T, out_dtype=torch.float32)
+            return self._return(output)
+
+        # Batch invariant: the specialized tiers are off, and F.linear would
+        # round the logits to the weight dtype first. One persistent matmul
+        # with FP32 out keeps a single K order at every M.
+        if (
+            envs.VLLM_BATCH_INVARIANT
+            and self._router_gemm_no_bias
+            and self.out_dtype == torch.float32
+            and x.dtype == self.weight.dtype == torch.bfloat16
+        ):
+            output = mm_batch_invariant(x, self.weight.T, out_dtype=torch.float32)
             return self._return(output)
 
         # Tier 7: F.linear (ReplicatedLinear)
