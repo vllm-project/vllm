@@ -103,6 +103,17 @@ The heartbeat is deferred to the next step once the handshake completes --- the 
 
 For multi-turn conversations, [bidirectional KV transfer](../features/disagg_prefill.md) allows D to cache KV blocks that P can pull from on subsequent turns. Since the timing of the next conversational turn is **client-dependent** (not controlled by the system), the heartbeat-based lease mechanism does not apply here. Instead, a separate `decoder_kv_blocks_ttl` (default 480s) provides a simple fixed timeout for blocks cached on D. If the client takes too long to continue the conversation, the blocks expire. D communicates back the expiry time so P can know when blocks are expired and recompute. Because the deadline is a `perf_counter` value produced on D and the two engines run in separate processes (with unrelated clocks), P estimates the clock offset to D from the handshake round-trip and applies it before comparing the deadline against its own `perf_counter`. Future work may extend a symmetric heartbeat mechanism to this case.
 
+## Lease Verification on the Reader
+
+A lease can lapse while D is alive: heartbeats may be delayed by a lost on the network. P then frees the blocks and may reuse them for another request, but D's READ addresses blocks by number and still succeeds, so D would decode another request's KV without any error. To turn this into a failed KV load, P exports a **lease slot** per request that D checks after the READ.
+
+- **On P:** each worker registers an `int64` array in DRAM with NIXL and advertises it in the handshake metadata. When a `do_remote_decode` request is first scheduled, the scheduler assigns it a slot and a unique nonce, and the workers write the nonce into the slot in that same step. The slot and nonce are exported in `kv_transfer_params` as `remote_lease_slot` and `remote_lease_nonce`. A worker zeroes the slot before it reports the request in `finished_sending`, whether the blocks are released by a read notification or by lease expiry, and the scheduler reuses a slot only after the blocks were freed.
+- **On D:** a READ that carries a lease is submitted without a completion notification. Once all block READs of the request completed, D reads the request's lease slot on every remote rank it read from into a local cell; the checks of all requests that complete in the same step share one READ per remote rank. Only if every slot still holds the nonce does D report the request as received; otherwise the load fails and `kv_load_failure_policy` applies. D then sends the read notification, which carries the nonce so that P ignores notifications for an earlier request with the same id.
+
+Because P zeroes the slot before the blocks can be reused and the slot READ starts after the block READs completed, a matching nonce proves that P held the blocks for the whole READ. The check needs no clock synchronization and covers both a read that starts after the lease lapsed and a lease that lapses mid-read. It costs one small READ per remote rank, typically delays the KV load by one D step, and does not involve P's engine loop.
+
+A pull that cannot be verified fails the KV load as well: the lease fields are missing from `kv_transfer_params` (a router dropped them, or P ran out of slots), or the slot READ fails. With `kv_lease_verification` enabled (the default), an instance that cannot register its lease slots in DRAM fails to start rather than failing every pull. Turn-2 readbacks from D in bidirectional mode are not verified yet.
+
 ## Key Design Decisions
 
 - **Per-request leasing, not per-instance.** P has no notion of which D its KV blocks belong to --- block ownership is only resolved after prefill completes and the router selects a D. Leasing at the request level avoids coupling P/D selection in the load balancer. In practice, D batches lease extensions toward the same P by grouping requests with the same `remote_engine_id`.
@@ -119,10 +130,12 @@ For multi-turn conversations, [bidirectional KV transfer](../features/disagg_pre
 
 The lease mechanism is controlled through `kv_connector_extra_config` in `--kv-transfer-config`:
 
-| Parameter               | Default | Description                                                                                                                                                   |
-|-------------------------|---------|---------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `kv_lease_duration`     | 30s     | Initial lease duration on P. Heartbeat interval and extension amount are derived automatically (`interval = duration // 6`, `extension = duration * 2 // 3`). |
-| `decoder_kv_blocks_ttl` | 480s    | TTL for KV blocks cached on D in bidirectional transfer mode. Simple fixed timeout, not renewed via heartbeats.                                               |
+| Parameter               | Default                    | Description                                                                                                                                                   |
+|-------------------------|----------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `kv_lease_duration`     | 30s                        | Initial lease duration on P. Heartbeat interval and extension amount are derived automatically (`interval = duration // 6`, `extension = duration * 2 // 3`). |
+| `decoder_kv_blocks_ttl` | 480s                       | TTL for KV blocks cached on D in bidirectional transfer mode. Simple fixed timeout, not renewed via heartbeats.                                               |
+| `kv_lease_verification` | `true`                     | Use pulled KV only after verifying the lease; a pull that cannot be verified fails the KV load. `false` pulls without verification.                           |
+| `kv_lease_slots`        | KV blocks + `max_num_seqs` | Number of lease slots on P. A request that finds no free slot gets no lease, so verifying decoders decline its KV.                                            |
 
 ```bash
 vllm serve <MODEL> \

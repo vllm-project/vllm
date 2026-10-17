@@ -37,6 +37,13 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorTransferResults,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.lease_slots import (
+    LeaseVerifier,
+    ProducerLeaseSlots,
+    get_num_lease_slots,
+    lease_slot_descs,
+    lease_verification_enabled,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     GET_META_MSG,
     NixlAgentMetadata,
@@ -135,6 +142,12 @@ class NixlBaseConnectorWorker:
     # Layer-name routing is supported only by NixlPushConnector for HMA or
     # packed KV caches under PP.
     _supports_pp_hma = False
+
+    # Pull-mode lease slots, set in register_kv_caches when DRAM can be
+    # registered: exported to readers / used to verify reads.
+    _lease_slots: ProducerLeaseSlots | None = None
+    _lease_verifier: LeaseVerifier | None = None
+    _lease_verification = True
 
     def _compute_desc_ids(
         self,
@@ -881,6 +894,7 @@ class NixlBaseConnectorWorker:
         self._failed_recv_reqs: queue.Queue[ReqId] = queue.Queue()
         self._recv_failures: set[ReqId] = set()
         self._pending_recv_notifs: dict[ReqId, list[tuple[str, bytes]]] = {}
+        self._lease_verification = lease_verification_enabled(vllm_config)
 
         # Handshake metadata of this worker for NIXL transfers.
         self.xfer_handshake_metadata: NixlHandshakePayload | None = None
@@ -1813,6 +1827,8 @@ class NixlBaseConnectorWorker:
             descs = self.nixl_wrapper.get_reg_descs(ranges_for_mem_type, mem_type)
             self.nixl_wrapper.register_memory(descs, backends=self.nixl_backends)
             self._registered_descs.append(descs)
+        if self._TRANSFER_MODE == "pull":
+            self._register_lease_slots()
 
         self.device_kv_caches = kv_caches
         self.dst_num_blocks[self.engine_id] = self.num_blocks
@@ -1841,6 +1857,7 @@ class NixlBaseConnectorWorker:
         self.src_xfer_handles_by_block_size[self.block_size], self.src_blocks_data = (
             self.register_local_xfer_handler(self.block_size)
         )
+        lease_tensor = self._lease_slots.tensor if self._lease_slots else None
 
         # After KV Caches registered, listen for new connections.
         agent_metadata = NixlAgentMetadata(
@@ -1869,6 +1886,10 @@ class NixlBaseConnectorWorker:
             pcp_size=self.pcp_size,
             region_members=self.region_members,
             packed_member_layouts=self._packed_member_layouts,
+            lease_slots_addr=(
+                lease_tensor.data_ptr() if lease_tensor is not None else None
+            ),
+            lease_num_slots=lease_tensor.numel() if lease_tensor is not None else 0,
         )
         # Wrap metadata in payload with hash for defensive decoding
         assert self.compat_hash is not None
@@ -1877,6 +1898,40 @@ class NixlBaseConnectorWorker:
             compatibility_hash=self.compat_hash,
             agent_metadata_bytes=encoder.encode(agent_metadata),
         )
+
+    def _register_lease_slots(self) -> None:
+        """Register the lease slots and landing cells of pull mode in DRAM.
+
+        Raises:
+            RuntimeError: If they cannot be registered while lease
+                verification is enabled, as no pull could then be verified.
+
+        """
+        slots = ProducerLeaseSlots(
+            get_num_lease_slots(self.vllm_config, self.kv_cache_config)
+        )
+        verifier = LeaseVerifier(self.nixl_wrapper)
+        try:
+            descs = self.nixl_wrapper.register_memory(
+                [slots.tensor, verifier.tensor], backends=self.nixl_backends
+            )
+        except Exception as e:
+            if self._lease_verification:
+                raise RuntimeError(
+                    f"Cannot register NIXL KV lease slots in DRAM ({e}), so "
+                    "pulled KV cannot be verified. Set kv_lease_verification "
+                    "to false in kv_connector_extra_config to pull without it."
+                ) from e
+            logger.exception("Cannot register NIXL KV lease slots in DRAM.")
+            return
+        self._registered_descs.append(descs)
+        verifier.local_handle = self.nixl_wrapper.prep_xfer_dlist(
+            "NIXL_INIT_AGENT",
+            lease_slot_descs(verifier.tensor.data_ptr(), verifier.tensor.numel()),
+            mem_type="DRAM",
+        )
+        self._lease_slots = slots
+        self._lease_verifier = verifier
 
     def _ple_page_len(self) -> int:
         """Transfer length of one PLE state page.
@@ -2534,6 +2589,20 @@ class NixlBaseConnectorWorker:
                 remote_agent_name, blocks_data, mem_type=remote_mem_types.pop()
             )
         )
+        if (
+            self._lease_verifier is not None
+            and nixl_agent_meta.lease_slots_addr is not None
+        ):
+            lease_descs = lease_slot_descs(
+                nixl_agent_meta.lease_slots_addr, nixl_agent_meta.lease_num_slots
+            )
+            self._lease_verifier.add_remote(
+                engine_id,
+                remote_tp_rank,
+                self.nixl_wrapper.prep_xfer_dlist(
+                    remote_agent_name, lease_descs, mem_type="DRAM"
+                ),
+            )
 
         return remote_agent_name
 
@@ -3005,6 +3074,7 @@ class NixlBaseConnectorWorker:
         done_recving, newly_failed = self._pop_done_transfers(self._recving_transfers)
         if newly_failed:
             self._recv_failures.update(newly_failed)
+        done_recving = self._verify_read_leases(done_recving)
 
         done_sending.update(self._replicated_pcp_done_sending)
         self._replicated_pcp_done_sending.clear()
@@ -3053,6 +3123,8 @@ class NixlBaseConnectorWorker:
             # Skip KV sync and post-processing for failed requests
             if req_id in failed_recv_reqs:
                 self._pending_recv_notifs.pop(req_id, None)
+                if self._lease_verifier is not None:
+                    self._lease_verifier.discard(req_id)
                 # TODO (NickLucche) handle failed transfer for HMA.
                 if not self._is_hma_required:
                     self._invalid_block_ids.put(set(meta.local_block_ids[0]))
@@ -3127,6 +3199,8 @@ class NixlBaseConnectorWorker:
 
         # Handle timeout to avoid stranding blocks on remote.
         self._reap_expired_send_leases(done_sending)
+        if self._lease_slots is not None:
+            self._lease_slots.publish()
 
         self._cleanup_remote_engines()
         return KVConnectorTransferResults(
@@ -3155,6 +3229,37 @@ class NixlBaseConnectorWorker:
         """
         raise NotImplementedError
 
+    def _verify_read_leases(self, done_recving: set[ReqId]) -> set[ReqId]:
+        """Hold back finished pulls until their remote leases are checked.
+
+        Returns the requests to report this step: ``done_recving`` minus the
+        pulls whose checks start now, plus the pulls whose checks finished.
+        """
+        verifier = self._lease_verifier
+        if verifier is None:
+            return done_recving
+        reads_done = {
+            req_id
+            for req_id in done_recving
+            if verifier.has_checks(req_id) and req_id not in self._recv_failures
+        }
+        verified, failures = verifier.step(reads_done)
+        for req_id, reason in failures.items():
+            logger.warning(
+                "Declining KV pulled for request %s: %s. The KV load fails.",
+                req_id,
+                reason,
+            )
+            self.xfer_stats.record_lease_check_failure()
+            # The block READs completed, so every source may release its blocks.
+            self._send_pending_recv_notifs(req_id)
+            self._recv_failures.add(req_id)
+        return (done_recving - reads_done) | verified | failures.keys()
+
+    def _clear_lease_slot(self, req_id: ReqId) -> None:
+        if self._lease_slots is not None:
+            self._lease_slots.clear(req_id)
+
     def _reap_expired_send_leases(self, done_sending: set[str]) -> None:
         """Reclaim expired send-side KV leases into ``done_sending``.
 
@@ -3181,6 +3286,7 @@ class NixlBaseConnectorWorker:
             )
             self._reqs_to_process.remove(req_id)
             del self._reqs_to_send[req_id]
+            self._clear_lease_slot(req_id)
             done_sending.add(req_id)
 
     def _handle_heartbeat(self, payload: str) -> None:
@@ -3719,12 +3825,15 @@ class NixlBaseConnectorWorker:
         it runs, so a transfer that outlives the TTL leaves its engine looking
         idle. A peer that has lost its NIC holds one indefinitely.
         """
-        return {
+        busy = {
             meta.remote.engine_id
             for req_id in self._recving_transfers
             if (meta := self._recving_metadata.get(req_id)) is not None
             and meta.remote is not None
         }
+        if self._lease_verifier is not None:
+            busy |= self._lease_verifier.busy_engines()
+        return busy
 
     def _track_remote_engine_replacement(
         self, engine_id: EngineId, host: str, port: int
@@ -3835,6 +3944,8 @@ class NixlBaseConnectorWorker:
         # Notif-only engines (push-mode D side) have no descriptor state.
         for handle in self.dst_xfer_side_handles.pop(engine_id, {}).values():
             self.nixl_wrapper.release_dlist_handle(handle)
+        if self._lease_verifier is not None:
+            self._lease_verifier.release_engine(engine_id)
         # Pop under the handshake lock; NIXL teardown stays outside it.
         with self._handshake_lock:
             agents = self._remote_agents.pop(engine_id)
@@ -3919,4 +4030,6 @@ class NixlBaseConnectorWorker:
             for handle in handles:
                 self.nixl_wrapper.release_xfer_handle(handle)
         self._recving_transfers.clear()
+        if self._lease_verifier is not None:
+            self._lease_verifier.shutdown()
         self._finish_shutdown()

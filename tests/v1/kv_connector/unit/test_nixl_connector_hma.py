@@ -19,6 +19,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl import base_worker as bw
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     NixlAgentMetadata,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.stats import (
+    NixlKVConnectorStats,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
     NixlConnectorWorker,
 )
@@ -105,6 +108,8 @@ def region_pull_worker():
     worker._engine_by_address = {("localhost", 1): "P"}
     worker._read_blocks_mixed = MagicMock()
     worker.nixl_wrapper = MagicMock()
+    worker.xfer_stats = NixlKVConnectorStats()
+    worker._lease_verification = False
     return worker
 
 
@@ -694,6 +699,8 @@ def test_read_blocks_for_req_expands_remote_ids(
     resolved_types = tuple(spec_name_to_type[n] for n in group_spec_types)
 
     worker = object.__new__(NixlConnectorWorker)
+    worker.xfer_stats = NixlKVConnectorStats()
+    worker._lease_verification = False
     worker._physical_blocks_per_logical_kv_block = local_physical_per_logical
     worker._invalid_remote_engines = set()
     worker._remote_agents = {"remote-engine": {}}
@@ -2301,7 +2308,7 @@ def test_register_kv_caches_hybrid_mla_dual_purpose_regions():
     ]
     fa_descs = expand_strided_descs(fa_runs)
     assert fa_descs[:, 0].tolist() == expected_addrs
-    worker.nixl_wrapper.register_memory.assert_called_once()
+    worker.nixl_wrapper.get_reg_descs.assert_called_once()
     metadata = msgspec.msgpack.decode(
         worker.xfer_handshake_metadata.agent_metadata_bytes,
         type=NixlAgentMetadata,

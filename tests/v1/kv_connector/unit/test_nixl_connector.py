@@ -49,6 +49,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
     NixlHandshakePayload,
     NixlKVConnectorStats,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.lease_slots import (
+    LeaseSlotAllocator,
+    LeaseVerifier,
+    ProducerLeaseSlots,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     HeartbeatInfo,
     RemoteMeta,
@@ -413,6 +418,64 @@ def test_prefill_exports_cached_tokens_in_kv_transfer_params():
         output.kv_transfer_params["remote_prefill_cached_tokens"]
         == NUM_TOKENS - BLOCK_SIZE
     )
+
+
+def test_prefill_lease_slot_is_reused_only_after_send():
+    """P exports the lease its workers write when the prefill is scheduled,
+    and gives the slot to another request only once the KV was sent."""
+    scheduler = create_scheduler(create_vllm_config())
+
+    def prefill(request_id: int) -> tuple[int, int]:
+        request = create_request(
+            request_id=request_id, num_tokens=32, do_remote_decode=True
+        )
+        scheduler.add_request(request)
+        scheduler_output = scheduler.schedule()
+        meta = scheduler_output.kv_connector_metadata
+        assert isinstance(meta, NixlConnectorMetadata)
+        lease = meta.lease_slots_to_arm[request.request_id]
+        outputs = scheduler.update_from_output(
+            scheduler_output, create_model_runner_output([request])
+        )
+        params = outputs[0].outputs[0].kv_transfer_params
+        assert (params["remote_lease_slot"], params["remote_lease_nonce"]) == lease
+        return lease
+
+    slot, nonce = prefill(1)
+    assert prefill(2)[0] != slot
+
+    scheduler.update_from_output(
+        scheduler.schedule(),
+        create_model_runner_output([], finished_sending={"id-1"}),
+    )
+    reused_slot, reused_nonce = prefill(3)
+    assert reused_slot == slot
+    assert reused_nonce != nonce
+
+
+@pytest.mark.cpu_test
+def test_lease_slot_reused_in_one_step_holds_new_nonce():
+    """Workers zero released slots before writing new leases, so a slot the
+    scheduler releases and hands out again in one step holds the new nonce.
+    A lease released before workers saw it needs no clear."""
+    allocator = LeaseSlotAllocator(num_slots=2)
+    slots = ProducerLeaseSlots(num_slots=2)
+    first = allocator.acquire("first")
+    assert first is not None
+    to_arm, to_clear = allocator.take_updates()
+    slots.update(to_clear, to_arm)
+
+    allocator.release("first", clear=True)
+    second = allocator.acquire("second")
+    assert second is not None and second[0] == first[0]
+    to_arm, to_clear = allocator.take_updates()
+    slots.update(to_clear, to_arm)
+    assert slots.tensor[second[0]] == second[1] != first[1]
+
+    allocator.release("second", clear=False)
+    allocator.acquire("third")
+    allocator.release("third", clear=True)
+    assert allocator.take_updates() == ({}, set())
 
 
 @patch(
@@ -1031,7 +1094,7 @@ class TestNixlHandshake:
         conn_p1.connector_worker._reqs_to_process.add(req_id)
 
         # Simulate a read notification coming from D with (tp=1, dp=2).
-        notif = f"{req_id}:{d_tp_size}".encode()
+        notif = f"{req_id}:{d_tp_size}:".encode()
         # D0-0->P0 notif
         conn_p0.connector_worker.nixl_wrapper.get_new_notifs = lambda: {
             "agent": [notif]
@@ -1942,7 +2005,7 @@ def test_notification_after_expiry_is_counted(default_vllm_config, dist_init):
     worker._reqs_to_process.add("known")
     worker._reqs_to_send["known"] = time.perf_counter() + 10
     worker.nixl_wrapper.get_new_notifs = MagicMock(
-        return_value={"decode-agent": [b"known:1", b"unknown:1"]}
+        return_value={"decode-agent": [b"known:1:", b"unknown:1:"]}
     )
 
     assert worker._get_new_notifs() == {"known"}
@@ -2410,6 +2473,147 @@ def test_hisparse_dram_rank0_only_dram_only_read_completes(recv_worker):
     worker.nixl_wrapper.send_notif.assert_called_once_with(
         "prefill", notif_msg=b"request:1"
     )
+
+
+def _serve_lease_reads(worker, producer: ProducerLeaseSlots) -> LeaseVerifier:
+    """Give ``worker`` a lease verifier whose READs copy ``producer`` slots."""
+    verifier = LeaseVerifier(worker.nixl_wrapper, num_cells=8)
+    verifier.local_handle = 1
+    verifier.add_remote("P", 0, handle=2)
+    worker._lease_verifier = verifier
+    reads: dict[int, tuple[list[int], list[int]]] = {}
+
+    def make_prepped_xfer(op, local_handle, cells, remote_handle, slots):
+        handle = 1000 + len(reads)
+        reads[handle] = (cells, slots)
+        return handle
+
+    def transfer(handle):
+        cells, slots = reads[handle]
+        verifier.tensor[cells] = producer.tensor[slots]
+        return "PROC"
+
+    worker.nixl_wrapper.make_prepped_xfer.side_effect = make_prepped_xfer
+    worker.nixl_wrapper.transfer.side_effect = transfer
+    return verifier
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("released_mid_read", [False, True])
+def test_pulled_kv_is_used_only_if_producer_held_the_lease(
+    recv_worker, released_mid_read
+):
+    """Pulled KV is reported received only if the producer still held the
+    blocks once the READ completed; a lease that lapsed mid-read fails the
+    load. Either way the producer is notified only after the check."""
+    worker = recv_worker
+    producer = ProducerLeaseSlots(num_slots=4)
+    producer.update(set(), {"prefill-request": (3, 7)})
+    verifier = _serve_lease_reads(worker, producer)
+    worker._recving_transfers = {"request": [101]}
+    worker._pending_recv_notifs = {"request": [("prefill", b"prefill-request:1:7")]}
+    verifier.add_check("request", "P", 0, slot=3, nonce=7)
+    block_read = ["PROC"]
+    worker.nixl_wrapper.check_xfer_state.side_effect = lambda handle: (
+        block_read[0] if handle == 101 else "DONE"
+    )
+
+    assert worker.get_transfer_results().finished_recving == set()
+    if released_mid_read:
+        producer.clear("prefill-request")
+    block_read[0] = "DONE"
+    result = worker.get_transfer_results()
+
+    assert result.finished_recving == {"request"}
+    assert result.failed_recving == ({"request"} if released_mid_read else set())
+    worker.nixl_wrapper.send_notif.assert_called_once_with(
+        "prefill", notif_msg=b"prefill-request:1:7"
+    )
+
+
+@pytest.mark.cpu_test
+def test_pull_fails_when_lease_slot_cannot_be_read(recv_worker):
+    """Without the slot value the lease may be gone, so the pull fails."""
+    worker = recv_worker
+    verifier = _serve_lease_reads(worker, ProducerLeaseSlots(num_slots=4))
+    worker.nixl_wrapper.transfer.side_effect = lambda handle: "ERR"
+    worker.nixl_wrapper.check_xfer_state.return_value = "DONE"
+    worker._recving_transfers = {"request": [101]}
+    verifier.add_check("request", "P", 0, slot=3, nonce=7)
+
+    assert worker.get_transfer_results().failed_recving == {"request"}
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("verification", [True, False])
+def test_pull_without_lease_is_declined_unless_verification_is_off(
+    recv_worker, verification
+):
+    worker = recv_worker
+    worker._lease_verification = verification
+    meta = ReqMeta(
+        local_block_ids=([1],),
+        local_physical_block_ids=([1],),
+        tp_size=1,
+        remote=RemoteMeta(
+            block_ids=([1],),
+            host="localhost",
+            port=1234,
+            engine_id="P",
+            request_id="prefill-request",
+        ),
+    )
+
+    verify = worker._should_verify_lease("request", meta, (0,))
+
+    assert verify is (None if verification else False)
+    assert worker.xfer_stats.data["num_lease_check_failures"] == (
+        [1] if verification else []
+    )
+
+
+@pytest.fixture
+def send_worker():
+    """Producer send state without distributed or device initialization."""
+    worker = object.__new__(NixlConnectorWorker)
+    worker.transfer_topo = MagicMock()
+    worker.xfer_stats = NixlKVConnectorStats()
+    worker._reqs_to_send = {"req": time.perf_counter() + 30}
+    worker._reqs_to_process = {"req"}
+    worker.consumer_notification_counts_by_req = defaultdict(int)
+    worker.expected_consumer_notifications_by_req = {}
+    worker._lease_slots = ProducerLeaseSlots(num_slots=4)
+    worker._lease_slots.update(set(), {"req": (3, 7)})
+    worker.nixl_wrapper = MagicMock()
+    return worker
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("release", ["read_notification", "lease_expiry"])
+def test_producer_zeroes_lease_slot_when_releasing_blocks(send_worker, release):
+    worker = send_worker
+    if release == "read_notification":
+        worker.nixl_wrapper.get_new_notifs.return_value = {"decode": [b"req:1:7"]}
+        done_sending = worker._get_new_notifs()
+    else:
+        worker._reqs_to_send["req"] = 0.0
+        done_sending = set()
+        worker._reap_expired_send_leases(done_sending)
+
+    assert done_sending == {"req"}
+    assert worker._lease_slots.tensor[3] == 0
+
+
+@pytest.mark.cpu_test
+def test_producer_ignores_notification_of_an_earlier_lease(send_worker):
+    """A late reader of an earlier request with the same id must not release
+    the blocks that the current request's reader still needs."""
+    worker = send_worker
+    worker.nixl_wrapper.get_new_notifs.return_value = {"decode": [b"req:1:6"]}
+
+    assert worker._get_new_notifs() == set()
+    assert worker._reqs_to_send.keys() == {"req"}
+    assert worker._lease_slots.tensor[3] == 7
 
 
 def element_byte_addrs(view: torch.Tensor) -> list[int]:
@@ -3198,7 +3402,7 @@ class TestPeerReplacement:
 
         self.worker.start_load_kv(NixlConnectorMetadata())
         self.transport.send_notif.assert_called_once_with(
-            "old", notif_msg=b"old-prefill:1"
+            "old", notif_msg=b"old-prefill:1:"
         )
         result = self.worker.get_transfer_results()
         assert result.finished_recving == {"old-req"}
@@ -4757,8 +4961,8 @@ def test_handshake_decode_errors(default_vllm_config, dist_init, error_scenario)
         # Every broadcast notif must be keyed by the prefill request id.
         # Pre-fix this used the *decode* request id, which prefill ranks
         # didn't recognize.
-        expected_notif = f"{prefill_req_id}:{decode_tp_size}".encode()
-        bad_notif = f"{decode_req_id}:{decode_tp_size}".encode()
+        expected_notif = f"{prefill_req_id}:{decode_tp_size}:".encode()
+        bad_notif = f"{decode_req_id}:{decode_tp_size}:".encode()
         for agent, notif in send_notif_calls:
             assert notif == expected_notif, (
                 f"Broadcast notif to {agent!r} must use prefill_req_id; "
