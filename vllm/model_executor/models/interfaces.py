@@ -1304,7 +1304,15 @@ class SupportsRealtime(Protocol):
         audio_stream: AsyncGenerator[np.ndarray, None],
         input_stream: asyncio.Queue[list[int]],
         model_config: "ModelConfig",
-    ) -> AsyncGenerator["PromptType", None]: ...
+        language: str | None = None,
+        request_prompt: str = "",
+    ) -> AsyncGenerator["PromptType", None]:
+        """Turn the session's audio stream into prompts for the engine.
+
+        `language` and `request_prompt` are the `language` and `prompt` set in
+        the realtime `session.update`.
+        """
+        ...
 
 
 @overload
