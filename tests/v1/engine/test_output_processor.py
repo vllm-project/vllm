@@ -19,6 +19,11 @@ from tests.v1.engine.utils import (
 )
 from vllm import PoolingParams
 from vllm.config.watermarking import WatermarkConfig
+from vllm.distributed.aux_output_connector.routed_experts import (
+    append_routed_experts,
+    pack_routed_experts,
+    snapshot_routed_experts,
+)
 from vllm.logprobs import FlatLogprobs, Logprob, PromptLogprobs, SampleLogprobs
 from vllm.lora.request import LoRARequest
 from vllm.outputs import (
@@ -49,6 +54,7 @@ from vllm.v1.metrics.loggers import PrometheusStatLogger
 from vllm.v1.metrics.prometheus import unregister_vllm_metrics
 from vllm.v1.metrics.stats import IterationStats, PrefillStats, SchedulerStats
 from vllm.v1.outputs import SamplingMaskLists
+from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 
 
 @pytest.mark.parametrize("flat_logprobs", [False, True])
@@ -67,7 +73,7 @@ def test_delta_output_without_new_tokens_returns_empty_logprobs(
     state.output_kind = RequestOutputKind.DELTA
     state.request_index = 0
     state.sampling_mask_chunks = []
-    state.routed_experts_chunks = []
+    state.routed_experts = None
     state.spec_decode_metrics = None
 
     output = state._new_completion_output([], None, None)
@@ -92,7 +98,7 @@ def test_completion_output_preserves_each_sampling_mask_position() -> None:
         ),
         SamplingMaskLists(token_ids=np.array([30, 31, 32])),
     ]
-    state.routed_experts_chunks = []
+    state.routed_experts = None
     state.spec_decode_metrics = None
     state.weight_version_starts = []
 
@@ -1520,7 +1526,11 @@ async def test_request_output_collector():
     assert output.outputs[0].cumulative_logprob == cumulative_logprob_expected
 
 
-def test_routed_experts_are_accumulated_until_finish():
+@pytest.mark.parametrize(
+    "finish_reason", [FinishReason.LENGTH, FinishReason.STOP, FinishReason.ABORT]
+)
+@pytest.mark.parametrize("stream_input", [False, True])
+def test_routed_experts_are_accumulated_until_finish(finish_reason, stream_input):
     state = RequestState(
         request_id="request-int",
         external_req_id="request",
@@ -1542,21 +1552,100 @@ def test_routed_experts_are_accumulated_until_finish():
         queue=None,
         log_stats=False,
         stream_interval=1,
+        stream_input=stream_input,
     )
     prompt_chunk = np.arange(24, dtype=np.uint8).reshape(4, 3, 2)
     decode_chunk = np.arange(12, dtype=np.uint8).reshape(2, 3, 2) + 24
-    state.routed_experts_chunks.append(prompt_chunk)
+    state.routed_experts = append_routed_experts(state.routed_experts, prompt_chunk)
 
     partial = state.make_request_output([5], None, None, None)
     assert partial is not None
     assert partial.outputs[0].routed_experts is None
 
-    state.routed_experts_chunks.append(decode_chunk)
-    finished = state.make_request_output([6], None, FinishReason.LENGTH, None)
+    state.routed_experts = append_routed_experts(state.routed_experts, decode_chunk)
+    accumulated = state.routed_experts[0]
+    finished = state.make_request_output([6], None, finish_reason, None)
     assert finished is not None
     np.testing.assert_array_equal(
         finished.outputs[0].routed_experts,
         np.concatenate((prompt_chunk, decode_chunk)),
+    )
+    snapshot = finished.outputs[0].routed_experts
+    assert snapshot.flags.writeable
+    assert (
+        np.shares_memory(snapshot, np.frombuffer(accumulated, np.uint8)) != stream_input
+    )
+    assert (state.routed_experts is None) != stream_input
+    # Resumed input and later accumulators cannot alter an earlier output.
+    state.routed_experts = append_routed_experts(state.routed_experts, decode_chunk)
+    np.testing.assert_array_equal(
+        snapshot, np.concatenate((prompt_chunk, decode_chunk))
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("abort_at_frontend", [True, False])
+async def test_aborted_request_preserves_incremental_batched_routed_experts(
+    abort_at_frontend,
+):
+    processor = OutputProcessor(None, log_stats=False)
+    collector = RequestOutputCollector(RequestOutputKind.CUMULATIVE, "request-int")
+    processor.add_request(
+        EngineCoreRequest(
+            request_id="request-int",
+            external_req_id="request",
+            prompt_token_ids=[1, 2],
+            mm_features=None,
+            arrival_time=0,
+            lora_request=None,
+            cache_salt=None,
+            data_parallel_rank=None,
+            sampling_params=SamplingParams(detokenize=False),
+            pooling_params=None,
+        ),
+        None,
+        queue=collector,
+    )
+    rows = np.arange(12, dtype=np.uint8).reshape(2, 3, 2)
+    message = EngineCoreOutputs(
+        outputs=[EngineCoreOutput("request-int", [3], routed_experts=rows)]
+    )
+    pack_routed_experts(message)
+    decoded = MsgpackDecoder(EngineCoreOutputs).decode(MsgpackEncoder().encode(message))
+    processor.process_outputs(decoded.outputs)
+    assert (await collector.get()).outputs[0].routed_experts is None
+
+    if abort_at_frontend:
+        processor.abort_requests(["request-int"], internal=True)
+    else:
+        processor.process_outputs(
+            [EngineCoreOutput("request-int", [], finish_reason=FinishReason.ABORT)]
+        )
+    final = await collector.get()
+    assert final.finished and final.outputs[0].finish_reason == "abort"
+    np.testing.assert_array_equal(final.outputs[0].routed_experts, rows)
+
+
+@pytest.mark.parametrize("dtype", [np.uint8, np.uint16])
+@pytest.mark.parametrize("step_rows", [0, 1, 3])
+def test_stop_truncation_preserves_earlier_routed_experts(dtype, step_rows):
+    """Truncation can remove only rows supplied by the current step."""
+    state = RequestState.__new__(RequestState)
+    state.routed_experts = None
+    state.detokenizer = Mock()
+    state.detokenizer.num_output_tokens.return_value = 5
+    earlier = np.arange(24, dtype=dtype).reshape(4, 3, 2)
+    current = np.ones((step_rows, 3, 2), dtype=dtype)
+    state.routed_experts = append_routed_experts(state.routed_experts, earlier)
+    state.routed_experts = append_routed_experts(state.routed_experts, current)
+    output = EngineCoreOutput("request", [10, 11, 12], routed_experts=current)
+
+    OutputProcessor._trim_surplus_tokens(state, output, num_prev_tokens=4)
+
+    assert output.new_token_ids == [10]
+    np.testing.assert_array_equal(
+        snapshot_routed_experts(state.routed_experts),
+        np.concatenate((earlier, current[:-2])),
     )
 
 
@@ -1822,7 +1911,7 @@ def test_sampling_masks_follow_output_kind(output_kind):
     state.output_kind = output_kind
     state.request_index = 0
     state.sampling_mask_chunks = []
-    state.routed_experts_chunks = []
+    state.routed_experts = None
     state.spec_decode_metrics = None
     state.weight_version_starts = []
 

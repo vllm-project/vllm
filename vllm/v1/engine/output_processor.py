@@ -7,9 +7,14 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
-import numpy as np
 import torch
 
+from vllm.distributed.aux_output_connector.routed_experts import (
+    RoutedExpertsAccumulator,
+    append_routed_experts,
+    snapshot_routed_experts,
+    trim_routed_experts,
+)
 from vllm.lora.request import LoRARequest
 from vllm.outputs import (
     STREAM_FINISHED,
@@ -236,7 +241,7 @@ class RequestState:
         self.stats = RequestStateStats(arrival_time=arrival_time) if log_stats else None
 
         # Routed experts accumulation (prompt + sample chunks)
-        self.routed_experts_chunks: list[np.ndarray] = []
+        self.routed_experts: RoutedExpertsAccumulator | None = None
         self.sampling_mask_chunks: list[SamplingMaskLists] = []
         # (weight version, first output-token index) for each span.
         self.weight_version_starts: list[tuple[str, int]] = []
@@ -509,10 +514,14 @@ class RequestState:
             if delta:
                 self.sampling_mask_chunks.clear()
 
-        # Concatenate routed experts on finish
+        # Snapshot routed experts on finish
         routed_experts = None
-        if finished and self.routed_experts_chunks:
-            routed_experts = np.concatenate(self.routed_experts_chunks, axis=0)
+        if finished and self.routed_experts is not None:
+            routed_experts = snapshot_routed_experts(
+                self.routed_experts, copy=self.streaming_input
+            )
+            if not self.streaming_input:
+                self.routed_experts = None
 
         return CompletionOutput(
             index=self.request_index,
@@ -773,8 +782,8 @@ class OutputProcessor:
             kv_transfer_params = engine_core_output.kv_transfer_params
             ec_transfer_params = engine_core_output.ec_transfer_params
             if engine_core_output.routed_experts is not None:
-                req_state.routed_experts_chunks.append(
-                    engine_core_output.routed_experts
+                req_state.routed_experts = append_routed_experts(
+                    req_state.routed_experts, engine_core_output.routed_experts
                 )
 
             if req_state.is_prefilling:
@@ -902,7 +911,9 @@ class OutputProcessor:
                 0, num_kept
             )
         if output.routed_experts is not None:
-            req_state.routed_experts_chunks[-1] = output.routed_experts[:-num_dropped]
+            trim_routed_experts(
+                req_state.routed_experts, output.routed_experts, num_dropped
+            )
 
     def _finish_request(self, req_state: RequestState) -> None:
         req_id = req_state.request_id

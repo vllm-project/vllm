@@ -288,9 +288,18 @@ class EngineCoreOutputs(
     # Weight version used for this step.
     weight_version: str | None = None
 
+    # Packed messages require matching client support for the batch payload.
+    routed_experts: tuple[np.ndarray, list[int]] | None = None
+
     def __post_init__(self):
         if self.timestamp == 0.0:
             self.timestamp = time.monotonic()
+        if self.routed_experts is not None:
+            from vllm.distributed.aux_output_connector.routed_experts import (
+                unpack_routed_experts,
+            )
+
+            unpack_routed_experts(self, self.routed_experts)
 
 
 class EngineCoreRequestType(enum.Enum):

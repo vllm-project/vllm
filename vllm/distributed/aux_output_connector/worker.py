@@ -15,7 +15,7 @@ import torch
 from vllm.config import VllmConfig
 from vllm.distributed.aux_output_connector.connector import (
     AuxOutputConnectorMetadata,
-    AuxRequestOutput,
+    AuxStepOutput,
 )
 from vllm.distributed.aux_output_connector.routed_experts import (
     RoutedExpertsBuffer,
@@ -76,7 +76,7 @@ class PendingAuxOutput:
             "cpu", non_blocking=True
         ).numpy()
 
-    def process_output(self) -> dict[str, AuxRequestOutput]:
+    def process_output(self) -> AuxStepOutput:
         return self.connector.process_output(self)
 
 
@@ -159,7 +159,7 @@ class AuxOutputWorkerConnector:
                 self._requests[request_id].pending_outputs += 1
         return pending_output
 
-    def process_output(self, pending: PendingAuxOutput) -> dict[str, AuxRequestOutput]:
+    def process_output(self, pending: PendingAuxOutput) -> AuxStepOutput:
         """Commit one consumed R3 snapshot and build request outputs.
 
         Request teardown deferred by begin_step is completed here once no
@@ -183,7 +183,7 @@ class AuxOutputWorkerConnector:
                 self._teardown(teardown)
             return outputs
 
-    def _commit_output(self, pending: PendingAuxOutput) -> dict[str, AuxRequestOutput]:
+    def _commit_output(self, pending: PendingAuxOutput) -> AuxStepOutput:
         buffer = self._buffer
         store = self._store
         assert buffer is not None and store is not None
@@ -201,7 +201,9 @@ class AuxOutputWorkerConnector:
         # Publish the whole batch before materializing any consumer output.
         materialize_outputs: list[tuple[str, int, int]] = []
         block_batches = []
-        outputs: dict[str, AuxRequestOutput] = {}
+        spans: dict[str, tuple[int, int, int]] = {}
+        packed = []
+        num_packed = 0
 
         # Use the ModelRunner's actual batch boundaries rather than rebuilding them.
         for request_id, token_start, start, end, sampled, rejected in zip(
@@ -252,9 +254,14 @@ class AuxOutputWorkerConnector:
 
             if sampled > 0 and emit_start <= token_end:
                 if emit_start >= capture_start:
-                    outputs[request_id] = AuxRequestOutput(
-                        emit_start, rows[emit_start - capture_start :]
+                    emit_rows = rows[emit_start - capture_start :]
+                    spans[request_id] = (
+                        emit_start,
+                        num_packed,
+                        num_packed + len(emit_rows),
                     )
+                    packed.append(emit_rows)
+                    num_packed += len(emit_rows)
                     state.emit_cursor = token_end
                 else:
                     materialize_outputs.append((request_id, emit_start, token_end))
@@ -283,9 +290,12 @@ class AuxOutputWorkerConnector:
                     )
             else:
                 rows = buffer.read(request_id, emit_start, token_end)
-            outputs[request_id] = AuxRequestOutput(emit_start, rows)
+            spans[request_id] = (emit_start, num_packed, num_packed + len(rows))
+            packed.append(rows)
+            num_packed += len(rows)
             state.emit_cursor = token_end
-        return outputs
+        packed_rows = np.concatenate(packed) if packed else routed_experts[:0]
+        return AuxStepOutput(packed_rows, spans)
 
     def _publish_blocks(
         self,
