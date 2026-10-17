@@ -598,7 +598,7 @@ def test_routed_experts_capturer_rejects_layer_before_restoring_rows(layer_id):
     with (
         patch(f"{_REC_MODULE}.get_forward_context", return_value=ctx),
         patch(f"{_REC_MODULE}.get_tp_group") as get_tp_group,
-        pytest.raises(IndexError, match="exceeds capture buffer"),
+        pytest.raises(IndexError, match="outside the capture buffer"),
     ):
         capturer.capture(layer_id, torch.ones(2, 2, dtype=torch.int32))
     get_tp_group.assert_not_called()
