@@ -605,6 +605,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
                         if request.return_weight_versions
                         else None
                     ),
+                    routed_experts_start=output.routed_experts_start,
                 )
                 choices.append(choice_data)
 

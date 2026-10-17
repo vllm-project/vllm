@@ -511,14 +511,23 @@ class RequestState:
 
         # Concatenate routed experts on finish
         routed_experts = None
+        routed_experts_start = None
         if finished and self.routed_experts_chunks:
             routed_experts = np.concatenate(self.routed_experts_chunks, axis=0)
+            # The rows stop before the last sampled token.
+            routed_experts_start = (
+                self.prompt_len
+                + self.detokenizer.num_output_tokens()
+                - 1
+                - len(routed_experts)
+            )
 
         return CompletionOutput(
             index=self.request_index,
             text=text,
             token_ids=token_ids,
             routed_experts=routed_experts,
+            routed_experts_start=routed_experts_start,
             sampling_mask=sampling_mask,
             logprobs=logprobs,
             cumulative_logprob=self.logprobs_processor.cumulative_logprob,

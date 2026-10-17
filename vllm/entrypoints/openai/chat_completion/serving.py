@@ -1138,6 +1138,7 @@ class OpenAIServingChat(GenerateBaseServing):
                 weight_versions=(
                     output.weight_versions if request.return_weight_versions else None
                 ),
+                routed_experts_start=output.routed_experts_start,
             )
             choice_data = maybe_filter_parallel_tool_calls(choice_data, request)
 

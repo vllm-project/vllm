@@ -451,6 +451,7 @@ class ServingTokens(GenerateBaseServing):
                 stop_reason=output.stop_reason,
                 token_ids=as_list(output.token_ids),
                 routed_experts=routed_experts_b64,
+                routed_experts_start=output.routed_experts_start,
                 sampling_mask=sampling_mask,
                 weight_versions=output.weight_versions,
             )
@@ -623,6 +624,7 @@ class ServingTokens(GenerateBaseServing):
                         stop_reason=output.stop_reason,
                         token_ids=as_list(delta_token_ids),
                         routed_experts=routed_experts_b64,
+                        routed_experts_start=output.routed_experts_start,
                         sampling_mask=sampling_mask,
                         weight_versions=output.weight_versions,
                     )

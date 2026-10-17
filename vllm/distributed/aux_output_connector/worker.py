@@ -32,6 +32,7 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsCapturer,
     bind_routed_experts_capturer,
 )
+from vllm.utils.math_utils import cdiv
 from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
 
 if TYPE_CHECKING:
@@ -44,6 +45,8 @@ class _WorkerRequestState:
     aux_output_keys: list[str] = field(default_factory=list)
     pending_blocks: list[tuple[int, np.ndarray]] = field(default_factory=list)
     capture_cursor: int | None = None
+    # Rows before this token are not buffered (see _commit_output).
+    buffer_start: int = 0
     scheduled_cursor: int = 0
     emit_cursor: int = 0
     pending_outputs: int = 0
@@ -242,9 +245,16 @@ class AuxOutputWorkerConnector:
                 )
                 capture_start = capture_cursor
 
+            if state.capture_cursor is None and capture_start % block_size:
+                # Local prefix hits are block aligned, so the KV before this
+                # token was loaded from a P/D prefill instance and this block
+                # has no rows here; buffer from the next block.
+                state.buffer_start = cdiv(capture_start, block_size) * block_size
+            skip = min(max(state.buffer_start - capture_start, 0), len(rows))
+
             emit_start = state.emit_cursor
             # Complete blocks without keys remain pending until a hash update.
-            completed = buffer.capture(request_id, capture_start, rows)
+            completed = buffer.capture(request_id, capture_start + skip, rows[skip:])
             token_end = capture_start + len(rows)
             state.capture_cursor = token_end
             state.scheduled_cursor = token_start + request_num_tokens
