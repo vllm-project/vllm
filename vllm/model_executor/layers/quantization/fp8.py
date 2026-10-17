@@ -17,13 +17,15 @@ from vllm.model_executor.kernels.linear.scaled_mm import (
 )
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
-    FusedMoEMethodBase,
     FusedMoeWeightScaleSupported,
     RoutedExperts,
     SharedExperts,
     UnquantizedFusedMoEMethod,
 )
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.fused_fp8_moe_method_base import (
+    FusedFp8MoEMethodBase,
+)
 from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     convert_to_fp8_moe_kernel_format,
@@ -461,7 +463,7 @@ class Fp8LinearMethod(LinearMethodBase):
         return self.fp8_linear.apply_weights(layer, x, bias)
 
 
-class Fp8MoEMethod(FusedMoEMethodBase):
+class Fp8MoEMethod(FusedFp8MoEMethodBase):
     """MoE method for FP8.
     Supports loading FP8 checkpoints with static weight scale and
     dynamic/static activation scale.
@@ -515,6 +517,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             )
 
         # Select Fp8 MoE backend
+        self.weight_quant_key = weight_key
         self.fp8_backend, self.experts_cls = select_fp8_moe_backend(
             config=self.moe,
             weight_key=weight_key,
@@ -671,6 +674,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         w13_input_scale: torch.Tensor | None,
         w2_input_scale: torch.Tensor | None,
     ) -> None:
+        w13, w2, w13_scale, w2_scale = self.maybe_pad_weights(
+            w13, w2, w13_scale, w2_scale
+        )
         # Shuffle weights to runtime format.
         w13, w2, w13_scale, w2_scale = convert_to_fp8_moe_kernel_format(
             fp8_backend=self.fp8_backend,
@@ -707,7 +713,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         if is_weights_pre_processed():
-            # Weights are already in kernel format; rebuild the kernel only.
+            # Weights are already in kernel format (padded); rebuild the kernel only.
+            self.update_kernel_sizes()
             self._init_moe_kernel(layer)
             return
 
