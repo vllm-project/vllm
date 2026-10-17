@@ -91,10 +91,10 @@ def _get_c_ptrs(
     # When sort_c is true, store the output in c_ptr using token order defined
     # in sorted_token_ids_ptr; otherwise, use the original token order from the prompt
     if sort_c:
-        offs_token_id = pid_m * BLOCK_SIZE_M + offs
+        offs_token_id = (pid_m * BLOCK_SIZE_M + offs).to(tl.int64)
         c_ptrs = (
             cur_c_ptr
-            + lora_id * EM * stride_cm
+            + lora_id.to(tl.int64) * EM * stride_cm
             + stride_cm * offs_token_id[:, None]
             + stride_cn * offs_cn[None, :]
         )
