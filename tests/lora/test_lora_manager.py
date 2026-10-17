@@ -1062,6 +1062,42 @@ def test_packed_loras(default_vllm_config, dist_init, dummy_model_gate_up, devic
     )
 
 
+@pytest.mark.parametrize("device", DEVICES)
+def test_packed_loras_layer_override(
+    default_vllm_config, dist_init, dummy_model_gate_up, device
+):
+    model = dummy_model_gate_up
+    model.gate_up_proj.lora_packed_modules = ["gate_proj", "gate_proj"]
+    model_lora = create_packed_lora(
+        1,
+        model,
+        module_name="gate_up_proj",
+        replaced_module_names=["gate_proj", "up_proj"],
+        device=device,
+        empty_replaced_module_name="up_proj",
+    )
+    gate_lora = model_lora.get_lora("gate_proj")
+
+    manager = LoRAModelManager(
+        model,
+        2,
+        2,
+        2,
+        LoRAConfig(
+            max_lora_rank=8, max_cpu_loras=2, max_loras=2, lora_dtype=DEFAULT_DTYPE
+        ),
+        device=device,
+        vllm_config=default_vllm_config,
+    )
+    assert manager.add_adapter(model_lora)
+
+    packed_lora = model_lora.get_lora("gate_up_proj")
+    assert isinstance(packed_lora, PackedLoRALayerWeights)
+    for i in range(2):
+        torch.testing.assert_close(packed_lora.lora_a[i], gate_lora.lora_a)
+        torch.testing.assert_close(packed_lora.lora_b[i], gate_lora.lora_b)
+
+
 def _test_target_modules(
     model,
     target_modules: list[str] | None,

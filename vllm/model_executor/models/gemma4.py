@@ -400,11 +400,14 @@ class Gemma4Attention(nn.Module):
         self.scaling = 1.0
 
         layer_idx = extract_layer_index(prefix)
+        layer_type = config.layer_types[layer_idx]
         num_kv_shared_layers = getattr(config, "num_kv_shared_layers", 0)
+        attention_k_eq_v = getattr(config, "attention_k_eq_v", False)
         first_kv_shared_layer_idx = config.num_hidden_layers - num_kv_shared_layers
         self.is_kv_shared_layer = (
             num_kv_shared_layers > 0 and layer_idx >= first_kv_shared_layer_idx
         )
+        self.is_sliding = layer_type == "sliding_attention"
 
         if self.is_kv_shared_layer:
             # K/V come from the target layer's cache, so like HF this layer
@@ -429,6 +432,9 @@ class Gemma4Attention(nn.Module):
                 quant_config=quant_config,
                 prefix=f"{prefix}.qkv_proj",
             )
+            if attention_k_eq_v and not self.is_sliding:
+                # k_proj LoRA must be applied to the V slice
+                self.qkv_proj.lora_packed_modules = ["q_proj", "k_proj", "k_proj"]
             self.k_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
             # V norm: no learnable scale (pure normalization only)
             self.v_norm = RMSNorm(
@@ -445,9 +451,6 @@ class Gemma4Attention(nn.Module):
         # Q norm: output = norm(x) * weight (learnable per-head scale)
         self.q_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
 
-        # Determine layer type and sliding window
-        layer_type = config.layer_types[layer_idx]
-        self.is_sliding = layer_type == "sliding_attention"
         sliding_window = config.sliding_window if self.is_sliding else None
 
         # Initialize RoPE based on layer type.
