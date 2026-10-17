@@ -4,10 +4,11 @@
 
 import torch
 
-from vllm._aiter_ops import rocm_aiter_ops
 from vllm.model_executor.custom_op import CustomOp
+from vllm.platforms import current_platform
 
 from .common import ApplyRotaryEmb
+from .functional import native_rope
 
 
 # --8<-- [start:rotary_embedding]
@@ -34,26 +35,11 @@ class RotaryEmbeddingBase(CustomOp):
         self.base = base
         self.is_neox_style = is_neox_style
         self.dtype = dtype
-        # TODO(mgoin): disabled for now due to failures
-        # Flashinfer only supports head_size=64, 128, 256, 512.
-        # https://github.com/flashinfer-ai/flashinfer/blob/ebfd655efe830048dba5d582aaa61d61d1cf9a87/include/flashinfer/utils.cuh#L174-L202
-        # self.use_flashinfer = (self.enabled()
-        #                        and dtype in (torch.float16, torch.bfloat16)
-        #                        and current_platform.is_cuda()
-        #                        and has_flashinfer()
-        #                        and self.head_size in [64, 128, 256, 512])
+        self.spec = current_platform.spec
 
-        # Check if use_flashinfer is already set
+        # Specialized RoPE variants may require an fp32 cache for FlashInfer.
         if not hasattr(self, "use_flashinfer"):
             self.use_flashinfer = False
-
-        self.use_aiter = (
-            self.enabled() and rocm_aiter_ops.is_triton_rotary_embed_enabled()
-        )
-        if self.use_aiter:
-            self.rocm_aiter_triton_rotary_embedding = (
-                rocm_aiter_ops.get_triton_rotary_embedding_op()
-            )
 
         if init_cache:
             cache = self._compute_cos_sin_cache()
@@ -62,16 +48,20 @@ class RotaryEmbeddingBase(CustomOp):
             self.cos_sin_cache: torch.Tensor
             self.register_buffer("cos_sin_cache", cache, persistent=False)
 
-            # Reuse a precomputed bf16 cache for the AITER compile path.
-            if self.use_aiter and cache.dtype != torch.bfloat16:
-                self.cos_sin_cache_bf16: torch.Tensor | None
+            alternate_dtype = self.spec.rope_cache_dtype
+            self.cos_sin_cache_alternate: torch.Tensor | None
+            if (
+                self.enabled()
+                and alternate_dtype is not None
+                and cache.dtype != alternate_dtype
+            ):
                 self.register_buffer(
-                    "cos_sin_cache_bf16",
-                    cache.to(torch.bfloat16),
+                    "cos_sin_cache_alternate",
+                    cache.to(alternate_dtype),
                     persistent=False,
                 )
             else:
-                self.cos_sin_cache_bf16 = None
+                self.cos_sin_cache_alternate = None
 
         self.apply_rotary_emb = ApplyRotaryEmb(
             is_neox_style=self.is_neox_style,
@@ -112,15 +102,14 @@ class RotaryEmbeddingBase(CustomOp):
         ):
             return cos_sin_cache
 
-        # Reuse precomputed bf16 cache in the AITER compile path.
+        alternate = getattr(self, "cos_sin_cache_alternate", None)
         if (
-            self.use_aiter
-            and torch.compiler.is_compiling()
-            and query.dtype == torch.bfloat16
+            torch.compiler.is_compiling()
+            and alternate is not None
+            and alternate.dtype == query.dtype
+            and alternate.device == query.device
         ):
-            cache_bf16 = getattr(self, "cos_sin_cache_bf16", None)
-            if cache_bf16 is not None and cache_bf16.device == query.device:
-                return cache_bf16
+            return alternate
 
         cos_sin_cache = cos_sin_cache.to(query.device, dtype=query.dtype)
         # Avoid mutating buffers during torch.compile (cudagraph) tracing.
@@ -157,48 +146,7 @@ class RotaryEmbedding(RotaryEmbeddingBase):
             init_cache=init_cache,
         )
 
-    @staticmethod
-    def forward_static(
-        positions: torch.Tensor,
-        query: torch.Tensor,
-        key: torch.Tensor | None,
-        head_size: int,
-        rotary_dim: int,
-        cos_sin_cache: torch.Tensor,
-        is_neox_style: bool,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """A PyTorch-native implementation of forward()."""
-        positions = positions.flatten()
-        num_tokens = positions.shape[0]
-        cos_sin = cos_sin_cache.index_select(0, positions)
-        cos, sin = cos_sin.chunk(2, dim=-1)
-
-        query_shape = query.shape
-        query = query.view(num_tokens, -1, head_size)
-        query_rot = query[..., :rotary_dim]
-        query_pass = query[..., rotary_dim:]
-        query_rot = ApplyRotaryEmb.forward_static(
-            query_rot,
-            cos,
-            sin,
-            is_neox_style,
-        )
-        query = torch.cat((query_rot, query_pass), dim=-1).reshape(query_shape)
-
-        # key may be None in some cases, e.g. cross-layer KV sharing
-        if key is not None:
-            key_shape = key.shape
-            key = key.view(num_tokens, -1, head_size)
-            key_rot = key[..., :rotary_dim]
-            key_pass = key[..., rotary_dim:]
-            key_rot = ApplyRotaryEmb.forward_static(
-                key_rot,
-                cos,
-                sin,
-                is_neox_style,
-            )
-            key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
-        return query, key
+    forward_static = staticmethod(native_rope)
 
     def forward_native(
         self,
@@ -218,104 +166,24 @@ class RotaryEmbedding(RotaryEmbeddingBase):
             self.is_neox_style,
         )
 
-    def forward_cuda(
+    def forward_platform(
         self,
         positions: torch.Tensor,
         query: torch.Tensor,
         key: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        if self.use_flashinfer:
-            torch.ops.vllm.flashinfer_rotary_embedding(
-                positions,
-                query,
-                key,
-                self.head_size,
-                self.cos_sin_cache,
-                self.is_neox_style,
-            )
-            return query, key
-
-        from vllm import _custom_ops as ops
-
-        cos_sin_cache = self._match_cos_sin_cache_dtype(query)
-
-        # ops.rotary_embedding() is an in-place operation
-        # that updates the query and key tensors.
-        ops.rotary_embedding(
-            positions,
-            query,
-            key,
-            self.head_size,
-            cos_sin_cache,
-            self.is_neox_style,
-        )
-        return query, key
-
-    def forward_hip(
-        self,
-        positions: torch.Tensor,
-        query: torch.Tensor,
-        key: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        if self.use_aiter:
-            cos_sin_cache = self._match_cos_sin_cache_dtype(query)
-            self.rocm_aiter_triton_rotary_embedding(
-                positions,
-                query,
-                key,
-                self.head_size,
-                cos_sin_cache,
-                self.is_neox_style,
-            )
-            return query, key
-        return self.forward_cuda(positions, query, key)
-
-    def forward_xpu(
-        self,
-        positions: torch.Tensor,
-        query: torch.Tensor,
-        key: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        self._match_cos_sin_cache_dtype(query)
-        # ops.rotary_embedding() is an in-place operation
-        # that updates the query and key tensors.
-        if key is None:
+        rope = self.spec.rope
+        if rope is None:
             return self.forward_native(positions, query, key)
-        else:
-            from vllm import _custom_ops as ops
-
-            cos_sin_cache = self._match_cos_sin_cache_dtype(query)
-            ops.rotary_embedding(
-                positions,
-                query,
-                key,
-                self.head_size,
-                cos_sin_cache,
-                self.is_neox_style,
-            )
-        return query, key
-
-    def forward_cpu(
-        self,
-        positions: torch.Tensor,
-        query: torch.Tensor,
-        key: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        from vllm import _custom_ops as ops
-
-        cos_sin_cache = self._match_cos_sin_cache_dtype(query)
-
-        # ops.rotary_embedding() is an in-place operation
-        # that updates the query and key tensors.
-        ops.rotary_embedding(
+        return rope(
             positions,
             query,
             key,
             self.head_size,
-            cos_sin_cache,
+            self.rotary_dim,
+            self._match_cos_sin_cache_dtype(query),
             self.is_neox_style,
         )
-        return query, key
 
     def extra_repr(self) -> str:
         s = f"head_size={self.head_size}, rotary_dim={self.rotary_dim}"

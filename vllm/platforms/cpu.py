@@ -6,6 +6,7 @@ import os
 import platform
 import subprocess
 import sys
+from functools import partial
 from typing import TYPE_CHECKING
 
 import torch
@@ -22,6 +23,8 @@ from vllm.v1.attention.backends.mla.prefill.registry import MLAPrefillBackendEnu
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .interface import CpuArchEnum, Platform, PlatformEnum
+from .spec import PlatformSpec
+from .spec.rotary_embedding import custom_rope
 
 logger = init_logger(__name__)
 
@@ -107,6 +110,12 @@ class CpuPlatform(Platform):
     dispatch_key: str = "CPU"
     dist_backend: str = "gloo"
     device_control_env_var = DEVICE_CONTROL_ENV_VAR
+
+    @property
+    def spec(self) -> PlatformSpec:
+        from vllm import _custom_ops as ops
+
+        return PlatformSpec(rope=partial(custom_rope, ops.rotary_embedding))
 
     @property
     def supported_dtypes(self) -> list[torch.dtype]:

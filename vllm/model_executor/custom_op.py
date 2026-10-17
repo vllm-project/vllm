@@ -141,8 +141,13 @@ class CustomOp(nn.Module):
         """
         raise NotImplementedError
 
-    def forward_cuda(self, *args, **kwargs):
+    def forward_platform(self, *args, **kwargs):
+        """Optional unified implementation, selected without per-device dispatch."""
         raise NotImplementedError
+
+    def forward_cuda(self, *args, **kwargs):
+        # Keep direct callers working after an op migrates to forward_platform.
+        return self.forward_platform(*args, **kwargs)
 
     def forward_hip(self, *args, **kwargs):
         # By default, we assume that HIP ops are compatible with CUDA ops.
@@ -190,6 +195,11 @@ class CustomOp(nn.Module):
             # Compile forward_native to avoid eager torch ops if inside
             # opaque torch custom op (e.g. fused_moe, unified_attention, etc.)
             return self.maybe_compile(self.forward_native, enable=compile_native)
+
+        if self.__class__.forward_platform is not CustomOp.forward_platform:
+            if current_platform.is_out_of_tree():
+                return self.forward_oot
+            return self.forward_platform
 
         if current_platform.is_rocm():
             return self.forward_hip

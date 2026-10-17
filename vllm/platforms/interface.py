@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 import torch
 
 from vllm.logger import init_logger
+from vllm.platforms.spec import PlatformSpec
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 if TYPE_CHECKING:
@@ -179,6 +180,11 @@ class Platform:
     additional_env_vars: list[str] = []
 
     _global_graph_pool: Any | None = None
+
+    @property
+    def spec(self) -> PlatformSpec:
+        """Resolve platform policy for a new layer, without caching model state."""
+        return PlatformSpec()
 
     @property
     def pass_key(self) -> str:
