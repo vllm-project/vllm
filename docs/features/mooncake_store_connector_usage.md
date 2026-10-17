@@ -83,6 +83,39 @@ vllm serve meta-llama/Llama-3.1-8B-Instruct \
     --kv-transfer-config '{"kv_connector":"MooncakeStoreConnector","kv_role":"kv_both"}'
 ```
 
+### Selective recurrent checkpoint leases
+
+For FullAttention + align-mode Mamba caches, opt in to selective recurrent
+lookup with:
+
+```json
+{
+    "kv_connector_extra_config": {
+        "mooncake_kda_last_hit_only": true
+    }
+}
+```
+
+The option defaults to `false`. KV availability first bounds legal resume
+points, including Eagle and final-token recomputation. A subsequent
+`LastHitOnly` probe selects one complete recurrent checkpoint across every
+required group and rank namespace. Partial-hash KV tails may use a later key
+in the same physical block; recurrent states always use the selected boundary.
+
+This requires matching Mooncake client and Master implementations of the
+selected-only response contract in [Mooncake PR #4314](https://github.com/kvcache-ai/Mooncake/pull/4314)
+(tested dependency: `7943c052be6aab81c71b60fea9483952dec21141`).
+An invalid response or RPC failure reports an error and returns a cache miss.
+The connector does not retry recurrent lookup through a lease-renewing
+existence query.
+
+With this option enabled, `enable_group_semantics=true`, non-align recurrent
+caches and prefix-cacheable attention types other than FullAttention are
+rejected. Scratch groups do not participate. Pure FullAttention lookup and
+save-side deduplication keep their existing behavior.
+All producers sharing the namespace must also use independent leases. Use a
+fresh `cache_prefix` when migrating data previously written with shared groups.
+
 ### Disaggregated Prefill-Decode (XpYd)
 
 In disaggregated prefill-decode mode, use `MultiConnector` to combine `MooncakeConnector` (point-to-point KV transfer) with `MooncakeStoreConnector` (shared KV cache pool). This enables both direct P2P transfer between prefiller and decoder, and cross-instance prefix cache sharing via the distributed store.

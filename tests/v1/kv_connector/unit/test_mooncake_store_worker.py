@@ -6,12 +6,14 @@ import itertools
 import json
 import logging
 import math
+import os
 import queue
 import sys
 import threading
 import types
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
+from uuid import uuid4
 
 import pytest
 import torch
@@ -3711,6 +3713,7 @@ def _make_bare_worker(
     worker.kv_role = kv_role
     worker.can_put = kv_role in ("kv_producer", "kv_both") or save_decode_cache
     worker._capacity_only = False
+    worker.mooncake_kda_last_hit_only = False
     worker.block_size = block_size
     worker._is_hma_required = False
     worker.tp_rank = 0
@@ -4101,6 +4104,424 @@ def test_uniform_group_uses_common_inner_replication_factor(spec_order):
         "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0",
         "test-model@tp_rank:1@pcp0@dcp0@pp_rank:0@group:0",
     )
+
+
+def _make_selective_worker(
+    namespace_counts: tuple[int, ...] = (2,),
+    *,
+    block_size: int = 16,
+    hash_block_size: int = 16,
+    use_eagle: bool = False,
+) -> mooncake_store_worker.MooncakeStoreWorker:
+    worker = _make_bare_worker(block_size=block_size)
+    worker.mooncake_kda_last_hit_only = True
+    worker.hash_block_size = hash_block_size
+    worker.tp_size = max(namespace_counts)
+    worker.num_kv_head = 1
+    worker._kv_cache_groups += [
+        KVCacheGroupSpec(
+            [f"state{gid}"],
+            MambaSpec(
+                block_size=block_size,
+                shapes=((1, 1),),
+                dtypes=(torch.float32,),
+                mamba_cache_mode="align",
+            ),
+        )
+        for gid in range(len(namespace_counts))
+    ]
+    worker.token_dbs = [
+        ChunkedTokenDatabase(
+            KeyMetadata("test-model", 0, 0, 0, 0, group_id=gid),
+            block_size=block_size,
+            hash_block_size=hash_block_size,
+        )
+        for gid in range(len(worker._kv_cache_groups))
+    ]
+    worker.coord = mooncake_store_worker.MooncakeStoreCoordinator(
+        worker._kv_cache_groups,
+        scheduler_block_size=block_size,
+        hash_block_size=hash_block_size,
+        use_eagle=use_eagle,
+    )
+    _refresh_group_tp_replication_factors(worker)
+    worker._lookup_key_prefixes = tuple(
+        prefixes[:count]
+        for prefixes, count in zip(
+            worker._lookup_key_prefixes, (1, *namespace_counts), strict=True
+        )
+    )
+    worker.store.batch_is_exist.side_effect = lambda keys: [1] * len(keys)
+    return worker
+
+
+def _checkpoint_keys(
+    worker: mooncake_store_worker.MooncakeStoreWorker, block_hash: BlockHash
+) -> list[str]:
+    return [
+        PoolKey.build_key_string(prefix, block_hash.hex())
+        for gid in sorted(worker.coord.mamba_group_ids)
+        for prefix in worker._lookup_key_prefixes[gid]
+    ]
+
+
+def _selected_mask(keys: list[str], size: int, present: set[str]) -> list[int]:
+    mask = [0] * len(keys)
+    for start in range(len(keys) - size, -1, -size):
+        if all(key in present for key in keys[start : start + size]):
+            mask[start : start + size] = [1] * size
+            break
+    return mask
+
+
+def test_selective_lookup_checkpoint_major_keys_and_sparse_states():
+    worker = _make_selective_worker((1, 2))
+    hashes = [BlockHash(bytes([i])) for i in range(3)]
+    checkpoints = [_checkpoint_keys(worker, h) for h in hashes]
+    present = set(checkpoints[0] + checkpoints[2])
+    worker.store.batch_probe_key.side_effect = lambda keys, policy, candidate_size: (
+        _selected_mask(keys, candidate_size, present)
+    )
+
+    result = worker.lookup(49, hashes)
+
+    assert result.hit_length == 48
+    assert result.tail_key_boundaries == tuple(
+        TailKeyBoundary(gid, 48) for gid in range(3)
+    )
+    assert worker.store.batch_probe_key.call_args.args == (sum(checkpoints, []),)
+    assert worker.store.batch_probe_key.call_args.kwargs == {
+        "policy": "LastHitOnly",
+        "candidate_size": 3,
+    }
+    kv_keys = worker.store.batch_is_exist.call_args.args[0]
+    assert all("@group:0@" in key for key in kv_keys)
+    assert [call[0] for call in worker.store.method_calls] == [
+        "batch_is_exist",
+        "batch_probe_key",
+    ]
+
+
+def test_selective_lookup_exhaustive_two_groups_two_namespaces():
+    """4096 physical existence patterns must select one globally complete state."""
+    worker = _make_selective_worker((2, 2))
+    hashes = [BlockHash(bytes([i])) for i in range(3)]
+    checkpoints = [_checkpoint_keys(worker, h) for h in hashes]
+    keys = sum(checkpoints, [])
+    present: set[str] = set()
+    worker.store.batch_probe_key.side_effect = lambda keys, policy, candidate_size: (
+        _selected_mask(keys, candidate_size, present)
+    )
+    for bits in itertools.product((False, True), repeat=len(keys)):
+        present = {key for key, exists in zip(keys, bits, strict=True) if exists}
+        expected = (
+            max(
+                (
+                    i + 1
+                    for i, checkpoint in enumerate(checkpoints)
+                    if set(checkpoint) <= present
+                ),
+                default=0,
+            )
+            * 16
+        )
+        result = worker.lookup(49, hashes)
+        assert result.hit_length == expected
+        assert worker.store.batch_probe_key.call_args.args == (keys,)
+        if expected:
+            assert all(b.num_tokens == expected for b in result.tail_key_boundaries)
+            masks = worker.coord.load_mask(hashes, expected)
+            for gid in worker.coord.mamba_group_ids:
+                chunks = list(
+                    worker.token_dbs[gid].process_tokens(
+                        expected, hashes, chunk_mask=masks[gid]
+                    )
+                )
+                assert [h for _, _, h in chunks] == [hashes[expected // 16 - 1]]
+
+
+@pytest.mark.parametrize(
+    "eagle,num_tokens,expected", [(False, 48, 32), (True, 48, 32), (True, 49, 32)]
+)
+def test_selective_lookup_prunes_before_leasing(eagle, num_tokens, expected):
+    worker = _make_selective_worker(use_eagle=eagle)
+    hashes = [BlockHash(bytes([i])) for i in range(3)]
+    present = set(sum([_checkpoint_keys(worker, h) for h in hashes], []))
+    worker.store.batch_probe_key.side_effect = lambda keys, policy, candidate_size: (
+        _selected_mask(keys, candidate_size, present)
+    )
+    result = worker.lookup(num_tokens, hashes)
+    assert result.hit_length == expected
+    assert worker.store.batch_probe_key.call_args.args[0] == sum(
+        [_checkpoint_keys(worker, h) for h in hashes[: expected // 16]], []
+    )
+
+
+def test_selective_lookup_kv_caps_candidates_and_no_hit_skips_probe():
+    worker = _make_selective_worker()
+    hashes = [BlockHash(bytes([i])) for i in range(3)]
+    worker.store.batch_is_exist.return_value = [1, 0, 1]
+    worker.store.batch_is_exist.side_effect = None
+    worker.store.batch_probe_key.return_value = [1, 1]
+    assert worker.lookup(49, hashes).hit_length == 16
+    assert worker.store.batch_probe_key.call_args.args == (
+        _checkpoint_keys(worker, hashes[0]),
+    )
+    worker.store.batch_is_exist.return_value = [0, 1, 1]
+    worker.store.batch_probe_key.reset_mock()
+    assert worker.lookup(49, hashes).hit_length == 0
+    worker.store.batch_probe_key.assert_not_called()
+
+
+@pytest.mark.parametrize("eagle,num_tokens,state", [(True, 25, 20), (False, 24, 20)])
+def test_selective_lookup_partial_kv_tail_keeps_exact_state(eagle, num_tokens, state):
+    worker = _make_selective_worker((1,), hash_block_size=4, use_eagle=eagle)
+    hashes = [BlockHash(bytes([i])) for i in range(6)]
+    kv_present = {
+        PoolKey.build_key_string(worker._lookup_key_prefixes[0][0], hashes[i].hex())
+        for i in (3, 5)
+    }
+    worker.store.batch_is_exist.side_effect = lambda keys: [
+        int(k in kv_present) for k in keys
+    ]
+    present = set(_checkpoint_keys(worker, hashes[state // 4 - 1]))
+    worker.store.batch_probe_key.side_effect = lambda keys, policy, candidate_size: (
+        _selected_mask(keys, candidate_size, present)
+    )
+    result = worker.lookup(num_tokens, hashes)
+    assert result == MooncakeLookupResult(
+        state, (TailKeyBoundary(0, 24), TailKeyBoundary(1, state))
+    )
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        [],
+        [1] * 7,
+        [-1] * 6,
+        [2] * 6,
+        [True] * 6,
+        [1, 0, 0, 0, 0, 0],
+        [1, 1, 0, 0, 1, 1],
+    ],
+)
+def test_selective_lookup_invalid_probe_is_error_without_fallback(response):
+    worker = _make_selective_worker()
+    worker.store.batch_probe_key.return_value = response
+    assert worker.lookup(49, [BlockHash(bytes([i])) for i in range(3)]).hit_length == 0
+    assert worker.store.batch_is_exist.call_count == 1
+    stats = worker.get_kv_connector_stats()
+    assert stats is not None
+    assert stats.data["lookup_probe"][0]["status"] == "error"
+
+
+def test_selective_lookup_probe_exception_and_all_miss():
+    worker = _make_selective_worker()
+    hashes = [BlockHash(b"0"), BlockHash(b"1")]
+    worker.store.batch_probe_key.side_effect = RuntimeError("RPC failed")
+    assert worker.lookup(33, hashes).hit_length == 0
+    worker.store.batch_probe_key.side_effect = None
+    worker.store.batch_probe_key.return_value = [0] * 4
+    assert worker.lookup(33, hashes).hit_length == 0
+    assert worker.store.batch_is_exist.call_count == 2
+
+
+@pytest.mark.parametrize("response", [[], [1] * 4, [-1, 1, 1], [2, 1, 1]])
+def test_selective_lookup_invalid_kv_response_skips_probe(response):
+    worker = _make_selective_worker()
+    worker.store.batch_is_exist.side_effect = None
+    worker.store.batch_is_exist.return_value = response
+    assert worker.lookup(49, [BlockHash(bytes([i])) for i in range(3)]).hit_length == 0
+    worker.store.batch_probe_key.assert_not_called()
+
+
+def test_selective_lookup_preserves_duplicates_and_refreshes_width():
+    worker = _make_selective_worker()
+    hashes = [BlockHash(b"same")] * 2
+    worker.store.batch_probe_key.return_value = [0, 0, 1, 1]
+    assert worker.lookup(33, hashes).hit_length == 32
+    assert worker.store.batch_probe_key.call_args.args == (
+        _checkpoint_keys(worker, hashes[0]) * 2,
+    )
+    worker._lookup_key_prefixes = tuple(p[:1] for p in worker._lookup_key_prefixes)
+    worker.store.batch_probe_key.return_value = [0, 1]
+    assert worker.lookup(33, hashes).hit_length == 32
+    assert worker.store.batch_probe_key.call_args.kwargs["candidate_size"] == 1
+
+
+@pytest.mark.parametrize("shared", [True, " true "])
+def test_selective_init_rejects_shared_leases_before_setup(monkeypatch, shared):
+    store = MagicMock()
+    _install_fake_mooncake(monkeypatch, store)
+    _patch_worker_runtime(monkeypatch)
+    with pytest.raises(ValueError, match="independent leases"):
+        worker.MooncakeStoreWorker(
+            _make_vllm_config(
+                extra_config={
+                    "mooncake_kda_last_hit_only": True,
+                    "enable_group_semantics": shared,
+                }
+            ),
+            _make_kv_cache_config(),
+        )
+    store.setup.assert_not_called()
+
+
+def test_selective_init_rejects_old_binding_before_setup(monkeypatch):
+    store = MagicMock()
+    _install_fake_mooncake(monkeypatch, store)
+    _patch_worker_runtime(monkeypatch)
+    with pytest.raises(ValueError, match="LastHitOnly support"):
+        worker.MooncakeStoreWorker(
+            _make_vllm_config(extra_config={"mooncake_kda_last_hit_only": True}),
+            _make_kv_cache_config(),
+        )
+    store.setup.assert_not_called()
+
+
+def test_selective_lookup_ignores_scratch_group():
+    worker = _make_selective_worker()
+    scratch = CircularBufferSpec(
+        block_size=16, num_kv_heads=1, head_size=64, dtype=torch.float32
+    )
+    worker._kv_cache_groups.append(KVCacheGroupSpec(["scratch"], scratch))
+    worker.token_dbs.append(
+        ChunkedTokenDatabase(
+            KeyMetadata("test-model", 0, 0, 0, 0, group_id=2), block_size=16
+        )
+    )
+    worker.coord = mooncake_store_worker.MooncakeStoreCoordinator(
+        worker._kv_cache_groups, scheduler_block_size=16, hash_block_size=16
+    )
+    _refresh_group_tp_replication_factors(worker)
+    worker.store.batch_probe_key.return_value = [1, 1]
+    result = worker.lookup(17, [BlockHash(b"a")])
+    assert result.hit_length == 16
+    assert [b.group_id for b in result.tail_key_boundaries] == [0, 1]
+    assert worker.store.batch_probe_key.call_args.kwargs["candidate_size"] == 2
+
+
+def test_selective_flag_with_no_recurrent_group_uses_existing_lookup():
+    worker = _make_bare_worker()
+    worker.mooncake_kda_last_hit_only = True
+    worker.store.batch_is_exist.return_value = [1, 1]
+    assert worker.lookup(33, [BlockHash(b"a"), BlockHash(b"b")]).hit_length == 32
+    worker.store.batch_probe_key.assert_not_called()
+
+
+def test_selective_recurrent_only_lookup_skips_empty_kv_rpc():
+    worker = _make_selective_worker()
+    worker._kv_cache_groups = worker._kv_cache_groups[1:]
+    worker.token_dbs = [
+        ChunkedTokenDatabase(KeyMetadata("test-model", 0, 0, 0, 0), block_size=16)
+    ]
+    worker.coord = mooncake_store_worker.MooncakeStoreCoordinator(
+        worker._kv_cache_groups, scheduler_block_size=16, hash_block_size=16
+    )
+    _refresh_group_tp_replication_factors(worker)
+    worker.store.batch_probe_key.return_value = [0, 0, 1, 1]
+    result = worker.lookup(33, [BlockHash(b"a"), BlockHash(b"b")])
+    assert result == MooncakeLookupResult(32, (TailKeyBoundary(0, 32),))
+    worker.store.batch_is_exist.assert_not_called()
+    assert worker.store.batch_probe_key.call_args.kwargs["candidate_size"] == 2
+
+
+@pytest.mark.parametrize(
+    "scenario,expected",
+    [("complete", 48), ("rank-hole", 32), ("kv-cap", 16), ("eagle", 32)],
+)
+def test_selective_lookup_tcp_loads_exact_checkpoint(scenario, expected):
+    """Opt-in real Master, connector lookup, wire metadata and host-buffer load."""
+    master = os.environ.get("MOONCAKE_LAST_HIT_MASTER")
+    if master is None:
+        pytest.skip("Set MOONCAKE_LAST_HIT_MASTER to an isolated TCP Master")
+    binding = pytest.importorskip("mooncake.store")
+    with contextlib.ExitStack() as cleanup:
+        store = binding.MooncakeDistributedStore()
+        cleanup.callback(store.close)
+        assert (
+            store.setup(
+                "127.0.0.1:0", "P2PHANDSHAKE", 32 << 20, 16 << 20, "tcp", "", master
+            )
+            == 0
+        )
+        worker = _make_selective_worker(use_eagle=scenario == "eagle")
+        worker.store = store
+        model = f"last-hit-{uuid4().hex}"
+        worker.token_dbs = [
+            ChunkedTokenDatabase(
+                KeyMetadata(model, 0, 0, 0, 0, group_id=gid), block_size=16
+            )
+            for gid in range(2)
+        ]
+        _refresh_group_tp_replication_factors(worker)
+        hashes = [BlockHash(bytes([i])) for i in range(3)]
+        payloads: dict[str, bytes] = {}
+        for idx, block_hash in enumerate(hashes):
+            for gid, prefixes in enumerate(worker._lookup_key_prefixes):
+                for rank, prefix in enumerate(prefixes):
+                    if scenario == "rank-hole" and (idx, gid, rank) == (2, 1, 1):
+                        continue
+                    if scenario == "kv-cap" and (idx, gid) == (1, 0):
+                        continue
+                    key = PoolKey.build_key_string(prefix, block_hash.hex())
+                    payloads[key] = bytes([8 * (idx + 1) + 2 * gid + rank]) * 256
+                    assert store.put(key, payloads[key]) == 0
+                    cleanup.callback(store.remove, key, True)
+        result = worker.lookup(49, hashes)
+        result = mooncake_store_worker.decode_lookup_response(
+            mooncake_store_worker.encode_lookup_response(result)
+        )
+        assert result.hit_length == expected
+        assert result.tail_key_boundaries == (
+            TailKeyBoundary(0, expected),
+            TailKeyBoundary(1, expected),
+        )
+        buffers_by_rank = [
+            [torch.zeros((3, 256), dtype=torch.uint8) for _ in range(2)]
+            for _ in range(2)
+        ]
+        for rank, buffers in enumerate(buffers_by_rank):
+            databases = []
+            for gid, tensor in enumerate(buffers):
+                db = ChunkedTokenDatabase(
+                    KeyMetadata(model, rank if gid == 1 else 0, 0, 0, 0, group_id=gid),
+                    block_size=16,
+                )
+                db.set_kv_caches_base_addr([tensor.data_ptr()])
+                db.set_block_len([256])
+                databases.append(db)
+                assert store.register_buffer(tensor.data_ptr(), tensor.numel()) == 0
+                cleanup.callback(store.unregister_buffer, tensor.data_ptr())
+            thread = mooncake_store_worker.KVCacheStoreRecvingThread(
+                store=store,
+                token_databases=databases,
+                block_size=16,
+                tp_rank=rank,
+                ready_event=threading.Event(),
+                coord=worker.coord,
+                is_hma_required=True,
+            )
+            thread.request_queue.task_done = MagicMock()
+            req = _make_load_req(
+                "tcp-load",
+                hashes,
+                token_len=result.hit_length,
+                tail_key_boundaries=result.tail_key_boundaries,
+            )
+            req.block_ids = (list(range(3)), list(range(3)))
+            thread._handle_request(req)
+            assert thread.get_and_clear_failed_requests() == set()
+            masks = worker.coord.load_mask(hashes, result.hit_length)
+            for gid, db in enumerate(databases):
+                for start, _, block_hash in db.process_tokens(
+                    result.hit_length, hashes, chunk_mask=masks[gid]
+                ):
+                    key = db.store_layout.key_for(
+                        db.store_layout.local_shard_ids[0], block_hash
+                    )
+                    assert buffers[gid][start // 16].numpy().tobytes() == payloads[key]
 
 
 def test_lookup_rejects_boundary_missing_one_mamba_shard():

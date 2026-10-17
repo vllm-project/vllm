@@ -1391,6 +1391,25 @@ class MooncakeStoreWorker:
         assert kv_role is not None
         self.kv_role = kv_role
         extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
+        self.mooncake_kda_last_hit_only = (
+            str(extra_config.get("mooncake_kda_last_hit_only", "False")).strip().lower()
+            == "true"
+        )
+        if self.mooncake_kda_last_hit_only:
+            if (
+                str(extra_config.get("enable_group_semantics", "False")).strip().lower()
+                == "true"
+            ):
+                raise ValueError(
+                    "Selective Mooncake lookup requires independent leases"
+                )
+            MooncakeStoreCoordinator.validate_recurrent_lookup(
+                kv_cache_config.prefix_cacheable_groups
+            )
+            if not hasattr(MooncakeDistributedStore, "batch_probe_key"):
+                raise ValueError(
+                    "Selective lookup requires Mooncake LastHitOnly support"
+                )
         self.can_put = self.kv_role in ("kv_producer", "kv_both") or (
             extra_config.get("save_decode_cache", False)
         )
@@ -2108,6 +2127,8 @@ class MooncakeStoreWorker:
         if not block_hashes or token_len <= 0:
             return MooncakeLookupResult(0)
 
+        selective = self.mooncake_kda_last_hit_only and bool(self.coord.mamba_group_ids)
+
         # Build per-(group, hash) candidate keys expanded across rank namespaces.
         # candidate_meta stores the (group, hash_bytes) for key slice.
         candidate_keys: list[str] = []
@@ -2116,6 +2137,8 @@ class MooncakeStoreWorker:
         lookup_masks = None if fine_grained else self.coord.lookup_mask(token_len)
         for g_idx, db in enumerate(self.token_dbs):
             if not self._kv_cache_groups[g_idx].kv_cache_spec.prefix_cacheable:
+                continue
+            if selective and g_idx in self.coord.mamba_group_ids:
                 continue
             spec_block_size = db.block_size
             key_prefixes = self._lookup_key_prefixes[g_idx]
@@ -2149,11 +2172,18 @@ class MooncakeStoreWorker:
                 candidate_meta.append((g_idx, bytes(h)))
 
         if not candidate_keys:
+            if selective:
+                return self._lookup_recurrent(num_tokens, block_hashes, set())
             return MooncakeLookupResult(0)
 
         lookup_start = time.perf_counter()
         try:
             res = self.store.batch_is_exist(candidate_keys)
+            if selective and (
+                len(res) != len(candidate_keys)
+                or any(type(v) is not int or v not in (0, 1) for v in res)
+            ):
+                raise ValueError("Invalid Mooncake KV existence response")
             self._record_kv_connector_operation(
                 "lookup_exists",
                 time.perf_counter() - lookup_start,
@@ -2181,6 +2211,9 @@ class MooncakeStoreWorker:
                 exists_set.add((g_idx, hash_bytes))
             pos += count
 
+        if selective:
+            return self._lookup_recurrent(num_tokens, block_hashes, exists_set)
+
         cached_block_pool = ExternalCachedBlockPool(
             self.hash_block_size,
             exists_set,
@@ -2205,6 +2238,76 @@ class MooncakeStoreWorker:
                 block_hashes,
                 hit_length,
                 cached_block_pool,
+            ),
+        )
+
+    def _lookup_recurrent(
+        self,
+        num_tokens: int,
+        block_hashes: Sequence[BlockHash],
+        kv_exists: set[tuple[int, bytes]],
+    ) -> MooncakeLookupResult:
+        candidates = self.coord.recurrent_candidates(
+            block_hashes, num_tokens, kv_exists
+        )
+        if not candidates:
+            return MooncakeLookupResult(0)
+        group_ids = sorted(self.coord.mamba_group_ids)
+        candidate_size = sum(len(self._lookup_key_prefixes[gid]) for gid in group_ids)
+        if any(not self._lookup_key_prefixes[gid] for gid in group_ids):
+            raise ValueError("A recurrent group has no Mooncake lookup namespace")
+        keys = [
+            PoolKey.build_key_string(
+                prefix, block_hashes[boundary // self.hash_block_size - 1].hex()
+            )
+            for boundary in candidates
+            for gid in group_ids
+            for prefix in self._lookup_key_prefixes[gid]
+        ]
+        selected: list[int] = []
+        started = time.perf_counter()
+        try:
+            res = self.store.batch_probe_key(
+                keys, policy="LastHitOnly", candidate_size=candidate_size
+            )
+            if len(res) != len(keys) or any(
+                type(v) is not int or v not in (0, 1) for v in res
+            ):
+                raise ValueError("Invalid Mooncake LastHitOnly response")
+            for idx in range(len(candidates)):
+                hits = sum(res[idx * candidate_size : (idx + 1) * candidate_size])
+                if hits not in (0, candidate_size):
+                    raise ValueError("Partial checkpoint in LastHitOnly response")
+                if hits == candidate_size:
+                    selected.append(idx)
+            if len(selected) > 1:
+                raise ValueError("Multiple checkpoints in LastHitOnly response")
+        except (RuntimeError, OSError, TypeError, ValueError) as error:
+            self._record_kv_connector_operation(
+                "lookup_probe",
+                time.perf_counter() - started,
+                len(keys),
+                status="error",
+                num_failed_keys=len(keys),
+            )
+            logger.error("Mooncake LastHitOnly lookup failed: %s", error)
+            return MooncakeLookupResult(0)
+        self._record_kv_connector_operation(
+            "lookup_probe", time.perf_counter() - started, len(keys)
+        )
+        if not selected:
+            return MooncakeLookupResult(0)
+        boundary = candidates[selected[0]]
+        exists = kv_exists | {
+            (gid, bytes(block_hashes[boundary // self.hash_block_size - 1]))
+            for gid in group_ids
+        }
+        return MooncakeLookupResult(
+            boundary,
+            self._tail_key_boundaries(
+                block_hashes,
+                boundary,
+                ExternalCachedBlockPool(self.hash_block_size, exists),
             ),
         )
 
