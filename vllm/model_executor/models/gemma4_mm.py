@@ -1597,7 +1597,9 @@ class Gemma4ForConditionalGeneration(
         assert self.audio_tower is not None
         assert self.embed_audio is not None
         # Run audio tower — mask convention: True=valid, False=padding.
-        audio_outputs = self.audio_tower(input_features, input_features_mask)
+        # TODO: remove after Transformers 5.20.2 (huggingface/transformers#49684)
+        with gpu_sync_allowed():
+            audio_outputs = self.audio_tower(input_features, input_features_mask)
         if isinstance(audio_outputs, tuple):
             audio_encodings, audio_mask = audio_outputs
         else:
