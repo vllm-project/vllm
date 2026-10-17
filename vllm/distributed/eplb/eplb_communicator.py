@@ -43,6 +43,28 @@ def has_nixl() -> bool:
     return nixl_utils.NixlWrapper is not None
 
 
+def ring_p2p_batches(
+    peers: Sequence[tuple[bool, int]], rank: int, world_size: int
+) -> list[tuple[int, list[int]]]:
+    """Group P2P ops so that every batch has one send peer and one recv peer.
+
+    ``peers[i]`` is ``(is_send, peer_rank)`` of op ``i``. Batch ``d``
+    (``1 <= d < world_size``) holds this rank's sends to
+    ``(rank + d) % world_size`` and its receives from
+    ``(rank - d) % world_size``, each in the order they were added. When every
+    rank runs the batches in increasing ``d``, a send from A to B and the
+    matching receive on B land in the same batch ``(B - A) % world_size``, in
+    the same per-peer order.
+
+    Returns ``(d, op indices)`` for every non-empty batch, in increasing ``d``.
+    """
+    batches: dict[int, list[int]] = {}
+    for i, (is_send, peer) in enumerate(peers):
+        d = (peer - rank) % world_size if is_send else (rank - peer) % world_size
+        batches.setdefault(d, []).append(i)
+    return sorted(batches.items())
+
+
 class EplbCommunicator(ABC):
     """Abstract EPLB communicator for expert weight transfers."""
 
@@ -71,6 +93,13 @@ class EplbCommunicator(ABC):
         Some backends perform communication here; others (e.g. NIXL)
         issue transfers eagerly in add_recv and only wait here.
         On return, all data is available in the destination buffers.
+        """
+
+    def prepare_transfer(self) -> None:  # noqa: B027
+        """Called on every EP rank before a rearrangement's first transfer.
+
+        Default is a no-op; backends that need a collective setup step run it
+        here, while all ranks are known to be present.
         """
 
     def set_transfer_context(  # noqa: B027
@@ -107,7 +136,25 @@ class TorchDistNcclEplbCommunicator(EplbCommunicator):
         self._ep_group = ep_group
         self._stream = stream
         self._p2p_ops: list[P2POp] = []
+        # ROCm: RCCL can deadlock on a P2P batch where one rank sends to many
+        # peers while it also exchanges with one peer in both directions (seen
+        # with RCCL 2.27.7 on MI355X, depending on the transfer plan). Running
+        # the layer as ring batches (one peer per direction each) avoids it.
+        self._ring = current_platform.is_rocm()
+        self._ring_group_ready = False
+        # (is_send, group peer) of every op in _p2p_ops, for the ring batches.
+        self._p2p_peers: list[tuple[bool, int]] = []
         self._log_initialized()
+
+    def prepare_transfer(self) -> None:
+        # The first op on a process group creates its communicator and has to
+        # involve every rank; a ring batch may not, so run a collective first.
+        if self._ring and not self._ring_group_ready:
+            torch.distributed.all_reduce(
+                torch.zeros(1, device=current_platform.device_type),
+                group=self._ep_group,
+            )
+            self._ring_group_ready = True
 
     def add_send(
         self,
@@ -124,6 +171,7 @@ class TorchDistNcclEplbCommunicator(EplbCommunicator):
                     group_peer=dst_rank,
                 )
             )
+            self._p2p_peers.append((True, dst_rank))
 
     def add_recv(
         self,
@@ -140,17 +188,31 @@ class TorchDistNcclEplbCommunicator(EplbCommunicator):
                     group_peer=src_rank,
                 )
             )
+            self._p2p_peers.append((False, src_rank))
 
     def execute(self) -> None:
         if not self._p2p_ops:
             return
         try:
             with device_stream(self._stream):
-                reqs = batch_isend_irecv(self._p2p_ops)
-                for req in reqs:
-                    req.wait()
+                if self._ring:
+                    batches = [
+                        [self._p2p_ops[i] for i in indices]
+                        for _, indices in ring_p2p_batches(
+                            self._p2p_peers,
+                            self._ep_group.rank(),
+                            self._ep_group.size(),
+                        )
+                    ]
+                else:
+                    batches = [self._p2p_ops]
+                for batch in batches:
+                    reqs = batch_isend_irecv(batch)
+                    for req in reqs:
+                        req.wait()
         finally:
             self._p2p_ops.clear()
+            self._p2p_peers.clear()
 
 
 class TorchDistGlooStagedEplbCommunicator(EplbCommunicator):
