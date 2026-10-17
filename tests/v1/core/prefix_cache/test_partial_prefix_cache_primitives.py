@@ -6,7 +6,7 @@ from collections.abc import Callable
 import pytest
 
 import vllm.v1.core.kv_cache_utils as kv_cache_utils
-from vllm.distributed.kv_events import BlockRemoved, BlockStored
+from vllm.distributed.kv_events import AllBlocksCleared, BlockRemoved, BlockStored
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
     MultiModalKwargsItem,
@@ -130,7 +130,8 @@ def test_boundary_hashes_reuse_fine_grained_chain():
     assert tail_hash == hash_block_tokens(sha256, req.block_hashes[3], token_ids[8:10])
 
 
-def test_cache_partial_block_kv_cache_events():
+@pytest.mark.parametrize("report_all_hash_boundaries", [False, True])
+def test_cache_partial_block_kv_cache_events(report_all_hash_boundaries: bool):
     hash_block_size = 4
     block_size = 12
     kv_cache_group_id = 2
@@ -156,6 +157,7 @@ def test_cache_partial_block_kv_cache_events():
         num_tokens=hash_block_size * 2,
         kv_cache_group_id=kv_cache_group_id,
         block_size=block_size,
+        report_all_hash_boundaries=report_all_hash_boundaries,
     )
 
     events = pool.take_events()
@@ -163,16 +165,24 @@ def test_cache_partial_block_kv_cache_events():
     stored_event = events[0]
     assert isinstance(stored_event, BlockStored)
     assert partial_entry_hash is not None
+    first_hash_idx = 0 if report_all_hash_boundaries else 1
     assert stored_event.block_hashes == [
-        kv_cache_utils.maybe_convert_block_hash(req.block_hashes[1])
+        kv_cache_utils.maybe_convert_block_hash(block_hash)
+        for block_hash in req.block_hashes[first_hash_idx:]
     ]
-    assert stored_event.parent_block_hash == kv_cache_utils.maybe_convert_block_hash(
-        req.block_hashes[0]
+    assert stored_event.parent_block_hash == (
+        None
+        if report_all_hash_boundaries
+        else kv_cache_utils.maybe_convert_block_hash(req.block_hashes[0])
     )
-    assert stored_event.token_ids == req.all_token_ids[hash_block_size:]
+    assert (
+        stored_event.token_ids == req.all_token_ids[first_hash_idx * hash_block_size :]
+    )
     assert stored_event.block_size == 4
     assert stored_event.group_idx == kv_cache_group_id
     assert stored_event.session_id == "agent-session-partial"
+    assert pool.get_cached_block(req.block_hashes[0], [kv_cache_group_id]) is None
+    assert pool.get_cached_block(req.block_hashes[1], [kv_cache_group_id]) == [block]
 
     duplicate_entry_hash = pool.cache_partial_block(
         request=req,
@@ -180,6 +190,7 @@ def test_cache_partial_block_kv_cache_events():
         num_tokens=hash_block_size * 2,
         kv_cache_group_id=kv_cache_group_id,
         block_size=block_size,
+        report_all_hash_boundaries=report_all_hash_boundaries,
     )
     assert duplicate_entry_hash == partial_entry_hash
     assert pool.take_events() == []
@@ -187,11 +198,100 @@ def test_cache_partial_block_kv_cache_events():
     pool.free_blocks([block])
     pool.get_new_blocks(1)
     events = pool.take_events()
-    assert len(events) == 1
-    removed_event = events[0]
-    assert isinstance(removed_event, BlockRemoved)
-    assert removed_event.block_hashes == stored_event.block_hashes
-    assert removed_event.group_idx == kv_cache_group_id
+    assert len(events) == len(stored_event.block_hashes)
+    assert all(isinstance(event, BlockRemoved) for event in events)
+    assert {h for event in events for h in event.block_hashes} == set(
+        stored_event.block_hashes
+    )
+    assert all(event.group_idx == kv_cache_group_id for event in events)
+
+
+@pytest.mark.parametrize("operation", ["evict", "move", "promote", "replace", "reset"])
+def test_reported_partial_hashes_follow_block_lifecycle(operation: str):
+    pool = BlockPool(4, True, 2, enable_kv_cache_events=True)
+    req = make_request("producer", list(range(10)), 2, sha256)
+    blocks = pool.get_new_blocks(3)
+    pool.cache_full_blocks(req, blocks, 0, 1, 6, 0)
+    pool.take_events()
+    pool.cache_partial_block(req, blocks[1], 10, 0, 6, report_all_hash_boundaries=True)
+    stored = pool.take_events()[0]
+    assert isinstance(stored, BlockStored)
+    assert len(stored.block_hashes) == 2
+
+    if operation == "reset":
+        pool.free_blocks(blocks)
+        assert pool.reset_prefix_cache()
+        assert isinstance(pool.take_events()[0], AllBlocksCleared)
+        pool.get_new_blocks(3)
+        assert pool.take_events() == []
+        return
+
+    tail = blocks[1]
+    if operation == "move":
+        tail = blocks[2]
+        pool.move_block_hashes(blocks[1], tail)
+        pool.evict_blocks({blocks[1].block_id})
+        assert pool.take_events() == []
+        assert pool.get_cached_block(req.block_hashes[3], [0]) is None
+        assert pool.get_cached_block(req.block_hashes[4], [0]) == [tail]
+
+    if operation == "promote":
+        req.append_output_token_ids([10, 11])
+        pool.cache_full_blocks(req, blocks, 1, 2, 6, 0)
+    elif operation == "replace":
+        replacement = make_request("replacement", list(range(100, 110)), 2, sha256)
+        pool.cache_partial_block(
+            replacement, tail, 10, 0, 6, replace_existing_hashes=True
+        )
+    else:
+        pool.evict_blocks({tail.block_id})
+
+    events = pool.take_events()
+    removed = [event for event in events if isinstance(event, BlockRemoved)]
+    assert len(removed) == len(stored.block_hashes)
+    assert {h for event in removed for h in event.block_hashes} == set(
+        stored.block_hashes
+    )
+    assert pool.get_cached_block(req.block_hashes[3], [0]) is None
+    assert pool.get_cached_block(req.block_hashes[4], [0]) is None
+    if operation in ("promote", "replace"):
+        assert isinstance(events[-1], BlockStored)
+        assert events[:-1] == removed
+    pool.evict_blocks({tail.block_id})
+    assert not any(
+        h in stored.block_hashes
+        for event in pool.take_events()
+        if isinstance(event, BlockRemoved)
+        for h in event.block_hashes
+    )
+
+
+def test_dense_partial_event_splits_multimodal_extra_keys():
+    pool = BlockPool(2, True, 2, enable_kv_cache_events=True)
+    req = make_request(
+        "multimodal",
+        list(range(14)),
+        2,
+        sha256,
+        mm_positions=[
+            PlaceholderRange(offset=6, length=5),
+            PlaceholderRange(offset=11, length=3),
+        ],
+        mm_hashes=["A", "B"],
+    )
+    pool.cache_partial_block(
+        req,
+        pool.get_new_blocks(1)[0],
+        14,
+        0,
+        8,
+        report_all_hash_boundaries=True,
+    )
+    event = pool.take_events()[0]
+    assert isinstance(event, BlockStored)
+    assert event.extra_keys == [(("A", -2),), (("A", -4), ("B", 1)), (("B", -1),)]
+    assert len(event.block_hashes) == len(event.extra_keys) == 3
+    assert event.token_ids == req.all_token_ids[8:14]
 
 
 def test_cache_partial_block_event_keeps_every_mm_feature():

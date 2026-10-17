@@ -179,6 +179,8 @@ class BlockPool:
         # Cache for block lookup
         self.cached_block_hash_to_block: BlockHashToBlockMap = BlockHashToBlockMap()
         self.cached_block_hashes_by_block: dict[int, set[BlockHashWithGroupId]] = {}
+        # Published hashes without lookup entries still need removal events.
+        self.reported_block_hashes_by_block: dict[int, set[BlockHashWithGroupId]] = {}
 
         # To represent a placeholder block with block_id=0.
         # The ref_cnt of null_block is not maintained, needs special care to
@@ -289,7 +291,7 @@ class BlockPool:
                     blk.block_hash_num_tokens is not None
                     and blk.block_hash_num_tokens < num_hash_tokens
                 )
-                removed_hashes = self._remove_cached_block_hashes(blk)
+                removed_hashes = self._remove_block_hash_metadata(blk)
                 self._emit_block_removed_events(removed_hashes)
             self._insert_block_hash(
                 block_hash_with_group_id,
@@ -453,6 +455,7 @@ class BlockPool:
         kv_cache_group_id: int,
         block_size: int,
         replace_existing_hashes: bool = False,
+        report_all_hash_boundaries: bool = False,
     ) -> BlockHashWithGroupId | None:
         """Register a partial prefix-cache entry for an existing block.
 
@@ -483,6 +486,8 @@ class BlockPool:
             replace_existing_hashes: Whether the block contents were replaced
                 and all existing cache entries must be removed before the new
                 entry is registered.
+            report_all_hash_boundaries: Report every hash boundary in the
+                partial block while registering only the final one for lookup.
 
         Returns:
             The hash key with group ID if a partial entry can be registered;
@@ -507,7 +512,7 @@ class BlockPool:
             )
         )
         if replace_existing_hashes:
-            removed_hashes = self._remove_cached_block_hashes(block)
+            removed_hashes = self._remove_block_hash_metadata(block)
             self._emit_block_removed_events(removed_hashes)
             already_cached = False
         elif (
@@ -516,7 +521,7 @@ class BlockPool:
             and block.block_hash_num_tokens is not None
             and block.block_hash_num_tokens < num_hash_blocks * self.hash_block_size
         ):
-            removed_hashes = self._remove_cached_block_hashes(block)
+            removed_hashes = self._remove_block_hash_metadata(block)
             self._emit_block_removed_events(removed_hashes)
         self._insert_block_hash(
             block_hash_with_group_id,
@@ -527,6 +532,23 @@ class BlockPool:
             parent_hash, block_start = self._get_partial_block_parent_hash_and_start(
                 request, num_tokens
             )
+            block_hashes = [block_hash]
+            if report_all_hash_boundaries:
+                block_start = num_tokens // block_size * block_size
+                first_hash_idx = block_start // self.hash_block_size
+                block_hashes = request.block_hashes[first_hash_idx:num_hash_blocks]
+                parent_hash = (
+                    request.block_hashes[first_hash_idx - 1]
+                    if first_hash_idx > 0
+                    else None
+                )
+            if len(block_hashes) > 1:
+                self.reported_block_hashes_by_block.setdefault(
+                    block.block_id, set()
+                ).update(
+                    make_block_hash_with_group_id(block_hash, kv_cache_group_id)
+                    for block_hash in block_hashes[:-1]
+                )
             parent_block_hash = (
                 maybe_convert_block_hash(parent_hash)
                 if parent_hash is not None
@@ -541,15 +563,24 @@ class BlockPool:
                     curr_mm_idx, _ = get_mm_features_in_window(
                         mm_features, block_start, block_end
                     )
-            extra_keys, _ = generate_block_hash_extra_keys(
-                request, block_start, block_end, curr_mm_idx
-            )
+            extra_keys_list: list[tuple[Any, ...] | None] = []
+            for chunk_start in range(block_start, block_end, self.hash_block_size):
+                extra_keys, curr_mm_idx = generate_block_hash_extra_keys(
+                    request,
+                    chunk_start,
+                    chunk_start + self.hash_block_size,
+                    curr_mm_idx,
+                )
+                extra_keys_list.append(extra_keys)
             self.kv_event_queue.append(
                 BlockStored(
-                    block_hashes=[maybe_convert_block_hash(block_hash)],
+                    block_hashes=[
+                        maybe_convert_block_hash(block_hash)
+                        for block_hash in block_hashes
+                    ],
                     parent_block_hash=parent_block_hash,
                     token_ids=request.all_token_ids[block_start:block_end],
-                    block_size=block_end - block_start,
+                    block_size=self.hash_block_size,
                     lora_id=request.lora_request.adapter_id
                     if request.lora_request
                     else None,
@@ -557,7 +588,7 @@ class BlockPool:
                     lora_name=request.lora_request.name
                     if request.lora_request
                     else None,
-                    extra_keys=[extra_keys],
+                    extra_keys=extra_keys_list,
                     group_idx=kv_cache_group_id,
                     session_id=request.session_id,
                 )
@@ -610,6 +641,14 @@ class BlockPool:
         block.reset_hash()
         return removed_hashes
 
+    def _remove_block_hash_metadata(
+        self,
+        block: KVCacheBlock,
+    ) -> list[BlockHashWithGroupId]:
+        cached_hashes = self._remove_cached_block_hashes(block)
+        reported_hashes = self.reported_block_hashes_by_block.pop(block.block_id, ())
+        return list(dict.fromkeys((*cached_hashes, *reported_hashes)))
+
     def _emit_block_removed_events(
         self,
         block_hashes: list[BlockHashWithGroupId],
@@ -660,10 +699,16 @@ class BlockPool:
         """
         assert dst_block.block_hash is None
         assert dst_block.block_id not in self.cached_block_hashes_by_block
+        assert dst_block.block_id not in self.reported_block_hashes_by_block
         num_tokens = src_block.block_hash_num_tokens
+        reported_hashes = self.reported_block_hashes_by_block.pop(
+            src_block.block_id, None
+        )
         for block_hash in self._remove_cached_block_hashes(src_block):
             # `num_tokens` only applies to the first (primary) insertion.
             self._insert_block_hash(block_hash, dst_block, num_tokens=num_tokens)
+        if reported_hashes:
+            self.reported_block_hashes_by_block[dst_block.block_id] = reported_hashes
 
     def get_new_blocks(self, num_blocks: int) -> list[KVCacheBlock]:
         """Get new blocks from the free block pool.
@@ -743,7 +788,7 @@ class BlockPool:
         if self.metrics_collector:
             self.metrics_collector.on_block_evicted(block)
 
-        evicted_hashes = self._remove_cached_block_hashes(block)
+        evicted_hashes = self._remove_block_hash_metadata(block)
         if not evicted_hashes:
             # The block doesn't have hash, eviction is not needed
             return False
@@ -848,6 +893,7 @@ class BlockPool:
         # Remove all hashes so that no new blocks will hit.
         self.cached_block_hash_to_block = BlockHashToBlockMap()
         self.cached_block_hashes_by_block.clear()
+        self.reported_block_hashes_by_block.clear()
         if self._reuse_watchers:
             self._notify_reuse(
                 [self.blocks[block_id] for block_id in list(self._reuse_watchers)]
