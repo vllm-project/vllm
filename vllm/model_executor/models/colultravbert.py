@@ -584,4 +584,13 @@ class ColUltraVBertForRetrieval(nn.Module, SupportsMultiModal, SupportsLateInter
         weights: Iterable[tuple[str, torch.Tensor]],
     ) -> set[str]:
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        loaded = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        # The pooler loads its projector from `1_Dense` when it is built, so
+        # the root checkpoint carries none of its parameters.
+        projector = getattr(self.pooler.head, "projector", None)
+        if isinstance(projector, nn.Module):
+            loaded |= {
+                f"pooler.head.projector.{name}"
+                for name, _ in projector.named_parameters()
+            }
+        return loaded
