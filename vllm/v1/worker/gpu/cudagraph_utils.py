@@ -188,6 +188,11 @@ class CudaGraphManager:
         self._max_full_descs_to_capture: int | None = None
         self._capture_mem_samples: list[int] | None = None
 
+        # Set by discard_full_graphs: dispatch must skip descriptors whose
+        # graphs were destroyed and not yet recaptured. Gated so the default
+        # path (including speculative-token specialization) is unchanged.
+        self._sleep_partial = False
+
         self._candidates: dict[tuple[int, int], list[BatchExecutionDescriptor]] = {}
         self._capture_descs: dict[CUDAGraphMode, list[BatchExecutionDescriptor]] = {}
 
@@ -534,6 +539,12 @@ class CudaGraphManager:
         key = (num_tokens, effective_loras)
         if self._graphs_captured and num_tokens > 0 and key in self._candidates:
             for desc in self._candidates[key]:
+                if (
+                    self._sleep_partial
+                    and desc.cg_mode == CUDAGraphMode.FULL
+                    and desc not in self.graphs
+                ):
+                    continue
                 if _is_compatible(
                     desc,
                     num_reqs,
@@ -607,6 +618,21 @@ class ModelCudaGraphManager(CudaGraphManager):
         self.aux_hidden_states: list[torch.Tensor] = []
         self.use_aux_hidden_state_outputs = False
         self.intermediate_tensors: IntermediateTensors | None = None
+
+    def discard_full_graphs(self) -> None:
+        """Release owned graphs and outputs after the worker has synchronized."""
+        if self.cudagraph_mode != CUDAGraphMode.FULL:
+            raise ValueError("Graph discard supports FULL mode only")
+        self._graphs_captured = False
+        self._sleep_partial = True
+        for graph in self.graphs.values():
+            graph.reset()
+        self.graphs.clear()
+        self.hidden_states = None
+        self.aux_hidden_states = []
+        self.intermediate_tensors = None
+        # The old pool cannot be reused after its final graph is released.
+        self.pool = torch.cuda.graph_pool_handle()
 
     def capture(
         self,

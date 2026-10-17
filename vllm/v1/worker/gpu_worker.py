@@ -296,8 +296,23 @@ class Worker(WorkerBase):
         self._sleep_saved_parameters.clear()
 
     def sleep(self, level: int = 1) -> None:
+        if envs.VLLM_SLEEP_DISCARD_GRAPHS and level != 1:
+            raise ValueError("Graph-discard sleep supports level 1 only")
         torch.accelerator.synchronize()
         free_bytes_before_sleep = torch.accelerator.get_memory_info()[0]
+
+        if envs.VLLM_SLEEP_DISCARD_GRAPHS:
+            runner = cast("GPUModelRunnerV2", self.model_runner)
+            assert runner.cudagraph_manager is not None
+            runner.cudagraph_manager.discard_full_graphs()
+            gc.collect()
+            torch.accelerator.empty_cache()
+            after_graphs = torch.accelerator.get_memory_info()[0]
+            logger.info(
+                "Free-memory change after graph destruction and allocator "
+                "cache cleanup, before allocator sleep: %d bytes",
+                after_graphs - free_bytes_before_sleep,
+            )
 
         # Save the buffers before level 2 sleep
         if level == 2:
@@ -362,6 +377,42 @@ class Worker(WorkerBase):
             self._sleep_saved_draft_buffers = {}
 
         self.synchronize_device()
+
+    def recapture_sleep_graph(self) -> tuple[bool, int]:
+        """Run only at an idle EngineCore boundary with all allocations awake.
+
+        Returns (failed, remaining). failed=True means this rank hit a
+        recoverable allocation failure and has already discarded its graphs;
+        the engine must converge all ranks to eager before serving continues,
+        because tensor-parallel ranks must not diverge on graph availability.
+        """
+        runner = cast("GPUModelRunnerV2", self.model_runner)
+        assert runner.cudagraph_manager is not None
+        try:
+            return (False, runner.capture_one_sleep_graph())
+        except torch.OutOfMemoryError:
+            # A successful sync distinguishes a recoverable allocation failure
+            # from a poisoned CUDA context. Unknown CUDA failures propagate.
+            self.synchronize_device()
+            runner.cudagraph_manager.discard_full_graphs()
+            gc.collect()
+            torch.accelerator.empty_cache()
+            logger.warning("Sleep graph recapture ran out of memory; staying eager")
+            return (True, 0)
+
+    def discard_sleep_graphs(self) -> None:
+        """Discard any (possibly partially recaptured) sleep graphs.
+
+        Used to converge all tensor-parallel ranks to eager execution when
+        any rank failed recapture; asymmetric graph availability across ranks
+        would desynchronize the collectives embedded in FULL graphs.
+        """
+        runner = cast("GPUModelRunnerV2", self.model_runner)
+        if runner.cudagraph_manager is None:
+            return
+        runner.cudagraph_manager.discard_full_graphs()
+        gc.collect()
+        torch.accelerator.empty_cache()
 
     def discard(self, tags: tuple[str, ...]) -> None:
         if has_kv_transfer_group() and "kv_cache" in tags:
