@@ -94,6 +94,7 @@ from vllm.v1.worker.gpu.async_utils import (
     StepTimingCollector,
 )
 from vllm.v1.worker.gpu.attn_utils import (
+    FastPrefillBatchMetadata,
     FastPrefillHelper,
     build_slot_mappings_by_layer,
     get_kv_cache_spec,
@@ -1086,6 +1087,34 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             start_free_gpu_memory = torch.accelerator.get_memory_info()[0]
 
             with self.maybe_setup_dummy_loras(self.lora_config):
+                fast_prefill_capture_hook = None
+                if self.fast_prefill is not None and (
+                    self.lora_config is not None
+                    or self.cudagraph_manager.use_breakable_cg
+                ):
+
+                    def fast_prefill_capture_hook(
+                        num_tokens: int,
+                    ) -> tuple[FastPrefillBatchMetadata, dict[str, Any]]:
+                        logits_indices = torch.arange(
+                            num_tokens, dtype=torch.int32, device=self.device
+                        )
+                        compact_mapping = (
+                            self.lora_manager.prepare_fast_prefill_token_mapping(
+                                logits_indices
+                            )
+                            if self.lora_config is not None
+                            else None
+                        )
+                        return (
+                            FastPrefillBatchMetadata(
+                                logits_indices_padded=logits_indices,
+                                num_logits_indices=num_tokens,
+                                max_logits_per_req=num_tokens,
+                            ),
+                            {"fast_prefill_lora_mapping": compact_mapping},
+                        )
+
                 if capture_encoder:
                     self.model_state.encoder_runner.capture()
 
@@ -1107,6 +1136,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         lora_capture_hook=create_lora_capture_hook(
                             self.lora_config, self
                         ),
+                        fast_prefill_capture_hook=fast_prefill_capture_hook,
                     )
                     self.model_state.capture_inner_cudagraphs(
                         input_buffers,
@@ -1504,6 +1534,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 batch_req_state.has_prefill,
                 batch_desc,
                 num_active_loras=num_active_loras,
+                max_query_len=int(num_scheduled_tokens_np.max()),
             )
 
         # CPU upper bound on seq_lens; padded entries left at zero.
@@ -1816,6 +1847,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             return self._merge_ec_connector_no_forward(scheduler_output, empty_output)
 
         cudagraph_stats = None
+        fast_prefill_lora_mapping = None
         if not dummy_run:
             # Common case.
             # Prepare all the inputs and copy to the input buffers.
@@ -1845,6 +1877,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     input_batch.num_scheduled_tokens,
                 )
                 self._set_active_loras(*lora_inputs)
+                if (
+                    input_batch.fast_prefill is not None
+                    and self.lora_config is not None
+                ):
+                    fast_prefill_lora_mapping = (
+                        self.lora_manager.prepare_fast_prefill_token_mapping(
+                            input_batch.fast_prefill.logits_indices_padded
+                        )
+                    )
         else:
             # No actual tokens to run. A dummy run for DP or memory profiling.
             dummy_num_reqs = batch_desc.num_reqs or num_reqs
@@ -2026,6 +2067,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 num_tokens=input_batch.num_tokens_after_padding,
                 has_lora=self.lora_config is not None,
                 num_active_loras=batch_desc.num_active_loras,
+                has_fast_prefill=(
+                    input_batch.fast_prefill is not None
+                    and self.cudagraph_manager is not None
+                    and self.cudagraph_manager.use_breakable_cg
+                ),
             )
 
             with set_forward_context(
@@ -2040,6 +2086,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 slot_mapping=slot_mappings_by_layer,
                 skip_compiled=skip_compiled,
                 is_padding=input_batch.is_padding,
+                extra_kwargs={
+                    "fast_prefill_lora_mapping": fast_prefill_lora_mapping,
+                },
             ):
                 self.kv_connector.pre_forward(scheduler_output, input_batch)
                 if ubatch_state is not None:

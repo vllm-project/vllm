@@ -89,6 +89,64 @@ def test_piecewise_capture_builds_fresh_metadata_for_both_passes():
     assert create_calls[0][1] is not create_calls[1][1]
 
 
+@pytest.mark.parametrize("breakable", [False, True])
+def test_captures_compact_decoder_before_outer_fast_graph(breakable):
+    from vllm.config import CUDAGraphMode
+    from vllm.v1.worker.gpu.cudagraph_utils import (
+        BatchExecutionDescriptor,
+        CudaGraphManager,
+    )
+
+    manager = CudaGraphManager.__new__(CudaGraphManager)
+    desc = BatchExecutionDescriptor(CUDAGraphMode.PIECEWISE, 4, None)
+    manager.device = torch.device("cpu")
+    manager._capture_descs = {CUDAGraphMode.PIECEWISE: [desc]}
+    manager._graphs_captured = False
+    manager.use_breakable_cg = breakable
+    manager.ubatch_runner = None
+    calls = []
+    metadata_seen = []
+
+    def factory(name):
+        def create_forward_fn(desc_arg, warmup):
+            assert desc_arg == desc
+            metadata = object()
+
+            def forward(mode):
+                calls.append((name, warmup, mode))
+                if name == "compact":
+                    metadata_seen.append(metadata)
+
+            return forward
+
+        return create_forward_fn
+
+    with (
+        patch(
+            "vllm.v1.worker.gpu.cudagraph_utils.graph_capture",
+            return_value=nullcontext(),
+        ),
+        patch(
+            "vllm.v1.worker.gpu.cudagraph_utils.is_global_first_rank",
+            return_value=False,
+        ),
+    ):
+        manager.capture(
+            factory("outer"), fast_prefill_create_forward_fn=factory("compact")
+        )
+
+    expected = [
+        ("outer", True, CUDAGraphMode.NONE),
+        ("outer", not breakable, CUDAGraphMode.PIECEWISE),
+        ("compact", True, CUDAGraphMode.NONE),
+    ]
+    if breakable:
+        expected.append(("compact", True, CUDAGraphMode.PIECEWISE))
+    expected.append(("compact", False, CUDAGraphMode.PIECEWISE))
+    assert calls == expected
+    assert len({id(metadata) for metadata in metadata_seen}) == 2 + int(breakable)
+
+
 @pytest.fixture(autouse=True)
 def _reset_breakable_tls():
     """Defensively clear thread-local capture state between tests so a
@@ -627,6 +685,29 @@ def test_wrapper_captures_on_runtime_mode_match():
     mock_capture.assert_called_once()
     assert calls == []
     assert desc in wrapper.entries
+
+
+def test_breakable_keeps_fast_and_full_prefill_graphs_separate():
+    from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphWrapper
+    from vllm.config import CUDAGraphMode
+    from vllm.forward_context import BatchDescriptor, set_forward_context
+
+    config = _mock_vllm_config()
+    wrapper = BreakableCUDAGraphWrapper(lambda x: x, config)
+    with patch.object(BreakableCUDAGraphWrapper, "_capture", return_value=None):
+        for fast_prefill in (False, True):
+            with set_forward_context(
+                None,
+                config,
+                cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE,
+                batch_descriptor=BatchDescriptor(
+                    num_tokens=4, has_lora=True, has_fast_prefill=fast_prefill
+                ),
+            ):
+                wrapper(1)
+
+    assert len(wrapper.entries) == 2
+    assert {desc.has_fast_prefill for desc in wrapper.entries} == {False, True}
 
 
 def test_wrapper_default_matches_any_non_none_mode():

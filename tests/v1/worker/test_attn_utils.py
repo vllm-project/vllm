@@ -420,6 +420,26 @@ def test_fast_prefill_dispatch_preserves_active_lora_count(
     assert manager.dispatch_calls[-1]["num_active_loras"] == num_active_loras
 
 
+def test_fast_prefill_skips_one_token_queries():
+    manager = SimpleNamespace(device="cpu")
+    helper = FastPrefillHelper(manager, max_num_tokens=4)
+    assert (
+        helper.prepare(
+            torch.arange(2, dtype=torch.int32),
+            num_reqs=2,
+            cu_num_logits_np=np.array([0, 1, 2], dtype=np.int32),
+            has_prefill=True,
+            batch_desc=BatchExecutionDescriptor(
+                cg_mode=CUDAGraphMode.PIECEWISE,
+                num_tokens=2,
+                num_reqs=None,
+            ),
+            max_query_len=1,
+        )
+        is None
+    )
+
+
 class _FakeSharedHostRegion:
     def __init__(self) -> None:
         self.cleanup_calls = 0

@@ -199,12 +199,16 @@ class LoRAModelRunnerMixin:
             # convert_mapping() will convert these to 0-indexed slot indices.
             if effective_num_loras > 0:
                 if include_no_lora:
-                    # Include -1 (no-LoRA) entries by cycling through
-                    # -1, 1, 2, ..., effective_num_loras
-                    # This ensures prepare_tensors sees both LoRA and no-LoRA
-                    # tokens, computing num_active_loras = effective_num_loras+1
+                    # Include a no-LoRA entry by cycling through
+                    # 1, 2, ..., effective_num_loras, 0. ``convert_mapping``
+                    # maps non-positive request ids to the -1 kernel sentinel.
+                    # Put an active LoRA first so small capture cases (for
+                    # example, a single request) never become no-LoRA-only.
+                    # When enough requests are available, this makes
+                    # prepare_tensors see both LoRA and no-LoRA tokens and
+                    # compute num_active_loras = effective_num_loras+1.
                     cycle_values = np.array(
-                        list(range(1, effective_num_loras + 1)),
+                        [*range(1, effective_num_loras + 1), 0],
                         dtype=np.int32,
                     )
                     prompt_lora_mapping = cycle_values[

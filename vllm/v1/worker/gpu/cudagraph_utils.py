@@ -42,7 +42,10 @@ from vllm.utils.torch_utils import current_stream
 from vllm.v1.hisparse.binding import release_hisparse_profiling_cache
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.spec_decode.dynamic.utils import build_dynamic_sd_schedule_lookup
-from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
+from vllm.v1.worker.gpu.attn_utils import (
+    FastPrefillBatchMetadata,
+    build_slot_mappings_by_layer,
+)
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.input_batch import (
@@ -425,6 +428,7 @@ class CudaGraphManager:
         self,
         create_forward_fn: CreateForwardFn,
         progress_bar_desc: str = "Capturing CUDA graphs",
+        fast_prefill_create_forward_fn: CreateForwardFn | None = None,
     ) -> None:
         """Capture CUDA graphs.
 
@@ -434,6 +438,9 @@ class CudaGraphManager:
                 it is invoked once with warmup=True and again with warmup=False
                 because attention backends may mutate or lazily initialize
                 metadata during warmup.
+            fast_prefill_create_forward_fn: Optional factory for the compact
+                KV-sharing fast-prefill path. Its PIECEWISE graphs are captured
+                on the same graph-capture stream as the regular graphs.
             progress_bar_desc: Description shown on the capture progress bar.
 
         """
@@ -482,35 +489,66 @@ class CudaGraphManager:
                         forward_fn = create_forward_fn(desc, warmup=False)
                         if desc.cg_mode == CUDAGraphMode.PIECEWISE:
                             forward_fn(CUDAGraphMode.PIECEWISE)
-                            continue
-                        assert desc not in self.graphs, (
-                            f"Graph already captured for {desc}"
+                        else:
+                            assert desc not in self.graphs, (
+                                f"Graph already captured for {desc}"
+                            )
+                            graph = torch.cuda.CUDAGraph()
+                            # Sync offloader's copy stream before capture.
+                            # Ensure any pre-capture prefetches from offloader are
+                            # complete.
+                            get_offloader().sync_prev_onload()
+                            if self._capture_mem_samples is not None:
+                                torch.accelerator.synchronize()
+                                free_before = torch.accelerator.get_memory_info()[0]
+                            with (
+                                capture_pool(self.pool, self.vllm_config) as pool,
+                                torch.cuda.graph(
+                                    graph, pool, stream=self._capture_stream(desc)
+                                ),
+                            ):
+                                forward_fn(CUDAGraphMode.NONE)
+                                # Join offloader's copy stream after forward to
+                                # avoid unjoined stream error. The last layer's
+                                # start_prefetch forks copy_stream, but
+                                # wait_prefetch only happens in the next forward
+                                # pass.
+                                get_offloader().join_after_forward()
+                            if self._capture_mem_samples is not None:
+                                torch.accelerator.synchronize()
+                                free_after = torch.accelerator.get_memory_info()[0]
+                                self._capture_mem_samples.append(
+                                    free_before - free_after
+                                )
+                            self.graphs[desc] = graph
+                            compilation_counter.num_cudagraph_captured += 1
+
+                    if (
+                        desc.cg_mode == CUDAGraphMode.PIECEWISE
+                        and fast_prefill_create_forward_fn is not None
+                    ):
+                        # The compact cross-decoder is a separate compiled
+                        # module. Capture it explicitly here so its first
+                        # CUDAGraphWrapper invocation never occurs on the
+                        # runtime's default stream.
+                        fast_forward_fn = fast_prefill_create_forward_fn(
+                            desc, warmup=True
                         )
-                        graph = torch.cuda.CUDAGraph()
-                        # Sync offloader's copy stream before capture.
-                        # Ensure any pre-capture prefetches from offloader are complete.
-                        get_offloader().sync_prev_onload()
-                        if self._capture_mem_samples is not None:
-                            torch.accelerator.synchronize()
-                            free_before = torch.accelerator.get_memory_info()[0]
-                        with (
-                            capture_pool(self.pool, self.vllm_config) as pool,
-                            torch.cuda.graph(
-                                graph, pool, stream=self._capture_stream(desc)
-                            ),
-                        ):
-                            forward_fn(CUDAGraphMode.NONE)
-                            # Join offloader's copy stream after forward to avoid
-                            # unjoined stream error. The last layer's start_prefetch
-                            # forks copy_stream, but wait_prefetch only happens in
-                            # the next forward pass.
-                            get_offloader().join_after_forward()
-                        if self._capture_mem_samples is not None:
-                            torch.accelerator.synchronize()
-                            free_after = torch.accelerator.get_memory_info()[0]
-                            self._capture_mem_samples.append(free_before - free_after)
-                        self.graphs[desc] = graph
-                        compilation_counter.num_cudagraph_captured += 1
+                        fast_forward_fn(CUDAGraphMode.NONE)
+                        if self.use_breakable_cg:
+                            # Capture the compact cross-decoder independently
+                            # before the outer breakable graph references it.
+                            # Rebuild attention metadata after warmup. Keep
+                            # warmup=True to bypass the outer breakable graph
+                            # while the compact graph captures on its own.
+                            fast_forward_fn = fast_prefill_create_forward_fn(
+                                desc, warmup=True
+                            )
+                            fast_forward_fn(CUDAGraphMode.PIECEWISE)
+                        fast_forward_fn = fast_prefill_create_forward_fn(
+                            desc, warmup=False
+                        )
+                        fast_forward_fn(CUDAGraphMode.PIECEWISE)
 
         self._graphs_captured = True
 
@@ -621,6 +659,9 @@ class ModelCudaGraphManager(CudaGraphManager):
         has_lora: bool = False,
         use_aux_hidden_state_outputs: bool = False,
         lora_capture_hook: Callable[[int, int, int], None] | None = None,
+        fast_prefill_capture_hook: (
+            Callable[[int], tuple[FastPrefillBatchMetadata, dict[str, Any]]] | None
+        ) = None,
         progress_bar_desc: str = "Capturing CUDA graphs",
     ) -> None:
         """Capture CUDA graphs for model forward pass."""
@@ -668,14 +709,29 @@ class ModelCudaGraphManager(CudaGraphManager):
                     self.intermediate_tensors[k][:num_tokens] = v
 
         def create_forward_fn(
-            desc: BatchExecutionDescriptor, warmup: bool
+            desc: BatchExecutionDescriptor,
+            warmup: bool,
+            fast_prefill: bool = False,
         ) -> Callable[[CUDAGraphMode], None]:
             num_tokens = desc.num_tokens
+            # The compact graph is keyed by token count, not request count.
+            # Keep the normal PIECEWISE request split for capture so the dummy
+            # LoRA mapping can represent every adapter in the graph's capture
+            # case. Fast-prefill metadata is armed independently below by the
+            # synthetic logits-index mapping.
             num_reqs = desc.num_reqs or min(num_tokens, self.max_num_reqs)
 
             # Set LoRA state before capture so kernels see correct adapters.
             if lora_capture_hook is not None:
                 lora_capture_hook(desc.num_active_loras, num_reqs, num_tokens)
+
+            if fast_prefill:
+                assert fast_prefill_capture_hook is not None
+                capture_fast_prefill, extra_kwargs = fast_prefill_capture_hook(
+                    num_tokens
+                )
+            else:
+                capture_fast_prefill, extra_kwargs = None, {}
 
             num_tokens_across_dp = (
                 torch.full((self.dp_size,), num_tokens, dtype=torch.int32, device="cpu")
@@ -739,8 +795,13 @@ class ModelCudaGraphManager(CudaGraphManager):
                 attn_groups,
                 kv_cache_config,
                 full_cudagraph=desc.cg_mode == CUDAGraphMode.FULL,
-                max_query_len=desc.max_query_len or desc.uniform_token_count,
+                max_query_len=(
+                    max(2, num_tokens)
+                    if fast_prefill
+                    else desc.max_query_len or desc.uniform_token_count
+                ),
                 pcp_manager=pcp_manager,
+                fast_prefill=capture_fast_prefill,
             )
 
             # Capture with dummy rows marked as padding.
@@ -752,10 +813,15 @@ class ModelCudaGraphManager(CudaGraphManager):
             def forward_fn(cg_mode: CUDAGraphMode) -> None:
                 batch_descriptor = None
                 if cg_mode == CUDAGraphMode.PIECEWISE:
+                    # The outer model forward still runs the self-decoder on
+                    # the regular full-batch descriptor. fast_prefill_forward
+                    # switches to the compact descriptor only around the
+                    # cross-decoder call after the self-decoder completes.
                     batch_descriptor = BatchDescriptor(
                         num_tokens=num_tokens,
                         has_lora=has_lora,
                         num_active_loras=desc.num_active_loras,
+                        has_fast_prefill=fast_prefill and self.use_breakable_cg,
                     )
                 with set_forward_context(
                     attn_metadata,
@@ -766,11 +832,16 @@ class ModelCudaGraphManager(CudaGraphManager):
                     slot_mapping=slot_mappings,
                     batch_descriptor=batch_descriptor,
                     is_padding=is_padding,
+                    extra_kwargs=extra_kwargs,
                 ):
                     if cg_mode == CUDAGraphMode.PIECEWISE:
                         # PIECEWISE graph (compiled PW or breakable, chosen inside
                         # run_pw_graph).
-                        model_output = self.run_pw_graph(model, model_inputs)
+                        model_output = (
+                            model(**model_inputs)
+                            if fast_prefill and warmup and self.use_breakable_cg
+                            else self.run_pw_graph(model, model_inputs)
+                        )
                     else:
                         model_output = model(**model_inputs)
 
@@ -783,7 +854,19 @@ class ModelCudaGraphManager(CudaGraphManager):
 
             return forward_fn
 
-        super().capture(create_forward_fn, progress_bar_desc)
+        fast_prefill_create_forward_fn = None
+        if fast_prefill_capture_hook is not None:
+
+            def fast_prefill_create_forward_fn(
+                desc: BatchExecutionDescriptor, warmup: bool
+            ) -> Callable[[CUDAGraphMode], None]:
+                return create_forward_fn(desc, warmup, fast_prefill=True)
+
+        super().capture(
+            create_forward_fn,
+            progress_bar_desc,
+            fast_prefill_create_forward_fn=fast_prefill_create_forward_fn,
+        )
 
     def run_fullgraph(
         self, desc: BatchExecutionDescriptor
@@ -833,6 +916,7 @@ def prepare_inputs_to_capture(
     full_cudagraph: bool,
     max_query_len: int | None = None,
     pcp_manager: "PCPManager | None" = None,
+    fast_prefill: FastPrefillBatchMetadata | None = None,
 ) -> AttentionState:
     if full_cudagraph and max_query_len is None:
         # Mixed graphs can replay a single prefill spanning the entire batch,
@@ -841,6 +925,7 @@ def prepare_inputs_to_capture(
     input_batch = InputBatch.make_dummy(
         num_reqs, num_tokens, input_buffers, max_query_len=max_query_len
     )
+    input_batch.fast_prefill = fast_prefill
     if pcp_manager is not None:
         input_batch = pcp_manager.prepare_inputs_for_capture_or_profile(input_batch)
 
