@@ -5,7 +5,7 @@ meta:
   provider: "DeepSeek"
   description: "DeepSeek V4.1 Flash vision-language MoE (552B backbone; 8B active per prompt token, 16B per output token) combining sliding-window plus compressed sparse attention with a two-level indexer, engram n-gram memory, hyper-connections, and a DSpark multi-token draft head."
   date_added: 2026-09-09
-  date_updated: 2026-10-13
+  date_updated: 2026-10-17
   tasks:
     - text
     - multimodal
@@ -33,15 +33,18 @@ model:
   smg_grpc:
     reasoning_parser: deepseek_v41
     tool_call_parser: deepseek_v41
-  min_vllm_version: "0.30.0"
-  # 0.30.0 has not shipped; the architecture lives on main (vllm-project/vllm#56228),
-  # so NVIDIA renders `vllm/vllm-openai:nightly` instead of the launch-day
-  # `deepseekv41-flash-0909` tag, which is now behind main.
-  nightly_required: true
+  # The architecture shipped in 0.30.0 (vllm-project/vllm#56228). 0.31.0 is the
+  # first release carrying KV offloading's scratch-group skip
+  # (vllm-project/vllm#57145) and the ROCm Engram host-memory gate
+  # (vllm-project/vllm#57491) the MI300X/MI325X/MI355X commands rely on. Every
+  # flag the NVIDIA commands generate is in the 0.31.0 wheel.
+  min_vllm_version: "0.31.0"
   default_frontend: rust
   docker_image:
-    # ROCm 10.0 nightly channel; includes the AITER mHC delayed-pre path from
-    # vllm-project/vllm#56503.
+    # ROCm 10.0 nightly channel. MI355X's --monokernel (vllm-project/vllm#60397,
+    # #61082), paged MXFP4 indexer (#58671) and Gluon sparse MLA (#53492) are on
+    # main but not in 0.31.0, so AMD stays on the nightly image the AMD rows were
+    # verified on; the MI355X pip tab is hidden in the variants below.
     amd: "vllm/vllm-openai-rocm:nightly-rocm100"
   architecture: moe
   parameter_count: "552B"
@@ -52,10 +55,6 @@ model:
     - "deepseek_v41"
   base_env:
     VLLM_ENGINE_READY_TIMEOUT_S: "3600"
-  install:
-    docker:
-      note: "Serve from the image for your GPU vendor — no pip wheel carries the DeepSeek-V4.1 architecture. Both vendors track the nightly image; the launch-day 0909 tag is superseded (see Prerequisites)."
-    pip: false
 
 dependencies: []
 
@@ -113,10 +112,18 @@ opt_in_features:
 
 variants:
   default:
+    # 2026-10-17 weight refresh, now the default (mirrors DeepSeek-V4-Pro's 0813
+    # roll-forward). config.json, tokenizer files and encoding/ are byte-identical
+    # to the launch repo, and the index holds the same 96,085 tensors (510.3 GB),
+    # so it keeps the launch checkpoint's per-GPU memory layout below. The repo
+    # ships no chat_template.jinja; the deepseek_v41 tokenizer mode in base_args
+    # encodes prompts in Python, so none is needed.
+    model_id: "deepseek-ai/DeepSeek-V4.1-Flash-1017"
+    label: "FP8 (1017)"
     precision: fp8
     vram_minimum_gb: 614
-    description: "Native mixed checkpoint: MXFP4 MoE experts, MXFP8 block-quantized dense weights, UE8M0 scales throughout"
-    hardware_overrides:
+    description: "DeepSeek-V4.1-Flash-1017 (2026-10-17): native mixed checkpoint (MXFP4 MoE experts, MXFP8 block-quantized dense weights, UE8M0 scales) with updated weights — stronger reasoning, coding, agentic and visual results, and shorter outputs."
+    hardware_overrides: &v41_flash_hw_overrides
       # 8x80 GB is the smallest NVIDIA node that serves this checkpoint, and
       # only with the memory levers the InferenceX H100 arm settled on
       # (SemiAnalysisAI/InferenceX#2974, validated on the 2026-09-15 nightly in
@@ -140,6 +147,11 @@ variants:
         extra_env:
           VLLM_USE_V2_MODEL_RUNNER: "1"
           PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
+      # --monokernel and the ROCm MXFP4 indexer path are on main, not in the
+      # 0.31.0 wheel, which rejects the flag. Drop this once a release ships them.
+      mi355x:
+        install:
+          pip: false
       # Single GB300 + Grace: Engram tables and 60 GiB of experts in host memory via UVA.
       # vram_minimum_gb is the GPU-resident fit budget (0.97 x 252); taxonomy vram_gb stays physical HBM.
       # 60 GiB is the lowest verified offload at 1M context with DSpark on; 55 fails the minimum-KV check.
@@ -165,6 +177,15 @@ variants:
           - "6144"
           - "--compilation-config"
           - '{"cudagraph_capture_sizes":[1,2,4,6,8,12,16,18,24,32,40,48,64,96,128]}'
+  fp8:
+    # The 2026-09-09 launch checkpoint. No model_id override: it serves the
+    # recipe's own repo. Labeled with its date so the pill doesn't read as
+    # "the plain one" next to the 1017 default.
+    label: "FP8 (0909)"
+    precision: fp8
+    vram_minimum_gb: 614
+    description: "Launch checkpoint (2026-09-09), superseded by 1017 — kept for reproducing earlier results. Same mixed MXFP4/MXFP8 format."
+    hardware_overrides: *v41_flash_hw_overrides
 
 compatible_strategies:
   - single_node_tp
@@ -378,25 +399,74 @@ strategy_overrides:
           - "4096"
   pd_cluster:
     # Verified 1P1D on GB200 NVL4: one tray per role, TP4 each, NIXL transfer.
+    # GB300: DEP4 prefill + DEP16 decode (SemiAnalysisAI/InferenceX#3941).
     env:
       VLLM_DEEP_GEMM_WARMUP: "skip"
+    hardware_overrides:
+      gb300:
+        extra_args:
+          - "--kv-cache-dtype"
+          - "fp8"
+          - "--attention-config"
+          - '{"backend":"FLASHMLA_MEGA_ATTN_DSV41","indexer_kv_dtype":"mxfp4","indexer_sparse_logits":true}'
+          - "--kernel-config"
+          - '{"moe_backend":"deep_gemm_mega_moe","sparse_indexer_topk_backend":"deep_select"}'
+          - "--engram-config"
+          - '{"cpu_offload":true}'
+          - "--enable-ep-weight-filter"
+          - "--gpu-memory-utilization"
+          - "0.95"
+          - "--numa-bind"
+        extra_env:
+          VLLM_USE_V2_MODEL_RUNNER: "1"
+          # KV moves over the NVLink fabric between trays.
+          UCX_TLS: "cuda_copy,cuda_ipc,tcp"
+          UCX_CUDA_IPC_ENABLE_MNNVL: "y"
     prefill:
       nodes: 1
-      parallelism: tp
+      parallelism:
+        default: tp
+        gb300: dep
       vllm_args:
         - "--max-num-seqs"
         - "32"
+      hardware_overrides:
+        gb300:
+          extra_args:
+            - "--max-num-seqs"
+            - "64"
+            - "--max-num-batched-tokens"
+            - "32768"
+            - "--long-prefill-token-threshold"
+            - "8192"
+            - "--compilation-config"
+            - '{"mode":"VLLM_COMPILE","cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[6,12,18,24,30,36,48,60,72,96,120,144,192,240,288,384,480,576,768,1020,1536,2046],"max_cudagraph_capture_size":2046}'
     decode:
-      nodes: 1
-      parallelism: tp
+      nodes:
+        default: 1
+        gb300: 4
+      parallelism:
+        default: tp
+        gb300: dep
       vllm_args:
         - "--max-num-seqs"
         - "32"
+      hardware_overrides:
+        # 40 sequences per rank; graph sizes are multiples of 1 + 5 DSpark tokens.
+        gb300:
+          extra_args:
+            - "--max-num-seqs"
+            - "40"
+            - "--max-num-batched-tokens"
+            - "400"
+            - "--compilation-config"
+            - '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[6,12,18,24,30,36,42,48,54,60,66,72,78,84,90,96,102,108,114,120,126,132,138,144,150,156,162,168,174,180,186,192,198,204,210,216,222,228,234,240],"max_cudagraph_capture_size":240}'
+            - "--no-enable-prefix-caching"
 
 hardware_notes:
   dgx_station_gb300:
     title: "Weights in Grace memory (UVA offload)"
-    body: "Single GB300 with both Engram tables and 60 GiB of routed experts in pinned Grace memory (UVA offload). Nightly image only. The first boot on a new flag set runs a 75-90 min FlashInfer autotune; keep /root/.cache/vllm on a persistent volume."
+    body: "Single GB300 with both Engram tables and 60 GiB of routed experts in pinned Grace memory (UVA offload). Measured on a nightly image; vLLM 0.31.0 carries every flag this row uses. The first boot on a new flag set runs a 75-90 min FlashInfer autotune; keep /root/.cache/vllm on a persistent volume."
 
 guide: |
   ## Overview
@@ -433,6 +503,26 @@ guide: |
   Routing is 6 of 384 experts per token plus one shared expert, scored with
   `sqrtsoftplus` and a `noaux_tc` bias — with a **separate routing bias for tokens
   inside an image span**, so vision and text tokens do not compete for the same experts.
+
+  ## Checkpoints
+
+  | Variant | Checkpoint | Notes |
+  |---|---|---|
+  | **FP8 (1017)** (default) | [deepseek-ai/DeepSeek-V4.1-Flash-1017](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017) | 2026-10-17 weight update — recommended |
+  | **FP8 (0909)** | [deepseek-ai/DeepSeek-V4.1-Flash](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash) | Launch release (2026-09-09) |
+
+  **1017 is the default here.** It is a minor update with the same architecture,
+  `config.json`, tokenizer and prompt encoding as the launch checkpoint — only the
+  weights change. DeepSeek reports gains across reasoning, coding, agentic and visual
+  benchmarks (e.g. Terminal-Bench 4.0 31.2 → 42.3, HLE w/o tools 36.8 → 42.6) along with
+  shorter outputs. Both serve with the same command; the Variant row only swaps the model
+  id. Like the launch repo it ships no Jinja chat template, which the
+  `--tokenizer-mode deepseek_v41` flag already covers. Pick **FP8 (0909)** to reproduce
+  earlier results.
+
+  The verified hardware badges and the measured numbers in the sections below
+  (benchmarks, KV offloading validation) were taken on the 0909 launch checkpoint; the
+  1017 weights share its config and footprint but have not been separately re-run.
 
   ## Context length
 
@@ -484,7 +574,7 @@ guide: |
 
   ```python
   resp = client.chat.completions.create(
-      model="deepseek-ai/DeepSeek-V4.1-Flash",
+      model="deepseek-ai/DeepSeek-V4.1-Flash-1017",
       messages=[{"role": "user", "content": "What is 17*19?"}],
       extra_body={"chat_template_kwargs": {"thinking": True, "reasoning_effort": 25}},
   )
@@ -531,6 +621,25 @@ guide: |
   With **Speculative decoding** on, DSpark runs in both pools so the transferred KV
   stays compatible.
 
+  ### GB300
+
+  GB300 runs both pools as DEP, per
+  [SemiAnalysisAI/InferenceX#3941](https://github.com/SemiAnalysisAI/InferenceX/pull/3941):
+  one tray of DEP4 prefill, four trays of DEP16 decode. Keep them on DEP; MegaMoE needs
+  expert parallelism.
+
+  To scale prefill, InferenceX ran two DEP2 engines per tray. Drop the
+  `--data-parallel-{start-rank,address,rpc-port}` flags from the prefill command and
+  run it twice:
+
+  ```bash
+  CUDA_VISIBLE_DEVICES=0,1 VLLM_NIXL_SIDE_CHANNEL_PORT=5557 vllm serve ... --port 8001 \
+    --data-parallel-size 2 --data-parallel-size-local 2
+  CUDA_VISIBLE_DEVICES=2,3 VLLM_NIXL_SIDE_CHANNEL_PORT=5559 vllm serve ... --port 8011 \
+    --data-parallel-size 2 --data-parallel-size-local 2
+  # vllm-router: list both ports, with --intra-node-data-parallel-size 1
+  ```
+
   ## Memory
 
   The checkpoint is roughly **511 GB on disk** (476 GiB), which breaks down as:
@@ -559,15 +668,16 @@ guide: |
 
   ## Prerequisites
 
-  - An image (vLLM 0.30.0+); no pip wheel serves this architecture, so the Install block
-    only offers Docker. On NVIDIA that is `vllm/vllm-openai:nightly`: the architecture
-    landed on `main` in [vllm-project/vllm#56228](https://github.com/vllm-project/vllm/pull/56228),
-    so any nightly from 2026-09-10 on serves it, and the launch-day
-    `deepseekv41-flash-0909` tag is no longer needed. On AMD it is
-    `vllm/vllm-openai-rocm:nightly-rocm100`, the ROCm 10.0 nightly, which also carries
-    [vllm-project/vllm#56503](https://github.com/vllm-project/vllm/pull/56503) — the change
-    that moves the mHC delayed pre block off the eager Torch reference and onto AITER
-    and postdates the 0909 tag.
+  - vLLM 0.31.0+, from the pip wheel or the release image. The architecture shipped in
+    0.30.0 ([vllm-project/vllm#56228](https://github.com/vllm-project/vllm/pull/56228));
+    0.31.0 adds the KV-offload fix ([vllm-project/vllm#57145](https://github.com/vllm-project/vllm/pull/57145))
+    and the ROCm Engram host-memory gate ([vllm-project/vllm#57491](https://github.com/vllm-project/vllm/pull/57491)).
+    The launch-day `deepseekv41-flash-0909` image is no longer needed.
+  - On AMD the Docker tab uses `vllm/vllm-openai-rocm:nightly-rocm100`, the ROCm 10.0
+    nightly the AMD rows were verified on. **MI355X needs it**: the TP2 command uses
+    `--monokernel` and the ROCm MXFP4 indexer, which are on `main` but not in 0.31.0,
+    so the Install block offers only Docker on MI355X. MI300X, MI325X and MI350X also
+    run from the ROCm pip wheel.
   - The Rust OpenAI frontend is selected by default in the command builder. Switch
     to Python if you encounter unsupported features or compatibility issues.
   - Expect a long first load: `VLLM_ENGINE_READY_TIMEOUT_S=3600` is set for that reason.
@@ -584,7 +694,7 @@ guide: |
   ```bash
   curl http://localhost:8000/v1/chat/completions \
     -H 'Content-Type: application/json' \
-    -d '{"model":"deepseek-ai/DeepSeek-V4.1-Flash",
+    -d '{"model":"deepseek-ai/DeepSeek-V4.1-Flash-1017",
          "messages":[{"role":"user","content":"What is 17*19? Return only the integer."}]}'
   ```
 
@@ -826,7 +936,7 @@ guide: |
 
   ## KV cache offloading
 
-  Offloading requires a build containing [vllm-project/vllm#57145](https://github.com/vllm-project/vllm/pull/57145).
+  Offloading requires vLLM 0.31.0+, the first release containing [vllm-project/vllm#57145](https://github.com/vllm-project/vllm/pull/57145).
   Validation used [deepseek-ai/DeepSeek-V4.1-Flash](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash) on 4×H200 (TP4),
   vLLM commit `d1b4028d7e`, the Python frontend, `--enforce-eager`,
   `--max-model-len 16384`, `--max-num-seqs 16` and `--max-num-batched-tokens 8192`.
@@ -841,6 +951,7 @@ guide: |
   ## References
 
   - [Model card](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash)
+  - [DeepSeek-V4.1-Flash-1017 model card](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017)
   - [Technical report](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash/blob/main/DeepSeek_V41_Tech_Report.pdf)
   - [DeepSeek-V4-Flash recipe](/deepseek-ai/DeepSeek-V4-Flash) — the V4 sibling this diverges from
   - [DeepSeek-V3.2-Exp recipe](/deepseek-ai/DeepSeek-V3.2-Exp) — where the indexer first appeared
