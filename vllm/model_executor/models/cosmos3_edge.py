@@ -24,6 +24,7 @@ from vllm.utils.torch_utils import async_tensor_h2d
 
 from .interfaces import (
     MultiModalEmbeddings,
+    SupportsEagle3,
     SupportsMRoPE,
     SupportsMultiModal,
     SupportsPP,
@@ -487,6 +488,7 @@ class Cosmos3EdgeForConditionalGeneration(
     SupportsMultiModal,
     SupportsPP,
     SupportsMRoPE,
+    SupportsEagle3,
 ):
     """Cosmos3 Edge model with a SigLIP2 vision encoder.
 
