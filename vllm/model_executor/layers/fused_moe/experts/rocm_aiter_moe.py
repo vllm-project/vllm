@@ -379,6 +379,11 @@ def rocm_aiter_fused_experts(
                 intermediate_pad // 64 * 64 * (2 if moe_config.tp_size == 1 else 1)
             )
 
+        # SITU is Kimi K3's a16w4 path, where AITER keys its own scratch
+        # zeroing on a non-zero pad; leave that one as it is.
+        if quant_config.use_mxfp4_w4a16 and activation != MoEActivation.SITU:
+            intermediate_pad = 0
+
         # AITER's stage1 GEMM needs gate_mode to match how weights were
         # shuffled at load time (oracle/mxfp4.py). gpt-oss uses INTERLEAVE;
         # DeepSeek V4.1 a4w4 uses SEPARATED (see below).
