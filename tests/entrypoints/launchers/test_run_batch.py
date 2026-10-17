@@ -17,6 +17,7 @@ import pytest
 import vllm.envs as envs
 from vllm.assets.audio import AudioAsset
 from vllm.connections import HTTPConnection
+from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.launchers import run_batch as run_batch_module
 from vllm.entrypoints.launchers.run_batch import (
     BatchProgressTracker,
@@ -25,7 +26,9 @@ from vllm.entrypoints.launchers.run_batch import (
     batch_output_writer,
     dispatch_batch,
     download_bytes_from_url,
+    ignore_admission_limits,
     is_same_local_file,
+    make_arg_parser,
     make_transcription_wrapper,
     open_batch_input,
     upload_data,
@@ -35,6 +38,7 @@ from vllm.entrypoints.launchers.run_batch import (
 )
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.exceptions import VLLMValidationError
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.mem_constants import MiB_bytes
 from vllm.v1.engine.exceptions import EngineDeadError
 
@@ -1316,6 +1320,21 @@ def test_unwritable_output_file_is_rejected_before_engine_start(tmp_path):
     validate_run_batch_args(args(str(tmp_path / "out.jsonl")))
     validate_run_batch_args(args("https://example.com/out.jsonl"))
     validate_run_batch_args(args("HTTPS://example.com/out.jsonl"))
+
+
+def test_admission_limits_are_ignored(caplog_vllm):
+    """The engine must not answer batch requests with 503 rows."""
+    args = make_arg_parser(FlexibleArgumentParser()).parse_args(
+        ["-i", "in.jsonl", "-o", "out.jsonl", "--max-num-queued-reqs", "8"]
+        + ["--max-num-queued-tokens", "100"]
+    )
+    ignore_admission_limits(args)
+    engine_args = AsyncEngineArgs.from_cli_args(args)
+    assert engine_args.max_num_queued_reqs is None
+    assert engine_args.max_num_queued_tokens is None
+    assert "Ignoring --max-num-queued-reqs and --max-num-queued-tokens" in (
+        caplog_vllm.text
+    )
 
 
 def _chat_requests(n: int) -> list[dict]:

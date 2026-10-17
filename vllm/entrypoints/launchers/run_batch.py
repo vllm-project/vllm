@@ -259,7 +259,8 @@ class BatchFrontendArgs(BaseFrontendArgs):
     """Maximum number of requests queued at the engine at once. Responses are
     written in input order, so up to 16 times this many finished responses may
     be held behind a slow request. Defaults to twice max_num_seqs across all
-    data-parallel engines, at least 1024."""
+    data-parallel engines, at least 1024. --max-num-queued-reqs and
+    --max-num-queued-tokens are ignored."""
     enable_metrics: bool = False
     """Enable Prometheus metrics"""
     host: str | None = None
@@ -910,6 +911,29 @@ def validate_run_batch_args(args):
         )
 
 
+def ignore_admission_limits(args: Namespace) -> None:
+    """Clear the engine limits that reject requests with a 503.
+
+    They let an online client retry on another instance or meet a TTFT target;
+    run-batch could only write each rejected request out as an error.
+    """
+    flags = [
+        flag
+        for flag, value in (
+            ("--max-num-queued-reqs", args.max_num_queued_reqs),
+            ("--max-num-queued-tokens", args.max_num_queued_tokens),
+        )
+        if value is not None
+    ]
+    if flags:
+        logger.warning(
+            "Ignoring %s: run-batch does not reject requests. "
+            "Use --max-inflight to bound how many run at once.",
+            " and ".join(flags),
+        )
+    args.max_num_queued_reqs = args.max_num_queued_tokens = None
+
+
 async def run_one_request(
     request_json: str,
     endpoint_registry: dict[str, EndpointConfig],
@@ -1043,9 +1067,6 @@ async def run_batch(
         * config.scheduler_config.max_num_seqs
         * config.parallel_config.data_parallel_size,
     )
-    if (queue_limit := config.scheduler_config.max_num_queued_reqs) is not None:
-        # Requests past the limit are rejected rather than queued.
-        max_inflight = min(max_inflight, max(queue_limit, 1))
     # The final drain reacquires every window slot, and the window is at least
     # max_inflight, so neither may exceed the batch.
     max_inflight = min(max_inflight, max(num_requests, 1))
@@ -1072,6 +1093,7 @@ async def main(args: Namespace):
     from vllm.usage.usage_lib import UsageContext
 
     validate_run_batch_args(args)
+    ignore_admission_limits(args)
 
     # Validate the batch before loading the model, so bad input fails fast.
     logger.info("Reading batch from %s...", args.input_file)
