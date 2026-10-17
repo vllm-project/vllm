@@ -230,6 +230,8 @@ class Request:
         self.update_block_hashes()
 
         self.skip_reading_prefix_cache = self.get_skip_reading_prefix_cache()
+        # Handle from KVConnectorBase_V1.on_preschedule_request, if any.
+        self.kv_preschedule_handle: Any = None
 
         # Used for streaming
         self.resumable = resumable
