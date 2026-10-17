@@ -67,6 +67,14 @@ pub enum Error {
     #[error("request `{request_id}` is already in flight")]
     DuplicateRequestId { request_id: String },
     #[error(
+        "The engine is currently busy and cannot accept new requests. Please try again later or on a different instance."
+    )]
+    QueueOverflow { current: usize, max: usize },
+    #[error(
+        "The engine has reached its prefill token backlog limit. Please try again later or on a different instance."
+    )]
+    MaxQueuedTokens { current: usize, max: usize },
+    #[error(
         "data parallel rank {rank} is not connected to this frontend; connected ranks: {connected_ranks:?}"
     )]
     InvalidDataParallelRank {
@@ -101,4 +109,16 @@ pub enum Error {
     /// A special variant to allow cloning the same error.
     #[error(transparent)]
     Shared(Arc<Self>),
+}
+
+impl Error {
+    /// Return the queue limit that rejected this request, if any.
+    pub fn admission_rejection_reason(&self) -> Option<&'static str> {
+        match self {
+            Self::QueueOverflow { .. } => Some("max_num_queued_reqs"),
+            Self::MaxQueuedTokens { .. } => Some("max_num_queued_tokens"),
+            Self::Shared(error) => error.admission_rejection_reason(),
+            _ => None,
+        }
+    }
 }

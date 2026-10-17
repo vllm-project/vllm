@@ -278,6 +278,14 @@ pub struct SharedRuntimeArgs {
     #[arg(long, default_value_t = NonZeroU32::MIN)]
     #[serde(default = "default_stream_interval")]
     pub stream_interval: NonZeroU32,
+    /// Maximum number of unfinished requests accepted by this frontend.
+    #[arg(long)]
+    #[serde(default)]
+    pub max_num_queued_reqs: Option<usize>,
+    /// Maximum prompt-token backlog among requests still in prefill.
+    #[arg(long, value_parser = parse_human_readable_usize)]
+    #[serde(default)]
+    pub max_num_queued_tokens: Option<usize>,
     /// Maximum time to wait for active requests to drain during shutdown.
     #[arg(long, default_value_t = 0)]
     #[serde(default)]
@@ -563,6 +571,8 @@ impl SharedRuntimeArgs {
             chat_template_content_format: self.chat_template_content_format,
             max_logprobs: self.max_logprobs,
             stream_interval: self.stream_interval,
+            max_num_queued_reqs: self.max_num_queued_reqs,
+            max_num_queued_tokens: self.max_num_queued_tokens,
             api_server_options,
             cors,
             tls,
@@ -626,6 +636,8 @@ impl SharedRuntimeArgs {
             chat_template_content_format: self.chat_template_content_format,
             max_logprobs: self.max_logprobs,
             stream_interval: self.stream_interval,
+            max_num_queued_reqs: self.max_num_queued_reqs,
+            max_num_queued_tokens: self.max_num_queued_tokens,
             api_server_options,
             cors,
             tls,
@@ -699,6 +711,51 @@ pub struct ProfilerConfig {
 
 fn parse_json<T: DeserializeOwned>(value: &str) -> Result<T, String> {
     serde_json::from_str(value).map_err(|e| format!("invalid JSON object: {}", e.as_report()))
+}
+
+fn parse_human_readable_usize(value: &str) -> Result<usize, String> {
+    let value = value.trim();
+    let Some(suffix) = value.chars().last() else {
+        return Err("expected a non-negative integer".to_string());
+    };
+    let (number, multiplier, binary) = match suffix {
+        'k' => (&value[..value.len() - 1], 10_usize.pow(3), false),
+        'm' => (&value[..value.len() - 1], 10_usize.pow(6), false),
+        'g' => (&value[..value.len() - 1], 10_usize.pow(9), false),
+        't' => (&value[..value.len() - 1], 10_usize.pow(12), false),
+        'K' => (&value[..value.len() - 1], 2_usize.pow(10), true),
+        'M' => (&value[..value.len() - 1], 2_usize.pow(20), true),
+        'G' => (&value[..value.len() - 1], 2_usize.pow(30), true),
+        'T' => (&value[..value.len() - 1], 2_usize.pow(40), true),
+        _ => return value.parse().map_err(|error| format!("invalid integer: {error}")),
+    };
+
+    if binary {
+        return number
+            .parse::<usize>()
+            .map_err(|_| format!("decimals are not allowed with binary suffixes like {suffix}"))?
+            .checked_mul(multiplier)
+            .ok_or_else(|| "integer is too large".to_string());
+    }
+
+    let valid_decimal = number.split_once('.').map_or_else(
+        || !number.is_empty() && number.chars().all(|c| c.is_ascii_digit()),
+        |(whole, fraction)| {
+            !whole.is_empty()
+                && !fraction.is_empty()
+                && whole.chars().all(|c| c.is_ascii_digit())
+                && fraction.chars().all(|c| c.is_ascii_digit())
+        },
+    );
+    if !valid_decimal {
+        return Err("expected a non-negative number before the suffix".to_string());
+    }
+    let scaled = number.parse::<f64>().map_err(|error| format!("invalid number: {error}"))?
+        * multiplier as f64;
+    if !scaled.is_finite() || scaled >= usize::MAX as f64 {
+        return Err("integer is too large".to_string());
+    }
+    Ok(scaled as usize)
 }
 
 fn parse_runtime_args_json(value: &str) -> Result<SharedRuntimeArgs, String> {

@@ -266,6 +266,10 @@ pub struct Config {
     /// output after the first one. Requests can raise it with their own
     /// `stream_interval`.
     pub stream_interval: NonZeroU32,
+    /// Maximum number of unfinished requests accepted by this frontend.
+    pub max_num_queued_reqs: Option<usize>,
+    /// Maximum prompt-token backlog among requests still in prefill.
+    pub max_num_queued_tokens: Option<usize>,
     /// HTTP/API-server behavior switches.
     pub api_server_options: ApiServerOptions,
     /// CORS settings applied to every HTTP response.

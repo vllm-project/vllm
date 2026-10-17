@@ -376,7 +376,9 @@ async fn generate_stream_responses(
 
 fn text_error_to_status(error: vllm_text::Error) -> Status {
     let message = error.to_report_string();
-    if error.is_request_validation_error() {
+    if error.is_admission_rejection() {
+        Status::unavailable(message)
+    } else if error.is_request_validation_error() {
         Status::invalid_argument(message)
     } else {
         Status::internal(message)
@@ -399,4 +401,20 @@ fn log_text_error(
         "gRPC inference request failed"
     );
     status
+}
+
+#[cfg(test)]
+mod tests {
+    use tonic::Code;
+
+    use super::text_error_to_status;
+
+    #[test]
+    fn admission_rejection_maps_to_unavailable() {
+        let error = vllm_text::Error::Llm(vllm_llm::Error::EngineCoreClient(
+            vllm_engine_core_client::Error::QueueOverflow { current: 1, max: 1 },
+        ));
+
+        assert_eq!(text_error_to_status(error).code(), Code::Unavailable);
+    }
 }

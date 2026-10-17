@@ -29,7 +29,7 @@ use crate::protocol::request::{EngineCoreRequest, EngineCoreRequestType};
 use crate::protocol::stats::SchedulerStats;
 use crate::protocol::utility::UtilityOutput;
 use crate::transport::{ConnectedEngine, EngineId};
-use crate::{Error, Result, transport};
+use crate::{AdmissionLimits, Error, Result, transport};
 
 const MSGPACK_ZERO_COPY_THRESHOLD_ENV: &str = "VLLM_MSGPACK_ZERO_COPY_THRESHOLD";
 const DEFAULT_MSGPACK_ZERO_COPY_THRESHOLD: usize = 256;
@@ -70,8 +70,12 @@ impl ClientInner {
         handle: Handle,
         model_name: String,
         engine_stats_enabled: bool,
+        admission_limits: AdmissionLimits,
         engines: &[ConnectedEngine],
     ) -> Self {
+        if engine_stats_enabled {
+            METRICS.api_server.initialize_admission_rejections(&model_name);
+        }
         let scheduler_stats_recorder = engine_stats_enabled
             .then(|| SchedulerStatsRecorder::new(&METRICS.scheduler, &model_name, engines));
         let iteration_metrics = engines
@@ -90,7 +94,10 @@ impl ClientInner {
             engine_stats_enabled,
             scheduler_stats_recorder,
             iteration_metrics,
-            request_reg: Mutex::new(RequestRegistry::new(engines)),
+            request_reg: Mutex::new(RequestRegistry::with_admission_limits(
+                engines,
+                admission_limits,
+            )),
             utility_reg: Mutex::new(UtilityRegistry::default()),
             health_error: ArcSwapOption::empty(),
             health_tx: watch::Sender::new(true),
@@ -115,12 +122,26 @@ impl ClientInner {
         lora_name: Option<String>,
         data_parallel_rank: Option<u32>,
         stream_interval: NonZeroU32,
+        prompt_len: usize,
     ) -> Result<(EngineId, OutputReceiver)> {
         let mut registry = self.request_reg.lock();
         if registry.is_closed() {
             return Err(self.closed_error());
         }
-        registry.register(request_id, lora_name, data_parallel_rank, stream_interval)
+        let result = registry.register_with_prompt_len(
+            request_id,
+            lora_name,
+            data_parallel_rank,
+            stream_interval,
+            prompt_len,
+        );
+        if self.engine_stats_enabled
+            && let Err(error) = &result
+            && let Some(reason) = error.admission_rejection_reason()
+        {
+            METRICS.api_server.record_admission_rejection(&self.model_name, reason);
+        }
+        result
     }
 
     /// Allocate the next utility `call_id` and register its waiting receiver.
@@ -553,6 +574,7 @@ mod tests {
             Handle::current(),
             "test-model".to_string(),
             true,
+            AdmissionLimits::default(),
             &[ConnectedEngine {
                 engine_id: EngineId::from(b"engine-0"),
                 ready_response: default_ready_response(),

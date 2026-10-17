@@ -13,8 +13,8 @@ pub mod test_utils;
 mod transport;
 
 pub use client::{
-    AbortCause, CoordinatorMode, EngineCoreClient, EngineCoreClientConfig, EngineCoreOutputStream,
-    EngineCoreStreamDelivery, EngineCoreStreamOutput, TransportMode,
+    AbortCause, AdmissionLimits, CoordinatorMode, EngineCoreClient, EngineCoreClientConfig,
+    EngineCoreOutputStream, EngineCoreStreamDelivery, EngineCoreStreamOutput, TransportMode,
 };
 pub use error::{Error, Result};
 pub use transport::{ENGINE_CORE_DEAD_SENTINEL, EngineId};

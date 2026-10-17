@@ -26,6 +26,8 @@ pub enum ApiError {
     Conflict { message: String },
     /// An unexpected internal failure happened before streaming started.
     ServerError { message: String },
+    /// The frontend is temporarily at its configured admission limit.
+    ServiceUnavailable { message: String },
 }
 
 impl ApiError {
@@ -36,6 +38,7 @@ impl ApiError {
             Self::ModelNotFound { .. } => StatusCode::NOT_FOUND,
             Self::Conflict { .. } => StatusCode::CONFLICT,
             Self::ServerError { .. } => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::ServiceUnavailable { .. } => StatusCode::SERVICE_UNAVAILABLE,
             Self::JsonParseError { .. } => StatusCode::BAD_REQUEST,
         }
     }
@@ -61,6 +64,12 @@ impl ApiError {
                 error_type: "server_error".to_string(),
                 param: None,
                 code: Some("server_error".to_string()),
+            },
+            Self::ServiceUnavailable { message } => ErrorDetail {
+                message: message.clone(),
+                error_type: "server_error".to_string(),
+                param: None,
+                code: Some("service_unavailable".to_string()),
             },
             Self::JsonParseError { message } => ErrorDetail {
                 message: message.clone(),
@@ -96,6 +105,9 @@ impl IntoResponse for ApiError {
 /// the client's fault and map to HTTP 400, mirroring the Python frontend.
 /// Everything else stays an internal 500.
 pub fn text_submit_error(context: &'static str, error: vllm_text::Error) -> ApiError {
+    if error.is_admission_rejection() {
+        return service_unavailable!("{}", error.to_report_string());
+    }
     if error.is_request_validation_error() {
         return invalid_request!("{error}");
     }
@@ -105,6 +117,9 @@ pub fn text_submit_error(context: &'static str, error: vllm_text::Error) -> ApiE
 /// Like [`text_submit_error`], for the chat pipeline (which both wraps the
 /// text errors and raises its own prompt-length variant).
 pub fn chat_submit_error(context: &'static str, error: vllm_chat::Error) -> ApiError {
+    if error.is_admission_rejection() {
+        return service_unavailable!("{}", error.to_report_string());
+    }
     if error.is_request_validation_error() {
         return invalid_request!("{error}");
     }
@@ -230,6 +245,31 @@ mod tests {
         });
         let api_error = text_submit_error("failed to submit completion request", error);
         assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn admission_rejections_map_to_service_unavailable() {
+        let text_error = vllm_text::Error::Llm(vllm_llm::Error::EngineCoreClient(
+            vllm_engine_core_client::Error::QueueOverflow {
+                current: 10,
+                max: 10,
+            },
+        ));
+        let api_error = text_submit_error("failed to submit completion request", text_error);
+        assert_eq!(api_error.status_code(), StatusCode::SERVICE_UNAVAILABLE);
+        let response = api_error.to_error_response();
+        assert_eq!(response.error.code.as_deref(), Some("service_unavailable"));
+        assert!(response.error.message.contains("currently busy"));
+
+        let chat_error = vllm_chat::Error::Text(vllm_text::Error::Llm(
+            vllm_llm::Error::EngineCoreClient(vllm_engine_core_client::Error::MaxQueuedTokens {
+                current: 1_000,
+                max: 1_000,
+            }),
+        ));
+        let api_error = chat_submit_error("failed to submit chat request", chat_error);
+        assert_eq!(api_error.status_code(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(api_error.to_error_response().error.message.contains("prefill token backlog"));
     }
 
     #[test]

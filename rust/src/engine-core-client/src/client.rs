@@ -163,6 +163,15 @@ pub struct EngineCoreClientConfig {
     pub engine_stats_enabled: bool,
 }
 
+/// Frontend-side limits applied before a request is sent to engine-core.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AdmissionLimits {
+    /// Maximum number of unfinished requests tracked by this frontend.
+    pub max_num_queued_reqs: Option<usize>,
+    /// Maximum prompt-token backlog among requests still in prefill.
+    pub max_num_queued_tokens: Option<usize>,
+}
+
 impl EngineCoreClientConfig {
     /// Create a new client config with the given handshake address, expecting a
     /// single engine, and default values for all other fields.
@@ -306,6 +315,14 @@ impl EngineCoreClient {
     /// handshake. In bootstrapped mode it binds the provided frontend
     /// sockets and waits for the expected engine registration frames.
     pub async fn connect(config: EngineCoreClientConfig) -> Result<Self> {
+        Self::connect_with_admission_limits(config, AdmissionLimits::default()).await
+    }
+
+    /// Connect with frontend-side request admission limits.
+    pub async fn connect_with_admission_limits(
+        config: EngineCoreClientConfig,
+        admission_limits: AdmissionLimits,
+    ) -> Result<Self> {
         config.validate()?;
         let connected = match &config.transport_mode {
             TransportMode::HandshakeOwner {
@@ -359,13 +376,14 @@ impl EngineCoreClient {
             }
         };
 
-        Self::from_connected(config, connected).await
+        Self::from_connected(config, admission_limits, connected).await
     }
 
     /// Create a new client instance from the connected transport state after
     /// the startup handshake completes.
     async fn from_connected(
         config: EngineCoreClientConfig,
+        admission_limits: AdmissionLimits,
         connected: transport::ConnectedTransport,
     ) -> Result<Self> {
         validate_lora_capabilities(&connected.engines)?;
@@ -378,6 +396,7 @@ impl EngineCoreClient {
             runtime.handle().clone(),
             config.model_name.clone(),
             config.engine_stats_enabled,
+            admission_limits,
             &engines,
         ));
         let output_task = AbortOnDropHandle::new(runtime.spawn(transport::run_output_loop(
@@ -634,6 +653,7 @@ impl EngineCoreClient {
         );
 
         let request_id = req.request_id.clone();
+        let prompt_len = req.prompt_token_ids.as_ref().map_or(0, Vec::len);
         let lora_name = req.lora_request.as_ref().map(|lora| lora.lora_name.clone());
         let data_parallel_rank = req.data_parallel_rank;
         let stream_interval = (req.sampling_params.as_ref())
@@ -644,6 +664,7 @@ impl EngineCoreClient {
             lora_name,
             data_parallel_rank,
             stream_interval,
+            prompt_len,
         )?;
 
         // Construct the output stream first before actually sending the request to the engine.

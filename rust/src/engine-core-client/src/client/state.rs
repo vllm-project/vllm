@@ -6,9 +6,8 @@ use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use tokio::sync::oneshot;
-use tracing::trace;
+use tracing::{debug, trace};
 
-use crate::EngineId;
 use crate::client::output_channel::output_channel;
 pub(crate) use crate::client::output_channel::{OutputReceiver, OutputSender};
 use crate::client::stream::EngineCoreStreamOutput;
@@ -17,6 +16,7 @@ use crate::protocol::output::{EngineCoreEventType, EngineCoreFinishReason, Engin
 use crate::protocol::stats::SchedulerStats;
 use crate::protocol::utility::UtilityOutput;
 use crate::transport::ConnectedEngine;
+use crate::{AdmissionLimits, EngineId};
 
 pub type UtilitySender = oneshot::Sender<Result<UtilityOutput>>;
 pub type UtilityReceiver = oneshot::Receiver<Result<UtilityOutput>>;
@@ -27,6 +27,7 @@ struct TrackedRequest {
     engine_id: EngineId,
     lora: Option<LoraRequestState>,
     admission_stats_generation: Option<u64>,
+    prefill_tokens: Option<usize>,
 }
 
 /// Frontend-side view of one LoRA request's scheduling phase.
@@ -133,15 +134,27 @@ impl EngineRoutingState {
 pub struct RequestRegistry {
     closed: bool,
     requests: HashMap<String, TrackedRequest>,
+    admission_limits: AdmissionLimits,
+    queued_tokens: usize,
     active_lora_requests: usize,
     routing_per_engine: BTreeMap<EngineId, EngineRoutingState>,
 }
 
 impl RequestRegistry {
+    #[cfg(test)]
     pub fn new(engines: &[ConnectedEngine]) -> Self {
+        Self::with_admission_limits(engines, AdmissionLimits::default())
+    }
+
+    pub fn with_admission_limits(
+        engines: &[ConnectedEngine],
+        admission_limits: AdmissionLimits,
+    ) -> Self {
         Self {
             closed: false,
             requests: HashMap::default(),
+            admission_limits,
+            queued_tokens: 0,
             active_lora_requests: 0,
             routing_per_engine: engines
                 .iter()
@@ -159,15 +172,45 @@ impl RequestRegistry {
     ///
     /// `stream_interval` sets how many new tokens the channel batches into one
     /// delivery after the first output; see [`OutputSender::send`].
-    pub fn register(
+    pub fn register_with_prompt_len(
         &mut self,
         request_id: String,
         lora_name: Option<String>,
         data_parallel_rank: Option<u32>,
         stream_interval: NonZeroU32,
+        prompt_len: usize,
     ) -> Result<(EngineId, OutputReceiver)> {
         if self.requests.contains_key(&request_id) {
             return Err(Error::DuplicateRequestId { request_id });
+        }
+
+        if let Some(max) = self.admission_limits.max_num_queued_reqs
+            && self.requests.len() >= max
+        {
+            debug!(
+                request_id,
+                current = self.requests.len(),
+                max,
+                "request queue full; rejecting request"
+            );
+            return Err(Error::QueueOverflow {
+                current: self.requests.len(),
+                max,
+            });
+        }
+        if let Some(max) = self.admission_limits.max_num_queued_tokens
+            && self.queued_tokens >= max
+        {
+            debug!(
+                request_id,
+                current_tokens = self.queued_tokens,
+                max,
+                "prefill token backlog full; rejecting request"
+            );
+            return Err(Error::MaxQueuedTokens {
+                current: self.queued_tokens,
+                max,
+            });
         }
 
         let engine_id = self.choose_engine_for_request(data_parallel_rank)?;
@@ -192,10 +235,29 @@ impl RequestRegistry {
                 engine_id: engine_id.clone(),
                 lora,
                 admission_stats_generation,
+                prefill_tokens: Some(prompt_len),
             },
         );
+        self.queued_tokens += prompt_len;
 
         Ok((engine_id, rx))
+    }
+
+    #[cfg(test)]
+    fn register(
+        &mut self,
+        request_id: String,
+        lora_name: Option<String>,
+        data_parallel_rank: Option<u32>,
+        stream_interval: NonZeroU32,
+    ) -> Result<(EngineId, OutputReceiver)> {
+        self.register_with_prompt_len(
+            request_id,
+            lora_name,
+            data_parallel_rank,
+            stream_interval,
+            0,
+        )
     }
 
     fn choose_engine_for_request(&mut self, data_parallel_rank: Option<u32>) -> Result<EngineId> {
@@ -249,6 +311,7 @@ impl RequestRegistry {
         output: EngineCoreStreamOutput,
     ) -> Option<EngineCoreStreamOutput> {
         self.apply_lora_events(&output.output);
+        self.finish_prefill(output.request_id.as_str());
         if output.finished() {
             match self.remove(output.request_id.as_str()) {
                 Some((mut sender, _)) => sender.send(output),
@@ -340,6 +403,7 @@ impl RequestRegistry {
         }
 
         self.closed = true;
+        self.queued_tokens = 0;
         self.active_lora_requests = 0;
         std::mem::take(&mut self.requests)
             .into_values()
@@ -381,6 +445,9 @@ impl RequestRegistry {
     #[must_use]
     pub fn remove(&mut self, request_id: &str) -> Option<(OutputSender, EngineId)> {
         let tracked = self.requests.remove(request_id)?;
+        if let Some(prefill_tokens) = tracked.prefill_tokens {
+            self.queued_tokens -= prefill_tokens;
+        }
         if tracked.lora.is_some() {
             self.active_lora_requests -= 1;
         }
@@ -389,6 +456,17 @@ impl RequestRegistry {
             .expect("request registry must track all known engines")
             .record_removal(tracked.admission_stats_generation);
         Some((tracked.sender, tracked.engine_id))
+    }
+
+    fn finish_prefill(&mut self, request_id: &str) {
+        let Some(prefill_tokens) = self
+            .requests
+            .get_mut(request_id)
+            .and_then(|tracked| tracked.prefill_tokens.take())
+        else {
+            return;
+        };
+        self.queued_tokens -= prefill_tokens;
     }
 
     fn apply_scheduler_counts(&mut self, engine_index: u32, next: EngineLoadSnapshot) -> bool {
@@ -428,6 +506,11 @@ impl RequestRegistry {
     #[cfg(test)]
     fn active_lora_requests(&self) -> usize {
         self.active_lora_requests
+    }
+
+    #[cfg(test)]
+    fn queued_tokens(&self) -> usize {
+        self.queued_tokens
     }
 }
 
@@ -503,8 +586,11 @@ impl UtilityRegistry {
 mod tests {
     use std::collections::BTreeSet;
     use std::num::NonZeroU32;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Barrier};
 
-    use crate::EngineId;
+    use parking_lot::Mutex;
+
     use crate::client::state::{
         EngineLoadSnapshot, EngineRoutingState, OutputReceiver, RequestRegistry, UtilityRegistry,
     };
@@ -514,6 +600,7 @@ mod tests {
         EngineCoreEvent, EngineCoreEventType, EngineCoreFinishReason, EngineCoreOutput,
     };
     use crate::transport::ConnectedEngine;
+    use crate::{AdmissionLimits, EngineId};
 
     fn connected_engine(engine_id: EngineId) -> ConnectedEngine {
         ConnectedEngine {
@@ -566,6 +653,183 @@ mod tests {
             error,
             crate::error::Error::DuplicateRequestId { request_id } if request_id == "req-1"
         ));
+    }
+
+    #[test]
+    fn registry_enforces_request_limit_and_releases_capacity() {
+        let mut registry = RequestRegistry::with_admission_limits(
+            &[connected_engine(EngineId::from(b"engine-0"))],
+            AdmissionLimits {
+                max_num_queued_reqs: Some(1),
+                max_num_queued_tokens: None,
+            },
+        );
+        registry
+            .register_with_prompt_len("req-1".to_string(), None, None, NonZeroU32::MIN, 10)
+            .unwrap();
+
+        let error = registry
+            .register_with_prompt_len("req-2".to_string(), None, None, NonZeroU32::MIN, 10)
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            crate::error::Error::QueueOverflow { current: 1, max: 1 }
+        ));
+
+        drop(registry.remove("req-1"));
+        registry
+            .register_with_prompt_len("req-2".to_string(), None, None, NonZeroU32::MIN, 10)
+            .unwrap();
+    }
+
+    #[test]
+    fn registry_request_limit_is_atomic_under_concurrent_registration() {
+        const LIMIT: usize = 4;
+        const CALLERS: usize = 16;
+        let registry = Arc::new(Mutex::new(RequestRegistry::with_admission_limits(
+            &[connected_engine(EngineId::from(b"engine-0"))],
+            AdmissionLimits {
+                max_num_queued_reqs: Some(LIMIT),
+                max_num_queued_tokens: None,
+            },
+        )));
+        let barrier = Arc::new(Barrier::new(CALLERS));
+        let admitted = Arc::new(AtomicUsize::new(0));
+
+        std::thread::scope(|scope| {
+            for index in 0..CALLERS {
+                let registry = Arc::clone(&registry);
+                let barrier = Arc::clone(&barrier);
+                let admitted = Arc::clone(&admitted);
+                scope.spawn(move || {
+                    barrier.wait();
+                    if registry
+                        .lock()
+                        .register_with_prompt_len(
+                            format!("req-{index}"),
+                            None,
+                            None,
+                            NonZeroU32::MIN,
+                            1,
+                        )
+                        .is_ok()
+                    {
+                        admitted.fetch_add(1, Ordering::Relaxed);
+                    }
+                });
+            }
+        });
+
+        assert_eq!(admitted.load(Ordering::Relaxed), LIMIT);
+    }
+
+    #[test]
+    fn registry_enforces_prefill_token_waterline_and_releases_on_first_output() {
+        let mut registry = RequestRegistry::with_admission_limits(
+            &[connected_engine(EngineId::from(b"engine-0"))],
+            AdmissionLimits {
+                max_num_queued_reqs: None,
+                max_num_queued_tokens: Some(100),
+            },
+        );
+        registry
+            .register_with_prompt_len("req-1".to_string(), None, None, NonZeroU32::MIN, 80)
+            .unwrap();
+        registry
+            .register_with_prompt_len("req-2".to_string(), None, None, NonZeroU32::MIN, 40)
+            .unwrap();
+        assert_eq!(registry.queued_tokens(), 120);
+
+        let error = registry
+            .register_with_prompt_len("req-3".to_string(), None, None, NonZeroU32::MIN, 1)
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            crate::error::Error::MaxQueuedTokens {
+                current: 120,
+                max: 100
+            }
+        ));
+
+        assert!(
+            registry
+                .send_output(stream_output(EngineCoreOutput {
+                    request_id: "req-1".to_string(),
+                    new_token_ids: vec![1],
+                    ..Default::default()
+                }))
+                .is_none()
+        );
+        assert_eq!(registry.queued_tokens(), 40);
+        registry
+            .register_with_prompt_len("req-3".to_string(), None, None, NonZeroU32::MIN, 1)
+            .unwrap();
+
+        registry.send_output(stream_output(EngineCoreOutput {
+            request_id: "req-1".to_string(),
+            new_token_ids: vec![2],
+            ..Default::default()
+        }));
+        assert_eq!(registry.queued_tokens(), 41);
+    }
+
+    #[test]
+    fn registry_releases_prefill_tokens_on_every_removal_path() {
+        let mut registry = RequestRegistry::with_admission_limits(
+            &[connected_engine(EngineId::from(b"engine-0"))],
+            AdmissionLimits {
+                max_num_queued_reqs: None,
+                max_num_queued_tokens: Some(1),
+            },
+        );
+
+        registry
+            .register_with_prompt_len("removed".to_string(), None, None, NonZeroU32::MIN, 2)
+            .unwrap();
+        drop(registry.remove("removed"));
+        assert_eq!(registry.queued_tokens(), 0);
+
+        registry
+            .register_with_prompt_len("aborted".to_string(), None, None, NonZeroU32::MIN, 2)
+            .unwrap();
+        drop(registry.abort_many(&["aborted".to_string()], 0.0));
+        assert_eq!(registry.queued_tokens(), 0);
+
+        registry
+            .register_with_prompt_len("finished".to_string(), None, None, NonZeroU32::MIN, 2)
+            .unwrap();
+        drop(registry.finish_many(&["finished".to_string()]));
+        assert_eq!(registry.queued_tokens(), 0);
+
+        registry
+            .register_with_prompt_len("closed".to_string(), None, None, NonZeroU32::MIN, 2)
+            .unwrap();
+        drop(registry.close());
+        assert_eq!(registry.queued_tokens(), 0);
+    }
+
+    #[test]
+    fn zero_admission_limits_reject_every_request() {
+        for admission_limits in [
+            AdmissionLimits {
+                max_num_queued_reqs: Some(0),
+                max_num_queued_tokens: None,
+            },
+            AdmissionLimits {
+                max_num_queued_reqs: None,
+                max_num_queued_tokens: Some(0),
+            },
+        ] {
+            let mut registry = RequestRegistry::with_admission_limits(
+                &[connected_engine(EngineId::from(b"engine-0"))],
+                admission_limits,
+            );
+            assert!(
+                registry
+                    .register_with_prompt_len("req-1".to_string(), None, None, NonZeroU32::MIN, 1,)
+                    .is_err()
+            );
+        }
     }
 
     #[test]
