@@ -236,10 +236,9 @@ class SchedulerOffloadConfig(NamedTuple):
         )
         if use_eagle_block_drop and not eagle_groups:
             # No group is annotated as holding drafter layers. This happens
-            # for shared-group MTP models (e.g. Qwen3.5-style), whose drafter
-            # is a regular decoder layer merged into the target's
-            # full-attention group, and for separate-draft models that miss
-            # annotation. Treating every group as a drafter group here makes
+            # when the drafter owns no KV cache (e.g. KV-sharing drafters) or
+            # the model runner does not tag draft layers' KV cache specs.
+            # Treating every group as a drafter group here makes
             # the volatile-tail pop apply to ALL groups, which can zero the
             # whole request's offload hit whenever any group's servable
             # window is a single chunk (issue #52735). Drafter KV served one
