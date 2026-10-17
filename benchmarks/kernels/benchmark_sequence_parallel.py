@@ -442,7 +442,10 @@ def benchmark_shape(
         "latency_change": (times["fused"] - times["unfused"]) / times["unfused"],
         "floor_gap": (times["fused"] - floor) / floor,
         "baseline_us": times["baseline"],
-        "vs_baseline": (times["fused"] - times["baseline"]) / times["baseline"],
+        "unfused_vs_baseline": (
+            (times["unfused"] - times["baseline"]) / times["baseline"]
+        ),
+        "fused_vs_baseline": (times["fused"] - times["baseline"]) / times["baseline"],
     }
 
 
@@ -453,16 +456,17 @@ def print_results(results: list[dict[str, float | int | str]]) -> None:
     print(
         "| M | N | K | GEMM (us) | collective (us) | floor (us) | "
         "unfused (us) | fused (us) | vs unfused | vs floor | "
-        "baseline (us) | vs baseline |"
+        "baseline (us) | unfused vs baseline | fused vs baseline |"
     )
-    print("|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
+    print("|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
     for r in results:
         print(
             f"| {r['M']} | {r['N']} | {r['K']} | {r['gemm_us']:.1f} | "
             f"{r['collective_us']:.1f} | {r['floor_us']:.1f} | "
             f"{r['unfused_us']:.1f} | {r['fused_us']:.1f} | "
             f"{r['latency_change']:+.1%} | {r['floor_gap']:+.1%} | "
-            f"{r['baseline_us']:.1f} | {r['vs_baseline']:+.1%} |"
+            f"{r['baseline_us']:.1f} | {r['unfused_vs_baseline']:+.1%} | "
+            f"{r['fused_vs_baseline']:+.1%} |"
         )
 
 
