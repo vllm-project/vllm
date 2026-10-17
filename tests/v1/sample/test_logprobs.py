@@ -531,6 +531,36 @@ def test_prompt_logprob_token_ids_require_v2_model_runner():
             InputProcessor._validate_params(processor, params, ("generate",))
 
 
+@pytest.mark.parametrize("prompt_logprobs", [0, 1, -1])
+def test_prompt_logprobs_rejected_with_kv_sharing_fast_prefill(prompt_logprobs):
+    """kv-sharing fast prefill gives wrong prompt logprobs, including for
+    `prompt_logprobs=0` (falsy but still a request for them)."""
+    processor = SimpleNamespace(
+        model_config=SimpleNamespace(
+            return_sampling_mask=False, enable_trace_replay=False, is_diffusion=False
+        ),
+        vllm_config=SimpleNamespace(
+            reasoning_config=None,
+            use_v2_model_runner=True,
+            cache_config=SimpleNamespace(kv_sharing_fast_prefill=True),
+        ),
+        speculative_config=None,
+        structured_outputs_config=None,
+        tokenizer=None,
+        validate_logits_processors_params=lambda params: None,
+        resolve_watermarking=lambda params: False,
+    )
+    params = SamplingParams(prompt_logprobs=prompt_logprobs)
+    with patch.object(SamplingParams, "verify"):
+        with pytest.raises(VLLMValidationError, match="kv-sharing-fast-prefill"):
+            InputProcessor._validate_params(processor, params, ("generate",))
+        # No prompt logprobs requested: still accepted.
+        InputProcessor._validate_params(processor, SamplingParams(), ("generate",))
+        # Without the flag, prompt logprobs are accepted.
+        processor.vllm_config.cache_config.kv_sharing_fast_prefill = False
+        InputProcessor._validate_params(processor, params, ("generate",))
+
+
 def test_none_logprobs(vllm_model, example_prompts):
     """Engine should return `logprobs` and `prompt_logprobs` as `None`.
 

@@ -423,17 +423,6 @@ class AsyncLLM(EngineClient):
 
         is_pooling = isinstance(params, PoolingParams)
 
-        if (
-            self.vllm_config.cache_config.kv_sharing_fast_prefill
-            and not is_pooling
-            and params.prompt_logprobs
-        ):
-            raise VLLMValidationError(
-                "--kv-sharing-fast-prefill produces incorrect logprobs for "
-                "prompt tokens, please disable it when the requests need "
-                "prompt logprobs"
-            )
-
         if isinstance(prompt, AsyncGenerator):
             if reasoning_ended is not None or reasoning_parser_kwargs is not None:
                 raise NotImplementedError
