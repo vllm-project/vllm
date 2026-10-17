@@ -131,6 +131,10 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
                 "core_attn_out buffer reuse is only supported for inference"
             )
             assert q.dtype == o.dtype, "Incompatible dtype for inplace computation"
+        elif o.dtype != q.dtype:
+            # o was upgraded to fp32 (see chunk_o.py); casting back here
+            # would reintroduce the overflow that upgrade avoided.
+            return o, final_state
         return o.to(q.dtype), final_state
 
 

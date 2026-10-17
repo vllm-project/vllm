@@ -157,21 +157,22 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
             m_h4 = m_v[:, None] & m_k4[None, :]
             tl.store(p_h4, b_h4.to(p_h4.dtype.element_ty), mask=m_h4)
 
+        # b_h1..4 can be fp32 (see h_dtype below); upcast b_w, not b_h.
         p_w = w + o_t[:, None] * stride_w + o_k1[None, :]
         b_w = tl.load(p_w, mask=m_t[:, None] & m_k1[None, :], other=0.0)
-        b_v = tl.dot(b_w, tl.trans(b_h1).to(b_w.dtype))
+        b_v = tl.dot(b_w.to(b_h1.dtype), tl.trans(b_h1))
         if K > 64:
             p_w = w + o_t[:, None] * stride_w + o_k2[None, :]
             b_w = tl.load(p_w, mask=m_t[:, None] & m_k2[None, :], other=0.0)
-            b_v += tl.dot(b_w, tl.trans(b_h2).to(b_w.dtype))
+            b_v += tl.dot(b_w.to(b_h2.dtype), tl.trans(b_h2))
         if K > 128:
             p_w = w + o_t[:, None] * stride_w + o_k3[None, :]
             b_w = tl.load(p_w, mask=m_t[:, None] & m_k3[None, :], other=0.0)
-            b_v += tl.dot(b_w, tl.trans(b_h3).to(b_w.dtype))
+            b_v += tl.dot(b_w.to(b_h3.dtype), tl.trans(b_h3))
         if K > 192:
             p_w = w + o_t[:, None] * stride_w + o_k4[None, :]
             b_w = tl.load(p_w, mask=m_t[:, None] & m_k4[None, :], other=0.0)
-            b_v += tl.dot(b_w, tl.trans(b_h4).to(b_w.dtype))
+            b_v += tl.dot(b_w.to(b_h4.dtype), tl.trans(b_h4))
         p_v = v + o_t[:, None] * stride_v + o_v[None, :]
         b_v = tl.load(p_v, mask=m_t[:, None] & m_v[None, :], other=0.0) - b_v
 
@@ -241,23 +242,22 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
                     b_h4 *= exp2(b_gk_last4)[None, :]
                 else:
                     b_h4 *= exp(b_gk_last4)[None, :]
-        b_v = b_v.to(k.dtype.element_ty)
-
+        # b_v inherits h's precision too; upcast b_k, not b_v.
         p_k = k + o_k1[:, None] + o_t[None, :] * stride_k
         b_k = tl.load(p_k, mask=m_k1[:, None] & m_t[None, :], other=0.0)
-        b_h1 += tl.trans(tl.dot(b_k, b_v))
+        b_h1 += tl.trans(tl.dot(b_k.to(b_v.dtype), b_v))
         if K > 64:
             p_k = k + o_k2[:, None] + o_t[None, :] * stride_k
             b_k = tl.load(p_k, mask=m_k2[:, None] & m_t[None, :], other=0.0)
-            b_h2 += tl.trans(tl.dot(b_k, b_v))
+            b_h2 += tl.trans(tl.dot(b_k.to(b_v.dtype), b_v))
         if K > 128:
             p_k = k + o_k3[:, None] + o_t[None, :] * stride_k
             b_k = tl.load(p_k, mask=m_k3[:, None] & m_t[None, :], other=0.0)
-            b_h3 += tl.trans(tl.dot(b_k, b_v))
+            b_h3 += tl.trans(tl.dot(b_k.to(b_v.dtype), b_v))
         if K > 192:
             p_k = k + o_k4[:, None] + o_t[None, :] * stride_k
             b_k = tl.load(p_k, mask=m_k4[:, None] & m_t[None, :], other=0.0)
-            b_h4 += tl.trans(tl.dot(b_k, b_v))
+            b_h4 += tl.trans(tl.dot(b_k.to(b_v.dtype), b_v))
     # epilogue
     if STORE_FINAL_STATE:
         p_ht = ht + o_v[:, None] * K + o_k1[None, :]
@@ -309,12 +309,25 @@ def chunk_gated_delta_rule_fwd_h(
             chunk_offsets = prepare_chunk_offsets(cu_seqlens, BT)
     assert K <= 256, "current kernel does not support head dimension larger than 256."
 
-    h = k.new_empty(B, NT, H, V, K)
+    # h (the per-chunk recurrent state) is accumulated in fp32 inside the
+    # kernel but was always materialized in k's (activation) dtype. The
+    # state is an unnormalized accumulator that can exceed fp16's ~65504
+    # range over long, low-decay context, so with an fp32 SSM state cache
+    # this silently overflowed on every chunk's store. Materialize in the
+    # state's own dtype instead, same fix as #54146 for the decode-update
+    # kernel; an fp16 state keeps the original dtype unchanged.
+    h_dtype = (
+        torch.float32
+        if initial_state is not None and initial_state.dtype == torch.float32
+        else k.dtype
+    )
+    h = k.new_empty(B, NT, H, V, K, dtype=h_dtype)
     final_state = (
         k.new_empty(N, H, V, K, dtype=torch.float32) if output_final_state else None
     )
 
-    v_new = torch.empty_like(u) if save_new_value else None
+    # v_new (= v - w @ h) carries h's magnitude; needs the same gating.
+    v_new = torch.empty_like(u, dtype=h_dtype) if save_new_value else None
 
     def grid(meta):
         return (triton.cdiv(V, meta["BV"]), N * H)
