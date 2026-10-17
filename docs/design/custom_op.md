@@ -314,3 +314,36 @@ In addition, you can also register all your `CustomOp` at one place for better m
     for op_name, op_cls in REGISTERED_CUSTOM_OPS.items():
         CustomOp.register_oot(_decorated_op_cls=op_cls, name=op_name)
     ```
+
+### Direct DCP Collectives
+
+`DirectDCPQGather`, `DirectDCPA2AReduce` and `DirectDCPKVGather` in
+`vllm.v1.attention.ops.dcp` support OOT replacements. Workspaces own buffers and
+views; ops own communication, reduction and fallbacks. `workspace` may be `None`.
+CUDA preserves the existing direct kernels, eligibility controls and fallbacks;
+`forward_native` uses Torch collectives.
+
+Register through `vllm.general_plugins` on every worker before model construction.
+Override `forward_cuda`; handle absent/oversized workspaces or call `super()`:
+
+```python
+import torch
+
+from my_plugin.kernels import gather_query
+from vllm.v1.attention.ops.dcp import DirectDCPQGather
+
+
+@DirectDCPQGather.register_oot
+class PluginDCPQGather(DirectDCPQGather):
+    def forward_cuda(self, local_query: torch.Tensor) -> torch.Tensor:
+        return gather_query(local_query, self.group, self.workspace)
+```
+
+Eligible direct kernels stay enabled, including with Inductor and `["none"]`.
+Use `["-direct_dcp_q_gather"]` to select Torch for an in-tree op, or
+`["-DirectDCPQGather"]` for its OOT replacement. `VLLM_USE_DIRECT_DCP_*` continues
+to control direct workspace allocation with its existing semantics.
+
+Preserve output layouts, both LSE bases, empty-shard handling and workspace
+synchronization/epochs. All ranks must use the same plugin/config and collective
+order. Keep buffers and bindings stable through CUDA graph replay.
