@@ -77,7 +77,7 @@ fi
 # Health endpoints (TP-mode ports from cluster.sh defaults).
 PREFILL_PORT="${PREFILL_PORT:-8100}"
 DECODE_PORT="${DECODE_PORT:-8200}"
-HEALTH_TIMEOUT_S="${HEALTH_TIMEOUT_S:-3600}"
+HEALTH_TIMEOUT_S="${HEALTH_TIMEOUT_S:-5400}"
 
 # EP-mode ports, mirrored from cluster.sh purely so the preflight below can test
 # them host-side; the in-container values still come from cluster.sh.
