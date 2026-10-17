@@ -133,7 +133,6 @@ class AsyncOutput(AsyncModelRunnerOutput):
         self.sampler_output = sampler_output
         self.num_sampled_tokens = num_sampled_tokens
         self.pending_aux_output = pending_aux_output
-        self.kv_checksums: KVChecksumCopy | None = None
         # Blocking (sleep) event to avoid busy-polling the CUDA driver lock.
         self.copy_event = torch.cuda.Event(blocking=True)
         self._has_fault: torch.Tensor | None = None
@@ -176,8 +175,6 @@ class AsyncOutput(AsyncModelRunnerOutput):
 
     def get_output(self) -> ModelRunnerOutput:
         self.copy_event.synchronize()
-        if self.kv_checksums is not None:
-            self.kv_checksums.add_to(self.model_runner_output)
 
         # NOTE(woosuk): The following code is to ensure compatibility with
         # the existing model runner.
@@ -234,7 +231,6 @@ class AsyncPoolingOutput(AsyncModelRunnerOutput):
     ):
         self.model_runner_output = model_runner_output
         self.pooler_output = pooler_output
-        self.kv_checksums: KVChecksumCopy | None = None
         # Blocking (sleep) event to avoid busy-polling the CUDA driver lock.
         self.copy_event = torch.cuda.Event(blocking=True)
 
@@ -265,8 +261,6 @@ class AsyncPoolingOutput(AsyncModelRunnerOutput):
             pooler_output = self.pooler_output_cpu
         self.copy_event.synchronize()
         self.model_runner_output.pooler_output = pooler_output
-        if self.kv_checksums is not None:
-            self.kv_checksums.add_to(self.model_runner_output)
         return self.model_runner_output
 
 
@@ -298,21 +292,25 @@ class KVChecksumCopy:
 
 
 class AsyncKVChecksumOutput(AsyncModelRunnerOutput):
-    """An output whose only asynchronous part is the step's KV checksums: the
-    output of a step without sampling (no forward, or a non-last PP rank)."""
+    """A step's output with its KV checksums, which are copied to host memory
+    on their own event so that the output's own copy need not wait for them."""
 
     def __init__(
         self,
-        model_runner_output: ModelRunnerOutput,
+        output: ModelRunnerOutput | AsyncModelRunnerOutput,
         kv_checksums: KVChecksumCopy,
     ):
-        # A copy, as this may be the shared empty output.
-        self.model_runner_output = copy(model_runner_output)
+        self.output = output
         self.kv_checksums = kv_checksums
 
     def get_output(self) -> ModelRunnerOutput:
-        self.kv_checksums.add_to(self.model_runner_output)
-        return self.model_runner_output
+        if isinstance(self.output, AsyncModelRunnerOutput):
+            output = self.output.get_output()
+        else:
+            # A copy, as this may be the shared empty output.
+            output = copy(self.output)
+        self.kv_checksums.add_to(output)
+        return output
 
 
 def async_copy_to_np(x: torch.Tensor) -> np.ndarray:

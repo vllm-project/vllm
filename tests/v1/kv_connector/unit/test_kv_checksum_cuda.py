@@ -226,7 +226,7 @@ def test_sampled_output_carries_kv_checksums():
             )
         )
         num_sampled = torch.ones(1, dtype=torch.int32, device="cuda")
-        async_output = AsyncOutput(
+        sampled_output = AsyncOutput(
             ModelRunnerOutput(req_ids=["send"], req_id_to_index={"send": 0}),
             SamplerOutput(
                 sampled_token_ids=torch.full((1, 1), 7, device="cuda"),
@@ -243,7 +243,9 @@ def test_sampled_output_carries_kv_checksums():
         )
         pending = worker.post_forward(_results("recv"), set())
         assert pending is not None
-        async_output.kv_checksums = KVChecksumCopy(pending, main_stream, copy_stream)
+        async_output = AsyncKVChecksumOutput(
+            sampled_output, KVChecksumCopy(pending, main_stream, copy_stream)
+        )
     finally:
         torch.cuda.set_stream(torch.cuda.default_stream())
 

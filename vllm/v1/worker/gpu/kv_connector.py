@@ -23,12 +23,7 @@ from vllm.v1.outputs import (
     KVConnectorOutput,
     ModelRunnerOutput,
 )
-from vllm.v1.worker.gpu.async_utils import (
-    AsyncKVChecksumOutput,
-    AsyncOutput,
-    AsyncPoolingOutput,
-    KVChecksumCopy,
-)
+from vllm.v1.worker.gpu.async_utils import AsyncKVChecksumOutput, KVChecksumCopy
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -210,11 +205,7 @@ class ActiveKVConnector(KVConnector):
         kv_checksums, self._kv_checksums = self._kv_checksums, None
         if kv_checksums is None:
             return output
-        if isinstance(output, ModelRunnerOutput):
-            return AsyncKVChecksumOutput(output, kv_checksums)
-        assert isinstance(output, (AsyncOutput, AsyncPoolingOutput))
-        output.kv_checksums = kv_checksums
-        return output
+        return AsyncKVChecksumOutput(output, kv_checksums)
 
     def no_forward(self, scheduler_output: "SchedulerOutput") -> ModelRunnerOutput:
         if self._disabled:
