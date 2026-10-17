@@ -282,7 +282,7 @@ class FrontendArgs(BaseFrontendArgs):
     """Arguments for the OpenAI-compatible frontend server."""
 
     host: str | None = None
-    """Host name."""
+    """Host name. If unset, listen on all IPv4 and IPv6 addresses."""
     port: int = 8000
     """Port number."""
     grpc_port: int | None = None
