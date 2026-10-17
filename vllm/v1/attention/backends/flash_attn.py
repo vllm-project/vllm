@@ -411,6 +411,13 @@ class FlashAttentionBackend(AttentionBackend):
         fa_version = get_flash_attn_version()
         return fa_version is not None and fa_version >= 3
 
+    @classmethod
+    def supports_varlen_decode_cudagraphs(cls) -> bool:
+        # FA2 graphs replay uniform decode batches only, with no variable-length
+        # bound; FA3 and FA4 graphs replay any batch. Reads the declaration because
+        # the selector has no KV cache spec, which get_cudagraph_support() ignores here.
+        return cls.get_builder_cls()._cudagraph_support == AttentionCGSupport.ALWAYS
+
     @staticmethod
     def get_impl_cls() -> type["FlashAttentionImpl"]:
         return FlashAttentionImpl

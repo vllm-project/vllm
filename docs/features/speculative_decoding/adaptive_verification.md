@@ -53,6 +53,7 @@ Set `enable_adaptive_verification: false` to verify the full block for every req
 ## Requirements and limitations
 
 - The attention backend must tolerate device-decided query lengths, since the CPU lengths only bound them from above. Backends that plan off the CPU lengths are excluded by the attention selector, and rejected at startup for models that hard-wire their backend.
+- The verifier's full decode cudagraphs must also replay batches whose per-request query lengths vary. FlashAttention 2 graphs cannot, so on GPUs where FLASH_ATTN runs FA2 (for example SM8x and SM12x) the selector moves the verifier to the next backend that can (EAGLE-style drafters keep FLASH_ATTN), and an explicit `--attention-backend FLASH_ATTN` is rejected.
 - Full cudagraphs are required: step costs are profiled from captured graphs, so `--enforce-eager` is rejected at startup.
 - Not supported with LoRA (the per-token LoRA mapping is built from CPU-side boundaries) or pipeline parallelism (cost curves and confidences exist only on the last rank).
 - Without a confidence head, `use_local_argmax_reduction` is rejected. The estimator needs the full draft logits, which local argmax reduction never materializes.
