@@ -4,6 +4,7 @@
 
 from dataclasses import dataclass
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 import torch
@@ -23,6 +24,7 @@ from vllm.entrypoints.pooling.scoring.utils import compress_token_type_ids
 from vllm.entrypoints.pooling.typing import OfflineScoringInputsContext
 from vllm.outputs import PoolingOutput, PoolingRequestOutput, RequestError
 from vllm.renderers import TokenizeParams
+from vllm.tokenizers import TokenizerLike
 
 pytestmark = pytest.mark.skip_global_cleanup
 
@@ -135,7 +137,7 @@ def test_token_type_ids_stay_aligned_with_a_truncated_padded_prompt():
     describe the same positions, and the model is told the query segment is
     empty.
     """
-    tokenizer = _DummyTokenizer()
+    tokenizer = cast(TokenizerLike, _DummyTokenizer())
     num_query, num_doc = 20, 30
     prompt = TokensPrompt(prompt_token_ids=list(range(num_query + num_doc)))
     token_type_ids = [0] * num_query + [1] * num_doc
