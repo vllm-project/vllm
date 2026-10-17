@@ -109,6 +109,48 @@ def test_no_spec_decode_padding_up_to_max_model_len():
     assert request.status == RequestStatus.FINISHED_LENGTH_CAPPED
 
 
+@pytest.mark.parametrize(
+    "ngram_invalid,grammar_invalid", [(0, 0), (2, 0), (3, 0), (1, 1)]
+)
+def test_ngram_invalid_drafts_excluded_from_stats(ngram_invalid, grammar_invalid):
+    """Trimmed slots must not inflate aggregate or per-request draft counts."""
+    scheduler = create_scheduler(
+        async_scheduling=True,
+        num_speculative_tokens=3,
+        speculative_method="ngram_gpu",
+        use_v2_model_runner=False,
+        per_request_spec_decode_metrics="summary",
+    )
+    requests = create_requests(num_requests=2, num_tokens=1)
+    for request in requests:
+        scheduler.add_request(request)
+    prefill = scheduler.schedule()
+    scheduler.update_from_output(prefill, _make_model_runner_output(prefill))
+
+    output = scheduler.schedule()
+    first, second = (request.request_id for request in requests)
+    assert output.scheduled_spec_decode_tokens == {
+        first: [-1] * 3,
+        second: [-1] * 3,
+    }
+    output.num_invalid_spec_tokens = {second: grammar_invalid}
+    runner_output = _make_model_runner_output(output)
+    runner_output.ngram_invalid_spec_tokens = {second: ngram_invalid}
+    valid = 3 - ngram_invalid - grammar_invalid
+    runner_output.sampled_token_ids = [[10, 11], [12, 13] if valid else [12]]
+    results = scheduler.update_from_output(output, runner_output)
+
+    stats = results[0].scheduler_stats.spec_decoding_stats
+    assert stats.num_drafts == 1 + bool(valid)
+    assert stats.num_draft_tokens == 3 + valid
+    assert stats.num_accepted_tokens == 1 + bool(valid)
+    assert stats.num_draft_tokens_per_pos == [1 + (i < valid) for i in range(3)]
+    for request, expected in zip(requests, [3, valid]):
+        metrics = request.spec_decode_metrics.to_dict()
+        assert metrics["num_draft_tokens"] == expected
+        assert metrics["num_accepted_draft_tokens"] == bool(expected)
+
+
 def test_abort():
     scheduler = create_scheduler(async_scheduling=True)
     requests = create_requests(num_requests=10, max_tokens=20)

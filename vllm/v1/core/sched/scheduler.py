@@ -2216,13 +2216,17 @@ class Scheduler(SchedulerInterface):
                     ngram_invalid_spec_tokens=model_runner_output.ngram_invalid_spec_tokens,
                 )
                 if request.spec_decode_metrics is not None:
-                    # Exclude grammar-invalidated drafts from the proposed
+                    # Exclude invalid drafts from the proposed
                     # count, mirroring make_spec_decoding_stats; the accepted
                     # bucket (j) is unaffected.
                     adj_draft_tokens = num_draft_tokens
                     if scheduler_output.num_invalid_spec_tokens:
                         adj_draft_tokens -= (
                             scheduler_output.num_invalid_spec_tokens.get(req_id, 0)
+                        )
+                    if model_runner_output.ngram_invalid_spec_tokens:
+                        adj_draft_tokens -= (
+                            model_runner_output.ngram_invalid_spec_tokens.get(req_id, 0)
                         )
                     request.spec_decode_metrics.observe(
                         num_draft_tokens=adj_draft_tokens,
