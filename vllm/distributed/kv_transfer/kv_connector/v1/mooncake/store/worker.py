@@ -1737,10 +1737,8 @@ class MooncakeStoreWorker:
             logger.warning("No KV caches to offload.")
             return
 
-        # Resolve each entry to a representative tensor for storage
-        # deduplication. For attention layers the value is already a tensor;
-        # for Mamba layers it is a list of tensors that all share the same
-        # underlying raw storage, so we take the first one.
+        # Keep the representative-view helper for the unchanged HiSparse path.
+        # Multi-view coverage in that path is outside this change's scope.
         def _repr_tensor(v: torch.Tensor | list[torch.Tensor]) -> torch.Tensor:
             assert isinstance(v, torch.Tensor | list)
             return v if isinstance(v, torch.Tensor) else v[0]
@@ -1756,10 +1754,12 @@ class MooncakeStoreWorker:
                 for layer_name in group.layer_names
             }
             seen_storage_ptrs: set[int] = set()
+            # Preserve every view; the layout deduplicates regions by address.
             cache_tensors = [
-                group_kernel_blocks(_repr_tensor(cache), self.num_blocks)
+                group_kernel_blocks(view, self.num_blocks)
                 for layer_name, cache in kv_caches.items()
                 if layer_name in store_layer_names
+                for view in (cache if isinstance(cache, (list, tuple)) else (cache,))
             ]
             for cache in cache_tensors:
                 cache_storage = cache.untyped_storage()

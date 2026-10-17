@@ -4642,6 +4642,53 @@ def test_register_kv_caches_shared_storage(layout: KVCacheLayout):
     worker.store.register_buffer.assert_called_once_with(raw.data_ptr(), raw.nbytes)
 
 
+@pytest.mark.parametrize("container", [list, tuple])
+@pytest.mark.parametrize("shared_storage", [False, True])
+def test_register_kv_caches_preserves_multi_view_cache(container, shared_storage):
+    """Keep both views and register each backing storage exactly once."""
+    num_blocks, block_bytes = 3, 16
+    if shared_storage:
+        raw = torch.zeros(2, num_blocks, block_bytes, dtype=torch.int8)
+        views = [raw[0], raw[1]]
+    else:
+        views = [
+            torch.zeros(num_blocks, block_bytes, dtype=torch.int8) for _ in range(2)
+        ]
+    worker = _make_bare_worker(num_gpu_blocks=num_blocks)
+    _register_with_mocked_threads(worker, {"layer0": container(views)})
+
+    expected_buffers = {
+        view.untyped_storage().data_ptr(): view.untyped_storage().nbytes()
+        for view in views
+    }
+    calls = worker.store.register_buffer.call_args_list
+    assert len(calls) == len(expected_buffers)
+    assert dict(call.args for call in calls) == expected_buffers
+    db = worker.token_dbs[0]
+    assert db.prepare_value_for_block(num_blocks - 1) == (
+        [view[-1].data_ptr() for view in views],
+        [block_bytes] * 2,
+    )
+
+
+def test_register_kv_caches_padded_states_keep_whole_page_region():
+    """Offset state views must still deduplicate to one full-page region."""
+    num_blocks, page_bytes, state_bytes = 3, 64, 16
+    raw = torch.zeros(num_blocks * page_bytes, dtype=torch.int8)
+    states = [
+        raw.as_strided((num_blocks, state_bytes), (page_bytes, 1), offset)
+        for offset in (0, state_bytes)
+    ]
+    worker = _make_bare_worker(num_gpu_blocks=num_blocks)
+    _register_with_mocked_threads(worker, {"layer0": states})
+
+    worker.store.register_buffer.assert_called_once_with(raw.data_ptr(), raw.nbytes)
+    assert worker.token_dbs[0].prepare_value_for_block(num_blocks - 1) == (
+        [raw.data_ptr() + (num_blocks - 1) * page_bytes],
+        [page_bytes],
+    )
+
+
 def test_register_kv_caches_uses_transfer_group_memory_domain():
     """Derived GPU caches must not change host-source transfer addresses."""
     from vllm.v1.kv_cache_interface import (
