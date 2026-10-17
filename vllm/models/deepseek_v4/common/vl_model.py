@@ -40,6 +40,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalKwargsItem
 
 from .mm_preprocess import (
+    COMPRESS_PAD_TO,
     IMAGE_PLACEHOLDER,
     IMAGE_SENTINEL_BASE_ID,
     DeepseekV4VLDummyInputsBuilder,
@@ -105,6 +106,10 @@ class DeepseekV4ForConditionalGeneration(
     # (borrowed reserved ids, see common/mm_preprocess.py) and apply bias_vl.
     requires_raw_input_tokens = True
     supports_tower_connector_lora = True
+    # Image spans widen the sparse-SWA window in-kernel and the placeholder
+    # starts with a compressor-alignment pad
+    mm_prefix_clamp_sliding_window = True
+    mm_prefix_span_leading_pad_modulus = COMPRESS_PAD_TO
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:

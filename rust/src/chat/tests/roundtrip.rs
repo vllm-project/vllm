@@ -958,7 +958,7 @@ async fn parse_completion(
         NewChatOutputProcessorOptions {
             // Pin every tool schema so that builder-backed parsers build an
             // output grammar for replay. The strict level does not affect parsing.
-            tool_strict_level: ToolStrictLevel::Parameter,
+            tool_strict_level: Some(ToolStrictLevel::Parameter),
             tool_call_parser: &case.tool_call_parser,
             reasoning_parser: &case.reasoning_parser,
         },
@@ -1051,6 +1051,7 @@ fn decoded_completion_stream(
                     kv_transfer_params: None,
                     ec_transfer_params: None,
                     sampling_mask: None,
+                    timestamps: Default::default(),
                 })),
             }
         });
@@ -1063,6 +1064,7 @@ fn decoded_completion_stream(
                 kv_transfer_params: None,
                 ec_transfer_params: None,
                 sampling_mask: None,
+                timestamps: Default::default(),
             });
             events.push(DecodedTextEvent::TextDelta {
                 decoded: chunk.delta,

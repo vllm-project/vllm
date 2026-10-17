@@ -131,8 +131,21 @@ To use benchmark commands, please install with extra dependencies using `pip ins
 Available Commands:
 
 ```bash
-vllm bench {latency, serve, throughput}
+vllm bench {forward, latency, serve, throughput}
 ```
+
+### forward
+
+Benchmark the model forward of exact batches: each case lists its requests as `[N*]Q[@K][c][:D]` (query length Q, KV length K including the query, D draft tokens). A prefill's prefix is a prefix-cache hit unless `c` marks a chunked prefill; they differ only on models with SWA bounded replay, which recompute the last window of a hit. Each request's prefix length varies by ±50% by default (`--kv-len-jitter`), identically on every DP rank. Each forward is captured as a one-shot CUDA graph; sampling and CPU overhead aren't measured. Use `torchrun`, one process per GPU, for DP/TP/EP. CUDA only for now.
+
+```bash
+vllm bench forward \
+    --model meta-llama/Llama-3.2-1B-Instruct \
+    --case decode=32*1@4096 \
+    --case mix=2048,32*1@4096
+```
+
+See [vllm bench forward](./bench/forward.md) for the full reference of all available arguments.
 
 ### latency
 

@@ -3,6 +3,7 @@
 
 import asyncio
 from collections.abc import AsyncGenerator
+from unittest import mock
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -198,3 +199,52 @@ async def test_empty_input_stream_finishes_without_engine_request():
 
     assert queue.get_nowait() is STREAM_FINISHED
     llm._add_request.assert_not_awaited()
+
+
+def _make_streaming_llm(num_chunks: int, has_request: bool = True):
+    llm = AsyncLLM.__new__(AsyncLLM)
+    llm._validate_streaming_input_sampling_params = MagicMock()
+    llm.get_supported_tasks = AsyncMock(return_value=("generate",))
+    llm._run_output_handler = MagicMock()
+    llm._add_request = AsyncMock()
+    llm.model_config = MagicMock()
+    llm.output_processor = MagicMock()
+    llm.output_processor.has_request.return_value = has_request
+
+    # The first processed request is the final (end-of-stream) request.
+    reqs = [MagicMock(prompt_embeds=None) for _ in range(num_chunks + 1)]
+    reqs[0].request_id = "r1-int"
+    llm.input_processor = MagicMock()
+    llm.input_processor.process_inputs.side_effect = reqs
+    return llm, reqs
+
+
+async def _stream_chunks(llm: AsyncLLM, num_chunks: int) -> None:
+    async def chunks():
+        for i in range(num_chunks):
+            yield StreamingInput(prompt=f"frame-{i}")
+
+    with mock.patch(
+        "vllm.v1.engine.async_llm.extract_prompt_components",
+        return_value=("", None, None),
+    ):
+        queue = await llm._add_streaming_input_request(
+            "r1", chunks(), SamplingParams(max_tokens=4)
+        )
+        task = queue._input_stream_task
+        assert task is not None
+        await task
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("session_live", [True, False])
+async def test_handle_inputs_stops_after_session_finished(session_live: bool):
+    """Once the session's request state is gone (aborted or errored), no
+    further chunks or final request are sent: they would recreate a request
+    state that is never cleaned up."""
+    llm, reqs = _make_streaming_llm(num_chunks=2, has_request=session_live)
+    await _stream_chunks(llm, num_chunks=2)
+
+    sent = [call.args[0] for call in llm._add_request.await_args_list]
+    # Both chunks then the final request, or only the first chunk.
+    assert sent == ([reqs[1], reqs[2], reqs[0]] if session_live else [reqs[1]])

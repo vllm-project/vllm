@@ -6,6 +6,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from threading import Event
 
+import numpy as np
 import pytest
 from transformers import AutoTokenizer
 
@@ -72,20 +73,26 @@ class MockReasoner:
 
 
 class MockEngineReasoner(ParserEngineReasoningAdapter):
-    """Ends reasoning implicitly on ``marker``, which is also content."""
+    """Ends reasoning implicitly on ``marker``, which is also content, and
+    explicitly on ``end_marker`` when one is given."""
 
-    def __init__(self, tokenizer, marker: int):
+    def __init__(self, tokenizer, marker: int, end_marker: int | None = None):
         self.marker = marker
+        self.end_marker = end_marker
 
     @property
     def reasoning_end_token_ids(self):
+        return frozenset({self.marker, self.end_marker} - {None})
+
+    @property
+    def implicit_reasoning_end_token_ids(self):
         return frozenset({self.marker})
 
     def find_reasoning_end(self, token_ids):
-        ids = list(token_ids)
-        if self.marker in ids:
-            return ReasoningEnd(ids.index(self.marker), True)
-        return ReasoningEnd(len(ids), False)
+        for offset, token in enumerate(token_ids):
+            if token in self.reasoning_end_token_ids:
+                return ReasoningEnd(offset, token == self.marker)
+        return ReasoningEnd(len(token_ids), False)
 
 
 def _single_token(tokenizer, text: str) -> int:
@@ -122,6 +129,7 @@ def _build_harness(
     enable_in_reasoning: bool = False,
     reasoning_parser_kwargs: dict | None = None,
     structured_outputs: StructuredOutputsParams | None = None,
+    num_spec_tokens: int = NUM_SPEC_TOKENS,
 ) -> tuple[StructuredOutputManager, Request]:
     vllm_config = VllmConfig(
         model_config=ModelConfig(tokenizer=TOKENIZER),
@@ -132,8 +140,10 @@ def _build_harness(
         ),
         speculative_config=SpeculativeConfig(
             model="[ngram]",
-            num_speculative_tokens=NUM_SPEC_TOKENS,
-        ),
+            num_speculative_tokens=num_spec_tokens,
+        )
+        if num_spec_tokens
+        else None,
     )
     manager = StructuredOutputManager(vllm_config)
     if use_reasoner:
@@ -171,8 +181,20 @@ def _build_harness(
     return manager, request
 
 
-def _row_pattern(bitmask) -> str:
-    return "".join("U" if (row == -1).all() else "C" for row in bitmask)
+def _row_pattern(bitmask, masked_ids=()) -> str:
+    """U: unconstrained; R: all but `masked_ids` allowed; C: grammar rows."""
+    reasoning_row = np.full(bitmask.shape[1], -1, dtype=np.int32)
+    for token_id in masked_ids:
+        reasoning_row.view(np.uint32)[token_id >> 5] &= ~np.uint32(1 << (token_id & 31))
+
+    def kind(row) -> str:
+        if (row == -1).all():
+            return "U"
+        if masked_ids and (row == reasoning_row).all():
+            return "R"
+        return "C"
+
+    return "".join(kind(row) for row in bitmask)
 
 
 def _run_real_flow(
@@ -183,6 +205,7 @@ def _run_real_flow(
     expected_row_pattern: str,
     expected_reasoning: bool | None,
     expect_terminated: bool,
+    masked_ids: list[int] | None = None,
 ) -> None:
     assert len(expected_validated) <= len(raw_drafts)
 
@@ -197,7 +220,7 @@ def _run_real_flow(
     )
     assert bitmask is not None
     assert bitmask.shape[0] == len(raw_drafts) + 1
-    assert _row_pattern(bitmask) == expected_row_pattern
+    assert _row_pattern(bitmask, masked_ids or ()) == expected_row_pattern
 
     # grammar_bitmask() must rollback any speculative state it advanced.
     assert manager.validate_tokens(request, list(raw_drafts)) == expected_validated
@@ -375,7 +398,8 @@ FLOW_CASES = [
         FlowCase(
             raw_drafts=(" ", IMPLICIT_THINK_END, "{", "}"),
             expected_validated=(" ",),
-            expected_row_pattern="UUUUU",
+            # The grammar cannot start with the marker, so reasoning rows mask it.
+            expected_row_pattern="RRUUU",
             expected_reasoning=False,
             expect_terminated=False,
             engine_reasoner=True,
@@ -421,7 +445,91 @@ def test_real_flow(
         expected_row_pattern=case.expected_row_pattern,
         expected_reasoning=case.expected_reasoning,
         expect_terminated=case.expect_terminated,
+        masked_ids=[reasoner_kwargs["marker"]] if case.engine_reasoner else None,
     )
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.parametrize(
+    ("structured_outputs", "raw_drafts", "expected_row_pattern"),
+    [
+        # JSON cannot start with the marker: reasoning rows mask it and keep
+        # every other token, including the explicit end, allowed.
+        pytest.param(
+            StructuredOutputsParams(json=JSON_SCHEMA), (" ", " "), "RRR", id="json"
+        ),
+        # The grammar can start with the marker: it stays allowed and, once
+        # sampled, is the first token the grammar consumes.
+        pytest.param(
+            StructuredOutputsParams(regex="z[0-9]+"),
+            (" ", IMPLICIT_THINK_END, "1"),
+            "UUCC",
+            id="regex_starts_with_marker",
+        ),
+    ],
+)
+def test_reasoning_rows_mask_grammar_invalid_implicit_end(
+    tokenizer,
+    backend: StructuredOutputsBackend,
+    structured_outputs: StructuredOutputsParams,
+    raw_drafts: tuple[str, ...],
+    expected_row_pattern: str,
+):
+    marker = _single_token(tokenizer, IMPLICIT_THINK_END)
+    manager, request = _build_harness(
+        tokenizer,
+        backend,
+        reasoning_ended=False,
+        reasoning_parser_kwargs={
+            "marker": marker,
+            "end_marker": _single_token(tokenizer, THINK_END),
+        },
+        structured_outputs=structured_outputs,
+    )
+    manager.reasoner_cls = MockEngineReasoner
+    drafts = _to_token_ids(tokenizer, raw_drafts)
+    assert manager.validate_tokens(request, drafts) == drafts
+
+    bitmask = manager.grammar_bitmask(
+        requests={request.request_id: request},
+        structured_output_request_ids=[request.request_id],
+        scheduled_spec_decode_tokens={request.request_id: drafts},
+    )
+    assert bitmask is not None
+    assert _row_pattern(bitmask, [marker]) == expected_row_pattern
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_parallel_fill_masks_grammar_invalid_implicit_end(
+    tokenizer, backend: StructuredOutputsBackend
+):
+    marker, end = _to_token_ids(tokenizer, (IMPLICIT_THINK_END, THINK_END))
+    manager, request = _build_harness(
+        tokenizer,
+        backend,
+        reasoning_ended=False,
+        reasoning_parser_kwargs={"marker": marker, "end_marker": end},
+        num_spec_tokens=0,
+    )
+    manager.reasoner_cls = MockEngineReasoner
+
+    def row_pattern() -> str:
+        bitmask = manager.grammar_bitmask(
+            requests={request.request_id: request},
+            structured_output_request_ids=[request.request_id],
+            scheduled_spec_decode_tokens={},
+        )
+        assert bitmask is not None
+        return _row_pattern(bitmask, [marker])
+
+    manager.fill_bitmask_parallel_threshold = 0
+    manager.fill_bitmask_parallel_batch_size = 16
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        manager.executor_for_fillmask = executor
+        assert row_pattern() == "R"
+        request.append_output_token_ids([end])
+        assert manager.accept_tokens(request, [end])
+        assert row_pattern() == "C"
 
 
 @pytest.mark.parametrize("backend", BACKENDS)

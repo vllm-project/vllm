@@ -16,6 +16,7 @@ from vllm.model_executor.layers.sparse_attn_indexer import (
     PrefillRowShard,
     _merge_dcp_topk_global,
     _reserve_row_shard_exchange_transient,
+    as_fp32_logits,
 )
 from vllm.models.glm5next.common.sparse_indexer import (
     RADIX_TOPK_WORKSPACE_SIZE,
@@ -29,7 +30,13 @@ from vllm.models.glm5next.common.sparse_indexer import (
 )
 from vllm.models.glm5next.nvidia.ops import kpool_compress as kpool_ops
 from vllm.platforms import current_platform
-from vllm.utils.deep_gemm import has_deep_gemm
+from vllm.utils.deep_gemm import (
+    fp8_fp4_mqa_logits,
+    fp8_fp4_paged_mqa_logits,
+    has_deep_gemm,
+    mqa_logits_mx_inputs,
+    mqa_logits_use_mx_scales,
+)
 from vllm.utils.import_utils import has_cutedsl
 from vllm.utils.torch_utils import (
     LayerNameType,
@@ -253,7 +260,7 @@ def sparse_attn_indexer_kpool(
                 kv_cache,
                 slot_mapping,
                 quant_block_size,
-                scale_fmt,
+                "mxfp8" if mqa_logits_use_mx_scales() else scale_fmt,
             )
 
     topk_indices_buffer[: hidden_states.shape[0]] = -1
@@ -343,20 +350,29 @@ def sparse_attn_indexer_kpool(
             else:
                 q_slice_cast = q_slice
                 k_quant_cast = k_quant
-                k_scale_cast = k_scale.view(torch.float32).squeeze(-1)
-            from vllm.utils.deep_gemm import fp8_fp4_mqa_logits
+                k_scale_cast = k_scale.view(
+                    torch.int32 if mqa_logits_use_mx_scales() else torch.float32
+                ).squeeze(-1)
 
             num_rows = q_slice.shape[0]
             if chunk.local_total_seq_lens == 0:
                 logits = q_slice.new_empty((num_rows, 0), dtype=torch.float32)
             else:
-                logits = fp8_fp4_mqa_logits(
-                    (q_slice_cast, q_scale_slice),
-                    (k_quant_cast, k_scale_cast),
-                    weights[row_start:row_end],
-                    cu_seqlen_ks,
-                    cu_seqlen_ke,
-                    clean_logits=False,
+                q_scale_slice, chunk_weights = mqa_logits_mx_inputs(
+                    q_slice_cast, q_scale_slice, weights[row_start:row_end]
+                )
+                # Compressed: row i starts at K position cu_seqlen_ks[i].
+                row_ends = cu_seqlen_ke - cu_seqlen_ks
+                logits = as_fp32_logits(
+                    fp8_fp4_mqa_logits(
+                        (q_slice_cast, q_scale_slice),
+                        (k_quant_cast, k_scale_cast),
+                        chunk_weights,
+                        cu_seqlen_ks,
+                        cu_seqlen_ke,
+                        chunk.max_seqlen_k,
+                    ),
+                    row_ends,
                 )
 
             # kpool: logits are pool-granular (compress_ratio == index_kpool),
@@ -376,8 +392,8 @@ def sparse_attn_indexer_kpool(
             else:
                 torch.ops._C.top_k_per_row_prefill(
                     logits,
-                    cu_seqlen_ks,
-                    cu_seqlen_ke,
+                    torch.zeros_like(row_ends),
+                    row_ends,
                     topk_dst,
                     num_rows,
                     logits.stride(0),
@@ -392,7 +408,7 @@ def sparse_attn_indexer_kpool(
                 dcp_rank,
                 dcp_world_size,
                 pool_cp_interleave,
-                row_starts=cu_seqlen_ks,
+                row_starts=None,
             )
 
             if index_kpool > 1:
@@ -594,18 +610,22 @@ def sparse_attn_indexer_kpool(
             if use_fp4_cache
             else padded_q_quant_decode_tokens
         )
-        from vllm.utils.deep_gemm import fp8_fp4_paged_mqa_logits
-
-        logits = fp8_fp4_paged_mqa_logits(
-            (padded_q_quant_cast, padded_q_scale),
-            kv_cache,
-            padded_weights[:num_padded_tokens],
-            seq_lens,
-            decode_metadata.block_table,
-            decode_metadata.schedule_metadata,
-            max_model_len=max_pool_len,
-            clean_logits=False,
-            indices=decode_metadata.indices,
+        padded_q_scale, decode_weights = mqa_logits_mx_inputs(
+            padded_q_quant_cast, padded_q_scale, padded_weights[:num_padded_tokens]
+        )
+        # SM100 decode is varlen: one row and context length per token.
+        logits = as_fp32_logits(
+            fp8_fp4_paged_mqa_logits(
+                (padded_q_quant_cast, padded_q_scale),
+                kv_cache,
+                decode_weights,
+                seq_lens,
+                decode_metadata.block_table,
+                decode_metadata.schedule_metadata,
+                max_model_len=max_pool_len,
+                indices=decode_metadata.indices,
+            ),
+            seq_lens.view(-1),
         )
         num_rows = logits.shape[0]
         # kpool: logits are pool-granular -> select topk_tokens//kpool pools,

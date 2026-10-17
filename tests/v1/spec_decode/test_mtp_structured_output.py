@@ -114,6 +114,10 @@ class _EngineReasonerStub(ParserEngineReasoningAdapter):
     def reasoning_end_token_ids(self):
         return self._end_token_ids
 
+    @property
+    def implicit_reasoning_end_token_ids(self):
+        return frozenset()
+
     def find_reasoning_end(self, token_ids):
         self.windows.append(list(token_ids))
         for offset, token in enumerate(token_ids):

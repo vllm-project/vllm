@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import asyncio
 import io
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -34,6 +35,7 @@ class MockModelConfig:
     tokenizer_revision = None
     tokenizer_mode = "auto"
     hf_config = MockHFConfig()
+    hf_text_config = hf_config
     encoder_config: dict[str, Any] | None = None
     enable_prompt_embeds: bool = True
     skip_tokenizer_init: bool = False
@@ -374,6 +376,32 @@ class TestRenderPrompt:
         assert len(results) == 1
         assert results[0]["prompt_token_ids"] == tokens
         assert results[0]["prompt"] == "[1, 2, 3, 4]"
+
+    @pytest.mark.parametrize(
+        ("truncation_side", "expected"),
+        [("left", [106, 107, 108, 109]), ("right", [100, 101, 102, 103])],
+    )
+    def test_detokenization_matches_truncated_tokens(self, truncation_side, expected):
+        """Echoed prompt text must match the truncated tokens sent to the engine."""
+        renderer = _build_renderer(MockModelConfig())
+        params = TokenizeParams(
+            max_total_tokens=100,
+            truncate_prompt_tokens=4,
+            truncation_side=truncation_side,
+            needs_detokenization=True,
+        )
+
+        def render():
+            return renderer.render_prompts(
+                _preprocess_prompt(renderer.model_config, list(range(100, 110)))
+            )
+
+        results = renderer.tokenize_prompts(render(), params)
+        async_results = asyncio.run(renderer.tokenize_prompts_async(render(), params))
+
+        for result in (*results, *async_results):
+            assert result["prompt_token_ids"] == expected
+            assert result["prompt"] == str(expected)
 
     def test_explicit_side_tokenizer_unbounded(self):
         renderer = _build_renderer(MockModelConfig())

@@ -63,14 +63,16 @@ class WriteTask:
     request_id: ReqId
     transfer_id: TransferId
     dst_engine_id: str
-    local_block_ids: list[int]
-    remote_block_ids_hint: list[int] | None
+    local_block_ids: BlockIds
+    remote_block_ids_hint: BlockIds | None
     layer_name: str
     event: torch.cuda.Event
     remote_notify_port: int
     remote_ip: str
+    remote_tp_size: int | None = None
     multi_pod_hosts: list[str] = field(default_factory=list)
     remote_dp_size_local: int = 0
+    remote_dp_size: int = 1
     enqueue_time: float = field(default_factory=time.perf_counter)
     retried: int = 0
 
@@ -93,7 +95,7 @@ class LayerTransferPlan:
 class RemoteAllocInfo:
     """Information about remote block allocation."""
 
-    block_ids: list[int]
+    block_ids: BlockIds | None
     writes_done: int = 0
     writes_expected: int | None = None
     decode_dp_rank: int = 0
@@ -307,8 +309,8 @@ class MoRIIOConfig:
         #                     WRITE mode.
         # transfer_timeout -> Timeout for waiting_for_transfer_complete before
         #                     raising TransferError (sec).
-        # defer_timeout    -> Timeout before a deferred send with no finished_sending
-        #                     notification is reaped and its blocks force-freed (sec).
+        # defer_timeout    -> Timeout for deferred WRITE allocation or a missing
+        #                     READ release notification (sec).
         # recv_abort_timeout -> Timeout before an in-flight recv whose RDMA
         #                     completion never arrived is aborted (sec).
 
@@ -414,8 +416,8 @@ class MoRIIOConstants:
     # Timeout (seconds) for waiting_for_transfer_complete before raising TransferError.
     # Overridable via kv_connector_extra_config["transfer_timeout"].
     DEFAULT_TRANSFER_TIMEOUT = 30.0
-    # Timeout (seconds) before a deferred send with no finished_sending
-    # notification is reaped and its blocks force-freed.
+    # Timeout (seconds) for deferred WRITE allocation or a missing READ release
+    # notification.
     # Overridable via kv_connector_extra_config["defer_timeout"].
     DEFAULT_DEFER_TIMEOUT = 60.0
     # Timeout (seconds) before an in-flight recv whose RDMA completion was lost

@@ -7,6 +7,7 @@ use std::task::{Context, Poll};
 
 use futures::Stream;
 use trait_set::trait_set;
+use vllm_llm::RequestTimestamps;
 use vllm_text::{DecodedLogprobs, DecodedPositionLogprobs, DecodedPromptLogprobs};
 
 use crate::FinishReason;
@@ -22,6 +23,7 @@ pub struct CollectedAssistantMessage {
     pub logprobs: Option<DecodedLogprobs>,
     pub token_ids: Vec<u32>,
     pub usage: ChatTokenUsage,
+    pub timestamps: RequestTimestamps,
     pub finish_reason: FinishReason,
     /// Connector-specific KV transfer parameters for disaggregated serving.
     pub kv_transfer_params: Option<serde_json::Value>,
@@ -81,6 +83,7 @@ impl ChatEventStream {
                 ChatEvent::Done {
                     message: done,
                     usage,
+                    timestamps,
                     finish_reason,
                     kv_transfer_params,
                     ec_transfer_params,
@@ -94,6 +97,7 @@ impl ChatEventStream {
                         }),
                         token_ids,
                         usage,
+                        timestamps,
                         finish_reason,
                         kv_transfer_params: kv_transfer_params.map(|value| *value),
                         ec_transfer_params: ec_transfer_params.map(|value| *value),
@@ -200,6 +204,7 @@ mod tests {
                         output_token_count: 1,
                         cached_token_count: 0,
                     }),
+                    timestamps: Default::default(),
                     finish_reason: FinishReason::stop_eos(),
                     kv_transfer_params: None,
                     ec_transfer_params: None,
@@ -241,6 +246,7 @@ mod tests {
                     output_token_count: 1,
                     cached_token_count: 0,
                 }),
+                timestamps: Default::default(),
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
                 ec_transfer_params: None,

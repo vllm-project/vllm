@@ -14,6 +14,7 @@ steps:
   - tests/distributed
   commands:
   - pytest -v -s distributed/test_comm_ops.py
+  - pytest -v -s distributed/test_cpu_all_reduce.py
   - pytest -v -s distributed/test_shm_broadcast.py
   - pytest -v -s distributed/test_shm_buffer.py
   - pytest -v -s distributed/test_shm_storage.py
@@ -109,6 +110,7 @@ steps:
     amd:
       label: ":amd: (MI355) Distributed DP Basic"
       dind: false
+      automatic_shard: true
       device: mi355_2
       timeout_in_minutes: 45
       depends_on:
@@ -331,6 +333,7 @@ steps:
     amd:
       label: ':amd: (MI355) Distributed DP Extended'
       dind: false
+      automatic_shard: true
       device: mi355_4
       timeout_in_minutes: 60
       working_dir: /vllm-workspace/tests
@@ -528,8 +531,11 @@ steps:
       - examples/rl/rlhf_async_new_apis.py
       - tests/distributed/test_weight_transfer.py
       - tests/distributed/test_packed_tensor.py
+      - tests/v1/attention/test_rocm_mla_dcp_context.py
+      - vllm/v1/attention/ops/rocm_aiter_mla_prefill.py
       commands:
       - pytest -v -s tests/distributed/test_context_parallel.py
+      - pytest -v -s tests/v1/attention/test_rocm_mla_dcp_context.py
       - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 examples/rl/rlhf_async_new_apis.py
       - VLLM_LOGGING_LEVEL=DEBUG python3 examples/features/data_parallel/data_parallel_offline.py --model=Qwen/Qwen1.5-MoE-A2.7B -tp=1 -dp=2 --max-model-len=2048 --all2all-backend=deepep_high_throughput
       - VLLM_LOGGING_LEVEL=DEBUG python3 examples/features/data_parallel/data_parallel_offline.py --model=Qwen/Qwen1.5-MoE-A2.7B -tp=1 -dp=2 --max-model-len=2048 --all2all-backend=allgather_reducescatter --disable-nccl-for-dp-synchronization
@@ -634,10 +640,11 @@ steps:
   - tests/distributed/
   - examples/features/data_parallel/data_parallel_offline.py
   commands:
-    - ./.buildkite/scripts/run-multi-node-test.sh /vllm-workspace/tests 2 2 $IMAGE_TAG "VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py | grep 'Same node test passed' && NUM_NODES=2 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_node_count.py | grep 'Node count test passed' && python3 ../examples/features/data_parallel/data_parallel_offline.py -dp=2 -tp=1 --dp-num-nodes=2 --dp-node-rank=0 --dp-master-addr=192.168.10.10 --dp-master-port=12345 --enforce-eager --trust-remote-code && VLLM_MULTI_NODE=1 pytest -v -s distributed/test_multi_node_assignment.py && VLLM_MULTI_NODE=1 pytest -v -s distributed/test_pipeline_parallel.py" "VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py | grep 'Same node test passed' && NUM_NODES=2 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_node_count.py | grep 'Node count test passed' && python3 ../examples/features/data_parallel/data_parallel_offline.py -dp=2 -tp=1 --dp-num-nodes=2 --dp-node-rank=1 --dp-master-addr=192.168.10.10 --dp-master-port=12345 --enforce-eager --trust-remote-code"
+    - ./.buildkite/scripts/run-multi-node-test.sh /vllm-workspace/tests 2 2 $IMAGE_TAG "VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py | grep 'Same node test passed' && NUM_NODES=2 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_node_count.py | grep 'Node count test passed' && python3 ../examples/features/data_parallel/data_parallel_offline.py -dp=2 -tp=1 --dp-num-nodes=2 --dp-node-rank=0 --dp-master-addr=192.168.10.10 --dp-master-port=12345 --enforce-eager --trust-remote-code && VLLM_MULTI_NODE=1 pytest -v -s distributed/test_pipeline_parallel.py" "VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py | grep 'Same node test passed' && NUM_NODES=2 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_node_count.py | grep 'Node count test passed' && python3 ../examples/features/data_parallel/data_parallel_offline.py -dp=2 -tp=1 --dp-num-nodes=2 --dp-node-rank=1 --dp-master-addr=192.168.10.10 --dp-master-port=12345 --enforce-eager --trust-remote-code"
 
 - label: ":nvidia: (L4) Pipeline + Context Parallelism"
   key: pipeline-context-parallelism-4-gpus
+  automatic_shard: true
   timeout_in_minutes: 55
   working_dir: "/vllm-workspace/tests"
   device: l4
@@ -693,7 +700,6 @@ steps:
   - tests/distributed/test_pipeline_parallel.py
   - tests/basic_correctness/models/test_basic_correctness.py
   commands:
-  - export VLLM_USE_RAY_V2_EXECUTOR_BACKEND=1
   - export NCCL_CUMEM_HOST_ENABLE=0
   - pytest -v -s distributed/test_ray_v2_executor.py
   - pytest -v -s distributed/test_ray_v2_executor_e2e.py
@@ -703,6 +709,7 @@ steps:
     amd:
       label: ':amd: (MI355) RayExecutorV2'
       dind: false
+      automatic_shard: true
       device: mi355_4
       timeout_in_minutes: 75
       working_dir: /vllm-workspace/tests
@@ -718,7 +725,6 @@ steps:
       - tests/basic_correctness/models/test_basic_correctness.py
       - vllm/platforms/rocm.py
       commands:
-      - export VLLM_USE_RAY_V2_EXECUTOR_BACKEND=1
       - pytest -v -s distributed/test_ray_v2_executor.py
       - pytest -v -s distributed/test_ray_v2_executor_e2e.py
       - pytest -v -s distributed/test_pipeline_parallel.py -k "ray"

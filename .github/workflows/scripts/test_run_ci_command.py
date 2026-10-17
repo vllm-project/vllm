@@ -144,6 +144,23 @@ class FakeGitHub:
         self.comments.append(body)
 
 
+class FakeBranchUpdater:
+    def __init__(self, github: FakeGitHub, error: ApiError | None = None) -> None:
+        self.calls: list[tuple[int, str]] = []
+        self.error = error
+        self.github = github
+
+    def update_branch(self, number: int, expected_head_sha: str) -> None:
+        self.calls.append((number, expected_head_sha))
+        if self.error:
+            raise self.error
+        self.github.prs[number] = {
+            **self.github.prs[number],
+            "head": {**self.github.prs[number]["head"], "sha": "merge-commit-sha"},
+        }
+        self.github.behind = 0
+
+
 class FakeBuildkite:
     def __init__(
         self,
@@ -615,6 +632,82 @@ class RunCiCommandTest(unittest.TestCase):
                             "No new CI build was started.", github.comments[0]
                         )
                         self.assertIn(command, github.comments[0])
+
+    def test_run_merges_base_into_outdated_branch_before_building(self) -> None:
+        github = FakeGitHub(behind=5)
+        updater = FakeBranchUpdater(github)
+        buildkite = FakeBuildkite([[], []])
+
+        with patch("run_ci_command.time.sleep"):
+            run(make_event(COMMAND_RUN_CI), github, buildkite, "", updater)
+
+        self.assertEqual(updater.calls, [(42, "0123456789abcdef")])
+        self.assertEqual(buildkite.created_builds[0]["commit"], "merge-commit-sha")
+        self.assertTrue(github.comments[0].startswith("✅ "))
+        self.assertIn("5 commits behind", github.comments[0])
+        self.assertIn("Merged upstream `main`", github.comments[0])
+
+    def test_only_committers_can_rerun_a_commit_that_already_ran_ci(self) -> None:
+        finished_build = {
+            "created_at": "2026-07-28T01:00:00Z",
+            "pull_request": {"id": 42},
+            "state": "failed",
+            "web_url": "https://buildkite.example/builds/122",
+        }
+        for actor, permission, command, allowed in (
+            ("author", "read", COMMAND_RUN_CI, False),
+            ("author", "read", f"{COMMAND_RUN_CI} --allow-stale", False),
+            ("reviewer", "write", COMMAND_RUN_CI, True),
+        ):
+            with self.subTest(actor=actor, command=command):
+                github = FakeGitHub(
+                    behind=5,
+                    permission=permission,
+                    pr=make_pr(labels=[{"name": "ready"}]),
+                )
+                updater = FakeBranchUpdater(github)
+                buildkite = FakeBuildkite([[], [finished_build]])
+
+                with patch("run_ci_command.time.sleep"):
+                    run(make_event(command, actor), github, buildkite, "", updater)
+
+                self.assertEqual(bool(buildkite.created_builds), allowed)
+                if not allowed:
+                    self.assertEqual(updater.calls, [])
+                    self.assertIn("CI already ran on this commit", github.comments[0])
+                    self.assertIn("`/ci retry`", github.comments[0])
+
+    def test_run_waits_for_fork_merge_commit_to_reach_base_repo(self) -> None:
+        github = FakeGitHub(behind=5)
+        updater = FakeBranchUpdater(github)
+        buildkite = FakeBuildkite([[], []])
+
+        with (
+            patch("run_ci_command.time.sleep"),
+            patch.object(
+                github,
+                "get_commits_behind_base",
+                side_effect=[5, ApiError(404, "Not Found"), 0],
+            ),
+        ):
+            run(make_event(COMMAND_RUN_CI), github, buildkite, "", updater)
+
+        self.assertEqual(buildkite.created_builds[0]["commit"], "merge-commit-sha")
+        self.assertTrue(github.comments[0].startswith("✅ "))
+
+    def test_run_reports_failed_merge_without_building(self) -> None:
+        github = FakeGitHub(behind=5)
+        updater = FakeBranchUpdater(github, error=ApiError(422, "merge conflict"))
+        buildkite = FakeBuildkite([[], []])
+
+        run(make_event(COMMAND_RUN_CI), github, buildkite, "", updater)
+
+        self.assertEqual(buildkite.created_builds, [])
+        self.assertTrue(github.comments[0].startswith("❌ "))
+        self.assertIn("could not merge upstream `main`", github.comments[0])
+        self.assertIn("merge conflict", github.comments[0])
+        self.assertIn("No new CI build was started.", github.comments[0])
+        self.assertIn("`/ci run --allow-stale`", github.comments[0])
 
     def test_allow_stale_preserves_author_permissions_and_run_configuration(
         self,

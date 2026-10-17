@@ -34,6 +34,7 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     triton_scalar_specialization_rep,
 )
 from vllm.platforms import current_platform
+from vllm.transformers_utils.deepseek_v4_utils import get_compress_ratios
 from vllm.triton_utils import tl, triton
 from vllm.utils.import_utils import has_cutedsl
 from vllm.utils.math_utils import next_power_of_2
@@ -393,7 +394,9 @@ class DequantizeAndGatherKCacheKernel(
 
         compress_ratios = frozenset(
             max(1, int(compress_ratio))
-            for compress_ratio in vllm_config.model_config.hf_config.compress_ratios
+            for compress_ratio in get_compress_ratios(
+                vllm_config.model_config.hf_config
+            )
         )
         return self._trace_dispatch(self.dispatch)(
             zip_inputs(
@@ -658,7 +661,7 @@ class ComputeGlobalTopkIndicesAndLensKernel(
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
         index_topk = vllm_config.model_config.hf_config.index_topk
-        compress_ratios = vllm_config.model_config.hf_config.compress_ratios
+        compress_ratios = get_compress_ratios(vllm_config.model_config.hf_config)
         cache_block_size = vllm_config.cache_config.block_size
         if index_topk <= 0 or cache_block_size <= 0:
             return []
@@ -964,7 +967,7 @@ class CombineTopkSwaIndicesKernel(
         hf_config = vllm_config.model_config.hf_config
         index_topk = int(getattr(hf_config, "index_topk", 0) or 0)
         compress_ratios = tuple(
-            sorted({max(1, int(ratio)) for ratio in hf_config.compress_ratios})
+            sorted({max(1, int(ratio)) for ratio in get_compress_ratios(hf_config)})
         )
         max_c128a_topk = (
             ((vllm_config.model_config.max_model_len + 127) // 128 + 127) // 128 * 128
@@ -1592,7 +1595,7 @@ class BuildFlashinferMixedSparseIndicesKernel(
         image_widths = (0, max_image_tokens) if max_image_tokens > 0 else 0
         index_topk = int(getattr(hf_config, "index_topk", 0) or 0)
         compress_ratios = tuple(
-            sorted({max(1, int(ratio)) for ratio in hf_config.compress_ratios})
+            sorted({max(1, int(ratio)) for ratio in get_compress_ratios(hf_config)})
         )
         max_c128a_topk = (
             ((vllm_config.model_config.max_model_len + 127) // 128 + 127) // 128 * 128

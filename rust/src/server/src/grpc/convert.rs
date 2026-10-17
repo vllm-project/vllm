@@ -947,6 +947,7 @@ mod tests {
             kv_transfer_params: None,
             ec_transfer_params: None,
             sampling_mask: None,
+            timestamps: Default::default(),
         }
     }
 

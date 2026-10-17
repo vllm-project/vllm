@@ -199,23 +199,26 @@ steps:
       - vllm/platforms/rocm.py
       - tests/models/language/generation_ppl_test
 
-- label: ":nvidia: (H200 MIG 35GB) Language Models (Extended Pooling) Shard %N"
+- label: ":nvidia: (H200 MIG 35GB) Language Models (Extended Pooling)"
   device: h200_35gb
   key: language-models-test-extended-pooling
+  automatic_shard: true
   timeout_in_minutes: 120
-  parallelism: 4
   optional: true
   source_file_dependencies:
   - vllm/
   - "!vllm/distributed/kv_transfer/"
   - tests/models/language/pooling
   commands:
-    - pytest -v -s models/language/pooling -m 'not core_model' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+    - pytest -v -s models/language/pooling -m 'not core_model'
   mirror:
     amd:
-      label: ":amd: (MI300) Language Models (Extended Pooling) Shard %N"
+      parallelism: 4
+      commands:
+        - "pytest -v -s models/language/pooling -m 'not core_model' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB"
+      label: ":amd: (MI355 DPX) Language Models (Extended Pooling) Shard %N"
       dind: false
-      device: mi300_1
+      device: mi355_dpx
       timeout_in_minutes: 95
       depends_on:
       - image-build-amd
