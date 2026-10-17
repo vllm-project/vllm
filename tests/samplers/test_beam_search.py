@@ -11,7 +11,9 @@ from unittest.mock import Mock
 
 import jsonschema
 import pytest
-from transformers import AutoModelForSeq2SeqLM
+from tokenizers import Tokenizer
+from tokenizers.models import WordLevel
+from transformers import AutoModelForSeq2SeqLM, TokenizersBackend
 
 from vllm import CompletionOutput, RequestOutput
 from vllm.assets.audio import AudioAsset
@@ -48,6 +50,87 @@ MAX_TOKENS = [64]
 BEAM_WIDTHS = [4]
 MM_BEAM_WIDTHS = [2]
 MODELS = ["TinyLlama/TinyLlama-1.1B-Chat-v1.0"]
+
+
+@pytest.mark.parametrize("ignore_eos", [False, True])
+@pytest.mark.parametrize("max_tokens", [2, 3, 4])
+@pytest.mark.parametrize("num_prompts", [1, 2])
+def test_structured_beam_search_does_not_duplicate_terminal_beams(
+    monkeypatch, ignore_eos: bool, max_tokens: int, num_prompts: int
+) -> None:
+    """Grammar termination must not displace the second-best distinct beam."""
+    tokenizer = TokenizersBackend(
+        tokenizer_object=Tokenizer(
+            WordLevel(
+                {"<eos>": 0, "a": 1, "b": 2, "prompt": 3, "<unk>": 4},
+                unk_token="<unk>",
+            )
+        ),
+        eos_token="<eos>",
+        unk_token="<unk>",
+    )
+    llm = LLM.__new__(LLM)
+    llm.model_config = SimpleNamespace(
+        get_vocab_size=lambda: 5, hf_config=SimpleNamespace(model_type="unit_test")
+    )
+    llm.llm_engine = Mock(
+        vllm_config=SimpleNamespace(
+            model_config=llm.model_config,
+            speculative_config=None,
+            structured_outputs_config=SimpleNamespace(
+                backend="xgrammar", disable_any_whitespace=False
+            ),
+        )
+    )
+    llm.renderer = Mock(get_tokenizer=Mock(return_value=tokenizer))
+    monkeypatch.setattr(llm, "_preprocess_cmpl", lambda prompts: prompts)
+
+    def run_requests(prompts, **kwargs):
+        results = []
+        for prompt in prompts:
+            tokens = prompt["prompt_token_ids"]
+            logprobs = (
+                {1: Logprob(-0.7), 2: Logprob(-1.0)}
+                if len(tokens) == 1
+                else {0: Logprob(-0.1)}
+            )
+            results.append(
+                RequestOutput(
+                    request_id="inner",
+                    prompt=None,
+                    prompt_token_ids=tokens,
+                    prompt_logprobs=None,
+                    finished=True,
+                    outputs=[
+                        CompletionOutput(
+                            index=0,
+                            text="",
+                            token_ids=[next(iter(logprobs))],
+                            cumulative_logprob=None,
+                            logprobs=[logprobs],
+                            finish_reason="length",
+                        )
+                    ],
+                )
+            )
+        return results
+
+    monkeypatch.setattr(llm, "_render_and_run_requests", run_requests)
+    prompts: list[TokensInput] = [
+        {"type": "token", "prompt_token_ids": [3]} for _ in range(num_prompts)
+    ]
+    outputs = llm.beam_search(
+        prompts,
+        BeamSearchParams(
+            beam_width=2,
+            max_tokens=max_tokens,
+            ignore_eos=ignore_eos,
+            structured_outputs=StructuredOutputsParams(regex="a|b"),
+        ),
+    )
+    assert len(outputs) == num_prompts
+    for output in outputs:
+        assert [beam.tokens for beam in output.sequences] == [[3, 1, 0], [3, 2, 0]]
 
 
 @pytest.mark.parametrize(("abort_after", "prompt_token"), [(0, 1), (1, 1), (0, 0)])
