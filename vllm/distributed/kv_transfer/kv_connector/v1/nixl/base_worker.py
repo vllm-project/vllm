@@ -82,13 +82,14 @@ from vllm.platforms import current_platform
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import make_zmq_path
-from vllm.utils.torch_utils import async_tensor_h2d
+from vllm.utils.torch_utils import async_tensor_h2d, get_dtype_size
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     CircularBufferSpec,
     FullAttentionSpec,
     KVCacheLayout,
     KVCacheSpec,
+    KVQuantMode,
     MambaSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
@@ -436,6 +437,28 @@ class NixlBaseConnectorWorker:
             for layer_name in layer_names:
                 regions_by_layer[layer_name].append(region)
         self._regions_by_layer: dict[str, list[int]] = dict(regions_by_layer)
+
+    def _is_separate_kv_head_slot_page(
+        self, layer_spec: KVCacheSpec, physical_page_size: int
+    ) -> bool:
+        """Whether a layer's page is an unquantized ``[K heads | V heads]`` page.
+
+        Set by ``AttentionConfig.flashinfer_separate_kv_head_slots``: the spec
+        has ``2 * num_kv_heads`` head slots of ``head_size`` elements, so under a
+        block-contiguous layout the first half of each page is K and the second
+        half is V.
+        """
+        return (
+            self.vllm_config.attention_config.flashinfer_separate_kv_head_slots
+            and isinstance(layer_spec, AttentionSpec)
+            and not isinstance(layer_spec, (MLAAttentionSpec, SlidingWindowMLASpec))
+            and layer_spec.kv_quant_mode == KVQuantMode.NONE
+            and layer_spec.num_head_slots == 2 * layer_spec.num_kv_heads
+            and layer_spec.state_content_bytes
+            == layer_spec.head_size * get_dtype_size(layer_spec.dtype)
+            and KVCacheLayout[self.kv_cache_layout].is_block_contiguous
+            and physical_page_size == layer_spec.page_size_bytes
+        )
 
     @staticmethod
     def _expand_remote_packed_rows(nixl_agent_meta: NixlAgentMetadata) -> None:
@@ -1818,6 +1841,18 @@ class NixlBaseConnectorWorker:
                         for segment_idx in range(num_segments)
                     ]
 
+            if self._is_separate_kv_head_slot_page(layer_spec, physical_page_size):
+                # [K heads | V heads] page: register K and V as two regions that
+                # step by the full page, so each region keeps its heads
+                # contiguous for head-sliced (heterogeneous TP) reads.
+                assert len(region_specs) == 1, region_specs
+                base_addr, block_len, block_stride = region_specs[0]
+                assert block_len == physical_page_size and block_len % 2 == 0
+                half = block_len // 2
+                region_specs = [
+                    (base_addr, half, block_stride),
+                    (base_addr + half, half, block_stride),
+                ]
             for base_addr, block_len, block_stride in region_specs:
                 # Overlaid groups can page the same bytes with different page
                 # sizes (DSv4.1 SWA, indexer and compressor caches), so views at
