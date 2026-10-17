@@ -187,3 +187,104 @@ def test_minimax_m3_sparse_decode_fp8_kv_scales(scale_mode: str):
 
     torch.testing.assert_close(got, ref, rtol=2e-2, atol=2e-2)
     assert not torch.allclose(unscaled, ref, rtol=1e-1, atol=1e-1)
+
+
+@pytest.mark.parametrize("scale_mode", ["scalar", "per_token_head"])
+@pytest.mark.parametrize(
+    "fp16_dot,batch_invariant", [(False, False), (True, False), (True, True)]
+)
+@torch.inference_mode()
+def test_minimax_m3_sparse_decode_fp8_split_scales(
+    scale_mode: str, fp16_dot: bool, batch_invariant: bool, monkeypatch
+):
+    if not (
+        current_platform.is_cuda() and current_platform.is_device_capability_family(100)
+    ):
+        pytest.skip("Sparse decode tuning requires SM100-family GPUs")
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", str(int(batch_invariant)))
+    total_q, num_blocks = 40, 16
+    torch.manual_seed(2)
+    q = torch.randn(total_q, NUM_HEADS, HEAD_DIM, dtype=DTYPE, device=DEVICE) * 0.1
+    kv_fp8, kv_dequant = _make_kv_cache(num_blocks, seed=3)
+    k_scale = torch.tensor(0.3, dtype=torch.float32, device=DEVICE)
+    v_scale = torch.tensor(0.7, dtype=torch.float32, device=DEVICE)
+    kv_dequant[..., :HEAD_DIM] = (kv_fp8[..., :HEAD_DIM].float() * k_scale).to(DTYPE)
+    kv_dequant[..., HEAD_DIM:] = (kv_fp8[..., HEAD_DIM:].float() * v_scale).to(DTYPE)
+    if scale_mode == "per_token_head":
+        shape = (NUM_KV_HEADS, num_blocks * SPARSE_BLOCK_SIZE)
+        k_scale = k_scale.expand(shape).contiguous()
+        v_scale = v_scale.expand(shape).contiguous()
+
+    blocks = torch.arange(num_blocks, dtype=torch.int32, device=DEVICE)
+    topk = blocks.expand(NUM_KV_HEADS, total_q, -1).contiguous()
+    block_table = blocks.expand(total_q, -1).contiguous()
+    seq_lens = torch.full(
+        (total_q,), num_blocks * SPARSE_BLOCK_SIZE, dtype=torch.int32, device=DEVICE
+    )
+    seq_lens[0] -= SPARSE_BLOCK_SIZE // 2
+    got, ref, unscaled = (torch.empty_like(q) for _ in range(3))
+    for output, cache, ks, vs in (
+        (got, kv_fp8, k_scale, v_scale),
+        (ref, kv_dequant, None, None),
+        (unscaled, kv_fp8, None, None),
+    ):
+        minimax_m3_sparse_attn_decode(
+            q,
+            cache,
+            topk,
+            block_table,
+            seq_lens,
+            NUM_KV_HEADS,
+            HEAD_DIM**-0.5,
+            output,
+            decode_query_len=1,
+            k_scale=ks,
+            v_scale=vs,
+            fp16_dot=fp16_dot,
+        )
+
+    torch.testing.assert_close(got, ref, rtol=2e-2, atol=2e-2)
+    assert (got.float() - ref.float()).abs().mean() < (
+        unscaled.float() - ref.float()
+    ).abs().mean() * 0.1
+
+
+@pytest.mark.parametrize(
+    "cache_dtype,scale", [(torch.float8_e4m3fn, 200.0), (torch.float8_e5m2, 2.0)]
+)
+@pytest.mark.parametrize("fp16_dot", [False, True])
+@torch.inference_mode()
+def test_minimax_m3_sparse_decode_fp16_saturates_scaled_kv(
+    cache_dtype: torch.dtype, scale: float, fp16_dot: bool, monkeypatch
+):
+    if not (
+        current_platform.is_cuda() and current_platform.is_device_capability_family(100)
+    ):
+        pytest.skip("Sparse decode tuning requires SM100-family GPUs")
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "0")
+    q = torch.full((1, NUM_HEADS, HEAD_DIM), 0.001, dtype=DTYPE, device=DEVICE)
+    cache_max = torch.finfo(cache_dtype).max
+    kv = torch.full(
+        (1, NUM_KV_HEADS, SPARSE_BLOCK_SIZE, 2 * HEAD_DIM),
+        cache_max,
+        dtype=DTYPE,
+        device=DEVICE,
+    ).to(cache_dtype)
+    scale_tensor = torch.tensor(scale, dtype=torch.float32, device=DEVICE)
+    output = torch.empty_like(q)
+    minimax_m3_sparse_attn_decode(
+        q,
+        kv,
+        torch.zeros((NUM_KV_HEADS, 1, 1), dtype=torch.int32, device=DEVICE),
+        torch.zeros((1, 1), dtype=torch.int32, device=DEVICE),
+        torch.tensor([SPARSE_BLOCK_SIZE], dtype=torch.int32, device=DEVICE),
+        NUM_KV_HEADS,
+        HEAD_DIM**-0.5,
+        output,
+        decode_query_len=1,
+        k_scale=scale_tensor,
+        v_scale=scale_tensor,
+        fp16_dot=fp16_dot,
+    )
+    expected = min(cache_max * scale, 65504.0) if fp16_dot else cache_max * scale
+    torch.testing.assert_close(output, torch.full_like(output, expected))

@@ -405,10 +405,12 @@ class MiniMaxM3SparseImpl(AttentionImplBase[MiniMaxM3SparseMetadata]):
         topk_blocks: int,
         sparse_block_size: int,
         msa_decode_backend: str = "triton",
+        msa_decode_fp16_dot: bool = False,
     ) -> None:
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = scale
+        self.fp16_dot = msa_decode_fp16_dot
         self.num_kv_heads = num_kv_heads if num_kv_heads is not None else num_heads
         self.kv_cache_dtype = kv_cache_dtype
         self.use_fp8_kv = is_quantized_kv_cache(kv_cache_dtype)
@@ -500,6 +502,7 @@ class MiniMaxM3SparseTritonImpl(MiniMaxM3SparseImpl):
                 d.decode_query_len,
                 k_scale=k_scale,
                 v_scale=v_scale,
+                fp16_dot=self.fp16_dot,
             )
 
         # Prefill [nd:]: cu_seqlens_q already rebased to 0.
