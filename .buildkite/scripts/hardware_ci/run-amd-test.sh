@@ -145,7 +145,8 @@ diagnostics() {
 # ---------------------------------------------------------------------------
 # Preflight: verify imports and GPU visibility
 # ---------------------------------------------------------------------------
-python3 -c "import vllm, torch, transformers, ray" || exit 1
+# -P: the checkout (cwd) has a vllm/ source tree that would shadow the installed package.
+python3 -P -c "import vllm, torch, transformers, ray" || exit 1
 
 if [[ $gpus != 0 ]]; then
   rocminfo >/dev/null || { diagnostics; exit 1; }
@@ -170,10 +171,12 @@ rc=0
 if [[ ${CONTAINER_TIMEOUT_S:-0} -gt 0 ]]; then
   # timeout fires TERM, then KILL after 10 s — mirrors the old docker run path.
   # Not --foreground: the whole process group (pytest, engine workers) must stop, not just bash.
+  # That group is in the background of the job's PTY, where reading the terminal stops it
+  # (SIGTTIN: apt, transformers' trust_remote_code prompt), so stdin is /dev/null.
   timeout --verbose --signal=TERM --kill-after=10s \
-    "${CONTAINER_TIMEOUT_S}s" bash -o pipefail -c "$commands" || rc=$?
+    "${CONTAINER_TIMEOUT_S}s" bash -o pipefail -c "$commands" </dev/null || rc=$?
 else
-  bash -o pipefail -c "$commands" || rc=$?
+  bash -o pipefail -c "$commands" </dev/null || rc=$?
 fi
 
 [[ $rc == 5   ]] && rc=0   # pytest exit 5 = no tests collected, not a failure

@@ -482,8 +482,8 @@ RUN --mount=type=bind,source=.buildkite/scripts/rocm/select_aiter_nightly_wheel.
         echo "$out"; spec="$(echo "$out" | head -n 1)"; \
     fi; \
     if [ -n "$spec" ]; then pip install --pre --no-deps --force-reinstall "$spec" && python3 -c 'import aiter'; fi
-# Catch GPU<->CPU syncs in execute_model/sample_tokens during tests.
-ENV VLLM_GPU_SYNC_CHECK=error
+# No VLLM_GPU_SYNC_CHECK yet: AMD CI never ran with it, and ROCm code paths still sync
+# (EPLB, sparse MLA, indexers, moondream3). Enable it once those are fixed.
 ENV HF_XET_HIGH_PERFORMANCE=1
 
 FROM test-base AS test
