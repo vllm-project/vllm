@@ -134,6 +134,18 @@ completion = client.chat.completions.create(
 )
 ```
 
+## Unicode Tag-Block Filtering
+
+The following environment variable controls sanitization of incoming request payloads. It is intended to clean up requests from clients that emit unwanted Unicode content — specifically, Unicode tag characters (`U+E0020`-`U+E007F`), which are invisible to humans but are tokenized by language models and can cause unpredictable responses. When enabled, these characters are stripped from the bodies of `POST` requests to the LLM generation endpoints: `/v1/chat/completions`, `/v1/chat/completions/batch`, `/v1/completions`, `/v1/responses`, `/v1/messages` and `/cohere/v2/chat`. All other endpoints, methods, and Unicode characters (including emojis) are unaffected.
+
+To enable it, set the following environment variable before starting the server:
+
+```bash
+VLLM_ENABLE_UNICODE_FILTERING_MIDDLEWARE=true vllm serve ...
+```
+
+Filtering operates directly on the UTF-8 bytes of the request body and handles both ways a JSON client can encode these characters: the raw UTF-8 sequence, and the JSON `\u` escape of the equivalent surrogate pair (`\uDB40\uDC20`-`\uDB40\uDC7F`, which is what Python's `json.dumps` emits by default). Clean payloads are detected with a quick substring check and skip the regex entirely. The flag defaults to off, so existing deployments are unaffected unless explicitly enabled.
+
 ## API Reference
 
 ### Completions API
