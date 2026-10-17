@@ -81,10 +81,10 @@ class _ObservabilityMixin:
         return {}
 
 
-if TYPE_CHECKING:
+if TYPE_CHECKING or not _IS_OTEL_AVAILABLE:
     ObservabilityMixin = _ObservabilityMixin
 
-elif _IS_OTEL_AVAILABLE:
+else:
     from opentelemetry.sdk.trace import Span
     from opentelemetry.trace import (
         NonRecordingSpan,
@@ -251,5 +251,3 @@ elif _IS_OTEL_AVAILABLE:
         return Status(StatusCode.ERROR)
 
     ObservabilityMixin = _ObservabilityMixinWithOpenTelemetry
-else:
-    ObservabilityMixin = _ObservabilityMixin
