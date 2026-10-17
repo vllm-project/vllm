@@ -5,7 +5,7 @@ import io
 import math
 import time
 import zlib
-from collections.abc import AsyncGenerator, Callable, Set
+from collections.abc import AsyncGenerator, Callable, Sequence, Set
 from concurrent.futures import ThreadPoolExecutor
 from functools import cached_property
 from typing import Final, Literal, TypeAlias, TypeVar, cast
@@ -27,7 +27,7 @@ from vllm.entrypoints.serve.engine.typing import SpeechToTextRequest
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.exceptions import VLLMValidationError
-from vllm.inputs import EncoderDecoderInput, EngineInput
+from vllm.inputs import EncoderDecoderInput, EngineInput, PromptType
 from vllm.logger import init_logger
 from vllm.logprobs import FlatLogprobs, Logprob
 from vllm.model_executor.models import SupportsTranscription
@@ -47,6 +47,7 @@ from ..transcription.protocol import (
     TranscriptionResponseVerbose,
     TranscriptionSegment,
     TranscriptionStreamResponse,
+    TranscriptionWord,
 )
 from ..translation.protocol import (
     TranslationResponse,
@@ -90,6 +91,55 @@ def asr_inter_chunk_separator(
     return "" if language and language.lower() in no_space_languages else " "
 
 
+# Punctuation that faster-whisper merges onto the neighbouring word
+# (``prepend_punctuations`` / ``append_punctuations``, transcribe.py v1.2.1).
+# A token made only of these, at the start or end of a word, is left out of the
+# word's ``probability``: the word's text keeps it, but a hesitant comma should
+# not make a confidently recognized word look uncertain.
+_LEADING_PUNCTUATION = frozenset("\"'“¿([{-")
+_TRAILING_PUNCTUATION = frozenset("\"'.。,，!！?？:：”)]}、")
+
+
+def _is_punctuation(piece: str, marks: frozenset[str]) -> bool:
+    text = piece.strip()
+    return bool(text) and all(ch in marks for ch in text)
+
+
+def _word_probability(pieces: list[str], probs: list[float | None]) -> float | None:
+    """Mean probability of a word's tokens, leaving out punctuation-only tokens
+    at its edges (internal ones, like the apostrophe in "don't", stay in).
+
+    A word that is nothing but punctuation keeps the mean over all its tokens,
+    so it still gets a score. Tokens with no known probability are skipped;
+    ``None`` if none is known.
+    """
+    lo, hi = 0, len(pieces)
+    while lo < hi and _is_punctuation(pieces[lo], _LEADING_PUNCTUATION):
+        lo += 1
+    while hi > lo and _is_punctuation(pieces[hi - 1], _TRAILING_PUNCTUATION):
+        hi -= 1
+    core = probs[lo:hi] if hi > lo else probs
+    known = [p for p in core if p is not None]
+    return sum(known) / len(known) if known else None
+
+
+def _token_probability(
+    log_probs: "FlatLogprobs | list[dict[int, Logprob]] | None",
+    j: int,
+    tid: int,
+) -> float | None:
+    """Probability of output token ``j`` (sampled id ``tid``), if known.
+
+    ``log_probs`` is aligned with the output tokens, one entry per sampled
+    token, as ``_get_verbose_segments`` also reads it.
+    """
+    if log_probs is None or j >= len(log_probs):
+        return None
+    position = log_probs[j]
+    entry = position.get(tid) if position is not None else None
+    return None if entry is None else math.exp(entry.logprob)
+
+
 class SpeechToTextBaseServing(GenerateBaseServing):
     """Base class for speech-to-text operations like transcription and
     translation."""
@@ -122,6 +172,10 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         )
 
         self.enable_force_include_usage = enable_force_include_usage
+
+        # Outputs that asked for word timestamps and got none. Counted so the
+        # report can be logged sparsely instead of once per request.
+        self._words_missing = 0
 
         self.max_audio_decode_duration_s: int = envs.VLLM_MAX_AUDIO_DECODE_DURATION_S
         self.max_audio_decode_bytes: int = envs.VLLM_MAX_AUDIO_DECODE_BYTES
@@ -300,15 +354,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                 task_type=self.task_type,
             )
             prompt = self.model_cls.get_generation_prompt(stt_params)
-
-            parsed_prompt: DictPrompt
-            if request.response_format == "verbose_json":
-                parsed_prompt = parse_enc_dec_prompt(prompt)
-                parsed_prompt = self._preprocess_verbose_prompt(parsed_prompt)
-            else:
-                parsed_prompt = parse_model_prompt(self.model_config, prompt)
-
-            parsed_prompts.append(parsed_prompt)
+            parsed_prompts.append(self._parse_generation_prompt(request, prompt))
 
         engine_inputs = await self.renderer.render_cmpl_async(parsed_prompts)
 
@@ -418,6 +464,255 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                 avg_logprob += log_probs[idx - 1][token].logprob
         return segments
 
+    def _wants_word_timestamps(self, request: SpeechToTextRequest) -> bool:
+        """Whether this request asked for word-level timestamps.
+
+        Decided once and used twice: to opt the request into cross-attention
+        capture + DTW in the worker, and to emit the words in the response. The
+        two must agree, or the worker either wastes the work or never does it.
+        """
+        return (
+            self.task_type == "transcribe"
+            and request.response_format == "verbose_json"
+            and "word" in (getattr(request, "timestamp_granularities", None) or [])
+            and getattr(self.model_cls, "supports_word_timestamp", False)
+        )
+
+    def _wants_word_probabilities(self, request: SpeechToTextRequest) -> bool:
+        """Whether word timestamps should also carry ``probability``.
+
+        Opt-in per request (``include_word_probabilities``): reading the sampled
+        token's logprob is not free, so plain word-timestamp requests skip it.
+        """
+        return self._wants_word_timestamps(request) and bool(
+            getattr(request, "include_word_probabilities", False)
+        )
+
+    def _needs_segments(self, request: SpeechToTextRequest) -> bool:
+        """Whether this response has to carry segment-level detail.
+
+        Segments need ``logprobs=1`` for ``avg_logprob`` and are cut on timestamp
+        tokens, which the decoder prompt has to ask the model for
+        (``_preprocess_verbose_prompt``). Word onsets need neither, so a
+        word-only request can skip all of it.
+
+        Note the default: ``timestamp_granularities`` is ``[]``, *not*
+        ``["segment"]``, and a plain ``verbose_json`` request must still return
+        segments -- gating on ``"segment" in granularities`` would drop them.
+        """
+        if request.response_format != "verbose_json":
+            return False
+        granularities = getattr(request, "timestamp_granularities", None) or []
+        if not granularities or "segment" in granularities:
+            return True
+        # Word-only. Skip segments only if the words will really be produced;
+        # otherwise (translation, or a model without word support) fall back
+        # rather than answer with nothing at all.
+        return not self._wants_word_timestamps(request)
+
+    def _apply_verbose_params(
+        self, request: SpeechToTextRequest, sampling_params: SamplingParams
+    ) -> None:
+        """Turn on only the sampling machinery this response format consumes."""
+        if self._needs_segments(request):
+            # Segment ``avg_logprob`` reads the sampled token's logprob.
+            sampling_params.logprobs = 1
+        elif self._wants_word_probabilities(request):
+            # Word ``probability`` needs only the sampled token's logprob.
+            # ``logprobs=0`` returns exactly that; ``1`` would also run a top-k
+            # over the vocabulary (``compute_topk_scores``) for nothing.
+            sampling_params.logprobs = 0
+
+        if self._wants_word_timestamps(request) and not isinstance(
+            sampling_params, BeamSearchParams
+        ):
+            # Opt in per *request*, not just per server: the worker captures
+            # cross-attention and runs the DTW only for requests carrying this
+            # flag, so the rest never pay the readout.
+            extra_args = dict(sampling_params.extra_args or {})
+            extra_args["word_timestamps"] = True
+            sampling_params.extra_args = extra_args
+
+    def _parse_generation_prompt(
+        self, request: SpeechToTextRequest, prompt: PromptType
+    ) -> DictPrompt:
+        """Parse the model's prompt, asking for timestamp tokens only if needed.
+
+        ``_preprocess_verbose_prompt`` swaps ``<|notimestamps|>`` for
+        ``<|0.00|>``, asking the model to emit timestamp tokens, and only segment
+        cutting reads those. A word-only request therefore keeps the prompt the
+        model built -- byte for byte the one ``json`` uses -- which also keeps
+        models never trained on timestamp tokens in their normal decode regime.
+        """
+        if self._needs_segments(request):
+            return self._preprocess_verbose_prompt(parse_enc_dec_prompt(prompt))
+        return parse_model_prompt(self.model_config, prompt)
+
+    def _group_words(
+        self,
+        token_ids: "Sequence[int]",
+        token_times: list[float],
+        start_offset: float,
+        log_probs: "FlatLogprobs | list[dict[int, Logprob]] | None" = None,
+    ) -> "list[TranscriptionWord]":
+        """Group generated tokens into words with (start, end) seconds from the
+        per-position onset times computed by the worker's cross-attention DTW.
+
+        With ``log_probs``, each word also carries ``probability``: the mean
+        probability of its tokens as sampled, over the full vocabulary, leaving
+        out punctuation-only tokens at the word's edges (``_word_probability``).
+        Without ``log_probs`` it is ``None``.
+        """
+        tok = self.tokenizer
+        ts_begin = cast(int, tok.convert_tokens_to_ids("<|0.00|>"))
+        specials = set(tok.all_special_ids)
+        n_prompt = max(len(token_times) - len(token_ids), 0)
+        raw: list[tuple[str, float, float, list[str], list[float | None]]] = []
+        cur: str = ""
+        cur_start: float | None = None
+        cur_pieces: list[str] = []
+        cur_probs: list[float | None] = []
+        prev_end: float = 0.0
+        for j, tid in enumerate(token_ids):
+            pos = n_prompt + j
+            if pos + 1 >= len(token_times):
+                break
+            tid = int(tid)
+            if tid in specials or tid >= ts_begin:
+                continue
+            piece = str(tok.decode([tid]))
+            s, e = float(token_times[pos]), float(token_times[pos + 1])
+            if piece.startswith(" ") and cur:
+                assert cur_start is not None
+                raw.append((cur.strip(), cur_start, prev_end, cur_pieces, cur_probs))
+                cur, cur_start, cur_pieces, cur_probs = "", None, [], []
+            if cur_start is None:
+                cur_start = s
+            cur += piece
+            prev_end = e
+            cur_pieces.append(piece)
+            cur_probs.append(_token_probability(log_probs, j, tid))
+        if cur:
+            assert cur_start is not None
+            raw.append((cur.strip(), cur_start, prev_end, cur_pieces, cur_probs))
+
+        words: list[TranscriptionWord] = []
+        last = 0.0
+        for word, s, e, pieces, probs in raw:
+            s = max(s, last)
+            e = max(e, s)
+            words.append(
+                TranscriptionWord(
+                    word=word,
+                    start=round(start_offset + s, 2),
+                    end=round(start_offset + e, 2),
+                    probability=(
+                        None if log_probs is None else _word_probability(pieces, probs)
+                    ),
+                )
+            )
+            last = s
+        return words
+
+    def _collect_output_parts(
+        self,
+        output,
+        *,
+        request: SpeechToTextRequest,
+        segment_class: type[SpeechToTextSegment],
+        start_time: float,
+        need_segments: bool,
+        want_words: bool,
+    ) -> "tuple[list[SpeechToTextSegment], list[str], list[TranscriptionWord]]":
+        """Split one engine output into its segments, text parts and words."""
+        segments: list[SpeechToTextSegment] = []
+        words: list[TranscriptionWord] = []
+
+        if need_segments:
+            assert output.logprobs
+            segments = self._get_verbose_segments(
+                tokens=tuple(output.token_ids),
+                segment_class=segment_class,
+                request=request,
+                start_time=start_time,
+                log_probs=output.logprobs,
+            )
+            # verbose_json rebuilds ``text`` from the segments it just cut.
+            text_parts = [segment.text for segment in segments]
+        else:
+            # Nothing to rebuild ``text`` from, so take it where the ``json`` and
+            # ``text`` formats take it. Skipping this returns word timestamps
+            # alongside an empty ``text``, which every text consumer downstream
+            # then silently drops.
+            text_parts = [self.model_cls.post_process_output(output.text)]
+
+        if want_words:
+            words = self._collect_words(
+                output,
+                start_time,
+                with_probability=self._wants_word_probabilities(request),
+            )
+
+        return segments, text_parts, words
+
+    def _collect_words(
+        self, output, start_time: float, with_probability: bool = False
+    ) -> "list[TranscriptionWord]":
+        """Group one output's onsets into words, warning when none come out.
+
+        ``with_probability`` hands the output's logprobs to the grouping. It is
+        decided by the request, not by whether logprobs exist: a request that
+        also asked for segments has them, but did not ask for word scores.
+
+        ``words: null`` is indistinguishable from audio that had no speech, so
+        the miss is only visible in the log. Outputs holding no word tokens are
+        silence, not a failure, and the warning is logged on a power-of-two
+        schedule to bound a systematic failure to a few lines.
+        """
+        words = (
+            []
+            if output.word_align is None
+            else self._group_words(
+                output.token_ids,
+                output.word_align,
+                start_time,
+                output.logprobs if with_probability else None,
+            )
+        )
+        num_word_tokens = self._count_word_tokens(output.token_ids)
+        if words or not num_word_tokens:
+            return words
+
+        self._words_missing += 1
+        if self._words_missing & (self._words_missing - 1) == 0:
+            reason = (
+                "the engine returned no word alignment (the request never got a "
+                "capture slot, or did not finish in a way the readout recognises)"
+                if output.word_align is None
+                else f"{len(output.word_align)} onset(s) came back but no words "
+                "could be grouped from them"
+            )
+            logger.warning(
+                "Word timestamps were requested but not produced for an output "
+                "holding %d word token(s): %s. %d output(s) affected so far.",
+                num_word_tokens,
+                reason,
+                self._words_missing,
+            )
+        return words
+
+    def _count_word_tokens(self, token_ids: "Sequence[int]") -> int:
+        """How many generated tokens could have become words.
+
+        Specials and timestamp tokens cannot, so an output made only of those is
+        silence, not a failure.
+        """
+        ts_begin = cast(int, self.tokenizer.convert_tokens_to_ids("<|0.00|>"))
+        specials = set(self.tokenizer.all_special_ids)
+        return sum(
+            1 for tid in token_ids if int(tid) not in specials and int(tid) < ts_begin
+        )
+
     async def _create_speech_to_text(
         self,
         audio_data: bytes,
@@ -525,8 +820,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                 self.default_sampling_params,
             )
 
-        if request.response_format == "verbose_json":
-            sampling_params.logprobs = 1
+        self._apply_verbose_params(request, sampling_params)
 
         engine_request_ids = [
             request_id if len(engine_inputs) == 1 else f"{request_id}-{idx}"
@@ -598,6 +892,12 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                 [] for _ in list_result_generator
             ]
             chunk_text_parts: list[list[str]] = [[] for _ in list_result_generator]
+            # Word-level timestamps (opt-in), grouped from the worker's onsets.
+            want_words = self._wants_word_timestamps(request)
+            need_segments = self._needs_segments(request)
+            chunk_word_parts: list[list[TranscriptionWord]] = [
+                [] for _ in list_result_generator
+            ]
             segments_types: dict[str, type[SpeechToTextSegment]] = {
                 "transcribe": TranscriptionSegment,
                 "translate": TranslationSegment,
@@ -611,28 +911,30 @@ class SpeechToTextBaseServing(GenerateBaseServing):
             assert len(chunk_start_offsets) == len(list_result_generator)
             result_generator = merge_async_iterators(*list_result_generator)
             async for idx, op in result_generator:
-                start_time = chunk_start_offsets[idx]
-                if request.response_format == "verbose_json":
-                    assert op.outputs[0].logprobs
-                    segments: list[SpeechToTextSegment] = self._get_verbose_segments(
-                        tokens=tuple(op.outputs[0].token_ids),
-                        segment_class=segment_class,
-                        request=request,
-                        start_time=start_time,
-                        log_probs=op.outputs[0].logprobs,
-                    )
-
-                    chunk_segment_parts[idx].extend(segments)
-                    chunk_text_parts[idx].extend([seg.text for seg in segments])
-                else:
-                    raw_text = op.outputs[0].text
-                    chunk_text_parts[idx].append(
-                        self.model_cls.post_process_output(raw_text)
-                    )
-            total_segments = [
-                segment
-                for segment_parts in chunk_segment_parts
-                for segment in segment_parts
+                segments, text_parts, words = self._collect_output_parts(
+                    op.outputs[0],
+                    request=request,
+                    segment_class=segment_class,
+                    start_time=chunk_start_offsets[idx],
+                    need_segments=need_segments,
+                    want_words=want_words,
+                )
+                chunk_segment_parts[idx].extend(segments)
+                chunk_text_parts[idx].extend(text_parts)
+                chunk_word_parts[idx].extend(words)
+            # ``None`` rather than ``[]`` when segments were not requested, so the
+            # response says "not asked for" instead of "none found".
+            total_segments = (
+                [
+                    segment
+                    for segment_parts in chunk_segment_parts
+                    for segment in segment_parts
+                ]
+                if need_segments
+                else None
+            )
+            total_words = [
+                word for word_parts in chunk_word_parts for word in word_parts
             ]
             text_parts = [text for text_part in chunk_text_parts for text in text_part]
             text = separator.join(text_parts)
@@ -682,6 +984,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                             language=request.language,
                             duration=duration_s,
                             segments=total_segments,
+                            words=total_words or None,
                         ),
                     )
             else:

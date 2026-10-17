@@ -95,6 +95,7 @@ def test_completion_output_preserves_each_sampling_mask_position() -> None:
     state.routed_experts_chunks = []
     state.spec_decode_metrics = None
     state.weight_version_starts = []
+    state.word_align = None
 
     output = state._new_completion_output([1, 2, 3], FinishReason.LENGTH, None)
 
@@ -1825,6 +1826,7 @@ def test_sampling_masks_follow_output_kind(output_kind):
     state.routed_experts_chunks = []
     state.spec_decode_metrics = None
     state.weight_version_starts = []
+    state.word_align = None
 
     supports = [[10, 11], [20], [30, 31]]
     masks = []
@@ -1957,7 +1959,12 @@ def test_async_pooling_cache_miss_does_not_fail_output_processor():
 
 
 @pytest.mark.parametrize(
-    "output_kind", [RequestOutputKind.DELTA, RequestOutputKind.FINAL_ONLY]
+    "output_kind,word_align",
+    [
+        (RequestOutputKind.DELTA, None),
+        (RequestOutputKind.FINAL_ONLY, None),
+        (RequestOutputKind.FINAL_ONLY, [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]),
+    ],
 )
 @pytest.mark.parametrize(
     "steps,expected",
@@ -1971,7 +1978,9 @@ def test_async_pooling_cache_miss_does_not_fail_output_processor():
         ([], []),
     ],
 )
-def test_weight_version_spans(output_kind: RequestOutputKind, steps, expected):
+def test_weight_version_spans(
+    output_kind: RequestOutputKind, word_align, steps, expected
+):
     output_processor = OutputProcessor(tokenizer=None, log_stats=False)
     queue = RequestOutputCollector(output_kind, request_id="request-0-int")
     request = EngineCoreRequest(
@@ -1991,16 +2000,20 @@ def test_weight_version_spans(output_kind: RequestOutputKind, steps, expected):
     for i, (weight_version, token_ids) in enumerate(steps):
         # Copy: merging deltas extends token lists in place.
         output = EngineCoreOutput(
-            request_id="request-0-int", new_token_ids=list(token_ids)
+            request_id="request-0-int",
+            new_token_ids=list(token_ids),
+            word_align=word_align if i == len(steps) - 1 else None,
         )
         output_processor.process_outputs([output], weight_version=weight_version)
         if i == 0 and output_kind == RequestOutputKind.DELTA:
             intermediate = queue.get_nowait()
             assert intermediate is not None
             assert intermediate.outputs[0].weight_versions is None
+            assert intermediate.outputs[0].word_align is None
 
     # Unread deltas merge into the abort output without losing spans.
     output_processor.abort_requests(["request-0"], internal=False)
     final = queue.get_nowait()
     assert final is not None and final.finished
     assert final.outputs[0].weight_versions == [WeightVersionSpan(*s) for s in expected]
+    assert final.outputs[0].word_align == (word_align if steps else None)
