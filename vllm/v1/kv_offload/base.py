@@ -670,6 +670,10 @@ class OffloadingWorker(ABC):
     @abstractmethod
     def wait(self, job_ids: set[int]) -> None: ...
 
+    def stream_wait(self, job_ids: set[int]) -> None:
+        """Make the current stream wait for the jobs. Defaults to a host wait."""
+        self.wait(job_ids)
+
     def shutdown(self) -> None:
         return
 
@@ -713,6 +717,11 @@ class OffloadingSpec(ABC):
         # reasoning models that strip thinking).
         self.offload_prompt_only: bool = bool(
             self.extra_config.get("offload_prompt_only", True)
+        )
+
+        # Hits up to this many tokens load within the step (0 disables).
+        self.sync_load_max_tokens: int = int(
+            self.extra_config.get("sync_load_max_tokens", 0)
         )
 
         self.tokens_per_block = tuple(group.tokens_per_block for group in config.groups)

@@ -762,6 +762,13 @@ class SingleDirectionOffloadingHandler:
             if event is not None:
                 event.synchronize()
 
+    def stream_wait(self, job_ids: set[int]):
+        stream = current_platform.current_stream()
+        for job_id in job_ids:
+            event = self._transfer_events.get(job_id)
+            if event is not None:
+                stream.wait_event(event)
+
     def shutdown(self) -> None:
         """Drain this direction and release its transfer-side resources."""
         sync_error: Exception | None = None
@@ -898,6 +905,10 @@ class CPUOffloadingWorker(OffloadingWorker):
     def wait(self, job_ids: set[int]) -> None:
         self._store_handler.wait(job_ids)
         self._load_handler.wait(job_ids)
+
+    def stream_wait(self, job_ids: set[int]) -> None:
+        self._store_handler.stream_wait(job_ids)
+        self._load_handler.stream_wait(job_ids)
 
     def shutdown(self) -> None:
         handler_failed = False
