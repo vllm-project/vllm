@@ -66,6 +66,7 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.utils.gc_utils import freeze_gc_for_cudagraph_capture
+from vllm.utils.math_utils import round_up
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, async_tensor_h2d
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
@@ -1728,6 +1729,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.ec_connector.no_forward(scheduler_output).ec_connector_output,
         )
 
+    def _pad_for_sequence_parallelism(self, num_tokens: int) -> int:
+        # Pad tokens to a multiple of tensor_parallel_size when SP is active.
+        tp_size = self.parallel_config.tensor_parallel_size
+        sp_min_tokens = self.parallel_config.sequence_parallel_min_tokens
+        if (
+            self.parallel_config.enable_sequence_parallel
+            and num_tokens >= sp_min_tokens
+            and tp_size > 1
+        ):
+            return round_up(num_tokens, tp_size)
+        return num_tokens
+
     @torch.inference_mode()
     def execute_model(
         self,
@@ -1778,6 +1791,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     batch_req_state.num_scheduled_tokens,
                     batch_req_state.is_prefilling_np,
                 )
+        num_toks = self._pad_for_sequence_parallelism(num_toks)
 
         num_active_loras = 0
         if self.lora_config:

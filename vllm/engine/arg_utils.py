@@ -560,6 +560,9 @@ class EngineArgs:
     enable_batch_sharded_sampling: bool | None = (
         ParallelConfig.enable_batch_sharded_sampling
     )
+    enable_sequence_parallel: bool = ParallelConfig.enable_sequence_parallel
+    sequence_parallel_min_tokens: int = ParallelConfig.sequence_parallel_min_tokens
+    enable_async_tp: bool = ParallelConfig.enable_async_tp
     enable_ep_weight_filter: bool = ParallelConfig.enable_ep_weight_filter
     moe_backend: MoEBackend = KernelConfig.moe_backend
     linear_backend: LinearBackend = KernelConfig.linear_backend
@@ -1293,6 +1296,18 @@ class EngineArgs:
         parallel_group.add_argument(
             "--enable-batch-sharded-sampling",
             **parallel_kwargs["enable_batch_sharded_sampling"],
+        )
+        parallel_group.add_argument(
+            "--enable-sequence-parallel",
+            **parallel_kwargs["enable_sequence_parallel"],
+        )
+        parallel_group.add_argument(
+            "--sequence-parallel-min-tokens",
+            **parallel_kwargs["sequence_parallel_min_tokens"],
+        )
+        parallel_group.add_argument(
+            "--enable-async-tp",
+            **parallel_kwargs["enable_async_tp"],
         )
         parallel_group.add_argument(
             "--enable-ep-weight-filter",
@@ -2570,6 +2585,9 @@ class EngineArgs:
             enable_hc_sp=self.enable_hc_sp,
             enable_expert_parallel=self.enable_expert_parallel,
             enable_batch_sharded_sampling=self.enable_batch_sharded_sampling,
+            enable_sequence_parallel=self.enable_sequence_parallel,
+            sequence_parallel_min_tokens=self.sequence_parallel_min_tokens,
+            enable_async_tp=self.enable_async_tp,
             enable_ep_weight_filter=self.enable_ep_weight_filter,
             all2all_backend=self.all2all_backend,
             enable_elastic_ep=self.enable_elastic_ep,

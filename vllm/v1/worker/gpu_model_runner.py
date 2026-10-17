@@ -112,7 +112,7 @@ from vllm.tracing import instrument
 from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.utils.gc_utils import freeze_gc_for_cudagraph_capture
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
-from vllm.utils.math_utils import cdiv
+from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.nvtx_pytorch_hooks import PytHooks
 from vllm.utils.torch_utils import (
@@ -3273,6 +3273,24 @@ class GPUModelRunner(
         padding_mask[num_tokens_unpadded:].fill_(True)
         return padding_mask
 
+    def _sp_applicable_for(self, num_tokens: int) -> bool:
+        """Whether a step with this token count runs with SP.
+
+        Below ``sequence_parallel_min_tokens``, SP falls back to plain TP
+        and tokens stay unsharded, so no TP-size padding is needed either.
+        """
+        parallel_config = self.vllm_config.parallel_config
+        if not parallel_config.enable_sequence_parallel:
+            return False
+        return num_tokens >= parallel_config.sequence_parallel_min_tokens
+
+    def _pad_for_sequence_parallelism(self, num_scheduled_tokens: int) -> int:
+        # Pad tokens to a multiple of tensor_parallel_size when SP is active.
+        tp_size = self.vllm_config.parallel_config.tensor_parallel_size
+        if self._sp_applicable_for(num_scheduled_tokens) and tp_size > 1:
+            return round_up(num_scheduled_tokens, tp_size)
+        return num_scheduled_tokens
+
     def _prepare_mm_inputs(
         self, num_tokens: int
     ) -> tuple[torch.Tensor | None, torch.Tensor]:
@@ -3764,10 +3782,20 @@ class GPUModelRunner(
                 invalid_modes={CUDAGraphMode.FULL} if disable_full else None,
             )
 
+        num_tokens_padded = self._pad_for_sequence_parallelism(num_tokens)
         cudagraph_mode, batch_descriptor = dispatch_cudagraph(
-            num_tokens, disable_full=has_encoder_output
+            num_tokens_padded, disable_full=has_encoder_output
         )
         num_tokens_padded = batch_descriptor.num_tokens
+        if self._sp_applicable_for(num_tokens_padded):
+            assert (
+                batch_descriptor.num_tokens
+                % self.vllm_config.parallel_config.tensor_parallel_size
+                == 0
+            ), (
+                "Sequence parallelism requires num_tokens to be "
+                "a multiple of tensor parallel size"
+            )
 
         # Extra coordination when running data-parallel since we need to coordinate
         # across ranks

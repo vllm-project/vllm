@@ -40,6 +40,10 @@ tests/distributed/test_weight_transfer_nccl_uid.py  # sibling test_weight_transf
 # tests/entrypoints/cli/
 tests/entrypoints/cli/test_serve.py  # added by #53124 (2026-09-15); no job collects tests/entrypoints/cli/
 
+# tests/models/ - mark_sp_region unit tests for TPSP, no dir-level pytest job
+tests/models/qwen3/test_sequence_parallel.py  # mark_sp_region wiring unit test; no dir-level pytest job
+tests/models/common/ops/test_sequence_parallel.py  # requires CUDA/ROCm/XPU; no dir-level pytest job
+
 # tests/kernels/
 tests/kernels/test_shuffle_rows.py  # explicitly --ignore'd in kernels.yaml with no follow-up job
 
