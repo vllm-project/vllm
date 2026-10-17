@@ -168,7 +168,11 @@ def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn, vllm_runner):
 
         # Now check the matches
         for match_name in matches_check:
-            log_matches = list(int(ms) for ms in log_matches_dict[match_name])
+            # manual_act_quant_fusion is tracked via match_table, not log patterns
+            if match_name == "manual_act_quant_fusion":
+                log_matches = []
+            else:
+                log_matches = list(int(ms) for ms in log_matches_dict[match_name])
 
             # AR+RMS skips the largest range.
             if match_name == "ar_rms_fusion" and num_compile_ranges >= 2:
@@ -183,6 +187,7 @@ def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn, vllm_runner):
                 "attn_quant_fusion",
                 "act_quant_fusion",
                 "norm_rope_fusion",
+                "manual_act_quant_fusion",
             ):
                 assert len(log_matches) == n_expected, (
                     f"Could not find {n_expected} {match_name} "
@@ -220,6 +225,12 @@ def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn, vllm_runner):
                 assert actual_match == expected_matches * n_expected, (
                     f"Could not find {expected_matches * n_expected} "
                     f"{match_name} (found {actual_match})."
+                )
+            elif match_name == "manual_act_quant_fusion":
+                actual_match = match_table.get("manual_act_quant_fusion", 0)
+                assert actual_match >= expected_matches, (
+                    f"Expected at least {expected_matches} manual_act_quant_fusion "
+                    f"(found {actual_match})."
                 )
             elif match_name == "attn_quant_fusion":
                 actual_match = match_table.get(
