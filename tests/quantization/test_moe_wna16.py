@@ -61,6 +61,36 @@ def test_moe_wna16_accepts_channelwise_gptq_activation_order():
     MoeWNA16Config.from_config(config)
 
 
+def test_moe_wna16_creates_channelwise_scale_tensors():
+    method = object.__new__(MoeWNA16Method)
+    method.quant_config = MoeWNA16Config(
+        linear_quant_method="gptq",
+        weight_bits=4,
+        group_size=-1,
+        has_zp=True,
+        lm_head_quantized=False,
+        modules_to_not_convert=None,
+        full_config={"desc_act": True},
+    )
+    method.moe = SimpleNamespace(w13_num_shards=2)
+    layer = torch.nn.Module()
+
+    method.create_weights(
+        layer,
+        num_experts=2,
+        hidden_size=256,
+        intermediate_size_per_partition=384,
+        params_dtype=torch.float16,
+        weight_loader=lambda *args, **kwargs: None,
+    )
+
+    assert layer.group_size == -1
+    assert layer.w13_scales.shape == (2, 768, 1)
+    assert layer.w2_scales.shape == (2, 256, 1)
+    assert layer.w13_qzeros.shape == (2, 384, 1)
+    assert layer.w2_qzeros.shape == (2, 128, 1)
+
+
 @pytest.mark.parametrize(
     ("backend", "quant_config", "may_have_zp", "may_have_bias", "expected"),
     [
