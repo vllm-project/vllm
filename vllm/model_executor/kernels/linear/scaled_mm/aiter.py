@@ -327,6 +327,8 @@ class AiterPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
     def is_supported(
         cls, compute_capability: int | None = None
     ) -> tuple[bool, str | None]:
+        if rocm_aiter_ops.is_rdna_linear_enabled():
+            return True, None
         return AiterPreshuffledPerTokenFp8ScaledMMLinearKernel.is_supported(
             compute_capability
         )
@@ -350,8 +352,7 @@ class AiterPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
                 False,
                 "requires per token activation scales and per channel weight scales.",
             )
-
-        # Aiter's per-token Gemm performs better than torch oonly when its
+        # Aiter's per-token Gemm performs better than torch only when its
         # tuned.
         if not rocm_aiter_ops.is_per_token_w8a8_gemm_tuned(N, K, fp8_dtype):
             return (
