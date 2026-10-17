@@ -28,23 +28,43 @@ def bgmv_expand(
     lora_indices_tensor: torch.Tensor,
     add_inputs: bool = True,
 ):
-    selected_loras = lora_b_weights[lora_indices_tensor].to(dtype=output_tensor.dtype)
+    # -1 means "no LoRA for this row". There is no dedicated null slot in
+    # lora_b_weights, so gathering with -1 would alias the last real LoRA
+    # slot via negative indexing; skip those rows instead.
+    valid_mask = lora_indices_tensor >= 0
+    if not valid_mask.any():
+        return
+    all_valid = bool(valid_mask.all())
+    valid_inputs = inputs if all_valid else inputs[valid_mask]
+    valid_indices = (
+        lora_indices_tensor if all_valid else lora_indices_tensor[valid_mask]
+    )
+
+    selected_loras = lora_b_weights[valid_indices].to(dtype=output_tensor.dtype)
     if len(selected_loras.shape) == 4:
         selected_loras = selected_loras.squeeze(dim=1)
-    inputs = inputs.to(dtype=output_tensor.dtype)
-    outputs = torch.einsum("bi, boi -> bo", inputs, selected_loras)
-
-    limit = output_tensor.shape[0]
-    if outputs.shape[0] == 1 and output_tensor.shape[0] != 1:
-        limit = 1
+    valid_inputs = valid_inputs.to(dtype=output_tensor.dtype)
+    outputs = torch.einsum("bi, boi -> bo", valid_inputs, selected_loras)
 
     # LoRA adapter and model may add different amounts of padding to output
     common_len = min(outputs.shape[1], output_tensor.shape[1])
 
-    if add_inputs:
-        output_tensor[:, :common_len] += outputs[:limit, :common_len]
+    if all_valid:
+        limit = output_tensor.shape[0]
+        if outputs.shape[0] == 1 and output_tensor.shape[0] != 1:
+            limit = 1
+        if add_inputs:
+            output_tensor[:, :common_len] += outputs[:limit, :common_len]
+        else:
+            output_tensor[:, :common_len] = outputs[:limit, :common_len]
     else:
-        output_tensor[:, :common_len] = outputs[:limit, :common_len]
+        # valid_mask selects exactly outputs.shape[0] rows, so this is
+        # always a 1:1 row correspondence — the broadcast case above
+        # doesn't apply here.
+        if add_inputs:
+            output_tensor[valid_mask, :common_len] += outputs[:, :common_len]
+        else:
+            output_tensor[valid_mask, :common_len] = outputs[:, :common_len]
 
 
 def sgmv_shrink(
@@ -71,13 +91,27 @@ def bgmv_shrink(
     lora_indices_tensor: torch.Tensor,
     scaling: float = 1.0,
 ):
-    selected_loras = lora_b_weights[lora_indices_tensor].to(dtype=output_tensor.dtype)
+    # -1 means "no LoRA for this row" — see bgmv_expand for why this must
+    # be skipped rather than gathered.
+    valid_mask = lora_indices_tensor >= 0
+    if not valid_mask.any():
+        return
+    all_valid = bool(valid_mask.all())
+    valid_inputs = inputs if all_valid else inputs[valid_mask]
+    valid_indices = (
+        lora_indices_tensor if all_valid else lora_indices_tensor[valid_mask]
+    )
+
+    selected_loras = lora_b_weights[valid_indices].to(dtype=output_tensor.dtype)
     if len(selected_loras.shape) == 4:
         selected_loras = selected_loras.squeeze(dim=1)
-    inputs = inputs.to(dtype=output_tensor.dtype)
-    outputs = torch.einsum("bi, boi -> bo", inputs, selected_loras)
+    valid_inputs = valid_inputs.to(dtype=output_tensor.dtype)
+    outputs = torch.einsum("bi, boi -> bo", valid_inputs, selected_loras)
 
-    output_tensor[:, : outputs.shape[1]] = scaling * outputs[:]
+    if all_valid:
+        output_tensor[:, : outputs.shape[1]] = scaling * outputs[:]
+    else:
+        output_tensor[valid_mask, : outputs.shape[1]] = scaling * outputs[:]
 
 
 def sgmv_expand_slice(
@@ -116,13 +150,34 @@ def bgmv_expand_slice(
     slice_size: int,
     add_inputs: bool = True,
 ):
-    selected_loras = lora_b_weights[lora_indices_tensor].to(dtype=output_tensor.dtype)
-    inputs = inputs.to(dtype=output_tensor.dtype)
+    # -1 means "no LoRA for this row" — see bgmv_expand for why this must
+    # be skipped rather than gathered.
+    valid_mask = lora_indices_tensor >= 0
+    if not valid_mask.any():
+        return
+    all_valid = bool(valid_mask.all())
+    valid_inputs = inputs if all_valid else inputs[valid_mask]
+    valid_indices = (
+        lora_indices_tensor if all_valid else lora_indices_tensor[valid_mask]
+    )
+
+    selected_loras = lora_b_weights[valid_indices].to(dtype=output_tensor.dtype)
+    valid_inputs = valid_inputs.to(dtype=output_tensor.dtype)
     if len(selected_loras.shape) == 4:
         selected_loras = selected_loras.squeeze(dim=1)
-    outputs = torch.einsum("bi, boi -> bo", inputs, selected_loras)
+    outputs = torch.einsum("bi, boi -> bo", valid_inputs, selected_loras)
 
-    if add_inputs:
-        output_tensor[:, slice_offset : slice_offset + slice_size] += outputs[:]
+    if all_valid:
+        if add_inputs:
+            output_tensor[:, slice_offset : slice_offset + slice_size] += outputs[:]
+        else:
+            output_tensor[:, slice_offset : slice_offset + slice_size] = outputs[:]
     else:
-        output_tensor[:, slice_offset : slice_offset + slice_size] = outputs[:]
+        if add_inputs:
+            output_tensor[valid_mask, slice_offset : slice_offset + slice_size] += (
+                outputs[:]
+            )
+        else:
+            output_tensor[valid_mask, slice_offset : slice_offset + slice_size] = (
+                outputs[:]
+            )
