@@ -1232,7 +1232,7 @@ def test_cleanup_keeps_region_mapped_while_buffers_are_exported(iid):
         assert region.mmap_obj[0:1] == b"\x00", "mapping must stay readable"
     finally:
         del export
-        region.mmap_obj.close()
+        region.mmap_obj.close()  # type: ignore[union-attr]
         _cleanup_file(region.mmap_path)
 
 

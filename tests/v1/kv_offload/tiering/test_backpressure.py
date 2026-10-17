@@ -290,11 +290,13 @@ class TestBackpressure:
 
         assert len(self.tier._held_jobs) == 2
         assert all(
-            self.primary._policy.get(key).ref_cnt == int(key in self.tier.blocks)
+            self.primary._policy.get(key).ref_cnt == int(key in self.tier.blocks)  # type: ignore[union-attr]
             for key in all_keys
         )
 
-        reduced = self.manager.get_stats().reduce()
+        stats = self.manager.get_stats()
+        assert stats is not None
+        reduced = stats.reduce()
         stores_key = TieringOffloadingMetrics.BACKPRESSURE_STORES_DROPPED
         blocks_key = TieringOffloadingMetrics.BACKPRESSURE_BLOCKS_DROPPED
         assert reduced["{}:('1:delayed',)".format(stores_key)] == 6
@@ -304,7 +306,7 @@ class TestBackpressure:
         self.tier.release_jobs()
         self._simulate_on_schedule_end()
         assert not self.manager._jobs
-        assert all(self.primary._policy.get(key).ref_cnt == 0 for key in all_keys)
+        assert all(self.primary._policy.get(key).ref_cnt == 0 for key in all_keys)  # type: ignore[union-attr]
 
     def test_ema_updates_on_store_completion(self, setup):
         bp = _ema_detector(self.tier)

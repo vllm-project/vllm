@@ -108,7 +108,7 @@ def test_runai_mtp_real_checkpoint(vllm_runner, tmp_path, monkeypatch):
         tensors.update(load_file(path))
     # Reshard real, unmodified weights so selection cannot pass vacuously on
     # the published single mixed file. This predicate needs no model state.
-    selector = Qwen3_5MTP.__new__(Qwen3_5MTP)
+    selector = Qwen3_5MTP.__new__(Qwen3_5MTP)  # type: ignore[type-abstract]
     main: dict[str, torch.Tensor] = {}
     draft: dict[str, torch.Tensor] = {}
     for name, tensor in tensors.items():

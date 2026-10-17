@@ -161,7 +161,7 @@ def _gpt_oss_container(monkeypatch, quant_method=None):
             )
         )
     ]
-    model.get_expert_mapping = lambda: []
+    model.get_expert_mapping = lambda: []  # type: ignore[method-assign]
     return model
 
 

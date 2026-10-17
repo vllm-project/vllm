@@ -480,7 +480,7 @@ def test_lock_defaults_to_no_op():
     The base default, inherited by the CPU manager, must be a no-op context
     manager that may be entered re-entrantly.
     """
-    base_lock = OffloadingManager.lock.fget(MagicMock())
+    base_lock = OffloadingManager.lock.fget(MagicMock())  # type: ignore[attr-defined]  # property
     assert isinstance(base_lock, nullcontext)
     with base_lock, base_lock:
         pass

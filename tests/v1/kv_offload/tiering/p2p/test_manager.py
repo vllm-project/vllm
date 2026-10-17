@@ -558,7 +558,7 @@ class TestPromotionLatency:
         )
         job = TransferJob(
             job_id=42,
-            keys=[b"key1"],
+            keys=[OffloadKey(b"key1")],
             chunk_ids=np.array([0]),
             is_promotion=True,
             req_context=_req_context(_remote_prefiller_kv_params()),
@@ -579,7 +579,7 @@ class TestPromotionLatency:
             reported_results.extend(results)
             return results
 
-        p2p_tier.get_finished_jobs = capture_finished_jobs
+        p2p_tier.get_finished_jobs = capture_finished_jobs  # type: ignore[method-assign]
         p2p_tier.submit_load(job)
         assert session.requests == [(42, "req-1")]
 
@@ -1260,7 +1260,7 @@ class TestBidirectionalManager:
         assert list(mgr_a.get_finished_jobs()) == []
         assert mgr_a.lookup(b"key", ctx) == LookupResult.MISS
         assert "B:2" not in mgr_a._sessions
-        assert "B:2" not in mgr_a._data._remote_peers
+        assert "B:2" not in mgr_a._data._remote_peers  # type: ignore[attr-defined]  # _FakeData
 
         # A replacement session must not restart the expired request's probes.
         mgr_a._sessions["B:2"] = _FakeSession(peer_id="B:2")  # type: ignore[assignment]
@@ -1285,7 +1285,7 @@ class TestBidirectionalManager:
                 mgr._data = _FakeData(mgr._local_id)
                 managers.append(mgr)
                 monitors.append(
-                    mgr._control._router.get_monitor_socket(zmq.EVENT_DISCONNECTED)
+                    mgr._control._router.get_monitor_socket(zmq.EVENT_DISCONNECTED)  # type: ignore[attr-defined]
                 )
             mgr_a, mgr_b = managers
             peer_a, peer_b = mgr_a._local_id, mgr_b._local_id

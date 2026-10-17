@@ -973,10 +973,10 @@ class TestLookupFlow:
         session.register_lookup("stalled", b"key")
         session.flush_pending_lookups()
         lookup_clock.now = _LOOKUP_TIMEOUT_S - 1
-        session.request_blocks(1, "load", [b"key"], [0])
-        session.add_stored_blocks("store", [b"key"], [1], 2)
+        session.request_blocks(1, "load", [OffloadKey(b"key")], [0])
+        session.add_stored_blocks("store", [OffloadKey(b"key")], [1], 2)
         if partial_fetch:
-            session.add_stored_blocks("store", [b"unused"], [2], 3)
+            session.add_stored_blocks("store", [OffloadKey(b"unused")], [2], 3)
         conn.enqueue(
             {
                 TYPE_KEY: FetchMsg.TYPE,
@@ -1039,7 +1039,7 @@ class TestLookupFlow:
         elif action == "finish":
             session.finish_request("req-1")
         else:
-            session.request_blocks(1, "req-1", [b"hA"], [0])
+            session.request_blocks(1, "req-1", [OffloadKey(b"hA")], [0])
 
         lookup_clock.now += 2
         session.poll()
@@ -2003,8 +2003,8 @@ class TestServerFlows:
     def test_store_timeout_keeps_pins_until_cancel_or_late_terminal(self, success):
         session, conn, transport = _make_session()
         _activate(session, conn)
-        session.add_stored_blocks("req-1", [b"k1"], [0], job_id=1)
-        session.add_stored_blocks("req-2", [b"k2"], [1], job_id=2)
+        session.add_stored_blocks("req-1", [OffloadKey(b"k1")], [0], job_id=1)
+        session.add_stored_blocks("req-2", [OffloadKey(b"k2")], [1], job_id=2)
         conn.enqueue(
             {
                 TYPE_KEY: FetchMsg.TYPE,
@@ -2051,8 +2051,8 @@ class TestServerFlows:
             }
         )
         session.poll()
-        session.add_stored_blocks("req-1", [b"k1"], [0], job_id=1)
-        session.add_stored_blocks("req-1", [b"k2"], [1], job_id=2)
+        session.add_stored_blocks("req-1", [OffloadKey(b"k1")], [0], job_id=1)
+        session.add_stored_blocks("req-1", [OffloadKey(b"k2")], [1], job_id=2)
         first, second = list(transport._transfers)
         session._server._store_jobs[1] = time.monotonic() - 60.0
         transport._cancel_still_inflight.add(second)
@@ -2062,7 +2062,7 @@ class TestServerFlows:
         assert 2 in session._server._store_jobs
         assert not any(m[TYPE_KEY] == TransferDoneMsg.TYPE for m in conn._sent)
         # Additional supply must not restart the timed-out round.
-        session.add_stored_blocks("req-1", [b"k3"], [2], job_id=3)
+        session.add_stored_blocks("req-1", [OffloadKey(b"k3")], [2], job_id=3)
         assert session.poll().stores == [StoreResult(job_id=3, success=False)]
         assert set(session._server._inflight) == {second}
         if success is None:
@@ -2093,8 +2093,8 @@ class TestServerFlows:
             }
         )
         session.poll()
-        session.add_stored_blocks("req-1", [b"k1"], [0], job_id=1)
-        session.add_stored_blocks("req-1", [b"k2"], [1], job_id=2)
+        session.add_stored_blocks("req-1", [OffloadKey(b"k1")], [0], job_id=1)
+        session.add_stored_blocks("req-1", [OffloadKey(b"k2")], [1], job_id=2)
         first, second = list(transport._transfers)
         transport._cancel_still_inflight.add(second)
 
@@ -2295,7 +2295,7 @@ class TestServerFlows:
         _activate(session, conn)
         tid = self._submit_unconfirmed_transfer(session, conn, transport)
         # Job 2 supplies a block nobody demanded: no transfer reads it.
-        session.add_stored_blocks("req-1", [b"k2"], [1], job_id=2)
+        session.add_stored_blocks("req-1", [OffloadKey(b"k2")], [1], job_id=2)
         conn.enqueue(
             {
                 TYPE_KEY: AbortFetchMsg.TYPE,
@@ -2349,7 +2349,7 @@ class TestServerFlows:
         """A lookup pin whose store job timed out has been reported failed,
         so the engine unpinned the primary slot. A late FetchMsg must not
         read that slot: the round fails fast instead."""
-        parent = FakeParent(stored={b"hA": 7})
+        parent = FakeParent(stored={OffloadKey(b"hA"): 7})
         session, conn, transport = _make_session()
         _activate(session, conn)
         _send_lookup(conn, "req-1", [b"hA"])

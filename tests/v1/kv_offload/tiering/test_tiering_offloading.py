@@ -545,7 +545,7 @@ class TestTieringOffloadingManager:
             assert job_metadata.job_id in self.manager._jobs
             original_submit_load(job_metadata)
 
-        self.secondary_tier1.submit_load = submit_load
+        self.secondary_tier1.submit_load = submit_load  # type: ignore[method-assign]
 
         # Lookup each chunk to initiate promotion for all of them
         for chunk in chunks:
