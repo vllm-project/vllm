@@ -65,3 +65,17 @@ A variety of EAGLE draft models are available on the Hugging Face hub:
 
 !!! warning
     If you are using `vllm<0.7.0`, please use [this script](https://gist.github.com/abhigoyal1997/1e7a4109ccb7704fbc67f625e86b2d6d) to convert the speculative model and specify `"model": "path/to/modified/eagle/model"` in `speculative_config`.
+
+## Draft RoPE comes from the draft config
+
+EAGLE and EAGLE-3 draft rotary embeddings are built from the draft checkpoint's
+own `config.json` (`rope_theta`, `rope_scaling`, or `rope_parameters`). They are
+**not** inherited from the target model.
+
+If the draft config omits those keys, transformers and vLLM both default to
+RoPE base `10000` and type `default`, even when the target uses a different
+base (for example Llama-3.1 at `500000` with `llama3` scaling). vLLM logs the
+resolved draft RoPE at startup and warns when the draft config omitted rope
+keys and the default disagrees with the target. Checkpoint authors should set
+`rope_theta` (and `rope_scaling` when needed) in the draft `config.json` when
+the draft was trained at a non-default base.
