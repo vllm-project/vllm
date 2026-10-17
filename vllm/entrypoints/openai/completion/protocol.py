@@ -334,6 +334,7 @@ class CompletionRequest(OpenAIBaseModel):
 
         return BeamSearchParams(
             beam_width=n,
+            allowed_token_ids=self.allowed_token_ids,
             max_tokens=max_tokens,
             ignore_eos=self.ignore_eos,
             temperature=temperature,
