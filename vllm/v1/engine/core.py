@@ -479,7 +479,7 @@ class EngineCore:
             supported_pooling_tasks,
         )
 
-    def get_kv_cache_group_metadata(self) -> list[dict[str, int | str | None]]:
+    def get_kv_cache_group_metadata(self) -> list[dict[str, int | str | bool | None]]:
         """Return serializable KV cache metadata for external event consumers
         (e.g., Dynamo). This function has no call sites within vLLM but needs to
         be kept.
@@ -490,7 +490,7 @@ class EngineCore:
 
         kv_cache_manager = cast(Any, self.scheduler).kv_cache_manager
         managers = kv_cache_manager.coordinator.single_type_managers
-        metadata: list[dict[str, int | str | None]] = []
+        metadata: list[dict[str, int | str | bool | None]] = []
         for group_idx, (group, manager) in enumerate(
             zip(kv_cache_config.kv_cache_groups, managers, strict=True)
         ):
@@ -501,6 +501,8 @@ class EngineCore:
                     "kind": get_kv_cache_spec_kind(spec).value,
                     "block_size": manager.block_size,
                     "sliding_window": getattr(spec, "sliding_window", None),
+                    "prefix_cacheable": spec.prefix_cacheable,
+                    "prefix_replay_tokens": spec.prefix_replay_tokens,
                 }
             )
         return metadata
