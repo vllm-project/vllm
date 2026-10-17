@@ -10,12 +10,14 @@ import pytest
 import torch
 
 from vllm import SamplingParams
+from vllm.config import DeviceConfig, KVTransferConfig, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
 
 # ruff: noqa: E501
 from vllm.distributed.kv_transfer.kv_connector.v1.decode_bench_connector import (
     DecodeBenchConnector,
     DecodeBenchConnectorMetadata,
+    DecodeBenchConnectorWorker,
 )
 from vllm.forward_context import ForwardContext
 from vllm.platforms import current_platform
@@ -48,6 +50,52 @@ from .utils import (
     create_scheduler,
     create_vllm_config,
 )
+
+
+@pytest.mark.parametrize("container", [list, tuple])
+@pytest.mark.parametrize("fill_std", [0.0, 0.1])
+def test_mamba_fill_preserves_unallocated_blocks(container, fill_std):
+    """A fake-prefill request must not reset other requests' Mamba state."""
+    worker = DecodeBenchConnectorWorker(
+        VllmConfig(
+            device_config=DeviceConfig(device="cpu"),
+            kv_transfer_config=KVTransferConfig(
+                kv_connector="DecodeBenchConnector",
+                kv_role="kv_both",
+                kv_connector_extra_config={"fill_std": fill_std},
+            ),
+        ),
+        KVCacheConfig(
+            num_blocks=6,
+            kv_cache_tensors=[],
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    ["mamba"],
+                    MambaSpec(
+                        block_size=16,
+                        shapes=((4,), (4,)),
+                        dtypes=(torch.float32, torch.float32),
+                    ),
+                )
+            ],
+        ),
+    )
+    # Include padding between blocks, as in the model runner's state views.
+    storage = [torch.full((6, 8), -1.0), torch.full((6, 12), -1.0)]
+    states = container(tensor[:, :4] for tensor in storage)
+    worker.register_kv_caches({"mamba": states})
+    worker.start_fill_kv(
+        DecodeBenchConnectorMetadata(reqs_to_fill={"new": (([-1, 1, 3, 6],), 32)})
+    )
+    for tensor in storage:
+        assert torch.all(tensor[[0, 2, 4, 5]] == -1.0)
+        assert torch.all(tensor[:, 4:] == -1.0)
+        filled = tensor[[1, 3], :4]
+        if fill_std == 0:
+            torch.testing.assert_close(filled, torch.full_like(filled, 0.015))
+        else:
+            assert torch.isfinite(filled).all()
+            assert not torch.equal(filled[0], filled[1])
 
 
 class DecodeBenchTestRunner:
