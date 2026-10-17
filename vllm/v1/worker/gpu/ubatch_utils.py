@@ -6,7 +6,7 @@ import threading
 from collections.abc import Callable
 from contextlib import ExitStack
 from dataclasses import replace
-from typing import Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import numpy as np
 import torch
@@ -22,11 +22,14 @@ from vllm.forward_context import (
 from vllm.logger import init_logger
 from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import current_stream
+from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
+from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.model_states.interface import ModelState
+from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.ubatch_utils import (
     UBatchSlice,
     UBatchSlices,
@@ -35,6 +38,9 @@ from vllm.v1.worker.ubatch_utils import (
 )
 from vllm.v1.worker.ubatching import make_ubatch_contexts
 from vllm.v1.worker.utils import AttentionGroup
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.model_runner import BatchReqState
 
 logger = init_logger(__name__)
 
@@ -258,6 +264,57 @@ def slice_model_inputs(
     if intermediate_tensors is not None:
         sliced["intermediate_tensors"] = intermediate_tensors[token_slice]
     return sliced
+
+
+def splits_prefix_from_writer(
+    scheduler_output: SchedulerOutput,
+    batch_req_state: "BatchReqState | None",
+    req_states: RequestState,
+    block_tables: BlockTables,
+) -> bool:
+    """Whether microbatching this step could split a prefix from its writer.
+
+    A request can be admitted on a prefix cache hit against blocks another
+    request in the same batch is only filling now. Split, a reader in the first
+    microbatch would attend over blocks the second has not written yet. Only
+    requests admitted this step (V2 gets resumed ones as new) can hold such hits.
+    Dummy batches (no `batch_req_state`) hold none.
+    """
+    if batch_req_state is None:
+        return False
+    req_id_to_index = req_states.req_id_to_index
+    reader_rows = [
+        req_id_to_index[new_req.req_id]
+        for new_req in scheduler_output.scheduled_new_reqs
+        if new_req.num_computed_tokens > 0
+    ]
+    if not reader_rows:
+        return False
+    block_tables_np = block_tables.block_tables_np
+    assert block_tables_np is not None
+    idx_mapping_np = batch_req_state.idx_mapping_np
+    num_scheduled_tokens = batch_req_state.num_scheduled_tokens
+    num_computed_tokens_np = req_states.num_computed_tokens_np
+    computed = num_computed_tokens_np[idx_mapping_np]
+    for table, tokens in zip(block_tables_np, block_tables.tokens_per_entry):
+        start = computed // tokens
+        stop = (computed + num_scheduled_tokens + tokens - 1) // tokens
+        span = int((stop - start).max())
+        if span <= 0:
+            continue
+        columns = start[:, None] + np.arange(span)[None, :]
+        written = table[
+            idx_mapping_np[:, None], np.minimum(columns, table.shape[1] - 1)
+        ][columns < stop[:, None]]
+        for row in reader_rows:
+            # Whole blocks only: a reader ends inside a partly filled block,
+            # which is private to it and which it fills before reading.
+            hits = table[row, : num_computed_tokens_np[row] // tokens]
+            # Block 0 is the null block (e.g. sliding-window entries that fell
+            # out of the window); it holds no KV anyone reads.
+            if np.isin(hits[hits != 0], written).any():
+                return True
+    return False
 
 
 def merge_ubatch_outputs(outputs: list[Any]) -> Any:

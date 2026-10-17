@@ -46,6 +46,7 @@ from vllm.v1.worker.gpu.ubatch_utils import (
     _slice_input_batch,
     create_ubatch_slices,
     slice_model_inputs,
+    splits_prefix_from_writer,
 )
 from vllm.v1.worker.ubatch_utils import (
     UBatchSlice,
@@ -961,3 +962,106 @@ def test_microbatched_graph_needs_every_rank_to_reach_the_split():
     assert desc.cg_mode == CUDAGraphMode.NONE
     assert desc.num_ubatches == 2
     assert dp_sync_state is not None and dp_sync_state.eager
+
+
+def _splits_prefix(
+    rows: list[list[int]],
+    num_computed: list[int],
+    num_scheduled: list[int],
+    readers: list[int],
+    tokens_per_entry: int = 4,
+) -> bool:
+    width = max(len(row) for row in rows)
+    table = np.zeros((len(rows), width), dtype=np.int32)
+    for i, row in enumerate(rows):
+        table[i, : len(row)] = row
+    # Request-state row i holds request "i"; only readers count as admitted.
+    scheduler_output = SimpleNamespace(
+        scheduled_new_reqs=[
+            SimpleNamespace(req_id=str(i), num_computed_tokens=num_computed[i])
+            for i in readers
+        ]
+    )
+    batch_req_state = SimpleNamespace(
+        idx_mapping_np=np.arange(len(rows), dtype=np.intp),
+        num_scheduled_tokens=np.array(num_scheduled, dtype=np.int32),
+    )
+    req_states = SimpleNamespace(
+        req_id_to_index={str(i): i for i in range(len(rows))},
+        num_computed_tokens_np=np.array(num_computed, dtype=np.int32),
+    )
+    block_tables = SimpleNamespace(
+        block_tables_np=[table], tokens_per_entry=[tokens_per_entry]
+    )
+    return splits_prefix_from_writer(
+        cast(Any, scheduler_output),
+        cast(Any, batch_req_state),
+        cast(Any, req_states),
+        cast(Any, block_tables),
+    )
+
+
+def test_prefix_hit_on_blocks_written_this_step_vetoes_microbatching():
+    # Request 0 fills blocks 10 and 11 this step; request 1 was admitted on a
+    # prefix cache hit against both. Split, request 1 could read them first.
+    assert _splits_prefix(
+        rows=[[10, 11], [10, 11, 20]],
+        num_computed=[0, 8],
+        num_scheduled=[8, 3],
+        readers=[1],
+    )
+    # A one-token query over a fully cached prompt still reads the prefix.
+    assert _splits_prefix(
+        rows=[[10, 11], [10, 11, 20]],
+        num_computed=[0, 8],
+        num_scheduled=[8, 1],
+        readers=[1],
+    )
+
+
+def test_prefix_hit_on_blocks_written_earlier_allows_microbatching():
+    # Request 0 filled blocks 10 and 11 in an earlier step and writes only
+    # block 12 now.
+    assert not _splits_prefix(
+        rows=[[10, 11, 12], [10, 11, 20]],
+        num_computed=[8, 8],
+        num_scheduled=[1, 3],
+        readers=[1],
+    )
+    # No request was admitted on a hit.
+    assert not _splits_prefix(
+        rows=[[10, 11], [10, 11, 20]],
+        num_computed=[0, 8],
+        num_scheduled=[8, 3],
+        readers=[],
+    )
+
+
+def test_prefix_hit_check_ignores_the_null_block():
+    # Sliding-window entries that fell out of the window point at block 0,
+    # which a writer's redirected (e.g. EPLB warmup) writes may also target.
+    assert not _splits_prefix(
+        rows=[[0, 0], [0, 11, 20]],
+        num_computed=[0, 8],
+        num_scheduled=[8, 3],
+        readers=[1],
+    )
+
+
+def test_prefix_hit_check_uses_dcp_virtual_blocks():
+    # With DCP, one entry covers block_size * dcp_size tokens: request 0 fills
+    # only entry 0 (block 10), which request 1 hits as its whole first entry.
+    assert _splits_prefix(
+        rows=[[10], [10, 20]],
+        num_computed=[0, 8],
+        num_scheduled=[8, 3],
+        readers=[1],
+        tokens_per_entry=8,
+    )
+    assert not _splits_prefix(
+        rows=[[10, 11], [12, 20]],
+        num_computed=[0, 8],
+        num_scheduled=[8, 3],
+        readers=[1],
+        tokens_per_entry=8,
+    )

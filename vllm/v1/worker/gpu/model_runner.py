@@ -181,6 +181,7 @@ from vllm.v1.worker.gpu.ubatch_utils import (
     UBatchRunner,
     UBatchState,
     maybe_build_ubatch_runner,
+    splits_prefix_from_writer,
 )
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 from vllm.v1.worker.utils import (
@@ -717,6 +718,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             cp_size=self.dcp_size,
             cp_rank=self.dcp_rank,
             cp_interleave=self.cp_interleave,
+            mirror_on_cpu=self.parallel_config.use_ubatching,
         )
         if self.pcp_manager is not None:
             self.pcp_manager.set_block_tables(self.block_tables)
@@ -1793,6 +1795,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # cross-attention cache with dynamic encoder outputs.
             skip_compiled = True
 
+        allow_ubatching = False
+        if self.ubatch_runner is not None and not skip_attn_for_dummy_run:
+            allow_ubatching = not splits_prefix_from_writer(
+                scheduler_output, batch_req_state, self.req_states, self.block_tables
+            )
+
         batch_desc, dp_sync_state = dispatch_cg_and_sync_dp(
             self.cudagraph_manager,
             num_reqs,
@@ -1804,9 +1812,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             need_eager=is_profile or skip_compiled,
             num_active_loras=num_active_loras,
             parallel_config=self.parallel_config,
-            allow_ubatching=(
-                self.ubatch_runner is not None and not skip_attn_for_dummy_run
-            ),
+            allow_ubatching=allow_ubatching,
             uniform_decode=uniform_tok_count == self.decode_query_len,
         )
 
