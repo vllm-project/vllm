@@ -301,6 +301,9 @@ class JambaModel(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
+        if vllm_config.lora_config:
+            raise ValueError("enable_lora=True is not supported for Jamba.")
+
         config = vllm_config.model_config.hf_config
         model_config = vllm_config.model_config
         cache_config = vllm_config.cache_config
@@ -315,7 +318,7 @@ class JambaModel(nn.Module):
             config.hidden_size,
         )
 
-        extra_kwargs = {"is_lora_enabled": bool(vllm_config.lora_config)}
+        extra_kwargs = {"is_lora_enabled": False}
 
         def get_layer(prefix: str):
             layer_idx = int(prefix.rsplit(".", 1)[1])
