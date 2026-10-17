@@ -50,6 +50,7 @@ from vllm.v1.attention.backends.mla.index_group import (
     SparseMLAIndexGroupBuilder,
     get_sparse_mla_index_group_max_rows,
 )
+from vllm.v1.worker.ubatch_utils import get_num_ubatches
 
 from .glm52_low_latency_gemm import enable_glm52_low_latency_gemm
 
@@ -198,6 +199,7 @@ class DeepseekV32Model(torch.nn.Module):
         index_group_builder = SparseMLAIndexGroupBuilder(
             self.topk_indices_buffer,
             get_sparse_mla_index_group_max_rows(vllm_config),
+            num_ubatches=get_num_ubatches(parallel_config),
         )
 
         if get_pp_group().is_first_rank:
