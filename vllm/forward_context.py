@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any
@@ -23,7 +23,10 @@ track_batchsize: bool = envs.VLLM_LOG_BATCHSIZE_INTERVAL >= 0
 last_logging_time: float = 0
 forward_start_time: float = 0
 batchsize_logging_interval: float = envs.VLLM_LOG_BATCHSIZE_INTERVAL
-batchsize_forward_time: defaultdict = defaultdict(list)
+# Report a rolling window so diagnostics do not retain every forward forever.
+batchsize_forward_time: defaultdict[int | None, deque[float]] = defaultdict(
+    lambda: deque(maxlen=1024)
+)
 
 
 @dataclass(frozen=True)
@@ -378,7 +381,7 @@ def set_forward_context(
                     if len(times) <= 1:
                         # can be cudagraph / profiling run
                         continue
-                    medium = torch.quantile(torch.tensor(times), q=0.5).item()
+                    medium = torch.quantile(torch.tensor(list(times)), q=0.5).item()
                     medium = round(medium, 2)
                     forward_stats.append((bs, len(times), medium))
                 forward_stats.sort(key=lambda x: x[1], reverse=True)
@@ -386,7 +389,7 @@ def set_forward_context(
                     logger.info(
                         (
                             "Batchsize forward time stats "
-                            "(batchsize, count, median_time(ms)): %s"
+                            "(batchsize, window_count, median_time(ms)): %s"
                         ),
                         forward_stats,
                     )
