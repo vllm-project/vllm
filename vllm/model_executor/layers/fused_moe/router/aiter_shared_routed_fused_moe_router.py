@@ -84,14 +84,7 @@ class AiterSharedRoutedFusedMoERouter(BaseRouter):
             total_topk_weights_slice = total_topk_weights[:M]
             topk_ids_slice = total_topk_ids[:M, :topk]
 
-            topk_func = dispatch_topk_softmax_func(
-                use_rocm_aiter=True,
-                topk_weights=total_topk_weights_slice,
-                topk_indices=topk_ids_slice,
-                gating_output=router_logits,
-                num_shared_experts=num_fse,
-                shared_expert_scoring_func="sigmoid",
-            )
+            topk_func = dispatch_topk_softmax_func(use_rocm_aiter=True)
             topk_func(
                 total_topk_weights_slice,
                 topk_ids_slice,
@@ -117,10 +110,7 @@ class AiterSharedRoutedFusedMoERouter(BaseRouter):
         )
 
         topk_func = dispatch_topk_softmax_func(
-            use_rocm_aiter=rocm_aiter_ops.is_fused_moe_enabled(),
-            topk_weights=topk_weights,
-            topk_indices=topk_ids,
-            gating_output=routing_logits,
+            use_rocm_aiter=rocm_aiter_ops.is_fused_moe_enabled()
         )
         topk_weights, topk_ids = topk_func(
             topk_weights,

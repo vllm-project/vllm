@@ -12,7 +12,6 @@ import pytest
 import pytest_asyncio
 
 from tests.utils import RemoteLaunchRenderServer
-from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.entrypoints.scale_out.render.api_router import router
@@ -116,7 +115,6 @@ async def test_render_responses_returns_generate_request_without_stored_state():
     assert response.priority == 3
     assert response.kv_transfer_params == {"do_remote_prefill": True}
     assert response.ec_transfer_params == {"remote": True}
-    assert response.sampling_params.extra_args is None
     serving.online_renderer.render_responses.assert_awaited_once_with(
         request,
         previous_messages=None,
@@ -124,54 +122,6 @@ async def test_render_responses_returns_generate_request_without_stored_state():
         tool_server=serving.tool_server,
         skip_mm_cache=True,
     )
-
-
-@pytest.mark.asyncio
-@pytest.mark.skip_global_cleanup
-async def test_render_chat_hoists_transfer_params_out_of_extra_args():
-    serving = _build_serving_render()
-    serving.online_renderer.render_chat = AsyncMock(
-        return_value=([], [{"prompt_token_ids": [7, 8, 9]}])
-    )
-    request = ChatCompletionRequest(
-        model=MODEL_NAME,
-        messages=[{"role": "user", "content": "Test prompt"}],
-        kv_transfer_params={"do_remote_prefill": True},
-        ec_transfer_params={"remote": True},
-        vllm_xargs={"foo": 1},
-    )
-
-    response = await serving.render_chat_request(request)
-
-    assert response.kv_transfer_params == {"do_remote_prefill": True}
-    assert response.ec_transfer_params == {"remote": True}
-    assert response.sampling_params.extra_args == {"foo": 1}
-
-
-@pytest.mark.asyncio
-@pytest.mark.skip_global_cleanup
-async def test_render_completion_hoists_transfer_params_for_every_prompt():
-    serving = _build_serving_render()
-    serving.online_renderer.render_completion = AsyncMock(
-        return_value=[
-            {"prompt_token_ids": [7, 8, 9]},
-            {"prompt_token_ids": [4, 5]},
-        ]
-    )
-    request = CompletionRequest(
-        model=MODEL_NAME,
-        prompt=["a", "b"],
-        kv_transfer_params={"do_remote_prefill": True},
-        ec_transfer_params={"remote": True},
-    )
-
-    responses = await serving.render_completion_request(request)
-
-    assert len(responses) == 2
-    for response in responses:
-        assert response.kv_transfer_params == {"do_remote_prefill": True}
-        assert response.ec_transfer_params == {"remote": True}
-        assert response.sampling_params.extra_args is None
 
 
 @pytest.mark.asyncio

@@ -1,44 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""NixlTransport: Data-plane transport for RDMA-based KV block transfers via NIXL.
-
-Threading: the agent is reached from the scheduler thread and, when the tiering
-manager runs one, from its tier-poll thread. The manager's lock serializes
-them strictly -- one Python thread inside any agent call at a time, with a full
-memory barrier between.
-
-That lock is the only protection, not a belt over NIXL's own. nixl_agent picks
-NIXL_THREAD_SYNC_STRICT only when ``enable_listen`` is set, which this transport
-does not set, so the agent runs with NIXL_THREAD_SYNC_NONE -- under which NIXL's
-internal agent lock compiles down to no-ops, leaving every agent entry point
-unguarded. So the manager lock must cover all of them, and the lifetime of every
-handle passed between calls. The exception is peer registration moved onto a
-worker thread, as NixlConnector's handshake executor does: it runs outside the
-lock and relies, like that connector, on NIXL tolerating it beside transfers.
-
-Serialized use from a second thread is supported (checked against NIXL 1.4.1
-sources): NIXL never creates its UCX worker in UCS_THREAD_MODE_SINGLE, the only
-creator-thread-affine mode. The weakest mode it ever requests is
-UCS_THREAD_MODE_SERIALIZED, documented as "multiple threads can access, but only
-one at a time", and because ``enable_prog_thread`` defaults on here it actually
-requests UCS_THREAD_MODE_MULTI and fails construction if the UCX build cannot
-provide it.
-
-Two caveats. NIXL binds a shared UCX worker per calling thread
-(``tlsSharedWorkerMap``), which is harmless only while there is exactly one
-shared worker -- true here, but it would stop being true if a ``num_workers``
-UCX backend param were ever set. And NIXL 1.4.1 does accept an explicit
-``sync_mode`` (including NIXL_THREAD_SYNC_RW), which would make its own locking
-real; that parameter does not exist before 1.x, so passing it would need a
-version gate, the way ``capture_telemetry`` does.
-"""
+"""NixlTransport: Data-plane transport for RDMA-based KV block transfers via NIXL."""
 
 from __future__ import annotations
 
 import itertools
-import threading
 from collections.abc import Iterable
-from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any, NamedTuple
 
 import numpy as np
@@ -58,22 +25,6 @@ logger = init_logger(__name__)
 # no transfer changed state since the last poll). Tuples make it immutable;
 # callers only iterate / membership-test / equality-check.
 _EMPTY_POLL_RESULT: PollResult = PollResult(done=(), failed=())
-
-
-def _is_remote_disconnect(exc: Exception) -> bool:
-    """True if a NIXL state check failed because the peer disconnected.
-
-    NIXL raises ``nixlRemoteDisconnectError`` (NIXL_ERR_REMOTE_DISCONNECT)
-    from ``check_xfer_state`` once the target endpoint is gone, e.g. after
-    the peer process died, instead of reporting an ``"ERR"`` state. Matched
-    by name and status code so the bindings need not be imported here; an
-    unrecognized error keeps the transfer inflight, the conservative side.
-    """
-    return type(
-        exc
-    ).__name__ == "nixlRemoteDisconnectError" or "NIXL_ERR_REMOTE_DISCONNECT" in str(
-        exc
-    )
 
 
 class _Inflight(NamedTuple):
@@ -115,23 +66,6 @@ class NixlTransport(DataTransport):
         # transfer_id → _Inflight(peer_id, handle).
         self._inflight: dict[int, _Inflight] = {}
         self._next_id = itertools.count()
-        # Registration is O(num_blocks) NIXL work — add_remote_agent plus a
-        # prep_xfer_dlist over every block of the peer's region — so it runs
-        # off the scheduler thread, mirroring the NIXL connector's
-        # _handshake_initiation_executor. One worker only: NIXL is not
-        # guaranteed to be thread-safe, so registrations stay serialized
-        # against each other.
-        self._reg_executor = ThreadPoolExecutor(
-            max_workers=1, thread_name_prefix="vllm-p2p-nixl-reg"
-        )
-        # peer_id → registration generation, bumped on every add and remove.
-        # A worker that finishes building handles under a stale generation
-        # releases them instead of publishing, so a late completion cannot
-        # revive a peer that was reaped or superseded meanwhile.
-        self._peer_gen: dict[str, int] = {}
-        # Guards _peer_gen together with _peer_nixl_names/_remote_dlists so
-        # the generation check and the publish are one atomic step.
-        self._peer_lock = threading.Lock()
 
         self._init(view)
 
@@ -192,132 +126,23 @@ class NixlTransport(DataTransport):
         num_blocks: int,
         block_len: int,
     ) -> None:
-        gen = self._begin_registration(peer_id)
-        nixl_name, remote_dlist = self._build_peer_handles(
-            agent_metadata, base_addr, num_blocks, block_len
-        )
-        self._publish_peer(peer_id, gen, nixl_name, remote_dlist)
-
-    def add_remote_peer_async(
-        self,
-        peer_id: str,
-        agent_metadata: bytes,
-        base_addr: int,
-        num_blocks: int,
-        block_len: int,
-    ) -> Future[None]:
-        gen = self._begin_registration(peer_id)
-
-        def register() -> None:
-            nixl_name, remote_dlist = self._build_peer_handles(
-                agent_metadata, base_addr, num_blocks, block_len
-            )
-            if not self._publish_peer(peer_id, gen, nixl_name, remote_dlist):
-                raise RuntimeError(
-                    f"registration for peer {peer_id} was superseded "
-                    "(peer removed or re-registered while registering)"
-                )
-
-        return self._reg_executor.submit(register)
-
-    def remove_remote_peer(self, peer_id: str) -> None:
-        with self._peer_lock:
-            # Invalidate any registration still being built for this peer so
-            # its worker releases the handles instead of publishing them.
-            self._peer_gen[peer_id] = self._peer_gen.get(peer_id, 0) + 1
-            nixl_name = self._peer_nixl_names.pop(peer_id, None)
-            dlist = self._remote_dlists.pop(peer_id, None)
-        if self._agent is not None:
-            self._release_remote_handles(peer_id, dlist, nixl_name)
-
-    def _begin_registration(self, peer_id: str) -> int:
-        """Claim the next registration generation for *peer_id*."""
-        with self._peer_lock:
-            gen = self._peer_gen.get(peer_id, 0) + 1
-            self._peer_gen[peer_id] = gen
-            return gen
-
-    def _build_peer_handles(
-        self,
-        agent_metadata: bytes,
-        base_addr: int,
-        num_blocks: int,
-        block_len: int,
-    ) -> tuple[str, Any]:
-        """The expensive half: agent wireup plus one descriptor per block.
-
-        Touches no shared state, so it runs unlocked — holding the peer
-        lock across it would stall the scheduler thread for exactly as
-        long as the registration it is meant to move off that thread.
-        """
         nixl_name = self._agent.add_remote_agent(agent_metadata)
         block_descs = [
             (base_addr + i * block_len, block_len, 0) for i in range(num_blocks)
         ]
         xfer_dlist = self._agent.get_xfer_descs(block_descs, mem_type="DRAM")
         remote_dlist = self._agent.prep_xfer_dlist(nixl_name, xfer_dlist)
-        return nixl_name, remote_dlist
+        self._peer_nixl_names[peer_id] = nixl_name
+        self._remote_dlists[peer_id] = remote_dlist
 
-    def _publish_peer(
-        self,
-        peer_id: str,
-        gen: int,
-        nixl_name: str,
-        remote_dlist: Any,
-    ) -> bool:
-        """Install freshly built handles, unless *gen* is stale.
-
-        Returns False when the peer was removed or re-registered while the
-        handles were being built; the handles are released here since
-        nothing else ever saw them.
-        """
-        with self._peer_lock:
-            fresh = self._peer_gen.get(peer_id) == gen
-            if fresh:
-                self._peer_nixl_names[peer_id] = nixl_name
-                self._remote_dlists[peer_id] = remote_dlist
-        if fresh:
-            return True
-        logger.info(
-            "NixlTransport %s: discarding superseded registration for peer=%s",
-            self._agent_name,
-            peer_id,
-        )
+    def remove_remote_peer(self, peer_id: str) -> None:
+        nixl_name = self._peer_nixl_names.pop(peer_id, None)
+        dlist = self._remote_dlists.pop(peer_id, None)
         if self._agent is not None:
-            self._release_remote_handles(peer_id, remote_dlist, nixl_name)
-        return False
-
-    def _release_remote_handles(
-        self, peer_id: str, dlist: object | None, nixl_name: str | None
-    ) -> None:
-        """Release a peer's descriptor list and remote agent independently.
-
-        The two teardown operations are independent: NIXL may reject one
-        after a transport failure, and a ``release_dlist_handle`` that
-        raises must not skip ``remove_remote_agent``. Skipping it would
-        leave a stale remote registration behind after the peer is gone
-        (peer removal) or after its registration was superseded.
-        """
-        if dlist is not None:
-            try:
+            if dlist is not None:
                 self._agent.release_dlist_handle(dlist)
-            except Exception as exc:
-                logger.warning(
-                    "NixlTransport %s: releasing dlist handle for peer=%s failed: %s",
-                    self._agent_name,
-                    peer_id,
-                    exc,
-                )
-        if nixl_name:
-            try:
+            if nixl_name:
                 self._agent.remove_remote_agent(nixl_name)
-            except Exception as exc:
-                logger.warning(
-                    "NixlTransport %s: removing remote agent for peer=%s failed: %s",
-                    self._agent_name,
-                    peer_id,
-                    exc,
-                )
 
     # ------------------------------------------------------------------
     # Transfer submission and polling
@@ -391,9 +216,7 @@ class NixlTransport(DataTransport):
                     transfer_id,
                     exc,
                 )
-                if not _is_remote_disconnect(exc):
-                    continue
-                state = "ERR"
+                continue
             if state == "DONE":
                 if done_ids is None:
                     done_ids = []
@@ -425,14 +248,10 @@ class NixlTransport(DataTransport):
     ) -> list[int]:
         """Cancel inflight transfers by their IDs.
 
-        See ``DataTransport.cancel`` for the contract. In "wait" mode, a
-        transfer is released only once NIXL reports it terminal. Releasing
-        a PROC/PEND handle does not stop the WRITE: the UCX backend frees
-        the request without cancelling RMA, and the bytes keep landing. So
-        PROC/PEND transfers, and those whose state check or
-        ``release_xfer_handle`` raises, stay in ``self._inflight`` for a
-        later ``poll()`` to observe. A state check that fails because the
-        peer disconnected counts as terminal.
+        See ``DataTransport.cancel`` for the contract. In "wait" mode,
+        transfers whose ``release_xfer_handle`` raises (NIXL could not
+        complete the abort because the backend is still draining) stay
+        in ``self._inflight`` so a later ``poll()`` will observe them.
         """
         if mode == "immediate":
             handles = [
@@ -447,27 +266,6 @@ class NixlTransport(DataTransport):
         for tid in transfer_ids:
             entry = self._inflight.get(tid)
             if entry is None:
-                continue
-            try:
-                state = self._agent.check_xfer_state(entry.handle)
-            except Exception as exc:
-                logger.debug(
-                    "NixlTransport %s: cancel state check failed for "
-                    "transfer_id=%d: %s",
-                    self._agent_name,
-                    tid,
-                    exc,
-                )
-                if not _is_remote_disconnect(exc):
-                    still_inflight.append(tid)
-                    continue
-                # The handle may no longer be releasable; it is terminal
-                # either way, so drop it instead of retrying forever.
-                self._release_handles([entry.handle])
-                del self._inflight[tid]
-                continue
-            if state in ("PROC", "PEND"):
-                still_inflight.append(tid)
                 continue
             try:
                 self._agent.release_xfer_handle(entry.handle)
@@ -488,9 +286,6 @@ class NixlTransport(DataTransport):
     # ------------------------------------------------------------------
 
     def close(self) -> None:
-        # Stop accepting registrations and let any in-flight one finish
-        # before the agent goes away underneath it.
-        self._reg_executor.shutdown(wait=True)
         if self._agent is None:
             return
         self._release_handles([entry.handle for entry in self._inflight.values()])

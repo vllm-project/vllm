@@ -52,8 +52,6 @@ async def stream_chat_derender(
     prompt_token_ids: list[int],
     finish_reason: str = "stop",
     on_chunk: Callable[[list[dict]], None] | None = None,
-    logprobs: list[dict | None] | None = None,
-    raw_choices: list[dict] | None = None,
 ) -> dict:
     """Feed `output_ids` through the streaming chat derender endpoint in
     the given `chunk_sizes`, threading `stream_state` across calls and
@@ -66,13 +64,7 @@ async def stream_chat_derender(
     `tool_calls` assembled so far, letting callers assert properties of the
     intermediate deltas (e.g. monotonic argument growth) rather than only
     the final assembled result.
-
-    `logprobs` supplies one `GenerateLogProbs` payload (or `None`) per chunk
-    and `raw_choices`, if given, collects every derendered choice so callers
-    can compare per-chunk fields such as `logprobs`.
     """
-    if logprobs is not None:
-        assert len(logprobs) == len(chunk_sizes)
     state = None
     choices: list[dict] = []
     pos = 0
@@ -92,7 +84,6 @@ async def stream_chat_derender(
                             "index": 0,
                             "token_ids": tids,
                             "finish_reason": finish_reason if is_last else None,
-                            "logprobs": logprobs[i] if logprobs is not None else None,
                         }
                     ],
                 },
@@ -110,8 +101,6 @@ async def stream_chat_derender(
             assert data["chunk"]["choices"][0]["token_ids"] == tids
         state = data["stream_state"]
         choices.extend(data["chunk"]["choices"])
-        if raw_choices is not None:
-            raw_choices.extend(data["chunk"]["choices"])
         if on_chunk is not None:
             on_chunk(assemble_stream(choices)["tool_calls"])
 

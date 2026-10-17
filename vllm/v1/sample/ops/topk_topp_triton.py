@@ -987,19 +987,13 @@ _SPLIT_MAX_BATCH = 64
 _SPLIT_MAX_SPLITS = 32  # power of two
 _SPLIT_FANOUT = 8
 _SPLIT_ROUNDS = 5
-# The step kernels are latency-bound at one program per SM, so keep splitting
-# past that while slices span at least this many entries; shorter slices no
-# longer amortize each program's row stats and combine replay.
-_SPLIT_MIN_SLICE = 7168
 
 _TRITON_SPLIT_CACHE: dict[torch.device, dict[str, torch.Tensor]] = {}
 
 
-def _topp_split_count(batch_size: int, vocab_size: int, num_sm: int) -> int:
+def _topp_split_count(batch_size: int, num_sm: int) -> int:
     splits = 1
-    while splits < _SPLIT_MAX_SPLITS and (
-        splits * 2 * batch_size <= num_sm or splits * 2 * _SPLIT_MIN_SLICE <= vocab_size
-    ):
+    while splits < _SPLIT_MAX_SPLITS and splits * 2 * batch_size <= num_sm:
         splits *= 2
     return splits
 
@@ -1085,7 +1079,7 @@ def _topp_split_stats(
     num_sm: int,
 ) -> DispatchSpec:
     batch_size, vocab_size = logits.shape
-    splits = _topp_split_count(batch_size, vocab_size, num_sm)
+    splits = _topp_split_count(batch_size, num_sm)
     return (logits.shape[0] * splits,), dict(
         K=k if k is not None else logits,
         HAS_K=k is not None,
@@ -1379,7 +1373,7 @@ def _topp_split_step(
     num_sm: int,
 ) -> DispatchSpec:
     batch_size, vocab_size = logits.shape
-    splits = _topp_split_count(batch_size, vocab_size, num_sm)
+    splits = _topp_split_count(batch_size, num_sm)
     return (logits.shape[0] * splits,), dict(
         K=k if k is not None else logits,
         HAS_K=k is not None,
@@ -1519,7 +1513,6 @@ def _topp_sb_mask_kernel(
             cum = tl.cumsum(dmask.to(tl.int32)).to(tl.float32) + num_preceding
             keep_dup = dmask & (cum <= numkeep)
             keep = keep & (~dmask | keep_dup)
-            num_preceding += tl.sum(dmask.to(tl.float32))
         tl.store(ROW + i + offs, tl.where(keep, x, MASK_VALUE), mask=mask_n)
 
 
@@ -1561,7 +1554,7 @@ def _topp_split_mask(
     num_sm: int,
 ) -> DispatchSpec:
     batch_size, vocab_size = logits.shape
-    splits = _topp_split_count(batch_size, vocab_size, num_sm)
+    splits = _topp_split_count(batch_size, num_sm)
     return (logits.shape[0] * splits,), dict(
         K=k if k is not None else logits,
         HAS_K=k is not None,
@@ -1625,7 +1618,6 @@ def apply_top_k_top_p_triton(
     k: torch.Tensor | None,
     p: torch.Tensor | None,
     mask_value: float = float("-inf"),
-    has_topp_only_rows: bool = True,
 ) -> torch.Tensor:
     """Apply combined top-k and top-p masking using Triton.
 
@@ -1640,9 +1632,6 @@ def apply_top_k_top_p_triton(
         p: [batch_size] float32 tensor of top-p values per row (0 to 1),
             or None to disable top-p
         mask_value: Value for masked positions (default: -inf)
-        has_topp_only_rows: Whether any row has p < 1 and k >= vocab_size.
-            False lets small batches skip the split top-p pipeline; pass it
-            only if no such row exists, as such a row would get no top-p.
 
     Returns:
         The masked logits tensor. It may or may not be modified in-place.
@@ -1725,7 +1714,7 @@ def apply_top_k_top_p_triton(
         mask_value,
         num_sm,
     )
-    if use_split and has_topp_only_rows:
+    if use_split:
         _apply_topp_split(logits, k_ptr, p_ptr, mask_value, num_sm)
 
     return logits

@@ -14,11 +14,11 @@ from vllm.logprobs import Logprob
 
 def test_top_logprobs_alternatives_have_own_token_ids():
     """Each top_logprobs alternative must carry its own integer token id."""
-    # Engine dict at logprobs=2 with the sampled token 262 also top-1.
     result = ServingTokens._create_tokens_logprobs(
         None,
         token_ids=[262],
-        top_logprobs=[{262: Logprob(-0.1), 257: Logprob(-1.2)}],
+        top_logprobs=[{262: Logprob(-0.1), 257: Logprob(-1.2), 428: Logprob(-2.3)}],
+        num_output_top_logprobs=2,
     )
     token_ids = {e.token_id for e in result.content[0].top_logprobs}
     assert token_ids == {262, 257}, f"got {token_ids}"
@@ -32,6 +32,7 @@ def test_sampled_entry_carries_token_id_and_rank():
         top_logprobs=[
             {262: Logprob(-0.1, rank=1), 257: Logprob(-1.2, rank=2)},
         ],
+        num_output_top_logprobs=2,
     )
     entry = result.content[0]
     assert entry.token_id == 262
@@ -49,6 +50,7 @@ def test_sampled_token_absent_from_topk_uses_sentinel():
         None,
         token_ids=[5],
         top_logprobs=[{7: Logprob(-0.9)}],
+        num_output_top_logprobs=1,
     )
     entry = result.content[0]
     assert entry.token_id == 5
@@ -58,13 +60,14 @@ def test_sampled_token_absent_from_topk_uses_sentinel():
 
 
 def test_logprobs_zero_emits_sampled_token():
-    """logprobs=0: the engine returns only the sampled token, and it is kept."""
+    """logprobs=0 must still emit 1 entry (the sampled token)."""
     result = ServingTokens._create_tokens_logprobs(
         None,
         token_ids=[7],
-        top_logprobs=[{7: Logprob(-0.9)}],
+        top_logprobs=[{7: Logprob(-0.9), 8: Logprob(-1.1)}],
+        num_output_top_logprobs=0,
     )
-    assert [t.token_id for t in result.content[0].top_logprobs] == [7]
+    assert len(result.content[0].top_logprobs) == 1
 
 
 def test_logprobs_minus_one_emits_all_tokens():
@@ -72,6 +75,7 @@ def test_logprobs_minus_one_emits_all_tokens():
         None,
         token_ids=[7],
         top_logprobs=[{7: Logprob(-0.9), 8: Logprob(-1.1)}],
+        num_output_top_logprobs=-1,
     )
     assert len(result.content[0].top_logprobs) == 2
 
@@ -82,6 +86,7 @@ def test_text_logprobs_without_tokenizer_are_placeholders_without_bytes():
         None,
         token_ids=[7],
         top_logprobs=[{7: Logprob(-0.9), 8: Logprob(-1.1)}],
+        num_output_top_logprobs=2,
     )
     entry = result.content[0]
     assert entry.token == "token_id:7"
@@ -97,6 +102,7 @@ def test_resolved_logprobs_use_engine_decoded_tokens_and_bytes():
         top_logprobs=[
             {7: Logprob(-0.9, decoded_token="é"), 8: Logprob(-1.1, decoded_token="e")}
         ],
+        num_output_top_logprobs=2,
         tokenizer=tokenizer,
     )
     entry = result.content[0]
@@ -115,6 +121,7 @@ def test_resolved_logprobs_decode_tokens_the_engine_did_not():
         None,
         token_ids=[7, 9],
         top_logprobs=[{7: Logprob(-0.9)}, None],
+        num_output_top_logprobs=1,
         tokenizer=tokenizer,
     )
     assert [e.token for e in result.content] == ["<7>", "<9>"]
@@ -123,9 +130,9 @@ def test_resolved_logprobs_decode_tokens_the_engine_did_not():
 
 
 def test_sampled_token_outside_topk_comes_first():
-    """The engine puts the sampled token first, then ranks 1..k. Generate keeps
-    all k + 1 candidates when the sampled token is outside the top k; derender
-    applies each endpoint's cut (#59513)."""
+    """The engine puts the sampled token first, then ranks 1..k. When the
+    sampled token is outside the top k it takes one of the k slots, so rank k
+    is left out (same as the OpenAI endpoints)."""
     result = ServingTokens._create_tokens_logprobs(
         None,
         token_ids=[50],
@@ -136,8 +143,9 @@ def test_sampled_token_outside_topk_comes_first():
                 20: Logprob(-1.0, rank=2),
             }
         ],
+        num_output_top_logprobs=2,
     )
-    assert [t.rank for t in result.content[0].top_logprobs] == [5, 1, 2]
+    assert [t.rank for t in result.content[0].top_logprobs] == [5, 1]
 
 
 def test_logprob_is_required_on_the_wire():
@@ -152,6 +160,7 @@ def test_rank_zero_from_a_nan_logprob_is_none():
         None,
         token_ids=[7],
         top_logprobs=[{7: Logprob(float("nan"), rank=0), 8: Logprob(-0.2, rank=1)}],
+        num_output_top_logprobs=1,
     )
     entry = result.content[0]
     assert entry.rank is None
@@ -167,6 +176,7 @@ def test_text_logprobs_clamp_a_nan_logprob():
         None,
         token_ids=[7],
         top_logprobs=[{7: Logprob(float("nan"), rank=0, decoded_token="a")}],
+        num_output_top_logprobs=1,
         tokenizer=MagicMock(),
     )
     entry = result.content[0]

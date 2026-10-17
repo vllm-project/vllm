@@ -345,52 +345,6 @@ def test_usage_only_stream_is_not_reported_as_success(
     assert "TTFT" in output.error
 
 
-# Significant whitespace at every edge, plus a multibyte character so that a
-# split can land inside a UTF-8 sequence.
-_BOUNDARY_TEXT = " leading 中 trailing "
-
-
-@pytest.mark.parametrize(
-    "endpoint_id,request_func,api_url,chat",
-    STREAMING_ENDPOINTS,
-    ids=[e[0] for e in STREAMING_ENDPOINTS],
-)
-def test_streamed_output_is_invariant_to_transport_chunk_boundaries(
-    endpoint_id: str,
-    request_func,
-    api_url: str,
-    chat: bool,
-) -> None:
-    """iter_any() yields arbitrary transport fragments, so parsing must
-    give the same result no matter where the byte stream is split."""
-    if chat:
-        choice: dict[str, Any] = {"index": 0, "delta": {"content": _BOUNDARY_TEXT}}
-    else:
-        choice = {"index": 0, "text": _BOUNDARY_TEXT}
-    # Not _sse(): its ensure_ascii default would escape the multibyte char.
-    event = json.dumps(
-        {"id": "cmpl-test", "object": "x", "choices": [choice]}, ensure_ascii=False
-    )
-    stream = f"data: {event}\n\ndata: [DONE]\n\n".encode()
-
-    async def run_all_splits() -> list[tuple[int, bool, str, str]]:
-        failures = []
-        for split_at in range(1, len(stream)):
-            chunks = [(0.0, stream[:split_at]), (0.0, stream[split_at:])]
-            output = await request_func(
-                _make_input(api_url, 1, endpoint_id),
-                _FakeSession(chunks),
-            )
-            if not output.success or output.generated_text != _BOUNDARY_TEXT:
-                error = output.error.splitlines()[-1] if output.error else ""
-                failures.append(
-                    (split_at, output.success, output.generated_text, error)
-                )
-        return failures
-
-    assert asyncio.run(run_all_splits()) == []
-
-
 # ``benchmarks/backend_request_func.py`` is a standalone script rather than a
 # package module, so it is loaded by path. It also builds its own ClientSession,
 # so the scripted stream is injected by swapping the module's aiohttp reference.
