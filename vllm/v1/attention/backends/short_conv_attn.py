@@ -46,6 +46,7 @@ class ShortConvAttentionMetadataBuilder(
     BaseMambaAttentionMetadataBuilder[ShortConvAttentionMetadata]
 ):
     metadata_cls = ShortConvAttentionMetadata
+    requires_decode_ordering = True
 
 
 @dataclass
