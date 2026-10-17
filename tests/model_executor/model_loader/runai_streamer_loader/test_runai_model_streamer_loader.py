@@ -19,6 +19,8 @@ from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader import runai_streamer_loader as rsl
 from vllm.utils.mem_constants import GiB_bytes
 
+from .conftest import requires_runai
+
 load_format = "runai_streamer"
 test_model = "openai-community/gpt2"
 # TODO(amacaskill): Replace with a GKE owned GCS bucket.
@@ -80,6 +82,7 @@ def test_checkpoint_selection_hook_is_optional_for_model_detection():
         assert SupportsMultiModal.get_language_model(model) is model.language_model
 
 
+@requires_runai
 def test_runai_model_loader_download_files(vllm_runner):
     with vllm_runner(test_model, load_format=load_format) as llm:
         deserialized_outputs = llm.generate(prompts, sampling_params)
@@ -88,6 +91,7 @@ def test_runai_model_loader_download_files(vllm_runner):
 
 # In-process MTP compilation must not retain GPU resources in the pytest worker.
 @create_new_process_for_each_test("spawn")
+@requires_runai
 def test_runai_mtp_real_checkpoint(vllm_runner, tmp_path, monkeypatch):
     """Skip main-only shards without changing a real MTP model's generation."""
     from vllm.model_executor.models.qwen3_5_mtp import Qwen3_5MTP
@@ -288,6 +292,7 @@ def test_runai_get_all_weights_resolves_source(model_config, expected_source):
 
 
 @pytest.mark.parametrize("selection", ["draft", "unadapted", "reject_all"])
+@requires_runai
 def test_runai_selects_shards_before_streaming(tmp_path, monkeypatch, selection):
     """Unused shards must not reach RunAI; mixed shards retain their tensors."""
     contents = [
@@ -594,6 +599,7 @@ def test_runai_model_rule_error_is_not_hidden_by_metadata_fallback(monkeypatch):
         list(_runai_loader({}).get_all_weights(config, model))
 
 
+@requires_runai
 def test_runai_header_reader_uses_actual_tensor_names(tmp_path):
     """The RunAI header reader sees names even when an index omits them."""
     path = tmp_path / "mixed.safetensors"
@@ -610,6 +616,7 @@ def test_runai_header_reader_uses_actual_tensor_names(tmp_path):
 
 
 @pytest.mark.parametrize("stale", [False, True])
+@requires_runai
 def test_runai_stale_index_keeps_actual_draft_weights(tmp_path, monkeypatch, stale):
     """Verify excluded headers before dropping a shard with real draft weights."""
     root = "s3://bucket/checkpoint"
@@ -678,6 +685,7 @@ def test_runai_stale_index_keeps_actual_draft_weights(tmp_path, monkeypatch, sta
         ),
     ],
 )
+@requires_runai
 def test_runai_deep_sleep_reload_weights(base_model, mul_model, add_model, vllm_runner):
     free, total = torch.accelerator.get_memory_info()
     used_bytes_baseline = total - free
