@@ -31,7 +31,10 @@ try:
     from opentelemetry.sdk.resources import Resource
     from opentelemetry.sdk.trace import TracerProvider
     from opentelemetry.sdk.trace.export import BatchSpanProcessor
+    from opentelemetry.semconv.resource import ResourceAttributes
     from opentelemetry.trace import (
+        NonRecordingSpan,
+        Span,
         SpanKind,  # noqa: F401
         Tracer,
         set_tracer_provider,
@@ -51,17 +54,20 @@ except ImportError:
     inject = None  # type: ignore
     Resource = None  # type: ignore
     SpanKind = Any  # type: ignore
+    NonRecordingSpan = Any  # type: ignore
+    ResourceAttributes = Any  # type: ignore
+    Span = Any  # type: ignore
+    TracerProvider = Any  # type: ignore
 
 
 def is_otel_available() -> bool:
     return _IS_OTEL_AVAILABLE
 
 
-def init_otel_tracer(
-    instrumenting_module_name: str,
+def init_otel_trace_provider(
     otlp_traces_endpoint: str,
     extra_attributes: dict[str, str] | None = None,
-) -> Tracer:
+) -> TracerProvider:
     """Initializes the OpenTelemetry tracer provider."""
     if not _IS_OTEL_AVAILABLE:
         raise ValueError(
@@ -69,13 +75,14 @@ def init_otel_tracer(
             "a tracer. Ensure OpenTelemetry packages are installed. "
             f"Original error:\n{otel_import_error_traceback}"
         )
-
     # Store the endpoint in environment so child processes can inherit it
     os.environ["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"] = otlp_traces_endpoint
 
-    resource_attrs = {}
-    resource_attrs["vllm.instrumenting_module_name"] = instrumenting_module_name
-    resource_attrs["vllm.process_id"] = str(os.getpid())
+    SERVICE_NAME = ResourceAttributes.SERVICE_NAME
+    OTEL_SERVICE_NAME = "OTEL_SERVICE_NAME"
+    service_name = os.environ.get(OTEL_SERVICE_NAME, "vllm")
+
+    resource_attrs = {"vllm.process_id": str(os.getpid()), SERVICE_NAME: service_name}
     if extra_attributes:
         resource_attrs.update(extra_attributes)
     resource = Resource.create(resource_attrs)
@@ -86,6 +93,32 @@ def init_otel_tracer(
     set_tracer_provider(trace_provider)
 
     atexit.register(trace_provider.shutdown)
+    return trace_provider
+
+
+def init_otel_tracer(
+    instrumenting_module_name: str,
+    otlp_traces_endpoint: str,
+    extra_attributes: dict[str, str] | None = None,
+) -> Tracer:
+    """Initializes the OpenTelemetry tracer."""
+    if not _IS_OTEL_AVAILABLE:
+        raise ValueError(
+            "OpenTelemetry is not available. Unable to initialize "
+            "a tracer. Ensure OpenTelemetry packages are installed. "
+            f"Original error:\n{otel_import_error_traceback}"
+        )
+
+    if extra_attributes is None:
+        extra_attributes = {}
+
+    trace_provider = init_otel_trace_provider(
+        otlp_traces_endpoint,
+        extra_attributes={
+            **extra_attributes,
+            "vllm.instrumenting_module_name": instrumenting_module_name,
+        },
+    )
 
     tracer = trace_provider.get_tracer(instrumenting_module_name)
     return tracer
