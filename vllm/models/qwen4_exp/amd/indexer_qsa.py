@@ -133,7 +133,7 @@ class QSAIndexer(nn.Module):
         cache_config = vllm_config.cache_config
         cache_prefix = f"{prefix}." if prefix else ""
         self.indexer_kv_dtype = vllm_config.attention_config.resolve_indexer_kv_dtype(
-            "bf16"
+            default="bf16"
         )
         if self.indexer_kv_dtype == "fp8":
             indexer_dtype = torch.float8_e4m3fn
