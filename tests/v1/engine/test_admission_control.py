@@ -39,11 +39,12 @@ from vllm.exceptions import (
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.utils.argparse_utils import human_readable_int
-from vllm.v1.engine import EngineCoreRequest
+from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
 from vllm.v1.engine.admission_control import SharedAdmissionStats
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.output_processor import OutputProcessor
 from vllm.v1.metrics.loggers import StatLoggerManager
+from vllm.v1.metrics.stats import FinishedRequestStats, IterationStats
 
 _ADMISSION_METRIC_MODEL = "admission-metric-test"
 _ADMISSION_LOGGER = "vllm.v1.engine.async_llm"
@@ -412,7 +413,7 @@ async def test_concurrent_single_request_admission_respects_limit():
     )
     llm.output_processor.has_request.side_effect = request_states.__contains__
 
-    def add_request(request, *_args):
+    def add_request(request, *_args, **_kwargs):
         request_states[request.request_id] = _make_req_state(
             len(request.prompt_token_ids)
         )
@@ -503,6 +504,68 @@ async def test_parallel_admission_cancellation_cleans_up_all_children():
     assert llm.output_processor.get_num_unfinished_requests() == 0
     aborted_ids = llm.engine_core.abort_requests_async.await_args.args[0]
     assert set(aborted_ids) == {"0_parallel", "1_parallel", "2_parallel"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("n", [1, 3])
+@pytest.mark.parametrize("rendered_prompt", [True, False])
+@pytest.mark.parametrize(
+    "api_surface",
+    ["messages", "chat_completions", "completions", None, "arbitrary"],
+)
+async def test_admitted_requests_keep_api_identity_with_tracing_disabled(
+    n, rendered_prompt, api_surface
+):
+    """Single requests and every n>1 child retain bounded identity until completion."""
+    finished: list[FinishedRequestStats] = []
+
+    async def add_request_async(request):
+        assert request.trace_headers is None
+        stats = IterationStats()
+        llm.output_processor.process_outputs(
+            [
+                EngineCoreOutput(
+                    request_id=request.request_id,
+                    new_token_ids=[2],
+                    finish_reason=FinishReason.STOP,
+                )
+            ],
+            engine_core_timestamp=2.0,
+            iteration_stats=stats,
+        )
+        finished.extend(stats.finished_requests)
+
+    llm = _make_request_test_llm(n, add_request_async)
+    llm.output_processor = OutputProcessor(None, log_stats=True)
+    llm.observability_config = SimpleNamespace(otlp_traces_endpoint=None)
+    llm.model_config = SimpleNamespace(is_encoder_decoder=False)
+    llm.get_supported_tasks = AsyncMock(return_value=("generate",))
+    request = _make_engine_request("request", n)
+    llm.input_processor.process_inputs.return_value = request
+    prompt = {"type": "token", "prompt_token_ids": [1]} if rendered_prompt else request
+
+    outputs = [
+        output
+        async for output in llm.generate(
+            prompt,
+            request.params,
+            request.request_id,
+            trace_headers={"api_surface": "client-controlled"},
+            **({"api_surface": api_surface} if api_surface is not None else {}),
+        )
+    ]
+
+    expected = "unknown" if api_surface in (None, "arbitrary") else api_surface
+    assert len(finished) == n
+    assert {stats.api_surface for stats in finished} == {expected}
+    assert all(stats.num_generation_tokens == 1 for stats in finished)
+    assert outputs[-1].finished
+    assert len(outputs[-1].outputs) == n
+    assert not llm.output_processor.has_unfinished_requests()
+    if rendered_prompt:
+        assert (
+            llm.input_processor.process_inputs.call_args.kwargs["trace_headers"] is None
+        )
 
 
 # ---------------------------------------------------------------------------

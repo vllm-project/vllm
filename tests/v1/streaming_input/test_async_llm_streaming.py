@@ -3,6 +3,7 @@
 
 import asyncio
 from collections.abc import AsyncGenerator
+from types import SimpleNamespace
 from unittest import mock
 from unittest.mock import AsyncMock, MagicMock
 
@@ -194,33 +195,44 @@ async def test_generate_with_async_generator():
 
 
 @pytest.mark.asyncio
-async def test_empty_input_stream_finishes_without_engine_request():
+@pytest.mark.parametrize("num_chunks", [0, 2])
+async def test_streaming_input_keeps_api_identity_and_skips_empty_stream(num_chunks):
     llm = AsyncLLM.__new__(AsyncLLM)
     llm._validate_streaming_input_sampling_params = MagicMock()
     llm.get_supported_tasks = AsyncMock(return_value=("generate",))
     llm._run_output_handler = MagicMock()
     llm._add_request = AsyncMock()
     llm.vllm_config = MagicMock(is_mm_encoder_only=False)
-    llm.model_config = MagicMock(is_diffusion=False)
+    llm.model_config = SimpleNamespace(is_encoder_decoder=False, is_diffusion=False)
+    llm.output_processor = MagicMock()
+    llm.output_processor.has_request.return_value = True
 
     final_req = MagicMock()
     final_req.request_id = "request-int"
+    final_req.prompt_embeds = None
     llm.input_processor = MagicMock()
     llm.input_processor.process_inputs.return_value = final_req
 
-    async def empty_stream():
-        return
-        yield  # pragma: no cover
+    async def input_stream():
+        for idx in range(num_chunks):
+            yield StreamingInput(prompt={"type": "token", "prompt_token_ids": [idx]})
 
     queue = await llm._add_streaming_input_request(
-        "request", empty_stream(), SamplingParams(max_tokens=4)
+        "request", input_stream(), SamplingParams(max_tokens=4), api_surface="messages"
     )
     task = queue._input_stream_task
     assert task is not None
     await task
 
-    assert queue.get_nowait() is STREAM_FINISHED
-    llm._add_request.assert_not_awaited()
+    if num_chunks == 0:
+        assert queue.get_nowait() is STREAM_FINISHED
+        llm._add_request.assert_not_awaited()
+    else:
+        assert llm._add_request.await_count == num_chunks + 1
+        assert all(
+            call.kwargs["api_surface"] == "messages"
+            for call in llm._add_request.await_args_list
+        )
 
 
 def _make_streaming_llm(num_chunks: int, has_request: bool = True):

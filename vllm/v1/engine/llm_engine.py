@@ -329,7 +329,9 @@ class LLMEngine:
         # 2) Process EngineCoreOutputs.
         with record_function_or_nullcontext("llm_engine step: process_outputs"):
             iteration_stats = (
-                IterationStats() if self.log_stats and outputs.outputs else None
+                IterationStats(self.observability_config.enable_api_surface_metrics)
+                if self.log_stats and outputs.outputs
+                else None
             )
             processed_outputs = self.output_processor.process_outputs(
                 outputs.outputs,

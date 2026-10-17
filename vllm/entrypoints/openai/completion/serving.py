@@ -200,6 +200,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
                     lora_request=lora_request,
                     trace_headers=trace_headers,
                     session_id=session_id,
+                    api_surface="completions",
                 )
             else:
                 generator = self.engine_client.generate(
@@ -209,6 +210,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
                     lora_request=lora_request,
                     trace_headers=trace_headers,
                     priority=self._get_priority(request, raw_request),
+                    api_surface="completions",
                     data_parallel_rank=data_parallel_rank,
                     session_id=session_id,
                 )
