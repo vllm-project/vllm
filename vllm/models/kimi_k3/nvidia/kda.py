@@ -202,9 +202,8 @@ def is_flashinfer_fused_kda_decode_supported(
     capability = current_platform.get_device_capability()
     if capability is None:
         return False
-    compute_capability = (capability.major, capability.minor)
     return (
-        compute_capability in ((10, 0), (10, 3))
+        current_platform.is_device_capability_family(100)
         and num_heads in (12, 24, 32, 48, 96)
         and head_dim == 128
         and conv_width == 4
@@ -331,7 +330,7 @@ def resolve_kda_decode_backend(
         return "flashinfer"
     if backend == "flashinfer":
         raise RuntimeError(
-            "FlashInfer fused KDA decode requires CUDA SM100 or SM103, "
+            "FlashInfer fused KDA decode requires CUDA SM100 family, "
             "bfloat16 activations and convolution state, bfloat16 or float32 "
             "recurrent state, head_dim=128, convolution width 4, no speculation."
         )
