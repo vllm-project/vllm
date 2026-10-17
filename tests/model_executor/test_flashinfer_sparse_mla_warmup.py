@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""CPU contracts for the SM120 sparse-MLA warmup's per-bucket refinement."""
+"""CPU contracts for sparse-only tuning and executable warmup buckets."""
 
 import sys
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, call
 
 import pytest
 
@@ -120,54 +120,78 @@ def _record_runs(worker, is_v2, context_state):
     return runs
 
 
-def _tracking_context(context_state):
+def _scope(monkeypatch, context_state):
+    """Replace the sparse-only tuning scope; record each scope's context factory."""
+    factories = []
+
     @contextmanager
-    def context(*args, **kwargs):
+    def scoped(tune_context):
         assert not context_state["tuning"]
+        factories.append(tune_context)
         context_state["tuning"] = True
         try:
             yield
         finally:
             context_state["tuning"] = False
 
-    return Mock(side_effect=context)
+    monkeypatch.setattr(warmup, "autotune_sparse_mla_only", scoped)
+    return factories
 
 
 @pytest.mark.parametrize("is_v2", [False, True])
-def test_managed_path_tunes_buckets_on_every_rank(worker, monkeypatch, is_v2):
+def test_managed_path_tunes_sparse_calls_on_every_rank(
+    worker, monkeypatch, tmp_path, is_v2
+):
     worker.vllm_config.use_v2_model_runner = is_v2
     worker.model_runner.max_num_reqs = 1  # no mixed batch: plain dummy run
+    monkeypatch.setattr(
+        warmup.envs, "VLLM_FLASHINFER_AUTOTUNE_SKIP_OPS", ["fp4_gemm", "test_op"]
+    )
     _world(monkeypatch, rank=0, world_size=1)
-    state = {"tuning": False}
-    managed = _tracking_context(state)
+    managed = Mock(return_value=nullcontext())
     monkeypatch.setitem(
         sys.modules,
         "flashinfer",
         SimpleNamespace(autotune_v2=managed, autotune_v2_reload=Mock()),
     )
     monkeypatch.setattr(fi_utils, "has_flashinfer_autotune_v2", lambda: True)
+    state = {"tuning": False}
+    factories = _scope(monkeypatch, state)
     runs = _record_runs(worker, is_v2, state)
 
     warmup.flashinfer_sparse_mla_decode_autotune_warmup(worker)
 
     assert runs == [(16, True), (1, True)]
-    assert managed.call_count == 2
+    assert len(factories) == 2
+    managed.assert_not_called()  # entered only around sparse MLA calls
+    for factory in factories:
+        with factory():
+            pass
+    assert managed.call_args_list == 2 * [
+        call(mode="tune", cache_root=tmp_path, skip_ops={"fp4_gemm", "test_op"})
+    ]
 
 
 @pytest.mark.parametrize("rank", [0, 1])
-def test_legacy_path_runs_buckets_after_mixed_warmup(worker, monkeypatch, rank):
+def test_legacy_path_tunes_sparse_calls_on_leader(worker, monkeypatch, rank):
     _world(monkeypatch, rank=rank, world_size=2)
-    state = {"tuning": False}
-    legacy = _tracking_context(state)
+    legacy = Mock(return_value=nullcontext())
     monkeypatch.setattr(warmup, "flashinfer_autotune", legacy)
     monkeypatch.setattr(fi_utils, "has_flashinfer_autotune_v2", lambda: False)
+    state = {"tuning": False}
+    factories = _scope(monkeypatch, state)
     runs = _record_runs(worker, False, state)
 
     warmup.flashinfer_sparse_mla_decode_autotune_warmup(worker)
 
     leader = rank == 0
     assert runs == [(16, leader), (1, leader), (4, leader), (16, leader), (64, leader)]
-    assert legacy.call_count == (2 if leader else 0)
+    assert len(factories) == (2 if leader else 0)
+    legacy.assert_not_called()
+    for factory in factories:
+        with factory():
+            pass
+    assert legacy.call_args_list == len(factories) * [call(True)]
 
 
 @pytest.mark.parametrize(

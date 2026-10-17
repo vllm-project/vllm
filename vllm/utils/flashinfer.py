@@ -12,7 +12,8 @@ import importlib.metadata
 import importlib.util
 import os
 import shutil
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextvars import ContextVar
 from typing import Any, NoReturn
 
 import requests
@@ -26,6 +27,47 @@ from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import PIN_MEMORY
 
 logger = init_logger(__name__)
+
+
+# Tuning context entered around each sparse MLA call during a scoped warmup.
+_sparse_mla_autotune_context: ContextVar[
+    Callable[[], contextlib.AbstractContextManager[Any]] | None
+] = ContextVar("flashinfer_sparse_mla_autotune_context", default=None)
+
+
+@contextlib.contextmanager
+def autotune_sparse_mla_only(
+    tune_context: Callable[[], contextlib.AbstractContextManager[Any]],
+) -> Iterator[None]:
+    """Tune only inside sparse MLA calls, not the enclosing model.
+
+    ``tune_context`` builds the FlashInfer tuning context entered around each
+    sparse MLA call, so GEMMs and MoE kernels run by the same warmup are not
+    tuned by it.
+    """
+    from flashinfer.autotuner import AutoTuner
+
+    if AutoTuner.get().is_tuning_mode:
+        raise RuntimeError(
+            "autotune_sparse_mla_only cannot run inside active FlashInfer autotuning"
+        )
+    token = _sparse_mla_autotune_context.set(tune_context)
+    try:
+        yield
+    finally:
+        _sparse_mla_autotune_context.reset(token)
+
+
+def _autotune_sparse_mla_call(fn: Callable[..., Any]) -> Callable[..., Any]:
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        tune_context = _sparse_mla_autotune_context.get()
+        if tune_context is None:
+            return fn(*args, **kwargs)
+        with tune_context():
+            return fn(*args, **kwargs)
+
+    return wrapper
 
 
 def flashinfer_bf16_mm(
@@ -323,15 +365,19 @@ flashinfer_get_hybrid_num_tokens_buckets = _lazy_import_wrapper(
 trtllm_fp4_block_scale_moe = _lazy_import_wrapper(
     "flashinfer", "trtllm_fp4_block_scale_moe"
 )
-flashinfer_trtllm_batch_decode_with_kv_cache_mla = _lazy_import_wrapper(
-    "flashinfer.decode",
-    "trtllm_batch_decode_with_kv_cache_mla",
-    fallback_fn=_missing_sparse_mla,
+flashinfer_trtllm_batch_decode_with_kv_cache_mla = _autotune_sparse_mla_call(
+    _lazy_import_wrapper(
+        "flashinfer.decode",
+        "trtllm_batch_decode_with_kv_cache_mla",
+        fallback_fn=_missing_sparse_mla,
+    )
 )
-flashinfer_trtllm_batch_decode_sparse_mla_dsv4 = _lazy_import_wrapper(
-    "flashinfer.decode",
-    "trtllm_batch_decode_sparse_mla_dsv4",
-    fallback_fn=_missing_sparse_mla,
+flashinfer_trtllm_batch_decode_sparse_mla_dsv4 = _autotune_sparse_mla_call(
+    _lazy_import_wrapper(
+        "flashinfer.decode",
+        "trtllm_batch_decode_sparse_mla_dsv4",
+        fallback_fn=_missing_sparse_mla,
+    )
 )
 flashinfer_xqa_batch_decode_with_kv_cache = _lazy_import_wrapper(
     "flashinfer.decode",
@@ -1259,6 +1305,7 @@ def is_flashinfer_cudnn_fp8_prefill_attn_supported() -> bool:
 __all__ = [
     "has_flashinfer",
     "flashinfer_bf16_mm",
+    "autotune_sparse_mla_only",
     "has_flashinfer_bf16_gemm",
     "is_flashinfer_bf16_gemm_supported",
     "is_flashinfer_cutedsl_bf16_gemm_supported",

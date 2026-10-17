@@ -364,6 +364,15 @@ def test_sparse_autotune_respects_cache_selection(
     )
     monkeypatch.setattr(sparse, "flashinfer_autotune", legacy)
 
+    @contextmanager
+    def scoped(tune_context):
+        # Stand in for one sparse MLA call inside the scope.
+        with tune_context():
+            pass
+        yield
+
+    monkeypatch.setattr(sparse, "autotune_sparse_mla_only", scoped)
+
     def mixed_warmup(*args, mixed_step_context=None, **kwargs):
         context = (
             mixed_step_context if mixed_step_context is not None else nullcontext()
@@ -390,7 +399,10 @@ def test_sparse_autotune_respects_cache_selection(
         world.broadcast_object.assert_called_once_with(
             b"cached" if rank == 0 else None, src=0
         )
-        tuner.load_configs.assert_called_once_with(str(cache_path))
+        # The leader also preloads its cache file before the scoped warmup.
+        assert tuner.load_configs.call_args_list == (2 if rank == 0 else 1) * [
+            call(str(cache_path))
+        ]
     assert mixed.call_count == (1 if model_runner_v2 and max_reqs >= 2 else 0)
     assert runner._dummy_run.call_count == (0 if mixed.called else 1)
 
