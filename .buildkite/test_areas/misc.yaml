@@ -269,6 +269,7 @@ steps:
   key: extract-hidden-states-integration-2-gpus
   timeout_in_minutes: 20
   device: l4
+  optional: true # L4 CI disabled
   num_devices: 2
   working_dir: "/vllm-workspace"
   source_file_dependencies:
@@ -391,6 +392,7 @@ steps:
   key: metrics-tracing-2-gpus
   timeout_in_minutes: 25
   device: l4
+  optional: true # L4 CI disabled
   num_devices: 2
   source_file_dependencies:
   - vllm/config/

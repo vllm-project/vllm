@@ -52,6 +52,7 @@ steps:
   timeout_in_minutes: 30
   working_dir: "/vllm-workspace"
   device: l4
+  optional: true # L4 CI disabled
   num_devices: 2
   source_file_dependencies:
     - vllm/distributed/ec_transfer/

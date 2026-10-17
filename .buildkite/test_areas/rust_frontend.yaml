@@ -179,6 +179,7 @@ steps:
   key: rust-frontend-distributed
   timeout_in_minutes: 25
   device: l4
+  optional: true # L4 CI disabled
   num_devices: 4
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:

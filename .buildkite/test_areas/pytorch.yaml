@@ -125,6 +125,7 @@ steps:
   key: pytorch-compilation-passes-unit-tests
   automatic_shard: true
   device: l4
+  optional: true # L4 CI disabled
   num_devices: 1
   timeout_in_minutes: 45
   source_file_dependencies:
@@ -230,6 +231,7 @@ steps:
 - label: ":nvidia: (L4) PyTorch Fullgraph CUDAGraph Compatibility"
   key: pytorch-fullgraph-cudagraph-l4-compatibility
   device: l4
+  optional: true # L4 CI disabled
   num_devices: 1
   timeout_in_minutes: 60
   source_file_dependencies:

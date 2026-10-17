@@ -35,6 +35,7 @@ steps:
   timeout_in_minutes: 25
   working_dir: "/vllm-workspace/tests"
   device: l4
+  optional: true # L4 CI disabled
   num_devices: 4
   source_file_dependencies:
   - vllm/distributed/eplb

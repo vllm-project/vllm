@@ -7,6 +7,7 @@ steps:
   timeout_in_minutes: 30
   working_dir: "/vllm-workspace/tests"
   device: l4
+  optional: true # L4 CI disabled
   num_devices: 4
   source_file_dependencies:
   - vllm/config/parallel.py
@@ -40,6 +41,7 @@ steps:
   timeout_in_minutes: 35
   working_dir: "/vllm-workspace/tests"
   device: l4
+  optional: true # L4 CI disabled
   num_devices: 2
   source_file_dependencies:
   - vllm/model_executor/model_loader/sharded_state_loader.py

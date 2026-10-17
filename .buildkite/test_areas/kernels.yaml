@@ -315,6 +315,7 @@ steps:
 - label: ":nvidia: (L4) Attention Kernels Shard %N"
   key: kernels-attention-test
   device: l4
+  optional: true # L4 CI disabled
   num_devices: 1
   timeout_in_minutes: 30
   source_file_dependencies:
@@ -435,6 +436,7 @@ steps:
 - label: ":nvidia: (L4) Quantization Kernels Shard %N"
   key: kernels-quantization-test
   device: l4
+  optional: true # L4 CI disabled
   num_devices: 1
   timeout_in_minutes: 30
   source_file_dependencies:
@@ -474,6 +476,7 @@ steps:
 - label: ":nvidia: (L4) MoE Kernels Shard %N"
   key: kernels-moe-test
   device: l4
+  optional: true # L4 CI disabled
   num_devices: 1
   timeout_in_minutes: 50
   source_file_dependencies:

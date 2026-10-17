@@ -7,6 +7,7 @@ steps:
   timeout_in_minutes: 25
   working_dir: "/vllm-workspace/tests"
   device: l4
+  optional: true # L4 CI disabled
   num_devices: 2
   source_file_dependencies:
   - vllm/distributed
@@ -40,6 +41,7 @@ steps:
 - label: ":nvidia: (L4) Sharded RDT Weight Transfer"
   key: sharded-rdt-weight-transfer
   device: l4
+  optional: true # L4 CI disabled
   timeout_in_minutes: 20
   working_dir: "/vllm-workspace/tests"
   num_devices: 1
@@ -82,6 +84,7 @@ steps:
   timeout_in_minutes: 45
   working_dir: "/vllm-workspace/tests"
   device: l4
+  optional: true # L4 CI disabled
   num_devices: 2
   source_file_dependencies:
   - vllm/distributed/
@@ -132,6 +135,7 @@ steps:
   timeout_in_minutes: 65
   working_dir: "/vllm-workspace/tests"
   device: l4
+  optional: true # L4 CI disabled
   num_devices: 2
   source_file_dependencies:
   - vllm/compilation/
@@ -178,6 +182,7 @@ steps:
   timeout_in_minutes: 30
   working_dir: "/vllm-workspace/tests"
   device: l4
+  optional: true # L4 CI disabled
   num_devices: 2
   source_file_dependencies:
   - vllm/distributed/
@@ -228,6 +233,7 @@ steps:
   timeout_in_minutes: 45
   working_dir: "/vllm-workspace"
   device: l4
+  optional: true # L4 CI disabled
   num_devices: 4
   source_file_dependencies:
   - vllm/distributed/
@@ -307,6 +313,7 @@ steps:
   timeout_in_minutes: 45
   working_dir: "/vllm-workspace/tests"
   device: l4
+  optional: true # L4 CI disabled
   num_devices: 4
   source_file_dependencies:
   - vllm/distributed/
@@ -361,6 +368,7 @@ steps:
   timeout_in_minutes: 70
   working_dir: "/vllm-workspace/tests"
   device: l4
+  optional: true # L4 CI disabled
   num_devices: 4
   source_file_dependencies:
   - vllm/distributed/
@@ -648,6 +656,7 @@ steps:
   timeout_in_minutes: 55
   working_dir: "/vllm-workspace/tests"
   device: l4
+  optional: true # L4 CI disabled
   num_devices: 4
   source_file_dependencies:
   - vllm/distributed/
@@ -690,6 +699,7 @@ steps:
   timeout_in_minutes: 45
   working_dir: "/vllm-workspace/tests"
   device: l4
+  optional: true # L4 CI disabled
   num_devices: 4
   source_file_dependencies:
   - vllm/v1/executor/ray_executor_v2.py

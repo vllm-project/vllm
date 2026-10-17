@@ -7,6 +7,7 @@ steps:
   timeout_in_minutes: 55
   working_dir: "/vllm-workspace/tests"
   device: l4
+  optional: true # L4 CI disabled
   num_devices: 4
   source_file_dependencies:
     - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
@@ -35,6 +36,7 @@ steps:
   timeout_in_minutes: 55
   working_dir: "/vllm-workspace/tests"
   device: l4
+  optional: true # L4 CI disabled
   num_devices: 4
   source_file_dependencies:
     - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
@@ -71,6 +73,7 @@ steps:
   timeout_in_minutes: 30
   working_dir: "/vllm-workspace/tests"
   device: l4
+  optional: true # L4 CI disabled
   num_devices: 4
   source_file_dependencies:
     - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
@@ -101,6 +104,7 @@ steps:
   timeout_in_minutes: 30
   working_dir: "/vllm-workspace/tests"
   device: l4
+  optional: true # L4 CI disabled
   num_devices: 4
   source_file_dependencies:
     - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
@@ -129,6 +133,7 @@ steps:
   timeout_in_minutes: 55
   working_dir: "/vllm-workspace/tests"
   device: l4
+  optional: true # L4 CI disabled
   num_devices: 4
   source_file_dependencies:
     - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
@@ -157,6 +162,7 @@ steps:
   timeout_in_minutes: 60
   working_dir: "/vllm-workspace/tests"
   device: l4
+  optional: true # L4 CI disabled
   num_devices: 4
   source_file_dependencies:
     - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
@@ -185,6 +191,7 @@ steps:
   timeout_in_minutes: 40
   working_dir: "/vllm-workspace/tests"
   device: l4
+  optional: true # L4 CI disabled
   num_devices: 2
   source_file_dependencies:
     - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
@@ -218,6 +225,7 @@ steps:
   timeout_in_minutes: 25
   working_dir: "/vllm-workspace/tests"
   device: l4
+  optional: true # L4 CI disabled
   num_devices: 2
   source_file_dependencies:
     - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
@@ -250,6 +258,7 @@ steps:
   timeout_in_minutes: 40
   working_dir: "/vllm-workspace/tests"
   device: l4
+  optional: true # L4 CI disabled
   num_devices: 2
   source_file_dependencies:
     - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
@@ -315,6 +324,7 @@ steps:
   timeout_in_minutes: 25
   working_dir: "/vllm-workspace/tests"
   device: l4
+  optional: true # L4 CI disabled
   num_devices: 2
   source_file_dependencies:
     - vllm/distributed/kv_transfer/kv_connector/v1/nixl/

@@ -99,6 +99,7 @@ steps:
 - label: ":nvidia: (L4) Granite Language Model Compatibility"
   key: language-models-tests-granite-l4-compatibility
   device: l4
+  optional: true # L4 CI disabled
   num_devices: 1
   timeout_in_minutes: 65
   source_file_dependencies:

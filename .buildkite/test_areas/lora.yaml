@@ -31,6 +31,7 @@ steps:
   key: lora-tp-distributed
   timeout_in_minutes: 25
   device: l4
+  optional: true # L4 CI disabled
   num_devices: 4
   parallelism: 4
   source_file_dependencies:
