@@ -12,6 +12,7 @@ import pytest
 import torch
 
 from tests.v1.core.test_prefix_caching import make_kv_cache_manager, make_request
+from vllm.distributed.kv_events import BlockStored
 from vllm.distributed.kv_transfer.kv_connector.v1.base import SupportsHMA
 from vllm.model_executor.layers.mamba.checkpoint import (
     compute_mamba_prefill_checkpoints,
@@ -22,6 +23,7 @@ from vllm.v1.core.kv_cache_utils import (
     get_block_hash,
     get_group_id,
     init_none_hash,
+    maybe_convert_block_hash,
     resolve_cache_hit_alignment_tokens,
 )
 from vllm.v1.core.sched.scheduler import Scheduler
@@ -103,6 +105,7 @@ def make_full_mamba_manager(
     use_eagle: bool = False,
     num_speculative_blocks: int = 0,
     num_prefill_checkpoint_blocks: int = 0,
+    enable_kv_cache_events: bool = False,
 ):
     mamba_group = KVCacheGroupSpec(
         ["mamba"],
@@ -146,6 +149,7 @@ def make_full_mamba_manager(
         scheduler_block_size=scheduler_block_size,
         hash_block_size=hash_block_size,
         use_eagle=use_eagle,
+        enable_kv_cache_events=enable_kv_cache_events,
     )
 
 
@@ -1590,6 +1594,57 @@ def test_hybrid_full_attention_partial_hash_hit_uses_cow():
     assert partial_full_block[0].ref_cnt == 1
     manager.block_pool.free_blocks(retained)
     assert partial_full_block[0].ref_cnt == 0
+
+
+@pytest.mark.parametrize("dcp_world_size", [1, 2, 4])
+def test_full_attention_tail_events_preserve_local_lookup(dcp_world_size: int):
+    hash_block_size = 2
+    full_block_size = 8 * dcp_world_size
+    manager = make_full_mamba_manager(
+        dcp_world_size=dcp_world_size,
+        full_block_size=8,
+        enable_kv_cache_events=True,
+    )
+    assert manager.coordinator.enable_partial_hash_hits
+    cached_prefix_tokens = full_block_size + 6
+    producer_tokens = list(range(cached_prefix_tokens + 1))
+    producer = make_request("producer", producer_tokens, hash_block_size, sha256)
+    computed, num_computed, _ = manager.get_computed_blocks(producer)
+    assert (
+        manager.allocate_slots(producer, len(producer_tokens), num_computed, computed)
+        is not None
+    )
+
+    events = [
+        event
+        for event in manager.take_events()
+        if isinstance(event, BlockStored) and event.group_idx == 0
+    ]
+    assert len(events) == 2
+    full_event, tail_event = events
+    tail_hashes = producer.block_hashes[full_block_size // hash_block_size :]
+    assert tail_event.parent_block_hash == full_event.block_hashes[-1]
+    assert tail_event.block_hashes == [
+        maybe_convert_block_hash(block_hash) for block_hash in tail_hashes
+    ]
+    assert tail_event.token_ids == producer_tokens[full_block_size:cached_prefix_tokens]
+    assert tail_event.block_size == hash_block_size
+    assert tail_event.extra_keys == [None] * len(tail_hashes)
+    for block_hash in tail_hashes[:-1]:
+        assert manager.block_pool.get_cached_block(block_hash, [0]) is None
+    assert manager.block_pool.get_cached_block(tail_hashes[-1], [0]) is not None
+
+    manager.free(producer)
+    manager.new_step_starts()
+    consumer = make_request(
+        "consumer",
+        producer_tokens[: full_block_size + 4] + [100],
+        hash_block_size,
+        sha256,
+    )
+    blocks, num_computed, _, _ = manager.get_computed_blocks_for_connector(consumer)
+    assert num_computed == full_block_size
+    assert len(blocks.blocks[0]) == 1
 
 
 def test_hybrid_partial_hit_cow_target_starts_uncached():
