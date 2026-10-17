@@ -104,6 +104,137 @@ def test_dspark_adaptive_verification_separates_graph_cache():
     assert config.compute_hash() != fixed_hash
 
 
+def test_use_multi_module_mtp_detects_qwen3_5_mtp_num_hidden_layers():
+    # Qwen3.5 MTP declares its module count via `mtp_num_hidden_layers`, unlike
+    # DeepSeek-style MTP (`num_nextn_predict_layers`). Multi-layer Qwen3.5 MTP
+    # must still route to the multi-module speculator so a distinct module is
+    # used per draft step (otherwise only module 0 is ever used).
+    config = object.__new__(SpeculativeConfig)
+    config.method = "mtp"
+    config.num_speculative_tokens = 2
+
+    config.draft_model_config = SimpleNamespace(
+        hf_config=SimpleNamespace(mtp_num_hidden_layers=2)
+    )
+    assert config.use_multi_module_mtp() is True
+
+    config.draft_model_config = SimpleNamespace(
+        hf_config=SimpleNamespace(mtp_num_hidden_layers=1)
+    )
+    assert config.use_multi_module_mtp() is False
+
+    # Multimodal Qwen3.5 nests `mtp_num_hidden_layers` under the text config;
+    # the top-level config does not carry it. Routing must still detect it via
+    # get_hf_text_config(), otherwise multi-layer MTP silently falls back to
+    # the single-module speculator (reusing module 0 every draft step).
+    text_cfg = SimpleNamespace(mtp_num_hidden_layers=2, num_attention_heads=8)
+    config.draft_model_config = SimpleNamespace(
+        hf_config=SimpleNamespace(get_text_config=lambda: text_cfg)
+    )
+    assert config.use_multi_module_mtp() is True
+
+    text_cfg_single = SimpleNamespace(mtp_num_hidden_layers=1, num_attention_heads=8)
+    config.draft_model_config = SimpleNamespace(
+        hf_config=SimpleNamespace(get_text_config=lambda: text_cfg_single)
+    )
+    assert config.use_multi_module_mtp() is False
+
+
+@pytest.mark.parametrize(
+    ("module_path", "class_name"),
+    [
+        ("vllm.model_executor.models.qwen3_5_mtp", "Qwen3_5MTP"),
+        ("vllm.model_executor.models.qwen3_next_mtp", "Qwen3NextMTP"),
+    ],
+)
+def test_qwen_mtp_forward_threads_spec_step_idx(module_path, class_name):
+    # Qwen3.5 and Qwen3Next MTP select the draft module per step via
+    # spec_step_idx (self.layers[spec_step_idx % num_mtp_layers]); forward must
+    # pass it through to the inner predictor. Dropping it pinned every step to
+    # module 0.
+    import importlib
+
+    cls = getattr(importlib.import_module(module_path), class_name)
+
+    captured = {}
+
+    def fake_model(
+        input_ids,
+        positions,
+        hidden_states,
+        intermediate_tensors,
+        inputs_embeds,
+        spec_step_idx,
+    ):
+        captured["spec_step_idx"] = spec_step_idx
+        return hidden_states
+
+    model = object.__new__(cls)
+    object.__setattr__(model, "model", fake_model)
+    out = model.forward(
+        input_ids=None,
+        positions=None,
+        hidden_states="h",
+        spec_step_idx=3,
+    )
+    assert out == "h"
+    assert captured["spec_step_idx"] == 3
+
+
+@pytest.mark.parametrize(
+    ("module_path", "class_name"),
+    [
+        ("vllm.model_executor.models.qwen3_5_mtp", "Qwen3_5MultiTokenPredictor"),
+        ("vllm.model_executor.models.qwen3_next_mtp", "Qwen3NextMultiTokenPredictor"),
+    ],
+)
+def test_qwen_mtp_predictor_selects_distinct_module_per_step(
+    monkeypatch, module_path, class_name
+):
+    # With >1 MTP layer, each draft step must use its own module via
+    # self.layers[spec_step_idx % num_mtp_layers]. This is the behavior the
+    # forward fix enables end to end: without the threaded spec_step_idx every
+    # step collapses onto module 0.
+    import importlib
+
+    mod = importlib.import_module(module_path)
+    cls = getattr(mod, class_name)
+
+    selected: list[int] = []
+
+    class FakeLayer:
+        use_attn_reduce_scatter_for_moe = False
+
+        def __init__(self, idx: int):
+            self.idx = idx
+
+        def __call__(self, positions, hidden_states, residual):
+            selected.append(self.idx)
+            return hidden_states, residual
+
+    monkeypatch.setattr(
+        mod,
+        "get_pp_group",
+        lambda: SimpleNamespace(is_first_rank=False, is_last_rank=True),
+    )
+
+    predictor = object.__new__(cls)
+    predictor.num_mtp_layers = 2
+    predictor.layers = [FakeLayer(0), FakeLayer(1)]
+    predictor.norm = lambda hidden_states, residual: (hidden_states, None)
+
+    intermediate_tensors = {"hidden_states": "h", "residual": "r"}
+    for step in range(4):
+        predictor.forward(
+            input_ids=None,
+            positions=None,
+            hidden_states="h",
+            intermediate_tensors=intermediate_tensors,
+            spec_step_idx=step,
+        )
+    assert selected == [0, 1, 0, 1]
+
+
 def _write_json(path: Path, value: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value), encoding="utf-8")
