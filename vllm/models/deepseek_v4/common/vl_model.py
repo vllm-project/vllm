@@ -79,6 +79,24 @@ def _make_deepseek_v4_vl_weights_mapper(
     )
 
 
+def stream_language_model_first(
+    weights: Iterable[tuple[str, torch.Tensor]],
+) -> Iterable[tuple[str, torch.Tensor]]:
+    """Yield ``language_model.*`` weights as they arrive, then the rest.
+
+    Keeps the language model's weights in one contiguous group without
+    materializing the stream. Deferred weights are cloned so they do not keep
+    the loader's per-shard storage alive until the end of the load.
+    """
+    rest = []
+    for name, tensor in weights:
+        if name.startswith("language_model."):
+            yield name, tensor
+        else:
+            rest.append((name, tensor.clone()))
+    yield from rest
+
+
 @MULTIMODAL_REGISTRY.register_processor(
     DeepseekV4VLMultiModalProcessor,
     info=DeepseekV4VLProcessingInfo,
@@ -334,7 +352,7 @@ class DeepseekV4ForConditionalGeneration(
         if child_finalizes:
             # A child which finalizes inside load_weights must see all of its
             # weights in one contiguous delegation from AutoWeightsLoader.
-            mapped = iter(sorted(mapped, key=lambda x: x[0]))
+            mapped = stream_language_model_first(mapped)
         loader = AutoWeightsLoader(self)
         loaded_params = loader.load_weights(mapped)
         self._weights_finalized = child_finalizes
