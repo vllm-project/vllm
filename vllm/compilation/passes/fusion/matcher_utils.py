@@ -396,9 +396,10 @@ class MatcherQuantFP8(MatcherCustomOp):
         if match_rocm_aiter:
             if quant_key.scale.group_shape.is_per_tensor():
                 assert quant_key.scale.static, (
-                    "ROCm aiter fusion only supports static per tensor quantization"
+                    "ROCm aiter fusion pass only supports static per-tensor "
+                    "quantization"
                 )
-                self.QUANT_OP = torch.ops.vllm.rocm_aiter_per_tensor_quant.default
+                self.QUANT_OP = rocm_aiter_ops.get_per_tensor_quant_op()
             elif quant_key.scale.group_shape.is_per_token():
                 self.QUANT_OP = rocm_aiter_ops.get_per_token_quant_op()
             else:
@@ -435,19 +436,23 @@ class MatcherQuantFP8(MatcherCustomOp):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         quant_key_group_shape = self.quant_key.scale.group_shape
         if quant_key_group_shape == GroupShape.PER_TENSOR:
-            result = torch.empty_like(input, dtype=self.quant_key.dtype)
-            _, result, scale = auto_functionalized(
-                self.QUANT_OP, out=result, x=input, scale=scale, is_dynamic=False
+            # rocm_aiter_per_tensor_quant mutates `out` and `scale` and returns
+            # None, so it has to be matched through auto_functionalized.
+            assert scale is not None
+            out = torch.empty_like(input, dtype=self.quant_key.dtype)
+            result = auto_functionalized(
+                self.QUANT_OP, out=out, x=input, scale=scale, is_dynamic=False
             )
-            return result, scale
+            # `scale` is mutable, so its functionalized output is a distinct
+            # value; return it to keep the quant node inside the match.
+            return result[1], result[2]
         if quant_key_group_shape == GroupShape.PER_TOKEN:
             return self.QUANT_OP(  # type: ignore[no-any-return]
                 x=input,
                 quant_dtype=self.quant_key.dtype,
                 scale=scale,
             )
-        else:
-            return self.QUANT_OP(input, quant_key_group_shape.col)  # type: ignore[no-any-return]
+        return self.QUANT_OP(input, quant_key_group_shape.col)  # type: ignore[no-any-return]
 
     def forward_custom(
         self,
