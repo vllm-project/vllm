@@ -37,6 +37,7 @@ from .model import (
     _num_fused_shared_experts,
     _try_load_fp8_attn_proj,
     _try_load_fp8_indexer_wk,
+    _try_load_nvfp4_attn_proj,
     get_spec_layer_idx_from_weight_name,
 )
 
@@ -356,6 +357,15 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
             # target model. The model holds fused_qkv_a_proj / o_proj in BF16,
             # so the checkpoint's block-FP8 weight + weight_scale_inv for these
             # has no param home and would KeyError without this dequant.
+            if _try_load_nvfp4_attn_proj(
+                name,
+                loaded_weight,
+                _pending_wk_fp8,
+                params_dict,
+                loaded_params,
+                kv_a_pad_size,
+            ):
+                continue
             if _try_load_fp8_attn_proj(
                 name,
                 loaded_weight,
