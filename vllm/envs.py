@@ -107,6 +107,8 @@ if TYPE_CHECKING:
     VERBOSE: bool = False
     VLLM_ALLOW_LONG_MAX_MODEL_LEN: bool = False
     VLLM_HTTP_TIMEOUT_KEEP_ALIVE: int = 5  # seconds
+    VLLM_ANTHROPIC_STREAM_KEEPALIVE: Literal["ping", "comment", "off"] = "ping"
+    VLLM_ANTHROPIC_STREAM_KEEPALIVE_INTERVAL_S: float = 15.0
     VLLM_MAX_N_SEQUENCES: int = 16384
     VLLM_MAX_COMPLETION_PROMPTS: int = 1024
     VLLM_MAX_STOP_STRINGS: int = 4
@@ -1125,6 +1127,18 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Timeout in seconds for keeping HTTP connections alive in API server
     "VLLM_HTTP_TIMEOUT_KEEP_ALIVE": lambda: int(
         os.environ.get("VLLM_HTTP_TIMEOUT_KEEP_ALIVE", "5")
+    ),
+    # What the Anthropic /v1/messages adapter sends while a streaming
+    # response is waiting on the engine (e.g. a long prefill), so idle
+    # timeouts on proxies and clients do not cut the request off:
+    # "ping" (Anthropic `ping` events), "comment" (an SSE comment line),
+    # or "off".
+    "VLLM_ANTHROPIC_STREAM_KEEPALIVE": lambda: os.environ.get(
+        "VLLM_ANTHROPIC_STREAM_KEEPALIVE", "ping"
+    ).lower(),
+    # Seconds of stream inactivity before a keepalive is sent.
+    "VLLM_ANTHROPIC_STREAM_KEEPALIVE_INTERVAL_S": lambda: float(
+        os.environ.get("VLLM_ANTHROPIC_STREAM_KEEPALIVE_INTERVAL_S", "15")
     ),
     # Maximum allowed value for the `n` sampling parameter (number of output
     # sequences per request). Limits resource consumption to prevent

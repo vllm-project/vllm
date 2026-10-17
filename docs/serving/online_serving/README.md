@@ -28,6 +28,7 @@ We currently support the following OpenAI APIs:
 ## Anthropic APIs
 
 - Anthropic messages API (`/v1/messages`, `/v1/messages/count_tokens`)
+    - While a streaming response is waiting on the engine (for example a long prefill), the server sends Anthropic `ping` events so idle timeouts on proxies and clients do not cut the request off. Configure with `VLLM_ANTHROPIC_STREAM_KEEPALIVE` (`ping`, `comment`, `off`) and `VLLM_ANTHROPIC_STREAM_KEEPALIVE_INTERVAL_S` (default 15).
 
 ## Cohere APIs
 
