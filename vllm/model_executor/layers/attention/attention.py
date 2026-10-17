@@ -488,8 +488,8 @@ class Attention(nn.Module, AttentionLayerBase):
     def forward(
         self,
         query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
+        key: torch.Tensor | None,
+        value: torch.Tensor | None,
         # For some alternate attention backends like MLA the attention output
         # shape does not match the query shape, so we optionally let the model
         # definition specify the output tensor shape.
@@ -766,8 +766,8 @@ direct_register_custom_op(
 @maybe_transfer_kv_layer
 def unified_attention_with_output(
     query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
+    key: torch.Tensor | None,
+    value: torch.Tensor | None,
     output: torch.Tensor,
     layer_name: LayerNameType,
     output_scale: torch.Tensor | None = None,
