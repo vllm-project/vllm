@@ -12,7 +12,7 @@ DEEPGEMM_GIT_REPO="https://github.com/vllm-project/DeepGEMM.git"
 # Mega MoE activations, NVFP4 Mega MoE, BF16/FP8/NVFP4 swiglustep, and
 # F8_128x4 SFs for the FP8 einsum output (vllm-project/DeepGEMM#40).
 # Uses the PyTorch 2.11 stable ABI and CPython 3.10 limited API.
-DEEPGEMM_GIT_REF="4ffc70d8574af26b4544373a2457ff4ee2c06225"
+DEEPGEMM_GIT_REF="727f847082d2e7946f70dc02b94949db206310d3"
 WHEEL_DIR=""
 
 # Parse command line arguments

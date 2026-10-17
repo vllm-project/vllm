@@ -35,7 +35,7 @@ else()
   # Mega MoE, plus swiglustep for BF16/FP8/NVFP4 Mega MoE and F8_128x4
   # SFs for the FP8 einsum output (vllm-project/DeepGEMM#40).
   # Uses the PyTorch 2.11 stable ABI and CPython 3.10 limited API.
-  set(_DEEPGEMM_UPSTREAM_TAG "4ffc70d8574af26b4544373a2457ff4ee2c06225")
+  set(_DEEPGEMM_UPSTREAM_TAG "727f847082d2e7946f70dc02b94949db206310d3")
 
   set(_deepgemm_fc_root "${FETCHCONTENT_BASE_DIR}")
   if(NOT _deepgemm_fc_root)
