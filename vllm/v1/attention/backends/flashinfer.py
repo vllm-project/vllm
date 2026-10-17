@@ -1102,7 +1102,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             # attention eagerly with any batch size, and a new split-KV config
             # would otherwise JIT-compile mid-serving.
             start = time.perf_counter()
-            mem_before = torch.cuda.memory_allocated(self.device)
+            mem_before = torch.accelerator.memory_allocated(self.device)
             for q_len in sorted({1, 1 + num_spec_tokens}):
                 for num_decodes in range(1, max_num_reqs + 1):
                     self._get_prims_ts_decode_wrapper(num_decodes, q_len)
@@ -1110,7 +1110,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 "Planned %d PrimTS decode batch sizes in %.1f s (%.1f MiB).",
                 len(self._prims_ts_decode_wrappers),
                 time.perf_counter() - start,
-                (torch.cuda.memory_allocated(self.device) - mem_before) / 2**20,
+                (torch.accelerator.memory_allocated(self.device) - mem_before) / 2**20,
             )
         self.paged_kv_indptr = CpuGpuBuffer(
             max_num_reqs + 1, dtype=torch.int32, device=self.device, pin_memory=False
