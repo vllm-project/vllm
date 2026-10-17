@@ -141,3 +141,26 @@ The coordinator process also runs in this scenario, co-located with the DP rank 
 </figure>
 
 In the above diagram, each of the dotted boxes corresponds to a separate launch of `vllm serve` - these could be separate Kubernetes pods, for example.
+
+## DP-aware routing with vLLM Router
+
+The modes above either spread requests across the DP ranks (internal/hybrid load balancing) or treat each rank as a separate endpoint (external load balancing). A third option is to put an external router in front of a single DP endpoint and let it choose the rank per request. The [vLLM Router](https://github.com/vllm-project/router) supports this via *DP-aware routing*.
+
+Tell the router how many internal DP ranks are exposed behind each worker URL with `--intra-node-data-parallel-size N`. The router then creates one logical worker per rank and forwards the selected rank through the `X-data-parallel-rank` header, which the vLLM API server uses to dispatch the request to that rank. DP-aware routing is enabled automatically when `N > 1` (default `1`), and it requires the router's `--api-key` to authorize against the workers.
+
+Combining DP-aware routing with a session-affinity policy such as `--policy consistent_hash` keeps a session's requests on the same rank, so its prefix/KV cache is reused across turns - useful for multi-turn conversational and agentic workloads.
+
+```bash
+# One vLLM deployment exposing 4 DP ranks on a single endpoint
+vllm serve $MODEL --data-parallel-size 4 --port 8000
+
+# Router in front, with DP-aware, session-affinity routing
+vllm-router \
+  --host 0.0.0.0 --port 3001 \
+  --worker-urls http://localhost:8000 \
+  --intra-node-data-parallel-size 4 \
+  --policy consistent_hash \
+  --api-key $ROUTER_API_KEY
+```
+
+Requests are keyed to a session by `X-Session-ID`, `X-User-ID`, `X-Tenant-ID`, or the `session_params.session_id` / `user` request fields; see the [vLLM Router load balancing documentation](https://github.com/vllm-project/router/blob/main/docs/load_balancing/README.md) for the full policy list and worker URL formats.
