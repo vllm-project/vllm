@@ -11,7 +11,7 @@ from vllm.config import VllmConfig
 from vllm.logger import configure_logging_from_args, init_logger
 
 from ..app import build_app
-from ..launcher import serve_http, setup_server
+from ..launcher import remove_unix_socket_file, serve_http, setup_server
 from ..utils.server_utils import get_uvicorn_log_config
 from .app_state import init_render_app_state
 
@@ -103,6 +103,8 @@ async def run_launch_fastapi(args: argparse.Namespace) -> None:
         await shutdown_task
     finally:
         sock.close()
+        if args.uds:
+            remove_unix_socket_file(args.uds)
 
 
 if __name__ == "__main__":
