@@ -32,5 +32,15 @@ class CPULoadStoreSpec(BlockIDsLoadStoreSpec):
 class CPUOffloadingInfo(ConfigInfo):
     """Static facts about the CPU offload tier."""
 
-    # Chunk slots in the tier. Chunks, not GPU blocks.
+    # Chunk slots in the tier. Chunks, not GPU blocks. See cpu_blocks_per_chunk.
     cpu_num_chunks: int
+    # GPU blocks for each chunk: the chunk-to-block conversion factor.
+    cpu_blocks_per_chunk: int
+    # Page-aligned bytes of one chunk, or None from a caller that does not
+    # report it. With cpu_num_chunks it gives the exact size of the tier in
+    # bytes, the only capacity that holds for every model shape.
+    cpu_kv_bytes_per_chunk: int | None
+    # Upper bound on the KV tokens the tier holds, over the request lengths up
+    # to max_model_len. None when max_model_len is not known. See
+    # _capacity_tokens_at_max_len in cpu/manager.py.
+    cpu_capacity_tokens_at_max_len: int | None
