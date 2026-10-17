@@ -89,11 +89,13 @@ class ServingStructuredDecisions(BaseServingDecisions):
                 if raw_request is None
                 else await self._get_trace_headers(raw_request.headers)
             )
+            state = self.strategy.render_state(request.state)
+            self._log_inputs(request_id, state, None, lora_request)
             read_fn = self.strategy.read_joint if joint else self.strategy.read
             reads = await read_fn(
                 questions,
                 request.instructions,
-                self.strategy.render_state(request.state),
+                state,
                 request_id=request_id,
                 chat_template_kwargs=request.chat_template_kwargs,
                 lora_request=lora_request,
