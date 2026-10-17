@@ -154,6 +154,76 @@ class InputProcessor:
             if not supported_generation_tasks:
                 raise VLLMValidationError("This model does not support generation")
 
+            aux_output_enabled = bool(
+                params.extra_args and params.extra_args.get("aux_output_enabled", False)
+            )
+            if aux_output_enabled:
+                aux_config = self.vllm_config.aux_output_config
+                if (
+                    params.logprobs is not None
+                    and not aux_config.enable_return_logprobs
+                ):
+                    raise VLLMValidationError(
+                        "aux_output_enabled with logprobs requires "
+                        "aux_output_config.enable_return_logprobs",
+                        parameter="aux_output_enabled",
+                    )
+                if (
+                    params.prompt_logprobs is not None
+                    and not aux_config.enable_return_prompt_logprobs
+                ):
+                    raise VLLMValidationError(
+                        "aux_output_enabled with prompt_logprobs requires "
+                        "aux_output_config.enable_return_prompt_logprobs",
+                        parameter="aux_output_enabled",
+                    )
+                if params.logprobs is None and params.prompt_logprobs is None:
+                    raise VLLMValidationError(
+                        "aux_output_enabled requires logprobs or prompt_logprobs",
+                        parameter="aux_output_enabled",
+                    )
+                if params.logprobs == -1 or params.prompt_logprobs == -1:
+                    raise VLLMValidationError(
+                        "aux_output_enabled does not support full-vocabulary logprobs",
+                        parameter="aux_output_enabled",
+                    )
+                if self.model_config.logprobs_mode != "raw_logprobs":
+                    raise VLLMValidationError(
+                        "aux_output_enabled currently requires "
+                        "logprobs_mode='raw_logprobs'",
+                        parameter="aux_output_enabled",
+                    )
+                if (
+                    params.logprob_token_ids is not None
+                    or params.prompt_logprob_token_ids is not None
+                ):
+                    raise VLLMValidationError(
+                        "aux_output_enabled does not yet support custom logprob "
+                        "token-id layouts",
+                        parameter="aux_output_enabled",
+                    )
+                if (
+                    params.logprobs is not None
+                    and params.prompt_logprobs is not None
+                    and params.logprobs != params.prompt_logprobs
+                ):
+                    raise VLLMValidationError(
+                        "aux_output_enabled requires logprobs and prompt_logprobs "
+                        "to use the same top-k width",
+                        parameter="aux_output_enabled",
+                    )
+                if params.prompt_logprobs is not None and params.logprobs is None:
+                    raise VLLMValidationError(
+                        "aux_output_enabled with prompt_logprobs also requires "
+                        "logprobs with the same top-k width",
+                        parameter="aux_output_enabled",
+                    )
+                if self.vllm_config.weight_transfer_config is not None:
+                    raise VLLMValidationError(
+                        "aux_output_enabled is incompatible with online weight updates",
+                        parameter="aux_output_enabled",
+                    )
+
             params.verify(
                 self.model_config,
                 self.speculative_config,

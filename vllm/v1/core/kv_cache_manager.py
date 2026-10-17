@@ -148,6 +148,7 @@ class KVCacheManager:
         enable_mamba_shared_prefix_checkpoint: bool = False,
     ) -> None:
         self.max_model_len = max_model_len
+        self.scheduler_block_size = scheduler_block_size
         # When unset, fall back to `max_model_len` so the recycling-aware cap
         # collapses to the prior (uncapped) admission behavior. The scheduler
         # always supplies the real value at runtime.
@@ -279,10 +280,9 @@ class KVCacheManager:
                   the junction and defeat cross-request reuse.
 
         """
-        # We skip finding the prefix cache hit when prefix caching is
-        # disabled or the request is marked as skipping kv cache read
-        # (which happens when the request requires prompt logprobs
-        # or calls a pooling model with all pooling).
+        # Prompt-logprob Auxoutput requests may read cached KV. The connector
+        # supplies the cached prompt score rows; ordinary prompt-logprob
+        # requests retain the legacy cache bypass set by SamplingParams.
         if not self.prefix_cache_lookup_enabled(request):
             return self.empty_kv_cache_blocks, 0, 0
 
@@ -293,6 +293,20 @@ class KVCacheManager:
         # num_computed_tokens to be block-size aligned. Removing this limitation
         # could slightly improve performance in the future.
         max_cache_hit_length = request.num_tokens - 1
+        sampling_params = request.sampling_params
+        if (
+            sampling_params is not None
+            and sampling_params.prompt_logprobs is not None
+            and sampling_params.extra_args
+            and sampling_params.extra_args.get("aux_output_enabled", False)
+        ):
+            # A prompt replay artifact's final row is keyed by the first token
+            # after its block. That token may differ from the request that
+            # populated the KV cache, so do not reuse the final KV block.
+            max_cache_hit_length = min(
+                max_cache_hit_length,
+                max(0, request.num_prompt_tokens - self.scheduler_block_size),
+            )
         computed_blocks, num_new_computed_tokens, num_uncached = (
             self.coordinator.find_longest_cache_hit(
                 request.block_hashes, max_cache_hit_length

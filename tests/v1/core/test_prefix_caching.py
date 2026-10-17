@@ -90,6 +90,7 @@ def make_request(
     mm_positions: list[PlaceholderRange] | None = None,
     mm_hashes: list[str] | None = None,
     prompt_logprobs: int | None = None,
+    aux_output_enabled: bool = False,
     cache_salt: str | None = None,
     lora_request: LoRARequest | None = None,
     session_id: str | None = None,
@@ -106,7 +107,11 @@ def make_request(
             )
             mm_features.append(mm_feature)
 
-    sampling_params = SamplingParams(max_tokens=17, prompt_logprobs=prompt_logprobs)
+    sampling_params = SamplingParams(
+        max_tokens=17,
+        prompt_logprobs=prompt_logprobs,
+        extra_args={"aux_output_enabled": True} if aux_output_enabled else None,
+    )
     sampling_params.update_from_generation_config({}, eos_token_id=100)
 
     return Request(
@@ -2815,6 +2820,38 @@ def test_prefill_plp():
         assert manager.block_pool.blocks[block_id].ref_cnt == 1
 
     manager.free(req2)
+
+
+def test_prompt_logprobs_aux_drops_boundary_cache_block():
+    block_size = 16
+    manager = make_kv_cache_manager(
+        make_kv_cache_config(block_size, 8),
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+    common_token_ids = [i for i in range(2) for _ in range(block_size)]
+
+    # Populate two complete KV blocks. The next request changes the token just
+    # after the cached prefix, which changes the auxiliary artifact key for
+    # the final cached block.
+    warm = make_request("warm", common_token_ids, block_size, sha256)
+    computed, num_computed, _ = manager.get_computed_blocks(warm)
+    manager.allocate_slots(warm, len(common_token_ids), num_computed, computed)
+    manager.free(warm)
+
+    replay = make_request(
+        "replay",
+        common_token_ids + [99],
+        block_size,
+        sha256,
+        prompt_logprobs=5,
+        aux_output_enabled=True,
+    )
+    _, num_computed, _ = manager.get_computed_blocks(replay)
+
+    assert num_computed == block_size
+    manager.free(replay)
 
 
 def test_decode():

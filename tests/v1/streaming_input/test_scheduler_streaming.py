@@ -211,6 +211,7 @@ class TestStreamingScheduler(unittest.TestCase):
 
     def test_update_request_as_session(self):
         scheduler = create_scheduler()
+        scheduler.aux_output_connector = MagicMock()
 
         session = DummyRequest(
             request_id="session",
@@ -227,6 +228,9 @@ class TestStreamingScheduler(unittest.TestCase):
         update = StreamingUpdate.from_request(new_request)
         scheduler._update_request_as_session(session, update)
 
+        scheduler.aux_output_connector.release_request.assert_called_once_with(
+            session
+        )
         assert session.prompt_token_ids == [1, 2, 3, 4, 5, 6]
         assert session._all_token_ids == [1, 2, 3, 4, 5, 6]
         assert session.sampling_params.max_tokens == 10
