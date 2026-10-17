@@ -317,21 +317,34 @@ class NixlBaseConnectorScheduler:
 
         # Only start the listener when we have metadata to serve.
         if self._nixl_handshake_listener_t is None:
-            ready_event = threading.Event()
-            self._nixl_handshake_listener_t = threading.Thread(
-                target=self._nixl_handshake_listener,
-                args=(
-                    encoded_data,
-                    ready_event,
-                    self._stop_event,
-                    self.side_channel_host,
-                    self.side_channel_port,
-                ),
-                daemon=True,
-                name="nixl_handshake_listener",
-            )
-            self._nixl_handshake_listener_t.start()
-            ready_event.wait()  # Wait for listener ZMQ socket to be ready.
+            self._start_handshake_listener(encoded_data)
+
+    def _start_handshake_listener(
+        self, encoded_data: dict[tuple[int, int], bytes]
+    ) -> None:
+        ready_event = threading.Event()
+        self._nixl_handshake_listener_t = threading.Thread(
+            target=self._nixl_handshake_listener,
+            args=(
+                encoded_data,
+                ready_event,
+                self._stop_event,
+                self.side_channel_host,
+                self.side_channel_port,
+            ),
+            daemon=True,
+            name="nixl_handshake_listener",
+        )
+        self._nixl_handshake_listener_t.start()
+        # Wait for listener ZMQ socket to be ready.
+        while not ready_event.wait(timeout=1.0):
+            if not self._nixl_handshake_listener_t.is_alive():
+                raise RuntimeError(
+                    "NIXL handshake listener failed to start on "
+                    f"{self.side_channel_host}:{self.side_channel_port}. "
+                    "If the port is in use, set VLLM_NIXL_SIDE_CHANNEL_PORT "
+                    "to a free base port."
+                )
 
     @staticmethod
     def _nixl_handshake_listener(

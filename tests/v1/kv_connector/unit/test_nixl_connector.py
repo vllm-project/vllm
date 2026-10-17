@@ -5,6 +5,7 @@ import contextlib
 import inspect
 import os
 import queue
+import socket
 import tempfile
 import textwrap
 import threading
@@ -2873,6 +2874,29 @@ def test_shutdown_cleans_up_resources(default_vllm_config, dist_init):
         assert mock_dereg.call_count == 2
         mock_dereg.assert_any_call("desc1")
         mock_dereg.assert_any_call("desc2")
+
+
+@pytest.mark.cpu_test
+@pytest.mark.timeout(60)
+def test_handshake_listener_bind_failure_raises():
+    """A side-channel port that is already in use fails startup instead of
+    blocking it forever."""
+    vllm_config = create_vllm_config()
+    scheduler = NixlConnectorScheduler(
+        vllm_config,
+        vllm_config.kv_transfer_config.engine_id,
+        make_kv_cache_config(block_size=16),
+    )
+    payload = NixlHandshakePayload(compatibility_hash="", agent_metadata_bytes=b"")
+    with socket.socket() as occupier:
+        occupier.bind(("127.0.0.1", 0))
+        occupier.listen()
+        scheduler.side_channel_host = "127.0.0.1"
+        scheduler.side_channel_port = occupier.getsockname()[1]
+        with pytest.raises(
+            RuntimeError, match=f"127.0.0.1:{scheduler.side_channel_port}"
+        ):
+            scheduler.set_xfer_handshake_metadata({(0, 0): payload})
 
 
 # ── TTL-based remote engine eviction tests ──────────────────────────
