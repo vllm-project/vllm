@@ -376,3 +376,51 @@ fn joins_text_parts_with_reference_separator_and_preserves_literal_tags() {
     expect!["<｜begin▁of▁sentence｜><｜User｜>first\n\n<｜DSML｜invoke name=\"literal\"><｜Assistant｜></think>"]
         .assert_eq(&render(&request));
 }
+
+fn final_assistant_request(mode: GenerationPromptMode) -> ChatRequest {
+    let mut request = ChatRequest {
+        messages: vec![
+            ChatMessage::user("question"),
+            ChatMessage::assistant_text("```python\ndef fib(n):"),
+        ],
+        ..ChatRequest::for_test()
+    };
+    request.chat_options.generation_prompt_mode = mode;
+    request
+}
+
+#[test]
+fn final_assistant_opens_new_turn_when_generation_prompt_enabled() {
+    let rendered = render(&final_assistant_request(
+        GenerationPromptMode::StartNewAssistant,
+    ));
+    assert!(
+        rendered.ends_with("def fib(n):<｜end▁of▁sentence｜><｜Assistant｜><think>"),
+        "{rendered}"
+    );
+}
+
+#[test]
+fn final_assistant_opens_closed_thinking_turn_in_chat_mode() {
+    let mut request = final_assistant_request(GenerationPromptMode::StartNewAssistant);
+    request.chat_options.template_kwargs.insert("thinking".into(), json!(false));
+    assert!(render(&request).ends_with("def fib(n):<｜end▁of▁sentence｜><｜Assistant｜></think>"));
+}
+
+#[test]
+fn final_assistant_continuation_and_no_generation_prompt_are_unchanged() {
+    let cont = render(&final_assistant_request(
+        GenerationPromptMode::ContinueFinalAssistant,
+    ));
+    assert!(
+        cont.ends_with("<｜Assistant｜><think></think>```python\ndef fib(n):"),
+        "{cont}"
+    );
+    let closed = render(&final_assistant_request(
+        GenerationPromptMode::NoGenerationPrompt,
+    ));
+    assert!(
+        closed.ends_with("def fib(n):<｜end▁of▁sentence｜>"),
+        "{closed}"
+    );
+}

@@ -256,6 +256,28 @@ pub(super) fn render_request_with_media_order(
                     current_render_index >= last_user_render_index,
                 );
             }
+        } else if matches!(message, ChatMessage::Assistant { .. })
+            && request.chat_options.add_generation_prompt()
+            && next_rendered_entry(
+                request.messages.as_slice(),
+                message_index,
+                drop_historical_developers,
+                last_user_like_message_index,
+            )
+            .is_none()
+        {
+            // A completed final assistant turn still needs a new-turn opener
+            // when the caller asked for one (StartNewAssistant, i.e.
+            // add_generation_prompt=true and continue_final_message=false).
+            // Without it the prompt ends at EOS and the model is asked to
+            // generate right after end-of-sentence, which yields garbled or
+            // empty output (vllm#46256).
+            write_assistant_transition(
+                &mut out,
+                thinking_mode,
+                drop_thinking,
+                current_render_index >= last_user_render_index,
+            );
         }
     }
 

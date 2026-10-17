@@ -381,6 +381,11 @@ fn system_to_assistant_transitions_in_chat_and_thinking_modes() {
             .template_kwargs
             .insert("enable_thinking".to_string(), Value::Bool(enable_thinking));
         request.chat_options.reasoning_effort = Some(EffortValue::from("low"));
+        // This test covers the system -> assistant transition, not the
+        // trailing generation prompt: pin the mode like the shared fixtures
+        // do for a final assistant turn (StartNewAssistant now opens a new
+        // assistant turn after it, see the final_assistant_* tests).
+        request.chat_options.generation_prompt_mode = GenerationPromptMode::NoGenerationPrompt;
         render_request(&request)
     });
 
