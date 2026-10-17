@@ -71,6 +71,45 @@ Set the config path via environment variable:
 export MOONCAKE_CONFIG_PATH=/path/to/mooncake_config.json
 ```
 
+## DFS initialization
+
+Configure the Mooncake Master and clients for DFS before enabling it in vLLM.
+Mooncake selects the storage backend separately from this JSON file; for example,
+its clients need
+`MOONCAKE_OFFLOAD_STORAGE_BACKEND_DESCRIPTOR=distributed_storage_backend` and a
+shared `MOONCAKE_DFS_ROOT_DIR`. See the
+[Mooncake DFS configuration](https://github.com/kvcache-ai/Mooncake/blob/main/mooncake-store/src/config/distributed_storage_config.cpp)
+for filesystem adapter and allocator settings. The Master must also enable DFS
+(`MOONCAKE_ENABLE_DFS=true`).
+
+For DFS, set `"enable_dfs": true` in the Mooncake JSON config. The connector
+passes `enable_ssd_offload=True` to the native SDK because that argument
+initializes `FileStorage`, including its DFS backend.
+The backend itself is selected by
+`MOONCAKE_OFFLOAD_STORAGE_BACKEND_DESCRIPTOR`; a Store instance uses one backend.
+DFS does not require the Master's local SSD option `--enable_offload=true`.
+
+Request the replicas in vLLM's `kv_connector_extra_config`:
+
+```json
+{
+  "kv_connector": "MooncakeStoreConnector",
+  "kv_role": "kv_both",
+  "kv_connector_extra_config": {"replica_num": 1, "dfs_replica_num": 1}
+}
+```
+
+`enable_dfs` requests one DFS replica plus at least one memory replica.
+`dfs_replica_num` must be 1 and `replica_num` defaults to 1. Unsupported SDKs and
+non-default DFS tenants are rejected before Store setup; the RAM-only
+cross-encoder cache does not support DFS.
+
+DFS reads reuse the existing load-batch splitting with `local_buffer_size` as
+the per-GET budget. This DFS budget takes precedence if `enable_offload` is also
+set. Keep `VLLM_MOONCAKE_LOAD_RECV_THREADS` at its default of 1 for this
+configuration: concurrent GETs share the client buffer, and aggregate buffer
+accounting across receive threads is not implemented.
+
 ## Usage
 
 ### Single-Node KV Cache Offloading
