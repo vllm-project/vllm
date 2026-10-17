@@ -16,6 +16,7 @@ from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.scale_out.render.serving import ServingRender
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
+from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.exceptions import GenerationError, VLLMValidationError
 from vllm.logprobs import Logprob
 from vllm.outputs import CompletionOutput, RequestOutput, WeightVersionSpan
@@ -91,7 +92,11 @@ class MockVllmConfig:
     parallel_config: MockParallelConfig
 
 
-def _build_serving_completion(engine: AsyncLLM) -> OpenAIServingCompletion:
+def _build_serving_completion(
+    engine: AsyncLLM,
+    request_logger: RequestLogger | None = None,
+    **kwargs: Any,
+) -> OpenAIServingCompletion:
     models = OpenAIServingModels(
         engine_client=engine,
         base_model_paths=BASE_MODEL_PATHS,
@@ -107,7 +112,8 @@ def _build_serving_completion(engine: AsyncLLM) -> OpenAIServingCompletion:
         engine,
         models,
         online_renderer=online_renderer,
-        request_logger=None,
+        request_logger=request_logger,
+        **kwargs,
     )
 
 
@@ -692,6 +698,72 @@ async def test_renderer_only_completion_request_skips_mm_cache():
         ]
         is True
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+async def test_completion_logs_outputs_when_enabled(stream: bool):
+    """`--enable-log-outputs` covers /v1/completions like the chat endpoint."""
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.errored = False
+    mock_engine.model_config = MockModelConfig()
+    mock_engine.input_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
+    request_logger = MagicMock(spec=RequestLogger)
+    serving_completion = _build_serving_completion(
+        mock_engine, request_logger=request_logger, enable_log_outputs=True
+    )
+
+    def request_output(text: str, token_ids: list[int], finish_reason: str | None):
+        return RequestOutput(
+            request_id="test-id",
+            prompt="Test prompt",
+            prompt_token_ids=[1, 2, 3],
+            prompt_logprobs=None,
+            outputs=[
+                CompletionOutput(
+                    index=0,
+                    text=text,
+                    token_ids=token_ids,
+                    cumulative_logprob=None,
+                    logprobs=None,
+                    finish_reason=finish_reason,
+                )
+            ],
+            finished=finish_reason is not None,
+        )
+
+    async def mock_generate(*args, **kwargs):
+        if stream:
+            yield request_output("Hello", [100], None)
+            yield request_output(" world", [101], "stop")
+        else:
+            yield request_output("Hello world", [100, 101], "stop")
+
+    mock_engine.generate = MagicMock(side_effect=mock_generate)
+    request = CompletionRequest(
+        model=MODEL_NAME, prompt="Test prompt", max_tokens=10, stream=stream
+    )
+
+    response = await serving_completion.create_completion(request)
+    if stream:
+        async for _ in response:
+            pass
+
+    input_request_id = request_logger.log_inputs.call_args.args[0]
+    logged = [call.kwargs for call in request_logger.log_outputs.call_args_list]
+    assert {log["request_id"] for log in logged} == {input_request_id}
+    if stream:
+        assert [(log["outputs"], log["delta"]) for log in logged] == [
+            ("Hello", True),
+            (" world", True),
+            ("Hello world", False),
+        ]
+    else:
+        assert len(logged) == 1
+        assert logged[0]["outputs"] == "Hello world"
+        assert logged[0]["output_token_ids"] == [100, 101]
+        assert logged[0]["finish_reason"] == "stop"
 
 
 @pytest.mark.asyncio
