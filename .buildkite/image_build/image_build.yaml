@@ -12,6 +12,8 @@ steps:
           limit: 2
         - exit_status: -10  # Agent was lost
           limit: 2
+        - exit_status: 1  # Transient Docker/BuildKit failure
+          limit: 1
 
   - label: ":docker: :smoking: Non-root smoke tests"
     key: image-build-smoke-test
@@ -80,6 +82,8 @@ steps:
           limit: 2
         - exit_status: -10  # Agent was lost
           limit: 2
+        - exit_status: 1  # Transient Docker/BuildKit failure
+          limit: 1
 
   - label: ":docker: Build HPU image"
     soft_fail: true
@@ -110,6 +114,8 @@ steps:
           limit: 2
         - exit_status: -10  # Agent was lost
           limit: 2
+        - exit_status: 1  # Transient Docker/BuildKit failure
+          limit: 1
 
   - label: ":docker: Build arm64 image"
     key: arm64-image-build
@@ -128,3 +134,5 @@ steps:
           limit: 2
         - exit_status: -10  # Agent was lost
           limit: 2
+        - exit_status: 1  # Transient Docker/BuildKit failure
+          limit: 1
