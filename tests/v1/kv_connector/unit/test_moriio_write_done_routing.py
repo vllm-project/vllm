@@ -487,6 +487,25 @@ def test_fanout_write_proceeds_once_every_target_session_exists():
     assert worker.writes == ["req"]
 
 
+def test_rank_with_nothing_to_write_does_not_wait_for_a_handshake():
+    # MLA fan-in: prefill rank 1 of TP2 holds the same latent as rank 0, which
+    # writes it to the single decode rank.
+    worker = _fanout_save_worker(set())
+    worker.tp_rank = 1
+    worker.world_size = 2
+    worker.write_ready_flags = {}
+    worker.moriio_config = SimpleNamespace(transfer_timeout=30.0)
+    metadata = MoRIIOConnectorMetadata()
+    metadata.reqs_to_save["req"] = _req_meta(tp_size=1)
+
+    start = time.monotonic()
+    worker.save_kv_layer(metadata, "layer0", kv_layer=None, attn_metadata=None)
+
+    assert time.monotonic() - start < 5
+    assert worker.handshakes == []
+    assert worker.writes == ["req"]
+
+
 @pytest.mark.parametrize(
     ("params", "expected_tp_ranks"),
     [

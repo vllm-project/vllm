@@ -152,6 +152,16 @@ def is_moriio_available() -> bool:
     return MoRIIO_enabled
 
 
+def _describe_memory(memory_desc: Any) -> str:
+    """Identify a MoRI memory descriptor for error messages."""
+    fields = ("engine_key", "device_id", "device_bus_id", "size")
+    return (
+        "{"
+        + ", ".join(f"{name}={getattr(memory_desc, name, '?')}" for name in fields)
+        + "}"
+    )
+
+
 def get_moriio_remote_tp_rank(
     local_tp_rank: int, local_tp_size: int, remote_tp_size: int
 ) -> int:
@@ -2054,11 +2064,19 @@ class MoRIIOConnectorWorker:
                     unpacked_remote_memory_meta = (
                         self.moriio_wrapper.get_unpack_memory_metadata(remote_meta)
                     )
-                    cur_remote_engine_sessions.append(
-                        self.moriio_wrapper.build_session(
-                            unpacked_local_memory_meta, unpacked_remote_memory_meta
-                        )
+                    session = self.moriio_wrapper.build_session(
+                        unpacked_local_memory_meta, unpacked_remote_memory_meta
                     )
+                    if session is None:
+                        raise MoRIIOError(
+                            f"MoRI could not open a session from layer {ln} to "
+                            f"peer {remote_engine_id} (region "
+                            f"{len(cur_remote_engine_sessions)}, local "
+                            f"{_describe_memory(unpacked_local_memory_meta)}, "
+                            "remote "
+                            f"{_describe_memory(unpacked_remote_memory_meta)})"
+                        )
+                    cur_remote_engine_sessions.append(session)
             self.built_write_session[remote_engine_id] = cur_remote_engine_sessions
         return self.built_write_session[remote_engine_id], self.remote_moriio_metadata[
             remote_engine_id
@@ -3083,9 +3101,13 @@ class MoRIIOConnectorWorker:
             write_targets = self._write_tp_mapping(int(meta.tp_size)).target_tp_ranks
             is_fanout = len(write_targets) > 1
             dp0_remote_engine_id = self.get_engine_name_with_dp(remote_engine_id, 0)
+            if not write_targets:
+                # Another producer rank writes everything this one holds: no
+                # session is needed, and waiting for a handshake that never
+                # starts would stall this rank, and its TP peers, every layer.
+                self.write_ready_flags[remote_engine_id] = True
             # A failed target handshake must be retried, so check every target
             # session rather than write_ready_flags, which is set either way.
-            # A rank whose copy another producer writes needs no session.
             handshake_ready = (
                 all(
                     self.get_engine_name_with_dp_tp(remote_engine_id, 0, tp_rank)
