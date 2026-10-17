@@ -182,6 +182,19 @@ class CudaCommunicator(DeviceCommunicatorBase):
             else:
                 self.use_aiter_ag_rs = True
 
+        # AITER all-gather for the MLA DCP query gather
+        if (
+            unique_name.split(":")[0] == "dcp"
+            and self.aiter_ar_comm is None
+            and self.world_size in (2, 4, 8)
+            and current_platform.is_rocm()
+            and rocm_aiter_ops.is_custom_all_reduce_enabled()
+        ):
+            aiter_ar_comm = AiterCustomAllreduce(
+                group=self.cpu_group, device=self.device
+            )
+            self.aiter_ar_comm = None if aiter_ar_comm.disabled else aiter_ar_comm
+
         if (
             use_custom_allreduce
             and self.world_size > 1
