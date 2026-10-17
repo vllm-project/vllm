@@ -267,7 +267,9 @@ def _create_nvfp4_hnd_kv_cache(
     return nvfp4_cache
 
 
-def _run_trtllm_integration(batch_spec, kv_cache_dtype="auto", model_name=MODEL):
+def _run_trtllm_integration(
+    batch_spec, kv_cache_dtype="auto", model_name=MODEL, value_bias=0.0
+):
     """Run TRTLLM attention through the full FlashInfer pipeline
     and compare against an SDPA reference."""
     set_random_seed(42)
@@ -304,7 +306,9 @@ def _run_trtllm_integration(batch_spec, kv_cache_dtype="auto", model_name=MODEL)
 
         q = torch.randn(q_len, num_q_heads, head_size, dtype=dtype, device=device)
         k_full = torch.randn(s_len, num_kv_heads, head_size, dtype=dtype, device=device)
-        v_full = torch.randn(s_len, num_kv_heads, head_size, dtype=dtype, device=device)
+        v_full = torch.randn(
+            s_len, num_kv_heads, head_size, dtype=dtype, device=device
+        ).add_(value_bias)
 
         # SDPA reference (N=1, H, L, D)
         q_sdpa = q.unsqueeze(0).transpose(1, 2)
@@ -482,7 +486,10 @@ def _run_trtllm_integration(batch_spec, kv_cache_dtype="auto", model_name=MODEL)
         )
 
     # 4. Compare against SDPA reference
-    if is_nvfp4:
+    if value_bias:
+        # Exercise NVFP4's FP8-only kernel output above the unscaled FP8 range.
+        atol, rtol = 16.0, 0.15
+    elif is_nvfp4:
         atol, rtol = 1.0, 1.0  # nvfp4 has higher quantization error
     else:
         atol, rtol = 1e-2, 1e-2
@@ -561,3 +568,15 @@ def test_trtllm_gen_draft_decode_metadata_tracks_in_place_seq_lens(
             assert torch.equal(value, expected), field.name
         else:
             assert value == expected, field.name
+
+
+@torch.inference_mode()
+@pytest.mark.parametrize("batch_spec_name", list(BATCH_SPECS))
+def test_trtllm_gen_nvfp4_kv_rescales_fp8_output(batch_spec_name: str):
+    """Test high-range NVFP4 output rescaling in prefill and decode."""
+    _run_trtllm_integration(
+        BATCH_SPECS[batch_spec_name],
+        kv_cache_dtype="nvfp4",
+        model_name=MODEL_NVFP4,
+        value_bias=1024.0,
+    )
