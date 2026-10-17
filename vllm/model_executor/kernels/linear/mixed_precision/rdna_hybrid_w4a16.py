@@ -5,6 +5,7 @@
 Routes based on the activation shape:
   M <= MAX_SKINNY_BATCH_SIZE and K*M <= MEDIUM_SKINNY_LIMIT_ELEMENTS:
       HIP skinny GEMM (wvSplitK_int4_g)
+  M >= DEQUANT_MATMUL_MIN_M on gfx1151: Triton dequant, then dense matmul
   otherwise: Triton W4A16 fused dequant GEMM
 
 Stores the weights ONCE as int8 [N, K//2] (ExLlama shuffle packed). Both
@@ -77,6 +78,9 @@ MAX_SKINNY_BATCH_SIZE = 5
 # (AMD RDNA has 128 KiB total LDS per CU, but 64 KiB per workgroup.)
 LDS_CAPACITY_ELEMENTS = 64 * 1024 // 2  # 32768 fp16 elements
 MEDIUM_SKINNY_LIMIT_ELEMENTS = int(LDS_CAPACITY_ELEMENTS * 1.2)
+# gfx1151: from this many rows on, dequantizing the weight and running one dense
+# matmul beats the fused Triton GEMM, whose throughput drops as M grows.
+DEQUANT_MATMUL_MIN_M = 4096
 
 
 # ---------------------------------------------------------------------------
@@ -178,6 +182,121 @@ def _triton_w4a16_skinny_fmt_kernel(
     c_ptrs = c_ptr + offs_m[:, None] * N + offs_n[None, :]
     mask_c = (offs_m[:, None] < M) & (offs_n[None, :] < N)
     tl.store(c_ptrs, c, mask=mask_c)
+
+
+@triton.jit
+def _triton_w4a16_dequant_kernel(
+    b_ptr,  # [N, K//8] int32 packed (ExLlama shuffle)
+    scales_ptr,  # [N, K//G]
+    zp_ptr,  # [N//8, K//G] int32 (HAS_ZP=True)
+    out_ptr,  # [N, K] dequantised, scales dtype
+    N,
+    K,
+    K8,
+    num_groups,
+    stride_bn,
+    stride_on,  # out row stride in elements (>= K)
+    group_size,
+    ZP_BIAS: tl.constexpr,
+    HAS_ZP: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+):
+    """Dequantize one [BLOCK_N, BLOCK_K] tile as the fused GEMM does.
+
+    Requires BLOCK_K <= group_size so that a tile lies in one quantization group.
+    """
+    pid_n = tl.program_id(0)
+    pid_k = tl.program_id(1)
+    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    offs_k = pid_k * BLOCK_K + tl.arange(0, BLOCK_K)
+    offs_k8 = pid_k * (BLOCK_K // 8) + tl.arange(0, BLOCK_K // 8)
+
+    exllama_shifts_row = (tl.arange(0, 8) // 2) * 4 + (tl.arange(0, 8) % 2) * 16
+    shifts_1d = tl.reshape(
+        tl.broadcast_to(exllama_shifts_row[None, :], (BLOCK_K // 8, 8)),
+        (BLOCK_K,),
+    )
+    shifts_full = tl.broadcast_to(shifts_1d[None, :], (BLOCK_N, BLOCK_K))
+
+    mask_b = (offs_n[:, None] < N) & (offs_k8[None, :] < K8)
+    b_packed = tl.load(
+        b_ptr + offs_n[:, None] * stride_bn + offs_k8[None, :], mask=mask_b, other=0
+    )
+    b = tl.interleave(b_packed, b_packed)
+    b = tl.interleave(b, b)
+    b = tl.interleave(b, b)
+    b = (b >> shifts_full) & 0xF
+
+    group_idx = (pid_k * BLOCK_K) // group_size
+    scale_mask = offs_n < N
+    scales = tl.load(
+        scales_ptr + offs_n * num_groups + group_idx, mask=scale_mask, other=1.0
+    )
+    if HAS_ZP:
+        zp_word = tl.load(
+            zp_ptr + (offs_n // 8) * num_groups + group_idx, mask=scale_mask, other=0
+        )
+        zp_raw = (zp_word >> (4 * (offs_n % 8))) & 0xF
+        b_fp = (b - zp_raw[:, None]).to(scales.dtype) * scales[:, None]
+    else:
+        b_fp = (b - ZP_BIAS).to(scales.dtype) * scales[:, None]
+
+    mask_o = (offs_n[:, None] < N) & (offs_k[None, :] < K)
+    tl.store(out_ptr + offs_n[:, None] * stride_on + offs_k[None, :], b_fp, mask=mask_o)
+
+
+def dequant_w4a16(
+    b_q: torch.Tensor,  # [N, K//8] int32
+    scales: torch.Tensor,  # [N, K//G]
+    group_size: int,
+    zp: torch.Tensor | None = None,
+    zp_bias: int = 8,
+) -> torch.Tensor:
+    """Dequantize a skinny-format weight to a dense [N, K] tensor of the scales dtype.
+
+    Rows are padded when their stride is on the gfx1151 cliff (see
+    ``_act_pad_bytes``); the result is a strided view that matmul accepts.
+    """
+    N, K8 = b_q.shape
+    K = K8 * 8
+    pad_bytes = _act_pad_bytes(K * scales.element_size()) if _on_gfx1151() else 0
+    pad = pad_bytes // scales.element_size()
+    buf = torch.empty((N, K + pad), dtype=scales.dtype, device=scales.device)
+    out = buf[:, :K]
+    block_k = min(128, group_size)
+    block_n = 64
+    grid = (triton.cdiv(N, block_n), triton.cdiv(K, block_k))
+    _triton_w4a16_dequant_kernel[grid](
+        b_q,
+        scales,
+        zp if zp is not None else scales,
+        out,
+        N,
+        K,
+        K8,
+        K // group_size,
+        b_q.stride(0),
+        out.stride(0),
+        group_size,
+        ZP_BIAS=zp_bias,
+        HAS_ZP=zp is not None,
+        BLOCK_N=block_n,
+        BLOCK_K=block_k,
+        num_warps=1,
+    )
+    return out
+
+
+def dequant_matmul_w4a16(
+    a: torch.Tensor,  # [M, K]
+    b_q: torch.Tensor,  # [N, K//8] int32
+    scales: torch.Tensor,
+    group_size: int,
+    zp: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Dequantize the weight, then run one dense matmul."""
+    return torch.matmul(a, dequant_w4a16(b_q, scales, group_size, zp).t())
 
 
 # Per-shape (group_size, K, N) -> (BLOCK_M, BLOCK_N, BLOCK_K, num_warps,
@@ -503,13 +622,18 @@ def _rdna_hybrid_w4a16_apply_impl(
         else torch.profiler.record_function(f"hybrid_triton_w4a16 {M}x{N}x{K}")
     )
     with ctx:
-        output = triton_w4a16_skinny_fmt_gemm(
-            a=_pad_activation_rows(x_2d),
-            b_q=w_q.view(torch.int32),
-            scales=w_s,
-            group_size=group_size,
-            zp=w_zp,
-        )
+        if M >= DEQUANT_MATMUL_MIN_M and _on_gfx1151():
+            output = dequant_matmul_w4a16(
+                x_2d, w_q.view(torch.int32), w_s, group_size, w_zp
+            )
+        else:
+            output = triton_w4a16_skinny_fmt_gemm(
+                a=_pad_activation_rows(x_2d),
+                b_q=w_q.view(torch.int32),
+                scales=w_s,
+                group_size=group_size,
+                zp=w_zp,
+            )
         if bias is not None:
             output.add_(bias)
     return output

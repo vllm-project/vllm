@@ -32,6 +32,7 @@ SUPPORTED_GROUP_SIZES = hybrid_module.SUPPORTED_GROUP_SIZES
 MAX_SKINNY_BATCH_SIZE = hybrid_module.MAX_SKINNY_BATCH_SIZE
 LDS_CAPACITY_ELEMENTS = hybrid_module.LDS_CAPACITY_ELEMENTS
 MEDIUM_SKINNY_LIMIT_ELEMENTS = hybrid_module.MEDIUM_SKINNY_LIMIT_ELEMENTS
+DEQUANT_MATMUL_MIN_M = hybrid_module.DEQUANT_MATMUL_MIN_M
 
 
 # ---------------------------------------------------------------------------
@@ -95,8 +96,14 @@ def _rdna_hybrid_w4a16_reference(
 @pytest.mark.parametrize("has_zp", [False, True])
 @pytest.mark.parametrize(
     "M",
-    [1, MAX_SKINNY_BATCH_SIZE, MAX_SKINNY_BATCH_SIZE + 1, 64],
-    ids=["M=1_decode", "M=5_decode", "M=6_prefill", "M=64_prefill"],
+    [1, MAX_SKINNY_BATCH_SIZE, MAX_SKINNY_BATCH_SIZE + 1, 64, DEQUANT_MATMUL_MIN_M],
+    ids=[
+        "M=1_decode",
+        "M=5_decode",
+        "M=6_prefill",
+        "M=64_prefill",
+        "M=min_dequant_matmul",
+    ],
 )
 def test_rdna_hybrid_w4a16_apply_matches_reference(dtype, group_size, has_zp, M):
     """Smoke test the registered custom op for both decode and prefill batches.
@@ -932,3 +939,75 @@ def test_rdna_hybrid_w4a16_medium_skinny_matches_reference(dtype, has_zp):
     reference = _rdna_hybrid_w4a16_reference(x_mk, w_int4_nk, scales, zp, G, bias=None)
 
     torch.testing.assert_close(output, reference, rtol=2e-2, atol=2e-2)
+
+
+@pytest.mark.skipif(not on_gfx1x(), reason="Hybrid path is gfx11/gfx12 only")
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("group_size", SUPPORTED_GROUP_SIZES)
+@pytest.mark.parametrize("has_zp", [False, True])
+# K=1024 in 16-bit gives 2 KiB rows, the gfx1151 stride cliff that gets padded.
+@pytest.mark.parametrize("K", [1024, 1536])
+def test_dequant_w4a16_matches_reference(dtype, group_size, has_zp, K):
+    """The dequantized weight matches the FP32 dequantization reference."""
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA/HIP device not available")
+
+    set_random_seed(0)
+    N = 192
+    w_int4_nk = torch.randint(0, 16, (N, K), device=device, dtype=torch.int32)
+    w_q = pack_int4_exllama_shuffle(w_int4_nk).contiguous()
+    scales = (0.05 * torch.rand((N, K // group_size), device=device)).to(dtype)
+    zp = (
+        torch.randint(0, 16, (N, K // group_size), device=device, dtype=torch.int32)
+        if has_zp
+        else None
+    )
+    w_zp = _pack_zp_rows_for_kernel(zp) if zp is not None else None
+
+    out = hybrid_module.dequant_w4a16(w_q, scales, group_size, w_zp)
+
+    z_full = (
+        torch.full((N, K), 8.0, device=device)
+        if zp is None
+        else zp.repeat_interleave(group_size, dim=1).to(torch.float32)
+    )
+    s_full = scales.repeat_interleave(group_size, dim=1).to(torch.float32)
+    reference = ((w_int4_nk.to(torch.float32) - z_full) * s_full).to(dtype)
+    assert out.shape == (N, K) and out.dtype == dtype
+    torch.testing.assert_close(out, reference, rtol=1e-2, atol=1e-3)
+
+
+@pytest.mark.skipif(not on_gfx1x(), reason="Hybrid path is gfx11/gfx12 only")
+@pytest.mark.parametrize(
+    "M,on_gfx1151,expected_path",
+    [
+        (DEQUANT_MATMUL_MIN_M - 1, True, "triton"),
+        (DEQUANT_MATMUL_MIN_M, True, "dequant_matmul"),
+        (DEQUANT_MATMUL_MIN_M, False, "triton"),
+    ],
+    ids=["below_min_m", "min_m_gfx1151", "min_m_other_gfx"],
+)
+def test_rdna_hybrid_w4a16_dequant_matmul_dispatch(
+    M, on_gfx1151, expected_path, monkeypatch
+):
+    """Only gfx1151 prefill with at least DEQUANT_MATMUL_MIN_M rows dequantizes."""
+    K, N, G = 1024, 16, 128
+    x_mk = torch.empty((M, K), dtype=torch.float16)
+    w_q = torch.empty((N, K // 2), dtype=torch.int8)
+    scales = torch.empty((N, K // G), dtype=torch.float16)
+    called = []
+
+    def fake(path):
+        def impl(*args, **kwargs):
+            called.append(path)
+            return torch.empty((M, N), dtype=x_mk.dtype)
+
+        return impl
+
+    monkeypatch.setattr(hybrid_module, "_on_gfx1151", lambda: on_gfx1151)
+    monkeypatch.setattr(hybrid_module, "triton_w4a16_skinny_fmt_gemm", fake("triton"))
+    monkeypatch.setattr(hybrid_module, "dequant_matmul_w4a16", fake("dequant_matmul"))
+
+    hybrid_module._rdna_hybrid_w4a16_apply_impl(x_mk, w_q, scales, None, None, 40, G)
+
+    assert called == [expected_path]
