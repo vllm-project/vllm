@@ -312,6 +312,11 @@ class SchedulerOutput:
     # Kept for out-of-tree schedulers and workers.
     num_common_prefix_blocks: list[int] = field(default_factory=list)
 
+    # P/D hidden-state handoff: scheduled requests whose single scheduled
+    # token is the last prompt token, already in the KV cache. The worker runs
+    # no forward pass for it and samples from the transferred hidden state.
+    hidden_state_record_req_ids: set[str] | None = None
+
     @classmethod
     def make_empty(cls) -> "SchedulerOutput":
         return cls(

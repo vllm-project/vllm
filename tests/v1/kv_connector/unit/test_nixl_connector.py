@@ -4445,7 +4445,8 @@ def test_compatibility_hash_validation(
         model="facebook/opt-125m",
         block_size=block_size,
         kv_connector_extra_config={
-            "enforce_handshake_compat": enforce_handshake_compat
+            "enforce_handshake_compat": enforce_handshake_compat,
+            "hidden_state_handoff": False,
         },
     )
     kv_cache_config = make_kv_cache_config(block_size=block_size, num_blocks=2)
