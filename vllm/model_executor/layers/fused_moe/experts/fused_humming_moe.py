@@ -355,7 +355,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
             (kInt8StaticChannelSym, kInt8DynamicTokenSym),
             # nvfp4 (compressed-tensors / modelopt / quark)
             (kNvfp4Static, kNvfp4Dynamic),
-            # mxfp8 (compressed-tensors / modelopt / online)
+            # mxfp8 (compressed-tensors / modelopt)
             (kMxfp8Static, kMxfp8Dynamic),
         ]
         return (weight_key, activation_key) in SUPPORTED_W_A or (

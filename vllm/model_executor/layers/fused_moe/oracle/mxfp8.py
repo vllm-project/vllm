@@ -107,6 +107,7 @@ def _select_kernel_cls(
 
 def select_mxfp8_moe_backend(
     config: FusedMoEConfig,
+    is_online: bool = False,
 ) -> tuple[Fp8MoeBackend, type[mk.FusedMoEExperts]]:
     """Select the MXFP8 MoE backend and the best expert class.
 
@@ -123,6 +124,13 @@ def select_mxfp8_moe_backend(
                 f"MXFP8 MoE. Expected one of "
                 f"{list(_BACKEND_NAME_MAP.keys())}."
             )
+        if is_online and backend == Fp8MoeBackend.HUMMING:
+            raise ValueError(
+                "moe_backend='humming' cannot be used with quantization='mxfp8': "
+                "the humming kernel expects an MXFP8 checkpoint with per-block "
+                "weight scales ('weight_scale' tensors). Use a pre-quantized "
+                "MXFP8 checkpoint, or moe_backend in {'triton', 'deep_gemm'}."
+            )
         logger.info_once(
             "Using '%s' MxFp8 MoE backend (user-requested).",
             backend.value,
@@ -132,6 +140,8 @@ def select_mxfp8_moe_backend(
     # Auto-select: pick the first supported backend.
     backends = prioritize_humming(list(_SUPPORTED_BACKENDS))
     for backend in backends:
+        if is_online and backend == Fp8MoeBackend.HUMMING:
+            continue
         try:
             experts_cls = _select_kernel_cls(backend, config)
         except ValueError:
