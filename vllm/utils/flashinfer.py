@@ -277,6 +277,22 @@ def pin_host_range_buf(length: int) -> None:
         cache_buf[key] = buf.pin_memory()
 
 
+def unpin_plan_staging_buffer(wrapper: Any) -> None:
+    """Keep a flashinfer wrapper's plan() staging buffer in pageable memory.
+
+    plan() writes its scheduling metadata into this reused host buffer and
+    copies it to the GPU asynchronously. A pinned source is read only when the
+    GPU reaches the copy, so planning the same wrapper again before then (the
+    drafter does so every draft step) hands the queued launch the later plan.
+    A pageable source is read when the copy is issued.
+    """
+    buf = getattr(wrapper, "_pin_memory_int_workspace_buffer", None)
+    if buf is not None and buf.is_pinned():
+        wrapper._pin_memory_int_workspace_buffer = torch.empty(
+            buf.shape, dtype=buf.dtype, device="cpu"
+        )
+
+
 # Create lazy wrappers for each function
 flashinfer_trtllm_bf16_moe = _lazy_import_wrapper(
     "flashinfer.fused_moe", "trtllm_bf16_moe"
