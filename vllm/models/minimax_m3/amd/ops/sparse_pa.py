@@ -548,12 +548,13 @@ def _run_gluon_decode(
         raise ValueError("MiniMax-M3 AITER sparse PA requires head_dim == 128")
     group_size = num_q_heads // num_kv_heads
 
-    nphys16, hkv = k_cache.shape[0], k_cache.shape[1]
     # V is offset by half a block when the sides interleave, so it holds fewer
-    # pages than K even though both are addressed by the same page id.
-    v_nphys16 = v_cache.shape[0]
-    k_cache_view = k_cache.view(nphys16 * hkv, 1, *k_cache.shape[2:])
-    v_cache_view = v_cache.view(v_nphys16 * hkv, 1, *v_cache.shape[2:])
+    # pages than K even though both are addressed by the same page id. The
+    # kernel wants one page count, and the tail of K that V lacks belongs to
+    # the last block's V pages, which no page id reaches, so hand it V's.
+    nphys16, hkv = v_cache.shape[0], k_cache.shape[1]
+    k_cache_view = k_cache[:nphys16].view(nphys16 * hkv, 1, *k_cache.shape[2:])
+    v_cache_view = v_cache.view(nphys16 * hkv, 1, *v_cache.shape[2:])
     q_view = q.view(total_q * num_kv_heads, group_size, head_size)
     out_view = output.view(total_q * num_kv_heads, group_size, head_size)
 
@@ -582,7 +583,7 @@ def _run_gluon_decode(
             k_scale, num_phys_pages=nphys16, num_kv_heads=hkv
         )
         v_scale_arg = _gluon_scale_arg(
-            v_scale, num_phys_pages=v_nphys16, num_kv_heads=hkv
+            v_scale, num_phys_pages=nphys16, num_kv_heads=hkv
         )
     else:
         k_scale_arg = v_scale_arg = None
