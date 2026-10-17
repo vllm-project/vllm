@@ -322,6 +322,122 @@ def test_determine_expert_counts_fuse_shared_experts_override(
     assert determine_expert_counts(*common_args, False)[2] == 0
 
 
+class PrunedExpertsConfig(ExpertsInt8Config):
+    """Quant config exposing the per-layer counts of a REAP-pruned checkpoint."""
+
+    def __init__(self, counts_per_layer: list[int | None]) -> None:
+        super().__init__()
+        self.counts_per_layer = counts_per_layer
+
+    def get_num_experts_for_layer(self, layer_idx: int) -> int | None:
+        if 0 <= layer_idx < len(self.counts_per_layer):
+            return self.counts_per_layer[layer_idx]
+        return None
+
+
+def test_determine_expert_counts_pruned_checkpoint_overrides_per_layer() -> None:
+    """A pruned checkpoint routes over and allocates its per-layer expert count."""
+    quant_config = PrunedExpertsConfig([3, 8, None])
+
+    def counts(prefix: str) -> tuple[int, int, int]:
+        return determine_expert_counts(8, 0, None, False, quant_config, prefix)
+
+    # Pruned layer: router and experts both use the retained count.
+    assert counts("model.layers.0.mlp.experts") == (3, 3, 0)
+    # Unpruned layer and dense layer keep the model config's count.
+    assert counts("model.layers.1.mlp.experts") == (8, 8, 0)
+    assert counts("model.layers.2.mlp.experts") == (8, 8, 0)
+    # Layers beyond the recorded list (e.g. MTP drafts) keep the model count.
+    assert counts("model.layers.9.mlp.experts") == (8, 8, 0)
+
+
+@pytest.mark.parametrize(
+    "prefix", [None, "", "model.layers.0.mlp.experts.1.2", "mlp.experts"]
+)
+def test_determine_expert_counts_skips_override_without_layer_index(
+    prefix: str | None,
+) -> None:
+    quant_config = PrunedExpertsConfig([3])
+    assert determine_expert_counts(8, 0, None, False, quant_config, prefix) == (8, 8, 0)
+
+
+def test_determine_expert_counts_without_quant_config_keeps_model_count() -> None:
+    assert determine_expert_counts(8, 0, None, False) == (8, 8, 0)
+
+
+def test_determine_expert_counts_pruned_checkpoint_rejects_eplb() -> None:
+    quant_config = PrunedExpertsConfig([3])
+    with pytest.raises(NotImplementedError, match="EPLB redundant experts"):
+        determine_expert_counts(
+            8, 4, None, False, quant_config, "model.layers.0.mlp.experts"
+        )
+
+
+def test_qwen3_5_pruned_checkpoint_sizes_gate_router_and_experts(
+    dist_init: None,
+) -> None:
+    """A REAP-pruned Qwen3.5 checkpoint sizes every layer's gate, router and
+    expert weights to the per-layer count recorded in the quantization config,
+    not to the model config's maximum."""
+    from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
+        CompressedTensorsConfig,
+    )
+    from vllm.model_executor.models.qwen3_5 import Qwen3_5Model
+
+    counts_per_layer = [1, 2]
+    config = Qwen3_5MoeTextConfig(
+        vocab_size=256,
+        hidden_size=128,
+        num_hidden_layers=2,
+        num_attention_heads=1,
+        num_key_value_heads=1,
+        head_dim=128,
+        linear_key_head_dim=64,
+        linear_value_head_dim=64,
+        linear_num_key_heads=1,
+        linear_num_value_heads=1,
+        moe_intermediate_size=32,
+        shared_expert_intermediate_size=32,
+        num_experts_per_tok=1,
+        num_experts=2,
+        layer_types=["full_attention", "full_attention"],
+    )
+    vllm_config = VllmConfig()
+    vllm_config.model_config = SimpleNamespace(
+        hf_config=config,
+        hf_text_config=config,
+        dtype=torch.bfloat16,
+        max_model_len=128,
+        is_diffusion=False,
+        head_dtype=None,
+        is_mm_prefix_lm=False,
+        multimodal_config=None,
+        quantization_config=None,
+        runner_type="generate",
+        is_moe=True,
+        logits_processors=None,
+        rswa_window=None,
+    )
+    vllm_config.quant_config = CompressedTensorsConfig(
+        target_scheme_map={},
+        ignore=[],
+        quant_format="dense",
+        expert_counts_per_layer=counts_per_layer,
+    )
+
+    with set_current_vllm_config(vllm_config):
+        model = Qwen3_5Model(vllm_config=vllm_config)
+
+    for layer, num_experts in zip(model.layers, counts_per_layer):
+        moe = layer.mlp
+        assert moe.n_routed_experts == num_experts
+        # The checkpoint's gate is compacted to the retained experts.
+        assert moe.gate.weight.shape == (num_experts, config.hidden_size)
+        # The router and the expert weights use the same count.
+        assert moe.experts.moe_config.num_experts == num_experts
+        assert moe.experts.routed_experts.global_num_experts == num_experts
+
+
 def test_resolve_layer_fused_shared_expert_skips_compatibility_when_disabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
