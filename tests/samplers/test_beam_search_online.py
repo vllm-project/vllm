@@ -210,6 +210,38 @@ async def test_beam_search_respects_generation_config_eos(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("priority", [None, -9, 12])
+async def test_beam_search_preserves_priority_for_every_step(monkeypatch, priority):
+    """All beam expansion requests retain the caller's scheduling priority."""
+    priorities = []
+    original_generate = _EngineClient().generate
+
+    async def generate(prompt, *args, priority=0, **kwargs):
+        priorities.append(priority)
+        async for output in original_generate(prompt, *args, **kwargs):
+            yield output
+
+    serving = _AsyncServing()
+    monkeypatch.setattr(serving.engine_client, "generate", generate)
+    prompt: TokensInput = {
+        "type": "token",
+        "prompt": "prompt",
+        "prompt_token_ids": [1],
+    }
+    params = BeamSearchParams(
+        beam_width=2, max_tokens=2, ignore_eos=True, watermarking=False
+    )
+    kwargs = {} if priority is None else {"priority": priority}
+    outputs = [
+        output
+        async for output in serving.beam_search(prompt, "request", params, **kwargs)
+    ]
+
+    assert len(outputs) == 1
+    assert priorities == [priority or 0] * 3
+
+
+@pytest.mark.asyncio
 async def test_beam_search_handles_extra_logprob_candidates() -> None:
     prompt: TokensInput = {
         "type": "token",
