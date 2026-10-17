@@ -1285,6 +1285,8 @@ def rocm_aiter_sparse_attn_indexer(
                 is_prefill=True,
                 compress_ratio=compress_ratio,
                 num_rows=num_rows,
+                max_valid_seq_len=chunk.max_seqlen_k,
+                topk_tokens=topk_tokens,
             ):
                 _launch_aiter_top_k_per_row_prefill(
                     logits,
@@ -1385,6 +1387,7 @@ def rocm_aiter_sparse_attn_indexer(
             compress_ratio=compress_ratio,
             num_rows=num_rows,
             max_valid_seq_len=max_compressed_seq_len,
+            topk_tokens=topk_tokens,
         ) and not rocm_aiter_ops.dsv4_indexer_prefers_native_top_k(
             num_rows=num_rows,
             num_columns=logits.shape[1],
