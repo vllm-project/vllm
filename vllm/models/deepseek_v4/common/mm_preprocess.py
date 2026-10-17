@@ -54,6 +54,14 @@ COMPRESS_PAD_TO = 4
 
 IMAGE_PLACEHOLDER = "<｜deepseek_image｜>"
 
+# Indexed in numpy: uint8 indices are masks in torch
+_NORMALIZE_LUT = (
+    ((torch.arange(256, dtype=torch.float32) / 255 - 0.5) / 0.5)
+    .to(torch.bfloat16)
+    .view(torch.int16)
+    .numpy()
+)
+
 # Sentinel roles borrow five consecutive ``<|place_holder_mm_span_XXXX|>``
 # tokens (reserved special tokens, never emitted from plain text). The order
 # must match IMAGE_START..IMAGE_END above so that
@@ -184,17 +192,15 @@ def load_image(
         image = image.resize((best_width, best_height))
     else:
         image = ImageOps.pad(image, (best_width, best_height), color=(127, 127, 127))
-    if do_rescale or do_normalize:
-        x = torch.from_numpy(np.asarray(image, dtype=np.float32)).permute(2, 0, 1)
-        if do_rescale:
-            x = x / 255
-        if do_normalize:
-            x = (x - 0.5) / 0.5
-        x = x.to(torch.bfloat16)
+    assert do_rescale == do_normalize
+    pixels = np.asarray(image, dtype=np.uint8)
+    if do_normalize:
+        x = torch.from_numpy(_NORMALIZE_LUT[pixels]).view(torch.bfloat16)
     else:
-        x = torch.from_numpy(np.asarray(image, dtype=np.uint8)).permute(2, 0, 1)
+        x = torch.from_numpy(pixels)
     patches = (
-        x.reshape(3, n_vit_h, p, n_vit_w, p)
+        x.permute(2, 0, 1)
+        .reshape(3, n_vit_h, p, n_vit_w, p)
         .permute(1, 3, 0, 2, 4)
         .reshape(n_vit_h * n_vit_w, 3, p, p)
     )
