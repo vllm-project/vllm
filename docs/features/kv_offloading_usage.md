@@ -112,6 +112,40 @@ vllm serve <model> \
 | `offload_prompt_only` | no | `true` | both | If `true`, only prompt (prefill) blocks are offloaded; decode blocks are skipped. |
 | `self_describing_kv_events` | no | `false` | both | Opt-in. When `true` *and* KV cache events are enabled (`--kv-events-config` with `enable_kv_cache_events`), the connector emits self-describing block-granular `BlockStored`/`BlockRemoved` payloads (constituent block hashes, whole-chunk `token_ids`, per-block `block_size`, parent hash, LoRA + group/cache-spec metadata) instead of the placeholder fallback, so external KV-event consumers can index offloaded blocks. Inert unless events are enabled. With `TieringOffloadingSpec`, a CPU promotion is self-describing when a local request observes its primary-tier `HIT` before event translation; otherwise its stored event may retain the placeholder, while a later `HIT` can backfill metadata for removal. Pending-removal/re-promotion races and externally initiated promotions may also produce placeholders, and consumers must ignore removals for unknown hashes. Partial recurrent tails emit the hash-aligned portion from the physical block start through the tail boundary. Other sliding-window/SSM chunks keep the placeholder fallback. In chunk mode (`block_size` > GPU block size, or `blocks_per_chunk` > 1), overlapping chunks re-announce shared per-block hashes, so consumers must reference-count (deduplicate) repeated store/remove announcements. |
 | `spec_module_path` | no | — | both | Python import path for a custom `OffloadingSpec` not in the built-in registry. Required only when `spec_name` is not built-in (advanced). |
+| `canonical_layout` | no | `false` | both | Store each offloaded block in a parallelism-free canonical layout, so offloaded KV is portable across tensor-parallel sizes. See [Canonical Layout](#canonical-layout). |
+
+## Canonical Layout
+
+By default, each worker copies its own GPU page to the CPU tier unchanged, so the offloaded bytes reflect the parallel configuration: with TP=4, every rank stores only its own shard of the KV heads. Those blocks can be reused by engines with the same parallel layout, but not by an engine with a different TP size.
+
+With `"canonical_layout": true`, every offloaded block is stored as a single canonical page: the full block as if there were no parallelism (all KV heads, all tokens), assembled from the shards of all workers. Because the canonical page doesn't depend on the topology, secondary tiers (FS, object store, P2P) store it under one shared namespace instead of a per-TP one. Engines with different TP sizes, such as a TP=2 prefiller and a TP=4 decoder, can then exchange offloaded KV.
+
+```bash
+vllm serve <model> \
+  --tensor-parallel-size 4 \
+  --kv-transfer-config '{
+    "kv_connector": "OffloadingConnector",
+    "kv_role": "kv_both",
+    "kv_connector_extra_config": {
+      "spec_name": "TieringOffloadingSpec",
+      "cpu_bytes_to_use": 64000000000,
+      "canonical_layout": true,
+      "secondary_tiers": [{"type": "fs", "root_dir": "/mnt/kv"}]
+    }
+  }'
+```
+
+Enable it on **every** instance that shares a secondary tier. The canonical format identity (format version and KV layout family) is part of the storage namespace, so canonical and direct-layout blocks never mix; an instance without `canonical_layout` doesn't see canonical blocks, and the reverse.
+
+For models where ranks hold identical KV bytes (for example MLA, or GQA with fewer KV heads than TP ranks), the ranks take turns storing each block, so the CPU tier holds one copy instead of one per rank.
+
+Requirements and limitations:
+
+- Supported layers: full and sliding-window attention whose KV heads divide evenly across TP ranks, and MLA attention. Per-token-head KV-cache quantization isn't supported.
+- Tensor parallelism only: pipeline parallelism, prefill context parallelism (PCP), and decode context parallelism (DCP) are not supported, and the offload workers must be exactly the TP group.
+- Packed and cross-layer KV cache layouts are not supported.
+- If a layer can't be mapped to the canonical layout, the engine fails at startup with an error that says to remove `canonical_layout`, rather than silently storing non-portable bytes.
+- Every load and store goes through a scatter/gather copy instead of a straight page copy, which adds some transfer overhead. Leave it off when every instance that shares offloaded KV uses the same parallel layout.
 
 ## Info Metric Labels
 
@@ -386,7 +420,7 @@ Implement `SecondaryTierManager` (`vllm/v1/kv_offload/tiering/base.py`) in your 
 - For single-tier (CPU-only) setups, set `cpu_bytes_to_use` larger than the aggregate GPU KV cache. Because offloading is immediate, a smaller CPU tier just mirrors what the GPU already holds and adds no hit rate.
 - `block_size` / `blocks_per_chunk`: larger offloaded chunks reduce per-block bookkeeping overhead but increase the granularity of lookups.
 - FS thread counts: tune `n_read_threads` and `n_write_threads` to the parallelism your storage can sustain. Reads are latency-sensitive on the prefill path, so prefer more read threads when prefill hit rates are high.
-- Sharing `root_dir` across runs: runs with the same model, `block_size`, parallelism layout, and dtype share files under the same `<digest>` subdirectory. Changing any of these produces a new subdirectory; old ones are orphaned but harmless. Delete them to reclaim disk.
+- Sharing `root_dir` across runs: runs with the same model, `block_size`, parallelism layout, and dtype share files under the same `<digest>` subdirectory. Changing any of these produces a new subdirectory; old ones are orphaned but harmless. Delete them to reclaim disk. To share files across different TP sizes, enable [`canonical_layout`](#canonical-layout).
 
 ## Per-Request Selective Offload
 
