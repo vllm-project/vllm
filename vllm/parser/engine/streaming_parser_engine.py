@@ -423,6 +423,18 @@ class StreamingParserEngine:
         if self.skip_reasoning_parsing and terminal in self._reasoning_markup_terminals:
             return self._emit_for_state(value, token_count)
 
+        # Inside a forwarded tool span, a terminal that is not tool markup
+        # must still reach the tool pass verbatim: its plain-state
+        # transition (e.g. absorbing a stray DSML parameter closer with no
+        # open block) must not fire here, or the forwarded call text would
+        # silently lose that markup before the tool pass re-parses it.
+        if (
+            self.skip_tool_parsing
+            and self._in_skipped_tool_span
+            and terminal not in self._tool_terminals
+        ):
+            return self._emit_for_state(value, token_count)
+
         if self.skip_tool_parsing and terminal in self._tool_terminals:
             # Inkling reuses one terminal for tool, text, and reasoning exits.
             # Outside a forwarded tool span, apply its normal transition.
