@@ -6,6 +6,10 @@ from transformers import AutoTokenizer
 
 from tests.reasoning.utils import run_reasoning_extraction
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
+from vllm.reasoning.olmo3_reasoning_parser import (
+    Olmo3ReasoningBuffer,
+    Olmo3ReasoningParser,
+)
 
 parser_name = "olmo3"
 START_REASONING = "<think>"
@@ -161,3 +165,74 @@ def test_reasoning(
 
     assert reasoning == param_dict["reasoning"]
     assert content == param_dict["content"]
+
+
+class _TinyTokenizer:
+    """Just enough vocab for Olmo3ReasoningParser's think_end splits."""
+
+    def get_vocab(self):
+        return {"Ġ</": 1, "</": 2, "think": 3, ">": 4}
+
+
+def _stream(parser, chunks):
+    reasoning, content, prev = "", "", ""
+    for chunk in chunks:
+        message = parser.extract_reasoning_streaming(
+            prev, prev + chunk, chunk, [], [], []
+        )
+        prev += chunk
+        if message is not None:
+            reasoning += message.reasoning or ""
+            content += message.content or ""
+    return reasoning, content
+
+
+def test_streaming_does_not_hold_a_delta_that_merely_occurs_in_a_marker():
+    # #60340: "think" is a substring of "<think>"/"</think>" but cannot grow
+    # into one here, so it must stream like any other text.
+    parser = Olmo3ReasoningParser(_TinyTokenizer())
+    chunks = ["<think>", "R", "</", "think", ">", "That is what I ", "think"]
+    reasoning, content = _stream(parser, chunks)
+    assert reasoning == "R"
+    assert content == "That is what I think"
+    assert parser.finish_streaming() is None
+
+
+def test_finish_streaming_flushes_a_tail_still_awaiting_a_marker():
+    # The stream can genuinely end on a marker prefix ("</"); at that point
+    # the held tail is emitted as content, like the non-streaming path.
+    parser = Olmo3ReasoningParser(_TinyTokenizer())
+    chunks = ["<think>", "R", "</", "think", ">", "That is what I ", "</"]
+    reasoning, content = _stream(parser, chunks)
+    assert (reasoning, content) == ("R", "That is what I ")
+    flushed = parser.finish_streaming()
+    assert flushed is not None
+    assert flushed.content == "</"
+    assert flushed.reasoning is None
+    # draining is idempotent: a second finish has nothing left to say
+    assert parser.finish_streaming() is None
+
+
+def test_finish_streaming_flushes_unterminated_reasoning_as_reasoning():
+    # If the stream ends mid-reasoning, earlier deltas already went out as
+    # reasoning, so the held tail stays reasoning for stream consistency.
+    parser = Olmo3ReasoningParser(_TinyTokenizer())
+    reasoning, content = _stream(parser, ["<think>", "R", "</"])
+    assert (reasoning, content) == ("R", "")
+    flushed = parser.finish_streaming()
+    assert flushed is not None
+    assert flushed.reasoning == "</"
+    assert flushed.content is None
+
+
+def test_buffer_holds_only_a_genuine_marker_prefix():
+    buffer = Olmo3ReasoningBuffer()
+    # "think" occurs inside "<think>" but is not its start: no hold
+    assert buffer.add_text("think") is not None
+    assert len(buffer) == 0
+    # "</" can still complete into "</think>": held
+    assert buffer.add_text("</") is None
+    assert len(buffer) == 2
+    # completing the marker flushes the buffer
+    buffer.add_text("think>")
+    assert len(buffer) == 0

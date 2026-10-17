@@ -833,3 +833,54 @@ def test_engine_reasoning_hermes_tool_multibyte_holdback(tokenizer, request_obj)
     )
     assert json.loads(tool_args) == {"city": city}
     assert content == ""
+
+
+class HoldbackThinkReasoningParser(ThinkReasoningParser):
+    """Legacy parser that holds every reasoning delta back, flushable at end.
+
+    Stands in for legacy parsers with a string buffer (e.g. olmo3) whose
+    held-back tail only surfaces when the serving layer asks for it.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._held: list[str] = []
+
+    def extract_reasoning_streaming(self, *args, **kwargs):
+        delta = super().extract_reasoning_streaming(*args, **kwargs)
+        if delta is not None and delta.reasoning:
+            self._held.append(delta.reasoning)
+            delta.reasoning = None
+            if delta.content is None and not delta.tool_calls:
+                delta = None
+        return delta
+
+    def finish_streaming(self):
+        if not self._held:
+            return None
+        text = "".join(self._held)
+        self._held.clear()
+        return DeltaMessage(reasoning=text)
+
+
+def test_parse_delta_finished_flushes_legacy_reasoning_holdback(tokenizer, request_obj):
+    # finalize_generation must give a legacy reasoning parser that defines
+    # finish_streaming one chance to flush its held-back tail at stream end.
+    class TestParser(DelegatingParser):
+        reasoning_parser_cls = HoldbackThinkReasoningParser
+        tool_parser_cls = None
+
+    parser = TestParser(tokenizer)
+    text = "<think>let me think</think>the answer"
+    results = stream_text(parser, tokenizer, text, request_obj)
+    reasoning, content, _ = collect_fields(results)
+    assert reasoning == ""
+    assert content == "the answer"
+
+    final = parser.parse_delta("", [], request_obj, finished=True)
+    assert final is not None
+    assert final.reasoning == "let me think"
+
+    # no double flush on a repeated finished call
+    again = parser.parse_delta("", [], request_obj, finished=True)
+    assert again is None or not again.reasoning
