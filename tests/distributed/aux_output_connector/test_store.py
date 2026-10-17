@@ -1276,7 +1276,7 @@ def test_store_lru_and_immutable_put():
     store.put([BlockObject("first", b"1111"), BlockObject("third", b"3333")])
 
     assert store.get_concatenated(["first", "third"]) == b"11113333"
-    with pytest.raises(BlockObjectStoreError, match="Increase aux_output_config"):
+    with pytest.raises(BlockObjectStoreError, match="does not exist"):
         store.get_concatenated(["second"])
     store.close()
 

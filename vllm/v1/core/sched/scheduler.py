@@ -586,14 +586,14 @@ class Scheduler(SchedulerInterface):
         return max(end - start, 0)
 
     def _get_local_prefix_cache_hit(
-        self, request: Request, max_hit: int | None = None
+        self, request: Request
     ) -> tuple[KVCacheBlocks, int, int, bool]:
         connector = self.connector
         if connector is not None and connector.supports_divergent_local_hybrid_hits:
             return self.kv_cache_manager.get_computed_blocks_for_connector(request)
 
         blocks, num_local, shared_prefix_boundary = (
-            self.kv_cache_manager.get_computed_blocks(request, max_hit)
+            self.kv_cache_manager.get_computed_blocks(request)
         )
         return blocks, num_local, shared_prefix_boundary, False
 
@@ -1014,15 +1014,22 @@ class Scheduler(SchedulerInterface):
                 # Get already-cached tokens.
                 if request.num_computed_tokens == 0:
                     did_prefix_cache_lookup = True
-                    # Hits must not outlive the auxiliary outputs they return.
-                    aux = self.aux_output_connector
-                    max_hit = aux.max_cache_hit(request) if aux else None
                     (
                         new_computed_blocks,
                         num_new_local_computed_tokens,
                         request.shared_prefix_boundary,
                         hit_diverged,
-                    ) = self._get_local_prefix_cache_hit(request, max_hit)
+                    ) = self._get_local_prefix_cache_hit(request)
+                    # Hits must not outlive the auxiliary outputs they return.
+                    aux = self.aux_output_connector
+                    max_hit = aux.max_cache_hit(request) if aux else None
+                    if max_hit is not None and num_new_local_computed_tokens > max_hit:
+                        # Only partial-block and sparse hits lack retained
+                        # outputs; a Mamba or sliding-window hit cannot be cut.
+                        new_computed_blocks = (
+                            self.kv_cache_manager.empty_kv_cache_blocks
+                        )
+                        num_new_local_computed_tokens = 0
 
                     # Get externally-cached tokens if using a KVConnector.
                     if self.connector is not None:
@@ -2981,11 +2988,11 @@ class Scheduler(SchedulerInterface):
                 "which is not supported yet."
             )
 
-        if reset_connector:
-            reset_successful = self.reset_connector_cache() and reset_successful
-
         if reset_successful and self.aux_output_connector is not None:
             self.aux_output_connector.reset()
+
+        if reset_connector:
+            reset_successful = self.reset_connector_cache() and reset_successful
 
         return reset_successful
 

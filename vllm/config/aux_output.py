@@ -15,7 +15,8 @@ class AuxOutputConfig:
     """Capture and return routed-experts auxiliary outputs."""
 
     max_bytes: int | None = Field(default=None, gt=0)
-    """LRU capacity, or ``None`` to derive it from the KV cache capacity."""
+    """Initial capacity, or ``None`` to derive it from the KV cache capacity. The
+    store grows when running requests and KV cache tiers reference every object."""
 
     @property
     def enabled(self) -> bool:

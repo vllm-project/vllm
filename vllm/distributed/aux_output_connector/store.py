@@ -102,7 +102,7 @@ class BackgroundBlockObjectStore:
 
 
 class BlockObjectStore:
-    """Single-owner bounded store that fails closed after an eviction."""
+    """Single-owner store that fails closed after an eviction."""
 
     _UNALLOCATED_SLOT = -1
 
@@ -169,13 +169,14 @@ class BlockObjectStore:
                 self._lru.move_to_end(key)
         self._evict_to_fit(set(unique) - set(terminal_order))
         if (nbytes := len(self._lru) * self.object_nbytes) > len(arena):
+            nbytes = max(nbytes, 2 * len(arena))
             logger.warning(
                 "Auxiliary output store grows past max_bytes to %d bytes: running "
                 "requests and KV cache tiers reference all %d objects.",
-                max(nbytes, 2 * len(arena)),
+                nbytes,
                 len(self._lru),
             )
-            grown = mmap.mmap(-1, max(nbytes, 2 * len(arena)))
+            grown = mmap.mmap(-1, nbytes)
             grown[: len(arena)] = arena
             self._arena = arena = grown
             self.num_slots = len(grown) // self.object_nbytes
@@ -216,8 +217,7 @@ class BlockObjectStore:
             raise BlockObjectStoreError(
                 "auxiliary output object does not exist; the object may have been "
                 f"evicted (used={len(self._lru)}, "
-                f"limit={self.num_slots} objects). Increase "
-                "aux_output_config.max_bytes when a KV cache hit requires it."
+                f"limit={self.num_slots} objects)."
             ) from error
         arena = memoryview(arena_obj)
         try:
