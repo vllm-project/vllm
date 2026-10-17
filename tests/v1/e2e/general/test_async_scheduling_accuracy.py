@@ -280,8 +280,13 @@ def run_tests(
                 if spec_config.get("max_model_len") is None:
                     # Keep the original acceptance-quality floor per batch.
                     # Preemption recomputes requests and loses n-gram drafts,
-                    # so allow a larger drop there.
-                    relative_drop = 0.10 if test_preemption else 0.05
+                    # so allow a larger drop there. ROCm's unified attention
+                    # backends are not batch invariant, so async scheduling
+                    # flips greedy near-ties and the continuations, with ~180
+                    # accepted tokens, move by more than 5% in either direction.
+                    relative_drop = (
+                        0.10 if test_preemption or current_platform.is_rocm() else 0.05
+                    )
                     assert actual >= baseline * (1 - relative_drop), (
                         f"{context}: acceptance={actual}, baseline={baseline}"
                     )
