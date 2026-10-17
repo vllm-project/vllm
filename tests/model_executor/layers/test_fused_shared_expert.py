@@ -1137,6 +1137,33 @@ def test_online_fp8_shared_expert_rejects_quark_mxfp4_fse() -> None:
     )
 
 
+def test_online_mxfp4_shared_expert_rejects_quark_weight_only_mxfp4_fse() -> None:
+    """Weight-only routed experts keep BF16 activations, unlike an MXFP4 target."""
+    shared_prefix = "model.layers.0.mlp.shared_expert"
+    quant_config = QuarkConfig(
+        {
+            **_QUARK_FSE_CONFIG,
+            "exclude": [],
+            "global_quant_config": {
+                **_QUARK_FSE_CONFIG["global_quant_config"],
+                "input_tensors": None,
+            },
+        }
+    )
+    quant_config.online_quantization_config = OnlineQuantizationConfig(
+        QuantizationConfigArgs(targets={f"{shared_prefix}*": "mxfp4"})
+    )
+
+    assert is_shared_expert_quant_fse_compatible(
+        quant_config,
+        "model.layers.0.mlp.experts",
+        shared_prefix,
+    ) == (
+        False,
+        "online shared-expert quantization keys do not match the routed expert keys",
+    )
+
+
 def test_quark_shared_expert_fse_exclude_is_scoped_to_the_layer() -> None:
     """Excluding one layer's shared experts must not disable FSE elsewhere.
 
