@@ -38,6 +38,7 @@ from vllm.v1.worker.gpu.sample.watermark import (
 )
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
+from vllm.v1.worker.gpu.spec_decode.rejection_sampler import RejectionSampler
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 
 
@@ -492,10 +493,14 @@ def test_gpu_sampler_skips_watermarking_for_repeated_contexts(monkeypatch):
     assert torch.equal(output_logits[1], torch.full((8,), 10.0))
 
 
-def test_gpu_sampler_can_disable_context_deduplication(monkeypatch):
+@pytest.mark.parametrize("scope", ["none", "single_turn", "all"])
+@pytest.mark.parametrize("partial", [False, True])
+def test_gpu_sampler_skips_partial_contexts_independently_of_deduplication(
+    monkeypatch, scope, partial
+):
     sampler = object.__new__(GPUWatermarkSampler)
     sampler.watermarker = StubWatermarker()
-    sampler.deduplicate_contexts = "none"
+    sampler.deduplicate_contexts = scope
     sampler.watermarking = SimpleNamespace(
         np=np.array([True, True]), gpu=torch.tensor([True, True])
     )
@@ -504,11 +509,17 @@ def test_gpu_sampler_can_disable_context_deduplication(monkeypatch):
         seeds=SimpleNamespace(gpu=torch.zeros(2, dtype=torch.int64)),
     )
     sampler.use_fp64_gumbel = False
-    sampler._get_contexts = lambda expanded_idx_mapping: torch.zeros(
-        2, 1, dtype=torch.int64
+    sampler._get_contexts = lambda expanded_idx_mapping: torch.tensor(
+        [[-1 if partial else 0], [0]]
     )
-    sampler._get_repeated_contexts = lambda *args: pytest.fail(
-        "context deduplication should not run"
+    sampler._get_repeated_contexts = lambda *args: (
+        pytest.fail("context deduplication should not run")
+        if scope == "none"
+        else torch.zeros(2, dtype=torch.bool)
+    )
+    monkeypatch.setattr(
+        "vllm.v1.watermarking.watermarker.gumbel_sample",
+        lambda *args, **kwargs: torch.tensor([3, 4]),
     )
     logits = torch.zeros(2, 8)
 
@@ -523,8 +534,9 @@ def test_gpu_sampler_can_disable_context_deduplication(monkeypatch):
         False,
     )
 
-    assert torch.equal(sampled, torch.tensor([7, 7]))
-    assert torch.equal(output_logits, torch.full((2, 8), 10.0))
+    assert torch.equal(sampled, torch.tensor([3 if partial else 7, 7]))
+    assert torch.equal(output_logits[0], logits[0] if partial else logits[0] + 10)
+    assert torch.equal(output_logits[1], logits[1] + 10)
 
 
 def test_repeated_context_mask_ignores_prompt_tokens():
@@ -1057,10 +1069,12 @@ def test_gpu_sampler_deduplicates_contexts_within_speculative_block():
     assert not repeated.any()
 
 
-def test_gpu_sampler_all_scope_skips_only_partial_speculative_contexts():
+@pytest.mark.parametrize("scope", ["none", "single_turn", "all"])
+def test_rejection_sampler_skips_only_partial_speculative_contexts(scope):
     sampler = object.__new__(GPUWatermarkSampler)
     sampler.watermarker = SimpleNamespace(context_width=2)
-    sampler.deduplicate_contexts = "all"
+    sampler.watermarking = SimpleNamespace(gpu=torch.tensor([True]))
+    sampler.deduplicate_contexts = scope
     sampler.deduplicate_contexts_max_history = None
     sampler.num_speculative_tokens = 3
     sampler.req_states = SimpleNamespace(
@@ -1070,18 +1084,18 @@ def test_gpu_sampler_all_scope_skips_only_partial_speculative_contexts():
     )
     request_indices = torch.tensor([0, 0, 0])
     local_positions = torch.tensor([0, 1, 2])
-    contexts = sampler._get_contexts(
+    rejection_sampler = object.__new__(RejectionSampler)
+    rejection_sampler.sampler = sampler
+    rejection_sampler.watermark_key = 42
+    kwargs = rejection_sampler._watermarking_kwargs(
+        torch.tensor([10, 20, 30]),
         request_indices,
         local_positions,
-        torch.tensor([10, 20, 30]),
     )
-
-    repeated = sampler._get_repeated_contexts(
-        request_indices, contexts, local_positions
+    assert torch.equal(kwargs["contexts"], torch.tensor([[-1, 10], [10, 20], [20, 30]]))
+    assert torch.equal(
+        kwargs["watermarking_skip_mask"], torch.tensor([True, False, False])
     )
-
-    assert torch.equal(contexts, torch.tensor([[-1, 10], [10, 20], [20, 30]]))
-    assert torch.equal(repeated, torch.tensor([True, False, False]))
 
 
 @pytest.mark.skipif(
@@ -1294,7 +1308,8 @@ def test_draft_context_deduplication_broadcasts_the_draft_step():
     assert torch.equal(production_prior, expected_prior)
 
 
-def test_draft_sampler_uses_draft_key_and_advances_context(monkeypatch):
+@pytest.mark.parametrize("partial", [False, True])
+def test_draft_sampler_uses_draft_key_and_advances_context(monkeypatch, partial):
     class StubSpeculator(DraftModelSpeculator):
         def capture(self): ...
 
@@ -1331,7 +1346,9 @@ def test_draft_sampler_uses_draft_key_and_advances_context(monkeypatch):
         deduplicate_contexts="none",
         deduplicate_contexts_max_history=None,
     )
-    draft_watermarker.state.contexts.copy_(torch.tensor([[1, 2], [3, 4]]))
+    draft_watermarker.state.contexts.copy_(
+        torch.tensor([[-1 if partial else 1, 2], [3, 4]])
+    )
     draft_watermarker.state.enabled = torch.tensor([True, False])
     speculator.draft_watermarker = draft_watermarker
     monkeypatch.setattr(
@@ -1349,8 +1366,11 @@ def test_draft_sampler_uses_draft_key_and_advances_context(monkeypatch):
         draft_logits=torch.zeros(2, 1, 8),
     )
 
-    assert torch.equal(sampled, torch.tensor([7, 4]))
-    assert torch.equal(draft_watermarker.state.contexts, torch.tensor([[2, 7], [4, 4]]))
+    assert torch.equal(sampled, torch.tensor([3 if partial else 7, 4]))
+    assert torch.equal(
+        draft_watermarker.state.contexts,
+        torch.tensor([[2, 3 if partial else 7], [4, 4]]),
+    )
 
 
 def test_draft_sampler_uses_ordinary_samples_for_repeated_contexts(monkeypatch):
@@ -1669,7 +1689,8 @@ def test_draft_watermarker_cuda_graph_reads_current_prompt_lens():
     assert mask.item()
 
 
-def test_dflash_draft_sampler_watermarks_drafts_in_step_order(monkeypatch):
+@pytest.mark.parametrize("partial", [False, True])
+def test_dflash_draft_sampler_watermarks_drafts_in_step_order(monkeypatch, partial):
     class NextTokenWatermarker:
         context_width = 2
 
@@ -1703,7 +1724,9 @@ def test_dflash_draft_sampler_watermarks_drafts_in_step_order(monkeypatch):
         deduplicate_contexts_max_history=None,
     )
     # Batch rows hold request slots 2, 0, 1. Slot 0 is greedy and row 2 opted out.
-    draft_watermarker.state.contexts[:num_reqs] = torch.tensor([[1, 2], [3, 4], [5, 6]])
+    draft_watermarker.state.contexts[:num_reqs] = torch.tensor(
+        [[-1 if partial else 1, 2], [3, 4], [5, 6]]
+    )
     draft_watermarker.state.enabled[:num_reqs] = torch.tensor([True, True, False])
     speculator = object.__new__(DFlashSpeculator)
     speculator.model = SimpleNamespace(
@@ -1727,7 +1750,12 @@ def test_dflash_draft_sampler_watermarks_drafts_in_step_order(monkeypatch):
         num_steps=num_steps,
     )
 
-    assert torch.equal(sampled, torch.tensor([3, 4, 102, 103, 204, 205]))
+    assert torch.equal(
+        sampled,
+        torch.tensor(
+            [300, 301, 102, 103, 204, 205] if partial else [3, 4, 102, 103, 204, 205]
+        ),
+    )
     assert torch.equal(draft_logits[batch_slots], logits.view(num_reqs, num_steps, -1))
 
 
