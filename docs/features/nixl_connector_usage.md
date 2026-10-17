@@ -462,6 +462,72 @@ exported when NixlConnector is active:
     Increase it via `--kv-transfer-config '{"kv_connector_extra_config":
     {"kv_lease_duration": <seconds>}}'`.
 
+## Troubleshooting same-host CUDA IPC pull latency
+
+On the `NixlConnector` pull/READ path, large descriptor lists can make transfer
+submission expensive even when the GPUs have a fast NVLink connection.
+A short benchmark on a fresh instance can miss this cost: unused KV blocks may be consecutive and merge into a few descriptors, while recycled blocks can be scattered. To investigate:
+
+1. **Verify the selected transport.** Set these variables before starting both
+   serving instances and retain their logs:
+
+    ```bash
+    export UCX_PROTO_INFO=y
+    export NIXL_LOG_LEVEL=DEBUG
+    ```
+
+    Check the UCX protocol output for the transport used by the KV reads.
+    Configuring or advertising `cuda_ipc` alone does not prove it was selected.
+    This procedure concerns expensive submission on a working CUDA IPC path;
+    investigate a TCP fallback separately. Debug logging can perturb timings;
+    use it for a bounded diagnostic and repeat timing runs at normal verbosity.
+
+2. **Compare early transfers with transfers after block reuse.** Keep the
+   software versions, model, payload size, cache layout, prefix-cache policy
+   and concurrency fixed. Run long enough to reuse the initial supply of
+   unused blocks, then compare the two phases. The required request count
+   depends on cache capacity and the workload; there is no universal warmup
+   count. Verify that KV transfers still occur, since prefix-cache hits can
+   otherwise hide the behavior being measured.
+
+3. **Inspect descriptor counts and merging diagnostics.** Compare `Avg number
+   of descriptors` for the same payload in each phase. In NIXL 1.5.0, this metric
+   reports the descriptor count after merging. Debug output also shows the
+   input count for each transfer:
+
+    ```text
+    makeXfer bytes: <payload bytes>, descs: <merged count>, indices: <input count>
+    ```
+
+    NIXL already merges compatible consecutive descriptors. A higher `descs`
+    count for the same payload can explain higher submission cost; `indices`
+    alone does not establish the resulting count or number of GPU copies.
+    Log formats can differ in other NIXL versions, so record the version and
+    available output rather than interpreting a missing line as disabled merging.
+    Allocation order at both the prefiller and decoder matters. Use an isolated
+    run without unrelated transfers to associate these lines with the work
+    under investigation; concurrent interval averages cannot identify the
+    expensive request.
+
+4. **Separate submission, transfer and client latency.** Compare `Avg post time
+   (ms)`, `Avg xfer time (ms)` and `Avg number of descriptors` from the same
+   reporting intervals. Record client time to first token and inter-token
+   latency separately. Rising descriptor counts and posting time at a fixed
+   payload point to submission overhead, rather than proving a link-bandwidth
+   problem. Transfer time includes submission; subtracting the two timings is
+   not a measurement of pure data-movement time. With tensor parallelism, one
+   client request can produce multiple rank transfers, so do not treat transfer
+   counts as request counts or sum rank durations into client latency.
+
+When reporting results, include the vLLM, NIXL and UCX versions, model and
+parallelism, KV layout and block size, cache capacity, prefix-cache settings,
+request count and concurrency, and early versus later descriptor/timing logs.
+Check the [compatibility matrix](nixl_connector_compatibility.md#kv-cache-layout)
+before testing another layout; a supported layout does not guarantee the same
+descriptor reduction for every model. See [issue #55434](https://github.com/vllm-project/vllm/issues/55434)
+for measurements of descriptor-heavy CUDA IPC submission, including a
+same-host Qwen3 example after block reuse.
+
 ## Example Scripts/Code
 
 Refer to these example scripts in the vLLM repository:
