@@ -788,11 +788,12 @@ class KVChecksumWorker:
         for _, batch, _ in groups:
             columns.append(width)
             width += len(batch.block_ids) + len(batch.block_ids) % 2
-        host = np.zeros((3, width), dtype=np.int64)
+        host_tensor = torch.zeros((3, width), dtype=torch.int64, pin_memory=PIN_MEMORY)
+        host = host_tensor.numpy()
         for (group_id, batch, _), column in zip(groups, columns):
             rows = batch.rows(self._block_sizes[group_id])
             host[:, column : column + rows.shape[1]] = rows
-        device_rows = _to_device(host, device)
+        device_rows = host_tensor.to(device, non_blocking=True)
 
         for (group_id, batch, plan), column in zip(groups, columns):
             num_rows = len(batch.block_ids)
@@ -807,16 +808,6 @@ class KVChecksumWorker:
             for launch in plan.launches:
                 launch.accumulate(block_ids, first_tokens, valid_tokens, values)
             output.add_group(group_id, batch.segments, plan.replica_keys, values)
-
-
-def _to_device(values: np.ndarray, device: torch.device) -> torch.Tensor:
-    """Copy ``values`` to ``device`` without blocking the host."""
-    host = torch.from_numpy(values)
-    if device.type == "cpu":
-        return host
-    if PIN_MEMORY:
-        host = host.pin_memory()
-    return host.to(device, non_blocking=True)
 
 
 def create_kv_checksum_worker(
