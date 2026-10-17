@@ -1,0 +1,175 @@
+meta:
+  title: "Qwen3-4B"
+  slug: "qwen3-4b"
+  provider: "Qwen"
+  description: "Qwen3 4B dense model with hybrid thinking/non-thinking modes — fits on a single TPU v6e chip, one GPU or one Xeon 6 NUMA node."
+  date_added: 2025-10-15
+  date_updated: 2026-09-12
+  tasks:
+    - text
+  performance_headline: "Verified on TPU v6e (Trillium) with BF16 on a single chip"
+  related_recipes:
+    - "Qwen/Qwen3-32B"
+  hardware:
+    trillium: verified
+    xeon6: verified
+
+model:
+  model_id: "Qwen/Qwen3-4B"
+  min_vllm_version: "0.8.5"
+  architecture: dense
+  parameter_count: "4B"
+  active_parameters: "4B"
+  context_length: 40960
+  base_args: []
+  base_env: {}
+
+features:
+  tool_calling:
+    description: "Enable automatic tool choice with the Hermes parser"
+    args:
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser"
+      - "hermes"
+  reasoning:
+    description: "Enable Qwen3 thinking mode (chain-of-thought) with the Qwen3 reasoning parser"
+    args:
+      - "--reasoning-parser"
+      - "qwen3"
+  long_context:
+    description: "YaRN RoPE scaling to the model card's validated 131,072-token context. Static YaRN holds the scaling factor constant regardless of input length, so leave this off unless you actually serve long prompts — it can cost quality below 32K."
+    args:
+      - "--hf-overrides"
+      - '{"max_position_embeddings":131072,"rope_parameters":{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768}}'
+      - "--max-model-len"
+      - "131072"
+
+opt_in_features:
+  - long_context
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 10
+    description: "Full precision BF16 — fits on a single TPU v6e chip or one 16GB+ GPU or one Xeon 6 NUMA node"
+    supported_hardware: [trillium, xeon6]
+  fp8:
+    model_id: "Qwen/Qwen3-4B-FP8"
+    precision: fp8
+    vram_minimum_gb: 5
+    description: "Qwen official FP8 checkpoint"
+    supported_hardware: [trillium]
+
+  redhat_fp8:
+    model_id: "RedHatAI/Qwen3-4B-FP8-dynamic"
+    precision: fp8
+    label: "FP8 Dynamic (RedHat)"
+    vram_minimum_gb: 5
+    description: "RedHatAI FP8 (E4M3) with dynamic per-token activation quantization"
+    extra_args:
+      - "--kv-cache-dtype"
+      - "fp8"
+
+compatible_strategies:
+  - single_node_tp
+  - multi_node_tp
+
+kv_offload_support:
+  offloading_cpu: verified
+  offloading_fs: verified
+
+hardware_overrides: {}
+
+strategy_overrides: {}
+
+guide: |
+  ## Overview
+
+  Qwen3-4B is the small dense model in the Qwen3 series, with hybrid thinking / non-thinking modes. At 4B it fits on a single accelerator — one TPU v6e (Trillium) chip, a single 16GB+ GPU or one Xeon 6 NUMA node — making it the cheapest entry point in the family. BF16 is the training precision and gives the best accuracy.
+
+  Toggle thinking mode per request with `enable_thinking` in `chat_template_kwargs`, or set the **Reasoning** feature to add the Qwen3 reasoning parser so `<think>` content is split into a separate field.
+
+  ## Prerequisites
+
+  ### NVIDIA
+  ```bash
+  uv venv
+  source .venv/bin/activate
+  uv pip install -U vllm --torch-backend auto
+  ```
+  
+  ### pip (Intel Xeon 6 CPUs)
+  For Intel and AMD x86 CPUs, follow the [CPU pre-built wheels](https://docs.vllm.ai/en/latest/getting_started/installation/cpu/#pre-built-wheels) installation instructions.
+
+  ### TPU (Trillium / v6e)
+  Use the official vLLM TPU image. The 4B model fits on a single v6e chip (`v6e-1`, `--topology 1x1`).
+  ```bash
+  export HF_HOME=/dev/shm
+  export HF_TOKEN=<your HF token>
+  ```
+
+  ## Deployment Configurations
+
+  ### TPU v6e (Trillium, single chip, TP=1)
+  Verified end-to-end on a single v6e chip.
+  ```bash
+  export HF_HOME=/dev/shm
+  export HF_TOKEN=<your HF token>
+  export TP=1
+  export MAX_MODEL_LEN=4096
+  vllm serve Qwen/Qwen3-4B \
+    --seed 42 \
+    --gpu-memory-utilization 0.98 \
+    --max-num-batched-tokens 1024 \
+    --max-num-seqs 128 \
+    --tensor-parallel-size $TP \
+    --max-model-len $MAX_MODEL_LEN
+  ```
+
+  ### Single GPU (BF16)
+  ```bash
+  vllm serve Qwen/Qwen3-4B \
+    --host 0.0.0.0 \
+    --port 8000
+  ```
+
+  ### Intel Xeon 6 Deployment via Docker
+
+  Launch the x86 CPU vLLM Docker container for `Qwen/Qwen3-4B`:
+
+  ```bash
+  docker run \
+    --privileged --ipc=host -p 8000:8000 \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    vllm/vllm-openai-cpu:latest-x86_64 Qwen/Qwen3-4B \
+    --tensor-parallel-size 1 \
+    --enable-auto-tool-choice \
+    --tool-call-parser hermes \
+    --reasoning-parser qwen3
+  ```
+
+  ## Configuration Tips
+
+  - `--max-model-len 4096` is the TPU-recipe default; native context is 40K — raise it if you have headroom.
+  - vLLM uses 90% of device memory by default; the TPU recipe pushes `--gpu-memory-utilization 0.98` to maximize KV cache.
+  - For thinking mode Qwen recommends `temperature=0.6, top_p=0.95, top_k=20`; for non-thinking, `temperature=0.7, top_p=0.8`.
+
+  ## Benchmarking
+
+  Launch the server with `--no-enable-prefix-caching` for consistent measurements.
+
+  ```bash
+  vllm bench serve \
+    --host 0.0.0.0 \
+    --port 8000 \
+    --model Qwen/Qwen3-4B \
+    --dataset-name random \
+    --random-input-len 1024 \
+    --random-output-len 1024 \
+    --num-prompts 128
+  ```
+
+  ## References
+
+  - [Model card](https://huggingface.co/Qwen/Qwen3-4B)
+  - [Qwen3 on Trillium (v6e)](https://github.com/AI-Hypercomputer/tpu-recipes/tree/main/inference/trillium/vLLM/Qwen3)
