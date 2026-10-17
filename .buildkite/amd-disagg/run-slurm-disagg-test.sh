@@ -78,7 +78,8 @@ echo "[slurm-submit] staged scripts for compute nodes: ${DISAGG_SCRIPTS_DIR}" >&
 #   skip_final_all_reduce is forced only when the MoE output is not already
 #   reduced (MoRI EP reduces it); TP and EP both reduce once (vllm-project/vllm#58589).
 #   Overlays replace the image's whole file: keep these copies in sync with the
-#   image's version, or they roll back its later upstream changes.
+#   image's version, or they roll back its later upstream changes. Each node
+#   skips an overlay its image already ships byte-for-byte.
 VLLM_REPO_ROOT="${VLLM_REPO_ROOT:-$(cd "${SCRIPT_DIR}/../.." && pwd)}"
 _dsv32_amd_src="${VLLM_REPO_ROOT}/vllm/models/deepseek_v32/amd/model.py"
 if [[ -f "${_dsv32_amd_src}" ]]; then

@@ -419,7 +419,6 @@ run_node_container() {
             IONIC_MOUNTS+=(-v "/etc/libibverbs.d/ionic.driver:/etc/libibverbs.d/ionic.driver:ro")
         echo "Rank $rank ionic mounts: ${IONIC_MOUNTS[*]:-<none>}"
     fi
-    echo "Rank $rank vLLM overlay mounts: ${VLLM_OVERLAY_ARGS[*]:-<none>}"
 
     # Pull latest container.
     if [ "$DRY_RUN" != "1" ]; then
@@ -474,6 +473,18 @@ run_node_container() {
         RUN_IMAGE="$ainic_tag"
     fi
 
+    # Mount only the overlays this image doesn't already ship byte-for-byte.
+    local overlay_args=() i src dst
+    for (( i = 0; i < ${#VLLM_OVERLAY_ARGS[@]}; i += 2 )); do
+        IFS=: read -r src dst _ <<< "${VLLM_OVERLAY_ARGS[i+1]}"
+        if docker run --rm --entrypoint cat "$RUN_IMAGE" "$dst" 2>/dev/null | cmp -s - "$src"; then
+            echo "Rank $rank overlay skipped, image already ships it: ${dst##*/dist-packages/}"
+        else
+            overlay_args+=("${VLLM_OVERLAY_ARGS[i]}" "${VLLM_OVERLAY_ARGS[i+1]}")
+        fi
+    done
+    echo "Rank $rank vLLM overlay mounts: ${overlay_args[*]:-<none>}"
+
     # Start the external vLLM router as a SEPARATE container on the rank-0 node.
     if [ "$ROUTER_TYPE" = "vllm-router" ] && [ "$rank" = "0" ] && [ "$DRY_RUN" = "1" ]; then
         echo "DRY_RUN: would start vllm-router on $(hostname): $VLLM_ROUTER_IMAGE (discovery :$PROXY_PING_PORT, port :$ROUTER_PORT, policy $ROUTER_POLICY, dp_local=$ROUTER_DP_LOCAL)"
@@ -500,7 +511,7 @@ run_node_container() {
 
     docker run --rm \
 	--user "$(id -u):$(id -g)" \
-        "${VLLM_OVERLAY_ARGS[@]}" \
+        "${overlay_args[@]}" \
         --device /dev/dri \
         --device /dev/kfd \
         --device /dev/infiniband \
