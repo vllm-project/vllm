@@ -171,6 +171,13 @@ def build_offloading_config(
     )
 
     canonical_layout = bool(extra_config.get("canonical_layout", False))
+    canonical_format = None
+    if canonical_layout:
+        from .canonical_mapping import canonical_format_id
+
+        # Resolved once here; consumers may run outside the vLLM config context
+        assert vllm_config.cache_config.kv_cache_layout is not None
+        canonical_format = canonical_format_id(vllm_config.cache_config.kv_cache_layout)
 
     # Only a single non-MLA full-attention group with genuinely head-sharded
     # pages is parallelism-invariant: replicated latent or GQA heads,
@@ -195,33 +202,38 @@ def build_offloading_config(
         total_kv_heads = vllm_config.model_config.get_total_num_kv_heads()
 
         def spec_certifiable(spec: KVCacheSpec) -> bool:
-            """Conservative static mirror of _layer_mapping's per-layer checks."""
+            """Mirror the canonical mapping's supported layer spec families."""
+            if isinstance(spec, UniformTypeKVCacheSpecs):
+                return bool(spec.kv_cache_specs) and all(
+                    spec_certifiable(inner) for inner in spec.kv_cache_specs.values()
+                )
             if not isinstance(spec, AttentionSpec):
-                return False
-            if spec.kv_quant_mode.is_per_token_head:
                 return False
             if type(spec) is MLAAttentionSpec:
                 return (
-                    spec.tokens_per_state == 1
+                    not spec.kv_quant_mode.is_per_token_head
+                    and spec.tokens_per_state == 1
                     and spec.real_page_size_bytes % spec.block_size == 0
                 )
-            if isinstance(spec, (SlidingWindowMLASpec, MLAAttentionSpec)):
+            if isinstance(spec, SlidingWindowMLASpec):
                 return False
             if not isinstance(spec, (FullAttentionSpec, SlidingWindowSpec)):
                 return False
-            return (
+            heads_are_portable = (
                 total_kv_heads % tp_size == 0 or tp_size % total_kv_heads == 0
-            ) and spec.num_kv_heads == max(1, total_kv_heads // tp_size)
+            )
+            # Packed per-token-head scales travel inline with their head rows.
+            return heads_are_portable and spec.num_kv_heads == max(
+                1, total_kv_heads // tp_size
+            )
 
-        # UniformTypeKVCacheSpecs groups (e.g. MLA plus its DSA indexer) hold
-        # one spec per layer; certify per layer, as the mapping derivation does.
         layer_specs = [
             spec
-            for group in kv_cache_config.kv_cache_groups
+            for _, group in selected_groups
             for spec in iter_layer_specs(group.kv_cache_spec)
         ]
         is_parallelism_agnostic = (
-            len(layer_specs) > 0
+            bool(layer_specs)
             and all(spec_certifiable(spec) for spec in layer_specs)
             and parallel_config.decode_context_parallel_size == 1
             and parallel_config.prefill_context_parallel_size == 1
@@ -280,5 +292,6 @@ def build_offloading_config(
         ),
         replicated_layout=replicated_layout,
         canonical_layout=canonical_layout,
+        canonical_format=canonical_format,
         kv_cache_layout=vllm_config.cache_config.kv_cache_layout,
     )
