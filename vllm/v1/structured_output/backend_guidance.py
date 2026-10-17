@@ -338,6 +338,15 @@ def serialize_guidance_grammar(
                 s_tag = json.loads(grammar_spec)
             else:
                 s_tag = grammar_spec
+            if "structures" not in s_tag:
+                # The guidance backend only understands the legacy
+                # structures/triggers structural tag shape. Raise a clear
+                # error instead of failing with a KeyError on "triggers".
+                raise VLLMValidationError(
+                    "The 'guidance' structured output backend does not "
+                    "support new-style structural tags (with 'format'); only "
+                    "the legacy 'structures'/'triggers' shape is supported."
+                )
             triggers: list[str] = s_tag["triggers"]
             tags: list[llguidance.StructTag] = []
             for s in s_tag["structures"]:
