@@ -46,7 +46,8 @@ from vllm.config.mamba import MambaBackendEnum
 from vllm.config.speculative import _validate_qwen3_omni_dspark
 from vllm.config.utils import get_field
 from vllm.config.vllm import OPTIMIZATION_LEVEL_TO_CONFIG, OptimizationLevel
-from vllm.platforms import current_platform
+from vllm.platforms import CpuArchEnum, current_platform
+from vllm.platforms.interface import DeviceCapability
 from vllm.sampling_params import BeamSearchParams
 from vllm.transformers_utils.config import (
     _patch_hf_transformers_nested_rope_validation,
@@ -1560,6 +1561,138 @@ def test_data_parallel_rpc_port_has_fixed_default():
 
 def test_all2all_backend_has_portable_default():
     assert ParallelConfig().all2all_backend == "allgather_reducescatter"
+
+
+def _pretend_cuda_host(monkeypatch, cpu_arch, capability) -> None:
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(current_platform, "get_cpu_architecture", lambda: cpu_arch)
+    # `is_device_capability_family` is a classmethod, so it reads the capability
+    # off the class rather than the instance patched above.
+    monkeypatch.setattr(
+        type(current_platform),
+        "get_device_capability",
+        staticmethod(
+            lambda device_id=0: DeviceCapability(
+                major=capability[0], minor=capability[1]
+            )
+        ),
+    )
+
+
+def _parallel_config(**kwargs) -> ParallelConfig:
+    """ParallelConfig with the executor pinned, so that multi-rank configs do
+    not reach the platform probe that picks one for us."""
+    kwargs.setdefault("distributed_executor_backend", "mp")
+    return ParallelConfig(**kwargs)
+
+
+@pytest.fixture
+def one_sided_capable_host(monkeypatch):
+    """A GB200 host with FlashInfer present, i.e. everything but the EP group."""
+    from vllm.config.parallel import _is_gb200_or_gb300
+
+    _pretend_cuda_host(monkeypatch, CpuArchEnum.ARM, (10, 0))
+    monkeypatch.setattr(
+        "vllm.utils.flashinfer.has_flashinfer_nvlink_one_sided", lambda: True
+    )
+    _is_gb200_or_gb300.cache_clear()
+    yield
+    _is_gb200_or_gb300.cache_clear()
+
+
+@pytest.mark.parametrize(
+    ("cpu_arch", "capability", "expected"),
+    [
+        # GB200 and GB300: datacenter Blackwell on a Grace host.
+        (CpuArchEnum.ARM, (10, 0), "flashinfer_nvlink_one_sided"),
+        (CpuArchEnum.ARM, (10, 3), "flashinfer_nvlink_one_sided"),
+        # HGX B200/B300 share the compute capability but not the Grace host.
+        (CpuArchEnum.X86, (10, 0), "allgather_reducescatter"),
+        (CpuArchEnum.X86, (10, 3), "allgather_reducescatter"),
+        # GB10 is a Grace-Blackwell superchip too, but not a 10.x part.
+        (CpuArchEnum.ARM, (12, 1), "allgather_reducescatter"),
+        # GH200 is Grace, but Hopper.
+        (CpuArchEnum.ARM, (9, 0), "allgather_reducescatter"),
+        (CpuArchEnum.X86, (9, 0), "allgather_reducescatter"),
+    ],
+)
+def test_all2all_backend_defaults_to_one_sided_only_on_gb200_gb300(
+    monkeypatch, cpu_arch, capability, expected
+):
+    """x86 HGX B200/B300 report the same compute capability as GB200/GB300, so
+    the default needs the Grace host to stay off unbenchmarked parts."""
+    from vllm.config.parallel import _is_gb200_or_gb300
+
+    _pretend_cuda_host(monkeypatch, cpu_arch, capability)
+    monkeypatch.setattr(
+        "vllm.utils.flashinfer.has_flashinfer_nvlink_one_sided", lambda: True
+    )
+    _is_gb200_or_gb300.cache_clear()
+    try:
+        config = _parallel_config(enable_expert_parallel=True, data_parallel_size=8)
+        assert config.all2all_backend == expected
+    finally:
+        _is_gb200_or_gb300.cache_clear()
+
+
+@pytest.mark.parametrize(
+    ("data_parallel_size", "expected"),
+    [
+        (8, "flashinfer_nvlink_one_sided"),
+        (16, "flashinfer_nvlink_one_sided"),
+        (4, "allgather_reducescatter"),
+        (2, "allgather_reducescatter"),
+        (1, "allgather_reducescatter"),
+    ],
+)
+def test_one_sided_all2all_default_requires_eight_data_parallel_ranks(
+    one_sided_capable_host, data_parallel_size, expected
+):
+    """Below DP 8 one-sided loses on large prefill chunks, so the default must
+    stay on allgather_reducescatter there."""
+    config = _parallel_config(
+        enable_expert_parallel=True, data_parallel_size=data_parallel_size
+    )
+    assert config.all2all_backend == expected
+
+
+def test_explicit_all2all_backend_survives_a_small_deployment(one_sided_capable_host):
+    """The DP threshold is a default-picking heuristic, not a constraint:
+    asking for one-sided explicitly must still get it."""
+    config = _parallel_config(
+        all2all_backend="flashinfer_nvlink_one_sided",
+        enable_expert_parallel=True,
+        data_parallel_size=2,
+    )
+    assert config.all2all_backend == "flashinfer_nvlink_one_sided"
+
+
+def test_one_sided_all2all_default_requires_expert_parallel(one_sided_capable_host):
+    """The all2all backend is only used by expert parallelism, so the GB200
+    default must not leak into non-EP deployments."""
+    assert _parallel_config(data_parallel_size=8).all2all_backend == (
+        "allgather_reducescatter"
+    )
+    assert _parallel_config(
+        enable_expert_parallel=True, data_parallel_size=8
+    ).all2all_backend == ("flashinfer_nvlink_one_sided")
+
+
+def test_one_sided_all2all_default_falls_back_without_flashinfer(monkeypatch):
+    """FlashInferNVLinkOneSidedManager asserts on the missing module, so an
+    image without it must degrade instead of failing startup."""
+    from vllm.config.parallel import _is_gb200_or_gb300
+
+    _pretend_cuda_host(monkeypatch, CpuArchEnum.ARM, (10, 0))
+    monkeypatch.setattr(
+        "vllm.utils.flashinfer.has_flashinfer_nvlink_one_sided", lambda: False
+    )
+    _is_gb200_or_gb300.cache_clear()
+    try:
+        config = _parallel_config(enable_expert_parallel=True, data_parallel_size=8)
+        assert config.all2all_backend == "allgather_reducescatter"
+    finally:
+        _is_gb200_or_gb300.cache_clear()
 
 
 def test_dp_group_uses_configured_timeout_without_current_config(monkeypatch):
