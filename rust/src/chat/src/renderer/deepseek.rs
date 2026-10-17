@@ -289,8 +289,8 @@ pub(super) fn resolve_reasoning(
         DsDialect::V41 => {
             let budget = match effort {
                 EffortValue::String(effort) => match effort.as_str() {
-                    "low" => 50,
-                    "high" => 75,
+                    "minimal" | "low" => 50,
+                    "medium" | "high" => 75,
                     "xhigh" => 75,
                     "max" => 100,
                     _ => return Err(invalid_v41_reasoning_effort()),
@@ -324,7 +324,7 @@ fn reasoning_prompt(control: &ReasoningControl, dialect: DsDialect) -> Cow<'stat
 
 fn invalid_v41_reasoning_effort() -> Error {
     Error::InvalidReasoningEffort(
-        "DeepSeek V4.1 reasoning_effort must be low, high, xhigh, max, or an integer within [1, 100] in chat_template_kwargs".to_string(),
+        "DeepSeek V4.1 reasoning_effort must be minimal, low, medium, high, xhigh, max, or an integer within [1, 100] in chat_template_kwargs".to_string(),
     )
 }
 
