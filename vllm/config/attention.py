@@ -78,6 +78,15 @@ class AttentionConfig:
     disable_flashinfer_q_quantization: bool = False
     """If set, when using fp8 kv, do not quantize Q to fp8."""
 
+    flashinfer_separate_kv_head_slots: bool = False
+    """Store an unquantized (fp16/bf16) FlashInfer KV cache with K and V as
+    separate head slots (`num_head_slots = 2 * num_kv_heads`) instead of packing
+    them in the content dim. Under the default LBHNC layout, each block is then
+    `[K heads (H, N, D) | V heads (H, N, D)]`, the same split the NVFP4 KV cache
+    uses. This lets KV connectors exchange blocks with engines that keep K and V
+    in separate per-layer slabs without a post-transfer permute. Requires the
+    LBHNC or BLHNC layout."""
+
     mla_prefill_backend: MLAPrefillBackendEnum | None = None
     """MLA prefill backend to use. If None, will be selected automatically.
     Valid options: FLASH_ATTN (FA3/FA4), FLASHINFER, TRTLLM_RAGGED."""
