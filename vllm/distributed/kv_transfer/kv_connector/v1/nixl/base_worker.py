@@ -2311,10 +2311,6 @@ class NixlBaseConnectorWorker:
         # Number of physical regions registered locally (one per layer/tensor).
         num_local_regions = len(self.block_len_per_layer)
         if self._transfer_layer_region_indices:
-            if self.block_size != nixl_agent_meta.block_size:
-                raise NotImplementedError(
-                    "Attention-HMA push requires identical P/D block sizes."
-                )
             if remote_tp_size > transfer_topo.tp_size and not self.use_mla:
                 raise NotImplementedError(
                     "Attention-HMA push does not support decode TP greater than "

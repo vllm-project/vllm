@@ -49,6 +49,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     PUSH_REG_NOTIF_PREFIX,
+    NixlAgentMetadata,
     NixlConnectorMetadata,
     RemoteMeta,
     ReqId,
@@ -133,6 +134,22 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
 
         self._push_writer_stop = threading.Event()
         self._push_writer_thread: threading.Thread | None = None
+
+    def _validate_remote_parallel_config(
+        self, agent_metadata: NixlAgentMetadata
+    ) -> None:
+        super()._validate_remote_parallel_config(agent_metadata)
+        local = (self.block_size, self._physical_blocks_per_logical_kv_block)
+        remote = (
+            agent_metadata.block_size,
+            agent_metadata.physical_blocks_per_logical_kv_block,
+        )
+        if local != remote:
+            raise NotImplementedError(
+                "NixlPushConnector requires identical P/D block sizes. Kernel "
+                "block size and kernel blocks per logical block: local "
+                f"{local}, remote engine {agent_metadata.engine_id} {remote}."
+            )
 
     # --- Lifecycle ----------------------------------------------------- #
 
@@ -648,15 +665,6 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         remote_block_ids = read_spec.remote_block_ids
 
         remote_info = self.transfer_topo.get_engine_info(dst_engine_id)
-        block_size_ratio = self.transfer_topo.block_size_ratio(
-            remote_info.remote_block_size
-        )
-        if block_size_ratio > 1:
-            local_block_ids, remote_block_ids = (
-                self._map_block_ids_for_block_size_ratio(
-                    local_block_ids, remote_block_ids, block_size_ratio
-                )
-            )
 
         notif_id = f"{remote_request_id}:{self.world_size}".encode()
 
@@ -700,7 +708,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         local_block_descs_ids = self._compute_desc_ids(
             block_ids=local_block_ids,
             dst_num_blocks=self.dst_num_blocks[self.engine_id],
-            block_size_ratio=block_size_ratio,
+            block_size_ratio=None,
             physical_blocks_per_logical=self._physical_blocks_per_logical_kv_block,
             region_num_blocks=self.dst_region_num_blocks[self.engine_id],
             region_group_ids=self.region_group_ids,
