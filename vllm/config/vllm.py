@@ -2723,6 +2723,22 @@ class VllmConfig:
             computed_compile_ranges_endpoints
         )
 
+    def _configure_monokernel(self) -> None:
+        """With ``--monokernel``, refuses an unsupported config before load and
+        sets the capture sizes the model's MonoKernels need (RFC #60904)."""
+        from vllm.models.common.mono.guards import configure, enabled
+
+        if not enabled(self):
+            return
+        spec = self.model_config.mono_spec
+        if spec is not None:
+            configure(self, spec)
+        elif self.kernel_config.monokernel:
+            logger.warning(
+                "--monokernel: %s has no MonoKernels; ignored",
+                self.model_config.architecture,
+            )
+
     def try_verify_and_update_config(self):
         if self.model_config is None:
             return
@@ -2753,6 +2769,8 @@ class VllmConfig:
             cls = MODELS_CONFIG_MAP.get(architecture, None)
         if cls is not None:
             cls.verify_and_update_config(self)
+
+        self._configure_monokernel()
 
         if self.model_config.is_hybrid:
             HybridAttentionMambaModelConfig.verify_and_update_config(self)

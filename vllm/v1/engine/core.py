@@ -568,10 +568,14 @@ class EngineCore:
             # interested in dumping info when the exception is due to an
             # error from execute_model itself.
 
+            # The stats must not replace the model's error: a failed step can
+            # leave the scheduler inconsistent enough for make_stats to raise.
+            try:
+                stats = self.scheduler.make_stats()
+            except Exception:
+                stats = None
             # NOTE: This method is exception-free
-            dump_engine_exception(
-                self.vllm_config, scheduler_output, self.scheduler.make_stats()
-            )
+            dump_engine_exception(self.vllm_config, scheduler_output, stats)
             raise err
 
     @contextmanager
