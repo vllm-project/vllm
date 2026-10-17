@@ -9,11 +9,15 @@ use vllm_engine_core_client::EngineCoreClient;
 mod error;
 mod inflight;
 mod log_stats;
+mod observer;
 mod output;
 mod request;
 mod request_metrics;
 
 pub use error::{Error, Result};
+pub use observer::{
+    FinishedRequest, FinishedRequestEvents, FinishedRequestStats, RequestObserver, RequestObservers,
+};
 pub use output::{
     CollectedGenerateOutput, FinishReason, GenerateOutput, GenerateOutputStream,
     GenerateOutputStreamExt, GeneratePromptInfo, TokenUsage, WeightVersionSpan,
@@ -24,6 +28,7 @@ pub use vllm_engine_core_client::protocol::logprobs::{Logprobs, PositionLogprobs
 
 use crate::inflight::InflightRequests;
 use crate::log_stats::StatsLogger;
+use crate::observer::ObserverContext;
 use crate::request_metrics::RequestMetricsTracker;
 
 /// Thin generate-and-abort facade over [`EngineCoreClient`].
@@ -39,6 +44,7 @@ pub struct Llm {
     stream_interval: NonZeroU32,
     stats_logger: Option<StatsLogger>,
     inflight: InflightRequests,
+    observers: RequestObservers,
 }
 
 impl Llm {
@@ -51,7 +57,14 @@ impl Llm {
             stream_interval: NonZeroU32::MIN,
             stats_logger: None,
             inflight: InflightRequests::new(),
+            observers: RequestObservers::default(),
         }
+    }
+
+    /// Register observers notified when a request submitted to the engine finishes.
+    pub fn with_request_observers(mut self, observers: RequestObservers) -> Self {
+        self.observers = observers;
+        self
     }
 
     /// Enable or disable periodic stats logging.
@@ -117,8 +130,20 @@ impl Llm {
         let max_tokens_param =
             (prepared.engine_request.sampling_params.as_ref()).map(|p| p.max_tokens);
         let prompt_len = prepared.prompt_token_ids().len() as u32;
+        let lora_name = (prepared.engine_request.lora_request.as_ref())
+            .filter(|_| !self.observers.is_empty())
+            .map(|lora| lora.lora_name.clone());
 
         let stream = self.client.call(prepared.engine_request).await?;
+
+        let observer_context = (!self.observers.is_empty()).then(|| ObserverContext {
+            observers: self.observers.clone(),
+            external_request_id: external_request_id.clone(),
+            engine_request_id: internal_request_id.clone(),
+            model_name: self.client.model_name().to_string(),
+            lora_name,
+            engine_index: stream.engine_index(),
+        });
 
         let request_metrics = RequestMetricsTracker::new(
             self.client.model_name().to_string(),
@@ -135,6 +160,7 @@ impl Llm {
             prompt_token_ids,
             stream,
             request_metrics,
+            observer_context,
             guard,
         ))
     }
@@ -162,7 +188,9 @@ impl Llm {
 
     /// Shut down the underlying engine-core client and its background tasks.
     pub async fn shutdown(self) -> Result<()> {
-        self.client.shutdown().await?;
+        let result = self.client.shutdown().await;
+        self.observers.shutdown().await;
+        result?;
         Ok(())
     }
 }
