@@ -145,6 +145,7 @@ class ThinkingBudgetStateHolder:
                 state["spec_token_ids"] = []
             state["in_spec_mode"] = self.in_spec_mode
             state["force_index"] = []
+            state["force_tokens"] = []
             self._update_think_state(state)
 
     def apply_to_logits(
@@ -167,6 +168,32 @@ class ThinkingBudgetStateHolder:
             if target_list[i : i + len(token_ids)] == token_ids:
                 return i
         return -1
+
+    def _committed_end_prefix(self, output: list[int]) -> int:
+        """Length of the longest proper prefix of the forced end sequence that
+        the accepted output ends with."""
+        end_ids = self.think_end_token_ids
+        for n in range(min(len(end_ids) - 1, len(output)), 0, -1):
+            if output[-n:] == end_ids[:n]:
+                return n
+        return 0
+
+    def _force_end_window(
+        self, state: dict[str, Any], progress: int, start: int = 0
+    ) -> None:
+        """Force the end sequence from ``progress`` at every position of this
+        step's verification window from ``start`` on, drafts and bonus alike.
+
+        Forcing only the first position that disagrees with the drafts leaves
+        a draft that already matches the next end token to the target's own
+        logits. If the target samples something else there, that draft is
+        rejected and the end tokens it stood for are lost.
+        """
+        end_ids = self.think_end_token_ids
+        window = len(state.get("spec_token_ids", [])) + 1
+        n = max(0, min(len(end_ids) - progress, window - start))
+        state["force_index"] = list(range(start, start + n))
+        state["force_tokens"] = end_ids[progress : progress + n]
 
     def _init_state_entry(
         self, prompt_tok_ids: list[int] | None, thinking_token_budget: int
@@ -434,35 +461,30 @@ class ThinkingBudgetStateHolder:
                 remaining_budget = state["thinking_token_budget"] - state["think_count"]
                 spec_len = len(state["spec_token_ids"])
                 if 0 < remaining_budget < spec_len:
-                    state["force_index"] = [remaining_budget]
-
+                    force_from = remaining_budget
                 elif remaining_budget <= 0:
-                    state["force_index"] = [0]
-
+                    force_from = 0
                 else:
                     # remaining_budget >= spec_len: all spec tokens are within
                     # budget; force the bonus token position
-                    state["force_index"] = [len(state["spec_token_ids"])]
+                    force_from = spec_len
+                self._force_end_window(state, 0, force_from)
 
         else:
-            state["force_index"] = []
-            if len(state["spec_token_ids"]) > 0:
-                for i, token_id in enumerate(state["spec_token_ids"]):
-                    if state["end_count"] + 1 < len(self.think_end_token_ids):
-                        if token_id == self.think_end_token_ids[state["end_count"] + 1]:
-                            state["end_count"] += 1
-                        else:
-                            state["end_count"] += 1
-                            state["force_index"] = [i]
-                            break
-                    else:
-                        state["end_count"] += 1
-                if len(state["force_index"]) == 0:
-                    state["end_count"] += 1
-                    state["force_index"] = [len(state["spec_token_ids"])]
+            # Progress through the end sequence is what the target accepted,
+            # not what the drafts propose: a draft matching the next end token
+            # can still be rejected at a position left to the target, so every
+            # position of the window is forced and end_count follows the
+            # accepted output.
+            end_ids = self.think_end_token_ids
+            recent = output[max(0, prev_length - len(end_ids) + 1) :]
+            if self._find_last_sequence_index(recent, end_ids) >= 0:
+                state["end_count"] = len(end_ids)
+                state["force_index"] = []
+                state["force_tokens"] = []
             else:
-                state["end_count"] += 1
-                state["force_index"] = [0]
+                state["end_count"] = self._committed_end_prefix(output)
+                self._force_end_window(state, state["end_count"])
             if state["end_count"] >= len(self.think_end_token_ids):
                 state.update(
                     {
@@ -511,6 +533,23 @@ class ThinkingBudgetStateHolder:
             if seq_idx not in self.cu_num_tokens:
                 continue
             state = self._state[seq_idx]
+            if state.get("in_end", False) and state.get("force_tokens"):
+                # One end token per window position: the draft positions in the
+                # target call, the bonus position in the bonus call.
+                num_drafts = len(state["spec_token_ids"])
+                for pos, token in zip(state["force_index"], state["force_tokens"]):
+                    if self.in_spec_mode and not predict_bonus_token:
+                        if pos >= num_drafts:
+                            continue
+                        row = self.cu_num_tokens[seq_idx] + pos
+                    elif pos == num_drafts:
+                        row = self.cu_num_tokens[seq_idx]
+                    else:
+                        continue
+                    if row < self._mask_capacity and row < logits.shape[0]:
+                        active_indices_cpu.append(row)
+                        force_tokens_cpu.append(token)
+                continue
             if state.get("in_end", False):
                 # logits processor in spec mode are called twice
                 # once for bonus token logits and
