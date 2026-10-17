@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import inspect
 import threading
 from dataclasses import dataclass
 from typing import Any
@@ -134,7 +135,13 @@ def test_failed_parallel_warmup_does_not_leak_into_runtime(monkeypatch) -> None:
         raise RuntimeError("warmup failed")
 
     def warmup(**kwargs):
-        active_mode.get().submit(kwargs["second"], fail, lambda result: None)
+        mode = active_mode.get()
+        args = [kwargs["second"], fail, lambda result: None]
+        # Triton 3.9 added cleanup_fn, called with the FutureKernel when the
+        # compile fails.
+        if "cleanup_fn" in inspect.signature(mode.submit).parameters:
+            args.append(lambda future_kernel: None)
+        mode.submit(*args)
 
     monkeypatch.setattr(owner.kernel, "warmup", warmup)
     with pytest.raises(RuntimeError, match="warmup failed"):
