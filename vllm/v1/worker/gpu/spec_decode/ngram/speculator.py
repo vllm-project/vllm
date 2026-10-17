@@ -152,6 +152,7 @@ class NgramGPUSpeculator(BaseSpeculator):
     """V2-compatible GPU n-gram speculator."""
 
     supports_mm_inputs = False
+    needs_target_attn_metadata = False
     draft_logits = None
 
     def __init__(
