@@ -447,13 +447,13 @@ def test_accepts_chunk_metadata_from_the_attention_builder(
     torch.testing.assert_close(state_got, state_ref, rtol=1e-3, atol=1e-3)
 
 
-def _checkpoint_buffer(rows: int) -> torch.Tensor:
+def _checkpoint_buffer(rows: int, dtype: torch.dtype = torch.float32) -> torch.Tensor:
     """A destination filled with NaN, so an unwritten row is unmistakable."""
     return torch.full(
         (rows, NUM_HEADS, HEAD_DIM, HEAD_DIM),
         float("nan"),
         device="cuda",
-        dtype=torch.float32,
+        dtype=dtype,
     )
 
 
@@ -470,9 +470,13 @@ def _prefix_inputs(inp: dict, seq: int, num_tokens: int) -> dict:
 
 
 def _run_with_checkpoints(
-    inp: dict, offsets: list[int], rows: int | None = None, **kw
+    inp: dict,
+    offsets: list[int],
+    rows: int | None = None,
+    dtype: torch.dtype = torch.float32,
+    **kw,
 ) -> tuple[torch.Tensor, tuple]:
-    ckpt = _checkpoint_buffer(len(offsets) if rows is None else rows)
+    ckpt = _checkpoint_buffer(len(offsets) if rows is None else rows, dtype)
     result = _run(
         inp,
         use_fused=True,
@@ -534,7 +538,10 @@ def test_checkpoint_leaves_the_output_and_final_state_alone() -> None:
 
 
 @pytest.mark.parametrize("offset", [100, 63, 65, 1024])
-def test_unusable_checkpoint_offsets_write_nothing(offset: int) -> None:
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_unusable_checkpoint_offsets_write_nothing(
+    offset: int, dtype: torch.dtype
+) -> None:
     """Offsets the walk never reaches must leave the destination untouched.
 
     The recurrent state only exists at chunk boundaries, so an offset that is
@@ -550,12 +557,13 @@ def test_unusable_checkpoint_offsets_write_nothing(offset: int) -> None:
 
     assert offset % KDA_CHECKPOINT_ALIGNMENT != 0 or offset > 512
     inp = _inputs([512], seed=31)
-    ckpt, _ = _run_with_checkpoints(inp, [offset])
+    ckpt, _ = _run_with_checkpoints(inp, [offset], dtype=dtype)
 
     assert ckpt.isnan().all()
 
 
-def test_checkpoint_state_indices_pick_the_destination_row() -> None:
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_checkpoint_state_indices_pick_the_destination_row(dtype: torch.dtype) -> None:
     """With indices the export lands straight in the paged state cache.
 
     FlashKDA writes one row per sequence into a staging buffer that the caller
@@ -574,6 +582,7 @@ def test_checkpoint_state_indices_pick_the_destination_row() -> None:
         inp,
         [64, 64, 128],
         rows=rows,
+        dtype=dtype,
         checkpoint_state_indices=torch.tensor(
             indices, device="cuda", dtype=torch.int32
         ),
@@ -586,7 +595,7 @@ def test_checkpoint_state_indices_pick_the_destination_row() -> None:
             continue
         seq, offset = written[row]
         _, truncated = _run(_prefix_inputs(inp, seq, offset), use_fused=True)
-        torch.testing.assert_close(ckpt[row], truncated[0], rtol=0, atol=0)
+        torch.testing.assert_close(ckpt[row], truncated[0].to(dtype), rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("groups", [2, 4])
@@ -811,11 +820,14 @@ def test_paged_state_survives_the_group_split(groups: int, monkeypatch) -> None:
     torch.testing.assert_close(cache[idx.long()], ht_ref, rtol=5e-3, atol=5e-3)
 
 
-def test_paged_state_and_checkpoint_export_together() -> None:
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_paged_state_and_checkpoint_export_together(dtype: torch.dtype) -> None:
     """The checkpoint lands in its own row while the walk owns the state row."""
     _requires_kernel()
     inp = _inputs([1024], seed=14)
+    inp["h0"] = inp["h0"].to(dtype).float()
     cache, idx, warm = _paged_cache(inp, [True], [3], slots=12)
+    cache = cache.to(dtype)
     ckidx = torch.tensor([8], device="cuda", dtype=torch.int32)
 
     o_ref, ht_ref = _run(inp, use_fused=True)
@@ -833,8 +845,10 @@ def test_paged_state_and_checkpoint_export_together() -> None:
         checkpoint_state_indices=ckidx,
     )
     torch.testing.assert_close(o_got, o_ref, rtol=5e-3, atol=5e-3)
-    torch.testing.assert_close(cache[idx.long()], ht_ref, rtol=5e-3, atol=5e-3)
-    torch.testing.assert_close(cache[ckidx.long()], ck_ref, rtol=5e-3, atol=5e-3)
+    torch.testing.assert_close(cache[idx.long()].float(), ht_ref, rtol=5e-3, atol=5e-3)
+    torch.testing.assert_close(
+        cache[ckidx.long()].float(), ck_ref, rtol=5e-3, atol=5e-3
+    )
 
 
 def test_paged_state_rejects_a_dense_initial_state() -> None:
@@ -898,7 +912,8 @@ def test_padded_cache_stride_is_honoured(use_fused: bool) -> None:
     )
 
 
-def test_padded_checkpoint_stride_is_honoured() -> None:
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_padded_checkpoint_stride_is_honoured(dtype: torch.dtype) -> None:
     """The checkpoint destination is the paged cache, which pads stride(0).
 
     Every other checkpoint case here builds a contiguous buffer, so none of
@@ -908,9 +923,10 @@ def test_padded_checkpoint_stride_is_honoured() -> None:
     _requires_kernel()
     seqlens = [1024]
     inp = _inputs(seqlens, seed=31)
+    inp["h0"] = inp["h0"].to(dtype).float()
     row = NUM_HEADS * HEAD_DIM * HEAD_DIM
     slots, pad = 16, 512
-    raw = torch.full((slots, row + pad), -7.0, device="cuda", dtype=torch.float32)
+    raw = torch.full((slots, row + pad), -7.0, device="cuda", dtype=dtype)
     cache = raw.as_strided(
         (slots, NUM_HEADS, HEAD_DIM, HEAD_DIM),
         (row + pad, HEAD_DIM * HEAD_DIM, HEAD_DIM, 1),
@@ -942,8 +958,10 @@ def test_padded_checkpoint_stride_is_honoured() -> None:
     )
 
     torch.testing.assert_close(o_got, o_ref, rtol=5e-3, atol=5e-3)
-    torch.testing.assert_close(cache[idx.long()], ht_ref, rtol=5e-3, atol=5e-3)
-    torch.testing.assert_close(cache[ck_rows[0]], ck_ref[0], rtol=5e-3, atol=5e-3)
+    torch.testing.assert_close(cache[idx.long()].float(), ht_ref, rtol=5e-3, atol=5e-3)
+    torch.testing.assert_close(
+        cache[ck_rows[0]].float(), ck_ref[0], rtol=5e-3, atol=5e-3
+    )
 
     touched = torch.zeros(slots, dtype=torch.bool, device="cuda")
     touched[state_rows + ck_rows] = True

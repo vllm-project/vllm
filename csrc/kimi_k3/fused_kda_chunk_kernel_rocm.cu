@@ -48,6 +48,7 @@
 
 using bf16_t = __bf16;
 using bf16x2 = __bf16 __attribute__((ext_vector_type(2)));
+using bf16x4 = __bf16 __attribute__((ext_vector_type(4)));
 using bf16x8 = __bf16 __attribute__((ext_vector_type(8)));
 using f32x4 = float __attribute__((ext_vector_type(4)));
 using u32x2 = uint32_t __attribute__((ext_vector_type(2)));
@@ -151,7 +152,8 @@ struct Params {
   // replaying the tail as a second model forward.  `ckidx`, when present,
   // redirects sequence n's snapshot to row `ckidx[n]`, which lets the store go
   // straight into the paged state cache; a negative row disables it.
-  float* ckpt;
+  void* ckpt;
+  bool ckpt_bf16;
   const int* ckoff;
   const int* ckidx;
   int G;
@@ -842,11 +844,18 @@ __global__ __launch_bounds__(64 * WAVES * KS,
   // Same store as the final state below, at an interior boundary instead of
   // the last one.
   auto store_checkpoint = [&]() {
-    float* dst = p.ckpt + ck_dst + (v0 + lrow) * kK + 4 * lgrp;
+    const int64_t base = ck_dst + (v0 + lrow) * kK + 4 * lgrp;
     for (int vt = 0; vt < kNV; ++vt)
-      for (int kt = 0; kt < kNKTL; ++kt)
-        *reinterpret_cast<f32x4*>(dst + vt * 16 * kK + (kt0 + kt) * 16) =
-            S[kt][vt];
+      for (int kt = 0; kt < kNKTL; ++kt) {
+        const int64_t offset = base + vt * 16 * kK + (kt0 + kt) * 16;
+        if (p.ckpt_bf16) {
+          *reinterpret_cast<bf16x4*>(static_cast<bf16_t*>(p.ckpt) + offset) =
+              __builtin_convertvector(S[kt][vt], bf16x4);
+        } else {
+          *reinterpret_cast<f32x4*>(static_cast<float*>(p.ckpt) + offset) =
+              S[kt][vt];
+        }
+      }
   };
 
   const int tail = last_group ? T - (nt_all - 1) * kBT : kBT;
@@ -2112,7 +2121,7 @@ void fused_kda_chunk(
   // Prefill checkpoint export. `checkpoint_state` is either a [N, H, V, K]
   // staging buffer, as FlashKDA takes, or the paged state cache itself when
   // `checkpoint_state_indices` says which row each sequence owns.
-  float* ckpt_ptr = nullptr;
+  void* ckpt_ptr = nullptr;
   int const* ckoff_ptr = nullptr;
   int const* ckidx_ptr = nullptr;
   if (checkpoint_state.has_value() || checkpoint_offsets.has_value()) {
@@ -2121,7 +2130,8 @@ void fused_kda_chunk(
         "checkpoint_state and checkpoint_offsets must be given together");
     STD_TORCH_CHECK(
         checkpoint_state->is_cuda() &&
-            checkpoint_state->scalar_type() == ScalarType::Float &&
+            (checkpoint_state->scalar_type() == ScalarType::Float ||
+             checkpoint_state->scalar_type() == ScalarType::BFloat16) &&
             checkpoint_state->dim() == 4 &&
             checkpoint_state->size(1) == num_heads &&
             checkpoint_state->size(2) == kV &&
@@ -2129,7 +2139,8 @@ void fused_kda_chunk(
             checkpoint_state->stride(3) == 1 &&
             checkpoint_state->stride(2) == kK &&
             checkpoint_state->stride(1) == kV * kK,
-        "checkpoint_state must be an fp32 [rows, H, 128, 128] tensor whose "
+        "checkpoint_state must be an fp32 or bf16 [rows, H, 128, 128] tensor "
+        "whose "
         "rows are dense; stride(0) may be padded, as the paged state cache "
         "it usually is");
     STD_TORCH_CHECK(checkpoint_offsets->is_cuda() &&
@@ -2154,7 +2165,7 @@ void fused_kda_chunk(
                       checkpoint_state->size(0), " rows for ", num_seqs,
                       " sequences");
     }
-    ckpt_ptr = static_cast<float*>(checkpoint_state->data_ptr());
+    ckpt_ptr = checkpoint_state->data_ptr();
     ckoff_ptr = static_cast<int const*>(checkpoint_offsets->data_ptr());
   }
 
@@ -2238,6 +2249,8 @@ void fused_kda_chunk(
   params.ckrow = checkpoint_state.has_value() ? checkpoint_state->stride(0)
                                               : num_heads * kV * kK;
   params.ckpt = ckpt_ptr;
+  params.ckpt_bf16 = checkpoint_state.has_value() &&
+                     checkpoint_state->scalar_type() == ScalarType::BFloat16;
   params.ckoff = ckoff_ptr;
   params.ckidx = ckidx_ptr;
 
