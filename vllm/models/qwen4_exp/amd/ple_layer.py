@@ -29,6 +29,7 @@ from vllm.models.common.ops.sequence_parallel import (
     sp_reduce_scatter,
     sp_shard,
 )
+from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.attention.backends.short_conv_attn import (
@@ -242,7 +243,7 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             persistent=True,
         )
         divisor = int(config.make_ngram_vocab_size_divisible_by)
-        padded_vocab_size = ((total_vocab_size + divisor - 1) // divisor) * divisor
+        padded_vocab_size = round_up(total_vocab_size, divisor)
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
         embedding_prefix = f"{prefix}.ngram_embedding"
@@ -280,9 +281,11 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             reduce_results=not self.use_reduce_scatter,
         )
         logger.info(
-            "Initialized AMD PLE embedding %s: quantization_method=%s, "
+            "Initialized AMD PLE embedding %s: "
+            "quantization_config=%s, quantization_method=%s, "
             "weight_dtype=%s, weight_device=%s, pinned=%s",
             embedding_prefix,
+            type(quant_config).__name__,
             type(embedding_quant_method).__name__,
             self.ngram_embedding.weight.dtype,
             self.ngram_embedding.weight.device,
