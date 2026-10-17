@@ -109,15 +109,18 @@ class StandaloneARSpeculator(DraftModelSpeculator):
         if spec.kv_cache_dtype is not None:
             cache_config = replace(cache_config, cache_dtype=spec.kv_cache_dtype)
 
-        draft_vllm_config = replace(
-            self.vllm_config,
-            model_config=self.draft_model_config,
-            quant_config=None,
-            cache_config=cache_config,
-            parallel_config=replace(
-                spec.draft_parallel_config,
-                rank=self.vllm_config.parallel_config.rank,
-            ),
+        from vllm.model_executor.models.utils import install_draft_quant_config
+
+        draft_vllm_config = install_draft_quant_config(
+            replace(
+                self.vllm_config,
+                model_config=self.draft_model_config,
+                cache_config=cache_config,
+                parallel_config=replace(
+                    spec.draft_parallel_config,
+                    rank=self.vllm_config.parallel_config.rank,
+                ),
+            )
         )
         self._draft_vllm_config = draft_vllm_config
         with set_model_tag("draft_model"):

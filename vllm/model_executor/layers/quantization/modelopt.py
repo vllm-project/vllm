@@ -344,18 +344,21 @@ class ModelOptQuantConfigBase(QuantizationConfig):
             # {"quant_algo": "...", "quant_method": "modelopt"}
             quant_method = config.get("quant_algo")
 
-            # "kv_cache_scheme" (a dict) instead of "kv_cache_quant_algo" (a string).
-            kv_cache_scheme = config.get("kv_cache_scheme")
-            if isinstance(kv_cache_scheme, dict) and (
-                kv_cache_scheme.get("type") == "float"
-                and kv_cache_scheme.get("num_bits") == 8
-            ):
-                kv_cache_quant_method = "FP8"
-            else:
-                kv_cache_quant_method = None
+            # Flat ModelOpt configs use kv_cache_quant_algo. Compressed-tensors
+            # style configs use kv_cache_scheme instead.
+            kv_cache_quant_method = config.get("kv_cache_quant_algo")
+            if kv_cache_quant_method is None:
+                kv_cache_scheme = config.get("kv_cache_scheme")
+                if isinstance(kv_cache_scheme, dict) and (
+                    kv_cache_scheme.get("type") == "float"
+                    and kv_cache_scheme.get("num_bits") == 8
+                ):
+                    kv_cache_quant_method = "FP8"
 
-            # "ignore" is the key in config.json
-            exclude_modules = config.get("ignore", [])
+            # ModelOpt writes exclude_modules. Compressed-tensors writes ignore.
+            exclude_modules = config.get("exclude_modules")
+            if exclude_modules is None:
+                exclude_modules = config.get("ignore", [])
             group_size_raw = config.get("group_size")
 
         if not quant_method:

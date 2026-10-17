@@ -47,9 +47,11 @@ from .qwen3 import Qwen3ForCausalLM
 from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
+    capture_eagle_vocab_map,
     get_draft_quant_config,
     maybe_prefix,
     process_eagle_weight,
+    validate_eagle_vocab_map,
 )
 
 logger = init_logger(__name__)
@@ -868,13 +870,14 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
         model_weights = {}
         includes_draft_id_mapping = False
         includes_embed_tokens = False
+        vocab_map: dict[str, torch.Tensor] = {}
         for name, loaded_weight in weights:
             assert "mask_hidden" not in name, (
                 "DFlash embeds masked slots via mask_token_id (optionally "
                 "overridden by a mask_embedding.pt file); it should not ship a "
                 "mask_hidden weight."
             )
-            if "t2d" in name:
+            if capture_eagle_vocab_map(name, loaded_weight, vocab_map):
                 continue
             if "d2t" in name:
                 name = name.replace("d2t", "draft_id_to_target_id")
@@ -885,6 +888,8 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
                 includes_embed_tokens = True
             model_weights[name] = loaded_weight
             process_eagle_weight(self, name)
+
+        validate_eagle_vocab_map(vocab_map)
 
         # Route the separately-trained mask embedding (if shipped) through the
         # standard weight loader alongside the rest of the draft weights.
