@@ -3,7 +3,9 @@
 """Utility functions that create ORCA endpoint load report response headers."""
 
 import json
-from collections.abc import Mapping
+from collections import defaultdict
+from collections.abc import Callable, Mapping
+from statistics import fmean
 
 from vllm.logger import init_logger
 from vllm.v1.metrics.reader import Gauge, get_metrics_snapshot
@@ -32,8 +34,8 @@ def create_orca_header(
     """
     if metrics_format.lower() not in ["text", "json"]:
         logger.warning(
-            "Warning: `%s` format is not supported in the ORCA response header",
-            format,
+            "%r format is not supported in the ORCA response header",
+            metrics_format,
         )
         return None
 
@@ -45,8 +47,6 @@ def create_orca_header(
             if isinstance(metric_name, str) and isinstance(value, float)
         }
     }
-    # output example:
-    # endpoint-load-metrics: TEXT named_metrics.kv_cache_utilization=0.4
     if metrics_format.lower() == "text":
         native_http_header = ", ".join(
             [
@@ -56,13 +56,10 @@ def create_orca_header(
             ]
         )
         header["endpoint-load-metrics"] = f"TEXT {native_http_header}"
-
-    # output example:
-    # endpoint-load-metrics: JSON “named_metrics”: {“custom-metric-util”: 0.4}
     elif metrics_format.lower() == "json":
         header["endpoint-load-metrics"] = f"JSON {json.dumps(orca_report)}"
 
-    logger.info("Created ORCA header %s", header)
+    logger.debug("Created ORCA header %s", header)
 
     return header
 
@@ -71,28 +68,26 @@ def get_named_metrics_from_prometheus() -> list[tuple[str, float]]:
     """Collects current metrics from Prometheus and returns some of them
     in the form of the `named_metrics` list for `create_orca_header()`.
 
-    Parameters
-    ----------
-    - None
+    With data parallelism each gauge has one sample per engine. Waiting
+    requests are summed and KV cache usage is averaged across engines, so the
+    header reports the load of the whole endpoint.
 
-    Returns
-    -------
-    - list[tuple[str, float]]: List of tuples of metric names and their values.
+    Returns:
+        List of tuples of metric names and their values.
 
     """
-    named_metrics: list[tuple[str, float]] = []
-    # Map from prometheus metric names to ORCA named metrics.
-    prometheus_to_orca_metrics = {
-        "vllm:kv_cache_usage_perc": "kv_cache_usage_perc",
-        "vllm:num_requests_waiting": "num_requests_waiting",
+    prometheus_to_orca_metrics: dict[str, tuple[str, Callable[..., float]]] = {
+        "vllm:kv_cache_usage_perc": ("kv_cache_usage_perc", fmean),
+        "vllm:num_requests_waiting": ("num_requests_waiting", sum),
     }
-    metrics = get_metrics_snapshot()
-    for metric in metrics:
-        orca_name = prometheus_to_orca_metrics.get(metric.name)
-        # If this metric is mapped into ORCA, then add it to the report.
-        # Note: Only Gauge metrics are currently supported.
-        if orca_name is not None and isinstance(metric, Gauge):
-            named_metrics.append((str(orca_name), float(metric.value)))
+    samples: dict[str, list[float]] = defaultdict(list)
+    for metric in get_metrics_snapshot():
+        if metric.name in prometheus_to_orca_metrics and isinstance(metric, Gauge):
+            samples[metric.name].append(float(metric.value))
+    named_metrics = []
+    for name, values in samples.items():
+        orca_name, combine = prometheus_to_orca_metrics[name]
+        named_metrics.append((orca_name, combine(values)))
     return named_metrics
 
 
@@ -114,6 +109,5 @@ def metrics_header(metrics_format: str) -> Mapping[str, str] | None:
     """
     if not metrics_format:
         return None
-    # Get named metrics from prometheus.
     named_metrics = get_named_metrics_from_prometheus()
     return create_orca_header(metrics_format, named_metrics)
