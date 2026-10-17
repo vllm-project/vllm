@@ -15,9 +15,6 @@ from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.dp_utils import DPSyncState, dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
-from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.cudagraph_utils import (
-    SpeculatorCudaGraphManager,
-)
 from vllm.v1.worker.utils import get_uniform_decode_token_count
 
 logger = init_logger(__name__)
@@ -45,9 +42,6 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
         )
 
         self.inputs_embeds: torch.Tensor | None = None
-
-        self.prefill_cudagraph_manager: SpeculatorCudaGraphManager | None = None
-        self.decode_cudagraph_manager: SpeculatorCudaGraphManager | None = None
 
     def load_model(self, target_model: nn.Module) -> None:
         super().load_model(target_model)
@@ -85,26 +79,6 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
             self.supports_decode_metadata_update = False
             return
         super()._configure_decode_metadata_update()
-
-    def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
-        # Initialize cudagraph manager for draft prefill (draft position 0).
-        self.prefill_cudagraph_manager = SpeculatorCudaGraphManager(
-            self.vllm_config,
-            self.device,
-            cudagraph_mode,
-            self.num_speculative_steps + 1,
-        )
-
-        # PIECEWISE cudagraphs are not supported for draft decodes.
-        if cudagraph_mode.decode_mode() == CUDAGraphMode.FULL:
-            cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
-        else:
-            cudagraph_mode = CUDAGraphMode.NONE
-
-        # Initialize cudagraph manager for draft decodes (draft positions > 0).
-        self.decode_cudagraph_manager = SpeculatorCudaGraphManager(
-            self.vllm_config, self.device, cudagraph_mode, decode_query_len=1
-        )
 
     def capture(self) -> None:
         logger.info("Capturing model for speculator...")
