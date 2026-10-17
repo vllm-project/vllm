@@ -43,12 +43,19 @@ def test_serialize_messages() -> None:
     assert serialize_messages([msg, dict_value]) == [msg_value, dict_value]
 
 
-def test_custom_tool_grammar_format_rejected() -> None:
+@pytest.mark.parametrize("namespaced", [False, True])
+def test_custom_tool_grammar_format_rejected(namespaced) -> None:
     grammar = {"type": "grammar", "syntax": "lark", "definition": 'start: "pwd"'}
+    tool = {"type": "custom", "name": "emit", "format": grammar}
+    if namespaced:
+        tool = {
+            "type": "namespace",
+            "name": "editing",
+            "description": "",
+            "tools": [tool],
+        }
     with pytest.raises(VLLMValidationError) as exc_info:
-        ResponsesRequest(
-            input="hi", tools=[{"type": "custom", "name": "emit", "format": grammar}]
-        )
+        ResponsesRequest(input="hi", tools=[tool])
     assert exc_info.value.parameter == "tools"
 
     request = ResponsesRequest(

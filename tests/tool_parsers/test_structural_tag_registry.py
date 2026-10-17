@@ -227,6 +227,32 @@ def _hermes_call(name: str) -> str:
     )
 
 
+@pytest.mark.parametrize("choice", ["required", {"type": "custom", "name": "emit"}])
+def test_namespace_custom_grammar_accepts_only_flat_name(choice):
+    request = ResponsesRequest(
+        input="hi",
+        tool_choice=choice,
+        tools=[
+            {
+                "type": "namespace",
+                "name": "editing",
+                "description": "",
+                "tools": [{"type": "custom", "name": "emit"}],
+            }
+        ],
+    )
+    tag = get_model_structural_tag(
+        "hermes",
+        request.tools,
+        request.tool_choice,
+        reasoning=False,
+    )
+    grammar = Grammar.from_structural_tag(tag.model_dump_json())
+    call = '<tool_call>\n{"name": "%s", "arguments": {"input": "pwd"}}\n</tool_call>'
+    assert _is_grammar_accept_string(grammar, call % "editing__emit")
+    assert not _is_grammar_accept_string(grammar, call % "emit")
+
+
 @pytest.mark.parametrize("model", sorted(SUPPORTED_STRUCTURAL_TAG_MODELS))
 def test_no_structural_tag_without_function_tools(model: str):
     """Builtin tools never reach the prompt, so there is nothing to constrain."""

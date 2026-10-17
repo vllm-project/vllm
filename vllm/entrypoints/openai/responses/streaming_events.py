@@ -1070,6 +1070,7 @@ def emit_simple_tool_call_open(
             id=state.current_item_id,
             call_id=state.tool_call_id,
             name=name,
+            namespace=namespace,
             input="",
         )
     else:
@@ -1157,6 +1158,7 @@ def emit_simple_tool_call_done(
             id=state.current_item_id,
             call_id=state.tool_call_id,
             name=state.tool_call_name,
+            namespace=state.tool_call_namespace,
             input=payload,
         )
     else:
@@ -1346,7 +1348,7 @@ class SimpleStreamingEventProcessor:
                 call_name.name,
                 tool_call.index,
                 call_name.namespace,
-                call_name.name in self.custom_tool_names,
+                tool_call.function.name in self.custom_tool_names,
                 tool_call.id,
             )
         return handlers.open_fn(self.state)
