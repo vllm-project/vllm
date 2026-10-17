@@ -682,6 +682,33 @@ class TestBeginSync:
         assert ("sentinel",) in server._pack_dsts
 
 
+class TestSyncTaggedFreeSignals:
+    def test_tagged_signals_apply_only_to_their_sync(self, server_factory):
+        server = server_factory()
+        server.free_group(GI_A, sync_idx=0)
+        server.free_group(GI_A, sync_idx=0)
+        server.begin_sync(2, sync_idx=0)
+        _publish(server, GI_A, GROUP_A)
+        assert server._inflight_groups == []
+
+        server.end_sync()
+        server.begin_sync(2, sync_idx=1)
+        _publish(server, GI_A, GROUP_A)
+        server.free_group(GI_A, sync_idx=1)
+        server.free_group(GI_A, sync_idx=0)
+        assert server._inflight_groups == [GI_A]
+
+        server.free_group(GI_A, sync_idx=1)
+        assert server._inflight_groups == []
+
+    def test_untagged_signal_remains_backward_compatible(self, server_factory):
+        server = server_factory()
+        server.begin_sync(1, sync_idx=3)
+        _publish(server, GI_A, GROUP_A)
+        server.free_group(GI_A)
+        assert server._inflight_groups == []
+
+
 class TestServedNamesGuard:
     """A producer serves only the names it holds: its stage's groups, and
     within them its own EP coordinate's experts plus the replicated names.
