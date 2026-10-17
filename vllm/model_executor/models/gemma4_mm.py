@@ -1654,11 +1654,7 @@ class Gemma4ForConditionalGeneration(
             batch_size, num_patches = src.shape[0], src.shape[1]
             dst[:batch_size, :num_patches].copy_(src)
 
-        configured_max_tokens = getattr(
-            self.config.vision_config,
-            "num_soft_tokens",
-            _SUPPORTED_SOFT_TOKENS[2],
-        )
+        configured_max_tokens = self.config.vision_config.default_output_length
         # One graph per row width (soft tokens of one image or video frame),
         # so a budget's rows are not all padded to the widest image.
         row_widths = tuple(

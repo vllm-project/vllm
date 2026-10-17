@@ -354,7 +354,9 @@ def test_encoder_chunk_no_free_memory_falls_back_to_one():
 
 def _gemma4_for_encoder_cudagraph() -> Gemma4ForConditionalGeneration:
     model = object.__new__(Gemma4ForConditionalGeneration)
-    vision_config = SimpleNamespace(patch_size=16, pooling_kernel_size=3)
+    vision_config = SimpleNamespace(
+        patch_size=16, pooling_kernel_size=3, default_output_length=280
+    )
     model.vision_tower = SimpleNamespace(config=vision_config)
     model.config = SimpleNamespace(vision_config=vision_config)
     return model
