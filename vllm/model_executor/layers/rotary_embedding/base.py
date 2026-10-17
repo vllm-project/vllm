@@ -77,6 +77,10 @@ class RotaryEmbeddingBase(CustomOp):
             is_neox_style=self.is_neox_style,
         )
 
+        self._cos_sin_split_cache: dict[
+            tuple[torch.device, torch.dtype], tuple[torch.Tensor, torch.Tensor]
+        ] = {}
+
     def _compute_inv_freq(self, base: float) -> torch.Tensor:
         """Compute the inverse frequency."""
         # NOTE(woosuk): To exactly match the HF implementation, we need to
@@ -129,6 +133,21 @@ class RotaryEmbeddingBase(CustomOp):
 
         self.cos_sin_cache = cos_sin_cache
         return cos_sin_cache
+
+    def get_cos_sin_split(
+        self, dtype: torch.dtype
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """The full cos_sin_cache as two separate contiguous tables in `dtype`.
+        Split and copied once per (device, dtype)."""
+        cache = self.cos_sin_cache
+        key = (cache.device, dtype)
+        if key not in self._cos_sin_split_cache:
+            cos, sin = cache.chunk(2, dim=-1)
+            self._cos_sin_split_cache[key] = (
+                cos.to(dtype).contiguous(),
+                sin.to(dtype).contiguous(),
+            )
+        return self._cos_sin_split_cache[key]
 
     def get_cos_sin(self, seqlen: int) -> tuple[torch.Tensor, torch.Tensor]:
         cos_sin = self.cos_sin_cache[:seqlen]
