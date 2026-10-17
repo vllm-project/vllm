@@ -612,8 +612,8 @@ class MoRIIOConnectorScheduler:
             for n_tokens, block_size in sw_sizes_tokens
         ]
         # Per-group block size over transfer_groups (matching blocks_per_sw and
-        # the connector's block payload), used to clamp each full-attention group
-        # to its prompt length on the WRITE save path.
+        # the connector's block payload), used to clamp groups to their prompt
+        # length before block ids are exchanged.
         self._group_block_sizes = [
             getattr(g.kv_cache_spec, "block_size", self.block_size)
             for g in kv_cache_config.transfer_groups
@@ -711,17 +711,30 @@ class MoRIIOConnectorScheduler:
     def get_exchange_clipped_blocks(
         self,
         block_ids: BlockIds,
+        num_prompt_tokens: int | None = None,
     ) -> BlockIds:
         """Clip the block list based on the layer type.
 
         Behavior:
         - sliding window: keep only the last window size blocks
         - full attention: keep all blocks
+
+        Args:
+            block_ids: Per-KV-cache-group block ids.
+            num_prompt_tokens: If set, first drop the blocks past the prompt,
+                e.g. lookahead slots that only one leg allocated, so both legs
+                clip the same window.
+
         """
         if len(block_ids) == 0:
             return []
         if len(block_ids) == len(self.kv_cache_config.kv_cache_groups):
             block_ids = self.kv_cache_config.select_transfer_block_ids(block_ids)
+        if num_prompt_tokens is not None:
+            block_ids = [
+                blocks[: cdiv(num_prompt_tokens, self._group_block_sizes[i])]
+                for i, blocks in enumerate(block_ids)
+            ]
         if not self._is_hma_required:
             return [list(blocks) for blocks in block_ids]
         return [
@@ -1056,7 +1069,8 @@ class MoRIIOConnectorScheduler:
                                 # for attention-only hybrid models while
                                 # accounting for the locally recomputed tail.
                                 local_block_ids = self.get_exchange_clipped_blocks(
-                                    blocks.get_block_ids()
+                                    blocks.get_block_ids(),
+                                    num_prompt_tokens=request.num_prompt_tokens,
                                 )
                                 adjusted_remote_block_ids = []
                                 aligned_local_block_ids: list[list[int]] = []
@@ -1559,7 +1573,8 @@ class MoRIIOConnectorScheduler:
             raise MoRIIOError("Hybrid request completion requires all KV cache groups")
         else:
             computed_block_ids = self.get_exchange_clipped_blocks(
-                cast(BlockIds, block_ids)
+                cast(BlockIds, block_ids),
+                num_prompt_tokens=request.num_prompt_tokens,
             )
         delay_free_blocks = any(len(group) > 0 for group in computed_block_ids)
 
