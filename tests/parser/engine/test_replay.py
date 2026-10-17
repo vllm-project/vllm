@@ -85,6 +85,10 @@ def _discover_parsers() -> list[_ParserInfo]:
             # it does not fit this token-terminal harness; its replay coverage
             # lives in test_granite.py.
             continue
+        if cfg.name == "llama_json":
+            # llama_json is a bare-JSON format with no TOOL_END terminal; its
+            # replay coverage lives in test_llama_json.py.
+            continue
         tool_end = cfg.token_id_terminals.get("TOOL_END")
         if not tool_end:
             raise RuntimeError(

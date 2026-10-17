@@ -1123,6 +1123,88 @@ def extract_types_from_schema(schema: Any) -> list[str]:
     return list(types) if types else ["string"]
 
 
+_ALL_JSON_TYPES = frozenset(
+    {"null", "boolean", "integer", "number", "string", "array", "object"}
+)
+
+
+def json_type_name(value: object) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, int):
+        return "integer"
+    if isinstance(value, float):
+        return "number"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, list):
+        return "array"
+    return "object"
+
+
+def declared_types(schema: object) -> set[str]:
+    """JSON types permitted by *schema*.
+
+    Sibling constraints and ``allOf`` intersect; ``anyOf``/``oneOf`` union.
+    No type constraint permits every type, unlike
+    :func:`extract_types_from_schema`'s string fallback -- why an integer
+    under ``{}``, a ``const`` or a ``$ref`` used to be rewritten as a string.
+    """
+    all_types = set(_ALL_JSON_TYPES)
+    if not isinstance(schema, dict):
+        return all_types
+
+    def widen(types: set[str]) -> set[str]:
+        # Every integer is a valid number, so a "number" schema accepts one.
+        if "number" in types:
+            types.add("integer")
+        return types
+
+    constraints: list[set[str]] = []
+    declared: set[str] = set()
+    type_value = schema.get("type")
+    if isinstance(type_value, str):
+        declared.add(type_value)
+    elif isinstance(type_value, list):
+        declared.update(t for t in type_value if isinstance(t, str))
+    if declared:
+        constraints.append(widen(declared))
+
+    enum = schema.get("enum")
+    if isinstance(enum, list) and enum:
+        constraints.append(widen({json_type_name(v) for v in enum}))
+
+    if "const" in schema:
+        constraints.append(widen({json_type_name(schema["const"])}))
+
+    for field in ("anyOf", "oneOf"):
+        choices = schema.get(field)
+        if isinstance(choices, list) and choices:
+            union: set[str] = set()
+            for choice in choices:
+                union |= declared_types(choice)
+            constraints.append(union)
+
+    choices = schema.get("allOf")
+    if isinstance(choices, list) and choices:
+        conjunction = set(all_types)
+        for choice in choices:
+            conjunction &= declared_types(choice)
+        constraints.append(conjunction)
+
+    allowed = all_types
+    for constraint in constraints:
+        allowed &= constraint
+    return allowed
+
+
+def is_valid_for_schema_type(value: object, schema: dict) -> bool:
+    """Whether *value* already has a JSON type *schema* permits."""
+    return json_type_name(value) in declared_types(schema)
+
+
 _TYPE_ALIASES: dict[str, str] = {
     "str": "string",
     "text": "string",
