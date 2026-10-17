@@ -195,6 +195,42 @@ class DeepseekV4MoE(DeepseekV4MoEBase):
         return MoEOutput(routed=routed, shared_output=shared_output)
 
 
+def _validate_pcp_config(vllm_config: VllmConfig) -> None:
+    parallel_config = vllm_config.parallel_config
+    if parallel_config.prefill_context_parallel_size <= 1:
+        return
+    if (
+        parallel_config.pipeline_parallel_size != 1
+        or parallel_config.data_parallel_size != 1
+        or parallel_config.decode_context_parallel_size != 1
+        or parallel_config.use_ubatching
+        or vllm_config.speculative_config is not None
+        or vllm_config.cache_config.enable_prefix_caching
+        or vllm_config.kernel_config.moe_backend in MEGA_MOE_BACKENDS
+    ):
+        raise NotImplementedError(
+            "DeepSeek-V4.1 PCP currently requires PP=DP=DCP=1, with no "
+            "microbatching, speculative decoding, prefix caching, or MegaMoE."
+        )
+    kv_transfer_config = vllm_config.kv_transfer_config
+    if kv_transfer_config is not None:
+        if (
+            kv_transfer_config.kv_connector != "NixlConnector"
+            or kv_transfer_config.kv_connector_module_path is not None
+            or kv_transfer_config.kv_role != "kv_producer"
+            or kv_transfer_config.kv_buffer_device != "cuda"
+            or kv_transfer_config.get_from_extra_config("bidirectional_kv_xfer", False)
+        ):
+            raise NotImplementedError(
+                "DeepSeek-V4.1 PCP KV transfer requires a GPU NixlConnector "
+                "pull producer; consumers require PCP=1."
+            )
+        if vllm_config.scheduler_config.async_scheduling:
+            raise NotImplementedError(
+                "DeepSeek-V4.1 PCP with NIXL requires synchronous scheduling."
+            )
+
+
 def _select_dsv4_attn_cls(vllm_config: VllmConfig) -> type[DeepseekV4Attention]:
     """Pick the CUDA sparse-MLA attention class for the configured backend.
 
@@ -696,21 +732,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         self.config = config
         self.quant_config = quant_config
         self.parallel_config = vllm_config.parallel_config
-        if self.parallel_config.prefill_context_parallel_size > 1 and (
-            self.parallel_config.pipeline_parallel_size != 1
-            or self.parallel_config.data_parallel_size != 1
-            or self.parallel_config.decode_context_parallel_size != 1
-            or self.parallel_config.use_ubatching
-            or vllm_config.speculative_config is not None
-            or vllm_config.kv_transfer_config is not None
-            or vllm_config.cache_config.enable_prefix_caching
-            or vllm_config.kernel_config.moe_backend in MEGA_MOE_BACKENDS
-        ):
-            raise NotImplementedError(
-                "DeepSeek-V4.1 PCP currently requires PP=DP=DCP=1, with no "
-                "microbatching, speculative decoding, KV transfer, prefix "
-                "caching, or MegaMoE."
-            )
+        _validate_pcp_config(vllm_config)
         self.use_native_mega_moe = (
             vllm_config.kernel_config.moe_backend in NATIVE_MEGA_MOE_BACKENDS
         )

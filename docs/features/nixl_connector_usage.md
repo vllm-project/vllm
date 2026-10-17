@@ -63,6 +63,33 @@ vllm serve <MODEL> \
 !!! note
     Backend availability depends on how NIXL was built and what plugins are present in your environment. Refer to the [NIXL repository](https://github.com/ai-dynamo/nixl) for available backends and build instructions.
 
+## DeepSeek-V4.1-Flash with PCP
+
+DeepSeek-V4.1-Flash supports PCP on the Prefill side of a `NixlConnector` pull deployment. Use Model Runner V2, NVIDIA CUDA, `FLASHMLA_SPARSE_DSV41`, GPU transfer buffers, and PP=DP=DCP=1. The Decode instance uses PCP=1. Tensor parallel sizes may differ because the MLA, indexer and compressor-state caches are replicated across TP ranks.
+
+Disable prefix caching, SWA bounded replay, speculative decoding and microbatching for this initial path. Run eagerly with synchronous scheduling. `NixlPushConnector`, bidirectional transfer, consumer PCP and custom connector modules are not enabled by this model path. Both instances must use this revision, the same checkpoint, attention backend, KV dtype and block size; keep handshake compatibility checks enabled.
+
+For example, on separate GPU allocations, start Prefill with TP4/PCP2 and Decode with TP8/PCP1. On both instances use these model arguments:
+
+```bash
+vllm serve <DEEPSEEK_V41_FLASH_CHECKPOINT> \
+  --language-model-only --tokenizer-mode deepseek_v41 \
+  --attention-backend FLASHMLA_SPARSE_DSV41 \
+  --kv-cache-dtype fp8_ds_mla --block-size 64 \
+  --no-enable-prefix-caching --no-swa-bounded-replay \
+  --enforce-eager --no-async-scheduling
+```
+
+Add `--tensor-parallel-size 4 --prefill-context-parallel-size 2` and `--kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_buffer_device":"cuda"}'` on Prefill. Add `--tensor-parallel-size 8 --prefill-context-parallel-size 1` and `--kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_buffer_device":"cuda"}'` on Decode. Expert parallelism with `--enable-expert-parallel --all2all-backend allgather_reducescatter` can be used on each side. Configure distinct serving/side-channel ports and reachable side-channel hosts as described below, then use the NIXL proxy.
+
+The request follows this flow:
+
+1. Prefill stops before the final prompt token. PCP ranks gather KV and the open ratio-2 compressor state, leaving equivalent cache replicas.
+2. Only the PCP-rank-0 replica exposes its TP workers to NIXL. Decode reads the compressed KV, indexer keys, SWA tail and compressor ring; the other PCP ranks report their local send completion without exposing duplicate endpoints.
+3. Decode resumes at the same N−1 boundary and computes the final prompt token. If it closes a ratio-2 pair, its predecessor comes from the transferred ring. Completion notifications allow Prefill to release all replicas.
+
+Multi-GPU NIXL transport, model accuracy and performance validation are pending.
+
 ## Basic Usage (on the same host)
 
 ### Producer (Prefiller) Configuration

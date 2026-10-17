@@ -22,16 +22,19 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
     NixlConnectorWorker,
 )
+from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
 from vllm.v1.core.single_type_kv_cache_manager import (
     FullAttentionManager,
     SlidingWindowManager,
 )
 from vllm.v1.kv_cache_interface import (
+    CircularBufferSpec,
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheTensor,
     MLAAttentionSpec,
+    SlidingWindowMLASpec,
 )
 
 from .utils import (
@@ -1582,17 +1585,17 @@ def test_failed_load_rezeroes_unwritten_skipped_blocks():
 
 @pytest.mark.cpu_test
 @pytest.mark.parametrize(
-    "has_mamba,is_hma_required,bounded_replay,expected_count",
+    "has_mamba,is_hma_required,bounded_replay",
     [
-        (True, True, False, 9),
-        (False, False, False, 10),
-        (False, True, False, 10),
-        (False, True, True, 9),
+        (True, True, False),
+        (False, False, False),
+        (False, True, False),
+        (False, True, True),
     ],
     ids=["mamba", "fa_only", "swa_only", "swa_bounded_replay"],
 )
-def test_mamba_n1_d_side(has_mamba, is_hma_required, bounded_replay, expected_count):
-    """D-side: Mamba and SWA bounded replay get N-1 matched tokens, others N."""
+def test_mamba_n1_d_side(has_mamba, is_hma_required, bounded_replay):
+    """D-side: every model gets N-1 matched tokens; decode recomputes the last."""
     sched = make_nixl_scheduler(
         has_mamba=has_mamba,
         is_hma_required=is_hma_required,
@@ -1601,7 +1604,7 @@ def test_mamba_n1_d_side(has_mamba, is_hma_required, bounded_replay, expected_co
     req = create_request(num_tokens=10, do_remote_prefill=True)
 
     count, is_async = sched.get_num_new_matched_tokens(req, num_computed_tokens=0)
-    assert count == expected_count
+    assert count == 9
     assert is_async is True
 
 
@@ -1635,7 +1638,7 @@ def test_mamba_n1_p_side_truncation():
 
     Also verifies idempotency (calling again is a no-op) which is
     needed for preemption safety via the _p_side_truncated guard,
-    and that non-Mamba models skip truncation entirely.
+    and that full-attention models are truncated too.
     """
     sched = make_nixl_scheduler(has_mamba=True, is_hma_required=True)
     req = create_request(num_tokens=10, do_remote_decode=True)
@@ -1658,13 +1661,18 @@ def test_mamba_n1_p_side_truncation():
     sched.on_new_request(req)
     assert len(req.prompt_token_ids) == original_len - 1
 
-    # Non-Mamba: truncation is skipped
     fa_sched = make_nixl_scheduler(has_mamba=False, is_hma_required=False)
     fa_req = create_request(num_tokens=10, do_remote_decode=True)
     fa_original = len(fa_req.prompt_token_ids)
 
+    # A mixed token-id / embeddings prompt is cut consistently.
+    fa_req.prompt_embeds = torch.zeros(fa_original, 8)
+    fa_req.prompt_is_token_ids = [True] * (fa_original - 2) + [False] * 2
     fa_sched.on_new_request(fa_req)
-    assert len(fa_req.prompt_token_ids) == fa_original
+    assert len(fa_req.prompt_token_ids) == fa_original - 1
+    assert len(fa_req.prompt_embeds) == fa_original - 1
+    assert len(fa_req.prompt_is_token_ids) == fa_original - 1
+    assert fa_req.num_tokens == fa_original - 1
 
     # SWA bounded replay: the window is not replayed after the load, so the
     # prefiller stops short of the last token too.
@@ -1679,29 +1687,80 @@ def test_mamba_n1_p_side_truncation():
     logprobs_req.sampling_params.skip_reading_prefix_cache = True
     swa_sched.on_new_request(logprobs_req)
     assert len(logprobs_req.prompt_token_ids) == 10
+    # A prompt ending in an image is cut before the image rather than inside
+    # it, since models parse an item from its whole placeholder; the decoder
+    # loads the same prefix and computes the image itself.
+    image = MultiModalFeatureSpec(
+        data=None,
+        mm_position=PlaceholderRange(offset=4, length=6),
+        identifier="image",
+        modality="image",
+    )
+    mm_req = create_request(num_tokens=10, do_remote_decode=True)
+    mm_req.mm_features = [image]
+    fa_sched.on_new_request(mm_req)
+    assert mm_req.num_prompt_tokens == len(mm_req.prompt_token_ids) == 4
+    assert mm_req.mm_features == []
+    d_req = create_request(num_tokens=10, do_remote_prefill=True)
+    d_req.mm_features = [image]
+    assert fa_sched.get_num_new_matched_tokens(d_req, 0) == (4, True)
+
+    # An item from the start of the prompt leaves no prefix to transfer: the
+    # prefiller keeps its prompt and the decoder computes all of it.
+    whole = MultiModalFeatureSpec(
+        data=None,
+        mm_position=PlaceholderRange(offset=0, length=10),
+        identifier="whole",
+        modality="image",
+    )
+    mm_req = create_request(num_tokens=10, do_remote_decode=True)
+    mm_req.mm_features = [whole]
+    fa_sched.on_new_request(mm_req)
+    assert mm_req.num_prompt_tokens == 10 and mm_req.mm_features == [whole]
+    d_req = create_request(num_tokens=10, do_remote_prefill=True)
+    d_req.mm_features = [whole]
+    assert fa_sched.get_num_new_matched_tokens(d_req, 0) == (0, False)
+
+    # A request that skips reading the prefix cache (prompt logprobs) is not
+    # cut: the decoder loads nothing and recomputes its whole prompt.
+    logprobs_req = create_request(num_tokens=10, do_remote_decode=True)
+    logprobs_req.sampling_params.skip_reading_prefix_cache = True
+    fa_sched.on_new_request(logprobs_req)
+    assert logprobs_req.num_prompt_tokens == len(logprobs_req.prompt_token_ids) == 10
+
+    # In-process parallel samples share the prompt and kv_transfer_params;
+    # each sample is cut on its own without touching the other's.
+    first = create_request(num_tokens=10, do_remote_decode=True)
+    second = create_request(num_tokens=10, do_remote_decode=True)
+    second.prompt_token_ids = first.prompt_token_ids
+    second.kv_transfer_params = first.kv_transfer_params
+    fa_sched.on_new_request(first)
+    fa_sched.on_new_request(second)
+    for sample in (first, second):
+        assert sample.num_prompt_tokens == len(sample.prompt_token_ids) == 9
+        assert sample.max_tokens == 1
 
 
 @pytest.mark.cpu_test
 @pytest.mark.parametrize(
-    "swa_enabled,mamba_enabled,expected_has_mamba,expected_is_hma",
+    "swa_enabled,mamba_enabled,expected_is_hma",
     [
-        (True, True, True, True),
-        (True, False, False, True),
-        (False, False, False, False),
+        (True, True, True),
+        (True, False, True),
+        (False, False, False),
     ],
     ids=["fa_swa_mamba", "fa_swa_only", "fa_only"],
 )
 @patch(
     "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_scheduler.current_platform"
 )
-def test_has_mamba_init(
+def test_is_hma_required_init(
     mock_platform,
     swa_enabled,
     mamba_enabled,
-    expected_has_mamba,
     expected_is_hma,
 ):
-    """Test _has_mamba / _is_hma_required derived from kv_cache_groups."""
+    """Test _is_hma_required derived from kv_cache_groups."""
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.scheduler import (
         NixlConnectorScheduler,
     )
@@ -1723,7 +1782,6 @@ def test_has_mamba_init(
         engine_id="test-engine",
         kv_cache_config=kv_cache_config,
     )
-    assert scheduler._has_mamba is expected_has_mamba
     assert scheduler._is_hma_required is expected_is_hma
 
 
@@ -2427,3 +2485,62 @@ def test_sync_recved_kv_issues_one_copy_per_request(group_block_ids, expected_id
     worker.sync_recved_kv_to_device("req", meta)
 
     assert calls == [(expected_ids, expected_ids, "h2d")]
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "prompt_len",
+    [2, 3, 31, 32, 33, 63, 64, 65, 127, 128, 129, 255, 256, 257, 4095, 4096, 4097],
+)
+def test_dsv41_nixl_handoff_retains_window_and_compressor_state(prompt_len):
+    """N-1 handoff carries the full SWA tail and the request's open CR2 ring."""
+    from vllm.utils.math_utils import cdiv
+
+    sched = make_nixl_scheduler(is_hma_required=True)
+    specs = [
+        MLAAttentionSpec(
+            block_size=64,
+            num_kv_heads=1,
+            head_size=512,
+            dtype=torch.bfloat16,
+            tokens_per_state=2,
+        ),
+        SlidingWindowMLASpec(
+            block_size=32,
+            num_kv_heads=1,
+            head_size=512,
+            dtype=torch.bfloat16,
+            sliding_window=128,
+        ),
+        CircularBufferSpec(
+            block_size=8,
+            num_kv_heads=1,
+            head_size=1024,
+            head_size_v=0,
+            dtype=torch.float32,
+        ),
+    ]
+    sched.kv_cache_config = KVCacheConfig(
+        num_blocks=256,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec([name], spec)
+            for name, spec in zip(("compressed", "swa", "ring"), specs)
+        ],
+    )
+    sched.blocks_per_sw = [0, 5, 0]
+    sched._ssm_spec_blocks = [None, None, None]
+    producer_req = create_request(num_tokens=prompt_len, do_remote_decode=True)
+    sched.on_new_request(producer_req)
+    resume = prompt_len - 1
+    assert producer_req.num_prompt_tokens == resume
+    consumer_req = create_request(num_tokens=prompt_len, do_remote_prefill=True)
+    assert sched.get_num_new_matched_tokens(consumer_req, 0) == (resume, True)
+
+    compressed = list(range(1, cdiv(resume, 64) + 1))
+    window = list(range(10, 10 + cdiv(resume, 32)))
+    blocks = (compressed, window, [255])
+    transferred = sched.get_exchange_clipped_blocks(blocks)
+    assert transferred == (compressed, window[-5:], [255])
+    # The ring keeps one transferable block regardless of the prompt length.
+    assert specs[-1].max_num_blocks_per_req(sched.vllm_config, prompt_len) == 1
