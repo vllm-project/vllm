@@ -4,6 +4,21 @@ from typing import Any
 
 from transformers import PreTrainedConfig
 
+# One table so the flat name, the nested key and the default cannot drift
+# apart, and so no assignment can depend on an earlier one.
+_VISION_FIELDS: tuple[tuple[str, str, Any], ...] = (
+    ("vision_n_layers", "num_hidden_layers", 0),
+    ("vision_dim", "hidden_size", 1024),
+    ("vision_n_heads", "num_attention_heads", 16),
+    ("vision_inter_dim", "intermediate_size", 2816),
+    ("vision_patch_size", "patch_size", 14),
+    ("vision_rope_theta", "rope_theta", 10000.0),
+    ("vision_downsample_ratio", "downsample_ratio", 3),
+    ("vision_max_n_token", "max_image_tokens", 1024),
+    ("vision_min_pixels", "min_pixels", 295936),
+    ("vision_max_wh_ratio", "max_wh_ratio", None),
+)
+
 
 class DeepseekV41Config(PreTrainedConfig):
     """DeepSeek V4.1 config.
@@ -49,14 +64,18 @@ class DeepseekV41Config(PreTrainedConfig):
         if not hasattr(self, "expert_dtype") and "expert_dtype" in quant_cfg:
             self.expert_dtype = quant_cfg["expert_dtype"]
 
-        vision_n_layers = vision_config.get("num_hidden_layers", 0)
-        self.vision_n_layers = vision_n_layers
-        self.vision_dim = vision_config.get("hidden_size", 1024)
-        self.vision_n_heads = vision_config.get("num_attention_heads", 16)
-        self.vision_inter_dim = vision_config.get("intermediate_size", 2816)
-        self.vision_patch_size = vision_config.get("patch_size", 14)
-        self.vision_rope_theta = vision_config.get("rope_theta", 10000.0)
-        self.vision_downsample_ratio = vision_config.get("downsample_ratio", 3)
-        self.vision_max_n_token = vision_config.get("max_image_tokens", 1024)
-        self.vision_min_pixels = vision_config.get("min_pixels", 295936)
-        self.vision_max_wh_ratio = vision_config.get("max_wh_ratio")
+        # to_dict() emits the flattened names and no ``vision_config``, so a
+        # config rebuilt from its own dict arrives with the flat fields set by
+        # super().__init__ and nothing nested. Taking the nested block
+        # unconditionally would reset such a config to a text-only tower.
+        # Precedence: the nested block, then a flat field the config was
+        # constructed with, then the default. Reading the flat value from
+        # kwargs rather than from self keeps a stale ``vision_*`` key inside
+        # ``text_config`` -- which the loop above has already set on self --
+        # from being taken for vision configuration.
+        for flat_name, nested_key, default in _VISION_FIELDS:
+            if nested_key in vision_config:
+                value = vision_config[nested_key]
+            else:
+                value = kwargs.get(flat_name, default)
+            setattr(self, flat_name, value)
