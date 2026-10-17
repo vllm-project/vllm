@@ -113,6 +113,9 @@ class AttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
     FLASHMLA_SPARSE_DSV41 = (
         "vllm.models.deepseek_v41.sparse_mla.DeepseekV4FlashMLABackend"
     )
+    TRITON_MLA_SPARSE_DSV41 = (
+        "vllm.models.deepseek_v41.nvidia.triton_sparse.DeepseekV41TritonSparseBackend"
+    )
     FLASHINFER_MLA_SPARSE_DSV41 = (
         "vllm.models.deepseek_v41.nvidia.flashinfer_sparse."
         "DeepseekV4FlashInferMLASparseBackend"
