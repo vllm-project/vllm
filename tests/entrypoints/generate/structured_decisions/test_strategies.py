@@ -972,19 +972,23 @@ def test_generation_failures_are_server_errors(decision_server, endpoint, failur
     assert len(server.engine.generated) == 1
 
 
-def test_decisions_logging_includes_receipt_and_body(
-    decision_server, caplog, monkeypatch
+@pytest.mark.parametrize("endpoint", ["decisions", "systemone"])
+def test_request_logging_includes_receipt_input_and_body(
+    decision_server, caplog, monkeypatch, endpoint
 ):
     logger_name = "vllm.entrypoints.serve.utils.request_logger"
     monkeypatch.setattr(logging.getLogger(logger_name), "propagate", True)
     with caplog.at_level(logging.DEBUG, logger=logger_name):
         response = decision_server.client.post(
-            "/v1/decisions", json=decision_body("decisions")
+            f"/v1/{endpoint}", json=decision_body(endpoint, count=2)
         )
     assert response.status_code == 200, response.text
-    assert "Received request decision-test-request" in caplog.text
-    assert "evidence" in caplog.text
-    assert '"safety_identifier":"test-user"' in caplog.text
+    assert caplog.text.count("Received request decision-test-request") == 1
+    assert "Request decision-test-request details: prompt: 'evidence'" in caplog.text
+    if endpoint == "decisions":
+        assert '"safety_identifier":"test-user"' in caplog.text
+    else:
+        assert '"state":"evidence"' in caplog.text
 
 
 def test_prompts_retain_question_order(decision_server):
