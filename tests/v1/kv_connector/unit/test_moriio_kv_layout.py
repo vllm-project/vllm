@@ -453,7 +453,7 @@ def test_hybrid_write_posts_both_regions_before_layer_completion():
         get_engine_name_with_dp=lambda name, rank: name,
         _get_built_session=lambda name: (["conv-session", "ssm-session"], None),
         _is_mamba_layer=lambda name: True,
-        _mamba_payload_index_by_layer={"kda": 2},
+        _hybrid_payload_index_by_layer={"kda": 2},
         _region_session_indices=lambda name: [0, 1],
         _compute_mamba_transfer_offsets=Mock(
             return_value=([10, 20, 30, 40], [50, 60, 70, 80], [2, 4, 8, 16], 3)
