@@ -79,6 +79,7 @@ class MiniMaxM3MultiTokenPredictorLayer(nn.Module):
             quant_config=quant_config,
             force_sparse_attn=True,
             force_moe=True,
+            is_mtp_block=True,
         )
         self.final_layernorm = MiniMAXGemmaRMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
