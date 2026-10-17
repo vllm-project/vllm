@@ -27,7 +27,7 @@ from vllm.profiler.wrapper import (
     create_worker_profiler,
     validate_worker_profiler_config,
 )
-from vllm.v1.core.sched.output import CachedRequestData
+from vllm.v1.core.sched.output import CachedRequestData, IterationDetails
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.v1.worker.gpu_worker import Worker
@@ -688,6 +688,7 @@ class TestAnnotateProfile:
             scheduled_new_reqs=[ctx_req],
             scheduled_cached_reqs=cached,
             num_scheduled_tokens={"ctx1": 4, "gen1": 1},
+            iteration_details=IterationDetails(1, 4, 1, 1),
         )
 
         Worker.annotate_profile(worker, sched)
@@ -708,13 +709,9 @@ class TestAnnotateProfile:
         worker = MagicMock()
         worker.profiler.should_annotate = False
 
-        with patch(
-            "vllm.v1.worker.gpu_worker.compute_iteration_details"
-        ) as compute_iteration_details:
-            context = Worker.annotate_profile(worker, scheduler_output=None)
+        context = Worker.annotate_profile(worker, scheduler_output=None)
 
         worker.profiler.step.assert_called_once_with()
-        compute_iteration_details.assert_not_called()
         worker.profiler.annotate_context_manager.assert_not_called()
         assert isinstance(context, nullcontext)
 
