@@ -21,7 +21,11 @@ source .venv/bin/activate
 uv pip freeze
 
 echo ">>> Installing nightly torch packages"
-uv pip install --quiet torch torchvision torchaudio --pre --extra-index-url https://download.pytorch.org/whl/nightly/cu128
+# cu132 to match the nightly image this runs in. The previous cu128 index is
+# stale -- CUDA 12.8 left PyTorch's binary build matrix long ago and it has
+# published nothing since 2.15.0.dev20260408, so this test was asserting that
+# requirements do not override a six-month-old wheel.
+uv pip install --quiet torch torchvision torchaudio --pre --extra-index-url https://download.pytorch.org/whl/nightly/cu132
 
 echo ">>> Capturing torch-related versions before requirements install"
 uv pip freeze | grep -E '^torch|^torchvision|^torchaudio' | sort > before.txt
