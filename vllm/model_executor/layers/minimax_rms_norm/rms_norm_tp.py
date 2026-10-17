@@ -306,9 +306,10 @@ class MiniMaxText01RMSNormTP(CustomOp):
         self.variance_epsilon = eps
 
         self.workspace = None
+        self._lamport_workspace_owner = None
         if _MINIMAX_FUSED_AR_RMS_QK is not None and self.tp_world > 1:
             from .lamport_workspace import (
-                get_allreduce_workspace,
+                get_allreduce_workspace_owner,
             )
 
             # The Lamport workspace exchanges CUDA IPC handles and enables peer
@@ -317,12 +318,23 @@ class MiniMaxText01RMSNormTP(CustomOp):
             # with P2P disabled in the driver), allocation raises. Fall back to
             # the eager allreduce + RMSNorm path instead of failing model load.
             try:
-                self.workspace = get_allreduce_workspace(
+                owner = get_allreduce_workspace_owner(
                     rank=self.tp_rank,
                     world_size=self.tp_world,
                     max_tokens=MINIMAX_QK_NORM_MAX_TOKEN_NUM,
                     process_group=get_tp_group().cpu_group,
                 )
+                self._lamport_workspace_owner = owner
+                self.register_buffer(
+                    "_lamport_flag_buf", owner._flag_buf, persistent=False
+                )
+                self.register_buffer(
+                    "_lamport_layout_buf", owner._layout_buf, persistent=False
+                )
+                self.register_buffer(
+                    "_lamport_workspace", owner._workspace, persistent=False
+                )
+                self.workspace = self._lamport_workspace
             except Exception as e:
                 logger.warning_once(
                     "Failed to initialize MiniMax fused allreduce+RMSNorm "
@@ -332,6 +344,10 @@ class MiniMaxText01RMSNormTP(CustomOp):
                     e,
                 )
                 self.workspace = None
+
+    def post_weights_wake_up(self) -> None:
+        if self._lamport_workspace_owner is not None:
+            self._lamport_workspace_owner.reset()
 
     @staticmethod
     def weight_loader(
