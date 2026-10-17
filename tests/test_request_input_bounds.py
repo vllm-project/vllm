@@ -29,7 +29,11 @@ from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs.engine import embeds_input
 from vllm.sampling_params import BeamSearchParams
-from vllm.tokenizers import deepseek_v4_encoding, deepseek_v32_encoding
+from vllm.tokenizers import (
+    deepseek_v4_encoding,
+    deepseek_v32_encoding,
+    deepseek_v41_encoding,
+)
 from vllm.v1.engine.input_processor import InputProcessor
 
 pytestmark = [pytest.mark.cpu_test, pytest.mark.skip_global_cleanup]
@@ -382,8 +386,8 @@ ENCODING_MODULES = [deepseek_v32_encoding, deepseek_v4_encoding]
 
 @pytest.mark.parametrize(
     "encoding_module",
-    ENCODING_MODULES,
-    ids=["deepseek_v32", "deepseek_v4"],
+    [*ENCODING_MODULES, deepseek_v41_encoding],
+    ids=["deepseek_v32", "deepseek_v4", "deepseek_v41"],
 )
 def test_encode_messages_scans_last_user_once_per_conversation(
     monkeypatch: pytest.MonkeyPatch,

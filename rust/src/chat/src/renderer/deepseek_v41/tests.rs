@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use expect_test::{expect, expect_file};
 use serde_json::{Value, json};
@@ -375,4 +376,71 @@ fn joins_text_parts_with_reference_separator_and_preserves_literal_tags() {
         .insert("thinking".into(), Value::Bool(false));
     expect!["<｜begin▁of▁sentence｜><｜User｜>first\n\n<｜DSML｜invoke name=\"literal\"><｜Assistant｜></think>"]
         .assert_eq(&render(&request));
+}
+
+#[test]
+fn tool_results_do_not_start_a_new_turn() {
+    // Reasoning from completed turns is dropped, but the current turn keeps
+    // its reasoning across tool results.
+    let mut request = ChatRequest {
+        messages: vec![
+            ChatMessage::user("q1"),
+            ChatMessage::assistant_blocks(vec![
+                AssistantContentBlock::Reasoning { text: "r1".into() },
+                AssistantContentBlock::Text { text: "a1".into() },
+            ]),
+            ChatMessage::user("q2"),
+            ChatMessage::assistant_blocks(vec![
+                AssistantContentBlock::Reasoning { text: "r2".into() },
+                AssistantContentBlock::ToolCall(AssistantToolCall {
+                    id: "c1".to_string(),
+                    name: "lookup".to_string(),
+                    arguments: "{}".to_string(),
+                }),
+            ]),
+            ChatMessage::tool_response("value", "c1"),
+        ],
+        ..ChatRequest::for_test()
+    };
+    expect!["<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\n<｜User｜>q1<｜Assistant｜></think>a1<｜end▁of▁sentence｜><｜User｜>q2<｜Assistant｜><think>r2</think>\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"lookup\">\n\n</｜DSML｜ invoke>\n</｜DSML｜ calls><｜end▁of▁sentence｜><｜User｜><tool_result>value</tool_result><｜Assistant｜><think>"].assert_eq(&render(&request));
+
+    // A user message after tool results joins their user block and starts a
+    // new turn.
+    request.messages.push(ChatMessage::user("q3"));
+    expect!["<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\n<｜User｜>q1<｜Assistant｜></think>a1<｜end▁of▁sentence｜><｜User｜>q2<｜Assistant｜></think>\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"lookup\">\n\n</｜DSML｜ invoke>\n</｜DSML｜ calls><｜end▁of▁sentence｜><｜User｜><tool_result>value</tool_result>\n\nq3<｜Assistant｜><think>"].assert_eq(&render(&request));
+}
+
+#[test]
+fn large_tool_result_blocks_render_in_linear_time() {
+    // Scanning a user-content block once per entry made this quadratic.
+    const TOOL_RESULTS: usize = 100_000;
+    let mut blocks = vec![AssistantContentBlock::Reasoning { text: "r".into() }];
+    blocks.extend((0..TOOL_RESULTS).map(|index| {
+        AssistantContentBlock::ToolCall(AssistantToolCall {
+            id: format!("c{index}"),
+            name: "lookup".to_string(),
+            arguments: "{}".to_string(),
+        })
+    }));
+    let mut messages = vec![
+        ChatMessage::user("q"),
+        ChatMessage::assistant_blocks(blocks),
+    ];
+    messages.extend(
+        (0..TOOL_RESULTS).map(|index| ChatMessage::tool_response("v", format!("c{index}"))),
+    );
+    let request = ChatRequest {
+        messages,
+        ..ChatRequest::for_test()
+    };
+
+    let start = Instant::now();
+    let prompt = render(&request);
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "rendering took {elapsed:?}"
+    );
+    assert!(prompt.contains("<｜User｜>q<｜Assistant｜><think>r</think>"));
+    assert!(prompt.ends_with("<tool_result>v</tool_result><｜Assistant｜><think>"));
 }

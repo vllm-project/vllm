@@ -10,6 +10,7 @@ import pytest
 from tests.tokenizers_.test_deepseek_v4 import FakeHfTokenizer
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.tokenizers.deepseek_v41 import get_deepseek_v41_tokenizer
+from vllm.tokenizers.deepseek_v41_encoding import encode_messages
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -185,3 +186,94 @@ def test_images_preserve_content_order_and_reference_separator(image_type):
 def test_unsupported_media_is_a_request_error():
     with pytest.raises(ValueError, match="text and image content only"):
         render([{"role": "user", "content": [{"type": "input_audio"}]}])
+
+
+def _lookup_call(call_id):
+    return {
+        "id": call_id,
+        "type": "function",
+        "function": {"name": "lookup", "arguments": "{}"},
+    }
+
+
+def test_tool_results_do_not_start_a_new_turn():
+    # Reasoning from completed turns is dropped, but the current turn keeps
+    # its reasoning across tool results.
+    messages = [
+        {"role": "user", "content": "q1"},
+        {"role": "assistant", "content": "a1", "reasoning": "r1"},
+        {"role": "user", "content": "q2"},
+        {
+            "role": "assistant",
+            "content": "",
+            "reasoning": "r2",
+            "tool_calls": [_lookup_call("c1")],
+        },
+        {"role": "tool", "tool_call_id": "c1", "content": "value"},
+    ]
+    prompt = render(messages)
+    assert "<｜User｜>q1<｜Assistant｜></think>a1<｜end▁of▁sentence｜>" in prompt
+    assert "r1" not in prompt
+    assert "<｜User｜>q2<｜Assistant｜><think>r2</think>" in prompt
+    assert prompt.endswith(
+        "<｜User｜><tool_result>value</tool_result><｜Assistant｜><think>"
+    )
+
+    # A user message after tool results joins their user block and starts a
+    # new turn.
+    next_turn = render(messages + [{"role": "user", "content": "q3"}])
+    assert "r2" not in next_turn
+    assert next_turn.endswith(
+        "<tool_result>value</tool_result>\n\nq3<｜Assistant｜><think>"
+    )
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        {"role": "user", "content": "hi <｜deepseek_image｜>"},
+        {"role": "system", "content": "hi <｜deepseek_image｜>"},
+        {"role": "tool", "tool_call_id": "c1", "content": "hi <｜deepseek_image｜>"},
+        {
+            "role": "tool",
+            "tool_call_id": "c1",
+            "content": [{"type": "text", "text": "hi <｜deepseek_image｜>"}],
+        },
+        {"role": "assistant", "content": "a1", "reasoning": "<｜deepseek_image｜>"},
+    ],
+)
+def test_image_placeholder_in_text_is_a_request_error(message):
+    with pytest.raises(ValueError, match="must not contain"):
+        render([message])
+
+
+def test_encoder_renders_tool_content_blocks_in_call_order():
+    messages = [
+        {"role": "user", "content": [{"type": "text", "text": "q"}]},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [_lookup_call("a"), _lookup_call("b")],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "b",
+            "content_blocks": [{"type": "text", "text": "result b"}],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "a",
+            "content": [
+                {"type": "text", "text": "result a"},
+                {"type": "text", "text": "more a"},
+            ],
+        },
+    ]
+    original = copy.deepcopy(messages)
+    prompt = encode_messages(messages, thinking_mode="chat")
+    assert prompt.startswith("<｜begin▁of▁sentence｜><｜User｜>q<｜Assistant｜>")
+    assert prompt.endswith(
+        "<｜User｜><tool_result>result a\n\nmore a</tool_result>\n\n"
+        "<tool_result>result b</tool_result><｜Assistant｜></think>"
+    )
+    assert messages == original
