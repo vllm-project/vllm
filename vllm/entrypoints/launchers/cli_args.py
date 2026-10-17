@@ -128,14 +128,13 @@ class BaseFrontendArgs:
     """Special the tool parser plugin write to parse the model-generated tool
     into OpenAI API format, the name register in this plugin can be used in
     `--tool-call-parser`."""
-    tool_strict_level: ToolStrictLevelName | None = None
+    tool_strict_level: ToolStrictLevelName = "auto"
     """Server-side floor for structural-tag based tool calling, applied on top
     of the per-tool `strict` field. `auto` follows the request's tool choice
     and per-tool strictness; `function` constrains the
     tool-call envelope (markup and function name) for every request with
     tools; `parameter` additionally pins argument schemas, as if every tool
-    were `strict: true`. When unset, the tool parser's default level applies,
-    which is `auto` for most parsers."""
+    were `strict: true`."""
     tool_server: str | None = None
     """Comma-separated list of host:port pairs (IPv4, IPv6, or hostname).
     Examples: 127.0.0.1:8000, [::1]:8000, localhost:1234. Or `demo` for
@@ -557,7 +556,7 @@ def create_parser_for_docs() -> FlexibleArgumentParser:
 
 
 def propagate_flash_late_interaction(args, engine_args) -> None:
-    """Propagate `--disable-flash-late-interaction` into the engine config.
+    """Propagate `--no-enable-flash-late-interaction` into the engine config.
 
     The frontend flag alone only disables the API-server scoring path;
     mirroring it into `PoolerConfig.enable_flash_late_interaction` lets the

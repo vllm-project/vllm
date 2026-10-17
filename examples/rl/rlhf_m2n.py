@@ -17,8 +17,9 @@ Every FSDP rank builds an ``M2NTrainerWeightTransferEngine`` and calls
 ``send_weights()``; all ranks run every reshard, and only rank 0 drives the
 inference side through its ``RayVLLMWeightSyncClient``.
 
-Requires the ``nccl-extensions`` package (NCCL 2.30.5+). The backend creates
-the data-plane communicator with ``nccl4py`` and passes it directly to M2N.
+Requires the ``nccl-extensions`` package (NCCL 2.30.5+) and a
+``VLLM_NCCL_SO_PATH`` pointing at the same ``libnccl.so`` that
+``libnccl_m2n.so`` was linked against.
 
 This example was written for 4xH100.
 """
@@ -27,7 +28,6 @@ from __future__ import annotations
 
 import os
 
-import nccl.core as nccl
 import pybase64 as base64
 import ray
 import torch
@@ -38,6 +38,7 @@ from transformers import AutoModelForCausalLM
 
 from vllm import LLM, SamplingParams
 from vllm.config import WeightTransferConfig
+from vllm.distributed.device_communicators.pynccl_wrapper import NCCLLibrary
 from vllm.distributed.weight_transfer import (
     RayVLLMWeightSyncClient,
     WeightTransferTrainerFactory,
@@ -93,15 +94,7 @@ class FSDPTrainWorker:
     def ready(self):
         return True
 
-    def setup_engine(
-        self,
-        llm_handle,
-        metadata_address,
-        metadata_port,
-        nccl_unique_id_b64,
-        world_size,
-        num_workers,
-    ):
+    def setup_engine(self, llm_handle, nccl_unique_id_b64, world_size, num_workers):
         """Build the trainer engine on every FSDP rank.
 
         `DTensorModuleSource` reads each parameter's FSDP device mesh and
@@ -110,8 +103,6 @@ class FSDPTrainWorker:
         """
         self.engine = WeightTransferTrainerFactory.trainer_init(
             init_info=M2NTrainerInitInfo(
-                master_address=metadata_address,
-                master_port=metadata_port,
                 nccl_unique_id_b64=nccl_unique_id_b64,
                 world_size=world_size,
                 num_trainer_ranks=FSDP_WORLD_SIZE,
@@ -175,22 +166,16 @@ def main():
 
     # Trainer ranks [0, FSDP_WORLD_SIZE) and inference ranks after them share
     # one communicator, so the two meshes are contiguous rank intervals.
-    nccl_unique_id_b64 = base64.b64encode(nccl.get_unique_id().as_bytes).decode()
+    nccl = NCCLLibrary()
+    nccl_unique_id_b64 = base64.b64encode(
+        bytes(nccl.ncclGetUniqueId().internal)
+    ).decode()
     world_size = FSDP_WORLD_SIZE + num_workers
-    metadata_address = get_ip()
-    metadata_port = get_open_port()
 
     print("[transfer] Initializing nccl_m2n weight transfer (all FSDP ranks)...")
     ray.get(
         [
-            w.setup_engine.remote(
-                llm,
-                metadata_address,
-                metadata_port,
-                nccl_unique_id_b64,
-                world_size,
-                num_workers,
-            )
+            w.setup_engine.remote(llm, nccl_unique_id_b64, world_size, num_workers)
             for w in fsdp_workers
         ]
     )

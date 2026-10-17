@@ -76,10 +76,6 @@ for span in completion.weight_versions:
 
 The offsets cover the whole output, so with streamed delta outputs, collect the tokens before slicing. `/inference/v1/generate` returns the same list on each choice; see [Tokens In <> Tokens Out API](../serving/online_serving/token_in_token_out.md#weight-versions).
 
-`/v1/completions` and `/v1/chat/completions` return it on each choice when the request sets `return_weight_versions: true`. The offsets count the choice's output tokens, which `return_token_ids` returns as `token_ids`, and a streamed choice gets the list on its last chunk.
-
-An aborted request returns spans over its partial output. If you resubmit that output as part of a new prompt, the new request's spans start again at 0, so shift them by the number of tokens already generated before joining the two lists.
-
 ## Example
 
 The [async RLHF example](../../examples/rl/rlhf_async_new_apis.py) demonstrates this pattern with `vllm.AsyncLLMEngine`, NCCL weight transfer, and mid-flight pause/resume with validation.

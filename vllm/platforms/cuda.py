@@ -27,7 +27,6 @@ with contextlib.suppress(ImportError):
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.utils.import_utils import import_pynvml
-from vllm.utils.platform_utils import cuda_get_device_properties
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .interface import DeviceCapability, Platform, PlatformEnum, in_wsl
@@ -803,14 +802,7 @@ class NvmlCudaPlatform(CudaPlatformBase):
     def get_device_total_memory(cls, device_id: int = 0) -> int:
         physical_device_id = cls.device_id_to_physical_device_id(device_id)
         handle = pynvml.nvmlDeviceGetHandleByIndex(physical_device_id)
-        try:
-            return int(pynvml.nvmlDeviceGetMemoryInfo(handle).total)
-        except pynvml.NVMLError:
-            # Integrated parts (e.g. GB10 / DGX Spark) do not implement the
-            # device-level NVML memory query - nvidia-smi reports [N/A] for
-            # memory.total there. Fall back to the same source
-            # NonNvmlCudaPlatform reads.
-            return int(cuda_get_device_properties(device_id, ("total_memory",))[0])
+        return int(pynvml.nvmlDeviceGetMemoryInfo(handle).total)
 
     @classmethod
     @with_nvml_context

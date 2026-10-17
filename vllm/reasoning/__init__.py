@@ -84,10 +84,6 @@ _REASONING_PARSERS_TO_REGISTER = {
         "response_template_reasoning_parser",
         "ResponseTemplateReasoningParser",
     ),
-    "beam": (
-        "beam_reasoning_parser",
-        "BeamReasoningParser",
-    ),
     "holo2": (
         "deepseek_v3_reasoning_parser",
         "DeepSeekV3ReasoningWithThinkingParser",

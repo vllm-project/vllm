@@ -387,14 +387,9 @@ def test_pynvvideocodec_unrelated_error_propagates(
     monkeypatch.setitem(sys.modules, "PyNvVideoCodec", fake_nvc)
     original_error = RuntimeError("GPU decoder unavailable")
 
-    def raise_unrelated_error(cls, file_path, nvc, max_width, max_height):
+    def raise_unrelated_error(cls, file_path, nvc):
         raise original_error
 
-    monkeypatch.setattr(
-        PyNvVideoCodecVideoBackendMixin,
-        "_validate_decoder_caps",
-        classmethod(lambda cls, file_path, nvc, **kwargs: (4096, 4096)),
-    )
     monkeypatch.setattr(
         PyNvVideoCodecVideoBackendMixin,
         "_read_source_metadata",
@@ -468,18 +463,6 @@ class TestMergeKwargsGpuBackendPolicy:
             runtime_kwargs={"hw_decoders": 4},
         )
         assert result["hw_decoders"] == 2
-
-    def test_prevents_request_level_pynv_dimension_override(self):
-        result = VideoMediaIO.merge_kwargs(
-            default_kwargs={
-                "backend": "pynvvideocodec",
-                "max_width": 3840,
-                "max_height": 2160,
-            },
-            runtime_kwargs={"max_width": 1920, "max_height": 1080},
-        )
-        assert result["max_width"] == 3840
-        assert result["max_height"] == 2160
 
     @pytest.mark.parametrize("backend", ["opencv", "torchcodec"])
     def test_software_video_backend_passes_through(self, backend: str):

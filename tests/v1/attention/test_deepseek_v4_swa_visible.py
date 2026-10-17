@@ -15,7 +15,6 @@ import inspect
 
 import pytest
 import torch
-from transformers import DeepseekV4Config
 from typing_extensions import TypedDict
 
 from tests.v1.attention.utils import create_vllm_config
@@ -529,30 +528,30 @@ def make_builder(
     window: int = WINDOW,
     max_image_tokens: int = MAX_IMG,
     max_num_batched_tokens: int = 64,
-    model_name: str = "Qwen/Qwen3-0.6B",
+    model_name: str = "meta-llama/Meta-Llama-3-8B",
     builder_cls: type[
         DeepseekSparseSWAMetadataBuilder
     ] = DeepseekSparseSWAMetadataBuilder,
-    deepseek_v4_config: bool = True,
+    mm_prefix_clamp_sliding_window: bool = True,
     bounded_replay: bool = False,
 ) -> DeepseekSparseSWAMetadataBuilder:
-    vision_fields = dict(vision_n_layers=2, vision_max_n_token=max_image_tokens)
+    overrides: dict = {"sliding_window": window}
+    if vision:
+        # Emulate the V4 vision config, whose mm_prefix_clamp_sliding_window
+        # gates the in-kernel SWA widening. V4.1 (causal image tokens) leaves
+        # it off.
+        overrides.update(
+            vision_n_layers=2,
+            vision_max_n_token=max_image_tokens,
+            mm_prefix_clamp_sliding_window=mm_prefix_clamp_sliding_window,
+        )
     vllm_config = create_vllm_config(
         model_name=model_name,
         max_model_len=4096,
         max_num_batched_tokens=max_num_batched_tokens,
         max_num_seqs=8,
-        hf_config_override={"sliding_window": window}
-        | (vision_fields if vision and not deepseek_v4_config else {}),
+        hf_config_override=overrides,
     )
-    if vision and deepseek_v4_config:
-        # Only V4 configs widen the SWA window in-kernel over image spans
-        vllm_config.model_config.hf_config = DeepseekV4Config(
-            num_hidden_layers=1,
-            layer_types=["sliding_attention"],
-            sliding_window=window,
-            **vision_fields,
-        )
     spec = SlidingWindowMLASpec(
         block_size=BLOCK_SIZE,
         num_kv_heads=1,
@@ -687,7 +686,7 @@ def test_v41_image_prefill_uses_causal_swa(compress_ratio, query_len):
         max_image_tokens,
         query_len,
         builder_cls=DeepseekV41SparseSWAMetadataBuilder,
-        deepseek_v4_config=False,
+        mm_prefix_clamp_sliding_window=False,
     )
     assert builder.max_image_tokens == 0
     md = build_metadata(builder, [seq_len], [query_len], {0: spans})

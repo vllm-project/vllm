@@ -230,7 +230,7 @@ are internal constants (no env vars).
 
 | Flag (`ParallelConfig` field) | Default | Meaning |
 | --- | --- | --- |
-| `--enable-shm-tensor-arena` / `--disable-shm-tensor-arena` (`enable_shm_tensor_arena`) | **off** | Opt in to route large CPU tensors through the arena (reserves slots in `/dev/shm`). Off = the out-of-band `_reduce_tensor` path only, identical to stock behavior. |
+| `--enable-shm-tensor-arena` / `--no-enable-shm-tensor-arena` (`enable_shm_tensor_arena`) | **off** | Opt in to route large CPU tensors through the arena (reserves slots in `/dev/shm`). Off = the out-of-band `_reduce_tensor` path only, identical to stock behavior. |
 
 Internal constants in `shm_tensor_arena.py`: **8 slots × 256 MB**; tensors larger
 than a slot, or smaller than the **8 MB** divert threshold, take the out-of-band
@@ -268,7 +268,7 @@ than a slot, or smaller than the **8 MB** divert threshold, take the out-of-band
    (arena + pinning); vision-encoder compute for the same image is ~80 ms.
 4. **Outstanding — arena vs. out-of-band on `main`.** Re-run the same seeded A/B
    with the baseline set to current `main` (i.e. `_reduce_tensor` on, arena off
-   via `--disable-shm-tensor-arena`) vs. arena on, to quantify the incremental N→1
+   via `--no-enable-shm-tensor-arena`) vs. arena on, to quantify the incremental N→1
    copy + pinning gain at TP=4 (and ideally TP=2/8 to show the copy-count scaling).
 
 ## 5. Limitations and future work

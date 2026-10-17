@@ -947,9 +947,6 @@ class Platform:
         from math import lcm
 
         from vllm.config.vllm import set_current_vllm_config
-        from vllm.model_executor.layers.mamba.abstract import (
-            get_mamba_prefill_checkpoint_alignment,
-        )
         from vllm.model_executor.models import ModelRegistry
         from vllm.utils.math_utils import cdiv
         from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
@@ -1083,12 +1080,6 @@ class Platform:
                 # For hybrid MLA/Mamba models, make the manager block size a
                 # multiple of 128 so split kernel blocks keep that invariant.
                 kernel_block_alignment_size = max(kernel_block_alignment_size, 128)
-        if cache_config.mamba_cache_mode == "align":
-            # Internal prefill checkpoints land on block boundaries.
-            kernel_block_alignment_size = lcm(
-                kernel_block_alignment_size,
-                get_mamba_prefill_checkpoint_alignment(vllm_config) or 1,
-            )
 
         # Use minimum block size that satisfies both backend alignment and
         # mamba page size compatibility
@@ -1466,28 +1457,6 @@ class Platform:
                     logger.warning(
                         "Unknown vLLM environment variable detected: %s", env
                     )
-
-    @classmethod
-    def get_kv_cache_config_builder_cls(cls, vllm_config: "VllmConfig") -> str:
-        """Resolve the fully-qualified class path of the platform's KV cache
-        config builder.
-
-        .. note::
-            Experimental, like the ``KVCacheConfigBuilder`` interface it selects.
-
-        The builder supplies grouping (``get_kv_cache_groups``) and tensor
-        placement (``get_kv_cache_config_from_groups``). Vendors may override
-        this to return a platform-specific builder. The default builder honors a
-        model implementing
-        :class:`~vllm.model_executor.models.interfaces.SupportsKVCacheGrouping`;
-        a builder that overrides ``get_kv_cache_groups`` owns grouping and
-        bypasses that model hook unless it calls ``super()``.
-
-        Returns:
-            Fully-qualified class path of a ``KVCacheConfigBuilder`` subclass.
-
-        """
-        return "vllm.v1.core.kv_cache_planning.DefaultKVCacheConfigBuilder"
 
 
 class UnspecifiedPlatform(Platform):

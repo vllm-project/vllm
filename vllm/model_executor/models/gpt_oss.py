@@ -43,7 +43,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
-    make_attention_sink,
     maybe_remap_kv_scale_name,
     remap_moe_expert_weights,
 )
@@ -128,7 +127,9 @@ class OAIAttention(nn.Module):
 
         tp_size = get_tensor_model_parallel_world_size()
 
-        self.sinks = make_attention_sink(config.num_attention_heads // tp_size)
+        self.sinks = torch.nn.Parameter(
+            torch.empty(config.num_attention_heads // tp_size, requires_grad=False)
+        )
 
         self.q_size = self.num_attention_heads * self.head_dim // tp_size
         self.kv_size = self.num_key_value_heads * self.head_dim // tp_size
@@ -555,6 +556,8 @@ class GptOssModel(nn.Module, EagleModelMixin):
         self,
         ep_rank_end: int,
         ep_rank_start: int,
+        heads_per_rank: int,
+        head_start: int,
         weights: Iterable[tuple[str, torch.Tensor]],
         stacked_params_mapping: list[tuple[str, str, str]],
     ) -> set[str]:
@@ -717,6 +720,13 @@ class GptOssModel(nn.Module, EagleModelMixin):
                 )
                 loaded_params.add(name)
                 continue
+            elif "sinks" in name:
+                # Handle attention sinks (distributed across ranks)
+                param = params_dict[name]
+                narrow_weight = weight.narrow(0, head_start, heads_per_rank)
+                param.data.copy_(narrow_weight)
+                loaded_params.add(name)
+                continue
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
@@ -742,6 +752,8 @@ class GptOssModel(nn.Module, EagleModelMixin):
         self,
         ep_rank_end: int,
         ep_rank_start: int,
+        heads_per_rank: int,
+        head_start: int,
         weights: Iterable[tuple[str, torch.Tensor]],
         stacked_params_mapping: list[tuple[str, str, str]],
     ) -> set[str]:
@@ -1070,6 +1082,14 @@ class GptOssModel(nn.Module, EagleModelMixin):
                 loaded_params.add(fused_name)
                 continue
 
+            elif "sinks" in name:
+                # Handle attention sinks (distributed across ranks)
+                param = params_dict[name]
+                narrow_weight = loaded_weight.narrow(0, head_start, heads_per_rank)
+                param.data.copy_(narrow_weight)
+                loaded_params.add(name)
+                continue
+
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 # Skip non-stacked layers and experts (experts handled below).
                 if weight_name not in name:
@@ -1148,6 +1168,8 @@ class GptOssModel(nn.Module, EagleModelMixin):
         self,
         ep_rank_end: int,
         ep_rank_start: int,
+        heads_per_rank: int,
+        head_start: int,
         weights: Iterable[tuple[str, torch.Tensor]],
         stacked_params_mapping: list[tuple[str, str, str]],
     ) -> set[str]:
@@ -1234,6 +1256,13 @@ class GptOssModel(nn.Module, EagleModelMixin):
                 param.copy_(weight)
                 loaded_params.add(name)
                 continue
+            elif "sinks" in name:
+                # Handle attention sinks (distributed across ranks)
+                param = params_dict[name]
+                narrow_weight = weight.narrow(0, head_start, heads_per_rank)
+                param.data.copy_(narrow_weight)
+                loaded_params.add(name)
+                continue
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
@@ -1316,6 +1345,13 @@ class GptOssModel(nn.Module, EagleModelMixin):
             (".qkv_proj", ".v_proj", "v"),
         ]
 
+        tp_rank = get_tensor_model_parallel_rank()
+        tp_size = get_tensor_model_parallel_world_size()
+
+        # Attention heads per rank
+        heads_per_rank = self.config.num_attention_heads // tp_size
+        head_start = tp_rank * heads_per_rank
+
         ep_size = get_ep_group().world_size
         ep_rank = get_ep_group().rank_in_group
         num_experts = self.config.num_local_experts
@@ -1347,6 +1383,8 @@ class GptOssModel(nn.Module, EagleModelMixin):
             return self._load_weights_mxfp4(
                 ep_rank_end,
                 ep_rank_start,
+                heads_per_rank,
+                head_start,
                 weights,
                 stacked_params_mapping,
             )
@@ -1354,6 +1392,8 @@ class GptOssModel(nn.Module, EagleModelMixin):
             return self._load_weights_quark(
                 ep_rank_end,
                 ep_rank_start,
+                heads_per_rank,
+                head_start,
                 weights,
                 stacked_params_mapping,
             )
@@ -1361,6 +1401,8 @@ class GptOssModel(nn.Module, EagleModelMixin):
             return self._load_weights_other(
                 ep_rank_end,
                 ep_rank_start,
+                heads_per_rank,
+                head_start,
                 weights,
                 stacked_params_mapping,
             )
@@ -1439,9 +1481,6 @@ class GptOssForCausalLM(
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
-
-    def compute_logits_local(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        return self.logits_processor(self.lm_head, hidden_states, skip_gather=True)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)

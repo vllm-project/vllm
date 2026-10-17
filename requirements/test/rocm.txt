@@ -606,6 +606,7 @@ numpy==2.2.6
     #   bitsandbytes
     #   bm25s
     #   contourpy
+    #   cupy-cuda12x
     #   datasets
     #   decord
     #   einx
@@ -1438,6 +1439,7 @@ zipp==3.23.0
 # cuda-bindings
 # cuda-pathfinder
 # cuda-toolkit
+# cupy-cuda12x
 # nvidia-cublas
 # nvidia-cuda-cupti
 # nvidia-cuda-nvrtc

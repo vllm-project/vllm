@@ -802,27 +802,6 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
             kv_c_and_k_pe_cache.dtype
         )
         assert hot_cache.is_contiguous(), "HiSparse hot buffer must be contiguous"
-        if (
-            num_decode_tokens >= num_tokens
-            or index_group.cache(layer_index).all_context_pages_resident
-        ):
-            physical_topk, valid_counts = index_group.convert_logical_to_physical_topk(
-                layer_index,
-                topk,
-                attn_metadata,
-                block_stride_rows=None,
-                return_valid_counts=True,
-            )
-            return self._forward_mqa_kernel(
-                q,
-                hot_cache,
-                physical_topk,
-                valid_counts,
-                layer=layer,
-                block_size=block_size,
-                is_decode=num_decode_tokens >= num_tokens,
-            )
-
         decode_out = decode_lse = None
         if num_decode_tokens:
             physical_topk, valid_counts = index_group.convert_logical_to_physical_topk(
@@ -846,18 +825,31 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
                 block_size=block_size,
                 is_decode=True,
             )
+            if num_decode_tokens >= num_tokens:
+                return decode_out, decode_lse
 
-        prefill_cache, block_table, req_ids = index_group.stage_prefill_rows(
-            layer_index, kv_c_and_k_pe_cache, attn_metadata
-        )
-        physical_topk, valid_counts = triton_convert_req_index_to_global_index(
-            req_ids,
-            block_table,
-            topk[num_decode_tokens:],
-            BLOCK_SIZE=block_size,
-            NUM_TOPK_TOKENS=topk.shape[1],
-            return_valid_counts=True,
-        )
+        cache = index_group.cache(layer_index)
+        if num_decode_tokens == 0 and cache.all_context_pages_resident:
+            physical_topk, valid_counts = index_group.convert_logical_to_physical_topk(
+                layer_index,
+                topk,
+                attn_metadata,
+                block_stride_rows=None,
+                return_valid_counts=True,
+            )
+            prefill_cache = hot_cache
+        else:
+            prefill_cache, block_table, req_ids = index_group.stage_prefill_rows(
+                layer_index, kv_c_and_k_pe_cache, attn_metadata
+            )
+            physical_topk, valid_counts = triton_convert_req_index_to_global_index(
+                req_ids,
+                block_table,
+                topk[num_decode_tokens:],
+                BLOCK_SIZE=block_size,
+                NUM_TOPK_TOKENS=topk.shape[1],
+                return_valid_counts=True,
+            )
         q_prefill = (
             (q[0][num_decode_tokens:], q[1][num_decode_tokens:])
             if isinstance(q, tuple)

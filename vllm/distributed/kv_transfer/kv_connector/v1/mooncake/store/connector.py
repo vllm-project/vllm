@@ -18,7 +18,7 @@ from typing import Any
 
 import torch
 
-from vllm.config import KVTransferConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed.kv_events import (
     BlockStored,
     KVCacheEvent,
@@ -126,10 +126,6 @@ class MooncakeStoreKVEvents(KVConnectorKVEvents):
 
 class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
     """KV connector using MooncakeDistributedStore as shared KV pool."""
-
-    @classmethod
-    def supports_sleep_mode(cls, kv_transfer_config: KVTransferConfig) -> bool:
-        return False
 
     @staticmethod
     def _validate_kv_cache_config(

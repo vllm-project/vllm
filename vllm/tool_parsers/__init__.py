@@ -90,10 +90,6 @@ _TOOL_PARSERS_TO_REGISTER = {
         "response_template_tool_parser",
         "ResponseTemplateToolParser",
     ),
-    "beam": (
-        "beam_tool_parser",
-        "BeamToolParser",
-    ),
     "poolside_v1": (
         "poolside_v1_tool_parser",
         "PoolsideV1ToolParser",
