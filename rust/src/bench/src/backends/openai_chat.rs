@@ -128,10 +128,13 @@ impl OpenAIChatBackend {
                             }
                             // Separate `if` (not `else if`) — Dynamo may send
                             // both choices and usage in the same chunk.
-                            if let Some(ref usage) = data.usage
-                                && let Some(ct) = usage.completion_tokens
-                            {
-                                output.output_tokens = ct as usize;
+                            if let Some(ref usage) = data.usage {
+                                if let Some(ct) = usage.completion_tokens {
+                                    output.output_tokens = ct as usize;
+                                }
+                                if let Some(pt) = usage.prompt_tokens {
+                                    output.prompt_len = pt as usize;
+                                }
                             }
                         }
                     }
@@ -361,7 +364,11 @@ mod tests {
     /// Serve one streaming chat response over a raw socket: `num_tokens`
     /// content chunks back-to-back, then `usage_delay` of silence, then the
     /// choice-less usage chunk and `[DONE]`. Returns the endpoint URL.
-    fn spawn_sse_server(num_tokens: usize, usage_delay: std::time::Duration) -> String {
+    fn spawn_sse_server(
+        num_tokens: usize,
+        usage_delay: std::time::Duration,
+        prompt_tokens: Option<u64>,
+    ) -> String {
         use std::io::{BufRead, BufReader, Read, Write};
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -391,8 +398,10 @@ mod tests {
                 send("data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n");
             }
             std::thread::sleep(usage_delay);
+            let prompt_tokens =
+                prompt_tokens.map_or(String::new(), |pt| format!(",\"prompt_tokens\":{pt}"));
             send(&format!(
-                "data: {{\"choices\":[],\"usage\":{{\"completion_tokens\":{num_tokens}}}}}\n\n"
+                "data: {{\"choices\":[],\"usage\":{{\"completion_tokens\":{num_tokens}{prompt_tokens}}}}}\n\n"
             ));
             send("data: [DONE]\n\n");
         });
@@ -409,7 +418,7 @@ mod tests {
         // real delay is needed here; there is no observable event to wait on.
         let usage_delay = std::time::Duration::from_millis(150);
         let input = RequestFuncInput {
-            api_url: spawn_sse_server(3, usage_delay),
+            api_url: spawn_sse_server(3, usage_delay, None),
             model: "test-model".to_string(),
             output_len: 3,
             ..Default::default()
@@ -439,5 +448,43 @@ mod tests {
         assert_eq!(v["temperature"], 0.5);
         // keys already set above must not be overridden by extra_body
         assert_eq!(v["stream"], true);
+    }
+
+    /// The server's `usage.prompt_tokens` replaces the client-side estimate,
+    /// so input-token totals count what the server actually processed
+    /// (chat template, multimodal tokens). Mirrors Python #38654.
+    #[tokio::test]
+    async fn test_usage_prompt_tokens_override_prompt_len() {
+        let input = RequestFuncInput {
+            api_url: spawn_sse_server(3, std::time::Duration::ZERO, Some(128)),
+            model: "test-model".to_string(),
+            prompt_len: 100,
+            output_len: 3,
+            ..Default::default()
+        };
+
+        let output = OpenAIChatBackend.send_request(&input, &reqwest::Client::new()).await.unwrap();
+
+        assert!(output.success, "{}", output.error);
+        assert_eq!(output.prompt_len, 128);
+    }
+
+    /// Servers that omit `usage.prompt_tokens` keep the client-side estimate,
+    /// and `completion_tokens` is still recorded.
+    #[tokio::test]
+    async fn test_missing_prompt_tokens_keeps_client_prompt_len() {
+        let input = RequestFuncInput {
+            api_url: spawn_sse_server(3, std::time::Duration::ZERO, None),
+            model: "test-model".to_string(),
+            prompt_len: 100,
+            output_len: 3,
+            ..Default::default()
+        };
+
+        let output = OpenAIChatBackend.send_request(&input, &reqwest::Client::new()).await.unwrap();
+
+        assert!(output.success, "{}", output.error);
+        assert_eq!(output.prompt_len, 100);
+        assert_eq!(output.output_tokens, 3);
     }
 }
