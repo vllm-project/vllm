@@ -1319,3 +1319,309 @@ def test_fused_moe_lora_kernel_rejects_bad_block_size_m(device):
             adapter_enabled,
             block_size,
         )
+
+
+@pytest.mark.skipif(not current_platform.is_xpu(), reason="XPU native MoE")
+@pytest.mark.parametrize("recipe", ["fp8", "block_fp8", "int4"])
+@pytest.mark.parametrize("logical_size", [96, 128])
+@pytest.mark.parametrize("mapped_experts", [False, True])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("packed", [False, True])
+@pytest.mark.parametrize("activation_name", ["SILU", "SWIGLUOAI"])
+@pytest.mark.parametrize("hidden", [256, 1024])
+def test_xpu_quantized_moe_lora_reference(
+    recipe, logical_size, mapped_experts, dtype, packed, activation_name, hidden
+):
+    """LoRA must follow token routes, padded gate/up halves and router weights."""
+    from tests.kernels.moe.utils import make_dummy_moe_config
+    from vllm.config import LoRAConfig
+    from vllm.lora.layers import LoRAMapping
+    from vllm.lora.punica_wrapper.punica_xpu import PunicaWrapperXPU
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.config import (
+        fp8_w8a16_moe_quant_config,
+        int4_w4a16_moe_quant_config,
+    )
+    from vllm.model_executor.layers.fused_moe.experts.lora_context import MoELoRAContext
+    from vllm.model_executor.layers.fused_moe.experts.xpu_moe import (
+        XPUExpertsBlockFp8,
+        XPUExpertsFp8,
+        XPUExpertsWNA16,
+    )
+
+    activation = MoEActivation[activation_name]
+    interleaved = activation == MoEActivation.SWIGLUOAI
+    block_fp8 = recipe == "block_fp8"
+    torch.manual_seed(42)
+    device = "xpu"
+    tokens, experts, padded, rank = 4, 2, 128, 8
+
+    def rand(*shape):
+        return torch.randn(*shape, device=device, dtype=dtype) * 0.05
+
+    # Keep projection variance comparable across hidden sizes.
+    x = rand(tokens, hidden) * (10 * (256 / hidden) ** 0.5)
+    w1 = rand(experts, hidden, 2 * padded)
+    w2 = rand(experts, padded, hidden)
+    w1[:, :, logical_size:padded] = 0
+    w1[:, :, padded + logical_size :] = 0
+    w2[:, logical_size:, :] = 0
+    if interleaved:
+        w1 = w1.unflatten(-1, (2, padded)).transpose(-1, -2).flatten(-2).contiguous()
+    if recipe == "int4":
+
+        def pack(w):
+            q = (w.transpose(-1, -2) * 64).round().clamp(-8, 7).to(torch.int32)
+            ref = (q.float() / 64).transpose(-1, -2)
+            q = q + 8
+            return (q[..., ::2] | (q[..., 1::2] << 4)).to(torch.uint8).contiguous(), ref
+
+        w1, ref_w1 = pack(w1)
+        w2, ref_w2 = pack(w2)
+        s1 = torch.full(
+            (experts, 2 * padded, hidden // 128), 1 / 64, device=device, dtype=dtype
+        )
+        s2 = torch.full((experts, hidden, 1), 1 / 64, device=device, dtype=dtype)
+    else:
+        w1, w2 = w1.to(torch.float8_e4m3fn), w2.to(torch.float8_e4m3fn)
+        ref_w1, ref_w2 = w1.float(), w2.float()
+        s1 = torch.ones(
+            (experts, hidden // 128, 2) if block_fp8 else (experts,), device=device
+        )
+        s2 = torch.ones(
+            (experts, 1, hidden // 128) if block_fp8 else (experts,), device=device
+        )
+    # Nonuniform scales expose expert/block-axis swaps in the native path.
+    s1.mul_(torch.linspace(0.5, 1.5, s1.numel(), device=device).view_as(s1))
+    s2.mul_(torch.linspace(1.5, 0.5, s2.numel(), device=device).view_as(s2))
+    if recipe == "int4":
+        ref_w1 *= (s1.float() * 64).transpose(-1, -2).repeat_interleave(128, 1)
+        ref_w2 *= (s2.float() * 64).transpose(-1, -2).repeat_interleave(128, 1)
+    elif block_fp8:
+        ref_w1 *= s1.repeat_interleave(128, 1).repeat_interleave(128, 2)
+        ref_w2 *= s2.repeat_interleave(128, 1).repeat_interleave(128, 2)
+    else:
+        ref_w1 *= s1[:, None, None]
+        ref_w2 *= s2[:, None, None]
+    config = make_dummy_moe_config(
+        num_experts=4 if mapped_experts else experts,
+        num_local_experts=experts,
+        experts_per_token=2,
+        hidden_dim=hidden,
+        intermediate_size=padded,
+        in_dtype=dtype,
+        activation=activation,
+    )
+    config.is_lora_enabled = True
+    if mapped_experts:
+        config.moe_parallel_config.ep_size = 2
+    quant = fp8_w8a16_moe_quant_config(
+        s1, s2, block_shape=[128, 128] if block_fp8 else None
+    )
+    cls = XPUExpertsBlockFp8 if block_fp8 else XPUExpertsFp8
+    if recipe == "int4":
+        quant = int4_w4a16_moe_quant_config(s1, s2, block_shape=[0, 128])
+        cls = XPUExpertsWNA16
+    assert cls.supports_lora()
+    impl = cls(config, quant)
+    wrapper = PunicaWrapperXPU(
+        32, 8, device, lora_config=LoRAConfig(max_loras=2, max_lora_rank=8)
+    )
+    mapping = (1, 2, 0, 1)
+    wrapper.update_metadata(
+        LoRAMapping(mapping, mapping, is_prefill=True), [1, 2, None], 3, 128
+    )
+    a13 = (rand(2, experts, rank, hidden), rand(2, experts, rank, hidden))
+    b13 = (rand(2, experts, logical_size, rank), rand(2, experts, logical_size, rank))
+    if packed:
+        a13 = (a13[0],)
+        b13 = (torch.cat(b13, dim=-2),)
+    a2, b2 = (rand(2, experts, rank, logical_size),), (rand(2, experts, hidden, rank),)
+    ctx = MoELoRAContext(
+        a13,
+        b13,
+        a2,
+        b2,
+        torch.ones(3, device=device, dtype=torch.int32),
+        2,
+        2,
+        len(a13),
+        False,
+        0,
+        1,
+        experts,
+        wrapper,
+        False,
+    )
+    # Adapter contributions must exceed the comparison error budget.
+    for tensor in (*a13, *b13, *a2, *b2):
+        tensor.mul_(3)
+    if packed and interleaved:
+        b13[0].copy_(
+            b13[0].unflatten(-2, (2, logical_size)).transpose(-3, -2).flatten(-3, -2)
+        )
+    impl.set_lora_context(ctx)
+    ids = torch.tensor([[1, 0], [0, 1], [1, 0], [0, 1]], device=device)
+    expert_map = None
+    if mapped_experts:
+        expert_map = torch.tensor([1, 0, -1, -1], device=device, dtype=torch.int32)
+        ids = torch.tensor([[1, 0], [0, -1], [2, 1], [-1, -1]], device=device)
+    weights = torch.tensor(
+        [[0.2, 0.8], [0.7, 0.3], [0.6, 0.4], [0.9, 0.1]], device=device
+    )
+    shape13, shape2, _ = impl.workspace_shapes(
+        tokens, 2 * padded, hidden, 2, config.num_experts, experts, None, activation
+    )
+    workspace13 = torch.empty(shape13, device=device, dtype=dtype)
+    workspace2 = torch.empty(shape2, device=device, dtype=dtype)
+    # Modular MoE may alias the output with workspace13. Exercise that case
+    # as well as an independent output across the existing adapter matrix.
+    output = torch.empty_like(x) if packed else workspace13[: x.numel()].view_as(x)
+    impl.apply(
+        output,
+        x,
+        w1,
+        w2,
+        weights,
+        ids,
+        activation,
+        4 if mapped_experts else experts,
+        expert_map,
+        None,
+        None,
+        workspace13,
+        workspace2,
+        None,
+        False,
+    )
+    graph = None
+    if not packed and logical_size == 96:
+        graph = torch.xpu.XPUGraph()
+        with torch.xpu.graph(graph):
+            impl.apply(
+                output,
+                x,
+                w1,
+                w2,
+                weights,
+                ids,
+                activation,
+                4 if mapped_experts else experts,
+                expert_map,
+                None,
+                None,
+                workspace13,
+                workspace2,
+                None,
+                False,
+            )
+        x.mul_(0.75)
+        weights.copy_(weights.flip(1))
+        ids.copy_(ids.flip(1))
+        graph.replay()
+
+    def reference(with_w13=True, with_w2=True):
+        result = torch.zeros_like(x, dtype=torch.float32)
+        for t in range(tokens):
+            for k in range(2):
+                e = int(ids[t, k])
+                if e < 0:
+                    continue
+                if expert_map is not None:
+                    e = int(expert_map[e])
+                if e < 0:
+                    continue
+                base13 = x[t].float() @ ref_w1[e]
+                gate, up = (
+                    (base13[::2], base13[1::2]) if interleaved else base13.chunk(2)
+                )
+                adapter = mapping[t] - 1
+                if adapter >= 0 and with_w13:
+                    for part, values in enumerate((gate, up)):
+                        b = b13[0 if packed else part][adapter, e]
+                        if packed:
+                            b = b[part::2] if interleaved else b.chunk(2)[part]
+                        values[:logical_size] += (
+                            x[t].float()
+                            @ a13[0 if packed else part][adapter, e].float().T
+                            @ b.float().T
+                        )
+                if interleaved:
+                    gate = gate.clamp(max=7)
+                    act = gate * torch.sigmoid(1.702 * gate) * (up.clamp(-7, 7) + 1)
+                else:
+                    act = torch.nn.functional.silu(gate) * up
+                y = act @ ref_w2[e]
+                if adapter >= 0 and with_w2:
+                    y += (
+                        act[:logical_size]
+                        @ a2[0][adapter, e].float().T
+                        @ b2[0][adapter, e].float().T
+                    )
+                result[t] += weights[t, k] * y
+        return result
+
+    expected = reference()
+    atol, rtol = (2e-3, 1e-2) if dtype == torch.float16 else (2e-2, 3e-2)
+    torch.testing.assert_close(output.float(), expected, atol=atol, rtol=rtol)
+    # Guard the oracle itself: neither omitted projection nor all-zero output
+    # may fit inside the same error budget as a correct implementation.
+    for wrong in (
+        reference(False, True),
+        reference(True, False),
+        torch.zeros_like(expected),
+    ):
+        assert not torch.allclose(wrong, expected, atol=atol, rtol=rtol)
+
+    # Zero deltas must preserve native routing/accumulation, especially in BF16.
+    for b in (*b13, *b2):
+        b.zero_()
+    args = (
+        x,
+        w1,
+        w2,
+        weights,
+        ids,
+        activation,
+        4 if mapped_experts else experts,
+        expert_map,
+        None,
+        None,
+        workspace13,
+        workspace2,
+        None,
+        False,
+    )
+    impl.apply(output, *args)
+    impl._lora_context = None
+    native = torch.empty_like(output)
+    impl.apply(native, *args)
+    torch.testing.assert_close(output, native, atol=0, rtol=0)
+    if graph is not None:
+        graph.replay()
+        torch.testing.assert_close(output, native, atol=0, rtol=0)
+
+
+@pytest.mark.skipif(not current_platform.is_xpu(), reason="XPU native MoE")
+def test_xpu_moe_lora_support_boundaries():
+    """The LoRA mixin must not enable unsupported native quantization paths."""
+    from vllm.model_executor.layers.fused_moe.experts.xpu_moe import (
+        XPUExpertsBlockFp8,
+        XPUExpertsFp8,
+        XPUExpertsMxFp4,
+        XPUExpertsMxFp8,
+        XPUExpertsWNA16,
+    )
+    from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
+        UnquantizedMoeBackend,
+        backend_to_kernel_cls,
+    )
+
+    for cls in (XPUExpertsFp8, XPUExpertsBlockFp8, XPUExpertsWNA16):
+        assert cls.supports_lora()
+    for cls in (
+        *backend_to_kernel_cls(UnquantizedMoeBackend.XPU),
+        XPUExpertsMxFp4,
+        XPUExpertsMxFp8,
+    ):
+        assert not cls.supports_lora()

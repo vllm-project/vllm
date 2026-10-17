@@ -121,6 +121,7 @@ if HAS_TRITON:
     )
     from vllm.model_executor.layers.fused_moe.experts.xpu_moe import (
         XPUExperts,
+        XPUExpertsBase,
         XPUExpertsFp8,
         XPUExpertsMxFp4,
     )
@@ -155,6 +156,7 @@ if HAS_TRITON:
         "BatchedDeepGemmExperts",
         "TritonOrDeepGemmExperts",
         "XPUExperts",
+        "XPUExpertsBase",
         "XPUExpertsFp8",
         "XPUExpertsBlockFp8",
         "XPUExpertsMxFp8",
