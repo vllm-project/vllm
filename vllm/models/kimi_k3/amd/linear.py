@@ -60,6 +60,7 @@ from vllm.model_executor.models.interfaces import (
     HasInnerState,
     IsHybrid,
     MixtureOfExperts,
+    SupportsMonoKernel,
     SupportsPP,
 )
 from vllm.model_executor.models.utils import (
@@ -70,6 +71,8 @@ from vllm.model_executor.models.utils import (
     make_layers,
     maybe_prefix,
 )
+from vllm.models.common import mono
+from vllm.models.common.mono.routing import Mono
 from vllm.models.kimi_k3.amd.kda import KimiK3DeltaAttention
 from vllm.models.kimi_k3.amd.latent_moe_runner import ROCmLatentMoERunner
 from vllm.models.kimi_k3.amd.mla import KimiK3MultiHeadLatentAttentionWrapper
@@ -781,6 +784,8 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
         assert config.num_attention_heads % world_size == 0, (
             "num_attention_heads must be divisible by world_size"
         )
+        # the mono decode's layer kernels, attached after load
+        self.mono: Mono | None = None
 
     def make_empty_intermediate_tensors(
         self,
@@ -885,11 +890,14 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
             self.layers[self.start_layer : self.end_layer],
             start=self.start_layer,
         ):
-            hidden_states, residual, prefix_delta = layer(
-                positions=positions,
-                hidden_states=hidden_states,
-                residual=residual,
-                prefix_delta=prefix_delta,
+            hidden_states, residual, prefix_delta = mono.forward_layer(
+                self.mono,
+                layer_idx,
+                layer,
+                positions,
+                hidden_states,
+                residual,
+                prefix_delta,
             )
             if (layer_idx + 1) in self.aux_hidden_state_layers:
                 self._maybe_add_hidden_state(
@@ -1057,8 +1065,10 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
 
 
 class KimiLinearForCausalLM(
-    nn.Module, HasInnerState, SupportsPP, MixtureOfExperts, IsHybrid
+    nn.Module, HasInnerState, SupportsPP, MixtureOfExperts, IsHybrid, SupportsMonoKernel
 ):
+    mono_spec = "vllm.models.kimi_k3.amd.mono.spec:MONO_SPEC"
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         self.model_config = vllm_config.model_config
@@ -1085,6 +1095,13 @@ class KimiLinearForCausalLM(
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
+
+    def process_weights_after_loading(self) -> None:
+        # the MonoKernels for this rank's layers; None when the switch is off
+        self.model.mono = mono.attach(self.model, self.vllm_config, self.mono_spec)
+
+    def step_health(self) -> torch.Tensor | None:
+        return mono.health(self.model.mono)
 
     def make_empty_intermediate_tensors(
         self,

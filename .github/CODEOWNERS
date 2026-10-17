@@ -204,6 +204,7 @@ mkdocs.yaml @hmellor
 
 # Kimi-K3-specific files
 /vllm/models/kimi_k3/nvidia/kda.py @gau-nernst
+/vllm/models/kimi_k3/amd/mono @hyukjlee
 
 # Mistral-specific files
 /vllm/model_executor/models/mistral*.py @patrickvonplaten

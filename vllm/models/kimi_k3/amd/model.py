@@ -18,6 +18,7 @@ from vllm.model_executor.models.interfaces import (
     HasInnerState,
     IsHybrid,
     SupportsEagle3,
+    SupportsMonoKernel,
     SupportsMultiModal,
     SupportsPP,
     SupportsQuant,
@@ -62,8 +63,11 @@ class KimiK3ForConditionalGeneration(
     SupportsEagle3,
     HasInnerState,
     IsHybrid,
+    SupportsMonoKernel,
 ):
     """Kimi-K3 model with Kimi-K2.5 vision and KimiLinear text."""
+
+    mono_spec = "vllm.models.kimi_k3.amd.mono.spec:MONO_SPEC"
 
     supports_encoder_tp_data = True
     supports_mm_device_do_normalize = True
@@ -219,6 +223,12 @@ class KimiK3ForConditionalGeneration(
 
     def compute_logits(self, hidden_states: torch.Tensor, **kwargs) -> torch.Tensor:
         return self.language_model.compute_logits(hidden_states)
+
+    def process_weights_after_loading(self) -> None:
+        self.language_model.process_weights_after_loading()
+
+    def step_health(self) -> torch.Tensor | None:
+        return self.language_model.step_health()
 
     def copy_inputs_before_cuda_graphs(self, input_buffers, **kwargs):
         return self.language_model.mamba_cache.copy_inputs_before_cuda_graphs(

@@ -122,6 +122,7 @@ class AsyncOutput(AsyncModelRunnerOutput):
         copy_stream: torch.cuda.Stream,
         check_ep_fault: bool,
         pending_aux_output: "PendingAuxOutput | None",
+        step_health: torch.Tensor | None = None,
     ):
         # NOTE(woosuk): We must retain references to the GPU tensors,
         # as the copy operations are performed on a different CUDA stream than
@@ -168,10 +169,19 @@ class AsyncOutput(AsyncModelRunnerOutput):
             if check_ep_fault:
                 has_fault = get_ep_all2all_manager().query_fault()
                 self._has_fault = has_fault.to("cpu", non_blocking=True)
+            # The model's MonoKernel error words for this step: any set word
+            # fails the step before its tokens are returned.
+            self._step_health: torch.Tensor | None = None
+            if step_health is not None:
+                self._step_health = step_health.to("cpu", non_blocking=True)
             self.copy_event.record(copy_stream)
 
     def get_output(self) -> ModelRunnerOutput:
         self.copy_event.synchronize()
+        if self._step_health is not None:
+            from vllm.models.common.mono.failstop import check
+
+            check(self._step_health)
 
         # NOTE(woosuk): The following code is to ensure compatibility with
         # the existing model runner.
