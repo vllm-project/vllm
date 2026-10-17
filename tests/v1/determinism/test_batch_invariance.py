@@ -9,6 +9,7 @@ import torch
 from transformers import AutoTokenizer
 from utils import (
     BACKENDS,
+    DEFAULT_BACKEND,
     TEST_MODEL,
     _extract_step_logprobs,
     _random_prompt,
@@ -396,7 +397,7 @@ def test_logprobs_bitwise_batch_invariance_ragged_chunked_prefill(backend):
     # depends on the tokenizer, so derive the budget rather than hardcode it:
     # half the longest prompt splits that prefill whatever TEST_MODEL is, while
     # the shorter prompts are still co-scheduled whole. Floor is max_num_seqs.
-    tokenizer = AutoTokenizer.from_pretrained(TEST_MODEL)
+    tokenizer = AutoTokenizer.from_pretrained(TEST_MODEL, trust_remote_code=True)
     prompt_lens = [len(tokenizer(p).input_ids) for p in prompts]
     max_num_batched_tokens = max(len(prompts), max(prompt_lens) // 2)
     assert max_num_batched_tokens < max(prompt_lens), (
@@ -715,7 +716,7 @@ def test_logprobs_without_batch_invariance_should_fail(
 
 
 @skip_if_not_cuda
-@pytest.mark.parametrize("backend", ["FLASH_ATTN"])
+@pytest.mark.parametrize("backend", [DEFAULT_BACKEND])
 def test_decode_logprobs_match_prefill_logprobs(
     backend,
 ):
