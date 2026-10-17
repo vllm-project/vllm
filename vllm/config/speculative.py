@@ -1302,7 +1302,13 @@ class SpeculativeConfig:
                     max_model_len=self.max_model_len,  # type: ignore[arg-type]
                     spec_target_max_model_len=self.target_model_config.max_model_len,
                     quantization=self.quantization,
-                    enforce_eager=self.target_model_config.enforce_eager,
+                    enforce_eager=(
+                        # A drafter-only eager override wins over inheriting
+                        # the target's setting.
+                        self.enforce_eager
+                        if self.enforce_eager is not None
+                        else self.target_model_config.enforce_eager
+                    ),
                     max_logprobs=self.target_model_config.max_logprobs,
                     hf_overrides=draft_hf_overrides,
                     config_format=self.target_model_config.config_format,
