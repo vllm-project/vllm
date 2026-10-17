@@ -78,6 +78,7 @@ def _make_offloading_config(
             is_parallelism_agnostic=is_parallelism_agnostic,
         ),
         replicated_layout=replicated_layout,
+        kv_cache_layout="LBNHC",
     )
 
 
