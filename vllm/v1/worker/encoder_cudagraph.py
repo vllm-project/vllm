@@ -400,6 +400,23 @@ class EncoderCudaGraphManager:
         dst.zero_()
         dst[: src.shape[0]].copy_(src)
 
+    @staticmethod
+    def _replay_exceeds_capture(
+        input_buffers: dict[str, torch.Tensor],
+        replay_values: dict[str, torch.Tensor | None],
+    ) -> bool:
+        """Return True when any replay tensor does not fit its capture buffer.
+
+        Capture buffers have a fixed leading dimension. Copying a longer
+        replay tensor raises in the padded copy path; callers must fall
+        back to eager execution instead.
+        """
+        for key, buf in input_buffers.items():
+            src = replay_values.get(key)
+            if src is not None and src.ndim > 0 and src.shape[0] > buf.shape[0]:
+                return True
+        return False
+
     def _run_budget_graph(
         self,
         mm_kwargs: dict[str, Any],
@@ -416,7 +433,8 @@ class EncoderCudaGraphManager:
             axis_keys: Resolved capture-axis keys for this batch.
 
         Returns:
-            Encoder outputs, or None if graph not captured.
+            Encoder outputs, or None if graph not captured or replay tensors
+            exceed the captured buffer capacity.
 
         """
         graph_set = self._get_graph_set(path)
@@ -437,6 +455,10 @@ class EncoderCudaGraphManager:
             self.max_frames_per_batch,
             path,
         )
+
+        if self._replay_exceeds_capture(graph_meta.input_buffers, replay.values):
+            self.graph_misses += num_items
+            return None
 
         # Copy replay values into the buffers recorded for this path.
         for key, buf in graph_meta.input_buffers.items():
@@ -540,6 +562,9 @@ class EncoderCudaGraphManager:
                             batch_mm_kwargs, path=path
                         )
                 else:
+                    # Whether replay succeeds or we fall back below, this path
+                    # attempted a captured graph — do not also count the batch
+                    # under the all-eager miss tally.
                     all_eager = False
                     graph_output = self._run_budget_graph(
                         batch_mm_kwargs,
@@ -547,8 +572,13 @@ class EncoderCudaGraphManager:
                         path=path,
                         axis_keys=axis_keys,
                     )
-                    assert graph_output is not None
-                    output = graph_output
+                    if graph_output is None:
+                        with torch.inference_mode():
+                            output = self.model.encoder_eager_forward(
+                                batch_mm_kwargs, path=path
+                            )
+                    else:
+                        output = graph_output
                 graph_outputs[path] = output
 
             if all_eager:
