@@ -111,7 +111,8 @@ def chunk_fwd_kernel_o(
         b_h = tl.load(p_h, mask=(o_v[:, None] < V) & m_k[None, :], other=0.0)
 
         # [BT, BK] @ [BK, BV] -> [BT, BV]
-        b_o += tl.dot(b_q, tl.trans(b_h))
+        # b_h can be fp32 (see chunk_delta_h.py's h_dtype); upcast b_q.
+        b_o += tl.dot(b_q.to(b_h.dtype), tl.trans(b_h))
         # [BT, BK] @ [BK, BT] -> [BT, BT]
         b_A += tl.dot(b_q, b_k)
 
@@ -162,7 +163,8 @@ def chunk_fwd_o(
         )
         o = core_attn_out[: v.numel()].view(*v.shape)
     else:
-        o = torch.empty_like(v)
+        # o = q @ h^T, unnormalized, so it can be as large as h; match h's dtype.
+        o = v.new_empty(v.shape, dtype=h.dtype)
 
     def grid(meta):
         return (triton.cdiv(V, meta["BV"]), NT, B * H)
