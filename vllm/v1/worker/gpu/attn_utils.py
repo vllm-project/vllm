@@ -13,6 +13,7 @@ import vllm.envs as envs
 from vllm.config import (
     VllmConfig,
     get_layers_from_vllm_config,
+    set_current_vllm_config,
 )
 from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.layers.attention import Attention
@@ -145,9 +146,11 @@ def get_kv_cache_layer_configs(
             continue
         # Skip modules that don't need KV cache (eg encoder-only attention)
         if layer_config := attn_module.get_kv_cache_config(vllm_config):
-            layer_config = customize_layer_config(
-                attn_module.get_attn_backend(), layer_config, layer_name
-            )
+            # Backends may read attention_config while packing the spec.
+            with set_current_vllm_config(vllm_config):
+                layer_config = customize_layer_config(
+                    attn_module.get_attn_backend(), layer_config, layer_name
+                )
             if attn_module.is_draft_layer:
                 layer_config = replace(layer_config, is_draft=True)
             layer_configs[layer_name] = layer_config
