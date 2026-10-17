@@ -79,9 +79,8 @@ pub struct ChatRequestProcessor {
     tool_call_parser: ParserSelection,
     /// Reasoning parser selection used when preparing generation requests.
     reasoning_parser: ParserSelection,
-    /// Server-side floor for tool-call structural tags, or `None` for the
-    /// tool parser's default level.
-    tool_strict_level: Option<ToolStrictLevel>,
+    /// Server-side floor for tool-call structural tags.
+    tool_strict_level: ToolStrictLevel,
 }
 
 impl ChatRequestProcessor {
@@ -94,7 +93,7 @@ impl ChatRequestProcessor {
             max_model_len: Some(max_model_len as usize),
             tool_call_parser: ParserSelection::Auto,
             reasoning_parser: ParserSelection::Auto,
-            tool_strict_level: None,
+            tool_strict_level: ToolStrictLevel::Auto,
         }
     }
 
@@ -106,7 +105,7 @@ impl ChatRequestProcessor {
             max_model_len: None,
             tool_call_parser: ParserSelection::Auto,
             reasoning_parser: ParserSelection::Auto,
-            tool_strict_level: None,
+            tool_strict_level: ToolStrictLevel::Auto,
         }
     }
 
@@ -121,9 +120,8 @@ impl ChatRequestProcessor {
         self
     }
 
-    /// Configure the server-side floor for tool-call structural tags, or
-    /// `None` for the tool parser's default level.
-    pub fn with_tool_strict_level(mut self, tool_strict_level: Option<ToolStrictLevel>) -> Self {
+    /// Configure the server-side floor for tool-call structural tags.
+    pub fn with_tool_strict_level(mut self, tool_strict_level: ToolStrictLevel) -> Self {
         self.tool_strict_level = tool_strict_level;
         self
     }
@@ -297,9 +295,8 @@ impl ChatLlm {
         self
     }
 
-    /// Set the server-side floor for tool-call structural tags, or `None` for
-    /// the tool parser's default level.
-    pub fn with_tool_strict_level(mut self, tool_strict_level: Option<ToolStrictLevel>) -> Self {
+    /// Set the server-side floor for tool-call structural tags.
+    pub fn with_tool_strict_level(mut self, tool_strict_level: ToolStrictLevel) -> Self {
         self.processor.tool_strict_level = tool_strict_level;
         self
     }
@@ -434,7 +431,7 @@ mod tests {
         )
         .unwrap_err();
 
-        expect_test::expect!["tool parser `definitely_missing_tool_parser` is not registered (choose from: beam, deepseek_v3, deepseek_v31, deepseek_v32, deepseek_v4, deepseek_v41, gemma4, glm45, glm47, granite4, hermes, hf, hy_v3, hy_v4, inkling, internlm, kimi_k2, kimi_k3, llama3_json, llama4_json, mimo, minimax_m2, minimax_m3, mistral, phi4_mini_json, qwen3_coder, qwen3_json, qwen3_xml, seed_oss)"].assert_eq(&error.to_report_string());
+        expect_test::expect!["tool parser `definitely_missing_tool_parser` is not registered (choose from: deepseek_v3, deepseek_v31, deepseek_v32, deepseek_v4, deepseek_v41, gemma4, glm45, glm47, granite4, hermes, hf, hy_v3, hy_v4, inkling, internlm, kimi_k2, kimi_k3, llama3_json, llama4_json, mimo, minimax_m2, minimax_m3, mistral, phi4_mini_json, qwen3_coder, qwen3_json, qwen3_xml, seed_oss)"].assert_eq(&error.to_report_string());
     }
 
     #[test]
@@ -445,6 +442,6 @@ mod tests {
         )
         .unwrap_err();
 
-        expect_test::expect!["reasoning parser `definitely_missing_reasoning_parser` is not registered (choose from: beam, cohere_cmd, deepseek_r1, deepseek_v3, deepseek_v4, deepseek_v41, gemma4, glm45, glm47, hf, hy_v3, hy_v4, inkling, kimi, kimi_k2, kimi_k3, mimo, minimax_m2, minimax_m3, nemotron_v3, qwen3, seed_oss, step3, step3p5)"].assert_eq(&error.to_report_string());
+        expect_test::expect!["reasoning parser `definitely_missing_reasoning_parser` is not registered (choose from: cohere_cmd, deepseek_r1, deepseek_v3, deepseek_v4, deepseek_v41, gemma4, glm45, glm47, hf, hy_v3, hy_v4, inkling, kimi, kimi_k2, kimi_k3, mimo, minimax_m2, minimax_m3, nemotron_v3, qwen3, seed_oss, step3, step3p5)"].assert_eq(&error.to_report_string());
     }
 }

@@ -56,6 +56,7 @@ steps:
       - "!vllm/distributed/device_communicators/shm_object_storage.py"
       - "!vllm/distributed/device_communicators/symm_mem.py"
       - "!vllm/distributed/device_communicators/mnnvl_compat.py"
+      - "!vllm/distributed/device_communicators/ray_communicator.py"
       - "!vllm/third_party/flashmla/"
       - "!vllm/third_party/pynvml.py"
       - "!vllm/_custom_ops.py"

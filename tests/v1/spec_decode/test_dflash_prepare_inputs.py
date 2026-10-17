@@ -35,7 +35,6 @@ def _run_prepare(
     input_buffers = SimpleNamespace(
         input_ids=torch.full((max_num_tokens,), -1, dtype=torch.int32, device=device),
         positions=torch.full((max_num_tokens,), -1, dtype=torch.int64, device=device),
-        is_padding=torch.zeros(max_num_tokens, dtype=torch.bool, device=device),
         query_start_loc=torch.full(
             (max_num_reqs + 1,), -1, dtype=torch.int32, device=device
         ),
@@ -178,11 +177,6 @@ def test_prepare_dflash_inputs_excludes_rejected_context_suffix(cp_rank, cp_size
     assert out.sample_idx_mapping[:3].tolist() == [2, 2, 2]
     assert out.temperature[2].item() == 1.0
     assert out.seeds[2].item() == 17
-    assert not out.input_buffers.is_padding[:3].any()
-    assert out.input_buffers.is_padding[3:].all()
-    assert (out.input_buffers.input_ids[3:] == 0).all()
-    assert (out.input_buffers.positions[3:] == 0).all()
-    assert (out.query_slot_mapping[3:] == PAD_SLOT_ID).all()
 
 
 def test_prepare_dflash_inputs_excludes_rejected_context_suffix_with_dcp():

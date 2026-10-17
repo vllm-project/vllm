@@ -180,7 +180,7 @@ def create_standard_kv_cache_spec(
 
 
 def create_vllm_config(
-    model_name: str = "Qwen/Qwen3-0.6B",
+    model_name: str = "meta-llama/Meta-Llama-3-8B",
     tensor_parallel_size: int = 1,
     max_model_len: int = 1024,
     dtype: ModelDType | torch.dtype = "auto",

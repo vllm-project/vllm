@@ -397,15 +397,11 @@ def _prepare_and_transform_sublayer(
 ) -> "LayerConfig":
     """Prepare Humming configuration and transform one sublayer's tensors."""
     from vllm.utils.humming import (
-        prepare_and_transform_humming_tensors,
+        prepare_layer_config,
+        transform_humming_tensors,
     )
 
-    source_tensors = _extract_sublayer_tensors(layer, sublayer_name)
-    for name in ("input_scale", "input_scale_2"):
-        if name != input_schema.static_tensor_scale_name:
-            source_tensors.pop(name, None)
-    config, tensors = prepare_and_transform_humming_tensors(
-        tensors=source_tensors,
+    config = prepare_layer_config(
         shape_n=shape_n,
         shape_k=shape_k,
         pad_n_to_multiple=256,
@@ -417,6 +413,11 @@ def _prepare_and_transform_sublayer(
         torch_dtype=param_dtype,
         device=getattr(layer, f"{sublayer_name}_weight").device,
     )
+    source_tensors = _extract_sublayer_tensors(layer, sublayer_name)
+    for name in ("input_scale", "input_scale_2"):
+        if name != input_schema.static_tensor_scale_name:
+            source_tensors.pop(name, None)
+    tensors = transform_humming_tensors(config, source_tensors)
     for name in ("input_scale", "input_scale_2"):
         if name in source_tensors:
             tensors[name] = source_tensors[name]

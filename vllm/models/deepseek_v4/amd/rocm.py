@@ -23,7 +23,7 @@ from vllm.models.deepseek_v4.sparse_mla import (
     DeepseekV4SparseMLAMetadataBuilder,
 )
 from vllm.platforms import current_platform
-from vllm.platforms.rocm import _ON_GFX950, on_gfx1250
+from vllm.platforms.rocm import _ON_GFX950
 from vllm.triton_utils import tl, triton
 from vllm.utils.multi_stream_utils import execute_in_parallel
 from vllm.v1.attention.backend import (
@@ -160,16 +160,6 @@ def apply_pre_quantized_block_scaled_mm(
 # ROCm sparse prefill keeps this dense combine local so AMD-specific SWA changes
 # do not touch the shared DeepSeek V4 cache utilities.
 _SPARSE_PREFILL_TOPK_ALIGNMENT = 128
-
-
-def _default_first_token_threshold() -> int:
-    """Max tokens at which the CSA/HCA fork enqueues the default chain first.
-
-    At small batches starting the long default chain first shortens the step
-    tail; larger batches saturate the device and aux-first is faster. Only
-    tuned on gfx950 (24 tokens = conc 8 with MTP=2); 0 disables elsewhere.
-    """
-    return 24 if _ON_GFX950 else 0
 
 
 @triton.jit
@@ -817,8 +807,6 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         indexer = self.indexer
         compressor = self.compressor
         assert compressor is not None
-        # Static per captured graph: each capture size bakes its own order.
-        default_first = hidden_states.shape[0] <= _default_first_token_threshold()
 
         def default_chain():
             qr_kv = self._fused_wqa_wkv_gemm(hidden_states)
@@ -850,7 +838,6 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                 [self.ln_events[1]],
                 aux_streams[:1],
                 enable=True,
-                default_first=default_first,
             )
             self._sparse_indexer_and_attn(
                 hidden_states, None, None, None, q, kv_out, positions, o_padded
@@ -877,7 +864,6 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             self.ln_events[1:3],
             aux_streams[:2],
             enable=True,
-            default_first=default_first,
         )
 
         indexer_weights_out, _ = indexer.weights_proj(hidden_states)
@@ -912,11 +898,6 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
 
         if not rocm_aiter_ops.is_enabled():
             return
-        # aiter's gemm_a8w8_blockscale_bpreshuffle currently disabled on gfx1250.
-        # Leaving the block scales as None -> "not preshuffled"
-        # _fused_wqa_wkv_gemm and _o_proj both fall back to the standard linear path
-        if on_gfx1250():
-            return
         from vllm.model_executor.layers.quantization.utils.fp8_utils import (
             _upcast_e8m0_to_fp32,
             get_fp8_block_weight_scale,
@@ -935,14 +916,12 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                 return None
             if ws.dtype == torch.float8_e8m0fnu:
                 ws = _upcast_e8m0_to_fp32(ws).contiguous()
-            # Shuffle the weight in place (single weight, no unshuffled copy),
-            # unless the linear kernel already B-preshuffled it at load time.
-            if not getattr(linear, "aiter_bpreshuffled", False):
-                replace_parameter(
-                    linear,
-                    "weight",
-                    rocm_aiter_ops.shuffle_weight(w.data, layout=(16, 16)),
-                )
+            # Shuffle the weight in place (single weight, no unshuffled copy).
+            replace_parameter(
+                linear,
+                "weight",
+                rocm_aiter_ops.shuffle_weight(w.data, layout=(16, 16)),
+            )
             return ws
 
         self._wqa_wkv_scale = _prep(self.fused_wqa_wkv)
@@ -1307,12 +1286,9 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         fuse_inv_rope = self._wo_a_fp8_weight is None
         rotated = 0
         if num_decodes > 0:
-            fuse_decode_inv_rope = fuse_inv_rope and not on_gfx1250()
             rotated = self._forward_decode(
                 q=q[:num_decode_tokens],
-                positions=(
-                    positions[:num_decode_tokens] if fuse_decode_inv_rope else None
-                ),
+                positions=positions[:num_decode_tokens] if fuse_inv_rope else None,
                 kv_cache=self_kv_cache,
                 swa_metadata=swa_metadata,
                 attn_metadata=rocm_metadata,

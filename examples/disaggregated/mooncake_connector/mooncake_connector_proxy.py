@@ -340,10 +340,7 @@ async def _handle_completions(api: str, request: Request):
             ):
                 yield chunk
 
-        media_type = (
-            "text/event-stream" if req_data.get("stream") else "application/json"
-        )
-        return StreamingResponse(generate_stream(), media_type=media_type)
+        return StreamingResponse(generate_stream(), media_type="application/json")
 
     except Exception as e:
         import sys
