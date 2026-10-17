@@ -74,6 +74,13 @@ def add_cli_args(parser: FlexibleArgumentParser) -> None:
     parser.add_argument("--iters", type=int, default=20, help="Replays per sample.")
     parser.add_argument("--samples", type=int, default=5)
     parser.add_argument("--output-json", help="Write results to this file.")
+    parser.add_argument(
+        "--profile-dir",
+        help="After timing, trace a few replays of each case and write "
+        "`<case>.rank<r>.trace.json.gz` (Perfetto) and `<case>.rank<r>.kernels.json` "
+        "(GPU time per kernel per forward) here. Summarize or compare with "
+        "`python -m vllm.benchmarks.forward.profile A.kernels.json [B.kernels.json]`.",
+    )
     EngineArgs.add_cli_args(parser)
     parser.set_defaults(load_format="dummy", enable_prefix_caching=False)
 
@@ -146,6 +153,13 @@ def run_case(runner, case: BenchCase, args: argparse.Namespace) -> dict[str, Any
         dcp_size,
     )
     zero_kv_blocks(context, kv_config.kv_cache_groups, batch, kv_config.num_blocks)
+    profile_prefix = None
+    if args.profile_dir:
+        from vllm.distributed.parallel_state import get_world_group
+
+        os.makedirs(args.profile_dir, exist_ok=True)
+        rank = get_world_group().rank
+        profile_prefix = os.path.join(args.profile_dir, f"{case.name}.rank{rank}")
     bench = ForwardBench(
         runner,
         batch,
@@ -154,6 +168,8 @@ def run_case(runner, case: BenchCase, args: argparse.Namespace) -> dict[str, Any
         touched_kv_views(
             context, kv_config.kv_cache_groups, batch, kv_config.num_blocks, dcp_size
         ),
+        case.name,
+        profile_prefix,
     )
     routing, balanced = install_routing(
         runner, args.routing, args.load_format == "dummy", batch.num_tokens, args.seed
@@ -221,6 +237,14 @@ def main(args: argparse.Namespace) -> None:
                 f"eager rel rms {rank0['graph_vs_eager']['relative_rms']:.1e}",
                 flush=True,
             )
+            if profile := rank0.get("profile"):
+                from vllm.benchmarks.forward.profile import format_summary
+
+                print(
+                    f"[forward] {case.name} rank 0 kernels ({profile['summary']}):\n"
+                    + format_summary({**profile, "kernels": profile["top_kernels"]}),
+                    flush=True,
+                )
             if latency["sample_spread_pct"] > 0.5:
                 logger.warning(
                     "%s: unstable timing (sample medians spread %.2f%%).",
