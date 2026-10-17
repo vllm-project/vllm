@@ -16,8 +16,9 @@ def _build_decode_scatter_indices(
     n: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Per-token (request id, intra-request index) for a non-uniform decode
-    batch, with ``n == decode_lens.sum()`` as a host int (avoids a
-    device sync and keeps both repeat_interleaves sync-free).
+    batch. ``n`` is the graph-padded token count and may be larger than
+    ``decode_lens.sum()`` under adaptive verification. Extra tokens are mapped
+    to request ``num_requests``, a discard row allocated by the scatter helper.
 
     Shared by every ``_scatter_decode_tokens_by_request`` call in a step:
     building it per call would repeat the same repeat_interleave/cumsum chain
@@ -25,20 +26,34 @@ def _build_decode_scatter_indices(
     """
     device = decode_lens.device
     dl = decode_lens.to(torch.int64)
+    # FULL CUDA graphs pad to the captured token count. Adaptive verification
+    # changes the live per-request lengths only on the GPU, so the padding
+    # amount must remain device-resident too.
+    graph_padding = n - dl.sum()
+    dl_with_discard = torch.cat((dl, graph_padding.reshape(1)))
     req_id = torch.repeat_interleave(
-        torch.arange(num_requests, device=device, dtype=torch.int64),
-        dl,
+        torch.arange(num_requests + 1, device=device, dtype=torch.int64),
+        dl_with_discard,
         output_size=n,
     )
     req_starts = torch.cumsum(
-        torch.cat([torch.zeros(1, device=device, dtype=torch.int64), dl[:-1]]),
+        torch.cat(
+            [
+                torch.zeros(1, device=device, dtype=torch.int64),
+                dl_with_discard[:-1],
+            ]
+        ),
         dim=0,
     )
     # Broadcast the per-request start offsets to per-token (length n ==
-    # dl.sum()) so each token's intra-request index subtracts its own
-    # request's start.
-    starts = torch.repeat_interleave(req_starts, dl, output_size=n)
+    # dl_with_discard.sum()) so each token's intra-request index subtracts its
+    # own request's start.
+    starts = torch.repeat_interleave(req_starts, dl_with_discard, output_size=n)
     intra = torch.arange(n, device=device, dtype=torch.int64) - starts
+    # Padding may produce arbitrarily large intra-request indices, while the
+    # downstream discard row has a fixed width. Since padding values are ignored,
+    # map every padding token to column zero.
+    intra = torch.where(req_id == num_requests, 0, intra)
     return req_id, intra
 
 
@@ -59,14 +74,17 @@ def _scatter_decode_tokens_by_request(
     reshape.
     """
     req_id, intra = scatter_indices
+    # The final row receives graph-padding tokens and is deliberately removed
+    # from the result. This avoids out-of-bounds advanced indexing without
+    # letting padding overwrite a live request's first token.
     out = torch.full(
-        (num_requests, lmax, *tokens.shape[1:]),
+        (num_requests + 1, lmax, *tokens.shape[1:]),
         pad_value,
         dtype=tokens.dtype,
         device=tokens.device,
     )
     out[req_id, intra] = tokens
-    return out
+    return out[:num_requests]
 
 
 def _decode_topk_seq_lens(

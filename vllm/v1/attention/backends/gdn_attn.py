@@ -20,6 +20,7 @@ from vllm.v1.attention.backend import (
     AttentionCGSupport,
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
+    max_decode_query_len,
 )
 from vllm.v1.attention.backends.utils import (
     NULL_BLOCK_ID,
@@ -84,6 +85,10 @@ class GDNAttentionBackend(AttentionBackend):
     def is_ssm(cls) -> bool:
         return True
 
+    @classmethod
+    def supports_device_cpu_query_lens_mismatch(cls) -> bool:
+        return True
+
 
 @dataclass
 class GDNAttentionMetadata:
@@ -134,6 +139,15 @@ class GDNAttentionMetadata:
 class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]):
     kv_cache_spec: MambaSpec
     _cudagraph_support = AttentionCGSupport.UNIFORM_BATCH
+
+    @classmethod
+    def get_varlen_cudagraph_max_query_len(
+        cls,
+        vllm_config: VllmConfig,
+        kv_cache_spec: MambaSpec,
+    ) -> int | None:
+        del kv_cache_spec
+        return min(max_decode_query_len(vllm_config), 8)
 
     reorder_batch_threshold: int = 1
 
@@ -808,7 +822,17 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         )
 
         num_accepted_tokens = torch.diff(m.query_start_loc)
-        num_decode_draft_tokens_cpu = torch.diff(m.query_start_loc_cpu).sub_(1)
+        if (
+            self.vllm_config.speculative_config is not None
+            and self.vllm_config.speculative_config.enable_adaptive_verification
+        ):
+            # Replay may turn captured one-token requests into fewer multi-token requests,
+            # so adaptive verification must capture the speculative path.
+            num_decode_draft_tokens_cpu = torch.full_like(
+                torch.diff(m.query_start_loc_cpu), self.num_spec
+            )
+        else:
+            num_decode_draft_tokens_cpu = torch.diff(m.query_start_loc_cpu).sub_(1)
         assert num_decode_draft_tokens_cpu.shape == num_accepted_tokens.shape
 
         return self.build(0, m, num_accepted_tokens, num_decode_draft_tokens_cpu)
