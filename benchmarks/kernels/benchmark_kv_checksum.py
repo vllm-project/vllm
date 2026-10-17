@@ -1,15 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""KV checksum cost: the Triton kernel vs the PyTorch path.
+"""KV checksum cost of the Triton kernel.
 
-Checksums ``--num-blocks`` blocks of ``--num-layers`` layers of one layout, as
-a consumer does for a finished load and a producer for a finished prefill. The
-Triton kernel takes one launch for all the layers; the PyTorch path one pass
-per layer.
+Checksums ``--num-blocks`` blocks of ``--num-layers`` layers of one layout, in
+one launch, as a consumer does for a finished load and a producer for a
+finished prefill.
 """
 
 import argparse
-from unittest.mock import patch
 
 import torch
 
@@ -41,30 +39,20 @@ def main(args: argparse.Namespace) -> None:
     layer_bytes = caches[0][0].numel() * caches[0].element_size()
     gigabytes = block_ids.numel() * layer_bytes * args.num_layers / 1e9
 
-    results = []
-    for use_triton in (False, True):
-        # The PyTorch path is the one taken without Triton.
-        with patch.object(checksum_worker, "HAS_TRITON", use_triton):
-            views = [
-                checksum_worker._LayerView(
-                    layer_pieces,
-                    first_slice=layer * MAX_KV_HEADS_PER_LAYER,
-                    replica_key=(1, 0),
-                )
-                for layer, layer_pieces in enumerate(pieces)
-            ]
-            launch = checksum_worker._FusedLayers(views, columns=[0] * len(views))
-        out = torch.zeros_like(block_ids).unsqueeze(1)
-        launch.accumulate(block_ids, first_tokens, valid_tokens, out)
-        results.append(out.clone())
-        ms = triton.testing.do_bench(
-            lambda launch=launch, out=out: launch.accumulate(
-                block_ids, first_tokens, valid_tokens, out
-            )
+    views = [
+        checksum_worker._LayerView(
+            layer_pieces,
+            first_slice=layer * MAX_KV_HEADS_PER_LAYER,
+            replica_key=(1, 0),
         )
-        name = "triton" if use_triton else "pytorch"
-        print(f"{name:8s} {ms:8.3f} ms  {gigabytes / ms * 1e3:8.1f} GB/s of KV read")
-    assert torch.equal(results[0], results[1]), "Triton and PyTorch paths differ"
+        for layer, layer_pieces in enumerate(pieces)
+    ]
+    launch = checksum_worker._FusedLayers(views, columns=[0] * len(views))
+    out = torch.zeros_like(block_ids).unsqueeze(1)
+    ms = triton.testing.do_bench(
+        lambda: launch.accumulate(block_ids, first_tokens, valid_tokens, out)
+    )
+    print(f"{ms:8.3f} ms  {gigabytes / ms * 1e3:8.1f} GB/s of KV read")
 
 
 if __name__ == "__main__":

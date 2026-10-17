@@ -54,13 +54,11 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from vllm import envs
-from vllm.logger import init_logger
+from vllm.platforms import current_platform
+from vllm.triton_utils import HAS_TRITON
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-
-logger = init_logger(__name__)
 
 MAX_KV_HEADS_PER_LAYER = 1 << 16
 """``H`` in the slice factor; groups with more KV heads per layer are not
@@ -146,29 +144,15 @@ def num_valid_tokens(position: int, block_size: int, num_tokens: int) -> int:
     return min(block_size, max(0, num_tokens - position * block_size))
 
 
+def kv_checksum_platform_supported() -> bool:
+    """Whether this platform can run the KV checksum kernel."""
+    return HAS_TRITON and (
+        current_platform.is_cuda_alike() or current_platform.is_xpu()
+    )
+
+
 def kv_checksum_enabled(vllm_config: "VllmConfig") -> bool:
-    """Whether KV checksums are enabled and supported by the parallel setup."""
+    """Whether KV checksums are enabled; ``VllmConfig`` rejects setups that do
+    not support them."""
     kv_transfer_config = vllm_config.kv_transfer_config
-    if kv_transfer_config is None or not kv_transfer_config.enable_kv_checksum:
-        return False
-    parallel_config = vllm_config.parallel_config
-    if (
-        parallel_config.decode_context_parallel_size > 1
-        or parallel_config.prefill_context_parallel_size > 1
-    ):
-        logger.warning_once(
-            "KV checksums are disabled: they do not support context parallelism."
-        )
-        return False
-    if (
-        parallel_config.distributed_executor_backend == "ray"
-        and parallel_config.pipeline_parallel_size > 1
-        and not envs.VLLM_USE_RAY_V2_EXECUTOR_BACKEND
-    ):
-        # Its non-last PP stages' connector outputs never reach the scheduler.
-        logger.warning_once(
-            "KV checksums are disabled: they do not support the Ray executor "
-            "with pipeline parallelism unless VLLM_USE_RAY_V2_EXECUTOR_BACKEND=1."
-        )
-        return False
-    return True
+    return kv_transfer_config is not None and kv_transfer_config.enable_kv_checksum

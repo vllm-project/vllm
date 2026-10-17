@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Triton kernel for the KV block checksums of several layers of one layout:
-the sums of ``_LayerView.accumulate``'s PyTorch path, in one launch."""
+"""Triton kernel for the KV block checksums (see ``checksum.py``) of several
+layers of one layout, in one launch."""
 
 import torch
 

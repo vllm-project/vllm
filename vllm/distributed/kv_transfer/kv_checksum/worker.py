@@ -40,7 +40,6 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-from vllm.triton_utils import HAS_TRITON
 from vllm.utils.torch_utils import PIN_MEMORY, get_dtype_size
 from vllm.v1.core.kv_cache_planning import layer_tp_replicas
 from vllm.v1.kv_cache_interface import (
@@ -66,65 +65,38 @@ logger = init_logger(__name__)
 # _build_mamba_local), or the only state of a layer with one.
 _MAMBA_CHECKSUMMED_STATES = 2
 
-# Upper bound on the bytes of KV gathered per kernel launch, which bounds the
-# transient device memory of a checksum pass for long prompts.
-_MAX_GATHER_BYTES = 64 * 1024 * 1024
 
-
+@dataclass
 class _LayerView:
-    """One layer's KV cache as integer pieces, for weighted sums.
+    """One layer's KV cache as integer pieces
+    ``[num_blocks, kernel_blocks, heads, tokens, pieces]``, read as unsigned.
 
-    ``pieces`` is ``[num_blocks, kernel_blocks, heads, tokens, pieces]``. A
-    piece ``j`` of slice ``(layer, head)`` weighs ``m * (2 * j + 1)``, with
+    A piece ``j`` of slice ``(layer, head)`` weighs ``m * (2 * j + 1)``, with
     ``m = 2 * (layer * H + head) + 1`` for the global head (see
-    ``checksum.py``). ``weights`` are those of a block holding the request's
-    first tokens; a block starting at token ``f`` adds ``f`` times
-    ``offset_weights`` to them. Pieces narrower than 8 bytes count as
-    unsigned.
-
-    On CUDA with Triton the sums come from ``_FusedLayers``, for all layers
-    of a layout in one launch; otherwise from PyTorch ops on gathered blocks.
+    ``checksum.py``).
     """
 
-    def __init__(
-        self, pieces: torch.Tensor, first_slice: int, replica_key: ReplicaKey
-    ) -> None:
-        """Set up the weighted sums of this rank's slices.
+    pieces: torch.Tensor
+    first_slice: int
+    """``layer * H + head`` of this rank's first head."""
+    replica_key: ReplicaKey
+    """The replicas and replica index of this rank's heads."""
 
-        Args:
-            pieces: The layer's cache viewed as integer pieces.
-            first_slice: ``layer * H + head`` of this rank's first head.
-            replica_key: The replicas and replica index of this rank's heads.
 
-        """
-        self.pieces = pieces
-        self.first_slice = first_slice
-        self.replica_key = replica_key
-        self.use_triton = pieces.is_cuda and HAS_TRITON
-        if self.use_triton:
-            return
-        _, kernel_blocks, heads, tokens, num_pieces = pieces.shape
-        tokens_per_block = kernel_blocks * tokens
-        device = pieces.device
-        # Token index within the logical block, as [kernel_block, 1, token, 1].
-        self.token_index = torch.arange(
-            tokens_per_block, device=device, dtype=torch.int64
-        ).view(kernel_blocks, 1, tokens, 1)
-        head = torch.arange(heads, device=device, dtype=torch.int64).view(
-            1, heads, 1, 1
-        )
-        piece = torch.arange(num_pieces, device=device, dtype=torch.int64).view(
-            1, 1, 1, num_pieces
-        )
-        slice_weight = 2 * (first_slice + head) + 1
-        position = self.token_index * num_pieces + piece
-        self.weights = slice_weight * (2 * position + 1)
-        self.offset_weights = 2 * num_pieces * slice_weight
-        piece_bits = 8 * pieces.element_size()
-        self.piece_mask = (1 << piece_bits) - 1 if piece_bits < 64 else None
-        # Gathered rows are widened to int64.
-        self.rows_per_gather = max(
-            1, _MAX_GATHER_BYTES // (tokens_per_block * heads * num_pieces * 8)
+class _FusedLayers:
+    """Layers of a group whose caches share one layout (shape, strides and
+    dtype), each adding into its column of the group's checksums in one
+    Triton launch."""
+
+    def __init__(self, views: list[_LayerView], columns: list[int]) -> None:
+        self.views = views
+        self.layers = torch.tensor(
+            [
+                [view.pieces.data_ptr(), view.first_slice, column]
+                for view, column in zip(views, columns)
+            ],
+            dtype=torch.int64,
+            device=views[0].pieces.device,
         )
 
     def accumulate(
@@ -134,79 +106,26 @@ class _LayerView:
         valid_tokens: torch.Tensor,
         out: torch.Tensor,
     ) -> None:
-        """Add this layer's weighted sum of each block row into ``out``.
+        """Add each layer's weighted sum of each block row into its column of``out``.
 
         Args:
             block_ids: ``[n]`` logical block ids on the device.
             first_tokens: ``[n]`` position in the request of each block's first
                 token.
             valid_tokens: ``[n]`` tokens to include from the start of each block.
-            out: ``[n]`` int64 accumulator, wrapping around (mod 2**64).
+            out: ``[n, num_columns]`` int64 accumulator, wrapping around
+                (mod 2**64).
 
         """
-        assert not self.use_triton
-        dims = (1, 2, 3, 4)
-        for start in range(0, block_ids.shape[0], self.rows_per_gather):
-            end = start + self.rows_per_gather
-            rows = self.pieces.index_select(0, block_ids[start:end])
-            valid = valid_tokens[start:end].view(-1, 1, 1, 1, 1)
-            rows.masked_fill_(self.token_index >= valid, 0)
-            rows = rows.to(torch.int64)
-            if self.piece_mask is not None:
-                rows &= self.piece_mask
-            out[start:end] += (rows * self.weights).sum(dim=dims) + first_tokens[
-                start:end
-            ] * (rows * self.offset_weights).sum(dim=dims)
-
-
-class _FusedLayers:
-    """Layers of a group whose caches share one layout (shape, strides and
-    dtype), each adding into its column of the group's checksums: in one
-    Triton launch on CUDA, else layer by layer."""
-
-    def __init__(self, views: list[_LayerView], columns: list[int]) -> None:
-        self.views = views
-        self.columns = columns
-        self.use_triton = views[0].use_triton
-        if self.use_triton:
-            self.layers = torch.tensor(
-                [
-                    [view.pieces.data_ptr(), view.first_slice, column]
-                    for view, column in zip(views, columns)
-                ],
-                dtype=torch.int64,
-                device=views[0].pieces.device,
-            )
-
-    def accumulate(
-        self,
-        block_ids: torch.Tensor,
-        first_tokens: torch.Tensor,
-        valid_tokens: torch.Tensor,
-        out: torch.Tensor,
-    ) -> None:
-        """Like ``_LayerView.accumulate``, into the ``[n, num_columns]``
-        ``out``."""
-        if self.use_triton:
-            layers_checksum(
-                self.views[0].pieces,
-                self.layers,
-                block_ids,
-                first_tokens,
-                valid_tokens,
-                out,
-            )
-            return
-        for view, column in zip(self.views, self.columns):
-            view.accumulate(block_ids, first_tokens, valid_tokens, out[:, column])
+        pieces = self.views[0].pieces
+        layers_checksum(pieces, self.layers, block_ids, first_tokens, valid_tokens, out)
 
     def warm_up(self, num_columns: int) -> None:
         """Compile the Triton kernel now rather than in a serving step."""
-        if self.use_triton:
-            device = self.views[0].pieces.device
-            zeros = torch.zeros(1, dtype=torch.int64, device=device)
-            out = torch.zeros(1, num_columns, dtype=torch.int64, device=device)
-            self.accumulate(zeros, zeros, zeros, out)
+        device = self.views[0].pieces.device
+        zeros = torch.zeros(1, dtype=torch.int64, device=device)
+        out = torch.zeros(1, num_columns, dtype=torch.int64, device=device)
+        self.accumulate(zeros, zeros, zeros, out)
 
 
 @dataclass
@@ -225,19 +144,16 @@ class _GroupPlan:
         layouts: dict[tuple, list[_LayerView]] = defaultdict(list)
         for view in views:
             pieces = view.pieces
-            layouts[
-                (pieces.dtype, pieces.device, pieces.shape, pieces.stride())
-            ].append(view)
-        return cls(
-            replica_keys,
-            [
-                _FusedLayers(
-                    same_layout,
-                    [replica_keys.index(view.replica_key) for view in same_layout],
-                )
-                for same_layout in layouts.values()
-            ],
-        )
+            key = (pieces.dtype, pieces.device, pieces.shape, pieces.stride())
+            layouts[key].append(view)
+        launches = [
+            _FusedLayers(
+                same_layout,
+                [replica_keys.index(view.replica_key) for view in same_layout],
+            )
+            for same_layout in layouts.values()
+        ]
+        return cls(replica_keys, launches)
 
     @property
     def device(self) -> torch.device:
@@ -803,9 +719,7 @@ class KVChecksumWorker:
                 :, column : column + num_rows
             ]
             values = torch.zeros(
-                (num_rows, len(plan.replica_keys)),
-                dtype=torch.int64,
-                device=device,
+                (num_rows, len(plan.replica_keys)), dtype=torch.int64, device=device
             )
             for launch in plan.launches:
                 launch.accumulate(block_ids, first_tokens, valid_tokens, values)

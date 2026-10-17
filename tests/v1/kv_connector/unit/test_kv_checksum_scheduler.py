@@ -13,6 +13,9 @@ import pybase64 as base64
 import pytest
 import torch
 
+from vllm.distributed.kv_transfer.kv_checksum.checksum import (
+    kv_checksum_platform_supported,
+)
 from vllm.distributed.kv_transfer.kv_checksum.scheduler import (
     KV_TRANSFER_PARAMS_KEY,
 )
@@ -20,6 +23,7 @@ from vllm.distributed.kv_transfer.kv_checksum.worker import KVChecksumWorker
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorTransferResults,
 )
+from vllm.platforms import current_platform
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
@@ -40,7 +44,12 @@ from .utils import (
     create_vllm_config,
 )
 
-pytestmark = [pytest.mark.cpu_test, pytest.mark.usefixtures("cuda_stream_stubs")]
+# KV checksums are computed by a Triton kernel, on CUDA, ROCm or XPU.
+pytestmark = pytest.mark.skipif(
+    not kv_checksum_platform_supported(), reason="needs a GPU with Triton"
+)
+
+DEVICE = current_platform.device_type
 
 BLOCK_SIZE = 16
 NUM_BLOCKS = 32
@@ -175,13 +184,20 @@ class _Engine:
         # Per layer, [blocks, heads, tokens, cell] bytes; ranks view their heads.
         self.kv = {
             layer: torch.zeros(
-                NUM_BLOCKS, HEADS, block_size, CELL_BYTES, dtype=torch.uint8
+                NUM_BLOCKS,
+                HEADS,
+                block_size,
+                CELL_BYTES,
+                dtype=torch.uint8,
+                device=DEVICE,
             )
             for layer in LAYERS
         }
         # Per TP rank, the Mamba layer's state pages (its own shard).
         self.states = [
-            torch.zeros(NUM_BLOCKS, 2 * MAMBA_PAGE_BYTES, dtype=torch.uint8)
+            torch.zeros(
+                NUM_BLOCKS, 2 * MAMBA_PAGE_BYTES, dtype=torch.uint8, device=DEVICE
+            )
             for _ in range(tp_size)
         ]
         replicas = max(1, tp_size // HEADS)

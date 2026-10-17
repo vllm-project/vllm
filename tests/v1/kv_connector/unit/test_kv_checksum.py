@@ -7,17 +7,20 @@ cache."""
 
 import copy
 from collections.abc import Iterable
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 import torch
 
-from vllm.distributed.kv_transfer.kv_checksum import worker as checksum_worker
+from vllm.config import VllmConfig
+from vllm.distributed.kv_transfer.kv_checksum import checksum
 from vllm.distributed.kv_transfer.kv_checksum.checksum import (
     MAX_KV_HEADS_PER_LAYER,
     KVChecksumBlocks,
     KVChecksumRecord,
     KVChecksumScheduled,
+    kv_checksum_platform_supported,
 )
 from vllm.distributed.kv_transfer.kv_checksum.scheduler import _sum_replicas
 from vllm.distributed.kv_transfer.kv_checksum.worker import (
@@ -29,6 +32,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorTransferResults,
 )
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateShapeCalculator
+from vllm.platforms import current_platform
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -43,7 +47,13 @@ from vllm.v1.kv_cache_layout import KVCacheLayout
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.worker.utils import allocate_kv_cache
 
-pytestmark = [pytest.mark.cpu_test, pytest.mark.usefixtures("cuda_stream_stubs")]
+# KV checksums are computed by a Triton kernel, on CUDA, ROCm or XPU.
+pytestmark = pytest.mark.skipif(
+    not kv_checksum_platform_supported(), reason="needs a GPU with Triton"
+)
+
+# KV caches live here; logical KV and the reference checksums stay on the host.
+DEVICE = current_platform.device_type
 
 BLOCK_SIZE = 16
 HEAD_SIZE = 8  # (K + V) * bf16 = 32 bytes = 4 pieces per cell
@@ -121,10 +131,11 @@ def _cache(logical: torch.Tensor, *, token_major=False, kernel_split=1):
             heads,
             cell,
             dtype=torch.uint8,
+            device=DEVICE,
         )
         view = storage.permute(0, 2, 1, 3)
     else:
-        view = torch.empty_like(data)
+        view = torch.empty_like(data, device=DEVICE)
     view.copy_(data)
     return view.view(torch.bfloat16)
 
@@ -192,6 +203,31 @@ def _recv(worker: KVChecksumWorker, blocks=BLOCKS):
     worker.bind(KVChecksumScheduled(reqs_to_recv={"req": blocks}))
     record = _finish(worker.post_forward(_results("req"), set()))
     return record.checksums["req"]
+
+
+@pytest.mark.parametrize(
+    "platform_supported,dcp_size,error",
+    [(False, 1, "need Triton"), (True, 2, "context parallelism"), (True, 1, None)],
+)
+def test_unsupported_setups_fail_validation(
+    monkeypatch, platform_supported, dcp_size, error
+):
+    """Enabling KV checksums where they cannot run fails startup rather than
+    silently leaving loads unverified."""
+    monkeypatch.setattr(
+        checksum, "kv_checksum_platform_supported", lambda: platform_supported
+    )
+    config = SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(enable_kv_checksum=True),
+        parallel_config=SimpleNamespace(
+            decode_context_parallel_size=dcp_size, prefill_context_parallel_size=1
+        ),
+    )
+    if error is None:
+        VllmConfig._validate_kv_checksum(config)  # type: ignore[arg-type]
+    else:
+        with pytest.raises(ValueError, match=error):
+            VllmConfig._validate_kv_checksum(config)  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize("tp_rank", [0, 1])
@@ -417,11 +453,15 @@ def test_checksums_add_up_across_block_sizes():
     )
 
 
-def _check_requests_and_groups_of_one_step(device: str) -> None:
+def test_requests_and_groups_of_one_step_are_checksummed_together():
+    """Loads of several requests and groups finishing in one step, starting
+    past the first block and ending in partial blocks, match the definition.
+    Each group's rows are read from one shared copy, after a group with an odd
+    number of rows."""
     first, second = _logical_kv(heads=2, seed=1), _logical_kv(heads=2, seed=2)
     worker = _worker(
         _config(_group(_spec(2), _name(0)), _group(_spec(2), _name(1))),
-        {_name(0): _cache(first).to(device), _name(1): _cache(second).to(device)},
+        {_name(0): _cache(first), _name(1): _cache(second)},
     )
     reqs = {
         "a": KVChecksumBlocks(
@@ -439,12 +479,6 @@ def _check_requests_and_groups_of_one_step(device: str) -> None:
                 record.checksums[req_id][group_id].values[:, 0],
                 _reference({group_id: kv}, group_blocks),
             )
-
-
-def test_requests_and_groups_of_one_step_are_checksummed_together():
-    """Loads of several requests and groups finishing in one step, starting
-    past the first block and ending in partial blocks, match the definition."""
-    _check_requests_and_groups_of_one_step("cpu")
 
 
 def test_kv_sharing_layers_counted_once():
@@ -528,15 +562,6 @@ def test_replicated_indexer_cache_sums_across_tp(tp_size, declared):
         np.testing.assert_array_equal(check, expected)
 
 
-def test_gathers_are_chunked_without_changing_results(monkeypatch):
-    monkeypatch.setattr(checksum_worker, "_MAX_GATHER_BYTES", 1)
-    logical = _logical_kv(heads=2)
-    worker = _worker(_config(_group(_spec(2))), {_name(0): _cache(logical)})
-    np.testing.assert_array_equal(
-        _send(worker)[0].values[:, 0], _reference({0: logical})
-    )
-
-
 def _mamba_name(layer: int) -> str:
     return f"model.layers.{layer}.linear_attn"
 
@@ -560,7 +585,7 @@ def _mamba_cache(
     gen = torch.Generator().manual_seed(seed)
     pages = torch.randint(
         0, 256, (NUM_BLOCKS, page_bytes), generator=gen, dtype=torch.uint8
-    )
+    ).to(DEVICE)
     view = pages[:, :content_bytes].view(torch.int8).view(NUM_BLOCKS, 1, 1, -1)
     return view, pages
 
@@ -576,7 +601,7 @@ def _mamba_reference(
     pages."""
     total = np.uint64(0)
     for slice_index, pages in states.items():
-        pieces = pages[block_id, :covered_bytes].contiguous()
+        pieces = pages[block_id, :covered_bytes].cpu()
         x = pieces.view(torch.int64).numpy().view(np.uint64)
         j = np.arange(len(x), dtype=np.uint64)
         with np.errstate(over="ignore"):
@@ -592,7 +617,9 @@ _LOGICAL = _logical_kv(heads=2)
 
 
 def _bf16_cache(blocks: int, tokens: int = BLOCK_SIZE) -> torch.Tensor:
-    return torch.zeros(blocks, 2, tokens, 2 * HEAD_SIZE, dtype=torch.bfloat16)
+    return torch.zeros(
+        blocks, 2, tokens, 2 * HEAD_SIZE, dtype=torch.bfloat16, device=DEVICE
+    )
 
 
 def _misaligned_cache() -> torch.Tensor:
@@ -698,8 +725,10 @@ def test_mamba_state_checksum_on_allocated_kv_cache():
         kv_cache_tensors=[tensor],
         kv_cache_groups=[_group(spec, *layers)],
     )
-    caches = allocate_kv_cache(config, torch.device("cpu"), KVCacheLayout.LBHNC)
-    raw = torch.empty(0, dtype=torch.uint8).set_(caches[layers[0]].untyped_storage())
+    caches = allocate_kv_cache(config, torch.device(DEVICE), KVCacheLayout.LBHNC)
+    raw = torch.empty(0, dtype=torch.uint8, device=DEVICE).set_(
+        caches[layers[0]].untyped_storage()
+    )
     raw.copy_(torch.randint(0, 256, raw.shape, dtype=torch.uint8))
 
     def pages(layer: int) -> torch.Tensor:
