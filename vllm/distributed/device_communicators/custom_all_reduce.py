@@ -472,8 +472,11 @@ class CustomAllreduce:
             yield
         finally:
             self._IS_CAPTURING = False
-            if not self.disabled:
-                self.register_graph_buffers()
+        # Not after an exception: the registration is a collective that the
+        # other ranks may never join (e.g. they wait for this rank in a GPU
+        # collective), so it would hang instead of raising.
+        if not self.disabled:
+            self.register_graph_buffers()
 
     def register_graph_buffers(self):
         if self.mnnvl_only:
