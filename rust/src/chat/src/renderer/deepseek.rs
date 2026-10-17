@@ -232,30 +232,41 @@ pub(super) fn render_request_with_media_order(
             }
         }
 
-        if is_user_like_entry(message, current_render_index as usize, dialect)
-            || (dialect == DsDialect::V4 && matches!(message, ChatMessage::System { .. }))
-        {
-            // Skip the opener only at the last rendered entry when
-            // add_generation_prompt is off. Inspect the next rendered
-            // entry, not the raw index: V4 merges trailing tool results.
-            let should_write_transition = match next_rendered_entry(
-                request.messages.as_slice(),
-                message_index,
-                drop_historical_developers,
-                last_user_like_message_index,
-            ) {
-                Some(ChatMessage::Assistant { .. }) => true,
-                None => request.chat_options.add_generation_prompt(),
-                Some(_) => false,
+        // Inspect the next rendered entry, not the raw index: V4 merges
+        // trailing tool results.
+        let next_entry = next_rendered_entry(
+            request.messages.as_slice(),
+            message_index,
+            drop_historical_developers,
+            last_user_like_message_index,
+        );
+        let should_write_transition =
+            if is_user_like_entry(message, current_render_index as usize, dialect)
+                || (dialect == DsDialect::V4 && matches!(message, ChatMessage::System { .. }))
+            {
+                // Skip the opener only at the last rendered entry when
+                // add_generation_prompt is off.
+                match next_entry {
+                    Some(ChatMessage::Assistant { .. }) => true,
+                    None => request.chat_options.add_generation_prompt(),
+                    Some(_) => false,
+                }
+            } else {
+                // A final assistant turn still needs a new-turn opener when the
+                // caller asked for one (StartNewAssistant); otherwise the prompt
+                // ends at EOS and the model generates after end-of-sentence
+                // (vllm#46256).
+                matches!(message, ChatMessage::Assistant { .. })
+                    && next_entry.is_none()
+                    && request.chat_options.add_generation_prompt()
             };
-            if should_write_transition {
-                write_assistant_transition(
-                    &mut out,
-                    thinking_mode,
-                    drop_thinking,
-                    current_render_index >= last_user_render_index,
-                );
-            }
+        if should_write_transition {
+            write_assistant_transition(
+                &mut out,
+                thinking_mode,
+                drop_thinking,
+                current_render_index >= last_user_render_index,
+            );
         }
     }
 

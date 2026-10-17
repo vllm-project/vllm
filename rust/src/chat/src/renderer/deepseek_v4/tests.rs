@@ -381,6 +381,12 @@ fn system_to_assistant_transitions_in_chat_and_thinking_modes() {
             .template_kwargs
             .insert("enable_thinking".to_string(), Value::Bool(enable_thinking));
         request.chat_options.reasoning_effort = Some(EffortValue::from("low"));
+        // This test covers the system -> assistant transition, not the
+        // trailing generation prompt: pin the mode like the shared fixtures
+        // do for a final assistant turn (StartNewAssistant now opens a new
+        // assistant turn after it, see
+        // final_assistant_starts_new_turn_when_generation_prompt_enabled).
+        request.chat_options.generation_prompt_mode = GenerationPromptMode::NoGenerationPrompt;
         render_request(&request)
     });
 
@@ -674,6 +680,33 @@ fn continue_final_assistant_omits_final_eos() {
 
     expect!["<｜begin▁of▁sentence｜><｜User｜>write<｜Assistant｜></think>partial answer"]
         .assert_eq(&rendered);
+}
+
+#[test]
+fn final_assistant_starts_new_turn_when_generation_prompt_enabled() {
+    let rendered = [false, true].map(|enable_thinking| {
+        let mut request = ChatRequest {
+            messages: vec![
+                ChatMessage::user("write"),
+                ChatMessage::assistant_text("answer"),
+            ],
+            ..ChatRequest::for_test()
+        };
+        request
+            .chat_options
+            .template_kwargs
+            .insert("enable_thinking".to_string(), Value::Bool(enable_thinking));
+        request.chat_options.reasoning_effort = Some(EffortValue::from("low"));
+        render_request(&request)
+    });
+
+    expect![[r#"
+        [
+            "<｜begin▁of▁sentence｜><｜User｜>write<｜Assistant｜></think>answer<｜end▁of▁sentence｜><｜Assistant｜></think>",
+            "<｜begin▁of▁sentence｜><｜User｜>write<｜Assistant｜><think></think>answer<｜end▁of▁sentence｜><｜Assistant｜><think>",
+        ]
+    "#]]
+    .assert_debug_eq(&rendered);
 }
 
 #[test]
