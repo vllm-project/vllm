@@ -14,6 +14,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.canonical_mapping i
 )
 from vllm.v1.attention.backends.triton_attn import TritonAttentionBackend
 from vllm.v1.kv_cache_interface import (
+    ChunkedLocalAttentionSpec,
     FullAttentionSpec,
     KVCacheGroupSpec,
     KVCacheSpec,
@@ -335,6 +336,71 @@ def test_cross_tp_store_load(form):
         assert all(m is not None for m in mappings)
         pages = [_load_one(m, reference) for m in mappings]
         assert _store_all(mappings, pages, canonical_size) == reference
+
+
+@pytest.mark.parametrize("form", sorted(CACHE_BUILDERS))
+@pytest.mark.parametrize(
+    "writer_tp,reader_tp", [(1, 2), (2, 1), (1, 4), (4, 1), (2, 4), (4, 2)]
+)
+@pytest.mark.parametrize("total_heads", [2, 8])
+def test_chunked_local_cross_tp_store_load(form, writer_tp, reader_tp, total_heads):
+    """Real derived mappings reconstruct independent KV shards, including replicas."""
+    full_kv = torch.randint(
+        -128,
+        128,
+        (NUM_BLOCKS, 2, 4, total_heads, 64),
+        dtype=torch.int8,
+        generator=torch.Generator().manual_seed(0),
+    )
+
+    def physical_pages(kv):
+        # Encode logical [block, K/V, token, head, channel] without copy runs.
+        if form.startswith("packed"):
+            kv = torch.cat((kv[:, 0], kv[:, 1]), dim=-1)
+            if form.endswith("hnd"):
+                kv = kv.permute(0, 2, 1, 3)
+        elif form.endswith("hnd"):
+            kv = kv.permute(0, 1, 3, 2, 4)
+        return [page.contiguous().numpy().tobytes() for page in kv]
+
+    def shards_at(tp):
+        heads = max(1, total_heads // tp)
+        replicas = max(1, tp // total_heads)
+        spec = ChunkedLocalAttentionSpec(
+            block_size=4,
+            num_kv_heads=heads,
+            head_size=64,
+            dtype=torch.int8,
+            attention_chunk_size=8,
+        )
+        config = _vllm_config(tp=tp, total_kv_heads=total_heads)
+        kv_config = _kv_cache_config([KVCacheGroupSpec(["local"], spec)])
+        mappings, pages = [], []
+        for rank in range(tp):
+            config.parallel_config.rank = rank
+            mapping = derive_canonical_mappings(
+                config, kv_config, {"local": CACHE_BUILDERS[form](spec)}
+            )["local"]
+            assert mapping.parallelism_agnostic
+            mappings.append(mapping)
+            first_head = rank // replicas * heads
+            pages.append(
+                physical_pages(full_kv[:, :, :, first_head : first_head + heads])
+            )
+        return mappings, pages
+
+    writers, writer_pages = shards_at(writer_tp)
+    readers, reader_pages = shards_at(reader_tp)
+    for block_id, expected in enumerate(physical_pages(full_kv)):
+        stored = _store_all(
+            writers,
+            [pages[block_id] for pages in writer_pages],
+            len(expected),
+            block_id,
+        )
+        assert stored == expected
+        for mapping, pages in zip(readers, reader_pages):
+            assert _load_one(mapping, stored) == pages[block_id]
 
 
 def test_cp_round_trip():
