@@ -16,6 +16,7 @@ from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding.mrope import triton_mrope
+from vllm.platforms import current_platform
 
 from ..common.qsa_cache import (
     QSACompressedKeyCache,
@@ -131,6 +132,19 @@ class QSAIndexer(nn.Module):
 
         cache_config = vllm_config.cache_config
         cache_prefix = f"{prefix}." if prefix else ""
+        self.indexer_kv_dtype = vllm_config.attention_config.resolve_indexer_kv_dtype(
+            default="bf16"
+        )
+        if self.indexer_kv_dtype == "fp8":
+            indexer_dtype = torch.float8_e4m3fn
+        elif self.indexer_kv_dtype == "bf16":
+            indexer_dtype = torch.bfloat16
+        else:
+            raise NotImplementedError(
+                f"indexer_kv_dtype={self.indexer_kv_dtype!r} is not supported "
+                "by the Qwen4Exp QSA indexer (only 'bf16' or 'fp8')."
+            )
+        self.indexer_dtype = indexer_dtype
         self.raw_key_cache = QSAKeyStateCache(
             head_size=self.index_head_dim,
             dtype=torch.bfloat16,
@@ -142,7 +156,7 @@ class QSAIndexer(nn.Module):
         )
         self.compressed_key_cache = QSACompressedKeyCache(
             head_size=self.index_head_dim,
-            dtype=torch.bfloat16,
+            dtype=indexer_dtype,
             compress_ratio=self.compress_ratio,
             prefix=f"{cache_prefix}compressed_key_cache",
             cache_config=cache_config,
@@ -180,6 +194,7 @@ class QSAIndexer(nn.Module):
             q.reshape(-1, self.index_head_dim),
         ).reshape_as(q)
         q = apply_qsa_rope(self.rotary_emb, positions, q)
+        q = q.to(self.indexer_dtype)
         return q, token_k.reshape(-1, 1, self.index_head_dim)
 
     def normalize_compressed_keys(
@@ -291,7 +306,19 @@ class QSAIndexer(nn.Module):
         """
         num_tokens = raw_metadata.num_actual_tokens
         raw_key_cache = self.raw_key_cache
-        q = projected_q.new_empty(num_tokens, self.index_n_heads, self.index_head_dim)
+        q = projected_q.new_empty(
+            num_tokens,
+            self.index_n_heads,
+            self.index_head_dim,
+            dtype=self.indexer_dtype,
+        )
+        main_kv_cache = attn.kv_cache.transpose(1, 2)
+        if attn.kv_cache_dtype in ("fp8", "fp8_e4m3"):
+            # Reinterpret the uint8 cache in the platform's native fp8 flavor,
+            # matching the C++ cache-update op and the attention backend's
+            # read-side views.
+            fp8_dtype = current_platform.fp8_dtype()
+            main_kv_cache = main_kv_cache.view(fp8_dtype)
         main_outputs = qsa_prepare(
             projected_q,
             raw_keys,
@@ -320,7 +347,7 @@ class QSAIndexer(nn.Module):
             main_q_norm_weight=attn.q_norm.weight,
             main_k_norm_weight=attn.k_norm.weight,
             main_eps=attn.q_norm.variance_epsilon,
-            main_kv_cache=attn.kv_cache.transpose(1, 2),
+            main_kv_cache=main_kv_cache,
             main_slot_mapping=slot_mapping[:num_tokens],
             main_k_scale=attn._k_scale_float,
             main_v_scale=attn._v_scale_float,

@@ -124,7 +124,7 @@ def _to_dst_dtype(x, dst, scale):
     """Round to BF16 like the unfused path, then scale for an FP8 destination."""
     out_ty = dst.dtype.element_ty
     x = x.to(tl.bfloat16)
-    if out_ty == tl.float8e4nv:
+    if out_ty == tl.float8e4nv or out_ty == tl.float8e4b8:
         x = x.to(tl.float32) / scale
     return x.to(out_ty)
 

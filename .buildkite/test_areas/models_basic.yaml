@@ -230,6 +230,24 @@ steps:
       # PLE and QSA import conflicting HC registrations in a shared process.
       - pytest -v -s models/qwen4_exp/test_ple.py
 
+- label: ":amd: (MI300) Qwen4 Exp"
+  key: qwen4-exp-unit-tests-mi300
+  timeout_in_minutes: 40
+  dind: false
+  device: mi300_1
+  working_dir: "/vllm-workspace/tests"
+  depends_on:
+  - image-build-amd
+  source_file_dependencies:
+  - vllm/models/qwen4_exp/
+  - vllm/config/compilation.py
+  - vllm/v1/attention/backends/short_conv_attn.py
+  - tests/models/qwen4_exp/
+  commands:
+  - pytest -v -s models/qwen4_exp/test_qsa_amd.py models/qwen4_exp/test_qsa_prepare_amd.py
+  # PLE and QSA import conflicting HC registrations in a shared process.
+  - pytest -v -s models/qwen4_exp/test_ple.py
+
 - label: ":computer: (CPU) Qwen4 Exp"
   key: qwen4-exp-unit-tests-cpu
   depends_on:

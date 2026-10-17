@@ -77,17 +77,35 @@ def assert_fp8_within_one_ulp(actual: torch.Tensor, expected: torch.Tensor) -> N
     assert bool(((code_diff <= 1) | (abs_diff <= 2**-8)).all())
 
 
-def _make_main_inputs(num_tokens: int) -> dict:
-    """Random main-attention arguments with a paged BF16 cache in vLLM's layout."""
+def _make_main_inputs(num_tokens: int, main_fp8: bool = False) -> dict:
+    """Random main-attention arguments with a paged cache in vLLM's layout."""
     num_blocks = num_tokens // MAIN_PAGE + 2
-    cache = torch.zeros(
-        num_blocks,
-        MAIN_HK,
-        MAIN_PAGE,
-        2 * MAIN_D,
-        dtype=torch.bfloat16,
-        device="cuda",
-    ).transpose(1, 2)
+    if main_fp8:
+        # ROCm fp8 KV-cache layout: uint8 storage holding e4m3 codes in
+        # the platform's native fp8 flavor, as the production typed views
+        # do (FNUZ on MI300/MI325, OCP elsewhere).
+        fp8_dtype = current_platform.fp8_dtype()
+        cache = (
+            torch.zeros(
+                num_blocks,
+                MAIN_HK,
+                MAIN_PAGE,
+                2 * MAIN_D,
+                dtype=torch.uint8,
+                device="cuda",
+            )
+            .view(fp8_dtype)
+            .transpose(1, 2)
+        )
+    else:
+        cache = torch.zeros(
+            num_blocks,
+            MAIN_HK,
+            MAIN_PAGE,
+            2 * MAIN_D,
+            dtype=torch.bfloat16,
+            device="cuda",
+        ).transpose(1, 2)
     slots = torch.randperm(num_blocks * MAIN_PAGE, device="cuda")[:num_tokens]
     slots[-1] = -1
     norm_weights = torch.randn(2, MAIN_D, dtype=torch.bfloat16, device="cuda") * 0.2
@@ -103,8 +121,8 @@ def _make_main_inputs(num_tokens: int) -> dict:
         main_eps=EPS,
         main_kv_cache=cache,
         main_slot_mapping=slots,
-        main_k_scale=1.0,
-        main_v_scale=1.0,
+        main_k_scale=0.5 if main_fp8 else 1.0,
+        main_v_scale=2.0 if main_fp8 else 1.0,
         # The AMD op hands the gate back through a buffer it does not own.
         main_gate_out=torch.empty(
             num_tokens, MAIN_HQ, MAIN_D, dtype=torch.bfloat16, device="cuda"
@@ -129,6 +147,47 @@ def _check_main_outputs(main: dict, q_out, gate_out, rope, positions) -> None:
     ).view(num_tokens, -1)
     q, k = rope(positions, q, k)
     kv_cache = main["main_kv_cache"]
+    if kv_cache.dtype in (torch.float8_e4m3fnuz, torch.float8_e4m3fn):
+        # The FP8 cache stores value / scale as e4m3fnuz codes. Compare
+        # against a torch-side conversion: the C++ cache-update reference
+        # mis-encodes fnuz destinations on gfx950, so it cannot referee.
+        slot = main["main_slot_mapping"]
+        valid = slot >= 0
+        blocks = (slot[valid] // MAIN_PAGE).long()
+        pages = (slot[valid] % MAIN_PAGE).long()
+        stored = kv_cache[blocks, pages]
+        # Match the kernel (and the C++ cache-update op): divide in FP32,
+        # not in BF16, before the fp8 cast.
+        expected_k = (
+            k.view(-1, MAIN_HK, MAIN_D)[valid].float() / main["main_k_scale"]
+        ).to(kv_cache.dtype)
+        expected_v = (
+            v.view(-1, MAIN_HK, MAIN_D)[valid].float() / main["main_v_scale"]
+        ).to(kv_cache.dtype)
+        torch.testing.assert_close(q_out.flatten(1), q, rtol=RTOL, atol=ATOL)
+        assert torch.equal(gate_out, gate)
+
+        # The unfused reference and the kernel differ within the BF16
+        # comparison's RTOL/ATOL (rope and norm rounding), which FP8
+        # denormal quantization amplifies into a few code steps at small
+        # magnitudes. Accept the BF16-equivalent tolerance, or 2 codes for
+        # cast-boundary flips; a mis-scale still fails at the large
+        # magnitudes the batch always covers.
+        def _assert_codes_match(actual, expected):
+            code_diff = (
+                actual.view(torch.uint8).int() - expected.view(torch.uint8).int()
+            ).abs()
+            abs_diff = (actual.float() - expected.float()).abs()
+            assert bool(
+                (
+                    (code_diff <= 2)
+                    | (abs_diff <= RTOL * expected.float().abs() + 2 * ATOL)
+                ).all()
+            )
+
+        _assert_codes_match(stored[..., :MAIN_D], expected_k)
+        _assert_codes_match(stored[..., MAIN_D:], expected_v)
+        return
     cache = torch.zeros_like(kv_cache)
     key_cache, value_cache = cache.split(MAIN_D, dim=-1)
     scale = torch.tensor(1.0, device="cuda")
@@ -149,6 +208,7 @@ def _check_main_outputs(main: dict, q_out, gate_out, rope, positions) -> None:
 
 @requires_qsa_kernels
 @pytest.mark.usefixtures("default_vllm_config")
+@pytest.mark.parametrize("main_fp8", [False, True])
 @pytest.mark.parametrize("indexer_dtype", [torch.bfloat16, torch.float8_e4m3fn])
 @pytest.mark.parametrize(
     "mrope,is_2d_positions,cache_rope_positions,state_size,seq_lens,query_lens,history_lens",
@@ -173,6 +233,7 @@ def _check_main_outputs(main: dict, q_out, gate_out, rope, positions) -> None:
     ],
 )
 def test_qsa_fused_prepare_matches_unfused(
+    main_fp8,
     indexer_dtype,
     mrope,
     is_2d_positions,
@@ -183,9 +244,6 @@ def test_qsa_fused_prepare_matches_unfused(
     history_lens,
 ) -> None:
     from vllm.model_executor.layers.rotary_embedding import get_rope
-
-    if indexer_dtype == torch.float8_e4m3fn:
-        pytest.skip("the AMD QSA indexer cache is bf16-only")
 
     # The FP8 comparison below is a one-ulp bound on data this test generates,
     # so an unseeded run decides for itself whether it reproduces a rounding
@@ -338,7 +396,7 @@ def test_qsa_fused_prepare_matches_unfused(
     k_weight = torch.randn(D, dtype=torch.bfloat16, device=device) * 0.2
 
     fused_query = torch.empty(num_tokens, HQ, D, dtype=indexer_dtype, device=device)
-    main = _make_main_inputs(num_tokens)
+    main = _make_main_inputs(num_tokens, main_fp8)
     main_q_out, main_gate_out = qsa_prepare(
         projected_qk[:, : HQ * D],
         projected_qk[:, HQ * D :],
