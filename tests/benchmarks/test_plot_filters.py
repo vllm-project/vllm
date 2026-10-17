@@ -14,6 +14,8 @@ from vllm.benchmarks.sweep.plot import (
     PlotNotEqualTo,
 )
 
+pytestmark = pytest.mark.skip_global_cleanup
+
 
 class TestPlotFilters:
     """Test PlotFilter functionality including 'inf' edge case."""
@@ -34,6 +36,32 @@ class TestPlotFilters:
             {
                 "request_rate": [1.0, 5.0, 10.0, float("inf"), float("inf")],
                 "value": [10, 20, 30, 40, 50],
+            }
+        )
+
+        # DataFrame with boolean values
+        self.df_bool = pd.DataFrame(
+            {
+                "enable_prefix_caching": [True, False, True],
+                "value": [10, 20, 30],
+            }
+        )
+
+        # DataFrame with nullable boolean values
+        self.df_bool_nullable = pd.DataFrame(
+            {
+                "enable_prefix_caching": pd.Series(
+                    [True, False, None], dtype="boolean"
+                ),
+                "value": [10, 20, 30],
+            }
+        )
+
+        # DataFrame with string labels resembling booleans
+        self.df_string_labels = pd.DataFrame(
+            {
+                "mode": ["true", "false", "auto"],
+                "value": [10, 20, 30],
             }
         )
 
@@ -77,6 +105,53 @@ class TestPlotFilters:
         result = filter_obj.apply(self.df_inf_float)
         # Should exclude float('inf') entries
         assert len(result) == 3
+
+    @pytest.mark.parametrize(
+        "target,expected_count",
+        [
+            ("true", 2),
+            ("True", 2),
+            ("TRUE", 2),
+            ("false", 1),
+            ("False", 1),
+            ("FALSE", 1),
+        ],
+    )
+    def test_equal_to_boolean(self, target, expected_count):
+        """Test PlotEqualTo with boolean values."""
+        filter_obj = PlotEqualTo("enable_prefix_caching", target)
+        result = filter_obj.apply(self.df_bool)
+        assert len(result) == expected_count
+
+    @pytest.mark.parametrize(
+        "target,expected_count",
+        [
+            ("true", 1),
+            ("True", 1),
+            ("false", 2),
+            ("False", 2),
+        ],
+    )
+    def test_not_equal_to_boolean(self, target, expected_count):
+        """Test PlotNotEqualTo with boolean values."""
+        filter_obj = PlotNotEqualTo("enable_prefix_caching", target)
+        result = filter_obj.apply(self.df_bool)
+        assert len(result) == expected_count
+
+    def test_boolean_nullable(self):
+        """Test boolean filters with nullable boolean series."""
+        filter_eq = PlotEqualTo("enable_prefix_caching", "true")
+        assert len(filter_eq.apply(self.df_bool_nullable)) == 1
+
+        filter_ne = PlotNotEqualTo("enable_prefix_caching", "true")
+        assert len(filter_ne.apply(self.df_bool_nullable)) == 1
+
+    def test_string_column_retains_literal_match(self):
+        """Test that string columns with boolean-like text compare literals."""
+        filter_obj = PlotEqualTo("mode", "true")
+        result = filter_obj.apply(self.df_string_labels)
+        assert len(result) == 1
+        assert result["value"].iloc[0] == 10
 
     @pytest.mark.parametrize(
         "target,expected_count",
@@ -142,6 +217,18 @@ class TestPlotFilters:
             ("request_rate>=10.0", "request_rate", "10.0", PlotGreaterThanOrEqualTo),
             ("request_rate==inf", "request_rate", "inf", PlotEqualTo),
             ("request_rate!='inf'", "request_rate", "inf", PlotNotEqualTo),
+            (
+                "enable_prefix_caching==true",
+                "enable_prefix_caching",
+                "true",
+                PlotEqualTo,
+            ),
+            (
+                "enable_prefix_caching!=false",
+                "enable_prefix_caching",
+                "false",
+                PlotNotEqualTo,
+            ),
         ],
     )
     def test_parse_str(self, filter_str, expected_var, expected_target, expected_type):
