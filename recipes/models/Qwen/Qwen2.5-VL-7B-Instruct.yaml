@@ -1,0 +1,235 @@
+meta:
+  title: "Qwen2.5-VL-7B-Instruct"
+  slug: "qwen2.5-vl-7b-instruct"
+  provider: "Qwen"
+  description: "Qwen2.5-VL dense vision-language model (7B) for image and video understanding — fits on a single TPU v6e chip, one GPU, or Intel Xeon 6 CPU."
+  date_added: 2025-08-22
+  date_updated: 2026-09-12
+  tasks:
+    - multimodal
+    - text
+  performance_headline: "Verified on TPU v6e (Trillium) and Intel Xeon 6 CPU with BF16"
+  related_recipes:
+    - "Qwen/Qwen2.5-VL-72B-Instruct"
+  hardware:
+    trillium: verified
+    xeon6: verified
+
+model:
+  model_id: "Qwen/Qwen2.5-VL-7B-Instruct"
+  min_vllm_version: "0.10.2"
+  architecture: dense
+  parameter_count: "7B"
+  active_parameters: "7B"
+  context_length: 128000
+  base_args: []
+  base_env: {}
+
+features:
+  text_only:
+    description: "Skip loading the vision encoder for text-only workloads — frees VRAM for KV cache. Mutually exclusive with encoder_parallel."
+    args:
+      - "--language-model-only"
+  encoder_parallel:
+    description: "Run the vision encoder in data-parallel mode — avoids TP comm overhead on the small encoder. Mutually exclusive with text_only."
+    args:
+      - "--mm-encoder-tp-mode"
+      - "data"
+
+opt_in_features:
+  - text_only
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 17
+    description: "Full precision BF16 — fits on a single TPU v6e chip or one 24GB+ GPU"
+    supported_hardware: [trillium, xeon6]
+  awq:
+    model_id: "Qwen/Qwen2.5-VL-7B-Instruct-AWQ"
+    precision: int4
+    vram_minimum_gb: 5
+    description: "AWQ 4-bit quantized weights"
+    supported_hardware: [trillium]
+    extra_args:
+      - "--quantization"
+      - "awq"
+
+  fp8:
+    model_id: "RedHatAI/Qwen2.5-VL-7B-Instruct-FP8-Dynamic"
+    precision: fp8
+    vram_minimum_gb: 9
+    description: "RedHatAI FP8 (E4M3) with dynamic per-token activation quantization"
+    extra_args:
+      - "--kv-cache-dtype"
+      - "fp8"
+
+compatible_strategies:
+  - single_node_tp
+  - multi_node_tp
+
+kv_offload_support:
+  offloading_cpu: verified
+  offloading_fs: verified
+
+hardware_overrides: {}
+
+strategy_overrides: {}
+
+guide: |
+  ## Overview
+
+  Qwen2.5-VL-7B-Instruct is the small dense vision-language model in the Qwen2.5-VL series. At 7B it fits comfortably on a single accelerator — one TPU v6e (Trillium) chip, or a single 24GB+ GPU — and is also validated for Intel Xeon 6 CPU serving. BF16 is the precision used in training, so BF16 inference gives the best accuracy.
+
+  For the 72B sibling, see [Qwen2.5-VL-72B-Instruct](/Qwen/Qwen2.5-VL-72B-Instruct).
+
+  ## Prerequisites
+
+  ### NVIDIA
+  ```bash
+  uv venv
+  source .venv/bin/activate
+  uv pip install -U vllm --torch-backend auto
+  ```
+
+  ### Intel Xeon 6 CPUs
+
+  - Hardware: Intel Xeon 6 CPUs
+  - vLLM CPU >= 0.8.5 for this validated Xeon 6 configuration
+
+  For Intel and AMD x86 CPUs, follow the
+  [CPU pre-built wheels](https://docs.vllm.ai/en/latest/getting_started/installation/cpu/#pre-built-wheels)
+  installation instructions.
+
+  ```bash
+  docker pull vllm/vllm-openai-cpu:latest-x86_64
+  ```
+
+  ### TPU (Trillium / v6e)
+  Use the official vLLM TPU image. The 7B model fits on a single v6e chip (`v6e-1`, `--topology 1x1`).
+  ```bash
+  export HF_HOME=/dev/shm
+  export HF_TOKEN=<your HF token>
+  docker run --rm --privileged --net=host \
+    --shm-size=16G \
+    -e HF_HOME -e HF_TOKEN \
+    vllm/vllm-tpu:latest \
+    vllm serve ...
+  ```
+
+  ## Deployment Configurations
+
+  ### Intel Xeon 6
+
+  Choose tensor parallelism based on the system topology; the recipe does not
+  prescribe a fixed TP/DP layout or hard-code NUMA node IDs.
+
+  ```bash
+  vllm serve Qwen/Qwen2.5-VL-7B-Instruct
+  ```
+
+  Docker:
+
+  ```bash
+  docker run \
+    --privileged --ipc=host -p 8000:8000 \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    vllm/vllm-openai-cpu:latest-x86_64 Qwen/Qwen2.5-VL-7B-Instruct \
+    --tensor-parallel-size 1 \
+    --mm-encoder-tp-mode data
+  ```
+
+  #### Runtime and Platform Tuning
+
+  The following settings are intentionally not prescribed as portable CPU model
+  defaults because they depend on the workload, hardware, or runtime environment:
+
+  - `--max-num-batched-tokens`: scheduler/throughput tuning.
+  - `--max-num-seqs`: concurrency and scheduler-capacity tuning.
+  - `--gpu-memory-utilization`: platform memory-budget tuning.
+  - `--no-enable-prefix-caching`: workload/benchmark cache-policy tuning.
+  - `VLLM_ENGINE_ITERATION_TIMEOUT_S`: operational runtime timeout.
+
+  These settings may still appear in validated hardware-specific overrides. Tune
+  them at deployment time based on platform resources, workload shape, and
+  latency/throughput goals.
+
+  ### TPU v6e (Trillium, single chip)
+  Verified end-to-end on a single v6e chip.
+  ```bash
+  export HF_HOME=/dev/shm
+  export HF_TOKEN=<your HF token>
+  vllm serve Qwen/Qwen2.5-VL-7B-Instruct \
+    --tensor-parallel-size 1 \
+    --pipeline-parallel-size 1 \
+    --dtype bfloat16 \
+    --gpu-memory-utilization 0.98 \
+    --max-model-len 16384 \
+    --limit-mm-per-prompt '{"image":10,"video":0}' \
+    --mm-processor-kwargs '{"max_pixels":1003520}' \
+    --guided-decoding-backend xgrammar \
+    --disable-chunked-mm-input
+  ```
+
+  ### Single GPU (BF16, TP=1)
+  ```bash
+  export CUDA_VISIBLE_DEVICES=0
+  vllm serve Qwen/Qwen2.5-VL-7B-Instruct \
+    --host 0.0.0.0 \
+    --port 8000 \
+    --limit-mm-per-prompt '{"image":2,"video":0}'
+  ```
+
+  ### Multi-GPU (DP=4)
+  For higher throughput across a node, data parallelism works better than TP for a model this size.
+  ```bash
+  export CUDA_VISIBLE_DEVICES=0,1,2,3
+  vllm serve Qwen/Qwen2.5-VL-7B-Instruct \
+    --host 0.0.0.0 \
+    --port 8000 \
+    --data-parallel-size 4 \
+    --limit-mm-per-prompt '{"image":2,"video":0}'
+  ```
+
+  ## Configuration Tips
+
+  - `--max-model-len 16384` is a safe default on a single v6e chip (native context is 128K); raise it if you have headroom.
+  - `--limit-mm-per-prompt` caps incoming multimodal requests per prompt.
+  - `--mm-processor-kwargs '{"max_pixels":1003520}'` bounds the per-image resolution to control encoder cost.
+  - vLLM uses 90% of device memory by default; on TPU the recipe pushes `--gpu-memory-utilization 0.98` to maximize KV cache.
+  - `--disable-chunked-mm-input` is recommended on TPU for stable multimodal batching.
+
+  ## Benchmarking
+
+  Launch the server with `--no-enable-prefix-caching` to get consistent measurements.
+
+  ### VisionArena-Chat
+  ```bash
+  vllm bench serve \
+    --host 0.0.0.0 \
+    --port 8000 \
+    --backend openai-chat \
+    --endpoint /v1/chat/completions \
+    --model Qwen/Qwen2.5-VL-7B-Instruct \
+    --dataset-name hf \
+    --dataset-path lmarena-ai/VisionArena-Chat \
+    --num-prompts 128
+  ```
+
+  ### Random Synthetic
+  ```bash
+  vllm bench serve \
+    --host 0.0.0.0 \
+    --port 8000 \
+    --model Qwen/Qwen2.5-VL-7B-Instruct \
+    --dataset-name random \
+    --random-input-len 8000 \
+    --random-output-len 1000 \
+    --num-prompts 128
+  ```
+
+  ## References
+
+  - [Model card](https://huggingface.co/Qwen/Qwen2.5-VL-7B-Instruct)
+  - [Qwen2.5-VL on Trillium (v6e)](https://github.com/AI-Hypercomputer/tpu-recipes/tree/main/inference/trillium/vLLM/Qwen2.5-VL)
+  - [vLLM multimodal inputs guide](https://docs.vllm.ai/en/latest/features/multimodal_inputs.html)

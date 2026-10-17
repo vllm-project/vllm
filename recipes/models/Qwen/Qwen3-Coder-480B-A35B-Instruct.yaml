@@ -1,0 +1,206 @@
+meta:
+  title: "Qwen3-Coder-480B-A35B-Instruct"
+  slug: "qwen3-coder-480b-a35b-instruct"
+  provider: "Qwen"
+  description: "Large coder MoE with 480B total / 35B active parameters, strong tool-use and code generation capabilities."
+  date_added: 2025-07-23
+  date_updated: 2026-04-17
+  tasks:
+    - text
+  performance_headline: "HumanEval 0.939, MBPP 0.918 (FP8). Recommended FP8 on 8x H200/H20 via DP=8"
+  related_recipes: []
+  hardware:
+    h200: verified
+    mi300x: verified
+    mi325x: verified
+    mi355x: verified
+    ironwood: verified
+
+model:
+  model_id: "Qwen/Qwen3-Coder-480B-A35B-Instruct"
+  min_vllm_version: "0.10.0"
+  architecture: moe
+  parameter_count: "480B"
+  active_parameters: "35B"
+  context_length: 262144
+  base_args: []
+  base_env: {}
+
+dependencies:
+  - note: "Optional: opt into DeepGEMM FP8 MoE kernels for extra throughput"
+    command: "export VLLM_USE_DEEP_GEMM=1"
+    optional: true
+
+features:
+  tool_calling:
+    description: "Enable automatic tool choice with Qwen3 Coder parser"
+    args:
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser"
+      - "qwen3_coder"
+
+opt_in_features: []
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 1152
+    description: "Full BF16 — 8x H200/H20 (141GB × 8) recommended"
+  fp8:
+    model_id: "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8"
+    precision: fp8
+    vram_minimum_gb: 576
+    # FP8 block_n=128 + moe_intermediate_size=2560 → TP must divide 20; cap at 4.
+    tp: 4
+    description: "Qwen official FP8 checkpoint — required for DP=8 serving"
+  nvfp4:
+    model_id: "nvidia/Qwen3-Coder-480B-A35B-Instruct-NVFP4"
+    precision: nvfp4
+    vram_minimum_gb: 288
+    description: "NVIDIA NVFP4 quantized weights for Blackwell GPUs"
+    extra_args:
+      - "--kv-cache-dtype"
+      - "fp8"
+
+  redhat_fp8:
+    model_id: "RedHatAI/Qwen3-Coder-480B-A35B-Instruct-FP8"
+    precision: fp8
+    label: "FP8 (RedHat)"
+    vram_minimum_gb: 576
+    description: "RedHatAI FP8 quantization"
+    extra_args:
+      - "--kv-cache-dtype"
+      - "fp8"
+
+compatible_strategies:
+  - single_node_tp
+  - single_node_tep
+  - single_node_dep
+  - multi_node_tp
+  - multi_node_tp_pp
+  - multi_node_dep
+  - multi_node_tep
+  - pd_cluster
+
+hardware_overrides:
+  hopper:
+    extra_args: []
+    extra_env:
+      VLLM_USE_DEEP_GEMM: "1"
+  amd:
+    # Verified on 8× MI300X / MI325X / MI355X (FP8 path uses --data-parallel-size 8
+    # instead of TP8 — swap strategy to DP if deploying the FP8 checkpoint).
+    extra_args: ["--attention-backend", "rocm_aiter_fa", "--moe-backend", "aiter"]
+    extra_env:
+      VLLM_ROCM_USE_AITER: "1"
+
+strategy_overrides: {}
+
+guide: |
+  ## Overview
+
+  [Qwen3-Coder](https://github.com/QwenLM/Qwen3-Coder) is an advanced large language model created by the Qwen team. `Qwen3-Coder-480B-A35B-Instruct` is the flagship coder MoE with 480B total / 35B active parameters. vLLM supports it including tool calling; the guide below covers BF16 and FP8 serving on NVIDIA and AMD GPUs.
+
+  TPU support is provided through [vLLM TPU](https://github.com/vllm-project/tpu-inference) with a recipe for [Ironwood](https://github.com/AI-Hypercomputer/tpu-recipes/tree/main/inference/ironwood/vLLM/Qwen3-Coder-480B-A35B). The Ironwood docker command rendered by the hardware picker uses the `vllm/vllm-tpu` image; pin to the tag specified by the upstream recipe.
+
+  ## Prerequisites
+
+  ### CUDA
+  ```bash
+  uv venv
+  source .venv/bin/activate
+  uv pip install -U vllm --torch-backend auto
+  ```
+
+  ### ROCm (MI300X, MI325X, MI355X)
+  ```bash
+  uv venv
+  source .venv/bin/activate
+  uv pip install vllm --extra-index-url https://wheels.vllm.ai/rocm/
+  ```
+  The ROCm wheel requires Python 3.12, ROCm 7.0, and glibc >= 2.35.
+
+  ## Deployment Configurations
+
+  ### 8xH200 / 8xH20 BF16
+  ```bash
+  vllm serve Qwen/Qwen3-Coder-480B-A35B-Instruct \
+    --max-model-len 32000 \
+    --enable-expert-parallel \
+    --tensor-parallel-size 8 \
+    --enable-auto-tool-choice \
+    --tool-call-parser qwen3_coder
+  ```
+
+  ### 8xH200 / 8xH20 FP8 (DP=8, recommended)
+  ```bash
+  VLLM_USE_DEEP_GEMM=1 vllm serve Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8 \
+    --max-model-len 131072 \
+    --enable-expert-parallel \
+    --data-parallel-size 8 \
+    --enable-auto-tool-choice \
+    --tool-call-parser qwen3_coder
+  ```
+
+  ### 8xMI300X/MI325X/MI355X BF16
+  ```bash
+  VLLM_ROCM_USE_AITER=1 vllm serve Qwen/Qwen3-Coder-480B-A35B-Instruct \
+    --max-model-len 32000 \
+    --attention-backend rocm_aiter_fa \
+    --moe-backend aiter \
+    --enable-expert-parallel \
+    --tensor-parallel-size 8 \
+    --enable-auto-tool-choice \
+    --tool-call-parser qwen3_coder
+  ```
+
+  ### 8xMI300X/MI325X/MI355X FP8
+  ```bash
+  VLLM_ROCM_USE_AITER=1 vllm serve Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8 \
+    --trust-remote-code \
+    --max-model-len 131072 \
+    --attention-backend rocm_aiter_fa \
+    --moe-backend aiter \
+    --enable-expert-parallel \
+    --data-parallel-size 8 \
+    --enable-auto-tool-choice \
+    --tool-call-parser qwen3_coder
+  ```
+
+  ## Client Usage
+
+  ```bash
+  vllm bench serve \
+    --backend vllm \
+    --model Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8 \
+    --endpoint /v1/completions \
+    --dataset-name random \
+    --random-input 2048 \
+    --random-output 1024 \
+    --max-concurrency 10 \
+    --num-prompt 100
+  ```
+
+  ## Troubleshooting
+
+  - **Context-length OOM**: A single H20 node cannot serve the native 262144 context. Reduce `--max-model-len` or raise `--gpu-memory-utilization`.
+  - **TP=8 failure on FP8**: Expect `ValueError: The output_size of gate's and up's weight = 320 is not divisible by weight quantization block_n = 128.` on FP8 with TP=8. Switch to `--data-parallel-size 8` instead.
+  - **DeepGEMM**: set `VLLM_USE_DEEP_GEMM=1` for faster FP8 matmul. Follow the [setup instructions](https://github.com/vllm-project/vllm/blob/main/benchmarks/kernels/deepgemm/README.md#setup) to install it.
+  - **Tool calling**: add `--tool-call-parser qwen3_coder` as shown above.
+
+  ## Evaluation
+
+  | Dataset    | Test Type          | Pass@1 Score |
+  |------------|--------------------|--------------|
+  | HumanEval  | Base tests         | 0.939        |
+  | HumanEval+ | Base + extra tests | 0.902        |
+  | MBPP       | Base tests         | 0.918        |
+  | MBPP+      | Base + extra tests | 0.794        |
+
+  ## References
+
+  - [Model card](https://huggingface.co/Qwen/Qwen3-Coder-480B-A35B-Instruct)
+  - [FP8 checkpoint](https://huggingface.co/Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8)
+  - [Qwen3-Coder GitHub](https://github.com/QwenLM/Qwen3-Coder)
+  - [EvalPlus](https://github.com/evalplus/evalplus)
+  - [TPU recipes: Ironwood](https://github.com/AI-Hypercomputer/tpu-recipes/tree/main/inference/ironwood/vLLM/Qwen3-Coder-480B-A35B)

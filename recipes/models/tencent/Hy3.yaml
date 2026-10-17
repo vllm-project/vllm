@@ -1,0 +1,411 @@
+meta:
+  title: "Hy3"
+  slug: "hy3"
+  provider: "Hy (Tencent)"
+  description: "Tencent Hy3 — scaled-up MoE language model (295B total / 21B active) with a 3.8B MTP layer for speculative decoding, 256K context, and hy_v3 tool/reasoning parsers"
+  date_added: 2026-07-06
+  date_updated: 2026-09-14
+  tasks:
+    - text
+  performance_headline: "Hy3 MoE — 295B/21B on 8×H200, 8×H20-3e(141GB), or 8×AMD MI300X/MI355X with MTP"
+  related_recipes:
+    - "tencent/Hy3-preview"
+  hardware:
+    gb300: verified
+    mi300x: verified
+    mi355x: verified
+
+model:
+  model_id: "tencent/Hy3"
+  min_vllm_version: "0.28.0"
+  default_frontend: rust
+  docker_image:
+    nvidia: "vllm/vllm-openai:hy3"
+    amd: "vllm/vllm-openai-rocm:latest"
+  install:
+    docker:
+      note: "Recommended: the dedicated image ships the Hy3 runtime and dependencies."
+    pip:
+      note: "vLLM 0.28.0 includes Hy3 support and the optimizations from vLLM #47433."
+  architecture: moe
+  parameter_count: "295B"
+  active_parameters: "21B"
+  context_length: 262144
+  base_args: []
+  base_env: {}
+
+features:
+  tool_calling:
+    description: "Hy v3 tool call parser with automatic tool choice"
+    args:
+      - "--tool-call-parser"
+      - "hy_v3"
+      - "--enable-auto-tool-choice"
+  reasoning:
+    description: "Hy v3 reasoning parser for thinking-mode chain-of-thought extraction"
+    args:
+      - "--reasoning-parser"
+      - "hy_v3"
+  spec_decoding:
+    description: "Multi-Token Prediction speculative decoding using the model's built-in MTP layer"
+    args:
+      - "--speculative-config"
+      - '{"method":"mtp","num_speculative_tokens":2}'
+
+opt_in_features:
+  - spec_decoding
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 708
+    description: "Full precision BF16 — 8×H200 or 8×H20-3e(141GB) minimum for weights + KV cache"
+  fp8:
+    model_id: "tencent/Hy3-FP8"
+    precision: fp8
+    vram_minimum_gb: 354
+    description: "FP8-quantized instruct checkpoint (tencent/Hy3-FP8) — fits a single 8×H200 / 8×H20-3e node with wide headroom."
+    # fp8 KV cache verified on this checkpoint only; scoped here so it doesn't apply to bf16.
+    hardware_overrides:
+      amd:
+        extra_args:
+          - "--kv-cache-dtype"
+          - "fp8"
+  nvfp4:
+    model_id: "RedHatAI/Hy3-NVFP4-FP8"
+    precision: nvfp4
+    vram_minimum_gb: 214
+    description: "Mixed-precision quant by Red Hat AI — MoE experts in NVFP4, attention in FP8 block. Halves GPU requirement vs BF16 (fits 4×H100 80GB / 4×H200)."
+
+compatible_strategies:
+  - single_node_tp
+  - single_node_tep
+  - single_node_dep
+  - multi_node_tp
+  - multi_node_tep
+  - multi_node_dep
+
+hardware_overrides:
+  # NVIDIA: use the trtllm all-reduce backend to work around an mnnvl workspace-size
+  # issue (per the Hy3 model card); applies on Hopper and Blackwell/NVL systems.
+  hopper:
+    extra_env:
+      VLLM_FLASHINFER_ALLREDUCE_BACKEND: "trtllm"
+  blackwell:
+    extra_env:
+      VLLM_FLASHINFER_ALLREDUCE_BACKEND: "trtllm"
+  amd:
+    extra_args:
+      - "--attention-backend"
+      - "ROCM_AITER_FA"
+    extra_env:
+      VLLM_ROCM_USE_AITER: "1"
+      # AITER fused-MoE disabled (CK GEMM crash); Triton fallback works.
+      VLLM_ROCM_USE_AITER_MOE: "0"
+      VLLM_ROCM_USE_AITER_MHA: "1"
+      VLLM_ROCM_USE_AITER_RMSNORM: "1"
+      VLLM_ROCM_USE_AITER_LINEAR: "1"
+      VLLM_ROCM_QUICK_REDUCE_QUANTIZATION: "INT4"
+
+strategy_overrides: {}
+
+guide: |
+  # Hy3 Usage Guide
+
+  Hy3 is Tencent's latest open-source Mixture-of-Experts language model:
+  295B total parameters with 21B activated per token, plus a 3.8B MTP layer for
+  speculative decoding. 80 transformer layers, 192 routed experts (top-8) + 1 shared
+  expert, GQA with 64 heads over 8 KV heads, 256K context.
+
+  ## Availability
+
+  Hy3 uses the same model code as
+  [Hy3-preview](https://huggingface.co/tencent/Hy3-preview), so any vLLM build that
+  serves Hy3-preview also serves Hy3. vLLM 0.28.0 includes
+  [#47433](https://github.com/vllm-project/vllm/pull/47433), which adds Tencent's
+  HPC-Ops attention and MoE backends. The HPC-Ops kernels are still built and
+  installed separately (see the HPC-Ops backends section below).
+
+  ## Setup
+
+  Choose one of the following setup methods.
+
+  ### Using Docker
+
+  ```bash
+  # Switch to the trtllm all-reduce backend to work around an mnnvl workspace-size issue.
+  docker run --gpus all \
+    -p 8000:8000 \
+    --ipc=host \
+    -e VLLM_FLASHINFER_ALLREDUCE_BACKEND=trtllm \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    vllm/vllm-openai:hy3 tencent/Hy3 \
+      --tensor-parallel-size 8 \
+      --tool-call-parser hy_v3 \
+      --reasoning-parser hy_v3 \
+      --enable-auto-tool-choice \
+      --served-model-name hy3
+  ```
+
+  ### Installing from source
+
+  ```bash
+  uv venv --python 3.12 --seed --managed-python
+  source .venv/bin/activate
+  git clone https://github.com/vllm-project/vllm.git
+  cd vllm
+  uv pip install --editable . --torch-backend=auto
+  ```
+
+  ## Model Deployment
+
+  To serve Hy3 on 8 GPUs, use H20-3e(141GB), H200, AMD MI300X/MI325X (192 GB),
+  AMD MI350X/MI355X (288 GB), or other GPUs with larger memory capacity. Smaller-memory
+  8-GPU configurations (8×H100 80GB, 8×A100 80GB) do not fit the BF16 weights plus KV
+  cache — use multi-node TP for those.
+
+  ### Serving on 8×AMD MI300X / MI325X / MI350X / MI355X
+
+  Serve with the standard launcher plus the AITER environment variables (the recipe's
+  `hardware_overrides.amd.extra_env` applies these automatically when the AMD profile is
+  selected on the recipe site):
+
+  ```bash
+  export VLLM_ROCM_USE_AITER=1
+  # MoE disabled (CK GEMM crash); Triton fallback. See troubleshooting note below.
+  export VLLM_ROCM_USE_AITER_MOE=0
+  export VLLM_ROCM_USE_AITER_MHA=1
+  export VLLM_ROCM_USE_AITER_RMSNORM=1
+  export VLLM_ROCM_USE_AITER_LINEAR=1
+
+  vllm serve tencent/Hy3 \
+    --tensor-parallel-size 8 \
+    --tool-call-parser hy_v3 \
+    --reasoning-parser hy_v3 \
+    --enable-auto-tool-choice \
+    --served-model-name hy3 \
+    --gpu-memory-utilization 0.90
+  ```
+
+  > **ROCm troubleshooting — AITER fused-MoE.** With `VLLM_ROCM_USE_AITER_MOE=1`
+  > the engine currently aborts during warmup with
+  > `RuntimeError: wrong! device_gemm with the specified compilation parameters
+  > does not support this GEMM problem` (raised from `aiter` `ck_moe_stage2`).
+  > Workaround: set
+  > `VLLM_ROCM_USE_AITER_MOE=0` to fall back to the Triton MoE kernel; the other
+  > AITER backends (MHA / RMSNorm / Linear) run as-is. The docker run needs the
+  > ROCm device flags `--device /dev/kfd --device /dev/dri --group-add video
+  > --group-add render` (the recipe's NVIDIA `docker run` above is CUDA-only).
+
+  MTP (recommended on AMD for lower latency, same flags as the NVIDIA path):
+
+  ```bash
+  vllm serve tencent/Hy3 \
+    --tensor-parallel-size 8 \
+    --speculative-config.method mtp \
+    --speculative-config.num_speculative_tokens 2 \
+    --tool-call-parser hy_v3 \
+    --reasoning-parser hy_v3 \
+    --enable-auto-tool-choice \
+    --served-model-name hy3 \
+    --gpu-memory-utilization 0.90
+  ```
+
+  ### Serving on 8×H200 or 8×H20-3e(141GB)
+
+  Without Multi-Token Prediction (MTP):
+
+  ```bash
+  # Switch to the trtllm all-reduce backend to work around an mnnvl workspace-size issue.
+  export VLLM_FLASHINFER_ALLREDUCE_BACKEND=trtllm
+  vllm serve tencent/Hy3 \
+    --tensor-parallel-size 8 \
+    --tool-call-parser hy_v3 \
+    --reasoning-parser hy_v3 \
+    --enable-auto-tool-choice \
+    --served-model-name hy3
+  ```
+
+  With MTP (recommended for lower latency):
+
+  ```bash
+  # Switch to the trtllm all-reduce backend to work around an mnnvl workspace-size issue.
+  export VLLM_FLASHINFER_ALLREDUCE_BACKEND=trtllm
+  vllm serve tencent/Hy3 \
+    --tensor-parallel-size 8 \
+    --speculative-config.method mtp \
+    --speculative-config.num_speculative_tokens 2 \
+    --tool-call-parser hy_v3 \
+    --reasoning-parser hy_v3 \
+    --enable-auto-tool-choice \
+    --served-model-name hy3
+  ```
+
+  ### HPC-Ops backends (Hopper) — maximum throughput
+
+  Tencent's HPC-Ops attention and MoE kernels
+  ([#47433](https://github.com/vllm-project/vllm/pull/47433)) reduce latency for
+  mixed-length decode and small-batch MoE on Hopper GPUs. They ship as a separate wheel —
+  build and install it first:
+
+  ```bash
+  git clone https://github.com/Tencent/hpc-ops.git
+  cd hpc-ops
+  make wheel
+  python3 -m pip install dist/*.whl
+  ```
+
+  Enable the attention backend with `--attention-backend HPC_ATTN`:
+
+  ```bash
+  # Switch to the trtllm all-reduce backend to work around an mnnvl workspace-size issue.
+  export VLLM_FLASHINFER_ALLREDUCE_BACKEND=trtllm
+  vllm serve tencent/Hy3 \
+    --tensor-parallel-size 8 \
+    --attention-backend HPC_ATTN
+  ```
+
+  Enable the fused MoE backend with `--moe-backend hpc`. On the FP8 checkpoint, add the
+  FP8 KV-cache flags `--kv-cache-dtype fp8_e4m3 --block-size 64`:
+
+  ```bash
+  # Switch to the trtllm all-reduce backend to work around an mnnvl workspace-size issue.
+  export VLLM_FLASHINFER_ALLREDUCE_BACKEND=trtllm
+  vllm serve tencent/Hy3-FP8 \
+    --tensor-parallel-size 8 \
+    --moe-backend hpc \
+    --kv-cache-dtype fp8_e4m3 \
+    --block-size 64
+  ```
+
+  Both backends combine with the standard `--tool-call-parser` / `--reasoning-parser` and
+  MTP flags shown above. See the
+  [vLLM × HPC-Ops post](https://vllm.ai/blog/2026-07-06-vllm-hpc-ops) for benchmarks and
+  details.
+
+  ## Sampling and Reasoning Modes
+
+  Tencent's recommended sampling parameters: `temperature=0.9`, `top_p=1.0`.
+
+  Reasoning is controlled via `chat_template_kwargs.reasoning_effort`:
+
+  | Value | Behavior |
+  |:---|:---|
+  | `no_think` (default) | Direct response, no chain-of-thought |
+  | `low` | Light reasoning |
+  | `high` | Deep chain-of-thought for math/coding/complex reasoning |
+
+  When tools are registered, set `interleaved_thinking: true` to allow the model to
+  think between tool calls.
+
+  ### OpenAI Client Example
+
+  ```bash
+  uv pip install -U openai
+  ```
+
+  ```python
+  from openai import OpenAI
+
+  client = OpenAI(base_url="http://localhost:8000/v1", api_key="EMPTY")
+  messages = [
+      {"role": "system", "content": "You are a helpful assistant."},
+      {"role": "user", "content": "Hello."},
+  ]
+
+  # Direct response (default).
+  resp = client.chat.completions.create(
+      model="hy3",
+      messages=messages,
+      temperature=0.9,
+      top_p=1.0,
+      max_tokens=4096,
+  )
+  print(resp.choices[0].message.content)
+
+  # Deep reasoning: set reasoning_effort (and interleaved_thinking if using tools).
+  resp_think = client.chat.completions.create(
+      model="hy3",
+      messages=messages,
+      temperature=0.9,
+      top_p=1.0,
+      max_tokens=4096,
+      extra_body={
+        "chat_template_kwargs": {
+            "reasoning_effort": "high",
+            "interleaved_thinking": True,
+        },
+      },
+  )
+  output_msg = resp_think.choices[0].message
+  print(output_msg.reasoning)           # chain-of-thought
+  print(output_msg.content)             # final answer
+  ```
+
+  ### cURL Usage
+
+  ```bash
+  curl http://localhost:8000/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d '{
+      "model": "hy3",
+      "messages": [
+        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "user", "content": "Hello."}
+      ],
+      "temperature": 0.9,
+      "top_p": 1.0,
+      "max_tokens": 4096
+    }'
+  ```
+
+  ## Benchmarking
+
+  For benchmarking, disable prefix caching by adding `--no-enable-prefix-caching` to
+  the server command.
+
+  The following benchmarks the FP8 checkpoint (8192→1024, concurrency 32, 160 prompts):
+
+  ```bash
+  vllm bench serve \
+    --model tencent/Hy3-FP8 \
+    --dataset-name random \
+    --random-input-len 8192 \
+    --random-output-len 1024 \
+    --max-concurrency 32 \
+    --num-prompts 160 \
+    --served-model-name hy3-fp8
+  ```
+
+  Representative output — Hy3-FP8, TP4 on 4×GB300 (one NVL4 tray), trtllm all-reduce,
+  MTP=2:
+
+  ```shell
+  ============ Serving Benchmark Result ============
+  Successful requests:                     160
+  Failed requests:                         0
+  Maximum request concurrency:             32
+  Benchmark duration (s):                  175.37
+  Request throughput (req/s):              0.91
+  Output token throughput (tok/s):         934.26
+  Peak output token throughput (tok/s):    1344.00
+  Total token throughput (tok/s):          8408.34
+  Mean TTFT (ms):                          2352.29
+  Median TTFT (ms):                         505.64
+  P99 TTFT (ms):                           14538.85
+  Mean TPOT (ms):                           30.11
+  Median TPOT (ms):                          30.86
+  P99 TPOT (ms):                             40.48
+  Mean ITL (ms):                            36.26
+  Median ITL (ms):                          24.09
+  ==================================================
+  ```
+
+  ## References
+
+  - [Hugging Face model card](https://huggingface.co/tencent/Hy3)
+  - [FP8 checkpoint — tencent/Hy3-FP8](https://huggingface.co/tencent/Hy3-FP8)
+  - [NVFP4-FP8 checkpoint — RedHatAI/Hy3-NVFP4-FP8](https://huggingface.co/RedHatAI/Hy3-NVFP4-FP8)
+  - [GitHub: Tencent-Hunyuan/Hy3](https://github.com/Tencent-Hunyuan/Hy3)
+  - [vLLM × HPC-Ops: high-performance attention & MoE backends](https://vllm.ai/blog/2026-07-06-vllm-hpc-ops)
+  - [Tencent Hy3](https://hy.tencent.com/research/hy3)

@@ -1,0 +1,322 @@
+meta:
+  title: "Gemma 4 E2B IT"
+  slug: "gemma-4-e2b-it"
+  provider: "Google"
+  description: "Google's compact Gemma 4 multimodal model (effective 2B) with native text, image, and audio, plus thinking mode and tool-use protocol."
+  date_added: 2026-04-02
+  date_updated: 2026-09-12
+  tasks:
+    - multimodal
+    - text
+  performance_headline: "Compact unified multimodal model with audio, thinking, and function calling — runs on a single 24 GB+ GPU"
+  related_recipes:
+    - google/gemma-4-E4B-it
+    - google/gemma-4-31B-it
+    - google/gemma-4-26B-A4B-it
+  hardware:
+    h100: verified
+    mi300x: verified
+    mi325x: verified
+    mi355x: verified
+    trillium: verified
+    ironwood: verified
+    xeon6: verified
+
+model:
+  model_id: "google/gemma-4-E2B-it"
+  min_vllm_version: "0.19.1"
+  architecture: dense
+  parameter_count: "5B"
+  active_parameters: "5B"
+  context_length: 131072
+  base_args: []
+  base_env: {}
+
+dependencies:
+  - note: "Audio extras — needed to serve the audio modality"
+    command: 'uv pip install "vllm[audio]"'
+    optional: true
+
+features:
+  tool_calling:
+    description: "Enable automatic tool choice with Gemma 4 parser and chat template"
+    args:
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser"
+      - "gemma4"
+      - "--chat-template"
+      - "examples/tool_chat_template_gemma4.jinja"
+  reasoning:
+    description: "Enable structured thinking/reasoning output"
+    args:
+      - "--reasoning-parser"
+      - "gemma4"
+  text_only:
+    description: "Skip loading the vision and audio encoders for text-only workloads — frees VRAM for KV cache. Mutually exclusive with encoder_parallel."
+    args:
+      - "--language-model-only"
+  spec_decoding:
+    description: "MTP speculative decoding with centroids masking for accelerated inference"
+    args:
+      - "--speculative-config"
+      - '{"model":"google/gemma-4-E2B-it-assistant","num_speculative_tokens":2}'
+
+opt_in_features:
+  - text_only
+  - spec_decoding
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 13
+    description: "Full BF16 — single 24 GB+ NVIDIA GPU or 1x MI300X/MI325X/MI350X/MI355X or 1x Xeon6/Xeon5 NUMA node"
+    supported_hardware: [h100, mi300x, mi325x, mi355x, trillium, ironwood, xeon6]
+  fp8:
+    model_id: "RedHatAI/gemma-4-E2B-it-FP8-dynamic"
+    precision: fp8
+    vram_minimum_gb: 6
+    description: "FP8 (E4M3) linear weights with dynamic per-token activation quantization (vision/audio encoders stay BF16) — Hopper or Blackwell"
+    supported_hardware: [h100]
+    extra_args:
+      - "--kv-cache-dtype"
+      - "fp8"
+  w4a16:
+    model_id: "google/gemma-4-E2B-it-qat-w4a16-ct"
+    precision: int4
+    vram_minimum_gb: 8
+    description: "W4A16 QAT (4-bit weights, 16-bit activations, group_size=32) via compressed-tensors — runs on any GPU"
+    supported_hardware: [h100, mi300x, mi325x, mi355x]
+  mobile:
+    model_id: "google/gemma-4-E2B-it-qat-mobile-ct"
+    precision: int2/4/8
+    vram_minimum_gb: 4
+    description: "Mobile QAT — mixed int2/4/8 compressed-tensors (int2 embeddings + lm_head + deep MLP, int4 attention + early MLP, int8 vision + gates). 3.6× weight compression vs BF16, up to 1.25× faster decode at low batch"
+    supported_hardware: [h100, mi300x, mi325x, mi355x]
+
+compatible_strategies:
+  - single_node_tp
+  - multi_node_tp
+
+strategy_overrides:
+  single_node_tp:
+    tp: 1
+
+guide: |
+  ## Overview
+
+  [Gemma 4 E2B](https://huggingface.co/google/gemma-4-E2B-it) is the smallest member of Google's Gemma 4 family — an effective-2B unified multimodal model that natively processes text, images, and audio, with structured thinking/reasoning, function calling, and dynamic vision resolution. It runs comfortably on a single 24 GB+ GPU.
+
+  Intel Xeon 6 CPU support remains verified. No additional benchmark-specific CPU
+  tuning is prescribed for general deployment.
+
+  ### Key Features
+  - **Multimodal**: Text + images + audio natively (video via custom frame-extraction pipeline).
+  - **Dual Attention**: Alternating sliding-window (local) and global attention with different head dimensions.
+  - **Thinking Mode**: Structured reasoning via `<|channel>thought\n...<channel|>` delimiters.
+  - **Function Calling**: Custom tool-call protocol with dedicated special tokens.
+  - **Dynamic Vision Resolution**: Per-request configurable vision token budget (70, 140, 280, 560, 1120 tokens).
+
+  TPU support is provided through [vLLM TPU](https://github.com/vllm-project/tpu-inference) with recipes for [Trillium](https://github.com/AI-Hypercomputer/tpu-recipes/tree/main/inference/trillium/vLLM/Gemma4) and [Ironwood](https://github.com/AI-Hypercomputer/tpu-recipes/blob/main/inference/ironwood/vLLM/Gemma4/).
+
+  ## Prerequisites
+
+  - Hardware: Intel Xeon 6/Xeon 5 CPUs
+  - vLLM >= 0.19.1
+
+  ### pip (NVIDIA CUDA)
+  ```bash
+  uv venv
+  source .venv/bin/activate
+  uv pip install -U vllm --pre \
+    --extra-index-url https://wheels.vllm.ai/nightly/cu129 \
+    --extra-index-url https://download.pytorch.org/whl/cu129 \
+    --index-strategy unsafe-best-match
+  ```
+
+  ### pip (AMD ROCm: MI300X, MI325X, MI350X, MI355X)
+  Requires Python 3.12, ROCm 7.2.1, glibc >= 2.35 (Ubuntu 22.04+).
+  ```bash
+  uv venv --python 3.12
+  source .venv/bin/activate
+  uv pip install vllm --pre \
+    --extra-index-url https://wheels.vllm.ai/rocm/nightly/rocm721 --upgrade
+  ```
+  ### pip (Intel Xeon 6 CPUs)
+  For Intel and AMD x86 CPUs, follow the [CPU pre-built wheels](https://docs.vllm.ai/en/latest/getting_started/installation/cpu/#pre-built-wheels) installation instructions.
+
+
+
+  ### Docker
+  ```bash
+  docker pull vllm/vllm-openai:gemma4-0505-cu129  # NVIDIA Hopper (H100/H200, CUDA 12.9)
+  docker pull vllm/vllm-openai:gemma4-0505-cu130  # NVIDIA Blackwell (B200/B300, CUDA 13.0)
+  docker pull vllm/vllm-openai-rocm:latest   # AMD
+  docker pull vllm/vllm-openai-cpu:latest-x86_64 # For Intel Xeon 6
+  ```
+
+  ## Deployment Configurations
+
+  ### Quick Start (Single GPU)
+  ```bash
+  vllm serve google/gemma-4-E2B-it \
+    --max-model-len 32768
+  ```
+
+  ### With Audio Support
+  ```bash
+  vllm serve google/gemma-4-E2B-it \
+    --max-model-len 8192 \
+    --limit-mm-per-prompt '{"image": 4, "audio": 1}'
+  ```
+
+  ### Full-Featured Server Launch
+  Enables text, image, audio, thinking, and tool calling:
+  ```bash
+  vllm serve google/gemma-4-E2B-it \
+    --max-model-len 16384 \
+    --gpu-memory-utilization 0.90 \
+    --enable-auto-tool-choice \
+    --reasoning-parser gemma4 \
+    --tool-call-parser gemma4 \
+    --chat-template examples/tool_chat_template_gemma4.jinja \
+    --limit-mm-per-prompt '{"image": 4, "audio": 1}' \
+    --async-scheduling \
+    --host 0.0.0.0 \
+    --port 8000
+  ```
+
+  ### Docker (NVIDIA)
+  ```bash
+  docker run -itd --name gemma4-e2b \
+    --ipc=host --network host --shm-size 16G --gpus all \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    vllm/vllm-openai:gemma4-0505-cu129 \
+      --model google/gemma-4-E2B-it \
+      --max-model-len 32768 \
+      --host 0.0.0.0 --port 8000
+  ```
+  Swap `vllm/vllm-openai:gemma4-0505-cu129` for `vllm/vllm-openai:gemma4-0505-cu130` on Blackwell (B200/B300).
+
+  ### Docker (AMD MI300X/MI325X/MI350X/MI355X)
+  ```bash
+  docker run -itd --name gemma4-rocm \
+    --ipc=host --network=host --privileged \
+    --cap-add=CAP_SYS_ADMIN --device=/dev/kfd --device=/dev/dri \
+    --group-add=video --cap-add=SYS_PTRACE \
+    --security-opt=seccomp=unconfined --shm-size 16G \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    vllm/vllm-openai-rocm:latest \
+      --model google/gemma-4-E2B-it \
+      --host 0.0.0.0 --port 8000
+  ```
+
+  ### Docker (Cloud TPU — Trillium / Ironwood)
+  TPU uses the separate `vllm/vllm-tpu` image (no pip wheel). Pull the tag specified by the upstream [Trillium](https://github.com/AI-Hypercomputer/tpu-recipes/tree/main/inference/trillium/vLLM/Gemma4) or [Ironwood](https://github.com/AI-Hypercomputer/tpu-recipes/blob/main/inference/ironwood/vLLM/Gemma4/) recipe, then run:
+  ```bash
+  docker run -itd --name gemma4-tpu \
+    --privileged --network host --shm-size 16G \
+    -v /dev/shm:/dev/shm -e HF_TOKEN=$HF_TOKEN \
+    vllm/vllm-tpu:latest \
+      --model google/gemma-4-E2B-it \
+      --max-model-len 16384 \
+      --disable_chunked_mm_input \
+      --host 0.0.0.0 --port 8000
+  ```
+
+  ### Intel Xeon 6 Deployment via Docker
+
+  Launch the x86 CPU vLLM Docker container for `google/gemma-4-E2B-it`:
+
+  ```bash
+  docker run \
+    --privileged --ipc=host -p 8000:8000 \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    vllm/vllm-openai-cpu:latest-x86_64 google/gemma-4-E2B-it \
+    --tensor-parallel-size 1 \
+    --enable-auto-tool-choice \
+    --tool-call-parser gemma4 \
+    --chat-template examples/tool_chat_template_gemma4.jinja \
+    --reasoning-parser gemma4
+  ```
+
+
+  The following settings are intentionally not prescribed as portable CPU model
+  defaults because they depend on the workload, hardware, or runtime environment:
+
+  - `--max-num-batched-tokens`: scheduler/throughput tuning.
+  - `--max-num-seqs`: concurrency and scheduler-capacity tuning.
+  - `--gpu-memory-utilization`: platform memory-budget tuning.
+  - `--no-enable-prefix-caching`: workload/benchmark cache-policy tuning.
+  - `VLLM_ENGINE_ITERATION_TIMEOUT_S`: operational runtime timeout.
+
+  These settings may still appear in validated hardware-specific overrides. Tune
+  them at deployment time based on platform resources, workload shape, and
+  latency/throughput goals.
+
+  ## Client Usage
+
+  ### Audio Transcription
+  ```python
+  from openai import OpenAI
+  client = OpenAI(base_url="http://localhost:8000/v1", api_key="EMPTY")
+  response = client.chat.completions.create(
+      model="google/gemma-4-E2B-it",
+      messages=[{"role": "user", "content": [
+          {"type": "audio_url", "audio_url": {"url": "https://upload.wikimedia.org/wikipedia/commons/2/22/Beatbox_by_Wikipedia_user_Wikipedia_Brown.ogg"}},
+          {"type": "text", "text": "Provide a verbatim, word-for-word transcription of the audio."},
+      ]}],
+      max_tokens=512,
+  )
+  print(response.choices[0].message.content)
+  ```
+
+  ### Image Understanding
+  ```python
+  response = client.chat.completions.create(
+      model="google/gemma-4-E2B-it",
+      messages=[{"role": "user", "content": [
+          {"type": "image_url", "image_url": {"url": "https://upload.wikimedia.org/wikipedia/commons/thumb/3/3a/Cat03.jpg/1200px-Cat03.jpg"}},
+          {"type": "text", "text": "Describe this image in detail."},
+      ]}],
+      max_tokens=1024,
+  )
+  ```
+
+  ### Thinking Mode
+  Launch with reasoning parser, then enable per-request:
+  ```bash
+  vllm serve google/gemma-4-E2B-it \
+    --max-model-len 16384 \
+    --reasoning-parser gemma4 \
+    --tool-call-parser gemma4 \
+    --enable-auto-tool-choice \
+    --chat-template examples/tool_chat_template_gemma4.jinja
+  ```
+  Enable per-request via `extra_body={"chat_template_kwargs": {"enable_thinking": True}}`.
+
+  ## Configuration Tips
+
+  - Set `--max-model-len` to match your workload (max 131072).
+  - Image-only workloads: `--limit-mm-per-prompt.audio 0`.
+  - Text-only workloads: `--limit-mm-per-prompt '{"image": 0, "audio": 0}'` to skip MM profiling.
+  - `--async-scheduling` improves throughput.
+  - FP8 KV cache (`--kv-cache-dtype fp8`) saves ~50% KV memory.
+
+  ## Quantized Variant
+
+  [`RedHatAI/gemma-4-E2B-it-FP8-dynamic`](https://huggingface.co/RedHatAI/gemma-4-E2B-it-FP8-dynamic) is a pre-quantized FP8 (E4M3) checkpoint — linear weights with dynamic per-token activation quantization, vision/audio encoders kept in BF16. Runs on Hopper and Blackwell. Pick the **fp8** variant above, or pass the repo id directly to `vllm serve`.
+
+  ## Speculative Decoding (MTP)
+
+  Enable the **Spec Decoding** feature toggle (above) or add `--speculative-config` manually to use MTP drafting with the [assistant model](https://huggingface.co/google/gemma-4-E2B-it-assistant). Recommended `num_speculative_tokens`: 2 for this model. The E2B assistant uses centroids masking for efficient sparse logit computation. See the [Gemma 4 usage guide](../../Google/Gemma4) for details and benchmarks.
+
+  > **Note:** MTP speculative decoding for Gemma 4 is only available on the vLLM nightly build — it has not yet landed in a stable release. Install via the nightly wheel (`uv pip install -U vllm --pre --extra-index-url https://wheels.vllm.ai/nightly/cu129 …`) or use the `vllm/vllm-openai:gemma4-0505-cu129` / `vllm/vllm-openai:gemma4-0505-cu130` images above; the standard `:latest` stable tag does not include this feature.
+
+  ## References
+
+  - [Model card](https://huggingface.co/google/gemma-4-E2B-it)
+  - [FP8 variant](https://huggingface.co/RedHatAI/gemma-4-E2B-it-FP8-dynamic)
+  - [Gemma docs](https://ai.google.dev/gemma/docs)
+  - [vLLM Gemma 4 tool-call template](https://github.com/vllm-project/vllm/blob/main/examples/tool_chat_template_gemma4.jinja)
+  - [TPU recipes: Trillium](https://github.com/AI-Hypercomputer/tpu-recipes/tree/main/inference/trillium/vLLM/Gemma4)
+  - [TPU recipes: Ironwood](https://github.com/AI-Hypercomputer/tpu-recipes/blob/main/inference/ironwood/vLLM/Gemma4/)

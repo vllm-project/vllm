@@ -1,0 +1,205 @@
+meta:
+  title: "Qwen2.5-VL-72B-Instruct"
+  slug: "qwen2.5-vl-72b-instruct"
+  provider: "Qwen"
+  description: "Qwen2.5-VL dense vision-language model (72B) for high-quality image and video understanding."
+  date_added: 2025-08-22
+  date_updated: 2026-04-17
+  tasks:
+    - multimodal
+    - text
+  performance_headline: "Verified on 4x A100 and 4x MI300X/MI325X/MI355X with BF16"
+  related_recipes:
+    - "Qwen/Qwen2.5-VL-7B-Instruct"
+  hardware:
+    mi300x: verified
+    mi325x: verified
+    mi355x: verified
+
+model:
+  model_id: "Qwen/Qwen2.5-VL-72B-Instruct"
+  min_vllm_version: "0.10.2"
+  architecture: dense
+  parameter_count: "72B"
+  active_parameters: "72B"
+  context_length: 128000
+  base_args: []
+  base_env: {}
+
+features:
+  text_only:
+    description: "Skip loading the vision encoder for text-only workloads — frees VRAM for KV cache. Mutually exclusive with encoder_parallel."
+    args:
+      - "--language-model-only"
+  encoder_parallel:
+    description: "Run the vision encoder in data-parallel mode — avoids TP comm overhead on the small encoder. Mutually exclusive with text_only."
+    args:
+      - "--mm-encoder-tp-mode"
+      - "data"
+
+opt_in_features:
+  - text_only
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 173
+    description: "Full precision BF16 — 4x A100 80GB or 4x MI300X/MI325X/MI355X"
+  awq:
+    model_id: "Qwen/Qwen2.5-VL-72B-Instruct-AWQ"
+    precision: int4
+    vram_minimum_gb: 43
+    description: "AWQ 4-bit quantized weights"
+    extra_args:
+      - "--quantization"
+      - "awq"
+
+  fp8:
+    model_id: "RedHatAI/Qwen2.5-VL-72B-Instruct-FP8-dynamic"
+    precision: fp8
+    vram_minimum_gb: 87
+    description: "RedHatAI FP8 (E4M3) with dynamic per-token activation quantization"
+    extra_args:
+      - "--kv-cache-dtype"
+      - "fp8"
+
+compatible_strategies:
+  - single_node_tp
+  - multi_node_tp
+  - multi_node_tp_pp
+
+kv_offload_support:
+  offloading_cpu: verified
+  offloading_fs: verified
+
+hardware_overrides:
+  hopper:
+    extra_args:
+      - "--mm-encoder-tp-mode"
+      - "data"
+    extra_env: {}
+  blackwell:
+    extra_args:
+      - "--mm-encoder-tp-mode"
+      - "data"
+    extra_env: {}
+  amd:
+    # PR #125 verified on MI300X only; TP=2 for throughput, TP=8 for latency.
+    extra_args:
+      - "--mm-encoder-tp-mode"
+      - "data"
+      - "--limit-mm-per-prompt"
+      - '{"image":2,"video":0}'
+    extra_env:
+      VLLM_ROCM_USE_AITER: "1"
+
+strategy_overrides: {}
+
+guide: |
+  ## Overview
+
+  This guide describes how to run Qwen2.5-VL series on the targeted accelerated stack. Since BF16 is the commonly used precision for Qwen2.5-VL training, using BF16 in inference ensures the best accuracy.
+
+  ## Prerequisites
+
+  ### NVIDIA
+  ```bash
+  uv venv
+  source .venv/bin/activate
+  uv pip install -U vllm --torch-backend auto
+  ```
+
+  ### AMD ROCm (MI300X, MI325X, MI355X)
+  > Note: The vLLM wheel for ROCm requires Python 3.12, ROCm 7.0, and glibc >= 2.35. Use the Docker flow if your environment is incompatible.
+  ```bash
+  uv venv
+  source .venv/bin/activate
+  uv pip install vllm --extra-index-url https://wheels.vllm.ai/rocm
+  ```
+
+  ### TPU Deployment
+  TPU support has been verified for the smaller [Qwen2.5-VL-7B-Instruct](/Qwen/Qwen2.5-VL-7B-Instruct) on a single v6e chip — the 72B is not yet validated on Trillium. See the [upstream TPU recipe](https://github.com/AI-Hypercomputer/tpu-recipes/tree/main/inference/trillium/vLLM/Qwen2.5-VL) (7B).
+
+  ## Deployment Configurations
+
+  ### 4xA100 (BF16, TP=4)
+  ```bash
+  export CUDA_VISIBLE_DEVICES=0,1,2,3
+  vllm serve Qwen/Qwen2.5-VL-72B-Instruct  \
+    --host 0.0.0.0 \
+    --port 8000 \
+    --tensor-parallel-size 4 \
+    --mm-encoder-tp-mode data \
+    --limit-mm-per-prompt '{"image":2,"video":0}'
+  ```
+
+  ### 4xMI300X/MI325X/MI355X (BF16, TP=4)
+  ```bash
+  export CUDA_VISIBLE_DEVICES=0,1,2,3
+  export VLLM_ROCM_USE_AITER=1
+  vllm serve Qwen/Qwen2.5-VL-72B-Instruct  \
+    --host 0.0.0.0 \
+    --port 8000 \
+    --tensor-parallel-size 4 \
+    --mm-encoder-tp-mode data \
+    --limit-mm-per-prompt '{"image":2,"video":0}'
+  ```
+
+  ### Qwen2.5-VL-7B-Instruct (DP=4)
+  For medium-size 7B model, data parallelism works better.
+
+  ```bash
+  export CUDA_VISIBLE_DEVICES=0,1,2,3
+  vllm serve Qwen/Qwen2.5-VL-7B-Instruct  \
+    --host 0.0.0.0 \
+    --port 8000 \
+    --data-parallel-size 4 \
+    --limit-mm-per-prompt '{"image":2,"video":0}'
+  ```
+
+  ## Configuration Tips
+
+  - `--max-model-len 65536` is usually good for most scenarios (native context is 128K).
+  - For A100-80GB devices, TP must be >= 2 to avoid OOM.
+  - `--limit-mm-per-prompt` caps incoming multimodal requests.
+  - `--mm-encoder-tp-mode data` deploys the small ViT encoder in DP fashion (ViT ≈ 675M vs 72B LM).
+  - vLLM uses 90% of GPU memory by default; set `--gpu-memory-utilization=0.95` to maximize KV cache.
+
+  ## Benchmarking
+
+  Launch the server with `--no-enable-prefix-caching` to get consistent measurements.
+
+  ### VisionArena-Chat
+  ```bash
+  vllm bench serve \
+    --host 0.0.0.0 \
+    --port 8000 \
+    --backend openai-chat \
+    --endpoint /v1/chat/completions \
+    --model Qwen/Qwen2.5-VL-72B-Instruct \
+    --dataset-name hf \
+    --dataset-path lmarena-ai/VisionArena-Chat \
+    --num-prompts 128
+  ```
+
+  ### Random Synthetic
+  ```bash
+  vllm bench serve \
+    --host 0.0.0.0 \
+    --port 8000 \
+    --model Qwen/Qwen2.5-VL-72B-Instruct \
+    --dataset-name random \
+    --random-input-len 8000 \
+    --random-output-len 1000 \
+    --num-prompts 128
+  ```
+
+  Workload mixes:
+  - Prompt-heavy: 8000 in / 1000 out
+  - Decode-heavy: 1000 in / 8000 out
+  - Balanced: 1000 in / 1000 out
+
+  ## References
+
+  - [Model card](https://huggingface.co/Qwen/Qwen2.5-VL-72B-Instruct)
+  - [vLLM multimodal inputs guide](https://docs.vllm.ai/en/latest/features/multimodal_inputs.html)

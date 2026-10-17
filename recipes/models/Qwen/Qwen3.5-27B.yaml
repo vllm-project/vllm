@@ -1,0 +1,209 @@
+meta:
+  title: "Qwen3.5-27B"
+  slug: "qwen3.5-27b"
+  provider: "Qwen"
+  description: "Qwen3.5 dense multimodal model (27B) with gated delta networks hybrid attention, MTP, and 262K context"
+  date_added: 2026-04-22
+  date_updated: 2026-09-14
+  tasks:
+    - multimodal
+    - text
+  performance_headline: "Qwen3.5 flagship dense — single-GPU FP8 or 2x GPU or 2-4x Intel Arc Pro B60/B70 BF16"
+  related_recipes:
+    - "Qwen/Qwen3.5-397B-A17B"
+    - "Qwen/Qwen3.5-35B-A3B"
+    - "Qwen/Qwen3.5-9B"
+  hardware:
+    arc_pro_b60: verified
+    arc_pro_b70: verified
+
+model:
+  model_id: "Qwen/Qwen3.5-27B"
+  min_vllm_version: "0.17.0"
+  default_frontend: rust
+  architecture: dense
+  parameter_count: "27B"
+  active_parameters: "27B"
+  context_length: 262144
+  base_args:
+    - "--trust-remote-code"
+  base_env: {}
+
+features:
+  tool_calling:
+    description: "Enable automatic tool choice with Qwen3 Coder parser"
+    args:
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser"
+      - "qwen3_coder"
+  reasoning:
+    description: "Enable chain-of-thought reasoning with Qwen3 parser"
+    args:
+      - "--reasoning-parser"
+      - "qwen3"
+  spec_decoding:
+    description: "Multi-token prediction speculative decoding for lower latency"
+    args:
+      - "--speculative-config"
+      - '{"method":"mtp","num_speculative_tokens":1}'
+  text_only:
+    description: "Skip loading the vision encoder for text-only workloads — frees VRAM for KV cache. Mutually exclusive with encoder_parallel."
+    args:
+      - "--language-model-only"
+  encoder_parallel:
+    description: "Run the vision encoder in data-parallel mode — avoids TP comm overhead on the small encoder. Mutually exclusive with text_only."
+    args:
+      - "--mm-encoder-tp-mode"
+      - "data"
+  long_context:
+    description: "YaRN RoPE scaling past the native 262,144-token window to ~1,010,000 tokens. Static YaRN holds the scaling factor constant regardless of input length, so leave this off unless you actually serve long prompts; for ~524K, halve the factor to 2.0."
+    args:
+      - "--hf-overrides"
+      - '{"text_config": {"rope_parameters": {"mrope_interleaved": true, "mrope_section": [11, 11, 10], "rope_type": "yarn", "rope_theta": 10000000, "partial_rotary_factor": 0.25, "factor": 4.0, "original_max_position_embeddings": 262144}}}'
+      - "--max-model-len"
+      - "1010000"
+    env:
+      VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
+
+opt_in_features:
+  - spec_decoding
+  - text_only
+  - long_context
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 65
+    description: "Full precision BF16 — fits on 1x H200, 2x H100, 4x Intel Arc Pro B60, 2x Intel Arc Pro B70"
+  fp8:
+    model_id: "Qwen/Qwen3.5-27B-FP8"
+    precision: fp8
+    vram_minimum_gb: 33
+    description: "Qwen official FP8 checkpoint — single 40 GB GPU"
+  gptq_int4:
+    model_id: "Qwen/Qwen3.5-27B-GPTQ-Int4"
+    precision: int4
+    vram_minimum_gb: 17
+    description: "GPTQ Int4 checkpoint — fits on a single 24 GB GPU"
+
+compatible_strategies:
+  - single_node_tp
+  - multi_node_tp
+
+hardware_overrides:
+  xpu:
+    extra_args:
+      - "--enforce-eager"
+
+strategy_overrides: {}
+
+guide: |
+  ## Overview
+
+  [Qwen3.5-27B](https://huggingface.co/Qwen/Qwen3.5-27B) is the flagship dense
+  model of the Qwen3.5 family. It uses the same gated delta networks hybrid
+  attention as its MoE siblings, supports vision+text input, and natively serves
+  262K context. MTP (multi-token prediction) is supported out of the box for
+  low-latency decoding.
+
+  ## Prerequisites
+
+  - **vLLM version:** >= 0.17.0
+  - **Hardware (BF16):** 1x H200, 2x H100, 4x Intel Arc Pro B60, 2x Intel Arc Pro B70
+  - **Hardware (FP8):** single 40 GB GPU (H100/H200/L40S)
+  - **Hardware (Int4):** single 24 GB GPU
+
+  ### Install vLLM
+
+  ```bash
+  uv venv
+  source .venv/bin/activate
+  uv pip install -U vllm --torch-backend=auto
+  ```
+
+  ### Docker
+  ```bash
+  docker pull vllm/vllm-openai-xpu:latest  # Intel XPU (B60 / B70)
+  ```
+
+  ## Launching the Server
+
+  ### Single-GPU FP8
+
+  ```bash
+  vllm serve Qwen/Qwen3.5-27B-FP8 \
+    --max-model-len 262144 \
+    --reasoning-parser qwen3
+  ```
+
+  ### BF16 on 2xH100 (TP2)
+
+  ```bash
+  vllm serve Qwen/Qwen3.5-27B \
+    --tensor-parallel-size 2 \
+    --max-model-len 262144 \
+    --reasoning-parser qwen3
+  ```
+
+  ### MTP speculative decoding
+
+  ```bash
+  vllm serve Qwen/Qwen3.5-27B-FP8 \
+    --speculative-config '{"method": "mtp", "num_speculative_tokens": 1}' \
+    --reasoning-parser qwen3
+  ```
+
+  ### Text-only (skip vision encoder)
+
+  ```bash
+  vllm serve Qwen/Qwen3.5-27B-FP8 \
+    --language-model-only \
+    --reasoning-parser qwen3 \
+    --enable-prefix-caching
+  ```
+
+  ### Docker (Intel XPU B60 / B70)
+
+  Validated on 4× Intel Arc Pro B60 or 2x Intel Arc Pro B70 (B60 24 GB, B70 32 GB per card) with the
+  official vLLM XPU image `vllm/vllm-openai-xpu:latest`.
+
+  ```bash
+  docker run --device /dev/dri \
+    -v /dev/dri/by-path:/dev/dri/by-path --shm-size=16g \
+    --privileged --ipc=host -p 8000:8000 \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    vllm/vllm-openai-xpu:latest \
+    Qwen/Qwen3.5-27B \
+    --reasoning-parser qwen3 \
+    --tensor-parallel-size 4 \
+    --max-model-len 8192 \
+    --enforce-eager
+  ```
+
+  ## Client Usage
+
+  ```python
+  from openai import OpenAI
+
+  client = OpenAI(api_key="EMPTY", base_url="http://localhost:8000/v1")
+  resp = client.chat.completions.create(
+      model="Qwen/Qwen3.5-27B",
+      messages=[{"role": "user", "content": "Write a haiku about gated delta networks."}],
+      max_tokens=256,
+  )
+  print(resp.choices[0].message.content)
+  ```
+
+  ## Troubleshooting
+
+  - **CUDA graph / Mamba cache size error:** reduce `--max-cudagraph-capture-size`
+    (default 512). See [vLLM PR #34571](https://github.com/vllm-project/vllm/pull/34571).
+  - **Disable reasoning:** add `--default-chat-template-kwargs '{"enable_thinking": false}'`.
+  - **Prefix Caching (Mamba):** currently experimental in "align" mode.
+
+  ## References
+
+  - [Model card](https://huggingface.co/Qwen/Qwen3.5-27B)
+  - [FP8 checkpoint](https://huggingface.co/Qwen/Qwen3.5-27B-FP8)
+  - [GPTQ-Int4 checkpoint](https://huggingface.co/Qwen/Qwen3.5-27B-GPTQ-Int4)
+  - [Qwen3.5-397B-A17B recipe](../Qwen3.5-397B-A17B)
