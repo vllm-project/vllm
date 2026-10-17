@@ -534,15 +534,17 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
       # Generate sources:
       set(MACHETE_GEN_SCRIPT
         ${CMAKE_CURRENT_SOURCE_DIR}/csrc/quantization/machete/generate.py)
-      file(MD5 ${MACHETE_GEN_SCRIPT} MACHETE_GEN_SCRIPT_HASH)
-      file(MD5
-        ${CMAKE_CURRENT_SOURCE_DIR}/csrc/cutlass_extensions/vllm_cutlass_library_extension.py
-        MACHETE_GEN_EXT_HASH)
-      run_source_generator(Machete machete_generation.log
-        ${CMAKE_CURRENT_SOURCE_DIR}/csrc/quantization/machete/generated/generate.hash
-        "${MACHETE_GEN_SCRIPT_HASH}(EXT:${MACHETE_GEN_EXT_HASH},CUTLASS:${CUTLASS_REVISION}${VLLM_CUTLASS_SRC_DIR})"
-        ${CMAKE_COMMAND} -E env
-        PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/csrc/cutlass_extensions/:${CUTLASS_DIR}/python/:${VLLM_PYTHON_PATH}:$ENV{PYTHONPATH}
+      file(GLOB MACHETE_CUTLASS_LIBRARY_SRCS ${CUTLASS_DIR}/python/cutlass_library/*.py)
+      run_source_generator(Machete
+        LOG machete_generation.log
+        STAMP ${CMAKE_CURRENT_SOURCE_DIR}/csrc/quantization/machete/generated/generate.hash
+        OUTPUTS ${CMAKE_CURRENT_SOURCE_DIR}/csrc/quantization/machete/generated/*.cu
+        INPUTS
+          ${MACHETE_GEN_SCRIPT}
+          ${CMAKE_CURRENT_SOURCE_DIR}/csrc/cutlass_extensions/vllm_cutlass_library_extension.py
+          ${MACHETE_CUTLASS_LIBRARY_SRCS}
+        COMMAND ${CMAKE_COMMAND} -E env
+          PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/csrc/cutlass_extensions/:${CUTLASS_DIR}/python/:${VLLM_PYTHON_PATH}:$ENV{PYTHONPATH}
           ${Python_EXECUTABLE} ${MACHETE_GEN_SCRIPT})
 
       # Add machete generated sources
@@ -643,13 +645,14 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
       # Generate sources:
       set(MARLIN_GEN_SCRIPT
         ${CMAKE_CURRENT_SOURCE_DIR}/csrc/quantization/marlin/generate_kernels.py)
-      file(MD5 ${MARLIN_GEN_SCRIPT} MARLIN_GEN_SCRIPT_HASH)
       list(JOIN CUDA_ARCHS "," CUDA_ARCHS_STR)
-      run_source_generator(Marlin marlin_generation.log
-        ${CMAKE_CURRENT_SOURCE_DIR}/csrc/quantization/marlin/generate_kernels.hash
-        "${MARLIN_GEN_SCRIPT_HASH}(ARCH:${CUDA_ARCHS_STR})"
-        ${CMAKE_COMMAND} -E env
-        PYTHONPATH=$ENV{PYTHONPATH}
+      run_source_generator(Marlin
+        LOG marlin_generation.log
+        STAMP ${CMAKE_CURRENT_SOURCE_DIR}/csrc/quantization/marlin/generate_kernels.hash
+        OUTPUTS ${CMAKE_CURRENT_SOURCE_DIR}/csrc/quantization/marlin/kernel_selector.h
+        INPUTS ${MARLIN_GEN_SCRIPT}
+        KEY "(ARCH:${CUDA_ARCHS_STR})"
+        COMMAND ${CMAKE_COMMAND} -E env PYTHONPATH=$ENV{PYTHONPATH}
           ${Python_EXECUTABLE} ${MARLIN_GEN_SCRIPT} ${CUDA_ARCHS_STR})
 
       if (MARLIN_ARCHS)
@@ -1313,13 +1316,14 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     # Generate sources:
     set(MOE_MARLIN_GEN_SCRIPT
       ${CMAKE_CURRENT_SOURCE_DIR}/csrc/quantization/marlin/generate_kernels.py)
-    file(MD5 ${MOE_MARLIN_GEN_SCRIPT} MOE_MARLIN_GEN_SCRIPT_HASH)
     list(JOIN CUDA_ARCHS "," CUDA_ARCHS_STR)
-    run_source_generator("Marlin MOE" moe_marlin_generation.log
-      ${CMAKE_CURRENT_SOURCE_DIR}/csrc/moe/marlin_moe_wna16/generate_kernels.hash
-      "${MOE_MARLIN_GEN_SCRIPT_HASH}(ARCH:${CUDA_ARCHS_STR})"
-      ${CMAKE_COMMAND} -E env
-      PYTHONPATH=$ENV{PYTHONPATH}
+    run_source_generator("Marlin MOE"
+      LOG moe_marlin_generation.log
+      STAMP ${CMAKE_CURRENT_SOURCE_DIR}/csrc/moe/marlin_moe_wna16/generate_kernels.hash
+      OUTPUTS ${CMAKE_CURRENT_SOURCE_DIR}/csrc/moe/marlin_moe_wna16/kernel_selector.h
+      INPUTS ${MOE_MARLIN_GEN_SCRIPT}
+      KEY "(ARCH:${CUDA_ARCHS_STR})"
+      COMMAND ${CMAKE_COMMAND} -E env PYTHONPATH=$ENV{PYTHONPATH}
         ${Python_EXECUTABLE} ${MOE_MARLIN_GEN_SCRIPT} ${CUDA_ARCHS_STR}
         ${CMAKE_CURRENT_SOURCE_DIR}/csrc/moe/marlin_moe_wna16)
 

@@ -206,15 +206,32 @@ class CMakeExtension(Extension):
         self.cmake_lists_dir = os.path.abspath(cmake_lists_dir)
 
 
+# Environment variables CMake only reads on the first configure.
+CMAKE_ENV_VARS = (
+    "CMAKE_ARGS",
+    "CC",
+    "CXX",
+    "CUDACXX",
+    "CUDAHOSTCXX",
+    "HIPCXX",
+    "CFLAGS",
+    "CXXFLAGS",
+    "CUDAFLAGS",
+    "HIPFLAGS",
+    "LDFLAGS",
+)
+
+
 class CMakeBuildEnv(TypedDict):
     """Inputs a configured CMake build directory is tied to."""
 
     python: str
     torch_dir: str
     torch_version: str
+    toolkit: str | None
     generator: str | None
     launcher: str | None
-    cmake_args: str | None
+    env: dict[str, str | None]
 
 
 class cmake_build_ext(build_ext):
@@ -308,8 +325,7 @@ class cmake_build_ext(build_ext):
         ]
 
         verbose = envs.VERBOSE
-        if verbose:
-            cmake_args += ["-DCMAKE_VERBOSE_MAKEFILE=ON"]
+        cmake_args += [f"-DCMAKE_VERBOSE_MAKEFILE={'ON' if verbose else 'OFF'}"]
 
         if is_sccache_available():
             launcher = "sccache"
@@ -346,6 +362,8 @@ class cmake_build_ext(build_ext):
 
         if nvcc_threads:
             cmake_args += [f"-DNVCC_THREADS={nvcc_threads}"]
+        else:
+            cmake_args += ["-UNVCC_THREADS"]
 
         if is_ninja_available():
             generator = "Ninja"
@@ -359,10 +377,13 @@ class cmake_build_ext(build_ext):
             generator = os.environ.get("CMAKE_GENERATOR")
             build_tool = []
         # Make sure we use the nvcc from CUDA_HOME
+        toolkit = None
         if _is_cuda() and CUDA_HOME is not None:
             cmake_args += [f"-DCMAKE_CUDA_COMPILER={CUDA_HOME}/bin/nvcc"]
+            toolkit = os.path.realpath(CUDA_HOME)
         elif _is_hip() and ROCM_HOME is not None:
             cmake_args += [f"-DROCM_PATH={ROCM_HOME}"]
+            toolkit = os.path.realpath(ROCM_HOME)
 
         other_cmake_args = os.environ.get("CMAKE_ARGS")
         if other_cmake_args:
@@ -372,9 +393,10 @@ class cmake_build_ext(build_ext):
             python=os.path.realpath(sys.executable),
             torch_dir=os.path.dirname(torch.__file__),
             torch_version=torch.__version__,
+            toolkit=toolkit,
             generator=generator,
             launcher=launcher,
-            cmake_args=other_cmake_args,
+            env={var: os.environ.get(var) for var in CMAKE_ENV_VARS},
         )
         stamp = Path(self.build_temp, "vllm_build_env.json")
         fresh = []

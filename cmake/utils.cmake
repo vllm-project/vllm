@@ -40,28 +40,44 @@ function (run_python OUT EXPR ERR_MSG)
 endfunction()
 
 #
-# Generate sources by running `COMMAND` (the remaining arguments) unless
-# `STAMP_FILE` already holds `KEY`. The stamp is kept next to the generated
-# sources so it is shared across build directories, and removed before
-# regenerating so an interrupted run is redone. Output goes to `LOG_NAME` in
-# the build directory.
+# Generate sources by running `COMMAND`, unless `STAMP` already holds the key
+# for `INPUTS` (files hashed) and `KEY` (extra string) and the `OUTPUTS` glob
+# matches something. The stamp is kept next to the generated sources so it is
+# shared across build directories, and removed before regenerating so an
+# interrupted run is redone. `INPUTS` also rerun configure when edited.
 #
-function (run_source_generator NAME LOG_NAME STAMP_FILE KEY)
+# run_source_generator(<name> LOG <file> STAMP <file> OUTPUTS <glob>
+#                      INPUTS <files...> [KEY <string>] COMMAND <cmd...>)
+#
+function (run_source_generator NAME)
+  cmake_parse_arguments(PARSE_ARGV 1 _GEN
+    "" "LOG;STAMP;OUTPUTS;KEY" "INPUTS;COMMAND")
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${_GEN_INPUTS})
+
+  set(_HASHES "")
+  foreach (_INPUT IN LISTS _GEN_INPUTS)
+    file(MD5 "${_INPUT}" _HASH)
+    string(APPEND _HASHES "${_HASH}")
+  endforeach()
+  string(MD5 _KEY "${_HASHES}")
+  string(APPEND _KEY "${_GEN_KEY}")
+
   set(_LAST_KEY "")
-  if (EXISTS "${STAMP_FILE}")
-    file(READ "${STAMP_FILE}" _LAST_KEY)
+  if (EXISTS "${_GEN_STAMP}")
+    file(READ "${_GEN_STAMP}" _LAST_KEY)
   endif()
-  message(STATUS "${NAME} generation key: ${KEY}")
+  file(GLOB _OUTPUTS "${_GEN_OUTPUTS}")
+  message(STATUS "${NAME} generation key: ${_KEY}")
   message(STATUS "Last run ${NAME} generation key: ${_LAST_KEY}")
-  if ("${_LAST_KEY}" STREQUAL "${KEY}")
+  if ("${_LAST_KEY}" STREQUAL "${_KEY}" AND _OUTPUTS)
     message(STATUS "${NAME} generation inputs have not changed, skipping generation.")
     return()
   endif()
 
-  file(REMOVE "${STAMP_FILE}")
-  set(_LOG "${CMAKE_CURRENT_BINARY_DIR}/${LOG_NAME}")
+  file(REMOVE "${_GEN_STAMP}")
+  set(_LOG "${CMAKE_CURRENT_BINARY_DIR}/${_GEN_LOG}")
   execute_process(
-    COMMAND ${ARGN}
+    COMMAND ${_GEN_COMMAND}
     RESULT_VARIABLE _RESULT
     OUTPUT_FILE "${_LOG}"
     ERROR_FILE "${_LOG}")
@@ -70,7 +86,7 @@ function (run_source_generator NAME LOG_NAME STAMP_FILE KEY)
                         " Result: \"${_RESULT}\""
                         "\nCheck the log for details: ${_LOG}")
   endif()
-  file(WRITE "${STAMP_FILE}" "${KEY}")
+  file(WRITE "${_GEN_STAMP}" "${_KEY}")
   message(STATUS "${NAME} generation completed successfully.")
 endfunction()
 
