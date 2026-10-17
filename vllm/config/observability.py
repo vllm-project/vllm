@@ -225,7 +225,8 @@ class ObservabilityConfig:
     def is_tracing_enabled(self) -> bool:
         return self.otlp_traces_endpoint is not None
 
-    def get_otlp_traces_endpoint(self) -> str:
+    @cached_property
+    def otlp_traces_endpoint_str(self) -> str:
         if self.otlp_traces_endpoint is None:
             raise ValueError("tracing requires `--otlp-traces-endpoint` to be set.")
 

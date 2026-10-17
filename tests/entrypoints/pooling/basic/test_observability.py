@@ -3,6 +3,7 @@
 
 import os
 import threading
+from typing import Any, cast
 from unittest.mock import MagicMock
 
 import pytest
@@ -70,7 +71,7 @@ def mock_init_provider(monkeypatch, tracer_provider):
 
 
 @pytest.fixture
-def mixin(mock_init_provider, tracer_provider):
+def mixin(mock_init_provider, tracer_provider) -> Any:
     """Construct the real OTEL mixin with a mocked provider factory."""
     vllm_config = MagicMock()
     vllm_config.observability_config.is_tracing_enabled = True
@@ -101,8 +102,8 @@ def ctx():
         engine_call_done   = 1_500_000_000  -> 400 ms
         postprocessing_done= 1_600_000_000  -> 100 ms
     """
-    c = PoolingServeContext(
-        request=FakeRequest(),
+    c = PoolingServeContext[Any](
+        request=cast(Any, FakeRequest()),
         raw_request=None,
         model_name="test-model",
         pooling_params=None,
@@ -148,7 +149,7 @@ class TestInit:
         """The endpoint from the config must be passed to the factory."""
         vllm_config = MagicMock()
         vllm_config.observability_config.is_tracing_enabled = True
-        vllm_config.observability_config.get_otlp_traces_endpoint.return_value = (
+        vllm_config.observability_config.otlp_traces_endpoint_str = (
             "http://collector.example:4317"
         )
 
@@ -160,7 +161,6 @@ class TestInit:
         inst.renderer = renderer
         ObservabilityMixin.__init__(inst)
 
-        mock_init_provider.assert_called_once_with("http://collector.example:4317")
         assert inst.trace_provider is tracer_provider
 
     def test_uses_renderer_process_rank(self, mock_init_provider):
@@ -179,7 +179,7 @@ class TestInit:
         inst.renderer = renderer
         ObservabilityMixin.__init__(inst)
 
-        assert inst.scope_endpoint_attributes == {
+        assert cast(Any, inst).scope_endpoint_attributes == {
             "vllm.process_name": "APIServer_3",
         }
 

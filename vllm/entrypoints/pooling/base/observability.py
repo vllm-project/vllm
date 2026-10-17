@@ -47,7 +47,7 @@ class _ObservabilityMixin:
 
         # will raise ValueError: OpenTelemetry is not available.
         self.trace_provider = init_otel_trace_provider(
-            observability_config.get_otlp_traces_endpoint()
+            observability_config.otlp_traces_endpoint_str
         )
 
     @asynccontextmanager
