@@ -3531,6 +3531,33 @@ def test_hisparse_gather_prefill_cache_prefers_resident_rows():
         torch.testing.assert_close(staged_flat[i], expected)
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_hisparse_staged_prefill_cache_backs_min_attention_rows():
+    """A staged cache of a few blocks still has 256 allocated rows behind it.
+
+    trtllm-gen sparse MLA reads ~200 rows from the start of its KV cache
+    whatever its size, faulting when a smaller cache ends at an unmapped page.
+    """
+    if not _has_hisparse_ops():
+        pytest.skip("hisparse CUDA ops unavailable")
+    device = torch.device("cuda")
+    block_size, row_width = 64, 16
+    block_table = torch.tensor([[3, 1]], dtype=torch.int32, device=device)
+    seq_lens = torch.tensor([100], dtype=torch.int32, device=device)
+    plan = build_hisparse_prefill_staging_plan(
+        block_table, seq_lens, block_size, staging_block_capacity=2
+    )
+    host_cache = torch.zeros(4, block_size, row_width).pin_memory()
+
+    staged = HiSparseRuntime.gather_prefill_cache(None, host_cache, plan)
+
+    assert staged.shape[0] * block_size < 256
+    backing_rows = staged.untyped_storage().nbytes() // (
+        row_width * staged.element_size()
+    )
+    assert backing_rows >= 256
+
+
 def test_hisparse_fp8_decode_resolves_rows_once_then_runs_batched_attention():
     """Verification rows resolve in one swap_in; FP8 attention sees them batched."""
     device = torch.device("cpu")
