@@ -482,11 +482,7 @@ class Qwen2_5OmniThinkerDummyInputsBuilder(BaseDummyInputsBuilder[_VI]):
         feature_extractor = self.info.get_hf_processor().feature_extractor
 
         target_audio_length = (
-            min(
-                feature_extractor.chunk_length,
-                30,
-            )
-            * feature_extractor.sampling_rate
+            feature_extractor.chunk_length * feature_extractor.sampling_rate
         )
 
         target_width, target_height = self.info.get_image_size_with_most_features()
