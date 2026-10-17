@@ -109,7 +109,7 @@ def parse_args() -> argparse.Namespace:
         "--m",
         type=int,
         nargs="+",
-        default=[128, 512, 2048, 8192, 32768],
+        default=[128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768],
         help="Global token counts to benchmark.",
     )
     parser.add_argument("--n", type=int, help="Output width override.")
