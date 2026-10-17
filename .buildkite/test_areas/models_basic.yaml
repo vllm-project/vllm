@@ -185,6 +185,31 @@ steps:
   - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
   - pytest -v -s models/kimi_k3/test_prefix_cache.py
 
+- label: ":nvidia: (4xB200) MiniMax-M3 Feature Matrix"
+  key: minimax-m3-feature-matrix-4xb200
+  timeout_in_minutes: 40
+  device: b200-k8s
+  num_devices: 4
+  source_file_dependencies:
+  - vllm/models/minimax_m3/
+  - vllm/model_executor/warmup/minimax_m3_msa_warmup.py
+  - vllm/reasoning/minimax_m3_reasoning_parser.py
+  - cmake/external_projects/fmha_sm100.cmake
+  - vllm/v1/worker/gpu/spec_decode/dspark/
+  - vllm/v1/structured_output/
+  - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
+  - vllm/distributed/kv_transfer/kv_connector/v1/offloading/
+  - vllm/distributed/kv_transfer/kv_connector/v1/offloading_connector.py
+  - vllm/distributed/kv_transfer/kv_connector/v1/simple_cpu_offload_connector.py
+  - vllm/v1/kv_offload/
+  - vllm/v1/simple_kv_offload/
+  - tests/models/minimax_m3/
+  - tests/v1/kv_connector/nixl_integration/toy_proxy_server.py
+  - .buildkite/scripts/install-kv-connectors.sh
+  commands:
+  - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
+  - pytest -v -s models/minimax_m3
+
 - label: ":nvidia: (H200) GLM5Next"
   key: glm5next-unit-tests
   timeout_in_minutes: 20
