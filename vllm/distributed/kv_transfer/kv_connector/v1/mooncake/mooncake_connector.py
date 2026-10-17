@@ -2390,11 +2390,8 @@ class MooncakeConnectorWorker:
         """
         finished_sending_reqs, finished_recving_reqs = self.get_finished()
         kv_checksums: dict[ReqId, bytes] = {}
-        while True:
-            try:
-                req_id, checksums = self._received_kv_checksums.get_nowait()
-            except queue.Empty:
-                break
+        while not self._received_kv_checksums.empty():
+            req_id, checksums = self._received_kv_checksums.get_nowait()
             # Every producer worker sending to this one sends the same.
             kv_checksums[req_id] = checksums
 
