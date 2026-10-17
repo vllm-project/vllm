@@ -317,10 +317,12 @@ def _create_decode_vllm_config(
     dynamic_spec_schedule: list[tuple[int, int, int]] | None = None,
     max_num_seqs: int = 8,
     use_kda_recoverssm: bool = False,
+    prefill_capture_sizes: list[int] | None = None,
 ) -> MagicMock:
     compilation_config = CompilationConfig(
         cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
         cudagraph_capture_sizes=capture_sizes,
+        cudagraph_capture_sizes_prefill=prefill_capture_sizes,
     )
     compilation_config.max_cudagraph_capture_size = capture_sizes[-1]
     compilation_config.post_init_cudagraph_sizes()
@@ -352,6 +354,7 @@ def _make_spec_decode_manager(
     max_num_seqs: int = 8,
     use_kda_recoverssm: bool = False,
     varlen_decode: bool = False,
+    prefill_capture_sizes: list[int] | None = None,
 ) -> gpu_cudagraph_utils.CudaGraphManager:
     monkeypatch.setattr(
         gpu_cudagraph_utils,
@@ -370,6 +373,7 @@ def _make_spec_decode_manager(
             dynamic_spec_schedule=dynamic_spec_schedule,
             max_num_seqs=max_num_seqs,
             use_kda_recoverssm=use_kda_recoverssm,
+            prefill_capture_sizes=prefill_capture_sizes,
         ),
         device=torch.device("cpu"),
         cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
@@ -378,6 +382,87 @@ def _make_spec_decode_manager(
     )
     manager._graphs_captured = True
     return manager
+
+
+@pytest.mark.parametrize("decode_query_len", [1, 3, 5])
+@pytest.mark.parametrize("varlen_decode", [False, True])
+def test_sparse_prefill_sizes_preserve_decode_graphs(
+    monkeypatch, decode_query_len, varlen_decode
+):
+    baseline = _make_spec_decode_manager(
+        monkeypatch,
+        decode_query_len=decode_query_len,
+        varlen_decode=varlen_decode,
+    )
+    sparse = _make_spec_decode_manager(
+        monkeypatch,
+        decode_query_len=decode_query_len,
+        varlen_decode=varlen_decode,
+        prefill_capture_sizes=[8, 24],
+    )
+    assert (
+        sparse._capture_descs[CUDAGraphMode.FULL]
+        == baseline._capture_descs[CUDAGraphMode.FULL]
+    )
+    assert [
+        desc.num_tokens for desc in sparse._capture_descs[CUDAGraphMode.PIECEWISE]
+    ] == [24, 8]
+    for num_reqs in range(1, 9):
+        batch = dict(
+            num_reqs=num_reqs,
+            num_tokens=num_reqs * decode_query_len,
+            uniform_token_count=decode_query_len,
+            num_active_loras=0,
+            max_query_len=decode_query_len,
+        )
+        expected = baseline.dispatch(**batch)
+        if expected.cg_mode == CUDAGraphMode.FULL:
+            assert sparse.dispatch(**batch) == expected
+
+
+@pytest.mark.parametrize("num_tokens, padded_tokens", [(3, 8), (13, 24), (25, 25)])
+def test_mixed_batches_use_prefill_capture_sizes(
+    monkeypatch, num_tokens, padded_tokens
+):
+    manager = _make_spec_decode_manager(monkeypatch, prefill_capture_sizes=[8, 24])
+    desc = manager.dispatch(
+        num_reqs=2,
+        num_tokens=num_tokens,
+        uniform_token_count=None,
+        num_active_loras=0,
+    )
+    expected_mode = CUDAGraphMode.PIECEWISE if num_tokens <= 24 else CUDAGraphMode.NONE
+    assert (desc.cg_mode, desc.num_tokens) == (expected_mode, padded_tokens)
+
+
+def test_full_prefill_subset_preserves_default_graphs(monkeypatch):
+    baseline = _make_spec_decode_manager(monkeypatch)
+    explicit = _make_spec_decode_manager(
+        monkeypatch, prefill_capture_sizes=[1, 2, 4, 8, 16, 24]
+    )
+    assert explicit._capture_descs == baseline._capture_descs
+
+
+def test_empty_prefill_capture_sizes_keep_decode_graphs(monkeypatch):
+    manager = _make_spec_decode_manager(monkeypatch, prefill_capture_sizes=[])
+    assert CUDAGraphMode.PIECEWISE not in manager._capture_descs
+    assert manager.dispatch(3, 9, 3, 0).cg_mode == CUDAGraphMode.FULL
+    assert manager.dispatch(2, 9, None, 0).cg_mode == CUDAGraphMode.NONE
+
+
+@pytest.mark.parametrize(
+    "mode",
+    [
+        CUDAGraphMode.NONE,
+        CUDAGraphMode.PIECEWISE,
+        CUDAGraphMode.FULL,
+        CUDAGraphMode.FULL_DECODE_ONLY,
+    ],
+)
+def test_prefill_sizes_reject_backend_mode_downgrade(mode):
+    config = _create_decode_vllm_config([1, 2, 4, 8], prefill_capture_sizes=[8])
+    with pytest.raises(ValueError, match="after attention backend selection"):
+        gpu_cudagraph_utils.ModelCudaGraphManager(config, torch.device("cpu"), mode, 1)
 
 
 def test_uniform_decode_pads_up_to_full_graph(monkeypatch):

@@ -652,6 +652,10 @@ class CompilationConfig:
     """Sizes to capture cudagraph.
     - None (default): capture sizes are inferred from vllm config.
     - list[int]: capture sizes are specified as given."""
+    cudagraph_capture_sizes_prefill: list[int] | None = None
+    """Subset of resolved capture sizes for MRV2 prefill/mixed graphs in
+    FULL_AND_PIECEWISE mode. None uses every size; [] disables mixed graphs.
+    Decode capture sizes and compilation sizes are unchanged."""
     cudagraph_copy_inputs: bool = False
     """Whether to copy input tensors for
     cudagraph. If the caller can guarantee that the same input buffers
@@ -1050,6 +1054,11 @@ class CompilationConfig:
                 "All decoder_replay_cudagraph_capture_sizes must be positive"
             )
 
+        if self.cudagraph_capture_sizes_prefill is not None and any(
+            size <= 0 for size in self.cudagraph_capture_sizes_prefill
+        ):
+            raise ValueError("All cudagraph_capture_sizes_prefill must be positive")
+
         # Validate encoder CUDA graph configuration
         if (
             self.cudagraph_mm_encoder
@@ -1158,6 +1167,22 @@ class CompilationConfig:
         self.cudagraph_capture_sizes.sort()
         if self.cudagraph_capture_sizes:
             assert self.cudagraph_capture_sizes[-1] == self.max_cudagraph_capture_size
+
+        if self.cudagraph_capture_sizes_prefill is not None:
+            if self.cudagraph_mode != CUDAGraphMode.FULL_AND_PIECEWISE:
+                raise ValueError(
+                    "cudagraph_capture_sizes_prefill requires FULL_AND_PIECEWISE"
+                )
+            if not set(self.cudagraph_capture_sizes_prefill).issubset(
+                self.cudagraph_capture_sizes
+            ):
+                raise ValueError(
+                    "cudagraph_capture_sizes_prefill must be a subset of resolved "
+                    "cudagraph_capture_sizes"
+                )
+            self.cudagraph_capture_sizes_prefill = sorted(
+                set(self.cudagraph_capture_sizes_prefill)
+            )
 
     def set_splitting_ops_for_v1(
         self, all2all_backend: str, data_parallel_size: int = 1
