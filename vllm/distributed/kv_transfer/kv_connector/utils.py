@@ -296,12 +296,14 @@ def yield_req_data(
     scheduler_output,
 ) -> Iterator[tuple[str, tuple[list[int], ...] | None, bool]]:
     """Yields:
-    (req_id, new_block_id_groups, preempted)
+    (req_id, block_id_groups, is_full_table)
 
+    ``is_full_table`` is True when ``block_id_groups`` is the request's whole
+    block table (new and resumed requests) rather than this step's additions.
     """
     # new requests
     for req_data in scheduler_output.scheduled_new_reqs:
-        yield req_data.req_id, req_data.block_ids, False
+        yield req_data.req_id, req_data.block_ids, True
 
     # cached requests
     cached_reqs = scheduler_output.scheduled_cached_reqs
