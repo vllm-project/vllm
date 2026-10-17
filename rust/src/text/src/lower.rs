@@ -124,6 +124,7 @@ pub fn lower_sampling_params(
         structured_outputs,
         skip_reading_prefix_cache,
         vllm_xargs,
+        stream_interval,
     } = sampling_params;
 
     validate_logprobs(
@@ -214,6 +215,7 @@ pub fn lower_sampling_params(
         skip_reading_prefix_cache,
         extra_args: vllm_xargs,
         routed_experts_prompt_start: 0,
+        stream_interval,
     };
     validate_resolved_sampling_params(&params)?;
     validate_vocab_range(&params, &sampling_limits)?;
@@ -341,6 +343,7 @@ fn merge_unique_token_ids(
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeSet, HashMap};
+    use std::num::NonZeroU32;
 
     use serial_test::file_serial;
     use vllm_engine_core_client::protocol::kv_hints::{KvHintAction, KvHintsEnvelope};
@@ -693,6 +696,7 @@ mod tests {
                 skip_reading_prefix_cache: None,
                 extra_args: None,
                 routed_experts_prompt_start: 0,
+                stream_interval: None,
             }
         "#]]
         .assert_debug_eq(&params);
@@ -746,6 +750,7 @@ mod tests {
                 skip_reading_prefix_cache: None,
                 extra_args: None,
                 routed_experts_prompt_start: 0,
+                stream_interval: None,
             }
         "#]]
         .assert_debug_eq(&params);
@@ -921,6 +926,7 @@ mod tests {
                 skip_reading_prefix_cache: None,
                 extra_args: None,
                 routed_experts_prompt_start: 0,
+                stream_interval: None,
             }
         "#]]
         .assert_debug_eq(&params);
@@ -992,6 +998,7 @@ mod tests {
                 skip_reading_prefix_cache: None,
                 extra_args: None,
                 routed_experts_prompt_start: 0,
+                stream_interval: None,
             }
         "#]]
         .assert_debug_eq(&params);
@@ -1056,6 +1063,7 @@ mod tests {
                 skip_reading_prefix_cache: None,
                 extra_args: None,
                 routed_experts_prompt_start: 0,
+                stream_interval: None,
             }
         "#]]
         .assert_debug_eq(&params);
@@ -1331,6 +1339,47 @@ mod tests {
     }
 
     #[test]
+    fn lower_sampling_params_enforces_bad_words_limits() {
+        let tokenizer = TestTokenizer::new()
+            .with_regular_token("blocked", 300)
+            .with_regular_token(" blocked", 301);
+        let lower = |bad_words: Option<Vec<String>>, bad_words_token_ids: Vec<Vec<u32>>| {
+            lower_sampling_params(
+                SamplingParams {
+                    bad_words,
+                    bad_words_token_ids: Some(bad_words_token_ids),
+                    ..Default::default()
+                },
+                SamplingHints::default(),
+                sample_sampling_limits(),
+                3,
+                &tokenizer,
+            )
+        };
+
+        lower(None, vec![vec![7; 8]; 128]).unwrap();
+        for (bad_words, raw, expected) in [
+            (
+                None,
+                vec![vec![7]; 129],
+                "Too many bad words: 129. The max number is 128.",
+            ),
+            (
+                Some(vec!["blocked".to_string()]),
+                vec![vec![7]; 127],
+                "Too many bad words: 129. The max number is 128.",
+            ),
+            (
+                None,
+                vec![vec![7; 1025]],
+                "Too many total bad word tokens: 1025. The max is 1024.",
+            ),
+        ] {
+            assert_eq!(lower(bad_words, raw).unwrap_err().to_string(), expected);
+        }
+    }
+
+    #[test]
     fn lower_sampling_params_rejects_out_of_vocab_logit_bias() {
         let error = lower_sampling_params_with_limits(
             SamplingParams {
@@ -1401,6 +1450,7 @@ mod tests {
                 skip_reading_prefix_cache: None,
                 extra_args: None,
                 routed_experts_prompt_start: 0,
+                stream_interval: None,
             }
         "#]]
         .assert_debug_eq(&params);
@@ -1428,6 +1478,26 @@ mod tests {
 
         assert!(!prepared.text_request.intermediate);
         assert_eq!(prepared.generate_request.request_id, "text-1");
+    }
+
+    #[test]
+    fn lower_text_request_carries_stream_interval_in_sampling_params() {
+        let mut request = sample_request();
+        request.sampling_params.stream_interval = NonZeroU32::new(4);
+
+        let prepared = lower_text_request(
+            request,
+            vec![1, 2, 3],
+            sample_sampling_hints(),
+            sample_sampling_limits(),
+            &stub_tokenizer(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            prepared.generate_request.sampling_params.stream_interval,
+            NonZeroU32::new(4)
+        );
     }
 
     #[test]
