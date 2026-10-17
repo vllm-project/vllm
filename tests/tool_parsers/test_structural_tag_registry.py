@@ -1494,6 +1494,36 @@ def test_tool_strict_level_from_name():
         ToolStrictLevel.from_name("off")
 
 
+@pytest.mark.parametrize("required", [False, True])
+@pytest.mark.parametrize("token_suffix", ["", ":6124c78e"])
+def test_hy_v4_preserves_whitespace_in_argument_keys(
+    sample_tools, required, token_suffix
+):
+    """Argument names must match the schema exactly, including whitespace."""
+    sample_tools[0].function.parameters = {
+        "type": "object",
+        "properties": {" count ": {"type": "integer"}},
+        "required": [" count "] if required else [],
+    }
+    tag = get_model_structural_tag(
+        "hy_v4",
+        sample_tools,
+        "required",
+        reasoning=False,
+        token_suffix=token_suffix,
+    )
+    grammar = Grammar.from_structural_tag(tag)
+    call = (
+        f"<tool_calls{token_suffix}><tool_call{token_suffix}>get_weather"
+        f"<arg_key{token_suffix}> count </arg_key{token_suffix}>"
+        f"<arg_value{token_suffix}>2</arg_value{token_suffix}>"
+        f"</tool_call{token_suffix}></tool_calls{token_suffix}>"
+    )
+
+    assert _is_grammar_accept_string(grammar, call)
+    assert not _is_grammar_accept_string(grammar, call.replace(" count ", "count"))
+
+
 # ---------------------------------------------------------------------------
 # GLM-4.7 structural tag: builtin content for strict tools, shallow otherwise
 # ---------------------------------------------------------------------------
