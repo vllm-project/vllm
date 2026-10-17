@@ -10,6 +10,7 @@ import time
 import pytest
 import zmq
 
+from vllm.v1.kv_offload.tiering.p2p.control import zmq as zmq_transport
 from vllm.v1.kv_offload.tiering.p2p.control.zmq import (
     ZmqConnection,
     ZmqTransport,
@@ -336,6 +337,48 @@ class TestZmqReconnect:
         finally:
             transport_a.close()
             transport_b.close()
+
+    def test_close_with_unsent_message_keeps_transport_usable(self, monkeypatch):
+        """A connection closed with an unsent message does not wedge the transport.
+
+        A closed DEALER that still holds a message keeps reconnecting to an
+        unresponsive peer, and its monitor events then block libzmq's I/O
+        thread, so no socket in the context can send or receive again.
+        """
+        apply_heartbeat = zmq_transport._apply_heartbeat
+
+        def apply_heartbeat_fast_handshake(sock: zmq.Socket) -> None:
+            apply_heartbeat(sock)
+            sock.setsockopt(zmq.HANDSHAKE_IVL, 200)
+
+        monkeypatch.setattr(
+            zmq_transport, "_apply_heartbeat", apply_heartbeat_fast_handshake
+        )
+        # Accepts TCP connections but never answers the ZMTP greeting.
+        silent = socket.socket()
+        silent.bind(("127.0.0.1", 0))
+        silent.listen(8)
+        transport_a, port_a = _make_transport()
+        transport_b, _ = _make_transport()
+        wedged = True
+        try:
+            stale = transport_b.connect(f"127.0.0.1:{silent.getsockname()[1]}")
+            stale.send({"type": "stale"})
+            stale.close()
+            # Several ZMTP handshake timeouts on the closed DEALER.
+            time.sleep(1.0)
+
+            conn = transport_b.connect(f"127.0.0.1:{port_a}")
+            conn.send({"seq": 1})
+            inbound = _wait_for_inbound(transport_a)[0]
+            assert _wait_for_messages(transport_a, inbound, 1) == [{"seq": 1}]
+            wedged = False
+        finally:
+            transport_a.close()
+            silent.close()
+            # Terminating a wedged context blocks forever.
+            if not wedged:
+                transport_b.close()
 
 
 class TestExpandedMonitorEvents:

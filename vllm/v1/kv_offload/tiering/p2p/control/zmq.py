@@ -113,7 +113,9 @@ class ZmqConnection(ControlConnection):
         self._dead = True
         logger.info("ZmqConnection: closing connection to %s", self.peer_id)
         self._sockets.monitor.close()
-        self._sockets.dealer.close()
+        # A lingering DEALER outlives close() while a peer is unresponsive,
+        # and its unread monitor events block libzmq's I/O thread.
+        self._sockets.dealer.close(linger=0)
 
     def enqueue(self, msg: dict) -> None:
         """Buffer an incoming message."""
