@@ -243,12 +243,11 @@ class PCPManager:
         """Per global request, whether every PCP rank gets the whole query."""
         num_chunks = 2 * self.pcp_world_size
         query_lens = np.asarray(num_scheduled_tokens, dtype=np.int64)
-        replicated = ~np.asarray(is_prefilling, dtype=np.bool_)
-        if self.dcp_world_size > 1:
-            chunk_sizes = (query_lens + num_chunks - 1) // num_chunks
-            drops_a_chunk = (num_chunks - 1) * chunk_sizes >= query_lens
-            replicated |= drops_a_chunk
-        return replicated
+        chunk_sizes = (query_lens + num_chunks - 1) // num_chunks
+        # A split prefill must give every PCP rank both of its chunks, so
+        # prefills too short for that are replicated instead.
+        drops_a_chunk = (num_chunks - 1) * chunk_sizes >= query_lens
+        return ~np.asarray(is_prefilling, dtype=np.bool_) | drops_a_chunk
 
     def _iter_rank_chunks(
         self,
@@ -279,7 +278,7 @@ class PCPManager:
             if not replicated[global_batch_req_idx]:
                 chunk_size = (query_len + num_chunks - 1) // num_chunks
                 chunk_indices = (rank, num_chunks - 1 - rank)
-            elif self.shard_decode_requests:
+            elif self.shard_decode_requests and not is_prefilling[global_batch_req_idx]:
                 chunk_size = query_len
                 # KV and hidden states are gathered back to every PCP rank, so
                 # decode ownership does not need to persist across steps. Use a
@@ -288,7 +287,7 @@ class PCPManager:
                 owner_rank = decode_ordinal % self.pcp_world_size
                 decode_ordinal += 1
                 chunk_indices = (0,) if rank == owner_rank else ()
-            else:  # DCP requires decode queries on every participating rank.
+            else:  # Short prefills, and decodes under DCP, run on every rank.
                 chunk_size = query_len
                 chunk_indices = (0,)
 
