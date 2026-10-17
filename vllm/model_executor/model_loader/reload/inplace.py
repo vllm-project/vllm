@@ -98,7 +98,7 @@ def reload_weights(
     else:
         # load weights from kernel format
         logger.warning_once(
-            "Reloading with `is_checkpoint_format=True` requires that "
+            "Reloading with `is_checkpoint_format=False` requires that "
             "weights be in kernel format and already sharded",
         )
         loaded_weights = set()

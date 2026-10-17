@@ -948,6 +948,10 @@ def test_flashinfer_xqa_single_token_decode_preserves_cudagraph_padding(monkeypa
     impl.o_sf_scale = None
     impl.window_left = -1
     impl.sinks = None
+    impl._bmm_scale_tensors = None
+    impl._xqa_bmm1_tensors = None
+    impl.float_scales_in_decode = False
+    impl._compilation_config = None
 
     layer = unittest.mock.Mock(
         _q_scale=torch.tensor(1.0),

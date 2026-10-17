@@ -1683,7 +1683,10 @@ class NemotronH_Nano_VL_V2(
                 # Load vision-language adapter weights directly
                 param = adapter_dict[trimmed_name]
                 with torch.no_grad():
-                    default_weight_loader(param, w)
+                    weight_loader = getattr(
+                        param, "weight_loader", default_weight_loader
+                    )
+                    weight_loader(param, w)
             self.vision_model.load_weights(vision_weights)
             if self.sound_encoder is not None and len(sound_weights) > 0:
                 self.sound_encoder.load_weights(sound_weights)

@@ -2585,3 +2585,20 @@ def test_online_quant_load_format_dummy(
     ) as llm:
         outputs = llm.generate_greedy(["The future of AI is"], max_tokens=4)
         print(outputs[0][1])
+
+
+@pytest.mark.parametrize(
+    "args,blocked",
+    [
+        (QuantizationConfigArgs(linear="fp8_per_block"), True),
+        (QuantizationConfigArgs(linear="fp8_per_tensor"), False),
+        (QuantizationConfigArgs(moe="fp8_per_block"), False),  # MoE-only
+        (QuantizationConfigArgs(targets={"re:.*o_proj": "fp8_per_block"}), True),
+        (QuantizationConfigArgs(targets={"re:.*o_proj": "mxfp8"}), False),
+    ],
+)
+def test_online_config_has_blocked_weights(args, blocked):
+    """Block-FP8 linears need the CUDA QuantFP8 op enabled (`+quant_fp8`):
+    under torch.compile the native path emits float32 activation scales, which
+    DeepGEMM's packed-UE8M0 kernels reject."""
+    assert OnlineQuantizationConfig(args).has_blocked_weights() is blocked
