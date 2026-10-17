@@ -244,6 +244,22 @@ class TestStreamingExtraction:
         assert tcs[0]["name"] == "get_weather"
         assert json.loads(tcs[0]["arguments"]) == {"location": "Paris, France"}
 
+    @pytest.mark.parametrize(
+        "arguments",
+        ['{"value": -2e-3}', '{"value": 1.5e3}', '{"values": [1.5e3, -2e-3]}'],
+    )
+    def test_streaming_scientific_notation(self, parser, mock_request, arguments):
+        model_output = (
+            f'{TOOL_CALLS_PREFIX}[{{"calculate": {arguments}}}]{TOOL_CALLS_SUFFIX}'
+        )
+
+        results = self._simulate_streaming(parser, mock_request, list(model_output))
+        tool_calls = self._collect_tool_calls(results)
+
+        assert len(tool_calls) == 1
+        assert tool_calls[0]["name"] == "calculate"
+        assert json.loads(tool_calls[0]["arguments"]) == json.loads(arguments)
+
     def test_streaming_missing_tool_suffix(self, parser, mock_request):
         chunks = [
             "<|tools_prefix|>",
