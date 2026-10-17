@@ -78,8 +78,8 @@ BATCH_SPECS = {
 }
 
 
-def _mock_get_per_layer_parameters(vllm_config, layer_names, impl_cls):
-    head_size = vllm_config.model_config.get_head_size()
+def _mock_get_per_layer_parameters(vllm_config, layer_names, impl_cls, head_size=None):
+    head_size = head_size or vllm_config.model_config.get_head_size()
     return {
         name: PerLayerParameters(
             window_left=-1,
@@ -241,11 +241,13 @@ def _create_nvfp4_hnd_kv_cache(
             bf16_cache[blocks, :, :, :head_size]
             .transpose(1, 2)
             .reshape(-1, num_kv_heads, head_size)[:ctx_len]
+            .contiguous()
         )
         v_ctx = (
             bf16_cache[blocks, :, :, head_size:]
             .transpose(1, 2)
             .reshape(-1, num_kv_heads, head_size)[:ctx_len]
+            .contiguous()
         )
         # Build slot mapping for these context tokens.
         token_offsets = torch.arange(ctx_len, device=device)
@@ -267,7 +269,13 @@ def _create_nvfp4_hnd_kv_cache(
     return nvfp4_cache
 
 
-def _run_trtllm_integration(batch_spec, kv_cache_dtype="auto", model_name=MODEL):
+def _run_trtllm_integration(
+    batch_spec,
+    kv_cache_dtype="auto",
+    model_name=MODEL,
+    head_size=None,
+    block_size=BLOCK_SIZE,
+):
     """Run TRTLLM attention through the full FlashInfer pipeline
     and compare against an SDPA reference."""
     set_random_seed(42)
@@ -276,7 +284,7 @@ def _run_trtllm_integration(batch_spec, kv_cache_dtype="auto", model_name=MODEL)
     vllm_config = create_vllm_config(
         model_name=model_name,
         max_model_len=max(batch_spec.seq_lens),
-        block_size=BLOCK_SIZE,
+        block_size=block_size,
         num_gpu_blocks=NUM_GPU_BLOCKS,
     )
     vllm_config.attention_config.use_trtllm_attention = True
@@ -288,7 +296,7 @@ def _run_trtllm_integration(batch_spec, kv_cache_dtype="auto", model_name=MODEL)
     num_kv_heads = vllm_config.model_config.get_num_kv_heads(
         vllm_config.parallel_config
     )
-    head_size = vllm_config.model_config.get_head_size()
+    head_size = head_size or vllm_config.model_config.get_head_size()
     dtype = vllm_config.model_config.dtype
     scale = 1.0 / (head_size**0.5)
 
@@ -344,7 +352,7 @@ def _run_trtllm_integration(batch_spec, kv_cache_dtype="auto", model_name=MODEL)
     value_vllm = torch.cat(all_v, dim=0)
     sdpa_output = torch.cat(all_sdpa_out, dim=0)
 
-    common_attn_metadata = create_common_attn_metadata(batch_spec, BLOCK_SIZE, device)
+    common_attn_metadata = create_common_attn_metadata(batch_spec, block_size, device)
 
     # 2. Create HND KV cache
     is_nvfp4 = kv_cache_dtype == "nvfp4"
@@ -355,7 +363,7 @@ def _run_trtllm_integration(batch_spec, kv_cache_dtype="auto", model_name=MODEL)
         kv_cache = _create_nvfp4_hnd_kv_cache(
             k_contexts,
             v_contexts,
-            BLOCK_SIZE,
+            block_size,
             num_kv_heads,
             head_size,
             dtype,
@@ -369,7 +377,7 @@ def _run_trtllm_integration(batch_spec, kv_cache_dtype="auto", model_name=MODEL)
         kv_cache = create_and_prepopulate_kv_cache(
             k_contexts,
             v_contexts,
-            BLOCK_SIZE,
+            block_size,
             num_kv_heads,
             head_size,
             dtype,
@@ -386,7 +394,7 @@ def _run_trtllm_integration(batch_spec, kv_cache_dtype="auto", model_name=MODEL)
     kv_quant_mode = KVQuantMode.NVFP4 if is_nvfp4 else KVQuantMode.NONE
     spec_dtype = torch.uint8 if is_nvfp4 else dtype
     kv_cache_spec = FullAttentionSpec(
-        block_size=BLOCK_SIZE,
+        block_size=block_size,
         num_kv_heads=num_kv_heads,
         head_size=head_size,
         dtype=spec_dtype,
@@ -402,7 +410,7 @@ def _run_trtllm_integration(batch_spec, kv_cache_dtype="auto", model_name=MODEL)
         ),
         unittest.mock.patch(
             "vllm.v1.attention.backends.flashinfer.get_per_layer_parameters",
-            _mock_get_per_layer_parameters,
+            partial(_mock_get_per_layer_parameters, head_size=head_size),
         ),
     ):
         builder = FlashInferMetadataBuilder(
@@ -425,7 +433,13 @@ def _run_trtllm_integration(batch_spec, kv_cache_dtype="auto", model_name=MODEL)
             assert isinstance(attn_metadata.decode, FlashInferTrtllmAPIDecode), (
                 f"Expected FlashInferTrtllmAPIDecode, got {type(attn_metadata.decode)}"
             )
-            assert attn_metadata.decode.kernel == FlashInferDecodeKernel.TRTLLM_GEN
+            # trtllm-gen has no NVFP4-KV kernel at head_dim 512; PrimTS decodes it.
+            expected_kernel = (
+                FlashInferDecodeKernel.PRIMS_TS
+                if is_nvfp4 and head_size == 512
+                else FlashInferDecodeKernel.TRTLLM_GEN
+            )
+            assert attn_metadata.decode.kernel == expected_kernel
 
         impl = FlashInferImpl(
             num_heads=num_q_heads,
@@ -513,6 +527,41 @@ def test_trtllm_gen_nvfp4_kv_integration(batch_spec_name: str):
         BATCH_SPECS[batch_spec_name],
         kv_cache_dtype="nvfp4",
         model_name=MODEL_NVFP4,
+    )
+
+
+def _has_flashinfer_nvfp4_head_dim_512() -> bool:
+    try:
+        from flashinfer.attention.prims_ts import (
+            BatchDecodePagedTSWrapper,  # noqa: F401
+        )
+        from flashinfer.quantization.kernels import (  # noqa: F401
+            nvfp4_kv_materialize_fp8,
+        )
+    except ImportError:
+        return False
+    return True
+
+
+@pytest.mark.skipif(
+    not _has_flashinfer_nvfp4_head_dim_512(),
+    reason="FlashInfer lacks PrimTS head_dim 512 decode / NVFP4 KV materialization",
+)
+@pytest.mark.parametrize(
+    "batch_spec_name",
+    list(BATCH_SPECS.keys()),
+)
+@torch.inference_mode()
+def test_trtllm_gen_nvfp4_kv_head_dim_512_integration(batch_spec_name: str):
+    """head_dim 512 NVFP4 KV (Gemma 4 global layers): PrimTS decode and
+    prefill on an FP8 copy of the active pages, through the full
+    FlashInfer MetadataBuilder.build() -> FlashInferImpl.forward() pipeline."""
+    _run_trtllm_integration(
+        BATCH_SPECS[batch_spec_name],
+        kv_cache_dtype="nvfp4",
+        model_name=MODEL_NVFP4,
+        head_size=512,
+        block_size=64,  # Gemma 4 page size; PrimTS NVFP4 decode needs 32 or 64
     )
 
 
