@@ -393,6 +393,32 @@ class TestUpdateConnectorOutput:
         assert mock_connector._kv_cache_events.get_number_of_workers() == 3
 
 
+class TestLoadFailureForwarding:
+    """Test that update_connector_output forwards failed KV loads."""
+
+    def test_forwards_invalid_block_ids(self, mock_connector):
+        connector_output = KVConnectorOutput(invalid_block_ids={3, 7})
+
+        mock_connector.update_connector_output(connector_output)
+
+        mock_connector._lmcache_engine.record_load_failures.assert_called_once_with(
+            {3, 7}
+        )
+
+    def test_does_not_forward_without_invalid_block_ids(self, mock_connector):
+        mock_connector.update_connector_output(KVConnectorOutput())
+
+        mock_connector._lmcache_engine.record_load_failures.assert_not_called()
+
+    def test_older_lmcache_without_record_load_failures(self, mock_connector):
+        mock_connector._lmcache_engine = MagicMock(spec=[])
+        connector_output = KVConnectorOutput(invalid_block_ids={3})
+
+        mock_connector.update_connector_output(connector_output)
+
+        assert mock_connector._kv_cache_events is None
+
+
 class TestTakeEvents:
     """Test take_events method."""
 
