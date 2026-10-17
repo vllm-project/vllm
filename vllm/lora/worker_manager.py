@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Iterable, Mapping
 from contextlib import contextmanager
 from typing import Any, Literal
 
@@ -240,6 +241,25 @@ class WorkerLoRAManager:
 
     def list_adapters(self) -> set[int]:
         return set(self._adapter_manager.list_adapters())
+
+    def get_adapter_slot(self, adapter_id: int) -> int | None:
+        return self._adapter_manager.get_adapter_slot(adapter_id)
+
+    def get_adapter_slot_weights(
+        self, adapter_id: int, module_names: Iterable[str] | None = None
+    ) -> dict[str, tuple[tuple[torch.Tensor, ...], tuple[torch.Tensor, ...]]]:
+        return self._adapter_manager.get_adapter_slot_weights(adapter_id, module_names)
+
+    def update_adapter_weights(
+        self,
+        adapter_id: int,
+        weights: Mapping[str, tuple[Any, Any]],
+        *,
+        update_cpu_cache: bool = True,
+    ) -> None:
+        self._adapter_manager.update_adapter_weights(
+            adapter_id, weights, update_cpu_cache=update_cpu_cache
+        )
 
 
 class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
