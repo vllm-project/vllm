@@ -508,6 +508,13 @@ def run_attention_benchmark(config: BenchmarkConfig) -> BenchmarkResult:
     torch.accelerator.set_device_index(device)
 
     backend_cfg = _get_backend_config(config.backend)
+    kv_cache_dtype = config.kv_cache_dtype
+    if get_kv_quant_mode(kv_cache_dtype).is_per_token_head and (
+        not backend_cfg["backend_class"].supports_kv_cache_dtype(kv_cache_dtype)
+    ):
+        raise ValueError(
+            f"{config.backend} does not support --kv-cache-dtype {kv_cache_dtype}"
+        )
 
     requests = parse_batch_spec(config.batch_spec)
 

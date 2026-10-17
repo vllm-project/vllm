@@ -87,7 +87,7 @@ python benchmark.py --config configs/standard_attention.yaml
 
 ### int8_per_token_head KV Cache Benchmark
 
-Tests decode, speculative verify and prefill on an `int8_per_token_head` KV cache (int8 K/V with an inline fp32 scale per token and head).
+Tests decode, speculative verify and prefill on an `int8_per_token_head` KV cache (int8 K/V with an inline fp32 scale per token and head). Only `TRITON_ATTN` supports this cache; other backends report an error.
 
 ```bash
 python benchmark.py --config configs/int8_per_token_head.yaml
