@@ -191,9 +191,12 @@ steps:
   device: h200_35gb
   source_file_dependencies:
   - vllm/models/glm5next/
+  - vllm/model_executor/layers/mamba/ops/causal_conv1d.py
   - tests/models/glm5next/
+  - tests/kernels/mamba/test_causal_conv1d.py
   commands:
     - pytest -v -s models/glm5next
+    - pytest -v -s kernels/mamba/test_causal_conv1d.py -k dense_qkv
   mirror:
     amd:
       label: ":amd: (MI355 DPX) GLM5Next"
