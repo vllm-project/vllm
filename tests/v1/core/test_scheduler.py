@@ -66,6 +66,7 @@ from vllm.v1.outputs import (
     DraftTokenIds,
     ECConnectorOutput,
     KVConnectorOutput,
+    LogprobsTensors,
     ModelRunnerOutput,
     SamplingMaskLists,
     make_empty_encoder_model_runner_output,
@@ -7853,6 +7854,105 @@ def test_sync_diffusion_step_commits_only_emitted_tokens(sampled, expected_statu
     assert request.num_computed_tokens == request.num_prompt_tokens + len(sampled)
     assert list(request.output_token_ids) == sampled
     assert request.status == expected_status
+
+
+@pytest.mark.parametrize("async_scheduling", [False, True])
+@pytest.mark.parametrize("score_kind", ["prompt_logprobs", "token_ids"])
+@pytest.mark.skip_global_cleanup
+@pytest.mark.usefixtures("diffusion_model_runner")
+def test_diffusion_prompt_scores_wait_for_emitted_tokens(async_scheduling, score_kind):
+    scheduler = _diffusion_scheduler(async_scheduling=async_scheduling)
+    request = _diffusion_request("scored", {})
+    scheduler.add_request(request)
+    scores = (
+        LogprobsTensors(
+            torch.tensor([[1, 2]], dtype=torch.int32),
+            torch.tensor([[-0.1, -0.2]]),
+            torch.tensor([0], dtype=torch.int32),
+        )
+        if score_kind == "prompt_logprobs"
+        else torch.tensor([[-0.1, -0.2]])
+    )
+    model_output = ModelRunnerOutput(
+        req_ids=[request.request_id],
+        req_id_to_index={request.request_id: 0},
+        sampled_token_ids=[[]],
+        prompt_logprobs_dict=(
+            {request.request_id: scores} if score_kind == "prompt_logprobs" else {}
+        ),
+        prompt_token_id_logprobs_dict=(
+            {request.request_id: scores} if score_kind == "token_ids" else {}
+        ),
+    )
+
+    prefill_outputs = scheduler.update_from_output(scheduler.schedule(), model_output)
+    assert all(not batch.outputs for batch in prefill_outputs.values())
+
+    if not async_scheduling:
+        scheduler.update_draft_token_ids(
+            DraftTokenIds([request.request_id], [list(range(8))])
+        )
+    decode_output = ModelRunnerOutput(
+        req_ids=[request.request_id],
+        req_id_to_index={request.request_id: 0},
+        sampled_token_ids=[[1] * 8],
+    )
+    outputs = scheduler.update_from_output(scheduler.schedule(), decode_output)
+    (emitted,) = next(iter(outputs.values())).outputs
+    if score_kind == "prompt_logprobs":
+        assert emitted.new_prompt_logprobs_tensors is scores
+        assert emitted.prompt_token_id_logprobs is None
+    else:
+        assert emitted.prompt_token_id_logprobs is scores
+        assert emitted.new_prompt_logprobs_tensors is None
+
+
+@pytest.mark.parametrize("exit_kind", ["abort", "preempt"])
+@pytest.mark.skip_global_cleanup
+@pytest.mark.usefixtures("diffusion_model_runner")
+def test_diffusion_prompt_scores_cleared_before_request_restarts(exit_kind):
+    scheduler = _diffusion_scheduler(async_scheduling=False)
+    request = _diffusion_request("scored", {})
+    scheduler.add_request(request)
+    scores = torch.tensor([[-0.1]])
+    scheduler.update_from_output(
+        scheduler.schedule(),
+        ModelRunnerOutput(
+            req_ids=[request.request_id],
+            req_id_to_index={request.request_id: 0},
+            sampled_token_ids=[[]],
+            prompt_token_id_logprobs_dict={request.request_id: scores},
+        ),
+    )
+
+    if exit_kind == "abort":
+        scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
+    else:
+        scheduler._preempt_request(request, timestamp=0.0)
+    assert request.request_id not in scheduler._pending_prompt_token_id_logprobs
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.usefixtures("diffusion_model_runner")
+def test_diffusion_dropped_stale_prompt_scores_are_not_retained():
+    scheduler = _diffusion_scheduler(async_scheduling=False)
+    request = _diffusion_request("scored", {})
+    scheduler.add_request(request)
+    prefill = scheduler.schedule()
+    request.drop_stale_output = True
+    request.num_stale_output_tokens = prefill.num_scheduled_tokens[request.request_id]
+
+    scheduler.update_from_output(
+        prefill,
+        ModelRunnerOutput(
+            req_ids=[request.request_id],
+            req_id_to_index={request.request_id: 0},
+            sampled_token_ids=[[]],
+            prompt_token_id_logprobs_dict={request.request_id: torch.tensor([[-0.1]])},
+        ),
+    )
+
+    assert request.request_id not in scheduler._pending_prompt_token_id_logprobs
 
 
 @pytest.mark.usefixtures("diffusion_model_runner")
