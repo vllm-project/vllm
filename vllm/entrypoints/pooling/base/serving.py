@@ -114,32 +114,6 @@ class PoolingBaseServing(BaseServing, ObservabilityMixin, ABC):
                     ctx.preprocessing_finished / TO_S
                 )
 
-    async def _collect_batch(
-        self,
-        ctx: PoolingServeContext,
-    ):
-        if ctx.engine_inputs is None:
-            raise ValueError("Engine prompts not available")
-
-        if ctx.result_generator is None:
-            raise ValueError("Result generator not available")
-
-        num_inputs = len(ctx.engine_inputs)
-        final_res_batch: list[PoolingRequestOutput | None]
-        final_res_batch = [None] * num_inputs
-
-        async for i, res in ctx.result_generator:
-            if res.error is not None:
-                if res.error.retryable:
-                    raise RetryableRequestError(res.error.message)
-                raise GenerationError(res.error.message)
-            final_res_batch[i] = res
-
-        if None in final_res_batch:
-            raise ValueError("Failed to generate results for all prompts")
-
-        ctx.final_res_batch = [res for res in final_res_batch if res is not None]
-
     async def _engine_call(self, ctx: PoolingServeContext):
         async with self.maybe_start_span_async(
             ctx.entrypoint_tracer,
@@ -252,6 +226,32 @@ class PoolingBaseServing(BaseServing, ObservabilityMixin, ABC):
             generators.append(generator)
 
         ctx.result_generator = merge_async_iterators(*generators)
+
+    async def _collect_batch(
+        self,
+        ctx: PoolingServeContext,
+    ):
+        if ctx.engine_inputs is None:
+            raise ValueError("Engine prompts not available")
+
+        if ctx.result_generator is None:
+            raise ValueError("Result generator not available")
+
+        num_inputs = len(ctx.engine_inputs)
+        final_res_batch: list[PoolingRequestOutput | None]
+        final_res_batch = [None] * num_inputs
+
+        async for i, res in ctx.result_generator:
+            if res.error is not None:
+                if res.error.retryable:
+                    raise RetryableRequestError(res.error.message)
+                raise GenerationError(res.error.message)
+            final_res_batch[i] = res
+
+        if None in final_res_batch:
+            raise ValueError("Failed to generate results for all prompts")
+
+        ctx.final_res_batch = [res for res in final_res_batch if res is not None]
 
     @abstractmethod
     def _build_response(
