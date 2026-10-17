@@ -85,6 +85,14 @@ Tests standard attention backends (Flash/Triton/FlashInfer) with pure prefill, d
 python benchmark.py --config configs/standard_attention.yaml
 ```
 
+### int8_per_token_head KV Cache Benchmark
+
+Tests decode, speculative verify and prefill on an `int8_per_token_head` KV cache (int8 K/V with an inline fp32 scale per token and head). Only `TRITON_ATTN` supports this cache; other backends report an error.
+
+```bash
+python benchmark.py --config configs/int8_per_token_head.yaml
+```
+
 ### Reorder Threshold Study
 
 **Question:** At what query length does the prefill pipeline become faster than the decode pipeline?
@@ -175,6 +183,7 @@ python benchmark.py \
 --device DEVICE                     # Device (default: cuda:0)
 --warmup-ms N                       # Warmup window in ms for triton do_bench
 --profile-memory                    # Profile memory usage
+--kv-cache-dtype DTYPE              # auto (default), fp8, int8_per_token_head
 
 # Parameter sweeps
 --sweep-param PARAM                 # Parameter name to sweep (e.g., num_kv_splits,
