@@ -67,6 +67,17 @@ pytestmark = pytest.mark.skipif(
 # ── reference helpers ────────────────────────────────────────────────────────
 
 
+def assert_index_weights(out: torch.Tensor, ref: torch.Tensor) -> None:
+    """Scaled indexer weights come out in the MQA logits kernels' dtype: BF16
+    on SM100 (one BF16 step of tolerance), FP32 elsewhere."""
+    if mqa_logits_use_mx_scales():
+        assert out.dtype == torch.bfloat16
+        torch.testing.assert_close(out.float(), ref, rtol=8e-3, atol=1e-3)
+    else:
+        assert out.dtype == torch.float32
+        torch.testing.assert_close(out, ref, rtol=1e-3, atol=1e-3)
+
+
 def make_cos_sin(max_pos: int, rot_dim: int, device) -> torch.Tensor:
     """cos||sin cache: row[pos] = [cos(theta)(rot/2), sin(theta)(rot/2)]."""
     half = rot_dim // 2
@@ -846,7 +857,7 @@ def test_fused_q(num_tokens: int, index_interleave: bool, cfg: ModelConfig):
     q_ref, scale_ref = ue8m0_quant(iq_ref)
     assert_fp8(iq_fp8, q_ref, "indexer-Q fp8")
     iw_ref = index_w * scale_ref * softmax_scale * head_scale
-    torch.testing.assert_close(iw_out, iw_ref, rtol=1e-3, atol=1e-3)
+    assert_index_weights(iw_out, iw_ref)
 
 
 @pytest.mark.parametrize("cfg", MODEL_CONFIGS, ids=MODEL_IDS)
@@ -989,7 +1000,7 @@ def test_fused_q_bf16_query(
         iw_ref = (
             index_w * scale_ref * (cfg.index_head_dim**-0.5) * (cfg.index_heads**-0.5)
         )
-        torch.testing.assert_close(iw_out, iw_ref, rtol=1e-3, atol=1e-3)
+        assert_index_weights(iw_out, iw_ref)
 
 
 def test_fused_q_triton_supports_large_token_count():
