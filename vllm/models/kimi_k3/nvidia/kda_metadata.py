@@ -612,6 +612,10 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
                 compute_causal_conv1d_metadata(
                     non_spec_query_start_loc_cpu,
                     device=query_start_loc.device,
+                    program_buffers=(
+                        self.mixed_batch_buffers["batch_ptr"],
+                        self.mixed_batch_buffers["token_chunk_offset_ptr"],
+                    ),
                 )
             )
         else:

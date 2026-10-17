@@ -6,6 +6,7 @@ import functools
 import itertools
 import math
 import os
+from collections.abc import Callable
 from dataclasses import replace
 from typing import Literal
 
@@ -17,9 +18,13 @@ from transformers import Qwen3NextConfig
 from vllm import _custom_ops as ops
 from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.compilation.breakable_cudagraph import eager_break_during_capture
+from vllm.compilation.breakable_cudagraph import (
+    BreakableCUDAGraphCapture,
+    eager_break_during_capture,
+)
 from vllm.config import (
     CacheConfig,
+    CUDAGraphMode,
     VllmConfig,
     get_current_vllm_config,
 )
@@ -78,6 +83,7 @@ from vllm.utils.torch_utils import (
     direct_register_custom_op,
 )
 from vllm.v1.attention.backends.gdn_attn import (
+    CAUSAL_CONV1D_BLOCK_M,
     FLASHINFER_GDN_CHECKPOINT_ALIGNMENT,
     GDNAttentionMetadata,
 )
@@ -105,6 +111,24 @@ logger = init_logger(__name__)
 
 MAX_FUSED_GDN_MTP_TOKENS = 8
 FUSED_GDN_STATE_DTYPES = (torch.float32, torch.bfloat16)
+
+# (output norm, input shape, SSM state shape and dtype) of the static GDN cores
+# that already ran once outside a capture, so their Triton kernels are compiled
+# for these arguments (process-wide, as Triton's own cache).
+_STATIC_CORE_WARMED_UP: set[tuple[bool, torch.Size, torch.Size, torch.dtype]] = set()
+
+
+def _captures_static_core(attn_metadata: GDNAttentionMetadata, num_tokens: int) -> bool:
+    """Whether a GDN core runs its static form: inside a breakable PIECEWISE
+    capture (and its uncaptured warm-up), when the builder staged capture
+    buffers that hold ``num_tokens`` tokens."""
+    capture_buffers = attn_metadata.capture_buffers
+    return (
+        capture_buffers is not None
+        and num_tokens <= capture_buffers["non_spec_token_indx"].shape[0]
+        and BreakableCUDAGraphCapture.is_active()
+        and get_forward_context().cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE
+    )
 
 
 def _aiter_flydsl_unsupported_reasons(
@@ -1529,6 +1553,13 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         assert isinstance(attn_metadata, GDNAttentionMetadata)
 
+        if _captures_static_core(attn_metadata, mixed_qkv.shape[0]):
+            forward = functools.partial(
+                self._forward_core_static, mixed_qkv, b, a, core_attn_out, attn_metadata
+            )
+            self._capture_static_core(forward, mixed_qkv, with_output_norm=False)
+            return
+
         if (
             self.enable_packed_recurrent_decode
             and attn_metadata.spec_sequence_masks is None
@@ -1859,6 +1890,201 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         else:
             core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0)
 
+    def _capture_static_core(
+        self,
+        forward: Callable[[], None],
+        mixed_qkv: torch.Tensor,
+        with_output_norm: bool,
+    ) -> None:
+        """Run ``forward``, a static core, inside a breakable capture.
+
+        The first capture of each form and shape runs it once outside the
+        capture first: its Triton kernels compile there (and autotune if no
+        config is cached), as neither can run inside a capture.
+        """
+        ssm_state = self.kv_cache[1]
+        warm_up_key = (
+            with_output_norm,
+            mixed_qkv.shape,
+            ssm_state.shape,
+            ssm_state.dtype,
+        )
+        if warm_up_key not in _STATIC_CORE_WARMED_UP:
+            _STATIC_CORE_WARMED_UP.add(warm_up_key)
+            capture = BreakableCUDAGraphCapture.current()
+            assert capture is not None
+            capture.run_uncaptured(forward)
+        forward()
+
+    def _forward_core_static(
+        self,
+        mixed_qkv: torch.Tensor,
+        b: torch.Tensor,
+        a: torch.Tensor,
+        core_attn_out: torch.Tensor,
+        attn_metadata: GDNAttentionMetadata,
+    ) -> None:
+        """Branch-free ``_forward_core`` for CUDA graph capture.
+
+        The graph captured for ``num_tokens`` tokens replays for every batch
+        padded to that size, so this reads only ``attn_metadata.capture_buffers``
+        at full length and sizes every grid by ``num_tokens`` and the buffer
+        capacity ``num_seqs``. It always runs the spec decodes, the decodes it
+        peels off the non-spec rows, and the prefills; a part that the batch
+        lacks has only zero-length sequences or pad programs, which exit. Each
+        part runs the kernels that ``_forward_core`` runs for a batch with
+        prefills, and pad rows write only the null state block and a scratch
+        output row.
+        """
+        buffers = attn_metadata.capture_buffers
+        assert buffers is not None
+        num_tokens = mixed_qkv.shape[0]
+        num_seqs = buffers["non_spec_state_indices_tensor"].shape[0]
+        conv_state = (
+            self.kv_cache[0]
+            if is_conv_state_dim_first()
+            else self.kv_cache[0].transpose(-1, -2)
+        )
+        ssm_state = self.kv_cache[1]
+        # (dim, width) view of the (dim, 1, width) weight.
+        conv_weights = self.conv1d.weight.squeeze(1)
+        # Pad rows of the token indices gather token 0.
+        spec_token_indx = buffers["spec_token_indx"][:num_tokens]
+        non_spec_token_indx = buffers["non_spec_token_indx"][:num_tokens]
+
+        # 1. Spec decodes.
+        spec_state_indices = buffers["spec_state_indices_tensor"]
+        spec_query_start_loc = buffers["spec_query_start_loc"]
+        num_accepted_tokens = buffers["num_accepted_tokens"]
+        mixed_qkv_spec = causal_conv1d_update(
+            mixed_qkv.index_select(0, spec_token_indx),
+            conv_state,
+            conv_weights,
+            self.conv1d.bias,
+            self.activation,
+            conv_state_indices=spec_state_indices[:, 0],
+            num_accepted_tokens=num_accepted_tokens,
+            query_start_loc=spec_query_start_loc,
+            max_query_len=spec_state_indices.size(-1),
+            validate_data=False,
+        )
+        query_spec, key_spec, value_spec = self.rearrange_mixed_qkv(mixed_qkv_spec)
+        core_attn_out_spec, _ = fused_sigmoid_gating_delta_rule_update(
+            A_log=self.A_log,
+            a=a.index_select(0, spec_token_indx),
+            b=b.index_select(0, spec_token_indx),
+            dt_bias=self.dt_bias,
+            q=query_spec,
+            k=key_spec,
+            v=value_spec,
+            initial_state=ssm_state,
+            inplace_final_state=True,
+            cu_seqlens=spec_query_start_loc,
+            ssm_state_indices=spec_state_indices,
+            num_accepted_tokens=num_accepted_tokens,
+            use_qk_l2norm_in_kernel=True,
+        )
+
+        # 2. Convolution of the non-spec rows.
+        non_spec_state_indices = buffers["non_spec_state_indices_tensor"]
+        non_spec_query_start_loc = buffers["non_spec_query_start_loc"]
+        a_non_spec = a.index_select(0, non_spec_token_indx)
+        b_non_spec = b.index_select(0, non_spec_token_indx)
+        mixed_qkv_non_spec = causal_conv1d_fn(
+            mixed_qkv.index_select(0, non_spec_token_indx).transpose(0, 1),
+            conv_weights,
+            self.conv1d.bias,
+            activation=self.activation,
+            conv_states=conv_state,
+            has_initial_state=buffers["has_initial_state"],
+            cache_indices=non_spec_state_indices,
+            query_start_loc=non_spec_query_start_loc,
+            metadata=attn_metadata,
+            # Each sequence adds at most one partial program.
+            num_programs=cdiv(num_tokens, CAUSAL_CONV1D_BLOCK_M) + num_seqs - 1,
+        ).transpose(0, 1)
+
+        # 3. Decodes peeled off the front of the non-spec rows.
+        decode_query_start_loc = buffers["decode_query_start_loc"]
+        query_decode, key_decode, value_decode = self.rearrange_mixed_qkv(
+            mixed_qkv_non_spec
+        )
+        core_attn_out_decode, _ = fused_sigmoid_gating_delta_rule_update(
+            A_log=self.A_log,
+            a=a_non_spec,
+            b=b_non_spec,
+            dt_bias=self.dt_bias,
+            q=query_decode,
+            k=key_decode,
+            v=value_decode,
+            initial_state=ssm_state,
+            inplace_final_state=True,
+            cu_seqlens=decode_query_start_loc,
+            ssm_state_indices=non_spec_state_indices,
+            use_qk_l2norm_in_kernel=True,
+        )
+
+        # 4. Prefills, after the decodes in the non-spec rows.
+        query_prefill, key_prefill, value_prefill, g_prefill, beta_prefill = (
+            fused_post_conv_prep(
+                conv_output=mixed_qkv_non_spec,
+                a=a_non_spec,
+                b=b_non_spec,
+                A_log=self.A_log,
+                dt_bias=self.dt_bias,
+                num_k_heads=self.num_k_heads // self.tp_size,
+                head_k_dim=self.head_k_dim,
+                head_v_dim=self.head_v_dim,
+                apply_l2norm=True,
+                output_g_exp=False,
+            )
+        )
+        prefill_state_indices = buffers["prefill_state_indices"]
+        initial_state = ssm_state[prefill_state_indices]
+        initial_state.masked_fill_(
+            ~buffers["prefill_has_initial_state"].view(-1, 1, 1, 1), 0
+        )
+        # Each sequence adds at most one partial chunk.
+        num_chunks = cdiv(num_tokens, FLA_CHUNK_SIZE) + num_seqs - 1
+        core_attn_out_prefill, last_recurrent_state = fla_chunk_gated_delta_rule(
+            q=query_prefill.unsqueeze(0),
+            k=key_prefill.unsqueeze(0),
+            v=value_prefill.unsqueeze(0),
+            g=g_prefill.unsqueeze(0),
+            beta=beta_prefill.unsqueeze(0),
+            initial_state=initial_state,
+            output_final_state=True,
+            cu_seqlens=buffers["non_spec_prefill_query_start_loc"],
+            chunk_indices=buffers["chunk_indices"][:num_chunks],
+            chunk_offsets=buffers["chunk_offsets"],
+            use_qk_l2norm_in_kernel=False,
+            use_graph=True,
+        )
+        ssm_state[prefill_state_indices] = last_recurrent_state.to(ssm_state.dtype)
+
+        # 5. Merge: each real token takes its part's output; pad rows of the
+        # token indices write a scratch row.
+        rows = torch.arange(num_tokens, device=mixed_qkv.device)
+        core_attn_out_non_spec = torch.where(
+            (rows < decode_query_start_loc[-1]).view(-1, 1, 1),
+            core_attn_out_decode.squeeze(0),
+            core_attn_out_prefill.squeeze(0),
+        )
+        merged = core_attn_out.new_zeros(num_tokens + 1, *core_attn_out.shape[1:])
+        merged.index_copy_(
+            0,
+            torch.where(
+                rows < non_spec_query_start_loc[-1], non_spec_token_indx, num_tokens
+            ),
+            core_attn_out_non_spec,
+        )
+        merged.index_copy_(
+            0,
+            torch.where(rows < spec_query_start_loc[-1], spec_token_indx, num_tokens),
+            core_attn_out_spec.squeeze(0),
+        )
+        core_attn_out.copy_(merged[:num_tokens])
+
     def _forward_core_decode_aiter(
         self,
         qkvz: torch.Tensor,
@@ -2161,6 +2387,15 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             return
 
         assert isinstance(attn_metadata, GDNAttentionMetadata)
+        if _captures_static_core(attn_metadata, mixed_qkv.shape[0]):
+
+            def forward() -> None:
+                self._forward_core_static(mixed_qkv, b, a, core_attn_out, attn_metadata)
+                # The static core writes every row, zeros in pad rows.
+                self._rms_norm_gated_cuda(core_attn_out, output_gate, core_attn_out)
+
+            self._capture_static_core(forward, mixed_qkv, with_output_norm=True)
+            return
         if (
             self._can_use_fused_gdn_mtp_decode(attn_metadata)
             and attn_metadata.num_prefills == 0
@@ -2188,7 +2423,30 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         )
 
 
-@eager_break_during_capture
+def _gdn_core_is_capturable(layer_name: LayerNameType, num_tokens: int) -> bool:
+    """Whether a GDN core op is captured in a breakable CUDA graph segment
+    instead of breaking it (see ``_captures_static_core``)."""
+    attn_metadata = get_forward_context().attn_metadata
+    if not isinstance(attn_metadata, dict):
+        return False
+    metadata = attn_metadata.get(_resolve_layer_name(layer_name))
+    return isinstance(metadata, GDNAttentionMetadata) and _captures_static_core(
+        metadata, num_tokens
+    )
+
+
+def _qwen_gdn_attention_core_is_capturable(
+    qkv_or_qkvz: torch.Tensor,
+    b_or_ba: torch.Tensor,
+    a_or_z_out: torch.Tensor,
+    core_attn_out: torch.Tensor,
+    layer_name: LayerNameType,
+    use_aiter: bool = False,
+) -> bool:
+    return not use_aiter and _gdn_core_is_capturable(layer_name, qkv_or_qkvz.shape[0])
+
+
+@eager_break_during_capture(capturable=_qwen_gdn_attention_core_is_capturable)
 def qwen_gdn_attention_core(
     qkv_or_qkvz: torch.Tensor,
     b_or_ba: torch.Tensor,
@@ -2236,7 +2494,18 @@ direct_register_custom_op(
 )
 
 
-@eager_break_during_capture
+def _qwen_gdn_attention_core_fused_norm_packed_is_capturable(
+    mixed_qkvz: torch.Tensor,
+    ba: torch.Tensor,
+    core_attn_out: torch.Tensor,
+    layer_name: LayerNameType,
+) -> bool:
+    return _gdn_core_is_capturable(layer_name, mixed_qkvz.shape[0])
+
+
+@eager_break_during_capture(
+    capturable=_qwen_gdn_attention_core_fused_norm_packed_is_capturable
+)
 def qwen_gdn_attention_core_fused_norm_packed(
     mixed_qkvz: torch.Tensor,
     ba: torch.Tensor,
