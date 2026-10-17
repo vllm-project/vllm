@@ -4,6 +4,7 @@
 import pytest
 
 from vllm import LLM, SamplingParams
+from vllm.exceptions import VLLMValidationError
 
 MODEL = "hmellor/tiny-random-LlamaForCausalLM"
 PROMPT = "Hello my name is Robert and I"
@@ -16,7 +17,6 @@ def llm() -> LLM:
 
 def test_n_gt_1(llm):
     """ParallelSampling is supported."""
-
     params = SamplingParams(n=3)
     outputs = llm.generate(PROMPT, params)
     assert len(outputs[0].outputs) == 3
@@ -24,7 +24,6 @@ def test_n_gt_1(llm):
 
 def test_penalties(llm):
     """Check that we do not get errors if applied."""
-
     params = SamplingParams(
         temperature=1.2,
         presence_penalty=1.2,
@@ -39,7 +38,6 @@ def test_penalties(llm):
 
 def test_stop(llm):
     """Check that we respect the stop words."""
-
     output = llm.generate(PROMPT, SamplingParams(temperature=0))
     split_text = output[0].outputs[0].text.split()
 
@@ -63,7 +61,6 @@ def test_stop(llm):
 
 def test_stop_token_ids(llm):
     """Check that we respect the stop token ids."""
-
     output = llm.generate(PROMPT, SamplingParams(temperature=0))
 
     stop_token_id_0 = output[0].outputs[0].token_ids[5]
@@ -82,7 +79,6 @@ def test_stop_token_ids(llm):
 
 def test_detokenize_false(llm):
     """Check that detokenize=False option works."""
-
     output = llm.generate(PROMPT, SamplingParams(detokenize=False))
     assert len(output[0].outputs[0].token_ids) > 0
     assert len(output[0].outputs[0].text) == 0
@@ -105,7 +101,6 @@ def test_detokenize_false(llm):
 
 def test_bad_words(llm):
     """Check that we respect bad words."""
-
     tokenizer = llm.get_tokenizer()
 
     def contains_bad_word(text: str, tokens: list[int], bad_word: str) -> bool:
@@ -146,28 +141,34 @@ def test_bad_words(llm):
 
 def test_allowed_token_ids(llm):
     """Check that we can use allowed_token_ids."""
-
     TOKEN_ID = 10
     allowed_token_ids = [TOKEN_ID]
     output = llm.generate(PROMPT, SamplingParams(allowed_token_ids=allowed_token_ids))
     assert output[0].outputs[0].token_ids[-1] == TOKEN_ID
 
+    # Each single-token allowlist must force that token (kernel used to drop some).
+    for token_id in (1, 5, 100, 500, 2518, 9834, 31999):
+        output = llm.generate(
+            PROMPT,
+            SamplingParams(temperature=0, max_tokens=1, allowed_token_ids=[token_id]),
+        )
+        assert output[0].outputs[0].token_ids[-1] == token_id
+
     # Reject empty allowed_token_ids.
-    with pytest.raises(ValueError):
+    with pytest.raises(VLLMValidationError):
         _ = llm.generate(PROMPT, SamplingParams(allowed_token_ids=[]))
 
     # Reject negative token id.
-    with pytest.raises(ValueError):
+    with pytest.raises(VLLMValidationError):
         _ = llm.generate(PROMPT, SamplingParams(allowed_token_ids=[-1]))
 
     # Reject out of vocabulary.
-    with pytest.raises(ValueError):
+    with pytest.raises(VLLMValidationError):
         _ = llm.generate(PROMPT, SamplingParams(allowed_token_ids=[10000000]))
 
 
 def test_seed(llm):
     """Check that seed impacts randomness."""
-
     out_1 = llm.generate(PROMPT, SamplingParams(seed=42))
     out_2 = llm.generate(PROMPT, SamplingParams(seed=42))
     out_3 = llm.generate(PROMPT, SamplingParams(seed=43))

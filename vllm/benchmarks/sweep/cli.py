@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import argparse
 
-from vllm.entrypoints.utils import VLLM_SUBCMD_PARSER_EPILOG
+from vllm.entrypoints.serve.utils.api_utils import VLLM_SUBCMD_PARSER_EPILOG
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 from .plot import SweepPlotArgs
 from .plot import main as plot_main
@@ -24,7 +25,7 @@ SUBCOMMANDS = (
 )
 
 
-def add_cli_args(parser: argparse.ArgumentParser):
+def add_cli_args(parser: FlexibleArgumentParser):
     subparsers = parser.add_subparsers(required=True, dest="sweep_type")
 
     for cmd, entrypoint in SUBCOMMANDS:

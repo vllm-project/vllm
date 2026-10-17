@@ -8,12 +8,12 @@ import regex as re
 from transformers import PreTrainedTokenizerBase
 
 import vllm.envs as envs
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-)
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
     ExtractedToolCallInformation,
+)
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
 )
 from vllm.logger import init_logger
 from vllm.tool_parsers.abstract_tool_parser import (
@@ -23,6 +23,7 @@ from vllm.tool_parsers.abstract_tool_parser import (
 from vllm.tool_parsers.utils import (
     UnexpectedAstError,
     compute_tool_delta,
+    escape_ctrl_chars_in_strings,
     handle_single_tool,
     make_valid_python,
 )
@@ -31,8 +32,7 @@ logger = init_logger(__name__)
 
 
 class PythonicToolParser(ToolParser):
-    """
-    Tool call parser for models that produce tool calls in a pythonic style,
+    """Tool call parser for models that produce tool calls in a pythonic style,
     such as Llama 3.2 and Llama 4 models.
 
     Used when --enable-auto-tool-choice --tool-call-parser pythonic are all set
@@ -69,9 +69,7 @@ class PythonicToolParser(ToolParser):
     def extract_tool_calls(
         self, model_output: str, request: ChatCompletionRequest
     ) -> ExtractedToolCallInformation:
-        """
-        Extract the tool calls from a complete model response.
-        """
+        """Extract the tool calls from a complete model response."""
         is_tool_call_pattern = False
         try:
             is_tool_call_pattern = (
@@ -92,7 +90,7 @@ class PythonicToolParser(ToolParser):
             )
 
         try:
-            module = ast.parse(model_output)
+            module = ast.parse(escape_ctrl_chars_in_strings(model_output))
             parsed = getattr(module.body[0], "value", None)
             if isinstance(parsed, ast.List) and all(
                 isinstance(e, ast.Call) for e in parsed.elts
@@ -128,7 +126,9 @@ class PythonicToolParser(ToolParser):
             return DeltaMessage(content=delta_text)
 
         try:
-            valid_and_added_text = make_valid_python(current_text)
+            valid_and_added_text = make_valid_python(
+                escape_ctrl_chars_in_strings(current_text)
+            )
             if valid_and_added_text is None:
                 return None
             valid_text, added_text = valid_and_added_text

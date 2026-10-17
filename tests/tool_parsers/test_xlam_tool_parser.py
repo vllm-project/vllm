@@ -6,12 +6,12 @@ from collections.abc import Generator
 
 import pytest
 
-from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
     FunctionCall,
     ToolCall,
 )
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.tokenizers import TokenizerLike, get_tokenizer
 from vllm.tokenizers.detokenizer_utils import detokenize_incrementally
 from vllm.tool_parsers.xlam_tool_parser import xLAMToolParser
@@ -100,7 +100,7 @@ def test_extract_tool_calls_no_tools(xlam_tool_parser):
     model_output = "This is a test"
     extracted_tool_calls = xlam_tool_parser.extract_tool_calls(
         model_output, request=None
-    )  # type: ignore[arg-type]
+    )
     assert not extracted_tool_calls.tools_called
     assert extracted_tool_calls.tool_calls == []
     assert extracted_tool_calls.content == model_output
@@ -225,7 +225,7 @@ def test_extract_tool_calls(
 ):
     extracted_tool_calls = xlam_tool_parser.extract_tool_calls(
         model_output, request=None
-    )  # type: ignore[arg-type]
+    )
     assert extracted_tool_calls.tools_called
 
     assert_tool_calls(extracted_tool_calls.tool_calls, expected_tool_calls)
@@ -263,7 +263,7 @@ def test_extract_tool_calls_list_structure(
     """Test extraction of tool calls when the model outputs a list-structured tool call."""  # noqa: E501
     extracted_tool_calls = xlam_tool_parser.extract_tool_calls(
         model_output, request=None
-    )  # type: ignore[arg-type]
+    )
     assert extracted_tool_calls.tools_called
 
     assert_tool_calls(extracted_tool_calls.tool_calls, expected_tool_calls)
@@ -532,3 +532,26 @@ def test_extract_tool_calls_streaming_incremental(
     parsed_args = json.loads(full_args)
     expected_args = json.loads(expected_first_tool.function.arguments)
     assert parsed_args == expected_args
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+def test_extract_tool_calls_non_ascii(xlam_tool_parser, xlam_tokenizer, streaming):
+    # Use parallel tool calls so the streaming path re-serializes arguments
+    # (the ensure_ascii fix only runs when tool_count > 1).
+    model_output = """[{"name": "get_current_weather", "arguments": {"city": "北京"}}, {"name": "get_current_weather", "arguments": {"city": "上海"}}]"""  # noqa: E501
+
+    if streaming:
+        request = ChatCompletionRequest(model=MODEL, messages=[])
+        args = "".join(
+            delta.tool_calls[0].function.arguments
+            for delta in stream_delta_message_generator(
+                xlam_tool_parser, xlam_tokenizer, model_output, request
+            )
+            if delta.tool_calls and delta.tool_calls[0].function.arguments
+        )
+    else:
+        extracted = xlam_tool_parser.extract_tool_calls(model_output, request=None)
+        args = "".join(tc.function.arguments for tc in extracted.tool_calls)
+
+    assert "北京" in args
+    assert "\\u" not in args

@@ -7,6 +7,7 @@ import time
 import numpy as np
 import torch
 
+from vllm.platforms import CpuArchEnum, current_platform
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.torch_utils import set_random_seed
 
@@ -14,17 +15,15 @@ from vllm.utils.torch_utils import set_random_seed
 try:
     from vllm._custom_ops import cpu_fused_moe, cpu_prepack_moe_weight
 except (ImportError, AttributeError) as e:
-    print("ERROR: CPU fused MoE operations are not available on this platform.")
-    print("This benchmark requires x86 CPU with proper vLLM CPU extensions compiled.")
-    print(
-        "The cpu_fused_moe kernel is typically available on Linux x86_64 "
-        "with AVX2/AVX512."
-    )
     print(f"Import error: {e}")
     sys.exit(1)
 
 # ISA selection following test_cpu_fused_moe.py pattern
-ISA_CHOICES = ["amx", "vec"] if torch.cpu._is_amx_tile_supported() else ["vec"]
+ISA_CHOICES = ["vec"]
+if torch.cpu._is_amx_tile_supported():
+    ISA_CHOICES.append("amx")
+if current_platform.get_cpu_architecture() == CpuArchEnum.ARM:
+    ISA_CHOICES.append("neon")
 
 
 @torch.inference_mode()
@@ -71,12 +70,14 @@ def main(
 
     packed_w13 = cpu_prepack_moe_weight(w13, isa)
     packed_w2 = cpu_prepack_moe_weight(w2, isa)
+    output = torch.empty_like(input_tensor)
 
     def run_benchmark(iters: int) -> list[float]:
         times = []
         for _ in range(iters):
             start_time = time.perf_counter_ns()
-            _ = cpu_fused_moe(
+            cpu_fused_moe(
+                output,
                 input_tensor,
                 packed_w13,
                 packed_w2,
@@ -145,7 +146,7 @@ if __name__ == "__main__":
         "--isa",
         type=str,
         choices=ISA_CHOICES,
-        default=ISA_CHOICES[0],
+        default="vec",
         help=f"ISA to use (available: {ISA_CHOICES})",
     )
     parser.add_argument("--seed", type=int, default=0)

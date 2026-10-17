@@ -36,10 +36,12 @@ from vllm.utils.deep_gemm import is_deep_gemm_supported
 from vllm.utils.flashinfer import (
     has_flashinfer_cutlass_fused_moe,
     has_flashinfer_nvlink_one_sided,
+    has_flashinfer_trtllm_fused_moe,
 )
 from vllm.utils.import_utils import (
     has_aiter,
     has_deep_ep,
+    has_deep_ep_v2,
     has_deep_gemm,
     has_mori,
 )
@@ -84,14 +86,15 @@ MK_FUSED_EXPERT_TYPES: list[mk.FusedMoEExpertsModular] = []
 standard_format = mk.FusedMoEActivationFormat.Standard
 batched_format = mk.FusedMoEActivationFormat.BatchedExperts
 common_float_types: list[torch.dtype | str] = [
-    torch.float8_e4m3fn,
+    current_platform.fp8_dtype(),
     torch.bfloat16,
     torch.float16,
     torch.float32,
 ]
 common_float_and_int_types = common_float_types + [torch.int8]
 nvfp4_types = ["nvfp4"]
-fp8_types = [torch.float8_e4m3fn]
+mxfp4_types = ["mxfp4"]
+fp8_types = [current_platform.fp8_dtype()]
 
 
 def register_prepare_and_finalize(
@@ -216,6 +219,19 @@ if has_deep_ep() and not current_platform.has_device_capability(100):
         backend="deepep_low_latency",
     )
 
+if has_deep_ep_v2() and current_platform.has_device_capability(100):
+    from vllm.model_executor.layers.fused_moe.prepare_finalize.deepep_v2 import (
+        DeepEPV2PrepareAndFinalize,
+    )
+
+    register_prepare_and_finalize(
+        DeepEPV2PrepareAndFinalize,
+        standard_format,
+        common_float_types,
+        blocked_quantization_support=True,
+        backend="deepep_v2",
+    )
+
 if has_mori():
     from vllm.model_executor.layers.fused_moe.prepare_finalize.mori import (
         MoriPrepareAndFinalize,
@@ -289,20 +305,51 @@ if has_flashinfer_cutlass_fused_moe() and current_platform.has_device_capability
         blocked_quantization_support=False,
     )
 
-if has_aiter():
-    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
-        AiterExperts,
+if has_flashinfer_trtllm_fused_moe() and current_platform.has_device_capability(100):
+    from vllm.model_executor.layers.fused_moe.experts.trtllm_fp8_moe import (
+        TrtLlmFp8ExpertsModular,
     )
 
     register_experts(
-        AiterExperts,
+        TrtLlmFp8ExpertsModular,
         standard_format,
         fp8_types,
         blocked_quantization_support=True,
-        needs_aiter=True,
     )
+
+if has_aiter():
+    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+        AiterFp8BlockExperts,
+        AiterFp8ChannelExperts,
+        AiterFp8TensorExperts,
+        AiterMxfp4Experts,
+        AiterUnquantizedExperts,
+    )
+
+    # Registration dtypes gate which quant configs the modular-kernel test
+    # harness will ever pair with a given class (see Config.is_valid()):
+    # they must match what each subclass's _supports_quant_scheme() actually
+    # declares, or the harness will generate a case the class rejects.
+    for aiter_experts_cls, aiter_supported_dtypes in (
+        (AiterUnquantizedExperts, common_float_types),
+        (AiterFp8BlockExperts, fp8_types),
+        (AiterFp8TensorExperts, fp8_types),
+        (AiterFp8ChannelExperts, fp8_types),
+        (AiterMxfp4Experts, mxfp4_types),
+    ):
+        register_experts(
+            aiter_experts_cls,
+            standard_format,
+            aiter_supported_dtypes,
+            blocked_quantization_support=True,
+            needs_aiter=True,
+        )
 else:
-    AiterExperts = None
+    AiterUnquantizedExperts = None
+    AiterFp8BlockExperts = None
+    AiterFp8TensorExperts = None
+    AiterFp8ChannelExperts = None
+    AiterMxfp4Experts = None
 
 if has_deep_gemm() and is_deep_gemm_supported():
     register_experts(
@@ -370,35 +417,35 @@ MK_QUANT_CONFIGS: list[TestMoEQuantConfig | None] = [
     None,
     # per-channel / per-column weights and per-tensor activations
     TestMoEQuantConfig(
-        quant_dtype=torch.float8_e4m3fn,
+        quant_dtype=current_platform.fp8_dtype(),
         per_out_ch_quant=True,
         per_act_token_quant=False,
         block_shape=None,
     ),
     # per-channel / per-column weights and per-token activations
     TestMoEQuantConfig(
-        quant_dtype=torch.float8_e4m3fn,
+        quant_dtype=current_platform.fp8_dtype(),
         per_out_ch_quant=True,
         per_act_token_quant=True,
         block_shape=None,
     ),
     # per-tensor weights and per-tensor activations
     TestMoEQuantConfig(
-        quant_dtype=torch.float8_e4m3fn,
+        quant_dtype=current_platform.fp8_dtype(),
         per_out_ch_quant=False,
         per_act_token_quant=False,
         block_shape=None,
     ),
     # per-tensor weights and per-token activations
     TestMoEQuantConfig(
-        quant_dtype=torch.float8_e4m3fn,
+        quant_dtype=current_platform.fp8_dtype(),
         per_out_ch_quant=False,
         per_act_token_quant=True,
         block_shape=None,
     ),
     # block-quantized weights and 128 block per-token activations
     TestMoEQuantConfig(
-        quant_dtype=torch.float8_e4m3fn,
+        quant_dtype=current_platform.fp8_dtype(),
         per_out_ch_quant=False,
         per_act_token_quant=False,
         block_shape=[128, 128],
@@ -417,24 +464,6 @@ if cutlass_fp4_supported() or has_flashinfer_cutlass_fused_moe():
             block_shape=None,
         ),
     ]
-
-
-def _slice(rank: int, num_local_experts: int, t: torch.Tensor) -> torch.Tensor:
-    s = rank * num_local_experts
-    e = s + num_local_experts
-    return t[s:e]
-
-
-def make_cutlass_strides(
-    e: int,
-    n: int,
-    k: int,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    ab_strides1 = torch.full((e,), k, device="cuda", dtype=torch.int64)
-    ab_strides2 = torch.full((e,), n, device="cuda", dtype=torch.int64)
-    c_strides1 = torch.full((e,), 2 * n, device="cuda", dtype=torch.int64)
-    c_strides2 = torch.full((e,), k, device="cuda", dtype=torch.int64)
-    return ab_strides1, ab_strides2, c_strides1, c_strides2
 
 
 def make_fused_experts(

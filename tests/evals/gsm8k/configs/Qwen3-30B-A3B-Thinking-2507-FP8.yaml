@@ -1,0 +1,6 @@
+model_name: "amd/Qwen3-30B-A3B-Thinking-2507-FP8"
+accuracy_threshold: 0.81
+num_questions: 1319
+num_fewshot: 5
+max_tokens: 1024
+server_args: "--max-model-len 4096 --gpu-memory-utilization 0.85"

@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""
-Simple benchmark to compare prefix-cache block hashing algorithms.
+"""Simple benchmark to compare prefix-cache block hashing algorithms.
 
 Example:
     python benchmark_prefix_block_hash.py --num-blocks 20000 --block-size 32
+
 """
 
 from __future__ import annotations

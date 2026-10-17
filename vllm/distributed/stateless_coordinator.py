@@ -17,6 +17,8 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.distributed.utils import (
     StatelessProcessGroup,
+    get_cpu_distributed_timeout_or_none,
+    get_distributed_timeout_or_none,
     stateless_destroy_torch_distributed_process_group,
     stateless_init_torch_distributed_process_group,
 )
@@ -59,8 +61,7 @@ def _fetch_group_ports(key: str, coord_store: Store) -> list[int]:
 
 
 class StatelessGroupCoordinator(GroupCoordinator):
-    """
-    A stateless version of the GroupCoordinator class in parallel_state,
+    """A stateless version of the GroupCoordinator class in parallel_state,
     It will create CPU, device and TCPStore based communication groups
     that are independent of PyTorch's WORLD group. Hence,
     communication groups with a different set of participants GPUs
@@ -79,6 +80,7 @@ class StatelessGroupCoordinator(GroupCoordinator):
         host: str = "127.0.0.1",
         global_rank: int = 0,
         global_world_size: int = 1,
+        use_all2all: bool = False,
     ):
         group_name = group_name or "anonymous"
         self.unique_name = _get_unique_name(group_name)
@@ -86,6 +88,15 @@ class StatelessGroupCoordinator(GroupCoordinator):
 
         self.rank = global_rank
         self.local_rank = local_rank
+        from vllm.distributed.parallel_state import _WORLD
+
+        if _WORLD is not None:
+            self.device_index = _WORLD.device_index
+        else:
+            assert local_rank >= 0, (
+                "local_rank must be provided when creating the world group"
+            )
+            self.device_index = local_rank
 
         self_device_group = None
         self_cpu_group = None
@@ -95,6 +106,10 @@ class StatelessGroupCoordinator(GroupCoordinator):
 
         backend = str(torch_distributed_backend)
         self.backend = backend
+        cpu_timeout = get_cpu_distributed_timeout_or_none()
+        device_timeout = (
+            cpu_timeout if backend == "gloo" else get_distributed_timeout_or_none()
+        )
         for idx, ranks in enumerate(group_ranks):
             if self.rank in ranks:
                 self.ranks = ranks
@@ -121,6 +136,7 @@ class StatelessGroupCoordinator(GroupCoordinator):
                     backend=backend,
                     group_name=f"{self.unique_name}_device",
                     listen_socket=socks[0] if socks else None,
+                    timeout=device_timeout,
                 )
                 cpu_group = stateless_init_torch_distributed_process_group(
                     host=host,
@@ -130,6 +146,7 @@ class StatelessGroupCoordinator(GroupCoordinator):
                     backend="gloo",
                     group_name=f"{self.unique_name}_cpu",
                     listen_socket=socks[1] if socks else None,
+                    timeout=cpu_timeout,
                 )
                 tcp_store_group = StatelessProcessGroup.create(
                     host=host,
@@ -152,11 +169,18 @@ class StatelessGroupCoordinator(GroupCoordinator):
         self.tcp_store_group = self_tcp_store_group
 
         if current_platform.is_cuda_alike():
-            self.device = torch.device(f"cuda:{local_rank}")
+            visible_device_index = (
+                current_platform.logical_device_id_to_visible_device_id(
+                    self.device_index
+                )
+            )
+            self.device = torch.device(f"cuda:{visible_device_index}")
         elif current_platform.is_xpu():
-            self.device = torch.device(f"xpu:{local_rank}")
+            self.device = torch.device(f"xpu:{self.device_index}")
         elif current_platform.is_out_of_tree():
-            self.device = torch.device(f"{current_platform.device_name}:{local_rank}")
+            self.device = torch.device(
+                f"{current_platform.device_name}:{self.device_index}"
+            )
         else:
             self.device = torch.device("cpu")
 
@@ -175,6 +199,7 @@ class StatelessGroupCoordinator(GroupCoordinator):
                 global_ranks=self.ranks,
                 global_world_size=global_world_size,
                 tcp_store_group=self.tcp_store_group,
+                use_all2all=use_all2all,
             )
 
         self.mq_broadcaster = None

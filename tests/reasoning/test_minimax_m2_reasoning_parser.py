@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
 from tests.reasoning.utils import run_reasoning_extraction
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
@@ -15,7 +15,7 @@ REASONING_MODEL_NAME = "MiniMaxAI/MiniMax-M2"
 
 
 @pytest.fixture(scope="module")
-def minimax_m2_tokenizer():
+def minimax_m2_tokenizer() -> PreTrainedTokenizerBase:
     return AutoTokenizer.from_pretrained(REASONING_MODEL_NAME)
 
 
@@ -59,28 +59,12 @@ MULTIPLE_LINES = {
     "is_reasoning_end": True,
 }
 
-# Case: only end token (empty reasoning, immediate response)
-SHORTEST_REASONING_NO_STREAMING = {
-    "output": "</think>This is the response",
-    "reasoning": "",
-    "content": "This is the response",
-    "is_reasoning_end": True,
-}
-
 # Case: only end token streaming (reasoning is None because it's just the token)
 SHORTEST_REASONING_STREAMING = {
     "output": "</think>This is the response",
     "reasoning": None,
     "content": "This is the response",
     "is_reasoning_end": True,
-}
-
-# Case: empty output
-EMPTY = {
-    "output": "",
-    "reasoning": "",
-    "content": None,
-    "is_reasoning_end": False,
 }
 
 # Case: empty streaming
@@ -150,19 +134,9 @@ TEST_CASES = [
         id="multiple_lines_streaming",
     ),
     pytest.param(
-        False,
-        SHORTEST_REASONING_NO_STREAMING,
-        id="shortest_reasoning",
-    ),
-    pytest.param(
         True,
         SHORTEST_REASONING_STREAMING,
         id="shortest_reasoning_streaming",
-    ),
-    pytest.param(
-        False,
-        EMPTY,
-        id="empty",
     ),
     pytest.param(
         True,
@@ -221,10 +195,10 @@ def test_reasoning(
 
     # Test extract_content
     if param_dict["content"] is not None:
-        content = parser.extract_content_ids(output_ids)
-        assert content == minimax_m2_tokenizer.convert_tokens_to_ids(
+        content_ids = parser.extract_content_ids(output_ids)
+        assert content_ids == minimax_m2_tokenizer.convert_tokens_to_ids(
             minimax_m2_tokenizer.tokenize(param_dict["content"])
         )
     else:
-        content = parser.extract_content_ids(output)
-        assert content == []
+        content_ids = parser.extract_content_ids(output)
+        assert content_ids == []

@@ -9,7 +9,7 @@ from tests.tool_parsers.utils import (
     run_tool_extraction,
     run_tool_extraction_streaming,
 )
-from vllm.entrypoints.openai.engine.protocol import FunctionCall
+from vllm.entrypoints.generate.base.protocol import FunctionCall
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser, ToolParserManager
 
@@ -57,6 +57,16 @@ ESCAPED_STRING_FUNCTION_OUTPUT = (
 ESCAPED_STRING_FUNCTION_CALL = FunctionCall(
     name="get_weather",
     arguments='{"city": "Martha\'s Vineyard", "metric": "\\"cool units\\""}',
+)
+# A raw (unescaped) newline inside a string argument is invalid Python, but the
+# intent is unambiguous; the parser escapes control chars before parsing.
+RAW_NEWLINE_FUNCTION_OUTPUT = "write_file(content='line1\nline2')"
+RAW_NEWLINE_FUNCTION_CALL = FunctionCall(
+    name="write_file",
+    arguments='{"content": "line1\\nline2"}',
+)
+RAW_NEWLINE_PARALLEL_FUNCTION_OUTPUT = (
+    "write_file(content='line1\nline2'), get_weather(city='SF')"
 )
 
 
@@ -150,6 +160,36 @@ TEST_CASES = [
     ),
     pytest.param(
         True,
+        f"[{RAW_NEWLINE_FUNCTION_OUTPUT}]",
+        [RAW_NEWLINE_FUNCTION_CALL],
+        id="raw_newline_in_string_streaming",
+    ),
+    pytest.param(
+        False,
+        f"[{RAW_NEWLINE_FUNCTION_OUTPUT}]",
+        [RAW_NEWLINE_FUNCTION_CALL],
+        id="raw_newline_in_string_nonstreaming",
+    ),
+    pytest.param(
+        True,
+        f"[{RAW_NEWLINE_PARALLEL_FUNCTION_OUTPUT}]",
+        [
+            RAW_NEWLINE_FUNCTION_CALL,
+            FunctionCall(name="get_weather", arguments='{"city": "SF"}'),
+        ],
+        id="raw_newline_parallel_calls_streaming",
+    ),
+    pytest.param(
+        False,
+        f"[{RAW_NEWLINE_PARALLEL_FUNCTION_OUTPUT}]",
+        [
+            RAW_NEWLINE_FUNCTION_CALL,
+            FunctionCall(name="get_weather", arguments='{"city": "SF"}'),
+        ],
+        id="raw_newline_parallel_calls_nonstreaming",
+    ),
+    pytest.param(
+        True,
         f"[{SIMPLE_FUNCTION_OUTPUT}, {MORE_TYPES_FUNCTION_OUTPUT}]",
         [SIMPLE_FUNCTION_CALL, MORE_TYPES_FUNCTION_CALL],
         id="parallel_calls_streaming",
@@ -209,7 +249,7 @@ def test_streaming_tool_call_with_large_steps(default_tokenizer: TokenizerLike):
 
 @pytest.mark.parametrize("streaming", [False])
 def test_regex_timeout_handling(streaming: bool, default_tokenizer: TokenizerLike):
-    """test regex timeout is handled gracefully"""
+    """Test regex timeout is handled gracefully."""
     tool_parser: ToolParser = ToolParserManager.get_tool_parser("pythonic")(
         default_tokenizer
     )

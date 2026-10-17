@@ -8,7 +8,10 @@ set -ex
 #   --nvshmem-ver <ver>  NVSHMEM version 
 
 CUDA_HOME=${CUDA_HOME:-/usr/local/cuda}
-DEEPEP_COMMIT_HASH=${DEEPEP_COMMIT_HASH:-"73b6ea4"}
+# Pinned in full: an abbreviated hash is not a ref, so a consumer that
+# fetches the pin directly ("git fetch origin <sha>") cannot resolve it.
+DEEPEP_COMMIT_HASH=${DEEPEP_COMMIT_HASH:-"d4f41e4e93602a15e95f55f6ee8df8f1aaa0e4bb"}
+
 NVSHMEM_VER=${NVSHMEM_VER:-"3.3.24"}  # Default supports both CUDA 12 and 13
 WORKSPACE=${WORKSPACE:-$(pwd)/ep_kernels_workspace}
 MODE=${MODE:-install}
@@ -75,10 +78,25 @@ mkdir -p "$WHEEL_DIR"
 pushd "$WORKSPACE"
 
 # install dependencies if not installed
+UV_PIP_TARGET=()
 if [ -z "$VIRTUAL_ENV" ]; then
-  uv pip install --system cmake torch ninja
-else
-  uv pip install cmake torch ninja
+  UV_PIP_TARGET=(--system)
+fi
+uv pip install "${UV_PIP_TARGET[@]}" cmake torch ninja
+
+# DeepEPv2 needs NCCL >= 2.30.4 at both build time and runtime, but PyTorch
+# pins an older release.
+DEEPEP_V2_MIN_NCCL="2.30.4"
+NCCL_PACKAGE="nvidia-nccl-cu${CUDA_VERSION_MAJOR}"
+NCCL_WARNING=""
+NCCL_INSTALLED=$(uv pip show "${UV_PIP_TARGET[@]}" "$NCCL_PACKAGE" 2>/dev/null | sed -n 's/^Version: //p')
+if [ -n "$NCCL_INSTALLED" ] && \
+    [ "$(printf '%s\n' "$DEEPEP_V2_MIN_NCCL" "$NCCL_INSTALLED" | sort -V | head -n1)" != "$DEEPEP_V2_MIN_NCCL" ]; then
+    NCCL_WARNING="WARNING: ${NCCL_PACKAGE} ${NCCL_INSTALLED} is installed, but the deepep_v2 backend
+requires NCCL >= ${DEEPEP_V2_MIN_NCCL} when DeepEP is built and when it runs. To use deepep_v2, run
+    uv pip install \"${NCCL_PACKAGE}>=${DEEPEP_V2_MIN_NCCL}\" --no-deps
+and then run this script again. See tools/ep_kernels/README.md."
+    echo "$NCCL_WARNING" >&2
 fi
 
 # fetch nvshmem
@@ -169,6 +187,48 @@ do_build() {
         sed -i "s|f'{nvshmem_dir}/include']|f'{nvshmem_dir}/include', '${CUDA_HOME}/include/cccl']|" "setup.py"
     fi
 
+    # DeepEPv2 requires Linux 5.6+ at runtime for pidfd_getfd (pidfd_open was
+    # added in Linux 5.3), but manylinux headers predate both definitions.
+    # DeepEP is built as a separate wheel for the vLLM container image and is
+    # not included in the vLLM wheel, so this does not change its manylinux ABI.
+    if [[ "$name" == "DeepEP" ]] && \
+        ! grep -q "vLLM manylinux syscall compatibility" \
+            csrc/kernels/backend/symmetric.hpp; then
+        sed -i '1i\
+// vLLM manylinux syscall compatibility\
+#if defined(__x86_64__) || defined(__aarch64__)\
+#ifndef SYS_pidfd_open\
+#ifdef __NR_pidfd_open\
+#define SYS_pidfd_open __NR_pidfd_open\
+#else\
+#define SYS_pidfd_open 434\
+#endif\
+#endif\
+#ifndef SYS_pidfd_getfd\
+#ifdef __NR_pidfd_getfd\
+#define SYS_pidfd_getfd __NR_pidfd_getfd\
+#else\
+#define SYS_pidfd_getfd 438\
+#endif\
+#endif\
+#endif' csrc/kernels/backend/symmetric.hpp
+    fi
+
+    if [[ "$name" == "DeepEP" ]]; then
+        # DeepEP links against the CUDA driver API in driverless build images.
+        local cuda_driver_stub
+        local cuda_driver_stub_dir
+        cuda_driver_stub=$(
+            find -H "$CUDA_HOME" -path "*/stubs/libcuda.so" -print -quit
+        )
+        if [[ -z "$cuda_driver_stub" ]]; then
+            echo "CUDA driver stub not found under $CUDA_HOME" >&2
+            exit 1
+        fi
+        cuda_driver_stub_dir=$(dirname "$cuda_driver_stub")
+        export LIBRARY_PATH="${cuda_driver_stub_dir}${LIBRARY_PATH:+:$LIBRARY_PATH}"
+    fi
+
     if [ "$MODE" = "install" ]; then
         echo "Installing $name into environment"
         eval "$extra_env" uv pip install --no-build-isolation -vvv .
@@ -190,4 +250,9 @@ do_build \
 if [ "$MODE" = "wheel" ]; then
     echo "All wheels written to $WHEEL_DIR"
     ls -l "$WHEEL_DIR"
+fi
+
+# Repeat after the verbose build output, where the first copy is easy to miss.
+if [ -n "$NCCL_WARNING" ]; then
+    echo "$NCCL_WARNING" >&2
 fi

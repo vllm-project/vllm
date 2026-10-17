@@ -7,15 +7,16 @@ import torch
 
 from vllm import PromptType, TextPrompt
 from vllm.config import ModelConfig
-from vllm.entrypoints.chat_utils import (
+from vllm.exceptions import VLLMValidationError
+from vllm.inputs import MultiModalDataDict, MultiModalUUIDDict
+from vllm.renderers.chat_utils import (
     BaseMultiModalItemTracker,
     ChatCompletionContentPartParam,
     ChatCompletionContentPartTextParam,
     ConversationMessage,
     MultiModalItemTracker,
-    _parse_chat_message_content_parts,
+    parse_chat_message_content_parts,
 )
-from vllm.inputs import MultiModalDataDict, MultiModalUUIDDict
 
 from .typing import (
     ScoreContentPartParam,
@@ -47,18 +48,31 @@ def truncate_text_to_tokens(
 
     Uses offset_mapping to slice the original text at the exact character
     boundary, avoiding lossy encode→decode round-trips that can shift
-    the token count by 1-3 tokens due to BPE merge boundary changes.
+    the token count due to BPE merge boundary changes.
     """
-    encoding = tokenizer(text, add_special_tokens=False, return_offsets_mapping=True)
-    if len(encoding["input_ids"]) <= max_tokens:
-        return text
-    char_end = encoding["offset_mapping"][max_tokens - 1][1]
-    return text[:char_end]
+    if max_tokens <= 0:
+        return ""
+
+    while text:
+        encoding = tokenizer(
+            text,
+            add_special_tokens=False,
+            return_offsets_mapping=True,
+        )
+        offsets = encoding["offset_mapping"]
+        if len(encoding["input_ids"]) <= max_tokens:
+            break
+
+        char_end = min(offsets[max_tokens - 1][1], offsets[max_tokens][0])
+        if char_end >= len(text):
+            char_end = len(text) - 1
+        text = text[:char_end]
+
+    return text
 
 
 def compute_maxsim_score(q_emb: torch.Tensor, d_emb: torch.Tensor) -> torch.Tensor:
-    """
-    Compute ColBERT MaxSim score.
+    """Compute ColBERT MaxSim score.
 
     Args:
         q_emb: Query token embeddings [query_len, dim]
@@ -66,6 +80,7 @@ def compute_maxsim_score(q_emb: torch.Tensor, d_emb: torch.Tensor) -> torch.Tens
 
     Returns:
         MaxSim score (sum over query tokens of max similarity to any doc token)
+
     """
     # compute in float32 for numerical stability
     # [query_len, doc_len]
@@ -85,7 +100,9 @@ def _validate_mm_score_input(
             out.append(d)
         else:
             if not is_multimodal_model:
-                raise ValueError(f"MultiModalParam is not supported for {architecture}")
+                raise VLLMValidationError(
+                    f"MultiModalParam is not supported for {architecture}"
+                )
             content = cast(list[ScoreContentPartParam], d.get("content", []))
             out.append(content)
     return out
@@ -99,11 +116,11 @@ def _validate_score_input_lens(
     len_2 = len(data_2)
 
     if len_1 > 1 and len_1 != len_2:
-        raise ValueError("Input lengths must be either 1:1, 1:N or N:N")
+        raise VLLMValidationError("Input lengths must be either 1:1, 1:N or N:N")
     if len_1 == 0:
-        raise ValueError("At least one text element must be given")
+        raise VLLMValidationError("At least one text element must be given")
     if len_2 == 0:
-        raise ValueError("At least one text_pair element must be given")
+        raise VLLMValidationError("At least one text_pair element must be given")
 
 
 def validate_score_input(
@@ -176,7 +193,7 @@ def _parse_score_content(
 
     mm_parser = mm_tracker.create_parser()
 
-    parse_res = _parse_chat_message_content_parts(
+    parse_res = parse_chat_message_content_parts(
         role=role,
         parts=parts,
         mm_tracker=mm_tracker,
@@ -245,22 +262,30 @@ def parse_score_data(
     return prompt_1, prompt_2, mm_items, mm_uuids
 
 
-def compress_token_type_ids(token_type_ids: list[int]) -> int:
-    """
-    Return position of the first 1 or the length of the list
-    if not found.
+def compress_token_type_ids(token_type_ids: list[int]) -> tuple[int, int]:
+    """Return the half-open range containing token type 1.
+
+    Right padding uses the tokenizer's padding token type, which is commonly
+    zero. Therefore, a padded query-document pair can contain zeros followed
+    by ones followed by trailing zeros.
     """
     first_one = len(token_type_ids)
+    first_zero_after_one = len(token_type_ids)
     err_msg = (
         "Token type ids are expected to be a sequence"
-        " of zeros followed by a sequence of ones"
+        " of zeros followed by ones and optional trailing zeros"
     )
     for i, type_id in enumerate(token_type_ids):
-        if type_id == 0 and first_one < i:
+        if type_id not in (0, 1):
             raise ValueError(err_msg)
-        elif type_id == 1 and first_one > i:
-            first_one = i
-        elif type_id > 1:
-            raise ValueError(err_msg)
+        if type_id == 1:
+            if first_zero_after_one < len(token_type_ids):
+                raise ValueError(err_msg)
+            if first_one == len(token_type_ids):
+                first_one = i
+        elif first_one < len(token_type_ids) and first_zero_after_one == len(
+            token_type_ids
+        ):
+            first_zero_after_one = i
 
-    return first_one
+    return first_one, first_zero_after_one

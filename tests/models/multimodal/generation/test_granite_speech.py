@@ -30,11 +30,14 @@ def vllm_to_hf_output(
 
 MODEL_NAME = "ibm-granite/granite-speech-3.3-2b"
 MODEL_NAME_4_0 = "ibm-granite/granite-4.0-1b-speech"
+# "plus" variant of granite speech (uses GraniteSpeechPlusForConditionalGeneration).
+MODEL_NAME_4_1_PLUS = "ibm-granite/granite-speech-4.1-2b-plus"
 # Audio lora co-exists directly in the 3.3 model directory,
-# the 4.0 model has adapters merged into the weights.
+# the 4.0 and 4.1-plus models have adapters merged into the weights.
 models: dict[str, str | None] = {
     MODEL_NAME: MODEL_NAME,
     MODEL_NAME_4_0: None,
+    MODEL_NAME_4_1_PLUS: None,
 }
 
 
@@ -42,9 +45,10 @@ models: dict[str, str | None] = {
 def granite_speech_attention_config():
     """Return attention config for Granite Speech tests on ROCm."""
     if current_platform.is_rocm():
-        from vllm.platforms.rocm import on_mi3xx
+        from vllm.platforms.rocm import get_cdna_version
 
-        if on_mi3xx():
+        # -1 (unknown arch) is truthy; gate on CDNA3+ like other call sites.
+        if get_cdna_version() > 2:
             return {"backend": "ROCM_AITER_FA"}
         return {"backend": "TRITON_ATTN"}
     return None

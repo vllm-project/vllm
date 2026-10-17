@@ -7,7 +7,7 @@ the inner Rust tokenizer of every HF fast tokenizer loaded afterwards with the
 fastokens shim and rebinds ``tokenizers.decoders.DecodeStream`` so the
 streaming detokenizer accepts the shim. The patch is process-global and
 idempotent, so it applies to any tokenizer mode that ends up loading an HF
-fast tokenizer (`hf`, `deepseek_v32`, `deepseek_v4`, `qwen_vl`, …).
+fast tokenizer (`hf`, `deepseek_v32`, `deepseek_v4`, …).
 """
 
 from importlib.metadata import PackageNotFoundError, version

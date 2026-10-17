@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-vLLM Helion kernel registration with pre-tuned config selection.
+"""vLLM Helion kernel registration with pre-tuned config selection.
 
 This module leverages Helion's internal config selection infrastructure to use
 pre-tuned configs instead of runtime autotuning.
@@ -38,6 +37,7 @@ Key Classes
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Callable
 from typing import Any
 
@@ -163,8 +163,7 @@ class ConfiguredHelionKernel:
         return self._decorated_kernel(*args, **kwargs)
 
     def _create_key_computer(self):
-        """
-        Create a key computer function derived from the config picker.
+        """Create a key computer function derived from the config picker.
 
         The returned function receives kernel arguments unpacked (*args) to match
         Helion's key signature (called as self._key_fn(*args)).
@@ -258,8 +257,9 @@ class HelionKernelWrapper:
         self,
         raw_kernel_func: Callable,
         op_name: str,
-        fake_impl: Callable,
+        fake_impl: Callable | None,
         config_picker: ConfigPicker,
+        mutates_args: list[str] | None = None,
         helion_settings: helion.Settings | None = None,
         input_generator: (Callable[[], dict[CaseKey, tuple[Any, ...]]] | None) = None,
     ):
@@ -272,6 +272,7 @@ class HelionKernelWrapper:
         self.helion_settings = helion_settings
         self._config_picker = config_picker
         self._input_generator = input_generator
+        self._mutates_args = mutates_args
         self._configured_kernel: ConfiguredHelionKernel | None = None
         # TODO(@gmagogsfm): Remove this disable flag once integrated with vLLM IR,
         # which handles op enablement/disablement.
@@ -357,7 +358,7 @@ class HelionKernelWrapper:
         direct_register_custom_op(
             op_name=self.op_name,
             op_func=configured_kernel._decorated_kernel,
-            mutates_args=None,
+            mutates_args=self._mutates_args,
             fake_impl=self._fake_impl,
             target_lib=vllm_helion_lib,
         )
@@ -402,12 +403,17 @@ def register_kernel(
     *,
     config_picker: ConfigPicker,
     fake_impl: Callable | None = None,
+    mutates_args: list[str] | None = None,
     helion_settings: helion.Settings | None = None,
     input_generator: (Callable[[], dict[CaseKey, tuple[Any, ...]]] | None) = None,
 ) -> Callable[[Callable], HelionKernelWrapper]:
     """Register a Helion kernel with pre-tuned config selection.
 
     Args:
+        op_name: Name to register the op under. Defaults to the function name.
+        fake_impl: Optional meta/fake implementation for tracing.
+        mutates_args: Names of arguments the kernel mutates in place.
+        helion_settings: Optional Helion settings override.
         config_picker: Required. Receives ``(args, config_keys)``
             where each config key is a ``dict[str, Any]`` mapping
             parameter names to values.  Return the best-matching
@@ -431,6 +437,7 @@ def register_kernel(
                         "4096": (torch.randn(4096, device="cuda"), 0.5),
                         "8192": (torch.randn(8192, device="cuda"), 0.5),
                     }
+
     """
 
     def decorator(kernel_func: Callable) -> HelionKernelWrapper:
@@ -442,8 +449,12 @@ def register_kernel(
                 f"Use a different op_name or check for duplicate registrations."
             )
 
+        # A void-returning kernel that mutates its args needs no fake impl:
+        # PyTorch auto-generates a trivial one for mutable, no-return schemas.
+        returns_none = inspect.signature(kernel_func).return_annotation is None
+
         final_fake_impl = fake_impl
-        if final_fake_impl is None:
+        if final_fake_impl is None and not (mutates_args and returns_none):
             final_fake_impl = infer_fake_impl(kernel_func, helion_settings)
             logger.debug(
                 "Auto-generated fake_impl for Helion kernel '%s'",
@@ -455,6 +466,7 @@ def register_kernel(
             op_name=final_op_name,
             fake_impl=final_fake_impl,
             config_picker=config_picker,
+            mutates_args=mutates_args,
             helion_settings=helion_settings,
             input_generator=input_generator,
         )

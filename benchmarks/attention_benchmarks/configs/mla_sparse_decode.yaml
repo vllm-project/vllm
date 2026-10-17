@@ -53,6 +53,4 @@ backends:
   - FLASHINFER_MLA_SPARSE
 
 device: "cuda:0"
-repeats: 100
-warmup_iters: 10
 profile_memory: true

@@ -116,33 +116,6 @@ inline void reshape_and_cache_fp8_amx_impl(
 // ---------------------------------------------------------------------------
 // FP8 E5M2 scalar helpers
 // ---------------------------------------------------------------------------
-
-// Reference scalar dequant — used to verify vectorized AMX dequant.
-// FP8 E5M2: s[7] e[6:2] m[1:0], exponent bias = 15 (same as FP16).
-// Byte b → FP16 bits = b << 8 (no bias correction needed).
-inline float fp8e5m2_to_float_scalar(uint8_t b, float scale) noexcept {
-  const uint8_t exp_bits = (b >> 2) & 0x1F;
-  const uint8_t mant_bits = b & 0x03;
-  // NaN: exp=11111, mant!=00
-  if (exp_bits == 0x1F && mant_bits != 0)
-    return std::numeric_limits<float>::quiet_NaN();
-  const uint32_t sign = static_cast<uint32_t>(b & 0x80) << 24;
-  if (exp_bits == 0x1F)
-    return sign ? -std::numeric_limits<float>::infinity()
-                : std::numeric_limits<float>::infinity();
-  if (exp_bits == 0) {  // subnormal: (-1)^s * 2^-14 * mant/4
-    if (mant_bits == 0) return 0.0f;
-    float v = mant_bits * 0x1p-16f;
-    return (sign ? -v : v) * scale;
-  }
-  // Normal: FP32 exp = exp5 - 15 + 127, mantissa top 2 bits
-  uint32_t fp32_bits = sign |
-                       ((static_cast<uint32_t>(exp_bits) - 15 + 127) << 23) |
-                       (static_cast<uint32_t>(mant_bits) << 21);
-  float val = *reinterpret_cast<const f32_alias_t*>(&fp32_bits);
-  return val * scale;
-}
-
 inline uint8_t float_to_fp8e5m2_scalar(float v, float inv_scale) noexcept {
   v *= inv_scale;
   constexpr float fp8_e5m2_max = 57344.0f;

@@ -16,8 +16,7 @@ logger = init_logger(__name__)
 
 
 class NoOpEliminationPass(VllmInductorPass):
-    """
-    This is an inductor pass that removes redundant reshape/slice operations.
+    """This is an inductor pass that removes redundant reshape/slice operations.
     It is required for RMSNorm-quant fusion to work properly.
     That's because apply_fp8_linear adds a reshape, which is redundant
     in the 2D-case. Additionally, torch internal no-op elimination pass does
@@ -106,15 +105,19 @@ class NoOpEliminationPass(VllmInductorPass):
 
     # ---------------------- Shape comparison helpers ----------------------
     def dims_equivalent(self, dim: int | SymInt, i_dim: int | SymInt) -> bool:
-        """
-        This function checks if two dimensions are equivalent.
-        :param dim: The dimension arg to reshape/slice
-        :param i_dim: The corresponding dimension in the input tensor
-        :return: Are the dimensions equivalent?
+        """This function checks if two dimensions are equivalent.
+
+        Args:
+            dim: The dimension arg to reshape/slice
+            i_dim: The corresponding dimension in the input tensor
+
+        Returns:
+            Are the dimensions equivalent?
 
         There are two cases in which the dimensions are equivalent:
         1. The dimensions are equal (both integers)
         2. The dimensions both correspond to the same SymInt
+
         """
         # Case 1
         return statically_known_true(dim == i_dim)  # type: ignore[no-any-return]

@@ -48,7 +48,7 @@ vLLM is flexible and easy to use with:
 - Tool calling and reasoning parsers
 - OpenAI-compatible API server, plus Anthropic Messages API and gRPC support
 - Efficient multi-LoRA support for dense and MoE layers
-- Support for NVIDIA GPUs, AMD GPUs, and x86/ARM/PowerPC CPUs. Additionally, diverse hardware plugins such as Google TPUs, Intel Gaudi, IBM Spyre, Huawei Ascend, Rebellions NPU, Apple Silicon, MetaX GPU, and more.
+- Support for NVIDIA GPUs, AMD GPUs, Intel GPUs, and x86/ARM/PowerPC CPUs. Additionally, diverse hardware plugins such as Google TPUs, Intel Gaudi, IBM Spyre, Huawei Ascend, Rebellions NPU, Apple Silicon, MetaX GPU, and more.
 
 vLLM seamlessly supports 200+ model architectures on Hugging Face, including:
 
@@ -67,6 +67,7 @@ Install vLLM with [`uv`](https://docs.astral.sh/uv/) (recommended) or `pip`:
 
 ```bash
 uv pip install vllm
+vllm download-kernels  # precompiled kernels for faster startup
 ```
 
 Or [build from source](https://docs.vllm.ai/en/latest/getting_started/installation/gpu/index.html#build-wheel-from-source) for development.

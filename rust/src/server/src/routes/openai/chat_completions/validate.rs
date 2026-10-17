@@ -1,14 +1,20 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use super::types::ChatCompletionRequest;
 use crate::error::{ApiError, bail_invalid_request};
-use crate::routes::openai::utils::types::{ChatMessage, Tool, ToolChoice, ToolChoiceValue};
+use crate::routes::openai::utils::types::{ChatMessage, Tool};
+use crate::routes::openai::utils::validate_generation_prompt_truncation;
 
 /// Enforce the minimal compatibility contract for the Rust OpenAI server.
 pub(super) fn validate_request_compat(
     request: &ChatCompletionRequest,
     served_model_names: &[String],
 ) -> Result<(), ApiError> {
-    if !served_model_names.iter().any(|n| n == &request.model) {
-        return Err(ApiError::model_not_found(request.model.clone()));
+    if let Some(model) = request.model.as_ref().filter(|model| !model.is_empty())
+        && !served_model_names.iter().any(|name| name == model)
+    {
+        return Err(ApiError::model_not_found(model.clone()));
     }
 
     if request.stream_options.is_some() && !request.stream {
@@ -26,6 +32,13 @@ pub(super) fn validate_request_compat(
         bail_invalid_request!(
             param = "top_logprobs",
             "top_logprobs can only be used when logprobs=true."
+        );
+    }
+
+    if request.logprob_token_ids.as_ref().is_some_and(|ids| !ids.is_empty()) && !request.logprobs {
+        bail_invalid_request!(
+            param = "logprob_token_ids",
+            "when using `logprob_token_ids`, `logprobs` must be set to true."
         );
     }
 
@@ -58,30 +71,6 @@ pub(super) fn validate_request_compat(
         }
     }
 
-    if let Some(tool_choice) = &request.tool_choice {
-        match tool_choice {
-            ToolChoice::Value(ToolChoiceValue::Auto | ToolChoiceValue::None) => {}
-            ToolChoice::Value(ToolChoiceValue::Required) => {
-                bail_invalid_request!(
-                    param = "tool_choice",
-                    "tool_choice=required is not supported yet."
-                );
-            }
-            ToolChoice::Function { .. } => {
-                bail_invalid_request!(
-                    param = "tool_choice",
-                    "Named function tool_choice is not supported yet."
-                );
-            }
-            ToolChoice::AllowedTools { .. } => {
-                bail_invalid_request!(
-                    param = "tool_choice",
-                    "allowed_tools tool_choice is not supported yet."
-                );
-            }
-        }
-    }
-
     if request.use_beam_search {
         bail_invalid_request!(
             param = "use_beam_search",
@@ -91,13 +80,6 @@ pub(super) fn validate_request_compat(
 
     // ---- Reject parameters that are accepted for deserialization but not yet
     // implemented ----
-
-    if request.parallel_tool_calls.is_some() {
-        bail_invalid_request!(
-            param = "parallel_tool_calls",
-            "parallel_tool_calls is not supported."
-        );
-    }
 
     reject_non_default(
         request.length_penalty.as_ref(),
@@ -110,22 +92,7 @@ pub(super) fn validate_request_compat(
             "spaces_between_special_tokens is not supported."
         );
     }
-    reject_non_default(
-        request.truncate_prompt_tokens.as_ref(),
-        "truncate_prompt_tokens",
-        "truncate_prompt_tokens is not supported.",
-    )?;
-    reject_non_default(
-        request.thinking_token_budget.as_ref(),
-        "thinking_token_budget",
-        "thinking_token_budget is not supported.",
-    )?;
-    if !request.include_reasoning {
-        bail_invalid_request!(
-            param = "include_reasoning",
-            "include_reasoning is not supported."
-        );
-    }
+    validate_generation_prompt_truncation(request.truncate_prompt_tokens, request.echo)?;
     reject_non_default(
         request.media_io_kwargs.as_ref(),
         "media_io_kwargs",
@@ -136,20 +103,6 @@ pub(super) fn validate_request_compat(
         "mm_processor_kwargs",
         "mm_processor_kwargs is not supported.",
     )?;
-    reject_non_default(
-        request.repetition_detection.as_ref(),
-        "repetition_detection",
-        "repetition_detection is not supported.",
-    )?;
-
-    if let Some(options) = &request.stream_options
-        && options.continuous_usage_stats.is_some()
-    {
-        bail_invalid_request!(
-            param = "stream_options",
-            "continuous_usage_stats is not supported."
-        );
-    }
 
     Ok(())
 }
@@ -179,15 +132,14 @@ fn validate_function_tools(tools: &[Tool], param: &'static str) -> Result<(), Ap
 mod tests {
     use std::collections::HashMap;
 
+    use crate::routes::openai::utils::types::ReasoningEffort;
     use serde_json::json;
-    use vllm_chat::ReasoningEffort;
 
     use super::validate_request_compat;
     use crate::routes::openai::chat_completions::types::ChatCompletionRequest;
     use crate::routes::openai::utils::structured_outputs::ResponseFormat;
     use crate::routes::openai::utils::types::{
-        ChatMessage, Function, FunctionChoice, MessageContent, StringOrArray, Tool, ToolChoice,
-        ToolChoiceValue, ToolReference,
+        ChatMessage, Function, MessageContent, StringOrArray, Tool, ToolChoice, ToolChoiceValue,
     };
 
     fn served(names: &[&str]) -> Vec<String> {
@@ -196,7 +148,7 @@ mod tests {
 
     fn base_request() -> ChatCompletionRequest {
         ChatCompletionRequest {
-            model: "Qwen/Qwen1.5-0.5B-Chat".to_string(),
+            model: Some("Qwen/Qwen1.5-0.5B-Chat".to_string()),
             messages: vec![ChatMessage::User {
                 content: MessageContent::Text("hello".to_string()),
                 name: None,
@@ -215,6 +167,18 @@ mod tests {
 
         validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"]))
             .expect("stop strings should be accepted");
+    }
+
+    #[test]
+    fn validate_request_compat_accepts_default_model_inputs() {
+        for model in [None, Some(String::new())] {
+            let request = ChatCompletionRequest {
+                model,
+                ..base_request()
+            };
+            validate_request_compat(&request, &served(&["served-model"]))
+                .expect("default model input should select the primary served model");
+        }
     }
 
     #[test]
@@ -238,7 +202,9 @@ mod tests {
                     description: None,
                     parameters: json!({}),
                     strict: None,
+                    defer_loading: None,
                 },
+                defer_loading: None,
             }]),
             ..base_request()
         };
@@ -255,7 +221,9 @@ mod tests {
                         description: None,
                         parameters: json!({}),
                         strict: None,
+                        defer_loading: None,
                     },
+                    defer_loading: None,
                 }]),
                 name: None,
             }],
@@ -277,7 +245,9 @@ mod tests {
                         description: None,
                         parameters: json!({}),
                         strict: None,
+                        defer_loading: None,
                     },
+                    defer_loading: None,
                 }]),
                 name: None,
             }],
@@ -310,6 +280,17 @@ mod tests {
 
         validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"]))
             .expect("reasoning_effort should be accepted");
+    }
+
+    #[test]
+    fn validate_request_compat_accepts_include_reasoning_false() {
+        let request = ChatCompletionRequest {
+            include_reasoning: false,
+            ..base_request()
+        };
+
+        validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"]))
+            .expect("include_reasoning=false should be accepted");
     }
 
     #[test]
@@ -372,39 +353,5 @@ mod tests {
 
         validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"]))
             .expect("tool_choice=none is ok");
-    }
-
-    #[test]
-    fn validate_request_compat_rejects_required_and_named_tool_choices() {
-        let required = ChatCompletionRequest {
-            tool_choice: Some(ToolChoice::Value(ToolChoiceValue::Required)),
-            ..base_request()
-        };
-        assert!(validate_request_compat(&required, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err());
-
-        let named = ChatCompletionRequest {
-            tool_choice: Some(ToolChoice::Function {
-                tool_type: "function".to_string(),
-                function: FunctionChoice {
-                    name: "tool".to_string(),
-                },
-            }),
-            ..base_request()
-        };
-        assert!(validate_request_compat(&named, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err());
-
-        let allowed_tools = ChatCompletionRequest {
-            tool_choice: Some(ToolChoice::AllowedTools {
-                tool_type: "allowed_tools".to_string(),
-                mode: "auto".to_string(),
-                tools: vec![ToolReference::Function {
-                    name: "tool".to_string(),
-                }],
-            }),
-            ..base_request()
-        };
-        assert!(
-            validate_request_compat(&allowed_tools, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err()
-        );
     }
 }

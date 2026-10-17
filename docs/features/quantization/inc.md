@@ -75,14 +75,11 @@ vllm serve Intel/DeepSeek-R1-0528-Qwen3-8B-int4-AutoRound \
     --max-model-len 4096
 ```
 
-!!! note
-     To deploy `wNa16` models on Intel GPU/CPU, please add `--enforce-eager` for now.
-
 ## Evaluating the Quantized Model with vLLM
 
 ```bash
 lm_eval --model vllm \
-  --model_args pretrained="Intel/DeepSeek-R1-0528-Qwen3-8B-int4-AutoRound,max_model_len=8192,max_num_batched_tokens=32768,max_num_seqs=128,gpu_memory_utilization=0.8,dtype=bfloat16,max_gen_toks=2048,enforce_eager=True" \
+  --model_args pretrained="Intel/DeepSeek-R1-0528-Qwen3-8B-int4-AutoRound,max_model_len=8192,max_num_batched_tokens=32768,max_num_seqs=128,gpu_memory_utilization=0.8,dtype=bfloat16,max_gen_toks=2048" \
   --tasks gsm8k \
   --num_fewshot 5 \
   --batch_size 128
