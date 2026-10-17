@@ -1003,12 +1003,20 @@ class Gemma3nTextModel(nn.Module, SupportsQuant):
         self.per_layer_inputs[:num_padded_logits_indices].copy_(
             per_layer_inputs_adjusted[logits_indices_padded]
         )
-        cross_decoder_hidden_states = self.cross_decoder(
-            positions=self.positions[:num_padded_logits_indices],
-            hidden_states=self.hidden_states[:num_padded_logits_indices],
-            per_layer_inputs=self.per_layer_inputs[:num_padded_logits_indices],
-            **kwargs,
+        forward_context = get_forward_context()
+        orig_lora_mapping = forward_context.lora_token_mapping
+        forward_context.lora_token_mapping = forward_context.additional_kwargs.get(
+            "fast_prefill_lora_mapping"
         )
+        try:
+            cross_decoder_hidden_states = self.cross_decoder(
+                positions=self.positions[:num_padded_logits_indices],
+                hidden_states=self.hidden_states[:num_padded_logits_indices],
+                per_layer_inputs=self.per_layer_inputs[:num_padded_logits_indices],
+                **kwargs,
+            )
+        finally:
+            forward_context.lora_token_mapping = orig_lora_mapping
 
         if num_logits_indices is not None:
             assert num_logits_indices > 0

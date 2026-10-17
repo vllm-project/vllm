@@ -1281,6 +1281,10 @@ class Gemma4Model(nn.Module, EagleModelMixin, SupportsQuant):
         # CUDAGraphWrapper dispatches to the correct (reduced) batch size.
         forward_context = get_forward_context()
         orig_batch_desc = forward_context.batch_descriptor
+        orig_lora_mapping = forward_context.lora_token_mapping
+        forward_context.lora_token_mapping = forward_context.additional_kwargs.get(
+            "fast_prefill_lora_mapping"
+        )
         if orig_batch_desc is not None:
             forward_context.batch_descriptor = replace(
                 orig_batch_desc, num_tokens=num_padded
@@ -1291,15 +1295,16 @@ class Gemma4Model(nn.Module, EagleModelMixin, SupportsQuant):
             if self.per_layer_inputs is not None
             else None
         )
-        cross_hidden_states = self.cross_decoder(
-            self.positions[:num_padded],
-            self.hidden_states[:num_padded],
-            cross_per_layer,
-            **kwargs,
-        )
-
-        # Restore the original batch_descriptor
-        forward_context.batch_descriptor = orig_batch_desc
+        try:
+            cross_hidden_states = self.cross_decoder(
+                self.positions[:num_padded],
+                self.hidden_states[:num_padded],
+                cross_per_layer,
+                **kwargs,
+            )
+        finally:
+            forward_context.batch_descriptor = orig_batch_desc
+            forward_context.lora_token_mapping = orig_lora_mapping
 
         if num_logits_indices is not None:
             assert num_logits_indices > 0
