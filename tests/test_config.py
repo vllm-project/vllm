@@ -924,6 +924,36 @@ def test_v2_model_runner_supports_custom_logits_processors():
     assert config._get_v2_model_runner_unsupported_features() == []
 
 
+def test_cpu_no_triton_v2_rejects_unsupported_features(monkeypatch):
+    config = VllmConfig()
+    config.speculative_config = cast(
+        SpeculativeConfig,
+        SimpleNamespace(
+            method="ngram",
+            parallel_drafting=False,
+            use_heterogeneous_vocab=False,
+        ),
+    )
+    config.model_config = cast(
+        ModelConfig,
+        SimpleNamespace(enable_prompt_embeds=True, is_diffusion=True),
+    )
+    config.parallel_config.decode_context_parallel_size = 2
+    config.parallel_config.prefill_context_parallel_size = 2
+    config.parallel_config.enable_batch_sharded_sampling = True
+    monkeypatch.setattr(vllm_config_module, "HAS_TRITON", False)
+    monkeypatch.setattr(current_platform, "is_cpu", lambda: True)
+
+    with pytest.raises(ValueError) as exc_info:
+        config._validate_v2_model_runner()
+    assert str(exc_info.value) == (
+        "CPU Model Runner V2 without Triton does not yet support: "
+        "speculative decoding, prompt embeddings, diffusion models, "
+        "decode context parallelism, prefill context parallelism, "
+        "batch-sharded sampling"
+    )
+
+
 @pytest.mark.parametrize("architecture", ["DFlash2DraftModel", "LiLiCorrDraftModel"])
 def test_dflash_candidate_draft_forces_v2_model_runner(architecture):
     """A DFlash2 draft must reach the V2 speculator, the only one that runs its
@@ -1345,6 +1375,15 @@ def test_models_default_to_v2_model_runner(model_config, expected, monkeypatch):
     config._get_v2_model_runner_unsupported_features = lambda: []
 
     assert VllmConfig.use_v2_model_runner.fget(config) is expected
+
+
+def test_cpu_without_triton_defaults_to_v2_model_runner(monkeypatch):
+    monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
+    monkeypatch.setattr(vllm_config_module, "HAS_TRITON", False)
+    monkeypatch.setattr(current_platform, "is_cpu", lambda: True)
+    config = SimpleNamespace(attention_config=AttentionConfig())
+
+    assert VllmConfig.use_v2_model_runner.fget(config)
 
 
 def test_v1_model_runner_rejects_v2_only_features():

@@ -6,11 +6,33 @@
 
 #include "cpu/mamba_kernels.hpp"
 
+#include <algorithm>
 #include <ATen/ATen.h>
 #include <torch/library.h>
 #include <c10/util/Optional.h>
 
 #include "cpu_types.hpp"
+
+void update_num_accepted_tokens_cpu(
+    const at::Tensor& idx_mapping, const c10::optional<at::Tensor>& num_sampled,
+    at::Tensor& num_accepted_tokens, int64_t num_sampled_value) {
+  const int64_t* idx_mapping_ptr = idx_mapping.data_ptr<int64_t>();
+  const int32_t* num_sampled_ptr =
+      num_sampled.has_value() ? num_sampled->data_ptr<int32_t>() : nullptr;
+  int32_t* num_accepted_tokens_ptr = num_accepted_tokens.data_ptr<int32_t>();
+  const int32_t fill_value =
+      static_cast<int32_t>(std::max<int64_t>(num_sampled_value, 1));
+
+  for (int64_t row = 0; row < idx_mapping.size(0); ++row) {
+    const int64_t req_state_idx = idx_mapping_ptr[row];
+    if (req_state_idx < 0) {
+      continue;
+    }
+    num_accepted_tokens_ptr[req_state_idx] =
+        num_sampled_ptr == nullptr ? fill_value
+                                   : std::max<int32_t>(num_sampled_ptr[row], 1);
+  }
+}
 
 // ---------------------------------------------------------------------------
 // causal_conv1d_update

@@ -51,7 +51,11 @@ kernel_tests() {
     pytest -x -v -s tests/kernels/moe/test_cpu_int4_moe.py
     pytest -x -v -s tests/kernels/mamba/test_cpu_short_conv.py
     pytest -x -v -s tests/kernels/mamba/test_causal_conv1d.py
-    pytest -x -v -s tests/kernels/mamba/test_mamba_ssm.py"
+    pytest -x -v -s tests/kernels/mamba/test_mamba_ssm.py
+    pytest -x -v -s tests/v1/worker/cpu
+    pytest -x -v -s tests/v1/worker/test_kv_block_zeroer.py
+    pytest -x -v -s tests/v1/worker/test_mamba_hybrid_model_state.py \
+        -k 'cpu_'"
 }
 
 model_tests() {

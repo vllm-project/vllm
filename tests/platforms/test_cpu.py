@@ -57,6 +57,21 @@ def _cpu_config(
     return config
 
 
+def test_cpu_disables_microbatching() -> None:
+    config = _cpu_config(
+        CacheConfig(),
+        model_type="qwen3_5",
+        resolved_dtype="float32",
+    )
+    config.parallel_config.enable_dbo = True
+    config.parallel_config.ubatch_size = 4
+
+    CpuPlatform.check_and_update_config(config)
+
+    assert not config.parallel_config.enable_dbo
+    assert config.parallel_config.ubatch_size == 0
+
+
 @pytest.mark.parametrize(
     (
         "model_type",
