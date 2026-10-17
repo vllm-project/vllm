@@ -56,6 +56,7 @@ from vllm.logger import init_logger
 from vllm.renderers.chat_utils import ChatTemplateContentFormatOption
 from vllm.renderers.hf import HfRenderer, resolve_chat_template
 from vllm.renderers.online_renderer import OnlineRenderer
+from vllm.tokenizers.protocol import TokenizerLike
 
 logger = init_logger(__name__)
 
@@ -245,7 +246,10 @@ class AnthropicServingMessages(OpenAIServingChat):
         renderer = online_renderer.renderer
         tool_variants: tuple[list[dict[str, Any]] | None, ...] = (None, [])
         if not isinstance(renderer, HfRenderer) or renderer.tokenizer is None:
-            merge = cls._detect_merge_inline_system(online_renderer.chat_template)
+            merge = cls._detect_merge_inline_system(
+                online_renderer.chat_template,
+                getattr(renderer, "tokenizer", None),
+            )
         else:
             merge = any(
                 cls._detect_merge_inline_system(
@@ -270,15 +274,25 @@ class AnthropicServingMessages(OpenAIServingChat):
         return merge
 
     @staticmethod
-    def _detect_merge_inline_system(chat_template: str | None) -> bool:
+    def _detect_merge_inline_system(
+        chat_template: str | None,
+        tokenizer: TokenizerLike | None = None,
+    ) -> bool:
         """Auto-detect whether the chat template requires system-first ordering.
 
         Renders a [system, user, system, user] conversation against the
         template; if it raises (e.g. Qwen's ``loop.first`` guard), the
         model needs inline system messages merged into the leading block.
+
+        Without a jinja template the tokenizer decides: encoder based
+        tokenizers that render ``role: system`` at any position declare
+        ``supports_inline_system_messages`` (e.g. DeepSeek V4), so their
+        inline system messages stay in place and the prompt prefix of earlier
+        turns is unchanged. Any other tokenizer keeps the conservative merge.
         """
         if not chat_template:
-            return True
+            supported = getattr(tokenizer, "supports_inline_system_messages", False)
+            return supported is not True
         try:
             env = jinja2.sandbox.ImmutableSandboxedEnvironment(
                 trim_blocks=True,
