@@ -15,6 +15,7 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import is_fp8
+from vllm.model_executor.model_loader.reload.layerwise import get_layerwise_info
 from vllm.model_executor.models.utils import AutoWeightsLoader
 from vllm.models.common.ops.sequence_parallel import sp_reduce_scatter, sp_shard
 
@@ -28,6 +29,7 @@ from ..common.ngram_embedding import (
     Qwen4ExpPLEUnquantizedEmbeddingMethod,
 )
 from ..common.ops.ple import ple_ngram_ids
+from ..common.ple import compute_ple_shard_overlap
 
 logger = init_logger(__name__)
 
@@ -432,6 +434,9 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         shard_size = (
             embedding.org_vocab_size + self.split_ngram_parts - 1
         ) // self.split_ngram_parts
+        if isinstance(embedding, Qwen4ExpPLEPinnedHostEmbedding):
+            # Materialize the reloaded table in host memory, not on the accelerator.
+            get_layerwise_info(embedding).restore_device = torch.device("cpu")
 
         for name, loaded_weight in weights:
             leaf_name = name.rsplit(".", 1)[-1]
@@ -477,12 +482,23 @@ class Qwen4ExpNGramEmbedding(nn.Module):
                         f"NVFP4 PLE shard {shard_index} {suffix} requires "
                         f"{parameter.dtype}, got {loaded_weight.dtype}"
                     )
+                loaded.add(f"ngram_embedding.{suffix}")
+                # Skip before the loader so layerwise reload does not buffer it.
+                if (
+                    compute_ple_shard_overlap(
+                        checkpoint_start=checkpoint_start,
+                        checkpoint_rows=expected_rows,
+                        tp_start=embedding.shard_indices.org_vocab_start_index,
+                        tp_end=embedding.shard_indices.org_vocab_end_index,
+                    )
+                    is None
+                ):
+                    continue
                 parameter.weight_loader(
                     parameter,
                     loaded_weight,
                     checkpoint_start=checkpoint_start,
                 )
-                loaded.add(f"ngram_embedding.{suffix}")
                 continue
             if nvfp4_method is not None and name in (
                 "ngram_embedding.weight",
