@@ -1165,6 +1165,13 @@ class SpeculativeConfig:
                 # --quantization fp8 with a bf16 checkpoint.
                 if not self.quantization:
                     self.quantization = self.target_model_config.quantization
+                # The MTP draft is the target checkpoint itself, so resolve its
+                # config and weights from the target's revision. Inherit
+                # revision/code_revision unless explicitly overridden here.
+                if self.revision is None:
+                    self.revision = self.target_model_config.revision
+                if self.code_revision is None:
+                    self.code_revision = self.target_model_config.code_revision
             elif self.method == "dspark":
                 # DeepSeek DSpark can ship the weights inside the target checkpoint
                 if self.target_model_config is None:
@@ -1461,6 +1468,15 @@ class SpeculativeConfig:
                             block_size = getattr(hf_config, "dspark_block_size", None)
                         self.num_speculative_tokens = block_size
                 elif n_predict is not None:
+                    if n_predict == 0:
+                        # Checkpoints that lack `num_nextn_predict_layers`
+                        # resolve to n_predict=0; fail loudly instead of
+                        # crashing with ZeroDivisionError below.
+                        raise ValueError(
+                            "Draft model config reports n_predict=0 "
+                            "(missing `num_nextn_predict_layers`); cannot "
+                            "determine the number of speculative tokens."
+                        )
                     if self.num_speculative_tokens is None:
                         # Default to max value defined in draft model config.
                         self.num_speculative_tokens = n_predict
