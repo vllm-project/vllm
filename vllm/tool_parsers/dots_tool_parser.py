@@ -17,7 +17,6 @@ from vllm.entrypoints.generate.base.protocol import (
 )
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
-    ChatCompletionToolsParam,
 )
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.logger import init_logger
@@ -411,8 +410,7 @@ class DotsToolParser(ToolParser):
                 valid_calls = [
                     validated
                     for parsed in parsed_calls
-                    if (validated := self._validated_call(parsed, tools))
-                    is not None
+                    if (validated := self._validated_call(parsed, tools)) is not None
                 ]
                 if self.current_tool_name_sent and valid_calls:
                     name, arguments = valid_calls.pop(0)
