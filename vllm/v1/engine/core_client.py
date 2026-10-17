@@ -25,6 +25,7 @@ from vllm.config import VllmConfig
 from vllm.config.kv_events import KVEventsConfig
 from vllm.distributed.elastic_ep.external_elastic_ep import (
     ExternalElasticEPScaleCoordinator,
+    ExternalElasticEPScaleStatus,
 )
 from vllm.envs import VLLM_ENGINE_READY_TIMEOUT_S
 from vllm.logger import init_logger
@@ -271,7 +272,11 @@ class EngineCoreClient(ABC):
     async def commit_elastic_ep(self) -> None:
         raise NotImplementedError
 
-    async def prepare_elastic_ep(self, new_data_parallel_size: int) -> None:
+    async def prepare_elastic_ep(
+        self,
+        new_data_parallel_size: int,
+        operation_id: str | None = None,
+    ) -> None:
         raise NotImplementedError
 
     async def abort_external_elastic_ep(self, error: str) -> None:
@@ -279,7 +284,15 @@ class EngineCoreClient(ABC):
 
     async def get_external_elastic_ep_status(
         self,
-    ) -> dict[str, str | int | None] | None:
+    ) -> ExternalElasticEPScaleStatus | None:
+        return None
+
+    async def validate_external_elastic_ep_request(
+        self,
+        new_data_parallel_size: int,
+        operation_id: str | None,
+        expected_instance_id: str | None,
+    ) -> ExternalElasticEPScaleStatus | None:
         return None
 
     async def get_output_async(self) -> EngineCoreOutputs:
@@ -1666,7 +1679,11 @@ class DPAsyncMPClient(AsyncMPClient):
         assert coordinator is not None
         return coordinator
 
-    async def prepare_elastic_ep(self, new_data_parallel_size: int) -> None:
+    async def prepare_elastic_ep(
+        self,
+        new_data_parallel_size: int,
+        operation_id: str | None = None,
+    ) -> None:
         cur_data_parallel_size = self.vllm_config.parallel_config.data_parallel_size
 
         assert new_data_parallel_size != cur_data_parallel_size, (
@@ -1674,7 +1691,9 @@ class DPAsyncMPClient(AsyncMPClient):
             f"different from cur_data_parallel_size {cur_data_parallel_size}"
         )
         await self._get_external_eep_coordinator().prepare(
-            cur_data_parallel_size, new_data_parallel_size
+            cur_data_parallel_size,
+            new_data_parallel_size,
+            operation_id,
         )
 
     async def commit_elastic_ep(self) -> None:
@@ -1685,12 +1704,28 @@ class DPAsyncMPClient(AsyncMPClient):
 
     async def get_external_elastic_ep_status(
         self,
-    ) -> dict[str, str | int | None] | None:
+    ) -> ExternalElasticEPScaleStatus | None:
         coordinator = self.external_eep_coordinator
         return (
             None
             if coordinator is None
             else await asyncio.to_thread(coordinator.get_status)
+        )
+
+    async def validate_external_elastic_ep_request(
+        self,
+        new_data_parallel_size: int,
+        operation_id: str | None,
+        expected_instance_id: str | None,
+    ) -> ExternalElasticEPScaleStatus | None:
+        coordinator = self.external_eep_coordinator
+        if coordinator is None:
+            return None
+        return await asyncio.to_thread(
+            coordinator.validate_request,
+            new_data_parallel_size,
+            operation_id,
+            expected_instance_id,
         )
 
 
@@ -1905,7 +1940,11 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         )
         self._prepared_elastic_ep = None
 
-    async def prepare_elastic_ep(self, new_data_parallel_size: int) -> None:
+    async def prepare_elastic_ep(
+        self,
+        new_data_parallel_size: int,
+        operation_id: str | None = None,
+    ) -> None:
         """Prepare elastic EP scaling without routing requests to new engines."""
         if (prepared := self._prepared_elastic_ep) is not None:
             if prepared[0] == new_data_parallel_size:

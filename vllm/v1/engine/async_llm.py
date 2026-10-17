@@ -16,6 +16,10 @@ from vllm.config.profiler import (
     validate_profile_iteration_bounds,
     validate_profile_prefix,
 )
+from vllm.distributed.elastic_ep.external_elastic_ep import (
+    ExternalElasticEPScaleConflict,
+    ExternalElasticEPScaleStatus,
+)
 from vllm.distributed.weight_transfer.base import (
     WeightTransferInitRequest,
     WeightTransferUpdateRequest,
@@ -1282,14 +1286,67 @@ class AsyncLLM(EngineClient):
             raise
 
     async def scale_elastic_ep(
-        self, new_data_parallel_size: int, drain_timeout: int = 300
-    ):
+        self,
+        new_data_parallel_size: int,
+        drain_timeout: int = 300,
+        operation_id: str | None = None,
+        expected_instance_id: str | None = None,
+    ) -> ExternalElasticEPScaleStatus | None:
         """Scale the elastic EP data parallel size."""
+        status = await self.engine_core.validate_external_elastic_ep_request(
+            new_data_parallel_size,
+            operation_id,
+            expected_instance_id,
+        )
+        if status is None and (
+            operation_id is not None or expected_instance_id is not None
+        ):
+            raise ValueError(
+                "Operation identifiers require external Elastic EP scaling."
+            )
+        if (
+            operation_id is not None
+            and status is not None
+            and status.operation_id == operation_id
+            and status.terminal
+        ):
+            return status
+        if operation_id is not None and self._elastic_ep_lock.locked():
+            if status is not None and status.operation_id == operation_id:
+                return status
+            raise ExternalElasticEPScaleConflict(
+                "Another external Elastic EP request is active on this rank."
+            )
+        if get_elastic_ep_rank_retired():
+            raise ExternalElasticEPScaleConflict(
+                "This data-parallel rank is retired and cannot start another resize."
+            )
+
         async with self._elastic_ep_lock:
-            await self._scale_elastic_ep(new_data_parallel_size, drain_timeout)
+            status = await self.engine_core.validate_external_elastic_ep_request(
+                new_data_parallel_size,
+                operation_id,
+                expected_instance_id,
+            )
+            if (
+                operation_id is not None
+                and status is not None
+                and status.operation_id == operation_id
+                and status.terminal
+            ):
+                return status
+            await self._scale_elastic_ep(
+                new_data_parallel_size,
+                drain_timeout,
+                operation_id,
+            )
+        return await self.get_external_elastic_ep_status()
 
     async def _scale_elastic_ep(
-        self, new_data_parallel_size: int, drain_timeout: int
+        self,
+        new_data_parallel_size: int,
+        drain_timeout: int,
+        operation_id: str | None,
     ) -> None:
         parallel_config = self.vllm_config.parallel_config
         old_data_parallel_size = parallel_config.data_parallel_size
@@ -1300,7 +1357,10 @@ class AsyncLLM(EngineClient):
             )
             return
 
-        await self.engine_core.prepare_elastic_ep(new_data_parallel_size)
+        await self.engine_core.prepare_elastic_ep(
+            new_data_parallel_size,
+            operation_id,
+        )
 
         # recreate stat loggers
         if new_data_parallel_size > old_data_parallel_size and self.log_stats:
@@ -1351,7 +1411,7 @@ class AsyncLLM(EngineClient):
 
     async def get_external_elastic_ep_status(
         self,
-    ) -> dict[str, str | int | None] | None:
+    ) -> ExternalElasticEPScaleStatus | None:
         return await self.engine_core.get_external_elastic_ep_status()
 
     async def handle_fault(
