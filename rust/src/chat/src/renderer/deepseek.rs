@@ -112,7 +112,9 @@ pub(super) fn render_request_with_media_order(
     let drop_thinking = request.parse_template_bool("drop_thinking")?.unwrap_or(true)
         && !rendered_tools_present(request, request_tools);
     let drop_historical_developers = thinking_mode == ThinkingMode::Thinking && drop_thinking;
+    // Visit each user-content block once, at its first entry.
     let last_user_like_message_index = (0..request.messages.len())
+        .filter(|&index| !is_following_user_content(request.messages.as_slice(), index))
         .rfind(|&index| starts_user_turn(request.messages.as_slice(), index, index, dialect));
     let last_user_render_index = find_last_user_render_index(
         request.messages.as_slice(),
