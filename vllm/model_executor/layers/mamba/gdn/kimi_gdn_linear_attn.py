@@ -160,7 +160,9 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
         if self.model_config is None or self.cache_config is None:
             raise ValueError("model_config and cache_config must be set")
         return MambaStateDtypeCalculator.kda_state_dtype(
-            self.model_config.dtype, self.cache_config.mamba_cache_dtype
+            self.model_config.dtype,
+            self.cache_config.mamba_cache_dtype,
+            self.cache_config.mamba_ssm_cache_dtype,
         )
 
     def get_state_shape(
@@ -590,7 +592,9 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
                     cu_seqlens=non_spec_query_start_loc,
                 )
                 # Init cache
-                recurrent_state[non_spec_state_indices_tensor] = last_recurrent_state
+                recurrent_state[non_spec_state_indices_tensor] = (
+                    last_recurrent_state.to(recurrent_state.dtype)
+                )
 
             else:
                 # pure-decode non-spec batch
