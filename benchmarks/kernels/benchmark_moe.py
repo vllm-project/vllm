@@ -227,7 +227,7 @@ def benchmark_config(
         from vllm.model_executor.layers.fused_moe import override_config
 
         if use_fp8_w8a8:
-            quant_dtype = torch.float8_e4m3fn
+            quant_dtype = FP8_DTYPE
         elif use_int8_w8a16:
             quant_dtype = torch.int8
         else:
