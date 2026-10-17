@@ -1301,6 +1301,7 @@ class FusedMoEConfig:
     elastic_ep_max_dp_size: int | None = None
     has_bias: bool = False
     is_lora_enabled: bool = False
+    fully_sharded_loras: bool = False
     has_hash_routing: bool = False
     # Routes are adjusted between routing and expert execution.
     require_decomposed_backend: bool = False
