@@ -1492,7 +1492,8 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     "csrc/rocm/torch_bindings.cpp"
     "csrc/rocm/skinny_gemms.cu"
     "csrc/rocm/skinny_gemms_int4.cu"
-    "csrc/rocm/attention.cu")
+    "csrc/rocm/attention.cu"
+    "csrc/rocm/sparse_mla_decode.cu")
   set(VLLM_ROCM_EXT_FLAGS ${VLLM_GPU_FLAGS})
 
   # skinny_gemms*.cu are built on gfx9/gfx11 ISA (MFMA, dot2/dot4, legacy

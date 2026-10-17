@@ -2096,6 +2096,38 @@ def mamba_chunk_scan_fwd_cpu(
     )
 
 
+def rocm_sparse_mla_decode_fp8_ds_mla(
+    out: torch.Tensor,
+    q: torch.Tensor,
+    main_cache: torch.Tensor,
+    main_indices: torch.Tensor,
+    main_indptr: torch.Tensor,
+    extra_cache: torch.Tensor | None,
+    extra_indices: torch.Tensor | None,
+    extra_indptr: torch.Tensor | None,
+    attn_sink: torch.Tensor | None,
+    scale: float,
+    main_ocp: bool,
+    extra_ocp: bool,
+    num_splits: int,
+) -> None:
+    torch.ops._rocm_C.sparse_mla_decode_fp8_ds_mla(
+        out,
+        q,
+        main_cache,
+        main_indices,
+        main_indptr,
+        extra_cache,
+        extra_indices,
+        extra_indptr,
+        attn_sink,
+        scale,
+        main_ocp,
+        extra_ocp,
+        num_splits,
+    )
+
+
 # ROCm skinny gemms
 def LLMM1(a: torch.Tensor, b: torch.Tensor, rows_per_block: int) -> torch.Tensor:
     return torch.ops._rocm_C.LLMM1(a, b, rows_per_block)
