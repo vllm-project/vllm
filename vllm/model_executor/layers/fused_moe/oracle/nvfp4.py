@@ -423,7 +423,7 @@ def convert_to_nvfp4_moe_kernel_format(
             trtllm_hidden_alignment=trtllm_hidden_alignment,
         )
     elif nvfp4_backend == NvFp4MoeBackend.HUMMING:
-        from vllm.model_executor.layers.quantization.utils.humming import (
+        from vllm.model_executor.layers.fused_moe.oracle.humming import (
             convert_to_humming_moe_kernel_format,
         )
 
@@ -540,7 +540,7 @@ def make_nvfp4_moe_quant_config(
     use_a16 = _use_a16(backend, use_a16)
     if backend == NvFp4MoeBackend.HUMMING:
         from vllm.model_executor.layers.fused_moe import RoutedExperts
-        from vllm.model_executor.layers.quantization.utils.humming import (
+        from vllm.model_executor.layers.fused_moe.oracle.humming import (
             get_humming_moe_quant_config,
         )
 
