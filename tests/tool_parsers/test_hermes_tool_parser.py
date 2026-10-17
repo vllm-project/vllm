@@ -248,6 +248,44 @@ def test_hermes_streaming_content_then_tool_call_with_stream_interval(
     assert json.loads(args_str) == {"city": "NYC"}
 
 
+@pytest.mark.parametrize("stream_interval", [1, 2, 3, 5, 8])
+def test_hermes_streaming_stray_tool_call_marker(
+    qwen_tokenizer: TokenizerLike,
+    any_chat_request: ChatCompletionRequest,
+    stream_interval: int,
+) -> None:
+    """A stray <tool_call> marker before the real one must not corrupt the
+    streamed arguments JSON.
+
+    Some models emit a spurious <tool_call> then continue generating prose
+    before the real <tool_call>{...}</tool_call> (speculative decoding makes
+    this more frequent). The first (unclosed) marker then pairs with the later
+    </tool_call>, so the extracted region is not valid JSON; the old is_complete
+    check therefore left the outer '}' in the arguments, streaming '{...}}' which
+    fails json.loads with "Extra data". The reassembled arguments must still be
+    valid JSON regardless of the stray marker or the stream interval.
+    """
+    text = (
+        "<tool_call> hmm, wait, let me reconsider the format.\n"
+        '<tool_call>{"name": "get_weather", '
+        '"arguments": {"city": "New York City", "unit": "celsius"}}'
+        "</tool_call>"
+    )
+    parser = Hermes2ProToolParser(qwen_tokenizer)
+    deltas = _simulate_streaming(
+        qwen_tokenizer, parser, any_chat_request, text, stream_interval
+    )
+
+    tool_calls = [tc for d in deltas if d.tool_calls for tc in d.tool_calls]
+    assert tool_calls, "Expected at least one tool call delta"
+    assert tool_calls[0].function.name == "get_weather"
+    args_str = "".join(tc.function.arguments or "" for tc in tool_calls)
+    assert json.loads(args_str) == {
+        "city": "New York City",
+        "unit": "celsius",
+    }
+
+
 @pytest.mark.parametrize("stream_interval", [1, 2, 4])
 def test_hermes_streaming_multiple_tool_calls_with_stream_interval(
     qwen_tokenizer: TokenizerLike,
