@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import pytest
+
 from vllm.v1.core.sched.output import ScheduledEncoderInputStats, SchedulerOutput
 from vllm.v1.engine import EngineCoreOutput, EngineCoreOutputs, FinishReason
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
@@ -23,9 +25,10 @@ def test_iteration_stats_repr():
     assert repr(iteration_stats).startswith("IterationStats(")
 
 
-def test_iteration_stats_preserve_api_surface_in_mixed_batch():
-    """Latencies, tokens, and completion stats retain each request's API."""
-    stats = IterationStats()
+@pytest.mark.parametrize("enabled", [False, True])
+def test_iteration_stats_preserve_api_surface_in_mixed_batch(enabled):
+    """Retain request identity and collect API token totals only when enabled."""
+    stats = IterationStats(enable_api_surface_metrics=enabled)
     stats.iteration_timestamp = 102.0
     api_surfaces = ("messages", "chat_completions", "completions", "unknown")
     for index, api_surface in enumerate(api_surfaces):
@@ -61,18 +64,27 @@ def test_iteration_stats_preserve_api_surface_in_mixed_batch():
     assert [request.api_surface for request in stats.finished_requests] == list(
         api_surfaces
     )
-    assert stats.num_generation_tokens_by_api_surface == dict.fromkeys(api_surfaces, 4)
     assert stats.num_generation_tokens == 16
     assert stats.num_prompt_tokens == sum(10 + index for index in range(4))
     assert stats.prompt_token_stats.cached_tokens == 20
-    for index, api_surface in enumerate(api_surfaces):
-        assert stats.prompt_token_stats_by_api_surface[api_surface] == PromptTokenStats(
-            computed=5 + index,
-            local_cache_hit=2,
-            external_kv_transfer=3,
-            cached_tokens=5,
-            total=10 + index,
+    if enabled:
+        assert stats.num_generation_tokens_by_api_surface == dict.fromkeys(
+            api_surfaces, 4
         )
+        assert stats.prompt_token_stats_by_api_surface is not None
+        for index, api_surface in enumerate(api_surfaces):
+            assert stats.prompt_token_stats_by_api_surface[
+                api_surface
+            ] == PromptTokenStats(
+                computed=5 + index,
+                local_cache_hit=2,
+                external_kv_transfer=3,
+                cached_tokens=5,
+                total=10 + index,
+            )
+    else:
+        assert stats.num_generation_tokens_by_api_surface is None
+        assert stats.prompt_token_stats_by_api_surface is None
 
 
 def test_scheduler_iteration_details_serialization():

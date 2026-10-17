@@ -878,6 +878,9 @@ class AsyncLLM(EngineClient):
         engine_core = self.engine_core
         output_processor = self.output_processor
         log_stats = self.log_stats
+        enable_api_surface_metrics = (
+            self.observability_config.enable_api_surface_metrics
+        )
         # We use a mutable list for logger_manager so that it can be updated
         # during elastic EP scaling (see scale_elastic_ep) without creating
         # a circular reference via self.
@@ -896,7 +899,9 @@ class AsyncLLM(EngineClient):
                     num_outputs = len(outputs.outputs)
 
                     iteration_stats = (
-                        IterationStats() if (log_stats and num_outputs) else None
+                        IterationStats(enable_api_surface_metrics)
+                        if (log_stats and num_outputs)
+                        else None
                     )
 
                     # Split outputs into chunks of at most

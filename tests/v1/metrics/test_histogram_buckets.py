@@ -363,7 +363,7 @@ def test_request_counts_and_latencies_by_api_surface(enabled):
     try:
         logger = PrometheusStatLogger(config, engine_indexes=[0, 1])
         for engine_idx in (0, 1):
-            stats = IterationStats()
+            stats = IterationStats(enable_api_surface_metrics=enabled)
             for index, api_surface in enumerate((*api_surfaces, "unsupported")):
                 value = (engine_idx + 1) * (index + 1) / 10
                 reason = list(FinishReason)[index]
@@ -439,13 +439,29 @@ def test_token_metrics_by_api_surface(enabled):
     config = build_logger_config(
         ObservabilityConfig(enable_api_surface_metrics=enabled)
     )
+    config.model_config.served_model_name = "served-alias"
     api_surfaces = ("messages", "chat_completions", "completions", "unknown")
     expected: dict[tuple[int, str | None], list[int]] = {}
     registry = prometheus_client.REGISTRY
     try:
         logger = PrometheusStatLogger(config, engine_indexes=[0, 1])
         for engine_idx in (0, 1):
-            prefill, decode = IterationStats(), IterationStats()
+            for api_surface in api_surfaces if enabled else (None,):
+                labels = {"model_name": "served-alias", "engine": str(engine_idx)}
+                if api_surface is not None:
+                    labels["api_surface"] = api_surface
+                for metric_name in (
+                    "prompt_tokens",
+                    "generation_tokens",
+                    "prompt_tokens_cached",
+                ):
+                    assert (
+                        registry.get_sample_value(f"vllm:{metric_name}_total", labels)
+                        == 0
+                    )
+        for engine_idx in (0, 1):
+            prefill = IterationStats(enable_api_surface_metrics=enabled)
+            decode = IterationStats(enable_api_surface_metrics=enabled)
             for index, api_surface in enumerate((*api_surfaces, "unsupported")):
                 value = (engine_idx + 1) * (index + 1)
                 normalized = api_surface if api_surface in api_surfaces else "unknown"
