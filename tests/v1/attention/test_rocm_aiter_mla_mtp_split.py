@@ -20,10 +20,6 @@ from vllm.v1.attention.backends.mla.rocm_aiter_mla import (  # noqa: E402
     AiterMLAImpl,
     AiterMLAMetadataBuilder,
 )
-from vllm.v1.attention.ops.dcp import (  # noqa: E402
-    CPTritonContext,
-    correct_attn_out,
-)
 from vllm.v1.attention.ops.rocm_aiter_mla_merge import (  # noqa: E402
     merge_mla_segments_triton,
 )
@@ -63,11 +59,9 @@ class _ExpandPageIndicesKernel:
         stride_0,
         stride_1,
         paged_kv_indptr,
-        num_real_tokens,
         *,
         KERNEL_BLOCK_SIZE,
         BLOCK_SIZE,
-        CLAMP_TAIL=False,
     ):
         # Both block-table strides are passed explicitly: the kernel no longer
         # assumes the column stride is 1. This stand-in indexes the tensor
@@ -127,11 +121,8 @@ def _builder(
         # segmented route is available, query length decides per batch. CPRR
         # preferred still keeps this True so qlen < _MIN_CPRR_QLEN can fall back.
         _supports_segmented_dcp_verify=supports_segmented_dcp_verify,
-        _use_triton_dcp_verify=False,
         # Derived once in the real constructor, so derive it once here too.
-        _dcp_verify_page_size=rocm_aiter_mla._segmented_mla_page_size(
-            kernel_block_size
-        ),
+        _segmented_page_size=rocm_aiter_mla._segmented_mla_page_size(kernel_block_size),
         _dcp_verify_buffers=None,
         _graph_seq_lens=None,
         _kv_cache_dtype_str=kv_cache_dtype,
@@ -147,7 +138,6 @@ def _builder(
             )
         ),
         _mtp_decode_qlen=mtp_decode_qlen,
-        _varlen_decode_qlen=0,
         _uniform_padded_mtp_qo_len=(AiterMLAMetadataBuilder._uniform_padded_mtp_qo_len),
         _use_persistent_metadata=False,
         kernel_block_size=kernel_block_size,
@@ -503,7 +493,6 @@ def test_non_causal_dcp_block_bypasses_cprr_in_forward(monkeypatch):
     impl.qk_rope_head_dim = 64
     impl.scale = 576**-0.5
     decode = SimpleNamespace(
-        varlen_q_rows=None,
         max_qo_len=4,
         qo_indptr=torch.tensor([0, 4], dtype=torch.int32),
         paged_kv_indptr=torch.tensor([0, 1], dtype=torch.int32),
@@ -567,7 +556,6 @@ def test_single_token_dcp_decode_returns_unpadded_lse(monkeypatch):
     impl.qk_rope_head_dim = 64
     impl.scale = head_dim**-0.5
     decode = SimpleNamespace(
-        varlen_q_rows=None,
         max_qo_len=1,
         qo_indptr=torch.arange(num_tokens + 1, dtype=torch.int32),
         paged_kv_indptr=torch.zeros(num_tokens + 1, dtype=torch.int32),
@@ -642,99 +630,6 @@ def test_segmented_verify_reduce_returns_natural_lse_and_masks_empty_rows():
     assert lse[1].item() == float("-inf")
 
 
-def test_triton_verify_empty_local_shard_merges_through_dcp_combine():
-    """Empty rows need no masking: -inf LSE gives them zero combine weight.
-
-    Row 0 has KV on both ranks, row 1 only on rank 0, row 2 on neither (graph
-    padding). The raw rows come back NaN; the production AG+RS combine must
-    still produce full-context attention and zeros for the padded row.
-    """
-    torch.manual_seed(0)
-    num_ranks, num_rows, num_heads = 2, 3, 16
-    kv_lora_rank, head_dim, block_size = 512, 576, 16
-    scale = head_dim**-0.5
-    local_lens = [[5, 4, 0], [5, 0, 0]]
-
-    q = torch.randn(num_rows, num_heads, head_dim, dtype=torch.bfloat16, device="cuda")
-    kv_caches = [
-        torch.randn(1, block_size, head_dim, dtype=torch.bfloat16, device="cuda")
-        for _ in range(num_ranks)
-    ]
-    impl = object.__new__(AiterMLAImpl)
-    impl.scale = scale
-    impl.kv_lora_rank = kv_lora_rank
-    impl._sm_count = current_platform.num_compute_units()
-    layer = SimpleNamespace(_k_scale=torch.tensor(1.0, device="cuda"))
-    outputs, lses = [], []
-    for rank in range(num_ranks):
-        verify = SimpleNamespace(
-            block_table=torch.zeros(num_rows, 1, dtype=torch.int32, device="cuda"),
-            row_lens=torch.tensor(local_lens[rank], dtype=torch.int32, device="cuda"),
-            max_kv_seq_len=max(local_lens[rank]),
-        )
-        output, lse = impl._forward_triton_dcp_verify(
-            q, verify, kv_caches[rank], layer, torch.bfloat16
-        )
-        outputs.append(output)
-        lses.append(lse)
-
-    assert torch.isneginf(lses[1][1]).all()
-    assert torch.isneginf(lses[0][2]).all() and torch.isneginf(lses[1][2]).all()
-
-    all_lses = torch.stack(lses)
-    merged = sum(
-        correct_attn_out(outputs[rank], all_lses, rank, CPTritonContext())[0].float()
-        for rank in range(num_ranks)
-    )
-
-    reference = torch.zeros(num_rows, num_heads, kv_lora_rank, device="cuda")
-    for row in range(num_rows):
-        keys = torch.cat(
-            [kv_caches[rank][0, : local_lens[rank][row]] for rank in range(num_ranks)]
-        ).float()
-        if keys.shape[0]:
-            probs = torch.softmax(q[row].float() @ keys.T * scale, dim=-1)
-            reference[row] = probs @ keys[:, :kv_lora_rank]
-
-    assert torch.isfinite(merged).all()
-    torch.testing.assert_close(merged, reference, rtol=2e-2, atol=2e-2)
-
-
-def test_batch_aware_kv_splits_fit_an_int32_safe_reservation(monkeypatch):
-    # MI325X DCP8 verify at 128K context: 128 gathered heads, 16K local tokens.
-    sm_count, heads, local_seq_len, kv_lora_rank = 304, 128, 16384, 512
-    max_rows = 4096
-    reserved = []
-    monkeypatch.setattr(
-        rocm_aiter_mla, "is_workspace_manager_initialized", lambda: True
-    )
-    monkeypatch.setattr(
-        rocm_aiter_mla,
-        "current_workspace_manager",
-        lambda: SimpleNamespace(get_simultaneous=lambda *specs: reserved.extend(specs)),
-    )
-    rocm_aiter_mla._reserve_triton_dcp_verify_workspace(
-        max_rows, heads, local_seq_len, kv_lora_rank, sm_count
-    )
-    ((shape, _),) = reserved
-    # The kernel's attn_logits offsets are int32; seq-only splits overflow them.
-    seq_only = rocm_aiter_mla._compute_num_kv_splits(local_seq_len, sm_count)
-    assert max_rows * heads * seq_only * (kv_lora_rank + 1) >= 2**31
-    assert math.prod(shape) < 2**31
-
-    counts = [
-        rocm_aiter_mla._triton_dcp_verify_num_kv_splits(
-            local_seq_len, rows, heads, sm_count
-        )
-        for rows in range(1, max_rows + 1)
-    ]
-    # Small batches keep the seq-only split count.
-    assert counts[:4] == [seq_only] * 4
-    assert counts == sorted(counts, reverse=True)
-    for rows, splits in enumerate(counts, start=1):
-        assert rows * heads * splits * (kv_lora_rank + 1) <= math.prod(shape)
-
-
 def test_segmented_dcp_verify_matches_causal_attention(monkeypatch):
     """Exercise the target qlen>1 path and merge two rank-local results."""
     monkeypatch.setattr(rocm_aiter_mla, "_segmented_mla_decode_supported", lambda: True)
@@ -792,7 +687,6 @@ def test_segmented_dcp_verify_matches_causal_attention(monkeypatch):
             torch.tensor([global_seq_len], dtype=torch.int32, device=device),
         )
         decode = SimpleNamespace(
-            varlen_q_rows=None,
             max_qo_len=qlen,
             paged_kv_indptr=torch.tensor(
                 [0, local_kv.shape[0]], dtype=torch.int32, device=device
@@ -1458,29 +1352,3 @@ def test_a_two_token_bf16_block_is_allowed(monkeypatch):
         monkeypatch, num_heads=12, kv_cache_dtype="auto", qlen=2, mtp_qlen=8
     )
     assert metadata.has_persistent_metadata
-
-
-def _adaptive_config(
-    *, adaptive: bool = True, dcp: int = 1, num_speculative_tokens: int = 7
-) -> SimpleNamespace:
-    return SimpleNamespace(
-        speculative_config=SimpleNamespace(
-            num_speculative_tokens=num_speculative_tokens,
-            enable_adaptive_verification=adaptive,
-            parallel_drafting=False,
-        ),
-        parallel_config=SimpleNamespace(decode_context_parallel_size=dcp),
-        use_v2_model_runner=True,
-    )
-
-
-def test_varlen_cudagraph_bound_follows_adaptive_verification():
-    bound = AiterMLAMetadataBuilder.get_varlen_cudagraph_max_query_len
-    assert bound(_adaptive_config(), SimpleNamespace()) == 8
-    assert bound(_adaptive_config(adaptive=False), SimpleNamespace()) is None
-    # DCP routes plan per-row windows from host lengths.
-    assert bound(_adaptive_config(dcp=2), SimpleNamespace()) is None
-    # Kimi-K3 DSpark draft layers share the target's group; causality is
-    # decided per batch, so the merged non-causal spec keeps the bound.
-    shared_draft_group = SimpleNamespace(non_causal_multi_token_decode=True)
-    assert bound(_adaptive_config(), shared_draft_group) == 8

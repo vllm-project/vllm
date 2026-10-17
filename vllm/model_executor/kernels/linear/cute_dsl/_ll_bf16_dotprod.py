@@ -356,12 +356,10 @@ class LLBf16Dotprod:
         if tidx == 0:
             for m in cutlass.range_constexpr(M):
                 partials = sm[m, None].load()
-                gC[m, n_idx] = cutlass.Float32(
-                    partials.reduce(
-                        cute.ReductionOp.ADD,
-                        init_val=cutlass.Float32(0.0),
-                        reduction_profile=0,
-                    )
-                ).to(gC.element_type)
+                gC[m, n_idx] = partials.reduce(
+                    cute.ReductionOp.ADD,
+                    init_val=cutlass.Float32(0.0),
+                    reduction_profile=0,
+                )
         if const_expr(self.use_pdl):
             cute.arch.griddepcontrol_launch_dependents()

@@ -482,7 +482,7 @@ def _spec_for(monkeypatch, **attrs) -> MambaSpec:
     layer = KimiK3DeltaAttention.__new__(KimiK3DeltaAttention)
     for name, value in dict(
         use_prefill_checkpoint=True,
-        kda_prefill_backend="fused",
+        use_fused_chunk=True,
         num_spec=0,
         use_safe_gate=True,
     ).items():
@@ -506,8 +506,7 @@ def test_opt_in_publishes_chunk_walk_alignment(monkeypatch) -> None:
     "attr,value",
     [
         ("use_prefill_checkpoint", False),
-        ("kda_prefill_backend", "triton"),
-        ("kda_prefill_backend", "gluon"),
+        ("use_fused_chunk", False),
         ("use_safe_gate", False),
     ],
 )

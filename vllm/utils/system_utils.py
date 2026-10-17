@@ -221,7 +221,7 @@ def kill_process_tree(pid: int):
 
     # Send SIGKILL to all children first
     for child in children:
-        with contextlib.suppress(ProcessLookupError, psutil.NoSuchProcess):
+        with contextlib.suppress(ProcessLookupError):
             logger.warning(
                 "[shutdown] force killing sub process %s pid %d",
                 child.name(),

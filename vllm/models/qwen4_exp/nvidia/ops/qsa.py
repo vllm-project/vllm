@@ -28,30 +28,10 @@ def _maybe_dequant(tile):
         # e4m3 bytes below sm_89 (no Triton fp8e4nv pointer type): sign to bit
         # 15, exp+mantissa to bits 13..7 gives the fp16 of x * 2^-8. Exact for
         # every finite code; the two NaN codes decode to +-480 after the host
-        # scale instead of NaN. Decodes four bytes per 32-bit register: the
-        # rotate moves each byte's bits 6..1 to 5..0 and its bit 0 to bit 7 of
-        # the byte below, lop3 restores the sign bits, prmt pairs high and low
-        # bytes, and the mask clears the sign copy at bit 14 and bits 6..0.
-        # pack=4 puts element k in byte k of $2 and half k of ($0, $1), the
-        # same lane mapping as Triton's own sm<89 fp8 -> fp16 asm.
-        return tl.inline_asm_elementwise(
-            asm="""
-            {
-            .reg .b32 rot, high;
-            shf.r.wrap.b32 rot, $2, $2, 1;
-            lop3.b32 high, $2, rot, 0x80808080, 0xE4;
-            prmt.b32 $0, rot, high, 0x5043;
-            prmt.b32 $1, rot, high, 0x7261;
-            and.b32 $0, $0, 0xBF80BF80;
-            and.b32 $1, $1, 0xBF80BF80;
-            }
-            """,
-            constraints="=r,=r,r",
-            args=[tile],
-            dtype=tl.float16,
-            is_pure=True,
-            pack=4,
-        )
+        # scale instead of NaN.
+        code = tile.to(tl.uint16)
+        bits = ((code & 0x80) << 8) | ((code & 0x7F) << 7)
+        return bits.to(tl.float16, bitcast=True)
     elif tile.dtype == tl.float8e4nv:
         return tile.to(tl.float16)
     else:

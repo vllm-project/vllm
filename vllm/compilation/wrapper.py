@@ -85,8 +85,6 @@ class TorchCompileWithNoGuardsWrapper:
             return ctx.result
         return callable_fn(*args, **kwargs)
 
-    _allow_aot_compile: bool = True
-
     def __init__(
         self,
         compile_prefix: str = "",
@@ -106,10 +104,7 @@ class TorchCompileWithNoGuardsWrapper:
             raise RuntimeError("Compilation mode cannot be NO_COMPILATION")
 
         backend = vllm_config.compilation_config.init_backend(
-            vllm_config,
-            prefix=compile_prefix,
-            is_encoder=is_encoder,
-            use_aot_compile=self._allow_aot_compile,
+            vllm_config, prefix=compile_prefix, is_encoder=is_encoder
         )
         options = {}
 
@@ -156,7 +151,7 @@ class TorchCompileWithNoGuardsWrapper:
         _apply_constrain_to_fx_strides_patch()
 
         aot_context = nullcontext()
-        if self._allow_aot_compile and envs.VLLM_USE_AOT_COMPILE:
+        if envs.VLLM_USE_AOT_COMPILE:
             if hasattr(torch._dynamo.config, "enable_aot_compile"):
                 aot_context = torch._dynamo.config.patch(enable_aot_compile=True)
             else:

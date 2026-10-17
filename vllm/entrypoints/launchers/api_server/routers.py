@@ -31,12 +31,6 @@ def register_api_routers(
 
     register_structured_decisions_api_router(app)
 
-    from vllm.entrypoints.openai.decisions.api_router import (
-        register_decisions_api_router,
-    )
-
-    register_decisions_api_router(app)
-
     from vllm.entrypoints.serve.sagemaker.api_router import (
         attach_router as register_sagemaker_api_router,
     )

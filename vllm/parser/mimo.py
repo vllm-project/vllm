@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """MiMo's compact XML parameters contain verbatim string values."""
 
-import functools
 import json
 from dataclasses import replace
 
@@ -11,7 +10,6 @@ from vllm.parser.qwen3 import (
     _PARTIAL_PARAM_RE,
     CHATML_TURN_BOUNDARIES,
     Qwen3Parser,
-    _param_value_extender,
     qwen3_config,
 )
 
@@ -39,9 +37,6 @@ class MiMoParser(Qwen3Parser):
                     turn_boundary_tokens=CHATML_TURN_BOUNDARIES,
                 ),
                 arg_converter=_mimo_arg_converter,
-                arg_value_extender=functools.partial(
-                    _param_value_extender, trim_newlines=False
-                ),
             ),
         )
         super().__init__(tokenizer, tools, **kwargs)

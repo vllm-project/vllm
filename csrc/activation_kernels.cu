@@ -1059,6 +1059,33 @@ void situ_and_mul(torch::stable::Tensor& out,    // [..., d]
       });
 }
 
+void masked_situ_and_mul(torch::stable::Tensor& out,    // [E, T, d]
+                         torch::stable::Tensor& input,  // [E, T, 2 * d]
+                         const torch::stable::Tensor& expert_num_tokens,
+                         double beta, double linear_beta) {
+  int num_experts = input.size(0);
+  int max_num_tokens = input.size(1);
+  int d = input.size(2) / 2;
+  if (num_experts == 0 || max_num_tokens == 0 || d == 0) {
+    return;
+  }
+  constexpr int block_size = 256;
+  dim3 grid((d + block_size - 1) / block_size, num_experts);
+  dim3 block(block_size);
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      input.get_device_index());
+  const cudaStream_t stream = get_current_cuda_stream();
+  VLLM_STABLE_DISPATCH_FLOATING_TYPES(
+      input.scalar_type(), "masked_situ_and_mul_kernel", [&] {
+        vllm::masked_situ_and_mul_kernel<scalar_t, true>
+            <<<grid, block, 0, stream>>>(
+                out.mutable_data_ptr<scalar_t>(),
+                input.const_data_ptr<scalar_t>(),
+                expert_num_tokens.const_data_ptr<int>(), max_num_tokens, d,
+                (float)beta, (float)linear_beta);
+      });
+}
+
 #define LAUNCH_MASKED_ACT_AND_MUL(KERNEL, ACT_FIRST, HAS_CLAMP, LIMIT, ALPHA, \
                                   BETA)                                       \
   vllm::masked_act_and_mul_kernel<scalar_t, KERNEL<scalar_t>, ACT_FIRST,      \

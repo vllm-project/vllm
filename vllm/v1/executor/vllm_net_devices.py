@@ -191,6 +191,32 @@ def set_worker_gpu_nic_mapping(local_rank: int) -> None:
     )
 
 
+def _dp_adjusted_local_rank(tp_local_rank: int, vllm_config: VllmConfig) -> int:
+    """Compute the node-wide GPU index accounting for data parallelism.
+
+    On CUDA-alike platforms without env-var device isolation (the common
+    MP-backend path), the worker sees *all* GPUs on the node and selects
+    its device via ``torch.accelerator.set_device_index()`` using::
+
+        dp_local_rank * tp_pp_world_size + tp_local_rank
+
+    This mirrors the adjustment in ``Worker.init_device()`` so we resolve
+    the correct GPU PCI address *before* the CUDA device is initialised.
+    """
+    pc = vllm_config.parallel_config
+    if (
+        pc.distributed_executor_backend not in ("ray", "external_launcher")
+        and pc.data_parallel_backend != "ray"
+        and pc.nnodes_within_dp == 1
+    ):
+        dp_local_rank = pc.data_parallel_rank_local
+        if dp_local_rank is None:
+            dp_local_rank = pc.data_parallel_index
+        tp_pp_world_size = pc.pipeline_parallel_size * pc.tensor_parallel_size
+        return dp_local_rank * tp_pp_world_size + tp_local_rank
+    return tp_local_rank
+
+
 def set_worker_net_device(local_rank: int, vllm_config: VllmConfig) -> None:
     """Top-level entry point for both UniProcExecutor and MultiprocExecutor.
 
@@ -213,6 +239,5 @@ def set_worker_net_device(local_rank: int, vllm_config: VllmConfig) -> None:
     if not has_pcie_mapping and not has_selection_vars:
         return
     # Both env vars are present, so set the NIC selection env vars.
-    # Resolve the node-wide GPU index before the CUDA device is initialised.
-    gpu_index = vllm_config.parallel_config.get_local_gpu_index(local_rank)
-    set_worker_gpu_nic_mapping(gpu_index)
+    adjusted_rank = _dp_adjusted_local_rank(local_rank, vllm_config)
+    set_worker_gpu_nic_mapping(adjusted_rank)

@@ -47,7 +47,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
-    make_attention_sink,
     maybe_remap_kv_scale_name,
 )
 from vllm.model_executor.models.utils import sequence_parallel_chunk
@@ -291,7 +290,9 @@ class MiMoV2Attention(nn.Module):
         )
 
         self.attention_sink_bias = (
-            make_attention_sink(self.num_heads) if add_swa_attention_sink_bias else None
+            torch.nn.Parameter(torch.empty(self.num_heads), requires_grad=False)
+            if add_swa_attention_sink_bias
+            else None
         )
 
         sliding_window = sliding_window_size if sliding_window_size > -1 else None
@@ -847,9 +848,18 @@ class MiMoV2Model(nn.Module, EagleModelMixin):
 
             param = params_dict[name]
 
-            weight_loader = getattr(param, "weight_loader", default_weight_loader)
-            weight_loader(param, loaded_weight)
-            loaded_params.add(name)
+            if "attention_sink_bias" in name:
+                total_heads = loaded_weight.shape[0]
+                heads_per_rank = total_heads // tp_size
+                head_start = tp_rank * heads_per_rank
+                narrow_weight = loaded_weight.narrow(0, head_start, heads_per_rank)
+
+                param.data.copy_(narrow_weight)
+                loaded_params.add(name)
+            else:
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader(param, loaded_weight)
+                loaded_params.add(name)
 
         return loaded_params
 
