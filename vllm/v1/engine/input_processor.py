@@ -160,6 +160,19 @@ class InputProcessor:
                 self.structured_outputs_config,
                 self.tokenizer,
             )
+            # `prompt_logprobs=0` still requests prompt logprobs, so compare
+            # against None rather than relying on truthiness.
+            if (
+                params.prompt_logprobs is not None
+                and self.vllm_config.cache_config.kv_sharing_fast_prefill
+            ):
+                raise VLLMValidationError(
+                    "--kv-sharing-fast-prefill produces incorrect logprobs for "
+                    "prompt tokens, please disable it when the requests need "
+                    "prompt logprobs",
+                    parameter="prompt_logprobs",
+                )
+
             if params.prompt_logprob_token_ids is not None:
                 if not self.vllm_config.use_v2_model_runner:
                     raise VLLMValidationError(
