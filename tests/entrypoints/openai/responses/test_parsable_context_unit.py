@@ -169,6 +169,7 @@ def _make_request_output(
     text: str = "Hello, world!",
     token_ids: Sequence[int] = (1, 2, 3),
     finish_reason: str = "stop",
+    num_cache_creation_tokens: int | None = None,
 ) -> RequestOutput:
     return RequestOutput(
         request_id="test",
@@ -186,6 +187,7 @@ def _make_request_output(
             )
         ],
         finished=True,
+        num_cache_creation_tokens=num_cache_creation_tokens,
     )
 
 
@@ -425,6 +427,14 @@ def test_reasoning_tokens_counted_per_round():
     assert ctx.num_reasoning_tokens == 3
 
 
+def test_cache_creation_tokens_counted_per_round():
+    ctx = _make_context(None)
+
+    for count, expected in [(None, 0), (0, 0), (3, 3), (4, 7)]:
+        ctx.append_output(_make_request_output(num_cache_creation_tokens=count))
+        assert ctx.num_cache_creation_tokens == expected
+
+
 def test_reasoning_tokens_zero_without_parser():
     ctx = _make_context(None)
 
@@ -446,3 +456,27 @@ def test_num_init_messages_offset():
     items = ctx.make_response_output_items()
     assert len(items) == 1
     assert items[0].type == "message"
+
+
+def test_length_truncation_marks_last_item_incomplete():
+    """A turn cut by max_output_tokens ends in an ``incomplete`` item, both
+    with a parser (tool call) and without one (plain message)."""
+    request = _make_request(
+        tool_choice="auto",
+        tools=[
+            {
+                "type": "function",
+                "name": "get_weather",
+                "parameters": {"type": "object", "properties": {}},
+            }
+        ],
+    )
+    ctx = _make_context(_ToolCallingParser, request=request, enable_auto_tools=True)
+    ctx.append_output(_make_request_output(text="calling tool", finish_reason="length"))
+    assert ctx.response_messages[-1].type == "function_call"
+    assert ctx.response_messages[-1].status == "incomplete"
+
+    ctx = _make_context(None)
+    ctx.append_output(_make_request_output(text="cut mid sen", finish_reason="length"))
+    assert ctx.response_messages[-1].type == "message"
+    assert ctx.response_messages[-1].status == "incomplete"
