@@ -1587,7 +1587,8 @@ class TestNixlHandshake:
         worker.add_remote_agent(meta, remote_tp_size=remote_tp_size)
 
         plan = worker.tp_mappings[FakeNixlConnectorWorker.REMOTE_ENGINE_ID]
-        assert worker._build_fa_remote(plan, meta, block_size_ratio=1).tolist() == [
+        remote = worker._build_fa_remote(plan, meta, block_size_ratio=1)
+        assert expand_strided_descs(remote).tolist() == [
             [0x10000, mla_len, 0],
             [0x20000 + draft_slice * draft_len, draft_len, 0],
         ]
@@ -1624,7 +1625,8 @@ class TestNixlHandshake:
 
         plan = worker.tp_mappings[FakeNixlConnectorWorker.REMOTE_ENGINE_ID]
         pages = [remote_page_base + b * remote_page for b in range(num_blocks)]
-        assert worker._build_fa_remote(plan, meta, block_size_ratio=1).tolist() == [
+        remote = worker._build_fa_remote(plan, meta, block_size_ratio=1)
+        assert expand_strided_descs(remote).tolist() == [
             *([page, mla_len, 0] for page in pages),
             *([page + mla_len + tp_rank * draft_len, draft_len, 0] for page in pages),
         ]
