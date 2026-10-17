@@ -159,7 +159,7 @@ steps:
       # The ROCm KDA/AttnRes kernels are gated on gfx950, so this has to be MI355.
       # The kernels/ file the NVIDIA job adds is CUDA-only (it imports
       # cuda.bindings.driver), so it is deliberately left out here.
-      - pytest -v -s models/kimi_k3
+      - pytest -v -s models/kimi_k3 --ignore=models/kimi_k3/test_prefix_cache.py
 
 - label: ":nvidia: (4xB200) Kimi K3 Prefix Cache"
   key: kimi-k3-prefix-cache-4xb200
@@ -184,6 +184,21 @@ steps:
   commands:
   - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
   - pytest -v -s models/kimi_k3/test_prefix_cache.py
+  mirror:
+    amd:
+      label: ":amd: (MI355) Kimi K3 Prefix Cache"
+      dind: false
+      device: mi355_4
+      timeout_in_minutes: 60
+      working_dir: "/vllm-workspace/tests"
+      env:
+        VLLM_ROCM_USE_AITER: "1"
+        MOONCAKE_PROTOCOL: "tcp"
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/platforms/rocm.py
+      - requirements/kv_connectors_rocm.txt
 
 - label: ":nvidia: (H200) GLM5Next"
   key: glm5next-unit-tests
