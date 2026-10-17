@@ -306,6 +306,46 @@ every 5 seconds with some key metrics:
   seconds
 - The prefix cache hit rate over the most recent 1k kv-cache block queries
 
+`--enable-logging-iteration-details` additionally logs per-iteration request and
+token counts. With log statistics enabled, it automatically includes GPU timing
+for CUDA generation with a `uni` or `mp` executor and an out-of-process
+EngineCore; unsupported configurations log counts only. This logging option is
+disabled by default, and there is no separate timing CLI flag.
+
+The `model_step_cuda` duration covers target-model execution, sampling and
+postprocessing, and drafting for the next iteration on the recorded CUDA stream,
+including CPU submission gaps. It excludes independent work on other streams and
+is not end-to-end request latency. With pipeline parallelism, only the output
+worker of the last stage is timed. Its interval may include waiting for input
+from earlier stages; it is not the duration of the whole pipeline.
+
+### Iteration Workload Metrics
+
+`--enable-iteration-workload-metrics` automatically enables GPU timing without
+turning on iteration logging. It adds scheduled logical KV-context sums and
+per-request population variances, plus a waiting-work snapshot. Unlike logging,
+this feature requires a configuration supported by GPU timing. The scheduled
+prefill variance uses
+`kv_context + scheduled_tokens / 2` for each request; decode variance uses the
+prior context length. These are logical token lengths, not physical KV cache
+occupancy or measured memory traffic. Scheduling phase is inherited from the
+scheduler, including prefill recomputation after preemption.
+
+Queued work is captured after output processing (at submission for dummy steps).
+For compatibility with FPM consumers, preempted requests and requests waiting
+for remote KV are grouped as queued decode; other waiting requests are grouped
+as queued prefill. This queue classification is distinct from execution phase.
+Deferred requests are already included in the two waiting queues and are not
+counted again. Speculative rejection corrects only later context snapshots from
+the same request/preemption generation, not the original scheduled-token counts.
+
+When workload collection is enabled, EngineCore sends explicit idle records at
+one-second intervals only while globally idle and after outstanding timings have
+been collected. Dummy executions remain timed model iterations, not idle records.
+Idle snapshots may retain queued work while scheduling is paused. Workload
+collection is disabled by default, so ordinary serving does not scan these
+queues or emit periodic idle snapshots.
+
 ### Metrics Publishing - Prometheus
 
 The `PrometheusStatLogger` metrics publisher makes the metrics

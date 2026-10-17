@@ -42,9 +42,9 @@ from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
 from vllm.v1.core.sched.output import (
     CachedRequestData,
     GrammarOutput,
+    IterationDetails,
     KVConnectorBlockState,
     NewRequestData,
-    ScheduledEncoderInputStats,
     SchedulerOutput,
 )
 from vllm.v1.core.sched.request_queue import (
@@ -60,6 +60,7 @@ from vllm.v1.kv_cache_interface import (
     get_mamba_prefill_checkpoint_position,
     is_mamba_prefill_checkpoint_valid,
 )
+from vllm.v1.metrics.iteration_workload import IterationWorkloadAccumulator
 from vllm.v1.metrics.perf import ModelMetrics, PerfStats
 from vllm.v1.metrics.stats import (
     KV_FETCH_COMPLETED_WAITING,
@@ -220,11 +221,11 @@ class Scheduler(SchedulerInterface):
                 f"Unknown scheduling policy: {self.scheduler_config.policy}"
             ) from e
         # Priority queues for requests.
-        self.waiting = create_request_queue(self.policy)
+        self.waiting: RequestQueue = create_request_queue(self.policy)
         # Waiting requests that hold KV blocks are always drained before
         # self.waiting: a block-holder must never sit behind a request whose
         # failed allocation would stop the scheduling scan.
-        self.kv_holding_waiting = create_request_queue(self.policy)
+        self.kv_holding_waiting: RequestQueue = create_request_queue(self.policy)
         # Waiting requests that are deferred, i.e. were skipped by the scheduling
         # scan or enqueued in a blocked status.
         self.deferred_waiting: set[Request] = set()
@@ -636,6 +637,21 @@ class Scheduler(SchedulerInterface):
         scheduled_running_reqs: list[Request] = []
         preempted_reqs: list[Request] = []
 
+        iteration_details = None
+        workload = (
+            IterationWorkloadAccumulator()
+            if self.observability_config.enable_iteration_workload_metrics
+            else None
+        )
+        if (
+            self.log_stats
+            and self.observability_config.enable_logging_iteration_details
+        ) or (
+            self.observability_config.iteration_timing_enabled
+            or self.vllm_config.profiler_config.profiler is not None
+        ):
+            iteration_details = IterationDetails()
+
         req_to_new_blocks: dict[str, KVCacheBlocks] = {}
         num_scheduled_tokens: dict[str, int] = {}
         token_budget = self.max_num_scheduled_tokens
@@ -885,6 +901,13 @@ class Scheduler(SchedulerInterface):
                                     for i in preempted_encoder_inputs
                                 )
                                 encoder_compute_budget += num_embeds_to_restore
+                                if iteration_details is not None:
+                                    iteration_details.num_encoder_inputs -= len(
+                                        preempted_encoder_inputs
+                                    )
+                                    iteration_details.num_encoder_output_tokens -= (
+                                        num_embeds_to_restore
+                                    )
                     else:
                         preempted_req = self.running.pop()
 
@@ -933,6 +956,13 @@ class Scheduler(SchedulerInterface):
             # Encoder-related.
             if encoder_inputs_to_schedule:
                 scheduled_encoder_inputs[request_id] = encoder_inputs_to_schedule
+                if iteration_details is not None:
+                    iteration_details.num_encoder_inputs += len(
+                        encoder_inputs_to_schedule
+                    )
+                    iteration_details.num_encoder_output_tokens += (
+                        encoder_compute_budget - new_encoder_compute_budget
+                    )
                 encoder_compute_budget = new_encoder_compute_budget
             if encoder_inputs_to_schedule or external_load_encoder_input:
                 self._allocate_encoder_inputs(
@@ -1448,6 +1478,13 @@ class Scheduler(SchedulerInterface):
                 # Encoder-related.
                 if encoder_inputs_to_schedule:
                     scheduled_encoder_inputs[request_id] = encoder_inputs_to_schedule
+                    if iteration_details is not None:
+                        iteration_details.num_encoder_inputs += len(
+                            encoder_inputs_to_schedule
+                        )
+                        iteration_details.num_encoder_output_tokens += (
+                            encoder_compute_budget - new_encoder_compute_budget
+                        )
                     encoder_compute_budget = new_encoder_compute_budget
                 if encoder_inputs_to_schedule or external_load_encoder_input:
                     self._allocate_encoder_inputs(
@@ -1522,7 +1559,24 @@ class Scheduler(SchedulerInterface):
                 num_scheduled_tokens,
                 scheduled_spec_decode_tokens,
                 req_to_new_blocks,
+                iteration_details=iteration_details,
+                workload=workload,
             )
+
+        if iteration_details is not None:
+            iteration_details.num_prefill_requests = (
+                len(num_scheduled_tokens) - iteration_details.num_decode_requests
+            )
+            iteration_details.num_prefill_tokens = (
+                total_num_scheduled_tokens - iteration_details.num_decode_tokens
+            )
+            if workload is not None:
+                for request in scheduled_new_reqs:
+                    workload.add_prefill(
+                        request.num_computed_tokens,
+                        num_scheduled_tokens[request.request_id],
+                    )
+                iteration_details.scheduled_workload = workload.snapshot()
 
         # Record the request ids that were scheduled in this step (MRV1-only).
         if not self.use_v2_model_runner:
@@ -1567,15 +1621,6 @@ class Scheduler(SchedulerInterface):
                 len(num_scheduled_tokens)
             ]
 
-        scheduled_encoder_input_stats = None
-        if (
-            self.log_stats
-            and self.observability_config.enable_logging_iteration_details
-        ):
-            scheduled_encoder_input_stats = self._make_scheduled_encoder_input_stats(
-                scheduled_encoder_inputs
-            )
-
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
             scheduled_cached_reqs=cached_reqs_data,
@@ -1583,7 +1628,7 @@ class Scheduler(SchedulerInterface):
             total_num_scheduled_tokens=total_num_scheduled_tokens,
             scheduled_spec_decode_tokens=scheduled_spec_decode_tokens,
             scheduled_encoder_inputs=scheduled_encoder_inputs,
-            scheduled_encoder_input_stats=scheduled_encoder_input_stats,
+            iteration_details=iteration_details,
             preempted_req_ids=self.reset_preempted_req_ids,
             # finished_req_ids is an existing state in the scheduler,
             # instead of being newly scheduled in this step.
@@ -1775,6 +1820,8 @@ class Scheduler(SchedulerInterface):
         num_scheduled_tokens: dict[str, int],
         spec_decode_tokens: dict[str, list[int]],
         req_to_new_blocks: dict[str, KVCacheBlocks],
+        iteration_details: IterationDetails | None = None,
+        workload: IterationWorkloadAccumulator | None = None,
     ) -> CachedRequestData:
         req_ids: list[str] = []
         new_token_ids: list[list[int]] = []
@@ -1783,11 +1830,23 @@ class Scheduler(SchedulerInterface):
         num_computed_tokens: list[int] = []
         num_output_tokens: list[int] = []
         resumed_req_ids = set()
+        prefill_req_ids: set[str] | None = None
+        if (
+            self.vllm_config.profiler_config.profiler is not None
+            and self.vllm_config.profiler_config.detailed_trace_annotation
+        ) or (
+            workload is not None
+            and self.scheduler_config.async_scheduling
+            and self.vllm_config.speculative_config is not None
+            and not self.vllm_config.model_config.is_diffusion
+        ):
+            prefill_req_ids = set()
 
         num_running_reqs = len(running_reqs)
         for idx, req in enumerate(itertools.chain(running_reqs, resumed_reqs)):
             req_id = req.request_id
             req_ids.append(req_id)
+            is_prefill = req.is_prefill_chunk
             # NOTE: In PP+async scheduling, we consume token ids via a direct GPU
             # broadcast path (`input_batch.prev_sampled_token_ids`), so we can
             # omit this payload.
@@ -1806,6 +1865,7 @@ class Scheduler(SchedulerInterface):
                 new_token_ids.append(token_ids)
             if idx >= num_running_reqs:
                 resumed_req_ids.add(req_id)
+                is_prefill = True
             if not self.use_v2_model_runner:  # noqa: SIM102
                 if req_id not in self.prev_step_scheduled_req_ids:
                     all_token_ids[req_id] = req.all_token_ids.copy()
@@ -1816,6 +1876,18 @@ class Scheduler(SchedulerInterface):
             num_output_tokens.append(
                 req.num_output_tokens + req.num_output_placeholders
             )
+            if iteration_details is not None and not is_prefill:
+                iteration_details.num_decode_requests += 1
+                iteration_details.num_decode_tokens += num_scheduled_tokens[req_id]
+            if workload is not None:
+                if is_prefill:
+                    workload.add_prefill(
+                        req.num_computed_tokens, num_scheduled_tokens[req_id]
+                    )
+                else:
+                    workload.add_decode(req.num_computed_tokens)
+            if prefill_req_ids is not None and is_prefill:
+                prefill_req_ids.add(req_id)
 
         return CachedRequestData(
             req_ids=req_ids,
@@ -1825,6 +1897,7 @@ class Scheduler(SchedulerInterface):
             new_block_ids=new_block_ids,
             num_computed_tokens=num_computed_tokens,
             num_output_tokens=num_output_tokens,
+            prefill_req_ids=prefill_req_ids,
         )
 
     def _reject_on_encoder_cache_embed_mismatch(
@@ -2055,23 +2128,6 @@ class Scheduler(SchedulerInterface):
             external_load_encoder_input,
             duplicate_encoder_inputs,
         )
-
-    def _make_scheduled_encoder_input_stats(
-        self, scheduled_encoder_inputs: dict[str, list[int]]
-    ) -> ScheduledEncoderInputStats | None:
-        stats = ScheduledEncoderInputStats()
-
-        for req_id, input_ids in scheduled_encoder_inputs.items():
-            request = self.requests.get(req_id)
-            if request is None:
-                continue
-
-            for input_id in input_ids:
-                mm_feature = request.mm_features[input_id]
-                stats.num_inputs += 1
-                stats.output_tokens += mm_feature.mm_position.get_num_embeds()
-
-        return stats if stats.num_inputs else None
 
     def get_grammar_bitmask(
         self, scheduler_output: SchedulerOutput

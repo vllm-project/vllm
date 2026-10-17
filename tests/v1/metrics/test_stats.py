@@ -1,9 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from vllm.v1.core.sched.output import ScheduledEncoderInputStats, SchedulerOutput
+import queue
+from types import SimpleNamespace
+
+import pytest
+
+from vllm.v1.core.sched.output import IterationDetails, SchedulerOutput
 from vllm.v1.engine import EngineCoreOutputs, FinishReason
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
+from vllm.v1.metrics.iteration import IterationMetricsCollector
+from vllm.v1.metrics.iteration_workload import (
+    IterationWorkloadAccumulator,
+    QueuedIterationWorkload,
+    ScheduledIterationWorkload,
+)
 from vllm.v1.metrics.stats import (
     IterationStats,
     PrefillStats,
@@ -13,13 +24,85 @@ from vllm.v1.metrics.stats import (
     SchedulerIterationDetails,
     SchedulerStats,
 )
+from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
-from vllm.v1.utils import compute_iteration_details
+
+
+@pytest.mark.parametrize("blocker", [None, "global", "timing", "arrival"])
+def test_idle_iteration_records_require_quiescence_and_drained_timing(blocker):
+    from vllm.v1.engine.core import EngineCoreProc
+
+    scheduler = SimpleNamespace(
+        requests={}, waiting=[], kv_holding_waiting=[], make_stats=SchedulerStats
+    )
+    collector = IterationMetricsCollector(scheduler)
+    if blocker == "timing":
+        collector.begin_dummy_iteration()
+
+    class InputQueue(queue.Queue):
+        def get(self, block=True, timeout=None):
+            if not self.empty():
+                return super().get(block=False)
+            return ("stop",)
+
+    running = [True]
+    inputs = InputQueue()
+
+    def poll():
+        if blocker == "arrival":
+            inputs.put(("stop",))
+        return {}
+
+    outputs: queue.Queue[tuple[int, EngineCoreOutputs]] = queue.Queue()
+    published: list[SchedulerIterationDetails] = []
+    core = SimpleNamespace(
+        iteration_metrics=collector,
+        forward_pass_metrics_exporter=SimpleNamespace(record=published.extend),
+        scheduler=scheduler,
+        vllm_config=SimpleNamespace(
+            observability_config=SimpleNamespace(enable_iteration_workload_metrics=True)
+        ),
+        input_queue=inputs,
+        output_queue=outputs,
+        aborts_queue=queue.Queue(),
+        process_input_queue_block=True,
+        has_work=lambda: blocker == "global",
+        is_running=lambda: running[0],
+        _poll_iteration_metrics=poll,
+        _notify_idle_state_callbacks=lambda: None,
+        _handle_client_request=lambda *_: running.__setitem__(0, False),
+    )
+    EngineCoreProc._process_input_queue(core)
+    if blocker is not None:
+        assert outputs.empty()
+        assert not published
+    else:
+        owner, output = outputs.get_nowait()
+        assert owner == 0
+        assert output.scheduler_stats is not None
+        (record,) = output.scheduler_stats.iteration_records
+        assert record.is_idle and not record.is_dummy
+        assert record.elapsed_ms == 0
+        assert published == [record]
 
 
 def test_iteration_stats_repr():
     iteration_stats = IterationStats()
     assert repr(iteration_stats).startswith("IterationStats(")
+
+
+def test_idle_iteration_output_preserves_control_and_mixed_records():
+    idle = SchedulerIterationDetails(0, 0, 0, 0, 0, elapsed_ms=0, is_idle=True)
+    output = EngineCoreOutputs(scheduler_stats=SchedulerStats(iteration_records=[idle]))
+    assert output.is_idle_iteration_output()
+    output.start_wave = 0
+    assert not output.is_idle_iteration_output()
+    output.start_wave = None
+    assert output.scheduler_stats is not None
+    output.scheduler_stats.iteration_records.append(
+        SchedulerIterationDetails(1, 1, 8, 0, 0, elapsed_ms=1)
+    )
+    assert not output.is_idle_iteration_output()
 
 
 def test_scheduler_iteration_details_serialization():
@@ -32,11 +115,14 @@ def test_scheduler_iteration_details_serialization():
         elapsed_ms=6.7,
         num_encoder_inputs=2,
         num_encoder_output_tokens=392,
+        scheduled_workload=ScheduledIterationWorkload(sum_prefill_kv_tokens=17),
+        queued_workload=QueuedIterationWorkload(num_prefill_requests=2),
     )
     outputs = EngineCoreOutputs(
         scheduler_stats=SchedulerStats(
             kv_cache_usage=0.5,
             iteration_details=iteration_details,
+            iteration_records=[iteration_details],
         )
     )
 
@@ -46,6 +132,239 @@ def test_scheduler_iteration_details_serialization():
     assert decoded.scheduler_stats is not None
     assert decoded.scheduler_stats.kv_cache_usage == 0.5
     assert decoded.scheduler_stats.iteration_details == iteration_details
+    assert decoded.scheduler_stats.iteration_records == [iteration_details]
+
+
+def test_iteration_timing_keeps_original_batch_when_results_arrive_late():
+    collector = IterationMetricsCollector()
+    output = SchedulerOutput.make_empty()
+    output.num_scheduled_tokens = {"request": 8}
+    output.total_num_scheduled_tokens = 8
+    output.iteration_details = IterationDetails(
+        num_prefill_requests=1, num_prefill_tokens=8
+    )
+    collector.begin_iteration(output)
+    index = output.iteration_metrics_id
+    assert index is not None
+
+    collector.complete_iteration(output, ModelRunnerOutput([], {}))
+    assert not collector.take_ready()
+    assert collector.has_pending_timing()
+    output.iteration_details.num_prefill_tokens = 99
+    collector.complete_timing_samples(((index, 12.0),))
+    (record,) = collector.take_ready()
+    assert record.num_ctx_tokens == 8
+    assert record.elapsed_ms == 12
+    assert record.timing_scope == "model_step_cuda"
+    assert not collector.has_pending_timing()
+
+
+def test_dummy_tail_timings_survive_more_than_batch_queue_depth():
+    collector = IterationMetricsCollector()
+    indices = [collector.begin_dummy_iteration() for _ in range(64)]
+    assert collector.has_pending_timing()
+    assert not collector.take_ready()
+    output = SchedulerOutput.make_empty()
+    collector.complete_iteration(
+        output,
+        ModelRunnerOutput(
+            [], {}, iteration_timing_samples=tuple((index, 10.0) for index in indices)
+        ),
+    )
+    records = collector.take_ready()
+    assert [record.iteration_index for record in records] == indices
+    assert all(record.is_dummy and record.elapsed_ms == 10 for record in records)
+    assert all(
+        record.num_ctx_tokens == record.num_generation_tokens == 0 for record in records
+    )
+    assert not collector.has_pending_timing()
+
+
+@pytest.mark.parametrize("dummy", [False, True])
+def test_completed_idle_timing_poll_is_consumed_when_inference_resumes(dummy):
+    collector = IterationMetricsCollector()
+    old_id = collector.begin_dummy_iteration()
+    submitted = []
+
+    def start_poll():
+        submitted.append(True)
+        return lambda: ((old_id, 10.0),)
+
+    collector.poll_timing(SimpleNamespace(start_iteration_timing_poll=start_poll))
+    if dummy:
+        iteration_id = collector.begin_dummy_iteration()
+        collector.complete_timing_samples(((iteration_id, 20.0),))
+    else:
+        output = SchedulerOutput.make_empty()
+        output.num_scheduled_tokens = {"request": 1}
+        output.total_num_scheduled_tokens = 1
+        output.iteration_details = IterationDetails(
+            num_decode_requests=1, num_decode_tokens=1
+        )
+        collector.begin_iteration(output)
+        iteration_id = output.iteration_metrics_id
+        collector.complete_iteration(
+            output,
+            ModelRunnerOutput([], {}, iteration_timing_samples=((iteration_id, 20.0),)),
+        )
+    records = collector.take_ready()
+    assert [record.iteration_index for record in records] == [
+        old_id,
+        iteration_id,
+    ]
+    assert [record.elapsed_ms for record in records] == [10, 20]
+    assert not collector.has_pending_timing()
+    assert submitted == [True]  # No new timing RPC on the active inference path.
+
+
+def test_iteration_records_have_one_stable_frontend_owner():
+    from vllm.v1.engine.core import EngineCore
+
+    collector = IterationMetricsCollector()
+    index = collector.begin_dummy_iteration()
+    collector.complete_timing_samples(((index, 10.0),))
+    stats = SchedulerStats(num_running_reqs=7, kv_cache_usage=0.5)
+    outputs = {3: EngineCoreOutputs(scheduler_stats=stats)}
+    published: list[SchedulerIterationDetails] = []
+    core = SimpleNamespace(
+        iteration_metrics=collector,
+        forward_pass_metrics_exporter=SimpleNamespace(record=published.extend),
+    )
+    EngineCore._attach_iteration_records(core, outputs)
+    assert outputs[3].scheduler_stats is None
+    assert outputs[0].scheduler_stats is stats
+    assert stats.num_running_reqs == 7
+    assert [record.iteration_index for record in stats.iteration_records] == [index]
+    EngineCore._attach_iteration_records(core, outputs)
+    assert len(stats.iteration_records) == 1
+    assert published == stats.iteration_records
+
+
+def _decode_workload_output(lengths: dict[str, int]) -> SchedulerOutput:
+    output = SchedulerOutput.make_empty()
+    output.num_scheduled_tokens = dict.fromkeys(lengths, 4)
+    output.total_num_scheduled_tokens = len(lengths) * 4
+    output.scheduled_spec_decode_tokens = {rid: [-1] * 3 for rid in lengths}
+    cached = output.scheduled_cached_reqs
+    cached.req_ids = list(lengths)
+    cached.num_computed_tokens = list(lengths.values())
+    cached.prefill_req_ids = set()
+    workload = IterationWorkloadAccumulator()
+    for length in lengths.values():
+        workload.add_decode(length)
+    output.iteration_details = IterationDetails(
+        num_decode_requests=len(lengths),
+        num_decode_tokens=len(lengths) * 4,
+        scheduled_workload=workload.snapshot(),
+    )
+    return output
+
+
+def test_async_spec_rejections_correct_later_workload_before_stop_truncation():
+    scheduler = SimpleNamespace(
+        requests={rid: SimpleNamespace(num_preemptions=0) for rid in ("a", "b")},
+        waiting=[],
+        kv_holding_waiting=[],
+    )
+    collector = IterationMetricsCollector(scheduler, correct_async_spec_lengths=True)
+    first = _decode_workload_output({"a": 100, "b": 200})
+    second = _decode_workload_output({"a": 104, "b": 204})
+    collector.begin_iteration(first)
+    collector.begin_iteration(second)
+    result = ModelRunnerOutput(
+        ["a", "b"],
+        {"a": 0, "b": 1},
+        [[1], [2, 3, 4]],
+        iteration_timing_samples=((first.iteration_metrics_id, 10.0),),
+    )
+    collector.before_update(first, result)
+    result.sampled_token_ids[1] = [2]  # Scheduler stop handling truncates output.
+    collector.complete_iteration(first, result)
+    assert collector.take_ready()[0].scheduled_workload.sum_decode_kv_tokens == 300
+
+    third = _decode_workload_output({"a": 105, "b": 207})
+    collector.begin_iteration(third)
+    result.sampled_token_ids = [[5], [6, 7, 8, 9]]
+    result.iteration_timing_samples = ((second.iteration_metrics_id, 20.0),)
+    collector.before_update(second, result)
+    collector.complete_iteration(second, result)
+    workload = collector.take_ready()[0].scheduled_workload
+    assert workload.sum_decode_kv_tokens == 304  # 101 + 203
+    assert workload.var_decode_kv_tokens == 2601
+    result.iteration_timing_samples = ((third.iteration_metrics_id, 30.0),)
+    collector.complete_iteration(third, result)
+    assert collector.take_ready()[0].scheduled_workload.sum_decode_kv_tokens == 309
+
+
+@pytest.mark.parametrize("preempted", [False, True])
+def test_async_spec_workload_correction_does_not_cross_request_generation(preempted):
+    request = SimpleNamespace(num_preemptions=0)
+    scheduler = SimpleNamespace(
+        requests={"request": request}, waiting=[], kv_holding_waiting=[]
+    )
+    collector = IterationMetricsCollector(scheduler, correct_async_spec_lengths=True)
+    first = _decode_workload_output({"request": 100})
+    collector.begin_iteration(first)
+    if preempted:
+        request.num_preemptions += 1
+    else:
+        scheduler.requests["request"] = SimpleNamespace(num_preemptions=0)
+    resumed = _decode_workload_output({"request": 20})
+    collector.begin_iteration(resumed)
+    result = ModelRunnerOutput(
+        ["request"],
+        {"request": 0},
+        [[1]],
+        iteration_timing_samples=((first.iteration_metrics_id, 10.0),),
+    )
+    collector.before_update(first, result)
+    collector.complete_iteration(first, result)
+    collector.take_ready()
+    scheduler.requests.clear()
+    result.iteration_timing_samples = ((resumed.iteration_metrics_id, 20.0),)
+    collector.complete_iteration(resumed, result)
+    assert collector.take_ready()[0].scheduled_workload.sum_decode_kv_tokens == 20
+
+
+@pytest.mark.parametrize("policy", ["fcfs", "priority"])
+def test_dummy_and_idle_keep_queue_snapshots_without_double_counting_deferred(policy):
+    from tests.v1.core.utils import create_requests, create_scheduler
+    from vllm.v1.request import RequestStatus
+
+    scheduler = create_scheduler(scheduling_policy=policy)
+    states = [
+        (RequestStatus.WAITING, 0),
+        (RequestStatus.WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR, 0),
+        (RequestStatus.WAITING, 32),
+        (RequestStatus.PREEMPTED, 70),
+        (RequestStatus.WAITING_FOR_REMOTE_KVS, 80),
+        (RequestStatus.WAITING_FOR_STREAMING_REQ, 96),
+    ]
+    requests = create_requests(num_requests=len(states), num_tokens=100)
+    for request, (status, computed) in zip(requests, states):
+        request.status = status
+        request.num_computed_tokens = computed
+        scheduler.add_request(request)
+    assert len(scheduler.deferred_waiting) == 3
+    collector = IterationMetricsCollector(scheduler)
+    index = collector.begin_dummy_iteration()
+    assert collector.make_idle_record() is None
+    requests[0].append_output_token_ids([1, 2])
+    collector.complete_timing_samples(((index, 20.0),))
+    (dummy,) = collector.take_ready()
+    assert dummy.is_dummy and not dummy.is_idle
+    assert dummy.scheduled_workload == ScheduledIterationWorkload()
+    assert dummy.queued_workload == QueuedIterationWorkload(
+        num_prefill_requests=4,
+        sum_prefill_tokens=400,
+        num_decode_requests=2,
+        sum_decode_kv_tokens=150,
+        var_decode_kv_tokens=25,
+    )
+    idle = collector.make_idle_record()
+    assert idle.is_idle and not idle.is_dummy and idle.elapsed_ms == 0
+    assert idle.iteration_index > dummy.iteration_index
+    assert idle.queued_workload.sum_prefill_tokens == 402
 
 
 def test_prefix_cache_stats_hits_by_source_accumulate():
@@ -136,19 +455,6 @@ def test_prefix_cache_stats_hits_by_source_serialization():
         CacheHitSource.P2P: 4,
         CacheHitSource.HOST: 4,
     }
-
-
-def test_compute_iteration_details_includes_encoder_stats():
-    scheduler_output = SchedulerOutput.make_empty()
-    scheduler_output.scheduled_encoder_input_stats = ScheduledEncoderInputStats(
-        num_inputs=2,
-        output_tokens=392,
-    )
-
-    iteration_details = compute_iteration_details(scheduler_output)
-
-    assert iteration_details.num_encoder_inputs == 2
-    assert iteration_details.num_encoder_output_tokens == 392
 
 
 def test_prefill_kv_computed_with_cache():

@@ -292,6 +292,24 @@ class EngineCoreOutputs(
         if self.timestamp == 0.0:
             self.timestamp = time.monotonic()
 
+    def is_idle_iteration_output(self) -> bool:
+        if (
+            self.outputs
+            or self.utility_output is not None
+            or self.finished_requests is not None
+            or self.wave_complete is not None
+            or self.start_wave is not None
+            or self.weight_version is not None
+        ):
+            return False
+        stats = self.scheduler_stats
+        return (
+            stats is not None
+            and stats.iteration_details is None
+            and bool(stats.iteration_records)
+            and all(record.is_idle for record in stats.iteration_records)
+        )
+
 
 class EngineCoreRequestType(enum.Enum):
     """Request types defined as hex byte strings, so it can be sent over sockets

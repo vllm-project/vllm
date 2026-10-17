@@ -103,6 +103,14 @@ class EngineCoreClient(ABC):
         log_stats: bool,
         renderer: BaseRenderer | None = None,
     ) -> "EngineCoreClient":
+        if (
+            not multiprocess_mode
+            and vllm_config.observability_config.enable_iteration_workload_metrics
+        ):
+            raise ValueError(
+                "Iteration GPU timing requires a multiprocessing EngineCore client "
+                "to deliver late timing records while the engine is idle."
+            )
         # renderer is passed through to the multiprocess clients, which start
         # the frontend MM warmup (renderer.start_mm_warmup_in_background) once
         # the engine-core processes have been forked, so warmup overlaps
@@ -1004,6 +1012,10 @@ class SyncMPClient(MPClient):
                     if outputs.utility_output:
                         _process_utility_output(outputs.utility_output, utility_results)
                     else:
+                        # Offline callers stop stepping between generations. Do
+                        # not accumulate periodic idle telemetry in their queue.
+                        if outputs.is_idle_iteration_output():
+                            continue
                         outputs_queue.put_nowait(outputs)
             except Exception as e:
                 outputs_queue.put_nowait(e)
