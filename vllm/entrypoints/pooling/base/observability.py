@@ -6,6 +6,7 @@ import threading
 import time
 from collections.abc import Mapping
 from contextlib import asynccontextmanager, contextmanager
+from typing import TYPE_CHECKING
 
 from fastapi import Request
 
@@ -52,7 +53,7 @@ class _ObservabilityMixin:
         raw_request: Request | None = None,
     ):
         raw_trace_headers = await self._get_trace_headers(
-            raw_request if raw_request is None else raw_request.headers
+            {} if raw_request is None else raw_request.headers
         )
 
         ctx.trace_headers = raw_trace_headers
@@ -80,7 +81,10 @@ class _ObservabilityMixin:
         return {}
 
 
-if _IS_OTEL_AVAILABLE:
+if TYPE_CHECKING:
+    ObservabilityMixin = _ObservabilityMixin
+
+elif _IS_OTEL_AVAILABLE:
     from opentelemetry.sdk.trace import Span
     from opentelemetry.trace import (
         NonRecordingSpan,
@@ -120,12 +124,15 @@ if _IS_OTEL_AVAILABLE:
             io_processor: PoolingIOProcessor,
             raw_request: Request | None = None,
         ):
+
+            raw_trace_headers = await self._get_trace_headers(
+                {} if raw_request is None else raw_request.headers
+            )
+
             if not self.is_tracing_request:
-                ctx.trace_headers = await self._get_trace_headers(raw_request.headers)
+                ctx.trace_headers = raw_trace_headers
                 yield
                 return
-
-            raw_trace_headers = await self._get_trace_headers(raw_request.headers)
 
             request_tracer = self.trace_provider.get_tracer(self.scope_request)
             trace_context = self.propagator.extract(
@@ -158,7 +165,7 @@ if _IS_OTEL_AVAILABLE:
 
         @contextmanager
         def maybe_start_span(self, tracer: Tracer | None, *args, **kwargs):
-            if not self.is_tracing_request:
+            if tracer is None:
                 yield None
                 return
 
@@ -182,7 +189,7 @@ if _IS_OTEL_AVAILABLE:
 
         @asynccontextmanager
         async def maybe_start_span_async(self, tracer: Tracer | None, *args, **kwargs):
-            if not self.is_tracing_request:
+            if tracer is None:
                 yield None
                 return
 
