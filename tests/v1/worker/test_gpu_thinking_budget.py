@@ -108,6 +108,59 @@ def test_v2_thinking_budget_forces_end_after_budget_reached():
     torch.testing.assert_close(out, expected)
 
 
+def test_v2_draftless_spec_step_forces_end_for_each_request():
+    """A draft-less speculative step keeps one logits row per request.
+
+    Model Runner V2 represents that layout with
+    ``expanded_idx_mapping == idx_mapping``. Verify that thinking-budget
+    forcing follows that mapping instead of writing every request's forced
+    token into the first logits row (vllm-project/vllm#59272).
+    """
+    tokens = [1, START, 10, 11, 12]
+    req_states = RequestState(
+        max_num_reqs=4,
+        max_model_len=64,
+        max_num_batched_tokens=16,
+        num_speculative_steps=4,
+        vocab_size=VOCAB_SIZE,
+        device=DEVICE,
+    )
+    for req_id in ("req-0", "req-1"):
+        req_states.add_request(
+            req_id=req_id,
+            prompt_len=1,
+            all_token_ids=tokens,
+            num_computed_tokens=len(tokens),
+            max_tokens=32,
+        )
+    req_states.apply_staged_writes()
+
+    req_indices = [req_states.req_id_to_index[req_id] for req_id in ("req-0", "req-1")]
+    state = ThinkingBudgetState(req_states, MockReasoningConfig())
+    for req_idx in req_indices:
+        state.add_request(req_idx, SamplingParams(thinking_token_budget=3))
+    state.apply_staged_writes()
+
+    # This is the no-draft branch from ModelRunner.prepare_inputs(): one row
+    # per request, local position zero for both rows.
+    idx_mapping = torch.tensor(req_indices, dtype=torch.int32, device=DEVICE)
+    logits = torch.zeros((2, VOCAB_SIZE), device=DEVICE)
+    state.apply(
+        logits,
+        LogitsContext(
+            expanded_idx_mapping=idx_mapping,
+            idx_mapping=idx_mapping,
+            idx_mapping_np=np.asarray(req_indices, dtype=np.int32),
+            expanded_local_pos=torch.zeros(2, dtype=torch.int32, device=DEVICE),
+            input_ids=torch.tensor([12, 12], dtype=torch.int32, device=DEVICE),
+            pos=torch.zeros(2, dtype=torch.int32, device=DEVICE),
+            seq_lens_upper_bound_np=np.ones(2, dtype=np.int64),
+        ),
+    )
+
+    assert logits[:, END].tolist() == pytest.approx([1.0e9, 1.0e9])
+
+
 def test_v2_thinking_budget_restores_masked_end_token():
     req_states = _make_req_states([1, START, 10, 11, 12], prompt_len=1)
     state = ThinkingBudgetState(req_states, MockReasoningConfig())
