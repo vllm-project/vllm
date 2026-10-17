@@ -974,13 +974,15 @@ def test_hisparse_admitted_async_loads_can_finish_with_nothing_running(tmp_path)
         max_model_len=128,
         use_kv_connector=mock_kv(matched_tokens=HISPARSE_BLOCK_SIZE, is_async=True),
     )
-    # One null block plus three usable host blocks.
-    manager = make_hisparse_kv_cache_manager(32, 4)
+    # One null block plus four usable host blocks: first (4 pages, 1 imported)
+    # and second (3 pages, 1 imported) are both admitted, leaving two free
+    # host blocks so only the newest load (second) can finish first.
+    manager = make_hisparse_kv_cache_manager(32, 5)
     scheduler.kv_cache_manager = manager
     scheduler.kv_cache_config = manager.kv_cache_config
     assert scheduler.scheduler_reserve_full_isl
     first = make_request(
-        "first", list(range(3 * HISPARSE_BLOCK_SIZE)), HISPARSE_BLOCK_SIZE, sha256
+        "first", list(range(4 * HISPARSE_BLOCK_SIZE)), HISPARSE_BLOCK_SIZE, sha256
     )
     second = make_request(
         "second",
@@ -992,6 +994,7 @@ def test_hisparse_admitted_async_loads_can_finish_with_nothing_running(tmp_path)
         scheduler.add_request(request)
         scheduler.schedule()
     admitted = {r.request_id for r in scheduler._inflight_prefills}
+    assert admitted == {"first", "second"}
 
     scheduler.finished_recving_kv_req_ids.update(admitted)
     num_scheduled_tokens = 0

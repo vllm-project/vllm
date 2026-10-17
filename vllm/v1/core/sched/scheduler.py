@@ -1334,6 +1334,9 @@ class Scheduler(SchedulerInterface):
                     # manager
                     if request.has_encoder_inputs:
                         self.encoder_cache_manager.free(request)
+                    if request_queue is self.kv_holding_waiting:
+                        skip_request(request_queue)
+                        continue
                     break
 
                 # KVTransfer: the connector uses this info to determine
