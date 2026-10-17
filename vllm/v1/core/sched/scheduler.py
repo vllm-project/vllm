@@ -24,7 +24,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (
     KVConnectorRole,
     SupportsHMA,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorMetadata,
+    connector_kv_events_enabled,
+    take_connector_kv_events,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
@@ -2459,7 +2463,9 @@ class Scheduler(SchedulerInterface):
 
         # collect KV cache events from connector
         if self.connector is not None:
-            connector_events = self.connector.take_events()
+            connector_events = take_connector_kv_events(
+                self.connector, connector_kv_events_enabled(self.vllm_config)
+            )
             if connector_events:
                 if events is None:
                     events = list(connector_events)

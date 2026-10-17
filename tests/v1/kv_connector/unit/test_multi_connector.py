@@ -12,7 +12,7 @@ import torch
 
 from tests.v1.kv_connector.unit.utils import create_vllm_config, maybe_update_block_size
 from vllm import LLM, SamplingParams
-from vllm.config import KVTransferConfig
+from vllm.config import KVEventsConfig, KVTransferConfig
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -257,6 +257,46 @@ def test_cache_hit_sources_delegate_to_selected_connector(mc: MultiConnector):
     mc._connectors[1].get_external_cache_hit_sources.assert_called_once_with(
         request, 32
     )
+
+
+@pytest.mark.parametrize(
+    "enable_kv_cache_events,expected", [(True, ["kept"]), (False, [])]
+)
+def test_take_events_honors_per_child_kv_events_switch(
+    enable_kv_cache_events, expected
+):
+    child = {
+        "kv_connector": "MockConnector",
+        "kv_role": "kv_both",
+        "kv_connector_module_path": "tests.v1.kv_connector.unit.test_multi_connector",
+    }
+    vllm_config = create_vllm_config(
+        kv_connector="MultiConnector",
+        kv_connector_extra_config={
+            "connectors": [
+                child,
+                {**child, "kv_connector_extra_config": {"enable_kv_events": False}},
+            ],
+        },
+    )
+    vllm_config.kv_events_config = KVEventsConfig(
+        enable_kv_cache_events=enable_kv_cache_events
+    )
+    mc = MultiConnector(
+        vllm_config=vllm_config,
+        role=KVConnectorRole.SCHEDULER,
+        kv_cache_config=KVCacheConfig(
+            num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[]
+        ),
+    )
+    kept, dropped = iter(["kept"]), iter(["dropped"])
+    mc._connectors[0].take_events.return_value = kept
+    mc._connectors[1].take_events.return_value = dropped
+
+    assert list(mc.take_events()) == expected
+    # Unpublished events are still drained from the connector.
+    assert next(kept, None) is None
+    assert next(dropped, None) is None
 
 
 # Helper function to compare directories recursively
