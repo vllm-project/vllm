@@ -195,6 +195,17 @@ class KVConnectorBase_V1(ABC):
         return False
 
     @property
+    def external_load_alignment(self) -> int | None:
+        """Tokens a shorter prefix of an external hit must end on a multiple of.
+
+        The scheduler may trim an external hit and pass the shorter, block-
+        aligned prefix to ``update_state_after_alloc``. A connector that loads
+        in larger units returns that unit. Defaults to None: the connector
+        loads only the whole hit it reported, so a trimmed hit is recomputed.
+        """
+        return None
+
+    @property
     def requires_kv_delivery(self) -> bool:
         """Whether this connector hands off KV that must be reliably delivered.
 

@@ -284,10 +284,23 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
             request, num_computed_tokens
         ), False
 
+    @property
+    def external_load_alignment(self) -> int | None:
+        return getattr(self._lmcache_engine, "_lmcache_chunk_size", None)
+
     def update_state_after_alloc(
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
     ):
         """Update KVConnector state after block allocation."""
+        load_spec = getattr(self._lmcache_engine, "load_specs", {}).get(
+            request.request_id
+        )
+        if load_spec is not None and num_external_tokens > 0:
+            # The scheduler may accept a shorter, chunk-aligned prefix.
+            num_tokens = load_spec.vllm_cached_tokens + num_external_tokens
+            num_hit = load_spec.lmcache_cached_tokens
+            if num_tokens < num_hit - (num_hit == request.num_tokens):
+                load_spec.lmcache_cached_tokens = num_tokens
         self._lmcache_engine.update_state_after_alloc(request, num_external_tokens)
 
     def build_connector_meta(

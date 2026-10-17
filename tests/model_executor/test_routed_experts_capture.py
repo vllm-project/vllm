@@ -749,7 +749,7 @@ def test_aux_output_worker_connector_default_capacity(monkeypatch):
     )
 
     aux_output_worker.AuxOutputWorkerConnector(**kwargs)
-    assert store_constructor.call_args.kwargs["max_bytes"] == 2560
+    assert store_constructor.call_args.kwargs["max_bytes"] == 5120
     assert store_constructor.call_args.kwargs["object_nbytes"] == 128
     assert background_store_constructor.call_args.kwargs["max_pending_batches"] == 16
 

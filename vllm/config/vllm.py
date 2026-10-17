@@ -2187,6 +2187,21 @@ class VllmConfig:
         # before the HMA check below, which inspects the connector class.
         self._post_init_kv_transfer_config()
         self._verify_aux_output_compatibility()
+        if self.aux_output_config.enabled and not (
+            self.kv_events_config and self.kv_events_config.enable_kv_cache_events
+        ):
+            # Auxiliary outputs follow KV cache events; nothing is published.
+            self.kv_events_config = KVEventsConfig(
+                enable_kv_cache_events=True, publisher="null"
+            )
+        if self.aux_output_config.enabled and self.kv_transfer_config is not None:
+            # Offloaded chunks must name every block they hold.
+            extra_config = self.kv_transfer_config.kv_connector_extra_config
+            for config in [extra_config] + [
+                child.setdefault("kv_connector_extra_config", {})
+                for child in extra_config.get("connectors", ())
+            ]:
+                config.setdefault("self_describing_kv_events", True)
 
         # Hybrid KV cache manager (HMA) runtime rules:
         # - Explicit enable (--enable-hybrid-kv-cache-manager): error if runtime

@@ -153,7 +153,9 @@ def test_routed_experts_prompt_start_at_prompt_end(max_tokens):
     scheduler = create_scheduler()
     (request,) = create_requests(num_requests=1, max_tokens=max_tokens)
     request.sampling_params.routed_experts_prompt_start = request.num_prompt_tokens
-    scheduler.aux_output_connector = AuxOutputSchedulerConnector()
+    scheduler.aux_output_connector = AuxOutputSchedulerConnector(
+        scheduler.kv_cache_manager
+    )
     scheduler.add_request(request)
     scheduler_output = scheduler.schedule()
     assert scheduler_output.aux_output_connector_metadata.requests == {
@@ -181,6 +183,81 @@ def test_routed_experts_prompt_start_at_prompt_end(max_tokens):
     output = outputs[request.client_index].outputs[0]
     assert output.new_token_ids == [0]
     assert output.routed_experts.shape == (0, 1, 1)
+
+
+@pytest.mark.parametrize(
+    "external_tokens,max_cache_hit,load_alignment,expected_hit",
+    [
+        (0, 79, 1, 64),
+        (0, 16, 1, 0),
+        (32, 79, 1, 32),
+        (31, 79, 1, 16),
+        (32, 16, 1, 16),
+        (64, 63, 32, 32),
+        (32, 16, None, 0),
+        (32, 0, 1, 0),
+    ],
+    ids=[
+        "local",
+        "local-dropped",
+        "external",
+        "external-unaligned",
+        "external-capped",
+        "external-capped-to-connector-unit",
+        "external-whole-only",
+        "none",
+    ],
+)
+def test_prefix_hit_is_capped_at_retained_auxiliary_outputs(
+    external_tokens, max_cache_hit, load_alignment, expected_hit
+):
+    scheduler = create_scheduler(
+        enable_prefix_caching=True,
+        use_kv_connector=(
+            mock_kv(matched_tokens=external_tokens, is_async=False)
+            if external_tokens
+            else None
+        ),
+    )
+    first, second = create_requests(num_requests=2, num_tokens=80, same_prompt=True)
+    if not external_tokens:
+        # Cache the prompt's blocks locally.
+        scheduler.add_request(first)
+        scheduler.schedule()
+        scheduler.finish_requests(first.request_id, RequestStatus.FINISHED_ABORTED)
+    connector = AuxOutputSchedulerConnector(
+        scheduler.kv_cache_manager, Mock(external_load_alignment=load_alignment)
+    )
+    connector.max_cache_hit = Mock(return_value=max_cache_hit)
+    scheduler.aux_output_connector = connector
+    scheduler.add_request(second)
+
+    output = scheduler.schedule()
+
+    assert output.num_scheduled_tokens[second.request_id] == 80 - expected_hit
+
+
+def test_evicted_blocks_release_their_auxiliary_outputs_in_the_evicting_step():
+    # Four usable blocks: the second prompt evicts every block of the first.
+    scheduler = create_scheduler(enable_prefix_caching=True, num_blocks=5)
+    block_pool = scheduler.kv_cache_manager.block_pool
+    block_pool.enable_kv_cache_events = True
+    block_pool.kv_event_queue = []
+    scheduler.aux_output_connector = AuxOutputSchedulerConnector(
+        scheduler.kv_cache_manager
+    )
+    # No KV connector may hold evicted blocks: release them at once.
+    scheduler.aux_output_connector._max_unheld = 0
+    first, second = create_requests(num_requests=2, num_tokens=64)
+    scheduler.add_request(first)
+    scheduler.schedule()
+    scheduler.finish_requests(first.request_id, RequestStatus.FINISHED_ABORTED)
+
+    scheduler.add_request(second)
+    metadata = scheduler.schedule().aux_output_connector_metadata
+
+    assert list(metadata.retained_block_hashes) == first.block_hashes
+    assert sorted(metadata.released_block_hashes) == sorted(first.block_hashes)
 
 
 def test_finish_request():
@@ -1997,7 +2074,9 @@ def test_prefix_cache_stats_counted_once_for_retried_then_scheduled_request():
 
 def test_scheduler_reset_prefix_cache():
     scheduler = create_scheduler(enable_prefix_caching=True)
-    scheduler.aux_output_connector = Mock()
+    scheduler.aux_output_connector = Mock(
+        wraps=AuxOutputSchedulerConnector(scheduler.kv_cache_manager)
+    )
     requests = create_requests(num_requests=10)
     for request in requests:
         scheduler.add_request(request)

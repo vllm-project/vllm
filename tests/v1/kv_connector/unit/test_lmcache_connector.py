@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterator
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -71,6 +72,36 @@ def mock_connector():
     )
 
     return connector
+
+
+class TestUpdateStateAfterAlloc:
+    @pytest.mark.parametrize(
+        "vllm_cached,lmcache_cached,num_external,expected",
+        [
+            (0, 1024, 1024, 1024),
+            (0, 1200, 1199, 1200),
+            (0, 1024, 768, 768),
+            (256, 1024, 512, 768),
+            (0, 1024, 0, 1024),
+        ],
+        ids=["whole-hit", "whole-prompt", "shorter", "after-local-hit", "not-chosen"],
+    )
+    def test_loads_the_accepted_prefix(
+        self, mock_connector, vllm_cached, lmcache_cached, num_external, expected
+    ):
+        load_spec = SimpleNamespace(
+            vllm_cached_tokens=vllm_cached, lmcache_cached_tokens=lmcache_cached
+        )
+        mock_connector._lmcache_engine.load_specs = {"r": load_spec}
+        request = SimpleNamespace(request_id="r", num_tokens=1200)
+
+        LMCacheConnectorV1.update_state_after_alloc(
+            mock_connector, request, MagicMock(), num_external
+        )
+
+        assert load_spec.lmcache_cached_tokens == expected
+        engine = mock_connector._lmcache_engine
+        engine.update_state_after_alloc.assert_called_once_with(request, num_external)
 
 
 class TestGetKVConnectorKVCacheEvents:

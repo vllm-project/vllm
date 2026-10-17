@@ -18,6 +18,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
     MooncakeStoreWorkerMetadata,
     ReqMeta,
     RequestTracker,
+    TailKeyBoundary,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.scheduler import (
     MooncakeStoreScheduler,
@@ -354,6 +355,34 @@ def test_update_state_excludes_nontransfer_groups():
     scheduler.update_state_after_alloc(request, blocks, num_external_tokens=32)
 
     assert scheduler._unfinished_requests["req-1"][1] == ([1, 2],)
+
+
+@pytest.mark.parametrize(
+    "num_external_tokens,expected_tokens,expected_tail_keys",
+    [(48, 48, 1), (32, 32, 0)],
+    ids=["whole-hit", "shorter-prefix"],
+)
+def test_update_state_loads_the_accepted_prefix(
+    num_external_tokens, expected_tokens, expected_tail_keys
+):
+    """The scheduler may accept a shorter, block-aligned prefix of a hit."""
+    scheduler = _make_bare_scheduler()
+    scheduler._store_group_ids = (0,)
+    request = SimpleNamespace(request_id="req-0")
+    blocks = KVCacheBlocks(([KVCacheBlock(1), KVCacheBlock(2), KVCacheBlock(3)],))
+    scheduler.load_specs["req-0"] = LoadSpec(
+        vllm_cached_tokens=0,
+        kvpool_cached_tokens=48,
+        can_load=False,
+        tail_key_boundaries=(TailKeyBoundary(group_id=0, num_tokens=47),),
+    )
+
+    scheduler.update_state_after_alloc(request, blocks, num_external_tokens)
+
+    load_spec = scheduler.load_specs["req-0"]
+    assert load_spec.can_load
+    assert load_spec.kvpool_cached_tokens == expected_tokens
+    assert len(load_spec.tail_key_boundaries) == expected_tail_keys
 
 
 def _setup_decode_request(

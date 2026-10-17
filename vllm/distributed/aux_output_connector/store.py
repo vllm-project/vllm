@@ -11,6 +11,10 @@ from collections import OrderedDict
 from collections.abc import Iterable
 from dataclasses import dataclass
 
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
+
 
 @dataclass(frozen=True)
 class BlockObject:
@@ -98,7 +102,7 @@ class BackgroundBlockObjectStore:
 
 
 class BlockObjectStore:
-    """Single-owner bounded store that fails closed after an eviction."""
+    """Single-owner store that fails closed after an eviction."""
 
     _UNALLOCATED_SLOT = -1
 
@@ -132,11 +136,6 @@ class BlockObjectStore:
                 victims.append(key)
                 if len(victims) == excess:
                     break
-        if len(victims) != excess:
-            raise BlockObjectStoreError(
-                "auxiliary output store cannot retain the requested batch: "
-                f"limit={self.num_slots} objects"
-            )
         for victim in victims:
             slot = self._lru.pop(victim)
             if slot != self._UNALLOCATED_SLOT:
@@ -168,13 +167,19 @@ class BlockObjectStore:
         for key in terminal_order:
             if key in self._lru:
                 self._lru.move_to_end(key)
-        try:
-            self._evict_to_fit(set(unique) - set(terminal_order))
-        except BlockObjectStoreError:
-            for key in unique:
-                if self._lru.get(key) == self._UNALLOCATED_SLOT:
-                    del self._lru[key]
-            raise
+        self._evict_to_fit(set(unique) - set(terminal_order))
+        if (nbytes := len(self._lru) * self.object_nbytes) > len(arena):
+            nbytes = max(nbytes, 2 * len(arena))
+            logger.warning(
+                "Auxiliary output store grows past max_bytes to %d bytes: running "
+                "requests and KV cache tiers reference all %d objects.",
+                nbytes,
+                len(self._lru),
+            )
+            grown = mmap.mmap(-1, nbytes)
+            grown[: len(arena)] = arena
+            self._arena = arena = grown
+            self.num_slots = len(grown) // self.object_nbytes
         for object_id, obj in unique.items():
             slot = self._lru.get(object_id)
             if slot is None:
@@ -212,8 +217,7 @@ class BlockObjectStore:
             raise BlockObjectStoreError(
                 "auxiliary output object does not exist; the object may have been "
                 f"evicted (used={len(self._lru)}, "
-                f"limit={self.num_slots} objects). Increase "
-                "aux_output_config.max_bytes when a KV cache hit requires it."
+                f"limit={self.num_slots} objects)."
             ) from error
         arena = memoryview(arena_obj)
         try:

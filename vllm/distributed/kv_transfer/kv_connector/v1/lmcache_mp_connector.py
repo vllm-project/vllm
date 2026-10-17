@@ -791,6 +791,10 @@ class LMCacheMPConnectorUpstream(KVConnectorBase_V1):
         )
         return need_to_load, need_to_load > 0
 
+    @property
+    def external_load_alignment(self) -> int:
+        return self.scheduler_adapter.num_blocks_per_chunk() * self.vllm_block_size
+
     def update_state_after_alloc(
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
     ):
@@ -825,6 +829,19 @@ class LMCacheMPConnectorUpstream(KVConnectorBase_V1):
         new_block_ids = block_ids[existing_count:]
         if new_block_ids:
             tracker.append_block_ids(new_block_ids)
+
+        # The scheduler may accept a shorter, chunk-aligned prefix of the hit.
+        num_blocks = tracker.num_vllm_hit_blocks + (
+            num_external_tokens // self.vllm_block_size
+        )
+        if num_external_tokens > 0 and num_blocks < tracker.num_lmcache_hit_blocks:
+            self.scheduler_adapter.free_lookup_locks(
+                token_ids=list(tracker.all_token_ids),
+                start=num_blocks * self.vllm_block_size,
+                end=tracker.num_lmcache_hit_blocks * self.vllm_block_size,
+                request_id=request.request_id,
+            )
+            tracker.num_lmcache_hit_blocks = num_blocks
 
         # num_external_tokens > 0 means this connector is chosen for loading.
         # When non-chosen (num_external_tokens == 0, e.g. in MultiConnector),

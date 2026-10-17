@@ -451,7 +451,7 @@ class Scheduler(SchedulerInterface):
             self.perf_metrics = ModelMetrics(vllm_config)
 
         self.aux_output_connector = (
-            AuxOutputSchedulerConnector()
+            AuxOutputSchedulerConnector(self.kv_cache_manager, self.connector)
             if vllm_config.aux_output_config.enabled
             else None
         )
@@ -1020,6 +1020,15 @@ class Scheduler(SchedulerInterface):
                         request.shared_prefix_boundary,
                         hit_diverged,
                     ) = self._get_local_prefix_cache_hit(request)
+                    if self.aux_output_connector is not None:
+                        # Hits must not outlive the auxiliary outputs they return.
+                        new_computed_blocks, num_new_local_computed_tokens = (
+                            self.aux_output_connector.cap_local_hit(
+                                request,
+                                new_computed_blocks,
+                                num_new_local_computed_tokens,
+                            )
+                        )
 
                     # Get externally-cached tokens if using a KVConnector.
                     if self.connector is not None:
@@ -1080,6 +1089,16 @@ class Scheduler(SchedulerInterface):
                             load_kv_async = False
                         else:
                             num_external_computed_tokens = ext_tokens
+
+                        if self.aux_output_connector is not None:
+                            num_external_computed_tokens = (
+                                self.aux_output_connector.cap_external_hit(
+                                    request,
+                                    num_new_local_computed_tokens,
+                                    num_external_computed_tokens,
+                                )
+                            )
+                            load_kv_async &= num_external_computed_tokens > 0
 
                         if hit_diverged and num_external_computed_tokens == 0:
                             # No external tokens back the deeper local hit, so its
@@ -1396,6 +1415,10 @@ class Scheduler(SchedulerInterface):
                     # _update_waiting_for_remote_kv will then cache
                     # only the successfully loaded tokens.
                     request.num_computed_tokens = num_computed_tokens
+                    if self.aux_output_connector is not None:
+                        self.aux_output_connector.request_loading(
+                            request, num_computed_tokens
+                        )
                     self._inflight_prefills.add(request)
                     self._set_kv_fetch_stage(request, KV_FETCH_IN_PROGRESS)
                     skip_request(request_queue)
@@ -2466,6 +2489,9 @@ class Scheduler(SchedulerInterface):
                 else:
                     events.extend(connector_events)
 
+        if self.aux_output_connector is not None:
+            self.aux_output_connector.update_kv_cache_events(events)
+
         # publish collected KV cache events
         if events:
             batch = KVEventBatch(ts=time.time(), events=events)
@@ -2963,11 +2989,11 @@ class Scheduler(SchedulerInterface):
                 "which is not supported yet."
             )
 
-        if reset_connector:
-            reset_successful = self.reset_connector_cache() and reset_successful
-
         if reset_successful and self.aux_output_connector is not None:
             self.aux_output_connector.reset()
+
+        if reset_connector:
+            reset_successful = self.reset_connector_cache() and reset_successful
 
         return reset_successful
 
@@ -2986,6 +3012,8 @@ class Scheduler(SchedulerInterface):
 
         if self.connector.reset_cache() is False:
             return False
+        if self.aux_output_connector is not None:
+            self.aux_output_connector.reset_connector_cache()
 
         if self.log_stats:
             assert self.connector_prefix_cache_stats is not None

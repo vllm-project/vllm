@@ -1232,6 +1232,18 @@ def test_divergent_local_hybrid_hit_capability_is_conservative():
     assert mixed.supports_divergent_local_hybrid_hits is False
 
 
+@pytest.mark.parametrize(
+    "alignments,expected",
+    [((16, 16), 16), ((16, 256), 256), ((1, None), None)],
+    ids=["same", "least-common-multiple", "whole-hits-only"],
+)
+def test_external_load_alignment_fits_every_connector(
+    mc: MultiConnector, alignments, expected
+):
+    mc._connectors = [MagicMock(external_load_alignment=a) for a in alignments]
+    assert mc.external_load_alignment == expected
+
+
 @pytest.mark.skipif(
     not torch.cuda.is_available(), reason="Requires GPU to instantiate LLM"
 )

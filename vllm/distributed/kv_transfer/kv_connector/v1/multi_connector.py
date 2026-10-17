@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
+import math
 from collections.abc import Callable, Iterable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
@@ -215,6 +216,15 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         return bool(self._connectors) and all(
             c.supports_divergent_local_hybrid_hits for c in self._connectors
         )
+
+    @property
+    def external_load_alignment(self) -> int | None:
+        lcm = 1
+        for c in self._connectors:
+            if (alignment := c.external_load_alignment) is None:
+                return None
+            lcm = math.lcm(lcm, alignment)
+        return lcm
 
     @property
     def requires_kv_delivery(self) -> bool:

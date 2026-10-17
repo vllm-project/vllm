@@ -121,7 +121,9 @@ class AuxOutputWorkerConnector:
         block_nbytes = hash_block_size * int(np.prod(shape_per_token)) * dtype.itemsize
         max_bytes = vllm_config.aux_output_config.max_bytes
         if max_bytes is None:
-            max_bytes = kv_cache_config.num_blocks * hashes_per_kv_block * block_nbytes
+            # Blocks the GPU caches, and as many retained after leaving it.
+            num_blocks = 2 * kv_cache_config.num_blocks
+            max_bytes = num_blocks * hashes_per_kv_block * block_nbytes
         self._store = BackgroundBlockObjectStore(
             BlockObjectStore(max_bytes=max_bytes, object_nbytes=block_nbytes),
             max_pending_batches=2 * vllm_config.scheduler_config.max_num_seqs,
@@ -346,7 +348,12 @@ class AuxOutputWorkerConnector:
             "auxiliary output metadata generation moved backwards"
         )
         with self._lock:
-            release_keys: list[str] = []
+            # KV cache blocks are retained and released in the sending generation.
+            namespace = str(self._generation)
+            hashes = metadata.retained_block_hashes or ()
+            retained_keys = routed_experts_keys(hashes, namespace)
+            hashes = metadata.released_block_hashes or ()
+            release_keys = routed_experts_keys(hashes, namespace)
             if metadata.generation > self._generation:
                 # A generation change follows a prefix-cache reset, which the
                 # scheduler only performs once all model output is consumed.
@@ -374,7 +381,6 @@ class AuxOutputWorkerConnector:
             block_batches: list[
                 tuple[_WorkerRequestState, list[tuple[int, np.ndarray]]]
             ] = []
-            retained_keys: list[str] = []
             for request_id, block_hashes in metadata.block_hashes.items():
                 state = self._requests[request_id]
                 keys = routed_experts_keys(block_hashes, str(self._generation))
