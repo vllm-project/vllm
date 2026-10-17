@@ -548,11 +548,8 @@ def _requested_kernel_cls(
         raise ValueError(
             _make_log_unsupported(
                 backend,
-                "expert LoRA is not supported with MXFP8 activations: the "
-                "down-projection delta is computed from the post-activation "
-                "FC1 output, which the kernel returns quantized (uint8) without "
-                "its block scales. Use the BF16-activation variant "
-                "(moe_backend='flashinfer_trtllm')",
+                "expert LoRA is not supported with MXFP8 activations; use "
+                "moe_backend='flashinfer_trtllm'",
             )
         )
     from vllm.model_executor.layers.fused_moe.experts.trtllm_lora_moe import (
