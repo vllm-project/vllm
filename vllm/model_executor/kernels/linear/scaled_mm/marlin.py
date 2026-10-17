@@ -46,6 +46,15 @@ class MarlinFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
 
     @classmethod
     def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
+        group_shape = c.weight_quant_key.scale.group_shape
+
+        # If using block quanitzation for weights, only [128,128] is supported.
+        if group_shape.row > 0 and group_shape.col > 0:
+            if c.weight_quant_key == kFp8Static128BlockSym:
+                return True, None
+            else:
+                return False, f"Unsupported weight group shape: {group_shape}."
+
         return True, None
 
     def __init__(
