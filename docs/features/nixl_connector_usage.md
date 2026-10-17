@@ -322,6 +322,43 @@ python benchmarks/multi_turn/benchmark_serving_multi_turn.py \
 
     We currently assume the router is able to detect such mismatch across turns. See [#43094](https://github.com/vllm-project/vllm/issues/43094). 
 
+## Troubleshooting
+
+### Authentication must live on the router, not the P/D backends
+
+When the P and D instances are fronted by a request-splitting router (e.g.
+`vllm-router --vllm-pd-disaggregation`), do **not** set `--api-key` on the
+backend instances. The router issues the second-stage (decode) request
+itself, and that internal request does not carry the client's
+`Authorization` header — a backend with `--api-key` rejects it with `401
+Unauthorized`, and every request fails even though direct calls to each
+backend succeed. Configure `--api-key` on the router only, and leave the
+backends unauthenticated on their internal network.
+
+### Cross-host handshake fails with an engine-ID mismatch
+
+If the prefiller does not set `VLLM_NIXL_SIDE_CHANNEL_HOST`, it advertises
+the default (`localhost`) as its handshake address. The decoder then
+connects to **itself** instead of the prefiller, and the request fails
+with:
+
+```
+RuntimeError: Remote NIXL agent engine ID mismatch. Expected <prefiller id>, received <decoder id>
+```
+
+(the request may even appear to succeed via the decoder's recompute
+fallback — check the decoder log for the handshake error). The fix is to
+set `VLLM_NIXL_SIDE_CHANNEL_HOST` to an address reachable from the decoder
+on the **prefiller**:
+
+```bash
+VLLM_NIXL_SIDE_CHANNEL_HOST=<prefiller-reachable-ip> vllm serve ... # prefiller only
+```
+
+A quick way to tell the loopback case apart: the "received" engine ID in
+the error equals the decoder's own engine ID (printed in its log at
+startup, `Creating v1 connector ... engine_id: ...`).
+
 ## Multi-Instance Setup
 
 ### Multiple Prefiller Instances on Different Machines
