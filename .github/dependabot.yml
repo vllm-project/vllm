@@ -1,30 +1,52 @@
 version: 2
 updates:
-  # Maintain dependencies for GitHub Actions
+  # One weekly PR for every GitHub Actions bump.
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
-  - package-ecosystem: "pip"
-    directory: "/"
+    labels: ["dependencies"]
+    open-pull-requests-limit: 1
+    groups:
+      github-actions:
+        patterns: ["*"]
+
+  # One weekly PR for crates.io updates in the rust/ workspace.
+  # llm-multimodal is pinned to a git rev. openai-harmony is the manifest
+  # name of oss-harmony, pinned to tag v0.0.11 so it stays aligned with
+  # requirements/common.txt.
+  - package-ecosystem: "cargo"
+    directory: "/rust"
     schedule:
       interval: "weekly"
     labels: ["dependencies"]
-    open-pull-requests-limit: 5
-    reviewers: ["khluu", "simon-mo"]
-    allow:
-      - dependency-type: "all"
+    open-pull-requests-limit: 2
+    reviewers: ["BugenZhao", "njhill"]
     ignore:
-      - dependency-name: "*"
-        update-types: ["version-update:semver-patch"]
-      - dependency-name: "torch"
-      - dependency-name: "torchvision"
-      - dependency-name: "xformers"
-      - dependency-name: "lm-format-enforcer"
-      - dependency-name: "compressed-tensors"
-      - dependency-name: "ray[cgraph]" # Ray Compiled Graph
-      - dependency-name: "lm-eval"
+      - dependency-name: "llm-multimodal"
+      - dependency-name: "openai-harmony"
+      - dependency-name: "oss-harmony"
     groups:
-      minor-update:
-        applies-to: version-updates
-        update-types: ["minor"]
+      rust:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+
+# No pip or uv job. Dependabot edits requirement lines in place, or reruns
+# `uv pip compile` without -c, --torch-backend, --python-platform,
+# --index-strategy, and --no-emit-package. requirements/test/{cuda,cpu,rocm,xpu}.txt
+# and requirements/docs.txt need those flags. The refresh workflow reruns the
+# pre-commit commands instead and uploads a patch for a manually opened PR.
+# Its separate publish job remains disabled until explicitly enabled.
+#
+# Source pins stay human-managed. Do not point Dependabot at requirements/
+# or pyproject.toml:
+# - setuptools: <80 on ROCm and ROCK (80+ breaks ROCm builds); <81 elsewhere
+#   (83.x for GHSA-h35f-9h28-mq5c is deferred); ==78.1.1 on CPU (CMake build
+#   dir reuse and GHSA-5rjg-fvgr-3xxf); ==78.1.0 on TPU.
+# - Torch stacks, and CUDA kernel pins that move with them (flashinfer,
+#   cutlass, quack, humming, tilelang, apache-tvm-ffi).
+# - requirements/common.txt contracts: fastapi<0.137, llguidance<1.8,
+#   lm-format-enforcer, outlines_core, lark, xgrammar, compressed-tensors,
+#   depyf, mcp<3, model-hosting-container-standards<1, protobuf exclusions.
+# - Exact test pins, including transformers, numba, grpcio, ray, datasets<=3.6,
+#   and the ROCm/XPU pins in requirements/test/*.in.
