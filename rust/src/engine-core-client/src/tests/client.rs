@@ -1355,6 +1355,93 @@ async fn dropping_multiple_live_streams_aborts_all_in_a_burst() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn blocked_auto_abort_does_not_delay_another_engine() {
+    init_tracing();
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+    let (add_0_tx, add_0_rx) = oneshot::channel();
+    let (abort_0_tx, abort_0_rx) = oneshot::channel();
+    let (add_1_tx, add_1_rx) = oneshot::channel();
+    let (abort_1_tx, mut abort_1_rx) = oneshot::channel();
+
+    let (shutdown_tx_0, engine_task_0) = spawn_mock_engine_task(
+        handshake_address.clone(),
+        EngineId::from_engine_index(0).into_frame().to_vec(),
+        |dealer, _push| {
+            Box::pin(async move {
+                let add = recv_engine_message(dealer).await;
+                assert_eq!(add[0].as_ref(), &[0x00]);
+                let _ = add_0_tx.send(());
+
+                let abort = recv_engine_message(dealer).await;
+                assert_eq!(abort[0].as_ref(), &[0x01]);
+                let aborted_ids: Vec<String> = rmp_serde::from_slice(&abort[1]).unwrap();
+                assert_eq!(aborted_ids, vec!["req-0".to_string()]);
+                let _ = abort_0_tx.send(());
+            })
+        },
+    );
+    let (shutdown_tx_1, engine_task_1) = spawn_mock_engine_task(
+        handshake_address.clone(),
+        EngineId::from_engine_index(1).into_frame().to_vec(),
+        |dealer, _push| {
+            Box::pin(async move {
+                let add = recv_engine_message(dealer).await;
+                assert_eq!(add[0].as_ref(), &[0x00]);
+                let _ = add_1_tx.send(());
+
+                let abort = recv_engine_message(dealer).await;
+                assert_eq!(abort[0].as_ref(), &[0x01]);
+                let aborted_ids: Vec<String> = rmp_serde::from_slice(&abort[1]).unwrap();
+                assert_eq!(aborted_ids, vec!["req-1".to_string()]);
+                let _ = abort_1_tx.send(());
+            })
+        },
+    );
+
+    let client = connect_client_with_ipc(
+        handshake_test_config(
+            handshake_address,
+            2,
+            "test-model",
+            Duration::from_secs(2),
+            0,
+            None,
+        ),
+        &ipc,
+    )
+    .await;
+    let stream_0 = client.call(sample_request_with_id("req-0")).await.unwrap();
+    let stream_1 = client.call(sample_request_with_id("req-1")).await.unwrap();
+    timeout(Duration::from_secs(1), add_0_rx).await.unwrap().unwrap();
+    timeout(Duration::from_secs(1), add_1_rx).await.unwrap().unwrap();
+
+    let gate = client.install_abort_send_gate(EngineId::from_engine_index(0));
+    drop(stream_0);
+    timeout(Duration::from_secs(1), gate.wait_until_blocked()).await.unwrap();
+
+    drop(stream_1);
+    let healthy_abort_completed = timeout(Duration::from_secs(1), &mut abort_1_rx).await.is_ok();
+
+    gate.release().await;
+    timeout(Duration::from_secs(1), abort_0_rx).await.unwrap().unwrap();
+    if !healthy_abort_completed {
+        timeout(Duration::from_secs(1), &mut abort_1_rx).await.unwrap().unwrap();
+    }
+
+    let _ = shutdown_tx_0.send(());
+    let _ = shutdown_tx_1.send(());
+    engine_task_0.await.unwrap();
+    engine_task_1.await.unwrap();
+    client.shutdown().await.unwrap();
+
+    assert!(
+        healthy_abort_completed,
+        "engine 1 abort waited for engine 0"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dispatcher_failure_propagates_to_streams_and_future_calls() {
     init_tracing();
     let ipc = IpcNamespace::new().unwrap();
