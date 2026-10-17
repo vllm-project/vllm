@@ -69,6 +69,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     create_fp8_quant_key,
 )
+from vllm.model_executor.utils import is_weights_pre_processed
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -1252,17 +1253,36 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
         """Override the default vLLM placeholder scales with the llm-compressor loaded
         scales. Zero points are not used as only symmetric quantization is supported.
         """
-        # Buffers (not Parameters) so sleep snapshots them; ATTN_HEAD changes shape.
-        layer.register_buffer("_k_scale", layer.k_scale.detach())
-        layer.register_buffer("_v_scale", layer.v_scale.detach())
-        layer.register_buffer("_q_scale", layer.q_scale.detach())
-
         # Set the _float variants that the attention backend uses.
         def _to_scalar(tensor: torch.Tensor) -> float:
             # For n_scales > 1 (e.g., ATTN_HEAD strategy), take max
             if tensor.numel() > 1:
                 return tensor.max().item()
             return tensor.item()
+
+        if is_weights_pre_processed() or not hasattr(layer, "q_scale"):
+            for name in (
+                "k_scale",
+                "v_scale",
+                "q_scale",
+                "k_zero_point",
+                "v_zero_point",
+                "q_zero_point",
+            ):
+                if hasattr(layer, name):
+                    delattr(layer, name)
+            if hasattr(layer, "_k_scale"):
+                layer._k_scale_float = _to_scalar(layer._k_scale)
+                layer._v_scale_float = _to_scalar(layer._v_scale)
+                layer._q_scale_float = _to_scalar(layer._q_scale)
+                layer._k_scale_cpu.fill_(layer._k_scale_float)
+                layer._v_scale_cpu.fill_(layer._v_scale_float)
+            return
+
+        # Buffers (not Parameters) so sleep snapshots them; ATTN_HEAD changes shape.
+        layer.register_buffer("_k_scale", layer.k_scale.detach())
+        layer.register_buffer("_v_scale", layer.v_scale.detach())
+        layer.register_buffer("_q_scale", layer.q_scale.detach())
 
         layer._k_scale_float = _to_scalar(layer.k_scale)
         layer._v_scale_float = _to_scalar(layer.v_scale)

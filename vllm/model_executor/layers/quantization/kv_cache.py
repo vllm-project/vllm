@@ -74,7 +74,7 @@ class BaseKVCacheMethod(QuantizeMethodBase):
         raise RuntimeError(f"{self.__class__.__name__}.apply should not be called.")
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        if is_weights_pre_processed():
+        if is_weights_pre_processed() or not hasattr(layer, "q_scale"):
             # Scale buffers were exported with post-processed values; drop the
             # consumed scale placeholders and rebuild the host-side copies.
             for name in ("k_scale", "v_scale", "q_scale", "prob_scale"):
@@ -84,15 +84,10 @@ class BaseKVCacheMethod(QuantizeMethodBase):
                 layer._k_scale_float = layer._k_scale.item()
                 layer._v_scale_float = layer._v_scale.item()
                 layer._q_scale_float = layer._q_scale.item()
+                if hasattr(layer, "_prob_scale") and layer._prob_scale.numel() == 1:
+                    layer._prob_scale_float = layer._prob_scale.item()
                 layer._k_scale_cpu = layer._k_scale.detach().to("cpu")
                 layer._v_scale_cpu = layer._v_scale.detach().to("cpu")
-            return
-
-        # skip if there are no weights to process (for example, weight reloading)
-        if not hasattr(layer, "q_scale"):
-            assert not hasattr(layer, "k_scale")
-            assert not hasattr(layer, "v_scale")
-            assert not hasattr(layer, "prob_scale")
             return
 
         # Per-token-head quantized KV cache: scales are computed dynamically
