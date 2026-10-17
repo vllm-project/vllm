@@ -93,6 +93,19 @@ def test_disk_mode_rejects_non_positive_capacity() -> None:
         )
 
 
+def test_joint_lookup_leaves_private_host_pools_on_existing_path() -> None:
+    """Host-resident HiSparse blocks must not be interpreted as GPU hits."""
+    from tests.v1.core.test_prefix_caching import make_hisparse_kv_cache_manager
+    from tests.v1.simple_kv_offload.test_scheduler import make_request
+
+    connector = _make_connector()
+    manager = make_hisparse_kv_cache_manager(16, 16)
+    connector.bind_kv_cache_manager(manager)
+
+    assert connector.get_joint_cache_hit(make_request(), manager.coordinator) is None
+    assert not connector.scheduler_manager._pending_joint_hits
+
+
 def _make_ring_kv_cache_config(num_blocks: int = 16) -> KVCacheConfig:
     """A paged full-attention group beside a per-request ring group."""
     full = FullAttentionSpec(
