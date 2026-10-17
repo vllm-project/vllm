@@ -357,6 +357,10 @@ class LLBf16SplitK:
             consumer_group=consumer_group,
         )
 
+        # Peer CTAs must be running before the epilogue's DSMEM stores.
+        cute.arch.cluster_arrive_relaxed()
+        cute.arch.cluster_wait()
+
         # Round-robin split-K: split z handles tiles z, z+split_k, ...
         K_total = cute.size(mA, mode=[1])
         k_tile_count = cute.size(gA, mode=[2])
