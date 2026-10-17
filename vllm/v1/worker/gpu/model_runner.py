@@ -1677,12 +1677,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 local_batch=input_batch,
                 gather_num_nans=self.sampler.compute_nans,
                 logprobs_dims=self.sampler.get_logprobs_dims(
-                    global_input_batch.idx_mapping_np,
-                    # Rejection sampler does not return logprob token ids.
-                    include_token_ids=(
-                        global_input_batch.num_draft_tokens == 0
-                        or self.rejection_sampler is None
-                    ),
+                    global_input_batch.idx_mapping_np
                 ),
             )
 
