@@ -1,0 +1,132 @@
+meta:
+  title: "Hunyuan-A13B-Instruct"
+  slug: "hunyuan-a13b-instruct"
+  provider: "Hunyuan (Tencent)"
+  description: "Tencent Hunyuan A13B instruct-tuned MoE language model with AITER-accelerated AMD ROCm deployment"
+  date_added: 2026-04-11
+  date_updated: 2026-09-10
+  tasks:
+    - text
+  performance_headline: "Hunyuan-A13B MoE with AITER acceleration on AMD MI300X/MI325X/MI355X"
+  related_recipes: []
+  hardware:
+    mi300x: verified
+    mi325x: verified
+    mi355x: verified
+
+model:
+  model_id: "tencent/Hunyuan-A13B-Instruct"
+  min_vllm_version: "0.11.0"
+  architecture: moe
+  parameter_count: "80B"
+  active_parameters: "13B"
+  context_length: 32768
+  base_args:
+    - "--trust-remote-code"
+  base_env: {}
+
+features:
+  long_context:
+    description: "Raise the context window from the config's default 32,768 to the model's full 262,144 tokens. The 32K cap in config.json exists to avoid OOM on smaller nodes, so enable this only with enough KV-cache headroom."
+    args:
+      - "--max-model-len"
+      - "262144"
+    env:
+      VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
+
+opt_in_features:
+  - long_context
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 580
+    description: "Full precision BF16 — 2x GPU (TP=2) on AMD MI300X/MI325X/MI355X"
+  fp8:
+    model_id: "tencent/Hunyuan-A13B-Instruct-FP8"
+    precision: fp8
+    vram_minimum_gb: 96
+    description: "FP8 quantized weights for Hopper/Blackwell GPUs"
+    extra_args:
+      - "--kv-cache-dtype"
+      - "fp8"
+
+compatible_strategies:
+  - single_node_tp
+  - single_node_tep
+  - multi_node_tp
+  - multi_node_tep
+  - multi_node_dep
+
+kv_offload_support:
+  offloading_cpu: verified
+  offloading_fs: verified
+
+hardware_overrides:
+  amd:
+    # Hunyuan-A13B is an AMD-first recipe; AITER acceleration required.
+    extra_args: []
+    extra_env:
+      VLLM_ROCM_USE_AITER: "1"
+
+strategy_overrides: {}
+
+guide: |
+  ## Overview
+
+  Hunyuan-A13B-Instruct is Tencent's instruct-tuned Hunyuan MoE model. This recipe
+  covers deployment on AMD ROCm GPUs (MI300X / MI325X / MI355X) with
+  [AITER](https://github.com/ROCm/aiter) acceleration enabled via
+  `VLLM_ROCM_USE_AITER=1`.
+
+  ## Prerequisites
+
+  - **vLLM version:** ROCm build
+  - **Python:** 3.12
+  - **Hardware:** AMD MI300X / MI325X / MI355X
+  - **ROCm:** 7.0+, glibc >= 2.35 (or use Docker)
+
+  ### Install vLLM (ROCm)
+
+  ```bash
+  uv venv
+  source .venv/bin/activate
+  uv pip install vllm --extra-index-url https://wheels.vllm.ai/rocm/
+  ```
+
+  If the environment does not meet the Python/ROCm/glibc requirements, use the
+  Docker-based setup from the vLLM install docs.
+
+  ## Launching the Server
+
+  ```bash
+  export VLLM_ROCM_USE_AITER=1
+  vllm serve tencent/Hunyuan-A13B-Instruct \
+      --tensor-parallel-size 2 \
+      --trust-remote-code
+  ```
+
+  ## Benchmarking
+
+  ```bash
+  vllm bench serve \
+    --model "tencent/Hunyuan-A13B-Instruct" \
+    --dataset-name random \
+    --random-input-len 8000 \
+    --random-output-len 1000 \
+    --request-rate 10000 \
+    --num-prompts 16 \
+    --ignore-eos
+  ```
+
+  ## Troubleshooting
+
+  - **First launch delay:** AITER JIT-compiles optimized kernels on first launch, which
+    can take several minutes. Subsequent runs use cached kernels.
+  - **Environment mismatch:** If wheel install fails, fall back to the vLLM ROCm Docker image.
+
+  ## References
+
+  - [Model card](https://huggingface.co/tencent/Hunyuan-A13B-Instruct)
+  - [AITER](https://github.com/ROCm/aiter)
+  - [vLLM install docs](https://docs.vllm.ai/en/latest/getting_started/installation/gpu/)

@@ -1,0 +1,4 @@
+# Recipe source manifest, read by the vllm-project/recipes renderer
+# (scripts/assemble-content.mjs). Its sources.yaml grants this directory's
+# role and scope; this file only declares the schema the recipes target.
+schema_version: 1
