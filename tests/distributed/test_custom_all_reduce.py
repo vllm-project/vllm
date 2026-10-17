@@ -345,22 +345,17 @@ def test_mnnvl_multimem_reduce_scatter_platform_gate(
 
 
 @pytest.mark.parametrize(
-    (
-        "message_bytes",
-        "multimem_ptr",
-        "multimem_initialized",
-        "batch_invariant",
-        "expected",
-    ),
+    ("message_bytes", "multimem_ptr", "batch_invariant", "expected"),
     [
-        (16 * 1024 * 1024, 1, True, False, "mnnvl_lamport"),
-        (16 * 1024 * 1024 + 128, 1, True, False, "mnnvl_multimem"),
-        (64 * 1024 * 1024, 1, True, False, "mnnvl_multimem"),
-        (64 * 1024 * 1024 + 128, 1, True, False, None),
-        (32 * 1024 * 1024, 0, True, False, None),
-        (32 * 1024 * 1024, 0, False, False, "mnnvl_multimem"),
-        (8 * 1024 * 1024, 1, True, True, "mnnvl_lamport"),
-        (32 * 1024 * 1024, 1, True, True, None),
+        (16 * 1024 * 1024, 1, False, "mnnvl_lamport"),
+        (16 * 1024 * 1024 + 128, 1, False, "mnnvl_multimem"),
+        (64 * 1024 * 1024, 1, False, "mnnvl_multimem"),
+        (64 * 1024 * 1024 + 128, 1, False, None),
+        # Without a mapped multicast buffer the multimem backend is never
+        # selected: the buffer is created at construction, not on first use.
+        (32 * 1024 * 1024, 0, False, None),
+        (8 * 1024 * 1024, 1, True, "mnnvl_lamport"),
+        (32 * 1024 * 1024, 1, True, None),
     ],
 )
 @pytest.mark.parametrize("world_size", [2, 4, 8])
@@ -369,7 +364,6 @@ def test_mnnvl_reduce_scatter_backend_gate(
     world_size,
     message_bytes,
     multimem_ptr,
-    multimem_initialized,
     batch_invariant,
     expected,
 ):
@@ -382,8 +376,6 @@ def test_mnnvl_reduce_scatter_backend_gate(
     communicator.mnnvl_only = False
     communicator.fully_connected = True
     communicator.mnnvl_multicast_ptr = 1
-    communicator.mnnvl_multimem_rs_supported = True
-    communicator.mnnvl_multimem_rs_initialized = multimem_initialized
     communicator.mnnvl_multimem_rs_multicast_ptr = multimem_ptr
     communicator.max_mnnvl_reduce_scatter_size = 16 * 1024 * 1024
     communicator.max_mnnvl_multimem_reduce_scatter_size = 64 * 1024 * 1024
@@ -399,6 +391,48 @@ def test_mnnvl_reduce_scatter_backend_gate(
     assert communicator.should_mnnvl_multimem_reduce_scatter(inp) is (
         expected == "mnnvl_multimem"
     )
+
+
+@pytest.mark.parametrize(
+    ("message_bytes", "expected"),
+    [
+        # The multimem window is empty (multimem ceiling <= the Lamport
+        # ceiling, e.g. VLLM_MNNVL_MULTIMEM_RS_MAX_BYTES <= 16 MiB): messages
+        # below the Lamport ceiling still use it, everything above falls
+        # through to NCCL, and the multimem backend is never selected even
+        # though its buffer is mapped.
+        (16 * 1024 * 1024, "mnnvl_lamport"),
+        (16 * 1024 * 1024 + 128, None),
+        (32 * 1024 * 1024, None),
+        (64 * 1024 * 1024 + 128, None),
+    ],
+)
+@pytest.mark.parametrize("world_size", [2, 4, 8])
+def test_mnnvl_multimem_window_disabled_gate(
+    monkeypatch,
+    world_size,
+    message_bytes,
+    expected,
+):
+    monkeypatch.setattr(car.current_platform, "is_cuda", lambda: True)
+    communicator = car.CustomAllreduce.__new__(car.CustomAllreduce)
+    communicator.disabled = False
+    communicator._ptr = 0
+    communicator.world_size = world_size
+    communicator.mnnvl_only = False
+    communicator.fully_connected = True
+    communicator.mnnvl_multicast_ptr = 1
+    communicator.mnnvl_multimem_rs_multicast_ptr = 1
+    communicator.max_mnnvl_reduce_scatter_size = 16 * 1024 * 1024
+    communicator.max_mnnvl_multimem_reduce_scatter_size = 8 * 1024 * 1024
+    communicator.max_reduce_scatter_size = 16 * 1024 * 1024
+    inp = torch.empty(
+        (world_size, message_bytes // torch.bfloat16.itemsize // world_size),
+        dtype=torch.bfloat16,
+    )
+
+    assert inp.nbytes == message_bytes
+    assert communicator._select_reduce_scatter_backend(inp) == expected
 
 
 def test_mnnvl_multimem_reduce_scatter_skips_rendezvous_after_peer_alloc_failure(
@@ -450,8 +484,10 @@ def test_mnnvl_multimem_reduce_scatter_skips_rendezvous_after_peer_alloc_failure
     assert communicator.mnnvl_multimem_rs_buffer is None
     assert communicator.mnnvl_multimem_rs_multicast_ptr == 0
     assert warnings == [
-        "MNNVL multimem reduce-scatter symmetric-memory allocation "
-        "failed on at least one rank; falling back to NCCL."
+        (
+            "MNNVL multimem reduce-scatter symmetric-memory allocation "
+            "failed on at least one rank; falling back to NCCL."
+        )
     ]
 
 
@@ -500,8 +536,10 @@ def test_mnnvl_multimem_reduce_scatter_warns_on_rendezvous_failure(monkeypatch):
     assert communicator.mnnvl_multimem_rs_buffer is None
     assert communicator.mnnvl_multimem_rs_multicast_ptr == 0
     assert warnings == [
-        "MNNVL multimem reduce-scatter symmetric-memory rendezvous "
-        "failed on at least one rank; falling back to NCCL."
+        (
+            "MNNVL multimem reduce-scatter symmetric-memory rendezvous "
+            "failed on at least one rank; falling back to NCCL."
+        )
     ]
 
 
