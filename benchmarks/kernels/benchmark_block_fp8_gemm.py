@@ -87,6 +87,10 @@ def build_w8a8_block_fp8_runner(M, N, K, block_size, device, kernel_type):
         module_name="build_w8a8_block_fp8_runner",
     )
 
+    assert type(linear_op) is kernel_type, (
+        f"Requested {kernel_type.__name__}, got {type(linear_op).__name__}"
+    )
+
     layer = torch.nn.Module()
     layer.weight = torch.nn.Parameter(B, requires_grad=False)
     layer.weight_scale_inv = torch.nn.Parameter(Bs, requires_grad=False)
