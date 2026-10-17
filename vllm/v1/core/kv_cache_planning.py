@@ -1230,7 +1230,7 @@ def _check_exact_partition(
     assert not missing, f"KV cache groups miss layers: {sorted(missing)}."
 
 
-def _layer_tp_replicas(spec: KVCacheSpec, tp_size: int, dcp_size: int) -> int:
+def layer_tp_replicas(spec: KVCacheSpec, tp_size: int, dcp_size: int) -> int:
     if not isinstance(spec, AttentionSpec) or spec.max_tp_shards is None:
         return 1
     if spec.dcp_sharded and dcp_size > 1:
@@ -1246,7 +1246,7 @@ def kv_cache_groups_tp_replicas(
     if not specs:
         return 1
     return reduce(
-        math.gcd, (_layer_tp_replicas(s, tp_size, dcp_size) for s in specs), tp_size
+        math.gcd, (layer_tp_replicas(s, tp_size, dcp_size) for s in specs), tp_size
     )
 
 

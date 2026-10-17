@@ -19,6 +19,7 @@ from vllm.utils.torch_utils import (
     get_kv_cache_torch_dtype,
 )
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
+from vllm.v1.kv_cache_interface import MambaStateSplit
 
 logger = init_logger(__name__)
 
@@ -302,6 +303,81 @@ class MambaStateShapeCalculator:
         return conv_state_shape, temporal_state_shape
 
     @classmethod
+    def _conv_split(cls, *segments: tuple[int, int]) -> MambaStateSplit:
+        return MambaStateSplit(0 if is_conv_state_dim_first() else 1, segments)
+
+    @classmethod
+    def linear_attention_state_splits(
+        cls, tp_size: int, num_heads: int
+    ) -> tuple[MambaStateSplit, ...] | None:
+        """How TP splits ``linear_attention_state_shape``'s state: by head."""
+        if num_heads % tp_size:
+            return None
+        return (MambaStateSplit(0, ((num_heads // tp_size, 1),)),)
+
+    @classmethod
+    def short_conv_state_splits(
+        cls, tp_world_size: int, intermediate_size: int
+    ) -> tuple[MambaStateSplit, ...] | None:
+        """How TP splits ``short_conv_state_shape``'s conv state: by channel."""
+        if intermediate_size % tp_world_size:
+            return None
+        return (cls._conv_split((intermediate_size // tp_world_size, 1)),)
+
+    @classmethod
+    def mamba1_state_splits(
+        cls, tp_world_size: int, intermediate_size: int
+    ) -> tuple[MambaStateSplit, ...] | None:
+        """How TP splits ``mamba1_state_shape``'s states: conv [x], and the
+        temporal state by channel."""
+        if intermediate_size % tp_world_size:
+            return None
+        channels = (intermediate_size // tp_world_size, 1)
+        return (cls._conv_split(channels), MambaStateSplit(0, (channels,)))
+
+    @classmethod
+    def mamba2_state_splits(
+        cls,
+        tp_world_size: int,
+        intermediate_size: int,
+        n_groups: int,
+        num_heads: int,
+        state_size: int,
+    ) -> tuple[MambaStateSplit, ...] | None:
+        """How TP splits ``mamba2_state_shape``'s states: conv [x, B, C], and
+        the temporal state by head. A single group that TP does not divide is
+        held whole by every rank (see ``extra_groups_for_head_shards``)."""
+        if intermediate_size % tp_world_size or num_heads % tp_world_size:
+            return None
+        if n_groups % tp_world_size == 0:
+            b_and_c = (n_groups * state_size // tp_world_size, 1)
+        elif n_groups == 1:
+            b_and_c = (state_size, tp_world_size)
+        else:
+            return None
+        x = (intermediate_size // tp_world_size, 1)
+        heads = (num_heads // tp_world_size, 1)
+        return (cls._conv_split(x, b_and_c, b_and_c), MambaStateSplit(0, (heads,)))
+
+    @classmethod
+    def gated_delta_net_state_splits(
+        cls,
+        tp_world_size: int,
+        num_k_heads: int,
+        num_v_heads: int,
+        head_k_dim: int,
+        head_v_dim: int,
+    ) -> tuple[MambaStateSplit, ...] | None:
+        """How TP splits ``gated_delta_net_state_shape``'s states: conv
+        [Q, K, V], and the temporal state by value head."""
+        if num_k_heads % tp_world_size or num_v_heads % tp_world_size:
+            return None
+        qk = (num_k_heads // tp_world_size * head_k_dim, 1)
+        v_heads = num_v_heads // tp_world_size
+        conv = cls._conv_split(qk, qk, (v_heads * head_v_dim, 1))
+        return (conv, MambaStateSplit(0, ((v_heads, 1),)))
+
+    @classmethod
     def kda_state_shape(
         cls,
         tp_world_size: int,
@@ -326,6 +402,25 @@ class MambaStateShapeCalculator:
         )
         recurrent_state_shape = (divide(num_heads, tp_world_size), head_dim, head_dim)
         return (conv_state_shape, recurrent_state_shape)
+
+    @classmethod
+    def kda_state_splits(
+        cls,
+        tp_world_size: int,
+        num_heads: int,
+        head_dim: int,
+        num_k_heads: int | None = None,
+        head_k_dim: int | None = None,
+    ) -> tuple[MambaStateSplit, ...] | None:
+        """How TP splits ``kda_state_shape``'s states: conv [Q, K, V], and the
+        recurrent state by head. The same layout as gated delta net's."""
+        return cls.gated_delta_net_state_splits(
+            tp_world_size,
+            num_heads if num_k_heads is None else num_k_heads,
+            num_heads,
+            head_dim if head_k_dim is None else head_k_dim,
+            head_dim,
+        )
 
     @classmethod
     def append_kda_recoverssm_record(

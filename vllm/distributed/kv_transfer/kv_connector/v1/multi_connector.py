@@ -380,6 +380,7 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
             child_results = connector.get_transfer_results(finished_req_ids)
             results.finished_recving.update(child_results.finished_recving)
             results.failed_recving.update(child_results.failed_recving)
+            results.kv_checksums.update(child_results.kv_checksums)
             for req_id in child_results.finished_sending:
                 extra_pending = self._extra_async_saves.get(req_id)
                 if extra_pending is None:

@@ -69,7 +69,12 @@ from vllm.utils.torch_utils import (
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadata
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
-from vllm.v1.kv_cache_interface import KVCacheGroupSpec, KVCacheSpec, MambaSpec
+from vllm.v1.kv_cache_interface import (
+    KVCacheGroupSpec,
+    KVCacheSpec,
+    MambaSpec,
+    MambaStateSplit,
+)
 
 logger = init_logger(__name__)
 
@@ -330,6 +335,8 @@ class MambaMixer2(MambaBase, PluggableLayer):
         self.num_heads = num_heads
 
         self.n_groups = n_groups
+        # n_groups before extra groups pad it to a multiple of the TP size.
+        self.model_n_groups = n_groups
         if n_groups % self.tp_size != 0:
             # - for TP we shard conv_dim by sharding on n_groups,
             # - but if n_groups cannot divide tp_size, we need to
@@ -1142,6 +1149,15 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 num_speculative_tokens=self.num_spec,
             )
         return base_shape
+
+    def get_state_splits(self) -> tuple[MambaStateSplit, ...] | None:
+        return MambaStateShapeCalculator.mamba2_state_splits(
+            tp_world_size=get_tensor_model_parallel_world_size(),
+            intermediate_size=self.intermediate_size,
+            n_groups=self.model_n_groups,
+            num_heads=self.num_heads,
+            state_size=self.ssm_state_size,
+        )
 
     @property
     def mamba_type(self) -> MambaAttentionBackendEnum:

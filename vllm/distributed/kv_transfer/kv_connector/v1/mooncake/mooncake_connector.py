@@ -655,6 +655,8 @@ class MooncakeXferResponse(
     # The pull's layout_id once P holds that layout. D omits the layout only
     # after seeing it, so a P that predates this field always gets it.
     layout_id: int = 0
+    # The producer's KV checksums of ok_reqs, by D request id.
+    kv_checksums: dict[ReqId, bytes] | None = None
 
 
 @dataclass
@@ -683,6 +685,7 @@ class SendBlockMeta:
     need_send: int = 0
     sent: int = 0
     sending: int = 0
+    kv_checksums: bytes | None = None
 
 
 class MooncakeConnectorMetadata(KVConnectorMetadata):
@@ -692,6 +695,8 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
         self.reqs_to_recv: dict[EngineId, dict[ReqId, PullReqMeta]] = defaultdict(dict)
         self.reqs_to_send: dict[ReqId, tuple[TransferId, list[list[int]]]] = {}
         self.reqs_not_processed: set[TransferId] = set()
+        # KV checksums of finished reqs_to_send, sent to D with their KV.
+        self.kv_checksums: dict[ReqId, bytes] = {}
 
     def add_new_req(
         self,
@@ -1144,6 +1149,8 @@ class MooncakeConnectorScheduler:
                     load_remote_cache=False,
                 )
             self._reqs_need_send.clear()
+            # Sent to D on the MooncakeXferResponse that reports the transfer.
+            meta.kv_checksums = scheduler_output.kv_checksums_to_send or {}
             meta.reqs_not_processed = self._reqs_not_processed
             self._reqs_not_processed = set()
 
@@ -1344,6 +1351,9 @@ class MooncakeConnectorWorker:
 
         self.finished_sending_reqs: set[ReqId] = set()
         self.finished_recving_reqs: set[ReqId] = set()
+        # D-side: producer KV checksums of loads, put by the receiver loop
+        # and reported by the next get_transfer_results.
+        self._received_kv_checksums: queue.Queue[tuple[ReqId, bytes]] = queue.Queue()
         # Written from the receiver loop, drained from the worker thread.
         self._invalid_block_ids: queue.Queue[set[int]] = queue.Queue()
         self._is_hma_required = len(kv_cache_config.kv_cache_groups) > 1
@@ -1758,6 +1768,12 @@ class MooncakeConnectorWorker:
                 err_reqs=err_reqs or None,
                 err_msg=err_msg,
                 layout_id=meta.layout_id,
+                kv_checksums={
+                    d_req_id: send_meta.kv_checksums
+                    for d_req_id, send_meta in ok_ready_reqs
+                    if send_meta.kv_checksums is not None
+                }
+                or None,
             )
             await sock.send_multipart((identity, self._encoder.encode(response)))
 
@@ -2373,6 +2389,11 @@ class MooncakeConnectorWorker:
         to track which workers are done.
         """
         finished_sending_reqs, finished_recving_reqs = self.get_finished()
+        kv_checksums: dict[ReqId, bytes] = {}
+        while not self._received_kv_checksums.empty():
+            req_id, checksums = self._received_kv_checksums.get_nowait()
+            # Every producer worker sending to this one sends the same.
+            kv_checksums[req_id] = checksums
 
         failed_recving_reqs: set[ReqId] = set()
         while True:
@@ -2385,6 +2406,7 @@ class MooncakeConnectorWorker:
             finished_sending=set(finished_sending_reqs or ()),
             finished_recving=set(finished_recving_reqs or ()),
             failed_recving=failed_recving_reqs,
+            kv_checksums=kv_checksums,
         )
 
     def get_kv_connector_stats(self) -> KVConnectorStats | None:
@@ -2520,10 +2542,13 @@ class MooncakeConnectorWorker:
     ):
         ok_reqs: list[ReqId] = response.ok_reqs or []
 
+        kv_checksums = response.kv_checksums or {}
         for req_id in ok_reqs:
             pull_meta = pull_metas[req_id]
             if pull_meta.failed:
                 continue
+            if (checksums := kv_checksums.get(req_id)) is not None:
+                self._received_kv_checksums.put((pull_meta.d_req_id, checksums))
             # No race because we are in async loop.
             pull_meta.pull_tasks_count -= 1
             # Empty pulls only release the producer's blocks; the consumer
@@ -2664,6 +2689,7 @@ class MooncakeConnectorWorker:
                 send_meta = self.reqs_need_send[transfer_id]
                 send_meta.p_req_id = p_req_id
                 send_meta.local_block_ids = block_ids
+                send_meta.kv_checksums = metadata.kv_checksums.get(p_req_id)
                 send_meta.expire_time = (
                     time.perf_counter() + envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT
                 )

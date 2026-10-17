@@ -96,6 +96,10 @@ class KVConnectorTransferResults:
     finished_sending: set[str] = field(default_factory=set)
     finished_recving: set[str] = field(default_factory=set)
     failed_recving: set[str] = field(default_factory=set)
+    kv_checksums: dict[str, bytes] = field(default_factory=dict)
+    """Producer KV checksums of loads, reported once on receipt (before or
+    with the load's ``finished_recving``), by connectors that carry them in
+    their own messages (see ``SchedulerOutput.kv_checksums_to_send``)."""
 
 
 class SupportsHMA(ABC):

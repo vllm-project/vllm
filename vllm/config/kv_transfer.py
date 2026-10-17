@@ -90,6 +90,17 @@ class KVTransferConfig:
     'recompute': reschedule the request to recompute failed blocks
     'fail': immediately fail the request with an error finish reason (default)"""
 
+    enable_kv_checksum: bool = False
+    """Checksum transferred KV blocks on the producer and verify them on the
+    consumer once loaded. Must be set on both sides. Applies to requests with
+    do_remote_decode (producer) or do_remote_prefill (consumer) in their
+    kv_transfer_params. The producer's checksums are added to the
+    kv_transfer_params it returns, so a proxy that builds the consumer's request
+    from them (e.g. for NIXL in pull mode) must forward them unchanged. A load
+    whose checksums mismatch or cannot be verified (e.g. without the
+    producer's checksums) is a KV load failure, handled per
+    kv_load_failure_policy, so enable KV checksums on producers first."""
+
     def compute_hash(self) -> str:
         """WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if

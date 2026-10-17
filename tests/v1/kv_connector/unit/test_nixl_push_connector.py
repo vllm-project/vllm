@@ -215,6 +215,7 @@ class TestPushScheduler:
         scheduler_output.scheduled_cached_reqs = MagicMock(
             req_ids=[], resumed_req_ids=set()
         )
+        scheduler_output.kv_checksums_to_send = None
 
         # Patch parent build_connector_meta so we don't have to set up
         # all the base scheduler plumbing.
@@ -231,6 +232,7 @@ class TestPushScheduler:
         # Staging dicts cleared.
         assert sched._push_pending_registrations == {}
         assert sched._newly_finished_push_blocks == {}
+        assert meta.push_finished_kv_checksums == {}
         # Lease bookkeeping kept until the WRITE completes.
         assert "req-p-9" in sched._finished_request_blocks
 
@@ -291,6 +293,26 @@ class TestPushScheduler:
         assert "req-p-x" not in sched._finished_request_blocks
         assert "req-d-x" not in sched._push_registration_deadlines
 
+    def test_kv_checksums_ship_with_finished_blocks(self):
+        """The KV checksums of requests finished since the last step ride the
+        same metadata as their finished blocks."""
+        sched = make_nixl_push_scheduler()
+        _stub_sw_clipping(sched)
+        request = _make_request(request_id="req-p-1", is_d_side=False)
+        sched.request_finished(request, ([4, 5, 6],))
+
+        with patch.object(
+            sched.__class__.__mro__[1],
+            "build_connector_meta",
+            return_value=NixlConnectorMetadata(),
+        ):
+            meta = sched.build_connector_meta(
+                MagicMock(kv_checksums_to_send={"req-p-1": b"checksums"})
+            )
+
+        assert meta.push_finished_blocks.keys() == {"req-p-1"}
+        assert meta.push_finished_kv_checksums == {"req-p-1": b"checksums"}
+
     def test_registration_watchdog_expires(self, caplog):
         """Stale D registrations whose deadline has passed are dropped at
         ``build_connector_meta`` time."""
@@ -350,6 +372,8 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         w._send_failures = set()
         w._sending_transfers_lock = threading.Lock()
         w._push_finished_blocks = {}
+        w._push_kv_checksums = {}
+        w._received_kv_checksums = {}
         w._pending_d_registrations = {}
         w._reg_send_inbox = queue.Queue()
         w._finished_blocks_inbox = queue.Queue()
@@ -642,12 +666,17 @@ class TestPushWriterStartLoadKv:
         meta.push_finished_blocks = {
             "req-E": ([5, 6, 7],),
         }
+        meta.push_finished_kv_checksums = {"req-E": b"checksums"}
 
         w.start_load_kv(meta)
 
         # Things are queued for the writer; nothing fires yet.
         assert w._reg_send_inbox.qsize() == 1
-        assert w._finished_blocks_inbox.qsize() == 1
+        assert w._finished_blocks_inbox.get_nowait() == (
+            "req-E",
+            ([5, 6, 7],),
+            b"checksums",
+        )
         assert w._push_writer_wake.is_set()
         assert w.start_push_calls == []
 
@@ -932,6 +961,31 @@ class TestPushWriterNotifs:
         w._get_new_notifs()
 
         assert request_id in w._recving_transfers
+
+    @pytest.mark.parametrize("with_checksums", [False, True])
+    def test_completion_notif_delivers_kv_checksums(self, with_checksums):
+        """P's WRITE completion notif carries the request's KV checksums when
+        the scheduler sent any; D reports them with the finished load."""
+        producer = _StubWriterWorker.fresh()
+        if with_checksums:
+            producer._push_kv_checksums["p-req"] = b"checksums"
+        notif = producer._completion_notif("p-req", "d:req")
+
+        consumer = _StubWriterWorker.fresh()
+        consumer._recving_metadata["d:req"] = MagicMock(pp_size=1)
+        consumer._pending_completion_notifs.put(notif)
+        consumer._get_new_notifs()
+        assert "d:req" in consumer._recving_transfers
+
+        with patch.object(
+            NixlPushConnectorWorker.__mro__[1],
+            "get_transfer_results",
+            return_value=KVConnectorTransferResults(finished_recving={"d:req"}),
+        ):
+            results = consumer.get_transfer_results()
+        expected = {"d:req": b"checksums"} if with_checksums else {}
+        assert results.kv_checksums == expected
+        assert consumer._received_kv_checksums == {}
 
     def test_get_transfer_results_evicts_completed_state(self):
         """Transfer completion should enqueue evictions and wake the writer."""

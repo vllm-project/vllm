@@ -24,6 +24,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 
 if TYPE_CHECKING:
+    from vllm.distributed.kv_transfer.kv_checksum.checksum import KVChecksumRecord
     from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
 
 logger = init_logger(__name__)
@@ -102,6 +103,7 @@ class KVOutputAggregator:
         finished_recving = set[str]()
         aggregated_kv_connector_stats = None
         aggregated_kv_connector_worker_meta = None
+        aggregated_kv_checksums: list[KVChecksumRecord] = []
         combined_kv_cache_events = None
         invalid_block_ids = set[int]()
         for model_runner_output in outputs:
@@ -152,6 +154,9 @@ class KVOutputAggregator:
                     )
                 )
 
+            # Merge kv_checksums from all workers.
+            aggregated_kv_checksums.extend(kv_output.kv_checksums or ())
+
             # Combine kv_cache_events from all workers.
             if combined_kv_cache_events is None:
                 # Use the first worker's kv_cache events as start event list.
@@ -184,6 +189,7 @@ class KVOutputAggregator:
             invalid_block_ids=invalid_block_ids,
             failed_recving=failed_recving,
             expected_finished_count=self._expected_finished_count,
+            kv_checksums=aggregated_kv_checksums or None,
         )
 
         return output
