@@ -1,0 +1,133 @@
+group: Basic Correctness XPU
+depends_on:
+  - image-build-xpu
+steps:
+- label: ':nvidia: (H200 MIG 18GB) Basic Correctness Models %N'
+  key: basic-correctness
+  device: intel_gpu
+  timeout_in_minutes: 68
+  parallelism: 2
+  optional: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
+  _raw_old_commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -v -s basic_correctness/models --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+  source_file_dependencies: &basic-correctness-deps
+  - vllm/
+  - '!vllm/distributed/kv_transfer/'
+  - tests/basic_correctness/
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'export VLLM_WORKER_MULTIPROC_METHOD=spawn || true &&
+    cd tests &&
+    pytest -v -s basic_correctness/models --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB || true'
+- label: ':nvidia: (H200 MIG 18GB) Basic Correctness CuMem'
+  key: basic-correctness-cumem
+  device: intel_gpu
+  timeout_in_minutes: 68
+  optional: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
+  _raw_old_commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -v -s basic_correctness/memory/cumem
+  source_file_dependencies: *basic-correctness-deps
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'export VLLM_WORKER_MULTIPROC_METHOD=spawn || true &&
+    cd tests &&
+    pytest -v -s basic_correctness/memory/cumem || true'
+- label: ':nvidia: (H200 MIG 18GB) Basic Correctness Sleep Mode'
+  key: basic-correctness-sleep-mode
+  device: intel_gpu
+  timeout_in_minutes: 68
+  optional: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
+  _raw_old_commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -v -s basic_correctness/memory/sleep_mode
+  source_file_dependencies: *basic-correctness-deps
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'export VLLM_WORKER_MULTIPROC_METHOD=spawn || true &&
+    cd tests &&
+    pytest -v -s basic_correctness/memory/sleep_mode || true'
+- label: ':nvidia: (H200 MIG 18GB) Basic Correctness CPU Offload'
+  key: basic-correctness-cpu-offload
+  device: intel_gpu
+  timeout_in_minutes: 68
+  optional: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
+  _raw_old_commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -v -s basic_correctness/cpu_offload
+  source_file_dependencies: *basic-correctness-deps
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'export VLLM_WORKER_MULTIPROC_METHOD=spawn || true &&
+    cd tests &&
+    pytest -v -s basic_correctness/cpu_offload || true'
+- label: ':nvidia: (H200 MIG 18GB) Basic Correctness Prefetch Offload'
+  key: basic-correctness-prefetch-offload
+  device: intel_gpu
+  timeout_in_minutes: 68
+  optional: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
+  _raw_old_commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -v -s basic_correctness/prefetch_offload
+  source_file_dependencies: *basic-correctness-deps
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'export VLLM_WORKER_MULTIPROC_METHOD=spawn || true &&
+    cd tests &&
+    pytest -v -s basic_correctness/prefetch_offload || true'
