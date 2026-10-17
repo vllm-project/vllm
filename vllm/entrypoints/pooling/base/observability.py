@@ -24,6 +24,14 @@ class _ObservabilityMixin:
     vllm_config: VllmConfig
     renderer: BaseRenderer
 
+    scope_request: str = "request"
+    span_request = "request"
+
+    scope_entrypoint: str = "entrypoint"
+    span_entrypoint_preprocessing = "preprocessing"
+    span_entrypoint_engine_call = "engine_call"
+    span_entrypoint_postprocessing = "postprocessing"
+
     def __init__(self):
         observability_config = self.vllm_config.observability_config
         self.is_tracing_request = observability_config.is_tracing_enabled
@@ -90,17 +98,6 @@ if _IS_OTEL_AVAILABLE:
     from vllm.tracing.otel import init_otel_trace_provider
 
     class _ObservabilityMixinWithOpenTelemetry(_ObservabilityMixin):
-        vllm_config: VllmConfig
-        renderer: BaseRenderer
-
-        scope_request: str = "request"
-        span_request = "request"
-
-        scope_entrypoint: str = "entrypoint"
-        span_entrypoint_preprocessing = "preprocessing"
-        span_entrypoint_engine_call = "engine_call"
-        span_entrypoint_postprocessing = "postprocessing"
-
         def __init__(self):
             super().__init__()
 
