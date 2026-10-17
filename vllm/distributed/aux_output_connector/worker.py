@@ -121,7 +121,9 @@ class AuxOutputWorkerConnector:
         block_nbytes = hash_block_size * int(np.prod(shape_per_token)) * dtype.itemsize
         max_bytes = vllm_config.aux_output_config.max_bytes
         if max_bytes is None:
-            max_bytes = kv_cache_config.num_blocks * hashes_per_kv_block * block_nbytes
+            # Blocks the GPU caches, and as many retained after leaving it.
+            num_blocks = 2 * kv_cache_config.num_blocks
+            max_bytes = num_blocks * hashes_per_kv_block * block_nbytes
         self._store = BackgroundBlockObjectStore(
             BlockObjectStore(max_bytes=max_bytes, object_nbytes=block_nbytes),
             max_pending_batches=2 * vllm_config.scheduler_config.max_num_seqs,

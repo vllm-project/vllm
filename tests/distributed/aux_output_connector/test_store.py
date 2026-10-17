@@ -67,8 +67,13 @@ def test_background_store_publishes_without_blocking_caller():
     underlying.close.assert_called_once_with()
 
 
-def _kv_cache_manager(cached: dict, hashes_per_block: int = 1) -> SimpleNamespace:
-    """A KV cache manager whose GPU prefix cache holds the keys of `cached`."""
+def _kv_cache_manager(
+    cached: dict, hashes_per_block: int = 1, num_blocks: int = 0
+) -> SimpleNamespace:
+    """A KV cache manager whose GPU prefix cache holds the keys of `cached`.
+
+    `num_blocks` bounds the retained blocks that no KV cache tier reports.
+    """
     block_pool = SimpleNamespace(
         get_cached_block=lambda block_hash, _: cached.get(block_hash),
         hash_block_size=_BLOCK_SIZE,
@@ -80,6 +85,7 @@ def _kv_cache_manager(cached: dict, hashes_per_block: int = 1) -> SimpleNamespac
     return SimpleNamespace(
         coordinator=SimpleNamespace(single_type_managers=[manager]),
         block_pool=block_pool,
+        kv_cache_config=SimpleNamespace(num_blocks=num_blocks),
     )
 
 
@@ -1908,9 +1914,9 @@ def _kv_cache_metadata(connector: AuxOutputSchedulerConnector):
     return list(retained or ()), list(released or ())
 
 
-def _finished_request_with_cached_blocks():
+def _finished_request_with_cached_blocks(num_blocks: int = 0):
     cached = {_HASHES[1]: [Mock()], _HASHES[3]: [Mock()]}
-    connector = AuxOutputSchedulerConnector(_kv_cache_manager(cached, 2))
+    connector = AuxOutputSchedulerConnector(_kv_cache_manager(cached, 2, num_blocks))
     request = _SchedulerRequest("request", list(_HASHES), 17, num_computed_tokens=16)
     connector.request_finished(request)
     assert _kv_cache_metadata(connector) == (_HASHES, [])
@@ -1987,3 +1993,18 @@ def test_worker_retains_kv_cache_blocks_in_the_sending_generation():
     step.metadata.released_block_hashes = PackedBlockHashes(_HASHES[1], 32)
     _begin_step(worker, step)
     assert not store._references
+
+
+def test_connector_keeps_evicted_blocks_until_the_lru_is_full():
+    # A KV connector without residency events may still hold evicted blocks.
+    cached, connector, request = _finished_request_with_cached_blocks(num_blocks=1)
+    del cached[_HASHES[3]]
+    connector.update_kv_cache_events([_kv_event(BlockRemoved, "GPU", _HASHES[3])])
+    assert _kv_cache_metadata(connector) == ([], [])
+    assert connector.max_cache_hit(request) == 16
+
+    # A second evicted block releases the oldest one.
+    del cached[_HASHES[1]]
+    connector.update_kv_cache_events([_kv_event(BlockRemoved, "GPU", _HASHES[1])])
+    assert _kv_cache_metadata(connector) == ([], _HASHES[2:])
+    assert connector.max_cache_hit(request) == 8

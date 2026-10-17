@@ -187,16 +187,17 @@ def test_routed_experts_prompt_start_at_prompt_end(max_tokens):
 
 @pytest.mark.parametrize(
     "external_tokens,max_cache_hit,expected_hit",
-    [(0, 79, 64), (0, 16, 0), (32, 79, 32), (31, 79, 16), (32, 0, 32)],
+    [(0, 79, 64), (0, 16, 0), (32, 79, 32), (31, 79, 16), (32, 16, 16), (32, 0, 0)],
     ids=[
         "local",
         "local-dropped",
         "external",
         "external-unaligned",
-        "external-unretained",
+        "external-capped",
+        "none",
     ],
 )
-def test_prefix_hit_respects_auxiliary_output_capture(
+def test_prefix_hit_is_capped_at_retained_auxiliary_outputs(
     external_tokens, max_cache_hit, expected_hit
 ):
     scheduler = create_scheduler(
@@ -232,6 +233,8 @@ def test_evicted_blocks_release_their_auxiliary_outputs_in_the_evicting_step():
     scheduler.aux_output_connector = AuxOutputSchedulerConnector(
         scheduler.kv_cache_manager
     )
+    # No KV connector may hold evicted blocks: release them at once.
+    scheduler.aux_output_connector._max_unheld = 0
     first, second = create_requests(num_requests=2, num_tokens=64)
     scheduler.add_request(first)
     scheduler.schedule()

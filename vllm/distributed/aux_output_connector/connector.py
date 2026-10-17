@@ -79,6 +79,11 @@ class AuxOutputSchedulerConnector:
         self._cpu_cached: Counter[ExternalBlockHash] = Counter()
         # Blocks of pending async loads, retained until their request runs.
         self._loading: dict[str, set[ExternalBlockHash]] = {}
+        # Retained blocks no tier is known to hold, oldest first. A KV connector
+        # without residency events may still hold them, so the oldest are only
+        # released once there are more than KV cache blocks.
+        self._unheld: dict[ExternalBlockHash, None] = {}
+        self._max_unheld = kv_cache_manager.kv_cache_config.num_blocks
         self._retained_hashes: list[bytes] = []
         self._released_hashes: list[bytes] = []
 
@@ -164,12 +169,15 @@ class AuxOutputSchedulerConnector:
             return blocks, num_tokens
         return self._kv_cache_manager.empty_kv_cache_blocks, 0
 
-    def cap_external_hit(self, num_local: int, num_external: int) -> int:
-        """Align an external hit down to a block boundary, where capture resumes.
+    def cap_external_hit(
+        self, request: Request, num_local: int, num_external: int
+    ) -> int:
+        """Trim an external hit to the retained outputs.
 
-        A Mamba state exists only at the end of the load.
+        Capture resumes on a block boundary, and a Mamba state exists only at
+        the end of the load.
         """
-        num_hit = num_local + num_external
+        num_hit = min(num_local + num_external, self.max_cache_hit(request))
         num_hit -= num_hit % self._kv_cache_manager.coordinator.scheduler_block_size
         if num_external <= (max_external := max(num_hit - num_local, 0)):
             return num_external
@@ -183,10 +191,10 @@ class AuxOutputSchedulerConnector:
         """Keep an async load's blocks retained until its request is scheduled."""
         num_blocks = num_tokens // self._block_size
         blocks = islice(self._kv_blocks(request.block_hashes), num_blocks)
-        previous = self._loading.get(request.request_id, ())
-        self._loading[request.request_id] = {block for block, _ in blocks}
+        previous = self._loading.get(request.request_id, set())
+        self._loading[request.request_id] = loading = {block for block, _ in blocks}
         # A retried load may cover fewer blocks than the failed one.
-        for block in previous:
+        for block in previous | loading:
             self._release_uncached(block)
 
     def _end_loading(self, request_id: str) -> None:
@@ -206,24 +214,34 @@ class AuxOutputSchedulerConnector:
                     )
                     if self._cpu_cached[block] <= 0:
                         del self._cpu_cached[block]
+                        # The CPU tier evicted the block: release it now.
+                        self._release_uncached(block, now=True)
                 self._release_uncached(block)
 
     def reset_connector_cache(self) -> None:
         """Forget the CPU tier after the KV connector cleared it."""
         self._cpu_cached.clear()
         for block in list(self._kv_cached):
-            self._release_uncached(block)
+            self._release_uncached(block, now=True)
 
-    def _release_uncached(self, block: ExternalBlockHash) -> None:
+    def _release_uncached(self, block: ExternalBlockHash, now: bool = False) -> None:
         keys = self._kv_cached.get(block)
+        if not keys:
+            return
         if (
-            keys
-            and block not in self._cpu_cached
-            and not self._gpu_cached(keys[-1])
-            and not any(block in blocks for blocks in self._loading.values())
+            block in self._cpu_cached
+            or self._gpu_cached(keys[-1])
+            or any(block in blocks for blocks in self._loading.values())
         ):
-            del self._kv_cached[block]
-            self._released_hashes.extend(keys)
+            self._unheld.pop(block, None)
+            return
+        if not now:
+            self._unheld.setdefault(block)
+            if len(self._unheld) <= self._max_unheld:
+                return
+            block = next(iter(self._unheld))
+        self._unheld.pop(block, None)
+        self._released_hashes.extend(self._kv_cached.pop(block))
 
     def _gpu_cached(self, block_hash: BlockHash) -> list[KVCacheBlock] | None:
         return self._manager.block_pool.get_cached_block(block_hash, [self._group_id])
@@ -304,3 +322,4 @@ class AuxOutputSchedulerConnector:
             k for keys in self._kv_cached.values() for k in keys
         )
         self._kv_cached.clear()
+        self._unheld.clear()
