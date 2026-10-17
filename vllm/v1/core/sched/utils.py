@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import contextlib
 from collections.abc import Sequence
 
 from vllm.sampling_params import RepetitionDetectionParams
@@ -79,17 +78,19 @@ def remove_all(lst: list, items_to_remove: set) -> list:
 
     Note:
         For single item removal, this modifies the original list in-place
-        and returns it. For multiple items, it creates and returns a new list.
+        and drops every matching element. For multiple items, it creates
+        and returns a new list.
 
     """
     if not items_to_remove:
         return lst
 
     if len(items_to_remove) == 1:
-        # Fast path for single item removal (most common case)
+        # In-place, but drop every copy. list.remove stops at the first hit,
+        # which left a duplicate request in `running` when the same object
+        # was queued twice.
         item = next(iter(items_to_remove))
-        with contextlib.suppress(ValueError):
-            lst.remove(item)
+        lst[:] = [existing for existing in lst if existing != item]
         return lst
     # For multiple items, use list comprehension
     return [item for item in lst if item not in items_to_remove]
