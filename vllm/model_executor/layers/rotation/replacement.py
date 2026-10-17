@@ -89,6 +89,15 @@ def prepare_rotation_transforms(
                 continue
             consumers[target] = _wrap_target(module, application, target)
 
+    if owns_registry:
+        dtypes = [model_config.dtype]
+        if draft_model_config is not None:
+            dtypes.append(draft_model_config.dtype)
+        for application in config.applications:
+            rotation = model.rotations[application.tag]
+            for dtype in dtypes:
+                rotation.register_warmup(inverse=application.inverse, dtype=dtype)
+
     state = PreparedRotationTransforms(
         consumers,
         unresolved,

@@ -66,6 +66,7 @@ For tag `0`, the target model owns these additional checkpoint tensors:
 Use row-vector hidden states `X[..., N]`, with `N = K * P` and `P = 2^m`.
 Let `D = diag(sign)`, `H_P` be the unnormalized Sylvester Hadamard matrix, and
 `H_K` be the unnormalized K-by-K base used by the checkpoint producer.
+`H_P` is symmetric, so `H_P.T = H_P`.
 **The checkpoint stores `hk = H_K.T`, already transposed and unnormalized.**
 Using the same signs and base, this matches the matrix convention of official
 [LLM Compressor's SpinQuantModifier](https://github.com/vllm-project/llm-compressor/blob/main/src/llmcompressor/modifiers/transform/spinquant/base.py)
@@ -141,7 +142,23 @@ an error.
 ## Execution requirements
 
 The adapter supports plain `RMSNorm` with `mode: "pre"`; custom RMSNorm subclasses
-are rejected to preserve their own forward behavior. CUDA execution requires
-TileLang and uses a kernel for NVIDIA warp32 GPUs. For the power-of-two width
-`P`, the kernel uses an H32 GEMM primitive when `P >= 32` and butterfly stages
-when `P < 32`. A PyTorch reference implementation is available for CPU execution.
+are rejected to preserve their own forward behavior. CUDA FP16/BF16 execution
+reuses vLLM's HadaCore operator for `H_P / sqrt(P)`, followed by a TileLang
+kernel that fuses checkpoint K-axis mixing, the remaining `1 / sqrt(K)` scale,
+and inverse signs. Forward signs are applied before HadaCore. The checkpoint
+`hk` remains unnormalized and is loaded unchanged.
+
+The CUDA FP16/BF16 path requires HadaCore and TileLang on NVIDIA GPUs, with
+`32 <= P <= 32768`; other widths raise an error. CPU and CUDA FP32 use the
+PyTorch reference implementation.
+
+The GLM-5.3 example uses `P=512`, which does not hit HadaCore's partial-warp
+numerical bug. Affected shapes with `32 <= P <= 256` need the fix in
+[#53167](https://github.com/vllm-project/vllm/pull/53167).
+
+The target model's preparation registers epilogues from `rotation_config.apply`
+for the target dtype and, when configured, the draft dtype. Equivalent registrations
+are deduplicated. With JIT warmup enabled, these epilogues compile during startup.
+Warmup and runtime share the compile key `(K, P, inverse, dtype)` and compiled
+kernel cache; the token dimension is dynamic. Warmup compiles without allocating
+input tensors or launching the kernel.
