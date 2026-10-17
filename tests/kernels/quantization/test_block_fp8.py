@@ -288,10 +288,7 @@ def test_cutlass_block_fp8_sm12x_declines_unaligned_n():
 
 @pytest.mark.parametrize("scale_attr", ["weight_scale", "weight_scale_inv"])
 @pytest.mark.skipif(
-    not (
-        current_platform.is_cuda() and current_platform.is_device_capability_family(120)
-    ),
-    reason="CUTLASS E8M0 regression only applies to SM120.",
+    not current_platform.is_cuda(), reason="CUTLASS only supported on CUDA platform."
 )
 @torch.inference_mode()
 def test_cutlass_block_fp8_e8m0_weight_scale_upcast(scale_attr, default_vllm_config):
