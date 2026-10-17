@@ -34,6 +34,7 @@ from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
     RowParallelLinear,
+    UnquantizedLinearMethod,
 )
 from vllm.model_executor.layers.mamba.abstract import (
     get_mamba_prefill_checkpoint_alignment,
@@ -99,6 +100,16 @@ if GDN_AITER_TRITON_AVAILABLE:
     )
     from aiter.ops.triton.gated_delta_net.fused_rearrange_sigmoid_gdr import (
         fused_rearrange_sigmoid_gated_delta_rule as gdn_aiter_fused_rearrange_sigmoid_gated_delta_rule,  # noqa: E501
+    )
+
+# Fused conv1d + delta-rule + gated-RMSNorm decode kernel (one launch per layer).
+GDN_AITER_FUSED_DECODE_AVAILABLE = (
+    GDN_AITER_TRITON_AVAILABLE and rocm_aiter_ops.is_fused_gdn_decode_enabled()
+)
+
+if GDN_AITER_FUSED_DECODE_AVAILABLE:
+    from aiter.ops.triton.gated_delta_net.fused_gdn_decode_qkvz import (
+        fused_gdn_decode_qkvz as gdn_aiter_fused_gdn_decode_qkvz,
     )
 
 logger = init_logger(__name__)
@@ -651,6 +662,16 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         self.chunk_gated_delta_rule = ChunkGatedDeltaRule()
         self.gdn_prefill_backend = self.chunk_gated_delta_rule.gdn_prefill_backend
         self._prefill_kernels_warmed_up = False
+        self.use_aiter_fused_gdn_decode = False
+        if GDN_AITER_FUSED_DECODE_AVAILABLE:
+            reason = self._aiter_fused_gdn_decode_unsupported_reason(vllm_config)
+            if reason is None:
+                self.use_aiter_fused_gdn_decode = True
+            else:
+                logger.info_once(
+                    "Not using the AITER fused GDN decode kernel: %s", reason
+                )
+        self._aiter_fused_conv_bias: torch.Tensor | None = None
         # FlashInfer's prefill emits mid-prefill states, so an align-mode
         # checkpoint needs no split prefill.
         self._checkpoint_alignment: int | None = None
@@ -699,6 +720,31 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
 
+    def _aiter_fused_gdn_decode_unsupported_reason(
+        self, vllm_config: VllmConfig
+    ) -> str | None:
+        conv_state_dtype, recurrent_state_dtype = self.get_state_dtype()
+        if (
+            self.head_k_dim != 128
+            or self.head_v_dim != 128
+            or self.num_v_heads % self.num_k_heads != 0
+            or self.num_v_heads // self.num_k_heads not in (2, 3)
+            or self.conv_kernel_size != 4
+            or self.norm.activation != "silu"
+            or vllm_config.model_config.dtype != torch.bfloat16
+            or conv_state_dtype != torch.bfloat16
+            or recurrent_state_dtype not in FUSED_GDN_STATE_DTYPES
+        ):
+            return (
+                "the fused AITER kernel requires a BF16 GDN model with K=V=128, "
+                "2 or 3 value heads per key head, conv width 4, SiLU gating and "
+                "a BF16 convolution cache"
+            )
+        if not isinstance(self.out_proj.quant_method, UnquantizedLinearMethod):
+            # The kernel emits the normed output, so the norm cannot be fused
+            # with the out_proj input quantization.
+            return "out_proj is quantized"
+        return None
     def get_prefill_checkpoint_alignment(self) -> int | None:
         return self._checkpoint_alignment
 
@@ -1070,6 +1116,20 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             projected_states_ba, _ = self.in_proj_ba(hidden_states)
             projected_states_qkvz = projected_states_qkvz.view(num_tokens, -1)
             projected_states_ba = projected_states_ba.view(num_tokens, -1)
+            if self.use_aiter_fused_gdn_decode:
+                normed_out = torch.empty(
+                    (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
+                    dtype=hidden_states.dtype,
+                    device=hidden_states.device,
+                )
+                torch.ops.vllm.qwen_gdn_attention_core_fused_norm_rocm(
+                    projected_states_qkvz,
+                    projected_states_ba,
+                    normed_out,
+                    layer_name=_encode_layer_name(self.prefix),
+                )
+                output, _ = self.out_proj(normed_out.flatten(-2))
+                return output
             core_attn_out = torch.empty(
                 (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
                 dtype=hidden_states.dtype,
@@ -1926,6 +1986,92 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             core_attn_out=core_attn_out.reshape(-1),
         )
 
+    def _forward_core_rocm_fused_norm(
+        self,
+        qkvz: torch.Tensor,
+        ba: torch.Tensor,
+        normed_out: torch.Tensor,
+    ):
+        """``_forward_core_rocm`` + gated RMSNorm into ``normed_out`` [T, H_v, d_v];
+        decode-only batches run the fused AITER kernel."""
+        forward_context = get_forward_context()
+        attn_metadata_raw = forward_context.attn_metadata
+
+        attn_metadata = None
+        if isinstance(attn_metadata_raw, dict):
+            attn_metadata = attn_metadata_raw.get(self.prefix)
+        if attn_metadata is None:
+            v_dim = normed_out.shape[-1] * normed_out.shape[-2]
+            self._warmup_prefill_kernels(qkvz, v_dim)
+            return
+
+        assert isinstance(attn_metadata, GDNAttentionMetadata)
+
+        if (
+            attn_metadata.spec_sequence_masks is None
+            and attn_metadata.num_prefills == 0
+            and attn_metadata.num_decodes > 0
+            and self.kv_cache[1].dtype is torch.float32
+        ):
+            return self._forward_core_decode_aiter_fused(
+                qkvz=qkvz,
+                ba=ba,
+                normed_out=normed_out,
+                attn_metadata=attn_metadata,
+            )
+
+        z = torch.empty_like(normed_out)
+        core_attn_out = torch.empty_like(normed_out)
+        self._forward_core_rocm(qkvz=qkvz, ba=ba, z_out=z, core_attn_out=core_attn_out)
+        # Eager inside the op: run the FLA gated norm straight into normed_out.
+        self._rms_norm_gated_cuda(core_attn_out, z, normed_out)
+
+    def _forward_core_decode_aiter_fused(
+        self,
+        qkvz: torch.Tensor,
+        ba: torch.Tensor,
+        normed_out: torch.Tensor,
+        attn_metadata: GDNAttentionMetadata,
+    ):
+        """Decode-only batch: conv1d + recurrence + gated RMSNorm in one kernel."""
+        num_tokens = attn_metadata.num_actual_tokens
+        conv_state = (
+            self.kv_cache[0]
+            if is_conv_state_dim_first()
+            else self.kv_cache[0].transpose(-1, -2)
+        )
+        conv_weights = self.conv1d.weight.view(
+            self.conv1d.weight.size(0), self.conv1d.weight.size(2)
+        )
+        conv_bias = self.conv1d.bias
+        if conv_bias is None:
+            if self._aiter_fused_conv_bias is None:
+                self._aiter_fused_conv_bias = conv_weights.new_zeros(
+                    conv_weights.shape[0]
+                )
+            conv_bias = self._aiter_fused_conv_bias
+        gdn_aiter_fused_gdn_decode_qkvz(
+            qkvz[:num_tokens],
+            ba[:num_tokens],
+            conv_state,
+            self.kv_cache[1],
+            attn_metadata.non_spec_state_indices_tensor[:num_tokens],  # type: ignore[index]
+            conv_weights,
+            conv_bias,
+            self.A_log,
+            self.dt_bias,
+            self.norm.weight,
+            scale=self.head_k_dim**-0.5,
+            norm_eps=self.norm.eps,
+            quant_dtype=None,
+            qkvz_layout=self.qkvz_layout,
+            # Empty query segments mark padded CUDA-graph rows; the kernel skips them.
+            query_start_loc=attn_metadata.non_spec_query_start_loc[  # type: ignore[index]
+                : num_tokens + 1
+            ],
+            out=normed_out[:num_tokens],
+        )
+
     def _forward_core_decode_non_spec(
         self,
         mixed_qkv: torch.Tensor,
@@ -2233,6 +2379,26 @@ direct_register_custom_op(
     op_name="qwen_gdn_attention_core",
     op_func=qwen_gdn_attention_core,
     mutates_args=["a_or_z_out", "core_attn_out"],
+)
+
+
+def qwen_gdn_attention_core_fused_norm_rocm(
+    qkvz: torch.Tensor,
+    ba: torch.Tensor,
+    normed_out: torch.Tensor,
+    layer_name: LayerNameType,
+) -> None:
+    """conv1d + recurrence + gated RMSNorm into ``normed_out`` (mutated in-place)."""
+    layer_name = _resolve_layer_name(layer_name)
+    forward_context: ForwardContext = get_forward_context()
+    self = forward_context.no_compile_layers[layer_name]
+    self._forward_core_rocm_fused_norm(qkvz=qkvz, ba=ba, normed_out=normed_out)
+
+
+direct_register_custom_op(
+    op_name="qwen_gdn_attention_core_fused_norm_rocm",
+    op_func=qwen_gdn_attention_core_fused_norm_rocm,
+    mutates_args=["normed_out"],
 )
 
 

@@ -2652,6 +2652,20 @@ class rocm_aiter_ops:
         except (ImportError, ModuleNotFoundError):
             return False
 
+    @classmethod
+    @if_aiter_supported
+    def is_fused_gdn_decode_enabled(cls) -> bool:
+        """Fused conv1d + delta-rule + gated-RMSNorm GDN decode kernel available."""
+        if not cls._AITER_ENABLED:
+            return False
+        try:
+            from aiter.ops.triton.gated_delta_net.fused_gdn_decode_qkvz import (  # noqa: F401
+                fused_gdn_decode_qkvz,
+            )
+        except ImportError:
+            return False
+        return True
+
     @staticmethod
     def _gdn_flydsl_prefill_kernels_importable() -> bool:
         try:
