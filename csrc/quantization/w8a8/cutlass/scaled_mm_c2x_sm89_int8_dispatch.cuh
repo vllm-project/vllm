@@ -330,6 +330,8 @@ inline void cutlass_gemm_sm89_int8_dispatch(torch::stable::Tensor& out,
   uint32_t const m = a.size(0);
   uint32_t const mp2 =
       std::max(static_cast<uint32_t>(16), next_pow_2(m));  // next power of 2
+  uint32_t const n = out.size(1);
+  uint32_t const np2 = next_pow_2(n);
 
   if (mp2 <= 16) {
     // M in [1, 16]
@@ -337,10 +339,21 @@ inline void cutlass_gemm_sm89_int8_dispatch(torch::stable::Tensor& out,
         out, a, b, std::forward<EpilogueArgs>(args)...);
   } else if (mp2 <= 32) {
     // M in (16, 32]
+    // For N <= 4096 the 16-row tiles of the M16 config launch 2x the CTAs of
+    // the M32 config and are faster here (measured on RTX 4090, vLLM #56924).
+    if (np2 <= 4096) {
+      return sm89_int8_config_M16::dispatch<InType, OutType, Epilogue>(
+          out, a, b, std::forward<EpilogueArgs>(args)...);
+    }
     return sm89_int8_config_M32::dispatch<InType, OutType, Epilogue>(
         out, a, b, std::forward<EpilogueArgs>(args)...);
   } else if (mp2 <= 64) {
     // M in (32, 64]
+    // Same for N <= 2048, where M16 launches 4x the CTAs of the M64 config.
+    if (np2 <= 2048) {
+      return sm89_int8_config_M16::dispatch<InType, OutType, Epilogue>(
+          out, a, b, std::forward<EpilogueArgs>(args)...);
+    }
     return sm89_int8_config_M64::dispatch<InType, OutType, Epilogue>(
         out, a, b, std::forward<EpilogueArgs>(args)...);
   } else if (mp2 <= 128) {
