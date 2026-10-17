@@ -175,6 +175,8 @@ Priority is **1 = highest** (tried first).
 
 > **†** FlashInfer Native is the regular FlashInfer path. XQA is the SM90 decode path exposed through FlashInfer's TRTLLM decode API. trtllm-gen is used on SM100 and supports sinks. Disable XQA/trtllm-gen via `--attention-config.use_trtllm_attention=0`.
 >
+> FlashInfer can store an unquantized KV cache with K and V as separate head slots (`[K heads | V heads]` per page, as the NVFP4 KV cache does) via `--attention-config.flashinfer_separate_kv_head_slots=true`. This is meant for KV transfer with engines that keep K and V in separate slabs; see [NIXL compatibility](../features/nixl_connector_compatibility.md#kv-cache-layout).
+>
 > **\*** Specify the FlashAttention version via `--attention-config.flash_attn_version=2`, `3`, or `4`. Default is FA4 on SM100+ (Blackwell), FA3 on SM90 (Hopper), FA2 otherwise.
 >
 > On Blackwell, when the FlashAttention backend is selected, `head_size=256` is served
