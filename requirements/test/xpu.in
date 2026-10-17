@@ -39,7 +39,7 @@ jiwer
 bm25s
 pystemmer
 mteb[bm25s]>=2, <3 # required for mteb test
-sentence-transformers==5.2.0 # required for embedding tests
+sentence-transformers==5.6.0 # required for embedding tests
 num2words
 pqdm
 
