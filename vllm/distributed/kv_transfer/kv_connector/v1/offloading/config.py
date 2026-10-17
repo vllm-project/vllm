@@ -14,6 +14,7 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheGroupRole,
     KVCacheSpec,
+    MambaSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
     SlidingWindowSpec,
@@ -116,11 +117,44 @@ def build_offloading_config(
 
         unique_tokens_per_block = {group.tokens_per_block for group in groups}
 
-        assert len(unique_tokens_per_block) == 1, (
-            "If 'block_size' is specified in kv_connector_extra_config, "
-            "there must be at least one KV cache group, "
-            "and all groups must have the same block size."
-        )
+        if len(unique_tokens_per_block) != 1:
+            # A draft group from speculative decoding is the usual reason a
+            # model brings a second block size, and the bare assert this
+            # replaced named neither the sizes nor the way out.
+            per_group = ", ".join(
+                f"group {group.group_id}: {group.tokens_per_block}" for group in groups
+            )
+            # Mamba groups in "align"/"all" mode need every such group's chunk
+            # span to be equal, not merely expressible, so blocks_per_chunk
+            # cannot rescue unequal block sizes there -- and the place that
+            # enforces it raises a bare assert. Say it here instead of
+            # pointing at a remedy that fails later.
+            aligned_mamba_spans = {
+                group.tokens_per_block
+                for (group_id, _), group in zip(selected_groups, groups)
+                for spec in iter_layer_specs(
+                    kv_cache_config.kv_cache_groups[group_id].kv_cache_spec
+                )
+                if isinstance(spec, MambaSpec)
+                and spec.mamba_cache_mode in ("align", "all")
+            }
+            remedy = (
+                "Set 'blocks_per_chunk' instead to size the chunk in blocks."
+                if len(aligned_mamba_spans) <= 1
+                else (
+                    "'blocks_per_chunk' will not help here: the Mamba groups "
+                    "in align mode need equal chunk spans, and a shared "
+                    "multiplier keeps unequal block sizes unequal."
+                )
+            )
+            raise ValueError(
+                f"'block_size'={tokens_per_chunk_int} in "
+                "kv_connector_extra_config sizes one offload chunk in tokens, "
+                "which needs every offloaded KV cache group to share a block "
+                f"size. This model's groups have {per_group} effective tokens "
+                "per block (context-parallel scaling included, so these can "
+                f"differ from --block-size). {remedy}"
+            )
 
         tokens_per_block = unique_tokens_per_block.pop()
         if tokens_per_chunk_int % tokens_per_block == 0:
