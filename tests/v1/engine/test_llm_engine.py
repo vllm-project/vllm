@@ -2,13 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import random
 from typing import TYPE_CHECKING
-from unittest.mock import MagicMock, call
+from unittest.mock import AsyncMock, MagicMock, call
 
 import pytest
 
 from vllm import LLM
 from vllm.exceptions import ProfilerAlreadyActiveError
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
+from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.llm_engine import LLMEngine
 from vllm.v1.metrics.reader import Counter, Gauge, Histogram, Metric, Vector
 
@@ -297,3 +298,58 @@ def test_skip_tokenizer_initialization(model: str):
     assert len(completions) > 0
     assert completions[0].text == ""
     assert completions[0].token_ids
+
+
+def _make_pause_test_engine() -> AsyncLLM:
+    engine = object.__new__(AsyncLLM)
+    engine.renderer = MagicMock()
+    engine.renderer.clear_mm_cache_async = AsyncMock()
+    engine.engine_core = MagicMock()
+    engine.engine_core.pause_scheduler_async = AsyncMock()
+    return engine
+
+
+@pytest.mark.asyncio
+async def test_pause_generation_keep_ignores_clear_cache():
+    """mode="keep" must not clear any cache.
+
+    Regression test for https://github.com/vllm-project/vllm/issues/62123:
+    "keep" freezes requests in the queue, and queued requests may still hold
+    handles into the multimodal cache (e.g. the SHM ring buffer). Clearing it
+    invalidates those handles, which raises ValueError in the worker and
+    kills the engine.
+    """
+    engine = _make_pause_test_engine()
+
+    await engine.pause_generation(mode="keep", clear_cache=True)
+
+    engine.renderer.clear_mm_cache_async.assert_not_called()
+    engine.engine_core.pause_scheduler_async.assert_called_once_with(
+        mode="keep", clear_cache=False
+    )
+
+
+@pytest.mark.asyncio
+async def test_pause_generation_abort_honors_clear_cache():
+    """mode="abort" still clears caches when clear_cache=True."""
+    engine = _make_pause_test_engine()
+
+    await engine.pause_generation(mode="abort", clear_cache=True)
+
+    engine.renderer.clear_mm_cache_async.assert_awaited_once()
+    engine.engine_core.pause_scheduler_async.assert_called_once_with(
+        mode="abort", clear_cache=True
+    )
+
+
+@pytest.mark.asyncio
+async def test_pause_generation_wait_honors_clear_cache():
+    """mode="wait" still honors an explicit clear_cache=True."""
+    engine = _make_pause_test_engine()
+
+    await engine.pause_generation(mode="wait", clear_cache=True)
+
+    engine.renderer.clear_mm_cache_async.assert_awaited_once()
+    engine.engine_core.pause_scheduler_async.assert_called_once_with(
+        mode="wait", clear_cache=True
+    )
