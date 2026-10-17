@@ -108,18 +108,30 @@ class FusedGemmReduceScatterKernel(FusedCommGemmKernel):
             return self.row_parallel_forward(x)
 
 
-class UnfusedAllGatherGemmKernel(LinearCommKernel):
-    """All-gather the input shard, then the layer's plain ``forward``."""
+class UnfusedAllGatherGemm(LinearCommKernel):
+    """All-gather the input shard, then the layer's plain ``forward``.
+
+    ``all_gather_input`` controls whether ``apply`` all-gathers ``x`` itself
+    before calling ``forward``. Subclasses that instead gather some
+    derivative of ``x`` (e.g. a quantized activation) from within a swapped
+    GEMM method should pass ``all_gather_input=False``.
+    """
+
+    def __init__(self, layer: LinearBase, all_gather_input: bool = True) -> None:
+        self.all_gather_input = all_gather_input
+        super().__init__(layer)
 
     @classmethod
     def is_supported(cls, layer: LinearBase) -> tuple[bool, str | None]:
         return True, None
 
     def apply(self, x: torch.Tensor) -> Any:
-        return self.column_parallel_forward(sp_all_gather(x))
+        if self.all_gather_input:
+            x = sp_all_gather(x)
+        return self.column_parallel_forward(x)
 
 
-class UnfusedGemmReduceScatterKernel(LinearCommKernel):
+class UnfusedGemmReduceScatter(LinearCommKernel):
     """The layer's GEMM, then reduce-scatter."""
 
     @classmethod
