@@ -1302,6 +1302,12 @@ class VllmConfig:
                 "logprobs_mode='processed_logprobs' so that returned logprobs "
                 "are normalized over the same nucleus as the sampling mask"
             )
+        # Request params are checked at admission; surface the contract here
+        # so operators learn it before the first rejected client call (#61318).
+        logger.warning(
+            "return_sampling_mask=True: every request must use temperature > 0 "
+            "and top_k > 0. Default SamplingParams (top_k=0) will be rejected."
+        )
 
     def _verify_trace_replay_config(self) -> None:
         model_config = self.model_config
