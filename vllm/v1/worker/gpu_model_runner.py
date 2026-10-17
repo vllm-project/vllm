@@ -6251,6 +6251,8 @@ class GPUModelRunner(
                     layer.impl._k_scale_cache = None
                 if hasattr(layer.impl, "_v_scale_cache"):
                     layer.impl._v_scale_cache = None
+                if hasattr(layer.impl, "_kv_cache_view_cache"):
+                    layer.impl._kv_cache_view_cache = None
 
         gc.collect()
         torch.accelerator.empty_cache()
