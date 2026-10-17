@@ -280,6 +280,9 @@ class KernelConfig:
     enable_flashinfer_autotune: bool = None  # type: ignore[assignment]
     """If True, run FlashInfer autotuning during kernel warmup."""
 
+    enable_triton_autotune: bool = None  # type: ignore[assignment]
+    """If True, run Triton autotuning during kernel warmup."""
+
     enable_rocm_segmented_attn_autotune: bool = False
     """If True, autotune ROCm segmented attention during kernel warmup on RDNA GPUs."""
 
@@ -422,6 +425,7 @@ class KernelConfig:
             "enable_cutedsl_warmup",
             "enable_jit_warmup",
             "enable_flashinfer_autotune",
+            "enable_triton_autotune",
             "enable_rocm_segmented_attn_autotune",
             "ir_op_priority",  # handled separately below
         }
@@ -433,6 +437,7 @@ class KernelConfig:
 
     @field_validator(
         "enable_flashinfer_autotune",
+        "enable_triton_autotune",
         "enable_cutedsl_warmup",
         "enable_jit_warmup",
         mode="wrap",
