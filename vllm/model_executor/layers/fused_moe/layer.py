@@ -439,8 +439,6 @@ def FusedMoEFactory(
         hash_indices_table=hash_indices_table,
         **routed_experts_args if routed_experts_args is not None else {},
     )
-    if hash_indices_table is not None:
-        object.__setattr__(routed_experts, "hash_indices_table", hash_indices_table)
 
     if runner_cls is None:
         runner_cls = MoERunner
