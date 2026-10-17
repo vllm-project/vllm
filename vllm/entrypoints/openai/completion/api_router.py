@@ -5,7 +5,7 @@
 from http import HTTPStatus
 
 from fastapi import APIRouter, Depends, FastAPI, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from vllm.entrypoints.openai.completion.protocol import (
     CompletionRequest,
@@ -64,8 +64,9 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
             content=generator.model_dump(), status_code=generator.error.code
         )
     elif isinstance(generator, CompletionResponse):
-        return JSONResponse(
-            content=generator.model_dump(),
+        return Response(
+            content=generator.model_dump_json(),
+            media_type="application/json",
             headers=metrics_header(metrics_header_format),
         )
 

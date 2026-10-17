@@ -68,7 +68,9 @@ async def generate(request: GenerateRequest, raw_request: Request):
         )
 
     elif isinstance(generator, GenerateResponseBase):
-        return JSONResponse(content=generator.model_dump())
+        return Response(
+            content=generator.model_dump_json(), media_type="application/json"
+        )
 
     return StreamingResponse(content=generator, media_type="text/event-stream")
 

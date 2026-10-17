@@ -5,7 +5,7 @@
 from http import HTTPStatus
 
 from fastapi import APIRouter, Depends, FastAPI, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from vllm.entrypoints.openai.chat_completion.batch_serving import OpenAIServingChatBatch
 from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -72,8 +72,9 @@ async def create_chat_completion(request: ChatCompletionRequest, raw_request: Re
         )
 
     elif isinstance(generator, ChatCompletionResponse):
-        return JSONResponse(
-            content=generator.model_dump(),
+        return Response(
+            content=generator.model_dump_json(),
+            media_type="application/json",
             headers=metrics_header(metrics_header_format),
         )
 
