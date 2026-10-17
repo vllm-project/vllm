@@ -286,6 +286,12 @@ impl BenchConfig {
                             .into(),
                     ));
                 }
+                // The Responses API would silently drop min_p as an unknown field.
+                if args.backend == BackendKind::OpenaiResponses && args.min_p.is_some() {
+                    return Err(BenchError::Config(
+                        "--min-p is not supported by the Responses API.".into(),
+                    ));
+                }
 
                 // Merge: sampling_params first, then extra_body on top (extra_body wins)
                 let merged = match extra_body.take() {
@@ -1375,6 +1381,22 @@ mod tests {
         let config = BenchConfig::from_args(&args).unwrap();
 
         assert_eq!(config.max_model_len, Some(4096));
+    }
+
+    #[test]
+    fn test_responses_backend_rejects_min_p() {
+        let args = vec![
+            "vllm-bench",
+            "--backend",
+            "openai-responses",
+            "--model",
+            "test-model",
+            "--min-p",
+            "0.1",
+        ];
+        let err = BenchConfig::from_args(&parse_args(args)).unwrap_err();
+
+        assert!(err.to_string().contains("--min-p"));
     }
 
     #[test]
