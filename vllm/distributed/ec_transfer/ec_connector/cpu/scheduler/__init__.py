@@ -124,7 +124,6 @@ class ECCPUScheduler:
 
     def _setup_nixl(self, vllm_config: "VllmConfig") -> None:
         # Lazy imports keep nixl/zmq off the gate-off path.
-        from vllm import envs
         from vllm.distributed.ec_transfer.ec_connector.cpu.control.zmq import (
             ZmqClientTransport,
             ZmqServerTransport,
@@ -140,6 +139,7 @@ class ECCPUScheduler:
             ProducerSession,
         )
         from vllm.distributed.nixl_utils import NixlWrapper, nixl_agent_config
+        from vllm.utils.network_utils import get_ip
         from vllm.version import __version__ as VLLM_VERSION
 
         if NixlWrapper is None or nixl_agent_config is None:
@@ -147,8 +147,10 @@ class ECCPUScheduler:
                 "ec_enable_nixl requires NIXL; install the `nixl` package or "
                 "remove ec_enable_nixl from ec_connector_extra_config."
             )
-        engine_id = self._ec_config.engine_id
-        assert engine_id is not None
+        engine_id = (
+            f"{vllm_config.instance_id}_dp"
+            f"{vllm_config.parallel_config.data_parallel_index}"
+        )
         # How long a consumer waits for an XferAck. The producer answers from
         # its scheduler step, so its reply latency scales with the encoder's
         # batch size: a deployment whose steps run longer must raise this.
@@ -163,10 +165,6 @@ class ECCPUScheduler:
             dtype=str(self._dtype),
             block_size_bytes=self._region.block_size_bytes,
         )
-        if self._is_producer:
-            self._peer_host = envs.VLLM_EC_SIDE_CHANNEL_HOST
-            self._peer_port = envs.VLLM_EC_SIDE_CHANNEL_PORT
-
         self._data = NixlDataTransport(
             agent_name=engine_id,
             base_ptr=self._region.blocks.data_ptr(),
@@ -175,12 +173,11 @@ class ECCPUScheduler:
             total_size_bytes=self._region.num_blocks * self._region.block_size_bytes,
         )
         if self._is_producer:
-            assert self._peer_host is not None
-            assert self._peer_port is not None
+            self._peer_host = get_ip()
+            transport = ZmqServerTransport(host=self._peer_host)
+            self._peer_port = transport.port
             self._producer_session = ProducerSession(
-                transport=ZmqServerTransport(
-                    host=self._peer_host, port=self._peer_port
-                ),
+                transport=transport,
                 data=self._data,
                 cache=self._cache,
                 compat_hash=self._compat_hash,

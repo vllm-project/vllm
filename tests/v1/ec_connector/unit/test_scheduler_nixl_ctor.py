@@ -126,13 +126,12 @@ def test_control_transport_failure_releases_nixl_and_shared_region(monkeypatch):
 
 
 @pytest.mark.skipif(NixlWrapper is None, reason="Requires NIXL package")
-def test_gate_on_wires_data_transport_and_producer_session(monkeypatch):
-    # Port 0 lets the OS pick an ephemeral port so the real ZMQ ROUTER bind
-    # in ProducerSession.start() cannot collide with another test/process.
-    monkeypatch.setenv("VLLM_EC_SIDE_CHANNEL_HOST", "127.0.0.1")
-    monkeypatch.setenv("VLLM_EC_SIDE_CHANNEL_PORT", "0")
+@pytest.mark.parametrize("dp_index", [0, 1])
+def test_gate_on_wires_data_transport_and_producer_session(monkeypatch, dp_index):
+    monkeypatch.setenv("VLLM_HOST_IP", "127.0.0.1")
     monkeypatch.setattr(sched_mod, "create_ec_shared_region", lambda cfg: _region())
     cfg = create_ec_vllm_config(ec_role="ec_both")
+    cfg.parallel_config.data_parallel_index = dp_index
     cfg.ec_transfer_config.ec_connector_extra_config["ec_enable_nixl"] = True
     s = ECCPUScheduler(cfg)
     try:
@@ -141,6 +140,30 @@ def test_gate_on_wires_data_transport_and_producer_session(monkeypatch):
         assert s._compat_hash is not None
         assert s._producer_session is not None
         assert s._peer_host == "127.0.0.1"
+        assert s._peer_port is not None and 0 < s._peer_port <= 65535
         assert s._transport is not None  # is_ec_consumer is also True
     finally:
         s.shutdown()
+
+
+@pytest.mark.skipif(NixlWrapper is None, reason="Requires NIXL package")
+def test_producers_allocate_distinct_ports_across_dp_and_instances(monkeypatch):
+    """Both DP replicas and independent instances can start on one host."""
+    monkeypatch.setenv("VLLM_HOST_IP", "127.0.0.1")
+    monkeypatch.setattr(sched_mod, "create_ec_shared_region", lambda cfg: _region())
+    instance_id = f"ec-test-{uuid.uuid4()}"
+    schedulers = []
+    try:
+        for instance, dp_index in [(instance_id, 0), (instance_id, 1), (None, 0)]:
+            cfg = create_ec_vllm_config(ec_role="ec_producer")
+            if instance is not None:
+                cfg.instance_id = instance
+            cfg.parallel_config.data_parallel_index = dp_index
+            cfg.ec_transfer_config.ec_connector_extra_config["ec_enable_nixl"] = True
+            schedulers.append(ECCPUScheduler(cfg))
+        ports = [s._peer_port for s in schedulers]
+        assert all(port is not None and 0 < port <= 65535 for port in ports)
+        assert len(set(ports)) == len(schedulers)
+    finally:
+        for scheduler in reversed(schedulers):
+            scheduler.shutdown()

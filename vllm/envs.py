@@ -234,8 +234,6 @@ if TYPE_CHECKING:
     VLLM_P2P_MAX_PEERS: int = 128
     VLLM_P2P_HANDSHAKE_TIMEOUT_S: int = 30
     VLLM_P2P_IDLE_TIMEOUT_S: int = 300
-    VLLM_EC_SIDE_CHANNEL_HOST: str = "localhost"
-    VLLM_EC_SIDE_CHANNEL_PORT: int = 5601
     VLLM_MOONCAKE_BOOTSTRAP_PORT: int = 8998
     VLLM_MOONCAKE_STORE_TIER_LOG: bool = False
     VLLM_MOONCAKE_LOAD_RECV_THREADS: int = 1
@@ -1742,16 +1740,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # only when remaining peer slots are within 8 of VLLM_P2P_MAX_PEERS.
     # Default: 300. Set to 0 to disable.
     "VLLM_P2P_IDLE_TIMEOUT_S": lambda: int(os.getenv("VLLM_P2P_IDLE_TIMEOUT_S", "300")),
-    # IP address used for the EC connector's ZMQ side channel
-    # (producer ROUTER bind, consumer DEALER dial).
-    "VLLM_EC_SIDE_CHANNEL_HOST": lambda: os.getenv(
-        "VLLM_EC_SIDE_CHANNEL_HOST", "localhost"
-    ),
-    # Port for the EC connector's ZMQ side channel; advertised to peers
-    # via `ec_transfer_params.peer_port` on the producer's response.
-    "VLLM_EC_SIDE_CHANNEL_PORT": lambda: int(
-        os.getenv("VLLM_EC_SIDE_CHANNEL_PORT", "5601")
-    ),
     # Per-request timeout (seconds) when a prefiller worker registers with
     # the Mooncake bootstrap server.
     "VLLM_MOONCAKE_CONNECTOR_TIMEOUT": lambda: float(
