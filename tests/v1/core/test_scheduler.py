@@ -360,6 +360,54 @@ def test_max_loras_counts_running_request_awaiting_output():
     assert req_b.status == RequestStatus.WAITING
 
 
+def test_max_loras_counts_running_request_skipped_for_encoder_budget():
+    """No PP: a running request skipped because earlier requests used up the
+    step's encoder compute budget still holds its LoRA slot."""
+    scheduler = create_scheduler(lora_config=LoRAConfig(max_loras=2))
+    scheduler.max_num_encoder_input_tokens = 100
+    scheduler.encoder_cache_manager = EncoderCacheManager(cache_size=1000)
+    # a: two 100-token images, one per step; b: image at 50, after a's.
+    req_a, req_b = create_requests(
+        num_requests=2,
+        num_tokens=300,
+        mm_positions=[
+            [
+                PlaceholderRange(offset=0, length=100),
+                PlaceholderRange(offset=150, length=100),
+            ],
+            [PlaceholderRange(offset=50, length=100)],
+        ],
+        req_ids=["a", "b"],
+    )
+    (req_c,) = create_requests(num_requests=1, num_tokens=10, req_ids=["c"])
+    req_a.lora_request = LoRARequest("lora-a", 1, "/path/a")
+    req_b.lora_request = LoRARequest("lora-b", 2, "/path/b")
+    req_c.lora_request = LoRARequest("lora-c", 3, "/path/c")
+
+    scheduler.add_request(req_a)
+    scheduler.add_request(req_b)
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens == {"a": 150, "b": 50}
+    scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=["a", "b"],
+            req_id_to_index={"a": 0, "b": 1},
+            sampled_token_ids=[[], []],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+
+    # a's second image uses the whole encoder budget, so b is skipped; c
+    # (a third adapter) must still wait.
+    scheduler.add_request(req_c)
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens == {"a": 150}
+    assert req_c.status == RequestStatus.WAITING
+
+
 def test_cached_request_data_resumed_all_token_ids_mrv1_only():
     """all_token_ids carries a resumed request's token ids to the connector
     for the V1 model runner, but is skipped entirely for the V2 model runner.
