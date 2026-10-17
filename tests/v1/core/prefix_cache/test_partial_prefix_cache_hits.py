@@ -547,7 +547,13 @@ def test_hybrid_mamba_partial_tail_owner_uses_cow_on_continue():
     req0 = make_request("0", [0, 0, 1, 1, 2, 2, 3], hash_block_size, sha256)
     computed_blocks, num_computed, _ = manager.get_computed_blocks(req0)
     assert num_computed == 0
-    assert manager.allocate_slots(req0, 6, num_computed, computed_blocks) is not None
+    assert manager.allocate_slots(req0, 4, num_computed, computed_blocks) is not None
+
+    # Async chunked prefill may publish a new boundary while the preceding
+    # chunk is still in flight. This first registration must remain enabled.
+    req0.num_computed_tokens = 4
+    req0.num_in_flight_tokens = 4
+    assert manager.allocate_slots(req0, 2) is not None
 
     partial_mamba_hash = req0.block_hashes[6 // hash_block_size - 1]
     partial_mamba_block = manager.block_pool.get_cached_block(
@@ -557,8 +563,11 @@ def test_hybrid_mamba_partial_tail_owner_uses_cow_on_continue():
     partial_mamba_block_id = partial_mamba_block[0].block_id
     assert manager.get_blocks("0").get_block_ids()[1][1] == partial_mamba_block_id
 
+    # The next run-ahead allocation moves the boundary to a durable CoW block.
+    # Its end-of-allocation cache pass must not reattach the same hash to the
+    # mutable request-table source.
     req0.num_computed_tokens = 6
-    req0.append_output_token_ids([3])
+    req0.num_in_flight_tokens = 6
     new_blocks = manager.allocate_slots(req0, 1)
     assert new_blocks is not None
 
@@ -581,6 +590,17 @@ def test_hybrid_mamba_partial_tail_owner_uses_cow_on_continue():
     assert get_block_hash(moved[0].block_hash) == partial_mamba_hash
     assert get_group_id(moved[0].block_hash) == 1
     assert moved[0].block_hash_num_tokens == 6
+
+    # The output-time cache path can retry the same settled boundary while a
+    # later step remains in flight; that must remain idempotent too.
+    req0.num_in_flight_tokens = 1
+    manager.cache_blocks(req0, 6)
+    grouped_hash = moved[0].block_hash
+    assert grouped_hash is not None
+    cache = manager.block_pool.cached_block_hash_to_block
+    assert cache.contain(grouped_hash, cow_copy.dst_block_id)
+    assert not cache.contain(grouped_hash, partial_mamba_block_id)
+    assert partial_mamba_block[0].block_hash is None
 
 
 def test_partial_hit_then_internal_checkpoint_uses_distinct_mamba_blocks():
@@ -742,7 +762,7 @@ def test_internal_checkpoint_publication_respects_retention(
 
 
 def test_transient_checkpoint_evicts_retained_boundary_hash():
-    """With retention_interval=0, the checkpoint slot can coincide with a
+    """With periodic retention, the checkpoint slot can coincide with a
     reachable boundary block that this step's full-block pass just hashed.
     The checkpoint state overwrites the slot, so the stale boundary hash
     must be evicted rather than left pointing at the wrong state.
@@ -755,7 +775,7 @@ def test_transient_checkpoint_evicts_retained_boundary_hash():
         mamba_block_size=32,
         num_prefill_checkpoint_blocks=1,
     )
-    manager.coordinator.retention_interval = 0
+    manager.coordinator.retention_interval = 64
 
     request = make_request("producer", list(range(240)), hash_block_size, sha256)
     # Block 2 ends at the shared-prefix junction 96, so the full-block pass
@@ -769,6 +789,18 @@ def test_transient_checkpoint_evicts_retained_boundary_hash():
     boundary_hash = request.block_hashes[96 // hash_block_size - 1]
     assert manager.block_pool.get_cached_block(boundary_hash, [1]) is None
     checkpoint_hash = request.block_hashes[112 // hash_block_size - 1]
+    assert manager.block_pool.get_cached_block(checkpoint_hash, [1]) is None
+
+    # An output-time retry can revisit the same boundary while a later async
+    # step remains in flight. The full-block pass may hash the checkpoint slot
+    # at the reachable boundary again; transient-checkpoint cleanup must still
+    # run before the async no-reattach guard returns.
+    mamba_manager = manager.coordinator.single_type_managers[1]
+    mamba_manager.num_cached_block[request.request_id] = 2
+    request.num_computed_tokens = 128
+    request.num_in_flight_tokens = 1
+    manager.cache_blocks(request, 127)
+    assert manager.block_pool.get_cached_block(boundary_hash, [1]) is None
     assert manager.block_pool.get_cached_block(checkpoint_hash, [1]) is None
 
 
