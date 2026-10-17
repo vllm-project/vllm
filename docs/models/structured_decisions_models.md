@@ -149,9 +149,12 @@ whole vocabulary: its share of the labels times `label_mass`.
 
 #### Labels
 
-Labels follow the type: a `choice` labels its options `A` to `Z` in the order
-the request lists them, a `noul` labels its options `yes` and `no`, and a
-`score` labels its levels `0` to `9`, so a level's label is its score.
+Labels follow the type. A `noul` labels its options `yes` and `no`. A `choice`
+labels its options `A` to `Z` in request order, unless every option is a
+distinct capital letter, which then keeps its own letter. A `score` labels its
+levels `0` to `9` in order, unless every level is a distinct single digit, such as `"1"` to
+`"5"`, which then keeps that digit. The answer's `score` is always the
+0-indexed position.
 
 #### Limits
 

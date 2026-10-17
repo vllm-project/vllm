@@ -507,7 +507,7 @@ class LiquidStrategy(NextTokenStrategy):
         elif question.type.name == "choice":
             forms = [(code, f" {code}") for code in self._codes(question)]
         else:
-            forms = [(label,) for label in question.labels]
+            forms = [(d,) for d in question.type.label_set[: len(question.options)]]
         groups = [self._single_tokens(f) for f in forms]
         seen: set[int] = set()
         for (label, *_), ids in zip(forms, groups):
@@ -536,7 +536,7 @@ class LiquidStrategy(NextTokenStrategy):
             ask = f"{q.instructions}{sides}\n\nReply with yes or no only."
         elif q.type.name == "score":
             legend = "\n".join(
-                f"{label} {o.name}" for label, o in zip(q.labels, q.options)
+                f"{label} {o.name}" for label, o in zip(q.type.label_set, q.options)
             )
             ask = (
                 f"{q.instructions}\n\n{legend}\n\n"

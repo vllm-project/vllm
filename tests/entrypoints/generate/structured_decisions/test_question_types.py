@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import importlib.util
 from typing import Any
 
 import pytest
 
+from tests.utils import VLLM_PATH
 from vllm.entrypoints.openai.decisions.question_types import (
     QUESTION_TYPES,
     Option,
@@ -13,6 +15,17 @@ from vllm.entrypoints.openai.decisions.question_types import (
     build_question,
     register_question_type,
 )
+
+GATEWAY = VLLM_PATH / "examples/features/structured_diffusion/structured_server.py"
+
+
+@pytest.fixture(scope="module")
+def gateway():
+    spec = importlib.util.spec_from_file_location("structured_server", GATEWAY)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def choice(qid="bucket", criteria=None, instructions="Which team?", max_options=128):
@@ -131,6 +144,40 @@ def test_score_labels_are_levels():
     assert score().labels == ("0", "1", "2")
     with pytest.raises(StructuredDecisionError, match="at most 10"):
         score(criteria=[str(i) for i in range(11)])
+
+
+@pytest.mark.parametrize(
+    "kind,names,labels,on_gateway",
+    [
+        ("score", ["1", "2", "3", "4", "5"], "12345", "12345"),
+        ("score", ["0", "1", "2", "3", "4"], "01234", "01234"),
+        ("score", ["poor", "2", "3", "4", "excellent"], "01234", "12345"),
+        ("score", [str(i) for i in range(1, 11)], "0123456789", "ABCDEFGHIJ"),
+        ("score", ["calm", "annoyed", "furious"], "012", "123"),
+        ("choice", ["C", "A", "D", "B"], "CADB", "CADB"),
+        ("choice", ["billing", "outage"], "AB", "AB"),
+    ],
+)
+def test_labels_follow_option_names(gateway, kind, names, labels, on_gateway):
+    criteria = names if kind == "score" else dict.fromkeys(names)
+    assert "".join(build_question("q", kind, "", criteria, 128).labels) == labels
+    key = "levels" if kind == "score" else "options"
+    schema = gateway.parse_schema(
+        {"questions": [{"id": "q", "type": kind, key: names}]}
+    )
+    assert "".join(schema["questions"][0]["labels"]) == on_gateway
+
+
+def test_score_prompt_own_digits():
+    q = score(criteria=["1", "2"])
+    assert q.type.prompt(q) == (
+        "Question: How angry?\n1\n2\nAnswer with the number of one level only."
+    )
+    q = score(criteria=["0", "1", "high"])
+    assert q.type.prompt(q) == (
+        "Question: How angry?\n0: 0\n1: 1\n2: high\n"
+        "Answer with the number of one level only."
+    )
 
 
 def test_score_prompt():
