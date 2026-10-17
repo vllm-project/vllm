@@ -2195,14 +2195,23 @@ def initialize_model_parallel(
         and config.model_config.architecture == "DeepseekV41ForCausalLM"
         and not enable_elastic_ep
     ):
-        engram_dp_size = _engram_dp_shard_size(
-            world_size,
-            data_parallel_size,
-            tensor_model_parallel_size
-            * pipeline_model_parallel_size
-            * prefill_context_model_parallel_size,
-        )
-    if engram_dp_size > 1:
+        if (
+            not engram_config.cpu_offload
+            and engram_config.embedding_across_dp
+            and tensor_model_parallel_size == 1
+        ):
+            # GPU tables are read from peers' HBM, so every DP rank must share
+            # one NVLink domain (e.g. GB200 NVL72).
+            engram_dp_size = data_parallel_size
+        else:
+            engram_dp_size = _engram_dp_shard_size(
+                world_size,
+                data_parallel_size,
+                tensor_model_parallel_size
+                * pipeline_model_parallel_size
+                * prefill_context_model_parallel_size,
+            )
+    if 1 < engram_dp_size < data_parallel_size:
         group_ranks = (
             all_ranks.permute(0, 2, 3, 4, 1).reshape(-1, engram_dp_size).unbind(0)
         )
@@ -2290,6 +2299,9 @@ def initialize_model_parallel(
         _DP = init_model_parallel_group(
             group_ranks, get_world_group().local_rank, backend, group_name="dp"
         )
+    if 1 < engram_dp_size == data_parallel_size:
+        # Same ranks as the DP group: reuse its communicators.
+        _ENGRAM_DP = _DP
 
     global _EP
     assert _EP is None, "expert parallel group is already initialized"
@@ -2472,11 +2484,6 @@ def destroy_model_parallel():
         _TP.destroy()
     _TP = None
 
-    global _ENGRAM_DP
-    if _ENGRAM_DP:
-        _ENGRAM_DP.destroy()
-    _ENGRAM_DP = None
-
     global _DCP
     if _DCP:
         _DCP.destroy()
@@ -2492,7 +2499,10 @@ def destroy_model_parallel():
         _PP.destroy()
     _PP = None
 
-    global _DP
+    global _DP, _ENGRAM_DP
+    if _ENGRAM_DP and _ENGRAM_DP is not _DP:
+        _ENGRAM_DP.destroy()
+    _ENGRAM_DP = None
     if _DP:
         _DP.destroy()
     _DP = None

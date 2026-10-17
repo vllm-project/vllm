@@ -890,11 +890,18 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         )
         self.engram_swa_prefix: str | None = None
         if self.engram_layout is not None:
-            local_engram = any(
-                isinstance(layer, DeepseekV4DecoderLayer) and layer.engram is not None
-                for layer in islice(self.layers, self.start_layer, self.end_layer)
+            engram = next(
+                (
+                    layer.engram
+                    for layer in islice(self.layers, self.start_layer, self.end_layer)
+                    if isinstance(layer, DeepseekV4DecoderLayer)
+                    and layer.engram is not None
+                ),
+                None,
             )
-            if local_engram:
+            if engram is not None:
+                # Shared host tables and GPU peer reads look up only local tokens.
+                self.engram_dp_shared_memory = engram.embed_tokens.dp_size == 1
                 first_layer = next(
                     iter(islice(self.layers, self.start_layer, self.end_layer))
                 )
