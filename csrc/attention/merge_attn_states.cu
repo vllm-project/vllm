@@ -59,7 +59,7 @@ __global__ void merge_attn_states_kernel(
   // Pre-invert scale: multiplication is faster than division
   float fp8_scale_inv = 1.0f;
   if constexpr (USE_FP8_OUTPUT) {
-    fp8_scale_inv = 1.0f / *output_scale;
+    fp8_scale_inv = vllm::fp8_reciprocal_scale(*output_scale);
   }
 
   // If token_idx >= prefix_num_tokens, just copy from suffix
@@ -70,13 +70,14 @@ __global__ void merge_attn_states_kernel(
 
       if constexpr (USE_FP8_OUTPUT) {
         output_t o_out_pack[pack_size];
+        float val[pack_size];
 #pragma unroll
         for (uint i = 0; i < pack_size; ++i) {
-          const float val =
+          val[i] =
               vllm::to_float(reinterpret_cast<const scalar_t*>(&s_out_pack)[i]);
-          o_out_pack[i] =
-              vllm::scaled_fp8_conversion<true, output_t>(val, fp8_scale_inv);
         }
+        vllm::scaled_fp8_conversion_vec<true, output_t, pack_size>(
+            o_out_pack, val, fp8_scale_inv);
         reinterpret_cast<output_pack_t*>(
             output_head_ptr)[pack_offset / pack_size] =
             *reinterpret_cast<output_pack_t*>(o_out_pack);
@@ -121,13 +122,14 @@ __global__ void merge_attn_states_kernel(
         // Convert prefix values to FP8 (since -inf means no data,
         // prefix_output is expected to be zeros)
         output_t o_out_pack[pack_size];
+        float val[pack_size];
 #pragma unroll
         for (uint i = 0; i < pack_size; ++i) {
-          const float val =
+          val[i] =
               vllm::to_float(reinterpret_cast<const scalar_t*>(&p_out_pack)[i]);
-          o_out_pack[i] =
-              vllm::scaled_fp8_conversion<true, output_t>(val, fp8_scale_inv);
         }
+        vllm::scaled_fp8_conversion_vec<true, output_t, pack_size>(
+            o_out_pack, val, fp8_scale_inv);
         reinterpret_cast<output_pack_t*>(
             output_head_ptr)[pack_offset / pack_size] =
             *reinterpret_cast<output_pack_t*>(o_out_pack);
@@ -172,11 +174,8 @@ __global__ void merge_attn_states_kernel(
     // Convert and store
     if constexpr (USE_FP8_OUTPUT) {
       output_t o_out_pack[pack_size];
-#pragma unroll
-      for (uint i = 0; i < pack_size; ++i) {
-        o_out_pack[i] = vllm::scaled_fp8_conversion<true, output_t>(
-            o_out_f[i], fp8_scale_inv);
-      }
+      vllm::scaled_fp8_conversion_vec<true, output_t, pack_size>(
+          o_out_pack, o_out_f, fp8_scale_inv);
       reinterpret_cast<output_pack_t*>(
           output_head_ptr)[pack_offset / pack_size] =
           *reinterpret_cast<output_pack_t*>(o_out_pack);
