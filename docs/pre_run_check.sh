@@ -1,3 +1,4 @@
+#!/usr/bin/env bash
 if [ "$READTHEDOCS_VERSION_TYPE" != "external" ]; then
   echo "Not a PR build (version type=$READTHEDOCS_VERSION_TYPE); skipping pre-run-check gate."
   exit 0
@@ -29,11 +30,21 @@ DOCS_PATHS=(
   requirements/docs.txt       # Affects build process
   requirements/docs.in        # Affects build process
 )
-if git diff --quiet origin/main -- "${DOCS_PATHS[@]}"; then
-  echo "No docs-affecting files changed vs origin/main; cancelling build."
+# Use three-dot diff (origin/main...HEAD) to compare the merge base with HEAD,
+# so we only see files introduced by this PR — not commits that landed on main
+# after the PR branch was created. A two-dot diff (origin/main..HEAD or just
+# origin/main) would incorrectly flag docs files modified on main as "changed".
+# Also exclude the gate files themselves (this script and .readthedocs.yaml) —
+# modifying build-control files should not force a docs build.
+DOCS_CHANGED=$(git diff --name-only origin/main...HEAD -- "${DOCS_PATHS[@]}" \
+  | grep -v -E '^(docs/pre_run_check\.sh|\.readthedocs\.yaml)$')
+if [ -z "$DOCS_CHANGED" ]; then
+  echo "No docs-affecting content changed in this PR vs merge base with origin/main; cancelling build."
   # See https://docs.readthedocs.com/platform/latest/guides/build/skip-build.html for info on exit code
   exit 183
 fi
+echo "Docs-affecting files changed in this PR:"
+echo "  ${DOCS_CHANGED//$'\n'/$'\n'  }"
 echo "Docs-affecting files changed; continuing pre-run-check."
 echo "Checking pre-commit/pre-run-check status..."
 MAX_WAIT=300
