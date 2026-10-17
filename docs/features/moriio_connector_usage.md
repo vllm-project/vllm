@@ -142,7 +142,7 @@ WRITE mode supports hybrid attention plus Mamba/KDA models, including DSpark, wi
 
 For DSpark, configure the same draft model on both instances through `--speculative-config`. Target and draft attention groups retain their own block IDs and token spans; only the running recurrent state is transferred, not speculative scratch slots. The producer transfers the state after the first N-1 prompt tokens, and the consumer recomputes the last prompt token. Convolution and SSM transfers must both finish before the layer is complete.
 
-Hybrid READ keeps its existing single-transferable-attention-group requirement. Plain-attention WRITE retains its existing notification format.
+Hybrid READ transfers every attention group, so drafters that share the target's attention groups (such as MTP) also work. Plain-attention WRITE retains its existing notification format.
 
 ### Transport configuration
 
