@@ -14,7 +14,7 @@ from vllm.model_executor.kernels.sequence_parallel.base import (
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
 
 
-class UnquantizedAllGatherGemm(FusedAllGatherGemmKernel):
+class FusedAllGatherGemm(FusedAllGatherGemmKernel):
     def __init__(self, layer: LinearBase) -> None:
         self._group_name = get_tp_group().device_group.group_name
         enable_symm_mem_for_group(self._group_name)
@@ -45,7 +45,7 @@ class UnquantizedAllGatherGemm(FusedAllGatherGemmKernel):
         return output
 
 
-class UnquantizedGemmReduceScatter(FusedGemmReduceScatterKernel):
+class FusedGemmReduceScatter(FusedGemmReduceScatterKernel):
     def __init__(self, layer: LinearBase) -> None:
         self._group_name = get_tp_group().device_group.group_name
         enable_symm_mem_for_group(self._group_name)
