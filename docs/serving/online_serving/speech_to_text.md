@@ -64,8 +64,8 @@ The Transcriptions API supports uploading audio files in various formats includi
 - `model`: The model to use for transcription (required)
 - `language`: The language code (e.g., "en", "zh") (optional)
 - `prompt`: Optional text to guide the transcription style (optional)
-- `response_format`: Format of the response ("json", "text", "verbose_json", or
-  "diarized_json") (optional)
+- `response_format`: Format of the response ("json", "text", "verbose_json",
+  "diarized_json", "srt", or "vtt") (optional)
 - `temperature`: Sampling temperature between 0 and 1 (optional)
 
 For the complete list of supported parameters including sampling parameters and vLLM extensions, see the [protocol definitions](https://github.com/vllm-project/vllm/blob/main/vllm/entrypoints/speech_to_text/transcription/protocol.py).
@@ -98,6 +98,18 @@ For `verbose_json` response format:
     }
     ```
 Currently “verbose_json” response format doesn’t support no_speech_prob.
+
+`srt` and `vtt` return the same segments rendered as SubRip / WebVTT subtitles
+with a `text/plain` body. They share the requirements of `verbose_json`: the
+model must emit segment timestamps (e.g. Whisper), and streaming is not
+supported.
+
+```text
+1
+00:00:00,000 --> 00:00:02,500
+Hello, this is a transcription
+
+```
 
 For models with diarization support, `diarized_json` returns OpenAI-compatible
 speaker segments. Currently, this is supported by
