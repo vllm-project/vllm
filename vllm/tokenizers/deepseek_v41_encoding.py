@@ -327,6 +327,7 @@ def render_message(
     thinking_mode: str,
     drop_thinking: bool = True,
     reasoning_effort: Union[str, int, None] = None,
+    last_user_idx: Optional[int] = None,
 ) -> str:
     """
     Render a single message at the given index into its V4.1 encoded string form.
@@ -337,7 +338,9 @@ def render_message(
     )
 
     msg = messages[index]
-    last_user_idx = find_last_user_index(messages)
+    last_user_idx = (
+        find_last_user_index(messages) if last_user_idx is None else last_user_idx
+    )
 
     role = msg.get("role")
     content = msg.get("content")
@@ -576,6 +579,8 @@ def encode_messages(
         num_to_render = len(messages)
         context_len = len(context)
 
+    last_user_idx = find_last_user_index(full_messages)
+
     for idx in range(num_to_render):
         prompt += render_message(
             idx + context_len,
@@ -583,6 +588,7 @@ def encode_messages(
             thinking_mode=thinking_mode,
             drop_thinking=effective_drop_thinking,
             reasoning_effort=reasoning_effort,
+            last_user_idx=last_user_idx,
         )
 
     return prompt
