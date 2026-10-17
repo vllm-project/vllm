@@ -154,7 +154,8 @@ class RayHistogramWrapper(RayPrometheusMetric):
         tag_keys = self._get_tag_keys(labelnames)
         name = self._get_sanitized_opentelemetry_name(name)
 
-        boundaries = buckets if buckets else []
+        # Ray rejects non-positive boundaries.
+        boundaries = [b for b in buckets if b > 0] if buckets else []
         self.metric = ray_metrics.Histogram(
             name=name,
             description=documentation,

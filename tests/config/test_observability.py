@@ -25,18 +25,31 @@ def test_custom_histogram_buckets_valid():
     }
 
 
+def test_custom_histogram_buckets_accepts_zero_bound():
+    """Count families need a `le="0"` bucket to tell zero apart from one."""
+    config = ObservabilityConfig(
+        custom_histogram_buckets={"request_num_preemptions": [0, 1, 2, 5]}
+    )
+    assert config.custom_histogram_buckets == {
+        "request_num_preemptions": [0.0, 1.0, 2.0, 5.0]
+    }
+
+
 @pytest.mark.parametrize(
     ("buckets", "match"),
     [
         ({"bogus": [1.0, 2.0]}, "unknown bucket family 'bogus'"),
         ({"request_latency": []}, "must not be empty"),
-        ({"request_latency": [0.0, 1.0]}, "must be finite and greater than 0"),
-        ({"request_latency": [-1.0, 1.0]}, "must be finite and greater than 0"),
+        ({"request_latency": [-1.0, 1.0]}, "must be finite and non-negative"),
         (
             {"request_latency": [1.0, float("inf")]},
-            "must be finite and greater than 0",
+            "must be finite and non-negative",
         ),
-        ({"request_latency": [float("nan")]}, "must be finite and greater than 0"),
+        ({"request_latency": [float("nan")]}, "must be finite and non-negative"),
+        (
+            {"request_num_preemptions": [0.0]},
+            "must include a bound greater than 0",
+        ),
         ({"request_latency": [1.0, 1.0]}, "must be strictly increasing"),
         ({"request_latency": [2.0, 1.0]}, "must be strictly increasing"),
         ({"request_latency": [True, 2.0]}, "must be a number, not a boolean"),
