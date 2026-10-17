@@ -196,6 +196,27 @@ def test_oot_collective_dispatch_preserves_cuda_fallback(
     ), "Native dispatch uses Torch; CUDA KV fallback preserves Torch's gather"
 
 
+@pytest.mark.parametrize(
+    "platform", ["cuda", "rocm", "cpu", "xpu", "tpu", "out_of_tree"]
+)
+def test_direct_dcp_preserves_platform_fallback(
+    monkeypatch: pytest.MonkeyPatch, platform: str
+) -> None:
+    config = VllmConfig(compilation_config=CompilationConfig(custom_ops=["none"]))
+    group = SimpleNamespace(
+        all_gather=MagicMock(side_effect=lambda query, dim: query),
+    )
+    with set_current_vllm_config(config):
+        for name in ("cuda", "rocm", "cpu", "xpu", "tpu", "out_of_tree"):
+            monkeypatch.setattr(
+                custom_op.current_platform, f"is_{name}", lambda n=name: n == platform
+            )
+        op = dcp.DirectDCPQGather(group)
+    query = torch.ones(2, 2, 4)
+    assert op(query) is query, "Each platform must retain its existing gather path"
+    group.all_gather.assert_called_once_with(query, dim=1)
+
+
 @pytest.mark.parametrize("backend", ["native", "cuda"])
 @pytest.mark.parametrize("world_size, num_heads", [(1, 3), (2, 3)])
 def test_direct_dcp_a2a_fallback_checks(
