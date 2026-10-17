@@ -274,6 +274,21 @@ class FlashInferMLASparseMetadataBuilder(
             supports_spec_as_decode=True,
             supports_dcp_with_varlen=True,
         )
+        self.supports_draft_decode_metadata_update = self.dcp_world_size == 1
+
+    def update_draft_decode_metadata(
+        self,
+        metadata: FlashInferMLASparseMetadata,
+    ) -> None:
+        num_tokens = metadata.num_decode_tokens
+        if num_tokens == 0:
+            return
+        compute_token_to_req_indices(
+            metadata.query_start_loc,
+            metadata.req_id_per_token,
+            num_tokens,
+            num_tokens,
+        )
 
 
 class FlashInferMLASparseTRTLLMMetadataBuilder(FlashInferMLASparseMetadataBuilder):
