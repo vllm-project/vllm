@@ -39,6 +39,7 @@ try:
         init_module,
         python_create_and_map,
         python_unmap_and_release,
+        set_host_numa_node,
     )
     from vllm.distributed.device_communicators.cuda_wrapper import CudaRTLibrary
 
@@ -50,6 +51,7 @@ except ModuleNotFoundError:
     init_module = None
     python_create_and_map = None
     python_unmap_and_release = None
+    set_host_numa_node = None
     lib_name = None
 
 
@@ -364,7 +366,7 @@ class CuMemAllocator:
                     torch.accelerator.synchronize()
 
     @contextmanager
-    def use_memory_pool(self, tag: str | None = None):
+    def use_memory_pool(self, tag: str | None = None, host_pinned: bool = False):
         """A context manager to use the memory pool.
         All memory allocation created inside the context will be allocated
         in the memory pool, and has the specified tag.
@@ -372,6 +374,10 @@ class CuMemAllocator:
         Args:
             tag: The tag of the memory allocation. If None, the default tag
                 will be used.
+            host_pinned: Back the allocations with host-pinned memory on the
+                device's host NUMA node (cuMemCreate HOST_NUMA) instead of
+                device memory. The tensors stay CUDA tensors; on UMA parts
+                (GB10) this is what makes them RDMA-registrable.
 
         """
         if tag is None:
@@ -395,6 +401,9 @@ class CuMemAllocator:
 
         old_tag = self.current_tag
         self.current_tag = tag
+        device = torch.accelerator.current_device_index()
+        if host_pinned:
+            set_host_numa_node(device, True)
         try:
             if tag != old_tag:
                 # Older pools of this tag are never reused, so trim them.
@@ -423,6 +432,8 @@ class CuMemAllocator:
                 # TODO: ask for help from PyTorch team to expose this method.
                 self._trim(data[0])
         finally:
+            if host_pinned:
+                set_host_numa_node(device, False)
             self.current_tag = old_tag
             if expandable_was_enabled:
                 set_alloc_conf(prev_conf)
