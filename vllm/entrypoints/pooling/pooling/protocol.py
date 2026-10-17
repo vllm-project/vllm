@@ -3,11 +3,13 @@
 import time
 from typing import Annotated, Generic, TypeAlias, TypeVar
 
-from pydantic import BeforeValidator, Field
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, model_validator
 
 from vllm import PoolingParams
 from vllm.config import ModelConfig
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel, UsageInfo
+from vllm.outputs import LateChunkingMetadata
+from vllm.pooling_params import LateChunkingParams
 from vllm.renderers import TokenizeParams
 from vllm.tasks import PoolingTask
 from vllm.utils import random_uuid
@@ -24,6 +26,12 @@ from ..base.protocol import (
 )
 
 
+class LateChunkingConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    chunk_size: int = Field(gt=0, le=2**63 - 1, strict=True)
+
+
 class PoolingCompletionRequest(
     PoolingBasicRequestMixin,
     CompletionRequestMixin,
@@ -32,12 +40,27 @@ class PoolingCompletionRequest(
     FixedMaxLenTokenizeParamsMixin,
 ):
     task: PoolingTask | None = None
+    late_chunking_params: LateChunkingConfig | None = None
+
+    @model_validator(mode="after")
+    def check_late_chunking(self):
+        if self.late_chunking_params is not None:
+            if self.task not in (None, "token_embed"):
+                raise ValueError("Late chunking requires token_embed")
+            if self.encoding_format != "float":
+                raise ValueError("Late chunking requires encoding_format='float'")
+        return self
 
     def to_pooling_params(self):
         return PoolingParams(
             task=self.task,
             use_activation=self.use_activation,
             dimensions=self.dimensions,
+            late_chunking_params=(
+                LateChunkingParams(chunk_size=self.late_chunking_params.chunk_size)
+                if self.late_chunking_params is not None
+                else None
+            ),
         )
 
 
@@ -103,6 +126,9 @@ class PoolingResponseData(OpenAIBaseModel):
     index: int
     object: str = "pooling"
     data: list[list[float]] | list[float] | str
+    late_chunking: LateChunkingMetadata | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
 
 class PoolingResponse(OpenAIBaseModel):

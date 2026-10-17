@@ -216,8 +216,8 @@ def test_token_classify(pooling_type: str):
             pooling_params.verify(model_config)
 
 
-@pytest.mark.parametrize("value", [0, -1, True, False, 1.5, "2"])
-def test_late_chunk_size_rejects_non_positive_integers(value):
+@pytest.mark.parametrize("value", [0, -1, True, False, 1.5, "2", 2**63, 2**64])
+def test_late_chunk_size_rejects_invalid_integers(value):
     with pytest.raises(VLLMValidationError, match="positive integer"):
         PoolingParams(late_chunking_params=LateChunkingParams(chunk_size=value))
 
@@ -232,10 +232,11 @@ def _late_chunking_model_config():
     )
 
 
-def test_late_chunking_params_preserve_defaults_clone_and_wire_format():
+@pytest.mark.parametrize("chunk_size", [3, 2**63 - 1])
+def test_late_chunking_params_preserve_defaults_clone_and_wire_format(chunk_size):
     model_config = _late_chunking_model_config()
     params = PoolingParams(
-        task="token_embed", late_chunking_params=LateChunkingParams(chunk_size=3)
+        task="token_embed", late_chunking_params=LateChunkingParams(chunk_size)
     )
     params.verify(model_config)
     assert params.skip_reading_prefix_cache is True
@@ -252,11 +253,11 @@ def test_late_chunking_params_preserve_defaults_clone_and_wire_format():
     assert clone.late_chunking_params is not None
     clone.late_chunking_params.chunk_size = 7
     assert params.late_chunking_params is not None
-    assert params.late_chunking_params.chunk_size == 3
+    assert params.late_chunking_params.chunk_size == chunk_size
     # Workers receive only the fixed chunk size, never source ranges.
     assert msgspec.msgpack.decode(
         msgspec.msgpack.encode(params.late_chunking_params)
-    ) == [3]
+    ) == [chunk_size]
     assert (
         msgspec.msgpack.decode(msgspec.msgpack.encode(params), type=PoolingParams)
         == params

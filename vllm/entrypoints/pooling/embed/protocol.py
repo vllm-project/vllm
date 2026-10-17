@@ -29,6 +29,7 @@ from ..base.protocol import (
     EmbedRequestMixin,
     PoolingBasicRequestMixin,
     reject_removed_pooling_parameters,
+    reject_unsupported_late_chunking,
 )
 
 
@@ -237,6 +238,11 @@ class CohereEmbedRequest(BaseModel):
     truncate: CohereTruncate = "END"
     max_tokens: int | None = None
     priority: int = Field(default=0, ge=-(2**63), le=2**63 - 1)
+
+    @model_validator(mode="before")
+    @classmethod
+    def check_late_chunking_support(cls, data):
+        return reject_unsupported_late_chunking(data)
 
     @model_validator(mode="after")
     def validate_input_fields(self):

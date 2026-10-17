@@ -157,6 +157,7 @@ class ServingPooling(PoolingBaseServing):
             item = PoolingResponseData(
                 index=idx,
                 data=encode_fn(final_res),
+                late_chunking=final_res.late_chunking,
             )
 
             items.append(item)
