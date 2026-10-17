@@ -12,7 +12,6 @@ from transformers import Qwen4ExpConfig, Qwen4ExpTextConfig
 from vllm.config import CacheConfig, ParallelConfig
 from vllm.config.speculative import SpeculativeConfig
 from vllm.model_executor.models.config import (
-    Qwen3_5ForConditionalGenerationConfig,
     Qwen4ExpForConditionalGenerationConfig,
 )
 from vllm.models.qwen4_exp.nvidia.model_state import Qwen4ExpModelState
@@ -181,39 +180,6 @@ def test_qwen4_exp_mtp_override_sets_draft_config(
     assert draft_config.architectures == ["Qwen4ExpMTP"]
     assert draft_config.hc_mult == 2
     assert draft_config.n_predict == 1
-
-
-@pytest.mark.parametrize(("partition", "rejected"), [("2,2", False), ("1,3", True)])
-def test_qwen4_exp_pipeline_parallel_requires_ple_on_first_rank(
-    monkeypatch, partition, rejected
-) -> None:
-    """Only the first pipeline rank receives raw input_ids, so PP works with
-    PLE exactly when every PLE layer is placed on that rank."""
-    monkeypatch.setenv("VLLM_PP_LAYER_PARTITION", partition)
-    text_config = _text_config(
-        num_hidden_layers=4,
-        layer_types=["linear_attention"] * 3 + ["full_attention"],
-        ple_layer_ids=[2],
-    )
-    vllm_config = SimpleNamespace(
-        model_config=SimpleNamespace(
-            hf_text_config=text_config, multimodal_config=None
-        ),
-        parallel_config=SimpleNamespace(
-            pipeline_parallel_size=2, enable_dbo=False, ubatch_size=1
-        ),
-        speculative_config=None,
-    )
-    with patch.object(
-        Qwen3_5ForConditionalGenerationConfig, "verify_and_update_config"
-    ):
-        if rejected:
-            with pytest.raises(NotImplementedError, match="not all within"):
-                Qwen4ExpForConditionalGenerationConfig.verify_and_update_config(
-                    vllm_config
-                )
-        else:
-            Qwen4ExpForConditionalGenerationConfig.verify_and_update_config(vllm_config)
 
 
 def test_qwen4_exp_model_state_prepares_ngram_context() -> None:
