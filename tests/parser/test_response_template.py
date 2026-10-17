@@ -472,6 +472,26 @@ def test_reasoning_gate_honors_disabled_and_repeated_thinking():
 
 
 @pytest.mark.parametrize(
+    ("prompt_token_ids", "output", "expected"),
+    [
+        (PROMPT_TOKEN_IDS, [50, 101, 102, 102, 51, 103], 2),
+        (OPEN_REASONING_PROMPT_TOKEN_IDS, [102, 102, 102, 51, 103], 3),
+        (PROMPT_TOKEN_IDS, [50, 101, 102, 102, 102], 3),
+        (PROMPT_TOKEN_IDS, [103, 103], 0),
+    ],
+    ids=["closed", "opened_by_prompt", "unclosed", "no_thinking"],
+)
+def test_count_reasoning_tokens_counts_thinking_content(
+    prompt_token_ids, output, expected
+):
+    """Usage reports the tokens of the thinking region, without delimiters."""
+    parser = ResponseTemplateParser(FakeTokenizer(GEMMA4_RESPONSE_TEMPLATE), TOOLS)
+    parser.set_prompt_token_ids(prompt_token_ids)
+
+    assert parser.count_reasoning_tokens(output) == expected
+
+
+@pytest.mark.parametrize(
     "text",
     [
         "Hello<turn|>",
