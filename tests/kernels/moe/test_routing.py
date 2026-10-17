@@ -9,6 +9,11 @@ import torch
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
+from vllm.model_executor.layers.fused_moe.layer import (
+    _adapt_routed_experts_cls,
+    _adapt_runner_cls,
+)
+from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.layers.fused_moe.router.base_router import (
     eplb_map_to_physical_and_record,
 )
@@ -24,6 +29,7 @@ from vllm.model_executor.layers.fused_moe.router.grouped_topk_router import (
 from vllm.model_executor.layers.fused_moe.router.router_factory import (
     create_fused_moe_router,
 )
+from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
 from vllm.model_executor.models.llama4 import Llama4MoE
 from vllm.platforms import current_platform
 
@@ -73,6 +79,96 @@ def test_degenerate_grouped_config_uses_standard_topk() -> None:
         baseline_weights,
         baseline_ids,
     )
+
+
+def test_platform_router_constructor_accepts_compatible_sibling() -> None:
+    def choose_constructor(selected_cls):
+        if selected_cls is FusedTopKRouter:
+            return lambda **kwargs: FusedTopKBiasRouter(**kwargs)
+        return selected_cls
+
+    with (
+        patch.object(current_platform, "is_cpu", return_value=False),
+        patch.object(
+            current_platform,
+            "get_fused_moe_router_constructor",
+            side_effect=choose_constructor,
+        ),
+    ):
+        router = create_fused_moe_router(top_k=2, global_num_experts=8)
+    assert isinstance(router, FusedTopKBiasRouter)
+
+
+def test_platform_router_constructor_rejects_non_router() -> None:
+    with (
+        patch.object(current_platform, "is_cpu", return_value=False),
+        patch.object(
+            current_platform,
+            "get_fused_moe_router_constructor",
+            return_value=lambda **kwargs: object(),
+        ),
+        pytest.raises(TypeError, match="must return FusedMoERouter"),
+    ):
+        create_fused_moe_router(top_k=2, global_num_experts=8)
+
+
+def test_platform_adapts_selected_fused_moe_component_classes() -> None:
+    class ModelRoutedExperts(RoutedExperts):
+        pass
+
+    class PlatformRoutedExperts(ModelRoutedExperts):
+        pass
+
+    class ModelRunner(MoERunner):
+        pass
+
+    class PlatformRunner(ModelRunner):
+        pass
+
+    with (
+        patch.object(
+            current_platform,
+            "get_fused_moe_routed_experts_cls",
+            return_value=PlatformRoutedExperts,
+        ) as routed_experts_hook,
+        patch.object(
+            current_platform,
+            "get_fused_moe_runner_cls",
+            return_value=PlatformRunner,
+        ) as runner_hook,
+    ):
+        assert _adapt_routed_experts_cls(ModelRoutedExperts) is PlatformRoutedExperts
+        assert _adapt_runner_cls(ModelRunner) is PlatformRunner
+
+    routed_experts_hook.assert_called_once_with(ModelRoutedExperts)
+    runner_hook.assert_called_once_with(ModelRunner)
+
+
+@pytest.mark.parametrize(
+    ("adapter", "hook_name", "selected_cls", "message"),
+    [
+        (
+            _adapt_routed_experts_cls,
+            "get_fused_moe_routed_experts_cls",
+            RoutedExperts,
+            "must return a RoutedExperts class",
+        ),
+        (
+            _adapt_runner_cls,
+            "get_fused_moe_runner_cls",
+            MoERunner,
+            "must return a MoERunner class",
+        ),
+    ],
+)
+def test_platform_rejects_invalid_fused_moe_component_class(
+    adapter, hook_name, selected_cls, message
+) -> None:
+    with (
+        patch.object(current_platform, hook_name, return_value=object),
+        pytest.raises(TypeError, match=message),
+    ):
+        adapter(selected_cls)
 
 
 def test_multiple_expert_groups_use_grouped_topk() -> None:
