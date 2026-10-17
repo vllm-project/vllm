@@ -150,3 +150,256 @@ tests:
       - equal:
           path: spec.template.spec.initContainers[1].ports[0].containerPort
           value: 8080
+
+  - it: should render the default startup probe and rollout deadline
+    asserts:
+      - equal:
+          path: spec.progressDeadlineSeconds
+          value: 2100
+      - equal:
+          path: spec.template.spec.containers[0].startupProbe
+          value:
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: 10
+            failureThreshold: 180
+      - equal:
+          path: spec.template.spec.containers[0].readinessProbe
+          value:
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 3
+            httpGet:
+              path: /health
+              port: 8000
+      - equal:
+          path: spec.template.spec.containers[0].livenessProbe
+          value:
+            initialDelaySeconds: 15
+            failureThreshold: 3
+            periodSeconds: 10
+            httpGet:
+              path: /health
+              port: 8000
+
+  - it: should omit startupProbe when it is null
+    set:
+      startupProbe: null
+    asserts:
+      - notExists:
+          path: spec.template.spec.containers[0].startupProbe
+      - equal:
+          path: spec.template.spec.containers[0].readinessProbe.httpGet.path
+          value: /health
+      - equal:
+          path: spec.template.spec.containers[0].readinessProbe.periodSeconds
+          value: 5
+      - equal:
+          path: spec.template.spec.containers[0].livenessProbe.httpGet.path
+          value: /health
+      - equal:
+          path: spec.template.spec.containers[0].livenessProbe.failureThreshold
+          value: 3
+
+  - it: should render a custom HTTP startup probe
+    set:
+      startupProbe:
+        httpGet:
+          path: /ready
+          port: 8080
+        periodSeconds: 15
+        failureThreshold: 40
+        timeoutSeconds: 3
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].startupProbe
+          value:
+            httpGet:
+              path: /ready
+              port: 8080
+            periodSeconds: 15
+            failureThreshold: 40
+            timeoutSeconds: 3
+      - equal:
+          path: spec.template.spec.containers[0].readinessProbe.httpGet.port
+          value: 8000
+      - equal:
+          path: spec.template.spec.containers[0].livenessProbe.httpGet.port
+          value: 8000
+
+  - it: should replace the startup HTTP handler with an exec probe
+    set:
+      startupProbe:
+        httpGet: null
+        exec:
+          command:
+            - sh
+            - -c
+            - test -f /tmp/model-ready
+        periodSeconds: 5
+        failureThreshold: 360
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].startupProbe
+          value:
+            exec:
+              command:
+                - sh
+                - -c
+                - test -f /tmp/model-ready
+            periodSeconds: 5
+            failureThreshold: 360
+      - notExists:
+          path: spec.template.spec.containers[0].startupProbe.httpGet
+      - equal:
+          path: spec.template.spec.containers[0].readinessProbe.httpGet.path
+          value: /health
+      - equal:
+          path: spec.template.spec.containers[0].livenessProbe.httpGet.path
+          value: /health
+
+  - it: should use an overridden rollout deadline
+    set:
+      progressDeadlineSeconds: 3600
+    asserts:
+      - equal:
+          path: spec.progressDeadlineSeconds
+          value: 3600
+
+  - it: should render a tcpSocket startup probe when httpGet is null
+    set:
+      startupProbe:
+        httpGet: null
+        tcpSocket:
+          port: 8000
+        periodSeconds: 10
+        failureThreshold: 90
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].startupProbe.tcpSocket.port
+          value: 8000
+      - equal:
+          path: spec.template.spec.containers[0].startupProbe.periodSeconds
+          value: 10
+      - notExists:
+          path: spec.template.spec.containers[0].startupProbe.httpGet
+      - equal:
+          path: spec.template.spec.containers[0].readinessProbe.httpGet.path
+          value: /health
+      - equal:
+          path: spec.template.spec.containers[0].livenessProbe.httpGet.path
+          value: /health
+
+  - it: should reject a non-object startupProbe
+    set:
+      startupProbe: "not-a-probe"
+    asserts:
+      - failedTemplate:
+          errorPattern: "startupProbe"
+
+  - it: should reject a rollout deadline below 1
+    set:
+      progressDeadlineSeconds: 0
+    asserts:
+      - failedTemplate:
+          errorPattern: "progressDeadlineSeconds"
+
+  - it: should accept a Kubernetes CPU quantity
+    set:
+      resources:
+        requests:
+          cpu: 500m
+        limits:
+          cpu: 500m
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].resources.requests.cpu
+          value: 500m
+      - equal:
+          path: spec.template.spec.containers[0].resources.limits.cpu
+          value: 500m
+
+  - it: should accept a named liveness HTTP port
+    set:
+      livenessProbe:
+        httpGet:
+          port: http
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].livenessProbe.httpGet.port
+          value: http
+      - equal:
+          path: spec.template.spec.containers[0].livenessProbe.httpGet.path
+          value: /health
+      - equal:
+          path: spec.template.spec.containers[0].readinessProbe.httpGet.port
+          value: 8000
+
+  - it: should omit readiness and liveness probes when they are null
+    set:
+      readinessProbe: null
+      livenessProbe: null
+    asserts:
+      - notExists:
+          path: spec.template.spec.containers[0].readinessProbe
+      - notExists:
+          path: spec.template.spec.containers[0].livenessProbe
+      - equal:
+          path: spec.template.spec.containers[0].startupProbe.httpGet.path
+          value: /health
+
+  - it: should replace the liveness HTTP handler with an exec probe
+    set:
+      livenessProbe:
+        httpGet: null
+        exec:
+          command:
+            - sh
+            - -c
+            - kill -0 1
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].livenessProbe.exec.command
+          value:
+            - sh
+            - -c
+            - kill -0 1
+      - notExists:
+          path: spec.template.spec.containers[0].livenessProbe.httpGet
+      - equal:
+          path: spec.template.spec.containers[0].readinessProbe.httpGet.path
+          value: /health
+
+  - it: should replace the readiness HTTP handler with a tcpSocket probe
+    set:
+      readinessProbe:
+        httpGet: null
+        tcpSocket:
+          port: http
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].readinessProbe.tcpSocket.port
+          value: http
+      - notExists:
+          path: spec.template.spec.containers[0].readinessProbe.httpGet
+      - equal:
+          path: spec.template.spec.containers[0].livenessProbe.httpGet.port
+          value: 8000
+
+  - it: should accept a startup success threshold of 1
+    set:
+      startupProbe:
+        successThreshold: 1
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].startupProbe.successThreshold
+          value: 1
+
+  - it: should reject a startup success threshold other than 1
+    set:
+      startupProbe:
+        successThreshold: 2
+    asserts:
+      - failedTemplate:
+          errorPattern: "successThreshold"
