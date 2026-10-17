@@ -225,6 +225,7 @@ class OpenAIServingResponses(GenerateBaseServing):
             tokenizer,
             request.tools,
             chat_template_kwargs=chat_template_kwargs,
+            chat_template=self.chat_template,
             model_config=self.model_config,
         )
 

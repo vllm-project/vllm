@@ -321,6 +321,7 @@ class OnlineDerenderer:
             tokenizer,
             chat_request.tools,
             chat_template_kwargs=chat_template_kwargs,
+            chat_template=chat_request.chat_template or self.chat_template,
             model_config=self.model_config,
         )
         if prompt_token_ids is not None:
@@ -617,6 +618,7 @@ class OnlineDerenderer:
             tokenizer,
             chat_request.tools,
             chat_template_kwargs=self._resolve_chat_template_kwargs(chat_request),
+            chat_template=chat_request.chat_template or self.chat_template,
             model_config=self.model_config,
         )
 
