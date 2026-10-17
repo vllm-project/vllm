@@ -8,8 +8,71 @@ from typing import Any
 
 import pytest
 
+from vllm.distributed.device_communicators.shm_broadcast import MessageQueue
+from vllm.distributed.parallel_state import GroupCoordinator
+from vllm.v1.executor import multiproc_executor
 from vllm.v1.executor.multiproc_executor import MultiprocExecutor, WorkerProc
 from vllm.v1.outputs import DraftTokenIds
+
+
+@pytest.mark.parametrize("nnodes", [1, 2])
+@pytest.mark.parametrize("concurrent_batches", [2, 9, 17])
+def test_response_queue_holds_pipeline_replies(monkeypatch, nnodes, concurrent_batches):
+    """A worker can publish the full RPC window before EngineCore drains it."""
+
+    # Replace distributed bootstrap only; exercise the real SHM transport with
+    # small slots since these responses contain no tensors.
+    def make_queue(*args, **kwargs):
+        kwargs["max_chunk_bytes"] = 1024
+        return MessageQueue(*args, **kwargs)
+
+    monkeypatch.setattr(multiproc_executor, "MessageQueue", make_queue)
+    monkeypatch.setattr(
+        make_queue, "create_from_handle", lambda *args: None, raising=False
+    )
+
+    def create_single_reader(pg, max_chunk_bytes, max_chunks, **kwargs):
+        return make_queue(1, 1, max_chunks=max_chunks), []
+
+    monkeypatch.setattr(
+        MessageQueue, "create_from_process_group_single_reader", create_single_reader
+    )
+    group: Any = GroupCoordinator.__new__(GroupCoordinator)
+    group.cpu_group = None
+    group.ranks = [0]
+    monkeypatch.setattr(group, "create_mq_broadcaster", lambda **kwargs: None)
+    monkeypatch.setattr(multiproc_executor, "get_inner_dp_world_group", lambda: group)
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(nnodes_within_dp=nnodes),
+        max_concurrent_batches=concurrent_batches,
+    )
+    worker: Any = WorkerProc.__new__(WorkerProc)
+    worker.worker = SimpleNamespace(rank=0)
+    worker._init_message_queues(None, config)
+    writer = worker.worker_response_mq
+    reader = MessageQueue.create_from_handle(writer.export_handle(), rank=0)
+    try:
+        writer.wait_until_ready()
+        reader.wait_until_ready()
+        # Repeated windows wrap the ring and verify that consumed slots can be
+        # reused without overwriting or reordering any worker's replies.
+        for window in range(3):
+            replies = [
+                (window, batch, method)
+                for batch in range(concurrent_batches)
+                for method in ("execute_model", "sample_tokens")
+            ]
+            for reply in replies:
+                writer.enqueue(reply, timeout=1)
+            assert [reader.dequeue(timeout=1) for _ in replies] == replies
+    finally:
+        writer.shutdown()
+        reader.shutdown()
+        for queue in (writer, reader):
+            queue.local_socket.close(linger=0)
+            queue._spin_condition.local_notify_socket.close(linger=0)
+        reader._spin_condition.read_cancel_socket.close(linger=0)
+        reader._spin_condition.write_cancel_socket.close(linger=0)
 
 
 class _ExitWorkerLoop(RuntimeError):
