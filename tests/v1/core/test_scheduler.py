@@ -186,19 +186,30 @@ def test_routed_experts_prompt_start_at_prompt_end(max_tokens):
 
 
 @pytest.mark.parametrize(
-    "external_tokens,max_cache_hit,expected_hit",
-    [(0, 79, 64), (0, 16, 0), (32, 79, 32), (31, 79, 16), (32, 16, 16), (32, 0, 0)],
+    "external_tokens,max_cache_hit,load_alignment,expected_hit",
+    [
+        (0, 79, 1, 64),
+        (0, 16, 1, 0),
+        (32, 79, 1, 32),
+        (31, 79, 1, 16),
+        (32, 16, 1, 16),
+        (64, 63, 32, 32),
+        (32, 16, None, 0),
+        (32, 0, 1, 0),
+    ],
     ids=[
         "local",
         "local-dropped",
         "external",
         "external-unaligned",
         "external-capped",
+        "external-capped-to-connector-unit",
+        "external-whole-only",
         "none",
     ],
 )
 def test_prefix_hit_is_capped_at_retained_auxiliary_outputs(
-    external_tokens, max_cache_hit, expected_hit
+    external_tokens, max_cache_hit, load_alignment, expected_hit
 ):
     scheduler = create_scheduler(
         enable_prefix_caching=True,
@@ -214,7 +225,9 @@ def test_prefix_hit_is_capped_at_retained_auxiliary_outputs(
         scheduler.add_request(first)
         scheduler.schedule()
         scheduler.finish_requests(first.request_id, RequestStatus.FINISHED_ABORTED)
-    connector = AuxOutputSchedulerConnector(scheduler.kv_cache_manager)
+    connector = AuxOutputSchedulerConnector(
+        scheduler.kv_cache_manager, Mock(external_load_alignment=load_alignment)
+    )
     connector.max_cache_hit = Mock(return_value=max_cache_hit)
     scheduler.aux_output_connector = connector
     scheduler.add_request(second)

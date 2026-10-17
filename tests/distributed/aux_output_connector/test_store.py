@@ -83,7 +83,9 @@ def _kv_cache_manager(
         block_size=hashes_per_block * _BLOCK_SIZE, block_pool=block_pool
     )
     return SimpleNamespace(
-        coordinator=SimpleNamespace(single_type_managers=[manager]),
+        coordinator=SimpleNamespace(
+            single_type_managers=[manager], scheduler_block_size=manager.block_size
+        ),
         block_pool=block_pool,
         kv_cache_config=SimpleNamespace(num_blocks=num_blocks),
     )

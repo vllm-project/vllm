@@ -451,7 +451,7 @@ class Scheduler(SchedulerInterface):
             self.perf_metrics = ModelMetrics(vllm_config)
 
         self.aux_output_connector = (
-            AuxOutputSchedulerConnector(self.kv_cache_manager)
+            AuxOutputSchedulerConnector(self.kv_cache_manager, self.connector)
             if vllm_config.aux_output_config.enabled
             else None
         )

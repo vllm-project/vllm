@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import math
 from collections import Counter
 from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
@@ -17,6 +18,7 @@ from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
 
 if TYPE_CHECKING:
     from vllm.distributed.kv_events import ExternalBlockHash, KVCacheEvent
+    from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorBase_V1
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
     from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -59,7 +61,11 @@ class AuxOutputSchedulerConnector:
     CPU KV cache holds them, so every GPU-cached full block has its outputs.
     """
 
-    def __init__(self, kv_cache_manager: KVCacheManager) -> None:
+    def __init__(
+        self,
+        kv_cache_manager: KVCacheManager,
+        kv_connector: KVConnectorBase_V1 | None = None,
+    ) -> None:
         # Number of hashes already sent to the worker for each active request.
         self._sent_hash_counts: dict[str, int] = {}
         # Terminal events are delivered with the next connector metadata.
@@ -73,6 +79,14 @@ class AuxOutputSchedulerConnector:
         # HiSparse moves this group's cache to a host pool after construction.
         self._manager = coordinator.single_type_managers[self._group_id]
         self._block_size = self._manager.block_size
+        # A trimmed external hit ends where the KV connector can stop loading;
+        # None if it loads only whole hits, or a Mamba state ends the load.
+        alignment = kv_connector.external_load_alignment if kv_connector else None
+        self._external_alignment = (
+            math.lcm(coordinator.scheduler_block_size, alignment)
+            if alignment and not kv_cache_manager.kv_cache_config.has_mamba_layers
+            else None
+        )
         # Retained block -> its hash-block hashes; the last is the block's hash.
         self._kv_cached: dict[ExternalBlockHash, Sequence[BlockHash]] = {}
         # CPU chunks holding each block; overlapping chunks announce it again.
@@ -174,18 +188,16 @@ class AuxOutputSchedulerConnector:
     ) -> int:
         """Trim an external hit to the retained outputs.
 
-        Capture resumes on a block boundary, and a Mamba state exists only at
-        the end of the load.
+        Capture resumes on a block boundary, and a trimmed hit on a boundary
+        the KV connector can load to.
         """
         num_hit = min(num_local + num_external, self.max_cache_hit(request))
         num_hit -= num_hit % self._kv_cache_manager.coordinator.scheduler_block_size
-        if num_external <= (max_external := max(num_hit - num_local, 0)):
+        if num_external <= num_hit - num_local:
             return num_external
-        return (
-            0
-            if self._kv_cache_manager.kv_cache_config.has_mamba_layers
-            else max_external
-        )
+        if self._external_alignment is None:
+            return 0
+        return max(num_hit - num_hit % self._external_alignment - num_local, 0)
 
     def request_loading(self, request: Request, num_tokens: int) -> None:
         """Keep an async load's blocks retained until its request is scheduled."""
