@@ -1560,6 +1560,9 @@ class KVCacheConfig:
         assert self.hisparse_host_num_blocks is not None
         return self.hisparse_host_num_blocks
 
+    _force_zeroing: bool = field(default=False, repr=False)
+    """Internal zeroing requirement derived from NaN fault tolerance."""
+
     @property
     def has_mamba_layers(self) -> bool:
         return any(
@@ -1591,4 +1594,8 @@ class KVCacheConfig:
         groups can be reinterpreted under a different precision and decode stale
         bytes to NaN/Inf. Uniform-precision caches skip zeroing.
         """
-        return self.has_mamba_layers or self.has_mixed_precision_kv_cache
+        return (
+            self.has_mamba_layers
+            or self.has_mixed_precision_kv_cache
+            or self._force_zeroing
+        )

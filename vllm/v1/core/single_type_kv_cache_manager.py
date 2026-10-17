@@ -2024,6 +2024,8 @@ class MambaManager(SingleTypeKVCacheManager):
         checkpoint = self._checkpoints.get(request.request_id)
         if checkpoint is not None:
             checkpoint_position, checkpoint_idx = checkpoint
+            if checkpoint_position > num_tokens:
+                return None
             blocks = self.req_to_blocks[request.request_id]
             assert 0 <= checkpoint_idx < len(blocks)
             checkpoint_block = blocks[checkpoint_idx]
