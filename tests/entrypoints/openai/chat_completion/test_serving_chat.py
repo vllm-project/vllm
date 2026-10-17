@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Coroutine
 from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import Any
@@ -894,6 +894,7 @@ async def test_chat_per_request_metrics_follow_server_flag():
         tokenizer=MagicMock(),
         request_metadata=RequestResponseMetadata(request_id="chatcmpl-test-id"),
     )
+    assert not isinstance(disabled_response, ErrorResponse)
     assert disabled_response.metrics is None
     details = disabled_response.usage.completion_tokens_details
     assert details is None or details.reasoning_tokens == 0
@@ -910,6 +911,7 @@ async def test_chat_per_request_metrics_follow_server_flag():
         tokenizer=MagicMock(),
         request_metadata=RequestResponseMetadata(request_id="chatcmpl-test-id"),
     )
+    assert not isinstance(enabled_response, ErrorResponse)
     assert enabled_response.metrics is not None
     assert enabled_response.metrics.time_to_first_token_ms == pytest.approx(500.0)
 
@@ -932,6 +934,7 @@ async def test_chat_per_request_metrics_suppressed_for_n_greater_than_one():
         tokenizer=MagicMock(),
         request_metadata=RequestResponseMetadata(request_id="chatcmpl-test-id"),
     )
+    assert not isinstance(response, ErrorResponse)
     assert response.metrics is None
 
 
@@ -959,7 +962,7 @@ async def test_chat_full_generator_gives_each_choice_parser_the_prompt():
     serving.parser_cls = RecordingParser
     serving.model_config = None
     serving.chat_template = None
-    serving.chat_template_content_format = "auto"
+    serving.chat_template_content_format = "auto"  # type: ignore[misc]  # Final attr
     serving.default_chat_template_kwargs = {}
     request_output = _make_metrics_request_output()
     request_output.prompt_token_ids = [7, 8]
@@ -1346,6 +1349,7 @@ async def test_streaming_reasoning_usage_lifecycle_edges(
         assert outcome == "exhausted" and chunks[-1] == "[DONE]" and not error_chunks
         assert metadata.final_usage_info is not None
         assert metadata.final_usage_info.completion_tokens == expected_tokens
+        assert metadata.final_usage_info.completion_tokens_details is not None
         assert (
             metadata.final_usage_info.completion_tokens_details.reasoning_tokens
             == expected_reasoning
@@ -1497,14 +1501,17 @@ def test_mm_prompt_tokens_details():
     # Zero cached_tokens is still reported (not None), matching the cached-only
     # behavior; multimodal counts ride alongside even when cached_tokens is None.
     details = _make_prompt_tokens_details(True, 0, 0, None)
+    assert details is not None
     assert details.cached_tokens == 0
     assert details.created_cache_tokens == 0
     assert details.multimodal_tokens is None
     details = _make_prompt_tokens_details(True, None, None, counts)
+    assert details is not None
     assert details.cached_tokens is None
     assert details.created_cache_tokens is None
     assert details.multimodal_tokens == {"image": 600, "video": 1200}
     details = _make_prompt_tokens_details(True, 3, 0, counts)
+    assert details is not None
     assert details.cached_tokens == 3
     assert details.created_cache_tokens == 0
     assert details.multimodal_tokens == {"image": 600, "video": 1200}
@@ -1515,7 +1522,9 @@ def test_completion_tokens_details():
 
 
 @pytest.mark.asyncio
-async def test_serving_chat_returns_correct_model_name():
+async def test_serving_chat_returns_correct_model_name(
+    monkeypatch: pytest.MonkeyPatch,
+):
     mock_engine = MagicMock(spec=AsyncLLM)
     mock_engine.errored = False
     mock_engine.model_config = MockModelConfig()
@@ -1528,7 +1537,9 @@ async def test_serving_chat_returns_correct_model_name():
     async def return_model_name(*args, **kwargs):
         return args[3]
 
-    serving_chat.chat_completion_full_generator = return_model_name
+    monkeypatch.setattr(
+        serving_chat, "chat_completion_full_generator", return_model_name
+    )
 
     # Test that full name is returned when short name is requested
     req = ChatCompletionRequest(model=MODEL_NAME_SHORT, messages=messages)
@@ -1836,7 +1847,9 @@ def test_serving_chat_starts_without_tokenizer():
 
 
 @pytest.mark.asyncio
-async def test_serving_chat_mistral_token_ids_prompt_is_validated():
+async def test_serving_chat_mistral_token_ids_prompt_is_validated(
+    monkeypatch: pytest.MonkeyPatch,
+):
     """Regression test: when the Mistral tokenizer path returns token IDs
     directly, we must still apply input length validation and clamp the
     generation budget to the context the prompt leaves over.
@@ -1859,11 +1872,15 @@ async def test_serving_chat_mistral_token_ids_prompt_is_validated():
     )
     # Force the Mistral chat template renderer to return token IDs. The prompt
     # fits the context on its own; only the naive prompt+output sum overflows.
-    mock_renderer.render_messages_async = AsyncMock(
-        return_value=(
-            [],
-            TokensPrompt(prompt_token_ids=list(range(95))),
-        )
+    monkeypatch.setattr(
+        mock_renderer,
+        "render_messages_async",
+        AsyncMock(
+            return_value=(
+                [],
+                TokensPrompt(prompt_token_ids=list(range(95))),
+            )
+        ),
     )
     mock_engine.renderer = mock_renderer
 
@@ -1884,7 +1901,9 @@ async def test_serving_chat_mistral_token_ids_prompt_is_validated():
 
 
 @pytest.mark.asyncio
-async def test_serving_chat_mistral_token_ids_prompt_too_long_is_rejected():
+async def test_serving_chat_mistral_token_ids_prompt_too_long_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+):
     """Regression test: MistralTokenizer token-id prompts must still enforce
     the max context length for the input itself (token_num >= max_model_len).
     """
@@ -1900,13 +1919,17 @@ async def test_serving_chat_mistral_token_ids_prompt_too_long_is_rejected():
     )
     # prompt_token_ids length == max_model_len should be rejected for
     # completion-like requests (ChatCompletionRequest).
-    mock_renderer.render_messages_async = AsyncMock(
-        return_value=(
-            [],
-            TokensPrompt(
-                prompt_token_ids=list(range(mock_engine.model_config.max_model_len))
-            ),
-        )
+    monkeypatch.setattr(
+        mock_renderer,
+        "render_messages_async",
+        AsyncMock(
+            return_value=(
+                [],
+                TokensPrompt(
+                    prompt_token_ids=list(range(mock_engine.model_config.max_model_len))
+                ),
+            )
+        ),
     )
     mock_engine.renderer = mock_renderer
 
@@ -1971,7 +1994,9 @@ async def test_serving_chat_could_load_correct_generation_config():
 
 @pytest.mark.parametrize("model_type", ["gpt_oss", "any"])
 @pytest.mark.asyncio
-async def test_serving_chat_did_set_correct_cache_salt(model_type):
+async def test_serving_chat_did_set_correct_cache_salt(
+    model_type, monkeypatch: pytest.MonkeyPatch
+):
     mock_model_config = MockModelConfig()
     mock_model_config.hf_config.model_type = model_type
 
@@ -1995,7 +2020,7 @@ async def test_serving_chat_did_set_correct_cache_salt(model_type):
 
         return result
 
-    serving_chat.render_chat_request = render_chat_request
+    monkeypatch.setattr(serving_chat, "render_chat_request", render_chat_request)
 
     # Test cache_salt
     req = ChatCompletionRequest(
@@ -2018,6 +2043,7 @@ async def test_serving_chat_did_set_correct_cache_salt(model_type):
         await serving_chat.create_chat_completion(req)
 
     assert len(captured_inputs) == 1
+    assert captured_inputs[0]["type"] == "token"
     assert captured_inputs[0]["cache_salt"] == "test_salt"
 
 
@@ -2275,7 +2301,10 @@ class TestServingChatWithHarmony:
 
         if stream:
             return await accumulate_streaming_response(result)
-        return await result
+        assert isinstance(result, Coroutine)
+        response = await result
+        assert not isinstance(response, ErrorResponse)
+        return response
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -3147,6 +3176,7 @@ async def test_chat_kv_transfer_prompt_token_ids_ignored_with_echo(ids):
 
     conversation, engine_inputs = result
     assert [msg["role"] for msg in conversation] == ["user"]
+    assert engine_inputs[0]["type"] == "token"
     assert engine_inputs[0]["prompt_token_ids"] != ids
     assert request.kv_transfer_params == {"do_remote_prefill": True}
 
@@ -3283,6 +3313,7 @@ async def test_non_streaming_finish_reason_matches_tool_calls(
     serving_chat = _build_serving_chat(
         _build_mock_engine(), tool_parser="hermes", enable_auto_tools=True
     )
+    assert serving_chat.parser_cls is not None
     # Parse required/named calls from the native <tool_call> format regardless
     # of VLLM_ENFORCE_STRICT_TOOL_CALLING, so one text serves every case.
     monkeypatch.setattr(
