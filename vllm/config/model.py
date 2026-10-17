@@ -513,8 +513,8 @@ class ModelConfig:
             )
         return hash_factors(factors)
 
+    @staticmethod
     def _update_nested(
-        self,
         target: PreTrainedConfig | dict[str, Any],
         updates: dict[str, Any],
     ) -> None:
@@ -532,7 +532,7 @@ class ModelConfig:
                     isinstance(nested_target, dict)
                     or hasattr(nested_target, "__dict__")
                 ):
-                    self._update_nested(nested_target, value)
+                    ModelConfig._update_nested(nested_target, value)
                     continue
 
             # Set the value (base case)
@@ -541,8 +541,8 @@ class ModelConfig:
             else:
                 setattr(target, key, value)
 
+    @staticmethod
     def _apply_dict_overrides(
-        self,
         config: PreTrainedConfig,
         overrides: dict[str, Any],
     ) -> None:
@@ -553,7 +553,7 @@ class ModelConfig:
             attr = getattr(config, key, None)
             if attr is not None and isinstance(attr, PreTrainedConfig):
                 # It's a nested config - recursively update it
-                self._update_nested(attr, value)
+                ModelConfig._update_nested(attr, value)
             else:
                 # It's a dict-valued parameter - set it directly
                 setattr(config, key, value)
