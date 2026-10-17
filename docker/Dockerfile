@@ -643,9 +643,11 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         python3 tools/use_existing_torch.py --prefix; \
     fi
 
-# Build the vLLM wheel
+# Build the vLLM wheel. dirty=false matches the Rust frontend build, since
+# .dockerignore drops tracked paths (e.g. /recipes) from the build context.
 RUN --mount=type=cache,target=/opt/uv/cache \
     --mount=type=bind,source=.git,target=.git \
+    export SETUPTOOLS_SCM_PRETEND_METADATA="{dirty=false}" && \
     if [ "${vllm_target_device}" = "cuda" ]; then \
         export VLLM_USE_PRECOMPILED=1; \
         export VLLM_PRECOMPILED_WHEEL_LOCATION=$(ls /precompiled-wheels/*.whl); \

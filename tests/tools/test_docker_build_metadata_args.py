@@ -180,6 +180,16 @@ def test_rust_build_cache_excludes_git_metadata() -> None:
         assert "bash tools/build_rust.sh" in exact_version_stage
 
 
+def test_wheel_version_matches_rust_frontend_dirty_flag() -> None:
+    dockerfile = (REPO_ROOT / "docker" / "Dockerfile").read_text()
+    build_stage = dockerfile.split("FROM base AS build", maxsplit=1)[1]
+    build_stage = build_stage.split("\nFROM ", maxsplit=1)[0]
+    wheel_build = build_stage.split("# Build the vLLM wheel", maxsplit=1)[1]
+    wheel_build = wheel_build.split("bdist_wheel", maxsplit=1)[0]
+
+    assert 'SETUPTOOLS_SCM_PRETEND_METADATA="{dirty=false}"' in wheel_build
+
+
 def test_rocm_ci_base_bake_embeds_content_hash_label() -> None:
     bake_file = (REPO_ROOT / "docker" / "docker-bake-rocm.hcl").read_text()
 
