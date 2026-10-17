@@ -2424,6 +2424,11 @@ def grouped_topk(
         raise NotImplementedError(
             "The fused grouped_topk kernel is only available on CUDA and XPU platforms"
         )
+    if scores.shape[0] == 0:
+        return (
+            scores.new_empty((0, topk), dtype=torch.float32),
+            scores.new_empty((0, topk), dtype=torch.int32),
+        )
     return torch.ops._moe_C.grouped_topk(
         scores,
         num_expert_group,
