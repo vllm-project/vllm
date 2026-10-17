@@ -980,6 +980,103 @@ def test_int4_w4a16_cpu_fused_moe(M, N, K, E, topk, group_size, quant_algo, seed
     torch.testing.assert_close(ref_out.bfloat16(), out, atol=1e-2, rtol=1e-2)
 
 
+@pytest.mark.parametrize("M", [1, 2, 64])
+@pytest.mark.parametrize("N,K,E,topk,group_size", INT4_MOE_CONFIGS)
+@pytest.mark.parametrize("quant_algo", [ops.CPUQuantAlgo.GPTQ, ops.CPUQuantAlgo.AWQ])
+@pytest.mark.parametrize("seed", [0])
+def test_int4_w4a16_cpu_fused_moe_defer_finalize(
+    M, N, K, E, topk, group_size, quant_algo, seed
+):
+    """defer_finalize=True must return the same raw per-route rows that
+    defer_finalize=False internally reduces, i.e. reference[m] ==
+    (raw[m] * topk_weight[m, :, None]).sum(dim=0)."""
+    set_random_seed(seed)
+
+    a = torch.randn(M, K, dtype=torch.bfloat16) / (0.5 * K**0.5)
+    (
+        _w1_int4,
+        _w2_int4,
+        w1_packed,
+        w2_packed,
+        _w1_zeros,
+        _w2_zeros,
+        w1_zeros_packed,
+        w2_zeros_packed,
+        w1_s,
+        w2_s,
+    ) = _make_int4_moe_weights(E, N, K, group_size, quant_algo)
+
+    score = torch.randn(M, E, dtype=torch.bfloat16)
+    score = torch.softmax(score, dim=-1, dtype=torch.float32)
+    topk_weight, topk_ids = torch.topk(score, topk)
+    topk_ids = topk_ids.to(torch.int32)
+
+    from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
+        prepare_int4_moe_layer_for_cpu,
+    )
+
+    (blocked_w1, blocked_w2, blocked_s1, blocked_s2, blocked_z1, blocked_z2) = (
+        prepare_int4_moe_layer_for_cpu(
+            w1_packed,
+            w2_packed,
+            w1_s,
+            w2_s,
+            quant_algo=quant_algo,
+            w13_zeros=w1_zeros_packed,
+            w2_zeros=w2_zeros_packed,
+        )
+    )
+
+    reduced_out = torch.empty_like(a)
+    ops.fused_experts_cpu(
+        reduced_out,
+        a.clone(),
+        blocked_w1,
+        blocked_w2,
+        topk_weight,
+        topk_ids,
+        ops.CPUQuantMethod.INT4_W4A8,
+        blocked_s1,
+        blocked_s2,
+        blocked_z1,
+        blocked_z2,
+        None,  # block_size
+        None,  # w1_bias
+        None,  # w2_bias
+        None,  # alpha
+        None,  # limit
+        is_vnni=True,
+        defer_finalize=False,
+    )
+
+    raw_out = torch.empty(M, topk, K, dtype=torch.bfloat16)
+    ops.fused_experts_cpu(
+        raw_out,
+        a.clone(),
+        blocked_w1,
+        blocked_w2,
+        topk_weight,
+        topk_ids,
+        ops.CPUQuantMethod.INT4_W4A8,
+        blocked_s1,
+        blocked_s2,
+        blocked_z1,
+        blocked_z2,
+        None,  # block_size
+        None,  # w1_bias
+        None,  # w2_bias
+        None,  # alpha
+        None,  # limit
+        is_vnni=True,
+        defer_finalize=True,
+    )
+
+    manual_reduced = (raw_out.float() * topk_weight.unsqueeze(-1)).sum(dim=1)
+    torch.testing.assert_close(
+        reduced_out.float(), manual_reduced, atol=1e-2, rtol=1e-2
+    )
+
+
 # ===========================================================================
 # INT8 W8A8 MoE
 # ===========================================================================

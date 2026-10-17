@@ -173,10 +173,6 @@ class DummyLayer:
     pass
 
 
-class DummyFusedMoE:
-    pass
-
-
 def make_config(**overrides) -> INCConfig:
     kwargs: dict[str, Any] = {
         "weight_bits": 4,
@@ -527,7 +523,9 @@ def test_inc_config_parser_fused_moe_requires_consistent_configs() -> None:
     )
 
     with pytest.raises(ValueError, match="requires consistent quant config"):
-        config.config_parser.resolve(DummyFusedMoE(), "layers.0.block_sparse_moe")
+        config.config_parser.resolve(
+            object.__new__(RoutedExperts), "layers.0.block_sparse_moe"
+        )
 
 
 def test_inc_config_parser_fused_module_requires_consistent_configs() -> None:
@@ -1182,6 +1180,52 @@ def test_wna16_xpu_moe_routes_to_gptq_moe(monkeypatch) -> None:
     assert method is expected_method
     assert captured["layer"] is layer
     assert captured["layer_config"].is_gptq is True
+
+
+def test_wna16_cpu_moe_routes_to_gptq_moe(monkeypatch) -> None:
+    captured = {}
+    expected_method = object()
+
+    class DummyMoeConfig:
+        pass
+
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: False)
+    monkeypatch.setattr(current_platform, "is_xpu", lambda: False)
+    monkeypatch.setattr(current_platform, "is_cpu", lambda: True)
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.inc.schemes."
+        "inc_wna16_scheme._resolve_gptq_moe",
+        lambda layer, layer_config: captured.update(
+            {"layer": layer, "layer_config": layer_config}
+        )
+        or expected_method,
+    )
+
+    layer = object.__new__(RoutedExperts)
+    layer.moe_config = DummyMoeConfig()
+    method = INCWna16Scheme().get_moe_method(
+        make_config(),
+        layer,
+        "model.layers.0.mlp",
+        make_layer_config(group_size=32),
+    )
+
+    assert method is expected_method
+    assert captured["layer"] is layer
+    assert captured["layer_config"].is_gptq is True
+
+
+def test_cpu_experts_int4_supports_minimax2_routing() -> None:
+    from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
+    from vllm.model_executor.layers.fused_moe.experts.cpu_moe import CPUExpertsInt4
+    from vllm.model_executor.layers.quantization.utils.quant_utils import kInt4Static
+
+    assert (
+        CPUExpertsInt4._supports_routing_method(
+            RoutingMethodType.MiniMax2, kInt4Static, None
+        )
+        is True
+    )
 
 
 def test_inc_resolve_scheme_selects_mxfp8() -> None:
