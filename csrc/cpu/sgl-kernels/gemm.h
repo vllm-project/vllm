@@ -247,7 +247,8 @@ void fused_experts_int4_w4a8_kernel_impl(
     int64_t K,
     int64_t E,
     int64_t topk,
-    int64_t num_tokens_post_pad);
+    int64_t num_tokens_post_pad,
+    bool defer_finalize);
 
 template <typename scalar_t>
 void shared_expert_fp8_kernel_impl(

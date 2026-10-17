@@ -3447,6 +3447,7 @@ def fused_experts_cpu(
     limit: float | None = None,
     is_vnni: bool = True,
     a1_scale: torch.Tensor | None = None,
+    defer_finalize: bool = False,
 ) -> None:
     torch.ops._C.fused_experts_cpu(
         out,
@@ -3467,6 +3468,7 @@ def fused_experts_cpu(
         alpha,
         limit,
         is_vnni,
+        defer_finalize,
     )
 
 
@@ -4574,6 +4576,7 @@ def cpu_fused_moe(
     act: str,
     isa: str,
     skip_weighted: bool = False,
+    defer_finalize: bool = False,
 ) -> None:
     torch.ops._C.cpu_fused_moe(
         out,
@@ -4587,6 +4590,7 @@ def cpu_fused_moe(
         skip_weighted,
         act,
         isa,
+        defer_finalize,
     )
 
 

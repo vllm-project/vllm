@@ -52,7 +52,8 @@ void fused_experts_int4_w4a8_kernel_impl(
     int64_t K,
     int64_t E,
     int64_t topk,
-    int64_t num_tokens_post_pad) {
+    int64_t num_tokens_post_pad,
+    bool defer_finalize) {
   constexpr int64_t BLOCK_M = block_size_m();
   constexpr int64_t BLOCK_N = block_size_n();
   int num_threads = at::get_num_threads();
@@ -266,11 +267,17 @@ void fused_experts_int4_w4a8_kernel_impl(
       }
 
       // 2.b copy from C to ic2 in original order
-      //   and also mul topk_weights in float32
+      //   and also mul topk_weights in float32, unless the weighting and
+      //   reduction are deferred to the caller (e.g. a post-expert norm that
+      //   must see the unweighted per-expert row).
       for (int64_t m = 0; m < m_size; ++m) {
         int32_t index = A_ids[m];
-        float weight = topk_weights[index];
-        copy_mul_stub(ic2 + index * K + nb * BLOCK_N, C2 + m * BLOCK_N, weight, n_size);
+        if (defer_finalize) {
+          copy_stub(ic2 + index * K + nb * BLOCK_N, C2 + m * BLOCK_N, n_size);
+        } else {
+          float weight = topk_weights[index];
+          copy_mul_stub(ic2 + index * K + nb * BLOCK_N, C2 + m * BLOCK_N, weight, n_size);
+        }
       }
     }
 
@@ -278,6 +285,12 @@ void fused_experts_int4_w4a8_kernel_impl(
       at::native::cpublas::brgemm_release();
     }
   });
+
+  if (defer_finalize) {
+    // The caller wants the raw, unweighted per-expert rows (ic2 itself, laid
+    // out [M, topk, K] in original token order); skip the weighted reduce.
+    return;
+  }
 
   // stage 3: out = intermediate_cache2.sum(dim=1)
   //   from [M, topk, K] to [M, K]
@@ -317,7 +330,8 @@ void fused_experts_int4_w4a8_kernel_impl(
       int64_t K,                                           \
       int64_t E,                                           \
       int64_t topk,                                        \
-      int64_t num_tokens_post_pad)
+      int64_t num_tokens_post_pad,                          \
+      bool defer_finalize)
 
 INSTANTIATE_MOE_INT4_W4A8_TEMPLATE(at::BFloat16);
 INSTANTIATE_MOE_INT4_W4A8_TEMPLATE(at::Half);

@@ -84,7 +84,8 @@ void fused_moe_impl(scalar_t* __restrict__ output, scalar_t* __restrict__ input,
                     const int32_t token_num, const int32_t expert_num,
                     const int32_t topk_num, const int32_t input_size_13,
                     const int32_t output_size_13, const int32_t input_size_2,
-                    const int32_t output_size_2, const bool skip_weighted) {
+                    const int32_t output_size_2, const bool skip_weighted,
+                    const bool defer_finalize) {
   using scalar_vec_t = typename cpu_utils::VecTypeTrait<scalar_t>::vec_t;
   constexpr int32_t gemm_n_tile_size = gemm_t::NSize;
   constexpr int32_t gemm_m_tile_size = gemm_t::MaxMSize;
@@ -565,6 +566,30 @@ void fused_moe_impl(scalar_t* __restrict__ output, scalar_t* __restrict__ input,
         int32_t* __restrict__ curr_expand_token_id_index_buffer =
             expand_token_id_index_buffer + token_id * topk_num;
         float* __restrict__ curr_weight = topk_weights + token_id * topk_num;
+
+        if (defer_finalize) {
+          // Caller wants the raw, unweighted per-route rows (output is
+          // preallocated as [token_num, topk_num, output_size_2]); skip the
+          // topk-weighted reduce entirely.
+          for (int32_t idx = 0; idx < topk_num; ++idx) {
+            int32_t w2_output_idx = curr_expand_token_id_index_buffer[idx];
+            float* __restrict__ w2_output_iter =
+                w2_gemm_output_buffer + w2_output_idx * output_size_2;
+            scalar_t* __restrict__ curr_output_buffer_iter =
+                output + (token_id * topk_num + idx) * output_size_2;
+            for (int32_t i = 0; i < output_size_2; i += 16) {
+              vec_op::FP32Vec16 vec(w2_output_iter);
+              scalar_vec_t out_vec(vec);
+              out_vec.save(curr_output_buffer_iter);
+
+              // update
+              w2_output_iter += 16;
+              curr_output_buffer_iter += 16;
+            }
+          }
+          continue;
+        }
+
         scalar_t* __restrict__ curr_output_buffer =
             output + token_id * output_size_2;
 
@@ -691,7 +716,8 @@ void cpu_fused_moe(
     const std::optional<torch::Tensor>& w2_bias,  // [expert_num, output_size_2]
     const torch::Tensor& topk_weights,            // [token_num, k], float32
     const torch::Tensor& topk_id,                 // [token_num, k], int32
-    const bool skip_weighted, const std::string& act, const std::string& isa) {
+    const bool skip_weighted, const std::string& act, const std::string& isa,
+    const bool defer_finalize) {
   const int32_t token_num = input.size(0);
   const int32_t input_size_13 = input.size(1);
   const int64_t input_stride = input.stride(0);
@@ -705,6 +731,16 @@ void cpu_fused_moe(
   cpu_utils::ISA isa_type = cpu_utils::get_isa(isa);
   TORCH_CHECK(!skip_weighted || topk_num == 1,
               "skip_weighted is only supported for topk=1 on CPU");
+  if (defer_finalize) {
+    // The caller wants the raw, unweighted per-route rows (skipping the
+    // topk-weighted reduce), so `output` must be preallocated with the
+    // unreduced shape [token_num, topk_num, output_size_2] rather than the
+    // usual [token_num, output_size_2].
+    TORCH_CHECK_EQ(output.dim(), 3);
+    TORCH_CHECK_EQ(output.size(0), token_num);
+    TORCH_CHECK_EQ(output.size(1), topk_num);
+    TORCH_CHECK_EQ(output.size(2), output_size_2);
+  }
 
   VLLM_DISPATCH_FLOATING_TYPES(w13.scalar_type(), "cpu_fused_moe", [&]() {
     CPU_ISA_DISPATCH_IMPL(isa_type, [&]() {
@@ -715,7 +751,7 @@ void cpu_fused_moe(
           w2_bias.has_value() ? w2_bias->data_ptr<scalar_t>() : nullptr,
           topk_weights.data_ptr<float>(), topk_id.data_ptr<int32_t>(), act_type,
           token_num, expert_num, topk_num, input_size_13, output_size_13,
-          input_size_2, output_size_2, skip_weighted);
+          input_size_2, output_size_2, skip_weighted, defer_finalize);
     });
   });
 }

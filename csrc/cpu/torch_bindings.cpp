@@ -78,7 +78,8 @@ void fused_experts_cpu(at::Tensor& out, at::Tensor& hidden_states,
                        const std::optional<at::Tensor>& w1_bias,
                        const std::optional<at::Tensor>& w2_bias,
                        const std::optional<double>& alpha,
-                       const std::optional<double>& limit, bool is_vnni);
+                       const std::optional<double>& limit, bool is_vnni,
+                       bool defer_finalize);
 
 at::Tensor int8_scaled_mm_with_quant(at::Tensor& mat1, at::Tensor& mat2,
                                      at::Tensor& scales2,
@@ -345,7 +346,8 @@ void cpu_fused_moe(torch::Tensor& output, const torch::Tensor& input,
                    const std::optional<torch::Tensor>& w2_bias,
                    const torch::Tensor& topk_weights,
                    const torch::Tensor& topk_id, const bool skip_weighted,
-                   const std::string& act, const std::string& isa);
+                   const std::string& act, const std::string& isa,
+                   const bool defer_finalize);
 
 void prepack_moe_weight_int8(const torch::Tensor& weight,
                              torch::Tensor& packed_weight,
@@ -659,7 +661,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "int moe_comp_method, Tensor? w1_scale, Tensor? w2_scale, "
       "Tensor? w1_zero, Tensor? w2_zero, Tensor? a1_scale, int[]? block_size, "
       "Tensor? w1_bias, Tensor? w2_bias, float? alpha, float? limit, "
-      "bool is_vnni) -> "
+      "bool is_vnni, bool defer_finalize) -> "
       "()");
   ops.impl("fused_experts_cpu", torch::kCPU, &fused_experts_cpu);
   ops.def(
@@ -929,7 +931,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "cpu_fused_moe(Tensor(a0!) output, Tensor input, Tensor w13, Tensor w2, "
       "Tensor? w13_bias, Tensor? w2_bias, Tensor topk_weights, Tensor topk_id, "
       "bool skip_weighted, "
-      "str act, str isa) -> ()");
+      "str act, str isa, bool defer_finalize) -> ()");
   ops.impl("cpu_fused_moe", torch::kCPU, &cpu_fused_moe);
 
 #if (defined(ARM_I8MM_SUPPORT) && defined(ARM_BF16_SUPPORT) && \

@@ -910,7 +910,10 @@ void fused_experts_cpu(
     const std::optional<at::Tensor>& w2_bias,
     const std::optional<double>& alpha,
     const std::optional<double>& limit,
-    bool is_vnni) {
+    bool is_vnni,
+    bool defer_finalize) {
+  TORCH_CHECK(!defer_finalize || moe_comp_method == CPUQuantMethod::INT4_W4A8,
+              "defer_finalize is only supported for INT4_W4A8.");
   auto packed_w1 = is_vnni ? w1 : convert_weight_packed(w1);
   auto packed_w2 = is_vnni ? w2 : convert_weight_packed(w2);
 
@@ -976,6 +979,17 @@ void fused_experts_cpu(
   check_moe_scales(moe_comp_method, w1_scale, w2_scale, block_size);
 
   at::Tensor& out_hidden_states = out;
+  if (defer_finalize) {
+    // The caller wants the raw, unweighted per-expert rows (skipping the
+    // topk-weighted reduce), so `out` must be preallocated with the
+    // unreduced shape rather than the usual [M, K].
+    CHECK_DIM(3, out_hidden_states);
+    TORCH_CHECK(out_hidden_states.size(0) == M);
+    TORCH_CHECK(out_hidden_states.size(1) == topk);
+    TORCH_CHECK(out_hidden_states.size(2) == K);
+  } else {
+    CHECK_DIM(2, out_hidden_states);
+  }
 
   // NB: worst case is each expert holds a block with remainder of 1
   //   1. sorted_ids : [M * topk + E * (BLOCK_M - 1)]
@@ -1196,12 +1210,17 @@ void fused_experts_cpu(
       // scales/qzeros shape = [E, Nc, G, block_n]
       int64_t num_groups = w1_scale.value().size(2);
       const int group_size = K / num_groups;
+      // When defer_finalize, the caller's `out` tensor is preallocated with
+      // the raw [M, topk, K] shape, so the kernel can write its per-route
+      // rows straight into it instead of the scratch buffer2 slice.
+      scalar_t* __restrict__ ic2 =
+          defer_finalize ? out_hidden_states.data_ptr<scalar_t>() : intermediate_cache2;
       // TODO: check scales and zeros
       fused_experts_int4_w4a8_kernel_impl<scalar_t>(
           out_hidden_states.data_ptr<scalar_t>(),
           intermediate_cache0,
           intermediate_cache1,
-          intermediate_cache2,
+          ic2,
           A_tmp,
           Aq_tmp,
           As_tmp,
@@ -1225,7 +1244,8 @@ void fused_experts_cpu(
           K,
           E,
           topk,
-          num_tokens_post_pad);
+          num_tokens_post_pad,
+          defer_finalize);
     } else if (moe_comp_method == CPUQuantMethod::FP8_W8A8) {
       // Stage 1: FP8×FP8 GEMM (hidden_states is FP8 input)
       // Stage 2: BF16×FP8 GEMM (W8A16 path for down-projection)
