@@ -446,6 +446,7 @@ th {
 | `MixtralForCausalLM` | Mixtral-8x7B, Mixtral-8x7B-Instruct | `mistralai/Mixtral-8x7B-v0.1`, `mistralai/Mixtral-8x7B-Instruct-v0.1`, `mistral-community/Mixtral-8x22B-v0.1`, etc. | ✅︎ | ✅︎ |
 | `NemotronForCausalLM` | Nemotron-3, Nemotron-4, Minitron | `nvidia/Minitron-8B-Base`, `mgoin/Nemotron-4-340B-Base-hf-FP8`, etc. | ✅︎ | ✅︎ |
 | `NemotronHForCausalLM` | Nemotron-H | `nvidia/Nemotron-H-8B-Base-8K`, `nvidia/Nemotron-H-47B-Base-8K`, `nvidia/Nemotron-H-56B-Base-8K`, etc. | ✅︎ | ✅︎ |
+| `NemotronLabsDiffusionModel`, `NemotronLabsDiffusionForCausalLM` | Nemotron Labs Diffusion | `nvidia/Nemotron-Labs-Diffusion-3B`, `nvidia/Nemotron-Labs-Diffusion-8B` | | |
 | `OlmoHybridForCausalLM` | OLMo Hybrid | `allenai/Olmo-Hybrid-7B` | ✅︎ | ✅︎ |
 | `OlmoeForCausalLM` | OLMoE | `allenai/OLMoE-1B-7B-0924`, `allenai/OLMoE-1B-7B-0924-Instruct`, etc. | | ✅︎ |
 | `OPTForCausalLM` | OPT, OPT-IML | `facebook/opt-66b`, `facebook/opt-iml-max-30b`, etc. | ✅︎ | ✅︎ |
@@ -501,6 +502,9 @@ Some models are supported only via the [Transformers modeling backend](#transfor
 
 !!! note
     Currently, the ROCm version of vLLM supports Mistral and Mixtral only for context lengths up to 4096.
+
+!!! note
+    Nemotron Labs Diffusion runs masked block diffusion by default. `--diffusion-config` sets `canvas_length` (default: the checkpoint's `block_size`) and `model_options` such as `selection_policy` and `confidence_threshold`; request temperatures are applied as usual. Pass `--hf-overrides '{"ar_mode": true}'` (or select `NemotronLabsDiffusionForCausalLM`) for ordinary autoregressive generation with the same checkpoint.
 
 ## List of Multimodal Language Models
 

@@ -1,7 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal, TypeVar
 
+from pydantic import Field
+
+from vllm.config import utils as config_utils
+from vllm.config.diffusion import DiffusionConfig, DiffusionModelOptions
 from vllm.logger import init_logger
 from vllm.utils.math_utils import round_up
 
@@ -68,6 +72,27 @@ class AliceAIForCausalLMConfig(VerifyAndUpdateConfig):
                 "AliceAI does not support speculative method "
                 f"{speculative_method!r} because it requires auxiliary hidden states"
             )
+
+
+_OptionsT = TypeVar("_OptionsT", bound=DiffusionModelOptions)
+
+
+def _parse_diffusion_model_options(
+    vllm_config: "VllmConfig", options_cls: type[_OptionsT]
+) -> _OptionsT:
+    """Validate `--diffusion-config` `model_options` against `options_cls`."""
+    diffusion_config = vllm_config.diffusion_config
+    assert diffusion_config is not None
+    options = diffusion_config.model_options
+    if isinstance(options, dict):
+        options = options_cls(**options)
+    if not isinstance(options, options_cls):
+        raise TypeError(
+            f"Expected {options_cls.__name__} diffusion model_options, "
+            f"got {type(options).__name__}."
+        )
+    diffusion_config.model_options = options
+    return options
 
 
 class DeepseekV32ForCausalLM(VerifyAndUpdateConfig):
@@ -386,6 +411,28 @@ class EmbeddingGemma2ModelConfig(Gemma4Config):
             model_config.max_model_len = 8192
 
 
+@config_utils.config
+class DiffusionGemmaDiffusionOptions(DiffusionModelOptions):
+    """DiffusionGemma `DiffusionConfig.model_options`. Unset options are read
+    from the model's generation_config.json."""
+
+    t_min: float | None = None
+    """Temperature at the last denoising step."""
+
+    t_max: float | None = None
+    """Temperature at the first denoising step."""
+
+    entropy_bound: float | None = Field(default=None, gt=0)
+    """Entropy budget for the EntropyBound sampler."""
+
+    confidence_threshold: float | None = None
+    """Confidence above which a position is committed."""
+
+    stability_threshold: int | None = Field(default=None, ge=0)
+    """Number of previous steps a prediction must match before it is
+    committed."""
+
+
 class DiffusionGemmaModelForBlockDiffusionConfig(VerifyAndUpdateConfig):
     @classmethod
     def verify_and_update_config(cls, vllm_config: "VllmConfig") -> None:
@@ -421,14 +468,14 @@ class DiffusionGemmaModelForBlockDiffusionConfig(VerifyAndUpdateConfig):
             )
 
         # Auto-create DiffusionConfig from HF config if not provided.
+        canvas_length = getattr(
+            vllm_config.model_config.hf_config, "canvas_length", 256
+        )
         if vllm_config.diffusion_config is None:
-            from vllm.config.diffusion import DiffusionConfig
-
-            hf_config = vllm_config.model_config.hf_config
-            canvas_length = getattr(hf_config, "canvas_length", 256)
-            vllm_config.diffusion_config = DiffusionConfig(
-                canvas_length=canvas_length,
-            )
+            vllm_config.diffusion_config = DiffusionConfig(canvas_length=canvas_length)
+        elif vllm_config.diffusion_config.canvas_length is None:
+            vllm_config.diffusion_config.canvas_length = canvas_length
+        _parse_diffusion_model_options(vllm_config, DiffusionGemmaDiffusionOptions)
 
         # The diffusion sampler materializes [num_seqs, canvas_length, vocab]
         # fp32 transients, so concurrency is memory-bound (>8 OOMs a single H200).
@@ -455,6 +502,146 @@ class DiffusionGemmaModelForBlockDiffusionConfig(VerifyAndUpdateConfig):
                 "from generation_config.json (use "
                 "--override-generation-config to set a custom limit).",
             )
+
+
+@config_utils.config
+class NemotronDiffusionOptions(DiffusionModelOptions):
+    """Nemotron Labs Diffusion `DiffusionConfig.model_options`."""
+
+    temperature: float | None = Field(default=None, ge=0)
+    """Default sampling temperature; explicit request temperatures take
+    precedence. 0 means greedy. If unset, the model's generation defaults
+    apply."""
+
+    selection_policy: (
+        Literal["low_confidence", "leftmost", "confidence_threshold"] | None
+    ) = None
+    """Which masked positions to unmask each denoising step.
+    ``low_confidence``: the most confident predictions first (LLaDA),
+    top-k per step with k from the even transfer schedule.
+    ``leftmost``: strictly left-to-right.
+    ``confidence_threshold``: unmask every position whose chosen-token
+    probability exceeds ``confidence_threshold`` (always at least the single
+    most confident one, so each step makes progress).
+    If not set, read from the model's generation_config.json
+    (``diffusion_selection_policy``), defaulting to ``confidence_threshold``."""
+
+    confidence_threshold: float | None = Field(default=None, gt=0, lt=1)
+    """Probability threshold for ``selection_policy="confidence_threshold"``.
+    If not set, read from the model's generation_config.json
+    (``diffusion_confidence_threshold``), defaulting to 0.9."""
+
+
+class NemotronLabsDiffusionForBlockDiffusionConfig(VerifyAndUpdateConfig):
+    @classmethod
+    def verify_and_update_config(cls, vllm_config: "VllmConfig") -> None:
+        """Set up the diffusion config and defaults for the Nemotron
+        Ministral masked block-diffusion LM.
+
+        Auto-creates DiffusionConfig from the HF config (canvas_length ==
+        block_size) when the user didn't pass ``--diffusion-config``.
+        ``max_denoising_steps`` defaults to ``canvas_length`` at
+        sampler-build time when generation_config.json doesn't provide it.
+        """
+        from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+        model_config = vllm_config.model_config
+        bidirectional = not getattr(model_config.hf_config, "is_causal", True)
+        if not model_config.is_diffusion:
+            if vllm_config.diffusion_config is not None:
+                raise ValueError(
+                    "Nemotron AR mode cannot be combined with --diffusion-config."
+                )
+            if "max_new_tokens" not in model_config.override_generation_config:
+                model_config.override_generation_config["max_new_tokens"] = None
+            if bidirectional:
+                cls._configure_bidirectional_reads(vllm_config)
+            return
+
+        if bidirectional:
+            raise ValueError(
+                "Nemotron masked diffusion keeps a causal prompt KV cache and "
+                "cannot use is_causal=False. For single-forward bidirectional "
+                "reads, also set ar_mode=True in hf_overrides."
+            )
+
+        if vllm_config.parallel_config.pipeline_parallel_size != 1:
+            raise ValueError("Nemotron diffusion requires PP=1.")
+
+        attention_config = vllm_config.attention_config
+        if attention_config.backend == AttentionBackendEnum.FLASHINFER:
+            raise ValueError(
+                "FlashInfer does not support the Nemotron DLM's mixed "
+                "causal/bidirectional attention. Use --attention-backend "
+                "FLASH_ATTN or TRITON_ATTN instead."
+            )
+        if attention_config.backend is None:
+            attention_config.backend = AttentionBackendEnum.TRITON_ATTN
+            logger.info("Nemotron Labs Diffusion defaults to TRITON_ATTN.")
+        elif attention_config.backend == AttentionBackendEnum.FLASH_ATTN:
+            if attention_config.flash_attn_version not in (None, 4):
+                raise ValueError(
+                    "Nemotron Labs Diffusion requires FA4 for per-sequence "
+                    "causal attention; use FA4 or TRITON_ATTN."
+                )
+            attention_config.flash_attn_version = 4
+
+        # Auto-create DiffusionConfig from HF config if not provided; a
+        # user config passed just to set e.g. temperature backfills
+        # canvas_length from the HF config.
+        hf_config = vllm_config.model_config.hf_config
+        if vllm_config.diffusion_config is None:
+            vllm_config.diffusion_config = DiffusionConfig(
+                canvas_length=getattr(hf_config, "canvas_length", 32),
+            )
+        elif vllm_config.diffusion_config.canvas_length is None:
+            vllm_config.diffusion_config.canvas_length = getattr(
+                hf_config, "canvas_length", 32
+            )
+        options = _parse_diffusion_model_options(vllm_config, NemotronDiffusionOptions)
+
+        # Use the ordinary generation defaults; explicit request temperatures
+        # always take precedence over this compatibility setting.
+        if options.temperature is not None:
+            model_config.override_generation_config.setdefault(
+                "temperature", options.temperature
+            )
+
+        # The diffusion sampler materializes [num_seqs, canvas_length, vocab]
+        # fp32 transients, so cap concurrency when the user didn't pass
+        # --max-num-seqs (same policy as DiffusionGemma).
+        from vllm.config.scheduler import SchedulerConfig
+
+        sc = vllm_config.scheduler_config
+        if sc is not None and sc.max_num_seqs >= SchedulerConfig.DEFAULT_MAX_NUM_SEQS:
+            sc.max_num_seqs = 8
+
+        # Remove any generation_config.json cap on max_new_tokens so each
+        # request controls its own output length via max_tokens.
+        model_config = vllm_config.model_config
+        if "max_new_tokens" not in model_config.override_generation_config:
+            model_config.override_generation_config["max_new_tokens"] = None
+
+    @staticmethod
+    def _configure_bidirectional_reads(vllm_config: "VllmConfig") -> None:
+        """``is_causal=False`` turns every layer into encoder-only attention:
+        the prompt runs in one bidirectional forward without KV cache, and the
+        last position is read for checkpoints fine-tuned with bidirectional
+        attention."""
+        cache_config = vllm_config.cache_config
+        if cache_config.enable_prefix_caching:
+            logger.info(
+                "Disabling prefix caching for Nemotron with is_causal=False: "
+                "a bidirectional prompt's keys depend on later tokens."
+            )
+            cache_config.enable_prefix_caching = False
+        logger.info(
+            "Nemotron with is_causal=False reads the last prompt position in "
+            "one bidirectional forward. Requests must use max_tokens=1, and a "
+            "prompt must fit in one step of max_num_batched_tokens (%d) "
+            "because it cannot be chunked.",
+            vllm_config.scheduler_config.max_num_batched_tokens,
+        )
 
 
 class DeepseekV4ForCausalLMConfig(VerifyAndUpdateConfig):
@@ -1219,6 +1406,8 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "NemotronHForCausalLM": NemotronHForCausalLMConfig,
     "NemotronHPuzzleForCausalLM": NemotronHForCausalLMConfig,
     "NemotronH_Nano_VL_V2": NemotronHNanoVLV2Config,
+    "NemotronLabsDiffusionForCausalLM": NemotronLabsDiffusionForBlockDiffusionConfig,
+    "NemotronLabsDiffusionModel": NemotronLabsDiffusionForBlockDiffusionConfig,
     "NomicBertModel": NomicBertModelConfig,
     "Qwen2ForProcessRewardModel": Qwen2ForProcessRewardModelConfig,
     "Qwen2ForRewardModel": Qwen2ForRewardModelConfig,
