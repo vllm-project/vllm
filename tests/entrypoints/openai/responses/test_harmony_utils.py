@@ -368,3 +368,48 @@ class TestHarmonyToResponseOutput:
         output_items = harmony_to_response_output(message, frozenset())
 
         assert len(output_items) == 0
+
+    @pytest.mark.parametrize("channel", ["comment", "commentaryanalysis"])
+    @pytest.mark.parametrize("incomplete", [False, True])
+    def test_unknown_channel_with_no_recipient_is_dropped(self, channel, incomplete):
+        """An unrecognized channel with no recipient must not abort parsing.
+
+        Harmony defines exactly three channels (analysis, commentary, final),
+        but gpt-oss occasionally emits a header outside that set, e.g.
+        ``comment``. The streaming dispatchers in streaming_events.py and the
+        chat-completions parser (``_SegmentType.IGNORE``) already drop such
+        segments; the completed-message parser used to raise
+        ``ValueError: Unknown channel: comment`` instead, which failed the
+        whole /v1/responses request at response assembly and, when streaming,
+        closed the SSE connection before ``response.completed``.
+        """
+        message = Message.from_role_and_content(Role.ASSISTANT, "some text")
+        message = message.with_channel(channel)
+
+        output_items = harmony_to_response_output(
+            message, frozenset(), incomplete=incomplete
+        )
+
+        assert output_items == []
+
+    def test_unknown_channel_does_not_affect_neighbouring_messages(self):
+        """Messages before/after an unknown-channel message still render."""
+        analysis = Message.from_role_and_content(
+            Role.ASSISTANT, "thinking"
+        ).with_channel("analysis")
+        unknown = Message.from_role_and_content(
+            Role.ASSISTANT, "stray text"
+        ).with_channel("comment")
+        final = Message.from_role_and_content(Role.ASSISTANT, "answer").with_channel(
+            "final"
+        )
+
+        output_items = []
+        for message in (analysis, unknown, final):
+            output_items.extend(harmony_to_response_output(message, frozenset()))
+
+        assert len(output_items) == 2
+        assert isinstance(output_items[0], ResponseReasoningItem)
+        assert output_items[0].content[0].text == "thinking"
+        assert isinstance(output_items[1], ResponseOutputMessage)
+        assert output_items[1].content[0].text == "answer"
