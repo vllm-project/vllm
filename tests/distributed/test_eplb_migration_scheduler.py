@@ -42,6 +42,7 @@ class _MockEplbCommunicator(EplbCommunicator):
 def test_migration_batching_is_disabled_by_default_and_can_be_enabled() -> None:
     assert not EPLBConfig().enable_migration_batching
     assert EPLBConfig(enable_migration_batching=True).enable_migration_batching
+    assert EPLBConfig().migration_max_peers == 1
 
 
 def test_migration_batching_only_applies_to_async_eplb() -> None:
@@ -57,7 +58,15 @@ def test_migration_batching_only_applies_to_async_eplb() -> None:
     ).migration_batching_enabled
 
 
-def test_schedule_migration_batches_is_deterministic() -> None:
+@pytest.mark.parametrize(
+    ("limit", "expected"),
+    [
+        (1, [[(1, 3), (2, 4)], [(0, 1)], [(0, 2)], [(0, 3)], [(0, 4)]]),
+        (2, [[(1, 3), (2, 4), (0, 1), (0, 2)], [(0, 3), (0, 4)]]),
+        (4, [[(1, 3), (2, 4), (0, 1), (0, 2), (0, 3), (0, 4)]]),
+    ],
+)
+def test_schedule_migration_batches_is_deterministic(limit, expected) -> None:
     transfers = [
         (1, 3, 0),
         (2, 4, 1),
@@ -70,17 +79,13 @@ def test_schedule_migration_batches_is_deterministic() -> None:
         5, transfers
     )
 
-    batches = schedule_migration_batches(num_local_experts, old_indices, new_indices)
+    batches = schedule_migration_batches(
+        num_local_experts, old_indices, new_indices, limit
+    )
 
-    assert [_endpoints(batch) for batch in batches] == [
-        [(1, 3), (2, 4)],
-        [(0, 1)],
-        [(0, 2)],
-        [(0, 3)],
-        [(0, 4)],
-    ]
+    assert [_endpoints(batch) for batch in batches] == expected
     for batch in batches:
-        _assert_no_endpoint_conflict(batch)
+        _assert_no_endpoint_conflict(batch, limit)
 
 
 def test_schedule_migration_batches_coalesces_rank_pair() -> None:
@@ -101,7 +106,8 @@ def test_schedule_migration_batches_coalesces_rank_pair() -> None:
     ]
 
 
-def test_schedule_migration_batches_covers_random_instructions() -> None:
+@pytest.mark.parametrize("limit", [1, 2, 4])
+def test_schedule_migration_batches_covers_random_instructions(limit) -> None:
     rng = np.random.default_rng(42)
     transfers = []
     for expert_id in range(80):
@@ -112,13 +118,15 @@ def test_schedule_migration_batches_covers_random_instructions() -> None:
         8, transfers
     )
 
-    batches = schedule_migration_batches(num_local_experts, old_indices, new_indices)
+    batches = schedule_migration_batches(
+        num_local_experts, old_indices, new_indices, limit
+    )
 
     scheduled = _flatten_transfers(batches)
     assert len(scheduled) == len(transfers)
     assert set(scheduled) == set(transfers)
     for batch in batches:
-        _assert_no_endpoint_conflict(batch)
+        _assert_no_endpoint_conflict(batch, limit)
 
 
 def test_schedule_migration_batches_excludes_local_copies() -> None:
@@ -153,13 +161,16 @@ def test_schedule_migration_batches_balances_replicas() -> None:
     }
 
 
-def test_schedule_migration_batches_for_layers_matches_individual_calls() -> None:
+@pytest.mark.parametrize("limit", [1, 2])
+def test_schedule_migration_batches_for_layers_matches_individual_calls(limit) -> None:
     old_indices = np.array([[0, 1, 2, 3], [3, 2, 1, 0]], dtype=np.int64)
     new_indices = np.array([[1, 2, 3, 0], [0, 3, 2, 1]], dtype=np.int64)
 
-    assert schedule_migration_batches_for_layers(1, old_indices, new_indices) == [
-        schedule_migration_batches(1, old_indices[0], new_indices[0]),
-        schedule_migration_batches(1, old_indices[1], new_indices[1]),
+    assert schedule_migration_batches_for_layers(
+        1, old_indices, new_indices, limit
+    ) == [
+        schedule_migration_batches(1, old_indices[0], new_indices[0], limit),
+        schedule_migration_batches(1, old_indices[1], new_indices[1], limit),
     ]
 
 
@@ -235,12 +246,12 @@ def _endpoints(
     return [(item.src_rank, item.dst_rank) for item in flows]
 
 
-def _assert_no_endpoint_conflict(batch: list[MigrationFlow]) -> None:
-    endpoints: set[int] = set()
+def _assert_no_endpoint_conflict(batch: list[MigrationFlow], limit: int = 1) -> None:
+    counts: dict[int, int] = {}
     for flow in batch:
-        assert flow.src_rank not in endpoints
-        assert flow.dst_rank not in endpoints
-        endpoints.update((flow.src_rank, flow.dst_rank))
+        for rank in (flow.src_rank, flow.dst_rank):
+            counts[rank] = counts.get(rank, 0) + 1
+            assert counts[rank] <= limit
 
 
 def _flatten_transfers(

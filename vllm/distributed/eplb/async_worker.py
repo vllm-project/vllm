@@ -113,6 +113,9 @@ def transfer_run_periodically(
                         num_local_experts,
                         physical_to_logical_map_cpu.numpy(),
                         new_physical_to_logical_map.numpy(),
+                        max_peers_per_batch=(
+                            state.parallel_config.eplb_config.migration_max_peers
+                        ),
                     )
 
             # Execute one EPLB layer transfer per model forward pass. Each iteration

@@ -182,7 +182,7 @@ def _execute_migration_batch(
     communicator: EplbCommunicator,
     layer_idx: int,
 ) -> None:
-    """Execute one batch of rank-pair-disjoint expert transfers."""
+    """Execute one batch of expert transfers."""
     # NIXL drains its transfer context in execute(), so each batch restores it.
     communicator.set_transfer_context(old_indices, layer_idx)
     for flow in batch:
@@ -300,7 +300,7 @@ def move_to_buffer(
         communicator: EplbCommunicator instance for P2P communication.
         layer_idx: Index of the MoE layer being transferred.
         enable_migration_batching: Schedule remote transfers in batches where
-            each rank communicates with at most one peer.
+            each rank has bounded peer-transfer concurrency.
         migration_batches: Optional batches precomputed for this layer.
 
     Returns:
@@ -583,7 +583,7 @@ def transfer_layer(
         rank_mapping: Optional rank mapping for elastic expert parallelism.
         layer_idx: Index of the MoE layer being transferred.
         enable_migration_batching: Schedule remote transfers in batches where
-            each rank communicates with at most one peer.
+            each rank has bounded peer-transfer concurrency.
         migration_batches: Optional batches precomputed for this layer.
 
     Returns:

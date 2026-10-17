@@ -108,9 +108,13 @@ class EPLBConfig:
 
     enable_migration_batching: bool = False
     """Schedule expert migrations in batches where each rank communicates with
-    at most one peer. This reduces per-rank network contention at the cost of
+    a bounded number of peers. This reduces network contention at the cost of
     additional sequential communication steps. This option only applies to
     async EPLB and is disabled by default."""
+
+    migration_max_peers: int = Field(default=1, gt=0)
+    """Maximum concurrent peer transfers per rank when migration batching is
+    enabled. Send and receive flows both count toward the limit."""
 
     @property
     def migration_batching_enabled(self) -> bool:
