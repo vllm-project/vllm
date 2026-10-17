@@ -2000,10 +2000,21 @@ def test_eagle_groups_are_the_groups_holding_draft_layers(make_specs, pp):
     draft_layers = {name for name, spec in specs.items() if spec.is_draft}
     untagged = {name: replace(spec, is_draft=False) for name, spec in specs.items()}
     groups = _spec_decode_kv_cache_groups([specs])
-    assert [(g.layer_names, g.kv_cache_spec) for g in groups] == [
-        (g.layer_names, g.kv_cache_spec)
-        for g in _spec_decode_kv_cache_groups([untagged])
-    ]
+
+    # The tags pick which sliding-window groups retain the EAGLE hit blocks
+    # (_retain_eagle_hit_blocks_below_window), so compare the grouping with
+    # that retention stripped.
+    def without_retention(spec):
+        if isinstance(spec, SlidingWindowSpec):
+            return replace(spec, extra_retained_tokens=0)
+        return spec
+
+    def grouping(kv_cache_groups):
+        return [
+            (g.layer_names, without_retention(g.kv_cache_spec)) for g in kv_cache_groups
+        ]
+
+    assert grouping(groups) == grouping(_spec_decode_kv_cache_groups([untagged]))
 
     worker_specs = [
         {n: s for n, s in specs.items() if n not in draft_layers},
