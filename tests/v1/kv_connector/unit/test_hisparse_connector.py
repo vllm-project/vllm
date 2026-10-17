@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
@@ -20,7 +20,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.worker import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiConnector
 from vllm.v1.hisparse.coordinator import get_hisparse_coordinator
-from vllm.v1.hisparse.runtime import HiSparseCacheHandle
+from vllm.v1.hisparse.runtime import HiSparseCacheHandle, release_pinned_state
 from vllm.v1.worker.gpu.kv_connector import ActiveKVConnector
 
 
@@ -114,3 +114,38 @@ def test_full_graph_step_prepares_host_mirror_outside_model():
 
     worker._enqueue_row_dma.assert_called_once_with((0,), ready_event=None)
     runtime.invalidate_written_slots.assert_called_once()
+
+
+def test_release_pinned_state_unpins_and_cleans_up_shared_region(caplog):
+    mock_cudart = MagicMock()
+    mock_cudart.cudaHostUnregister.return_value.value = 0
+
+    tensor = MagicMock()
+    tensor.data_ptr.return_value = 12345
+    tensor.nbytes = 8 * 1024**3
+    pinned_pools = [tensor]
+
+    shared_region = MagicMock()
+    shared_region.total_size_bytes = 16 * 1024**3
+
+    runtime = SimpleNamespace(
+        _host_cache=1,
+        registered_host_pool=2,
+        hot_backing=3,
+    )
+
+    with (
+        patch("torch.accelerator.synchronize") as mock_sync,
+        patch("torch.cuda.cudart", return_value=mock_cudart),
+        caplog.at_level("INFO"),
+    ):
+        release_pinned_state([runtime], pinned_pools, shared_region)
+
+    mock_sync.assert_called_once()
+    mock_cudart.cudaHostUnregister.assert_called_once_with(12345)
+    assert len(pinned_pools) == 0
+    shared_region.cleanup.assert_called_once()
+    assert not hasattr(runtime, "_host_cache")
+    assert not hasattr(runtime, "registered_host_pool")
+    assert not hasattr(runtime, "hot_backing")
+    assert "HiSparse: unpinned 24.0 GiB of host pool in" in caplog.text

@@ -6,7 +6,8 @@ import time
 from collections import deque
 from concurrent.futures import Future, InvalidStateError
 from contextlib import suppress
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 
 def _dequeue_timeout(deadline: float | None) -> float | None:
@@ -170,3 +171,77 @@ def test_recv_timeout_ms_clamps_negative_timeout() -> None:
     assert recv_timeout_ms(0.0) == 0
     assert recv_timeout_ms(0.001) == 1
     assert recv_timeout_ms(2.5) == 2500
+
+
+def test_ensure_worker_termination_scales_timeout_for_hisparse(caplog) -> None:
+    from vllm.config.kv_transfer import KVTransferConfig
+    from vllm.v1.executor.multiproc_executor import MultiprocExecutor
+
+    mock_proc = MagicMock()
+    alive_sequence = [True, True, False]
+
+    def fake_is_alive():
+        if alive_sequence:
+            return alive_sequence.pop(0)
+        return False
+
+    mock_proc.is_alive.side_effect = fake_is_alive
+
+    kv_transfer_config = KVTransferConfig(
+        kv_connector="HiSparseConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={"host_pool_gib": 128},
+    )
+    vllm_config = SimpleNamespace(kv_transfer_config=kv_transfer_config)
+
+    with patch("time.sleep"), caplog.at_level("INFO"):
+        MultiprocExecutor._ensure_worker_termination(
+            [mock_proc], vllm_config=vllm_config
+        )
+
+    assert (
+        "[shutdown] HiSparse detected (pool_gib=128.0). Scaling shutdown timeout to 20s"
+    ) in caplog.text
+    assert mock_proc.join.called
+    mock_proc.join.assert_called_with(timeout=1.0)
+    mock_proc.terminate.assert_not_called()
+    mock_proc.kill.assert_not_called()
+
+
+def test_ensure_worker_termination_fallback_timeout(caplog) -> None:
+    from vllm.v1.executor.multiproc_executor import MultiprocExecutor
+
+    mock_proc = MagicMock()
+    mock_proc.is_alive.return_value = False
+
+    with caplog.at_level("INFO"):
+        MultiprocExecutor._ensure_worker_termination([mock_proc], vllm_config=None)
+
+    assert "HiSparse detected" not in caplog.text
+    mock_proc.join.assert_called_with(timeout=1.0)
+    mock_proc.terminate.assert_not_called()
+
+
+def test_ensure_worker_termination_forced_kill_joins_procs() -> None:
+    from vllm.v1.executor.multiproc_executor import MultiprocExecutor
+
+    mock_proc = MagicMock()
+    mock_proc.is_alive.return_value = True
+
+    current_time = [100.0]
+
+    def fake_time():
+        return current_time[0]
+
+    def fake_sleep(sec):
+        current_time[0] += sec
+
+    with (
+        patch("time.time", side_effect=fake_time),
+        patch("time.sleep", side_effect=fake_sleep),
+    ):
+        MultiprocExecutor._ensure_worker_termination([mock_proc], vllm_config=None)
+
+    mock_proc.terminate.assert_called_once()
+    mock_proc.kill.assert_called_once()
+    mock_proc.join.assert_called_with(timeout=1.0)

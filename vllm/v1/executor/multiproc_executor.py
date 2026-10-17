@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import math
 import multiprocessing
 import os
 import pickle
@@ -261,7 +262,9 @@ class MultiprocExecutor(Executor):
                     if uw.death_writer is not None:
                         uw.death_writer.close()
                         uw.death_writer = None
-                self._ensure_worker_termination([uw.proc for uw in unready_workers])
+                self._ensure_worker_termination(
+                    [uw.proc for uw in unready_workers], self.vllm_config
+                )
 
         self.output_rank = self._get_output_rank()
 
@@ -450,7 +453,10 @@ class MultiprocExecutor(Executor):
         return future if non_block else future.result()
 
     @staticmethod
-    def _ensure_worker_termination(worker_procs: list[BaseProcess]):
+    def _ensure_worker_termination(
+        worker_procs: list[BaseProcess],
+        vllm_config: VllmConfig | None = None,
+    ):
         """Ensure that all worker processes are terminated. Assumes workers have
         received termination requests. Waits for processing, then sends
         termination and kill signals if needed."""
@@ -467,18 +473,49 @@ class MultiprocExecutor(Executor):
                 time.sleep(0.1)
             return False
 
+        # Determine shutdown timeout, scaling up if HiSparse is enabled
+        timeout = envs.VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS
+        if vllm_config is not None:
+            kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
+            if kv_transfer_config is not None:
+                try:
+                    from vllm.config.kv_transfer import hisparse_host_pool_gib
+
+                    pool_gib = hisparse_host_pool_gib(kv_transfer_config)
+                    if pool_gib is not None:
+                        hi_timeout = max(timeout, int(math.ceil(pool_gib * 0.15)))
+                        timeout = hi_timeout
+                        logger.info(
+                            "[shutdown] HiSparse detected (pool_gib=%s). "
+                            "Scaling shutdown timeout to %ds",
+                            pool_gib,
+                            timeout,
+                        )
+                except Exception:
+                    pass
+
         active_procs = lambda: [proc for proc in worker_procs if proc.is_alive()]
         initial_count = len(active_procs())
+
+        def _join_worker_procs(procs: list[BaseProcess], join_timeout: float = 1.0):
+            for p in procs:
+                try:
+                    p.join(timeout=join_timeout)
+                except Exception as e:
+                    logger.debug(
+                        "[shutdown] Exception while joining worker %s: %s",
+                        getattr(p, "name", p),
+                        e,
+                    )
 
         # Give processes time to clean themselves up properly first
         logger.info(
             "[shutdown] Executor: waiting for worker exit count=%d",
             initial_count,
         )
-        if wait_for_termination(
-            active_procs(), timeout=envs.VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS
-        ):
+        if wait_for_termination(active_procs(), timeout=timeout):
             logger.info_once("[shutdown] Executor: all workers exited gracefully")
+            _join_worker_procs(worker_procs, join_timeout=1.0)
             return
 
         # Send SIGTERM if still running
@@ -501,6 +538,15 @@ class MultiprocExecutor(Executor):
             for p in remaining:
                 p.kill()
 
+            # Bound and log the post-SIGKILL wait
+            logger.info("[shutdown] Waiting for workers to exit after SIGKILL...")
+            if not wait_for_termination(active_procs(), 10):
+                logger.error(
+                    "[shutdown] Some worker processes failed to exit after SIGKILL"
+                )
+
+        _join_worker_procs(worker_procs, join_timeout=1.0)
+
     def shutdown(self):
         """Properly shut down the executor and its workers."""
         if not getattr(self, "shutting_down", False):
@@ -518,7 +564,9 @@ class MultiprocExecutor(Executor):
                     if w.death_writer is not None:
                         w.death_writer.close()
                         w.death_writer = None
-                self._ensure_worker_termination([w.proc for w in workers])
+                self._ensure_worker_termination(
+                    [w.proc for w in workers], self.vllm_config
+                )
 
                 for w in workers:
                     # Shutdown response queues

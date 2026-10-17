@@ -398,6 +398,13 @@ def release_pinned_state(
                 break
             freed_bytes += tensor.nbytes
             pinned_host_pools.pop()
+
+        if shared_host_region is not None:
+            region_bytes = getattr(shared_host_region, "total_size_bytes", 0)
+            shared_host_region.cleanup()
+            freed_bytes += region_bytes
+            shared_host_region = None
+
         if freed_bytes:
             logger.info(
                 "HiSparse: unpinned %.1f GiB of host pool in %.1fs.",
