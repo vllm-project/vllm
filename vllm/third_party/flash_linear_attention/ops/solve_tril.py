@@ -45,6 +45,7 @@ def solve_tril_16x16_kernel(
     BT: tl.constexpr,
     USE_TMA: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    USE_GRAPH: tl.constexpr,
     DOT_PRECISION: tl.constexpr,
 ):
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
@@ -54,6 +55,8 @@ def solve_tril_16x16_kernel(
             tl.load(chunk_indices + i_t * 2).to(tl.int32),
             tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32),
         )
+        if USE_GRAPH and i_n < 0:
+            return
         bos, eos = (
             tl.load(cu_seqlens + i_n).to(tl.int32),
             tl.load(cu_seqlens + i_n + 1).to(tl.int32),
@@ -118,6 +121,7 @@ def merge_16x16_to_32x32_inverse_kernel(
     BT: tl.constexpr,
     USE_TMA: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    USE_GRAPH: tl.constexpr,
     DOT_PRECISION: tl.constexpr,
 ):
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
@@ -127,6 +131,8 @@ def merge_16x16_to_32x32_inverse_kernel(
             tl.load(chunk_indices + i_t * 2).to(tl.int32),
             tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32),
         )
+        if USE_GRAPH and i_n < 0:
+            return
         bos, eos = (
             tl.load(cu_seqlens + i_n).to(tl.int32),
             tl.load(cu_seqlens + i_n + 1).to(tl.int32),
@@ -234,6 +240,7 @@ def merge_16x16_to_64x64_inverse_kernel(
     BT: tl.constexpr,
     USE_TMA: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    USE_GRAPH: tl.constexpr,
     DOT_PRECISION: tl.constexpr,
 ):
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
@@ -243,6 +250,8 @@ def merge_16x16_to_64x64_inverse_kernel(
             tl.load(chunk_indices + i_t * 2).to(tl.int32),
             tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32),
         )
+        if USE_GRAPH and i_n < 0:
+            return
         bos, eos = (
             tl.load(cu_seqlens + i_n).to(tl.int32),
             tl.load(cu_seqlens + i_n + 1).to(tl.int32),
@@ -465,6 +474,7 @@ def solve_tril(
     cu_seqlens: torch.Tensor | None = None,
     chunk_indices: torch.Tensor | None = None,
     output_dtype: torch.dtype = torch.float,
+    use_graph: bool = False,
 ) -> torch.Tensor:
     """
     Compute the inverse of the matrix I + A
@@ -510,5 +520,6 @@ def solve_tril(
         BT=BT,
         USE_TMA=is_tma_supported,
         DOT_PRECISION=FLA_TRIL_PRECISION,
+        USE_GRAPH=use_graph,
     )
     return Ai

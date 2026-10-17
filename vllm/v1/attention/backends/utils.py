@@ -1065,9 +1065,15 @@ def create_fast_prefill_custom_backend(
 
 
 def compute_causal_conv1d_metadata(
-    query_start_loc_p_cpu: torch.Tensor, *, device: torch.device
+    query_start_loc_p_cpu: torch.Tensor,
+    *,
+    device: torch.device,
+    program_buffers: tuple[torch.Tensor, torch.Tensor] | None = None,
 ) -> tuple[dict[int, dict[str, Any]], torch.Tensor, torch.Tensor]:
     # Needed for causal_conv1d. Use the CPU query_start_loc to avoid DtoH sync.
+    # program_buffers: persistent (batch_ptr, token_chunk_offset_ptr) to fill
+    # in place. Entries past the batch's programs are PAD_SLOT_ID, so a static
+    # grid of up to their length is safe.
     assert query_start_loc_p_cpu.device.type == "cpu"
     seqlens = query_start_loc_p_cpu.diff()
     nums_dict: dict[int, dict[str, Any]] = {}
@@ -1089,7 +1095,11 @@ def compute_causal_conv1d_metadata(
         offsetlist = torch.tensor(offsetlist, dtype=torch.int32, pin_memory=PIN_MEMORY)
         nums_dict[BLOCK_M]["offsetlist"] = offsetlist
 
-        if batch_ptr is None:
+        if program_buffers is not None:
+            batch_ptr, token_chunk_offset_ptr = program_buffers
+            batch_ptr.fill_(PAD_SLOT_ID)
+            token_chunk_offset_ptr.fill_(PAD_SLOT_ID)
+        elif batch_ptr is None:
             # Update default value after class definition
             batch_ptr = torch.full(
                 (MAX_NUM_PROGRAMS,), PAD_SLOT_ID, dtype=torch.int32, device=device

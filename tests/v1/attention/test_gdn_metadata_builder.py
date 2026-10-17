@@ -261,6 +261,9 @@ def test_update_block_table_matches_build(
         # FULL graph state indices land in this group's own buffers.
         if full_cuda_graph and meta.num_prefills == 0 and actual is not None:
             assert actual.data_ptr() == getattr(dst, field).data_ptr()
+        # So do the state indices of batches with prefills.
+        if meta.num_prefills > 0 and actual is not None:
+            assert actual.data_ptr() == dst.mixed_batch_buffers[field].data_ptr()
 
 
 def test_has_initial_state_after_reclassification():
@@ -506,3 +509,112 @@ def test_plan_flashinfer_checkpoints_selects_the_state_at_each_offset():
     # Row 1: state after 128 tokens of the first prefill. Row 3: after 192
     # tokens of the third prefill, whose states start at index 3.
     assert rows == [0, 1, 0, 5]
+
+
+# Batches with prefills, as (seq_lens, query_lens, num_decode_draft_tokens).
+MIXED_BATCHES = {
+    "spec_and_prefill": ([100, 65, 20], [50, 1, 3], [-1, -1, 2]),
+    "prefill_only": ([100, 300], [100, 130], None),
+    "decode_and_prefill": ([40, 41, 200], [1, 1, 70], None),
+    "zero_length_prefill_rows": ([40, 100, 16, 16], [1, 50, 0, 0], None),
+    "spec_and_zero_length_rows": ([16, 65, 20], [0, 1, 3], [-1, -1, 2]),
+}
+
+
+def _build_mixed(
+    builder: GDNAttentionMetadataBuilder, name: str
+) -> tuple[GDNAttentionMetadata, GDNAttentionMetadata]:
+    """Build a mixed batch with and without staging into persistent buffers."""
+    seq_lens, query_lens, draft_tokens = MIXED_BATCHES[name]
+    batch = BatchSpec(seq_lens=seq_lens, query_lens=query_lens)
+    # One state slot per token of a spec-decode row, as in production.
+    builder.vllm_config.cache_config.mamba_cache_mode = "none"
+    block_table = torch.randint(
+        1, 1000, (batch.batch_size, builder.num_spec + 1), dtype=torch.int32
+    )
+    unstaged = builder._stage_mixed_batch
+    builder._stage_mixed_batch = lambda metadata, *args: metadata  # type: ignore
+    try:
+        reference = _build(builder, batch, draft_tokens, block_table)
+    finally:
+        builder._stage_mixed_batch = unstaged  # type: ignore
+    meta = _build(builder, batch, draft_tokens, block_table)
+    assert meta.num_prefills > 0
+    return meta, reference
+
+
+def _assert_staged(builder, meta, reference) -> None:
+    """Each mixed-batch field equals the unstaged one, lives at the front of
+    its persistent buffer and is followed by its documented pad value."""
+    from vllm.third_party.flash_linear_attention.ops.index import (
+        prepare_chunk_indices,
+        prepare_chunk_offsets,
+    )
+    from vllm.v1.attention.backends.gdn_attn import MIXED_BATCH_PAD_VALUES
+    from vllm.v1.attention.backends.utils import (
+        PAD_SLOT_ID,
+        compute_causal_conv1d_metadata,
+    )
+
+    buffers = builder.mixed_batch_buffers
+    for name, pad_value in MIXED_BATCH_PAD_VALUES.items():
+        actual, expected = getattr(meta, name), getattr(reference, name)
+        if expected is None:
+            assert actual is None, name
+            continue
+        assert actual.dtype == expected.dtype, name
+        assert torch.equal(actual, expected), name
+        buffer = buffers[name]
+        assert actual.data_ptr() == buffer.data_ptr(), name
+        pad = buffer[len(actual) :]
+        expected_pad = expected[-1] if pad_value is None else pad_value
+        assert torch.all(pad == expected_pad), name
+
+    qsl = reference.prefill_query_start_loc
+    chunk_indices = prepare_chunk_indices(qsl, 64)
+    chunk_offsets = prepare_chunk_offsets(qsl, 64)
+    for name, expected, pad_row in (
+        ("chunk_indices", chunk_indices, [-1, 0]),
+        ("chunk_offsets", chunk_offsets, int(chunk_offsets[-1])),
+    ):
+        actual, buffer = getattr(meta, name), buffers[name]
+        assert actual.dtype == expected.dtype, name
+        assert torch.equal(actual, expected), name
+        assert actual.data_ptr() == buffer.data_ptr(), name
+        assert torch.all(buffer[len(actual) :] == torch.tensor(pad_row)), name
+
+    nums_dict, batch_ptr, offset_ptr = compute_causal_conv1d_metadata(
+        reference.non_spec_query_start_loc, device=DEVICE
+    )
+    num_programs = nums_dict[8]["tot"]
+    for actual, expected, buffer in (
+        (meta.batch_ptr, batch_ptr, buffers["batch_ptr"]),
+        (meta.token_chunk_offset_ptr, offset_ptr, buffers["token_chunk_offset_ptr"]),
+    ):
+        assert actual is buffer
+        assert torch.equal(actual[:num_programs], expected[:num_programs])
+        assert torch.all(actual[num_programs:] == PAD_SLOT_ID)
+    assert meta.nums_dict[8]["tot"] == num_programs
+
+
+@pytest.mark.parametrize("name", MIXED_BATCHES.keys())
+def test_mixed_batch_metadata_is_staged(name: str):
+    """Batches with prefills keep their metadata values, in persistent
+    buffers with documented pads after the real rows."""
+    builder = _create_gdn_builder(num_speculative_tokens=2)
+    _assert_staged(builder, *_build_mixed(builder, name))
+
+
+def test_mixed_batch_buffers_keep_addresses():
+    """Different mixes reuse the same buffers, and a smaller batch after a
+    larger one leaves no stale rows behind its real rows."""
+    builder = _create_gdn_builder(num_speculative_tokens=2)
+    addresses: dict[str, set[int]] = {}
+    for name in [*MIXED_BATCHES, *reversed(MIXED_BATCHES)]:
+        meta, reference = _build_mixed(builder, name)
+        _assert_staged(builder, meta, reference)
+        for field, buffer in builder.mixed_batch_buffers.items():
+            if getattr(meta, field) is not None:
+                addresses.setdefault(field, set()).add(buffer.data_ptr())
+    assert set(addresses) == set(builder.mixed_batch_buffers)
+    assert all(len(ptrs) == 1 for ptrs in addresses.values())
