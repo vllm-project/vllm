@@ -839,6 +839,7 @@ def select_deepseek_v4_mxfp4_moe_backend(
     ):
         priority_backends = [
             Mxfp4MoeBackend.AITER_MXFP4_BF16,
+            Mxfp4MoeBackend.RDNA3_MXFP4,
             Mxfp4MoeBackend.TRITON_UNFUSED,
         ]
     else:
@@ -2081,6 +2082,19 @@ def convert_weight_to_mxfp4_moe_kernel_format(
             w13_bias=w13_bias,
             w2_bias=w2_bias,
             _cache_permute_indices=_cache_permute_indices,
+        )
+    elif mxfp4_backend == Mxfp4MoeBackend.RDNA3_MXFP4:
+        # Separate gate_proj/up_proj checkpoints are contiguous after _load_w13;
+        # the RDNA3 repack only de-interleaves for SWIGLUOAI (GPT-OSS).
+        return convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
+            mxfp4_backend=mxfp4_backend,
+            layer=layer,
+            w13_weight=w13_weight,
+            w2_weight=w2_weight,
+            w13_weight_scale=w13_weight_scale,
+            w2_weight_scale=w2_weight_scale,
+            w13_bias=w13_bias,
+            w2_bias=w2_bias,
         )
     elif mxfp4_backend in FLASHINFER_MOE_EP_MXFP4_BACKENDS:
         from vllm.model_executor.layers.fused_moe.flashinfer_moe_ep import (

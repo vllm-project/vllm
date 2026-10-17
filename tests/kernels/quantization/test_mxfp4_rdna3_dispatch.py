@@ -150,3 +150,13 @@ def test_auto_quantized_activations(
             _make_moe_config("auto"), activation_key=activation_key
         )
     assert backend == expected
+
+
+@pytest.mark.parametrize("num_tokens", BATCH_SIZES)
+def test_no_wmma_uses_scalar_tile(num_tokens):
+    # gfx1151 never takes the WMMA-16 tile; >=16-row steps use bsm=4 instead.
+    bsm = _select_block_size_m(num_tokens, 8, 256, use_wmma=False)
+    if num_tokens >= 16:
+        assert bsm == 4
+    else:
+        assert bsm == _select_block_size_m(num_tokens, 8, 256)
