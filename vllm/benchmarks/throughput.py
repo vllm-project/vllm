@@ -654,6 +654,18 @@ def validate_args(args):
             )
 
     # === Dataset Name Specific Checks ===
+    if args.dataset_name == "random-rerank" and args.no_reranker:
+        if args.random_batch_size <= 1:
+            raise ValueError(
+                "--random-batch-size must be greater than 1 "
+                "for --dataset-name random-rerank with --no-reranker"
+            )
+        if args.num_prompts <= 1:
+            raise ValueError(
+                "--num-prompts must be greater than 1 "
+                "for --dataset-name random-rerank with --no-reranker"
+            )
+
     # --hf-subset and --hf-split: only used
     # when dataset_name is 'hf'
     if args.dataset_name != "hf" and (

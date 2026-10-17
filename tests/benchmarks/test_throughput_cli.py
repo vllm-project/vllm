@@ -88,6 +88,47 @@ def test_validate_args_without_dataset_path(dataset_name: str | None):
     assert args.dataset_name == (dataset_name or "random")
 
 
+@pytest.mark.parametrize("dataset_args", [[], ["--dataset-path", "unused"]])
+@pytest.mark.parametrize(
+    ("sampling_args", "invalid_arg"),
+    [
+        ([], "--random-batch-size"),
+        (["--random-batch-size", "0"], "--random-batch-size"),
+        (["--random-batch-size", "2", "--num-prompts", "1"], "--num-prompts"),
+    ],
+)
+def test_validate_args_rejects_invalid_non_reranker_sizes(
+    dataset_args: list[str], sampling_args: list[str], invalid_arg: str
+) -> None:
+    parser = FlexibleArgumentParser()
+    add_cli_args(parser)
+    args = parser.parse_args(
+        ["--dataset-name", "random-rerank", "--no-reranker"]
+        + dataset_args
+        + sampling_args
+    )
+
+    with pytest.raises(ValueError, match=f"{invalid_arg} must be greater than 1"):
+        validate_args(args)
+
+
+@pytest.mark.parametrize(
+    "sampling_args",
+    [
+        ["--num-prompts", "1"],
+        ["--no-reranker", "--random-batch-size", "2", "--num-prompts", "2"],
+    ],
+)
+def test_validate_args_accepts_valid_rerank_sizes(sampling_args: list[str]) -> None:
+    parser = FlexibleArgumentParser()
+    add_cli_args(parser)
+    args = parser.parse_args(["--dataset-name", "random-rerank"] + sampling_args)
+
+    validate_args(args)
+
+    assert args.dataset_name == "random-rerank"
+
+
 def test_vllm_chat_requests_include_multimodal_content():
     class FakeLLM:
         def __init__(self):
@@ -337,24 +378,16 @@ def test_to_serve_args_keeps_legacy_flag_fallback() -> None:
 
 
 @pytest.mark.benchmark
-@pytest.mark.parametrize("benchmark", ["throughput", "mm-processor"])
 def test_get_requests_random_mm_without_dataset_path(
-    benchmark: str,
     hf_tokenizer: PreTrainedTokenizerBase,
 ) -> None:
-    """Both CLI paths must retain synthetic images without a dataset path."""
-    from vllm.benchmarks.mm_processor import add_cli_args as add_mm_cli_args
-
+    """Throughput validation must retain synthetic images without a dataset path."""
     parser = FlexibleArgumentParser()
-    if benchmark == "throughput":
-        add_cli_args(parser)
-        backend_args = ["--backend", "vllm-chat"]
-    else:
-        add_mm_cli_args(parser)
-        backend_args = []
+    add_cli_args(parser)
     args = parser.parse_args(
         [
-            *backend_args,
+            "--backend",
+            "vllm-chat",
             "--dataset-name",
             "random-mm",
             "--num-prompts",
@@ -373,12 +406,58 @@ def test_get_requests_random_mm_without_dataset_path(
             "{(224, 224, 1): 1.0}",
         ]
     )
-    if benchmark == "throughput":
-        validate_args(args)
+    validate_args(args)
 
     requests = get_requests(args, hf_tokenizer)
     assert len(requests) == 3
     assert all(isinstance(r, SampleRequest) for r in requests)
+    for req in requests:
+        assert isinstance(req.prompt, list)
+        assert req.prompt[0]["role"] == "user"
+        assert any(item.get("type") == "image_url" for item in req.prompt[0]["content"])
+
+
+@pytest.mark.benchmark
+def test_get_requests_random_mm_with_mm_processor_args(
+    hf_tokenizer: PreTrainedTokenizerBase,
+) -> None:
+    """Regression: bench mm-processor's random-mm sampling must not crash.
+
+    get_requests feeds mm-processor's parsed args (no legacy length/backend
+    flags) through the shared get_samples dispatch. With the default
+    --random-prefix-len 0 this previously crashed inside
+    RandomMultiModalDataset.get_prefix with a TypeError.
+    """
+    from vllm.benchmarks.mm_processor import add_cli_args as add_mm_cli_args
+
+    parser = FlexibleArgumentParser()
+    add_mm_cli_args(parser)
+    args = parser.parse_args(
+        [
+            "--dataset-name",
+            "random-mm",
+            "--num-prompts",
+            "3",
+            "--random-input-len",
+            "32",
+            "--random-output-len",
+            "1",
+            "--random-mm-base-items-per-request",
+            "1",
+            "--random-mm-num-mm-items-range-ratio",
+            "0",
+            "--random-mm-limit-mm-per-prompt",
+            '{"image": 1}',
+            "--random-mm-bucket-config",
+            "{(224, 224, 1): 1.0}",
+        ]
+    )
+
+    requests = get_requests(args, hf_tokenizer)
+    assert len(requests) == 3
+    assert all(isinstance(r, SampleRequest) for r in requests)
+    # mm-processor drives llm.chat, so prompts must be chat-formatted with
+    # multimodal content attached.
     for req in requests:
         assert isinstance(req.prompt, list)
         assert req.prompt[0]["role"] == "user"
