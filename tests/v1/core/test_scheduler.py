@@ -187,17 +187,16 @@ def test_routed_experts_prompt_start_at_prompt_end(max_tokens):
 
 @pytest.mark.parametrize(
     "external_tokens,max_cache_hit,expected_hit",
-    [(0, 79, 64), (0, 16, 0), (32, 79, 32), (31, 79, 16), (32, 16, 16), (32, 0, 0)],
+    [(0, 79, 64), (0, 16, 0), (32, 79, 32), (31, 79, 16), (32, 0, 32)],
     ids=[
         "local",
         "local-dropped",
         "external",
         "external-unaligned",
-        "external-capped",
-        "none",
+        "external-unretained",
     ],
 )
-def test_prefix_hit_is_capped_at_retained_auxiliary_outputs(
+def test_prefix_hit_respects_auxiliary_output_capture(
     external_tokens, max_cache_hit, expected_hit
 ):
     scheduler = create_scheduler(

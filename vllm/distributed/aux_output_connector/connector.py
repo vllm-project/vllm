@@ -164,15 +164,12 @@ class AuxOutputSchedulerConnector:
             return blocks, num_tokens
         return self._kv_cache_manager.empty_kv_cache_blocks, 0
 
-    def cap_external_hit(
-        self, request: Request, num_local: int, num_external: int
-    ) -> int:
-        """Trim an external hit to the retained outputs.
+    def cap_external_hit(self, num_local: int, num_external: int) -> int:
+        """Align an external hit down to a block boundary, where capture resumes.
 
-        Capture resumes on a block boundary, and a Mamba state exists only at
-        the end of the load.
+        A Mamba state exists only at the end of the load.
         """
-        num_hit = min(num_local + num_external, self.max_cache_hit(request))
+        num_hit = num_local + num_external
         num_hit -= num_hit % self._kv_cache_manager.coordinator.scheduler_block_size
         if num_external <= (max_external := max(num_hit - num_local, 0)):
             return num_external

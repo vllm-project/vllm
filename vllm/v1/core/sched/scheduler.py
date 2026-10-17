@@ -1093,7 +1093,6 @@ class Scheduler(SchedulerInterface):
                         if self.aux_output_connector is not None:
                             num_external_computed_tokens = (
                                 self.aux_output_connector.cap_external_hit(
-                                    request,
                                     num_new_local_computed_tokens,
                                     num_external_computed_tokens,
                                 )
