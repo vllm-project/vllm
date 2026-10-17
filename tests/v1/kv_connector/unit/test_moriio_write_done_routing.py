@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for mori-io write_done routing (#51681)."""
 
+import queue
 import threading
 import time
 from collections import OrderedDict
@@ -15,6 +16,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio import moriio_engine
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     ROLE,
     LayerTransferPlan,
+    MoRIIOConnectorMetadata,
     MoRIIOError,
     MoRIIOMode,
     RemoteAllocInfo,
@@ -368,8 +370,8 @@ def test_fanout_write_done_notifies_every_target_after_completion():
     writer._execute_write_task(task)
 
     assert info.completion_notify_targets == {
-        ("10.0.0.1", base + get_port_offset(1, 2, 4)),
-        ("10.0.0.1", base + get_port_offset(1, 3, 4)),
+        ("10.0.0.1", base + get_port_offset(1, 2)),
+        ("10.0.0.1", base + get_port_offset(1, 3)),
     }
 
     info.writes_expected = 1
@@ -386,13 +388,13 @@ def test_fanout_write_done_notifies_every_target_after_completion():
         (
             "tA",
             "10.0.0.1",
-            base + get_port_offset(1, 2, 4),
+            base + get_port_offset(1, 2),
             "write_done",
         ),
         (
             "tA",
             "10.0.0.1",
-            base + get_port_offset(1, 3, 4),
+            base + get_port_offset(1, 3),
             "write_done",
         ),
     ]
@@ -473,6 +475,85 @@ def test_write_blocks_for_req_schedules_mla_write_fanout():
     assert captured["remote_tp_size"] == 4
 
 
+def _fanout_save_worker(remote_agents: set[str]) -> MoRIIOConnectorWorker:
+    worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
+    worker.is_producer = True
+    worker.mode = MoRIIOMode.WRITE
+    worker.tp_rank = 0
+    worker.world_size = 1
+    worker.use_mla = True
+    worker._remote_agents = {engine_id: {"agent"} for engine_id in remote_agents}
+    # Set by the handshake callback even when one of the targets failed.
+    worker.write_ready_flags = {"10.0.0.1:2": True}
+    worker._handshake_lock = threading.Lock()
+    worker._ready_requests = queue.Queue()
+    worker.moriio_config = SimpleNamespace(transfer_timeout=0.01)
+    worker.handshakes = []
+    worker.writes = []
+    worker._background_moriio_handshake = (  # type: ignore[method-assign]
+        lambda req_id, remote_engine_id, meta: worker.handshakes.append(req_id)
+    )
+    worker._write_blocks_for_req = (  # type: ignore[method-assign]
+        lambda req_id, meta, layer_name, kv_layer: worker.writes.append(req_id)
+    )
+    return worker
+
+
+def test_fanout_write_retries_handshake_after_one_target_failed():
+    worker = _fanout_save_worker({"10.0.0.1:2_dp0_tp0"})
+    metadata = MoRIIOConnectorMetadata()
+    metadata.reqs_to_save["req"] = _req_meta(tp_size=2)
+
+    worker.save_kv_layer(metadata, "layer0", kv_layer=None, attn_metadata=None)
+
+    assert worker.handshakes == ["req"]
+    assert worker.writes == []
+
+
+def test_fanout_write_proceeds_once_every_target_session_exists():
+    worker = _fanout_save_worker({"10.0.0.1:2_dp0_tp0", "10.0.0.1:2_dp0_tp1"})
+    metadata = MoRIIOConnectorMetadata()
+    metadata.reqs_to_save["req"] = _req_meta(tp_size=2)
+
+    worker.save_kv_layer(metadata, "layer0", kv_layer=None, attn_metadata=None)
+
+    assert worker.handshakes == []
+    assert worker.writes == ["req"]
+
+
+@pytest.mark.parametrize(
+    ("params", "expected_tp_ranks"),
+    [
+        ({"remote_tp_size": 2}, [0, 1]),
+        ({"tp_size": 8}, list(range(8))),
+        ({}, list(range(4))),
+    ],
+)
+def test_release_reaches_every_prefill_rank_and_no_other(params, expected_tp_ranks):
+    scheduler = MoRIIOConnectorScheduler.__new__(MoRIIOConnectorScheduler)
+    scheduler.tp_size = 4
+    sent: list[tuple[str, str, int]] = []
+    scheduler._send_transfer_release = (  # type: ignore[method-assign]
+        lambda transfer_id, host, port: sent.append((transfer_id, host, port))
+    )
+
+    scheduler._release_write_prefill_blocks(
+        "req",
+        {
+            "transfer_id": "tA",
+            "remote_dp_rank": 0,
+            "remote_host": "10.0.0.1",
+            "remote_notify_port": 20000,
+            **params,
+        },
+    )
+
+    assert sent == [
+        ("tA", "10.0.0.1", 20000 + get_port_offset(0, tp_rank))
+        for tp_rank in expected_tp_ranks
+    ]
+
+
 def test_deferred_write_timeout_fails_transfer_on_every_decode_rank():
     wrapper = _real_wrapper()
     sent: list[tuple[str, int, str]] = []
@@ -532,7 +613,7 @@ def test_deferred_write_timeout_notifies_every_fanout_target():
     assert sent == [
         (
             "10.0.0.1",
-            20000 + get_port_offset(dp_rank, tp_rank, 4),
+            20000 + get_port_offset(dp_rank, tp_rank),
             "write_failed",
         )
         for dp_rank in (0, 1)

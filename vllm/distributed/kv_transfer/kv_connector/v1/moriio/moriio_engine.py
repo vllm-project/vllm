@@ -612,7 +612,6 @@ class MoRIIOWriter:
         task: WriteTask,
         decode_dp_rank: int,
         tp_rank: int | None = None,
-        tp_size: int = 1,
     ) -> tuple[str, int]:
         # Wide-EP multi-pod: task.remote_ip addresses only the first pod, so
         # resolve the per-rank host from multi_pod_hosts (falls back to
@@ -628,8 +627,9 @@ class MoRIIOWriter:
                 remote_ip = task.multi_pod_hosts[remote_pod]
         if tp_rank is None:
             tp_rank = self.worker.tp_rank
+        # Same offset the consumer binds its notify socket at (MoRIIOConfig).
         remote_port = task.remote_notify_port + get_port_offset(
-            fold_local_rank(decode_dp_rank, dp_local), tp_rank, tp_size
+            fold_local_rank(decode_dp_rank, dp_local), tp_rank
         )
         return remote_ip, remote_port
 
@@ -639,12 +639,7 @@ class MoRIIOWriter:
         if not task.target_tp_ranks:
             return [self._resolve_notify_endpoint(task, decode_dp_rank)]
         return [
-            self._resolve_notify_endpoint(
-                task,
-                decode_dp_rank,
-                target_tp_rank,
-                task.remote_tp_size,
-            )
+            self._resolve_notify_endpoint(task, decode_dp_rank, target_tp_rank)
             for target_tp_rank in task.target_tp_ranks
         ]
 

@@ -201,6 +201,12 @@ def validate_moriio_heterogeneous_tp_kv_heads(
     )
 
 
+def get_moriio_peer_tp_size(params: dict[str, Any] | None, local_tp_size: int) -> int:
+    """TP size of the peer named in ``kv_transfer_params``; unknown means equal."""
+    params = params or {}
+    return int(params.get("remote_tp_size") or params.get("tp_size") or local_tp_size)
+
+
 def get_moriio_expected_ack_count(producer_tp_size: int, consumer_tp_size: int) -> int:
     if producer_tp_size <= 0 or consumer_tp_size <= 0:
         raise ValueError("TP sizes must be positive")
@@ -950,7 +956,7 @@ class MoRIIOConnectorScheduler:
                 return
 
         remote_notify_port = int(remote_notify_port)
-        for tp_index in range(self.tp_size):
+        for tp_index in range(get_moriio_peer_tp_size(params, self.tp_size)):
             target_port = remote_notify_port + get_port_offset(remote_dp_rank, tp_index)
             self._send_transfer_release(transfer_id, remote_host, target_port)
 
@@ -1234,7 +1240,9 @@ class MoRIIOConnectorScheduler:
                         _pod_idx = pod_index(remote_dp_rank, _dp_local)
                         if 0 <= _pod_idx < len(_remote_hosts):
                             _notify_host = _remote_hosts[_pod_idx]
-                    for tp_index in range(self.tp_size):
+                    # Every prefill TP rank needs the allocation; ports past
+                    # the prefill TP size are not bound.
+                    for tp_index in range(get_moriio_peer_tp_size(_kvp, self.tp_size)):
                         target_port = remote_notify_port + get_port_offset(
                             _remote_dp_rank_for_port, tp_index
                         )
@@ -3056,8 +3064,14 @@ class MoRIIOConnectorWorker:
             )
             is_fanout = len(write_targets) > 1
             dp0_remote_engine_id = self.get_engine_name_with_dp(remote_engine_id, 0)
+            # A failed target handshake must be retried, so check every target
+            # session rather than write_ready_flags, which is set either way.
             handshake_ready = (
-                remote_engine_id in self.write_ready_flags
+                all(
+                    self.get_engine_name_with_dp_tp(remote_engine_id, 0, tp_rank)
+                    in self._remote_agents
+                    for tp_rank in write_targets
+                )
                 if is_fanout
                 else dp0_remote_engine_id in self._remote_agents
             )
