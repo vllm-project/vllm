@@ -394,26 +394,17 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     if(TORCH_STABLE_STRING_CONTENTS MATCHES "auto strptr = new std::string")
       set(TORCH_SHADOW_INCLUDE_DIR
         "${CMAKE_CURRENT_BINARY_DIR}/torch_patched_headers")
-      set(_stable_hdr_staging_dir
-        "${CMAKE_CURRENT_BINARY_DIR}/torch_patched_headers_staging")
 
-      # Copy only if different so reconfiguring doesn't force a rebuild.
-      file(MAKE_DIRECTORY "${_stable_hdr_staging_dir}/torch/csrc/stable")
+      file(MAKE_DIRECTORY "${TORCH_SHADOW_INCLUDE_DIR}/torch/csrc/stable")
       file(COPY_FILE
         "${TORCH_INCLUDE_DIR}/${_stable_hdr_rel}"
-        "${_stable_hdr_staging_dir}/${_stable_hdr_rel}")
+        "${TORCH_SHADOW_INCLUDE_DIR}/${_stable_hdr_rel}")
 
       execute_process(
         COMMAND patch --batch --forward -p1
           "--input=${CMAKE_CURRENT_LIST_DIR}/cmake/patches/pytorch_stable_string.patch"
-        WORKING_DIRECTORY "${_stable_hdr_staging_dir}"
+        WORKING_DIRECTORY "${TORCH_SHADOW_INCLUDE_DIR}"
         COMMAND_ERROR_IS_FATAL ANY)
-
-      file(MAKE_DIRECTORY "${TORCH_SHADOW_INCLUDE_DIR}/torch/csrc/stable")
-      file(COPY_FILE
-        "${_stable_hdr_staging_dir}/${_stable_hdr_rel}"
-        "${TORCH_SHADOW_INCLUDE_DIR}/${_stable_hdr_rel}"
-        ONLY_IF_DIFFERENT)
 
       include_directories(BEFORE "${TORCH_SHADOW_INCLUDE_DIR}")
     endif()
