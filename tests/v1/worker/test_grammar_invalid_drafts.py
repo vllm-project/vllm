@@ -75,15 +75,6 @@ def _handler(max_num_reqs: int = 8):
     return h
 
 
-def test_discard_drops_only_the_named_request():
-    # discard() on a re-added (or finished) request must not touch others.
-    h = _handler()
-    h._draft_tokens_by_req = {"x": [1, 1], "keep": [2, 2]}
-    h.discard("x")
-    assert "x" not in h._draft_tokens_by_req
-    assert h._draft_tokens_by_req["keep"] == [2, 2]
-
-
 def test_request_bound_asserts_when_exceeded():
     # Retention is bounded by max_num_reqs: discard-on-remove keeps the dict
     # at or below the live request count; exceeding it is a bug and asserts.

@@ -53,6 +53,16 @@ def test_request_removed_before_retrieval_can_reuse_id() -> None:
     assert _get_draft_toks(handler) == {}
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
+def test_discard_drops_only_the_named_request() -> None:
+    # discard() on a re-added (or finished) request must not touch others.
+    handler = DraftTokensHandler(max_num_reqs=8, device=torch.device("cuda"))
+    _add_draft_toks(handler, req_id="x", tokens=[11, 12], structured=True)
+    _add_draft_toks(handler, req_id="keep", tokens=[21, 22], structured=True)
+    handler.discard("x")
+    assert _get_draft_toks(handler) == {"keep": [21, 22]}
+
+
 def _add_draft_toks(
     handler: DraftTokensHandler, req_id: str, tokens: list[int], structured: bool
 ) -> None:
