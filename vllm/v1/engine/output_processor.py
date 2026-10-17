@@ -770,15 +770,9 @@ class OutputProcessor:
             new_token_ids = engine_core_output.new_token_ids
             pooling_output = engine_core_output.pooling_output
             finish_reason = engine_core_output.finish_reason
-            if finish_reason == FinishReason.PAUSED:
-                # Rejected: end the session, including chunks sent since then.
-                if req_state.streaming_input:
-                    req_state.streaming_input = False
-                    reqs_to_abort.append(req_id)
-                if req_state.queue is not None:
-                    req_state.queue.close()
-                if pooling_output is None and req_state.detokenizer is None:
-                    pooling_output = EMPTY_CPU_TENSOR
+            if finish_reason == FinishReason.PAUSED and req_state.detokenizer is None:
+                # Rejected on arrival, so there is nothing to pool.
+                pooling_output = EMPTY_CPU_TENSOR
             stop_reason = engine_core_output.stop_reason
             kv_transfer_params = engine_core_output.kv_transfer_params
             ec_transfer_params = engine_core_output.ec_transfer_params
@@ -842,7 +836,8 @@ class OutputProcessor:
                 req_state.logprobs_processor.update_from_output(engine_core_output)
 
             streaming_chunk_boundary = req_state.streaming_input and (
-                finish_reason not in (FinishReason.ABORT, FinishReason.ERROR)
+                finish_reason
+                not in (FinishReason.ABORT, FinishReason.ERROR, FinishReason.PAUSED)
             )
 
             # 4) Create and handle RequestOutput objects.

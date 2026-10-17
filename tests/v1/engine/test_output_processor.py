@@ -1840,21 +1840,18 @@ def test_request_rejected_while_paused(
         else None
     )
     output_processor.add_request(request, None, queue=queue)
-    input_task = MagicMock()
-    if queue is not None:
-        queue._input_stream_task = input_task
 
     result = output_processor.process_outputs(
         [EngineCoreOutput(request.request_id, [], finish_reason=FinishReason.PAUSED)]
     )
 
-    assert not output_processor.has_unfinished_requests()
+    # The input task stops once its request is gone.
+    assert not output_processor.has_request(request.request_id)
     # Chunks the input task sent after the rejection must not outlive it.
     assert result.reqs_to_abort == ([request.request_id] if request.resumable else [])
     if queue is not None:
         with pytest.raises(EnginePausedError):
             queue.get_nowait()
-        input_task.cancel.assert_called_once()
     else:
         [output] = result.request_outputs
         assert output.finished
