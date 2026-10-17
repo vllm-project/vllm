@@ -296,11 +296,18 @@ def find_last_user_index(messages: List[Dict[str, Any]]) -> int:
 
     V4.1 supports mid-conversation system messages, which count as user
     messages for the purposes of the assistant generation header.
+    User messages containing only tool results do not start a new turn.
     """
     last_user_index = -1
     for idx in range(len(messages) - 1, -1, -1):
         role = messages[idx].get("role")
         if role in ["user", "developer"] or (role == "system" and idx > 0):
+            content_blocks = messages[idx].get("content_blocks")
+            if content_blocks and not any(
+                block.get("type") in ("text", "image", "image_url")
+                for block in content_blocks
+            ):
+                continue
             last_user_index = idx
             break
     return last_user_index
