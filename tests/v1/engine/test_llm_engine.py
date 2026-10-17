@@ -297,3 +297,33 @@ def test_skip_tokenizer_initialization(model: str):
     assert len(completions) > 0
     assert completions[0].text == ""
     assert completions[0].token_ids
+
+
+    
+
+    @pytest.mark.parametrize("output_kind", [
+        RequestOutputKind.CUMULATIVE,
+        RequestOutputKind.DELTA,
+        RequestOutputKind.FINAL_ONLY,
+    ])
+    def test_parallel_sampling_llm_engine_output_kinds(vllm_runner, output_kind):
+        prompt = "San Francisco is a"
+        n_outputs = 2
+        
+        sampling_params = SamplingParams(
+            n=n_outputs,
+            max_tokens=5,
+            temperature=0.7,
+            output_kind=output_kind,
+        )
+
+        with vllm_runner("facebook/opt-125m") as llm:
+            outputs = llm.generate([prompt], sampling_params=sampling_params)
+
+            assert len(outputs) == 1
+            request_output = outputs[0]
+            
+            assert len(request_output.outputs) == n_outputs
+            
+            for completion in request_output.outputs:
+                assert completion.text is not None
