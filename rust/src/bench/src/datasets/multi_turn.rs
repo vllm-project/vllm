@@ -324,10 +324,7 @@ fn generate_shared_prefix_text(
     Ok(Arc::from(text))
 }
 
-/// Load multi-turn conversations from a ShareGPT dataset.
-///
-/// Walks ALL turns in each entry (not just first 2). Filters entries
-/// with at least 4 messages (2 user + 2 assistant = 2 real turns).
+/// Read a ShareGPT JSON file and delegate to [`load_sharegpt_multi_turn_from_rows`].
 pub fn load_sharegpt_multi_turn(
     tokenizer: &TokenizerKind,
     dataset_path: &str,
@@ -336,6 +333,8 @@ pub fn load_sharegpt_multi_turn(
     max_turns: Option<usize>,
     seed: u64,
     request_id_prefix: &str,
+    no_oversample: bool,
+    disable_shuffle: bool,
 ) -> Result<Vec<MultiTurnConversation>> {
     let content = std::fs::read_to_string(dataset_path).map_err(|e| {
         BenchError::Config(format!(
@@ -358,10 +357,18 @@ pub fn load_sharegpt_multi_turn(
         max_turns,
         seed,
         request_id_prefix,
+        no_oversample,
+        disable_shuffle,
     )
 }
 
-/// Load multi-turn conversations from deserialized ShareGPT rows.
+/// Load multi-turn conversations from deserialized ShareGPT-format rows.
+///
+/// Walks ALL turns in each entry (not just first 2). Filters entries
+/// with at least 4 messages (2 user + 2 assistant = 2 real turns).
+/// Entries are shuffled with `seed` unless `disable_shuffle`; if fewer than
+/// `num_conversations` survive, they are cloned to fill the gap unless
+/// `no_oversample`.
 pub fn load_sharegpt_multi_turn_from_rows(
     tokenizer: &TokenizerKind,
     entries: &[serde_json::Value],
@@ -370,6 +377,8 @@ pub fn load_sharegpt_multi_turn_from_rows(
     max_turns: Option<usize>,
     seed: u64,
     request_id_prefix: &str,
+    no_oversample: bool,
+    disable_shuffle: bool,
 ) -> Result<Vec<MultiTurnConversation>> {
     // Filter entries with at least 4 messages (2 turns: user+assistant+user+assistant)
     let mut filtered: Vec<&serde_json::Value> = entries
@@ -385,14 +394,16 @@ pub fn load_sharegpt_multi_turn_from_rows(
 
     if filtered.is_empty() {
         return Err(BenchError::Config(
-            "No valid multi-turn entries in ShareGPT file (need at least 4 messages per entry)"
+            "No valid multi-turn entries in ShareGPT-format dataset \
+             (need a 'conversations' array with at least 4 messages per entry)"
                 .into(),
         ));
     }
 
-    // Shuffle
     let mut rng = StdRng::seed_from_u64(seed);
-    filtered.shuffle(&mut rng);
+    if !disable_shuffle {
+        filtered.shuffle(&mut rng);
+    }
 
     let mut conversations = Vec::new();
 
@@ -457,20 +468,27 @@ pub fn load_sharegpt_multi_turn_from_rows(
         ));
     }
 
-    // Oversample if needed
     if conversations.len() < num_conversations {
-        let original_len = conversations.len();
-        let needed = num_conversations - original_len;
-        for i in 0..needed {
-            let mut conv = conversations[rng.random_range(0..original_len)].clone();
-            conv.conversation_id = format!("{request_id_prefix}conv-{}", original_len + i);
-            conversations.push(conv);
+        if no_oversample {
+            tracing::info!(
+                conversations = conversations.len(),
+                requested = num_conversations,
+                "skipping multi-turn conversation oversampling"
+            );
+        } else {
+            let original_len = conversations.len();
+            let needed = num_conversations - original_len;
+            for i in 0..needed {
+                let mut conv = conversations[rng.random_range(0..original_len)].clone();
+                conv.conversation_id = format!("{request_id_prefix}conv-{}", original_len + i);
+                conversations.push(conv);
+            }
+            tracing::info!(
+                original_conversations = original_len,
+                conversations = conversations.len(),
+                "oversampled multi-turn conversations"
+            );
         }
-        tracing::info!(
-            original_conversations = original_len,
-            conversations = conversations.len(),
-            "oversampled multi-turn conversations"
-        );
     }
 
     Ok(conversations)
@@ -528,40 +546,158 @@ fn gen_prompt_to_target_len(
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_load_sharegpt_multi_turn_from_hf_rows() {
-        let tokenizer =
-            TokenizerKind::Tiktoken(crate::tiktoken::load_builtin_tiktoken("gpt2").unwrap());
-        let rows = vec![serde_json::json!({
-            "conversations": [
-                {"from": "human", "value": "hello"},
-                {"from": "gpt", "value": "hi"},
-                {"from": "human", "value": "how are you?"},
-                {"from": "gpt", "value": "great"}
-            ]
-        })];
+    fn gpt2_tokenizer() -> TokenizerKind {
+        TokenizerKind::Tiktoken(crate::tiktoken::load_builtin_tiktoken("gpt2").unwrap())
+    }
 
-        let conversations =
-            load_sharegpt_multi_turn_from_rows(&tokenizer, &rows, 1, Some(7), None, 42, "hf-")
-                .unwrap();
-        let actual = conversations
+    fn sharegpt_row(pairs: &[(&str, &str)]) -> serde_json::Value {
+        let msgs: Vec<serde_json::Value> = pairs
             .iter()
-            .map(|conversation| {
+            .flat_map(|(user, assistant)| {
+                [
+                    serde_json::json!({"from": "human", "value": user}),
+                    serde_json::json!({"from": "gpt", "value": assistant}),
+                ]
+            })
+            .collect();
+        serde_json::json!({"conversations": msgs})
+    }
+
+    fn summarize(conversations: &[MultiTurnConversation]) -> Vec<(String, Vec<(String, usize)>)> {
+        conversations
+            .iter()
+            .map(|c| {
                 (
-                    conversation.conversation_id.as_str(),
-                    conversation
-                        .turns
+                    c.conversation_id.clone(),
+                    c.turns
                         .iter()
-                        .map(|turn| (turn.user_message.as_ref(), turn.expected_output_len))
-                        .collect::<Vec<_>>(),
+                        .map(|t| (t.user_message.to_string(), t.expected_output_len))
+                        .collect(),
                 )
             })
-            .collect::<Vec<_>>();
+            .collect()
+    }
+
+    /// Default HF path: no output-len override, so expected_output_len comes from
+    /// tokenizing the assistant reply, and max_turns stops the walk early.
+    #[test]
+    fn test_load_sharegpt_multi_turn_from_rows_assistant_len_and_max_turns() {
+        let tokenizer = gpt2_tokenizer();
+        let rows = vec![
+            sharegpt_row(&[
+                ("a1", "one"),
+                ("a2", "two words"),
+                ("a3", "three more words"),
+            ]),
+            sharegpt_row(&[("b1", "x"), ("b2", "y z")]),
+            sharegpt_row(&[("single", "turn")]),
+        ];
+        let len = |s: &str| tokenizer.encode(s, false).unwrap().len();
+
+        let conversations = load_sharegpt_multi_turn_from_rows(
+            &tokenizer,
+            &rows,
+            2,
+            None,
+            Some(2),
+            42,
+            "hf-",
+            false,
+            true,
+        )
+        .unwrap();
 
         assert_eq!(
-            actual,
-            vec![("hf-conv-0", vec![("hello", 7), ("how are you?", 7)])]
+            summarize(&conversations),
+            vec![
+                (
+                    "hf-conv-0".to_string(),
+                    vec![
+                        ("a1".to_string(), len("one")),
+                        ("a2".to_string(), len("two words"))
+                    ]
+                ),
+                (
+                    "hf-conv-1".to_string(),
+                    vec![("b1".to_string(), len("x")), ("b2".to_string(), len("y z"))]
+                ),
+            ]
         );
+    }
+
+    #[test]
+    fn test_load_sharegpt_multi_turn_from_rows_no_oversample_caps_at_dataset_size() {
+        let tokenizer = gpt2_tokenizer();
+        let rows = vec![sharegpt_row(&[("a", "b"), ("c", "d")])];
+
+        let capped = load_sharegpt_multi_turn_from_rows(
+            &tokenizer,
+            &rows,
+            5,
+            Some(1),
+            None,
+            0,
+            "",
+            true,
+            false,
+        )
+        .unwrap();
+        assert_eq!(capped.len(), 1);
+
+        let padded = load_sharegpt_multi_turn_from_rows(
+            &tokenizer,
+            &rows,
+            5,
+            Some(1),
+            None,
+            0,
+            "",
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!(padded.len(), 5);
+        assert_eq!(padded[4].conversation_id, "conv-4");
+    }
+
+    #[test]
+    fn test_load_sharegpt_multi_turn_from_rows_disable_shuffle_preserves_order() {
+        let tokenizer = gpt2_tokenizer();
+        let rows: Vec<serde_json::Value> = (0..20)
+            .map(|i| sharegpt_row(&[(&format!("u{i}"), "r"), ("again", "r")]))
+            .collect();
+
+        let ordered = load_sharegpt_multi_turn_from_rows(
+            &tokenizer,
+            &rows,
+            5,
+            Some(1),
+            None,
+            7,
+            "",
+            false,
+            true,
+        )
+        .unwrap();
+        let first_messages: Vec<&str> =
+            ordered.iter().map(|c| c.turns[0].user_message.as_ref()).collect();
+        assert_eq!(first_messages, ["u0", "u1", "u2", "u3", "u4"]);
+
+        let shuffled = load_sharegpt_multi_turn_from_rows(
+            &tokenizer,
+            &rows,
+            5,
+            Some(1),
+            None,
+            7,
+            "",
+            false,
+            false,
+        )
+        .unwrap();
+        let shuffled_first: Vec<&str> =
+            shuffled.iter().map(|c| c.turns[0].user_message.as_ref()).collect();
+        assert_ne!(shuffled_first, first_messages);
     }
 
     fn common_prefix_bytes(strings: &[&str]) -> usize {
