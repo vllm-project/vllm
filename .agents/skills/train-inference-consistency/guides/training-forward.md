@@ -172,10 +172,10 @@ dtype, dequantization, QAT and update format: [precision guide](precision-quant.
 
 ### 2. How to wire kernel-only calls
 
-`visible_forward(visible, native, *inputs)`: `visible` is the vLLM kernel; it produces the output bitwise identical to inference and saves inputs without building a graph. `native` is the training-side same-math implementation used for backward. Borrow only the kernel, no vLLM runtime object:
+Each layer's forward runs once: call the vLLM kernel for the visible output, bitwise identical to inference, and save what the backward needs; see [backward wiring](backward-validation.md#how-to-wire-it-forward-once-backward-uses-what-the-forward-saved). Borrow only the kernel, no vLLM runtime object:
 
 - No KV paging, decode scheduling or CUDA Graph management. Training runs a full-sequence teacher-forced forward; packing passes boundaries via thd/cu_seqlens.
-- Reuse order: model-agnostic differentiable operators -> concise PyTorch reference to vLLM semantics -> ready-made operators with backward -> custom autograd/kernel only if necessary. Throughput is not a goal yet.
+- Reuse order: model-agnostic differentiable operators -> concise PyTorch reference to vLLM semantics -> ready-made operators with backward -> custom autograd/kernel only if necessary. This order only says where to look first; the training-step cost of each choice is checked at C6 against the C1 budget, not deferred to C10.
 - Handle discrete top-k / index selection apart from the selected differentiable tensors. What is trained, frozen or given an auxiliary loss follows the model definition; do not detach to get it running or add router/indexer objectives.
 - vLLM layer modules used directly (FusedMoE, ModelOpt linear) need `get_tp/ep_group`, so the training process creates vLLM process groups (Nemotron does; DS4's own modules do not).
 - Take the same branch as inference: reproduce the quantization config, attention backend and BI-switch kernel selection, or the comparison is against a different path. Tests use the production `CompilationConfig(custom_ops=...)` ([the two false negatives](backward-validation.md#two-test-infrastructure-false-negatives)).

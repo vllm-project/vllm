@@ -8,9 +8,11 @@ When to reuse backward and when to write glue.
 
 Backward is determined by the **math formula**, not by the forward kernel. The backward of `y = f(x, W)` needs only the formula and the saved inputs: `dX = dY·W`, `dW = dYᵀ·x`. A vLLM forward kernel does not by itself require a new backward. "No backward operator at the same precision" is not a reason to rewrite: under the high_precision contract the backward runs in BF16/FP32 anyway.
 
-### How to wire it
+### How to wire it: forward once, backward uses what the forward saved
 
-`visible_forward(visible, native, *inputs)`: `visible` is the vLLM inference kernel; it produces the forward output, bitwise identical to inference, and saves inputs without building a graph. `native` is the training framework's implementation of the same math with its own backward; on backward it recomputes from the same inputs and differentiates. Backward precision and speed depend entirely on `native`.
+The training forward is the inference forward. Each module is an autograd Function: its forward calls the inference kernel to produce the visible output and saves what its own backward needs (inputs, visible output, LSE, fixed routing IDs, quantized values and scales); its backward uses only those, through a reused library backward or a closed-form VJP. If the inference kernel does not output something the backward needs, change the kernel to output it.
+
+Delivery requires 0 diff and a training step within budget on the main topologies fixed at C1; C6 checks both together. Nemotron audited this against DS4: attention saves q/k/v, out and LSE; routed MoE saves x, the visible FC1 output and the visible output; linear and norms save their inputs; the router saves logits and fixed IDs. Its open gap is Mamba SSD, because vLLM's visible SSD does not output the chunk state.
 
 ### Three cases
 
@@ -145,7 +147,8 @@ y = VisibleWithSurrogate.apply(visible.detach(), surrogate)
 - Build the surrogate graph in normal grad mode, outside the custom Function's forward.
 - With the dequantized surrogate, `w_ref`'s gradient must reach master via STE: bridge a tensor valued as the dequantized weight whose gradient passes straight to master, then feed it to a plain linear.
 - Do not use `visible + surrogate - surrogate.detach()`: floating-point add/subtract and compiler transforms change the result. Do not modify the bridge output in place downstream.
-- Production need not use this double forward: return the inference result, `save_for_backward` the required state, and call the verified backward.
+- This bridge is the independent validation reference, not the production wiring; production wiring is in [How to wire it](#how-to-wire-it-forward-once-backward-uses-what-the-forward-saved).
+- `visible_forward(visible, native, *inputs)` is another way to write the same bridge: `visible` saves inputs without building a graph, `native` is the training framework's implementation of the same math and reruns the forward on those inputs in backward; precision and speed depend on which `native` is chosen.
 
 #### Comparison steps
 
