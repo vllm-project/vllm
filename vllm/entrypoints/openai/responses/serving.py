@@ -946,7 +946,7 @@ class OpenAIServingResponses(GenerateBaseServing):
         """Returns the top-k logprobs from the logprobs dictionary."""
         out = []
         for i, (token_id, _logprob) in enumerate(logprobs.items()):
-            if i >= top_logprobs:
+            if top_logprobs != -1 and i >= top_logprobs:
                 break
             text = self._get_decoded_token(
                 logprob=_logprob,
