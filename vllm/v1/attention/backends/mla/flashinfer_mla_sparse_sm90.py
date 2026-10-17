@@ -65,6 +65,9 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 
 _FP8_KV_DTYPES = ("fp8", "fp8_e4m3")
 _WORKSPACE_BYTES = 128 * 1024 * 1024
+# MLAPlan caps works at 16384 in FlashInfer 0.7.0.post1; budget 8192 tiles.
+# https://github.com/flashinfer-ai/flashinfer/pull/5170
+_MAX_PLAN_QUERY_TILES = 8192
 # TODO: FlashInfer bakes per-row kv_len into the plan on the host, which
 # forces a D2H sync under async scheduling. The plan-info layout constants
 # below and the int-workspace clamp in _SM90State work around this by
@@ -85,6 +88,11 @@ _PI_WORK_INDPTR = 15
 # plan stays reusable across draft steps and consecutive decode steps; the
 # device-side clamp restores the exact lengths.
 _PLAN_SLACK = 32
+
+
+def _max_plan_chunk_rows(num_heads: int) -> int:
+    # Smallest planner query tile is 64 heads; keep that for 128-head tiles too.
+    return _MAX_PLAN_QUERY_TILES // triton.cdiv(num_heads, 64)
 
 
 @triton.jit
@@ -109,7 +117,7 @@ def _pack_topk_indices(
     )
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["row_offset"])
 def _clamp_work_kv_end(
     int_ws,
     saved_kv_end,
@@ -120,6 +128,7 @@ def _clamp_work_kv_end(
     q_indptr_off,
     kv_start_off,
     kv_end_off,
+    row_offset,
     TOPK: tl.constexpr,
     KPOOL: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
@@ -129,6 +138,7 @@ def _clamp_work_kv_end(
     works = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = works < tl.load(int_ws + num_works_idx)
     row = tl.load(int_ws + q_indptr_off + works, mask=mask, other=0)
+    row += row_offset
     req = tl.load(req_id_per_token + row, mask=mask, other=0)
     seq_len = tl.load(seq_lens + req, mask=mask, other=0)
     query_end = tl.load(query_start_loc + req + 1, mask=mask, other=0)
@@ -253,10 +263,15 @@ class _SM90State:
         sm_scale: float,
         index_topk: int,
         index_kpool: int,
+        workspace: torch.Tensor | None = None,
     ) -> None:
         from flashinfer.mla import BatchMLAPagedAttentionWrapper
 
-        self.workspace = torch.empty(_WORKSPACE_BYTES, dtype=torch.uint8, device=device)
+        self.workspace = (
+            torch.empty(_WORKSPACE_BYTES, dtype=torch.uint8, device=device)
+            if workspace is None
+            else workspace
+        )
         self.device = device
         self.num_heads = num_heads
         self.kv_dtype = kv_dtype
@@ -306,6 +321,7 @@ class _SM90State:
         kv_lens: torch.Tensor,
         cam: CommonAttentionMetadata | None,
         req_id_per_token: torch.Tensor | None,
+        row_offset: int = 0,
     ) -> None:
         """Plan per-row KV lengths (CPU int32, ``[num_tokens]``).
 
@@ -338,7 +354,7 @@ class _SM90State:
                 num_tokens, torch.clamp(kv_lens + _PLAN_SLACK, max=self.max_valid)
             )
             self._planned_num_tokens = num_tokens
-        self._clamp_kv_end(cam, req_id_per_token)
+        self._clamp_kv_end(cam, req_id_per_token, row_offset)
 
     def _plan(self, num_tokens: int, kv_lens: torch.Tensor) -> None:
         # CPU staging buffers are filled in place: plan() runs per step
@@ -395,7 +411,10 @@ class _SM90State:
         self._saved_kv_end.copy_(self._int_ws[kv_end_off : kv_end_off + max_works])
 
     def _clamp_kv_end(
-        self, cam: CommonAttentionMetadata, req_id_per_token: torch.Tensor
+        self,
+        cam: CommonAttentionMetadata,
+        req_id_per_token: torch.Tensor,
+        row_offset: int,
     ) -> None:
         assert self._int_ws is not None and self._plan_offsets is not None
         block = 1024
@@ -406,6 +425,7 @@ class _SM90State:
             cam.query_start_loc,
             req_id_per_token,
             *self._plan_offsets,
+            row_offset,
             TOPK=self.index_topk,
             KPOOL=self.index_kpool,
             BLOCK_SIZE=block,
@@ -421,6 +441,7 @@ class _SM90State:
 @dataclass
 class FlashInferMLASparseSM90Metadata(FlashInferMLASparseMetadata):
     state: _SM90State | None = None
+    chunk_states: list[tuple[int, int, _SM90State]] | None = None
 
 
 class FlashInferMLASparseSM90Builder(FlashInferMLASparseMetadataBuilder):
@@ -460,7 +481,10 @@ class FlashInferMLASparseSM90Builder(FlashInferMLASparseMetadataBuilder):
             device,
             impl.num_heads,
             kv_plan_dtype,
-            vllm_config.scheduler_config.max_num_batched_tokens,
+            min(
+                vllm_config.scheduler_config.max_num_batched_tokens,
+                _max_plan_chunk_rows(impl.num_heads),
+            ),
             topk_indices_buffer.shape[1],
             kv_lora_rank=impl.kv_lora_rank,
             qk_rope_head_dim=impl.qk_rope_head_dim,
@@ -468,6 +492,7 @@ class FlashInferMLASparseSM90Builder(FlashInferMLASparseMetadataBuilder):
             index_topk=int(hf_config.index_topk),
             index_kpool=int(getattr(hf_config, "index_kpool", 1) or 1),
         )
+        self._chunk_states = [self.state]
         spec_config = vllm_config.speculative_config
         self._adaptive_verification = bool(
             spec_config is not None and spec_config.enable_adaptive_verification
@@ -539,13 +564,45 @@ class FlashInferMLASparseSM90Builder(FlashInferMLASparseMetadataBuilder):
         ):
             num_rows = metadata.num_decode_tokens
             kv_lens = kv_lens[:num_rows]
-        if exact:
+        metadata.state = self.state
+        metadata.chunk_states = None
+        chunk_size = self.state.max_tokens
+        if num_rows > chunk_size:
+            metadata.chunk_states = []
+            for i, start in enumerate(range(0, num_rows, chunk_size)):
+                end = min(start + chunk_size, num_rows)
+                if i == len(self._chunk_states):
+                    state = self.state
+                    self._chunk_states.append(
+                        _SM90State(
+                            state.device,
+                            state.num_heads,
+                            state.kv_dtype,
+                            state.max_tokens,
+                            state.topk_width,
+                            state.kv_lora_rank,
+                            state.qk_rope_head_dim,
+                            state.sm_scale,
+                            state.index_topk,
+                            state.index_kpool,
+                            workspace=state.workspace,
+                        )
+                    )
+                state = self._chunk_states[i]
+                state.plan(
+                    end - start,
+                    kv_lens[start:end],
+                    None if exact else common_attn_metadata,
+                    None if exact else metadata.req_id_per_token,
+                    row_offset=start,
+                )
+                metadata.chunk_states.append((start, end, state))
+        elif exact:
             self.state.plan(num_rows, kv_lens, None, None)
         else:
             self.state.plan(
                 num_rows, kv_lens, common_attn_metadata, metadata.req_id_per_token
             )
-        metadata.state = self.state
         return metadata
 
 
@@ -626,8 +683,6 @@ class FlashInferMLASparseSM90Impl(SparseMLACommonImpl[FlashInferMLASparseSM90Met
         )
         state = attn_metadata.state
         assert state is not None
-        # Pack valid prefixes at the offsets refreshed by plan() before replay.
-        state.pack_indices(topk_slots)
 
         flat = (
             kv_c_and_k_pe_cache.view(torch.float8_e4m3fn)
@@ -642,5 +697,20 @@ class FlashInferMLASparseSM90Impl(SparseMLACommonImpl[FlashInferMLASparseSM90Met
             if self.use_fp8_kv_cache
             else {}
         )
-        out = state.wrapper.run(q_nope, q_pe, ckv, kpe, **scale_kwargs)
+        if attn_metadata.chunk_states is not None:
+            out = torch.empty_like(q_nope)
+            for start, end, chunk_state in attn_metadata.chunk_states:
+                chunk_state.pack_indices(topk_slots[start:end])
+                chunk_state.wrapper.run(
+                    q_nope[start:end],
+                    q_pe[start:end],
+                    ckv,
+                    kpe,
+                    out=out[start:end],
+                    **scale_kwargs,
+                )
+        else:
+            # Pack valid prefixes at the offsets refreshed before replay.
+            state.pack_indices(topk_slots)
+            out = state.wrapper.run(q_nope, q_pe, ckv, kpe, **scale_kwargs)
         return out, None
