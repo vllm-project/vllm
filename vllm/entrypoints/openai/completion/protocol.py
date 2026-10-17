@@ -26,7 +26,6 @@ from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel, UsageInfo
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
-from vllm.outputs import WeightVersionSpan
 from vllm.renderers import TokenizeParams
 from vllm.sampling_params import (
     BeamSearchParams,
@@ -179,15 +178,6 @@ class CompletionRequest(OpenAIBaseModel):
             "need to map generated text back to input tokens."
         ),
     )
-    return_weight_versions: bool = Field(
-        default=False,
-        description=(
-            "If true, each choice includes weight_versions: the weight-version "
-            "label that sampled each half-open range of its output tokens. "
-            "When streaming, only the last chunk of each choice includes it. "
-            "Beam search does not return it."
-        ),
-    )
     routed_experts_prompt_start: int = Field(
         default=0,
         ge=0,
@@ -334,7 +324,6 @@ class CompletionRequest(OpenAIBaseModel):
 
         return BeamSearchParams(
             beam_width=n,
-            allowed_token_ids=self.allowed_token_ids,
             max_tokens=max_tokens,
             ignore_eos=self.ignore_eos,
             temperature=temperature,
@@ -688,8 +677,6 @@ class CompletionResponseChoice(OpenAIBaseModel):
     # ``None`` if (a) the request was aborted before any forward pass,
     # or (b) ``enable_return_routed_experts`` is off server-side.
     routed_experts: str | None = None
-    # Contiguous weight version spans over output-token indexes.
-    weight_versions: list[WeightVersionSpan] | None = None
 
 
 class CompletionResponse(OpenAIBaseModel):
@@ -729,8 +716,6 @@ class CompletionResponseStreamChoice(OpenAIBaseModel):
     # prompt tokens is put into choice to align with CompletionResponseChoice
     prompt_token_ids: list[int] | None = None
     token_ids: list[int] | None = None
-    # Set on the final chunk only; covers the whole output.
-    weight_versions: list[WeightVersionSpan] | None = None
 
 
 class CompletionStreamResponse(OpenAIBaseModel):

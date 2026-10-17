@@ -23,8 +23,7 @@ use crate::output::{ChatOutputProcessor, DynChatEventStream, DynDecodedTextEvent
 use crate::parser::reasoning::{ReasoningParser, ReasoningParserFactory};
 use crate::parser::tool::{ToolParser, ToolParserFactory};
 use crate::parser::unified::{
-    BeamUnifiedParser, HfTemplateError, HfUnifiedParser, ResponseTemplate, UnifiedParserFactory,
-    names,
+    HfTemplateError, HfUnifiedParser, ResponseTemplate, UnifiedParserFactory, names,
 };
 use crate::parser::{ParserSelection, ToolStrictLevel};
 use crate::request::{ChatRequest, ChatTool};
@@ -207,19 +206,17 @@ impl DefaultChatOutputProcessor {
             });
         }
 
-        // Parsers driven by the model's template are built from it, never by
-        // their registry constructors.
-        let template = || {
-            response_template.clone().map_err(|error| Error::ParserInitialization {
-                kind: "unified",
-                name: parser_name.to_string(),
-                error: Box::new(error),
-            })
-        };
-        let parser: Box<dyn UnifiedParser> = match parser_name {
-            names::HF => Box::new(HfUnifiedParser::new(template()?, tools, tokenizer)),
-            names::BEAM => Box::new(BeamUnifiedParser::new(template()?, tools, tokenizer)),
-            _ => factory.create(parser_name, tools, tokenizer)?,
+        // `hf` is built from the model's template, never by its registry constructor.
+        let parser = if parser_name == names::HF {
+            let template =
+                response_template.as_ref().map_err(|error| Error::ParserInitialization {
+                    kind: "unified",
+                    name: parser_name.to_string(),
+                    error: Box::new(error.clone()),
+                })?;
+            Box::new(HfUnifiedParser::new(template.clone(), tools, tokenizer))
+        } else {
+            factory.create(parser_name, tools, tokenizer)?
         };
 
         UNIFIED_PARSER_LOG_ONCE.call_once(|| info!(parser_name, "using unified parser"));
@@ -590,20 +587,6 @@ mod tests {
             .assert_eq(&error(Err(HfTemplateError::Missing)));
         expect_test::expect!["failed to initialize unified parser `hf`: invalid response_template: response_template must define 'start_anchor' or 'start_anchor_pattern'."]
             .assert_eq(&error(invalid_template()));
-    }
-
-    #[test]
-    fn explicit_beam_uses_the_model_response_template() {
-        let beam = ParserSelection::Explicit("beam".to_string());
-        crate::parser::validate_parser_overrides(&beam, &beam).unwrap();
-        assert!(keeps_special_tokens("other-model", &loaded_template(), &beam, &beam).unwrap());
-
-        let error =
-            keeps_special_tokens("other-model", &Err(HfTemplateError::Missing), &beam, &beam)
-                .unwrap_err()
-                .to_report_string();
-        expect_test::expect!["failed to initialize unified parser `beam`: the model's tokenizer_config.json provides no response_template"]
-            .assert_eq(&error);
     }
 
     #[test]

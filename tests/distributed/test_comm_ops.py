@@ -462,8 +462,8 @@ def test_flashinfer_standalone_workspace_size(
 @pytest.mark.parametrize(
     ("node_count", "is_blackwell", "expected"),
     [
-        (1, False, ("mnnvl", True)),
-        (1, True, ("mnnvl", True)),
+        (1, False, ("trtllm", False)),
+        (1, True, ("trtllm", False)),
         (2, False, (None, False)),
         (2, True, ("mnnvl", False)),
     ],

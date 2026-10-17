@@ -411,35 +411,6 @@ Example (OpenAI-compatible completions request):
 }
 ```
 
-## Explicit pool sizing for `SimpleCPUOffloadConnector`
-
-`SimpleCPUOffloadConnector` accepts an optional `num_cpu_blocks` in
-`kv_connector_extra_config`. The scheduler and every worker use this exact
-number of offload blocks instead of automatic sizing from
-`cpu_bytes_to_use_per_rank` or `cpu_bytes_to_use / world_size`.
-Use the same positive integer on all ranks, chosen
-to fit the smallest per-worker capacity. This supports pipeline stages with
-different KV cache sizes without adding a collective during initialization.
-
-```json
-{
-  "kv_connector": "SimpleCPUOffloadConnector",
-  "kv_role": "kv_both",
-  "kv_connector_extra_config": {
-    "cpu_bytes_to_use_per_rank": 1073741824,
-    "num_cpu_blocks": 64,
-    "lazy_offload": false
-  }
-}
-```
-
-The example count must be adjusted for the model, KV layout, and parallelism.
-The configured byte budget remains an upper bound: startup fails if the
-requested count exceeds a worker's capacity. For the `disk` backend the count
-selects disk slots and is checked against `disk_capacity_bytes`. Omitting
-`num_cpu_blocks` preserves automatic per-worker sizing. This option applies
-to `SimpleCPUOffloadConnector`, separately from `OffloadingConnector` above.
-
 ## Further Reading
 
 - [vLLM blog: KV Offloading Connector](https://vllm.ai/blog/2026-01-08-kv-offloading-connector) — motivation, architecture (DMA-based async transfer), and benchmarks (TTFT and throughput).

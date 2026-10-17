@@ -85,11 +85,6 @@ class AttentionConfig:
     use_prefill_query_quantization: bool = False
     """If set, quantize query for attention in prefill."""
 
-    trtllm_ragged_backend: Literal["trtllm-gen", "cute-dsl"] = "trtllm-gen"
-    """Kernel backend for cached-context TRTLLM_RAGGED MLA prefill.
-    CuTe DSL requires FP8 queries for head dimension 192 and does not support
-    head dimension 256. New-token prefill always uses TRTLLM."""
-
     indexer_kv_dtype: IndexerKVDType = "auto"
     """Data type for the sparse-attention indexer K cache. "auto" picks the
     model's default (bf16 for MiniMax M3, fp8 for the DeepSeek sparse

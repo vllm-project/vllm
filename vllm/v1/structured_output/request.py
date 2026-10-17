@@ -28,9 +28,6 @@ class StructuredOutputRequest:
     # Cached per request; do not share reasoning parsers across requests because
     # their behavior can depend on reasoning_parser_kwargs.
     reasoner: "ReasoningParser | None" = None
-    # Implicit reasoning-end tokens the grammar rejects as the first content
-    # token; masked while the request reasons. Computed on first use.
-    masked_reasoning_end_ids: tuple[int, ...] | None = None
 
     @staticmethod
     def from_sampling_params(

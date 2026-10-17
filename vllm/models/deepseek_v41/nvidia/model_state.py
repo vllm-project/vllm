@@ -41,8 +41,7 @@ from vllm.v1.worker.utils import AttentionGroup
 def _gather_lookback_kernel(
     lookback_ptr,
     idx_mapping_ptr,
-    query_start_loc_ptr,
-    positions_ptr,
+    num_computed_tokens_ptr,
     all_token_ids_ptr,
     all_token_ids_stride,
     num_reqs,
@@ -53,16 +52,13 @@ def _gather_lookback_kernel(
     batch_idx = tl.program_id(0)
     in_batch = batch_idx < num_reqs
     req_state_idx = tl.load(idx_mapping_ptr + batch_idx, mask=in_batch, other=0)
-    begin = tl.load(query_start_loc_ptr + batch_idx, mask=in_batch, other=0)
-    end = tl.load(query_start_loc_ptr + batch_idx + 1, mask=in_batch, other=0)
-    in_batch = in_batch & (end > begin)
-    num_computed = tl.load(positions_ptr + begin, mask=in_batch, other=0)
+    num_computed = tl.load(num_computed_tokens_ptr + req_state_idx)
 
     offs = tl.arange(0, BLOCK_DEPTH)
     pos = num_computed - 1 - offs
     valid = in_batch & (offs < DEPTH) & (pos >= 0)
     ids = tl.load(
-        all_token_ids_ptr + req_state_idx.to(tl.int64) * all_token_ids_stride + pos,
+        all_token_ids_ptr + req_state_idx * all_token_ids_stride + pos,
         mask=valid,
         other=-1,
     )
@@ -204,11 +200,8 @@ class DeepseekV41ModelState(DefaultModelState):
         self.lookback_token_ids: torch.Tensor | None = None
         if depth > 0:
             # Persistent so a captured graph can read it on replay.
-            max_num_reqs = self.max_num_reqs
-            if vllm_config.parallel_config.prefill_context_parallel_size > 1:
-                max_num_reqs *= 2
             self.lookback_token_ids = torch.full(
-                (max_num_reqs, depth), -1, dtype=torch.int32, device=device
+                (self.max_num_reqs, depth), -1, dtype=torch.int32, device=device
             )
 
         # Per request state index; batches gather from it (see prepare_attn).
@@ -294,8 +287,7 @@ class DeepseekV41ModelState(DefaultModelState):
         _gather_lookback_kernel[(window.shape[0],)](
             window,
             input_batch.idx_mapping,
-            input_batch.query_start_loc,
-            input_batch.positions,
+            req_states.num_computed_tokens.gpu,
             all_token_ids,
             all_token_ids.stride(0),
             input_batch.idx_mapping.shape[0],

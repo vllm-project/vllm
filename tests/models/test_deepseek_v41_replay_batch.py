@@ -4,7 +4,7 @@
 
 from dataclasses import replace
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
@@ -15,9 +15,6 @@ from vllm.forward_context import (
     BatchDescriptor,
     ForwardContext,
     override_forward_context,
-)
-from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
-    RoutedExpertsCapturer,
 )
 from vllm.models.deepseek_v41.decoder_replay_layers import DecoderReplayLayers
 from vllm.models.deepseek_v41.nvidia.model_state import DeepseekV41ModelState
@@ -174,31 +171,6 @@ def test_replay_batch_keeps_each_request_window(state):
     }
     assert torch.equal(context.slot_mapping["mla"], _slot_mappings(401)[1, rows])
     assert context.dp_metadata is None and context.is_padding is None
-
-
-def test_replay_context_restores_tp_routing_rows(state):
-    """Capture uses the compact replay batch's size, not the outer batch's."""
-    batch = _input_batch(QUERY_LENS, SEQ_LENS, PREFILLING)
-    replay, _ = _prepare(state, batch, CUDAGraphMode.NONE)
-    context = replay.forward_context
-    assert context.is_padding is None and context.dp_metadata is None
-    count = len(REPLAY_ROWS)
-    assert context.batch_descriptor.num_tokens == count
-    capturer = RoutedExpertsCapturer.__new__(RoutedExpertsCapturer)
-    capturer.dp_rank, capturer.tp_size = 0, 2
-    capturer.device_buffer = torch.full((401, 1, 2), -1, device=DEVICE)
-    expected = torch.tensor(REPLAY_ROWS, device=DEVICE)[:, None].expand(-1, 2)
-    gathered = torch.cat((expected, torch.full((1, 2), -1, device=DEVICE)))
-    with (
-        override_forward_context(context),
-        patch(
-            "vllm.model_executor.layers.fused_moe.routed_experts_capturer.get_tp_group"
-        ) as group,
-    ):
-        group.return_value.all_gather.return_value = gathered
-        capturer.capture(0, gathered[: (count + 1) // 2])
-    torch.testing.assert_close(capturer.device_buffer[:count, 0], expected)
-    assert (capturer.device_buffer[count:] == -1).all()
 
 
 def test_replay_batch_keeps_device_decode_boundaries(state):
