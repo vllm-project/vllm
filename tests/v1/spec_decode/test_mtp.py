@@ -57,6 +57,90 @@ def test_glm_mtp_defers_lm_head(default_vllm_config):
     assert layer.shared_head.head is None
 
 
+@pytest.mark.parametrize(
+    ("module_path", "class_name"),
+    [
+        (
+            "vllm.model_executor.models.glm4_moe_lite_mtp",
+            "Glm4MoeLiteMultiTokenPredictorLayer",
+        ),
+        (
+            "vllm.model_executor.models.glm4_moe_mtp",
+            "Glm4MoeMultiTokenPredictorLayer",
+        ),
+        (
+            "vllm.model_executor.models.glm_ocr_mtp",
+            "GlmOcrMultiTokenPredictorLayer",
+        ),
+    ],
+)
+def test_glm_mtp_layer_recycles_post_final_norm_hidden(
+    default_vllm_config, module_path, class_name
+):
+    # GLM MTP is a DeepSeek-NextN clone. The layer forward must apply the final
+    # norm exactly once (shared_head.norm, fused add+norm over the mtp_block
+    # output + residual) and return that POST-final-norm hidden for BOTH tuple
+    # positions, so the speculator recycles post-norm into the next step's hnorm
+    # and compute_logits consumes it directly. This is the contract fixed in
+    # #47448 and vllm/models/glm5next/common/mtp.py. Returning the single
+    # pre-norm tensor recycled a hidden one RMSNorm short on chained draft steps
+    # (k>=2) — lossless, but lowers draft acceptance.
+    #
+    # A real RMSNorm with NON-UNIFORM weights is used so that a missing, extra,
+    # or wrong normalization is actually caught (a scalar stub would not).
+    import importlib
+    from types import SimpleNamespace
+
+    from vllm.model_executor.layers.layernorm import RMSNorm
+
+    cls = getattr(importlib.import_module(module_path), class_name)
+
+    hidden_size = 8
+    torch.manual_seed(0)
+    final_norm = RMSNorm(hidden_size, eps=1e-6)
+    with torch.no_grad():
+        final_norm.weight.copy_(torch.linspace(0.5, 1.5, hidden_size))
+
+    # Deterministic, distinct block output and residual.
+    block_hidden = torch.randn(3, hidden_size)
+    block_residual = torch.randn(3, hidden_size)
+
+    # Independently compute the expected post-final-norm hidden BEFORE calling
+    # the layer (the fused norm may mutate its inputs in place).
+    expected_post, _ = final_norm.forward_native(
+        block_hidden.clone(), residual=block_residual.clone()
+    )
+    pre_norm = block_hidden.clone() + block_residual.clone()
+
+    layer = object.__new__(cls)
+    layer.enorm = lambda x: x
+    layer.hnorm = lambda x: x
+    layer.eh_proj = lambda x: x[..., :hidden_size]
+    layer.mtp_block = lambda positions, hidden_states, residual: (
+        block_hidden,
+        block_residual,
+    )
+    layer.shared_head = SimpleNamespace(norm=final_norm)
+
+    out = layer.forward(
+        input_ids=None,
+        positions=torch.tensor([1, 2, 3]),
+        previous_hidden_states=torch.randn(3, hidden_size),
+        inputs_embeds=torch.randn(3, hidden_size),
+    )
+
+    assert isinstance(out, tuple) and len(out) == 2
+    logits_hidden, recycle_hidden = out
+    # Both tuple positions carry the same post-final-norm hidden.
+    assert torch.allclose(logits_hidden, recycle_hidden)
+    # It equals the real fused final norm of (block_hidden + residual) — i.e. the
+    # correct normalization is recycled (and, since compute_logits now consumes
+    # this directly, the logits path is unchanged from before the fix).
+    assert torch.allclose(recycle_hidden, expected_post, atol=1e-5)
+    # And it is NOT the pre-norm hidden (the old, buggy recycle value).
+    assert not torch.allclose(recycle_hidden, pre_norm)
+
+
 def _create_mtp_proposer(num_speculative_tokens: int) -> EagleProposer:
     """Create an MTP proposer with unified model configuration."""
     model_config = ModelConfig(
