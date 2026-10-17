@@ -1618,6 +1618,14 @@ def _with_even_cpu_query_split(
     )
 
 
+def _fp8_cache_roundtrip(tensor: torch.Tensor, scale: float) -> torch.Tensor:
+    """Reproduce cache storage rounding for the SDPA reference."""
+    fp8_dtype = current_platform.fp8_dtype()
+    limits = torch.finfo(fp8_dtype)
+    quantized = (tensor.float() / scale).clamp(limits.min, limits.max).to(fp8_dtype)
+    return (quantized.float() * scale).to(tensor.dtype)
+
+
 def _run_backend_correctness(
     default_vllm_config,
     dist_init,
@@ -1801,6 +1809,19 @@ def _run_backend_correctness(
         # K_PE (rope component): [s_len, 1, qk_rope_head_dim]
         k_pe_full = torch.randn(s_len, 1, qk_rope_head_dim, dtype=dtype, device=device)
 
+        kv_c_cached, k_pe_cached = kv_c_full, k_pe_full
+        kv_c_prefill, k_pe_prefill = kv_c_full, k_pe_full
+        if kv_cache_dtype.startswith("fp8"):
+            kv_c_cached = _fp8_cache_roundtrip(kv_c_full, k_scale)
+            k_pe_cached = _fp8_cache_roundtrip(k_pe_full, k_scale)
+            # Prefill reads cached context and unquantized new tokens.
+            kv_c_prefill = torch.cat(
+                [kv_c_cached[:context_len], kv_c_full[context_len:]]
+            )
+            k_pe_prefill = torch.cat(
+                [k_pe_cached[:context_len], k_pe_full[context_len:]]
+            )
+
         # Determine if this sequence uses the decode pipeline or prefill
         # pipeline for each backend
         # NOTE: For spec decode tests with uniform query_len > 1, backends that
@@ -1850,10 +1871,10 @@ def _run_backend_correctness(
         q_mqa = torch.cat([ql_nope, q_pe], dim=-1)
         # K: [s_len, kv_lora_rank + qk_rope_head_dim]
         # (broadcasted to all heads)
-        k_mqa = torch.cat([kv_c_full, k_pe_full.squeeze(1)], dim=-1)
+        k_mqa = torch.cat([kv_c_cached, k_pe_cached.squeeze(1)], dim=-1)
         k_mqa = k_mqa.unsqueeze(1).expand(-1, num_q_heads, -1)
         # V: [s_len, kv_lora_rank] (broadcasted to all heads)
-        v_mqa = kv_c_full.unsqueeze(1).expand(-1, num_q_heads, -1)
+        v_mqa = kv_c_cached.unsqueeze(1).expand(-1, num_q_heads, -1)
 
         # Create custom attention mask for decode path:
         # - Query tokens can attend to all context tokens
@@ -1882,12 +1903,12 @@ def _run_backend_correctness(
         #######################################################
         # Prefill path: MHA-style attention with full sequence
         # Apply kv_b_proj to the full kv_c tensor
-        kv_nope_full = torch.einsum("sl,lnh->snh", kv_c_full, kv_b_proj_weight)
+        kv_nope_full = torch.einsum("sl,lnh->snh", kv_c_prefill, kv_b_proj_weight)
         k_nope_full, v_full = kv_nope_full.split([qk_nope_head_dim, v_head_dim], dim=-1)
 
         # Build attention inputs for full sequence
         q_mha = torch.cat([q_nope, q_pe], dim=-1)  # [q_len, num_heads, total_dim]
-        k_pe_full_expanded = k_pe_full.expand(-1, num_q_heads, -1)
+        k_pe_full_expanded = k_pe_prefill.expand(-1, num_q_heads, -1)
         k_full = torch.cat([k_nope_full, k_pe_full_expanded], dim=-1)
 
         # Create custom attention mask:
