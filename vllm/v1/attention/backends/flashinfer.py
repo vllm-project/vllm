@@ -1029,17 +1029,18 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         )
         # Fused draft steps advance seq_lens in place and keep block tables fixed,
         # so one trtllm-gen decode build serves every step (not DCP-local seq_lens).
+        # Draft steps reuse the target's decode metadata: trtllm-gen and PrimTS
+        # read persistent seq_lens/block-table buffers that the speculator
+        # updates in place, so update_draft_decode_metadata() has nothing to do.
         self.supports_draft_decode_metadata_update = (
             self.flashinfer_trtllm_api_decode_kernel
-            == FlashInferDecodeKernel.TRTLLM_GEN
+            in (FlashInferDecodeKernel.TRTLLM_GEN, FlashInferDecodeKernel.PRIMS_TS)
             and not self.use_dcp
         )
         self._init_reorder_batch_threshold(
             1,
-            supports_spec_as_decode=(
-                self.flashinfer_trtllm_api_decode_kernel is not None
-                and not self.nvfp4_prims_ts
-            ),
+            supports_spec_as_decode=self.flashinfer_trtllm_api_decode_kernel
+            is not None,
             # trtllm-gen decode receives no cp_rank/global-seq-len information,
             # so its end-aligned causal mask is wrong for q_len > 1 over the
             # DCP-interleaved local KV shard (spec token i misses up to
@@ -1092,7 +1093,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # Preparing persistent buffers
         # PrimTS decode (head_dim 512 NVFP4): one plan per batch size, and
         # graph-stable sequence lengths with padded rows clamped to one token.
-        self._prims_ts_decode_wrappers: dict[int, Any] = {}
+        self._prims_ts_decode_wrappers: dict[tuple[int, int], Any] = {}
         self._prims_ts_seq_lens = torch.zeros(
             max_num_reqs, dtype=torch.int32, device=self.device
         )
@@ -1102,8 +1103,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             # would otherwise JIT-compile mid-serving.
             start = time.perf_counter()
             mem_before = torch.cuda.memory_allocated(self.device)
-            for num_decodes in range(1, max_num_reqs + 1):
-                self._get_prims_ts_decode_wrapper(num_decodes)
+            for q_len in sorted({1, 1 + num_spec_tokens}):
+                for num_decodes in range(1, max_num_reqs + 1):
+                    self._get_prims_ts_decode_wrapper(num_decodes, q_len)
             logger.info(
                 "Planned %d PrimTS decode batch sizes in %.1f s (%.1f MiB).",
                 len(self._prims_ts_decode_wrappers),
@@ -1193,14 +1195,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 # FlashInfer only applies to attention, so we don't consider other types
                 # of KV spec (e.g. Mamba) here. This is mostly for type checking.
                 continue
-            if (
-                spec.kv_quant_mode.is_nvfp4
-                and spec.head_size == _NVFP4_PRIMS_TS_HEAD_DIM
-                and current_platform.is_device_capability_family(100)
-            ):
-                # PrimTS decodes single-token queries only.
-                has_uniform_batch_support = False
-                break
             if not can_use_trtllm_attention(
                 num_qo_heads=num_qo_heads,
                 num_kv_heads=spec.num_kv_heads,
@@ -1890,6 +1884,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 attn_metadata.decode = self._build_prims_ts_decode(
                     num_decodes,
                     num_decode_tokens,
+                    qo_indptr_cpu,
                     block_table_tensor,
                     seq_lens,
                     max_seq_len,
@@ -2000,13 +1995,13 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 attn_metadata.decode = FIDecode(wrapper=decode_wrapper)
         return attn_metadata
 
-    def _get_prims_ts_decode_wrapper(self, num_decodes: int) -> Any:
-        """Return the PrimTS decode plan for one batch size.
+    def _get_prims_ts_decode_wrapper(self, num_decodes: int, q_len: int) -> Any:
+        """Return the PrimTS decode plan for one batch size and query length.
 
         PrimTS compiles at plan time, and its split-KV config depends on the
         batch size, so a new size can JIT-compile mid-serving.
         """
-        wrapper = self._prims_ts_decode_wrappers.get(num_decodes)
+        wrapper = self._prims_ts_decode_wrappers.get((num_decodes, q_len))
         if wrapper is None:
             try:
                 from flashinfer.attention.prims_ts import BatchDecodePagedTSWrapper
@@ -2024,29 +2019,42 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 self.head_dim,
                 self.page_size,
                 self.model_config.max_model_len,
+                max_seq_len_q=q_len,
                 q_data_type=self.q_data_type_decode,
                 kv_data_type=torch.uint8,
                 o_data_type=self.model_config.dtype,
-                mask_type="causal" if self.window_left >= 0 else "dense",
+                mask_type="causal" if self.window_left >= 0 or q_len > 1 else "dense",
                 window_left=self.window_left,
             )
-            self._prims_ts_decode_wrappers[num_decodes] = wrapper
+            self._prims_ts_decode_wrappers[(num_decodes, q_len)] = wrapper
         return wrapper
 
     def _build_prims_ts_decode(
         self,
         num_decodes: int,
         num_decode_tokens: int,
+        qo_indptr_cpu: torch.Tensor,
         block_table_tensor: torch.Tensor,
         seq_lens: torch.Tensor,
         max_seq_len: int,
     ) -> FlashInferTrtllmAPIDecode:
-        """Plan (once per batch size) a PrimTS decode for head_dim 512 NVFP4."""
-        if num_decode_tokens != num_decodes:
+        """Plan (once per batch size and query length) a PrimTS decode for
+        head_dim 512 NVFP4.
+
+        Speculative decoding verifies a fixed number of tokens per request.
+        CUDA graph padding adds zero-length rows; every other row must have the
+        same query length, since PrimTS runs fixed [batch, q_len] queries.
+        """
+        q_len = num_decode_tokens // num_decodes
+        q_lens = qo_indptr_cpu[1 : num_decodes + 1] - qo_indptr_cpu[:num_decodes]
+        if num_decode_tokens % num_decodes or not bool(
+            ((q_lens == q_len) | (q_lens == 0)).all()
+        ):
             raise NotImplementedError(
-                "NVFP4 KV at head_dim 512 decodes single-token queries only."
+                "NVFP4 KV at head_dim 512 needs the same query length for every "
+                f"decode request, got {q_lens.tolist()}."
             )
-        wrapper = self._get_prims_ts_decode_wrapper(num_decodes)
+        wrapper = self._get_prims_ts_decode_wrapper(num_decodes, q_len)
         # CUDA graph padding adds zero-length rows; PrimTS needs positive
         # lengths, and a persistent buffer keeps the address graph-stable.
         seq_lens_decode = self._prims_ts_seq_lens[:num_decodes]
@@ -2056,6 +2064,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             block_tables=block_table_tensor[:num_decodes],
             seq_lens=seq_lens_decode,
             max_seq_len=max_seq_len,
+            q_len_per_req=q_len,
             prims_ts_wrapper=wrapper,
         )
 
@@ -2761,6 +2770,12 @@ class FlashInferImpl(AttentionImpl):
                     assert nvfp4_kv_data is not None
                     assert nvfp4_kv_block_scales is not None
                     assert self.o_sf_scale is None
+                    out_decode = output[:num_decode_tokens]
+                    q_len = attn_metadata.decode.q_len_per_req
+                    if q_len > 1:
+                        shape = (-1, q_len, self.num_heads, self.head_size)
+                        decode_query = decode_query.view(shape)
+                        out_decode = out_decode.view(shape)
                     attn_metadata.decode.prims_ts_wrapper.run(
                         decode_query,
                         nvfp4_kv_data,
@@ -2769,7 +2784,7 @@ class FlashInferImpl(AttentionImpl):
                         kv_scale_factors=nvfp4_kv_block_scales,
                         bmm1_scale=self.bmm1_scale,
                         bmm2_scale=self.bmm2_scale,
-                        out=output[:num_decode_tokens],
+                        out=out_decode,
                         validate=False,
                     )
                     return output_padded
