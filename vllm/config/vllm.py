@@ -3418,6 +3418,8 @@ class VllmConfig:
         kda_architectures = (
             "KimiLinearForCausalLM",
             "KimiK3ForConditionalGeneration",
+            "Glm5NextForCausalLM",
+            "Glm5NextForConditionalGeneration",
         )
         is_kda_model = (
             self.model_config is not None
@@ -3449,13 +3451,11 @@ class VllmConfig:
                     "SSM state caches, not --enable-mamba-cache-stochastic-"
                     "rounding, which requires an explicit float16 cache"
                 )
-            if (
-                self.cache_config.mamba_cache_mode == "align"
-                and not self.use_v2_model_runner
-            ):
-                raise ValueError(
-                    "RecoverSSM with prefix caching requires VLLM_USE_V2_MODEL_RUNNER=1"
-                )
+            # Only Model Runner V2 commits the accepted state after sampling
+            # (RecoverSSMState); the verify kernel itself leaves the checkpoint
+            # untouched, so on Model Runner V1 decode would run from stale state.
+            if not self.use_v2_model_runner:
+                raise ValueError("RecoverSSM requires VLLM_USE_V2_MODEL_RUNNER=1")
             if self.parallel_config.pipeline_parallel_size > 1:
                 raise ValueError(
                     "RecoverSSM currently requires pipeline_parallel_size=1"

@@ -277,6 +277,18 @@ def test_kda_recoverssm_derivation_is_revalidated():
     config.mamba_config.backend = MambaBackendEnum.FLASHINFER
     VllmConfig.validate_mamba_cached_kernel(config)
     assert not config.cache_config.use_kda_recoverssm
+    config.mamba_config.backend = MambaBackendEnum.TRITON
+
+    config.model_config.architecture = "Glm5NextForCausalLM"
+    VllmConfig.validate_mamba_cached_kernel(config)
+    assert config.cache_config.use_kda_recoverssm
+
+    # The accepted state is committed by Model Runner V2 only, with or
+    # without prefix caching.
+    config.use_v2_model_runner = False
+    with pytest.raises(ValueError, match="VLLM_USE_V2_MODEL_RUNNER=1"):
+        VllmConfig.validate_mamba_cached_kernel(config)
+    config.use_v2_model_runner = True
 
     config.model_config.architecture = "KimiLinearForCausalLM"
     config.parallel_config.pipeline_parallel_size = 2
