@@ -2000,10 +2000,21 @@ def test_eagle_groups_are_the_groups_holding_draft_layers(make_specs, pp):
     draft_layers = {name for name, spec in specs.items() if spec.is_draft}
     untagged = {name: replace(spec, is_draft=False) for name, spec in specs.items()}
     groups = _spec_decode_kv_cache_groups([specs])
-    assert [(g.layer_names, g.kv_cache_spec) for g in groups] == [
-        (g.layer_names, g.kv_cache_spec)
-        for g in _spec_decode_kv_cache_groups([untagged])
-    ]
+
+    # The tags pick which sliding-window groups retain the EAGLE hit blocks
+    # (_retain_eagle_hit_blocks_below_window), so compare the grouping with
+    # that retention stripped.
+    def without_retention(spec):
+        if isinstance(spec, SlidingWindowSpec):
+            return replace(spec, extra_retained_tokens=0)
+        return spec
+
+    def grouping(kv_cache_groups):
+        return [
+            (g.layer_names, without_retention(g.kv_cache_spec)) for g in kv_cache_groups
+        ]
+
+    assert grouping(groups) == grouping(_spec_decode_kv_cache_groups([untagged]))
 
     worker_specs = [
         {n: s for n, s in specs.items() if n not in draft_layers},
@@ -2040,6 +2051,51 @@ def test_warns_only_when_untagged_draft_meets_mamba(make_specs, warns, caplog_vl
     _spec_decode_kv_cache_groups([make_specs()])
     warned = "could be identified as the draft model's" in caplog_vllm.text
     assert warned == warns
+
+
+def test_eagle_sliding_window_group_retains_hit_blocks_below_window():
+    # An EAGLE sliding-window hit scans cdiv(window - 1, block) + 1 = 5 whole
+    # blocks, so the group retains 5 * 16 - 63 = 17 tokens below the window.
+    from vllm.v1.core.kv_cache_planning import (
+        _retain_eagle_hit_blocks_below_window,
+    )
+
+    draft_spec = new_sliding_window_spec(sliding_window=64)
+    retained_draft_spec = replace(draft_spec, extra_retained_tokens=17)
+    config = _grouping_config()
+    config.speculative_config = SimpleNamespace(
+        method="eagle", use_eagle_block_drop=lambda: True
+    )
+
+    def specs_by_layer(specs):
+        # Mirror get_kv_cache_configs: tag the groups holding draft layers,
+        # then widen the retained window.
+        draft_layers = {name for name, spec in specs.items() if spec.is_draft}
+        groups = get_kv_cache_groups(config, specs)
+        for group in groups:
+            group.is_eagle_group = not draft_layers.isdisjoint(group.layer_names)
+        _retain_eagle_hit_blocks_below_window(config, groups)
+        return {g.layer_names[0]: g.kv_cache_spec for g in groups}
+
+    # No group is tagged as the draft's: every group counts as EAGLE.
+    specs = {"target.attn": new_kv_cache_spec(), "draft.attn": draft_spec}
+    assert specs_by_layer(specs) == {
+        "target.attn": new_kv_cache_spec(),
+        "draft.attn": retained_draft_spec,
+    }
+
+    # A tagged draft group is widened; a target sliding-window group is
+    # untouched.
+    target_spec = new_sliding_window_spec(sliding_window=128)
+    specs = {"target.attn": target_spec, "draft.attn": _as_draft(draft_spec)}
+    assert specs_by_layer(specs) == {
+        "target.attn": target_spec,
+        "draft.attn": _as_draft(retained_draft_spec),
+    }
+
+    # Without a drafter nothing changes.
+    config.speculative_config = None
+    assert specs_by_layer(specs) == specs
 
 
 _GQA_SPEC = FullAttentionSpec(

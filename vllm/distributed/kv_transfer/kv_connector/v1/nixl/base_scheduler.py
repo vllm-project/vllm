@@ -137,8 +137,13 @@ class NixlBaseConnectorScheduler:
 
         # Gather Sliding Window sizes for each kv cache group (if any) in number of
         # blocks per KV cache group. This is used to clip the local attention window.
+        # The trailing tokens retained below the window are allocated and must
+        # be transferred too.
         sw_sizes_tokens: list[tuple[int, int]] = [
-            (g.kv_cache_spec.sliding_window, g.kv_cache_spec.block_size)
+            (
+                g.kv_cache_spec.sliding_window + g.kv_cache_spec.extra_retained_tokens,
+                g.kv_cache_spec.block_size,
+            )
             if isinstance(g.kv_cache_spec, SlidingWindowSpec)
             else (0, self.block_size)
             for g in kv_cache_config.transfer_groups
