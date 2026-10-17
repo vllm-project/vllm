@@ -53,10 +53,10 @@ def _aiter_w4a16_silu_via_a8w4(
         from aiter.ops.triton.moe_op_gemm_a8w4 import moe_gemm_a8w4
 
     from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
-        should_use_cdna4_mx_scale_swizzle,
+        get_aiter_mx_scale_swizzle,
     )
 
-    swz = "CDNA4_SCALE" if should_use_cdna4_mx_scale_swizzle() else None
+    swz = get_aiter_mx_scale_swizzle()
     quant_dtype = torch.float8_e4m3fn
 
     g1_gammas = gammas if apply_router_weight_on_input else None
@@ -181,7 +181,11 @@ def aiter_triton_kernel_w4a16_moe_forward(
             gating_output,
             topk,
             score_mode=score_mode,
-            bias=e_score_correction_bias,
+            bias=(
+                e_score_correction_bias.float()
+                if e_score_correction_bias is not None
+                else None
+            ),
             renorm=renormalize,
             routed_scaling_factor=scale,
             use_grouped_topk=use_grouped_topk,

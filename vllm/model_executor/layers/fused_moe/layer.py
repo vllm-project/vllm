@@ -436,10 +436,9 @@ def FusedMoEFactory(
         # TODO get from router? needs to be truncated?
         e_score_correction_bias=e_score_correction_bias,
         apply_router_weight_on_input=apply_router_weight_on_input,
+        hash_indices_table=hash_indices_table,
         **routed_experts_args if routed_experts_args is not None else {},
     )
-    if hash_indices_table is not None:
-        object.__setattr__(routed_experts, "hash_indices_table", hash_indices_table)
 
     if runner_cls is None:
         runner_cls = MoERunner
