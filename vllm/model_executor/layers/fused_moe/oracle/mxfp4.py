@@ -535,6 +535,30 @@ def _make_log_unsupported(backend: Mxfp4MoeBackend, reason: str | None) -> str:
     return f"{base} since {reason}." if reason else f"{base}."
 
 
+def _requested_kernel_cls(
+    backend: Mxfp4MoeBackend,
+    config: FusedMoEConfig,
+) -> list[type[mk.FusedMoEExperts]]:
+    """Kernel classes for an explicitly requested backend. The LoRA-aware
+    TRT-LLM experts are opt-in: "auto" keeps its current LoRA selection."""
+    candidates = backend_to_kernel_cls(backend)
+    if not config.is_lora_enabled or backend not in TRTLLM_BACKENDS:
+        return candidates
+    if backend == Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8:
+        raise ValueError(
+            _make_log_unsupported(
+                backend,
+                "expert LoRA is not supported with MXFP8 activations; use "
+                "moe_backend='flashinfer_trtllm'",
+            )
+        )
+    from vllm.model_executor.layers.fused_moe.experts.trtllm_lora_moe import (
+        TrtLlmMxfp4LoRAExperts,
+    )
+
+    return [TrtLlmMxfp4LoRAExperts, *candidates]
+
+
 def _return_or_raise(
     backend: Mxfp4MoeBackend,
     config: FusedMoEConfig,
@@ -544,7 +568,7 @@ def _return_or_raise(
     scope: Literal["process", "global", "local"] = "local",
 ) -> tuple[Mxfp4MoeBackend, type[mk.FusedMoEExperts]]:
     reason: str | None = None
-    for k_cls in backend_to_kernel_cls(backend):
+    for k_cls in _requested_kernel_cls(backend, config):
         supported, reason = k_cls.is_supported_config(
             k_cls, config, weight_key, activation_key, activation_format
         )
