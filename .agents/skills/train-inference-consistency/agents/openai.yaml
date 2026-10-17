@@ -1,4 +1,0 @@
-interface:
-  display_name: "Train-Inference Consistency"
-  short_description: "Make RL training and vLLM rollout logprobs bitwise identical."
-  default_prompt: "Use the train-inference consistency workflow to align training with vLLM inference for this model."
