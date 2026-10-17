@@ -10,6 +10,7 @@ import pytest
 from tests.tokenizers_.test_deepseek_v4 import FakeHfTokenizer
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.tokenizers.deepseek_v41 import get_deepseek_v41_tokenizer
+from vllm.tokenizers.deepseek_v41_encoding import IMAGE_PLACEHOLDER, encode_messages
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -20,16 +21,83 @@ def render(messages, **kwargs):
     )
 
 
-@pytest.mark.parametrize("case_id", [1, 2])
+def tool_call(name):
+    return {
+        "id": name,
+        "type": "function",
+        "function": {"name": name, "arguments": "{}"},
+    }
+
+
+@pytest.mark.parametrize("case_id", [1, 2, 3, 4, 5])
 def test_reference_encoder_fixtures(case_id):
-    # Expected prompts come from the DeepSeek V4.1 reference encoder.
+    # Copied from DeepSeek-V4.1-Flash-1017 encoding/tests.
     data = json.loads(
-        (FIXTURES / "deepseek_v4" / f"test_input_{case_id}.json").read_text()
+        (FIXTURES / "deepseek_v41" / f"test_input_{case_id}.json").read_text()
     )
-    messages = data["messages"] if isinstance(data, dict) else data
-    tools = data.get("tools") if isinstance(data, dict) else None
+    case = data if isinstance(data, dict) else {"messages": data}
+    messages = case["messages"]
+    thinking_mode = case.get("thinking_mode") or "chat"
     expected = (FIXTURES / "deepseek_v41" / f"test_output_{case_id}.txt").read_text()
-    assert render(messages, tools=tools) == expected
+
+    if any(m["role"] == "latest_reminder" for m in messages):
+        # latest_reminder is not an API role.
+        assert case.get("tools") is None
+        prompt = encode_messages(
+            messages,
+            thinking_mode=thinking_mode,
+            reasoning_effort=case.get("reasoning_effort"),
+        )
+    else:
+        prompt = render(
+            messages,
+            tools=case.get("tools"),
+            thinking=thinking_mode == "thinking",
+            reasoning_effort=case.get("reasoning_effort"),
+        )
+    assert prompt == expected
+
+
+def test_drop_thinking_keeps_current_turn_across_tool_results():
+    messages = [
+        {"role": "user", "content": "q1"},
+        {"role": "assistant", "content": "a1", "reasoning_content": "r1"},
+        {"role": "user", "content": "q2"},
+        {
+            "role": "assistant",
+            "reasoning_content": "r2",
+            "tool_calls": [tool_call("c1")],
+        },
+        {"role": "tool", "tool_call_id": "c1", "content": "value"},
+    ]
+    prompt = render(messages)
+    assert "<｜User｜>q1<｜Assistant｜></think>a1<｜end▁of▁sentence｜>" in prompt
+    assert "r1" not in prompt
+    assert "<think>r2</think>" in prompt
+    assert prompt.endswith("<tool_result>value</tool_result><｜Assistant｜><think>")
+
+    next_turn = render(messages + [{"role": "user", "content": "q3"}])
+    assert "r2" not in next_turn
+    assert next_turn.endswith("q3<｜Assistant｜><think>")
+
+
+@pytest.mark.parametrize("role", ["user", "tool"])
+@pytest.mark.parametrize("as_part", [False, True])
+def test_rejects_image_placeholder_in_text(role, as_part):
+    text = f"hi {IMAGE_PLACEHOLDER}"
+    content = [{"type": "text", "text": text}] if as_part else text
+    with pytest.raises(ValueError, match="image special token"):
+        render([{"role": role, "tool_call_id": "c1", "content": content}])
+
+
+def test_rejects_image_placeholder_in_reasoning():
+    with pytest.raises(ValueError, match="image special token"):
+        render(
+            [
+                {"role": "user", "content": "q"},
+                {"role": "assistant", "content": "a", "reasoning": IMAGE_PLACEHOLDER},
+            ]
+        )
 
 
 @pytest.mark.parametrize(
