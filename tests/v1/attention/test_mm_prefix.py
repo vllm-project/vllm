@@ -15,6 +15,8 @@ auto-clearing those when ``mask_mod`` is set; leaving ``causal=True`` would
 short out the mask_mod on SM90 and clip bidirectional ranges on SM100.
 """
 
+from typing import Any
+
 import numpy as np
 import pytest
 import torch
@@ -638,6 +640,461 @@ def test_mm_prefix_kv_cache_path(head_size: int):
     assert not torch.allclose(expected, causal_only, atol=2e-2, rtol=2e-2), (
         "test batch does not actually exercise the mm_prefix branch"
     )
+
+
+# --------------------------------------------------------------------------- #
+# FlashInfer JIT-variant path
+# --------------------------------------------------------------------------- #
+# The FlashInfer backend serves mm-prefix through FlashInfer's own wrapper,
+# which consumes the per-query [start, end] rows directly, so none of these
+# tests depend on FA4.
+
+FLASHINFER_MM_SLIDING_WINDOW = 32
+"""Narrower than PAGED_MM_RANGES' widest range (224, 287), so the clamp-on
+and clamp-off window formulas produce different outputs on this batch."""
+
+
+@pytest.mark.parametrize(
+    ("kv_dtype", "sink", "reason"),
+    [
+        ("nvfp4", False, None),
+        ("float16", False, None),
+        # The store-time scale search exists only in trtllm-gen.
+        ("nvfp4_4over6", False, "nvfp4_4over6"),
+        ("fp8", False, None),
+        ("fp8_e5m2", False, "fp8_e5m2"),
+        (None, True, "sink"),
+    ],
+)
+def test_flashinfer_mm_prefix_supports_combination(kv_dtype, sink, reason):
+    from vllm.platforms.interface import DeviceCapability
+    from vllm.v1.attention.backends.flashinfer import FlashInferBackend
+
+    result = FlashInferBackend.supports_combination(
+        head_size=128,
+        dtype=torch.bfloat16,
+        kv_cache_dtype=kv_dtype,
+        block_size=16,
+        use_mla=False,
+        has_sink=sink,
+        use_sparse=False,
+        use_mm_prefix=True,
+        device_capability=DeviceCapability(8, 0),
+    )
+
+    if reason is None:
+        assert result is None
+    else:
+        assert reason in result
+
+
+@pytest.mark.parametrize("dcp", [1, 2])
+def test_flashinfer_mm_prefix_rejects_dcp(dcp):
+    import unittest.mock
+
+    from vllm.v1.attention.backends.flashinfer import _native_mm_prefix
+
+    vllm_config, _, _ = _flashinfer_builder_env(None)
+    vllm_config.parallel_config.decode_context_parallel_size = dcp
+    with unittest.mock.patch(
+        "vllm.v1.attention.backends.flashinfer._mm_prefix_wrapper_cls",
+        return_value=object,
+    ):
+        assert _native_mm_prefix(vllm_config) == (dcp == 1)
+
+
+@pytest.mark.parametrize("soft_cap", [None, 0.0, 50.0], ids=["absent", "0", "50"])
+def test_flashinfer_mm_prefix_skips_soft_capped_models(soft_cap):
+    """The ranges wrapper has no logits soft cap: a soft-capped model keeps the
+    automatic Triton route on SM8x, and an explicit FLASHINFER is rejected
+    instead of failing later in the builder."""
+    import unittest.mock
+
+    from vllm.config import set_current_vllm_config
+    from vllm.platforms.interface import DeviceCapability
+    from vllm.v1.attention.backends.flashinfer import _native_mm_prefix
+    from vllm.v1.attention.backends.registry import AttentionBackendEnum
+    from vllm.v1.attention.selector import _cached_get_attn_backend, get_attn_backend
+
+    vllm_config, _, _ = _flashinfer_builder_env(None)
+    text_config = vllm_config.model_config.hf_text_config
+    if soft_cap is None:
+        text_config.__dict__.pop("attn_logit_softcapping", None)
+    else:
+        text_config.attn_logit_softcapping = soft_cap
+    with (
+        unittest.mock.patch(
+            "vllm.v1.attention.backends.flashinfer._mm_prefix_wrapper_cls",
+            return_value=object,
+        ),
+        unittest.mock.patch.object(
+            type(current_platform),
+            "get_device_capability",
+            return_value=DeviceCapability(8, 0),
+        ),
+        set_current_vllm_config(vllm_config),
+    ):
+        assert _native_mm_prefix(vllm_config) == (not soft_cap)
+        for selected in (None, AttentionBackendEnum.FLASHINFER):
+            vllm_config.attention_config.backend = selected
+            _cached_get_attn_backend.cache_clear()
+            args = (HEAD_SIZE, torch.bfloat16, None)
+            if soft_cap and selected:
+                with pytest.raises(ValueError):
+                    get_attn_backend(*args, use_mm_prefix=True)
+                continue
+            backend = get_attn_backend(*args, use_mm_prefix=True)
+            assert backend.get_name() == ("TRITON_ATTN" if soft_cap else "FLASHINFER")
+
+
+def _flashinfer_builder_env(sliding_window: int | None, cache_dtype: str = "auto"):
+    """vllm_config + kv_cache_spec + per-layer-parameter mock for FlashInfer."""
+    import unittest.mock
+
+    from tests.v1.attention.utils import create_vllm_config
+    from vllm.v1.attention.backends.flashinfer import FlashInferBackend
+    from vllm.v1.attention.backends.registry import AttentionBackendEnum
+    from vllm.v1.attention.backends.utils import PerLayerParameters
+    from vllm.v1.kv_cache_interface import FullAttentionSpec, get_kv_quant_mode
+
+    vllm_config = _enable_mm_prefix(
+        create_vllm_config(
+            model_name=MODEL,
+            max_model_len=max(PAGED_SEQ_LENS),
+            block_size=BLOCK_SIZE,
+            num_gpu_blocks=2048,
+        )
+    )
+    vllm_config.cache_config.cache_dtype = cache_dtype
+    # SM100 serves the ranges natively only when FLASHINFER is explicit, and
+    # its trtllm-gen text path reads a head-major cache.
+    vllm_config.attention_config.backend = AttentionBackendEnum.FLASHINFER
+    layouts = FlashInferBackend.supported_kv_cache_layouts() or (KVCacheLayout.LBNHC,)
+    vllm_config.cache_config.kv_cache_layout = layouts[0].name
+    mc = vllm_config.model_config
+    kv_cache_spec = FullAttentionSpec(
+        block_size=BLOCK_SIZE,
+        num_kv_heads=mc.get_num_kv_heads(vllm_config.parallel_config),
+        head_size=HEAD_SIZE,
+        dtype=torch.uint8 if cache_dtype.startswith("fp8") else mc.dtype,
+        sliding_window=sliding_window,
+        kv_quant_mode=get_kv_quant_mode(cache_dtype),
+    )
+    window_left = sliding_window - 1 if sliding_window is not None else -1
+    scale = HEAD_SIZE**-0.5
+
+    def mock_params(vllm_config, layer_names, impl_cls, soft_cap=0.0):
+        return {
+            name: PerLayerParameters(
+                window_left=window_left,
+                logits_soft_cap=soft_cap,
+                sm_scale=scale,
+                has_sinks=False,
+            )
+            for name in layer_names
+        }
+
+    patch = unittest.mock.patch(
+        "vllm.v1.attention.backends.flashinfer.get_per_layer_parameters",
+        mock_params,
+    )
+    return vllm_config, kv_cache_spec, patch
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a GPU")
+def test_flashinfer_mm_prefix_builder_is_fail_closed():
+    """soft-cap must die at engine start."""
+    import unittest.mock
+    from functools import partial
+
+    from vllm.config import set_current_vllm_config
+    from vllm.v1.attention.backends.flashinfer import (
+        FlashInferMetadataBuilder,
+        _mm_prefix_wrapper_cls,
+    )
+
+    vllm_config, kv_cache_spec, patch = _flashinfer_builder_env(SLIDING_WINDOW)
+    if _mm_prefix_wrapper_cls() is None:
+        pytest.skip("FlashInfer mm-prefix wrapper unavailable here")
+    layer_names = ["model.layers.0.self_attn.attn"]
+
+    mock_params = patch.new
+    with (
+        set_current_vllm_config(vllm_config),
+        unittest.mock.patch(
+            "vllm.v1.attention.backends.flashinfer.get_per_layer_parameters",
+            partial(mock_params, soft_cap=30.0),
+        ),
+        pytest.raises(NotImplementedError, match="logits_soft_cap"),
+    ):
+        FlashInferMetadataBuilder(
+            kv_cache_spec, layer_names, vllm_config, torch.device("cuda:0")
+        )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a GPU")
+@pytest.mark.parametrize("cache_dtype", ["auto", "fp8_e4m3"])
+def test_flashinfer_mm_prefix_text_only_and_decode_only_keep_causal(cache_dtype):
+    """Empty range dicts and decode-only batches must not select the mm path.
+
+    Neither case may construct the mm wrapper, but the builder's fail-fast
+    backstop still requires the capability to be available here.
+    """
+    from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
+    from vllm.config import set_current_vllm_config
+    from vllm.v1.attention.backends.flashinfer import (
+        FlashInferMetadataBuilder,
+        _mm_prefix_wrapper_cls,
+    )
+
+    vllm_config, kv_cache_spec, patch = _flashinfer_builder_env(
+        SLIDING_WINDOW, cache_dtype
+    )
+    if _mm_prefix_wrapper_cls() is None:
+        pytest.skip("FlashInfer mm-prefix wrapper unavailable here")
+    layer_names = ["model.layers.0.self_attn.attn"]
+    device = torch.device("cuda:0")
+
+    with set_current_vllm_config(vllm_config), patch:
+        builder = FlashInferMetadataBuilder(
+            kv_cache_spec, layer_names, vllm_config, device
+        )
+
+        # Text-only: ranges dict present but every list empty.
+        batch = BatchSpec(seq_lens=[352, 200], query_lens=[96, 60], name="text_only")
+        common = create_common_attn_metadata(batch, BLOCK_SIZE, device)
+        common.mm_req_doc_ranges = {0: [], 1: []}
+        md = builder.build(common_prefix_len=0, common_attn_metadata=common)
+        assert md.mm_prefix_query_range_tensor is None
+        assert md.prefill is not None and md.mm_wrapper is None
+
+        # Decode-only: every query token sits past every prompt range.
+        batch = BatchSpec(seq_lens=[513, 200, 97], query_lens=[1, 1, 1], name="decode")
+        common = create_common_attn_metadata(batch, BLOCK_SIZE, device)
+        common.mm_req_doc_ranges = {0: [(4, 259)], 1: [(0, 63)], 2: [(1, 64)]}
+        md = builder.build(common_prefix_len=0, common_attn_metadata=common)
+        assert md.mm_prefix_query_range_tensor is None
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a GPU")
+@pytest.mark.parametrize("cache_dtype", ["auto", "fp8_e4m3"])
+def test_flashinfer_mm_prefix_kv_cache_path(cache_dtype):
+    """FlashInfer mm-prefix attention + paged KV matches the dense reference.
+
+    The sliding window (32) is narrower than the widest range in
+    PAGED_MM_RANGES, so the clamp-off and clamp-on formulas genuinely differ
+    on this batch and both are checked against their own reference. The
+    cleared-metadata fallback (Gemma4 clears the field for its full-attention
+    groups at forward time) must reproduce the plain causal wrapper.
+
+    An FP8 cache gets distinct non-unit K/V scales, and the reference is
+    rebuilt from what was actually stored.
+    """
+    from tests.v1.attention.test_attention_backends import (
+        MockAttentionLayer,
+        create_and_prepopulate_kv_cache,
+    )
+    from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
+    from vllm.config import set_current_vllm_config
+    from vllm.v1.attention.backends.flashinfer import (
+        FlashInferImpl,
+        FlashInferMetadataBuilder,
+        _mm_prefix_wrapper_cls,
+    )
+    from vllm.v1.kv_cache_interface import KVCacheLayout
+
+    torch.manual_seed(0)
+    device = torch.device("cuda:0")
+    sliding_window = FLASHINFER_MM_SLIDING_WINDOW
+    vllm_config, kv_cache_spec, patch = _flashinfer_builder_env(
+        sliding_window, cache_dtype
+    )
+    k_scale, v_scale = (1.0, 1.0) if cache_dtype == "auto" else (2.0, 0.5)
+    mc = vllm_config.model_config
+    if _mm_prefix_wrapper_cls() is None:
+        pytest.skip("FlashInfer mm-prefix wrapper unavailable here")
+
+    from types import MethodType
+
+    mc.get_head_size = MethodType(lambda self: HEAD_SIZE, mc)
+    num_heads = mc.get_num_attention_heads(vllm_config.parallel_config)
+    num_kv_heads = mc.get_num_kv_heads(vllm_config.parallel_config)
+    scale = HEAD_SIZE**-0.5
+
+    batch = BatchSpec(
+        seq_lens=PAGED_SEQ_LENS, query_lens=PAGED_QUERY_LENS, name="fi_mm_mixed"
+    )
+    common = create_common_attn_metadata(batch, BLOCK_SIZE, device)
+    common.mm_req_doc_ranges = PAGED_MM_RANGES
+
+    qs, new_ks, new_vs, k_fulls, v_fulls, k_ctxs, v_ctxs = [], [], [], [], [], [], []
+    for q_len, s_len in zip(PAGED_QUERY_LENS, PAGED_SEQ_LENS, strict=True):
+        ctx = s_len - q_len
+        shape = (num_kv_heads, HEAD_SIZE)
+        qs.append(torch.randn(q_len, num_heads, HEAD_SIZE, dtype=DTYPE, device=device))
+        k_full = torch.randn(s_len, *shape, dtype=DTYPE, device=device)
+        v_full = torch.randn(s_len, *shape, dtype=DTYPE, device=device)
+        k_fulls.append(k_full)
+        v_fulls.append(v_full)
+        # The helper stores the context unscaled; divide as the write does.
+        k_ctxs.append(k_full[:ctx] / k_scale)
+        v_ctxs.append(v_full[:ctx] / v_scale)
+        new_ks.append(k_full[ctx:])
+        new_vs.append(v_full[ctx:])
+
+    query, key, value = torch.cat(qs), torch.cat(new_ks), torch.cat(new_vs)
+    if cache_dtype == "fp8_e4m3":
+        # SM100's causal path quantizes the query with _q_scale (1.5 below).
+        query = (query / 1.5).to(torch.float8_e4m3fn).to(DTYPE) * 1.5
+    kv_cache = create_and_prepopulate_kv_cache(
+        k_contexts=k_ctxs,
+        v_contexts=v_ctxs,
+        block_size=BLOCK_SIZE,
+        num_kv_heads=num_kv_heads,
+        head_size=HEAD_SIZE,
+        dtype=DTYPE,
+        device=device,
+        num_blocks=2048,
+        common_attn_metadata=common,
+        layout=KVCacheLayout[vllm_config.cache_config.kv_cache_layout],
+        randomize_blocks=True,
+        kv_cache_dtype=cache_dtype,
+    )
+
+    layer_names = ["model.layers.0.self_attn.attn"]
+    with set_current_vllm_config(vllm_config), patch:
+        builder = FlashInferMetadataBuilder(
+            kv_cache_spec, layer_names, vllm_config, device
+        )
+        attn_metadata = builder.build(common_prefix_len=0, common_attn_metadata=common)
+        assert attn_metadata.mm_prefix_query_range_tensor is not None
+        assert attn_metadata.prefill is not None
+        assert attn_metadata.mm_wrapper is not None
+
+        impl = FlashInferImpl(
+            num_heads=num_heads,
+            head_size=HEAD_SIZE,
+            scale=scale,
+            num_kv_heads=num_kv_heads,
+            alibi_slopes=None,
+            sliding_window=sliding_window,
+            kv_cache_dtype=cache_dtype,
+        )
+        # mm_prefix_clamp_sliding_window is read off the layer with getattr(),
+        # so the mock grows it here; the annotation keeps mypy from rejecting
+        # an attribute the stub class does not declare.
+        mock_layer: Any = MockAttentionLayer(device, k_scale, v_scale)
+        # q_scale belongs to an FP8 query; it must not touch this one.
+        mock_layer._q_scale = torch.tensor(1.5, device=device)
+        mock_layer._q_scale_float = 1.5
+        impl.do_kv_cache_update(
+            mock_layer, key, value, kv_cache, attn_metadata.slot_mapping
+        )
+        if cache_dtype != "auto":
+            # Stored values must be the scaled inputs (catches a write that
+            # drops a scale), and the kernel must match what was stored.
+            fp8_cache = kv_cache.view(torch.float8_e4m3fn)
+            for i, s_len in enumerate(PAGED_SEQ_LENS):
+                t = torch.arange(s_len, device=device)
+                blk = common.block_table_tensor[i, t // BLOCK_SIZE]
+                stored = fp8_cache[blk, :, t % BLOCK_SIZE].float()
+                k = stored[..., :HEAD_SIZE] * k_scale
+                v = stored[..., HEAD_SIZE:] * v_scale
+                torch.testing.assert_close(k, k_fulls[i].float(), atol=2e-2, rtol=0.07)
+                torch.testing.assert_close(v, v_fulls[i].float(), atol=2e-2, rtol=0.07)
+                k_fulls[i], v_fulls[i] = k, v
+
+        ref_args = (query, k_fulls, v_fulls, PAGED_QUERY_LENS, PAGED_SEQ_LENS)
+        expected_by_clamp = {}
+        for clamp in (False, True):
+            mock_layer.mm_prefix_clamp_sliding_window = clamp
+            output = torch.empty_like(query)
+            actual = impl.forward(
+                mock_layer, query, key, value, kv_cache, attn_metadata, output=output
+            )
+            expected = _dense_reference(
+                *ref_args,
+                PAGED_MM_RANGES,
+                sliding_window,
+                scale,
+                mm_clamp_sw=sliding_window if clamp else 0,
+            )
+            expected_by_clamp[clamp] = expected
+            torch.testing.assert_close(actual.float(), expected, atol=2e-2, rtol=2e-2)
+
+        # The two window formulas must actually differ on this batch, and
+        # both must differ from plain causal + window.
+        causal_only = _dense_reference(*ref_args, {}, sliding_window, scale)
+        assert not torch.allclose(
+            expected_by_clamp[False], expected_by_clamp[True], atol=2e-2, rtol=2e-2
+        )
+        assert not torch.allclose(
+            expected_by_clamp[False], causal_only, atol=2e-2, rtol=2e-2
+        )
+
+        # Cleared metadata field -> plain causal wrapper, which keeps main's
+        # q_scale handling.
+        attn_metadata.mm_prefix_query_range_tensor = None
+        mock_layer.mm_prefix_clamp_sliding_window = False
+        mock_layer._q_scale_float = 1.0
+        output = torch.empty_like(query)
+        actual = impl.forward(
+            mock_layer, query, key, value, kv_cache, attn_metadata, output=output
+        )
+        # Main's FP8 causal path keeps test_attention_backends' FP8 tolerance.
+        tol = 6e-2 if cache_dtype == "fp8_e4m3" else 2e-2
+        torch.testing.assert_close(actual.float(), causal_only, atol=tol, rtol=tol)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a GPU")
+def test_flashinfer_mm_prefix_short_extend_stays_a_prefill():
+    """A short chunked-prefill tail inside a range must not become a decode.
+
+    With the default treat_short_extends_as_decodes=True a query_len==1
+    still-prefilling request is routed to the causal decode path, losing
+    access to the future tokens of its bidirectional range. On mm batches
+    the builder reclassifies via is_prefilling.
+    """
+    from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
+    from vllm.config import set_current_vllm_config
+    from vllm.v1.attention.backends.flashinfer import (
+        FlashInferMetadataBuilder,
+        _mm_prefix_wrapper_cls,
+    )
+
+    device = torch.device("cuda:0")
+    vllm_config, kv_cache_spec, patch = _flashinfer_builder_env(SLIDING_WINDOW)
+    if _mm_prefix_wrapper_cls() is None:
+        pytest.skip("FlashInfer mm-prefix wrapper unavailable here")
+
+    # Reordered batches put decodes first. Request 0: a plain decode.
+    # Request 1: query_len 1 but still prefilling (chunked tail at absolute
+    # position 128) inside range (100, 200).
+    batch = BatchSpec(seq_lens=[300, 129], query_lens=[1, 1], name="short_extend")
+    common = create_common_attn_metadata(batch, BLOCK_SIZE, device)
+    common.mm_req_doc_ranges = {1: [(100, 200)]}
+    common.is_prefilling = torch.tensor([False, True])
+
+    layer_names = ["model.layers.0.self_attn.attn"]
+    with set_current_vllm_config(vllm_config), patch:
+        builder = FlashInferMetadataBuilder(
+            kv_cache_spec, layer_names, vllm_config, device
+        )
+        md = builder.build(common_prefix_len=0, common_attn_metadata=common)
+
+    assert md.mm_prefix_query_range_tensor is not None
+    # Reordered batches put decodes first: the still-prefilling tail must be
+    # counted as a prefill even though its query length is 1.
+    assert md.num_prefills == 1
+    assert md.num_decodes == 1
+    assert md.prefill is not None and md.mm_wrapper is not None
+    assert md.mm_prefill_ranges is not None
+    # The prefill slice holds exactly the tail row: its range, inclusive.
+    # The wrapper takes (N, 2) rows and rejects a non-contiguous tensor, so
+    # both are part of the contract this slice has to satisfy.
+    assert md.mm_prefill_ranges.shape == (1, 2)
+    assert md.mm_prefill_ranges.is_contiguous()
+    assert md.mm_prefill_ranges.tolist() == [[100, 200]]
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA backend imports")
