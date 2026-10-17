@@ -415,12 +415,15 @@ steps:
   - vllm/v1/executor/uniproc_executor.py
   - vllm/v1/worker/gpu_worker.py
   - tests/distributed/test_mnnvl_alltoall.py
+  - tests/distributed/test_eplb_execute.py
 
   commands:
   # https://github.com/NVIDIA/nccl/issues/1838
   - export NCCL_CUMEM_HOST_ENABLE=0
   # test with torchrun tp=2 and dp=4 with ep
   - torchrun --nproc-per-node=8 ../examples/features/torchrun/torchrun_dp_example_offline.py --tp-size=2 --pp-size=1 --dp-size=4 --enable-ep
+  # The L4 EPLB Execution job has no NVLink, so it skips symm_mem.
+  - pytest -v -s distributed/test_eplb_execute.py -k symm_mem
   mirror:
     amd:
       label: ":amd: (MI355) Distributed DP + EP"

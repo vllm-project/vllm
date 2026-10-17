@@ -3,6 +3,7 @@
 """The async worker that transfers experts in the background."""
 
 import threading
+import time
 from typing import TYPE_CHECKING
 
 import torch
@@ -38,7 +39,8 @@ def start_async_worker(
                 stream=stream,
                 is_profile=is_profile,
             )
-        except Exception as exc:  # pragma: no cover - diagnostic path
+        except Exception as exc:
+            state.async_worker_error = exc
             logger.exception("async loop error (Rank %d): %s", rank, str(exc))
 
     thread = threading.Thread(target=thread_target, daemon=True)
@@ -96,6 +98,7 @@ def transfer_run_periodically(
             with device_stream(stream):
                 physical_to_logical_map_cpu = model_state.physical_to_logical_map.cpu()
 
+            t_start = time.perf_counter()
             new_physical_to_logical_map = run_rebalance_experts(
                 model_state, state, physical_to_logical_map_cpu, stream
             )
@@ -182,5 +185,16 @@ def transfer_run_periodically(
                 # finish copying model_state.expert_buffer into
                 # model_state.model.expert_weights[layer_idx]
                 consumed_event.wait(stream=stream)
+                # Host-issued writes into expert_buffer (e.g. NIXL RDMA reads) are not
+                # stream-ordered, so wait until move_from_buffer has run on the GPU.
+                stream.synchronize()
                 assert model_state.pending_result is None
                 layer_idx += 1
+            if ep_rank == 0:
+                logger.info(
+                    "Async EPLB rearranged %d/%d layers of %s in %.2f s.",
+                    layer_idx,
+                    num_layers,
+                    model_state.model_name,
+                    time.perf_counter() - t_start,
+                )
