@@ -33,8 +33,12 @@ class DeepseekV4Renderer(BaseRenderer[DeepseekV4Tokenizer]):
             self._apply_chat_template, executor=self._executor
         )
 
-    def _apply_chat_template(self, *args, **kwargs):
-        return self.get_tokenizer().apply_chat_template(*args, **kwargs)
+    def _apply_chat_template(self, conversation, messages, **kwargs):
+        return self.get_tokenizer().apply_chat_template(
+            conversation=conversation,
+            messages=messages,
+            **kwargs
+        )
 
     def render_completion_suffix(self, prompt: str, suffix: str) -> str | None:
         return f"{_FIM_BEGIN}{prompt}{_FIM_HOLE}{suffix}{_FIM_END}"
