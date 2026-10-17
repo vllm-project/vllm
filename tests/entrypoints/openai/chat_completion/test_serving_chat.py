@@ -20,6 +20,8 @@ from tests.entrypoints.openai.utils import (
 from tests.utils import RemoteOpenAIServer
 from vllm._aiter_ops import is_aiter_found_and_supported
 from vllm.config import MultiModalConfig
+from vllm.entrypoints.anthropic.protocol import AnthropicCountTokensRequest
+from vllm.entrypoints.anthropic.serving import AnthropicServingMessages
 from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
     RequestResponseMetadata,
@@ -2628,8 +2630,7 @@ class TestServingChatWithHarmony:
 
 @pytest.mark.asyncio
 async def test_tool_choice_validation_without_parser():
-    """Test that tool_choice='required' or named tool without tool_parser
-    returns an appropriate error message."""
+    """Generation requires a tool parser, but counting renders tool schemas."""
     mock_engine = MagicMock(spec=AsyncLLM)
     mock_engine.errored = False
     mock_engine.model_config = MockModelConfig()
@@ -2642,8 +2643,12 @@ async def test_tool_choice_validation_without_parser():
     )
     online_renderer = _build_online_renderer(mock_engine, models.registry)
 
-    # Create serving_chat without tool_parser (enable_auto_tools=False)
-    serving_chat = OpenAIServingChat(
+    online_renderer.chat_template = (
+        "{{ tools[0].function.name }} "
+        "{{ tools[0].function.parameters.properties.location.type }}"
+    )
+    # Generation still requires a parser, while counting only renders the prompt.
+    serving_chat = AnthropicServingMessages(
         mock_engine,
         models,
         response_role="assistant",
@@ -2654,7 +2659,7 @@ async def test_tool_choice_validation_without_parser():
         enable_auto_tools=False,  # No tool parser
     )
 
-    tools = [
+    tools: list[dict[str, Any]] = [
         {
             "type": "function",
             "function": {
@@ -2681,11 +2686,24 @@ async def test_tool_choice_validation_without_parser():
     assert "tool_choice" in response_required.error.message
     assert "--tool-call-parser" in response_required.error.message
 
-    rendered = await serving_chat.render_chat_request(
-        req_required, validate_tool_parser=False
+    counted = await serving_chat.count_tokens(
+        AnthropicCountTokensRequest(
+            model=MODEL_NAME,
+            messages=[{"role": "user", "content": "What's the weather?"}],
+            tools=[
+                {
+                    "name": "get_weather",
+                    "input_schema": tools[0]["function"]["parameters"],
+                }
+            ],
+        )
     )
-    assert not isinstance(rendered, ErrorResponse)
-    assert rendered[1][0]["prompt_token_ids"]
+    assert not isinstance(counted, ErrorResponse)
+    assert counted.input_tokens == len(
+        mock_engine.renderer.tokenizer.encode(
+            "get_weather string", add_special_tokens=False
+        )
+    )
 
     # Test named tool_choice without tool_parser
     req_named = ChatCompletionRequest(
