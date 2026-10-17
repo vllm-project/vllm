@@ -118,6 +118,7 @@ pub(super) fn prepare_completion_request(
     let text_request = TextRequest {
         request_id: request_id.clone(),
         prompt: request.prompt,
+        prompt_token_offsets: None,
         mm_features: None,
         sampling_params: SamplingParams {
             temperature: request.temperature,

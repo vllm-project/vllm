@@ -2,8 +2,8 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use std::borrow::Cow;
-use std::path::Path;
-use std::sync::{Arc, LazyLock};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, LazyLock, OnceLock};
 
 use fastokens::Tokenizer as FastokensTokenizer;
 use fastokens::decoders::Decoder as FastokensDecoder;
@@ -19,7 +19,7 @@ use tracing::{info, warn};
 
 use crate::byte_level_decode::decode_byte_level;
 use crate::hf::added_tokens::load_tokenizer_json_with_extra_tokens;
-use crate::{Result, Tokenizer};
+use crate::{EncodedPrompt, Result, Tokenizer};
 
 mod added_tokens;
 
@@ -147,6 +147,8 @@ fn encode_fastokens_ordinary(
 /// unsupported tokenizer features or file formats).
 pub struct HuggingFaceTokenizer {
     backend: Backend,
+    source_path: Option<PathBuf>,
+    offsets_tokenizer: OnceLock<Option<Box<HfTokenizer>>>,
     special_token_ids: Arc<[u32]>,
     added_vocab: Box<[(String, u32)]>,
     vocab_size: usize,
@@ -178,6 +180,8 @@ impl HuggingFaceTokenizer {
         let vocab_size = tokenizer.get_vocab_size(true);
         Self {
             backend: Backend::Hf(Box::new(tokenizer)),
+            source_path: None,
+            offsets_tokenizer: OnceLock::new(),
             special_token_ids,
             added_vocab,
             vocab_size,
@@ -216,6 +220,8 @@ impl HuggingFaceTokenizer {
         };
         Self {
             backend,
+            source_path: None,
+            offsets_tokenizer: OnceLock::new(),
             special_token_ids,
             added_vocab,
             vocab_size,
@@ -228,16 +234,15 @@ impl HuggingFaceTokenizer {
         let tokenizer_json = load_tokenizer_json_with_extra_tokens(path)?;
         let t = FastokensTokenizer::from_json(tokenizer_json)
             .map_err(|error| tokenizer_error!("failed to load tokenizer: {}", error.as_report()))?;
-        Ok(Self::from_fastokens_backend(t))
+        let mut tokenizer = Self::from_fastokens_backend(t);
+        tokenizer.source_path = Some(path.to_path_buf());
+        Ok(tokenizer)
     }
 
     /// Load from `tokenizer.json` with Hugging Face `tokenizers`.
     pub fn new_hf(path: &Path) -> Result<Self> {
         info!(path = %path.display(), "loading tokenizer with huggingface tokenizers");
-        let tokenizer_json = load_tokenizer_json_with_extra_tokens(path)?;
-        let t = serde_json::from_value::<HfTokenizer>(tokenizer_json)
-            .map_err(|error| tokenizer_error!("failed to load tokenizer: {}", error.as_report()))?;
-        Ok(Self::from_hf_backend(t))
+        Ok(Self::from_hf_backend(Self::load_hf(path)?))
     }
 
     /// Load from `tokenizer.json` via fastokens or HuggingFace tokenizers.
@@ -254,6 +259,31 @@ impl HuggingFaceTokenizer {
             }
         }
     }
+
+    fn load_hf(path: &Path) -> Result<HfTokenizer> {
+        let tokenizer_json = load_tokenizer_json_with_extra_tokens(path)?;
+        serde_json::from_value(tokenizer_json)
+            .map_err(|error| tokenizer_error!("failed to load tokenizer: {}", error.as_report()))
+    }
+
+    fn offsets_tokenizer(&self) -> Option<&HfTokenizer> {
+        self.offsets_tokenizer
+            .get_or_init(|| {
+                let path = self.source_path.as_deref()?;
+                match Self::load_hf(path) {
+                    Ok(mut tokenizer) => {
+                        tokenizer.with_truncation(None).ok()?;
+                        tokenizer.with_padding(None);
+                        Some(Box::new(tokenizer))
+                    }
+                    Err(error) => {
+                        warn!(error = %error.as_report(), "token offsets are unavailable");
+                        None
+                    }
+                }
+            })
+            .as_deref()
+    }
 }
 
 impl Tokenizer for HuggingFaceTokenizer {
@@ -268,6 +298,35 @@ impl Tokenizer for HuggingFaceTokenizer {
             Backend::Fastokens(t) | Backend::FastokensByteLevel(t) => t
                 .encode_with_special_tokens(text, add_special_tokens)
                 .map_err(|error| tokenizer_error!("encoding failed: {}", error.as_report())),
+        }
+    }
+
+    fn encode_with_offsets(&self, text: &str, add_special_tokens: bool) -> Result<EncodedPrompt> {
+        if let Backend::Hf(tokenizer) = &self.backend {
+            let encoding = tokenizer
+                .encode_char_offsets(text, add_special_tokens)
+                .map_err(|error| tokenizer_error!("encoding failed: {}", error.as_report()))?;
+            return Ok(EncodedPrompt {
+                token_ids: encoding.get_ids().to_vec(),
+                token_offsets: Some(encoding.get_offsets().to_vec()),
+            });
+        }
+
+        let token_ids = self.encode(text, add_special_tokens)?;
+        let token_offsets = self
+            .offsets_tokenizer()
+            .and_then(|tokenizer| tokenizer.encode_char_offsets(text, add_special_tokens).ok())
+            .filter(|encoding| encoding.get_ids() == token_ids)
+            .map(|encoding| encoding.get_offsets().to_vec());
+        Ok(EncodedPrompt {
+            token_ids,
+            token_offsets,
+        })
+    }
+
+    fn warm_offsets(&self) {
+        if !matches!(self.backend, Backend::Hf(_)) {
+            self.offsets_tokenizer();
         }
     }
 
@@ -472,6 +531,97 @@ mod tests {
         )
         .expect("write tokenizer");
         path
+    }
+
+    #[test]
+    fn offsets_match_hf_source_characters_and_preserve_token_ids() {
+        let dir = tempdir().unwrap();
+        let mut json = ordinary_test_tokenizer_json(false, true);
+        let processor = tokenizers::processors::template::TemplateProcessing::builder()
+            .try_single(format!("{SPECIAL_TOKEN} $A"))
+            .unwrap()
+            .special_tokens(vec![(SPECIAL_TOKEN, 257)])
+            .build()
+            .unwrap();
+        json["post_processor"] = serde_json::to_value(processor).unwrap();
+        let path = write_tokenizer_json(dir.path(), "tokenizer.json", &json);
+        let text = "é🙂Cafe\u{301}<|special|>";
+        for tokenizer in [
+            HuggingFaceTokenizer::new_hf(&path).unwrap(),
+            HuggingFaceTokenizer::new_fastokens(&path).unwrap(),
+        ] {
+            for add_special_tokens in [false, true] {
+                let encoded = tokenizer.encode_with_offsets(text, add_special_tokens).unwrap();
+                assert_eq!(
+                    encoded.token_ids,
+                    tokenizer.encode(text, add_special_tokens).unwrap()
+                );
+                let mut expected = vec![
+                    (0, 1),
+                    (0, 1),
+                    (1, 2),
+                    (1, 2),
+                    (1, 2),
+                    (1, 2),
+                    (2, 3),
+                    (3, 4),
+                    (4, 5),
+                    (5, 6),
+                    (5, 6),
+                    (7, 18),
+                ];
+                if add_special_tokens {
+                    expected.insert(0, (0, 0));
+                }
+                assert_eq!(encoded.token_offsets, Some(expected));
+            }
+        }
+    }
+
+    #[test]
+    fn fastokens_offsets_ignore_hf_settings_but_reject_changed_tokenization() {
+        let dir = tempdir().unwrap();
+        let mut json = ordinary_test_tokenizer_json(false, false);
+        json["padding"] = serde_json::json!({
+            "strategy": {"Fixed": 30}, "direction": "Right",
+            "pad_to_multiple_of": null, "pad_id": 0, "pad_type_id": 0, "pad_token": "!"
+        });
+        let path = write_tokenizer_json(dir.path(), "tokenizer.json", &json);
+        let tokenizer = HuggingFaceTokenizer::new_fastokens(&path).unwrap();
+        tokenizer.warm_offsets();
+        let x_id = json["model"]["vocab"]["x"].clone();
+        let y_id = json["model"]["vocab"]["y"].clone();
+        json["model"]["vocab"]["x"] = y_id.clone();
+        json["model"]["vocab"]["y"] = x_id.clone();
+        write_tokenizer_json(dir.path(), "tokenizer.json", &json);
+        let text = "x".repeat(25);
+        let encoded = tokenizer.encode_with_offsets(&text, false).unwrap();
+        assert_eq!(encoded.token_ids, tokenizer.encode(&text, false).unwrap());
+        assert_eq!(encoded.token_ids.len(), 25);
+        assert_eq!(
+            encoded.token_offsets,
+            Some((0..25).map(|i| (i, i + 1)).collect())
+        );
+
+        let tokenizer = HuggingFaceTokenizer::new_fastokens(&path).unwrap();
+        json["model"]["vocab"]["x"] = x_id;
+        json["model"]["vocab"]["y"] = y_id;
+        write_tokenizer_json(dir.path(), "tokenizer.json", &json);
+        let encoded = tokenizer.encode_with_offsets(&text, false).unwrap();
+        assert_eq!(encoded.token_ids, tokenizer.encode(&text, false).unwrap());
+        assert!(encoded.token_offsets.is_none());
+    }
+
+    #[test]
+    fn fastokens_preserves_ids_when_offsets_cannot_load() {
+        let dir = tempdir().unwrap();
+        let json = ordinary_test_tokenizer_json(false, false);
+        let path = write_tokenizer_json(dir.path(), "tokenizer.json", &json);
+        let mut tokenizer = HuggingFaceTokenizer::new_fastokens(&path).unwrap();
+        tokenizer.source_path = Some(dir.path().join("missing.json"));
+        let encoded = tokenizer.encode_with_offsets("hello", false).unwrap();
+        assert_eq!(encoded.token_ids, tokenizer.encode("hello", false).unwrap());
+        assert!(encoded.token_offsets.is_none());
     }
 
     fn assert_ordinary_matches_added_empty(

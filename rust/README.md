@@ -122,6 +122,16 @@ It exposes `/v1/chat/completions/render` and `/v1/completions/render`. Only
 tokenizer and model configuration files are loaded; model weights, PyTorch,
 and vLLM kernels are not required.
 
+Set `return_token_offsets: true` to include per-token `[start, end]` character
+spans (Unicode code points) in `token_offsets`. Chat spans refer to the prompt
+after applying the chat template; truncation retains coordinates in that original
+prompt. Pre-tokenized prompts and unsupported tokenizers return `null`.
+Multimodal requests are rejected by this text-only server.
+Spans follow Hugging Face semantics: they can overlap, and inserted
+special tokens have span `[0, 0]`. With Fastokens, offsets use a lazily loaded
+Hugging Face tokenizer only when its token IDs match exactly. This opt-in path
+tokenizes twice and retains an additional tokenizer in memory.
+
 To serve HTTPS, pass `--ssl-certfile`. If the certificate and private key are
 in separate files, pass `--ssl-keyfile` for the key; otherwise the key is read from
 the certificate file. For mTLS, pass `--ssl-ca-certs` with a CA
