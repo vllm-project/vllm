@@ -55,6 +55,7 @@ from ..translation.protocol import (
     TranslationSegment,
     TranslationStreamResponse,
 )
+from .utils import format_segments_as_srt, format_segments_as_vtt
 
 SpeechToTextResponse: TypeAlias = (
     TranscriptionResponse | TranslationResponse | TranscriptionResponseDiarized
@@ -77,6 +78,11 @@ ResponseType: TypeAlias = (
 )
 
 logger = init_logger(__name__)
+
+# Response formats whose payload is built from timestamped segments.
+# ``srt`` and ``vtt`` reuse the verbose_json token-to-segment extraction
+# to render subtitle cues.
+TIMESTAMPED_FORMATS: Final[frozenset[str]] = frozenset({"verbose_json", "srt", "vtt"})
 
 
 def asr_inter_chunk_separator(
@@ -302,7 +308,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
             prompt = self.model_cls.get_generation_prompt(stt_params)
 
             parsed_prompt: DictPrompt
-            if request.response_format == "verbose_json":
+            if request.response_format in TIMESTAMPED_FORMATS:
                 parsed_prompt = parse_enc_dec_prompt(prompt)
                 parsed_prompt = self._preprocess_verbose_prompt(parsed_prompt)
             else:
@@ -445,20 +451,23 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         if request.response_format not in [
             "text",
             "json",
+            "srt",
+            "vtt",
             "verbose_json",
             "diarized_json",
         ]:
             return self.create_error_response(
                 "Currently only support response_format: "
-                "`text`, `json`, `verbose_json` or `diarized_json`"
+                "`text`, `json`, `srt`, `vtt`, `verbose_json` or `diarized_json`"
             )
 
         if (
-            request.response_format == "verbose_json"
+            request.response_format in TIMESTAMPED_FORMATS
             and not self.model_cls.supports_segment_timestamp
         ):
             return self.create_error_response(
-                f"Currently do not support verbose_json for {request.model}"
+                f"Currently do not support {request.response_format} for "
+                f"{request.model}"
             )
 
         if (
@@ -470,7 +479,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
             )
 
         if (
-            request.response_format in {"verbose_json", "diarized_json"}
+            request.response_format in TIMESTAMPED_FORMATS | {"diarized_json"}
             and request.stream
         ):
             return self.create_error_response(
@@ -525,7 +534,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                 self.default_sampling_params,
             )
 
-        if request.response_format == "verbose_json":
+        if request.response_format in TIMESTAMPED_FORMATS:
             sampling_params.logprobs = 1
 
         engine_request_ids = [
@@ -612,7 +621,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
             result_generator = merge_async_iterators(*list_result_generator)
             async for idx, op in result_generator:
                 start_time = chunk_start_offsets[idx]
-                if request.response_format == "verbose_json":
+                if request.response_format in TIMESTAMPED_FORMATS:
                     assert op.outputs[0].logprobs
                     segments: list[SpeechToTextSegment] = self._get_verbose_segments(
                         tokens=tuple(op.outputs[0].token_ids),
@@ -670,6 +679,17 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                             usage=usage,
                         ),
                     )
+                elif request.response_format in {"srt", "vtt"}:
+                    # Subtitle formats render the timestamped segments as a
+                    # plain-text track carried in the response ``text`` field.
+                    subtitle_text = (
+                        format_segments_as_srt(total_segments)
+                        if request.response_format == "srt"
+                        else format_segments_as_vtt(total_segments)
+                    )
+                    final_response = cast(
+                        T, TranscriptionResponse(text=subtitle_text, usage=usage)
+                    )
                 elif request.response_format != "verbose_json":
                     final_response = cast(
                         T, TranscriptionResponse(text=text, usage=usage)
@@ -686,7 +706,14 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                     )
             else:
                 # no usage in response for translation task
-                if request.response_format != "verbose_json":
+                if request.response_format in {"srt", "vtt"}:
+                    subtitle_text = (
+                        format_segments_as_srt(total_segments)
+                        if request.response_format == "srt"
+                        else format_segments_as_vtt(total_segments)
+                    )
+                    final_response = cast(T, TranslationResponse(text=subtitle_text))
+                elif request.response_format != "verbose_json":
                     final_response = cast(T, TranslationResponse(text=text))
                 else:
                     final_response = cast(
