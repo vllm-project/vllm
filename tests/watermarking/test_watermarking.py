@@ -368,6 +368,7 @@ def test_gpu_sampler_respects_mixed_request_watermarking(
         None,
         None,
         False,
+        False,
     )
 
     assert torch.equal(sampled, torch.tensor([3, 7]))
@@ -383,7 +384,7 @@ def test_gpu_sampler_filters_top_k_top_p_before_watermarking(
     # reference path; the assertion is about the call order, not the kernel.
     monkeypatch.setattr(
         "vllm.v1.watermarking.gpu_sampler.apply_top_k_top_p",
-        lambda logits, k, p: apply_top_k_top_p_pytorch(
+        lambda logits, k, p, **kwargs: apply_top_k_top_p_pytorch(
             logits, k, p, allow_cpu_sync=True
         ),
     )
@@ -414,6 +415,7 @@ def test_gpu_sampler_filters_top_k_top_p_before_watermarking(
         torch.zeros(1, dtype=torch.int64),
         torch.tensor([2]),
         torch.tensor([0.8]),
+        False,
         False,
     )
 
@@ -482,6 +484,7 @@ def test_gpu_sampler_skips_watermarking_for_repeated_contexts(monkeypatch):
         None,
         None,
         False,
+        False,
     )
 
     assert torch.equal(sampled, torch.tensor([3, 7]))
@@ -516,6 +519,7 @@ def test_gpu_sampler_can_disable_context_deduplication(monkeypatch):
         torch.zeros(2, dtype=torch.int64),
         None,
         None,
+        False,
         False,
     )
 
@@ -956,6 +960,7 @@ def test_gpu_sampler_uses_fused_gumbel_for_repeated_contexts():
         None,
         None,
         False,
+        False,
     )
 
     assert torch.equal(repeated, torch.tensor([True, False], device=device))
@@ -991,6 +996,7 @@ def test_gpu_sampler_skips_watermarking_for_greedy_batch(monkeypatch):
         torch.zeros(2, dtype=torch.int64),
         None,
         None,
+        False,
         False,
     )
 
