@@ -352,6 +352,8 @@ def _make_spec_decode_manager(
     max_num_seqs: int = 8,
     use_kda_recoverssm: bool = False,
     varlen_decode: bool = False,
+    cudagraph_mode: CUDAGraphMode = CUDAGraphMode.FULL_AND_PIECEWISE,
+    lora_capture_cases: list[int] | None = None,
 ) -> gpu_cudagraph_utils.CudaGraphManager:
     monkeypatch.setattr(
         gpu_cudagraph_utils,
@@ -372,12 +374,54 @@ def _make_spec_decode_manager(
             use_kda_recoverssm=use_kda_recoverssm,
         ),
         device=torch.device("cpu"),
-        cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
+        cudagraph_mode=cudagraph_mode,
         decode_query_len=decode_query_len,
         varlen_decode=varlen_decode,
+        lora_capture_cases=lora_capture_cases,
     )
     manager._graphs_captured = True
     return manager
+
+
+@pytest.mark.parametrize("cudagraph_mode", list(CUDAGraphMode))
+@pytest.mark.parametrize("num_active_loras", [0, 1, 2])
+def test_decode_and_mixed_plans_preserve_mode_and_lora_selection(
+    monkeypatch, cudagraph_mode, num_active_loras
+):
+    """Splitting capture planning must preserve both routes and LoRA variants."""
+    manager = _make_spec_decode_manager(
+        monkeypatch,
+        cudagraph_mode=cudagraph_mode,
+        lora_capture_cases=[0, 1, 2],
+    )
+
+    decode = manager.dispatch(2, 6, _DECODE_QUERY_LEN, num_active_loras)
+    assert decode.cg_mode == cudagraph_mode.decode_mode()
+    assert decode.num_active_loras == num_active_loras
+    if cudagraph_mode.separate_routine():
+        assert decode.uniform_token_count == _DECODE_QUERY_LEN
+        assert decode.num_tokens == 6
+        assert decode.num_reqs == 2
+
+    mixed = manager.dispatch(1, 4, None, num_active_loras)
+    assert mixed.cg_mode == cudagraph_mode.mixed_mode()
+    assert mixed.uniform_token_count is None
+    assert mixed.num_tokens == 4
+    assert mixed.num_active_loras == num_active_loras
+
+
+def test_decode_plan_keeps_capture_order_after_rounding_and_deduplication(monkeypatch):
+    """Rounded sizes share graphs without losing or reordering LoRA variants."""
+    manager = _make_spec_decode_manager(monkeypatch, lora_capture_cases=[0, 1])
+
+    assert [
+        (desc.num_tokens, desc.num_active_loras)
+        for desc in manager._capture_descs[CUDAGraphMode.FULL]
+    ] == [(size, lora) for size in (24, 18, 9, 6, 3) for lora in (0, 1)]
+    assert [
+        (desc.num_tokens, desc.num_active_loras)
+        for desc in manager._capture_descs[CUDAGraphMode.PIECEWISE]
+    ] == [(size, lora) for size in (24, 16, 8, 4, 2, 1) for lora in (0, 1)]
 
 
 def test_uniform_decode_pads_up_to_full_graph(monkeypatch):
