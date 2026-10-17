@@ -41,6 +41,7 @@ from vllm.model_executor.layers.fused_moe.oracle.mxfp8 import (
 )
 from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
     NvFp4MoeBackend,
+    _use_a16,
     convert_to_nvfp4_moe_kernel_format,
     is_global_sf_supported_for_nvfp4_backend,
     make_nvfp4_moe_kernel,
@@ -1031,27 +1032,26 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
     def _validate_loaded_expert_scales(self, layer: RoutedExperts) -> None:
         """Reject ModelOpt NVFP4 MoE checkpoints with missing expert scales."""
         names = ["w13_weight_scale_2", "w2_weight_scale_2"]
-        effective_a16 = self.use_a16 or (
-            self.nvfp4_backend == NvFp4MoeBackend.B12X
-            and envs.VLLM_B12X_MOE_FP4_FORCE_A16
-        )
         # Only backends that read the checkpoint's activation scales need them.
         # FLASHINFER_B12X quantizes FC1 input itself and overwrites a2_gscale with
         # 1.0; FLASHINFER_MOE_EP_CUTEDSL drops the input scales.
-        if self.nvfp4_backend in (
-            NvFp4MoeBackend.HUMMING,
-            NvFp4MoeBackend.MARLIN,
-            NvFp4MoeBackend.FLASHINFER_B12X,
-            NvFp4MoeBackend.FLASHINFER_MOE_EP_CUTEDSL,
-        ) or (self.nvfp4_backend == NvFp4MoeBackend.B12X and effective_a16):
-            pass
-        else:
+        if not (
+            self.nvfp4_backend
+            in (
+                NvFp4MoeBackend.HUMMING,
+                NvFp4MoeBackend.MARLIN,
+                NvFp4MoeBackend.FLASHINFER_B12X,
+                NvFp4MoeBackend.FLASHINFER_MOE_EP_CUTEDSL,
+            )
+            or (
+                self.nvfp4_backend == NvFp4MoeBackend.B12X
+                and _use_a16(self.nvfp4_backend, self.use_a16)
+            )
+        ):
             names.extend(("w13_input_scale", "w2_input_scale"))
 
         for name in names:
-            scale = getattr(layer, name, None)
-            if scale is None:
-                continue
+            scale = getattr(layer, name)
             per_expert = scale.detach().float().reshape(scale.shape[0], -1)
             bad = ((per_expert == 0) | ~per_expert.isfinite()).any(dim=-1)
             if bad.any():
