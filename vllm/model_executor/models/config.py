@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
 from typing import TYPE_CHECKING
 
 from vllm.logger import init_logger
@@ -113,6 +114,55 @@ class GlmMoeDsaForCausalLM(VerifyAndUpdateConfig):
         vllm_config.parallel_config.set_dcp_defaults(
             comm_backend="a2a", q_replicate=True
         )
+
+        if current_platform.is_rocm():
+            _maybe_enable_glm_mxfp4_fused_shared_experts(vllm_config)
+
+
+def _maybe_enable_glm_mxfp4_fused_shared_experts(vllm_config: "VllmConfig") -> None:
+    """Default AITER fused shared experts on for GLM-5.x MXFP4 on gfx950.
+
+    AITER tunes this model's MXFP4 (W4A4) fused MoE only for the fused
+    shared-expert shape (257 experts, top-9), so the unfused 256/top-8 MoE runs
+    untuned kernels. Limited to TP4/TP8 without data, prefill context or expert
+    parallelism, where the per-rank shape has tuned rows. An explicit
+    VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS always wins.
+    """
+    import vllm.envs as envs
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.platforms.rocm import on_gfx950
+
+    name = "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS"
+    parallel_config = vllm_config.parallel_config
+    if (
+        envs.is_set(name)
+        or not on_gfx950()
+        or not rocm_aiter_ops.is_fused_moe_enabled()
+        or vllm_config.kernel_config.moe_backend not in ("auto", "aiter")
+        or parallel_config.tensor_parallel_size not in (4, 8)
+        or parallel_config.data_parallel_size != 1
+        or parallel_config.prefill_context_parallel_size != 1
+        or parallel_config.enable_expert_parallel
+    ):
+        return
+    quant_config = getattr(
+        vllm_config.model_config.hf_config, "quantization_config", None
+    )
+    if (
+        not isinstance(quant_config, dict)
+        or quant_config.get("quant_method") != "quark"
+    ):
+        return
+    global_config = quant_config.get("global_quant_config") or {}
+    specs = (global_config.get("weight"), global_config.get("input_tensors"))
+    if not all(isinstance(spec, dict) and spec.get("dtype") == "fp4" for spec in specs):
+        return
+
+    os.environ[name] = "1"
+    rocm_aiter_ops.refresh_env_variables()
+    logger.info_once(
+        "Auto-enabling %s=1 for GLM-5.x MXFP4. Set %s=0 to opt out.", name, name
+    )
 
 
 class Glm5NextModelConfig(VerifyAndUpdateConfig):
