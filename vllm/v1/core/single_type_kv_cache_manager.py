@@ -113,12 +113,10 @@ class SingleTypeKVCacheManager(ABC):
         self.max_admission_blocks_per_request = max_admission_blocks_per_request
         # Record newly allocated block ids only when worker-side zeroing will
         # consume them and this manager holds a spec type that gets zeroed.
-        self._record_new_block_ids = needs_kv_cache_zeroing and (
-            (
-                isinstance(kv_cache_spec, AttentionSpec)
-                and not isinstance(kv_cache_spec, CircularBufferSpec)
-            )
-            or kv_cache_spec.requires_zeroing
+        self._record_new_block_ids = (
+            needs_kv_cache_zeroing
+            and isinstance(kv_cache_spec, AttentionSpec)
+            and not isinstance(kv_cache_spec, CircularBufferSpec)
         )
         self.new_block_ids: list[int] = []
 
@@ -1183,19 +1181,13 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         num_external_computed_tokens: int,
         record_for_zeroing: bool = True,
     ) -> None:
-        # External hits include the MTP replay tail, but not EAGLE proof blocks.
-        # Do not cache extra retained blocks that the connector never writes.
+        # Like a local hit, an external hit only provides the attended window.
+        # Retained blocks below it would never be written, yet would be cached.
         num_total_computed_tokens = (
             num_local_computed_tokens + num_external_computed_tokens
         )
         num_unattended_blocks = (
-            max(
-                0,
-                num_total_computed_tokens
-                - self.sliding_window
-                - self.extra_retained_tokens
-                + 1,
-            )
+            max(0, num_total_computed_tokens - self.sliding_window + 1)
             // self.block_size
         )
         req_blocks = self.req_to_blocks[request_id]

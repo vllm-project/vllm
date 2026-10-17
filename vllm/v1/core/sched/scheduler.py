@@ -1047,31 +1047,6 @@ class Scheduler(SchedulerInterface):
                             skip_request(request_queue)
                             continue
 
-                        # A model-specific prefix-replay contract applies to
-                        # both local and connector-backed hits.  If the remote
-                        # connector would fill past that boundary, decline the
-                        # remote suffix and recompute it locally instead of
-                        # silently undoing the local replay ceiling.
-                        max_returned_cache_hit_length = (
-                            self.kv_cache_manager.get_max_returned_cache_hit_length(
-                                request
-                            )
-                        )
-                        if (
-                            self.kv_cache_manager.prefix_cache_recompute_tokens > 0
-                            and block_aligned_local + ext_tokens
-                            > max_returned_cache_hit_length
-                        ):
-                            logger.debug(
-                                "Clamping connector prefix hit for %s from %d "
-                                "tokens to local replay boundary %d",
-                                request.request_id,
-                                ext_tokens,
-                                max_returned_cache_hit_length,
-                            )
-                            ext_tokens = 0
-                            load_kv_async = False
-
                         if self.prefix_replay_tokens and not (
                             ext_tokens and self._load_restores_replay_window(request)
                         ):
@@ -1585,11 +1560,9 @@ class Scheduler(SchedulerInterface):
                 boundary_state_offloads=boundary_state_offloads,
             )
 
-        (
-            kv_cache_block_copies,
-            kv_cache_block_copies_by_group,
-            cow_retained_blocks,
-        ) = self.kv_cache_manager.take_kv_cache_block_copies_by_group()
+        kv_cache_block_copies, cow_retained_blocks = (
+            self.kv_cache_manager.take_kv_cache_block_copies()
+        )
         if kv_cache_block_copies:
             # The copies run with this step's execution; the first non-empty
             # step at or after it gets seq `sched_step_seq + 1` (0-token steps
@@ -1597,11 +1570,6 @@ class Scheduler(SchedulerInterface):
             # have run.
             self._free_cow_retained_blocks(cow_retained_blocks, self.sched_step_seq + 1)
         pending_kv_cache_block_copies = kv_cache_block_copies or None
-        pending_kv_cache_block_copies_by_group = (
-            kv_cache_block_copies_by_group
-            if any(kv_cache_block_copies_by_group)
-            else None
-        )
 
         # Dynamic speculative decoding: compute optimal K
         num_spec_tokens_to_schedule = self.num_spec_tokens
@@ -1619,11 +1587,6 @@ class Scheduler(SchedulerInterface):
                 scheduled_encoder_inputs
             )
 
-        (
-            new_block_ids_to_zero,
-            new_block_ids_to_zero_by_group,
-        ) = self._get_new_block_ids_for_zeroing()
-
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
             scheduled_cached_reqs=cached_reqs_data,
@@ -1639,11 +1602,9 @@ class Scheduler(SchedulerInterface):
             # the previous and the current steps.
             finished_req_ids=self.finished_req_ids,
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
-            new_block_ids_to_zero=new_block_ids_to_zero,
-            new_block_ids_to_zero_by_group=new_block_ids_to_zero_by_group,
-            kv_cache_block_copies=pending_kv_cache_block_copies,
-            kv_cache_block_copies_by_group=(pending_kv_cache_block_copies_by_group),
+            new_block_ids_to_zero=self._get_new_block_ids_to_zero(),
             has_sync_kv_loads=has_sync_kv_loads,
+            kv_cache_block_copies=pending_kv_cache_block_copies,
             kv_connector_block_state=kv_connector_block_state,
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
             ec_manager_metadata=self.encoder_cache_manager.get_manager_metadata(),
@@ -1688,40 +1649,13 @@ class Scheduler(SchedulerInterface):
     ) -> KVConnectorMetadata:
         return connector.build_connector_meta(scheduler_output)
 
-    def _get_new_block_ids_for_zeroing(
-        self,
-    ) -> tuple[list[int] | None, list[list[int]] | None]:
+    def _get_new_block_ids_to_zero(self) -> list[int] | None:
         # Drain new attention block ids every step so the manager-side list
         # does not grow unbounded; only kv-cache zeroing consumes them.
-        take_grouped_ids = getattr(
-            self.kv_cache_manager,
-            "take_new_block_ids_for_zeroing",
-            None,
-        )
-        if take_grouped_ids is None:
-            new_block_ids_to_zero = self.kv_cache_manager.take_new_block_ids()
-            new_block_ids_to_zero_by_group = None
-        else:
-            (
-                new_block_ids_to_zero,
-                new_block_ids_to_zero_by_group,
-            ) = take_grouped_ids()
+        new_block_ids_to_zero = self.kv_cache_manager.take_new_block_ids()
         if not self.needs_kv_cache_zeroing:
-            return None, None
-
-        # Keep the per-group container even when every group is empty.  A
-        # KVBlockZeroer may own side-storage hooks for groups that did not
-        # allocate a block in this step while another full-attention group did.
-        # Collapsing the empty list to ``None`` makes the zeroer reject the
-        # otherwise valid base-KV reset because it cannot map side-storage
-        # owners to group IDs.
-        grouped_ids = new_block_ids_to_zero_by_group
-        return new_block_ids_to_zero or None, grouped_ids
-
-    def _get_new_block_ids_to_zero(self) -> list[int] | None:
-        """Compatibility wrapper for callers that only consume base KV IDs."""
-        block_ids, _ = self._get_new_block_ids_for_zeroing()
-        return block_ids
+            return None
+        return new_block_ids_to_zero or None
 
     def _preempt_request(
         self, request: Request, timestamp: float, drop_stale_output: bool = False

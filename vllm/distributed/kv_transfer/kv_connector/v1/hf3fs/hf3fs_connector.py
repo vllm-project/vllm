@@ -322,7 +322,7 @@ class AsyncOperationManager:
                 for result in write_future.result()
             )
 
-            # Step5: Confirm writes to metadata server
+            # Step4: Confirm writes to metadata server
             if write_success:
                 written_keys = list(zip(block_hashes, page_indices))
                 self._connector._metadata_client.confirm_write_for_keys(

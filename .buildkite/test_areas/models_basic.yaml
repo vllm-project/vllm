@@ -185,6 +185,16 @@ steps:
   - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
   - pytest -v -s models/kimi_k3/test_prefix_cache.py
 
+- label: ":nvidia: (H200) Step5"
+  key: step5-unit-tests
+  timeout_in_minutes: 20
+  device: h200_35gb
+  source_file_dependencies:
+  - vllm/models/step5/
+  - tests/models/step5/
+  commands:
+    - pytest -v -s models/step5
+
 - label: ":nvidia: (H200) GLM5Next"
   key: glm5next-unit-tests
   timeout_in_minutes: 20

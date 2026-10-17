@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Base scheduler-side logic for the NIXL connector."""
 
-import math
 import threading
 import time
 from typing import TYPE_CHECKING, Any
@@ -105,19 +104,6 @@ class NixlBaseConnectorScheduler:
         self._bounded_replay = any(
             g.kv_cache_spec.prefix_replay_tokens > 0
             for g in kv_cache_config.kv_cache_groups
-        )
-        # Groups that recompute a prefix-cache replay suffix resume at a block
-        # boundary; a P/D load does the same.
-        recompute_specs = [
-            g.kv_cache_spec
-            for g in kv_cache_config.kv_cache_groups
-            if g.kv_cache_spec.prefix_cache_recompute_tokens
-        ]
-        self._prefix_recompute_tokens = max(
-            (s.prefix_cache_recompute_tokens for s in recompute_specs), default=0
-        )
-        self._prefix_recompute_block_size = (
-            math.lcm(*(s.block_size for s in recompute_specs)) if recompute_specs else 0
         )
 
         logger.info("Initializing NIXL Scheduler %s", engine_id)
@@ -400,45 +386,38 @@ class NixlBaseConnectorScheduler:
         MTP needs to keep its whole lookahead window off of the prefiller, which
         would otherwise embed the unverified drafts in the MTP layer's KV cache. The
         decoder would never rebuild them, because the update is sized by the rejection
-        count, which is zero for the first decode. A prefix-cache replay suffix
-        is recomputed after a P/D load as after a local hit.
+        count, which is zero for the first decode.
         """
         return max(
             1 if self._has_mamba or self._bounded_replay else 0,
-            self._prefix_recompute_tokens,
             self.vllm_config.num_prefill_lookahead_tokens - 1,
         )
 
     def _get_remote_prefill_token_count(self, num_prompt_tokens: int) -> int:
-        """The number of prompt tokens the prefiller computes and the decoder
-        loads. Stops short of the trailing ``_prefill_backoff()`` tokens that the
-        decoder will recompute locally, at a replay block boundary; 0 means the
-        decoder prefills the whole prompt."""
+        """D-side only. The number of prompt tokens to load from the prefiller.
+        Stops short of the trailing ``_prefill_backoff()`` tokens that the decoder
+        will recompute locally."""
         backoff = self._prefill_backoff()
-        if self._prefix_recompute_block_size:
-            count = max(num_prompt_tokens - backoff, 0)
-            return count - count % self._prefix_recompute_block_size
         if backoff and num_prompt_tokens > backoff:
             return num_prompt_tokens - backoff
         return num_prompt_tokens
 
     def _truncate_request_for_prefill(self, request: "Request") -> None:
-        """P-side only: drop the trailing prompt tokens the decoder recomputes
-        locally. For Mamba that is the single token needed to yield h(N-1); for
+        """P-side only: drop the trailing ``_prefill_backoff()`` prompt tokens
+        so the prefiller stops short of what the decoder recomputes locally.
+        For Mamba that is the single token needed to yield h(N-1); for
         multi-module MTP it is the drafter's whole lookahead window.
 
         Guarded by ``_p_side_truncated`` to avoid repeated truncation if the
         request is preempted and rescheduled."""
-        count = self._get_remote_prefill_token_count(request.num_prompt_tokens)
-        backoff = request.num_prompt_tokens - count
+        backoff = self._prefill_backoff()
         params = request.kv_transfer_params
         if (
-            # With nothing to load, the decoder prefills the whole prompt.
-            count
-            and backoff
+            backoff
             and params is not None
             # Guard against repeated truncation after preemption/reschedule.
             and not params.get("_p_side_truncated")
+            and request.num_prompt_tokens > backoff
             # A request that skips reading the prefix cache (prompt logprobs)
             # loads nothing on the decoder, which recomputes its whole prompt.
             and not request.get_skip_reading_prefix_cache()

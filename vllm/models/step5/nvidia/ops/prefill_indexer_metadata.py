@@ -58,6 +58,7 @@ def _prepare_prefill_indexer(
     PAGE_TABLE_COL: tl.constexpr = 0,
     PAGE_INDPTR_STRIDE: tl.constexpr = 1,
     BLOCK_SIZE: tl.constexpr = 8,
+    PAGE_STRIDE: tl.constexpr = 1,
 ):
     page_tile = tl.program_id(0)
     row = tl.program_id(1)
@@ -92,6 +93,7 @@ def _prepare_prefill_indexer(
                 PAGE_TABLE_COL,
                 PAGE_INDPTR_STRIDE,
                 BLOCK_SIZE,
+                PAGE_STRIDE,
             )
         if NEED_SCORES and row % CHUNK_SIZE == 0:
             query = row + tl.arange(0, CHUNK_SIZE)
@@ -157,6 +159,7 @@ def prepare_prefill_indexer(
             PAGE_TABLE_COL=paged_prefill.block_table.stride(1),
             PAGE_INDPTR_STRIDE=paged_prefill.indptr.stride(0),
             BLOCK_SIZE=paged_prefill.block_size,
+            PAGE_STRIDE=paged_prefill.page_stride,
         )
     pages = triton.cdiv(regions, 128) * 4 if need_scores else 0
     current = torch.empty(rows, device=positions.device, dtype=torch.int64)

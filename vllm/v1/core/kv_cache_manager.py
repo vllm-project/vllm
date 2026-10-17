@@ -201,13 +201,6 @@ class KVCacheManager:
             if manager.retains_longer_hit
         )
         self.kv_cache_config = kv_cache_config
-        self.prefix_cache_recompute_tokens = max(
-            (
-                group.kv_cache_spec.prefix_cache_recompute_tokens
-                for group in kv_cache_config.kv_cache_groups
-            ),
-            default=0,
-        )
 
         # Watermark: minimum number of KV cache blocks to keep free when
         # admitting waiting/preempted requests, to avoid frequent preemptions.
@@ -293,25 +286,18 @@ class KVCacheManager:
         if not self.prefix_cache_lookup_enabled(request):
             return self.empty_kv_cache_blocks, 0, 0
 
-        max_cache_hit_length, max_returned_cache_hit_length = (
-            self._get_cache_hit_limits(request)
+        # NOTE: When all tokens hit the cache, we must recompute the last token
+        # to obtain logits. Thus, set max_cache_hit_length to prompt_length - 1.
+        # This can trigger recomputation of an entire block, rather than just
+        # the single last token, because allocate_slots() requires
+        # num_computed_tokens to be block-size aligned. Removing this limitation
+        # could slightly improve performance in the future.
+        max_cache_hit_length = request.num_tokens - 1
+        computed_blocks, num_new_computed_tokens, num_uncached = (
+            self.coordinator.find_longest_cache_hit(
+                request.block_hashes, max_cache_hit_length
+            )
         )
-        if max_returned_cache_hit_length == max_cache_hit_length:
-            # Keep the legacy coordinator call shape for external overrides.
-            computed_blocks, num_new_computed_tokens, num_uncached = (
-                self.coordinator.find_longest_cache_hit(
-                    request.block_hashes,
-                    max_cache_hit_length,
-                )
-            )
-        else:
-            computed_blocks, num_new_computed_tokens, num_uncached = (
-                self.coordinator.find_longest_cache_hit(
-                    request.block_hashes,
-                    max_cache_hit_length,
-                    max_returned_cache_hit_length,
-                )
-            )
 
         # When kv_cache_report_mode is "full", emit BlockStored events
         # for the reused prefix cache blocks so that external consumers
@@ -368,21 +354,9 @@ class KVCacheManager:
             return self.empty_kv_cache_blocks, 0, 0, False
 
         fa_group_id = coordinator.full_attention_group_id
-        max_cache_hit_length, max_returned_cache_hit_length = (
-            self._get_cache_hit_limits(request)
+        computed, per_group_hits = coordinator.find_longest_cache_hit_per_group(
+            request.block_hashes, request.num_tokens - 1
         )
-        if max_returned_cache_hit_length == max_cache_hit_length:
-            # Keep the legacy coordinator call shape for external overrides.
-            computed, per_group_hits = coordinator.find_longest_cache_hit_per_group(
-                request.block_hashes,
-                max_cache_hit_length,
-            )
-        else:
-            computed, per_group_hits = coordinator.find_longest_cache_hit_per_group(
-                request.block_hashes,
-                max_cache_hit_length,
-                max_returned_cache_hit_length,
-            )
         if any(hit > per_group_hits[fa_group_id] for hit in per_group_hits):
             # A lagging group hit deeper than full attention means its
             # full-attention blocks were evicted; use the reconciled boundary
@@ -393,24 +367,6 @@ class KVCacheManager:
         blocks = self.create_kv_cache_blocks(computed)
         # Per-group lookups do not detect an uncached shared prefix (boundary 0).
         return blocks, num_local, 0, min(per_group_hits) < num_local
-
-    def _get_cache_hit_limits(self, request: Request) -> tuple[int, int]:
-        """Return lookup and final-return ceilings for prefix-cache replay.
-
-        The lookup ceiling preserves the long-standing requirement to
-        recompute the final prompt token for logits.  A model may declare a
-        larger replay suffix through its KV-cache side-storage contract.  That
-        stricter returned-hit ceiling is kept separate so EAGLE/MTP can still
-        inspect its one-unit lookahead without applying a second rewind.
-        """
-        lookup_ceiling = max(0, request.num_tokens - 1)
-        required = max(1, self.prefix_cache_recompute_tokens)
-        returned_ceiling = max(0, request.num_tokens - required)
-        return lookup_ceiling, min(lookup_ceiling, returned_ceiling)
-
-    def get_max_returned_cache_hit_length(self, request: Request) -> int:
-        """Return the final local/remote prefix-replay ceiling for a request."""
-        return self._get_cache_hit_limits(request)[1]
 
     def allocate_slots(
         self,
@@ -874,27 +830,11 @@ class KVCacheManager:
             truncated.append(list(group_blocks[:num_blocks]))
         return self.create_kv_cache_blocks(tuple(truncated))
 
-    def take_new_block_ids_for_zeroing(
-        self,
-    ) -> tuple[list[int], list[list[int]]]:
-        """Drain newly allocated block IDs for base and side-storage resets."""
-        base_ids: list[int] = []
-        ids_by_group: list[list[int]] = []
-        reset_base_kv = self.kv_cache_config.needs_base_kv_cache_zeroing
-        for mgr in self.coordinator.single_type_managers:
-            group_ids = mgr.take_new_block_ids()
-            ids_by_group.append(group_ids)
-            spec = getattr(mgr, "kv_cache_spec", None)
-            if reset_base_kv and (
-                isinstance(spec, AttentionSpec)
-                or (spec is None and getattr(mgr, "records_new_block_ids", False))
-            ):
-                base_ids.extend(group_ids)
-        return base_ids, ids_by_group
-
     def take_new_block_ids(self) -> list[int]:
-        """Drain and return new full-attention block IDs for zeroing."""
-        ids, _ = self.take_new_block_ids_for_zeroing()
+        """Drain and return new attention block IDs for zeroing."""
+        ids: list[int] = []
+        for mgr in self.coordinator.single_type_managers:
+            ids.extend(mgr.take_new_block_ids())
         return ids
 
     def record_blocks_for_zeroing(self, request_id: str, start_token: int) -> None:
@@ -915,37 +855,18 @@ class KVCacheManager:
         self,
     ) -> tuple[list[KVCacheBlockCopy], list[KVCacheBlock]]:
         """Drain pending copies and return their retained endpoints."""
-        copies, _, retained_blocks = self.take_kv_cache_block_copies_by_group()
-        return copies, retained_blocks
-
-    def take_kv_cache_block_copies_by_group(
-        self,
-    ) -> tuple[
-        list[KVCacheBlockCopy],
-        list[list[KVCacheBlockCopy]],
-        list[KVCacheBlock],
-    ]:
-        """Drain pending copies, preserving their KV cache group ownership."""
-        copies_by_group: list[list[KVCacheBlockCopy]] = []
-        retained_blocks: list[KVCacheBlock] = []
+        pending_copies: list[tuple[KVCacheBlock, KVCacheBlock]] = []
         for mgr in self.coordinator.single_type_managers:
-            pending_copies = mgr.take_pending_cow_copies()
-            copies_by_group.append(
-                [
-                    KVCacheBlockCopy(
-                        src_block_id=source_block.block_id,
-                        dst_block_id=cow_block.block_id,
-                    )
-                    for source_block, cow_block in pending_copies
-                ]
-            )
-            retained_blocks.extend(block for pair in pending_copies for block in pair)
+            pending_copies.extend(mgr.take_pending_cow_copies())
         copies = [
-            block_copy
-            for group_copies in copies_by_group
-            for block_copy in group_copies
+            KVCacheBlockCopy(
+                src_block_id=source_block.block_id,
+                dst_block_id=cow_block.block_id,
+            )
+            for source_block, cow_block in pending_copies
         ]
-        return copies, copies_by_group, retained_blocks
+        retained_blocks = [block for pair in pending_copies for block in pair]
+        return copies, retained_blocks
 
     def take_boundary_state_offloads(
         self,

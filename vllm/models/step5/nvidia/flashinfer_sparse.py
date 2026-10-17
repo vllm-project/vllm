@@ -261,7 +261,8 @@ class Step5FlashInferSparse:
             and weights.stride(-1) == 1
             and (mean.shape[1:] == (8, 256) or mean.shape[1:] in ((2, 256), (4, 256)))
             and mean.dtype == torch.uint8
-            and mean.is_contiguous()
+            and mean.stride(1) == 256
+            and mean.stride(2) == 1
             and table.stride(1) == 1
             and regions > 0
         ):

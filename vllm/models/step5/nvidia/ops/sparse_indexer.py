@@ -30,6 +30,8 @@ class PagedPrefillMetadata(NamedTuple):
     indices: torch.Tensor
     indptr: torch.Tensor
     block_size: int
+    # Eight-token pages between consecutive cache blocks.
+    page_stride: int
 
 
 @triton.jit
@@ -47,6 +49,7 @@ def _emit_prefill_pages(
     TABLE_COL: tl.constexpr,
     INDPTR_STRIDE: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
+    PAGE_STRIDE: tl.constexpr,
 ):
     start = tl.load(Indptr + row * INDPTR_STRIDE)
     end = tl.load(Indptr + (row + 1) * INDPTR_STRIDE)
@@ -58,7 +61,7 @@ def _emit_prefill_pages(
         valid,
         other=0,
     )
-    page = physical * (BLOCK_SIZE // 8) + selected % (BLOCK_SIZE // 8)
+    page = physical * PAGE_STRIDE + selected % (BLOCK_SIZE // 8)
     tl.store(Pages + start + compact_col, page, valid)
 
 
@@ -129,6 +132,7 @@ def _copy_summary_page(
     PAGES,
     CACHE_PAGES: tl.constexpr,
     REGIONS_PER_BLOCK: tl.constexpr,
+    MEAN_BLOCK: tl.constexpr,
     TABLE_COLS: tl.constexpr,
     TABLE_STRIDE: tl.constexpr,
 ):
@@ -143,11 +147,8 @@ def _copy_summary_page(
     dim = tl.arange(0, 256)
     values = tl.load(
         Mean
-        + (
-            physical[:, None].to(tl.int64) * REGIONS_PER_BLOCK
-            + region[:, None] % REGIONS_PER_BLOCK
-        )
-        * 256
+        + physical[:, None].to(tl.int64) * MEAN_BLOCK
+        + region[:, None] % REGIONS_PER_BLOCK * 256
         + dim[None, :],
         valid[:, None],
         other=0,
@@ -176,6 +177,7 @@ def _copy_summary_tile(
     PAGES,
     CACHE_PAGES: tl.constexpr,
     REGIONS_PER_BLOCK: tl.constexpr,
+    MEAN_BLOCK: tl.constexpr,
     TABLE_COLS: tl.constexpr,
     TABLE_STRIDE: tl.constexpr,
     TILE_PAGES: tl.constexpr,
@@ -189,11 +191,8 @@ def _copy_summary_tile(
     dim = tl.arange(0, 64)
     values = tl.load(
         Mean.to(tl.pointer_type(tl.uint32))
-        + (
-            physical[:, None].to(tl.int64) * REGIONS_PER_BLOCK
-            + region[:, None] % REGIONS_PER_BLOCK
-        )
-        * 64
+        + physical[:, None].to(tl.int64) * (MEAN_BLOCK // 4)
+        + region[:, None] % REGIONS_PER_BLOCK * 64
         + dim[None, :],
         valid[:, None],
         other=0,
@@ -230,6 +229,7 @@ def _pack_summary_pages(
     PAGES,
     CACHE_PAGES: tl.constexpr,
     REGIONS_PER_BLOCK: tl.constexpr,
+    MEAN_BLOCK: tl.constexpr,
     TABLE_COLS: tl.constexpr,
     TABLE_STRIDE: tl.constexpr,
     DECODE: tl.constexpr,
@@ -299,6 +299,7 @@ def _pack_summary_pages(
                 PAGES,
                 CACHE_PAGES,
                 REGIONS_PER_BLOCK,
+                MEAN_BLOCK,
                 TABLE_COLS,
                 TABLE_STRIDE,
                 TILE_PAGES,
@@ -315,6 +316,7 @@ def _pack_summary_pages(
             PAGES,
             CACHE_PAGES,
             REGIONS_PER_BLOCK,
+            MEAN_BLOCK,
             TABLE_COLS,
             TABLE_STRIDE,
         )
@@ -323,6 +325,8 @@ def _pack_summary_pages(
 def _pack_summaries(
     mean, block_table, regions, slots=None, seq_lens=None, num_sms=0, *, live_only=False
 ):
+    # Blocks may be strided (block-outer KV layout); regions within one are not.
+    assert mean.stride(1) == 256 and mean.stride(2) == 1
     pages = triton.cdiv(regions, 128) * 4
     batch = block_table.shape[0]
     packed = torch.empty(
@@ -366,6 +370,7 @@ def _pack_summaries(
             pages,
             mean.shape[0],
             mean.shape[1],
+            mean.stride(0),
             block_table.shape[1],
             block_table.stride(0),
             metadata is not None,
@@ -453,6 +458,7 @@ def _stable_topk_regions(
     TABLE_ROW: tl.constexpr = 0,
     TABLE_COL: tl.constexpr = 0,
     BLOCK_SIZE: tl.constexpr = 8,
+    PAGE_STRIDE: tl.constexpr = 1,
     PREPARE_PREFILL: tl.constexpr = False,
     Owners=None,
     OWNER_STRIDE: tl.constexpr = 0,
@@ -551,6 +557,7 @@ def _stable_topk_regions(
             TABLE_COL,
             INDPTR_STRIDE,
             BLOCK_SIZE,
+            PAGE_STRIDE,
         )
 
 
@@ -622,6 +629,7 @@ def select_regions(
             TABLE_COL=paged_prefill.block_table.stride(1),
             INDPTR_STRIDE=paged_prefill.indptr.stride(0),
             BLOCK_SIZE=paged_prefill.block_size,
+            PAGE_STRIDE=paged_prefill.page_stride,
         )
     _stable_topk_regions[(rows,)](
         scores,

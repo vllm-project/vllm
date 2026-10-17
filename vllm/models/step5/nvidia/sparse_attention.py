@@ -3,6 +3,7 @@
 """Hopper and B300 sparse attention using FlashInfer and Triton."""
 
 import functools
+from dataclasses import replace
 from typing import Any, ClassVar, NamedTuple, cast
 
 import numpy as np
@@ -13,7 +14,7 @@ from vllm.config.cache import CacheDType
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.utils.torch_utils import is_quantized_kv_cache
-from vllm.v1.attention.backend import AttentionCGSupport, AttentionType
+from vllm.v1.attention.backend import AttentionCGSupport, AttentionType, MultipleOf
 from vllm.v1.attention.backends.flash_attn import (
     FlashAttentionBackend,
     FlashAttentionImpl,
@@ -24,7 +25,11 @@ from vllm.v1.kv_cache_layout import KVCacheLayout
 
 from .ops.attention_gate import headwise_sigmoid_gate
 from .ops.sparse_prefill import make_prefill_chunks
-from .ops.sparse_prefill_pages import plan_staged_prefill_pages, stage_prefill_pages
+from .ops.sparse_prefill_pages import (
+    kv_page_stride,
+    plan_staged_prefill_pages,
+    stage_prefill_pages,
+)
 from .ops.summary_update import build_prefill_groups
 
 # Transient dense BF16 copy of a prefill batch's live pages for one KV group.
@@ -38,6 +43,8 @@ class _PrefillLayout(NamedTuple):
     dtype: torch.dtype
     quantized: bool
     block_size: int
+    # Eight-token pages between KV blocks, which may be strided.
+    page_stride: int
 
 
 def _upload(values: np.ndarray, device: torch.device) -> torch.Tensor:
@@ -48,19 +55,16 @@ def _upload(values: np.ndarray, device: torch.device) -> torch.Tensor:
     )
 
 
-def _request_state(attn_metadata) -> torch.Tensor:
-    state = getattr(attn_metadata, "step5_request_state", None)
-    if state is None:
-        raise RuntimeError(
-            "Step5 DSA speculative decoding requires the V2 model runner "
-            "(Step5ModelState supplies persistent request indices)"
-        )
-    return state
-
-
 @functools.cache
 def _num_sms(device: torch.device) -> int:
     return torch.cuda.get_device_properties(device).multi_processor_count
+
+
+@functools.cache
+def _shared_adapter(device: torch.device):
+    from .flashinfer_sparse import Step5FlashInferSparse
+
+    return Step5FlashInferSparse(device)
 
 
 class Step5SplitKVFlashAttentionImpl(FlashAttentionImpl):
@@ -183,8 +187,6 @@ def _validate_step5_dsa_attention_contract(
 class Step5DSAMetadataBuilder(FlashAttentionMetadataBuilder):
     _cudagraph_support = AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
     supports_update_block_table = False
-    # Set by Step5ModelState: persistent request state indices (MRv2).
-    step5_request_state: torch.Tensor | None = None
 
     @classmethod
     def get_cudagraph_support(cls, vllm_config, kv_cache_spec):
@@ -199,28 +201,22 @@ class Step5DSAMetadataBuilder(FlashAttentionMetadataBuilder):
         step5_metadata.num_actual_reqs = common_attn_metadata.num_reqs
         step5_metadata.query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
         step5_metadata.step5_runtime = None
-        request_state = self.step5_request_state
-        step5_metadata.step5_request_state = (
-            request_state[: common_attn_metadata.num_reqs]
-            if request_state is not None
-            else None
-        )
         self._plan_prefill(step5_metadata, common_attn_metadata)
         return metadata
 
-    def _impl(self):
+    def _layer(self):
         if not self.layer_names:
             return None
         context = self.vllm_config.compilation_config.static_forward_context
-        layer = context.get(self.layer_names[0])
-        return getattr(layer, "impl", None)
+        return context.get(self.layer_names[0])
 
     def _plan_prefill(self, metadata, common) -> None:
         """Plan prefill steps here, before the forward, so the forward has no
         host sync: host lengths come from the scheduler and exact positions
         stay on device. Uniform (decode and MTP verify) batches need no plan.
         """
-        impl = self._impl()
+        layer = self._layer()
+        impl = getattr(layer, "impl", None)
         n, reqs, query_len = (
             common.num_actual_tokens,
             common.num_reqs,
@@ -251,6 +247,7 @@ class Step5DSAMetadataBuilder(FlashAttentionMetadataBuilder):
                 self.vllm_config.model_config.dtype,
                 is_quantized_kv_cache(impl.kv_cache_dtype),
                 spec.block_size,
+                kv_page_stride(layer.kv_cache),
             ),
             positions,
         )
@@ -339,8 +336,14 @@ class Step5DSAAttentionImpl(Step5SplitKVFlashAttentionImpl):
         )
         self.max_num_seqs = max_num_seqs or 1
         self.max_num_regions = ((max_model_len or 1048576) + 7) // 8
-        self.adapter = None
+        # Created with the model so memory profiling counts its workspace.
+        self.adapter = _shared_adapter(
+            torch.device(
+                current_platform.device_type, torch.accelerator.current_device_index()
+            )
+        )
         self.summary_cache = None
+        self.csa_ring = None
 
     def forward(
         self,
@@ -424,6 +427,7 @@ class Step5DSAAttentionImpl(Step5SplitKVFlashAttentionImpl):
                     query.dtype,
                     kv_cache.dtype in (torch.uint8, torch.float8_e4m3fn),
                     kv_cache.shape[2],
+                    kv_page_stride(kv_cache),
                 ),
             )
         if groups > 1 and is_decode:
@@ -556,6 +560,8 @@ class Step5DSAAttentionImpl(Step5SplitKVFlashAttentionImpl):
             else None
         )
         attn_table = table if staged is None else staged.table
+        # Staged pages are dense.
+        page_stride = layout.page_stride if staged is None else block_size // 8
         chunks = (
             make_prefill_chunks(host_positions.tolist(), self.sparse_topk, device)
             if paged_plan is None
@@ -566,11 +572,6 @@ class Step5DSAAttentionImpl(Step5SplitKVFlashAttentionImpl):
             positions,
             owners,
             attn_metadata.query_start_loc[: count + 1],
-            block_size,
-            # Speculative rows in each last window are journaled separately.
-            prefix_width=self.num_speculative_tokens + 1
-            if self.num_speculative_tokens
-            else 0,
         )
         indexer = self.adapter.prefill_metadata(
             owners,
@@ -578,7 +579,7 @@ class Step5DSAAttentionImpl(Step5SplitKVFlashAttentionImpl):
             num_regions,
             self.sparse_topk,
             paged_prefill=(
-                paged_plan.page_metadata(attn_table, owners)
+                paged_plan.page_metadata(attn_table, owners, page_stride)
                 if paged_plan is not None and num_regions <= self.sparse_topk
                 else None
             ),
@@ -639,21 +640,13 @@ class Step5DSAAttentionImpl(Step5SplitKVFlashAttentionImpl):
             attn_cache = stage_prefill_pages(kv_cache, staged, query.dtype, *kv_scales)
             attn_table = staged.table
         if not summary_updated:
-            if self.num_speculative_tokens:
-                count = attn_metadata.num_actual_reqs
-                self.summary_cache.update_request_journal(
-                    dsa_proxy_key[:n],
-                    dsa_proxy_z[:n],
-                    attn_metadata.slot_mapping[:n],
-                    attn_metadata.query_start_loc[: count + 1],
-                    attn_metadata.seq_lens[:count],
-                    _request_state(attn_metadata)[:count],
-                    summary_plan,
-                )
-            else:
-                self.summary_cache.update(
-                    dsa_proxy_key[:n], dsa_proxy_z[:n], [], summary_plan
-                )
+            self.summary_cache.update_prefill(
+                dsa_proxy_key[:n],
+                dsa_proxy_z[:n],
+                summary_plan,
+                positions,
+                self.csa_ring,
+            )
         packed_summaries = None
         if num_regions > self.sparse_topk:
             packed_summaries = self.adapter.pack_summaries(
@@ -687,7 +680,9 @@ class Step5DSAAttentionImpl(Step5SplitKVFlashAttentionImpl):
                     self.sparse_topk,
                     topk_lengths=indexer_meta.topk_lengths,
                     paged_prefill=(
-                        paged_plan.page_metadata(attn_table, owners, start, end)
+                        paged_plan.page_metadata(
+                            attn_table, owners, kv_page_stride(attn_cache), start, end
+                        )
                         if paged_plan is not None
                         else None
                     ),
@@ -749,19 +744,21 @@ class Step5DSAAttentionImpl(Step5SplitKVFlashAttentionImpl):
         table = metadata.block_table[:requests]
         seq_lens = metadata.seq_lens[:requests]
         if self.num_speculative_tokens:
-            # Tokens of one request update the same open region in order, and
-            # rejected drafts are undone next step from the request journal.
+            # Tokens of one request fill their open region in order; a region
+            # closed by a rejected draft is summarized again when it recloses.
             assert not summary_updated
-            self.summary_cache.update_request_journal(
+            self.summary_cache.update_verify(
                 proxy_key,
                 proxy_z,
                 slots,
                 metadata.query_start_loc[: requests + 1],
                 seq_lens,
-                _request_state(metadata)[:requests],
+                self.csa_ring,
             )
         elif not summary_updated:
-            self.summary_cache.update_decode(proxy_key, proxy_z, slots)
+            self.summary_cache.update_decode(
+                proxy_key, proxy_z, slots, seq_lens - 1, self.csa_ring
+            )
         num_regions = min(self.max_num_regions, table.shape[1] * kv_cache.shape[2] // 8)
         # Rows are (token, KV group): row r is group r % G of token r // G.
         scores, decode = self.adapter.decode_logits(
@@ -809,7 +806,9 @@ class Step5SplitKVFlashAttentionBackend(FlashAttentionBackend):
 
     @classmethod
     def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
-        return (KVCacheLayout.LBNHC,)
+        # DSA layers pack their region summaries beside the KV inside each
+        # block, so the layer dim must sit inside the block dim.
+        return (KVCacheLayout.BLNHC,)
 
 
 class Step5DSAAttentionBackend(Step5SplitKVFlashAttentionBackend):
@@ -889,10 +888,10 @@ class Step5DSAAttentionBackend(Step5SplitKVFlashAttentionBackend):
         return False
 
     @classmethod
-    def supports_kv_connector(cls) -> bool:
-        # The Step5 summary sidecar is not part of the generic connector
-        # transfer contract.
-        return False
+    def customize_spec(cls, spec: AttentionSpec) -> AttentionSpec:
+        # Sparse prefill reads eight-token pages, which must tile every block
+        # stride.
+        return replace(spec, block_stride_alignment=MultipleOf(8))
 
     @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:

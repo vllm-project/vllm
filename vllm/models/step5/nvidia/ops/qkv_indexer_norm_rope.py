@@ -7,6 +7,7 @@ import torch
 from vllm.triton_utils import tl, triton
 
 from .indexer_norm_rope import _indexer_norm_rope
+from .summary_update import summary_layout
 
 
 @triton.jit(do_not_specialize=["SLOT_ROWS"])
@@ -130,16 +131,15 @@ def _joint_prepare(
     Z,
     Slots,
     Mean,
-    Numerator,
-    Denominator,
-    Maximum,
-    LastSlot,
+    Ring,
+    RingBase,
     UPDATE_CSA: tl.constexpr,
     CSA_ROWS,
     Z_STRIDE: tl.constexpr,
     SLOT_STRIDE: tl.constexpr,
-    CACHE_PAGES: tl.constexpr,
-    CACHE_BLOCK_SIZE: tl.constexpr,
+    RING_CAPACITY: tl.constexpr,
+    MEAN_BLOCK: tl.constexpr,
+    MEAN_BLOCK_SIZE: tl.constexpr,
     Q_STRIDE: tl.constexpr,
     K_STRIDE: tl.constexpr,
     W_STRIDE: tl.constexpr,
@@ -194,16 +194,15 @@ def _joint_prepare(
             Z,
             Slots,
             Mean,
-            Numerator,
-            Denominator,
-            Maximum,
-            LastSlot,
+            Ring,
+            RingBase,
             UPDATE_CSA,
             CSA_ROWS,
             Z_STRIDE,
             SLOT_STRIDE,
-            CACHE_PAGES,
-            CACHE_BLOCK_SIZE,
+            RING_CAPACITY,
+            MEAN_BLOCK,
+            MEAN_BLOCK_SIZE,
             Q_STRIDE,
             K_STRIDE,
             W_STRIDE,
@@ -265,6 +264,7 @@ def qkv_indexer_norm_rope(
     *,
     main_inputs,
     decode_cache=None,
+    decode_ring=None,
     decode_z: torch.Tensor | None = None,
     decode_slots: torch.Tensor | None = None,
 ) -> tuple[
@@ -296,6 +296,8 @@ def qkv_indexer_norm_rope(
     main_k = main_qkv.new_empty((tokens, main_kh * 192))
     main_v = torch.empty_like(main_k)
     main_group = 4 if main_rotary > 128 else 8
+    if (decode_cache is None) != (decode_ring is None):
+        raise ValueError("CSA fusion needs both the summary cache and the ring")
     if decode_cache is not None:
         if decode_z is None or decode_slots is None:
             raise ValueError("CSA fusion needs decode z and slots")
@@ -335,17 +337,19 @@ def qkv_indexer_norm_rope(
             w,
             decode_z,
             decode_slots,
-            decode_cache._mean if decode_cache is not None else None,
-            decode_cache.numerator if decode_cache is not None else None,
-            decode_cache.denominator if decode_cache is not None else None,
-            decode_cache.maximum if decode_cache is not None else None,
-            decode_cache.last_slot if decode_cache is not None else None,
+            decode_cache.mean if decode_cache is not None else None,
+            decode_ring.rows if decode_ring is not None else None,
+            decode_ring.metadata().base if decode_ring is not None else None,
             decode_cache is not None,
             decode_slots.numel() if decode_slots is not None else 0,
             decode_z.stride(0) if decode_z is not None else 0,
             decode_slots.stride(0) if decode_slots is not None else 0,
-            decode_cache.pages if decode_cache is not None else 0,
-            decode_cache.block_size if decode_cache is not None else 8,
+            decode_ring.capacity if decode_ring is not None else 8,
+            *(
+                summary_layout(decode_cache.mean)
+                if decode_cache is not None
+                else (0, 8)
+            ),
             query.stride(0),
             key.stride(0),
             weights.stride(0),

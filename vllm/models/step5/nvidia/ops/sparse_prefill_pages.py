@@ -108,9 +108,25 @@ def fill_prefill_pages(
     )
 
 
+def kv_page_stride(cache: torch.Tensor) -> int:
+    """Eight-token pages between consecutive blocks of a ``[B, H, N, C]`` cache.
+
+    Blocks may be strided (sliced KV groups, block-outer layouts) as long as
+    the block stride is a whole number of eight-token pages.
+    """
+    page = 8 * cache.stride(2)
+    if cache.stride(0) % page:
+        raise ValueError(
+            f"KV block stride {cache.stride(0)} is not a multiple of the "
+            f"eight-token page ({page})"
+        )
+    return cache.stride(0) // page
+
+
 def view_sparse_kv_pages(cache):
-    """View eight-token pages, retaining gaps between sliced KV groups."""
+    """View eight-token pages, retaining gaps between blocks and KV groups."""
     dim = cache.shape[-1] // 2
+    kv_page_stride(cache)
     page_stride = 8 * cache.stride(2)
     size = (
         (cache.shape[0] - 1) * cache.stride(0) + cache.shape[2] * cache.stride(2)
@@ -172,7 +188,6 @@ class CompactPagedPrefill:
         self.indptr = indptr.to(device, non_blocking=True)
         self.region_count = region_count
         self.block_size = block_size
-        self.page_stride = block_size // 8
         # The native planner reuses pinned memory for asynchronous HtoD copies.
         # Plans alternate between two instances, so this only waits if the GPU
         # is two steps behind.
@@ -218,7 +233,7 @@ class CompactPagedPrefill:
         self.wrapper._paged_kv_indptr_buf.copy_(self.indptr)
         self.wrapper._paged_kv_last_page_len_buf.copy_(positions % 8 + 1)
 
-    def page_metadata(self, table, owners, start=0, end=None):
+    def page_metadata(self, table, owners, page_stride, start=0, end=None):
         if self.query_buffer is not None:
             return None
         end = self.query_shape[0] if end is None else end
@@ -228,6 +243,7 @@ class CompactPagedPrefill:
             self.pages,
             self.indptr[start : end + 1],
             self.block_size,
+            page_stride,
         )
 
     def prepare_chunk(self, start, query, cache, regions, table, owners):
@@ -245,7 +261,7 @@ class CompactPagedPrefill:
             cache.shape[2],
             query,
             self.query_buffer[start:end],
-            self.page_stride,
+            kv_page_stride(cache),
         )
 
     def finish(self, query, cache, out):

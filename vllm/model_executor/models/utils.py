@@ -5,7 +5,6 @@ import itertools
 from collections.abc import Callable, Iterable, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
-from functools import cache, wraps
 from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeAlias, overload
 
 import regex as re
@@ -44,21 +43,6 @@ ShardId: TypeAlias = str | int | tuple[int, ...]
 """One shard of a stacked parameter. A tuple is a single contiguous span."""
 ShardIds: TypeAlias = ShardId | list[ShardId]
 """One shard, or a list of shards the same weight is loaded into in turn."""
-
-
-@cache
-def _get_quantized_reload_wrapper(func: Callable) -> Callable:
-    return support_quantized_model_reload_from_hp_weights(func)
-
-
-def _lazy_support_quantized_model_reload_from_hp_weights(func: Callable):
-    @wraps(func)
-    def wrapper(self, weights, *args, **kwargs):
-        if not getattr(self.module, "_do_torchao_reload", False):
-            return func(self, weights, *args, **kwargs)
-        return _get_quantized_reload_wrapper(func)(self, weights, *args, **kwargs)
-
-    return wrapper
 
 
 @dataclass
@@ -463,7 +447,7 @@ class AutoWeightsLoader:
                 )
                 raise ValueError(msg)
 
-    @_lazy_support_quantized_model_reload_from_hp_weights
+    @support_quantized_model_reload_from_hp_weights
     def load_weights(
         self,
         weights: Iterable[tuple[str, torch.Tensor]],

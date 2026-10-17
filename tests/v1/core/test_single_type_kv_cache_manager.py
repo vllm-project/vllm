@@ -458,11 +458,13 @@ def test_sliding_window_records_new_blocks_for_zeroing():
     assert manager.take_new_block_ids() == []
 
 
-@pytest.mark.parametrize(("extra_retained_tokens", "num_null_blocks"), [(0, 4), (2, 3)])
-def test_sliding_window_external_hit_allocates_loaded_window(
-    extra_retained_tokens, num_null_blocks
+@pytest.mark.parametrize("extra_retained_tokens", [0, 2])
+def test_sliding_window_external_hit_allocates_only_attended_window(
+    extra_retained_tokens,
 ):
-    """Load the attended window and MTP replay tail, excluding EAGLE proof blocks."""
+    """Connectors load only the attended window (the same blocks a local hit
+    returns), so retained blocks below it, MTP replay tail included, must stay
+    null instead of being cached unwritten under their prefix hashes."""
     block_size = 4
     spec = SlidingWindowSpec(
         block_size=block_size,
@@ -482,9 +484,7 @@ def test_sliding_window_external_hit_allocates_loaded_window(
     manager.allocate_external_computed_blocks("request", 0, 24)
 
     blocks = manager.req_to_blocks["request"]
-    assert [block.is_null for block in blocks] == [True] * num_null_blocks + [False] * (
-        6 - num_null_blocks
-    )
+    assert [block.is_null for block in blocks] == [True] * 4 + [False] * 2
 
 
 def test_chunked_local_attention_records_new_blocks_for_zeroing():

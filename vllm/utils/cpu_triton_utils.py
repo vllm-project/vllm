@@ -8,7 +8,7 @@ import ctypes
 import torch
 
 
-# For ComputeSlotMappingKernel in vllm/v1/worker/block_table.py
+# For _compute_slot_mapping_kernel in vllm/v1/worker/block_table.py
 def _compute_slot_mapping_kernel_impl(
     num_tokens: int,
     max_num_tokens: int,
@@ -348,8 +348,6 @@ def _rejection_random_sample_kernel_impl(
     cu_num_draft_tokens,
     draft_token_ids,
     draft_probs,
-    draft_probs_stride,
-    draft_probs_vocab_size,
     target_probs,
     bonus_token_ids,
     recovered_token_ids,
@@ -411,8 +409,6 @@ def _sample_recovered_tokens_kernel_impl(
     cu_num_draft_tokens,
     draft_token_ids,
     draft_probs,
-    draft_probs_stride,
-    draft_probs_vocab_size,
     target_probs,
     inv_q,
     vocab_size,

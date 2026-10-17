@@ -1063,7 +1063,9 @@ def generate_scheduler_kv_cache_config(
         if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs):
             # All layers in the UniformTypeKVCacheSpecs have the same type,
             # so use an arbitrary one to initialize the scheduler.
-            group.kv_cache_spec = _get_scheduler_kv_cache_spec(group.kv_cache_spec)
+            group.kv_cache_spec = next(
+                iter(group.kv_cache_spec.kv_cache_specs.values())
+            )
     return cfg
 
 
@@ -1214,27 +1216,10 @@ def resolve_block_hashes(
 
 
 def _get_scheduler_kv_cache_spec(spec: KVCacheSpec) -> KVCacheSpec:
-    """Project a worker KV-cache spec to the scheduler-visible spec."""
-    if not isinstance(spec, UniformTypeKVCacheSpecs):
-        return spec
-
-    # Uniform groups share one block table in the scheduler. Use the same
-    # representative and aggregate group-level behavior that
-    # `generate_scheduler_kv_cache_config` exposes at runtime.
-    scheduler_spec = copy.deepcopy(next(iter(spec.kv_cache_specs.values())))
-    side_storage_updates: dict[str, Any] = {}
-    if spec.requires_zeroing and not scheduler_spec.requires_zeroing:
-        side_storage_updates["requires_zeroing"] = True
-    if (
-        spec.prefix_cache_recompute_tokens
-        > scheduler_spec.prefix_cache_recompute_tokens
-    ):
-        side_storage_updates["prefix_cache_recompute_tokens"] = (
-            spec.prefix_cache_recompute_tokens
-        )
-    if side_storage_updates:
-        scheduler_spec = scheduler_spec.with_side_storage(**side_storage_updates)
-    return scheduler_spec
+    """The spec the scheduler sees, as in ``generate_scheduler_kv_cache_config``."""
+    if isinstance(spec, UniformTypeKVCacheSpecs):
+        return next(iter(spec.kv_cache_specs.values()))
+    return spec
 
 
 def _required_blocks_per_group(

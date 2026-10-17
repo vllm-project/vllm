@@ -53,9 +53,6 @@ lora_hf_hub_resolver = "vllm.plugins.lora_resolvers.hf_hub_resolver:register_hf_
 where = ["."]
 include = ["vllm*"]
 
-[tool.ruff]
-# The Step5 NVIDIA inference kernels are model-scoped. In particular,
-
 [tool.ruff.lint.per-file-ignores]
 # `vllm` is the only installed package; everything else is standalone scripts
 "!vllm/**" = ["INP"]

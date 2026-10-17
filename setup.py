@@ -1622,7 +1622,7 @@ package_data = {
         "third_party/fmha_sm100/cutlass/include/**/*.hpp",
         "third_party/fmha_sm100/cutlass/tools/util/include/**/*.h",
         "third_party/fmha_sm100/cutlass/tools/util/include/**/*.hpp",
-    ],
+    ]
 }
 
 

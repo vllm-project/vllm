@@ -3723,10 +3723,6 @@ def _make_bare_worker(
     worker.finished_store_req = set()
     worker.tp_size = 1
     worker.store_tp_size = None
-    worker._store_tp_requested = False
-    worker._vllm_config = SimpleNamespace(
-        compilation_config=SimpleNamespace(static_forward_context={})
-    )
     worker.num_kv_head = 1
     worker.pp_size = 1
     # Minimal single-full-attention-group config so the coordinator-based
@@ -4251,31 +4247,6 @@ def test_lookup_full_hit_with_eagle_pops_once_not_twice():
     assert worker.store.batch_is_exist.call_count == 1
 
 
-@pytest.mark.parametrize("use_eagle", [False, True])
-def test_lookup_leaves_prefix_cache_recompute_tokens(use_eagle):
-    """A hit must leave the model's replay suffix to recompute, or the
-    scheduler drops the whole connector hit."""
-    from vllm.v1.kv_cache_interface import KVCacheGroupSpec
-
-    worker = _make_bare_worker(block_size=16)
-    spec = worker._kv_cache_groups[0].kv_cache_spec.with_side_storage(
-        prefix_cache_recompute_tokens=16
-    )
-    worker._kv_cache_groups = [KVCacheGroupSpec(["layer0"], spec)]
-    worker.coord = mooncake_store_worker.MooncakeStoreCoordinator(
-        worker._kv_cache_groups,
-        scheduler_block_size=16,
-        hash_block_size=16,
-        use_eagle=use_eagle,
-    )
-    _refresh_group_tp_replication_factors(worker)
-    worker.store.batch_is_exist.side_effect = lambda keys: [1] * len(keys)
-
-    # Same ceiling as the local prefix cache: 40 - 16 tokens rounds to 16.
-    assert worker.lookup(40, [b"h0", b"h1"]).hit_length == 16
-    assert worker.lookup(48, [b"h0", b"h1", b"h2"]).hit_length == 32
-
-
 def test_lookup_plan_resolves_group_tail_keys_from_existing_hashes():
     from vllm.v1.kv_cache_interface import (
         FullAttentionSpec,
@@ -4610,21 +4581,6 @@ def test_start_load_kv_queues_async_load():
     assert w.recv_request_queue.get_nowait() is req
 
 
-def test_start_load_kv_waits_for_block_zeroing():
-    """Zeroing of the freshly allocated blocks must not overwrite the load."""
-    w = _make_bare_worker()
-    w._kv_cache_config = SimpleNamespace(needs_kv_cache_zeroing=True)
-    req = _make_load_req("load-req", [b"h0", b"h1"], token_len=32)
-    meta = mooncake_store_worker.MooncakeStoreConnectorMetadata(set(), set())
-    meta.add_request(req)
-
-    with patch.object(torch.cuda, "Event") as event_cls:
-        w.start_load_kv(meta)
-
-    event_cls.return_value.record.assert_called_once_with()
-    assert w.recv_request_queue.get_nowait().current_event is event_cls.return_value
-
-
 def test_putting_consumer_queues_decode_save():
     w = _make_bare_worker(kv_role="kv_consumer", save_decode_cache=True)
     send_thread = MagicMock()
@@ -4684,30 +4640,6 @@ def test_register_kv_caches_shared_storage(layout: KVCacheLayout):
         assert db.kv_caches_base_addr == [raw.data_ptr()]
         assert db.block_len == [num_layers * spec.page_size_bytes]
     worker.store.register_buffer.assert_called_once_with(raw.data_ptr(), raw.nbytes)
-
-
-def test_register_kv_caches_appends_side_storage_to_owner_group():
-    num_blocks = 4
-    worker = _make_bare_worker(num_gpu_blocks=num_blocks)
-    kv = torch.zeros(num_blocks, 64, dtype=torch.uint8)
-    side = torch.zeros(num_blocks, 8, dtype=torch.uint8)
-
-    class SideStorageLayer:
-        main_layer_name = "layer0"
-
-        def kv_cache_side_storage_transfer_view(self):
-            return side
-
-    worker._vllm_config.compilation_config.static_forward_context = {
-        "layer0.summary": SideStorageLayer()
-    }
-
-    _register_with_mocked_threads(worker, {"layer0": kv})
-
-    db = worker.token_dbs[0]
-    assert db.kv_caches_base_addr == [kv.data_ptr(), side.data_ptr()]
-    assert db.block_len == [64, 8]
-    worker.store.register_buffer.assert_called_with(side.data_ptr(), side.nbytes)
 
 
 def test_register_kv_caches_uses_transfer_group_memory_domain():

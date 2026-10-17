@@ -33,6 +33,7 @@ def _direct_scores(
     SEQ_STRIDE: tl.constexpr,
     CACHE_PAGES: tl.constexpr,
     REGIONS_PER_BLOCK: tl.constexpr,
+    MEAN_BLOCK: tl.constexpr,
     CAPACITY: tl.constexpr,
     SCORE_ROW: tl.constexpr,
     HEADS: tl.constexpr,
@@ -73,10 +74,9 @@ def _direct_scores(
         h = tl.arange(0, 16)
         raw = tl.load(
             Mean
-            + (physical.to(tl.int64) * REGIONS_PER_BLOCK + region % REGIONS_PER_BLOCK)[
+            + (physical.to(tl.int64) * MEAN_BLOCK + region % REGIONS_PER_BLOCK * 256)[
                 :, None
             ]
-            * 256
             + d[None, :],
             valid[:, None],
             other=0,
@@ -137,6 +137,7 @@ def decode_summary_scores(
     tokens, groups = query.shape[:2]
     assert groups == row_groups and query.stride(3) == 1 and query.stride(2) == 256
     assert weights.shape == query.shape[:3] and weights.stride(2) == 1
+    assert mean.stride(1) == 256 and mean.stride(2) == 1
     batch = tokens * groups
     scores = torch.empty(
         (batch, triton.cdiv(capacity, 256) * 256),
@@ -173,6 +174,7 @@ def decode_summary_scores(
         seq_lens.stride(0),
         mean.shape[0],
         mean.shape[1],
+        mean.stride(0),
         capacity,
         scores.stride(0),
         8,

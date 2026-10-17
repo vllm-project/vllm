@@ -2,10 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
 from collections import defaultdict
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from itertools import product as iprod
-from typing import Any, Protocol, runtime_checkable
+from typing import Any
 
 import numpy as np
 import torch
@@ -42,172 +42,6 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.worker.block_table import get_block_table_width
 
 logger = init_logger(__name__)
-
-
-@runtime_checkable
-class KVCacheSideStorageLayer(Protocol):
-    """Lifecycle contract for storage aligned with an owner KV cache."""
-
-    main_layer_name: str
-
-    def bind_kv_cache_side_storage(self, forward_context: dict[str, Any]) -> None: ...
-
-    def zero_kv_cache_side_storage(
-        self, block_ids: torch.Tensor | list[int]
-    ) -> None: ...
-
-    def reset_kv_cache_side_storage_runtime_state(
-        self,
-    ) -> tuple[int, int]: ...
-
-    def copy_kv_cache_side_storage(
-        self,
-        block_copies: Sequence[KVCacheBlockCopy],
-        num_blocks: int,
-    ) -> None: ...
-
-
-@runtime_checkable
-class KVCacheSideStorageTransfer(Protocol):
-    """Side storage that KV connectors move together with its owner's blocks."""
-
-    main_layer_name: str
-
-    def kv_cache_side_storage_transfer_view(self) -> torch.Tensor:
-        """Return a contiguous ``[num_blocks, bytes]`` view of full blocks."""
-        ...
-
-
-@runtime_checkable
-class KVCacheSideStorageMemoryProfiler(Protocol):
-    """Optional fixed-memory profiling contract for KV side storage.
-
-    ``memory_profile_key`` is compared by object identity. Layers that share
-    one fixed workspace should return the same owner object so the generic
-    worker lifecycle invokes their preparation hook exactly once.
-    """
-
-    def kv_cache_side_storage_memory_profile_key(
-        self,
-        forward_context: dict[str, Any],
-    ) -> object: ...
-
-    def prepare_kv_cache_side_storage_memory_profile(
-        self,
-        forward_context: dict[str, Any],
-        device: torch.device,
-    ) -> None: ...
-
-
-def _iter_unique_layers(
-    forward_context: dict[str, Any],
-    layer_type: type,
-) -> Iterator[tuple[str, Any]]:
-    """Yield the first ``(name, layer)`` for each distinct ``layer_type`` layer."""
-    seen_layers: set[int] = set()
-    for layer_name, layer in forward_context.items():
-        layer_id = id(layer)
-        if layer_id in seen_layers:
-            continue
-        seen_layers.add(layer_id)
-        if isinstance(layer, layer_type):
-            yield layer_name, layer
-
-
-def _layer_name_to_group_id(
-    kv_cache_groups: Sequence[KVCacheGroupSpec],
-) -> dict[str, int]:
-    return {
-        layer_name: group_id
-        for group_id, group in enumerate(kv_cache_groups)
-        for layer_name in group.layer_names
-    }
-
-
-def get_kv_cache_side_storage_transfer_views(
-    static_forward_context: dict[str, Any],
-    kv_cache_groups: Sequence[KVCacheGroupSpec],
-) -> dict[int, list[torch.Tensor]]:
-    """Group the transferable side-storage views by their owner KV cache group."""
-    group_ids = _layer_name_to_group_id(kv_cache_groups)
-    views: dict[int, list[torch.Tensor]] = {}
-    for _, layer in _iter_unique_layers(
-        static_forward_context, KVCacheSideStorageTransfer
-    ):
-        views.setdefault(group_ids[layer.main_layer_name], []).append(
-            layer.kv_cache_side_storage_transfer_view()
-        )
-    return views
-
-
-def prepare_kv_cache_side_storage_for_memory_profiling(
-    static_forward_context: dict[str, Any],
-    device: torch.device,
-) -> int:
-    """Allocate and retain fixed side-storage memory before model profiling.
-
-    This must run inside the worker's main ``memory_profiling`` interval.
-    Persistent allocations made here are then included in the non-KV memory
-    baseline before the KV block budget is computed.
-
-    Returns the number of distinct profiling owners that were prepared.
-    """
-    seen_profile_owners: set[int] = set()
-    num_profile_owners = 0
-    for _, layer in _iter_unique_layers(
-        static_forward_context, KVCacheSideStorageMemoryProfiler
-    ):
-        profile_owner = layer.kv_cache_side_storage_memory_profile_key(
-            static_forward_context
-        )
-        profile_owner_id = id(profile_owner)
-        if profile_owner_id in seen_profile_owners:
-            continue
-        seen_profile_owners.add(profile_owner_id)
-        layer.prepare_kv_cache_side_storage_memory_profile(
-            static_forward_context,
-            device,
-        )
-        num_profile_owners += 1
-    return num_profile_owners
-
-
-def reset_kv_cache_side_storage_runtime_state(
-    static_forward_context: dict[str, Any],
-) -> tuple[int, int]:
-    """Reset model-specific side storage after startup dummy executions.
-
-    Hooks must update existing tensors in place because CUDA graphs retain
-    their addresses.
-    """
-    num_storages = 0
-    num_scratch_buffers = 0
-    for _, layer in _iter_unique_layers(
-        static_forward_context, KVCacheSideStorageLayer
-    ):
-        storage_count, scratch_buffer_count = (
-            layer.reset_kv_cache_side_storage_runtime_state()
-        )
-        num_storages += int(storage_count)
-        num_scratch_buffers += int(scratch_buffer_count)
-    return num_storages, num_scratch_buffers
-
-
-def reset_kv_cache_side_storage_and_log(
-    static_forward_context: dict[str, Any],
-    phase: str,
-) -> None:
-    num_side_storages, num_scratch_buffers = reset_kv_cache_side_storage_runtime_state(
-        static_forward_context
-    )
-    if num_side_storages:
-        torch.accelerator.synchronize()
-        logger.info(
-            "Reset KV side-storage state after %s: storages=%d scratch_buffers=%d",
-            phase,
-            num_side_storages,
-            num_scratch_buffers,
-        )
 
 
 def raise_if_nan_logits(num_nans_in_logits: Mapping[str, int]) -> None:
@@ -284,7 +118,6 @@ class KVBlockZeroer:
         static_forward_context: dict[str, Any],
         num_blocks: int,
         runner_only_attn_layers: set[str] | None = None,
-        zero_base_kv_cache: bool = True,
     ) -> None:
         """Precompute the absolute-address table for the Triton zeroing kernel.
 
@@ -303,198 +136,89 @@ class KVBlockZeroer:
         physical block stride and zeroed page span remain independent.
 
         Only AttentionSpec layers are processed; Mamba layers are skipped.
-        ``zero_base_kv_cache=False`` keeps only side-storage lifecycle hooks,
-        avoiding full KV-page writes when the sidecar alone requires reset.
         """
         self.device = device
         self._meta: (
-            tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, int, int]
-            | tuple[torch.Tensor, torch.Tensor, int, int, int]
-            | None
+            tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, int, int] | None
         ) = None
-        self._side_storage_zero_hooks: dict[int, list[Any]] = {}
 
         if runner_only_attn_layers is None:
             runner_only_attn_layers = set()
-        # Packed layouts and cross-layer sharing can expose the same address
-        # through multiple logical layers.  Keep the widest page span for an
-        # overlaid address, but reject conflicting logical block strides since
-        # one segment cannot represent two different block-index geometries.
+        # Overlaid layers (packed layouts) share a base address but may have
+        # different page sizes; keep the widest span per address so newly
+        # allocated blocks are fully zeroed for every overlaying group.
         seen_ptrs: dict[int, int] = {}
         seg_addrs: list[int] = []
         seg_block_strides: list[int] = []
         seg_page_sizes: list[int] = []
 
-        attn_groups = list(attn_groups_iter)
-        layer_name_to_group_id: dict[str, int] = {}
-        for group in attn_groups:
+        for group in attn_groups_iter:
+            spec = group.kv_cache_spec
+            if not isinstance(spec, AttentionSpec):
+                continue
+            if group.kv_cache_group_id >= len(kernel_block_sizes):
+                continue
+            kernel_bs = kernel_block_sizes[group.kv_cache_group_id]
+            assert spec.block_size % kernel_bs == 0
             for layer_name in group.layer_names:
-                previous_group_id = layer_name_to_group_id.setdefault(
-                    layer_name, group.kv_cache_group_id
-                )
-                if previous_group_id != group.kv_cache_group_id:
-                    raise ValueError(
-                        "KV cache layer belongs to multiple groups: "
-                        f"layer={layer_name!r}, groups="
-                        f"{previous_group_id},{group.kv_cache_group_id}"
-                    )
-
-        for layer_name, layer in _iter_unique_layers(
-            static_forward_context, KVCacheSideStorageLayer
-        ):
-            owner_name = layer.main_layer_name
-            group_id = layer_name_to_group_id.get(owner_name)
-            if group_id is None:
-                raise ValueError(
-                    "KV side-storage layer has no owner KV cache group: "
-                    f"layer={layer_name!r}, owner={owner_name!r}"
-                )
-            self._side_storage_zero_hooks.setdefault(group_id, []).append(
-                layer.zero_kv_cache_side_storage
-            )
-        for group in attn_groups:
-            if (
-                group.kv_cache_spec.requires_zeroing
-                and group.kv_cache_group_id not in self._side_storage_zero_hooks
-            ):
-                raise ValueError(
-                    "KV cache group declares side-storage zeroing but no "
-                    "KVCacheSideStorageLayer owns the group: "
-                    f"group={group.kv_cache_group_id}, "
-                    f"layers={group.layer_names!r}"
-                )
-
-        if zero_base_kv_cache:
-            for group in attn_groups:
-                spec = group.kv_cache_spec
-                if not isinstance(spec, AttentionSpec):
+                if layer_name in runner_only_attn_layers:
                     continue
-                if group.kv_cache_group_id >= len(kernel_block_sizes):
+                kv = static_forward_context[layer_name].kv_cache
+                if not isinstance(kv, torch.Tensor):
                     continue
-                kernel_bs = kernel_block_sizes[group.kv_cache_group_id]
-                if kernel_bs <= 0 or spec.block_size % kernel_bs != 0:
-                    raise ValueError(
-                        "KV cache block size must be divisible by the kernel "
-                        f"block size: spec={spec.block_size}, kernel={kernel_bs}"
-                    )
-                block_dim = 0
+                if group.kernel_block_stride:
+                    # Bound views address kernel blocks; zero by manager block.
+                    kv = group.map_kv_cache_to_manager_blocks(kv, num_blocks)
+                if kv.device.type != self.device.type:
+                    continue
+                dp = kv.data_ptr()
 
-                for layer_name in group.layer_names:
-                    if layer_name in runner_only_attn_layers:
-                        continue
-                    kv = static_forward_context[layer_name].kv_cache
-                    if not isinstance(kv, torch.Tensor):
-                        continue
-                    if group.kernel_block_stride:
-                        kv = group.map_kv_cache_to_manager_blocks(kv, num_blocks)
-                    if kv.device.type != self.device.type:
-                        continue
-                    ratio, remainder = divmod(kv.shape[0], num_blocks)
-                    if remainder or ratio <= 0:
-                        raise ValueError(
-                            "KV kernel blocks must divide into logical blocks"
-                        )
-                    el = kv.element_size()
-                    block_stride_bytes = kv.stride(block_dim) * el
-                    if block_stride_bytes <= 0 or block_stride_bytes % 4 != 0:
-                        raise ValueError(
-                            "KV block stride must be a positive multiple of "
-                            f"4 bytes, got {block_stride_bytes}"
-                        )
-                    if kv.shape[block_dim] % ratio != 0:
-                        raise ValueError(
-                            "KV cache physical block count must be divisible by "
-                            f"virtual split ratio: shape={tuple(kv.shape)}, "
-                            f"block_dim={block_dim}, ratio={ratio}"
-                        )
+                assert kv.shape[0] % num_blocks == 0, (
+                    f"{layer_name}: {kv.shape[0]} kernel blocks is not a "
+                    f"multiple of {num_blocks} logical blocks"
+                )
+                ratio = kv.shape[0] // num_blocks
 
-                    # Find the largest contiguous run inside one physical
-                    # block and split every non-dense dimension into its own
-                    # segment.  Merely treating dimensions whose stride is
-                    # larger than the block stride as "outer" is insufficient
-                    # for strided/padded views: it can make the kernel write
-                    # across a gap into a neighbouring layer or page.
-                    #
-                    # Sort by physical stride rather than logical dimension
-                    # order so this works for both blocks-first and K/V-first
-                    # layouts.  Once a gap is encountered, all larger-stride
-                    # dimensions are independent planes; only dimensions of
-                    # size one can be ignored safely.
-                    dims_by_stride = sorted(
-                        (
-                            d
-                            for d in range(kv.ndim)
-                            if d != block_dim and kv.shape[d] > 1
-                        ),
-                        key=lambda d: (kv.stride(d), d),
-                    )
-                    kernel_page_bytes = el
-                    split_dims: list[int] = []
-                    dense = True
-                    for dim in dims_by_stride:
-                        dim_stride_bytes = kv.stride(dim) * el
-                        if dense and dim_stride_bytes == kernel_page_bytes:
-                            kernel_page_bytes *= kv.shape[dim]
-                        else:
-                            dense = False
-                            split_dims.append(dim)
-                    if kernel_page_bytes <= 0 or kernel_page_bytes % 4 != 0:
-                        raise ValueError(
-                            "KV page span must be a positive multiple of 4 "
-                            f"bytes, got {kernel_page_bytes}"
-                        )
-                    if kernel_page_bytes > block_stride_bytes:
-                        raise ValueError(
-                            "KV page span exceeds physical block stride; "
-                            f"page={kernel_page_bytes}, stride={block_stride_bytes}, "
-                            f"shape={tuple(kv.shape)}, strides={tuple(kv.stride())}"
-                        )
-                    logical_block_stride_bytes = block_stride_bytes * ratio
-                    split_ranges = (range(kv.shape[d]) for d in split_dims)
-                    for split_indices in iprod(*split_ranges):
-                        off_bytes = sum(
-                            i * kv.stride(d) * el
-                            for i, d in zip(split_indices, split_dims)
-                        )
-                        for virtual_index in range(ratio):
-                            addr = (
-                                kv.data_ptr()
-                                + off_bytes
-                                + virtual_index * block_stride_bytes
+                el = kv.element_size()
+                block_stride_bytes = kv.stride(0) * el
+                assert block_stride_bytes % 4 == 0
+                assert kv.shape[0] % ratio == 0
+                outer_dims = [
+                    d
+                    for d in range(1, kv.ndim)
+                    if kv.stride(d) * el > block_stride_bytes
+                ]
+                outer_strides = [kv.stride(d) * el for d in outer_dims]
+                inner_dims = [d for d in range(1, kv.ndim) if d not in outer_dims]
+                kernel_page_bytes = el + sum(
+                    (kv.shape[d] - 1) * kv.stride(d) * el for d in inner_dims
+                )
+                assert kernel_page_bytes % 4 == 0
+                logical_block_stride_bytes = block_stride_bytes * ratio
+                for outer in iprod(*(range(kv.shape[d]) for d in outer_dims)):
+                    off_bytes = sum(i * s for i, s in zip(outer, outer_strides))
+                    assert (dp + off_bytes) % 4 == 0
+                    for virtual_index in range(ratio):
+                        addr = dp + off_bytes + virtual_index * block_stride_bytes
+                        if (idx := seen_ptrs.get(addr)) is not None:
+                            assert (
+                                seg_block_strides[idx]
+                                == logical_block_stride_bytes // 4
                             )
-                            if addr % 4 != 0:
-                                raise ValueError(
-                                    f"KV segment address is not 4-byte aligned: {addr}"
-                                )
-                            page_size_el = kernel_page_bytes // 4
-                            block_stride_el = logical_block_stride_bytes // 4
-                            existing = seen_ptrs.get(addr)
-                            if existing is not None:
-                                if seg_block_strides[existing] != block_stride_el:
-                                    raise ValueError(
-                                        "Overlaid KV segments have conflicting "
-                                        "logical block strides: "
-                                        f"{seg_block_strides[existing]} vs "
-                                        f"{block_stride_el}"
-                                    )
-                                seg_page_sizes[existing] = max(
-                                    seg_page_sizes[existing], page_size_el
-                                )
-                                continue
-                            seen_ptrs[addr] = len(seg_addrs)
-                            seg_addrs.append(addr)
-                            seg_block_strides.append(block_stride_el)
-                            seg_page_sizes.append(page_size_el)
+                            seg_page_sizes[idx] = max(
+                                seg_page_sizes[idx], kernel_page_bytes // 4
+                            )
+                            continue
+                        seen_ptrs[addr] = len(seg_addrs)
+                        seg_addrs.append(addr)
+                        seg_block_strides.append(logical_block_stride_bytes // 4)
+                        seg_page_sizes.append(kernel_page_bytes // 4)
 
         if not seg_addrs:
             self._meta = None
             return
 
         max_page_size_el = max(seg_page_sizes)
-        # A fixed power-of-two tile keeps the launch bounded even when one
-        # layer has a very large page and another has a tiny one.  Individual
-        # pages may not be exact multiples of this tile, so the kernel masks
-        # the final partial chunk.
         blk_size = min(1 << (max_page_size_el - 1).bit_length(), 1024)
         self._meta = (
             torch.tensor(seg_addrs, dtype=torch.uint64, device=self.device),
@@ -505,101 +229,33 @@ class KVBlockZeroer:
             len(seg_addrs),
         )
 
-    def zero_block_ids(
-        self,
-        block_ids: list[int],
-        block_ids_by_group: list[list[int]] | None = None,
-    ) -> None:
-        """Zero base KV blocks and side storage owned by each KV group."""
-        if block_ids and self._meta is not None:
-            # Accept the pre-geometry five-field metadata shape used by older
-            # callers/tests.  In that format each page was assumed to be
-            # contiguous and therefore also served as the block stride.
-            if len(self._meta) == 5:
-                (
-                    seg_addrs,
-                    seg_page_sizes,
-                    max_chunks,
-                    blk_size,
-                    n_segs,
-                ) = self._meta
-                seg_block_strides = seg_page_sizes
-            else:
-                (
-                    seg_addrs,
-                    seg_block_strides,
-                    seg_page_sizes,
-                    max_chunks,
-                    blk_size,
-                    n_segs,
-                ) = self._meta
-            n_blocks = len(block_ids)
-            idx = async_tensor_h2d(block_ids, device=self.device, dtype=torch.int64)
-            grid = (n_blocks, n_segs, max_chunks)
-            _zero_kv_blocks_kernel[grid](
-                seg_addrs,
-                seg_block_strides,
-                seg_page_sizes,
-                idx,
-                BLOCK_SIZE=blk_size,
-            )
-
-        side_storage_zero_hooks = getattr(
-            self,
-            "_side_storage_zero_hooks",
-            {},
+    def zero_block_ids(self, block_ids: list[int]) -> None:
+        """Zero the KV cache memory for the given block IDs."""
+        if not block_ids or self._meta is None:
+            return
+        (
+            seg_addrs,
+            seg_block_strides,
+            seg_page_sizes,
+            max_chunks,
+            blk_size,
+            n_segs,
+        ) = self._meta
+        n_blocks = len(block_ids)
+        idx = async_tensor_h2d(block_ids, device=self.device, dtype=torch.int64)
+        grid = (n_blocks, n_segs, max_chunks)
+        _zero_kv_blocks_kernel[grid](
+            seg_addrs,
+            seg_block_strides,
+            seg_page_sizes,
+            idx,
+            BLOCK_SIZE=blk_size,
         )
-        if not side_storage_zero_hooks:
-            return
-        if block_ids_by_group is None:
-            if block_ids:
-                raise RuntimeError(
-                    "KV side-storage reset requires block IDs grouped by KV "
-                    "cache group."
-                )
-            return
-        required_group_count = max(side_storage_zero_hooks) + 1
-        if len(block_ids_by_group) < required_group_count:
-            raise RuntimeError(
-                "KV side-storage reset is missing owner group IDs: "
-                f"required_groups={required_group_count}, "
-                f"actual_groups={len(block_ids_by_group)}"
-            )
-
-        flat_group_ids = [
-            block_id for group_ids in block_ids_by_group for block_id in group_ids
-        ]
-        if not flat_group_ids:
-            return
-        group_ids_gpu = async_tensor_h2d(
-            flat_group_ids,
-            device=self.device,
-            dtype=torch.int64,
-        )
-        offset = 0
-        for group_id, group_ids in enumerate(block_ids_by_group):
-            next_offset = offset + len(group_ids)
-            hooks = side_storage_zero_hooks.get(group_id, ())
-            if hooks and next_offset > offset:
-                ids = group_ids_gpu[offset:next_offset]
-                for hook in hooks:
-                    hook(ids)
-            offset = next_offset
 
     def warmup(self, num_kv_blocks: int) -> None:
         """JIT-compile the zeroing kernel before the first real request."""
         if num_kv_blocks > 0:
-            side_storage_zero_hooks = getattr(
-                self,
-                "_side_storage_zero_hooks",
-                {},
-            )
-            num_groups = max(side_storage_zero_hooks, default=-1) + 1
-            block_ids_by_group = [
-                [0] if group_id in side_storage_zero_hooks else []
-                for group_id in range(num_groups)
-            ]
-            self.zero_block_ids([0], block_ids_by_group)
+            self.zero_block_ids([0])
 
 
 @dataclass(eq=False)
@@ -1156,7 +812,7 @@ def add_kv_sharing_layers_to_kv_cache_groups(
 
 def bind_kv_cache(
     kv_caches: dict[str, torch.Tensor],
-    forward_context: dict[str, Any],
+    forward_context: dict[str, Attention],
     runner_kv_caches: list[torch.Tensor],
     num_attn_module: int = 1,
     kv_cache_groups: Sequence[KVCacheGroupSpec] | None = None,
@@ -1224,12 +880,6 @@ def bind_kv_cache_to_layers(
     # layer for the KV connector to register.
     for layer_name, kv_cache in kv_caches.items():
         forward_context[layer_name].bind_kv_cache(kv_cache)
-
-    # Some model-specific state is physically aligned with an owner KV cache
-    # but intentionally omitted from the generic KV specs. Bind it only after
-    # every regular KV cache is available.
-    for _, layer in _iter_unique_layers(forward_context, KVCacheSideStorageLayer):
-        layer.bind_kv_cache_side_storage(forward_context)
 
     ordered_layer_names = sorted(
         kv_caches, key=lambda name: extract_layer_index(name, num_attn_module)
@@ -1325,33 +975,6 @@ def get_uniform_decode_token_count(
     ):
         return max_query_len
     return None
-
-
-def copy_kv_cache_side_storage_blocks(
-    static_forward_context: dict[str, Any],
-    kv_cache_groups: Sequence[KVCacheGroupSpec],
-    kv_cache_block_copies_by_group: Sequence[Sequence[KVCacheBlockCopy]],
-    num_blocks: int,
-) -> None:
-    """Apply owner KV copy-on-write mappings to aligned side storage."""
-    layer_name_to_group_id = _layer_name_to_group_id(kv_cache_groups)
-    for layer_name, layer in _iter_unique_layers(
-        static_forward_context, KVCacheSideStorageLayer
-    ):
-        group_id = layer_name_to_group_id.get(layer.main_layer_name)
-        if group_id is None:
-            raise ValueError(
-                "KV side-storage layer has no owner KV cache group: "
-                f"layer={layer_name!r}, owner={layer.main_layer_name!r}"
-            )
-        if group_id >= len(kv_cache_block_copies_by_group):
-            raise ValueError(
-                f"KV side-storage copy mappings are missing the owner group {group_id}."
-            )
-        layer.copy_kv_cache_side_storage(
-            kv_cache_block_copies_by_group[group_id],
-            num_blocks,
-        )
 
 
 @dataclass

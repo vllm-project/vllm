@@ -81,8 +81,7 @@ class WorkerSentinel:
             input_batch = model_runner.input_batch
             cached_req_ids = list(input_batch.req_id_to_index)
             for req_id in cached_req_ids:
-                req_state = model_runner.requests.pop(req_id, None)
-                model_runner._on_request_state_removed(req_id, req_state)
+                model_runner.requests.pop(req_id, None)
                 model_runner.num_prompt_logprobs.pop(req_id, None)
                 input_batch.remove_request(req_id)
 

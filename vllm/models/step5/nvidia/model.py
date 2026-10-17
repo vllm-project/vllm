@@ -34,9 +34,6 @@ from vllm.distributed import (
 )
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
-from vllm.model_executor.determinism.batch_invariant import (
-    linear_batch_invariant,
-)
 from vllm.model_executor.layers.activation import SiluAndMul, SwigluStepAndMul
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention.attention import (
@@ -662,10 +659,7 @@ class Step5FusedQKVIndexerLinear(QKVParallelLinear):
         self,
         hidden_states: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        if envs.VLLM_BATCH_INVARIANT and current_platform.is_cuda_alike():
-            combined = linear_batch_invariant(hidden_states, self.weight)
-        else:
-            combined = torch.nn.functional.linear(hidden_states, self.weight)
+        combined = torch.nn.functional.linear(hidden_states, self.weight)
         return combined[..., : self.qkv_size], combined[..., self.qkv_size :]
 
     def split_indexer(
@@ -747,8 +741,6 @@ class Step5SparseIndexerIndexTPLinear(nn.Module):
         self,
         input_: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
-        if envs.VLLM_BATCH_INVARIANT and current_platform.is_cuda_alike():
-            return linear_batch_invariant(input_, self.weight), None
         return torch.nn.functional.linear(input_, self.weight, None), None
 
 
@@ -1204,11 +1196,8 @@ class Step5Attention(nn.Module):
             attn_backend=attn_backend,
             **sparse_impl_args,
         )
-        if cache_config is not None:
-            # Prefix-cache reuse must replay at least one cache page, for DSA
-            # layers and for dense layers sharing their KV layout.
-            self.attn.kv_cache_prefix_recompute_tokens = int(cache_config.block_size)
         if self.use_dsa_backend:
+            from .csa_tail_ring import Step5CSATailRing
             from .sparse_summary_cache import Step5SparseSummaryCacheLayer
 
             sparse_config = typing.cast(Step5SparseConfig, sparse_config)
@@ -1236,23 +1225,21 @@ class Step5Attention(nn.Module):
                 proxy_dim,
                 eps=rms_norm_eps,
             )
-            self.attn.kv_cache_requires_zeroing = True
+            static_forward_context = typing.cast(
+                VllmConfig, vllm_config
+            ).compilation_config.static_forward_context
             self.sparse_summary_cache = Step5SparseSummaryCacheLayer(
                 prefix=f"{prefix}.attn.sparse_summary_cache",
                 target_impl=self.attn.impl,
+                static_forward_context=static_forward_context,
+            )
+            self.csa_tail_ring = Step5CSATailRing(
+                prefix=f"{prefix}.attn.csa_tail_ring",
                 main_layer_name=f"{prefix}.attn",
-                static_forward_context=(
-                    typing.cast(
-                        VllmConfig, vllm_config
-                    ).compilation_config.static_forward_context
-                ),
+                num_speculative_tokens=sparse_impl_args["num_speculative_tokens"],
+                static_forward_context=static_forward_context,
             )
-            self.attn.kv_cache_extra_budget_page_size_bytes = (
-                self.sparse_summary_cache._set_summary_cache_budget
-            )
-            self.attn.kv_cache_extra_budget_fixed_size_bytes = (
-                self.sparse_summary_cache._fixed_runtime_state_budget
-            )
+            typing.cast(Any, self.attn.impl).csa_ring = self.csa_tail_ring
         self.max_position_embeddings = max_position
         self.sparse_attn = (
             Step5SparseAttention(self, typing.cast(Step5SparseConfig, sparse_config))
@@ -1306,7 +1293,7 @@ class Step5Attention(nn.Module):
         ):
             decode_slots = attn_metadata.slot_mapping[: attn_metadata.num_actual_tokens]
         # MTP verify fuses the preparation only; its CSA update runs in the
-        # attention through the request journal.
+        # attention, one program per request.
         fuse_prepare = decode_slots is not None or (
             speculative > 0
             and _is_uniform_verify(attn_metadata, runtime_mode, speculative)
@@ -1465,11 +1452,8 @@ class Step5SparseAttention:
         owner = self.owner
         index_q, index_k, index_z, gate = owner.qkv_indexer_proj.split_indexer(qkzg)
         weights, _ = owner.sparse_indexer_w(hidden_states)
-        cache = (
-            typing.cast(Any, owner.attn.impl).summary_cache
-            if decode_slots is not None
-            else None
-        )
+        impl = typing.cast(Any, owner.attn.impl)
+        cache = impl.summary_cache if decode_slots is not None else None
         index_q, index_k, weights, q, k, v = qkv_indexer_norm_rope(
             index_q,
             index_k,
@@ -1499,6 +1483,7 @@ class Step5SparseAttention:
                 owner.attn._v_scale,
             ),
             decode_cache=cache,
+            decode_ring=impl.csa_ring if cache is not None else None,
             decode_z=index_z if cache is not None else None,
             decode_slots=decode_slots,
         )
@@ -1651,11 +1636,8 @@ class Step5SparseAttention:
             qkzg
         )
         weights, _ = owner.sparse_indexer_w(hidden_states)
-        cache = (
-            typing.cast(Any, owner.attn.impl).summary_cache
-            if decode_slots is not None
-            else None
-        )
+        impl = typing.cast(Any, owner.attn.impl)
+        cache = impl.summary_cache if decode_slots is not None else None
         index_q, index_k, weights = indexer_norm_rope(
             index_q,
             index_k,
@@ -1670,6 +1652,7 @@ class Step5SparseAttention:
             native_rope=self._indexer_native_rope,
             num_groups=int(owner.num_kv_heads),
             decode_cache=cache,
+            decode_ring=impl.csa_ring if cache is not None else None,
             decode_z=index_z if cache is not None else None,
             decode_slots=decode_slots if cache is not None else None,
         )
@@ -2327,12 +2310,6 @@ class Step5Model(nn.Module):
 class Step5ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
     # Required so quantization exclude lists match fused module prefixes.
     packed_modules_mapping = STEP5_PACKED_MODULES_MAPPING
-
-    @staticmethod
-    def get_model_state_cls():
-        from .model_state import Step5ModelState
-
-        return Step5ModelState
 
     # The custom loader returns the complete loaded-parameter set.
     _enable_weights_track_by_default = True

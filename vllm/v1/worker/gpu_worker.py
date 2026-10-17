@@ -116,11 +116,7 @@ from vllm.v1.worker.workspace import init_workspace_manager
 from ...model_executor.model_loader import TensorizerLoader
 from .gpu.cudagraph_utils import has_compiled_submodule
 from .gpu.warmup import warmup_kernels
-from .utils import (
-    prepare_kv_cache_side_storage_for_memory_profiling,
-    request_memory,
-    reset_kv_cache_side_storage_and_log,
-)
+from .utils import request_memory
 
 logger = init_logger(__name__)
 
@@ -659,10 +655,6 @@ class Worker(WorkerBase):
 
         if kv_cache_memory_bytes := self.cache_config.kv_cache_memory_bytes:
             deep_gemm_kernel_warmup(self)
-            prepare_kv_cache_side_storage_for_memory_profiling(
-                self.compilation_config.static_forward_context,
-                self.device,
-            )
             # still need a profile run which compiles the model for
             # max_num_batched_tokens
             with set_current_vllm_config(self.vllm_config):
@@ -707,9 +699,6 @@ class Worker(WorkerBase):
             set_current_vllm_config(self.vllm_config),
         ):
             deep_gemm_kernel_warmup(self)
-            prepare_kv_cache_side_storage_for_memory_profiling(
-                self.compilation_config.static_forward_context, self.device
-            )
             self.model_runner.profile_run(randomize_inputs=self.randomize_dummy_inputs)
 
         # Profile CUDA graph memory if graphs will be captured.
@@ -1083,10 +1072,6 @@ class Worker(WorkerBase):
                 self.model_runner._dummy_pooler_run(hidden_states)
             else:
                 self.model_runner._dummy_sampler_run(hidden_states=last_hidden_states)
-
-        reset_kv_cache_side_storage_and_log(
-            self.compilation_config.static_forward_context, "startup warmup"
-        )
 
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.

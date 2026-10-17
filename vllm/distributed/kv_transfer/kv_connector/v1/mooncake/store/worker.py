@@ -52,7 +52,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (  
     MooncakeStoreConnectorMetadata,
     MooncakeStoreWorkerMetadata,
     PoolKey,
-    RankLocalStoreLayout,
     ReqMeta,
     StoreShardId,
     TailKeyBoundary,
@@ -72,7 +71,6 @@ from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import get_ip, make_zmq_socket
 from vllm.utils.torch_utils import is_non_overlapping_and_dense
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
-from vllm.v1.core.kv_cache_coordinator import replay_suffix_tokens
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     maybe_convert_block_hash,
@@ -1125,9 +1123,6 @@ class KVCacheStoreRecvingThread(KVTransferThread):
     def _handle_request(self, req_meta: ReqMeta):
         token_len = req_meta.load_spec.token_len  # type: ignore[union-attr]
         req_id = req_meta.req_id
-        if req_meta.current_event is not None:
-            # The step that allocated the blocks zeroes them first.
-            req_meta.current_event.synchronize()
         mask_num = (
             req_meta.load_spec.vllm_cached_tokens  # type: ignore[union-attr]
             // self.block_size
@@ -1517,13 +1512,8 @@ class MooncakeStoreWorker:
             kv_cache_config, vllm_config, self.block_size, self.hash_block_size
         )
         self._kv_cache_groups = self.coord.kv_cache_groups
-        self._vllm_config = vllm_config
         self.store_tp_size, store_namespace, store_layout_cls = (
             self._select_store_layout(extra_config)
-        )
-        self._store_tp_requested = (
-            extra_config.get("enable_store_tp_lcm") is True
-            or extra_config.get("store_tp_size") is not None
         )
         metadata = KeyMetadata(
             model_name=model_config.model.rstrip("/").split("/")[-1],
@@ -1788,12 +1778,6 @@ class MooncakeStoreWorker:
                     )
             for db in self.token_dbs:
                 db.store_layout.register_kv_caches(cache_tensors, self.num_blocks)
-            self._register_side_storage()
-        elif self._side_storage_views():
-            raise NotImplementedError(
-                "Mooncake Store does not transfer KV side storage with "
-                "per-group KV regions."
-            )
 
         registered_buffers: dict[int, int] = {}
         num_host_segments = 0
@@ -1950,40 +1934,6 @@ class MooncakeStoreWorker:
             "Started %d Mooncake KV-load receive thread(s)", self.num_recv_threads
         )
 
-    def _side_storage_views(self) -> dict[int, list[torch.Tensor]]:
-        from vllm.v1.worker.utils import get_kv_cache_side_storage_transfer_views
-
-        return get_kv_cache_side_storage_transfer_views(
-            self._vllm_config.compilation_config.static_forward_context,
-            self._kv_cache_groups,
-        )
-
-    def _register_side_storage(self) -> None:
-        """Append model side storage to its owner group's per-block payload."""
-        side_storage_views = self._side_storage_views()
-        if side_storage_views and self._store_tp_requested:
-            raise NotImplementedError(
-                "Mooncake Store TP-shared layouts do not carry KV side storage; "
-                "unset store_tp_size and enable_store_tp_lcm."
-            )
-        for group_id, views in side_storage_views.items():
-            layout = self.token_dbs[group_id].store_layout
-            assert isinstance(layout, RankLocalStoreLayout)
-            for view in views:
-                if view.shape[0] != self.num_blocks or not view.is_contiguous():
-                    raise ValueError(
-                        "KV side storage must be a contiguous view with one row "
-                        f"per KV block, got shape {tuple(view.shape)}."
-                    )
-                ret = self.store.register_buffer(view.data_ptr(), view.nbytes)
-                if ret != 0:
-                    raise RuntimeError(
-                        "Mooncake register_buffer failed for KV side storage at "
-                        f"{view.data_ptr():#x} len {view.nbytes}: {ret}"
-                    )
-                layout.kv_caches_base_addr.append(view.data_ptr())
-                layout.block_len.append(view.nbytes // self.num_blocks)
-
     def start_load_kv(self, metadata: MooncakeStoreConnectorMetadata):
         """Issue async loads.
 
@@ -1994,16 +1944,11 @@ class MooncakeStoreWorker:
         if self._capacity_only:
             return
 
-        current_event = None
         for request in metadata.requests:
             load_spec = request.load_spec
             if load_spec is None or not load_spec.can_load:
                 continue
 
-            if self._kv_cache_config.needs_kv_cache_zeroing and current_event is None:
-                current_event = torch.cuda.Event()
-                current_event.record()
-            request.current_event = current_event
             load_spec.token_len = load_spec.kvpool_cached_tokens
             self.recv_request_queue.put(request)
 
@@ -2153,8 +2098,8 @@ class MooncakeStoreWorker:
         """Check how many prefix tokens exist in the store.
 
         Checks across all rank-specific key namespaces that may be loaded. A
-        hit is re-derived below the request end so that the model's replay
-        suffix (at least the last token, for sampling) is recomputed.
+        hit covering all ``num_tokens`` is re-derived below the request end so
+        the last token is recomputed for sampling.
         """
         if self._capacity_only:
             return MooncakeLookupResult(0)
@@ -2253,18 +2198,6 @@ class MooncakeStoreWorker:
                 block_hashes,
                 usable_length,
                 cached_block_pool,
-            )
-        # Like the local prefix cache, clamp an EAGLE hit without a second pop.
-        max_hit_length = num_tokens - replay_suffix_tokens(self._kv_cache_groups)
-        if hit_length > max_hit_length:
-            usable_length = self.coord.align_lookup_length(max_hit_length)
-            if usable_length <= 0:
-                return MooncakeLookupResult(0)
-            _, hit_length = self.coord.find_longest_cache_hit(
-                block_hashes,
-                usable_length,
-                cached_block_pool,
-                apply_eagle=False,
             )
         return MooncakeLookupResult(
             hit_length,

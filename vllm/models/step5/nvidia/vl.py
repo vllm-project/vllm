@@ -9,9 +9,3 @@ class Step5ForConditionalGeneration(Step3p7ForConditionalGeneration):
     """Step5 VLM using the Step3p7 multimodal frontend and Step5 text model."""
 
     _enable_weights_track_by_default = True
-
-    @staticmethod
-    def get_model_state_cls():
-        from .model_state import Step5ModelState
-
-        return Step5ModelState

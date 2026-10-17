@@ -6,7 +6,7 @@ import torch
 
 from vllm.triton_utils import tl, triton
 
-from .summary_update import _update_decode_values
+from .summary_update import _update_decode_values, summary_layout
 
 
 @triton.jit
@@ -89,16 +89,15 @@ def _indexer_norm_rope(
     Z,
     Slots,
     Mean,
-    Numerator,
-    Denominator,
-    Maximum,
-    LastSlot,
+    Ring,
+    RingBase,
     UPDATE_CSA: tl.constexpr,
     CSA_ROWS,
     Z_STRIDE: tl.constexpr,
     SLOT_STRIDE: tl.constexpr,
-    CACHE_PAGES: tl.constexpr,
-    CACHE_BLOCK_SIZE: tl.constexpr,
+    RING_CAPACITY: tl.constexpr,
+    MEAN_BLOCK: tl.constexpr,
+    MEAN_BLOCK_SIZE: tl.constexpr,
     Q_STRIDE: tl.constexpr,
     K_STRIDE: tl.constexpr,
     W_STRIDE: tl.constexpr,
@@ -166,18 +165,17 @@ def _indexer_norm_rope(
                 z = tl.load(Z + token * Z_STRIDE + dim).to(tl.float32)
                 normalized_key = x.to(K.dtype.element_ty).to(tl.float32)
                 _update_decode_values(
-                    token,
                     slot,
+                    tl.load(Positions + token),
+                    tl.load(RingBase + token),
                     dim,
                     normalized_key,
                     z,
                     Mean,
-                    Numerator,
-                    Denominator,
-                    Maximum,
-                    LastSlot,
-                    CACHE_PAGES,
-                    CACHE_BLOCK_SIZE,
+                    Ring,
+                    RING_CAPACITY,
+                    MEAN_BLOCK,
+                    MEAN_BLOCK_SIZE,
                 )
     else:
         # RoPE also materializes BF16/FP16 before the FP8 conversion.
@@ -203,11 +201,14 @@ def indexer_norm_rope(
     *,
     num_groups: int = 1,
     decode_cache=None,
+    decode_ring=None,
     decode_z: torch.Tensor | None = None,
     decode_slots: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Prepare indexer Q/K/weights and update the decode CSA state."""
     tokens, width = query.shape
+    if (decode_cache is None) != (decode_ring is None):
+        raise ValueError("CSA fusion needs both the summary cache and the ring")
     if decode_cache is not None:
         if decode_z is None or decode_slots is None:
             raise ValueError("CSA fusion needs decode z and slots")
@@ -243,17 +244,19 @@ def indexer_norm_rope(
             w,
             decode_z,
             decode_slots,
-            decode_cache._mean if decode_cache is not None else None,
-            decode_cache.numerator if decode_cache is not None else None,
-            decode_cache.denominator if decode_cache is not None else None,
-            decode_cache.maximum if decode_cache is not None else None,
-            decode_cache.last_slot if decode_cache is not None else None,
+            decode_cache.mean if decode_cache is not None else None,
+            decode_ring.rows if decode_ring is not None else None,
+            decode_ring.metadata().base if decode_ring is not None else None,
             decode_cache is not None,
             decode_slots.numel() if decode_slots is not None else 0,
             decode_z.stride(0) if decode_z is not None else 0,
             decode_slots.stride(0) if decode_slots is not None else 0,
-            decode_cache.pages if decode_cache is not None else 0,
-            decode_cache.block_size if decode_cache is not None else 8,
+            decode_ring.capacity if decode_ring is not None else 8,
+            *(
+                summary_layout(decode_cache.mean)
+                if decode_cache is not None
+                else (0, 8)
+            ),
             query.stride(0),
             key.stride(0),
             weights.stride(0),

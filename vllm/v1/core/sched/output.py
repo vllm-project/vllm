@@ -317,16 +317,8 @@ class SchedulerOutput:
     # preventing stale NaN/data from corrupting attention or SSM computation.
     new_block_ids_to_zero: list[int] | None = None
 
-    # Freshly allocated block IDs grouped by KV cache group. Side-storage
-    # reset hooks consume only the IDs belonging to their owner layer's group.
-    new_block_ids_to_zero_by_group: list[list[int]] | None = None
-
     # CoW copies to apply after zeroing new blocks and before forward.
     kv_cache_block_copies: list[KVCacheBlockCopy] | None = None
-
-    # CoW copies grouped by the KV cache group that owns the source/destination
-    # block lifecycle. Side storage must only consume its owner's mappings.
-    kv_cache_block_copies_by_group: list[list[KVCacheBlockCopy]] | None = None
 
     # Scheduler-local; always None by the time this reaches a worker.
     kv_connector_block_state: KVConnectorBlockState | None = None
