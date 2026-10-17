@@ -662,19 +662,19 @@ class Glm5NextProcessingInfo(Glm4vProcessingInfo):
             proc.max_image_tokens * pixels_per_token,
         )
 
-    def _get_image_max_pixels(self) -> int:
-        mm_kwargs = self.ctx.get_merged_mm_kwargs({})
+    def _get_image_max_pixels(self, modality: str = "image") -> int:
+        mm_kwargs = self.ctx.get_modality_mm_kwargs({}, modality)
         if (override := mm_kwargs.get("max_pixels")) is not None:
             return int(override)
         return self._processor_pixel_budget(self.get_hf_processor().image_processor)[1]
 
     def _get_video_max_pixels(self) -> int:
-        mm_kwargs = self.ctx.get_merged_mm_kwargs({})
+        mm_kwargs = self.ctx.get_modality_mm_kwargs({}, "video")
         if (override := mm_kwargs.get("max_pixels")) is not None:
             return int(override)
         return self._processor_pixel_budget(self.get_hf_processor().video_processor)[1]
 
-    def get_image_size_with_most_features(self) -> ImageSize:
+    def get_image_size_with_most_features(self, modality: str = "image") -> ImageSize:
         # The inherited square probe strands budget whenever the token
         # ceiling is not a perfect square: with max_image_tokens=8000 the
         # square refits to 2492x2492 (89x89 = 7921 tokens) while a
@@ -688,7 +688,7 @@ class Glm5NextProcessingInfo(Glm4vProcessingInfo):
             * self.get_hf_processor().image_processor.patch_expand_factor
         )
         pixels_per_token = vision_config.temporal_patch_size * factor * factor
-        max_tokens = max(1, self._get_image_max_pixels() // pixels_per_token)
+        max_tokens = max(1, self._get_image_max_pixels(modality) // pixels_per_token)
         short_side = math.isqrt(max_tokens)
         while max_tokens % short_side:
             short_side -= 1
