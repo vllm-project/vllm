@@ -152,6 +152,8 @@ def test_main_async_skip_tokenizer_init_does_not_raise(tmp_path: Path) -> None:
         "output_lens": [],
         "ttfts": [],
         "itls": [],
+        "latencies": [0.25],
+        "queue_times": [0.05],
         "generated_texts": [],
         "errors": [],
         "duration": 1.0,
@@ -160,4 +162,8 @@ def test_main_async_skip_tokenizer_init_does_not_raise(tmp_path: Path) -> None:
         serve_module, "benchmark", new=AsyncMock(return_value=mock_result)
     ):
         # Must NOT raise AssertionError
-        asyncio.run(serve_module.main_async(args))
+        result = asyncio.run(serve_module.main_async(args))
+
+    assert result["num_warmups"] == 0
+    assert "latencies" not in result
+    assert "queue_times" not in result
