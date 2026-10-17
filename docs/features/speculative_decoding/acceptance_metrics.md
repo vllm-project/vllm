@@ -48,6 +48,7 @@ A `summary` response's `metrics` looks like:
       "mean_acceptance_length": 1.2325581395348837,
       "draft_acceptance_rate": 0.07751937984496124,
       "acceptance_histogram": [39, 1, 0, 3],
+      "acceptance_histogram_by_draft_length": {"3": [39, 1, 0, 3]},
       "num_spec_steps": 43,
       "num_accepted_draft_tokens": 10,
       "num_draft_tokens": 129,
@@ -62,10 +63,23 @@ A `summary` response's `metrics` looks like:
 | `mean_acceptance_length` | Mean tokens emitted per verification step, including the bonus token: `1 + num_accepted_draft_tokens / num_spec_steps`. Ranges from `1.0` (nothing accepted) to `num_spec_tokens + 1`. |
 | `draft_acceptance_rate` | Fraction of proposed draft tokens accepted: `num_accepted_draft_tokens / num_draft_tokens`. |
 | `acceptance_histogram` | Dense list of length `num_spec_tokens + 1`; index `j` is the number of steps that accepted exactly `j` draft tokens. Excludes the always-accepted bonus token. |
+| `acceptance_histogram_by_draft_length` | Maps each observed proposed draft length `k` to a dense list of `k + 1` accepted-count buckets. The proposed length excludes grammar-invalidated drafts; JSON object keys are strings. |
 | `num_spec_steps` | Number of verification steps for this request (the sum of the histogram). |
 | `num_accepted_draft_tokens` | Total accepted draft tokens, excluding bonus tokens. |
 | `num_draft_tokens` | Total proposed draft tokens, after subtracting drafts invalidated by structured-output constraints. |
 | `num_spec_tokens` | Configured `num_speculative_tokens` (`k`), i.e. the maximum draft length per step. |
+
+For variable-length drafting, `acceptance_histogram_by_draft_length[k][j]`
+counts verification steps that accepted `j` of `k` draft tokens. The length
+`k` is measured after grammar validation, so steps with the same configured
+budget can appear in different rows.
+
+Steps with no scheduled draft tokens are omitted, so the histogram does not
+show how often drafting is skipped. A `k = 0` row means a verification step
+had no valid drafts left after adjustment.
+
+Only observed draft lengths allocate rows. Storage depends on the maximum
+configured draft length and does not grow with the number of verification steps.
 
 With `detailed`, two ordered arrays are added, one entry per verification step:
 
