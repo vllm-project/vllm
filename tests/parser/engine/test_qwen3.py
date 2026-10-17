@@ -128,6 +128,40 @@ class TestNonStreaming:
         args = json.loads(result.tool_calls[0].function.arguments)
         assert args == {}
 
+    def test_think_marker_quoted_in_parameter_survives_reasoning_pass(
+        self, mock_request
+    ):
+        # The serving layer runs a reasoning-only pass (skip_tool_parsing)
+        # whose output feeds the tool pass. A literal </think> quoted inside
+        # a parameter value must reach the tool pass intact.
+        tokenizer = make_mock_tokenizer(
+            {
+                "<think>": 100,
+                "</think>": 101,
+                TOOL_CALL_START: 102,
+                TOOL_CALL_END: 103,
+            }
+        )
+        reasoning_engine = ParserEngine(
+            tokenizer, parser_engine_config=qwen3_config(thinking=True)
+        )
+        reasoning_engine.skip_tool_parsing = True
+        text = (
+            "Reason.\n</think>\n<tool_call>\n<function=echo_payload>\n"
+            "<parameter=text>\nalpha <think>literal</think> omega\n"
+            "</parameter>\n</function>\n</tool_call>"
+        )
+
+        _, content = reasoning_engine.extract_reasoning(text, mock_request)
+
+        tool_engine = ParserEngine(
+            tokenizer, parser_engine_config=qwen3_config(thinking=True)
+        )
+        result = tool_engine.extract_tool_calls(content or "", mock_request)
+        assert result.tools_called is True
+        args = json.loads(result.tool_calls[0].function.arguments)
+        assert args["text"] == "alpha <think>literal</think> omega"
+
     def test_surrounding_text(self, parser, mock_request):
         text = (
             "Let me check the weather for you.\n\n"
