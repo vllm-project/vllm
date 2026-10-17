@@ -20,6 +20,9 @@ from __future__ import annotations
 import functools
 from typing import TYPE_CHECKING
 
+import partial_json_parser
+from partial_json_parser.core.options import Allow
+
 from vllm.parser.engine.parser_engine import ParserEngine
 from vllm.parser.engine.parser_engine_config import (
     ParserEngineConfig,
@@ -86,3 +89,18 @@ class GraniteParser(ParserEngine):
     ) -> None:
         kwargs.setdefault("parser_engine_config", granite_config())
         super().__init__(tokenizer, tools, **kwargs)
+
+    def _try_extract_name(self, idx: int) -> str | None:
+        raw_args = self._tool_slots[idx].args
+        # Avoid repeatedly decoding arguments that precede the name. Escaped
+        # JSON keys still need the decoder even without a literal "name".
+        if "\\" not in raw_args and self._NAME_RE.search(raw_args) is None:
+            return None
+        # Arguments can precede the name and contain their own "name" fields.
+        # Only emit a complete top-level name, with JSON escapes decoded.
+        try:
+            parsed = partial_json_parser.loads(raw_args, Allow.ALL & ~Allow.STR)
+        except ValueError:
+            return None
+        name = parsed.get("name") if isinstance(parsed, dict) else None
+        return name if isinstance(name, str) and name else None
