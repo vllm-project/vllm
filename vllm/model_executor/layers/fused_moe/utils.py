@@ -754,9 +754,8 @@ def warn_if_moe_use_td_ineffective(
     """One-shot warning when ``VLLM_TRITON_USE_TD`` is set but ignored.
 
     Fires when the user set the env explicitly and either (a) the active
-    MoE backend is not the fused Triton kernel, or (b) the model is
-    quantized (the TD path falls back to the pointer path under any
-    quantization).
+    MoE backend is not the fused Triton kernel, or (b) the weights use a
+    quantization scheme without a TD path.
     """
     global _warned_moe_use_td_ineffective
     if _warned_moe_use_td_ineffective:
@@ -773,9 +772,8 @@ def warn_if_moe_use_td_ineffective(
         )
     else:
         reason = (
-            "the model uses quantized MoE weights; the TD path is "
-            "currently restricted to non-quantized weights and falls "
-            "back to the pointer path"
+            "this MoE layer's quantization scheme has no tensor-descriptor "
+            "path and falls back to the pointer path"
         )
     logger.warning(
         "VLLM_TRITON_USE_TD is set to %s but %s.",
