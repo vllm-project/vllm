@@ -5,6 +5,7 @@ from functools import partial
 import pytest
 
 from tests.models.utils import dummy_hf_overrides
+from tests.utils import create_new_process_for_each_test
 from vllm.compilation.counter import compilation_counter
 from vllm.config import VllmConfig
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
@@ -17,7 +18,9 @@ def test_compile():
     assert not vllm_config.compilation_config.compile_mm_encoder
 
 
-@pytest.mark.forked
+# Each test compiles in a fresh interpreter, not a fork: a fork fails once
+# another test file in the same pytest has initialized CUDA
+# (https://github.com/vllm-project/vllm/issues/21073, #28965).
 @pytest.mark.core_model
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Skip if not cuda")
 @pytest.mark.parametrize(
@@ -50,6 +53,7 @@ def test_compile():
         pytest.param(True, 3, id="enabled"),
     ],
 )
+@create_new_process_for_each_test("spawn")
 def test_pixtral_compilation(
     vllm_runner,
     monkeypatch,
@@ -88,9 +92,8 @@ def test_pixtral_compilation(
         pass
 
 
-# forked needed to workaround https://github.com/vllm-project/vllm/issues/21073
-@pytest.mark.forked
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Skip if not cuda")
+@create_new_process_for_each_test("spawn")
 def test_qwen2_5_vl_compilation(vllm_runner, monkeypatch):
     """Test that Qwen2.5-VL vision submodules are compiled.
 
@@ -122,9 +125,8 @@ def test_qwen2_5_vl_compilation(vllm_runner, monkeypatch):
         pass
 
 
-# forked needed to workaround https://github.com/vllm-project/vllm/issues/21073
-@pytest.mark.forked
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Skip if not cuda")
+@create_new_process_for_each_test("spawn")
 def test_qwen2_5_vl_no_vit_compilation(vllm_runner, monkeypatch):
     """Test that Qwen2.5-VL vision submodules are not compiled when the
     config is passed off
@@ -147,10 +149,9 @@ def test_qwen2_5_vl_no_vit_compilation(vllm_runner, monkeypatch):
         pass
 
 
-# forked needed to workaround https://github.com/vllm-project/vllm/issues/21073
 # Requires Cuda and 8 gpus as well
-@pytest.mark.forked
 @pytest.mark.skip(reason="Skipping due to CI resource constraints")
+@create_new_process_for_each_test("spawn")
 def test_mllama4_vit_compilation(vllm_runner, monkeypatch):
     """Test that Mllama4 vision submodules are compiled.
 
