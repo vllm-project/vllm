@@ -69,6 +69,9 @@ from vllm.third_party.flash_linear_attention.ops import (
     fused_sigmoid_gating_delta_rule_update,
 )
 from vllm.third_party.flash_linear_attention.ops.chunk import l2norm_fwd
+from vllm.third_party.flash_linear_attention.ops.fused_gdn_decode_post_conv_mtp import (
+    fused_gdn_decode_post_conv_mtp_triton,
+)
 from vllm.third_party.flash_linear_attention.ops.utils import FLA_CHUNK_SIZE
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import (
@@ -759,7 +762,10 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 "layout, BF16 convolution cache, BF16 or FP32 recurrent "
                 "state, and a GPU with compute capability 8.0+"
             )
-        if not hasattr(torch.ops._C, "fused_gdn_decode_post_conv_mtp"):
+        # ROCm has no build of the CUDA kernel and uses its Triton port instead.
+        if not current_platform.is_rocm() and not hasattr(
+            torch.ops._C, "fused_gdn_decode_post_conv_mtp"
+        ):
             return "torch.ops._C.fused_gdn_decode_post_conv_mtp is not built"
         return None
 
@@ -1064,7 +1070,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
     ) -> torch.Tensor:
         """ROCm forward using AITER Triton fused projection+attention when
         available, otherwise falling back to the generic CUDA path."""
-        if GDN_AITER_TRITON_AVAILABLE:
+        if GDN_AITER_TRITON_AVAILABLE and not self.enable_fused_gdn_spec_decode:
             num_tokens = hidden_states.size(0)
             projected_states_qkvz, _ = self.in_proj_qkvz(hidden_states)
             projected_states_ba, _ = self.in_proj_ba(hidden_states)
@@ -2042,7 +2048,12 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         assert num_accepted_tokens is not None
 
         num_requests = attn_metadata.num_spec_decodes
-        ops.fused_gdn_decode_post_conv_mtp(
+        fused_mtp_decode = (
+            fused_gdn_decode_post_conv_mtp_triton
+            if current_platform.is_rocm()
+            else ops.fused_gdn_decode_post_conv_mtp
+        )
+        fused_mtp_decode(
             mixed_qkv=mixed_qkv,
             a=a,
             b=b,
@@ -2106,7 +2117,10 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             and self.num_v_heads // self.num_k_heads in (1, 2, 3, 4, 8)
             and state_indices is not None
             and state_indices.size(1) <= MAX_FUSED_GDN_MTP_TOKENS
-            and hasattr(torch.ops._C, "fused_gdn_decode_post_conv_mtp")
+            and (
+                current_platform.is_rocm()
+                or hasattr(torch.ops._C, "fused_gdn_decode_post_conv_mtp")
+            )
         )
 
     def _rms_norm_gated_cuda(
