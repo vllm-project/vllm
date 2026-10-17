@@ -183,7 +183,8 @@ def compute_tile_loop_bounds(
        the base mask and each image range intersecting the query block.
     3. 3D scoping: when ``IS_3D`` is True, further narrows to the
        segment's slice via ``(segm_idx * tiles_per_segment,
-       (segm_idx + 1) * tiles_per_segment)``.
+       (segm_idx + 1) * tiles_per_segment)``. With a pruned sliding
+       window, the window's tiles are split over the segments instead.
     """
     # compute the length of the longest sequence prefix spanned by any
     # query token in the current q_block (q_block_local_idx)
@@ -272,7 +273,18 @@ def compute_tile_loop_bounds(
         tile_start = tl.maximum(0, first_allowed_key // TILE_SIZE)
         tile_end = tl.minimum((last_allowed_key // TILE_SIZE) + 1, num_tiles)
 
-    if IS_3D:
+    if IS_3D and SLIDING_WINDOW > 0 and can_prune_sliding:
+        # Split the pruned window, not the whole sequence, so that no segment
+        # idles outside it at long context. Use the segment count that
+        # reduce_segments derives from seq_len so that it reads every segment
+        # written here.
+        num_segments = cdiv_fn(seq_len, tiles_per_segment_or_0 * TILE_SIZE)
+        window_tiles_per_segment = cdiv_fn(
+            tl.maximum(tile_end - tile_start, 0), num_segments
+        )
+        loop_lo = tile_start + segm_idx_or_0 * window_tiles_per_segment
+        loop_hi = tl.minimum(loop_lo + window_tiles_per_segment, tile_end)
+    elif IS_3D:
         loop_lo = max(segm_idx_or_0 * tiles_per_segment_or_0, tile_start)
         loop_hi = min((segm_idx_or_0 + 1) * tiles_per_segment_or_0, tile_end)
     else:
