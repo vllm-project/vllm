@@ -37,6 +37,7 @@ from vllm.v1.core.sched.output import SchedulerOutput
 if TYPE_CHECKING:
     import numpy as np
 
+    from vllm.config import ModelConfig
     from vllm.v1.engine.coordinator import DPCoordinator
     from vllm.v1.engine.utils import CoreEngineActorManager, CoreEngineProcManager
 
@@ -297,6 +298,7 @@ class RustFrontendProcessManager:
         data_parallel_size: int,
         stats_update_address: str | None = None,
         grpc_sock: Any | None = None,
+        model_config: "ModelConfig | None" = None,
     ):
         import os
         import subprocess
@@ -352,6 +354,14 @@ class RustFrontendProcessManager:
         model_tag = getattr(args, "model_tag", None) or getattr(args, "model", None)
         if model_tag is not None:
             args_dict["model_tag"] = model_tag
+
+        # Object storage models (s3://, gs://, az://) have their config and
+        # tokenizer pulled into a local directory, which the Rust frontend can
+        # read; it can't read the object storage URI. Keep serving the URI as
+        # the model name, like the Python frontend.
+        if model_config is not None and model_config.model_weights:
+            args_dict["model_tag"] = model_config.model
+            args_dict.setdefault("served_model_name", [model_config.served_model_name])
 
         # The Rust `frontend` subcommand parses --args-json via serde_json,
         # which bypasses clap and therefore ignores any `#[arg(env = ...)]`
