@@ -27,6 +27,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     FusedMoEQuantDesc,
     RoutingMethodType,
+    biased_moe_quant_config,
     mxfp4_mxfp8_moe_quant_config,
     mxfp4_w4a8_moe_quant_config,
     mxfp4_w4a16_moe_quant_config,
@@ -164,6 +165,7 @@ class Mxfp4MoeBackend(Enum):
     CPU = "CPU"
     # Emulation
     EMULATION = "EMULATION"
+    CPU_EMULATION = "CPU_EMULATION"
     # Humming
     HUMMING = "HUMMING"
     # FlashInfer MoE-EP megakernels: routing outside, dispatch/GEMMs/combine fused.
@@ -329,6 +331,13 @@ def backend_to_kernel_cls(
 
         return [CPUExpertsMxfp4]
 
+    elif backend == Mxfp4MoeBackend.CPU_EMULATION:
+        from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
+            CPUEmulationExpertsMxfp4,
+        )
+
+        return [CPUEmulationExpertsMxfp4]
+
     elif backend == Mxfp4MoeBackend.EMULATION:
         from vllm.model_executor.layers.fused_moe.experts.ocp_mx_emulation_moe import (
             OCP_MXQuantizationEmulationTritonExperts,
@@ -386,7 +395,7 @@ def map_mxfp4_backend(runner_backend: MoEBackend) -> list[Mxfp4MoeBackend]:
         "aiter_triton_mxfp4_mxfp4": [Mxfp4MoeBackend.AITER_TRITON_MXFP4_MXFP4],
         "aiter_mxfp4_mxfp4": [Mxfp4MoeBackend.AITER_MXFP4_MXFP4],
         "xpu": [Mxfp4MoeBackend.XPU],
-        "cpu": [Mxfp4MoeBackend.CPU],
+        "cpu": [Mxfp4MoeBackend.CPU, Mxfp4MoeBackend.CPU_EMULATION],
         "emulation": [Mxfp4MoeBackend.EMULATION],
     }
     if backends := mapping.get(runner_backend):
@@ -419,6 +428,7 @@ def _get_priority_backends_for_gpt_oss() -> list[Mxfp4MoeBackend]:
         Mxfp4MoeBackend.HUMMING,
         Mxfp4MoeBackend.XPU,
         Mxfp4MoeBackend.CPU,
+        Mxfp4MoeBackend.CPU_EMULATION,
         Mxfp4MoeBackend.EMULATION,
     ]
     if current_platform.is_cuda() and current_platform.is_device_capability_family(120):
@@ -446,7 +456,7 @@ def _get_priority_backends() -> list[Mxfp4MoeBackend]:
     if current_platform.is_xpu():
         return [Mxfp4MoeBackend.XPU]
     if current_platform.is_cpu():
-        return [Mxfp4MoeBackend.CPU]
+        return [Mxfp4MoeBackend.CPU, Mxfp4MoeBackend.CPU_EMULATION]
     _AVAILABLE_BACKENDS = [
         Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8,
         Mxfp4MoeBackend.DEEPGEMM_MXFP4,
@@ -923,8 +933,8 @@ def mxfp4_round_up_hidden_size_and_intermediate_size(
 
         intermediate_size = round_up(intermediate_size, intermediate_alignment)
         hidden_size = round_up(hidden_size, hidden_alignment)
-    elif backend == Mxfp4MoeBackend.CPU:
-        # CPU AMX kernel uses BLOCK_N=32, align to 32
+    elif backend in (Mxfp4MoeBackend.CPU, Mxfp4MoeBackend.CPU_EMULATION):
+        # Both CPU AMX and portable grouped-GEMM kernels require 32 alignment.
         intermediate_size = round_up(intermediate_size, 32)
         hidden_size = round_up(hidden_size, 32)
     else:
@@ -1491,8 +1501,12 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
             w13_bias,
             w2_bias,
         )
-    elif mxfp4_backend == Mxfp4MoeBackend.XPU:
-        # No additional transformation needed for XPU backend
+    elif mxfp4_backend in (
+        Mxfp4MoeBackend.XPU,
+        Mxfp4MoeBackend.CPU_EMULATION,
+    ):
+        # XPU consumes packed weights directly; CPU emulation decodes them
+        # during the experts' load-time processing.
         return (
             w13_weight,
             w2_weight,
@@ -2019,9 +2033,11 @@ def convert_weight_to_mxfp4_moe_kernel_format(
     elif mxfp4_backend in (
         Mxfp4MoeBackend.XPU,
         Mxfp4MoeBackend.EMULATION,
+        Mxfp4MoeBackend.CPU_EMULATION,
     ):
         # No additional transformation is needed: XPU consumes the checkpoint
-        # layout directly, while emulation dequantizes that layout at runtime.
+        # layout directly. Emulation decodes it at runtime on GPU and at
+        # load time on CPU.
         return (
             w13_weight,
             w2_weight,
@@ -2116,6 +2132,14 @@ def make_mxfp4_moe_quant_config(
     layer: "RoutedExperts | None" = None,
 ) -> FusedMoEQuantConfig | None:
     """Create a FusedMoEQuantConfig for the given MXFP4 backend."""
+    if mxfp4_backend == Mxfp4MoeBackend.CPU_EMULATION:
+        return biased_moe_quant_config(
+            w1_bias=w1_bias,
+            w2_bias=w2_bias,
+            gemm1_alpha=gemm1_alpha,
+            gemm1_beta=gemm1_beta,
+            gemm1_clamp_limit=swiglu_limit,
+        )
     if mxfp4_backend in FLASHINFER_MOE_EP_MXFP4_BACKENDS:
         # The megakernel quantizes activations itself and owns its scales.
         return FusedMoEQuantConfig.make("nvfp4", weight_dtype="mxfp4")
