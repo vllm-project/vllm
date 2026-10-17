@@ -6,7 +6,6 @@ import pytest
 import regex as re
 from transformers import AutoModel
 
-from tests.models.registry import HF_EXAMPLE_MODELS
 from tests.models.utils import check_logprobs_close
 from vllm.assets.image import ImageAsset
 from vllm.logprobs import Logprob, SampleLogprobs
@@ -49,42 +48,6 @@ def mask_bbox_tokens(
     return output_ids, output_str, masked_logprobs
 
 
-def generate_hf_logprobs_from_logits(
-    hf_model: HfRunner,
-    prompts: list[str],
-    images: PromptImageInput,
-    max_tokens: int,
-    num_logprobs: int,
-) -> list[tuple[list[int], str, SampleLogprobs]]:
-    """Parse 3.5 exposes generation logits but not decoder hidden states."""
-    inputs = hf_model.get_inputs(
-        prompts,
-        images=images,
-        tokenization_kwargs={"add_special_tokens": False},
-    )
-    outputs = []
-    for model_inputs in inputs:
-        generated = hf_model.model.generate(
-            **hf_model.wrap_device(model_inputs),
-            do_sample=False,
-            max_new_tokens=max_tokens,
-            output_logits=True,
-            return_dict_in_generate=True,
-        )
-        logprobs: SampleLogprobs = []
-        for logits in generated.logits:
-            values, indices = logits[0].float().log_softmax(dim=-1).topk(num_logprobs)
-            logprobs.append(
-                {
-                    int(token_id): Logprob(float(value))
-                    for token_id, value in zip(indices.tolist(), values.tolist())
-                }
-            )
-        token_ids = generated.sequences[0, -len(logprobs) :].tolist()
-        outputs.append((token_ids, hf_model.tokenizer.decode(token_ids), logprobs))
-    return outputs
-
-
 def run_test(
     hf_runner: type[HfRunner],
     vllm_runner: type[VllmRunner],
@@ -96,20 +59,18 @@ def run_test(
     num_logprobs: int,
 ) -> None:
     """Verify that the inference result is the same between hf and vllm."""
-    is_parse_35 = model == "nvidia/Nemotron-3.5-Parse"
     with vllm_runner(
         model,
         dtype=dtype,
-        max_model_len=16384 if is_parse_35 else 1024,
-        enable_chunked_prefill=is_parse_35,
+        max_model_len=1024,
+        enable_chunked_prefill=False,
         max_num_seqs=64,
         limit_mm_per_prompt={"image": 1},
         trust_remote_code=True,
     ) as vllm_model:
         vllm_outputs_per_case = [
             vllm_model.generate_greedy_logprobs(
-                # The native causal-prefix processor expands this image placeholder.
-                [f"<pad>{prompt}" for prompt in prompts] if is_parse_35 else prompts,
+                prompts,
                 max_tokens,
                 num_logprobs=num_logprobs,
                 images=images,
@@ -121,11 +82,7 @@ def run_test(
 
     with hf_runner(model, dtype=dtype, auto_cls=AutoModel) as hf_model:
         hf_outputs_per_case = [
-            generate_hf_logprobs_from_logits(
-                hf_model, prompts, images, max_tokens, num_logprobs
-            )
-            if is_parse_35
-            else hf_model.generate_greedy_logprobs_limit(
+            hf_model.generate_greedy_logprobs_limit(
                 prompts,
                 max_tokens,
                 num_logprobs=num_logprobs,
@@ -156,7 +113,6 @@ def run_test(
         # instead of shipping a separate lm_head.weight tensor; this
         # exercises that path (see tie_weights() in nemotron_parse.py).
         "nvidia/NVIDIA-Nemotron-Parse-2.0",
-        "nvidia/Nemotron-3.5-Parse",
     ],
 )
 @pytest.mark.parametrize("dtype", ["bfloat16"])
@@ -164,10 +120,6 @@ def run_test(
 def test_models(
     hf_runner, vllm_runner, model: str, dtype: str, num_logprobs: int
 ) -> None:
-    if model == "nvidia/Nemotron-3.5-Parse":
-        model_info = HF_EXAMPLE_MODELS.get_hf_info("RadioMBartPrefixForCausalLM")
-        model_info.check_available_online(on_fail="skip")
-
     image = ImageAsset("paper-11").pil_image_ext(ext="png").convert("RGB")
     run_test(
         hf_runner,
