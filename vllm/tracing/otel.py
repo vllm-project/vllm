@@ -57,6 +57,7 @@ except ImportError:
     NonRecordingSpan = Any  # type: ignore
     ResourceAttributes = Any  # type: ignore
     Span = Any  # type: ignore
+    TracerProvider = Any  # type: ignore
 
 
 def is_otel_available() -> bool:
