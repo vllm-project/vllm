@@ -156,6 +156,9 @@ class AttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
         "RocmAiterUnifiedAttentionBackend"
     )
     CPU_ATTN = "vllm.v1.attention.backends.cpu_attn.CPUAttentionBackend"
+    CPU_ULTRAQUANT = (
+        "vllm.v1.attention.backends.cpu_ultraquant_attn.CPUUltraQuantAttentionBackend"
+    )
     CPU_MLA = "vllm.v1.attention.backends.mla.cpu_mla.CPUMLABackend"
     AMX_MLA = "vllm.v1.attention.backends.mla.amx_mla.AMXMLABackend"
     TURBOQUANT = "vllm.v1.attention.backends.turboquant_attn.TurboQuantAttentionBackend"
