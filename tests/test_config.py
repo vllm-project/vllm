@@ -3917,6 +3917,102 @@ def test_mtp_draft_uses_model_weights_not_local_cache(mock_model_config_cls):
     assert actual_model == s3_url
 
 
+@patch("vllm.config.speculative.ModelConfig")
+def test_mtp_draft_inherits_model_weights_from_object_storage(
+    mock_model_config_cls,
+):
+    """Regression test for https://github.com/vllm-project/vllm/issues/42060.
+
+    When the target model is resolved from object storage (e.g.
+    --load-format runai_streamer with an s3:// model),
+    target_model_config.model points at a local config-only cache dir
+    (it never contains safetensors) while target_model_config.model_weights
+    keeps the original object-storage URL. A draft that shares the target
+    checkpoint (e.g. MTP) must inherit that weight source, otherwise
+    drafter weight loading falls back to the config-only cache dir and
+    fails with "Cannot find any safetensors model weights".
+    """
+    from unittest.mock import MagicMock
+
+    s3_url = "s3://my-bucket/Qwen3.6-27B-FP8/"
+    local_cache = "/root/.cache/vllm/assets/model_streamer/abcd1234"
+
+    mock_draft = MagicMock()
+    mock_draft.model = local_cache
+    mock_draft.model_weights = ""  # not resolved from object storage itself
+    mock_draft.hf_config.model_type = "deepseek_mtp"
+    mock_draft.hf_config.n_predict = None
+    mock_draft.max_model_len = 4096
+    mock_model_config_cls.return_value = mock_draft
+
+    target_config = MagicMock()
+    target_config.model = local_cache
+    target_config.model_weights = s3_url
+    target_config.hf_text_config.model_type = "deepseek_v3"
+    target_config.quantization = None
+    target_config.max_model_len = 4096
+
+    SpeculativeConfig(
+        method="mtp",
+        num_speculative_tokens=1,
+        target_model_config=target_config,
+        target_parallel_config=ParallelConfig(),
+    )
+
+    # The draft model config must load weights from the same object-storage
+    # source as the target, not from the local config-only cache dir.
+    assert mock_draft.model_weights == s3_url
+
+
+@patch("vllm.config.speculative.ModelConfig")
+def test_mtp_draft_inherits_weights_when_model_is_prefilled_cache_dir(
+    mock_model_config_cls,
+):
+    """Regression test for the production path of #42060, which the
+    ``model_weights or model`` seed for a None draft model cannot fix:
+    with runai_streamer, speculative_config.model arrives already
+    populated with the local config-only cache dir before
+    SpeculativeConfig.__post_init__ runs (see the E2E analysis at
+    https://github.com/vllm-project/vllm/pull/42079#issuecomment-4785438700),
+    so the draft config is built from the cache dir and must still inherit
+    the target's model_weights URL afterwards.
+    """
+    from unittest.mock import MagicMock
+
+    s3_url = "s3://my-bucket/Qwen3.6-27B-FP8/"
+    local_cache = "/root/.cache/vllm/assets/model_streamer/abcd1234"
+
+    mock_draft = MagicMock()
+    mock_draft.model = local_cache
+    mock_draft.model_weights = ""  # not resolved from object storage itself
+    mock_draft.hf_config.model_type = "deepseek_mtp"
+    mock_draft.hf_config.n_predict = None
+    mock_draft.max_model_len = 4096
+    mock_model_config_cls.return_value = mock_draft
+
+    target_config = MagicMock()
+    target_config.model = local_cache
+    target_config.model_weights = s3_url
+    target_config.hf_text_config.model_type = "deepseek_v3"
+    target_config.quantization = None
+    target_config.max_model_len = 4096
+
+    SpeculativeConfig(
+        method="mtp",
+        model=local_cache,  # pre-populated with the cache dir, not None
+        num_speculative_tokens=1,
+        target_model_config=target_config,
+        target_parallel_config=ParallelConfig(),
+    )
+
+    # The seed for a None draft model did not fire: the draft config was
+    # built directly from the local cache dir.
+    actual_model = mock_model_config_cls.call_args.kwargs["model"]
+    assert actual_model == local_cache
+    # The draft model config must still load weights from object storage.
+    assert mock_draft.model_weights == s3_url
+
+
 def _make_qwen3_omni_dspark_configs():
     text_config = SimpleNamespace(
         hidden_size=2048,
