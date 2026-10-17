@@ -18,6 +18,18 @@ from vllm.model_executor.layers.fused_embed_norm import (
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
+from vllm.model_executor.layers.fused_moe.experts.trtllm_bf16_moe import (
+    TrtLlmBf16ExpertsMonolithic,
+)
+from vllm.model_executor.layers.fused_moe.experts.trtllm_nvfp4_moe import (
+    TrtLlmNvFp4ExpertsModular,
+    TrtLlmNvFp4ExpertsMonolithic,
+)
+from vllm.model_executor.layers.fused_moe.moe_output import (
+    MoEOutput,
+    UnfinalizedMoEOutput,
+)
+from vllm.model_executor.layers.fused_moe.runner.moe_runner import _unpack
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
@@ -37,7 +49,10 @@ from vllm.model_executor.models.utils import (
     make_empty_intermediate_tensors_factory,
     make_layers,
 )
-from vllm.models.common.ops.fused_allreduce_rms_norm import fused_allreduce_rms_norm
+from vllm.models.common.ops.fused_allreduce_rms_norm import (
+    fused_allreduce_rms_norm,
+    moe_finalize_allreduce_max_num_tokens,
+)
 from vllm.models.common.ops.sequence_parallel import (
     sp_all_gather,
     sp_padding_mask,
@@ -52,6 +67,14 @@ from vllm.v1.attention.backends.mla.index_group import (
 )
 
 from .glm52_low_latency_gemm import enable_glm52_low_latency_gemm
+
+# TRTLLM-Gen experts that can stop after GEMM2 in a single launch (the
+# ``do_finalize=False`` path).
+_DEFERRING_EXPERTS = (
+    TrtLlmNvFp4ExpertsMonolithic,
+    TrtLlmNvFp4ExpertsModular,
+    TrtLlmBf16ExpertsMonolithic,
+)
 
 
 class DeepseekV32DecoderLayer(torch.nn.Module):
@@ -119,13 +142,46 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
         )
         self.routed_scaling_factor = getattr(config, "routed_scaling_factor", 1.0)
 
+    def defer_moe_finalize(self) -> None:
+        """Leave the MoE top-k reduction and shared-expert add to the consumer.
+
+        The consumer is the ``fused_allreduce_rms_norm`` that follows this layer
+        (the next layer's input norm or the final norm), which then finalizes,
+        all-reduces and normalizes in one kernel.
+        """
+        if self.use_sequence_parallel or not isinstance(self.mlp, DeepseekV2MoE):
+            return
+        experts = self.mlp.experts
+        experts_cls = getattr(experts.routed_experts.quant_method, "experts_cls", None)
+        # The runner scales the routed output itself unless the router folds
+        # routed_scaling_factor into the routing weights.
+        if (
+            experts_cls not in _DEFERRING_EXPERTS
+            or experts.routed_scaling_factor != 1.0
+        ):
+            return
+        max_num_tokens = moe_finalize_allreduce_max_num_tokens(
+            self.hidden_size, self.input_layernorm.weight.dtype
+        )
+        if max_num_tokens > 0:
+            experts.moe_config.defer_moe_finalize(max_num_tokens)
+
+    def _forward_moe_unfinalized(self, hidden_states: torch.Tensor) -> MoEOutput:
+        """``mlp`` with the routed top-k reduction and all-reduce left open."""
+        # The runner's custom op returns tensors only, so run its body directly.
+        shared_output, routed = _unpack(
+            self.mlp.experts._forward_impl(hidden_states, hidden_states, hidden_states)
+        )
+        assert isinstance(routed, UnfinalizedMoEOutput)
+        return MoEOutput(routed=routed, shared_output=shared_output)
+
     def forward(
         self,
         positions: torch.Tensor,
-        hidden_states: torch.Tensor,
+        hidden_states: torch.Tensor | MoEOutput,
         residual: torch.Tensor | None,
         attn_in: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor | MoEOutput, torch.Tensor]:
         full_num_tokens = positions.shape[0]
 
         if residual is None:
@@ -161,6 +217,12 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
 
         if self.use_sequence_parallel and isinstance(self.mlp, DeepseekV2MoE):
             hidden_states = self.mlp(hidden_states, already_sequence_parallel=True)
+        elif isinstance(
+            self.mlp, DeepseekV2MoE
+        ) and self.mlp.experts.moe_config.should_defer_moe_finalize(
+            hidden_states.shape[0]
+        ):
+            hidden_states = self._forward_moe_unfinalized(hidden_states)
         else:
             hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
@@ -234,6 +296,15 @@ class DeepseekV32Model(torch.nn.Module):
 
         self.aux_hidden_state_layers = tuple[int, ...]()
         self.num_redundant_experts = parallel_config.eplb_config.num_redundant_experts
+
+        # A layer's output feeds the next layer's input norm or the final norm,
+        # both of which can finalize a MoE output, except on a non-last PP rank,
+        # whose last layer ships its output as IntermediateTensors.
+        local_layers = list(islice(self.layers, self.start_layer, self.end_layer))
+        if not get_pp_group().is_last_rank:
+            local_layers = local_layers[:-1]
+        for layer in local_layers:
+            layer.defer_moe_finalize()
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -436,6 +507,15 @@ class DeepseekV32ForCausalLM(DeepseekV2ForCausalLM):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         if self.config.model_type == "glm_moe_dsa":
             enable_glm52_low_latency_gemm(self, vllm_config.model_config.dtype)
+
+    def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
+        super().set_aux_hidden_state_layers(layers)
+        # An aux hidden state reads the previous layer's output as a tensor.
+        for idx in layers:
+            if self.model.start_layer < idx < self.model.end_layer:
+                mlp = self.model.layers[idx - 1].mlp
+                if isinstance(mlp, DeepseekV2MoE):
+                    mlp.experts.moe_config.limit_deferred_moe_finalize(0)
 
     def set_moe_parameters(self):
         # Same as the base, but keyed on the MoE block type rather than the
