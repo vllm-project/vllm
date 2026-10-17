@@ -190,3 +190,123 @@ def test_streaming_arguments_match_final_arguments(
     streamed = reconstructor.tool_calls[0].function.arguments
     streamed += parser.get_remaining_unstreamed_args()
     assert streamed == '{"location": "Beijing", "days": 3}'
+
+
+def _stream_content(parser: Internlm2ToolParser, deltas: list[str]) -> str:
+    """Concatenate the content of every streamed delta."""
+    streamed = ""
+    current_text = ""
+    for delta_text in deltas:
+        previous_text = current_text
+        current_text += delta_text
+        delta_message = parser.extract_tool_calls_streaming(
+            previous_text=previous_text,
+            current_text=current_text,
+            delta_text=delta_text,
+            previous_token_ids=[],
+            current_token_ids=[],
+            delta_token_ids=[],
+            request=None,
+        )
+        if delta_message and delta_message.content:
+            streamed += delta_message.content
+    return streamed
+
+
+def test_streaming_non_plugin_action_streams_as_content(
+    default_tokenizer: TokenizerLike,
+) -> None:
+    """A non-plugin action (<|interpreter|>) must stream through as content,
+    matching the non-streaming path instead of being held back forever."""
+    tokenizer_vocab = default_tokenizer.get_vocab()
+    default_tokenizer.get_vocab = MagicMock()
+    tokenizer_vocab.update(
+        {
+            "<|action_start|>": 92540,
+            "<|plugin|>": 92541,
+            "<|action_end|>": 92542,
+        }
+    )
+    default_tokenizer.get_vocab.return_value = tokenizer_vocab
+    parser = Internlm2ToolParser(default_tokenizer)
+
+    deltas = [
+        "Let me compute that. ",
+        "<|action_start|>",
+        "<|interpreter|>print(1)",
+        "<|action_end|>",
+    ]
+    assert _stream_content(parser, deltas) == "".join(deltas)
+
+
+def test_streaming_releases_once_plugin_is_ruled_out(
+    default_tokenizer: TokenizerLike,
+) -> None:
+    """Text held while it is still a prefix of <|plugin|> goes out, unaltered,
+    as soon as a later delta rules the plugin call out."""
+    tokenizer_vocab = default_tokenizer.get_vocab()
+    default_tokenizer.get_vocab = MagicMock()
+    tokenizer_vocab.update(
+        {
+            "<|action_start|>": 92540,
+            "<|plugin|>": 92541,
+            "<|action_end|>": 92542,
+        }
+    )
+    default_tokenizer.get_vocab.return_value = tokenizer_vocab
+    parser = Internlm2ToolParser(default_tokenizer)
+
+    # "<|pl" is still ambiguous; "<|plugboard" rules the marker out.
+    deltas = ["Let me ", "<|action_start|><|pl", "ugboard", " today."]
+    assert _stream_content(parser, deltas) == "".join(deltas)
+
+
+def test_finish_streaming_releases_held_text(
+    default_tokenizer: TokenizerLike,
+) -> None:
+    """A stream ending inside the ambiguous window flushes the held text."""
+    tokenizer_vocab = default_tokenizer.get_vocab()
+    default_tokenizer.get_vocab = MagicMock()
+    tokenizer_vocab.update(
+        {
+            "<|action_start|>": 92540,
+            "<|plugin|>": 92541,
+            "<|action_end|>": 92542,
+        }
+    )
+    default_tokenizer.get_vocab.return_value = tokenizer_vocab
+    parser = Internlm2ToolParser(default_tokenizer)
+
+    deltas = ["Let me compute that. ", "<|action_start|><|pl"]
+    streamed = _stream_content(parser, deltas)
+    flushed = parser.finish_streaming()
+
+    assert flushed is not None
+    assert flushed.content == "<|action_start|><|pl"
+    assert streamed + flushed.content == "".join(deltas)
+
+
+def test_finish_streaming_keeps_tool_call_in_flight(
+    default_tokenizer: TokenizerLike,
+) -> None:
+    """A truncated plugin call must not be re-emitted as content at flush."""
+    tokenizer_vocab = default_tokenizer.get_vocab()
+    default_tokenizer.get_vocab = MagicMock()
+    tokenizer_vocab.update(
+        {
+            "<|action_start|>": 92540,
+            "<|plugin|>": 92541,
+            "<|action_end|>": 92542,
+        }
+    )
+    default_tokenizer.get_vocab.return_value = tokenizer_vocab
+    parser = Internlm2ToolParser(default_tokenizer)
+
+    deltas = [
+        "<|action_start|><|plugin|>",
+        '{"name": "get_weather", "parameters": {"city": "To',
+    ]
+    _stream_content(parser, deltas)
+
+    assert parser.current_tool_name_sent
+    assert parser.finish_streaming() is None
