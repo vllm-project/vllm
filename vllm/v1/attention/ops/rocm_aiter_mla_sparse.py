@@ -1345,7 +1345,7 @@ def rocm_aiter_sparse_attn_indexer(
         # only the logits of their candidate blocks, straight into compact
         # rows, and take their top 512 from those rows. The logits are
         # bit-identical to the dense call's below, and the top-512 sets
-        # are the same (tests/kernels/test_dsv41_gfx942_cand_logits.py). At
+        # are the same (tests/kernels/models/amd/test_dsv41_gfx942_cand_logits.py). At
         # 128k context the dense call scores 8 times more positions than
         # the top-k reads. The hook only takes calls whose dense logits
         # would come from AITER's gfx942 Gluon kernel, whose arithmetic it
@@ -1407,7 +1407,7 @@ def rocm_aiter_sparse_attn_indexer(
                 # On gfx942 with --monokernel the gfx942
                 # extension writes layer 20's candidate blocks in one launch.
                 # They are the blocks that vLLM's selection writes, in
-                # another order (tests/kernels/test_dsv41_gfx942_topk.py).
+                # another order (tests/kernels/models/amd/test_dsv41_gfx942_topk.py).
                 if not gfx942_topk.select_candidates(
                     logits,
                     next_n,
@@ -1436,7 +1436,7 @@ def rocm_aiter_sparse_attn_indexer(
                 # On gfx942 with --monokernel the gfx942 extension
                 # wrote each row's top 512 among its candidate blocks. Those
                 # are the columns that the mask and the top-k below choose
-                # (tests/kernels/test_dsv41_gfx942_topk.py), so both are
+                # (tests/kernels/models/amd/test_dsv41_gfx942_topk.py), so both are
                 # skipped. The mask writes -inf to about 7 of every 8 logits
                 # of a 128k row, and the top-k then reads the whole row.
                 candidates_done = True
@@ -1487,7 +1487,7 @@ def rocm_aiter_sparse_attn_indexer(
             # and the call takes 100 us at 128k context. With
             # --monokernel the gfx942 extension's top-512 runs
             # instead. It gives the same index sets, except for ties at the
-            # cut (tests/kernels/test_dsv41_gfx942_topk.py).
+            # cut (tests/kernels/models/amd/test_dsv41_gfx942_topk.py).
             pass
         else:
             torch.ops._C.top_k_per_row_decode(

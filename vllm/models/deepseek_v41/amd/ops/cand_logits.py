@@ -25,7 +25,8 @@ and adds the heads up with the same reduction. The sum over the heads runs
 inside one wave, along the heads of one column, so its order does not depend
 on which position a column holds. Only the address of each column's key
 differs from the dense kernel. So every logit is bit-identical to the dense
-kernel's logit of that position (tests/kernels/test_dsv41_gfx942_cand_logits.py).
+kernel's logit of that position
+(tests/kernels/models/amd/test_dsv41_gfx942_cand_logits.py).
 """
 
 import torch

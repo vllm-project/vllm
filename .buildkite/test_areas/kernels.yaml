@@ -1086,10 +1086,10 @@ steps:
   - vllm/models/deepseek_v41/amd/
   - vllm/v1/attention/ops/rocm_aiter_mla_sparse.py
   - vllm/v1/worker/gpu/spec_decode/dspark/
-  - tests/kernels/test_dsv41_gfx942_topk.py
-  - tests/kernels/test_dsv41_gfx942_cand_logits.py
-  - tests/kernels/test_dsv41_gfx942_decode_meta.py
-  - tests/kernels/test_dsv41_gfx942_fused_markov.py
-  - tests/kernels/test_dsv41_mono_gfx942.py
+  - tests/kernels/models/amd/test_dsv41_gfx942_topk.py
+  - tests/kernels/models/amd/test_dsv41_gfx942_cand_logits.py
+  - tests/kernels/models/amd/test_dsv41_gfx942_decode_meta.py
+  - tests/kernels/models/amd/test_dsv41_gfx942_fused_markov.py
+  - tests/kernels/models/amd/test_dsv41_mono_gfx942.py
   commands:
-  - pytest -v -s tests/kernels/test_dsv41_gfx942_topk.py tests/kernels/test_dsv41_gfx942_cand_logits.py tests/kernels/test_dsv41_gfx942_decode_meta.py tests/kernels/test_dsv41_gfx942_fused_markov.py tests/kernels/test_dsv41_mono_gfx942.py
+  - pytest -v -s tests/kernels/models/amd/test_dsv41_gfx942_topk.py tests/kernels/models/amd/test_dsv41_gfx942_cand_logits.py tests/kernels/models/amd/test_dsv41_gfx942_decode_meta.py tests/kernels/models/amd/test_dsv41_gfx942_fused_markov.py tests/kernels/models/amd/test_dsv41_mono_gfx942.py

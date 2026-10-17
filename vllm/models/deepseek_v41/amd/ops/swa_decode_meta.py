@@ -25,7 +25,7 @@ is 3 more builds of 8 launches after every target step.
 On gfx942 with --monokernel (``ops.enabled()``), decode
 batches of up to MAX_ROWS rows, causal or the draft block, use it. Other
 batches take the rest of DeepseekV41ROCMAiterSparseSWAMetadataBuilder.build.
-tests/kernels/test_dsv41_gfx942_decode_meta.py compares it with the vLLM ops
+tests/kernels/models/amd/test_dsv41_gfx942_decode_meta.py compares it with the vLLM ops
 that it replaces.
 """
 

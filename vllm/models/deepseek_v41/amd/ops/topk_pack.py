@@ -18,7 +18,7 @@ ragged entries past indptr[-1], which
 _compute_global_topk_ragged_indices_and_indptr_old also leaves uninitialized.
 
 On gfx942 with --monokernel (``ops.enabled()``), batches
-of up to MAX_ROWS rows use it. tests/kernels/test_dsv41_gfx942_decode_meta.py
+of up to MAX_ROWS rows use it. tests/kernels/models/amd/test_dsv41_gfx942_decode_meta.py
 compares it with _compute_global_topk_ragged_indices_and_indptr_old.
 """
 

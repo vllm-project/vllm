@@ -16,7 +16,7 @@ same format:
     KLEN[t] = ntopk + the window length, KLEN[S + t] = ntopk
 
 ntopk is min((position + 1) // ratio, TOPK), as in ``stage_kt``, and a token
-whose slot is -1 has no keys. tests/kernels/test_dsv41_mono_gfx942.py
+whose slot is -1 has no keys. tests/kernels/models/amd/test_dsv41_mono_gfx942.py
 compares the result with a reference built in torch.
 """
 

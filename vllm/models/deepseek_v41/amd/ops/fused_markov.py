@@ -26,7 +26,7 @@ the draft proposes, not the target's output, because the rejection sampler
 verifies every draft token against the target's own distribution.
 
 It runs on gfx942 with --monokernel (``ops.enabled()``).
-tests/kernels/test_dsv41_gfx942_fused_markov.py compares it with vLLM's loop.
+tests/kernels/models/amd/test_dsv41_gfx942_fused_markov.py compares it with vLLM's loop.
 """
 
 import torch
