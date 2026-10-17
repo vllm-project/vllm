@@ -578,6 +578,9 @@ def _validate_aiter_mega_moe_config(vllm_config: VllmConfig) -> None:
 
 
 class DeepseekV4MoE(nn.Module):
+    # None: use the padding vLLM added.
+    experts_intermediate_pad: int | None = None
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -726,6 +729,7 @@ class DeepseekV4MoE(nn.Module):
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
             intermediate_size=config.moe_intermediate_size,
+            intermediate_pad=self.experts_intermediate_pad,
             renormalize=config.norm_topk_prob,
             quant_config=quant_config,
             prefix=f"{prefix}.experts",
