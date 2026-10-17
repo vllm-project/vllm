@@ -5,8 +5,6 @@ from collections.abc import Iterable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import TYPE_CHECKING, NamedTuple
 
-import numpy as np
-
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.parser.engine.adapters import ParserEngineReasoningAdapter
@@ -22,6 +20,7 @@ from vllm.v1.structured_output.backend_xgrammar import XgrammarBackend
 from vllm.v1.structured_output.utils import strip_speculative_padding
 
 if TYPE_CHECKING:
+    import numpy as np
     import numpy.typing as npt
     import torch
 
@@ -212,16 +211,10 @@ class StructuredOutputManager:
             raise
 
     def _fill_bitmasks(
-        self,
-        batch: Iterable[tuple[StructuredOutputGrammar, int, bool, tuple[int, ...]]],
+        self, batch: Iterable[tuple[StructuredOutputGrammar, int, bool]]
     ) -> None:
-        """Fill one bitmask row per entry.
-
-        A row the grammar does not constrain allows every token except
-        `masked_ids`, the implicit reasoning ends masked while reasoning.
-        """
         assert self._grammar_bitmask is not None
-        for grammar, index, apply_bitmask, masked_ids in batch:
+        for grammar, index, apply_bitmask in batch:
             if apply_bitmask and not grammar.is_terminated():
                 grammar.fill_bitmask(self._grammar_bitmask, index)
             else:
@@ -229,40 +222,11 @@ class StructuredOutputManager:
                 # reset the relevant part of the bitmask for consequent
                 # requests here.
                 self._grammar_bitmask[index].fill_(self._full_mask)
-                if masked_ids:
-                    row = self._grammar_bitmask[index].numpy().view(np.uint32)
-                    for token_id in masked_ids:
-                        row[token_id >> 5] &= ~np.uint32(1 << (token_id & 31))
 
     def _async_submit_fill_bitmask(
-        self, batch: list[tuple[StructuredOutputGrammar, int, bool, tuple[int, ...]]]
+        self, batch: list[tuple[StructuredOutputGrammar, int, bool]]
     ) -> Future:
         return self.executor_for_fillmask.submit(self._fill_bitmasks, batch)
-
-    def _masked_reasoning_ends(self, request: "Request") -> tuple[int, ...]:
-        """Implicit reasoning-end tokens the grammar rejects as first content.
-
-        Such a token (e.g. a tool-call start) ends reasoning and is also the
-        first content token, so sampling one where the grammar cannot start
-        with it would make the output invalid. These stay masked while the
-        request reasons. The grammar does not advance before reasoning ends,
-        so the set is fixed per request.
-        """
-        structured_req = request.structured_output_request
-        assert structured_req is not None
-        if structured_req.masked_reasoning_end_ids is None:
-            masked: tuple[int, ...] = ()
-            reasoner = self._get_reasoner(request)
-            if isinstance(reasoner, ParserEngineReasoningAdapter):
-                grammar = structured_req.grammar
-                assert isinstance(grammar, StructuredOutputGrammar)
-                masked = tuple(
-                    token_id
-                    for token_id in sorted(reasoner.implicit_reasoning_end_token_ids)
-                    if not grammar.validate_tokens([token_id])
-                )
-            structured_req.masked_reasoning_end_ids = masked
-        return structured_req.masked_reasoning_end_ids
 
     def _get_constraint_bounds(
         self,
@@ -413,10 +377,7 @@ class StructuredOutputManager:
                 apply_bitmask = (
                     self._get_constraint_bounds(request, ()).constraint_start == 0
                 )
-                masked_ids = (
-                    () if apply_bitmask else self._masked_reasoning_ends(request)
-                )
-                batch.append((grammar, cumulative_index, apply_bitmask, masked_ids))
+                batch.append((grammar, cumulative_index, apply_bitmask))
                 if len(batch) == self.fill_bitmask_parallel_batch_size:
                     promises.append(self._async_submit_fill_bitmask(batch))
                     batch = []
@@ -444,10 +405,6 @@ class StructuredOutputManager:
                 grammar_start, constraint_start = self._get_constraint_bounds(
                     request, strip_speculative_padding(req_tokens)
                 )
-                # Rows before constraint_start are still reasoning.
-                masked_ids = (
-                    self._masked_reasoning_ends(request) if constraint_start else ()
-                )
                 state_advancements = 0
                 seen_padding = False
                 # Row filled from the last valid grammar state before a draft
@@ -460,11 +417,7 @@ class StructuredOutputManager:
                         cumulative_index += 1
                         continue
                     apply_bitmask = not seen_padding and i >= constraint_start
-                    reasoning = not seen_padding and i < constraint_start
-                    row_masked = masked_ids if reasoning else ()
-                    self._fill_bitmasks(
-                        ((grammar, cumulative_index, apply_bitmask, row_masked),)
-                    )
+                    self._fill_bitmasks(((grammar, cumulative_index, apply_bitmask),))
                     if token == -1:
                         seen_padding = True
                     elif not seen_padding and i >= grammar_start:
@@ -491,11 +444,7 @@ class StructuredOutputManager:
                         bonus_apply = not seen_padding and constraint_start <= len(
                             req_tokens
                         )
-                        bonus_reasoning = not seen_padding and not bonus_apply
-                        bonus_masked = masked_ids if bonus_reasoning else ()
-                        self._fill_bitmasks(
-                            ((grammar, cumulative_index, bonus_apply, bonus_masked),)
-                        )
+                        self._fill_bitmasks(((grammar, cumulative_index, bonus_apply),))
                     cumulative_index += 1
 
                 if state_advancements > 0:

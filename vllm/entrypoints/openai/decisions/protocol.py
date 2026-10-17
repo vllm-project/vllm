@@ -6,7 +6,6 @@ from typing import Annotated, Any, Literal
 
 from pydantic import ConfigDict, Field, StrictBool, StrictStr, model_validator
 
-from vllm.entrypoints.generate.base.protocol import validate_cache_salt
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel
 
 ShortText = Annotated[StrictStr, Field(max_length=1048576)]
@@ -97,26 +96,6 @@ class DecisionRequest(DecisionModel):
     input: InputText | Annotated[list[DecisionInputMessage], Field(max_length=131072)]
     questions: list[DecisionQuestion] = Field(min_length=1, max_length=200)
     safety_identifier: Annotated[StrictStr, Field(max_length=128)] | None = None
-    cache_salt: str | None = Field(
-        default=None,
-        min_length=1,
-        max_length=1024,
-        description=(
-            "If specified, the prefix cache will be salted with the provided "
-            "string to prevent an attacker to guess prompts in multi-user "
-            "environments. The salt should be random, protected from "
-            "access by 3rd parties, and long enough to be "
-            "unpredictable (e.g., 43 characters base64-encoded, corresponding "
-            "to 256 bit)."
-        ),
-    )
-
-    @model_validator(mode="before")
-    @classmethod
-    def check_cache_salt_support(cls, data: Any) -> Any:
-        if isinstance(data, dict):
-            validate_cache_salt(data.get("cache_salt"))
-        return data
 
 
 class PredicateAnswer(DecisionModel):

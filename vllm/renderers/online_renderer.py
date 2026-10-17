@@ -60,7 +60,6 @@ from vllm.renderers.chat_utils import (
     has_non_text_content,
 )
 from vllm.renderers.inputs.preprocess import (
-    extract_prompt_components,
     parse_model_prompt,
     prompt_to_seq,
 )
@@ -166,7 +165,7 @@ class OnlineRenderer:
         exclude_tools_when_tool_choice_none: bool = False,
         tool_parser: str | None = None,
         reasoning_parser: str | None = None,
-        tool_strict_level: str | None = None,
+        tool_strict_level: str = "auto",
         default_chat_template_kwargs: dict[str, Any] | None = None,
         log_error_stack: bool = False,
     ) -> None:
@@ -845,17 +844,13 @@ class OnlineRenderer:
                         f"but got {type(request).__name__}"
                     )
                     raise NotImplementedError(msg)
-                request_parser = parser(
+                request = parser(
                     tokenizer,
                     request.tools,
                     model_config=self.model_config,
                     chat_template_kwargs=chat_params.chat_template_kwargs,
+                ).adjust_request(
+                    request=request,
                 )
-                prompt_token_ids = extract_prompt_components(
-                    self.model_config, engine_input
-                ).token_ids
-                if prompt_token_ids is not None:
-                    request_parser.set_prompt_token_ids(prompt_token_ids)
-                request = request_parser.adjust_request(request=request)
 
         return conversation, [engine_input]

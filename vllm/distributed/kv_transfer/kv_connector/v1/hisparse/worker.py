@@ -28,7 +28,6 @@ from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.hisparse.layout import HISPARSE_HOT_SUFFIX
 from vllm.v1.hisparse.runtime import (
     HiSparseCacheHandle,
-    drop_hisparse_host_pool,
     release_pinned_state,
     update_hisparse_residency,
 )
@@ -255,7 +254,6 @@ class HiSparseConnectorWorker:
                 pinned_host_pools,
                 shared_host_region,
             )
-            drop_hisparse_host_pool(self.vllm_config)
             raise
 
     def initialize(
@@ -974,5 +972,4 @@ class HiSparseConnectorWorker:
             self.pinned_host_pools,
             self.shared_host_region,
         )
-        drop_hisparse_host_pool(self.vllm_config)
         self._initialized = False

@@ -468,10 +468,7 @@ def _check_layers(rank: int, tp: int, device) -> None:
         # relative errors about 3x what the kernels show (0.3-0.5%)
         assert _cos(o[1], res2) > 0.9999 and _rel(o[1], res2) < 0.01, tag
         assert _cos(normed, xf) > 0.999 and _rel(normed, xf) < 0.012, tag
-        # TODO: back to cos > 0.9999, rel < 0.015 once
-        # https://github.com/ROCm/aiter/issues/6548 is fixed: aiter's fused-FP8
-        # stage-1 MoE kernels use another MXFP8 scale rule (1.53% at TP4)
-        assert _cos(o[0], same_in) > 0.9998 and _rel(o[0], same_in) < 0.02, tag
+        assert _cos(o[0], same_in) > 0.9999 and _rel(o[0], same_in) < 0.015, tag
         # per token, where both FFN inputs pick the same experts
         same = (top6(xf) == top6(normed)).all(1)
         assert same.float().mean() >= 0.5, tag
@@ -482,8 +479,7 @@ def _check_layers(rank: int, tp: int, device) -> None:
         f = runner.ffn(mw, part, res, post, comb, attn_pre)
         torch.testing.assert_close(f[1], res2, rtol=2**-8, atol=1e-6)
         torch.testing.assert_close(normed, xf, rtol=2**-7, atol=1e-6)
-        # TODO: back to 0.9999 / 0.015 with the one above (ROCm/aiter#6548)
-        assert _cos(f[0], out) > 0.9998 and _rel(f[0], out) < 0.02, tag
+        assert _cos(f[0], out) > 0.9999 and _rel(f[0], out) < 0.015, tag
         torch.accelerator.synchronize()
 
         whole, ffn = runner._outs(M, res0), runner._outs(M, res)

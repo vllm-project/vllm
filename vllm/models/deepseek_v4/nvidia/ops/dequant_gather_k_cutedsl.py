@@ -18,7 +18,6 @@ from vllm.model_executor.warmup.jit_warmup_cutedsl_helper import (
     CuTeDSLLaunchSpec,
     VllmCuTeDSLJitKernel,
 )
-from vllm.transformers_utils.deepseek_v4_utils import get_compress_ratios
 
 
 class DequantGatherKCacheKernel(
@@ -52,12 +51,6 @@ class DequantGatherKCacheKernel(
         data_dim = fp8_dim + bf16_dim * 2
         scale_bytes = head_dim // group_size
         block_size = compile_key.block_size
-        # V4.1 stores each token's scales right after its data; V4 puts all of
-        # a block's data rows ahead of its scale rows.
-        interleaved = bf16_dim == 0
-        data_stride = data_dim + scale_bytes if interleaved else data_dim
-        scale_offset = data_dim if interleaved else block_size * data_dim
-        scale_stride = data_stride if interleaved else scale_bytes
 
         @cute.jit
         def load_g2s(
@@ -280,22 +273,23 @@ class DequantGatherKCacheKernel(
             offset: Int32,
             stream: CUstream,
         ):
-            # Split k_cache into k_data [block_size, fp8_dim + bf16_dim * 2] and
-            # k_scale [block_size, scale_bytes] views of each block.
+            # Split k_cache into k_data and k_scale. Each [block_size, head_bytes]
+            # block is actually a concat of
+            # [block_size, fp8_dim + bf16_dim * 2] and [block_size, scale_bytes].
             k_data = cute.make_tensor(
                 k_cache.iterator,
                 layout=cute.make_layout(
                     (k_cache.shape[0], block_size, data_dim),
-                    stride=(k_cache.stride[0], data_stride, 1),
+                    stride=(k_cache.stride[0], data_dim, 1),
                 ),
             )
             # k_data_slice: [num_blocks, block_size, (16, data_dim/16)]
             # s_kdata_slice: [(4, data_dim/16), num_stages]
             k_scale = cute.make_tensor(
-                k_cache.iterator + scale_offset,
+                k_cache.iterator + (block_size * data_dim),
                 layout=cute.make_layout(
                     (k_cache.shape[0], block_size, scale_bytes),
-                    stride=(k_cache.stride[0], scale_stride, 1),
+                    stride=(k_cache.stride[0], scale_bytes, 1),
                 ),
             )
 
@@ -335,7 +329,7 @@ class DequantGatherKCacheKernel(
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
         block_size = vllm_config.cache_config.block_size
-        compress_ratios = get_compress_ratios(vllm_config.model_config.hf_config)
+        compress_ratios = vllm_config.model_config.hf_config.compress_ratios
         return self._trace_dispatch(self.dispatch)(
             zip_inputs(
                 dict(

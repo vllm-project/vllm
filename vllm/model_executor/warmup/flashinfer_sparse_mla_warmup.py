@@ -9,8 +9,6 @@ import torch
 from vllm.logger import init_logger
 from vllm.model_executor.warmup.flashinfer_autotune_cache import (
     resolve_flashinfer_autotune_file,
-    resolve_flashinfer_autotune_v2_root,
-    use_flashinfer_autotune_v2,
     write_flashinfer_autotune_cache,
 )
 from vllm.platforms import current_platform
@@ -32,7 +30,6 @@ _DEEPSEEK_V4_SPARSE_MLA_BACKENDS = frozenset(
         "ROCM_FLASHMLA_SPARSE_DSV4",
         "FLASHMLA_SPARSE_DSV41",
         "FLASHINFER_MLA_SPARSE_DSV41",
-        "ROCM_FLASHMLA_SPARSE_DSV41",
         "DEEPSEEK_SPARSE_SWA",
     }
 )
@@ -147,6 +144,7 @@ def _run_flashinfer_sparse_mla_decode_autotune(
 
     world = get_world_group()
     is_leader = world.rank_in_group == 0
+    cache_path = resolve_flashinfer_autotune_file(runner)
 
     dummy_run_kwargs = dict(
         num_tokens=num_tokens,
@@ -155,13 +153,6 @@ def _run_flashinfer_sparse_mla_decode_autotune(
         force_attention=True,
         create_mixed_batch=True,
     )
-
-    if use_flashinfer_autotune_v2(runner):
-        return _run_sparse_mla_decode_autotune_v2(
-            worker, num_tokens, log_label, dummy_run_kwargs
-        )
-
-    cache_path = resolve_flashinfer_autotune_file(runner)
 
     if is_leader:
         logger.info(
@@ -228,58 +219,6 @@ def _run_flashinfer_sparse_mla_decode_autotune(
         world.rank_in_group,
         cache_path,
     )
-    return True
-
-
-def _run_sparse_mla_decode_autotune_v2(
-    worker: "Worker",
-    num_tokens: int,
-    log_label: str,
-    dummy_run_kwargs: dict,
-) -> bool:
-    """Run every rank's sparse warmup in the managed autotune context.
-
-    FlashInfer owns persistence; some sparse kernels use a separate calibration
-    cache instead of managed winner entries.
-    """
-    from flashinfer import autotune_v2, autotune_v2_reload
-
-    from vllm.distributed.parallel_state import get_world_group
-
-    runner = worker.model_runner
-    world = get_world_group()
-    cache_root = resolve_flashinfer_autotune_v2_root()
-    if world.rank_in_group == 0:
-        logger.info(
-            "Autotuning FlashInfer SM120 sparse MLA %s decode with the managed "
-            "autotune context (root=%s)",
-            log_label,
-            cache_root if cache_root is not None else "flashinfer default",
-        )
-
-    with torch.inference_mode():
-        if _uses_v2_model_runner(runner) and runner.max_num_reqs >= 2:
-            v2_runner = cast("V2GPUModelRunner", runner)
-            warmup_executed = run_mixed_prefill_decode_warmup(
-                v2_runner,
-                worker.execute_model,
-                worker.sample_tokens,
-                num_tokens,
-                mixed_step_context=autotune_v2(mode="tune", cache_root=cache_root),
-                req_id_prefix="_sparse_mla_v2_warmup",
-            )
-        else:
-            warmup_executed = True
-            with autotune_v2(mode="tune", cache_root=cache_root):
-                runner._dummy_run(**dummy_run_kwargs)
-
-    if not warmup_executed:
-        return False
-
-    if world.world_size > 1:
-        world.barrier()
-        autotune_v2_reload()
-        world.barrier()
     return True
 
 

@@ -104,8 +104,6 @@ plugins:
         examples/others/lmcache.md: examples/disaggregated/lmcache.md
         examples/features/batch_invariance.md: examples/rl/batch_invariance.md
         examples/features/pause_resume.md: examples/rl/pause_resume.md
-        serving/online_serving/decisions.md: models/structured_decisions_models.md
-        serving/online_serving/structured_decisions.md: models/structured_decisions_models.md
 
 markdown_extensions:
   - attr_list

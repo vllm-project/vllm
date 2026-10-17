@@ -4,8 +4,6 @@ depends_on:
 steps:
 - label: ":nvidia: (B200) Distributed MooncakeConnector PD accuracy"
   key: distributed-mooncakeconnector-pd-accuracy-4-gpus
-  # Nightly only: 4-GPU B200 pods wait hours behind smaller jobs on per-PR runs.
-  optional: true
   timeout_in_minutes: 10
   working_dir: "/vllm-workspace/tests"
   # Runs on b200-k8s because it is the only NVIDIA pool that can carry mooncake
@@ -24,7 +22,6 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI355) Distributed MooncakeConnector HIP PD accuracy"
-      optional: true
       dind: false
       device: mi355_4
       num_devices: 4

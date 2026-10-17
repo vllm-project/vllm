@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
-from functools import partial
 from types import SimpleNamespace
 
 import pytest
@@ -50,18 +49,9 @@ def _make_config(**parallel_kwargs):
         data_parallel_index=0,
         pipeline_parallel_size=1,
         tensor_parallel_size=1,
-        prefill_context_parallel_size=1,
     )
     parallel_defaults.update(parallel_kwargs)
     parallel_config = SimpleNamespace(**parallel_defaults)
-    parallel_config.world_size = (
-        parallel_config.tensor_parallel_size
-        * parallel_config.prefill_context_parallel_size
-        * parallel_config.pipeline_parallel_size
-    )
-    parallel_config.get_local_gpu_index = partial(
-        ParallelConfig.get_local_gpu_index, parallel_config
-    )
     return SimpleNamespace(parallel_config=parallel_config)
 
 
@@ -378,86 +368,13 @@ def test_get_numactl_args_user_cpus_override_pct(monkeypatch):
     )
 
 
-@pytest.mark.parametrize("pcp,pp", [(1, 1), (2, 1), (2, 2)])
-def test_get_numactl_args_uses_dp_offset(pcp, pp):
-    workers_per_dp = 2 * pcp * pp
+def test_get_numactl_args_uses_dp_offset():
     vllm_config = _make_config(
         numa_bind=True,
-        numa_bind_nodes=[0] * workers_per_dp + [1] * workers_per_dp,
+        numa_bind_nodes=[0, 0, 1, 1],
         data_parallel_rank_local=1,
-        pipeline_parallel_size=pp,
+        pipeline_parallel_size=1,
         tensor_parallel_size=2,
-        prefill_context_parallel_size=pcp,
-    )
-    assert (
-        numa_utils._get_numactl_worker_args(vllm_config.parallel_config, local_rank=1)
-        == "--cpunodebind=1 --membind=1"
-    )
-
-
-@pytest.mark.parametrize(
-    "local_dp_rank,global_dp_rank,launch_dp_rank",
-    [(1, 3, None), (None, 1, None), (0, 0, 1)],
-    ids=["local-rank", "global-fallback", "launch-override"],
-)
-def test_pcp_worker_cpu_binding_uses_dp_gpu_index(
-    local_dp_rank, global_dp_rank, launch_dp_rank
-):
-    """CPU overrides use the same PCP-aware GPU index as device selection."""
-    vllm_config = _make_config(
-        numa_bind=True,
-        numa_bind_nodes=[0] * 4 + [1] * 4,
-        numa_bind_cpus=[f"{4 * i}-{4 * i + 3}" for i in range(8)],
-        tensor_parallel_size=2,
-        prefill_context_parallel_size=2,
-        data_parallel_rank_local=local_dp_rank,
-        data_parallel_index=global_dp_rank,
-    )
-    assert (
-        numa_utils._get_numactl_worker_args(
-            vllm_config.parallel_config, local_rank=1, dp_local_rank=launch_dp_rank
-        )
-        == "--physcpubind=20-23 --membind=1"
-    )
-
-
-@pytest.mark.parametrize("dp_rank,expected_nodes", [(0, "0,1"), (1, "2,3")])
-def test_pcp_engine_core_covers_all_shard_workers(dp_rank, expected_nodes):
-    """EngineCore includes every PCP worker's NUMA node in its DP shard."""
-    vllm_config = _make_config(
-        numa_bind=True,
-        numa_bind_nodes=[0, 0, 1, 1, 2, 2, 3, 3],
-        tensor_parallel_size=2,
-        prefill_context_parallel_size=2,
-        data_parallel_rank_local=dp_rank,
-    )
-    assert (
-        numa_utils._get_numactl_enginecore_args(
-            vllm_config.parallel_config, local_rank=0
-        )
-        == f"--cpunodebind={expected_nodes} --membind={expected_nodes}"
-    )
-
-
-@pytest.mark.parametrize(
-    "parallel_kwargs",
-    [
-        {"distributed_executor_backend": "ray"},
-        {"distributed_executor_backend": "external_launcher"},
-        {"data_parallel_backend": "ray"},
-        {"nnodes_within_dp": 2},
-    ],
-    ids=["ray-executor", "external-launcher", "ray-dp", "multi-node-dp"],
-)
-def test_pcp_worker_keeps_local_gpu_index_without_dp_offset(parallel_kwargs):
-    """Node-local launcher ranks do not acquire a colocated DP offset."""
-    vllm_config = _make_config(
-        numa_bind=True,
-        numa_bind_nodes=[0, 1],
-        tensor_parallel_size=2,
-        prefill_context_parallel_size=2,
-        data_parallel_rank_local=1,
-        **parallel_kwargs,
     )
     assert (
         numa_utils._get_numactl_worker_args(vllm_config.parallel_config, local_rank=1)
