@@ -57,5 +57,19 @@ def test_extract_tool_calls_with_multiple_tools(parser):
     assert result.tool_calls[1].function.name == "bar"
     assert result.tool_calls[1].function.arguments == '{"y":2}'
 
-    # prefix is content
-    assert result.content == "some prefix text"
+    # Text before the block and text after it are both content.
+    assert result.content == "some prefix text some suffix text"
+
+
+def test_extract_tool_calls_keeps_text_after_tool_calls(parser):
+    model_output = (
+        "<｜tool▁calls▁begin｜>"
+        '<｜tool▁call▁begin｜>foo<｜tool▁sep｜>{"x":1}<｜tool▁call▁end｜>'
+        "<｜tool▁calls▁end｜>"
+        "It is 30 degrees."
+    )
+    result = parser.extract_tool_calls(model_output, None)
+    assert result.tools_called
+    assert result.tool_calls[0].function.name == "foo"
+    assert result.tool_calls[0].function.arguments == '{"x":1}'
+    assert result.content == "It is 30 degrees."
