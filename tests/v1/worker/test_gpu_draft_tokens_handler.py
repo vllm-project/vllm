@@ -63,6 +63,17 @@ def test_discard_drops_only_the_named_request() -> None:
     assert _get_draft_toks(handler) == {"keep": [21, 22]}
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
+def test_request_bound_asserts_when_exceeded() -> None:
+    # Retention is bounded by max_num_reqs: discard-on-remove keeps the dict
+    # at or below the live request count; exceeding it is a bug and asserts.
+    handler = DraftTokensHandler(max_num_reqs=2, device=torch.device("cuda"))
+    _add_draft_toks(handler, req_id="a", tokens=[11, 12], structured=True)
+    _add_draft_toks(handler, req_id="b", tokens=[21, 22], structured=True)
+    with pytest.raises(AssertionError):
+        _add_draft_toks(handler, req_id="c", tokens=[31, 32], structured=True)
+
+
 def _add_draft_toks(
     handler: DraftTokensHandler, req_id: str, tokens: list[int], structured: bool
 ) -> None:

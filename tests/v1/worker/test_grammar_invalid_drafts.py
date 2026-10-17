@@ -15,10 +15,7 @@ import numpy as np
 import pytest
 import torch
 
-from vllm.v1.worker.gpu.spec_decode.utils import (
-    DraftTokensHandler,
-    check_draft_vintage,
-)
+from vllm.v1.worker.gpu.spec_decode.utils import check_draft_vintage
 from vllm.v1.worker.gpu.structured_outputs import grammar_invalid_drafts
 
 
@@ -62,26 +59,6 @@ def test_follow_the_device_layout_under_adaptive_verification():
 
 
 # --- DraftTokensHandler per-request retention (no CUDA: dict logic only) ---
-
-
-def _handler(max_num_reqs: int = 8):
-    # Skip __init__ (creates CUDA stream/event); the tests exercise the
-    # retention logic, with a no-op event standing in for the copy sync.
-    h = object.__new__(DraftTokensHandler)
-    h.max_num_reqs = max_num_reqs
-    h._draft_tokens_by_req = {}
-    h._copy_pending = False
-    h.copy_event = SimpleNamespace(synchronize=lambda: None)
-    return h
-
-
-def test_request_bound_asserts_when_exceeded():
-    # Retention is bounded by max_num_reqs: discard-on-remove keeps the dict
-    # at or below the live request count; exceeding it is a bug and asserts.
-    h = _handler(max_num_reqs=2)
-    h._draft_tokens_by_req = {"a": [1, 1], "b": [2, 2], "c": [3, 3]}
-    with pytest.raises(AssertionError):
-        h._assert_request_bound()
 
 
 def _proposal_states(rows, req_ids):
