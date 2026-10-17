@@ -637,6 +637,7 @@ class TrtLlmMxfp4LoRAExperts(_TrtLlmLoRAExpertsBase, TrtLlmMxfp4ExpertsBase):
         from flashinfer.fused_moe.core import get_w2_permute_indices_with_cache
 
         # Kernel format is the (up_i, gate_i) bias permuted for the tile.
+        assert self.w1_bias is not None
         bias = self.w1_bias.reshape(self.local_num_experts, -1)[0]
         permute = get_w2_permute_indices_with_cache({}, bias.reshape(-1, 1), 128)
         interleaved = torch.argsort(permute.to(bias.device))
