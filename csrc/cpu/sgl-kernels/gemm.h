@@ -92,7 +92,34 @@ enum class CPUActMethod : int {
   silu_and_mul = 0,
   swiglu = 1,
   gelu_and_mul = 2,
+  gelu_tanh_and_mul = 3,
 };
+
+// swiglu is selected by its (alpha, limit) parameters rather than by name and
+// takes precedence; the name is still validated, so it cannot pass silently.
+// vLLM's MoEActivation enum names this family "swigluoai" (gpt-oss-style
+// clamped swiglu), not "swiglu" - accept both so the Python-side value
+// actually matches.
+inline CPUActMethod act_method_from_string(const std::optional<std::string>& activation, bool has_swiglu_params) {
+  const bool unnamed_or_silu = !activation.has_value() || activation.value() == "silu";
+  if (has_swiglu_params) {
+    TORCH_CHECK(
+        unnamed_or_silu || activation.value() == "swiglu" || activation.value() == "swigluoai",
+        "Unsupported activation with clamped swiglu parameters: ",
+        activation.value());
+    return CPUActMethod::swiglu;
+  }
+  if (unnamed_or_silu) {
+    return CPUActMethod::silu_and_mul;
+  }
+  if (activation.value() == "gelu") {
+    return CPUActMethod::gelu_and_mul;
+  }
+  if (activation.value() == "gelu_tanh") {
+    return CPUActMethod::gelu_tanh_and_mul;
+  }
+  TORCH_CHECK(false, "Unsupported activation: ", activation.value(), ". Supported: silu, gelu, gelu_tanh");
+}
 
 enum class CPUQuantMethod : int64_t { BF16 = 0, INT8_W8A8 = 1, FP8_W8A16 = 2, INT4_W4A8 = 3, MXFP4 = 4, FP8_W8A8 = 5 };
 
@@ -163,7 +190,8 @@ void fused_experts_int8_kernel_impl(
     int64_t K,
     int64_t E,
     int64_t topk,
-    int64_t num_tokens_post_pad);
+    int64_t num_tokens_post_pad,
+    CPUActMethod act_func);
 
 // moe implementations for fp8 w8a16 and mxfp4
 template <typename scalar_t, typename packed_t, typename param_t, bool is_mxfp4>
@@ -247,7 +275,8 @@ void fused_experts_int4_w4a8_kernel_impl(
     int64_t K,
     int64_t E,
     int64_t topk,
-    int64_t num_tokens_post_pad);
+    int64_t num_tokens_post_pad,
+    CPUActMethod act_func);
 
 template <typename scalar_t>
 void shared_expert_fp8_kernel_impl(
@@ -446,4 +475,5 @@ void fused_experts_fp8_a8_kernel_impl(
     int64_t K,
     int64_t E,
     int64_t topk,
-    int64_t num_tokens_post_pad);
+    int64_t num_tokens_post_pad,
+    CPUActMethod act_func);

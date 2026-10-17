@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
+import os
 from argparse import ArgumentError
 from contextlib import AbstractContextManager, nullcontext
 from typing import Annotated, Literal
@@ -1054,6 +1055,40 @@ class TestDpDeviceIdSharding:
             get_physical_gpu_ids_for_local_dp_rank(
                 evar, local_dp_rank=2, world_size=2, user_assigned_gpu_ids=[4, 5, 6, 7]
             )
+
+    def test_cpu_visible_memory_nodes_env_var_set_per_rank(self, monkeypatch):
+        """Regression test for #47328: CPU DP ranks must bind disjoint NUMA
+        nodes. Unlike GPU/XPU, CPU workers resolve their NUMA node from the
+        device-control env var rather than the in-process
+        assigned_physical_gpu_ids global, so it must be set explicitly here.
+        Ranks must be resolved up front, before any env var mutation begins,
+        or a later rank's resolution would misread an earlier rank's
+        mutation as an already-narrowed CVD-style device list.
+        """
+        import types
+
+        from vllm.platforms import current_platform
+        from vllm.v1.engine.utils import (
+            compute_cpu_physical_gpu_ids_by_dp_rank,
+            set_cpu_visible_memory_nodes_env_var_for_dp_rank,
+        )
+
+        monkeypatch.delenv(current_platform.device_control_env_var, raising=False)
+
+        vllm_config = types.SimpleNamespace(
+            parallel_config=types.SimpleNamespace(
+                world_size=1, local_world_size=1, assigned_physical_gpu_ids=None
+            )
+        )
+        by_rank = compute_cpu_physical_gpu_ids_by_dp_rank(
+            vllm_config, local_dp_ranks=[0, 1]
+        )
+        assert by_rank == {0: [0], 1: [1]}
+
+        for rank in (0, 1):
+            set_cpu_visible_memory_nodes_env_var_for_dp_rank(vllm_config, by_rank[rank])
+            assert os.environ[current_platform.device_control_env_var] == str(rank)
+            assert vllm_config.parallel_config.assigned_physical_gpu_ids == [rank]
 
 
 @pytest.mark.parametrize(

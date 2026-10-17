@@ -3512,6 +3512,7 @@ def fused_experts_cpu(
     limit: float | None = None,
     is_vnni: bool = True,
     a1_scale: torch.Tensor | None = None,
+    activation: str | None = None,
 ) -> None:
     torch.ops._C.fused_experts_cpu(
         out,
@@ -3532,6 +3533,7 @@ def fused_experts_cpu(
         alpha,
         limit,
         is_vnni,
+        activation,
     )
 
 
