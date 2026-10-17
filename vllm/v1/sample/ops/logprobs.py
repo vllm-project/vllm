@@ -25,3 +25,26 @@ def batched_count_greater_than(x: torch.Tensor, values: torch.Tensor) -> torch.T
     torch._check(x.shape[0] >= 1)
     torch._check(x.shape[0] == values.shape[0])
     return (x >= values).sum(-1)
+
+
+@torch.compile(backend=current_platform.simple_compile_backend)
+def batched_count_greater_than_per_value(
+    x: torch.Tensor, values: torch.Tensor
+) -> torch.Tensor:
+    """Like `batched_count_greater_than`, but for several values per row.
+
+    Compiled into a single reduction kernel, so the
+    [batch_size, num_values, n_elements] comparison is never materialized.
+
+    Args:
+        x (torch.Tensor): A 2D tensor of shape (batch_size, n_elements).
+        values (torch.Tensor): A 2D tensor of shape (batch_size, num_values).
+
+    Returns:
+        torch.Tensor: A 2D tensor of shape (batch_size, num_values) with the
+            counts.
+
+    """
+    torch._check(x.shape[0] >= 1)
+    torch._check(x.shape[0] == values.shape[0])
+    return (x.unsqueeze(1) >= values.unsqueeze(-1)).sum(-1)
