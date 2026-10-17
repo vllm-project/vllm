@@ -365,7 +365,15 @@ class AnthropicServingMessages(OpenAIServingChat):
                 system_parts.append(anthropic_request.system)
             else:
                 for block in anthropic_request.system:
-                    if block.type == "text" and block.text:
+                    if block.type != "text":
+                        logger.warning_once(
+                            "Anthropic system messages should only contain "
+                            "text content. Found content type: '%s'; it will "
+                            "be ignored.",
+                            block.type,
+                        )
+                        continue
+                    if block.text:
                         # Strip Claude Code's attribution header which contains
                         # a per-request hash that defeats prefix caching.
                         if block.text.startswith("x-anthropic-billing-header"):
@@ -396,7 +404,18 @@ class AnthropicServingMessages(OpenAIServingChat):
             return text
         parts: list[str] = []
         for block in msg.content:
-            if block.type == "text" and block.text:
+            if block.type in ("tool_addition", "tool_removal"):
+                # Not text, but not ignored: _resolve_tools applies them.
+                continue
+            if block.type != "text":
+                logger.warning_once(
+                    "Anthropic system messages should only contain "
+                    "text content. Found content type: '%s'; it will "
+                    "be ignored.",
+                    block.type,
+                )
+                continue
+            if block.text:
                 if block.text.startswith("x-anthropic-billing-header"):
                     continue
                 parts.append(block.text)
