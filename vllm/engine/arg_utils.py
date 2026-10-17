@@ -816,7 +816,7 @@ class EngineArgs:
     replayssm_buffer_len: int = CacheConfig.replayssm_buffer_len
     use_replayssm: bool = CacheConfig.use_replayssm
 
-    mamba_backend: MambaBackendEnum = MambaBackendEnum.TRITON
+    mamba_backend: MambaBackendEnum | None = None
     mamba_ssu_algorithm: MambaSSUAlgorithm | None = None
     enable_mamba_cache_stochastic_rounding: bool = (
         MambaConfig.enable_stochastic_rounding
@@ -1104,6 +1104,7 @@ class EngineArgs:
             title="MambaConfig",
             description=MambaConfig.__doc__,
         )
+        mamba_kwargs["backend"]["default"] = None
         mamba_group.add_argument("--mamba-backend", **mamba_kwargs["backend"])
         mamba_group.add_argument(
             "--mamba-ssu-algorithm", **mamba_kwargs["ssu_algorithm"]
@@ -2750,11 +2751,10 @@ class EngineArgs:
 
         # Mamba config overrides
         mamba_config = copy.deepcopy(self.mamba_config)
-        # Convert string to enum if needed (CLI parsing returns a string)
-        if isinstance(self.mamba_backend, str):
-            mamba_config.backend = MambaBackendEnum[self.mamba_backend.upper()]
-        else:
-            mamba_config.backend = self.mamba_backend
+        if self.mamba_backend is not None:
+            mamba_config.backend = MambaConfig.validate_backend_before(
+                self.mamba_backend
+            )
         if self.mamba_ssu_algorithm is not None:
             mamba_config.ssu_algorithm = self.mamba_ssu_algorithm
         if self.enable_mamba_cache_stochastic_rounding:
